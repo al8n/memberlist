@@ -1,0 +1,95 @@
+[package]
+name = "memberlist-core"
+license = { workspace = true }
+repository = { workspace = true }
+homepage = { workspace = true }
+version = { workspace = true }
+edition = { workspace = true }
+
+[features]
+default = ["metrics"]
+
+# TODO: temporarily disable nightly, wait Rust's issue https://github.com/rust-lang/rust/issues/111105 to be fixed
+# nightly = ["agnostic/nightly"]
+
+# implement tokio::io::AsyncRead/AsyncWrite for Tcp/Udp
+tokio-compat = ["agnostic/tokio-compat"]
+metrics = ["dep:metrics", "memberlist-utils/metrics"]
+
+serde = [
+  "dep:serde",
+  "bytes/serde",
+  "nodecraft/serde",
+  "humantime-serde",
+  "memberlist-utils/serde",
+]
+rkyv = ["dep:rkyv", "nodecraft/rkyv", "memberlist-utils/rkyv"]
+
+# expose all tests fn for users who want to use other runtime
+# see memberlist-wasm for more examples about how to use those tests fn
+test = ["tracing-subscriber", "pnet"]
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+once_cell = "1.17"
+
+[target.'cfg(not(any(target_family = "wasm", windows)))'.dependencies]
+rustix = { version = "0.38", features = ["system"] }
+
+[target.'cfg(windows)'.dependencies]
+hostname = "0.3"
+
+[dependencies]
+agnostic = { workspace = true, features = ["net", "dns"] }
+async-channel.workspace = true
+async-lock = "3"
+async-recursion = "1"
+bytes.workspace = true
+byteorder.workspace = true
+derive_more.workspace = true
+either = "1"
+futures.workspace = true
+nodecraft.workspace = true
+transformable.workspace = true
+paste.workspace = true
+pin-project.workspace = true
+rand = "0.8"
+scopeguard.workspace = true
+smol_str.workspace = true
+smallvec.workspace = true
+memberlist-utils.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+viewit.workspace = true
+
+# rkyv feature
+rkyv = { version = "0.7", features = [
+  "validation",
+  "bytes",
+  "smol_str",
+], optional = true }
+
+# serde feature
+serde = { workspace = true, optional = true }
+humantime-serde = { workspace = true, optional = true }
+
+# test feature
+tracing-subscriber = { version = "0.3", optional = true, features = [
+  "env-filter",
+  "tracing-log",
+] }
+pnet = { version = "0.34", optional = true }
+
+# metrics feature
+metrics = { workspace = true, optional = true }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = [
+  "env-filter",
+  "tracing-log",
+] }
+pnet = "0.34"
+agnostic = { workspace = true, features = ["net", "tokio"] }
+rand = "0.8"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }

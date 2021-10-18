@@ -1,0 +1,6 @@
+- [ ] NetTransport
+  - [ ] Add/Remove label
+  - [ ] Encryption/Decryption
+  - [ ] Compression/Decompression
+  - [x] retry new transport
+  - [ ] check if address is global
