@@ -1,0 +1,21 @@
+[package]
+name = "showbiz-traits"
+license = { workspace = true }
+repository = { workspace = true }
+homepage = { workspace = true }
+version = { workspace= true }
+edition = { workspace= true }
+
+[features]
+default = ["async"]
+async = ["async-trait", "async-channel"]
+sync = ["crossbeam-channel"]
+
+[dependencies]
+async-trait = { version = "0.1", optional = true }
+async-channel = { version = "1.8", optional = true }
+
+crossbeam-channel = { version = "0.5", optional = true }
+
+bytes = "1.4"
+showbiz-types = { path = "../types" }

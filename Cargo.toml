@@ -1,8 +1,24 @@
-[package]
-name = "showbiz"
-version = "0.1.0"
+[workspace]
+members = [
+  "core",
+  "showbiz",
+  "transport",
+  "traits",
+  "types"
+]
+
+[workspace.package]
+version = "0.0.0"
 edition = "2021"
+license = "Apache-2.0/MIT"
+repository = "https://github.com/al8n/showbiz"
+homepage = "https://github.com/al8n/showbiz"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
+[workspace.dependencies]
+bytes = "1.4"
+either = "1.8"
+local-ip-address = "0.5"
+viewit = "0.1.5"
+scopeguard = "1"
+socket2 = "0.5"
+tracing = "0.1"
