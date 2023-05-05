@@ -34,14 +34,13 @@ impl<B: Broadcast> Inner<B> {
     }
   }
 
-  fn insert(&mut self, item: LimitedBroadcast<B>) {
-    let arc = Arc::new(item);
-    if let Some(name) = arc.broadcast.name() {
+  fn insert(&mut self, item: Arc<LimitedBroadcast<B>>) {
+    if let Some(name) = item.broadcast.name() {
       self
         .m
-        .insert(SharedString::Owned(name.to_owned()), arc.clone());
+        .insert(SharedString::Owned(name.to_owned()), item.clone());
     }
-    self.q.insert(arc);
+    self.q.insert(item);
   }
 }
 
@@ -86,6 +85,99 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     }
   }
 
+  #[cfg(feature = "async")]
+  pub async fn num_queued(&self) -> usize {
+    self.inner.lock().await.q.len()
+  }
+
+  #[cfg(not(feature = "async"))]
+  pub fn num_queued(&self) -> usize {
+    self.inner.lock().q.len()
+  }
+
+  #[cfg(not(feature = "async"))]
+  pub fn get_broadcasts(&self, overhead: usize, limit: usize) -> Vec<bytes::Bytes> {
+    let mut inner = self.inner.lock();
+    if inner.q.is_empty() {
+      return Vec::new();
+    }
+
+    let transmit_limit = retransmit_limit(self.retransmit_mult, self.num_nodes.num_nodes());
+
+    // Visit fresher items first, but only look at stuff that will fit.
+    // We'll go tier by tier, grabbing the largest items first.
+    let (min_tr, max_tr) = match (inner.q.first(), inner.q.last()) {
+      (Some(min), Some(max)) => (
+        min.transmits.load(Ordering::Relaxed),
+        max.transmits.load(Ordering::Relaxed),
+      ),
+      _ => (0, 0),
+    };
+    let mut bytes_used = 0usize;
+    let mut transmits = min_tr;
+    let mut to_send = Vec::new();
+    let mut reinsert = Vec::new();
+    while transmits <= max_tr {
+      let free = (limit - bytes_used).saturating_sub(overhead);
+      if free == 0 {
+        break;
+      }
+
+      let greater_or_equal = Cmp {
+        transmits,
+        msg_len: free as u64,
+        id: u64::MAX,
+      };
+
+      let less_than = Cmp {
+        transmits: transmits + 1,
+        msg_len: u64::MAX,
+        id: u64::MAX,
+      };
+
+      let keep = inner
+        .q
+        .iter()
+        .filter(|item| greater_or_equal <= item && less_than > item)
+        .find(|item| item.broadcast.message().len() <= free)
+        .cloned();
+
+      match keep {
+        Some(keep) => {
+          let msg = keep.broadcast.message();
+          bytes_used += msg.len() + overhead;
+          // Add to slice to send
+          to_send.push(msg.clone());
+
+          // check if we should stop transmission
+          inner.remove(&keep);
+          if keep.transmits.load(Ordering::Relaxed) + 1 >= transmit_limit {
+            keep.broadcast.finished();
+          } else {
+            // We need to bump this item down to another transmit tier, but
+            // because it would be in the same direction that we're walking the
+            // tiers, we will have to delay the reinsertion until we are
+            // finished our search. Otherwise we'll possibly re-add the message
+            // when we ascend to the next tier.
+            keep.transmits.fetch_add(1, Ordering::Relaxed);
+            reinsert.push(keep);
+          }
+        }
+        None => {
+          transmits += 1;
+          continue;
+        }
+      }
+    }
+
+    for item in reinsert {
+      inner.insert(item);
+    }
+
+    to_send
+  }
+
+  #[cfg(feature = "async")]
   pub async fn get_broadcasts(&self, overhead: usize, limit: usize) -> Vec<bytes::Bytes> {
     let mut inner = self.inner.lock().await;
     if inner.q.is_empty() {
@@ -94,7 +186,77 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
 
     let transmit_limit = retransmit_limit(self.retransmit_mult, self.num_nodes.num_nodes());
 
-    todo!()
+    // Visit fresher items first, but only look at stuff that will fit.
+    // We'll go tier by tier, grabbing the largest items first.
+    let (min_tr, max_tr) = match (inner.q.first(), inner.q.last()) {
+      (Some(min), Some(max)) => (
+        min.transmits.load(Ordering::Relaxed),
+        max.transmits.load(Ordering::Relaxed),
+      ),
+      _ => (0, 0),
+    };
+    let mut bytes_used = 0usize;
+    let mut transmits = min_tr;
+    let mut to_send = Vec::new();
+    let mut reinsert = Vec::new();
+    while transmits <= max_tr {
+      let free = (limit - bytes_used).saturating_sub(overhead);
+      if free == 0 {
+        break;
+      }
+
+      let greater_or_equal = Cmp {
+        transmits,
+        msg_len: free as u64,
+        id: u64::MAX,
+      };
+
+      let less_than = Cmp {
+        transmits: transmits + 1,
+        msg_len: u64::MAX,
+        id: u64::MAX,
+      };
+
+      let keep = inner
+        .q
+        .iter()
+        .filter(|item| greater_or_equal <= item && less_than > item)
+        .find(|item| item.broadcast.message().len() <= free)
+        .cloned();
+
+      match keep {
+        Some(keep) => {
+          let msg = keep.broadcast.message();
+          bytes_used += msg.len() + overhead;
+          // Add to slice to send
+          to_send.push(msg.clone());
+
+          // check if we should stop transmission
+          inner.remove(&keep);
+          if keep.transmits.load(Ordering::Relaxed) + 1 >= transmit_limit {
+            keep.broadcast.finished().await;
+          } else {
+            // We need to bump this item down to another transmit tier, but
+            // because it would be in the same direction that we're walking the
+            // tiers, we will have to delay the reinsertion until we are
+            // finished our search. Otherwise we'll possibly re-add the message
+            // when we ascend to the next tier.
+            keep.transmits.fetch_add(1, Ordering::Relaxed);
+            reinsert.push(keep);
+          }
+        }
+        None => {
+          transmits += 1;
+          continue;
+        }
+      }
+    }
+
+    for item in reinsert {
+      inner.insert(item);
+    }
+
+    to_send
   }
 
   /// Used to enqueue a broadcast
@@ -162,7 +324,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     }
 
     // Append to the relevant queue.
-    inner.insert(lb);
+    inner.insert(Arc::new(lb));
   }
 
   /// Used to enqueue a broadcast
@@ -317,5 +479,31 @@ impl<B: Broadcast> Ord for LimitedBroadcast<B> {
       .cmp(&other.transmits.load(Ordering::Relaxed))
       .then_with(|| self.msg_len.cmp(&other.msg_len))
       .then_with(|| self.id.cmp(&other.id))
+  }
+}
+
+struct Cmp {
+  transmits: usize,
+  msg_len: u64,
+  id: u64,
+}
+
+impl<B: Broadcast> PartialEq<&LimitedBroadcast<B>> for Cmp {
+  fn eq(&self, other: &&LimitedBroadcast<B>) -> bool {
+    self.transmits == other.transmits.load(Ordering::Relaxed)
+      && self.msg_len == other.msg_len
+      && self.id == other.id
+  }
+}
+
+impl<B: Broadcast> PartialOrd<&LimitedBroadcast<B>> for Cmp {
+  fn partial_cmp(&self, other: &&LimitedBroadcast<B>) -> Option<std::cmp::Ordering> {
+    Some(
+      self
+        .transmits
+        .cmp(&other.transmits.load(Ordering::Relaxed))
+        .then_with(|| self.msg_len.cmp(&other.msg_len))
+        .then_with(|| self.id.cmp(&other.id)),
+    )
   }
 }
