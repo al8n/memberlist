@@ -1,7 +1,11 @@
 mod awareness;
 mod broadcast;
+pub mod error;
+mod keyring;
 mod network;
 mod options;
 mod queue;
+mod security;
 mod showbiz;
+mod suspicion;
 mod util;

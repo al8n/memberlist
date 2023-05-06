@@ -1,11 +1,12 @@
 use bytes::Bytes;
+use showbiz_types::SmolStr;
 
 /// Something that can be broadcasted via gossip to
 /// the memberlist cluster.
 #[cfg_attr(feature = "async", async_trait::async_trait)]
 pub trait Broadcast {
   /// Returns the name of the broadcast, if any
-  fn name(&self) -> Option<&str>;
+  fn name(&self) -> Option<&SmolStr>;
 
   /// Checks if enqueuing the current broadcast
   /// invalidates a previous broadcast

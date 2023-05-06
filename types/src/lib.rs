@@ -1,8 +1,7 @@
 use std::{net::SocketAddr, time::Instant};
 
 use bytes::Bytes;
-
-pub type SharedString = std::borrow::Cow<'static, str>;
+pub use smol_str::SmolStr;
 
 #[viewit::viewit(vis_all = "")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -39,7 +38,20 @@ pub struct Address {
   /// The name of the node being addressed. This is optional but
   /// transports may require it.
   #[viewit(getter(const, style = "ref"))]
-  name: String,
+  name: smol_str::SmolStr,
+}
+
+impl Address {
+  #[inline]
+  pub fn new<T>(name: T, addr: SocketAddr) -> Self
+  where
+    T: AsRef<str>,
+  {
+    Self {
+      name: smol_str::SmolStr::new(name),
+      addr,
+    }
+  }
 }
 
 impl From<SocketAddr> for Address {
@@ -127,9 +139,9 @@ impl core::str::FromStr for NodeStateType {
 pub struct Node {
   #[viewit(getter(
     style = "ref",
-    result(converter(fn = "SharedString::as_ref"), type = "&str")
+    result(converter(fn = "SmolStr::as_str"), type = "&str")
   ))]
-  name: SharedString,
+  name: SmolStr,
   addr: SocketAddr,
   /// Metadata from the delegate for this node.
   #[viewit(getter(const, style = "ref"))]
@@ -153,9 +165,12 @@ pub struct Node {
 impl Node {
   /// Construct a new node with the given name, address and state.
   #[inline]
-  pub const fn new(name: SharedString, addr: SocketAddr, state: NodeStateType) -> Self {
+  pub fn new<T>(name: T, addr: SocketAddr, state: NodeStateType) -> Self
+  where
+    T: AsRef<str>,
+  {
     Self {
-      name,
+      name: SmolStr::new(name),
       addr,
       meta: Bytes::new(),
       state,

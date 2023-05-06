@@ -11,4 +11,5 @@ edition = { workspace= true }
 [dependencies]
 bytes = { workspace = true }
 viewit = { workspace = true }
+smol_str = { version = "0.1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }

@@ -1,9 +1,9 @@
 use bytes::Bytes;
 use showbiz_traits::Broadcast;
-use showbiz_types::SharedString;
+use showbiz_types::SmolStr;
 
 pub(crate) struct ShowbizBroadcast {
-  name: Option<SharedString>,
+  name: Option<SmolStr>,
   node: String,
   msg: Bytes,
   #[cfg(feature = "async")]
@@ -13,8 +13,8 @@ pub(crate) struct ShowbizBroadcast {
 }
 
 impl Broadcast for ShowbizBroadcast {
-  fn name(&self) -> Option<&str> {
-    None
+  fn name(&self) -> Option<&SmolStr> {
+    self.name.as_ref()
   }
 
   fn invalidates(&self, other: &Self) -> bool {

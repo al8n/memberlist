@@ -7,7 +7,7 @@ use std::{
 };
 
 use showbiz_traits::Broadcast;
-use showbiz_types::SharedString;
+use showbiz_types::SmolStr;
 
 use crate::util::retransmit_limit;
 
@@ -17,7 +17,7 @@ pub trait NodeCalculator {
 
 struct Inner<B: Broadcast> {
   q: BTreeSet<Arc<LimitedBroadcast<B>>>,
-  m: HashMap<SharedString, Arc<LimitedBroadcast<B>>>,
+  m: HashMap<SmolStr, Arc<LimitedBroadcast<B>>>,
   id_gen: u64,
 }
 
@@ -36,9 +36,7 @@ impl<B: Broadcast> Inner<B> {
 
   fn insert(&mut self, item: Arc<LimitedBroadcast<B>>) {
     if let Some(name) = item.broadcast.name() {
-      self
-        .m
-        .insert(SharedString::Owned(name.to_owned()), item.clone());
+      self.m.insert(name.clone(), item.clone());
     }
     self.q.insert(item);
   }
@@ -56,7 +54,7 @@ pub struct TransmitLimitedQueue<B: Broadcast, C: NodeCalculator> {
   #[cfg(not(feature = "async"))]
   inner: parking_lot::Mutex<Inner<B>>,
   #[cfg(feature = "async")]
-  inner: futures::lock::Mutex<Inner<B>>,
+  inner: async_lock::Mutex<Inner<B>>,
 }
 
 impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
@@ -65,7 +63,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     Self {
       num_nodes: calc,
       retransmit_mult,
-      inner: futures::lock::Mutex::new(Inner {
+      inner: async_lock::Mutex::new(Inner {
         q: BTreeSet::new(),
         m: HashMap::new(),
         id_gen: 0,
@@ -74,8 +72,9 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
   }
 
   #[cfg(not(feature = "async"))]
-  pub const fn new(retransmit_mult: usize) -> Self {
+  pub fn new(calc: C, retransmit_mult: usize) -> Self {
     Self {
+      num_nodes: calc,
       retransmit_mult,
       inner: parking_lot::Mutex::new(Inner {
         q: BTreeSet::new(),
@@ -260,10 +259,12 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
   }
 
   /// Used to enqueue a broadcast
+  #[cfg(feature = "async")]
   pub async fn queue_broadcast(&self, b: B) {
     self.queue_broadcast_in(b, 0).await
   }
 
+  #[cfg(feature = "async")]
   async fn queue_broadcast_in(&self, b: B, initial_transmits: usize) {
     let mut inner = self.inner.lock().await;
 
@@ -382,7 +383,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     }
 
     // Append to the relevant queue.
-    inner.insert(lb);
+    inner.insert(Arc::new(lb));
   }
 
   #[cfg(all(not(feature = "async"), test))]
@@ -432,7 +433,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
   /// will be discarded. This can be used to prevent unbounded queue sizes
   #[cfg(not(feature = "async"))]
   pub fn prune(&self, max_retain: usize) {
-    let mut inner = self.inner.lock().await;
+    let mut inner = self.inner.lock();
     // Do nothing if queue size is less than the limit
     while inner.q.len() > max_retain {
       if let Some(item) = inner.q.pop_last() {

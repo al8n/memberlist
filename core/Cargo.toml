@@ -7,10 +7,10 @@ version = { workspace= true }
 edition = { workspace= true }
 
 [features]
-default = []
+default = ["async"]
 
 sync = ["crossbeam-channel"]
-async = ["async-channel", "async-trait", "futures"]
+async = ["async-channel", "async-trait", "async-lock", "async-io", "futures-timer", "futures-util"]
 
 
 [dependencies]
@@ -19,17 +19,25 @@ async = ["async-channel", "async-trait", "futures"]
 crossbeam-channel = { version = "0.5", optional = true }
 
 # async common
-async-trait = { version = "0.1", optional = true }
 async-channel = { version = "1.8", optional = true }
-futures = { version = "0.3", optional = true }
+async-io = { version = "1.12", optional = true }
+async-lock = { version = "2.7", optional = true }
+async-trait = { version = "0.1", optional = true }
+futures-timer = { version = "3", optional = true }
+futures-util = { version = "0.3", optional = true }
 
 # common
+aead = { version = "0.5", features = ["bytes"] }
+aes-gcm = "0.10"
 bytes = { workspace = true, features = ["serde"] }
+cbc = "0.1"
 crossbeam-utils = "0.8"
 either = { workspace = true }
+indexmap = "1.9"
 local-ip-address = { workspace = true }
 metrics = "0.20"
 parking_lot = "0.12"
+rand = { version = "0.8" }
 showbiz-types = { path = "../types" }
 showbiz-traits = { path = "../traits" }
 scopeguard = { workspace = true }
@@ -39,3 +47,6 @@ thiserror = "1"
 tracing = { workspace = true }
 viewit = { workspace = true }
 wg = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1.19", features = ["full"] }
