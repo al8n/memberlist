@@ -34,10 +34,12 @@ cbc = "0.1"
 crossbeam-utils = "0.8"
 either = { workspace = true }
 indexmap = "1.9"
+ipnet = { version = "2.7", features = ["serde"] }
 local-ip-address = { workspace = true }
 metrics = "0.20"
 parking_lot = "0.12"
 rand = { version = "0.8" }
+rustix = { versino = "0.37", features = ["process"] }
 showbiz-types = { path = "../types" }
 showbiz-traits = { path = "../traits" }
 scopeguard = { workspace = true }

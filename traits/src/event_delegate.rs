@@ -32,3 +32,34 @@ pub trait EventDelegate {
   #[cfg(feature = "async")]
   async fn notify_update(&self, node: &Node);
 }
+
+/// No-op implementation of [`EventDelegate`]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct VoidEventDelegate;
+
+#[cfg_attr(feature = "async", async_trait::async_trait)]
+impl EventDelegate for VoidEventDelegate {
+  #[cfg(not(feature = "async"))]
+  #[inline(always)]
+  fn notify_join(&self, _node: &Node) {}
+
+  #[cfg(feature = "async")]
+  #[inline(always)]
+  async fn notify_join(&self, _node: &Node) {}
+
+  #[cfg(not(feature = "async"))]
+  #[inline(always)]
+  fn notify_leave(&self, _node: &Node) {}
+
+  #[cfg(feature = "async")]
+  #[inline(always)]
+  async fn notify_leave(&self, _node: &Node) {}
+
+  #[cfg(not(feature = "async"))]
+  #[inline(always)]
+  fn notify_update(&self, _node: &Node) {}
+
+  #[cfg(feature = "async")]
+  #[inline(always)]
+  async fn notify_update(&self, _node: &Node) {}
+}

@@ -4,7 +4,7 @@ use showbiz_types::SmolStr;
 
 pub(crate) struct ShowbizBroadcast {
   name: Option<SmolStr>,
-  node: String,
+  node: SmolStr,
   msg: Bytes,
   #[cfg(feature = "async")]
   notify: async_channel::Sender<()>,
@@ -12,6 +12,7 @@ pub(crate) struct ShowbizBroadcast {
   notify: crossbeam_channel::Sender<()>,
 }
 
+#[cfg_attr(feature = "async", async_trait::async_trait)]
 impl Broadcast for ShowbizBroadcast {
   fn name(&self) -> Option<&SmolStr> {
     self.name.as_ref()
@@ -25,13 +26,13 @@ impl Broadcast for ShowbizBroadcast {
     todo!()
   }
 
-  fn finished<'life0, 'async_trait>(
-    &'life0 self,
-  ) -> core::pin::Pin<Box<dyn core::future::Future<Output = ()> + core::marker::Send + 'async_trait>>
-  where
-    'life0: 'async_trait,
-    Self: 'async_trait,
-  {
+  #[cfg(feature = "async")]
+  async fn finished(&self) {
+    todo!()
+  }
+
+  #[cfg(not(feature = "async"))]
+  fn finished(&self) {
     todo!()
   }
 

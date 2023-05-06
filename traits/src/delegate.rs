@@ -44,3 +44,36 @@ pub trait Delegate {
   /// boolean indicates this is for a join instead of a push/pull.
   fn merge_remote_state(&self, buf: &[u8], join: bool);
 }
+
+/// No-op implementation of Delegate
+#[derive(Debug, Default, Clone, Copy)]
+pub struct VoidDelegate;
+
+#[cfg_attr(feature = "async", async_trait::async_trait)]
+impl Delegate for VoidDelegate {
+  #[inline(always)]
+  fn node_meta(&self, _limit: usize) -> Bytes {
+    Bytes::new()
+  }
+
+  #[cfg(not(feature = "async"))]
+  #[inline(always)]
+  fn notify_msg(&self, _msg: Bytes) {}
+
+  #[cfg(feature = "async")]
+  #[inline(always)]
+  async fn notify_msg(&self, _msg: Bytes) {}
+
+  #[inline(always)]
+  fn get_broadcasts(&self, _overhead: usize, _limit: usize) -> Vec<Bytes> {
+    Vec::new()
+  }
+
+  #[inline(always)]
+  fn local_state(&self, _join: bool) -> Bytes {
+    Bytes::new()
+  }
+
+  #[inline(always)]
+  fn merge_remote_state(&self, _buf: &[u8], _join: bool) {}
+}

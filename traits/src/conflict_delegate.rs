@@ -14,3 +14,18 @@ pub trait ConflictDelegate {
   #[cfg(feature = "async")]
   async fn notify_conflict(&self, existing: bool, other: &Node);
 }
+
+/// No-op implementation of [`ConflictDelegate`]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct VoidConflictDelegate;
+
+#[cfg_attr(feature = "async", async_trait::async_trait)]
+impl ConflictDelegate for VoidConflictDelegate {
+  #[cfg(not(feature = "async"))]
+  #[inline(always)]
+  fn notify_conflict(&self, _existing: bool, _other: &Node) {}
+
+  #[cfg(feature = "async")]
+  #[inline(always)]
+  async fn notify_conflict(&self, _existing: bool, _other: &Node) {}
+}

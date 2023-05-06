@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use showbiz_types::SmolStr;
+
 #[inline]
 fn remaining_suspicion_time(
   n: u32,
@@ -35,7 +37,7 @@ mod r#impl {
     start: Instant,
     timer: Timer,
     timeout_fn: Arc<dyn Fn(u32) + Send + Sync>,
-    confirmations: HashSet<String>,
+    confirmations: HashSet<SmolStr>,
   }
 
   impl Suspicion {
@@ -45,7 +47,7 @@ mod r#impl {
     /// gossiped back to us. The minimum time will be used if no confirmations are
     /// called for (k = 0).
     pub(crate) fn new(
-      from: String,
+      from: SmolStr,
       k: u32,
       min: Duration,
       max: Duration,
@@ -73,7 +75,7 @@ mod r#impl {
     /// node is suspect. This returns true if this was new information, and false
     /// if it was a duplicate confirmation, or if we've got enough confirmations to
     /// hit the minimum.
-    pub(crate) fn confirm(&mut self, from: String) -> bool {
+    pub(crate) fn confirm(&mut self, from: SmolStr) -> bool {
       if self.n.load(Ordering::Relaxed) >= self.k {
         return false;
       }
@@ -197,7 +199,7 @@ mod r#impl {
     start: Instant,
     timer: Timer,
     timeout_fn: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync>,
-    confirmations: HashSet<String>,
+    confirmations: HashSet<SmolStr>,
     spawner: Box<dyn Fn(BoxFuture<'static, ()>) + Send + Sync + 'static>,
   }
 
@@ -208,7 +210,7 @@ mod r#impl {
     /// gossiped back to us. The minimum time will be used if no confirmations are
     /// called for (k = 0).
     pub(crate) fn new(
-      from: String,
+      from: SmolStr,
       k: u32,
       min: Duration,
       max: Duration,
@@ -238,7 +240,7 @@ mod r#impl {
     /// node is suspect. This returns true if this was new information, and false
     /// if it was a duplicate confirmation, or if we've got enough confirmations to
     /// hit the minimum.
-    pub(crate) async fn confirm(&mut self, from: String) -> bool {
+    pub(crate) async fn confirm(&mut self, from: SmolStr) -> bool {
       if self.n.load(Ordering::Relaxed) >= self.k {
         return false;
       }

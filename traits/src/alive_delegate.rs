@@ -8,7 +8,7 @@ use showbiz_types::Node;
 /// using application specific logic.
 #[cfg_attr(feature = "async", async_trait::async_trait)]
 pub trait AliveDelegate {
-  type Error: std::error::Error;
+  type Error: std::error::Error + Send + Sync + 'static;
 
   /// Invoked when a name conflict is detected
   #[cfg(not(feature = "async"))]
@@ -17,4 +17,33 @@ pub trait AliveDelegate {
   /// Invoked when a name conflict is detected
   #[cfg(feature = "async")]
   async fn notify_alive(&self, peer: &Node) -> Result<(), Self::Error>;
+}
+
+/// No-op implementation of [`AliveDelegate`]
+#[derive(Debug, Clone, Copy)]
+pub struct VoidAliveDelegate<E: std::error::Error + Send + Sync + 'static>(
+  std::marker::PhantomData<E>,
+);
+
+impl<E: std::error::Error + Send + Sync + 'static> Default for VoidAliveDelegate<E> {
+  fn default() -> Self {
+    Self(std::marker::PhantomData)
+  }
+}
+
+#[cfg_attr(feature = "async", async_trait::async_trait)]
+impl<E: std::error::Error + Send + Sync + 'static> AliveDelegate for VoidAliveDelegate<E> {
+  type Error = E;
+
+  #[cfg(not(feature = "async"))]
+  #[inline(always)]
+  fn notify_alive(&self, _peer: &Node) -> Result<(), Self::Error> {
+    Ok(())
+  }
+
+  #[cfg(feature = "async")]
+  #[inline(always)]
+  async fn notify_alive(&self, _peer: &Node) -> Result<(), Self::Error> {
+    Ok(())
+  }
 }

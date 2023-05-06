@@ -2,6 +2,8 @@ use std::{net::SocketAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
+use showbiz_types::SmolStr;
+
 /// Maximum size for node meta data
 pub const META_MAX_SIZE: usize = 512;
 
@@ -28,12 +30,12 @@ pub(crate) struct Ping {
   /// Node is sent so the target can verify they are
   /// the intended recipient. This is to protect again an agent
   /// restart with a new name.
-  node: String,
+  node: SmolStr,
 
   /// Source address, used for a direct reply
   source_addr: SocketAddr,
   /// Source name, used for a direct reply
-  source_node: String,
+  source_node: SmolStr,
 }
 
 #[viewit::viewit]
@@ -44,7 +46,7 @@ pub(crate) struct IndirectPingRequest {
   /// Node is sent so the target can verify they are
   /// the intended recipient. This is to protect against an agent
   /// restart with a new name.
-  node: String,
+  node: SmolStr,
 
   /// true if we'd like a nack back
   nack: bool,
@@ -52,7 +54,7 @@ pub(crate) struct IndirectPingRequest {
   /// Source address, used for a direct reply
   source_addr: SocketAddr,
   /// Source name, used for a direct reply
-  source_node: String,
+  source_node: SmolStr,
 }
 
 /// Ack response is sent for a ping
@@ -79,5 +81,5 @@ pub(crate) struct NackResponse {
 #[serde(transparent)]
 #[repr(transparent)]
 pub(crate) struct ErrorResponse {
-  err: String,
+  err: SmolStr,
 }

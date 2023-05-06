@@ -20,3 +20,32 @@ pub trait MergeDelegate {
   #[cfg(feature = "async")]
   async fn notify_merge(&self, peers: &[Node]) -> Result<(), Self::Error>;
 }
+
+/// No-op implementation of [`MergeDelegate`]
+#[derive(Debug, Clone, Copy)]
+pub struct VoidMergeDelegate<E: std::error::Error + Send + Sync + 'static>(
+  std::marker::PhantomData<E>,
+);
+
+impl<E: std::error::Error + Send + Sync + 'static> Default for VoidMergeDelegate<E> {
+  fn default() -> Self {
+    Self(std::marker::PhantomData)
+  }
+}
+
+#[cfg_attr(feature = "async", async_trait::async_trait)]
+impl<E: std::error::Error + Send + Sync + 'static> MergeDelegate for VoidMergeDelegate<E> {
+  type Error = E;
+
+  #[cfg(not(feature = "async"))]
+  #[inline(always)]
+  fn notify_merge(&self, _peers: &[Node]) -> Result<(), Self::Error> {
+    Ok(())
+  }
+
+  #[cfg(feature = "async")]
+  #[inline(always)]
+  async fn notify_merge(&self, _peers: &[Node]) -> Result<(), Self::Error> {
+    Ok(())
+  }
+}
