@@ -4,7 +4,9 @@ members = [
   "showbiz",
   "transport",
   "traits",
-  "types"
+  "types",
+  "js",
+  "py",
 ]
 
 [workspace.package]

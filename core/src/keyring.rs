@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use indexmap::IndexSet;
 
 #[cfg(feature = "async")]
@@ -9,14 +8,138 @@ use parking_lot::{Mutex, MutexGuard};
 
 use std::sync::Arc;
 
-#[derive(Debug, Default)]
-pub struct SecretKeys(IndexSet<Bytes>);
+/// The key used while attempting to encrypt/decrypt a message
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum SecretKey {
+  /// secret key for AES128
+  Aes128([u8; 16]),
+  /// secret key for AES192
+  Aes192([u8; 24]),
+  /// secret key for AES256
+  Aes256([u8; 32]),
+}
+
+impl core::borrow::Borrow<[u8]> for SecretKey {
+  fn borrow(&self) -> &[u8] {
+    self.as_ref()
+  }
+}
+
+impl PartialEq<[u8]> for SecretKey {
+  fn eq(&self, other: &[u8]) -> bool {
+    self.as_ref() == other
+  }
+}
+
+impl core::ops::Deref for SecretKey {
+  type Target = [u8];
+
+  fn deref(&self) -> &Self::Target {
+    match self {
+      Self::Aes128(k) => k,
+      Self::Aes192(k) => k,
+      Self::Aes256(k) => k,
+    }
+  }
+}
+
+impl core::ops::DerefMut for SecretKey {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    match self {
+      Self::Aes128(k) => k,
+      Self::Aes192(k) => k,
+      Self::Aes256(k) => k,
+    }
+  }
+}
+
+impl SecretKey {
+  /// Returns the size of the key in bytes
+  #[inline]
+  pub const fn len(&self) -> usize {
+    match self {
+      Self::Aes128(_) => 16,
+      Self::Aes192(_) => 24,
+      Self::Aes256(_) => 32,
+    }
+  }
+
+  /// Returns true if the key is empty
+  #[inline]
+  pub const fn is_empty(&self) -> bool {
+    self.len() == 0
+  }
+
+  #[inline]
+  pub fn to_vec(&self) -> Vec<u8> {
+    self.as_ref().to_vec()
+  }
+}
+
+impl From<[u8; 16]> for SecretKey {
+  fn from(k: [u8; 16]) -> Self {
+    Self::Aes128(k)
+  }
+}
+
+impl From<[u8; 24]> for SecretKey {
+  fn from(k: [u8; 24]) -> Self {
+    Self::Aes192(k)
+  }
+}
+
+impl From<[u8; 32]> for SecretKey {
+  fn from(k: [u8; 32]) -> Self {
+    Self::Aes256(k)
+  }
+}
+
+impl TryFrom<&[u8]> for SecretKey {
+  type Error = String;
+
+  fn try_from(k: &[u8]) -> Result<Self, Self::Error> {
+    match k.len() {
+      16 => Ok(Self::Aes128(k.try_into().unwrap())),
+      24 => Ok(Self::Aes192(k.try_into().unwrap())),
+      32 => Ok(Self::Aes256(k.try_into().unwrap())),
+      x => Err(format!(
+        "invalid key size: {}, secret key size must be 16, 24 or 32 bytes",
+        x
+      )),
+    }
+  }
+}
+
+impl AsRef<[u8]> for SecretKey {
+  fn as_ref(&self) -> &[u8] {
+    match self {
+      Self::Aes128(k) => k,
+      Self::Aes192(k) => k,
+      Self::Aes256(k) => k,
+    }
+  }
+}
+
+impl AsMut<[u8]> for SecretKey {
+  fn as_mut(&mut self) -> &mut [u8] {
+    match self {
+      Self::Aes128(k) => k,
+      Self::Aes192(k) => k,
+      Self::Aes256(k) => k,
+    }
+  }
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SecretKeys(IndexSet<SecretKey>);
 
 impl SecretKeys {
   /// Returns the key on the ring at position 0. This is the key used
   /// for encrypting messages, and is the first key tried for decrypting messages.
   #[inline]
-  pub fn primary_key(&self) -> Option<&Bytes> {
+  pub fn primary_key(&self) -> Option<&SecretKey> {
     self.0.get_index(0)
   }
 
@@ -40,10 +163,8 @@ impl SecretKeys {
   /// key should be either 16, 24, or 32 bytes to select AES-128,
   /// AES-192, or AES-256.
   #[inline]
-  pub fn insert(&mut self, key: Bytes) -> Result<(), SecretKeyringError> {
-    SecretKeyring::validate_key(&key).map(|_| {
-      self.0.insert(key);
-    })
+  pub fn insert(&mut self, key: SecretKey) {
+    self.0.insert(key);
   }
 
   /// Changes the key used to encrypt messages. This is the only key used to
@@ -59,7 +180,7 @@ impl SecretKeys {
 
   /// Returns the current set of keys on the ring.
   #[inline]
-  pub fn get(&self) -> impl Iterator<Item = &Bytes> {
+  pub fn get(&self) -> impl Iterator<Item = &SecretKey> {
     self.0.iter()
   }
 }
@@ -99,25 +220,21 @@ impl SecretKeyring {
   /// A key should be either 16, 24, or 32 bytes to select AES-128,
   /// AES-192, or AES-256.
   #[inline]
-  pub fn new(keys: Vec<Bytes>, primary_key: Bytes) -> Result<Self, SecretKeyringError> {
+  pub fn new(keys: Vec<SecretKey>, primary_key: SecretKey) -> Self {
     if !keys.is_empty() || !primary_key.is_empty() {
-      if primary_key.is_empty() {
-        return Err(SecretKeyringError::EmptyPrimaryKey);
-      }
-
-      return [primary_key]
-        .into_iter()
-        .chain(keys.into_iter())
-        .map(|k| SecretKeyring::validate_key(&k).map(|_| k))
-        .collect::<Result<IndexSet<Bytes>, _>>()
-        .map(|keys| Self {
-          keys: Arc::new(Mutex::new(SecretKeys(keys))),
-        });
+      return Self {
+        keys: Arc::new(Mutex::new(SecretKeys(
+          [primary_key]
+            .into_iter()
+            .chain(keys.into_iter())
+            .collect::<IndexSet<SecretKey>>(),
+        ))),
+      };
     }
 
-    Ok(Self {
+    Self {
       keys: Arc::new(Mutex::new(SecretKeys(IndexSet::new()))),
-    })
+    }
   }
 
   #[cfg(feature = "async")]
@@ -130,17 +247,5 @@ impl SecretKeyring {
   #[inline]
   pub fn lock(&self) -> MutexGuard<'_, SecretKeys> {
     self.keys.lock()
-  }
-
-  /// Check to see if the key is valid and returns an error if not.
-  ///
-  /// key should be either 16, 24, or 32 bytes to select AES-128,
-  /// AES-192, or AES-256.
-  #[inline]
-  pub const fn validate_key(key: &[u8]) -> Result<(), SecretKeyringError> {
-    match key.len() {
-      16 | 24 | 32 => Ok(()),
-      _ => Err(SecretKeyringError::InvalidKeySize),
-    }
   }
 }

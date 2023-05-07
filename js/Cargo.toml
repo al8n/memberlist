@@ -1,0 +1,16 @@
+[package]
+name = "showbiz-js"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "showbiz"
+crate-type = ["cdylib"]
+
+[dependencies]
+showbiz-core = { path = "../core" }
+js-sys = "0.3"
+wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
+ipnet = "2.7"
+serde-wasm-bindgen = "0.5"
+serde = { version = "1", features = ["derive"] }

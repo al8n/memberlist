@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::{net::SocketAddr, time::Instant};
 
 use bytes::Bytes;
@@ -188,16 +190,4 @@ impl core::fmt::Display for Node {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{} ({})", self.name, self.addr)
   }
-}
-
-/// The key used while attempting to encrypt/decrypt a message
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(untagged)]
-pub enum SecretKey {
-  /// secret key for AES128
-  Aes128([u8; 16]),
-  /// secret key for AES192
-  Aes192([u8; 24]),
-  /// secret key for AES256
-  Aes256([u8; 32]),
 }

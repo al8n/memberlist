@@ -314,7 +314,7 @@ mod r#impl {
 
       (self.spawner)(Box::pin(async move {
         futures_util::select! {
-          _ = async_io::Timer::after(timeout).fuse() => {
+          _ = futures_timer::Delay::new(timeout).fuse() => {
             f(n.load(Ordering::SeqCst)).await
           }
           _ = rx.recv().fuse() => {}
@@ -332,7 +332,7 @@ mod r#impl {
 
       (self.spawner)(Box::pin(async move {
         futures_util::select! {
-          _ = async_io::Timer::after(remaining).fuse() => {
+          _ = futures_timer::Delay::new(remaining).fuse() => {
             f(n.load(Ordering::SeqCst)).await
           }
           _ = rx.recv().fuse() => {}

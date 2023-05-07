@@ -9,9 +9,12 @@ use showbiz_traits::{
   Transport, VoidAliveDelegate, VoidConflictDelegate, VoidDelegate, VoidEventDelegate,
   VoidMergeDelegate, VoidPingDelegate,
 };
-use showbiz_types::{SecretKey, SmolStr};
+use showbiz_types::SmolStr;
 
-use super::error::Error;
+use super::{
+  error::Error,
+  keyring::{SecretKey, SecretKeyring},
+};
 
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -216,7 +219,7 @@ pub struct Options {
       type = "Option<&HashSet<ipnet::IpNet>>"
     )
   ))]
-  cidrs_allowed: Option<HashSet<ipnet::IpNet>>,
+  allowed_cidrs: Option<HashSet<ipnet::IpNet>>,
   /// The interval at which we check the message
   /// queue to apply the warning and max depth.
   queue_check_interval: Duration,
@@ -238,10 +241,17 @@ impl Options {
   /// these values are a good starting point when getting started with memberlist.
   #[inline]
   pub fn lan() -> Self {
-    let uname = rustix::process::uname();
-    let hostname = uname.nodename().to_string_lossy();
+    #[cfg(not(target_arch = "wasm32"))]
+    let hostname = {
+      let uname = rustix::process::uname();
+      uname.nodename().to_string_lossy().into()
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    let hostname = "".into();
+
     Self {
-      name: hostname.into(),
+      name: hostname,
       label: Default::default(),
       skip_inbound_label_check: false,
       bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 7946),
@@ -272,7 +282,7 @@ impl Options {
       packet_buffer_size: 1400,
       dead_node_reclaim_time: Duration::ZERO,
       require_node_names: false,
-      cidrs_allowed: None,
+      allowed_cidrs: None,
       queue_check_interval: Duration::from_secs(30),
     }
   }
@@ -333,6 +343,9 @@ pub struct ShowbizBuilder<
   merge_delegate: Option<MD>,
   ping_delegate: Option<PD>,
   alive_delegate: Option<AD>,
+  /// Holds all of the encryption keys used internally. It is
+  /// automatically initialized using the SecretKey and SecretKeys values.
+  keyring: Option<SecretKeyring>,
 }
 
 impl<T: Transport> ShowbizBuilder<T> {
@@ -347,6 +360,7 @@ impl<T: Transport> ShowbizBuilder<T> {
       merge_delegate: None,
       ping_delegate: None,
       alive_delegate: None,
+      keyring: None,
     }
   }
 }
@@ -362,28 +376,15 @@ where
   AD: showbiz_traits::AliveDelegate,
 {
   #[inline]
-  pub fn with_options(self, opts: Options) -> Self {
-    let Self {
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      ..
-    } = self;
+  pub fn with_options(mut self, opts: Options) -> Self {
+    self.opts = opts;
+    self
+  }
 
-    Self {
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-    }
+  #[inline]
+  pub fn with_keyring(mut self, keyring: Option<SecretKeyring>) -> Self {
+    self.keyring = keyring;
+    self
   }
 
   #[inline]
@@ -396,6 +397,7 @@ where
       merge_delegate,
       ping_delegate,
       alive_delegate,
+      keyring,
       ..
     } = self;
 
@@ -408,6 +410,7 @@ where
       merge_delegate,
       ping_delegate,
       alive_delegate,
+      keyring,
     }
   }
 
@@ -422,6 +425,7 @@ where
       merge_delegate,
       ping_delegate,
       alive_delegate,
+      keyring,
     } = self;
 
     ShowbizBuilder {
@@ -433,6 +437,7 @@ where
       merge_delegate,
       ping_delegate,
       alive_delegate,
+      keyring,
     }
   }
 
@@ -450,6 +455,7 @@ where
       merge_delegate,
       ping_delegate,
       alive_delegate,
+      keyring,
     } = self;
 
     ShowbizBuilder {
@@ -461,6 +467,7 @@ where
       merge_delegate,
       ping_delegate,
       alive_delegate,
+      keyring,
     }
   }
 
@@ -478,6 +485,7 @@ where
       merge_delegate,
       ping_delegate,
       alive_delegate,
+      keyring,
     } = self;
 
     ShowbizBuilder {
@@ -489,6 +497,7 @@ where
       merge_delegate,
       ping_delegate,
       alive_delegate,
+      keyring,
     }
   }
 
@@ -506,6 +515,7 @@ where
       conflict_delegate,
       ping_delegate,
       alive_delegate,
+      keyring,
     } = self;
 
     ShowbizBuilder {
@@ -517,6 +527,7 @@ where
       merge_delegate: md,
       ping_delegate,
       alive_delegate,
+      keyring,
     }
   }
 
@@ -534,6 +545,7 @@ where
       conflict_delegate,
       merge_delegate,
       alive_delegate,
+      keyring,
     } = self;
 
     ShowbizBuilder {
@@ -545,6 +557,7 @@ where
       merge_delegate,
       ping_delegate: pd,
       alive_delegate,
+      keyring,
     }
   }
 
@@ -562,6 +575,7 @@ where
       conflict_delegate,
       merge_delegate,
       ping_delegate,
+      keyring,
     } = self;
 
     ShowbizBuilder {
@@ -573,6 +587,7 @@ where
       merge_delegate,
       ping_delegate,
       alive_delegate: ad,
+      keyring,
     }
   }
 }
