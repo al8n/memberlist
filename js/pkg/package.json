@@ -1,6 +1,12 @@
 {
-  "name": "showbiz-js",
+  "name": "showbiz",
   "version": "0.0.0",
+  "license": "MPL-2.0",
+  "author": {
+    "name": "Al Liu",
+    "email": "scygliu1@gmail.com"
+  },
+  "description": "A placeholder",
   "files": [
     "showbiz_bg.wasm",
     "showbiz.js",

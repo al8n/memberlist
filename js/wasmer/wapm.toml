@@ -1,0 +1,9 @@
+[package]
+name = "al8n/showbiz"
+version = "0.0.0"
+description = "A placeholder"
+license = "MPL-2.0"
+
+[[module]]
+name = "showbiz"
+source = "showbiz.wasm"
