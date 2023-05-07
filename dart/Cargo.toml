@@ -1,0 +1,15 @@
+[package]
+name = "showbiz-dart"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "showbiz"
+crate-type = ["cdylib"]
+
+[dependencies]
+flutter_rust_bridge = "1.75"
+serde = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+flutter_rust_bridge_codegen = { version = "1.75" }

@@ -5,6 +5,7 @@ members = [
   "transport",
   "traits",
   "types",
+  "dart",
   "js",
   "py",
 ]

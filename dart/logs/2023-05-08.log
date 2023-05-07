@@ -1,0 +1,222 @@
+2023/05/08 00:43:57 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/options.rs"
+2023/05/08 00:43:57 [INFO] Phase: Validate config(s)
+2023/05/08 00:43:57 [INFO] Picked config: Opts { rust_input_path: "/Users/al/Developer/showbiz/dart/src/options.rs", dart_output_path: "/Users/al/Developer/showbiz/dart/../dart/lib/bridge_generated.dart", dart_decl_output_path: Some("/Users/al/Developer/showbiz/dart/../dart/lib/bridge_definitions.dart"), c_output_path: ["/Users/al/Developer/showbiz/dart/c_output_path/c_output.h", "c_output_path_extra/c_output.h"], rust_crate_dir: "/Users/al/Developer/showbiz/dart", rust_output_path: "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs", class_name: "ShowbizDart", dart_format_line_length: 120, dart_enums_style: true, skip_add_mod_to_lib: false, llvm_path: ["/opt/homebrew/opt/llvm", "/usr/local/opt/llvm", "/usr/lib/llvm-9", "/usr/lib/llvm-10", "/usr/lib/llvm-11", "/usr/lib/llvm-12", "/usr/lib/llvm-13", "/usr/lib/llvm-14", "/usr/lib/", "/usr/lib64/", "C:/Program Files/llvm", "C:/msys64/mingw64"], llvm_compiler_opts: "", manifest_path: "/Users/al/Developer/showbiz/dart/Cargo.toml", dart_root: None, build_runner: true, block_index: BlockIndex(0), skip_deps_check: false, wasm_enabled: true, inline_rust: false, bridge_in_method: true, extra_headers: "" }
+2023/05/08 00:43:57 [INFO] Phase: Parse source code to AST, then to IR
+2023/05/08 00:43:57 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/options.rs"
+2023/05/08 00:43:57 [INFO] Phase: Transform IR
+2023/05/08 00:43:57 [INFO] Phase: Generate Rust code
+2023/05/08 00:43:57 [INFO] Inject `mod bridge_generated;` into "/Users/al/Developer/showbiz/dart/src/lib.rs"
+2023/05/08 00:43:57 [DEBUG] execute format_rust path=["/Users/al/Developer/showbiz/dart/src/bridge_generated.rs", "/Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs", "/Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs"]
+2023/05/08 00:43:57 [DEBUG] execute command: bin=rustfmt args="/Users/al/Developer/showbiz/dart/src/bridge_generated.rs /Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs /Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs" current_dir=None cmd="rustfmt" "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs"
+2023/05/08 00:43:57 [DEBUG] command="rustfmt" "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs" stdout= stderr=
+2023/05/08 00:43:57 [INFO] Phase: Generate Dart code
+2023/05/08 00:43:57 [DEBUG] Guessing toolchain the runner is run into
+2023/05/08 00:43:57 [ERROR] panicked at 'called `Result::unwrap()` on an `Err` value: missing pubspec.lock in /Users/al/.cargo/registry/src/index.crates.io-6f17d22bba15001f/flutter_rust_bridge_codegen-1.75.2
+
+Stack backtrace:
+   0: std::backtrace_rs::backtrace::libunwind::trace
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/../../backtrace/src/backtrace/libunwind.rs:93:5
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/../../backtrace/src/backtrace/mod.rs:66:5
+   2: std::backtrace::Backtrace::create
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/backtrace.rs:332:13
+   3: anyhow::error::<impl core::convert::From<E> for anyhow::Error>::from
+   4: <core::result::Result<T,F> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible,E>>>::from_residual
+   5: lib_flutter_rust_bridge_codegen::entrypoint::dart::generate_dart_code
+   6: lib_flutter_rust_bridge_codegen::frb_codegen_multi
+   7: lib_flutter_rust_bridge_codegen::frb_codegen
+   8: build_script_build::main
+   9: core::ops::function::FnOnce::call_once
+  10: std::sys_common::backtrace::__rust_begin_short_backtrace
+  11: std::rt::lang_start::{{closure}}
+  12: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/core/src/ops/function.rs:287:13
+  13: std::panicking::try::do_call
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:485:40
+  14: std::panicking::try
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:449:19
+  15: std::panic::catch_unwind
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panic.rs:140:14
+  16: std::rt::lang_start_internal::{{closure}}
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/rt.rs:148:48
+  17: std::panicking::try::do_call
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:485:40
+  18: std::panicking::try
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:449:19
+  19: std::panic::catch_unwind
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panic.rs:140:14
+  20: std::rt::lang_start_internal
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/rt.rs:148:20
+  21: std::rt::lang_start
+  22: _main', dart/build.rs:23:46
+2023/05/08 00:49:16 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs"
+2023/05/08 00:49:16 [WARN] Skipping unresolvable module web (tried /Users/al/Developer/showbiz/dart/src/web.rs, /Users/al/Developer/showbiz/dart/src/web/mod.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/web.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/web/mod.rs, )
+2023/05/08 00:49:16 [WARN] Skipping unresolvable module io (tried /Users/al/Developer/showbiz/dart/src/io.rs, /Users/al/Developer/showbiz/dart/src/io/mod.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/io.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/io/mod.rs, )
+2023/05/08 00:49:16 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/options.rs"
+2023/05/08 00:49:16 [INFO] Phase: Validate config(s)
+2023/05/08 00:49:16 [INFO] Picked config: Opts { rust_input_path: "/Users/al/Developer/showbiz/dart/src/options.rs", dart_output_path: "/Users/al/Developer/showbiz/dart/../dart/lib/bridge_generated.dart", dart_decl_output_path: Some("/Users/al/Developer/showbiz/dart/../dart/lib/bridge_definitions.dart"), c_output_path: ["/Users/al/Developer/showbiz/dart/c_output_path/c_output.h", "c_output_path_extra/c_output.h"], rust_crate_dir: "/Users/al/Developer/showbiz/dart", rust_output_path: "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs", class_name: "ShowbizDart", dart_format_line_length: 120, dart_enums_style: true, skip_add_mod_to_lib: false, llvm_path: ["/opt/homebrew/opt/llvm", "/usr/local/opt/llvm", "/usr/lib/llvm-9", "/usr/lib/llvm-10", "/usr/lib/llvm-11", "/usr/lib/llvm-12", "/usr/lib/llvm-13", "/usr/lib/llvm-14", "/usr/lib/", "/usr/lib64/", "C:/Program Files/llvm", "C:/msys64/mingw64"], llvm_compiler_opts: "", manifest_path: "/Users/al/Developer/showbiz/dart/Cargo.toml", dart_root: None, build_runner: true, block_index: BlockIndex(0), skip_deps_check: false, wasm_enabled: true, inline_rust: false, bridge_in_method: true, extra_headers: "" }
+2023/05/08 00:49:16 [INFO] Phase: Parse source code to AST, then to IR
+2023/05/08 00:49:16 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs"
+2023/05/08 00:49:16 [WARN] Skipping unresolvable module web (tried /Users/al/Developer/showbiz/dart/src/web.rs, /Users/al/Developer/showbiz/dart/src/web/mod.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/web.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/web/mod.rs, )
+2023/05/08 00:49:16 [WARN] Skipping unresolvable module io (tried /Users/al/Developer/showbiz/dart/src/io.rs, /Users/al/Developer/showbiz/dart/src/io/mod.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/io.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/io/mod.rs, )
+2023/05/08 00:49:16 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/options.rs"
+2023/05/08 00:49:16 [INFO] Phase: Transform IR
+2023/05/08 00:49:16 [INFO] Phase: Generate Rust code
+2023/05/08 00:49:16 [DEBUG] execute format_rust path=["/Users/al/Developer/showbiz/dart/src/bridge_generated.rs", "/Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs", "/Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs"]
+2023/05/08 00:49:16 [DEBUG] execute command: bin=rustfmt args="/Users/al/Developer/showbiz/dart/src/bridge_generated.rs /Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs /Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs" current_dir=None cmd="rustfmt" "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs"
+2023/05/08 00:49:16 [DEBUG] command="rustfmt" "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs" stdout= stderr=
+2023/05/08 00:49:16 [INFO] Phase: Generate Dart code
+2023/05/08 00:49:16 [DEBUG] Guessing toolchain the runner is run into
+2023/05/08 00:49:16 [ERROR] panicked at 'called `Result::unwrap()` on an `Err` value: missing pubspec.lock in /Users/al/.cargo/registry/src/index.crates.io-6f17d22bba15001f/flutter_rust_bridge_codegen-1.75.2
+
+Stack backtrace:
+   0: std::backtrace_rs::backtrace::libunwind::trace
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/../../backtrace/src/backtrace/libunwind.rs:93:5
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/../../backtrace/src/backtrace/mod.rs:66:5
+   2: std::backtrace::Backtrace::create
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/backtrace.rs:332:13
+   3: anyhow::error::<impl core::convert::From<E> for anyhow::Error>::from
+   4: <core::result::Result<T,F> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible,E>>>::from_residual
+   5: lib_flutter_rust_bridge_codegen::entrypoint::dart::generate_dart_code
+   6: lib_flutter_rust_bridge_codegen::frb_codegen_multi
+   7: lib_flutter_rust_bridge_codegen::frb_codegen
+   8: build_script_build::main
+   9: core::ops::function::FnOnce::call_once
+  10: std::sys_common::backtrace::__rust_begin_short_backtrace
+  11: std::rt::lang_start::{{closure}}
+  12: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/core/src/ops/function.rs:287:13
+  13: std::panicking::try::do_call
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:485:40
+  14: std::panicking::try
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:449:19
+  15: std::panic::catch_unwind
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panic.rs:140:14
+  16: std::rt::lang_start_internal::{{closure}}
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/rt.rs:148:48
+  17: std::panicking::try::do_call
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:485:40
+  18: std::panicking::try
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:449:19
+  19: std::panic::catch_unwind
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panic.rs:140:14
+  20: std::rt::lang_start_internal
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/rt.rs:148:20
+  21: std::rt::lang_start
+  22: _main', dart/build.rs:23:46
+2023/05/08 00:49:24 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs"
+2023/05/08 00:49:24 [WARN] Skipping unresolvable module web (tried /Users/al/Developer/showbiz/dart/src/web.rs, /Users/al/Developer/showbiz/dart/src/web/mod.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/web.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/web/mod.rs, )
+2023/05/08 00:49:24 [WARN] Skipping unresolvable module io (tried /Users/al/Developer/showbiz/dart/src/io.rs, /Users/al/Developer/showbiz/dart/src/io/mod.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/io.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/io/mod.rs, )
+2023/05/08 00:49:24 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/options.rs"
+2023/05/08 00:49:24 [INFO] Phase: Validate config(s)
+2023/05/08 00:49:24 [INFO] Picked config: Opts { rust_input_path: "/Users/al/Developer/showbiz/dart/src/options.rs", dart_output_path: "/Users/al/Developer/showbiz/dart/../dart/lib/bridge_generated.dart", dart_decl_output_path: Some("/Users/al/Developer/showbiz/dart/../dart/lib/bridge_definitions.dart"), c_output_path: ["/Users/al/Developer/showbiz/dart/c_output_path/c_output.h", "c_output_path_extra/c_output.h"], rust_crate_dir: "/Users/al/Developer/showbiz/dart", rust_output_path: "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs", class_name: "ShowbizDart", dart_format_line_length: 120, dart_enums_style: true, skip_add_mod_to_lib: false, llvm_path: ["/opt/homebrew/opt/llvm", "/usr/local/opt/llvm", "/usr/lib/llvm-9", "/usr/lib/llvm-10", "/usr/lib/llvm-11", "/usr/lib/llvm-12", "/usr/lib/llvm-13", "/usr/lib/llvm-14", "/usr/lib/", "/usr/lib64/", "C:/Program Files/llvm", "C:/msys64/mingw64"], llvm_compiler_opts: "", manifest_path: "/Users/al/Developer/showbiz/dart/Cargo.toml", dart_root: None, build_runner: true, block_index: BlockIndex(0), skip_deps_check: false, wasm_enabled: true, inline_rust: false, bridge_in_method: true, extra_headers: "" }
+2023/05/08 00:49:24 [INFO] Phase: Parse source code to AST, then to IR
+2023/05/08 00:49:24 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs"
+2023/05/08 00:49:24 [WARN] Skipping unresolvable module web (tried /Users/al/Developer/showbiz/dart/src/web.rs, /Users/al/Developer/showbiz/dart/src/web/mod.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/web.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/web/mod.rs, )
+2023/05/08 00:49:24 [WARN] Skipping unresolvable module io (tried /Users/al/Developer/showbiz/dart/src/io.rs, /Users/al/Developer/showbiz/dart/src/io/mod.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/io.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/io/mod.rs, )
+2023/05/08 00:49:24 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/options.rs"
+2023/05/08 00:49:24 [INFO] Phase: Transform IR
+2023/05/08 00:49:24 [INFO] Phase: Generate Rust code
+2023/05/08 00:49:24 [DEBUG] execute format_rust path=["/Users/al/Developer/showbiz/dart/src/bridge_generated.rs", "/Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs", "/Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs"]
+2023/05/08 00:49:24 [DEBUG] execute command: bin=rustfmt args="/Users/al/Developer/showbiz/dart/src/bridge_generated.rs /Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs /Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs" current_dir=None cmd="rustfmt" "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs"
+2023/05/08 00:49:24 [DEBUG] command="rustfmt" "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs" stdout= stderr=
+2023/05/08 00:49:24 [INFO] Phase: Generate Dart code
+2023/05/08 00:49:24 [DEBUG] Guessing toolchain the runner is run into
+2023/05/08 00:49:24 [ERROR] panicked at 'called `Result::unwrap()` on an `Err` value: missing pubspec.lock in /Users/al/.cargo/registry/src/index.crates.io-6f17d22bba15001f/flutter_rust_bridge_codegen-1.75.2
+
+Stack backtrace:
+   0: std::backtrace_rs::backtrace::libunwind::trace
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/../../backtrace/src/backtrace/libunwind.rs:93:5
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/../../backtrace/src/backtrace/mod.rs:66:5
+   2: std::backtrace::Backtrace::create
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/backtrace.rs:332:13
+   3: anyhow::error::<impl core::convert::From<E> for anyhow::Error>::from
+   4: <core::result::Result<T,F> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible,E>>>::from_residual
+   5: lib_flutter_rust_bridge_codegen::entrypoint::dart::generate_dart_code
+   6: lib_flutter_rust_bridge_codegen::frb_codegen_multi
+   7: lib_flutter_rust_bridge_codegen::frb_codegen
+   8: build_script_build::main
+   9: core::ops::function::FnOnce::call_once
+  10: std::sys_common::backtrace::__rust_begin_short_backtrace
+  11: std::rt::lang_start::{{closure}}
+  12: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/core/src/ops/function.rs:287:13
+  13: std::panicking::try::do_call
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:485:40
+  14: std::panicking::try
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:449:19
+  15: std::panic::catch_unwind
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panic.rs:140:14
+  16: std::rt::lang_start_internal::{{closure}}
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/rt.rs:148:48
+  17: std::panicking::try::do_call
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:485:40
+  18: std::panicking::try
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:449:19
+  19: std::panic::catch_unwind
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panic.rs:140:14
+  20: std::rt::lang_start_internal
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/rt.rs:148:20
+  21: std::rt::lang_start
+  22: _main', dart/build.rs:23:46
+2023/05/08 00:53:58 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs"
+2023/05/08 00:53:58 [WARN] Skipping unresolvable module web (tried /Users/al/Developer/showbiz/dart/src/web.rs, /Users/al/Developer/showbiz/dart/src/web/mod.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/web.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/web/mod.rs, )
+2023/05/08 00:53:58 [WARN] Skipping unresolvable module io (tried /Users/al/Developer/showbiz/dart/src/io.rs, /Users/al/Developer/showbiz/dart/src/io/mod.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/io.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/io/mod.rs, )
+2023/05/08 00:53:58 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/options.rs"
+2023/05/08 00:53:58 [INFO] Phase: Validate config(s)
+2023/05/08 00:53:58 [INFO] Picked config: Opts { rust_input_path: "/Users/al/Developer/showbiz/dart/src/options.rs", dart_output_path: "/Users/al/Developer/showbiz/dart/lib/bridge_generated.dart", dart_decl_output_path: Some("/Users/al/Developer/showbiz/dart/lib/bridge_definitions.dart"), c_output_path: ["/Users/al/Developer/showbiz/dart/c_output_path/c_output.h", "c_output_path_extra/c_output.h"], rust_crate_dir: "/Users/al/Developer/showbiz/dart", rust_output_path: "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs", class_name: "ShowbizDart", dart_format_line_length: 120, dart_enums_style: true, skip_add_mod_to_lib: false, llvm_path: ["/opt/homebrew/opt/llvm", "/usr/local/opt/llvm", "/usr/lib/llvm-9", "/usr/lib/llvm-10", "/usr/lib/llvm-11", "/usr/lib/llvm-12", "/usr/lib/llvm-13", "/usr/lib/llvm-14", "/usr/lib/", "/usr/lib64/", "C:/Program Files/llvm", "C:/msys64/mingw64"], llvm_compiler_opts: "", manifest_path: "/Users/al/Developer/showbiz/dart/Cargo.toml", dart_root: Some("/Users/al/Developer/showbiz/dart/lib"), build_runner: true, block_index: BlockIndex(0), skip_deps_check: false, wasm_enabled: true, inline_rust: false, bridge_in_method: true, extra_headers: "" }
+2023/05/08 00:53:58 [INFO] Phase: Parse source code to AST, then to IR
+2023/05/08 00:53:58 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs"
+2023/05/08 00:53:58 [WARN] Skipping unresolvable module web (tried /Users/al/Developer/showbiz/dart/src/web.rs, /Users/al/Developer/showbiz/dart/src/web/mod.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/web.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/web/mod.rs, )
+2023/05/08 00:53:58 [WARN] Skipping unresolvable module io (tried /Users/al/Developer/showbiz/dart/src/io.rs, /Users/al/Developer/showbiz/dart/src/io/mod.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/io.rs, /Users/al/Developer/showbiz/dart/src/bridge_generated/io/mod.rs, )
+2023/05/08 00:53:58 [DEBUG] Trying to parse "/Users/al/Developer/showbiz/dart/src/options.rs"
+2023/05/08 00:53:58 [INFO] Phase: Transform IR
+2023/05/08 00:53:58 [INFO] Phase: Generate Rust code
+2023/05/08 00:53:58 [DEBUG] execute format_rust path=["/Users/al/Developer/showbiz/dart/src/bridge_generated.rs", "/Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs", "/Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs"]
+2023/05/08 00:53:58 [DEBUG] execute command: bin=rustfmt args="/Users/al/Developer/showbiz/dart/src/bridge_generated.rs /Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs /Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs" current_dir=None cmd="rustfmt" "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs"
+2023/05/08 00:53:58 [DEBUG] command="rustfmt" "/Users/al/Developer/showbiz/dart/src/bridge_generated.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.io.rs" "/Users/al/Developer/showbiz/dart/src/bridge_generated.web.rs" stdout= stderr=
+2023/05/08 00:53:58 [INFO] Phase: Generate Dart code
+2023/05/08 00:53:58 [DEBUG] Guessing toolchain the runner is run into
+2023/05/08 00:53:58 [DEBUG] execute command: bin=sh args="-c \"dart\" \"--version\"" current_dir=None cmd="sh" "-c" "\"dart\" \"--version\""
+2023/05/08 00:53:58 [DEBUG] command="sh" "-c" "\"dart\" \"--version\"" stdout= stderr=
+2023/05/08 00:53:58 [DEBUG] Checking presence of ffi in dependencies at /Users/al/Developer/showbiz/dart/lib
+2023/05/08 00:53:58 [ERROR] panicked at 'called `Result::unwrap()` on an `Err` value: please add ffi to your dependencies. (version >=2.0.1, <3.0.0)
+
+Stack backtrace:
+   0: std::backtrace_rs::backtrace::libunwind::trace
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/../../backtrace/src/backtrace/libunwind.rs:93:5
+   1: std::backtrace_rs::backtrace::trace_unsynchronized
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/../../backtrace/src/backtrace/mod.rs:66:5
+   2: std::backtrace::Backtrace::create
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/backtrace.rs:332:13
+   3: anyhow::error::<impl core::convert::From<E> for anyhow::Error>::from
+   4: <core::result::Result<T,F> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible,E>>>::from_residual
+   5: lib_flutter_rust_bridge_codegen::entrypoint::dart::generate_dart_code
+   6: lib_flutter_rust_bridge_codegen::frb_codegen_multi
+   7: lib_flutter_rust_bridge_codegen::frb_codegen
+   8: build_script_build::main
+   9: core::ops::function::FnOnce::call_once
+  10: std::sys_common::backtrace::__rust_begin_short_backtrace
+  11: std::rt::lang_start::{{closure}}
+  12: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/core/src/ops/function.rs:287:13
+  13: std::panicking::try::do_call
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:485:40
+  14: std::panicking::try
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:449:19
+  15: std::panic::catch_unwind
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panic.rs:140:14
+  16: std::rt::lang_start_internal::{{closure}}
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/rt.rs:148:48
+  17: std::panicking::try::do_call
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:485:40
+  18: std::panicking::try
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panicking.rs:449:19
+  19: std::panic::catch_unwind
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/panic.rs:140:14
+  20: std::rt::lang_start_internal
+             at /rustc/7908a1d65496b88626e4b7c193c81d777005d6f3/library/std/src/rt.rs:148:20
+  21: std::rt::lang_start
+  22: _main', dart/build.rs:23:46

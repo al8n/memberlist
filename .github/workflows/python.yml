@@ -29,13 +29,12 @@ jobs:
         with:
           working-directory: py
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out ../dist --find-interpreter
           sccache: 'true'
           manylinux: auto
       - name: Upload wheels
         uses: actions/upload-artifact@v3
         with:
-          working-directory: py
           name: wheels
           path: dist
 
@@ -55,12 +54,11 @@ jobs:
         with:
           working-directory: py
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out ../dist --find-interpreter
           sccache: 'true'
       - name: Upload wheels
         uses: actions/upload-artifact@v3
         with:
-          working-directory: py
           name: wheels
           path: dist
 
@@ -79,12 +77,11 @@ jobs:
         with:
           working-directory: py
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out ../dist --find-interpreter
           sccache: 'true'
       - name: Upload wheels
         uses: actions/upload-artifact@v3
         with:
-          working-directory: py
           name: wheels
           path: dist
 
@@ -95,13 +92,11 @@ jobs:
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: py
           command: sdist
           args: --out dist
       - name: Upload sdist
         uses: actions/upload-artifact@v3
         with:
-          working-directory: py
           name: wheels
           path: dist
 
@@ -113,13 +108,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v3
         with:
-          working-directory: py
           name: wheels
       - name: Publish to PyPI
         uses: PyO3/maturin-action@v1
         env:
           MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         with:
-          working-directory: py
           command: upload
           args: --skip-existing *
