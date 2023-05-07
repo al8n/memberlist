@@ -18,8 +18,11 @@ sync = ["crossbeam-channel", "showbiz-traits/sync", "parking_lot"]
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(not(all(target_arch = "wasm32", windows)))'.dependencies]
 rustix = { versino = "0.37", features = ["process"] }
+
+[target.'cfg(windows)'.dependencies]
+hostname = "0.3"
 
 [dependencies]
 # sync
