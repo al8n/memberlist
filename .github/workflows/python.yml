@@ -115,5 +115,6 @@ jobs:
         env:
           MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         with:
+          working-directory: py
           command: upload
           args: --skip-existing *
