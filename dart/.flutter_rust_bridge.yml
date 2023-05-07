@@ -1,7 +1,7 @@
 rust_input: [src/options.rs]
-dart_output: [lib/bridge_generated.dart]
+dart_output: [lib/lib/bridge_generated.dart]
 wasm: true
-dart_decl_output: lib/bridge_definitions.dart
+dart_decl_output: lib/lib/bridge_definitions.dart
 dart_format_line_length: 120
 dart_enums_style: true
 c_output: [c_output_path/c_output.h]

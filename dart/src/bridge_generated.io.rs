@@ -1,6 +1,21 @@
 use super::*;
 // Section: wire functions
 
+#[no_mangle]
+pub extern "C" fn wire_lan__static_method__Options(port_: i64) {
+  wire_lan__static_method__Options_impl(port_)
+}
+
+#[no_mangle]
+pub extern "C" fn wire_wan__static_method__Options(port_: i64) {
+  wire_wan__static_method__Options_impl(port_)
+}
+
+#[no_mangle]
+pub extern "C" fn wire_local__static_method__Options(port_: i64) {
+  wire_local__static_method__Options_impl(port_)
+}
+
 // Section: allocate functions
 
 // Section: related functions

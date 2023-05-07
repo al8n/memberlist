@@ -21,6 +21,36 @@ use std::sync::Arc;
 
 // Section: wire functions
 
+fn wire_lan__static_method__Options_impl(port_: MessagePort) {
+  FLUTTER_RUST_BRIDGE_HANDLER.wrap(
+    WrapInfo {
+      debug_name: "lan__static_method__Options",
+      port: Some(port_),
+      mode: FfiCallMode::Normal,
+    },
+    move || move |task_callback| Ok(Options::lan()),
+  )
+}
+fn wire_wan__static_method__Options_impl(port_: MessagePort) {
+  FLUTTER_RUST_BRIDGE_HANDLER.wrap(
+    WrapInfo {
+      debug_name: "wan__static_method__Options",
+      port: Some(port_),
+      mode: FfiCallMode::Normal,
+    },
+    move || move |task_callback| Ok(Options::wan()),
+  )
+}
+fn wire_local__static_method__Options_impl(port_: MessagePort) {
+  FLUTTER_RUST_BRIDGE_HANDLER.wrap(
+    WrapInfo {
+      debug_name: "local__static_method__Options",
+      port: Some(port_),
+      mode: FfiCallMode::Normal,
+    },
+    move || move |task_callback| Ok(Options::local()),
+  )
+}
 // Section: wrapper structs
 
 // Section: static checks
@@ -45,11 +75,60 @@ where
 }
 // Section: impl IntoDart
 
+impl support::IntoDart for Options {
+  fn into_dart(self) -> support::DartAbi {
+    vec![
+      self.name.into_dart(),
+      self.label.into_dart(),
+      self.skip_inbound_label_check.into_dart(),
+      self.bind_addr.into_dart(),
+      self.advertise_addr.into_dart(),
+      self.protocol_version.into_dart(),
+      self.tcp_timeout.into_dart(),
+      self.indirect_checks.into_dart(),
+      self.retransmit_mult.into_dart(),
+      self.suspicion_mult.into_dart(),
+      self.suspicion_max_timeout_mult.into_dart(),
+      self.push_pull_interval.into_dart(),
+      self.probe_interval.into_dart(),
+      self.probe_timeout.into_dart(),
+      self.disable_tcp_pings.into_dart(),
+      self.awareness_max_multiplier.into_dart(),
+      self.gossip_interval.into_dart(),
+      self.gossip_nodes.into_dart(),
+      self.gossip_to_the_dead_time.into_dart(),
+      self.gossip_verify_incoming.into_dart(),
+      self.gossip_verify_outgoing.into_dart(),
+      self.enable_compression.into_dart(),
+      self.secret_key.into_dart(),
+      self.delegate_protocol_version.into_dart(),
+      self.delegate_protocol_min.into_dart(),
+      self.delegate_protocol_max.into_dart(),
+      self.dns_config_path.into_dart(),
+      self.handoff_queue_depth.into_dart(),
+      self.packet_buffer_size.into_dart(),
+      self.dead_node_reclaim_time.into_dart(),
+      self.require_node_names.into_dart(),
+      self.allowed_cidrs.into_dart(),
+      self.queue_check_interval.into_dart(),
+    ]
+    .into_dart()
+  }
+}
+impl support::IntoDartExceptPrimitive for Options {}
+
 // Section: executor
 
 support::lazy_static! {
     pub static ref FLUTTER_RUST_BRIDGE_HANDLER: support::DefaultHandler = Default::default();
 }
+
+/// cbindgen:ignore
+#[cfg(target_family = "wasm")]
+#[path = "bridge_generated.web.rs"]
+mod web;
+#[cfg(target_family = "wasm")]
+pub use web::*;
 
 #[cfg(not(target_family = "wasm"))]
 #[path = "bridge_generated.io.rs"]
