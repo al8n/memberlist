@@ -354,7 +354,7 @@ mod r#async {
 #[cfg(not(feature = "async"))]
 pub use sync::*;
 
-#[cfg(feature = "sync")]
+#[cfg(not(feature = "async"))]
 mod sync {
   use crossbeam_channel::Receiver;
 
