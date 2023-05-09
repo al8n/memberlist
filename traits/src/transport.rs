@@ -112,19 +112,50 @@ mod r#async {
     };
   }
 
+  #[cfg(feature = "async")]
+  macro_rules! bail {
+    ($this:ident.$fn: ident($cx:ident, $buf:ident, $timer: expr)) => {{
+      let mut conn_pin = Pin::new(&mut $this.conn);
+
+      if let Some(timeout) = $this.timeout {
+        let timer = $timer(timeout);
+        futures_util::pin_mut!(timer);
+
+        // bias towards the read operation
+        match conn_pin.$fn($cx, $buf) {
+          Poll::Ready(result) => Poll::Ready(result),
+          Poll::Pending => match timer.poll($cx) {
+            Poll::Ready(_) => {
+              Poll::Ready(Err(Error::new(ErrorKind::TimedOut, "deadline has elapsed")))
+            }
+            Poll::Pending => Poll::Pending,
+          },
+        }
+      } else {
+        conn_pin.$fn($cx, $buf)
+      }
+    }};
+  }
+
   #[cfg(feature = "smol")]
   pub use _smol::SmolConnection;
 
   #[cfg(feature = "smol")]
   mod _smol {
-    use std::{future::Future, time::Duration};
-
-    use futures_util::future::FutureExt;
-    use futures_util::select;
+    use futures_util::{
+      future::{Fuse, FutureExt},
+      select_biased,
+    };
     use smol::{
-      io::{AsyncReadExt, AsyncWriteExt, Error, ErrorKind},
+      io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Error, ErrorKind},
       net::TcpStream,
       Timer,
+    };
+    use std::{
+      future::Future,
+      pin::Pin,
+      task::{Context, Poll},
+      time::Duration,
     };
 
     #[inline]
@@ -132,7 +163,7 @@ mod r#async {
     where
       F: Future<Output = T>,
     {
-      select! {
+      select_biased! {
         result = f.fuse() => {
           Ok(result)
         }
@@ -141,6 +172,7 @@ mod r#async {
         }
       }
     }
+
     #[derive(Debug)]
     pub struct SmolConnection {
       timeout: Option<Duration>,
@@ -169,6 +201,40 @@ mod r#async {
           timeout: None,
           conn,
         }
+      }
+    }
+
+    fn timer(timeout: Duration) -> Fuse<smol::Timer> {
+      Timer::after(timeout).fuse()
+    }
+
+    impl AsyncRead for SmolConnection {
+      fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+      ) -> Poll<std::io::Result<usize>> {
+        bail!(self.poll_read(cx, buf, timer))
+      }
+    }
+
+    impl AsyncWrite for SmolConnection {
+      fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+      ) -> Poll<std::io::Result<usize>> {
+        bail!(self.poll_write(cx, buf, timer))
+      }
+
+      fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let mut conn_pin = Pin::new(&mut self.conn);
+        conn_pin.poll_flush(cx)
+      }
+
+      fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let mut conn_pin = Pin::new(&mut self.conn);
+        conn_pin.poll_close(cx)
       }
     }
 
@@ -207,13 +273,20 @@ mod r#async {
 
   #[cfg(feature = "async-std")]
   mod _async_std {
-    use std::time::Duration;
+    use std::{
+      future::Future,
+      pin::Pin,
+      task::{Context, Poll},
+      time::Duration,
+    };
 
+    use async_io::Timer;
     use async_std::{
       future::timeout,
-      io::{Error, ErrorKind, ReadExt, WriteExt},
+      io::{Error, ErrorKind, Read, ReadExt, Write, WriteExt},
       net::TcpStream,
     };
+    use futures_util::{future::Fuse, FutureExt};
 
     #[derive(Debug)]
     pub struct AsyncConnection {
@@ -243,6 +316,40 @@ mod r#async {
           timeout: None,
           conn,
         }
+      }
+    }
+
+    fn timer(timeout: Duration) -> Fuse<smol::Timer> {
+      Timer::after(timeout).fuse()
+    }
+
+    impl Read for AsyncConnection {
+      fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+      ) -> Poll<std::io::Result<usize>> {
+        bail!(self.poll_read(cx, buf, timer))
+      }
+    }
+
+    impl Write for AsyncConnection {
+      fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+      ) -> Poll<std::io::Result<usize>> {
+        bail!(self.poll_write(cx, buf, timer))
+      }
+
+      fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let mut conn_pin = Pin::new(&mut self.conn);
+        conn_pin.poll_flush(cx)
+      }
+
+      fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let mut conn_pin = Pin::new(&mut self.conn);
+        conn_pin.poll_close(cx)
       }
     }
 
@@ -281,10 +388,15 @@ mod r#async {
 
   #[cfg(feature = "tokio")]
   mod _tokio {
-    use std::time::Duration;
+    use std::{
+      future::Future,
+      pin::Pin,
+      task::{Context, Poll},
+      time::Duration,
+    };
 
     use tokio::{
-      io::{AsyncReadExt, AsyncWriteExt, Error, ErrorKind},
+      io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Error, ErrorKind, ReadBuf},
       net::TcpStream,
       time::timeout,
     };
@@ -317,6 +429,42 @@ mod r#async {
           timeout: None,
           conn,
         }
+      }
+    }
+
+    impl AsyncRead for TokioConnection {
+      fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+      ) -> Poll<std::io::Result<()>> {
+        bail!(self.poll_read(cx, buf, tokio::time::sleep))
+      }
+    }
+
+    impl AsyncWrite for TokioConnection {
+      fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+      ) -> Poll<Result<usize, std::io::Error>> {
+        bail!(self.poll_write(cx, buf, tokio::time::sleep))
+      }
+
+      fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+      ) -> Poll<Result<(), std::io::Error>> {
+        let mut conn_pin = Pin::new(&mut self.conn);
+        conn_pin.poll_flush(cx)
+      }
+
+      fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+      ) -> Poll<Result<(), std::io::Error>> {
+        let mut conn_pin = Pin::new(&mut self.conn);
+        conn_pin.poll_shutdown(cx)
       }
     }
 
