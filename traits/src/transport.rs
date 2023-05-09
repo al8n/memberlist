@@ -100,19 +100,6 @@ mod r#async {
   }
 
   #[cfg(feature = "async")]
-  macro_rules! async_bail {
-    ($this:ident.$fn_name: ident ($src: ident) $(.map($map: expr))?) => {
-      match $this.timeout {
-        Some(t) => match timeout(t, $this.conn.$fn_name($src)).await {
-          Ok(r) => r$(. map($map))?,
-          Err(e) => Err(Error::new(ErrorKind::TimedOut, e)),
-        },
-        None => $this.conn.$fn_name($src).await$(. map($map))?,
-      }
-    };
-  }
-
-  #[cfg(feature = "async")]
   macro_rules! bail {
     ($this:ident.$fn: ident($cx:ident, $buf:ident, $timer: expr)) => {{
       let mut conn_pin = Pin::new(&mut $this.conn);
@@ -142,10 +129,7 @@ mod r#async {
 
   #[cfg(feature = "smol")]
   mod _smol {
-    use futures_util::{
-      future::{Fuse, FutureExt},
-      select_biased,
-    };
+    use futures_util::future::{Fuse, FutureExt};
     use smol::{
       io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Error, ErrorKind},
       net::TcpStream,
@@ -157,21 +141,6 @@ mod r#async {
       task::{Context, Poll},
       time::Duration,
     };
-
-    #[inline]
-    async fn timeout<F, T>(duration: Duration, f: F) -> Result<T, Error>
-    where
-      F: Future<Output = T>,
-    {
-      select_biased! {
-        result = f.fuse() => {
-          Ok(result)
-        }
-        _ = Timer::after(duration).fuse() => {
-          Err(Error::new(ErrorKind::TimedOut, "deadline has elapsed"))
-        }
-      }
-    }
 
     #[derive(Debug)]
     pub struct SmolConnection {
@@ -251,19 +220,19 @@ mod r#async {
       }
 
       async fn write(&mut self, src: &[u8]) -> Result<usize, Self::Error> {
-        async_bail!(self.write(src))
+        AsyncWriteExt::write(self, src).await
       }
 
       async fn write_all(&mut self, src: &[u8]) -> Result<(), Self::Error> {
-        async_bail!(self.write_all(src))
+        AsyncWriteExt::write_all(self, src).await
       }
 
       async fn read(&mut self, src: &mut [u8]) -> Result<usize, Self::Error> {
-        async_bail!(self.read(src))
+        AsyncReadExt::read(self, src).await
       }
 
       async fn read_exact(&mut self, b: &mut [u8]) -> Result<(), Self::Error> {
-        async_bail!(self.read_exact(b))
+        AsyncReadExt::read_exact(self, b).await
       }
     }
   }
@@ -282,7 +251,6 @@ mod r#async {
 
     use async_io::Timer;
     use async_std::{
-      future::timeout,
       io::{Error, ErrorKind, Read, ReadExt, Write, WriteExt},
       net::TcpStream,
     };
@@ -366,19 +334,19 @@ mod r#async {
       }
 
       async fn write(&mut self, src: &[u8]) -> Result<usize, Self::Error> {
-        async_bail!(self.write(src))
+        WriteExt::write(self, src).await
       }
 
       async fn write_all(&mut self, src: &[u8]) -> Result<(), Self::Error> {
-        async_bail!(self.write_all(src))
+        WriteExt::write_all(self, src).await
       }
 
       async fn read(&mut self, src: &mut [u8]) -> Result<usize, Self::Error> {
-        async_bail!(self.read(src))
+        ReadExt::read(self, src).await
       }
 
       async fn read_exact(&mut self, b: &mut [u8]) -> Result<(), Self::Error> {
-        async_bail!(self.read_exact(b))
+        ReadExt::read_exact(self, b).await
       }
     }
   }
@@ -398,7 +366,6 @@ mod r#async {
     use tokio::{
       io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Error, ErrorKind, ReadBuf},
       net::TcpStream,
-      time::timeout,
     };
 
     #[derive(Debug)]
@@ -481,19 +448,19 @@ mod r#async {
       }
 
       async fn write(&mut self, src: &[u8]) -> Result<usize, Self::Error> {
-        async_bail!(self.write(src))
+        AsyncWriteExt::write(self, src).await
       }
 
       async fn write_all(&mut self, src: &[u8]) -> Result<(), Self::Error> {
-        async_bail!(self.write_all(src))
+        AsyncWriteExt::write_all(self, src).await
       }
 
       async fn read(&mut self, src: &mut [u8]) -> Result<usize, Self::Error> {
-        async_bail!(self.read(src))
+        AsyncReadExt::read(self, src).await
       }
 
       async fn read_exact(&mut self, b: &mut [u8]) -> Result<(), Self::Error> {
-        async_bail!(self.read_exact(b).map(|_| ()))
+        AsyncReadExt::read_exact(self, b).await.map(|_| ())
       }
     }
   }
