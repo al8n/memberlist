@@ -1,6 +1,7 @@
 use std::{
   collections::VecDeque,
   net::SocketAddr,
+  os::fd::{AsRawFd, FromRawFd},
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -8,16 +9,18 @@ use std::{
   time::{Duration, Instant},
 };
 
-use either::Either;
-use showbiz_types::{Address, Packet};
-
-use super::{set_udp_recv_buf, Error, NetTransportOptions, UDP_PACKET_BUF_SIZE};
-use crate::{
+use super::{NetTransportOptions, UDP_PACKET_BUF_SIZE, UDP_RECV_BUF_SIZE};
+use crate::async_std_sealed::{
   sleep, spawn, unbounded, IOError, TcpListener, TcpStream, UdpSocket, UnboundedReceiver,
   UnboundedSender, WaitGroup,
 };
+use either::Either;
+use showbiz_traits::{async_trait, AsyncConnection};
+use showbiz_types::{Address, Packet};
 
-transport!(await, async);
+error!();
+set_udp_recv_buf!();
+transport!(AsyncConnection, await, async);
 
 #[async_trait::async_trait]
 impl showbiz_traits::NodeAwareTransport for NetTransport {
@@ -42,11 +45,11 @@ impl showbiz_traits::NodeAwareTransport for NetTransport {
     &self,
     addr: Address,
     timeout: std::time::Duration,
-  ) -> Result<Self::Conn, Self::Error> {
+  ) -> Result<Self::Connection, Self::Error> {
     todo!()
   }
 }
 
-tcp_processor!(await, async,);
+tcp_processor!(AsyncConnection, await, async,);
 
 udp_processor!(await, async,);

@@ -2,6 +2,7 @@ use aead::KeyInit;
 use aead::{generic_array::GenericArray, AeadInPlace};
 use aes_gcm::Aes128Gcm;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecurityError {
@@ -17,9 +18,9 @@ pub enum SecurityError {
   NoInstalledKeys,
 }
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
-enum EncryptionVersion {
+pub enum EncryptionVersion {
   /// AES-GCM 128, using PKCS7 padding
   #[default]
   PKCS7 = 0,
@@ -28,7 +29,7 @@ enum EncryptionVersion {
 }
 
 impl EncryptionVersion {
-  fn from_u8(val: u8) -> Result<Self, SecurityError> {
+  pub fn from_u8(val: u8) -> Result<Self, SecurityError> {
     match val {
       0 => Ok(EncryptionVersion::PKCS7),
       1 => Ok(EncryptionVersion::NoPadding),

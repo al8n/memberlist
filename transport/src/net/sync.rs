@@ -1,6 +1,7 @@
 use std::{
   collections::VecDeque,
   net::SocketAddr,
+  os::fd::{AsRawFd, FromRawFd},
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -11,13 +12,15 @@ use std::{
 use either::Either;
 use showbiz_types::{Address, Packet};
 
-use super::{set_udp_recv_buf, Error, NetTransportOptions, UDP_PACKET_BUF_SIZE};
-use crate::{
-  sleep, spawn, unbounded, TcpListener, TcpStream, UdpSocket, UnboundedReceiver, UnboundedSender,
-  WaitGroup,
+use super::{NetTransportOptions, UDP_PACKET_BUF_SIZE, UDP_RECV_BUF_SIZE};
+use crate::sealed::{
+  sleep, spawn, unbounded, IOError, TcpListener, TcpStream, UdpSocket, UnboundedReceiver,
+  UnboundedSender, WaitGroup,
 };
 
-transport!(,);
+error!();
+set_udp_recv_buf!();
+transport!(TcpStream,,);
 
 impl showbiz_traits::NodeAwareTransport for NetTransport {
   fn write_to_address(&self, b: &[u8], addr: Address) -> Result<std::time::Instant, Self::Error> {
@@ -36,10 +39,10 @@ impl showbiz_traits::NodeAwareTransport for NetTransport {
     &self,
     addr: Address,
     timeout: std::time::Duration,
-  ) -> Result<Self::Conn, Self::Error> {
+  ) -> Result<Self::Connection, Self::Error> {
     TcpStream::connect_timeout(&addr.addr(), timeout).map_err(From::from)
   }
 }
 
-tcp_processor!(, , ||);
+tcp_processor!(TcpStream,, , ||);
 udp_processor!(, , ||);

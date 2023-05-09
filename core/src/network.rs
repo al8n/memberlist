@@ -1,8 +1,13 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use bytes::Bytes;
+use futures_util::{future::BoxFuture, FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 
-use showbiz_types::SmolStr;
+use showbiz_traits::Transport;
+use showbiz_types::{NodeStateType, SmolStr};
+
+use crate::showbiz::Showbiz;
 
 /// Maximum size for node meta data
 pub const META_MAX_SIZE: usize = 512;
@@ -21,6 +26,12 @@ const BLOCKING_WARNING: Duration = Duration::from_millis(10);
 const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
 /// Maximum number of concurrent push/pull requests
 const MAX_PUSH_PULL_REQUESTS: usize = 128;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum CompressionType {
+  LZW,
+}
 
 /// Ping request sent directly to node
 #[viewit::viewit]
@@ -82,4 +93,115 @@ pub(crate) struct NackResponse {
 #[repr(transparent)]
 pub(crate) struct ErrorResponse {
   err: SmolStr,
+}
+
+/// suspect is broadcast when we suspect a node is dead
+#[viewit::viewit]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct Suspect {
+  incarnation: u32,
+  node: SmolStr,
+  from: SmolStr,
+}
+
+/// Alive is broadcast when we know a node is alive.
+/// Overloaded for nodes joining
+#[viewit::viewit]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct Alive {
+  incarnation: u32,
+  node: SmolStr,
+  addr: SocketAddr,
+  meta: Bytes,
+  // The versions of the protocol/delegate that are being spoken, order:
+  // pmin, pmax, pcur, dmin, dmax, dcur
+  vsn: [u8; 6],
+}
+
+/// Dead is broadcast when we confirm a node is dead
+/// Overloaded for nodes leaving
+#[viewit::viewit]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct Dead {
+  incarnation: u32,
+  node: SmolStr,
+  from: SmolStr, // Include who is suspecting
+}
+
+#[viewit::viewit]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct PushPullHeader {
+  nodes: usize,
+  user_state_len: usize, // Encodes the byte lengh of user state
+  join: bool,            // Is this a join request or a anti-entropy run
+}
+
+#[viewit::viewit]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct UserMsgHeader {
+  user_msg_len: usize, // Encodes the byte lengh of user state
+}
+
+#[viewit::viewit]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct PushNodeState {
+  name: SmolStr,
+  addr: SocketAddr,
+  meta: Bytes,
+  incarnation: u32,
+  state: NodeStateType,
+  vsn: [u8; 6],
+}
+
+#[viewit::viewit]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct Compress {
+  algo: CompressionType,
+  buf: Bytes,
+}
+
+impl Showbiz {
+  fn stream_listen(&self) {}
+}
+
+pub(crate) struct StreamProcessor<T: Transport> {
+  transport: Arc<T>,
+  shutdown_rx: async_channel::Receiver<()>,
+}
+
+impl<T: Transport> StreamProcessor<T> {
+  pub(crate) fn new(transport: Arc<T>, shutdown_rx: async_channel::Receiver<()>) -> Self {
+    Self {
+      transport,
+      shutdown_rx,
+    }
+  }
+
+  pub(crate) fn run<R, S>(self, spawner: S)
+  where
+    R: Send + Sync + 'static,
+    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  {
+    let transport = self.transport;
+    let shutdown_rx = self.shutdown_rx;
+    (spawner)(Box::pin(async move {
+      loop {
+        futures_util::select! {
+          _ = shutdown_rx.recv().fuse() => {
+            return;
+          }
+          conn = transport.stream_rx().recv().fuse() => {
+            (spawner)(async move {
+              match conn {
+                Ok(conn) => Self::handle_conn(conn).await,
+                Err(e) => tracing::error!(target = "showbiz", "failed to accept connection: {}", e),
+              }
+            }.boxed());
+          }
+        }
+      }
+    }));
+  }
+
+  async fn handle_conn(conn: T::Connection) {}
 }

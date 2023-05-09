@@ -1,6 +1,7 @@
 use std::{
   collections::VecDeque,
   net::SocketAddr,
+  os::fd::{AsRawFd, FromRawFd},
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -9,15 +10,18 @@ use std::{
 };
 
 use either::Either;
+use showbiz_traits::{async_trait, SmolConnection};
 use showbiz_types::{Address, Packet};
 
-use super::{set_udp_recv_buf, Error, NetTransportOptions, UDP_PACKET_BUF_SIZE};
-use crate::{
+use super::{NetTransportOptions, UDP_PACKET_BUF_SIZE, UDP_RECV_BUF_SIZE};
+use crate::smol_sealed::{
   sleep, spawn, unbounded, IOError, TcpListener, TcpStream, UdpSocket, UnboundedReceiver,
   UnboundedSender, WaitGroup,
 };
 
-transport!(await, async);
+error!();
+set_udp_recv_buf!();
+transport!(SmolConnection, await, async);
 
 #[async_trait::async_trait]
 impl showbiz_traits::NodeAwareTransport for NetTransport {
@@ -42,7 +46,7 @@ impl showbiz_traits::NodeAwareTransport for NetTransport {
     &self,
     addr: Address,
     timeout: std::time::Duration,
-  ) -> Result<Self::Conn, Self::Error> {
+  ) -> Result<Self::Connection, Self::Error> {
     // match smol::Timer::after(timeout, TcpStream::connect_timeout(addr.addr())).await {
     //   Ok(rst) => rst.map_err(From::from),
     //   Err(_) => Err(Error::IO(IOError::new(smol::io::ErrorKind::TimedOut, "timeout"))),
@@ -51,6 +55,6 @@ impl showbiz_traits::NodeAwareTransport for NetTransport {
   }
 }
 
-tcp_processor!(await, async,);
+tcp_processor!(SmolConnection, await, async,);
 
 udp_processor!(await, async,);

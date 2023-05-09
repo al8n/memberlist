@@ -1,7 +1,8 @@
 mod net;
 pub use net::*;
 
-pub(crate) use sealed::*;
+#[cfg(feature = "async")]
+pub use showbiz_traits::async_trait;
 
 #[cfg(feature = "sync")]
 mod sealed {
@@ -16,8 +17,8 @@ mod sealed {
   pub(crate) use wg::WaitGroup;
 }
 
-#[cfg(feature = "tokio-showbiz")]
-mod sealed {
+#[cfg(feature = "tokio")]
+mod tokio_sealed {
   pub(crate) use async_channel::{
     unbounded, Receiver as UnboundedReceiver, Receiver, Sender as UnboundedSender, Sender,
   };
@@ -30,8 +31,8 @@ mod sealed {
   pub(crate) use wg::AsyncWaitGroup as WaitGroup;
 }
 
-#[cfg(feature = "smol-showbiz")]
-mod sealed {
+#[cfg(feature = "smol")]
+mod smol_sealed {
   pub(crate) use async_channel::{
     unbounded, Receiver as UnboundedReceiver, Receiver, Sender as UnboundedSender, Sender,
   };
@@ -54,8 +55,8 @@ mod sealed {
   }
 }
 
-#[cfg(feature = "async-showbiz")]
-mod sealed {
+#[cfg(feature = "async-std")]
+mod async_std_sealed {
   pub(crate) use async_channel::{
     unbounded, Receiver as UnboundedReceiver, Receiver, Sender as UnboundedSender, Sender,
   };

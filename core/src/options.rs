@@ -241,9 +241,7 @@ impl Options {
   /// these values are a good starting point when getting started with memberlist.
   #[inline]
   pub fn lan() -> Self {
-    #[cfg(not(any(
-      target_arch = "wasm32",
-      windows)))]
+    #[cfg(not(any(target_arch = "wasm32", windows)))]
     let hostname = {
       let uname = rustix::process::uname();
       uname.nodename().to_string_lossy().into()

@@ -18,25 +18,29 @@ impl Broadcast for ShowbizBroadcast {
     self.name.as_ref()
   }
 
-  fn invalidates(&self, _other: &Self) -> bool {
-    todo!()
+  fn invalidates(&self, other: &Self) -> bool {
+    self.node == other.node
   }
 
   fn message(&self) -> &Bytes {
-    todo!()
+    &self.msg
   }
 
   #[cfg(feature = "async")]
   async fn finished(&self) {
-    todo!()
+    if let Err(e) = self.notify.send(()).await {
+      tracing::error!(target = "showbiz", "failed to notify: {}", e);
+    }
   }
 
   #[cfg(not(feature = "async"))]
   fn finished(&self) {
-    todo!()
+    if let Err(e) = self.notify.send(()) {
+      tracing::error!(target = "showbiz", "failed to notify: {}", e);
+    }
   }
 
   fn is_unique(&self) -> bool {
-    todo!()
+    false
   }
 }

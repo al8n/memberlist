@@ -1,6 +1,7 @@
 use std::{
   collections::VecDeque,
   net::SocketAddr,
+  os::fd::{AsRawFd, FromRawFd},
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -9,16 +10,20 @@ use std::{
 };
 
 use either::Either;
-use showbiz_traits::NodeAwareTransport;
+use showbiz_traits::{async_trait, TokioConnection};
 use showbiz_types::{Address, Packet};
 
-use super::{set_udp_recv_buf, Error, NetTransportOptions, UDP_PACKET_BUF_SIZE};
-use crate::{
+use super::{NetTransportOptions, UDP_PACKET_BUF_SIZE, UDP_RECV_BUF_SIZE};
+use crate::tokio_sealed::{
   sleep, spawn, unbounded, IOError, TcpListener, TcpStream, UdpSocket, UnboundedReceiver,
   UnboundedSender, WaitGroup,
 };
 
-transport!(await, async);
+error!();
+
+set_udp_recv_buf!();
+
+transport!(TokioConnection, await, async);
 
 #[async_trait::async_trait]
 impl showbiz_traits::NodeAwareTransport for NetTransport {
@@ -43,7 +48,7 @@ impl showbiz_traits::NodeAwareTransport for NetTransport {
     &self,
     addr: Address,
     timeout: std::time::Duration,
-  ) -> Result<Self::Conn, Self::Error> {
+  ) -> Result<Self::Connection, Self::Error> {
     match tokio::time::timeout(timeout, TcpStream::connect(addr.addr())).await {
       Ok(rst) => rst.map_err(From::from),
       Err(_) => Err(Error::IO(IOError::new(
@@ -51,9 +56,10 @@ impl showbiz_traits::NodeAwareTransport for NetTransport {
         "timeout",
       ))),
     }
+    .map(TokioConnection::from)
   }
 }
 
-tcp_processor!(await, async,);
+tcp_processor!(TokioConnection, await, async,);
 
 udp_processor!(await, async,);

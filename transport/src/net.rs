@@ -1,8 +1,4 @@
-use crate::{IOError, UdpSocket};
-use std::{
-  net::SocketAddr,
-  os::fd::{AsRawFd, FromRawFd},
-};
+use std::net::SocketAddr;
 
 /// Used to buffer incoming packets during read
 /// operations.
@@ -12,18 +8,22 @@ const UDP_PACKET_BUF_SIZE: usize = 65536;
 /// sockets to in order to handle a large volume of messages.
 const UDP_RECV_BUF_SIZE: usize = 2 * 1024 * 1024;
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-  #[error("showbiz: net transport: {0}")]
-  IO(#[from] IOError),
-  #[error("showbiz: net transport: no private IP address found, and explicit IP not provided")]
-  NoPrivateIP,
-  #[error("showbiz: net transport: failed to get interface addresses {0}")]
-  NoInterfaceAddresses(#[from] local_ip_address::Error),
-  #[error("showbiz: net transport: at least one bind address is required")]
-  EmptyBindAddrs,
-  #[error("showbiz: net transport: failed to resize UDP buffer {0}")]
-  FailToResizeUdpBuffer(IOError),
+macro_rules! error {
+  () => {
+    #[derive(Debug, thiserror::Error)]
+    pub enum Error {
+      #[error("showbiz: net transport: {0}")]
+      IO(#[from] IOError),
+      #[error("showbiz: net transport: no private IP address found, and explicit IP not provided")]
+      NoPrivateIP,
+      #[error("showbiz: net transport: failed to get interface addresses {0}")]
+      NoInterfaceAddresses(#[from] local_ip_address::Error),
+      #[error("showbiz: net transport: at least one bind address is required")]
+      EmptyBindAddrs,
+      #[error("showbiz: net transport: failed to resize UDP buffer {0}")]
+      FailToResizeUdpBuffer(IOError),
+    }
+  };
 }
 
 /// Used to configure a net transport.
@@ -38,39 +38,43 @@ pub struct NetTransportOptions {
   bind_addrs: Vec<SocketAddr>,
 }
 
-#[inline]
-fn set_udp_recv_buf(socket: &UdpSocket) -> Result<(), Error> {
-  use socket2::Socket;
-  // Safety: the fd we created from the socket is just created, so it is a valid and open file descriptor
-  let socket = unsafe { Socket::from_raw_fd(socket.as_raw_fd()) };
-  let mut size = UDP_RECV_BUF_SIZE;
-  let mut err = None;
+macro_rules! set_udp_recv_buf {
+  () => {
+    #[inline]
+    fn set_udp_recv_buf(socket: &UdpSocket) -> Result<(), Error> {
+      use socket2::Socket;
+      // Safety: the fd we created from the socket is just created, so it is a valid and open file descriptor
+      let socket = unsafe { Socket::from_raw_fd(socket.as_raw_fd()) };
+      let mut size = UDP_RECV_BUF_SIZE;
+      let mut err = None;
 
-  while size > 0 {
-    match socket.set_recv_buffer_size(size) {
-      Ok(()) => return Ok(()),
-      Err(e) => {
-        err = Some(e);
-        size /= 2;
+      while size > 0 {
+        match socket.set_recv_buffer_size(size) {
+          Ok(()) => return Ok(()),
+          Err(e) => {
+            err = Some(e);
+            size /= 2;
+          }
+        }
+      }
+
+      // This is required to prevent double-closing the file descriptor.
+      drop(socket);
+
+      match err {
+        Some(err) => Err(Error::FailToResizeUdpBuffer(err)),
+        None => Ok(()),
       }
     }
-  }
-
-  // This is required to prevent double-closing the file descriptor.
-  drop(socket);
-
-  match err {
-    Some(err) => Err(Error::FailToResizeUdpBuffer(err)),
-    None => Ok(()),
-  }
+  };
 }
 
 macro_rules! transport {
-  ($($suffix: ident)?, $($async:ident)?) => {
+  ($conn: ident, $($suffix: ident)?, $($async:ident)?) => {
     pub struct NetTransport {
       opts: Arc<NetTransportOptions>,
       packet_rx: UnboundedReceiver<Packet>,
-      stream_rx: UnboundedReceiver<TcpStream>,
+      stream_rx: UnboundedReceiver<$conn>,
 
       tcp_addr: SocketAddr,
       udp_listener: Arc<UdpSocket>,
@@ -88,14 +92,14 @@ macro_rules! transport {
     }
 
     #[cfg_attr(any(
-      feature = "tokio-showbiz",
-      feature = "async-showbiz",
-      feature = "smol-showbiz"
+      feature = "tokio",
+      feature = "async",
+      feature = "smol"
     ), async_trait::async_trait)]
     impl showbiz_traits::Transport for NetTransport {
       type Error = Error;
 
-      type Conn = TcpStream;
+      type Connection = $conn;
 
       type Options = Arc<NetTransportOptions>;
 
@@ -189,7 +193,7 @@ macro_rules! transport {
         &self,
         addr: SocketAddr,
         timeout: std::time::Duration,
-      ) -> Result<Self::Conn, Self::Error> {
+      ) -> Result<Self::Connection, Self::Error> {
         <Self as showbiz_traits::NodeAwareTransport>::dial_address_timeout(&self, addr.into(), timeout) $(. $suffix)?
       }
 
@@ -231,7 +235,7 @@ macro_rules! transport {
         &self.packet_rx
       }
 
-      fn stream_rx(&self) -> &UnboundedReceiver<Self::Conn> {
+      fn stream_rx(&self) -> &UnboundedReceiver<Self::Connection> {
         &self.stream_rx
       }
     }
@@ -298,10 +302,10 @@ macro_rules! udp_processor {
 }
 
 macro_rules! tcp_processor {
-  ($($suffix: ident)?, $($async:ident)?, $($closure: tt)?) => {
+  ($conn: ident, $($suffix: ident)?, $($async:ident)?, $($closure: tt)?) => {
     struct TcpProcessor {
       wg: WaitGroup,
-      stream_tx: UnboundedSender<TcpStream>,
+      stream_tx: UnboundedSender<$conn>,
       ln: TcpListener,
       shutdown: Arc<AtomicBool>,
     }
@@ -333,7 +337,7 @@ macro_rules! tcp_processor {
                 // No error, reset loop delay
                 loop_delay = Duration::ZERO;
 
-                if let Err(e) = stream_tx.send(conn) $(. $suffix)? {
+                if let Err(e) = stream_tx.send(conn.into()) $(. $suffix)? {
                   tracing::error!(target = "showbiz", err = %e, "failed to send tcp connection");
                 }
               }
@@ -369,17 +373,17 @@ mod sync;
 #[cfg(feature = "sync")]
 pub use sync::*;
 
-#[cfg(feature = "tokio-showbiz")]
+#[cfg(feature = "tokio")]
 mod tokyo;
-#[cfg(feature = "tokio-showbiz")]
+#[cfg(feature = "tokio")]
 pub use tokyo::*;
 
-#[cfg(feature = "async-showbiz")]
+#[cfg(feature = "async-std")]
 mod async_;
-#[cfg(feature = "async-showbiz")]
+#[cfg(feature = "async-std")]
 pub use async_::*;
 
-#[cfg(feature = "smol-showbiz")]
+#[cfg(feature = "smol")]
 mod small;
-#[cfg(feature = "smol-showbiz")]
+#[cfg(feature = "smol")]
 pub use small::*;

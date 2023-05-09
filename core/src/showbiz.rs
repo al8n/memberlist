@@ -1,6 +1,9 @@
 use std::{
   net::SocketAddr,
-  sync::atomic::{AtomicBool, AtomicU32},
+  sync::{
+    atomic::{AtomicBool, AtomicU32},
+    Arc,
+  },
 };
 
 #[cfg(feature = "async")]
@@ -13,6 +16,8 @@ use parking_lot::{Mutex, RwLock};
 use async_channel::{Receiver, Sender};
 #[cfg(not(feature = "async"))]
 use crossbeam_channel::{Receiver, Sender};
+
+use crate::Options;
 
 struct HotData {
   sequence_num: CachePadded<AtomicU32>,
@@ -34,4 +39,9 @@ struct Inner {
   shutdown_lock: Mutex<()>,
   // Serializes calls to Leave
   leave_lock: Mutex<()>,
+  opts: Options,
+}
+
+pub struct Showbiz {
+  inner: Arc<Inner>,
 }
