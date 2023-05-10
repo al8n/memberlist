@@ -70,11 +70,11 @@ macro_rules! set_udp_recv_buf {
 }
 
 macro_rules! transport {
-  ($conn: ident, $($suffix: ident)?, $($async:ident)?) => {
+  ($($suffix: ident)?, $($async:ident)?) => {
     pub struct NetTransport {
       opts: Arc<NetTransportOptions>,
       packet_rx: UnboundedReceiver<Packet>,
-      stream_rx: UnboundedReceiver<$conn>,
+      stream_rx: UnboundedReceiver<TransportConnection>,
 
       tcp_addr: SocketAddr,
       udp_listener: Arc<UdpSocket>,
@@ -99,7 +99,7 @@ macro_rules! transport {
     impl showbiz_traits::Transport for NetTransport {
       type Error = Error;
 
-      type Connection = $conn;
+      type Connection = TransportConnection;
 
       type Options = Arc<NetTransportOptions>;
 
@@ -302,10 +302,10 @@ macro_rules! udp_processor {
 }
 
 macro_rules! tcp_processor {
-  ($conn: ident, $($suffix: ident)?, $($async:ident)?, $($closure: tt)?) => {
+  ($($suffix: ident)?, $($async:ident)?, $($closure: tt)?) => {
     struct TcpProcessor {
       wg: WaitGroup,
-      stream_tx: UnboundedSender<$conn>,
+      stream_tx: UnboundedSender<TransportConnection>,
       ln: TcpListener,
       shutdown: Arc<AtomicBool>,
     }
@@ -369,21 +369,14 @@ macro_rules! tcp_processor {
 }
 
 #[cfg(feature = "sync")]
-mod sync;
-#[cfg(feature = "sync")]
-pub use sync::*;
+pub mod sync;
 
 #[cfg(feature = "tokio")]
-mod tokyo;
-#[cfg(feature = "tokio")]
-pub use tokyo::*;
+pub mod tokio;
 
 #[cfg(feature = "async-std")]
-mod async_;
-#[cfg(feature = "async-std")]
-pub use async_::*;
+pub mod async_std;
 
 #[cfg(feature = "smol")]
-mod small;
-#[cfg(feature = "smol")]
-pub use small::*;
+pub mod smol;
+

@@ -14,13 +14,13 @@ use showbiz_types::{Address, Packet};
 
 use super::{NetTransportOptions, UDP_PACKET_BUF_SIZE, UDP_RECV_BUF_SIZE};
 use crate::sealed::{
-  sleep, spawn, unbounded, IOError, TcpListener, TcpStream, UdpSocket, UnboundedReceiver,
+  sleep, spawn, unbounded, IOError, TcpListener, TcpStream as TransportConnection, TcpStream, UdpSocket, UnboundedReceiver,
   UnboundedSender, WaitGroup,
 };
 
 error!();
 set_udp_recv_buf!();
-transport!(TcpStream,,);
+transport!(,);
 
 impl showbiz_traits::NodeAwareTransport for NetTransport {
   fn write_to_address(&self, b: &[u8], addr: Address) -> Result<std::time::Instant, Self::Error> {
@@ -44,5 +44,5 @@ impl showbiz_traits::NodeAwareTransport for NetTransport {
   }
 }
 
-tcp_processor!(TcpStream,, , ||);
+tcp_processor!(, , ||);
 udp_processor!(, , ||);

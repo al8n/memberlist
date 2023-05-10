@@ -9,19 +9,18 @@ use std::{
   time::{Duration, Instant},
 };
 
-use either::Either;
-use showbiz_traits::{async_trait, SmolConnection};
-use showbiz_types::{Address, Packet};
-
 use super::{NetTransportOptions, UDP_PACKET_BUF_SIZE, UDP_RECV_BUF_SIZE};
-use crate::smol_sealed::{
+use crate::async_std_sealed::{
   sleep, spawn, unbounded, IOError, TcpListener, TcpStream, UdpSocket, UnboundedReceiver,
   UnboundedSender, WaitGroup,
 };
+use either::Either;
+use showbiz_traits::{async_trait, async_std::TransportConnection};
+use showbiz_types::{Address, Packet};
 
 error!();
 set_udp_recv_buf!();
-transport!(SmolConnection, await, async);
+transport!(await, async);
 
 #[async_trait::async_trait]
 impl showbiz_traits::NodeAwareTransport for NetTransport {
@@ -47,14 +46,17 @@ impl showbiz_traits::NodeAwareTransport for NetTransport {
     addr: Address,
     timeout: std::time::Duration,
   ) -> Result<Self::Connection, Self::Error> {
-    // match smol::Timer::after(timeout, TcpStream::connect_timeout(addr.addr())).await {
-    //   Ok(rst) => rst.map_err(From::from),
-    //   Err(_) => Err(Error::IO(IOError::new(smol::io::ErrorKind::TimedOut, "timeout"))),
-    // }
-    todo!()
+    match async_std::future::timeout(timeout, TcpStream::connect(addr.addr())).await {
+      Ok(rst) => rst.map_err(From::from),
+      Err(_) => Err(Error::IO(IOError::new(
+        async_std::io::ErrorKind::TimedOut,
+        "deadline has elapsed",
+      ))),
+    }
+    .map(TransportConnection::from)
   }
 }
 
-tcp_processor!(SmolConnection, await, async,);
+tcp_processor!(await, async,);
 
 udp_processor!(await, async,);

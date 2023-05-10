@@ -13,8 +13,8 @@ sync = ["crossbeam-channel", "showbiz-traits/sync"]
 async = ["showbiz-traits/async", "async-channel"]
 
 tokio = ["dep:tokio", "showbiz-traits/tokio", "async"]
-async-std = ["dep:async-std", "showbiz-traits/async-std", "async"]
-smol = ["dep:smol", "showbiz-traits/smol", "async"]
+async-std = ["dep:async-std", "showbiz-traits/async-std", "async", "futures-util"]
+smol = ["dep:smol", "showbiz-traits/smol", "async", "futures-util"]
 
 [dependencies]
 
@@ -32,6 +32,7 @@ async-std = { version = "1.12", features = ["attributes"], optional = true }
 
 # async common
 async-channel = { version = "1.8", optional = true }
+futures-util = { version = "0.3", optional = true }
 
 # common
 bytes = { workspace = true, features = ["serde"] }

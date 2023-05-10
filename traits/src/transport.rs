@@ -14,20 +14,10 @@ mod r#async {
   use async_channel::Receiver;
 
   #[async_trait::async_trait]
-  pub trait Connection: Send + Sync + 'static {
-    type Error: std::error::Error + Send + Sync + 'static;
-
+  pub trait Connection: futures_io::AsyncRead + futures_io::AsyncWrite + Send + Sync + 'static {
     fn set_timeout(&mut self, timeout: Option<Duration>);
 
     fn timeout(&self) -> Option<Duration>;
-
-    async fn write(&mut self, b: &[u8]) -> Result<usize, Self::Error>;
-
-    async fn write_all(&mut self, b: &[u8]) -> Result<(), Self::Error>;
-
-    async fn read(&mut self, b: &mut [u8]) -> Result<usize, Self::Error>;
-
-    async fn read_exact(&mut self, b: &mut [u8]) -> Result<(), Self::Error>;
   }
 
   /// Transport is used to abstract over communicating with other peers. The packet
@@ -36,7 +26,6 @@ mod r#async {
   #[async_trait::async_trait]
   pub trait Transport: Send + Sync + 'static {
     type Error: std::error::Error
-      + From<<Self::Connection as Connection>::Error>
       + Send
       + Sync
       + 'static;
@@ -102,9 +91,10 @@ mod r#async {
   #[cfg(feature = "async")]
   macro_rules! bail {
     ($this:ident.$fn: ident($cx:ident, $buf:ident, $timer: expr)) => {{
-      let mut conn_pin = Pin::new(&mut $this.conn);
+      let timeout = $this.timeout;
+      let conn_pin = Pin::new(&mut $this.conn);
 
-      if let Some(timeout) = $this.timeout {
+      if let Some(timeout) = timeout {
         let timer = $timer(timeout);
         futures_util::pin_mut!(timer);
 
@@ -125,13 +115,10 @@ mod r#async {
   }
 
   #[cfg(feature = "smol")]
-  pub use _smol::SmolConnection;
-
-  #[cfg(feature = "smol")]
-  mod _smol {
+  pub mod smol {
     use futures_util::future::{Fuse, FutureExt};
-    use smol::{
-      io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Error, ErrorKind},
+    use ::smol::{
+      io::{Error, ErrorKind},
       net::TcpStream,
       Timer,
     };
@@ -141,14 +128,15 @@ mod r#async {
       task::{Context, Poll},
       time::Duration,
     };
+    use futures_io::{AsyncRead, AsyncWrite};
 
     #[derive(Debug)]
-    pub struct SmolConnection {
+    pub struct TransportConnection {
       timeout: Option<Duration>,
       conn: TcpStream,
     }
 
-    impl SmolConnection {
+    impl TransportConnection {
       #[inline]
       pub const fn new(conn: TcpStream) -> Self {
         Self {
@@ -164,7 +152,7 @@ mod r#async {
       }
     }
 
-    impl From<TcpStream> for SmolConnection {
+    impl From<TcpStream> for TransportConnection {
       fn from(conn: TcpStream) -> Self {
         Self {
           timeout: None,
@@ -173,11 +161,11 @@ mod r#async {
       }
     }
 
-    fn timer(timeout: Duration) -> Fuse<smol::Timer> {
+    fn timer(timeout: Duration) -> Fuse<Timer> {
       Timer::after(timeout).fuse()
     }
 
-    impl AsyncRead for SmolConnection {
+    impl AsyncRead for TransportConnection {
       fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -187,7 +175,7 @@ mod r#async {
       }
     }
 
-    impl AsyncWrite for SmolConnection {
+    impl AsyncWrite for TransportConnection {
       fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -197,20 +185,16 @@ mod r#async {
       }
 
       fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let mut conn_pin = Pin::new(&mut self.conn);
-        conn_pin.poll_flush(cx)
+        Pin::new(&mut self.conn).poll_flush(cx)
       }
 
       fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let mut conn_pin = Pin::new(&mut self.conn);
-        conn_pin.poll_close(cx)
+        Pin::new(&mut self.conn).poll_close(cx)
       }
     }
 
     #[async_trait::async_trait]
-    impl super::Connection for SmolConnection {
-      type Error = Error;
-
+    impl super::Connection for TransportConnection {
       fn set_timeout(&mut self, timeout: Option<Duration>) {
         self.timeout = timeout;
       }
@@ -218,30 +202,11 @@ mod r#async {
       fn timeout(&self) -> Option<Duration> {
         self.timeout
       }
-
-      async fn write(&mut self, src: &[u8]) -> Result<usize, Self::Error> {
-        AsyncWriteExt::write(self, src).await
-      }
-
-      async fn write_all(&mut self, src: &[u8]) -> Result<(), Self::Error> {
-        AsyncWriteExt::write_all(self, src).await
-      }
-
-      async fn read(&mut self, src: &mut [u8]) -> Result<usize, Self::Error> {
-        AsyncReadExt::read(self, src).await
-      }
-
-      async fn read_exact(&mut self, b: &mut [u8]) -> Result<(), Self::Error> {
-        AsyncReadExt::read_exact(self, b).await
-      }
     }
   }
 
   #[cfg(feature = "async-std")]
-  pub use _async_std::AsyncConnection;
-
-  #[cfg(feature = "async-std")]
-  mod _async_std {
+  pub mod async_std {
     use std::{
       future::Future,
       pin::Pin,
@@ -250,19 +215,20 @@ mod r#async {
     };
 
     use async_io::Timer;
-    use async_std::{
-      io::{Error, ErrorKind, Read, ReadExt, Write, WriteExt},
+    use ::async_std::{
+      io::{Error, ErrorKind},
       net::TcpStream,
     };
+    use futures_io::{AsyncRead, AsyncWrite};
     use futures_util::{future::Fuse, FutureExt};
 
     #[derive(Debug)]
-    pub struct AsyncConnection {
+    pub struct TransportConnection {
       timeout: Option<Duration>,
       conn: TcpStream,
     }
 
-    impl AsyncConnection {
+    impl TransportConnection {
       #[inline]
       pub const fn new(conn: TcpStream) -> Self {
         Self {
@@ -278,7 +244,7 @@ mod r#async {
       }
     }
 
-    impl From<TcpStream> for AsyncConnection {
+    impl From<TcpStream> for TransportConnection {
       fn from(conn: TcpStream) -> Self {
         Self {
           timeout: None,
@@ -287,11 +253,11 @@ mod r#async {
       }
     }
 
-    fn timer(timeout: Duration) -> Fuse<smol::Timer> {
+    fn timer(timeout: Duration) -> Fuse<Timer> {
       Timer::after(timeout).fuse()
     }
 
-    impl Read for AsyncConnection {
+    impl AsyncRead for TransportConnection {
       fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -301,7 +267,7 @@ mod r#async {
       }
     }
 
-    impl Write for AsyncConnection {
+    impl AsyncWrite for TransportConnection {
       fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -311,20 +277,16 @@ mod r#async {
       }
 
       fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let mut conn_pin = Pin::new(&mut self.conn);
-        conn_pin.poll_flush(cx)
+        Pin::new(&mut self.conn).poll_flush(cx)
       }
 
       fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let mut conn_pin = Pin::new(&mut self.conn);
-        conn_pin.poll_close(cx)
+        Pin::new(&mut self.conn).poll_close(cx)
       }
     }
 
     #[async_trait::async_trait]
-    impl super::Connection for AsyncConnection {
-      type Error = Error;
-
+    impl super::Connection for TransportConnection {
       fn set_timeout(&mut self, timeout: Option<Duration>) {
         self.timeout = timeout;
       }
@@ -332,30 +294,11 @@ mod r#async {
       fn timeout(&self) -> Option<Duration> {
         self.timeout
       }
-
-      async fn write(&mut self, src: &[u8]) -> Result<usize, Self::Error> {
-        WriteExt::write(self, src).await
-      }
-
-      async fn write_all(&mut self, src: &[u8]) -> Result<(), Self::Error> {
-        WriteExt::write_all(self, src).await
-      }
-
-      async fn read(&mut self, src: &mut [u8]) -> Result<usize, Self::Error> {
-        ReadExt::read(self, src).await
-      }
-
-      async fn read_exact(&mut self, b: &mut [u8]) -> Result<(), Self::Error> {
-        ReadExt::read_exact(self, b).await
-      }
     }
   }
 
   #[cfg(feature = "tokio")]
-  pub use _tokio::TokioConnection;
-
-  #[cfg(feature = "tokio")]
-  mod _tokio {
+  pub mod tokio {
     use std::{
       future::Future,
       pin::Pin,
@@ -364,17 +307,18 @@ mod r#async {
     };
 
     use tokio::{
-      io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Error, ErrorKind, ReadBuf},
+      io::{Error, ErrorKind, ReadBuf},
       net::TcpStream,
     };
+    use tokio_util::compat::{TokioAsyncWriteCompatExt, TokioAsyncReadCompatExt};
 
     #[derive(Debug)]
-    pub struct TokioConnection {
+    pub struct TransportConnection {
       timeout: Option<Duration>,
       conn: TcpStream,
     }
 
-    impl TokioConnection {
+    impl TransportConnection {
       #[inline]
       pub const fn new(conn: TcpStream) -> Self {
         Self {
@@ -390,7 +334,7 @@ mod r#async {
       }
     }
 
-    impl From<TcpStream> for TokioConnection {
+    impl From<TcpStream> for TransportConnection {
       fn from(conn: TcpStream) -> Self {
         Self {
           timeout: None,
@@ -399,7 +343,35 @@ mod r#async {
       }
     }
 
-    impl AsyncRead for TokioConnection {
+    impl futures_io::AsyncRead for TransportConnection {
+      fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+      ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut (&mut self.conn).compat()).poll_read(cx, buf)
+      }
+    }
+
+    impl futures_io::AsyncWrite for TransportConnection {
+      fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+      ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut (&mut self.conn).compat_write()).poll_write(cx, buf)
+      }
+
+      fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> { 
+        Pin::new(&mut (&mut self.conn).compat_write()).poll_flush(cx)
+      }
+
+      fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut (&mut self.conn).compat_write()).poll_close(cx)
+      }
+    }
+
+    impl tokio::io::AsyncRead for TransportConnection {
       fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -409,7 +381,7 @@ mod r#async {
       }
     }
 
-    impl AsyncWrite for TokioConnection {
+    impl tokio::io::AsyncWrite for TransportConnection {
       fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -422,45 +394,25 @@ mod r#async {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
       ) -> Poll<Result<(), std::io::Error>> {
-        let mut conn_pin = Pin::new(&mut self.conn);
-        conn_pin.poll_flush(cx)
+        Pin::new(&mut self.conn).poll_flush(cx)
       }
 
       fn poll_shutdown(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
       ) -> Poll<Result<(), std::io::Error>> {
-        let mut conn_pin = Pin::new(&mut self.conn);
-        conn_pin.poll_shutdown(cx)
+        Pin::new(&mut self.conn).poll_shutdown(cx)
       }
     }
 
     #[async_trait::async_trait]
-    impl super::Connection for TokioConnection {
-      type Error = Error;
-
+    impl super::Connection for TransportConnection {
       fn set_timeout(&mut self, timeout: Option<Duration>) {
         self.timeout = timeout;
       }
 
       fn timeout(&self) -> Option<Duration> {
         self.timeout
-      }
-
-      async fn write(&mut self, src: &[u8]) -> Result<usize, Self::Error> {
-        AsyncWriteExt::write(self, src).await
-      }
-
-      async fn write_all(&mut self, src: &[u8]) -> Result<(), Self::Error> {
-        AsyncWriteExt::write_all(self, src).await
-      }
-
-      async fn read(&mut self, src: &mut [u8]) -> Result<usize, Self::Error> {
-        AsyncReadExt::read(self, src).await
-      }
-
-      async fn read_exact(&mut self, b: &mut [u8]) -> Result<(), Self::Error> {
-        AsyncReadExt::read_exact(self, b).await.map(|_| ())
       }
     }
   }
@@ -475,49 +427,21 @@ mod sync {
 
   use super::*;
 
-  pub trait Connection: Send + Sync + 'static {
-    type Error: std::error::Error + Send + Sync + 'static;
+  pub trait Connection: std::io::Read + std::io::Write + Send + Sync + 'static {
+    fn set_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()>;
 
-    fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), Self::Error>;
-
-    fn timeout(&self) -> Result<Option<Duration>, Self::Error>;
-
-    fn write(&mut self, src: &[u8]) -> Result<usize, Self::Error>;
-
-    fn write_all(&mut self, src: &[u8]) -> Result<(), Self::Error>;
-
-    fn read(&mut self, src: &mut [u8]) -> Result<usize, Self::Error>;
-
-    fn read_exact(&mut self, b: &mut [u8]) -> Result<(), Self::Error>;
+    fn timeout(&self) -> std::io::Result<Option<Duration>>;
   }
 
   impl Connection for std::net::TcpStream {
-    type Error = std::io::Error;
-
-    fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), Self::Error> {
+    fn set_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
       self
         .set_write_timeout(timeout)
         .and_then(|_| self.set_read_timeout(timeout))
     }
 
-    fn timeout(&self) -> Result<Option<Duration>, Self::Error> {
+    fn timeout(&self) -> std::io::Result<Option<Duration>> {
       self.write_timeout()
-    }
-
-    fn read(&mut self, src: &mut [u8]) -> Result<usize, Self::Error> {
-      std::io::Read::read(self, src)
-    }
-
-    fn read_exact(&mut self, b: &mut [u8]) -> Result<(), Self::Error> {
-      std::io::Read::read_exact(self, b)
-    }
-
-    fn write(&mut self, src: &[u8]) -> Result<usize, Self::Error> {
-      std::io::Write::write(self, src)
-    }
-
-    fn write_all(&mut self, src: &[u8]) -> Result<(), Self::Error> {
-      std::io::Write::write_all(self, src)
     }
   }
 
@@ -526,7 +450,6 @@ mod sync {
   /// be reliable.
   pub trait Transport {
     type Error: std::error::Error
-      + From<<Self::Connection as Connection>::Error>
       + Send
       + Sync
       + 'static;

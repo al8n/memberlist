@@ -8,21 +8,23 @@ edition = { workspace= true }
 
 [features]
 default = ["async"]
-async = ["async-trait", "async-channel"]
+async = ["async-trait", "async-channel", "futures-io", "futures-util"]
 sync = ["crossbeam-channel"]
 
-tokio = ["dep:tokio", "async"]
-async-std = ["dep:async-std", "async", "async-io", "futures-util"]
-smol = ["dep:smol", "async", "futures-util"]
+tokio = ["dep:tokio", "async", "tokio-util"]
+async-std = ["dep:async-std", "async", "async-io"]
+smol = ["dep:smol", "async"]
 
 [dependencies]
 async-trait = { version = "0.1", optional = true }
 async-channel = { version = "1.8", optional = true }
 async-io = { version = "1.12", optional = true }
+futures-io = { version = "0.3", optional = true }
 
 crossbeam-channel = { version = "0.5", optional = true }
 
 tokio = { version = "1.28", optional = true, default-features = false, features = ["net", "time", "io-util"] }
+tokio-util = { version = "0.7", optional = true, default-features = false, features = ["compat"] }
 
 async-std = { version = "1.12", optional = true }
 

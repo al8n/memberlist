@@ -10,7 +10,7 @@ use std::{
 };
 
 use either::Either;
-use showbiz_traits::{async_trait, TokioConnection};
+use showbiz_traits::{async_trait, tokio::TransportConnection};
 use showbiz_types::{Address, Packet};
 
 use super::{NetTransportOptions, UDP_PACKET_BUF_SIZE, UDP_RECV_BUF_SIZE};
@@ -23,7 +23,7 @@ error!();
 
 set_udp_recv_buf!();
 
-transport!(TokioConnection, await, async);
+transport!(await, async);
 
 #[async_trait::async_trait]
 impl showbiz_traits::NodeAwareTransport for NetTransport {
@@ -56,10 +56,10 @@ impl showbiz_traits::NodeAwareTransport for NetTransport {
         "timeout",
       ))),
     }
-    .map(TokioConnection::from)
+    .map(TransportConnection::from)
   }
 }
 
-tcp_processor!(TokioConnection, await, async,);
+tcp_processor!(await, async,);
 
 udp_processor!(await, async,);
