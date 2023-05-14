@@ -1398,15 +1398,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"nodejs@workspace:.":
-  version: 0.0.0-use.local
-  resolution: "nodejs@workspace:."
-  dependencies:
-    "@napi-rs/cli": ^2.15.2
-    ava: ^5.1.1
-  languageName: unknown
-  linkType: soft
-
 "nofilter@npm:^3.1.0":
   version: 3.1.0
   resolution: "nofilter@npm:3.1.0"
@@ -1716,6 +1707,15 @@ __metadata:
   checksum: 6e65a05f7cf7ebdf8b7c75b101e18c0b7e3dff4940d480efed8aad3a36a4005140b660fa1d804cb8bce911cac290441dc728084a30504d3516ac2ff7ad607b02
   languageName: node
   linkType: hard
+
+"showbiz@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "showbiz@workspace:."
+  dependencies:
+    "@napi-rs/cli": ^2.15.2
+    ava: ^5.1.1
+  languageName: unknown
+  linkType: soft
 
 "signal-exit@npm:^3.0.7":
   version: 3.0.7

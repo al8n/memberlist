@@ -6,7 +6,7 @@ use showbiz_types::Node;
 /// into ack messages. Note that in order to be meaningful for RTT estimates, this
 /// delegate does not apply to indirect pings, nor fallback pings sent over TCP.
 #[cfg_attr(feature = "async", async_trait::async_trait)]
-pub trait PingDelegate {
+pub trait PingDelegate: Send + Sync + 'static {
   /// Invoked when an ack is being sent; the returned bytes will be appended to the ack
   #[cfg(not(feature = "async"))]
   fn ack_payload(&self) -> Bytes;

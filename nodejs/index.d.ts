@@ -343,7 +343,7 @@ export class Options {
    */
   static local(): Options
   get name(): string
-  get label(): string
+  get label(): Array<number>
   get skipInboundLabelCheck(): boolean
   get bindAddr(): string
   get advertiseAddr(): string | null
@@ -376,7 +376,7 @@ export class Options {
   get allowedCIDRs(): Array<string> | null
   get queueCheckInterval(): Duration
   setName(val: string): Options
-  setLabel(val: string): Options
+  setLabel(val: Array<number>): Options
   setSkipInboundLabelCheck(val: boolean): Options
   setBindAddr(val: string): Options
   setAdvertiseAddr(val?: string | undefined | null): Options

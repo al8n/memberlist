@@ -8,7 +8,7 @@ pub use keyring::{SecretKey, SecretKeyring, SecretKeyringError};
 pub mod label;
 mod network;
 mod options;
-pub use options::{Options, ShowbizBuilder};
+pub use options::Options;
 mod queue;
 pub use queue::TransmitLimitedQueue;
 mod security;
@@ -18,6 +18,7 @@ mod util;
 
 pub use ipnet::IpNet;
 pub use showbiz_types::SmolStr;
+pub use bytes;
 
 pub const MIN_PROTOCOL_VERSION: u8 = 1;
 pub const PROTOCOL_VERSION2_COMPATIBLE: u8 = 2;

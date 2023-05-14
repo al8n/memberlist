@@ -7,8 +7,8 @@ use showbiz_types::Node;
 /// based on custom logic. The merge delegate is NOT invoked
 /// as part of the push-pull anti-entropy.
 #[cfg_attr(feature = "async", async_trait::async_trait)]
-pub trait MergeDelegate {
-  type Error: std::error::Error;
+pub trait MergeDelegate: Send + Sync + 'static {
+  type Error: std::error::Error + Send + Sync + 'static;
 
   /// Invoked when a merge could take place.
   /// Provides a list of the nodes known by the peer.

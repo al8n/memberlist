@@ -5,7 +5,7 @@ use showbiz_types::Node;
 /// delegate may be called by multiple goroutines, but never concurrently.
 /// This allows you to reason about ordering.
 #[cfg_attr(feature = "async", async_trait::async_trait)]
-pub trait EventDelegate {
+pub trait EventDelegate: Send + Sync + 'static {
   /// Invoked when a node is detected to have joined the cluster
   #[cfg(not(feature = "async"))]
   fn notify_join(&self, node: &Node);

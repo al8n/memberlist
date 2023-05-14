@@ -1,8 +1,16 @@
 use aead::KeyInit;
-use aead::{generic_array::GenericArray, AeadInPlace};
-use aes_gcm::Aes128Gcm;
+use aead::{generic_array::GenericArray, Aead, AeadInPlace, Payload};
+use aes_gcm::{
+  aes::{cipher::consts::U12, Aes192},
+  Aes128Gcm, Aes256Gcm, AesGcm,
+};
+use bytes::{BufMut, Bytes, BytesMut};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+
+use crate::{SecretKey, SecretKeyring};
+
+type Aes192Gcm = AesGcm<Aes192, U12>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecurityError {
@@ -16,9 +24,13 @@ pub enum SecurityError {
   SmallPayload,
   #[error("showbiz security: no installed keys could decrypt the message")]
   NoInstalledKeys,
+  #[error("showbiz security: no primary key installed")]
+  MissingPrimaryKey,
 }
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+  Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[repr(u8)]
 pub enum EncryptionVersion {
   /// AES-GCM 128, using PKCS7 padding
@@ -47,15 +59,36 @@ const TAG_SIZE: usize = 16;
 const MAX_PAD_OVERHEAD: usize = 16;
 const BLOCK_SIZE: usize = 16;
 
-fn encrypt_overhead(vsn: EncryptionVersion) -> usize {
+// pkcs7encode is used to pad a byte buffer to a specific block size using
+// the PKCS7 algorithm. "Ignores" some bytes to compensate for IV
+#[inline]
+fn pkcs7encode(buf: &mut BytesMut, ignore: usize, block_size: usize) {
+  let n = buf.len() - ignore;
+  let more = block_size - (n % block_size);
+  buf.put_bytes(more as u8, more);
+}
+
+// pkcs7decode is used to decode a buffer that has been padded
+#[inline]
+fn pkcs7decode(mut buf: Vec<u8>) -> Vec<u8> {
+  if buf.is_empty() {
+    panic!("Cannot decode a PKCS7 buffer of zero length");
+  }
+  let n = buf.len();
+  let last = buf[n - 1];
+  let n = n - (last as usize);
+  buf.truncate(n);
+  buf
+}
+
+pub(crate) fn encrypt_overhead(vsn: EncryptionVersion) -> usize {
   match vsn {
     EncryptionVersion::PKCS7 => 45, // Version: 1, IV: 12, Padding: 16, Tag: 16
     EncryptionVersion::NoPadding => 29, // Version: 1, IV: 12, Tag: 16
-    _ => panic!("unsupported version"),
   }
 }
 
-fn encrypted_length(vsn: EncryptionVersion, inp: usize) -> usize {
+pub(crate) fn encrypted_length(vsn: EncryptionVersion, inp: usize) -> usize {
   // If we are on version 1, there is no padding
   if vsn as u8 >= 1 {
     return VERSION_SIZE + NONCE_SIZE + inp + TAG_SIZE;
@@ -68,60 +101,169 @@ fn encrypted_length(vsn: EncryptionVersion, inp: usize) -> usize {
   VERSION_SIZE + NONCE_SIZE + inp + padding + TAG_SIZE
 }
 
-pub(crate) fn encrypt_payload(
-  vsn: EncryptionVersion,
-  key: &[u8],
-  msg: &[u8],
-  data: &[u8],
-) -> Result<bytes::Bytes, SecurityError> {
-  let key = GenericArray::from_slice(key);
-  let cipher = Aes128Gcm::new(key);
-
-  let mut nonce = [0u8; NONCE_SIZE];
-  rand::thread_rng().fill(&mut nonce[..]);
-  let nonce = GenericArray::from_slice(&nonce);
-
-  let mut src = msg.to_vec();
-
-  // Ensure we are correctly padded (only version 0)
-  if vsn == EncryptionVersion::PKCS7 {
-    let pad_size = BLOCK_SIZE - (src.len() % BLOCK_SIZE);
-    src.resize(src.len() + pad_size, pad_size as u8);
-  }
-
-  let mut dst = bytes::BytesMut::with_capacity(encrypted_length(vsn, msg.len()));
-  dst.fill(0);
-
-  // Write the encryption version
-  dst[0] = vsn as u8;
-
-  // Add the nonce
-  dst[VERSION_SIZE..VERSION_SIZE + NONCE_SIZE].copy_from_slice(nonce.as_slice());
-
-  // Encrypt message using GCM
-  cipher
-    .encrypt_in_place(nonce, data, &mut dst)
-    .map(|_| dst.freeze())
-    .map_err(SecurityError::AeadError)
+macro_rules! bail {
+  (enum $ty:ident:$key:ident { $($var:ident($algo: ident)),+ $(,)? } -> $fn:expr) => {
+    match $key {
+      $($ty::$var(key) => $fn($algo::new(GenericArray::from_slice(key)))),*
+    }
+  };
 }
 
-fn decrypt_message(key: &[u8], msg: &[u8], data: &[u8]) -> Result<Vec<u8>, SecurityError> {
-  let key = GenericArray::from_slice(key);
-  let cipher = Aes128Gcm::new(key);
+pub(crate) fn encrypt_payload(
+  vsn: EncryptionVersion,
+  key: &SecretKey,
+  msg: &[u8],
+  data: &[u8],
+) -> Result<Bytes, SecurityError> {
+  bail! {
+    enum SecretKey: key {
+      Aes128(Aes128Gcm),
+      Aes192(Aes192Gcm),
+      Aes256(Aes256Gcm),
+    } -> |algo| encrypt_payload_in(algo, vsn, msg, data)
+  }
+}
 
+#[inline]
+fn decrypt_message(key: &SecretKey, msg: &[u8], data: &[u8]) -> Result<Vec<u8>, SecurityError> {
+  bail! {
+    enum SecretKey: key {
+      Aes128(Aes128Gcm),
+      Aes192(Aes192Gcm),
+      Aes256(Aes256Gcm),
+    } -> |algo| decrypt_message_in(algo, msg, data)
+  }
+}
+
+#[inline]
+fn encrypt_payload_in<A: AeadInPlace + Aead>(
+  gcm: A,
+  vsn: EncryptionVersion,
+  msg: &[u8],
+  data: &[u8],
+) -> Result<Bytes, SecurityError> {
+  // Create the buffer to hold everything
+  let mut buf = BytesMut::with_capacity(encrypted_length(vsn, msg.len()));
+  // Write the encryption version
+  buf.put_u8(vsn as u8);
+
+  // Add a random nonce
+  let mut nonce = [0u8; NONCE_SIZE];
+  rand::thread_rng().fill(&mut nonce);
+  buf.put_slice(&nonce);
+  let after_nonce = buf.len();
+
+  // Ensure we are correctly padded (only version 0)
+  if vsn as u8 == 0 {
+    buf.put_slice(msg);
+    pkcs7encode(&mut buf, VERSION_SIZE + NONCE_SIZE, BLOCK_SIZE);
+  }
+
+  // Encrypt message using GCM
+  let nonce = GenericArray::from_slice(&nonce);
+  let src = if vsn as u8 == 0 {
+    &buf[VERSION_SIZE + NONCE_SIZE..]
+  } else {
+    msg
+  };
+  let out = gcm
+    .encrypt(
+      nonce,
+      Payload {
+        msg: src,
+        aad: data,
+      },
+    )
+    .map_err(|e| SecurityError::AeadError(e))?;
+  // Truncate the plaintext, and write the cipher text
+  buf.truncate(after_nonce);
+  buf.put_slice(&out);
+
+  Ok(buf.freeze())
+}
+
+#[inline]
+fn decrypt_message_in<A: Aead + AeadInPlace>(
+  gcm: A,
+  msg: &[u8],
+  data: &[u8],
+) -> Result<Vec<u8>, SecurityError> {
+  // Decrypt the message
   let nonce = GenericArray::from_slice(&msg[VERSION_SIZE..VERSION_SIZE + NONCE_SIZE]);
   let ciphertext = &msg[VERSION_SIZE + NONCE_SIZE..];
+  let plain = gcm
+    .decrypt(
+      nonce,
+      Payload {
+        msg: ciphertext,
+        aad: data,
+      },
+    )
+    .map_err(|e| SecurityError::AeadError(e))?;
 
-  let mut plaintext = ciphertext.to_vec();
+  Ok(plain)
+}
 
-  cipher
-    .decrypt_in_place(nonce, data, &mut plaintext)
-    .map(|_| plaintext)
-    .map_err(SecurityError::AeadError)
+impl SecretKeyring {
+  pub(crate) async fn encrypt_payload(
+    &self,
+    vsn: EncryptionVersion,
+    msg: &[u8],
+    data: &[u8],
+  ) -> Result<Bytes, SecurityError> {
+    let Some(key) = self.lock().await.primary_key() else {
+      return Err(SecurityError::MissingPrimaryKey)
+    };
+
+    bail! {
+      enum SecretKey: key {
+        Aes128(Aes128Gcm),
+        Aes192(Aes192Gcm),
+        Aes256(Aes256Gcm),
+      } -> |algo| encrypt_payload_in(algo, vsn, msg, data)
+    }
+  }
+
+  pub(crate) async fn decrypt_payload(
+    &self,
+    msg: &[u8],
+    data: &[u8],
+  ) -> Result<Vec<u8>, SecurityError> {
+    // Ensure we have at least one byte
+    if msg.is_empty() {
+      return Err(SecurityError::EmptyPayload);
+    }
+  
+    // Verify the version
+    let vsn = EncryptionVersion::from_u8(msg[0])?;
+    if vsn > MAX_ENCRYPTION_VERSION {
+      return Err(SecurityError::UnknownEncryptionVersion(vsn as u8));
+    }
+  
+    // Ensure the length is sane
+    if msg.len() < encrypted_length(vsn, 0) {
+      return Err(SecurityError::SmallPayload);
+    }
+  
+    for key in self.lock().await.keys() {
+      match decrypt_message(key, msg, data) {
+        Ok(mut plain) => {
+          // Remove the PKCS7 padding for vsn 0
+          if vsn as u8 == 0 {
+            plain = pkcs7decode(plain);
+          }
+          return Ok(plain);
+        }
+        Err(_) => continue,
+      }
+    }
+
+    Err(SecurityError::NoInstalledKeys)
+  }
 }
 
 pub(crate) fn decrypt_payload(
-  keys: &[&[u8]],
+  keys: &[SecretKey],
   msg: &[u8],
   data: &[u8],
 ) -> Result<Vec<u8>, SecurityError> {
@@ -132,6 +274,9 @@ pub(crate) fn decrypt_payload(
 
   // Verify the version
   let vsn = EncryptionVersion::from_u8(msg[0])?;
+  if vsn > MAX_ENCRYPTION_VERSION {
+    return Err(SecurityError::UnknownEncryptionVersion(vsn as u8));
+  }
 
   // Ensure the length is sane
   if msg.len() < encrypted_length(vsn, 0) {
@@ -141,9 +286,9 @@ pub(crate) fn decrypt_payload(
   for key in keys {
     match decrypt_message(key, msg, data) {
       Ok(mut plain) => {
-        if vsn == EncryptionVersion::PKCS7 {
-          let last = plain[plain.len() - 1] as usize;
-          plain.truncate(plain.len() - last);
+        // Remove the PKCS7 padding for vsn 0
+        if vsn as u8 == 0 {
+          plain = pkcs7decode(plain);
         }
         return Ok(plain);
       }
@@ -169,19 +314,20 @@ pub(crate) fn append_bytes(first: &[u8], second: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use bytes::{BufMut, BytesMut};
 
   fn encrypt_decrypt_versioned(vsn: EncryptionVersion) {
-    let k1 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    let k1 = SecretKey::Aes256([
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+      12, 13, 14, 15,
+    ]);
     let plain_text = b"this is a plain text message";
     let extra = b"random data";
 
     let encrypted = encrypt_payload(vsn, &k1, plain_text, extra).unwrap();
-
     let exp_len = encrypted_length(vsn, plain_text.len());
     assert_eq!(encrypted.len(), exp_len);
 
-    let msg = decrypt_payload(&[&k1], encrypted.as_ref(), extra).unwrap();
+    let msg = decrypt_payload(&[k1], encrypted.as_ref(), extra).unwrap();
     assert_eq!(msg, plain_text);
   }
   #[test]

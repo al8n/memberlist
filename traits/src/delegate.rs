@@ -4,7 +4,7 @@ use bytes::Bytes;
 /// into the gossip layer of Memberlist. All the methods must be thread-safe,
 /// as they can and generally will be called concurrently.
 #[cfg_attr(feature = "async", async_trait::async_trait)]
-pub trait Delegate {
+pub trait Delegate: Send + Sync + 'static {
   /// Used to retrieve meta-data about the current node
   /// when broadcasting an alive message. It's length is limited to
   /// the given byte size. This metadata is available in the Node structure.

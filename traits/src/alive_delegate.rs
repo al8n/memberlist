@@ -7,7 +7,7 @@ use showbiz_types::Node;
 /// a node out and prevent it from being considered a peer
 /// using application specific logic.
 #[cfg_attr(feature = "async", async_trait::async_trait)]
-pub trait AliveDelegate {
+pub trait AliveDelegate: Send + Sync + 'static {
   type Error: std::error::Error + Send + Sync + 'static;
 
   /// Invoked when a name conflict is detected

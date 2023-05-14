@@ -5,6 +5,7 @@ use std::{
   time::Duration,
 };
 
+use bytes::Bytes;
 use showbiz_traits::{
   Transport, VoidAliveDelegate, VoidConflictDelegate, VoidDelegate, VoidEventDelegate,
   VoidMergeDelegate, VoidPingDelegate,
@@ -29,7 +30,7 @@ pub struct Options {
   /// If gossip encryption is enabled and this is set it is treated as GCM
   /// authenticated data.
   #[viewit(getter(const, style = "ref"))]
-  label: SmolStr,
+  label: Bytes,
 
   /// Skips the check that inbound packets and gossip
   /// streams need to be label prefixed.
@@ -168,6 +169,10 @@ pub struct Options {
   /// AES-192, or AES-256.
   secret_key: Option<SecretKey>,
 
+  // /// Holds all of the encryption keys used internally. It is
+  // /// automatically initialized using the SecretKey and SecretKeys values.
+  // #[viewit(getter(style = "ref", result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeyring>")))]
+  // secret_keyring: Option<SecretKeyring>,
   /// Used to guarantee protocol-compatibility
   /// for any custom messages that the delegate might do (broadcasts,
   /// local/remote state, etc.). If you don't set these, then the protocol
@@ -326,276 +331,5 @@ impl Options {
       .with_probe_interval(Duration::from_secs(1))
       .with_gossip_interval(Duration::from_millis(100))
       .with_gossip_to_the_dead_time(Duration::from_secs(15))
-  }
-
-  #[inline]
-  pub fn into_builder<T: Transport>(self, t: T) -> ShowbizBuilder<T> {
-    ShowbizBuilder::new(t).with_options(self)
-  }
-}
-
-pub struct ShowbizBuilder<
-  T,
-  D = VoidDelegate,
-  ED = VoidEventDelegate,
-  CD = VoidConflictDelegate,
-  MD = VoidMergeDelegate<Error>,
-  PD = VoidPingDelegate,
-  AD = VoidAliveDelegate<Error>,
-> {
-  opts: Options,
-  transport: T,
-  delegate: Option<D>,
-  event_delegate: Option<ED>,
-  conflict_delegate: Option<CD>,
-  merge_delegate: Option<MD>,
-  ping_delegate: Option<PD>,
-  alive_delegate: Option<AD>,
-  /// Holds all of the encryption keys used internally. It is
-  /// automatically initialized using the SecretKey and SecretKeys values.
-  keyring: Option<SecretKeyring>,
-}
-
-impl<T: Transport> ShowbizBuilder<T> {
-  #[inline]
-  pub fn new(transport: T) -> Self {
-    Self {
-      opts: Options::default(),
-      transport,
-      delegate: None,
-      event_delegate: None,
-      conflict_delegate: None,
-      merge_delegate: None,
-      ping_delegate: None,
-      alive_delegate: None,
-      keyring: None,
-    }
-  }
-}
-
-impl<T, D, ED, CD, MD, PD, AD> ShowbizBuilder<T, D, ED, CD, MD, PD, AD>
-where
-  T: Transport,
-  D: showbiz_traits::Delegate,
-  ED: showbiz_traits::EventDelegate,
-  CD: showbiz_traits::ConflictDelegate,
-  MD: showbiz_traits::MergeDelegate,
-  PD: showbiz_traits::PingDelegate,
-  AD: showbiz_traits::AliveDelegate,
-{
-  #[inline]
-  pub fn with_options(mut self, opts: Options) -> Self {
-    self.opts = opts;
-    self
-  }
-
-  #[inline]
-  pub fn with_keyring(mut self, keyring: Option<SecretKeyring>) -> Self {
-    self.keyring = keyring;
-    self
-  }
-
-  #[inline]
-  pub fn with_transport<NT>(self, t: NT) -> ShowbizBuilder<NT, D, ED, CD, MD, PD, AD> {
-    let Self {
-      opts,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-      ..
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport: t,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    }
-  }
-
-  #[inline]
-  pub fn with_delegate<ND>(self, d: Option<ND>) -> ShowbizBuilder<T, ND, ED, CD, MD, PD, AD> {
-    let Self {
-      event_delegate,
-      opts,
-      transport,
-      delegate: _,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport,
-      delegate: d,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    }
-  }
-
-  #[inline]
-  pub fn with_event_delegate<NED>(
-    self,
-    ed: Option<NED>,
-  ) -> ShowbizBuilder<T, D, NED, CD, MD, PD, AD> {
-    let Self {
-      event_delegate: _,
-      opts,
-      transport,
-      delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport,
-      delegate,
-      event_delegate: ed,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    }
-  }
-
-  #[inline]
-  pub fn with_conflict_delegate<NCD>(
-    self,
-    cd: Option<NCD>,
-  ) -> ShowbizBuilder<T, D, ED, NCD, MD, PD, AD> {
-    let Self {
-      conflict_delegate: _,
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate: cd,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    }
-  }
-
-  #[inline]
-  pub fn with_merge_delegate<NMD>(
-    self,
-    md: Option<NMD>,
-  ) -> ShowbizBuilder<T, D, ED, CD, NMD, PD, AD> {
-    let Self {
-      merge_delegate: _,
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate: md,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    }
-  }
-
-  #[inline]
-  pub fn with_ping_delegate<NPD>(
-    self,
-    pd: Option<NPD>,
-  ) -> ShowbizBuilder<T, D, ED, CD, MD, NPD, AD> {
-    let Self {
-      ping_delegate: _,
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      alive_delegate,
-      keyring,
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate: pd,
-      alive_delegate,
-      keyring,
-    }
-  }
-
-  #[inline]
-  pub fn with_alive_delegate<NAD>(
-    self,
-    ad: Option<NAD>,
-  ) -> ShowbizBuilder<T, D, ED, CD, MD, PD, NAD> {
-    let Self {
-      alive_delegate: _,
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      keyring,
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate: ad,
-      keyring,
-    }
   }
 }

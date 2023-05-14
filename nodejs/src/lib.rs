@@ -5,6 +5,7 @@ extern crate napi_derive;
 
 use napi::{Error, Result, Status};
 
+use showbiz_core::bytes::Bytes;
 use showbiz_core::{IpNet, Options as ROptions, SecretKey, SmolStr};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -373,7 +374,7 @@ pub struct Options {
   ///
   /// If gossip encryption is enabled and this is set it is treated as GCM
   /// authenticated data.
-  label: SmolStr,
+  label: Bytes,
 
   /// Skips the check that inbound packets and gossip
   /// streams need to be label prefixed.
@@ -699,8 +700,8 @@ impl Options {
     self.name.as_str()
   }
   #[napi(getter)]
-  pub fn label(&self) -> &str {
-    self.label.as_str()
+  pub fn label(&self) -> Vec<u8> {
+    self.label.to_vec()
   }
   #[napi(getter)]
   pub fn skip_inbound_label_check(&self) -> bool {
@@ -835,7 +836,7 @@ impl Options {
     self
   }
   #[napi(writable = false)]
-  pub fn set_label(&mut self, val: String) -> &mut Options {
+  pub fn set_label(&mut self, val: Vec<u8>) -> &mut Options {
     self.label = val.into();
     self
   }

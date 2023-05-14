@@ -1,12 +1,12 @@
 use super::*;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 
-pub struct LabeledReader<R> {
+pub struct LabeledConnection<R> {
   label: Option<Bytes>,
   reader: BufReader<R>,
 }
 
-impl<R> LabeledReader<R> {
+impl<R> LabeledConnection<R> {
   /// Returns the label if present.
   #[inline]
   pub fn label(&self) -> Option<&Bytes> {
@@ -19,7 +19,7 @@ impl<R> LabeledReader<R> {
   }
 }
 
-impl<R: Read> LabeledReader<R> {
+impl<R: Read> LabeledConnection<R> {
   #[inline]
   pub(crate) fn new(reader: BufReader<R>) -> Self {
     Self {
@@ -37,13 +37,13 @@ impl<R: Read> LabeledReader<R> {
   }
 }
 
-impl<R: Read> Read for LabeledReader<R> {
+impl<R: Read> Read for LabeledConnection<R> {
   fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
     self.reader.read(buf)
   }
 }
 
-impl<R: Read> BufRead for LabeledReader<R> {
+impl<R: Read> BufRead for LabeledConnection<R> {
   fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
     self.reader.fill_buf()
   }
@@ -71,18 +71,18 @@ pub fn add_label_header_to_stream<W: Write>(w: &mut W, label: &[u8]) -> Result<(
 
 /// Removes any label header from the beginning of
 /// the stream if present and returns it.
-pub fn remove_label_header_from_stream<R: Read>(reader: R) -> Result<LabeledReader<R>, Error> {
+pub fn remove_label_header_from_stream<R: Read>(reader: R) -> Result<LabeledConnection<R>, Error> {
   let mut r = BufReader::with_capacity(DEFAULT_BUFFER_SIZE, reader);
   let buf = match r.fill_buf() {
     Ok(buf) => {
       if buf.is_empty() {
-        return Ok(LabeledReader::new(r));
+        return Ok(LabeledConnection::new(r));
       }
       buf
     }
     Err(e) => {
       if e.kind() == std::io::ErrorKind::UnexpectedEof {
-        return Ok(LabeledReader::new(r));
+        return Ok(LabeledConnection::new(r));
       } else {
         return Err(e.into());
       }
@@ -91,7 +91,7 @@ pub fn remove_label_header_from_stream<R: Read>(reader: R) -> Result<LabeledRead
 
   // First check for the type byte.
   if MessageType::try_from(buf[0])? != MessageType::HasLabel {
-    return Ok(LabeledReader::new(r));
+    return Ok(LabeledConnection::new(r));
   }
   if buf.len() < 2 {
     return Err(Error::TruncatedLabel);
@@ -107,5 +107,5 @@ pub fn remove_label_header_from_stream<R: Read>(reader: R) -> Result<LabeledRead
 
   let label = Bytes::copy_from_slice(&buf[2..2 + label_size]);
   r.consume(2 + label_size);
-  Ok(LabeledReader::with_label(r, label))
+  Ok(LabeledConnection::with_label(r, label))
 }

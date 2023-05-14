@@ -5,7 +5,7 @@ use showbiz_types::Node;
 /// name conflict. This happens if two clients are configured
 /// with the same name but different addresses.
 #[cfg_attr(feature = "async", async_trait::async_trait)]
-pub trait ConflictDelegate {
+pub trait ConflictDelegate: Send + Sync + 'static {
   /// Invoked when a name conflict is detected
   #[cfg(not(feature = "async"))]
   fn notify_conflict(&self, existing: bool, other: &Node);

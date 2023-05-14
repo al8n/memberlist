@@ -44,6 +44,7 @@ indexmap = { version = "1.9", features = ["serde-1"] }
 ipnet = { version = "2.7", features = ["serde"] }
 metrics = "0.20"
 rmp = "0.8"
+rmp-serde = "1.1"
 rand = { version = "0.8" }
 showbiz-types = { path = "../types" }
 showbiz-traits = { path = "../traits", default-features = false }
@@ -52,6 +53,7 @@ thiserror = "1"
 tracing = { workspace = true }
 viewit = { workspace = true }
 wg = "0.3"
+weezl = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1.26", features = ["full"] }
