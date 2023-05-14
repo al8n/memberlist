@@ -1,13 +1,19 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use futures_util::{future::BoxFuture, FutureExt, StreamExt};
+use futures_util::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use showbiz_traits::Transport;
 use showbiz_types::{NodeStateType, SmolStr};
 
 use crate::showbiz::Showbiz;
+
+#[cfg(feature = "async")]
+mod r#async;
+
+#[cfg(feature = "sync")]
+mod sync;
 
 /// Maximum size for node meta data
 pub const META_MAX_SIZE: usize = 512;
@@ -153,55 +159,13 @@ pub(crate) struct PushNodeState {
   vsn: [u8; 6],
 }
 
+impl Showbiz {
+  fn stream_listen(&self) {}
+}
+
 #[viewit::viewit]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct Compress {
   algo: CompressionType,
   buf: Bytes,
-}
-
-impl Showbiz {
-  fn stream_listen(&self) {}
-}
-
-pub(crate) struct StreamProcessor<T: Transport> {
-  transport: Arc<T>,
-  shutdown_rx: async_channel::Receiver<()>,
-}
-
-impl<T: Transport> StreamProcessor<T> {
-  pub(crate) fn new(transport: Arc<T>, shutdown_rx: async_channel::Receiver<()>) -> Self {
-    Self {
-      transport,
-      shutdown_rx,
-    }
-  }
-
-  pub(crate) fn run<R, S>(self, spawner: S)
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
-  {
-    let transport = self.transport;
-    let shutdown_rx = self.shutdown_rx;
-    (spawner)(Box::pin(async move {
-      loop {
-        futures_util::select! {
-          _ = shutdown_rx.recv().fuse() => {
-            return;
-          }
-          conn = transport.stream_rx().recv().fuse() => {
-            (spawner)(async move {
-              match conn {
-                Ok(conn) => Self::handle_conn(conn).await,
-                Err(e) => tracing::error!(target = "showbiz", "failed to accept connection: {}", e),
-              }
-            }.boxed());
-          }
-        }
-      }
-    }));
-  }
-
-  async fn handle_conn(conn: T::Connection) {}
 }

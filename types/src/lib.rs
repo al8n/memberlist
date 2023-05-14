@@ -79,25 +79,83 @@ impl core::fmt::Display for Address {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum MessageType {
-  Ping,
-  IndirectPing,
-  AckResp,
-  Suspect,
-  Alive,
-  Dead,
-  PushPull,
-  Compound,
+  Ping = 0,
+  IndirectPing = 1,
+  AckResp = 2,
+  Suspect = 3,
+  Alive = 4,
+  Dead = 5,
+  PushPull = 6,
+  Compound = 7,
   /// User mesg, not handled by us
-  User,
-  Compress,
-  Encrypt,
-  NackResp,
-  HasCrc,
-  Err,
+  User = 8,
+  Compress = 9,
+  Encrypt = 10,
+  NackResp = 11,
+  HasCrc = 12,
+  Err = 13,
   /// HasLabel has a deliberately high value so that you can disambiguate
   /// it from the encryptionVersion header which is either 0/1 right now and
   /// also any of the existing [`MessageType`].
   HasLabel = 244,
+}
+
+impl core::fmt::Display for MessageType {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Ping => write!(f, "Ping"),
+      Self::IndirectPing => write!(f, "IndirectPing"),
+      Self::AckResp => write!(f, "AckResponse"),
+      Self::Suspect => write!(f, "Suspect"),
+      Self::Alive => write!(f, "Alive"),
+      Self::Dead => write!(f, "Dead"),
+      Self::PushPull => write!(f, "PushPull"),
+      Self::Compound => write!(f, "Compound"),
+      Self::User => write!(f, "User"),
+      Self::Compress => write!(f, "Compress"),
+      Self::Encrypt => write!(f, "Encrypt"),
+      Self::NackResp => write!(f, "NackResponse"),
+      Self::HasCrc => write!(f, "HasCrc"),
+      Self::Err => write!(f, "Error"),
+      Self::HasLabel => write!(f, "HasLabel"),
+    }
+  }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct InvalidMessageType(u8);
+
+impl core::fmt::Display for InvalidMessageType {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(f, "invalid message type: {}", self.0)
+  }
+}
+
+impl std::error::Error for InvalidMessageType {}
+
+impl TryFrom<u8> for MessageType {
+  type Error = InvalidMessageType;
+
+  fn try_from(value: u8) -> Result<Self, Self::Error> {
+    match value {
+      0 => Ok(Self::Ping),
+      1 => Ok(Self::IndirectPing),
+      2 => Ok(Self::AckResp),
+      3 => Ok(Self::Suspect),
+      4 => Ok(Self::Alive),
+      5 => Ok(Self::Dead),
+      6 => Ok(Self::PushPull),
+      7 => Ok(Self::Compound),
+      8 => Ok(Self::User),
+      9 => Ok(Self::Compress),
+      10 => Ok(Self::Encrypt),
+      11 => Ok(Self::NackResp),
+      12 => Ok(Self::HasCrc),
+      13 => Ok(Self::Err),
+      244 => Ok(Self::HasLabel),
+      _ => Err(InvalidMessageType(value)),
+    }
+  }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

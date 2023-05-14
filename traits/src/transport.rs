@@ -13,11 +13,40 @@ mod r#async {
   use super::*;
   use async_channel::Receiver;
 
+  /// Compressor is used to compress and decompress data from a transport connection.
   #[async_trait::async_trait]
-  pub trait Connection: futures_io::AsyncRead + futures_io::AsyncWrite + Send + Sync + 'static {
+  pub trait Compressor {
+    /// The error type returned by the compressor.
+    type Error: std::error::Error;
+
+    /// Compress data from a slice, returning compressed data.
+    fn compress(&self, buf: &[u8]) -> Vec<u8>;
+
+    /// Compress data from a slice, writing the compressed data to the given writer.
+    async fn compress_to_writer<W: futures_util::io::AsyncWrite>(
+      &self,
+      buf: &[u8],
+      writer: W,
+    ) -> Result<(), Self::Error>;
+
+    /// Decompress data from a slice, returning uncompressed data.
+    fn decompress(src: &[u8]) -> Result<Vec<u8>, Self::Error>;
+
+    /// Decompress data from a reader, returning the bytes readed and the uncompressed data.
+    async fn decompress_from_reader<R: futures_util::io::AsyncRead>(
+      reader: R,
+    ) -> Result<(usize, Vec<u8>), Self::Error>;
+  }
+
+  #[async_trait::async_trait]
+  pub trait Connection:
+    futures_util::io::AsyncRead + futures_util::io::AsyncWrite + Send + Sync + 'static
+  {
     fn set_timeout(&mut self, timeout: Option<Duration>);
 
     fn timeout(&self) -> Option<Duration>;
+
+    fn remote_address(&self) -> std::io::Result<SocketAddr>;
   }
 
   /// Transport is used to abstract over communicating with other peers. The packet
@@ -25,11 +54,8 @@ mod r#async {
   /// be reliable.
   #[async_trait::async_trait]
   pub trait Transport: Send + Sync + 'static {
-    type Error: std::error::Error
-      + Send
-      + Sync
-      + 'static;
-    type Connection: Connection;
+    type Error: std::error::Error + Send + Sync + 'static;
+    type Connection: Connection + std::marker::Unpin;
     type Options;
 
     /// Creates a new transport instance with the given options
@@ -65,12 +91,12 @@ mod r#async {
       timeout: Duration,
     ) -> Result<Self::Connection, Self::Error>;
 
-    fn packet_rx(&self) -> &Receiver<Packet>;
+    fn packet(&self) -> &Receiver<Packet>;
 
     /// Returns a receiver that can be read to handle incoming stream
     /// connections from other peers. How this is set up for listening is
     /// left as an exercise for the concrete transport implementations.
-    fn stream_rx(&self) -> &Receiver<Self::Connection>;
+    fn stream(&self) -> &Receiver<Self::Connection>;
 
     /// Called when memberlist is shutting down; this gives the
     /// transport a chance to clean up any listeners.
@@ -116,19 +142,20 @@ mod r#async {
 
   #[cfg(feature = "smol")]
   pub mod smol {
-    use futures_util::future::{Fuse, FutureExt};
     use ::smol::{
       io::{Error, ErrorKind},
       net::TcpStream,
       Timer,
     };
+    use futures_util::future::{Fuse, FutureExt};
+    use futures_util::io::{AsyncRead, AsyncWrite};
     use std::{
       future::Future,
+      net::SocketAddr,
       pin::Pin,
       task::{Context, Poll},
       time::Duration,
     };
-    use futures_io::{AsyncRead, AsyncWrite};
 
     #[derive(Debug)]
     pub struct TransportConnection {
@@ -202,25 +229,34 @@ mod r#async {
       fn timeout(&self) -> Option<Duration> {
         self.timeout
       }
+
+      fn remote_address(&self) -> std::io::Result<SocketAddr> {
+        self.conn.peer_addr()
+      }
     }
   }
 
-  #[cfg(feature = "async-std")]
+  #[cfg(any(feature = "async-std", feature = "async-std-wasm"))]
   pub mod async_std {
     use std::{
       future::Future,
+      net::SocketAddr,
       pin::Pin,
       task::{Context, Poll},
       time::Duration,
     };
 
-    use async_io::Timer;
     use ::async_std::{
       io::{Error, ErrorKind},
       net::TcpStream,
     };
-    use futures_io::{AsyncRead, AsyncWrite};
+    #[cfg(not(target_arch = "wasm32"))]
+    use async_io::Timer;
+
+    use futures_util::io::{AsyncRead, AsyncWrite};
     use futures_util::{future::Fuse, FutureExt};
+    #[cfg(target_arch = "wasm32")]
+    use gloo_timers::future::sleep as timer;
 
     #[derive(Debug)]
     pub struct TransportConnection {
@@ -253,6 +289,7 @@ mod r#async {
       }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn timer(timeout: Duration) -> Fuse<Timer> {
       Timer::after(timeout).fuse()
     }
@@ -294,23 +331,31 @@ mod r#async {
       fn timeout(&self) -> Option<Duration> {
         self.timeout
       }
+
+      fn remote_address(&self) -> std::io::Result<SocketAddr> {
+        self.conn.peer_addr()
+      }
     }
   }
 
-  #[cfg(feature = "tokio")]
+  #[cfg(any(feature = "tokio", feature = "tokio_wasi"))]
   pub mod tokio {
     use std::{
       future::Future,
+      net::SocketAddr,
       pin::Pin,
       task::{Context, Poll},
       time::Duration,
     };
 
-    use tokio::{
-      io::{Error, ErrorKind, ReadBuf},
-      net::TcpStream,
-    };
-    use tokio_util::compat::{TokioAsyncWriteCompatExt, TokioAsyncReadCompatExt};
+    use tokio::io::{Error, ErrorKind, ReadBuf};
+    #[cfg(not(target_arch = "wasm32"))]
+    use tokio::net::TcpStream;
+
+    #[cfg(target_arch = "wasm32")]
+    use wasi_tokio::net::TcpStream;
+
+    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
     #[derive(Debug)]
     pub struct TransportConnection {
@@ -343,7 +388,7 @@ mod r#async {
       }
     }
 
-    impl futures_io::AsyncRead for TransportConnection {
+    impl futures_util::io::AsyncRead for TransportConnection {
       fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -353,7 +398,7 @@ mod r#async {
       }
     }
 
-    impl futures_io::AsyncWrite for TransportConnection {
+    impl futures_util::io::AsyncWrite for TransportConnection {
       fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -362,7 +407,7 @@ mod r#async {
         Pin::new(&mut (&mut self.conn).compat_write()).poll_write(cx, buf)
       }
 
-      fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> { 
+      fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut (&mut self.conn).compat_write()).poll_flush(cx)
       }
 
@@ -414,6 +459,10 @@ mod r#async {
       fn timeout(&self) -> Option<Duration> {
         self.timeout
       }
+
+      fn remote_address(&self) -> std::io::Result<SocketAddr> {
+        self.conn.peer_addr()
+      }
     }
   }
 }
@@ -427,10 +476,35 @@ mod sync {
 
   use super::*;
 
+  /// Compressor is used to compress and decompress data from a transport connection.
+  pub trait Compressor {
+    /// The error type returned by the compressor.
+    type Error: std::error::Error;
+
+    /// Compress data from a slice, returning compressed data.
+    fn compress(&self, buf: &[u8]) -> Vec<u8>;
+
+    /// Compress data from a slice, writing the compressed data to the given writer.
+    fn compress_to_writer<W: std::io::Write>(
+      &self,
+      buf: &[u8],
+      writer: W,
+    ) -> Result<(), Self::Error>;
+
+    /// Decompress data from a slice, returning uncompressed data.
+    fn decompress(src: &[u8]) -> Result<Vec<u8>, Self::Error>;
+
+    /// Decompress data from a reader, returning the bytes readed and the uncompressed data.
+    fn decompress_from_reader<R: std::io::Read>(reader: R)
+      -> Result<(usize, Vec<u8>), Self::Error>;
+  }
+
   pub trait Connection: std::io::Read + std::io::Write + Send + Sync + 'static {
     fn set_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()>;
 
     fn timeout(&self) -> std::io::Result<Option<Duration>>;
+
+    fn remote_address(&self) -> std::io::Result<SocketAddr>;
   }
 
   impl Connection for std::net::TcpStream {
@@ -443,16 +517,17 @@ mod sync {
     fn timeout(&self) -> std::io::Result<Option<Duration>> {
       self.write_timeout()
     }
+
+    fn remote_address(&self) -> std::io::Result<SocketAddr> {
+      self.peer_addr()
+    }
   }
 
   /// Transport is used to abstract over communicating with other peers. The packet
   /// interface is assumed to be best-effort and the stream interface is assumed to
   /// be reliable.
   pub trait Transport {
-    type Error: std::error::Error
-      + Send
-      + Sync
-      + 'static;
+    type Error: std::error::Error + Send + Sync + 'static;
     type Connection: Connection;
     type Options;
 

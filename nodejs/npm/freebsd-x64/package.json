@@ -1,0 +1,20 @@
+{
+  "name": "showbiz-freebsd-x64",
+  "version": "0.0.0",
+  "os": [
+    "freebsd"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "showbiz.freebsd-x64.node",
+  "files": [
+    "showbiz.freebsd-x64.node"
+  ],
+  "description": "High performance gossip protocol implementation, powered by Rust.",
+  "license": "MPL-2.0",
+  "engines": {
+    "node": ">= 10"
+  },
+  "repository": "https://github.com/al8n/showbiz"
+}

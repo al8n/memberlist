@@ -40,6 +40,7 @@ pub struct NetTransportOptions {
 
 macro_rules! set_udp_recv_buf {
   () => {
+    #[cfg(not(target_arch = "wasm32"))]
     #[inline]
     fn set_udp_recv_buf(socket: &UdpSocket) -> Result<(), Error> {
       use socket2::Socket;
@@ -65,6 +66,12 @@ macro_rules! set_udp_recv_buf {
         Some(err) => Err(Error::FailToResizeUdpBuffer(err)),
         None => Ok(()),
       }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[inline]
+    fn set_udp_recv_buf(socket: &UdpSocket) -> Result<(), Error> {
+      Ok(())
     }
   };
 }
@@ -231,11 +238,11 @@ macro_rules! transport {
         }
       }
 
-      fn packet_rx(&self) -> &UnboundedReceiver<Packet> {
+      fn packet(&self) -> &UnboundedReceiver<Packet> {
         &self.packet_rx
       }
 
-      fn stream_rx(&self) -> &UnboundedReceiver<Self::Connection> {
+      fn stream(&self) -> &UnboundedReceiver<Self::Connection> {
         &self.stream_rx
       }
     }
@@ -319,12 +326,12 @@ macro_rules! tcp_processor {
           shutdown,
         } = self;
 
-        /// The initial delay after an AcceptTCP() error before attempting again
+        /// The initial delay after an `accept()` error before attempting again
         const BASE_DELAY: Duration = Duration::from_millis(5);
 
-        /// the maximum delay after an AcceptTCP() error before attempting again.
+        /// the maximum delay after an `accept()` error before attempting again.
         /// In the case that tcpListen() is error-looping, it will delay the shutdown check.
-        /// Therefore, changes to maxDelay may have an effect on the latency of shutdown.
+        /// Therefore, changes to `MAX_DELAY` may have an effect on the latency of shutdown.
         const MAX_DELAY: Duration = Duration::from_secs(1);
 
         spawn($($async)? move $($closure)? {
@@ -379,4 +386,3 @@ pub mod async_std;
 
 #[cfg(feature = "smol")]
 pub mod smol;
-

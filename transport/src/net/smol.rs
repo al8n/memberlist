@@ -11,9 +11,9 @@ use std::{
 
 use either::Either;
 use futures_util::{select_biased, FutureExt};
-use smol::Timer;
 use showbiz_traits::{async_trait, smol::TransportConnection};
 use showbiz_types::{Address, Packet};
+use smol::Timer;
 
 use super::{NetTransportOptions, UDP_PACKET_BUF_SIZE, UDP_RECV_BUF_SIZE};
 use crate::smol_sealed::{

@@ -1,0 +1,17 @@
+{
+  "name": "showbiz-darwin-universal",
+  "version": "0.0.0",
+  "os": [
+    "darwin"
+  ],
+  "main": "showbiz.darwin-universal.node",
+  "files": [
+    "showbiz.darwin-universal.node"
+  ],
+  "description": "High performance gossip protocol implementation, powered by Rust.",
+  "license": "MPL-2.0",
+  "engines": {
+    "node": ">= 10"
+  },
+  "repository": "https://github.com/al8n/showbiz"
+}

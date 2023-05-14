@@ -14,8 +14,8 @@ use showbiz_types::{Address, Packet};
 
 use super::{NetTransportOptions, UDP_PACKET_BUF_SIZE, UDP_RECV_BUF_SIZE};
 use crate::sealed::{
-  sleep, spawn, unbounded, IOError, TcpListener, TcpStream as TransportConnection, TcpStream, UdpSocket, UnboundedReceiver,
-  UnboundedSender, WaitGroup,
+  sleep, spawn, unbounded, IOError, TcpListener, TcpStream as TransportConnection, TcpStream,
+  UdpSocket, UnboundedReceiver, UnboundedSender, WaitGroup,
 };
 
 error!();

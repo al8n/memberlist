@@ -1,0 +1,20 @@
+{
+  "name": "showbiz-win32-arm64-msvc",
+  "version": "0.0.0",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "showbiz.win32-arm64-msvc.node",
+  "files": [
+    "showbiz.win32-arm64-msvc.node"
+  ],
+  "description": "High performance gossip protocol implementation, powered by Rust.",
+  "license": "MPL-2.0",
+  "engines": {
+    "node": ">= 10"
+  },
+  "repository": "https://github.com/al8n/showbiz"
+}

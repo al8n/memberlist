@@ -53,7 +53,7 @@ impl showbiz_traits::NodeAwareTransport for NetTransport {
       Ok(rst) => rst.map_err(From::from),
       Err(_) => Err(Error::IO(IOError::new(
         tokio::io::ErrorKind::TimedOut,
-        "timeout",
+        "deadline has elapsed",
       ))),
     }
     .map(TransportConnection::from)

@@ -39,7 +39,7 @@ impl EncryptionVersion {
 }
 
 const MIN_ENCRYPTION_VERSION: EncryptionVersion = EncryptionVersion::PKCS7;
-const MAX_ENCRYPTION_VERSION: EncryptionVersion = EncryptionVersion::NoPadding;
+pub(crate) const MAX_ENCRYPTION_VERSION: EncryptionVersion = EncryptionVersion::NoPadding;
 
 const VERSION_SIZE: usize = 1;
 const NONCE_SIZE: usize = 12;
@@ -68,12 +68,12 @@ fn encrypted_length(vsn: EncryptionVersion, inp: usize) -> usize {
   VERSION_SIZE + NONCE_SIZE + inp + padding + TAG_SIZE
 }
 
-fn encrypt_payload(
+pub(crate) fn encrypt_payload(
   vsn: EncryptionVersion,
   key: &[u8],
   msg: &[u8],
   data: &[u8],
-) -> Result<(), SecurityError> {
+) -> Result<bytes::Bytes, SecurityError> {
   let key = GenericArray::from_slice(key);
   let cipher = Aes128Gcm::new(key);
 
@@ -101,6 +101,7 @@ fn encrypt_payload(
   // Encrypt message using GCM
   cipher
     .encrypt_in_place(nonce, data, &mut dst)
+    .map(|_| dst.freeze())
     .map_err(SecurityError::AeadError)
 }
 
@@ -119,7 +120,11 @@ fn decrypt_message(key: &[u8], msg: &[u8], data: &[u8]) -> Result<Vec<u8>, Secur
     .map_err(SecurityError::AeadError)
 }
 
-fn decrypt_payload(keys: &[&[u8]], msg: &[u8], data: &[u8]) -> Result<Vec<u8>, SecurityError> {
+pub(crate) fn decrypt_payload(
+  keys: &[&[u8]],
+  msg: &[u8],
+  data: &[u8],
+) -> Result<Vec<u8>, SecurityError> {
   // Ensure we have at least one byte
   if msg.is_empty() {
     return Err(SecurityError::EmptyPayload);
@@ -149,7 +154,7 @@ fn decrypt_payload(keys: &[&[u8]], msg: &[u8], data: &[u8]) -> Result<Vec<u8>, S
   Err(SecurityError::NoInstalledKeys)
 }
 
-fn append_bytes(first: &[u8], second: &[u8]) -> Vec<u8> {
+pub(crate) fn append_bytes(first: &[u8], second: &[u8]) -> Vec<u8> {
   let has_first = !first.is_empty();
   let has_second = !second.is_empty();
 
@@ -158,5 +163,34 @@ fn append_bytes(first: &[u8], second: &[u8]) -> Vec<u8> {
     (true, false) => first.to_vec(),
     (false, true) => second.to_vec(),
     (false, false) => Vec::new(),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use bytes::{BufMut, BytesMut};
+
+  fn encrypt_decrypt_versioned(vsn: EncryptionVersion) {
+    let k1 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    let plain_text = b"this is a plain text message";
+    let extra = b"random data";
+
+    let encrypted = encrypt_payload(vsn, &k1, plain_text, extra).unwrap();
+
+    let exp_len = encrypted_length(vsn, plain_text.len());
+    assert_eq!(encrypted.len(), exp_len);
+
+    let msg = decrypt_payload(&[&k1], encrypted.as_ref(), extra).unwrap();
+    assert_eq!(msg, plain_text);
+  }
+  #[test]
+  fn test_encrypt_decrypt_v0() {
+    encrypt_decrypt_versioned(EncryptionVersion::PKCS7);
+  }
+
+  #[test]
+  fn test_encrypt_decrypt_v1() {
+    encrypt_decrypt_versioned(EncryptionVersion::NoPadding);
   }
 }

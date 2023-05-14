@@ -9,7 +9,7 @@ use parking_lot::{Mutex, MutexGuard};
 use std::sync::Arc;
 
 /// The key used while attempting to encrypt/decrypt a message
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum SecretKey {
   /// secret key for AES128
@@ -18,6 +18,12 @@ pub enum SecretKey {
   Aes192([u8; 24]),
   /// secret key for AES256
   Aes256([u8; 32]),
+}
+
+impl core::hash::Hash for SecretKey {
+  fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+    self.as_ref().hash(state);
+  }
 }
 
 impl core::borrow::Borrow<[u8]> for SecretKey {
@@ -247,5 +253,124 @@ impl SecretKeyring {
   #[inline]
   pub fn lock(&self) -> MutexGuard<'_, SecretKeys> {
     self.keys.lock()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  const TEST_KEYS: &[SecretKey] = &[
+    SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
+    SecretKey::Aes128([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]),
+    SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
+  ];
+
+  #[cfg(feature = "async")]
+  #[tokio::test]
+  async fn test_empty_keyring() {
+    let ring = SecretKeyring::default();
+    let keys = ring.lock().await;
+    assert_eq!(keys.get().size_hint().0, 0);
+  }
+
+  #[cfg(not(feature = "async"))]
+  #[test]
+  fn test_empty_keyring() {
+    let ring = SecretKeyring::default();
+    let keys = ring.lock();
+    assert_eq!(keys.get().size_hint().0, 0);
+  }
+
+  #[cfg(feature = "async")]
+  #[tokio::test]
+  async fn test_primary_only() {
+    let keying = SecretKeyring::new(vec![], TEST_KEYS[1]);
+
+    let keys = keying.lock().await;
+    assert_eq!(keys.get().size_hint().0, 1);
+  }
+
+  #[cfg(not(feature = "async"))]
+  #[test]
+  fn test_get_primary_key() {
+    let keying = SecretKeyring::new(TEST_KEYS.to_vec(), TEST_KEYS[1]);
+
+    let keys = keying.lock();
+    assert_eq!(keys.get().size_hint().0, 1);
+  }
+
+  #[cfg(feature = "async")]
+  #[tokio::test]
+  async fn test_get_primary_key() {
+    let keying = SecretKeyring::new(TEST_KEYS.to_vec(), TEST_KEYS[1]);
+
+    let keys = keying.lock().await;
+    assert_eq!(keys.primary_key().unwrap().as_ref(), TEST_KEYS[1].as_ref());
+  }
+
+  #[cfg(not(feature = "async"))]
+  #[test]
+  fn test_get_primary_key() {
+    let keying = SecretKeyring::new(TEST_KEYS.to_vec(), TEST_KEYS[1]);
+
+    let keys = keying.lock();
+    assert_eq!(keys.primary_key().unwrap().as_ref(), TEST_KEYS[1].as_ref());
+  }
+
+  #[cfg(feature = "async")]
+  #[tokio::test]
+  async fn test_insert_remove_use() {
+    let keying = SecretKeyring::new(vec![], TEST_KEYS[1]);
+
+    // Use non-existent key throws error
+    let mut keys = keying.lock().await;
+    keys.use_key(&TEST_KEYS[2]).unwrap_err();
+
+    // Add key to ring
+    keys.insert(TEST_KEYS[2]);
+    assert_eq!(keys.get().size_hint().0, 2);
+    assert_eq!(keys.get().next().unwrap().as_ref(), TEST_KEYS[1].as_ref());
+
+    // Use key that exists should succeed
+    keys.use_key(&TEST_KEYS[2]).unwrap();
+
+    let primary_key = keys.primary_key().unwrap();
+    assert_eq!(primary_key.as_ref(), TEST_KEYS[2].as_ref());
+
+    // Removing primary key should fail
+    keys.remove(&TEST_KEYS[2]).unwrap_err();
+
+    // Removing non-primary key should succeed
+    keys.remove(&TEST_KEYS[1]).unwrap();
+    assert_eq!(keys.get().size_hint().0, 1);
+  }
+
+  #[cfg(not(feature = "async"))]
+  #[test]
+  fn test_insert_remove_use() {
+    let keying = SecretKeyring::new(vec![], TEST_KEYS[1]);
+
+    // Use non-existent key throws error
+    let mut keys = keying.lock();
+    keys.use_key(&TEST_KEYS[2]).unwrap_err();
+
+    // Add key to ring
+    keys.insert(TEST_KEYS[2]);
+    assert_eq!(keys.get().size_hint().0, 2);
+    assert_eq!(keys.get().next().unwrap().as_ref(), TEST_KEYS[1].as_ref());
+
+    // Use key that exists should succeed
+    keys.use_key(&TEST_KEYS[2]).unwrap();
+
+    let primary_key = keys.primary_key().unwrap();
+    assert_eq!(primary_key.as_ref(), TEST_KEYS[2].as_ref());
+
+    // Removing primary key should fail
+    keys.remove(&TEST_KEYS[2]).unwrap_err();
+
+    // Removing non-primary key should succeed
+    keys.remove(&TEST_KEYS[1]).unwrap();
+    assert_eq!(keys.get().size_hint().0, 1);
   }
 }

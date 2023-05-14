@@ -5,6 +5,7 @@ mod broadcast;
 pub mod error;
 mod keyring;
 pub use keyring::{SecretKey, SecretKeyring, SecretKeyringError};
+pub mod label;
 mod network;
 mod options;
 pub use options::{Options, ShowbizBuilder};
@@ -15,6 +16,7 @@ mod showbiz;
 mod suspicion;
 mod util;
 
+pub use ipnet::IpNet;
 pub use showbiz_types::SmolStr;
 
 pub const MIN_PROTOCOL_VERSION: u8 = 1;

@@ -313,11 +313,11 @@ mod r#impl {
       let timeout = self.timeout;
 
       (self.spawner)(Box::pin(async move {
-        futures_util::select! {
+        futures_util::select_biased! {
+          _ = rx.recv().fuse() => {}
           _ = futures_timer::Delay::new(timeout).fuse() => {
             f(n.load(Ordering::SeqCst)).await
           }
-          _ = rx.recv().fuse() => {}
         }
       }));
     }
@@ -331,11 +331,11 @@ mod r#impl {
       self.start = Instant::now();
 
       (self.spawner)(Box::pin(async move {
-        futures_util::select! {
+        futures_util::select_biased! {
+          _ = rx.recv().fuse() => {}
           _ = futures_timer::Delay::new(remaining).fuse() => {
             f(n.load(Ordering::SeqCst)).await
           }
-          _ = rx.recv().fuse() => {}
         }
       }));
     }

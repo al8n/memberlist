@@ -15,7 +15,7 @@ use crate::async_std_sealed::{
   UnboundedSender, WaitGroup,
 };
 use either::Either;
-use showbiz_traits::{async_trait, async_std::TransportConnection};
+use showbiz_traits::{async_std::TransportConnection, async_trait};
 use showbiz_types::{Address, Packet};
 
 error!();
