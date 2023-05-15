@@ -33,11 +33,19 @@ const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
 /// Maximum number of concurrent push/pull requests
 const MAX_PUSH_PULL_REQUESTS: usize = 128;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 #[non_exhaustive]
-pub enum CompressionType {
+pub enum CompressionAlgo {
+  #[default]
   LZW = 0,
+  None = 1,
+}
+
+impl CompressionAlgo {
+  pub fn is_none(&self) -> bool {
+    matches!(self, Self::None)
+  }
 }
 
 /// Ping request sent directly to node
@@ -163,7 +171,7 @@ pub(crate) struct PushNodeState {
 #[viewit::viewit]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct Compress {
-  algo: CompressionType,
+  algo: CompressionAlgo,
   buf: Bytes,
 }
 

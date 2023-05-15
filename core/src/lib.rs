@@ -16,9 +16,9 @@ mod showbiz;
 mod suspicion;
 mod util;
 
+pub use bytes;
 pub use ipnet::IpNet;
 pub use showbiz_types::SmolStr;
-pub use bytes;
 
 pub const MIN_PROTOCOL_VERSION: u8 = 1;
 pub const PROTOCOL_VERSION2_COMPATIBLE: u8 = 2;

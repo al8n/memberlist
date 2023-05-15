@@ -22,7 +22,7 @@ impl<R> LabeledConnection<R> {
 
   #[inline]
   pub fn set_label(&mut self, label: Bytes) {
-    self.label = Some(label)
+    self.label = label;
   }
 }
 
@@ -30,7 +30,7 @@ impl<R: AsyncRead> LabeledConnection<R> {
   #[inline]
   pub(crate) fn new(reader: BufReader<R>) -> Self {
     Self {
-      label: None,
+      label: Bytes::new(),
       conn: reader,
     }
   }

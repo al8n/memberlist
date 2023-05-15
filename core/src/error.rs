@@ -1,4 +1,4 @@
-use showbiz_types::{InvalidMessageType, SmolStr};
+use showbiz_types::InvalidMessageType;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -14,6 +14,8 @@ pub enum Error {
   IO(#[from] std::io::Error),
   #[error("showbiz: remote node state(size {0}) is larger than limit")]
   LargeRemoteState(usize),
+  #[error("showbiz: security error {0}")]
+  Security(#[from] crate::security::SecurityError),
 }
 
 impl PartialEq for Error {

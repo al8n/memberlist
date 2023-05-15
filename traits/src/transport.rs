@@ -236,7 +236,7 @@ mod r#async {
     }
   }
 
-  #[cfg(any(feature = "async-std", feature = "async-std-wasm"))]
+  #[cfg(feature = "async-std")]
   pub mod async_std {
     use std::{
       future::Future,
@@ -338,7 +338,7 @@ mod r#async {
     }
   }
 
-  #[cfg(any(feature = "tokio", feature = "tokio_wasi"))]
+  #[cfg(feature = "tokio")]
   pub mod tokio {
     use std::{
       future::Future,

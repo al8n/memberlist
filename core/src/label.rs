@@ -397,7 +397,6 @@ mod tests {
 
   #[cfg(feature = "async")]
   mod async_tests {
-    use super::r#async::*;
     use super::*;
 
     #[tokio::test]
@@ -424,8 +423,8 @@ mod tests {
             label.read_exact(&mut got_buf).await.unwrap();
 
             match tc.expect_label.is_empty() {
-              true => assert_eq!(None, label.label()),
-              false => assert_eq!(Some(tc.expect_label).as_ref(), label.label()),
+              true => assert_eq!(&Bytes::new(), label.label()),
+              false => assert_eq!(tc.expect_label.as_ref(), label.label()),
             }
             assert_eq!(tc.expect_packet, got_buf);
           }

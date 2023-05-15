@@ -1,9 +1,9 @@
 use crate::{
   error::Error,
   label::{remove_label_header_from_stream, LabeledConnection},
-  security::{append_bytes, decrypt_payload},
+  security::{append_bytes, encrypted_length, EncryptionAlgo, SecurityError},
   showbiz::ShowbizDelegates,
-  util::{decompress_buffer, CompressError, compress_payload},
+  util::{compress_payload, decompress_buffer, CompressError},
   Options, SecretKeyring,
 };
 
@@ -11,7 +11,7 @@ use super::*;
 use bytes::{BufMut, BytesMut};
 use futures_util::{
   future::{BoxFuture, FutureExt},
-  io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+  io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
 };
 use showbiz_traits::{
   AliveDelegate, ConflictDelegate, Connection, Delegate, EventDelegate, MergeDelegate,
@@ -29,11 +29,13 @@ enum InnerError {
   #[error("{0}")]
   IO(#[from] std::io::Error),
   #[error("{0}")]
-  Encode(#[from] rmp::encode::Error),
+  Encode(#[from] rmp::encode::ValueWriteError),
   #[error("{0}")]
   Decode(#[from] rmp_serde::decode::Error),
   #[error("{0}")]
   Compress(#[from] CompressError),
+  #[error("{0}")]
+  Security(#[from] SecurityError),
 }
 
 pub(crate) struct StreamProcessor<
@@ -173,7 +175,7 @@ where
       false
     };
 
-    let (mt, lr) = match Self::read_stream(lr, encryption_enabled, keyring.as_ref()).await {
+    let (lr, mt) = match Self::read_stream(lr, encryption_enabled, keyring.as_ref(), &opts).await {
       Ok((mt, lr)) => (mt, lr),
       Err(e) => match e {
         InnerError::IO(e) => {
@@ -186,7 +188,9 @@ where
               err: e.to_string().into(),
             },
             addr.as_ref(),
-            opts.enable_compression,
+            keyring.as_ref(),
+            opts.compression_algo,
+            opts.encryption_algo,
             encryption_enabled,
             opts.gossip_verify_outgoing,
           )
@@ -208,17 +212,19 @@ where
       MessageType::Ping => {}
       MessageType::User => {}
       MessageType::PushPull => {}
-      _ => {
+      mt => {
         tracing::error!(target = "showbiz", remote_addr = ?addr, "received invalid msg type {}", mt);
       }
     }
   }
 
   async fn encode_and_send_err_msg(
-    lr: LabeledConnection<T::Connection>,
+    mut lr: LabeledConnection<T::Connection>,
     err: ErrorResponse,
     addr: Option<&SocketAddr>,
-    compression_enabled: bool,
+    keyring: Option<&SecretKeyring>,
+    compression_algo: CompressionAlgo,
+    encryption_algo: EncryptionAlgo,
     encryption_enabled: bool,
     gossip_verify_outgoing: bool,
   ) -> Result<(), InnerError> {
@@ -231,8 +237,8 @@ where
     }
 
     // Check if compression is enabled
-    if enable_compression {
-      buf = match compress_payload(CompressionType::LZW, &buf) {
+    if !compression_algo.is_none() {
+      buf = match compress_payload(compression_algo, &buf) {
         Ok(buf) => buf,
         Err(e) => {
           tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to compress payload");
@@ -243,19 +249,26 @@ where
 
     // Check if encryption is enabled
     if encryption_enabled && gossip_verify_outgoing {
-      
+      match encrypt_local_state(keyring.unwrap(), &buf, lr.label(), encryption_algo).await {
+        // Write out the entire send buffer
+        Ok(crypt) => lr.conn.write_all(&buf).await.map_err(From::from),
+        Err(e) => {
+          tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to encrypt local state");
+          return Err(e.into());
+        }
+      }
+    } else {
+      // Write out the entire send buffer
+      //TODO: handle metrics
+      lr.conn.write_all(&buf).await.map_err(From::from)
     }
-
-    // Write out the entire send buffer
-    //TODO: handle metrics
-
-    lr.conn.write_all(&buf).await
   }
 
   async fn read_stream<R: AsyncRead + Unpin>(
-    lr: LabeledConnection<R>,
+    mut lr: LabeledConnection<R>,
     encryption_enabled: bool,
     keyring: Option<&SecretKeyring>,
+    opts: &Options,
   ) -> Result<(LabeledConnection<R>, MessageType), InnerError> {
     // Read the message type
     let mut buf = [0u8; 1];
@@ -323,7 +336,11 @@ where
       let mut buf = vec![0; compressed_size];
       lr.read_exact(&mut buf).await?;
       let compress = rmp_serde::from_slice::<'_, Compress>(&buf)?;
-      let uncompressed_data = decompress_buffer(compress.algo, &compress.buf)?;
+      let uncompressed_data = if compress.algo.is_none() {
+        compress.buf
+      } else {
+        decompress_buffer(compress.algo, &compress.buf).map(Into::into)?
+      };
 
       // Reset the message type
       mt = match MessageType::try_from(uncompressed_data[0]) {
@@ -340,24 +357,59 @@ where
   }
 }
 
-async fn encrypt_local_state(keyring: &SecretKeyring, data: &[u8]) -> Result<Vec<u8>, Error> {
-  todo!()
-  // Authenticated Data is:
-	//
-	//   [messageType; byte] [messageLength; uint32] [stream_label; optional]
-	//
+async fn encrypt_local_state(
+  keyring: &SecretKeyring,
+  msg: &[u8],
+  label: &[u8],
+  algo: EncryptionAlgo,
+) -> Result<Bytes, InnerError> {
+  let enc_len = encrypted_length(algo, msg.len());
+  let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
+  let mut buf = BytesMut::with_capacity(meta_size + enc_len);
 
-  // Write the encrypted cipher text to the buffer
-  keyring.encrypt_payload(vsn, msg, data).await
+  // Write the encrypt byte
+  buf.put_u8(MessageType::Encrypt as u8);
+
+  // Write the size of the message
+  buf.put_u32(msg.len() as u32);
+
+  // Authenticated Data is:
+  //
+  //   [messageType; byte] [messageLength; uint32] [stream_label; optional]
+  //
+  let mut ciphertext = buf.split_off(meta_size);
+  if label.is_empty() {
+    // Write the encrypted cipher text to the buffer
+    keyring
+      .encrypt_payload(algo, msg, &buf, &mut ciphertext)
+      .await
+      .map(|_| {
+        buf.unsplit(ciphertext);
+        buf.freeze()
+      })
+      .map_err(From::from)
+  } else {
+    let data_bytes = append_bytes(&buf, label);
+    // Write the encrypted cipher text to the buffer
+    keyring
+      .encrypt_payload(algo, msg, &data_bytes, &mut ciphertext)
+      .await
+      .map(|_| {
+        buf.unsplit(ciphertext);
+        buf.freeze()
+      })
+      .map_err(From::from)
+  }
 }
 
 async fn decrypt_remote_state<R: AsyncRead + std::marker::Unpin>(
   r: &mut LabeledConnection<R>,
   keyring: &SecretKeyring,
 ) -> Result<Bytes, Error> {
-  let mut buf = BytesMut::with_capacity(8);
+  let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
+  let mut buf = BytesMut::with_capacity(meta_size);
   buf.put_u8(MessageType::Encrypt as u8);
-  let mut b = [0u8; 4];
+  let mut b = [0u8; core::mem::size_of::<u32>()];
   r.read_exact(&mut b).await?;
   buf.put_slice(&b);
 
@@ -379,7 +431,7 @@ async fn decrypt_remote_state<R: AsyncRead + std::marker::Unpin>(
   }
 
   // Read in the rest of the payload
-  buf.resize(5 + more_bytes as usize, 0);
+  buf.resize(meta_size + more_bytes as usize, 0);
   r.read_exact(&mut buf).await?;
 
   // Decrypt the cipherText with some authenticated data
@@ -388,9 +440,27 @@ async fn decrypt_remote_state<R: AsyncRead + std::marker::Unpin>(
   //
   //   [messageType; byte] [messageLength; uint32] [label_data; optional]
   //
-  let data_bytes = append_bytes(&buf[..5], r.label());
-  let cipher_text = &buf[5..];
-
-  // Decrypt the payload
-  keyring.decrypt_payload(cipher_text, data_bytes.as_ref()).await
+  let mut ciphertext = buf.split_off(meta_size);
+  if r.label().is_empty() {
+    // Decrypt the payload
+    keyring
+      .decrypt_payload(&mut ciphertext, &buf)
+      .await
+      .map(|_| {
+        buf.unsplit(ciphertext);
+        buf.freeze()
+      })
+      .map_err(From::from)
+  } else {
+    let data_bytes = append_bytes(&buf, r.label());
+    // Decrypt the payload
+    keyring
+      .decrypt_payload(&mut ciphertext, data_bytes.as_ref())
+      .await
+      .map(|_| {
+        buf.unsplit(ciphertext);
+        buf.freeze()
+      })
+      .map_err(From::from)
+  }
 }

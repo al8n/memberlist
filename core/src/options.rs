@@ -6,16 +6,8 @@ use std::{
 };
 
 use bytes::Bytes;
-use showbiz_traits::{
-  Transport, VoidAliveDelegate, VoidConflictDelegate, VoidDelegate, VoidEventDelegate,
-  VoidMergeDelegate, VoidPingDelegate,
-};
-use showbiz_types::SmolStr;
 
-use super::{
-  error::Error,
-  keyring::{SecretKey, SecretKeyring},
-};
+use super::{keyring::SecretKey, network::CompressionAlgo, security::EncryptionAlgo, SmolStr};
 
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -46,10 +38,10 @@ pub struct Options {
   /// cluster members. Used for nat traversal.
   advertise_addr: Option<SocketAddr>,
 
-  /// The configured protocol version that we
-  /// will _speak_. This must be between [`MIN_PROTOCOL_VERSION`] and
-  /// [`MAX_PROTOCOL_VERSION`].
-  protocol_version: u8,
+  /// The configured encryption type that we
+  /// will _speak_. This must be between [`EncryptionAlgo::MIN`] and
+  /// [`EncryptionAlgo::MAX`].
+  encryption_algo: EncryptionAlgo,
 
   /// The timeout for establishing a stream connection with
   /// a remote node for a full state sync, and for stream read and write
@@ -155,10 +147,11 @@ pub struct Options {
   /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
   /// a running cluster.
   gossip_verify_outgoing: bool,
+
   /// Used to control message compression. This can
   /// be used to reduce bandwidth usage at the cost of slightly more CPU
   /// utilization. This is only available starting at protocol version 1.
-  enable_compression: bool,
+  compression_algo: CompressionAlgo,
 
   /// Used to initialize the primary encryption key in a keyring.
   /// The primary encryption key is the only key used to encrypt messages and
@@ -269,7 +262,7 @@ impl Options {
       skip_inbound_label_check: false,
       bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 7946),
       advertise_addr: None,
-      protocol_version: super::MAX_PROTOCOL_VERSION,
+      encryption_algo: EncryptionAlgo::MAX,
       tcp_timeout: Duration::from_secs(10), // Timeout after 10 seconds
       indirect_checks: 3,                   // Use 3 nodes for the indirect ping
       retransmit_mult: 4,                   // Retransmit a message 4 * log(N+1) nodes
@@ -285,7 +278,7 @@ impl Options {
       gossip_to_the_dead_time: Duration::from_secs(30), // same as push/pull
       gossip_verify_incoming: true,
       gossip_verify_outgoing: true,
-      enable_compression: true, // Enable compression by default
+      compression_algo: CompressionAlgo::LZW, // Enable compression by default
       secret_key: None,
       delegate_protocol_version: 0,
       delegate_protocol_min: 0,

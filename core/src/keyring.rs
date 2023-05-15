@@ -145,8 +145,8 @@ impl SecretKeys {
   /// Returns the key on the ring at position 0. This is the key used
   /// for encrypting messages, and is the first key tried for decrypting messages.
   #[inline]
-  pub fn primary_key(&self) -> Option<&SecretKey> {
-    self.0.get_index(0)
+  pub fn primary_key(&self) -> Option<SecretKey> {
+    self.0.get_index(0).copied()
   }
 
   /// Drops a key from the keyring. This will return an error if the key
@@ -186,8 +186,8 @@ impl SecretKeys {
 
   /// Returns the current set of keys on the ring.
   #[inline]
-  pub fn keys(&self) -> impl Iterator<Item = &SecretKey> {
-    self.0.iter()
+  pub fn keys(&self) -> Box<[SecretKey]> {
+    self.0.iter().copied().collect::<Box<[_]>>()
   }
 
   #[inline]
@@ -281,7 +281,7 @@ mod tests {
   async fn test_empty_keyring() {
     let ring = SecretKeyring::default();
     let keys = ring.lock().await;
-    assert_eq!(keys.keys().size_hint().0, 0);
+    assert_eq!(keys.keys().len(), 0);
   }
 
   #[cfg(not(feature = "async"))]
@@ -289,7 +289,7 @@ mod tests {
   fn test_empty_keyring() {
     let ring = SecretKeyring::default();
     let keys = ring.lock();
-    assert_eq!(keys.keys().size_hint().0, 0);
+    assert_eq!(keys.keys().len(), 0);
   }
 
   #[cfg(feature = "async")]
@@ -298,7 +298,7 @@ mod tests {
     let keying = SecretKeyring::new(vec![], TEST_KEYS[1]);
 
     let keys = keying.lock().await;
-    assert_eq!(keys.keys().size_hint().0, 1);
+    assert_eq!(keys.keys().len(), 1);
   }
 
   #[cfg(not(feature = "async"))]
@@ -307,7 +307,7 @@ mod tests {
     let keying = SecretKeyring::new(TEST_KEYS.to_vec(), TEST_KEYS[1]);
 
     let keys = keying.lock();
-    assert_eq!(keys.keys().size_hint().0, 1);
+    assert_eq!(keys.keys().len(), 1);
   }
 
   #[cfg(feature = "async")]
@@ -339,8 +339,8 @@ mod tests {
 
     // Add key to ring
     keys.insert(TEST_KEYS[2]);
-    assert_eq!(keys.keys().size_hint().0, 2);
-    assert_eq!(keys.keys().next().unwrap().as_ref(), TEST_KEYS[1].as_ref());
+    assert_eq!(keys.keys().len(), 2);
+    assert_eq!(keys.keys()[0], TEST_KEYS[1]);
 
     // Use key that exists should succeed
     keys.use_key(&TEST_KEYS[2]).unwrap();
@@ -353,7 +353,7 @@ mod tests {
 
     // Removing non-primary key should succeed
     keys.remove(&TEST_KEYS[1]).unwrap();
-    assert_eq!(keys.keys().size_hint().0, 1);
+    assert_eq!(keys.keys().len(), 1);
   }
 
   #[cfg(not(feature = "async"))]
@@ -367,7 +367,7 @@ mod tests {
 
     // Add key to ring
     keys.insert(TEST_KEYS[2]);
-    assert_eq!(keys.keys().size_hint().0, 2);
+    assert_eq!(keys.keys().len(), 2);
     assert_eq!(keys.keys().next().unwrap().as_ref(), TEST_KEYS[1].as_ref());
 
     // Use key that exists should succeed

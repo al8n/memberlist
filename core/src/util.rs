@@ -1,6 +1,4 @@
-use bytes::BytesMut;
-
-use crate::network::CompressionType;
+use crate::network::CompressionAlgo;
 
 pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
   let node_scale = ((n + 1) as f64).log10().ceil() as usize;
@@ -16,20 +14,24 @@ pub(crate) enum CompressError {
 }
 
 #[inline]
-pub(crate) fn decompress_buffer(cmp: CompressionType, data: &[u8]) -> Result<Vec<u8>, CompressError> {
+pub(crate) fn decompress_buffer(
+  cmp: CompressionAlgo,
+  data: &[u8],
+) -> Result<Vec<u8>, CompressError> {
   match cmp {
-    CompressionType::LZW => {
-      weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH).decode(data).map_err(CompressError::LZW)
-    }
+    CompressionAlgo::LZW => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+      .decode(data)
+      .map_err(CompressError::LZW),
+    CompressionAlgo::None => unreachable!(),
   }
 }
 
 #[inline]
-pub(crate) fn compress_payload(cmp: CompressionType, inp: &[u8]) -> Result<Vec<u8>, CompressError> {
+pub(crate) fn compress_payload(cmp: CompressionAlgo, inp: &[u8]) -> Result<Vec<u8>, CompressError> {
   match cmp {
-    CompressionType::LZW => {
-      weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
-        .encode(inp)
-    }
+    CompressionAlgo::LZW => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+      .encode(inp)
+      .map_err(Into::into),
+    CompressionAlgo::None => unreachable!(),
   }
 }
