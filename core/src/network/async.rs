@@ -177,7 +177,7 @@ where
 
     let (lr, mt) = match Self::read_stream(lr, encryption_enabled, keyring.as_ref(), &opts).await {
       Ok((mt, lr)) => (mt, lr),
-      Err(e) => match e {
+      Err((lr, e)) => match e {
         InnerError::IO(e) => {
           if e.kind() != std::io::ErrorKind::UnexpectedEof {
             tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to receive");
@@ -269,48 +269,48 @@ where
     encryption_enabled: bool,
     keyring: Option<&SecretKeyring>,
     opts: &Options,
-  ) -> Result<(LabeledConnection<R>, MessageType), InnerError> {
+  ) -> Result<(LabeledConnection<R>, MessageType), (LabeledConnection<R>, InnerError)> {
     // Read the message type
     let mut buf = [0u8; 1];
     let mut mt = match lr.read(&mut buf).await {
       Ok(n) => {
         if n == 0 {
-          return Err(InnerError::IO(std::io::Error::new(
+          return Err((lr, InnerError::IO(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             "eof",
-          )));
+          ))));
         }
         match MessageType::try_from(buf[0]) {
           Ok(mt) => mt,
           Err(e) => {
-            return Err(InnerError::from(e));
+            return Err((lr, InnerError::from(e)));
           }
         }
       }
       Err(e) => {
-        return Err(InnerError::IO(e));
+        return Err((lr, InnerError::IO(e)));
       }
     };
 
     // Check if the message is encrypted
     if mt == MessageType::Encrypt {
       if !encryption_enabled {
-        return Err(InnerError::Other(
+        return Err((lr, InnerError::Other(
           "remote state is encrypted and encryption is not configured",
-        ));
+        )));
       }
 
       let Some(keyring) = keyring else {
-        return Err(InnerError::Other(
+        return Err((lr, InnerError::Other(
           "remote state is encrypted and encryption is not configured",
-        ));
+        )));
       };
 
       let plain = match decrypt_remote_state(&mut lr, keyring).await {
         Ok(plain) => plain,
         Err(e) => {
           // TODO: handle e
-          return Err(InnerError::Other("failed to decrypt remote state"));
+          return Err((lr, InnerError::Other("failed to decrypt remote state")));
         }
       };
 
@@ -318,35 +318,49 @@ where
       mt = match MessageType::try_from(plain[0]) {
         Ok(mt) => mt,
         Err(e) => {
-          return Err(InnerError::from(e));
+          return Err((lr, InnerError::from(e)));
         }
       };
 
       // TODO: reset conn
     } else if encryption_enabled && opts.gossip_verify_incoming {
-      return Err(InnerError::Other(
+      return Err((lr, InnerError::Other(
         "encryption is configured but remote state is not encrypted",
-      ));
+      )));
     }
 
     if mt == MessageType::Compress {
       let mut compressed_size = [0u8; core::mem::size_of::<u32>()];
-      lr.read_exact(&mut compressed_size).await?;
+      if let Err(e) = lr.read_exact(&mut compressed_size).await {
+        return Err((lr, e.into()));
+      }
       let compressed_size = u32::from_be_bytes(compressed_size) as usize;
       let mut buf = vec![0; compressed_size];
-      lr.read_exact(&mut buf).await?;
-      let compress = rmp_serde::from_slice::<'_, Compress>(&buf)?;
+      if let Err(e) = lr.read_exact(&mut buf).await {
+        return Err((lr, e.into()));
+      }
+      let compress = match rmp_serde::from_slice::<'_, Compress>(&buf) {
+        Ok(compress) => compress,
+        Err(e) => {
+          return Err((lr, e.into()));
+        }
+      };
       let uncompressed_data = if compress.algo.is_none() {
         compress.buf
       } else {
-        decompress_buffer(compress.algo, &compress.buf).map(Into::into)?
+        match decompress_buffer(compress.algo, &compress.buf) {
+          Ok(buf) => buf.into(),
+          Err(e) => {
+            return Err((lr, e.into()));
+          }
+        }
       };
 
       // Reset the message type
       mt = match MessageType::try_from(uncompressed_data[0]) {
         Ok(mt) => mt,
         Err(e) => {
-          return Err(InnerError::from(e));
+          return Err((lr, InnerError::from(e)));
         }
       };
 

@@ -185,6 +185,9 @@ impl SecretKeys {
   }
 
   /// Returns the current set of keys on the ring.
+  // TODO: any better way to implement this? Have to allocate a new vec here 
+  // because we cannot return a reference to the internal indexset like Go.
+  // hopefully the secret keyring is not too big. And secret key is copyable.
   #[inline]
   pub fn keys(&self) -> Box<[SecretKey]> {
     self.0.iter().copied().collect::<Box<[_]>>()
