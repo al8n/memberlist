@@ -1,4 +1,5 @@
 use std::{
+  collections::VecDeque,
   net::SocketAddr,
   sync::{
     atomic::{AtomicBool, AtomicU32},
@@ -310,9 +311,12 @@ where
       keyring,
     } = self;
 
+    let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
+    let (handoff_tx, handoff_rx) = async_channel::bounded(1);
+
     Showbiz {
       inner: Arc::new(ShowbizCore {
-        hot: todo!(),
+        hot: HotData::new(),
         advertise: todo!(),
         shutdown_lock: Mutex::new(()),
         leave_lock: Mutex::new(()),
@@ -327,6 +331,11 @@ where
           alive_delegate: alive_delegate.map(Arc::new),
         }),
         keyring,
+        shutdown_rx,
+        shutdown_tx,
+        handoff_tx,
+        handoff_rx,
+        queue: Mutex::new(MessageQueue::new()),
       }),
     }
   }
@@ -340,6 +349,19 @@ pub(crate) struct HotData {
   push_pull_req: CachePadded<AtomicU32>,
   shutdown: CachePadded<AtomicBool>,
   leave: CachePadded<AtomicBool>,
+}
+
+impl HotData {
+  const fn new() -> Self {
+    Self {
+      sequence_num: CachePadded::new(AtomicU32::new(0)),
+      incarnation: CachePadded::new(AtomicU32::new(0)),
+      num_nodes: CachePadded::new(AtomicU32::new(0)),
+      push_pull_req: CachePadded::new(AtomicU32::new(0)),
+      shutdown: CachePadded::new(AtomicBool::new(false)),
+      leave: CachePadded::new(AtomicBool::new(false)),
+    }
+  }
 }
 
 #[viewit::viewit]
@@ -364,6 +386,30 @@ pub(crate) struct ShowbizDelegates<
   alive_delegate: Option<Arc<AD>>,
 }
 
+#[viewit::viewit]
+pub(crate) struct MessageHandoff {
+  msg_ty: MessageType,
+  buf: Bytes,
+  from: SocketAddr,
+}
+
+#[viewit::viewit]
+pub(crate) struct MessageQueue {
+  /// high priority messages queue
+  high: VecDeque<MessageHandoff>,
+  /// low priority messages queue
+  low: VecDeque<MessageHandoff>,
+}
+
+impl MessageQueue {
+  const fn new() -> Self {
+    Self {
+      high: VecDeque::new(),
+      low: VecDeque::new(),
+    }
+  }
+}
+
 #[viewit::viewit(getters(skip), setters(skip))]
 pub(crate) struct ShowbizCore<
   T: Transport,
@@ -378,12 +424,17 @@ pub(crate) struct ShowbizCore<
   advertise: RwLock<SocketAddr>,
   // Serializes calls to Shutdown
   shutdown_lock: Mutex<()>,
+  shutdown_rx: Receiver<()>,
+  shutdown_tx: Sender<()>,
   // Serializes calls to Leave
   leave_lock: Mutex<()>,
   opts: Arc<Options>,
   transport: Arc<T>,
   keyring: Option<SecretKeyring>,
   delegates: Arc<ShowbizDelegates<D, ED, CD, MD, PD, AD>>,
+  handoff_tx: Sender<()>,
+  handoff_rx: Receiver<()>,
+  queue: Mutex<MessageQueue>,
 }
 
 pub struct Showbiz<
@@ -396,4 +447,21 @@ pub struct Showbiz<
   AD = VoidAliveDelegate<Error>,
 > {
   pub(crate) inner: Arc<ShowbizCore<T, D, ED, CD, MD, PD, AD>>,
+}
+
+impl<T, D, ED, CD, MD, PD, AD> Clone for Showbiz<T, D, ED, CD, MD, PD, AD>
+where
+  T: Transport,
+  D: Delegate,
+  ED: EventDelegate,
+  CD: ConflictDelegate,
+  MD: MergeDelegate,
+  PD: PingDelegate,
+  AD: AliveDelegate,
+{
+  fn clone(&self) -> Self {
+    Self {
+      inner: self.inner.clone(),
+    }
+  }
 }

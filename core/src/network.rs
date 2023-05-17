@@ -1,11 +1,15 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+  net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+  sync::Arc,
+  time::Duration,
+};
 
 use bytes::Bytes;
 use futures_util::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use showbiz_traits::Transport;
-use showbiz_types::{NodeStateType, SmolStr};
+use showbiz_types::{MessageType, NodeStateType, SmolStr};
 
 use crate::showbiz::Showbiz;
 
@@ -31,7 +35,7 @@ const BLOCKING_WARNING: Duration = Duration::from_millis(10);
 
 const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
 /// Maximum number of concurrent push/pull requests
-const MAX_PUSH_PULL_REQUESTS: usize = 128;
+const MAX_PUSH_PULL_REQUESTS: u32 = 128;
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
@@ -64,6 +68,42 @@ pub(crate) struct Ping {
   source_node: SmolStr,
 }
 
+impl Ping {
+  pub(crate) fn encode<W: rmp::encode::RmpWrite>(
+    &self,
+    wr: &mut W,
+  ) -> Result<(), rmp::encode::ValueWriteError<W::Error>> {
+    rmp::encode::write_u32(wr, self.seq_no)
+      .and_then(|_| rmp::encode::write_str(wr, &self.node))
+      .and_then(|_| match self.source_addr {
+        SocketAddr::V4(v) => {
+          let ip = v.ip().octets();
+          rmp::encode::write_bin(wr, &ip)
+        }
+        SocketAddr::V6(v) => {
+          let ip = v.ip().octets();
+          rmp::encode::write_bin(wr, &ip)
+        }
+      })
+      .and_then(|_| rmp::encode::write_str(wr, &self.source_node))
+  }
+}
+
+#[test]
+fn test_ping_encode_decode() {
+  let ping = Ping {
+    seq_no: 42,
+    node: "test".into(),
+    source_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 12345)),
+    source_node: "other".into(),
+  };
+  let mut vec = vec![];
+  ping.encode(&mut vec).unwrap();
+  let v1 = rmp_serde::encode::to_vec(&ping).unwrap();
+  eprintln!("len: {} {:?}", vec.len(), vec);
+  eprintln!("len: {} {:?}", v1.len(), v1);
+}
+
 #[viewit::viewit]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct IndirectPingRequest {
@@ -91,6 +131,15 @@ pub(crate) struct AckResponse {
   payload: bytes::Bytes,
 }
 
+impl AckResponse {
+  pub(crate) fn encode<W: rmp::encode::RmpWrite>(
+    &self,
+    wr: &mut W,
+  ) -> Result<(), rmp::encode::ValueWriteError<W::Error>> {
+    rmp::encode::write_u32(wr, self.seq_no).and_then(|_| rmp::encode::write_bin(wr, &self.payload))
+  }
+}
+
 /// nack response is sent for an indirect ping when the pinger doesn't hear from
 /// the ping-ee within the configured timeout. This lets the original node know
 /// that the indirect ping attempt happened but didn't succeed.
@@ -102,12 +151,30 @@ pub(crate) struct NackResponse {
   seq_no: u32,
 }
 
+impl NackResponse {
+  pub(crate) fn encode<W: rmp::encode::RmpWrite>(
+    &self,
+    wr: &mut W,
+  ) -> Result<(), rmp::encode::ValueWriteError<W::Error>> {
+    rmp::encode::write_u32(wr, self.seq_no)
+  }
+}
+
 #[viewit::viewit]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 #[repr(transparent)]
 pub(crate) struct ErrorResponse {
   err: SmolStr,
+}
+
+impl ErrorResponse {
+  pub(crate) fn encode<W: rmp::encode::RmpWrite>(
+    &self,
+    wr: &mut W,
+  ) -> Result<(), rmp::encode::ValueWriteError<W::Error>> {
+    rmp::encode::write_str(wr, &self.err)
+  }
 }
 
 /// suspect is broadcast when we suspect a node is dead
@@ -117,6 +184,17 @@ pub(crate) struct Suspect {
   incarnation: u32,
   node: SmolStr,
   from: SmolStr,
+}
+
+impl Suspect {
+  pub(crate) fn encode<W: rmp::encode::RmpWrite>(
+    &self,
+    wr: &mut W,
+  ) -> Result<(), rmp::encode::ValueWriteError<W::Error>> {
+    rmp::encode::write_u32(wr, self.incarnation)
+      .and_then(|_| rmp::encode::write_str(wr, &self.node))
+      .and_then(|_| rmp::encode::write_str(wr, &self.from))
+  }
 }
 
 /// Alive is broadcast when we know a node is alive.
@@ -133,6 +211,28 @@ pub(crate) struct Alive {
   vsn: [u8; 6],
 }
 
+impl Alive {
+  pub(crate) fn encode<W: rmp::encode::RmpWrite>(
+    &self,
+    wr: &mut W,
+  ) -> Result<(), rmp::encode::ValueWriteError<W::Error>> {
+    rmp::encode::write_u32(wr, self.incarnation)
+      .and_then(|_| rmp::encode::write_str(wr, &self.node))
+      .and_then(|_| match self.addr {
+        SocketAddr::V4(v) => {
+          let ip = v.ip().octets();
+          rmp::encode::write_bin(wr, &ip)
+        }
+        SocketAddr::V6(v) => {
+          let ip = v.ip().octets();
+          rmp::encode::write_bin(wr, &ip)
+        }
+      })
+      .and_then(|_| rmp::encode::write_bin(wr, &self.meta))
+      .and_then(|_| rmp::encode::write_bin(wr, &self.vsn))
+  }
+}
+
 /// Dead is broadcast when we confirm a node is dead
 /// Overloaded for nodes leaving
 #[viewit::viewit]
@@ -143,6 +243,17 @@ pub(crate) struct Dead {
   from: SmolStr, // Include who is suspecting
 }
 
+impl Dead {
+  pub(crate) fn encode<W: rmp::encode::RmpWrite>(
+    &self,
+    wr: &mut W,
+  ) -> Result<(), rmp::encode::ValueWriteError<W::Error>> {
+    rmp::encode::write_u32(wr, self.incarnation)
+      .and_then(|_| rmp::encode::write_str(wr, &self.node))
+      .and_then(|_| rmp::encode::write_str(wr, &self.from))
+  }
+}
+
 #[viewit::viewit]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct PushPullHeader {
@@ -151,10 +262,42 @@ pub(crate) struct PushPullHeader {
   join: bool,            // Is this a join request or a anti-entropy run
 }
 
+impl PushPullHeader {
+  pub fn encode<W: rmp::encode::RmpWrite>(
+    &self,
+    wr: &mut W,
+  ) -> Result<(), rmp::encode::ValueWriteError<W::Error>> {
+    rmp::encode::write_u32(wr, self.nodes as u32)
+      .and_then(|_| rmp::encode::write_u32(wr, self.user_state_len as u32))
+      .and_then(|_| {
+        rmp::encode::write_bool(wr, self.join)
+          .map_err(rmp::encode::ValueWriteError::InvalidMarkerWrite)
+      })
+  }
+
+  // pub fn decode<R: rmp::decode::>
+}
+
 #[viewit::viewit]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct UserMsgHeader {
   user_msg_len: usize, // Encodes the byte lengh of user state
+}
+
+impl UserMsgHeader {
+  pub(crate) fn encode<W: rmp::encode::RmpWrite>(
+    &self,
+    wr: &mut W,
+  ) -> Result<(), rmp::encode::ValueWriteError<W::Error>> {
+    rmp::encode::write_u32(wr, self.user_msg_len as u32)
+  }
+
+  pub(crate) fn decode<R: rmp::decode::RmpRead>(
+    rd: &mut R,
+  ) -> Result<Self, rmp::decode::ValueReadError<R::Error>> {
+    let user_msg_len = rmp::decode::read_u32(rd)? as usize;
+    Ok(Self { user_msg_len })
+  }
 }
 
 #[viewit::viewit]
@@ -166,6 +309,13 @@ pub(crate) struct PushNodeState {
   incarnation: u32,
   state: NodeStateType,
   vsn: [u8; 6],
+}
+
+#[viewit::viewit]
+pub(crate) struct NodeState {
+  join: bool,
+  push_state: PushNodeState,
+  user_state: Bytes,
 }
 
 #[viewit::viewit]
