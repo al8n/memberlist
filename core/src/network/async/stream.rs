@@ -1,3 +1,7 @@
+use prost::Message;
+
+use crate::util::encode;
+
 use super::*;
 
 impl<T, D, ED, CD, MD, PD, AD> Showbiz<T, D, ED, CD, MD, PD, AD>
@@ -105,18 +109,16 @@ where
             tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to receive");
           }
 
-          let err = ErrorResponse {
-            err: e.to_string().into(),
+          let out = match ErrorResponse::from(e).encode_with_prefix() {
+            Ok(out) => out,
+            Err(e) => {
+              tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to encode error response");
+              return;
+            }
           };
 
-          let mut out = vec![MessageType::Err as u8];
-          if let Err(e) = err.encode(&mut out) {
-            tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to encode error response");
-            return;
-          }
-
           if let Err(e) = self
-            .raw_send_msg_stream(lr, out.into(), addr.as_ref(), encryption_enabled)
+            .raw_send_msg_stream(lr, out, addr.as_ref(), encryption_enabled)
             .await
           {
             tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to send error response");
@@ -157,19 +159,16 @@ where
           return;
         }
 
-        let ack = AckResponse {
-          seq_no: ping.seq_no,
-          payload: Bytes::new(),
+        let out = match AckResponse::new(ping.seq_no, Bytes::new()).encode_with_prefix() {
+          Ok(out) => out,
+          Err(e) => {
+            tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to encode ack response");
+            return;
+          }
         };
 
-        let mut out = vec![MessageType::AckResp as u8];
-        if let Err(e) = ack.encode(&mut out) {
-          tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to encode ack response");
-          return;
-        }
-
         if let Err(e) = self
-          .raw_send_msg_stream(lr, out.into(), addr.as_ref(), encryption_enabled)
+          .raw_send_msg_stream(lr, out, addr.as_ref(), encryption_enabled)
           .await
         {
           tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to send ack response");
@@ -219,7 +218,7 @@ where
   async fn read_remote_state(
     &self,
     lr: &mut LabeledConnection<T::Connection>,
-    data: Option<Bytes>,
+    mut data: Option<Bytes>,
     addr: Option<SocketAddr>,
   ) -> Result<NodeState, InnerError> {
     // Read the push/pull header
@@ -253,10 +252,10 @@ where
 
   async fn read_user_msg(
     &self,
-    lr: LabeledConnection<T::Connection>,
+    mut lr: LabeledConnection<T::Connection>,
     data: Option<Bytes>,
     addr: Option<SocketAddr>,
-  ) -> Result<(), InnerError> {
+  ) {
     match data {
       Some(mut data) => {
         let user_msg_len = data.get_u32() as usize;
@@ -264,28 +263,28 @@ where
         let user_msg = match user_msg_len.cmp(&remaining) {
           std::cmp::Ordering::Less => {
             tracing::error!(target = "showbiz", remote_addr = ?addr, "failed to read full user message ({} / {})", remaining, user_msg_len);
-            return Ok(());
+            return;
           }
           std::cmp::Ordering::Equal => data,
           std::cmp::Ordering::Greater => data.slice(..user_msg_len),
         };
 
         if let Some(d) = &self.inner.delegates.delegate {
-          d.notify_msg(data).await;
+          d.notify_msg(user_msg).await;
         }
       }
       None => {
         let mut user_msg_len = [0u8; 4];
-        if let Err(e) = lr.read_exact(&user_msg_len).await {
+        if let Err(e) = lr.read_exact(&mut user_msg_len).await {
           tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to receive user message");
-          return Ok(());
+          return;
         }
         let user_msg_len = u32::from_be_bytes(user_msg_len) as usize;
         if user_msg_len > 0 {
           let mut user_msg = vec![0; user_msg_len];
           if let Err(e) = lr.read_exact(&mut user_msg).await {
             tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to receive user message");
-            return Ok(());
+            return;
           }
           if let Some(d) = &self.inner.delegates.delegate {
             d.notify_msg(user_msg.into()).await;
@@ -293,8 +292,6 @@ where
         }
       }
     }
-
-    Ok(())
   }
 
   async fn raw_send_msg_stream(

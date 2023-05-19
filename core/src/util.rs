@@ -1,3 +1,7 @@
+use bytes::{BufMut, BytesMut};
+use prost::Message;
+use showbiz_types::MessageType;
+
 use crate::network::CompressionAlgo;
 
 pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
@@ -34,4 +38,17 @@ pub(crate) fn compress_payload(cmp: CompressionAlgo, inp: &[u8]) -> Result<Vec<u
       .map_err(Into::into),
     CompressionAlgo::None => unreachable!(),
   }
+}
+
+#[inline]
+pub(crate) fn encode<B: BufMut, M: Message>(
+  buf: &mut B,
+  msg: &M,
+) -> Result<(), prost::EncodeError> {
+  msg.encode(buf)
+}
+
+#[inline]
+pub(crate) fn decode<M: Message + Default>(buf: &[u8]) -> Result<M, prost::DecodeError> {
+  M::decode(buf)
 }

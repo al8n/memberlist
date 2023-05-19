@@ -6,6 +6,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use showbiz_types::hidden::Name;
 
 use super::{keyring::SecretKey, network::CompressionAlgo, security::EncryptionAlgo, SmolStr};
 
@@ -14,7 +15,7 @@ use super::{keyring::SecretKey, network::CompressionAlgo, security::EncryptionAl
 pub struct Options {
   /// The name of this node. This must be unique in the cluster.
   #[viewit(getter(const, style = "ref"))]
-  name: SmolStr,
+  name: Name,
 
   /// Label is an optional set of bytes to include on the outside of each
   /// packet and stream.
@@ -242,7 +243,7 @@ impl Options {
     #[cfg(not(any(target_arch = "wasm32", windows)))]
     let hostname = {
       let uname = rustix::process::uname();
-      uname.nodename().to_string_lossy().into()
+      uname.nodename().to_string_lossy().to_string().into()
     };
 
     #[cfg(windows)]

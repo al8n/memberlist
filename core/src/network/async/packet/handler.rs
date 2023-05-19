@@ -29,19 +29,19 @@ where
           }
           _ = this.inner.handoff_rx.recv().fuse() => {
             loop {
-              if let Some(msg) = self.get_next_message().await {
+              if let Some(msg) = this.get_next_message().await {
                 match msg.msg_ty {
                   MessageType::Suspect => {
-                    self.handle_suspect(msg).await;
+                    this.handle_suspect(msg).await;
                   }
                   MessageType::Alive => {
-                    self.handle_alive(msg).await;
+                    this.handle_alive(msg).await;
                   }
                   MessageType::Dead => {
-                    self.handle_dead(msg).await;
+                    this.handle_dead(msg).await;
                   }
                   MessageType::User => {
-                    self.handle_user(msg).await;
+                    this.handle_user(msg).await;
                   }
                   _ => {
                     tracing::error!(target = "showbiz", "message type ({}) not supported {} (packet handler)", msg.msg_ty, msg.from);

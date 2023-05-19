@@ -1,5 +1,6 @@
 mod net;
 pub use net::*;
+mod grpc;
 
 #[cfg(feature = "async")]
 pub use showbiz_traits::async_trait;

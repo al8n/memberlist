@@ -9,6 +9,7 @@ use std::{
 
 #[cfg(feature = "async")]
 use async_lock::{Mutex, RwLock};
+use bytes::Bytes;
 use crossbeam_utils::CachePadded;
 #[cfg(not(feature = "async"))]
 use parking_lot::{Mutex, RwLock};
@@ -23,6 +24,7 @@ use showbiz_traits::{
   VoidAliveDelegate, VoidConflictDelegate, VoidDelegate, VoidEventDelegate, VoidMergeDelegate,
   VoidPingDelegate,
 };
+use showbiz_types::MessageType;
 
 use crate::{error::Error, Options, SecretKeyring};
 

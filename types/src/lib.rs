@@ -1,9 +1,13 @@
 #![forbid(unsafe_code)]
 
+use bytes::Bytes;
 use std::{net::SocketAddr, time::Instant};
 
-use bytes::Bytes;
+pub use bytes;
 pub use smol_str::SmolStr;
+
+#[doc(hidden)]
+pub mod hidden;
 
 #[viewit::viewit(vis_all = "")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -81,7 +85,7 @@ impl core::fmt::Display for Address {
 pub enum MessageType {
   Ping = 0,
   IndirectPing = 1,
-  AckResp = 2,
+  AckResponse = 2,
   Suspect = 3,
   Alive = 4,
   Dead = 5,
@@ -91,9 +95,9 @@ pub enum MessageType {
   User = 8,
   Compress = 9,
   Encrypt = 10,
-  NackResp = 11,
+  NackResponse = 11,
   HasCrc = 12,
-  Err = 13,
+  ErrorResponse = 13,
   /// HasLabel has a deliberately high value so that you can disambiguate
   /// it from the encryptionVersion header which is either 0/1 right now and
   /// also any of the existing [`MessageType`].
@@ -105,7 +109,7 @@ impl core::fmt::Display for MessageType {
     match self {
       Self::Ping => write!(f, "Ping"),
       Self::IndirectPing => write!(f, "IndirectPing"),
-      Self::AckResp => write!(f, "AckResponse"),
+      Self::AckResponse => write!(f, "AckResponse"),
       Self::Suspect => write!(f, "Suspect"),
       Self::Alive => write!(f, "Alive"),
       Self::Dead => write!(f, "Dead"),
@@ -114,9 +118,9 @@ impl core::fmt::Display for MessageType {
       Self::User => write!(f, "User"),
       Self::Compress => write!(f, "Compress"),
       Self::Encrypt => write!(f, "Encrypt"),
-      Self::NackResp => write!(f, "NackResponse"),
+      Self::NackResponse => write!(f, "NackResponse"),
       Self::HasCrc => write!(f, "HasCrc"),
-      Self::Err => write!(f, "Error"),
+      Self::ErrorResponse => write!(f, "ErrorResponse"),
       Self::HasLabel => write!(f, "HasLabel"),
     }
   }
@@ -140,7 +144,7 @@ impl TryFrom<u8> for MessageType {
     match value {
       0 => Ok(Self::Ping),
       1 => Ok(Self::IndirectPing),
-      2 => Ok(Self::AckResp),
+      2 => Ok(Self::AckResponse),
       3 => Ok(Self::Suspect),
       4 => Ok(Self::Alive),
       5 => Ok(Self::Dead),
@@ -149,9 +153,9 @@ impl TryFrom<u8> for MessageType {
       8 => Ok(Self::User),
       9 => Ok(Self::Compress),
       10 => Ok(Self::Encrypt),
-      11 => Ok(Self::NackResp),
+      11 => Ok(Self::NackResponse),
       12 => Ok(Self::HasCrc),
-      13 => Ok(Self::Err),
+      13 => Ok(Self::ErrorResponse),
       244 => Ok(Self::HasLabel),
       _ => Err(InvalidMessageType(value)),
     }
