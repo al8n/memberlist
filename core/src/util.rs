@@ -1,6 +1,5 @@
-use bytes::{BufMut, BytesMut};
+use bytes::BufMut;
 use prost::Message;
-use showbiz_types::MessageType;
 
 use crate::network::CompressionAlgo;
 

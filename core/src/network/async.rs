@@ -36,7 +36,7 @@ enum InnerError {
   #[error("{0}")]
   Encode(#[from] rmp::encode::ValueWriteError),
   #[error("{0}")]
-  Decode(#[from] rmp_serde::decode::Error),
+  Decode(#[from] prost::DecodeError),
   #[error("{0}")]
   Compress(#[from] CompressError),
   #[error("{0}")]

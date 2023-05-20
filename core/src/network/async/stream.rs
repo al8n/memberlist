@@ -1,6 +1,6 @@
 use prost::Message;
 
-use crate::util::encode;
+use crate::util::decode;
 
 use super::*;
 
@@ -188,7 +188,6 @@ where
           tracing::error!(target = "showbiz", "too many pending push/pull requests");
           return;
         }
-        // TODO:
 
         let node_state = match self.read_remote_state(&mut lr, data, addr).await {
           Ok(ns) => ns,
@@ -220,18 +219,38 @@ where
     lr: &mut LabeledConnection<T::Connection>,
     mut data: Option<Bytes>,
     addr: Option<SocketAddr>,
-  ) -> Result<NodeState, InnerError> {
+  ) -> Result<RemoteNodeState, InnerError> {
     // Read the push/pull header
     let push_pull_header = match &mut data {
-      Some(data) => data.get_u32() as usize,
+      Some(data) => {
+        let size = data.get_u32() as usize;
+        match decode::<PushPullHeader>(data) {
+          Ok(header) => header,
+          Err(e) => return InnerError::Decode(e),
+        }
+      }
       None => {
         let mut size_buf = [0u8; 4];
         lr.read_exact(&mut size_buf).await?;
-        u32::from_be_bytes(size_buf) as usize
+        let size = u32::from_be_bytes(size_buf) as usize;
+        let mut buf = vec![0; size];
+        lr.read_exact(&mut buf).await?;
+        match decode::<PushPullHeader>(&buf) {
+          Ok(header) => header,
+          Err(e) => return InnerError::Decode(e),
+        }
       }
     };
 
     // Allocate space for the transfer
+    let mut remote_nodes = Vec::<PushNodeState>::with_capacity(push_pull_header.nodes as usize);
+
+    // Try to decode all the states
+    for _ in 0..push_pull_header.nodes {
+      // remote_nodes.push(PushNodeState::)
+    }
+    // Read the remote user state into a buffer
+
     // TODO:
     // Ok(())
     todo!()
@@ -385,7 +404,7 @@ where
 
       let mut plain = match decrypt_remote_state(lr, keyring).await {
         Ok(plain) => plain,
-        Err(e) => return Err(InnerError::Other("failed to decrypt remote state")),
+        Err(_e) => return Err(InnerError::Other("failed to decrypt remote state")),
       };
 
       // Reset message type and buf conn

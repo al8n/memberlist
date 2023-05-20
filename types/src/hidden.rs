@@ -2,16 +2,20 @@ use std::{cell::RefCell, net::SocketAddr, ops::DerefMut, thread_local};
 
 use prost::{
   bytes::{Buf, BufMut, Bytes, BytesMut},
-  encoding::{bool, bytes, skip_field, uint32, DecodeContext, WireType},
+  encoding::{bool, bytes, int32, skip_field, uint32, DecodeContext, WireType},
   DecodeError, EncodeError, Message,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::MessageType;
+use super::{MessageType, NodeState};
+
+const VSN_SIZE: usize = 6;
+const VSN_ENCODED_SIZE: usize = 8;
+const MAX_ENCODED_SOCKET_ADDR_SIZE: usize = 18;
 
 thread_local! {
-  static VSN_BUFFER: RefCell<Vec<u8>> = RefCell::new(vec![0; 6]);
-  static SOCKET_ADDR_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(18));
+  static VSN_BUFFER: RefCell<Vec<u8>> = RefCell::new(vec![0; VSN_SIZE]);
+  static SOCKET_ADDR_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(MAX_ENCODED_SOCKET_ADDR_SIZE));
 }
 
 #[inline]
@@ -59,6 +63,37 @@ where
         b.put_u16(v6.port());
       }
     }
+    bytes::merge(wire_type, b.deref_mut(), buf, ctx)
+  })
+}
+
+#[inline]
+fn encode_vsn<B>(vsn: &[u8], tag: u32, buf: &mut B)
+where
+  B: BufMut,
+{
+  VSN_BUFFER.with(|b| {
+    let mut b = b.borrow_mut();
+    b.clear();
+    b.put_slice(vsn);
+    bytes::encode(tag, b.deref_mut(), buf);
+  });
+}
+
+#[inline]
+fn merge_vsn<B>(
+  wire_type: WireType,
+  vsn: &[u8],
+  buf: &mut B,
+  ctx: DecodeContext,
+) -> Result<(), DecodeError>
+where
+  B: Buf,
+{
+  VSN_BUFFER.with(|b| {
+    let mut b = b.borrow_mut();
+    b.clear();
+    b.put_slice(vsn);
     bytes::merge(wire_type, b.deref_mut(), buf, ctx)
   })
 }
@@ -505,7 +540,7 @@ pub struct Alive {
   meta: Bytes,
   // The versions of the protocol/delegate that are being spoken, order:
   // pmin, pmax, pcur, dmin, dmax, dcur
-  vsn: [u8; 6],
+  vsn: [u8; VSN_SIZE],
 }
 
 impl Message for Alive {
@@ -528,13 +563,7 @@ impl Message for Alive {
       bytes::encode(4u32, &self.meta, buf);
     }
     if self.vsn != b"" as &[u8] {
-      VSN_BUFFER.with(|buffer| {
-        let mut buffer = buffer.borrow_mut();
-        // clear buffer
-        buffer.fill(0);
-        // Do your serialization here...
-        bytes::encode(5u32, buffer.deref_mut(), buf);
-      });
+      encode_vsn(&self.vsn, 5u32, buf);
     }
   }
   #[allow(unused_variables)]
@@ -584,18 +613,10 @@ impl Message for Alive {
           error
         })
       }
-      5u32 => {
-        VSN_BUFFER.with(|buffer| {
-          let mut buffer = buffer.borrow_mut();
-          // clear buffer
-          buffer.fill(0);
-          // Do your serialization here...
-          bytes::merge(wire_type, buffer.deref_mut(), buf, ctx).map_err(|mut error| {
-            error.push(STRUCT_NAME, "vsn");
-            error
-          })
-        })
-      }
+      5u32 => merge_vsn(wire_type, &self.vsn, buf, ctx).map_err(|mut error| {
+        error.push(STRUCT_NAME, "vsn");
+        error
+      }),
       _ => skip_field(wire_type, tag, buf, ctx),
     }
   }
@@ -615,7 +636,7 @@ impl Message for Alive {
       } else {
         0
       }
-      + 8 // vsn encoded size
+      + VSN_ENCODED_SIZE // vsn encoded size
   }
   fn clear(&mut self) {
     self.incarnation = 0u32;
@@ -915,5 +936,138 @@ impl Message for Ping {
     self.node.clear();
     self.source_addr.clear();
     self.source_node.clear();
+  }
+}
+
+#[viewit::viewit]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[doc(hidden)]
+pub struct PushNodeState {
+  name: Name,
+  addr: EncodableSocketAddr,
+  meta: Bytes,
+  incarnation: u32,
+  state: NodeState,
+  vsn: [u8; VSN_SIZE],
+}
+
+impl Message for PushNodeState {
+  #[allow(unused_variables)]
+  fn encode_raw<B>(&self, buf: &mut B)
+  where
+    B: BufMut,
+  {
+    if !self.name.is_empty() {
+      bytes::encode(1u32, &self.name.0, buf);
+    }
+    match self.addr() {
+      EncodableSocketAddr::Local(addr) => encode_socket_addr(addr, 2u32, buf),
+      EncodableSocketAddr::None => {}
+    }
+    if self.meta != b"" as &[u8] {
+      bytes::encode(3u32, &self.meta, buf);
+    }
+    if self.incarnation != 0u32 {
+      uint32::encode(4u32, &self.incarnation, buf);
+    }
+    if self.state as i32 != 0i32 {
+      int32::encode(5u32, &(self.state as i32), buf);
+    }
+    if self.vsn != b"" as &[u8] {
+      encode_vsn(&self.vsn, 6u32, buf);
+    }
+  }
+  #[allow(unused_variables)]
+  fn merge_field<B>(
+    &mut self,
+    tag: u32,
+    wire_type: WireType,
+    buf: &mut B,
+    ctx: DecodeContext,
+  ) -> Result<(), DecodeError>
+  where
+    B: Buf,
+  {
+    const STRUCT_NAME: &str = "PushNodeState";
+    match tag {
+      1u32 => {
+        let value = &mut self.name.0;
+        bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
+          error.push(STRUCT_NAME, "name");
+          error
+        })
+      }
+      2u32 => match &self.addr {
+        EncodableSocketAddr::Local(addr) => {
+          merge_socket_addr(wire_type, addr, buf, ctx).map_err(|mut error| {
+            error.push(STRUCT_NAME, "source_addr");
+            error
+          })
+        }
+        EncodableSocketAddr::None => {
+          let mut error = DecodeError::new("invalid source_addr");
+          error.push(STRUCT_NAME, "source_addr");
+          Err(error)
+        }
+      },
+      3u32 => {
+        let value = &mut self.meta;
+        bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
+          error.push(STRUCT_NAME, "meta");
+          error
+        })
+      }
+      4u32 => {
+        let value = &mut self.incarnation;
+        uint32::merge(wire_type, value, buf, ctx).map_err(|mut error| {
+          error.push(STRUCT_NAME, "incarnation");
+          error
+        })
+      }
+      5u32 => {
+        let value = &mut (self.state as i32);
+        int32::merge(wire_type, value, buf, ctx).map_err(|mut error| {
+          error.push(STRUCT_NAME, "state");
+          error
+        })
+      }
+      6u32 => merge_vsn(wire_type, &self.vsn, buf, ctx).map_err(|mut error| {
+        error.push(STRUCT_NAME, "vsn");
+        error
+      }),
+      _ => skip_field(wire_type, tag, buf, ctx),
+    }
+  }
+  #[inline]
+  fn encoded_len(&self) -> usize {
+    (if !self.name.is_empty() {
+      bytes::encoded_len(1u32, &self.name.0)
+    } else {
+      0
+    }) + self.addr.encoded_len()
+      + if self.meta != b"" as &[u8] {
+        bytes::encoded_len(3u32, &self.meta)
+      } else {
+        0
+      }
+      + if self.incarnation != 0u32 {
+        uint32::encoded_len(4u32, &self.incarnation)
+      } else {
+        0
+      }
+      + if self.state as i32 != 0i32 {
+        int32::encoded_len(5u32, &(self.state as i32))
+      } else {
+        0
+      }
+      + VSN_ENCODED_SIZE
+  }
+  fn clear(&mut self) {
+    self.name.clear();
+    self.addr.clear();
+    self.meta.clear();
+    self.incarnation = 0u32;
+    self.state = NodeState::Alive;
+    self.vsn = [0; VSN_SIZE];
   }
 }

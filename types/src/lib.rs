@@ -162,17 +162,45 @@ impl TryFrom<u8> for MessageType {
   }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-#[repr(u8)]
-pub enum NodeStateType {
-  Alive,
-  Suspect,
-  Dead,
-  Left,
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct InvalidNodeState(u8);
+
+impl core::fmt::Display for InvalidNodeState {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(f, "invalid node state: {}", self.0)
+  }
 }
 
-impl core::fmt::Display for NodeStateType {
+impl std::error::Error for InvalidNodeState {}
+
+#[derive(
+  Debug, Default, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum NodeState {
+  #[default]
+  Alive = 0,
+  Suspect = 1,
+  Dead = 2,
+  Left = 3,
+}
+
+impl TryFrom<u8> for NodeState {
+  type Error = InvalidNodeState;
+
+  fn try_from(value: u8) -> Result<Self, Self::Error> {
+    match value {
+      0 => Ok(Self::Alive),
+      1 => Ok(Self::Suspect),
+      2 => Ok(Self::Dead),
+      3 => Ok(Self::Left),
+      _ => Err(InvalidNodeState(value)),
+    }
+  }
+}
+
+impl core::fmt::Display for NodeState {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match self {
       Self::Alive => write!(f, "alive"),
@@ -183,7 +211,7 @@ impl core::fmt::Display for NodeStateType {
   }
 }
 
-impl core::str::FromStr for NodeStateType {
+impl core::str::FromStr for NodeState {
   type Err = String;
 
   fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -211,7 +239,7 @@ pub struct Node {
   #[viewit(getter(const, style = "ref"))]
   meta: Bytes,
   /// State of the node.
-  state: NodeStateType,
+  state: NodeState,
   /// Minimum protocol version this understands
   pmin: u8,
   /// Maximum protocol version this understands
@@ -229,7 +257,7 @@ pub struct Node {
 impl Node {
   /// Construct a new node with the given name, address and state.
   #[inline]
-  pub fn new<T>(name: T, addr: SocketAddr, state: NodeStateType) -> Self
+  pub fn new<T>(name: T, addr: SocketAddr, state: NodeState) -> Self
   where
     T: AsRef<str>,
   {

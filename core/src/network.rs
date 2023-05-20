@@ -9,7 +9,7 @@ use futures_util::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use showbiz_traits::Transport;
-use showbiz_types::{hidden::*, MessageType, NodeStateType, SmolStr};
+use showbiz_types::{hidden::*, MessageType, NodeState, SmolStr};
 
 use crate::showbiz::Showbiz;
 
@@ -54,27 +54,16 @@ impl CompressionAlgo {
 
 #[viewit::viewit]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct PushNodeState {
-  name: SmolStr,
-  addr: SocketAddr,
-  meta: Bytes,
-  incarnation: u32,
-  state: NodeStateType,
-  vsn: [u8; 6],
-}
-
-#[viewit::viewit]
-pub(crate) struct NodeState {
-  join: bool,
-  push_state: PushNodeState,
-  user_state: Bytes,
-}
-
-#[viewit::viewit]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct Compress {
   algo: CompressionAlgo,
   buf: Bytes,
+}
+
+#[viewit::viewit]
+pub(crate) struct RemoteNodeState {
+  join: bool,
+  push_states: Vec<PushNodeState>,
+  user_state: Bytes,
 }
 
 // impl Showbiz {
