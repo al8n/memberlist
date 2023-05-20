@@ -6,9 +6,9 @@ use std::{
 };
 
 use bytes::Bytes;
-use showbiz_types::hidden::Name;
 
-use super::{keyring::SecretKey, network::CompressionAlgo, security::EncryptionAlgo};
+use super::{keyring::SecretKey, security::EncryptionAlgo, types::CompressionAlgo};
+use showbiz_types::Name;
 
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

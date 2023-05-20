@@ -1,4 +1,5 @@
 use prost::Message;
+use showbiz_types::{Address, Node};
 
 use crate::util::decode;
 
@@ -135,7 +136,7 @@ where
 
     match mt {
       MessageType::Ping => {
-        let buf = if let Some(data) = data {
+        let mut buf = if let Some(data) = data {
           data
         } else {
           let mut buf = Vec::new();
@@ -146,7 +147,7 @@ where
           Bytes::from(buf)
         };
 
-        let ping = match rmp_serde::decode::from_slice::<'_, Ping>(&buf) {
+        let ping = match Ping::decode(&mut buf) {
           Ok(ping) => ping,
           Err(e) => {
             tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to decode ping");
@@ -197,7 +198,10 @@ where
           }
         };
 
-        if let Err(e) = self.send_local_state(lr, node_state.join).await {
+        if let Err(e) = self
+          .send_local_state(lr, addr.as_ref(), encryption_enabled, node_state.join)
+          .await
+        {
           tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to push local state");
           return;
         }
@@ -221,12 +225,12 @@ where
     addr: Option<SocketAddr>,
   ) -> Result<RemoteNodeState, InnerError> {
     // Read the push/pull header
-    let push_pull_header = match &mut data {
+    let header = match &mut data {
       Some(data) => {
         let size = data.get_u32() as usize;
         match decode::<PushPullHeader>(data) {
           Ok(header) => header,
-          Err(e) => return InnerError::Decode(e),
+          Err(e) => return Err(InnerError::Decode(e)),
         }
       }
       None => {
@@ -237,36 +241,208 @@ where
         lr.read_exact(&mut buf).await?;
         match decode::<PushPullHeader>(&buf) {
           Ok(header) => header,
-          Err(e) => return InnerError::Decode(e),
+          Err(e) => return Err(InnerError::Decode(e)),
         }
       }
     };
 
     // Allocate space for the transfer
-    let mut remote_nodes = Vec::<PushNodeState>::with_capacity(push_pull_header.nodes as usize);
+    let mut remote_nodes = Vec::<PushNodeState>::with_capacity(header.nodes as usize);
 
     // Try to decode all the states
-    for _ in 0..push_pull_header.nodes {
-      // remote_nodes.push(PushNodeState::)
-    }
-    // Read the remote user state into a buffer
+    for _ in 0..header.nodes {
+      // read push node state size
+      let size = match &mut data {
+        Some(data) => data.get_u32() as usize,
+        None => {
+          let mut size_buf = [0u8; 4];
+          lr.read_exact(&mut size_buf).await?;
+          u32::from_be_bytes(size_buf) as usize
+        }
+      };
+      let state = match &mut data {
+        Some(data) => {
+          if size > data.remaining() {
+            return Err(InnerError::FailReadRemoteState(data.remaining(), size));
+          }
+          let mut buf = data.split_to(size);
+          match PushNodeState::decode(&mut buf) {
+            Ok(state) => state,
+            Err(e) => return Err(InnerError::Decode(e)),
+          }
+        }
+        None => {
+          let mut buf = vec![0; size];
+          if let Err(e) = lr.read_exact(&mut buf).await {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+              tracing::error!(target = "showbiz", remote_addr = ?addr, "failed to read full push node state");
+            }
+            return Err(InnerError::IO(e));
+          }
+          match PushNodeState::decode(buf.as_slice()) {
+            Ok(state) => state,
+            Err(e) => return Err(InnerError::Decode(e)),
+          }
+        }
+      };
 
-    // TODO:
-    // Ok(())
-    todo!()
+      remote_nodes.push(state);
+    }
+
+    // Read the remote user state into a buffer
+    if header.user_state_len > 0 {
+      let user_state = match &mut data {
+        Some(data) => {
+          if header.user_state_len as usize > data.remaining() {
+            return Err(InnerError::FailReadUserState(
+              data.remaining(),
+              header.user_state_len as usize,
+            ));
+          }
+          data.split_to(header.user_state_len as usize)
+        }
+        None => {
+          let mut user_state = vec![0; header.user_state_len as usize];
+          if let Err(e) = lr.read_exact(&mut user_state).await {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+              tracing::error!(target = "showbiz", remote_addr = ?addr, "failed to read full user state");
+            }
+            return Err(InnerError::IO(e));
+          }
+          user_state.into()
+        }
+      };
+      return Ok(RemoteNodeState {
+        join: header.join,
+        push_states: remote_nodes,
+        user_state,
+      });
+    }
+
+    Ok(RemoteNodeState {
+      join: header.join,
+      push_states: remote_nodes,
+      user_state: Bytes::new(),
+    })
   }
 
   async fn send_local_state(
     &self,
-    lr: LabeledConnection<T::Connection>,
+    mut lr: LabeledConnection<T::Connection>,
+    addr: Option<&SocketAddr>,
+    encryption_enabled: bool,
     join: bool,
   ) -> Result<(), InnerError> {
-    todo!()
+    // Setup a deadline
+    lr.conn
+      .get_mut()
+      .set_timeout(Some(self.inner.opts.tcp_timeout));
+
+    // Prepare the local node state
+    let mut states_encoded_size = 0;
+    let local_nodes = {
+      self
+        .inner
+        .nodes
+        .read()
+        .await
+        .iter()
+        .map(|n| {
+          let this = PushNodeState {
+            name: n.full_address().name().clone(),
+            addr: EncodableSocketAddr::Local(n.address()),
+            meta: n.node.meta().clone(),
+            incarnation: n.incarnation,
+            state: n.state,
+            vsn: n.node.vsn(),
+          };
+
+          // we use length-prefix encoding, so we need to add the size of the length of encoded data
+          states_encoded_size += this.encoded_len() + core::mem::size_of::<u32>();
+          this
+        })
+        .collect::<Vec<_>>()
+    };
+
+    // TODO: metrics
+
+    // Get the delegate state
+    let user_data = if let Some(delegate) = &self.inner.delegates.delegate {
+      delegate.local_state(join).await.map_err(InnerError::any)?
+    } else {
+      Bytes::new()
+    };
+
+    // Send our node state
+    let header = PushPullHeader {
+      nodes: local_nodes.len() as u32,
+      user_state_len: user_data.len() as u32,
+      join,
+    };
+    let header_size = header.encoded_len() + core::mem::size_of::<u32>();
+
+    let mut buf = BytesMut::with_capacity(header_size + states_encoded_size + user_data.len());
+
+    // begin state push
+    buf.put_u32(header_size as u32);
+    header.encode(&mut buf)?;
+
+    for n in local_nodes {
+      buf.put_u32(n.encoded_len() as u32);
+      n.encode(&mut buf)?;
+    }
+
+    // Write the user state as well
+    buf.put_slice(&user_data);
+
+    // TODO: metrics
+
+    self
+      .raw_send_msg_stream(lr, buf.freeze(), addr, encryption_enabled)
+      .await
   }
 
   /// Used to merge the remote state with our local state
-  async fn merge_remote_state(&self, node_state: NodeState) -> Result<(), InnerError> {
-    todo!()
+  async fn merge_remote_state(&self, node_state: RemoteNodeState) -> Result<(), InnerError> {
+    self.verify_protocol(&node_state.push_states).await?;
+
+    // Invoke the merge delegate if any
+    if node_state.join {
+      if let Some(merge) = self.inner.delegates.merge_delegate.as_ref() {
+        let peers = node_state
+          .push_states
+          .iter()
+          .map(|n| Node {
+            full_address: Address::new(n.name.clone(), n.addr.addr()),
+            meta: n.meta.clone(),
+            state: n.state,
+            pmin: n.pmin(),
+            pmax: n.pmax(),
+            pcur: n.pcur(),
+            dmin: n.dmin(),
+            dmax: n.dmax(),
+            dcur: n.dcur(),
+          })
+          .collect::<Vec<_>>();
+        merge.notify_merge(peers).await.map_err(InnerError::any)?;
+      }
+    }
+
+    // Merge the membership state
+    self
+      .merge_state(node_state.push_states)
+      .await
+      .map_err(InnerError::any)?;
+
+    // Invoke the delegate for user state
+    if let Some(d) = &self.inner.delegates.delegate {
+      if !node_state.user_state.is_empty() {
+        d.merge_remote_state(node_state.user_state, node_state.join)
+          .await
+          .map_err(InnerError::any)?;
+      }
+    }
+    Ok(())
   }
 
   async fn read_user_msg(
@@ -289,7 +465,10 @@ where
         };
 
         if let Some(d) = &self.inner.delegates.delegate {
-          d.notify_msg(user_msg).await;
+          if let Err(e) = d.notify_msg(user_msg).await {
+            tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to notify user message");
+            return;
+          }
         }
       }
       None => {
@@ -306,7 +485,10 @@ where
             return;
           }
           if let Some(d) = &self.inner.delegates.delegate {
-            d.notify_msg(user_msg.into()).await;
+            if let Err(e) = d.notify_msg(user_msg.into()).await {
+              tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to notify user message");
+              return;
+            }
           }
         }
       }
@@ -440,7 +622,7 @@ where
         buf.into()
       };
 
-      let compress = match rmp_serde::from_slice::<'_, Compress>(&compressed) {
+      let compress = match Compress::decode(compressed) {
         Ok(compress) => compress,
         Err(e) => {
           return Err(e.into());

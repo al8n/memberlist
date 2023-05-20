@@ -13,8 +13,11 @@ mod queue;
 pub use queue::TransmitLimitedQueue;
 mod security;
 mod showbiz;
+mod state;
 mod suspicion;
+mod types;
 mod util;
+pub use types::{CompressionAlgo, InvalidCompressionAlgo};
 
 pub use bytes;
 pub use ipnet::IpNet;

@@ -26,7 +26,7 @@ use showbiz_traits::{
 };
 use showbiz_types::MessageType;
 
-use crate::{error::Error, Options, SecretKeyring};
+use crate::{error::Error, state::LocalNodeState, types::PushNodeState, Options, SecretKeyring};
 
 impl Options {
   #[inline]
@@ -37,7 +37,7 @@ impl Options {
 
 pub struct ShowbizBuilder<
   T,
-  D = VoidDelegate,
+  D = VoidDelegate<Error>,
   ED = VoidEventDelegate,
   CD = VoidConflictDelegate,
   MD = VoidMergeDelegate<Error>,
@@ -338,6 +338,7 @@ where
         handoff_tx,
         handoff_rx,
         queue: Mutex::new(MessageQueue::new()),
+        nodes: RwLock::new(Vec::new()),
       }),
     }
   }
@@ -373,7 +374,7 @@ pub(crate) struct Advertise {
 
 #[viewit::viewit(getters(skip), setters(skip))]
 pub(crate) struct ShowbizDelegates<
-  D = VoidDelegate,
+  D = VoidDelegate<Error>,
   ED = VoidEventDelegate,
   CD = VoidConflictDelegate,
   MD = VoidMergeDelegate<Error>,
@@ -415,7 +416,7 @@ impl MessageQueue {
 #[viewit::viewit(getters(skip), setters(skip))]
 pub(crate) struct ShowbizCore<
   T: Transport,
-  D = VoidDelegate,
+  D = VoidDelegate<Error>,
   ED = VoidEventDelegate,
   CD = VoidConflictDelegate,
   MD = VoidMergeDelegate<Error>,
@@ -437,11 +438,13 @@ pub(crate) struct ShowbizCore<
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue>,
+
+  nodes: RwLock<Vec<LocalNodeState>>,
 }
 
 pub struct Showbiz<
   T: Transport,
-  D = VoidDelegate,
+  D = VoidDelegate<Error>,
   ED = VoidEventDelegate,
   CD = VoidConflictDelegate,
   MD = VoidMergeDelegate<Error>,
@@ -465,5 +468,22 @@ where
     Self {
       inner: self.inner.clone(),
     }
+  }
+}
+
+impl<T, D, ED, CD, MD, PD, AD> Showbiz<T, D, ED, CD, MD, PD, AD>
+where
+  T: Transport,
+  D: Delegate,
+  ED: EventDelegate,
+  CD: ConflictDelegate,
+  MD: MergeDelegate,
+  PD: PingDelegate,
+  AD: AliveDelegate,
+{
+  pub(crate) async fn verify_protocol(&self, remote: &[PushNodeState]) -> Result<(), Error> {
+    // TODO: implement
+
+    Ok(())
   }
 }

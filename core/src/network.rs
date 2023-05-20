@@ -9,9 +9,9 @@ use futures_util::{future::BoxFuture, FutureExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use showbiz_traits::Transport;
-use showbiz_types::{hidden::*, MessageType, NodeState, SmolStr};
+use showbiz_types::{MessageType, NodeState, SmolStr};
 
-use crate::showbiz::Showbiz;
+use crate::{showbiz::Showbiz, types::*};
 
 #[cfg(feature = "async")]
 mod r#async;
@@ -36,28 +36,6 @@ const BLOCKING_WARNING: Duration = Duration::from_millis(10);
 const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
 /// Maximum number of concurrent push/pull requests
 const MAX_PUSH_PULL_REQUESTS: u32 = 128;
-
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[repr(u8)]
-#[non_exhaustive]
-pub enum CompressionAlgo {
-  #[default]
-  LZW = 0,
-  None = 1,
-}
-
-impl CompressionAlgo {
-  pub fn is_none(&self) -> bool {
-    matches!(self, Self::None)
-  }
-}
-
-#[viewit::viewit]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct Compress {
-  algo: CompressionAlgo,
-  buf: Bytes,
-}
 
 #[viewit::viewit]
 pub(crate) struct RemoteNodeState {

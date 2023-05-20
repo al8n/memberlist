@@ -1,7 +1,7 @@
 use bytes::BufMut;
 use prost::Message;
 
-use crate::network::CompressionAlgo;
+use super::CompressionAlgo;
 
 pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
   let node_scale = ((n + 1) as f64).log10().ceil() as usize;

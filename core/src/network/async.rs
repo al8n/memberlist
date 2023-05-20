@@ -1,6 +1,7 @@
-use std::{f32::consts::E, sync::atomic::Ordering};
+use std::sync::atomic::Ordering;
 
 use crate::{
+  awareness::Inner,
   error::Error,
   label::{remove_label_header_from_stream, LabeledConnection},
   security::{append_bytes, encrypted_length, EncryptionAlgo, SecurityError},
@@ -13,7 +14,7 @@ use super::*;
 use bytes::{Buf, BufMut, BytesMut};
 use futures_util::{
   future::{BoxFuture, FutureExt},
-  io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
+  io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
 };
 use showbiz_traits::{
   AliveDelegate, ConflictDelegate, Connection, Delegate, EventDelegate, MergeDelegate,
@@ -34,13 +35,28 @@ enum InnerError {
   #[error("{0}")]
   IO(#[from] std::io::Error),
   #[error("{0}")]
-  Encode(#[from] rmp::encode::ValueWriteError),
+  Encode(#[from] prost::EncodeError),
   #[error("{0}")]
   Decode(#[from] prost::DecodeError),
   #[error("{0}")]
   Compress(#[from] CompressError),
   #[error("{0}")]
   Security(#[from] SecurityError),
+  #[error("failed to read full push node state ({0} / {1})")]
+  FailReadRemoteState(usize, usize),
+  #[error("failed to read full user state ({0} / {1})")]
+  FailReadUserState(usize, usize),
+  #[error("{0}")]
+  Error(#[from] crate::error::Error),
+
+  #[error("{0}")]
+  Any(Box<dyn std::error::Error + Send + Sync + 'static>),
+}
+
+impl InnerError {
+  fn any<E: std::error::Error + Send + Sync + 'static>(e: E) -> Self {
+    Self::Any(Box::new(e))
+  }
 }
 
 async fn encrypt_local_state(
