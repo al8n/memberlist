@@ -13,12 +13,12 @@ pub trait MergeDelegate: Send + Sync + 'static {
   /// Invoked when a merge could take place.
   /// Provides a list of the nodes known by the peer.
   #[cfg(not(feature = "async"))]
-  fn notify_merge(&self, peers: &[Node]) -> Result<(), Self::Error>;
+  fn notify_merge(&self, peers: Vec<Node>) -> Result<(), Self::Error>;
 
   /// Invoked when a merge could take place.
   /// Provides a list of the nodes known by the peer.
   #[cfg(feature = "async")]
-  async fn notify_merge(&self, peers: &[Node]) -> Result<(), Self::Error>;
+  async fn notify_merge(&self, peers: Vec<Node>) -> Result<(), Self::Error>;
 }
 
 /// No-op implementation of [`MergeDelegate`]
@@ -39,13 +39,13 @@ impl<E: std::error::Error + Send + Sync + 'static> MergeDelegate for VoidMergeDe
 
   #[cfg(not(feature = "async"))]
   #[inline(always)]
-  fn notify_merge(&self, _peers: &[Node]) -> Result<(), Self::Error> {
+  fn notify_merge(&self, _peers: Vec<Node>) -> Result<(), Self::Error> {
     Ok(())
   }
 
   #[cfg(feature = "async")]
   #[inline(always)]
-  async fn notify_merge(&self, _peers: &[Node]) -> Result<(), Self::Error> {
+  async fn notify_merge(&self, _peers: Vec<Node>) -> Result<(), Self::Error> {
     Ok(())
   }
 }

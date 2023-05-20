@@ -1,8 +1,6 @@
 use prost::Message;
 use showbiz_types::{Address, Node};
 
-use crate::util::decode;
-
 use super::*;
 
 impl<T, D, ED, CD, MD, PD, AD> Showbiz<T, D, ED, CD, MD, PD, AD>
@@ -228,7 +226,7 @@ where
     let header = match &mut data {
       Some(data) => {
         let size = data.get_u32() as usize;
-        match decode::<PushPullHeader>(data) {
+        match PushPullHeader::decode(data) {
           Ok(header) => header,
           Err(e) => return Err(InnerError::Decode(e)),
         }
@@ -239,7 +237,7 @@ where
         let size = u32::from_be_bytes(size_buf) as usize;
         let mut buf = vec![0; size];
         lr.read_exact(&mut buf).await?;
-        match decode::<PushPullHeader>(&buf) {
+        match PushPullHeader::decode(buf.as_slice()) {
           Ok(header) => header,
           Err(e) => return Err(InnerError::Decode(e)),
         }

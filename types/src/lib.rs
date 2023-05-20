@@ -1,13 +1,11 @@
 #![forbid(unsafe_code)]
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, time::Instant};
 
 pub use bytes;
 pub use smol_str::SmolStr;
-
-#[doc(hidden)]
-pub mod hidden;
 
 #[viewit::viewit(vis_all = "")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -44,19 +42,13 @@ pub struct Address {
   /// The name of the node being addressed. This is optional but
   /// transports may require it.
   #[viewit(getter(const, style = "ref"))]
-  name: smol_str::SmolStr,
+  name: Name,
 }
 
 impl Address {
   #[inline]
-  pub fn new<T>(name: T, addr: SocketAddr) -> Self
-  where
-    T: AsRef<str>,
-  {
-    Self {
-      name: smol_str::SmolStr::new(name),
-      addr,
-    }
+  pub fn new(name: Name, addr: SocketAddr) -> Self {
+    Self { name, addr }
   }
 }
 
@@ -226,15 +218,11 @@ impl core::str::FromStr for NodeState {
 }
 
 /// Represents a node in the cluster
-#[viewit::viewit(vis_all = "", getters(vis_all = "pub"), setters(vis_all = "pub"))]
+#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Node {
-  #[viewit(getter(
-    style = "ref",
-    result(converter(fn = "SmolStr::as_str"), type = "&str")
-  ))]
-  name: SmolStr,
-  addr: SocketAddr,
+  #[viewit(getter(const, style = "ref"))]
+  full_address: Address,
   /// Metadata from the delegate for this node.
   #[viewit(getter(const, style = "ref"))]
   meta: Bytes,
@@ -257,13 +245,9 @@ pub struct Node {
 impl Node {
   /// Construct a new node with the given name, address and state.
   #[inline]
-  pub fn new<T>(name: T, addr: SocketAddr, state: NodeState) -> Self
-  where
-    T: AsRef<str>,
-  {
+  pub fn new(name: Name, addr: SocketAddr, state: NodeState) -> Self {
     Self {
-      name: SmolStr::new(name),
-      addr,
+      full_address: Address { addr, name },
       meta: Bytes::new(),
       state,
       pmin: 0,
@@ -274,10 +258,187 @@ impl Node {
       dcur: 0,
     }
   }
+
+  #[inline]
+  pub const fn vsn(&self) -> [u8; 6] {
+    [
+      self.pcur, self.pmin, self.pmax, self.dcur, self.dmin, self.dmax,
+    ]
+  }
+
+  #[inline]
+  pub const fn address(&self) -> SocketAddr {
+    self.full_address.addr()
+  }
 }
 
 impl core::fmt::Display for Node {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{} ({})", self.name, self.addr)
+    write!(f, "{} ({})", self.full_address.name, self.full_address.addr)
+  }
+}
+
+#[derive(Clone)]
+pub struct Name(Bytes);
+
+impl bytes::Buf for Name {
+  fn remaining(&self) -> usize {
+    self.0.remaining()
+  }
+
+  fn chunk(&self) -> &[u8] {
+    self.0.chunk()
+  }
+
+  fn advance(&mut self, cnt: usize) {
+    self.0.advance(cnt);
+  }
+}
+
+impl Default for Name {
+  fn default() -> Self {
+    Self(Bytes::new())
+  }
+}
+
+impl Name {
+  pub fn is_empty(&self) -> bool {
+    self.0.is_empty()
+  }
+
+  pub fn len(&self) -> usize {
+    self.0.len()
+  }
+
+  #[inline]
+  pub fn clear(&mut self) {
+    self.0.clear()
+  }
+
+  #[inline]
+  #[doc(hidden)]
+  pub fn bytes(&self) -> &Bytes {
+    &self.0
+  }
+
+  #[inline]
+  #[doc(hidden)]
+  pub fn bytes_mut(&mut self) -> &mut Bytes {
+    &mut self.0
+  }
+}
+
+impl Serialize for Name {
+  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(self.as_str())
+  }
+}
+
+impl<'de> Deserialize<'de> for Name {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    String::deserialize(deserializer).map(Name::from)
+  }
+}
+
+impl AsRef<str> for Name {
+  fn as_ref(&self) -> &str {
+    self.as_str()
+  }
+}
+
+impl core::cmp::PartialOrd for Name {
+  fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+    self.as_str().partial_cmp(other.as_str())
+  }
+}
+
+impl core::cmp::Ord for Name {
+  fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+    self.as_str().cmp(other.as_str())
+  }
+}
+
+impl core::cmp::PartialEq for Name {
+  fn eq(&self, other: &Self) -> bool {
+    self.as_str() == other.as_str()
+  }
+}
+
+impl core::cmp::PartialEq<str> for Name {
+  fn eq(&self, other: &str) -> bool {
+    self.as_str() == other
+  }
+}
+
+impl core::cmp::PartialEq<&str> for Name {
+  fn eq(&self, other: &&str) -> bool {
+    self.as_str() == *other
+  }
+}
+
+impl core::cmp::PartialEq<String> for Name {
+  fn eq(&self, other: &String) -> bool {
+    self.as_str() == other
+  }
+}
+
+impl core::cmp::PartialEq<&String> for Name {
+  fn eq(&self, other: &&String) -> bool {
+    self.as_str() == *other
+  }
+}
+
+impl core::cmp::Eq for Name {}
+
+impl core::hash::Hash for Name {
+  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    self.as_str().hash(state)
+  }
+}
+
+impl Name {
+  pub fn as_bytes(&self) -> &[u8] {
+    &self.0
+  }
+
+  fn as_str(&self) -> &str {
+    // unwrap safe here, because there is no way to build a name with invalid utf8
+    core::str::from_utf8(&self.0).unwrap()
+  }
+}
+
+impl From<Name> for String {
+  fn from(name: Name) -> Self {
+    // unwrap safe here, because there is no way to build a name with invalid utf8
+    String::from_utf8(name.0.to_vec()).unwrap()
+  }
+}
+
+impl From<&str> for Name {
+  fn from(s: &str) -> Self {
+    Self(Bytes::copy_from_slice(s.as_bytes()))
+  }
+}
+
+impl core::fmt::Debug for Name {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    // unwrap safe here, because there is no way to build a name with invalid utf8
+    write!(f, "{}", core::str::from_utf8(&self.0).unwrap())
+  }
+}
+
+impl core::fmt::Display for Name {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    // unwrap safe here, because there is no way to build a name with invalid utf8
+    write!(f, "{}", core::str::from_utf8(&self.0).unwrap())
+  }
+}
+
+impl From<String> for Name {
+  fn from(s: String) -> Self {
+    Self(Bytes::from(s))
   }
 }

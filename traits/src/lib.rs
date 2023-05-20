@@ -29,3 +29,21 @@ pub use merge_delegate::*;
 
 mod ping_delegate;
 pub use ping_delegate::*;
+
+pub trait DelegateManager {
+  type Error: std::error::Error + Send + Sync + 'static;
+
+  type Delegate: Delegate<Error = Self::Error> + Send + Sync + 'static;
+  type AliveDelegate: AliveDelegate<Error = Self::Error> + Send + Sync + 'static;
+  type ConflictDelegate: ConflictDelegate + Send + Sync + 'static;
+  type EventDelegate: EventDelegate + Send + Sync + 'static;
+  type MergeDelegate: MergeDelegate<Error = Self::Error> + Send + Sync + 'static;
+  type PingDelegate: PingDelegate + Send + Sync + 'static;
+
+  fn delegate(&self) -> Option<&Self::Delegate>;
+  fn alive_delegate(&self) -> Option<&Self::AliveDelegate>;
+  fn conflict_delegate(&self) -> Option<&Self::ConflictDelegate>;
+  fn event_delegate(&self) -> Option<&Self::EventDelegate>;
+  fn merge_delegate(&self) -> Option<&Self::MergeDelegate>;
+  fn ping_delegate(&self) -> Option<&Self::PingDelegate>;
+}
