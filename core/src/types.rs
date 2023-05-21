@@ -1,14 +1,14 @@
 use std::{
   cell::RefCell,
   net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
-  ops::DerefMut,
+  ops::{Deref, DerefMut},
   thread_local,
 };
 
 use prost::{
   bytes::{Buf, BufMut, Bytes, BytesMut},
   encoding::{bool, bytes, int32, skip_field, uint32, DecodeContext, WireType},
-  DecodeError, EncodeError, Message,
+  DecodeError, EncodeError, ProstMessage,
 };
 use serde::{Deserialize, Serialize};
 use showbiz_types::{MessageType, Name, NodeState};
@@ -126,7 +126,7 @@ pub(crate) struct Compress {
   buf: Bytes,
 }
 
-impl Message for Compress {
+impl ProstMessage for Compress {
   fn encode_raw<B>(&self, buf: &mut B)
   where
     B: BufMut,
@@ -323,18 +323,18 @@ impl<'de> Deserialize<'de> for EncodableSocketAddr {
 }
 
 #[doc(hidden)]
-pub trait MessageExt: Message {
+pub trait ProstMessageExt: ProstMessage {
   fn encode_with_prefix(&self) -> Result<Bytes, EncodeError>;
 }
 
 macro_rules! msg_ext {
   ($($ty: ident),+ $(,)?) => {
     $(
-      impl MessageExt for $ty {
+      impl ProstMessageExt for $ty {
         fn encode_with_prefix(&self) -> Result<Bytes, EncodeError> {
           let encoded_len = self.encoded_len();
           let mut buf = BytesMut::with_capacity(1 + 4 + encoded_len);
-          buf.put_u8(MessageType::$ty as u8);
+          buf.put_u8(ProstMessageType::$ty as u8);
           buf.put_u32(encoded_len as u32);
           self.encode(&mut buf).map(|_| buf.freeze())
         }
@@ -356,7 +356,7 @@ macro_rules! bad_bail {
       from: Name,
     }
 
-    impl Message for $name {
+    impl ProstMessage for $name {
       #[allow(unused_variables)]
       fn encode_raw<B>(&self, buf: &mut B)
       where
@@ -452,7 +452,7 @@ impl AckResponse {
   }
 }
 
-impl Message for AckResponse {
+impl ProstMessage for AckResponse {
   #[allow(unused_variables)]
   fn encode_raw<B>(&self, buf: &mut B)
   where
@@ -517,7 +517,7 @@ impl Message for AckResponse {
 /// the ping-ee within the configured timeout. This lets the original node know
 /// that the indirect ping attempt happened but didn't succeed.
 #[viewit::viewit]
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Message)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ProstMessage)]
 #[serde(transparent)]
 #[repr(transparent)]
 #[doc(hidden)]
@@ -527,7 +527,7 @@ pub(crate) struct NackResponse {
 }
 
 #[viewit::viewit]
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Message)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ProstMessage)]
 #[serde(transparent)]
 #[repr(transparent)]
 #[doc(hidden)]
@@ -545,7 +545,7 @@ impl<E: std::error::Error> From<E> for ErrorResponse {
 }
 
 #[viewit::viewit]
-#[derive(PartialEq, Eq, Hash, Serialize, Deserialize, Message)]
+#[derive(PartialEq, Eq, Hash, Serialize, Deserialize, ProstMessage)]
 #[doc(hidden)]
 pub(crate) struct PushPullHeader {
   #[prost(uint32, tag = "1")]
@@ -581,7 +581,7 @@ impl Default for Alive {
   }
 }
 
-impl Message for Alive {
+impl ProstMessage for Alive {
   #[allow(unused_variables)]
   fn encode_raw<B>(&self, buf: &mut B)
   where
@@ -710,7 +710,7 @@ pub(crate) struct IndirectPingRequest {
   source_node: Name,
 }
 
-impl Message for IndirectPingRequest {
+impl ProstMessage for IndirectPingRequest {
   fn encode_raw<B>(&self, buf: &mut B)
   where
     B: BufMut,
@@ -826,7 +826,7 @@ impl Message for IndirectPingRequest {
 }
 
 #[viewit::viewit]
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Message)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ProstMessage)]
 #[doc(hidden)]
 #[repr(transparent)]
 #[serde(transparent)]
@@ -862,7 +862,7 @@ impl Ping {
   }
 }
 
-impl Message for Ping {
+impl ProstMessage for Ping {
   #[allow(unused_variables)]
   fn encode_raw<B>(&self, buf: &mut B)
   where
@@ -1003,7 +1003,7 @@ impl Default for PushNodeState {
   }
 }
 
-impl Message for PushNodeState {
+impl ProstMessage for PushNodeState {
   #[allow(unused_variables)]
   fn encode_raw<B>(&self, buf: &mut B)
   where
@@ -1133,4 +1133,213 @@ fn test_push_state_enc_dec() {
   push_state.encode(&mut buf).unwrap();
   let val = PushNodeState::decode(&mut buf).unwrap();
   assert_eq!(val, push_state);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Message(pub(crate) BytesMut);
+
+impl Default for Message {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+impl Message {
+  const PREFIX_SIZE: usize = 5;
+
+  #[inline]
+  pub fn new() -> Self {
+    let mut this = BytesMut::with_capacity(Self::PREFIX_SIZE);
+    this.put_u8(MessageType::User as u8);
+    this.put_slice(&[0; core::mem::size_of::<u32>()]);
+    Self(this)
+  }
+
+  #[inline]
+  pub fn with_capacity(cap: usize) -> Self {
+    let mut this = BytesMut::with_capacity(cap + Self::PREFIX_SIZE);
+    this.put_u8(MessageType::User as u8);
+    this.put_slice(&[0; core::mem::size_of::<u32>()]);
+    Self(this)
+  }
+
+  #[inline]
+  pub fn resize(&mut self, new_len: usize, val: u8) {
+    self.0.resize(new_len + Self::PREFIX_SIZE, val);
+  }
+
+  #[inline]
+  pub fn reserve(&mut self, additional: usize) {
+    self.0.reserve(additional);
+  }
+
+  #[inline]
+  pub fn remaining(&self) -> usize {
+    self.0.remaining()
+  }
+
+  #[inline]
+  pub fn remaining_mut(&self) -> usize {
+    self.0.remaining_mut()
+  }
+
+  #[inline]
+  pub fn truncate(&mut self, len: usize) {
+    self.0.truncate(len + Self::PREFIX_SIZE);
+  }
+
+  #[inline]
+  pub fn put_slice(&mut self, buf: &[u8]) {
+    self.0.put_slice(buf);
+  }
+
+  #[inline]
+  pub fn put_u8(&mut self, val: u8) {
+    self.0.put_u8(val);
+  }
+
+  #[inline]
+  pub fn put_u16(&mut self, val: u16) {
+    self.0.put_u16(val);
+  }
+
+  #[inline]
+  pub fn put_u16_le(&mut self, val: u16) {
+    self.0.put_u16_le(val);
+  }
+
+  #[inline]
+  pub fn put_u32(&mut self, val: u32) {
+    self.0.put_u32(val);
+  }
+
+  #[inline]
+  pub fn put_u32_le(&mut self, val: u32) {
+    self.0.put_u32_le(val);
+  }
+
+  #[inline]
+  pub fn put_u64(&mut self, val: u64) {
+    self.0.put_u64(val);
+  }
+
+  #[inline]
+  pub fn put_u64_le(&mut self, val: u64) {
+    self.0.put_u64_le(val);
+  }
+
+  #[inline]
+  pub fn put_i8(&mut self, val: i8) {
+    self.0.put_i8(val);
+  }
+
+  #[inline]
+  pub fn put_i16(&mut self, val: i16) {
+    self.0.put_i16(val);
+  }
+
+  #[inline]
+  pub fn put_i16_le(&mut self, val: i16) {
+    self.0.put_i16_le(val);
+  }
+
+  #[inline]
+  pub fn put_i32(&mut self, val: i32) {
+    self.0.put_i32(val);
+  }
+
+  #[inline]
+  pub fn put_i32_le(&mut self, val: i32) {
+    self.0.put_i32_le(val);
+  }
+
+  #[inline]
+  pub fn put_i64(&mut self, val: i64) {
+    self.0.put_i64(val);
+  }
+
+  #[inline]
+  pub fn put_i64_le(&mut self, val: i64) {
+    self.0.put_i64_le(val);
+  }
+
+  #[inline]
+  pub fn put_f32(&mut self, val: f32) {
+    self.0.put_f32(val);
+  }
+
+  #[inline]
+  pub fn put_f32_le(&mut self, val: f32) {
+    self.0.put_f32_le(val);
+  }
+
+  #[inline]
+  pub fn put_f64(&mut self, val: f64) {
+    self.0.put_f64(val);
+  }
+
+  #[inline]
+  pub fn put_f64_le(&mut self, val: f64) {
+    self.0.put_f64_le(val);
+  }
+
+  #[inline]
+  pub fn put_bool(&mut self, val: bool) {
+    self.0.put_u8(val as u8);
+  }
+
+  #[inline]
+  pub fn put_bytes(&mut self, val: u8, cnt: usize) {
+    self.0.put_bytes(val, cnt);
+  }
+
+  #[inline]
+  pub fn clear(&mut self) {
+    let mt = self.0[0];
+    self.0.clear();
+    self.0.put_u8(mt);
+  }
+
+  #[inline]
+  pub fn as_slice(&self) -> &[u8] {
+    &self.0[Self::PREFIX_SIZE..]
+  }
+
+  #[inline]
+  pub fn as_slice_mut(&mut self) -> &mut [u8] {
+    &mut self.0[Self::PREFIX_SIZE..]
+  }
+
+  #[inline]
+  pub(crate) fn freeze(mut self) -> Bytes {
+    let size = self.0.len() - Self::PREFIX_SIZE;
+    self.0[1..Self::PREFIX_SIZE].copy_from_slice(&(size as u32).to_be_bytes());
+    self.0.freeze()
+  }
+}
+
+impl Deref for Message {
+  type Target = [u8];
+
+  fn deref(&self) -> &Self::Target {
+    &self.0[Self::PREFIX_SIZE..]
+  }
+}
+
+impl DerefMut for Message {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    &mut self.0[Self::PREFIX_SIZE..]
+  }
+}
+
+impl AsRef<[u8]> for Message {
+  fn as_ref(&self) -> &[u8] {
+    &self.0[Self::PREFIX_SIZE..]
+  }
+}
+
+impl AsMut<[u8]> for Message {
+  fn as_mut(&mut self) -> &mut [u8] {
+    &mut self.0[Self::PREFIX_SIZE..]
+  }
 }

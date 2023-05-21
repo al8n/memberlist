@@ -1,8 +1,12 @@
 #![forbid(unsafe_code)]
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, time::Instant};
+use std::{
+  net::SocketAddr,
+  ops::{Deref, DerefMut},
+  time::Instant,
+};
 
 pub use bytes;
 pub use smol_str::SmolStr;

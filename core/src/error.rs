@@ -16,6 +16,8 @@ pub enum Error {
   LargeRemoteState(usize),
   #[error("showbiz: security error {0}")]
   Security(#[from] crate::security::SecurityError),
+  #[error("showbiz: node names are required by configuration but one was not provided")]
+  MissingNodeName,
 }
 
 impl PartialEq for Error {

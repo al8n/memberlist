@@ -344,6 +344,7 @@ where
         .nodes
         .read()
         .await
+        .nodes
         .iter()
         .map(|n| {
           let this = PushNodeState {
@@ -493,7 +494,7 @@ where
     }
   }
 
-  async fn raw_send_msg_stream(
+  pub(crate) async fn raw_send_msg_stream(
     &self,
     mut lr: LabeledConnection<T::Connection>,
     mut buf: Bytes,
