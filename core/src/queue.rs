@@ -1,11 +1,12 @@
 use std::{
   collections::{BTreeSet, HashMap},
   sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU32, AtomicUsize, Ordering},
     Arc,
   },
 };
 
+use crossbeam_utils::CachePadded;
 use showbiz_traits::Broadcast;
 use showbiz_types::SmolStr;
 
@@ -39,6 +40,22 @@ impl<B: Broadcast> Inner<B> {
       self.m.insert(name.clone(), item.clone());
     }
     self.q.insert(item);
+  }
+}
+
+#[derive(Clone)]
+pub(crate) struct DefaultNodeCalculator(Arc<CachePadded<AtomicU32>>);
+
+impl NodeCalculator for DefaultNodeCalculator {
+  fn num_nodes(&self) -> usize {
+    self.0.load(Ordering::SeqCst) as usize
+  }
+}
+
+impl DefaultNodeCalculator {
+  #[inline]
+  pub(crate) const fn new(num: Arc<CachePadded<AtomicU32>>) -> Self {
+    Self(num)
   }
 }
 

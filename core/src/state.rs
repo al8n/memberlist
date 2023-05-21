@@ -1,15 +1,16 @@
 use std::{net::SocketAddr, sync::Arc, time::Instant};
 
 use super::{error::Error, showbiz::Showbiz, types::PushNodeState};
-use showbiz_traits::{Delegate, Transport};
+use showbiz_traits::{Broadcast, Delegate, Transport};
 use showbiz_types::{Address, Node, NodeState};
+
+mod r#async;
 
 #[viewit::viewit]
 #[derive(Debug, Clone)]
 pub(crate) struct LocalNodeState {
   node: Arc<Node>,
   incarnation: u32,
-  state: NodeState,
   state_change: Instant,
 }
 
@@ -24,18 +25,74 @@ impl LocalNodeState {
 
   #[inline]
   pub(crate) fn dead_or_left(&self) -> bool {
-    self.state == NodeState::Dead || self.state == NodeState::Left
+    self.node.state == NodeState::Dead || self.node.state == NodeState::Left
   }
 }
 
-impl<T, D> Showbiz<T, D>
+// private implementation
+impl<B, T, D> Showbiz<B, T, D>
 where
+  B: Broadcast,
   T: Transport,
   D: Delegate,
 {
-  pub(crate) async fn merge_state(&self, remote: Vec<PushNodeState>) -> Result<(), Error<T, D>> {
-    // TODO: implement
+  /// Returns a usable sequence number in a thread safe way
+  #[inline]
+  pub(crate) fn next_seq_no(&self) -> u32 {
+    self
+      .inner
+      .hot
+      .sequence_num
+      .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+  }
 
-    Ok(())
+  /// Returns the next incarnation number in a thread safe way
+  #[inline]
+  pub(crate) fn next_incarnation(&self) -> u32 {
+    self
+      .inner
+      .hot
+      .incarnation
+      .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+  }
+
+  /// Adds the positive offset to the incarnation number.
+  #[inline]
+  pub(crate) fn skip_incarnation(&self, offset: u32) -> u32 {
+    self
+      .inner
+      .hot
+      .incarnation
+      .fetch_add(offset, std::sync::atomic::Ordering::SeqCst)
+  }
+
+  /// Used to get the current estimate of the number of nodes
+  #[inline]
+  pub(crate) fn estimate_num_nodes(&self) -> u32 {
+    self
+      .inner
+      .hot
+      .num_nodes
+      .load(std::sync::atomic::Ordering::SeqCst)
+  }
+
+  #[inline]
+  pub(crate) fn has_shutdown(&self) -> bool {
+    self
+      .inner
+      .hot
+      .shutdown
+      .load(std::sync::atomic::Ordering::SeqCst)
+      == 1
+  }
+
+  #[inline]
+  pub(crate) fn has_left(&self) -> bool {
+    self
+      .inner
+      .hot
+      .leave
+      .load(std::sync::atomic::Ordering::SeqCst)
+      == 1
   }
 }

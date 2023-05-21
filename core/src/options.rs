@@ -7,6 +7,8 @@ use std::{
 
 use bytes::Bytes;
 
+use crate::security::MAX_ENCRYPTION_VERSION;
+
 use super::{keyring::SecretKey, security::EncryptionAlgo, types::CompressionAlgo};
 use showbiz_types::Name;
 
@@ -232,6 +234,18 @@ impl Default for Options {
 }
 
 impl Options {
+  #[inline]
+  pub const fn build_vsn_array(&self) -> [u8; 6] {
+    [
+      MAX_ENCRYPTION_VERSION as u8,
+      MAX_ENCRYPTION_VERSION as u8,
+      self.encryption_algo as u8,
+      self.delegate_protocol_min,
+      self.delegate_protocol_max,
+      self.delegate_protocol_version,
+    ]
+  }
+
   /// Returns a sane set of configurations for Memberlist.
   /// It uses the hostname as the node name, and otherwise sets very conservative
   /// values that are sane for most LAN environments. The default configuration

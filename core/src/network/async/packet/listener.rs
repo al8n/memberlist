@@ -1,7 +1,8 @@
 use super::*;
 
-impl<T, D> Showbiz<T, D>
+impl<B, T, D> Showbiz<B, T, D>
 where
+  B: Broadcast,
   T: Transport,
   D: Delegate,
 {
@@ -11,13 +12,15 @@ where
     S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
   {
     let this = self.clone();
+    let shutdown_rx = this.inner.shutdown_rx.clone();
+    let transport_rx = this.inner.transport.packet().clone();
     (spawner)(Box::pin(async move {
       loop {
         futures_util::select! {
-          _ = this.inner.shutdown_rx.recv().fuse() => {
+          _ = shutdown_rx.recv().fuse() => {
             return;
           }
-          packet = this.inner.transport.packet().recv().fuse() => {
+          packet = transport_rx.recv().fuse() => {
             match packet {
               Ok(packet) => this.ingest_packet(packet).await,
               Err(e) => tracing::error!(target = "showbiz", "failed to receive packet: {}", e),

@@ -52,13 +52,13 @@ impl InnerError {
   }
 }
 
-impl<D: Delegate, T: Transport> Showbiz<T, D> {
+impl<B: Broadcast, D: Delegate, T: Transport> Showbiz<B, T, D> {
   async fn encrypt_local_state(
     keyring: &SecretKeyring,
     msg: &[u8],
     label: &[u8],
     algo: EncryptionAlgo,
-  ) -> Result<Bytes, Error<T, D>> {
+  ) -> Result<Bytes, Error<B, T, D>> {
     let enc_len = encrypted_length(algo, msg.len());
     let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
     let mut buf = BytesMut::with_capacity(meta_size + enc_len);
@@ -101,7 +101,7 @@ impl<D: Delegate, T: Transport> Showbiz<T, D> {
   async fn decrypt_remote_state<R: AsyncRead + std::marker::Unpin>(
     r: &mut LabeledConnection<R>,
     keyring: &SecretKeyring,
-  ) -> Result<Bytes, Error<T, D>> {
+  ) -> Result<Bytes, Error<B, T, D>> {
     let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
     let mut buf = BytesMut::with_capacity(meta_size);
     buf.put_u8(MessageType::Encrypt as u8);

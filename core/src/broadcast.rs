@@ -14,6 +14,12 @@ pub(crate) struct ShowbizBroadcast {
 
 #[cfg_attr(feature = "async", async_trait::async_trait)]
 impl Broadcast for ShowbizBroadcast {
+  #[cfg(feature = "async")]
+  type Error = async_channel::SendError<()>;
+
+  #[cfg(not(feature = "async"))]
+  type Error = crossbeam_channel::SendError<()>;
+
   fn name(&self) -> Option<&SmolStr> {
     self.name.as_ref()
   }
@@ -27,17 +33,21 @@ impl Broadcast for ShowbizBroadcast {
   }
 
   #[cfg(feature = "async")]
-  async fn finished(&self) {
+  async fn finished(&self) -> Result<(), Self::Error> {
     if let Err(e) = self.notify.send(()).await {
       tracing::error!(target = "showbiz", "failed to notify: {}", e);
+      return Err(e);
     }
+    Ok(())
   }
 
   #[cfg(not(feature = "async"))]
-  fn finished(&self) {
+  fn finished(&self) -> Result<(), Self::Error> {
     if let Err(e) = self.notify.send(()) {
       tracing::error!(target = "showbiz", "failed to notify: {}", e);
+      return Err(e);
     }
+    Ok(())
   }
 
   fn is_unique(&self) -> bool {

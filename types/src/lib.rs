@@ -3,7 +3,7 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::{
-  net::SocketAddr,
+  net::{IpAddr, SocketAddr},
   ops::{Deref, DerefMut},
   time::Instant,
 };
@@ -221,6 +221,56 @@ impl core::str::FromStr for NodeState {
   }
 }
 
+/// Represents a node in the cluster, can be thought as an identifier for a node
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct RemoteNode {
+  pub name: Option<Name>,
+  pub addr: IpAddr,
+  pub port: Option<u16>,
+}
+
+impl RemoteNode {
+  /// Construct a new remote node identifier with the given ip addr.
+  #[inline]
+  pub const fn new(addr: IpAddr) -> Self {
+    Self {
+      name: None,
+      addr,
+      port: None,
+    }
+  }
+
+  /// With the given name
+  #[inline]
+  pub fn with_name(mut self, name: Option<Name>) -> Self {
+    self.name = name;
+    self
+  }
+
+  /// With the given port
+  #[inline]
+  pub fn with_port(mut self, port: Option<u16>) -> Self {
+    self.port = port;
+    self
+  }
+
+  /// Return the node name
+  #[inline]
+  pub const fn name(&self) -> Option<&Name> {
+    self.name.as_ref()
+  }
+
+  #[inline]
+  pub const fn ip(&self) -> IpAddr {
+    self.addr
+  }
+
+  #[inline]
+  pub const fn port(&self) -> Option<u16> {
+    self.port
+  }
+}
+
 /// Represents a node in the cluster
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -261,6 +311,12 @@ impl Node {
       dmax: 0,
       dcur: 0,
     }
+  }
+
+  /// Return the node name
+  #[inline]
+  pub fn name(&self) -> &str {
+    self.full_address.name.as_ref()
   }
 
   #[inline]

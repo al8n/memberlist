@@ -1,5 +1,6 @@
 use bytes::BufMut;
 use prost::Message;
+use showbiz_types::SmolStr;
 
 use super::CompressionAlgo;
 
@@ -50,4 +51,118 @@ pub(crate) fn encode<B: BufMut, M: Message>(
 #[inline]
 pub(crate) fn decode<M: Message + Default>(buf: &[u8]) -> Result<M, prost::DecodeError> {
   M::decode(buf)
+}
+
+/// Returns the host:port form of an address, for use with a
+/// transport.
+#[inline]
+fn join_host_port(host: &str, port: u16) -> SmolStr {
+  // We assume that host is a literal IPv6 address if host has
+  // colons.
+  if host.find(':').is_some() {
+    return format!("[{}]:{}", host, port).into();
+  }
+  format!("{}:{}", host, port).into()
+}
+
+/// Given a string of the form "host", "host:port", "ipv6::address",
+/// or "\[ipv6::address\]:port", and returns true if the string includes a port.
+#[inline]
+pub(crate) fn has_port(s: &str) -> bool {
+  // IPv6 address in brackets.
+  if s.starts_with('[') {
+    s.rfind(':') > s.rfind(']')
+  } else {
+    // Otherwise the presence of a single colon determines if there's a port
+    // since IPv6 addresses outside of brackets (count > 1) can't have a
+    // port.
+    s.matches(':').count() == 1
+  }
+}
+
+/// Makes sure the given string has a port number on it, otherwise it
+/// appends the given port as a default.
+#[inline]
+pub(crate) fn ensure_port(s: &SmolStr, port: u16) -> SmolStr {
+  if has_port(s) {
+    s.clone()
+  } else {
+    let s = s.trim_matches(|c| c == '[' || c == ']');
+    join_host_port(s, port)
+  }
+}
+
+#[derive(Debug)]
+pub struct InvalidAddress {
+  pub err: &'static str,
+  pub addr: SmolStr,
+}
+
+impl core::fmt::Display for InvalidAddress {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(f, "{}: {}", self.addr, self.err)
+  }
+}
+
+impl std::error::Error for InvalidAddress {}
+
+#[inline]
+fn addr_err(addr: &SmolStr, why: &'static str) -> Result<(String, u16), InvalidAddress> {
+  Err(InvalidAddress {
+    err: why,
+    addr: addr.clone(),
+  })
+}
+
+pub(crate) fn split_host_port(hostport: &SmolStr) -> Result<(String, u16), InvalidAddress> {
+  let missing_port = "missing port in address";
+  let too_many_colons = "too many colons in address";
+  let (mut j, mut k) = (0, 0);
+  let mut host = String::new();
+
+  let last_colon_index = match hostport.rfind(':') {
+    Some(index) => index,
+    None => return addr_err(hostport, missing_port),
+  };
+
+  if hostport.starts_with('[') {
+    let end = match hostport.find(']') {
+      Some(index) => index,
+      None => return addr_err(hostport, "missing ']' in address"),
+    };
+    if end + 1 == hostport.len() {
+      return addr_err(hostport, missing_port);
+    }
+    if end + 1 != last_colon_index {
+      return if hostport.chars().nth(end + 1).unwrap() == ':' {
+        addr_err(hostport, too_many_colons)
+      } else {
+        addr_err(hostport, missing_port)
+      };
+    }
+    host = hostport[1..end].to_string();
+    j = 1;
+    k = end + 1;
+  } else {
+    host = hostport[..last_colon_index].to_string();
+    if host.contains(':') {
+      return addr_err(hostport, too_many_colons);
+    }
+  }
+
+  if hostport[j..].contains('[') {
+    return addr_err(hostport, "unexpected '[' in address");
+  }
+
+  if hostport[k..].contains(']') {
+    return addr_err(hostport, "unexpected ']' in address");
+  }
+
+  match u16::from_str_radix(&hostport[last_colon_index + 1..], 10) {
+    Ok(port) => Ok((host, port)),
+    Err(e) => Err(InvalidAddress {
+      err: "invalid port",
+      addr: hostport.clone(),
+    }),
+  }
 }

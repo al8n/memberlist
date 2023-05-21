@@ -5,6 +5,7 @@ use std::{
     atomic::{AtomicBool, AtomicU32},
     Arc,
   },
+  time::Instant,
 };
 
 #[cfg(feature = "async")]
@@ -20,15 +21,24 @@ use async_channel::{Receiver, Sender};
 #[cfg(not(feature = "async"))]
 use crossbeam_channel::{Receiver, Sender};
 
-use showbiz_traits::{Connection, Delegate, Transport, VoidDelegate};
-use showbiz_types::{Address, MessageType, Name, Node};
+use showbiz_traits::{Broadcast, Connection, Delegate, Transport, VoidDelegate};
+use showbiz_types::{Address, MessageType, Name, Node, NodeState};
 
-use crate::{label::LabeledConnection, types::Message};
+use crate::{
+  awareness::Awareness,
+  label::LabeledConnection,
+  network::META_MAX_SIZE,
+  queue::DefaultNodeCalculator,
+  types::{Alive, Message},
+  TransmitLimitedQueue,
+};
 
 use super::{
   error::Error, state::LocalNodeState, suspicion::Suspicion, types::PushNodeState, Options,
   SecretKeyring,
 };
+
+mod r#async;
 
 impl Options {
   #[inline]
@@ -108,47 +118,16 @@ where
       keyring,
     }
   }
-
-  pub fn finalize(self) -> Showbiz<T, D> {
-    let Self {
-      opts,
-      transport,
-      delegate,
-      keyring,
-    } = self;
-
-    let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
-    let (handoff_tx, handoff_rx) = async_channel::bounded(1);
-
-    Showbiz {
-      inner: Arc::new(ShowbizCore {
-        hot: HotData::new(),
-        advertise: todo!(),
-        shutdown_lock: Mutex::new(()),
-        leave_lock: Mutex::new(()),
-        opts: Arc::new(opts),
-        transport: Arc::new(transport),
-        delegate: delegate.map(Arc::new),
-        keyring,
-        shutdown_rx,
-        shutdown_tx,
-        handoff_tx,
-        handoff_rx,
-        queue: Mutex::new(MessageQueue::new()),
-        nodes: RwLock::new(Default::default()),
-      }),
-    }
-  }
 }
 
 #[viewit::viewit]
 pub(crate) struct HotData {
   sequence_num: CachePadded<AtomicU32>,
   incarnation: CachePadded<AtomicU32>,
-  num_nodes: CachePadded<AtomicU32>,
   push_pull_req: CachePadded<AtomicU32>,
   shutdown: CachePadded<AtomicU32>,
   leave: CachePadded<AtomicU32>,
+  num_nodes: Arc<CachePadded<AtomicU32>>,
 }
 
 impl HotData {
@@ -156,7 +135,7 @@ impl HotData {
     Self {
       sequence_num: CachePadded::new(AtomicU32::new(0)),
       incarnation: CachePadded::new(AtomicU32::new(0)),
-      num_nodes: CachePadded::new(AtomicU32::new(0)),
+      num_nodes: Arc::new(CachePadded::new(AtomicU32::new(0))),
       push_pull_req: CachePadded::new(AtomicU32::new(0)),
       shutdown: CachePadded::new(AtomicU32::new(0)),
       leave: CachePadded::new(AtomicU32::new(0)),
@@ -194,15 +173,19 @@ impl MessageQueue {
 }
 
 #[viewit::viewit]
-pub(crate) struct Nodes {
+pub(crate) struct Memberlist {
+  /// self
+  local: LocalNodeState,
+  /// remote nodes
   nodes: Vec<LocalNodeState>,
-  node_map: HashMap<SocketAddr, LocalNodeState>,
-  node_timers: HashMap<SocketAddr, Suspicion>,
+  node_map: HashMap<Name, LocalNodeState>,
+  node_timers: HashMap<Name, Suspicion>,
 }
 
-impl Default for Nodes {
-  fn default() -> Self {
+impl Memberlist {
+  fn new(local: LocalNodeState) -> Self {
     Self {
+      local,
       nodes: Vec::new(),
       node_map: HashMap::new(),
       node_timers: HashMap::new(),
@@ -211,145 +194,38 @@ impl Default for Nodes {
 }
 
 #[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct ShowbizCore<T: Transport, D = VoidDelegate> {
+pub(crate) struct ShowbizCore<B: Broadcast, T: Transport, D = VoidDelegate> {
   hot: HotData,
+  awareness: Awareness,
   advertise: RwLock<SocketAddr>,
-  // Serializes calls to Shutdown
-  shutdown_lock: Mutex<()>,
+  broadcast: TransmitLimitedQueue<B, DefaultNodeCalculator>,
   shutdown_rx: Receiver<()>,
   shutdown_tx: Sender<()>,
   // Serializes calls to Leave
   leave_lock: Mutex<()>,
   opts: Arc<Options>,
-  transport: Arc<T>,
+  transport: T,
   keyring: Option<SecretKeyring>,
-  delegate: Option<Arc<D>>,
+  delegate: Option<D>,
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue>,
-
-  nodes: RwLock<Nodes>,
+  nodes: RwLock<Memberlist>,
 }
 
-pub struct Showbiz<T: Transport, D = VoidDelegate> {
-  pub(crate) inner: Arc<ShowbizCore<T, D>>,
+pub struct Showbiz<B: Broadcast, T: Transport, D = VoidDelegate> {
+  pub(crate) inner: Arc<ShowbizCore<B, T, D>>,
 }
 
-impl<T, D> Clone for Showbiz<T, D>
+impl<B, T, D> Clone for Showbiz<B, T, D>
 where
+  B: Broadcast,
   T: Transport,
   D: Delegate,
 {
   fn clone(&self) -> Self {
     Self {
       inner: self.inner.clone(),
-    }
-  }
-}
-
-impl<T, D> Showbiz<T, D>
-where
-  T: Transport,
-  D: Delegate,
-{
-  /// Uses the unreliable packet-oriented interface of the transport
-  /// to target a user message at the given node (this does not use the gossip
-  /// mechanism). The maximum size of the message depends on the configured
-  /// `packet_buffer_size` for this memberlist instance.
-  pub async fn send_best_effort(&self, to: &Node, mut msg: Vec<u8>) -> Result<(), Error<T, D>> {
-    // Encode as a user message
-
-    // TODO: implement
-    Ok(())
-  }
-
-  /// Uses the reliable stream-oriented interface of the transport to
-  /// target a user message at the given node (this does not use the gossip
-  /// mechanism). Delivery is guaranteed if no error is returned, and there is no
-  /// limit on the size of the message.
-  #[inline]
-  pub async fn send_reliable(&self, to: &Node, mut msg: Message) -> Result<(), Error<T, D>> {
-    self.send_user_msg(to.full_address(), msg).await
-  }
-
-  async fn send_user_msg(&self, addr: &Address, msg: Message) -> Result<(), Error<T, D>> {
-    if addr.name().is_empty() && self.inner.opts.require_node_names {
-      return Err(Error::MissingNodeName);
-    }
-    let mut conn = self
-      .inner
-      .transport
-      .dial_timeout(addr.addr(), self.inner.opts.tcp_timeout)
-      .await
-      .map_err(Error::transport)?;
-
-    // self
-    //   .raw_send_msg_stream(
-    //     LabeledConnection::new(BufReader::new(conn)),
-    //     msg.freeze(),
-    //     Some(addr.addr()).as_ref(),
-    //     self.encryption_enabled().await,
-    //   )
-    //   .await
-    todo!()
-  }
-
-  /// Returns a list of all known live nodes.
-  #[inline]
-  pub async fn members(&self) -> Vec<Arc<Node>> {
-    self
-      .inner
-      .nodes
-      .read()
-      .await
-      .nodes
-      .iter()
-      .map(|n| n.node.clone())
-      .collect()
-  }
-
-  #[inline]
-  pub(crate) fn has_shutdown(&self) -> bool {
-    self
-      .inner
-      .hot
-      .shutdown
-      .load(std::sync::atomic::Ordering::SeqCst)
-      == 1
-  }
-
-  #[inline]
-  pub(crate) fn has_left(&self) -> bool {
-    self
-      .inner
-      .hot
-      .leave
-      .load(std::sync::atomic::Ordering::SeqCst)
-      == 1
-  }
-
-  #[cfg(test)]
-  pub(crate) async fn change_node<F>(&self, addr: SocketAddr, mut f: F)
-  where
-    F: Fn(&LocalNodeState),
-  {
-    let mut nodes = self.inner.nodes.write().await;
-    if let Some(n) = nodes.node_map.get_mut(&addr) {
-      f(n)
-    }
-  }
-
-  pub(crate) async fn verify_protocol(&self, remote: &[PushNodeState]) -> Result<(), Error<T, D>> {
-    // TODO: implement
-
-    Ok(())
-  }
-
-  pub(crate) async fn encryption_enabled(&self) -> bool {
-    if let Some(keyring) = &self.inner.keyring {
-      !keyring.lock().await.is_empty()
-    } else {
-      false
     }
   }
 }

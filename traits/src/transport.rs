@@ -101,15 +101,12 @@ mod r#async {
     /// Called when memberlist is shutting down; this gives the
     /// transport a chance to clean up any listeners.
     async fn shutdown(self) -> Result<(), Self::Error>;
-  }
 
-  #[async_trait::async_trait]
-  pub trait NodeAwareTransport: Transport {
-    async fn write_to_address(&self, b: &[u8], addr: Address) -> Result<Instant, Self::Error>;
+    async fn write_to_address(&self, b: &[u8], addr: &Address) -> Result<Instant, Self::Error>;
 
     async fn dial_address_timeout(
       &self,
-      addr: Address,
+      addr: &Address,
       timeout: Duration,
     ) -> Result<Self::Connection, Self::Error>;
   }
@@ -574,14 +571,12 @@ mod sync {
     /// Called when memberlist is shutting down; this gives the
     /// transport a chance to clean up any listeners.
     fn shutdown(self) -> Result<(), Self::Error>;
-  }
 
-  pub trait NodeAwareTransport: Transport {
-    fn write_to_address(&self, b: &[u8], addr: Address) -> Result<Instant, Self::Error>;
+    fn write_to_address(&self, b: &[u8], addr: &Address) -> Result<Instant, Self::Error>;
 
     fn dial_address_timeout(
       &self,
-      addr: Address,
+      addr: &Address,
       timeout: Duration,
     ) -> Result<Self::Connection, Self::Error>;
   }

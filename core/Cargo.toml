@@ -8,7 +8,7 @@ edition = { workspace= true }
 
 [features]
 default = ["async"]
-async = ["async-channel", "async-trait", "async-lock", "futures-timer", "futures-util", "showbiz-traits/async", "futures-io", "pin-project-lite"]
+async = ["async-channel", "async-trait", "async-lock", "futures-timer", "futures-util", "futures-channel", "showbiz-traits/async", "futures-io", "pin-project-lite"]
 # sync = ["crossbeam-channel", "showbiz-traits/sync", "parking_lot"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -30,6 +30,7 @@ async-channel = { version = "1.8", optional = true }
 async-lock = { version = "2.7", optional = true }
 async-trait = { version = "0.1", optional = true }
 futures-timer = { version = "3", optional = true }
+futures-channel = { version = "0.3", optional = true }
 futures-util = { version = "0.3", optional = true, features = ["io"] }
 futures-io = { version = "0.3", optional = true }
 pin-project-lite = { version = "0.2", optional = true }
@@ -44,8 +45,6 @@ indexmap = { version = "1.9", features = ["serde-1"] }
 ipnet = { version = "2.7", features = ["serde"] }
 metrics = "0.20"
 prost = { version = "0.11" }
-rmp = "0.8"
-rmp-serde = "1.1"
 rand = { version = "0.8" }
 scopeguard = "1.1"
 showbiz-types = { path = "../types" }
@@ -53,6 +52,8 @@ showbiz-traits = { path = "../traits", default-features = false }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 tracing = { workspace = true }
+trust-dns-resolver = { version = "0.22", default-features = false, features = ["system-config"] }
+url = "2.3"
 viewit = { workspace = true }
 wg = "0.3"
 weezl = "0.1"

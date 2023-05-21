@@ -1,10 +1,12 @@
+use futures_util::io::BufReader;
 use prost::Message;
 use showbiz_types::{Address, Node};
 
 use super::*;
 
-impl<T, D> Showbiz<T, D>
+impl<B, T, D> Showbiz<B, T, D>
 where
+  B: Broadcast,
   T: Transport,
   D: Delegate,
 {
@@ -16,13 +18,15 @@ where
     S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
   {
     let this = self.clone();
+    let transport_rx = this.inner.transport.stream().clone();
+    let shutdown_rx = this.inner.shutdown_rx.clone();
     (spawner)(Box::pin(async move {
       loop {
         futures_util::select! {
-          _ = this.inner.shutdown_rx.recv().fuse() => {
+          _ = shutdown_rx.recv().fuse() => {
             return;
           }
-          conn = this.inner.transport.stream().recv().fuse() => {
+          conn = transport_rx.recv().fuse() => {
             let this = this.clone();
             (spawner)(async move {
               match conn {
@@ -325,7 +329,7 @@ where
     addr: Option<&SocketAddr>,
     encryption_enabled: bool,
     join: bool,
-  ) -> Result<(), Error<T, D>> {
+  ) -> Result<(), Error<B, T, D>> {
     // Setup a deadline
     lr.conn
       .get_mut()
@@ -347,7 +351,7 @@ where
             addr: EncodableSocketAddr::Local(n.address()),
             meta: n.node.meta().clone(),
             incarnation: n.incarnation,
-            state: n.state,
+            state: n.node.state,
             vsn: n.node.vsn(),
           };
 
@@ -397,7 +401,7 @@ where
   }
 
   /// Used to merge the remote state with our local state
-  async fn merge_remote_state(&self, node_state: RemoteNodeState) -> Result<(), Error<T, D>> {
+  async fn merge_remote_state(&self, node_state: RemoteNodeState) -> Result<(), Error<B, T, D>> {
     self.verify_protocol(&node_state.push_states).await?;
 
     // Invoke the merge delegate if any
@@ -486,13 +490,40 @@ where
     }
   }
 
-  pub(crate) async fn raw_send_msg_stream(
+  pub(crate) async fn send_user_msg(
+    &self,
+    addr: &Address,
+    msg: crate::types::Message,
+  ) -> Result<(), Error<B, T, D>> {
+    if addr.name().is_empty() && self.inner.opts.require_node_names {
+      return Err(Error::MissingNodeName);
+    }
+    let conn = self
+      .inner
+      .transport
+      .dial_address_timeout(addr, self.inner.opts.tcp_timeout)
+      .await
+      .map_err(Error::transport)?;
+
+    let mut lr = LabeledConnection::new(BufReader::new(conn));
+    lr.set_label(self.inner.opts.label.clone());
+    self
+      .raw_send_msg_stream(
+        lr,
+        msg.freeze(),
+        Some(addr.addr()).as_ref(),
+        self.encryption_enabled().await,
+      )
+      .await
+  }
+
+  async fn raw_send_msg_stream(
     &self,
     mut lr: LabeledConnection<T::Connection>,
     mut buf: Bytes,
     addr: Option<&SocketAddr>,
     encryption_enabled: bool,
-  ) -> Result<(), Error<T, D>> {
+  ) -> Result<(), Error<B, T, D>> {
     // Check if compression is enabled
     if !self.inner.opts.compression_algo.is_none() {
       buf = match compress_payload(self.inner.opts.compression_algo, &buf) {
