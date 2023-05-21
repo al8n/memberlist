@@ -11,7 +11,7 @@ pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
 const LZW_LIT_WIDTH: u8 = 8;
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum CompressError {
+pub enum CompressError {
   #[error("{0}")]
   LZW(#[from] weezl::LzwError),
 }

@@ -1,7 +1,8 @@
+use showbiz_traits::{Delegate, Transport};
 use showbiz_types::InvalidMessageType;
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub enum Error<T: Transport, D: Delegate> {
   #[error("showbiz: label is too long. expected at most 255 bytes, got {0}")]
   LabelTooLong(usize),
   #[error("showbiz: invalid message type {0}")]
@@ -18,9 +19,31 @@ pub enum Error {
   Security(#[from] crate::security::SecurityError),
   #[error("showbiz: node names are required by configuration but one was not provided")]
   MissingNodeName,
+  #[error("showbiz: {0}")]
+  Compression(#[from] crate::util::CompressError),
+  #[error("showbiz: {0}")]
+  Encode(#[from] prost::EncodeError),
+  #[error("showbiz: {0}")]
+  Decode(#[from] prost::DecodeError),
+  #[error("showbiz: {0}")]
+  Delegate(D::Error),
+  #[error("showbiz: {0}")]
+  Transport(T::Error),
 }
 
-impl PartialEq for Error {
+impl<D: Delegate, T: Transport> Error<T, D> {
+  #[inline]
+  pub fn delegate(e: D::Error) -> Self {
+    Self::Delegate(e)
+  }
+
+  #[inline]
+  pub fn transport(e: T::Error) -> Self {
+    Self::Transport(e)
+  }
+}
+
+impl<D: Delegate, T: Transport> PartialEq for Error<T, D> {
   fn eq(&self, other: &Self) -> bool {
     match (self, other) {
       (Self::LabelTooLong(a), Self::LabelTooLong(b)) => a == b,

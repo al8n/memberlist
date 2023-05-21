@@ -54,7 +54,7 @@ mod r#async {
   /// be reliable.
   #[async_trait::async_trait]
   pub trait Transport: Send + Sync + 'static {
-    type Error: std::error::Error + Send + Sync + 'static;
+    type Error: std::error::Error + From<std::io::Error> + Send + Sync + 'static;
     type Connection: Connection + std::marker::Unpin;
     type Options;
 

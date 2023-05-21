@@ -1,6 +1,6 @@
 use std::{
   cell::RefCell,
-  net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+  net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
   ops::{Deref, DerefMut},
   thread_local,
 };
@@ -8,7 +8,7 @@ use std::{
 use prost::{
   bytes::{Buf, BufMut, Bytes, BytesMut},
   encoding::{bool, bytes, int32, skip_field, uint32, DecodeContext, WireType},
-  DecodeError, EncodeError, ProstMessage,
+  DecodeError, EncodeError, Message as ProstMessage,
 };
 use serde::{Deserialize, Serialize};
 use showbiz_types::{MessageType, Name, NodeState};
@@ -334,7 +334,7 @@ macro_rules! msg_ext {
         fn encode_with_prefix(&self) -> Result<Bytes, EncodeError> {
           let encoded_len = self.encoded_len();
           let mut buf = BytesMut::with_capacity(1 + 4 + encoded_len);
-          buf.put_u8(ProstMessageType::$ty as u8);
+          buf.put_u8(MessageType::$ty as u8);
           buf.put_u32(encoded_len as u32);
           self.encode(&mut buf).map(|_| buf.freeze())
         }
@@ -517,7 +517,7 @@ impl ProstMessage for AckResponse {
 /// the ping-ee within the configured timeout. This lets the original node know
 /// that the indirect ping attempt happened but didn't succeed.
 #[viewit::viewit]
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ProstMessage)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, prost::Message)]
 #[serde(transparent)]
 #[repr(transparent)]
 #[doc(hidden)]
@@ -527,7 +527,7 @@ pub(crate) struct NackResponse {
 }
 
 #[viewit::viewit]
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ProstMessage)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, prost::Message)]
 #[serde(transparent)]
 #[repr(transparent)]
 #[doc(hidden)]
@@ -545,7 +545,7 @@ impl<E: std::error::Error> From<E> for ErrorResponse {
 }
 
 #[viewit::viewit]
-#[derive(PartialEq, Eq, Hash, Serialize, Deserialize, ProstMessage)]
+#[derive(PartialEq, Eq, Hash, Serialize, Deserialize, prost::Message)]
 #[doc(hidden)]
 pub(crate) struct PushPullHeader {
   #[prost(uint32, tag = "1")]
@@ -826,7 +826,7 @@ impl ProstMessage for IndirectPingRequest {
 }
 
 #[viewit::viewit]
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ProstMessage)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, prost::Message)]
 #[doc(hidden)]
 #[repr(transparent)]
 #[serde(transparent)]

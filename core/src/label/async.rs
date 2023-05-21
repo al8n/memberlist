@@ -1,8 +1,11 @@
+use crate::showbiz::Showbiz;
+
 use super::*;
 use futures_util::{
   io::{AsyncBufRead, AsyncRead, BufReader},
   AsyncBufReadExt, AsyncWriteExt,
 };
+use showbiz_traits::Delegate;
 
 pin_project_lite::pin_project! {
   #[derive(Debug)]
@@ -67,62 +70,64 @@ impl<R: AsyncBufRead> AsyncBufRead for LabeledConnection<R> {
   }
 }
 
-pub async fn add_label_header_to_stream<W: futures_io::AsyncWrite + std::marker::Unpin>(
-  w: &mut W,
-  label: &[u8],
-) -> Result<(), Error> {
-  if label.is_empty() {
-    return Ok(());
-  }
-
-  if label.len() > LABEL_MAX_SIZE {
-    return Err(Error::LabelTooLong(label.len()));
-  }
-
-  w.write_all(&[MessageType::HasLabel as u8, label.len() as u8])
-    .await?;
-  w.write_all(label).await.map_err(From::from)
-}
-
-/// Removes any label header from the beginning of
-/// the stream if present and returns it.
-pub async fn remove_label_header_from_stream<R: futures_io::AsyncRead + std::marker::Unpin>(
-  reader: R,
-) -> Result<LabeledConnection<R>, Error> {
-  let mut r = BufReader::with_capacity(DEFAULT_BUFFER_SIZE, reader);
-  let buf = match r.fill_buf().await {
-    Ok(buf) => {
-      if buf.is_empty() {
-        return Ok(LabeledConnection::new(r));
-      }
-      buf
+impl<D: Delegate, T: Transport> Showbiz<T, D> {
+  pub async fn add_label_header_to_stream<W: futures_io::AsyncWrite + std::marker::Unpin>(
+    w: &mut W,
+    label: &[u8],
+  ) -> Result<(), Error<T, D>> {
+    if label.is_empty() {
+      return Ok(());
     }
-    Err(e) => {
-      if e.kind() == std::io::ErrorKind::UnexpectedEof {
-        return Ok(LabeledConnection::new(r));
-      } else {
-        return Err(e.into());
-      }
+
+    if label.len() > LABEL_MAX_SIZE {
+      return Err(Error::LabelTooLong(label.len()));
     }
-  };
 
-  // First check for the type byte.
-  if MessageType::try_from(buf[0])? != MessageType::HasLabel {
-    return Ok(LabeledConnection::new(r));
-  }
-  if buf.len() < 2 {
-    return Err(Error::TruncatedLabel);
-  }
-  let label_size = buf[1] as usize;
-  if label_size < 1 {
-    return Err(Error::EmptyLabel);
+    w.write_all(&[MessageType::HasLabel as u8, label.len() as u8])
+      .await?;
+    w.write_all(label).await.map_err(From::from)
   }
 
-  if buf.len() < 2 + label_size {
-    return Err(Error::TruncatedLabel);
-  }
+  /// Removes any label header from the beginning of
+  /// the stream if present and returns it.
+  pub async fn remove_label_header_from_stream<R: futures_io::AsyncRead + std::marker::Unpin>(
+    reader: R,
+  ) -> Result<LabeledConnection<R>, Error<T, D>> {
+    let mut r = BufReader::with_capacity(DEFAULT_BUFFER_SIZE, reader);
+    let buf = match r.fill_buf().await {
+      Ok(buf) => {
+        if buf.is_empty() {
+          return Ok(LabeledConnection::new(r));
+        }
+        buf
+      }
+      Err(e) => {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+          return Ok(LabeledConnection::new(r));
+        } else {
+          return Err(e.into());
+        }
+      }
+    };
 
-  let label = Bytes::copy_from_slice(&buf[2..2 + label_size]);
-  r.consume_unpin(2 + label_size);
-  Ok(LabeledConnection::with_label(r, label))
+    // First check for the type byte.
+    if MessageType::try_from(buf[0])? != MessageType::HasLabel {
+      return Ok(LabeledConnection::new(r));
+    }
+    if buf.len() < 2 {
+      return Err(Error::TruncatedLabel);
+    }
+    let label_size = buf[1] as usize;
+    if label_size < 1 {
+      return Err(Error::EmptyLabel);
+    }
+
+    if buf.len() < 2 + label_size {
+      return Err(Error::TruncatedLabel);
+    }
+
+    let label = Bytes::copy_from_slice(&buf[2..2 + label_size]);
+    r.consume_unpin(2 + label_size);
+    Ok(LabeledConnection::with_label(r, label))
+  }
 }

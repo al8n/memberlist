@@ -20,17 +20,10 @@ use async_channel::{Receiver, Sender};
 #[cfg(not(feature = "async"))]
 use crossbeam_channel::{Receiver, Sender};
 
-use showbiz_traits::{
-  AliveDelegate, ConflictDelegate, Delegate, EventDelegate, MergeDelegate, PingDelegate, Transport,
-  VoidAliveDelegate, VoidConflictDelegate, VoidDelegate, VoidEventDelegate, VoidMergeDelegate,
-  VoidPingDelegate,
-};
+use showbiz_traits::{Connection, Delegate, Transport, VoidDelegate};
 use showbiz_types::{Address, MessageType, Name, Node};
 
-use crate::{
-  label::LabeledConnection,
-  types::{Message, UserMsgHeader},
-};
+use crate::{label::LabeledConnection, types::Message};
 
 use super::{
   error::Error, state::LocalNodeState, suspicion::Suspicion, types::PushNodeState, Options,
@@ -44,23 +37,10 @@ impl Options {
   }
 }
 
-pub struct ShowbizBuilder<
-  T,
-  D = VoidDelegate<Error>,
-  ED = VoidEventDelegate,
-  CD = VoidConflictDelegate,
-  MD = VoidMergeDelegate<Error>,
-  PD = VoidPingDelegate,
-  AD = VoidAliveDelegate<Error>,
-> {
+pub struct ShowbizBuilder<T, D = VoidDelegate> {
   opts: Options,
   transport: T,
   delegate: Option<D>,
-  event_delegate: Option<ED>,
-  conflict_delegate: Option<CD>,
-  merge_delegate: Option<MD>,
-  ping_delegate: Option<PD>,
-  alive_delegate: Option<AD>,
   /// Holds all of the encryption keys used internally. It is
   /// automatically initialized using the SecretKey and SecretKeys values.
   keyring: Option<SecretKeyring>,
@@ -73,25 +53,15 @@ impl<T: Transport> ShowbizBuilder<T> {
       opts: Options::default(),
       transport,
       delegate: None,
-      event_delegate: None,
-      conflict_delegate: None,
-      merge_delegate: None,
-      ping_delegate: None,
-      alive_delegate: None,
       keyring: None,
     }
   }
 }
 
-impl<T, D, ED, CD, MD, PD, AD> ShowbizBuilder<T, D, ED, CD, MD, PD, AD>
+impl<T, D> ShowbizBuilder<T, D>
 where
   T: Transport,
   D: Delegate,
-  ED: EventDelegate,
-  CD: ConflictDelegate,
-  MD: MergeDelegate,
-  PD: PingDelegate,
-  AD: AliveDelegate,
 {
   #[inline]
   pub fn with_options(mut self, opts: Options) -> Self {
@@ -106,15 +76,10 @@ where
   }
 
   #[inline]
-  pub fn with_transport<NT>(self, t: NT) -> ShowbizBuilder<NT, D, ED, CD, MD, PD, AD> {
+  pub fn with_transport<NT>(self, t: NT) -> ShowbizBuilder<NT, D> {
     let Self {
       opts,
       delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
       keyring,
       ..
     } = self;
@@ -123,26 +88,16 @@ where
       opts,
       transport: t,
       delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
       keyring,
     }
   }
 
   #[inline]
-  pub fn with_delegate<ND>(self, d: Option<ND>) -> ShowbizBuilder<T, ND, ED, CD, MD, PD, AD> {
+  pub fn with_delegate<ND>(self, d: Option<ND>) -> ShowbizBuilder<T, ND> {
     let Self {
-      event_delegate,
       opts,
       transport,
       delegate: _,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
       keyring,
     } = self;
 
@@ -150,175 +105,15 @@ where
       opts,
       transport,
       delegate: d,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
       keyring,
     }
   }
 
-  #[inline]
-  pub fn with_event_delegate<NED>(
-    self,
-    ed: Option<NED>,
-  ) -> ShowbizBuilder<T, D, NED, CD, MD, PD, AD> {
-    let Self {
-      event_delegate: _,
-      opts,
-      transport,
-      delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport,
-      delegate,
-      event_delegate: ed,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    }
-  }
-
-  #[inline]
-  pub fn with_conflict_delegate<NCD>(
-    self,
-    cd: Option<NCD>,
-  ) -> ShowbizBuilder<T, D, ED, NCD, MD, PD, AD> {
-    let Self {
-      conflict_delegate: _,
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate: cd,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    }
-  }
-
-  #[inline]
-  pub fn with_merge_delegate<NMD>(
-    self,
-    md: Option<NMD>,
-  ) -> ShowbizBuilder<T, D, ED, CD, NMD, PD, AD> {
-    let Self {
-      merge_delegate: _,
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate: md,
-      ping_delegate,
-      alive_delegate,
-      keyring,
-    }
-  }
-
-  #[inline]
-  pub fn with_ping_delegate<NPD>(
-    self,
-    pd: Option<NPD>,
-  ) -> ShowbizBuilder<T, D, ED, CD, MD, NPD, AD> {
-    let Self {
-      ping_delegate: _,
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      alive_delegate,
-      keyring,
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate: pd,
-      alive_delegate,
-      keyring,
-    }
-  }
-
-  #[inline]
-  pub fn with_alive_delegate<NAD>(
-    self,
-    ad: Option<NAD>,
-  ) -> ShowbizBuilder<T, D, ED, CD, MD, PD, NAD> {
-    let Self {
-      alive_delegate: _,
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      keyring,
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport,
-      delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate: ad,
-      keyring,
-    }
-  }
-
-  pub fn finalize(self) -> Showbiz<T, D, ED, CD, MD, PD, AD> {
+  pub fn finalize(self) -> Showbiz<T, D> {
     let Self {
       opts,
       transport,
       delegate,
-      event_delegate,
-      conflict_delegate,
-      merge_delegate,
-      ping_delegate,
-      alive_delegate,
       keyring,
     } = self;
 
@@ -333,14 +128,7 @@ where
         leave_lock: Mutex::new(()),
         opts: Arc::new(opts),
         transport: Arc::new(transport),
-        delegates: Arc::new(ShowbizDelegates {
-          delegate: delegate.map(Arc::new),
-          event_delegate: event_delegate.map(Arc::new),
-          conflict_delegate: conflict_delegate.map(Arc::new),
-          merge_delegate: merge_delegate.map(Arc::new),
-          ping_delegate: ping_delegate.map(Arc::new),
-          alive_delegate: alive_delegate.map(Arc::new),
-        }),
+        delegate: delegate.map(Arc::new),
         keyring,
         shutdown_rx,
         shutdown_tx,
@@ -370,8 +158,8 @@ impl HotData {
       incarnation: CachePadded::new(AtomicU32::new(0)),
       num_nodes: CachePadded::new(AtomicU32::new(0)),
       push_pull_req: CachePadded::new(AtomicU32::new(0)),
-      shutdown: CachePadded::new(AtomicU32::new(false)),
-      leave: CachePadded::new(AtomicU32::new(false)),
+      shutdown: CachePadded::new(AtomicU32::new(0)),
+      leave: CachePadded::new(AtomicU32::new(0)),
     }
   }
 }
@@ -379,23 +167,6 @@ impl HotData {
 #[viewit::viewit]
 pub(crate) struct Advertise {
   addr: SocketAddr,
-}
-
-#[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct ShowbizDelegates<
-  D = VoidDelegate<Error>,
-  ED = VoidEventDelegate,
-  CD = VoidConflictDelegate,
-  MD = VoidMergeDelegate<Error>,
-  PD = VoidPingDelegate,
-  AD = VoidAliveDelegate<Error>,
-> {
-  delegate: Option<Arc<D>>,
-  event_delegate: Option<Arc<ED>>,
-  conflict_delegate: Option<Arc<CD>>,
-  merge_delegate: Option<Arc<MD>>,
-  ping_delegate: Option<Arc<PD>>,
-  alive_delegate: Option<Arc<AD>>,
 }
 
 #[viewit::viewit]
@@ -424,8 +195,8 @@ impl MessageQueue {
 
 #[viewit::viewit]
 pub(crate) struct Nodes {
-  nodes: Vec<Arc<LocalNodeState>>,
-  node_map: HashMap<SocketAddr, Arc<LocalNodeState>>,
+  nodes: Vec<LocalNodeState>,
+  node_map: HashMap<SocketAddr, LocalNodeState>,
   node_timers: HashMap<SocketAddr, Suspicion>,
 }
 
@@ -440,15 +211,7 @@ impl Default for Nodes {
 }
 
 #[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct ShowbizCore<
-  T: Transport,
-  D = VoidDelegate<Error>,
-  ED = VoidEventDelegate,
-  CD = VoidConflictDelegate,
-  MD = VoidMergeDelegate<Error>,
-  PD = VoidPingDelegate,
-  AD = VoidAliveDelegate<Error>,
-> {
+pub(crate) struct ShowbizCore<T: Transport, D = VoidDelegate> {
   hot: HotData,
   advertise: RwLock<SocketAddr>,
   // Serializes calls to Shutdown
@@ -460,7 +223,7 @@ pub(crate) struct ShowbizCore<
   opts: Arc<Options>,
   transport: Arc<T>,
   keyring: Option<SecretKeyring>,
-  delegates: Arc<ShowbizDelegates<D, ED, CD, MD, PD, AD>>,
+  delegate: Option<Arc<D>>,
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue>,
@@ -468,27 +231,14 @@ pub(crate) struct ShowbizCore<
   nodes: RwLock<Nodes>,
 }
 
-pub struct Showbiz<
-  T: Transport,
-  D = VoidDelegate<Error>,
-  ED = VoidEventDelegate,
-  CD = VoidConflictDelegate,
-  MD = VoidMergeDelegate<Error>,
-  PD = VoidPingDelegate,
-  AD = VoidAliveDelegate<Error>,
-> {
-  pub(crate) inner: Arc<ShowbizCore<T, D, ED, CD, MD, PD, AD>>,
+pub struct Showbiz<T: Transport, D = VoidDelegate> {
+  pub(crate) inner: Arc<ShowbizCore<T, D>>,
 }
 
-impl<T, D, ED, CD, MD, PD, AD> Clone for Showbiz<T, D, ED, CD, MD, PD, AD>
+impl<T, D> Clone for Showbiz<T, D>
 where
   T: Transport,
   D: Delegate,
-  ED: EventDelegate,
-  CD: ConflictDelegate,
-  MD: MergeDelegate,
-  PD: PingDelegate,
-  AD: AliveDelegate,
 {
   fn clone(&self) -> Self {
     Self {
@@ -497,21 +247,16 @@ where
   }
 }
 
-impl<T, D, ED, CD, MD, PD, AD> Showbiz<T, D, ED, CD, MD, PD, AD>
+impl<T, D> Showbiz<T, D>
 where
   T: Transport,
   D: Delegate,
-  ED: EventDelegate,
-  CD: ConflictDelegate,
-  MD: MergeDelegate,
-  PD: PingDelegate,
-  AD: AliveDelegate,
 {
   /// Uses the unreliable packet-oriented interface of the transport
   /// to target a user message at the given node (this does not use the gossip
   /// mechanism). The maximum size of the message depends on the configured
   /// `packet_buffer_size` for this memberlist instance.
-  pub async fn send_best_effort(&self, to: &Node, mut msg: Vec<u8>) -> Result<(), Error> {
+  pub async fn send_best_effort(&self, to: &Node, mut msg: Vec<u8>) -> Result<(), Error<T, D>> {
     // Encode as a user message
 
     // TODO: implement
@@ -523,11 +268,11 @@ where
   /// mechanism). Delivery is guaranteed if no error is returned, and there is no
   /// limit on the size of the message.
   #[inline]
-  pub async fn send_reliable(&self, to: &Node, mut msg: Message) -> Result<(), Error> {
+  pub async fn send_reliable(&self, to: &Node, mut msg: Message) -> Result<(), Error<T, D>> {
     self.send_user_msg(to.full_address(), msg).await
   }
 
-  async fn send_user_msg(&self, addr: &Address, msg: Message) -> Result<(), Error> {
+  async fn send_user_msg(&self, addr: &Address, msg: Message) -> Result<(), Error<T, D>> {
     if addr.name().is_empty() && self.inner.opts.require_node_names {
       return Err(Error::MissingNodeName);
     }
@@ -535,15 +280,18 @@ where
       .inner
       .transport
       .dial_timeout(addr.addr(), self.inner.opts.tcp_timeout)
-      .await?;
-    self
-      .raw_send_msg_stream(
-        LabeledConnection::new(BufReader::new(conn)),
-        msg.freeze(),
-        Some(addr.addr()).as_ref(),
-        self.encryption_enabled().await,
-      )
       .await
+      .map_err(Error::transport)?;
+
+    // self
+    //   .raw_send_msg_stream(
+    //     LabeledConnection::new(BufReader::new(conn)),
+    //     msg.freeze(),
+    //     Some(addr.addr()).as_ref(),
+    //     self.encryption_enabled().await,
+    //   )
+    //   .await
+    todo!()
   }
 
   /// Returns a list of all known live nodes.
@@ -591,7 +339,7 @@ where
     }
   }
 
-  pub(crate) async fn verify_protocol(&self, remote: &[PushNodeState]) -> Result<(), Error> {
+  pub(crate) async fn verify_protocol(&self, remote: &[PushNodeState]) -> Result<(), Error<T, D>> {
     // TODO: implement
 
     Ok(())

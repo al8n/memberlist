@@ -3,15 +3,10 @@ use showbiz_types::{Address, Node};
 
 use super::*;
 
-impl<T, D, ED, CD, MD, PD, AD> Showbiz<T, D, ED, CD, MD, PD, AD>
+impl<T, D> Showbiz<T, D>
 where
   T: Transport,
   D: Delegate,
-  ED: EventDelegate,
-  CD: ConflictDelegate,
-  MD: MergeDelegate,
-  PD: PingDelegate,
-  AD: AliveDelegate,
 {
   /// A long running thread that pulls incoming streams from the
   /// transport and hands them off for processing.
@@ -65,7 +60,7 @@ where
       <T::Connection as Connection>::set_timeout(&mut conn, Some(self.inner.opts.tcp_timeout));
     }
 
-    let mut lr = match remove_label_header_from_stream(conn).await {
+    let mut lr = match Self::remove_label_header_from_stream(conn).await {
       Ok(lr) => lr,
       Err(e) => {
         tracing::error!(target = "showbiz", err = %e, remote_addr = ?addr, "failed to remove label header");
@@ -330,7 +325,7 @@ where
     addr: Option<&SocketAddr>,
     encryption_enabled: bool,
     join: bool,
-  ) -> Result<(), InnerError> {
+  ) -> Result<(), Error<T, D>> {
     // Setup a deadline
     lr.conn
       .get_mut()
@@ -366,8 +361,8 @@ where
     // TODO: metrics
 
     // Get the delegate state
-    let user_data = if let Some(delegate) = &self.inner.delegates.delegate {
-      delegate.local_state(join).await.map_err(InnerError::any)?
+    let user_data = if let Some(delegate) = &self.inner.delegate {
+      delegate.local_state(join).await.map_err(Error::delegate)?
     } else {
       Bytes::new()
     };
@@ -402,12 +397,12 @@ where
   }
 
   /// Used to merge the remote state with our local state
-  async fn merge_remote_state(&self, node_state: RemoteNodeState) -> Result<(), InnerError> {
+  async fn merge_remote_state(&self, node_state: RemoteNodeState) -> Result<(), Error<T, D>> {
     self.verify_protocol(&node_state.push_states).await?;
 
     // Invoke the merge delegate if any
     if node_state.join {
-      if let Some(merge) = self.inner.delegates.merge_delegate.as_ref() {
+      if let Some(merge) = self.inner.delegate.as_ref() {
         let peers = node_state
           .push_states
           .iter()
@@ -423,22 +418,19 @@ where
             dcur: n.dcur(),
           })
           .collect::<Vec<_>>();
-        merge.notify_merge(peers).await.map_err(InnerError::any)?;
+        merge.notify_merge(peers).await.map_err(Error::delegate)?;
       }
     }
 
     // Merge the membership state
-    self
-      .merge_state(node_state.push_states)
-      .await
-      .map_err(InnerError::any)?;
+    self.merge_state(node_state.push_states).await?;
 
     // Invoke the delegate for user state
-    if let Some(d) = &self.inner.delegates.delegate {
+    if let Some(d) = &self.inner.delegate {
       if !node_state.user_state.is_empty() {
         d.merge_remote_state(node_state.user_state, node_state.join)
           .await
-          .map_err(InnerError::any)?;
+          .map_err(Error::delegate)?;
       }
     }
     Ok(())
@@ -463,8 +455,8 @@ where
           std::cmp::Ordering::Greater => data.slice(..user_msg_len),
         };
 
-        if let Some(d) = &self.inner.delegates.delegate {
-          if let Err(e) = d.notify_msg(user_msg).await {
+        if let Some(d) = &self.inner.delegate {
+          if let Err(e) = d.notify_user_msg(user_msg).await {
             tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to notify user message");
             return;
           }
@@ -483,8 +475,8 @@ where
             tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to receive user message");
             return;
           }
-          if let Some(d) = &self.inner.delegates.delegate {
-            if let Err(e) = d.notify_msg(user_msg.into()).await {
+          if let Some(d) = &self.inner.delegate {
+            if let Err(e) = d.notify_user_msg(user_msg.into()).await {
               tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to notify user message");
               return;
             }
@@ -500,7 +492,7 @@ where
     mut buf: Bytes,
     addr: Option<&SocketAddr>,
     encryption_enabled: bool,
-  ) -> Result<(), InnerError> {
+  ) -> Result<(), Error<T, D>> {
     // Check if compression is enabled
     if !self.inner.opts.compression_algo.is_none() {
       buf = match compress_payload(self.inner.opts.compression_algo, &buf) {
@@ -514,7 +506,7 @@ where
 
     // Check if encryption is enabled
     if encryption_enabled && self.inner.opts.gossip_verify_outgoing {
-      match encrypt_local_state(
+      match Self::encrypt_local_state(
         self.inner.keyring.as_ref().unwrap(),
         &buf,
         lr.label(),
@@ -526,13 +518,16 @@ where
         Ok(crypt) => lr.conn.write_all(&crypt).await.map_err(From::from),
         Err(e) => {
           tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to encrypt local state");
-          return Err(e.into());
+          return Err(e);
         }
       }
     } else {
       // Write out the entire send buffer
       //TODO: handle metrics
-      lr.conn.write_all(&buf).await.map_err(From::from)
+      lr.conn
+        .write_all(&buf)
+        .await
+        .map_err(|e| Error::transport(T::Error::from(e)))
     }
   }
 
@@ -583,7 +578,7 @@ where
         ));
       };
 
-      let mut plain = match decrypt_remote_state(lr, keyring).await {
+      let mut plain = match Self::decrypt_remote_state(lr, keyring).await {
         Ok(plain) => plain,
         Err(_e) => return Err(InnerError::Other("failed to decrypt remote state")),
       };

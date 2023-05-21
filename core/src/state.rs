@@ -1,27 +1,24 @@
-use std::{net::SocketAddr, time::Instant};
-
-use bytes::Bytes;
-use showbiz_traits::{
-  AliveDelegate, ConflictDelegate, Delegate, EventDelegate, MergeDelegate, PingDelegate, Transport,
-};
-use showbiz_types::{Address, Node, NodeState};
+use std::{net::SocketAddr, sync::Arc, time::Instant};
 
 use super::{error::Error, showbiz::Showbiz, types::PushNodeState};
+use showbiz_traits::{Delegate, Transport};
+use showbiz_types::{Address, Node, NodeState};
 
 #[viewit::viewit]
+#[derive(Debug, Clone)]
 pub(crate) struct LocalNodeState {
-  node: Node,
+  node: Arc<Node>,
   incarnation: u32,
   state: NodeState,
   state_change: Instant,
 }
 
 impl LocalNodeState {
-  pub(crate) const fn address(&self) -> SocketAddr {
+  pub(crate) fn address(&self) -> SocketAddr {
     self.node.full_address().addr()
   }
 
-  pub(crate) const fn full_address(&self) -> &Address {
+  pub(crate) fn full_address(&self) -> &Address {
     self.node.full_address()
   }
 
@@ -31,17 +28,12 @@ impl LocalNodeState {
   }
 }
 
-impl<T, D, ED, CD, MD, PD, AD> Showbiz<T, D, ED, CD, MD, PD, AD>
+impl<T, D> Showbiz<T, D>
 where
   T: Transport,
   D: Delegate,
-  ED: EventDelegate,
-  CD: ConflictDelegate,
-  MD: MergeDelegate,
-  PD: PingDelegate,
-  AD: AliveDelegate,
 {
-  pub(crate) async fn merge_state(&self, remote: Vec<PushNodeState>) -> Result<(), Error> {
+  pub(crate) async fn merge_state(&self, remote: Vec<PushNodeState>) -> Result<(), Error<T, D>> {
     // TODO: implement
 
     Ok(())

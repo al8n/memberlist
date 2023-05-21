@@ -1,14 +1,9 @@
 use super::*;
 
-impl<T, D, ED, CD, MD, PD, AD> Showbiz<T, D, ED, CD, MD, PD, AD>
+impl<T, D> Showbiz<T, D>
 where
   T: Transport,
   D: Delegate,
-  ED: EventDelegate,
-  CD: ConflictDelegate,
-  MD: MergeDelegate,
-  PD: PingDelegate,
-  AD: AliveDelegate,
 {
   pub(crate) fn packet_listener<R, S>(&self, spawner: S)
   where

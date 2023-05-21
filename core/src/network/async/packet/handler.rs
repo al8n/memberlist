@@ -2,15 +2,10 @@ use crate::showbiz::MessageHandoff;
 
 use super::*;
 
-impl<T, D, ED, CD, MD, PD, AD> Showbiz<T, D, ED, CD, MD, PD, AD>
+impl<T, D> Showbiz<T, D>
 where
   T: Transport,
   D: Delegate,
-  ED: EventDelegate,
-  CD: ConflictDelegate,
-  MD: MergeDelegate,
-  PD: PingDelegate,
-  AD: AliveDelegate,
 {
   /// a long running thread that processes messages received
   /// over the packet interface, but is decoupled from the listener to avoid

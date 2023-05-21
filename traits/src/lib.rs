@@ -12,29 +12,11 @@ pub use async_trait;
 mod transport;
 pub use transport::*;
 
-mod alive_delegate;
-pub use alive_delegate::*;
-
 mod broadcast;
 pub use broadcast::*;
 
-mod conflict_delegate;
-pub use conflict_delegate::*;
-
-// mod delegate;
-// pub use delegate::*;
-
-mod event_delegate;
-pub use event_delegate::*;
-
-mod merge_delegate;
-pub use merge_delegate::*;
-
-mod ping_delegate;
-pub use ping_delegate::*;
-
 #[cfg_attr(feature = "async", async_trait::async_trait)]
-pub trait Delegate {
+pub trait Delegate: Send + Sync + 'static {
   /// The error type of the delegate
   type Error: std::error::Error + Send + Sync + 'static;
 
@@ -182,20 +164,29 @@ pub trait Delegate {
   ) -> Result<(), Self::Error>;
 }
 
-pub struct VoidDelegate<E>(std::marker::PhantomData<E>);
+#[derive(Debug, Copy, Clone)]
+pub struct VoidDelegateError;
 
-impl<E> Default for VoidDelegate<E> {
+impl std::fmt::Display for VoidDelegateError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "void delegate error")
+  }
+}
+
+impl std::error::Error for VoidDelegateError {}
+
+#[derive(Debug, Copy, Clone)]
+pub struct VoidDelegate;
+
+impl Default for VoidDelegate {
   fn default() -> Self {
-    Self(Default::default())
+    Self
   }
 }
 
 #[cfg_attr(feature = "async", async_trait::async_trait)]
-impl<E> Delegate for VoidDelegate<E>
-where
-  E: std::error::Error + Send + Sync + 'static,
-{
-  type Error = E;
+impl Delegate for VoidDelegate {
+  type Error = VoidDelegateError;
 
   /// Used to retrieve meta-data about the current node
   /// when broadcasting an alive message. It's length is limited to
