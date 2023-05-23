@@ -4,9 +4,8 @@ use showbiz_types::{Address, Node};
 
 use super::*;
 
-impl<B, T, D> Showbiz<B, T, D>
+impl<T, D> Showbiz<T, D>
 where
-  B: Broadcast,
   T: Transport,
   D: Delegate,
 {
@@ -329,7 +328,7 @@ where
     addr: Option<&SocketAddr>,
     encryption_enabled: bool,
     join: bool,
-  ) -> Result<(), Error<B, T, D>> {
+  ) -> Result<(), Error<T, D>> {
     // Setup a deadline
     lr.conn
       .get_mut()
@@ -401,7 +400,7 @@ where
   }
 
   /// Used to merge the remote state with our local state
-  async fn merge_remote_state(&self, node_state: RemoteNodeState) -> Result<(), Error<B, T, D>> {
+  async fn merge_remote_state(&self, node_state: RemoteNodeState) -> Result<(), Error<T, D>> {
     self.verify_protocol(&node_state.push_states).await?;
 
     // Invoke the merge delegate if any
@@ -494,7 +493,7 @@ where
     &self,
     addr: &Address,
     msg: crate::types::Message,
-  ) -> Result<(), Error<B, T, D>> {
+  ) -> Result<(), Error<T, D>> {
     if addr.name().is_empty() && self.inner.opts.require_node_names {
       return Err(Error::MissingNodeName);
     }
@@ -523,7 +522,7 @@ where
     mut buf: Bytes,
     addr: Option<&SocketAddr>,
     encryption_enabled: bool,
-  ) -> Result<(), Error<B, T, D>> {
+  ) -> Result<(), Error<T, D>> {
     // Check if compression is enabled
     if !self.inner.opts.compression_algo.is_none() {
       buf = match compress_payload(self.inner.opts.compression_algo, &buf) {

@@ -53,9 +53,10 @@ mod r#async {
   /// interface is assumed to be best-effort and the stream interface is assumed to
   /// be reliable.
   #[async_trait::async_trait]
-  pub trait Transport: Send + Sync + 'static {
+  pub trait Transport: Unpin + Send + Sync + 'static {
     type Error: std::error::Error + From<std::io::Error> + Send + Sync + 'static;
-    type Connection: Connection + std::marker::Unpin;
+    type Connection: Connection + trust_dns_proto::tcp::DnsTcpStream;
+    type UnreliableConnection: Connection + trust_dns_proto::udp::DnsUdpSocket;
     type Options;
 
     /// Creates a new transport instance with the given options
@@ -109,6 +110,29 @@ mod r#async {
       addr: &Address,
       timeout: Duration,
     ) -> Result<Self::Connection, Self::Error>;
+
+    /// Used to create a potentially unreliable connection, e.g. UDP, that allows us to perform
+    /// two-way communication with a peer. This is generally less expensive
+    /// than stream connections so can be used for frequent operations
+    /// that can tolerate data loss.
+    async fn dial_unreliable_timeout(
+      &self,
+      addr: SocketAddr,
+      timeout: Duration,
+    ) -> Result<Self::UnreliableConnection, Self::Error>;
+
+    /// Used to create a potentially unreliable connection, e.g. UDP, that allows us to perform
+    /// two-way communication with a peer using an Address object. This function can
+    /// be used for frequent operations that can tolerate data loss.
+    async fn dial_address_unreliable_timeout(
+      &self,
+      addr: &Address,
+      timeout: Duration,
+    ) -> Result<Self::UnreliableConnection, Self::Error>;
+
+    async fn connect(addr: SocketAddr) -> std::io::Result<Self::Connection>;
+
+    async fn bind_unreliable(addr: SocketAddr) -> std::io::Result<Self::UnreliableConnection>;
   }
 
   #[cfg(feature = "async")]

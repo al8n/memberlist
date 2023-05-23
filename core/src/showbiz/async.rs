@@ -1,20 +1,26 @@
 use std::{net::ToSocketAddrs, sync::atomic::Ordering, time::Duration};
 
-use crate::util::{ensure_port, split_host_port};
+use crate::{
+  dns::AsyncRuntimeProvider,
+  util::{ensure_port, split_host_port},
+};
 
 use super::*;
 
 use futures_channel::oneshot::channel;
 use futures_timer::Delay;
-use futures_util::FutureExt;
-use showbiz_types::{RemoteNode, SmolStr};
+use futures_util::{future::BoxFuture, FutureExt};
+use showbiz_types::SmolStr;
 
 impl<T, D> ShowbizBuilder<T, D>
 where
   T: Transport,
   D: Delegate,
 {
-  pub async fn finalize<B: Broadcast>(self) -> Result<Showbiz<B, T, D>, Error<B, T, D>> {
+  pub async fn finalize<S>(self, spawner: S) -> Result<Showbiz<T, D>, Error<T, D>>
+  where
+    S: Fn(BoxFuture<'static, ()>) + Send + Sync + 'static + Unpin + Copy,
+  {
     let Self {
       opts,
       transport,
@@ -56,6 +62,20 @@ where
       opts.retransmit_mult,
     );
 
+    let data = std::fs::read_to_string(opts.dns_config_path.as_path())?;
+    let (config, options) = trust_dns_resolver::system_conf::parse_resolv_conf(data)?;
+    let dns = if config.name_servers().is_empty() {
+      tracing::warn!(
+        target = "showbiz",
+        "no DNS servers found in {}",
+        opts.dns_config_path.display()
+      );
+
+      None
+    } else {
+      Some(DNS::new(config, options, AsyncRuntimeProvider::new(spawner)).map_err(Error::dns)?)
+    };
+
     // let num_nodes = hot.num_nodes;
     Ok(Showbiz {
       inner: Arc::new(ShowbizCore {
@@ -75,10 +95,7 @@ where
         queue: Mutex::new(MessageQueue::new()),
         nodes: RwLock::new(Memberlist::new(LocalNodeState {
           node: Arc::new(Node {
-            full_address: Address {
-              addr: advertise,
-              name,
-            },
+            full_address: Address::new(name, advertise),
             meta,
             state: NodeState::Dead,
             pmin: vsn[0],
@@ -91,14 +108,14 @@ where
           incarnation: 0,
           state_change: Instant::now(),
         })),
+        dns,
       }),
     })
   }
 }
 
-impl<B, T, D> Showbiz<B, T, D>
+impl<T, D> Showbiz<T, D>
 where
-  B: Broadcast,
   T: Transport,
   D: Delegate,
 {
@@ -111,11 +128,10 @@ where
   /// This returns the number of hosts successfully contacted and an error if
   /// none could be reached. If an error is returned, the node did not successfully
   /// join the cluster.
-  pub async fn join(&self, existing: Vec<String>) -> Result<usize, Vec<Error<B, T, D>>> {
+  pub async fn join(&self, existing: Vec<String>) -> Result<usize, Vec<Error<T, D>>> {
     let mut num_success = 0;
     let mut errors = Vec::new();
     for exist in existing {
-      let exist: SmolStr = exist.into();
       let addrs = match self.resolve_addr(exist.clone()).await {
         Ok(addrs) => addrs,
         Err(e) => {
@@ -164,7 +180,7 @@ where
   /// meta data.  This will block until the update message is successfully
   /// broadcasted to a member of the cluster, if any exist or until a specified
   /// timeout is reached.
-  pub async fn update_node(&self, timeout: Duration) -> Result<(), Error<B, T, D>> {
+  pub async fn update_node(&self, timeout: Duration) -> Result<(), Error<T, D>> {
     // Get the node meta data
     let meta = if let Some(delegate) = &self.inner.delegate {
       let meta = delegate.node_meta(META_MAX_SIZE);
@@ -220,12 +236,9 @@ where
   /// to target a user message at the given node (this does not use the gossip
   /// mechanism). The maximum size of the message depends on the configured
   /// `packet_buffer_size` for this memberlist instance.
-  pub async fn send_best_effort(&self, to: &Node, mut msg: Vec<u8>) -> Result<(), Error<B, T, D>> {
+  pub async fn send_best_effort(&self, to: &Node, mut msg: Vec<u8>) -> Result<(), Error<T, D>> {
     // Encode as a user message
-    let addr = Address {
-      addr: to.address(),
-      name: to.full_address().name().clone(),
-    };
+    let addr = Address::new(to.full_address().name().clone(), to.address());
 
     // TODO: implement
     Ok(())
@@ -236,7 +249,7 @@ where
   /// mechanism). Delivery is guaranteed if no error is returned, and there is no
   /// limit on the size of the message.
   #[inline]
-  pub async fn send_reliable(&self, to: &Node, msg: Message) -> Result<(), Error<B, T, D>> {
+  pub async fn send_reliable(&self, to: &Node, msg: Message) -> Result<(), Error<T, D>> {
     self.send_user_msg(to.full_address(), msg).await
   }
 
@@ -254,7 +267,7 @@ where
       .collect()
   }
 
-  pub async fn shutdown<P>(self, parker: P) -> Result<(), Error<B, T, D>>
+  pub async fn shutdown<P>(self, parker: P) -> Result<(), Error<T, D>>
   where
     P: std::future::Future<Output = ()> + Copy,
   {
@@ -283,6 +296,7 @@ where
       handoff_rx,
       queue,
       nodes,
+      dns,
     } = Arc::into_inner(core).unwrap();
 
     // Shut down the transport first, which should block until it's
@@ -299,9 +313,8 @@ where
 }
 
 // private impelementation
-impl<B, T, D> Showbiz<B, T, D>
+impl<T, D> Showbiz<T, D>
 where
-  B: Broadcast,
   T: Transport,
   D: Delegate,
 {
@@ -313,30 +326,48 @@ where
   /// to do this rather expensive operation.
   pub(crate) async fn tcp_lookup_ip(
     &self,
+    dns: &DNS<T>,
     host: &str,
     default_port: u16,
     node_name: Option<&Name>,
-  ) -> Result<Vec<Address>, Error<B, T, D>> {
+  ) -> Result<Vec<Address>, Error<T, D>> {
     // Don't attempt any TCP lookups against non-fully qualified domain
     // names, since those will likely come from the resolv.conf file.
     if !host.contains('.') {
       return Ok(Vec::new());
     }
 
-    todo!()
+    // Make sure the domain name is terminated with a dot (we know there's
+    // at least one character at this point).
+    let mut dn = host.chars().last().unwrap();
+    let ips = if dn != '.' {
+      let mut dn = host.to_string();
+      dn.push('.');
+      dns.lookup_ip(dn).await
+    } else {
+      dns.lookup_ip(host).await
+    }
+    .map_err(Error::dns)?;
+
+    Ok(
+      ips
+        .into_iter()
+        .map(|ip| {
+          let addr = SocketAddr::new(ip, default_port);
+          Address::new(node_name.cloned().unwrap_or_default(), addr)
+        })
+        .collect(),
+    )
   }
 
   /// Used to resolve the address into an address,
   /// port, and error. If no port is given, use the default
-  pub(crate) async fn resolve_addr(
-    &self,
-    mut raw: SmolStr,
-  ) -> Result<Vec<Address>, Error<B, T, D>> {
+  pub(crate) async fn resolve_addr(&self, mut raw: String) -> Result<Vec<Address>, Error<T, D>> {
     let (host, node_name) = if let Some(pos) = raw.find('/') {
       if pos == 0 {
         return Err(Error::EmptyNodeName);
       }
-      (raw.split(pos), Some(Name::from(raw)))
+      (raw.split_off(pos), Some(Name::from(raw)))
     } else {
       (raw, None)
     };
@@ -346,30 +377,32 @@ where
 
     // If it looks like an IP address we are done.
     if let Ok(addr) = host.as_str().parse::<SocketAddr>() {
-      return Ok(vec![Address {
-        addr,
-        name: node_name.unwrap_or_default(),
-      }]);
+      return Ok(vec![Address::new(node_name.unwrap_or_default(), addr)]);
     }
 
-    let (host, port) = split_host_port(&host)?;
+    let (host, port) = split_host_port(host)?;
 
     // First try TCP so we have the best chance for the largest list of
     // hosts to join. If this fails it's not fatal since this isn't a standard
     // way to query DNS, and we have a fallback below.
-    match self.tcp_lookup_ip(host.as_str(), port, node_name).await {
-      Ok(ips) => {
-        if !ips.is_empty() {
-          return Ok(ips);
+    if let Some(dns) = self.inner.dns.as_ref() {
+      match self
+        .tcp_lookup_ip(dns, host.as_str(), port, node_name.as_ref())
+        .await
+      {
+        Ok(ips) => {
+          if !ips.is_empty() {
+            return Ok(ips);
+          }
         }
-      }
-      Err(e) => {
-        tracing::debug!(
-          target = "showbiz",
-          "TCP-first lookup failed for '{}', falling back to UDP: {}",
-          host,
-          e
-        );
+        Err(e) => {
+          tracing::debug!(
+            target = "showbiz",
+            "TCP-first lookup failed for '{}', falling back to UDP: {}",
+            host,
+            e
+          );
+        }
       }
     }
 
@@ -379,10 +412,7 @@ where
     host.to_socket_addrs().map_err(Into::into).map(|addrs| {
       addrs
         .into_iter()
-        .map(|addr| Address {
-          addr,
-          name: node_name.clone().unwrap_or_default(),
-        })
+        .map(|addr| Address::new(node_name.clone().unwrap_or_default(), addr))
         .collect()
     })
   }
@@ -398,7 +428,7 @@ where
   }
 
   #[inline]
-  pub(crate) async fn refresh_advertise(&self) -> Result<SocketAddr, Error<B, T, D>> {
+  pub(crate) async fn refresh_advertise(&self) -> Result<SocketAddr, Error<T, D>> {
     let addr = self
       .inner
       .transport
@@ -429,10 +459,7 @@ where
     }
   }
 
-  pub(crate) async fn verify_protocol(
-    &self,
-    remote: &[PushNodeState],
-  ) -> Result<(), Error<B, T, D>> {
+  pub(crate) async fn verify_protocol(&self, remote: &[PushNodeState]) -> Result<(), Error<T, D>> {
     // TODO: implement
 
     Ok(())
@@ -443,9 +470,9 @@ where
   where
     F: Fn(&LocalNodeState),
   {
-    let mut nodes = self.inner.nodes.write().await;
-    if let Some(n) = nodes.node_map.get_mut(&addr) {
-      f(n)
-    }
+    // let mut nodes = self.inner.nodes.write().await;
+    // if let Some(n) = nodes.node_map.get_mut(&addr) {
+    //   f(n)
+    // }
   }
 }

@@ -24,3 +24,4 @@ local-ip-address = "0.5"
 viewit = "0.1.5"
 scopeguard = "1"
 tracing = "0.1"
+trust-dns-proto = { version = "0.23.0-alpha.2", default-features = false }

@@ -1,18 +1,14 @@
 use std::{
   collections::{HashMap, VecDeque},
   net::SocketAddr,
-  sync::{
-    atomic::{AtomicBool, AtomicU32},
-    Arc,
-  },
+  sync::{atomic::AtomicU32, Arc},
   time::Instant,
 };
 
 #[cfg(feature = "async")]
 use async_lock::{Mutex, RwLock};
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 use crossbeam_utils::CachePadded;
-use futures_util::io::BufReader;
 #[cfg(not(feature = "async"))]
 use parking_lot::{Mutex, RwLock};
 
@@ -21,12 +17,13 @@ use async_channel::{Receiver, Sender};
 #[cfg(not(feature = "async"))]
 use crossbeam_channel::{Receiver, Sender};
 
-use showbiz_traits::{Broadcast, Connection, Delegate, Transport, VoidDelegate};
+use showbiz_traits::{Broadcast, Delegate, Transport, VoidDelegate};
 use showbiz_types::{Address, MessageType, Name, Node, NodeState};
 
 use crate::{
   awareness::Awareness,
-  label::LabeledConnection,
+  broadcast::ShowbizBroadcast,
+  dns::DNS,
   network::META_MAX_SIZE,
   queue::DefaultNodeCalculator,
   types::{Alive, Message},
@@ -131,7 +128,7 @@ pub(crate) struct HotData {
 }
 
 impl HotData {
-  const fn new() -> Self {
+  fn new() -> Self {
     Self {
       sequence_num: CachePadded::new(AtomicU32::new(0)),
       incarnation: CachePadded::new(AtomicU32::new(0)),
@@ -194,11 +191,11 @@ impl Memberlist {
 }
 
 #[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct ShowbizCore<B: Broadcast, T: Transport, D = VoidDelegate> {
+pub(crate) struct ShowbizCore<T: Transport, D = VoidDelegate> {
   hot: HotData,
   awareness: Awareness,
   advertise: RwLock<SocketAddr>,
-  broadcast: TransmitLimitedQueue<B, DefaultNodeCalculator>,
+  broadcast: TransmitLimitedQueue<ShowbizBroadcast, DefaultNodeCalculator>,
   shutdown_rx: Receiver<()>,
   shutdown_tx: Sender<()>,
   // Serializes calls to Leave
@@ -211,15 +208,15 @@ pub(crate) struct ShowbizCore<B: Broadcast, T: Transport, D = VoidDelegate> {
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue>,
   nodes: RwLock<Memberlist>,
+  dns: Option<DNS<T>>,
 }
 
-pub struct Showbiz<B: Broadcast, T: Transport, D = VoidDelegate> {
-  pub(crate) inner: Arc<ShowbizCore<B, T, D>>,
+pub struct Showbiz<T: Transport, D = VoidDelegate> {
+  pub(crate) inner: Arc<ShowbizCore<T, D>>,
 }
 
-impl<B, T, D> Clone for Showbiz<B, T, D>
+impl<T, D> Clone for Showbiz<T, D>
 where
-  B: Broadcast,
   T: Transport,
   D: Delegate,
 {

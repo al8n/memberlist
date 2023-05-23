@@ -15,6 +15,13 @@ pub use transport::*;
 mod broadcast;
 pub use broadcast::*;
 
+#[cfg(feature = "async")]
+pub use trust_dns_proto::{
+  tcp::DnsTcpStream,
+  udp::{DnsUdpSocket, UdpSocket},
+  Time,
+};
+
 #[cfg_attr(feature = "async", async_trait::async_trait)]
 pub trait Delegate: Send + Sync + 'static {
   /// The error type of the delegate

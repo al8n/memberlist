@@ -21,6 +21,7 @@ async-io = { version = "1.12", optional = true }
 async-trait = { version = "0.1", optional = true }
 async-channel = { version = "1.8", optional = true }
 tokio = { version = "1.28", optional = true, default-features = false, features = ["time", "io-util"] }
+trust-dns-proto = { workspace = true }
 
 wasi_tokio = { package = "tokio_wasi", version = "1.25", default-features = false, features = ["net"], optional = true }
 

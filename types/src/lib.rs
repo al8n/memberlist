@@ -1,10 +1,9 @@
 #![forbid(unsafe_code)]
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{
   net::{IpAddr, SocketAddr},
-  ops::{Deref, DerefMut},
   time::Instant,
 };
 

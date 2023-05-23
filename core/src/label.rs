@@ -7,10 +7,10 @@ use showbiz_types::MessageType;
 const LABEL_MAX_SIZE: usize = 255;
 const DEFAULT_BUFFER_SIZE: usize = 4096;
 
-impl<B: Broadcast, D: Delegate, T: Transport> Showbiz<B, T, D> {
+impl<T: Transport, D: Delegate> Showbiz<T, D> {
   /// Rrefixes outgoing packets with the correct header if
   /// the label is not empty.
-  pub fn add_label_header_to_packet<E>(src: &[u8], label: &[u8]) -> Result<Bytes, Error<B, T, D>> {
+  pub fn add_label_header_to_packet<E>(src: &[u8], label: &[u8]) -> Result<Bytes, Error<T, D>> {
     if !label.is_empty() {
       if label.len() > LABEL_MAX_SIZE {
         return Err(Error::LabelTooLong(label.len()));
@@ -21,7 +21,7 @@ impl<B: Broadcast, D: Delegate, T: Transport> Showbiz<B, T, D> {
     }
   }
 
-  pub fn remove_label_header_from_packet(mut buf: Bytes) -> Result<(Bytes, Bytes), Error<B, T, D>> {
+  pub fn remove_label_header_from_packet(mut buf: Bytes) -> Result<(Bytes, Bytes), Error<T, D>> {
     #[allow(clippy::declare_interior_mutable_const)]
     const EMPTY_BYTES: Bytes = Bytes::new();
 

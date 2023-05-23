@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![feature(ip)]
 
 mod awareness;
 mod broadcast;
@@ -11,6 +12,7 @@ mod options;
 pub use options::Options;
 mod queue;
 pub use queue::TransmitLimitedQueue;
+mod dns;
 mod security;
 mod showbiz;
 mod state;

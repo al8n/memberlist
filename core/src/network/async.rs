@@ -1,7 +1,6 @@
 use std::sync::atomic::Ordering;
 
 use crate::{
-  awareness::Inner,
   error::Error,
   label::LabeledConnection,
   security::{append_bytes, encrypted_length, EncryptionAlgo, SecurityError},
@@ -15,7 +14,7 @@ use futures_util::{
   future::{BoxFuture, FutureExt},
   io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
 };
-use showbiz_traits::{Connection, Delegate, VoidDelegate};
+use showbiz_traits::{Connection, Delegate};
 use showbiz_types::{InvalidMessageType, MessageType};
 
 mod packet;
@@ -52,13 +51,13 @@ impl InnerError {
   }
 }
 
-impl<B: Broadcast, D: Delegate, T: Transport> Showbiz<B, T, D> {
+impl<T: Transport, D: Delegate> Showbiz<T, D> {
   async fn encrypt_local_state(
     keyring: &SecretKeyring,
     msg: &[u8],
     label: &[u8],
     algo: EncryptionAlgo,
-  ) -> Result<Bytes, Error<B, T, D>> {
+  ) -> Result<Bytes, Error<T, D>> {
     let enc_len = encrypted_length(algo, msg.len());
     let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
     let mut buf = BytesMut::with_capacity(meta_size + enc_len);
@@ -101,7 +100,7 @@ impl<B: Broadcast, D: Delegate, T: Transport> Showbiz<B, T, D> {
   async fn decrypt_remote_state<R: AsyncRead + std::marker::Unpin>(
     r: &mut LabeledConnection<R>,
     keyring: &SecretKeyring,
-  ) -> Result<Bytes, Error<B, T, D>> {
+  ) -> Result<Bytes, Error<T, D>> {
     let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
     let mut buf = BytesMut::with_capacity(meta_size);
     buf.put_u8(MessageType::Encrypt as u8);

@@ -30,9 +30,8 @@ impl LocalNodeState {
 }
 
 // private implementation
-impl<B, T, D> Showbiz<B, T, D>
+impl<T, D> Showbiz<T, D>
 where
-  B: Broadcast,
   T: Transport,
   D: Delegate,
 {

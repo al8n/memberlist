@@ -56,13 +56,13 @@ pub(crate) fn decode<M: Message + Default>(buf: &[u8]) -> Result<M, prost::Decod
 /// Returns the host:port form of an address, for use with a
 /// transport.
 #[inline]
-fn join_host_port(host: &str, port: u16) -> SmolStr {
+fn join_host_port(host: &str, port: u16) -> String {
   // We assume that host is a literal IPv6 address if host has
   // colons.
   if host.find(':').is_some() {
-    return format!("[{}]:{}", host, port).into();
+    return format!("[{}]:{}", host, port);
   }
-  format!("{}:{}", host, port).into()
+  format!("{}:{}", host, port)
 }
 
 /// Given a string of the form "host", "host:port", "ipv6::address",
@@ -83,9 +83,9 @@ pub(crate) fn has_port(s: &str) -> bool {
 /// Makes sure the given string has a port number on it, otherwise it
 /// appends the given port as a default.
 #[inline]
-pub(crate) fn ensure_port(s: &SmolStr, port: u16) -> SmolStr {
+pub(crate) fn ensure_port(s: &str, port: u16) -> String {
   if has_port(s) {
-    s.clone()
+    s.to_string()
   } else {
     let s = s.trim_matches(|c| c == '[' || c == ']');
     join_host_port(s, port)
@@ -95,7 +95,7 @@ pub(crate) fn ensure_port(s: &SmolStr, port: u16) -> SmolStr {
 #[derive(Debug)]
 pub struct InvalidAddress {
   pub err: &'static str,
-  pub addr: SmolStr,
+  pub addr: String,
 }
 
 impl core::fmt::Display for InvalidAddress {
@@ -107,14 +107,11 @@ impl core::fmt::Display for InvalidAddress {
 impl std::error::Error for InvalidAddress {}
 
 #[inline]
-fn addr_err(addr: &SmolStr, why: &'static str) -> Result<(String, u16), InvalidAddress> {
-  Err(InvalidAddress {
-    err: why,
-    addr: addr.clone(),
-  })
+fn addr_err(addr: String, why: &'static str) -> Result<(String, u16), InvalidAddress> {
+  Err(InvalidAddress { err: why, addr })
 }
 
-pub(crate) fn split_host_port(hostport: &SmolStr) -> Result<(String, u16), InvalidAddress> {
+pub(crate) fn split_host_port(hostport: String) -> Result<(String, u16), InvalidAddress> {
   let missing_port = "missing port in address";
   let too_many_colons = "too many colons in address";
   let (mut j, mut k) = (0, 0);
@@ -162,7 +159,7 @@ pub(crate) fn split_host_port(hostport: &SmolStr) -> Result<(String, u16), Inval
     Ok(port) => Ok((host, port)),
     Err(e) => Err(InvalidAddress {
       err: "invalid port",
-      addr: hostport.clone(),
+      addr: hostport,
     }),
   }
 }
