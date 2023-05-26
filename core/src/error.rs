@@ -39,6 +39,8 @@ pub enum Error<T: Transport, D: Delegate> {
   Delegate(D::Error),
   #[error("showbiz: {0}")]
   Transport(T::Error),
+  #[error("showbiz: timeout waiting for leave broadcast")]
+  LeaveTimeout,
 }
 
 impl<D: Delegate, T: Transport> Error<T, D> {

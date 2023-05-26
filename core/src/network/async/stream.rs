@@ -223,7 +223,7 @@ where
     // Read the push/pull header
     let header = match &mut data {
       Some(data) => {
-        let size = data.get_u32() as usize;
+        let _size = data.get_u32() as usize;
         match PushPullHeader::decode(data) {
           Ok(header) => header,
           Err(e) => return Err(InnerError::Decode(e)),
@@ -350,7 +350,7 @@ where
             addr: EncodableSocketAddr::Local(n.address()),
             meta: n.node.meta().clone(),
             incarnation: n.incarnation,
-            state: n.node.state,
+            state: n.state,
             vsn: n.node.vsn(),
           };
 

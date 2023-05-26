@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use showbiz_types::SmolStr;
+use showbiz_types::Name;
 
 /// Something that can be broadcasted via gossip to
 /// the memberlist cluster.
@@ -9,7 +9,7 @@ pub trait Broadcast: Send + Sync + 'static {
   type Error: std::error::Error + Send + Sync + 'static;
 
   /// Returns the name of the broadcast, if any
-  fn name(&self) -> Option<&SmolStr>;
+  fn name(&self) -> &Name;
 
   /// Checks if enqueuing the current broadcast
   /// invalidates a previous broadcast

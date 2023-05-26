@@ -30,5 +30,5 @@ where
     }));
   }
 
-  async fn ingest_packet(&self, packet: Packet) {}
+  async fn ingest_packet(&self, _packet: Packet) {}
 }

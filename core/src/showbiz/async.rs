@@ -2,6 +2,7 @@ use std::{net::ToSocketAddrs, sync::atomic::Ordering, time::Duration};
 
 use crate::{
   dns::AsyncRuntimeProvider,
+  types::Dead,
   util::{ensure_port, split_host_port},
 };
 
@@ -10,7 +11,6 @@ use super::*;
 use futures_channel::oneshot::channel;
 use futures_timer::Delay;
 use futures_util::{future::BoxFuture, FutureExt};
-use showbiz_types::SmolStr;
 
 impl<T, D> ShowbizBuilder<T, D>
 where
@@ -30,6 +30,7 @@ where
 
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
     let (handoff_tx, handoff_rx) = async_channel::bounded(1);
+    let (leave_broadcast_tx, leave_broadcast_rx) = async_channel::bounded(1);
 
     let vsn = opts.build_vsn_array();
     let name = opts.name.clone();
@@ -83,6 +84,7 @@ where
         broadcast,
         hot: HotData::new(),
         advertise: RwLock::new(advertise),
+        dns,
         leave_lock: Mutex::new(()),
         opts: Arc::new(opts),
         transport,
@@ -92,23 +94,25 @@ where
         shutdown_tx,
         handoff_tx,
         handoff_rx,
+        leave_broadcast_tx,
+        leave_broadcast_rx,
         queue: Mutex::new(MessageQueue::new()),
         nodes: RwLock::new(Memberlist::new(LocalNodeState {
           node: Arc::new(Node {
             full_address: Address::new(name, advertise),
             meta,
-            state: NodeState::Dead,
             pmin: vsn[0],
             pmax: vsn[1],
             pcur: vsn[2],
             dmin: vsn[3],
             dmax: vsn[4],
             dcur: vsn[5],
+            state: NodeState::Dead,
           }),
           incarnation: 0,
+          state: NodeState::Dead,
           state_change: Instant::now(),
         })),
-        dns,
       }),
     })
   }
@@ -119,6 +123,102 @@ where
   T: Transport,
   D: Delegate,
 {
+  /// Returns a list of all known live nodes.
+  #[inline]
+  pub async fn members(&self) -> Vec<Arc<Node>> {
+    self
+      .inner
+      .nodes
+      .read()
+      .await
+      .nodes
+      .iter()
+      .map(|n| n.node.clone())
+      .collect()
+  }
+
+  /// Returns the number of alive nodes currently known. Between
+  /// the time of calling this and calling Members, the number of alive nodes
+  /// may have changed, so this shouldn't be used to determine how many
+  /// members will be returned by Members.
+  #[inline]
+  pub async fn num_members(&self) -> usize {
+    self
+      .inner
+      .nodes
+      .read()
+      .await
+      .nodes
+      .iter()
+      .filter(|n| !n.dead_or_left())
+      .count()
+  }
+
+  /// Leave will broadcast a leave message but will not shutdown the background
+  /// listeners, meaning the node will continue participating in gossip and state
+  /// updates.
+  ///
+  /// This will block until the leave message is successfully broadcasted to
+  /// a member of the cluster, if any exist or until a specified timeout
+  /// is reached.
+  ///
+  /// This method is safe to call multiple times, but must not be called
+  /// after the cluster is already shut down.
+  pub async fn leave(&self, timeout: Duration) -> Result<(), Error<T, D>> {
+    let _mu = self.inner.leave_lock.lock().await;
+
+    if !self.has_left() {
+      self.inner.hot.leave.fetch_add(1, Ordering::SeqCst);
+
+      let mut memberlist = self.inner.nodes.write().await;
+      if let Some(state) = memberlist.node_map.get(&self.inner.opts.name) {
+        // This dead message is special, because Node and From are the
+        // same. This helps other nodes figure out that a node left
+        // intentionally. When Node equals From, other nodes know for
+        // sure this node is gone.
+
+        let d = Dead {
+          incarnation: state.incarnation,
+          node: state.node.name().clone(),
+          from: state.node.name().clone(),
+        };
+
+        self.dead_node(&mut memberlist, d).await?;
+
+        // Block until the broadcast goes out
+        if memberlist.any_alive() {
+          if timeout > Duration::ZERO {
+            futures_util::select_biased! {
+              rst = self.inner.leave_broadcast_rx.recv().fuse() => {
+                if let Err(e) = rst {
+                  tracing::error!(
+                    target = "showbiz",
+                    "failed to receive leave broadcast: {}",
+                    e
+                  );
+                }
+              },
+              _ = futures_timer::Delay::new(timeout).fuse() => {
+                return Err(Error::LeaveTimeout);
+              }
+            }
+          } else {
+            if let Err(e) = self.inner.leave_broadcast_rx.recv().await {
+              tracing::error!(
+                target = "showbiz",
+                "failed to receive leave broadcast: {}",
+                e
+              );
+            }
+          }
+        }
+      } else {
+        tracing::warn!(target = "showbiz", "leave but we're not a member");
+      }
+    }
+    Ok(())
+  }
+
   /// Used to take an existing Memberlist and attempt to join a cluster
   /// by contacting all the given hosts and performing a state sync. Initially,
   /// the Memberlist only contains our own state, so doing this will cause
@@ -167,6 +267,14 @@ where
     }
 
     Ok(num_success)
+  }
+
+  /// Gives this instance's idea of how well it is meeting the soft
+  /// real-time requirements of the protocol. Lower numbers are better, and zero
+  /// means "totally healthy".
+  #[inline]
+  pub async fn health_score(&self) -> usize {
+    self.inner.awareness.get_health_score().await as usize
   }
 
   /// Used to return the local Node
@@ -236,10 +344,15 @@ where
   /// to target a user message at the given node (this does not use the gossip
   /// mechanism). The maximum size of the message depends on the configured
   /// `packet_buffer_size` for this memberlist instance.
-  pub async fn send_best_effort(&self, to: &Node, mut msg: Vec<u8>) -> Result<(), Error<T, D>> {
+  pub async fn send_best_effort(&self, to: &Node, _msg: Message) -> Result<(), Error<T, D>> {
     // Encode as a user message
-    let addr = Address::new(to.full_address().name().clone(), to.address());
+    let _addr = Address::new(to.full_address().name().clone(), to.address());
 
+    // TODO: implement
+    Ok(())
+  }
+
+  pub async fn send_to_address(&self, _addr: &Address, _msg: Message) -> Result<(), Error<T, D>> {
     // TODO: implement
     Ok(())
   }
@@ -251,20 +364,6 @@ where
   #[inline]
   pub async fn send_reliable(&self, to: &Node, msg: Message) -> Result<(), Error<T, D>> {
     self.send_user_msg(to.full_address(), msg).await
-  }
-
-  /// Returns a list of all known live nodes.
-  #[inline]
-  pub async fn members(&self) -> Vec<Arc<Node>> {
-    self
-      .inner
-      .nodes
-      .read()
-      .await
-      .nodes
-      .iter()
-      .map(|n| n.node.clone())
-      .collect()
   }
 
   pub async fn shutdown<P>(self, parker: P) -> Result<(), Error<T, D>>
@@ -282,21 +381,11 @@ where
 
     let ShowbizCore {
       hot,
-      awareness,
-      advertise,
-      broadcast,
-      shutdown_rx,
+
       shutdown_tx,
-      leave_lock,
-      opts,
+
       transport,
-      keyring,
-      delegate,
-      handoff_tx,
-      handoff_rx,
-      queue,
-      nodes,
-      dns,
+      ..
     } = Arc::into_inner(core).unwrap();
 
     // Shut down the transport first, which should block until it's
@@ -339,7 +428,7 @@ where
 
     // Make sure the domain name is terminated with a dot (we know there's
     // at least one character at this point).
-    let mut dn = host.chars().last().unwrap();
+    let dn = host.chars().last().unwrap();
     let ips = if dn != '.' {
       let mut dn = host.to_string();
       dn.push('.');
@@ -459,14 +548,14 @@ where
     }
   }
 
-  pub(crate) async fn verify_protocol(&self, remote: &[PushNodeState]) -> Result<(), Error<T, D>> {
+  pub(crate) async fn verify_protocol(&self, _remote: &[PushNodeState]) -> Result<(), Error<T, D>> {
     // TODO: implement
 
     Ok(())
   }
 
   #[cfg(test)]
-  pub(crate) async fn change_node<F>(&self, addr: SocketAddr, mut f: F)
+  pub(crate) async fn change_node<F>(&self, _addr: SocketAddr, _f: F)
   where
     F: Fn(&LocalNodeState),
   {

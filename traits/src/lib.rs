@@ -17,10 +17,12 @@ pub use broadcast::*;
 
 #[cfg(feature = "async")]
 pub use trust_dns_proto::{
-  tcp::DnsTcpStream,
+  tcp::{Connect, DnsTcpStream},
   udp::{DnsUdpSocket, UdpSocket},
   Time,
 };
+
+use std::sync::Arc;
 
 #[cfg_attr(feature = "async", async_trait::async_trait)]
 pub trait Delegate: Send + Sync + 'static {
@@ -102,11 +104,11 @@ pub trait Delegate: Send + Sync + 'static {
 
   /// Invoked when a node is detected to have left the cluster
   #[cfg(not(feature = "async"))]
-  fn notify_leave(&self, node: &Node) -> Result<(), Self::Error>;
+  fn notify_leave(&self, node: Arc<Node>) -> Result<(), Self::Error>;
 
   /// Invoked when a node is detected to have left the cluster
   #[cfg(feature = "async")]
-  async fn notify_leave(&self, node: &Node) -> Result<(), Self::Error>;
+  async fn notify_leave(&self, node: Arc<Node>) -> Result<(), Self::Error>;
 
   /// Invoked when a node is detected to have
   /// updated, usually involving the meta data.
@@ -292,13 +294,13 @@ impl Delegate for VoidDelegate {
 
   /// Invoked when a node is detected to have left the cluster
   #[cfg(not(feature = "async"))]
-  fn notify_leave(&self, node: &Node) -> Result<(), Self::Error> {
+  fn notify_leave(&self, node: Arc<Node>) -> Result<(), Self::Error> {
     Ok(())
   }
 
   /// Invoked when a node is detected to have left the cluster
   #[cfg(feature = "async")]
-  async fn notify_leave(&self, node: &Node) -> Result<(), Self::Error> {
+  async fn notify_leave(&self, node: Arc<Node>) -> Result<(), Self::Error> {
     Ok(())
   }
 

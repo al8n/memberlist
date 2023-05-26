@@ -2,7 +2,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
 
-use showbiz_traits::{Broadcast, Transport};
+use showbiz_traits::Transport;
 
 use crate::{showbiz::Showbiz, types::*};
 

@@ -437,6 +437,13 @@ macro_rules! bad_bail {
 bad_bail!(Suspect);
 bad_bail!(Dead);
 
+impl Dead {
+  #[inline]
+  pub(crate) fn dead_self(&self) -> bool {
+    self.node == self.from
+  }
+}
+
 /// Ack response is sent for a ping
 #[viewit::viewit]
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1149,10 +1156,28 @@ impl Message {
 
   #[inline]
   pub fn new() -> Self {
+    Self::new_with_type(MessageType::User)
+  }
+
+  #[inline]
+  pub(crate) fn new_with_type(ty: MessageType) -> Self {
     let mut this = BytesMut::with_capacity(Self::PREFIX_SIZE);
-    this.put_u8(MessageType::User as u8);
+    this.put_u8(ty as u8);
     this.put_slice(&[0; core::mem::size_of::<u32>()]);
     Self(this)
+  }
+
+  #[inline]
+  pub(crate) fn encode<M: ProstMessage>(
+    msg: &M,
+    ty: MessageType,
+  ) -> Result<Self, prost::EncodeError> {
+    let encoded_len = msg.encoded_len();
+    let mut buf = BytesMut::with_capacity(Self::PREFIX_SIZE + encoded_len);
+    buf.put_u8(ty as u8);
+    buf.put_u32(encoded_len as u32);
+    msg.encode(&mut buf)?;
+    Ok(Self(buf))
   }
 
   #[inline]

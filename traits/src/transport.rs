@@ -55,8 +55,8 @@ mod r#async {
   #[async_trait::async_trait]
   pub trait Transport: Unpin + Send + Sync + 'static {
     type Error: std::error::Error + From<std::io::Error> + Send + Sync + 'static;
-    type Connection: Connection + trust_dns_proto::tcp::DnsTcpStream;
-    type UnreliableConnection: Connection + trust_dns_proto::udp::DnsUdpSocket;
+    type Connection: Connection + trust_dns_proto::tcp::DnsTcpStream + trust_dns_proto::tcp::Connect;
+    type UnreliableConnection: Connection + trust_dns_proto::udp::UdpSocket;
     type Options;
 
     /// Creates a new transport instance with the given options
@@ -130,9 +130,15 @@ mod r#async {
       timeout: Duration,
     ) -> Result<Self::UnreliableConnection, Self::Error>;
 
-    async fn connect(addr: SocketAddr) -> std::io::Result<Self::Connection>;
+    /// Connect to the address with reliable connection, e.g. TCP
+    async fn connect(addr: SocketAddr) -> std::io::Result<Self::Connection> {
+      <Self::Connection as trust_dns_proto::tcp::Connect>::connect(addr).await
+    }
 
-    async fn bind_unreliable(addr: SocketAddr) -> std::io::Result<Self::UnreliableConnection>;
+    /// Connect to the address with unreliable connection, e.g. UDP
+    async fn bind_unreliable(addr: SocketAddr) -> std::io::Result<Self::UnreliableConnection> {
+      <Self::UnreliableConnection as trust_dns_proto::udp::UdpSocket>::bind(addr).await
+    }
   }
 
   #[cfg(feature = "async")]

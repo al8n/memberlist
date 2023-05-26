@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, sync::Arc, time::Instant};
 
 use super::{error::Error, showbiz::Showbiz, types::PushNodeState};
-use showbiz_traits::{Broadcast, Delegate, Transport};
+use showbiz_traits::{Delegate, Transport};
 use showbiz_types::{Address, Node, NodeState};
 
 mod r#async;
@@ -12,6 +12,7 @@ pub(crate) struct LocalNodeState {
   node: Arc<Node>,
   incarnation: u32,
   state_change: Instant,
+  state: NodeState,
 }
 
 impl LocalNodeState {
@@ -25,7 +26,7 @@ impl LocalNodeState {
 
   #[inline]
   pub(crate) fn dead_or_left(&self) -> bool {
-    self.node.state == NodeState::Dead || self.node.state == NodeState::Left
+    self.state == NodeState::Dead || self.state == NodeState::Left
   }
 }
 

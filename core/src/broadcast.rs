@@ -1,15 +1,17 @@
+use async_channel::Sender;
 use bytes::Bytes;
-use showbiz_traits::Broadcast;
-use showbiz_types::SmolStr;
+use showbiz_traits::{Broadcast, Delegate, Transport};
+use showbiz_types::Name;
+
+use crate::{showbiz::Showbiz, types::Message};
 
 pub(crate) struct ShowbizBroadcast {
-  name: Option<SmolStr>,
-  node: SmolStr,
+  node: Name,
   msg: Bytes,
   #[cfg(feature = "async")]
-  notify: async_channel::Sender<()>,
+  notify: Option<async_channel::Sender<()>>,
   #[cfg(not(feature = "async"))]
-  notify: crossbeam_channel::Sender<()>,
+  notify: Option<crossbeam_channel::Sender<()>>,
 }
 
 #[cfg_attr(feature = "async", async_trait::async_trait)]
@@ -20,8 +22,8 @@ impl Broadcast for ShowbizBroadcast {
   #[cfg(not(feature = "async"))]
   type Error = crossbeam_channel::SendError<()>;
 
-  fn name(&self) -> Option<&SmolStr> {
-    self.name.as_ref()
+  fn name(&self) -> &Name {
+    &self.node
   }
 
   fn invalidates(&self, other: &Self) -> bool {
@@ -34,23 +36,58 @@ impl Broadcast for ShowbizBroadcast {
 
   #[cfg(feature = "async")]
   async fn finished(&self) -> Result<(), Self::Error> {
-    if let Err(e) = self.notify.send(()).await {
-      tracing::error!(target = "showbiz", "failed to notify: {}", e);
-      return Err(e);
+    if let Some(tx) = &self.notify {
+      if let Err(e) = tx.send(()).await {
+        tracing::error!(target = "showbiz", "failed to notify: {}", e);
+        return Err(e);
+      }
     }
     Ok(())
   }
 
   #[cfg(not(feature = "async"))]
   fn finished(&self) -> Result<(), Self::Error> {
-    if let Err(e) = self.notify.send(()) {
-      tracing::error!(target = "showbiz", "failed to notify: {}", e);
-      return Err(e);
+    if let Some(tx) = &self.notify {
+      if let Err(e) = tx.send(()) {
+        tracing::error!(target = "showbiz", "failed to notify: {}", e);
+        return Err(e);
+      }
     }
     Ok(())
   }
 
   fn is_unique(&self) -> bool {
     false
+  }
+}
+
+#[cfg(feature = "async")]
+impl<T: Transport, D: Delegate> Showbiz<T, D> {
+  #[inline]
+  pub(crate) async fn broadcast_notify(&self, node: Name, msg: Message, notify_tx: Sender<()>) {
+    let _ = self.queue_broadcast(node, msg, Some(notify_tx)).await;
+  }
+
+  #[inline]
+  pub(crate) async fn broadcast(&self, node: Name, msg: Message) {
+    let _ = self.queue_broadcast(node, msg, None).await;
+  }
+
+  #[inline]
+  pub(crate) async fn queue_broadcast(
+    &self,
+    node: Name,
+    msg: Message,
+    notify_tx: Option<Sender<()>>,
+  ) -> Result<(), async_channel::SendError<()>> {
+    self
+      .inner
+      .broadcast
+      .queue_broadcast(ShowbizBroadcast {
+        node,
+        msg: msg.freeze(),
+        notify: notify_tx,
+      })
+      .await
   }
 }

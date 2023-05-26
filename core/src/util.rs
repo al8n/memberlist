@@ -1,6 +1,5 @@
 use bytes::BufMut;
 use prost::Message;
-use showbiz_types::SmolStr;
 
 use super::CompressionAlgo;
 
@@ -157,7 +156,7 @@ pub(crate) fn split_host_port(hostport: String) -> Result<(String, u16), Invalid
 
   match u16::from_str_radix(&hostport[last_colon_index + 1..], 10) {
     Ok(port) => Ok((host, port)),
-    Err(e) => Err(InvalidAddress {
+    Err(_e) => Err(InvalidAddress {
       err: "invalid port",
       addr: hostport,
     }),

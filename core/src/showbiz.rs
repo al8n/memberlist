@@ -17,7 +17,7 @@ use async_channel::{Receiver, Sender};
 #[cfg(not(feature = "async"))]
 use crossbeam_channel::{Receiver, Sender};
 
-use showbiz_traits::{Broadcast, Delegate, Transport, VoidDelegate};
+use showbiz_traits::{Delegate, Transport, VoidDelegate};
 use showbiz_types::{Address, MessageType, Name, Node, NodeState};
 
 use crate::{
@@ -188,6 +188,13 @@ impl Memberlist {
       node_timers: HashMap::new(),
     }
   }
+
+  pub(crate) fn any_alive(&self) -> bool {
+    self
+      .nodes
+      .iter()
+      .any(|n| !n.dead_or_left() && n.node.name() != self.local.node.name())
+  }
 }
 
 #[viewit::viewit(getters(skip), setters(skip))]
@@ -200,6 +207,8 @@ pub(crate) struct ShowbizCore<T: Transport, D = VoidDelegate> {
   shutdown_tx: Sender<()>,
   // Serializes calls to Leave
   leave_lock: Mutex<()>,
+  leave_broadcast_tx: Sender<()>,
+  leave_broadcast_rx: Receiver<()>,
   opts: Arc<Options>,
   transport: T,
   keyring: Option<SecretKeyring>,

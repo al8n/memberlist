@@ -302,20 +302,20 @@ impl Node {
     Self {
       full_address: Address { addr, name },
       meta: Bytes::new(),
-      state,
       pmin: 0,
       pmax: 0,
       pcur: 0,
       dmin: 0,
       dmax: 0,
       dcur: 0,
+      state,
     }
   }
 
   /// Return the node name
   #[inline]
-  pub fn name(&self) -> &str {
-    self.full_address.name.as_ref()
+  pub fn name(&self) -> &Name {
+    &self.full_address.name
   }
 
   #[inline]

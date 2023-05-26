@@ -1,7 +1,7 @@
 use crate::{error::Error, showbiz::Showbiz};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use showbiz_traits::{Broadcast, Delegate, Transport};
+use showbiz_traits::{Delegate, Transport};
 use showbiz_types::MessageType;
 
 const LABEL_MAX_SIZE: usize = 255;

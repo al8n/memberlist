@@ -8,7 +8,7 @@ use std::{
 
 use crossbeam_utils::CachePadded;
 use showbiz_traits::Broadcast;
-use showbiz_types::SmolStr;
+use showbiz_types::Name;
 
 use crate::util::retransmit_limit;
 
@@ -18,13 +18,14 @@ pub trait NodeCalculator {
 
 struct Inner<B: Broadcast> {
   q: BTreeSet<Arc<LimitedBroadcast<B>>>,
-  m: HashMap<SmolStr, Arc<LimitedBroadcast<B>>>,
+  m: HashMap<Name, Arc<LimitedBroadcast<B>>>,
   id_gen: u64,
 }
 
 impl<B: Broadcast> Inner<B> {
   fn remove(&mut self, item: &LimitedBroadcast<B>) {
-    if let Some(name) = item.broadcast.name() {
+    let name = item.broadcast.name();
+    if !name.is_empty() {
       self.m.remove(name);
     }
 
@@ -36,7 +37,8 @@ impl<B: Broadcast> Inner<B> {
   }
 
   fn insert(&mut self, item: Arc<LimitedBroadcast<B>>) {
-    if let Some(name) = item.broadcast.name() {
+    let name = item.broadcast.name();
+    if !name.is_empty() {
       self.m.insert(name.clone(), item.clone());
     }
     self.q.insert(item);
@@ -194,10 +196,14 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
   }
 
   #[cfg(feature = "async")]
-  pub async fn get_broadcasts(&self, overhead: usize, limit: usize) -> Vec<bytes::Bytes> {
+  pub async fn get_broadcasts(
+    &self,
+    overhead: usize,
+    limit: usize,
+  ) -> Result<Vec<bytes::Bytes>, B::Error> {
     let mut inner = self.inner.lock().await;
     if inner.q.is_empty() {
-      return Vec::new();
+      return Ok(Vec::new());
     }
 
     let transmit_limit = retransmit_limit(self.retransmit_mult, self.num_nodes.num_nodes());
@@ -250,7 +256,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
           // check if we should stop transmission
           inner.remove(&keep);
           if keep.transmits.load(Ordering::Relaxed) + 1 >= transmit_limit {
-            keep.broadcast.finished().await;
+            keep.broadcast.finished().await?;
           } else {
             // We need to bump this item down to another transmit tier, but
             // because it would be in the same direction that we're walking the
@@ -272,17 +278,17 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
       inner.insert(item);
     }
 
-    to_send
+    Ok(to_send)
   }
 
   /// Used to enqueue a broadcast
   #[cfg(feature = "async")]
-  pub async fn queue_broadcast(&self, b: B) {
+  pub async fn queue_broadcast(&self, b: B) -> Result<(), B::Error> {
     self.queue_broadcast_in(b, 0).await
   }
 
   #[cfg(feature = "async")]
-  async fn queue_broadcast_in(&self, b: B, initial_transmits: usize) {
+  async fn queue_broadcast_in(&self, b: B, initial_transmits: usize) -> Result<(), B::Error> {
     let mut inner = self.inner.lock().await;
 
     if inner.id_gen == u64::MAX {
@@ -303,9 +309,10 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     let unique = lb.broadcast.is_unique();
 
     // Check if this message invalidates another.
-    if let Some(name) = lb.broadcast.name() {
+    let name = lb.broadcast.name();
+    if !name.is_empty() {
       if let Some(old) = inner.m.remove(name) {
-        old.broadcast.finished().await;
+        old.broadcast.finished().await?;
 
         inner.q.remove(&old);
         if inner.q.is_empty() {
@@ -317,7 +324,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
       for item in inner.q.iter() {
         let keep = lb.broadcast.invalidates(&item.broadcast);
         if keep {
-          item.broadcast.finished().await;
+          item.broadcast.finished().await?;
         }
       }
       inner
@@ -328,7 +335,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
         inner.q.retain(|item| {
           let keep = lb.broadcast.invalidates(&item.broadcast);
           if keep {
-            item.broadcast.finished();
+            item.broadcast.finished()?;
           }
           !keep
         });
@@ -343,6 +350,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
 
     // Append to the relevant queue.
     inner.insert(Arc::new(lb));
+    Ok(())
   }
 
   /// Used to enqueue a broadcast
@@ -375,7 +383,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     // Check if this message invalidates another.
     if let Some(name) = lb.broadcast.name() {
       if let Some(old) = inner.m.remove(name) {
-        old.broadcast.finished();
+        old.broadcast.finished()?;
 
         inner.q.remove(&old);
         if inner.q.is_empty() {
@@ -387,7 +395,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
       inner.q.retain(|item| {
         let keep = lb.broadcast.invalidates(&item.broadcast);
         if keep {
-          item.broadcast.finished();
+          item.broadcast.finished()?;
         }
         !keep
       });
@@ -401,6 +409,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
 
     // Append to the relevant queue.
     inner.insert(Arc::new(lb));
+    Ok(())
   }
 
   #[cfg(all(not(feature = "async"), test))]
@@ -418,32 +427,34 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
 
   /// Clears all the queued messages.
   #[cfg(all(feature = "async", test))]
-  pub async fn reset(&self) {
+  pub async fn reset(&self) -> Result<(), B::Error> {
     let mut inner = self.inner.lock().await;
 
     for b in inner.q.iter() {
-      b.broadcast.finished().await;
+      b.broadcast.finished().await?;
     }
 
     inner.q.clear();
     inner.m.clear();
     inner.id_gen = 0;
+    Ok(())
   }
 
   /// Retain the maxRetain latest messages, and the rest
   /// will be discarded. This can be used to prevent unbounded queue sizes
   #[cfg(feature = "async")]
-  pub async fn prune(&self, max_retain: usize) {
+  pub async fn prune(&self, max_retain: usize) -> Result<(), B::Error> {
     let mut inner = self.inner.lock().await;
     // Do nothing if queue size is less than the limit
     while inner.q.len() > max_retain {
       if let Some(item) = inner.q.pop_last() {
-        item.broadcast.finished().await;
+        item.broadcast.finished().await?;
         inner.remove(&item);
       } else {
         break;
       }
     }
+    Ok(())
   }
 
   /// Retain the maxRetain latest messages, and the rest
