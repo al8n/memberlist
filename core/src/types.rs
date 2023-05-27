@@ -1,8 +1,9 @@
 use std::{
   cell::RefCell,
-  net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+  net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
   ops::{Deref, DerefMut},
   thread_local,
+  time::Instant,
 };
 
 use prost::{
@@ -11,7 +12,6 @@ use prost::{
   DecodeError, EncodeError, Message as ProstMessage,
 };
 use serde::{Deserialize, Serialize};
-use showbiz_types::{MessageType, Name, NodeState};
 
 const VSN_SIZE: usize = 6;
 const VSN_ENCODED_SIZE: usize = 8;
@@ -120,7 +120,7 @@ impl TryFrom<u8> for CompressionAlgo {
 }
 
 #[viewit::viewit]
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Compress {
   algo: CompressionAlgo,
   buf: Bytes,
@@ -189,139 +189,6 @@ impl ProstMessage for Compress {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[doc(hidden)]
-pub enum EncodableSocketAddr {
-  Local(SocketAddr),
-  None,
-}
-
-impl Default for EncodableSocketAddr {
-  fn default() -> Self {
-    Self::None
-  }
-}
-
-impl EncodableSocketAddr {
-  #[inline]
-  fn clear(&mut self) {
-    match self {
-      EncodableSocketAddr::Local(_) => *self = Self::None,
-      EncodableSocketAddr::None => {}
-    }
-  }
-
-  #[inline]
-  fn merge<B>(
-    &mut self,
-    wire_type: WireType,
-    buf: &mut B,
-    ctx: DecodeContext,
-  ) -> Result<(), DecodeError>
-  where
-    B: Buf,
-  {
-    SOCKET_ADDR_BUFFER.with(|b| {
-      let mut b = b.borrow_mut();
-      b.clear();
-      match self {
-        Self::Local(addr) => {
-          match addr {
-            SocketAddr::V4(v4) => {
-              b.put_slice(v4.ip().octets().as_slice());
-              b.put_u16(v4.port());
-            }
-            SocketAddr::V6(v6) => {
-              b.put_slice(v6.ip().octets().as_slice());
-              b.put_u16(v6.port());
-            }
-          }
-          bytes::merge(wire_type, b.deref_mut(), buf, ctx)
-        }
-        Self::None => {
-          bytes::merge(wire_type, b.deref_mut(), buf, ctx).and_then(|_| match b.len() {
-            V4_SOCKET_ADDR_SIZE => {
-              *self = EncodableSocketAddr::Local(SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::new(b[0], b[1], b[2], b[3]),
-                u16::from_be_bytes([b[4], b[5]]),
-              )));
-              Ok(())
-            }
-            V6_SOCKET_ADDR_SIZE => {
-              *self = EncodableSocketAddr::Local(SocketAddr::V6(SocketAddrV6::new(
-                Ipv6Addr::new(
-                  u16::from_be_bytes([b[0], b[1]]),
-                  u16::from_be_bytes([b[2], b[3]]),
-                  u16::from_be_bytes([b[4], b[5]]),
-                  u16::from_be_bytes([b[6], b[7]]),
-                  u16::from_be_bytes([b[8], b[9]]),
-                  u16::from_be_bytes([b[10], b[11]]),
-                  u16::from_be_bytes([b[12], b[13]]),
-                  u16::from_be_bytes([b[14], b[15]]),
-                ),
-                u16::from_be_bytes([b[16], b[17]]),
-                0,
-                0,
-              )));
-              Ok(())
-            }
-            _ => return Err(DecodeError::new("invalid socket addr")),
-          })
-        }
-      }
-    })
-  }
-
-  #[inline]
-  const fn encoded_len(&self) -> usize {
-    // The encoded len correct based on this assumption:
-    // 1. the tag is less than 16
-    // 2. the length is less than 128
-    match self {
-      EncodableSocketAddr::Local(p) => {
-        if p.is_ipv4() {
-          6 + 2
-        } else {
-          18 + 2
-        }
-      }
-      EncodableSocketAddr::None => unreachable!(),
-    }
-  }
-
-  #[inline]
-  pub(crate) const fn addr(&self) -> SocketAddr {
-    match self {
-      EncodableSocketAddr::Local(addr) => *addr,
-      EncodableSocketAddr::None => unreachable!(),
-    }
-  }
-}
-
-impl From<SocketAddr> for EncodableSocketAddr {
-  fn from(addr: SocketAddr) -> Self {
-    Self::Local(addr)
-  }
-}
-
-impl Serialize for EncodableSocketAddr {
-  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-    match self {
-      EncodableSocketAddr::Local(addr) => addr.serialize(serializer),
-      EncodableSocketAddr::None => unreachable!(),
-    }
-  }
-}
-
-impl<'de> Deserialize<'de> for EncodableSocketAddr {
-  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-  where
-    D: serde::Deserializer<'de>,
-  {
-    SocketAddr::deserialize(deserializer).map(EncodableSocketAddr::Local)
-  }
-}
-
 #[doc(hidden)]
 pub trait ProstMessageExt: ProstMessage {
   fn encode_with_prefix(&self) -> Result<Bytes, EncodeError>;
@@ -348,12 +215,11 @@ msg_ext!(Suspect, Dead, AckResponse, NackResponse, ErrorResponse,);
 macro_rules! bad_bail {
   ($name: ident) => {
     #[viewit::viewit]
-    #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    #[doc(hidden)]
+    #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
     pub(crate) struct $name {
       incarnation: u32,
-      node: Name,
-      from: Name,
+      node: NodeId,
+      from: NodeId,
     }
 
     impl ProstMessage for $name {
@@ -446,7 +312,7 @@ impl Dead {
 
 /// Ack response is sent for a ping
 #[viewit::viewit]
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 #[doc(hidden)]
 pub(crate) struct AckResponse {
   seq_no: u32,
@@ -524,8 +390,7 @@ impl ProstMessage for AckResponse {
 /// the ping-ee within the configured timeout. This lets the original node know
 /// that the indirect ping attempt happened but didn't succeed.
 #[viewit::viewit]
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, prost::Message)]
-#[serde(transparent)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, prost::Message)]
 #[repr(transparent)]
 #[doc(hidden)]
 pub(crate) struct NackResponse {
@@ -534,7 +399,7 @@ pub(crate) struct NackResponse {
 }
 
 #[viewit::viewit]
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, prost::Message)]
 #[serde(transparent)]
 #[repr(transparent)]
 #[doc(hidden)]
@@ -552,7 +417,7 @@ impl<E: std::error::Error> From<E> for ErrorResponse {
 }
 
 #[viewit::viewit]
-#[derive(PartialEq, Eq, Hash, Serialize, Deserialize, prost::Message)]
+#[derive(PartialEq, Eq, Hash, prost::Message)]
 #[doc(hidden)]
 pub(crate) struct PushPullHeader {
   #[prost(uint32, tag = "1")]
@@ -564,12 +429,11 @@ pub(crate) struct PushPullHeader {
 }
 
 #[viewit::viewit]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 #[doc(hidden)]
 pub(crate) struct Alive {
   incarnation: u32,
-  node: Name,
-  addr: EncodableSocketAddr,
+  node: NodeId,
   meta: Bytes,
   // The versions of the protocol/delegate that are being spoken, order:
   // pmin, pmax, pcur, dmin, dmax, dcur
@@ -580,8 +444,7 @@ impl Default for Alive {
   fn default() -> Self {
     Self {
       incarnation: 0,
-      node: Name::default(),
-      addr: EncodableSocketAddr::default(),
+      node: NodeId::default(),
       meta: Bytes::new(),
       vsn: VSN_EMPTY,
     }
@@ -699,10 +562,10 @@ fn test_vsn_encode() {
 }
 
 #[viewit::viewit]
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct IndirectPingRequest {
   seq_no: u32,
-  target: EncodableSocketAddr,
+  target: NodeAddress,
   /// Node is sent so the target can verify they are
   /// the intended recipient. This is to protect against an agent
   /// restart with a new name.
@@ -712,9 +575,7 @@ pub(crate) struct IndirectPingRequest {
   nack: bool,
 
   /// Source address, used for a direct reply
-  source_addr: EncodableSocketAddr,
-  /// Source name, used for a direct reply
-  source_node: Name,
+  source: NodeId,
 }
 
 impl ProstMessage for IndirectPingRequest {
@@ -833,10 +694,9 @@ impl ProstMessage for IndirectPingRequest {
 }
 
 #[viewit::viewit]
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, prost::Message)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, prost::Message)]
 #[doc(hidden)]
 #[repr(transparent)]
-#[serde(transparent)]
 pub(crate) struct UserMsgHeader {
   #[prost(uint32, tag = "1")]
   len: u32, // Encodes the byte lengh of user state
@@ -844,7 +704,7 @@ pub(crate) struct UserMsgHeader {
 
 /// Ping request sent directly to node
 #[viewit::viewit]
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Ping {
   seq_no: u32,
   /// Node is sent so the target can verify they are
@@ -852,19 +712,16 @@ pub(crate) struct Ping {
   /// restart with a new name.
   node: Name,
 
-  /// Source address, used for a direct reply
-  source_addr: EncodableSocketAddr,
-  /// Source name, used for a direct reply
-  source_node: Name,
+  /// Source node, used for a direct reply
+  source: NodeId,
 }
 
 impl Ping {
-  pub const fn new(seq_no: u32, node: Name, source_addr: SocketAddr, source_node: Name) -> Self {
+  pub const fn new(seq_no: u32, node: Name, source: NodeId) -> Self {
     Self {
       seq_no,
       node,
-      source_addr: EncodableSocketAddr::Local(source_addr),
-      source_node,
+      source,
     }
   }
 }
@@ -959,11 +816,10 @@ impl ProstMessage for Ping {
 }
 
 #[viewit::viewit]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[doc(hidden)]
 pub(crate) struct PushNodeState {
-  name: Name,
-  addr: EncodableSocketAddr,
+  node: NodeId,
   meta: Bytes,
   incarnation: u32,
   state: NodeState,
@@ -1000,8 +856,7 @@ impl PushNodeState {
 impl Default for PushNodeState {
   fn default() -> Self {
     Self {
-      name: Name::default(),
-      addr: EncodableSocketAddr::None,
+      node: NodeId::default(),
       meta: Bytes::default(),
       incarnation: 0,
       state: NodeState::default(),
@@ -1142,7 +997,7 @@ fn test_push_state_enc_dec() {
   assert_eq!(val, push_state);
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Message(pub(crate) BytesMut);
 
 impl Default for Message {
@@ -1178,6 +1033,32 @@ impl Message {
     buf.put_u32(encoded_len as u32);
     msg.encode(&mut buf)?;
     Ok(Self(buf))
+  }
+
+  pub(crate) fn compound(msgs: Vec<Self>) -> Bytes {
+    let num_msgs = msgs.len();
+    let total: usize = msgs.iter().map(|m| m.len()).sum();
+    let mut buf = BytesMut::with_capacity(
+      MessageType::SIZE
+        + core::mem::size_of::<u8>()
+        + num_msgs * core::mem::size_of::<u16>()
+        + total,
+    );
+    // Write out the type
+    buf.put_u8(MessageType::Compound as u8);
+    // Write out the number of message
+    buf.put_u8(num_msgs as u8);
+
+    let mut compound = buf.split_off(num_msgs * 2);
+    for msg in msgs {
+      // Add the message length
+      buf.put_u16(msg.len() as u16);
+      // put msg into compound
+      compound.put_slice(&msg.freeze());
+    }
+
+    buf.unsplit(compound);
+    buf.freeze()
   }
 
   #[inline]
@@ -1366,5 +1247,813 @@ impl AsRef<[u8]> for Message {
 impl AsMut<[u8]> for Message {
   fn as_mut(&mut self) -> &mut [u8] {
     &mut self.0[Self::PREFIX_SIZE..]
+  }
+}
+
+#[viewit::viewit(vis_all = "", getters(vis_all = "pub"), setters(vis_all = "pub"))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Packet {
+  /// The raw contents of the packet.
+  #[viewit(getter(skip))]
+  buf: BytesMut,
+
+  /// Address of the peer. This is an actual [`SocketAddr`] so we
+  /// can expose some concrete details about incoming packets.
+  from: SocketAddr,
+
+  /// The time when the packet was received. This should be
+  /// taken as close as possible to the actual receipt time to help make an
+  /// accurate RTT measurement during probes.
+  timestamp: Instant,
+}
+
+impl Packet {
+  #[inline]
+  pub fn new(from: SocketAddr, timestamp: Instant) -> Self {
+    Self {
+      buf: BytesMut::new(),
+      from,
+      timestamp,
+    }
+  }
+
+  #[inline]
+  pub fn with_capacity(cap: usize, from: SocketAddr, timestamp: Instant) -> Self {
+    Self {
+      buf: BytesMut::with_capacity(cap),
+      from,
+      timestamp,
+    }
+  }
+
+  #[inline]
+  pub fn as_slice(&self) -> &[u8] {
+    self.buf.as_ref()
+  }
+
+  #[inline]
+  pub fn as_mut_slice(&mut self) -> &mut [u8] {
+    self.buf.as_mut()
+  }
+
+  #[inline]
+  pub fn into_inner(self) -> BytesMut {
+    self.buf
+  }
+
+  #[inline]
+  pub fn resize(&mut self, new_len: usize, val: u8) {
+    self.buf.resize(new_len, val);
+  }
+
+  #[inline]
+  pub fn reserve(&mut self, additional: usize) {
+    self.buf.reserve(additional);
+  }
+
+  #[inline]
+  pub fn remaining(&self) -> usize {
+    self.buf.remaining()
+  }
+
+  #[inline]
+  pub fn remaining_mut(&self) -> usize {
+    self.buf.remaining_mut()
+  }
+
+  #[inline]
+  pub fn truncate(&mut self, len: usize) {
+    self.buf.truncate(len);
+  }
+
+  #[inline]
+  pub fn put_slice(&mut self, buf: &[u8]) {
+    self.buf.put_slice(buf);
+  }
+
+  #[inline]
+  pub fn put_u8(&mut self, val: u8) {
+    self.buf.put_u8(val);
+  }
+
+  #[inline]
+  pub fn put_u16(&mut self, val: u16) {
+    self.buf.put_u16(val);
+  }
+
+  #[inline]
+  pub fn put_u16_le(&mut self, val: u16) {
+    self.buf.put_u16_le(val);
+  }
+
+  #[inline]
+  pub fn put_u32(&mut self, val: u32) {
+    self.buf.put_u32(val);
+  }
+
+  #[inline]
+  pub fn put_u32_le(&mut self, val: u32) {
+    self.buf.put_u32_le(val);
+  }
+
+  #[inline]
+  pub fn put_u64(&mut self, val: u64) {
+    self.buf.put_u64(val);
+  }
+
+  #[inline]
+  pub fn put_u64_le(&mut self, val: u64) {
+    self.buf.put_u64_le(val);
+  }
+
+  #[inline]
+  pub fn put_i8(&mut self, val: i8) {
+    self.buf.put_i8(val);
+  }
+
+  #[inline]
+  pub fn put_i16(&mut self, val: i16) {
+    self.buf.put_i16(val);
+  }
+
+  #[inline]
+  pub fn put_i16_le(&mut self, val: i16) {
+    self.buf.put_i16_le(val);
+  }
+
+  #[inline]
+  pub fn put_i32(&mut self, val: i32) {
+    self.buf.put_i32(val);
+  }
+
+  #[inline]
+  pub fn put_i32_le(&mut self, val: i32) {
+    self.buf.put_i32_le(val);
+  }
+
+  #[inline]
+  pub fn put_i64(&mut self, val: i64) {
+    self.buf.put_i64(val);
+  }
+
+  #[inline]
+  pub fn put_i64_le(&mut self, val: i64) {
+    self.buf.put_i64_le(val);
+  }
+
+  #[inline]
+  pub fn put_f32(&mut self, val: f32) {
+    self.buf.put_f32(val);
+  }
+
+  #[inline]
+  pub fn put_f32_le(&mut self, val: f32) {
+    self.buf.put_f32_le(val);
+  }
+
+  #[inline]
+  pub fn put_f64(&mut self, val: f64) {
+    self.buf.put_f64(val);
+  }
+
+  #[inline]
+  pub fn put_f64_le(&mut self, val: f64) {
+    self.buf.put_f64_le(val);
+  }
+
+  #[inline]
+  pub fn put_bool(&mut self, val: bool) {
+    self.buf.put_u8(val as u8);
+  }
+
+  #[inline]
+  pub fn put_bytes(&mut self, val: u8, cnt: usize) {
+    self.buf.put_bytes(val, cnt);
+  }
+
+  #[inline]
+  pub fn clear(&mut self) {
+    self.buf.clear();
+  }
+}
+
+/// The Address for a node, can be an ip or a domain.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NodeAddress {
+  /// e.g. `128.0.0.1`
+  Ip(IpAddr),
+  /// e.g. `www.example.com`
+  Domain(Name),
+}
+
+impl Default for NodeAddress {
+  #[inline]
+  fn default() -> Self {
+    Self::Domain(Name::new())
+  }
+}
+
+impl NodeAddress {
+  #[inline]
+  pub const fn is_ip(&self) -> bool {
+    matches!(self, Self::Ip(_))
+  }
+
+  #[inline]
+  pub const fn is_domain(&self) -> bool {
+    matches!(self, Self::Domain(_))
+  }
+
+  #[inline]
+  pub const fn unwrap_domain(&self) -> &str {
+    match self {
+      Self::Ip(_) => unreachable!(),
+      Self::Domain(addr) => addr.as_str(),
+    }
+  }
+
+  #[inline]
+  pub(crate) const fn unwrap_ip(&self) -> IpAddr {
+    match self {
+      NodeAddress::Ip(addr) => *addr,
+      _ => unreachable!(),
+    }
+  }
+}
+
+impl From<IpAddr> for NodeAddress {
+  fn from(addr: IpAddr) -> Self {
+    Self::Ip(addr)
+  }
+}
+
+impl From<String> for NodeAddress {
+  fn from(addr: String) -> Self {
+    Self::Domain(addr.into())
+  }
+}
+
+impl core::fmt::Display for NodeAddress {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Ip(addr) => write!(f, "{}", addr),
+      Self::Domain(addr) => write!(f, "{}", addr),
+    }
+  }
+}
+
+#[viewit::viewit(
+  vis_all = "pub(crate)",
+  getters(vis_all = "pub"),
+  setters(vis_all = "pub")
+)]
+#[derive(Debug, Clone)]
+pub struct NodeId {
+  #[viewit(getter(const, style = "ref"))]
+  name: Name,
+  port: Option<u16>,
+  #[viewit(getter(const, style = "ref"))]
+  addr: NodeAddress,
+}
+
+impl Eq for NodeId {}
+
+impl PartialEq for NodeId {
+  #[inline]
+  fn eq(&self, other: &Self) -> bool {
+    self.port == other.port && self.addr == other.addr
+  }
+}
+
+impl core::hash::Hash for NodeId {
+  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    self.port.hash(state);
+    self.addr.hash(state);
+  }
+}
+
+impl Default for NodeId {
+  #[inline]
+  fn default() -> Self {
+    Self {
+      name: Name(Bytes::new()),
+      port: None,
+      addr: NodeAddress::Domain(Name::new()),
+    }
+  }
+}
+
+impl NodeId {
+  #[inline]
+  pub fn from_domain(domain: String) -> Self {
+    Self {
+      name: Name(Bytes::new()),
+      port: None,
+      addr: NodeAddress::Domain(domain.into()),
+    }
+  }
+
+  #[inline]
+  pub const fn from_ip(ip: IpAddr) -> Self {
+    Self {
+      name: Name(Bytes::new()),
+      port: None,
+      addr: NodeAddress::Ip(ip),
+    }
+  }
+
+  #[inline]
+  pub const fn from_addr(addr: NodeAddress) -> Self {
+    Self {
+      name: Name(Bytes::new()),
+      port: None,
+      addr,
+    }
+  }
+}
+
+impl From<SocketAddr> for NodeId {
+  fn from(addr: SocketAddr) -> Self {
+    Self {
+      name: Name(Bytes::new()),
+      port: Some(addr.port()),
+      addr: NodeAddress::Ip(addr.ip()),
+    }
+  }
+}
+
+impl core::fmt::Display for NodeId {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match &self.addr {
+      NodeAddress::Ip(addr) => {
+        if let Some(port) = self.port {
+          write!(f, "{}({}:{})", self.name.as_str(), addr, port)
+        } else {
+          write!(f, "{}({})", self.name.as_str(), addr)
+        }
+      }
+      NodeAddress::Domain(addr) => {
+        if let Some(port) = self.port {
+          write!(f, "{}({}:{})", self.name.as_str(), addr, port)
+        } else {
+          write!(f, "{}({})", self.name.as_str(), addr)
+        }
+      }
+    }
+  }
+}
+
+/// An ID of a type of message that can be received
+/// on network channels from other members.
+///
+/// The list of available message types.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum MessageType {
+  Ping = 0,
+  IndirectPing = 1,
+  AckResponse = 2,
+  Suspect = 3,
+  Alive = 4,
+  Dead = 5,
+  PushPull = 6,
+  Compound = 7,
+  /// User mesg, not handled by us
+  User = 8,
+  Compress = 9,
+  Encrypt = 10,
+  NackResponse = 11,
+  HasCrc = 12,
+  ErrorResponse = 13,
+  /// HasLabel has a deliberately high value so that you can disambiguate
+  /// it from the encryptionVersion header which is either 0/1 right now and
+  /// also any of the existing [`MessageType`].
+  HasLabel = 244,
+}
+
+impl MessageType {
+  #[doc(hidden)]
+  pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+impl core::fmt::Display for MessageType {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Ping => write!(f, "Ping"),
+      Self::IndirectPing => write!(f, "IndirectPing"),
+      Self::AckResponse => write!(f, "AckResponse"),
+      Self::Suspect => write!(f, "Suspect"),
+      Self::Alive => write!(f, "Alive"),
+      Self::Dead => write!(f, "Dead"),
+      Self::PushPull => write!(f, "PushPull"),
+      Self::Compound => write!(f, "Compound"),
+      Self::User => write!(f, "User"),
+      Self::Compress => write!(f, "Compress"),
+      Self::Encrypt => write!(f, "Encrypt"),
+      Self::NackResponse => write!(f, "NackResponse"),
+      Self::HasCrc => write!(f, "HasCrc"),
+      Self::ErrorResponse => write!(f, "ErrorResponse"),
+      Self::HasLabel => write!(f, "HasLabel"),
+    }
+  }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct InvalidMessageType(u8);
+
+impl core::fmt::Display for InvalidMessageType {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(f, "invalid message type: {}", self.0)
+  }
+}
+
+impl std::error::Error for InvalidMessageType {}
+
+impl TryFrom<u8> for MessageType {
+  type Error = InvalidMessageType;
+
+  fn try_from(value: u8) -> Result<Self, Self::Error> {
+    match value {
+      0 => Ok(Self::Ping),
+      1 => Ok(Self::IndirectPing),
+      2 => Ok(Self::AckResponse),
+      3 => Ok(Self::Suspect),
+      4 => Ok(Self::Alive),
+      5 => Ok(Self::Dead),
+      6 => Ok(Self::PushPull),
+      7 => Ok(Self::Compound),
+      8 => Ok(Self::User),
+      9 => Ok(Self::Compress),
+      10 => Ok(Self::Encrypt),
+      11 => Ok(Self::NackResponse),
+      12 => Ok(Self::HasCrc),
+      13 => Ok(Self::ErrorResponse),
+      244 => Ok(Self::HasLabel),
+      _ => Err(InvalidMessageType(value)),
+    }
+  }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct InvalidNodeState(u8);
+
+impl core::fmt::Display for InvalidNodeState {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(f, "invalid node state: {}", self.0)
+  }
+}
+
+impl std::error::Error for InvalidNodeState {}
+
+#[derive(
+  Debug, Default, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum NodeState {
+  #[default]
+  Alive = 0,
+  Suspect = 1,
+  Dead = 2,
+  Left = 3,
+}
+
+impl TryFrom<u8> for NodeState {
+  type Error = InvalidNodeState;
+
+  fn try_from(value: u8) -> Result<Self, Self::Error> {
+    match value {
+      0 => Ok(Self::Alive),
+      1 => Ok(Self::Suspect),
+      2 => Ok(Self::Dead),
+      3 => Ok(Self::Left),
+      _ => Err(InvalidNodeState(value)),
+    }
+  }
+}
+
+impl core::fmt::Display for NodeState {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Alive => write!(f, "alive"),
+      Self::Suspect => write!(f, "suspect"),
+      Self::Dead => write!(f, "dead"),
+      Self::Left => write!(f, "left"),
+    }
+  }
+}
+
+impl core::str::FromStr for NodeState {
+  type Err = String;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    match s.trim().to_lowercase().as_str() {
+      "alive" => Ok(Self::Alive),
+      "suspect" => Ok(Self::Suspect),
+      "dead" => Ok(Self::Dead),
+      "left" => Ok(Self::Left),
+      _ => Err(format!("invalid node state type: {}", s)),
+    }
+  }
+}
+
+/// Represents a node in the cluster, can be thought as an identifier for a node
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct RemoteNode {
+  pub name: Option<Name>,
+  pub addr: IpAddr,
+  pub port: Option<u16>,
+}
+
+impl RemoteNode {
+  /// Construct a new remote node identifier with the given ip addr.
+  #[inline]
+  pub const fn new(addr: IpAddr) -> Self {
+    Self {
+      name: None,
+      addr,
+      port: None,
+    }
+  }
+
+  /// With the given name
+  #[inline]
+  pub fn with_name(mut self, name: Option<Name>) -> Self {
+    self.name = name;
+    self
+  }
+
+  /// With the given port
+  #[inline]
+  pub fn with_port(mut self, port: Option<u16>) -> Self {
+    self.port = port;
+    self
+  }
+
+  /// Return the node name
+  #[inline]
+  pub const fn name(&self) -> Option<&Name> {
+    self.name.as_ref()
+  }
+
+  #[inline]
+  pub const fn ip(&self) -> IpAddr {
+    self.addr
+  }
+
+  #[inline]
+  pub const fn port(&self) -> Option<u16> {
+    self.port
+  }
+}
+
+/// Represents a node in the cluster
+#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub"))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Node {
+  #[viewit(getter(const, style = "ref"))]
+  id: NodeId,
+  /// Metadata from the delegate for this node.
+  #[viewit(getter(const, style = "ref"))]
+  meta: Bytes,
+  /// State of the node.
+  state: NodeState,
+  /// Minimum protocol version this understands
+  pmin: u8,
+  /// Maximum protocol version this understands
+  pmax: u8,
+  /// Current version node is speaking
+  pcur: u8,
+  /// Min protocol version for the delegate to understand
+  dmin: u8,
+  /// Max protocol version for the delegate to understand
+  dmax: u8,
+  /// Current version delegate is speaking
+  dcur: u8,
+}
+
+impl Node {
+  /// Construct a new node with the given name, address and state.
+  #[inline]
+  pub fn new(name: Name, addr: NodeAddress, state: NodeState) -> Self {
+    Self {
+      id: NodeId {
+        name,
+        port: None,
+        addr,
+      },
+      meta: Bytes::new(),
+      pmin: 0,
+      pmax: 0,
+      pcur: 0,
+      dmin: 0,
+      dmax: 0,
+      dcur: 0,
+      state,
+    }
+  }
+
+  #[inline]
+  pub fn with_port(mut self, port: u16) -> Self {
+    self.id.port = Some(port);
+    self
+  }
+
+  /// Return the node name
+  #[inline]
+  pub fn name(&self) -> &Name {
+    &self.id.name
+  }
+
+  #[inline]
+  pub const fn vsn(&self) -> [u8; 6] {
+    [
+      self.pcur, self.pmin, self.pmax, self.dcur, self.dmin, self.dmax,
+    ]
+  }
+
+  #[inline]
+  pub const fn address(&self) -> &NodeAddress {
+    self.id.addr()
+  }
+}
+
+impl core::fmt::Display for Node {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self.id.port {
+      Some(port) => write!(f, "{}({}:{})", self.id.name.as_ref(), self.id.addr, port),
+      None => write!(f, "{}({})", self.id.name.as_ref(), self.id.addr),
+    }
+  }
+}
+
+#[derive(Clone)]
+pub struct Name(Bytes);
+
+impl Buf for Name {
+  fn remaining(&self) -> usize {
+    self.0.remaining()
+  }
+
+  fn chunk(&self) -> &[u8] {
+    self.0.chunk()
+  }
+
+  fn advance(&mut self, cnt: usize) {
+    self.0.advance(cnt);
+  }
+}
+
+impl Default for Name {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+impl Name {
+  #[inline]
+  pub const fn new() -> Self {
+    Self(Bytes::new())
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.0.is_empty()
+  }
+
+  pub fn len(&self) -> usize {
+    self.0.len()
+  }
+
+  #[inline]
+  pub fn clear(&mut self) {
+    self.0.clear()
+  }
+
+  #[inline]
+  #[doc(hidden)]
+  pub fn bytes(&self) -> &Bytes {
+    &self.0
+  }
+
+  #[inline]
+  #[doc(hidden)]
+  pub fn bytes_mut(&mut self) -> &mut Bytes {
+    &mut self.0
+  }
+}
+
+impl Serialize for Name {
+  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(self.as_str())
+  }
+}
+
+impl<'de> Deserialize<'de> for Name {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    String::deserialize(deserializer).map(Name::from)
+  }
+}
+
+impl AsRef<str> for Name {
+  fn as_ref(&self) -> &str {
+    self.as_str()
+  }
+}
+
+impl core::cmp::PartialOrd for Name {
+  fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+    self.as_str().partial_cmp(other.as_str())
+  }
+}
+
+impl core::cmp::Ord for Name {
+  fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+    self.as_str().cmp(other.as_str())
+  }
+}
+
+impl core::cmp::PartialEq for Name {
+  fn eq(&self, other: &Self) -> bool {
+    self.as_str() == other.as_str()
+  }
+}
+
+impl core::cmp::PartialEq<str> for Name {
+  fn eq(&self, other: &str) -> bool {
+    self.as_str() == other
+  }
+}
+
+impl core::cmp::PartialEq<&str> for Name {
+  fn eq(&self, other: &&str) -> bool {
+    self.as_str() == *other
+  }
+}
+
+impl core::cmp::PartialEq<String> for Name {
+  fn eq(&self, other: &String) -> bool {
+    self.as_str() == other
+  }
+}
+
+impl core::cmp::PartialEq<&String> for Name {
+  fn eq(&self, other: &&String) -> bool {
+    self.as_str() == *other
+  }
+}
+
+impl core::cmp::Eq for Name {}
+
+impl core::hash::Hash for Name {
+  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    self.as_str().hash(state)
+  }
+}
+
+impl Name {
+  pub fn as_bytes(&self) -> &[u8] {
+    &self.0
+  }
+
+  pub fn as_str(&self) -> &str {
+    // unwrap safe here, because there is no way to build a name with invalid utf8
+    core::str::from_utf8(&self.0).unwrap()
+  }
+}
+
+impl From<Name> for String {
+  fn from(name: Name) -> Self {
+    // unwrap safe here, because there is no way to build a name with invalid utf8
+    String::from_utf8(name.0.to_vec()).unwrap()
+  }
+}
+
+impl From<&str> for Name {
+  fn from(s: &str) -> Self {
+    Self(Bytes::copy_from_slice(s.as_bytes()))
+  }
+}
+
+impl From<String> for Name {
+  fn from(s: String) -> Self {
+    Self(Bytes::from(s))
+  }
+}
+
+impl core::fmt::Debug for Name {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    // unwrap safe here, because there is no way to build a name with invalid utf8
+    write!(f, "{}", core::str::from_utf8(&self.0).unwrap())
+  }
+}
+
+impl core::fmt::Display for Name {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    // unwrap safe here, because there is no way to build a name with invalid utf8
+    write!(f, "{}", core::str::from_utf8(&self.0).unwrap())
   }
 }

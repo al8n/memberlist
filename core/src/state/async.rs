@@ -1,11 +1,12 @@
+use std::net::SocketAddr;
+
 use crate::{
   showbiz::Memberlist,
-  types::{Alive, Dead, Message},
+  types::{Alive, Dead, Message, MessageType, Name},
 };
 
 use super::*;
 use futures_channel::oneshot::Sender;
-use showbiz_types::MessageType;
 
 impl<T, D> Showbiz<T, D>
 where
@@ -13,7 +14,12 @@ where
   D: Delegate,
 {
   /// Does a complete state exchange with a specific node.
-  pub(crate) async fn push_pull_node(&self, _a: Address, _join: bool) -> Result<(), Error<T, D>> {
+  pub(crate) async fn push_pull_node(
+    &self,
+    name: &Name,
+    _addr: SocketAddr,
+    _join: bool,
+  ) -> Result<(), Error<T, D>> {
     // TODO: metrics
 
     // self.send_and_receive_state(a, join).await
@@ -67,12 +73,16 @@ where
       let msg = Message::encode(&d, MessageType::Dead)?;
 
       self
-        .broadcast_notify(d.node.clone(), msg, self.inner.leave_broadcast_tx.clone())
+        .broadcast_notify(
+          d.node.name.clone(),
+          msg,
+          self.inner.leave_broadcast_tx.clone(),
+        )
         .await;
     } else {
       let _name = d.node.clone();
       let msg = Message::encode(&d, MessageType::Dead)?;
-      self.broadcast(d.node.clone(), msg).await;
+      self.broadcast(d.node.name.clone(), msg).await;
     }
 
     // TODO: update metrics

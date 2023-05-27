@@ -35,4 +35,3 @@ smol = { version = "1.3", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, features = ["io"] }
 
 bytes = "1.4"
-showbiz-types = { path = "../types" }

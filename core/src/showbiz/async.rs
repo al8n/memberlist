@@ -1,10 +1,6 @@
 use std::{net::ToSocketAddrs, sync::atomic::Ordering, time::Duration};
 
-use crate::{
-  dns::AsyncRuntimeProvider,
-  types::Dead,
-  util::{ensure_port, split_host_port},
-};
+use crate::{dns::AsyncRuntimeProvider, types::Dead};
 
 use super::*;
 
@@ -86,7 +82,6 @@ where
         advertise: RwLock::new(advertise),
         dns,
         leave_lock: Mutex::new(()),
-        opts: Arc::new(opts),
         transport,
         delegate,
         keyring,
@@ -99,7 +94,11 @@ where
         queue: Mutex::new(MessageQueue::new()),
         nodes: RwLock::new(Memberlist::new(LocalNodeState {
           node: Arc::new(Node {
-            full_address: Address::new(name, advertise),
+            id: NodeId {
+              name: opts.name.clone(),
+              port: Some(opts.bind_port),
+              addr: opts.bind_ip.into(),
+            },
             meta,
             pmin: vsn[0],
             pmax: vsn[1],
@@ -113,6 +112,7 @@ where
           state: NodeState::Dead,
           state_change: Instant::now(),
         })),
+        opts: Arc::new(opts),
       }),
     })
   }
@@ -171,7 +171,7 @@ where
       self.inner.hot.leave.fetch_add(1, Ordering::SeqCst);
 
       let mut memberlist = self.inner.nodes.write().await;
-      if let Some(state) = memberlist.node_map.get(&self.inner.opts.name) {
+      if let Some(state) = memberlist.node_map.get(memberlist.local.id()) {
         // This dead message is special, because Node and From are the
         // same. This helps other nodes figure out that a node left
         // intentionally. When Node equals From, other nodes know for
@@ -179,8 +179,8 @@ where
 
         let d = Dead {
           incarnation: state.incarnation,
-          node: state.node.name().clone(),
-          from: state.node.name().clone(),
+          node: state.node.id.clone(),
+          from: state.node.id.clone(),
         };
 
         self.dead_node(&mut memberlist, d).await?;
@@ -202,14 +202,12 @@ where
                 return Err(Error::LeaveTimeout);
               }
             }
-          } else {
-            if let Err(e) = self.inner.leave_broadcast_rx.recv().await {
-              tracing::error!(
-                target = "showbiz",
-                "failed to receive leave broadcast: {}",
-                e
-              );
-            }
+          } else if let Err(e) = self.inner.leave_broadcast_rx.recv().await {
+            tracing::error!(
+              target = "showbiz",
+              "failed to receive leave broadcast: {}",
+              e
+            );
           }
         }
       } else {
@@ -228,7 +226,7 @@ where
   /// This returns the number of hosts successfully contacted and an error if
   /// none could be reached. If an error is returned, the node did not successfully
   /// join the cluster.
-  pub async fn join(&self, existing: Vec<String>) -> Result<usize, Vec<Error<T, D>>> {
+  pub async fn join(&self, existing: Vec<NodeId>) -> Result<usize, Vec<Error<T, D>>> {
     let mut num_success = 0;
     let mut errors = Vec::new();
     for exist in existing {
@@ -246,14 +244,14 @@ where
         }
       };
 
-      for addr in addrs {
-        let sa = addr.addr();
-        if let Err(e) = self.push_pull_node(addr, true).await {
+      for (name, addr) in addrs {
+        if let Err(e) = self.push_pull_node(&name, addr, true).await {
           tracing::debug!(
             target = "showbiz",
             err = %e,
-            "failed to join {}",
-            sa
+            "failed to join {}({})",
+            name.as_ref(),
+            addr
           );
           errors.push(e);
         } else {
@@ -302,21 +300,12 @@ where
 
     // Get the existing node
     // unwrap safe here this is self
-    let node_addr = self
-      .inner
-      .nodes
-      .read()
-      .await
-      .node_map
-      .get(&self.inner.opts.name)
-      .unwrap()
-      .address();
+    let node_id = self.inner.nodes.read().await.local().id().clone();
 
     // Format a new alive message
     let alive = Alive {
       incarnation: self.next_incarnation(),
-      node: self.inner.opts.name.clone(),
-      addr: node_addr.into(),
+      node: node_id,
       meta,
       vsn: self.inner.opts.build_vsn_array(),
     };
@@ -346,13 +335,13 @@ where
   /// `packet_buffer_size` for this memberlist instance.
   pub async fn send_best_effort(&self, to: &Node, _msg: Message) -> Result<(), Error<T, D>> {
     // Encode as a user message
-    let _addr = Address::new(to.full_address().name().clone(), to.address());
+    // let _addr = Address::new(to.full_address().name().clone(), to.address());
 
     // TODO: implement
     Ok(())
   }
 
-  pub async fn send_to_address(&self, _addr: &Address, _msg: Message) -> Result<(), Error<T, D>> {
+  pub async fn send_to_id(&self, _addr: &NodeId, _msg: Message) -> Result<(), Error<T, D>> {
     // TODO: implement
     Ok(())
   }
@@ -363,7 +352,7 @@ where
   /// limit on the size of the message.
   #[inline]
   pub async fn send_reliable(&self, to: &Node, msg: Message) -> Result<(), Error<T, D>> {
-    self.send_user_msg(to.full_address(), msg).await
+    self.send_user_msg(to.id(), msg).await
   }
 
   pub async fn shutdown<P>(self, parker: P) -> Result<(), Error<T, D>>
@@ -418,8 +407,8 @@ where
     dns: &DNS<T>,
     host: &str,
     default_port: u16,
-    node_name: Option<&Name>,
-  ) -> Result<Vec<Address>, Error<T, D>> {
+    node_name: &Name,
+  ) -> Result<Vec<(Name, SocketAddr)>, Error<T, D>> {
     // Don't attempt any TCP lookups against non-fully qualified domain
     // names, since those will likely come from the resolv.conf file.
     if !host.contains('.') {
@@ -443,7 +432,7 @@ where
         .into_iter()
         .map(|ip| {
           let addr = SocketAddr::new(ip, default_port);
-          Address::new(node_name.cloned().unwrap_or_default(), addr)
+          (node_name.clone(), addr)
         })
         .collect(),
     )
@@ -451,32 +440,40 @@ where
 
   /// Used to resolve the address into an address,
   /// port, and error. If no port is given, use the default
-  pub(crate) async fn resolve_addr(&self, mut raw: String) -> Result<Vec<Address>, Error<T, D>> {
-    let (host, node_name) = if let Some(pos) = raw.find('/') {
-      if pos == 0 {
-        return Err(Error::EmptyNodeName);
-      }
-      (raw.split_off(pos), Some(Name::from(raw)))
-    } else {
-      (raw, None)
-    };
+  pub(crate) async fn resolve_addr(
+    &self,
+    mut host: NodeId,
+  ) -> Result<Vec<(Name, SocketAddr)>, Error<T, D>> {
+    // let (host, node_name) = if let Some(pos) = raw.find('/') {
+    //   if pos == 0 {
+    //     return Err(Error::EmptyNodeName);
+    //   }
+    //   (raw.split_off(pos), Some(Name::from(raw)))
+    // } else {
+    //   (raw, None)
+    // };
 
     // This captures the supplied port, or the default one.
-    let host = ensure_port(&host, self.inner.opts.bind_addr.port());
-
-    // If it looks like an IP address we are done.
-    if let Ok(addr) = host.as_str().parse::<SocketAddr>() {
-      return Ok(vec![Address::new(node_name.unwrap_or_default(), addr)]);
+    if host.port().is_none() {
+      host = host.set_port(Some(self.inner.opts.bind_port));
     }
 
-    let (host, port) = split_host_port(host)?;
+    let NodeId { name, port, addr } = host;
+
+    // If it looks like an IP address we are done.
+    if addr.is_ip() {
+      return Ok(vec![(
+        name.clone(),
+        SocketAddr::new(addr.unwrap_ip(), port.unwrap()),
+      )]);
+    }
 
     // First try TCP so we have the best chance for the largest list of
     // hosts to join. If this fails it's not fatal since this isn't a standard
     // way to query DNS, and we have a fallback below.
     if let Some(dns) = self.inner.dns.as_ref() {
       match self
-        .tcp_lookup_ip(dns, host.as_str(), port, node_name.as_ref())
+        .tcp_lookup_ip(dns, addr.unwrap_domain(), port.unwrap(), &name)
         .await
       {
         Ok(ips) => {
@@ -488,7 +485,7 @@ where
           tracing::debug!(
             target = "showbiz",
             "TCP-first lookup failed for '{}', falling back to UDP: {}",
-            host,
+            addr,
             e
           );
         }
@@ -498,12 +495,11 @@ where
     // If TCP didn't yield anything then use the normal Go resolver which
     // will try UDP, then might possibly try TCP again if the UDP response
     // indicates it was truncated.
-    host.to_socket_addrs().map_err(Into::into).map(|addrs| {
-      addrs
-        .into_iter()
-        .map(|addr| Address::new(node_name.clone().unwrap_or_default(), addr))
-        .collect()
-    })
+    addr
+      .unwrap_domain()
+      .to_socket_addrs()
+      .map_err(Into::into)
+      .map(|addrs| addrs.into_iter().map(|addr| (name.clone(), addr)).collect())
   }
 
   #[inline]

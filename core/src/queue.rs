@@ -1,3 +1,4 @@
+use crossbeam_utils::CachePadded;
 use std::{
   collections::{BTreeSet, HashMap},
   sync::{
@@ -6,11 +7,11 @@ use std::{
   },
 };
 
-use crossbeam_utils::CachePadded;
-use showbiz_traits::Broadcast;
-use showbiz_types::Name;
-
-use crate::util::retransmit_limit;
+use crate::{
+  broadcast::Broadcast,
+  types::{Message, Name},
+  util::retransmit_limit,
+};
 
 pub trait NodeCalculator {
   fn num_nodes(&self) -> usize;
@@ -200,7 +201,20 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     &self,
     overhead: usize,
     limit: usize,
-  ) -> Result<Vec<bytes::Bytes>, B::Error> {
+  ) -> Result<Vec<Message>, B::Error> {
+    self
+      .get_broadcast_with_prepend(Vec::new(), overhead, limit)
+      .await
+  }
+
+  #[cfg(feature = "async")]
+  pub(crate) async fn get_broadcast_with_prepend(
+    &self,
+    prepend: Vec<Message>,
+    overhead: usize,
+    limit: usize,
+  ) -> Result<Vec<Message>, B::Error> {
+    let mut to_send = prepend;
     let mut inner = self.inner.lock().await;
     if inner.q.is_empty() {
       return Ok(Vec::new());
@@ -219,7 +233,6 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     };
     let mut bytes_used = 0usize;
     let mut transmits = min_tr;
-    let mut to_send = Vec::new();
     let mut reinsert = Vec::new();
     while transmits <= max_tr {
       let free = (limit - bytes_used).saturating_sub(overhead);

@@ -17,16 +17,15 @@ use async_channel::{Receiver, Sender};
 #[cfg(not(feature = "async"))]
 use crossbeam_channel::{Receiver, Sender};
 
-use showbiz_traits::{Delegate, Transport, VoidDelegate};
-use showbiz_types::{Address, MessageType, Name, Node, NodeState};
-
 use crate::{
   awareness::Awareness,
   broadcast::ShowbizBroadcast,
+  delegate::{Delegate, VoidDelegate},
   dns::DNS,
   network::META_MAX_SIZE,
   queue::DefaultNodeCalculator,
-  types::{Alive, Message},
+  transport::Transport,
+  types::{Alive, Message, MessageType, Name, Node, NodeId, NodeState},
   TransmitLimitedQueue,
 };
 
@@ -175,8 +174,8 @@ pub(crate) struct Memberlist {
   local: LocalNodeState,
   /// remote nodes
   nodes: Vec<LocalNodeState>,
-  node_map: HashMap<Name, LocalNodeState>,
-  node_timers: HashMap<Name, Suspicion>,
+  node_map: HashMap<NodeId, LocalNodeState>,
+  node_timers: HashMap<NodeId, Suspicion>,
 }
 
 impl Memberlist {

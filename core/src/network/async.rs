@@ -1,10 +1,13 @@
 use std::sync::atomic::Ordering;
 
 use crate::{
+  delegate::Delegate,
   error::Error,
   label::LabeledConnection,
   security::{append_bytes, encrypted_length, EncryptionAlgo, SecurityError},
-  util::{compress_payload, decompress_buffer, CompressError},
+  transport::Connection,
+  types::{InvalidMessageType, MessageType},
+  util::{compress_payload, decompress_buffer, CompressionError},
   Options, SecretKeyring,
 };
 
@@ -14,8 +17,6 @@ use futures_util::{
   future::{BoxFuture, FutureExt},
   io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
 };
-use showbiz_traits::{Connection, Delegate};
-use showbiz_types::{InvalidMessageType, MessageType};
 
 mod packet;
 mod stream;
@@ -33,7 +34,7 @@ enum InnerError {
   #[error("{0}")]
   Decode(#[from] prost::DecodeError),
   #[error("{0}")]
-  Compress(#[from] CompressError),
+  Compress(#[from] CompressionError),
   #[error("{0}")]
   Security(#[from] SecurityError),
   #[error("failed to read full push node state ({0} / {1})")]

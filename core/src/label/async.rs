@@ -1,11 +1,11 @@
 use crate::showbiz::Showbiz;
 
 use super::*;
+use crate::delegate::Delegate;
 use futures_util::{
   io::{AsyncBufRead, AsyncRead, BufReader},
   AsyncBufReadExt, AsyncWriteExt,
 };
-use showbiz_traits::Delegate;
 
 pin_project_lite::pin_project! {
   #[derive(Debug)]

@@ -1,11 +1,15 @@
-use std::{net::SocketAddr, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
-use super::{error::Error, showbiz::Showbiz, types::PushNodeState};
-use showbiz_traits::{Delegate, Transport};
-use showbiz_types::{Address, Node, NodeState};
+use crate::types::NodeAddress;
 
+use super::{
+  delegate::Delegate,
+  error::Error,
+  showbiz::Showbiz,
+  transport::Transport,
+  types::{Node, NodeId, NodeState, PushNodeState},
+};
 mod r#async;
-
 #[viewit::viewit]
 #[derive(Debug, Clone)]
 pub(crate) struct LocalNodeState {
@@ -16,12 +20,12 @@ pub(crate) struct LocalNodeState {
 }
 
 impl LocalNodeState {
-  pub(crate) fn address(&self) -> SocketAddr {
-    self.node.full_address().addr()
+  pub(crate) fn id(&self) -> &NodeId {
+    self.node.id()
   }
 
-  pub(crate) fn full_address(&self) -> &Address {
-    self.node.full_address()
+  pub(crate) fn address(&self) -> &NodeAddress {
+    self.node.id().addr()
   }
 
   #[inline]

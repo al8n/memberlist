@@ -1,11 +1,31 @@
-use crate::{error::Error, showbiz::Showbiz};
+use crate::{
+  delegate::Delegate, error::Error, showbiz::Showbiz, transport::Transport, types::MessageType,
+};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use showbiz_traits::{Delegate, Transport};
-use showbiz_types::MessageType;
 
 const LABEL_MAX_SIZE: usize = 255;
 const DEFAULT_BUFFER_SIZE: usize = 4096;
+
+#[cfg(feature = "sync")]
+mod sync;
+#[cfg(feature = "sync")]
+pub use sync::*;
+
+#[cfg(feature = "async")]
+mod r#async;
+#[cfg(feature = "async")]
+pub use r#async::*;
+
+#[inline]
+fn make_label_header(label: &[u8], src: &[u8]) -> Bytes {
+  let mut dst = BytesMut::with_capacity(2 + src.len() + label.len());
+  dst.put_u8(MessageType::HasLabel as u8);
+  dst.put_u8(label.len() as u8);
+  dst.put_slice(label);
+  dst.put_slice(src);
+  dst.freeze()
+}
 
 impl<T: Transport, D: Delegate> Showbiz<T, D> {
   /// Rrefixes outgoing packets with the correct header if
@@ -19,6 +39,37 @@ impl<T: Transport, D: Delegate> Showbiz<T, D> {
     } else {
       Ok(Bytes::copy_from_slice(src))
     }
+  }
+
+  pub fn remove_label_header_from(mut buf: BytesMut) -> Result<(BytesMut, Bytes), Error<T, D>> {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const EMPTY_BYTES: Bytes = Bytes::new();
+
+    if buf.is_empty() {
+      return Ok((buf, EMPTY_BYTES));
+    }
+
+    let msg_type = MessageType::try_from(buf[0])?;
+    if msg_type != MessageType::HasLabel {
+      return Ok((buf, EMPTY_BYTES));
+    }
+
+    if buf.len() < 2 {
+      return Err(Error::TruncatedLabel);
+    }
+
+    let label_size = buf[1] as usize;
+    if label_size < 1 {
+      return Err(Error::EmptyLabel);
+    }
+
+    if buf.len() < 2 + label_size {
+      return Err(Error::TruncatedLabel);
+    }
+
+    buf.advance(2);
+    let label = buf.split_to(label_size);
+    Ok((buf, label.freeze()))
   }
 
   pub fn remove_label_header_from_packet(mut buf: Bytes) -> Result<(Bytes, Bytes), Error<T, D>> {
@@ -51,26 +102,15 @@ impl<T: Transport, D: Delegate> Showbiz<T, D> {
     let label = buf.split_to(label_size);
     Ok((buf, label))
   }
-}
 
-#[cfg(feature = "sync")]
-mod sync;
-#[cfg(feature = "sync")]
-pub use sync::*;
-
-#[cfg(feature = "async")]
-mod r#async;
-#[cfg(feature = "async")]
-pub use r#async::*;
-
-#[inline]
-fn make_label_header(label: &[u8], src: &[u8]) -> Bytes {
-  let mut dst = BytesMut::with_capacity(2 + src.len() + label.len());
-  dst.put_u8(MessageType::HasLabel as u8);
-  dst.put_u8(label.len() as u8);
-  dst.put_slice(label);
-  dst.put_slice(src);
-  dst.freeze()
+  #[inline]
+  pub(crate) const fn label_overhead(label: &[u8]) -> usize {
+    if label.is_empty() {
+      0
+    } else {
+      2 + label.len()
+    }
+  }
 }
 
 // #[cfg(test)]

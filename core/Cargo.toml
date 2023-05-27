@@ -8,7 +8,7 @@ edition = { workspace= true }
 
 [features]
 default = ["async"]
-async = ["async-channel", "async-trait", "async-lock", "futures-timer", "futures-util", "futures-channel", "showbiz-traits/async", "futures-io", "pin-project-lite"]
+async = ["async-channel", "async-trait", "async-lock", "futures-timer", "futures-util", "futures-channel", "futures-io", "pin-project-lite", "weezl/async"]
 # sync = ["crossbeam-channel", "showbiz-traits/sync", "parking_lot"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -28,6 +28,7 @@ parking_lot = { version = "0.12", optional = true }
 # async common
 async-channel = { version = "1.8", optional = true }
 async-lock = { version = "2.7", optional = true }
+async-recursion = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 futures-timer = { version = "3", optional = true }
 futures-channel = { version = "0.3", optional = true }
@@ -40,6 +41,7 @@ aead = { version = "0.5", features = ["bytes"] }
 aes-gcm = "0.10"
 bytes = { workspace = true, features = ["serde"] }
 cbc = "0.1"
+crc32fast = "1"
 crossbeam-utils = "0.8"
 indexmap = { version = "1.9", features = ["serde-1"] }
 ipnet = { version = "2.7", features = ["serde"] }
@@ -47,9 +49,8 @@ metrics = "0.20"
 prost = { version = "0.11" }
 rand = { version = "0.8" }
 scopeguard = "1.1"
-showbiz-types = { path = "../types" }
-showbiz-traits = { path = "../traits", default-features = false }
 serde = { version = "1", features = ["derive"] }
+smol_str = "0.1"
 thiserror = "1"
 tracing = { workspace = true }
 trust-dns-proto = { workspace = true }

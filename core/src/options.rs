@@ -6,11 +6,13 @@ use std::{
 };
 
 use bytes::Bytes;
+use smol_str::SmolStr;
 
-use crate::security::MAX_ENCRYPTION_VERSION;
-
-use super::{keyring::SecretKey, security::EncryptionAlgo, types::CompressionAlgo};
-use showbiz_types::Name;
+use super::{
+  keyring::SecretKey,
+  security::{EncryptionAlgo, MAX_ENCRYPTION_VERSION},
+  types::{CompressionAlgo, Name},
+};
 
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -35,7 +37,8 @@ pub struct Options {
   /// listen on. The port is used for both UDP and TCP gossip. It is
   /// assumed other nodes are running on this port, but they do not need
   /// to.
-  bind_addr: SocketAddr,
+  bind_ip: IpAddr,
+  bind_port: u16,
 
   /// Configuration related to what address to advertise to other
   /// cluster members. Used for nat traversal.
@@ -275,7 +278,8 @@ impl Options {
       name: hostname,
       label: Default::default(),
       skip_inbound_label_check: false,
-      bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 7946),
+      bind_ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+      bind_port: 7946,
       advertise_addr: None,
       encryption_algo: EncryptionAlgo::MAX,
       tcp_timeout: Duration::from_secs(10), // Timeout after 10 seconds

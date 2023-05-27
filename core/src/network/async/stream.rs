@@ -1,6 +1,6 @@
+use crate::types::{Node, NodeId};
 use futures_util::io::BufReader;
 use prost::Message;
-use showbiz_types::{Address, Node};
 
 use super::*;
 
@@ -41,21 +41,8 @@ where
 
   /// Handles a single incoming stream connection from the transport.
   async fn handle_conn(self, mut conn: T::Connection) {
-    let addr = match <T::Connection as Connection>::remote_address(&conn) {
-      Ok(addr) => {
-        tracing::debug!(target = "showbiz", remote_addr = %addr, "stream connection");
-        Some(addr)
-      }
-      Err(e) => {
-        tracing::error!(target = "showbiz", err = %e, "fail to get connection remote address");
-        tracing::debug!(
-          target = "showbiz",
-          remote_addr = "unknown",
-          "stream connection"
-        );
-        None
-      }
-    };
+    let addr = <T::Connection as Connection>::remote_node(&conn).clone();
+    tracing::debug!(target = "showbiz", remote_node = %addr, "stream connection");
 
     // TODO: metrics
 
@@ -66,14 +53,14 @@ where
     let mut lr = match Self::remove_label_header_from_stream(conn).await {
       Ok(lr) => lr,
       Err(e) => {
-        tracing::error!(target = "showbiz", err = %e, remote_addr = ?addr, "failed to remove label header");
+        tracing::error!(target = "showbiz", err = %e, remote_node = ?addr, "failed to remove label header");
         return;
       }
     };
 
     if self.inner.opts.skip_inbound_label_check {
       if !lr.label().is_empty() {
-        tracing::error!(target = "showbiz", remote_addr = ?addr, "unexpected double stream label header");
+        tracing::error!(target = "showbiz", remote_node = ?addr, "unexpected double stream label header");
         return;
       }
       // Set this from config so that the auth data assertions work below
@@ -81,7 +68,7 @@ where
     }
 
     if self.inner.opts.label.ne(lr.label()) {
-      tracing::error!(target = "showbiz", remote_addr = ?addr, "discarding stream with unacceptable label: {:?}", self.inner.opts.label.as_ref());
+      tracing::error!(target = "showbiz", remote_node = ?addr, "discarding stream with unacceptable label: {:?}", self.inner.opts.label.as_ref());
       return;
     }
 
@@ -103,28 +90,28 @@ where
       Err(e) => match e {
         InnerError::IO(e) => {
           if e.kind() != std::io::ErrorKind::UnexpectedEof {
-            tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to receive");
+            tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to receive");
           }
 
           let out = match ErrorResponse::from(e).encode_with_prefix() {
             Ok(out) => out,
             Err(e) => {
-              tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to encode error response");
+              tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to encode error response");
               return;
             }
           };
 
           if let Err(e) = self
-            .raw_send_msg_stream(lr, out, addr.as_ref(), encryption_enabled)
+            .raw_send_msg_stream(lr, out, &addr, encryption_enabled)
             .await
           {
-            tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to send error response");
+            tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to send error response");
             return;
           }
           return;
         }
         e => {
-          tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to receive");
+          tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to receive");
           return;
         }
       },
@@ -137,7 +124,7 @@ where
         } else {
           let mut buf = Vec::new();
           if let Err(e) = lr.read_to_end(&mut buf).await {
-            tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to read ping");
+            tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to read ping");
             return;
           }
           Bytes::from(buf)
@@ -146,33 +133,33 @@ where
         let ping = match Ping::decode(&mut buf) {
           Ok(ping) => ping,
           Err(e) => {
-            tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to decode ping");
+            tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to decode ping");
             return;
           }
         };
 
         if !ping.node.is_empty() && ping.node != self.inner.opts.name {
-          tracing::warn!(target = "showbiz", remote_addr = ?addr, "got ping for unexpected node");
+          tracing::warn!(target = "showbiz", remote_node = %addr, "got ping for unexpected node");
           return;
         }
 
         let out = match AckResponse::new(ping.seq_no, Bytes::new()).encode_with_prefix() {
           Ok(out) => out,
           Err(e) => {
-            tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to encode ack response");
+            tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to encode ack response");
             return;
           }
         };
 
         if let Err(e) = self
-          .raw_send_msg_stream(lr, out, addr.as_ref(), encryption_enabled)
+          .raw_send_msg_stream(lr, out, &addr, encryption_enabled)
           .await
         {
-          tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to send ack response");
+          tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to send ack response");
           return;
         }
       }
-      MessageType::User => self.read_user_msg(lr, data, addr).await,
+      MessageType::User => self.read_user_msg(lr, data, &addr).await,
       MessageType::PushPull => {
         // Increment counter of pending push/pulls
         let num_concurrent = self.inner.hot.push_pull_req.fetch_add(1, Ordering::SeqCst);
@@ -186,29 +173,29 @@ where
           return;
         }
 
-        let node_state = match self.read_remote_state(&mut lr, data, addr).await {
+        let node_state = match self.read_remote_state(&mut lr, data, &addr).await {
           Ok(ns) => ns,
           Err(e) => {
-            tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to read remote state");
+            tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to read remote state");
             return;
           }
         };
 
         if let Err(e) = self
-          .send_local_state(lr, addr.as_ref(), encryption_enabled, node_state.join)
+          .send_local_state(lr, &addr, encryption_enabled, node_state.join)
           .await
         {
-          tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to push local state");
+          tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to push local state");
           return;
         }
 
         if let Err(e) = self.merge_remote_state(node_state).await {
-          tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to push/pull merge");
+          tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to push/pull merge");
           return;
         }
       }
       mt => {
-        tracing::error!(target = "showbiz", remote_addr = ?addr, "received invalid msg type {}", mt);
+        tracing::error!(target = "showbiz", remote_node = ?addr, "received invalid msg type {}", mt);
       }
     }
   }
@@ -218,7 +205,7 @@ where
     &self,
     lr: &mut LabeledConnection<T::Connection>,
     mut data: Option<Bytes>,
-    addr: Option<SocketAddr>,
+    addr: &NodeId,
   ) -> Result<RemoteNodeState, InnerError> {
     // Read the push/pull header
     let header = match &mut data {
@@ -271,7 +258,7 @@ where
           let mut buf = vec![0; size];
           if let Err(e) = lr.read_exact(&mut buf).await {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
-              tracing::error!(target = "showbiz", remote_addr = ?addr, "failed to read full push node state");
+              tracing::error!(target = "showbiz", remote_node = %addr, "failed to read full push node state");
             }
             return Err(InnerError::IO(e));
           }
@@ -301,7 +288,7 @@ where
           let mut user_state = vec![0; header.user_state_len as usize];
           if let Err(e) = lr.read_exact(&mut user_state).await {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
-              tracing::error!(target = "showbiz", remote_addr = ?addr, "failed to read full user state");
+              tracing::error!(target = "showbiz", remote_node = ?addr, "failed to read full user state");
             }
             return Err(InnerError::IO(e));
           }
@@ -325,7 +312,7 @@ where
   async fn send_local_state(
     &self,
     mut lr: LabeledConnection<T::Connection>,
-    addr: Option<&SocketAddr>,
+    addr: &NodeId,
     encryption_enabled: bool,
     join: bool,
   ) -> Result<(), Error<T, D>> {
@@ -346,8 +333,7 @@ where
         .iter()
         .map(|n| {
           let this = PushNodeState {
-            name: n.full_address().name().clone(),
-            addr: EncodableSocketAddr::Local(n.address()),
+            node: n.id().clone(),
             meta: n.node.meta().clone(),
             incarnation: n.incarnation,
             state: n.state,
@@ -410,7 +396,7 @@ where
           .push_states
           .iter()
           .map(|n| Node {
-            full_address: Address::new(n.name.clone(), n.addr.addr()),
+            id: NodeId::from_addr(n.node.addr.clone()).set_name(n.node.name.clone()),
             meta: n.meta.clone(),
             state: n.state,
             pmin: n.pmin(),
@@ -443,7 +429,7 @@ where
     &self,
     mut lr: LabeledConnection<T::Connection>,
     data: Option<Bytes>,
-    addr: Option<SocketAddr>,
+    addr: &NodeId,
   ) {
     match data {
       Some(mut data) => {
@@ -451,7 +437,7 @@ where
         let remaining = data.remaining();
         let user_msg = match user_msg_len.cmp(&remaining) {
           std::cmp::Ordering::Less => {
-            tracing::error!(target = "showbiz", remote_addr = ?addr, "failed to read full user message ({} / {})", remaining, user_msg_len);
+            tracing::error!(target = "showbiz", remote_node = %addr, "failed to read full user message ({} / {})", remaining, user_msg_len);
             return;
           }
           std::cmp::Ordering::Equal => data,
@@ -460,28 +446,26 @@ where
 
         if let Some(d) = &self.inner.delegate {
           if let Err(e) = d.notify_user_msg(user_msg).await {
-            tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to notify user message");
-            return;
+            tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to notify user message");
           }
         }
       }
       None => {
         let mut user_msg_len = [0u8; 4];
         if let Err(e) = lr.read_exact(&mut user_msg_len).await {
-          tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to receive user message");
+          tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to receive user message");
           return;
         }
         let user_msg_len = u32::from_be_bytes(user_msg_len) as usize;
         if user_msg_len > 0 {
           let mut user_msg = vec![0; user_msg_len];
           if let Err(e) = lr.read_exact(&mut user_msg).await {
-            tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to receive user message");
+            tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to receive user message");
             return;
           }
           if let Some(d) = &self.inner.delegate {
             if let Err(e) = d.notify_user_msg(user_msg.into()).await {
-              tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to notify user message");
-              return;
+              tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to notify user message");
             }
           }
         }
@@ -491,7 +475,7 @@ where
 
   pub(crate) async fn send_user_msg(
     &self,
-    addr: &Address,
+    addr: &NodeId,
     msg: crate::types::Message,
   ) -> Result<(), Error<T, D>> {
     if addr.name().is_empty() && self.inner.opts.require_node_names {
@@ -507,12 +491,7 @@ where
     let mut lr = LabeledConnection::new(BufReader::new(conn));
     lr.set_label(self.inner.opts.label.clone());
     self
-      .raw_send_msg_stream(
-        lr,
-        msg.freeze(),
-        Some(addr.addr()).as_ref(),
-        self.encryption_enabled().await,
-      )
+      .raw_send_msg_stream(lr, msg.freeze(), addr, self.encryption_enabled().await)
       .await
   }
 
@@ -520,7 +499,7 @@ where
     &self,
     mut lr: LabeledConnection<T::Connection>,
     mut buf: Bytes,
-    addr: Option<&SocketAddr>,
+    addr: &NodeId,
     encryption_enabled: bool,
   ) -> Result<(), Error<T, D>> {
     // Check if compression is enabled
@@ -528,7 +507,7 @@ where
       buf = match compress_payload(self.inner.opts.compression_algo, &buf) {
         Ok(buf) => buf.into(),
         Err(e) => {
-          tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to compress payload");
+          tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to compress payload");
           return Err(e.into());
         }
       }
@@ -547,7 +526,7 @@ where
         // Write out the entire send buffer
         Ok(crypt) => lr.conn.write_all(&crypt).await.map_err(From::from),
         Err(e) => {
-          tracing::error!(target = "showbiz", err=%e, remote_addr = ?addr, "failed to encrypt local state");
+          tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to encrypt local state");
           return Err(e);
         }
       }

@@ -1,6 +1,6 @@
+use crate::transport::Transport;
 use futures_timer::Delay;
 use futures_util::{future::BoxFuture, select_biased, FutureExt};
-use showbiz_traits::Transport;
 use std::{future::Future, io, marker::PhantomData, net::SocketAddr, sync::Arc, time::Duration};
 use trust_dns_proto::Time;
 use trust_dns_resolver::{

@@ -1,7 +1,6 @@
-use showbiz_traits::{Delegate, Transport};
-use showbiz_types::InvalidMessageType;
-
-use crate::util::InvalidAddress;
+use crate::{
+  delegate::Delegate, transport::Transport, types::InvalidMessageType, util::InvalidAddress,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error<T: Transport, D: Delegate> {
@@ -26,7 +25,9 @@ pub enum Error<T: Transport, D: Delegate> {
   #[error("showbiz: node names are required by configuration but one was not provided")]
   MissingNodeName,
   #[error("showbiz: {0}")]
-  Compression(#[from] crate::util::CompressError),
+  Compression(#[from] crate::util::CompressionError),
+  #[error("showbiz: {0}")]
+  LocalBroadcast(#[from] async_channel::SendError<()>),
   #[error("showbiz: {0}")]
   Encode(#[from] prost::EncodeError),
   #[error("showbiz: {0}")]
