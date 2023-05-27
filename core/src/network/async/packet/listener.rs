@@ -197,10 +197,18 @@ where
   }
 
   #[inline]
-  async fn handle_compressed(&self, buf: Bytes, from: SocketAddr, timestamp: Instant) {
+  async fn handle_compressed(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
     // Try to decode the payload
     if !self.inner.opts.compression_algo.is_none() {
-      match decompress_payload(self.inner.opts.compression_algo, &buf) {
+      let algo = match CompressionAlgo::try_from(buf.get_u8()) {
+        Ok(algo) => algo,
+        Err(e) => {
+          tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode compression algorithm");
+          return;
+        },
+      };
+      let size = buf.get_u32() as usize;
+      match decompress_payload(algo, &buf) {
         Ok(payload) => self.handle_command(payload.into(), from, timestamp).await,
         Err(e) => {
           tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decompress payload");
@@ -251,6 +259,18 @@ where
     if let Err(e) = self.send_msg(p.source, msg).await {
       tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to send ack response");
     }
+  }
+
+  async fn handle_indirect_ping(&self, buf: Bytes, from: SocketAddr) {
+    todo!()
+  }
+
+  async fn handle_ack(&self, buf: Bytes, from: SocketAddr, timestamp: Instant) {
+    todo!()
+  }
+
+  async fn handle_nack(&self, buf: Bytes, from: SocketAddr) {
+    todo!()
   }
 
   async fn send_msg(&self, addr: NodeId, msg: Message) -> Result<(), Error<T, D>> {
@@ -402,7 +422,7 @@ where
       if !self.inner.opts.encryption_algo.is_none() && self.inner.opts.gossip_verify_outgoing {
         let buf = encrypt_bail!(data -> self.node.addr -> |buf: &mut BytesMut| {
           buf.put_u8(MessageType::Compress as u8);
-          buf.put_u32(compressed_msg_len as u32);
+          buf.put_u32((data.len() + CompressionAlgo::SIZE) as u32);
           buf.put_u8(self.inner.opts.compression_algo as u8);
           buf.put_slice(&data);
         });
@@ -415,7 +435,7 @@ where
         let mut buf = BytesMut::with_capacity(after_crc_msg_len);
         crc_bail!(crc, buf);
         buf.put_u8(MessageType::Compress as u8);
-        buf.put_u32(compressed_msg_len as u32);
+        buf.put_u32((data.len() + CompressionAlgo::SIZE) as u32);
         buf.put_u8(self.inner.opts.compression_algo as u8);
         buf.put_slice(&data);
 
