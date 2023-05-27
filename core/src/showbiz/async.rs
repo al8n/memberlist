@@ -96,8 +96,8 @@ where
           node: Arc::new(Node {
             id: NodeId {
               name: opts.name.clone(),
-              port: Some(opts.bind_port),
-              addr: opts.bind_ip.into(),
+              port: Some(opts.bind_addr.port()),
+              addr: opts.bind_addr.ip().into(),
             },
             meta,
             pmin: vsn[0],
@@ -455,7 +455,7 @@ where
 
     // This captures the supplied port, or the default one.
     if host.port().is_none() {
-      host = host.set_port(Some(self.inner.opts.bind_port));
+      host = host.set_port(Some(self.inner.opts.bind_addr.port()));
     }
 
     let NodeId { name, port, addr } = host;

@@ -1,12 +1,11 @@
 use std::{
   collections::HashSet,
-  net::{IpAddr, Ipv4Addr, SocketAddr},
+  net::{Ipv4Addr, SocketAddr, SocketAddrV4},
   path::PathBuf,
   time::Duration,
 };
 
 use bytes::Bytes;
-use smol_str::SmolStr;
 
 use super::{
   keyring::SecretKey,
@@ -37,8 +36,7 @@ pub struct Options {
   /// listen on. The port is used for both UDP and TCP gossip. It is
   /// assumed other nodes are running on this port, but they do not need
   /// to.
-  bind_ip: IpAddr,
-  bind_port: u16,
+  bind_addr: SocketAddr,
 
   /// Configuration related to what address to advertise to other
   /// cluster members. Used for nat traversal.
@@ -278,8 +276,7 @@ impl Options {
       name: hostname,
       label: Default::default(),
       skip_inbound_label_check: false,
-      bind_ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-      bind_port: 7946,
+      bind_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 7946)),
       advertise_addr: None,
       encryption_algo: EncryptionAlgo::MAX,
       tcp_timeout: Duration::from_secs(10), // Timeout after 10 seconds

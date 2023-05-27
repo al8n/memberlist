@@ -102,6 +102,8 @@ pub enum CompressionAlgo {
 }
 
 impl CompressionAlgo {
+  pub(crate) const SIZE: usize = core::mem::size_of::<Self>();
+
   pub fn is_none(&self) -> bool {
     matches!(self, Self::None)
   }
@@ -1035,7 +1037,7 @@ impl Message {
     Ok(Self(buf))
   }
 
-  pub(crate) fn compound(msgs: Vec<Self>) -> Bytes {
+  pub(crate) fn compound(msgs: Vec<Self>) -> BytesMut {
     let num_msgs = msgs.len();
     let total: usize = msgs.iter().map(|m| m.len()).sum();
     let mut buf = BytesMut::with_capacity(
@@ -1058,7 +1060,7 @@ impl Message {
     }
 
     buf.unsplit(compound);
-    buf.freeze()
+    buf
   }
 
   #[inline]

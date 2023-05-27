@@ -44,39 +44,49 @@ impl std::error::Error for UnknownEncryptionAlgo {}
 )]
 #[repr(u8)]
 pub enum EncryptionAlgo {
-  /// AES-GCM 128, using PKCS7 padding
+  /// No encryption
   #[default]
-  PKCS7 = 0,
+  None = 0,
+
+  /// AES-GCM 128, using PKCS7 padding
+  PKCS7 = 1,
   /// AES-GCM 128, no padding. Padding not needed,
-  NoPadding = 1,
+  NoPadding = 2,
 }
 
 impl EncryptionAlgo {
   pub const MAX: Self = Self::NoPadding;
-  pub const MIN: Self = Self::PKCS7;
+  pub const MIN: Self = Self::None;
+
+  pub(crate) const SIZE: usize = core::mem::size_of::<Self>();
 
   pub fn from_u8(val: u8) -> Result<Self, UnknownEncryptionAlgo> {
     match val {
-      0 => Ok(EncryptionAlgo::PKCS7),
-      1 => Ok(EncryptionAlgo::NoPadding),
+      0 => Ok(EncryptionAlgo::None),
+      1 => Ok(EncryptionAlgo::PKCS7),
+      2 => Ok(EncryptionAlgo::NoPadding),
       _ => Err(UnknownEncryptionAlgo(val)),
     }
   }
+
+  pub fn is_none(&self) -> bool {
+    *self == EncryptionAlgo::None
+  }
 }
 
-const MIN_ENCRYPTION_VERSION: EncryptionAlgo = EncryptionAlgo::PKCS7;
+const MIN_ENCRYPTION_VERSION: EncryptionAlgo = EncryptionAlgo::None;
 pub(crate) const MAX_ENCRYPTION_VERSION: EncryptionAlgo = EncryptionAlgo::NoPadding;
 
 const VERSION_SIZE: usize = 1;
-const NONCE_SIZE: usize = 12;
+pub(crate) const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
 const MAX_PAD_OVERHEAD: usize = 16;
-const BLOCK_SIZE: usize = 16;
+pub(crate) const BLOCK_SIZE: usize = 16;
 
 // pkcs7encode is used to pad a byte buffer to a specific block size using
 // the PKCS7 algorithm. "Ignores" some bytes to compensate for IV
 #[inline]
-fn pkcs7encode(buf: &mut impl BufMut, buf_len: usize, ignore: usize, block_size: usize) {
+pub(crate) fn pkcs7encode(buf: &mut impl BufMut, buf_len: usize, ignore: usize, block_size: usize) {
   let n = buf_len - ignore;
   let more = block_size - (n % block_size);
   buf.put_bytes(more as u8, more);
@@ -98,12 +108,13 @@ pub(crate) fn encrypt_overhead(vsn: EncryptionAlgo) -> usize {
   match vsn {
     EncryptionAlgo::PKCS7 => 45, // Version: 1, IV: 12, Padding: 16, Tag: 16
     EncryptionAlgo::NoPadding => 29, // Version: 1, IV: 12, Tag: 16
+    EncryptionAlgo::None => unreachable!(),
   }
 }
 
 pub(crate) fn encrypted_length(vsn: EncryptionAlgo, inp: usize) -> usize {
-  // If we are on version 1, there is no padding
-  if vsn as u8 >= 1 {
+  // If we are on version 2, there is no padding
+  if vsn == EncryptionAlgo::NoPadding {
     return VERSION_SIZE + NONCE_SIZE + inp + TAG_SIZE;
   }
 
@@ -215,7 +226,36 @@ pub(crate) fn encrypt_payload(
   }
 }
 
+#[inline]
+fn encrypt_to<A: AeadInPlace + Aead>(
+  gcm: A,
+  nonce: &[u8],
+  data: &[u8],
+  dst: &mut BytesMut,
+) -> Result<(), SecurityError> {
+  let nonce = GenericArray::from_slice(nonce);
+  gcm
+    .encrypt_in_place(nonce, data, dst)
+    .map_err(|e| SecurityError::AeadError(e))
+}
+
 impl SecretKeyring {
+  pub(crate) fn encrypt_to(
+    &self,
+    key: SecretKey,
+    nonce: &[u8],
+    auth_data: &[u8],
+    dst: &mut BytesMut,
+  ) -> Result<(), SecurityError> {
+    bail! {
+      enum SecretKey: &key {
+        Aes128(Aes128Gcm),
+        Aes192(Aes192Gcm),
+        Aes256(Aes256Gcm),
+      } -> |algo| encrypt_to(algo, nonce, auth_data, dst)
+    }
+  }
+
   pub(crate) async fn encrypt_payload(
     &self,
     vsn: EncryptionAlgo,

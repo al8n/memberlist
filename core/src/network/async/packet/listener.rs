@@ -1,13 +1,14 @@
 use std::{sync::Arc, time::Instant};
 
 use crate::{
-  security::decrypt_payload,
+  security::{decrypt_payload, pkcs7encode, BLOCK_SIZE, NONCE_SIZE},
   showbiz::MessageHandoff,
   types::{Message, Node, NodeId},
   util::decompress_payload,
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use prost::Message as _;
+use rand::Rng;
 
 use super::*;
 
@@ -266,7 +267,7 @@ where
     // Fast path if nothing to piggypack
     if msgs.len() == 1 {
       return self
-        .raw_send_msg_packet(addr, None, msgs.pop().unwrap().freeze())
+        .raw_send_msg_packet(addr, None, msgs.pop().unwrap().0)
         .await;
     }
 
@@ -282,55 +283,167 @@ where
   pub(crate) async fn raw_send_msg_packet(
     &self,
     addr: NodeId,
-    node: Option<Arc<Node>>,
-    mut msg: Bytes,
+    mut node: Option<Arc<Node>>,
+    msg: BytesMut,
   ) -> Result<(), Error<T, D>> {
+    macro_rules! crc_bail {
+      ($node: ident, $data:ident, $msg_len: ident) => {
+        match $node {
+          Some(node) => {
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(&[
+              MessageType::Compress as u8,
+              ($msg_len >> 24) as u8,
+              ($msg_len >> 16) as u8,
+              ($msg_len >> 8) as u8,
+              $msg_len as u8,
+              self.inner.opts.compression_algo as u8,
+            ]);
+            hasher.update(&$data);
+            let crc = hasher.finalize();
+            // compressed msg len should add the crc msg len
+            $msg_len += MessageType::SIZE // MessageType::HasCrc
+              + core::mem::size_of::<u32>(); // crc
+            Some(crc)
+          },
+          _ => None,
+        }
+      };
+      ($crc: ident, $buf: ident) => {
+        if let Some(crc) = $crc {
+          $buf.put_u8(MessageType::HasCrc as u8);
+          $buf.put_u32(crc);
+        }
+      }
+    }
+
+    macro_rules! encrypt_bail {
+      ($msg: ident -> $this:ident.$node:ident.$addr:ident -> $block: expr) => {{
+        // Try to look up the destination node. Note this will only work if the
+        // bare ip address is used as the node name, which is not guaranteed.
+        if $node.is_none() {
+          $node = $this.inner.nodes.read().await.node_map.get(&addr).map(|ls| ls.node.clone());
+        }
+
+        // Add a CRC to the end of the payload
+        let mut after_crc_msg_len = $msg.len();
+        let crc = crc_bail!($node, $msg, after_crc_msg_len);
+
+        let encrypted_msg_len = MessageType::SIZE // MessageType::Encryption
+        + core::mem::size_of::<u32>() // Encrypted message length
+        + EncryptionAlgo::SIZE // Encryption algo length
+        + encrypted_length(self.inner.opts.encryption_algo, after_crc_msg_len);
+
+        let mut buf = BytesMut::with_capacity(encrypted_msg_len);
+        buf.put_u8(MessageType::Encrypt as u8);
+        buf.put_u32(encrypted_msg_len as u32);
+        let offset = buf.len();
+        buf.put_u8(self.inner.opts.encryption_algo as u8);
+        // Add a random nonce
+        let mut nonce = [0u8; NONCE_SIZE];
+        rand::thread_rng().fill(&mut nonce);
+        buf.put_slice(&nonce);
+        let after_nonce = buf.len();
+        crc_bail!(crc, buf);
+
+        $block(&mut buf);
+
+        if $this.inner.opts.encryption_algo == EncryptionAlgo::PKCS7 {
+          let buf_len = buf.len();
+          pkcs7encode(&mut buf, buf_len, offset + EncryptionAlgo::SIZE + NONCE_SIZE, BLOCK_SIZE);
+        }
+
+        let keyring = $this.inner.keyring.as_ref().unwrap();
+        let mut bytes = buf.split_off(after_nonce);
+        let Some(pk) = keyring.lock().await.primary_key() else {
+          let err = Error::Security(SecurityError::MissingPrimaryKey);
+          tracing::error!(target = "showbiz", addr = %$addr, err = %err, "failed to encrypt message");
+          return Err(err);
+        };
+
+        if let Err(e) = keyring.encrypt_to(pk, &nonce, &self.inner.opts.label, &mut bytes)
+          .map(|_| {
+            buf.unsplit(bytes);
+          }) {
+          tracing::error!(target = "showbiz", addr = %$addr, err = %e, "failed to encrypt message");
+          return Err(Error::Security(e));
+        }
+        buf
+      }};
+    }
+
+    macro_rules! return_bail {
+      ($this:ident, $buf: ident, $addr: ident) => {
+        $this
+          .inner
+          .transport
+          .write_to_address(&$buf, &$addr)
+          .await
+          .map(|_| ())
+          .map_err(Error::transport)
+      };
+    }
+
     if addr.name().is_empty() && self.inner.opts.require_node_names {
       return Err(Error::MissingNodeName);
     }
 
     // Check if we have compression enabled
     if !self.inner.opts.compression_algo.is_none() {
-      let c = Compress {
-        algo: self.inner.opts.compression_algo,
-        buf: compress_payload(self.inner.opts.compression_algo, &msg).map(Into::into).map_err(|e| {
-          tracing::error!(target = "showbiz", addr = %addr, err = %e, "failed to compress message");
-          Error::Compression(e)
-        })?,
-      };
-      msg = match Message::encode(&c, MessageType::Compress) {
-        Ok(msg) => msg.0.freeze(),
-        Err(e) => {
-          tracing::error!(target = "showbiz", addr = %addr, err = %e, "failed to encode compress message");
-          return Err(Error::Encode(e));
-        }
-      };
+      let data = compress_payload(self.inner.opts.compression_algo, &msg).map_err(|e| {
+        tracing::error!(target = "showbiz", addr = %addr, err = %e, "failed to compress message");
+        Error::Compression(e)
+      })?;
+      let compressed_msg_len = MessageType::SIZE // MessageType::Compression
+        + core::mem::size_of::<u32>() // Compressed message length
+        + CompressionAlgo::SIZE // CompressionAlgo length
+        + data.len(); // data length
+
+      if !self.inner.opts.encryption_algo.is_none() && self.inner.opts.gossip_verify_outgoing {
+        let buf = encrypt_bail!(data -> self.node.addr -> |buf: &mut BytesMut| {
+          buf.put_u8(MessageType::Compress as u8);
+          buf.put_u32(compressed_msg_len as u32);
+          buf.put_u8(self.inner.opts.compression_algo as u8);
+          buf.put_slice(&data);
+        });
+
+        return return_bail!(self, buf, addr);
+      } else {
+        // Add a CRC to the end of the payload
+        let mut after_crc_msg_len = compressed_msg_len;
+        let crc = crc_bail!(node, data, after_crc_msg_len);
+        let mut buf = BytesMut::with_capacity(after_crc_msg_len);
+        crc_bail!(crc, buf);
+        buf.put_u8(MessageType::Compress as u8);
+        buf.put_u32(compressed_msg_len as u32);
+        buf.put_u8(self.inner.opts.compression_algo as u8);
+        buf.put_slice(&data);
+
+        return return_bail!(self, buf, addr);
+      }
     }
 
-    // Try to look up the destination node. Note this will only work if the
-    // bare ip address is used as the node name, which is not guaranteed.
-    if node.is_none() {}
-
     // Check if encryption is enabled
-    // if let Some(keyring) = &self.inner.keyring {
-    //   if self.inner.opts.gossip_verify_outgoing {
-    //     let mu = keyring.lock().await;
-    //     match mu.primary_key() {
-    //       Some(pk) => {
-    //         keyring.encrypt_payload(self.inner.opts.encryption_algo, msg, data, dst)
-    //       },
-    //       None => {},
-    //     }
-    //   }
-    // }
+    if !self.inner.opts.encryption_algo.is_none() && self.inner.opts.gossip_verify_outgoing {
+      let buf = encrypt_bail!(msg -> self.node.addr -> |buf: &mut BytesMut| {
+        buf.put_slice(&msg);
+      });
 
-    self
-      .inner
-      .transport
-      .write_to_address(&msg, &addr)
-      .await
-      .map(|_| ())
-      .map_err(Error::transport)
+      return return_bail!(self, buf, addr);
+    }
+
+    // Add a CRC to the end of the payload
+    let mut msg_len = msg.len();
+    match crc_bail!(node, msg, msg_len) {
+      Some(crc) => {
+        let mut buf = BytesMut::with_capacity(msg_len);
+        buf.put_u8(MessageType::HasCrc as u8);
+        buf.put_u32(crc);
+        buf.put_slice(&msg);
+        return_bail!(self, buf, addr)
+      }
+      None => return_bail!(self, msg, addr),
+    }
   }
 }
 
