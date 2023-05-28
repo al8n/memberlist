@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use super::{DecodeError, LENGTH_SIZE};
+use super::*;
 
 const V4_ADDR_SIZE: usize = 4;
 const V6_ADDR_SIZE: usize = 16;
@@ -66,18 +66,16 @@ impl Domain {
 
   #[inline]
   pub(crate) fn encoded_len(&self) -> usize {
-    core::mem::size_of::<u8>() + self.0.len()
+    self.0.len()
   }
 
   #[inline]
   pub(crate) fn encode_to(&self, buf: &mut BytesMut) {
-    buf.put_u8(self.0.len() as u8);
     buf.put(self.0.as_bytes());
   }
 
   #[inline]
-  pub(crate) fn decode_from(mut buf: impl Buf) -> Result<Self, DecodeError> {
-    let len = buf.get_u8() as usize;
+  pub(crate) fn decode_from(mut buf: impl Buf, len: usize) -> Result<Self, DecodeError> {
     if len > Self::MAX_SIZE {
       return Err(DecodeError::InvalidDomain(InvalidDomain::InvalidLength(
         len,
@@ -95,16 +93,13 @@ impl Domain {
   #[inline]
   pub(crate) async fn decode_from_reader<R: futures_util::io::AsyncRead + Unpin>(
     r: &mut R,
+    len: usize,
   ) -> io::Result<Self> {
     use futures_util::io::AsyncReadExt;
 
-    let mut len_buf = [0; 1];
-    r.read_exact(&mut len_buf).await?;
-    let len = len_buf[0] as usize;
-
     if len <= 23 {
       map_inlined!(match Self.len() {
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
         11, 12, 13, 14, 15, 16, 17, 18,
         19, 20, 21, 22, 23
       } => r)
@@ -327,7 +322,7 @@ impl NodeAddress {
 
   #[inline]
   pub(crate) fn encode_to(&self, buf: &mut BytesMut) {
-    buf.put_u32(self.encoded_len() as u32);
+    buf.put_u8(self.encoded_len() as u8);
     match self {
       Self::Ip(addr) => match addr {
         IpAddr::V4(addr) => {
@@ -348,24 +343,31 @@ impl NodeAddress {
 
   #[inline]
   pub(crate) fn decode_from(mut buf: impl Buf) -> Result<Self, DecodeError> {
-    match buf.get_u8() {
-      0 => match buf.remaining() {
+    let len = buf.get_u8() as usize;
+    if len < 1 {
+      return Err(DecodeError::Truncated("node address"));
+    }
+
+    let mark = buf.get_u8();
+    let remaining = buf.remaining();
+    match mark {
+      0 => match remaining {
         4 => {
           let mut addr = [0; V4_ADDR_SIZE];
-          addr.copy_from_slice(&buf.chunk()[..V4_ADDR_SIZE]);
+          buf.copy_to_slice(&mut addr);
           Ok(Self::Ip(IpAddr::V4(Ipv4Addr::from(addr))))
         }
         r => Err(DecodeError::InvalidIpAddrLength(r)),
       },
-      1 => match buf.remaining() {
+      1 => match remaining {
         16 => {
           let mut addr = [0; V6_ADDR_SIZE];
-          addr.copy_from_slice(&buf.chunk()[..V6_ADDR_SIZE]);
+          buf.copy_to_slice(&mut addr);
           Ok(Self::Ip(IpAddr::V6(Ipv6Addr::from(addr))))
         }
         r => Err(DecodeError::InvalidIpAddrLength(r)),
       },
-      2 => Domain::decode_from(buf).map(Self::Domain),
+      2 => Domain::decode_from(buf, len).map(Self::Domain),
       b => Err(DecodeError::UnknownMarkBit(b)),
     }
   }
@@ -377,18 +379,25 @@ impl NodeAddress {
   ) -> std::io::Result<Self> {
     use futures_util::io::AsyncReadExt;
 
-    let mut msg_len = [0; LENGTH_SIZE];
+    let mut msg_len = [0; 1];
     r.read_exact(&mut msg_len).await?;
-    let len = u32::from_be_bytes(msg_len) as usize;
+    let len = msg_len[0] as usize;
+    if len < 1 {
+      return Err(Error::new(
+        ErrorKind::InvalidData,
+        DecodeError::Truncated("node address"),
+      ));
+    }
 
     let mut marker = [0u8; 1];
     r.read_exact(&mut marker).await?;
+    let remaining = len - 1;
     match marker[0] {
       0 => {
-        if len != V4_ADDR_SIZE {
+        if remaining != V4_ADDR_SIZE {
           return Err(Error::new(
             ErrorKind::InvalidData,
-            DecodeError::InvalidIpAddrLength(len - 1),
+            DecodeError::InvalidIpAddrLength(remaining),
           ));
         }
         let mut addr = [0; V4_ADDR_SIZE];
@@ -396,17 +405,19 @@ impl NodeAddress {
         Ok(Self::Ip(IpAddr::V4(Ipv4Addr::from(addr))))
       }
       1 => {
-        if len != V6_ADDR_SIZE {
+        if remaining != V6_ADDR_SIZE {
           return Err(Error::new(
             ErrorKind::InvalidData,
-            DecodeError::InvalidIpAddrLength(len - 1),
+            DecodeError::InvalidIpAddrLength(remaining),
           ));
         }
         let mut addr = [0; V6_ADDR_SIZE];
         r.read_exact(&mut addr).await?;
         Ok(Self::Ip(IpAddr::V6(Ipv6Addr::from(addr))))
       }
-      2 => Domain::decode_from_reader(r).await.map(Self::Domain),
+      2 => Domain::decode_from_reader(r, remaining)
+        .await
+        .map(Self::Domain),
       b => Err(Error::new(
         ErrorKind::InvalidData,
         DecodeError::UnknownMarkBit(b),

@@ -53,9 +53,8 @@ impl AckResponse {
 
   #[inline]
   pub fn encoded_len(&self) -> usize {
-    LENGTH_SIZE
-    + core::mem::size_of::<u32>() // seq_no
-    + self.payload.len()
+    let length = self.payload.len() + encoded_u32_len(self.seq_no) as usize;
+    length + encoded_u32_len(length as u32)
   }
 
   #[inline]
@@ -67,29 +66,32 @@ impl AckResponse {
 
   #[inline]
   pub fn encode_to(&self, buf: &mut BytesMut) {
-    buf.put_u32(self.encoded_len() as u32);
-    buf.put_u32(self.seq_no);
+    encode_u32_to_buf(buf, self.encoded_len() as u32);
+    encode_u32_to_buf(buf, self.seq_no);
     buf.put_slice(&self.payload);
   }
 
   #[inline]
   pub fn decode_from(mut buf: impl Buf) -> Result<Self, DecodeError> {
-    if buf.remaining() < LENGTH_SIZE {
+    let (len, _) = decode_u32_from_buf(buf)?;
+    let len = len as usize;
+
+    let (seq_no, readed) = decode_u32_from_buf(buf)?;
+
+    if buf.remaining() + readed < len {
       return Err(DecodeError::Truncated(MessageType::Ping.as_err_str()));
     }
-    let len = buf.get_u32() as usize;
-    if buf.remaining() < len {
-      return Err(DecodeError::Truncated(MessageType::Ping.as_err_str()));
-    }
-    let seq_no = buf.get_u32();
-    if len - core::mem::size_of::<u32>() == 0 {
+
+    if len - readed == 0 {
       Ok(Self {
         seq_no,
         payload: Bytes::new(),
       })
     } else {
-      let payload = buf.copy_to_bytes(len - core::mem::size_of::<u32>());
-      Ok(Self { seq_no, payload })
+      Ok(Self {
+        seq_no,
+        payload: buf.copy_to_bytes(len - readed),
+      })
     }
   }
 
@@ -99,21 +101,24 @@ impl AckResponse {
     r: &mut R,
   ) -> Result<Self, std::io::Error> {
     use futures_util::io::AsyncReadExt;
-    let mut len = [0u8; 4];
-    r.read_exact(&mut len).await?;
-    let len = u32::from_be_bytes(len) as usize;
 
-    let mut seq_no = [0u8; 4];
-    r.read_exact(&mut seq_no).await?;
-    let seq_no = u32::from_be_bytes(seq_no);
+    let (len, _) = decode_u32_from_reader(r).await?;
+    let len = len as usize;
+    let (seq_no, readed) = decode_u32_from_reader(r).await?;
+    if len < readed {
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "invalid length",
+      ));
+    }
 
-    if len - core::mem::size_of::<u32>() == 0 {
+    if len - readed == 0 {
       Ok(Self {
         seq_no,
         payload: Bytes::new(),
       })
     } else {
-      let mut payload = vec![0u8; len - core::mem::size_of::<u32>()];
+      let mut payload = vec![0u8; len as usize - readed];
       r.read_exact(&mut payload).await?;
       Ok(Self {
         seq_no,
@@ -122,3 +127,15 @@ impl AckResponse {
     }
   }
 }
+
+/// nack response is sent for an indirect ping when the pinger doesn't hear from
+/// the ping-ee within the configured timeout. This lets the original node know
+/// that the indirect ping attempt happened but didn't succeed.
+#[viewit::viewit]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub(crate) struct NackResponse {
+  seq_no: u32,
+}
+
+impl NackResponse {}

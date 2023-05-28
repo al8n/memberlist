@@ -31,6 +31,94 @@ macro_rules! map_inlined {
   };
 }
 
+/// Returns the encoded length of the value in LEB128 variable length format.
+/// The returned value will be between 1 and 5, inclusive.
+#[inline]
+pub(crate) fn encoded_u32_len(value: u32) -> usize {
+  ((((value | 1).leading_zeros() ^ 31) * 9 + 37) / 32) as usize
+}
+
+#[inline]
+pub(crate) fn encode_u32(mut n: u32) -> (usize, [u8; 5]) {
+  let mut buf = [0u8; 5];
+  let mut i = 0;
+
+  while n >= 0x80 {
+    buf[i] = ((n as u8) & 0x7f) | 0x80;
+    n >>= 7;
+    i += 1;
+  }
+
+  buf[i] = n as u8;
+  (i, buf)
+}
+
+#[inline]
+pub(crate) fn encode_u32_to_buf(mut buf: impl BufMut, mut n: u32) {
+  while n >= 0x80 {
+    buf.put_u8(((n as u8) & 0x7F) | 0x80);
+    n >>= 7;
+  }
+  buf.put_u8(n as u8);
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DecodeU32Error;
+
+impl core::fmt::Display for DecodeU32Error {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(f, "invalid u32")
+  }
+}
+
+impl std::error::Error for DecodeU32Error {}
+
+#[inline]
+pub(crate) fn decode_u32_from_buf(mut buf: impl Buf) -> Result<(u32, usize), DecodeU32Error> {
+  let mut n = 0;
+  let mut shift = 0;
+  let mut i = 0;
+  while buf.has_remaining() {
+    let b = buf.get_u8();
+    i += 1;
+    if b < 0x80 {
+      return Ok((n | ((b as u32) << shift), i));
+    }
+
+    n |= ((b & 0x7f) as u32) << shift;
+    if shift >= 25 {
+      return Err(DecodeU32Error);
+    }
+    shift += 7;
+  }
+
+  Err(DecodeU32Error)
+}
+
+#[cfg(feature = "async")]
+async fn decode_u32_from_reader<R: futures_util::io::AsyncRead + Unpin>(
+  reader: &mut R,
+) -> std::io::Result<(u32, usize)> {
+  use futures_util::io::AsyncReadExt;
+
+  let mut n = 0;
+  let mut shift = 0;
+  for i in 0..5 {
+    let mut byte = [0; 1];
+    reader.read_exact(&mut byte).await?;
+    let b = byte[0];
+
+    if b < 0x80 {
+      return Ok((n | ((b as u32) << shift), i));
+    }
+
+    n |= ((b & 0x7f) as u32) << shift;
+    shift += 7;
+  }
+
+  Err(Error::new(ErrorKind::InvalidData, "invalid u32"))
+}
+
 mod name;
 pub use name::*;
 
@@ -40,11 +128,20 @@ pub use address::*;
 mod id;
 pub use id::*;
 
-mod ping;
-pub(crate) use ping::*;
-
 mod ack;
 pub(crate) use ack::*;
+
+mod alive;
+pub(crate) use alive::*;
+
+mod bad_state;
+pub(crate) use bad_state::*;
+
+mod err;
+pub(crate) use err::*;
+
+mod ping;
+pub(crate) use ping::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
@@ -58,6 +155,18 @@ pub enum DecodeError {
   InvalidDomain(#[from] InvalidDomain),
   #[error("invalid name {0}")]
   InvalidName(#[from] InvalidName),
+  #[error("invalid string {0}")]
+  InvalidErrorResponse(std::string::FromUtf8Error),
+  #[error("invalid size {0}")]
+  InvalidMessageSize(#[from] DecodeU32Error),
+  #[error("{0}")]
+  Other(String),
+}
+
+impl DecodeError {
+  pub(crate) fn other(s: impl core::fmt::Display) -> Self {
+    Self::Other(format!("{s}"))
+  }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -107,139 +216,11 @@ pub(crate) struct Compress {
   buf: Bytes,
 }
 
-macro_rules! bad_bail {
-  ($name: ident) => {
-    #[viewit::viewit]
-    #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
-    pub(crate) struct $name {
-      incarnation: u32,
-      node: NodeId,
-      from: NodeId,
-    }
-
-    impl $name {
-      #[inline]
-      pub(crate) fn encoded_len(&self) -> usize {
-        core::mem::size_of::<u32>() // incarnation
-        + LENGTH_SIZE // node size length
-        + self.node.encoded_len() // node data
-        + LENGTH_SIZE // from size length
-        + self.from.encoded_len() // from data
-      }
-
-      #[inline]
-      pub(crate) fn encode_to_msg(&self) -> Message {
-        let encoded_len = self.encoded_len();
-        let mut buf = BytesMut::with_capacity(encoded_len + MessageType::SIZE + LENGTH_SIZE);
-        buf.put_u8(MessageType::$name as u8);
-        buf.put_u32(encoded_len as u32);
-        self.encode_to(&mut buf);
-        Message(buf)
-      }
-
-      #[inline]
-      pub(crate) fn encode_to(&self, buf: &mut BytesMut) {
-        buf.put_u32(self.incarnation);
-        let len = self.node.encoded_len();
-        buf.put_u32(len as u32);
-        self.node.encode_to(buf);
-        let len = self.from.encoded_len();
-        buf.put_u32(len as u32);
-        self.from.encode_to(buf);
-      }
-
-      #[inline]
-      pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
-        let incarnation = buf.get_u32();
-        let node_len = buf.get_u32() as usize;
-        if node_len > buf.remaining() {
-          return Err(DecodeError::Truncated(MessageType::$name.as_err_str()));
-        }
-
-        let node = NodeId::decode_from(buf.split_to(node_len))?;
-        let from_len = buf.get_u32() as usize;
-        let buf = if from_len > buf.remaining() {
-          return Err(DecodeError::Truncated(MessageType::$name.as_err_str()));
-        } else if from_len == buf.remaining() {
-          buf
-        } else {
-          buf.slice(..from_len)
-        };
-        let from = NodeId::decode_from(buf)?;
-        Ok(Self {
-          incarnation,
-          node,
-          from,
-        })
-      }
-    }
-  };
-}
-
-bad_bail!(Suspect);
-bad_bail!(Dead);
-
-impl Dead {
-  #[inline]
-  pub(crate) fn dead_self(&self) -> bool {
-    self.node == self.from
-  }
-}
-
-/// nack response is sent for an indirect ping when the pinger doesn't hear from
-/// the ping-ee within the configured timeout. This lets the original node know
-/// that the indirect ping attempt happened but didn't succeed.
-#[viewit::viewit]
-#[derive(Copy, Clone, PartialEq, Eq, Hash, prost::Message)]
-#[repr(transparent)]
-pub(crate) struct NackResponse {
-  #[prost(uint32, tag = "1")]
-  seq_no: u32,
-}
-
-#[viewit::viewit]
-#[derive(Clone, PartialEq, Eq, Hash, prost::Message)]
-#[repr(transparent)]
-pub(crate) struct ErrorResponse {
-  #[prost(string, tag = "1")]
-  err: String,
-}
-
-impl<E: std::error::Error> From<E> for ErrorResponse {
-  fn from(err: E) -> Self {
-    Self {
-      err: err.to_string(),
-    }
-  }
-}
-
 #[viewit::viewit]
 pub(crate) struct PushPullHeader {
   nodes: u32,
   user_state_len: u32, // Encodes the byte lengh of user state
   join: bool,          // Is this a join request or a anti-entropy run
-}
-
-#[viewit::viewit]
-#[derive(Debug, Clone)]
-pub(crate) struct Alive {
-  incarnation: u32,
-  node: NodeId,
-  meta: Bytes,
-  // The versions of the protocol/delegate that are being spoken, order:
-  // pmin, pmax, pcur, dmin, dmax, dcur
-  vsn: [u8; VSN_SIZE],
-}
-
-impl Default for Alive {
-  fn default() -> Self {
-    Self {
-      incarnation: 0,
-      node: NodeId::default(),
-      meta: Bytes::new(),
-      vsn: VSN_EMPTY,
-    }
-  }
 }
 
 #[viewit::viewit]
@@ -1065,63 +1046,5 @@ impl core::fmt::Display for Node {
       Some(port) => write!(f, "{}({}:{})", self.id.name.as_ref(), self.id.addr, port),
       None => write!(f, "{}({})", self.id.name.as_ref(), self.id.addr),
     }
-  }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-#[repr(u8)]
-enum Inlined {
-  U1,
-  U2,
-  U3,
-  U4,
-  U5,
-  U6,
-  U7,
-  U8,
-  U9,
-  U10,
-  U11,
-  U12,
-  U13,
-  U14,
-  U15,
-  U16,
-  U17,
-  U18,
-  U19,
-  U20,
-  U21,
-  U22,
-  U23,
-}
-
-#[inline]
-const fn inlined_array(len: usize) -> Inlined {
-  match len {
-    1 => Inlined::U1,
-    2 => Inlined::U2,
-    3 => Inlined::U3,
-    4 => Inlined::U4,
-    5 => Inlined::U5,
-    6 => Inlined::U6,
-    7 => Inlined::U7,
-    8 => Inlined::U8,
-    9 => Inlined::U9,
-    10 => Inlined::U10,
-    11 => Inlined::U11,
-    12 => Inlined::U12,
-    13 => Inlined::U13,
-    14 => Inlined::U14,
-    15 => Inlined::U15,
-    16 => Inlined::U16,
-    17 => Inlined::U17,
-    18 => Inlined::U18,
-    19 => Inlined::U19,
-    20 => Inlined::U20,
-    21 => Inlined::U21,
-    22 => Inlined::U22,
-    23 => Inlined::U23,
-    _ => unreachable!(),
   }
 }

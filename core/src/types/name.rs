@@ -78,6 +78,10 @@ impl Name {
   #[inline]
   pub(crate) fn decode_from(buf: &mut impl Buf) -> Result<Self, DecodeError> {
     let len = buf.get_u16() as usize;
+    if len == 0 {
+      return Ok(Self::new());
+    }
+
     if len > Self::MAX_SIZE {
       return Err(DecodeError::InvalidName(InvalidName::TooLarge(len)));
     }
@@ -99,6 +103,9 @@ impl Name {
     let mut len_buf = [0; 2];
     r.read_exact(&mut len_buf).await?;
     let len = u16::from_be_bytes(len_buf) as usize;
+    if len == 0 {
+      return Ok(Self::new());
+    }
 
     if len <= 23 {
       map_inlined!(match Self.len() {

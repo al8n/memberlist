@@ -92,16 +92,13 @@ where
             tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to receive");
           }
 
-          let out = match ErrorResponse::from(e).encode_with_prefix() {
-            Ok(out) => out,
-            Err(e) => {
-              tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to encode error response");
-              return;
-            }
-          };
+          let err_resp = ErrorResponse::from(e);
+          let mut out = BytesMut::with_capacity(MessageType::SIZE + err_resp.encoded_len());
+          out.put_u8(MessageType::ErrorResponse as u8);
+          err_resp.encode_to(&mut out);
 
           if let Err(e) = self
-            .raw_send_msg_stream(lr, out, &addr, encryption_enabled)
+            .raw_send_msg_stream(lr, out.freeze(), &addr, encryption_enabled)
             .await
           {
             tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to send error response");
@@ -118,7 +115,7 @@ where
 
     match mt {
       MessageType::Ping => {
-        let mut ping = if let Some(mut data) = data {
+        let ping = if let Some(mut data) = data {
           match Ping::decode_from(&mut data) {
             Ok(ping) => ping,
             Err(e) => {
