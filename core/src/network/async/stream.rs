@@ -1,6 +1,5 @@
 use crate::types::{Node, NodeId};
 use futures_util::io::BufReader;
-use prost::Message;
 
 use super::*;
 
@@ -119,40 +118,38 @@ where
 
     match mt {
       MessageType::Ping => {
-        let mut buf = if let Some(data) = data {
-          data
+        let mut ping = if let Some(mut data) = data {
+          match Ping::decode_from(&mut data) {
+            Ok(ping) => ping,
+            Err(e) => {
+              tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to decode ping");
+              return;
+            }
+          }
         } else {
-          let mut buf = Vec::new();
-          if let Err(e) = lr.read_to_end(&mut buf).await {
-            tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to read ping");
-            return;
-          }
-          Bytes::from(buf)
-        };
-
-        let ping = match Ping::decode(&mut buf) {
-          Ok(ping) => ping,
-          Err(e) => {
-            tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to decode ping");
-            return;
+          match Ping::decode_from_reader(&mut lr).await {
+            Ok(ping) => ping,
+            Err(e) => {
+              tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to decode ping");
+              return;
+            }
           }
         };
 
-        if !ping.node.is_empty() && ping.node != self.inner.opts.name {
-          tracing::warn!(target = "showbiz", remote_node = %addr, "got ping for unexpected node");
-          return;
+        if let Some(target) = &ping.target {
+          if target != &self.inner.id {
+            tracing::error!(target = "showbiz", remote_node = %addr, "got ping for unexpected node {}", target);
+            return;
+          }
         }
 
-        let out = match AckResponse::new(ping.seq_no, Bytes::new()).encode_with_prefix() {
-          Ok(out) => out,
-          Err(e) => {
-            tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to encode ack response");
-            return;
-          }
-        };
+        let ack = AckResponse::empty(ping.seq_no);
+        let mut out = BytesMut::with_capacity(MessageType::SIZE + ack.encoded_len());
+        out.put_u8(MessageType::AckResponse as u8);
+        ack.encode_to(&mut out);
 
         if let Err(e) = self
-          .raw_send_msg_stream(lr, out, &addr, encryption_enabled)
+          .raw_send_msg_stream(lr, out.freeze(), &addr, encryption_enabled)
           .await
         {
           tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to send ack response");

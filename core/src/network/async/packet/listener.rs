@@ -7,7 +7,6 @@ use crate::{
   util::decompress_payload,
 };
 use futures_util::{stream::FuturesUnordered, StreamExt};
-use prost::Message as _;
 use rand::Rng;
 
 use super::*;
@@ -111,22 +110,22 @@ where
     }
 
     // Decode the message type
-    let msg_type = match MessageType::try_from(buf[0]) {
+    let mt = buf.get_u8();
+    let msg_type = match MessageType::try_from(mt) {
       Ok(msg_type) => msg_type,
       Err(e) => {
-        tracing::error!(target = "showbiz", addr = %from, err = %e, "message type ({}) not supported", buf[0]);
+        tracing::error!(target = "showbiz", addr = %from, err = %e, "message type ({}) not supported", mt);
         return;
       }
     };
-    buf.advance(1);
 
     match msg_type {
       MessageType::Compound => self.handle_compound(buf, from, timestamp).await,
       MessageType::Compress => self.handle_compressed(buf, from, timestamp).await,
       MessageType::Ping => self.handle_ping(buf, from).await,
       MessageType::IndirectPing => {}
-      MessageType::AckResponse => {}
-      MessageType::NackResponse => {}
+      MessageType::AckResponse => self.handle_ack(buf, from, timestamp).await,
+      MessageType::NackResponse => self.handle_nack(buf, from).await,
       MessageType::Suspect | MessageType::Alive | MessageType::Dead | MessageType::User => {
         // Determine the message queue, prioritize alive
         {
@@ -205,7 +204,7 @@ where
         Err(e) => {
           tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode compression algorithm");
           return;
-        },
+        }
       };
       let size = buf.get_u32() as usize;
       match decompress_payload(algo, &buf) {
@@ -219,9 +218,9 @@ where
     }
   }
 
-  async fn handle_ping(&self, buf: Bytes, from: SocketAddr) {
+  async fn handle_ping(&self, mut buf: Bytes, from: SocketAddr) {
     // Decode the ping
-    let p = match Ping::decode(buf) {
+    let p = match Ping::decode_from(&mut buf) {
       Ok(ping) => ping,
       Err(e) => {
         tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode ping request");
@@ -230,12 +229,15 @@ where
     };
 
     // If node is provided, verify that it is for us
-    if !p.node.is_empty() && p.node != self.inner.opts.name {
-      tracing::error!(target = "showbiz", addr = %from, "got ping for unexpected node '{}'", p.node.as_ref());
-      return;
+    if let Some(target) = &p.target {
+      if target != &self.inner.id {
+        tracing::error!(target = "showbiz", addr = %from, "got ping for unexpected node '{}'", target);
+        return;
+      }
     }
 
-    let ack = if let Some(delegate) = &self.inner.delegate {
+    let msg = if let Some(delegate) = &self.inner.delegate {
+      // TODO: add new method to delegate e.g. read_ack_payload_to_buf, to avoid copying and allocating
       let payload = match delegate.ack_payload().await {
         Ok(payload) => payload,
         Err(e) => {
@@ -243,17 +245,20 @@ where
           return;
         }
       };
-      AckResponse::new(p.seq_no, payload)
+      let mut out = BytesMut::with_capacity(
+        MessageType::SIZE + AckResponseEncoder::<BytesMut>::encoded_len(&payload),
+      );
+      out.put_u8(MessageType::AckResponse as u8);
+      let mut enc = AckResponseEncoder::new(&mut out);
+      enc.encode_seq_no(p.seq_no);
+      enc.encode_payload(&payload);
+      Message(out)
     } else {
-      AckResponse::new(p.seq_no, Bytes::new())
-    };
-
-    let msg = match Message::encode(&ack, MessageType::AckResponse) {
-      Ok(msg) => msg,
-      Err(e) => {
-        tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to encode ack response");
-        return;
-      }
+      let ack = AckResponse::empty(p.seq_no);
+      let mut out = BytesMut::with_capacity(MessageType::SIZE + ack.encoded_len());
+      out.put_u8(MessageType::AckResponse as u8);
+      ack.encode_to(&mut out);
+      Message(out)
     };
 
     if let Err(e) = self.send_msg(p.source, msg).await {
@@ -265,12 +270,35 @@ where
     todo!()
   }
 
-  async fn handle_ack(&self, buf: Bytes, from: SocketAddr, timestamp: Instant) {
-    todo!()
+  async fn handle_ack(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
+    let size = buf.get_u32() as usize;
+    if size > buf.remaining() {
+      tracing::error!(target = "showbiz", addr = %from, err="truncated ack message", "failed to decode ack response");
+      return;
+    }
+    let seq_no = buf.get_u32();
+    let ack = if buf.remaining() == size - 4 {
+      AckResponse {
+        seq_no,
+        payload: buf,
+      }
+    } else {
+      AckResponse {
+        seq_no,
+        payload: buf.slice(..size),
+      }
+    };
+    self.invoke_ack_handler(ack, timestamp).await
   }
 
-  async fn handle_nack(&self, buf: Bytes, from: SocketAddr) {
-    todo!()
+  async fn handle_nack(&self, mut buf: Bytes, from: SocketAddr) {
+    if buf.remaining() < core::mem::size_of::<u32>() {
+      tracing::error!(target = "showbiz", addr = %from, err="truncated nack message", "failed to decode nack response");
+      return;
+    }
+    let seq_no = buf.get_u32();
+    let nack = NackResponse { seq_no };
+    self.invoke_nack_handler(nack).await
   }
 
   async fn send_msg(&self, addr: NodeId, msg: Message) -> Result<(), Error<T, D>> {

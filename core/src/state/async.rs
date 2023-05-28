@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use crate::{
   showbiz::Memberlist,
-  types::{Alive, Dead, Message, MessageType, Name},
+  types::{Alive, Dead, Name},
 };
 
 use super::*;
@@ -68,10 +68,7 @@ where
       }
 
       // If we are leaving, we broadcast and wait
-
-      let _name = d.node.clone();
-      let msg = Message::encode(&d, MessageType::Dead)?;
-
+      let msg = d.encode_to_msg();
       self
         .broadcast_notify(
           d.node.name.clone(),
@@ -80,8 +77,7 @@ where
         )
         .await;
     } else {
-      let _name = d.node.clone();
-      let msg = Message::encode(&d, MessageType::Dead)?;
+      let msg = d.encode_to_msg();
       self.broadcast(d.node.name.clone(), msg).await;
     }
 

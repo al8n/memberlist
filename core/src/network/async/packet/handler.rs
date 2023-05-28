@@ -61,9 +61,7 @@ where
     queue.high.pop_back().or_else(|| queue.low.pop_back())
   }
 
-  async fn handle_suspect(&self, _msg: MessageHandoff) {
-    
-  }
+  async fn handle_suspect(&self, _msg: MessageHandoff) {}
 
   async fn handle_alive(&self, _msg: MessageHandoff) {}
 

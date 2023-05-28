@@ -76,6 +76,11 @@ where
     // let num_nodes = hot.num_nodes;
     Ok(Showbiz {
       inner: Arc::new(ShowbizCore {
+        id: NodeId {
+          name: opts.name.clone(),
+          port: Some(opts.bind_addr.port()),
+          addr: opts.bind_addr.ip().into(),
+        },
         awareness,
         broadcast,
         hot: HotData::new(),
@@ -113,6 +118,7 @@ where
           state_change: Instant::now(),
         })),
         opts: Arc::new(opts),
+        ack_handlers: Mutex::new(HashMap::new()),
       }),
     })
   }

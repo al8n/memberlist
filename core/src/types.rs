@@ -1,84 +1,63 @@
 use std::{
-  cell::RefCell,
-  net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+  io::{Error, ErrorKind},
+  net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
   ops::{Deref, DerefMut},
-  thread_local,
   time::Instant,
 };
 
-use prost::{
-  bytes::{Buf, BufMut, Bytes, BytesMut},
-  encoding::{bool, bytes, int32, skip_field, uint32, DecodeContext, WireType},
-  DecodeError, EncodeError, Message as ProstMessage,
-};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
 const VSN_SIZE: usize = 6;
 const VSN_ENCODED_SIZE: usize = 8;
 const VSN_EMPTY: [u8; VSN_SIZE] = [255; VSN_SIZE];
-const V4_SOCKET_ADDR_SIZE: usize = 6;
-const V6_SOCKET_ADDR_SIZE: usize = 18;
-const MAX_ENCODED_SOCKET_ADDR_SIZE: usize = 18;
 
-thread_local! {
-  static VSN_BUFFER: RefCell<Vec<u8>> = RefCell::new(vec![0; VSN_SIZE]);
-  static SOCKET_ADDR_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(MAX_ENCODED_SOCKET_ADDR_SIZE));
-}
+const MAX_DNS_DOMAIN_SIZE: usize = 253;
 
-#[inline]
-fn encode_socket_addr<B>(addr: &SocketAddr, tag: u32, buf: &mut B)
-where
-  B: BufMut,
-{
-  SOCKET_ADDR_BUFFER.with(|b| {
-    let mut b = b.borrow_mut();
-    b.clear();
-    match addr {
-      SocketAddr::V4(v4) => {
-        b.put_slice(v4.ip().octets().as_slice());
-        b.put_u16(v4.port());
-      }
-      SocketAddr::V6(v6) => {
-        b.put_slice(v6.ip().octets().as_slice());
-        b.put_u16(v6.port());
-      }
+const LENGTH_SIZE: usize = core::mem::size_of::<u32>();
+
+macro_rules! map_inlined {
+  (match $ident: ident.$len: ident() {
+    $($size: literal),* $(,)?
+  } => $r: ident) => {
+    match $len {
+      $($size => {
+        let mut arr = [0; $size];
+        $r.read_exact(&mut arr).await?;
+        $ident::from_array(arr).map_err(|e| Error::new(ErrorKind::InvalidData, e))
+      },)*
+      _ => unreachable!(),
     }
-    bytes::encode(tag, b.deref_mut(), buf);
-  });
+  };
 }
 
-#[inline]
-fn encode_vsn<B>(vsn: &[u8], tag: u32, buf: &mut B)
-where
-  B: BufMut,
-{
-  VSN_BUFFER.with(|b| {
-    if vsn == VSN_EMPTY {
-      return;
-    }
-    let mut b = b.borrow_mut();
-    b.clear();
-    b.put_slice(vsn);
-    bytes::encode(tag, b.deref_mut(), buf);
-  });
-}
+mod name;
+pub use name::*;
 
-#[inline]
-fn merge_vsn<B>(
-  wire_type: WireType,
-  vsn: &[u8],
-  buf: &mut B,
-  ctx: DecodeContext,
-) -> Result<(), DecodeError>
-where
-  B: Buf,
-{
-  VSN_BUFFER.with(|b| {
-    let mut b = b.borrow_mut();
-    b.clear();
-    b.put_slice(vsn);
-    bytes::merge(wire_type, b.deref_mut(), buf, ctx)
-  })
+mod address;
+pub use address::*;
+
+mod id;
+pub use id::*;
+
+mod ping;
+pub(crate) use ping::*;
+
+mod ack;
+pub(crate) use ack::*;
+
+#[derive(Debug, thiserror::Error)]
+pub enum DecodeError {
+  #[error("truncated {0}")]
+  Truncated(&'static str),
+  #[error("unknown mark bit {0}")]
+  UnknownMarkBit(u8),
+  #[error("invalid ip addr length {0}")]
+  InvalidIpAddrLength(usize),
+  #[error("invalid domain {0}")]
+  InvalidDomain(#[from] InvalidDomain),
+  #[error("invalid name {0}")]
+  InvalidName(#[from] InvalidName),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -128,92 +107,6 @@ pub(crate) struct Compress {
   buf: Bytes,
 }
 
-impl ProstMessage for Compress {
-  fn encode_raw<B>(&self, buf: &mut B)
-  where
-    B: BufMut,
-    Self: Sized,
-  {
-    if self.algo as i32 != 0i32 {
-      int32::encode(1u32, &(self.algo as i32), buf);
-    }
-    if !self.buf.is_empty() {
-      bytes::encode(2u32, &self.buf, buf);
-    }
-  }
-
-  fn merge_field<B>(
-    &mut self,
-    tag: u32,
-    wire_type: WireType,
-    buf: &mut B,
-    ctx: DecodeContext,
-  ) -> Result<(), DecodeError>
-  where
-    B: Buf,
-    Self: Sized,
-  {
-    const STRUCT_NAME: &str = "Compress";
-    match tag {
-      1u32 => {
-        let value = &mut (self.algo as i32);
-        int32::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "algo");
-          error
-        })
-      }
-      2u32 => {
-        let value = &mut self.buf;
-        bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "buf");
-          error
-        })
-      }
-      _ => skip_field(wire_type, tag, buf, ctx),
-    }
-  }
-
-  fn encoded_len(&self) -> usize {
-    (if self.algo as i32 != 0i32 {
-      int32::encoded_len(1u32, &(self.algo as i32))
-    } else {
-      0
-    }) + if !self.buf.is_empty() {
-      bytes::encoded_len(2u32, &self.buf)
-    } else {
-      0
-    }
-  }
-
-  fn clear(&mut self) {
-    self.algo = CompressionAlgo::LZW;
-    self.buf.clear();
-  }
-}
-
-#[doc(hidden)]
-pub trait ProstMessageExt: ProstMessage {
-  fn encode_with_prefix(&self) -> Result<Bytes, EncodeError>;
-}
-
-macro_rules! msg_ext {
-  ($($ty: ident),+ $(,)?) => {
-    $(
-      impl ProstMessageExt for $ty {
-        fn encode_with_prefix(&self) -> Result<Bytes, EncodeError> {
-          let encoded_len = self.encoded_len();
-          let mut buf = BytesMut::with_capacity(1 + 4 + encoded_len);
-          buf.put_u8(MessageType::$ty as u8);
-          buf.put_u32(encoded_len as u32);
-          self.encode(&mut buf).map(|_| buf.freeze())
-        }
-      }
-    )*
-  };
-}
-
-msg_ext!(Suspect, Dead, AckResponse, NackResponse, ErrorResponse,);
-
 macro_rules! bad_bail {
   ($name: ident) => {
     #[viewit::viewit]
@@ -224,79 +117,60 @@ macro_rules! bad_bail {
       from: NodeId,
     }
 
-    impl ProstMessage for $name {
-      #[allow(unused_variables)]
-      fn encode_raw<B>(&self, buf: &mut B)
-      where
-        B: BufMut,
-      {
-        if self.incarnation != 0u32 {
-          uint32::encode(1u32, &self.incarnation, buf);
-        }
-        if self.node != "" {
-          bytes::encode(2u32, self.node.bytes(), buf);
-        }
-        if self.from != "" {
-          bytes::encode(3u32, self.from.bytes(), buf);
-        }
-      }
-      #[allow(unused_variables)]
-      fn merge_field<B>(
-        &mut self,
-        tag: u32,
-        wire_type: WireType,
-        buf: &mut B,
-        ctx: DecodeContext,
-      ) -> ::core::result::Result<(), DecodeError>
-      where
-        B: Buf,
-      {
-        const STRUCT_NAME: &str = stringify!($name);
-        match tag {
-          1u32 => {
-            let value = &mut self.incarnation;
-            uint32::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-              error.push(STRUCT_NAME, "incarnation");
-              error
-            })
-          }
-          2u32 => {
-            let value = self.node.bytes_mut();
-            bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-              error.push(STRUCT_NAME, "node");
-              error
-            })
-          }
-          3u32 => {
-            let value = self.from.bytes_mut();
-            bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-              error.push(STRUCT_NAME, "from");
-              error
-            })
-          }
-          _ => skip_field(wire_type, tag, buf, ctx),
-        }
-      }
+    impl $name {
       #[inline]
-      fn encoded_len(&self) -> usize {
-        (if self.incarnation != 0u32 {
-          uint32::encoded_len(1u32, &self.incarnation)
-        } else {
-          0
-        }) + if self.node != "" {
-          bytes::encoded_len(2u32, self.node.bytes())
-        } else {
-          0
-        } + if self.from != "" {
-          bytes::encoded_len(3u32, self.from.bytes())
-        } else {
-          0
-        }
+      pub(crate) fn encoded_len(&self) -> usize {
+        core::mem::size_of::<u32>() // incarnation
+        + LENGTH_SIZE // node size length
+        + self.node.encoded_len() // node data
+        + LENGTH_SIZE // from size length
+        + self.from.encoded_len() // from data
       }
-      fn clear(&mut self) {
-        self.incarnation = 0u32;
-        self.node.clear();
-        self.from.clear();
+
+      #[inline]
+      pub(crate) fn encode_to_msg(&self) -> Message {
+        let encoded_len = self.encoded_len();
+        let mut buf = BytesMut::with_capacity(encoded_len + MessageType::SIZE + LENGTH_SIZE);
+        buf.put_u8(MessageType::$name as u8);
+        buf.put_u32(encoded_len as u32);
+        self.encode_to(&mut buf);
+        Message(buf)
+      }
+
+      #[inline]
+      pub(crate) fn encode_to(&self, buf: &mut BytesMut) {
+        buf.put_u32(self.incarnation);
+        let len = self.node.encoded_len();
+        buf.put_u32(len as u32);
+        self.node.encode_to(buf);
+        let len = self.from.encoded_len();
+        buf.put_u32(len as u32);
+        self.from.encode_to(buf);
+      }
+
+      #[inline]
+      pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
+        let incarnation = buf.get_u32();
+        let node_len = buf.get_u32() as usize;
+        if node_len > buf.remaining() {
+          return Err(DecodeError::Truncated(MessageType::$name.as_err_str()));
+        }
+
+        let node = NodeId::decode_from(buf.split_to(node_len))?;
+        let from_len = buf.get_u32() as usize;
+        let buf = if from_len > buf.remaining() {
+          return Err(DecodeError::Truncated(MessageType::$name.as_err_str()));
+        } else if from_len == buf.remaining() {
+          buf
+        } else {
+          buf.slice(..from_len)
+        };
+        let from = NodeId::decode_from(buf)?;
+        Ok(Self {
+          incarnation,
+          node,
+          from,
+        })
       }
     }
   };
@@ -312,89 +186,12 @@ impl Dead {
   }
 }
 
-/// Ack response is sent for a ping
-#[viewit::viewit]
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
-#[doc(hidden)]
-pub(crate) struct AckResponse {
-  seq_no: u32,
-  payload: Bytes,
-}
-
-impl AckResponse {
-  pub fn new(seq_no: u32, payload: Bytes) -> Self {
-    Self { seq_no, payload }
-  }
-}
-
-impl ProstMessage for AckResponse {
-  #[allow(unused_variables)]
-  fn encode_raw<B>(&self, buf: &mut B)
-  where
-    B: BufMut,
-  {
-    if self.seq_no != 0u32 {
-      uint32::encode(1u32, &self.seq_no, buf);
-    }
-    if !self.payload.is_empty() {
-      bytes::encode(2u32, &self.payload, buf);
-    }
-  }
-  #[allow(unused_variables)]
-  fn merge_field<B>(
-    &mut self,
-    tag: u32,
-    wire_type: WireType,
-    buf: &mut B,
-    ctx: DecodeContext,
-  ) -> ::core::result::Result<(), DecodeError>
-  where
-    B: Buf,
-  {
-    const STRUCT_NAME: &str = stringify!(AckResponse);
-    match tag {
-      1u32 => {
-        let value = &mut self.seq_no;
-        uint32::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "seq_no");
-          error
-        })
-      }
-      2u32 => {
-        let value = &mut self.payload;
-        bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "payload");
-          error
-        })
-      }
-      _ => skip_field(wire_type, tag, buf, ctx),
-    }
-  }
-  #[inline]
-  fn encoded_len(&self) -> usize {
-    (if self.seq_no != 0u32 {
-      uint32::encoded_len(1u32, &self.seq_no)
-    } else {
-      0
-    }) + if !self.payload.is_empty() {
-      bytes::encoded_len(2u32, &self.payload)
-    } else {
-      0
-    }
-  }
-  fn clear(&mut self) {
-    self.seq_no = 0u32;
-    self.payload.clear();
-  }
-}
-
 /// nack response is sent for an indirect ping when the pinger doesn't hear from
 /// the ping-ee within the configured timeout. This lets the original node know
 /// that the indirect ping attempt happened but didn't succeed.
 #[viewit::viewit]
 #[derive(Copy, Clone, PartialEq, Eq, Hash, prost::Message)]
 #[repr(transparent)]
-#[doc(hidden)]
 pub(crate) struct NackResponse {
   #[prost(uint32, tag = "1")]
   seq_no: u32,
@@ -402,9 +199,7 @@ pub(crate) struct NackResponse {
 
 #[viewit::viewit]
 #[derive(Clone, PartialEq, Eq, Hash, prost::Message)]
-#[serde(transparent)]
 #[repr(transparent)]
-#[doc(hidden)]
 pub(crate) struct ErrorResponse {
   #[prost(string, tag = "1")]
   err: String,
@@ -419,20 +214,14 @@ impl<E: std::error::Error> From<E> for ErrorResponse {
 }
 
 #[viewit::viewit]
-#[derive(PartialEq, Eq, Hash, prost::Message)]
-#[doc(hidden)]
 pub(crate) struct PushPullHeader {
-  #[prost(uint32, tag = "1")]
   nodes: u32,
-  #[prost(uint32, tag = "2")]
   user_state_len: u32, // Encodes the byte lengh of user state
-  #[prost(bool, tag = "3")]
-  join: bool, // Is this a join request or a anti-entropy run
+  join: bool,          // Is this a join request or a anti-entropy run
 }
 
 #[viewit::viewit]
 #[derive(Debug, Clone)]
-#[doc(hidden)]
 pub(crate) struct Alive {
   incarnation: u32,
   node: NodeId,
@@ -453,373 +242,15 @@ impl Default for Alive {
   }
 }
 
-impl ProstMessage for Alive {
-  #[allow(unused_variables)]
-  fn encode_raw<B>(&self, buf: &mut B)
-  where
-    B: BufMut,
-  {
-    if self.incarnation != 0u32 {
-      uint32::encode(1u32, &self.incarnation, buf);
-    }
-    if !self.node.is_empty() {
-      bytes::encode(2u32, self.node.bytes(), buf);
-    }
-    match self.addr() {
-      EncodableSocketAddr::Local(addr) => encode_socket_addr(addr, 3u32, buf),
-      EncodableSocketAddr::None => {}
-    }
-    if self.meta != b"" as &[u8] {
-      bytes::encode(4u32, &self.meta, buf);
-    }
-    if self.vsn != VSN_EMPTY {
-      encode_vsn(&self.vsn, 5u32, buf);
-    }
-  }
-  #[allow(unused_variables)]
-  fn merge_field<B>(
-    &mut self,
-    tag: u32,
-    wire_type: WireType,
-    buf: &mut B,
-    ctx: DecodeContext,
-  ) -> Result<(), DecodeError>
-  where
-    B: Buf,
-  {
-    const STRUCT_NAME: &str = "Alive";
-    match tag {
-      1u32 => {
-        let value = &mut self.incarnation;
-        uint32::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "incarnation");
-          error
-        })
-      }
-      2u32 => {
-        let value = self.node.bytes_mut();
-        bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "node");
-          error
-        })
-      }
-      3u32 => self.addr.merge(wire_type, buf, ctx).map_err(|mut error| {
-        error.push(STRUCT_NAME, "addr");
-        error
-      }),
-      4u32 => {
-        let value = &mut self.meta;
-        bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "meta");
-          error
-        })
-      }
-      5u32 => merge_vsn(wire_type, &self.vsn, buf, ctx).map_err(|mut error| {
-        error.push(STRUCT_NAME, "vsn");
-        error
-      }),
-      _ => skip_field(wire_type, tag, buf, ctx),
-    }
-  }
-  #[inline]
-  fn encoded_len(&self) -> usize {
-    (if self.incarnation != 0u32 {
-      uint32::encoded_len(1u32, &self.incarnation)
-    } else {
-      0
-    }) + if !self.node.is_empty() {
-      bytes::encoded_len(2u32, self.node.bytes())
-    } else {
-      0
-    } + self.addr.encoded_len()
-      + if self.meta != b"" as &[u8] {
-        bytes::encoded_len(4u32, &self.meta)
-      } else {
-        0
-      }
-      + if self.vsn != VSN_EMPTY {
-        VSN_ENCODED_SIZE
-      } else {
-        0
-      }
-  }
-  fn clear(&mut self) {
-    self.incarnation = 0u32;
-    self.node.clear();
-    self.addr.clear();
-    self.meta.clear();
-    self.vsn = VSN_EMPTY;
-  }
-}
-
-#[test]
-fn test_vsn_encode() {
-  for i in 0..=255 {
-    let x = bytes::encoded_len(1, &vec![i; 6]);
-    let y = bytes::encoded_len(1, &vec![i; 6]);
-    assert_eq!(x, 8, "idx: {}", i);
-    assert_eq!(y, 8, "idx: {}", i);
-    assert_eq!(x, y, "idx: {}", i);
-  }
-}
-
 #[viewit::viewit]
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct IndirectPingRequest {
-  seq_no: u32,
-  target: NodeAddress,
-  /// Node is sent so the target can verify they are
-  /// the intended recipient. This is to protect against an agent
-  /// restart with a new name.
-  node: Name,
-
-  /// true if we'd like a nack back
-  nack: bool,
-
-  /// Source address, used for a direct reply
-  source: NodeId,
-}
-
-impl ProstMessage for IndirectPingRequest {
-  fn encode_raw<B>(&self, buf: &mut B)
-  where
-    B: BufMut,
-  {
-    if self.seq_no != 0u32 {
-      uint32::encode(1u32, &self.seq_no, buf);
-    }
-    match self.target() {
-      EncodableSocketAddr::Local(addr) => encode_socket_addr(addr, 2u32, buf),
-      EncodableSocketAddr::None => {}
-    }
-    if !self.node.is_empty() {
-      bytes::encode(3u32, self.node.bytes(), buf);
-    }
-    if self.nack {
-      bool::encode(4u32, &self.nack, buf);
-    }
-    match self.source_addr() {
-      EncodableSocketAddr::Local(addr) => encode_socket_addr(addr, 5u32, buf),
-      EncodableSocketAddr::None => {}
-    }
-    if !self.source_node.is_empty() {
-      bytes::encode(6u32, self.source_node.bytes(), buf);
-    }
-  }
-  #[allow(unused_variables)]
-  fn merge_field<B>(
-    &mut self,
-    tag: u32,
-    wire_type: WireType,
-    buf: &mut B,
-    ctx: DecodeContext,
-  ) -> Result<(), DecodeError>
-  where
-    B: Buf,
-  {
-    const STRUCT_NAME: &str = "IndirectPingRequest";
-    match tag {
-      1u32 => {
-        let value = &mut self.seq_no;
-        uint32::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "seq_no");
-          error
-        })
-      }
-      2u32 => self.target.merge(wire_type, buf, ctx).map_err(|mut error| {
-        error.push(STRUCT_NAME, "target");
-        error
-      }),
-      3u32 => {
-        let value = self.node.bytes_mut();
-        bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "node");
-          error
-        })
-      }
-      4u32 => {
-        let value = &mut self.nack;
-        bool::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "nack");
-          error
-        })
-      }
-      5u32 => self
-        .source_addr
-        .merge(wire_type, buf, ctx)
-        .map_err(|mut error| {
-          error.push(STRUCT_NAME, "source_addr");
-          error
-        }),
-      6u32 => {
-        let value = self.source_node.bytes_mut();
-        bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "source_node");
-          error
-        })
-      }
-      _ => skip_field(wire_type, tag, buf, ctx),
-    }
-  }
-  #[inline]
-  fn encoded_len(&self) -> usize {
-    (if self.seq_no != 0u32 {
-      uint32::encoded_len(1u32, &self.seq_no)
-    } else {
-      0
-    }) + self.target.encoded_len()
-      + if !self.node.is_empty() {
-        bytes::encoded_len(3u32, self.node.bytes())
-      } else {
-        0
-      }
-      + if self.nack {
-        bool::encoded_len(4u32, &self.nack)
-      } else {
-        0
-      }
-      + self.source_addr.encoded_len()
-      + if !self.source_node.is_empty() {
-        bytes::encoded_len(6u32, self.source_node.bytes())
-      } else {
-        0
-      }
-  }
-  fn clear(&mut self) {
-    self.seq_no = 0u32;
-    self.target.clear();
-    self.node.clear();
-    self.nack = false;
-    self.source_addr.clear();
-    self.source_node.clear();
-  }
-}
-
-#[viewit::viewit]
-#[derive(Copy, Clone, PartialEq, Eq, Hash, prost::Message)]
-#[doc(hidden)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub(crate) struct UserMsgHeader {
-  #[prost(uint32, tag = "1")]
   len: u32, // Encodes the byte lengh of user state
-}
-
-/// Ping request sent directly to node
-#[viewit::viewit]
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct Ping {
-  seq_no: u32,
-  /// Node is sent so the target can verify they are
-  /// the intended recipient. This is to protect again an agent
-  /// restart with a new name.
-  node: Name,
-
-  /// Source node, used for a direct reply
-  source: NodeId,
-}
-
-impl Ping {
-  pub const fn new(seq_no: u32, node: Name, source: NodeId) -> Self {
-    Self {
-      seq_no,
-      node,
-      source,
-    }
-  }
-}
-
-impl ProstMessage for Ping {
-  #[allow(unused_variables)]
-  fn encode_raw<B>(&self, buf: &mut B)
-  where
-    B: BufMut,
-  {
-    if self.seq_no != 0u32 {
-      uint32::encode(1u32, &self.seq_no, buf);
-    }
-    if !self.node.is_empty() {
-      bytes::encode(2u32, self.node.bytes(), buf);
-    }
-    match self.source_addr() {
-      EncodableSocketAddr::Local(addr) => encode_socket_addr(addr, 3u32, buf),
-      EncodableSocketAddr::None => {}
-    }
-    if !self.source_node.is_empty() {
-      bytes::encode(4u32, self.source_node.bytes(), buf);
-    }
-  }
-  #[allow(unused_variables)]
-  fn merge_field<B>(
-    &mut self,
-    tag: u32,
-    wire_type: WireType,
-    buf: &mut B,
-    ctx: DecodeContext,
-  ) -> Result<(), DecodeError>
-  where
-    B: Buf,
-  {
-    const STRUCT_NAME: &str = "Ping";
-    match tag {
-      1u32 => {
-        let value = &mut self.seq_no;
-        uint32::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "seq_no");
-          error
-        })
-      }
-      2u32 => {
-        let value = self.node.bytes_mut();
-        bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "node");
-          error
-        })
-      }
-      3u32 => self
-        .source_addr
-        .merge(wire_type, buf, ctx)
-        .map_err(|mut error| {
-          error.push(STRUCT_NAME, "source_addr");
-          error
-        }),
-      4u32 => {
-        let value = self.source_node.bytes_mut();
-        bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "source_node");
-          error
-        })
-      }
-      _ => skip_field(wire_type, tag, buf, ctx),
-    }
-  }
-  #[inline]
-  fn encoded_len(&self) -> usize {
-    (if self.seq_no != 0u32 {
-      uint32::encoded_len(1u32, &self.seq_no)
-    } else {
-      0
-    }) + if !self.node.is_empty() {
-      bytes::encoded_len(2u32, self.node.bytes())
-    } else {
-      0
-    } + self.source_addr.encoded_len()
-      + if !self.source_node.is_empty() {
-        bytes::encoded_len(4u32, self.source_node.bytes())
-      } else {
-        0
-      }
-  }
-  fn clear(&mut self) {
-    self.seq_no = 0u32;
-    self.node.clear();
-    self.source_addr.clear();
-    self.source_node.clear();
-  }
 }
 
 #[viewit::viewit]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[doc(hidden)]
 pub(crate) struct PushNodeState {
   node: NodeId,
   meta: Bytes,
@@ -867,138 +298,6 @@ impl Default for PushNodeState {
   }
 }
 
-impl ProstMessage for PushNodeState {
-  #[allow(unused_variables)]
-  fn encode_raw<B>(&self, buf: &mut B)
-  where
-    B: BufMut,
-  {
-    if !self.name.is_empty() {
-      bytes::encode(1u32, self.name.bytes(), buf);
-    }
-    match self.addr() {
-      EncodableSocketAddr::Local(addr) => encode_socket_addr(addr, 2u32, buf),
-      EncodableSocketAddr::None => {}
-    }
-    if self.meta != b"" as &[u8] {
-      bytes::encode(3u32, &self.meta, buf);
-    }
-    if self.incarnation != 0u32 {
-      uint32::encode(4u32, &self.incarnation, buf);
-    }
-    if self.state as i32 != 0i32 {
-      int32::encode(5u32, &(self.state as i32), buf);
-    }
-    if self.vsn != VSN_EMPTY {
-      encode_vsn(&self.vsn, 6u32, buf);
-    }
-  }
-  #[allow(unused_variables)]
-  fn merge_field<B>(
-    &mut self,
-    tag: u32,
-    wire_type: WireType,
-    buf: &mut B,
-    ctx: DecodeContext,
-  ) -> Result<(), DecodeError>
-  where
-    B: Buf,
-  {
-    const STRUCT_NAME: &str = "PushNodeState";
-    match tag {
-      1u32 => {
-        let value = self.name.bytes_mut();
-        bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "name");
-          error
-        })
-      }
-      2u32 => self.addr.merge(wire_type, buf, ctx).map_err(|mut error| {
-        error.push(STRUCT_NAME, "addr");
-        error
-      }),
-      3u32 => {
-        let value = &mut self.meta;
-        bytes::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "meta");
-          error
-        })
-      }
-      4u32 => {
-        let value = &mut self.incarnation;
-        uint32::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "incarnation");
-          error
-        })
-      }
-      5u32 => {
-        let value = &mut (self.state as i32);
-        int32::merge(wire_type, value, buf, ctx).map_err(|mut error| {
-          error.push(STRUCT_NAME, "state");
-          error
-        })
-      }
-      6u32 => merge_vsn(wire_type, &self.vsn, buf, ctx).map_err(|mut error| {
-        error.push(STRUCT_NAME, "vsn");
-        error
-      }),
-      _ => skip_field(wire_type, tag, buf, ctx),
-    }
-  }
-  #[inline]
-  fn encoded_len(&self) -> usize {
-    (if !self.name.is_empty() {
-      bytes::encoded_len(1u32, self.name.bytes())
-    } else {
-      0
-    }) + self.addr.encoded_len()
-      + if self.meta != b"" as &[u8] {
-        bytes::encoded_len(3u32, &self.meta)
-      } else {
-        0
-      }
-      + if self.incarnation != 0u32 {
-        uint32::encoded_len(4u32, &self.incarnation)
-      } else {
-        0
-      }
-      + if self.state as i32 != 0i32 {
-        int32::encoded_len(5u32, &(self.state as i32))
-      } else {
-        0
-      }
-      + if self.vsn != VSN_EMPTY {
-        VSN_ENCODED_SIZE
-      } else {
-        0
-      }
-  }
-  fn clear(&mut self) {
-    self.name.clear();
-    self.addr.clear();
-    self.meta.clear();
-    self.incarnation = 0u32;
-    self.state = NodeState::Alive;
-    self.vsn = VSN_EMPTY;
-  }
-}
-
-#[test]
-fn test_push_state_enc_dec() {
-  use std::net::*;
-  let mut buf = BytesMut::new();
-  let mut push_state = PushNodeState::default();
-  push_state.name = "foo".to_string().into();
-  push_state.addr = EncodableSocketAddr::Local(SocketAddr::new(
-    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-    8080,
-  ));
-
-  push_state.encode(&mut buf).unwrap();
-  let val = PushNodeState::decode(&mut buf).unwrap();
-  assert_eq!(val, push_state);
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Message(pub(crate) BytesMut);
 
@@ -1024,18 +323,18 @@ impl Message {
     Self(this)
   }
 
-  #[inline]
-  pub(crate) fn encode<M: ProstMessage>(
-    msg: &M,
-    ty: MessageType,
-  ) -> Result<Self, prost::EncodeError> {
-    let encoded_len = msg.encoded_len();
-    let mut buf = BytesMut::with_capacity(Self::PREFIX_SIZE + encoded_len);
-    buf.put_u8(ty as u8);
-    buf.put_u32(encoded_len as u32);
-    msg.encode(&mut buf)?;
-    Ok(Self(buf))
-  }
+  // #[inline]
+  // pub(crate) fn encode<M: ProstMessage>(
+  //   msg: &M,
+  //   ty: MessageType,
+  // ) -> Result<Self, prost::EncodeError> {
+  //   let encoded_len = msg.encoded_len();
+  //   let mut buf = BytesMut::with_capacity(Self::PREFIX_SIZE + encoded_len);
+  //   buf.put_u8(ty as u8);
+  //   buf.put_u32(encoded_len as u32);
+  //   msg.encode(&mut buf)?;
+  //   Ok(Self(buf))
+  // }
 
   pub(crate) fn compound(msgs: Vec<Self>) -> BytesMut {
     let num_msgs = msgs.len();
@@ -1439,172 +738,6 @@ impl Packet {
   }
 }
 
-/// The Address for a node, can be an ip or a domain.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum NodeAddress {
-  /// e.g. `128.0.0.1`
-  Ip(IpAddr),
-  /// e.g. `www.example.com`
-  Domain(Name),
-}
-
-impl Default for NodeAddress {
-  #[inline]
-  fn default() -> Self {
-    Self::Domain(Name::new())
-  }
-}
-
-impl NodeAddress {
-  #[inline]
-  pub const fn is_ip(&self) -> bool {
-    matches!(self, Self::Ip(_))
-  }
-
-  #[inline]
-  pub const fn is_domain(&self) -> bool {
-    matches!(self, Self::Domain(_))
-  }
-
-  #[inline]
-  pub const fn unwrap_domain(&self) -> &str {
-    match self {
-      Self::Ip(_) => unreachable!(),
-      Self::Domain(addr) => addr.as_str(),
-    }
-  }
-
-  #[inline]
-  pub(crate) const fn unwrap_ip(&self) -> IpAddr {
-    match self {
-      NodeAddress::Ip(addr) => *addr,
-      _ => unreachable!(),
-    }
-  }
-}
-
-impl From<IpAddr> for NodeAddress {
-  fn from(addr: IpAddr) -> Self {
-    Self::Ip(addr)
-  }
-}
-
-impl From<String> for NodeAddress {
-  fn from(addr: String) -> Self {
-    Self::Domain(addr.into())
-  }
-}
-
-impl core::fmt::Display for NodeAddress {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    match self {
-      Self::Ip(addr) => write!(f, "{}", addr),
-      Self::Domain(addr) => write!(f, "{}", addr),
-    }
-  }
-}
-
-#[viewit::viewit(
-  vis_all = "pub(crate)",
-  getters(vis_all = "pub"),
-  setters(vis_all = "pub")
-)]
-#[derive(Debug, Clone)]
-pub struct NodeId {
-  #[viewit(getter(const, style = "ref"))]
-  name: Name,
-  port: Option<u16>,
-  #[viewit(getter(const, style = "ref"))]
-  addr: NodeAddress,
-}
-
-impl Eq for NodeId {}
-
-impl PartialEq for NodeId {
-  #[inline]
-  fn eq(&self, other: &Self) -> bool {
-    self.port == other.port && self.addr == other.addr
-  }
-}
-
-impl core::hash::Hash for NodeId {
-  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-    self.port.hash(state);
-    self.addr.hash(state);
-  }
-}
-
-impl Default for NodeId {
-  #[inline]
-  fn default() -> Self {
-    Self {
-      name: Name(Bytes::new()),
-      port: None,
-      addr: NodeAddress::Domain(Name::new()),
-    }
-  }
-}
-
-impl NodeId {
-  #[inline]
-  pub fn from_domain(domain: String) -> Self {
-    Self {
-      name: Name(Bytes::new()),
-      port: None,
-      addr: NodeAddress::Domain(domain.into()),
-    }
-  }
-
-  #[inline]
-  pub const fn from_ip(ip: IpAddr) -> Self {
-    Self {
-      name: Name(Bytes::new()),
-      port: None,
-      addr: NodeAddress::Ip(ip),
-    }
-  }
-
-  #[inline]
-  pub const fn from_addr(addr: NodeAddress) -> Self {
-    Self {
-      name: Name(Bytes::new()),
-      port: None,
-      addr,
-    }
-  }
-}
-
-impl From<SocketAddr> for NodeId {
-  fn from(addr: SocketAddr) -> Self {
-    Self {
-      name: Name(Bytes::new()),
-      port: Some(addr.port()),
-      addr: NodeAddress::Ip(addr.ip()),
-    }
-  }
-}
-
-impl core::fmt::Display for NodeId {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    match &self.addr {
-      NodeAddress::Ip(addr) => {
-        if let Some(port) = self.port {
-          write!(f, "{}({}:{})", self.name.as_str(), addr, port)
-        } else {
-          write!(f, "{}({})", self.name.as_str(), addr)
-        }
-      }
-      NodeAddress::Domain(addr) => {
-        if let Some(port) = self.port {
-          write!(f, "{}({}:{})", self.name.as_str(), addr, port)
-        } else {
-          write!(f, "{}({})", self.name.as_str(), addr)
-        }
-      }
-    }
-  }
-}
-
 /// An ID of a type of message that can be received
 /// on network channels from other members.
 ///
@@ -1642,21 +775,66 @@ impl MessageType {
 impl core::fmt::Display for MessageType {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
-      Self::Ping => write!(f, "Ping"),
-      Self::IndirectPing => write!(f, "IndirectPing"),
-      Self::AckResponse => write!(f, "AckResponse"),
-      Self::Suspect => write!(f, "Suspect"),
-      Self::Alive => write!(f, "Alive"),
-      Self::Dead => write!(f, "Dead"),
-      Self::PushPull => write!(f, "PushPull"),
-      Self::Compound => write!(f, "Compound"),
-      Self::User => write!(f, "User"),
-      Self::Compress => write!(f, "Compress"),
-      Self::Encrypt => write!(f, "Encrypt"),
-      Self::NackResponse => write!(f, "NackResponse"),
-      Self::HasCrc => write!(f, "HasCrc"),
-      Self::ErrorResponse => write!(f, "ErrorResponse"),
-      Self::HasLabel => write!(f, "HasLabel"),
+      Self::Ping => write!(f, "ping"),
+      Self::IndirectPing => write!(f, "indirect ping"),
+      Self::AckResponse => write!(f, "ack"),
+      Self::Suspect => write!(f, "suspect"),
+      Self::Alive => write!(f, "alive"),
+      Self::Dead => write!(f, "dead"),
+      Self::PushPull => write!(f, "push pull"),
+      Self::Compound => write!(f, "compound"),
+      Self::User => write!(f, "user"),
+      Self::Compress => write!(f, "compress"),
+      Self::Encrypt => write!(f, "encrypt"),
+      Self::NackResponse => write!(f, "nack"),
+      Self::HasCrc => write!(f, "crc"),
+      Self::ErrorResponse => write!(f, "error"),
+      Self::HasLabel => write!(f, "label"),
+    }
+  }
+}
+
+impl MessageType {
+  /// Returns the str of the [`MessageType`].
+  #[inline]
+  pub const fn as_str(&self) -> &'static str {
+    match self {
+      MessageType::Ping => "ping",
+      MessageType::IndirectPing => "indirect ping",
+      MessageType::AckResponse => "ack",
+      MessageType::Suspect => "suspect",
+      MessageType::Alive => "alive",
+      MessageType::Dead => "dead",
+      MessageType::PushPull => "push pull",
+      MessageType::Compound => "compound",
+      MessageType::User => "user",
+      MessageType::Compress => "compress",
+      MessageType::Encrypt => "encrypt",
+      MessageType::NackResponse => "nack",
+      MessageType::HasCrc => "crc",
+      MessageType::ErrorResponse => "error",
+      MessageType::HasLabel => "label",
+    }
+  }
+
+  #[inline]
+  pub(crate) const fn as_err_str(&self) -> &'static str {
+    match self {
+      MessageType::Ping => "ping msg",
+      MessageType::IndirectPing => "indirect ping msg",
+      MessageType::AckResponse => "ack msg",
+      MessageType::Suspect => "suspect msg",
+      MessageType::Alive => "alive msg",
+      MessageType::Dead => "dead msg",
+      MessageType::PushPull => "push pull msg",
+      MessageType::Compound => "compound msg",
+      MessageType::User => "user msg",
+      MessageType::Compress => "compress msg",
+      MessageType::Encrypt => "encrypt msg",
+      MessageType::NackResponse => "nack msg",
+      MessageType::HasCrc => "crc msg",
+      MessageType::ErrorResponse => "error msg",
+      MessageType::HasLabel => "label msg",
     }
   }
 }
@@ -1890,172 +1068,60 @@ impl core::fmt::Display for Node {
   }
 }
 
-#[derive(Clone)]
-pub struct Name(Bytes);
-
-impl Buf for Name {
-  fn remaining(&self) -> usize {
-    self.0.remaining()
-  }
-
-  fn chunk(&self) -> &[u8] {
-    self.0.chunk()
-  }
-
-  fn advance(&mut self, cnt: usize) {
-    self.0.advance(cnt);
-  }
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[repr(u8)]
+enum Inlined {
+  U1,
+  U2,
+  U3,
+  U4,
+  U5,
+  U6,
+  U7,
+  U8,
+  U9,
+  U10,
+  U11,
+  U12,
+  U13,
+  U14,
+  U15,
+  U16,
+  U17,
+  U18,
+  U19,
+  U20,
+  U21,
+  U22,
+  U23,
 }
 
-impl Default for Name {
-  fn default() -> Self {
-    Self::new()
-  }
-}
-
-impl Name {
-  #[inline]
-  pub const fn new() -> Self {
-    Self(Bytes::new())
-  }
-
-  pub fn is_empty(&self) -> bool {
-    self.0.is_empty()
-  }
-
-  pub fn len(&self) -> usize {
-    self.0.len()
-  }
-
-  #[inline]
-  pub fn clear(&mut self) {
-    self.0.clear()
-  }
-
-  #[inline]
-  #[doc(hidden)]
-  pub fn bytes(&self) -> &Bytes {
-    &self.0
-  }
-
-  #[inline]
-  #[doc(hidden)]
-  pub fn bytes_mut(&mut self) -> &mut Bytes {
-    &mut self.0
-  }
-}
-
-impl Serialize for Name {
-  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(self.as_str())
-  }
-}
-
-impl<'de> Deserialize<'de> for Name {
-  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-  where
-    D: serde::Deserializer<'de>,
-  {
-    String::deserialize(deserializer).map(Name::from)
-  }
-}
-
-impl AsRef<str> for Name {
-  fn as_ref(&self) -> &str {
-    self.as_str()
-  }
-}
-
-impl core::cmp::PartialOrd for Name {
-  fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-    self.as_str().partial_cmp(other.as_str())
-  }
-}
-
-impl core::cmp::Ord for Name {
-  fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-    self.as_str().cmp(other.as_str())
-  }
-}
-
-impl core::cmp::PartialEq for Name {
-  fn eq(&self, other: &Self) -> bool {
-    self.as_str() == other.as_str()
-  }
-}
-
-impl core::cmp::PartialEq<str> for Name {
-  fn eq(&self, other: &str) -> bool {
-    self.as_str() == other
-  }
-}
-
-impl core::cmp::PartialEq<&str> for Name {
-  fn eq(&self, other: &&str) -> bool {
-    self.as_str() == *other
-  }
-}
-
-impl core::cmp::PartialEq<String> for Name {
-  fn eq(&self, other: &String) -> bool {
-    self.as_str() == other
-  }
-}
-
-impl core::cmp::PartialEq<&String> for Name {
-  fn eq(&self, other: &&String) -> bool {
-    self.as_str() == *other
-  }
-}
-
-impl core::cmp::Eq for Name {}
-
-impl core::hash::Hash for Name {
-  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-    self.as_str().hash(state)
-  }
-}
-
-impl Name {
-  pub fn as_bytes(&self) -> &[u8] {
-    &self.0
-  }
-
-  pub fn as_str(&self) -> &str {
-    // unwrap safe here, because there is no way to build a name with invalid utf8
-    core::str::from_utf8(&self.0).unwrap()
-  }
-}
-
-impl From<Name> for String {
-  fn from(name: Name) -> Self {
-    // unwrap safe here, because there is no way to build a name with invalid utf8
-    String::from_utf8(name.0.to_vec()).unwrap()
-  }
-}
-
-impl From<&str> for Name {
-  fn from(s: &str) -> Self {
-    Self(Bytes::copy_from_slice(s.as_bytes()))
-  }
-}
-
-impl From<String> for Name {
-  fn from(s: String) -> Self {
-    Self(Bytes::from(s))
-  }
-}
-
-impl core::fmt::Debug for Name {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    // unwrap safe here, because there is no way to build a name with invalid utf8
-    write!(f, "{}", core::str::from_utf8(&self.0).unwrap())
-  }
-}
-
-impl core::fmt::Display for Name {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    // unwrap safe here, because there is no way to build a name with invalid utf8
-    write!(f, "{}", core::str::from_utf8(&self.0).unwrap())
+#[inline]
+const fn inlined_array(len: usize) -> Inlined {
+  match len {
+    1 => Inlined::U1,
+    2 => Inlined::U2,
+    3 => Inlined::U3,
+    4 => Inlined::U4,
+    5 => Inlined::U5,
+    6 => Inlined::U6,
+    7 => Inlined::U7,
+    8 => Inlined::U8,
+    9 => Inlined::U9,
+    10 => Inlined::U10,
+    11 => Inlined::U11,
+    12 => Inlined::U12,
+    13 => Inlined::U13,
+    14 => Inlined::U14,
+    15 => Inlined::U15,
+    16 => Inlined::U16,
+    17 => Inlined::U17,
+    18 => Inlined::U18,
+    19 => Inlined::U19,
+    20 => Inlined::U20,
+    21 => Inlined::U21,
+    22 => Inlined::U22,
+    23 => Inlined::U23,
+    _ => unreachable!(),
   }
 }

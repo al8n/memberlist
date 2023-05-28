@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
-use crate::types::NodeAddress;
+use crate::types::{AckResponse, NackResponse, NodeAddress};
 
 use super::{
   delegate::Delegate,
@@ -98,5 +98,31 @@ where
       .leave
       .load(std::sync::atomic::Ordering::SeqCst)
       == 1
+  }
+
+  #[inline]
+  pub(crate) async fn invoke_ack_handler(&self, ack: AckResponse, timestamp: Instant) {
+    let ah = self.inner.ack_handlers.lock().await.remove(&ack.seq_no);
+    if let Some(handler) = ah {
+      handler.timer.stop().await;
+      (handler.ack_fn)(ack.payload, timestamp);
+    } else {
+      return;
+    }
+  }
+
+  #[inline]
+  pub(crate) async fn invoke_nack_handler(&self, nack: NackResponse) {
+    let ah = self
+      .inner
+      .ack_handlers
+      .lock()
+      .await
+      .get(&nack.seq_no)
+      .map(|ah| ah.nack_fn.clone())
+      .flatten();
+    if let Some(nack_fn) = ah {
+      (nack_fn)();
+    }
   }
 }

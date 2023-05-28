@@ -24,6 +24,7 @@ use crate::{
   dns::DNS,
   network::META_MAX_SIZE,
   queue::DefaultNodeCalculator,
+  timer::Timer,
   transport::Transport,
   types::{Alive, Message, MessageType, Name, Node, NodeId, NodeState},
   TransmitLimitedQueue,
@@ -196,8 +197,15 @@ impl Memberlist {
   }
 }
 
+pub(crate) struct AckHandler {
+  pub(crate) ack_fn: Box<dyn Fn(Bytes, Instant) + Send + Sync + 'static>,
+  pub(crate) nack_fn: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+  pub(crate) timer: Timer,
+}
+
 #[viewit::viewit(getters(skip), setters(skip))]
 pub(crate) struct ShowbizCore<T: Transport, D = VoidDelegate> {
+  id: NodeId,
   hot: HotData,
   awareness: Awareness,
   advertise: RwLock<SocketAddr>,
@@ -216,6 +224,7 @@ pub(crate) struct ShowbizCore<T: Transport, D = VoidDelegate> {
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue>,
   nodes: RwLock<Memberlist>,
+  ack_handlers: Mutex<HashMap<u32, AckHandler>>,
   dns: Option<DNS<T>>,
 }
 

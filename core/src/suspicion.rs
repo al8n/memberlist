@@ -576,14 +576,14 @@ mod tests {
         .boxed()
       };
 
-      let mut s = Suspicion::new(from.into(), K, MIN, MAX, f, |x| {
+      let mut s = Suspicion::new(from.try_into().unwrap(), K, MIN, MAX, f, |x| {
         tokio::spawn(x);
       });
       let fudge = Duration::from_millis(25);
       for p in confirmations.iter() {
         tokio::time::sleep(fudge).await;
         assert_eq!(
-          s.confirm(p.from.into()).await,
+          s.confirm(p.from.try_into().unwrap()).await,
           p.new_info,
           "case {}: newInfo mismatch for {}",
           i,
@@ -611,7 +611,7 @@ mod tests {
 
       // Confirm after to make sure it handles a negative remaining
       // time correctly and doesn't fire again.
-      s.confirm("late".into()).await;
+      s.confirm("late".try_into().unwrap()).await;
       tokio::time::sleep(expected + 2 * fudge).await;
       match rx.try_recv() {
         Ok(d) => panic!("case {}: should not have fired ({:?})", i, d),
@@ -634,7 +634,7 @@ mod tests {
     };
 
     let mut s = Suspicion::new(
-      "me".into(),
+      "me".try_into().unwrap(),
       0,
       Duration::from_millis(25),
       Duration::from_secs(30),
@@ -644,7 +644,7 @@ mod tests {
       },
     );
 
-    assert!(!s.confirm("foo".into()).await);
+    assert!(!s.confirm("foo".try_into().unwrap()).await);
     let _ = tokio::time::timeout(Duration::from_millis(50), rx.recv())
       .await
       .unwrap();
@@ -663,7 +663,7 @@ mod tests {
     };
 
     let mut s = Suspicion::new(
-      "me".into(),
+      "me".try_into().unwrap(),
       1,
       Duration::from_millis(100),
       Duration::from_secs(30),
@@ -674,7 +674,7 @@ mod tests {
     );
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    s.confirm("foo".into()).await;
+    s.confirm("foo".try_into().unwrap()).await;
 
     let _ = tokio::time::timeout(Duration::from_millis(25), rx.recv())
       .await
@@ -732,7 +732,7 @@ mod tests {
 
       // Confirm after to make sure it handles a negative remaining
       // time correctly and doesn't fire again.
-      s.confirm("late".into());
+      s.confirm("late".try_into().unwrap());
       std::thread::sleep(expected + 2 * fudge);
       match rx.try_recv() {
         Ok(d) => panic!("case {}: should not have fired ({:?})", i, d),
@@ -752,14 +752,14 @@ mod tests {
     };
 
     let mut s = Suspicion::new(
-      "me".into(),
+      "me".try_into().unwrap(),
       0,
       Duration::from_millis(25),
       Duration::from_secs(30),
       f,
     );
 
-    assert!(!s.confirm("foo".into()));
+    assert!(!s.confirm("foo".try_into().unwrap()));
     crossbeam_channel::select! {
       recv(rx) -> _ => {}
       recv(crossbeam_channel::after(Duration::from_millis(50))) -> _ => { panic!("should have fired") }
@@ -776,7 +776,7 @@ mod tests {
     };
 
     let mut s = Suspicion::new(
-      "me".into(),
+      "me".try_into().unwrap(),
       1,
       Duration::from_millis(100),
       Duration::from_secs(30),
@@ -784,7 +784,7 @@ mod tests {
     );
 
     std::thread::sleep(Duration::from_millis(200));
-    s.confirm("foo".into());
+    s.confirm("foo".try_into().unwrap());
 
     crossbeam_channel::select! {
       recv(rx) -> _ => {}

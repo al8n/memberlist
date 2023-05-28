@@ -258,7 +258,12 @@ impl Options {
     #[cfg(not(any(target_arch = "wasm32", windows)))]
     let hostname = {
       let uname = rustix::process::uname();
-      uname.nodename().to_string_lossy().to_string().into()
+      uname
+        .nodename()
+        .to_string_lossy()
+        .to_string()
+        .try_into()
+        .unwrap_or_default()
     };
 
     #[cfg(windows)]
