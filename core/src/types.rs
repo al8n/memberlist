@@ -1,3 +1,60 @@
+//! Types used by the protocol.
+//!
+//! The encoding and decoding rules are similar to protobuf
+//! e.g. For a struct, the root struct stores the length of each field.
+//!
+//! ```rust,no_compile
+//! struct Name(Bytes);
+//!
+//! struct NodeId {
+//!   name: Name,
+//!   addr: NodeAddress,
+//!   port: Option<u16>,
+//! }
+//!
+//! struct Foo {
+//!   seq_no: u32,
+//!   from: NodeId,
+//!   to: NodeId,
+//! }
+//! ```
+//!
+//! In the above example, `Name` is a 'atomic' type, which means it only contains one field.
+//! For 'atomic' types, when encoding, they will only contains the data itself, no length information.
+//! So, the encoded data for `Name` is just the bytes of the name, and the length is just `Name::len(self)`.
+//!
+//! Now, let us look the NodeId. It contains 3 fields, `name`, `addr` and `port`.
+//! The encoded data format for `NodeId` is:
+//!
+//! Let us say the tag for name is 0, the tag for addr may be [1, 2, 3], represent for the 3 kinds of addr: ipv4, ipv6 and domain (e.g. www.example.com). the port tag is 4.
+//!
+//! If the all fields are not empty:
+//!
+//! ```text
+//! name field tag (u8), name_length (u16), name, addr, port tag(u8), port, checksum (u32)
+//! ```
+//!
+//! If the a field is empty, then the tag and the length of the field will not be included in the encoded data.
+//!
+//! ```text
+//! addr tag (u8), addr length (u8), addr data, checksum (u32)
+//! ```
+//!
+//! So now, the problem is that how we decode the `NodeId`?
+//!
+//! We requires the caller to provide the length information.
+//!
+//! Let say we have a decode funtion like `decode_node_id(buf: Bytes) -> Result<NodeId, Error>`.
+//!
+//! then we read the first byte as the tag, and then we match the tag to the field. If the num of readed bytes is equal to the length,
+//! then we know that the we have all the data for the struct.
+//!
+//! The encoded data format for `Foo` is:
+//!
+//! ```text
+//! seq_no, from_length (u32 varint), from, to_length(u32 varint), to
+//! ```
+
 use std::{
   io::{Error, ErrorKind},
   net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -96,7 +153,7 @@ pub(crate) fn decode_u32_from_buf(mut buf: impl Buf) -> Result<(u32, usize), Dec
 }
 
 #[cfg(feature = "async")]
-async fn decode_u32_from_reader<R: futures_util::io::AsyncRead + Unpin>(
+pub(crate) async fn decode_u32_from_reader<R: futures_util::io::AsyncRead + Unpin>(
   reader: &mut R,
 ) -> std::io::Result<(u32, usize)> {
   use futures_util::io::AsyncReadExt;
@@ -143,10 +200,17 @@ pub(crate) use err::*;
 mod ping;
 pub(crate) use ping::*;
 
+mod push_pull_state;
+pub(crate) use push_pull_state::*;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
   #[error("truncated {0}")]
   Truncated(&'static str),
+  #[error("corrupted message")]
+  Corrupted,
+  #[error("checksum mismatch")]
+  ChecksumMismatch,
   #[error("unknown mark bit {0}")]
   UnknownMarkBit(u8),
   #[error("invalid ip addr length {0}")]
@@ -217,66 +281,10 @@ pub(crate) struct Compress {
 }
 
 #[viewit::viewit]
-pub(crate) struct PushPullHeader {
-  nodes: u32,
-  user_state_len: u32, // Encodes the byte lengh of user state
-  join: bool,          // Is this a join request or a anti-entropy run
-}
-
-#[viewit::viewit]
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub(crate) struct UserMsgHeader {
   len: u32, // Encodes the byte lengh of user state
-}
-
-#[viewit::viewit]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct PushNodeState {
-  node: NodeId,
-  meta: Bytes,
-  incarnation: u32,
-  state: NodeState,
-  vsn: [u8; VSN_SIZE],
-}
-
-impl PushNodeState {
-  #[inline]
-  pub const fn pmin(&self) -> u8 {
-    self.vsn[0]
-  }
-  #[inline]
-  pub const fn pmax(&self) -> u8 {
-    self.vsn[1]
-  }
-  #[inline]
-  pub const fn pcur(&self) -> u8 {
-    self.vsn[2]
-  }
-  #[inline]
-  pub const fn dmin(&self) -> u8 {
-    self.vsn[3]
-  }
-  #[inline]
-  pub const fn dmax(&self) -> u8 {
-    self.vsn[4]
-  }
-  #[inline]
-  pub const fn dcur(&self) -> u8 {
-    self.vsn[5]
-  }
-}
-
-impl Default for PushNodeState {
-  fn default() -> Self {
-    Self {
-      node: NodeId::default(),
-      meta: Bytes::default(),
-      incarnation: 0,
-      state: NodeState::default(),
-      vsn: VSN_EMPTY,
-    }
-  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

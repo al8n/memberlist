@@ -18,7 +18,13 @@ impl<E: std::error::Error> From<E> for ErrorResponse {
 impl ErrorResponse {
   #[inline]
   pub fn encoded_len(&self) -> usize {
-    LENGTH_SIZE + self.err.as_bytes().len()
+    let basic_len = if self.err.is_empty() {
+      0
+    } else {
+      // err len + err + err tag
+      encoded_u32_len(self.err.len() as u32) + self.err.len() + 1
+    };
+    basic_len + encoded_u32_len(basic_len as u32)
   }
 
   #[inline]
@@ -30,48 +36,40 @@ impl ErrorResponse {
 
   #[inline]
   pub fn encode_to(&self, buf: &mut BytesMut) {
-    buf.put_u32(self.encoded_len() as u32);
+    encode_u32_to_buf(buf, self.encoded_len() as u32);
+    buf.put_u8(1); // tag
+    encode_u32_to_buf(buf, self.err.len() as u32);
     buf.put_slice(self.err.as_bytes());
   }
 
   #[inline]
-  pub fn decode_from(mut buf: impl Buf) -> Result<Self, DecodeError> {
-    if buf.remaining() < LENGTH_SIZE {
-      return Err(DecodeError::Truncated(MessageType::Ping.as_err_str()));
+  pub fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
+    let mut required = 0;
+    let mut this = Self { err: String::new() };
+    while buf.has_remaining() {
+      match buf.get_u8() {
+        1 => {
+          let len = decode_u32_from_buf(&mut buf)?.0 as usize;
+          if len > buf.remaining() {
+            return Err(DecodeError::Truncated(
+              MessageType::ErrorResponse.as_err_str(),
+            ));
+          }
+          this.err = match String::from_utf8(buf.split_to(len).to_vec()) {
+            Ok(s) => s,
+            Err(e) => return Err(DecodeError::InvalidErrorResponse(e)),
+          };
+          required += 1;
+        }
+        _ => {}
+      }
     }
-    let len = buf.get_u32() as usize;
-    if buf.remaining() < len {
-      return Err(DecodeError::Truncated(MessageType::Ping.as_err_str()));
-    }
-    let seq_no = buf.get_u32();
-    if len == 0 {
-      Ok(Self { err: String::new() })
-    } else {
-      let err = buf.copy_to_bytes(len);
-      String::from_utf8(err.into())
-        .map(|err| Self { err })
-        .map_err(|e| DecodeError::other(e))
-    }
-  }
 
-  #[cfg(feature = "async")]
-  #[inline]
-  pub async fn decode_from_reader<R: futures_util::io::AsyncRead + Unpin>(
-    r: &mut R,
-  ) -> Result<Self, std::io::Error> {
-    use futures_util::io::AsyncReadExt;
-    let mut len = [0u8; 4];
-    r.read_exact(&mut len).await?;
-    let len = u32::from_be_bytes(len) as usize;
-
-    if len == 0 {
-      Ok(Self { err: String::new() })
-    } else {
-      let mut payload = vec![0u8; len];
-      r.read_exact(&mut payload).await?;
-      String::from_utf8(payload)
-        .map(|err| Self { err })
-        .map_err(|e| Error::new(ErrorKind::InvalidData, e.utf8_error()))
+    if required != 1 {
+      return Err(DecodeError::Truncated(
+        MessageType::ErrorResponse.as_err_str(),
+      ));
     }
+    Ok(this)
   }
 }

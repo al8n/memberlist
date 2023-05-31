@@ -1,10 +1,8 @@
 use std::io::{self, Error, ErrorKind};
 
-use bytes::{Buf, BufMut, BytesMut};
-use serde::{Deserialize, Serialize};
-use smol_str::SmolStr;
-
 use super::DecodeError;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum InvalidName {
@@ -15,7 +13,7 @@ pub enum InvalidName {
 }
 
 #[derive(Clone)]
-pub struct Name(SmolStr);
+pub struct Name(Bytes);
 
 impl Default for Name {
   fn default() -> Self {
@@ -29,7 +27,7 @@ impl Name {
 
   #[inline]
   pub fn new() -> Self {
-    Self(SmolStr::new(""))
+    Self(Bytes::new())
   }
 
   #[inline]
@@ -43,7 +41,18 @@ impl Name {
   }
 
   #[inline]
-  pub(crate) fn from_bytes(s: &[u8]) -> Result<Self, InvalidName> {
+  pub(crate) fn from_bytes(s: Bytes) -> Result<Self, InvalidName> {
+    if s.len() > Self::MAX_SIZE {
+      return Err(InvalidName::TooLarge(s.len()));
+    }
+    match core::str::from_utf8(&s) {
+      Ok(_) => Ok(Self(s)),
+      Err(e) => Err(e.into()),
+    }
+  }
+
+  #[inline]
+  pub(crate) fn from_slice(s: &[u8]) -> Result<Self, InvalidName> {
     if s.len() > Self::MAX_SIZE {
       return Err(InvalidName::TooLarge(s.len()));
     }
@@ -59,7 +68,7 @@ impl Name {
       return Err(InvalidName::TooLarge(s.len()));
     }
     match core::str::from_utf8(&s) {
-      Ok(s) => Ok(Self(SmolStr::new_inline(s))),
+      Ok(_) => Ok(Self(Bytes::copy_from_slice(&s))),
       Err(e) => Err(e.into()),
     }
   }
@@ -72,25 +81,26 @@ impl Name {
   #[inline]
   pub(crate) fn encode_to(&self, buf: &mut BytesMut) {
     buf.put_u16(self.0.len() as u16);
-    buf.put(self.0.as_bytes());
+    buf.put(self.0.as_ref());
   }
 
   #[inline]
-  pub(crate) fn decode_from(buf: &mut impl Buf) -> Result<Self, DecodeError> {
-    let len = buf.get_u16() as usize;
-    if len == 0 {
+  pub(crate) fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
+    if buf.remaining() < core::mem::size_of::<u16>() {
+      return Err(DecodeError::Corrupted);
+    }
+    Ok(buf.get_u16() as usize)
+  }
+
+  #[inline]
+  pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
+    if buf.remaining() == 0 {
       return Ok(Self::new());
     }
-
-    if len > Self::MAX_SIZE {
-      return Err(DecodeError::InvalidName(InvalidName::TooLarge(len)));
+    match core::str::from_utf8(buf.as_ref()) {
+      Ok(_) => Ok(Self(buf)),
+      Err(e) => Err(DecodeError::InvalidName(InvalidName::Utf8(e))),
     }
-    if len > buf.remaining() {
-      return Err(DecodeError::Truncated("name"));
-    }
-
-    let s = &buf.chunk()[..len];
-    Self::from_bytes(s).map_err(From::from)
   }
 
   #[cfg(feature = "async")]
@@ -116,14 +126,18 @@ impl Name {
     } else {
       let mut buf = vec![0; len];
       r.read_exact(&mut buf).await?;
-      Self::from_bytes(&buf).map_err(|e| Error::new(ErrorKind::InvalidData, e))
+      Self::from_bytes(buf.into()).map_err(|e| Error::new(ErrorKind::InvalidData, e))
     }
   }
 }
 
 impl Serialize for Name {
   fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(self.as_str())
+    if serializer.is_human_readable() {
+      serializer.serialize_str(self.as_str())
+    } else {
+      serializer.serialize_bytes(self.as_bytes())
+    }
   }
 }
 
@@ -132,8 +146,13 @@ impl<'de> Deserialize<'de> for Name {
   where
     D: serde::Deserializer<'de>,
   {
-    SmolStr::deserialize(deserializer)
-      .and_then(|n| Name::try_from(n).map_err(|e| serde::de::Error::custom(e)))
+    if deserializer.is_human_readable() {
+      String::deserialize(deserializer)
+        .and_then(|n| Name::try_from(n).map_err(|e| serde::de::Error::custom(e)))
+    } else {
+      Bytes::deserialize(deserializer)
+        .and_then(|n| Name::try_from(n).map_err(|e| serde::de::Error::custom(e)))
+    }
   }
 }
 
@@ -194,12 +213,14 @@ impl core::hash::Hash for Name {
 }
 
 impl Name {
+  #[inline]
   pub fn as_bytes(&self) -> &[u8] {
-    self.0.as_bytes()
+    &self.0
   }
 
+  #[inline]
   pub fn as_str(&self) -> &str {
-    self.0.as_str()
+    core::str::from_utf8(&self.0).unwrap()
   }
 }
 
@@ -225,10 +246,10 @@ impl TryFrom<String> for Name {
   }
 }
 
-impl TryFrom<SmolStr> for Name {
+impl TryFrom<Bytes> for Name {
   type Error = InvalidName;
 
-  fn try_from(s: SmolStr) -> Result<Self, Self::Error> {
+  fn try_from(s: Bytes) -> Result<Self, Self::Error> {
     if s.len() > Self::MAX_SIZE {
       return Err(InvalidName::TooLarge(s.len()));
     }
@@ -236,10 +257,10 @@ impl TryFrom<SmolStr> for Name {
   }
 }
 
-impl TryFrom<&SmolStr> for Name {
+impl TryFrom<&Bytes> for Name {
   type Error = InvalidName;
 
-  fn try_from(s: &SmolStr) -> Result<Self, Self::Error> {
+  fn try_from(s: &Bytes) -> Result<Self, Self::Error> {
     if s.len() > Self::MAX_SIZE {
       return Err(InvalidName::TooLarge(s.len()));
     }
@@ -249,12 +270,12 @@ impl TryFrom<&SmolStr> for Name {
 
 impl core::fmt::Debug for Name {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{}", self.0)
+    write!(f, "{}", self.as_str())
   }
 }
 
 impl core::fmt::Display for Name {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{}", self.0)
+    write!(f, "{}", self.as_str())
   }
 }

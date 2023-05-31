@@ -116,18 +116,46 @@ where
     match mt {
       MessageType::Ping => {
         let ping = if let Some(mut data) = data {
-          match Ping::decode_from(&mut data) {
-            Ok(ping) => ping,
+          match Ping::decode_len(&mut data) {
+            Ok(len) => {
+              if len > data.len() {
+                tracing::error!(target = "showbiz", remote_node = %addr, "failed to decode ping");
+                return;
+              }
+
+              match Ping::decode_from(data.split_to(len)) {
+                Ok(ping) => ping,
+                Err(e) => {
+                  tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to decode ping");
+                  return;
+                }
+              }
+            }
             Err(e) => {
               tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to decode ping");
               return;
             }
           }
         } else {
-          match Ping::decode_from_reader(&mut lr).await {
-            Ok(ping) => ping,
+          match decode_u32_from_reader(&mut lr).await {
+            Ok((len, _)) => {
+              let mut buf = vec![0; len as usize];
+              match lr.read_exact(&mut buf).await {
+                Ok(_) => match Ping::decode_from(buf.into()) {
+                  Ok(ping) => ping,
+                  Err(e) => {
+                    tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to decode ping");
+                    return;
+                  }
+                },
+                Err(e) => {
+                  tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to decode ping");
+                  return;
+                }
+              }
+            }
             Err(e) => {
-              tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to decode ping");
+              tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to decode ping");
               return;
             }
           }

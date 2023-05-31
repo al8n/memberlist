@@ -3,9 +3,8 @@ use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-use smol_str::SmolStr;
 
 use super::*;
 
@@ -13,11 +12,11 @@ const V4_ADDR_SIZE: usize = 4;
 const V6_ADDR_SIZE: usize = 16;
 
 #[derive(Debug, Clone)]
-pub struct Domain(SmolStr);
+pub struct Domain(Bytes);
 
 impl core::fmt::Display for Domain {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "{}", self.0)
+    write!(f, "{}", self.as_str())
   }
 }
 
@@ -35,7 +34,7 @@ impl Default for Domain {
 impl Domain {
   #[inline]
   pub fn new() -> Self {
-    Self(SmolStr::new(""))
+    Self(Bytes::new())
   }
 
   #[inline]
@@ -66,40 +65,51 @@ impl Domain {
 
   #[inline]
   pub(crate) fn encoded_len(&self) -> usize {
-    self.0.len()
+    1 + self.0.len()
   }
 
   #[inline]
   pub(crate) fn encode_to(&self, buf: &mut BytesMut) {
-    buf.put(self.0.as_bytes());
+    buf.put_u8(self.0.len() as u8);
+    buf.put(self.0.as_ref());
   }
 
   #[inline]
-  pub(crate) fn decode_from(mut buf: impl Buf, len: usize) -> Result<Self, DecodeError> {
+  pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
+    if buf.is_empty() {
+      return Err(DecodeError::Truncated("domain"));
+    }
+
+    let len = buf.remaining();
     if len > Self::MAX_SIZE {
       return Err(DecodeError::InvalidDomain(InvalidDomain::InvalidLength(
         len,
       )));
     }
-    if len > buf.remaining() {
-      return Err(DecodeError::Truncated("name"));
-    }
 
-    let s = &buf.chunk()[..len];
-    Self::from_bytes(s).map_err(From::from)
+    Self::try_from(buf).map_err(From::from)
   }
 
   #[cfg(feature = "async")]
   #[inline]
   pub(crate) async fn decode_from_reader<R: futures_util::io::AsyncRead + Unpin>(
     r: &mut R,
-    len: usize,
   ) -> io::Result<Self> {
     use futures_util::io::AsyncReadExt;
+    let mut len = [0; 1];
+    r.read_exact(&mut len).await?;
+
+    let len = len[0] as usize;
+    if len == 0 {
+      return Err(Error::new(
+        ErrorKind::InvalidData,
+        DecodeError::InvalidDomain(InvalidDomain::InvalidLength(len)),
+      ));
+    }
 
     if len <= 23 {
       map_inlined!(match Self.len() {
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
         11, 12, 13, 14, 15, 16, 17, 18,
         19, 20, 21, 22, 23
       } => r)
@@ -122,7 +132,7 @@ impl<'de> Deserialize<'de> for Domain {
   where
     D: serde::Deserializer<'de>,
   {
-    SmolStr::deserialize(deserializer)
+    Bytes::deserialize(deserializer)
       .and_then(|n| Domain::try_from(n).map_err(|e| serde::de::Error::custom(e)))
   }
 }
@@ -184,12 +194,14 @@ impl core::hash::Hash for Domain {
 }
 
 impl Domain {
+  #[inline]
   pub fn as_bytes(&self) -> &[u8] {
-    self.0.as_bytes()
+    &self.0
   }
 
+  #[inline]
   pub fn as_str(&self) -> &str {
-    self.0.as_str()
+    core::str::from_utf8(&self.0).unwrap()
   }
 }
 
@@ -209,19 +221,25 @@ impl TryFrom<String> for Domain {
   }
 }
 
-impl TryFrom<SmolStr> for Domain {
+impl TryFrom<Bytes> for Domain {
   type Error = InvalidDomain;
 
-  fn try_from(s: SmolStr) -> Result<Self, Self::Error> {
-    is_valid_domain_name(s.as_str()).map(|_| Self(s))
+  fn try_from(buf: Bytes) -> Result<Self, Self::Error> {
+    match core::str::from_utf8(&buf) {
+      Ok(s) => is_valid_domain_name(s).map(|_| Self(buf)),
+      Err(e) => Err(InvalidDomain::Utf8(e)),
+    }
   }
 }
 
-impl TryFrom<&SmolStr> for Domain {
+impl TryFrom<&Bytes> for Domain {
   type Error = InvalidDomain;
 
-  fn try_from(s: &SmolStr) -> Result<Self, Self::Error> {
-    is_valid_domain_name(s.as_str()).map(|_| Self(s.clone()))
+  fn try_from(buf: &Bytes) -> Result<Self, Self::Error> {
+    match core::str::from_utf8(&buf) {
+      Ok(s) => is_valid_domain_name(s).map(|_| Self(buf.clone())),
+      Err(e) => Err(InvalidDomain::Utf8(e)),
+    }
   }
 }
 
@@ -342,12 +360,19 @@ impl NodeAddress {
   }
 
   #[inline]
-  pub(crate) fn decode_from(mut buf: impl Buf) -> Result<Self, DecodeError> {
-    let len = buf.get_u8() as usize;
-    if len < 1 {
-      return Err(DecodeError::Truncated("node address"));
+  pub(crate) fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
+    if buf.remaining() < 1 {
+      return Err(DecodeError::Corrupted);
     }
 
+    Ok(buf.get_u8() as usize)
+  }
+
+  #[inline]
+  pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
+    if buf.is_empty() {
+      return Err(DecodeError::Truncated("node address"));
+    }
     let mark = buf.get_u8();
     let remaining = buf.remaining();
     match mark {
@@ -367,7 +392,7 @@ impl NodeAddress {
         }
         r => Err(DecodeError::InvalidIpAddrLength(r)),
       },
-      2 => Domain::decode_from(buf, len).map(Self::Domain),
+      2 => Domain::decode_from(buf).map(Self::Domain),
       b => Err(DecodeError::UnknownMarkBit(b)),
     }
   }
@@ -379,9 +404,9 @@ impl NodeAddress {
   ) -> std::io::Result<Self> {
     use futures_util::io::AsyncReadExt;
 
-    let mut msg_len = [0; 1];
-    r.read_exact(&mut msg_len).await?;
-    let len = msg_len[0] as usize;
+    let mut buf = [0; 2];
+    r.read_exact(&mut buf).await?;
+    let len = buf[0] as usize;
     if len < 1 {
       return Err(Error::new(
         ErrorKind::InvalidData,
@@ -389,10 +414,9 @@ impl NodeAddress {
       ));
     }
 
-    let mut marker = [0u8; 1];
-    r.read_exact(&mut marker).await?;
+    let marker = buf[1];
     let remaining = len - 1;
-    match marker[0] {
+    match marker {
       0 => {
         if remaining != V4_ADDR_SIZE {
           return Err(Error::new(
@@ -415,9 +439,7 @@ impl NodeAddress {
         r.read_exact(&mut addr).await?;
         Ok(Self::Ip(IpAddr::V6(Ipv6Addr::from(addr))))
       }
-      2 => Domain::decode_from_reader(r, remaining)
-        .await
-        .map(Self::Domain),
+      2 => Domain::decode_from_reader(r).await.map(Self::Domain),
       b => Err(Error::new(
         ErrorKind::InvalidData,
         DecodeError::UnknownMarkBit(b),

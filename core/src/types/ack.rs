@@ -53,7 +53,13 @@ impl AckResponse {
 
   #[inline]
   pub fn encoded_len(&self) -> usize {
-    let length = self.payload.len() + encoded_u32_len(self.seq_no) as usize;
+    let length = if self.payload.is_empty() {
+      0
+    } else {
+      // payload len + payload + tag
+      encoded_u32_len(self.payload.len() as u32) + self.payload.len() + 1
+    } + encoded_u32_len(self.seq_no)
+      + 1; // seq_no + tag
     length + encoded_u32_len(length as u32)
   }
 
@@ -67,64 +73,45 @@ impl AckResponse {
   #[inline]
   pub fn encode_to(&self, buf: &mut BytesMut) {
     encode_u32_to_buf(buf, self.encoded_len() as u32);
+    buf.put_u8(1); // tag
     encode_u32_to_buf(buf, self.seq_no);
-    buf.put_slice(&self.payload);
-  }
-
-  #[inline]
-  pub fn decode_from(mut buf: impl Buf) -> Result<Self, DecodeError> {
-    let (len, _) = decode_u32_from_buf(buf)?;
-    let len = len as usize;
-
-    let (seq_no, readed) = decode_u32_from_buf(buf)?;
-
-    if buf.remaining() + readed < len {
-      return Err(DecodeError::Truncated(MessageType::Ping.as_err_str()));
-    }
-
-    if len - readed == 0 {
-      Ok(Self {
-        seq_no,
-        payload: Bytes::new(),
-      })
-    } else {
-      Ok(Self {
-        seq_no,
-        payload: buf.copy_to_bytes(len - readed),
-      })
+    if !self.payload.is_empty() {
+      buf.put_u8(1); // tag
+      encode_u32_to_buf(buf, self.payload.len() as u32);
+      buf.put_slice(&self.payload);
     }
   }
 
-  #[cfg(feature = "async")]
   #[inline]
-  pub async fn decode_from_reader<R: futures_util::io::AsyncRead + Unpin>(
-    r: &mut R,
-  ) -> Result<Self, std::io::Error> {
-    use futures_util::io::AsyncReadExt;
+  pub fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
+    let mut this = Self::default();
+    let mut required = 0;
+    while buf.has_remaining() {
+      match buf.get_u8() {
+        1 => {
+          this.seq_no = decode_u32_from_buf(buf)?.0;
+          required += 1;
+        }
+        2 => {
+          let payload_len = decode_u32_from_buf(buf)?.0 as usize;
+          if buf.remaining() < payload_len {
+            return Err(DecodeError::Truncated(
+              MessageType::AckResponse.as_err_str(),
+            ));
+          }
+          this.payload = buf.split_to(payload_len);
+          required += 1;
+        }
+        _ => {}
+      }
+    }
 
-    let (len, _) = decode_u32_from_reader(r).await?;
-    let len = len as usize;
-    let (seq_no, readed) = decode_u32_from_reader(r).await?;
-    if len < readed {
-      return Err(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        "invalid length",
+    if required != 2 {
+      return Err(DecodeError::Truncated(
+        MessageType::AckResponse.as_err_str(),
       ));
     }
-
-    if len - readed == 0 {
-      Ok(Self {
-        seq_no,
-        payload: Bytes::new(),
-      })
-    } else {
-      let mut payload = vec![0u8; len as usize - readed];
-      r.read_exact(&mut payload).await?;
-      Ok(Self {
-        seq_no,
-        payload: Bytes::from(payload),
-      })
-    }
+    Ok(this)
   }
 }
 

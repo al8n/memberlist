@@ -5,13 +5,13 @@ use super::*;
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Ping {
   seq_no: u32,
+  /// Source node, used for a direct reply
+  source: NodeId,
+
   /// NodeId is sent so the target can verify they are
   /// the intended recipient. This is to protect again an agent
   /// restart with a new name.
   target: Option<NodeId>,
-
-  /// Source node, used for a direct reply
-  source: NodeId,
 }
 
 impl Ping {
@@ -31,13 +31,12 @@ impl Ping {
 
   #[inline]
   pub fn encoded_len(&self) -> usize {
-    LENGTH_SIZE
-    + core::mem::size_of::<u32>() // seq_no
-    + match &self.target {
-      Some(target) => 1 + target.encoded_len(),
-      None => 1,
-    }
-    + self.source.encoded_len()
+    let basic = encoded_u32_len(self.seq_no) + 1 // seq_no + tag
+    + if let Some(t) = &self.target {
+      t.encoded_len() + 1 // target + tag
+    } else { 0 }
+    + self.source.encoded_len() + 1; // source + tag
+    basic + encoded_u32_len(basic as u32)
   }
 
   #[inline]
@@ -49,77 +48,60 @@ impl Ping {
 
   #[inline]
   pub fn encode_to(&self, buf: &mut BytesMut) {
-    buf.put_u32(self.encoded_len() as u32);
-    buf.put_u32(self.seq_no);
-    match &self.target {
-      Some(target) => {
-        buf.put_u8(1);
-        target.encode_to(buf);
-      }
-      None => {
-        buf.put_u8(0);
-      }
-    }
+    encode_u32_to_buf(buf, self.encoded_len() as u32);
+
+    buf.put_u8(1); // seq_no tag
+    encode_u32_to_buf(buf, self.seq_no);
+
+    buf.put_u8(2); // source tag
     self.source.encode_to(buf);
+
+    if let Some(target) = &self.target {
+      buf.put_u8(3); // target tag
+      target.encode_to(buf);
+    }
   }
 
   #[inline]
-  pub fn decode_from(mut buf: impl Buf) -> Result<Self, DecodeError> {
-    if buf.remaining() < LENGTH_SIZE {
-      return Err(DecodeError::Truncated(MessageType::Ping.as_err_str()));
-    }
-    let len = buf.get_u32() as usize;
-    if buf.remaining() < len {
-      return Err(DecodeError::Truncated(MessageType::Ping.as_err_str()));
-    }
-    let seq_no = buf.get_u32();
-    let target = match buf.get_u8() {
-      0 => None,
-      1 => Some(NodeId::decode_from(buf)?),
-      b => return Err(DecodeError::UnknownMarkBit(b)),
-    };
-    let source = NodeId::decode_from(buf)?;
-    Ok(Self {
-      seq_no,
-      target,
-      source,
-    })
+  pub(crate) fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
+    decode_u32_from_buf(buf)
+      .map(|(len, _)| len as usize)
+      .map_err(From::from)
   }
 
-  #[cfg(feature = "async")]
   #[inline]
-  pub async fn decode_from_reader<R: futures_util::io::AsyncRead + Unpin>(
-    r: &mut R,
-  ) -> Result<Self, std::io::Error> {
-    use futures_util::io::AsyncReadExt;
-    let mut len = [0u8; 4];
-    r.read_exact(&mut len).await?;
-
-    let mut seq_no = [0u8; 4];
-    r.read_exact(&mut seq_no).await?;
-    let seq_no = u32::from_be_bytes(seq_no);
-
-    let mut mark = [0u8; 1];
-    r.read_exact(&mut mark).await?;
-
-    let target = match mark[0] {
-      0 => None,
-      1 => NodeId::decode_from_reader(r).await.map(Some)?,
-      b => {
-        return Err(Error::new(
-          ErrorKind::InvalidData,
-          DecodeError::UnknownMarkBit(b),
-        ))
+  pub fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
+    let mut this = Self::default();
+    let mut required = 0;
+    while buf.has_remaining() {
+      match buf.get_u8() {
+        1 => {
+          this.seq_no = decode_u32_from_buf(&mut buf)?.0;
+          required += 1;
+        }
+        2 => {
+          let len = NodeId::decode_len(&mut buf)?;
+          if len > buf.remaining() {
+            return Err(DecodeError::Truncated(MessageType::Ping.as_err_str()));
+          }
+          this.source = NodeId::decode_from(buf.split_to(len))?;
+          required += 1;
+        }
+        3 => {
+          let len = NodeId::decode_len(&mut buf)?;
+          if len > buf.remaining() {
+            return Err(DecodeError::Truncated(MessageType::Ping.as_err_str()));
+          }
+          this.target = Some(NodeId::decode_from(buf.split_to(len))?);
+        }
+        _ => {}
       }
-    };
+    }
 
-    let source = NodeId::decode_from_reader(r).await?;
-
-    Ok(Self {
-      seq_no,
-      target,
-      source,
-    })
+    if required != 2 {
+      return Err(DecodeError::Truncated(MessageType::Ping.as_err_str()));
+    }
+    Ok(this)
   }
 }
 
@@ -145,7 +127,9 @@ impl IndirectPing {
 
   #[inline]
   pub fn encoded_len(&self) -> usize {
-    1 + self.ping.encoded_len()
+    let basic = 1 + 1 // nack + tag
+    + self.ping.encoded_len() + 1; // ping + 1
+    basic + encoded_u32_len(basic as u32)
   }
 
   #[inline]
@@ -157,59 +141,51 @@ impl IndirectPing {
 
   #[inline]
   pub fn encode_to(&self, buf: &mut BytesMut) {
-    buf.put_u32(self.encoded_len() as u32);
+    encode_u32_to_buf(buf, self.encoded_len() as u32);
+    buf.put_u8(1); // nack tag
     buf.put_u8(self.nack as u8);
+    buf.put_u8(2); // ping tag
     self.ping.encode_to(buf);
   }
 
   #[inline]
-  pub fn decode_from(mut buf: impl Buf) -> Result<Self, DecodeError> {
-    if buf.remaining() < LENGTH_SIZE {
-      return Err(DecodeError::Truncated(
-        MessageType::IndirectPing.as_err_str(),
-      ));
-    }
-    let len = buf.get_u32() as usize;
-
-    if buf.remaining() < len {
-      return Err(DecodeError::Truncated(
-        MessageType::IndirectPing.as_err_str(),
-      ));
-    }
-
-    let nack = match buf.get_u8() {
-      0 => false,
-      1 => true,
-      b => return Err(DecodeError::UnknownMarkBit(b)),
-    };
-
-    Ping::decode_from(buf).map(|ping| Self { nack, ping })
-  }
-
-  #[cfg(feature = "async")]
-  #[inline]
-  pub async fn decode_from_reader<R: futures_util::io::AsyncRead + Unpin>(
-    r: &mut R,
-  ) -> std::io::Result<Self> {
-    use futures_util::io::AsyncReadExt;
-    let mut len = [0u8; 4];
-    r.read_exact(&mut len).await?;
-
-    let mut nack = [0u8; 1];
-    r.read_exact(&mut nack).await?;
-
-    Ping::decode_from_reader(r).await.and_then(|ping| {
-      let nack = match nack[0] {
-        0 => false,
-        1 => true,
-        b => {
-          return Err(Error::new(
-            ErrorKind::InvalidData,
-            DecodeError::UnknownMarkBit(b),
-          ))
+  pub fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
+    let mut this = Self::default();
+    let mut required = 0;
+    while buf.has_remaining() {
+      match buf.get_u8() {
+        1 => {
+          if !buf.has_remaining() {
+            return Err(DecodeError::Truncated(
+              MessageType::IndirectPing.as_err_str(),
+            ));
+          }
+          match buf.get_u8() {
+            0 => this.nack = false,
+            1 => this.nack = true,
+            x => return Err(DecodeError::UnknownMarkBit(x)),
+          }
+          required += 1;
         }
-      };
-      Ok(Self { nack, ping })
-    })
+        2 => {
+          let len = Ping::decode_len(&mut buf)?;
+          if len > buf.remaining() {
+            return Err(DecodeError::Truncated(
+              MessageType::IndirectPing.as_err_str(),
+            ));
+          }
+          this.ping = Ping::decode_from(buf.split_to(len))?;
+          required += 1;
+        }
+      }
+    }
+
+    if required != 2 {
+      return Err(DecodeError::Truncated(
+        MessageType::IndirectPing.as_err_str(),
+      ));
+    }
+
+    Ok(this)
   }
 }

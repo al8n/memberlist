@@ -122,7 +122,13 @@ where
     match msg_type {
       MessageType::Compound => self.handle_compound(buf, from, timestamp).await,
       MessageType::Compress => self.handle_compressed(buf, from, timestamp).await,
-      MessageType::Ping => self.handle_ping(buf, from).await,
+      MessageType::Ping => match decode_u32_from_buf(&mut buf) {
+        Ok((len, _)) => self.handle_ping(buf.split_to(len as usize), from).await,
+        Err(e) => {
+          tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode ping");
+          return;
+        }
+      },
       MessageType::IndirectPing => {}
       MessageType::AckResponse => self.handle_ack(buf, from, timestamp).await,
       MessageType::NackResponse => self.handle_nack(buf, from).await,
@@ -218,9 +224,9 @@ where
     }
   }
 
-  async fn handle_ping(&self, mut buf: Bytes, from: SocketAddr) {
+  async fn handle_ping(&self, buf: Bytes, from: SocketAddr) {
     // Decode the ping
-    let p = match Ping::decode_from(&mut buf) {
+    let p = match Ping::decode_from(buf) {
       Ok(ping) => ping,
       Err(e) => {
         tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode ping request");

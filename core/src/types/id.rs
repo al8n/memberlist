@@ -3,9 +3,12 @@ use std::{
   net::{IpAddr, SocketAddr},
 };
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use super::{DecodeError, Domain, InvalidDomain, Name, NodeAddress, LENGTH_SIZE};
+use super::{
+  decode_u32_from_buf, encode_u32_to_buf, encoded_u32_len, DecodeError, Domain, InvalidDomain,
+  Name, NodeAddress, LENGTH_SIZE,
+};
 
 #[viewit::viewit(
   vis_all = "pub(crate)",
@@ -78,39 +81,76 @@ impl NodeId {
 
   #[inline]
   pub const fn encoded_len(&self) -> usize {
-    core::mem::size_of::<u32>()
-      + self.name.encoded_len()
-      + self.addr.encoded_len()
-      + if self.port.is_some() { 3 } else { 1 } // port
+    let basic_len = if self.name.is_empty() {
+      0
+    } else {
+      self.name.encoded_len() + 1 // name + name tag
+    }
+    + self.addr.encoded_len() + 1 // addr + addr tag
+    + if self.port.is_some() {
+      2 + 1 // port + port tag
+    } else {
+      0
+    };
+
+    encoded_u32_len(basic_len as u32) + basic_len
   }
 
   #[inline]
   pub(crate) fn encode_to(&self, buf: &mut BytesMut) {
-    buf.put_u32(self.encoded_len() as u32);
-    self.name.encode_to(buf);
+    encode_u32_to_buf(buf, self.encoded_len() as u32);
+    if !self.name.is_empty() {
+      // put tag
+      buf.put_u8(1);
+      self.name.encode_to(buf);
+    }
+
+    buf.put_u8(2);
     self.addr.encode_to(buf);
     if let Some(port) = self.port {
-      buf.put_u8(1);
+      // put tag
+      buf.put_u8(3);
       buf.put_u16(port);
-    } else {
-      buf.put_u8(0);
     }
   }
 
   #[inline]
-  pub(crate) fn decode_from(mut buf: impl Buf) -> Result<Self, DecodeError> {
-    if buf.remaining() < LENGTH_SIZE {
-      return Err(DecodeError::Truncated("node id"));
+  pub(crate) fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
+    decode_u32_from_buf(buf)
+      .map(|(len, _)| len as usize)
+      .map_err(From::from)
+  }
+
+  #[inline]
+  pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
+    let mut this = Self::default();
+    while buf.has_remaining() {
+      match buf.get_u8() {
+        1 => {
+          let len = Name::decode_len(&mut buf)?;
+          if len > buf.remaining() {
+            return Err(DecodeError::Truncated("node id"));
+          }
+          this.name = Name::decode_from(buf.split_to(len))?;
+        }
+        2 => {
+          let len = NodeAddress::decode_len(&mut buf)?;
+          if len > buf.remaining() {
+            return Err(DecodeError::Truncated("node id"));
+          }
+
+          this.addr = NodeAddress::decode_from(buf.split_to(len))?;
+        }
+        3 => {
+          if buf.remaining() < 2 {
+            return Err(DecodeError::Truncated("node id"));
+          }
+          this.port = Some(buf.get_u16());
+        }
+        _ => {}
+      }
     }
-    let size = buf.get_u32() as usize;
-    let name = Name::decode_from(&mut buf)?;
-    let addr = NodeAddress::decode_from(&mut buf)?;
-    let port = match buf.get_u8() {
-      0 => None,
-      1 => Some(buf.get_u16()),
-      b => return Err(DecodeError::UnknownMarkBit(b)),
-    };
-    Ok(Self { name, port, addr })
+    Ok(this)
   }
 
   #[cfg(feature = "async")]
