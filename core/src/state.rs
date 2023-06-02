@@ -105,9 +105,7 @@ where
     let ah = self.inner.ack_handlers.lock().await.remove(&ack.seq_no);
     if let Some(handler) = ah {
       handler.timer.stop().await;
-      (handler.ack_fn)(ack.payload, timestamp);
-    } else {
-      return;
+      (handler.ack_fn)(ack.payload, timestamp).await;
     }
   }
 
@@ -119,8 +117,7 @@ where
       .lock()
       .await
       .get(&nack.seq_no)
-      .map(|ah| ah.nack_fn.clone())
-      .flatten();
+      .and_then(|ah| ah.nack_fn.clone());
     if let Some(nack_fn) = ah {
       (nack_fn)();
     }

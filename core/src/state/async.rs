@@ -1,12 +1,14 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use crate::{
-  showbiz::Memberlist,
-  types::{Alive, Dead, Name},
+  showbiz::{Memberlist, AckHandler},
+  types::{Alive, Dead, Name}, timer::Timer,
 };
 
 use super::*;
+use bytes::Bytes;
 use futures_channel::oneshot::Sender;
+use futures_util::future::BoxFuture;
 
 impl<T, D> Showbiz<T, D>
 where
@@ -104,6 +106,24 @@ where
     }
 
     Ok(())
+  }
+
+  pub(crate) async fn set_ack_handler<R, S, F>(&self, seq_no: u32, timeout: Duration, f: F, s: S)
+  where
+    R: Send + Sync + 'static,
+    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+    F: FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static,
+  {
+    // Add the handler
+    let tlock = self.inner.ack_handlers.clone();
+    let mut mu = self.inner.ack_handlers.lock().await;
+    mu.insert(seq_no, AckHandler {
+      ack_fn: Box::new(f),
+      nack_fn: None,
+      timer: Timer::after(timeout, async move {
+        tlock.lock().await.remove(&seq_no);
+      }, s),
+    });
   }
 
   pub(crate) async fn alive_node(

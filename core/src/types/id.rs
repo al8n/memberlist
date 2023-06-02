@@ -50,6 +50,15 @@ impl Default for NodeId {
 
 impl NodeId {
   #[inline]
+  pub fn new(name: Name, addr: SocketAddr) -> Self {
+    Self {
+      name,
+      port: Some(addr.port()),
+      addr: NodeAddress::Ip(addr.ip()),
+    }
+  }
+
+  #[inline]
   pub fn from_domain(domain: String) -> Result<Self, InvalidDomain> {
     Domain::try_from(domain).map(|domain| Self {
       name: Name::new(),

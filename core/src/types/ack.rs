@@ -162,6 +162,11 @@ pub(crate) struct NackResponse {
 
 impl NackResponse {
   #[inline]
+  pub fn new(seq_no: u32) -> Self {
+    Self { seq_no }
+  }
+
+  #[inline]
   pub fn encoded_len(&self) -> usize {
     let length = encoded_u32_len(self.seq_no) + 1; // seq_no + tag
     length + encoded_u32_len(length as u32) + CHECKSUM_SIZE

@@ -118,7 +118,7 @@ where
           state_change: Instant::now(),
         })),
         opts: Arc::new(opts),
-        ack_handlers: Mutex::new(HashMap::new()),
+        ack_handlers: Arc::new(Mutex::new(HashMap::new())),
       }),
     })
   }

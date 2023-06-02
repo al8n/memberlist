@@ -9,6 +9,7 @@ use std::{
 use async_lock::{Mutex, RwLock};
 use bytes::Bytes;
 use crossbeam_utils::CachePadded;
+use futures_util::future::BoxFuture;
 #[cfg(not(feature = "async"))]
 use parking_lot::{Mutex, RwLock};
 
@@ -197,14 +198,16 @@ impl Memberlist {
   }
 }
 
+#[cfg(feature = "async")]
 pub(crate) struct AckHandler {
-  pub(crate) ack_fn: Box<dyn Fn(Bytes, Instant) + Send + Sync + 'static>,
+  pub(crate) ack_fn: Box<dyn FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
   pub(crate) nack_fn: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
   pub(crate) timer: Timer,
 }
 
 #[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct ShowbizCore<T: Transport, D = VoidDelegate> {
+pub(crate) struct ShowbizCore<T: Transport, D = VoidDelegate>
+{
   id: NodeId,
   hot: HotData,
   awareness: Awareness,
@@ -224,7 +227,7 @@ pub(crate) struct ShowbizCore<T: Transport, D = VoidDelegate> {
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue>,
   nodes: RwLock<Memberlist>,
-  ack_handlers: Mutex<HashMap<u32, AckHandler>>,
+  ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
   dns: Option<DNS<T>>,
 }
 

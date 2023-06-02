@@ -1,13 +1,14 @@
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 
 use crate::{
   checksum::Checksumer,
   security::{decrypt_payload, pkcs7encode, BLOCK_SIZE, NONCE_SIZE},
   showbiz::MessageHandoff,
-  types::{Message, Node, NodeId},
+  types::{Message, NodeId},
   util::decompress_payload,
 };
-use futures_util::{stream::FuturesUnordered, StreamExt};
+use futures_timer::Delay;
+use futures_util::{stream::FuturesOrdered, StreamExt};
 use rand::Rng;
 
 use super::*;
@@ -33,7 +34,7 @@ where
           }
           packet = transport_rx.recv().fuse() => {
             match packet {
-              Ok(packet) => this.ingest_packet(packet).await,
+              Ok(packet) => this.ingest_packet(packet, spawner).await,
               Err(e) => tracing::error!(target = "showbiz", "failed to receive packet: {}", e),
             }
           }
@@ -42,7 +43,11 @@ where
     }));
   }
 
-  async fn ingest_packet(&self, packet: Packet) {
+  async fn ingest_packet<R, S>(&self, packet: Packet, spawner: S)
+  where
+    R: Send + Sync + 'static,
+    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  {
     let addr = packet.from();
     let timestamp = packet.timestamp();
     let (mut buf, mut packet_label) = match Self::remove_label_header_from(packet.into_inner()) {
@@ -68,7 +73,6 @@ where
     }
 
     // Check if encryption is enabled
-
     if let Some(keyring) = &self.inner.keyring {
       let keys = keyring.lock().await;
       // Decrypt the payload
@@ -90,22 +94,39 @@ where
     // See if there's a checksum included to verify the contents of the message
     let meta_size = MessageType::SIZE + core::mem::size_of::<u32>();
     if buf.len() >= meta_size && buf[0] == MessageType::HasCrc as u8 {
-      let crc = crc32fast::hash(&buf[meta_size..]);
-      let expected_crc = u32::from_be_bytes(buf[MessageType::SIZE..meta_size].try_into().unwrap());
-      if crc != expected_crc {
-        tracing::warn!(target = "showbiz", addr = %addr, "got invalid checksum for UDP packet: {} vs. {}", crc, expected_crc);
-        return;
+      let mut buf = buf.freeze();
+      buf.advance(1);
+      match decode_u32_from_buf(&mut buf) {
+        Ok((size, _)) => {
+          if size as usize + 4 > buf.remaining() {
+            tracing::error!(target = "showbiz", addr = %addr, err = "truncated message");
+            return;
+          }
+          let msg = buf.split_to(size as usize);
+          let mut hasher = T::Checksumer::new();
+          hasher.update(&msg);
+          let crc = hasher.finalize();
+          let expected_crc = buf.get_u32();
+          if crc != expected_crc {
+            tracing::warn!(target = "showbiz", addr = %addr, "got invalid checksum for UDP packet: {} vs. {}", crc, expected_crc);
+            return;
+          }
+          self.handle_command(msg, addr, timestamp, spawner).await
+        },
+        Err(e) => tracing::error!(target = "showbiz", addr = %addr, err = %e, "failed to decode plain message"),
       }
-      buf.advance(meta_size);
-      self.handle_command(buf.freeze(), addr, timestamp).await
     } else {
-      self.handle_command(buf.freeze(), addr, timestamp).await
+      self.handle_command(buf.freeze(), addr, timestamp, spawner).await
     }
   }
 
   #[async_recursion::async_recursion]
-  async fn handle_command(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
-    if buf.len() < 1 {
+  async fn handle_command<R, S>(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant, spawner: S)
+  where
+    R: Send + Sync + 'static,
+    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  {
+    if !buf.has_remaining() {
       tracing::error!(target = "showbiz", addr = %from, err = "missing message type byte");
       return;
     }
@@ -121,15 +142,13 @@ where
     };
 
     match msg_type {
-      MessageType::Compound => self.handle_compound(buf, from, timestamp).await,
-      MessageType::Compress => self.handle_compressed(buf, from, timestamp).await,
+      MessageType::Compound => self.handle_compound(buf, from, timestamp, spawner).await,
+      MessageType::Compress => self.handle_compressed(buf, from, timestamp, spawner).await,
       MessageType::Ping => match decode_u32_from_buf(&mut buf) {
         Ok((len, _)) => self.handle_ping(buf.split_to(len as usize), from).await,
-        Err(e) => {
-          tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode ping");
-        }
+        Err(e) => tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode ping"),
       },
-      MessageType::IndirectPing => {}
+      MessageType::IndirectPing => self.handle_indirect_ping(buf, from, spawner).await,
       MessageType::AckResponse => self.handle_ack(buf, from, timestamp).await,
       MessageType::NackResponse => self.handle_nack(buf, from).await,
       MessageType::Suspect | MessageType::Alive | MessageType::Dead | MessageType::User => {
@@ -164,9 +183,13 @@ where
     }
   }
 
-  async fn handle_compound(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
+  async fn handle_compound<R, S>(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant, spawner: S)
+  where
+    R: Send + Sync + 'static,
+    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  {
     // Decode the parts
-    if buf.len() < 1 {
+    if !buf.has_remaining() {
       tracing::error!(target = "showbiz", addr = %from, err = %CompoundError::MissingLengthByte, "failed to decode compound request");
       return;
     }
@@ -174,7 +197,7 @@ where
     let num_parts = buf.get_u8() as usize;
 
     // check we have enough bytes
-    if buf.len() < num_parts as usize * 2 {
+    if buf.len() < num_parts * 2 {
       tracing::error!(target = "showbiz", addr = %from, err = %CompoundError::Truncated, "failed to decode compound request");
       return;
     }
@@ -191,18 +214,22 @@ where
         }
 
         let msg = buf.split_to(len as usize);
-        Some(self.handle_command(msg, from, timestamp))
+        Some(self.handle_command(msg, from, timestamp, spawner))
       })
-      .collect::<FuturesUnordered<_>>();
+      .collect::<FuturesOrdered<_>>();
     if trunc > 0 {
       let num = num_parts - trunc;
       tracing::warn!(target = "showbiz", addr = %from, err = %CompoundError::TruncatedMsgs(num), "failed to decode compound request");
     }
-    while let Some(_) = futs.next().await {}
+    while futs.next().await.is_some() {}
   }
 
   #[inline]
-  async fn handle_compressed(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
+  async fn handle_compressed<R, S>(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant, spawner: S)
+  where
+    R: Send + Sync + 'static,
+    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  {
     // Try to decode the payload
     if !self.inner.opts.compression_algo.is_none() {
       let algo = match CompressionAlgo::try_from(buf.get_u8()) {
@@ -214,13 +241,13 @@ where
       };
       let size = buf.get_u32() as usize;
       match decompress_payload(algo, &buf) {
-        Ok(payload) => self.handle_command(payload.into(), from, timestamp).await,
+        Ok(payload) => self.handle_command(payload.into(), from, timestamp, spawner).await,
         Err(e) => {
           tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decompress payload");
         }
       }
     } else {
-      self.handle_command(buf, from, timestamp).await
+      self.handle_command(buf, from, timestamp, spawner).await
     }
   }
 
@@ -243,7 +270,6 @@ where
     }
 
     let msg = if let Some(delegate) = &self.inner.delegate {
-      // TODO: add new method to delegate e.g. read_ack_payload_to_buf, to avoid copying and allocating
       let payload = match delegate.ack_payload().await {
         Ok(payload) => payload,
         Err(e) => {
@@ -273,9 +299,95 @@ where
     }
   }
 
-  async fn handle_indirect_ping(&self, buf: Bytes, from: SocketAddr) {
-    todo!()
+  async fn handle_indirect_ping<R, S>(&self, mut buf: Bytes, from: SocketAddr, spawner: S)
+  where
+    R: Send + Sync + 'static,
+    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  {
+    let len = match IndirectPing::decode_len(&mut buf) {
+      Ok(len) => len,
+      Err(e) => {
+        tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode indirect ping request");
+        return;
+      }
+    };
+    let ind = match IndirectPing::decode_from(buf.split_to(len)) {
+      Ok(ind) => ind,
+      Err(e) => {
+        tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode indirect ping request");
+        return;
+      }
+    };
+
+    // Send a ping to the correct host.
+    let local_seq_no = self.next_seq_no();
+
+    let ping = Ping {
+      seq_no: local_seq_no,
+      source: self.inner.id.clone(),
+      target: ind.ping.target.clone(),
+    };
+
+    // Forward the ack back to the requestor. If the request encodes an origin
+	  // use that otherwise assume that the other end of the UDP socket is
+	  // usable.
+
+    let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
+    // Setup a response handler to relay the ack
+    let this = self.clone();
+    let ind_source = ind.ping.source.clone();
+    let ind_seq_no = ind.ping.seq_no;
+
+    self.set_ack_handler(local_seq_no, self.inner.opts.probe_timeout, move |_payload, _timestamp| {
+      async move {
+        let _ = cancel_tx.send(());
+
+        // Try to prevent the nack if we've caught it in time.
+        let ack = AckResponse::empty(ind_seq_no);
+        let mut out = BytesMut::with_capacity(MessageType::SIZE + ack.encoded_len());
+        out.put_u8(MessageType::AckResponse as u8);
+        ack.encode_to::<T::Checksumer>(&mut out);
+        if let Err(e) = this.send_msg(ind_source, Message(out)).await {
+          tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to forward ack");
+        }
+      }.boxed()
+    }, spawner).await;
+
+    let mut out = BytesMut::with_capacity(MessageType::SIZE + ping.encoded_len());
+    out.put_u8(MessageType::Ping as u8);
+    ping.encode_to(&mut out);
+
+    // TODO: change ind ping struct encoding
+    if let Err(e) = self.send_msg(ind.ping.target.unwrap(), Message(out)).await {
+      tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to send ping");
+    }
+
+    // Setup a timer to fire off a nack if no ack is seen in time.
+    if ind.nack {
+      let this = self.clone();
+      let probe_timeout = self.inner.opts.probe_timeout;
+      (spawner)(async move {
+        let timer = Delay::new(probe_timeout);
+        futures_util::select! {
+          _ = timer.fuse() => {
+            // We've not received an ack, so send a nack.
+            let nack = NackResponse::new(ind.ping.seq_no);
+            let mut out = BytesMut::with_capacity(MessageType::SIZE + nack.encoded_len());
+            out.put_u8(MessageType::NackResponse as u8);
+            nack.encode_to::<T::Checksumer>(&mut out);
+            let addr = ind.ping.source;
+            if let Err(e) = this.send_msg(addr, Message(out)).await {
+              tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to send nack");
+            }
+          }
+          _ = cancel_rx.fuse() => {
+            // We've received an ack, so we can cancel the nack.
+          }
+        }
+      }.boxed());
+    }
   }
+
 
   async fn handle_ack(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
     match decode_u32_from_buf(&mut buf) {
