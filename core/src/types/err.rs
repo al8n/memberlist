@@ -35,10 +35,13 @@ impl ErrorResponse {
   }
 
   #[inline]
-  pub fn encode_to(&self, buf: &mut BytesMut) {
-    encode_u32_to_buf(buf, self.encoded_len() as u32);
+  pub fn encode_to(&self, mut buf: &mut BytesMut) {
+    encode_u32_to_buf(&mut buf, self.encoded_len() as u32);
+    if self.err.is_empty() {
+      return;
+    }
     buf.put_u8(1); // tag
-    encode_u32_to_buf(buf, self.err.len() as u32);
+    encode_u32_to_buf(&mut buf, self.err.len() as u32);
     buf.put_slice(self.err.as_bytes());
   }
 

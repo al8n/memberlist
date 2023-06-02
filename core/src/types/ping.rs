@@ -47,11 +47,11 @@ impl Ping {
   }
 
   #[inline]
-  pub fn encode_to(&self, buf: &mut BytesMut) {
-    encode_u32_to_buf(buf, self.encoded_len() as u32);
+  pub fn encode_to(&self, mut buf: &mut BytesMut) {
+    encode_u32_to_buf(&mut buf, self.encoded_len() as u32);
 
     buf.put_u8(1); // seq_no tag
-    encode_u32_to_buf(buf, self.seq_no);
+    encode_u32_to_buf(&mut buf, self.seq_no);
 
     buf.put_u8(2); // source tag
     self.source.encode_to(buf);
@@ -63,7 +63,7 @@ impl Ping {
   }
 
   #[inline]
-  pub(crate) fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
+  pub(crate) fn decode_len(buf: impl Buf) -> Result<usize, DecodeError> {
     decode_u32_from_buf(buf)
       .map(|(len, _)| len as usize)
       .map_err(From::from)
@@ -121,7 +121,7 @@ impl IndirectPing {
 
   #[inline]
   pub fn with_target(mut self, target: NodeId) -> Self {
-    self.ping.with_target(target);
+    self.ping.target = Some(target);
     self
   }
 
@@ -140,8 +140,8 @@ impl IndirectPing {
   }
 
   #[inline]
-  pub fn encode_to(&self, buf: &mut BytesMut) {
-    encode_u32_to_buf(buf, self.encoded_len() as u32);
+  pub fn encode_to(&self, mut buf: &mut BytesMut) {
+    encode_u32_to_buf(&mut buf, self.encoded_len() as u32);
     buf.put_u8(1); // nack tag
     buf.put_u8(self.nack as u8);
     buf.put_u8(2); // ping tag
@@ -177,6 +177,7 @@ impl IndirectPing {
           this.ping = Ping::decode_from(buf.split_to(len))?;
           required += 1;
         }
+        _ => {}
       }
     }
 

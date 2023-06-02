@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
 use crate::{
+  checksum::Checksumer,
   security::{decrypt_payload, pkcs7encode, BLOCK_SIZE, NONCE_SIZE},
   showbiz::MessageHandoff,
   types::{Message, Node, NodeId},
@@ -126,7 +127,6 @@ where
         Ok((len, _)) => self.handle_ping(buf.split_to(len as usize), from).await,
         Err(e) => {
           tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode ping");
-          return;
         }
       },
       MessageType::IndirectPing => {}
@@ -252,10 +252,11 @@ where
         }
       };
       let mut out = BytesMut::with_capacity(
-        MessageType::SIZE + AckResponseEncoder::<BytesMut>::encoded_len(&payload),
+        MessageType::SIZE
+          + AckResponseEncoder::<BytesMut, T::Checksumer>::encoded_len(p.seq_no, &payload),
       );
       out.put_u8(MessageType::AckResponse as u8);
-      let mut enc = AckResponseEncoder::new(&mut out);
+      let mut enc = AckResponseEncoder::<_, T::Checksumer>::new(&mut out);
       enc.encode_seq_no(p.seq_no);
       enc.encode_payload(&payload);
       Message(out)
@@ -263,7 +264,7 @@ where
       let ack = AckResponse::empty(p.seq_no);
       let mut out = BytesMut::with_capacity(MessageType::SIZE + ack.encoded_len());
       out.put_u8(MessageType::AckResponse as u8);
-      ack.encode_to(&mut out);
+      ack.encode_to::<T::Checksumer>(&mut out);
       Message(out)
     };
 
@@ -277,34 +278,37 @@ where
   }
 
   async fn handle_ack(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
-    let size = buf.get_u32() as usize;
-    if size > buf.remaining() {
-      tracing::error!(target = "showbiz", addr = %from, err="truncated ack message", "failed to decode ack response");
-      return;
+    match decode_u32_from_buf(&mut buf) {
+      Ok((size, _)) => {
+        buf.truncate(size as usize);
+        match AckResponse::decode_from::<T::Checksumer>(buf) {
+          Ok(ack) => self.invoke_ack_handler(ack, timestamp).await,
+          Err(e) => {
+            tracing::error!(target = "showbiz", addr = %from, err=%e, "failed to decode ack response");
+          }
+        }
+      }
+      Err(e) => {
+        tracing::error!(target = "showbiz", addr = %from, err=%e, "failed to decode ack response");
+      }
     }
-    let seq_no = buf.get_u32();
-    let ack = if buf.remaining() == size - 4 {
-      AckResponse {
-        seq_no,
-        payload: buf,
-      }
-    } else {
-      AckResponse {
-        seq_no,
-        payload: buf.slice(..size),
-      }
-    };
-    self.invoke_ack_handler(ack, timestamp).await
   }
 
   async fn handle_nack(&self, mut buf: Bytes, from: SocketAddr) {
-    if buf.remaining() < core::mem::size_of::<u32>() {
-      tracing::error!(target = "showbiz", addr = %from, err="truncated nack message", "failed to decode nack response");
-      return;
+    match decode_u32_from_buf(&mut buf) {
+      Ok((size, _)) => {
+        buf.truncate(size as usize);
+        match NackResponse::decode_from::<T::Checksumer>(buf) {
+          Ok(nack) => self.invoke_nack_handler(nack).await,
+          Err(e) => {
+            tracing::error!(target = "showbiz", addr = %from, err=%e, "failed to decode nack response");
+          }
+        }
+      }
+      Err(e) => {
+        tracing::error!(target = "showbiz", addr = %from, err=%e, "failed to decode nack response");
+      }
     }
-    let seq_no = buf.get_u32();
-    let nack = NackResponse { seq_no };
-    self.invoke_nack_handler(nack).await
   }
 
   async fn send_msg(&self, addr: NodeId, msg: Message) -> Result<(), Error<T, D>> {
@@ -320,16 +324,14 @@ where
 
     // Fast path if nothing to piggypack
     if msgs.len() == 1 {
-      return self
-        .raw_send_msg_packet(addr, None, msgs.pop().unwrap().0)
-        .await;
+      return self.raw_send_msg_packet(addr, msgs.pop().unwrap().0).await;
     }
 
     // Create a compound message
     let compound = Message::compound(msgs);
 
     // Send the message
-    self.raw_send_msg_packet(addr, None, compound).await
+    self.raw_send_msg_packet(addr, compound).await
   }
 
   /// Used to send message via packet to another host without
@@ -337,60 +339,18 @@ where
   pub(crate) async fn raw_send_msg_packet(
     &self,
     addr: NodeId,
-    mut node: Option<Arc<Node>>,
     msg: BytesMut,
   ) -> Result<(), Error<T, D>> {
-    macro_rules! crc_bail {
-      ($node: ident, $data:ident, $msg_len: ident) => {
-        match $node {
-          Some(node) => {
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.update(&[
-              MessageType::Compress as u8,
-              ($msg_len >> 24) as u8,
-              ($msg_len >> 16) as u8,
-              ($msg_len >> 8) as u8,
-              $msg_len as u8,
-              self.inner.opts.compression_algo as u8,
-            ]);
-            hasher.update(&$data);
-            let crc = hasher.finalize();
-            // compressed msg len should add the crc msg len
-            $msg_len += MessageType::SIZE // MessageType::HasCrc
-              + core::mem::size_of::<u32>(); // crc
-            Some(crc)
-          },
-          _ => None,
-        }
-      };
-      ($crc: ident, $buf: ident) => {
-        if let Some(crc) = $crc {
-          $buf.put_u8(MessageType::HasCrc as u8);
-          $buf.put_u32(crc);
-        }
-      }
-    }
-
     macro_rules! encrypt_bail {
-      ($msg: ident -> $this:ident.$node:ident.$addr:ident -> $block: expr) => {{
-        // Try to look up the destination node. Note this will only work if the
-        // bare ip address is used as the node name, which is not guaranteed.
-        if $node.is_none() {
-          $node = $this.inner.nodes.read().await.node_map.get(&addr).map(|ls| ls.node.clone());
-        }
-
-        // Add a CRC to the end of the payload
-        let mut after_crc_msg_len = $msg.len();
-        let crc = crc_bail!($node, $msg, after_crc_msg_len);
-
-        let encrypted_msg_len = MessageType::SIZE // MessageType::Encryption
-        + core::mem::size_of::<u32>() // Encrypted message length
+      ($msg: ident.len($compressed_msg_len: ident) -> $this:ident.$node:ident.$addr:ident -> $block: expr) => {{
+        let basic_encrypt_len = MessageType::SIZE // MessageType::Encryption
         + EncryptionAlgo::SIZE // Encryption algo length
-        + encrypted_length(self.inner.opts.encryption_algo, after_crc_msg_len);
+        + encrypted_length(self.inner.opts.encryption_algo, $compressed_msg_len);
+        let encrypted_msg_len = encoded_u32_len(basic_encrypt_len as u32) + basic_encrypt_len;
 
         let mut buf = BytesMut::with_capacity(encrypted_msg_len);
         buf.put_u8(MessageType::Encrypt as u8);
-        buf.put_u32(encrypted_msg_len as u32);
+        encode_u32_to_buf(&mut buf, encrypted_msg_len as u32);
         let offset = buf.len();
         buf.put_u8(self.inner.opts.encryption_algo as u8);
         // Add a random nonce
@@ -398,7 +358,6 @@ where
         rand::thread_rng().fill(&mut nonce);
         buf.put_slice(&nonce);
         let after_nonce = buf.len();
-        crc_bail!(crc, buf);
 
         $block(&mut buf);
 
@@ -448,56 +407,51 @@ where
         tracing::error!(target = "showbiz", addr = %addr, err = %e, "failed to compress message");
         Error::Compression(e)
       })?;
-      let compressed_msg_len = MessageType::SIZE // MessageType::Compression
-        + core::mem::size_of::<u32>() // Compressed message length
-        + CompressionAlgo::SIZE // CompressionAlgo length
-        + data.len(); // data length
 
+      let compressed_msg_len = CompressEncoder::<BytesMut, T::Checksumer>::encoded_len(&data) + 1;
       if !self.inner.opts.encryption_algo.is_none() && self.inner.opts.gossip_verify_outgoing {
-        let buf = encrypt_bail!(data -> self.node.addr -> |buf: &mut BytesMut| {
+        let buf = encrypt_bail!(data.len(compressed_msg_len) -> self.node.addr -> |mut buf: &mut BytesMut| {
           buf.put_u8(MessageType::Compress as u8);
-          buf.put_u32((data.len() + CompressionAlgo::SIZE) as u32);
-          buf.put_u8(self.inner.opts.compression_algo as u8);
-          buf.put_slice(&data);
+          encode_u32_to_buf(&mut buf, compressed_msg_len as u32);
+          let mut enc = CompressEncoder::<_, T::Checksumer>::new(buf);
+          enc.encode_algo(self.inner.opts.compression_algo);
+          enc.encode_payload(&data);
         });
 
         return return_bail!(self, buf, addr);
       } else {
-        // Add a CRC to the end of the payload
-        let mut after_crc_msg_len = compressed_msg_len;
-        let crc = crc_bail!(node, data, after_crc_msg_len);
-        let mut buf = BytesMut::with_capacity(after_crc_msg_len);
-        crc_bail!(crc, buf);
+        let compressed_msg_len = CompressEncoder::<BytesMut, T::Checksumer>::encoded_len(&data) + 1;
+        let mut buf = BytesMut::with_capacity(compressed_msg_len);
         buf.put_u8(MessageType::Compress as u8);
-        buf.put_u32((data.len() + CompressionAlgo::SIZE) as u32);
-        buf.put_u8(self.inner.opts.compression_algo as u8);
-        buf.put_slice(&data);
-
+        encode_u32_to_buf(&mut buf, compressed_msg_len as u32);
+        let mut enc = CompressEncoder::<_, T::Checksumer>::new(&mut buf);
+        enc.encode_algo(self.inner.opts.compression_algo);
+        enc.encode_payload(&data);
         return return_bail!(self, buf, addr);
       }
     }
 
     // Check if encryption is enabled
     if !self.inner.opts.encryption_algo.is_none() && self.inner.opts.gossip_verify_outgoing {
-      let buf = encrypt_bail!(msg -> self.node.addr -> |buf: &mut BytesMut| {
+      let len = msg.len();
+      let buf = encrypt_bail!(msg.len(len) -> self.node.addr -> |buf: &mut BytesMut| {
         buf.put_slice(&msg);
       });
 
       return return_bail!(self, buf, addr);
     }
 
-    // Add a CRC to the end of the payload
-    let mut msg_len = msg.len();
-    match crc_bail!(node, msg, msg_len) {
-      Some(crc) => {
-        let mut buf = BytesMut::with_capacity(msg_len);
-        buf.put_u8(MessageType::HasCrc as u8);
-        buf.put_u32(crc);
-        buf.put_slice(&msg);
-        return_bail!(self, buf, addr)
-      }
-      None => return_bail!(self, msg, addr),
-    }
+    let msg_len = msg.len();
+    let mut hasher = <T::Checksumer as Checksumer>::new();
+    hasher.update(&msg);
+    let crc = hasher.finalize();
+    let msg_encoded_len = encoded_u32_len(msg_len as u32) + msg_len + 1;
+    let mut buf = BytesMut::with_capacity(msg_encoded_len);
+    buf.put_u8(MessageType::HasCrc as u8);
+    encode_u32_to_buf(&mut buf, msg_len as u32);
+    buf.put_slice(&msg);
+    buf.put_u32(crc);
+    return_bail!(self, buf, addr)
   }
 }
 

@@ -31,10 +31,10 @@ macro_rules! bad_bail {
       }
 
       #[inline]
-      pub(crate) fn encode_to(&self, buf: &mut BytesMut) {
-        encode_u32_to_buf(buf, self.encoded_len() as u32);
+      pub(crate) fn encode_to(&self, mut buf: &mut BytesMut) {
+        encode_u32_to_buf(&mut buf, self.encoded_len() as u32);
         buf.put_u8(1); // incarnation tag
-        encode_u32_to_buf(buf, self.incarnation);
+        encode_u32_to_buf(&mut buf, self.incarnation);
         buf.put_u8(2); // node tag
         self.node.encode_to(buf);
         buf.put_u8(3); // from tag

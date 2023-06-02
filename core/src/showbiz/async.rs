@@ -339,17 +339,9 @@ where
   /// to target a user message at the given node (this does not use the gossip
   /// mechanism). The maximum size of the message depends on the configured
   /// `packet_buffer_size` for this memberlist instance.
-  pub async fn send_best_effort(&self, to: &Node, _msg: Message) -> Result<(), Error<T, D>> {
-    // Encode as a user message
-    // let _addr = Address::new(to.full_address().name().clone(), to.address());
-
-    // TODO: implement
-    Ok(())
-  }
-
-  pub async fn send_to_id(&self, _addr: &NodeId, _msg: Message) -> Result<(), Error<T, D>> {
-    // TODO: implement
-    Ok(())
+  #[inline]
+  pub async fn send(&self, to: NodeId, msg: Message) -> Result<(), Error<T, D>> {
+    self.raw_send_msg_packet(to, msg.0).await
   }
 
   /// Uses the reliable stream-oriented interface of the transport to
@@ -450,15 +442,6 @@ where
     &self,
     mut host: NodeId,
   ) -> Result<Vec<(Name, SocketAddr)>, Error<T, D>> {
-    // let (host, node_name) = if let Some(pos) = raw.find('/') {
-    //   if pos == 0 {
-    //     return Err(Error::EmptyNodeName);
-    //   }
-    //   (raw.split_off(pos), Some(Name::from(raw)))
-    // } else {
-    //   (raw, None)
-    // };
-
     // This captures the supplied port, or the default one.
     if host.port().is_none() {
       host = host.set_port(Some(self.inner.opts.bind_addr.port()));

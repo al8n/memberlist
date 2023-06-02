@@ -1,5 +1,3 @@
-use std::io::{self, Error, ErrorKind};
-
 use super::DecodeError;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
@@ -57,7 +55,7 @@ impl Name {
       return Err(InvalidName::TooLarge(s.len()));
     }
     match core::str::from_utf8(s) {
-      Ok(s) => Ok(Self(s.into())),
+      Ok(s) => Ok(Self(Bytes::copy_from_slice(s.as_bytes()))),
       Err(e) => Err(e.into()),
     }
   }
@@ -93,40 +91,13 @@ impl Name {
   }
 
   #[inline]
-  pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
+  pub(crate) fn decode_from(buf: Bytes) -> Result<Self, DecodeError> {
     if buf.remaining() == 0 {
       return Ok(Self::new());
     }
     match core::str::from_utf8(buf.as_ref()) {
       Ok(_) => Ok(Self(buf)),
       Err(e) => Err(DecodeError::InvalidName(InvalidName::Utf8(e))),
-    }
-  }
-
-  #[cfg(feature = "async")]
-  #[inline]
-  pub(crate) async fn decode_from_reader<R: futures_util::io::AsyncRead + Unpin>(
-    r: &mut R,
-  ) -> io::Result<Self> {
-    use futures_util::io::AsyncReadExt;
-
-    let mut len_buf = [0; 2];
-    r.read_exact(&mut len_buf).await?;
-    let len = u16::from_be_bytes(len_buf) as usize;
-    if len == 0 {
-      return Ok(Self::new());
-    }
-
-    if len <= 23 {
-      map_inlined!(match Self.len() {
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-        11, 12, 13, 14, 15, 16, 17, 18,
-        19, 20, 21, 22, 23
-      } => r)
-    } else {
-      let mut buf = vec![0; len];
-      r.read_exact(&mut buf).await?;
-      Self::from_bytes(buf.into()).map_err(|e| Error::new(ErrorKind::InvalidData, e))
     }
   }
 }
@@ -231,7 +202,7 @@ impl TryFrom<&str> for Name {
     if s.len() > Self::MAX_SIZE {
       return Err(InvalidName::TooLarge(s.len()));
     }
-    Ok(Self(s.into()))
+    Ok(Self(Bytes::copy_from_slice(s.as_bytes())))
   }
 }
 

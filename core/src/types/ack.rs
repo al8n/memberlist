@@ -1,32 +1,49 @@
+use crate::checksum::Checksumer;
+
 use super::*;
 
-pub(crate) struct AckResponseEncoder<T: BufMut> {
+pub(crate) struct AckResponseEncoder<T: BufMut, C: Checksumer> {
   buf: T,
+  cks: C,
 }
 
-impl<T: BufMut> AckResponseEncoder<T> {
+impl<T: BufMut, C: Checksumer> AckResponseEncoder<T, C> {
   #[inline]
   pub(crate) fn new(buf: T) -> Self {
-    Self { buf }
+    Self { buf, cks: C::new() }
   }
 
   #[inline]
-  pub(crate) fn encoded_len(payload: &[u8]) -> usize {
-    LENGTH_SIZE
-    + core::mem::size_of::<u32>() // seq_no
-    + core::mem::size_of::<u32>() // payload len
-    + payload.len()
+  pub(crate) fn encoded_len(seq_no: u32, payload: &[u8]) -> usize {
+    let length = if payload.is_empty() {
+      0
+    } else {
+      // payload len + payload + tag
+      encoded_u32_len(payload.len() as u32) + payload.len() + 1
+    } + encoded_u32_len(seq_no)
+      + 1; // seq_no + tag
+    length + encoded_u32_len(length as u32) + CHECKSUM_SIZE
   }
 
   #[inline]
   pub(crate) fn encode_seq_no(&mut self, seq_no: u32) {
-    self.buf.put_u32(seq_no);
+    self.buf.put_u8(1); // tag
+    self.cks.update(seq_no.to_be_bytes().as_ref());
+    encode_u32_to_buf(&mut self.buf, seq_no);
   }
 
   #[inline]
-  pub(crate) fn encode_payload(&mut self, payload: &[u8]) {
-    self.buf.put_u32(payload.len() as u32);
+  pub(crate) fn encode_payload(mut self, payload: &[u8]) -> T {
+    if payload.is_empty() {
+      self.buf.put_u32(self.cks.finalize());
+      return self.buf;
+    }
+    self.buf.put_u8(2); // tag
+    encode_u32_to_buf(&mut self.buf, payload.len() as u32);
+    self.cks.update(payload);
     self.buf.put_slice(payload);
+    self.buf.put_u32(self.cks.finalize());
+    self.buf
   }
 }
 
@@ -60,46 +77,54 @@ impl AckResponse {
       encoded_u32_len(self.payload.len() as u32) + self.payload.len() + 1
     } + encoded_u32_len(self.seq_no)
       + 1; // seq_no + tag
-    length + encoded_u32_len(length as u32)
+    length + encoded_u32_len(length as u32) + CHECKSUM_SIZE
   }
 
   #[inline]
-  pub fn encode(&self) -> Bytes {
+  pub fn encode<C: Checksumer>(&self) -> Bytes {
     let mut buf = BytesMut::with_capacity(self.encoded_len());
-    self.encode_to(&mut buf);
+    self.encode_to::<C>(&mut buf);
     buf.freeze()
   }
 
   #[inline]
-  pub fn encode_to(&self, buf: &mut BytesMut) {
-    encode_u32_to_buf(buf, self.encoded_len() as u32);
+  pub fn encode_to<C: Checksumer>(&self, mut buf: &mut BytesMut) {
+    let mut cks = C::new();
+    encode_u32_to_buf(&mut buf, self.encoded_len() as u32);
     buf.put_u8(1); // tag
-    encode_u32_to_buf(buf, self.seq_no);
+    cks.update(self.seq_no.to_be_bytes().as_ref());
+    encode_u32_to_buf(&mut buf, self.seq_no);
     if !self.payload.is_empty() {
-      buf.put_u8(1); // tag
-      encode_u32_to_buf(buf, self.payload.len() as u32);
+      buf.put_u8(2); // tag
+      encode_u32_to_buf(&mut buf, self.payload.len() as u32);
       buf.put_slice(&self.payload);
+      cks.update(&self.payload);
     }
+    buf.put_u32(cks.finalize());
   }
 
   #[inline]
-  pub fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
+  pub fn decode_from<C: Checksumer>(mut buf: Bytes) -> Result<Self, DecodeError> {
+    let mut hasher = C::new();
     let mut this = Self::default();
     let mut required = 0;
     while buf.has_remaining() {
       match buf.get_u8() {
         1 => {
-          this.seq_no = decode_u32_from_buf(buf)?.0;
+          this.seq_no = decode_u32_from_buf(&mut buf)?.0;
+          hasher.update(this.seq_no.to_be_bytes().as_ref());
           required += 1;
         }
         2 => {
-          let payload_len = decode_u32_from_buf(buf)?.0 as usize;
+          let payload_len = decode_u32_from_buf(&mut buf)?.0 as usize;
+          hasher.update(payload_len.to_be_bytes().as_ref());
           if buf.remaining() < payload_len {
             return Err(DecodeError::Truncated(
               MessageType::AckResponse.as_err_str(),
             ));
           }
           this.payload = buf.split_to(payload_len);
+          hasher.update(&this.payload);
           required += 1;
         }
         _ => {}
@@ -110,6 +135,16 @@ impl AckResponse {
       return Err(DecodeError::Truncated(
         MessageType::AckResponse.as_err_str(),
       ));
+    }
+
+    if buf.remaining() < CHECKSUM_SIZE {
+      return Err(DecodeError::Truncated(
+        MessageType::AckResponse.as_err_str(),
+      ));
+    }
+    let cks = buf.get_u32();
+    if cks != hasher.finalize() {
+      return Err(DecodeError::ChecksumMismatch);
     }
     Ok(this)
   }
@@ -125,4 +160,62 @@ pub(crate) struct NackResponse {
   seq_no: u32,
 }
 
-impl NackResponse {}
+impl NackResponse {
+  #[inline]
+  pub fn encoded_len(&self) -> usize {
+    let length = encoded_u32_len(self.seq_no) + 1; // seq_no + tag
+    length + encoded_u32_len(length as u32) + CHECKSUM_SIZE
+  }
+
+  #[inline]
+  pub fn encode<C: Checksumer>(&self) -> Bytes {
+    let mut buf = BytesMut::with_capacity(self.encoded_len());
+    self.encode_to::<C>(&mut buf);
+    buf.freeze()
+  }
+
+  #[inline]
+  pub fn encode_to<C: Checksumer>(&self, mut buf: &mut BytesMut) {
+    let mut cks = C::new();
+    encode_u32_to_buf(&mut buf, self.encoded_len() as u32);
+    buf.put_u8(1); // tag
+    cks.update(self.seq_no.to_be_bytes().as_ref());
+    encode_u32_to_buf(&mut buf, self.seq_no);
+    buf.put_u32(cks.finalize());
+  }
+
+  #[inline]
+  pub fn decode_from<C: Checksumer>(mut buf: Bytes) -> Result<Self, DecodeError> {
+    let mut hasher = C::new();
+    let mut seq_no = 0;
+    let mut required = 0;
+    while buf.has_remaining() {
+      #[allow(clippy::single_match)]
+      match buf.get_u8() {
+        1 => {
+          seq_no = decode_u32_from_buf(&mut buf)?.0;
+          hasher.update(seq_no.to_be_bytes().as_ref());
+          required += 1;
+        }
+        _ => {}
+      }
+    }
+
+    if required != 1 {
+      return Err(DecodeError::Truncated(
+        MessageType::NackResponse.as_err_str(),
+      ));
+    }
+
+    if buf.remaining() < CHECKSUM_SIZE {
+      return Err(DecodeError::Truncated(
+        MessageType::NackResponse.as_err_str(),
+      ));
+    }
+    let cks = buf.get_u32();
+    if cks != hasher.finalize() {
+      return Err(DecodeError::ChecksumMismatch);
+    }
+    Ok(Self { seq_no })
+  }
+}

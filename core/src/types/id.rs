@@ -1,13 +1,10 @@
-use std::{
-  io::{self, Error, ErrorKind},
-  net::{IpAddr, SocketAddr},
-};
+use std::net::{IpAddr, SocketAddr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use super::{
   decode_u32_from_buf, encode_u32_to_buf, encoded_u32_len, DecodeError, Domain, InvalidDomain,
-  Name, NodeAddress, LENGTH_SIZE,
+  Name, NodeAddress,
 };
 
 #[viewit::viewit(
@@ -80,7 +77,7 @@ impl NodeId {
   }
 
   #[inline]
-  pub const fn encoded_len(&self) -> usize {
+  pub fn encoded_len(&self) -> usize {
     let basic_len = if self.name.is_empty() {
       0
     } else {
@@ -97,8 +94,8 @@ impl NodeId {
   }
 
   #[inline]
-  pub(crate) fn encode_to(&self, buf: &mut BytesMut) {
-    encode_u32_to_buf(buf, self.encoded_len() as u32);
+  pub(crate) fn encode_to(&self, mut buf: &mut BytesMut) {
+    encode_u32_to_buf(&mut buf, self.encoded_len() as u32);
     if !self.name.is_empty() {
       // put tag
       buf.put_u8(1);
@@ -115,7 +112,7 @@ impl NodeId {
   }
 
   #[inline]
-  pub(crate) fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
+  pub(crate) fn decode_len(buf: impl Buf) -> Result<usize, DecodeError> {
     decode_u32_from_buf(buf)
       .map(|(len, _)| len as usize)
       .map_err(From::from)
@@ -151,38 +148,6 @@ impl NodeId {
       }
     }
     Ok(this)
-  }
-
-  #[cfg(feature = "async")]
-  #[inline]
-  pub(crate) async fn decode_from_reader<R: futures_util::io::AsyncRead + Unpin>(
-    r: &mut R,
-  ) -> io::Result<Self> {
-    use futures_util::io::AsyncReadExt;
-
-    let mut buf = [0u8; LENGTH_SIZE];
-    r.read_exact(&mut buf).await?;
-    let size = u32::from_be_bytes(buf) as usize;
-    let name = Name::decode_from_reader(r).await?;
-    let addr = NodeAddress::decode_from_reader(r).await?;
-    let mut mark = [0; 1];
-    r.read_exact(&mut mark).await?;
-    let port = match mark[0] {
-      0 => None,
-      1 => {
-        let mut buf = [0; 2];
-        r.read_exact(&mut buf).await?;
-        Some(u16::from_be_bytes(buf))
-      }
-      b => {
-        return Err(Error::new(
-          ErrorKind::InvalidData,
-          format!("unknown mark bit: {}", b),
-        ))
-      }
-    };
-
-    Ok(Self { name, addr, port })
   }
 }
 

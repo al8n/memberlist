@@ -3,6 +3,7 @@
 
 mod awareness;
 mod broadcast;
+pub mod checksum;
 pub mod delegate;
 pub mod error;
 mod keyring;

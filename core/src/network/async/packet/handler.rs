@@ -24,31 +24,24 @@ where
           _ = shutdown_rx.recv().fuse() => {
             return;
           }
-          _ = handoff_rx.recv().fuse() => {
-            loop {
-              if let Some(msg) = this.get_next_message().await {
-                match msg.msg_ty {
-                  MessageType::Suspect => {
-                    this.handle_suspect(msg).await;
-                  }
-                  MessageType::Alive => {
-                    this.handle_alive(msg).await;
-                  }
-                  MessageType::Dead => {
-                    this.handle_dead(msg).await;
-                  }
-                  MessageType::User => {
-                    this.handle_user(msg).await;
-                  }
-                  _ => {
-                    tracing::error!(target = "showbiz", "message type ({}) not supported {} (packet handler)", msg.msg_ty, msg.from);
-                  }
-                }
-              } else {
-                break;
+          _ = handoff_rx.recv().fuse() => while let Some(msg) = this.get_next_message().await {
+            match msg.msg_ty {
+              MessageType::Suspect => {
+                this.handle_suspect(msg).await;
+              }
+              MessageType::Alive => {
+                this.handle_alive(msg).await;
+              }
+              MessageType::Dead => {
+                this.handle_dead(msg).await;
+              }
+              MessageType::User => {
+                this.handle_user(msg).await;
+              }
+              _ => {
+                tracing::error!(target = "showbiz", "message type ({}) not supported {} (packet handler)", msg.msg_ty, msg.from);
               }
             }
-
           }
         }
       }

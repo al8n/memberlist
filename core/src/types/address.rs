@@ -75,7 +75,7 @@ impl Domain {
   }
 
   #[inline]
-  pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
+  pub(crate) fn decode_from(buf: Bytes) -> Result<Self, DecodeError> {
     if buf.is_empty() {
       return Err(DecodeError::Truncated("domain"));
     }
@@ -209,7 +209,7 @@ impl TryFrom<&str> for Domain {
   type Error = InvalidDomain;
 
   fn try_from(s: &str) -> Result<Self, Self::Error> {
-    is_valid_domain_name(s).map(|_| Self(s.into()))
+    is_valid_domain_name(s).map(|_| Self(Bytes::copy_from_slice(s.as_bytes())))
   }
 }
 
@@ -311,7 +311,7 @@ impl NodeAddress {
   }
 
   #[inline]
-  pub const fn unwrap_domain(&self) -> &str {
+  pub fn unwrap_domain(&self) -> &str {
     match self {
       Self::Ip(_) => unreachable!(),
       Self::Domain(addr) => addr.as_str(),

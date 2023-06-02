@@ -28,7 +28,7 @@ impl Spawn for AsyncSpawn {
   where
     F: Future<Output = Result<(), trust_dns_proto::error::ProtoError>> + Send + 'static,
   {
-    let _join = (self.spawner)(Box::pin(async move {
+    (self.spawner)(Box::pin(async move {
       if let Err(e) = future.await {
         tracing::error!(target = "showbiz", err = %e, "dns error");
       }

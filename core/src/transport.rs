@@ -10,6 +10,8 @@ pub use r#async::*;
 
 #[cfg(feature = "async")]
 mod r#async {
+  use crate::checksum::Checksumer;
+
   use super::*;
   use async_channel::Receiver;
 
@@ -55,6 +57,7 @@ mod r#async {
   #[async_trait::async_trait]
   pub trait Transport: Unpin + Send + Sync + 'static {
     type Error: std::error::Error + From<std::io::Error> + Send + Sync + 'static;
+    type Checksumer: Checksumer + Send + Sync + 'static;
     type Connection: Connection + trust_dns_proto::tcp::DnsTcpStream + trust_dns_proto::tcp::Connect;
     type UnreliableConnection: Connection + trust_dns_proto::udp::UdpSocket;
     type Options;

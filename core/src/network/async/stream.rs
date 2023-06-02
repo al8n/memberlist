@@ -171,14 +171,13 @@ where
         let ack = AckResponse::empty(ping.seq_no);
         let mut out = BytesMut::with_capacity(MessageType::SIZE + ack.encoded_len());
         out.put_u8(MessageType::AckResponse as u8);
-        ack.encode_to(&mut out);
+        ack.encode_to::<T::Checksumer>(&mut out);
 
         if let Err(e) = self
           .raw_send_msg_stream(lr, out.freeze(), &addr, encryption_enabled)
           .await
         {
           tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to send ack response");
-          return;
         }
       }
       MessageType::User => self.read_user_msg(lr, data, &addr).await,
@@ -213,7 +212,6 @@ where
 
         if let Err(e) = self.merge_remote_state(node_state).await {
           tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to push/pull merge");
-          return;
         }
       }
       mt => {
@@ -226,28 +224,37 @@ where
   async fn read_remote_state(
     &self,
     lr: &mut LabeledConnection<T::Connection>,
-    mut data: Option<Bytes>,
+    data: Option<Bytes>,
     addr: &NodeId,
   ) -> Result<RemoteNodeState, InnerError> {
     // Read the push/pull header
-    let header = match &mut data {
-      Some(data) => {
-        let _size = data.get_u32() as usize;
-        match PushPullHeader::decode(data) {
+    let (header, mut data) = match data {
+      Some(mut data) => {
+        // consume total msg len
+        let _ = decode_u32_from_buf(&mut data).map_err(DecodeError::from)?;
+        let len = match PushPullHeader::decode_len(&mut data) {
+          Ok(len) => len,
+          Err(e) => return Err(InnerError::Decode(e)),
+        };
+        let h = match PushPullHeader::decode_from(data.split_to(len as usize)) {
           Ok(header) => header,
           Err(e) => return Err(InnerError::Decode(e)),
-        }
+        };
+
+        (h, data)
       }
       None => {
-        let mut size_buf = [0u8; 4];
-        lr.read_exact(&mut size_buf).await?;
-        let size = u32::from_be_bytes(size_buf) as usize;
-        let mut buf = vec![0; size];
+        let (total_len, _) = decode_u32_from_reader(lr).await?;
+        let mut buf = vec![0; total_len as usize];
         lr.read_exact(&mut buf).await?;
-        match PushPullHeader::decode(buf.as_slice()) {
+        let mut buf: Bytes = buf.into();
+        let len = PushPullHeader::decode_len(&mut buf)? as usize;
+
+        let h = match PushPullHeader::decode_from(buf.split_to(len)) {
           Ok(header) => header,
           Err(e) => return Err(InnerError::Decode(e)),
-        }
+        };
+        (h, buf)
       }
     };
 
@@ -256,67 +263,26 @@ where
 
     // Try to decode all the states
     for _ in 0..header.nodes {
-      // read push node state size
-      let size = match &mut data {
-        Some(data) => data.get_u32() as usize,
-        None => {
-          let mut size_buf = [0u8; 4];
-          lr.read_exact(&mut size_buf).await?;
-          u32::from_be_bytes(size_buf) as usize
-        }
-      };
-      let state = match &mut data {
-        Some(data) => {
-          if size > data.remaining() {
-            return Err(InnerError::FailReadRemoteState(data.remaining(), size));
-          }
-          let mut buf = data.split_to(size);
-          match PushNodeState::decode(&mut buf) {
-            Ok(state) => state,
-            Err(e) => return Err(InnerError::Decode(e)),
-          }
-        }
-        None => {
-          let mut buf = vec![0; size];
-          if let Err(e) = lr.read_exact(&mut buf).await {
-            if e.kind() == std::io::ErrorKind::UnexpectedEof {
-              tracing::error!(target = "showbiz", remote_node = %addr, "failed to read full push node state");
-            }
-            return Err(InnerError::IO(e));
-          }
-          match PushNodeState::decode(buf.as_slice()) {
-            Ok(state) => state,
-            Err(e) => return Err(InnerError::Decode(e)),
-          }
-        }
-      };
+      let len = PushNodeState::decode_len(&mut data)?;
+      if len > data.remaining() {
+        return Err(InnerError::FailReadRemoteState(data.remaining(), len));
+      }
 
-      remote_nodes.push(state);
+      match PushNodeState::decode_from(data.split_to(len)) {
+        Ok(state) => remote_nodes.push(state),
+        Err(e) => return Err(InnerError::Decode(e)),
+      }
     }
 
     // Read the remote user state into a buffer
     if header.user_state_len > 0 {
-      let user_state = match &mut data {
-        Some(data) => {
-          if header.user_state_len as usize > data.remaining() {
-            return Err(InnerError::FailReadUserState(
-              data.remaining(),
-              header.user_state_len as usize,
-            ));
-          }
-          data.split_to(header.user_state_len as usize)
-        }
-        None => {
-          let mut user_state = vec![0; header.user_state_len as usize];
-          if let Err(e) = lr.read_exact(&mut user_state).await {
-            if e.kind() == std::io::ErrorKind::UnexpectedEof {
-              tracing::error!(target = "showbiz", remote_node = ?addr, "failed to read full user state");
-            }
-            return Err(InnerError::IO(e));
-          }
-          user_state.into()
-        }
-      };
+      if header.user_state_len as usize > data.remaining() {
+        return Err(InnerError::FailReadUserState(
+          data.remaining(),
+          header.user_state_len as usize,
+        ));
+      }
+      let user_state = data.split_to(header.user_state_len as usize);
       return Ok(RemoteNodeState {
         join: header.join,
         push_states: remote_nodes,
@@ -361,9 +327,7 @@ where
             state: n.state,
             vsn: n.node.vsn(),
           };
-
-          // we use length-prefix encoding, so we need to add the size of the length of encoded data
-          states_encoded_size += this.encoded_len() + core::mem::size_of::<u32>();
+          states_encoded_size += this.encoded_len();
           this
         })
         .collect::<Vec<_>>()
@@ -384,21 +348,28 @@ where
       user_state_len: user_data.len() as u32,
       join,
     };
-    let header_size = header.encoded_len() + core::mem::size_of::<u32>();
+    let header_size = header.encoded_len();
 
-    let mut buf = BytesMut::with_capacity(header_size + states_encoded_size + user_data.len());
-
+    let basic_len = header_size
+      + states_encoded_size
+      + if user_data.is_empty() {
+        0
+      } else {
+        user_data.len()
+      };
+    let total_len = basic_len + encoded_u32_len(basic_len as u32);
+    let mut buf = BytesMut::with_capacity(total_len);
     // begin state push
-    buf.put_u32(header_size as u32);
-    header.encode(&mut buf)?;
+    header.encode_to(&mut buf);
 
     for n in local_nodes {
-      buf.put_u32(n.encoded_len() as u32);
-      n.encode(&mut buf)?;
+      n.encode_to(&mut buf);
     }
 
     // Write the user state as well
-    buf.put_slice(&user_data);
+    if !user_data.is_empty() {
+      buf.put_slice(&user_data);
+    }
 
     // TODO: metrics
 
@@ -549,7 +520,7 @@ where
         Ok(crypt) => lr.conn.write_all(&crypt).await.map_err(From::from),
         Err(e) => {
           tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to encrypt local state");
-          return Err(e);
+          Err(e)
         }
       }
     } else {
@@ -632,14 +603,10 @@ where
 
     if mt == MessageType::Compress {
       let compressed = if let Some(mut unencrypted) = unencrypted {
-        unencrypted.advance(core::mem::size_of::<u32>());
-        unencrypted
+        let size = Compress::decode_len(&mut unencrypted)?;
+        unencrypted.split_to(size as usize)
       } else {
-        let mut compressed_size = [0u8; core::mem::size_of::<u32>()];
-        if let Err(e) = lr.read_exact(&mut compressed_size).await {
-          return Err(e.into());
-        }
-        let compressed_size = u32::from_be_bytes(compressed_size) as usize;
+        let compressed_size = decode_u32_from_reader(lr).await?.0 as usize;
         let mut buf = vec![0; compressed_size];
         if let Err(e) = lr.read_exact(&mut buf).await {
           return Err(e.into());
@@ -647,7 +614,7 @@ where
         buf.into()
       };
 
-      let compress = match Compress::decode(compressed) {
+      let compress = match Compress::decode_from::<T::Checksumer>(compressed) {
         Ok(compress) => compress,
         Err(e) => {
           return Err(e.into());
@@ -664,8 +631,14 @@ where
         }
       };
 
+      if !uncompressed_data.has_remaining() {
+        return Err(InnerError::Decode(DecodeError::Truncated(
+          MessageType::Compress.as_err_str(),
+        )));
+      }
+
       // Reset the message type
-      mt = match MessageType::try_from(uncompressed_data[0]) {
+      mt = match MessageType::try_from(uncompressed_data.get_u8()) {
         Ok(mt) => mt,
         Err(e) => {
           return Err(InnerError::from(e));
@@ -673,7 +646,6 @@ where
       };
 
       // Create a new bufConn
-      uncompressed_data.advance(1);
       return Ok((Some(uncompressed_data), mt));
     }
 

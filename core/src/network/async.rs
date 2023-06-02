@@ -32,7 +32,7 @@ enum InnerError {
   #[error("{0}")]
   Encode(#[from] prost::EncodeError),
   #[error("{0}")]
-  Decode(#[from] prost::DecodeError),
+  Decode(#[from] DecodeError),
   #[error("{0}")]
   Compress(#[from] CompressionError),
   #[error("{0}")]

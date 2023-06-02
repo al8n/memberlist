@@ -72,6 +72,7 @@ const VSN_EMPTY: [u8; VSN_SIZE] = [255; VSN_SIZE];
 const MAX_DNS_DOMAIN_SIZE: usize = 253;
 
 const LENGTH_SIZE: usize = core::mem::size_of::<u32>();
+const CHECKSUM_SIZE: usize = core::mem::size_of::<u32>();
 
 macro_rules! map_inlined {
   (match $ident: ident.$len: ident() {
@@ -176,6 +177,9 @@ pub(crate) async fn decode_u32_from_reader<R: futures_util::io::AsyncRead + Unpi
   Err(Error::new(ErrorKind::InvalidData, "invalid u32"))
 }
 
+mod compress;
+pub use compress::*;
+
 mod name;
 pub use name::*;
 
@@ -223,6 +227,10 @@ pub enum DecodeError {
   InvalidErrorResponse(std::string::FromUtf8Error),
   #[error("invalid size {0}")]
   InvalidMessageSize(#[from] DecodeU32Error),
+  #[error("invalid node state {0}")]
+  InvalidNodeState(#[from] InvalidNodeState),
+  #[error("invalid compress algo {0}")]
+  InvalidCompressionAlgo(#[from] InvalidCompressionAlgo),
   #[error("{0}")]
   Other(String),
 }
@@ -231,53 +239,6 @@ impl DecodeError {
   pub(crate) fn other(s: impl core::fmt::Display) -> Self {
     Self::Other(format!("{s}"))
   }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InvalidCompressionAlgo(u8);
-
-impl core::fmt::Display for InvalidCompressionAlgo {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "invalid compression algo {}", self)
-  }
-}
-
-impl std::error::Error for InvalidCompressionAlgo {}
-
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[repr(u8)]
-#[non_exhaustive]
-pub enum CompressionAlgo {
-  #[default]
-  LZW = 0,
-  None = 1,
-}
-
-impl CompressionAlgo {
-  pub(crate) const SIZE: usize = core::mem::size_of::<Self>();
-
-  pub fn is_none(&self) -> bool {
-    matches!(self, Self::None)
-  }
-}
-
-impl TryFrom<u8> for CompressionAlgo {
-  type Error = InvalidCompressionAlgo;
-
-  fn try_from(value: u8) -> Result<Self, Self::Error> {
-    match value {
-      0 => Ok(Self::LZW),
-      1 => Ok(Self::None),
-      _ => Err(InvalidCompressionAlgo(value)),
-    }
-  }
-}
-
-#[viewit::viewit]
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct Compress {
-  algo: CompressionAlgo,
-  buf: Bytes,
 }
 
 #[viewit::viewit]
