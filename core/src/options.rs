@@ -1,6 +1,6 @@
 use std::{
   collections::HashSet,
-  net::{Ipv4Addr, SocketAddr, SocketAddrV4, IpAddr},
+  net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
   path::PathBuf,
   time::Duration,
 };
@@ -347,11 +347,14 @@ impl Options {
       .with_gossip_to_the_dead_time(Duration::from_secs(15))
   }
 
-
   /// Return true if `allowed_cidrs` must be called
   #[inline]
   pub fn ip_must_be_checked(&self) -> bool {
-    self.allowed_cidrs.as_ref().map(|x| !x.is_empty()).unwrap_or(false)
+    self
+      .allowed_cidrs
+      .as_ref()
+      .map(|x| !x.is_empty())
+      .unwrap_or(false)
   }
 
   #[inline]
@@ -370,7 +373,6 @@ impl Options {
     Err(ForbiddenIp(addr))
   }
 }
-
 
 #[derive(Debug, Clone, Copy)]
 pub struct ForbiddenIp(IpAddr);

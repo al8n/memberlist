@@ -70,11 +70,11 @@ impl<R: AsyncBufRead> AsyncBufRead for LabeledConnection<R> {
   }
 }
 
-impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
+impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
   pub async fn add_label_header_to_stream<W: futures_io::AsyncWrite + std::marker::Unpin>(
     w: &mut W,
     label: &[u8],
-  ) -> Result<(), Error<T, D>> {
+  ) -> Result<(), Error<D, T>> {
     if label.is_empty() {
       return Ok(());
     }
@@ -92,7 +92,7 @@ impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
   /// the stream if present and returns it.
   pub async fn remove_label_header_from_stream<R: futures_io::AsyncRead + std::marker::Unpin>(
     reader: R,
-  ) -> Result<LabeledConnection<R>, Error<T, D>> {
+  ) -> Result<LabeledConnection<R>, Error<D, T>> {
     let mut r = BufReader::with_capacity(DEFAULT_BUFFER_SIZE, reader);
     let buf = match r.fill_buf().await {
       Ok(buf) => {

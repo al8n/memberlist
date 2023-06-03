@@ -227,10 +227,16 @@ pub enum DecodeError {
   InvalidErrorResponse(std::string::FromUtf8Error),
   #[error("invalid size {0}")]
   InvalidMessageSize(#[from] DecodeU32Error),
-  #[error("invalid node state {0}")]
+  #[error("{0}")]
   InvalidNodeState(#[from] InvalidNodeState),
-  #[error("invalid compress algo {0}")]
+  #[error("{0}")]
+  InvalidMessageType(#[from] InvalidMessageType),
+  #[error("{0}")]
   InvalidCompressionAlgo(#[from] InvalidCompressionAlgo),
+  #[error("failed to read full push node state ({0} / {1})")]
+  FailReadRemoteState(usize, usize),
+  #[error("failed to read full user state ({0} / {1})")]
+  FailReadUserState(usize, usize),
   #[error("{0}")]
   Other(String),
 }

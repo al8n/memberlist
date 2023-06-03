@@ -1,21 +1,28 @@
 use super::*;
 
 #[viewit::viewit]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub(crate) struct ErrorResponse {
   err: String,
 }
 
-impl<E: std::error::Error> From<E> for ErrorResponse {
-  fn from(err: E) -> Self {
+impl core::fmt::Display for ErrorResponse {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(f, "{}", self.err)
+  }
+}
+
+impl std::error::Error for ErrorResponse {}
+
+impl ErrorResponse {
+  #[inline]
+  pub fn new(err: impl std::error::Error) -> Self {
     Self {
       err: err.to_string(),
     }
   }
-}
 
-impl ErrorResponse {
   #[inline]
   pub fn encoded_len(&self) -> usize {
     let basic_len = if self.err.is_empty() {
@@ -43,6 +50,13 @@ impl ErrorResponse {
     buf.put_u8(1); // tag
     encode_u32_to_buf(&mut buf, self.err.len() as u32);
     buf.put_slice(self.err.as_bytes());
+  }
+
+  #[inline]
+  pub fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
+    decode_u32_from_buf(buf)
+      .map(|(x, _)| x as usize)
+      .map_err(From::from)
   }
 
   #[inline]

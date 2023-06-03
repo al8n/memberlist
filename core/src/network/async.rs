@@ -5,58 +5,124 @@ use crate::{
   error::Error,
   label::LabeledConnection,
   security::{append_bytes, encrypted_length, EncryptionAlgo, SecurityError},
+  showbiz::Spawner,
   transport::Connection,
   types::{InvalidMessageType, MessageType},
   util::{compress_payload, decompress_buffer, CompressionError},
-  Options, SecretKeyring, showbiz::Spawner,
+  Options, SecretKeyring,
 };
 
 use super::*;
 use bytes::{Buf, BufMut, BytesMut};
 use futures_util::{
   future::{BoxFuture, FutureExt},
-  io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+  io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
 };
 
 mod packet;
 mod stream;
 
 #[derive(Debug, thiserror::Error)]
-enum InnerError {
+pub enum NetworkError<T: Transport> {
   #[error("{0}")]
-  Other(&'static str),
-  #[error("{0}")]
-  InvalidMessageType(#[from] InvalidMessageType),
+  Transport(T::Error),
   #[error("{0}")]
   IO(#[from] std::io::Error),
   #[error("{0}")]
-  Encode(#[from] prost::EncodeError),
+  Remote(String),
   #[error("{0}")]
   Decode(#[from] DecodeError),
-  #[error("{0}")]
-  Compress(#[from] CompressionError),
-  #[error("{0}")]
-  Security(#[from] SecurityError),
-  #[error("failed to read full push node state ({0} / {1})")]
-  FailReadRemoteState(usize, usize),
-  #[error("failed to read full user state ({0} / {1})")]
-  FailReadUserState(usize, usize),
-
-  #[error("{0}")]
-  Any(Box<dyn std::error::Error + Send + Sync + 'static>),
+  #[error("fail to decode remote state")]
+  Decrypt,
+  #[error("expected {expected} message but got {got}")]
+  WrongMessageType {
+    expected: MessageType,
+    got: MessageType,
+  },
 }
 
-impl InnerError {
-  fn any<E: std::error::Error + Send + Sync + 'static>(e: E) -> Self {
-    Self::Any(Box::new(e))
-  }
-}
-
-impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
+impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
   /// Used to initiate a push/pull over a stream with a
   /// remote host.
-  pub(crate) async fn send_and_receive_state(&self, id: &NodeId, join: bool) -> Result<(Vec<PushNodeState>, Bytes), Error<T, D>> {
-    todo!()
+  pub(crate) async fn send_and_receive_state(
+    &self,
+    id: &NodeId,
+    join: bool,
+  ) -> Result<RemoteNodeState, Error<D, T>> {
+    if id.name.is_empty() && self.inner.opts.require_node_names {
+      return Err(Error::MissingNodeName);
+    }
+
+    // Attempt to connect
+    let conn = self
+      .inner
+      .transport
+      .dial_address_timeout(id, self.inner.opts.tcp_timeout)
+      .await
+      .map_err(Error::transport)?;
+    tracing::debug!(target = "showbiz", "initiating push/pull sync with: {}", id);
+
+    // TODO: update metrics
+
+    // Send our state
+    let mut lr = LabeledConnection::new(BufReader::new(conn));
+    lr.set_label(self.inner.opts.label.clone());
+
+    let encryption_enabled = self.encryption_enabled().await;
+    self
+      .send_local_state(&mut lr, id, encryption_enabled, join)
+      .await?;
+
+    lr.conn
+      .get_mut()
+      .set_timeout(if self.inner.opts.tcp_timeout == Duration::ZERO {
+        None
+      } else {
+        Some(self.inner.opts.tcp_timeout)
+      });
+
+    let (data, mt) = Self::read_stream(
+      &mut lr,
+      encryption_enabled,
+      self.inner.keyring.as_ref(),
+      &self.inner.opts,
+    )
+    .await?;
+
+    if mt == MessageType::ErrorResponse {
+      let err = match data {
+        Some(mut d) => match ErrorResponse::decode_len(&mut d) {
+          Ok(len) => ErrorResponse::decode_from(d.split_to(len)).map_err(NetworkError::Decode)?,
+          Err(e) => return Err(NetworkError::Decode(e).into()),
+        },
+        None => {
+          let len = decode_u32_from_reader(&mut lr)
+            .await
+            .map(|(x, _)| x as usize)?;
+          let mut buf = vec![0; len];
+          lr.read_exact(&mut buf).await?;
+          ErrorResponse::decode_from(buf.into()).map_err(NetworkError::Decode)?
+        }
+      };
+      return Err(NetworkError::Remote(err.err).into());
+    }
+
+    // Quit if not push/pull
+    if mt != MessageType::PushPull {
+      return Err(
+        NetworkError::WrongMessageType {
+          expected: MessageType::PushPull,
+          got: mt,
+        }
+        .into(),
+      );
+    }
+
+    // Read remote state
+    self
+      .read_remote_state(&mut lr, data, id)
+      .await
+      .map_err(From::from)
   }
 
   async fn encrypt_local_state(
@@ -64,7 +130,7 @@ impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
     msg: &[u8],
     label: &[u8],
     algo: EncryptionAlgo,
-  ) -> Result<Bytes, Error<T, D>> {
+  ) -> Result<Bytes, Error<D, T>> {
     let enc_len = encrypted_length(algo, msg.len());
     let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
     let mut buf = BytesMut::with_capacity(meta_size + enc_len);
@@ -107,7 +173,7 @@ impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
   async fn decrypt_remote_state<R: AsyncRead + std::marker::Unpin>(
     r: &mut LabeledConnection<R>,
     keyring: &SecretKeyring,
-  ) -> Result<Bytes, Error<T, D>> {
+  ) -> Result<Bytes, Error<D, T>> {
     let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
     let mut buf = BytesMut::with_capacity(meta_size);
     buf.put_u8(MessageType::Encrypt as u8);

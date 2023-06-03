@@ -1,46 +1,38 @@
 use std::{net::SocketAddr, time::Duration};
 
 use crate::{
-  showbiz::{Memberlist, AckHandler, Member, Spawner},
-  types::{Alive, Dead, Name, Suspect, Message, MessageType}, timer::Timer, suspicion::Suspicion, network::RemoteNodeState,
+  network::RemoteNodeState,
+  showbiz::{AckHandler, Member, Memberlist, Spawner},
+  suspicion::Suspicion,
+  timer::Timer,
+  types::{Alive, Dead, Message, MessageType, Name, Suspect},
 };
 
 use super::*;
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures_channel::oneshot::Sender;
 use futures_util::{future::BoxFuture, FutureExt};
 
-impl<T, S, D> Showbiz<T, S, D>
+impl<D, T, S> Showbiz<D, T, S>
 where
   T: Transport,
-  S: Spawner,
   D: Delegate,
+  S: Spawner,
 {
   /// Does a complete state exchange with a specific node.
-  pub(crate) async fn push_pull_node(
-    &self,
-    addr: &NodeId,
-    join: bool,
-  ) -> Result<(), Error<T, D>>
-  {
+  pub(crate) async fn push_pull_node(&self, addr: &NodeId, join: bool) -> Result<(), Error<D, T>> {
     // TODO: metrics
 
-
-
-    let (remote, user_state) = self.send_and_receive_state(addr, join).await?;
-
-    self.merge_remote_state(RemoteNodeState {
-      join,
-      push_states: remote,
-      user_state,
-    }).await
+    self
+      .merge_remote_state(self.send_and_receive_state(addr, join).await?)
+      .await
   }
 
   pub(crate) async fn dead_node(
     &self,
     memberlist: &mut Memberlist,
     d: Dead,
-  ) -> Result<(), Error<T, D>> {
+  ) -> Result<(), Error<D, T>> {
     let state = if d.dead_self() {
       &mut memberlist.local
     } else {
@@ -80,11 +72,7 @@ where
       // If we are leaving, we broadcast and wait
       let msg = d.encode_to_msg();
       self
-        .broadcast_notify(
-          d.node.clone(),
-          msg,
-          self.inner.leave_broadcast_tx.clone(),
-        )
+        .broadcast_notify(d.node.clone(), msg, self.inner.leave_broadcast_tx.clone())
         .await;
     } else {
       let msg = d.encode_to_msg();
@@ -116,8 +104,7 @@ where
     Ok(())
   }
 
-  pub(crate) async fn suspect_node(&self, s: Suspect) -> Result<(), Error<T, D>>
-  {
+  pub(crate) async fn suspect_node(&self, s: Suspect) -> Result<(), Error<D, T>> {
     let mut mu = self.inner.nodes.write().await;
 
     let Some(state) = mu.node_map.get_mut(&s.node) else {
@@ -178,15 +165,19 @@ where
     let mut k = self.inner.opts.suspicion_mult.saturating_sub(2);
 
     // If there aren't enough nodes to give the expected confirmations, just
-	  // set k to 0 to say that we don't expect any. Note we subtract 2 from n
-	  // here to take out ourselves and the node being probed.
+    // set k to 0 to say that we don't expect any. Note we subtract 2 from n
+    // here to take out ourselves and the node being probed.
     let n = self.estimate_num_nodes() as usize;
-    if n-2 < k {
+    if n - 2 < k {
       k = 0;
     }
 
     // Compute the timeouts based on the size of the cluster.
-    let min = suspicion_timeout(self.inner.opts.suspicion_mult, n, self.inner.opts.probe_interval);
+    let min = suspicion_timeout(
+      self.inner.opts.suspicion_mult,
+      n,
+      self.inner.opts.probe_interval,
+    );
     let max = (self.inner.opts.suspicion_max_timeout_mult as u64) * min;
 
     let this = self.clone();
@@ -201,18 +192,25 @@ where
         let n = s.node.clone();
         async move {
           let timeout = {
-            t.inner.nodes.read().await.node_map.get(&n).and_then(|state| {
-              let timeout = state.state.state == NodeState::Suspect && state.state.state_change == change_time;
-              if timeout {
-                Some(Dead {
-                  node: state.state.node.id.clone(),
-                  from: t.inner.id.clone(),
-                  incarnation: s.incarnation,
-                })
-              } else {
-                None
-              }
-            })
+            t.inner
+              .nodes
+              .read()
+              .await
+              .node_map
+              .get(&n)
+              .and_then(|state| {
+                let timeout = state.state.state == NodeState::Suspect
+                  && state.state.state_change == change_time;
+                if timeout {
+                  Some(Dead {
+                    node: state.state.node.id.clone(),
+                    from: t.inner.id.clone(),
+                    incarnation: s.incarnation,
+                  })
+                } else {
+                  None
+                }
+              })
           };
 
           if let Some(dead) = timeout {
@@ -220,16 +218,22 @@ where
               // TODO: metrics
             }
 
-            tracing::info!(target = "showbiz", "marking {} as failed, suspect timeout reached ({} peer confirmations)", dead.node, num_confirmations);
+            tracing::info!(
+              target = "showbiz",
+              "marking {} as failed, suspect timeout reached ({} peer confirmations)",
+              dead.node,
+              num_confirmations
+            );
             let mut memberlist = t.inner.nodes.write().await;
             let err_info = format!("failed to mark {} as failed", dead.node);
             if let Err(e) = t.dead_node(&mut memberlist, dead).await {
               tracing::error!(target = "showbiz", err=%e, err_info);
             }
           }
-        }.boxed()
+        }
+        .boxed()
       },
-      move |fut| spawner.spawn(fut)
+      move |fut| spawner.spawn(fut),
     ));
     Ok(())
   }
@@ -239,14 +243,11 @@ where
     alive: Alive,
     notify_tx: Option<Sender<()>>,
     bootstrap: bool,
-  ) -> Result<(), Error<T, D>> {
-
-
+  ) -> Result<(), Error<D, T>> {
     Ok(())
   }
 
-  pub(crate) async fn merge_state(&self, remote: Vec<PushNodeState>) -> Result<(), Error<T, D>>
-  {
+  pub(crate) async fn merge_state(&self, remote: Vec<PushNodeState>) -> Result<(), Error<D, T>> {
     for r in remote {
       match r.state {
         NodeState::Alive => {
@@ -257,7 +258,7 @@ where
             meta: r.meta,
           };
           self.alive_node(alive, None, false).await?;
-        },
+        }
         NodeState::Left => {
           let dead = Dead {
             incarnation: r.incarnation,
@@ -266,9 +267,9 @@ where
           };
           let mut memberlist = self.inner.nodes.write().await;
           self.dead_node(&mut memberlist, dead).await?;
-        },
+        }
         // If the remote node believes a node is dead, we prefer to
-			  // suspect that node instead of declaring it dead instantly
+        // suspect that node instead of declaring it dead instantly
         NodeState::Dead | NodeState::Suspect => {
           let s = Suspect {
             incarnation: r.incarnation,
@@ -276,7 +277,7 @@ where
             from: self.inner.id.clone(),
           };
           self.suspect_node(s).await?;
-        },
+        }
       }
     }
     Ok(())
@@ -289,13 +290,20 @@ where
     // Add the handler
     let tlock = self.inner.ack_handlers.clone();
     let mut mu = self.inner.ack_handlers.lock().await;
-    mu.insert(seq_no, AckHandler {
-      ack_fn: Box::new(f),
-      nack_fn: None,
-      timer: Timer::after(timeout, async move {
-        tlock.lock().await.remove(&seq_no);
-      }, |fut| self.inner.spawner.spawn(fut)),
-    });
+    mu.insert(
+      seq_no,
+      AckHandler {
+        ack_fn: Box::new(f),
+        nack_fn: None,
+        timer: Timer::after(
+          timeout,
+          async move {
+            tlock.lock().await.remove(&seq_no);
+          },
+          |fut| self.inner.spawner.spawn(fut),
+        ),
+      },
+    );
   }
 
   /// Gossips an alive message in response to incoming information that we
@@ -328,7 +336,6 @@ where
     self.broadcast(me.state.node.id.clone(), Message(buf)).await;
   }
 }
-
 
 #[inline]
 fn suspicion_timeout(suspicion_mult: usize, n: usize, interval: Duration) -> u64 {

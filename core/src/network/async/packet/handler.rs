@@ -4,7 +4,7 @@ use crate::showbiz::MessageHandoff;
 
 use super::*;
 
-impl<T, S, D> Showbiz<T, S, D>
+impl<D, T, S> Showbiz<D, T, S>
 where
   T: Transport,
   S: Spawner,
@@ -13,8 +13,7 @@ where
   /// a long running thread that processes messages received
   /// over the packet interface, but is decoupled from the listener to avoid
   /// blocking the listener which may cause ping/ack messages to be delayed.
-  pub(crate) fn packet_handler(&self)
-  {
+  pub(crate) fn packet_handler(&self) {
     let this = self.clone();
     let shutdown_rx = this.inner.shutdown_rx.clone();
     let handoff_rx = this.inner.handoff_rx.clone();
@@ -47,14 +46,13 @@ where
     queue.high.pop_back().or_else(|| queue.low.pop_back())
   }
 
-  async fn handle_suspect(&self, mut msg: MessageHandoff)
-  {
+  async fn handle_suspect(&self, mut msg: MessageHandoff) {
     let len = match Suspect::decode_len(&mut msg.buf) {
       Ok(len) => len,
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode suspect message");
         return;
-      },
+      }
     };
 
     let suspect = match Suspect::decode_from(msg.buf.split_to(len)) {
@@ -62,7 +60,7 @@ where
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode suspect message");
         return;
-      },
+      }
     };
 
     if let Err(e) = self.suspect_node(suspect).await {
@@ -81,7 +79,7 @@ where
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode alive message");
         return;
-      },
+      }
     };
 
     let mut alive = match Alive::decode_from(msg.buf.split_to(len)) {
@@ -89,7 +87,7 @@ where
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode alive message");
         return;
-      },
+      }
     };
 
     if self.inner.opts.ip_must_be_checked() {
@@ -100,25 +98,26 @@ where
             tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "blocked alive message");
             return;
           }
-        },
-        NodeAddress::Domain(d) => {
-          match d.as_str().parse() {
-            Ok(ip) => {
-              if let Err(e) = self.inner.opts.ip_allowed(ip) {
-                tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "blocked alive message");
-                return;
-              }
-            },
-            Err(_) => {
-              tracing::error!(target = "showbiz", err=%Error::<T, D>::ParseIpFailed(d.clone()), remote_addr = %msg.from, "blocked alive message");
+        }
+        NodeAddress::Domain(d) => match d.as_str().parse() {
+          Ok(ip) => {
+            if let Err(e) = self.inner.opts.ip_allowed(ip) {
+              tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "blocked alive message");
               return;
-            },
+            }
+          }
+          Err(_) => {
+            tracing::error!(target = "showbiz", err=%Error::<D, T>::ParseIpFailed(d.clone()), remote_addr = %msg.from, "blocked alive message");
+            return;
           }
         },
       }
     }
 
-    alive.node.port.get_or_insert(self.inner.opts.bind_addr.port());
+    alive
+      .node
+      .port
+      .get_or_insert(self.inner.opts.bind_addr.port());
 
     if let Err(e) = self.alive_node(alive, None, false).await {
       tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to alive node");
@@ -131,7 +130,7 @@ where
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode dead message");
         return;
-      },
+      }
     };
 
     let dead = match Dead::decode_from(msg.buf.split_to(len)) {
@@ -139,7 +138,7 @@ where
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode dead message");
         return;
-      },
+      }
     };
 
     let mut memberlist = self.inner.nodes.write().await;
@@ -156,7 +155,7 @@ where
     }
   }
 
-  fn ensure_can_connect(&self, from: IpAddr) -> Result<(), Error<T, D>> {
+  fn ensure_can_connect(&self, from: IpAddr) -> Result<(), Error<D, T>> {
     if !self.inner.opts.ip_must_be_checked() {
       return Ok(());
     }

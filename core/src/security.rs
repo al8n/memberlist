@@ -14,18 +14,20 @@ type Aes192Gcm = AesGcm<Aes192, U12>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecurityError {
-  #[error("showbiz security: unknown encryption version: {0}")]
+  #[error("security: unknown encryption version: {0}")]
   UnknownEncryptionAlgo(#[from] UnknownEncryptionAlgo),
-  #[error("showbiz security: {0}")]
+  #[error("security: {0}")]
   AeadError(aead::Error),
-  #[error("showbiz security: cannot decode empty payload")]
+  #[error("security: cannot decode empty payload")]
   EmptyPayload,
-  #[error("showbiz security: payload is too small to decrypt")]
+  #[error("security: payload is too small to decrypt")]
   SmallPayload,
-  #[error("showbiz security: no installed keys could decrypt the message")]
+  #[error("security: no installed keys could decrypt the message")]
   NoInstalledKeys,
-  #[error("showbiz security: no primary key installed")]
+  #[error("security: no primary key installed")]
   MissingPrimaryKey,
+  #[error("security: remote state is encrypted and encryption is not configured")]
+  NotConfigured,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

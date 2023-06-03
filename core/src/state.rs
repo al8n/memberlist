@@ -1,6 +1,9 @@
 use std::{sync::Arc, time::Instant};
 
-use crate::{types::{AckResponse, NackResponse, NodeAddress}, showbiz::Spawner};
+use crate::{
+  showbiz::Spawner,
+  types::{AckResponse, NackResponse, NodeAddress},
+};
 
 use super::{
   delegate::Delegate,
@@ -35,7 +38,7 @@ impl LocalNodeState {
 }
 
 // private implementation
-impl<T, S, D> Showbiz<T, S, D>
+impl<D, T, S> Showbiz<D, T, S>
 where
   T: Transport,
   S: Spawner,

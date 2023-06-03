@@ -58,7 +58,9 @@ impl Alive {
 
   #[inline]
   pub(crate) fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
-    decode_u32_from_buf(&mut buf).map(|(len, _)| len as usize).map_err(From::from)
+    decode_u32_from_buf(&mut buf)
+      .map(|(len, _)| len as usize)
+      .map_err(From::from)
   }
 
   #[inline]

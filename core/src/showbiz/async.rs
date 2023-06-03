@@ -8,16 +8,14 @@ use futures_channel::oneshot::channel;
 use futures_timer::Delay;
 use futures_util::{future::BoxFuture, FutureExt};
 
-
-
 impl<T, D> ShowbizBuilder<T, D>
 where
   T: Transport,
   D: Delegate,
 {
-  pub async fn finalize<S>(self, spawner: S) -> Result<Showbiz<T, S, D>, Error<T, D>>
+  pub async fn finalize<S>(self, spawner: S) -> Result<Showbiz<D, T, S>, Error<D, T>>
   where
-    S: Fn(BoxFuture<'static, ()>) + Send + Sync + 'static + Copy + Unpin
+    S: Fn(BoxFuture<'static, ()>) + Send + Sync + 'static + Copy + Unpin,
   {
     let Self {
       opts,
@@ -99,26 +97,29 @@ where
         leave_broadcast_tx,
         leave_broadcast_rx,
         queue: Mutex::new(MessageQueue::new()),
-        nodes: Arc::new(RwLock::new(Memberlist::new(Member { state: LocalNodeState {
-          node: Arc::new(Node {
-            id: NodeId {
-              name: opts.name.clone(),
-              port: Some(opts.bind_addr.port()),
-              addr: opts.bind_addr.ip().into(),
-            },
-            meta,
-            pmin: vsn[0],
-            pmax: vsn[1],
-            pcur: vsn[2],
-            dmin: vsn[3],
-            dmax: vsn[4],
-            dcur: vsn[5],
+        nodes: Arc::new(RwLock::new(Memberlist::new(Member {
+          state: LocalNodeState {
+            node: Arc::new(Node {
+              id: NodeId {
+                name: opts.name.clone(),
+                port: Some(opts.bind_addr.port()),
+                addr: opts.bind_addr.ip().into(),
+              },
+              meta,
+              pmin: vsn[0],
+              pmax: vsn[1],
+              pcur: vsn[2],
+              dmin: vsn[3],
+              dmax: vsn[4],
+              dcur: vsn[5],
+              state: NodeState::Dead,
+            }),
+            incarnation: 0,
             state: NodeState::Dead,
-          }),
-          incarnation: 0,
-          state: NodeState::Dead,
-          state_change: Instant::now(),
-        }, suspicion: None }))),
+            state_change: Instant::now(),
+          },
+          suspicion: None,
+        }))),
         opts: Arc::new(opts),
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
         spawner,
@@ -129,11 +130,11 @@ where
 
 #[cfg(feature = "async")]
 pub(crate) struct AckHandler {
-  pub(crate) ack_fn: Box<dyn FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
+  pub(crate) ack_fn:
+    Box<dyn FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
   pub(crate) nack_fn: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
   pub(crate) timer: Timer,
 }
-
 
 #[cfg(feature = "async")]
 pub trait Spawner: Copy + Send + Sync + 'static {
@@ -141,15 +142,16 @@ pub trait Spawner: Copy + Send + Sync + 'static {
 }
 
 #[cfg(feature = "async")]
-impl<R: Send + Sync + 'static, F: Fn(BoxFuture<'static, ()>) -> R + Send + Sync + 'static + Copy> Spawner for F {
+impl<R: Send + Sync + 'static, F: Fn(BoxFuture<'static, ()>) -> R + Send + Sync + 'static + Copy>
+  Spawner for F
+{
   fn spawn(&self, future: BoxFuture<'static, ()>) {
     self(future);
   }
 }
 
 #[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct ShowbizCore<T: Transport, S: Spawner, D = VoidDelegate>
-{
+pub(crate) struct ShowbizCore<D: Delegate, T: Transport, S: Spawner> {
   id: NodeId,
   hot: HotData,
   awareness: Awareness,
@@ -174,13 +176,11 @@ pub(crate) struct ShowbizCore<T: Transport, S: Spawner, D = VoidDelegate>
   spawner: S,
 }
 
-pub struct Showbiz<T: Transport, S: Spawner, D = VoidDelegate> {
-  pub(crate) inner: Arc<ShowbizCore<T, S, D>>,
+pub struct Showbiz<D: Delegate, T: Transport, S: Spawner> {
+  pub(crate) inner: Arc<ShowbizCore<D, T, S>>,
 }
 
-
-
-impl<T, S, D> Clone for Showbiz<T, S, D>
+impl<D, T, S> Clone for Showbiz<D, T, S>
 where
   T: Transport,
   D: Delegate,
@@ -193,7 +193,7 @@ where
   }
 }
 
-impl<T, S, D> Showbiz<T, S, D>
+impl<D, T, S> Showbiz<D, T, S>
 where
   T: Transport,
   D: Delegate,
@@ -201,11 +201,17 @@ where
 {
   #[inline]
   fn ip_must_be_checked(&self) -> bool {
-    self.inner.opts.allowed_cidrs.as_ref().map(|x| !x.is_empty()).unwrap_or(false)
+    self
+      .inner
+      .opts
+      .allowed_cidrs
+      .as_ref()
+      .map(|x| !x.is_empty())
+      .unwrap_or(false)
   }
 }
 
-impl<T, S, D> Showbiz<T, S, D>
+impl<D, T, S> Showbiz<D, T, S>
 where
   T: Transport,
   S: Spawner,
@@ -252,7 +258,7 @@ where
   ///
   /// This method is safe to call multiple times, but must not be called
   /// after the cluster is already shut down.
-  pub async fn leave(&self, timeout: Duration) -> Result<(), Error<T, D>> {
+  pub async fn leave(&self, timeout: Duration) -> Result<(), Error<D, T>> {
     let _mu = self.inner.leave_lock.lock().await;
 
     if !self.has_left() {
@@ -314,7 +320,7 @@ where
   /// This returns the number of hosts successfully contacted and an error if
   /// none could be reached. If an error is returned, the node did not successfully
   /// join the cluster.
-  pub async fn join(&self, existing: Vec<NodeId>) -> Result<usize, Vec<Error<T, D>>> {
+  pub async fn join(&self, existing: Vec<NodeId>) -> Result<usize, Vec<Error<D, T>>> {
     let mut num_success = 0;
     let mut errors = Vec::new();
     for exist in existing {
@@ -333,7 +339,11 @@ where
       };
 
       for (name, addr) in addrs {
-        let id = NodeId { name, port: Some(addr.port()), addr: addr.ip().into() };
+        let id = NodeId {
+          name,
+          port: Some(addr.port()),
+          addr: addr.ip().into(),
+        };
         let spawner = self.inner.spawner;
         if let Err(e) = self.push_pull_node(&id, true).await {
           tracing::debug!(
@@ -376,7 +386,7 @@ where
   /// meta data.  This will block until the update message is successfully
   /// broadcasted to a member of the cluster, if any exist or until a specified
   /// timeout is reached.
-  pub async fn update_node(&self, timeout: Duration) -> Result<(), Error<T, D>> {
+  pub async fn update_node(&self, timeout: Duration) -> Result<(), Error<D, T>> {
     // Get the node meta data
     let meta = if let Some(delegate) = &self.inner.delegate {
       let meta = delegate.node_meta(META_MAX_SIZE);
@@ -424,7 +434,7 @@ where
   /// mechanism). The maximum size of the message depends on the configured
   /// `packet_buffer_size` for this memberlist instance.
   #[inline]
-  pub async fn send(&self, to: NodeId, msg: Message) -> Result<(), Error<T, D>> {
+  pub async fn send(&self, to: NodeId, msg: Message) -> Result<(), Error<D, T>> {
     self.raw_send_msg_packet(to, msg.0).await
   }
 
@@ -433,11 +443,11 @@ where
   /// mechanism). Delivery is guaranteed if no error is returned, and there is no
   /// limit on the size of the message.
   #[inline]
-  pub async fn send_reliable(&self, to: &Node, msg: Message) -> Result<(), Error<T, D>> {
+  pub async fn send_reliable(&self, to: &Node, msg: Message) -> Result<(), Error<D, T>> {
     self.send_user_msg(to.id(), msg).await
   }
 
-  pub async fn shutdown<P>(self, parker: P) -> Result<(), Error<T, D>>
+  pub async fn shutdown<P>(self, parker: P) -> Result<(), Error<D, T>>
   where
     P: std::future::Future<Output = ()> + Copy,
   {
@@ -473,7 +483,7 @@ where
 }
 
 // private impelementation
-impl<T, S, D> Showbiz<T, S, D>
+impl<D, T, S> Showbiz<D, T, S>
 where
   T: Transport,
   S: Spawner,
@@ -491,7 +501,7 @@ where
     host: &str,
     default_port: u16,
     node_name: &Name,
-  ) -> Result<Vec<(Name, SocketAddr)>, Error<T, D>> {
+  ) -> Result<Vec<(Name, SocketAddr)>, Error<D, T>> {
     // Don't attempt any TCP lookups against non-fully qualified domain
     // names, since those will likely come from the resolv.conf file.
     if !host.contains('.') {
@@ -526,7 +536,7 @@ where
   pub(crate) async fn resolve_addr(
     &self,
     mut host: NodeId,
-  ) -> Result<Vec<(Name, SocketAddr)>, Error<T, D>> {
+  ) -> Result<Vec<(Name, SocketAddr)>, Error<D, T>> {
     // This captures the supplied port, or the default one.
     if host.port().is_none() {
       host = host.set_port(Some(self.inner.opts.bind_addr.port()));
@@ -587,7 +597,7 @@ where
   }
 
   #[inline]
-  pub(crate) async fn refresh_advertise(&self) -> Result<SocketAddr, Error<T, D>> {
+  pub(crate) async fn refresh_advertise(&self) -> Result<SocketAddr, Error<D, T>> {
     let addr = self
       .inner
       .transport
@@ -618,7 +628,7 @@ where
     }
   }
 
-  pub(crate) async fn verify_protocol(&self, _remote: &[PushNodeState]) -> Result<(), Error<T, D>> {
+  pub(crate) async fn verify_protocol(&self, _remote: &[PushNodeState]) -> Result<(), Error<D, T>> {
     // TODO: implement
 
     Ok(())

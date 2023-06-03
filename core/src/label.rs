@@ -1,5 +1,9 @@
 use crate::{
-  delegate::Delegate, error::Error, showbiz::{Showbiz, Spawner}, transport::Transport, types::MessageType,
+  delegate::Delegate,
+  error::Error,
+  showbiz::{Showbiz, Spawner},
+  transport::Transport,
+  types::MessageType,
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -27,10 +31,10 @@ fn make_label_header(label: &[u8], src: &[u8]) -> Bytes {
   dst.freeze()
 }
 
-impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
+impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
   /// Rrefixes outgoing packets with the correct header if
   /// the label is not empty.
-  pub fn add_label_header_to_packet<E>(src: &[u8], label: &[u8]) -> Result<Bytes, Error<T, D>> {
+  pub fn add_label_header_to_packet(src: &[u8], label: &[u8]) -> Result<Bytes, Error<D, T>> {
     if !label.is_empty() {
       if label.len() > LABEL_MAX_SIZE {
         return Err(Error::LabelTooLong(label.len()));
@@ -41,7 +45,7 @@ impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
     }
   }
 
-  pub fn remove_label_header_from(mut buf: BytesMut) -> Result<(BytesMut, Bytes), Error<T, D>> {
+  pub fn remove_label_header_from(mut buf: BytesMut) -> Result<(BytesMut, Bytes), Error<D, T>> {
     #[allow(clippy::declare_interior_mutable_const)]
     const EMPTY_BYTES: Bytes = Bytes::new();
 
@@ -72,7 +76,7 @@ impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
     Ok((buf, label.freeze()))
   }
 
-  pub fn remove_label_header_from_packet(mut buf: Bytes) -> Result<(Bytes, Bytes), Error<T, D>> {
+  pub fn remove_label_header_from_packet(mut buf: Bytes) -> Result<(Bytes, Bytes), Error<D, T>> {
     #[allow(clippy::declare_interior_mutable_const)]
     const EMPTY_BYTES: Bytes = Bytes::new();
 

@@ -1,9 +1,14 @@
 use crate::{
-  delegate::Delegate, transport::Transport, types::{InvalidMessageType, Domain}, util::InvalidAddress, options::ForbiddenIp,
+  delegate::Delegate,
+  network::NetworkError,
+  options::ForbiddenIp,
+  transport::Transport,
+  types::{DecodeError, Domain, InvalidMessageType},
+  util::InvalidAddress,
 };
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error<T: Transport, D: Delegate> {
+pub enum Error<D: Delegate, T: Transport> {
   #[error("showbiz: empty node name provided")]
   EmptyNodeName,
   #[error("showbiz: label is too long. expected at most 255 bytes, got {0}")]
@@ -28,10 +33,6 @@ pub enum Error<T: Transport, D: Delegate> {
   Compression(#[from] crate::util::CompressionError),
   #[error("showbiz: {0}")]
   LocalBroadcast(#[from] async_channel::SendError<()>),
-  #[error("showbiz: {0}")]
-  Encode(#[from] prost::EncodeError),
-  #[error("showbiz: {0}")]
-  Decode(#[from] prost::DecodeError),
   #[error("showbiz: timeout waiting for update broadcast")]
   UpdateTimeout,
   #[error("showbiz: dns error: {0}")]
@@ -46,9 +47,12 @@ pub enum Error<T: Transport, D: Delegate> {
   ForbiddenIp(#[from] ForbiddenIp),
   #[error("showbiz: cannot parse ip from {0}")]
   ParseIpFailed(Domain),
+
+  #[error("showbiz: network error {0}")]
+  Network(#[from] NetworkError<T>),
 }
 
-impl<D: Delegate, T: Transport> Error<T, D> {
+impl<D: Delegate, T: Transport> Error<D, T> {
   #[inline]
   pub fn delegate(e: D::Error) -> Self {
     Self::Delegate(e)
@@ -65,7 +69,7 @@ impl<D: Delegate, T: Transport> Error<T, D> {
   }
 }
 
-impl<D: Delegate, T: Transport> PartialEq for Error<T, D> {
+impl<D: Delegate, T: Transport> PartialEq for Error<D, T> {
   fn eq(&self, other: &Self) -> bool {
     match (self, other) {
       (Self::LabelTooLong(a), Self::LabelTooLong(b)) => a == b,

@@ -188,7 +188,7 @@ mod r#impl {
 mod r#impl {
   use crate::types::NodeId;
 
-use super::*;
+  use super::*;
   use futures_util::{future::BoxFuture, FutureExt};
 
   pub(crate) struct Suspicion {

@@ -100,7 +100,7 @@ impl Broadcast for ShowbizBroadcast {
 }
 
 #[cfg(feature = "async")]
-impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
+impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
   #[inline]
   pub(crate) async fn broadcast_notify(&self, node: NodeId, msg: Message, notify_tx: Sender<()>) {
     let _ = self.queue_broadcast(node, msg, Some(notify_tx)).await;
@@ -138,7 +138,7 @@ impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
     to_send: Vec<Message>,
     overhead: usize,
     limit: usize,
-  ) -> Result<Vec<Message>, Error<T, D>> {
+  ) -> Result<Vec<Message>, Error<D, T>> {
     // Get memberlist messages first
     let mut to_send = self
       .inner

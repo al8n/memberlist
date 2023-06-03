@@ -203,4 +203,3 @@ impl Memberlist {
       .any(|n| !n.dead_or_left() && n.node.name() != self.local.state.node.name())
   }
 }
-
