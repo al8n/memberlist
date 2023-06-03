@@ -132,7 +132,7 @@ where
 pub(crate) struct AckHandler {
   pub(crate) ack_fn:
     Box<dyn FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
-  pub(crate) nack_fn: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+  pub(crate) nack_fn: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static>>,
   pub(crate) timer: Timer,
 }
 
@@ -435,7 +435,7 @@ where
   /// `packet_buffer_size` for this memberlist instance.
   #[inline]
   pub async fn send(&self, to: NodeId, msg: Message) -> Result<(), Error<D, T>> {
-    self.raw_send_msg_packet(to, msg.0).await
+    self.raw_send_msg_packet(&to, msg.0).await
   }
 
   /// Uses the reliable stream-oriented interface of the transport to

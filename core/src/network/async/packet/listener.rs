@@ -278,7 +278,7 @@ where
       Message(out)
     };
 
-    if let Err(e) = self.send_msg(p.source, msg).await {
+    if let Err(e) = self.send_msg(&p.source, msg).await {
       tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to send ack response");
     }
   }
@@ -331,7 +331,7 @@ where
             let mut out = BytesMut::with_capacity(MessageType::SIZE + ack.encoded_len());
             out.put_u8(MessageType::AckResponse as u8);
             ack.encode_to::<T::Checksumer>(&mut out);
-            if let Err(e) = this.send_msg(ind_source, Message(out)).await {
+            if let Err(e) = this.send_msg(&ind_source, Message(out)).await {
               tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to forward ack");
             }
           }
@@ -347,7 +347,7 @@ where
     ping.encode_to(&mut out);
 
     // TODO: change ind ping struct encoding
-    if let Err(e) = self.send_msg(ind.ping.target.unwrap(), Message(out)).await {
+    if let Err(e) = self.send_msg(&ind.ping.target.unwrap(), Message(out)).await {
       tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to send ping");
     }
 
@@ -366,7 +366,7 @@ where
               out.put_u8(MessageType::NackResponse as u8);
               nack.encode_to::<T::Checksumer>(&mut out);
               let addr = ind.ping.source;
-              if let Err(e) = this.send_msg(addr, Message(out)).await {
+              if let Err(e) = this.send_msg(&addr, Message(out)).await {
                 tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to send nack");
               }
             }
@@ -414,7 +414,7 @@ where
     }
   }
 
-  async fn send_msg(&self, addr: NodeId, msg: Message) -> Result<(), Error<D, T>> {
+  pub(crate) async fn send_msg(&self, addr: &NodeId, msg: Message) -> Result<(), Error<D, T>> {
     // Check if we can piggy back any messages
     let bytes_avail = self.inner.opts.packet_buffer_size
       - msg.len()
@@ -427,7 +427,7 @@ where
 
     // Fast path if nothing to piggypack
     if msgs.len() == 1 {
-      return self.raw_send_msg_packet(addr, msgs.pop().unwrap().0).await;
+      return self.raw_send_msg_packet(&addr, msgs.pop().unwrap().0).await;
     }
 
     // Create a compound message
@@ -441,7 +441,7 @@ where
   /// modification, other than compression or encryption if enabled.
   pub(crate) async fn raw_send_msg_packet(
     &self,
-    addr: NodeId,
+    addr: &NodeId,
     msg: BytesMut,
   ) -> Result<(), Error<D, T>> {
     macro_rules! encrypt_bail {

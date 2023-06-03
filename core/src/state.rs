@@ -123,7 +123,7 @@ where
       .get(&nack.seq_no)
       .and_then(|ah| ah.nack_fn.clone());
     if let Some(nack_fn) = ah {
-      (nack_fn)();
+      (nack_fn)().await;
     }
   }
 }

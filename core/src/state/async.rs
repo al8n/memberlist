@@ -1,18 +1,128 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, time::Duration, sync::atomic::Ordering};
 
 use crate::{
-  network::RemoteNodeState,
+  network::{RemoteNodeState, COMPOUND_HEADER_OVERHEAD, COMPOUND_OVERHEAD},
   showbiz::{AckHandler, Member, Memberlist, Spawner},
   suspicion::Suspicion,
   timer::Timer,
-  types::{Alive, Dead, Message, MessageType, Name, Suspect},
+  types::{Alive, Dead, Message, MessageType, Name, Suspect, Ping}, security::encrypt_overhead,
 };
 
 use super::*;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures_channel::oneshot::Sender;
+use futures_timer::Delay;
 use futures_util::{future::BoxFuture, FutureExt};
+use rand::seq::SliceRandom;
 
+fn random_offset(n: usize) -> usize {
+  if n == 0 {
+    return 0;
+  }
+  (rand::random::<u32>() % (n as u32)) as usize
+}
+
+fn random_nodes<F>(k: usize, nodes: &Memberlist, exclude: Option<F>) -> Vec<Arc<Node>>
+where
+  F: Fn(&LocalNodeState) -> bool,
+{
+  let n = nodes.nodes.len();
+  let mut knodes: Vec<Arc<Node>> = Vec::with_capacity(k);
+
+  'outer: loop {
+    // Probe up to 3*n times, with large n this is not necessary
+	  // since k << n, but with small n we want search to be
+	  // exhaustive
+    for i in 0..k {
+      // Get random node state
+      let idx = random_offset(n);
+      let node = &nodes.nodes[idx];
+
+      // Give the filter a shot at it
+      if let Some(exclude) = &exclude {
+        if exclude(node) {
+          continue 'outer;
+        }
+      }
+
+      // Check if we have this node already
+      #[allow(clippy::needless_range_loop)]
+      for j in 0..knodes.len() {
+        if knodes[j].id == node.node.id {
+          continue 'outer;
+        }
+      }
+
+      // Append the node
+      knodes.push(node.node.clone());
+
+      if i >= 3 * n && knodes.len() >= k {
+        break;
+      }
+    }
+
+    return knodes;
+  }
+}
+
+struct AckMessage {
+  complete: bool,
+  payload: Bytes,
+  timestamp: Instant,
+}
+
+// -------------------------------Public methods---------------------------------
+
+impl<D, T, S> Showbiz<D, T, S>
+where
+  T: Transport,
+  D: Delegate,
+  S: Spawner,
+{
+  /// Initiates a ping to the node with the specified node.
+  pub async fn ping(&self, node: NodeId) -> Result<Duration, Error<D, T>> {
+    // Prepare a ping message and setup an ack handler.
+    let self_addr = self.get_advertise().await;
+    let ping = Ping {
+      seq_no: self.next_seq_no(),
+      source: NodeId { name: self.inner.opts.name.clone(), port: Some(self_addr.port()), addr: self_addr.ip().into() },
+      target: Some(node.clone()),
+    };
+
+    let (ack_tx, ack_rx) = async_channel::bounded(self.inner.opts.indirect_checks + 1);
+    self.set_probe_channels(ping.seq_no, ack_tx, None, self.inner.opts.probe_interval).await;
+
+    // Send a ping to the node.
+    let mut msg = BytesMut::with_capacity(ping.encoded_len() + MessageType::SIZE);
+    msg.put_u8(MessageType::Ping as u8);
+    ping.encode_to(&mut msg);
+    self.send_msg(&node, Message(msg)).await?;
+    // Mark the sent time here, which should be after any pre-processing and
+	  // system calls to do the actual send. This probably under-reports a bit,
+  	// but it's the best we can do.
+    let sent = Instant::now();
+
+    // Wait for response or timeout.
+    futures_util::select! {
+      v = ack_rx.recv().fuse() => {
+        // If we got a response, update the RTT.
+        if let Ok(AckMessage { complete, .. }) = v {
+          if complete {
+            return Ok(sent.elapsed());
+          }
+        } 
+      }
+      _ = Delay::new(self.inner.opts.probe_timeout).fuse() => {}
+    }
+
+    // If we timed out, return Error.
+    tracing::debug!(target: "showbiz", "failed UDP ping {} (timeout reached)", node);
+    Err(Error::NoPingResponse(node))
+  }
+}
+
+
+// ---------------------------------Crate methods-------------------------------
 impl<D, T, S> Showbiz<D, T, S>
 where
   T: Transport,
@@ -305,6 +415,208 @@ where
       },
     );
   }
+}
+
+
+// -------------------------------Private Methods--------------------------------
+
+#[inline]
+fn move_dead_nodes(nodes: &mut Vec<LocalNodeState>, gossip_to_the_dead_time: Duration) -> usize {
+  let mut num_dead = 0;
+
+  let n = nodes.len();
+  let mut i = 0;
+
+  while i < n - num_dead {
+    let node = &nodes[i];
+    if !node.dead_or_left() {
+      i += 1;
+      continue;
+    }
+
+    // Respect the gossip to the dead interval
+    if node.state_change.elapsed() <= gossip_to_the_dead_time {
+      i += 1;
+      continue;
+    }
+
+    // Move this node to the end
+    nodes.swap(i, n - num_dead - 1);
+    num_dead += 1;
+  }
+
+  n - num_dead
+}
+
+impl<D, T, S> Showbiz<D, T, S>
+where
+  T: Transport,
+  D: Delegate,
+  S: Spawner,
+{
+  /// Used when the tick wraps around. It will reap the
+  /// dead nodes and shuffle the node list.
+  async fn reset_nodes(&self) {
+    let mut memberlist = self.inner.nodes.write().await;
+
+    // Move dead nodes, but respect gossip to the dead interval
+    let dead_idx = move_dead_nodes(
+      &mut memberlist.nodes,
+      self.inner.opts.gossip_to_the_dead_time,
+    );
+
+    // Trim the nodes to exclude the dead nodes and deregister the dead nodes
+    let mut i = 0;
+    let num_remove = memberlist.nodes.len() - dead_idx;
+    while i < num_remove {
+      let node = memberlist.nodes.pop().unwrap();
+      memberlist.node_map.remove(node.id());
+      i += 1;
+    }
+
+    // Update num_nodes after we've trimmed the dead nodes
+    self.inner.hot.num_nodes.store(dead_idx as u32, Ordering::Relaxed);
+
+    // Shuffle live nodes
+    memberlist.nodes.shuffle(&mut rand::thread_rng());
+  }
+
+  /// Used to attach the ackCh to receive a message when an ack
+  /// with a given sequence number is received. The `complete` field of the message
+  /// will be false on timeout. Any nack messages will cause an empty struct to be
+  /// passed to the nackCh, which can be nil if not needed.
+  async fn set_probe_channels(&self, seq_no: u32, ack_tx: async_channel::Sender<AckMessage>, nack_tx: Option<async_channel::Sender<()>>, timeout: Duration) {
+    let tx = ack_tx.clone();
+    let ack_fn = |payload, timestamp| {
+      async move {
+        futures_util::select! {
+          _ = tx.send(AckMessage {
+            payload,
+            timestamp,
+            complete: true,
+          }).fuse() => {},
+          default => {}
+        }
+      }.boxed()
+    };
+
+    let nack_fn = move || {
+      let tx = nack_tx.clone();
+      async move {
+        if let Some(nack_tx) = tx {
+          futures_util::select! {
+            _ = nack_tx.send(()).fuse() => {},
+            default => {}
+          }
+        }
+      }.boxed()
+    };
+
+    let ack_handlers = self.inner.ack_handlers.clone();
+    self.inner.ack_handlers.lock().await.insert(seq_no, AckHandler {
+      ack_fn: Box::new(ack_fn),
+      nack_fn: Some(Arc::new(nack_fn)),
+      timer: Timer::after(
+        timeout,
+        async move {
+          ack_handlers.lock().await.remove(&seq_no);
+          futures_util::select! {
+            _ = ack_tx.send(AckMessage {
+              payload: Bytes::new(),
+              timestamp: Instant::now(),
+              complete: false,
+            }).fuse() => {},
+            default => {}
+          }
+        },
+        |fut| self.inner.spawner.spawn(fut),
+      ),
+    });
+  }
+
+  /// Invoked every GossipInterval period to broadcast our gossip
+  /// messages to a few random nodes.
+  async fn gossip(&self) {
+    // TODO: metrics
+
+    // Get some random live, suspect, or recently dead nodes
+    let nodes = {
+      let memberlist = self.inner.nodes.read().await;
+      random_nodes(
+        self.inner.opts.gossip_nodes,
+        &memberlist,
+        Some(|n: &LocalNodeState| {
+          match n.state {
+            NodeState::Alive | NodeState::Suspect => false,
+            NodeState::Dead => {
+              n.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time
+            }
+            _ => true,
+          }
+        }),
+      )
+    };
+
+    // Compute the bytes available
+    let mut bytes_avail = self.inner.opts.packet_buffer_size - COMPOUND_HEADER_OVERHEAD - Self::label_overhead(&self.inner.opts.label);
+
+    if self.encryption_enabled().await {
+      bytes_avail = bytes_avail.saturating_sub(encrypt_overhead(self.inner.opts.encryption_algo));
+    }
+
+    for node in nodes {
+      // Get any pending broadcasts
+      let mut msgs = match self.get_broadcast_with_prepend(vec![], COMPOUND_OVERHEAD, bytes_avail).await {
+        Ok(msgs) => msgs,
+        Err(e) => {
+          tracing::error!(target = "showbiz", err = %e, "failed to get broadcast messages from {}", node);
+          return;
+        }
+      };
+      if msgs.is_empty() {
+        return;
+      }
+
+      let addr = node.id();
+      if msgs.len() == 1 {
+        // Send single message as is
+        if let Err(e) = self.raw_send_msg_packet(addr, msgs.pop().unwrap().0).await {
+          tracing::error!(target = "showbiz", err = %e, "failed to send gossip to {}", addr);
+        }
+      } else {
+        // Otherwise create and send one or more compound messages
+        for compound in Message::compounds(msgs) {
+          if let Err(e) = self.raw_send_msg_packet(addr, compound).await {
+            tracing::error!(target = "showbiz", err = %e, "failed to send gossip to {}", addr);
+          }
+        }
+      }
+    }
+  }
+
+  /// invoked periodically to randomly perform a complete state
+  /// exchange. Used to ensure a high level of convergence, but is also
+  /// reasonably expensive as the entire state of this node is exchanged
+  /// with the other node.
+  async fn push_pull(&self) {
+    // get a random live node
+    let nodes = {
+      let memberlist = self.inner.nodes.read().await;
+      random_nodes(1, &memberlist, Some(|n: &LocalNodeState| {
+        n.state != NodeState::Alive
+      }))
+    };
+
+    if nodes.is_empty() {
+      return;
+    }
+
+    let node = &nodes[0];
+    // Attempt a push pull
+    if let Err(e) = self.push_pull_node(node.id(), false).await {
+      tracing::error!(target = "showbiz", err = %e, "push/pull with {} failed", node.id());
+    }
+  }
 
   /// Gossips an alive message in response to incoming information that we
   /// are suspect or dead. It will make sure the incarnation number beats the given
@@ -336,6 +648,7 @@ where
     self.broadcast(me.state.node.id.clone(), Message(buf)).await;
   }
 }
+
 
 #[inline]
 fn suspicion_timeout(suspicion_mult: usize, n: usize, interval: Duration) -> u64 {

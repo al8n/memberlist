@@ -279,18 +279,23 @@ impl Message {
     Self(this)
   }
 
-  // #[inline]
-  // pub(crate) fn encode<M: ProstMessage>(
-  //   msg: &M,
-  //   ty: MessageType,
-  // ) -> Result<Self, prost::EncodeError> {
-  //   let encoded_len = msg.encoded_len();
-  //   let mut buf = BytesMut::with_capacity(Self::PREFIX_SIZE + encoded_len);
-  //   buf.put_u8(ty as u8);
-  //   buf.put_u32(encoded_len as u32);
-  //   msg.encode(&mut buf)?;
-  //   Ok(Self(buf))
-  // }
+  pub(crate) fn compounds(mut msgs: Vec<Self>) -> Vec<BytesMut> {
+    const MAX_MESSAGES: usize = 255;
+
+    let mut bufs = Vec::with_capacity(
+      (msgs.len() + MAX_MESSAGES - 1) / MAX_MESSAGES
+    );
+
+    while msgs.len() > MAX_MESSAGES {
+      bufs.push(Self::compound(msgs.drain(..MAX_MESSAGES).collect()));
+    }
+
+    if !msgs.is_empty() {
+      bufs.push(Self::compound(msgs));
+    }
+
+    bufs
+  }
 
   pub(crate) fn compound(msgs: Vec<Self>) -> BytesMut {
     let num_msgs = msgs.len();

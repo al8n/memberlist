@@ -16,10 +16,10 @@ mod sync;
 pub const META_MAX_SIZE: usize = 512;
 
 /// Assumed header overhead
-const COMPOUND_HEADER_OVERHEAD: usize = 2;
+pub(crate) const COMPOUND_HEADER_OVERHEAD: usize = 2;
 
 /// Assumed overhead per entry in compound header
-const COMPOUND_OVERHEAD: usize = 2;
+pub(crate) const COMPOUND_OVERHEAD: usize = 2;
 
 pub(crate) const USER_MSG_OVERHEAD: usize = 1;
 

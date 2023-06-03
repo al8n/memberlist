@@ -3,7 +3,7 @@ use crate::{
   network::NetworkError,
   options::ForbiddenIp,
   transport::Transport,
-  types::{DecodeError, Domain, InvalidMessageType},
+  types::{DecodeError, Domain, InvalidMessageType, NodeId},
   util::InvalidAddress,
 };
 
@@ -50,6 +50,8 @@ pub enum Error<D: Delegate, T: Transport> {
 
   #[error("showbiz: network error {0}")]
   Network(#[from] NetworkError<T>),
+  #[error("showbiz: no response from node {0}")]
+  NoPingResponse(NodeId),
 }
 
 impl<D: Delegate, T: Transport> Error<D, T> {
