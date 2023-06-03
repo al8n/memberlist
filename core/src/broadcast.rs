@@ -2,7 +2,7 @@ use crate::{
   delegate::Delegate,
   error::Error,
   network::USER_MSG_OVERHEAD,
-  showbiz::Showbiz,
+  showbiz::{Showbiz, Spawner},
   transport::Transport,
   types::{Message, Name, NodeId},
 };
@@ -100,7 +100,7 @@ impl Broadcast for ShowbizBroadcast {
 }
 
 #[cfg(feature = "async")]
-impl<T: Transport, D: Delegate> Showbiz<T, D> {
+impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
   #[inline]
   pub(crate) async fn broadcast_notify(&self, node: NodeId, msg: Message, notify_tx: Sender<()>) {
     let _ = self.queue_broadcast(node, msg, Some(notify_tx)).await;

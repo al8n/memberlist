@@ -9,7 +9,6 @@ use std::{
 use async_lock::{Mutex, RwLock};
 use bytes::Bytes;
 use crossbeam_utils::CachePadded;
-use futures_util::future::BoxFuture;
 #[cfg(not(feature = "async"))]
 use parking_lot::{Mutex, RwLock};
 
@@ -36,7 +35,10 @@ use super::{
   SecretKeyring,
 };
 
+#[cfg(feature = "async")]
 mod r#async;
+#[cfg(feature = "async")]
+pub(crate) use r#async::*;
 
 impl Options {
   #[inline]
@@ -202,64 +204,3 @@ impl Memberlist {
   }
 }
 
-#[cfg(feature = "async")]
-pub(crate) struct AckHandler {
-  pub(crate) ack_fn: Box<dyn FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
-  pub(crate) nack_fn: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
-  pub(crate) timer: Timer,
-}
-
-#[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct ShowbizCore<T: Transport, D = VoidDelegate>
-{
-  id: NodeId,
-  hot: HotData,
-  awareness: Awareness,
-  advertise: RwLock<SocketAddr>,
-  broadcast: TransmitLimitedQueue<ShowbizBroadcast, DefaultNodeCalculator>,
-  shutdown_rx: Receiver<()>,
-  shutdown_tx: Sender<()>,
-  // Serializes calls to Leave
-  leave_lock: Mutex<()>,
-  leave_broadcast_tx: Sender<()>,
-  leave_broadcast_rx: Receiver<()>,
-  opts: Arc<Options>,
-  transport: T,
-  keyring: Option<SecretKeyring>,
-  delegate: Option<D>,
-  handoff_tx: Sender<()>,
-  handoff_rx: Receiver<()>,
-  queue: Mutex<MessageQueue>,
-  nodes: Arc<RwLock<Memberlist>>,
-  ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
-  dns: Option<DNS<T>>,
-}
-
-pub struct Showbiz<T: Transport, D = VoidDelegate> {
-  pub(crate) inner: Arc<ShowbizCore<T, D>>,
-}
-
-
-
-impl<T, D> Clone for Showbiz<T, D>
-where
-  T: Transport,
-  D: Delegate,
-{
-  fn clone(&self) -> Self {
-    Self {
-      inner: self.inner.clone(),
-    }
-  }
-}
-
-impl<T, D> Showbiz<T, D>
-where
-  T: Transport,
-  D: Delegate,
-{
-  #[inline]
-  fn ip_must_be_checked(&self) -> bool {
-    self.inner.opts.allowed_cidrs.as_ref().map(|x| !x.is_empty()).unwrap_or(false)
-  }
-}

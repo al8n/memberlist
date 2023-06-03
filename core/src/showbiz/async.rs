@@ -8,14 +8,16 @@ use futures_channel::oneshot::channel;
 use futures_timer::Delay;
 use futures_util::{future::BoxFuture, FutureExt};
 
+
+
 impl<T, D> ShowbizBuilder<T, D>
 where
   T: Transport,
   D: Delegate,
 {
-  pub async fn finalize<S>(self, spawner: S) -> Result<Showbiz<T, D>, Error<T, D>>
+  pub async fn finalize<S>(self, spawner: S) -> Result<Showbiz<T, S, D>, Error<T, D>>
   where
-    S: Fn(BoxFuture<'static, ()>) + Send + Sync + 'static + Unpin + Copy,
+    S: Fn(BoxFuture<'static, ()>) + Send + Sync + 'static + Copy + Unpin
   {
     let Self {
       opts,
@@ -55,7 +57,7 @@ where
     let awareness = Awareness::new(opts.awareness_max_multiplier as isize, Arc::new(vec![]));
     let hot = HotData::new();
     let broadcast = TransmitLimitedQueue::new(
-      DefaultNodeCalculator::new(hot.num_nodes.clone()),
+      DefaultNodeCalculator::new(hot.num_nodes),
       opts.retransmit_mult,
     );
 
@@ -119,14 +121,94 @@ where
         }, suspicion: None }))),
         opts: Arc::new(opts),
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
+        spawner,
       }),
     })
   }
 }
 
-impl<T, D> Showbiz<T, D>
+#[cfg(feature = "async")]
+pub(crate) struct AckHandler {
+  pub(crate) ack_fn: Box<dyn FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
+  pub(crate) nack_fn: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+  pub(crate) timer: Timer,
+}
+
+
+#[cfg(feature = "async")]
+pub trait Spawner: Copy + Send + Sync + 'static {
+  fn spawn(&self, future: BoxFuture<'static, ()>);
+}
+
+#[cfg(feature = "async")]
+impl<R: Send + Sync + 'static, F: Fn(BoxFuture<'static, ()>) -> R + Send + Sync + 'static + Copy> Spawner for F {
+  fn spawn(&self, future: BoxFuture<'static, ()>) {
+    self(future);
+  }
+}
+
+#[viewit::viewit(getters(skip), setters(skip))]
+pub(crate) struct ShowbizCore<T: Transport, S: Spawner, D = VoidDelegate>
+{
+  id: NodeId,
+  hot: HotData,
+  awareness: Awareness,
+  advertise: RwLock<SocketAddr>,
+  broadcast: TransmitLimitedQueue<ShowbizBroadcast, DefaultNodeCalculator>,
+  shutdown_rx: Receiver<()>,
+  shutdown_tx: Sender<()>,
+  // Serializes calls to Leave
+  leave_lock: Mutex<()>,
+  leave_broadcast_tx: Sender<()>,
+  leave_broadcast_rx: Receiver<()>,
+  opts: Arc<Options>,
+  transport: T,
+  keyring: Option<SecretKeyring>,
+  delegate: Option<D>,
+  handoff_tx: Sender<()>,
+  handoff_rx: Receiver<()>,
+  queue: Mutex<MessageQueue>,
+  nodes: Arc<RwLock<Memberlist>>,
+  ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
+  dns: Option<DNS<T>>,
+  spawner: S,
+}
+
+pub struct Showbiz<T: Transport, S: Spawner, D = VoidDelegate> {
+  pub(crate) inner: Arc<ShowbizCore<T, S, D>>,
+}
+
+
+
+impl<T, S, D> Clone for Showbiz<T, S, D>
 where
   T: Transport,
+  D: Delegate,
+  S: Spawner,
+{
+  fn clone(&self) -> Self {
+    Self {
+      inner: self.inner.clone(),
+    }
+  }
+}
+
+impl<T, S, D> Showbiz<T, S, D>
+where
+  T: Transport,
+  D: Delegate,
+  S: Spawner,
+{
+  #[inline]
+  fn ip_must_be_checked(&self) -> bool {
+    self.inner.opts.allowed_cidrs.as_ref().map(|x| !x.is_empty()).unwrap_or(false)
+  }
+}
+
+impl<T, S, D> Showbiz<T, S, D>
+where
+  T: Transport,
+  S: Spawner,
   D: Delegate,
 {
   /// Returns a list of all known live nodes.
@@ -251,12 +333,14 @@ where
       };
 
       for (name, addr) in addrs {
-        if let Err(e) = self.push_pull_node(&name, addr, true).await {
+        let id = NodeId { name, port: Some(addr.port()), addr: addr.ip().into() };
+        let spawner = self.inner.spawner;
+        if let Err(e) = self.push_pull_node(&id, true).await {
           tracing::debug!(
             target = "showbiz",
             err = %e,
             "failed to join {}({})",
-            name.as_ref(),
+            id.name.as_ref(),
             addr
           );
           errors.push(e);
@@ -389,9 +473,10 @@ where
 }
 
 // private impelementation
-impl<T, D> Showbiz<T, D>
+impl<T, S, D> Showbiz<T, S, D>
 where
   T: Transport,
+  S: Spawner,
   D: Delegate,
 {
   /// a helper to initiate a TCP-based DNS lookup for the given host.

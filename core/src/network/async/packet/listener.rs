@@ -12,20 +12,19 @@ use rand::Rng;
 
 use super::*;
 
-impl<T, D> Showbiz<T, D>
+impl<T, S, D> Showbiz<T, S, D>
 where
   T: Transport,
+  S: Spawner,
   D: Delegate,
 {
-  pub(crate) fn packet_listener<R, S>(&self, spawner: S)
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  pub(crate) fn packet_listener(&self)
   {
     let this = self.clone();
     let shutdown_rx = this.inner.shutdown_rx.clone();
     let transport_rx = this.inner.transport.packet().clone();
-    (spawner)(Box::pin(async move {
+    let spawner = self.inner.spawner;
+    spawner.spawn(Box::pin(async move {
       loop {
         futures_util::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -33,7 +32,7 @@ where
           }
           packet = transport_rx.recv().fuse() => {
             match packet {
-              Ok(packet) => this.ingest_packet(packet, spawner).await,
+              Ok(packet) => this.ingest_packet(packet).await,
               Err(e) => tracing::error!(target = "showbiz", "failed to receive packet: {}", e),
             }
           }
@@ -42,10 +41,7 @@ where
     }));
   }
 
-  async fn ingest_packet<R, S>(&self, packet: Packet, spawner: S)
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  async fn ingest_packet(&self, packet: Packet)
   {
     let addr = packet.from();
     let timestamp = packet.timestamp();
@@ -110,20 +106,17 @@ where
             tracing::warn!(target = "showbiz", addr = %addr, "got invalid checksum for UDP packet: {} vs. {}", crc, expected_crc);
             return;
           }
-          self.handle_command(msg, addr, timestamp, spawner).await
+          self.handle_command(msg, addr, timestamp).await
         },
         Err(e) => tracing::error!(target = "showbiz", addr = %addr, err = %e, "failed to decode plain message"),
       }
     } else {
-      self.handle_command(buf.freeze(), addr, timestamp, spawner).await
+      self.handle_command(buf.freeze(), addr, timestamp).await
     }
   }
 
   #[async_recursion::async_recursion]
-  async fn handle_command<R, S>(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant, spawner: S)
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  async fn handle_command(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant)
   {
     if !buf.has_remaining() {
       tracing::error!(target = "showbiz", addr = %from, err = "missing message type byte");
@@ -141,13 +134,13 @@ where
     };
 
     match msg_type {
-      MessageType::Compound => self.handle_compound(buf, from, timestamp, spawner).await,
-      MessageType::Compress => self.handle_compressed(buf, from, timestamp, spawner).await,
+      MessageType::Compound => self.handle_compound(buf, from, timestamp).await,
+      MessageType::Compress => self.handle_compressed(buf, from, timestamp).await,
       MessageType::Ping => match decode_u32_from_buf(&mut buf) {
         Ok((len, _)) => self.handle_ping(buf.split_to(len as usize), from).await,
         Err(e) => tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode ping"),
       },
-      MessageType::IndirectPing => self.handle_indirect_ping(buf, from, spawner).await,
+      MessageType::IndirectPing => self.handle_indirect_ping(buf, from).await,
       MessageType::AckResponse => self.handle_ack(buf, from, timestamp).await,
       MessageType::NackResponse => self.handle_nack(buf, from).await,
       MessageType::Suspect | MessageType::Alive | MessageType::Dead | MessageType::User => {
@@ -182,10 +175,7 @@ where
     }
   }
 
-  async fn handle_compound<R, S>(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant, spawner: S)
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  async fn handle_compound(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant)
   {
     // Decode the parts
     if !buf.has_remaining() {
@@ -215,7 +205,7 @@ where
         Some(buf.split_to(len as usize))
       })
     {
-      self.handle_command(msg, from, timestamp, spawner).await;   
+      self.handle_command(msg, from, timestamp).await;   
     }
 
     if trunc > 0 {
@@ -225,10 +215,7 @@ where
   }
 
   #[inline]
-  async fn handle_compressed<R, S>(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant, spawner: S)
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  async fn handle_compressed(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant)
   {
     // Try to decode the payload
     if !self.inner.opts.compression_algo.is_none() {
@@ -241,13 +228,13 @@ where
       };
       let size = buf.get_u32() as usize;
       match decompress_payload(algo, &buf) {
-        Ok(payload) => self.handle_command(payload.into(), from, timestamp, spawner).await,
+        Ok(payload) => self.handle_command(payload.into(), from, timestamp).await,
         Err(e) => {
           tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decompress payload");
         }
       }
     } else {
-      self.handle_command(buf, from, timestamp, spawner).await
+      self.handle_command(buf, from, timestamp).await
     }
   }
 
@@ -299,10 +286,7 @@ where
     }
   }
 
-  async fn handle_indirect_ping<R, S>(&self, mut buf: Bytes, from: SocketAddr, spawner: S)
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  async fn handle_indirect_ping(&self, mut buf: Bytes, from: SocketAddr)
   {
     let len = match IndirectPing::decode_len(&mut buf) {
       Ok(len) => len,
@@ -351,7 +335,9 @@ where
           tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to forward ack");
         }
       }.boxed()
-    }, spawner).await;
+    }).await;
+
+    let spawner = self.inner.spawner;
 
     let mut out = BytesMut::with_capacity(MessageType::SIZE + ping.encoded_len());
     out.put_u8(MessageType::Ping as u8);
@@ -366,7 +352,7 @@ where
     if ind.nack {
       let this = self.clone();
       let probe_timeout = self.inner.opts.probe_timeout;
-      (spawner)(async move {
+      spawner.spawn(async move {
         let timer = Delay::new(probe_timeout);
         futures_util::select! {
           _ = timer.fuse() => {

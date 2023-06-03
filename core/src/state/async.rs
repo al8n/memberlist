@@ -1,8 +1,8 @@
 use std::{net::SocketAddr, time::Duration};
 
 use crate::{
-  showbiz::{Memberlist, AckHandler, Member},
-  types::{Alive, Dead, Name, Suspect, Message, MessageType}, timer::Timer, suspicion::Suspicion,
+  showbiz::{Memberlist, AckHandler, Member, Spawner},
+  types::{Alive, Dead, Name, Suspect, Message, MessageType}, timer::Timer, suspicion::Suspicion, network::RemoteNodeState,
 };
 
 use super::*;
@@ -10,22 +10,30 @@ use bytes::{Bytes, BytesMut, BufMut};
 use futures_channel::oneshot::Sender;
 use futures_util::{future::BoxFuture, FutureExt};
 
-impl<T, D> Showbiz<T, D>
+impl<T, S, D> Showbiz<T, S, D>
 where
   T: Transport,
+  S: Spawner,
   D: Delegate,
 {
   /// Does a complete state exchange with a specific node.
   pub(crate) async fn push_pull_node(
     &self,
-    name: &Name,
-    _addr: SocketAddr,
-    _join: bool,
-  ) -> Result<(), Error<T, D>> {
+    addr: &NodeId,
+    join: bool,
+  ) -> Result<(), Error<T, D>>
+  {
     // TODO: metrics
 
-    // self.send_and_receive_state(a, join).await
-    todo!()
+
+
+    let (remote, user_state) = self.send_and_receive_state(addr, join).await?;
+
+    self.merge_remote_state(RemoteNodeState {
+      join,
+      push_states: remote,
+      user_state,
+    }).await
   }
 
   pub(crate) async fn dead_node(
@@ -108,10 +116,7 @@ where
     Ok(())
   }
 
-  pub(crate) async fn suspect_node<R, S>(&self, s: Suspect, spawner: S) -> Result<(), Error<T, D>>
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  pub(crate) async fn suspect_node(&self, s: Suspect) -> Result<(), Error<T, D>>
   {
     let mut mu = self.inner.nodes.write().await;
 
@@ -170,7 +175,7 @@ where
     // relationship with our peers, we set up k such that we hit the nominal
     // timeout two probe intervals short of what we expect given the suspicion
     // multiplier.
-    let mut k = self.inner.opts.suspicion_mult.checked_sub(2).unwrap_or(0);
+    let mut k = self.inner.opts.suspicion_mult.saturating_sub(2);
 
     // If there aren't enough nodes to give the expected confirmations, just
 	  // set k to 0 to say that we don't expect any. Note we subtract 2 from n
@@ -185,6 +190,7 @@ where
     let max = (self.inner.opts.suspicion_max_timeout_mult as u64) * min;
 
     let this = self.clone();
+    let spawner = self.inner.spawner;
     state.suspicion = Some(Suspicion::new(
       s.from.clone(),
       k as u32,
@@ -223,9 +229,7 @@ where
           }
         }.boxed()
       },
-      move |fut| {
-        spawner(fut);
-      }
+      move |fut| spawner.spawn(fut)
     ));
     Ok(())
   }
@@ -241,10 +245,7 @@ where
     Ok(())
   }
 
-  pub(crate) async fn merge_state<R, S>(&self, remote: Vec<PushNodeState>, spawner: S) -> Result<(), Error<T, D>>
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  pub(crate) async fn merge_state(&self, remote: Vec<PushNodeState>) -> Result<(), Error<T, D>>
   {
     for r in remote {
       match r.state {
@@ -274,17 +275,15 @@ where
             node: r.node,
             from: self.inner.id.clone(),
           };
-          self.suspect_node(s, spawner).await?;
+          self.suspect_node(s).await?;
         },
       }
     }
     Ok(())
   }
 
-  pub(crate) async fn set_ack_handler<R, S, F>(&self, seq_no: u32, timeout: Duration, f: F, s: S)
+  pub(crate) async fn set_ack_handler<F>(&self, seq_no: u32, timeout: Duration, f: F)
   where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
     F: FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static,
   {
     // Add the handler
@@ -295,7 +294,7 @@ where
       nack_fn: None,
       timer: Timer::after(timeout, async move {
         tlock.lock().await.remove(&seq_no);
-      }, s),
+      }, |fut| self.inner.spawner.spawn(fut)),
     });
   }
 

@@ -4,23 +4,22 @@ use crate::showbiz::MessageHandoff;
 
 use super::*;
 
-impl<T, D> Showbiz<T, D>
+impl<T, S, D> Showbiz<T, S, D>
 where
   T: Transport,
+  S: Spawner,
   D: Delegate,
 {
   /// a long running thread that processes messages received
   /// over the packet interface, but is decoupled from the listener to avoid
   /// blocking the listener which may cause ping/ack messages to be delayed.
-  pub(crate) fn packet_handler<R, S>(&self, spawner: S)
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  pub(crate) fn packet_handler(&self)
   {
     let this = self.clone();
     let shutdown_rx = this.inner.shutdown_rx.clone();
     let handoff_rx = this.inner.handoff_rx.clone();
-    (spawner)(Box::pin(async move {
+    let spawner = self.inner.spawner;
+    spawner.spawn(Box::pin(async move {
       loop {
         futures_util::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -28,7 +27,7 @@ where
           }
           _ = handoff_rx.recv().fuse() => while let Some(msg) = this.get_next_message().await {
             match msg.msg_ty {
-              MessageType::Suspect => this.handle_suspect(msg, spawner).await,
+              MessageType::Suspect => this.handle_suspect(msg).await,
               MessageType::Alive => this.handle_alive(msg).await,
               MessageType::Dead => this.handle_dead(msg).await,
               MessageType::User => this.handle_user(msg).await,
@@ -48,10 +47,7 @@ where
     queue.high.pop_back().or_else(|| queue.low.pop_back())
   }
 
-  async fn handle_suspect<R, S>(&self, mut msg: MessageHandoff, spawner: S)
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  async fn handle_suspect(&self, mut msg: MessageHandoff)
   {
     let len = match Suspect::decode_len(&mut msg.buf) {
       Ok(len) => len,
@@ -69,7 +65,7 @@ where
       },
     };
 
-    if let Err(e) = self.suspect_node(suspect, spawner).await {
+    if let Err(e) = self.suspect_node(suspect).await {
       tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to suspect node");
     }
   }

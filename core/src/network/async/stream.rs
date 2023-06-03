@@ -3,22 +3,21 @@ use futures_util::io::BufReader;
 
 use super::*;
 
-impl<T, D> Showbiz<T, D>
+impl<T, S, D> Showbiz<T, S, D>
 where
   T: Transport,
+  S: Spawner,
   D: Delegate,
 {
   /// A long running thread that pulls incoming streams from the
   /// transport and hands them off for processing.
-  pub(crate) fn steram_listen<R, S>(&self, spawner: S)
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  pub(crate) fn steram_listen(&self)
   {
     let this = self.clone();
     let transport_rx = this.inner.transport.stream().clone();
     let shutdown_rx = this.inner.shutdown_rx.clone();
-    (spawner)(Box::pin(async move {
+    let spawner = self.inner.spawner;
+    spawner.spawn(Box::pin(async move {
       loop {
         futures_util::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -26,9 +25,9 @@ where
           }
           conn = transport_rx.recv().fuse() => {
             let this = this.clone();
-            (spawner)(async move {
+            spawner.spawn(async move {
               match conn {
-                Ok(conn) => this.handle_conn(conn, spawner).await,
+                Ok(conn) => this.handle_conn(conn).await,
                 Err(e) => tracing::error!(target = "showbiz", "failed to accept connection: {}", e),
               }
             }.boxed());
@@ -39,10 +38,7 @@ where
   }
 
   /// Handles a single incoming stream connection from the transport.
-  async fn handle_conn<R, S>(self, mut conn: T::Connection, spawner: S)
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  async fn handle_conn(self, mut conn: T::Connection)
   {
     let addr = <T::Connection as Connection>::remote_node(&conn).clone();
     tracing::debug!(target = "showbiz", remote_node = %addr, "stream connection");
@@ -214,7 +210,7 @@ where
           return;
         }
 
-        if let Err(e) = self.merge_remote_state(node_state, spawner).await {
+        if let Err(e) = self.merge_remote_state(node_state).await {
           tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to push/pull merge");
         }
       }
@@ -383,10 +379,7 @@ where
   }
 
   /// Used to merge the remote state with our local state
-  async fn merge_remote_state<R, S>(&self, node_state: RemoteNodeState, spawner: S) -> Result<(), Error<T, D>>
-  where
-    R: Send + Sync + 'static,
-    S: Fn(BoxFuture<'static, ()>) -> R + Copy + Send + Sync + 'static,
+  pub(crate) async fn merge_remote_state(&self, node_state: RemoteNodeState) -> Result<(), Error<T, D>>
   {
     self.verify_protocol(&node_state.push_states).await?;
 
@@ -413,7 +406,7 @@ where
     }
 
     // Merge the membership state
-    self.merge_state(node_state.push_states, spawner).await?;
+    self.merge_state(node_state.push_states).await?;
 
     // Invoke the delegate for user state
     if let Some(d) = &self.inner.delegate {

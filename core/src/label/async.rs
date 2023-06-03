@@ -70,7 +70,7 @@ impl<R: AsyncBufRead> AsyncBufRead for LabeledConnection<R> {
   }
 }
 
-impl<T: Transport, D: Delegate> Showbiz<T, D> {
+impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
   pub async fn add_label_header_to_stream<W: futures_io::AsyncWrite + std::marker::Unpin>(
     w: &mut W,
     label: &[u8],

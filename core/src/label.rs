@@ -1,5 +1,5 @@
 use crate::{
-  delegate::Delegate, error::Error, showbiz::Showbiz, transport::Transport, types::MessageType,
+  delegate::Delegate, error::Error, showbiz::{Showbiz, Spawner}, transport::Transport, types::MessageType,
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -27,7 +27,7 @@ fn make_label_header(label: &[u8], src: &[u8]) -> Bytes {
   dst.freeze()
 }
 
-impl<T: Transport, D: Delegate> Showbiz<T, D> {
+impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
   /// Rrefixes outgoing packets with the correct header if
   /// the label is not empty.
   pub fn add_label_header_to_packet<E>(src: &[u8], label: &[u8]) -> Result<Bytes, Error<T, D>> {

@@ -8,7 +8,7 @@ use crate::{
   transport::Connection,
   types::{InvalidMessageType, MessageType},
   util::{compress_payload, decompress_buffer, CompressionError},
-  Options, SecretKeyring,
+  Options, SecretKeyring, showbiz::Spawner,
 };
 
 use super::*;
@@ -52,7 +52,13 @@ impl InnerError {
   }
 }
 
-impl<T: Transport, D: Delegate> Showbiz<T, D> {
+impl<T: Transport, S: Spawner, D: Delegate> Showbiz<T, S, D> {
+  /// Used to initiate a push/pull over a stream with a
+  /// remote host.
+  pub(crate) async fn send_and_receive_state(&self, id: &NodeId, join: bool) -> Result<(Vec<PushNodeState>, Bytes), Error<T, D>> {
+    todo!()
+  }
+
   async fn encrypt_local_state(
     keyring: &SecretKeyring,
     msg: &[u8],

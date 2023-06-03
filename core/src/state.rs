@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
-use crate::types::{AckResponse, NackResponse, NodeAddress};
+use crate::{types::{AckResponse, NackResponse, NodeAddress}, showbiz::Spawner};
 
 use super::{
   delegate::Delegate,
@@ -35,9 +35,10 @@ impl LocalNodeState {
 }
 
 // private implementation
-impl<T, D> Showbiz<T, D>
+impl<T, S, D> Showbiz<T, S, D>
 where
   T: Transport,
+  S: Spawner,
   D: Delegate,
 {
   /// Returns a usable sequence number in a thread safe way
