@@ -3,8 +3,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::types::Name;
-
 #[inline]
 fn remaining_suspicion_time(
   n: u32,
@@ -188,7 +186,9 @@ mod r#impl {
 
 #[cfg(feature = "async")]
 mod r#impl {
-  use super::*;
+  use crate::types::NodeId;
+
+use super::*;
   use futures_util::{future::BoxFuture, FutureExt};
 
   pub(crate) struct Suspicion {
@@ -199,7 +199,7 @@ mod r#impl {
     start: Instant,
     timer: Timer,
     timeout_fn: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync>,
-    confirmations: HashSet<Name>,
+    confirmations: HashSet<NodeId>,
     spawner: Box<dyn Fn(BoxFuture<'static, ()>) + Send + Sync + 'static>,
   }
 
@@ -210,13 +210,14 @@ mod r#impl {
     /// gossiped back to us. The minimum time will be used if no confirmations are
     /// called for (k = 0).
     pub(crate) fn new(
-      from: Name,
+      from: NodeId,
       k: u32,
       min: Duration,
       max: Duration,
-      timeout_fn: impl Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static,
+      timeout_fn: impl Fn(u32) -> BoxFuture<'static, ()> + Clone + Send + Sync + 'static,
       spawner: impl Fn(BoxFuture<'static, ()>) + Copy + Send + Sync + 'static,
     ) -> Self {
+      #[allow(clippy::mutable_key_type)]
       let confirmations = [from].into_iter().collect();
       let n = Arc::new(AtomicU32::new(0));
       let timeout = if k < 1 { min } else { max };
@@ -240,7 +241,7 @@ mod r#impl {
     /// node is suspect. This returns true if this was new information, and false
     /// if it was a duplicate confirmation, or if we've got enough confirmations to
     /// hit the minimum.
-    pub(crate) async fn confirm(&mut self, from: Name) -> bool {
+    pub(crate) async fn confirm(&mut self, from: NodeId) -> bool {
       if self.n.load(Ordering::Relaxed) >= self.k {
         return false;
       }

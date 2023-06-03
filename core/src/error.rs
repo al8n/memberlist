@@ -1,5 +1,5 @@
 use crate::{
-  delegate::Delegate, transport::Transport, types::InvalidMessageType, util::InvalidAddress,
+  delegate::Delegate, transport::Transport, types::{InvalidMessageType, Domain}, util::InvalidAddress, options::ForbiddenIp,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +42,10 @@ pub enum Error<T: Transport, D: Delegate> {
   Transport(T::Error),
   #[error("showbiz: timeout waiting for leave broadcast")]
   LeaveTimeout,
+  #[error("showbiz: {0}")]
+  ForbiddenIp(#[from] ForbiddenIp),
+  #[error("showbiz: cannot parse ip from {0}")]
+  ParseIpFailed(Domain),
 }
 
 impl<D: Delegate, T: Transport> Error<T, D> {

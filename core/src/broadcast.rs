@@ -4,7 +4,7 @@ use crate::{
   network::USER_MSG_OVERHEAD,
   showbiz::Showbiz,
   transport::Transport,
-  types::{Message, Name},
+  types::{Message, Name, NodeId},
 };
 use async_channel::Sender;
 
@@ -44,7 +44,7 @@ pub trait Broadcast: Send + Sync + 'static {
 }
 
 pub(crate) struct ShowbizBroadcast {
-  node: Name,
+  node: NodeId,
   msg: Message,
   #[cfg(feature = "async")]
   notify: Option<async_channel::Sender<()>>,
@@ -61,7 +61,7 @@ impl Broadcast for ShowbizBroadcast {
   type Error = crossbeam_channel::SendError<()>;
 
   fn name(&self) -> &Name {
-    &self.node
+    &self.node.name
   }
 
   fn invalidates(&self, other: &Self) -> bool {
@@ -102,19 +102,19 @@ impl Broadcast for ShowbizBroadcast {
 #[cfg(feature = "async")]
 impl<T: Transport, D: Delegate> Showbiz<T, D> {
   #[inline]
-  pub(crate) async fn broadcast_notify(&self, node: Name, msg: Message, notify_tx: Sender<()>) {
+  pub(crate) async fn broadcast_notify(&self, node: NodeId, msg: Message, notify_tx: Sender<()>) {
     let _ = self.queue_broadcast(node, msg, Some(notify_tx)).await;
   }
 
   #[inline]
-  pub(crate) async fn broadcast(&self, node: Name, msg: Message) {
+  pub(crate) async fn broadcast(&self, node: NodeId, msg: Message) {
     let _ = self.queue_broadcast(node, msg, None).await;
   }
 
   #[inline]
   pub(crate) async fn queue_broadcast(
     &self,
-    node: Name,
+    node: NodeId,
     msg: Message,
     notify_tx: Option<Sender<()>>,
   ) -> Result<(), async_channel::SendError<()>> {

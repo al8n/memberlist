@@ -170,6 +170,17 @@ impl From<SocketAddr> for NodeId {
   }
 }
 
+#[cfg(test)]
+impl From<&str> for NodeId {
+  fn from(addr: &str) -> Self {
+    Self {
+      name: Name::try_from(addr).unwrap(),
+      port: None,
+      addr: NodeAddress::Domain(Default::default()),
+    }
+  }
+}
+
 impl core::fmt::Display for NodeId {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match &self.addr {

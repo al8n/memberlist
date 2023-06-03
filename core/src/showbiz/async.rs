@@ -97,7 +97,7 @@ where
         leave_broadcast_tx,
         leave_broadcast_rx,
         queue: Mutex::new(MessageQueue::new()),
-        nodes: RwLock::new(Memberlist::new(LocalNodeState {
+        nodes: Arc::new(RwLock::new(Memberlist::new(Member { state: LocalNodeState {
           node: Arc::new(Node {
             id: NodeId {
               name: opts.name.clone(),
@@ -116,7 +116,7 @@ where
           incarnation: 0,
           state: NodeState::Dead,
           state_change: Instant::now(),
-        })),
+        }, suspicion: None }))),
         opts: Arc::new(opts),
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
       }),
@@ -177,16 +177,16 @@ where
       self.inner.hot.leave.fetch_add(1, Ordering::SeqCst);
 
       let mut memberlist = self.inner.nodes.write().await;
-      if let Some(state) = memberlist.node_map.get(memberlist.local.id()) {
+      if let Some(state) = memberlist.node_map.get(memberlist.local.state.id()) {
         // This dead message is special, because Node and From are the
         // same. This helps other nodes figure out that a node left
         // intentionally. When Node equals From, other nodes know for
         // sure this node is gone.
 
         let d = Dead {
-          incarnation: state.incarnation,
-          node: state.node.id.clone(),
-          from: state.node.id.clone(),
+          incarnation: state.state.incarnation,
+          node: state.state.node.id.clone(),
+          from: state.state.node.id.clone(),
         };
 
         self.dead_node(&mut memberlist, d).await?;
@@ -284,7 +284,7 @@ where
   /// Used to return the local Node
   #[inline]
   pub async fn local_node(&self) -> Arc<Node> {
-    self.inner.nodes.read().await.local.node.clone()
+    self.inner.nodes.read().await.local.state.node.clone()
   }
 
   /// Used to trigger re-advertising the local node. This is
@@ -306,7 +306,7 @@ where
 
     // Get the existing node
     // unwrap safe here this is self
-    let node_id = self.inner.nodes.read().await.local().id().clone();
+    let node_id = self.inner.nodes.read().await.local().state().id().clone();
 
     // Format a new alive message
     let alive = Alive {
@@ -316,7 +316,7 @@ where
       vsn: self.inner.opts.build_vsn_array(),
     };
     let (notify_tx, notify_rx) = channel();
-    self.alive_node(alive, notify_tx, true).await?;
+    self.alive_node(alive, Some(notify_tx), true).await?;
 
     // Wait for the broadcast or a timeout
     if self.any_alive().await {

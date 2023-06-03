@@ -456,7 +456,10 @@ impl From<IpAddr> for NodeAddress {
 
 impl From<Domain> for NodeAddress {
   fn from(addr: Domain) -> Self {
-    Self::Domain(addr)
+    match addr.as_str().parse() {
+      Ok(ip) => Self::Ip(ip),
+      Err(_) => Self::Domain(addr),
+    }
   }
 }
 

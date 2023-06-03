@@ -171,22 +171,26 @@ impl MessageQueue {
 }
 
 #[viewit::viewit]
+pub(crate) struct Member {
+  state: LocalNodeState,
+  suspicion: Option<Suspicion>,
+}
+
+#[viewit::viewit]
 pub(crate) struct Memberlist {
   /// self
-  local: LocalNodeState,
+  local: Member,
   /// remote nodes
   nodes: Vec<LocalNodeState>,
-  node_map: HashMap<NodeId, LocalNodeState>,
-  node_timers: HashMap<NodeId, Suspicion>,
+  node_map: HashMap<NodeId, Member>,
 }
 
 impl Memberlist {
-  fn new(local: LocalNodeState) -> Self {
+  fn new(local: Member) -> Self {
     Self {
       local,
       nodes: Vec::new(),
       node_map: HashMap::new(),
-      node_timers: HashMap::new(),
     }
   }
 
@@ -194,7 +198,7 @@ impl Memberlist {
     self
       .nodes
       .iter()
-      .any(|n| !n.dead_or_left() && n.node.name() != self.local.node.name())
+      .any(|n| !n.dead_or_left() && n.node.name() != self.local.state.node.name())
   }
 }
 
@@ -226,7 +230,7 @@ pub(crate) struct ShowbizCore<T: Transport, D = VoidDelegate>
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue>,
-  nodes: RwLock<Memberlist>,
+  nodes: Arc<RwLock<Memberlist>>,
   ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
   dns: Option<DNS<T>>,
 }
@@ -234,6 +238,8 @@ pub(crate) struct ShowbizCore<T: Transport, D = VoidDelegate>
 pub struct Showbiz<T: Transport, D = VoidDelegate> {
   pub(crate) inner: Arc<ShowbizCore<T, D>>,
 }
+
+
 
 impl<T, D> Clone for Showbiz<T, D>
 where
@@ -244,5 +250,16 @@ where
     Self {
       inner: self.inner.clone(),
     }
+  }
+}
+
+impl<T, D> Showbiz<T, D>
+where
+  T: Transport,
+  D: Delegate,
+{
+  #[inline]
+  fn ip_must_be_checked(&self) -> bool {
+    self.inner.opts.allowed_cidrs.as_ref().map(|x| !x.is_empty()).unwrap_or(false)
   }
 }

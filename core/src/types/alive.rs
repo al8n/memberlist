@@ -57,6 +57,11 @@ impl Alive {
   }
 
   #[inline]
+  pub(crate) fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
+    decode_u32_from_buf(&mut buf).map(|(len, _)| len as usize).map_err(From::from)
+  }
+
+  #[inline]
   pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
     let mut this = Self::default();
     while buf.has_remaining() {

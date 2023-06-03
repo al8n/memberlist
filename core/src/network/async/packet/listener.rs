@@ -8,7 +8,6 @@ use crate::{
   util::decompress_payload,
 };
 use futures_timer::Delay;
-use futures_util::{stream::FuturesOrdered, StreamExt};
 use rand::Rng;
 
 use super::*;
@@ -205,7 +204,7 @@ where
     // Decode the lengths
     let mut trunc = 0usize;
     let mut lengths = buf.split_to(num_parts * 2);
-    let mut futs = (0..num_parts)
+    for msg in (0..num_parts)
       .filter_map(|_| {
         let len = lengths.get_u16();
         if buf.len() < len as usize {
@@ -213,15 +212,16 @@ where
           return None;
         }
 
-        let msg = buf.split_to(len as usize);
-        Some(self.handle_command(msg, from, timestamp, spawner))
+        Some(buf.split_to(len as usize))
       })
-      .collect::<FuturesOrdered<_>>();
+    {
+      self.handle_command(msg, from, timestamp, spawner).await;   
+    }
+
     if trunc > 0 {
       let num = num_parts - trunc;
       tracing::warn!(target = "showbiz", addr = %from, err = %CompoundError::TruncatedMsgs(num), "failed to decode compound request");
-    }
-    while futs.next().await.is_some() {}
+    } 
   }
 
   #[inline]

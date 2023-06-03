@@ -1,6 +1,6 @@
 use std::{
   collections::HashSet,
-  net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+  net::{Ipv4Addr, SocketAddr, SocketAddrV4, IpAddr},
   path::PathBuf,
   time::Duration,
 };
@@ -346,4 +346,39 @@ impl Options {
       .with_gossip_interval(Duration::from_millis(100))
       .with_gossip_to_the_dead_time(Duration::from_secs(15))
   }
+
+
+  /// Return true if `allowed_cidrs` must be called
+  #[inline]
+  pub fn ip_must_be_checked(&self) -> bool {
+    self.allowed_cidrs.as_ref().map(|x| !x.is_empty()).unwrap_or(false)
+  }
+
+  #[inline]
+  pub fn ip_allowed(&self, addr: IpAddr) -> Result<(), ForbiddenIp> {
+    if !self.ip_must_be_checked() {
+      return Ok(());
+    }
+
+    for n in self.allowed_cidrs.as_ref().unwrap().iter() {
+      let ip = ipnet::IpNet::from(addr);
+      if n.contains(&ip) {
+        return Ok(());
+      }
+    }
+
+    Err(ForbiddenIp(addr))
+  }
 }
+
+
+#[derive(Debug, Clone, Copy)]
+pub struct ForbiddenIp(IpAddr);
+
+impl core::fmt::Display for ForbiddenIp {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(f, "IP {} is not allowed", self.0)
+  }
+}
+
+impl std::error::Error for ForbiddenIp {}

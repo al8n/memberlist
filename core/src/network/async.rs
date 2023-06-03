@@ -127,7 +127,7 @@ impl<T: Transport, D: Delegate> Showbiz<T, D> {
     }
 
     // Read in the rest of the payload
-    buf.resize(meta_size + more_bytes as usize, 0);
+    buf.resize(meta_size + more_bytes, 0);
     r.read_exact(&mut buf).await?;
 
     // Decrypt the cipherText with some authenticated data
