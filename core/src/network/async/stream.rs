@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 use crate::types::{Node, NodeId};
 use futures_util::io::BufReader;
 
@@ -41,7 +43,10 @@ where
     let addr = <T::Connection as Connection>::remote_node(&conn).clone();
     tracing::debug!(target = "showbiz", remote_node = %addr, "stream connection");
 
-    // TODO: metrics
+    #[cfg(feature = "metrics")]
+    {
+      incr_tcp_accept_counter(self.inner.metrics_labels.iter());
+    }
 
     if self.inner.opts.tcp_timeout != Duration::ZERO {
       <T::Connection as Connection>::set_timeout(&mut conn, Some(self.inner.opts.tcp_timeout));
@@ -337,8 +342,6 @@ where
         .collect::<Vec<_>>()
     };
 
-    // TODO: metrics
-
     // Get the delegate state
     let user_data = if let Some(delegate) = &self.inner.delegate {
       delegate.local_state(join).await.map_err(Error::delegate)?
@@ -366,8 +369,45 @@ where
     // begin state push
     header.encode_to(&mut buf);
 
+    #[cfg(feature = "metrics")]
+    let mut node_state_counts = NodeState::empty_metrics();
+
     for n in local_nodes {
       n.encode_to(&mut buf);
+
+      #[cfg(feature = "metrics")]
+      {
+        node_state_counts[n.state as u8 as usize].1 += 1;
+      }
+    }
+
+    #[cfg(feature = "metrics")]
+    {
+      std::thread_local! {
+        static NODE_INSTANCES_GAUGE: std::cell::OnceCell<std::cell::RefCell<Vec<metrics::Label>>> = std::cell::OnceCell::new();
+      }
+
+      NODE_INSTANCES_GAUGE.with(|g| {
+        let mut labels = g
+          .get_or_init(|| {
+            let mut labels = (*self.inner.metrics_labels).clone();
+            labels.reserve_exact(1);
+            std::cell::RefCell::new(labels)
+          })
+          .borrow_mut();
+
+        for (idx, (node_state, cnt)) in node_state_counts.into_iter().enumerate() {
+          let label = metrics::Label::new("node_state", node_state);
+          if idx == 0 {
+            labels.push(label);
+          } else {
+            *labels.last_mut().unwrap() = label;
+          }
+          let iter = labels.iter();
+          metrics::gauge!("showbiz.node.instances", cnt as f64, iter);
+        }
+        labels.pop();
+      });
     }
 
     // Write the user state as well
@@ -375,10 +415,14 @@ where
       buf.put_slice(&user_data);
     }
 
-    // TODO: metrics
+    let buf = buf.freeze();
+    #[cfg(feature = "metrics")]
+    {
+      set_local_size_gauge(basic_len as f64, self.inner.metrics_labels.iter());
+    }
 
     self
-      .raw_send_msg_stream(lr, buf.freeze(), addr, encryption_enabled)
+      .raw_send_msg_stream(lr, buf, addr, encryption_enabled)
       .await
   }
 
@@ -524,7 +568,14 @@ where
       .await
       {
         // Write out the entire send buffer
-        Ok(crypt) => lr.conn.write_all(&crypt).await.map_err(From::from),
+        Ok(crypt) => {
+          #[cfg(feature = "metrics")]
+          {
+            incr_tcp_sent_counter(crypt.len() as u64, self.inner.metrics_labels.iter());
+          }
+
+          lr.conn.write_all(&crypt).await.map_err(From::from)
+        }
         Err(e) => {
           tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to encrypt local state");
           Err(e)
@@ -532,7 +583,11 @@ where
       }
     } else {
       // Write out the entire send buffer
-      //TODO: handle metrics
+      #[cfg(feature = "metrics")]
+      {
+        incr_tcp_sent_counter(buf.len() as u64, self.inner.metrics_labels.iter());
+      }
+
       lr.conn
         .write_all(&buf)
         .await

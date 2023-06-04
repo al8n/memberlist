@@ -123,6 +123,7 @@ where
         opts: Arc::new(opts),
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
         spawner,
+        metrics_labels: Arc::new(vec![]),
       }),
     })
   }
@@ -173,6 +174,7 @@ pub(crate) struct ShowbizCore<D: Delegate, T: Transport, S: Spawner> {
   nodes: Arc<RwLock<Memberlist>>,
   ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
   dns: Option<DNS<T>>,
+  metrics_labels: Arc<Vec<metrics::Label>>,
   spawner: S,
 }
 

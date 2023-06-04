@@ -62,7 +62,10 @@ impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
       .map_err(Error::transport)?;
     tracing::debug!(target = "showbiz", "initiating push/pull sync with: {}", id);
 
-    // TODO: update metrics
+    #[cfg(feature = "metrics")]
+    {
+      incr_tcp_connect_counter(self.inner.metrics_labels.iter());
+    }
 
     // Send our state
     let mut lr = LabeledConnection::new(BufReader::new(conn));

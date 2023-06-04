@@ -489,7 +489,12 @@ where
     }
 
     macro_rules! return_bail {
-      ($this:ident, $buf: ident, $addr: ident) => {
+      ($this:ident, $buf: ident, $addr: ident) => {{
+        #[cfg(feature = "metrics")]
+        {
+          incr_udp_sent_counter($buf.len() as u64, self.inner.metrics_labels.iter());
+        }
+
         $this
           .inner
           .transport
@@ -497,7 +502,7 @@ where
           .await
           .map(|_| ())
           .map_err(Error::transport)
-      };
+      }};
     }
 
     if addr.name().is_empty() && self.inner.opts.require_node_names {

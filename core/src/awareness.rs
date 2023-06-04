@@ -1,7 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use metrics::Label;
-
 #[derive(Debug)]
 pub(crate) struct Inner {
   /// max is the upper threshold for the timeout scale (the score will be
@@ -22,17 +20,22 @@ pub(crate) struct Awareness {
   pub(crate) inner: Arc<async_lock::RwLock<Inner>>,
   #[cfg(not(feature = "async"))]
   pub(crate) inner: Arc<parking_lot::RwLock<Inner>>,
-  pub(crate) metric_labels: Arc<Vec<Label>>,
+  #[cfg(feature = "metrics")]
+  pub(crate) metric_labels: Arc<Vec<metrics::Label>>,
 }
 
 impl Awareness {
   /// Returns a new awareness object.
-  pub(crate) fn new(max: isize, metric_labels: Arc<Vec<Label>>) -> Self {
+  pub(crate) fn new(
+    max: isize,
+    #[cfg(feature = "metrics")] metric_labels: Arc<Vec<metrics::Label>>,
+  ) -> Self {
     Self {
       #[cfg(feature = "async")]
       inner: Arc::new(async_lock::RwLock::new(Inner { max, score: 0 })),
       #[cfg(not(feature = "async"))]
       inner: Arc::new(parking_lot::RwLock::new(Inner { max, score: 0 })),
+      #[cfg(feature = "metrics")]
       metric_labels,
     }
   }
@@ -42,37 +45,64 @@ impl Awareness {
   /// change the overall score if it's railed at one of the extremes.
   #[cfg(feature = "async")]
   pub(crate) async fn apply_delta(&self, delta: isize) {
-    let mut inner = self.inner.write().await;
-    let initial = inner.score;
-    inner.score += delta;
-    if inner.score < 0 {
-      inner.score = 0;
-    } else if inner.score > inner.max - 1 {
-      inner.score = inner.max - 1;
-    }
+    let (_initial, _fnl) = {
+      let mut inner = self.inner.write().await;
+      let initial = inner.score;
+      inner.score += delta;
+      if inner.score < 0 {
+        inner.score = 0;
+      } else if inner.score > inner.max - 1 {
+        inner.score = inner.max - 1;
+      }
+      (initial, inner.score)
+    };
 
-    let fnl = inner.score;
-    drop(inner);
-    if initial != fnl {
-      // TODO: update metrics
+    #[cfg(feature = "metrics")]
+    {
+      const HEALTH_GAUGE: std::sync::Once = std::sync::Once::new();
+
+      if _initial != _fnl {
+        HEALTH_GAUGE.call_once(|| {
+          metrics::register_gauge!("showbiz.health.score");
+        });
+        metrics::gauge!(
+          "showbiz.health.score",
+          _fnl as f64,
+          self.metric_labels.iter()
+        );
+      }
     }
   }
 
   #[cfg(not(feature = "async"))]
   pub(crate) fn apply_delta(&self, delta: isize) {
-    let mut inner = self.inner.write();
-    let initial = inner.score;
-    inner.score += delta;
-    if inner.score < 0 {
-      inner.score = 0;
-    } else if inner.score > inner.max - 1 {
-      inner.score = inner.max - 1;
-    }
+    let (_initial, _fnl) = {
+      let mut inner = self.inner.write();
+      let initial = inner.score;
+      inner.score += delta;
+      if inner.score < 0 {
+        inner.score = 0;
+      } else if inner.score > inner.max - 1 {
+        inner.score = inner.max - 1;
+      }
 
-    let fnl = inner.score;
-    drop(inner);
-    if initial != fnl {
-      // TODO: update metrics
+      (initial, inner.score)
+    };
+
+    #[cfg(feature = "metrics")]
+    {
+      const HEALTH_GAUGE: std::sync::Once = std::sync::Once::new();
+
+      if _initial != _fnl {
+        HEALTH_GAUGE.call_once(|| {
+          metrics::register_gauge!("showbiz.health.score");
+        });
+        metrics::gauge!(
+          "showbiz.health.score",
+          _fnl as f64,
+          self.metric_labels.iter()
+        );
+      }
     }
   }
 

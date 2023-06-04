@@ -1,11 +1,12 @@
-use std::{net::SocketAddr, time::Duration, sync::atomic::Ordering};
+use std::{net::SocketAddr, sync::atomic::Ordering, time::Duration};
 
 use crate::{
   network::{RemoteNodeState, COMPOUND_HEADER_OVERHEAD, COMPOUND_OVERHEAD},
+  security::encrypt_overhead,
   showbiz::{AckHandler, Member, Memberlist, Spawner},
   suspicion::Suspicion,
   timer::Timer,
-  types::{Alive, Dead, Message, MessageType, Name, Suspect, Ping}, security::encrypt_overhead,
+  types::{Alive, Dead, Message, MessageType, Name, Ping, Suspect},
 };
 
 use super::*;
@@ -31,8 +32,8 @@ where
 
   'outer: loop {
     // Probe up to 3*n times, with large n this is not necessary
-	  // since k << n, but with small n we want search to be
-	  // exhaustive
+    // since k << n, but with small n we want search to be
+    // exhaustive
     for i in 0..k {
       // Get random node state
       let idx = random_offset(n);
@@ -85,12 +86,18 @@ where
     let self_addr = self.get_advertise().await;
     let ping = Ping {
       seq_no: self.next_seq_no(),
-      source: NodeId { name: self.inner.opts.name.clone(), port: Some(self_addr.port()), addr: self_addr.ip().into() },
+      source: NodeId {
+        name: self.inner.opts.name.clone(),
+        port: Some(self_addr.port()),
+        addr: self_addr.ip().into(),
+      },
       target: Some(node.clone()),
     };
 
     let (ack_tx, ack_rx) = async_channel::bounded(self.inner.opts.indirect_checks + 1);
-    self.set_probe_channels(ping.seq_no, ack_tx, None, self.inner.opts.probe_interval).await;
+    self
+      .set_probe_channels(ping.seq_no, ack_tx, None, self.inner.opts.probe_interval)
+      .await;
 
     // Send a ping to the node.
     let mut msg = BytesMut::with_capacity(ping.encoded_len() + MessageType::SIZE);
@@ -98,8 +105,8 @@ where
     ping.encode_to(&mut msg);
     self.send_msg(&node, Message(msg)).await?;
     // Mark the sent time here, which should be after any pre-processing and
-	  // system calls to do the actual send. This probably under-reports a bit,
-  	// but it's the best we can do.
+    // system calls to do the actual send. This probably under-reports a bit,
+    // but it's the best we can do.
     let sent = Instant::now();
 
     // Wait for response or timeout.
@@ -110,7 +117,7 @@ where
           if complete {
             return Ok(sent.elapsed());
           }
-        } 
+        }
       }
       _ = Delay::new(self.inner.opts.probe_timeout).fuse() => {}
     }
@@ -121,7 +128,6 @@ where
   }
 }
 
-
 // ---------------------------------Crate methods-------------------------------
 impl<D, T, S> Showbiz<D, T, S>
 where
@@ -131,7 +137,12 @@ where
 {
   /// Does a complete state exchange with a specific node.
   pub(crate) async fn push_pull_node(&self, addr: &NodeId, join: bool) -> Result<(), Error<D, T>> {
-    // TODO: metrics
+    #[cfg(feature = "metrics")]
+    let now = Instant::now();
+    #[cfg(feature = "metrics")]
+    scopeguard::defer!(
+      observe_push_pull_node(now.elapsed().as_millis() as f64, self.inner.metrics_labels.iter());
+    );
 
     self
       .merge_remote_state(self.send_and_receive_state(addr, join).await?)
@@ -189,7 +200,10 @@ where
       self.broadcast(d.node.clone(), msg).await;
     }
 
-    // TODO: update metrics
+    #[cfg(feature = "metrics")]
+    {
+      incr_msg_dead(self.inner.metrics_labels.iter());
+    }
 
     // Update the state
     state.state.incarnation = d.incarnation;
@@ -260,7 +274,10 @@ where
       self.broadcast(s.node.clone(), Message(buf)).await;
     }
 
-    // TODO: Update metrics
+    #[cfg(feature = "metrics")]
+    {
+      incr_msg_suspect(self.inner.metrics_labels.iter());
+    }
 
     // Update the state
     state.state.incarnation = s.incarnation;
@@ -324,8 +341,11 @@ where
           };
 
           if let Some(dead) = timeout {
-            if k > 0 && k > num_confirmations as usize {
-              // TODO: metrics
+            #[cfg(feature = "metrics")]
+            {
+              if k > 0 && k > num_confirmations as usize {
+                incr_degraded_timeout(t.inner.metrics_labels.iter())
+              }
             }
 
             tracing::info!(
@@ -417,7 +437,6 @@ where
   }
 }
 
-
 // -------------------------------Private Methods--------------------------------
 
 #[inline]
@@ -454,6 +473,15 @@ where
   D: Delegate,
   S: Spawner,
 {
+  async fn probe_node(&self, node: &LocalNodeState) {
+    #[cfg(feature = "metrics")]
+    let now = Instant::now();
+    #[cfg(feature = "metrics")]
+    scopeguard::defer! {
+      observe_probe_node(now.elapsed().as_millis() as f64, self.inner.metrics_labels.iter());
+    }
+  }
+
   /// Used when the tick wraps around. It will reap the
   /// dead nodes and shuffle the node list.
   async fn reset_nodes(&self) {
@@ -475,7 +503,11 @@ where
     }
 
     // Update num_nodes after we've trimmed the dead nodes
-    self.inner.hot.num_nodes.store(dead_idx as u32, Ordering::Relaxed);
+    self
+      .inner
+      .hot
+      .num_nodes
+      .store(dead_idx as u32, Ordering::Relaxed);
 
     // Shuffle live nodes
     memberlist.nodes.shuffle(&mut rand::thread_rng());
@@ -485,7 +517,13 @@ where
   /// with a given sequence number is received. The `complete` field of the message
   /// will be false on timeout. Any nack messages will cause an empty struct to be
   /// passed to the nackCh, which can be nil if not needed.
-  async fn set_probe_channels(&self, seq_no: u32, ack_tx: async_channel::Sender<AckMessage>, nack_tx: Option<async_channel::Sender<()>>, timeout: Duration) {
+  async fn set_probe_channels(
+    &self,
+    seq_no: u32,
+    ack_tx: async_channel::Sender<AckMessage>,
+    nack_tx: Option<async_channel::Sender<()>>,
+    timeout: Duration,
+  ) {
     let tx = ack_tx.clone();
     let ack_fn = |payload, timestamp| {
       async move {
@@ -497,7 +535,8 @@ where
           }).fuse() => {},
           default => {}
         }
-      }.boxed()
+      }
+      .boxed()
     };
 
     let nack_fn = move || {
@@ -509,35 +548,44 @@ where
             default => {}
           }
         }
-      }.boxed()
+      }
+      .boxed()
     };
 
     let ack_handlers = self.inner.ack_handlers.clone();
-    self.inner.ack_handlers.lock().await.insert(seq_no, AckHandler {
-      ack_fn: Box::new(ack_fn),
-      nack_fn: Some(Arc::new(nack_fn)),
-      timer: Timer::after(
-        timeout,
-        async move {
-          ack_handlers.lock().await.remove(&seq_no);
-          futures_util::select! {
-            _ = ack_tx.send(AckMessage {
-              payload: Bytes::new(),
-              timestamp: Instant::now(),
-              complete: false,
-            }).fuse() => {},
-            default => {}
-          }
-        },
-        |fut| self.inner.spawner.spawn(fut),
-      ),
-    });
+    self.inner.ack_handlers.lock().await.insert(
+      seq_no,
+      AckHandler {
+        ack_fn: Box::new(ack_fn),
+        nack_fn: Some(Arc::new(nack_fn)),
+        timer: Timer::after(
+          timeout,
+          async move {
+            ack_handlers.lock().await.remove(&seq_no);
+            futures_util::select! {
+              _ = ack_tx.send(AckMessage {
+                payload: Bytes::new(),
+                timestamp: Instant::now(),
+                complete: false,
+              }).fuse() => {},
+              default => {}
+            }
+          },
+          |fut| self.inner.spawner.spawn(fut),
+        ),
+      },
+    );
   }
 
   /// Invoked every GossipInterval period to broadcast our gossip
   /// messages to a few random nodes.
   async fn gossip(&self) {
-    // TODO: metrics
+    #[cfg(feature = "metrics")]
+    let now = Instant::now();
+    #[cfg(feature = "metrics")]
+    scopeguard::defer!(
+      observe_gossip(now.elapsed().as_millis() as f64, self.inner.metrics_labels.iter());
+    );
 
     // Get some random live, suspect, or recently dead nodes
     let nodes = {
@@ -545,20 +593,18 @@ where
       random_nodes(
         self.inner.opts.gossip_nodes,
         &memberlist,
-        Some(|n: &LocalNodeState| {
-          match n.state {
-            NodeState::Alive | NodeState::Suspect => false,
-            NodeState::Dead => {
-              n.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time
-            }
-            _ => true,
-          }
+        Some(|n: &LocalNodeState| match n.state {
+          NodeState::Alive | NodeState::Suspect => false,
+          NodeState::Dead => n.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time,
+          _ => true,
         }),
       )
     };
 
     // Compute the bytes available
-    let mut bytes_avail = self.inner.opts.packet_buffer_size - COMPOUND_HEADER_OVERHEAD - Self::label_overhead(&self.inner.opts.label);
+    let mut bytes_avail = self.inner.opts.packet_buffer_size
+      - COMPOUND_HEADER_OVERHEAD
+      - Self::label_overhead(&self.inner.opts.label);
 
     if self.encryption_enabled().await {
       bytes_avail = bytes_avail.saturating_sub(encrypt_overhead(self.inner.opts.encryption_algo));
@@ -566,7 +612,10 @@ where
 
     for node in nodes {
       // Get any pending broadcasts
-      let mut msgs = match self.get_broadcast_with_prepend(vec![], COMPOUND_OVERHEAD, bytes_avail).await {
+      let mut msgs = match self
+        .get_broadcast_with_prepend(vec![], COMPOUND_OVERHEAD, bytes_avail)
+        .await
+      {
         Ok(msgs) => msgs,
         Err(e) => {
           tracing::error!(target = "showbiz", err = %e, "failed to get broadcast messages from {}", node);
@@ -602,9 +651,11 @@ where
     // get a random live node
     let nodes = {
       let memberlist = self.inner.nodes.read().await;
-      random_nodes(1, &memberlist, Some(|n: &LocalNodeState| {
-        n.state != NodeState::Alive
-      }))
+      random_nodes(
+        1,
+        &memberlist,
+        Some(|n: &LocalNodeState| n.state != NodeState::Alive),
+      )
     };
 
     if nodes.is_empty() {
@@ -648,7 +699,6 @@ where
     self.broadcast(me.state.node.id.clone(), Message(buf)).await;
   }
 }
-
 
 #[inline]
 fn suspicion_timeout(suspicion_mult: usize, n: usize, interval: Duration) -> u64 {

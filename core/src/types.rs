@@ -282,9 +282,7 @@ impl Message {
   pub(crate) fn compounds(mut msgs: Vec<Self>) -> Vec<BytesMut> {
     const MAX_MESSAGES: usize = 255;
 
-    let mut bufs = Vec::with_capacity(
-      (msgs.len() + MAX_MESSAGES - 1) / MAX_MESSAGES
-    );
+    let mut bufs = Vec::with_capacity((msgs.len() + MAX_MESSAGES - 1) / MAX_MESSAGES);
 
     while msgs.len() > MAX_MESSAGES {
       bufs.push(Self::compound(msgs.drain(..MAX_MESSAGES).collect()));
@@ -858,6 +856,13 @@ pub enum NodeState {
   Suspect = 1,
   Dead = 2,
   Left = 3,
+}
+
+impl NodeState {
+  #[inline]
+  pub(crate) const fn empty_metrics() -> [(&'static str, usize); 4] {
+    [("alive", 0), ("suspect", 0), ("dead", 0), ("left", 0)]
+  }
 }
 
 impl TryFrom<u8> for NodeState {
