@@ -16,6 +16,8 @@ pub(crate) struct Inner {
 /// cluster.
 #[derive(Debug, Clone)]
 pub(crate) struct Awareness {
+  #[cfg(feature = "metrics")]
+  id: crate::types::NodeId,
   #[cfg(feature = "async")]
   pub(crate) inner: Arc<async_lock::RwLock<Inner>>,
   #[cfg(not(feature = "async"))]
@@ -29,6 +31,7 @@ impl Awareness {
   pub(crate) fn new(
     max: isize,
     #[cfg(feature = "metrics")] metric_labels: Arc<Vec<metrics::Label>>,
+    #[cfg(feature = "metrics")] id: crate::types::NodeId,
   ) -> Self {
     Self {
       #[cfg(feature = "async")]
@@ -37,6 +40,8 @@ impl Awareness {
       inner: Arc::new(parking_lot::RwLock::new(Inner { max, score: 0 })),
       #[cfg(feature = "metrics")]
       metric_labels,
+      #[cfg(feature = "metrics")]
+      id,
     }
   }
 
@@ -63,7 +68,8 @@ impl Awareness {
 
       if _initial != _fnl {
         HEALTH_GAUGE.call_once(|| {
-          metrics::register_gauge!("showbiz.health.score");
+          metrics::register_gauge!("showbiz.health.score", "node" => self.id.to_string());
+          metrics::describe_gauge!("showbiz.health.score", "the health score of the local node");
         });
         metrics::gauge!(
           "showbiz.health.score",
@@ -135,6 +141,10 @@ impl Awareness {
 #[tokio::test]
 #[cfg(all(feature = "async", test))]
 async fn test_awareness() {
+  use std::net::SocketAddr;
+
+  use crate::types::{Name, NodeId};
+
   let cases = vec![
     (0, 0, Duration::from_secs(1)),
     (-1, 0, Duration::from_secs(1)),
@@ -151,8 +161,13 @@ async fn test_awareness() {
     (-1, 0, Duration::from_secs(1)),
     (-1, 0, Duration::from_secs(1)),
   ];
-
-  let a = Awareness::new(8, Arc::new(vec![]));
+  let a = Awareness::new(
+    8,
+    #[cfg(feature = "metrics")]
+    Arc::new(vec![]),
+    #[cfg(feature = "metrics")]
+    NodeId::new(Name::new(), SocketAddr::from(([127, 0, 0, 1], 0))),
+  );
   for (delta, score, timeout) in cases {
     a.apply_delta(delta).await;
     assert_eq!(a.get_health_score().await, score);

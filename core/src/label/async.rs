@@ -3,7 +3,7 @@ use crate::showbiz::Showbiz;
 use super::*;
 use crate::delegate::Delegate;
 use futures_util::{
-  io::{AsyncBufRead, AsyncRead, BufReader},
+  io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader},
   AsyncBufReadExt, AsyncWriteExt,
 };
 
@@ -67,6 +67,30 @@ impl<R: AsyncBufRead> AsyncBufRead for LabeledConnection<R> {
 
   fn consume(self: std::pin::Pin<&mut Self>, amt: usize) {
     self.project().conn.consume(amt)
+  }
+}
+
+impl<W: AsyncWrite> AsyncWrite for LabeledConnection<W> {
+  fn poll_write(
+    self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+    buf: &[u8],
+  ) -> std::task::Poll<futures_io::Result<usize>> {
+    self.project().conn.poll_write(cx, buf)
+  }
+
+  fn poll_flush(
+    self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<futures_io::Result<()>> {
+    self.project().conn.poll_flush(cx)
+  }
+
+  fn poll_close(
+    self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<futures_io::Result<()>> {
+    self.project().conn.poll_close(cx)
   }
 }
 

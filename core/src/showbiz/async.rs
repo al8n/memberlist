@@ -51,8 +51,16 @@ where
     }
 
     // TODO: alive node
-
-    let awareness = Awareness::new(opts.awareness_max_multiplier as isize, Arc::new(vec![]));
+    let id = NodeId {
+      name: opts.name.clone(),
+      port: Some(opts.bind_addr.port()),
+      addr: opts.bind_addr.ip().into(),
+    };
+    let awareness = Awareness::new(
+      opts.awareness_max_multiplier as isize,
+      Arc::new(vec![]),
+      id.clone(),
+    );
     let hot = HotData::new();
     let broadcast = TransmitLimitedQueue::new(
       DefaultNodeCalculator::new(hot.num_nodes),
@@ -76,11 +84,7 @@ where
     // let num_nodes = hot.num_nodes;
     Ok(Showbiz {
       inner: Arc::new(ShowbizCore {
-        id: NodeId {
-          name: opts.name.clone(),
-          port: Some(opts.bind_addr.port()),
-          addr: opts.bind_addr.ip().into(),
-        },
+        id,
         awareness,
         broadcast,
         hot: HotData::new(),
