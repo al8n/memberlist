@@ -6,7 +6,7 @@ use crate::{
   label::LabeledConnection,
   security::{append_bytes, encrypted_length, EncryptionAlgo, SecurityError},
   showbiz::Spawner,
-  transport::Connection,
+  transport::{Connection, TransportError},
   types::{InvalidMessageType, MessageType},
   util::{compress_payload, decompress_buffer, CompressionError},
   Options, SecretKeyring,
@@ -25,7 +25,7 @@ mod stream;
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkError<T: Transport> {
   #[error("{0}")]
-  Transport(T::Error),
+  Transport(#[from] TransportError<T>),
   #[error("{0}")]
   IO(#[from] std::io::Error),
   #[error("{0}")]

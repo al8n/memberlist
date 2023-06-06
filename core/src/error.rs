@@ -2,7 +2,7 @@ use crate::{
   delegate::Delegate,
   network::NetworkError,
   options::ForbiddenIp,
-  transport::Transport,
+  transport::{Transport, TransportError},
   types::{DecodeError, Domain, InvalidMessageType, NodeId},
   util::InvalidAddress,
 };
@@ -40,7 +40,7 @@ pub enum Error<D: Delegate, T: Transport> {
   #[error("showbiz: {0}")]
   Delegate(D::Error),
   #[error("showbiz: {0}")]
-  Transport(T::Error),
+  Transport(TransportError<T>),
   #[error("showbiz: timeout waiting for leave broadcast")]
   LeaveTimeout,
   #[error("showbiz: {0}")]
@@ -61,7 +61,7 @@ impl<D: Delegate, T: Transport> Error<D, T> {
   }
 
   #[inline]
-  pub fn transport(e: T::Error) -> Self {
+  pub fn transport(e: TransportError<T>) -> Self {
     Self::Transport(e)
   }
 

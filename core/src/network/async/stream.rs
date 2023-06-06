@@ -5,6 +5,11 @@ use futures_util::io::BufReader;
 
 use super::*;
 
+#[test]
+fn test() {
+
+}
+
 impl<D, T, S> Showbiz<D, T, S>
 where
   T: Transport,
