@@ -22,23 +22,34 @@ fn remaining_suspicion_time(
 }
 
 pub(crate) use r#impl::Suspicion;
-
-#[cfg(not(feature = "async"))]
+#[cfg(feature = "async")]
 mod r#impl {
-  use super::*;
+  use crate::types::Name;
 
-  pub(crate) struct Suspicion {
+  use super::*;
+  use agnostic::Runtime;
+  use futures_util::{future::BoxFuture, Future, FutureExt};
+
+  pub(crate) struct Suspicion<R>
+  where
+    R: Runtime,
+  {
     n: Arc<AtomicU32>,
     k: u32,
     min: Duration,
     max: Duration,
     start: Instant,
-    timer: Timer,
-    timeout_fn: Arc<dyn Fn(u32) + Send + Sync>,
+    timer: Timer<R>,
+    timeout_fn: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync>,
     confirmations: HashSet<Name>,
+    runtime: R,
   }
 
-  impl Suspicion {
+  impl<R> Suspicion<R>
+  where
+    R: Runtime,
+    <R::Sleep as Future>::Output: Send,
+  {
     /// Returns a timer started with the max time, and that will drive
     /// to the min time after seeing k or more confirmations. The from node will be
     /// excluded from confirmations since we might get our own suspicion message
@@ -49,180 +60,15 @@ mod r#impl {
       k: u32,
       min: Duration,
       max: Duration,
-      timeout_fn: impl Fn(u32) + Send + Sync + 'static,
-    ) -> Self {
-      let confirmations = [from].into_iter().collect();
-      let n = Arc::new(AtomicU32::new(0));
-      let timeout = if k < 1 { min } else { max };
-      let timeout_fn = Arc::new(timeout_fn);
-      let timer = Timer::new(n.clone(), timeout, timeout_fn.clone());
-      timer.start();
-      Suspicion {
-        n,
-        k,
-        min,
-        max,
-        start: Instant::now(),
-        timer,
-        timeout_fn,
-        confirmations,
-      }
-    }
-
-    /// Confirm registers that a possibly new peer has also determined the given
-    /// node is suspect. This returns true if this was new information, and false
-    /// if it was a duplicate confirmation, or if we've got enough confirmations to
-    /// hit the minimum.
-    pub(crate) fn confirm(&mut self, from: Name) -> bool {
-      if self.n.load(Ordering::Relaxed) >= self.k {
-        return false;
-      }
-
-      if self.confirmations.contains(&from) {
-        return false;
-      }
-      self.confirmations.insert(from);
-
-      // Compute the new timeout given the current number of confirmations and
-      // adjust the timer. If the timeout becomes negative *and* we can cleanly
-      // stop the timer then we will call the timeout function directly from
-      // here.
-      let n = self.n.fetch_add(1, Ordering::SeqCst) + 1;
-      let elapsed = self.start.elapsed();
-      let remaining = remaining_suspicion_time(n, self.k, elapsed, self.min, self.max);
-
-      if self.timer.stop() {
-        if remaining > Duration::ZERO {
-          self.timer.reset(remaining);
-        } else {
-          (self.timeout_fn)(self.n.load(Ordering::SeqCst));
-        }
-      }
-      true
-    }
-  }
-
-  pub(super) struct Timer {
-    n: Arc<AtomicU32>,
-    timeout: Duration,
-    start: Instant,
-    stop_rx: crossbeam_channel::Receiver<()>,
-    stop_tx: crossbeam_channel::Sender<()>,
-    stopped: Arc<AtomicBool>,
-    f: Arc<dyn Fn(u32) + Send + Sync + 'static>,
-  }
-
-  impl Timer {
-    pub fn new(
-      n: Arc<AtomicU32>,
-      timeout: Duration,
-      f: Arc<impl Fn(u32) + Send + Sync + 'static>,
-    ) -> Self {
-      let (tx, rx) = crossbeam_channel::bounded(1);
-      let stopped = Arc::new(AtomicBool::new(false));
-
-      Self {
-        n,
-        timeout,
-        stop_rx: rx,
-        stop_tx: tx,
-        stopped,
-        f,
-        start: Instant::now(),
-      }
-    }
-
-    pub fn start(&self) {
-      let rx = self.stop_rx.clone();
-      let n = self.n.clone();
-      let f = self.f.clone();
-      let timeout = self.timeout;
-
-      std::thread::spawn(move || {
-        crossbeam_channel::select! {
-          recv(rx) -> _ => {}
-          recv(crossbeam_channel::after(timeout)) -> _ => {
-            f(n.load(Ordering::SeqCst));
-          }
-        }
-      });
-    }
-
-    pub fn reset(&mut self, remaining: Duration) {
-      self.stop();
-      let rx = self.stop_rx.clone();
-      let n = self.n.clone();
-      let f = self.f.clone();
-      self.timeout = remaining;
-      self.start = Instant::now();
-
-      std::thread::spawn(move || {
-        crossbeam_channel::select! {
-          recv(rx) -> _ => {}
-          recv(crossbeam_channel::after(remaining)) -> _ => {
-            f(n.load(Ordering::SeqCst));
-          }
-        }
-      });
-    }
-
-    pub fn stop(&self) -> bool {
-      if self.start.elapsed() >= self.timeout {
-        return false;
-      }
-
-      if self.stopped.load(Ordering::SeqCst) {
-        false
-      } else {
-        self.stopped.store(true, Ordering::SeqCst);
-        if let Err(e) = self.stop_tx.send(()) {
-          tracing::error!(target = "showbiz", err = %e);
-        }
-        true
-      }
-    }
-  }
-}
-
-#[cfg(feature = "async")]
-mod r#impl {
-  use crate::types::NodeId;
-
-  use super::*;
-  use futures_util::{future::BoxFuture, FutureExt};
-
-  pub(crate) struct Suspicion {
-    n: Arc<AtomicU32>,
-    k: u32,
-    min: Duration,
-    max: Duration,
-    start: Instant,
-    timer: Timer,
-    timeout_fn: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync>,
-    confirmations: HashSet<NodeId>,
-    spawner: Box<dyn Fn(BoxFuture<'static, ()>) + Send + Sync + 'static>,
-  }
-
-  impl Suspicion {
-    /// Returns a timer started with the max time, and that will drive
-    /// to the min time after seeing k or more confirmations. The from node will be
-    /// excluded from confirmations since we might get our own suspicion message
-    /// gossiped back to us. The minimum time will be used if no confirmations are
-    /// called for (k = 0).
-    pub(crate) fn new(
-      from: NodeId,
-      k: u32,
-      min: Duration,
-      max: Duration,
       timeout_fn: impl Fn(u32) -> BoxFuture<'static, ()> + Clone + Send + Sync + 'static,
-      spawner: impl Fn(BoxFuture<'static, ()>) + Copy + Send + Sync + 'static,
+      runtime: R,
     ) -> Self {
       #[allow(clippy::mutable_key_type)]
       let confirmations = [from].into_iter().collect();
       let n = Arc::new(AtomicU32::new(0));
       let timeout = if k < 1 { min } else { max };
       let timeout_fn = Arc::new(timeout_fn);
-      let timer = Timer::new(n.clone(), timeout, timeout_fn.clone(), spawner);
+      let timer = Timer::new(n.clone(), timeout, timeout_fn.clone(), runtime);
       timer.start();
       Suspicion {
         n,
@@ -233,7 +79,7 @@ mod r#impl {
         timer,
         timeout_fn,
         confirmations,
-        spawner: Box::new(spawner),
+        runtime,
       }
     }
 
@@ -241,15 +87,15 @@ mod r#impl {
     /// node is suspect. This returns true if this was new information, and false
     /// if it was a duplicate confirmation, or if we've got enough confirmations to
     /// hit the minimum.
-    pub(crate) async fn confirm(&mut self, from: NodeId) -> bool {
+    pub(crate) async fn confirm(&mut self, from: &Name) -> bool {
       if self.n.load(Ordering::Relaxed) >= self.k {
         return false;
       }
 
-      if self.confirmations.contains(&from) {
+      if self.confirmations.contains(from) {
         return false;
       }
-      self.confirmations.insert(from);
+      self.confirmations.insert(from.clone());
 
       // Compute the new timeout given the current number of confirmations and
       // adjust the timer. If the timeout becomes negative *and* we can cleanly
@@ -265,16 +111,16 @@ mod r#impl {
         } else {
           let n = self.n.clone();
           let f = self.timeout_fn.clone();
-          (self.spawner)(Box::pin(async move {
+          self.runtime.spawn_detach(async move {
             f(n.load(Ordering::SeqCst)).await;
-          }));
+          });
         }
       }
       true
     }
   }
 
-  pub(super) struct Timer {
+  pub(super) struct Timer<R: Runtime> {
     n: Arc<AtomicU32>,
     timeout: Duration,
     start: Instant,
@@ -282,15 +128,19 @@ mod r#impl {
     stop_tx: async_channel::Sender<()>,
     stopped: Arc<AtomicBool>,
     f: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
-    spawner: Box<dyn Fn(BoxFuture<'static, ()>) + Send + Sync + 'static>,
+    runtime: R,
   }
 
-  impl Timer {
+  impl<R> Timer<R>
+  where
+    R: Runtime,
+    <R::Sleep as Future>::Output: Send,
+  {
     pub fn new(
       n: Arc<AtomicU32>,
       timeout: Duration,
       f: Arc<impl Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
-      spawner: impl Fn(BoxFuture<'static, ()>) + Send + Sync + 'static,
+      runtime: R,
     ) -> Self {
       let (tx, rx) = async_channel::bounded(1);
       let stopped = Arc::new(AtomicBool::new(false));
@@ -302,7 +152,7 @@ mod r#impl {
         stop_tx: tx,
         stopped,
         f,
-        spawner: Box::new(spawner),
+        runtime,
         start: Instant::now(),
       }
     }
@@ -313,14 +163,14 @@ mod r#impl {
       let f = self.f.clone();
       let timeout = self.timeout;
 
-      (self.spawner)(Box::pin(async move {
+      self.runtime.spawn_detach(async move {
         futures_util::select_biased! {
           _ = rx.recv().fuse() => {}
-          _ = futures_timer::Delay::new(timeout).fuse() => {
+          _ = R::new().sleep(timeout).fuse() => {
             f(n.load(Ordering::SeqCst)).await
           }
         }
-      }));
+      });
     }
 
     pub async fn reset(&mut self, remaining: Duration) {
@@ -331,14 +181,14 @@ mod r#impl {
       self.timeout = remaining;
       self.start = Instant::now();
 
-      (self.spawner)(Box::pin(async move {
+      self.runtime.spawn_detach(async move {
         futures_util::select_biased! {
           _ = rx.recv().fuse() => {}
-          _ = futures_timer::Delay::new(remaining).fuse() => {
+          _ = R::new().sleep(remaining).fuse() => {
             f(n.load(Ordering::SeqCst)).await
           }
         }
-      }));
+      });
     }
 
     pub async fn stop(&self) -> bool {
@@ -430,9 +280,6 @@ mod tests {
   use async_channel::TryRecvError;
   #[cfg(feature = "async")]
   use futures_util::FutureExt;
-
-  #[cfg(not(feature = "async"))]
-  use crossbeam_channel::TryRecvError;
 
   struct Pair {
     from: &'static str,
@@ -559,6 +406,8 @@ mod tests {
   #[cfg(feature = "async")]
   #[tokio::test]
   async fn test_suspicion_timer() {
+    use agnostic::tokio::TokioRuntime;
+
     for (i, (num_confirmations, from, confirmations, expected)) in
       test_cases().into_iter().enumerate()
     {
@@ -577,14 +426,12 @@ mod tests {
         .boxed()
       };
 
-      let mut s = Suspicion::new(from.try_into().unwrap(), K, MIN, MAX, f, |x| {
-        tokio::spawn(x);
-      });
+      let mut s = Suspicion::new(from.try_into().unwrap(), K, MIN, MAX, f, TokioRuntime);
       let fudge = Duration::from_millis(25);
       for p in confirmations.iter() {
         tokio::time::sleep(fudge).await;
         assert_eq!(
-          s.confirm(p.from.try_into().unwrap()).await,
+          s.confirm(&p.from.try_into().unwrap()).await,
           p.new_info,
           "case {}: newInfo mismatch for {}",
           i,
@@ -612,7 +459,7 @@ mod tests {
 
       // Confirm after to make sure it handles a negative remaining
       // time correctly and doesn't fire again.
-      s.confirm("late".try_into().unwrap()).await;
+      s.confirm(&"late".try_into().unwrap()).await;
       tokio::time::sleep(expected + 2 * fudge).await;
       match rx.try_recv() {
         Ok(d) => panic!("case {}: should not have fired ({:?})", i, d),
@@ -625,6 +472,8 @@ mod tests {
   #[cfg(feature = "async")]
   #[tokio::test]
   async fn test_suspicion_timer_zero_k() {
+    use agnostic::tokio::TokioRuntime;
+
     let (tx, rx) = async_channel::unbounded();
     let f = move |_| {
       let tx = tx.clone();
@@ -640,12 +489,10 @@ mod tests {
       Duration::from_millis(25),
       Duration::from_secs(30),
       f,
-      |x| {
-        tokio::spawn(x);
-      },
+      TokioRuntime,
     );
 
-    assert!(!s.confirm("foo".try_into().unwrap()).await);
+    assert!(!s.confirm(&"foo".try_into().unwrap()).await);
     let _ = tokio::time::timeout(Duration::from_millis(50), rx.recv())
       .await
       .unwrap();
@@ -654,6 +501,8 @@ mod tests {
   #[cfg(feature = "async")]
   #[tokio::test]
   async fn test_suspicion_timer_immediate() {
+    use agnostic::tokio::TokioRuntime;
+
     let (tx, rx) = async_channel::unbounded();
     let f = move |_| {
       let tx = tx.clone();
@@ -669,127 +518,14 @@ mod tests {
       Duration::from_millis(100),
       Duration::from_secs(30),
       f,
-      |x| {
-        tokio::spawn(x);
-      },
+      TokioRuntime,
     );
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    s.confirm("foo".try_into().unwrap()).await;
+    s.confirm(&"foo".try_into().unwrap()).await;
 
     let _ = tokio::time::timeout(Duration::from_millis(25), rx.recv())
       .await
       .unwrap();
-  }
-
-  #[test]
-  #[cfg(not(feature = "async"))]
-  fn test_suspicion_timer() {
-    for (i, (num_confirmations, from, confirmations, expected)) in
-      test_cases().into_iter().enumerate()
-    {
-      let (tx, rx) = crossbeam_channel::unbounded();
-      let start = Instant::now();
-      let f = move |nc: u32| {
-        let tx = tx.clone();
-        assert_eq!(
-          nc, num_confirmations as u32,
-          "case {}: bad {} != {}",
-          i, nc, num_confirmations
-        );
-        tx.send(Instant::now().duration_since(start)).unwrap();
-      };
-
-      let mut s = Suspicion::new(from.into(), K, MIN, MAX, f);
-      let fudge = Duration::from_millis(25);
-      for p in confirmations.iter() {
-        std::thread::sleep(fudge);
-        assert_eq!(
-          s.confirm(p.from.into()),
-          p.new_info,
-          "case {}: newInfo mismatch for {}",
-          i,
-          p.from
-        );
-      }
-
-      let sleep = expected
-        - Duration::from_millis(confirmations.len() as u64 * (fudge.as_millis() as u64))
-        - fudge;
-      std::thread::sleep(sleep);
-      match rx.try_recv() {
-        Ok(d) => panic!("case {}: should not have fired ({:?})", i, d),
-        Err(TryRecvError::Empty) => (),
-        Err(TryRecvError::Disconnected) => panic!("case {}: channel closed", i),
-      }
-
-      // Wait through the timeout and a little after and make sure it
-      // fires.
-      std::thread::sleep(2 * fudge);
-      match rx.recv() {
-        Ok(_) => (),
-        Err(_) => panic!("case {}: should have fired", i),
-      }
-
-      // Confirm after to make sure it handles a negative remaining
-      // time correctly and doesn't fire again.
-      s.confirm("late".try_into().unwrap());
-      std::thread::sleep(expected + 2 * fudge);
-      match rx.try_recv() {
-        Ok(d) => panic!("case {}: should not have fired ({:?})", i, d),
-        Err(TryRecvError::Empty) => (),
-        Err(TryRecvError::Disconnected) => panic!("case {}: channel closed", i),
-      }
-    }
-  }
-
-  #[test]
-  #[cfg(not(feature = "async"))]
-  fn test_suspicion_timer_zero_k() {
-    let (tx, rx) = crossbeam_channel::unbounded();
-    let f = move |_| {
-      let tx = tx.clone();
-      tx.send(()).unwrap();
-    };
-
-    let mut s = Suspicion::new(
-      "me".try_into().unwrap(),
-      0,
-      Duration::from_millis(25),
-      Duration::from_secs(30),
-      f,
-    );
-
-    assert!(!s.confirm("foo".try_into().unwrap()));
-    crossbeam_channel::select! {
-      recv(rx) -> _ => {}
-      recv(crossbeam_channel::after(Duration::from_millis(50))) -> _ => { panic!("should have fired") }
-    }
-  }
-
-  #[test]
-  #[cfg(not(feature = "async"))]
-  fn test_suspicion_timer_immediate() {
-    let (tx, rx) = crossbeam_channel::unbounded();
-    let f = move |_| {
-      let tx = tx.clone();
-      tx.send(()).unwrap();
-    };
-
-    let mut s = Suspicion::new(
-      "me".try_into().unwrap(),
-      1,
-      Duration::from_millis(100),
-      Duration::from_secs(30),
-      f,
-    );
-
-    std::thread::sleep(Duration::from_millis(200));
-    s.confirm("foo".try_into().unwrap());
-
-    crossbeam_channel::select! {
-      recv(rx) -> _ => {}
-      recv(crossbeam_channel::after(Duration::from_millis(25))) -> _ => { panic!("should have fired") }
-    }
   }
 }

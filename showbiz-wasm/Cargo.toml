@@ -1,0 +1,20 @@
+[package]
+name = "showbiz-wasm"
+version = "0.0.0"
+edition = "2021"
+
+[features]
+default = ["async", "metrics"]
+async = ["showbiz-core/async", "showbiz-transport/async"]
+metrics = ["showbiz-core/metrics", "showbiz-transport/metrics"]
+
+
+[dependencies]
+wasm-agnostic = { path = "../../agnostic/wasm-agnostic" }
+showbiz-core = { path = "../core" }
+showbiz-transport = { path = "../transport" }
+
+[patch.crates-io]
+socket2 = { git = "https://github.com/wasix-org/socket2.git", branch = "v0.4.7" }
+libc = { git = "https://github.com/wasix-org/libc.git" }
+tokio = { git = "https://github.com/wasix-org/tokio.git", branch = "wasix-1.24.2" }

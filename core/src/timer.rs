@@ -1,34 +1,32 @@
+use agnostic::Runtime;
 use futures_channel::oneshot;
-use futures_timer::Delay;
-use futures_util::{
-  future::{BoxFuture, FutureExt},
-  select,
-};
+use futures_util::{future::FutureExt, select, Future};
 use std::time::Duration;
 
 pub(crate) struct Timer {
+  #[allow(dead_code)]
   fut: oneshot::Receiver<()>,
   cancel: oneshot::Sender<()>,
 }
 
 impl Timer {
-  pub(crate) fn after<S, F, R>(dur: Duration, future: F, spawner: S) -> Self
+  pub(crate) fn after<F, R>(dur: Duration, future: F, runtime: R) -> Self
   where
-    S: Fn(BoxFuture<'static, ()>) -> R,
+    R: Runtime,
+    <R::Sleep as Future>::Output: Send,
     F: std::future::Future<Output = ()> + Send + 'static,
   {
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let (tx, rx) = oneshot::channel();
-    (spawner)(
+    runtime.spawn_detach(
       async move {
-        let mut delay = Delay::new(dur);
-        let mut cancel_fut = cancel_rx.fuse();
+        let delay = runtime.sleep(dur);
         select! {
-          res = delay.fuse() => {
+          _ = delay.fuse() => {
             future.await;
             let _ = tx.send(());
           },
-          _ = cancel_fut => {},
+          _ = cancel_rx.fuse() => {},
         }
       }
       .boxed(),

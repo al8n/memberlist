@@ -18,13 +18,11 @@ impl std::error::Error for InvalidCompressionAlgo {}
 #[non_exhaustive]
 pub enum CompressionAlgo {
   #[default]
-  LZW = 0,
+  Lzw = 0,
   None = 1,
 }
 
 impl CompressionAlgo {
-  pub(crate) const SIZE: usize = core::mem::size_of::<Self>();
-
   pub fn is_none(&self) -> bool {
     matches!(self, Self::None)
   }
@@ -35,7 +33,7 @@ impl TryFrom<u8> for CompressionAlgo {
 
   fn try_from(value: u8) -> Result<Self, Self::Error> {
     match value {
-      0 => Ok(Self::LZW),
+      0 => Ok(Self::Lzw),
       1 => Ok(Self::None),
       _ => Err(InvalidCompressionAlgo(value)),
     }
@@ -96,18 +94,6 @@ pub(crate) struct Compress {
 
 impl Compress {
   #[inline]
-  pub fn encoded_len(&self) -> usize {
-    let length = if self.buf.is_empty() {
-      0
-    } else {
-      // payload len + payload + tag
-      encoded_u32_len(self.buf.len() as u32) + self.buf.len() + 1
-    } + 1
-      + 1; // algo + tag
-    length + encoded_u32_len(length as u32) + CHECKSUM_SIZE
-  }
-
-  #[inline]
   pub fn decode_len(buf: impl Buf) -> Result<u32, DecodeError> {
     decode_u32_from_buf(buf).map(|(x, _)| x).map_err(From::from)
   }
@@ -135,7 +121,7 @@ impl Compress {
           if buf.remaining() < len {
             return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
           }
-          this.buf = buf.split_to(len as usize);
+          this.buf = buf.split_to(len);
           hasher.update(&this.buf);
         }
         _ => {}

@@ -20,8 +20,6 @@ pub(crate) struct Awareness {
   id: crate::types::NodeId,
   #[cfg(feature = "async")]
   pub(crate) inner: Arc<async_lock::RwLock<Inner>>,
-  #[cfg(not(feature = "async"))]
-  pub(crate) inner: Arc<parking_lot::RwLock<Inner>>,
   #[cfg(feature = "metrics")]
   pub(crate) metric_labels: Arc<Vec<metrics::Label>>,
 }
@@ -36,8 +34,6 @@ impl Awareness {
     Self {
       #[cfg(feature = "async")]
       inner: Arc::new(async_lock::RwLock::new(Inner { max, score: 0 })),
-      #[cfg(not(feature = "async"))]
-      inner: Arc::new(parking_lot::RwLock::new(Inner { max, score: 0 })),
       #[cfg(feature = "metrics")]
       metric_labels,
       #[cfg(feature = "metrics")]
@@ -64,44 +60,12 @@ impl Awareness {
 
     #[cfg(feature = "metrics")]
     {
-      const HEALTH_GAUGE: std::sync::Once = std::sync::Once::new();
+      static HEALTH_GAUGE: std::sync::Once = std::sync::Once::new();
 
       if _initial != _fnl {
         HEALTH_GAUGE.call_once(|| {
           metrics::register_gauge!("showbiz.health.score", "node" => self.id.to_string());
           metrics::describe_gauge!("showbiz.health.score", "the health score of the local node");
-        });
-        metrics::gauge!(
-          "showbiz.health.score",
-          _fnl as f64,
-          self.metric_labels.iter()
-        );
-      }
-    }
-  }
-
-  #[cfg(not(feature = "async"))]
-  pub(crate) fn apply_delta(&self, delta: isize) {
-    let (_initial, _fnl) = {
-      let mut inner = self.inner.write();
-      let initial = inner.score;
-      inner.score += delta;
-      if inner.score < 0 {
-        inner.score = 0;
-      } else if inner.score > inner.max - 1 {
-        inner.score = inner.max - 1;
-      }
-
-      (initial, inner.score)
-    };
-
-    #[cfg(feature = "metrics")]
-    {
-      const HEALTH_GAUGE: std::sync::Once = std::sync::Once::new();
-
-      if _initial != _fnl {
-        HEALTH_GAUGE.call_once(|| {
-          metrics::register_gauge!("showbiz.health.score");
         });
         metrics::gauge!(
           "showbiz.health.score",
@@ -118,22 +82,11 @@ impl Awareness {
     self.inner.read().await.score
   }
 
-  #[cfg(not(feature = "async"))]
-  pub(crate) fn get_health_score(&self) -> isize {
-    self.inner.read().score
-  }
-
   /// Takes the given duration and scales it based on the current
   /// score. Less healthyness will lead to longer timeouts.
   #[cfg(feature = "async")]
   pub(crate) async fn scale_timeout(&self, timeout: Duration) -> Duration {
     let score = self.inner.read().await.score;
-    timeout * ((score + 1) as u32)
-  }
-
-  #[cfg(not(feature = "async"))]
-  pub(crate) fn scale_timeout(&self, timeout: Duration) -> Duration {
-    let score = self.inner.read().score;
     timeout * ((score + 1) as u32)
   }
 }
@@ -172,33 +125,5 @@ async fn test_awareness() {
     a.apply_delta(delta).await;
     assert_eq!(a.get_health_score().await, score);
     assert_eq!(a.scale_timeout(Duration::from_secs(1)).await, timeout);
-  }
-}
-
-#[test]
-#[cfg(all(not(feature = "async"), test))]
-fn test_awareness() {
-  let cases = vec![
-    (0, 0, Duration::from_secs(1)),
-    (-1, 0, Duration::from_secs(1)),
-    (-10, 0, Duration::from_secs(1)),
-    (1, 1, Duration::from_secs(2)),
-    (-1, 0, Duration::from_secs(1)),
-    (10, 7, Duration::from_secs(8)),
-    (-1, 6, Duration::from_secs(7)),
-    (-1, 5, Duration::from_secs(6)),
-    (-1, 4, Duration::from_secs(5)),
-    (-1, 3, Duration::from_secs(4)),
-    (-1, 2, Duration::from_secs(3)),
-    (-1, 1, Duration::from_secs(2)),
-    (-1, 0, Duration::from_secs(1)),
-    (-1, 0, Duration::from_secs(1)),
-  ];
-
-  let a = Awareness::new(8, Arc::new(vec![]));
-  for (delta, score, timeout) in cases {
-    a.apply_delta(delta);
-    assert_eq!(a.get_health_score(), score);
-    assert_eq!(a.scale_timeout(Duration::from_secs(1)), timeout);
   }
 }

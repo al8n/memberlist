@@ -9,9 +9,6 @@ mod r#async;
 #[cfg(feature = "async")]
 pub use r#async::*;
 
-#[cfg(feature = "sync")]
-mod sync;
-
 /// Maximum size for node meta data
 pub const META_MAX_SIZE: usize = 512;
 
@@ -22,9 +19,6 @@ pub(crate) const COMPOUND_HEADER_OVERHEAD: usize = 2;
 pub(crate) const COMPOUND_OVERHEAD: usize = 2;
 
 pub(crate) const USER_MSG_OVERHEAD: usize = 1;
-
-/// Warn if a UDP packet takes this long to process
-const BLOCKING_WARNING: Duration = Duration::from_millis(10);
 
 const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
 /// Maximum number of concurrent push/pull requests
@@ -37,7 +31,7 @@ use sealed_metrics::*;
 mod sealed_metrics {
   use std::sync::Once;
 
-  const TCP_ACCEPT_COUNTER: Once = Once::new();
+  static TCP_ACCEPT_COUNTER: Once = Once::new();
 
   #[inline]
   pub(super) fn incr_tcp_accept_counter<'a>(
@@ -49,7 +43,7 @@ mod sealed_metrics {
     metrics::increment_counter!("showbiz.tcp.accept", labels);
   }
 
-  const TCP_SENT_COUNTER: Once = Once::new();
+  static TCP_SENT_COUNTER: Once = Once::new();
 
   #[inline]
   pub(super) fn incr_tcp_sent_counter<'a>(
@@ -62,7 +56,7 @@ mod sealed_metrics {
     metrics::counter!("showbiz.tcp.sent", val, labels);
   }
 
-  const TCP_CONNECT_COUNTER: Once = Once::new();
+  static TCP_CONNECT_COUNTER: Once = Once::new();
 
   #[inline]
   pub(super) fn incr_tcp_connect_counter<'a>(
@@ -74,7 +68,7 @@ mod sealed_metrics {
     metrics::increment_counter!("showbiz.tcp.connect", labels);
   }
 
-  const UDP_SENT_COUNTER: Once = Once::new();
+  static UDP_SENT_COUNTER: Once = Once::new();
   #[inline]
   pub(super) fn incr_udp_sent_counter<'a>(
     val: u64,
@@ -86,7 +80,7 @@ mod sealed_metrics {
     metrics::counter!("showbiz.udp.sent", val, labels);
   }
 
-  const LOCAL_SIZE_GAUGE: Once = Once::new();
+  static LOCAL_SIZE_GAUGE: Once = Once::new();
   #[inline]
   pub(super) fn set_local_size_gauge<'a>(
     val: f64,
@@ -98,7 +92,7 @@ mod sealed_metrics {
     metrics::gauge!("showbiz.local.size", val, labels);
   }
 
-  const REMOTE_SIZE_HISTOGRAM: Once = Once::new();
+  static REMOTE_SIZE_HISTOGRAM: Once = Once::new();
   #[inline]
   pub(super) fn add_sample_to_remote_size_histogram<'a>(
     val: f64,
@@ -110,7 +104,7 @@ mod sealed_metrics {
     metrics::histogram!("showbiz.remote.size", val, labels);
   }
 
-  const NODE_INSTANCES_GAUGE: Once = Once::new();
+  static NODE_INSTANCES_GAUGE: Once = Once::new();
   #[inline]
   pub(super) fn set_node_instances_gauge<'a>(
     val: f64,
@@ -129,10 +123,3 @@ pub(crate) struct RemoteNodeState {
   push_states: Vec<PushNodeState>,
   user_state: Bytes,
 }
-
-#[test]
-fn test_() {}
-
-// impl Showbiz {
-//   fn stream_listen(&self) {}
-// }

@@ -17,13 +17,6 @@ impl PushPullHeader {
   }
 
   #[inline]
-  pub fn encode(&self) -> Bytes {
-    let mut buf = BytesMut::with_capacity(self.encoded_len());
-    self.encode_to(&mut buf);
-    buf.freeze()
-  }
-
-  #[inline]
   pub fn encode_to(&self, mut buf: &mut BytesMut) {
     encode_u32_to_buf(&mut buf, self.encoded_len() as u32);
     buf.put_u8(1); // nodes tag
@@ -85,46 +78,10 @@ pub(crate) struct PushNodeState {
   meta: Bytes,
   incarnation: u32,
   state: NodeState,
+  /// - 0: encryption algorithm
+  /// - 1: compression algorithm
+  /// - 2: delegate version
   vsn: [u8; VSN_SIZE],
-}
-
-impl PushNodeState {
-  #[inline]
-  pub const fn pmin(&self) -> u8 {
-    self.vsn[0]
-  }
-  #[inline]
-  pub const fn pmax(&self) -> u8 {
-    self.vsn[1]
-  }
-  #[inline]
-  pub const fn pcur(&self) -> u8 {
-    self.vsn[2]
-  }
-  #[inline]
-  pub const fn dmin(&self) -> u8 {
-    self.vsn[3]
-  }
-  #[inline]
-  pub const fn dmax(&self) -> u8 {
-    self.vsn[4]
-  }
-  #[inline]
-  pub const fn dcur(&self) -> u8 {
-    self.vsn[5]
-  }
-}
-
-impl Default for PushNodeState {
-  fn default() -> Self {
-    Self {
-      node: NodeId::default(),
-      meta: Bytes::default(),
-      incarnation: 0,
-      state: NodeState::default(),
-      vsn: VSN_EMPTY,
-    }
-  }
 }
 
 impl PushNodeState {
@@ -141,13 +98,6 @@ impl PushNodeState {
     + 1 + 1 // state + tag
     + VSN_SIZE + 1; // vsn + tag
     basic + encoded_u32_len(basic as u32)
-  }
-
-  #[inline]
-  pub fn encode(&self) -> Bytes {
-    let mut buf = BytesMut::with_capacity(self.encoded_len());
-    self.encode_to(&mut buf);
-    buf.freeze()
   }
 
   #[inline]
@@ -177,57 +127,55 @@ impl PushNodeState {
 
   #[inline]
   pub fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
-    let mut required = 0;
-    let mut this = Self {
-      node: NodeId::default(),
-      meta: Bytes::default(),
-      incarnation: 0,
-      state: NodeState::default(),
-      vsn: VSN_EMPTY,
-    };
+    let mut node = None;
+    let mut incarnation = None;
+    let mut meta = Bytes::new();
+    let mut state = None;
+    let mut vsn = None;
     while buf.has_remaining() {
-      match required {
+      match buf.get_u8() {
         1 => {
           let len = decode_u32_from_buf(&mut buf)?.0 as usize;
           if buf.remaining() < len {
             return Err(DecodeError::Truncated(MessageType::PushPull.as_err_str()));
           }
-          this.node = NodeId::decode_from(buf.split_to(len))?;
-          required += 1;
+          node = Some(NodeId::decode_from(buf.split_to(len))?);
         }
         2 => {
-          this.incarnation = decode_u32_from_buf(&mut buf)?.0;
-          required += 1;
+          incarnation = Some(decode_u32_from_buf(&mut buf)?.0);
         }
         3 => {
           let len = decode_u32_from_buf(&mut buf)?.0 as usize;
           if buf.remaining() < len {
             return Err(DecodeError::Truncated(MessageType::PushPull.as_err_str()));
           }
-          this.meta = buf.split_to(len);
+          meta = buf.split_to(len);
         }
         4 => {
           if !buf.has_remaining() {
             return Err(DecodeError::Truncated(MessageType::PushPull.as_err_str()));
           }
-          this.state = NodeState::try_from(buf.get_u8())?;
-          required += 1;
+          state = Some(NodeState::try_from(buf.get_u8())?);
         }
         5 => {
           if buf.remaining() < VSN_SIZE {
             return Err(DecodeError::Truncated(MessageType::PushPull.as_err_str()));
           }
-          buf.copy_to_slice(&mut this.vsn);
-          required += 1;
+          let mut vbuf = [0; VSN_SIZE];
+          buf.copy_to_slice(&mut vbuf);
+          vsn = Some(vbuf);
         }
         _ => {}
       }
     }
 
-    if required != 4 {
-      return Err(DecodeError::Truncated(MessageType::PushPull.as_err_str()));
-    }
-
-    Ok(this)
+    Ok(Self {
+      node: node.ok_or_else(|| DecodeError::Truncated(MessageType::PushPull.as_err_str()))?,
+      incarnation: incarnation
+        .ok_or_else(|| DecodeError::Truncated(MessageType::PushPull.as_err_str()))?,
+      meta,
+      state: state.ok_or_else(|| DecodeError::Truncated(MessageType::PushPull.as_err_str()))?,
+      vsn: vsn.ok_or_else(|| DecodeError::Truncated(MessageType::PushPull.as_err_str()))?,
+    })
   }
 }

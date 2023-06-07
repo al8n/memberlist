@@ -5,119 +5,45 @@ use std::{
   time::Instant,
 };
 
-#[cfg(feature = "async")]
-use async_lock::{Mutex, RwLock};
-use bytes::Bytes;
-use crossbeam_utils::CachePadded;
-#[cfg(not(feature = "async"))]
-use parking_lot::{Mutex, RwLock};
-
+use agnostic::Runtime;
 #[cfg(feature = "async")]
 use async_channel::{Receiver, Sender};
-#[cfg(not(feature = "async"))]
-use crossbeam_channel::{Receiver, Sender};
-
-use crate::{
-  awareness::Awareness,
-  broadcast::ShowbizBroadcast,
-  delegate::{Delegate, VoidDelegate},
-  dns::DNS,
-  network::META_MAX_SIZE,
-  queue::DefaultNodeCalculator,
-  timer::Timer,
-  transport::Transport,
-  types::{Alive, Message, MessageType, Name, Node, NodeId, NodeState},
-  TransmitLimitedQueue,
-};
+use atomic::Atomic;
+use bytes::Bytes;
+use crossbeam_utils::CachePadded;
+use futures_util::Future;
 
 use super::{
-  error::Error, state::LocalNodeState, suspicion::Suspicion, types::PushNodeState, Options,
-  SecretKeyring,
+  awareness::Awareness,
+  broadcast::ShowbizBroadcast,
+  delegate::Delegate,
+  dns::Dns,
+  error::Error,
+  keyring::SecretKeyring,
+  network::META_MAX_SIZE,
+  queue::DefaultNodeCalculator,
+  queue::TransmitLimitedQueue,
+  state::LocalNodeState,
+  suspicion::Suspicion,
+  timer::Timer,
+  transport::Transport,
+  types::PushNodeState,
+  types::{Alive, Message, MessageType, Name, Node, NodeId},
+  Options,
 };
 
 #[cfg(feature = "async")]
 mod r#async;
 #[cfg(feature = "async")]
-pub(crate) use r#async::*;
+pub use r#async::*;
 
-impl Options {
-  #[inline]
-  pub fn into_builder<T: Transport>(self, t: T) -> ShowbizBuilder<T> {
-    ShowbizBuilder::new(t).with_options(self)
-  }
-}
-
-pub struct ShowbizBuilder<T, D = VoidDelegate> {
-  opts: Options,
-  transport: T,
-  delegate: Option<D>,
-  /// Holds all of the encryption keys used internally. It is
-  /// automatically initialized using the SecretKey and SecretKeys values.
-  keyring: Option<SecretKeyring>,
-}
-
-impl<T: Transport> ShowbizBuilder<T> {
-  #[inline]
-  pub fn new(transport: T) -> Self {
-    Self {
-      opts: Options::default(),
-      transport,
-      delegate: None,
-      keyring: None,
-    }
-  }
-}
-
-impl<T, D> ShowbizBuilder<T, D>
-where
-  T: Transport,
-  D: Delegate,
-{
-  #[inline]
-  pub fn with_options(mut self, opts: Options) -> Self {
-    self.opts = opts;
-    self
-  }
-
-  #[inline]
-  pub fn with_keyring(mut self, keyring: Option<SecretKeyring>) -> Self {
-    self.keyring = keyring;
-    self
-  }
-
-  #[inline]
-  pub fn with_transport<NT>(self, t: NT) -> ShowbizBuilder<NT, D> {
-    let Self {
-      opts,
-      delegate,
-      keyring,
-      ..
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport: t,
-      delegate,
-      keyring,
-    }
-  }
-
-  #[inline]
-  pub fn with_delegate<ND>(self, d: Option<ND>) -> ShowbizBuilder<T, ND> {
-    let Self {
-      opts,
-      transport,
-      delegate: _,
-      keyring,
-    } = self;
-
-    ShowbizBuilder {
-      opts,
-      transport,
-      delegate: d,
-      keyring,
-    }
-  }
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum Status {
+  Fresh,
+  Running,
+  Left,
+  Shutdown,
 }
 
 #[viewit::viewit]
@@ -125,8 +51,7 @@ pub(crate) struct HotData {
   sequence_num: CachePadded<AtomicU32>,
   incarnation: CachePadded<AtomicU32>,
   push_pull_req: CachePadded<AtomicU32>,
-  shutdown: CachePadded<AtomicU32>,
-  leave: CachePadded<AtomicU32>,
+  status: CachePadded<Atomic<Status>>,
   num_nodes: Arc<CachePadded<AtomicU32>>,
 }
 
@@ -137,15 +62,9 @@ impl HotData {
       incarnation: CachePadded::new(AtomicU32::new(0)),
       num_nodes: Arc::new(CachePadded::new(AtomicU32::new(0))),
       push_pull_req: CachePadded::new(AtomicU32::new(0)),
-      shutdown: CachePadded::new(AtomicU32::new(0)),
-      leave: CachePadded::new(AtomicU32::new(0)),
+      status: CachePadded::new(Atomic::new(Status::Fresh)),
     }
   }
-}
-
-#[viewit::viewit]
-pub(crate) struct Advertise {
-  addr: SocketAddr,
 }
 
 #[viewit::viewit]
@@ -172,27 +91,36 @@ impl MessageQueue {
   }
 }
 
-#[viewit::viewit]
-pub(crate) struct Member {
-  state: LocalNodeState,
-  suspicion: Option<Suspicion>,
+// #[viewit::viewit]
+pub(crate) struct Member<R: Runtime>
+where
+  R: Runtime,
+{
+  pub(crate) state: LocalNodeState,
+  pub(crate) suspicion: Option<Suspicion<R>>,
 }
 
-#[viewit::viewit]
-pub(crate) struct Memberlist {
-  /// self
-  local: Member,
+pub(crate) struct Memberlist<R>
+where
+  R: Runtime,
+{
+  pub(crate) local: Name,
   /// remote nodes
-  nodes: Vec<LocalNodeState>,
-  node_map: HashMap<NodeId, Member>,
+  pub(crate) nodes: Vec<LocalNodeState>,
+  #[allow(clippy::mutable_key_type)]
+  pub(crate) node_map: HashMap<Name, Member<R>>,
 }
 
-impl Memberlist {
-  fn new(local: Member) -> Self {
+impl<R> Memberlist<R>
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+{
+  fn new(local: Name) -> Self {
     Self {
-      local,
       nodes: Vec::new(),
       node_map: HashMap::new(),
+      local,
     }
   }
 
@@ -200,6 +128,6 @@ impl Memberlist {
     self
       .nodes
       .iter()
-      .any(|n| !n.dead_or_left() && n.node.name() != self.local.state.node.name())
+      .any(|n| !n.dead_or_left() && n.node.name() != &self.local)
   }
 }

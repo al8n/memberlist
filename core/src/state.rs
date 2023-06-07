@@ -1,9 +1,15 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+  net::SocketAddr,
+  sync::{atomic::AtomicU32, Arc},
+  time::Instant,
+};
 
 use crate::{
-  showbiz::Spawner,
-  types::{AckResponse, NackResponse, NodeAddress},
+  types::{AckResponse, NackResponse},
+  Status,
 };
+
+use agnostic::Runtime;
 
 use super::{
   delegate::Delegate,
@@ -21,7 +27,7 @@ use sealed_metrics::*;
 mod sealed_metrics {
   use std::sync::Once;
 
-  const DEGRADED_PROBE: Once = Once::new();
+  static DEGRADED_PROBE: Once = Once::new();
 
   #[inline]
   pub(super) fn incr_degraded_probe<'a>(
@@ -33,7 +39,7 @@ mod sealed_metrics {
     metrics::increment_counter!("showbiz.degraded.probe", labels);
   }
 
-  const DEGRADED_TIMEOUT: Once = Once::new();
+  static DEGRADED_TIMEOUT: Once = Once::new();
 
   #[inline]
   pub(super) fn incr_degraded_timeout<'a>(
@@ -45,7 +51,7 @@ mod sealed_metrics {
     metrics::increment_counter!("showbiz.degraded.timeout", labels);
   }
 
-  const MSG_ALIVE: Once = Once::new();
+  static MSG_ALIVE: Once = Once::new();
 
   #[inline]
   pub(super) fn incr_msg_alive<'a>(
@@ -57,7 +63,7 @@ mod sealed_metrics {
     metrics::increment_counter!("showbiz.msg.alive", labels);
   }
 
-  const MSG_SUSPECT: Once = Once::new();
+  static MSG_SUSPECT: Once = Once::new();
 
   #[inline]
   pub(super) fn incr_msg_suspect<'a>(
@@ -69,7 +75,7 @@ mod sealed_metrics {
     metrics::increment_counter!("showbiz.msg.suspect", labels);
   }
 
-  const MSG_DEAD: Once = Once::new();
+  static MSG_DEAD: Once = Once::new();
 
   #[inline]
   pub(super) fn incr_msg_dead<'a>(
@@ -81,7 +87,7 @@ mod sealed_metrics {
     metrics::increment_counter!("showbiz.msg.dead", labels);
   }
 
-  const PUSH_PULL_NODE_HISTOGRAM: Once = Once::new();
+  static PUSH_PULL_NODE_HISTOGRAM: Once = Once::new();
 
   #[inline]
   pub(super) fn observe_push_pull_node<'a>(
@@ -94,7 +100,7 @@ mod sealed_metrics {
     metrics::histogram!("showbiz.push_pull_node", value, labels);
   }
 
-  const GOSSIP_HISTOGRAM: Once = Once::new();
+  static GOSSIP_HISTOGRAM: Once = Once::new();
 
   #[inline]
   pub(super) fn observe_gossip<'a>(
@@ -107,7 +113,7 @@ mod sealed_metrics {
     metrics::histogram!("showbiz.gossip", value, labels);
   }
 
-  const PROBE_HISTOGRAM: Once = Once::new();
+  static PROBE_HISTOGRAM: Once = Once::new();
 
   #[inline]
   pub(super) fn observe_probe_node<'a>(
@@ -125,8 +131,9 @@ mod sealed_metrics {
 #[derive(Debug, Clone)]
 pub(crate) struct LocalNodeState {
   node: Arc<Node>,
-  incarnation: u32,
+  incarnation: Arc<AtomicU32>,
   state_change: Instant,
+  /// The current state of the node
   state: NodeState,
 }
 
@@ -135,7 +142,7 @@ impl LocalNodeState {
     self.node.id()
   }
 
-  pub(crate) fn address(&self) -> &NodeAddress {
+  pub(crate) fn address(&self) -> SocketAddr {
     self.node.id().addr()
   }
 
@@ -146,10 +153,10 @@ impl LocalNodeState {
 }
 
 // private implementation
-impl<D, T, S> Showbiz<D, T, S>
+impl<D, T, R> Showbiz<D, T, R>
 where
   T: Transport,
-  S: Spawner,
+  R: Runtime,
   D: Delegate,
 {
   /// Returns a usable sequence number in a thread safe way
@@ -193,23 +200,33 @@ where
   }
 
   #[inline]
-  pub(crate) fn has_shutdown(&self) -> bool {
+  pub(crate) fn is_shutdown(&self) -> bool {
     self
       .inner
       .hot
-      .shutdown
+      .status
       .load(std::sync::atomic::Ordering::SeqCst)
-      == 1
+      == Status::Shutdown
   }
 
   #[inline]
-  pub(crate) fn has_left(&self) -> bool {
+  pub(crate) fn is_running(&self) -> bool {
     self
       .inner
       .hot
-      .leave
+      .status
       .load(std::sync::atomic::Ordering::SeqCst)
-      == 1
+      == Status::Running
+  }
+
+  #[inline]
+  pub(crate) fn is_left(&self) -> bool {
+    self
+      .inner
+      .hot
+      .status
+      .load(std::sync::atomic::Ordering::SeqCst)
+      == Status::Left
   }
 
   #[inline]

@@ -168,7 +168,7 @@ pub struct Options {
   /// versions will just be zero, and version compliance won't be done.
   delegate_protocol_max: u8,
 
-  /// Points to the system's DNS config file, usually located
+  /// Points to the system's Dns config file, usually located
   /// at `/etc/resolv.conf`. It can be overridden via config for easier testing.
   dns_config_path: String,
 

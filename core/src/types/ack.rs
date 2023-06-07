@@ -56,16 +56,19 @@ pub(crate) struct AckResponse {
 }
 
 impl AckResponse {
-  pub fn new(seq_no: u32, payload: Bytes) -> Self {
-    Self { seq_no, payload }
-  }
-
   #[inline]
   pub fn empty(seq_no: u32) -> Self {
     Self {
       seq_no,
       payload: Bytes::new(),
     }
+  }
+
+  #[inline]
+  pub fn decode_len(buf: impl Buf) -> Result<usize, DecodeError> {
+    decode_u32_from_buf(buf)
+      .map(|(len, _)| len as usize)
+      .map_err(From::from)
   }
 
   #[inline]
@@ -78,13 +81,6 @@ impl AckResponse {
     } + encoded_u32_len(self.seq_no)
       + 1; // seq_no + tag
     length + encoded_u32_len(length as u32) + CHECKSUM_SIZE
-  }
-
-  #[inline]
-  pub fn encode<C: Checksumer>(&self) -> Bytes {
-    let mut buf = BytesMut::with_capacity(self.encoded_len());
-    self.encode_to::<C>(&mut buf);
-    buf.freeze()
   }
 
   #[inline]
@@ -170,13 +166,6 @@ impl NackResponse {
   pub fn encoded_len(&self) -> usize {
     let length = encoded_u32_len(self.seq_no) + 1; // seq_no + tag
     length + encoded_u32_len(length as u32) + CHECKSUM_SIZE
-  }
-
-  #[inline]
-  pub fn encode<C: Checksumer>(&self) -> Bytes {
-    let mut buf = BytesMut::with_capacity(self.encoded_len());
-    self.encode_to::<C>(&mut buf);
-    buf.freeze()
   }
 
   #[inline]

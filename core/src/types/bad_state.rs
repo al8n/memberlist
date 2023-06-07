@@ -2,14 +2,15 @@ use super::*;
 
 macro_rules! bad_bail {
   ($name: ident) => {
-    #[viewit::viewit]
-    #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+    #[viewit::viewit(getters(skip), setters(skip))]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub(crate) struct $name {
       incarnation: u32,
       node: NodeId,
       from: NodeId,
     }
 
+    #[allow(dead_code)]
     impl $name {
       #[inline]
       pub(crate) fn encoded_len(&self) -> usize {
@@ -42,38 +43,37 @@ macro_rules! bad_bail {
       }
 
       #[inline]
-      pub(crate) fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
+      pub(crate) fn decode_len(buf: impl Buf) -> Result<usize, DecodeError> {
         decode_u32_from_buf(buf).map(|(len, _)| len as usize).map_err(From::from)
       }
 
       #[inline]
       pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
-        let mut this = Self::default();
-        let mut required = 0;
+        let mut incarnation = None;
+        let mut node = None;
+        let mut from = None;
         while buf.has_remaining() {
           match buf.get_u8() {
             1 => {
-              this.incarnation = decode_u32_from_buf(&mut buf)?.0;
-              required += 1;
+              incarnation = Some(decode_u32_from_buf(&mut buf)?.0);
             }
             2 => {
               let node_len = NodeId::decode_len(&mut buf)?;
-              this.node = NodeId::decode_from(buf.split_to(node_len))?;
-              required += 1;
+              node = Some(NodeId::decode_from(buf.split_to(node_len))?);
             }
             3 => {
               let from_len = NodeId::decode_len(&mut buf)?;
-              this.from = NodeId::decode_from(buf.split_to(from_len))?;
-              required += 1;
+              from = Some(NodeId::decode_from(buf.split_to(from_len))?);
             }
             _ => {}
           }
         }
 
-        if required != 3 {
-          return Err(DecodeError::Truncated(MessageType::$name.as_err_str()));
-        }
-        Ok(this)
+        Ok(Self {
+          incarnation: incarnation.ok_or_else(|| DecodeError::Truncated(MessageType::$name.as_err_str()))?,
+          node: node.ok_or_else(|| DecodeError::Truncated(MessageType::$name.as_err_str()))?,
+          from: from.ok_or_else(|| DecodeError::Truncated(MessageType::$name.as_err_str()))?,
+        })
       }
     }
   };
@@ -85,6 +85,6 @@ bad_bail!(Dead);
 impl Dead {
   #[inline]
   pub(crate) fn dead_self(&self) -> bool {
-    self.node == self.from
+    self.node.name == self.from.name
   }
 }

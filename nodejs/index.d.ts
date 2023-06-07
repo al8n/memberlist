@@ -279,7 +279,7 @@ export class Duration {
  *
  * - **dnsConfigPath**
  *
- *   Points to the system's DNS config file, usually located
+ *   Points to the system's Dns config file, usually located
  *   at `/etc/resolv.conf`. It can be overridden via config for easier testing.
  *
  * - **handoffQueueDepth**

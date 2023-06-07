@@ -1,32 +1,22 @@
 use crate::{
   delegate::Delegate,
+  dns::DnsError,
   network::NetworkError,
   options::ForbiddenIp,
   transport::{Transport, TransportError},
-  types::{DecodeError, Domain, InvalidMessageType, NodeId},
-  util::InvalidAddress,
+  types::{Domain, InvalidMessageType, NodeId},
 };
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum Error<D: Delegate, T: Transport> {
-  #[error("showbiz: empty node name provided")]
-  EmptyNodeName,
-  #[error("showbiz: label is too long. expected at most 255 bytes, got {0}")]
-  LabelTooLong(usize),
   #[error("showbiz: invalid message type {0}")]
   InvalidMessageType(#[from] InvalidMessageType),
-  #[error("showbiz: invalid address {0}")]
-  InvalidAddress(#[from] InvalidAddress),
-  #[error("showbiz: cannot decode label; packet has been truncated")]
-  TruncatedLabel,
-  #[error("showbiz: label header cannot be empty when present")]
-  EmptyLabel,
-  #[error("showbiz: io error {0}")]
-  IO(#[from] std::io::Error),
   #[error("showbiz: remote node state(size {0}) is larger than limit")]
   LargeRemoteState(usize),
   #[error("showbiz: security error {0}")]
   Security(#[from] crate::security::SecurityError),
+  #[error("showbiz: keyring error {0}")]
+  Keyring(#[from] crate::keyring::SecretKeyringError),
   #[error("showbiz: node names are required by configuration but one was not provided")]
   MissingNodeName,
   #[error("showbiz: {0}")]
@@ -36,22 +26,31 @@ pub enum Error<D: Delegate, T: Transport> {
   #[error("showbiz: timeout waiting for update broadcast")]
   UpdateTimeout,
   #[error("showbiz: dns error: {0}")]
-  DNS(#[from] trust_dns_resolver::error::ResolveError),
+  Dns(#[from] trust_dns_resolver::error::ResolveError),
   #[error("showbiz: {0}")]
   Delegate(D::Error),
   #[error("showbiz: {0}")]
-  Transport(TransportError<T>),
+  Transport(#[from] TransportError<T>),
   #[error("showbiz: timeout waiting for leave broadcast")]
   LeaveTimeout,
   #[error("showbiz: {0}")]
   ForbiddenIp(#[from] ForbiddenIp),
   #[error("showbiz: cannot parse ip from {0}")]
   ParseIpFailed(Domain),
-
   #[error("showbiz: network error {0}")]
   Network(#[from] NetworkError<T>),
   #[error("showbiz: no response from node {0}")]
   NoPingResponse(NodeId),
+  #[error("showbiz: {0}")]
+  Other(String),
+  #[error("showbiz: node is not running, please bootstrap first")]
+  NotRunning,
+}
+
+impl<D: Delegate, T: Transport> core::fmt::Debug for Error<D, T> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(f, "{self}")
+  }
 }
 
 impl<D: Delegate, T: Transport> Error<D, T> {
@@ -66,19 +65,14 @@ impl<D: Delegate, T: Transport> Error<D, T> {
   }
 
   #[inline]
-  pub fn dns(e: trust_dns_resolver::error::ResolveError) -> Self {
-    Self::DNS(e)
+  pub(crate) fn dns_resolve(e: trust_dns_resolver::error::ResolveError) -> Self {
+    Self::Transport(TransportError::Dns(DnsError::Resolve(e)))
   }
-}
 
-impl<D: Delegate, T: Transport> PartialEq for Error<D, T> {
-  fn eq(&self, other: &Self) -> bool {
-    match (self, other) {
-      (Self::LabelTooLong(a), Self::LabelTooLong(b)) => a == b,
-      (Self::InvalidMessageType(a), Self::InvalidMessageType(b)) => a == b,
-      (Self::TruncatedLabel, Self::TruncatedLabel) => true,
-      (Self::EmptyLabel, Self::EmptyLabel) => true,
-      (Self::IO(a), Self::IO(b)) => a.kind() == b.kind(),
+  #[inline]
+  pub(crate) fn failed_remote(&self) -> bool {
+    match self {
+      Self::Transport(e) => e.failed_remote(),
       _ => false,
     }
   }

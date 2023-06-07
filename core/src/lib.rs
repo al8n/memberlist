@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
-#![feature(ip)]
+#![deny(warnings)]
+#![cfg_attr(feature = "nightly", feature(return_position_impl_trait_in_trait))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(docsrs, allow(unused_attributes))]
 
 mod awareness;
 mod broadcast;
@@ -8,27 +11,48 @@ pub mod delegate;
 pub mod error;
 mod keyring;
 pub use keyring::{SecretKey, SecretKeyring, SecretKeyringError};
-pub mod label;
 mod network;
 mod options;
 pub use options::Options;
-mod queue;
-pub use queue::TransmitLimitedQueue;
 mod dns;
+pub mod queue;
 mod security;
 mod showbiz;
+pub use showbiz::*;
 mod state;
 mod suspicion;
 pub mod transport;
-mod types;
+pub mod types;
 mod util;
-pub use types::{CompressionAlgo, InvalidCompressionAlgo};
 
 pub use bytes;
 pub use ipnet::IpNet;
 
-mod timer;
+#[cfg(feature = "async")]
+pub mod timer;
 
-pub const MIN_PROTOCOL_VERSION: u8 = 1;
-pub const PROTOCOL_VERSION2_COMPATIBLE: u8 = 2;
-pub const MAX_PROTOCOL_VERSION: u8 = 5;
+mod version;
+pub use version::*;
+
+#[cfg(feature = "async")]
+#[doc(hidden)]
+pub use async_channel;
+
+#[cfg(feature = "async")]
+#[doc(hidden)]
+pub use async_lock;
+
+#[cfg(feature = "async")]
+#[doc(hidden)]
+pub use async_trait;
+
+#[cfg(feature = "async")]
+#[doc(hidden)]
+pub use futures_util;
+
+#[cfg(feature = "metrics")]
+#[doc(hidden)]
+pub use metrics;
+
+#[doc(hidden)]
+pub use tracing;

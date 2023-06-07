@@ -3,26 +3,22 @@ use std::sync::atomic::Ordering;
 use crate::{
   delegate::Delegate,
   error::Error,
-  label::LabeledConnection,
   security::{append_bytes, encrypted_length, EncryptionAlgo, SecurityError},
-  showbiz::Spawner,
-  transport::{Connection, TransportError},
-  types::{InvalidMessageType, MessageType},
-  util::{compress_payload, decompress_buffer, CompressionError},
+  transport::{ReliableConnection, TransportError},
+  types::MessageType,
+  util::{compress_payload, decompress_buffer},
   Options, SecretKeyring,
 };
 
 use super::*;
+use agnostic::Runtime;
 use bytes::{Buf, BufMut, BytesMut};
-use futures_util::{
-  future::{BoxFuture, FutureExt},
-  io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
-};
+use futures_util::{future::FutureExt, Future, Stream};
 
 mod packet;
 mod stream;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum NetworkError<T: Transport> {
   #[error("{0}")]
   Transport(#[from] TransportError<T>),
@@ -41,26 +37,121 @@ pub enum NetworkError<T: Transport> {
   },
 }
 
-impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
+impl<T: Transport> core::fmt::Debug for NetworkError<T> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(f, "{self}")
+  }
+}
+
+impl<D, T, R> Showbiz<D, T, R>
+where
+  D: Delegate,
+  T: Transport,
+  R: Runtime,
+  <R::Interval as Stream>::Item: Send,
+  <R::Sleep as Future>::Output: Send,
+{
+  pub(crate) async fn send_ping_and_wait_for_ack(
+    &self,
+    target: &NodeId,
+    ping: Ping,
+    deadline: Duration,
+  ) -> Result<bool, Error<D, T>> {
+    let Ok(mut conn) = self.runner().as_ref().unwrap().transport.dial_timeout(target.addr(), deadline).await else {
+      // If the node is actually dead we expect this to fail, so we
+      // shouldn't spam the logs with it. After this point, errors
+      // with the connection are real, unexpected errors and should
+      // get propagated up.
+      return Ok(false);
+    };
+    if deadline != Duration::ZERO {
+      conn.set_timeout(Some(deadline));
+    }
+
+    let mut out = BytesMut::with_capacity(MessageType::SIZE + ping.encoded_len());
+    out.put_u8(MessageType::Ping as u8);
+    ping.encode_to(&mut out);
+
+    let encryption_enabled = self.encryption_enabled().await;
+    self
+      .raw_send_msg_stream(
+        &mut conn,
+        &self.inner.opts.label,
+        out.freeze(),
+        target.addr(),
+        encryption_enabled,
+      )
+      .await?;
+
+    let (data, mt) = Self::read_stream(
+      &mut conn,
+      &self.inner.opts.label,
+      encryption_enabled,
+      self.inner.keyring.as_ref(),
+      &self.inner.opts,
+      #[cfg(feature = "metrics")]
+      &self.inner.metrics_labels,
+    )
+    .await?;
+
+    if mt != MessageType::AckResponse {
+      return Err(Error::Other(format!(
+        "unexpected message type: {} from ping",
+        mt
+      )));
+    }
+
+    let ack = match data {
+      Some(mut d) => match AckResponse::decode_len(&mut d) {
+        Ok(len) => AckResponse::decode_from::<T::Checksumer>(d.split_to(len))
+          .map_err(TransportError::Decode)?,
+        Err(e) => return Err(TransportError::Decode(e).into()),
+      },
+      None => {
+        let len = conn.read_u32_varint().await.map_err(Error::transport)?;
+        let mut buf = vec![0; len];
+        conn.read_exact(&mut buf).await.map_err(Error::transport)?;
+        AckResponse::decode_from::<T::Checksumer>(buf.into()).map_err(TransportError::Decode)?
+      }
+    };
+
+    if ack.seq_no != ping.seq_no {
+      return Err(Error::Other(format!(
+        "sequence number from ack ({}) doesn't match ping ({})",
+        ack.seq_no, ping.seq_no
+      )));
+    }
+
+    Ok(true)
+  }
+
   /// Used to initiate a push/pull over a stream with a
   /// remote host.
   pub(crate) async fn send_and_receive_state(
     &self,
-    id: &NodeId,
+    name: &Name,
+    addr: SocketAddr,
     join: bool,
   ) -> Result<RemoteNodeState, Error<D, T>> {
-    if id.name.is_empty() && self.inner.opts.require_node_names {
+    if name.is_empty() && self.inner.opts.require_node_names {
       return Err(Error::MissingNodeName);
     }
 
     // Attempt to connect
-    let conn = self
-      .inner
+    let mut conn = self
+      .runner()
+      .as_ref()
+      .unwrap()
       .transport
-      .dial_address_timeout(id, self.inner.opts.tcp_timeout)
+      .dial_timeout(addr, self.inner.opts.tcp_timeout)
       .await
       .map_err(Error::transport)?;
-    tracing::debug!(target = "showbiz", "initiating push/pull sync with: {}", id);
+    tracing::debug!(
+      target = "showbiz",
+      "initiating push/pull sync with: {}({})",
+      name,
+      addr
+    );
 
     #[cfg(feature = "metrics")]
     {
@@ -68,43 +159,45 @@ impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
     }
 
     // Send our state
-    let mut lr = LabeledConnection::new(BufReader::new(conn));
-    lr.set_label(self.inner.opts.label.clone());
-
     let encryption_enabled = self.encryption_enabled().await;
     self
-      .send_local_state(&mut lr, id, encryption_enabled, join)
+      .send_local_state(
+        &mut conn,
+        addr,
+        encryption_enabled,
+        join,
+        &self.inner.opts.label,
+      )
       .await?;
 
-    lr.conn
-      .get_mut()
-      .set_timeout(if self.inner.opts.tcp_timeout == Duration::ZERO {
-        None
-      } else {
-        Some(self.inner.opts.tcp_timeout)
-      });
+    conn.set_timeout(if self.inner.opts.tcp_timeout == Duration::ZERO {
+      None
+    } else {
+      Some(self.inner.opts.tcp_timeout)
+    });
 
     let (data, mt) = Self::read_stream(
-      &mut lr,
+      &mut conn,
+      &self.inner.opts.label,
       encryption_enabled,
       self.inner.keyring.as_ref(),
       &self.inner.opts,
+      #[cfg(feature = "metrics")]
+      &self.inner.metrics_labels,
     )
     .await?;
 
     if mt == MessageType::ErrorResponse {
       let err = match data {
         Some(mut d) => match ErrorResponse::decode_len(&mut d) {
-          Ok(len) => ErrorResponse::decode_from(d.split_to(len)).map_err(NetworkError::Decode)?,
-          Err(e) => return Err(NetworkError::Decode(e).into()),
+          Ok(len) => ErrorResponse::decode_from(d.split_to(len)).map_err(TransportError::Decode)?,
+          Err(e) => return Err(TransportError::Decode(e).into()),
         },
         None => {
-          let len = decode_u32_from_reader(&mut lr)
-            .await
-            .map(|(x, _)| x as usize)?;
+          let len = conn.read_u32_varint().await.map_err(Error::transport)?;
           let mut buf = vec![0; len];
-          lr.read_exact(&mut buf).await?;
-          ErrorResponse::decode_from(buf.into()).map_err(NetworkError::Decode)?
+          conn.read_exact(&mut buf).await.map_err(Error::transport)?;
+          ErrorResponse::decode_from(buf.into()).map_err(TransportError::Decode)?
         }
       };
       return Err(NetworkError::Remote(err.err).into());
@@ -123,7 +216,7 @@ impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
 
     // Read remote state
     self
-      .read_remote_state(&mut lr, data, id)
+      .read_remote_state(&mut conn, data)
       .await
       .map_err(From::from)
   }
@@ -131,7 +224,7 @@ impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
   async fn encrypt_local_state(
     keyring: &SecretKeyring,
     msg: &[u8],
-    label: &[u8],
+    label: &Label,
     algo: EncryptionAlgo,
   ) -> Result<Bytes, Error<D, T>> {
     let enc_len = encrypted_length(algo, msg.len());
@@ -160,7 +253,7 @@ impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
         })
         .map_err(From::from)
     } else {
-      let data_bytes = append_bytes(&buf, label);
+      let data_bytes = append_bytes(&buf, label.as_bytes());
       // Write the encrypted cipher text to the buffer
       keyring
         .encrypt_payload(algo, msg, &data_bytes, &mut ciphertext)
@@ -173,25 +266,33 @@ impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
     }
   }
 
-  async fn decrypt_remote_state<R: AsyncRead + std::marker::Unpin>(
-    r: &mut LabeledConnection<R>,
+  async fn decrypt_remote_state(
+    r: &mut ReliableConnection<T>,
+    stream_label: &Label,
     keyring: &SecretKeyring,
+    #[cfg(feature = "metrics")] metrics_labels: &[metrics::Label],
   ) -> Result<Bytes, Error<D, T>> {
-    let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
+    // Read in enough to determine message length
+    let meta_size = MessageType::SIZE + core::mem::size_of::<u32>();
     let mut buf = BytesMut::with_capacity(meta_size);
     buf.put_u8(MessageType::Encrypt as u8);
     let mut b = [0u8; core::mem::size_of::<u32>()];
-    r.read_exact(&mut b).await?;
+    r.read_exact(&mut b).await.map_err(Error::transport)?;
     buf.put_slice(&b);
 
     // Ensure we aren't asked to download too much. This is to guard against
     // an attack vector where a huge amount of state is sent
     let more_bytes = u32::from_be_bytes(b) as usize;
+    #[cfg(feature = "metrics")]
+    {
+      add_sample_to_remote_size_histogram(more_bytes as f64, metrics_labels.iter());
+    }
+
     if more_bytes > MAX_PUSH_STATE_BYTES {
       return Err(Error::LargeRemoteState(more_bytes));
     }
 
-    //Start reporting the size before you cross the limit
+    // Start reporting the size before you cross the limit
     if more_bytes > (0.6 * (MAX_PUSH_STATE_BYTES as f64)).floor() as usize {
       tracing::warn!(
         target = "showbiz",
@@ -203,7 +304,9 @@ impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
 
     // Read in the rest of the payload
     buf.resize(meta_size + more_bytes, 0);
-    r.read_exact(&mut buf).await?;
+    r.read_exact(&mut buf[meta_size..])
+      .await
+      .map_err(Error::transport)?;
 
     // Decrypt the cipherText with some authenticated data
     //
@@ -212,7 +315,7 @@ impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
     //   [messageType; byte] [messageLength; uint32] [label_data; optional]
     //
     let mut ciphertext = buf.split_off(meta_size);
-    if r.label().is_empty() {
+    if stream_label.is_empty() {
       // Decrypt the payload
       keyring
         .decrypt_payload(&mut ciphertext, &buf)
@@ -223,7 +326,7 @@ impl<D: Delegate, T: Transport, S: Spawner> Showbiz<D, T, S> {
         })
         .map_err(From::from)
     } else {
-      let data_bytes = append_bytes(&buf, r.label());
+      let data_bytes = append_bytes(&buf, stream_label.as_bytes());
       // Decrypt the payload
       keyring
         .decrypt_payload(&mut ciphertext, data_bytes.as_ref())

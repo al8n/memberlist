@@ -3,12 +3,15 @@ members = [
   "core",
   "showbiz",
   "transport",
-  "traits",
-  "types",
-  "js",
-  "nodejs",
-  "py",
+  # "js",
+  # "nodejs",
+  # "py",
 ]
+exclude = [
+  "showbiz-wasm"
+]
+
+resolver = "2"
 
 [workspace.package]
 version = "0.0.0"
@@ -17,11 +20,17 @@ license = "Apache-2.0/MIT"
 repository = "https://github.com/al8n/showbiz"
 homepage = "https://github.com/al8n/showbiz"
 
+[workspace.package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [workspace.dependencies]
+agnostic = { path = "../agnostic/agnostic" }
 bytes = "1.4"
-either = "1.8"
-local-ip-address = "0.5"
 viewit = "0.1.5"
 scopeguard = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+thiserror = "1"
 tracing = "0.1"
-trust-dns-proto = { version = "0.23.0-alpha.2", default-features = false }
+
+showbiz-core = { path = "core", version = "0.0.0", default-features = false }

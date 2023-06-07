@@ -7,23 +7,23 @@ use crate::{
   types::{Message, NodeId},
   util::decompress_payload,
 };
-use futures_timer::Delay;
+use futures_util::{Future, Stream};
 use rand::Rng;
 
 use super::*;
 
-impl<D, T, S> Showbiz<D, T, S>
+impl<D, T, R> Showbiz<D, T, R>
 where
-  T: Transport,
-  S: Spawner,
   D: Delegate,
+  T: Transport,
+  R: Runtime,
+  <R::Interval as Stream>::Item: Send,
+  <R::Sleep as Future>::Output: Send,
 {
-  pub(crate) fn packet_listener(&self) {
+  pub(crate) fn packet_listener(&self, shutdown_rx: async_channel::Receiver<()>) {
     let this = self.clone();
-    let shutdown_rx = this.inner.shutdown_rx.clone();
-    let transport_rx = this.inner.transport.packet().clone();
-    let spawner = self.inner.spawner;
-    spawner.spawn(Box::pin(async move {
+    let transport_rx = this.runner().as_ref().unwrap().transport.packet();
+    self.inner.runtime.spawn_detach(async move {
       loop {
         futures_util::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -37,13 +37,13 @@ where
           }
         }
       }
-    }));
+    });
   }
 
   async fn ingest_packet(&self, packet: Packet) {
     let addr = packet.from();
     let timestamp = packet.timestamp();
-    let (mut buf, mut packet_label) = match Self::remove_label_header_from(packet.into_inner()) {
+    let (mut buf, mut packet_label) = match Label::remove_label_header_from(packet.into_inner()) {
       Ok((buf, packet_label)) => (buf, packet_label),
       Err(e) => {
         tracing::error!(target = "showbiz", err = %e, addr = %addr);
@@ -73,7 +73,7 @@ where
         if let Err(e) = decrypt_payload(
           &keys.keys(),
           &mut buf,
-          &packet_label,
+          packet_label.as_bytes(),
           self.inner.opts.encryption_algo,
         ) {
           if self.inner.opts.gossip_verify_incoming {
@@ -152,6 +152,7 @@ where
           if msg_type == MessageType::Alive {
             queue = &mut mq.high;
           }
+
           // Check for overflow and append if not full
           if queue.len() >= self.inner.opts.handoff_queue_depth {
             tracing::warn!(target = "showbiz", addr = %from, "handler queue full, dropping message ({})", msg_type);
@@ -216,18 +217,26 @@ where
   async fn handle_compressed(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
     // Try to decode the payload
     if !self.inner.opts.compression_algo.is_none() {
-      let algo = match CompressionAlgo::try_from(buf.get_u8()) {
-        Ok(algo) => algo,
+      let size = match Compress::decode_len(&mut buf) {
+        Ok(len) => len as usize,
         Err(e) => {
-          tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode compression algorithm");
+          tracing::error!(target = "showbiz", remote = %from, err = %e, "failed to decode compressed message");
           return;
         }
       };
-      let size = buf.get_u32() as usize;
-      match decompress_payload(algo, &buf) {
+
+      let compress = match Compress::decode_from::<T::Checksumer>(buf.split_to(size)) {
+        Ok(compress) => compress,
+        Err(e) => {
+          tracing::error!(target = "showbiz", remote = %from, err = %e, "failed to decode compressed message");
+          return;
+        }
+      };
+
+      match decompress_payload(compress.algo, &compress.buf) {
         Ok(payload) => self.handle_command(payload.into(), from, timestamp).await,
         Err(e) => {
-          tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decompress payload");
+          tracing::error!(target = "showbiz", remote = %from, err = %e, "failed to decompress payload");
         }
       }
     } else {
@@ -240,24 +249,22 @@ where
     let p = match Ping::decode_from(buf) {
       Ok(ping) => ping,
       Err(e) => {
-        tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode ping request");
+        tracing::error!(target = "showbiz", local=%self.inner.id, remote = %from, err = %e, "failed to decode ping request");
         return;
       }
     };
 
     // If node is provided, verify that it is for us
-    if let Some(target) = &p.target {
-      if target != &self.inner.id {
-        tracing::error!(target = "showbiz", addr = %from, "got ping for unexpected node '{}'", target);
-        return;
-      }
+    if p.target.name != self.inner.opts.name {
+      tracing::error!(target = "showbiz", local=%self.inner.id, remote = %from, "got ping for unexpected node '{}'", p.target);
+      return;
     }
 
     let msg = if let Some(delegate) = &self.inner.delegate {
       let payload = match delegate.ack_payload().await {
         Ok(payload) => payload,
         Err(e) => {
-          tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to get ack payload from delegate");
+          tracing::error!(target = "showbiz", local=%self.inner.id, remote = %from, err = %e, "failed to get ack payload from delegate");
           return;
         }
       };
@@ -305,7 +312,7 @@ where
     let ping = Ping {
       seq_no: local_seq_no,
       source: self.inner.id.clone(),
-      target: ind.ping.target.clone(),
+      target: ind.target.clone(),
     };
 
     // Forward the ack back to the requestor. If the request encodes an origin
@@ -315,8 +322,8 @@ where
     let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
     // Setup a response handler to relay the ack
     let this = self.clone();
-    let ind_source = ind.ping.source.clone();
-    let ind_seq_no = ind.ping.seq_no;
+    let ind_source = ind.source.clone();
+    let ind_seq_no = ind.seq_no;
 
     self
       .set_ack_handler(
@@ -340,44 +347,38 @@ where
       )
       .await;
 
-    let spawner = self.inner.spawner;
+    let runtime = self.inner.runtime;
 
     let mut out = BytesMut::with_capacity(MessageType::SIZE + ping.encoded_len());
     out.put_u8(MessageType::Ping as u8);
     ping.encode_to(&mut out);
 
-    // TODO: change ind ping struct encoding
-    if let Err(e) = self.send_msg(&ind.ping.target.unwrap(), Message(out)).await {
+    if let Err(e) = self.send_msg(&ind.target, Message(out)).await {
       tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to send ping");
     }
 
     // Setup a timer to fire off a nack if no ack is seen in time.
-    if ind.nack {
-      let this = self.clone();
-      let probe_timeout = self.inner.opts.probe_timeout;
-      spawner.spawn(
-        async move {
-          let timer = Delay::new(probe_timeout);
-          futures_util::select! {
-            _ = timer.fuse() => {
-              // We've not received an ack, so send a nack.
-              let nack = NackResponse::new(ind.ping.seq_no);
-              let mut out = BytesMut::with_capacity(MessageType::SIZE + nack.encoded_len());
-              out.put_u8(MessageType::NackResponse as u8);
-              nack.encode_to::<T::Checksumer>(&mut out);
-              let addr = ind.ping.source;
-              if let Err(e) = this.send_msg(&addr, Message(out)).await {
-                tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to send nack");
-              }
-            }
-            _ = cancel_rx.fuse() => {
-              // We've received an ack, so we can cancel the nack.
+    let this = self.clone();
+    let probe_timeout = self.inner.opts.probe_timeout;
+    runtime.spawn_detach(
+      async move {
+        futures_util::select! {
+          _ = this.inner.runtime.sleep(probe_timeout).fuse() => {
+            // We've not received an ack, so send a nack.
+            let nack = NackResponse::new(ind.seq_no);
+            let mut out = BytesMut::with_capacity(MessageType::SIZE + nack.encoded_len());
+            out.put_u8(MessageType::NackResponse as u8);
+            nack.encode_to::<T::Checksumer>(&mut out);
+            if let Err(e) = this.send_msg(&ind.source, Message(out)).await {
+              tracing::error!(target = "showbiz", local = %ind.source, remote = %from, err = %e, "failed to send nack");
             }
           }
+          _ = cancel_rx.fuse() => {
+            // We've received an ack, so we can cancel the nack.
+          }
         }
-        .boxed(),
-      );
-    }
+      },
+    );
   }
 
   async fn handle_ack(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
@@ -419,7 +420,7 @@ where
     let bytes_avail = self.inner.opts.packet_buffer_size
       - msg.len()
       - COMPOUND_HEADER_OVERHEAD
-      - Self::label_overhead(&self.inner.opts.label);
+      - self.inner.opts.label.label_overhead();
 
     let mut msgs = self
       .get_broadcast_with_prepend(vec![msg], COMPOUND_OVERHEAD, bytes_avail)
@@ -427,7 +428,7 @@ where
 
     // Fast path if nothing to piggypack
     if msgs.len() == 1 {
-      return self.raw_send_msg_packet(&addr, msgs.pop().unwrap().0).await;
+      return self.raw_send_msg_packet(addr, msgs.pop().unwrap().0).await;
     }
 
     // Create a compound message
@@ -477,7 +478,7 @@ where
           return Err(err);
         };
 
-        if let Err(e) = keyring.encrypt_to(pk, &nonce, &self.inner.opts.label, &mut bytes)
+        if let Err(e) = keyring.encrypt_to(pk, &nonce, self.inner.opts.label.as_bytes(), &mut bytes)
           .map(|_| {
             buf.unsplit(bytes);
           }) {
@@ -496,9 +497,11 @@ where
         }
 
         $this
-          .inner
+          .runner()
+          .as_ref()
+          .unwrap()
           .transport
-          .write_to_address(&$buf, &$addr)
+          .write_to(&$buf, $addr.addr())
           .await
           .map(|_| ())
           .map_err(Error::transport)

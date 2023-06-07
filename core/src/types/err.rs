@@ -35,13 +35,6 @@ impl ErrorResponse {
   }
 
   #[inline]
-  pub fn encode(&self) -> Bytes {
-    let mut buf = BytesMut::with_capacity(self.encoded_len());
-    self.encode_to(&mut buf);
-    buf.freeze()
-  }
-
-  #[inline]
   pub fn encode_to(&self, mut buf: &mut BytesMut) {
     encode_u32_to_buf(&mut buf, self.encoded_len() as u32);
     if self.err.is_empty() {
@@ -53,7 +46,7 @@ impl ErrorResponse {
   }
 
   #[inline]
-  pub fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
+  pub fn decode_len(buf: impl Buf) -> Result<usize, DecodeError> {
     decode_u32_from_buf(buf)
       .map(|(x, _)| x as usize)
       .map_err(From::from)
@@ -64,6 +57,7 @@ impl ErrorResponse {
     let mut required = 0;
     let mut this = Self { err: String::new() };
     while buf.has_remaining() {
+      #[allow(clippy::single_match)]
       match buf.get_u8() {
         1 => {
           let len = decode_u32_from_buf(&mut buf)?.0 as usize;

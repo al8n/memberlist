@@ -1,15 +1,9 @@
-use std::{
-  io::{self, Error, ErrorKind},
-  net::{IpAddr, Ipv4Addr, Ipv6Addr},
-};
+use std::net::IpAddr;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use super::*;
-
-const V4_ADDR_SIZE: usize = 4;
-const V6_ADDR_SIZE: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct Domain(Bytes);
@@ -46,79 +40,6 @@ impl Domain {
   pub fn len(&self) -> usize {
     self.0.len()
   }
-
-  #[inline]
-  pub(crate) fn from_bytes(s: &[u8]) -> Result<Self, InvalidDomain> {
-    match core::str::from_utf8(s) {
-      Ok(s) => Self::try_from(s),
-      Err(e) => Err(e.into()),
-    }
-  }
-
-  #[inline]
-  pub(crate) fn from_array<const N: usize>(s: [u8; N]) -> Result<Self, InvalidDomain> {
-    match core::str::from_utf8(&s) {
-      Ok(domain) => Self::try_from(domain),
-      Err(e) => Err(e.into()),
-    }
-  }
-
-  #[inline]
-  pub(crate) fn encoded_len(&self) -> usize {
-    1 + self.0.len()
-  }
-
-  #[inline]
-  pub(crate) fn encode_to(&self, buf: &mut BytesMut) {
-    buf.put_u8(self.0.len() as u8);
-    buf.put(self.0.as_ref());
-  }
-
-  #[inline]
-  pub(crate) fn decode_from(buf: Bytes) -> Result<Self, DecodeError> {
-    if buf.is_empty() {
-      return Err(DecodeError::Truncated("domain"));
-    }
-
-    let len = buf.remaining();
-    if len > Self::MAX_SIZE {
-      return Err(DecodeError::InvalidDomain(InvalidDomain::InvalidLength(
-        len,
-      )));
-    }
-
-    Self::try_from(buf).map_err(From::from)
-  }
-
-  #[cfg(feature = "async")]
-  #[inline]
-  pub(crate) async fn decode_from_reader<R: futures_util::io::AsyncRead + Unpin>(
-    r: &mut R,
-  ) -> io::Result<Self> {
-    use futures_util::io::AsyncReadExt;
-    let mut len = [0; 1];
-    r.read_exact(&mut len).await?;
-
-    let len = len[0] as usize;
-    if len == 0 {
-      return Err(Error::new(
-        ErrorKind::InvalidData,
-        DecodeError::InvalidDomain(InvalidDomain::InvalidLength(len)),
-      ));
-    }
-
-    if len <= 23 {
-      map_inlined!(match Self.len() {
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-        11, 12, 13, 14, 15, 16, 17, 18,
-        19, 20, 21, 22, 23
-      } => r)
-    } else {
-      let mut buf = vec![0; len];
-      r.read_exact(&mut buf).await?;
-      Self::from_bytes(&buf).map_err(|e| Error::new(ErrorKind::InvalidData, e))
-    }
-  }
 }
 
 impl Serialize for Domain {
@@ -133,7 +54,7 @@ impl<'de> Deserialize<'de> for Domain {
     D: serde::Deserializer<'de>,
   {
     Bytes::deserialize(deserializer)
-      .and_then(|n| Domain::try_from(n).map_err(|e| serde::de::Error::custom(e)))
+      .and_then(|n| Domain::try_from(n).map_err(serde::de::Error::custom))
   }
 }
 
@@ -236,7 +157,7 @@ impl TryFrom<&Bytes> for Domain {
   type Error = InvalidDomain;
 
   fn try_from(buf: &Bytes) -> Result<Self, Self::Error> {
-    match core::str::from_utf8(&buf) {
+    match core::str::from_utf8(buf) {
       Ok(s) => is_valid_domain_name(s).map(|_| Self(buf.clone())),
       Err(e) => Err(InvalidDomain::Utf8(e)),
     }
@@ -264,7 +185,7 @@ fn is_valid_domain_name(domain: &str) -> Result<(), InvalidDomain> {
   for label in domain.split('.') {
     let len = label.len();
     // Each label must be between 1 and 63 characters long
-    if len < 1 || len > 63 {
+    if !(1..=63).contains(&len) {
       return Err(InvalidDomain::InvalidLabelSize(len));
     }
     // Labels must start and end with an alphanumeric character
@@ -284,12 +205,47 @@ fn is_valid_domain_name(domain: &str) -> Result<(), InvalidDomain> {
 }
 
 /// The Address for a node, can be an ip or a domain.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NodeAddress {
   /// e.g. `128.0.0.1`
   Ip(IpAddr),
   /// e.g. `www.example.com`
   Domain(Domain),
+}
+
+impl PartialEq for NodeAddress {
+  fn eq(&self, other: &Self) -> bool {
+    match (self, other) {
+      (Self::Ip(a), Self::Ip(b)) => a == b,
+      (Self::Domain(a), Self::Domain(b)) => a == b,
+      (Self::Ip(a), Self::Domain(b)) => {
+        if let Ok(addr) = b.as_str().parse::<IpAddr>() {
+          a == &addr
+        } else {
+          false
+        }
+      }
+      (Self::Domain(a), Self::Ip(b)) => {
+        if let Ok(addr) = a.as_str().parse::<IpAddr>() {
+          &addr == b
+        } else {
+          false
+        }
+      }
+    }
+  }
+}
+
+impl core::hash::Hash for NodeAddress {
+  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    match self {
+      Self::Ip(addr) => addr.hash(state),
+      Self::Domain(addr) => match addr.as_str().parse::<IpAddr>() {
+        Ok(addr) => addr.hash(state),
+        Err(_) => addr.hash(state),
+      },
+    }
+  }
 }
 
 impl Default for NodeAddress {
@@ -319,131 +275,10 @@ impl NodeAddress {
   }
 
   #[inline]
-  pub(crate) const fn unwrap_ip(&self) -> IpAddr {
+  pub fn is_unspecified(&self) -> bool {
     match self {
-      NodeAddress::Ip(addr) => *addr,
-      _ => unreachable!(),
-    }
-  }
-
-  #[inline]
-  pub(crate) fn encoded_len(&self) -> usize {
-    1 // type mark
-    + match self {
-      Self::Ip(addr) => match addr {
-        IpAddr::V4(_) => 4,
-        IpAddr::V6(_) => 16,
-      },
-      Self::Domain(addr) => addr.encoded_len(),
-    }
-  }
-
-  #[inline]
-  pub(crate) fn encode_to(&self, buf: &mut BytesMut) {
-    buf.put_u8(self.encoded_len() as u8);
-    match self {
-      Self::Ip(addr) => match addr {
-        IpAddr::V4(addr) => {
-          buf.put_u8(0);
-          buf.put_slice(&addr.octets());
-        }
-        IpAddr::V6(addr) => {
-          buf.put_u8(1);
-          buf.put_slice(&addr.octets())
-        }
-      },
-      Self::Domain(addr) => {
-        buf.put_u8(2);
-        addr.encode_to(buf);
-      }
-    }
-  }
-
-  #[inline]
-  pub(crate) fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
-    if buf.remaining() < 1 {
-      return Err(DecodeError::Corrupted);
-    }
-
-    Ok(buf.get_u8() as usize)
-  }
-
-  #[inline]
-  pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
-    if buf.is_empty() {
-      return Err(DecodeError::Truncated("node address"));
-    }
-    let mark = buf.get_u8();
-    let remaining = buf.remaining();
-    match mark {
-      0 => match remaining {
-        4 => {
-          let mut addr = [0; V4_ADDR_SIZE];
-          buf.copy_to_slice(&mut addr);
-          Ok(Self::Ip(IpAddr::V4(Ipv4Addr::from(addr))))
-        }
-        r => Err(DecodeError::InvalidIpAddrLength(r)),
-      },
-      1 => match remaining {
-        16 => {
-          let mut addr = [0; V6_ADDR_SIZE];
-          buf.copy_to_slice(&mut addr);
-          Ok(Self::Ip(IpAddr::V6(Ipv6Addr::from(addr))))
-        }
-        r => Err(DecodeError::InvalidIpAddrLength(r)),
-      },
-      2 => Domain::decode_from(buf).map(Self::Domain),
-      b => Err(DecodeError::UnknownMarkBit(b)),
-    }
-  }
-
-  #[cfg(feature = "async")]
-  #[inline]
-  pub(crate) async fn decode_from_reader<R: futures_util::io::AsyncRead + Unpin>(
-    r: &mut R,
-  ) -> std::io::Result<Self> {
-    use futures_util::io::AsyncReadExt;
-
-    let mut buf = [0; 2];
-    r.read_exact(&mut buf).await?;
-    let len = buf[0] as usize;
-    if len < 1 {
-      return Err(Error::new(
-        ErrorKind::InvalidData,
-        DecodeError::Truncated("node address"),
-      ));
-    }
-
-    let marker = buf[1];
-    let remaining = len - 1;
-    match marker {
-      0 => {
-        if remaining != V4_ADDR_SIZE {
-          return Err(Error::new(
-            ErrorKind::InvalidData,
-            DecodeError::InvalidIpAddrLength(remaining),
-          ));
-        }
-        let mut addr = [0; V4_ADDR_SIZE];
-        r.read_exact(&mut addr).await?;
-        Ok(Self::Ip(IpAddr::V4(Ipv4Addr::from(addr))))
-      }
-      1 => {
-        if remaining != V6_ADDR_SIZE {
-          return Err(Error::new(
-            ErrorKind::InvalidData,
-            DecodeError::InvalidIpAddrLength(remaining),
-          ));
-        }
-        let mut addr = [0; V6_ADDR_SIZE];
-        r.read_exact(&mut addr).await?;
-        Ok(Self::Ip(IpAddr::V6(Ipv6Addr::from(addr))))
-      }
-      2 => Domain::decode_from_reader(r).await.map(Self::Domain),
-      b => Err(Error::new(
-        ErrorKind::InvalidData,
-        DecodeError::UnknownMarkBit(b),
-      )),
+      Self::Ip(addr) => addr.is_unspecified(),
+      Self::Domain(_) => false,
     }
   }
 }
@@ -469,5 +304,32 @@ impl core::fmt::Display for NodeAddress {
       Self::Ip(addr) => write!(f, "{}", addr),
       Self::Domain(addr) => write!(f, "{}", addr),
     }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Address {
+  Socket(SocketAddr),
+  Domain { domain: Domain, port: Option<u16> },
+}
+
+impl From<SocketAddr> for Address {
+  fn from(addr: SocketAddr) -> Self {
+    Self::Socket(addr)
+  }
+}
+
+impl From<(Domain, u16)> for Address {
+  fn from((domain, port): (Domain, u16)) -> Self {
+    Self::Domain {
+      domain,
+      port: Some(port),
+    }
+  }
+}
+
+impl From<Domain> for Address {
+  fn from(domain: Domain) -> Self {
+    Self::Domain { domain, port: None }
   }
 }

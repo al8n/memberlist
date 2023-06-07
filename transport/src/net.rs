@@ -1,4 +1,38 @@
-use std::net::SocketAddr;
+use std::{
+  collections::VecDeque,
+  io::{self, Error, ErrorKind},
+  marker::PhantomData,
+  net::SocketAddr,
+  pin::Pin,
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+  },
+  task::{Context, Poll},
+  time::{Duration, Instant},
+};
+
+#[cfg(feature = "tokio-compat")]
+use agnostic::io::ReadBuf;
+
+use agnostic::{
+  net::{Net, TcpListener, TcpStream, UdpSocket},
+  Runtime,
+};
+use bytes::BytesMut;
+use showbiz_core::{
+  async_trait, futures_util,
+  transport::{
+    stream::{
+      connection_stream, packet_stream, ConnectionProducer, ConnectionSubscriber, PacketProducer,
+      PacketSubscriber,
+    },
+    ConnectionError, ConnectionErrorKind, ConnectionKind, ConnectionTimeout, PacketConnection,
+    ReliableConnection, Transport, TransportError, UnreliableConnection,
+  },
+  types::Packet,
+};
+use wg::AsyncWaitGroup;
 
 /// Used to buffer incoming packets during read
 /// operations.
@@ -8,26 +42,42 @@ const UDP_PACKET_BUF_SIZE: usize = 65536;
 /// sockets to in order to handle a large volume of messages.
 const UDP_RECV_BUF_SIZE: usize = 2 * 1024 * 1024;
 
-macro_rules! error {
-  () => {
-    #[derive(Debug, thiserror::Error)]
-    pub enum Error {
-      #[error("showbiz: net transport: {0}")]
-      IO(#[from] IOError),
-      #[error("showbiz: net transport: no private IP address found, and explicit IP not provided")]
-      NoPrivateIP,
-      #[error("showbiz: net transport: failed to get interface addresses {0}")]
-      NoInterfaceAddresses(#[from] local_ip_address::Error),
-      #[error("showbiz: net transport: at least one bind address is required")]
-      EmptyBindAddrs,
-      #[error("showbiz: net transport: failed to resize UDP buffer {0}")]
-      FailToResizeUdpBuffer(IOError),
-    }
-  };
+#[derive(Debug, thiserror::Error)]
+pub enum NetTransportError {
+  #[error("no private IP address found, and explicit IP not provided")]
+  NoPrivateIP,
+  #[error("failed to get interface addresses {0}")]
+  NoInterfaceAddresses(#[from] local_ip_address::Error),
+  #[error("at least one bind address is required")]
+  EmptyBindAddrs,
+  #[error("failed to resize UDP buffer {0}")]
+  ResizeUdpBuffer(std::io::Error),
+  #[error("failed to start UDP listener on {0}: {1}")]
+  ListenUdp(SocketAddr, std::io::Error),
+  #[error("failed to start TCP listener on {0}: {1}")]
+  ListenTcp(SocketAddr, std::io::Error),
+}
+
+#[derive(Debug, Clone)]
+pub struct Crc32(crc32fast::Hasher);
+
+impl showbiz_core::checksum::Checksumer for Crc32 {
+  fn new() -> Self {
+    Self(crc32fast::Hasher::new())
+  }
+
+  fn update(&mut self, data: &[u8]) {
+    self.0.update(data);
+  }
+
+  fn finalize(self) -> u32 {
+    self.0.finalize()
+  }
 }
 
 /// Used to configure a net transport.
-#[viewit::viewit(vis_all = "")]
+#[viewit::viewit(vis_all = "pub(crate)")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NetTransportOptions {
   /// A list of addresses to bind to for both TCP and UDP
   /// communications.
@@ -38,351 +88,660 @@ pub struct NetTransportOptions {
   bind_addrs: Vec<SocketAddr>,
 }
 
-macro_rules! set_udp_recv_buf {
-  () => {
-    #[cfg(not(target_arch = "wasm32"))]
-    #[inline]
-    fn set_udp_recv_buf(socket: &UdpSocket) -> Result<(), Error> {
-      use socket2::Socket;
-      // Safety: the fd we created from the socket is just created, so it is a valid and open file descriptor
-      let socket = unsafe { Socket::from_raw_fd(socket.as_raw_fd()) };
-      let mut size = UDP_RECV_BUF_SIZE;
-      let mut err = None;
+#[repr(transparent)]
+pub struct Udp<R: Runtime> {
+  conn: <R::Net as Net>::UdpSocket,
+}
 
-      while size > 0 {
-        match socket.set_recv_buffer_size(size) {
-          Ok(()) => return Ok(()),
-          Err(e) => {
-            err = Some(e);
-            size /= 2;
-          }
-        }
-      }
+impl<R: Runtime> Udp<R> {
+  fn new(conn: <R::Net as Net>::UdpSocket) -> Self {
+    Self { conn }
+  }
+}
 
-      // This is required to prevent double-closing the file descriptor.
-      drop(socket);
+// #[async_trait::async_trait]
+// impl<R: Runtime> showbiz_core::transport::UdpSocket for Udp<R> {
+//   /// setups up a "client" udp connection that will only receive packets from the associated address
+//   ///
+//   /// if the addr is ipv4 then it will bind local addr to 0.0.0.0:0, ipv6 \[::\]0
+//   async fn connect(addr: SocketAddr) -> io::Result<Self> {
+//     let bind_addr: SocketAddr = match addr {
+//       SocketAddr::V4(_addr) => (Ipv4Addr::UNSPECIFIED, 0).into(),
+//       SocketAddr::V6(_addr) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+//     };
 
-      match err {
-        Some(err) => Err(Error::FailToResizeUdpBuffer(err)),
-        None => Ok(()),
-      }
+//     Self::connect_with_bind(addr, bind_addr).await
+//   }
+
+//   /// same as connect, but binds to the specified local address for sending address
+//   async fn connect_with_bind(_addr: SocketAddr, bind_addr: SocketAddr) -> io::Result<Self> {
+//     let socket = Self::bind(bind_addr).await?;
+
+//     // TODO: research connect more, it appears to break UDP receiving tests, etc...
+//     // socket.connect(addr).await?;
+
+//     Ok(socket)
+//   }
+
+//   async fn bind(addr: SocketAddr) -> io::Result<Self> {
+//     <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::bind(addr)
+//       .await
+//       .map(|conn| Self {
+//         conn,
+//         timeout: None,
+//       })
+//   }
+// }
+
+#[async_trait::async_trait]
+impl<R: Runtime> PacketConnection for Udp<R> {
+  async fn send_to(&self, addr: SocketAddr, buffer: &[u8]) -> io::Result<usize> {
+    self.conn.send_to(buffer, addr).await
+  }
+
+  async fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+    self.conn.recv_from(buffer).await
+  }
+}
+
+impl<R: Runtime> ConnectionTimeout for Udp<R> {
+  fn set_write_timeout(&self, timeout: Option<Duration>) {
+    self.conn.set_write_timeout(timeout)
+  }
+
+  fn write_timeout(&self) -> Option<Duration> {
+    self.conn.write_timeout()
+  }
+
+  fn set_read_timeout(&self, timeout: Option<Duration>) {
+    self.conn.set_read_timeout(timeout)
+  }
+
+  fn read_timeout(&self) -> Option<Duration> {
+    self.conn.read_timeout()
+  }
+}
+
+#[repr(transparent)]
+pub struct Tcp<R: Runtime> {
+  conn: <R::Net as Net>::TcpStream,
+}
+
+impl<R: Runtime> futures_util::io::AsyncRead for Tcp<R> {
+  fn poll_read(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &mut [u8],
+  ) -> Poll<std::io::Result<usize>> {
+    futures_util::io::AsyncRead::poll_read(Pin::new(&mut self.conn), cx, buf)
+    // self.conn.poll_read(cx, buf)
+    // Pin::new(&mut (&mut self.conn).compat()).poll_read(cx, buf)
+  }
+}
+
+impl<R: Runtime> futures_util::io::AsyncWrite for Tcp<R> {
+  fn poll_write(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+  ) -> Poll<std::io::Result<usize>> {
+    futures_util::io::AsyncWrite::poll_write(Pin::new(&mut self.conn), cx, buf)
+  }
+
+  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    futures_util::io::AsyncWrite::poll_flush(Pin::new(&mut self.conn), cx)
+  }
+
+  fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    futures_util::io::AsyncWrite::poll_close(Pin::new(&mut self.conn), cx)
+  }
+}
+
+#[cfg(feature = "tokio-compat")]
+impl<R: Runtime> agnostic::io::TokioAsyncRead for Tcp<R> {
+  fn poll_read(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &mut ReadBuf<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    agnostic::io::TokioAsyncRead::poll_read(Pin::new(&mut self.conn), cx, buf)
+  }
+}
+
+#[cfg(feature = "tokio-compat")]
+impl<R: Runtime> agnostic::io::TokioAsyncWrite for Tcp<R> {
+  fn poll_write(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+  ) -> Poll<Result<usize, std::io::Error>> {
+    agnostic::io::TokioAsyncWrite::poll_write(Pin::new(&mut self.conn), cx, buf)
+  }
+
+  fn poll_flush(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Result<(), std::io::Error>> {
+    agnostic::io::TokioAsyncWrite::poll_flush(Pin::new(&mut self.conn), cx)
+  }
+
+  fn poll_shutdown(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Result<(), std::io::Error>> {
+    agnostic::io::TokioAsyncWrite::poll_shutdown(Pin::new(&mut self.conn), cx)
+  }
+}
+
+// #[async_trait::async_trait]
+// impl<R: Runtime> Connect for Tcp<R> {
+//   async fn connect_with_bind(addr: SocketAddr, bind_addr: Option<SocketAddr>) -> io::Result<Self> {
+//     let stream = match bind_addr {
+//       Some(bind_addr) => {
+//         <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect(bind_addr).await?
+//       }
+//       None => <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect(addr).await?,
+//     };
+//     stream.set_nodelay(true)?;
+//     Ok(Tcp {
+//       conn: stream,
+//       timeout: None,
+//     })
+//   }
+// }
+
+impl<R: Runtime> ConnectionTimeout for Tcp<R> {
+  fn set_write_timeout(&self, timeout: Option<Duration>) {
+    self.conn.set_write_timeout(timeout)
+  }
+
+  fn write_timeout(&self) -> Option<Duration> {
+    self.conn.write_timeout()
+  }
+
+  fn set_read_timeout(&self, timeout: Option<Duration>) {
+    self.conn.set_read_timeout(timeout)
+  }
+
+  fn read_timeout(&self) -> Option<Duration> {
+    self.conn.read_timeout()
+  }
+}
+
+pub struct NetTransport<R: Runtime> {
+  opts: Arc<NetTransportOptions>,
+  packet_rx: PacketSubscriber,
+  stream_rx: ConnectionSubscriber<Self>,
+  tcp_addr: SocketAddr,
+  udp_listener: Arc<UnreliableConnection<Self>>,
+  wg: AsyncWaitGroup,
+  shutdown: Arc<AtomicBool>,
+  runtime: R,
+}
+
+impl<R: Runtime> NetTransport<R> {
+  async fn new_in(
+    opts: <Self as Transport>::Options,
+    #[cfg(feature = "metrics")] metrics_labels: Option<Arc<Vec<showbiz_core::metrics::Label>>>,
+    runtime: R,
+  ) -> Result<Self, TransportError<Self>> {
+    // If we reject the empty list outright we can assume that there's at
+    // least one listener of each type later during operation.
+    if opts.bind_addrs.is_empty() {
+      return Err(TransportError::Other(NetTransportError::EmptyBindAddrs));
     }
 
-    #[cfg(target_arch = "wasm32")]
-    #[inline]
-    fn set_udp_recv_buf(socket: &UdpSocket) -> Result<(), Error> {
+    let (stream_tx, stream_rx) = connection_stream();
+    let (packet_tx, packet_rx) = packet_stream();
+
+    let mut tcp_listeners = VecDeque::with_capacity(opts.bind_addrs.len());
+    let mut udp_listeners = VecDeque::with_capacity(opts.bind_addrs.len());
+    let tcp_addr = opts.bind_addrs[0];
+    for &addr in &opts.bind_addrs {
+      tcp_listeners.push_back((
+        <<R::Net as Net>::TcpListener as agnostic::net::TcpListener>::bind(addr)
+          .await
+          .map_err(|e| TransportError::Other(NetTransportError::ListenTcp(addr, e)))?,
+        addr,
+      ));
+
+      let udp_ln = <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::bind(addr)
+        .await
+        .map_err(|e| NetTransportError::ListenUdp(addr, e))
+        .and_then(|udp| {
+          <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::set_read_buffer(
+            &udp,
+            UDP_RECV_BUF_SIZE,
+          )
+          .map(|_| UnreliableConnection::new(Udp::new(udp), addr))
+          .map_err(NetTransportError::ResizeUdpBuffer)
+        })
+        .map_err(TransportError::Other)?;
+      udp_listeners.push_back((udp_ln, addr));
+    }
+
+    let wg = AsyncWaitGroup::new();
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Fire them up now that we've been able to create them all.
+    // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
+    // udp and tcp listener can
+    for _ in 0..opts.bind_addrs.len() - 1 {
+      wg.add(2);
+      let (tcp_ln, remote_addr) = tcp_listeners.pop_back().unwrap();
+      TcpProcessor {
+        remote_addr,
+        wg: wg.clone(),
+        stream_tx: stream_tx.clone(),
+        ln: tcp_ln,
+        shutdown: shutdown.clone(),
+      }
+      .run(runtime);
+
+      let (udp_ln, remote_addr) = udp_listeners.pop_back().unwrap();
+      UdpProcessor {
+        wg: wg.clone(),
+        packet_tx: packet_tx.clone(),
+        ln: udp_ln,
+        remote_addr,
+        shutdown: shutdown.clone(),
+        #[cfg(feature = "metrics")]
+        metrics_labels: metrics_labels.clone().unwrap_or_default(),
+        _marker: std::marker::PhantomData,
+      }
+      .run(runtime);
+    }
+
+    wg.add(2);
+    let (tcp_ln, remote_addr) = tcp_listeners.pop_back().unwrap();
+    TcpProcessor {
+      remote_addr,
+      wg: wg.clone(),
+      stream_tx,
+      ln: tcp_ln,
+      shutdown: shutdown.clone(),
+    }
+    .run(runtime);
+    let (udp_ln, remote_addr) = udp_listeners.pop_back().unwrap();
+    let udp_ln = Arc::new(udp_ln);
+
+    UdpProcessor {
+      wg: wg.clone(),
+      packet_tx,
+      ln: udp_ln.clone(),
+      remote_addr,
+      shutdown: shutdown.clone(),
+      #[cfg(feature = "metrics")]
+      metrics_labels: metrics_labels.clone().unwrap_or_default(),
+      _marker: std::marker::PhantomData,
+    }
+    .run(runtime);
+
+    Ok(Self {
+      opts,
+      packet_rx,
+      stream_rx,
+      wg,
+      shutdown,
+      tcp_addr,
+      udp_listener: udp_ln,
+      runtime,
+    })
+  }
+}
+
+#[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
+impl<R: Runtime> Transport for NetTransport<R> {
+  type Error = NetTransportError;
+
+  type Checksumer = super::Crc32;
+
+  type Connection = Tcp<R>;
+
+  type UnreliableConnection = Udp<R>;
+
+  type Options = Arc<NetTransportOptions>;
+
+  type Runtime = R;
+
+  #[cfg(feature = "nightly")]
+  fn new<'a>(
+    opts: Self::Options,
+    runtime: Self::Runtime,
+  ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'a
+  where
+    Self: Sized,
+  {
+    #[cfg(feature = "metrics")]
+    {
+      Self::new_in(opts, None, runtime)
+    }
+
+    #[cfg(not(feature = "metrics"))]
+    {
+      Self::new_in(opts, runtime)
+    }
+  }
+
+  // #[cfg(all(feature = "metrics", feature = "nightly"))]
+  // fn with_metrics_labels(
+  //   opts: Self::Options,
+  //   metrics_labels: std::sync::Arc<Vec<showbiz_core::metrics::Label>>,
+  //   runtime: Self::Runtime,
+  // ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
+  // where
+  //   Self: Sized,
+  // {
+  //   Self::new_in(opts, Some(metrics_labels), runtime)
+  // }
+
+  #[cfg(feature = "nightly")]
+  fn write_to<'a>(
+    &'a self,
+    b: &'a [u8],
+    addr: SocketAddr,
+  ) -> impl Future<Output = Result<Instant, TransportError<Self>>> + Send + 'a {
+    async move {
+      UnreliableConnection::send_to(&self.udp_listener, addr, b)
+        .await
+        .map(|_| Instant::now())
+    }
+  }
+
+  #[cfg(feature = "nightly")]
+  fn dial_timeout(
+    &self,
+    addr: SocketAddr,
+    timeout: Duration,
+  ) -> impl Future<Output = Result<ReliableConnection<Self>, TransportError<Self>>> + '_ {
+    async move {
+      match <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect_timeout(addr, timeout)
+        .await
+      {
+        Ok(conn) => Ok(ReliableConnection::new(
+          Tcp {
+            conn,
+            timeout: None,
+          },
+          addr,
+        )),
+        Err(_) => Err(TransportError::Connection(ConnectionError {
+          kind: ConnectionKind::Reliable,
+          error_kind: ConnectionErrorKind::Dial,
+          error: Error::new(ErrorKind::TimedOut, "timeout"),
+        })),
+      }
+    }
+  }
+
+  #[cfg(feature = "nightly")]
+  fn shutdown(&self) -> impl Future<Output = Result<(), TransportError<Self>>> + Send + '_ {
+    async move {
+      // This will avoid log spam about errors when we shut down.
+      self.shutdown.store(true, Ordering::SeqCst);
+
+      // Block until all the listener threads have died.
+      self.wg.wait().await;
       Ok(())
     }
-  };
+  }
+
+  #[cfg(not(feature = "nightly"))]
+  async fn new(opts: Self::Options, runtime: Self::Runtime) -> Result<Self, TransportError<Self>>
+  where
+    Self: Sized,
+  {
+    #[cfg(feature = "metrics")]
+    {
+      Self::new_in(opts, None, runtime).await
+    }
+
+    #[cfg(not(feature = "metrics"))]
+    {
+      Self::new_in(opts, runtime).await
+    }
+  }
+
+  // #[cfg(all(feature = "metrics", not(feature = "nightly")))]
+  // async fn with_metrics_labels(
+  //   opts: Self::Options,
+  //   metrics_labels: Arc<Vec<showbiz_core::metrics::Label>>,
+  //   runtime: Self::Runtime,
+  // ) -> Result<Self, TransportError<Self>>
+  // where
+  //   Self: Sized,
+  // {
+  //   Self::new_in(opts, Some(metrics_labels), runtime).await
+  // }
+
+  fn final_advertise_addr(
+    &self,
+    addr: Option<SocketAddr>,
+  ) -> Result<SocketAddr, TransportError<Self>> {
+    match addr {
+      Some(addr) => Ok(addr),
+      None => {
+        if self.opts.bind_addrs[0].ip().is_unspecified() {
+          local_ip_address::local_ip()
+            .map_err(|e| match e {
+              local_ip_address::Error::LocalIpAddressNotFound => {
+                TransportError::Other(Self::Error::NoPrivateIP)
+              }
+              e => TransportError::Other(Self::Error::NoInterfaceAddresses(e)),
+            })
+            .map(|ip| SocketAddr::new(ip, self.tcp_addr.port()))
+        } else {
+          Ok(self.tcp_addr)
+        }
+      }
+    }
+  }
+
+  #[cfg(not(feature = "nightly"))]
+  async fn write_to(&self, b: &[u8], addr: SocketAddr) -> Result<Instant, TransportError<Self>> {
+    UnreliableConnection::send_to(&self.udp_listener, addr, b)
+      .await
+      .map(|_| Instant::now())
+  }
+
+  #[cfg(not(feature = "nightly"))]
+  async fn dial_timeout(
+    &self,
+    addr: SocketAddr,
+    timeout: Duration,
+  ) -> Result<ReliableConnection<Self>, TransportError<Self>> {
+    match <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect_timeout(addr, timeout)
+      .await
+    {
+      Ok(conn) => Ok(ReliableConnection::new(Tcp { conn }, addr)),
+      Err(_) => Err(TransportError::Connection(ConnectionError {
+        kind: ConnectionKind::Reliable,
+        error_kind: ConnectionErrorKind::Dial,
+        error: Error::new(ErrorKind::TimedOut, "timeout"),
+      })),
+    }
+  }
+
+  fn packet(&self) -> PacketSubscriber {
+    self.packet_rx.clone()
+  }
+
+  fn stream(&self) -> ConnectionSubscriber<Self> {
+    self.stream_rx.clone()
+  }
+
+  #[cfg(not(feature = "nightly"))]
+  async fn shutdown(&self) -> Result<(), TransportError<Self>> {
+    // This will avoid log spam about errors when we shut down.
+    self.shutdown.store(true, Ordering::SeqCst);
+
+    // Block until all the listener threads have died.
+    self.wg.wait().await;
+    Ok(())
+  }
+
+  fn block_shutdown(&self) -> Result<(), TransportError<Self>> {
+    self.runtime.block_on(self.shutdown())
+  }
 }
 
-macro_rules! transport {
-  ($($suffix: ident)?, $($async:ident)?) => {
-    pub struct NetTransport {
-      opts: Arc<NetTransportOptions>,
-      packet_rx: UnboundedReceiver<Packet>,
-      stream_rx: UnboundedReceiver<TransportConnection>,
+struct TcpProcessor<T: Transport, R: Runtime> {
+  remote_addr: SocketAddr,
+  wg: AsyncWaitGroup,
+  stream_tx: ConnectionProducer<T>,
+  ln: <R::Net as agnostic::net::Net>::TcpListener,
+  shutdown: Arc<AtomicBool>,
+}
 
-      tcp_addr: SocketAddr,
-      udp_listener: Arc<UdpSocket>,
-      wg: WaitGroup,
-      shutdown: Arc<AtomicBool>,
-    }
+impl<T, R> TcpProcessor<T, R>
+where
+  T: Transport<Connection = Tcp<R>>,
+  R: Runtime,
+{
+  pub(super) fn run(self, runtime: impl agnostic::Runtime) {
+    let Self {
+      remote_addr,
+      wg,
+      stream_tx,
+      ln,
+      shutdown,
+      ..
+    } = self;
 
-    impl NetTransport {
-      /// Returns the bind port that was automatically given by the
-      /// kernel, if a bind port of 0 was given.
-      #[inline]
-      pub const fn get_auto_bind_port(&self) -> u16 {
-        self.tcp_addr.port()
-      }
-    }
+    /// The initial delay after an `accept()` error before attempting again
+    const BASE_DELAY: Duration = Duration::from_millis(5);
 
-    #[cfg_attr(any(
-      feature = "tokio",
-      feature = "async",
-      feature = "smol"
-    ), async_trait::async_trait)]
-    impl showbiz_traits::Transport for NetTransport {
-      type Error = Error;
+    /// the maximum delay after an `accept()` error before attempting again.
+    /// In the case that tcpListen() is error-looping, it will delay the shutdown check.
+    /// Therefore, changes to `MAX_DELAY` may have an effect on the latency of shutdown.
+    const MAX_DELAY: Duration = Duration::from_secs(1);
 
-      type Connection = TransportConnection;
+    runtime.spawn_detach(async move {
+      scopeguard::defer!(wg.done());
+      let mut loop_delay = Duration::ZERO;
 
-      type Options = Arc<NetTransportOptions>;
+      loop {
+        match ln.accept().await {
+          Ok((conn, _)) => {
+            // No error, reset loop delay
+            loop_delay = Duration::ZERO;
 
-      $($async)? fn new(opts: Self::Options) -> Result<Self, Self::Error>
-      where
-        Self: Sized,
-      {
-        // If we reject the empty list outright we can assume that there's at
-        // least one listener of each type later during operation.
-        if opts.bind_addrs.is_empty() {
-          return Err(Error::EmptyBindAddrs);
-        }
-
-        let (stream_tx, stream_rx) = unbounded();
-        let (packet_tx, packet_rx) = unbounded();
-
-        let mut tcp_listeners = VecDeque::with_capacity(opts.bind_addrs.len());
-        let mut udp_listeners = VecDeque::with_capacity(opts.bind_addrs.len());
-        let tcp_addr = opts.bind_addrs[0];
-        for addr in &opts.bind_addrs {
-          tcp_listeners.push_back(TcpListener::bind(addr) $(. $suffix )? ?);
-
-          let udp_ln = UdpSocket::bind(addr) $(. $suffix )? ?;
-          set_udp_recv_buf(&udp_ln)?;
-          udp_listeners.push_back(udp_ln);
-        }
-
-        let wg = WaitGroup::new();
-        let shutdown = Arc::new(AtomicBool::new(false));
-
-        // Fire them up now that we've been able to create them all.
-        // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
-        // udp and tcp listener can
-        for _ in 0..opts.bind_addrs.len() - 1 {
-          wg.add(2);
-          let tcp_ln = tcp_listeners.pop_back().unwrap();
-          let udp_ln = udp_listeners.pop_back().unwrap();
-
-          TcpProcessor {
-            wg: wg.clone(),
-            stream_tx: stream_tx.clone(),
-            ln: tcp_ln,
-            shutdown: shutdown.clone(),
+            if let Err(e) = stream_tx
+              .send(ReliableConnection::new(Tcp { conn }, remote_addr))
+              .await
+            {
+              tracing::error!(target = "showbiz", err = %e, "failed to send tcp connection");
+            }
           }
-          .run();
+          Err(e) => {
+            if shutdown.load(Ordering::SeqCst) {
+              break;
+            }
 
-          UdpProcessor {
-            wg: wg.clone(),
-            packet_tx: packet_tx.clone(),
-            ln: Either::Right(udp_ln),
-            shutdown: shutdown.clone(),
-          }
-          .run();
-        }
-
-        wg.add(2);
-        let tcp_ln = tcp_listeners.pop_back().unwrap();
-        let udp_ln = Arc::new(udp_listeners.pop_back().unwrap());
-        TcpProcessor {
-          wg: wg.clone(),
-          stream_tx,
-          ln: tcp_ln,
-          shutdown: shutdown.clone(),
-        }
-        .run();
-
-        UdpProcessor {
-          wg: wg.clone(),
-          packet_tx,
-          ln: Either::Left(udp_ln.clone()),
-          shutdown: shutdown.clone(),
-        }
-        .run();
-
-        Ok(Self {
-          opts,
-          packet_rx,
-          stream_rx,
-          wg,
-          shutdown,
-          tcp_addr,
-          udp_listener: udp_ln,
-        })
-      }
-
-      $($async)? fn write_to(&self, b: &[u8], addr: SocketAddr) -> Result<Instant, Self::Error> {
-        <Self as showbiz_traits::NodeAwareTransport>::write_to_address(self, b, Address::from(addr)) $(. $suffix)?
-      }
-
-      $($async)? fn dial_timeout(
-        &self,
-        addr: SocketAddr,
-        timeout: std::time::Duration,
-      ) -> Result<Self::Connection, Self::Error> {
-        <Self as showbiz_traits::NodeAwareTransport>::dial_address_timeout(&self, addr.into(), timeout) $(. $suffix)?
-      }
-
-      $($async)? fn shutdown(self) -> Result<(), Self::Error> {
-        // This will avoid log spam about errors when we shut down.
-        self.shutdown.store(true, Ordering::SeqCst);
-
-        self.wg.wait() $(. $suffix)? ;
-
-        Ok(())
-      }
-
-      fn final_advertise_addr(
-        &self,
-        addr: Option<SocketAddr>,
-      ) -> Result<SocketAddr, Self::Error> {
-        match addr {
-          Some(addr) => Ok(addr),
-          None => {
-            if self.opts.bind_addrs[0].ip().is_unspecified() {
-              local_ip_address::local_ip()
-                .map_err(|e| match e {
-                  local_ip_address::Error::LocalIpAddressNotFound => Error::NoPrivateIP,
-                  e => Error::NoInterfaceAddresses(e),
-                })
-                .map(|ip| SocketAddr::new(ip, self.get_auto_bind_port()))
+            if loop_delay == Duration::ZERO {
+              loop_delay = BASE_DELAY;
             } else {
-              // Use the IP that we're bound to, based on the first
-              // TCP listener, which we already ensure is there.
-              let mut addr = self.tcp_addr;
-              addr.set_port(self.get_auto_bind_port());
-              Ok(addr)
+              loop_delay *= 2;
             }
+
+            if loop_delay > MAX_DELAY {
+              loop_delay = MAX_DELAY;
+            }
+
+            tracing::error!(target = "showbiz", err = %e, "error accepting TCP connection");
+            runtime.sleep(loop_delay).await;
+            continue;
           }
         }
       }
-
-      fn packet(&self) -> &UnboundedReceiver<Packet> {
-        &self.packet_rx
-      }
-
-      fn stream(&self) -> &UnboundedReceiver<Self::Connection> {
-        &self.stream_rx
-      }
-    }
-  };
+    });
+  }
 }
 
-macro_rules! udp_processor {
-  ($($suffix: ident)?, $($async:ident)?, $($closure: tt)?) => {
-    struct UdpProcessor {
-      wg: WaitGroup,
-      packet_tx: UnboundedSender<Packet>,
-      ln: Either<Arc<UdpSocket>, UdpSocket>,
-      shutdown: Arc<AtomicBool>,
-    }
-
-    impl UdpProcessor {
-      pub(super) fn run(self) {
-        let Self {
-          wg,
-          packet_tx,
-          ln,
-          shutdown,
-        } = self;
-
-        spawn($($async)? move $($closure)? {
-          scopeguard::defer!(wg.done());
-          loop {
-            // Do a blocking read into a fresh buffer. Grab a time stamp as
-            // close as possible to the I/O.
-            let mut buf = vec![0; UDP_PACKET_BUF_SIZE];
-            let ln = match &ln {
-              Either::Left(ln) => ln,
-              Either::Right(ln) => ln,
-            };
-            match ln.recv_from(&mut buf) $(. $suffix)? {
-              Ok((n, addr)) => {
-                // Check the length - it needs to have at least one byte to be a
-                // proper message.
-                if n < 1 {
-                  tracing::error!(target = "showbiz", err = "UDP packet too short (0 bytes)");
-                  continue;
-                }
-
-                buf.truncate(n);
-                if let Err(e) = packet_tx.send(Packet::new(buf.into(), addr, Instant::now())) $(. $suffix)? {
-                  tracing::error!(target = "showbiz", err = %e, "failed to send packet");
-                }
-                // TODO: record metrics
-              }
-              Err(e) => {
-                if shutdown.load(Ordering::SeqCst) {
-                  break;
-                }
-
-                tracing::error!(target = "showbiz", err = %e, "Error reading UDP packet");
-                continue;
-              }
-            };
-          }
-        });
-      }
-    }
-  };
+struct UdpProcessor<T, L>
+where
+  T: Transport,
+  L: AsRef<UnreliableConnection<T>>,
+{
+  wg: AsyncWaitGroup,
+  packet_tx: PacketProducer,
+  ln: L,
+  remote_addr: SocketAddr,
+  shutdown: Arc<AtomicBool>,
+  #[cfg(feature = "metrics")]
+  metrics_labels: Arc<Vec<showbiz_core::metrics::Label>>,
+  _marker: PhantomData<T>,
 }
 
-macro_rules! tcp_processor {
-  ($($suffix: ident)?, $($async:ident)?, $($closure: tt)?) => {
-    struct TcpProcessor {
-      wg: WaitGroup,
-      stream_tx: UnboundedSender<TransportConnection>,
-      ln: TcpListener,
-      shutdown: Arc<AtomicBool>,
-    }
+impl<T, L> UdpProcessor<T, L>
+where
+  T: Transport,
+  L: AsRef<UnreliableConnection<T>> + Send + Sync + 'static,
+{
+  #[cfg(feature = "async")]
+  pub(super) fn run(self, runtime: impl agnostic::Runtime) {
+    let Self {
+      wg,
+      packet_tx,
+      ln,
+      shutdown,
+      remote_addr,
+      ..
+    } = self;
 
-    impl TcpProcessor {
-      pub(super) fn run(self) {
-        let Self {
-          wg,
-          stream_tx,
-          ln,
-          shutdown,
-        } = self;
+    runtime.spawn_detach(async move {
+      scopeguard::defer!(wg.done());
+      let ln = ln.as_ref();
+      loop {
+        // Do a blocking read into a fresh buffer. Grab a time stamp as
+        // close as possible to the I/O.
+        let mut buf = BytesMut::with_capacity(UDP_PACKET_BUF_SIZE);
+        buf.fill(0);
+        match ln.recv_from(&mut buf).await {
+          Ok((n, addr)) => {
+            // Check the length - it needs to have at least one byte to be a
+            // proper message.
+            if n < 1 {
+              tracing::error!(target = "showbiz", peer=%remote_addr, from=%addr, err = "UDP packet too short (0 bytes)");
+              continue;
+            }
 
-        /// The initial delay after an `accept()` error before attempting again
-        const BASE_DELAY: Duration = Duration::from_millis(5);
+            buf.truncate(n);
 
-        /// the maximum delay after an `accept()` error before attempting again.
-        /// In the case that tcpListen() is error-looping, it will delay the shutdown check.
-        /// Therefore, changes to `MAX_DELAY` may have an effect on the latency of shutdown.
-        const MAX_DELAY: Duration = Duration::from_secs(1);
+            if let Err(e) = packet_tx.send(Packet::new(buf, addr, Instant::now())).await {
+              tracing::error!(target = "showbiz", peer=%remote_addr, from=%addr, err = %e, "failed to send packet");
+            }
 
-        spawn($($async)? move $($closure)? {
-          scopeguard::defer!(wg.done());
-          let mut loop_delay = Duration::ZERO;
+            #[cfg(feature = "metrics")]
+            {
+              static UDP_RECEIVED: std::sync::Once = std::sync::Once::new();
 
-          loop {
-            match ln.accept() $(. $suffix)? {
-              Ok((conn, _)) => {
-                // No error, reset loop delay
-                loop_delay = Duration::ZERO;
-
-                if let Err(e) = stream_tx.send(conn.into()) $(. $suffix)? {
-                  tracing::error!(target = "showbiz", err = %e, "failed to send tcp connection");
-                }
+              #[inline]
+              fn incr_udp_received<'a>(
+                val: u64,
+                labels: impl Iterator<Item = &'a showbiz_core::metrics::Label>
+                  + showbiz_core::metrics::IntoLabels,
+              ) {
+                use showbiz_core::metrics;
+                UDP_RECEIVED.call_once(|| {
+                  metrics::register_counter!("showbiz.udp.received");
+                });
+                metrics::counter!("showbiz.udp.received", val, labels);
               }
-              Err(e) => {
-                if shutdown.load(Ordering::SeqCst) {
-                  break;
-                }
 
-                if loop_delay == Duration::ZERO {
-                  loop_delay = BASE_DELAY;
-                } else {
-                  loop_delay *= 2;
-                }
-
-                if loop_delay > MAX_DELAY {
-                  loop_delay = MAX_DELAY;
-                }
-
-                tracing::error!(target = "showbiz", err = %e, "Error accepting TCP connection");
-                sleep(loop_delay) $(. $suffix)? ;
-                continue;
-              }
+              incr_udp_received(n as u64, self.metrics_labels.iter());
             }
           }
-        });
+          Err(e) => {
+            if shutdown.load(Ordering::SeqCst) {
+              break;
+            }
+
+            tracing::error!(target = "showbiz", peer=%remote_addr, err = %e, "error reading UDP packet");
+            continue;
+          }
+        };
       }
-    }
-  };
+    });
+  }
 }
-
-#[cfg(feature = "sync")]
-pub mod sync;
-
-#[cfg(feature = "tokio")]
-pub mod tokio;
-
-#[cfg(feature = "async-std")]
-pub mod async_std;
-
-#[cfg(feature = "smol")]
-pub mod smol;

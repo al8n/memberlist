@@ -1,63 +1,5 @@
-//! Types used by the protocol.
-//!
-//! The encoding and decoding rules are similar to protobuf
-//! e.g. For a struct, the root struct stores the length of each field.
-//!
-//! ```rust,no_compile
-//! struct Name(Bytes);
-//!
-//! struct NodeId {
-//!   name: Name,
-//!   addr: NodeAddress,
-//!   port: Option<u16>,
-//! }
-//!
-//! struct Foo {
-//!   seq_no: u32,
-//!   from: NodeId,
-//!   to: NodeId,
-//! }
-//! ```
-//!
-//! In the above example, `Name` is a 'atomic' type, which means it only contains one field.
-//! For 'atomic' types, when encoding, they will only contains the data itself, no length information.
-//! So, the encoded data for `Name` is just the bytes of the name, and the length is just `Name::len(self)`.
-//!
-//! Now, let us look the NodeId. It contains 3 fields, `name`, `addr` and `port`.
-//! The encoded data format for `NodeId` is:
-//!
-//! Let us say the tag for name is 0, the tag for addr may be [1, 2, 3], represent for the 3 kinds of addr: ipv4, ipv6 and domain (e.g. www.example.com). the port tag is 4.
-//!
-//! If the all fields are not empty:
-//!
-//! ```text
-//! name field tag (u8), name_length (u16), name, addr, port tag(u8), port, checksum (u32)
-//! ```
-//!
-//! If the a field is empty, then the tag and the length of the field will not be included in the encoded data.
-//!
-//! ```text
-//! addr tag (u8), addr length (u8), addr data, checksum (u32)
-//! ```
-//!
-//! So now, the problem is that how we decode the `NodeId`?
-//!
-//! We requires the caller to provide the length information.
-//!
-//! Let say we have a decode funtion like `decode_node_id(buf: Bytes) -> Result<NodeId, Error>`.
-//!
-//! then we read the first byte as the tag, and then we match the tag to the field. If the num of readed bytes is equal to the length,
-//! then we know that the we have all the data for the struct.
-//!
-//! The encoded data format for `Foo` is:
-//!
-//! ```text
-//! seq_no, from_length (u32 varint), from, to_length(u32 varint), to
-//! ```
-
 use std::{
-  io::{Error, ErrorKind},
-  net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+  net::{IpAddr, SocketAddr},
   ops::{Deref, DerefMut},
   time::Instant,
 };
@@ -65,50 +7,15 @@ use std::{
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
-const VSN_SIZE: usize = 6;
-const VSN_ENCODED_SIZE: usize = 8;
-const VSN_EMPTY: [u8; VSN_SIZE] = [255; VSN_SIZE];
+use crate::version::VSN_SIZE;
 
-const MAX_DNS_DOMAIN_SIZE: usize = 253;
-
-const LENGTH_SIZE: usize = core::mem::size_of::<u32>();
 const CHECKSUM_SIZE: usize = core::mem::size_of::<u32>();
-
-macro_rules! map_inlined {
-  (match $ident: ident.$len: ident() {
-    $($size: literal),* $(,)?
-  } => $r: ident) => {
-    match $len {
-      $($size => {
-        let mut arr = [0; $size];
-        $r.read_exact(&mut arr).await?;
-        $ident::from_array(arr).map_err(|e| Error::new(ErrorKind::InvalidData, e))
-      },)*
-      _ => unreachable!(),
-    }
-  };
-}
 
 /// Returns the encoded length of the value in LEB128 variable length format.
 /// The returned value will be between 1 and 5, inclusive.
 #[inline]
 pub(crate) fn encoded_u32_len(value: u32) -> usize {
   ((((value | 1).leading_zeros() ^ 31) * 9 + 37) / 32) as usize
-}
-
-#[inline]
-pub(crate) fn encode_u32(mut n: u32) -> (usize, [u8; 5]) {
-  let mut buf = [0u8; 5];
-  let mut i = 0;
-
-  while n >= 0x80 {
-    buf[i] = ((n as u8) & 0x7f) | 0x80;
-    n >>= 7;
-    i += 1;
-  }
-
-  buf[i] = n as u8;
-  (i, buf)
 }
 
 #[inline]
@@ -125,7 +32,7 @@ pub struct DecodeU32Error;
 
 impl core::fmt::Display for DecodeU32Error {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "invalid u32")
+    write!(f, "invalid length")
   }
 }
 
@@ -151,30 +58,6 @@ pub(crate) fn decode_u32_from_buf(mut buf: impl Buf) -> Result<(u32, usize), Dec
   }
 
   Err(DecodeU32Error)
-}
-
-#[cfg(feature = "async")]
-pub(crate) async fn decode_u32_from_reader<R: futures_util::io::AsyncRead + Unpin>(
-  reader: &mut R,
-) -> std::io::Result<(u32, usize)> {
-  use futures_util::io::AsyncReadExt;
-
-  let mut n = 0;
-  let mut shift = 0;
-  for i in 0..5 {
-    let mut byte = [0; 1];
-    reader.read_exact(&mut byte).await?;
-    let b = byte[0];
-
-    if b < 0x80 {
-      return Ok((n | ((b as u32) << shift), i));
-    }
-
-    n |= ((b & 0x7f) as u32) << shift;
-    shift += 7;
-  }
-
-  Err(Error::new(ErrorKind::InvalidData, "invalid u32"))
 }
 
 mod compress;
@@ -207,6 +90,9 @@ pub(crate) use ping::*;
 mod push_pull_state;
 pub(crate) use push_pull_state::*;
 
+mod label;
+pub use label::*;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
   #[error("truncated {0}")]
@@ -215,6 +101,8 @@ pub enum DecodeError {
   Corrupted,
   #[error("checksum mismatch")]
   ChecksumMismatch,
+  #[error("fail to decode length {0}")]
+  Length(DecodeU32Error),
   #[error("unknown mark bit {0}")]
   UnknownMarkBit(u8),
   #[error("invalid ip addr length {0}")]
@@ -233,18 +121,18 @@ pub enum DecodeError {
   InvalidMessageType(#[from] InvalidMessageType),
   #[error("{0}")]
   InvalidCompressionAlgo(#[from] InvalidCompressionAlgo),
+  #[error("{0}")]
+  InvalidLabel(#[from] InvalidLabel),
   #[error("failed to read full push node state ({0} / {1})")]
   FailReadRemoteState(usize, usize),
   #[error("failed to read full user state ({0} / {1})")]
   FailReadUserState(usize, usize),
-  #[error("{0}")]
-  Other(String),
 }
 
-impl DecodeError {
-  pub(crate) fn other(s: impl core::fmt::Display) -> Self {
-    Self::Other(format!("{s}"))
-  }
+#[derive(Debug, thiserror::Error)]
+pub enum EncodeError {
+  #[error("{0}")]
+  InvalidLabel(#[from] InvalidLabel),
 }
 
 #[viewit::viewit]
@@ -529,18 +417,9 @@ pub struct Packet {
 
 impl Packet {
   #[inline]
-  pub fn new(from: SocketAddr, timestamp: Instant) -> Self {
+  pub fn new(buf: BytesMut, from: SocketAddr, timestamp: Instant) -> Self {
     Self {
-      buf: BytesMut::new(),
-      from,
-      timestamp,
-    }
-  }
-
-  #[inline]
-  pub fn with_capacity(cap: usize, from: SocketAddr, timestamp: Instant) -> Self {
-    Self {
-      buf: BytesMut::with_capacity(cap),
+      buf,
       from,
       timestamp,
     }
@@ -859,6 +738,7 @@ pub enum NodeState {
 }
 
 impl NodeState {
+  #[cfg(feature = "metrics")]
   #[inline]
   pub(crate) const fn empty_metrics() -> [(&'static str, usize); 4] {
     [("alive", 0), ("suspect", 0), ("dead", 0), ("left", 0)]
@@ -912,48 +792,6 @@ pub struct RemoteNode {
   pub port: Option<u16>,
 }
 
-impl RemoteNode {
-  /// Construct a new remote node identifier with the given ip addr.
-  #[inline]
-  pub const fn new(addr: IpAddr) -> Self {
-    Self {
-      name: None,
-      addr,
-      port: None,
-    }
-  }
-
-  /// With the given name
-  #[inline]
-  pub fn with_name(mut self, name: Option<Name>) -> Self {
-    self.name = name;
-    self
-  }
-
-  /// With the given port
-  #[inline]
-  pub fn with_port(mut self, port: Option<u16>) -> Self {
-    self.port = port;
-    self
-  }
-
-  /// Return the node name
-  #[inline]
-  pub const fn name(&self) -> Option<&Name> {
-    self.name.as_ref()
-  }
-
-  #[inline]
-  pub const fn ip(&self) -> IpAddr {
-    self.addr
-  }
-
-  #[inline]
-  pub const fn port(&self) -> Option<u16> {
-    self.port
-  }
-}
-
 /// Represents a node in the cluster
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -965,45 +803,27 @@ pub struct Node {
   meta: Bytes,
   /// State of the node.
   state: NodeState,
-  /// Minimum protocol version this understands
-  pmin: u8,
-  /// Maximum protocol version this understands
-  pmax: u8,
-  /// Current version node is speaking
-  pcur: u8,
-  /// Min protocol version for the delegate to understand
-  dmin: u8,
-  /// Max protocol version for the delegate to understand
-  dmax: u8,
-  /// Current version delegate is speaking
-  dcur: u8,
+  /// - 0: encryption algorithm
+  /// - 1: compression algorithm
+  vsn: [u8; VSN_SIZE],
 }
 
 impl Node {
   /// Construct a new node with the given name, address and state.
   #[inline]
-  pub fn new(name: Name, addr: NodeAddress, state: NodeState) -> Self {
+  pub fn new(
+    name: Name,
+    addr: SocketAddr,
+    state: NodeState,
+    protocol_version: u8,
+    delegate_version: u8,
+  ) -> Self {
     Self {
-      id: NodeId {
-        name,
-        port: None,
-        addr,
-      },
+      id: NodeId { name, addr },
       meta: Bytes::new(),
-      pmin: 0,
-      pmax: 0,
-      pcur: 0,
-      dmin: 0,
-      dmax: 0,
-      dcur: 0,
+      vsn: [protocol_version, delegate_version],
       state,
     }
-  }
-
-  #[inline]
-  pub fn with_port(mut self, port: u16) -> Self {
-    self.id.port = Some(port);
-    self
   }
 
   /// Return the node name
@@ -1013,23 +833,23 @@ impl Node {
   }
 
   #[inline]
-  pub const fn vsn(&self) -> [u8; 6] {
-    [
-      self.pcur, self.pmin, self.pmax, self.dcur, self.dmin, self.dmax,
-    ]
+  pub const fn protocol_version(&self) -> u8 {
+    self.vsn[0]
   }
 
   #[inline]
-  pub const fn address(&self) -> &NodeAddress {
+  pub const fn delegate_version(&self) -> u8 {
+    self.vsn[1]
+  }
+
+  #[inline]
+  pub fn address(&self) -> SocketAddr {
     self.id.addr()
   }
 }
 
 impl core::fmt::Display for Node {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    match self.id.port {
-      Some(port) => write!(f, "{}({}:{})", self.id.name.as_ref(), self.id.addr, port),
-      None => write!(f, "{}({})", self.id.name.as_ref(), self.id.addr),
-    }
+    write!(f, "{}({})", self.id.name.as_ref(), self.id.addr)
   }
 }

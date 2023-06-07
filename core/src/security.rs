@@ -76,13 +76,9 @@ impl EncryptionAlgo {
   }
 }
 
-const MIN_ENCRYPTION_VERSION: EncryptionAlgo = EncryptionAlgo::None;
-pub(crate) const MAX_ENCRYPTION_VERSION: EncryptionAlgo = EncryptionAlgo::NoPadding;
-
 const VERSION_SIZE: usize = 1;
 pub(crate) const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
-const MAX_PAD_OVERHEAD: usize = 16;
 pub(crate) const BLOCK_SIZE: usize = 16;
 
 // pkcs7encode is used to pad a byte buffer to a specific block size using
@@ -183,7 +179,7 @@ fn encrypt_payload_in<A: AeadInPlace + Aead>(
       .map(|_| {
         dst.unsplit(bytes);
       })
-      .map_err(|e| SecurityError::AeadError(e))
+      .map_err(SecurityError::AeadError)
   } else {
     let mut bytes = dst.split_off(after_nonce);
     gcm
@@ -191,7 +187,7 @@ fn encrypt_payload_in<A: AeadInPlace + Aead>(
       .map(|_| {
         dst.unsplit(bytes);
       })
-      .map_err(|e| SecurityError::AeadError(e))
+      .map_err(SecurityError::AeadError)
   }
 }
 
@@ -207,7 +203,7 @@ fn decrypt_message_in<A: Aead + AeadInPlace>(
 
   gcm
     .decrypt_in_place(nonce, data, &mut ciphertext)
-    .map_err(|e| SecurityError::AeadError(e))?;
+    .map_err(SecurityError::AeadError)?;
   msg.unsplit(ciphertext);
   Ok(())
 }
@@ -238,7 +234,7 @@ fn encrypt_to<A: AeadInPlace + Aead>(
   let nonce = GenericArray::from_slice(nonce);
   gcm
     .encrypt_in_place(nonce, data, dst)
-    .map_err(|e| SecurityError::AeadError(e))
+    .map_err(SecurityError::AeadError)
 }
 
 impl SecretKeyring {

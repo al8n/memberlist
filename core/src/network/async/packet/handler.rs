@@ -1,24 +1,26 @@
 use std::net::IpAddr;
 
+use futures_util::{Future, Stream};
+
 use crate::showbiz::MessageHandoff;
 
 use super::*;
 
-impl<D, T, S> Showbiz<D, T, S>
+impl<D, T, R> Showbiz<D, T, R>
 where
   T: Transport,
-  S: Spawner,
   D: Delegate,
+  R: Runtime,
+  <R::Interval as Stream>::Item: Send,
+  <R::Sleep as Future>::Output: Send,
 {
   /// a long running thread that processes messages received
   /// over the packet interface, but is decoupled from the listener to avoid
   /// blocking the listener which may cause ping/ack messages to be delayed.
-  pub(crate) fn packet_handler(&self) {
+  pub(crate) fn packet_handler(&self, shutdown_rx: async_channel::Receiver<()>) {
     let this = self.clone();
-    let shutdown_rx = this.inner.shutdown_rx.clone();
     let handoff_rx = this.inner.handoff_rx.clone();
-    let spawner = self.inner.spawner;
-    spawner.spawn(Box::pin(async move {
+    self.inner.runtime.spawn_detach(async move {
       loop {
         futures_util::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -37,7 +39,7 @@ where
           }
         }
       }
-    }));
+    });
   }
 
   /// Returns the next message to process in priority order, using LIFO
@@ -82,7 +84,7 @@ where
       }
     };
 
-    let mut alive = match Alive::decode_from(msg.buf.split_to(len)) {
+    let alive = match Alive::decode_from(msg.buf.split_to(len)) {
       Ok(alive) => alive,
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode alive message");
@@ -91,37 +93,13 @@ where
     };
 
     if self.inner.opts.ip_must_be_checked() {
-      let inner_ip = alive.node.addr();
-      match inner_ip {
-        NodeAddress::Ip(ip) => {
-          if let Err(e) = self.inner.opts.ip_allowed(*ip) {
-            tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "blocked alive message");
-            return;
-          }
-        }
-        NodeAddress::Domain(d) => match d.as_str().parse() {
-          Ok(ip) => {
-            if let Err(e) = self.inner.opts.ip_allowed(ip) {
-              tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "blocked alive message");
-              return;
-            }
-          }
-          Err(_) => {
-            tracing::error!(target = "showbiz", err=%Error::<D, T>::ParseIpFailed(d.clone()), remote_addr = %msg.from, "blocked alive message");
-            return;
-          }
-        },
+      if let Err(e) = self.inner.opts.ip_allowed(alive.node.addr().ip()) {
+        tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "blocked alive message");
+        return;
       }
     }
 
-    alive
-      .node
-      .port
-      .get_or_insert(self.inner.opts.bind_addr.port());
-
-    if let Err(e) = self.alive_node(alive, None, false).await {
-      tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to alive node");
-    }
+    self.alive_node(alive, None, false).await
   }
 
   async fn handle_dead(&self, mut msg: MessageHandoff) {

@@ -1,8 +1,20 @@
 [package]
 name = "showbiz"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = ["async", "metrics"]
+async = ["showbiz-core/async", "showbiz-transport/async"]
+metrics = ["showbiz-core/metrics", "showbiz-transport/metrics"]
+
+tokio = ["agnostic/tokio-net"]
+
+async-std = ["agnostic/async-std-net"]
+
+smol = ["agnostic/smol-net"]
 
 [dependencies]
+agnostic = { workspace = true }
+showbiz-core = { workspace = true }
+showbiz-transport = { path = "../transport" }

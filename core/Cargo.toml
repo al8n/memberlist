@@ -8,60 +8,63 @@ edition = { workspace= true }
 
 [features]
 default = ["async", "metrics"]
-async = ["async-channel", "async-trait", "async-lock", "futures-timer", "futures-util", "futures-channel", "futures-io", "pin-project-lite", "weezl/async"]
-# sync = ["crossbeam-channel", "showbiz-traits/sync", "parking_lot"]
 
+# TODO: temporarily disable nightly, wait Rust's issue https://github.com/rust-lang/rust/issues/111105 to be fixed
+# nightly = ["agnostic/nightly"]
+
+async = ["agnostic", "async-channel", "async-recursion", "async-trait", "async-lock", "futures-util", "futures-channel", "weezl/async"]
 metrics = ["dep:metrics"]
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2", features = ["js"] }
 
-[target.'cfg(not(any(target_arch = "wasm32", windows)))'.dependencies]
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+trust-dns-resolver = { version = "0.23.0-alpha.4", default-features = false, features = ["system-config"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+trust-dns-resolver = { version = "0.23.0-alpha.4", default-features = false }
+resolv-conf = { version = "0.7", default-features = false }
+getrandom = { version = "0.2", features = ["js"] }
+once_cell = "1.17"
+
+[target.'cfg(not(any(target_family = "wasm", windows)))'.dependencies]
 rustix = { version = "0.37", features = ["process"] }
 
 [target.'cfg(windows)'.dependencies]
 hostname = "0.3"
 
 [dependencies]
-# sync
-crossbeam-channel = { version = "0.5", optional = true }
-parking_lot = { version = "0.12", optional = true }
-
 # async common
+agnostic = { workspace = true, optional = true, features = ["net"] }
 async-channel = { version = "1.8", optional = true }
 async-lock = { version = "2.7", optional = true }
 async-recursion = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
-futures-timer = { version = "3", optional = true }
 futures-channel = { version = "0.3", optional = true }
 futures-util = { version = "0.3", optional = true, features = ["io"] }
-futures-io = { version = "0.3", optional = true }
-pin-project-lite = { version = "0.2", optional = true }
 
 # common
+atomic = "0.5"
+arc-swap = "1.6"
 aead = { version = "0.5", features = ["bytes"] }
 aes-gcm = "0.10"
 bytes = { workspace = true, features = ["serde"] }
 cbc = "0.1"
 crc32fast = "1"
 crossbeam-utils = "0.8"
+itertools = "0.10.5"
 indexmap = { version = "1.9", features = ["serde-1"] }
 ipnet = { version = "2.7", features = ["serde"] }
 metrics = { version = "0.20", optional = true }
-prost = { version = "0.11" }
+paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
 rand = { version = "0.8" }
 scopeguard = "1.1"
-serde = { version = "1", features = ["derive"] }
-smol_str = "0.1"
-thiserror = "1"
+serde = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
-trust-dns-proto = { workspace = true }
-trust-dns-resolver = { version = "0.23.0-alpha.2", features = ["system-config"] }
-url = "2.3"
+trust-dns-proto = { version = "0.23.0-alpha.4", default-features = false }
 viewit = { workspace = true }
-wg = "0.3"
 weezl = "0.1"
 
 [dev-dependencies]
+agnostic = { path = "../../agnostic/agnostic", features = ["tokio-net"] }
 tokio = { version = "1.26", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
