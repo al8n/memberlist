@@ -35,19 +35,15 @@ mod version;
 pub use version::*;
 
 #[cfg(feature = "async")]
-#[doc(hidden)]
-pub use async_channel;
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+pub use agnostic;
 
 #[cfg(feature = "async")]
-#[doc(hidden)]
-pub use async_lock;
-
-#[cfg(feature = "async")]
-#[doc(hidden)]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub use async_trait;
 
 #[cfg(feature = "async")]
-#[doc(hidden)]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub use futures_util;
 
 #[cfg(feature = "metrics")]
