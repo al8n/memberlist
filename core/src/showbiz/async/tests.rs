@@ -1,0 +1,41 @@
+use std::{
+  net::{IpAddr, Ipv4Addr},
+  sync::Mutex,
+};
+
+use agnostic::tokio::TokioRuntime;
+
+use crate::transport::net::{NetTransport, NetTransportOptions};
+
+use super::*;
+
+static BIND_NUM: Mutex<u8> = Mutex::new(10u8);
+
+fn get_bind_addr_net(network: u8) -> IpAddr {
+  let mut bind_num = BIND_NUM.lock().unwrap();
+  let ip = IpAddr::V4(Ipv4Addr::new(127, 0, network, *bind_num));
+
+  *bind_num += 1;
+  if *bind_num == 255 {
+    *bind_num = 10;
+  }
+
+  ip
+}
+
+fn get_bind_addr() -> IpAddr {
+  get_bind_addr_net(0)
+}
+
+fn test_config_net(network: u8) -> Options<NetTransport<TokioRuntime>> {
+  let transport_options = NetTransportOptions::default();
+  let bind_addr = SocketAddr::new(get_bind_addr_net(network), 0);
+  Options::lan(Arc::new(transport_options))
+    .with_bind_addr(bind_addr)
+    .with_name(bind_addr.to_string().try_into().unwrap())
+    .with_require_node_names(true)
+}
+
+fn test_config() -> Options<NetTransport<TokioRuntime>> {
+  test_config_net(0)
+}
