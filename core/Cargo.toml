@@ -13,6 +13,9 @@ default = ["async", "metrics"]
 # nightly = ["agnostic/nightly"]
 
 async = ["agnostic", "async-channel", "async-recursion", "async-trait", "async-lock", "futures-util", "futures-channel", "weezl/async"]
+
+# implement tokio::io::AsyncRead/AsyncWrite for Tcp/Udp
+tokio-compat = ["agnostic/tokio-compat"]
 metrics = ["dep:metrics"]
 
 
@@ -50,6 +53,7 @@ bytes = { workspace = true, features = ["serde"] }
 cbc = "0.1"
 crc32fast = "1"
 crossbeam-utils = "0.8"
+local-ip-address = "0.5"
 itertools = "0.10.5"
 indexmap = { version = "1.9", features = ["serde-1"] }
 ipnet = { version = "2.7", features = ["serde"] }
@@ -63,6 +67,7 @@ tracing = { workspace = true }
 trust-dns-proto = { version = "0.23.0-alpha.4", default-features = false }
 viewit = { workspace = true }
 weezl = "0.1"
+wg = "0.3"
 
 [dev-dependencies]
 agnostic = { path = "../../agnostic/agnostic", features = ["tokio-net"] }

@@ -5,8 +5,8 @@ edition = "2021"
 
 [features]
 default = ["async", "metrics"]
-async = ["showbiz-core/async", "showbiz-transport/async"]
-metrics = ["showbiz-core/metrics", "showbiz-transport/metrics"]
+async = ["showbiz-core/async"]
+metrics = ["showbiz-core/metrics"]
 
 tokio = ["agnostic/tokio-net"]
 
@@ -17,4 +17,3 @@ smol = ["agnostic/smol-net"]
 [dependencies]
 agnostic = { workspace = true }
 showbiz-core = { workspace = true }
-showbiz-transport = { path = "../transport" }

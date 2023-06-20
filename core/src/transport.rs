@@ -16,6 +16,9 @@ use bytes::{BufMut, Bytes, BytesMut};
 pub mod stream;
 use stream::*;
 
+#[cfg(feature = "async")]
+pub mod net;
+
 const LABEL_MAX_SIZE: usize = 255;
 const DEFAULT_BUFFER_SIZE: usize = 4096;
 

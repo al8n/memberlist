@@ -4,13 +4,12 @@ compile_error!("showbiz does not support sync currently, `async` feature must be
 
 pub use agnostic;
 pub use showbiz_core::*;
-pub use showbiz_transport::*;
 
 #[cfg(all(feature = "tokio", not(target_family = "wasm")))]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "tokio", not(target_family = "wasm")))))]
 pub type TokioShowbiz<D> = showbiz_core::Showbiz<
   D,
-  showbiz_transport::NetTransport<agnostic::tokio::TokioRuntime>,
+  showbiz_core::transport::net::NetTransport<agnostic::tokio::TokioRuntime>,
   agnostic::tokio::TokioRuntime,
 >;
 
@@ -21,7 +20,7 @@ pub type TokioShowbiz<D> = showbiz_core::Showbiz<
 )]
 pub type AsyncStdShowbiz<D> = showbiz_core::Showbiz<
   D,
-  showbiz_transport::NetTransport<agnostic::async_std::AsyncStdRuntime>,
+  showbiz_core::transport::net::NetTransport<agnostic::async_std::AsyncStdRuntime>,
   agnostic::async_std::AsyncStdRuntime,
 >;
 
@@ -29,6 +28,6 @@ pub type AsyncStdShowbiz<D> = showbiz_core::Showbiz<
 #[cfg_attr(docsrs, doc(cfg(all(feature = "smol", not(target_family = "wasm")))))]
 pub type SmolShowbiz<D> = showbiz_core::Showbiz<
   D,
-  showbiz_transport::NetTransport<agnostic::smol::SmolRuntime>,
+  showbiz_core::transport::net::NetTransport<agnostic::smol::SmolRuntime>,
   agnostic::smol::SmolRuntime,
 >;

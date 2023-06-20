@@ -1,8 +1,7 @@
 [workspace]
 members = [
   "core",
-  "showbiz",
-  "transport",
+  "showbiz", 
   # "js",
   # "nodejs",
   # "py",

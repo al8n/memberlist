@@ -20,7 +20,7 @@ use agnostic::{
   Runtime,
 };
 use bytes::BytesMut;
-use showbiz_core::{
+use crate::{
   async_trait, futures_util,
   transport::{
     stream::{
@@ -61,7 +61,7 @@ pub enum NetTransportError {
 #[derive(Debug, Clone)]
 pub struct Crc32(crc32fast::Hasher);
 
-impl showbiz_core::checksum::Checksumer for Crc32 {
+impl crate::checksum::Checksumer for Crc32 {
   fn new() -> Self {
     Self(crc32fast::Hasher::new())
   }
@@ -98,40 +98,6 @@ impl<R: Runtime> Udp<R> {
     Self { conn }
   }
 }
-
-// #[async_trait::async_trait]
-// impl<R: Runtime> showbiz_core::transport::UdpSocket for Udp<R> {
-//   /// setups up a "client" udp connection that will only receive packets from the associated address
-//   ///
-//   /// if the addr is ipv4 then it will bind local addr to 0.0.0.0:0, ipv6 \[::\]0
-//   async fn connect(addr: SocketAddr) -> io::Result<Self> {
-//     let bind_addr: SocketAddr = match addr {
-//       SocketAddr::V4(_addr) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-//       SocketAddr::V6(_addr) => (Ipv6Addr::UNSPECIFIED, 0).into(),
-//     };
-
-//     Self::connect_with_bind(addr, bind_addr).await
-//   }
-
-//   /// same as connect, but binds to the specified local address for sending address
-//   async fn connect_with_bind(_addr: SocketAddr, bind_addr: SocketAddr) -> io::Result<Self> {
-//     let socket = Self::bind(bind_addr).await?;
-
-//     // TODO: research connect more, it appears to break UDP receiving tests, etc...
-//     // socket.connect(addr).await?;
-
-//     Ok(socket)
-//   }
-
-//   async fn bind(addr: SocketAddr) -> io::Result<Self> {
-//     <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::bind(addr)
-//       .await
-//       .map(|conn| Self {
-//         conn,
-//         timeout: None,
-//       })
-//   }
-// }
 
 #[async_trait::async_trait]
 impl<R: Runtime> PacketConnection for Udp<R> {
@@ -174,8 +140,6 @@ impl<R: Runtime> futures_util::io::AsyncRead for Tcp<R> {
     buf: &mut [u8],
   ) -> Poll<std::io::Result<usize>> {
     futures_util::io::AsyncRead::poll_read(Pin::new(&mut self.conn), cx, buf)
-    // self.conn.poll_read(cx, buf)
-    // Pin::new(&mut (&mut self.conn).compat()).poll_read(cx, buf)
   }
 }
 
@@ -233,23 +197,6 @@ impl<R: Runtime> agnostic::io::TokioAsyncWrite for Tcp<R> {
   }
 }
 
-// #[async_trait::async_trait]
-// impl<R: Runtime> Connect for Tcp<R> {
-//   async fn connect_with_bind(addr: SocketAddr, bind_addr: Option<SocketAddr>) -> io::Result<Self> {
-//     let stream = match bind_addr {
-//       Some(bind_addr) => {
-//         <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect(bind_addr).await?
-//       }
-//       None => <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect(addr).await?,
-//     };
-//     stream.set_nodelay(true)?;
-//     Ok(Tcp {
-//       conn: stream,
-//       timeout: None,
-//     })
-//   }
-// }
-
 impl<R: Runtime> ConnectionTimeout for Tcp<R> {
   fn set_write_timeout(&self, timeout: Option<Duration>) {
     self.conn.set_write_timeout(timeout)
@@ -282,7 +229,7 @@ pub struct NetTransport<R: Runtime> {
 impl<R: Runtime> NetTransport<R> {
   async fn new_in(
     opts: <Self as Transport>::Options,
-    #[cfg(feature = "metrics")] metrics_labels: Option<Arc<Vec<showbiz_core::metrics::Label>>>,
+    #[cfg(feature = "metrics")] metrics_labels: Option<Arc<Vec<crate::metrics::Label>>>,
     runtime: R,
   ) -> Result<Self, TransportError<Self>> {
     // If we reject the empty list outright we can assume that there's at
@@ -394,7 +341,7 @@ impl<R: Runtime> NetTransport<R> {
 impl<R: Runtime> Transport for NetTransport<R> {
   type Error = NetTransportError;
 
-  type Checksumer = super::Crc32;
+  type Checksumer = Crc32;
 
   type Connection = Tcp<R>;
 
@@ -426,7 +373,7 @@ impl<R: Runtime> Transport for NetTransport<R> {
   // #[cfg(all(feature = "metrics", feature = "nightly"))]
   // fn with_metrics_labels(
   //   opts: Self::Options,
-  //   metrics_labels: std::sync::Arc<Vec<showbiz_core::metrics::Label>>,
+  //   metrics_labels: std::sync::Arc<Vec<crate::metrics::Label>>,
   //   runtime: Self::Runtime,
   // ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
   // where
@@ -505,7 +452,7 @@ impl<R: Runtime> Transport for NetTransport<R> {
   // #[cfg(all(feature = "metrics", not(feature = "nightly")))]
   // async fn with_metrics_labels(
   //   opts: Self::Options,
-  //   metrics_labels: Arc<Vec<showbiz_core::metrics::Label>>,
+  //   metrics_labels: Arc<Vec<crate::metrics::Label>>,
   //   runtime: Self::Runtime,
   // ) -> Result<Self, TransportError<Self>>
   // where
@@ -669,7 +616,7 @@ where
   remote_addr: SocketAddr,
   shutdown: Arc<AtomicBool>,
   #[cfg(feature = "metrics")]
-  metrics_labels: Arc<Vec<showbiz_core::metrics::Label>>,
+  metrics_labels: Arc<Vec<crate::metrics::Label>>,
   _marker: PhantomData<T>,
 }
 
@@ -719,10 +666,9 @@ where
               #[inline]
               fn incr_udp_received<'a>(
                 val: u64,
-                labels: impl Iterator<Item = &'a showbiz_core::metrics::Label>
-                  + showbiz_core::metrics::IntoLabels,
+                labels: impl Iterator<Item = &'a metrics::Label>
+                  + metrics::IntoLabels,
               ) {
-                use showbiz_core::metrics;
                 UDP_RECEIVED.call_once(|| {
                   metrics::register_counter!("showbiz.udp.received");
                 });
