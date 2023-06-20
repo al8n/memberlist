@@ -129,7 +129,7 @@ where
           }
         }
       }
-      _ = self.inner.runtime.sleep(self.inner.opts.probe_timeout).fuse() => {}
+      _ = R::sleep(self.inner.opts.probe_timeout).fuse() => {}
     }
 
     // If we timed out, return Error.
@@ -331,7 +331,6 @@ where
     let max = (self.inner.opts.suspicion_max_timeout_mult as u64) * min;
 
     let this = self.clone();
-    let runtime = self.inner.runtime;
     state.suspicion = Some(Suspicion::new(
       s.from.name().clone(),
       k as u32,
@@ -386,7 +385,6 @@ where
         }
         .boxed()
       },
-      runtime,
     ));
     Ok(())
   }
@@ -638,18 +636,16 @@ where
     // Add the handler
     let tlock = self.inner.ack_handlers.clone();
     let mut mu = self.inner.ack_handlers.lock().await;
-    let runtime = self.inner.runtime;
     mu.insert(
       seq_no,
       AckHandler {
         ack_fn: Box::new(f),
         nack_fn: None,
-        timer: Timer::after(
+        timer: Timer::after::<_, R>(
           timeout,
           async move {
             tlock.lock().await.remove(&seq_no);
           },
-          runtime,
         ),
       },
     );
@@ -701,15 +697,14 @@ macro_rules! bail_trigger {
         // Use a random stagger to avoid syncronizing
         let mut rng = rand::thread_rng();
         let rand_stagger = Duration::from_millis(rng.gen_range(0..stagger.as_millis() as u64));
-        let delay = self.inner.runtime.sleep(rand_stagger);
+        let delay = R::sleep(rand_stagger);
         futures_util::select! {
           _ = delay.fuse() => {},
           _ = stop_rx.recv().fuse() => return,
         }
 
-        let runtime = self.inner.runtime;
-        self.inner.runtime.spawn_detach(async move {
-          let mut timer = runtime.interval(interval);
+        R::spawn_detach(async move {
+          let mut timer = R::interval(interval);
           loop {
             futures_util::select! {
               _ = futures_util::StreamExt::next(&mut timer).fuse() => {
@@ -776,16 +771,15 @@ where
     let rand_stagger = Duration::from_millis(rng.gen_range(0..interval.as_millis() as u64));
 
     futures_util::select! {
-      _ = self.inner.runtime.sleep(rand_stagger).fuse() => {},
+      _ = R::sleep(rand_stagger).fuse() => {},
       _ = stop_rx.recv().fuse() => return,
     }
 
-    let runtime = self.inner.runtime;
-    self.inner.runtime.spawn_detach(async move {
+    R::spawn_detach(async move {
       // Tick using a dynamic timer
       loop {
         let tick_time = push_pull_scale(interval, this.estimate_num_nodes() as usize);
-        let mut timer = runtime.interval(tick_time);
+        let mut timer = R::interval(tick_time);
         futures_util::select! {
           _ = futures_util::StreamExt::next(&mut timer).fuse() => {
             this.push_pull().await;
@@ -969,7 +963,7 @@ where
           }
         }
       },
-      _ = self.inner.runtime.sleep(self.inner.opts.probe_timeout).fuse() => {
+      _ = R::sleep(self.inner.opts.probe_timeout).fuse() => {
         // Note that we don't scale this timeout based on awareness and
         // the health score. That's because we don't really expect waiting
         // longer to help get UDP through. Since health does extend the
@@ -1041,7 +1035,7 @@ where
     if !disable_reliable_pings {
       let target_id = target.id().clone();
       let this = self.clone();
-      self.inner.runtime.spawn_detach(async move {
+      R::spawn_detach(async move {
         match this.send_ping_and_wait_for_ack(&target_id, ind.into(), deadline - Instant::now()).await {
           Ok(ack) => {
             // The error should never happen, because we do not drop the rx,
@@ -1197,13 +1191,12 @@ where
     };
 
     let ack_handlers = self.inner.ack_handlers.clone();
-    let runtime = self.inner.runtime;
     self.inner.ack_handlers.lock().await.insert(
       seq_no,
       AckHandler {
         ack_fn: Box::new(ack_fn),
         nack_fn: Some(Arc::new(nack_fn)),
-        timer: Timer::after(
+        timer: Timer::after::<_, R>(
           timeout,
           async move {
             ack_handlers.lock().await.remove(&seq_no);
@@ -1216,7 +1209,6 @@ where
               default => {}
             }
           },
-          runtime,
         ),
       },
     );

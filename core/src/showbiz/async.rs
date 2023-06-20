@@ -53,7 +53,7 @@ pub(crate) struct ShowbizCore<D: Delegate, T: Transport, R: Runtime> {
   metrics_labels: Arc<Vec<metrics::Label>>,
   runner: ArcSwapOption<Runner<T>>,
   opts: Arc<Options<T>>,
-  runtime: R,
+  _marker: std::marker::PhantomData<R>,
 }
 
 impl<D: Delegate, T: Transport, R: Runtime> Drop for ShowbizCore<D, T, R> {
@@ -197,7 +197,7 @@ where
         metrics_labels: Arc::new(vec![]),
         runner: ArcSwapOption::empty(),
         opts: Arc::new(opts),
-        runtime,
+        _marker: std::marker::PhantomData,
         handoff_tx,
         handoff_rx,
       }),
@@ -219,21 +219,20 @@ where
       .status
       .store(Status::Running, Ordering::Relaxed);
 
-    // #[cfg(feature = "metrics")]
-    // let transport = {
-    //   if !self.inner.metrics_labels.is_empty() {
-    //     T::with_metrics_labels(
-    //       self.inner.opts.transport.clone(),
-    //       self.inner.metrics_labels.clone(),
-    //       self.inner.runtime,
-    //     )
-    //     .await?
-    //   } else {
-    //     T::new(self.inner.opts.transport.clone(), self.inner.runtime).await?
-    //   }
-    // };
-    // #[cfg(not(feature = "metrics"))]
-    let transport = T::new(self.inner.opts.transport.clone(), self.inner.runtime).await?;
+    #[cfg(feature = "metrics")]
+    let transport = {
+      if !self.inner.metrics_labels.is_empty() {
+        T::with_metrics_labels(
+          self.inner.opts.transport.clone(),
+          self.inner.metrics_labels.clone(),
+        )
+        .await?
+      } else {
+        T::new(self.inner.opts.transport.clone()).await?
+      }
+    };
+    #[cfg(not(feature = "metrics"))]
+    let transport = T::new(self.inner.opts.transport.clone()).await?;
 
     // Get the final advertise address from the transport, which may need
     // to see which address we bound to. We'll refresh this each time we
@@ -364,7 +363,7 @@ where
                   );
                 }
               },
-              _ = self.inner.runtime.sleep(timeout).fuse() => {
+              _ = R::sleep(timeout).fuse() => {
                 return Err(Error::LeaveTimeout);
               }
             }
@@ -530,7 +529,7 @@ where
       if timeout > Duration::ZERO {
         futures_util::select_biased! {
           _ = notify_rx.recv().fuse() => {},
-          _ = self.inner.runtime.sleep(timeout).fuse() => return Err(Error::UpdateTimeout),
+          _ = R::sleep(timeout).fuse() => return Err(Error::UpdateTimeout),
         }
       } else {
         futures_util::select! {

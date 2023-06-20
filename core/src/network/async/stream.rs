@@ -22,8 +22,7 @@ where
   pub(crate) fn stream_listener(&self, shutdown_rx: async_channel::Receiver<()>) {
     let this = self.clone();
     let transport_rx = this.runner().as_ref().unwrap().transport.stream();
-    let runtime = self.inner.runtime;
-    runtime.spawn_detach(async move {
+    R::spawn_detach(async move {
       loop {
         futures_util::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -31,7 +30,7 @@ where
           }
           conn = transport_rx.recv().fuse() => {
             let this = this.clone();
-            runtime.spawn_detach(async move {
+            R::spawn_detach(async move {
               match conn {
                 Ok(conn) => this.handle_conn(conn).await,
                 Err(e) => tracing::error!(target = "showbiz", "failed to accept connection: {}", e),

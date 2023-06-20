@@ -20,7 +20,7 @@ where
   pub(crate) fn packet_handler(&self, shutdown_rx: async_channel::Receiver<()>) {
     let this = self.clone();
     let handoff_rx = this.inner.handoff_rx.clone();
-    self.inner.runtime.spawn_detach(async move {
+    R::spawn_detach(async move {
       loop {
         futures_util::select! {
           _ = shutdown_rx.recv().fuse() => {

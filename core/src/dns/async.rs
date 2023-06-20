@@ -38,7 +38,7 @@ impl<R: Runtime> Spawn for AsyncSpawn<R> {
   where
     F: Future<Output = Result<(), trust_dns_proto::error::ProtoError>> + Send + 'static,
   {
-    self.runtime.spawn_detach(async move {
+    R::spawn_detach(async move {
       if let Err(e) = future.await {
         tracing::error!(target = "showbiz", err = %e, "dns error");
       }
@@ -87,7 +87,7 @@ impl<R: Runtime> Time for Timer<R> {
   /// Return a type that implements `Future` that will wait until the specified duration has
   /// elapsed.
   async fn delay_for(duration: Duration) {
-    let _ = R::new().sleep(duration).await;
+    let _ = R::sleep(duration).await;
   }
 
   /// Return a type that implement `Future` to complete before the specified duration has elapsed.
@@ -99,7 +99,7 @@ impl<R: Runtime> Time for Timer<R> {
       rst = future.fuse() => {
         return Ok(rst);
       }
-      _ = R::new().sleep(duration).fuse() => {
+      _ = R::sleep(duration).fuse() => {
         return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"));
       }
     }
@@ -117,14 +117,14 @@ where
   R: Runtime,
 {
   async fn delay_for(duration: Duration) {
-    R::new().sleep(duration).await;
+    R::sleep(duration).await;
   }
 
   async fn timeout<F: 'static + Future + Send>(
     duration: Duration,
     future: F,
   ) -> Result<F::Output, std::io::Error> {
-    R::new().timeout(duration, future).await
+    R::timeout(duration, future).await
   }
 }
 

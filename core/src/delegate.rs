@@ -4,6 +4,11 @@ use bytes::Bytes;
 
 use crate::types::{Message, Node, NodeId};
 
+#[cfg(test)]
+mod mock;
+#[cfg(test)]
+pub use mock::*;
+
 #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 pub trait Delegate: Send + Sync + 'static {
   /// The error type of the delegate
@@ -218,28 +223,15 @@ impl Default for VoidDelegate {
 impl Delegate for VoidDelegate {
   type Error = VoidDelegateError;
 
-  /// Used to retrieve meta-data about the current node
-  /// when broadcasting an alive message. It's length is limited to
-  /// the given byte size. This metadata is available in the Node structure.
   fn node_meta(&self, _limit: usize) -> Bytes {
     Bytes::new()
   }
 
-  /// Called when a user-data message is received.
-  /// Care should be taken that this method does not block, since doing
-  /// so would block the entire UDP packet receive loop. Additionally, the byte
-  /// slice may be modified after the call returns, so it should be copied if needed
   #[cfg(not(feature = "nightly"))]
   async fn notify_user_msg(&self, _msg: Bytes) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  /// Called when user data messages can be broadcast.
-  /// It can return a list of buffers to send. Each buffer should assume an
-  /// overhead as provided with a limit on the total byte size allowed.
-  /// The total byte size of the resulting data to send must not exceed
-  /// the limit. Care should be taken that this method does not block,
-  /// since doing so would block the entire UDP packet receive loop.
   #[cfg(not(feature = "nightly"))]
   async fn get_broadcasts(
     &self,
@@ -249,50 +241,36 @@ impl Delegate for VoidDelegate {
     Ok(Vec::new())
   }
 
-  /// Used for a TCP Push/Pull. This is sent to
-  /// the remote side in addition to the membership information. Any
-  /// data can be sent here. See MergeRemoteState as well. The `join`
-  /// boolean indicates this is for a join instead of a push/pull.
   #[cfg(not(feature = "nightly"))]
   async fn local_state(&self, _join: bool) -> Result<Bytes, Self::Error> {
     Ok(Bytes::new())
   }
 
-  /// Invoked after a TCP Push/Pull. This is the
-  /// state received from the remote side and is the result of the
-  /// remote side's LocalState call. The 'join'
-  /// boolean indicates this is for a join instead of a push/pull.
   #[cfg(not(feature = "nightly"))]
   async fn merge_remote_state(&self, _buf: Bytes, _join: bool) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  /// Invoked when a node is detected to have joined the cluster
   #[cfg(not(feature = "nightly"))]
   async fn notify_join(&self, _node: Arc<Node>) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  /// Invoked when a node is detected to have left the cluster
   #[cfg(not(feature = "nightly"))]
   async fn notify_leave(&self, _node: Arc<Node>) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  /// Invoked when a node is detected to have
-  /// updated, usually involving the meta data.
   #[cfg(not(feature = "nightly"))]
   async fn notify_update(&self, _node: Arc<Node>) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  /// Invoked when a name conflict is detected
   #[cfg(not(feature = "nightly"))]
   async fn notify_alive(&self, _peer: Arc<Node>) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  /// Invoked when a name conflict is detected
   #[cfg(not(feature = "nightly"))]
   async fn notify_conflict(
     &self,
@@ -302,20 +280,16 @@ impl Delegate for VoidDelegate {
     Ok(())
   }
 
-  /// Invoked when a merge could take place.
-  /// Provides a list of the nodes known by the peer.
   #[cfg(not(feature = "nightly"))]
   async fn notify_merge(&self, _peers: Vec<Node>) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  /// Invoked when an ack is being sent; the returned bytes will be appended to the ack
   #[cfg(not(feature = "nightly"))]
   async fn ack_payload(&self) -> Result<Bytes, Self::Error> {
     Ok(Bytes::new())
   }
 
-  /// Invoked when an ack for a ping is received
   #[cfg(not(feature = "nightly"))]
   async fn notify_ping_complete(
     &self,
@@ -326,10 +300,6 @@ impl Delegate for VoidDelegate {
     Ok(())
   }
 
-  /// Called when a user-data message is received.
-  /// Care should be taken that this method does not block, since doing
-  /// so would block the entire UDP packet receive loop. Additionally, the byte
-  /// slice may be modified after the call returns, so it should be copied if needed
   #[cfg(feature = "nightly")]
   fn notify_user_msg<'a>(
     &'a self,
@@ -338,12 +308,6 @@ impl Delegate for VoidDelegate {
     async move { Ok(()) }
   }
 
-  /// Called when user data messages can be broadcast.
-  /// It can return a list of buffers to send. Each buffer should assume an
-  /// overhead as provided with a limit on the total byte size allowed.
-  /// The total byte size of the resulting data to send must not exceed
-  /// the limit. Care should be taken that this method does not block,
-  /// since doing so would block the entire UDP packet receive loop.
   #[cfg(feature = "nightly")]
   fn get_broadcasts<'a>(
     &'a self,
@@ -353,10 +317,6 @@ impl Delegate for VoidDelegate {
     async move { Ok(Vec::new()) }
   }
 
-  /// Used for a TCP Push/Pull. This is sent to
-  /// the remote side in addition to the membership information. Any
-  /// data can be sent here. See MergeRemoteState as well. The `join`
-  /// boolean indicates this is for a join instead of a push/pull.
   #[cfg(feature = "nightly")]
   fn local_state<'a>(
     &'a self,
@@ -365,10 +325,6 @@ impl Delegate for VoidDelegate {
     async move { Ok(Bytes::new()) }
   }
 
-  /// Invoked after a TCP Push/Pull. This is the
-  /// state received from the remote side and is the result of the
-  /// remote side's LocalState call. The 'join'
-  /// boolean indicates this is for a join instead of a push/pull.
   #[cfg(feature = "nightly")]
   fn merge_remote_state<'a>(
     &'a self,
@@ -378,7 +334,6 @@ impl Delegate for VoidDelegate {
     async move { Ok(()) }
   }
 
-  /// Invoked when a node is detected to have joined the cluster
   #[cfg(feature = "nightly")]
   fn notify_join<'a>(
     &'a self,
@@ -387,7 +342,6 @@ impl Delegate for VoidDelegate {
     async move { Ok(()) }
   }
 
-  /// Invoked when a node is detected to have left the cluster
   #[cfg(feature = "nightly")]
   fn notify_leave<'a>(
     &'a self,
@@ -396,8 +350,6 @@ impl Delegate for VoidDelegate {
     async move { Ok(()) }
   }
 
-  /// Invoked when a node is detected to have
-  /// updated, usually involving the meta data.
   #[cfg(feature = "nightly")]
   fn notify_update<'a>(
     &'a self,
@@ -406,7 +358,6 @@ impl Delegate for VoidDelegate {
     async move { Ok(()) }
   }
 
-  /// Invoked when a name conflict is detected
   #[cfg(feature = "nightly")]
   fn notify_alive<'a>(
     &'a self,
@@ -415,7 +366,6 @@ impl Delegate for VoidDelegate {
     async move { Ok(()) }
   }
 
-  /// Invoked when a name conflict is detected
   #[cfg(feature = "nightly")]
   fn notify_conflict<'a>(
     &'a self,
@@ -425,8 +375,6 @@ impl Delegate for VoidDelegate {
     async move { Ok(()) }
   }
 
-  /// Invoked when a merge could take place.
-  /// Provides a list of the nodes known by the peer.
   #[cfg(feature = "nightly")]
   fn notify_merge<'a>(
     &'a self,
@@ -435,13 +383,11 @@ impl Delegate for VoidDelegate {
     async move { Ok(()) }
   }
 
-  /// Invoked when an ack is being sent; the returned bytes will be appended to the ack
   #[cfg(feature = "nightly")]
   fn ack_payload<'a>(&'a self) -> impl Future<Output = Result<Bytes, Self::Error>> + Send + 'a {
     async move {}
   }
 
-  /// Invoked when an ack for a ping is received
   #[cfg(feature = "nightly")]
   fn notify_ping_complete<'a>(
     &'a self,

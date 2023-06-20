@@ -42,7 +42,7 @@ mod r#impl {
     timer: Timer<R>,
     timeout_fn: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync>,
     confirmations: HashSet<Name>,
-    runtime: R,
+    _marker: std::marker::PhantomData<R>,
   }
 
   impl<R> Suspicion<R>
@@ -61,14 +61,13 @@ mod r#impl {
       min: Duration,
       max: Duration,
       timeout_fn: impl Fn(u32) -> BoxFuture<'static, ()> + Clone + Send + Sync + 'static,
-      runtime: R,
     ) -> Self {
       #[allow(clippy::mutable_key_type)]
       let confirmations = [from].into_iter().collect();
       let n = Arc::new(AtomicU32::new(0));
       let timeout = if k < 1 { min } else { max };
       let timeout_fn = Arc::new(timeout_fn);
-      let timer = Timer::new(n.clone(), timeout, timeout_fn.clone(), runtime);
+      let timer = Timer::new(n.clone(), timeout, timeout_fn.clone());
       timer.start();
       Suspicion {
         n,
@@ -79,7 +78,7 @@ mod r#impl {
         timer,
         timeout_fn,
         confirmations,
-        runtime,
+        _marker: std::marker::PhantomData,
       }
     }
 
@@ -111,7 +110,7 @@ mod r#impl {
         } else {
           let n = self.n.clone();
           let f = self.timeout_fn.clone();
-          self.runtime.spawn_detach(async move {
+          R::spawn_detach(async move {
             f(n.load(Ordering::SeqCst)).await;
           });
         }
@@ -128,7 +127,7 @@ mod r#impl {
     stop_tx: async_channel::Sender<()>,
     stopped: Arc<AtomicBool>,
     f: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
-    runtime: R,
+    _marker: std::marker::PhantomData<R>,
   }
 
   impl<R> Timer<R>
@@ -140,7 +139,6 @@ mod r#impl {
       n: Arc<AtomicU32>,
       timeout: Duration,
       f: Arc<impl Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
-      runtime: R,
     ) -> Self {
       let (tx, rx) = async_channel::bounded(1);
       let stopped = Arc::new(AtomicBool::new(false));
@@ -152,8 +150,8 @@ mod r#impl {
         stop_tx: tx,
         stopped,
         f,
-        runtime,
         start: Instant::now(),
+        _marker: std::marker::PhantomData,
       }
     }
 
@@ -163,10 +161,10 @@ mod r#impl {
       let f = self.f.clone();
       let timeout = self.timeout;
 
-      self.runtime.spawn_detach(async move {
+      R::spawn_detach(async move {
         futures_util::select_biased! {
           _ = rx.recv().fuse() => {}
-          _ = R::new().sleep(timeout).fuse() => {
+          _ = R::sleep(timeout).fuse() => {
             f(n.load(Ordering::SeqCst)).await
           }
         }
@@ -181,10 +179,10 @@ mod r#impl {
       self.timeout = remaining;
       self.start = Instant::now();
 
-      self.runtime.spawn_detach(async move {
+      R::spawn_detach(async move {
         futures_util::select_biased! {
           _ = rx.recv().fuse() => {}
-          _ = R::new().sleep(remaining).fuse() => {
+          _ = R::sleep(remaining).fuse() => {
             f(n.load(Ordering::SeqCst)).await
           }
         }
@@ -426,7 +424,7 @@ mod tests {
         .boxed()
       };
 
-      let mut s = Suspicion::new(from.try_into().unwrap(), K, MIN, MAX, f, TokioRuntime);
+      let mut s = Suspicion::<TokioRuntime>::new(from.try_into().unwrap(), K, MIN, MAX, f);
       let fudge = Duration::from_millis(25);
       for p in confirmations.iter() {
         tokio::time::sleep(fudge).await;
@@ -483,13 +481,12 @@ mod tests {
       .boxed()
     };
 
-    let mut s = Suspicion::new(
+    let mut s = Suspicion::<TokioRuntime>::new(
       "me".try_into().unwrap(),
       0,
       Duration::from_millis(25),
       Duration::from_secs(30),
       f,
-      TokioRuntime,
     );
 
     assert!(!s.confirm(&"foo".try_into().unwrap()).await);
@@ -512,13 +509,12 @@ mod tests {
       .boxed()
     };
 
-    let mut s = Suspicion::new(
+    let mut s = Suspicion::<TokioRuntime>::new(
       "me".try_into().unwrap(),
       1,
       Duration::from_millis(100),
       Duration::from_secs(30),
       f,
-      TokioRuntime,
     );
 
     tokio::time::sleep(Duration::from_millis(200)).await;

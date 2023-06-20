@@ -15,11 +15,6 @@ use std::{
 #[cfg(feature = "tokio-compat")]
 use agnostic::io::ReadBuf;
 
-use agnostic::{
-  net::{Net, TcpListener, TcpStream, UdpSocket},
-  Runtime,
-};
-use bytes::BytesMut;
 use crate::{
   async_trait, futures_util,
   transport::{
@@ -32,6 +27,11 @@ use crate::{
   },
   types::Packet,
 };
+use agnostic::{
+  net::{Net, TcpListener, TcpStream, UdpSocket},
+  Runtime,
+};
+use bytes::BytesMut;
 use wg::AsyncWaitGroup;
 
 /// Used to buffer incoming packets during read
@@ -77,7 +77,7 @@ impl crate::checksum::Checksumer for Crc32 {
 
 /// Used to configure a net transport.
 #[viewit::viewit(vis_all = "pub(crate)")]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NetTransportOptions {
   /// A list of addresses to bind to for both TCP and UDP
   /// communications.
@@ -223,14 +223,13 @@ pub struct NetTransport<R: Runtime> {
   udp_listener: Arc<UnreliableConnection<Self>>,
   wg: AsyncWaitGroup,
   shutdown: Arc<AtomicBool>,
-  runtime: R,
+  _marker: PhantomData<R>,
 }
 
 impl<R: Runtime> NetTransport<R> {
   async fn new_in(
     opts: <Self as Transport>::Options,
     #[cfg(feature = "metrics")] metrics_labels: Option<Arc<Vec<crate::metrics::Label>>>,
-    runtime: R,
   ) -> Result<Self, TransportError<Self>> {
     // If we reject the empty list outright we can assume that there's at
     // least one listener of each type later during operation.
@@ -283,7 +282,7 @@ impl<R: Runtime> NetTransport<R> {
         ln: tcp_ln,
         shutdown: shutdown.clone(),
       }
-      .run(runtime);
+      .run();
 
       let (udp_ln, remote_addr) = udp_listeners.pop_back().unwrap();
       UdpProcessor {
@@ -296,7 +295,7 @@ impl<R: Runtime> NetTransport<R> {
         metrics_labels: metrics_labels.clone().unwrap_or_default(),
         _marker: std::marker::PhantomData,
       }
-      .run(runtime);
+      .run();
     }
 
     wg.add(2);
@@ -308,7 +307,7 @@ impl<R: Runtime> NetTransport<R> {
       ln: tcp_ln,
       shutdown: shutdown.clone(),
     }
-    .run(runtime);
+    .run();
     let (udp_ln, remote_addr) = udp_listeners.pop_back().unwrap();
     let udp_ln = Arc::new(udp_ln);
 
@@ -322,7 +321,7 @@ impl<R: Runtime> NetTransport<R> {
       metrics_labels: metrics_labels.clone().unwrap_or_default(),
       _marker: std::marker::PhantomData,
     }
-    .run(runtime);
+    .run();
 
     Ok(Self {
       opts,
@@ -332,7 +331,7 @@ impl<R: Runtime> NetTransport<R> {
       shutdown,
       tcp_addr,
       udp_listener: udp_ln,
-      runtime,
+      _marker: PhantomData,
     })
   }
 }
@@ -354,33 +353,31 @@ impl<R: Runtime> Transport for NetTransport<R> {
   #[cfg(feature = "nightly")]
   fn new<'a>(
     opts: Self::Options,
-    runtime: Self::Runtime,
   ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'a
   where
     Self: Sized,
   {
     #[cfg(feature = "metrics")]
     {
-      Self::new_in(opts, None, runtime)
+      Self::new_in(opts, None)
     }
 
     #[cfg(not(feature = "metrics"))]
     {
-      Self::new_in(opts, runtime)
+      Self::new_in(opts)
     }
   }
 
-  // #[cfg(all(feature = "metrics", feature = "nightly"))]
-  // fn with_metrics_labels(
-  //   opts: Self::Options,
-  //   metrics_labels: std::sync::Arc<Vec<crate::metrics::Label>>,
-  //   runtime: Self::Runtime,
-  // ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
-  // where
-  //   Self: Sized,
-  // {
-  //   Self::new_in(opts, Some(metrics_labels), runtime)
-  // }
+  #[cfg(all(feature = "metrics", feature = "nightly"))]
+  fn with_metrics_labels(
+    opts: Self::Options,
+    metrics_labels: std::sync::Arc<Vec<crate::metrics::Label>>,
+  ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
+  where
+    Self: Sized,
+  {
+    Self::new_in(opts, Some(metrics_labels))
+  }
 
   #[cfg(feature = "nightly")]
   fn write_to<'a>(
@@ -434,32 +431,31 @@ impl<R: Runtime> Transport for NetTransport<R> {
   }
 
   #[cfg(not(feature = "nightly"))]
-  async fn new(opts: Self::Options, runtime: Self::Runtime) -> Result<Self, TransportError<Self>>
+  async fn new(opts: Self::Options) -> Result<Self, TransportError<Self>>
   where
     Self: Sized,
   {
     #[cfg(feature = "metrics")]
     {
-      Self::new_in(opts, None, runtime).await
+      Self::new_in(opts, None).await
     }
 
     #[cfg(not(feature = "metrics"))]
     {
-      Self::new_in(opts, runtime).await
+      Self::new_in(opts).await
     }
   }
 
-  // #[cfg(all(feature = "metrics", not(feature = "nightly")))]
-  // async fn with_metrics_labels(
-  //   opts: Self::Options,
-  //   metrics_labels: Arc<Vec<crate::metrics::Label>>,
-  //   runtime: Self::Runtime,
-  // ) -> Result<Self, TransportError<Self>>
-  // where
-  //   Self: Sized,
-  // {
-  //   Self::new_in(opts, Some(metrics_labels), runtime).await
-  // }
+  #[cfg(all(feature = "metrics", not(feature = "nightly")))]
+  async fn with_metrics_labels(
+    opts: Self::Options,
+    metrics_labels: Arc<Vec<crate::metrics::Label>>,
+  ) -> Result<Self, TransportError<Self>>
+  where
+    Self: Sized,
+  {
+    Self::new_in(opts, Some(metrics_labels)).await
+  }
 
   fn final_advertise_addr(
     &self,
@@ -528,7 +524,7 @@ impl<R: Runtime> Transport for NetTransport<R> {
   }
 
   fn block_shutdown(&self) -> Result<(), TransportError<Self>> {
-    self.runtime.block_on(self.shutdown())
+    R::block_on(self.shutdown())
   }
 }
 
@@ -545,7 +541,7 @@ where
   T: Transport<Connection = Tcp<R>>,
   R: Runtime,
 {
-  pub(super) fn run(self, runtime: impl agnostic::Runtime) {
+  pub(super) fn run(self) {
     let Self {
       remote_addr,
       wg,
@@ -563,7 +559,7 @@ where
     /// Therefore, changes to `MAX_DELAY` may have an effect on the latency of shutdown.
     const MAX_DELAY: Duration = Duration::from_secs(1);
 
-    runtime.spawn_detach(async move {
+    R::spawn_detach(async move {
       scopeguard::defer!(wg.done());
       let mut loop_delay = Duration::ZERO;
 
@@ -596,7 +592,7 @@ where
             }
 
             tracing::error!(target = "showbiz", err = %e, "error accepting TCP connection");
-            runtime.sleep(loop_delay).await;
+            R::sleep(loop_delay).await;
             continue;
           }
         }
@@ -626,7 +622,7 @@ where
   L: AsRef<UnreliableConnection<T>> + Send + Sync + 'static,
 {
   #[cfg(feature = "async")]
-  pub(super) fn run(self, runtime: impl agnostic::Runtime) {
+  pub(super) fn run(self) {
     let Self {
       wg,
       packet_tx,
@@ -636,7 +632,7 @@ where
       ..
     } = self;
 
-    runtime.spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn_detach(async move {
       scopeguard::defer!(wg.done());
       let ln = ln.as_ref();
       loop {

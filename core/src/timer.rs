@@ -10,7 +10,7 @@ pub(crate) struct Timer {
 }
 
 impl Timer {
-  pub(crate) fn after<F, R>(dur: Duration, future: F, runtime: R) -> Self
+  pub(crate) fn after<F, R>(dur: Duration, future: F) -> Self
   where
     R: Runtime,
     <R::Sleep as Future>::Output: Send,
@@ -18,9 +18,9 @@ impl Timer {
   {
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let (tx, rx) = oneshot::channel();
-    runtime.spawn_detach(
+    R::spawn_detach(
       async move {
-        let delay = runtime.sleep(dur);
+        let delay = R::sleep(dur);
         select! {
           _ = delay.fuse() => {
             future.await;

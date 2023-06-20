@@ -461,11 +461,19 @@ mod r#async {
     }
   }
 
-  #[async_trait::async_trait]
+  #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
   pub trait PacketConnection: ConnectionTimeout + Send + Sync + 'static {
+    #[cfg(not(feature = "nightly"))]
     async fn send_to(&self, addr: SocketAddr, buf: &[u8]) -> std::io::Result<usize>;
 
+    #[cfg(not(feature = "nightly"))]
     async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)>;
+
+    #[cfg(feature = "nightly")]
+    fn send_to<'a>(&'a self, addr: SocketAddr, buf: &'a [u8]) -> impl futures_util::Future<Output = Result<usize, std::io::Error>> + Send + 'a;
+
+    #[cfg(feature = "nightly")]
+    fn recv_from<'a>(&'a self, buf: &'a mut [u8]) -> impl futures_util::Future<Output = Result<(usize, SocketAddr), std::io::Error>> + Send + 'a;
   }
 
   /// Transport is used to abstract over communicating with other peers. The packet
@@ -491,29 +499,27 @@ mod r#async {
 
     /// Creates a new transport instance with the given options
     #[cfg(not(feature = "nightly"))]
-    async fn new(opts: Self::Options, runtime: Self::Runtime) -> Result<Self, TransportError<Self>>
+    async fn new(opts: Self::Options) -> Result<Self, TransportError<Self>>
     where
       Self: Sized;
 
-    // /// Creates a new transport instance with the given options and metrics labels
-    // #[cfg(all(feature = "metrics", feature = "nightly"))]
-    // fn with_metrics_labels(
-    //   opts: Self::Options,
-    //   metrics_labels: std::sync::Arc<Vec<metrics::Label>>,
-    //   runtime: Self::Runtime,
-    // ) -> impl Future<Output = Result<Self, TransportError<Self>>> + 'static
-    // where
-    //   Self: Sized;
+    /// Creates a new transport instance with the given options and metrics labels
+    #[cfg(all(feature = "metrics", feature = "nightly"))]
+    fn with_metrics_labels(
+      opts: Self::Options,
+      metrics_labels: std::sync::Arc<Vec<metrics::Label>>,
+    ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
+    where
+      Self: Sized;
 
-    // /// Creates a new transport instance with the given options and metrics labels
-    // #[cfg(all(feature = "metrics", not(feature = "nightly")))]
-    // async fn with_metrics_labels(
-    //   opts: Self::Options,
-    //   metrics_labels: std::sync::Arc<Vec<metrics::Label>>,
-    //   runtime: Self::Runtime,
-    // ) -> Result<Self, TransportError<Self>>
-    // where
-    //   Self: Sized;
+    /// Creates a new transport instance with the given options and metrics labels
+    #[cfg(all(feature = "metrics", not(feature = "nightly")))]
+    async fn with_metrics_labels(
+      opts: Self::Options,
+      metrics_labels: std::sync::Arc<Vec<metrics::Label>>,
+    ) -> Result<Self, TransportError<Self>>
+    where
+      Self: Sized;
 
     /// Given the user's configured values (which
     /// might be empty) and returns the desired IP and port to advertise to
