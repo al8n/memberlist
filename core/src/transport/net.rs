@@ -88,6 +88,20 @@ pub struct NetTransportOptions {
   bind_addrs: Vec<SocketAddr>,
 }
 
+impl super::TransportOptions for NetTransportOptions {
+  fn from_addr(addr: SocketAddr) -> Self {
+    Self {
+      bind_addrs: vec![addr],
+    }
+  }
+
+  fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self {
+    Self {
+      bind_addrs: addrs.collect(),
+    }
+  }
+}
+
 #[repr(transparent)]
 pub struct Udp<R: Runtime> {
   conn: <R::Net as Net>::UdpSocket,

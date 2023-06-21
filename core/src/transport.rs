@@ -155,7 +155,9 @@ pub use r#async::*;
 
 #[cfg(feature = "async")]
 mod r#async {
-  use crate::checksum::Checksumer;
+  use std::sync::Arc;
+
+use crate::checksum::Checksumer;
 
   use super::*;
   use futures_util::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -476,6 +478,32 @@ mod r#async {
     fn recv_from<'a>(&'a self, buf: &'a mut [u8]) -> impl futures_util::Future<Output = Result<(usize, SocketAddr), std::io::Error>> + Send + 'a;
   }
 
+  pub trait TransportOptions: Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static {
+    fn from_addr(addr: SocketAddr) -> Self;
+
+    fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self;
+  }
+
+  impl<T: TransportOptions> TransportOptions for Arc<T> {
+    fn from_addr(addr: SocketAddr) -> Self {
+      Arc::new(T::from_addr(addr))
+    }
+
+    fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self {
+      Arc::new(T::from_addrs(addrs))
+    }
+  }
+
+  impl<T: TransportOptions> TransportOptions for Box<T> {
+    fn from_addr(addr: SocketAddr) -> Self {
+      Box::new(T::from_addr(addr))
+    }
+
+    fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self {
+      Box::new(T::from_addrs(addrs))
+    }
+  }
+
   /// Transport is used to abstract over communicating with other peers. The packet
   /// interface is assumed to be best-effort and the stream interface is assumed to
   /// be reliable.
@@ -485,7 +513,7 @@ mod r#async {
     type Checksumer: Checksumer + Send + Sync + 'static;
     type Connection: ConnectionTimeout + futures_util::io::AsyncRead + futures_util::io::AsyncWrite;
     type UnreliableConnection: PacketConnection;
-    type Options: Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static;
+    type Options: TransportOptions;
     type Runtime: agnostic::Runtime;
 
     /// Creates a new transport instance with the given options

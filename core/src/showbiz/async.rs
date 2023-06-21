@@ -127,7 +127,7 @@ where
   async fn new_in(
     delegate: Option<D>,
     mut keyring: Option<SecretKeyring>,
-    opts: Options<T>,
+    mut opts: Options<T>,
     runtime: R,
   ) -> Result<Self, Error<D, T>> {
     let (handoff_tx, handoff_rx) = async_channel::bounded(1);
@@ -142,6 +142,8 @@ where
         mu.use_key(&pk)?;
       }
     }
+
+    opts.transport.get_or_insert_with(|| <T::Options as crate::transport::TransportOptions>::from_addr(opts.bind_addr));
 
     let id = NodeId {
       name: opts.name.clone(),
@@ -223,16 +225,16 @@ where
     let transport = {
       if !self.inner.metrics_labels.is_empty() {
         T::with_metrics_labels(
-          self.inner.opts.transport.clone(),
+          self.inner.opts.transport.as_ref().unwrap().clone(),
           self.inner.metrics_labels.clone(),
         )
         .await?
       } else {
-        T::new(self.inner.opts.transport.clone()).await?
+        T::new(self.inner.opts.transport.as_ref().unwrap().clone()).await?
       }
     };
     #[cfg(not(feature = "metrics"))]
-    let transport = T::new(self.inner.opts.transport.clone()).await?;
+    let transport = T::new(self.inner.opts.transport.as_ref().unwrap().clone()).await?;
 
     // Get the final advertise address from the transport, which may need
     // to see which address we bound to. We'll refresh this each time we
