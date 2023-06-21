@@ -39,10 +39,8 @@ mod r#impl {
     min: Duration,
     max: Duration,
     start: Instant,
-    timer: Timer<R>,
-    timeout_fn: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync>,
+    after_func: AfterFunc<R>,
     confirmations: HashSet<Name>,
-    _marker: std::marker::PhantomData<R>,
   }
 
   impl<R> Suspicion<R>
@@ -50,7 +48,7 @@ mod r#impl {
     R: Runtime,
     <R::Sleep as Future>::Output: Send,
   {
-    /// Returns a timer started with the max time, and that will drive
+    /// Returns a after_func started with the max time, and that will drive
     /// to the min time after seeing k or more confirmations. The from node will be
     /// excluded from confirmations since we might get our own suspicion message
     /// gossiped back to us. The minimum time will be used if no confirmations are
@@ -66,19 +64,16 @@ mod r#impl {
       let confirmations = [from].into_iter().collect();
       let n = Arc::new(AtomicU32::new(0));
       let timeout = if k < 1 { min } else { max };
-      let timeout_fn = Arc::new(timeout_fn);
-      let timer = Timer::new(n.clone(), timeout, timeout_fn.clone());
-      timer.start();
+      let after_func = AfterFunc::new(n.clone(), timeout, Arc::new(timeout_fn));
+      after_func.start();
       Suspicion {
         n,
         k,
         min,
         max,
         start: Instant::now(),
-        timer,
-        timeout_fn,
+        after_func,
         confirmations,
-        _marker: std::marker::PhantomData,
       }
     }
 
@@ -97,21 +92,21 @@ mod r#impl {
       self.confirmations.insert(from.clone());
 
       // Compute the new timeout given the current number of confirmations and
-      // adjust the timer. If the timeout becomes negative *and* we can cleanly
-      // stop the timer then we will call the timeout function directly from
+      // adjust the after_func. If the timeout becomes negative *and* we can cleanly
+      // stop the after_func then we will call the timeout function directly from
       // here.
       let n = self.n.fetch_add(1, Ordering::SeqCst) + 1;
       let elapsed = self.start.elapsed();
       let remaining = remaining_suspicion_time(n, self.k, elapsed, self.min, self.max);
 
-      if self.timer.stop().await {
+      if self.after_func.stop().await {
         if remaining > Duration::ZERO {
-          self.timer.reset(remaining).await;
+          self.after_func.reset(remaining).await;
         } else {
           let n = self.n.clone();
-          let f = self.timeout_fn.clone();
+          let fut = (self.after_func.f)(n.load(Ordering::SeqCst));
           R::spawn_detach(async move {
-            f(n.load(Ordering::SeqCst)).await;
+            fut.await;
           });
         }
       }
@@ -119,7 +114,7 @@ mod r#impl {
     }
   }
 
-  pub(super) struct Timer<R: Runtime> {
+  pub(super) struct AfterFunc<R: Runtime> {
     n: Arc<AtomicU32>,
     timeout: Duration,
     start: Instant,
@@ -130,7 +125,7 @@ mod r#impl {
     _marker: std::marker::PhantomData<R>,
   }
 
-  impl<R> Timer<R>
+  impl<R> AfterFunc<R>
   where
     R: Runtime,
     <R::Sleep as Future>::Output: Send,
@@ -193,14 +188,11 @@ mod r#impl {
       if self.start.elapsed() >= self.timeout {
         return false;
       }
-
       if self.stopped.load(Ordering::SeqCst) {
         false
       } else {
         self.stopped.store(true, Ordering::SeqCst);
-        if let Err(e) = self.stop_tx.send(()).await {
-          tracing::error!(target = "showbiz", err = %e);
-        }
+        let _ = self.stop_tx.send(()).await;
         true
       }
     }
@@ -403,7 +395,7 @@ mod tests {
 
   #[cfg(feature = "async")]
   #[tokio::test]
-  async fn test_suspicion_timer() {
+  async fn test_suspicion_after_func() {
     use agnostic::tokio::TokioRuntime;
 
     for (i, (num_confirmations, from, confirmations, expected)) in
@@ -469,7 +461,7 @@ mod tests {
 
   #[cfg(feature = "async")]
   #[tokio::test]
-  async fn test_suspicion_timer_zero_k() {
+  async fn test_suspicion_after_func_zero_k() {
     use agnostic::tokio::TokioRuntime;
 
     let (tx, rx) = async_channel::unbounded();
@@ -497,7 +489,7 @@ mod tests {
 
   #[cfg(feature = "async")]
   #[tokio::test]
-  async fn test_suspicion_timer_immediate() {
+  async fn test_suspicion_after_func_immediate() {
     use agnostic::tokio::TokioRuntime;
 
     let (tx, rx) = async_channel::unbounded();

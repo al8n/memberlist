@@ -5,34 +5,31 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
 mod awareness;
-mod broadcast;
+pub mod broadcast;
 pub mod checksum;
 pub mod delegate;
 pub mod error;
-mod keyring;
-pub use keyring::{SecretKey, SecretKeyring, SecretKeyringError};
 mod network;
 mod options;
-pub use options::Options;
+pub use options::{Options, ProtocolVersion, DelegateVersion};
 mod dns;
 pub mod queue;
-mod security;
+pub mod security;
 mod showbiz;
 pub use showbiz::*;
 mod state;
 mod suspicion;
 pub mod transport;
-pub mod types;
+mod types;
+pub use types::{Address, CompressionAlgo, Domain, Label, Message, Name, Node, NodeId, Packet};
 mod util;
 
 pub use bytes;
 pub use ipnet::IpNet;
 
 #[cfg(feature = "async")]
-pub mod timer;
-
+mod timer;
 mod version;
-pub use version::*;
 
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]

@@ -6,12 +6,13 @@ use std::{
 };
 
 use super::{
-  keyring::SecretKey,
-  security::EncryptionAlgo,
+  security::{EncryptionAlgo, SecretKey},
   transport::Transport,
   types::{CompressionAlgo, Label, Name},
-  version::{DelegateVersion, ProtocolVersion, VSN_SIZE},
+  version::VSN_SIZE,
 };
+
+pub use super::version::{DelegateVersion, ProtocolVersion};
 
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -157,6 +158,13 @@ pub struct Options<T: Transport> {
   /// utilization. This is only available starting at protocol version 1.
   compression_algo: CompressionAlgo,
 
+  /// The size of a message that should be offload to [`rayon`] thread pool
+  /// for encryption or compression.
+  ///
+  /// The default value is 1KB, which means that any message larger than 1KB
+  /// will be offloaded to [`rayon`] thread pool for encryption or compression.
+  offload_size: usize,
+
   /// Used to initialize the primary encryption key in a keyring.
   /// The primary encryption key is the only key used to encrypt messages and
   /// the first key used while attempting to decrypt messages. Providing a
@@ -200,10 +208,6 @@ pub struct Options<T: Transport> {
   /// meaning nodes cannot be reclaimed this way.
   dead_node_reclaim_time: Duration,
 
-  /// Controls if the name of a node is required when sending
-  /// a message to that node.
-  require_node_names: bool,
-
   /// If [`None`], allow any connection (default), otherwise specify all networks
   /// allowed to connect (you must specify IPv6/IPv4 separately)
   /// Using an empty Vec will block all connections.
@@ -217,8 +221,12 @@ pub struct Options<T: Transport> {
   allowed_cidrs: Option<HashSet<ipnet::IpNet>>,
 
   /// Transport options
-  #[viewit(getter(style = "ref", const))]
-  transport: T::Options,
+  #[viewit(getter(
+    style = "ref",
+    const,
+    result(converter(fn = "Option::as_ref"), type = "Option<&T::Options>")
+  ))]
+  transport: Option<T::Options>,
 
   /// The interval at which we check the message
   /// queue to apply the warning and max depth.
@@ -232,7 +240,7 @@ where
 {
   #[inline]
   fn default() -> Self {
-    Self::lan(T::Options::default())
+    Self::lan()
   }
 }
 
@@ -249,7 +257,7 @@ impl<T: Transport> Options<T> {
   /// for higher convergence at the cost of higher bandwidth usage. Regardless,
   /// these values are a good starting point when getting started with memberlist.
   #[inline]
-  pub fn lan(transport: T::Options) -> Self {
+  pub fn lan() -> Self {
     #[cfg(not(any(target_arch = "wasm32", windows)))]
     let hostname = {
       let uname = rustix::process::uname();
@@ -300,11 +308,11 @@ impl<T: Transport> Options<T> {
       protocol_version: ProtocolVersion::V0,
       dns_config_path: PathBuf::from("/etc/resolv.conf"),
       handoff_queue_depth: 1024,
+      offload_size: 1024, // 1KB
       packet_buffer_size: 1400,
       dead_node_reclaim_time: Duration::ZERO,
-      require_node_names: false,
       allowed_cidrs: None,
-      transport,
+      transport: None,
       queue_check_interval: Duration::from_secs(30),
     }
   }
@@ -313,8 +321,8 @@ impl<T: Transport> Options<T> {
   /// that is optimized for most WAN environments. The default configuration is
   /// still very conservative and errs on the side of caution.
   #[inline]
-  pub fn wan(transport: T::Options) -> Self {
-    Self::lan(transport)
+  pub fn wan() -> Self {
+    Self::lan()
       .with_tcp_timeout(Duration::from_secs(30))
       .with_suspicion_mult(6)
       .with_push_pull_interval(Duration::from_secs(60))
@@ -329,8 +337,8 @@ impl<T: Transport> Options<T> {
   /// that is optimized for a local loopback environments. The default configuration is
   /// still very conservative and errs on the side of caution.
   #[inline]
-  pub fn local(transport: T::Options) -> Self {
-    Self::lan(transport)
+  pub fn local() -> Self {
+    Self::lan()
       .with_tcp_timeout(Duration::from_secs(1))
       .with_indirect_checks(1)
       .with_retransmit_mult(2)

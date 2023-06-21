@@ -8,29 +8,19 @@ pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
 const LZW_LIT_WIDTH: u8 = 8;
 
 #[derive(Debug, thiserror::Error)]
-pub enum CompressionError {
+pub enum CompressError {
+  #[error("{0}")]
+  Lzw(#[from] weezl::LzwError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DecompressError {
   #[error("{0}")]
   Lzw(#[from] weezl::LzwError),
 }
 
 #[inline]
-pub(crate) fn decompress_buffer(
-  cmp: CompressionAlgo,
-  data: &[u8],
-) -> Result<Vec<u8>, CompressionError> {
-  match cmp {
-    CompressionAlgo::Lzw => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
-      .decode(data)
-      .map_err(CompressionError::Lzw),
-    CompressionAlgo::None => unreachable!(),
-  }
-}
-
-#[inline]
-pub(crate) fn compress_payload(
-  cmp: CompressionAlgo,
-  inp: &[u8],
-) -> Result<Vec<u8>, CompressionError> {
+pub(crate) fn compress_payload(cmp: CompressionAlgo, inp: &[u8]) -> Result<Vec<u8>, CompressError> {
   match cmp {
     CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
       .encode(inp)
@@ -43,7 +33,7 @@ pub(crate) fn compress_payload(
 pub(crate) fn decompress_payload(
   cmp: CompressionAlgo,
   inp: &[u8],
-) -> Result<Vec<u8>, CompressionError> {
+) -> Result<Vec<u8>, DecompressError> {
   match cmp {
     CompressionAlgo::Lzw => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
       .decode(inp)
@@ -54,7 +44,9 @@ pub(crate) fn decompress_payload(
 
 pub(crate) use is_global_ip::IsGlobalIp;
 
-/// The code in this mod is copied from https://github.com/tcoratger/rust-libp2p/blob/master/core/src/transport/global_only.rs.
+/// The code in this mod is copied from [libp2p]
+/// 
+/// [libp2p]: https://github.com/tcoratger/rust-libp2p/blob/master/core/src/transport/global_only.rs.
 mod is_global_ip {
   pub(crate) trait IsGlobalIp {
     fn is_global_ip(&self) -> bool;

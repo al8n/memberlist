@@ -127,6 +127,13 @@ pub enum DecodeError {
   FailReadRemoteState(usize, usize),
   #[error("failed to read full user state ({0} / {1})")]
   FailReadUserState(usize, usize),
+  #[error("mismatch message type, expected {expected}, got {got}")]
+  MismatchMessageType {
+    expected: &'static str,
+    got: &'static str,
+  },
+  #[error("sequence number from ack ({ack}) doesn't match ping ({ping})")]
+  MismatchSequenceNumber { ack: u32, ping: u32 },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -583,7 +590,7 @@ impl Packet {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 #[repr(u8)]
-pub enum MessageType {
+pub(crate) enum MessageType {
   Ping = 0,
   IndirectPing = 1,
   AckResponse = 2,
@@ -639,7 +646,7 @@ impl MessageType {
     match self {
       MessageType::Ping => "ping",
       MessageType::IndirectPing => "indirect ping",
-      MessageType::AckResponse => "ack",
+      MessageType::AckResponse => "ack response",
       MessageType::Suspect => "suspect",
       MessageType::Alive => "alive",
       MessageType::Dead => "dead",
@@ -648,7 +655,7 @@ impl MessageType {
       MessageType::User => "user",
       MessageType::Compress => "compress",
       MessageType::Encrypt => "encrypt",
-      MessageType::NackResponse => "nack",
+      MessageType::NackResponse => "nack response",
       MessageType::HasCrc => "crc",
       MessageType::ErrorResponse => "error",
       MessageType::HasLabel => "label",

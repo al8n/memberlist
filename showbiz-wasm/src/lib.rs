@@ -7,12 +7,11 @@
 compile_error!("showbiz does not support sync currently, `async` feature must be enabled.");
 
 pub use showbiz_core::*;
-pub use showbiz_transport::*;
 
 pub use wasm_agnostic as agnostic;
 
 pub type TokioWasmShowbiz<D> = showbiz_core::Showbiz<
   D,
-  showbiz_transport::NetTransport<agnostic::tokio::TokioWasmRuntime>,
+  showbiz_core::transport::net::NetTransport<agnostic::tokio::TokioWasmRuntime>,
   agnostic::tokio::TokioWasmRuntime,
 >;

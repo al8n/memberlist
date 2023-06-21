@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::{
   checksum::Checksumer,
-  security::{decrypt_payload, pkcs7encode, BLOCK_SIZE, NONCE_SIZE},
+  security::{pkcs7encode, BLOCK_SIZE, NONCE_SIZE},
   showbiz::MessageHandoff,
   types::{Message, NodeId},
   util::decompress_payload,
@@ -32,7 +32,12 @@ where
           packet = transport_rx.recv().fuse() => {
             match packet {
               Ok(packet) => this.ingest_packet(packet).await,
-              Err(e) => tracing::error!(target = "showbiz", "failed to receive packet: {}", e),
+              Err(e) => {
+                tracing::error!(target = "showbiz", "failed to receive packet: {}", e);
+                // If we got an error, which means on the other side the transport has been closed,
+                // so we need to return and shutdown the packet listener
+                return;
+              },
             }
           }
         }
@@ -67,15 +72,9 @@ where
 
     // Check if encryption is enabled
     if let Some(keyring) = &self.inner.keyring {
-      let keys = keyring.lock().await;
       // Decrypt the payload
-      if !keys.is_empty() {
-        if let Err(e) = decrypt_payload(
-          &keys.keys(),
-          &mut buf,
-          packet_label.as_bytes(),
-          self.inner.opts.encryption_algo,
-        ) {
+      if !keyring.is_empty() {
+        if let Err(e) = keyring.decrypt_payload(&mut buf, packet_label.as_bytes()) {
           if self.inner.opts.gossip_verify_incoming {
             tracing::error!(target = "showbiz", addr = %addr, err = %e, "decrypt packet failed");
             return;
@@ -358,25 +357,23 @@ where
     // Setup a timer to fire off a nack if no ack is seen in time.
     let this = self.clone();
     let probe_timeout = self.inner.opts.probe_timeout;
-    R::spawn_detach(
-      async move {
-        futures_util::select! {
-          _ = R::sleep(probe_timeout).fuse() => {
-            // We've not received an ack, so send a nack.
-            let nack = NackResponse::new(ind.seq_no);
-            let mut out = BytesMut::with_capacity(MessageType::SIZE + nack.encoded_len());
-            out.put_u8(MessageType::NackResponse as u8);
-            nack.encode_to::<T::Checksumer>(&mut out);
-            if let Err(e) = this.send_msg(&ind.source, Message(out)).await {
-              tracing::error!(target = "showbiz", local = %ind.source, remote = %from, err = %e, "failed to send nack");
-            }
-          }
-          _ = cancel_rx.fuse() => {
-            // We've received an ack, so we can cancel the nack.
+    R::spawn_detach(async move {
+      futures_util::select! {
+        _ = R::sleep(probe_timeout).fuse() => {
+          // We've not received an ack, so send a nack.
+          let nack = NackResponse::new(ind.seq_no);
+          let mut out = BytesMut::with_capacity(MessageType::SIZE + nack.encoded_len());
+          out.put_u8(MessageType::NackResponse as u8);
+          nack.encode_to::<T::Checksumer>(&mut out);
+          if let Err(e) = this.send_msg(&ind.source, Message(out)).await {
+            tracing::error!(target = "showbiz", local = %ind.source, remote = %from, err = %e, "failed to send nack");
           }
         }
-      },
-    );
+        _ = cancel_rx.fuse() => {
+          // We've received an ack, so we can cancel the nack.
+        }
+      }
+    });
   }
 
   async fn handle_ack(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
@@ -470,18 +467,14 @@ where
 
         let keyring = $this.inner.keyring.as_ref().unwrap();
         let mut bytes = buf.split_off(after_nonce);
-        let Some(pk) = keyring.lock().await.primary_key() else {
-          let err = Error::Security(SecurityError::MissingPrimaryKey);
-          tracing::error!(target = "showbiz", addr = %$addr, err = %err, "failed to encrypt message");
-          return Err(err);
-        };
+        let pk = keyring.primary_key();
 
         if let Err(e) = keyring.encrypt_to(pk, &nonce, self.inner.opts.label.as_bytes(), &mut bytes)
           .map(|_| {
             buf.unsplit(bytes);
           }) {
           tracing::error!(target = "showbiz", addr = %$addr, err = %e, "failed to encrypt message");
-          return Err(Error::Security(e));
+          return Err(Error::Transport(TransportError::Security(e)));
         }
         buf
       }};
@@ -506,15 +499,11 @@ where
       }};
     }
 
-    if addr.name().is_empty() && self.inner.opts.require_node_names {
-      return Err(Error::MissingNodeName);
-    }
-
     // Check if we have compression enabled
     if !self.inner.opts.compression_algo.is_none() {
       let data = compress_payload(self.inner.opts.compression_algo, &msg).map_err(|e| {
         tracing::error!(target = "showbiz", addr = %addr, err = %e, "failed to compress message");
-        Error::Compression(e)
+        e
       })?;
 
       let compressed_msg_len = CompressEncoder::<BytesMut, T::Checksumer>::encoded_len(&data) + 1;

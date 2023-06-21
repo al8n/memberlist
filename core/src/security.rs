@@ -4,11 +4,13 @@ use aes_gcm::{
   aes::{cipher::consts::U12, Aes192},
   Aes128Gcm, Aes256Gcm, AesGcm,
 };
+use atomic::{Atomic, Ordering};
 use bytes::{BufMut, BytesMut};
+use crossbeam_skiplist::SkipSet;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::{SecretKey, SecretKeyring};
+use std::sync::{atomic::AtomicU64, Arc};
 
 type Aes192Gcm = AesGcm<Aes192, U12>;
 
@@ -28,6 +30,12 @@ pub enum SecurityError {
   MissingPrimaryKey,
   #[error("security: remote state is encrypted and encryption is not configured")]
   NotConfigured,
+  #[error("security: encryption is configured but remote state is not encrypted")]
+  PlainRemoteState,
+  #[error("security: secret key is not in the keyring")]
+  SecretKeyNotFound,
+  #[error("security: removing the primary key is not allowed")]
+  RemovePrimaryKey,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -73,6 +81,292 @@ impl EncryptionAlgo {
 
   pub fn is_none(&self) -> bool {
     *self == EncryptionAlgo::None
+  }
+}
+
+/// The key used while attempting to encrypt/decrypt a message
+#[derive(
+  Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(untagged)]
+pub enum SecretKey {
+  /// secret key for AES128
+  Aes128([u8; 16]),
+  /// secret key for AES192
+  Aes192([u8; 24]),
+  /// secret key for AES256
+  Aes256([u8; 32]),
+}
+
+impl core::hash::Hash for SecretKey {
+  fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+    self.as_ref().hash(state);
+  }
+}
+
+impl core::borrow::Borrow<[u8]> for SecretKey {
+  fn borrow(&self) -> &[u8] {
+    self.as_ref()
+  }
+}
+
+impl PartialEq<[u8]> for SecretKey {
+  fn eq(&self, other: &[u8]) -> bool {
+    self.as_ref() == other
+  }
+}
+
+impl core::ops::Deref for SecretKey {
+  type Target = [u8];
+
+  fn deref(&self) -> &Self::Target {
+    match self {
+      Self::Aes128(k) => k,
+      Self::Aes192(k) => k,
+      Self::Aes256(k) => k,
+    }
+  }
+}
+
+impl core::ops::DerefMut for SecretKey {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    match self {
+      Self::Aes128(k) => k,
+      Self::Aes192(k) => k,
+      Self::Aes256(k) => k,
+    }
+  }
+}
+
+impl SecretKey {
+  /// Returns the size of the key in bytes
+  #[inline]
+  pub const fn len(&self) -> usize {
+    match self {
+      Self::Aes128(_) => 16,
+      Self::Aes192(_) => 24,
+      Self::Aes256(_) => 32,
+    }
+  }
+
+  /// Returns true if the key is empty
+  #[inline]
+  pub const fn is_empty(&self) -> bool {
+    self.len() == 0
+  }
+
+  #[inline]
+  pub fn to_vec(&self) -> Vec<u8> {
+    self.as_ref().to_vec()
+  }
+}
+
+impl From<[u8; 16]> for SecretKey {
+  fn from(k: [u8; 16]) -> Self {
+    Self::Aes128(k)
+  }
+}
+
+impl From<[u8; 24]> for SecretKey {
+  fn from(k: [u8; 24]) -> Self {
+    Self::Aes192(k)
+  }
+}
+
+impl From<[u8; 32]> for SecretKey {
+  fn from(k: [u8; 32]) -> Self {
+    Self::Aes256(k)
+  }
+}
+
+impl TryFrom<&[u8]> for SecretKey {
+  type Error = String;
+
+  fn try_from(k: &[u8]) -> Result<Self, Self::Error> {
+    match k.len() {
+      16 => Ok(Self::Aes128(k.try_into().unwrap())),
+      24 => Ok(Self::Aes192(k.try_into().unwrap())),
+      32 => Ok(Self::Aes256(k.try_into().unwrap())),
+      x => Err(format!(
+        "invalid key size: {}, secret key size must be 16, 24 or 32 bytes",
+        x
+      )),
+    }
+  }
+}
+
+impl AsRef<[u8]> for SecretKey {
+  fn as_ref(&self) -> &[u8] {
+    match self {
+      Self::Aes128(k) => k,
+      Self::Aes192(k) => k,
+      Self::Aes256(k) => k,
+    }
+  }
+}
+
+impl AsMut<[u8]> for SecretKey {
+  fn as_mut(&mut self) -> &mut [u8] {
+    match self {
+      Self::Aes128(k) => k,
+      Self::Aes192(k) => k,
+      Self::Aes256(k) => k,
+    }
+  }
+}
+
+#[derive(Debug)]
+struct SecretKeyringInner {
+  primary_key: Atomic<SecretKey>,
+  update_sequence: AtomicU64,
+  keys: SkipSet<SecretKey>,
+}
+
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub struct SecretKeyring {
+  inner: Arc<SecretKeyringInner>,
+}
+
+impl SecretKeyring {
+  /// Constructs a new container for a primary key. The
+  /// keyring contains all key data used internally by showbiz.
+  ///
+  /// If only a primary key is passed, then it will be automatically added to the
+  /// keyring.
+  ///
+  /// A key should be either 16, 24, or 32 bytes to select AES-128,
+  /// AES-192, or AES-256.
+  #[inline]
+  pub fn new(primary_key: SecretKey) -> Self {
+    Self {
+      inner: Arc::new(SecretKeyringInner {
+        primary_key: Atomic::new(primary_key),
+        update_sequence: AtomicU64::new(0),
+        keys: [primary_key].into_iter().collect::<SkipSet<SecretKey>>(),
+      }),
+    }
+  }
+
+  /// Constructs a new container for a set of encryption keys. The
+  /// keyring contains all key data used internally by showbiz.
+  ///
+  /// If only a primary key is passed, then it will be automatically added to the
+  /// keyring. If creating a keyring with multiple keys, one key must be designated
+  /// primary by passing it as the primaryKey. If the primaryKey does not exist in
+  /// the list of secondary keys, it will be automatically added.
+  ///
+  /// A key should be either 16, 24, or 32 bytes to select AES-128,
+  /// AES-192, or AES-256.
+  #[inline]
+  pub fn with_keys(primary_key: SecretKey, keys: Vec<SecretKey>) -> Self {
+    if !keys.is_empty() {
+      return Self {
+        inner: Arc::new(SecretKeyringInner {
+          primary_key: Atomic::new(primary_key),
+          update_sequence: AtomicU64::new(0),
+          keys: [primary_key]
+            .into_iter()
+            .chain(keys.into_iter())
+            .collect::<SkipSet<SecretKey>>(),
+        }),
+      };
+    }
+
+    Self {
+      inner: Arc::new(SecretKeyringInner {
+        primary_key: Atomic::new(primary_key),
+        update_sequence: AtomicU64::new(0),
+        keys: [primary_key].into_iter().collect::<SkipSet<SecretKey>>(),
+      }),
+    }
+  }
+
+  /// Returns the key on the ring at position 0. This is the key used
+  /// for encrypting messages, and is the first key tried for decrypting messages.
+  #[inline]
+  pub fn primary_key(&self) -> SecretKey {
+    self.inner.primary_key.load(Ordering::SeqCst)
+  }
+
+  /// Drops a key from the keyring. This will return an error if the key
+  /// requested for removal is currently at position 0 (primary key).
+  #[inline]
+  pub fn remove(&self, key: &[u8]) -> Result<(), SecurityError> {
+    if &self.primary_key() == key {
+      return Err(SecurityError::RemovePrimaryKey);
+    }
+    self.inner.keys.remove(key);
+    Ok(())
+  }
+
+  /// Install a new key on the ring. Adding a key to the ring will make
+  /// it available for use in decryption. If the key already exists on the ring,
+  /// this function will just return noop.
+  ///
+  /// key should be either 16, 24, or 32 bytes to select AES-128,
+  /// AES-192, or AES-256.
+  #[inline]
+  pub fn insert(&self, key: SecretKey) {
+    self.inner.keys.insert(key);
+  }
+
+  /// Changes the key used to encrypt messages. This is the only key used to
+  /// encrypt messages, so peers should know this key before this method is called.
+  #[inline]
+  pub fn use_key(&self, key_data: &[u8]) -> Result<(), SecurityError> {
+    if key_data == self.primary_key().as_ref() {
+      return Ok(());
+    }
+
+    // Try to find the key to set as primary
+    let Some(entry) = self.inner.keys.get(key_data) else {
+      return Err(SecurityError::SecretKeyNotFound);
+    };
+
+    let key = *entry.value();
+
+    // Increment the sequence number for the new update
+    let new_sequence = self.inner.update_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+
+    // Try to update the primary key
+    let mut seq = self.inner.update_sequence.load(Ordering::Acquire);
+    loop {
+      if new_sequence <= seq {
+        return Ok(());
+      }
+
+      match self.inner.update_sequence.compare_exchange_weak(
+        seq,
+        new_sequence,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+      ) {
+        Ok(_) => {
+          self.inner.primary_key.store(key, Ordering::Release);
+          return Ok(());
+        }
+        Err(current_seq) => {
+          seq = current_seq;
+        }
+      }
+    }
+  }
+
+  /// Returns the current set of keys on the ring.
+  #[inline]
+  pub fn keys(&self) -> impl Iterator<Item = SecretKey> + '_ {
+    self.inner.keys.iter().map(|entry| *entry.value())
+  }
+
+  #[inline]
+  pub fn len(&self) -> usize {
+    self.inner.keys.len()
+  }
+
+  #[inline]
+  pub fn is_empty(&self) -> bool {
+    self.inner.keys.is_empty()
   }
 }
 
@@ -254,20 +548,18 @@ impl SecretKeyring {
     }
   }
 
-  pub(crate) async fn encrypt_payload(
+  pub(crate) fn encrypt_payload(
     &self,
+    primary_key: SecretKey,
     vsn: EncryptionAlgo,
     msg: &[u8],
     data: &[u8],
     dst: &mut BytesMut,
   ) -> Result<(), SecurityError> {
-    let Some(key) = self.lock().await.primary_key() else {
-      return Err(SecurityError::MissingPrimaryKey)
-    };
-    encrypt_payload(&key, vsn, msg, data, dst)
+    encrypt_payload(&primary_key, vsn, msg, data, dst)
   }
 
-  pub(crate) async fn decrypt_payload(
+  pub(crate) fn decrypt_payload(
     &self,
     msg: &mut BytesMut,
     data: &[u8],
@@ -285,22 +577,19 @@ impl SecretKeyring {
       return Err(SecurityError::SmallPayload);
     }
 
-    let keys = {
-      let mu = self.lock().await;
-      mu.keys()
-    };
-    decrypt_payload(&keys, msg, data, vsn)
+    decrypt_payload(self.keys(), msg, data, vsn)
   }
 }
 
-pub(crate) fn decrypt_payload(
-  keys: &[SecretKey],
+#[inline]
+fn decrypt_payload(
+  keys: impl Iterator<Item = SecretKey>,
   msg: &mut BytesMut,
   data: &[u8],
   vsn: EncryptionAlgo,
 ) -> Result<(), SecurityError> {
   for key in keys {
-    match decrypt_message(key, msg, data) {
+    match decrypt_message(&key, msg, data) {
       Ok(_) => {
         // Remove the PKCS7 padding for vsn 0
         if vsn as u8 == 0 {
@@ -341,7 +630,7 @@ mod tests {
     let exp_len = encrypted_length(vsn, plain_text.len());
     assert_eq!(encrypted.len(), exp_len);
 
-    decrypt_payload(&[k1], &mut encrypted, extra, vsn).unwrap();
+    decrypt_payload([k1].into_iter(), &mut encrypted, extra, vsn).unwrap();
     assert_eq!(&encrypted[VERSION_SIZE + NONCE_SIZE..], plain_text);
   }
 
@@ -353,5 +642,52 @@ mod tests {
   #[test]
   fn test_encrypt_decrypt_v1() {
     encrypt_decrypt_versioned(EncryptionAlgo::NoPadding);
+  }
+
+  const TEST_KEYS: &[SecretKey] = &[
+    SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
+    SecretKey::Aes128([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]),
+    SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
+  ];
+
+  #[test]
+  fn test_primary_only() {
+    let keyring = SecretKeyring::new(TEST_KEYS[1]);
+    assert_eq!(keyring.keys().collect::<Vec<_>>().len(), 1);
+  }
+
+  #[test]
+  fn test_get_primary_key() {
+    let keyring = SecretKeyring::with_keys(TEST_KEYS[1], TEST_KEYS.to_vec());
+    assert_eq!(keyring.primary_key().as_ref(), TEST_KEYS[1].as_ref());
+  }
+
+  #[test]
+  fn test_insert_remove_use() {
+    let keyring = SecretKeyring::new(TEST_KEYS[1]);
+
+    // Use non-existent key throws error
+    keyring.use_key(&TEST_KEYS[2]).unwrap_err();
+
+    // Add key to ring
+    keyring.insert(TEST_KEYS[2]);
+    assert_eq!(keyring.len(), 2);
+    assert_eq!(
+      keyring.keys().peekable().next().unwrap().as_ref(),
+      TEST_KEYS[1].as_ref()
+    );
+
+    // Use key that exists should succeed
+    keyring.use_key(&TEST_KEYS[2]).unwrap();
+
+    let primary_key = keyring.primary_key();
+    assert_eq!(primary_key.as_ref(), TEST_KEYS[2].as_ref());
+
+    // Removing primary key should fail
+    keyring.remove(&TEST_KEYS[2]).unwrap_err();
+
+    // Removing non-primary key should succeed
+    keyring.remove(&TEST_KEYS[1]).unwrap();
+    assert_eq!(keyring.len(), 1);
   }
 }

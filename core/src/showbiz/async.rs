@@ -15,6 +15,9 @@ use async_lock::{Mutex, RwLock};
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Stream, StreamExt};
 use itertools::{Either, Itertools};
 
+#[cfg(test)]
+mod tests;
+
 #[viewit::viewit(getters(skip), setters(skip))]
 pub(crate) struct Runner<T: Transport> {
   transport: T,
@@ -59,9 +62,11 @@ pub(crate) struct ShowbizCore<D: Delegate, T: Transport, R: Runtime> {
 impl<D: Delegate, T: Transport, R: Runtime> Drop for ShowbizCore<D, T, R> {
   fn drop(&mut self) {
     if let Some(runner) = self.runner.swap(None) {
-      if let Err(e) = runner.transport.block_shutdown() {
-        tracing::error!(target = "showbiz", err=%e, "failed to block shutdown showbiz");
-      }
+      R::spawn_detach(async move {
+        if let Err(e) = runner.transport.shutdown().await {
+          tracing::error!(target = "showbiz", err=%e, "failed to block shutdown showbiz");
+        }
+      });
     }
   }
 }
@@ -127,7 +132,7 @@ where
   async fn new_in(
     delegate: Option<D>,
     mut keyring: Option<SecretKeyring>,
-    opts: Options<T>,
+    mut opts: Options<T>,
     runtime: R,
   ) -> Result<Self, Error<D, T>> {
     let (handoff_tx, handoff_rx) = async_channel::bounded(1);
@@ -135,13 +140,18 @@ where
 
     if let Some(pk) = opts.secret_key() {
       let has_keyring = keyring.is_some();
-      let keyring = keyring.get_or_insert(SecretKeyring::new(vec![], pk));
+      let keyring = keyring.get_or_insert(SecretKeyring::new(pk));
       if has_keyring {
-        let mut mu = keyring.lock().await;
-        mu.insert(pk);
-        mu.use_key(&pk)?;
+        keyring.insert(pk);
+        keyring
+          .use_key(&pk)
+          .map_err(|e| Error::Transport(TransportError::Security(e)))?;
       }
     }
+
+    opts.transport.get_or_insert_with(|| {
+      <T::Options as crate::transport::TransportOptions>::from_addr(opts.bind_addr)
+    });
 
     let id = NodeId {
       name: opts.name.clone(),
@@ -223,22 +233,22 @@ where
     let transport = {
       if !self.inner.metrics_labels.is_empty() {
         T::with_metrics_labels(
-          self.inner.opts.transport.clone(),
+          self.inner.opts.transport.as_ref().unwrap().clone(),
           self.inner.metrics_labels.clone(),
         )
         .await?
       } else {
-        T::new(self.inner.opts.transport.clone()).await?
+        T::new(self.inner.opts.transport.as_ref().unwrap().clone()).await?
       }
     };
     #[cfg(not(feature = "metrics"))]
-    let transport = T::new(self.inner.opts.transport.clone()).await?;
+    let transport = T::new(self.inner.opts.transport.as_ref().unwrap().clone()).await?;
 
     // Get the final advertise address from the transport, which may need
     // to see which address we bound to. We'll refresh this each time we
     // send out an alive message.
     let advertise = transport.final_advertise_addr(self.inner.opts.advertise_addr)?;
-    let encryption_enabled = self.encryption_enabled().await;
+    let encryption_enabled = self.encryption_enabled();
 
     // TODO: replace this with is_global when IpAddr::is_global is stable
     // https://github.com/rust-lang/rust/issues/27709
@@ -260,6 +270,8 @@ where
     self.stream_listener(shutdown_rx.clone());
     self.packet_handler(shutdown_rx.clone());
     self.packet_listener(shutdown_rx.clone());
+    #[cfg(feature = "metrics")]
+    self.check_broadcast_queue_depth(shutdown_rx.clone());
 
     let meta = if let Some(d) = &self.inner.delegate {
       d.node_meta(META_MAX_SIZE)
@@ -278,7 +290,6 @@ where
       meta,
       node: self.inner.id.clone(),
     };
-
     self.alive_node(alive, None, true).await;
     self.schedule(shutdown_rx).await;
     Ok(())
@@ -394,7 +405,7 @@ where
   #[allow(clippy::mutable_key_type)]
   pub async fn join(
     &self,
-    existing: HashMap<Name, Address>,
+    existing: HashMap<Address, Name>,
   ) -> Result<(usize, HashMap<Address, Vec<Error<D, T>>>), Error<D, T>> {
     if !self.is_running() {
       return Err(Error::NotRunning);
@@ -402,7 +413,7 @@ where
 
     let (left, right): (FuturesUnordered<_>, FuturesUnordered<_>) = existing
       .into_iter()
-      .partition_map(|(name, addr)| match addr {
+      .partition_map(|(addr, name)| match addr {
         Address::Socket(addr) => Either::Left(async move {
           if let Err(e) = self.push_pull_node(&name, addr, true).await {
             tracing::debug!(
@@ -708,12 +719,39 @@ where
       .any(|n| !n.dead_or_left() && n.node.name() != self.inner.opts.name.as_ref())
   }
 
-  pub(crate) async fn encryption_enabled(&self) -> bool {
+  #[inline]
+  pub(crate) fn encryption_enabled(&self) -> bool {
     if let Some(keyring) = &self.inner.keyring {
-      !keyring.lock().await.is_empty() && !self.inner.opts.encryption_algo.is_none()
+      !keyring.is_empty() && !self.inner.opts.encryption_algo.is_none()
     } else {
       false
     }
+  }
+
+  #[cfg(feature = "metrics")]
+  fn check_broadcast_queue_depth(&self, shutdown_rx: Receiver<()>) {
+    let queue_check_interval = self.inner.opts.queue_check_interval;
+    let this = self.clone();
+
+    static QUEUE_BROADCAST: std::sync::Once = std::sync::Once::new();
+
+    R::spawn_detach(async move {
+      loop {
+        futures_util::select! {
+          _ = shutdown_rx.recv().fuse() => {
+            return;
+          },
+          _ = R::sleep(queue_check_interval).fuse() => {
+            let numq = this.inner.broadcast.num_queued().await;
+            QUEUE_BROADCAST.call_once(|| {
+              metrics::register_gauge!("showbiz.queue.broadcasts");
+            });
+
+            metrics::gauge!("showbiz.queue.broadcasts", numq as f64);
+          }
+        }
+      }
+    });
   }
 
   pub(crate) async fn verify_protocol(&self, _remote: &[PushNodeState]) -> Result<(), Error<D, T>> {

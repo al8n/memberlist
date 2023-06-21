@@ -136,7 +136,7 @@ impl core::fmt::Display for ConnectionSubscriberError {
 impl std::error::Error for ConnectionSubscriberError {}
 
 pub fn connection_stream<T: Transport>() -> (ConnectionProducer<T>, ConnectionSubscriber<T>) {
-  let (sender, receiver) = async_channel::unbounded();
+  let (sender, receiver) = async_channel::bounded(1);
   (
     ConnectionProducer { sender },
     ConnectionSubscriber { receiver },

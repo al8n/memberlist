@@ -1,0 +1,18 @@
+[package]
+name = 'al8n/showbiz'
+version = '0.0.0'
+description = 'Description for package showbiz-wasm'
+
+[dependencies]
+
+[[module]]
+name = 'al8n/showbiz'
+source = 'wasm32-wasi/release/showbiz-wasm.wasm'
+abi = 'wasi'
+
+[module.interfaces]
+wasi = '0.1.0-unstable'
+
+[[command]]
+name = 'al8n/showbiz'
+module = 'al8n/showbiz'

@@ -128,8 +128,16 @@ pub enum TransportError<T: Transport> {
   Encode(#[from] EncodeError),
   #[error("decode error: {0}")]
   Decode(#[from] DecodeError),
+  #[error("compression error {0}")]
+  Compress(#[from] crate::util::CompressError),
+  #[error("decompress error {0}")]
+  Decompress(#[from] crate::util::DecompressError),
+  #[error("security error {0}")]
+  Security(#[from] crate::security::SecurityError),
   #[error("dns error: {0}")]
   Dns(#[from] DnsError),
+  #[error("remote node state(size {0}) is larger than limit (20 MB)")]
+  RemoteStateTooLarge(usize),
   #[error("other: {0}")]
   Other(T::Error),
 }
@@ -155,6 +163,12 @@ pub use r#async::*;
 
 #[cfg(feature = "async")]
 mod r#async {
+  use std::{
+    io,
+    sync::Arc,
+    task::{Context, Poll},
+  };
+
   use crate::checksum::Checksumer;
 
   use super::*;
@@ -415,6 +429,35 @@ mod r#async {
           })
         })
     }
+
+    pub fn poll_recv_from(
+      &self,
+      cx: &mut Context<'_>,
+      buf: &mut [u8],
+    ) -> Poll<Result<(usize, SocketAddr), TransportError<T>>> {
+      PacketConnection::poll_recv_from(&self.0, cx, buf).map_err(|e| {
+        TransportError::Connection(ConnectionError {
+          kind: ConnectionKind::Unreliable,
+          error_kind: ConnectionErrorKind::Read,
+          error: e,
+        })
+      })
+    }
+
+    pub fn poll_send_to(
+      &self,
+      cx: &mut Context<'_>,
+      buf: &[u8],
+      target: SocketAddr,
+    ) -> Poll<Result<usize, TransportError<T>>> {
+      PacketConnection::poll_send_to(&self.0, cx, buf, target).map_err(|e| {
+        TransportError::Connection(ConnectionError {
+          kind: ConnectionKind::Unreliable,
+          error_kind: ConnectionErrorKind::Write,
+          error: e,
+        })
+      })
+    }
   }
 
   /// Compressor is used to compress and decompress data from a transport connection.
@@ -470,10 +513,101 @@ mod r#async {
     async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)>;
 
     #[cfg(feature = "nightly")]
-    fn send_to<'a>(&'a self, addr: SocketAddr, buf: &'a [u8]) -> impl futures_util::Future<Output = Result<usize, std::io::Error>> + Send + 'a;
+    fn send_to<'a>(
+      &'a self,
+      addr: SocketAddr,
+      buf: &'a [u8],
+    ) -> impl futures_util::Future<Output = Result<usize, std::io::Error>> + Send + 'a;
 
     #[cfg(feature = "nightly")]
-    fn recv_from<'a>(&'a self, buf: &'a mut [u8]) -> impl futures_util::Future<Output = Result<(usize, SocketAddr), std::io::Error>> + Send + 'a;
+    fn recv_from<'a>(
+      &'a self,
+      buf: &'a mut [u8],
+    ) -> impl futures_util::Future<Output = Result<(usize, SocketAddr), std::io::Error>> + Send + 'a;
+
+    /// Attempts to receive a single datagram on the socket.
+    ///
+    /// Note that on multiple calls to a `poll_*` method in the recv direction, only the
+    /// `Waker` from the `Context` passed to the most recent call will be scheduled to
+    /// receive a wakeup.
+    ///
+    /// # Return value
+    ///
+    /// The function returns:
+    ///
+    /// * `Poll::Pending` if the socket is not ready to read
+    /// * `Poll::Ready(Ok(addr))` reads data from `addr` into `ReadBuf` if the socket is ready
+    /// * `Poll::Ready(Err(e))` if an error is encountered.
+    ///
+    /// # Errors
+    ///
+    /// This function may encounter any standard I/O error except `WouldBlock`.
+    ///
+    /// # Notes
+    /// Note that the socket address **cannot** be implicitly trusted, because it is relatively
+    /// trivial to send a UDP datagram with a spoofed origin in a [packet injection attack].
+    /// Because UDP is stateless and does not validate the origin of a packet,
+    /// the attacker does not need to be able to intercept traffic in order to interfere.
+    /// It is important to be aware of this when designing your application-level protocol.
+    ///
+    /// [packet injection attack]: https://en.wikipedia.org/wiki/Packet_injection
+    fn poll_recv_from(
+      &self,
+      cx: &mut Context<'_>,
+      buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr)>>;
+
+    /// Attempts to send data on the socket to a given address.
+    ///
+    /// Note that on multiple calls to a `poll_*` method in the send direction, only the
+    /// `Waker` from the `Context` passed to the most recent call will be scheduled to
+    /// receive a wakeup.
+    ///
+    /// # Return value
+    ///
+    /// The function returns:
+    ///
+    /// * `Poll::Pending` if the socket is not ready to write
+    /// * `Poll::Ready(Ok(n))` `n` is the number of bytes sent.
+    /// * `Poll::Ready(Err(e))` if an error is encountered.
+    ///
+    /// # Errors
+    ///
+    /// This function may encounter any standard I/O error except `WouldBlock`.
+    fn poll_send_to(
+      &self,
+      cx: &mut Context<'_>,
+      buf: &[u8],
+      target: SocketAddr,
+    ) -> Poll<io::Result<usize>>;
+  }
+
+  pub trait TransportOptions:
+    Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static
+  {
+    fn from_addr(addr: SocketAddr) -> Self;
+
+    fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self;
+  }
+
+  impl<T: TransportOptions> TransportOptions for Arc<T> {
+    fn from_addr(addr: SocketAddr) -> Self {
+      Arc::new(T::from_addr(addr))
+    }
+
+    fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self {
+      Arc::new(T::from_addrs(addrs))
+    }
+  }
+
+  impl<T: TransportOptions> TransportOptions for Box<T> {
+    fn from_addr(addr: SocketAddr) -> Self {
+      Box::new(T::from_addr(addr))
+    }
+
+    fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self {
+      Box::new(T::from_addrs(addrs))
+    }
   }
 
   /// Transport is used to abstract over communicating with other peers. The packet
@@ -485,7 +619,7 @@ mod r#async {
     type Checksumer: Checksumer + Send + Sync + 'static;
     type Connection: ConnectionTimeout + futures_util::io::AsyncRead + futures_util::io::AsyncWrite;
     type UnreliableConnection: PacketConnection;
-    type Options: Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static;
+    type Options: TransportOptions;
     type Runtime: agnostic::Runtime;
 
     /// Creates a new transport instance with the given options
