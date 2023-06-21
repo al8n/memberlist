@@ -27,6 +27,10 @@ fn get_bind_addr() -> IpAddr {
   get_bind_addr_net(0)
 }
 
+async fn yield_now() {
+  TokioRuntime::sleep(Duration::from_millis(250)).await;
+}
+
 fn test_config_net(network: u8) -> Options<NetTransport<TokioRuntime>> {
   let transport_options = NetTransportOptions::default();
   let bind_addr = SocketAddr::new(get_bind_addr_net(network), 0);
@@ -39,3 +43,18 @@ fn test_config_net(network: u8) -> Options<NetTransport<TokioRuntime>> {
 fn test_config() -> Options<NetTransport<TokioRuntime>> {
   test_config_net(0)
 }
+
+
+pub(crate) async fn get_showbiz<D: Delegate, F>(f: Option<F>) -> Result<Showbiz<D, NetTransport<TokioRuntime>, TokioRuntime>, Error<D, NetTransport<TokioRuntime>>>
+where
+  F: FnOnce(Options<NetTransport<TokioRuntime>>) -> Options<NetTransport<TokioRuntime>>
+{
+  let c = if let Some(f) = f {
+    f(test_config())
+  } else {
+    test_config()
+  };
+
+  Showbiz::new(c, TokioRuntime).await
+}
+

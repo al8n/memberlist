@@ -16,7 +16,7 @@ use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Strea
 use itertools::{Either, Itertools};
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
 
 #[viewit::viewit(getters(skip), setters(skip))]
 pub(crate) struct Runner<T: Transport> {
