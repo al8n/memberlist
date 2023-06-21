@@ -34,7 +34,7 @@ async fn yield_now() {
 fn test_config_net(network: u8) -> Options<NetTransport<TokioRuntime>> {
   let transport_options = NetTransportOptions::default();
   let bind_addr = SocketAddr::new(get_bind_addr_net(network), 0);
-  Options::lan(Arc::new(transport_options))
+  Options::lan()
     .with_bind_addr(bind_addr)
     .with_name(bind_addr.to_string().try_into().unwrap())
     .with_require_node_names(true)
