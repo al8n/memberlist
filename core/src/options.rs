@@ -220,8 +220,8 @@ pub struct Options<T: Transport> {
   #[viewit(getter(
     style = "ref",
     const,
-    result(converter(fn = "Option::as_ref"), type = "Option<&T::Options>"))
-  )]
+    result(converter(fn = "Option::as_ref"), type = "Option<&T::Options>")
+  ))]
   transport: Option<T::Options>,
 
   /// The interval at which we check the message

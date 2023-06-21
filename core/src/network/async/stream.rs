@@ -23,19 +23,26 @@ where
     let this = self.clone();
     let transport_rx = this.runner().as_ref().unwrap().transport.stream();
     R::spawn_detach(async move {
+      tracing::debug!(target = "showbiz", "stream_listener start");
       loop {
         futures_util::select! {
           _ = shutdown_rx.recv().fuse() => {
+            tracing::debug!(target = "showbiz", "stream_listener shutting down");
             return;
           }
           conn = transport_rx.recv().fuse() => {
-            let this = this.clone();
-            R::spawn_detach(async move {
-              match conn {
-                Ok(conn) => this.handle_conn(conn).await,
-                Err(e) => tracing::error!(target = "showbiz", "failed to accept connection: {}", e),
-              }
-            });
+            match conn {
+              Ok(conn) => {
+                let this = this.clone();
+                R::spawn_detach(this.handle_conn(conn))
+              },
+              Err(e) => {
+                tracing::error!(target = "showbiz", "failed to accept connection: {}", e);
+                // If we got an error, which means on the other side the transport has been closed,
+                // so we need to return and shutdown the stream listener
+                return;
+              },
+            }
           }
         }
       }
@@ -521,6 +528,7 @@ where
   /// Handles a single incoming stream connection from the transport.
   async fn handle_conn(self, mut conn: ReliableConnection<T>) {
     let addr = conn.remote_node();
+    eprintln!("{}", addr);
     tracing::debug!(target = "showbiz", remote_node = %addr, "stream connection");
 
     #[cfg(feature = "metrics")]

@@ -15,6 +15,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{future::BoxFuture, Future, FutureExt, Stream};
 use rand::{seq::SliceRandom, Rng};
 
+#[inline]
 fn random_offset(n: usize) -> usize {
   if n == 0 {
     return 0;
@@ -22,51 +23,32 @@ fn random_offset(n: usize) -> usize {
   (rand::random::<u32>() % (n as u32)) as usize
 }
 
-fn random_nodes<F, R: Runtime>(
+#[inline]
+fn random_nodes(
   k: usize,
-  nodes: &Memberlist<R>,
-  exclude: Option<F>,
-) -> Vec<Arc<Node>>
-where
-  F: Fn(&LocalNodeState) -> bool,
+  mut nodes: Vec<Arc<Node>>,
+) -> Vec<Arc<Node>> 
 {
-  let n = nodes.nodes.len();
-  let mut knodes: Vec<Arc<Node>> = Vec::with_capacity(k);
-
-  'outer: loop {
-    // Probe up to 3*n times, with large n this is not necessary
-    // since k << n, but with small n we want search to be
-    // exhaustive
-    for i in 0..k {
-      // Get random node state
-      let idx = random_offset(n);
-      let node = &nodes.nodes[idx];
-
-      // Give the filter a shot at it
-      if let Some(exclude) = &exclude {
-        if exclude(node) {
-          continue 'outer;
-        }
-      }
-
-      // Check if we have this node already
-      #[allow(clippy::needless_range_loop)]
-      for j in 0..knodes.len() {
-        if knodes[j].id == node.node.id {
-          continue 'outer;
-        }
-      }
-
-      // Append the node
-      knodes.push(node.node.clone());
-
-      if i >= 3 * n && knodes.len() >= k {
-        break;
-      }
-    }
-
-    return knodes;
+  let n = nodes.len();
+  if n == 0 {
+    return Vec::new();
   }
+
+  // The modified Fisher-Yates algorithm, but up to 3*n times to ensure exhaustive search for small n.
+  let rounds = 3 * n;
+  let mut i = 0;
+
+  while i < rounds && i < n {
+    let j = rand::random::<usize>() % (n - i) + i;
+    nodes.swap(i, j);
+    i += 1;
+    if i >= k && i >= rounds {
+      break;
+    }
+  }
+
+  nodes.truncate(k);
+  nodes
 }
 
 struct AckMessage {
@@ -697,13 +679,15 @@ macro_rules! bail_trigger {
         // Use a random stagger to avoid syncronizing
         let mut rng = rand::thread_rng();
         let rand_stagger = Duration::from_millis(rng.gen_range(0..stagger.as_millis() as u64));
-        let delay = R::sleep(rand_stagger);
-        futures_util::select! {
-          _ = delay.fuse() => {},
-          _ = stop_rx.recv().fuse() => return,
-        }
-
+        
         R::spawn_detach(async move {
+          let delay = R::sleep(rand_stagger);
+
+          futures_util::select! {
+            _ = delay.fuse() => {},
+            _ = stop_rx.recv().fuse() => return,
+          }
+
           let mut timer = R::interval(interval);
           loop {
             futures_util::select! {
@@ -770,12 +754,12 @@ where
     let mut rng = rand::thread_rng();
     let rand_stagger = Duration::from_millis(rng.gen_range(0..interval.as_millis() as u64));
 
-    futures_util::select! {
-      _ = R::sleep(rand_stagger).fuse() => {},
-      _ = stop_rx.recv().fuse() => return,
-    }
-
     R::spawn_detach(async move {
+      futures_util::select! {
+        _ = R::sleep(rand_stagger).fuse() => {},
+        _ = stop_rx.recv().fuse() => return,
+      }
+
       // Tick using a dynamic timer
       loop {
         let tick_time = push_pull_scale(interval, this.estimate_num_nodes() as usize);
@@ -989,15 +973,18 @@ where
   ) {
     // Get some random live nodes.
     let nodes = {
-      let memberlist = self.inner.nodes.read().await;
+      let nodes = self.inner.nodes.read().await.nodes.iter().filter_map(|n| {
+        if n.id().name == self.inner.opts.name
+        || n.id().name == target.id().name
+        || n.state != NodeState::Alive {
+          None
+        } else {
+          Some(n.node.clone())
+        }
+      }).collect::<Vec<_>>();
       random_nodes(
         self.inner.opts.indirect_checks,
-        &memberlist,
-        Some(|n: &LocalNodeState| {
-          n.id().name == self.inner.opts.name
-            || n.id().name == target.id().name
-            || n.state != NodeState::Alive
-        }),
+        nodes,
       )
     };
 
@@ -1222,25 +1209,28 @@ where
     #[cfg(feature = "metrics")]
     scopeguard::defer!(
       observe_gossip(now.elapsed().as_millis() as f64, self.inner.metrics_labels.iter());
-    );
+    ); 
 
     // Get some random live, suspect, or recently dead nodes
     let nodes = {
-      let memberlist = self.inner.nodes.read().await;
+      let nodes = self.inner.nodes.read().await.nodes.iter().filter_map(|n| {
+        if n.id().name == self.inner.opts.name {
+          return None;
+        }
+
+        match n.state {
+          NodeState::Alive | NodeState::Suspect => Some(n.node.clone()),
+          NodeState::Dead => if n.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
+            None
+          } else {
+            Some(n.node.clone())
+          },
+          _ => None,
+        }
+      }).collect::<Vec<_>>();
       random_nodes(
         self.inner.opts.gossip_nodes,
-        &memberlist,
-        Some(|n: &LocalNodeState| {
-          if n.id().name == self.inner.opts.name {
-            return true;
-          }
-
-          match n.state {
-            NodeState::Alive | NodeState::Suspect => false,
-            NodeState::Dead => n.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time,
-            _ => true,
-          }
-        }),
+        nodes,
       )
     };
 
@@ -1293,13 +1283,16 @@ where
   async fn push_pull(&self) {
     // get a random live node
     let nodes = {
-      let memberlist = self.inner.nodes.read().await;
+      let nodes = self.inner.nodes.read().await.nodes.iter().filter_map(|n| {
+        if n.id().name == self.inner.opts.name || n.state != NodeState::Alive {
+          None
+        } else {
+          Some(n.node.clone())
+        }
+      }).collect::<Vec<_>>();
       random_nodes(
         1,
-        &memberlist,
-        Some(|n: &LocalNodeState| {
-          n.id().name == self.inner.opts.name || n.state != NodeState::Alive
-        }),
+        nodes,
       )
     };
 

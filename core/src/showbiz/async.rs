@@ -62,9 +62,11 @@ pub(crate) struct ShowbizCore<D: Delegate, T: Transport, R: Runtime> {
 impl<D: Delegate, T: Transport, R: Runtime> Drop for ShowbizCore<D, T, R> {
   fn drop(&mut self) {
     if let Some(runner) = self.runner.swap(None) {
-      if let Err(e) = runner.transport.block_shutdown() {
-        tracing::error!(target = "showbiz", err=%e, "failed to block shutdown showbiz");
-      }
+      R::spawn_detach(async move {
+        if let Err(e) = runner.transport.shutdown().await {
+          tracing::error!(target = "showbiz", err=%e, "failed to block shutdown showbiz");
+        }
+      });
     }
   }
 }
@@ -146,7 +148,9 @@ where
       }
     }
 
-    opts.transport.get_or_insert_with(|| <T::Options as crate::transport::TransportOptions>::from_addr(opts.bind_addr));
+    opts.transport.get_or_insert_with(|| {
+      <T::Options as crate::transport::TransportOptions>::from_addr(opts.bind_addr)
+    });
 
     let id = NodeId {
       name: opts.name.clone(),
@@ -283,7 +287,6 @@ where
       meta,
       node: self.inner.id.clone(),
     };
-
     self.alive_node(alive, None, true).await;
     self.schedule(shutdown_rx).await;
     Ok(())

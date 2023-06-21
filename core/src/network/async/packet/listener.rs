@@ -32,7 +32,12 @@ where
           packet = transport_rx.recv().fuse() => {
             match packet {
               Ok(packet) => this.ingest_packet(packet).await,
-              Err(e) => tracing::error!(target = "showbiz", "failed to receive packet: {}", e),
+              Err(e) => {
+                tracing::error!(target = "showbiz", "failed to receive packet: {}", e);
+                // If we got an error, which means on the other side the transport has been closed,
+                // so we need to return and shutdown the packet listener
+                return;
+              },
             }
           }
         }
@@ -358,25 +363,23 @@ where
     // Setup a timer to fire off a nack if no ack is seen in time.
     let this = self.clone();
     let probe_timeout = self.inner.opts.probe_timeout;
-    R::spawn_detach(
-      async move {
-        futures_util::select! {
-          _ = R::sleep(probe_timeout).fuse() => {
-            // We've not received an ack, so send a nack.
-            let nack = NackResponse::new(ind.seq_no);
-            let mut out = BytesMut::with_capacity(MessageType::SIZE + nack.encoded_len());
-            out.put_u8(MessageType::NackResponse as u8);
-            nack.encode_to::<T::Checksumer>(&mut out);
-            if let Err(e) = this.send_msg(&ind.source, Message(out)).await {
-              tracing::error!(target = "showbiz", local = %ind.source, remote = %from, err = %e, "failed to send nack");
-            }
-          }
-          _ = cancel_rx.fuse() => {
-            // We've received an ack, so we can cancel the nack.
+    R::spawn_detach(async move {
+      futures_util::select! {
+        _ = R::sleep(probe_timeout).fuse() => {
+          // We've not received an ack, so send a nack.
+          let nack = NackResponse::new(ind.seq_no);
+          let mut out = BytesMut::with_capacity(MessageType::SIZE + nack.encoded_len());
+          out.put_u8(MessageType::NackResponse as u8);
+          nack.encode_to::<T::Checksumer>(&mut out);
+          if let Err(e) = this.send_msg(&ind.source, Message(out)).await {
+            tracing::error!(target = "showbiz", local = %ind.source, remote = %from, err = %e, "failed to send nack");
           }
         }
-      },
-    );
+        _ = cancel_rx.fuse() => {
+          // We've received an ack, so we can cancel the nack.
+        }
+      }
+    });
   }
 
   async fn handle_ack(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
