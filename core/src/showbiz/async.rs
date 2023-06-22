@@ -269,6 +269,8 @@ where
     self.stream_listener(shutdown_rx.clone());
     self.packet_handler(shutdown_rx.clone());
     self.packet_listener(shutdown_rx.clone());
+    #[cfg(feature = "metrics")]
+    self.check_broadcast_queue_depth(shutdown_rx.clone());
 
     let meta = if let Some(d) = &self.inner.delegate {
       d.node_meta(META_MAX_SIZE)
@@ -722,6 +724,32 @@ where
     } else {
       false
     }
+  }
+
+  #[cfg(feature = "metrics")]
+  fn check_broadcast_queue_depth(&self, shutdown_rx: Receiver<()>) {
+    let queue_check_interval = self.inner.opts.queue_check_interval;
+    let this = self.clone();
+
+    static QUEUE_BROADCAST: std::sync::Once = std::sync::Once::new();
+
+    R::spawn_detach(async move {
+      loop {
+        futures_util::select! {
+          _ = shutdown_rx.recv().fuse() => {
+            return;
+          },
+          _ = R::sleep(queue_check_interval).fuse() => {
+            let numq = this.inner.broadcast.num_queued().await;
+            QUEUE_BROADCAST.call_once(|| {
+              metrics::register_gauge!("showbiz.queue.broadcasts");
+            });
+
+            metrics::gauge!("showbiz.queue.broadcasts", numq as f64);
+          }
+        }
+      }
+    });
   }
 
   pub(crate) async fn verify_protocol(&self, _remote: &[PushNodeState]) -> Result<(), Error<D, T>> {
