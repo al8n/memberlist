@@ -141,18 +141,12 @@ where
     // encrypt and compress are CPU-bound computation, so let rayon to handle it
     if compression_enabled || encryption_enabled {
       let primary_key = if encryption_enabled {
-        let key = self
+        Some(self
           .inner
           .keyring
           .as_ref()
           .unwrap()
-          .lock()
-          .await
-          .primary_key();
-        if key.is_none() {
-          return Err(Error::Security(SecurityError::MissingPrimaryKey));
-        }
-        key
+          .primary_key())
       } else {
         None
       };
@@ -646,7 +640,7 @@ where
     }
 
     let encryption_enabled = if let Some(keyring) = &self.inner.keyring {
-      keyring.lock().await.is_empty()
+      keyring.is_empty()
     } else {
       false
     };

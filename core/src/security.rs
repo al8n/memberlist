@@ -286,22 +286,18 @@ impl SecretKeyring {
       return Err(SecurityError::SmallPayload);
     }
 
-    let keys = {
-      let mu = self.lock().await;
-      mu.keys()
-    };
-    decrypt_payload(&keys, msg, data, vsn)
+    decrypt_payload(self.keys().map(|ent| *ent.value()), msg, data, vsn)
   }
 }
 
 pub(crate) fn decrypt_payload(
-  keys: &[SecretKey],
+  keys: impl Iterator<Item = SecretKey>,
   msg: &mut BytesMut,
   data: &[u8],
   vsn: EncryptionAlgo,
 ) -> Result<(), SecurityError> {
   for key in keys {
-    match decrypt_message(key, msg, data) {
+    match decrypt_message(&key, msg, data) {
       Ok(_) => {
         // Remove the PKCS7 padding for vsn 0
         if vsn as u8 == 0 {
@@ -342,7 +338,7 @@ mod tests {
     let exp_len = encrypted_length(vsn, plain_text.len());
     assert_eq!(encrypted.len(), exp_len);
 
-    decrypt_payload(&[k1], &mut encrypted, extra, vsn).unwrap();
+    decrypt_payload([k1].into_iter(), &mut encrypted, extra, vsn).unwrap();
     assert_eq!(&encrypted[VERSION_SIZE + NONCE_SIZE..], plain_text);
   }
 

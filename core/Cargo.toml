@@ -53,9 +53,9 @@ bytes = { workspace = true, features = ["serde"] }
 cbc = "0.1"
 crc32fast = "1"
 crossbeam-utils = "0.8"
+crossbeam-skiplist = "0.1"
 local-ip-address = "0.5"
 itertools = "0.10.5"
-indexmap = { version = "1.9", features = ["serde-1"] }
 ipnet = { version = "2.7", features = ["serde"] }
 metrics = { version = "0.20", optional = true }
 paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable

@@ -1,12 +1,10 @@
-use indexmap::IndexSet;
+use atomic::{Atomic, Ordering};
+use crossbeam_skiplist::SkipSet;
 
-#[cfg(feature = "async")]
-use async_lock::{Mutex, MutexGuard};
-
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicU64};
 
 /// The key used while attempting to encrypt/decrypt a message
-#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum SecretKey {
   /// secret key for AES128
@@ -134,73 +132,6 @@ impl AsMut<[u8]> for SecretKey {
   }
 }
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct SecretKeys(IndexSet<SecretKey>);
-
-impl SecretKeys {
-  /// Returns the key on the ring at position 0. This is the key used
-  /// for encrypting messages, and is the first key tried for decrypting messages.
-  #[inline]
-  pub fn primary_key(&self) -> Option<SecretKey> {
-    self.0.get_index(0).copied()
-  }
-
-  /// Drops a key from the keyring. This will return an error if the key
-  /// requested for removal is currently at position 0 (primary key).
-  #[inline]
-  pub fn remove(&mut self, key: &[u8]) -> Result<(), SecretKeyringError> {
-    if let Some(k) = self.0.get_index(0) {
-      if k == key {
-        return Err(SecretKeyringError::RemovePrimaryKey);
-      }
-    }
-    self.0.remove(key);
-    Ok(())
-  }
-
-  /// Install a new key on the ring. Adding a key to the ring will make
-  /// it available for use in decryption. If the key already exists on the ring,
-  /// this function will just return noop.
-  ///
-  /// key should be either 16, 24, or 32 bytes to select AES-128,
-  /// AES-192, or AES-256.
-  #[inline]
-  pub fn insert(&mut self, key: SecretKey) {
-    self.0.insert(key);
-  }
-
-  /// Changes the key used to encrypt messages. This is the only key used to
-  /// encrypt messages, so peers should know this key before this method is called.
-  #[inline]
-  pub fn use_key(&mut self, key: &[u8]) -> Result<(), SecretKeyringError> {
-    if let Some((idx, _)) = self.0.get_full(key) {
-      self.0.move_index(idx, 0);
-      return Ok(());
-    }
-    Err(SecretKeyringError::NotFound)
-  }
-
-  /// Returns the current set of keys on the ring.
-  // TODO: any better way to implement this? Have to allocate a new vec here
-  // because we cannot return a reference to the internal indexset like Go.
-  // hopefully the secret keyring is not too big. And secret key is copyable.
-  #[inline]
-  pub fn keys(&self) -> Box<[SecretKey]> {
-    self.0.iter().copied().collect::<Box<[_]>>()
-  }
-
-  #[inline]
-  pub fn len(&self) -> usize {
-    self.0.len()
-  }
-
-  #[inline]
-  pub fn is_empty(&self) -> bool {
-    self.0.is_empty()
-  }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum SecretKeyringError {
   #[error("secret key size must be 16, 24 or 32 bytes")]
@@ -213,10 +144,17 @@ pub enum SecretKeyringError {
   EmptyPrimaryKey,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug)]
+struct SecretKeyringInner {
+  primary_key: Atomic<SecretKey>,
+  update_sequence: AtomicU64,
+  keys: SkipSet<SecretKey>,
+}
+
+#[derive(Debug, Clone)]
 #[repr(transparent)]
 pub struct SecretKeyring {
-  keys: Arc<Mutex<SecretKeys>>,
+  inner: Arc<SecretKeyringInner>,
 }
 
 impl SecretKeyring {
@@ -239,24 +177,112 @@ impl SecretKeyring {
   pub fn new(keys: Vec<SecretKey>, primary_key: SecretKey) -> Self {
     if !keys.is_empty() || !primary_key.is_empty() {
       return Self {
-        keys: Arc::new(Mutex::new(SecretKeys(
-          [primary_key]
-            .into_iter()
-            .chain(keys.into_iter())
-            .collect::<IndexSet<SecretKey>>(),
-        ))),
+        inner: Arc::new(SecretKeyringInner {
+          primary_key: Atomic::new(primary_key),
+          update_sequence: AtomicU64::new(0),
+          keys: [primary_key]
+          .into_iter()
+          .chain(keys.into_iter())
+          .collect::<SkipSet<SecretKey>>(),
+        })
       };
     }
 
     Self {
-      keys: Arc::new(Mutex::new(SecretKeys(IndexSet::new()))),
+      inner: Arc::new(SecretKeyringInner {
+        primary_key: Atomic::new(primary_key),
+        update_sequence: AtomicU64::new(0),
+        keys: [primary_key].into_iter().collect::<SkipSet<SecretKey>>(),
+      })
     }
   }
 
-  #[cfg(feature = "async")]
+/// Returns the key on the ring at position 0. This is the key used
+  /// for encrypting messages, and is the first key tried for decrypting messages.
   #[inline]
-  pub async fn lock(&self) -> MutexGuard<'_, SecretKeys> {
-    self.keys.lock().await
+  pub fn primary_key(&self) -> SecretKey {
+    self.inner.primary_key.load(Ordering::SeqCst)
+  }
+
+  /// Drops a key from the keyring. This will return an error if the key
+  /// requested for removal is currently at position 0 (primary key).
+  #[inline]
+  pub fn remove(&self, key: &[u8]) -> Result<(), SecretKeyringError> {
+    if &self.primary_key() == key {
+      return Err(SecretKeyringError::RemovePrimaryKey);
+    }
+    self.inner.keys.remove(key);
+    Ok(())
+  }
+
+  /// Install a new key on the ring. Adding a key to the ring will make
+  /// it available for use in decryption. If the key already exists on the ring,
+  /// this function will just return noop.
+  ///
+  /// key should be either 16, 24, or 32 bytes to select AES-128,
+  /// AES-192, or AES-256.
+  #[inline]
+  pub fn insert(&self, key: SecretKey) {
+    self.inner.keys.insert(key);
+  }
+
+  /// Changes the key used to encrypt messages. This is the only key used to
+  /// encrypt messages, so peers should know this key before this method is called.
+  #[inline]
+  pub fn use_key(&self, key_data: &[u8]) -> Result<(), SecretKeyringError> {
+    if key_data == self.primary_key().as_ref() {
+      return Ok(());
+    }
+
+    // Try to find the key to set as primary
+    let Some(entry) = self.inner.keys.get(key_data) else {
+      return Err(SecretKeyringError::NotFound);
+    };
+    
+    let key = *entry.value();
+
+    // Increment the sequence number for the new update
+    let new_sequence = self.inner.update_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+
+    // Try to update the primary key
+    let mut seq = self.inner.update_sequence.load(Ordering::Acquire);
+    loop {
+      if new_sequence <= seq {
+          return Ok(());
+      }
+
+      match self.inner.update_sequence.compare_exchange_weak(
+        seq,
+        new_sequence,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+      ) {
+        Ok(_) => {
+          self.inner.primary_key.store(key, Ordering::Release);
+          return Ok(());
+        }
+        Err(current_seq) => {
+          seq = current_seq;
+        }
+      }
+    }
+  }
+
+
+  /// Returns the current set of keys on the ring.
+  #[inline]
+  pub fn keys(&self) -> crossbeam_skiplist::set::Iter<'_, SecretKey> {
+    self.inner.keys.iter()
+  }
+
+  #[inline]
+  pub fn len(&self) -> usize {
+    self.inner.keys.len()
+  }
+
+  #[inline]
+  pub fn is_empty(&self) -> bool {
+    self.inner.keys.is_empty()
   }
 }
 
@@ -272,55 +298,42 @@ mod tests {
 
   #[cfg(feature = "async")]
   #[tokio::test]
-  async fn test_empty_keyring() {
-    let ring = SecretKeyring::default();
-    let keys = ring.lock().await;
-    assert_eq!(keys.keys().len(), 0);
-  }
-
-  #[cfg(feature = "async")]
-  #[tokio::test]
   async fn test_primary_only() {
-    let keying = SecretKeyring::new(vec![], TEST_KEYS[1]);
-
-    let keys = keying.lock().await;
-    assert_eq!(keys.keys().len(), 1);
+    let keyring = SecretKeyring::new(vec![], TEST_KEYS[1]);
+    assert_eq!(keyring.keys().collect::<Vec<_>>().len(), 1);
   }
 
   #[cfg(feature = "async")]
   #[tokio::test]
   async fn test_get_primary_key() {
-    let keying = SecretKeyring::new(TEST_KEYS.to_vec(), TEST_KEYS[1]);
-
-    let keys = keying.lock().await;
-    assert_eq!(keys.primary_key().unwrap().as_ref(), TEST_KEYS[1].as_ref());
+    let keyring = SecretKeyring::new(TEST_KEYS.to_vec(), TEST_KEYS[1]);
+    assert_eq!(keyring.primary_key().as_ref(), TEST_KEYS[1].as_ref());
   }
 
   #[cfg(feature = "async")]
   #[tokio::test]
   async fn test_insert_remove_use() {
-    let keying = SecretKeyring::new(vec![], TEST_KEYS[1]);
+    let keyring = SecretKeyring::new(vec![], TEST_KEYS[1]);
 
     // Use non-existent key throws error
-    let mut keys = keying.lock().await;
-    keys.use_key(&TEST_KEYS[2]).unwrap_err();
+    keyring.use_key(&TEST_KEYS[2]).unwrap_err();
 
     // Add key to ring
-    keys.insert(TEST_KEYS[2]);
-    assert_eq!(keys.keys().len(), 2);
-    assert_eq!(keys.keys()[0], TEST_KEYS[1]);
+    keyring.insert(TEST_KEYS[2]);
+    assert_eq!(keyring.len(), 2);
+    assert_eq!(keyring.keys().peekable().next().unwrap().as_ref(), TEST_KEYS[1].as_ref());
 
     // Use key that exists should succeed
-    keys.use_key(&TEST_KEYS[2]).unwrap();
+    keyring.use_key(&TEST_KEYS[2]).unwrap();
 
-    let primary_key = keys.primary_key().unwrap();
+    let primary_key = keyring.primary_key();
     assert_eq!(primary_key.as_ref(), TEST_KEYS[2].as_ref());
 
     // Removing primary key should fail
-    keys.remove(&TEST_KEYS[2]).unwrap_err();
+    keyring.remove(&TEST_KEYS[2]).unwrap_err();
 
     // Removing non-primary key should succeed
-    keys.remove(&TEST_KEYS[1]).unwrap();
-    assert_eq!(keys.keys().len(), 1);
+    keyring.remove(&TEST_KEYS[1]).unwrap();
+    assert_eq!(keyring.len(), 1);
   }
 }

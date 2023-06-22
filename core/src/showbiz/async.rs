@@ -141,10 +141,9 @@ where
     if let Some(pk) = opts.secret_key() {
       let has_keyring = keyring.is_some();
       let keyring = keyring.get_or_insert(SecretKeyring::new(vec![], pk));
-      if has_keyring {
-        let mut mu = keyring.lock().await;
-        mu.insert(pk);
-        mu.use_key(&pk)?;
+      if has_keyring { 
+        keyring.insert(pk);
+        keyring.use_key(&pk)?;
       }
     }
 
@@ -720,7 +719,7 @@ where
 
   pub(crate) async fn encryption_enabled(&self) -> bool {
     if let Some(keyring) = &self.inner.keyring {
-      !keyring.lock().await.is_empty() && !self.inner.opts.encryption_algo.is_none()
+      !keyring.is_empty() && !self.inner.opts.encryption_algo.is_none()
     } else {
       false
     }

@@ -71,12 +71,11 @@ where
     }
 
     // Check if encryption is enabled
-    if let Some(keyring) = &self.inner.keyring {
-      let keys = keyring.lock().await;
+    if let Some(keyring) = &self.inner.keyring { 
       // Decrypt the payload
-      if !keys.is_empty() {
+      if !keyring.is_empty() {
         if let Err(e) = decrypt_payload(
-          &keys.keys(),
+          keyring.keys().map(|ent| *ent.value()),
           &mut buf,
           packet_label.as_bytes(),
           self.inner.opts.encryption_algo,
@@ -473,11 +472,7 @@ where
 
         let keyring = $this.inner.keyring.as_ref().unwrap();
         let mut bytes = buf.split_off(after_nonce);
-        let Some(pk) = keyring.lock().await.primary_key() else {
-          let err = Error::Security(SecurityError::MissingPrimaryKey);
-          tracing::error!(target = "showbiz", addr = %$addr, err = %err, "failed to encrypt message");
-          return Err(err);
-        };
+        let pk = keyring.primary_key();
 
         if let Err(e) = keyring.encrypt_to(pk, &nonce, self.inner.opts.label.as_bytes(), &mut bytes)
           .map(|_| {
