@@ -7,7 +7,7 @@ use crate::{
   transport::{ReliableConnection, TransportError},
   types::MessageType,
   util::{compress_payload, decompress_buffer},
-  Options, SecretKeyring,
+  Options, SecretKey, SecretKeyring,
 };
 
 use super::*;
@@ -76,7 +76,7 @@ where
     self
       .raw_send_msg_stream(
         &mut conn,
-        &self.inner.opts.label,
+        self.inner.opts.label.clone(),
         out.freeze(),
         target.addr(),
         encryption_enabled,
@@ -166,7 +166,7 @@ where
         addr,
         encryption_enabled,
         join,
-        &self.inner.opts.label,
+        self.inner.opts.label.clone(),
       )
       .await?;
 
@@ -221,7 +221,8 @@ where
       .map_err(From::from)
   }
 
-  async fn encrypt_local_state(
+  fn encrypt_local_state(
+    primary_key: SecretKey,
     keyring: &SecretKeyring,
     msg: &[u8],
     label: &Label,
@@ -245,8 +246,7 @@ where
     if label.is_empty() {
       // Write the encrypted cipher text to the buffer
       keyring
-        .encrypt_payload(algo, msg, &buf, &mut ciphertext)
-        .await
+        .encrypt_payload(primary_key, algo, msg, &buf, &mut ciphertext)
         .map(|_| {
           buf.unsplit(ciphertext);
           buf.freeze()
@@ -256,8 +256,7 @@ where
       let data_bytes = append_bytes(&buf, label.as_bytes());
       // Write the encrypted cipher text to the buffer
       keyring
-        .encrypt_payload(algo, msg, &data_bytes, &mut ciphertext)
-        .await
+        .encrypt_payload(primary_key, algo, msg, &data_bytes, &mut ciphertext)
         .map(|_| {
           buf.unsplit(ciphertext);
           buf.freeze()

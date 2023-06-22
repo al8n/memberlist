@@ -60,6 +60,7 @@ ipnet = { version = "2.7", features = ["serde"] }
 metrics = { version = "0.20", optional = true }
 paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
 rand = { version = "0.8" }
+rayon = "1.7"
 scopeguard = "1.1"
 serde = { workspace = true }
 thiserror = { workspace = true }

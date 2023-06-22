@@ -254,17 +254,18 @@ impl SecretKeyring {
     }
   }
 
-  pub(crate) async fn encrypt_payload(
+  pub(crate) fn encrypt_payload(
     &self,
+    primary_key: SecretKey,
     vsn: EncryptionAlgo,
     msg: &[u8],
     data: &[u8],
     dst: &mut BytesMut,
   ) -> Result<(), SecurityError> {
-    let Some(key) = self.lock().await.primary_key() else {
-      return Err(SecurityError::MissingPrimaryKey)
-    };
-    encrypt_payload(&key, vsn, msg, data, dst)
+    // let Some(key) = self.lock().await.primary_key() else {
+    //   return Err(SecurityError::MissingPrimaryKey)
+    // };
+    encrypt_payload(&primary_key, vsn, msg, data, dst)
   }
 
   pub(crate) async fn decrypt_payload(

@@ -107,7 +107,7 @@ where
     self
       .raw_send_msg_stream(
         &mut conn,
-        &self.inner.opts.label,
+        self.inner.opts.label.clone(),
         msg.freeze(),
         addr.addr(),
         self.encryption_enabled().await,
@@ -128,55 +128,138 @@ where
   pub(super) async fn raw_send_msg_stream(
     &self,
     conn: &mut ReliableConnection<T>,
-    label: &Label,
+    label: Label,
     mut buf: Bytes,
     addr: SocketAddr,
     encryption_enabled: bool,
   ) -> Result<(), Error<D, T>> {
-    // Check if compression is enabled
-    if !self.inner.opts.compression_algo.is_none() {
-      buf = match compress_payload(self.inner.opts.compression_algo, &buf) {
-        Ok(buf) => buf.into(),
-        Err(e) => {
-          tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to compress payload");
-          return Err(e.into());
-        }
-      }
-    }
+    let compression_enabled = !self.inner.opts.compression_algo.is_none();
+    let encryption_enabled = encryption_enabled
+      && !self.inner.opts.encryption_algo.is_none()
+      && self.inner.opts.gossip_verify_outgoing;
 
-    // Check if encryption is enabled
-    if encryption_enabled && self.inner.opts.gossip_verify_outgoing {
-      match Self::encrypt_local_state(
-        self.inner.keyring.as_ref().unwrap(),
-        &buf,
-        label,
-        self.inner.opts.encryption_algo,
-      )
-      .await
-      {
-        // Write out the entire send buffer
-        Ok(crypt) => {
-          #[cfg(feature = "metrics")]
-          {
-            incr_tcp_sent_counter(crypt.len() as u64, self.inner.metrics_labels.iter());
+    // encrypt and compress are CPU-bound computation, so let rayon to handle it
+    if compression_enabled || encryption_enabled {
+      let primary_key = if encryption_enabled {
+        let key = self
+          .inner
+          .keyring
+          .as_ref()
+          .unwrap()
+          .lock()
+          .await
+          .primary_key();
+        if key.is_none() {
+          return Err(Error::Security(SecurityError::MissingPrimaryKey));
+        }
+        key
+      } else {
+        None
+      };
+
+      let encryption_algo = self.inner.opts.encryption_algo;
+      let compression_algo = self.inner.opts.compression_algo;
+
+      // offload the encryption and compression to a thread pool
+      if buf.len() > self.inner.opts.offload_size {
+        #[cfg(feature = "metrics")]
+        let metrics_labels = self.inner.metrics_labels.clone();
+        let keyring = self.inner.keyring.clone();
+        let (tx, rx) = futures_channel::oneshot::channel();
+        rayon::spawn(move || {
+          if compression_enabled {
+            buf = match compress_payload(compression_algo, &buf) {
+              Ok(buf) => buf.into(),
+              Err(e) => {
+                tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to compress payload");
+                return tx.send(Err(e.into())).unwrap();
+              }
+            };
           }
-
-          conn.write_all(&crypt).await.map_err(Error::transport)
-        }
-        Err(e) => {
-          tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to encrypt local state");
-          Err(e)
+  
+          // Check if encryption is enabled
+          if let Some(primary_key) = primary_key {
+            match Self::encrypt_local_state(
+              primary_key,
+              keyring.as_ref().unwrap(),
+              &buf,
+              &label,
+              encryption_algo,
+            ) {
+              // Write out the entire send buffer
+              Ok(crypt) => {
+                #[cfg(feature = "metrics")]
+                {
+                  incr_tcp_sent_counter(crypt.len() as u64, metrics_labels.iter());
+                }
+  
+                tx.send(Ok(crypt)).unwrap();
+              }
+              Err(e) => {
+                tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to encrypt local state");
+                tx.send(Err(e)).unwrap();
+              }
+            }
+          } else {
+            tx.send(Ok(buf)).unwrap();
+          }
+        });
+  
+        match rx
+          .await
+          .expect("panic in rayon thread (encryption or compression)")
+        {
+          Ok(buf) => {
+            // Write out the entire send buffer
+            #[cfg(feature = "metrics")]
+            {
+              incr_tcp_sent_counter(buf.len() as u64, self.inner.metrics_labels.iter());
+            }
+  
+            return conn.write_all(&buf).await.map_err(Error::transport);
+          }
+          Err(e) => return Err(e),
         }
       }
-    } else {
-      // Write out the entire send buffer
-      #[cfg(feature = "metrics")]
-      {
-        incr_tcp_sent_counter(buf.len() as u64, self.inner.metrics_labels.iter());
+
+      if compression_enabled {
+        buf = match compress_payload(compression_algo, &buf) {
+          Ok(buf) => buf.into(),
+          Err(e) => {
+            tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to compress payload");
+            return Err(e.into());
+          }
+        };
       }
 
-      conn.write_all(&buf).await.map_err(Error::transport)
+      // Check if encryption is enabled
+      buf = if let Some(primary_key) = primary_key {
+        match Self::encrypt_local_state(
+          primary_key,
+          self.inner.keyring.as_ref().unwrap(),
+          &buf,
+          &label,
+          encryption_algo,
+        ) {
+          // Write out the entire send buffer
+          Ok(crypt) => crypt,
+          Err(e) => {
+            tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to encrypt local state");
+            return Err(e);
+          }
+        }
+      } else {
+        buf
+      };
     }
+
+    // Write out the entire send buffer
+    #[cfg(feature = "metrics")]
+    {
+      incr_tcp_sent_counter(buf.len() as u64, self.inner.metrics_labels.iter());
+    }
+
+    conn.write_all(&buf).await.map_err(Error::transport)
   }
 
   /// Used to read the remote state from a connection
@@ -267,7 +350,7 @@ where
     addr: SocketAddr,
     encryption_enabled: bool,
     join: bool,
-    stream_label: &Label,
+    stream_label: Label,
   ) -> Result<(), Error<D, T>> {
     // Setup a deadline
     conn.set_timeout(Some(self.inner.opts.tcp_timeout));
@@ -594,7 +677,7 @@ where
           if let Err(e) = self
             .raw_send_msg_stream(
               &mut conn,
-              &stream_label,
+              stream_label,
               out.freeze(),
               addr,
               encryption_enabled,
@@ -674,7 +757,7 @@ where
         if let Err(e) = self
           .raw_send_msg_stream(
             &mut conn,
-            &stream_label,
+            stream_label,
             out.freeze(),
             addr,
             encryption_enabled,
@@ -712,7 +795,7 @@ where
             addr,
             encryption_enabled,
             node_state.join,
-            &stream_label,
+            stream_label,
           )
           .await
         {

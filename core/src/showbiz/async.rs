@@ -404,7 +404,7 @@ where
   #[allow(clippy::mutable_key_type)]
   pub async fn join(
     &self,
-    existing: HashMap<Name, Address>,
+    existing: HashMap<Address, Name>,
   ) -> Result<(usize, HashMap<Address, Vec<Error<D, T>>>), Error<D, T>> {
     if !self.is_running() {
       return Err(Error::NotRunning);
@@ -412,7 +412,7 @@ where
 
     let (left, right): (FuturesUnordered<_>, FuturesUnordered<_>) = existing
       .into_iter()
-      .partition_map(|(name, addr)| match addr {
+      .partition_map(|(addr, name)| match addr {
         Address::Socket(addr) => Either::Left(async move {
           if let Err(e) = self.push_pull_node(&name, addr, true).await {
             tracing::debug!(

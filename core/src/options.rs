@@ -157,6 +157,13 @@ pub struct Options<T: Transport> {
   /// utilization. This is only available starting at protocol version 1.
   compression_algo: CompressionAlgo,
 
+  /// The size of a message that should be offload to [`rayon`] thread pool
+  /// for encryption or compression.
+  /// 
+  /// The default value is 1KB, which means that any message larger than 1KB
+  /// will be offloaded to [`rayon`] thread pool for encryption or compression. 
+  offload_size: usize,
+
   /// Used to initialize the primary encryption key in a keyring.
   /// The primary encryption key is the only key used to encrypt messages and
   /// the first key used while attempting to decrypt messages. Providing a
@@ -304,6 +311,7 @@ impl<T: Transport> Options<T> {
       protocol_version: ProtocolVersion::V0,
       dns_config_path: PathBuf::from("/etc/resolv.conf"),
       handoff_queue_depth: 1024,
+      offload_size: 1024, // 1KB
       packet_buffer_size: 1400,
       dead_node_reclaim_time: Duration::ZERO,
       require_node_names: false,
