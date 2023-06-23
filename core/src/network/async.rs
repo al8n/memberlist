@@ -6,7 +6,7 @@ use crate::{
   security::{append_bytes, encrypted_length, EncryptionAlgo, SecurityError},
   transport::{ReliableConnection, TransportError},
   types::MessageType,
-  util::{compress_payload, decompress_buffer},
+  util::{compress_payload, decompress_payload},
   Options, SecretKey, SecretKeyring,
 };
 
@@ -173,9 +173,12 @@ where
 
     // Quit if not push/pull
     if mt != MessageType::PushPull {
-      return Err(
-        Error::Transport(TransportError::Decode(DecodeError::MismatchMessageType { expected: MessageType::PushPull, got: mt }))
-      );
+      return Err(Error::Transport(TransportError::Decode(
+        DecodeError::MismatchMessageType {
+          expected: MessageType::PushPull,
+          got: mt,
+        },
+      )));
     }
 
     // Read remote state

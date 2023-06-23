@@ -35,7 +35,7 @@ pub enum Error<D: Delegate, T: Transport> {
   #[error("showbiz: remote: {0}")]
   Remote(String),
   #[error("showbiz: cannot parse ip from {0}")]
-  ParseIpFailed(Domain), 
+  ParseIpFailed(Domain),
   #[error("showbiz: no response from node {0}")]
   NoPingResponse(NodeId),
   #[error("showbiz: {0}")]

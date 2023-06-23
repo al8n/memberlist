@@ -510,14 +510,20 @@ where
           match Self::decrypt_remote_state(&label, header, keyring.as_ref().unwrap()) {
             Ok(plain) => {
               if tx.send(Ok(plain)).is_err() {
-                tracing::error!(target = "showbiz", "fail to send decrypted remote state, receiver end closed");
+                tracing::error!(
+                  target = "showbiz",
+                  "fail to send decrypted remote state, receiver end closed"
+                );
               }
-            },
+            }
             Err(e) => {
               if tx.send(Err(e)).is_err() {
-                tracing::error!(target = "showbiz", "fail to send decrypted remote state, receiver end closed");
+                tracing::error!(
+                  target = "showbiz",
+                  "fail to send decrypted remote state, receiver end closed"
+                );
               }
-            },
+            }
           };
         });
         match rx.await {
@@ -570,17 +576,23 @@ where
       } else if compress.buf.len() > opts.offload_size {
         let (tx, rx) = futures_channel::oneshot::channel();
         rayon::spawn(move || {
-          match decompress_buffer(compress.algo, &compress.buf) {
+          match decompress_payload(compress.algo, &compress.buf) {
             Ok(buf) => {
               if tx.send(Ok(buf)).is_err() {
-                tracing::error!(target = "showbiz", "fail to send decompressed buffer, receiver end closed");
+                tracing::error!(
+                  target = "showbiz",
+                  "fail to send decompressed buffer, receiver end closed"
+                );
               }
-            },
+            }
             Err(e) => {
               if tx.send(Err(e)).is_err() {
-                tracing::error!(target = "showbiz", "fail to send decompressed buffer, receiver end closed");
+                tracing::error!(
+                  target = "showbiz",
+                  "fail to send decompressed buffer, receiver end closed"
+                );
               }
-            },
+            }
           };
         });
         match rx.await {
@@ -588,7 +600,7 @@ where
           Err(_) => return Err(Error::FailReload),
         }
       } else {
-        match decompress_buffer(compress.algo, &compress.buf) {
+        match decompress_payload(compress.algo, &compress.buf) {
           Ok(buf) => buf.into(),
           Err(e) => return Err(Error::Compression(e)),
         }

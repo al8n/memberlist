@@ -14,19 +14,6 @@ pub enum CompressionError {
 }
 
 #[inline]
-pub(crate) fn decompress_buffer(
-  cmp: CompressionAlgo,
-  data: &[u8],
-) -> Result<Vec<u8>, CompressionError> {
-  match cmp {
-    CompressionAlgo::Lzw => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
-      .decode(data)
-      .map_err(CompressionError::Lzw),
-    CompressionAlgo::None => unreachable!(),
-  }
-}
-
-#[inline]
 pub(crate) fn compress_payload(
   cmp: CompressionAlgo,
   inp: &[u8],

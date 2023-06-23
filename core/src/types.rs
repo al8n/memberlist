@@ -128,7 +128,10 @@ pub enum DecodeError {
   #[error("failed to read full user state ({0} / {1})")]
   FailReadUserState(usize, usize),
   #[error("mismatch message type, expected {expected}, got {got}")]
-  MismatchMessageType { expected: MessageType, got: MessageType },
+  MismatchMessageType {
+    expected: MessageType,
+    got: MessageType,
+  },
 }
 
 #[derive(Debug, thiserror::Error)]
