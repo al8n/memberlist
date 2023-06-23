@@ -10,7 +10,7 @@ use crossbeam_skiplist::SkipSet;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use std::sync::{atomic::AtomicU64, Arc};
+use std::{iter::once, sync::{atomic::AtomicU64, Arc}};
 
 type Aes192Gcm = AesGcm<Aes192, U12>;
 
@@ -222,6 +222,12 @@ struct SecretKeyringInner {
   keys: SkipSet<SecretKey>,
 }
 
+/// A lock-free and thread-safe container for a set of encryption keys. 
+/// The keyring contains all key data used internally by showbiz.
+/// 
+/// If creating a keyring with multiple keys, one key must be designated
+/// primary by passing it as the primaryKey. If the primaryKey does not exist in
+/// the list of secondary keys, it will be automatically added at position 0.
 #[derive(Debug, Clone)]
 #[repr(transparent)]
 pub struct SecretKeyring {
@@ -243,7 +249,7 @@ impl SecretKeyring {
       inner: Arc::new(SecretKeyringInner {
         primary_key: Atomic::new(primary_key),
         update_sequence: AtomicU64::new(0),
-        keys: [primary_key].into_iter().collect::<SkipSet<SecretKey>>(),
+        keys: once(primary_key).collect(),
       }),
     }
   }
@@ -265,10 +271,9 @@ impl SecretKeyring {
         inner: Arc::new(SecretKeyringInner {
           primary_key: Atomic::new(primary_key),
           update_sequence: AtomicU64::new(0),
-          keys: [primary_key]
-            .into_iter()
+          keys: once(primary_key)
             .chain(keys.into_iter())
-            .collect::<SkipSet<SecretKey>>(),
+            .collect(),
         }),
       };
     }
@@ -277,7 +282,7 @@ impl SecretKeyring {
       inner: Arc::new(SecretKeyringInner {
         primary_key: Atomic::new(primary_key),
         update_sequence: AtomicU64::new(0),
-        keys: [primary_key].into_iter().collect::<SkipSet<SecretKey>>(),
+        keys: once(primary_key).collect(),
       }),
     }
   }
@@ -356,7 +361,17 @@ impl SecretKeyring {
   /// Returns the current set of keys on the ring.
   #[inline]
   pub fn keys(&self) -> impl Iterator<Item = SecretKey> + '_ {
-    self.inner.keys.iter().map(|entry| *entry.value())
+    let primary_key = self.primary_key();
+
+    // we must promise the first key is the primary key
+    // so that when decrypt messages, we can try the primary key first
+    once(primary_key).chain(
+      self
+        .inner
+        .keys
+        .iter()
+        .filter_map(move |entry| Some(*entry.value()).filter(|key| key != &primary_key)),
+    )
   }
 
   #[inline]
@@ -672,9 +687,11 @@ mod tests {
     // Add key to ring
     keyring.insert(TEST_KEYS[2]);
     assert_eq!(keyring.len(), 2);
+    assert_eq!(keyring.keys().next().unwrap(), TEST_KEYS[1]);
 
     // Use key that exists should succeed
     keyring.use_key(&TEST_KEYS[2]).unwrap();
+    assert_eq!(keyring.keys().next().unwrap(), TEST_KEYS[2]);
 
     let primary_key = keyring.primary_key();
     assert_eq!(primary_key.as_ref(), TEST_KEYS[2].as_ref());
