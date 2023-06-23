@@ -97,26 +97,18 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   #[inline]
-  pub async fn new(opts: Options<T>, runtime: R) -> Result<Self, Error<D, T>> {
-    Self::new_in(None, None, opts, runtime).await
+  pub async fn new(opts: Options<T>) -> Result<Self, Error<D, T>> {
+    Self::new_in(None, None, opts).await
   }
 
   #[inline]
-  pub async fn with_delegate(
-    delegate: D,
-    opts: Options<T>,
-    runtime: R,
-  ) -> Result<Self, Error<D, T>> {
-    Self::new_in(Some(delegate), None, opts, runtime).await
+  pub async fn with_delegate(delegate: D, opts: Options<T>) -> Result<Self, Error<D, T>> {
+    Self::new_in(Some(delegate), None, opts).await
   }
 
   #[inline]
-  pub async fn with_keyring(
-    keyring: SecretKeyring,
-    opts: Options<T>,
-    runtime: R,
-  ) -> Result<Self, Error<D, T>> {
-    Self::new_in(None, Some(keyring), opts, runtime).await
+  pub async fn with_keyring(keyring: SecretKeyring, opts: Options<T>) -> Result<Self, Error<D, T>> {
+    Self::new_in(None, Some(keyring), opts).await
   }
 
   #[inline]
@@ -124,16 +116,14 @@ where
     delegate: D,
     keyring: SecretKeyring,
     opts: Options<T>,
-    runtime: R,
   ) -> Result<Self, Error<D, T>> {
-    Self::new_in(Some(delegate), Some(keyring), opts, runtime).await
+    Self::new_in(Some(delegate), Some(keyring), opts).await
   }
 
   async fn new_in(
     delegate: Option<D>,
     mut keyring: Option<SecretKeyring>,
     mut opts: Options<T>,
-    runtime: R,
   ) -> Result<Self, Error<D, T>> {
     let (handoff_tx, handoff_rx) = async_channel::bounded(1);
     let (leave_broadcast_tx, leave_broadcast_rx) = async_channel::bounded(1);
@@ -184,7 +174,7 @@ where
       Some(Dns::new(
         config,
         options,
-        crate::dns::AsyncConnectionProvider::new(runtime),
+        crate::dns::AsyncConnectionProvider::new(),
       ))
     };
 

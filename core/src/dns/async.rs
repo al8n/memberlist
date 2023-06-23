@@ -20,13 +20,13 @@ pub enum DnsError {
 
 #[repr(transparent)]
 pub struct AsyncSpawn<R: Runtime> {
-  runtime: R,
+  _marker: PhantomData<R>,
 }
 
 impl<R: Runtime> Clone for AsyncSpawn<R> {
   fn clone(&self) -> Self {
     Self {
-      runtime: self.runtime,
+      _marker: PhantomData,
     }
   }
 }
@@ -52,9 +52,11 @@ pub struct AsyncRuntimeProvider<T: Transport, R: Runtime> {
 }
 
 impl<T: Transport, R: Runtime> AsyncRuntimeProvider<T, R> {
-  pub(crate) fn new(runtime: R) -> Self {
+  pub(crate) fn new() -> Self {
     Self {
-      runtime: AsyncSpawn { runtime },
+      runtime: AsyncSpawn {
+        _marker: PhantomData,
+      },
       _marker: PhantomData,
     }
   }
@@ -244,10 +246,10 @@ pub struct AsyncConnectionProvider<T: Transport, R: Runtime> {
 }
 
 impl<T: Transport, R: Runtime> AsyncConnectionProvider<T, R> {
-  pub(crate) fn new(runtime: R) -> Self {
+  pub(crate) fn new() -> Self {
     Self {
-      runtime_provider: AsyncRuntimeProvider::new(runtime),
-      connection_provider: GenericConnector::new(AsyncRuntimeProvider::new(runtime)),
+      runtime_provider: AsyncRuntimeProvider::new(),
+      connection_provider: GenericConnector::new(AsyncRuntimeProvider::new()),
     }
   }
 }

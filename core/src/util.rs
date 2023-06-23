@@ -45,7 +45,7 @@ pub(crate) fn decompress_payload(
 pub(crate) use is_global_ip::IsGlobalIp;
 
 /// The code in this mod is copied from [libp2p]
-/// 
+///
 /// [libp2p]: https://github.com/tcoratger/rust-libp2p/blob/master/core/src/transport/global_only.rs.
 mod is_global_ip {
   pub(crate) trait IsGlobalIp {

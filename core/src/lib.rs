@@ -11,7 +11,7 @@ pub mod delegate;
 pub mod error;
 mod network;
 mod options;
-pub use options::{Options, ProtocolVersion, DelegateVersion};
+pub use options::{DelegateVersion, Options, ProtocolVersion};
 mod dns;
 pub mod queue;
 pub mod security;

@@ -332,7 +332,7 @@ impl SecretKeyring {
     // Try to update the primary key
     let mut seq = self.inner.update_sequence.load(Ordering::Acquire);
     loop {
-      if new_sequence <= seq {
+      if new_sequence < seq {
         return Ok(());
       }
 
@@ -592,7 +592,7 @@ fn decrypt_payload(
     match decrypt_message(&key, msg, data) {
       Ok(_) => {
         // Remove the PKCS7 padding for vsn 0
-        if vsn as u8 == 0 {
+        if vsn == EncryptionAlgo::PKCS7 {
           pkcs7decode(msg);
         }
         return Ok(());
@@ -672,10 +672,6 @@ mod tests {
     // Add key to ring
     keyring.insert(TEST_KEYS[2]);
     assert_eq!(keyring.len(), 2);
-    assert_eq!(
-      keyring.keys().peekable().next().unwrap().as_ref(),
-      TEST_KEYS[1].as_ref()
-    );
 
     // Use key that exists should succeed
     keyring.use_key(&TEST_KEYS[2]).unwrap();

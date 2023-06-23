@@ -11,6 +11,7 @@ use super::*;
 
 static BIND_NUM: Mutex<u8> = Mutex::new(10u8);
 static LOCALHOST: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+type TestTransport = NetTransport<TokioRuntime>;
 
 fn get_bind_addr_net(network: u8) -> IpAddr {
   let mut bind_num = BIND_NUM.lock().unwrap();
@@ -60,7 +61,7 @@ where
     test_config()
   };
 
-  Showbiz::new(c, TokioRuntime).await
+  Showbiz::new(c).await
 }
 
 #[tokio::test]
@@ -92,5 +93,22 @@ async fn test_create_secret_key_empty() {
   let m = get_showbiz::<VoidDelegate, _>(Some(|_| c)).await.unwrap();
   m.bootstrap().await.unwrap();
   yield_now().await;
+  assert!(m.shutdown().await.is_ok());
+}
+
+#[tokio::test]
+async fn test_create_keyring_only() {
+  let c = Options::<NetTransport<TokioRuntime>>::lan().with_bind_addr(LOCALHOST);
+
+  let m = Showbiz::<VoidDelegate, TestTransport, TokioRuntime>::with_keyring(
+    SecretKeyring::new(SecretKey::Aes128([0; 16])),
+    c,
+  )
+  .await
+  .unwrap();
+
+  m.bootstrap().await.unwrap();
+  yield_now().await;
+  assert!(m.encryption_enabled());
   assert!(m.shutdown().await.is_ok());
 }

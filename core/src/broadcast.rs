@@ -36,7 +36,9 @@ pub trait Broadcast: Send + Sync + 'static {
   /// be broadcast, either due to invalidation or to the
   /// transmit limit being reached
   #[cfg(feature = "nightly")]
-  fn finished<'a>(&'a self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'a;
+  fn finished<'a>(
+    &'a self,
+  ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'a;
 
   /// Indicates that each message is
   /// intrinsically unique and there is no need to scan the broadcast queue for
@@ -78,7 +80,9 @@ impl Broadcast for ShowbizBroadcast {
   }
 
   #[cfg(feature = "nightly")]
-  fn finished<'a>(&'a self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'a {
+  fn finished<'a>(
+    &'a self,
+  ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'a {
     async move {
       if let Some(tx) = &self.notify {
         if let Err(e) = tx.send(()).await {

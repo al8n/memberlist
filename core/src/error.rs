@@ -10,7 +10,7 @@ pub use crate::{
     DecodeError, EncodeError, InvalidCompressionAlgo, InvalidDomain, InvalidLabel, InvalidName,
   },
   util::{CompressError, DecompressError},
-  version::{InvalidProtocolVersion, InvalidDelegateVersion},
+  version::{InvalidDelegateVersion, InvalidProtocolVersion},
 };
 
 #[derive(thiserror::Error)]
