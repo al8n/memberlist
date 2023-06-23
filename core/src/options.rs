@@ -6,8 +6,7 @@ use std::{
 };
 
 use super::{
-  keyring::SecretKey,
-  security::EncryptionAlgo,
+  security::{EncryptionAlgo, SecretKey},
   transport::Transport,
   types::{CompressionAlgo, Label, Name},
   version::{DelegateVersion, ProtocolVersion, VSN_SIZE},
@@ -159,9 +158,9 @@ pub struct Options<T: Transport> {
 
   /// The size of a message that should be offload to [`rayon`] thread pool
   /// for encryption or compression.
-  /// 
+  ///
   /// The default value is 1KB, which means that any message larger than 1KB
-  /// will be offloaded to [`rayon`] thread pool for encryption or compression. 
+  /// will be offloaded to [`rayon`] thread pool for encryption or compression.
   offload_size: usize,
 
   /// Used to initialize the primary encryption key in a keyring.

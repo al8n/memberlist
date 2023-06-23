@@ -88,8 +88,7 @@ async fn test_create_secret_key() {
 
 #[tokio::test]
 async fn test_create_secret_key_empty() {
-  let c = Options::<NetTransport<TokioRuntime>>::lan()
-    .with_bind_addr(LOCALHOST);
+  let c = Options::<NetTransport<TokioRuntime>>::lan().with_bind_addr(LOCALHOST);
 
   let m = get_showbiz::<VoidDelegate, _>(Some(|_| c)).await.unwrap();
   m.bootstrap().await.unwrap();

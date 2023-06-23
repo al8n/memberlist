@@ -72,17 +72,16 @@ where
     out.put_u8(MessageType::Ping as u8);
     ping.encode_to(&mut out);
 
-    let encryption_enabled = self.encryption_enabled().await;
     self
       .raw_send_msg_stream(
         &mut conn,
         self.inner.opts.label.clone(),
         out.freeze(),
         target.addr(),
-        encryption_enabled,
       )
       .await?;
 
+    let encryption_enabled = self.encryption_enabled();
     let (data, mt) = Self::read_stream(
       &mut conn,
       &self.inner.opts.label,
@@ -159,15 +158,8 @@ where
     }
 
     // Send our state
-    let encryption_enabled = self.encryption_enabled().await;
     self
-      .send_local_state(
-        &mut conn,
-        addr,
-        encryption_enabled,
-        join,
-        self.inner.opts.label.clone(),
-      )
+      .send_local_state(&mut conn, addr, join, self.inner.opts.label.clone())
       .await?;
 
     conn.set_timeout(if self.inner.opts.tcp_timeout == Duration::ZERO {
@@ -176,6 +168,7 @@ where
       Some(self.inner.opts.tcp_timeout)
     });
 
+    let encryption_enabled = self.encryption_enabled();
     let (data, mt) = Self::read_stream(
       &mut conn,
       &self.inner.opts.label,
@@ -265,12 +258,10 @@ where
     }
   }
 
-  async fn decrypt_remote_state(
+  async fn read_encrypt_remote_state_header(
     r: &mut ReliableConnection<T>,
-    stream_label: &Label,
-    keyring: &SecretKeyring,
     #[cfg(feature = "metrics")] metrics_labels: &[metrics::Label],
-  ) -> Result<Bytes, Error<D, T>> {
+  ) -> Result<EncryptedRemoteStateHeader, Error<D, T>> {
     // Read in enough to determine message length
     let meta_size = MessageType::SIZE + core::mem::size_of::<u32>();
     let mut buf = BytesMut::with_capacity(meta_size);
@@ -278,7 +269,6 @@ where
     let mut b = [0u8; core::mem::size_of::<u32>()];
     r.read_exact(&mut b).await.map_err(Error::transport)?;
     buf.put_slice(&b);
-
     // Ensure we aren't asked to download too much. This is to guard against
     // an attack vector where a huge amount of state is sent
     let more_bytes = u32::from_be_bytes(b) as usize;
@@ -307,6 +297,16 @@ where
       .await
       .map_err(Error::transport)?;
 
+    Ok(EncryptedRemoteStateHeader { meta_size, buf })
+  }
+
+  fn decrypt_remote_state(
+    stream_label: &Label,
+    header: EncryptedRemoteStateHeader,
+    keyring: &SecretKeyring,
+  ) -> Result<Bytes, Error<D, T>> {
+    let EncryptedRemoteStateHeader { meta_size, mut buf } = header;
+
     // Decrypt the cipherText with some authenticated data
     //
     // Authenticated Data is:
@@ -318,7 +318,6 @@ where
       // Decrypt the payload
       keyring
         .decrypt_payload(&mut ciphertext, &buf)
-        .await
         .map(|_| {
           buf.unsplit(ciphertext);
           buf.freeze()
@@ -329,7 +328,6 @@ where
       // Decrypt the payload
       keyring
         .decrypt_payload(&mut ciphertext, data_bytes.as_ref())
-        .await
         .map(|_| {
           buf.unsplit(ciphertext);
           buf.freeze()
@@ -337,4 +335,9 @@ where
         .map_err(From::from)
     }
   }
+}
+
+struct EncryptedRemoteStateHeader {
+  meta_size: usize,
+  buf: BytesMut,
 }

@@ -140,8 +140,8 @@ where
 
     if let Some(pk) = opts.secret_key() {
       let has_keyring = keyring.is_some();
-      let keyring = keyring.get_or_insert(SecretKeyring::new(vec![], pk));
-      if has_keyring { 
+      let keyring = keyring.get_or_insert(SecretKeyring::new(pk));
+      if has_keyring {
         keyring.insert(pk);
         keyring.use_key(&pk)?;
       }
@@ -246,7 +246,7 @@ where
     // to see which address we bound to. We'll refresh this each time we
     // send out an alive message.
     let advertise = transport.final_advertise_addr(self.inner.opts.advertise_addr)?;
-    let encryption_enabled = self.encryption_enabled().await;
+    let encryption_enabled = self.encryption_enabled();
 
     // TODO: replace this with is_global when IpAddr::is_global is stable
     // https://github.com/rust-lang/rust/issues/27709
@@ -717,7 +717,8 @@ where
       .any(|n| !n.dead_or_left() && n.node.name() != self.inner.opts.name.as_ref())
   }
 
-  pub(crate) async fn encryption_enabled(&self) -> bool {
+  #[inline]
+  pub(crate) fn encryption_enabled(&self) -> bool {
     if let Some(keyring) = &self.inner.keyring {
       !keyring.is_empty() && !self.inner.opts.encryption_algo.is_none()
     } else {

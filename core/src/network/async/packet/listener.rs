@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::{
   checksum::Checksumer,
-  security::{decrypt_payload, pkcs7encode, BLOCK_SIZE, NONCE_SIZE},
+  security::{pkcs7encode, BLOCK_SIZE, NONCE_SIZE},
   showbiz::MessageHandoff,
   types::{Message, NodeId},
   util::decompress_payload,
@@ -71,15 +71,10 @@ where
     }
 
     // Check if encryption is enabled
-    if let Some(keyring) = &self.inner.keyring { 
+    if let Some(keyring) = &self.inner.keyring {
       // Decrypt the payload
       if !keyring.is_empty() {
-        if let Err(e) = decrypt_payload(
-          keyring.keys().map(|ent| *ent.value()),
-          &mut buf,
-          packet_label.as_bytes(),
-          self.inner.opts.encryption_algo,
-        ) {
+        if let Err(e) = keyring.decrypt_payload(&mut buf, packet_label.as_bytes()) {
           if self.inner.opts.gossip_verify_incoming {
             tracing::error!(target = "showbiz", addr = %addr, err = %e, "decrypt packet failed");
             return;

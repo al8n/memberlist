@@ -110,7 +110,6 @@ where
         self.inner.opts.label.clone(),
         msg.freeze(),
         addr.addr(),
-        self.encryption_enabled().await,
       )
       .await
   }
@@ -131,22 +130,15 @@ where
     label: Label,
     mut buf: Bytes,
     addr: SocketAddr,
-    encryption_enabled: bool,
+    // encryption_enabled: bool,
   ) -> Result<(), Error<D, T>> {
     let compression_enabled = !self.inner.opts.compression_algo.is_none();
-    let encryption_enabled = encryption_enabled
-      && !self.inner.opts.encryption_algo.is_none()
-      && self.inner.opts.gossip_verify_outgoing;
+    let encryption_enabled = self.encryption_enabled() && self.inner.opts.gossip_verify_outgoing;
 
     // encrypt and compress are CPU-bound computation, so let rayon to handle it
     if compression_enabled || encryption_enabled {
       let primary_key = if encryption_enabled {
-        Some(self
-          .inner
-          .keyring
-          .as_ref()
-          .unwrap()
-          .primary_key())
+        Some(self.inner.keyring.as_ref().unwrap().primary_key())
       } else {
         None
       };
@@ -170,7 +162,7 @@ where
               }
             };
           }
-  
+
           // Check if encryption is enabled
           if let Some(primary_key) = primary_key {
             match Self::encrypt_local_state(
@@ -186,7 +178,7 @@ where
                 {
                   incr_tcp_sent_counter(crypt.len() as u64, metrics_labels.iter());
                 }
-  
+
                 tx.send(Ok(crypt)).unwrap();
               }
               Err(e) => {
@@ -198,7 +190,7 @@ where
             tx.send(Ok(buf)).unwrap();
           }
         });
-  
+
         match rx
           .await
           .expect("panic in rayon thread (encryption or compression)")
@@ -209,7 +201,7 @@ where
             {
               incr_tcp_sent_counter(buf.len() as u64, self.inner.metrics_labels.iter());
             }
-  
+
             return conn.write_all(&buf).await.map_err(Error::transport);
           }
           Err(e) => return Err(e),
@@ -342,7 +334,6 @@ where
     &self,
     conn: &mut ReliableConnection<T>,
     addr: SocketAddr,
-    encryption_enabled: bool,
     join: bool,
     stream_label: Label,
   ) -> Result<(), Error<D, T>> {
@@ -458,7 +449,7 @@ where
     }
 
     self
-      .raw_send_msg_stream(conn, stream_label, buf, addr, encryption_enabled)
+      .raw_send_msg_stream(conn, stream_label, buf, addr)
       .await
   }
 
@@ -511,15 +502,13 @@ where
         return Err(SecurityError::NotConfigured.into());
       };
 
-      let mut plain = match Self::decrypt_remote_state(
+      let header = Self::read_encrypt_remote_state_header(
         conn,
-        label,
-        keyring,
         #[cfg(feature = "metrics")]
         metrics_labels,
       )
-      .await
-      {
+      .await?;
+      let mut plain = match Self::decrypt_remote_state(label, header, keyring) {
         Ok(plain) => plain,
         Err(_e) => return Err(NetworkError::Decrypt.into()),
       };
@@ -639,12 +628,7 @@ where
       return;
     }
 
-    let encryption_enabled = if let Some(keyring) = &self.inner.keyring {
-      keyring.is_empty()
-    } else {
-      false
-    };
-
+    let encryption_enabled = self.encryption_enabled();
     let (data, mt) = match Self::read_stream(
       &mut conn,
       &stream_label,
@@ -669,13 +653,7 @@ where
           err_resp.encode_to(&mut out);
 
           if let Err(e) = self
-            .raw_send_msg_stream(
-              &mut conn,
-              stream_label,
-              out.freeze(),
-              addr,
-              encryption_enabled,
-            )
+            .raw_send_msg_stream(&mut conn, stream_label, out.freeze(), addr)
             .await
           {
             tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to send error response");
@@ -749,13 +727,7 @@ where
         ack.encode_to::<T::Checksumer>(&mut out);
 
         if let Err(e) = self
-          .raw_send_msg_stream(
-            &mut conn,
-            stream_label,
-            out.freeze(),
-            addr,
-            encryption_enabled,
-          )
+          .raw_send_msg_stream(&mut conn, stream_label, out.freeze(), addr)
           .await
         {
           tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to send ack response");
@@ -784,13 +756,7 @@ where
         };
 
         if let Err(e) = self
-          .send_local_state(
-            &mut conn,
-            addr,
-            encryption_enabled,
-            node_state.join,
-            stream_label,
-          )
+          .send_local_state(&mut conn, addr, node_state.join, stream_label)
           .await
         {
           tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to push local state");

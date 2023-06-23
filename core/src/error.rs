@@ -15,8 +15,6 @@ pub enum Error<D: Delegate, T: Transport> {
   LargeRemoteState(usize),
   #[error("showbiz: security error {0}")]
   Security(#[from] crate::security::SecurityError),
-  #[error("showbiz: keyring error {0}")]
-  Keyring(#[from] crate::keyring::SecretKeyringError),
   #[error("showbiz: node names are required by configuration but one was not provided")]
   MissingNodeName,
   #[error("showbiz: {0}")]

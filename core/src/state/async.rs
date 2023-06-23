@@ -24,11 +24,7 @@ fn random_offset(n: usize) -> usize {
 }
 
 #[inline]
-fn random_nodes(
-  k: usize,
-  mut nodes: Vec<Arc<Node>>,
-) -> Vec<Arc<Node>> 
-{
+fn random_nodes(k: usize, mut nodes: Vec<Arc<Node>>) -> Vec<Arc<Node>> {
   let n = nodes.len();
   if n == 0 {
     return Vec::new();
@@ -623,12 +619,9 @@ where
       AckHandler {
         ack_fn: Box::new(f),
         nack_fn: None,
-        timer: Timer::after::<_, R>(
-          timeout,
-          async move {
-            tlock.lock().await.remove(&seq_no);
-          },
-        ),
+        timer: Timer::after::<_, R>(timeout, async move {
+          tlock.lock().await.remove(&seq_no);
+        }),
       },
     );
   }
@@ -679,7 +672,7 @@ macro_rules! bail_trigger {
         // Use a random stagger to avoid syncronizing
         let mut rng = rand::thread_rng();
         let rand_stagger = Duration::from_millis(rng.gen_range(0..stagger.as_millis() as u64));
-        
+
         R::spawn_detach(async move {
           let delay = R::sleep(rand_stagger);
 
@@ -973,19 +966,25 @@ where
   ) {
     // Get some random live nodes.
     let nodes = {
-      let nodes = self.inner.nodes.read().await.nodes.iter().filter_map(|n| {
-        if n.id().name == self.inner.opts.name
-        || n.id().name == target.id().name
-        || n.state != NodeState::Alive {
-          None
-        } else {
-          Some(n.node.clone())
-        }
-      }).collect::<Vec<_>>();
-      random_nodes(
-        self.inner.opts.indirect_checks,
-        nodes,
-      )
+      let nodes = self
+        .inner
+        .nodes
+        .read()
+        .await
+        .nodes
+        .iter()
+        .filter_map(|n| {
+          if n.id().name == self.inner.opts.name
+            || n.id().name == target.id().name
+            || n.state != NodeState::Alive
+          {
+            None
+          } else {
+            Some(n.node.clone())
+          }
+        })
+        .collect::<Vec<_>>();
+      random_nodes(self.inner.opts.indirect_checks, nodes)
     };
 
     // Attempt an indirect ping.
@@ -1023,7 +1022,10 @@ where
       let target_id = target.id().clone();
       let this = self.clone();
       R::spawn_detach(async move {
-        match this.send_ping_and_wait_for_ack(&target_id, ind.into(), deadline - Instant::now()).await {
+        match this
+          .send_ping_and_wait_for_ack(&target_id, ind.into(), deadline - Instant::now())
+          .await
+        {
           Ok(ack) => {
             // The error should never happen, because we do not drop the rx,
             // handle error here for good manner, and if you see this log, please
@@ -1183,20 +1185,17 @@ where
       AckHandler {
         ack_fn: Box::new(ack_fn),
         nack_fn: Some(Arc::new(nack_fn)),
-        timer: Timer::after::<_, R>(
-          timeout,
-          async move {
-            ack_handlers.lock().await.remove(&seq_no);
-            futures_util::select! {
-              _ = ack_tx.send(AckMessage {
-                payload: Bytes::new(),
-                timestamp: sent,
-                complete: false,
-              }).fuse() => {},
-              default => {}
-            }
-          },
-        ),
+        timer: Timer::after::<_, R>(timeout, async move {
+          ack_handlers.lock().await.remove(&seq_no);
+          futures_util::select! {
+            _ = ack_tx.send(AckMessage {
+              payload: Bytes::new(),
+              timestamp: sent,
+              complete: false,
+            }).fuse() => {},
+            default => {}
+          }
+        }),
       },
     );
   }
@@ -1209,29 +1208,36 @@ where
     #[cfg(feature = "metrics")]
     scopeguard::defer!(
       observe_gossip(now.elapsed().as_millis() as f64, self.inner.metrics_labels.iter());
-    ); 
+    );
 
     // Get some random live, suspect, or recently dead nodes
     let nodes = {
-      let nodes = self.inner.nodes.read().await.nodes.iter().filter_map(|n| {
-        if n.id().name == self.inner.opts.name {
-          return None;
-        }
+      let nodes = self
+        .inner
+        .nodes
+        .read()
+        .await
+        .nodes
+        .iter()
+        .filter_map(|n| {
+          if n.id().name == self.inner.opts.name {
+            return None;
+          }
 
-        match n.state {
-          NodeState::Alive | NodeState::Suspect => Some(n.node.clone()),
-          NodeState::Dead => if n.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
-            None
-          } else {
-            Some(n.node.clone())
-          },
-          _ => None,
-        }
-      }).collect::<Vec<_>>();
-      random_nodes(
-        self.inner.opts.gossip_nodes,
-        nodes,
-      )
+          match n.state {
+            NodeState::Alive | NodeState::Suspect => Some(n.node.clone()),
+            NodeState::Dead => {
+              if n.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
+                None
+              } else {
+                Some(n.node.clone())
+              }
+            }
+            _ => None,
+          }
+        })
+        .collect::<Vec<_>>();
+      random_nodes(self.inner.opts.gossip_nodes, nodes)
     };
 
     // Compute the bytes available
@@ -1239,7 +1245,7 @@ where
       - COMPOUND_HEADER_OVERHEAD
       - self.inner.opts.label.label_overhead();
 
-    if self.encryption_enabled().await {
+    if self.encryption_enabled() {
       bytes_avail = bytes_avail.saturating_sub(encrypt_overhead(self.inner.opts.encryption_algo));
     }
 
@@ -1283,17 +1289,22 @@ where
   async fn push_pull(&self) {
     // get a random live node
     let nodes = {
-      let nodes = self.inner.nodes.read().await.nodes.iter().filter_map(|n| {
-        if n.id().name == self.inner.opts.name || n.state != NodeState::Alive {
-          None
-        } else {
-          Some(n.node.clone())
-        }
-      }).collect::<Vec<_>>();
-      random_nodes(
-        1,
-        nodes,
-      )
+      let nodes = self
+        .inner
+        .nodes
+        .read()
+        .await
+        .nodes
+        .iter()
+        .filter_map(|n| {
+          if n.id().name == self.inner.opts.name || n.state != NodeState::Alive {
+            None
+          } else {
+            Some(n.node.clone())
+          }
+        })
+        .collect::<Vec<_>>();
+      random_nodes(1, nodes)
     };
 
     if nodes.is_empty() {
