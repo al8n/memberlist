@@ -20,8 +20,8 @@ use futures_util::{future::FutureExt, Future, Stream};
 mod packet;
 mod stream;
 
-#[cfg(test)]
-mod tests;
+#[cfg(any(test, feature = "test"))]
+pub(crate) mod tests;
 
 impl<D, T, R> Showbiz<D, T, R>
 where

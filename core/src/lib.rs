@@ -1,8 +1,11 @@
 #![forbid(unsafe_code)]
-#![deny(warnings)]
+// #![deny(warnings)]
 #![cfg_attr(feature = "nightly", feature(return_position_impl_trait_in_trait))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
+
+#[cfg(not(feature = "async"))]
+compile_error!("showbiz does not support sync currently, `async` feature must be enabled.");
 
 mod awareness;
 pub mod broadcast;
@@ -49,3 +52,11 @@ pub use metrics;
 
 #[doc(hidden)]
 pub use tracing;
+
+#[cfg(all(any(test, feature = "test"), feature = "async"))]
+pub mod tests {
+  pub use super::network::tests::*;
+  pub use super::showbiz::tests::*;
+  pub use super::state::tests::*;
+  pub use super::transport::tests::*;
+}

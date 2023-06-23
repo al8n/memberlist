@@ -18,6 +18,9 @@ async = ["agnostic", "async-channel", "async-recursion", "async-trait", "async-l
 tokio-compat = ["agnostic/tokio-compat"]
 metrics = ["dep:metrics"]
 
+# expose all tests fn for users who want to use other runtime
+# see showbiz-wasm for more examples about how to use those tests fn
+test = []
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 trust-dns-resolver = { version = "0.23.0-alpha.4", default-features = false, features = ["system-config"] }

@@ -19,8 +19,8 @@ use stream::*;
 #[cfg(feature = "async")]
 pub mod net;
 
-#[cfg(test)]
-mod tests;
+#[cfg(any(test, feature = "test"))]
+pub(crate) mod tests;
 
 const LABEL_MAX_SIZE: usize = 255;
 const DEFAULT_BUFFER_SIZE: usize = 4096;

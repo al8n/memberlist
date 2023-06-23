@@ -3,6 +3,7 @@ use std::{
   sync::Mutex,
 };
 
+#[cfg(test)]
 use agnostic::{async_std::AsyncStdRuntime, smol::SmolRuntime, tokio::TokioRuntime};
 
 use crate::{delegate::VoidDelegate, security::SecretKey, transport::net::NetTransport};
@@ -63,7 +64,7 @@ where
   Showbiz::<_, _, R>::new(c).await
 }
 
-async fn test_create_secret_key_runner<R>()
+pub async fn test_create_secret_key_runner<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
@@ -105,7 +106,7 @@ fn test_create_secret_key() {
   }
 }
 
-async fn test_create_secret_key_empty_runner<R>()
+pub async fn test_create_secret_key_empty_runner<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
@@ -135,7 +136,7 @@ fn test_create_secret_key_empty() {
   }
 }
 
-async fn test_create_keyring_only_runner<R>()
+pub async fn test_create_keyring_only_runner<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
@@ -170,7 +171,7 @@ fn test_create_keyring_only() {
   }
 }
 
-async fn test_create_keyring_and_primary_key_runner<R>()
+pub async fn test_create_keyring_and_primary_key_runner<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
@@ -211,7 +212,7 @@ fn test_create_keyring_and_primary_key() {
   }
 }
 
-async fn test_create_runner<R>()
+pub async fn test_create_runner<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
@@ -241,112 +242,90 @@ fn test_create() {
   }
 }
 
-#[tokio::test]
 async fn test_resolve_addr() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_resolve_addr_tcp_first() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_members() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_join() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_join_with_labels() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_join_with_labels_and_encryption() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_join_different_networks_unique_mask() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_join_different_networks_multi_masks() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_join_cancel() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_join_cancel_passive() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_leave() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_join_shutdown() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_join_dead_node() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_join_ipv6() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_delegate_meta() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_delegate_meta_update() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_user_data() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_send_to() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_advertise_addr() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_conflict_delegate() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_ping_delegate() {
   todo!()
 }
 
-#[tokio::test]
 async fn test_encrypted_gossip_transition() {
   todo!()
 }

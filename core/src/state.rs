@@ -18,7 +18,12 @@ use super::{
   transport::Transport,
   types::{Node, NodeId, NodeState, PushNodeState},
 };
+
+#[cfg(feature = "async")]
 mod r#async;
+
+#[cfg(all(feature = "async", feature = "test"))]
+pub use r#async::*;
 
 #[cfg(feature = "metrics")]
 use sealed_metrics::*;
