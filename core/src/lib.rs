@@ -53,7 +53,7 @@ pub use metrics;
 #[doc(hidden)]
 pub use tracing;
 
-#[cfg(all(any(test, feature = "test"), feature = "async"))]
+#[cfg(all(feature = "async", feature = "test"))]
 pub mod tests {
   pub use super::network::tests::*;
   pub use super::showbiz::tests::*;

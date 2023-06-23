@@ -19,7 +19,7 @@ use stream::*;
 #[cfg(feature = "async")]
 pub mod net;
 
-#[cfg(any(test, feature = "test"))]
+#[cfg(all(feature = "async", feature = "test"))]
 pub(crate) mod tests;
 
 const LABEL_MAX_SIZE: usize = 255;

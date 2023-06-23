@@ -15,7 +15,7 @@ use async_lock::{Mutex, RwLock};
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Stream, StreamExt};
 use itertools::{Either, Itertools};
 
-#[cfg(any(test, feature = "test"))]
+#[cfg(all(feature = "async", feature = "test"))]
 pub(crate) mod tests;
 
 #[viewit::viewit(getters(skip), setters(skip))]
