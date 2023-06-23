@@ -15,6 +15,9 @@ use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{future::BoxFuture, Future, FutureExt, Stream};
 use rand::{seq::SliceRandom, Rng};
 
+#[cfg(test)]
+mod tests;
+
 #[inline]
 fn random_offset(n: usize) -> usize {
   if n == 0 {

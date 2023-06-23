@@ -71,7 +71,7 @@ weezl = "0.1"
 wg = "0.3"
 
 [dev-dependencies]
-agnostic = { path = "../../agnostic/agnostic", features = ["tokio-net"] }
+agnostic = { path = "../../agnostic/agnostic", features = ["tokio-net", "async-std-net", "smol-net"] }
 parking_lot = "0.12"
 tokio = { version = "1.26", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }

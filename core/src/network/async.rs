@@ -20,6 +20,9 @@ use futures_util::{future::FutureExt, Future, Stream};
 mod packet;
 mod stream;
 
+#[cfg(test)]
+mod tests;
+
 impl<D, T, R> Showbiz<D, T, R>
 where
   D: Delegate,

@@ -10,7 +10,10 @@ use crossbeam_skiplist::SkipSet;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use std::{iter::once, sync::{atomic::AtomicU64, Arc}};
+use std::{
+  iter::once,
+  sync::{atomic::AtomicU64, Arc},
+};
 
 type Aes192Gcm = AesGcm<Aes192, U12>;
 
@@ -222,9 +225,9 @@ struct SecretKeyringInner {
   keys: SkipSet<SecretKey>,
 }
 
-/// A lock-free and thread-safe container for a set of encryption keys. 
+/// A lock-free and thread-safe container for a set of encryption keys.
 /// The keyring contains all key data used internally by showbiz.
-/// 
+///
 /// If creating a keyring with multiple keys, one key must be designated
 /// primary by passing it as the primaryKey. If the primaryKey does not exist in
 /// the list of secondary keys, it will be automatically added at position 0.
@@ -271,9 +274,7 @@ impl SecretKeyring {
         inner: Arc::new(SecretKeyringInner {
           primary_key: Atomic::new(primary_key),
           update_sequence: AtomicU64::new(0),
-          keys: once(primary_key)
-            .chain(keys.into_iter())
-            .collect(),
+          keys: once(primary_key).chain(keys.into_iter()).collect(),
         }),
       };
     }
