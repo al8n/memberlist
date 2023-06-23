@@ -1,7 +1,6 @@
 use crate::{
   delegate::Delegate,
   dns::DnsError,
-  network::NetworkError,
   options::ForbiddenIp,
   transport::{Transport, TransportError},
   types::{Domain, InvalidMessageType, NodeId},
@@ -33,16 +32,18 @@ pub enum Error<D: Delegate, T: Transport> {
   LeaveTimeout,
   #[error("showbiz: {0}")]
   ForbiddenIp(#[from] ForbiddenIp),
+  #[error("showbiz: remote: {0}")]
+  Remote(String),
   #[error("showbiz: cannot parse ip from {0}")]
-  ParseIpFailed(Domain),
-  #[error("showbiz: network error {0}")]
-  Network(#[from] NetworkError<T>),
+  ParseIpFailed(Domain), 
   #[error("showbiz: no response from node {0}")]
   NoPingResponse(NodeId),
   #[error("showbiz: {0}")]
   Other(String),
   #[error("showbiz: node is not running, please bootstrap first")]
   NotRunning,
+  #[error("showbiz: offload thread panicked, fail to receive message")]
+  FailReload,
 }
 
 impl<D: Delegate, T: Transport> core::fmt::Debug for Error<D, T> {

@@ -30,6 +30,8 @@ pub enum SecurityError {
   MissingPrimaryKey,
   #[error("security: remote state is encrypted and encryption is not configured")]
   NotConfigured,
+  #[error("security: encryption is configured but remote state is not encrypted")]
+  PlainRemoteState,
   #[error("security: secret key is not in the keyring")]
   NotFound,
   #[error("security: removing the primary key is not allowed")]

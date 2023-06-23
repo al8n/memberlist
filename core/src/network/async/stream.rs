@@ -460,9 +460,9 @@ where
   /// of each message.
   pub(super) async fn read_stream(
     conn: &mut ReliableConnection<T>,
-    label: &Label,
+    label: Label,
     encryption_enabled: bool,
-    keyring: Option<&SecretKeyring>,
+    keyring: Option<SecretKeyring>,
     opts: &Options<T>,
     #[cfg(feature = "metrics")] metrics_labels: &[metrics::Label],
   ) -> Result<(Option<Bytes>, MessageType), Error<D, T>> {
@@ -498,19 +498,37 @@ where
         return Err(SecurityError::NotConfigured.into());
       }
 
-      let Some(keyring) = keyring else {
-        return Err(SecurityError::NotConfigured.into());
-      };
-
-      let header = Self::read_encrypt_remote_state_header(
+      let header = Self::read_encrypt_remote_state(
         conn,
         #[cfg(feature = "metrics")]
         metrics_labels,
       )
       .await?;
-      let mut plain = match Self::decrypt_remote_state(label, header, keyring) {
-        Ok(plain) => plain,
-        Err(_e) => return Err(NetworkError::Decrypt.into()),
+      let mut plain = if header.buf.len() >= opts.offload_size {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        rayon::spawn(move || {
+          match Self::decrypt_remote_state(&label, header, keyring.as_ref().unwrap()) {
+            Ok(plain) => {
+              if tx.send(Ok(plain)).is_err() {
+                tracing::error!(target = "showbiz", "fail to send decrypted remote state, receiver end closed");
+              }
+            },
+            Err(e) => {
+              if tx.send(Err(e)).is_err() {
+                tracing::error!(target = "showbiz", "fail to send decrypted remote state, receiver end closed");
+              }
+            },
+          };
+        });
+        match rx.await {
+          Ok(plain) => plain?,
+          Err(_) => return Err(Error::FailReload),
+        }
+      } else {
+        match Self::decrypt_remote_state(&label, header, keyring.as_ref().unwrap()) {
+          Ok(plain) => plain,
+          Err(e) => return Err(e),
+        }
       };
 
       // Reset message type and buf conn
@@ -522,7 +540,7 @@ where
       plain.advance(1);
       Some(plain)
     } else if encryption_enabled && opts.gossip_verify_incoming {
-      return Err(SecurityError::NotConfigured.into());
+      return Err(SecurityError::PlainRemoteState.into());
     } else {
       None
     };
@@ -549,12 +567,30 @@ where
       };
       let mut uncompressed_data = if compress.algo.is_none() {
         compress.buf
+      } else if compress.buf.len() > opts.offload_size {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        rayon::spawn(move || {
+          match decompress_buffer(compress.algo, &compress.buf) {
+            Ok(buf) => {
+              if tx.send(Ok(buf)).is_err() {
+                tracing::error!(target = "showbiz", "fail to send decompressed buffer, receiver end closed");
+              }
+            },
+            Err(e) => {
+              if tx.send(Err(e)).is_err() {
+                tracing::error!(target = "showbiz", "fail to send decompressed buffer, receiver end closed");
+              }
+            },
+          };
+        });
+        match rx.await {
+          Ok(buf) => buf?.into(),
+          Err(_) => return Err(Error::FailReload),
+        }
       } else {
         match decompress_buffer(compress.algo, &compress.buf) {
           Ok(buf) => buf.into(),
-          Err(e) => {
-            return Err(e.into());
-          }
+          Err(e) => return Err(Error::Compression(e)),
         }
       };
 
@@ -631,9 +667,9 @@ where
     let encryption_enabled = self.encryption_enabled();
     let (data, mt) = match Self::read_stream(
       &mut conn,
-      &stream_label,
+      stream_label.clone(),
       encryption_enabled,
-      self.inner.keyring.as_ref(),
+      self.inner.keyring.clone(),
       &self.inner.opts,
       #[cfg(feature = "metrics")]
       &self.inner.metrics_labels,

@@ -18,31 +18,6 @@ use futures_util::{future::FutureExt, Future, Stream};
 mod packet;
 mod stream;
 
-#[derive(thiserror::Error)]
-pub enum NetworkError<T: Transport> {
-  #[error("{0}")]
-  Transport(#[from] TransportError<T>),
-  #[error("{0}")]
-  IO(#[from] std::io::Error),
-  #[error("{0}")]
-  Remote(String),
-  #[error("{0}")]
-  Decode(#[from] DecodeError),
-  #[error("fail to decode remote state")]
-  Decrypt,
-  #[error("expected {expected} message but got {got}")]
-  WrongMessageType {
-    expected: MessageType,
-    got: MessageType,
-  },
-}
-
-impl<T: Transport> core::fmt::Debug for NetworkError<T> {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{self}")
-  }
-}
-
 impl<D, T, R> Showbiz<D, T, R>
 where
   D: Delegate,
@@ -84,9 +59,9 @@ where
     let encryption_enabled = self.encryption_enabled();
     let (data, mt) = Self::read_stream(
       &mut conn,
-      &self.inner.opts.label,
+      self.inner.opts.label.clone(),
       encryption_enabled,
-      self.inner.keyring.as_ref(),
+      self.inner.keyring.clone(),
       &self.inner.opts,
       #[cfg(feature = "metrics")]
       &self.inner.metrics_labels,
@@ -171,9 +146,9 @@ where
     let encryption_enabled = self.encryption_enabled();
     let (data, mt) = Self::read_stream(
       &mut conn,
-      &self.inner.opts.label,
+      self.inner.opts.label.clone(),
       encryption_enabled,
-      self.inner.keyring.as_ref(),
+      self.inner.keyring.clone(),
       &self.inner.opts,
       #[cfg(feature = "metrics")]
       &self.inner.metrics_labels,
@@ -193,17 +168,13 @@ where
           ErrorResponse::decode_from(buf.into()).map_err(TransportError::Decode)?
         }
       };
-      return Err(NetworkError::Remote(err.err).into());
+      return Err(Error::Remote(err.err));
     }
 
     // Quit if not push/pull
     if mt != MessageType::PushPull {
       return Err(
-        NetworkError::WrongMessageType {
-          expected: MessageType::PushPull,
-          got: mt,
-        }
-        .into(),
+        Error::Transport(TransportError::Decode(DecodeError::MismatchMessageType { expected: MessageType::PushPull, got: mt }))
       );
     }
 
@@ -258,7 +229,7 @@ where
     }
   }
 
-  async fn read_encrypt_remote_state_header(
+  async fn read_encrypt_remote_state(
     r: &mut ReliableConnection<T>,
     #[cfg(feature = "metrics")] metrics_labels: &[metrics::Label],
   ) -> Result<EncryptedRemoteStateHeader, Error<D, T>> {
