@@ -3,11 +3,13 @@ use std::sync::atomic::Ordering;
 use crate::{
   delegate::Delegate,
   error::Error,
-  security::{append_bytes, encrypted_length, EncryptionAlgo, SecurityError},
+  security::{
+    append_bytes, encrypted_length, EncryptionAlgo, SecretKey, SecretKeyring, SecurityError,
+  },
   transport::{ReliableConnection, TransportError},
   types::MessageType,
   util::{compress_payload, decompress_payload},
-  Options, SecretKey, SecretKeyring,
+  Options,
 };
 
 use super::*;
@@ -69,9 +71,11 @@ where
     .await?;
 
     if mt != MessageType::AckResponse {
-      return Err(Error::Other(format!(
-        "unexpected message type: {} from ping",
-        mt
+      return Err(Error::Transport(TransportError::Decode(
+        DecodeError::MismatchMessageType {
+          expected: MessageType::AckResponse.as_str(),
+          got: mt.as_str(),
+        },
       )));
     }
 
@@ -90,9 +94,11 @@ where
     };
 
     if ack.seq_no != ping.seq_no {
-      return Err(Error::Other(format!(
-        "sequence number from ack ({}) doesn't match ping ({})",
-        ack.seq_no, ping.seq_no
+      return Err(Error::Transport(TransportError::Decode(
+        DecodeError::MismatchSequenceNumber {
+          ping: ping.seq_no,
+          ack: ack.seq_no,
+        },
       )));
     }
 
@@ -107,10 +113,6 @@ where
     addr: SocketAddr,
     join: bool,
   ) -> Result<RemoteNodeState, Error<D, T>> {
-    if name.is_empty() && self.inner.opts.require_node_names {
-      return Err(Error::MissingNodeName);
-    }
-
     // Attempt to connect
     let mut conn = self
       .runner()
@@ -168,15 +170,15 @@ where
           ErrorResponse::decode_from(buf.into()).map_err(TransportError::Decode)?
         }
       };
-      return Err(Error::Remote(err.err));
+      return Err(Error::Peer(err.err));
     }
 
     // Quit if not push/pull
     if mt != MessageType::PushPull {
       return Err(Error::Transport(TransportError::Decode(
         DecodeError::MismatchMessageType {
-          expected: MessageType::PushPull,
-          got: mt,
+          expected: MessageType::PushPull.as_str(),
+          got: mt.as_str(),
         },
       )));
     }
@@ -252,7 +254,9 @@ where
     }
 
     if more_bytes > MAX_PUSH_STATE_BYTES {
-      return Err(Error::LargeRemoteState(more_bytes));
+      return Err(Error::Transport(TransportError::RemoteStateTooLarge(
+        more_bytes,
+      )));
     }
 
     // Start reporting the size before you cross the limit

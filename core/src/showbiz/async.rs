@@ -143,7 +143,9 @@ where
       let keyring = keyring.get_or_insert(SecretKeyring::new(pk));
       if has_keyring {
         keyring.insert(pk);
-        keyring.use_key(&pk)?;
+        keyring
+          .use_key(&pk)
+          .map_err(|e| Error::Transport(TransportError::Security(e)))?;
       }
     }
 

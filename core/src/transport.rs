@@ -128,8 +128,16 @@ pub enum TransportError<T: Transport> {
   Encode(#[from] EncodeError),
   #[error("decode error: {0}")]
   Decode(#[from] DecodeError),
+  #[error("compression error {0}")]
+  Compress(#[from] crate::util::CompressError),
+  #[error("decompress error {0}")]
+  Decompress(#[from] crate::util::DecompressError),
+  #[error("security error {0}")]
+  Security(#[from] crate::security::SecurityError),
   #[error("dns error: {0}")]
   Dns(#[from] DnsError),
+  #[error("remote node state(size {0}) is larger than limit (20 MB)")]
+  RemoteStateTooLarge(usize),
   #[error("other: {0}")]
   Other(T::Error),
 }

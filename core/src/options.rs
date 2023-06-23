@@ -9,8 +9,10 @@ use super::{
   security::{EncryptionAlgo, SecretKey},
   transport::Transport,
   types::{CompressionAlgo, Label, Name},
-  version::{DelegateVersion, ProtocolVersion, VSN_SIZE},
+  version::VSN_SIZE,
 };
+
+pub use super::version::{DelegateVersion, ProtocolVersion};
 
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -206,10 +208,6 @@ pub struct Options<T: Transport> {
   /// meaning nodes cannot be reclaimed this way.
   dead_node_reclaim_time: Duration,
 
-  /// Controls if the name of a node is required when sending
-  /// a message to that node.
-  require_node_names: bool,
-
   /// If [`None`], allow any connection (default), otherwise specify all networks
   /// allowed to connect (you must specify IPv6/IPv4 separately)
   /// Using an empty Vec will block all connections.
@@ -313,7 +311,6 @@ impl<T: Transport> Options<T> {
       offload_size: 1024, // 1KB
       packet_buffer_size: 1400,
       dead_node_reclaim_time: Duration::ZERO,
-      require_node_names: false,
       allowed_cidrs: None,
       transport: None,
       queue_check_interval: Duration::from_secs(30),

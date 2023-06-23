@@ -92,9 +92,6 @@ where
     addr: &NodeId,
     msg: crate::types::Message,
   ) -> Result<(), Error<D, T>> {
-    if addr.name().is_empty() && self.inner.opts.require_node_names {
-      return Err(Error::MissingNodeName);
-    }
     let mut conn = self
       .runner()
       .as_ref()
@@ -158,7 +155,13 @@ where
               Ok(buf) => buf.into(),
               Err(e) => {
                 tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to compress payload");
-                return tx.send(Err(e.into())).unwrap();
+                if tx.send(Err(e.into())).is_err() {
+                  tracing::error!(
+                    target = "showbiz",
+                    "failed to send compressed payload back to the onload thread"
+                  );
+                }
+                return;
               }
             };
           }
@@ -495,7 +498,7 @@ where
     // Check if the message is encrypted
     let unencrypted = if mt == MessageType::Encrypt {
       if !encryption_enabled {
-        return Err(SecurityError::NotConfigured.into());
+        return Err(TransportError::Security(SecurityError::NotConfigured).into());
       }
 
       let header = Self::read_encrypt_remote_state(
@@ -528,7 +531,11 @@ where
         });
         match rx.await {
           Ok(plain) => plain?,
-          Err(_) => return Err(Error::FailReload),
+          Err(_) => {
+            return Err(Error::Other(std::borrow::Cow::Borrowed(
+              "offload thread panicked, fail to receive message",
+            )))
+          }
         }
       } else {
         match Self::decrypt_remote_state(&label, header, keyring.as_ref().unwrap()) {
@@ -546,7 +553,7 @@ where
       plain.advance(1);
       Some(plain)
     } else if encryption_enabled && opts.gossip_verify_incoming {
-      return Err(SecurityError::PlainRemoteState.into());
+      return Err(TransportError::Security(SecurityError::PlainRemoteState).into());
     } else {
       None
     };
@@ -597,12 +604,16 @@ where
         });
         match rx.await {
           Ok(buf) => buf?.into(),
-          Err(_) => return Err(Error::FailReload),
+          Err(_) => {
+            return Err(Error::Other(std::borrow::Cow::Borrowed(
+              "offload thread panicked, fail to receive message",
+            )))
+          }
         }
       } else {
         match decompress_payload(compress.algo, &compress.buf) {
           Ok(buf) => buf.into(),
-          Err(e) => return Err(Error::Compression(e)),
+          Err(e) => return Err(e.into()),
         }
       };
 

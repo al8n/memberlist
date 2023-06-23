@@ -474,7 +474,7 @@ where
             buf.unsplit(bytes);
           }) {
           tracing::error!(target = "showbiz", addr = %$addr, err = %e, "failed to encrypt message");
-          return Err(Error::Security(e));
+          return Err(Error::Transport(TransportError::Security(e)));
         }
         buf
       }};
@@ -499,15 +499,11 @@ where
       }};
     }
 
-    if addr.name().is_empty() && self.inner.opts.require_node_names {
-      return Err(Error::MissingNodeName);
-    }
-
     // Check if we have compression enabled
     if !self.inner.opts.compression_algo.is_none() {
       let data = compress_payload(self.inner.opts.compression_algo, &msg).map_err(|e| {
         tracing::error!(target = "showbiz", addr = %addr, err = %e, "failed to compress message");
-        Error::Compression(e)
+        e
       })?;
 
       let compressed_msg_len = CompressEncoder::<BytesMut, T::Checksumer>::encoded_len(&data) + 1;

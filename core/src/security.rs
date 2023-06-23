@@ -33,7 +33,7 @@ pub enum SecurityError {
   #[error("security: encryption is configured but remote state is not encrypted")]
   PlainRemoteState,
   #[error("security: secret key is not in the keyring")]
-  NotFound,
+  SecretKeyNotFound,
   #[error("security: removing the primary key is not allowed")]
   RemovePrimaryKey,
 }
@@ -321,7 +321,7 @@ impl SecretKeyring {
 
     // Try to find the key to set as primary
     let Some(entry) = self.inner.keys.get(key_data) else {
-      return Err(SecurityError::NotFound);
+      return Err(SecurityError::SecretKeyNotFound);
     };
 
     let key = *entry.value();

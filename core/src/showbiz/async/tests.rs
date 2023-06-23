@@ -5,7 +5,7 @@ use std::{
 
 use agnostic::tokio::TokioRuntime;
 
-use crate::{delegate::VoidDelegate, transport::net::NetTransport, SecretKey};
+use crate::{delegate::VoidDelegate, security::SecretKey, transport::net::NetTransport};
 
 use super::*;
 
@@ -39,7 +39,6 @@ fn test_config_net(network: u8) -> Options<NetTransport<TokioRuntime>> {
   Options::lan()
     .with_bind_addr(bind_addr)
     .with_name(bind_addr.to_string().try_into().unwrap())
-    .with_require_node_names(true)
 }
 
 fn test_config() -> Options<NetTransport<TokioRuntime>> {

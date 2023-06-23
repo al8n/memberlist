@@ -26,9 +26,7 @@ struct Inner<B: Broadcast> {
 impl<B: Broadcast> Inner<B> {
   fn remove(&mut self, item: &LimitedBroadcast<B>) {
     let name = item.broadcast.name();
-    if !name.is_empty() {
-      self.m.remove(name);
-    }
+    self.m.remove(name);
 
     if self.q.is_empty() {
       // At idle there's no reason to let the id generator keep going
@@ -39,9 +37,7 @@ impl<B: Broadcast> Inner<B> {
 
   fn insert(&mut self, item: Arc<LimitedBroadcast<B>>) {
     let name = item.broadcast.name();
-    if !name.is_empty() {
-      self.m.insert(name.clone(), item.clone());
-    }
+    self.m.insert(name.clone(), item.clone());
     self.q.insert(item);
   }
 }
@@ -221,14 +217,12 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
 
     // Check if this message invalidates another.
     let name = lb.broadcast.name();
-    if !name.is_empty() {
-      if let Some(old) = inner.m.remove(name) {
-        old.broadcast.finished().await?;
+    if let Some(old) = inner.m.remove(name) {
+      old.broadcast.finished().await?;
 
-        inner.q.remove(&old);
-        if inner.q.is_empty() {
-          inner.id_gen = 0;
-        }
+      inner.q.remove(&old);
+      if inner.q.is_empty() {
+        inner.id_gen = 0;
       }
     } else if !unique {
       // Slow path, hopefully nothing hot hits this.
