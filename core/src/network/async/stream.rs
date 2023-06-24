@@ -2,7 +2,7 @@
 use futures_util::{Future, Stream};
 
 use crate::{
-  transport::{ConnectionError, ConnectionErrorKind, ConnectionKind, ReliableConnection},
+  transport::ReliableConnection,
   types::{Node, NodeId},
 };
 
@@ -247,51 +247,24 @@ where
     {
       incr_tcp_sent_counter(buf.len() as u64, self.inner.metrics_labels.iter());
     }
-
     conn.write_all(&buf).await.map_err(Error::transport)
   }
 
   /// Used to read the remote state from a connection
   pub(super) async fn read_remote_state(
     &self,
-    conn: &mut ReliableConnection<T>,
-    data: Option<Bytes>,
+    mut data: Bytes,
   ) -> Result<RemoteNodeState, Error<D, T>> {
-    // Read the push/pull header
-    let (header, mut data) = match data {
-      Some(mut data) => {
-        // consume total msg len
-        let _ = decode_u32_from_buf(&mut data)
-          .map_err(|e| TransportError::Decode(DecodeError::from(e)))?;
-        let len = match PushPullHeader::decode_len(&mut data) {
-          Ok(len) => len,
-          Err(e) => return Err(TransportError::Decode(e).into()),
-        };
-        let h = match PushPullHeader::decode_from(data.split_to(len as usize)) {
-          Ok(header) => header,
-          Err(e) => return Err(TransportError::Decode(e).into()),
-        };
-
-        (h, data)
-      }
-      None => {
-        let total_len = conn.read_u32_varint().await.map_err(Error::transport)?;
-        let mut buf = vec![0; total_len];
-        conn.read_exact(&mut buf).await.map_err(Error::transport)?;
-        let mut buf: Bytes = buf.into();
-        let len = PushPullHeader::decode_len(&mut buf).map_err(TransportError::Decode)? as usize;
-
-        let h = match PushPullHeader::decode_from(buf.split_to(len)) {
-          Ok(header) => header,
-          Err(e) => return Err(TransportError::Decode(e).into()),
-        };
-        (h, buf)
-      }
+    let len = match PushPullHeader::decode_len(&mut data) {
+      Ok(len) => len,
+      Err(e) => return Err(TransportError::Decode(e).into()),
     };
-
+    let header = match PushPullHeader::decode_from(data.split_to(len as usize)) {
+      Ok(header) => header,
+      Err(e) => return Err(TransportError::Decode(e).into()),
+    };
     // Allocate space for the transfer
     let mut remote_nodes = Vec::<PushNodeState>::with_capacity(header.nodes as usize);
-
     // Try to decode all the states
     for _ in 0..header.nodes {
       let len = PushNodeState::decode_len(&mut data).map_err(TransportError::Decode)?;
@@ -383,15 +356,18 @@ where
     let header_size = header.encoded_len();
 
     let basic_len = header_size
+      + encoded_u32_len(header_size as u32)
       + states_encoded_size
+      + encoded_u32_len(states_encoded_size as u32)
       + if user_data.is_empty() {
         0
       } else {
         user_data.len()
       };
-    let total_len = basic_len + encoded_u32_len(basic_len as u32);
+    let total_len = MessageType::SIZE + basic_len + encoded_u32_len(basic_len as u32);
     let mut buf = BytesMut::with_capacity(total_len);
-    // begin state push
+    buf.put_u8(MessageType::PushPull as u8);
+    encode_u32_to_buf(&mut buf, basic_len as u32);
     header.encode_to(&mut buf);
 
     #[cfg(feature = "metrics")]
@@ -399,7 +375,6 @@ where
 
     for n in local_nodes {
       n.encode_to(&mut buf);
-
       #[cfg(feature = "metrics")]
       {
         node_state_counts[n.state as u8 as usize].1 += 1;
@@ -468,30 +443,18 @@ where
     keyring: Option<SecretKeyring>,
     opts: &Options<T>,
     #[cfg(feature = "metrics")] metrics_labels: &[metrics::Label],
-  ) -> Result<(Option<Bytes>, MessageType), Error<D, T>> {
+  ) -> Result<(Bytes, MessageType), Error<D, T>> {
     // Read the message type
     let mut buf = [0u8; 1];
-    let mut mt = match conn.read(&mut buf).await {
-      Ok(n) => {
-        if n == 0 {
-          return Err(
-            TransportError::Connection(ConnectionError {
-              kind: ConnectionKind::Reliable,
-              error_kind: ConnectionErrorKind::Read,
-              error: std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof"),
-            })
-            .into(),
-          );
+    let mut mt = match conn.read_exact(&mut buf).await {
+      Ok(_) => match MessageType::try_from(buf[0]) {
+        Ok(mt) => mt,
+        Err(e) => {
+          return Err(Error::transport(TransportError::Decode(DecodeError::from(
+            e,
+          ))));
         }
-        match MessageType::try_from(buf[0]) {
-          Ok(mt) => mt,
-          Err(e) => {
-            return Err(Error::transport(TransportError::Decode(DecodeError::from(
-              e,
-            ))));
-          }
-        }
-      }
+      },
       Err(e) => return Err(Error::transport(e)),
     };
 
@@ -634,10 +597,15 @@ where
       };
 
       // Create a new bufConn
-      return Ok((Some(uncompressed_data), mt));
+      return Ok((uncompressed_data, mt));
     }
 
-    Ok((None, mt))
+    let size = conn.read_u32_varint().await.map_err(Error::transport)?;
+    let mut buf = vec![0; size];
+    if let Err(e) = conn.read(&mut buf).await {
+      return Err(Error::transport(e));
+    }
+    Ok((buf.into(), mt))
   }
 }
 
@@ -653,7 +621,6 @@ where
   /// Handles a single incoming stream connection from the transport.
   async fn handle_conn(self, mut conn: ReliableConnection<T>) {
     let addr = conn.remote_node();
-    eprintln!("{}", addr);
     tracing::debug!(target = "showbiz", remote_node = %addr, "stream connection");
 
     #[cfg(feature = "metrics")]
@@ -688,7 +655,7 @@ where
     }
 
     let encryption_enabled = self.encryption_enabled();
-    let (data, mt) = match Self::read_stream(
+    let (mut data, mt) = match Self::read_stream(
       &mut conn,
       stream_label.clone(),
       encryption_enabled,
@@ -703,7 +670,7 @@ where
       Err(e) => match e {
         Error::Transport(TransportError::Connection(err)) => {
           if err.error.kind() != std::io::ErrorKind::UnexpectedEof {
-            tracing::error!(target = "showbiz", err=%err, remote_node = ?addr, "failed to receive");
+            tracing::error!(target = "showbiz", err=%err, local = %self.inner.id, remote_node = %addr, "failed to receive");
           }
 
           let err_resp = ErrorResponse::new(err);
@@ -715,21 +682,20 @@ where
             .raw_send_msg_stream(&mut conn, stream_label, out.freeze(), addr)
             .await
           {
-            tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to send error response");
+            tracing::error!(target = "showbiz", err=%e, local = %self.inner.id, remote_node = %addr, "failed to send error response");
             return;
           }
           return;
         }
         e => {
-          tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to receive");
+          tracing::error!(target = "showbiz", err=%e, local = %self.inner.id, remote_node = %addr, "failed to receive");
           return;
         }
       },
     };
-
     match mt {
       MessageType::Ping => {
-        let ping = if let Some(mut data) = data {
+        let ping = {
           match Ping::decode_len(&mut data) {
             Ok(len) => {
               if len > data.len() {
@@ -739,29 +705,6 @@ where
 
               match Ping::decode_from(data.split_to(len)) {
                 Ok(ping) => ping,
-                Err(e) => {
-                  tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to decode ping");
-                  return;
-                }
-              }
-            }
-            Err(e) => {
-              tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to decode ping");
-              return;
-            }
-          }
-        } else {
-          match conn.read_u32_varint().await {
-            Ok(len) => {
-              let mut buf = vec![0; len];
-              match conn.read_exact(&mut buf).await {
-                Ok(_) => match Ping::decode_from(buf.into()) {
-                  Ok(ping) => ping,
-                  Err(e) => {
-                    tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to decode ping");
-                    return;
-                  }
-                },
                 Err(e) => {
                   tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to decode ping");
                   return;
@@ -792,7 +735,7 @@ where
           tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to send ack response");
         }
       }
-      MessageType::User => self.read_user_msg(conn, data, addr).await,
+      MessageType::User => self.read_user_msg(data, addr).await,
       MessageType::PushPull => {
         // Increment counter of pending push/pulls
         let num_concurrent = self.inner.hot.push_pull_req.fetch_add(1, Ordering::SeqCst);
@@ -805,15 +748,13 @@ where
           tracing::error!(target = "showbiz", "too many pending push/pull requests");
           return;
         }
-
-        let node_state = match self.read_remote_state(&mut conn, data).await {
+        let node_state = match self.read_remote_state(data).await {
           Ok(ns) => ns,
           Err(e) => {
             tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to read remote state");
             return;
           }
         };
-
         if let Err(e) = self
           .send_local_state(&mut conn, addr, node_state.join, stream_label)
           .await
@@ -832,50 +773,21 @@ where
     }
   }
 
-  async fn read_user_msg(
-    &self,
-    mut conn: ReliableConnection<T>,
-    data: Option<Bytes>,
-    addr: SocketAddr,
-  ) {
-    match data {
-      Some(mut data) => {
-        let user_msg_len = data.get_u32() as usize;
-        let remaining = data.remaining();
-        let user_msg = match user_msg_len.cmp(&remaining) {
-          std::cmp::Ordering::Less => {
-            tracing::error!(target = "showbiz", remote_node = %addr, "failed to read full user message ({} / {})", remaining, user_msg_len);
-            return;
-          }
-          std::cmp::Ordering::Equal => data,
-          std::cmp::Ordering::Greater => data.slice(..user_msg_len),
-        };
-
-        if let Some(d) = &self.inner.delegate {
-          if let Err(e) = d.notify_user_msg(user_msg).await {
-            tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to notify user message");
-          }
-        }
+  async fn read_user_msg(&self, mut data: Bytes, addr: SocketAddr) {
+    let user_msg_len = data.get_u32() as usize;
+    let remaining = data.remaining();
+    let user_msg = match user_msg_len.cmp(&remaining) {
+      std::cmp::Ordering::Less => {
+        tracing::error!(target = "showbiz", remote_node = %addr, "failed to read full user message ({} / {})", remaining, user_msg_len);
+        return;
       }
-      None => {
-        let mut user_msg_len = [0u8; 4];
-        if let Err(e) = conn.read_exact(&mut user_msg_len).await {
-          tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to receive user message");
-          return;
-        }
-        let user_msg_len = u32::from_be_bytes(user_msg_len) as usize;
-        if user_msg_len > 0 {
-          let mut user_msg = vec![0; user_msg_len];
-          if let Err(e) = conn.read_exact(&mut user_msg).await {
-            tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to receive user message");
-            return;
-          }
-          if let Some(d) = &self.inner.delegate {
-            if let Err(e) = d.notify_user_msg(user_msg.into()).await {
-              tracing::error!(target = "showbiz", err=%e, remote_node = ?addr, "failed to notify user message");
-            }
-          }
-        }
+      std::cmp::Ordering::Equal => data,
+      std::cmp::Ordering::Greater => data.slice(..user_msg_len),
+    };
+
+    if let Some(d) = &self.inner.delegate {
+      if let Err(e) = d.notify_user_msg(user_msg).await {
+        tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to notify user message");
       }
     }
   }

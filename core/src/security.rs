@@ -17,7 +17,7 @@ use std::{
 
 type Aes192Gcm = AesGcm<Aes192, U12>;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SecurityError {
   #[error("security: unknown encryption version: {0}")]
   UnknownEncryptionAlgo(#[from] UnknownEncryptionAlgo),

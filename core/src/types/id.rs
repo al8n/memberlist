@@ -63,14 +63,13 @@ impl NodeId {
 
   #[inline]
   pub fn encoded_len(&self) -> usize {
-    let basic_len = if self.name.is_empty() {
+    // addr + addr tag
+    (if self.name.is_empty() {
       0
     } else {
       self.name.encoded_len() + 1 // name + name tag
-    } + if self.addr.is_ipv4() { 6 } else { 18 }
-      + 1; // addr + addr tag
-
-    encoded_u32_len(basic_len as u32) + basic_len
+    }) + if self.addr.is_ipv4() { 6 } else { 18 }
+      + 1
   }
 
   #[inline]
@@ -81,7 +80,6 @@ impl NodeId {
       buf.put_u8(1);
       self.name.encode_to(buf);
     }
-
     match self.addr {
       SocketAddr::V4(addr) => {
         buf.put_u8(2);

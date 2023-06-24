@@ -62,7 +62,7 @@ where
       .await?;
 
     let encryption_enabled = self.encryption_enabled();
-    let (data, mt) = Self::read_stream(
+    let (mut data, mt) = Self::read_stream(
       &mut conn,
       self.inner.opts.label.clone(),
       encryption_enabled,
@@ -82,18 +82,10 @@ where
       )));
     }
 
-    let ack = match data {
-      Some(mut d) => match AckResponse::decode_len(&mut d) {
-        Ok(len) => AckResponse::decode_from::<T::Checksumer>(d.split_to(len))
-          .map_err(TransportError::Decode)?,
-        Err(e) => return Err(TransportError::Decode(e).into()),
-      },
-      None => {
-        let len = conn.read_u32_varint().await.map_err(Error::transport)?;
-        let mut buf = vec![0; len];
-        conn.read_exact(&mut buf).await.map_err(Error::transport)?;
-        AckResponse::decode_from::<T::Checksumer>(buf.into()).map_err(TransportError::Decode)?
-      }
+    let ack = match AckResponse::decode_len(&mut data) {
+      Ok(len) => AckResponse::decode_from::<T::Checksumer>(data.split_to(len))
+        .map_err(TransportError::Decode)?,
+      Err(e) => return Err(TransportError::Decode(e).into()),
     };
 
     if ack.seq_no != ping.seq_no {
@@ -149,7 +141,7 @@ where
     });
 
     let encryption_enabled = self.encryption_enabled();
-    let (data, mt) = Self::read_stream(
+    let (mut data, mt) = Self::read_stream(
       &mut conn,
       self.inner.opts.label.clone(),
       encryption_enabled,
@@ -158,20 +150,15 @@ where
       #[cfg(feature = "metrics")]
       &self.inner.metrics_labels,
     )
-    .await?;
+    .await
+    .map_err(|e| e)?;
 
     if mt == MessageType::ErrorResponse {
-      let err = match data {
-        Some(mut d) => match ErrorResponse::decode_len(&mut d) {
-          Ok(len) => ErrorResponse::decode_from(d.split_to(len)).map_err(TransportError::Decode)?,
-          Err(e) => return Err(TransportError::Decode(e).into()),
-        },
-        None => {
-          let len = conn.read_u32_varint().await.map_err(Error::transport)?;
-          let mut buf = vec![0; len];
-          conn.read_exact(&mut buf).await.map_err(Error::transport)?;
-          ErrorResponse::decode_from(buf.into()).map_err(TransportError::Decode)?
+      let err = match ErrorResponse::decode_len(&mut data) {
+        Ok(len) => {
+          ErrorResponse::decode_from(data.split_to(len)).map_err(TransportError::Decode)?
         }
+        Err(e) => return Err(TransportError::Decode(e).into()),
       };
       return Err(Error::Peer(err.err));
     }
@@ -187,10 +174,7 @@ where
     }
 
     // Read remote state
-    self
-      .read_remote_state(&mut conn, data)
-      .await
-      .map_err(From::from)
+    self.read_remote_state(data).await.map_err(From::from)
   }
 
   fn encrypt_local_state(

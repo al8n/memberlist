@@ -408,6 +408,7 @@ where
           if let Err(e) = self.push_pull_node(&name, addr, true).await {
             tracing::debug!(
               target = "showbiz",
+              local = %self.inner.id,
               err = %e,
               "failed to join {}({})",
               name,

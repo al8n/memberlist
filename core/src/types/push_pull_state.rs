@@ -1,6 +1,7 @@
 use super::*;
 
 #[viewit::viewit]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) struct PushPullHeader {
   nodes: u32,
   user_state_len: u32, // Encodes the byte lengh of user state
@@ -13,7 +14,8 @@ impl PushPullHeader {
     let basic = encoded_u32_len(self.nodes) + 1 // nodes + tag
     + encoded_u32_len(self.user_state_len) + 1 // user_state_len + tag
     + 1 + 1; // join + tag
-    basic + encoded_u32_len(basic as u32)
+    basic
+    // + encoded_u32_len(basic as u32)
   }
 
   #[inline]
@@ -41,7 +43,7 @@ impl PushPullHeader {
       join: false,
     };
     while buf.has_remaining() {
-      match required {
+      match buf.get_u8() {
         1 => {
           this.nodes = decode_u32_from_buf(&mut buf)?.0;
           required += 1;
@@ -87,7 +89,9 @@ pub(crate) struct PushNodeState {
 impl PushNodeState {
   #[inline]
   pub fn encoded_len(&self) -> usize {
-    let basic = self.node.encoded_len() + 1 // node + tag
+    // vsn + tag
+    let encoded_node_len = self.node.encoded_len();
+    encoded_node_len + encoded_u32_len(encoded_node_len as u32) + 1 // node + tag
     + encoded_u32_len(self.incarnation) + 1 // incarnation + tag
     + if self.meta.is_empty() {
       0
@@ -96,8 +100,7 @@ impl PushNodeState {
       len + 1 + self.meta.len()
     }
     + 1 + 1 // state + tag
-    + VSN_SIZE + 1; // vsn + tag
-    basic + encoded_u32_len(basic as u32)
+    + VSN_SIZE + 1
   }
 
   #[inline]

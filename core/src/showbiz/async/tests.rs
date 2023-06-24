@@ -6,14 +6,15 @@ use std::{
 #[cfg(test)]
 use agnostic::{async_std::AsyncStdRuntime, smol::SmolRuntime, tokio::TokioRuntime};
 
-use crate::{delegate::VoidDelegate, security::SecretKey, transport::net::NetTransport};
+use crate::{
+  delegate::VoidDelegate, security::SecretKey, transport::net::NetTransport, CompressionAlgo,
+};
 
 use super::*;
 
 static BIND_NUM: Mutex<u8> = Mutex::new(10u8);
-static LOCALHOST: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
 
-fn get_bind_addr_net(network: u8) -> IpAddr {
+fn get_bind_addr_net(network: u8) -> SocketAddr {
   let mut bind_num = BIND_NUM.lock().unwrap();
   let ip = IpAddr::V4(Ipv4Addr::new(127, 0, network, *bind_num));
 
@@ -22,11 +23,11 @@ fn get_bind_addr_net(network: u8) -> IpAddr {
     *bind_num = 10;
   }
 
-  ip
+  SocketAddr::new(ip, 7949)
 }
 
 #[allow(dead_code)]
-fn get_bind_addr() -> IpAddr {
+pub(crate) fn get_bind_addr() -> SocketAddr {
   get_bind_addr_net(0)
 }
 
@@ -36,13 +37,13 @@ async fn yield_now<R: Runtime>() {
 }
 
 fn test_config_net<R: Runtime>(network: u8) -> Options<NetTransport<R>> {
-  let bind_addr = SocketAddr::new(get_bind_addr_net(network), 0);
+  let bind_addr = get_bind_addr_net(network);
   Options::lan()
     .with_bind_addr(bind_addr)
     .with_name(bind_addr.to_string().try_into().unwrap())
 }
 
-fn test_config<R: Runtime>() -> Options<NetTransport<R>> {
+pub(crate) fn test_config<R: Runtime>() -> Options<NetTransport<R>> {
   test_config_net(0)
 }
 
@@ -78,7 +79,7 @@ where
 
   for (name, key) in cases {
     let c = Options::<NetTransport<R>>::lan()
-      .with_bind_addr(LOCALHOST)
+      .with_bind_addr(get_bind_addr())
       .with_secret_key(Some(key));
 
     let m = get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
@@ -112,7 +113,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let c = Options::<NetTransport<R>>::lan().with_bind_addr(LOCALHOST);
+  let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr());
 
   let m = get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
     .await
@@ -142,7 +143,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let c = Options::<NetTransport<R>>::lan().with_bind_addr(LOCALHOST);
+  let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr());
 
   let m = Showbiz::<VoidDelegate, NetTransport<R>, R>::with_keyring(
     SecretKeyring::new(SecretKey::Aes128([0; 16])),
@@ -178,7 +179,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c = Options::<NetTransport<R>>::lan()
-    .with_bind_addr(LOCALHOST)
+    .with_bind_addr(get_bind_addr())
     .with_secret_key(Some(SecretKey::Aes128([1; 16])));
 
   let m = Showbiz::<VoidDelegate, NetTransport<R>, R>::with_keyring(
@@ -218,7 +219,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let c = Options::<NetTransport<R>>::lan().with_bind_addr(LOCALHOST);
+  let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr());
   let m = get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
     .await
     .unwrap();
@@ -254,8 +255,101 @@ async fn test_members() {
   todo!()
 }
 
-async fn test_join() {
-  todo!()
+pub async fn test_join_runner<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let c1 = test_config::<R>()
+    .with_name("test_join_runner_1".try_into().unwrap())
+    .with_compression_algo(CompressionAlgo::None);
+  let m1 = Showbiz::<VoidDelegate, _, _>::new(c1).await.unwrap();
+
+  let c2 = test_config::<R>()
+    .with_name("test_join_runner_2".try_into().unwrap())
+    .with_compression_algo(CompressionAlgo::None);
+  let m2 = Showbiz::<VoidDelegate, _, _>::new(c2).await.unwrap();
+
+  m1.bootstrap().await.unwrap();
+  m2.bootstrap().await.unwrap();
+
+  let (num, _) = m2
+    .join(
+      [(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())]
+        .into_iter()
+        .collect(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(num, 1);
+
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
+}
+
+#[tracing_test::traced_test]
+#[test]
+fn test_join() {
+  {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(test_join_runner::<TokioRuntime>());
+  }
+
+  // TODO: fix async-std runtime
+  // {
+  //   AsyncStdRuntime::block_on(test_join_runner::<AsyncStdRuntime>());
+  // }
+
+  // TODO: fix smol runtime
+  // {
+  //   SmolRuntime::block_on(test_join_runner::<SmolRuntime>());
+  // }
+}
+
+pub async fn test_join_with_compression_runner<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let c1 = test_config::<R>().with_name("test_join_runner_1".try_into().unwrap());
+  let m1 = Showbiz::<VoidDelegate, _, _>::new(c1).await.unwrap();
+
+  let c2 = test_config::<R>().with_name("test_join_runner_2".try_into().unwrap());
+  let m2 = Showbiz::<VoidDelegate, _, _>::new(c2).await.unwrap();
+
+  m1.bootstrap().await.unwrap();
+  m2.bootstrap().await.unwrap();
+
+  let (num, _) = m2
+    .join(
+      [(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())]
+        .into_iter()
+        .collect(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(num, 1);
+
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
+}
+
+#[tracing_test::traced_test]
+#[test]
+fn test_join_with_compression() {
+  {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(test_join_with_compression_runner::<TokioRuntime>());
+  }
+
+  // {
+  //   AsyncStdRuntime::block_on(test_join_runner::<AsyncStdRuntime>());
+  // }
+  // {
+  //   SmolRuntime::block_on(test_join_runner::<SmolRuntime>());
+  // }
 }
 
 async fn test_join_with_labels() {

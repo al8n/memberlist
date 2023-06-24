@@ -15,7 +15,7 @@ const CHECKSUM_SIZE: usize = core::mem::size_of::<u32>();
 /// The returned value will be between 1 and 5, inclusive.
 #[inline]
 pub(crate) fn encoded_u32_len(value: u32) -> usize {
-  ((((value | 1).leading_zeros() ^ 31) * 9 + 37) / 32) as usize
+  ((((value as u64 | 1).leading_zeros() ^ 63) * 9 + 73) / 64) as usize
 }
 
 #[inline]

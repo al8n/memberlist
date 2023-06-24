@@ -557,11 +557,14 @@ impl<R: Runtime> Transport for NetTransport<R> {
       .await
     {
       Ok(conn) => Ok(ReliableConnection::new(Tcp { conn }, addr)),
-      Err(_) => Err(TransportError::Connection(ConnectionError {
-        kind: ConnectionKind::Reliable,
-        error_kind: ConnectionErrorKind::Dial,
-        error: Error::new(ErrorKind::TimedOut, "timeout"),
-      })),
+      Err(e) => {
+        tracing::error!(target = "showbiz", err = %e);
+        Err(TransportError::Connection(ConnectionError {
+          kind: ConnectionKind::Reliable,
+          error_kind: ConnectionErrorKind::Dial,
+          error: Error::new(ErrorKind::TimedOut, "timeout"),
+        }))
+      }
     }
   }
 
@@ -635,7 +638,6 @@ where
               Ok((conn, _)) => {
                 // No error, reset loop delay
                 loop_delay = Duration::ZERO;
-                println!("sent tcp connection");
                 if let Err(e) = stream_tx
                   .send(ReliableConnection::new(Tcp { conn }, remote_addr))
                   .await

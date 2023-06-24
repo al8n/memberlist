@@ -141,7 +141,6 @@ where
     scopeguard::defer!(
       observe_push_pull_node(now.elapsed().as_millis() as f64, self.inner.metrics_labels.iter());
     );
-
     self
       .merge_remote_state(self.send_and_receive_state(name, addr, join).await?)
       .await
