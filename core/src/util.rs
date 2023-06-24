@@ -1,3 +1,5 @@
+use crate::{types::{Compress, MessageType, encoded_u32_len, encode_u32_to_buf}, checksum::Checksumer};
+
 use super::types::CompressionAlgo;
 
 pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
@@ -19,8 +21,23 @@ pub enum DecompressError {
   Lzw(#[from] weezl::LzwError),
 }
 
+pub(crate) fn compress_to_msg<C: Checksumer>(algo: CompressionAlgo, data: Bytes) -> Result<Bytes, CompressError> {
+  let b = compress_payload(algo, data.as_ref())?;
+  let compress = Compress {
+    algo,
+    buf: b.into(),
+  };
+  let basic_size = compress.encoded_len();
+  let total_size = MessageType::SIZE + basic_size + encoded_u32_len(basic_size as u32);
+  let mut b = BytesMut::with_capacity(total_size);
+  b.put_u8(MessageType::Compress as u8);
+  compress.encode_to::<C>(&mut b);
+  Ok(b.freeze())
+}
+
 #[inline]
 pub(crate) fn compress_payload(cmp: CompressionAlgo, inp: &[u8]) -> Result<Vec<u8>, CompressError> {
+  println!("before compress {:?}", inp);
   match cmp {
     CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
       .encode(inp)
@@ -42,6 +59,7 @@ pub(crate) fn decompress_payload(
   }
 }
 
+use bytes::{Bytes, BytesMut, BufMut};
 pub(crate) use is_global_ip::IsGlobalIp;
 
 /// The code in this mod is copied from [libp2p]

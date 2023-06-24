@@ -3,7 +3,7 @@ use futures_util::{Future, Stream};
 
 use crate::{
   transport::ReliableConnection,
-  types::{Node, NodeId},
+  types::{Node, NodeId}, util::compress_to_msg,
 };
 
 use super::*;
@@ -151,8 +151,8 @@ where
         let (tx, rx) = futures_channel::oneshot::channel();
         rayon::spawn(move || {
           if compression_enabled {
-            buf = match compress_payload(compression_algo, &buf) {
-              Ok(buf) => buf.into(),
+            buf = match compress_to_msg::<T::Checksumer>(compression_algo, buf) {
+              Ok(buf) => buf,
               Err(e) => {
                 tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to compress payload");
                 if tx.send(Err(e.into())).is_err() {
@@ -163,7 +163,7 @@ where
                 }
                 return;
               }
-            };
+            }; 
           }
 
           // Check if encryption is enabled
@@ -212,8 +212,8 @@ where
       }
 
       if compression_enabled {
-        buf = match compress_payload(compression_algo, &buf) {
-          Ok(buf) => buf.into(),
+        buf = match compress_to_msg::<T::Checksumer>(compression_algo, buf) {
+          Ok(buf) => buf,
           Err(e) => {
             tracing::error!(target = "showbiz", err=%e, remote_node = %addr, "failed to compress payload");
             return Err(e.into());
@@ -247,6 +247,7 @@ where
     {
       incr_tcp_sent_counter(buf.len() as u64, self.inner.metrics_labels.iter());
     }
+    println!("send: {:?} {}", buf.as_ref(), buf.len());
     conn.write_all(&buf).await.map_err(Error::transport)
   }
 
@@ -259,10 +260,12 @@ where
       Ok(len) => len,
       Err(e) => return Err(TransportError::Decode(e).into()),
     };
+    println!("len {} buf_len {}", len, data.len());
     let header = match PushPullHeader::decode_from(data.split_to(len as usize)) {
       Ok(header) => header,
       Err(e) => return Err(TransportError::Decode(e).into()),
     };
+    println!("header {:?}", header);
     // Allocate space for the transfer
     let mut remote_nodes = Vec::<PushNodeState>::with_capacity(header.nodes as usize);
     // Try to decode all the states
@@ -528,19 +531,21 @@ where
         unencrypted.split_to(size as usize)
       } else {
         let compressed_size = conn.read_u32_varint().await.map_err(Error::transport)?;
+        println!("compressed_size {}", compressed_size);
         let mut buf = vec![0; compressed_size];
         if let Err(e) = conn.read_exact(&mut buf).await {
           return Err(Error::transport(e));
         }
         buf.into()
       };
-
+      println!("compress msg: {:?}", compressed.as_ref());
       let compress = match Compress::decode_from::<T::Checksumer>(compressed) {
         Ok(compress) => compress,
         Err(e) => {
           return Err(Error::transport(TransportError::Decode(e)));
         }
       };
+      println!("compressed buf: {:?}", compress.buf.as_ref());
       let mut uncompressed_data = if compress.algo.is_none() {
         compress.buf
       } else if compress.buf.len() > opts.offload_size {
@@ -579,6 +584,7 @@ where
           Err(e) => return Err(e.into()),
         }
       };
+      println!("uncompressed_data: {:?}", uncompressed_data.as_ref());
 
       if !uncompressed_data.has_remaining() {
         return Err(Error::transport(TransportError::Decode(
@@ -595,14 +601,18 @@ where
           ))));
         }
       };
-
-      // Create a new bufConn
+      let len = decode_u32_from_buf(&mut uncompressed_data).map_err(|e| TransportError::Decode(DecodeError::from(e)))?.0 as usize;
+      if uncompressed_data.remaining() < len {
+        return Err(Error::transport(TransportError::Decode(
+          DecodeError::Truncated(MessageType::Compress.as_err_str()),
+        )));
+      }
       return Ok((uncompressed_data, mt));
     }
 
     let size = conn.read_u32_varint().await.map_err(Error::transport)?;
     let mut buf = vec![0; size];
-    if let Err(e) = conn.read(&mut buf).await {
+    if let Err(e) = conn.read_exact(&mut buf).await {
       return Err(Error::transport(e));
     }
     Ok((buf.into(), mt))
@@ -748,6 +758,7 @@ where
           tracing::error!(target = "showbiz", "too many pending push/pull requests");
           return;
         }
+        println!("before read {:?}", data.as_ref());
         let node_state = match self.read_remote_state(data).await {
           Ok(ns) => ns,
           Err(e) => {

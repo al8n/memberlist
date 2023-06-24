@@ -94,6 +94,34 @@ pub(crate) struct Compress {
 
 impl Compress {
   #[inline]
+  pub fn encoded_len(&self) -> usize {
+    let buf_len = self.buf.len();
+    1 + 1 // algo + tag
+    + if buf_len == 0 {
+      0
+    } else {
+      buf_len + encoded_u32_len(buf_len as u32) + 1 // buf + tag
+    } + CHECKSUM_SIZE
+  }
+
+  #[inline]
+  pub fn encode_to<C: Checksumer>(&self, mut buf: impl BufMut) {
+    let mut h = C::new();
+    encode_u32_to_buf(&mut buf, self.encoded_len() as u32);
+    buf.put_u8(1);
+    buf.put_u8(self.algo as u8);
+    h.update(&[self.algo as u8]);
+    if !self.buf.is_empty() {
+      buf.put_u8(2);
+      encode_u32_to_buf(&mut buf, self.buf.len() as u32);
+      buf.put_slice(self.buf.as_ref());
+      println!("com {:?} len {}", self.buf.as_ref(), self.buf.len());
+      h.update(self.buf.as_ref());
+    }
+    buf.put_u32(h.finalize());
+  }
+
+  #[inline]
   pub fn decode_len(buf: impl Buf) -> Result<u32, DecodeError> {
     decode_u32_from_buf(buf).map(|(x, _)| x).map_err(From::from)
   }
@@ -121,8 +149,12 @@ impl Compress {
           if buf.remaining() < len {
             return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
           }
+          println!("decom {:?} buf_len {} len {}", buf.as_ref(), buf.len(), len);
           this.buf = buf.split_to(len);
           hasher.update(&this.buf);
+          if required == 1 {
+            break;
+          }
         }
         _ => {}
       }

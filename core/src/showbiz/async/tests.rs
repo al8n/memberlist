@@ -352,6 +352,107 @@ fn test_join_with_compression() {
   // }
 }
 
+pub async fn test_join_with_encryption_runner<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let c1 = test_config::<R>()
+    .with_name("test_join_runner_1".try_into().unwrap())
+    .with_compression_algo(CompressionAlgo::None)
+    .with_secret_key(Some(SecretKey::Aes128([0; 16])));
+  let m1 = Showbiz::<VoidDelegate, _, _>::new(c1).await.unwrap();
+
+  let c2 = test_config::<R>()
+    .with_name("test_join_runner_2".try_into().unwrap())
+    .with_compression_algo(CompressionAlgo::None)
+    .with_secret_key(Some(SecretKey::Aes128([0; 16])));
+  let m2 = Showbiz::<VoidDelegate, _, _>::new(c2).await.unwrap();
+
+  m1.bootstrap().await.unwrap();
+  m2.bootstrap().await.unwrap();
+
+  let (num, _) = m2
+    .join(
+      [(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())]
+        .into_iter()
+        .collect(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(num, 1);
+
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
+}
+
+#[tracing_test::traced_test]
+#[test]
+fn test_join_with_encryption() {
+  {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(test_join_with_encryption_runner::<TokioRuntime>());
+  }
+
+  // {
+  //   AsyncStdRuntime::block_on(test_join_runner::<AsyncStdRuntime>());
+  // }
+  // {
+  //   SmolRuntime::block_on(test_join_runner::<SmolRuntime>());
+  // }
+}
+
+pub async fn test_join_with_encryption_and_compression_runner<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let c1 = test_config::<R>()
+    .with_name("test_join_runner_1".try_into().unwrap())
+    .with_secret_key(Some(SecretKey::Aes128([0; 16])));
+  let m1 = Showbiz::<VoidDelegate, _, _>::new(c1).await.unwrap();
+
+  let c2 = test_config::<R>()
+    .with_name("test_join_runner_2".try_into().unwrap())
+    .with_secret_key(Some(SecretKey::Aes128([0; 16])));
+  let m2 = Showbiz::<VoidDelegate, _, _>::new(c2).await.unwrap();
+
+  m1.bootstrap().await.unwrap();
+  m2.bootstrap().await.unwrap();
+
+  let (num, _) = m2
+    .join(
+      [(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())]
+        .into_iter()
+        .collect(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(num, 1);
+
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
+}
+
+#[tracing_test::traced_test]
+#[test]
+fn test_join_with_encryption_and_compression() {
+  {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(test_join_with_encryption_and_compression_runner::<TokioRuntime>());
+  }
+
+  // {
+  //   AsyncStdRuntime::block_on(test_join_runner::<AsyncStdRuntime>());
+  // }
+  // {
+  //   SmolRuntime::block_on(test_join_runner::<SmolRuntime>());
+  // }
+}
+
+
 async fn test_join_with_labels() {
   todo!()
 }
