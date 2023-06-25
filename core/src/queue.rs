@@ -91,11 +91,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
   }
 
   #[cfg(feature = "async")]
-  pub async fn get_broadcasts(
-    &self,
-    overhead: usize,
-    limit: usize,
-  ) -> Result<Vec<Message>, B::Error> {
+  pub async fn get_broadcasts(&self, overhead: usize, limit: usize) -> Vec<Message> {
     self
       .get_broadcast_with_prepend(Vec::new(), overhead, limit)
       .await
@@ -107,11 +103,11 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     prepend: Vec<Message>,
     overhead: usize,
     limit: usize,
-  ) -> Result<Vec<Message>, B::Error> {
+  ) -> Vec<Message> {
     let mut to_send = prepend;
     let mut inner = self.inner.lock().await;
     if inner.q.is_empty() {
-      return Ok(Vec::new());
+      return Vec::new();
     }
 
     let transmit_limit = retransmit_limit(self.retransmit_mult, self.num_nodes.num_nodes());
@@ -163,7 +159,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
           // check if we should stop transmission
           inner.remove(&keep);
           if keep.transmits.load(Ordering::Relaxed) + 1 >= transmit_limit {
-            keep.broadcast.finished().await?;
+            keep.broadcast.finished().await;
           } else {
             // We need to bump this item down to another transmit tier, but
             // because it would be in the same direction that we're walking the
@@ -185,17 +181,17 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
       inner.insert(item);
     }
 
-    Ok(to_send)
+    to_send
   }
 
   /// Used to enqueue a broadcast
   #[cfg(feature = "async")]
-  pub async fn queue_broadcast(&self, b: B) -> Result<(), B::Error> {
+  pub async fn queue_broadcast(&self, b: B) {
     self.queue_broadcast_in(b, 0).await
   }
 
   #[cfg(feature = "async")]
-  async fn queue_broadcast_in(&self, b: B, initial_transmits: usize) -> Result<(), B::Error> {
+  async fn queue_broadcast_in(&self, b: B, initial_transmits: usize) {
     let mut inner = self.inner.lock().await;
 
     if inner.id_gen == u64::MAX {
@@ -218,7 +214,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     // Check if this message invalidates another.
     let name = lb.broadcast.name();
     if let Some(old) = inner.m.remove(name) {
-      old.broadcast.finished().await?;
+      old.broadcast.finished().await;
 
       inner.q.remove(&old);
       if inner.q.is_empty() {
@@ -229,7 +225,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
       for item in inner.q.iter() {
         let keep = lb.broadcast.invalidates(&item.broadcast);
         if keep {
-          item.broadcast.finished().await?;
+          item.broadcast.finished().await;
         }
       }
       inner
@@ -245,39 +241,36 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
 
     // Append to the relevant queue.
     inner.insert(Arc::new(lb));
-    Ok(())
   }
 
   /// Clears all the queued messages.
   #[cfg(all(feature = "async", test))]
-  pub async fn reset(&self) -> Result<(), B::Error> {
+  pub async fn reset(&self) {
     let mut inner = self.inner.lock().await;
 
     for b in inner.q.iter() {
-      b.broadcast.finished().await?;
+      b.broadcast.finished().await;
     }
 
     inner.q.clear();
     inner.m.clear();
     inner.id_gen = 0;
-    Ok(())
   }
 
   /// Retain the maxRetain latest messages, and the rest
   /// will be discarded. This can be used to prevent unbounded queue sizes
   #[cfg(feature = "async")]
-  pub async fn prune(&self, max_retain: usize) -> Result<(), B::Error> {
+  pub async fn prune(&self, max_retain: usize) {
     let mut inner = self.inner.lock().await;
     // Do nothing if queue size is less than the limit
     while inner.q.len() > max_retain {
       if let Some(item) = inner.q.pop_last() {
-        item.broadcast.finished().await?;
+        item.broadcast.finished().await;
         inner.remove(&item);
       } else {
         break;
       }
     }
-    Ok(())
   }
 }
 

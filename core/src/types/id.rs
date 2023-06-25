@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use super::{decode_u32_from_buf, encode_u32_to_buf, encoded_u32_len, DecodeError, Name};
+use super::{decode_u32_from_buf, encode_u32_to_buf, DecodeError, Name};
 
 const V4_ADDR_SIZE: usize = 4;
 const V6_ADDR_SIZE: usize = 16;

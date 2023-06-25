@@ -1,4 +1,7 @@
-use crate::{types::{Compress, MessageType, encoded_u32_len, encode_u32_to_buf}, checksum::Checksumer};
+use crate::{
+  checksum::Checksumer,
+  types::{encoded_u32_len, Compress, MessageType},
+};
 
 use super::types::CompressionAlgo;
 
@@ -21,7 +24,10 @@ pub enum DecompressError {
   Lzw(#[from] weezl::LzwError),
 }
 
-pub(crate) fn compress_to_msg<C: Checksumer>(algo: CompressionAlgo, data: Bytes) -> Result<Bytes, CompressError> {
+pub(crate) fn compress_to_msg<C: Checksumer>(
+  algo: CompressionAlgo,
+  data: Bytes,
+) -> Result<Bytes, CompressError> {
   let b = compress_payload(algo, data.as_ref())?;
   let compress = Compress {
     algo,
@@ -59,7 +65,7 @@ pub(crate) fn decompress_payload(
   }
 }
 
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 pub(crate) use is_global_ip::IsGlobalIp;
 
 /// The code in this mod is copied from [libp2p]

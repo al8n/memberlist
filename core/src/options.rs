@@ -7,7 +7,7 @@ use std::{
 
 use super::{
   security::{EncryptionAlgo, SecretKey},
-  transport::Transport,
+  transport::{Transport, TransportOptions},
   types::{CompressionAlgo, Label, Name},
   version::VSN_SIZE,
 };
@@ -15,7 +15,7 @@ use super::{
 pub use super::version::{DelegateVersion, ProtocolVersion};
 
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Options<T: Transport> {
   /// The name of this node. This must be unique in the cluster.
   #[viewit(getter(const, style = "ref"))]
@@ -53,6 +53,7 @@ pub struct Options<T: Transport> {
   /// operations. This is a legacy name for backwards compatibility, but
   /// should really be called StreamTimeout now that we have generalized
   /// the transport.
+  #[serde(with = "humantime_serde")]
   tcp_timeout: Duration,
 
   /// The number of nodes that will be asked to perform
@@ -111,15 +112,18 @@ pub struct Options<T: Transport> {
   /// Setting this interval lower (more frequent) will increase convergence
   /// speeds across larger clusters at the expense of increased bandwidth
   /// usage.
+  #[serde(with = "humantime_serde")]
   push_pull_interval: Duration,
 
   /// The interval between random node probes. Setting
   /// this lower (more frequent) will cause the memberlist cluster to detect
   /// failed nodes more quickly at the expense of increased bandwidth usage
+  #[serde(with = "humantime_serde")]
   probe_interval: Duration,
   /// The timeout to wait for an ack from a probed node
   /// before assuming it is unhealthy. This should be set to 99-percentile
   /// of RTT (round-trip time) on your network.
+  #[serde(with = "humantime_serde")]
   probe_timeout: Duration,
   /// Set this field will turn off the fallback TCP pings that are attempted
   /// if the direct UDP ping fails. These get pipelined along with the
@@ -135,6 +139,7 @@ pub struct Options<T: Transport> {
   /// If this is set to zero, non-piggyback gossip is disabled. By lowering
   /// this value (more frequent) gossip messages are propagated across
   /// the cluster more quickly at the expense of increased bandwidth.
+  #[serde(with = "humantime_serde")]
   gossip_interval: Duration,
   /// The number of random nodes to send gossip messages to
   /// per `gossip_interval`. Increasing this number causes the gossip messages
@@ -143,6 +148,7 @@ pub struct Options<T: Transport> {
   gossip_nodes: usize,
   /// The interval after which a node has died that
   /// we will still try to gossip to it. This gives it a chance to refute.
+  #[serde(with = "humantime_serde")]
   gossip_to_the_dead_time: Duration,
   /// Controls whether to enforce encryption for incoming
   /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
@@ -206,6 +212,7 @@ pub struct Options<T: Transport> {
   /// Controls the time before a dead node's name can be
   /// reclaimed by one with a different address or port. By default, this is 0,
   /// meaning nodes cannot be reclaimed this way.
+  #[serde(with = "humantime_serde")]
   dead_node_reclaim_time: Duration,
 
   /// If [`None`], allow any connection (default), otherwise specify all networks
@@ -226,21 +233,36 @@ pub struct Options<T: Transport> {
     const,
     result(converter(fn = "Option::as_ref"), type = "Option<&T::Options>")
   ))]
+  #[serde(bound = "T::Options: TransportOptions")]
   transport: Option<T::Options>,
 
   /// The interval at which we check the message
   /// queue to apply the warning and max depth.
+  #[serde(with = "humantime_serde")]
   queue_check_interval: Duration,
 }
 
 impl<T> Default for Options<T>
 where
   T: Transport,
-  T::Options: Default,
 {
   #[inline]
   fn default() -> Self {
     Self::lan()
+  }
+}
+
+impl<T: Transport> Clone for Options<T> {
+  #[inline]
+  fn clone(&self) -> Self {
+    Self {
+      transport: self.transport.clone(),
+      name: self.name.clone(),
+      label: self.label.clone(),
+      dns_config_path: self.dns_config_path.clone(),
+      allowed_cidrs: self.allowed_cidrs.clone(),
+      ..*self
+    }
   }
 }
 

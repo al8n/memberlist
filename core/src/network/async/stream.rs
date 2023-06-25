@@ -3,7 +3,8 @@ use futures_util::{Future, Stream};
 
 use crate::{
   transport::ReliableConnection,
-  types::{Node, NodeId}, util::compress_to_msg,
+  types::{Node, NodeId},
+  util::compress_to_msg,
 };
 
 use super::*;
@@ -163,7 +164,7 @@ where
                 }
                 return;
               }
-            }; 
+            };
           }
 
           // Check if encryption is enabled
@@ -601,7 +602,9 @@ where
           ))));
         }
       };
-      let len = decode_u32_from_buf(&mut uncompressed_data).map_err(|e| TransportError::Decode(DecodeError::from(e)))?.0 as usize;
+      let len = decode_u32_from_buf(&mut uncompressed_data)
+        .map_err(|e| TransportError::Decode(DecodeError::from(e)))?
+        .0 as usize;
       if uncompressed_data.remaining() < len {
         return Err(Error::transport(TransportError::Decode(
           DecodeError::Truncated(MessageType::Compress.as_err_str()),

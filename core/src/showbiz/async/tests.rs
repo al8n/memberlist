@@ -441,7 +441,9 @@ where
 fn test_join_with_encryption_and_compression() {
   {
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_join_with_encryption_and_compression_runner::<TokioRuntime>());
+    runtime.block_on(test_join_with_encryption_and_compression_runner::<
+      TokioRuntime,
+    >());
   }
 
   // {
@@ -451,7 +453,6 @@ fn test_join_with_encryption_and_compression() {
   //   SmolRuntime::block_on(test_join_runner::<SmolRuntime>());
   // }
 }
-
 
 async fn test_join_with_labels() {
   todo!()

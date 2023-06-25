@@ -17,8 +17,6 @@ pub use crate::{
 pub enum Error<D: Delegate, T: Transport> {
   #[error("showbiz: node is not running, please bootstrap first")]
   NotRunning,
-  #[error("showbiz: failed to broadcast, no receivers are living")]
-  Broadcast,
   #[error("showbiz: timeout waiting for update broadcast")]
   UpdateTimeout,
   #[error("showbiz: timeout waiting for leave broadcast")]

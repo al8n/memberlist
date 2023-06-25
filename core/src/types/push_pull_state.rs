@@ -11,11 +11,9 @@ pub(crate) struct PushPullHeader {
 impl PushPullHeader {
   #[inline]
   pub fn encoded_len(&self) -> usize {
-    let basic = encoded_u32_len(self.nodes) + 1 // nodes + tag
+    encoded_u32_len(self.nodes) + 1 // nodes + tag
     + encoded_u32_len(self.user_state_len) + 1 // user_state_len + tag
-    + 1 + 1; // join + tag
-    basic
-    // + encoded_u32_len(basic as u32)
+    + 1 + 1 // join + tag
   }
 
   #[inline]

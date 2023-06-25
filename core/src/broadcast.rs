@@ -13,9 +13,6 @@ use async_channel::Sender;
 /// the memberlist cluster.
 #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 pub trait Broadcast: Send + Sync + 'static {
-  /// Error type
-  type Error: std::error::Error + Send + Sync + 'static;
-
   /// Returns the name of the broadcast, if any
   fn name(&self) -> &Name;
 
@@ -30,20 +27,20 @@ pub trait Broadcast: Send + Sync + 'static {
   /// be broadcast, either due to invalidation or to the
   /// transmit limit being reached
   #[cfg(not(feature = "nightly"))]
-  async fn finished(&self) -> Result<(), Self::Error>;
+  async fn finished(&self);
 
   /// Invoked when the message will no longer
   /// be broadcast, either due to invalidation or to the
   /// transmit limit being reached
   #[cfg(feature = "nightly")]
-  fn finished<'a>(
-    &'a self,
-  ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'a;
+  fn finished<'a>(&'a self) -> impl std::future::Future<Output = ()> + Send + 'a;
 
   /// Indicates that each message is
   /// intrinsically unique and there is no need to scan the broadcast queue for
   /// duplicates.
-  fn is_unique(&self) -> bool;
+  fn is_unique(&self) -> bool {
+    false
+  }
 }
 
 pub(crate) struct ShowbizBroadcast {
@@ -54,8 +51,6 @@ pub(crate) struct ShowbizBroadcast {
 
 #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 impl Broadcast for ShowbizBroadcast {
-  type Error = async_channel::SendError<()>;
-
   fn name(&self) -> &Name {
     &self.node.name
   }
@@ -69,28 +64,24 @@ impl Broadcast for ShowbizBroadcast {
   }
 
   #[cfg(not(feature = "nightly"))]
-  async fn finished(&self) -> Result<(), Self::Error> {
+  async fn finished(&self) {
     if let Some(tx) = &self.notify {
       if let Err(e) = tx.send(()).await {
-        tracing::error!(target = "showbiz", "failed to notify: {}", e);
-        return Err(e);
+        tracing::error!(target = "showbiz", "broadcast failed to notify: {}", e);
+        return;
       }
     }
-    Ok(())
   }
 
   #[cfg(feature = "nightly")]
-  fn finished<'a>(
-    &'a self,
-  ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'a {
+  fn finished<'a>(&'a self) -> impl std::future::Future<Output = ()> + Send + 'a {
     async move {
       if let Some(tx) = &self.notify {
         if let Err(e) = tx.send(()).await {
           tracing::error!(target = "showbiz", "failed to notify: {}", e);
-          return Err(e);
+          return;
         }
       }
-      Ok(())
     }
   }
 
@@ -122,7 +113,7 @@ impl<D: Delegate, T: Transport, R: Runtime> Showbiz<D, T, R> {
     node: NodeId,
     msg: Message,
     notify_tx: Option<Sender<()>>,
-  ) -> Result<(), async_channel::SendError<()>> {
+  ) {
     self
       .inner
       .broadcast
@@ -149,8 +140,7 @@ impl<D: Delegate, T: Transport, R: Runtime> Showbiz<D, T, R> {
       .inner
       .broadcast
       .get_broadcast_with_prepend(to_send, overhead, limit)
-      .await
-      .map_err(|_| Error::Broadcast)?;
+      .await;
 
     // Check if the user has anything to broadcast
     if let Some(delegate) = &self.inner.delegate {

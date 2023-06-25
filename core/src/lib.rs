@@ -53,6 +53,9 @@ pub use metrics;
 #[doc(hidden)]
 pub use tracing;
 
+#[doc(hidden)]
+pub use humantime_serde;
+
 /// All unit test fns are exported in the `tests` module.
 /// This module is used for users want to use other async runtime,
 /// and want to use the test if showbiz also works with their runtime.

@@ -149,7 +149,8 @@ pub(crate) struct UserMsgHeader {
   len: u32, // Encodes the byte lengh of user state
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(transparent)]
 pub struct Message(pub(crate) BytesMut);
 
 impl Default for Message {

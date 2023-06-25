@@ -1,7 +1,8 @@
 use super::*;
+use serde::{Deserialize, Serialize};
 
 #[viewit::viewit]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Alive {
   incarnation: u32,
   /// - 0: encryption algorithm
