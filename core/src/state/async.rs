@@ -60,7 +60,7 @@ struct AckMessage {
 
 impl<D, T, R> Showbiz<D, T, R>
 where
-  T: Transport,
+  T: Transport<Runtime = R>,
   D: Delegate,
   R: Runtime,
   <R::Interval as Stream>::Item: Send,
@@ -122,7 +122,7 @@ where
 // ---------------------------------Crate methods-------------------------------
 impl<D, T, R> Showbiz<D, T, R>
 where
-  T: Transport,
+  T: Transport<Runtime = R>,
   D: Delegate,
   R: Runtime,
   <R::Interval as Stream>::Item: Send,
@@ -702,7 +702,7 @@ macro_rules! bail_trigger {
 
 impl<D, T, R> Showbiz<D, T, R>
 where
-  T: Transport,
+  T: Transport<Runtime = R>,
   D: Delegate,
   R: Runtime,
   <R::Interval as Stream>::Item: Send,

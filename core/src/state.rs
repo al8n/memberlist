@@ -160,7 +160,7 @@ impl LocalNodeState {
 // private implementation
 impl<D, T, R> Showbiz<D, T, R>
 where
-  T: Transport,
+  T: Transport<Runtime = R>,
   R: Runtime,
   D: Delegate,
 {

@@ -36,7 +36,7 @@ pub(crate) struct AckHandler {
 }
 
 #[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct ShowbizCore<D: Delegate, T: Transport, R: Runtime> {
+pub(crate) struct ShowbizCore<D: Delegate, T: Transport<Runtime = R>, R: Runtime> {
   id: NodeId,
   hot: HotData,
   awareness: Awareness,
@@ -59,7 +59,7 @@ pub(crate) struct ShowbizCore<D: Delegate, T: Transport, R: Runtime> {
   _marker: std::marker::PhantomData<R>,
 }
 
-impl<D: Delegate, T: Transport, R: Runtime> Drop for ShowbizCore<D, T, R> {
+impl<D: Delegate, T: Transport<Runtime = R>, R: Runtime> Drop for ShowbizCore<D, T, R> {
   fn drop(&mut self) {
     if let Some(runner) = self.runner.swap(None) {
       R::spawn_detach(async move {
@@ -71,13 +71,13 @@ impl<D: Delegate, T: Transport, R: Runtime> Drop for ShowbizCore<D, T, R> {
   }
 }
 
-pub struct Showbiz<D: Delegate, T: Transport, R: Runtime> {
+pub struct Showbiz<D: Delegate, T: Transport<Runtime = R>, R: Runtime> {
   pub(crate) inner: Arc<ShowbizCore<D, T, R>>,
 }
 
 impl<D, T, R> Clone for Showbiz<D, T, R>
 where
-  T: Transport,
+  T: Transport<Runtime = R>,
   D: Delegate,
   R: Runtime,
 {
@@ -85,6 +85,47 @@ where
     Self {
       inner: self.inner.clone(),
     }
+  }
+}
+
+impl<D, T, R> Showbiz<D, T, R>
+where
+  D: Delegate,
+  T: Transport<Runtime = R>,
+  R: Runtime,
+{
+/// Returns the number of alive nodes currently known. Between
+  /// the time of calling this and calling Members, the number of alive nodes
+  /// may have changed, so this shouldn't be used to determine how many
+  /// members will be returned by Members.
+  #[inline]
+  pub async fn num_members(&self) -> usize {
+    self
+      .inner
+      .nodes
+      .read()
+      .await
+      .nodes
+      .iter()
+      .filter(|n| !n.dead_or_left())
+      .count()
+  }
+
+  /// Returns if the showbiz enabled encryption
+  #[inline]
+  pub fn encryption_enabled(&self) -> bool {
+    if let Some(keyring) = &self.inner.keyring {
+      !keyring.is_empty() && !self.inner.opts.encryption_algo.is_none()
+    } else {
+      false
+    }
+  }
+
+  #[inline]
+  pub async fn local_node(&self) -> Arc<Node> {
+    let nodes = self.inner.nodes.read().await;
+    // TODO: return an error
+    nodes.node_map.get(&self.inner.id.name).map(|m| m.state.node.clone()).unwrap()
   }
 }
 
@@ -297,23 +338,6 @@ where
       .iter()
       .map(|n| n.node.clone())
       .collect()
-  }
-
-  /// Returns the number of alive nodes currently known. Between
-  /// the time of calling this and calling Members, the number of alive nodes
-  /// may have changed, so this shouldn't be used to determine how many
-  /// members will be returned by Members.
-  #[inline]
-  pub async fn num_members(&self) -> usize {
-    self
-      .inner
-      .nodes
-      .read()
-      .await
-      .nodes
-      .iter()
-      .filter(|n| !n.dead_or_left())
-      .count()
   }
 
   /// Leave will broadcast a leave message but will not shutdown the background
@@ -600,7 +624,7 @@ where
 impl<D, T, R> Showbiz<D, T, R>
 where
   D: Delegate,
-  T: Transport,
+  T: Transport<Runtime = R>,
   R: Runtime,
   <R::Interval as Stream>::Item: Send,
   <R::Sleep as Future>::Output: Send,
@@ -708,15 +732,6 @@ where
       .nodes
       .iter()
       .any(|n| !n.dead_or_left() && n.node.name() != self.inner.opts.name.as_ref())
-  }
-
-  #[inline]
-  pub(crate) fn encryption_enabled(&self) -> bool {
-    if let Some(keyring) = &self.inner.keyring {
-      !keyring.is_empty() && !self.inner.opts.encryption_algo.is_none()
-    } else {
-      false
-    }
   }
 
   #[cfg(feature = "metrics")]

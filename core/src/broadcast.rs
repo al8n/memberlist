@@ -91,7 +91,7 @@ impl Broadcast for ShowbizBroadcast {
 }
 
 #[cfg(feature = "async")]
-impl<D: Delegate, T: Transport, R: Runtime> Showbiz<D, T, R> {
+impl<D: Delegate, T: Transport<Runtime = R>, R: Runtime> Showbiz<D, T, R> {
   #[inline]
   pub(crate) async fn broadcast_notify(
     &self,

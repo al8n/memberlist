@@ -15,7 +15,7 @@ use super::*;
 impl<D, T, R> Showbiz<D, T, R>
 where
   D: Delegate,
-  T: Transport,
+  T: Transport<Runtime = R>,
   R: Runtime,
   <R::Interval as Stream>::Item: Send,
   <R::Sleep as Future>::Output: Send,

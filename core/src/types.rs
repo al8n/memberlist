@@ -167,6 +167,12 @@ impl Message {
     Self::new_with_type(MessageType::User)
   }
 
+  #[doc(hidden)]
+  #[inline]
+  pub fn __from_bytes_mut(data: BytesMut) -> Self {
+    Self(data)
+  }
+
   #[inline]
   pub(crate) fn new_with_type(ty: MessageType) -> Self {
     let mut this = BytesMut::with_capacity(Self::PREFIX_SIZE);
@@ -377,6 +383,17 @@ impl Message {
     let size = self.0.len() - Self::PREFIX_SIZE;
     self.0[1..Self::PREFIX_SIZE].copy_from_slice(&(size as u32).to_be_bytes());
     self.0.freeze()
+  }
+}
+
+impl std::io::Write for Message {
+  fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    self.0.put_slice(buf);
+    Ok(buf.len())
+  }
+
+  fn flush(&mut self) -> std::io::Result<()> {
+    Ok(())
   }
 }
 
