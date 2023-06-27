@@ -12,18 +12,17 @@ use rand::Rng;
 
 use super::*;
 
-impl<D, T, R> Showbiz<D, T, R>
+impl<D, T> Showbiz<D, T>
 where
   D: Delegate,
-  T: Transport<Runtime = R>,
-  R: Runtime,
-  <R::Interval as Stream>::Item: Send,
-  <R::Sleep as Future>::Output: Send,
+  T: Transport,
+  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
+  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   pub(crate) fn packet_listener(&self, shutdown_rx: async_channel::Receiver<()>) {
     let this = self.clone();
     let transport_rx = this.runner().as_ref().unwrap().transport.packet();
-    R::spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn_detach(async move {
       loop {
         futures_util::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -357,9 +356,9 @@ where
     // Setup a timer to fire off a nack if no ack is seen in time.
     let this = self.clone();
     let probe_timeout = self.inner.opts.probe_timeout;
-    R::spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn_detach(async move {
       futures_util::select! {
-        _ = R::sleep(probe_timeout).fuse() => {
+        _ = <T::Runtime as Runtime>::sleep(probe_timeout).fuse() => {
           // We've not received an ack, so send a nack.
           let nack = NackResponse::new(ind.seq_no);
           let mut out = BytesMut::with_capacity(MessageType::SIZE + nack.encoded_len());

@@ -23,13 +23,12 @@ mod stream;
 #[cfg(any(test, feature = "test"))]
 pub(crate) mod tests;
 
-impl<D, T, R> Showbiz<D, T, R>
+impl<D, T> Showbiz<D, T>
 where
   D: Delegate,
-  T: Transport<Runtime = R>,
-  R: Runtime,
-  <R::Interval as Stream>::Item: Send,
-  <R::Sleep as Future>::Output: Send,
+  T: Transport,
+  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
+  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   pub(crate) async fn send_ping_and_wait_for_ack(
     &self,

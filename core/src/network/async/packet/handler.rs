@@ -6,13 +6,12 @@ use crate::showbiz::MessageHandoff;
 
 use super::*;
 
-impl<D, T, R> Showbiz<D, T, R>
+impl<D, T> Showbiz<D, T>
 where
-  T: Transport<Runtime = R>,
+  T: Transport,
   D: Delegate,
-  R: Runtime,
-  <R::Interval as Stream>::Item: Send,
-  <R::Sleep as Future>::Output: Send,
+  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
+  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// a long running thread that processes messages received
   /// over the packet interface, but is decoupled from the listener to avoid
@@ -20,7 +19,7 @@ where
   pub(crate) fn packet_handler(&self, shutdown_rx: async_channel::Receiver<()>) {
     let this = self.clone();
     let handoff_rx = this.inner.handoff_rx.clone();
-    R::spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn_detach(async move {
       loop {
         futures_util::select! {
           _ = shutdown_rx.recv().fuse() => {

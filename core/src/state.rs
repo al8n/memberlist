@@ -9,8 +9,6 @@ use crate::{
   Status,
 };
 
-use agnostic::Runtime;
-
 use super::{
   delegate::Delegate,
   error::Error,
@@ -158,10 +156,9 @@ impl LocalNodeState {
 }
 
 // private implementation
-impl<D, T, R> Showbiz<D, T, R>
+impl<D, T> Showbiz<D, T>
 where
-  T: Transport<Runtime = R>,
-  R: Runtime,
+  T: Transport,
   D: Delegate,
 {
   /// Returns a usable sequence number in a thread safe way

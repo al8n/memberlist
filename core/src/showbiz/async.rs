@@ -36,7 +36,7 @@ pub(crate) struct AckHandler {
 }
 
 #[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct ShowbizCore<D: Delegate, T: Transport<Runtime = R>, R: Runtime> {
+pub(crate) struct ShowbizCore<D: Delegate, T: Transport> {
   id: NodeId,
   hot: HotData,
   awareness: Awareness,
@@ -49,20 +49,19 @@ pub(crate) struct ShowbizCore<D: Delegate, T: Transport<Runtime = R>, R: Runtime
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue>,
-  nodes: Arc<RwLock<Memberlist<R>>>,
+  nodes: Arc<RwLock<Memberlist<T::Runtime>>>,
   ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
-  dns: Option<Dns<T, R>>,
+  dns: Option<Dns<T>>,
   #[cfg(feature = "metrics")]
   metrics_labels: Arc<Vec<metrics::Label>>,
   runner: ArcSwapOption<Runner<T>>,
   opts: Arc<Options<T>>,
-  _marker: std::marker::PhantomData<R>,
 }
 
-impl<D: Delegate, T: Transport<Runtime = R>, R: Runtime> Drop for ShowbizCore<D, T, R> {
+impl<D: Delegate, T: Transport> Drop for ShowbizCore<D, T> {
   fn drop(&mut self) {
     if let Some(runner) = self.runner.swap(None) {
-      R::spawn_detach(async move {
+      <T::Runtime as Runtime>::spawn_detach(async move {
         if let Err(e) = runner.transport.shutdown().await {
           tracing::error!(target = "showbiz", err=%e, "failed to block shutdown showbiz");
         }
@@ -71,15 +70,14 @@ impl<D: Delegate, T: Transport<Runtime = R>, R: Runtime> Drop for ShowbizCore<D,
   }
 }
 
-pub struct Showbiz<D: Delegate, T: Transport<Runtime = R>, R: Runtime> {
-  pub(crate) inner: Arc<ShowbizCore<D, T, R>>,
+pub struct Showbiz<D: Delegate, T: Transport> {
+  pub(crate) inner: Arc<ShowbizCore<D, T>>,
 }
 
-impl<D, T, R> Clone for Showbiz<D, T, R>
+impl<D, T> Clone for Showbiz<D, T>
 where
-  T: Transport<Runtime = R>,
+  T: Transport,
   D: Delegate,
-  R: Runtime,
 {
   fn clone(&self) -> Self {
     Self {
@@ -88,13 +86,18 @@ where
   }
 }
 
-impl<D, T, R> Showbiz<D, T, R>
+impl<D, T> Showbiz<D, T>
 where
   D: Delegate,
-  T: Transport<Runtime = R>,
-  R: Runtime,
+  T: Transport,
 {
-/// Returns the number of alive nodes currently known. Between
+  /// Returns the local node's name.
+  #[inline]
+  pub fn name(&self) -> &Name {
+    &self.inner.opts.name
+  }
+
+  /// Returns the number of alive nodes currently known. Between
   /// the time of calling this and calling Members, the number of alive nodes
   /// may have changed, so this shouldn't be used to determine how many
   /// members will be returned by Members.
@@ -125,17 +128,20 @@ where
   pub async fn local_node(&self) -> Arc<Node> {
     let nodes = self.inner.nodes.read().await;
     // TODO: return an error
-    nodes.node_map.get(&self.inner.id.name).map(|m| m.state.node.clone()).unwrap()
+    nodes
+      .node_map
+      .get(&self.inner.id.name)
+      .map(|m| m.state.node.clone())
+      .unwrap()
   }
 }
 
-impl<D, T, R> Showbiz<D, T, R>
+impl<D, T> Showbiz<D, T>
 where
   D: Delegate,
-  T: Transport<Runtime = R>,
-  R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
+  T: Transport,
+  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
+  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
 {
   #[inline]
   pub async fn new(opts: Options<T>) -> Result<Self, Error<D, T>> {
@@ -238,7 +244,6 @@ where
         metrics_labels: Arc::new(vec![]),
         runner: ArcSwapOption::empty(),
         opts: Arc::new(opts),
-        _marker: std::marker::PhantomData,
         handoff_tx,
         handoff_rx,
       }),
@@ -388,7 +393,7 @@ where
                   );
                 }
               },
-              _ = R::sleep(timeout).fuse() => {
+              _ = <T::Runtime as Runtime>::sleep(timeout).fuse() => {
                 return Err(Error::LeaveTimeout);
               }
             }
@@ -555,7 +560,7 @@ where
       if timeout > Duration::ZERO {
         futures_util::select_biased! {
           _ = notify_rx.recv().fuse() => {},
-          _ = R::sleep(timeout).fuse() => return Err(Error::UpdateTimeout),
+          _ = <T::Runtime as Runtime>::sleep(timeout).fuse() => return Err(Error::UpdateTimeout),
         }
       } else {
         futures_util::select! {
@@ -621,13 +626,12 @@ where
 }
 
 // private impelementation
-impl<D, T, R> Showbiz<D, T, R>
+impl<D, T> Showbiz<D, T>
 where
   D: Delegate,
-  T: Transport<Runtime = R>,
-  R: Runtime,
-  <R::Interval as Stream>::Item: Send,
-  <R::Sleep as Future>::Output: Send,
+  T: Transport,
+  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
+  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   #[inline]
   pub(crate) fn runner(&self) -> Guard<Option<Arc<Runner<T>>>, DefaultStrategy> {
@@ -642,7 +646,7 @@ where
   /// to do this rather expensive operation.
   pub(crate) async fn tcp_lookup_ip(
     &self,
-    dns: &Dns<T, R>,
+    dns: &Dns<T>,
     host: &str,
     default_port: u16,
   ) -> Result<Vec<SocketAddr>, Error<D, T>> {
@@ -741,13 +745,13 @@ where
 
     static QUEUE_BROADCAST: std::sync::Once = std::sync::Once::new();
 
-    R::spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn_detach(async move {
       loop {
         futures_util::select! {
           _ = shutdown_rx.recv().fuse() => {
             return;
           },
-          _ = R::sleep(queue_check_interval).fuse() => {
+          _ = <T::Runtime as Runtime>::sleep(queue_check_interval).fuse() => {
             let numq = this.inner.broadcast.num_queued().await;
             QUEUE_BROADCAST.call_once(|| {
               metrics::register_gauge!("showbiz.queue.broadcasts");

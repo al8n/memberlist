@@ -54,7 +54,7 @@ async fn test_ingest_packet_exported_func_empty_message() {
   todo!()
 }
 
-async fn test_gossip_mismatched_keys_runner<R: Runtime>()
+pub async fn test_gossip_mismatched_keys_runner<R: Runtime>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,

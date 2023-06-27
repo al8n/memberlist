@@ -8,7 +8,7 @@ use trust_dns_resolver::{
   AsyncResolver,
 };
 
-pub(crate) type Dns<T, R> = AsyncResolver<AsyncConnectionProvider<T, R>>;
+pub(crate) type Dns<T> = AsyncResolver<AsyncConnectionProvider<T>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DnsError {
@@ -46,41 +46,32 @@ impl<R: Runtime> Spawn for AsyncSpawn<R> {
   }
 }
 
-pub struct AsyncRuntimeProvider<T: Transport, R: Runtime> {
-  runtime: AsyncSpawn<R>,
-  _marker: PhantomData<T>,
+pub struct AsyncRuntimeProvider<T: Transport> {
+  runtime: AsyncSpawn<T::Runtime>,
 }
 
-impl<T: Transport, R: Runtime> AsyncRuntimeProvider<T, R> {
+impl<T: Transport> AsyncRuntimeProvider<T> {
   pub(crate) fn new() -> Self {
     Self {
       runtime: AsyncSpawn {
         _marker: PhantomData,
       },
-      _marker: PhantomData,
     }
   }
 }
 
-impl<T, R> Clone for AsyncRuntimeProvider<T, R>
+impl<T> Clone for AsyncRuntimeProvider<T>
 where
   T: Transport,
-  R: Runtime,
 {
   fn clone(&self) -> Self {
     Self {
       runtime: self.runtime,
-      _marker: PhantomData,
     }
   }
 }
 
-impl<T, R> Copy for AsyncRuntimeProvider<T, R>
-where
-  T: Transport,
-  R: Runtime,
-{
-}
+impl<T> Copy for AsyncRuntimeProvider<T> where T: Transport {}
 
 pub struct Timer<R: Runtime>(PhantomData<R>);
 
@@ -211,14 +202,14 @@ impl<R: Runtime> trust_dns_proto::udp::DnsUdpSocket for AsyncDnsUdp<R> {
   }
 }
 
-impl<T: Transport, R: Runtime> RuntimeProvider for AsyncRuntimeProvider<T, R> {
-  type Handle = AsyncSpawn<R>;
+impl<T: Transport> RuntimeProvider for AsyncRuntimeProvider<T> {
+  type Handle = AsyncSpawn<T::Runtime>;
 
-  type Timer = Timer<R>;
+  type Timer = Timer<T::Runtime>;
 
-  type Udp = AsyncDnsUdp<R>;
+  type Udp = AsyncDnsUdp<T::Runtime>;
 
-  type Tcp = AsyncDnsTcp<R>;
+  type Tcp = AsyncDnsTcp<T::Runtime>;
 
   fn create_handle(&self) -> Self::Handle {
     self.runtime
@@ -240,12 +231,12 @@ impl<T: Transport, R: Runtime> RuntimeProvider for AsyncRuntimeProvider<T, R> {
   }
 }
 
-pub struct AsyncConnectionProvider<T: Transport, R: Runtime> {
-  runtime_provider: AsyncRuntimeProvider<T, R>,
-  connection_provider: GenericConnector<AsyncRuntimeProvider<T, R>>,
+pub struct AsyncConnectionProvider<T: Transport> {
+  runtime_provider: AsyncRuntimeProvider<T>,
+  connection_provider: GenericConnector<AsyncRuntimeProvider<T>>,
 }
 
-impl<T: Transport, R: Runtime> AsyncConnectionProvider<T, R> {
+impl<T: Transport> AsyncConnectionProvider<T> {
   pub(crate) fn new() -> Self {
     Self {
       runtime_provider: AsyncRuntimeProvider::new(),
@@ -254,7 +245,7 @@ impl<T: Transport, R: Runtime> AsyncConnectionProvider<T, R> {
   }
 }
 
-impl<T: Transport, R: Runtime> Clone for AsyncConnectionProvider<T, R> {
+impl<T: Transport> Clone for AsyncConnectionProvider<T> {
   fn clone(&self) -> Self {
     Self {
       runtime_provider: self.runtime_provider,
@@ -263,11 +254,10 @@ impl<T: Transport, R: Runtime> Clone for AsyncConnectionProvider<T, R> {
   }
 }
 
-impl<T: Transport, R: Runtime> ConnectionProvider for AsyncConnectionProvider<T, R> {
-  type Conn = <GenericConnector<AsyncRuntimeProvider<T, R>> as ConnectionProvider>::Conn;
-  type FutureConn =
-    <GenericConnector<AsyncRuntimeProvider<T, R>> as ConnectionProvider>::FutureConn;
-  type RuntimeProvider = AsyncRuntimeProvider<T, R>;
+impl<T: Transport> ConnectionProvider for AsyncConnectionProvider<T> {
+  type Conn = <GenericConnector<AsyncRuntimeProvider<T>> as ConnectionProvider>::Conn;
+  type FutureConn = <GenericConnector<AsyncRuntimeProvider<T>> as ConnectionProvider>::FutureConn;
+  type RuntimeProvider = AsyncRuntimeProvider<T>;
 
   fn new_connection(
     &self,

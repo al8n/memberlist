@@ -13,6 +13,7 @@ pub mod checksum;
 pub mod delegate;
 pub mod error;
 mod network;
+pub use network::META_MAX_SIZE;
 mod options;
 pub use options::{DelegateVersion, Options, ProtocolVersion};
 mod dns;

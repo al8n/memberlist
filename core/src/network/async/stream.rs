@@ -10,20 +10,19 @@ use crate::{
 use super::*;
 
 // --------------------------------------------Crate Level Methods-------------------------------------------------
-impl<D, T, R> Showbiz<D, T, R>
+impl<D, T> Showbiz<D, T>
 where
   D: Delegate,
-  T: Transport<Runtime = R>,
-  R: Runtime,
-  <R::Interval as Stream>::Item: Send,
-  <R::Sleep as Future>::Output: Send,
+  T: Transport,
+  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
+  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// A long running thread that pulls incoming streams from the
   /// transport and hands them off for processing.
   pub(crate) fn stream_listener(&self, shutdown_rx: async_channel::Receiver<()>) {
     let this = self.clone();
     let transport_rx = this.runner().as_ref().unwrap().transport.stream();
-    R::spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn_detach(async move {
       tracing::debug!(target = "showbiz", "stream_listener start");
       loop {
         futures_util::select! {
@@ -35,7 +34,7 @@ where
             match conn {
               Ok(conn) => {
                 let this = this.clone();
-                R::spawn_detach(this.handle_conn(conn))
+                <T::Runtime as Runtime>::spawn_detach(this.handle_conn(conn))
               },
               Err(e) => {
                 tracing::error!(target = "showbiz", "failed to accept connection: {}", e);
@@ -114,13 +113,12 @@ where
 }
 
 // ----------------------------------------Module Level Methods------------------------------------
-impl<D, T, R> Showbiz<D, T, R>
+impl<D, T> Showbiz<D, T>
 where
   D: Delegate,
-  T: Transport<Runtime = R>,
-  R: Runtime,
-  <R::Interval as Stream>::Item: Send,
-  <R::Sleep as Future>::Output: Send,
+  T: Transport,
+  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
+  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   pub(super) async fn raw_send_msg_stream(
     &self,
@@ -623,13 +621,12 @@ where
 }
 
 // -----------------------------------------Private Level Methods-----------------------------------
-impl<D, T, R> Showbiz<D, T, R>
+impl<D, T> Showbiz<D, T>
 where
   D: Delegate,
-  T: Transport<Runtime = R>,
-  R: Runtime,
-  <R::Interval as Stream>::Item: Send,
-  <R::Sleep as Future>::Output: Send,
+  T: Transport,
+  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
+  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Handles a single incoming stream connection from the transport.
   async fn handle_conn(self, mut conn: ReliableConnection<T>) {

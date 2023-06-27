@@ -624,7 +624,7 @@ where
     /// Therefore, changes to `MAX_DELAY` may have an effect on the latency of shutdown.
     const MAX_DELAY: Duration = Duration::from_secs(1);
 
-    R::spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn_detach(async move {
       scopeguard::defer!(wg.done());
       let mut loop_delay = Duration::ZERO;
 
@@ -661,7 +661,7 @@ where
                 }
 
                 tracing::error!(target = "showbiz", err = %e, "error accepting TCP connection");
-                R::sleep(loop_delay).await;
+                <T::Runtime as Runtime>::sleep(loop_delay).await;
                 continue;
               }
             }
