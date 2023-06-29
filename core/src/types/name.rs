@@ -2,30 +2,131 @@ use super::DecodeError;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
+mod random;
+
+/// Error returned when a name is invalid.
 #[derive(Debug, thiserror::Error)]
 pub enum InvalidName {
-  #[error("name too large, max length of name is 65536 but got {0}")]
+  /// name size is too large.
+  #[error("name too large, max length of name is 512 but got {0}")]
   TooLarge(usize),
+  /// name is empty.
+  #[error("name cannot be empty")]
+  Empty,
+  /// name is not valid utf8.
   #[error("{0}")]
   Utf8(#[from] core::str::Utf8Error),
 }
 
+/// The name of a node in the showbiz.
+///
+/// The name is a string with a minimum length 1 and maximum length of 512 bytes.
 #[derive(Clone)]
 pub struct Name(Bytes);
 
 impl Default for Name {
+  #[inline]
   fn default() -> Self {
-    Self::new()
+    Self::from_string_unchecked(random::random_name())
   }
 }
 
 impl Name {
   /// The maximum size of a name in bytes.
-  pub const MAX_SIZE: usize = u16::MAX as usize;
+  pub const MAX_SIZE: usize = 512;
 
+  /// Creates a new Name from a static str.
   #[inline]
-  pub fn new() -> Self {
-    Self(Bytes::new())
+  pub const fn from_static(name: &'static str) -> Result<Self, InvalidName> {
+    if name.is_empty() {
+      return Err(InvalidName::Empty);
+    }
+
+    if name.len() > Self::MAX_SIZE {
+      return Err(InvalidName::TooLarge(name.len()));
+    }
+
+    Ok(Self(Bytes::from_static(name.as_bytes())))
+  }
+
+  /// Creates a new Name from a static str.
+  ///
+  /// # Panics
+  /// Panics if the name is empty or larger than 512 bytes.
+  #[inline]
+  pub const fn from_static_unchecked(name: &'static str) -> Self {
+    if name.is_empty() {
+      panic!("name is empty");
+    }
+
+    if name.len() > Self::MAX_SIZE {
+      panic!("name is too large, max length of name is 512");
+    }
+
+    Self(Bytes::from_static(name.as_bytes()))
+  }
+
+  /// Creates a new Name from a str.
+  #[inline]
+  #[allow(clippy::should_implement_trait)]
+  pub fn from_str(name: &str) -> Result<Self, InvalidName> {
+    if name.is_empty() {
+      return Err(InvalidName::Empty);
+    }
+
+    if name.len() > Self::MAX_SIZE {
+      return Err(InvalidName::TooLarge(name.len()));
+    }
+
+    Ok(Self(Bytes::copy_from_slice(name.as_bytes())))
+  }
+
+  /// Creates a new Name from a str without checking the size.
+  ///
+  /// # Panics
+  /// Panics if the name is empty or larger than 512 bytes.
+  #[inline]
+  pub fn from_str_unchecked(name: &str) -> Self {
+    if name.is_empty() {
+      panic!("{}", InvalidName::Empty);
+    }
+
+    if name.len() > Self::MAX_SIZE {
+      panic!("{}", InvalidName::TooLarge(name.len()));
+    }
+
+    Self(Bytes::copy_from_slice(name.as_bytes()))
+  }
+
+  /// Creates a new Name from a String.
+  #[inline]
+  pub fn from_string(name: String) -> Result<Self, InvalidName> {
+    if name.is_empty() {
+      return Err(InvalidName::Empty);
+    }
+
+    if name.len() > Self::MAX_SIZE {
+      return Err(InvalidName::TooLarge(name.len()));
+    }
+
+    Ok(Self(Bytes::from(name)))
+  }
+
+  /// Creates a new Name from a String.
+  ///
+  /// # Panics
+  /// Panics if the name is empty or larger than 512 bytes.
+  #[inline]
+  pub fn from_string_unchecked(name: String) -> Self {
+    if name.is_empty() {
+      panic!("{}", InvalidName::Empty);
+    }
+
+    if name.len() > Self::MAX_SIZE {
+      panic!("{}", InvalidName::TooLarge(name.len()));
+    }
+
+    Self(Bytes::from(name))
   }
 
   #[inline]
@@ -59,13 +160,19 @@ impl Name {
 
   #[inline]
   pub(crate) fn decode_from(buf: Bytes) -> Result<Self, DecodeError> {
-    if buf.remaining() == 0 {
-      return Ok(Self::new());
-    }
-    match core::str::from_utf8(buf.as_ref()) {
-      Ok(_) => Ok(Self(buf)),
-      Err(e) => Err(DecodeError::InvalidName(InvalidName::Utf8(e))),
-    }
+    Self::try_from(buf).map_err(From::from)
+  }
+
+  /// Returns a reference to the underlying str of the name.
+  #[inline]
+  pub fn as_str(&self) -> &str {
+    core::str::from_utf8(self.0.as_ref()).unwrap()
+  }
+
+  /// Returns a reference to the underlying bytes of the name.
+  #[inline]
+  pub fn as_bytes(&self) -> &[u8] {
+    &self.0
   }
 }
 
@@ -86,7 +193,7 @@ impl<'de> Deserialize<'de> for Name {
   {
     if deserializer.is_human_readable() {
       String::deserialize(deserializer)
-        .and_then(|n| Name::try_from(n).map_err(serde::de::Error::custom))
+        .and_then(|n| Name::from_string(n).map_err(serde::de::Error::custom))
     } else {
       Bytes::deserialize(deserializer)
         .and_then(|n| Name::try_from(n).map_err(serde::de::Error::custom))
@@ -150,37 +257,11 @@ impl core::hash::Hash for Name {
   }
 }
 
-impl Name {
-  #[inline]
-  pub fn as_bytes(&self) -> &[u8] {
-    &self.0
-  }
-
-  #[inline]
-  pub fn as_str(&self) -> &str {
-    core::str::from_utf8(&self.0).unwrap()
-  }
-}
-
 impl TryFrom<&str> for Name {
   type Error = InvalidName;
 
   fn try_from(s: &str) -> Result<Self, Self::Error> {
-    if s.len() > Self::MAX_SIZE {
-      return Err(InvalidName::TooLarge(s.len()));
-    }
-    Ok(Self(Bytes::copy_from_slice(s.as_bytes())))
-  }
-}
-
-impl TryFrom<String> for Name {
-  type Error = InvalidName;
-
-  fn try_from(s: String) -> Result<Self, Self::Error> {
-    if s.len() > Self::MAX_SIZE {
-      return Err(InvalidName::TooLarge(s.len()));
-    }
-    Ok(Self(s.into()))
+    Self::from_str(s)
   }
 }
 
@@ -188,7 +269,12 @@ impl TryFrom<Bytes> for Name {
   type Error = InvalidName;
 
   fn try_from(s: Bytes) -> Result<Self, Self::Error> {
-    if s.len() > Self::MAX_SIZE {
+    let len = s.len();
+    if len == 0 {
+      return Err(InvalidName::Empty);
+    }
+
+    if len > Self::MAX_SIZE {
       return Err(InvalidName::TooLarge(s.len()));
     }
     Ok(Self(s))
@@ -199,7 +285,12 @@ impl TryFrom<&Bytes> for Name {
   type Error = InvalidName;
 
   fn try_from(s: &Bytes) -> Result<Self, Self::Error> {
-    if s.len() > Self::MAX_SIZE {
+    let len = s.len();
+    if len == 0 {
+      return Err(InvalidName::Empty);
+    }
+
+    if len > Self::MAX_SIZE {
       return Err(InvalidName::TooLarge(s.len()));
     }
     Ok(Self(s.clone()))

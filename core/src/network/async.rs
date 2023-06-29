@@ -149,8 +149,7 @@ where
       #[cfg(feature = "metrics")]
       &self.inner.metrics_labels,
     )
-    .await
-    .map_err(|e| e)?;
+    .await?;
 
     if mt == MessageType::ErrorResponse {
       let err = match ErrorResponse::decode_len(&mut data) {

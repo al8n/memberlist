@@ -283,23 +283,18 @@ impl<T: Transport> Options<T> {
     #[cfg(not(any(target_arch = "wasm32", windows)))]
     let hostname = {
       let uname = rustix::process::uname();
-      uname
-        .nodename()
-        .to_string_lossy()
-        .to_string()
-        .try_into()
-        .unwrap_or_default()
+      Name::from_string(uname.nodename().to_string_lossy().to_string()).unwrap_or_default()
     };
 
     #[cfg(windows)]
     let hostname = {
       match hostname::get() {
-        Ok(name) => name.to_string_lossy().into(),
-        Err(_) => "".into(),
+        Ok(name) => Name::from_string(name.to_string_lossy().to_string()).unwrap_or_default(),
+        Err(_) => Name::default(),
       }
     };
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(target_family = "wasm")]
     let hostname = Name::default();
 
     Self {

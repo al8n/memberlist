@@ -54,14 +54,6 @@ impl NodeId {
   }
 
   #[inline]
-  pub fn from_addr(addr: SocketAddr) -> Self {
-    Self {
-      name: Name::new(),
-      addr,
-    }
-  }
-
-  #[inline]
   pub fn encoded_len(&self) -> usize {
     // addr + addr tag
     (if self.name.is_empty() {
@@ -104,7 +96,7 @@ impl NodeId {
   #[inline]
   pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
     let mut addr = None;
-    let mut name = Name::new();
+    let mut name = Name::default();
     while buf.has_remaining() {
       match buf.get_u8() {
         1 => {
@@ -144,11 +136,11 @@ impl NodeId {
   }
 }
 
-impl From<SocketAddr> for NodeId {
-  fn from(addr: SocketAddr) -> Self {
+impl From<(Name, SocketAddr)> for NodeId {
+  fn from(val: (Name, SocketAddr)) -> Self {
     Self {
-      name: Name::new(),
-      addr,
+      name: val.0,
+      addr: val.1,
     }
   }
 }

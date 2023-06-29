@@ -60,6 +60,7 @@ crossbeam-skiplist = "0.1"
 local-ip-address = "0.5"
 itertools = "0.10.5"
 ipnet = { version = "2.7", features = ["serde"] }
+names = "0.14"
 metrics = { version = "0.20", optional = true }
 paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
 rand = { version = "0.8" }

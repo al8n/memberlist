@@ -6,7 +6,6 @@ use crate::{
   transport::Transport,
   types::{Message, Name, NodeId},
 };
-use agnostic::Runtime;
 use async_channel::Sender;
 
 /// Something that can be broadcasted via gossip to

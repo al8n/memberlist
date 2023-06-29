@@ -119,7 +119,10 @@ async fn test_awareness() {
     #[cfg(feature = "metrics")]
     Arc::new(vec![]),
     #[cfg(feature = "metrics")]
-    NodeId::new(Name::new(), SocketAddr::from(([127, 0, 0, 1], 0))),
+    NodeId::new(
+      Name::from_static("1").unwrap(),
+      SocketAddr::from(([127, 0, 0, 1], 0)),
+    ),
   );
   for (delta, score, timeout) in cases {
     a.apply_delta(delta).await;

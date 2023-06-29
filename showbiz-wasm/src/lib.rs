@@ -12,8 +12,7 @@ pub use wasm_agnostic as agnostic;
 
 pub type TokioWasmShowbiz<D> = showbiz_core::Showbiz<
   D,
-  showbiz_core::transport::net::NetTransport<agnostic::tokio::TokioWasmRuntime>,
-  agnostic::tokio::TokioWasmRuntime,
+  showbiz_core::transport::net::NetTransport<agnostic::tokio::TokioWasmRuntime>, 
 >;
 
 #[cfg(test)]

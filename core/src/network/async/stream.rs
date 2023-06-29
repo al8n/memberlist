@@ -63,7 +63,7 @@ where
           .push_states
           .iter()
           .map(|n| Node {
-            id: NodeId::from_addr(n.node.addr()).set_name(n.node.name.clone()),
+            id: NodeId::new(n.node.name.clone(), n.node.addr()),
             meta: n.meta.clone(),
             state: n.state,
             vsn: n.vsn,

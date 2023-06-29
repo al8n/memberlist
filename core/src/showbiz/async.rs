@@ -134,6 +134,12 @@ where
       .map(|m| m.state.node.clone())
       .unwrap()
   }
+
+  /// Returns the keyring used for the local node
+  #[inline]
+  pub fn keyring(&self) -> Option<&SecretKeyring> {
+    self.inner.keyring.as_ref()
+  }
 }
 
 impl<D, T> Showbiz<D, T>
