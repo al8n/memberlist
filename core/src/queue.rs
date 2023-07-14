@@ -7,11 +7,7 @@ use std::{
   },
 };
 
-use crate::{
-  broadcast::Broadcast,
-  types::{Message, Name},
-  util::retransmit_limit,
-};
+use crate::{broadcast::Broadcast, types::Message, util::retransmit_limit, NodeId};
 
 pub trait NodeCalculator {
   fn num_nodes(&self) -> usize;
@@ -19,14 +15,14 @@ pub trait NodeCalculator {
 
 struct Inner<B: Broadcast> {
   q: BTreeSet<Arc<LimitedBroadcast<B>>>,
-  m: HashMap<Name, Arc<LimitedBroadcast<B>>>,
+  m: HashMap<NodeId, Arc<LimitedBroadcast<B>>>,
   id_gen: u64,
 }
 
 impl<B: Broadcast> Inner<B> {
   fn remove(&mut self, item: &LimitedBroadcast<B>) {
-    let name = item.broadcast.name();
-    self.m.remove(name);
+    let id = item.broadcast.id();
+    self.m.remove(id);
 
     if self.q.is_empty() {
       // At idle there's no reason to let the id generator keep going
@@ -36,8 +32,8 @@ impl<B: Broadcast> Inner<B> {
   }
 
   fn insert(&mut self, item: Arc<LimitedBroadcast<B>>) {
-    let name = item.broadcast.name();
-    self.m.insert(name.clone(), item.clone());
+    let id = item.broadcast.id();
+    self.m.insert(id.clone(), item.clone());
     self.q.insert(item);
   }
 }
@@ -212,8 +208,8 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     let unique = lb.broadcast.is_unique();
 
     // Check if this message invalidates another.
-    let name = lb.broadcast.name();
-    if let Some(old) = inner.m.remove(name) {
+    let id = lb.broadcast.id();
+    if let Some(old) = inner.m.remove(id) {
       old.broadcast.finished().await;
 
       inner.q.remove(&old);

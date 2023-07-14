@@ -4,7 +4,7 @@ use crate::{
   network::USER_MSG_OVERHEAD,
   showbiz::Showbiz,
   transport::Transport,
-  types::{Message, Name, NodeId},
+  types::{Message, NodeId},
 };
 use async_channel::Sender;
 
@@ -13,7 +13,7 @@ use async_channel::Sender;
 #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 pub trait Broadcast: Send + Sync + 'static {
   /// Returns the name of the broadcast, if any
-  fn name(&self) -> &Name;
+  fn id(&self) -> &NodeId;
 
   /// Checks if enqueuing the current broadcast
   /// invalidates a previous broadcast
@@ -50,8 +50,8 @@ pub(crate) struct ShowbizBroadcast {
 
 #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 impl Broadcast for ShowbizBroadcast {
-  fn name(&self) -> &Name {
-    &self.node.name
+  fn id(&self) -> &NodeId {
+    &self.node
   }
 
   fn invalidates(&self, other: &Self) -> bool {

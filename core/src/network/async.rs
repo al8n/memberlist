@@ -36,7 +36,14 @@ where
     ping: Ping,
     deadline: Duration,
   ) -> Result<bool, Error<D, T>> {
-    let Ok(mut conn) = self.runner().as_ref().unwrap().transport.dial_timeout(target.addr(), deadline).await else {
+    let Ok(mut conn) = self
+      .runner()
+      .as_ref()
+      .unwrap()
+      .transport
+      .dial_timeout(target.addr(), deadline)
+      .await
+    else {
       // If the node is actually dead we expect this to fail, so we
       // shouldn't spam the logs with it. After this point, errors
       // with the connection are real, unexpected errors and should
@@ -103,8 +110,7 @@ where
   /// remote host.
   pub(crate) async fn send_and_receive_state(
     &self,
-    name: &Name,
-    addr: SocketAddr,
+    id: &NodeId,
     join: bool,
   ) -> Result<RemoteNodeState, Error<D, T>> {
     // Attempt to connect
@@ -113,15 +119,10 @@ where
       .as_ref()
       .unwrap()
       .transport
-      .dial_timeout(addr, self.inner.opts.tcp_timeout)
+      .dial_timeout(id.addr, self.inner.opts.tcp_timeout)
       .await
       .map_err(Error::transport)?;
-    tracing::debug!(
-      target = "showbiz",
-      "initiating push/pull sync with: {}({})",
-      name,
-      addr
-    );
+    tracing::debug!(target = "showbiz", "initiating push/pull sync with: {}", id);
 
     #[cfg(feature = "metrics")]
     {
@@ -130,7 +131,7 @@ where
 
     // Send our state
     self
-      .send_local_state(&mut conn, addr, join, self.inner.opts.label.clone())
+      .send_local_state(&mut conn, id.addr, join, self.inner.opts.label.clone())
       .await?;
 
     conn.set_timeout(if self.inner.opts.tcp_timeout == Duration::ZERO {

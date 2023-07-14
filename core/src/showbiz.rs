@@ -104,11 +104,11 @@ pub(crate) struct Memberlist<R>
 where
   R: Runtime,
 {
-  pub(crate) local: Name,
+  pub(crate) local: NodeId,
   /// remote nodes
   pub(crate) nodes: Vec<LocalNodeState>,
   #[allow(clippy::mutable_key_type)]
-  pub(crate) node_map: HashMap<Name, Member<R>>,
+  pub(crate) node_map: HashMap<NodeId, Member<R>>,
 }
 
 impl<R> Memberlist<R>
@@ -116,7 +116,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
 {
-  fn new(local: Name) -> Self {
+  fn new(local: NodeId) -> Self {
     Self {
       nodes: Vec::new(),
       node_map: HashMap::new(),
@@ -128,6 +128,6 @@ where
     self
       .nodes
       .iter()
-      .any(|n| !n.dead_or_left() && n.node.name() != &self.local)
+      .any(|n| !n.dead_or_left() && n.node.id != self.local)
   }
 }

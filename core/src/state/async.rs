@@ -1,4 +1,4 @@
-use std::{collections::hash_map::Entry, net::SocketAddr, sync::atomic::Ordering, time::Duration};
+use std::{collections::hash_map::Entry, sync::atomic::Ordering, time::Duration};
 
 use crate::{
   network::{COMPOUND_HEADER_OVERHEAD, COMPOUND_OVERHEAD},
@@ -6,7 +6,7 @@ use crate::{
   showbiz::{AckHandler, Member, Memberlist},
   suspicion::Suspicion,
   timer::Timer,
-  types::{Alive, Dead, IndirectPing, Message, MessageType, Name, Ping, Suspect},
+  types::{Alive, Dead, IndirectPing, Message, MessageType, Ping, Suspect},
 };
 
 use super::*;
@@ -127,12 +127,7 @@ where
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Does a complete state exchange with a specific node.
-  pub(crate) async fn push_pull_node(
-    &self,
-    name: &Name,
-    addr: SocketAddr,
-    join: bool,
-  ) -> Result<(), Error<D, T>> {
+  pub(crate) async fn push_pull_node(&self, id: &NodeId, join: bool) -> Result<(), Error<D, T>> {
     #[cfg(feature = "metrics")]
     let now = Instant::now();
     #[cfg(feature = "metrics")]
@@ -140,7 +135,7 @@ where
       observe_push_pull_node(now.elapsed().as_millis() as f64, self.inner.metrics_labels.iter());
     );
     self
-      .merge_remote_state(self.send_and_receive_state(name, addr, join).await?)
+      .merge_remote_state(self.send_and_receive_state(id, join).await?)
       .await
   }
 
@@ -149,7 +144,7 @@ where
     memberlist: &mut Memberlist<T::Runtime>,
     d: Dead,
   ) -> Result<(), Error<D, T>> {
-    let state = match memberlist.node_map.get_mut(&d.node.name) {
+    let state = match memberlist.node_map.get_mut(&d.node) {
       Some(state) => state,
       // If we've never heard about this node before, ignore it
       None => return Ok(()),
@@ -229,7 +224,7 @@ where
   pub(crate) async fn suspect_node(&self, s: Suspect) -> Result<(), Error<D, T>> {
     let mut mu = self.inner.nodes.write().await;
 
-    let Some(state) = mu.node_map.get_mut(&s.node.name) else {
+    let Some(state) = mu.node_map.get_mut(&s.node) else {
       return Ok(());
     };
 
@@ -324,7 +319,7 @@ where
               .read()
               .await
               .node_map
-              .get(&n.name)
+              .get(&n)
               .and_then(|state| {
                 let timeout = state.state.state == NodeState::Suspect
                   && state.state.state_change == change_time;
@@ -376,7 +371,7 @@ where
     bootstrap: bool,
   ) {
     let mut memberlist = self.inner.nodes.write().await;
-    let member = memberlist.node_map.entry(alive.node.name.clone());
+    let member = memberlist.node_map.entry(alive.node.clone());
 
     // It is possible that during a Leave(), there is already an aliveMsg
     // in-queue to be processed but blocked by the locks above. If we let
@@ -482,7 +477,7 @@ where
       }
     }
 
-    let member = memberlist.node_map.get_mut(&alive.node.name).unwrap();
+    let member = memberlist.node_map.get_mut(&alive.node).unwrap();
     let local_incarnation = member.state.incarnation.load(Ordering::Relaxed);
     // Bail if the incarnation number is older, and this is not about us
     let is_local_node = alive.node.name == self.inner.id.name;
@@ -973,10 +968,7 @@ where
         .nodes
         .iter()
         .filter_map(|n| {
-          if n.id().name == self.inner.opts.name
-            || n.id().name == target.id().name
-            || n.state != NodeState::Alive
-          {
+          if n.id() == &self.inner.id || n.id() == target.id() || n.state != NodeState::Alive {
             None
           } else {
             Some(n.node.clone())
@@ -1123,7 +1115,7 @@ where
     let num_remove = memberlist.nodes.len() - dead_idx;
     while i < num_remove {
       let node = memberlist.nodes.pop().unwrap();
-      memberlist.node_map.remove(node.id().name());
+      memberlist.node_map.remove(node.id());
       i += 1;
     }
 
@@ -1219,7 +1211,7 @@ where
         .nodes
         .iter()
         .filter_map(|n| {
-          if n.id().name == self.inner.opts.name {
+          if n.id() == &self.inner.id {
             return None;
           }
 
@@ -1296,7 +1288,7 @@ where
         .nodes
         .iter()
         .filter_map(|n| {
-          if n.id().name == self.inner.opts.name || n.state != NodeState::Alive {
+          if n.id() == &self.inner.id || n.state != NodeState::Alive {
             None
           } else {
             Some(n.node.clone())
@@ -1312,10 +1304,7 @@ where
 
     let node = &nodes[0];
     // Attempt a push pull
-    if let Err(e) = self
-      .push_pull_node(node.name(), node.id().addr(), false)
-      .await
-    {
+    if let Err(e) = self.push_pull_node(node.id(), false).await {
       tracing::error!(target = "showbiz", err = %e, "push/pull with {} failed", node.id());
     }
   }

@@ -25,9 +25,7 @@ pub struct AsyncSpawn<R: Runtime> {
 
 impl<R: Runtime> Clone for AsyncSpawn<R> {
   fn clone(&self) -> Self {
-    Self {
-      _marker: PhantomData,
-    }
+    *self
   }
 }
 
@@ -65,9 +63,7 @@ where
   T: Transport,
 {
   fn clone(&self) -> Self {
-    Self {
-      runtime: self.runtime,
-    }
+    *self
   }
 }
 

@@ -130,7 +130,7 @@ where
     // TODO: return an error
     nodes
       .node_map
-      .get(&self.inner.id.name)
+      .get(&self.inner.id)
       .map(|m| m.state.node.clone())
       .unwrap()
   }
@@ -140,6 +140,15 @@ where
   pub fn keyring(&self) -> Option<&SecretKeyring> {
     self.inner.keyring.as_ref()
   }
+}
+
+pub enum JoinResult<D: Delegate, T: Transport> {
+  Ok(usize),
+  PartialErr {
+    num_joined: usize,
+    errors: HashMap<Address, Error<D, T>>,
+  },
+  Err(Error<D, T>),
 }
 
 impl<D, T> Showbiz<D, T>
@@ -233,7 +242,7 @@ where
 
     Ok(Showbiz {
       inner: Arc::new(ShowbizCore {
-        id,
+        id: id.clone(),
         hot: HotData::new(),
         awareness,
         broadcast,
@@ -243,7 +252,7 @@ where
         keyring,
         delegate,
         queue: Mutex::new(MessageQueue::new()),
-        nodes: Arc::new(RwLock::new(Memberlist::new(opts.name.clone()))),
+        nodes: Arc::new(RwLock::new(Memberlist::new(id))),
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
         dns,
         #[cfg(feature = "metrics")]
@@ -428,26 +437,23 @@ where
   /// none could be reached. If an error is returned, the node did not successfully
   /// join the cluster.
   #[allow(clippy::mutable_key_type)]
-  pub async fn join(
-    &self,
-    existing: HashMap<Address, Name>,
-  ) -> Result<(usize, HashMap<Address, Vec<Error<D, T>>>), Error<D, T>> {
+  pub async fn join(&self, existing: impl Iterator<Item = (Address, Name)>) -> JoinResult<D, T> {
     if !self.is_running() {
-      return Err(Error::NotRunning);
+      return JoinResult::Err(Error::NotRunning);
     }
 
     let (left, right): (FuturesUnordered<_>, FuturesUnordered<_>) = existing
       .into_iter()
       .partition_map(|(addr, name)| match addr {
         Address::Socket(addr) => Either::Left(async move {
-          if let Err(e) = self.push_pull_node(&name, addr, true).await {
+          let id = NodeId::new(name, addr);
+          if let Err(e) = self.push_pull_node(&id, true).await {
             tracing::debug!(
               target = "showbiz",
               local = %self.inner.id,
               err = %e,
-              "failed to join {}({})",
-              name,
-              addr
+              "failed to join {}",
+              id,
             );
             Err((Address::Socket(addr), e))
           } else {
@@ -464,48 +470,68 @@ where
                 "failed to resolve address {}",
                 domain.as_str(),
               );
-              return (0, Address::Domain { domain, port }, vec![e]);
+              return Err((Address::Domain { domain, port }, e));
             }
           };
           let mut errors = Vec::new();
           let mut num_success = 0;
           for addr in addrs {
-            if let Err(e) = self.push_pull_node(&name, addr, true).await {
+            let id = NodeId::new(name.clone(), addr);
+            if let Err(e) = self.push_pull_node(&id, true).await {
               tracing::debug!(
                 target = "showbiz",
                 err = %e,
-                "failed to join {}({})",
-                name,
-                addr
+                "failed to join {}",
+                id,
               );
-              errors.push(e);
+              errors.push((Address::Socket(addr), e));
             } else {
               num_success += 1;
             }
           }
-          (num_success, Address::Domain { domain, port }, errors)
+          Ok((num_success, errors))
         }),
       });
 
-    let mut num_success = 0;
     let (left, right) =
       futures_util::future::join(left.collect::<Vec<_>>(), right.collect::<Vec<_>>()).await;
 
-    let mut errors = HashMap::new();
-    for rst in left {
-      if let Err((addr, e)) = rst {
-        errors.insert(addr, vec![e]);
-      } else {
-        num_success += 1;
-      }
+    let num_success = std::cell::RefCell::new(0);
+    let errors = left
+      .into_iter()
+      .filter_map(|rst| match rst {
+        Ok(()) => {
+          *num_success.borrow_mut() += 1;
+          None
+        }
+        Err((addr, e)) => Some((addr, e)),
+      })
+      .chain(
+        right
+          .into_iter()
+          .filter_map(|rst| match rst {
+            Ok((success, errors)) => {
+              *num_success.borrow_mut() += success;
+              if errors.is_empty() {
+                None
+              } else {
+                Some(errors)
+              }
+            }
+            Err((addr, e)) => Some(vec![(addr, e)]),
+          })
+          .flatten(),
+      )
+      .collect::<HashMap<_, _>>();
+
+    if errors.is_empty() {
+      return JoinResult::Ok(num_success.into_inner());
     }
 
-    for (success, addr, errs) in right {
-      errors.insert(addr, errs);
-      num_success += success;
+    JoinResult::PartialErr {
+      num_joined: num_success.into_inner(),
+      errors,
     }
-
-    Ok((num_success, errors))
   }
 
   /// Gives this instance's idea of how well it is meeting the soft
@@ -545,7 +571,7 @@ where
       .read()
       .await
       .node_map
-      .get(&self.inner.id.name)
+      .get(&self.inner.id)
       .unwrap()
       .state
       .id()

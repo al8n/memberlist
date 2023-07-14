@@ -274,7 +274,7 @@ impl SecretKeyring {
         inner: Arc::new(SecretKeyringInner {
           primary_key: Atomic::new(primary_key),
           update_sequence: AtomicU64::new(0),
-          keys: once(primary_key).chain(keys.into_iter()).collect(),
+          keys: once(primary_key).chain(keys).collect(),
         }),
       };
     }

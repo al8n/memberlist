@@ -7,7 +7,7 @@ pub struct InvalidCompressionAlgo(u8);
 
 impl core::fmt::Display for InvalidCompressionAlgo {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "invalid compression algo {}", self)
+    write!(f, "invalid compression algo {}", self.0)
   }
 }
 

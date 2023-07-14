@@ -2,6 +2,7 @@ use std::{
   collections::HashSet,
   net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
   path::PathBuf,
+  str::FromStr,
   time::Duration,
 };
 
@@ -392,6 +393,26 @@ impl<T: Transport> Options<T> {
 
     Err(ForbiddenIp(addr))
   }
+}
+
+// ParseCIDRs return a possible empty list of all Network that have been parsed
+// In case of error, it returns succesfully parsed CIDRs and the last error found
+pub fn parse_cidrs(v: &[impl AsRef<str>]) -> (HashSet<ipnet::IpNet>, Option<Vec<String>>) {
+  let mut nets = HashSet::new();
+  let mut errs = Vec::new();
+
+  for p in v.iter() {
+    let p = p.as_ref();
+    match ipnet::IpNet::from_str(p.trim()) {
+      Ok(net) => {
+        nets.insert(net);
+      }
+      Err(_) => {
+        errs.push(format!("invalid cidr: {}", p));
+      }
+    }
+  }
+  (nets, (!errs.is_empty()).then_some(errs))
 }
 
 #[derive(Debug, Clone, Copy)]
