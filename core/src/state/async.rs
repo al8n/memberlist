@@ -17,6 +17,8 @@ use rand::{seq::SliceRandom, Rng};
 
 #[cfg(any(test, feature = "test"))]
 pub(crate) mod tests;
+#[cfg(any(test, feature = "test"))]
+pub use tests::*;
 
 #[inline]
 fn random_offset(n: usize) -> usize {

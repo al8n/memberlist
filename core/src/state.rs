@@ -21,7 +21,7 @@ use super::{
 mod r#async;
 
 #[cfg(all(feature = "async", feature = "test"))]
-pub use r#async::*;
+pub use r#async::tests::*;
 
 #[cfg(feature = "metrics")]
 use sealed_metrics::*;

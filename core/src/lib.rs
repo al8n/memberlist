@@ -65,8 +65,8 @@ pub use humantime_serde;
 /// [showbiz-wasm]: https://github.com/al8n/showbiz/blob/main/showbiz-wasm/src/lib.rs#L20
 #[cfg(all(feature = "async", feature = "test"))]
 pub mod tests {
-  pub use super::network::tests::*;
+  pub use super::network::*;
   pub use super::showbiz::tests::*;
-  pub use super::state::tests::*;
+  pub use super::state::*;
   pub use super::transport::tests::*;
 }

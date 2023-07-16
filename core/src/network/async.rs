@@ -22,6 +22,8 @@ mod stream;
 
 #[cfg(any(test, feature = "test"))]
 pub(crate) mod tests;
+#[cfg(any(test, feature = "test"))]
+pub use tests::*;
 
 impl<D, T> Showbiz<D, T>
 where

@@ -7,7 +7,7 @@ use crate::{showbiz::Showbiz, transport::Transport, types::*};
 #[cfg(feature = "async")]
 mod r#async;
 #[cfg(all(feature = "async", feature = "test"))]
-pub use r#async::*;
+pub use r#async::tests::*;
 
 /// Maximum size for node meta data
 pub const META_MAX_SIZE: usize = 512;

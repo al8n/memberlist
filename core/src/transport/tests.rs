@@ -1,11 +1,11 @@
-async fn test_transport_join() {
+pub async fn test_transport_join_runner() {
   todo!()
 }
 
-async fn test_transport_send() {
+pub async fn test_transport_send_runner() {
   todo!()
 }
 
-async fn test_transport_tcp_listen_back_off() {
+pub async fn test_transport_tcp_listen_back_off_runner() {
   todo!()
 }
