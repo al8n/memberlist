@@ -28,6 +28,7 @@ use crate::{
     ReliableConnection, Transport, TransportError, UnreliableConnection,
   },
   types::Packet,
+  Label,
 };
 use agnostic::{
   net::{Net, TcpListener, TcpStream, UdpSocket},
@@ -270,6 +271,7 @@ impl<R: Runtime> ConnectionTimeout for Tcp<R> {
 
 pub struct NetTransport<R: Runtime> {
   opts: Arc<NetTransportOptions>,
+  label: Option<Label>,
   packet_rx: PacketSubscriber,
   stream_rx: ConnectionSubscriber<Self>,
   tcp_addr: SocketAddr,
@@ -282,6 +284,7 @@ pub struct NetTransport<R: Runtime> {
 
 impl<R: Runtime> NetTransport<R> {
   async fn new_in(
+    label: Option<Label>,
     opts: <Self as Transport>::Options,
     #[cfg(feature = "metrics")] metrics_labels: Option<Arc<Vec<crate::metrics::Label>>>,
   ) -> Result<Self, TransportError<Self>> {
@@ -382,6 +385,7 @@ impl<R: Runtime> NetTransport<R> {
     .run();
 
     Ok(Self {
+      label,
       opts,
       packet_rx,
       stream_rx,
@@ -411,6 +415,7 @@ impl<R: Runtime> Transport for NetTransport<R> {
 
   #[cfg(feature = "nightly")]
   fn new<'a>(
+    label: Option<Label>,
     opts: Self::Options,
   ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'a
   where
@@ -418,24 +423,25 @@ impl<R: Runtime> Transport for NetTransport<R> {
   {
     #[cfg(feature = "metrics")]
     {
-      Self::new_in(opts, None)
+      Self::new_in(label, opts, None)
     }
 
     #[cfg(not(feature = "metrics"))]
     {
-      Self::new_in(opts)
+      Self::new_in(label, opts)
     }
   }
 
   #[cfg(all(feature = "metrics", feature = "nightly"))]
   fn with_metrics_labels(
+    label: Option<Label>,
     opts: Self::Options,
     metrics_labels: std::sync::Arc<Vec<crate::metrics::Label>>,
   ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
   where
     Self: Sized,
   {
-    Self::new_in(opts, Some(metrics_labels))
+    Self::new_in(label, opts, Some(metrics_labels))
   }
 
   #[cfg(feature = "nightly")]
@@ -491,30 +497,31 @@ impl<R: Runtime> Transport for NetTransport<R> {
   }
 
   #[cfg(not(feature = "nightly"))]
-  async fn new(opts: Self::Options) -> Result<Self, TransportError<Self>>
+  async fn new(label: Option<Label>, opts: Self::Options) -> Result<Self, TransportError<Self>>
   where
     Self: Sized,
   {
     #[cfg(feature = "metrics")]
     {
-      Self::new_in(opts, None).await
+      Self::new_in(label, opts, None).await
     }
 
     #[cfg(not(feature = "metrics"))]
     {
-      Self::new_in(opts).await
+      Self::new_in(label, opts).await
     }
   }
 
   #[cfg(all(feature = "metrics", not(feature = "nightly")))]
   async fn with_metrics_labels(
+    label: Option<Label>,
     opts: Self::Options,
     metrics_labels: Arc<Vec<crate::metrics::Label>>,
   ) -> Result<Self, TransportError<Self>>
   where
     Self: Sized,
   {
-    Self::new_in(opts, Some(metrics_labels)).await
+    Self::new_in(label, opts, Some(metrics_labels)).await
   }
 
   fn final_advertise_addr(
@@ -542,6 +549,17 @@ impl<R: Runtime> Transport for NetTransport<R> {
 
   #[cfg(not(feature = "nightly"))]
   async fn write_to(&self, b: &[u8], addr: SocketAddr) -> Result<Instant, TransportError<Self>> {
+    if let Some(label) = &self.label {
+      // TODO: is there a better way to avoid allocating and copying?
+      if !label.is_empty() {
+        let b =
+          Label::add_label_header_to_packet(b, label.as_bytes()).map_err(TransportError::Encode)?;
+        return UnreliableConnection::send_to(&self.udp_listener, addr, &b)
+          .await
+          .map(|_| Instant::now());
+      }
+    }
+
     UnreliableConnection::send_to(&self.udp_listener, addr, b)
       .await
       .map(|_| Instant::now())
@@ -556,7 +574,13 @@ impl<R: Runtime> Transport for NetTransport<R> {
     match <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect_timeout(addr, timeout)
       .await
     {
-      Ok(conn) => Ok(ReliableConnection::new(Tcp { conn }, addr)),
+      Ok(conn) => {
+        let mut conn = ReliableConnection::new(Tcp { conn }, addr);
+        if let Some(label) = &self.label {
+          conn.add_label_header(label.as_bytes()).await?;
+        }
+        Ok(conn)
+      }
       Err(e) => {
         tracing::error!(target = "showbiz", err = %e);
         Err(TransportError::Connection(ConnectionError {

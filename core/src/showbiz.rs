@@ -105,10 +105,126 @@ where
   R: Runtime,
 {
   pub(crate) local: NodeId,
-  /// remote nodes
-  pub(crate) nodes: Vec<LocalNodeState>,
+  pub(crate) nodes: Vec<Member<R>>,
   #[allow(clippy::mutable_key_type)]
-  pub(crate) node_map: HashMap<NodeId, Member<R>>,
+  pub(crate) node_map: HashMap<NodeId, usize>,
+}
+
+impl<Run: Runtime> rand::seq::SliceRandom for Memberlist<Run> {
+  type Item = Member<Run>;
+
+  fn choose<R>(&self, rng: &mut R) -> Option<&Self::Item>
+  where
+    R: rand::Rng + ?Sized,
+  {
+    unreachable!()
+  }
+
+  fn choose_mut<R>(&mut self, rng: &mut R) -> Option<&mut Self::Item>
+  where
+    R: rand::Rng + ?Sized,
+  {
+    unreachable!()
+  }
+
+  fn choose_multiple<R>(
+    &self,
+    rng: &mut R,
+    amount: usize,
+  ) -> rand::seq::SliceChooseIter<Self, Self::Item>
+  where
+    R: rand::Rng + ?Sized,
+  {
+    unreachable!()
+  }
+
+  fn choose_weighted<R, F, B, X>(
+    &self,
+    rng: &mut R,
+    weight: F,
+  ) -> Result<&Self::Item, rand::distributions::WeightedError>
+  where
+    R: rand::Rng + ?Sized,
+    F: Fn(&Self::Item) -> B,
+    B: rand::distributions::uniform::SampleBorrow<X>,
+    X: rand::distributions::uniform::SampleUniform
+      + for<'a> core::ops::AddAssign<&'a X>
+      + core::cmp::PartialOrd<X>
+      + Clone
+      + Default,
+  {
+    unreachable!()
+  }
+
+  fn choose_weighted_mut<R, F, B, X>(
+    &mut self,
+    rng: &mut R,
+    weight: F,
+  ) -> Result<&mut Self::Item, rand::distributions::WeightedError>
+  where
+    R: rand::Rng + ?Sized,
+    F: Fn(&Self::Item) -> B,
+    B: rand::distributions::uniform::SampleBorrow<X>,
+    X: rand::distributions::uniform::SampleUniform
+      + for<'a> core::ops::AddAssign<&'a X>
+      + core::cmp::PartialOrd<X>
+      + Clone
+      + Default,
+  {
+    unreachable!()
+  }
+
+  fn choose_multiple_weighted<R, F, X>(
+    &self,
+    rng: &mut R,
+    amount: usize,
+    weight: F,
+  ) -> Result<rand::seq::SliceChooseIter<Self, Self::Item>, rand::distributions::WeightedError>
+  where
+    R: rand::Rng + ?Sized,
+    F: Fn(&Self::Item) -> X,
+    X: Into<f64>,
+  {
+    unreachable!()
+  }
+
+  fn shuffle<R>(&mut self, rng: &mut R)
+  where
+    R: rand::Rng + ?Sized,
+  {
+    // Sample a number uniformly between 0 and `ubound`. Uses 32-bit sampling where
+    // possible, primarily in order to produce the same output on 32-bit and 64-bit
+    // platforms.
+    #[inline]
+    fn gen_index<R: rand::Rng + ?Sized>(rng: &mut R, ubound: usize) -> usize {
+      if ubound <= (core::u32::MAX as usize) {
+        rng.gen_range(0..ubound as u32) as usize
+      } else {
+        rng.gen_range(0..ubound)
+      }
+    }
+
+    for i in (1..self.nodes.len()).rev() {
+      // invariant: elements with index > i have been locked in place.
+      let ridx = gen_index(rng, i + 1);
+      let curr = self.node_map.get_mut(self.nodes[i].state.id()).unwrap();
+      *curr = ridx;
+      let target = self.node_map.get_mut(self.nodes[ridx].state.id()).unwrap();
+      *target = i;
+      self.nodes.swap(i, ridx);
+    }
+  }
+
+  fn partial_shuffle<R>(
+    &mut self,
+    rng: &mut R,
+    amount: usize,
+  ) -> (&mut [Self::Item], &mut [Self::Item])
+  where
+    R: rand::Rng + ?Sized,
+  {
+    unreachable!()
+  }
 }
 
 impl<R> Memberlist<R>
@@ -128,6 +244,6 @@ where
     self
       .nodes
       .iter()
-      .any(|n| !n.dead_or_left() && n.node.id != self.local)
+      .any(|m| !m.state.dead_or_left() && m.state.node.id != self.local)
   }
 }

@@ -43,7 +43,6 @@ pub(crate) fn compress_to_msg<C: Checksumer>(
 
 #[inline]
 pub(crate) fn compress_payload(cmp: CompressionAlgo, inp: &[u8]) -> Result<Vec<u8>, CompressError> {
-  println!("before compress {:?}", inp);
   match cmp {
     CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
       .encode(inp)

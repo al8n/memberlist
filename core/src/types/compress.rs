@@ -115,7 +115,6 @@ impl Compress {
       buf.put_u8(2);
       encode_u32_to_buf(&mut buf, self.buf.len() as u32);
       buf.put_slice(self.buf.as_ref());
-      println!("com {:?} len {}", self.buf.as_ref(), self.buf.len());
       h.update(self.buf.as_ref());
     }
     buf.put_u32(h.finalize());
@@ -149,7 +148,6 @@ impl Compress {
           if buf.remaining() < len {
             return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
           }
-          println!("decom {:?} buf_len {} len {}", buf.as_ref(), buf.len(), len);
           this.buf = buf.split_to(len);
           hasher.update(&this.buf);
           if required == 1 {

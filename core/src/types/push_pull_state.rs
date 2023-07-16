@@ -45,10 +45,16 @@ impl PushPullHeader {
         1 => {
           this.nodes = decode_u32_from_buf(&mut buf)?.0;
           required += 1;
+          if required == 3 {
+            break;
+          }
         }
         2 => {
           this.user_state_len = decode_u32_from_buf(&mut buf)?.0;
           required += 1;
+          if required == 3 {
+            break;
+          }
         }
         3 => {
           if !buf.has_remaining() {
@@ -60,6 +66,9 @@ impl PushPullHeader {
             x => return Err(DecodeError::UnknownMarkBit(x)),
           };
           required += 1;
+          if required == 3 {
+            break;
+          }
         }
         _ => {}
       }

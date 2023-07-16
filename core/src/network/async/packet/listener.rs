@@ -443,12 +443,13 @@ where
       ($msg: ident.len($compressed_msg_len: ident) -> $this:ident.$node:ident.$addr:ident -> $block: expr) => {{
         let basic_encrypt_len = MessageType::SIZE // MessageType::Encryption
         + EncryptionAlgo::SIZE // Encryption algo length
-        + encrypted_length(self.inner.opts.encryption_algo, $compressed_msg_len);
+        + self.inner.opts.encryption_algo.encrypted_length($compressed_msg_len);
         let encrypted_msg_len = encoded_u32_len(basic_encrypt_len as u32) + basic_encrypt_len;
 
         let mut buf = BytesMut::with_capacity(encrypted_msg_len);
         buf.put_u8(MessageType::Encrypt as u8);
-        encode_u32_to_buf(&mut buf, encrypted_msg_len as u32);
+        buf.put_u32(encrypted_msg_len as u32);
+        // encode_u32_to_buf(&mut buf, );
         let offset = buf.len();
         buf.put_u8(self.inner.opts.encryption_algo as u8);
         // Add a random nonce
@@ -456,7 +457,6 @@ where
         rand::thread_rng().fill(&mut nonce);
         buf.put_slice(&nonce);
         let after_nonce = buf.len();
-
         $block(&mut buf);
 
         if $this.inner.opts.encryption_algo == EncryptionAlgo::PKCS7 {

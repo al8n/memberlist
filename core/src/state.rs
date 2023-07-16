@@ -23,6 +23,7 @@ mod r#async;
 #[cfg(all(feature = "async", feature = "test"))]
 pub use r#async::tests::*;
 
+use rand::seq::SliceRandom;
 #[cfg(feature = "metrics")]
 use sealed_metrics::*;
 
@@ -169,6 +170,7 @@ where
       .hot
       .sequence_num
       .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+      + 1
   }
 
   /// Returns the next incarnation number in a thread safe way
@@ -179,6 +181,7 @@ where
       .hot
       .incarnation
       .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+      + 1
   }
 
   /// Adds the positive offset to the incarnation number.
@@ -189,6 +192,7 @@ where
       .hot
       .incarnation
       .fetch_add(offset, std::sync::atomic::Ordering::SeqCst)
+      + offset
   }
 
   /// Used to get the current estimate of the number of nodes

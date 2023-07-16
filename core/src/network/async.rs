@@ -3,9 +3,7 @@ use std::sync::atomic::Ordering;
 use crate::{
   delegate::Delegate,
   error::Error,
-  security::{
-    append_bytes, encrypted_length, EncryptionAlgo, SecretKey, SecretKeyring, SecurityError,
-  },
+  security::{append_bytes, EncryptionAlgo, SecretKey, SecretKeyring, SecurityError},
   transport::{ReliableConnection, TransportError},
   types::MessageType,
   util::{compress_payload, decompress_payload},
@@ -185,7 +183,7 @@ where
     label: &Label,
     algo: EncryptionAlgo,
   ) -> Result<Bytes, Error<D, T>> {
-    let enc_len = encrypted_length(algo, msg.len());
+    let enc_len = algo.encrypted_length(msg.len());
     let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
     let mut buf = BytesMut::with_capacity(meta_size + enc_len);
 
@@ -193,11 +191,11 @@ where
     buf.put_u8(MessageType::Encrypt as u8);
 
     // Write the size of the message
-    buf.put_u32(msg.len() as u32);
+    buf.put_u32(enc_len as u32);
 
     // Authenticated Data is:
     //
-    //   [messageType; byte] [messageLength; uint32] [stream_label; optional]
+    //   [messageType; byte] [messageLength; uint32] [encryptionAlgo; byte] [stream_label; optional]
     //
     let mut ciphertext = buf.split_off(meta_size);
     if label.is_empty() {
@@ -227,6 +225,7 @@ where
     #[cfg(feature = "metrics")] metrics_labels: &[metrics::Label],
   ) -> Result<EncryptedRemoteStateHeader, Error<D, T>> {
     // Read in enough to determine message length
+    // let meta_size = MessageType::SIZE + core::mem::size_of::<u32>() + EncryptionAlgo::SIZE;
     let meta_size = MessageType::SIZE + core::mem::size_of::<u32>();
     let mut buf = BytesMut::with_capacity(meta_size);
     buf.put_u8(MessageType::Encrypt as u8);
@@ -284,20 +283,14 @@ where
       // Decrypt the payload
       keyring
         .decrypt_payload(&mut ciphertext, &buf)
-        .map(|_| {
-          buf.unsplit(ciphertext);
-          buf.freeze()
-        })
+        .map(|_| ciphertext.freeze())
         .map_err(From::from)
     } else {
       let data_bytes = append_bytes(&buf, stream_label.as_bytes());
       // Decrypt the payload
       keyring
         .decrypt_payload(&mut ciphertext, data_bytes.as_ref())
-        .map(|_| {
-          buf.unsplit(ciphertext);
-          buf.freeze()
-        })
+        .map(|_| ciphertext.freeze())
         .map_err(From::from)
     }
   }

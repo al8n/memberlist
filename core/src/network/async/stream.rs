@@ -246,7 +246,6 @@ where
     {
       incr_tcp_sent_counter(buf.len() as u64, self.inner.metrics_labels.iter());
     }
-    println!("send: {:?} {}", buf.as_ref(), buf.len());
     conn.write_all(&buf).await.map_err(Error::transport)
   }
 
@@ -259,12 +258,10 @@ where
       Ok(len) => len,
       Err(e) => return Err(TransportError::Decode(e).into()),
     };
-    println!("len {} buf_len {}", len, data.len());
     let header = match PushPullHeader::decode_from(data.split_to(len as usize)) {
       Ok(header) => header,
       Err(e) => return Err(TransportError::Decode(e).into()),
     };
-    println!("header {:?}", header);
     // Allocate space for the transfer
     let mut remote_nodes = Vec::<PushNodeState>::with_capacity(header.nodes as usize);
     // Try to decode all the states
@@ -328,7 +325,8 @@ where
         .await
         .nodes
         .iter()
-        .map(|n| {
+        .map(|m| {
+          let n = &m.state;
           let this = PushNodeState {
             node: n.id().clone(),
             meta: n.node.meta().clone(),
@@ -356,9 +354,9 @@ where
       join,
     };
     let header_size = header.encoded_len();
-
+    let encoded_header_size = encoded_u32_len(header_size as u32);
     let basic_len = header_size
-      + encoded_u32_len(header_size as u32)
+      + encoded_header_size
       + states_encoded_size
       + encoded_u32_len(states_encoded_size as u32)
       + if user_data.is_empty() {
@@ -371,7 +369,6 @@ where
     buf.put_u8(MessageType::PushPull as u8);
     encode_u32_to_buf(&mut buf, basic_len as u32);
     header.encode_to(&mut buf);
-
     #[cfg(feature = "metrics")]
     let mut node_state_counts = NodeState::empty_metrics();
 
@@ -427,7 +424,6 @@ where
     {
       set_local_size_gauge(basic_len as f64, self.inner.metrics_labels.iter());
     }
-
     self
       .raw_send_msg_stream(conn, stream_label, buf, addr)
       .await
@@ -508,7 +504,6 @@ where
           Err(e) => return Err(e),
         }
       };
-
       // Reset message type and buf conn
       mt = match MessageType::try_from(plain[0]) {
         Ok(mt) => mt,
@@ -530,21 +525,18 @@ where
         unencrypted.split_to(size as usize)
       } else {
         let compressed_size = conn.read_u32_varint().await.map_err(Error::transport)?;
-        println!("compressed_size {}", compressed_size);
         let mut buf = vec![0; compressed_size];
         if let Err(e) = conn.read_exact(&mut buf).await {
           return Err(Error::transport(e));
         }
         buf.into()
       };
-      println!("compress msg: {:?}", compressed.as_ref());
       let compress = match Compress::decode_from::<T::Checksumer>(compressed) {
         Ok(compress) => compress,
         Err(e) => {
           return Err(Error::transport(TransportError::Decode(e)));
         }
       };
-      println!("compressed buf: {:?}", compress.buf.as_ref());
       let mut uncompressed_data = if compress.algo.is_none() {
         compress.buf
       } else if compress.buf.len() > opts.offload_size {
@@ -583,7 +575,6 @@ where
           Err(e) => return Err(e.into()),
         }
       };
-      println!("uncompressed_data: {:?}", uncompressed_data.as_ref());
 
       if !uncompressed_data.has_remaining() {
         return Err(Error::transport(TransportError::Decode(
@@ -609,6 +600,19 @@ where
         )));
       }
       return Ok((uncompressed_data, mt));
+    }
+
+    if let Some(mut unencrypted) = unencrypted {
+      // As we have already read full message from reader, so we need to consume the total msg len
+      let len = decode_u32_from_buf(&mut unencrypted)
+        .map_err(|e| TransportError::Decode(DecodeError::from(e)))?
+        .0 as usize;
+      if unencrypted.remaining() < len {
+        return Err(Error::transport(TransportError::Decode(
+          DecodeError::Truncated(MessageType::Encrypt.as_err_str()),
+        )));
+      }
+      return Ok((unencrypted, mt));
     }
 
     let size = conn.read_u32_varint().await.map_err(Error::transport)?;
@@ -658,7 +662,6 @@ where
       // Set this from config so that the auth data assertions work below
       stream_label = self.inner.opts.label.clone();
     }
-
     if self.inner.opts.label.ne(&stream_label) {
       tracing::error!(target = "showbiz", remote_node = ?addr, "discarding stream with unacceptable label: {:?}", self.inner.opts.label.as_ref());
       return;
@@ -758,7 +761,6 @@ where
           tracing::error!(target = "showbiz", "too many pending push/pull requests");
           return;
         }
-        println!("before read {:?}", data.as_ref());
         let node_state = match self.read_remote_state(data).await {
           Ok(ns) => ns,
           Err(e) => {

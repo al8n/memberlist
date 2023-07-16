@@ -5,7 +5,7 @@ use aes_gcm::{
   Aes128Gcm, Aes256Gcm, AesGcm,
 };
 use atomic::{Atomic, Ordering};
-use bytes::{BufMut, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use crossbeam_skiplist::SkipSet;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -84,6 +84,20 @@ impl EncryptionAlgo {
 
   pub fn is_none(&self) -> bool {
     *self == EncryptionAlgo::None
+  }
+
+  pub const fn encrypted_length(&self, inp: usize) -> usize {
+    match self {
+      Self::None => VERSION_SIZE + NONCE_SIZE + inp + TAG_SIZE,
+      Self::PKCS7 => {
+        // Determine the padding size
+        let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
+
+        // Sum the extra parts to get total size
+        VERSION_SIZE + NONCE_SIZE + inp + padding + TAG_SIZE
+      }
+      Self::NoPadding => VERSION_SIZE + NONCE_SIZE + inp + TAG_SIZE,
+    }
   }
 }
 
@@ -420,19 +434,6 @@ pub(crate) fn encrypt_overhead(vsn: EncryptionAlgo) -> usize {
   }
 }
 
-pub(crate) fn encrypted_length(vsn: EncryptionAlgo, inp: usize) -> usize {
-  // If we are on version 2, there is no padding
-  if vsn == EncryptionAlgo::NoPadding {
-    return VERSION_SIZE + NONCE_SIZE + inp + TAG_SIZE;
-  }
-
-  // Determine the padding size
-  let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
-
-  // Sum the extra parts to get total size
-  VERSION_SIZE + NONCE_SIZE + inp + padding + TAG_SIZE
-}
-
 macro_rules! bail {
   (enum $ty:ident: $key:ident { $($var:ident($algo: ident)),+ $(,)? } -> $fn:expr) => {
     match $key {
@@ -466,7 +467,7 @@ fn encrypt_payload_in<A: AeadInPlace + Aead>(
   dst: &mut BytesMut,
 ) -> Result<(), SecurityError> {
   let offset = dst.len();
-  dst.reserve(encrypted_length(vsn, msg.len()));
+  dst.reserve(vsn.encrypted_length(msg.len()));
 
   // Write the encryption version
   dst.put_u8(vsn as u8);
@@ -480,24 +481,28 @@ fn encrypt_payload_in<A: AeadInPlace + Aead>(
   // Encrypt message using GCM
   let nonce = GenericArray::from_slice(&nonce);
   // Ensure we are correctly padded (now, only for PKCS7)
-  if vsn == EncryptionAlgo::PKCS7 {
-    let buf_len = dst.len();
-    pkcs7encode(dst, buf_len, offset + VERSION_SIZE + NONCE_SIZE, BLOCK_SIZE);
-    let mut bytes = dst.split_off(after_nonce);
-    gcm
-      .encrypt_in_place(nonce, data, &mut bytes)
-      .map(|_| {
-        dst.unsplit(bytes);
-      })
-      .map_err(SecurityError::AeadError)
-  } else {
-    let mut bytes = dst.split_off(after_nonce);
-    gcm
-      .encrypt_in_place(nonce, data, &mut bytes)
-      .map(|_| {
-        dst.unsplit(bytes);
-      })
-      .map_err(SecurityError::AeadError)
+  match vsn {
+    EncryptionAlgo::None => Ok(()),
+    EncryptionAlgo::PKCS7 => {
+      let buf_len = dst.len();
+      pkcs7encode(dst, buf_len, offset + VERSION_SIZE + NONCE_SIZE, BLOCK_SIZE);
+      let mut bytes = dst.split_off(after_nonce);
+      gcm
+        .encrypt_in_place(nonce, data, &mut bytes)
+        .map(|_| {
+          dst.unsplit(bytes);
+        })
+        .map_err(SecurityError::AeadError)
+    }
+    EncryptionAlgo::NoPadding => {
+      let mut bytes = dst.split_off(after_nonce);
+      gcm
+        .encrypt_in_place(nonce, data, &mut bytes)
+        .map(|_| {
+          dst.unsplit(bytes);
+        })
+        .map_err(SecurityError::AeadError)
+    }
   }
 }
 
@@ -515,6 +520,7 @@ fn decrypt_message_in<A: Aead + AeadInPlace>(
     .decrypt_in_place(nonce, data, &mut ciphertext)
     .map_err(SecurityError::AeadError)?;
   msg.unsplit(ciphertext);
+  msg.advance(VERSION_SIZE + NONCE_SIZE);
   Ok(())
 }
 
@@ -589,7 +595,7 @@ impl SecretKeyring {
     let vsn = EncryptionAlgo::from_u8(msg[0])?;
 
     // Ensure the length is sane
-    if msg.len() < encrypted_length(vsn, 0) {
+    if msg.len() < vsn.encrypted_length(0) {
       return Err(SecurityError::SmallPayload);
     }
 
@@ -643,7 +649,7 @@ mod tests {
     let mut encrypted = BytesMut::new();
     encrypt_payload(&k1, vsn, plain_text, extra, &mut encrypted).unwrap();
 
-    let exp_len = encrypted_length(vsn, plain_text.len());
+    let exp_len = vsn.encrypted_length(plain_text.len());
     assert_eq!(encrypted.len(), exp_len);
 
     decrypt_payload([k1].into_iter(), &mut encrypted, extra, vsn).unwrap();

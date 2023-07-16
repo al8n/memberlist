@@ -7,8 +7,11 @@ use std::{
 use agnostic::{async_std::AsyncStdRuntime, smol::SmolRuntime, tokio::TokioRuntime};
 
 use crate::{
-  delegate::VoidDelegate, options::parse_cidrs, security::SecretKey, transport::net::NetTransport,
-  CompressionAlgo,
+  delegate::VoidDelegate,
+  options::parse_cidrs,
+  security::{EncryptionAlgo, SecretKey},
+  transport::net::NetTransport,
+  CompressionAlgo, Label,
 };
 
 use super::*;
@@ -308,7 +311,7 @@ where
   m1.bootstrap().await.unwrap();
   m2.bootstrap().await.unwrap();
 
-  let JoinResult::Ok(num) = m2
+  let Ok(num) = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
   else {
@@ -354,12 +357,10 @@ where
   m1.bootstrap().await.unwrap();
   m2.bootstrap().await.unwrap();
 
-  let JoinResult::Ok(num) = m2
+  let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
-  else {
-    panic!("join failed")
-  };
+    .unwrap();
   assert_eq!(num, 1);
 
   m1.shutdown().await.unwrap();
@@ -382,7 +383,7 @@ fn test_join_with_compression() {
   // }
 }
 
-pub async fn test_join_with_encryption_runner<R>()
+pub async fn test_join_with_encryption_runner<R>(algo: EncryptionAlgo)
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
@@ -391,19 +392,21 @@ where
   let c1 = test_config::<R>()
     .with_name("test_join_runner_1".try_into().unwrap())
     .with_compression_algo(CompressionAlgo::None)
+    .with_encryption_algo(algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])));
   let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
 
   let c2 = test_config::<R>()
     .with_name("test_join_runner_2".try_into().unwrap())
     .with_compression_algo(CompressionAlgo::None)
+    .with_encryption_algo(algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])));
   let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
 
   m1.bootstrap().await.unwrap();
   m2.bootstrap().await.unwrap();
 
-  let JoinResult::Ok(num) = m2
+  let Ok(num) = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
   else {
@@ -420,37 +423,54 @@ where
 fn test_join_with_encryption() {
   {
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_join_with_encryption_runner::<TokioRuntime>());
+    runtime.block_on(test_join_with_encryption_runner::<TokioRuntime>(
+      EncryptionAlgo::None,
+    ));
+    runtime.block_on(test_join_with_encryption_runner::<TokioRuntime>(
+      EncryptionAlgo::NoPadding,
+    ));
+    runtime.block_on(test_join_with_encryption_runner::<TokioRuntime>(
+      EncryptionAlgo::PKCS7,
+    ));
   }
-
   // {
-  //   AsyncStdRuntime::block_on(test_join_runner::<AsyncStdRuntime>());
+  //   AsyncStdRuntime::block_on(test_join_with_encryption_runner::<AsyncStdRuntime>(EncryptionAlgo::None));
+  //   AsyncStdRuntime::block_on(test_join_with_encryption_runner::<AsyncStdRuntime>(EncryptionAlgo::NoPadding));
+  //   AsyncStdRuntime::block_on(test_join_with_encryption_runner::<AsyncStdRuntime>(EncryptionAlgo::PKCS7));
   // }
   // {
-  //   SmolRuntime::block_on(test_join_runner::<SmolRuntime>());
+  //   SmolRuntime::block_on(test_join_with_encryption_runner::<AsyncStdRuntime>(EncryptionAlgo::None));
+  //   SmolRuntime::block_on(test_join_with_encryption_runner::<AsyncStdRuntime>(EncryptionAlgo::NoPadding));
+  //   SmolRuntime::block_on(test_join_with_encryption_runner::<AsyncStdRuntime>(EncryptionAlgo::PKCS7));
   // }
 }
 
-pub async fn test_join_with_encryption_and_compression_runner<R>()
-where
+pub async fn test_join_with_encryption_and_compression_runner<R>(
+  encryption_algo: EncryptionAlgo,
+  compression_algo: CompressionAlgo,
+) where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>()
     .with_name("test_join_runner_1".try_into().unwrap())
+    .with_compression_algo(compression_algo)
+    .with_encryption_algo(encryption_algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])));
   let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
 
   let c2 = test_config::<R>()
     .with_name("test_join_runner_2".try_into().unwrap())
+    .with_compression_algo(compression_algo)
+    .with_encryption_algo(encryption_algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])));
   let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
 
   m1.bootstrap().await.unwrap();
   m2.bootstrap().await.unwrap();
 
-  let JoinResult::Ok(num) = m2
+  let Ok(num) = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
   else {
@@ -469,23 +489,206 @@ fn test_join_with_encryption_and_compression() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(test_join_with_encryption_and_compression_runner::<
       TokioRuntime,
-    >());
+    >(EncryptionAlgo::NoPadding, CompressionAlgo::Lzw));
+    runtime.block_on(test_join_with_encryption_and_compression_runner::<
+      TokioRuntime,
+    >(EncryptionAlgo::PKCS7, CompressionAlgo::Lzw));
   }
-
   // {
-  //   AsyncStdRuntime::block_on(test_join_runner::<AsyncStdRuntime>());
+  //   AsyncStdRuntime::block_on(test_join_with_encryption_and_compression_runner::<AsyncStdRuntime>(EncryptionAlgo::NoPadding, CompressionAlgo::Lzw));
+  //   AsyncStdRuntime::block_on(test_join_with_encryption_and_compression_runner::<AsyncStdRuntime>(EncryptionAlgo::PKCS7, CompressionAlgo::Lzw));
   // }
   // {
-  //   SmolRuntime::block_on(test_join_runner::<SmolRuntime>());
+  //   SmolRuntime::block_on(test_join_with_encryption_and_compression_runner::<AsyncStdRuntime>(EncryptionAlgo::NoPadding, CompressionAlgo::Lzw));
+  //   SmolRuntime::block_on(test_join_with_encryption_and_compression_runner::<AsyncStdRuntime>(EncryptionAlgo::PKCS7, CompressionAlgo::Lzw));
   // }
 }
 
-async fn test_join_with_labels() {
-  todo!()
+const TEST_KEYS: &[SecretKey] = &[
+  SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
+  SecretKey::Aes128([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]),
+  SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
+];
+
+pub async fn test_join_with_labels<R>(
+  encryption_algo: EncryptionAlgo,
+  compression_algo: CompressionAlgo,
+  key: Option<SecretKey>,
+) where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let c1 = test_config::<R>()
+    .with_label(Label::from_static("blah"))
+    .with_encryption_algo(encryption_algo)
+    .with_compression_algo(compression_algo)
+    .with_name("node1".try_into().unwrap())
+    .with_secret_key(key);
+  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
+  m1.bootstrap().await.unwrap();
+
+  // Create a second node
+  let c2 = test_config::<R>()
+    .with_name("node2".try_into().unwrap())
+    .with_label(Label::from_static("blah"))
+    .with_compression_algo(compression_algo)
+    .with_encryption_algo(encryption_algo)
+    .with_secret_key(key);
+  let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
+  m2.bootstrap().await.unwrap();
+  let Ok(num) = m2
+    .join(std::iter::once((
+      m1.inner.opts.bind_addr.into(),
+      Name::from_str_unchecked("node1"),
+    )))
+    .await
+  else {
+    panic!("test_join_with_labels: node2 fail to join node1");
+  };
+  assert_eq!(num, 1);
+
+  // Check the hosts
+  // assert_eq!(m1.alive_members().await, 2);
+  assert_eq!(m1.estimate_num_nodes(), 2);
+  // assert_eq!(m2.alive_members().await, 2);
+  assert_eq!(m2.estimate_num_nodes(), 2);
+
+  // Create a third node that uses no label
+  let c3 = test_config::<R>()
+    .with_name("node3".try_into().unwrap())
+    .with_label(Label::from_static(""))
+    .with_compression_algo(compression_algo)
+    .with_encryption_algo(encryption_algo)
+    .with_secret_key(key);
+  let m3 = Showbiz::<VoidDelegate, _>::new(c3).await.unwrap();
+  m3.bootstrap().await.unwrap();
+  let Err(JoinError { num_joined, .. }) = m3
+    .join(std::iter::once((
+      m1.inner.opts.bind_addr.into(),
+      Name::from_str_unchecked("node1"),
+    )))
+    .await
+  else {
+    panic!("test_join_with_labels: node3 fail to join node1");
+  };
+  assert_eq!(num_joined, 0);
+
+  // Check the hosts
+  assert_eq!(m1.alive_members().await, 2);
+  assert_eq!(m1.estimate_num_nodes(), 2);
+  assert_eq!(m2.alive_members().await, 2);
+  assert_eq!(m2.estimate_num_nodes(), 2);
+  assert_eq!(m3.alive_members().await, 1);
+  assert_eq!(m3.estimate_num_nodes(), 1);
+
+  // Create a fourth node that uses a mismatched label
+  let c4 = test_config::<R>()
+    .with_name("node4".try_into().unwrap())
+    .with_label(Label::from_static("not-blah"))
+    .with_compression_algo(compression_algo)
+    .with_encryption_algo(encryption_algo)
+    .with_secret_key(key);
+  let m4 = Showbiz::<VoidDelegate, _>::new(c4).await.unwrap();
+  m4.bootstrap().await.unwrap();
+
+  let Err(JoinError { num_joined, .. }) = m4
+    .join(std::iter::once((
+      m1.inner.opts.bind_addr.into(),
+      Name::from_str_unchecked("node1"),
+    )))
+    .await
+  else {
+    panic!("test_join_with_labels: node4 fail to join node1");
+  };
+  assert_eq!(num_joined, 0);
+
+  // Check the hosts
+  assert_eq!(m1.alive_members().await, 2);
+  assert_eq!(m1.estimate_num_nodes(), 2);
+  assert_eq!(m2.alive_members().await, 2);
+  assert_eq!(m2.estimate_num_nodes(), 2);
+  assert_eq!(m3.alive_members().await, 1);
+  assert_eq!(m3.estimate_num_nodes(), 1);
+  assert_eq!(m4.alive_members().await, 1);
+  assert_eq!(m4.estimate_num_nodes(), 1);
+
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
+  m3.shutdown().await.unwrap();
+  m4.shutdown().await.unwrap();
 }
 
-async fn test_join_with_labels_and_encryption() {
-  todo!()
+#[tracing_test::traced_test]
+#[test]
+fn _test_join_with_labels() {
+  {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(test_join_with_labels::<TokioRuntime>(
+      EncryptionAlgo::None,
+      CompressionAlgo::None,
+      None,
+    ));
+  }
+}
+
+#[tracing_test::traced_test]
+#[test]
+fn _test_join_with_labels_and_compression() {
+  {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(test_join_with_labels::<TokioRuntime>(
+      EncryptionAlgo::None,
+      CompressionAlgo::Lzw,
+      None,
+    ));
+  }
+}
+
+#[tracing_test::traced_test]
+#[test]
+fn _test_join_with_labels_and_encryption() {
+  {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(test_join_with_labels::<TokioRuntime>(
+      EncryptionAlgo::NoPadding,
+      CompressionAlgo::None,
+      Some(TEST_KEYS[0]),
+    ));
+    runtime.block_on(test_join_with_labels::<TokioRuntime>(
+      EncryptionAlgo::PKCS7,
+      CompressionAlgo::None,
+      Some(TEST_KEYS[0]),
+    ));
+    runtime.block_on(test_join_with_labels::<TokioRuntime>(
+      EncryptionAlgo::None,
+      CompressionAlgo::None,
+      Some(TEST_KEYS[0]),
+    ));
+  }
+}
+
+#[tracing_test::traced_test]
+#[test]
+fn _test_join_with_labels_and_compression_and_encryption() {
+  {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(test_join_with_labels::<TokioRuntime>(
+      EncryptionAlgo::NoPadding,
+      CompressionAlgo::Lzw,
+      Some(TEST_KEYS[0]),
+    ));
+    runtime.block_on(test_join_with_labels::<TokioRuntime>(
+      EncryptionAlgo::PKCS7,
+      CompressionAlgo::Lzw,
+      Some(TEST_KEYS[0]),
+    ));
+    runtime.block_on(test_join_with_labels::<TokioRuntime>(
+      EncryptionAlgo::None,
+      CompressionAlgo::Lzw,
+      Some(TEST_KEYS[0]),
+    ));
+  }
 }
 
 pub async fn test_join_different_networks_unique_mask_runner<R>()
@@ -505,7 +708,7 @@ where
   let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
   m2.bootstrap().await.unwrap();
 
-  let JoinResult::Ok(num) = m2
+  let Ok(num) = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
   else {
@@ -515,7 +718,7 @@ where
   assert_eq!(num, 1);
 
   // Check the hosts
-  assert_eq!(m2.num_members().await, 2);
+  assert_eq!(m2.alive_members().await, 2);
   assert_eq!(m2.estimate_num_nodes(), 2);
 
   m1.shutdown().await.unwrap();

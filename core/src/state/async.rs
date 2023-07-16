@@ -1,4 +1,4 @@
-use std::{collections::hash_map::Entry, sync::atomic::Ordering, time::Duration};
+use std::{sync::atomic::Ordering, time::Duration};
 
 use crate::{
   network::{COMPOUND_HEADER_OVERHEAD, COMPOUND_OVERHEAD},
@@ -146,12 +146,13 @@ where
     memberlist: &mut Memberlist<T::Runtime>,
     d: Dead,
   ) -> Result<(), Error<D, T>> {
-    let state = match memberlist.node_map.get_mut(&d.node) {
-      Some(state) => state,
+    let idx = match memberlist.node_map.get(&d.node) {
+      Some(idx) => *idx,
       // If we've never heard about this node before, ignore it
       None => return Ok(()),
     };
 
+    let state = &mut memberlist.nodes[idx];
     // Ignore old incarnation numbers
     if d.incarnation < state.state.incarnation.load(Ordering::Relaxed) {
       return Ok(());
@@ -226,10 +227,11 @@ where
   pub(crate) async fn suspect_node(&self, s: Suspect) -> Result<(), Error<D, T>> {
     let mut mu = self.inner.nodes.write().await;
 
-    let Some(state) = mu.node_map.get_mut(&s.node) else {
+    let Some(&idx) = mu.node_map.get(&s.node) else {
       return Ok(());
     };
 
+    let state = &mut mu.nodes[idx];
     // Ignore old incarnation numbers
     if s.incarnation < state.state.incarnation.load(Ordering::Relaxed) {
       return Ok(());
@@ -316,25 +318,22 @@ where
         let n = s.node.clone();
         async move {
           let timeout = {
-            t.inner
-              .nodes
-              .read()
-              .await
-              .node_map
-              .get(&n)
-              .and_then(|state| {
-                let timeout = state.state.state == NodeState::Suspect
-                  && state.state.state_change == change_time;
-                if timeout {
-                  Some(Dead {
-                    node: state.state.node.id.clone(),
-                    from: t.inner.id.clone(),
-                    incarnation: s.incarnation,
-                  })
-                } else {
-                  None
-                }
-              })
+            let members = t.inner.nodes.read().await;
+
+            members.node_map.get(&n).and_then(|&idx| {
+              let state = &members.nodes[idx];
+              let timeout =
+                state.state.state == NodeState::Suspect && state.state.state_change == change_time;
+              if timeout {
+                Some(Dead {
+                  node: state.state.node.id.clone(),
+                  from: t.inner.id.clone(),
+                  incarnation: s.incarnation,
+                })
+              } else {
+                None
+              }
+            })
           };
 
           if let Some(dead) = timeout {
@@ -373,7 +372,6 @@ where
     bootstrap: bool,
   ) {
     let mut memberlist = self.inner.nodes.write().await;
-    let member = memberlist.node_map.entry(alive.node.clone());
 
     // It is possible that during a Leave(), there is already an aliveMsg
     // in-queue to be processed but blocked by the locks above. If we let
@@ -402,84 +400,82 @@ where
     }
 
     let mut updates_node = false;
-    match member {
-      Entry::Occupied(member) => {
-        // Check if this address is different than the existing node unless the old node is dead.
-        let state = &member.get().state;
-        if state.address() != alive.node.addr() {
-          if let Err(err) = self.inner.opts.ip_allowed(alive.node.addr().ip()) {
-            tracing::warn!(target = "showbiz", local = %self.inner.id, remote = %alive.node, err=%err, "rejected IP update from {} to {} for node {}", alive.node.name(), state.node.id().addr(), alive.node.addr());
-            return;
-          };
-
-          // If DeadNodeReclaimTime is configured, check if enough time has elapsed since the node died.
-          let can_reclaim = self.inner.opts.dead_node_reclaim_time > Duration::ZERO
-            && state.state_change.elapsed() > self.inner.opts.dead_node_reclaim_time;
-
-          // Allow the address to be updated if a dead node is being replaced.
-          if state.state == NodeState::Left || (state.state == NodeState::Dead && can_reclaim) {
-            tracing::info!(target = "showbiz", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.node.name(), state.node.id().addr(), alive.node.addr());
-            updates_node = true;
-          } else {
-            tracing::error!(target = "showbiz", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.node.id().name(), state.node.id().addr(), alive.node, state.state);
-
-            // Inform the conflict delegate if provided
-            if let Some(delegate) = self.inner.delegate.as_ref() {
-              if let Err(e) = delegate
-                .notify_conflict(
-                  state.node.clone(),
-                  Arc::new(Node {
-                    id: alive.node.clone(),
-                    meta: alive.meta.clone(),
-                    state: NodeState::Alive,
-                    vsn: alive.vsn,
-                  }),
-                )
-                .await
-              {
-                tracing::error!(target = "showbiz", local = %self.inner.id, err=%e, "failed to notify conflict delegate");
-              }
-            }
-            return;
-          }
-        }
-      }
-      Entry::Vacant(ent) => {
+    if let Some(idx) = memberlist.node_map.get(&alive.node) {
+      // Check if this address is different than the existing node unless the old node is dead.
+      let state = &memberlist.nodes[*idx].state;
+      if state.address() != alive.node.addr() {
         if let Err(err) = self.inner.opts.ip_allowed(alive.node.addr().ip()) {
-          tracing::warn!(target = "showbiz", local = %self.inner.id, remote = %alive.node, err=%err, "rejected node");
+          tracing::warn!(target = "showbiz", local = %self.inner.id, remote = %alive.node, err=%err, "rejected IP update from {} to {} for node {}", alive.node.name(), state.node.id().addr(), alive.node.addr());
           return;
         };
 
-        let state = LocalNodeState {
-          node,
-          incarnation: Arc::new(AtomicU32::new(alive.incarnation)),
-          state_change: Instant::now(),
-          state: NodeState::Dead,
-        };
+        // If DeadNodeReclaimTime is configured, check if enough time has elapsed since the node died.
+        let can_reclaim = self.inner.opts.dead_node_reclaim_time > Duration::ZERO
+          && state.state_change.elapsed() > self.inner.opts.dead_node_reclaim_time;
 
-        // Add to map
-        ent.insert(Member {
-          state: state.clone(),
-          suspicion: None,
-        });
+        // Allow the address to be updated if a dead node is being replaced.
+        if state.state == NodeState::Left || (state.state == NodeState::Dead && can_reclaim) {
+          tracing::info!(target = "showbiz", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.node.name(), state.node.id().addr(), alive.node.addr());
+          updates_node = true;
+        } else {
+          tracing::error!(target = "showbiz", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.node.id().name(), state.node.id().addr(), alive.node, state.state);
 
-        // Get a random offset. This is important to ensure
-        // the failure detection bound is low on average. If all
-        // nodes did an append, failure detection bound would be
-        // very high.
-        let n = memberlist.nodes.len();
-        let offset = random_offset(n);
-
-        // Add at the end and swap with the node at the offset
-        memberlist.nodes.push(state);
-        memberlist.nodes.swap(n, offset);
-
-        // Update numNodes after we've added a new node
-        self.inner.hot.num_nodes.fetch_add(1, Ordering::Relaxed);
+          // Inform the conflict delegate if provided
+          if let Some(delegate) = self.inner.delegate.as_ref() {
+            if let Err(e) = delegate
+              .notify_conflict(
+                state.node.clone(),
+                Arc::new(Node {
+                  id: alive.node.clone(),
+                  meta: alive.meta.clone(),
+                  state: NodeState::Alive,
+                  vsn: alive.vsn,
+                }),
+              )
+              .await
+            {
+              tracing::error!(target = "showbiz", local = %self.inner.id, err=%e, "failed to notify conflict delegate");
+            }
+          }
+          return;
+        }
       }
+    } else {
+      if let Err(err) = self.inner.opts.ip_allowed(alive.node.addr().ip()) {
+        tracing::warn!(target = "showbiz", local = %self.inner.id, remote = %alive.node, err=%err, "rejected node");
+        return;
+      };
+
+      let state = LocalNodeState {
+        node,
+        incarnation: Arc::new(AtomicU32::new(0)),
+        state_change: Instant::now(),
+        state: NodeState::Dead,
+      };
+
+      // Get a random offset. This is important to ensure
+      // the failure detection bound is low on average. If all
+      // nodes did an append, failure detection bound would be
+      // very high.
+      let n = memberlist.nodes.len();
+      let offset = random_offset(n);
+
+      // Add at the end and swap with the node at the offset
+      memberlist.nodes.push(Member {
+        state: state.clone(),
+        suspicion: None,
+      });
+      memberlist.nodes.swap(n, offset);
+
+      // Add to map
+      memberlist.node_map.insert(alive.node.clone(), offset);
+
+      // Update numNodes after we've added a new node
+      self.inner.hot.num_nodes.fetch_add(1, Ordering::Relaxed);
     }
 
-    let member = memberlist.node_map.get_mut(&alive.node).unwrap();
+    let idx = memberlist.node_map.get(&alive.node).copied().unwrap();
+    let member = &mut memberlist.nodes[idx];
     let local_incarnation = member.state.incarnation.load(Ordering::Relaxed);
     // Bail if the incarnation number is older, and this is not about us
     let is_local_node = alive.node.name == self.inner.id.name;
@@ -530,21 +526,19 @@ where
         .await;
 
       // Update the state and incarnation number
-      if updates_node {
-        member
-          .state
-          .incarnation
-          .store(alive.incarnation, Ordering::Relaxed);
-        member.state.node = Arc::new(Node {
-          id: alive.node,
-          meta: alive.meta,
-          state: NodeState::Alive,
-          vsn: alive.vsn,
-        });
-        if member.state.state != NodeState::Alive {
-          member.state.state = NodeState::Alive;
-          member.state.state_change = Instant::now();
-        }
+      member
+        .state
+        .incarnation
+        .store(alive.incarnation, Ordering::Relaxed);
+      member.state.node = Arc::new(Node {
+        id: alive.node,
+        meta: alive.meta,
+        state: NodeState::Alive,
+        vsn: alive.vsn,
+      });
+      if member.state.state != NodeState::Alive {
+        member.state.state = NodeState::Alive;
+        member.state.state_change = Instant::now();
       }
     }
 
@@ -627,7 +621,10 @@ where
 // -------------------------------Private Methods--------------------------------
 
 #[inline]
-fn move_dead_nodes(nodes: &mut Vec<LocalNodeState>, gossip_to_the_dead_time: Duration) -> usize {
+fn move_dead_nodes<R: Runtime>(
+  nodes: &mut Vec<Member<R>>,
+  gossip_to_the_dead_time: Duration,
+) -> usize {
   let mut num_dead = 0;
 
   let n = nodes.len();
@@ -635,13 +632,13 @@ fn move_dead_nodes(nodes: &mut Vec<LocalNodeState>, gossip_to_the_dead_time: Dur
 
   while i < n - num_dead {
     let node = &nodes[i];
-    if !node.dead_or_left() {
+    if !node.state.dead_or_left() {
       i += 1;
       continue;
     }
 
     // Respect the gossip to the dead interval
-    if node.state_change.elapsed() <= gossip_to_the_dead_time {
+    if node.state.state_change.elapsed() <= gossip_to_the_dead_time {
       i += 1;
       continue;
     }
@@ -787,7 +784,7 @@ where
 
       // Determine if we should probe this node
       let mut skip = false;
-      let node = memberlist.nodes[probe_index].clone();
+      let node = memberlist.nodes[probe_index].state.clone();
       if node.dead_or_left() || node.id().name == self.inner.opts.name {
         skip = true;
       }
@@ -969,11 +966,14 @@ where
         .await
         .nodes
         .iter()
-        .filter_map(|n| {
-          if n.id() == &self.inner.id || n.id() == target.id() || n.state != NodeState::Alive {
+        .filter_map(|m| {
+          if m.state.id() == &self.inner.id
+            || m.state.id() == target.id()
+            || m.state.state != NodeState::Alive
+          {
             None
           } else {
-            Some(n.node.clone())
+            Some(m.state.node.clone())
           }
         })
         .collect::<Vec<_>>();
@@ -1114,10 +1114,10 @@ where
 
     // Trim the nodes to exclude the dead nodes and deregister the dead nodes
     let mut i = 0;
-    let num_remove = memberlist.nodes.len() - dead_idx;
+    let num_remove = memberlist.node_map.len() - dead_idx;
     while i < num_remove {
       let node = memberlist.nodes.pop().unwrap();
-      memberlist.node_map.remove(node.id());
+      memberlist.node_map.remove(node.state.id());
       i += 1;
     }
 
@@ -1129,7 +1129,7 @@ where
       .store(dead_idx as u32, Ordering::Relaxed);
 
     // Shuffle live nodes
-    memberlist.nodes.shuffle(&mut rand::thread_rng());
+    memberlist.shuffle(&mut rand::thread_rng());
   }
 
   /// Used to attach the ackCh to receive a message when an ack
@@ -1212,18 +1212,18 @@ where
         .await
         .nodes
         .iter()
-        .filter_map(|n| {
-          if n.id() == &self.inner.id {
+        .filter_map(|m| {
+          if m.state.id() == &self.inner.id {
             return None;
           }
 
-          match n.state {
-            NodeState::Alive | NodeState::Suspect => Some(n.node.clone()),
+          match m.state.state {
+            NodeState::Alive | NodeState::Suspect => Some(m.state.node.clone()),
             NodeState::Dead => {
-              if n.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
+              if m.state.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
                 None
               } else {
-                Some(n.node.clone())
+                Some(m.state.node.clone())
               }
             }
             _ => None,
@@ -1290,10 +1290,10 @@ where
         .nodes
         .iter()
         .filter_map(|n| {
-          if n.id() == &self.inner.id || n.state != NodeState::Alive {
+          if n.state.id() == &self.inner.id || n.state.state != NodeState::Alive {
             None
           } else {
-            Some(n.node.clone())
+            Some(n.state.node.clone())
           }
         })
         .collect::<Vec<_>>();

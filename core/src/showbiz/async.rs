@@ -102,7 +102,7 @@ where
   /// may have changed, so this shouldn't be used to determine how many
   /// members will be returned by Members.
   #[inline]
-  pub async fn num_members(&self) -> usize {
+  pub async fn alive_members(&self) -> usize {
     self
       .inner
       .nodes
@@ -110,7 +110,7 @@ where
       .await
       .nodes
       .iter()
-      .filter(|n| !n.dead_or_left())
+      .filter(|n| !n.state.dead_or_left())
       .count()
   }
 
@@ -131,7 +131,7 @@ where
     nodes
       .node_map
       .get(&self.inner.id)
-      .map(|m| m.state.node.clone())
+      .map(|&idx| nodes.nodes[idx].state.node.clone())
       .unwrap()
   }
 
@@ -142,13 +142,47 @@ where
   }
 }
 
-pub enum JoinResult<D: Delegate, T: Transport> {
-  Ok(usize),
-  PartialErr {
-    num_joined: usize,
-    errors: HashMap<Address, Error<D, T>>,
-  },
-  Err(Error<D, T>),
+pub struct JoinError<D: Delegate, T: Transport> {
+  num_joined: usize,
+  errors: HashMap<Address, Error<D, T>>,
+}
+
+impl<D: Delegate, T: Transport> core::fmt::Debug for JoinError<D, T> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    if self.num_joined != 0 {
+      writeln!(f, "Successes: {}", self.num_joined)?;
+    }
+    writeln!(f, "Failures:")?;
+    for (addr, err) in self.errors.iter() {
+      writeln!(f, "\t{}: {}", addr, err)?;
+    }
+    Ok(())
+  }
+}
+
+impl<D: Delegate, T: Transport> core::fmt::Display for JoinError<D, T> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    if self.num_joined != 0 {
+      writeln!(f, "Successes: {}", self.num_joined)?;
+    }
+    writeln!(f, "Failures:")?;
+    for (addr, err) in self.errors.iter() {
+      writeln!(f, "\t{}: {}", addr, err)?;
+    }
+    Ok(())
+  }
+}
+
+impl<D: Delegate, T: Transport> JoinError<D, T> {
+  /// Return the number of successful joined nodes
+  pub const fn joined(&self) -> usize {
+    self.num_joined
+  }
+
+  #[allow(clippy::mutable_key_type)]
+  pub const fn errors(&self) -> &HashMap<Address, Error<D, T>> {
+    &self.errors
+  }
 }
 
 impl<D, T> Showbiz<D, T>
@@ -284,12 +318,17 @@ where
     let transport = {
       if !self.inner.metrics_labels.is_empty() {
         T::with_metrics_labels(
+          (!self.inner.opts.label.is_empty()).then_some(self.inner.opts.label.clone()),
           self.inner.opts.transport.as_ref().unwrap().clone(),
           self.inner.metrics_labels.clone(),
         )
         .await?
       } else {
-        T::new(self.inner.opts.transport.as_ref().unwrap().clone()).await?
+        T::new(
+          (!self.inner.opts.label.is_empty()).then_some(self.inner.opts.label.clone()),
+          self.inner.opts.transport.as_ref().unwrap().clone(),
+        )
+        .await?
       }
     };
     #[cfg(not(feature = "metrics"))]
@@ -346,7 +385,7 @@ where
     Ok(())
   }
 
-  /// Returns a list of all known live nodes.
+  /// Returns a list of all known nodes.
   #[inline]
   pub async fn members(&self) -> Vec<Arc<Node>> {
     self
@@ -356,7 +395,7 @@ where
       .await
       .nodes
       .iter()
-      .map(|n| n.node.clone())
+      .map(|n| n.state.node.clone())
       .collect()
   }
 
@@ -381,12 +420,13 @@ where
       self.inner.hot.status.store(Status::Left, Ordering::Relaxed);
 
       let mut memberlist = self.inner.nodes.write().await;
-      if let Some(state) = memberlist.node_map.get(&memberlist.local) {
+      if let Some(&idx) = memberlist.node_map.get(&self.inner.id) {
         // This dead message is special, because Node and From are the
         // same. This helps other nodes figure out that a node left
         // intentionally. When Node equals From, other nodes know for
         // sure this node is gone.
 
+        let state = &memberlist.nodes[idx];
         let d = Dead {
           incarnation: state.state.incarnation.load(Ordering::Relaxed),
           node: state.state.node.id.clone(),
@@ -436,10 +476,18 @@ where
   /// This returns the number of hosts successfully contacted and an error if
   /// none could be reached. If an error is returned, the node did not successfully
   /// join the cluster.
-  #[allow(clippy::mutable_key_type)]
-  pub async fn join(&self, existing: impl Iterator<Item = (Address, Name)>) -> JoinResult<D, T> {
+  pub async fn join(
+    &self,
+    existing: impl Iterator<Item = (Address, Name)>,
+  ) -> Result<usize, JoinError<D, T>> {
     if !self.is_running() {
-      return JoinResult::Err(Error::NotRunning);
+      return Err(JoinError {
+        num_joined: 0,
+        errors: existing
+          .into_iter()
+          .map(|(addr, _)| (addr, Error::NotRunning))
+          .collect(),
+      });
     }
 
     let (left, right): (FuturesUnordered<_>, FuturesUnordered<_>) = existing
@@ -497,6 +545,7 @@ where
       futures_util::future::join(left.collect::<Vec<_>>(), right.collect::<Vec<_>>()).await;
 
     let num_success = std::cell::RefCell::new(0);
+    #[allow(clippy::mutable_key_type)]
     let errors = left
       .into_iter()
       .filter_map(|rst| match rst {
@@ -525,13 +574,13 @@ where
       .collect::<HashMap<_, _>>();
 
     if errors.is_empty() {
-      return JoinResult::Ok(num_success.into_inner());
+      return Ok(num_success.into_inner());
     }
 
-    JoinResult::PartialErr {
+    Err(JoinError {
       num_joined: num_success.into_inner(),
       errors,
-    }
+    })
   }
 
   /// Gives this instance's idea of how well it is meeting the soft
@@ -565,17 +614,13 @@ where
 
     // Get the existing node
     // unwrap safe here this is self
-    let node_id = self
-      .inner
-      .nodes
-      .read()
-      .await
-      .node_map
-      .get(&self.inner.id)
-      .unwrap()
-      .state
-      .id()
-      .clone();
+    let node_id = {
+      let members = self.inner.nodes.read().await;
+
+      let idx = *members.node_map.get(&self.inner.id).unwrap();
+
+      members.nodes[idx].state.id().clone()
+    };
 
     // Format a new alive message
     let alive = Alive {
@@ -767,7 +812,7 @@ where
       .await
       .nodes
       .iter()
-      .any(|n| !n.dead_or_left() && n.node.name() != self.inner.opts.name.as_ref())
+      .any(|n| !n.state.dead_or_left() && n.state.node.name() != self.inner.opts.name.as_ref())
   }
 
   #[cfg(feature = "metrics")]

@@ -628,6 +628,7 @@ mod r#async {
     /// Creates a new transport instance with the given options
     #[cfg(feature = "nightly")]
     fn new<'a>(
+      label: Option<Label>,
       opts: Self::Options,
       runtime: Self::Runtime,
     ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'a
@@ -636,13 +637,14 @@ mod r#async {
 
     /// Creates a new transport instance with the given options
     #[cfg(not(feature = "nightly"))]
-    async fn new(opts: Self::Options) -> Result<Self, TransportError<Self>>
+    async fn new(label: Option<Label>, opts: Self::Options) -> Result<Self, TransportError<Self>>
     where
       Self: Sized;
 
     /// Creates a new transport instance with the given options and metrics labels
     #[cfg(all(feature = "metrics", feature = "nightly"))]
     fn with_metrics_labels(
+      label: Option<Label>,
       opts: Self::Options,
       metrics_labels: std::sync::Arc<Vec<metrics::Label>>,
     ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
@@ -652,6 +654,7 @@ mod r#async {
     /// Creates a new transport instance with the given options and metrics labels
     #[cfg(all(feature = "metrics", not(feature = "nightly")))]
     async fn with_metrics_labels(
+      label: Option<Label>,
       opts: Self::Options,
       metrics_labels: std::sync::Arc<Vec<metrics::Label>>,
     ) -> Result<Self, TransportError<Self>>

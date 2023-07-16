@@ -208,6 +208,18 @@ pub enum Address {
   Domain { domain: Domain, port: Option<u16> },
 }
 
+impl core::fmt::Display for Address {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Address::Socket(addr) => write!(f, "{addr}"),
+      Address::Domain { domain, port } => match port {
+        Some(port) => write!(f, "{domain}:{port}"),
+        None => write!(f, "{domain}"),
+      },
+    }
+  }
+}
+
 impl From<SocketAddr> for Address {
   fn from(addr: SocketAddr) -> Self {
     Self::Socket(addr)
