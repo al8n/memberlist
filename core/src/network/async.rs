@@ -37,9 +37,7 @@ where
     deadline: Duration,
   ) -> Result<bool, Error<D, T>> {
     let Ok(mut conn) = self
-      .runner()
-      .as_ref()
-      .unwrap()
+      .inner
       .transport
       .dial_timeout(target.addr(), deadline)
       .await
@@ -115,9 +113,7 @@ where
   ) -> Result<RemoteNodeState, Error<D, T>> {
     // Attempt to connect
     let mut conn = self
-      .runner()
-      .as_ref()
-      .unwrap()
+      .inner
       .transport
       .dial_timeout(id.addr, self.inner.opts.tcp_timeout)
       .await

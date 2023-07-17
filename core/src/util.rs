@@ -64,6 +64,37 @@ pub(crate) fn decompress_payload(
   }
 }
 
+#[cfg(feature = "metrics")]
+pub(crate) mod label_serde {
+  use std::{collections::HashMap, sync::Arc};
+
+  use metrics::Label;
+  use serde::{
+    de::Deserializer,
+    ser::{SerializeMap, Serializer},
+    Deserialize,
+  };
+
+  pub fn serialize<S>(labels: &Arc<Vec<Label>>, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut ser = serializer.serialize_map(Some(labels.len()))?;
+    for label in labels.iter() {
+      ser.serialize_entry(label.key(), label.value())?;
+    }
+    ser.end()
+  }
+
+  pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<Vec<Label>>, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    HashMap::<String, String>::deserialize(deserializer)
+      .map(|map| Arc::new(map.into_iter().map(|(k, v)| Label::new(k, v)).collect()))
+  }
+}
+
 use bytes::{BufMut, Bytes, BytesMut};
 pub(crate) use is_global_ip::IsGlobalIp;
 

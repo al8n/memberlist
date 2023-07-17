@@ -168,6 +168,7 @@ pub use r#async::*;
 mod r#async {
   use std::{
     io,
+    net::IpAddr,
     sync::Arc,
     task::{Context, Poll},
   };
@@ -178,6 +179,13 @@ mod r#async {
   use futures_util::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
   pub struct ReliableConnection<T: Transport>(BufReader<T::Connection>, SocketAddr);
+
+  impl<T: Transport> AsRef<ReliableConnection<T>> for ReliableConnection<T> {
+    #[inline]
+    fn as_ref(&self) -> &ReliableConnection<T> {
+      self
+    }
+  }
 
   #[allow(dead_code)]
   impl<T> ReliableConnection<T>
@@ -588,28 +596,28 @@ mod r#async {
   pub trait TransportOptions:
     Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static
   {
-    fn from_addr(addr: SocketAddr) -> Self;
+    fn from_addr(addr: IpAddr, port: Option<u16>) -> Self;
 
-    fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self;
+    fn from_addrs(addrs: impl Iterator<Item = IpAddr>, port: Option<u16>) -> Self;
   }
 
   impl<T: TransportOptions> TransportOptions for Arc<T> {
-    fn from_addr(addr: SocketAddr) -> Self {
-      Arc::new(T::from_addr(addr))
+    fn from_addr(addr: IpAddr, port: Option<u16>) -> Self {
+      Arc::new(T::from_addr(addr, port))
     }
 
-    fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self {
-      Arc::new(T::from_addrs(addrs))
+    fn from_addrs(addrs: impl Iterator<Item = IpAddr>, port: Option<u16>) -> Self {
+      Arc::new(T::from_addrs(addrs, port))
     }
   }
 
   impl<T: TransportOptions> TransportOptions for Box<T> {
-    fn from_addr(addr: SocketAddr) -> Self {
-      Box::new(T::from_addr(addr))
+    fn from_addr(addr: IpAddr, port: Option<u16>) -> Self {
+      Box::new(T::from_addr(addr, port))
     }
 
-    fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self {
-      Box::new(T::from_addrs(addrs))
+    fn from_addrs(addrs: impl Iterator<Item = IpAddr>, port: Option<u16>) -> Self {
+      Box::new(T::from_addrs(addrs, port))
     }
   }
 
@@ -666,7 +674,8 @@ mod r#async {
     /// the rest of the cluster.
     fn final_advertise_addr(
       &self,
-      addr: Option<SocketAddr>,
+      addr: Option<IpAddr>,
+      port: u16,
     ) -> Result<SocketAddr, TransportError<Self>>;
 
     /// A packet-oriented interface that fires off the given

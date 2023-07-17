@@ -21,7 +21,7 @@ where
 {
   pub(crate) fn packet_listener(&self, shutdown_rx: async_channel::Receiver<()>) {
     let this = self.clone();
-    let transport_rx = this.runner().as_ref().unwrap().transport.packet();
+    let transport_rx = this.inner.transport.packet();
     <T::Runtime as Runtime>::spawn_detach(async move {
       loop {
         futures_util::select! {
@@ -487,9 +487,7 @@ where
         }
 
         $this
-          .runner()
-          .as_ref()
-          .unwrap()
+          .inner
           .transport
           .write_to(&$buf, $addr.addr())
           .await

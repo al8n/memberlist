@@ -43,7 +43,8 @@ async fn yield_now<R: Runtime>() {
 fn test_config_net<R: Runtime>(network: u8) -> Options<NetTransport<R>> {
   let bind_addr = get_bind_addr_net(network);
   Options::lan()
-    .with_bind_addr(bind_addr)
+    .with_bind_addr(bind_addr.ip())
+    .with_bind_port(Some(0))
     .with_name(Name::from_string(bind_addr.to_string()).unwrap())
 }
 
@@ -81,19 +82,15 @@ where
     ("size-32", SecretKey::Aes256([0; 32])),
   ];
 
-  for (name, key) in cases {
+  for (_, key) in cases {
     let c = Options::<NetTransport<R>>::lan()
-      .with_bind_addr(get_bind_addr())
+      .with_bind_addr(get_bind_addr().ip())
       .with_secret_key(Some(key));
 
-    let m = get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
+    get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
       .await
       .unwrap();
-    if let Err(e) = m.bootstrap().await {
-      panic!("name: {} key '{:?}' error: {:?}", name, key, e);
-    }
     yield_now::<R>().await;
-    assert!(m.shutdown().await.is_ok());
   }
 }
 
@@ -117,14 +114,12 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr());
+  let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr().ip());
 
-  let m = get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
+  get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
     .await
     .unwrap();
-  m.bootstrap().await.unwrap();
   yield_now::<R>().await;
-  assert!(m.shutdown().await.is_ok());
 }
 
 #[test]
@@ -147,7 +142,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr());
+  let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr().ip());
 
   let m = Showbiz::<VoidDelegate, NetTransport<R>>::with_keyring(
     SecretKeyring::new(SecretKey::Aes128([0; 16])),
@@ -156,10 +151,8 @@ where
   .await
   .unwrap();
 
-  m.bootstrap().await.unwrap();
   yield_now::<R>().await;
   assert!(m.encryption_enabled());
-  assert!(m.shutdown().await.is_ok());
 }
 
 #[test]
@@ -183,7 +176,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c = Options::<NetTransport<R>>::lan()
-    .with_bind_addr(get_bind_addr())
+    .with_bind_addr(get_bind_addr().ip())
     .with_secret_key(Some(SecretKey::Aes128([1; 16])));
 
   let m = Showbiz::<VoidDelegate, NetTransport<R>>::with_keyring(
@@ -193,14 +186,12 @@ where
   .await
   .unwrap();
 
-  m.bootstrap().await.unwrap();
   yield_now::<R>().await;
   assert!(m.encryption_enabled());
   assert_eq!(
     m.inner.keyring.as_ref().unwrap().keys().next().unwrap(),
     SecretKey::Aes128([1; 16])
   );
-  assert!(m.shutdown().await.is_ok());
 }
 
 #[test]
@@ -223,14 +214,12 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr());
+  let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr().ip());
   let m = get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
     .await
     .unwrap();
-  m.bootstrap().await.unwrap();
   yield_now::<R>().await;
   assert_eq!(m.members().await.len(), 1);
-  assert!(m.shutdown().await.is_ok());
 }
 
 #[test]
@@ -298,29 +287,25 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let c1 = test_config::<R>()
-    .with_name("test_join_runner_1".try_into().unwrap())
-    .with_compression_algo(CompressionAlgo::None);
+  let c1 = test_config::<R>().with_compression_algo(CompressionAlgo::None);
   let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
 
-  let c2 = test_config::<R>()
-    .with_name("test_join_runner_2".try_into().unwrap())
-    .with_compression_algo(CompressionAlgo::None);
+  let c2 = test_config::<R>().with_compression_algo(CompressionAlgo::None);
   let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
 
-  m1.bootstrap().await.unwrap();
-  m2.bootstrap().await.unwrap();
-
   let Ok(num) = m2
-    .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
+    .join(
+      [(
+        (m1.inner.opts.bind_addr, m1.inner.opts.bind_port.unwrap()).into(),
+        m1.inner.opts.name.clone(),
+      )]
+      .into_iter(),
+    )
     .await
   else {
     panic!("join failed")
   };
   assert_eq!(num, 1);
-
-  m1.shutdown().await.unwrap();
-  m2.shutdown().await.unwrap();
 }
 
 #[tracing_test::traced_test]
@@ -348,23 +333,17 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let c1 = test_config::<R>().with_name("test_join_runner_1".try_into().unwrap());
+  let c1 = test_config::<R>();
   let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
 
-  let c2 = test_config::<R>().with_name("test_join_runner_2".try_into().unwrap());
+  let c2 = test_config::<R>();
   let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
-
-  m1.bootstrap().await.unwrap();
-  m2.bootstrap().await.unwrap();
 
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
     .unwrap();
   assert_eq!(num, 1);
-
-  m1.shutdown().await.unwrap();
-  m2.shutdown().await.unwrap();
 }
 
 #[tracing_test::traced_test]
@@ -390,21 +369,16 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>()
-    .with_name("test_join_runner_1".try_into().unwrap())
     .with_compression_algo(CompressionAlgo::None)
     .with_encryption_algo(algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])));
   let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
 
   let c2 = test_config::<R>()
-    .with_name("test_join_runner_2".try_into().unwrap())
     .with_compression_algo(CompressionAlgo::None)
     .with_encryption_algo(algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])));
   let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
-
-  m1.bootstrap().await.unwrap();
-  m2.bootstrap().await.unwrap();
 
   let Ok(num) = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -413,9 +387,6 @@ where
     panic!("join failed");
   };
   assert_eq!(num, 1);
-
-  m1.shutdown().await.unwrap();
-  m2.shutdown().await.unwrap();
 }
 
 #[tracing_test::traced_test]
@@ -454,21 +425,16 @@ pub async fn test_join_with_encryption_and_compression_runner<R>(
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>()
-    .with_name("test_join_runner_1".try_into().unwrap())
     .with_compression_algo(compression_algo)
     .with_encryption_algo(encryption_algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])));
   let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
 
   let c2 = test_config::<R>()
-    .with_name("test_join_runner_2".try_into().unwrap())
     .with_compression_algo(compression_algo)
     .with_encryption_algo(encryption_algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])));
   let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
-
-  m1.bootstrap().await.unwrap();
-  m2.bootstrap().await.unwrap();
 
   let Ok(num) = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -477,9 +443,6 @@ pub async fn test_join_with_encryption_and_compression_runner<R>(
     panic!("join failed");
   };
   assert_eq!(num, 1);
-
-  m1.shutdown().await.unwrap();
-  m2.shutdown().await.unwrap();
 }
 
 #[tracing_test::traced_test]
@@ -526,7 +489,6 @@ pub async fn test_join_with_labels<R>(
     .with_name("node1".try_into().unwrap())
     .with_secret_key(key);
   let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
-  m1.bootstrap().await.unwrap();
 
   // Create a second node
   let c2 = test_config::<R>()
@@ -536,7 +498,7 @@ pub async fn test_join_with_labels<R>(
     .with_encryption_algo(encryption_algo)
     .with_secret_key(key);
   let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
-  m2.bootstrap().await.unwrap();
+
   let Ok(num) = m2
     .join(std::iter::once((
       m1.inner.opts.bind_addr.into(),
@@ -562,7 +524,6 @@ pub async fn test_join_with_labels<R>(
     .with_encryption_algo(encryption_algo)
     .with_secret_key(key);
   let m3 = Showbiz::<VoidDelegate, _>::new(c3).await.unwrap();
-  m3.bootstrap().await.unwrap();
   let Err(JoinError { num_joined, .. }) = m3
     .join(std::iter::once((
       m1.inner.opts.bind_addr.into(),
@@ -590,7 +551,6 @@ pub async fn test_join_with_labels<R>(
     .with_encryption_algo(encryption_algo)
     .with_secret_key(key);
   let m4 = Showbiz::<VoidDelegate, _>::new(c4).await.unwrap();
-  m4.bootstrap().await.unwrap();
 
   let Err(JoinError { num_joined, .. }) = m4
     .join(std::iter::once((
@@ -612,11 +572,6 @@ pub async fn test_join_with_labels<R>(
   assert_eq!(m3.estimate_num_nodes(), 1);
   assert_eq!(m4.alive_members().await, 1);
   assert_eq!(m4.estimate_num_nodes(), 1);
-
-  m1.shutdown().await.unwrap();
-  m2.shutdown().await.unwrap();
-  m3.shutdown().await.unwrap();
-  m4.shutdown().await.unwrap();
 }
 
 #[tracing_test::traced_test]
@@ -701,12 +656,9 @@ where
   let c1 = test_config_net::<R>(0).with_allowed_cidrs(Some(cidrs.clone()));
   let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
 
-  m1.bootstrap().await.unwrap();
-
   // Create a second node
   let c2 = test_config_net::<R>(1).with_allowed_cidrs(Some(cidrs));
   let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
-  m2.bootstrap().await.unwrap();
 
   let Ok(num) = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -720,9 +672,6 @@ where
   // Check the hosts
   assert_eq!(m2.alive_members().await, 2);
   assert_eq!(m2.estimate_num_nodes(), 2);
-
-  m1.shutdown().await.unwrap();
-  m2.shutdown().await.unwrap();
 }
 
 #[tracing_test::traced_test]
