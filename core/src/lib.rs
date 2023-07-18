@@ -69,4 +69,23 @@ pub mod tests {
   pub use super::showbiz::tests::*;
   pub use super::state::*;
   pub use super::transport::tests::*;
+
+  pub fn initialize_tests_tracing() {
+    use std::sync::Once;
+    static TRACE: Once = Once::new();
+    TRACE.call_once(|| {
+      let filter = std::env::var("SHOWBIZ_TESTING_LOG").unwrap_or_else(|_| "debug".to_owned());
+      tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt::fmt()
+          .without_time()
+          .with_line_number(true)
+          .with_env_filter(filter)
+          .with_file(false)
+          .with_target(true)
+          .with_ansi(true)
+          .finish(),
+      )
+      .unwrap();
+    });
+  }
 }

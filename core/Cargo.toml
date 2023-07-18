@@ -20,7 +20,7 @@ metrics = ["dep:metrics"]
 
 # expose all tests fn for users who want to use other runtime
 # see showbiz-wasm for more examples about how to use those tests fn
-test = []
+test = ["tracing-subscriber"]
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 trust-dns-resolver = { version = "0.23.0-alpha.4", default-features = false, features = ["system-config"] }
@@ -70,13 +70,14 @@ serde = { workspace = true }
 humantime-serde = "1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "tracing-log"] }
 trust-dns-proto = { version = "0.23.0-alpha.4", default-features = false }
 viewit = { workspace = true }
 weezl = "0.1"
 wg = "0.3"
 
 [dev-dependencies]
-tracing-test = "0.2.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 prost = "0.11"
 rmp-serde = { version = "1" }
 bincode = "1"

@@ -1,8 +1,7 @@
-use std::net::{IpAddr, Ipv4Addr};
-
-#[cfg(test)]
-use agnostic::{async_std::AsyncStdRuntime, smol::SmolRuntime, tokio::TokioRuntime};
-use parking_lot::Mutex;
+use std::{
+  net::{IpAddr, Ipv4Addr},
+  sync::Mutex,
+};
 
 use crate::{
   delegate::VoidDelegate,
@@ -15,10 +14,9 @@ use crate::{
 use super::*;
 
 static BIND_NUM: Mutex<u8> = Mutex::new(10u8);
-static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn get_bind_addr_net(network: u8) -> SocketAddr {
-  let mut bind_num = BIND_NUM.lock();
+  let mut bind_num = BIND_NUM.lock().unwrap();
   let ip = IpAddr::V4(Ipv4Addr::new(127, 0, network, *bind_num));
 
   *bind_num += 1;
@@ -69,13 +67,12 @@ where
   Showbiz::new(c).await
 }
 
-pub async fn test_create_secret_key_runner<R>()
+pub async fn test_create_secret_key<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let _mu = TEST_LOCK.lock();
   let cases = vec![
     ("size-16", SecretKey::Aes128([0; 16])),
     ("size-24", SecretKey::Aes192([0; 24])),
@@ -94,27 +91,12 @@ where
   }
 }
 
-#[test]
-fn test_create_secret_key() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_create_secret_key_runner::<TokioRuntime>());
-  }
-  {
-    AsyncStdRuntime::block_on(test_create_secret_key_runner::<AsyncStdRuntime>());
-  }
-  {
-    SmolRuntime::block_on(test_create_secret_key_runner::<SmolRuntime>());
-  }
-}
-
-pub async fn test_create_secret_key_empty_runner<R>()
+pub async fn test_create_secret_key_empty<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let _mu = TEST_LOCK.lock();
   let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr().ip());
 
   get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
@@ -123,27 +105,12 @@ where
   yield_now::<R>().await;
 }
 
-#[test]
-fn test_create_secret_key_empty() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_create_secret_key_empty_runner::<TokioRuntime>());
-  }
-  {
-    AsyncStdRuntime::block_on(test_create_secret_key_empty_runner::<AsyncStdRuntime>());
-  }
-  {
-    SmolRuntime::block_on(test_create_secret_key_empty_runner::<SmolRuntime>());
-  }
-}
-
-pub async fn test_create_keyring_only_runner<R>()
+pub async fn test_create_keyring_only<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let _mu = TEST_LOCK.lock();
   let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr().ip());
 
   let m = Showbiz::<VoidDelegate, NetTransport<R>>::with_keyring(
@@ -157,27 +124,12 @@ where
   assert!(m.encryption_enabled());
 }
 
-#[test]
-fn test_create_keyring_only() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_create_keyring_only_runner::<TokioRuntime>());
-  }
-  {
-    AsyncStdRuntime::block_on(test_create_keyring_only_runner::<AsyncStdRuntime>());
-  }
-  {
-    SmolRuntime::block_on(test_create_keyring_only_runner::<SmolRuntime>());
-  }
-}
-
-pub async fn test_create_keyring_and_primary_key_runner<R>()
+pub async fn test_create_keyring_and_primary_key<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let _mu = TEST_LOCK.lock();
   let c = Options::<NetTransport<R>>::lan()
     .with_bind_addr(get_bind_addr().ip())
     .with_secret_key(Some(SecretKey::Aes128([1; 16])));
@@ -197,27 +149,12 @@ where
   );
 }
 
-#[test]
-fn test_create_keyring_and_primary_key() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_create_keyring_and_primary_key_runner::<TokioRuntime>());
-  }
-  {
-    AsyncStdRuntime::block_on(test_create_keyring_and_primary_key_runner::<AsyncStdRuntime>());
-  }
-  {
-    SmolRuntime::block_on(test_create_keyring_and_primary_key_runner::<SmolRuntime>());
-  }
-}
-
-pub async fn test_create_runner<R>()
+pub async fn test_create<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let _mu = TEST_LOCK.lock();
   let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr().ip());
   let m = get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
     .await
@@ -226,22 +163,8 @@ where
   assert_eq!(m.members().await.len(), 1);
 }
 
-#[test]
-fn test_create() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_create_runner::<TokioRuntime>());
-  }
-  {
-    AsyncStdRuntime::block_on(test_create_runner::<AsyncStdRuntime>());
-  }
-  {
-    SmolRuntime::block_on(test_create_runner::<SmolRuntime>());
-  }
-}
+pub async fn test_resolve_addr() {
 
-pub async fn test_resolve_addr_runner() {
-  let _mu = TEST_LOCK.lock();
   // let m = get_showbiz(None).await.unwrap();
 
   // struct TestCase {
@@ -263,20 +186,20 @@ pub async fn test_resolve_addr_runner() {
   // }
 }
 
-#[tracing_test::traced_test]
-#[test]
-fn test_resolve_addr() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_resolve_addr_runner());
-  }
-  {
-    AsyncStdRuntime::block_on(test_resolve_addr_runner());
-  }
-  {
-    SmolRuntime::block_on(test_resolve_addr_runner());
-  }
-}
+// #[tracing_test::traced_test]
+// #[test]
+// fn test_resolve_addr() {
+//   {
+//     let runtime = tokio::runtime::Runtime::new().unwrap();
+//     runtime.block_on(test_resolve_addr());
+//   }
+//   {
+//     AsyncStdRuntime::block_on(test_resolve_addr());
+//   }
+//   {
+//     SmolRuntime::block_on(test_resolve_addr());
+//   }
+// }
 
 async fn test_resolve_addr_tcp_first() {
   todo!()
@@ -286,13 +209,12 @@ async fn test_members() {
   todo!()
 }
 
-pub async fn test_join_runner<R>()
+pub async fn test_join<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let _mu = TEST_LOCK.lock();
   let c1 = test_config::<R>().with_compression_algo(CompressionAlgo::None);
   let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
 
@@ -312,32 +234,12 @@ where
   assert_eq!(num, 1);
 }
 
-#[tracing_test::traced_test]
-#[test]
-fn test_join() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_join_runner::<TokioRuntime>());
-  }
-
-  // TODO: fix async-std runtime
-  // {
-  //   AsyncStdRuntime::block_on(test_join_runner::<AsyncStdRuntime>());
-  // }
-
-  // TODO: fix smol runtime
-  // {
-  //   SmolRuntime::block_on(test_join_runner::<SmolRuntime>());
-  // }
-}
-
-pub async fn test_join_with_compression_runner<R>()
+pub async fn test_join_with_compression<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let _mu = TEST_LOCK.lock();
   let c1 = test_config::<R>();
   let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
 
@@ -351,29 +253,12 @@ where
   assert_eq!(num, 1);
 }
 
-#[tracing_test::traced_test]
-#[test]
-fn test_join_with_compression() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_join_with_compression_runner::<TokioRuntime>());
-  }
-
-  // {
-  //   AsyncStdRuntime::block_on(test_join_runner::<AsyncStdRuntime>());
-  // }
-  // {
-  //   SmolRuntime::block_on(test_join_runner::<SmolRuntime>());
-  // }
-}
-
-pub async fn test_join_with_encryption_runner<R>(algo: EncryptionAlgo)
+pub async fn test_join_with_encryption<R>(algo: EncryptionAlgo)
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let _mu = TEST_LOCK.lock();
   let c1 = test_config::<R>()
     .with_compression_algo(CompressionAlgo::None)
     .with_encryption_algo(algo)
@@ -394,34 +279,7 @@ where
   assert_eq!(num, 1);
 }
 
-#[tracing_test::traced_test]
-#[test]
-fn test_join_with_encryption() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_join_with_encryption_runner::<TokioRuntime>(
-      EncryptionAlgo::None,
-    ));
-    runtime.block_on(test_join_with_encryption_runner::<TokioRuntime>(
-      EncryptionAlgo::NoPadding,
-    ));
-    runtime.block_on(test_join_with_encryption_runner::<TokioRuntime>(
-      EncryptionAlgo::PKCS7,
-    ));
-  }
-  // {
-  //   AsyncStdRuntime::block_on(test_join_with_encryption_runner::<AsyncStdRuntime>(EncryptionAlgo::None));
-  //   AsyncStdRuntime::block_on(test_join_with_encryption_runner::<AsyncStdRuntime>(EncryptionAlgo::NoPadding));
-  //   AsyncStdRuntime::block_on(test_join_with_encryption_runner::<AsyncStdRuntime>(EncryptionAlgo::PKCS7));
-  // }
-  // {
-  //   SmolRuntime::block_on(test_join_with_encryption_runner::<AsyncStdRuntime>(EncryptionAlgo::None));
-  //   SmolRuntime::block_on(test_join_with_encryption_runner::<AsyncStdRuntime>(EncryptionAlgo::NoPadding));
-  //   SmolRuntime::block_on(test_join_with_encryption_runner::<AsyncStdRuntime>(EncryptionAlgo::PKCS7));
-  // }
-}
-
-pub async fn test_join_with_encryption_and_compression_runner<R>(
+pub async fn test_join_with_encryption_and_compression<R>(
   encryption_algo: EncryptionAlgo,
   compression_algo: CompressionAlgo,
 ) where
@@ -429,7 +287,6 @@ pub async fn test_join_with_encryption_and_compression_runner<R>(
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let _mu = TEST_LOCK.lock();
   let c1 = test_config::<R>()
     .with_compression_algo(compression_algo)
     .with_encryption_algo(encryption_algo)
@@ -451,29 +308,7 @@ pub async fn test_join_with_encryption_and_compression_runner<R>(
   assert_eq!(num, 1);
 }
 
-#[tracing_test::traced_test]
-#[test]
-fn test_join_with_encryption_and_compression() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_join_with_encryption_and_compression_runner::<
-      TokioRuntime,
-    >(EncryptionAlgo::NoPadding, CompressionAlgo::Lzw));
-    runtime.block_on(test_join_with_encryption_and_compression_runner::<
-      TokioRuntime,
-    >(EncryptionAlgo::PKCS7, CompressionAlgo::Lzw));
-  }
-  // {
-  //   AsyncStdRuntime::block_on(test_join_with_encryption_and_compression_runner::<AsyncStdRuntime>(EncryptionAlgo::NoPadding, CompressionAlgo::Lzw));
-  //   AsyncStdRuntime::block_on(test_join_with_encryption_and_compression_runner::<AsyncStdRuntime>(EncryptionAlgo::PKCS7, CompressionAlgo::Lzw));
-  // }
-  // {
-  //   SmolRuntime::block_on(test_join_with_encryption_and_compression_runner::<AsyncStdRuntime>(EncryptionAlgo::NoPadding, CompressionAlgo::Lzw));
-  //   SmolRuntime::block_on(test_join_with_encryption_and_compression_runner::<AsyncStdRuntime>(EncryptionAlgo::PKCS7, CompressionAlgo::Lzw));
-  // }
-}
-
-const TEST_KEYS: &[SecretKey] = &[
+pub const TEST_KEYS: &[SecretKey] = &[
   SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
   SecretKey::Aes128([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]),
   SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
@@ -488,7 +323,6 @@ pub async fn test_join_with_labels<R>(
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let _mu = TEST_LOCK.lock();
   let c1 = test_config::<R>()
     .with_label(Label::from_static("blah"))
     .with_encryption_algo(encryption_algo)
@@ -578,85 +412,12 @@ pub async fn test_join_with_labels<R>(
   assert_eq!(m4.estimate_num_nodes(), 1);
 }
 
-#[tracing_test::traced_test]
-#[test]
-fn _test_join_with_labels() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_join_with_labels::<TokioRuntime>(
-      EncryptionAlgo::None,
-      CompressionAlgo::None,
-      None,
-    ));
-  }
-}
-
-#[tracing_test::traced_test]
-#[test]
-fn _test_join_with_labels_and_compression() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_join_with_labels::<TokioRuntime>(
-      EncryptionAlgo::None,
-      CompressionAlgo::Lzw,
-      None,
-    ));
-  }
-}
-
-#[tracing_test::traced_test]
-#[test]
-fn _test_join_with_labels_and_encryption() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_join_with_labels::<TokioRuntime>(
-      EncryptionAlgo::NoPadding,
-      CompressionAlgo::None,
-      Some(TEST_KEYS[0]),
-    ));
-    runtime.block_on(test_join_with_labels::<TokioRuntime>(
-      EncryptionAlgo::PKCS7,
-      CompressionAlgo::None,
-      Some(TEST_KEYS[0]),
-    ));
-    runtime.block_on(test_join_with_labels::<TokioRuntime>(
-      EncryptionAlgo::None,
-      CompressionAlgo::None,
-      Some(TEST_KEYS[0]),
-    ));
-  }
-}
-
-#[tracing_test::traced_test]
-#[test]
-fn _test_join_with_labels_and_compression_and_encryption() {
-  {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(test_join_with_labels::<TokioRuntime>(
-      EncryptionAlgo::NoPadding,
-      CompressionAlgo::Lzw,
-      Some(TEST_KEYS[0]),
-    ));
-    runtime.block_on(test_join_with_labels::<TokioRuntime>(
-      EncryptionAlgo::PKCS7,
-      CompressionAlgo::Lzw,
-      Some(TEST_KEYS[0]),
-    ));
-    runtime.block_on(test_join_with_labels::<TokioRuntime>(
-      EncryptionAlgo::None,
-      CompressionAlgo::Lzw,
-      Some(TEST_KEYS[0]),
-    ));
-  }
-}
-
-pub async fn test_join_different_networks_unique_mask_runner<R>()
+pub async fn test_join_different_networks_unique_mask<R>()
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let _mu = TEST_LOCK.lock();
   let (cidrs, _) = parse_cidrs(&["127.0.0.0/8"]);
   let c1 = test_config_net::<R>(0).with_allowed_cidrs(Some(cidrs.clone()));
   let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
@@ -679,23 +440,23 @@ where
   assert_eq!(m2.estimate_num_nodes(), 2);
 }
 
-#[tracing_test::traced_test]
-#[test]
-fn test_join_different_networks_unique_mask() {
-  // {
-  //   let runtime = tokio::runtime::Runtime::new().unwrap();
-  //   runtime.block_on(test_join_different_networks_unique_mask_runner::<
-  //     TokioRuntime,
-  //   >());
-  // }
+// #[tracing_test::traced_test]
+// #[test]
+// fn test_join_different_networks_unique_mask() {
+//   // {
+//   //   let runtime = tokio::runtime::Runtime::new().unwrap();
+//   //   runtime.block_on(test_join_different_networks_unique_mask::<
+//   //     TokioRuntime,
+//   //   >());
+//   // }
 
-  // {
-  //   AsyncStdRuntime::block_on(test_join_runner::<AsyncStdRuntime>());
-  // }
-  // {
-  //   SmolRuntime::block_on(test_join_runner::<SmolRuntime>());
-  // }
-}
+//   // {
+//   //   AsyncStdRuntime::block_on(test_join::<AsyncStdRuntime>());
+//   // }
+//   // {
+//   //   SmolRuntime::block_on(test_join::<SmolRuntime>());
+//   // }
+// }
 
 async fn test_join_different_networks_multi_masks() {
   todo!()
