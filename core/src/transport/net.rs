@@ -278,6 +278,7 @@ pub struct NetTransport<R: Runtime> {
   packet_rx: PacketSubscriber,
   stream_rx: ConnectionSubscriber<Self>,
   tcp_bind_addr: SocketAddr,
+  #[allow(dead_code)]
   tcp_listener: Arc<<R::Net as Net>::TcpListener>,
   udp_listener: Arc<UnreliableConnection<Self>>,
   wg: AsyncWaitGroup,
@@ -307,26 +308,36 @@ impl<R: Runtime> NetTransport<R> {
     let bind_port = opts.bind_port.unwrap_or(0);
     for &addr in &opts.bind_addrs {
       let addr = SocketAddr::new(addr, bind_port);
-      tcp_listeners.push_back((
-        <<R::Net as Net>::TcpListener as agnostic::net::TcpListener>::bind(addr)
-          .await
-          .map_err(|e| TransportError::Other(NetTransportError::ListenTcp(addr, e)))?,
-        addr,
-      ));
+      let (local_addr, ln) =
+        match <<R::Net as Net>::TcpListener as agnostic::net::TcpListener>::bind(addr).await {
+          Ok(ln) => (ln.local_addr().unwrap(), ln),
+          Err(e) => return Err(TransportError::Other(NetTransportError::ListenTcp(addr, e))),
+        };
+      tcp_listeners.push_back((ln, local_addr));
 
-      let udp_ln = <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::bind(addr)
-        .await
-        .map_err(|e| NetTransportError::ListenUdp(addr, e))
-        .and_then(|udp| {
-          <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::set_read_buffer(
-            &udp,
-            UDP_RECV_BUF_SIZE,
-          )
-          .map(|_| UnreliableConnection::new(Udp::new(udp), addr))
-          .map_err(NetTransportError::ResizeUdpBuffer)
-        })
-        .map_err(TransportError::Other)?;
-      udp_listeners.push_back((udp_ln, addr));
+      let (local_addr, udp_ln) =
+        <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::bind(addr)
+          .await
+          .map_err(|e| NetTransportError::ListenUdp(addr, e))
+          .and_then(|udp| {
+            <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::set_read_buffer(
+              &udp,
+              UDP_RECV_BUF_SIZE,
+            )
+            .map(|_| {
+              let local_addr = match udp.local_addr() {
+                Ok(addr) => addr,
+                Err(e) => {
+                  tracing::warn!(target = "showbiz", err = %e, "fail to get UDP local address");
+                  addr
+                }
+              };
+              (local_addr, UnreliableConnection::new(Udp::new(udp)))
+            })
+            .map_err(NetTransportError::ResizeUdpBuffer)
+          })
+          .map_err(TransportError::Other)?;
+      udp_listeners.push_back((udp_ln, local_addr));
     }
 
     let wg = AsyncWaitGroup::new();
@@ -364,7 +375,7 @@ impl<R: Runtime> NetTransport<R> {
     }
 
     wg.add(2);
-    let (tcp_ln, local_addr) = tcp_listeners.pop_back().unwrap();
+    let (tcp_ln, local_tcp_addr) = tcp_listeners.pop_back().unwrap();
     let tcp_ln = Arc::new(tcp_ln);
     TcpProcessor {
       wg: wg.clone(),
@@ -372,7 +383,7 @@ impl<R: Runtime> NetTransport<R> {
       ln: tcp_ln.clone(),
       shutdown: shutdown.clone(),
       shutdown_rx: shutdown_rx.clone(),
-      local_addr,
+      local_addr: local_tcp_addr,
     }
     .run();
     let (udp_ln, local_addr) = udp_listeners.pop_back().unwrap();
@@ -397,7 +408,7 @@ impl<R: Runtime> NetTransport<R> {
       stream_rx,
       wg,
       shutdown,
-      tcp_bind_addr: local_addr,
+      tcp_bind_addr: local_tcp_addr,
       tcp_listener: tcp_ln,
       shutdown_tx: ArcSwapOption::from_pointee(Some(shutdown_tx)),
       udp_listener: udp_ln,
@@ -439,70 +450,6 @@ impl<R: Runtime> Transport for NetTransport<R> {
     }
   }
 
-  #[cfg(all(feature = "metrics", feature = "nightly"))]
-  fn with_metrics_labels(
-    label: Option<Label>,
-    opts: Self::Options,
-    metrics_labels: std::sync::Arc<Vec<crate::metrics::Label>>,
-  ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
-  where
-    Self: Sized,
-  {
-    Self::new_in(label, opts, Some(metrics_labels))
-  }
-
-  #[cfg(feature = "nightly")]
-  fn write_to<'a>(
-    &'a self,
-    b: &'a [u8],
-    addr: SocketAddr,
-  ) -> impl Future<Output = Result<Instant, TransportError<Self>>> + Send + 'a {
-    async move {
-      UnreliableConnection::send_to(&self.udp_listener, addr, b)
-        .await
-        .map(|_| Instant::now())
-    }
-  }
-
-  #[cfg(feature = "nightly")]
-  fn dial_timeout(
-    &self,
-    addr: SocketAddr,
-    timeout: Duration,
-  ) -> impl Future<Output = Result<ReliableConnection<Self>, TransportError<Self>>> + '_ {
-    async move {
-      match <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect_timeout(addr, timeout)
-        .await
-      {
-        Ok(conn) => Ok(ReliableConnection::new(
-          Tcp {
-            conn,
-            timeout: None,
-          },
-          addr,
-        )),
-        Err(_) => Err(TransportError::Connection(ConnectionError {
-          kind: ConnectionKind::Reliable,
-          error_kind: ConnectionErrorKind::Dial,
-          error: Error::new(ErrorKind::TimedOut, "timeout"),
-        })),
-      }
-    }
-  }
-
-  #[cfg(feature = "nightly")]
-  fn shutdown(&self) -> impl Future<Output = Result<(), TransportError<Self>>> + Send + '_ {
-    async move {
-      // This will avoid log spam about errors when we shut down.
-      self.shutdown.store(true, Ordering::SeqCst);
-      self.shutdown_tx.store(None);
-
-      // Block until all the listener threads have died.
-      self.wg.wait().await;
-      Ok(())
-    }
-  }
-
   #[cfg(not(feature = "nightly"))]
   async fn new(label: Option<Label>, opts: Self::Options) -> Result<Self, TransportError<Self>>
   where
@@ -517,6 +464,18 @@ impl<R: Runtime> Transport for NetTransport<R> {
     {
       Self::new_in(label, opts).await
     }
+  }
+
+  #[cfg(all(feature = "metrics", feature = "nightly"))]
+  fn with_metrics_labels(
+    label: Option<Label>,
+    opts: Self::Options,
+    metrics_labels: std::sync::Arc<Vec<crate::metrics::Label>>,
+  ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
+  where
+    Self: Sized,
+  {
+    Self::new_in(label, opts, Some(metrics_labels))
   }
 
   #[cfg(all(feature = "metrics", not(feature = "nightly")))]
@@ -551,14 +510,21 @@ impl<R: Runtime> Transport for NetTransport<R> {
         };
 
         // Use the port we are bound to.
-        Ok(
-          self
-            .tcp_listener
-            .local_addr()
-            .map(|s| SocketAddr::new(addr, s.port()))
-            .unwrap(),
-        )
+        Ok(SocketAddr::new(addr, self.tcp_bind_addr.port()))
       }
+    }
+  }
+
+  #[cfg(feature = "nightly")]
+  fn write_to<'a>(
+    &'a self,
+    b: &'a [u8],
+    addr: SocketAddr,
+  ) -> impl Future<Output = Result<Instant, TransportError<Self>>> + Send + 'a {
+    async move {
+      UnreliableConnection::send_to(&self.udp_listener, addr, b)
+        .await
+        .map(|_| Instant::now())
     }
   }
 
@@ -578,6 +544,32 @@ impl<R: Runtime> Transport for NetTransport<R> {
     UnreliableConnection::send_to(&self.udp_listener, addr, b)
       .await
       .map(|_| Instant::now())
+  }
+
+  #[cfg(feature = "nightly")]
+  fn dial_timeout(
+    &self,
+    addr: SocketAddr,
+    timeout: Duration,
+  ) -> impl Future<Output = Result<ReliableConnection<Self>, TransportError<Self>>> + '_ {
+    async move {
+      match <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect_timeout(addr, timeout)
+        .await
+      {
+        Ok(conn) => Ok(ReliableConnection::new(
+          Tcp {
+            conn,
+            timeout: None,
+          },
+          addr,
+        )),
+        Err(_) => Err(TransportError::Connection(ConnectionError {
+          kind: ConnectionKind::Reliable,
+          error_kind: ConnectionErrorKind::Dial,
+          error: Error::new(ErrorKind::TimedOut, "timeout"),
+        })),
+      }
+    }
   }
 
   #[cfg(not(feature = "nightly"))]
@@ -615,6 +607,19 @@ impl<R: Runtime> Transport for NetTransport<R> {
     self.stream_rx.clone()
   }
 
+  #[cfg(feature = "nightly")]
+  fn shutdown(&self) -> impl Future<Output = Result<(), TransportError<Self>>> + Send + '_ {
+    async move {
+      // This will avoid log spam about errors when we shut down.
+      self.shutdown.store(true, Ordering::SeqCst);
+      self.shutdown_tx.store(None);
+
+      // Block until all the listener threads have died.
+      self.wg.wait().await;
+      Ok(())
+    }
+  }
+
   #[cfg(not(feature = "nightly"))]
   async fn shutdown(&self) -> Result<(), TransportError<Self>> {
     // This will avoid log spam about errors when we shut down.
@@ -633,6 +638,10 @@ impl<R: Runtime> Transport for NetTransport<R> {
     let wg = self.wg.clone();
     R::spawn_detach(async move { wg.wait().await });
     Ok(())
+  }
+
+  fn auto_bind_port(&self) -> u16 {
+    self.tcp_bind_addr.port()
   }
 }
 
@@ -670,6 +679,7 @@ where
       stream_tx,
       ln,
       shutdown,
+      local_addr,
       ..
     } = self;
 
@@ -696,7 +706,7 @@ where
                 let remote_addr = match conn.peer_addr() {
                   Ok(addr) => addr,
                   Err(err) => {
-                    tracing::error!(target = "showbiz", err = %err, "failed to get peer address");
+                    tracing::error!(target = "showbiz", local_addr=%local_addr, err = %err, "failed to get TCP peer address");
                     continue;
                   }
                 };
@@ -706,7 +716,7 @@ where
                   .send(ReliableConnection::new(Tcp { conn }, remote_addr))
                   .await
                 {
-                  tracing::error!(target = "showbiz", err = %e, "failed to send tcp connection");
+                  tracing::error!(target = "showbiz", local_addr=%local_addr, err = %e, "failed to send TCP connection");
                 }
               }
               Err(e) => {
@@ -724,7 +734,7 @@ where
                   loop_delay = MAX_DELAY;
                 }
 
-                tracing::error!(target = "showbiz", err = %e, "error accepting TCP connection");
+                tracing::error!(target = "showbiz", local_addr=%local_addr, err = %e, "error accepting TCP connection");
                 <T::Runtime as Runtime>::sleep(loop_delay).await;
                 continue;
               }

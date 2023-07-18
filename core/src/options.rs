@@ -1,5 +1,4 @@
 use std::{
-  borrow::Cow,
   collections::HashSet,
   net::{IpAddr, Ipv4Addr},
   path::PathBuf,
@@ -18,8 +17,6 @@ use super::{
 pub use super::version::{DelegateVersion, ProtocolVersion};
 
 const DEFAULT_PORT: u16 = 7946;
-
-pub type SharedString = Cow<'static, str>;
 
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -277,6 +274,7 @@ impl<T: Transport> Clone for Options<T> {
       label: self.label.clone(),
       dns_config_path: self.dns_config_path.clone(),
       allowed_cidrs: self.allowed_cidrs.clone(),
+      metrics_labels: self.metrics_labels.clone(),
       ..*self
     }
   }

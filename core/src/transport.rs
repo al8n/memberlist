@@ -379,7 +379,7 @@ mod r#async {
     }
   }
 
-  pub struct UnreliableConnection<T: Transport>(T::UnreliableConnection, SocketAddr);
+  pub struct UnreliableConnection<T: Transport>(T::UnreliableConnection);
 
   impl<T: Transport> AsRef<UnreliableConnection<T>> for UnreliableConnection<T> {
     #[inline]
@@ -393,8 +393,8 @@ mod r#async {
     T: Transport,
   {
     #[inline]
-    pub fn new(conn: T::UnreliableConnection, remote_addr: SocketAddr) -> Self {
-      Self(conn, remote_addr)
+    pub fn new(conn: T::UnreliableConnection) -> Self {
+      Self(conn)
     }
 
     #[inline]
@@ -405,11 +405,6 @@ mod r#async {
     #[inline]
     pub fn timeout(&self) -> (Option<Duration>, Option<Duration>) {
       self.0.timeout()
-    }
-
-    #[inline]
-    pub fn remote_node(&self) -> SocketAddr {
-      self.1
     }
 
     #[inline]
@@ -677,6 +672,10 @@ mod r#async {
       addr: Option<IpAddr>,
       port: u16,
     ) -> Result<SocketAddr, TransportError<Self>>;
+
+    /// Returns the bind port that was automatically given by the
+    /// kernel, if a bind port of 0 was given.
+    fn auto_bind_port(&self) -> u16;
 
     /// A packet-oriented interface that fires off the given
     /// payload to the given address in a connectionless fashion. This should

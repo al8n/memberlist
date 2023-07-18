@@ -19,15 +19,6 @@ use itertools::{Either, Itertools};
 #[cfg(all(feature = "async", feature = "test"))]
 pub(crate) mod tests;
 
-#[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct Runner<T: Transport> {
-  transport: T,
-  /// We do not call send directly, just directly drop it.
-  #[allow(dead_code)]
-  shutdown_tx: Sender<()>,
-  advertise: SocketAddr,
-}
-
 #[cfg(feature = "async")]
 pub(crate) struct AckHandler {
   pub(crate) ack_fn:
@@ -303,11 +294,16 @@ where
     )
     .await?;
 
+    if let Some(0) | None = opts.bind_port {
+      let port = transport.auto_bind_port();
+      opts.bind_port = Some(port);
+      tracing::warn!(target = "showbiz", "using dynamic bind port {port}");
+    }
+
     // Get the final advertise address from the transport, which may need
     // to see which address we bound to. We'll refresh this each time we
     // send out an alive message.
-    let advertise =
-      transport.final_advertise_addr(opts.advertise_addr, opts.advertise_port.unwrap_or(0))?;
+    let advertise = transport.final_advertise_addr(opts.advertise_addr, opts.bind_port.unwrap())?;
 
     let id = NodeId {
       name: opts.name.clone(),
@@ -391,7 +387,11 @@ where
     };
     this.alive_node(alive, None, true).await;
     this.schedule(shutdown_rx).await;
-
+    this
+      .inner
+      .hot
+      .status
+      .store(Status::Running, Ordering::Relaxed);
     Ok(this)
   }
 
@@ -503,8 +503,6 @@ where
     let (left, right): (FuturesUnordered<_>, FuturesUnordered<_>) = existing
       .into_iter()
       .partition_map(|(addr, name)| match addr {
-        // Address::Ip(addr) => Either::Left(self.join_socket(SocketAddr::new(addr, 0), name, true)),
-        // Address::Socket(addr) => Either::Left(self.join_socket(addr, name, false)),
         Address::Domain { domain, port } => Either::Right(async move {
           let addrs = match self.resolve_addr(&domain, port).await {
             Ok(addrs) => addrs,
@@ -538,7 +536,10 @@ where
         }),
         address => {
           let (addr, is_ip) = match address {
-            Address::Ip(addr) => (SocketAddr::new(addr, 0), true),
+            Address::Ip(addr) => (
+              SocketAddr::new(addr, self.inner.opts.bind_port.unwrap()),
+              true,
+            ),
             Address::Socket(addr) => (addr, false),
             Address::Domain { .. } => unreachable!(),
           };

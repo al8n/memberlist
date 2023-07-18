@@ -23,7 +23,6 @@ mod r#async;
 #[cfg(all(feature = "async", feature = "test"))]
 pub use r#async::tests::*;
 
-use rand::seq::SliceRandom;
 #[cfg(feature = "metrics")]
 use sealed_metrics::*;
 
@@ -203,16 +202,6 @@ where
       .hot
       .num_nodes
       .load(std::sync::atomic::Ordering::SeqCst)
-  }
-
-  #[inline]
-  pub(crate) fn is_shutdown(&self) -> bool {
-    self
-      .inner
-      .hot
-      .status
-      .load(std::sync::atomic::Ordering::SeqCst)
-      == Status::Shutdown
   }
 
   #[inline]

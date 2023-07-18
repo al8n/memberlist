@@ -40,10 +40,8 @@ pub use r#async::*;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum Status {
-  Fresh,
   Running,
   Left,
-  Shutdown,
 }
 
 #[viewit::viewit]
@@ -62,7 +60,7 @@ impl HotData {
       incarnation: CachePadded::new(AtomicU32::new(0)),
       num_nodes: Arc::new(CachePadded::new(AtomicU32::new(0))),
       push_pull_req: CachePadded::new(AtomicU32::new(0)),
-      status: CachePadded::new(Atomic::new(Status::Fresh)),
+      status: CachePadded::new(Atomic::new(Status::Running)),
     }
   }
 }
@@ -113,14 +111,14 @@ where
 impl<Run: Runtime> rand::seq::SliceRandom for Memberlist<Run> {
   type Item = Member<Run>;
 
-  fn choose<R>(&self, rng: &mut R) -> Option<&Self::Item>
+  fn choose<R>(&self, _rng: &mut R) -> Option<&Self::Item>
   where
     R: rand::Rng + ?Sized,
   {
     unreachable!()
   }
 
-  fn choose_mut<R>(&mut self, rng: &mut R) -> Option<&mut Self::Item>
+  fn choose_mut<R>(&mut self, _rng: &mut R) -> Option<&mut Self::Item>
   where
     R: rand::Rng + ?Sized,
   {
@@ -129,8 +127,8 @@ impl<Run: Runtime> rand::seq::SliceRandom for Memberlist<Run> {
 
   fn choose_multiple<R>(
     &self,
-    rng: &mut R,
-    amount: usize,
+    _rng: &mut R,
+    _amount: usize,
   ) -> rand::seq::SliceChooseIter<Self, Self::Item>
   where
     R: rand::Rng + ?Sized,
@@ -140,8 +138,8 @@ impl<Run: Runtime> rand::seq::SliceRandom for Memberlist<Run> {
 
   fn choose_weighted<R, F, B, X>(
     &self,
-    rng: &mut R,
-    weight: F,
+    _rng: &mut R,
+    _weight: F,
   ) -> Result<&Self::Item, rand::distributions::WeightedError>
   where
     R: rand::Rng + ?Sized,
@@ -158,8 +156,8 @@ impl<Run: Runtime> rand::seq::SliceRandom for Memberlist<Run> {
 
   fn choose_weighted_mut<R, F, B, X>(
     &mut self,
-    rng: &mut R,
-    weight: F,
+    _rng: &mut R,
+    _weight: F,
   ) -> Result<&mut Self::Item, rand::distributions::WeightedError>
   where
     R: rand::Rng + ?Sized,
@@ -176,9 +174,9 @@ impl<Run: Runtime> rand::seq::SliceRandom for Memberlist<Run> {
 
   fn choose_multiple_weighted<R, F, X>(
     &self,
-    rng: &mut R,
-    amount: usize,
-    weight: F,
+    _rng: &mut R,
+    _amount: usize,
+    _weight: F,
   ) -> Result<rand::seq::SliceChooseIter<Self, Self::Item>, rand::distributions::WeightedError>
   where
     R: rand::Rng + ?Sized,
@@ -217,8 +215,8 @@ impl<Run: Runtime> rand::seq::SliceRandom for Memberlist<Run> {
 
   fn partial_shuffle<R>(
     &mut self,
-    rng: &mut R,
-    amount: usize,
+    _rng: &mut R,
+    _amount: usize,
   ) -> (&mut [Self::Item], &mut [Self::Item])
   where
     R: rand::Rng + ?Sized,
