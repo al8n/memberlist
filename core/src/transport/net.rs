@@ -315,6 +315,15 @@ impl<R: Runtime> NetTransport<R> {
         };
       tcp_listeners.push_back((ln, local_addr));
 
+      // If the config port given was zero, use the first TCP listener
+		  // to pick an available port and then apply that to everything
+		  // else.
+      let addr = if bind_port == 0 {
+        local_addr
+      } else {
+        addr
+      };
+
       let (local_addr, udp_ln) =
         <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::bind(addr)
           .await
@@ -325,18 +334,12 @@ impl<R: Runtime> NetTransport<R> {
               UDP_RECV_BUF_SIZE,
             )
             .map(|_| {
-              let local_addr = match udp.local_addr() {
-                Ok(addr) => addr,
-                Err(e) => {
-                  tracing::warn!(target = "showbiz", err = %e, "fail to get UDP local address");
-                  addr
-                }
-              };
-              (local_addr, UnreliableConnection::new(Udp::new(udp)))
+              (addr, UnreliableConnection::new(Udp::new(udp)))
             })
             .map_err(NetTransportError::ResizeUdpBuffer)
           })
           .map_err(TransportError::Other)?;
+      println!("udp local {local_addr}");
       udp_listeners.push_back((udp_ln, local_addr));
     }
 
