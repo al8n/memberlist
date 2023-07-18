@@ -21,7 +21,7 @@ where
   /// transport and hands them off for processing.
   pub(crate) fn stream_listener(&self, shutdown_rx: async_channel::Receiver<()>) {
     let this = self.clone();
-    let transport_rx = this.runner().as_ref().unwrap().transport.stream();
+    let transport_rx = this.inner.transport.stream();
     <T::Runtime as Runtime>::spawn_detach(async move {
       tracing::debug!(target = "showbiz", "stream_listener start");
       loop {
@@ -93,9 +93,7 @@ where
     msg: crate::types::Message,
   ) -> Result<(), Error<D, T>> {
     let mut conn = self
-      .runner()
-      .as_ref()
-      .unwrap()
+      .inner
       .transport
       .dial_timeout(addr.addr(), self.inner.opts.tcp_timeout)
       .await

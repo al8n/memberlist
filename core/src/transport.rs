@@ -168,6 +168,7 @@ pub use r#async::*;
 mod r#async {
   use std::{
     io,
+    net::IpAddr,
     sync::Arc,
     task::{Context, Poll},
   };
@@ -178,6 +179,13 @@ mod r#async {
   use futures_util::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
   pub struct ReliableConnection<T: Transport>(BufReader<T::Connection>, SocketAddr);
+
+  impl<T: Transport> AsRef<ReliableConnection<T>> for ReliableConnection<T> {
+    #[inline]
+    fn as_ref(&self) -> &ReliableConnection<T> {
+      self
+    }
+  }
 
   #[allow(dead_code)]
   impl<T> ReliableConnection<T>
@@ -371,7 +379,7 @@ mod r#async {
     }
   }
 
-  pub struct UnreliableConnection<T: Transport>(T::UnreliableConnection, SocketAddr);
+  pub struct UnreliableConnection<T: Transport>(T::UnreliableConnection);
 
   impl<T: Transport> AsRef<UnreliableConnection<T>> for UnreliableConnection<T> {
     #[inline]
@@ -385,8 +393,8 @@ mod r#async {
     T: Transport,
   {
     #[inline]
-    pub fn new(conn: T::UnreliableConnection, remote_addr: SocketAddr) -> Self {
-      Self(conn, remote_addr)
+    pub fn new(conn: T::UnreliableConnection) -> Self {
+      Self(conn)
     }
 
     #[inline]
@@ -397,11 +405,6 @@ mod r#async {
     #[inline]
     pub fn timeout(&self) -> (Option<Duration>, Option<Duration>) {
       self.0.timeout()
-    }
-
-    #[inline]
-    pub fn remote_node(&self) -> SocketAddr {
-      self.1
     }
 
     #[inline]
@@ -588,28 +591,28 @@ mod r#async {
   pub trait TransportOptions:
     Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static
   {
-    fn from_addr(addr: SocketAddr) -> Self;
+    fn from_addr(addr: IpAddr, port: Option<u16>) -> Self;
 
-    fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self;
+    fn from_addrs(addrs: impl Iterator<Item = IpAddr>, port: Option<u16>) -> Self;
   }
 
   impl<T: TransportOptions> TransportOptions for Arc<T> {
-    fn from_addr(addr: SocketAddr) -> Self {
-      Arc::new(T::from_addr(addr))
+    fn from_addr(addr: IpAddr, port: Option<u16>) -> Self {
+      Arc::new(T::from_addr(addr, port))
     }
 
-    fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self {
-      Arc::new(T::from_addrs(addrs))
+    fn from_addrs(addrs: impl Iterator<Item = IpAddr>, port: Option<u16>) -> Self {
+      Arc::new(T::from_addrs(addrs, port))
     }
   }
 
   impl<T: TransportOptions> TransportOptions for Box<T> {
-    fn from_addr(addr: SocketAddr) -> Self {
-      Box::new(T::from_addr(addr))
+    fn from_addr(addr: IpAddr, port: Option<u16>) -> Self {
+      Box::new(T::from_addr(addr, port))
     }
 
-    fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self {
-      Box::new(T::from_addrs(addrs))
+    fn from_addrs(addrs: impl Iterator<Item = IpAddr>, port: Option<u16>) -> Self {
+      Box::new(T::from_addrs(addrs, port))
     }
   }
 
@@ -666,8 +669,13 @@ mod r#async {
     /// the rest of the cluster.
     fn final_advertise_addr(
       &self,
-      addr: Option<SocketAddr>,
+      addr: Option<IpAddr>,
+      port: u16,
     ) -> Result<SocketAddr, TransportError<Self>>;
+
+    /// Returns the bind port that was automatically given by the
+    /// kernel, if a bind port of 0 was given.
+    fn auto_bind_port(&self) -> u16;
 
     /// A packet-oriented interface that fires off the given
     /// payload to the given address in a connectionless fashion. This should

@@ -2,7 +2,7 @@ use std::{
   collections::VecDeque,
   io::{self, Error, ErrorKind},
   marker::PhantomData,
-  net::SocketAddr,
+  net::{IpAddr, SocketAddr},
   pin::Pin,
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -86,21 +86,24 @@ pub struct NetTransportOptions {
   /// communications.
   #[viewit(getter(
     style = "ref",
-    result(type = "&[SocketAddr]", converter(fn = "Vec::as_slice"))
+    result(type = "&[IpAddr]", converter(fn = "Vec::as_slice"))
   ))]
-  bind_addrs: Vec<SocketAddr>,
+  bind_addrs: Vec<IpAddr>,
+  bind_port: Option<u16>,
 }
 
 impl super::TransportOptions for NetTransportOptions {
-  fn from_addr(addr: SocketAddr) -> Self {
+  fn from_addr(addr: IpAddr, port: Option<u16>) -> Self {
     Self {
       bind_addrs: vec![addr],
+      bind_port: port,
     }
   }
 
-  fn from_addrs(addrs: impl Iterator<Item = SocketAddr>) -> Self {
+  fn from_addrs(addrs: impl Iterator<Item = IpAddr>, port: Option<u16>) -> Self {
     Self {
       bind_addrs: addrs.collect(),
+      bind_port: port,
     }
   }
 }
@@ -274,7 +277,9 @@ pub struct NetTransport<R: Runtime> {
   label: Option<Label>,
   packet_rx: PacketSubscriber,
   stream_rx: ConnectionSubscriber<Self>,
-  tcp_addr: SocketAddr,
+  tcp_bind_addr: SocketAddr,
+  #[allow(dead_code)]
+  tcp_listener: Arc<<R::Net as Net>::TcpListener>,
   udp_listener: Arc<UnreliableConnection<Self>>,
   wg: AsyncWaitGroup,
   shutdown: Arc<AtomicBool>,
@@ -300,28 +305,39 @@ impl<R: Runtime> NetTransport<R> {
 
     let mut tcp_listeners = VecDeque::with_capacity(opts.bind_addrs.len());
     let mut udp_listeners = VecDeque::with_capacity(opts.bind_addrs.len());
-    let tcp_addr = opts.bind_addrs[0];
+    let bind_port = opts.bind_port.unwrap_or(0);
     for &addr in &opts.bind_addrs {
-      tcp_listeners.push_back((
-        <<R::Net as Net>::TcpListener as agnostic::net::TcpListener>::bind(addr)
-          .await
-          .map_err(|e| TransportError::Other(NetTransportError::ListenTcp(addr, e)))?,
-        addr,
-      ));
+      let addr = SocketAddr::new(addr, bind_port);
+      let (local_addr, ln) =
+        match <<R::Net as Net>::TcpListener as agnostic::net::TcpListener>::bind(addr).await {
+          Ok(ln) => (ln.local_addr().unwrap(), ln),
+          Err(e) => return Err(TransportError::Other(NetTransportError::ListenTcp(addr, e))),
+        };
+      tcp_listeners.push_back((ln, local_addr));
 
-      let udp_ln = <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::bind(addr)
-        .await
-        .map_err(|e| NetTransportError::ListenUdp(addr, e))
-        .and_then(|udp| {
-          <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::set_read_buffer(
-            &udp,
-            UDP_RECV_BUF_SIZE,
-          )
-          .map(|_| UnreliableConnection::new(Udp::new(udp), addr))
-          .map_err(NetTransportError::ResizeUdpBuffer)
-        })
-        .map_err(TransportError::Other)?;
-      udp_listeners.push_back((udp_ln, addr));
+      let (local_addr, udp_ln) =
+        <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::bind(addr)
+          .await
+          .map_err(|e| NetTransportError::ListenUdp(addr, e))
+          .and_then(|udp| {
+            <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::set_read_buffer(
+              &udp,
+              UDP_RECV_BUF_SIZE,
+            )
+            .map(|_| {
+              let local_addr = match udp.local_addr() {
+                Ok(addr) => addr,
+                Err(e) => {
+                  tracing::warn!(target = "showbiz", err = %e, "fail to get UDP local address");
+                  addr
+                }
+              };
+              (local_addr, UnreliableConnection::new(Udp::new(udp)))
+            })
+            .map_err(NetTransportError::ResizeUdpBuffer)
+          })
+          .map_err(TransportError::Other)?;
+      udp_listeners.push_back((udp_ln, local_addr));
     }
 
     let wg = AsyncWaitGroup::new();
@@ -332,23 +348,23 @@ impl<R: Runtime> NetTransport<R> {
     // udp and tcp listener can
     for _ in 0..opts.bind_addrs.len() - 1 {
       wg.add(2);
-      let (tcp_ln, remote_addr) = tcp_listeners.pop_back().unwrap();
+      let (tcp_ln, local_addr) = tcp_listeners.pop_back().unwrap();
       TcpProcessor {
-        remote_addr,
         wg: wg.clone(),
         stream_tx: stream_tx.clone(),
-        ln: tcp_ln,
+        ln: Listener::<R>(tcp_ln),
         shutdown: shutdown.clone(),
         shutdown_rx: shutdown_rx.clone(),
+        local_addr,
       }
       .run();
 
-      let (udp_ln, remote_addr) = udp_listeners.pop_back().unwrap();
+      let (udp_ln, local_addr) = udp_listeners.pop_back().unwrap();
       UdpProcessor {
         wg: wg.clone(),
         packet_tx: packet_tx.clone(),
         ln: udp_ln,
-        remote_addr,
+        local_addr,
         shutdown: shutdown.clone(),
         #[cfg(feature = "metrics")]
         metrics_labels: metrics_labels.clone().unwrap_or_default(),
@@ -359,23 +375,24 @@ impl<R: Runtime> NetTransport<R> {
     }
 
     wg.add(2);
-    let (tcp_ln, remote_addr) = tcp_listeners.pop_back().unwrap();
+    let (tcp_ln, local_tcp_addr) = tcp_listeners.pop_back().unwrap();
+    let tcp_ln = Arc::new(tcp_ln);
     TcpProcessor {
-      remote_addr,
       wg: wg.clone(),
       stream_tx,
-      ln: tcp_ln,
+      ln: tcp_ln.clone(),
       shutdown: shutdown.clone(),
       shutdown_rx: shutdown_rx.clone(),
+      local_addr: local_tcp_addr,
     }
     .run();
-    let (udp_ln, remote_addr) = udp_listeners.pop_back().unwrap();
+    let (udp_ln, local_addr) = udp_listeners.pop_back().unwrap();
     let udp_ln = Arc::new(udp_ln);
     UdpProcessor {
       wg: wg.clone(),
       packet_tx,
       ln: udp_ln.clone(),
-      remote_addr,
+      local_addr,
       shutdown: shutdown.clone(),
       #[cfg(feature = "metrics")]
       metrics_labels: metrics_labels.clone().unwrap_or_default(),
@@ -391,7 +408,8 @@ impl<R: Runtime> NetTransport<R> {
       stream_rx,
       wg,
       shutdown,
-      tcp_addr,
+      tcp_bind_addr: local_tcp_addr,
+      tcp_listener: tcp_ln,
       shutdown_tx: ArcSwapOption::from_pointee(Some(shutdown_tx)),
       udp_listener: udp_ln,
       _marker: PhantomData,
@@ -432,6 +450,22 @@ impl<R: Runtime> Transport for NetTransport<R> {
     }
   }
 
+  #[cfg(not(feature = "nightly"))]
+  async fn new(label: Option<Label>, opts: Self::Options) -> Result<Self, TransportError<Self>>
+  where
+    Self: Sized,
+  {
+    #[cfg(feature = "metrics")]
+    {
+      Self::new_in(label, opts, None).await
+    }
+
+    #[cfg(not(feature = "metrics"))]
+    {
+      Self::new_in(label, opts).await
+    }
+  }
+
   #[cfg(all(feature = "metrics", feature = "nightly"))]
   fn with_metrics_labels(
     label: Option<Label>,
@@ -442,6 +476,43 @@ impl<R: Runtime> Transport for NetTransport<R> {
     Self: Sized,
   {
     Self::new_in(label, opts, Some(metrics_labels))
+  }
+
+  #[cfg(all(feature = "metrics", not(feature = "nightly")))]
+  async fn with_metrics_labels(
+    label: Option<Label>,
+    opts: Self::Options,
+    metrics_labels: Arc<Vec<crate::metrics::Label>>,
+  ) -> Result<Self, TransportError<Self>>
+  where
+    Self: Sized,
+  {
+    Self::new_in(label, opts, Some(metrics_labels)).await
+  }
+
+  fn final_advertise_addr(
+    &self,
+    addr: Option<IpAddr>,
+    port: u16,
+  ) -> Result<SocketAddr, TransportError<Self>> {
+    match addr {
+      Some(addr) => Ok(SocketAddr::new(addr, port)),
+      None => {
+        let addr = if self.opts.bind_addrs[0].is_unspecified() {
+          local_ip_address::local_ip().map_err(|e| match e {
+            local_ip_address::Error::LocalIpAddressNotFound => {
+              TransportError::Other(Self::Error::NoPrivateIP)
+            }
+            e => TransportError::Other(Self::Error::NoInterfaceAddresses(e)),
+          })?
+        } else {
+          self.tcp_bind_addr.ip()
+        };
+
+        // Use the port we are bound to.
+        Ok(SocketAddr::new(addr, self.tcp_bind_addr.port()))
+      }
+    }
   }
 
   #[cfg(feature = "nightly")]
@@ -455,6 +526,24 @@ impl<R: Runtime> Transport for NetTransport<R> {
         .await
         .map(|_| Instant::now())
     }
+  }
+
+  #[cfg(not(feature = "nightly"))]
+  async fn write_to(&self, b: &[u8], addr: SocketAddr) -> Result<Instant, TransportError<Self>> {
+    if let Some(label) = &self.label {
+      // TODO: is there a better way to avoid allocating and copying?
+      if !label.is_empty() {
+        let b =
+          Label::add_label_header_to_packet(b, label.as_bytes()).map_err(TransportError::Encode)?;
+        return UnreliableConnection::send_to(&self.udp_listener, addr, &b)
+          .await
+          .map(|_| Instant::now());
+      }
+    }
+
+    UnreliableConnection::send_to(&self.udp_listener, addr, b)
+      .await
+      .map(|_| Instant::now())
   }
 
   #[cfg(feature = "nightly")]
@@ -481,88 +570,6 @@ impl<R: Runtime> Transport for NetTransport<R> {
         })),
       }
     }
-  }
-
-  #[cfg(feature = "nightly")]
-  fn shutdown(&self) -> impl Future<Output = Result<(), TransportError<Self>>> + Send + '_ {
-    async move {
-      // This will avoid log spam about errors when we shut down.
-      self.shutdown.store(true, Ordering::SeqCst);
-      self.shutdown_tx.store(None);
-
-      // Block until all the listener threads have died.
-      self.wg.wait().await;
-      Ok(())
-    }
-  }
-
-  #[cfg(not(feature = "nightly"))]
-  async fn new(label: Option<Label>, opts: Self::Options) -> Result<Self, TransportError<Self>>
-  where
-    Self: Sized,
-  {
-    #[cfg(feature = "metrics")]
-    {
-      Self::new_in(label, opts, None).await
-    }
-
-    #[cfg(not(feature = "metrics"))]
-    {
-      Self::new_in(label, opts).await
-    }
-  }
-
-  #[cfg(all(feature = "metrics", not(feature = "nightly")))]
-  async fn with_metrics_labels(
-    label: Option<Label>,
-    opts: Self::Options,
-    metrics_labels: Arc<Vec<crate::metrics::Label>>,
-  ) -> Result<Self, TransportError<Self>>
-  where
-    Self: Sized,
-  {
-    Self::new_in(label, opts, Some(metrics_labels)).await
-  }
-
-  fn final_advertise_addr(
-    &self,
-    addr: Option<SocketAddr>,
-  ) -> Result<SocketAddr, TransportError<Self>> {
-    match addr {
-      Some(addr) => Ok(addr),
-      None => {
-        if self.opts.bind_addrs[0].ip().is_unspecified() {
-          local_ip_address::local_ip()
-            .map_err(|e| match e {
-              local_ip_address::Error::LocalIpAddressNotFound => {
-                TransportError::Other(Self::Error::NoPrivateIP)
-              }
-              e => TransportError::Other(Self::Error::NoInterfaceAddresses(e)),
-            })
-            .map(|ip| SocketAddr::new(ip, self.tcp_addr.port()))
-        } else {
-          Ok(self.tcp_addr)
-        }
-      }
-    }
-  }
-
-  #[cfg(not(feature = "nightly"))]
-  async fn write_to(&self, b: &[u8], addr: SocketAddr) -> Result<Instant, TransportError<Self>> {
-    if let Some(label) = &self.label {
-      // TODO: is there a better way to avoid allocating and copying?
-      if !label.is_empty() {
-        let b =
-          Label::add_label_header_to_packet(b, label.as_bytes()).map_err(TransportError::Encode)?;
-        return UnreliableConnection::send_to(&self.udp_listener, addr, &b)
-          .await
-          .map(|_| Instant::now());
-      }
-    }
-
-    UnreliableConnection::send_to(&self.udp_listener, addr, b)
-      .await
-      .map(|_| Instant::now())
   }
 
   #[cfg(not(feature = "nightly"))]
@@ -600,6 +607,19 @@ impl<R: Runtime> Transport for NetTransport<R> {
     self.stream_rx.clone()
   }
 
+  #[cfg(feature = "nightly")]
+  fn shutdown(&self) -> impl Future<Output = Result<(), TransportError<Self>>> + Send + '_ {
+    async move {
+      // This will avoid log spam about errors when we shut down.
+      self.shutdown.store(true, Ordering::SeqCst);
+      self.shutdown_tx.store(None);
+
+      // Block until all the listener threads have died.
+      self.wg.wait().await;
+      Ok(())
+    }
+  }
+
   #[cfg(not(feature = "nightly"))]
   async fn shutdown(&self) -> Result<(), TransportError<Self>> {
     // This will avoid log spam about errors when we shut down.
@@ -612,31 +632,54 @@ impl<R: Runtime> Transport for NetTransport<R> {
   }
 
   fn block_shutdown(&self) -> Result<(), TransportError<Self>> {
-    R::block_on(self.shutdown())
+    // This will avoid log spam about errors when we shut down.
+    self.shutdown.store(true, Ordering::SeqCst);
+    self.shutdown_tx.store(None);
+    let wg = self.wg.clone();
+    R::spawn_detach(async move { wg.wait().await });
+    Ok(())
+  }
+
+  fn auto_bind_port(&self) -> u16 {
+    self.tcp_bind_addr.port()
   }
 }
 
-struct TcpProcessor<T: Transport, R: Runtime> {
-  remote_addr: SocketAddr,
+struct Listener<R: Runtime>(<R::Net as agnostic::net::Net>::TcpListener);
+
+impl<R: Runtime> AsRef<<R::Net as agnostic::net::Net>::TcpListener> for Listener<R> {
+  fn as_ref(&self) -> &<R::Net as agnostic::net::Net>::TcpListener {
+    &self.0
+  }
+}
+
+struct TcpProcessor<T, R, L>
+where
+  R: Runtime,
+  T: Transport<Runtime = R>,
+  L: AsRef<<R::Net as agnostic::net::Net>::TcpListener>,
+{
   wg: AsyncWaitGroup,
   stream_tx: ConnectionProducer<T>,
-  ln: <R::Net as agnostic::net::Net>::TcpListener,
+  ln: L,
+  local_addr: SocketAddr,
   shutdown: Arc<AtomicBool>,
   shutdown_rx: async_channel::Receiver<()>,
 }
 
-impl<T, R> TcpProcessor<T, R>
+impl<T, R, L> TcpProcessor<T, R, L>
 where
-  T: Transport<Connection = Tcp<R>>,
+  T: Transport<Connection = Tcp<R>, Runtime = R>,
   R: Runtime,
+  L: AsRef<<R::Net as agnostic::net::Net>::TcpListener> + Send + Sync + 'static,
 {
   pub(super) fn run(self) {
     let Self {
-      remote_addr,
       wg,
       stream_tx,
       ln,
       shutdown,
+      local_addr,
       ..
     } = self;
 
@@ -651,7 +694,7 @@ where
     <T::Runtime as Runtime>::spawn_detach(async move {
       scopeguard::defer!(wg.done());
       let mut loop_delay = Duration::ZERO;
-
+      let ln = ln.as_ref();
       loop {
         futures_util::select! {
           _ = self.shutdown_rx.recv().fuse() => {
@@ -660,13 +703,20 @@ where
           rst = ln.accept().fuse() => {
             match rst {
               Ok((conn, _)) => {
+                let remote_addr = match conn.peer_addr() {
+                  Ok(addr) => addr,
+                  Err(err) => {
+                    tracing::error!(target = "showbiz", local_addr=%local_addr, err = %err, "failed to get TCP peer address");
+                    continue;
+                  }
+                };
                 // No error, reset loop delay
                 loop_delay = Duration::ZERO;
                 if let Err(e) = stream_tx
                   .send(ReliableConnection::new(Tcp { conn }, remote_addr))
                   .await
                 {
-                  tracing::error!(target = "showbiz", err = %e, "failed to send tcp connection");
+                  tracing::error!(target = "showbiz", local_addr=%local_addr, err = %e, "failed to send TCP connection");
                 }
               }
               Err(e) => {
@@ -684,7 +734,7 @@ where
                   loop_delay = MAX_DELAY;
                 }
 
-                tracing::error!(target = "showbiz", err = %e, "error accepting TCP connection");
+                tracing::error!(target = "showbiz", local_addr=%local_addr, err = %e, "error accepting TCP connection");
                 <T::Runtime as Runtime>::sleep(loop_delay).await;
                 continue;
               }
@@ -704,7 +754,7 @@ where
   wg: AsyncWaitGroup,
   packet_tx: PacketProducer,
   ln: L,
-  remote_addr: SocketAddr,
+  local_addr: SocketAddr,
   shutdown: Arc<AtomicBool>,
   shutdown_rx: async_channel::Receiver<()>,
   #[cfg(feature = "metrics")]
@@ -724,7 +774,7 @@ where
       packet_tx,
       ln,
       shutdown,
-      remote_addr,
+      local_addr,
       ..
     } = self;
 
@@ -747,14 +797,14 @@ where
                 // Check the length - it needs to have at least one byte to be a
                 // proper message.
                 if n < 1 {
-                  tracing::error!(target = "showbiz", peer=%remote_addr, from=%addr, err = "UDP packet too short (0 bytes)");
+                  tracing::error!(target = "showbiz", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
                   continue;
                 }
 
                 buf.truncate(n);
 
                 if let Err(e) = packet_tx.send(Packet::new(buf, addr, Instant::now())).await {
-                  tracing::error!(target = "showbiz", peer=%remote_addr, from=%addr, err = %e, "failed to send packet");
+                  tracing::error!(target = "showbiz", local=%local_addr, from=%addr, err = %e, "failed to send packet");
                 }
 
                 #[cfg(feature = "metrics")]
@@ -781,7 +831,7 @@ where
                   break;
                 }
 
-                tracing::error!(target = "showbiz", peer=%remote_addr, err = %e, "error reading UDP packet");
+                tracing::error!(target = "showbiz", peer=%local_addr, err = %e, "error reading UDP packet");
                 continue;
               }
             };

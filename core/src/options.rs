@@ -1,8 +1,9 @@
 use std::{
   collections::HashSet,
-  net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
+  net::{IpAddr, Ipv4Addr},
   path::PathBuf,
   str::FromStr,
+  sync::Arc,
   time::Duration,
 };
 
@@ -14,6 +15,8 @@ use super::{
 };
 
 pub use super::version::{DelegateVersion, ProtocolVersion};
+
+const DEFAULT_PORT: u16 = 7946;
 
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -34,15 +37,19 @@ pub struct Options<T: Transport> {
   /// streams need to be label prefixed.
   skip_inbound_label_check: bool,
 
-  /// Configuration related to what address to bind to and ports to
+  /// Configuration related to what address to bind to
+  /// listen on. The port is used for both UDP and TCP gossip.
+  bind_addr: IpAddr,
+  /// Configuration related to what port to bind to
   /// listen on. The port is used for both UDP and TCP gossip. It is
   /// assumed other nodes are running on this port, but they do not need
   /// to.
-  bind_addr: SocketAddr,
+  bind_port: Option<u16>,
 
   /// Configuration related to what address to advertise to other
   /// cluster members. Used for nat traversal.
-  advertise_addr: Option<SocketAddr>,
+  advertise_addr: Option<IpAddr>,
+  advertise_port: Option<u16>,
 
   /// The configured encryption type that we
   /// will _speak_. This must be between [`EncryptionAlgo::MIN`] and
@@ -241,6 +248,11 @@ pub struct Options<T: Transport> {
   /// queue to apply the warning and max depth.
   #[serde(with = "humantime_serde")]
   queue_check_interval: Duration,
+
+  #[viewit(getter(style = "ref", const,))]
+  #[cfg(feature = "metrics")]
+  #[serde(with = "crate::util::label_serde")]
+  metrics_labels: Arc<Vec<metrics::Label>>,
 }
 
 impl<T> Default for Options<T>
@@ -262,6 +274,7 @@ impl<T: Transport> Clone for Options<T> {
       label: self.label.clone(),
       dns_config_path: self.dns_config_path.clone(),
       allowed_cidrs: self.allowed_cidrs.clone(),
+      metrics_labels: self.metrics_labels.clone(),
       ..*self
     }
   }
@@ -302,8 +315,10 @@ impl<T: Transport> Options<T> {
       name: hostname,
       label: Label::empty(),
       skip_inbound_label_check: false,
-      bind_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 7946)),
+      bind_addr: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+      bind_port: Some(DEFAULT_PORT),
       advertise_addr: None,
+      advertise_port: Some(DEFAULT_PORT),
       encryption_algo: EncryptionAlgo::MAX,
       tcp_timeout: Duration::from_secs(10), // Timeout after 10 seconds
       indirect_checks: 3,                   // Use 3 nodes for the indirect ping
@@ -332,6 +347,8 @@ impl<T: Transport> Options<T> {
       allowed_cidrs: None,
       transport: None,
       queue_check_interval: Duration::from_secs(30),
+      #[cfg(feature = "metrics")]
+      metrics_labels: Arc::new(Vec::new()),
     }
   }
 

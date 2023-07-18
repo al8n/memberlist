@@ -5,27 +5,19 @@ use crate::{
   transport::TransportError,
   types::{Address, Dead, Domain},
   util::read_resolv_conf,
+  Label,
 };
 
 use super::*;
 
 use agnostic::Runtime;
-use arc_swap::{strategy::DefaultStrategy, ArcSwapOption, Guard};
+use arc_swap::ArcSwapOption;
 use async_lock::{Mutex, RwLock};
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Stream, StreamExt};
 use itertools::{Either, Itertools};
 
 #[cfg(all(feature = "async", feature = "test"))]
 pub(crate) mod tests;
-
-#[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct Runner<T: Transport> {
-  transport: T,
-  /// We do not call send directly, just directly drop it.
-  #[allow(dead_code)]
-  shutdown_tx: Sender<()>,
-  advertise: SocketAddr,
-}
 
 #[cfg(feature = "async")]
 pub(crate) struct AckHandler {
@@ -54,18 +46,18 @@ pub(crate) struct ShowbizCore<D: Delegate, T: Transport> {
   dns: Option<Dns<T>>,
   #[cfg(feature = "metrics")]
   metrics_labels: Arc<Vec<metrics::Label>>,
-  runner: ArcSwapOption<Runner<T>>,
+  transport: T,
+  /// We do not call send directly, just directly drop it.
+  shutdown_tx: ArcSwapOption<Sender<()>>,
+  advertise: SocketAddr,
   opts: Arc<Options<T>>,
 }
 
 impl<D: Delegate, T: Transport> Drop for ShowbizCore<D, T> {
   fn drop(&mut self) {
-    if let Some(runner) = self.runner.swap(None) {
-      <T::Runtime as Runtime>::spawn_detach(async move {
-        if let Err(e) = runner.transport.shutdown().await {
-          tracing::error!(target = "showbiz", err=%e, "failed to block shutdown showbiz");
-        }
-      });
+    self.shutdown_tx.store(None);
+    if let Err(e) = self.transport.block_shutdown() {
+      tracing::error!(target = "showbiz", err=%e, "failed to shutdown");
     }
   }
 }
@@ -235,27 +227,6 @@ where
       }
     }
 
-    opts.transport.get_or_insert_with(|| {
-      <T::Options as crate::transport::TransportOptions>::from_addr(opts.bind_addr)
-    });
-
-    let id = NodeId {
-      name: opts.name.clone(),
-      addr: opts.bind_addr,
-    };
-    let awareness = Awareness::new(
-      opts.awareness_max_multiplier as isize,
-      #[cfg(feature = "metrics")]
-      Arc::new(vec![]),
-      #[cfg(feature = "metrics")]
-      id.clone(),
-    );
-    let hot = HotData::new();
-    let broadcast = TransmitLimitedQueue::new(
-      DefaultNodeCalculator::new(hot.num_nodes),
-      opts.retransmit_mult,
-    );
-
     let (config, options) = read_resolv_conf(opts.dns_config_path.as_path())
       .map_err(|e| TransportError::Dns(DnsError::from(e)))?;
     let dns = if config.name_servers().is_empty() {
@@ -274,7 +245,99 @@ where
       ))
     };
 
-    Ok(Showbiz {
+    opts.transport.get_or_insert_with(|| {
+      <T::Options as crate::transport::TransportOptions>::from_addr(opts.bind_addr, opts.bind_port)
+    });
+
+    async fn retry<D: Delegate, T: Transport>(
+      limit: usize,
+      label: Option<Label>,
+      opts: T::Options,
+      #[cfg(feature = "metrics")] metrics_labels: Arc<Vec<metrics::Label>>,
+    ) -> Result<T, Error<D, T>> {
+      let mut i = 0;
+      loop {
+        #[cfg(feature = "metrics")]
+        let transport = {
+          if !metrics_labels.is_empty() {
+            T::with_metrics_labels(label.clone(), opts.clone(), metrics_labels.clone()).await
+          } else {
+            T::new(label.clone(), opts.clone()).await
+          }
+        };
+        #[cfg(not(feature = "metrics"))]
+        let transport = T::new(opts.transport.as_ref().unwrap().clone()).await;
+
+        match transport {
+          Ok(t) => return Ok(t),
+          Err(e) => {
+            tracing::debug!(target="showbiz", err=%e, "fail to create transport");
+            if i == limit - 1 {
+              return Err(e.into());
+            }
+            i += 1;
+          }
+        }
+      }
+    }
+
+    let limit = match opts.bind_port {
+      Some(0) | None => 10,
+      Some(_) => 1,
+    };
+    let transport = retry(
+      limit,
+      (!opts.label.is_empty()).then_some(opts.label.clone()),
+      opts.transport.as_ref().unwrap().clone(),
+      #[cfg(feature = "metrics")]
+      opts.metrics_labels.clone(),
+    )
+    .await?;
+
+    if let Some(0) | None = opts.bind_port {
+      let port = transport.auto_bind_port();
+      opts.bind_port = Some(port);
+      tracing::warn!(target = "showbiz", "using dynamic bind port {port}");
+    }
+
+    // Get the final advertise address from the transport, which may need
+    // to see which address we bound to. We'll refresh this each time we
+    // send out an alive message.
+    let advertise = transport.final_advertise_addr(opts.advertise_addr, opts.bind_port.unwrap())?;
+
+    let id = NodeId {
+      name: opts.name.clone(),
+      addr: advertise,
+    };
+    let awareness = Awareness::new(
+      opts.awareness_max_multiplier as isize,
+      #[cfg(feature = "metrics")]
+      Arc::new(vec![]),
+      #[cfg(feature = "metrics")]
+      id.clone(),
+    );
+    let hot = HotData::new();
+    let broadcast = TransmitLimitedQueue::new(
+      DefaultNodeCalculator::new(hot.num_nodes),
+      opts.retransmit_mult,
+    );
+    let encryption_enabled = if let Some(keyring) = &keyring {
+      !keyring.is_empty() && !opts.encryption_algo.is_none()
+    } else {
+      false
+    };
+
+    // TODO: replace this with is_global when IpAddr::is_global is stable
+    // https://github.com/rust-lang/rust/issues/27709
+    if crate::util::IsGlobalIp::is_global_ip(&advertise.ip()) && !encryption_enabled {
+      tracing::warn!(
+        target = "showbiz",
+        "binding to public address without encryption!"
+      );
+    }
+
+    let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
+    let this = Showbiz {
       inner: Arc::new(ShowbizCore {
         id: id.clone(),
         hot: HotData::new(),
@@ -291,98 +354,45 @@ where
         dns,
         #[cfg(feature = "metrics")]
         metrics_labels: Arc::new(vec![]),
-        runner: ArcSwapOption::empty(),
+        transport,
+        advertise,
+        shutdown_tx: ArcSwapOption::from_pointee(shutdown_tx),
         opts: Arc::new(opts),
         handoff_tx,
         handoff_rx,
       }),
-    })
-  }
-
-  #[inline]
-  pub async fn bootstrap(&self) -> Result<(), Error<D, T>> {
-    // if we already in running status, just return
-    if self.is_running() {
-      return Ok(());
-    }
-
-    let _mu = self.inner.status_change_lock.lock().await;
-    // mark self as running
-    self
-      .inner
-      .hot
-      .status
-      .store(Status::Running, Ordering::Relaxed);
-
-    #[cfg(feature = "metrics")]
-    let transport = {
-      if !self.inner.metrics_labels.is_empty() {
-        T::with_metrics_labels(
-          (!self.inner.opts.label.is_empty()).then_some(self.inner.opts.label.clone()),
-          self.inner.opts.transport.as_ref().unwrap().clone(),
-          self.inner.metrics_labels.clone(),
-        )
-        .await?
-      } else {
-        T::new(
-          (!self.inner.opts.label.is_empty()).then_some(self.inner.opts.label.clone()),
-          self.inner.opts.transport.as_ref().unwrap().clone(),
-        )
-        .await?
-      }
     };
-    #[cfg(not(feature = "metrics"))]
-    let transport = T::new(self.inner.opts.transport.as_ref().unwrap().clone()).await?;
 
-    // Get the final advertise address from the transport, which may need
-    // to see which address we bound to. We'll refresh this each time we
-    // send out an alive message.
-    let advertise = transport.final_advertise_addr(self.inner.opts.advertise_addr)?;
-    let encryption_enabled = self.encryption_enabled();
-
-    // TODO: replace this with is_global when IpAddr::is_global is stable
-    // https://github.com/rust-lang/rust/issues/27709
-    if crate::util::IsGlobalIp::is_global_ip(&advertise.ip()) && !encryption_enabled {
-      tracing::warn!(
-        target = "showbiz",
-        "binding to public address without encryption!"
-      );
-    }
-
-    let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
-    let runtime = Runner {
-      transport,
-      shutdown_tx,
-      advertise,
-    };
-    self.inner.runner.store(Some(Arc::new(runtime)));
-
-    self.stream_listener(shutdown_rx.clone());
-    self.packet_handler(shutdown_rx.clone());
-    self.packet_listener(shutdown_rx.clone());
+    this.stream_listener(shutdown_rx.clone());
+    this.packet_handler(shutdown_rx.clone());
+    this.packet_listener(shutdown_rx.clone());
     #[cfg(feature = "metrics")]
-    self.check_broadcast_queue_depth(shutdown_rx.clone());
+    this.check_broadcast_queue_depth(shutdown_rx.clone());
 
-    let meta = if let Some(d) = &self.inner.delegate {
+    let meta = if let Some(d) = &this.inner.delegate {
       d.node_meta(META_MAX_SIZE)
     } else {
       Bytes::new()
     };
 
     if meta.len() > META_MAX_SIZE {
-      self.inner.runner.store(None);
       panic!("Node meta data provided is longer than the limit");
     }
 
     let alive = Alive {
-      incarnation: self.next_incarnation(),
-      vsn: self.inner.opts.build_vsn_array(),
+      incarnation: this.next_incarnation(),
+      vsn: this.inner.opts.build_vsn_array(),
       meta,
-      node: self.inner.id.clone(),
+      node: this.inner.id.clone(),
     };
-    self.alive_node(alive, None, true).await;
-    self.schedule(shutdown_rx).await;
-    Ok(())
+    this.alive_node(alive, None, true).await;
+    this.schedule(shutdown_rx).await;
+    this
+      .inner
+      .hot
+      .status
+      .store(Status::Running, Ordering::Relaxed);
+    Ok(this)
   }
 
   /// Returns a list of all known nodes.
@@ -493,21 +503,6 @@ where
     let (left, right): (FuturesUnordered<_>, FuturesUnordered<_>) = existing
       .into_iter()
       .partition_map(|(addr, name)| match addr {
-        Address::Socket(addr) => Either::Left(async move {
-          let id = NodeId::new(name, addr);
-          if let Err(e) = self.push_pull_node(&id, true).await {
-            tracing::debug!(
-              target = "showbiz",
-              local = %self.inner.id,
-              err = %e,
-              "failed to join {}",
-              id,
-            );
-            Err((Address::Socket(addr), e))
-          } else {
-            Ok(())
-          }
-        }),
         Address::Domain { domain, port } => Either::Right(async move {
           let addrs = match self.resolve_addr(&domain, port).await {
             Ok(addrs) => addrs,
@@ -539,6 +534,36 @@ where
           }
           Ok((num_success, errors))
         }),
+        address => {
+          let (addr, is_ip) = match address {
+            Address::Ip(addr) => (
+              SocketAddr::new(addr, self.inner.opts.bind_port.unwrap()),
+              true,
+            ),
+            Address::Socket(addr) => (addr, false),
+            Address::Domain { .. } => unreachable!(),
+          };
+          Either::Left(async move {
+            let id = NodeId::new(name, addr);
+            if let Err(e) = self.push_pull_node(&id, true).await {
+              tracing::debug!(
+                target = "showbiz",
+                local = %self.inner.id,
+                err = %e,
+                "failed to join {}",
+                id,
+              );
+              let addr = if is_ip {
+                Address::Ip(addr.ip())
+              } else {
+                Address::Socket(addr)
+              };
+              Err((addr, e))
+            } else {
+              Ok(())
+            }
+          })
+        }
       });
 
     let (left, right) =
@@ -672,34 +697,6 @@ where
     }
     self.send_user_msg(to, msg).await
   }
-
-  /// Stop any background maintenance of network activity
-  /// for this memberlist, causing it to appear "dead". A leave message
-  /// will not be broadcasted prior, so the cluster being left will have
-  /// to detect this node's shutdown using probing. If you wish to more
-  /// gracefully exit the cluster, call Leave prior to shutting down.
-  ///
-  /// This method is safe to call multiple times.
-  #[inline]
-  pub async fn shutdown(&self) -> Result<(), Error<D, T>> {
-    // if we already in shutdown state, just return
-    if self.is_shutdown() {
-      return Ok(());
-    }
-
-    let _mu = self.inner.status_change_lock.lock().await;
-    // mark self as shutdown
-    self
-      .inner
-      .hot
-      .status
-      .store(Status::Shutdown, Ordering::Relaxed);
-    if let Some(runner) = self.inner.runner.swap(None) {
-      runner.transport.shutdown().await?;
-    }
-
-    Ok(())
-  }
 }
 
 // private impelementation
@@ -710,11 +707,6 @@ where
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
-  #[inline]
-  pub(crate) fn runner(&self) -> Guard<Option<Arc<Runner<T>>>, DefaultStrategy> {
-    self.inner.runner.load()
-  }
-
   /// a helper to initiate a TCP-based Dns lookup for the given host.
   /// The built-in Go resolver will do a UDP lookup first, and will only use TCP if
   /// the response has the truncate bit set, which isn't common on Dns servers like
@@ -758,18 +750,22 @@ where
   pub(crate) async fn resolve_addr(
     &self,
     addr: &Domain,
-    mut port: Option<u16>,
+    port: Option<u16>,
   ) -> Result<Vec<SocketAddr>, Error<D, T>> {
     // This captures the supplied port, or the default one.
-    if port.is_none() {
-      port = Some(self.inner.opts.bind_addr.port());
-    }
+    let port = port.unwrap_or(
+      self
+        .inner
+        .opts
+        .bind_port
+        .unwrap_or(self.inner.advertise.port()),
+    );
 
     // First try TCP so we have the best chance for the largest list of
     // hosts to join. If this fails it's not fatal since this isn't a standard
     // way to query Dns, and we have a fallback below.
     if let Some(dns) = self.inner.dns.as_ref() {
-      match self.tcp_lookup_ip(dns, addr.as_str(), port.unwrap()).await {
+      match self.tcp_lookup_ip(dns, addr.as_str(), port).await {
         Ok(ips) => {
           if !ips.is_empty() {
             return Ok(ips);
@@ -798,8 +794,7 @@ where
 
   #[inline]
   pub(crate) fn get_advertise(&self) -> SocketAddr {
-    // Unwrap is safe here, because advertise is always set before get_advertise is called.
-    self.inner.runner.load().as_ref().unwrap().advertise
+    self.inner.advertise
   }
 
   /// Check for any other alive node.

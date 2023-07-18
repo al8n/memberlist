@@ -1,3 +1,5 @@
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
@@ -204,6 +206,7 @@ fn is_valid_domain_name(domain: &str) -> Result<(), InvalidDomain> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Address {
+  Ip(IpAddr),
   Socket(SocketAddr),
   Domain { domain: Domain, port: Option<u16> },
 }
@@ -211,12 +214,61 @@ pub enum Address {
 impl core::fmt::Display for Address {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
-      Address::Socket(addr) => write!(f, "{addr}"),
-      Address::Domain { domain, port } => match port {
+      Self::Socket(addr) => write!(f, "{addr}"),
+      Self::Domain { domain, port } => match port {
         Some(port) => write!(f, "{domain}:{port}"),
         None => write!(f, "{domain}"),
       },
+      Self::Ip(addr) => write!(f, "{addr}"),
     }
+  }
+}
+
+impl From<Ipv4Addr> for Address {
+  fn from(addr: Ipv4Addr) -> Self {
+    Self::Ip(addr.into())
+  }
+}
+
+impl From<Ipv6Addr> for Address {
+  fn from(addr: Ipv6Addr) -> Self {
+    Self::Ip(addr.into())
+  }
+}
+
+impl From<IpAddr> for Address {
+  fn from(addr: IpAddr) -> Self {
+    Self::Ip(addr)
+  }
+}
+
+impl From<(Ipv4Addr, u16)> for Address {
+  fn from(addr: (Ipv4Addr, u16)) -> Self {
+    Self::Socket(addr.into())
+  }
+}
+
+impl From<(Ipv6Addr, u16)> for Address {
+  fn from(addr: (Ipv6Addr, u16)) -> Self {
+    Self::Socket(addr.into())
+  }
+}
+
+impl From<(IpAddr, u16)> for Address {
+  fn from(addr: (IpAddr, u16)) -> Self {
+    Self::Socket(addr.into())
+  }
+}
+
+impl From<SocketAddrV4> for Address {
+  fn from(addr: SocketAddrV4) -> Self {
+    Self::Socket(addr.into())
+  }
+}
+
+impl From<SocketAddrV6> for Address {
+  fn from(addr: SocketAddrV6) -> Self {
+    Self::Socket(addr.into())
   }
 }
 
