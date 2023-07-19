@@ -186,7 +186,6 @@ pub async fn test_resolve_addr() {
   // }
 }
 
-// #[tracing_test::traced_test]
 // #[test]
 // fn test_resolve_addr() {
 //   {
@@ -351,9 +350,9 @@ pub async fn test_join_with_labels<R>(
   assert_eq!(num, 1);
 
   // Check the hosts
-  // assert_eq!(m1.alive_members().await, 2);
+  assert_eq!(m1.alive_members().await, 2);
   assert_eq!(m1.estimate_num_nodes(), 2);
-  // assert_eq!(m2.alive_members().await, 2);
+  assert_eq!(m2.alive_members().await, 2);
   assert_eq!(m2.estimate_num_nodes(), 2);
 
   // Create a third node that uses no label
@@ -423,15 +422,15 @@ where
   let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
 
   // Create a second node
-  let c2 = test_config_net::<R>(1).with_allowed_cidrs(Some(cidrs));
+  let c2 = test_config_net::<R>(1)
+    .with_allowed_cidrs(Some(cidrs))
+    .with_bind_port(m1.inner.opts.bind_port);
   let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
 
-  let Ok(num) = m2
+  let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
-  else {
-    panic!("join failed");
-  };
+    .unwrap();
 
   assert_eq!(num, 1);
 
@@ -440,26 +439,87 @@ where
   assert_eq!(m2.estimate_num_nodes(), 2);
 }
 
-// #[tracing_test::traced_test]
-// #[test]
-// fn test_join_different_networks_unique_mask() {
-//   // {
-//   //   let runtime = tokio::runtime::Runtime::new().unwrap();
-//   //   runtime.block_on(test_join_different_networks_unique_mask::<
-//   //     TokioRuntime,
-//   //   >());
-//   // }
+pub async fn test_join_different_networks_multi_masks<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let (cidrs, _) = parse_cidrs(&["127.0.0.0/24", "127.0.1.0/24"]);
+  let c1 = test_config_net::<R>(0).with_allowed_cidrs(Some(cidrs.clone()));
+  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
 
-//   // {
-//   //   AsyncStdRuntime::block_on(test_join::<AsyncStdRuntime>());
-//   // }
-//   // {
-//   //   SmolRuntime::block_on(test_join::<SmolRuntime>());
-//   // }
-// }
+  // Create a second node
+  let c2 = test_config_net::<R>(1)
+    .with_allowed_cidrs(Some(cidrs.clone()))
+    .with_bind_port(m1.inner.opts.bind_port);
+  let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
+  join_and_test_member_ship(
+    &m2,
+    [(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter(),
+    2,
+  )
+  .await;
+  // Create a rogue node that allows all networks
+  // It should see others, but will not be seen by others
+  let c3 = test_config_net::<R>(2)
+    .with_allowed_cidrs(Some(parse_cidrs(&["127.0.0.0/8"]).0))
+    .with_bind_port(m1.inner.opts.bind_port);
+  let m3 = Showbiz::<VoidDelegate, _>::new(c3).await.unwrap();
+  // The rogue can see others, but others cannot see it
+  join_and_test_member_ship(
+    &m3,
+    [(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter(),
+    3,
+  )
+  .await;
 
-async fn test_join_different_networks_multi_masks() {
-  todo!()
+  // m1 and m2 should not see newcomer however
+  assert_eq!(m1.alive_members().await, 2);
+  assert_eq!(m1.estimate_num_nodes(), 2);
+
+  assert_eq!(m2.alive_members().await, 2);
+  assert_eq!(m2.estimate_num_nodes(), 2);
+
+  // Another rogue, this time with a config that denies itself
+  // Create a rogue node that allows all networks
+  // It should see others, but will not be seen by others
+  let c4 = test_config_net::<R>(2)
+    .with_allowed_cidrs(Some(cidrs.clone()))
+    .with_bind_port(m1.inner.opts.bind_port);
+  let m4 = Showbiz::<VoidDelegate, _>::new(c4).await.unwrap();
+  // This time, the node should not even see itself, so 2 expected nodes
+  join_and_test_member_ship(
+    &m4,
+    [
+      (m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone()),
+      (m2.inner.opts.bind_addr.into(), m2.inner.opts.name.clone()),
+    ]
+    .into_iter(),
+    2,
+  )
+  .await;
+
+  // m1 and m2 should not see newcomer however
+  assert_eq!(m1.alive_members().await, 2);
+  assert_eq!(m1.estimate_num_nodes(), 2);
+  assert_eq!(m2.alive_members().await, 2);
+  assert_eq!(m2.estimate_num_nodes(), 2);
+}
+
+async fn join_and_test_member_ship<D: Delegate, R>(
+  this: &Showbiz<D, NetTransport<R>>,
+  members_to_join: impl Iterator<Item = (Address, Name)>,
+  expected_members: usize,
+) where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let members_to_join_num = members_to_join.size_hint().0;
+  let num = this.join(members_to_join).await.unwrap();
+  assert_eq!(num, members_to_join_num);
+  assert_eq!(this.members().await.len(), expected_members);
 }
 
 async fn test_join_cancel() {

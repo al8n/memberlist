@@ -392,6 +392,7 @@ where
       .hot
       .status
       .store(Status::Running, Ordering::Relaxed);
+    tracing::debug!(target = "showbiz", local = %this.inner.id, advertise_addr = %advertise, "node is living");
     Ok(this)
   }
 
@@ -520,9 +521,11 @@ where
           let mut num_success = 0;
           for addr in addrs {
             let id = NodeId::new(name.clone(), addr);
+            tracing::info!(target = "showbiz", local = %self.inner.id, peer = %id, "start join...");
             if let Err(e) = self.push_pull_node(&id, true).await {
               tracing::debug!(
                 target = "showbiz",
+                local = %self.inner.id,
                 err = %e,
                 "failed to join {}",
                 id,
@@ -545,6 +548,7 @@ where
           };
           Either::Left(async move {
             let id = NodeId::new(name, addr);
+            tracing::info!(target = "showbiz", local = %self.inner.id, peer = %id, "start join...");
             if let Err(e) = self.push_pull_node(&id, true).await {
               tracing::debug!(
                 target = "showbiz",

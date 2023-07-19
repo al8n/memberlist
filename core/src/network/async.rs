@@ -118,7 +118,7 @@ where
       .dial_timeout(id.addr, self.inner.opts.tcp_timeout)
       .await
       .map_err(Error::transport)?;
-    tracing::debug!(target = "showbiz", "initiating push/pull sync with: {}", id);
+    tracing::debug!(target = "showbiz", local_addr = %self.inner.id, peer_addr = %id, "initiating push/pull sync");
 
     #[cfg(feature = "metrics")]
     {

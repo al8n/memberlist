@@ -584,7 +584,7 @@ impl<R: Runtime> Transport for NetTransport<R> {
         Ok(conn)
       }
       Err(e) => {
-        tracing::error!(target = "showbiz", err = %e);
+        tracing::error!(target = "showbiz.net.transport", err = %e);
         Err(TransportError::Connection(ConnectionError {
           kind: ConnectionKind::Reliable,
           error_kind: ConnectionErrorKind::Dial,
@@ -701,7 +701,7 @@ where
                 let remote_addr = match conn.peer_addr() {
                   Ok(addr) => addr,
                   Err(err) => {
-                    tracing::error!(target = "showbiz", local_addr=%local_addr, err = %err, "failed to get TCP peer address");
+                    tracing::error!(target = "showbiz.net.transport", local_addr=%local_addr, err = %err, "failed to get TCP peer address");
                     continue;
                   }
                 };
@@ -711,7 +711,7 @@ where
                   .send(ReliableConnection::new(Tcp { conn }, remote_addr))
                   .await
                 {
-                  tracing::error!(target = "showbiz", local_addr=%local_addr, err = %e, "failed to send TCP connection");
+                  tracing::error!(target = "showbiz.net.transport", local_addr=%local_addr, err = %e, "failed to send TCP connection");
                 }
               }
               Err(e) => {
@@ -729,7 +729,7 @@ where
                   loop_delay = MAX_DELAY;
                 }
 
-                tracing::error!(target = "showbiz", local_addr=%local_addr, err = %e, "error accepting TCP connection");
+                tracing::error!(target = "showbiz.net.transport", local_addr=%local_addr, err = %e, "error accepting TCP connection");
                 <T::Runtime as Runtime>::sleep(loop_delay).await;
                 continue;
               }
@@ -792,14 +792,14 @@ where
                 // Check the length - it needs to have at least one byte to be a
                 // proper message.
                 if n < 1 {
-                  tracing::error!(target = "showbiz", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
+                  tracing::error!(target = "showbiz.net.transport", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
                   continue;
                 }
 
                 buf.truncate(n);
 
                 if let Err(e) = packet_tx.send(Packet::new(buf, addr, Instant::now())).await {
-                  tracing::error!(target = "showbiz", local=%local_addr, from=%addr, err = %e, "failed to send packet");
+                  tracing::error!(target = "showbiz.net.transport", local=%local_addr, from=%addr, err = %e, "failed to send packet");
                 }
 
                 #[cfg(feature = "metrics")]
@@ -826,7 +826,7 @@ where
                   break;
                 }
 
-                tracing::error!(target = "showbiz", peer=%local_addr, err = %e, "error reading UDP packet");
+                tracing::error!(target = "showbiz.net.transport", peer=%local_addr, err = %e, "error reading UDP packet");
                 continue;
               }
             };

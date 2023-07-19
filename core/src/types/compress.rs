@@ -134,6 +134,7 @@ impl Compress {
       match buf.get_u8() {
         1 => {
           if !buf.has_remaining() {
+            tracing::error!("here wo cao 5");
             return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
           }
           this.algo = buf.get_u8().try_into()?;
@@ -142,10 +143,12 @@ impl Compress {
         }
         2 => {
           if !buf.has_remaining() {
+            tracing::error!("here wo cao 4");
             return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
           }
           let len = decode_u32_from_buf(&mut buf)?.0 as usize;
           if buf.remaining() < len {
+            tracing::error!("here wo cao 3");
             return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
           }
           this.buf = buf.split_to(len);
@@ -159,10 +162,12 @@ impl Compress {
     }
 
     if required != 1 {
+      tracing::error!("here wo cao");
       return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
     }
 
     if buf.remaining() < CHECKSUM_SIZE {
+      tracing::error!("here wo cao 2");
       return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
     }
 

@@ -93,3 +93,13 @@ fn join_with_labels_and_compression_and_encryption() {
     Some(TEST_KEYS[0]),
   ));
 }
+
+#[test]
+fn join_different_networks_unique_mask() {
+  run(test_join_different_networks_unique_mask::<TokioRuntime>());
+}
+
+#[test]
+fn join_different_networks_multi_masks() {
+  run(test_join_different_networks_multi_masks::<TokioRuntime>());
+}

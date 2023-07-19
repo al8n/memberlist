@@ -172,7 +172,7 @@ where
       if !self.is_left() {
         // self.refute().await?;
         tracing::warn!(
-          target = "showbiz",
+          target = "showbiz.state",
           "refuting a dead message (from: {})",
           d.from
         );
@@ -259,7 +259,7 @@ where
     if state.state.node.name() == &self.inner.opts.name {
       self.refute(&state.state, s.incarnation).await;
       tracing::warn!(
-        target = "showbiz",
+        target = "showbiz.state",
         "refuting a suspect message (from: {})",
         s.from
       );
@@ -345,7 +345,7 @@ where
             }
 
             tracing::info!(
-              target = "showbiz",
+              target = "showbiz.state",
               "marking {} as failed, suspect timeout reached ({} peer confirmations)",
               dead.node,
               num_confirmations
@@ -353,7 +353,7 @@ where
             let mut memberlist = t.inner.nodes.write().await;
             let err_info = format!("failed to mark {} as failed", dead.node);
             if let Err(e) = t.dead_node(&mut memberlist, dead).await {
-              tracing::error!(target = "showbiz", err=%e, err_info);
+              tracing::error!(target = "showbiz.state", err=%e, err_info);
             }
           }
         }
@@ -394,7 +394,7 @@ where
     // cluster merging to still occur.
     if let Some(delegate) = &self.inner.delegate {
       if let Err(e) = delegate.notify_alive(node.clone()).await {
-        tracing::warn!(target = "showbiz", local = %self.inner.id, remote = %alive.node, err=%e, "ignoring alive message");
+        tracing::warn!(target = "showbiz.state", local = %self.inner.id, peer = %alive.node, err=%e, "ignoring alive message");
         return;
       }
     }
@@ -405,7 +405,7 @@ where
       let state = &memberlist.nodes[*idx].state;
       if state.address() != alive.node.addr() {
         if let Err(err) = self.inner.opts.ip_allowed(alive.node.addr().ip()) {
-          tracing::warn!(target = "showbiz", local = %self.inner.id, remote = %alive.node, err=%err, "rejected IP update from {} to {} for node {}", alive.node.name(), state.node.id().addr(), alive.node.addr());
+          tracing::warn!(target = "showbiz.state", local = %self.inner.id, remote = %alive.node, err=%err, "rejected IP update from {} to {} for node {}", alive.node.name(), state.node.id().addr(), alive.node.addr());
           return;
         };
 
@@ -415,10 +415,10 @@ where
 
         // Allow the address to be updated if a dead node is being replaced.
         if state.state == NodeState::Left || (state.state == NodeState::Dead && can_reclaim) {
-          tracing::info!(target = "showbiz", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.node.name(), state.node.id().addr(), alive.node.addr());
+          tracing::info!(target = "showbiz.state", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.node.name(), state.node.id().addr(), alive.node.addr());
           updates_node = true;
         } else {
-          tracing::error!(target = "showbiz", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.node.id().name(), state.node.id().addr(), alive.node, state.state);
+          tracing::error!(target = "showbiz.state", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.node.id().name(), state.node.id().addr(), alive.node, state.state);
 
           // Inform the conflict delegate if provided
           if let Some(delegate) = self.inner.delegate.as_ref() {
@@ -434,7 +434,7 @@ where
               )
               .await
             {
-              tracing::error!(target = "showbiz", local = %self.inner.id, err=%e, "failed to notify conflict delegate");
+              tracing::error!(target = "showbiz.state", local = %self.inner.id, err=%e, "failed to notify conflict delegate");
             }
           }
           return;
@@ -442,7 +442,7 @@ where
       }
     } else {
       if let Err(err) = self.inner.opts.ip_allowed(alive.node.addr().ip()) {
-        tracing::warn!(target = "showbiz", local = %self.inner.id, remote = %alive.node, err=%err, "rejected node");
+        tracing::warn!(target = "showbiz.state", local = %self.inner.id, remote = %alive.node, err=%err, "rejected node");
         return;
       };
 
@@ -469,6 +469,8 @@ where
 
       // Add to map
       memberlist.node_map.insert(alive.node.clone(), offset);
+      let id = memberlist.nodes[n].state.id().clone();
+      *memberlist.node_map.get_mut(&id).unwrap() = n;
 
       // Update numNodes after we've added a new node
       self.inner.hot.num_nodes.fetch_add(1, Ordering::Relaxed);
@@ -516,7 +518,7 @@ where
         return;
       }
       self.refute(&member.state, alive.incarnation).await;
-      tracing::warn!(target = "showbiz", local = %self.inner.id, remote = %alive.node, local_meta = ?member.state.node.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
+      tracing::warn!(target = "showbiz.state", local = %self.inner.id, peer = %alive.node, local_meta = ?member.state.node.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
     } else {
       let mut buf = BytesMut::with_capacity(alive.encoded_len() + MessageType::SIZE);
       buf.put_u8(MessageType::Alive as u8);
@@ -551,12 +553,12 @@ where
       if old_state == NodeState::Dead || old_state == NodeState::Left {
         // if Dead/Left -> Alive, notify of join
         if let Err(e) = delegate.notify_join(member.state.node.clone()).await {
-          tracing::error!(target = "showbiz", local = %self.inner.id, err=%e, "failed to notify join");
+          tracing::error!(target = "showbiz.state", local = %self.inner.id, err=%e, "failed to notify join");
         }
       } else if old_meta != member.state.node.meta {
         // if Meta changed, trigger an update notification
         if let Err(e) = delegate.notify_update(member.state.node.clone()).await {
-          tracing::error!(target = "showbiz", local = %self.inner.id, err=%e, "failed to notify update");
+          tracing::error!(target = "showbiz.state", local = %self.inner.id, err=%e, "failed to notify update");
         }
       }
     }
@@ -866,7 +868,7 @@ where
       mbuf.put_u8(MessageType::Ping as u8);
       ping.encode_to(&mut mbuf);
       if let Err(e) = self.send_msg(target.id(), Message(mbuf)).await {
-        tracing::error!(target = "showbiz", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
+        tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
         if e.failed_remote() {
           self
             .handle_remote_failure(target, ping, ack_rx, nack_rx, deadline)
@@ -889,7 +891,7 @@ where
       suspect.encode_to(&mut suspect_buf);
       let compound = Message::compound(vec![Message(ping_buf), Message(suspect_buf)]);
       if let Err(e) = self.raw_send_msg_packet(target.id(), compound).await {
-        tracing::error!(target = "showbiz", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
+        tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
         if e.failed_remote() {
           self
             .handle_remote_failure(target, ping, ack_rx, nack_rx, deadline)
@@ -911,7 +913,7 @@ where
                 let rtt = v.timestamp.elapsed();
 
                 if let Err(e) = delegate.notify_ping_complete(target.node.clone(), rtt, v.payload).await {
-                  tracing::error!(target = "showbiz", local = %self.inner.id, remote = %target.id(), err=%e, "failed to notify ping complete ack");
+                  tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to notify ping complete ack");
                 }
               }
 
@@ -923,13 +925,13 @@ where
             // here to break out of the select below.
             if !v.complete {
               if let Err(e) = ack_tx.send(v).await {
-                tracing::error!(target = "showbiz", local = %self.inner.id, remote = %target.id(), err=%e, "failed to re-enqueue UDP ping ack");
+                tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to re-enqueue UDP ping ack");
               }
             }
           }
           Err(e) => {
             // This branch should never be reached, if there's an error in your log, please report an issue.
-            tracing::debug!(target = "showbiz", local = %self.inner.id, remote = %target.id(), err = %e, "failed unreliable connection ping (ack channel closed)");
+            tracing::debug!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err = %e, "failed unreliable connection ping (ack channel closed)");
           }
         }
       },
@@ -940,7 +942,7 @@ where
         // probe interval it will give the TCP fallback more time, which
         // is more active in dealing with lost packets, and it gives more
         // time to wait for indirect acks/nacks.
-        tracing::debug!(target = "showbiz", local = %self.inner.id, remote = %target.id(), "failed unreliable connection ping (timeout reached)");
+        tracing::debug!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), "failed unreliable connection ping (timeout reached)");
       }
     }
 
@@ -991,7 +993,7 @@ where
       buf.put_u8(MessageType::IndirectPing as u8);
       ind.encode_to(&mut buf);
       if let Err(e) = self.send_msg(&ind.target, Message(buf)).await {
-        tracing::error!(target = "showbiz", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
+        tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
       }
     }
 
@@ -1024,16 +1026,16 @@ where
             // handle error here for good manner, and if you see this log, please
             // report an issue.
             if let Err(e) = fallback_tx.send(ack) {
-              tracing::error!(target = "showbiz", local = %this.inner.id, remote = %target_id, err=%e, "failed to send fallback");
+              tracing::error!(target = "showbiz.state", local = %this.inner.id, remote = %target_id, err=%e, "failed to send fallback");
             }
           }
           Err(e) => {
-            tracing::error!(target = "showbiz", local = %this.inner.id, remote = %target_id, err=%e, "failed to send ping by reliable connection");
+            tracing::error!(target = "showbiz.state", local = %this.inner.id, remote = %target_id, err=%e, "failed to send ping by reliable connection");
             // The error should never happen, because we do not drop the rx,
             // handle error here for good manner, and if you see this log, please
             // report an issue.
             if let Err(e) = fallback_tx.send(false) {
-              tracing::error!(target = "showbiz", local = %this.inner.id, remote = %target_id, err=%e, "failed to send fallback");
+              tracing::error!(target = "showbiz.state", local = %this.inner.id, remote = %target_id, err=%e, "failed to send fallback");
             }
           }
         }
@@ -1061,7 +1063,7 @@ where
     if !disable_reliable_pings {
       if let Ok(did_contact) = fallback_rx.await {
         if did_contact {
-          tracing::warn!(target = "showbiz", local = %self.inner.id, remote = %target.id(), "was able to connect to target over reliable connection but unreliable probes failed, network may be misconfigured");
+          tracing::warn!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), "was able to connect to target over reliable connection but unreliable probes failed, network may be misconfigured");
           apply_delta!(self <= -1);
           return;
         }
@@ -1087,14 +1089,14 @@ where
     };
 
     // No acks received from target, suspect it as failed.
-    tracing::info!(target = "showbiz", local = %self.inner.id, remote = %target.id(), "suspecting has failed, no acks received");
+    tracing::info!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), "suspecting has failed, no acks received");
     let s = Suspect {
       incarnation: target.incarnation.load(Ordering::SeqCst),
       node: target.id().clone(),
       from: self.inner.id.clone(),
     };
     if let Err(e) = self.suspect_node(s).await {
-      tracing::error!(target = "showbiz", local = %self.inner.id, remote = %target.id(), err=%e, "failed to suspect node");
+      tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to suspect node");
     }
     if awareness_delta != 0 {
       apply_delta!(self <= awareness_delta);
@@ -1250,7 +1252,7 @@ where
       {
         Ok(msgs) => msgs,
         Err(e) => {
-          tracing::error!(target = "showbiz", err = %e, "failed to get broadcast messages from {}", node);
+          tracing::error!(target = "showbiz.state", err = %e, "failed to get broadcast messages from {}", node);
           return;
         }
       };
@@ -1262,13 +1264,13 @@ where
       if msgs.len() == 1 {
         // Send single message as is
         if let Err(e) = self.raw_send_msg_packet(addr, msgs.pop().unwrap().0).await {
-          tracing::error!(target = "showbiz", err = %e, "failed to send gossip to {}", addr);
+          tracing::error!(target = "showbiz.state", err = %e, "failed to send gossip to {}", addr);
         }
       } else {
         // Otherwise create and send one or more compound messages
         for compound in Message::compounds(msgs) {
           if let Err(e) = self.raw_send_msg_packet(addr, compound).await {
-            tracing::error!(target = "showbiz", err = %e, "failed to send gossip to {}", addr);
+            tracing::error!(target = "showbiz.state", err = %e, "failed to send gossip to {}", addr);
           }
         }
       }
@@ -1307,7 +1309,7 @@ where
     let node = &nodes[0];
     // Attempt a push pull
     if let Err(e) = self.push_pull_node(node.id(), false).await {
-      tracing::error!(target = "showbiz", err = %e, "push/pull with {} failed", node.id());
+      tracing::error!(target = "showbiz.state", err = %e, "push/pull with {} failed", node.id());
     }
   }
 
