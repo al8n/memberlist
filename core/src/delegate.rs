@@ -4,9 +4,9 @@ use bytes::Bytes;
 
 use crate::types::{Message, Node, NodeId};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 mod mock;
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 pub use mock::*;
 
 #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
@@ -198,6 +198,10 @@ pub trait Delegate: Send + Sync + 'static {
   /// Invoked when we want to send a ping message to target by reliable connection. Return true if the target node does not expect ping message from reliable connection.
   fn disable_reliable_pings(&self, target: &NodeId) -> bool;
 }
+
+// impl<D: Delegate> Delegate for Arc<D> {
+
+// }
 
 #[derive(Debug, Copy, Clone)]
 pub struct VoidDelegateError;

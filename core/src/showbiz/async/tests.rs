@@ -1,10 +1,12 @@
 use std::{
   net::{IpAddr, Ipv4Addr},
-  sync::Mutex,
+  sync::{atomic::AtomicBool, Mutex},
 };
 
+use agnostic::Delay;
+
 use crate::{
-  delegate::VoidDelegate,
+  delegate::{MockDelegate, MockDelegateError, VoidDelegate, VoidDelegateError},
   options::parse_cidrs,
   security::{EncryptionAlgo, SecretKey},
   transport::net::NetTransport,
@@ -27,12 +29,10 @@ fn get_bind_addr_net(network: u8) -> SocketAddr {
   SocketAddr::new(ip, 7949)
 }
 
-#[allow(dead_code)]
 pub(crate) fn get_bind_addr() -> SocketAddr {
   get_bind_addr_net(0)
 }
 
-#[allow(dead_code)]
 async fn yield_now<R: Runtime>() {
   R::sleep(Duration::from_millis(250)).await;
 }
@@ -522,27 +522,169 @@ async fn join_and_test_member_ship<D: Delegate, R>(
   assert_eq!(this.members().await.len(), expected_members);
 }
 
-async fn test_join_cancel() {
-  todo!()
+pub async fn test_join_cancel<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let c1 = test_config::<R>();
+  let m1 = Showbiz::<MockDelegate, _>::with_delegate(MockDelegate::cancel_merge(), c1)
+    .await
+    .unwrap();
+
+  let c2 = test_config::<R>().with_bind_port(m1.inner.opts.bind_port);
+  let m2 = Showbiz::<MockDelegate, _>::with_delegate(MockDelegate::cancel_merge(), c2)
+    .await
+    .unwrap();
+
+  let err = m2
+    .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
+    .await
+    .unwrap_err();
+  // JoinError
+  assert_eq!(err.num_joined, 0);
+  let Error::Delegate(e) = err.errors.into_iter().next().unwrap().1 else {
+    panic!("Expected a MockDelegateError::CustomMergeCancelled");
+  };
+  assert_eq!(e, MockDelegateError::CustomMergeCancelled);
+
+  // Check the hosts
+  assert_eq!(m1.alive_members().await, 1);
+  assert_eq!(m2.alive_members().await, 1);
+
+  // Check delegate invocation
+  assert!(m1.inner.delegate.as_ref().unwrap().is_invoked());
+  assert!(m2.inner.delegate.as_ref().unwrap().is_invoked());
 }
 
-async fn test_join_cancel_passive() {
+pub async fn test_join_cancel_passive<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let c1 = test_config::<R>();
+  let m1 =
+    Showbiz::<MockDelegate, _>::with_delegate(MockDelegate::cancel_alive(c1.name.clone()), c1)
+      .await
+      .unwrap();
+
+  let c2 = test_config::<R>().with_bind_port(m1.inner.opts.bind_port);
+  let m2 =
+    Showbiz::<MockDelegate, _>::with_delegate(MockDelegate::cancel_alive(c2.name.clone()), c2)
+      .await
+      .unwrap();
+
+  let num = m2
+    .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
+    .await
+    .unwrap();
+  assert_eq!(num, 1);
+
+  // Check the hosts
+  assert_eq!(m1.alive_members().await, 1);
+  assert_eq!(m2.alive_members().await, 1);
+
+  // Check delegate invocation
+  assert_eq!(m1.inner.delegate.as_ref().unwrap().count(), 2);
+  assert_eq!(m2.inner.delegate.as_ref().unwrap().count(), 2);
+}
+
+pub async fn test_join_shutdown<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let new_config = || -> Options<NetTransport<R>> {
+    test_config()
+      .with_probe_interval(Duration::from_millis(1))
+      .with_probe_timeout(Duration::from_micros(100))
+      .with_suspicion_max_timeout_mult(1)
+  };
+
+  let c1 = new_config();
+  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
+
+  // Create a second node
+  let c2 = new_config().with_bind_port(m1.inner.opts.bind_port);
+  let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
+
+  let num = m2
+    .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
+    .await
+    .unwrap();
+  assert_eq!(num, 1);
+
+  // Check the hosts
+  assert_eq!(m1.alive_members().await, 2);
+
+  let start = Instant::now();
+  let mut msg = String::new();
+  while start.elapsed() < Duration::from_secs(20) {
+    let n = m2.members().await.len();
+
+    let (done, msg1) = (n == 1, format!("expected 1 node, got {n}"));
+    if done {
+      return;
+    }
+    msg = msg1;
+    std::thread::sleep(Duration::from_secs(5));
+  }
+  panic!("timeout waiting for condition {}", msg);
+}
+
+// async fn wait_for_condition(f: Arc<impl Future<Output = (bool, String)>>) {
+//   let start = Instant::now();
+//   let mut msg = String::new();
+//   while start.elapsed() < Duration::from_secs(20) {
+//     let (done, msg1) = (*f.clone()).await;
+//     if done {
+//       return;
+//     }
+//     msg = msg1;
+//     std::thread::sleep(Duration::from_secs(5));
+//   }
+//   panic!("timeout waiting for condition {}", msg);
+// }
+
+pub async fn test_join_dead_node<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let c1 = test_config::<R>().with_tcp_timeout(Duration::from_millis(50));
+  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
+
+  // Create a second "node", which is just a TCP listener that
+  // does not ever respond. This is to test our deadlines
+  let addr2 = get_bind_addr();
+  let _listener = std::net::TcpListener::bind(addr2).unwrap();
+  // Ensure we don't hang forever
+  let mut _delay = R::delay(Duration::from_millis(100), async {
+    panic!("should have timed out by now");
+  });
+
+  let err = m1
+    .join([(addr2.into(), Name::from_static_unchecked("fake"))].into_iter())
+    .await
+    .unwrap_err();
+  eprintln!("{}", err);
+  _delay.cancel().await;
+}
+
+pub async fn test_join_ipv6<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
   todo!()
 }
 
 async fn test_leave() {
-  todo!()
-}
-
-async fn test_join_shutdown() {
-  todo!()
-}
-
-async fn test_join_dead_node() {
-  todo!()
-}
-
-async fn test_join_ipv6() {
   todo!()
 }
 

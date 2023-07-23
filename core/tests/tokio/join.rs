@@ -103,3 +103,28 @@ fn join_different_networks_unique_mask() {
 fn join_different_networks_multi_masks() {
   run(test_join_different_networks_multi_masks::<TokioRuntime>());
 }
+
+#[test]
+fn join_cancel() {
+  run(test_join_cancel::<TokioRuntime>());
+}
+
+#[test]
+fn join_cancel_passive() {
+  run(test_join_cancel_passive::<TokioRuntime>());
+}
+
+#[test]
+fn join_shutdown() {
+  run(test_join_shutdown::<TokioRuntime>());
+}
+
+#[test]
+fn join_dead_node() {
+  run(test_join_dead_node::<TokioRuntime>());
+}
+
+#[test]
+fn join_ipv6() {
+  run(test_join_ipv6::<TokioRuntime>());
+}

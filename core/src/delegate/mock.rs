@@ -1,6 +1,24 @@
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+
 use parking_lot::Mutex;
 
+use crate::Name;
+
 use super::*;
+
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
+pub enum MockDelegateError {
+  #[error("custom merge cancelled")]
+  CustomMergeCancelled,
+  #[error("custom alive cancelled")]
+  CustomAliveCancelled,
+}
+
+pub enum MockDelegateType {
+  None,
+  CancelMerge,
+  CancelAlive,
+}
 
 struct MockDelegateInner {
   meta: Bytes,
@@ -12,6 +30,74 @@ struct MockDelegateInner {
 
 pub struct MockDelegate {
   inner: Arc<Mutex<MockDelegateInner>>,
+  invoked: Arc<AtomicBool>,
+  ty: MockDelegateType,
+  ignore: Name,
+  count: Arc<AtomicUsize>,
+}
+
+impl Default for MockDelegate {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+impl MockDelegate {
+  pub fn new() -> Self {
+    Self {
+      inner: Arc::new(Mutex::new(MockDelegateInner {
+        meta: Bytes::new(),
+        msgs: vec![],
+        broadcasts: vec![],
+        state: Bytes::new(),
+        remote_state: Bytes::new(),
+      })),
+      invoked: Arc::new(AtomicBool::new(false)),
+      ty: MockDelegateType::None,
+      ignore: Name::from_static_unchecked("mock"),
+      count: Arc::new(AtomicUsize::new(0)),
+    }
+  }
+
+  pub fn cancel_merge() -> Self {
+    Self {
+      inner: Arc::new(Mutex::new(MockDelegateInner {
+        meta: Bytes::new(),
+        msgs: vec![],
+        broadcasts: vec![],
+        state: Bytes::new(),
+        remote_state: Bytes::new(),
+      })),
+      invoked: Arc::new(AtomicBool::new(false)),
+      ty: MockDelegateType::CancelMerge,
+      ignore: Name::from_static_unchecked("mock"),
+      count: Arc::new(AtomicUsize::new(0)),
+    }
+  }
+
+  pub fn is_invoked(&self) -> bool {
+    self.invoked.load(atomic::Ordering::SeqCst)
+  }
+
+  pub fn cancel_alive(ignore: Name) -> Self {
+    Self {
+      inner: Arc::new(Mutex::new(MockDelegateInner {
+        meta: Bytes::new(),
+        msgs: vec![],
+        broadcasts: vec![],
+        state: Bytes::new(),
+        remote_state: Bytes::new(),
+      })),
+      invoked: Arc::new(AtomicBool::new(false)),
+      ty: MockDelegateType::CancelAlive,
+      ignore,
+      count: Arc::new(AtomicUsize::new(0)),
+    }
+  }
+
+  pub fn count(&self) -> usize {
+    self.count.load(atomic::Ordering::SeqCst)
+  }
 }
 
 impl MockDelegate {
@@ -41,7 +127,7 @@ impl MockDelegate {
 
 #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 impl Delegate for MockDelegate {
-  type Error = VoidDelegateError;
+  type Error = MockDelegateError;
 
   fn node_meta(&self, _limit: usize) -> Bytes {
     self.inner.lock().meta.clone()
@@ -92,8 +178,18 @@ impl Delegate for MockDelegate {
   }
 
   #[cfg(not(feature = "nightly"))]
-  async fn notify_alive(&self, _peer: Arc<Node>) -> Result<(), Self::Error> {
-    Ok(())
+  async fn notify_alive(&self, peer: Arc<Node>) -> Result<(), Self::Error> {
+    match self.ty {
+      MockDelegateType::CancelAlive => {
+        self.count.fetch_add(1, atomic::Ordering::SeqCst);
+        if peer.id().name() == &self.ignore {
+          return Ok(());
+        }
+        tracing::info!(target = "showbiz.mock.delegate", "cancel alive");
+        Err(MockDelegateError::CustomAliveCancelled)
+      }
+      _ => Ok(()),
+    }
   }
 
   #[cfg(not(feature = "nightly"))]
@@ -107,7 +203,15 @@ impl Delegate for MockDelegate {
 
   #[cfg(not(feature = "nightly"))]
   async fn notify_merge(&self, _peers: Vec<Node>) -> Result<(), Self::Error> {
-    Ok(())
+    match self.ty {
+      MockDelegateType::CancelMerge => {
+        use atomic::Ordering;
+        tracing::info!(target = "showbiz.mock.delegate", "cancel merge");
+        self.invoked.store(true, Ordering::SeqCst);
+        Err(MockDelegateError::CustomMergeCancelled)
+      }
+      _ => Ok(()),
+    }
   }
 
   #[cfg(not(feature = "nightly"))]
@@ -205,7 +309,17 @@ impl Delegate for MockDelegate {
     &'a self,
     _peers: Vec<Node>,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'a {
-    async move { Ok(()) }
+    async move {
+      match self.ty {
+        MockDelegateType::None => Ok(()),
+        MockDelegateType::CancelMerge => {
+          use atomic::Ordering;
+          tracing::info!(target = "showbiz.mock.delegate", "cancel merge");
+          self.invoked.store(true, Ordering::SeqCst);
+          Err(MockDelegateError::CustomMergeCancelled)
+        }
+      }
+    }
   }
 
   #[cfg(feature = "nightly")]

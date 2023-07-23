@@ -20,7 +20,7 @@ metrics = ["dep:metrics"]
 
 # expose all tests fn for users who want to use other runtime
 # see showbiz-wasm for more examples about how to use those tests fn
-test = ["tracing-subscriber"]
+test = ["tracing-subscriber", "parking_lot"]
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 trust-dns-resolver = { version = "0.23.0-alpha.4", default-features = false, features = ["system-config"] }
@@ -63,6 +63,7 @@ itertools = "0.10.5"
 ipnet = { version = "2.7", features = ["serde"] }
 metrics = { version = "0.20", optional = true }
 paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
+parking_lot = { version = "0.12", optional = true }
 rand = { version = "0.8" }
 rayon = "1.7"
 scopeguard = "1.1"
