@@ -135,14 +135,22 @@ where
 }
 
 pub struct JoinError<D: Delegate, T: Transport> {
-  num_joined: usize,
+  joined: Vec<NodeId>,
   errors: HashMap<Address, Error<D, T>>,
+}
+
+impl<D: Delegate, T: Transport> From<JoinError<D, T>>
+  for (Vec<NodeId>, HashMap<Address, Error<D, T>>)
+{
+  fn from(e: JoinError<D, T>) -> Self {
+    (e.joined, e.errors)
+  }
 }
 
 impl<D: Delegate, T: Transport> core::fmt::Debug for JoinError<D, T> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    if self.num_joined != 0 {
-      writeln!(f, "Successes: {}", self.num_joined)?;
+    if !self.joined.is_empty() {
+      writeln!(f, "Successes: {}", self.joined.len())?;
     }
     writeln!(f, "Failures:")?;
     for (addr, err) in self.errors.iter() {
@@ -154,8 +162,8 @@ impl<D: Delegate, T: Transport> core::fmt::Debug for JoinError<D, T> {
 
 impl<D: Delegate, T: Transport> core::fmt::Display for JoinError<D, T> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    if self.num_joined != 0 {
-      writeln!(f, "Successes: {}", self.num_joined)?;
+    if !self.joined.is_empty() {
+      writeln!(f, "Successes: {}", self.joined.len())?;
     }
     writeln!(f, "Failures:")?;
     for (addr, err) in self.errors.iter() {
@@ -167,8 +175,13 @@ impl<D: Delegate, T: Transport> core::fmt::Display for JoinError<D, T> {
 
 impl<D: Delegate, T: Transport> JoinError<D, T> {
   /// Return the number of successful joined nodes
-  pub const fn joined(&self) -> usize {
-    self.num_joined
+  pub fn num_joined(&self) -> usize {
+    self.joined.len()
+  }
+
+  /// Return the joined nodes
+  pub const fn joined(&self) -> &Vec<NodeId> {
+    &self.joined
   }
 
   #[allow(clippy::mutable_key_type)]
@@ -490,16 +503,17 @@ where
   pub async fn join(
     &self,
     existing: impl Iterator<Item = (Address, Name)>,
-  ) -> Result<usize, JoinError<D, T>> {
+  ) -> Result<Vec<NodeId>, JoinError<D, T>> {
     if !self.is_running() {
       return Err(JoinError {
-        num_joined: 0,
+        joined: Vec::new(),
         errors: existing
           .into_iter()
           .map(|(addr, _)| (addr, Error::NotRunning))
           .collect(),
       });
     }
+    let estimated_total = existing.size_hint().0;
 
     let (left, right): (FuturesUnordered<_>, FuturesUnordered<_>) = existing
       .into_iter()
@@ -518,7 +532,7 @@ where
             }
           };
           let mut errors = Vec::new();
-          let mut num_success = 0;
+          let mut joined = Vec::with_capacity(addrs.len());
           for addr in addrs {
             let id = NodeId::new(name.clone(), addr);
             tracing::info!(target = "showbiz", local = %self.inner.id, peer = %id, "start join...");
@@ -532,10 +546,10 @@ where
               );
               errors.push((Address::Socket(addr), e));
             } else {
-              num_success += 1;
+              joined.push(id);
             }
           }
-          Ok((num_success, errors))
+          Ok((joined, errors))
         }),
         address => {
           let (addr, is_ip) = match address {
@@ -564,7 +578,7 @@ where
               };
               Err((addr, e))
             } else {
-              Ok(())
+              Ok(id)
             }
           })
         }
@@ -573,13 +587,13 @@ where
     let (left, right) =
       futures_util::future::join(left.collect::<Vec<_>>(), right.collect::<Vec<_>>()).await;
 
-    let num_success = std::cell::RefCell::new(0);
+    let num_success = std::cell::RefCell::new(Vec::with_capacity(estimated_total));
     #[allow(clippy::mutable_key_type)]
     let errors = left
       .into_iter()
       .filter_map(|rst| match rst {
-        Ok(()) => {
-          *num_success.borrow_mut() += 1;
+        Ok(id) => {
+          num_success.borrow_mut().push(id);
           None
         }
         Err((addr, e)) => Some((addr, e)),
@@ -589,7 +603,7 @@ where
           .into_iter()
           .filter_map(|rst| match rst {
             Ok((success, errors)) => {
-              *num_success.borrow_mut() += success;
+              num_success.borrow_mut().extend(success);
               if errors.is_empty() {
                 None
               } else {
@@ -607,7 +621,7 @@ where
     }
 
     Err(JoinError {
-      num_joined: num_success.into_inner(),
+      joined: num_success.into_inner(),
       errors,
     })
   }

@@ -1,12 +1,12 @@
 use std::{
   net::{IpAddr, Ipv4Addr},
-  sync::{atomic::AtomicBool, Mutex},
+  sync::Mutex,
 };
 
 use agnostic::Delay;
 
 use crate::{
-  delegate::{MockDelegate, MockDelegateError, VoidDelegate, VoidDelegateError},
+  delegate::{MockDelegate, MockDelegateError, VoidDelegate},
   options::parse_cidrs,
   security::{EncryptionAlgo, SecretKey},
   transport::net::NetTransport,
@@ -229,7 +229,8 @@ where
       .into_iter(),
     )
     .await
-    .unwrap();
+    .unwrap()
+    .len();
   assert_eq!(num, 1);
 }
 
@@ -248,7 +249,8 @@ where
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
-    .unwrap();
+    .unwrap()
+    .len();
   assert_eq!(num, 1);
 }
 
@@ -274,7 +276,8 @@ where
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
-    .unwrap();
+    .unwrap()
+    .len();
   assert_eq!(num, 1);
 }
 
@@ -302,7 +305,8 @@ pub async fn test_join_with_encryption_and_compression<R>(
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
-    .unwrap();
+    .unwrap()
+    .len();
 
   assert_eq!(num, 1);
 }
@@ -346,7 +350,8 @@ pub async fn test_join_with_labels<R>(
       Name::from_str_unchecked("node1"),
     )))
     .await
-    .unwrap();
+    .unwrap()
+    .len();
   assert_eq!(num, 1);
 
   // Check the hosts
@@ -364,14 +369,14 @@ pub async fn test_join_with_labels<R>(
     .with_secret_key(key)
     .with_bind_port(m1.inner.opts.bind_port);
   let m3 = Showbiz::<VoidDelegate, _>::new(c3).await.unwrap();
-  let JoinError { num_joined, .. } = m3
+  let JoinError { joined, .. } = m3
     .join(std::iter::once((
       m1.inner.opts.bind_addr.into(),
       Name::from_str_unchecked("node1"),
     )))
     .await
     .unwrap_err();
-  assert_eq!(num_joined, 0);
+  assert_eq!(joined.len(), 0);
 
   // Check the hosts
   assert_eq!(m1.alive_members().await, 2);
@@ -391,14 +396,14 @@ pub async fn test_join_with_labels<R>(
     .with_bind_port(m1.inner.opts.bind_port);
   let m4 = Showbiz::<VoidDelegate, _>::new(c4).await.unwrap();
 
-  let JoinError { num_joined, .. } = m4
+  let JoinError { joined, .. } = m4
     .join(std::iter::once((
       m1.inner.opts.bind_addr.into(),
       Name::from_str_unchecked("node1"),
     )))
     .await
     .unwrap_err();
-  assert_eq!(num_joined, 0);
+  assert_eq!(joined.len(), 0);
 
   // Check the hosts
   assert_eq!(m1.alive_members().await, 2);
@@ -430,7 +435,8 @@ where
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
-    .unwrap();
+    .unwrap()
+    .len();
 
   assert_eq!(num, 1);
 
@@ -517,7 +523,7 @@ async fn join_and_test_member_ship<D: Delegate, R>(
   <R::Interval as Stream>::Item: Send,
 {
   let members_to_join_num = members_to_join.size_hint().0;
-  let num = this.join(members_to_join).await.unwrap();
+  let num = this.join(members_to_join).await.unwrap().len();
   assert_eq!(num, members_to_join_num);
   assert_eq!(this.members().await.len(), expected_members);
 }
@@ -543,7 +549,7 @@ where
     .await
     .unwrap_err();
   // JoinError
-  assert_eq!(err.num_joined, 0);
+  assert_eq!(err.joined.len(), 0);
   let Error::Delegate(e) = err.errors.into_iter().next().unwrap().1 else {
     panic!("Expected a MockDelegateError::CustomMergeCancelled");
   };
@@ -579,7 +585,8 @@ where
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
-    .unwrap();
+    .unwrap()
+    .len();
   assert_eq!(num, 1);
 
   // Check the hosts
@@ -614,7 +621,8 @@ where
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
-    .unwrap();
+    .unwrap()
+    .len();
   assert_eq!(num, 1);
 
   // Check the hosts
