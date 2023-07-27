@@ -150,12 +150,16 @@ impl<D: Delegate, T: Transport> From<JoinError<D, T>>
 impl<D: Delegate, T: Transport> core::fmt::Debug for JoinError<D, T> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     if !self.joined.is_empty() {
-      writeln!(f, "Successes: {}", self.joined.len())?;
+      writeln!(f, "Successes: {:?}", self.joined)?;
     }
-    writeln!(f, "Failures:")?;
-    for (addr, err) in self.errors.iter() {
-      writeln!(f, "\t{}: {}", addr, err)?;
+
+    if !self.errors.is_empty() {
+      writeln!(f, "Failures:")?;
+      for (addr, err) in self.errors.iter() {
+        writeln!(f, "\t{}: {}", addr, err)?;
+      }
     }
+
     Ok(())
   }
 }
@@ -163,15 +167,21 @@ impl<D: Delegate, T: Transport> core::fmt::Debug for JoinError<D, T> {
 impl<D: Delegate, T: Transport> core::fmt::Display for JoinError<D, T> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     if !self.joined.is_empty() {
-      writeln!(f, "Successes: {}", self.joined.len())?;
+      writeln!(f, "Successes: {:?}", self.joined)?;
     }
-    writeln!(f, "Failures:")?;
-    for (addr, err) in self.errors.iter() {
-      writeln!(f, "\t{}: {}", addr, err)?;
+
+    if !self.errors.is_empty() {
+      writeln!(f, "Failures:")?;
+      for (addr, err) in self.errors.iter() {
+        writeln!(f, "\t{addr}: {err}")?;
+      }
     }
+
     Ok(())
   }
 }
+
+impl<D: Delegate, T: Transport> std::error::Error for JoinError<D, T> {}
 
 impl<D: Delegate, T: Transport> JoinError<D, T> {
   /// Return the number of successful joined nodes
