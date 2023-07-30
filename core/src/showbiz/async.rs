@@ -117,6 +117,11 @@ where
   }
 
   #[inline]
+  pub fn local_id(&self) -> &NodeId {
+    &self.inner.id
+  }
+
+  #[inline]
   pub async fn local_node(&self) -> Arc<Node> {
     let nodes = self.inner.nodes.read().await;
     // TODO: return an error
