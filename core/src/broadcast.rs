@@ -12,8 +12,10 @@ use async_channel::Sender;
 /// the memberlist cluster.
 #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 pub trait Broadcast: Send + Sync + 'static {
+  type Id: Clone + Eq + core::hash::Hash;
+
   /// Returns the name of the broadcast, if any
-  fn id(&self) -> &NodeId;
+  fn id(&self) -> &Self::Id;
 
   /// Checks if enqueuing the current broadcast
   /// invalidates a previous broadcast
@@ -50,7 +52,9 @@ pub(crate) struct ShowbizBroadcast {
 
 #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 impl Broadcast for ShowbizBroadcast {
-  fn id(&self) -> &NodeId {
+  type Id = NodeId;
+
+  fn id(&self) -> &Self::Id {
     &self.node
   }
 

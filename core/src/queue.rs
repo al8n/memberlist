@@ -7,7 +7,7 @@ use std::{
   },
 };
 
-use crate::{broadcast::Broadcast, types::Message, util::retransmit_limit, NodeId};
+use crate::{broadcast::Broadcast, types::Message, util::retransmit_limit};
 
 pub trait NodeCalculator {
   fn num_nodes(&self) -> usize;
@@ -15,7 +15,7 @@ pub trait NodeCalculator {
 
 struct Inner<B: Broadcast> {
   q: BTreeSet<Arc<LimitedBroadcast<B>>>,
-  m: HashMap<NodeId, Arc<LimitedBroadcast<B>>>,
+  m: HashMap<B::Id, Arc<LimitedBroadcast<B>>>,
   id_gen: u64,
 }
 

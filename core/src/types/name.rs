@@ -81,6 +81,22 @@ impl Name {
     Ok(Self(Bytes::copy_from_slice(name.as_bytes())))
   }
 
+  /// Creates a new Name from bytes.
+  #[inline]
+  #[allow(clippy::should_implement_trait)]
+  pub fn from_slice(src: &[u8]) -> Result<Self, InvalidName> {
+    if src.is_empty() {
+      return Err(InvalidName::Empty);
+    }
+
+    if src.len() > Self::MAX_SIZE {
+      return Err(InvalidName::TooLarge(src.len()));
+    }
+
+    core::str::from_utf8(src).map_err(InvalidName::Utf8)?;
+    Ok(Self(Bytes::copy_from_slice(src)))
+  }
+
   /// Creates a new Name from a str without checking the size.
   ///
   /// # Panics
@@ -127,6 +143,27 @@ impl Name {
     }
 
     Self(Bytes::from(name))
+  }
+
+  /// Creates a new Name from slice.
+  ///
+  /// # Panics
+  /// Panics if the name is empty or larger than 512 bytes.
+  #[inline]
+  #[allow(clippy::should_implement_trait)]
+  pub fn from_slice_unchecked(src: &[u8]) -> Self {
+    if src.is_empty() {
+      panic!("{}", InvalidName::Empty);
+    }
+
+    if src.len() > Self::MAX_SIZE {
+      panic!("{}", InvalidName::TooLarge(src.len()));
+    }
+
+    if let Err(e) = core::str::from_utf8(src) {
+      panic!("{}", InvalidName::Utf8(e));
+    }
+    Self(Bytes::copy_from_slice(src))
   }
 
   #[inline]
