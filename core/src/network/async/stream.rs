@@ -124,14 +124,21 @@ where
     label: Label,
     mut buf: Bytes,
     addr: SocketAddr,
-    // encryption_enabled: bool,
   ) -> Result<(), Error<D, T>> {
     let compression_enabled = !self.inner.opts.compression_algo.is_none();
     let encryption_enabled = self.encryption_enabled() && self.inner.opts.gossip_verify_outgoing;
     // encrypt and compress are CPU-bound computation, so let rayon to handle it
     if compression_enabled || encryption_enabled {
       let primary_key = if encryption_enabled {
-        Some(self.inner.keyring.as_ref().unwrap().primary_key())
+        Some(
+          self
+            .inner
+            .opts
+            .secret_keyring
+            .as_ref()
+            .unwrap()
+            .primary_key(),
+        )
       } else {
         None
       };
@@ -142,8 +149,8 @@ where
       // offload the encryption and compression to a thread pool
       if buf.len() > self.inner.opts.offload_size {
         #[cfg(feature = "metrics")]
-        let metrics_labels = self.inner.metrics_labels.clone();
-        let keyring = self.inner.keyring.clone();
+        let metrics_labels = self.inner.opts.metrics_labels.clone();
+        let keyring = self.inner.opts.secret_keyring.clone();
         let (tx, rx) = futures_channel::oneshot::channel();
         rayon::spawn(move || {
           if compression_enabled {
@@ -198,7 +205,7 @@ where
             // Write out the entire send buffer
             #[cfg(feature = "metrics")]
             {
-              incr_tcp_sent_counter(buf.len() as u64, self.inner.metrics_labels.iter());
+              incr_tcp_sent_counter(buf.len() as u64, self.inner.opts.metrics_labels.iter());
             }
 
             return conn.write_all(&buf).await.map_err(Error::transport);
@@ -221,7 +228,7 @@ where
       buf = if let Some(primary_key) = primary_key {
         match Self::encrypt_local_state(
           primary_key,
-          self.inner.keyring.as_ref().unwrap(),
+          self.inner.opts.secret_keyring.as_ref().unwrap(),
           &buf,
           &label,
           encryption_algo,
@@ -241,7 +248,7 @@ where
     // Write out the entire send buffer
     #[cfg(feature = "metrics")]
     {
-      incr_tcp_sent_counter(buf.len() as u64, self.inner.metrics_labels.iter());
+      incr_tcp_sent_counter(buf.len() as u64, self.inner.opts.metrics_labels.iter());
     }
     conn.write_all(&buf).await.map_err(Error::transport)
   }
@@ -394,7 +401,7 @@ where
       NODE_INSTANCES_GAUGE.with(|g| {
         let mut labels = g
           .get_or_init(|| {
-            let mut labels = (*self.inner.metrics_labels).clone();
+            let mut labels = (*self.inner.opts.metrics_labels).clone();
             labels.reserve_exact(1);
             std::cell::RefCell::new(labels)
           })
@@ -422,7 +429,7 @@ where
     let buf = buf.freeze();
     #[cfg(feature = "metrics")]
     {
-      set_local_size_gauge(basic_len as f64, self.inner.metrics_labels.iter());
+      set_local_size_gauge(basic_len as f64, self.inner.opts.metrics_labels.iter());
     }
     self
       .raw_send_msg_stream(conn, stream_label, buf, addr)
@@ -639,7 +646,7 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      incr_tcp_accept_counter(self.inner.metrics_labels.iter());
+      incr_tcp_accept_counter(self.inner.opts.metrics_labels.iter());
     }
 
     if self.inner.opts.tcp_timeout != Duration::ZERO {
@@ -672,10 +679,10 @@ where
       &mut conn,
       stream_label.clone(),
       encryption_enabled,
-      self.inner.keyring.clone(),
+      self.inner.opts.secret_keyring.clone(),
       &self.inner.opts,
       #[cfg(feature = "metrics")]
-      &self.inner.metrics_labels,
+      &self.inner.opts.metrics_labels,
     )
     .await
     {

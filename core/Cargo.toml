@@ -53,6 +53,7 @@ arc-swap = "1.6"
 aead = { version = "0.5", features = ["bytes"] }
 aes-gcm = "0.10"
 bytes = { workspace = true, features = ["serde"] }
+base64 = "0.21"
 cbc = "0.1"
 crc32fast = "1"
 crossbeam-utils = "0.8"

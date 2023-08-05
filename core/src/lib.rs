@@ -26,7 +26,7 @@ mod suspicion;
 pub mod transport;
 mod types;
 pub use types::{Address, CompressionAlgo, Domain, Label, Message, Name, Node, NodeId, Packet};
-mod util;
+pub mod util;
 
 pub use bytes;
 pub use ipnet::IpNet;

@@ -70,7 +70,7 @@ where
     }
 
     // Check if encryption is enabled
-    if let Some(keyring) = &self.inner.keyring {
+    if let Some(keyring) = &self.inner.opts.secret_keyring {
       // Decrypt the payload
       if !keyring.is_empty() {
         if let Err(e) = keyring.decrypt_payload(&mut buf, packet_label.as_bytes()) {
@@ -464,7 +464,7 @@ where
           pkcs7encode(&mut buf, buf_len, offset + EncryptionAlgo::SIZE + NONCE_SIZE, BLOCK_SIZE);
         }
 
-        let keyring = $this.inner.keyring.as_ref().unwrap();
+        let keyring = $this.inner.opts.secret_keyring.as_ref().unwrap();
         let mut bytes = buf.split_off(after_nonce);
         let pk = keyring.primary_key();
 
@@ -483,7 +483,7 @@ where
       ($this:ident, $buf: ident, $addr: ident) => {{
         #[cfg(feature = "metrics")]
         {
-          incr_udp_sent_counter($buf.len() as u64, self.inner.metrics_labels.iter());
+          incr_udp_sent_counter($buf.len() as u64, self.inner.opts.metrics_labels.iter());
         }
 
         $this

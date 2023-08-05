@@ -65,7 +65,7 @@ pub(crate) fn decompress_payload(
 }
 
 #[cfg(feature = "metrics")]
-pub(crate) mod label_serde {
+pub mod label_serde {
   use std::{collections::HashMap, sync::Arc};
 
   use metrics::Label;

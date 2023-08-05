@@ -36,7 +36,6 @@ pub(crate) struct ShowbizCore<D: Delegate, T: Transport> {
   leave_broadcast_tx: Sender<()>,
   leave_broadcast_rx: Receiver<()>,
   status_change_lock: Mutex<()>,
-  keyring: Option<SecretKeyring>,
   delegate: Option<D>,
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
@@ -44,8 +43,6 @@ pub(crate) struct ShowbizCore<D: Delegate, T: Transport> {
   nodes: Arc<RwLock<Memberlist<T::Runtime>>>,
   ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
   dns: Option<Dns<T>>,
-  #[cfg(feature = "metrics")]
-  metrics_labels: Arc<Vec<metrics::Label>>,
   transport: T,
   /// We do not call send directly, just directly drop it.
   shutdown_tx: ArcSwapOption<Sender<()>>,
@@ -109,7 +106,7 @@ where
   /// Returns if the showbiz enabled encryption
   #[inline]
   pub fn encryption_enabled(&self) -> bool {
-    if let Some(keyring) = &self.inner.keyring {
+    if let Some(keyring) = &self.inner.opts.secret_keyring {
       !keyring.is_empty() && !self.inner.opts.encryption_algo.is_none()
     } else {
       false
@@ -135,7 +132,7 @@ where
   /// Returns the keyring used for the local node
   #[inline]
   pub fn keyring(&self) -> Option<&SecretKeyring> {
-    self.inner.keyring.as_ref()
+    self.inner.opts.secret_keyring.as_ref()
   }
 }
 
@@ -214,39 +211,21 @@ where
 {
   #[inline]
   pub async fn new(opts: Options<T>) -> Result<Self, Error<D, T>> {
-    Self::new_in(None, None, opts).await
+    Self::new_in(None, opts).await
   }
 
   #[inline]
   pub async fn with_delegate(delegate: D, opts: Options<T>) -> Result<Self, Error<D, T>> {
-    Self::new_in(Some(delegate), None, opts).await
+    Self::new_in(Some(delegate), opts).await
   }
 
-  #[inline]
-  pub async fn with_keyring(keyring: SecretKeyring, opts: Options<T>) -> Result<Self, Error<D, T>> {
-    Self::new_in(None, Some(keyring), opts).await
-  }
-
-  #[inline]
-  pub async fn with_delegate_and_keyring(
-    delegate: D,
-    keyring: SecretKeyring,
-    opts: Options<T>,
-  ) -> Result<Self, Error<D, T>> {
-    Self::new_in(Some(delegate), Some(keyring), opts).await
-  }
-
-  async fn new_in(
-    delegate: Option<D>,
-    mut keyring: Option<SecretKeyring>,
-    mut opts: Options<T>,
-  ) -> Result<Self, Error<D, T>> {
+  async fn new_in(delegate: Option<D>, mut opts: Options<T>) -> Result<Self, Error<D, T>> {
     let (handoff_tx, handoff_rx) = async_channel::bounded(1);
     let (leave_broadcast_tx, leave_broadcast_rx) = async_channel::bounded(1);
 
     if let Some(pk) = opts.secret_key() {
-      let has_keyring = keyring.is_some();
-      let keyring = keyring.get_or_insert(SecretKeyring::new(pk));
+      let has_keyring = opts.secret_keyring.is_some();
+      let keyring = opts.secret_keyring.get_or_insert(SecretKeyring::new(pk));
       if has_keyring {
         keyring.insert(pk);
         keyring
@@ -349,7 +328,7 @@ where
       DefaultNodeCalculator::new(hot.num_nodes),
       opts.retransmit_mult,
     );
-    let encryption_enabled = if let Some(keyring) = &keyring {
+    let encryption_enabled = if let Some(keyring) = &opts.secret_keyring {
       !keyring.is_empty() && !opts.encryption_algo.is_none()
     } else {
       false
@@ -374,14 +353,11 @@ where
         leave_broadcast_tx,
         leave_broadcast_rx,
         status_change_lock: Mutex::new(()),
-        keyring,
         delegate,
         queue: Mutex::new(MessageQueue::new()),
         nodes: Arc::new(RwLock::new(Memberlist::new(id))),
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
         dns,
-        #[cfg(feature = "metrics")]
-        metrics_labels: Arc::new(vec![]),
         transport,
         advertise,
         shutdown_tx: ArcSwapOption::from_pointee(shutdown_tx),

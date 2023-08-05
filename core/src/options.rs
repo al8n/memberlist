@@ -7,6 +7,8 @@ use std::{
   time::Duration,
 };
 
+use crate::security::SecretKeyring;
+
 use super::{
   security::{EncryptionAlgo, SecretKey},
   transport::{Transport, TransportOptions},
@@ -188,6 +190,12 @@ pub struct Options<T: Transport> {
   /// AES-192, or AES-256.
   secret_key: Option<SecretKey>,
 
+  #[viewit(getter(
+    style = "ref",
+    result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeyring>")
+  ))]
+  secret_keyring: Option<SecretKeyring>,
+
   /// Used to guarantee protocol-compatibility
   protocol_version: ProtocolVersion,
 
@@ -249,7 +257,7 @@ pub struct Options<T: Transport> {
   #[serde(with = "humantime_serde")]
   queue_check_interval: Duration,
 
-  #[viewit(getter(style = "ref", const,))]
+  #[viewit(getter(style = "ref", const, attrs(cfg(feature = "metrics"))))]
   #[cfg(feature = "metrics")]
   #[serde(with = "crate::util::label_serde")]
   metrics_labels: Arc<Vec<metrics::Label>>,
@@ -274,6 +282,8 @@ impl<T: Transport> Clone for Options<T> {
       label: self.label.clone(),
       dns_config_path: self.dns_config_path.clone(),
       allowed_cidrs: self.allowed_cidrs.clone(),
+      secret_keyring: self.secret_keyring.clone(),
+      #[cfg(feature = "metrics")]
       metrics_labels: self.metrics_labels.clone(),
       ..*self
     }
@@ -337,6 +347,7 @@ impl<T: Transport> Options<T> {
       gossip_verify_outgoing: true,
       compression_algo: CompressionAlgo::Lzw, // Enable compression by default
       secret_key: None,
+      secret_keyring: None,
       delegate_version: DelegateVersion::V0,
       protocol_version: ProtocolVersion::V0,
       dns_config_path: PathBuf::from("/etc/resolv.conf"),

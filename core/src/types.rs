@@ -423,6 +423,12 @@ impl AsMut<[u8]> for Message {
   }
 }
 
+impl From<Message> for Bytes {
+  fn from(msg: Message) -> Self {
+    msg.0.freeze()
+  }
+}
+
 #[viewit::viewit(vis_all = "", getters(vis_all = "pub"), setters(vis_all = "pub"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Packet {

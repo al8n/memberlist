@@ -5,6 +5,7 @@ use aes_gcm::{
   Aes128Gcm, Aes256Gcm, AesGcm,
 };
 use atomic::{Atomic, Ordering};
+use base64::Engine;
 use bytes::{Buf, BufMut, BytesMut};
 use crossbeam_skiplist::SkipSet;
 use rand::Rng;
@@ -102,10 +103,7 @@ impl EncryptionAlgo {
 }
 
 /// The key used while attempting to encrypt/decrypt a message
-#[derive(
-  Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-#[serde(untagged)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SecretKey {
   /// secret key for AES128
   Aes128([u8; 16]),
@@ -113,6 +111,52 @@ pub enum SecretKey {
   Aes192([u8; 24]),
   /// secret key for AES256
   Aes256([u8; 32]),
+}
+
+impl Serialize for SecretKey {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: serde::Serializer,
+  {
+    if serializer.is_human_readable() {
+      base64::engine::general_purpose::STANDARD
+        .encode(self)
+        .serialize(serializer)
+    } else {
+      serializer.serialize_bytes(self)
+    }
+  }
+}
+
+impl<'de> Deserialize<'de> for SecretKey {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    macro_rules! parse {
+      ($key:ident) => {{
+        match $key.len() {
+          16 => Ok(Self::Aes128($key.try_into().unwrap())),
+          24 => Ok(Self::Aes192($key.try_into().unwrap())),
+          32 => Ok(Self::Aes256($key.try_into().unwrap())),
+          _ => Err(<D::Error as serde::de::Error>::custom(
+            "invalid secret key length",
+          )),
+        }
+      }};
+    }
+
+    if deserializer.is_human_readable() {
+      <String as Deserialize<'de>>::deserialize(deserializer).and_then(|val| {
+        base64::engine::general_purpose::STANDARD
+          .decode(val)
+          .map_err(serde::de::Error::custom)
+          .and_then(|key| parse!(key))
+      })
+    } else {
+      <Vec<u8> as Deserialize<'de>>::deserialize(deserializer).and_then(|val| parse!(val))
+    }
+  }
 }
 
 impl core::hash::Hash for SecretKey {
@@ -232,11 +276,59 @@ impl AsMut<[u8]> for SecretKey {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SecretKeyringInner {
+  #[serde(with = "primary_key_serde")]
   primary_key: Atomic<SecretKey>,
   update_sequence: AtomicU64,
+  #[serde(with = "keys_serde")]
   keys: SkipSet<SecretKey>,
+}
+
+mod primary_key_serde {
+  use super::SecretKey;
+  use atomic::{Atomic, Ordering};
+  use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+  pub fn serialize<S>(pk: &Atomic<SecretKey>, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    pk.load(Ordering::Relaxed).serialize(serializer)
+  }
+
+  pub fn deserialize<'de, D>(deserializer: D) -> Result<Atomic<SecretKey>, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    <SecretKey as Deserialize<'_>>::deserialize(deserializer).map(Atomic::new)
+  }
+}
+
+mod keys_serde {
+  use crossbeam_skiplist::SkipSet;
+  use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+  use super::SecretKey;
+
+  pub fn serialize<S>(keys: &SkipSet<SecretKey>, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    keys
+      .iter()
+      .map(|ent| *ent.value())
+      .collect::<Vec<_>>()
+      .serialize(serializer)
+  }
+
+  pub fn deserialize<'de, D>(deserializer: D) -> Result<SkipSet<SecretKey>, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    <Vec<SecretKey> as Deserialize<'_>>::deserialize(deserializer)
+      .map(|keys| keys.into_iter().collect::<SkipSet<_>>())
+  }
 }
 
 /// A lock-free and thread-safe container for a set of encryption keys.
@@ -245,8 +337,9 @@ struct SecretKeyringInner {
 /// If creating a keyring with multiple keys, one key must be designated
 /// primary by passing it as the primaryKey. If the primaryKey does not exist in
 /// the list of secondary keys, it will be automatically added at position 0.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[repr(transparent)]
+#[serde(transparent)]
 pub struct SecretKeyring {
   inner: Arc<SecretKeyringInner>,
 }

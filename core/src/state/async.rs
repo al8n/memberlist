@@ -134,7 +134,7 @@ where
     let now = Instant::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer!(
-      observe_push_pull_node(now.elapsed().as_millis() as f64, self.inner.metrics_labels.iter());
+      observe_push_pull_node(now.elapsed().as_millis() as f64, self.inner.opts.metrics_labels.iter());
     );
     self
       .merge_remote_state(self.send_and_receive_state(id, join).await?)
@@ -195,7 +195,7 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      incr_msg_dead(self.inner.metrics_labels.iter());
+      incr_msg_dead(self.inner.opts.metrics_labels.iter());
     }
 
     // Update the state
@@ -273,7 +273,7 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      incr_msg_suspect(self.inner.metrics_labels.iter());
+      incr_msg_suspect(self.inner.opts.metrics_labels.iter());
     }
 
     // Update the state
@@ -340,7 +340,7 @@ where
             #[cfg(feature = "metrics")]
             {
               if k > 0 && k > num_confirmations as usize {
-                incr_degraded_timeout(t.inner.metrics_labels.iter())
+                incr_degraded_timeout(t.inner.opts.metrics_labels.iter())
               }
             }
 
@@ -546,7 +546,7 @@ where
 
     // Update metrics
     #[cfg(feature = "metrics")]
-    incr_msg_alive(self.inner.metrics_labels.iter());
+    incr_msg_alive(self.inner.opts.metrics_labels.iter());
 
     // Notify the delegate of any relevant updates
     if let Some(delegate) = &self.inner.delegate {
@@ -810,7 +810,7 @@ where
     let now = Instant::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer! {
-      observe_probe_node(now.elapsed().as_millis() as f64, self.inner.metrics_labels.iter());
+      observe_probe_node(now.elapsed().as_millis() as f64, self.inner.opts.metrics_labels.iter());
     }
 
     // We use our health awareness to scale the overall probe interval, so we
@@ -825,7 +825,7 @@ where
     #[cfg(feature = "metrics")]
     {
       if probe_interval > self.inner.opts.probe_interval {
-        incr_degraded_probe(self.inner.metrics_labels.iter())
+        incr_degraded_probe(self.inner.opts.metrics_labels.iter())
       }
     }
 
@@ -1202,7 +1202,7 @@ where
     let now = Instant::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer!(
-      observe_gossip(now.elapsed().as_millis() as f64, self.inner.metrics_labels.iter());
+      observe_gossip(now.elapsed().as_millis() as f64, self.inner.opts.metrics_labels.iter());
     );
 
     // Get some random live, suspect, or recently dead nodes

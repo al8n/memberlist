@@ -111,14 +111,13 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr().ip());
+  let c = Options::<NetTransport<R>>::lan()
+    .with_bind_addr(get_bind_addr().ip())
+    .with_secret_keyring(Some(SecretKeyring::new(SecretKey::Aes128([0; 16]))));
 
-  let m = Showbiz::<VoidDelegate, NetTransport<R>>::with_keyring(
-    SecretKeyring::new(SecretKey::Aes128([0; 16])),
-    c,
-  )
-  .await
-  .unwrap();
+  let m = Showbiz::<VoidDelegate, NetTransport<R>>::new(c)
+    .await
+    .unwrap();
 
   yield_now::<R>().await;
   assert!(m.encryption_enabled());
@@ -132,19 +131,24 @@ where
 {
   let c = Options::<NetTransport<R>>::lan()
     .with_bind_addr(get_bind_addr().ip())
-    .with_secret_key(Some(SecretKey::Aes128([1; 16])));
+    .with_secret_key(Some(SecretKey::Aes128([1; 16])))
+    .with_secret_keyring(Some(SecretKeyring::new(SecretKey::Aes128([0; 16]))));
 
-  let m = Showbiz::<VoidDelegate, NetTransport<R>>::with_keyring(
-    SecretKeyring::new(SecretKey::Aes128([0; 16])),
-    c,
-  )
-  .await
-  .unwrap();
+  let m = Showbiz::<VoidDelegate, NetTransport<R>>::new(c)
+    .await
+    .unwrap();
 
   yield_now::<R>().await;
   assert!(m.encryption_enabled());
   assert_eq!(
-    m.inner.keyring.as_ref().unwrap().keys().next().unwrap(),
+    m.inner
+      .opts
+      .secret_keyring
+      .as_ref()
+      .unwrap()
+      .keys()
+      .next()
+      .unwrap(),
     SecretKey::Aes128([1; 16])
   );
 }

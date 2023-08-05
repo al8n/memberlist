@@ -70,10 +70,10 @@ where
       &mut conn,
       self.inner.opts.label.clone(),
       encryption_enabled,
-      self.inner.keyring.clone(),
+      self.inner.opts.secret_keyring.clone(),
       &self.inner.opts,
       #[cfg(feature = "metrics")]
-      &self.inner.metrics_labels,
+      &self.inner.opts.metrics_labels,
     )
     .await?;
 
@@ -122,7 +122,7 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      incr_tcp_connect_counter(self.inner.metrics_labels.iter());
+      incr_tcp_connect_counter(self.inner.opts.metrics_labels.iter());
     }
 
     // Send our state
@@ -141,10 +141,10 @@ where
       &mut conn,
       self.inner.opts.label.clone(),
       encryption_enabled,
-      self.inner.keyring.clone(),
+      self.inner.opts.secret_keyring.clone(),
       &self.inner.opts,
       #[cfg(feature = "metrics")]
-      &self.inner.metrics_labels,
+      &self.inner.opts.metrics_labels,
     )
     .await?;
 

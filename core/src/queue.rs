@@ -9,8 +9,9 @@ use std::{
 
 use crate::{broadcast::Broadcast, types::Message, util::retransmit_limit};
 
+#[async_trait::async_trait]
 pub trait NodeCalculator {
-  fn num_nodes(&self) -> usize;
+  async fn num_nodes(&self) -> usize;
 }
 
 struct Inner<B: Broadcast> {
@@ -41,8 +42,9 @@ impl<B: Broadcast> Inner<B> {
 #[derive(Clone)]
 pub(crate) struct DefaultNodeCalculator(Arc<CachePadded<AtomicU32>>);
 
+#[async_trait::async_trait]
 impl NodeCalculator for DefaultNodeCalculator {
-  fn num_nodes(&self) -> usize {
+  async fn num_nodes(&self) -> usize {
     self.0.load(Ordering::SeqCst) as usize
   }
 }
@@ -106,7 +108,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
       return Vec::new();
     }
 
-    let transmit_limit = retransmit_limit(self.retransmit_mult, self.num_nodes.num_nodes());
+    let transmit_limit = retransmit_limit(self.retransmit_mult, self.num_nodes.num_nodes().await);
 
     // Visit fresher items first, but only look at stuff that will fit.
     // We'll go tier by tier, grabbing the largest items first.
