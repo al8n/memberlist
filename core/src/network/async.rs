@@ -23,7 +23,7 @@ pub(crate) mod tests;
 #[cfg(any(test, feature = "test"))]
 pub use tests::*;
 
-impl<D, T> Showbiz<D, T>
+impl<D, T> Showbiz<T, D>
 where
   D: Delegate,
   T: Transport,
@@ -35,7 +35,7 @@ where
     target: &NodeId,
     ping: Ping,
     deadline: Duration,
-  ) -> Result<bool, Error<D, T>> {
+  ) -> Result<bool, Error<T, D>> {
     let Ok(mut conn) = self
       .inner
       .transport
@@ -73,7 +73,7 @@ where
       self.inner.opts.secret_keyring.clone(),
       &self.inner.opts,
       #[cfg(feature = "metrics")]
-      &self.inner.opts.metrics_labels,
+      &self.inner.opts.metric_labels,
     )
     .await?;
 
@@ -110,7 +110,7 @@ where
     &self,
     id: &NodeId,
     join: bool,
-  ) -> Result<RemoteNodeState, Error<D, T>> {
+  ) -> Result<RemoteNodeState, Error<T, D>> {
     // Attempt to connect
     let mut conn = self
       .inner
@@ -122,7 +122,7 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      incr_tcp_connect_counter(self.inner.opts.metrics_labels.iter());
+      incr_tcp_connect_counter(self.inner.opts.metric_labels.iter());
     }
 
     // Send our state
@@ -144,7 +144,7 @@ where
       self.inner.opts.secret_keyring.clone(),
       &self.inner.opts,
       #[cfg(feature = "metrics")]
-      &self.inner.opts.metrics_labels,
+      &self.inner.opts.metric_labels,
     )
     .await?;
 
@@ -178,7 +178,7 @@ where
     msg: &[u8],
     label: &Label,
     algo: EncryptionAlgo,
-  ) -> Result<Bytes, Error<D, T>> {
+  ) -> Result<Bytes, Error<T, D>> {
     let enc_len = algo.encrypted_length(msg.len());
     let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
     let mut buf = BytesMut::with_capacity(meta_size + enc_len);
@@ -218,8 +218,8 @@ where
 
   async fn read_encrypt_remote_state(
     r: &mut ReliableConnection<T>,
-    #[cfg(feature = "metrics")] metrics_labels: &[metrics::Label],
-  ) -> Result<EncryptedRemoteStateHeader, Error<D, T>> {
+    #[cfg(feature = "metrics")] metric_labels: &[metrics::Label],
+  ) -> Result<EncryptedRemoteStateHeader, Error<T, D>> {
     // Read in enough to determine message length
     // let meta_size = MessageType::SIZE + core::mem::size_of::<u32>() + EncryptionAlgo::SIZE;
     let meta_size = MessageType::SIZE + core::mem::size_of::<u32>();
@@ -233,7 +233,7 @@ where
     let more_bytes = u32::from_be_bytes(b) as usize;
     #[cfg(feature = "metrics")]
     {
-      add_sample_to_remote_size_histogram(more_bytes as f64, metrics_labels.iter());
+      add_sample_to_remote_size_histogram(more_bytes as f64, metric_labels.iter());
     }
 
     if more_bytes > MAX_PUSH_STATE_BYTES {
@@ -265,7 +265,7 @@ where
     stream_label: &Label,
     header: EncryptedRemoteStateHeader,
     keyring: &SecretKeyring,
-  ) -> Result<Bytes, Error<D, T>> {
+  ) -> Result<Bytes, Error<T, D>> {
     let EncryptedRemoteStateHeader { meta_size, mut buf } = header;
 
     // Decrypt the cipherText with some authenticated data

@@ -60,7 +60,7 @@ struct AckMessage {
 
 // -------------------------------Public methods---------------------------------
 
-impl<D, T> Showbiz<D, T>
+impl<D, T> Showbiz<T, D>
 where
   T: Transport,
   D: Delegate,
@@ -68,7 +68,7 @@ where
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Initiates a ping to the node with the specified node.
-  pub async fn ping(&self, node: NodeId) -> Result<Duration, Error<D, T>> {
+  pub async fn ping(&self, node: NodeId) -> Result<Duration, Error<T, D>> {
     // Prepare a ping message and setup an ack handler.
     let self_addr = self.get_advertise();
     let ping = Ping {
@@ -121,7 +121,7 @@ where
 }
 
 // ---------------------------------Crate methods-------------------------------
-impl<D, T> Showbiz<D, T>
+impl<D, T> Showbiz<T, D>
 where
   T: Transport,
   D: Delegate,
@@ -129,12 +129,12 @@ where
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Does a complete state exchange with a specific node.
-  pub(crate) async fn push_pull_node(&self, id: &NodeId, join: bool) -> Result<(), Error<D, T>> {
+  pub(crate) async fn push_pull_node(&self, id: &NodeId, join: bool) -> Result<(), Error<T, D>> {
     #[cfg(feature = "metrics")]
     let now = Instant::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer!(
-      observe_push_pull_node(now.elapsed().as_millis() as f64, self.inner.opts.metrics_labels.iter());
+      observe_push_pull_node(now.elapsed().as_millis() as f64, self.inner.opts.metric_labels.iter());
     );
     self
       .merge_remote_state(self.send_and_receive_state(id, join).await?)
@@ -145,7 +145,7 @@ where
     &self,
     memberlist: &mut Memberlist<T::Runtime>,
     d: Dead,
-  ) -> Result<(), Error<D, T>> {
+  ) -> Result<(), Error<T, D>> {
     let idx = match memberlist.node_map.get(&d.node) {
       Some(idx) => *idx,
       // If we've never heard about this node before, ignore it
@@ -195,7 +195,7 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      incr_msg_dead(self.inner.opts.metrics_labels.iter());
+      incr_msg_dead(self.inner.opts.metric_labels.iter());
     }
 
     // Update the state
@@ -214,7 +214,7 @@ where
     state.state.state_change = Instant::now();
 
     // notify of death
-    if let Some(ref delegate) = self.inner.delegate {
+    if let Some(ref delegate) = self.delegate {
       delegate
         .notify_leave(state.state.node.clone())
         .await
@@ -224,7 +224,7 @@ where
     Ok(())
   }
 
-  pub(crate) async fn suspect_node(&self, s: Suspect) -> Result<(), Error<D, T>> {
+  pub(crate) async fn suspect_node(&self, s: Suspect) -> Result<(), Error<T, D>> {
     let mut mu = self.inner.nodes.write().await;
 
     let Some(&idx) = mu.node_map.get(&s.node) else {
@@ -273,7 +273,7 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      incr_msg_suspect(self.inner.opts.metrics_labels.iter());
+      incr_msg_suspect(self.inner.opts.metric_labels.iter());
     }
 
     // Update the state
@@ -340,7 +340,7 @@ where
             #[cfg(feature = "metrics")]
             {
               if k > 0 && k > num_confirmations as usize {
-                incr_degraded_timeout(t.inner.opts.metrics_labels.iter())
+                incr_degraded_timeout(t.inner.opts.metric_labels.iter())
               }
             }
 
@@ -392,7 +392,7 @@ where
     // alive messages based on custom logic. For example, using a cluster name.
     // Using a merge delegate is not enough, as it is possible for passive
     // cluster merging to still occur.
-    if let Some(delegate) = &self.inner.delegate {
+    if let Some(delegate) = &self.delegate {
       if let Err(e) = delegate.notify_alive(node.clone()).await {
         tracing::warn!(target = "showbiz.state", local = %self.inner.id, peer = %alive.node, err=%e, "ignoring alive message");
         return;
@@ -421,7 +421,7 @@ where
           tracing::error!(target = "showbiz.state", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.node.id().name(), state.node.id().addr(), alive.node, state.state);
 
           // Inform the conflict delegate if provided
-          if let Some(delegate) = self.inner.delegate.as_ref() {
+          if let Some(delegate) = self.delegate.as_ref() {
             if let Err(e) = delegate
               .notify_conflict(
                 state.node.clone(),
@@ -546,10 +546,10 @@ where
 
     // Update metrics
     #[cfg(feature = "metrics")]
-    incr_msg_alive(self.inner.opts.metrics_labels.iter());
+    incr_msg_alive(self.inner.opts.metric_labels.iter());
 
     // Notify the delegate of any relevant updates
-    if let Some(delegate) = &self.inner.delegate {
+    if let Some(delegate) = &self.delegate {
       if old_state == NodeState::Dead || old_state == NodeState::Left {
         // if Dead/Left -> Alive, notify of join
         if let Err(e) = delegate.notify_join(member.state.node.clone()).await {
@@ -564,7 +564,7 @@ where
     }
   }
 
-  pub(crate) async fn merge_state(&self, remote: Vec<PushNodeState>) -> Result<(), Error<D, T>> {
+  pub(crate) async fn merge_state(&self, remote: Vec<PushNodeState>) -> Result<(), Error<T, D>> {
     for r in remote {
       match r.state {
         NodeState::Alive => {
@@ -694,7 +694,7 @@ macro_rules! bail_trigger {
   };
 }
 
-impl<D, T> Showbiz<D, T>
+impl<D, T> Showbiz<T, D>
 where
   T: Transport,
   D: Delegate,
@@ -810,7 +810,7 @@ where
     let now = Instant::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer! {
-      observe_probe_node(now.elapsed().as_millis() as f64, self.inner.opts.metrics_labels.iter());
+      observe_probe_node(now.elapsed().as_millis() as f64, self.inner.opts.metric_labels.iter());
     }
 
     // We use our health awareness to scale the overall probe interval, so we
@@ -825,7 +825,7 @@ where
     #[cfg(feature = "metrics")]
     {
       if probe_interval > self.inner.opts.probe_interval {
-        incr_degraded_probe(self.inner.opts.metrics_labels.iter())
+        incr_degraded_probe(self.inner.opts.metric_labels.iter())
       }
     }
 
@@ -901,7 +901,7 @@ where
       }
     }
 
-    let delegate = self.inner.delegate.as_ref();
+    let delegate = self.delegate.as_ref();
 
     // Wait for response or round-trip-time.
     futures_util::select! {
@@ -1010,7 +1010,7 @@ where
     let (fallback_tx, fallback_rx) = futures_channel::oneshot::channel();
 
     let mut disable_reliable_pings = self.inner.opts.disable_tcp_pings;
-    if let Some(delegate) = self.inner.delegate.as_ref() {
+    if let Some(delegate) = self.delegate.as_ref() {
       disable_reliable_pings |= delegate.disable_reliable_pings(target.id());
     }
     if !disable_reliable_pings {
@@ -1202,7 +1202,7 @@ where
     let now = Instant::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer!(
-      observe_gossip(now.elapsed().as_millis() as f64, self.inner.opts.metrics_labels.iter());
+      observe_gossip(now.elapsed().as_millis() as f64, self.inner.opts.metric_labels.iter());
     );
 
     // Get some random live, suspect, or recently dead nodes

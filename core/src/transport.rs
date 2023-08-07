@@ -646,20 +646,20 @@ mod r#async {
 
     /// Creates a new transport instance with the given options and metrics labels
     #[cfg(all(feature = "metrics", feature = "nightly"))]
-    fn with_metrics_labels(
+    fn with_metric_labels(
       label: Option<Label>,
       opts: Self::Options,
-      metrics_labels: std::sync::Arc<Vec<metrics::Label>>,
+      metric_labels: std::sync::Arc<Vec<metrics::Label>>,
     ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
     where
       Self: Sized;
 
     /// Creates a new transport instance with the given options and metrics labels
     #[cfg(all(feature = "metrics", not(feature = "nightly")))]
-    async fn with_metrics_labels(
+    async fn with_metric_labels(
       label: Option<Label>,
       opts: Self::Options,
-      metrics_labels: std::sync::Arc<Vec<metrics::Label>>,
+      metric_labels: std::sync::Arc<Vec<metrics::Label>>,
     ) -> Result<Self, TransportError<Self>>
     where
       Self: Sized;

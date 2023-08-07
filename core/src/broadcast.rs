@@ -94,7 +94,7 @@ impl Broadcast for ShowbizBroadcast {
 }
 
 #[cfg(feature = "async")]
-impl<D: Delegate, T: Transport> Showbiz<D, T> {
+impl<D: Delegate, T: Transport> Showbiz<T, D> {
   #[inline]
   pub(crate) async fn broadcast_notify(
     &self,
@@ -137,7 +137,7 @@ impl<D: Delegate, T: Transport> Showbiz<D, T> {
     to_send: Vec<Message>,
     overhead: usize,
     limit: usize,
-  ) -> Result<Vec<Message>, Error<D, T>> {
+  ) -> Result<Vec<Message>, Error<T, D>> {
     // Get memberlist messages first
     let mut to_send = self
       .inner
@@ -146,7 +146,7 @@ impl<D: Delegate, T: Transport> Showbiz<D, T> {
       .await;
 
     // Check if the user has anything to broadcast
-    if let Some(delegate) = &self.inner.delegate {
+    if let Some(delegate) = &self.delegate {
       // Determine the bytes used already
       let mut bytes_used = 0;
       for msg in &to_send {

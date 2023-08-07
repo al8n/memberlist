@@ -156,7 +156,7 @@ impl LocalNodeState {
 }
 
 // private implementation
-impl<D, T> Showbiz<D, T>
+impl<D, T> Showbiz<T, D>
 where
   T: Transport,
   D: Delegate,

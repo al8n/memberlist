@@ -12,7 +12,7 @@ use rand::Rng;
 
 use super::*;
 
-impl<D, T> Showbiz<D, T>
+impl<D, T> Showbiz<T, D>
 where
   D: Delegate,
   T: Transport,
@@ -258,7 +258,7 @@ where
       return;
     }
 
-    let msg = if let Some(delegate) = &self.inner.delegate {
+    let msg = if let Some(delegate) = &self.delegate {
       let payload = match delegate.ack_payload().await {
         Ok(payload) => payload,
         Err(e) => {
@@ -409,7 +409,7 @@ where
     }
   }
 
-  pub(crate) async fn send_msg(&self, addr: &NodeId, msg: Message) -> Result<(), Error<D, T>> {
+  pub(crate) async fn send_msg(&self, addr: &NodeId, msg: Message) -> Result<(), Error<T, D>> {
     // Check if we can piggy back any messages
     let bytes_avail = self.inner.opts.packet_buffer_size
       - msg.len()
@@ -438,7 +438,7 @@ where
     &self,
     addr: &NodeId,
     msg: BytesMut,
-  ) -> Result<(), Error<D, T>> {
+  ) -> Result<(), Error<T, D>> {
     macro_rules! encrypt_bail {
       ($msg: ident.len($compressed_msg_len: ident) -> $this:ident.$node:ident.$addr:ident -> $block: expr) => {{
         let basic_encrypt_len = MessageType::SIZE // MessageType::Encryption
@@ -483,7 +483,7 @@ where
       ($this:ident, $buf: ident, $addr: ident) => {{
         #[cfg(feature = "metrics")]
         {
-          incr_udp_sent_counter($buf.len() as u64, self.inner.opts.metrics_labels.iter());
+          incr_udp_sent_counter($buf.len() as u64, self.inner.opts.metric_labels.iter());
         }
 
         $this

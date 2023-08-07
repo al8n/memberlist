@@ -291,7 +291,7 @@ impl<R: Runtime> NetTransport<R> {
   async fn new_in(
     label: Option<Label>,
     opts: <Self as Transport>::Options,
-    #[cfg(feature = "metrics")] metrics_labels: Option<Arc<Vec<crate::metrics::Label>>>,
+    #[cfg(feature = "metrics")] metric_labels: Option<Arc<Vec<crate::metrics::Label>>>,
   ) -> Result<Self, TransportError<Self>> {
     // If we reject the empty list outright we can assume that there's at
     // least one listener of each type later during operation.
@@ -362,7 +362,7 @@ impl<R: Runtime> NetTransport<R> {
         local_addr,
         shutdown: shutdown.clone(),
         #[cfg(feature = "metrics")]
-        metrics_labels: metrics_labels.clone().unwrap_or_default(),
+        metric_labels: metric_labels.clone().unwrap_or_default(),
         _marker: std::marker::PhantomData,
         shutdown_rx: shutdown_rx.clone(),
       }
@@ -390,7 +390,7 @@ impl<R: Runtime> NetTransport<R> {
       local_addr,
       shutdown: shutdown.clone(),
       #[cfg(feature = "metrics")]
-      metrics_labels: metrics_labels.clone().unwrap_or_default(),
+      metric_labels: metric_labels.clone().unwrap_or_default(),
       shutdown_rx,
       _marker: std::marker::PhantomData,
     }
@@ -462,27 +462,27 @@ impl<R: Runtime> Transport for NetTransport<R> {
   }
 
   #[cfg(all(feature = "metrics", feature = "nightly"))]
-  fn with_metrics_labels(
+  fn with_metric_labels(
     label: Option<Label>,
     opts: Self::Options,
-    metrics_labels: std::sync::Arc<Vec<crate::metrics::Label>>,
+    metric_labels: std::sync::Arc<Vec<crate::metrics::Label>>,
   ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
   where
     Self: Sized,
   {
-    Self::new_in(label, opts, Some(metrics_labels))
+    Self::new_in(label, opts, Some(metric_labels))
   }
 
   #[cfg(all(feature = "metrics", not(feature = "nightly")))]
-  async fn with_metrics_labels(
+  async fn with_metric_labels(
     label: Option<Label>,
     opts: Self::Options,
-    metrics_labels: Arc<Vec<crate::metrics::Label>>,
+    metric_labels: Arc<Vec<crate::metrics::Label>>,
   ) -> Result<Self, TransportError<Self>>
   where
     Self: Sized,
   {
-    Self::new_in(label, opts, Some(metrics_labels)).await
+    Self::new_in(label, opts, Some(metric_labels)).await
   }
 
   fn final_advertise_addr(
@@ -753,7 +753,7 @@ where
   shutdown: Arc<AtomicBool>,
   shutdown_rx: async_channel::Receiver<()>,
   #[cfg(feature = "metrics")]
-  metrics_labels: Arc<Vec<crate::metrics::Label>>,
+  metric_labels: Arc<Vec<crate::metrics::Label>>,
   _marker: PhantomData<T>,
 }
 
@@ -818,7 +818,7 @@ where
                     metrics::counter!("showbiz.udp.received", val, labels);
                   }
 
-                  incr_udp_received(n as u64, self.metrics_labels.iter());
+                  incr_udp_received(n as u64, self.metric_labels.iter());
                 }
               }
               Err(e) => {

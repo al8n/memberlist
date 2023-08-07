@@ -6,7 +6,7 @@ use crate::showbiz::MessageHandoff;
 
 use super::*;
 
-impl<D, T> Showbiz<D, T>
+impl<D, T> Showbiz<T, D>
 where
   T: Transport,
   D: Delegate,
@@ -125,14 +125,14 @@ where
   }
 
   async fn handle_user(&self, msg: MessageHandoff) {
-    if let Some(d) = self.inner.delegate.as_ref() {
+    if let Some(d) = self.delegate.as_ref() {
       if let Err(e) = d.notify_user_msg(msg.buf).await {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to handle user message");
       }
     }
   }
 
-  fn ensure_can_connect(&self, from: IpAddr) -> Result<(), Error<D, T>> {
+  fn ensure_can_connect(&self, from: IpAddr) -> Result<(), Error<T, D>> {
     if !self.inner.opts.ip_must_be_checked() {
       return Ok(());
     }

@@ -260,7 +260,7 @@ pub struct Options<T: Transport> {
   #[viewit(getter(style = "ref", const, attrs(cfg(feature = "metrics"))))]
   #[cfg(feature = "metrics")]
   #[serde(with = "crate::util::label_serde")]
-  metrics_labels: Arc<Vec<metrics::Label>>,
+  metric_labels: Arc<Vec<metrics::Label>>,
 }
 
 impl<T> Default for Options<T>
@@ -284,7 +284,7 @@ impl<T: Transport> Clone for Options<T> {
       allowed_cidrs: self.allowed_cidrs.clone(),
       secret_keyring: self.secret_keyring.clone(),
       #[cfg(feature = "metrics")]
-      metrics_labels: self.metrics_labels.clone(),
+      metric_labels: self.metric_labels.clone(),
       ..*self
     }
   }
@@ -359,7 +359,7 @@ impl<T: Transport> Options<T> {
       transport: None,
       queue_check_interval: Duration::from_secs(30),
       #[cfg(feature = "metrics")]
-      metrics_labels: Arc::new(Vec::new()),
+      metric_labels: Arc::new(Vec::new()),
     }
   }
 

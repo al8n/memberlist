@@ -1,6 +1,7 @@
 use std::{future::Future, net::ToSocketAddrs, sync::atomic::Ordering, time::Duration};
 
 use crate::{
+  delegate::VoidDelegate,
   dns::DnsError,
   transport::TransportError,
   types::{Address, Dead, Domain},
@@ -28,7 +29,7 @@ pub(crate) struct AckHandler {
 }
 
 #[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct ShowbizCore<D: Delegate, T: Transport> {
+pub(crate) struct ShowbizCore<T: Transport> {
   id: NodeId,
   hot: HotData,
   awareness: Awareness,
@@ -36,7 +37,6 @@ pub(crate) struct ShowbizCore<D: Delegate, T: Transport> {
   leave_broadcast_tx: Sender<()>,
   leave_broadcast_rx: Receiver<()>,
   status_change_lock: Mutex<()>,
-  delegate: Option<D>,
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue>,
@@ -50,7 +50,7 @@ pub(crate) struct ShowbizCore<D: Delegate, T: Transport> {
   opts: Arc<Options<T>>,
 }
 
-impl<D: Delegate, T: Transport> Drop for ShowbizCore<D, T> {
+impl<T: Transport> Drop for ShowbizCore<T> {
   fn drop(&mut self) {
     self.shutdown_tx.store(None);
     if let Err(e) = self.transport.block_shutdown() {
@@ -59,11 +59,12 @@ impl<D: Delegate, T: Transport> Drop for ShowbizCore<D, T> {
   }
 }
 
-pub struct Showbiz<D: Delegate, T: Transport> {
-  pub(crate) inner: Arc<ShowbizCore<D, T>>,
+pub struct Showbiz<T: Transport, D: Delegate = VoidDelegate> {
+  pub(crate) inner: Arc<ShowbizCore<T>>,
+  pub(crate) delegate: Option<Arc<D>>,
 }
 
-impl<D, T> Clone for Showbiz<D, T>
+impl<D, T> Clone for Showbiz<T, D>
 where
   T: Transport,
   D: Delegate,
@@ -71,11 +72,12 @@ where
   fn clone(&self) -> Self {
     Self {
       inner: self.inner.clone(),
+      delegate: self.delegate.clone(),
     }
   }
 }
 
-impl<D, T> Showbiz<D, T>
+impl<D, T> Showbiz<T, D>
 where
   D: Delegate,
   T: Transport,
@@ -113,6 +115,7 @@ where
     }
   }
 
+  /// Returns the local node ID.
   #[inline]
   pub fn local_id(&self) -> &NodeId {
     &self.inner.id
@@ -136,20 +139,20 @@ where
   }
 }
 
-pub struct JoinError<D: Delegate, T: Transport> {
+pub struct JoinError<T: Transport, D: Delegate> {
   joined: Vec<NodeId>,
-  errors: HashMap<Address, Error<D, T>>,
+  errors: HashMap<Address, Error<T, D>>,
 }
 
-impl<D: Delegate, T: Transport> From<JoinError<D, T>>
-  for (Vec<NodeId>, HashMap<Address, Error<D, T>>)
+impl<D: Delegate, T: Transport> From<JoinError<T, D>>
+  for (Vec<NodeId>, HashMap<Address, Error<T, D>>)
 {
-  fn from(e: JoinError<D, T>) -> Self {
+  fn from(e: JoinError<T, D>) -> Self {
     (e.joined, e.errors)
   }
 }
 
-impl<D: Delegate, T: Transport> core::fmt::Debug for JoinError<D, T> {
+impl<D: Delegate, T: Transport> core::fmt::Debug for JoinError<T, D> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     if !self.joined.is_empty() {
       writeln!(f, "Successes: {:?}", self.joined)?;
@@ -166,7 +169,7 @@ impl<D: Delegate, T: Transport> core::fmt::Debug for JoinError<D, T> {
   }
 }
 
-impl<D: Delegate, T: Transport> core::fmt::Display for JoinError<D, T> {
+impl<D: Delegate, T: Transport> core::fmt::Display for JoinError<T, D> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     if !self.joined.is_empty() {
       writeln!(f, "Successes: {:?}", self.joined)?;
@@ -183,9 +186,9 @@ impl<D: Delegate, T: Transport> core::fmt::Display for JoinError<D, T> {
   }
 }
 
-impl<D: Delegate, T: Transport> std::error::Error for JoinError<D, T> {}
+impl<D: Delegate, T: Transport> std::error::Error for JoinError<T, D> {}
 
-impl<D: Delegate, T: Transport> JoinError<D, T> {
+impl<D: Delegate, T: Transport> JoinError<T, D> {
   /// Return the number of successful joined nodes
   pub fn num_joined(&self) -> usize {
     self.joined.len()
@@ -197,12 +200,24 @@ impl<D: Delegate, T: Transport> JoinError<D, T> {
   }
 
   #[allow(clippy::mutable_key_type)]
-  pub const fn errors(&self) -> &HashMap<Address, Error<D, T>> {
+  pub const fn errors(&self) -> &HashMap<Address, Error<T, D>> {
     &self.errors
   }
 }
 
-impl<D, T> Showbiz<D, T>
+impl<T> Showbiz<T>
+where
+  T: Transport,
+  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
+  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
+{
+  #[inline]
+  pub async fn new(opts: Options<T>) -> Result<Self, Error<T, VoidDelegate>> {
+    Self::new_in(None, opts).await
+  }
+}
+
+impl<D, T> Showbiz<T, D>
 where
   D: Delegate,
   T: Transport,
@@ -210,16 +225,11 @@ where
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
 {
   #[inline]
-  pub async fn new(opts: Options<T>) -> Result<Self, Error<D, T>> {
-    Self::new_in(None, opts).await
-  }
-
-  #[inline]
-  pub async fn with_delegate(delegate: D, opts: Options<T>) -> Result<Self, Error<D, T>> {
+  pub async fn with_delegate(delegate: D, opts: Options<T>) -> Result<Self, Error<T, D>> {
     Self::new_in(Some(delegate), opts).await
   }
 
-  async fn new_in(delegate: Option<D>, mut opts: Options<T>) -> Result<Self, Error<D, T>> {
+  async fn new_in(delegate: Option<D>, mut opts: Options<T>) -> Result<Self, Error<T, D>> {
     let (handoff_tx, handoff_rx) = async_channel::bounded(1);
     let (leave_broadcast_tx, leave_broadcast_rx) = async_channel::bounded(1);
 
@@ -260,14 +270,14 @@ where
       limit: usize,
       label: Option<Label>,
       opts: T::Options,
-      #[cfg(feature = "metrics")] metrics_labels: Arc<Vec<metrics::Label>>,
-    ) -> Result<T, Error<D, T>> {
+      #[cfg(feature = "metrics")] metric_labels: Arc<Vec<metrics::Label>>,
+    ) -> Result<T, Error<T, D>> {
       let mut i = 0;
       loop {
         #[cfg(feature = "metrics")]
         let transport = {
-          if !metrics_labels.is_empty() {
-            T::with_metrics_labels(label.clone(), opts.clone(), metrics_labels.clone()).await
+          if !metric_labels.is_empty() {
+            T::with_metric_labels(label.clone(), opts.clone(), metric_labels.clone()).await
           } else {
             T::new(label.clone(), opts.clone()).await
           }
@@ -297,7 +307,7 @@ where
       (!opts.label.is_empty()).then_some(opts.label.clone()),
       opts.transport.as_ref().unwrap().clone(),
       #[cfg(feature = "metrics")]
-      opts.metrics_labels.clone(),
+      opts.metric_labels.clone(),
     )
     .await?;
 
@@ -353,7 +363,6 @@ where
         leave_broadcast_tx,
         leave_broadcast_rx,
         status_change_lock: Mutex::new(()),
-        delegate,
         queue: Mutex::new(MessageQueue::new()),
         nodes: Arc::new(RwLock::new(Memberlist::new(id))),
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
@@ -365,6 +374,7 @@ where
         handoff_tx,
         handoff_rx,
       }),
+      delegate: delegate.map(Arc::new),
     };
 
     this.stream_listener(shutdown_rx.clone());
@@ -373,7 +383,7 @@ where
     #[cfg(feature = "metrics")]
     this.check_broadcast_queue_depth(shutdown_rx.clone());
 
-    let meta = if let Some(d) = &this.inner.delegate {
+    let meta = if let Some(d) = &this.delegate {
       d.node_meta(META_MAX_SIZE)
     } else {
       Bytes::new()
@@ -400,6 +410,11 @@ where
     Ok(this)
   }
 
+  /// Returns the delegate, if any.
+  pub fn delegate(&self) -> Option<&D> {
+    self.delegate.as_deref()
+  }
+
   /// Returns a list of all known nodes.
   #[inline]
   pub async fn members(&self) -> Vec<Arc<Node>> {
@@ -424,7 +439,7 @@ where
   ///
   /// This method is safe to call multiple times, but must not be called
   /// after the cluster is already shut down.
-  pub async fn leave(&self, timeout: Duration) -> Result<(), Error<D, T>> {
+  pub async fn leave(&self, timeout: Duration) -> Result<(), Error<T, D>> {
     if !self.is_running() {
       return Err(Error::NotRunning);
     }
@@ -494,7 +509,7 @@ where
   pub async fn join(
     &self,
     existing: impl Iterator<Item = (Address, Name)>,
-  ) -> Result<Vec<NodeId>, JoinError<D, T>> {
+  ) -> Result<Vec<NodeId>, JoinError<T, D>> {
     if !self.is_running() {
       return Err(JoinError {
         joined: Vec::new(),
@@ -630,13 +645,13 @@ where
   /// meta data.  This will block until the update message is successfully
   /// broadcasted to a member of the cluster, if any exist or until a specified
   /// timeout is reached.
-  pub async fn update_node(&self, timeout: Duration) -> Result<(), Error<D, T>> {
+  pub async fn update_node(&self, timeout: Duration) -> Result<(), Error<T, D>> {
     if !self.is_running() {
       return Err(Error::NotRunning);
     }
 
     // Get the node meta data
-    let meta = if let Some(delegate) = &self.inner.delegate {
+    let meta = if let Some(delegate) = &self.delegate {
       let meta = delegate.node_meta(META_MAX_SIZE);
       if meta.len() > META_MAX_SIZE {
         panic!("node meta data provided is longer than the limit");
@@ -688,7 +703,7 @@ where
   /// mechanism). The maximum size of the message depends on the configured
   /// `packet_buffer_size` for this memberlist instance.
   #[inline]
-  pub async fn send(&self, to: &NodeId, msg: Message) -> Result<(), Error<D, T>> {
+  pub async fn send(&self, to: &NodeId, msg: Message) -> Result<(), Error<T, D>> {
     if !self.is_running() {
       return Err(Error::NotRunning);
     }
@@ -700,7 +715,7 @@ where
   /// mechanism). Delivery is guaranteed if no error is returned, and there is no
   /// limit on the size of the message.
   #[inline]
-  pub async fn send_reliable(&self, to: &NodeId, msg: Message) -> Result<(), Error<D, T>> {
+  pub async fn send_reliable(&self, to: &NodeId, msg: Message) -> Result<(), Error<T, D>> {
     if !self.is_running() {
       return Err(Error::NotRunning);
     }
@@ -709,7 +724,7 @@ where
 }
 
 // private impelementation
-impl<D, T> Showbiz<D, T>
+impl<D, T> Showbiz<T, D>
 where
   D: Delegate,
   T: Transport,
@@ -727,7 +742,7 @@ where
     dns: &Dns<T>,
     host: &str,
     default_port: u16,
-  ) -> Result<Vec<SocketAddr>, Error<D, T>> {
+  ) -> Result<Vec<SocketAddr>, Error<T, D>> {
     // Don't attempt any TCP lookups against non-fully qualified domain
     // names, since those will likely come from the resolv.conf file.
     if !host.contains('.') {
@@ -760,7 +775,7 @@ where
     &self,
     addr: &Domain,
     port: Option<u16>,
-  ) -> Result<Vec<SocketAddr>, Error<D, T>> {
+  ) -> Result<Vec<SocketAddr>, Error<T, D>> {
     // This captures the supplied port, or the default one.
     let port = port.unwrap_or(
       self
@@ -845,7 +860,7 @@ where
     });
   }
 
-  pub(crate) async fn verify_protocol(&self, _remote: &[PushNodeState]) -> Result<(), Error<D, T>> {
+  pub(crate) async fn verify_protocol(&self, _remote: &[PushNodeState]) -> Result<(), Error<T, D>> {
     // TODO: now we do not need to handle this situation, because there is no update
     // on protocol.
     Ok(())

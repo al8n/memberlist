@@ -14,7 +14,7 @@ pub use crate::{
 };
 
 #[derive(thiserror::Error)]
-pub enum Error<D: Delegate, T: Transport> {
+pub enum Error<T: Transport, D: Delegate> {
   #[error("showbiz: node is not running, please bootstrap first")]
   NotRunning,
   #[error("showbiz: timeout waiting for update broadcast")]
@@ -35,34 +35,34 @@ pub enum Error<D: Delegate, T: Transport> {
   Other(Cow<'static, str>),
 }
 
-impl<D: Delegate, T: Transport> From<crate::util::CompressError> for Error<D, T> {
+impl<D: Delegate, T: Transport> From<crate::util::CompressError> for Error<T, D> {
   #[inline]
   fn from(e: crate::util::CompressError) -> Self {
     Self::Transport(e.into())
   }
 }
 
-impl<D: Delegate, T: Transport> From<crate::util::DecompressError> for Error<D, T> {
+impl<D: Delegate, T: Transport> From<crate::util::DecompressError> for Error<T, D> {
   #[inline]
   fn from(e: crate::util::DecompressError) -> Self {
     Self::Transport(e.into())
   }
 }
 
-impl<D: Delegate, T: Transport> From<crate::security::SecurityError> for Error<D, T> {
+impl<D: Delegate, T: Transport> From<crate::security::SecurityError> for Error<T, D> {
   #[inline]
   fn from(e: crate::security::SecurityError) -> Self {
     Self::Transport(e.into())
   }
 }
 
-impl<D: Delegate, T: Transport> core::fmt::Debug for Error<D, T> {
+impl<D: Delegate, T: Transport> core::fmt::Debug for Error<T, D> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{self}")
   }
 }
 
-impl<D: Delegate, T: Transport> Error<D, T> {
+impl<D: Delegate, T: Transport> Error<T, D> {
   #[inline]
   pub fn delegate(e: D::Error) -> Self {
     Self::Delegate(e)

@@ -10,7 +10,7 @@ use crate::{
 use super::*;
 
 // --------------------------------------------Crate Level Methods-------------------------------------------------
-impl<D, T> Showbiz<D, T>
+impl<D, T> Showbiz<T, D>
 where
   D: Delegate,
   T: Transport,
@@ -53,12 +53,12 @@ where
   pub(crate) async fn merge_remote_state(
     &self,
     node_state: RemoteNodeState,
-  ) -> Result<(), Error<D, T>> {
+  ) -> Result<(), Error<T, D>> {
     self.verify_protocol(&node_state.push_states).await?;
 
     // Invoke the merge delegate if any
     if node_state.join {
-      if let Some(merge) = self.inner.delegate.as_ref() {
+      if let Some(merge) = self.delegate.as_ref() {
         let peers = node_state
           .push_states
           .iter()
@@ -77,7 +77,7 @@ where
     self.merge_state(node_state.push_states).await?;
 
     // Invoke the delegate for user state
-    if let Some(d) = &self.inner.delegate {
+    if let Some(d) = &self.delegate {
       if !node_state.user_state.is_empty() {
         d.merge_remote_state(node_state.user_state, node_state.join)
           .await
@@ -91,7 +91,7 @@ where
     &self,
     addr: &NodeId,
     msg: crate::types::Message,
-  ) -> Result<(), Error<D, T>> {
+  ) -> Result<(), Error<T, D>> {
     let mut conn = self
       .inner
       .transport
@@ -111,7 +111,7 @@ where
 }
 
 // ----------------------------------------Module Level Methods------------------------------------
-impl<D, T> Showbiz<D, T>
+impl<D, T> Showbiz<T, D>
 where
   D: Delegate,
   T: Transport,
@@ -124,7 +124,7 @@ where
     label: Label,
     mut buf: Bytes,
     addr: SocketAddr,
-  ) -> Result<(), Error<D, T>> {
+  ) -> Result<(), Error<T, D>> {
     let compression_enabled = !self.inner.opts.compression_algo.is_none();
     let encryption_enabled = self.encryption_enabled() && self.inner.opts.gossip_verify_outgoing;
     // encrypt and compress are CPU-bound computation, so let rayon to handle it
@@ -149,7 +149,7 @@ where
       // offload the encryption and compression to a thread pool
       if buf.len() > self.inner.opts.offload_size {
         #[cfg(feature = "metrics")]
-        let metrics_labels = self.inner.opts.metrics_labels.clone();
+        let metric_labels = self.inner.opts.metric_labels.clone();
         let keyring = self.inner.opts.secret_keyring.clone();
         let (tx, rx) = futures_channel::oneshot::channel();
         rayon::spawn(move || {
@@ -182,7 +182,7 @@ where
               Ok(crypt) => {
                 #[cfg(feature = "metrics")]
                 {
-                  incr_tcp_sent_counter(crypt.len() as u64, metrics_labels.iter());
+                  incr_tcp_sent_counter(crypt.len() as u64, metric_labels.iter());
                 }
 
                 tx.send(Ok(crypt)).unwrap();
@@ -205,7 +205,7 @@ where
             // Write out the entire send buffer
             #[cfg(feature = "metrics")]
             {
-              incr_tcp_sent_counter(buf.len() as u64, self.inner.opts.metrics_labels.iter());
+              incr_tcp_sent_counter(buf.len() as u64, self.inner.opts.metric_labels.iter());
             }
 
             return conn.write_all(&buf).await.map_err(Error::transport);
@@ -248,7 +248,7 @@ where
     // Write out the entire send buffer
     #[cfg(feature = "metrics")]
     {
-      incr_tcp_sent_counter(buf.len() as u64, self.inner.opts.metrics_labels.iter());
+      incr_tcp_sent_counter(buf.len() as u64, self.inner.opts.metric_labels.iter());
     }
     conn.write_all(&buf).await.map_err(Error::transport)
   }
@@ -257,7 +257,7 @@ where
   pub(super) async fn read_remote_state(
     &self,
     mut data: Bytes,
-  ) -> Result<RemoteNodeState, Error<D, T>> {
+  ) -> Result<RemoteNodeState, Error<T, D>> {
     let len = match PushPullHeader::decode_len(&mut data) {
       Ok(len) => len,
       Err(e) => return Err(TransportError::Decode(e).into()),
@@ -315,7 +315,7 @@ where
     addr: SocketAddr,
     join: bool,
     stream_label: Label,
-  ) -> Result<(), Error<D, T>> {
+  ) -> Result<(), Error<T, D>> {
     // Setup a deadline
     conn.set_timeout(Some(self.inner.opts.tcp_timeout));
 
@@ -345,7 +345,7 @@ where
     };
 
     // Get the delegate state
-    let user_data = if let Some(delegate) = &self.inner.delegate {
+    let user_data = if let Some(delegate) = &self.delegate {
       delegate.local_state(join).await.map_err(Error::delegate)?
     } else {
       Bytes::new()
@@ -401,7 +401,7 @@ where
       NODE_INSTANCES_GAUGE.with(|g| {
         let mut labels = g
           .get_or_init(|| {
-            let mut labels = (*self.inner.opts.metrics_labels).clone();
+            let mut labels = (*self.inner.opts.metric_labels).clone();
             labels.reserve_exact(1);
             std::cell::RefCell::new(labels)
           })
@@ -429,7 +429,7 @@ where
     let buf = buf.freeze();
     #[cfg(feature = "metrics")]
     {
-      set_local_size_gauge(basic_len as f64, self.inner.opts.metrics_labels.iter());
+      set_local_size_gauge(basic_len as f64, self.inner.opts.metric_labels.iter());
     }
     self
       .raw_send_msg_stream(conn, stream_label, buf, addr)
@@ -447,8 +447,8 @@ where
     encryption_enabled: bool,
     keyring: Option<SecretKeyring>,
     opts: &Options<T>,
-    #[cfg(feature = "metrics")] metrics_labels: &[metrics::Label],
-  ) -> Result<(Bytes, MessageType), Error<D, T>> {
+    #[cfg(feature = "metrics")] metric_labels: &[metrics::Label],
+  ) -> Result<(Bytes, MessageType), Error<T, D>> {
     // Read the message type
     let mut buf = [0u8; 1];
     let mut mt = match conn.read_exact(&mut buf).await {
@@ -472,7 +472,7 @@ where
       let header = Self::read_encrypt_remote_state(
         conn,
         #[cfg(feature = "metrics")]
-        metrics_labels,
+        metric_labels,
       )
       .await?;
       let mut plain = if header.buf.len() >= opts.offload_size {
@@ -632,7 +632,7 @@ where
 }
 
 // -----------------------------------------Private Level Methods-----------------------------------
-impl<D, T> Showbiz<D, T>
+impl<D, T> Showbiz<T, D>
 where
   D: Delegate,
   T: Transport,
@@ -646,7 +646,7 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      incr_tcp_accept_counter(self.inner.opts.metrics_labels.iter());
+      incr_tcp_accept_counter(self.inner.opts.metric_labels.iter());
     }
 
     if self.inner.opts.tcp_timeout != Duration::ZERO {
@@ -682,7 +682,7 @@ where
       self.inner.opts.secret_keyring.clone(),
       &self.inner.opts,
       #[cfg(feature = "metrics")]
-      &self.inner.opts.metrics_labels,
+      &self.inner.opts.metric_labels,
     )
     .await
     {
@@ -808,7 +808,7 @@ where
       std::cmp::Ordering::Greater => data.slice(..user_msg_len),
     };
 
-    if let Some(d) = &self.inner.delegate {
+    if let Some(d) = &self.delegate {
       if let Err(e) = d.notify_user_msg(user_msg).await {
         tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to notify user message");
       }

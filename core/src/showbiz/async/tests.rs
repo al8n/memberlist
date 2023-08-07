@@ -49,9 +49,9 @@ pub(crate) fn test_config<R: Runtime>() -> Options<NetTransport<R>> {
   test_config_net(0)
 }
 
-pub(crate) async fn get_showbiz<D: Delegate, F, R: Runtime>(
+pub(crate) async fn get_showbiz<F, R: Runtime>(
   f: Option<F>,
-) -> Result<Showbiz<D, NetTransport<R>>, Error<D, NetTransport<R>>>
+) -> Result<Showbiz<NetTransport<R>>, Error<NetTransport<R>, VoidDelegate>>
 where
   F: FnOnce(Options<NetTransport<R>>) -> Options<NetTransport<R>>,
   R: Runtime,
@@ -84,9 +84,7 @@ where
       .with_bind_addr(get_bind_addr().ip())
       .with_secret_key(Some(key));
 
-    get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
-      .await
-      .unwrap();
+    get_showbiz::<_, R>(Some(|_| c)).await.unwrap();
     yield_now::<R>().await;
   }
 }
@@ -99,9 +97,7 @@ where
 {
   let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr().ip());
 
-  get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
-    .await
-    .unwrap();
+  get_showbiz::<_, R>(Some(|_| c)).await.unwrap();
   yield_now::<R>().await;
 }
 
@@ -115,9 +111,7 @@ where
     .with_bind_addr(get_bind_addr().ip())
     .with_secret_keyring(Some(SecretKeyring::new(SecretKey::Aes128([0; 16]))));
 
-  let m = Showbiz::<VoidDelegate, NetTransport<R>>::new(c)
-    .await
-    .unwrap();
+  let m = Showbiz::<NetTransport<R>>::new(c).await.unwrap();
 
   yield_now::<R>().await;
   assert!(m.encryption_enabled());
@@ -134,9 +128,7 @@ where
     .with_secret_key(Some(SecretKey::Aes128([1; 16])))
     .with_secret_keyring(Some(SecretKeyring::new(SecretKey::Aes128([0; 16]))));
 
-  let m = Showbiz::<VoidDelegate, NetTransport<R>>::new(c)
-    .await
-    .unwrap();
+  let m = Showbiz::<NetTransport<R>>::new(c).await.unwrap();
 
   yield_now::<R>().await;
   assert!(m.encryption_enabled());
@@ -160,9 +152,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr().ip());
-  let m = get_showbiz::<VoidDelegate, _, R>(Some(|_| c))
-    .await
-    .unwrap();
+  let m = get_showbiz::<_, R>(Some(|_| c)).await.unwrap();
   yield_now::<R>().await;
   assert_eq!(m.members().await.len(), 1);
 }
@@ -219,10 +209,10 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>().with_compression_algo(CompressionAlgo::None);
-  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
+  let m1 = Showbiz::new(c1).await.unwrap();
 
   let c2 = test_config::<R>().with_compression_algo(CompressionAlgo::None);
-  let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
+  let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
     .join(
@@ -245,10 +235,10 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>();
-  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
+  let m1 = Showbiz::new(c1).await.unwrap();
 
   let c2 = test_config::<R>().with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
+  let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -268,14 +258,14 @@ where
     .with_compression_algo(CompressionAlgo::None)
     .with_encryption_algo(algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])));
-  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
+  let m1 = Showbiz::new(c1).await.unwrap();
 
   let c2 = test_config::<R>()
     .with_compression_algo(CompressionAlgo::None)
     .with_encryption_algo(algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])))
     .with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
+  let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -297,14 +287,14 @@ pub async fn test_join_with_encryption_and_compression<R>(
     .with_compression_algo(compression_algo)
     .with_encryption_algo(encryption_algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])));
-  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
+  let m1 = Showbiz::new(c1).await.unwrap();
 
   let c2 = test_config::<R>()
     .with_compression_algo(compression_algo)
     .with_encryption_algo(encryption_algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])))
     .with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
+  let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -336,7 +326,7 @@ pub async fn test_join_with_labels<R>(
     .with_compression_algo(compression_algo)
     .with_name("node1".try_into().unwrap())
     .with_secret_key(key);
-  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
+  let m1 = Showbiz::new(c1).await.unwrap();
 
   // Create a second node
   let c2 = test_config::<R>()
@@ -346,7 +336,7 @@ pub async fn test_join_with_labels<R>(
     .with_encryption_algo(encryption_algo)
     .with_secret_key(key)
     .with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
+  let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
     .join(std::iter::once((
@@ -372,7 +362,7 @@ pub async fn test_join_with_labels<R>(
     .with_encryption_algo(encryption_algo)
     .with_secret_key(key)
     .with_bind_port(m1.inner.opts.bind_port);
-  let m3 = Showbiz::<VoidDelegate, _>::new(c3).await.unwrap();
+  let m3 = Showbiz::new(c3).await.unwrap();
   let JoinError { joined, .. } = m3
     .join(std::iter::once((
       m1.inner.opts.bind_addr.into(),
@@ -398,7 +388,7 @@ pub async fn test_join_with_labels<R>(
     .with_encryption_algo(encryption_algo)
     .with_secret_key(key)
     .with_bind_port(m1.inner.opts.bind_port);
-  let m4 = Showbiz::<VoidDelegate, _>::new(c4).await.unwrap();
+  let m4 = Showbiz::new(c4).await.unwrap();
 
   let JoinError { joined, .. } = m4
     .join(std::iter::once((
@@ -428,13 +418,13 @@ where
 {
   let (cidrs, _) = parse_cidrs(&["127.0.0.0/8"]);
   let c1 = test_config_net::<R>(0).with_allowed_cidrs(Some(cidrs.clone()));
-  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
+  let m1 = Showbiz::new(c1).await.unwrap();
 
   // Create a second node
   let c2 = test_config_net::<R>(1)
     .with_allowed_cidrs(Some(cidrs))
     .with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
+  let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -457,13 +447,13 @@ where
 {
   let (cidrs, _) = parse_cidrs(&["127.0.0.0/24", "127.0.1.0/24"]);
   let c1 = test_config_net::<R>(0).with_allowed_cidrs(Some(cidrs.clone()));
-  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
+  let m1 = Showbiz::new(c1).await.unwrap();
 
   // Create a second node
   let c2 = test_config_net::<R>(1)
     .with_allowed_cidrs(Some(cidrs.clone()))
     .with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
+  let m2 = Showbiz::new(c2).await.unwrap();
   join_and_test_member_ship(
     &m2,
     [(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter(),
@@ -475,7 +465,7 @@ where
   let c3 = test_config_net::<R>(2)
     .with_allowed_cidrs(Some(parse_cidrs(&["127.0.0.0/8"]).0))
     .with_bind_port(m1.inner.opts.bind_port);
-  let m3 = Showbiz::<VoidDelegate, _>::new(c3).await.unwrap();
+  let m3 = Showbiz::new(c3).await.unwrap();
   // The rogue can see others, but others cannot see it
   join_and_test_member_ship(
     &m3,
@@ -497,7 +487,7 @@ where
   let c4 = test_config_net::<R>(2)
     .with_allowed_cidrs(Some(cidrs.clone()))
     .with_bind_port(m1.inner.opts.bind_port);
-  let m4 = Showbiz::<VoidDelegate, _>::new(c4).await.unwrap();
+  let m4 = Showbiz::new(c4).await.unwrap();
   // This time, the node should not even see itself, so 2 expected nodes
   join_and_test_member_ship(
     &m4,
@@ -518,7 +508,7 @@ where
 }
 
 async fn join_and_test_member_ship<D: Delegate, R>(
-  this: &Showbiz<D, NetTransport<R>>,
+  this: &Showbiz<NetTransport<R>, D>,
   members_to_join: impl Iterator<Item = (Address, Name)>,
   expected_members: usize,
 ) where
@@ -539,12 +529,12 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>();
-  let m1 = Showbiz::<MockDelegate, _>::with_delegate(MockDelegate::cancel_merge(), c1)
+  let m1 = Showbiz::with_delegate(MockDelegate::cancel_merge(), c1)
     .await
     .unwrap();
 
   let c2 = test_config::<R>().with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::<MockDelegate, _>::with_delegate(MockDelegate::cancel_merge(), c2)
+  let m2 = Showbiz::with_delegate(MockDelegate::cancel_merge(), c2)
     .await
     .unwrap();
 
@@ -564,8 +554,8 @@ where
   assert_eq!(m2.alive_members().await, 1);
 
   // Check delegate invocation
-  assert!(m1.inner.delegate.as_ref().unwrap().is_invoked());
-  assert!(m2.inner.delegate.as_ref().unwrap().is_invoked());
+  assert!(m1.delegate.as_ref().unwrap().is_invoked());
+  assert!(m2.delegate.as_ref().unwrap().is_invoked());
 }
 
 pub async fn test_join_cancel_passive<R>()
@@ -575,16 +565,14 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>();
-  let m1 =
-    Showbiz::<MockDelegate, _>::with_delegate(MockDelegate::cancel_alive(c1.name.clone()), c1)
-      .await
-      .unwrap();
+  let m1 = Showbiz::with_delegate(MockDelegate::cancel_alive(c1.name.clone()), c1)
+    .await
+    .unwrap();
 
   let c2 = test_config::<R>().with_bind_port(m1.inner.opts.bind_port);
-  let m2 =
-    Showbiz::<MockDelegate, _>::with_delegate(MockDelegate::cancel_alive(c2.name.clone()), c2)
-      .await
-      .unwrap();
+  let m2 = Showbiz::with_delegate(MockDelegate::cancel_alive(c2.name.clone()), c2)
+    .await
+    .unwrap();
 
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -598,8 +586,8 @@ where
   assert_eq!(m2.alive_members().await, 1);
 
   // Check delegate invocation
-  assert_eq!(m1.inner.delegate.as_ref().unwrap().count(), 2);
-  assert_eq!(m2.inner.delegate.as_ref().unwrap().count(), 2);
+  assert_eq!(m1.delegate.as_ref().unwrap().count(), 2);
+  assert_eq!(m2.delegate.as_ref().unwrap().count(), 2);
 }
 
 pub async fn test_join_shutdown<R>()
@@ -616,11 +604,11 @@ where
   };
 
   let c1 = new_config();
-  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
+  let m1 = Showbiz::new(c1).await.unwrap();
 
   // Create a second node
   let c2 = new_config().with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::<VoidDelegate, _>::new(c2).await.unwrap();
+  let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
     .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -668,7 +656,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>().with_tcp_timeout(Duration::from_millis(50));
-  let m1 = Showbiz::<VoidDelegate, _>::new(c1).await.unwrap();
+  let m1 = Showbiz::new(c1).await.unwrap();
 
   // Create a second "node", which is just a TCP listener that
   // does not ever respond. This is to test our deadlines
