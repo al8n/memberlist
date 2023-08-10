@@ -32,7 +32,7 @@ getrandom = { version = "0.2", features = ["js"] }
 once_cell = "1.17"
 
 [target.'cfg(not(any(target_family = "wasm", windows)))'.dependencies]
-rustix = { version = "0.37", features = ["process"] }
+rustix = { version = "0.38", features = ["system"] }
 
 [target.'cfg(windows)'.dependencies]
 hostname = "0.3"
@@ -48,23 +48,24 @@ futures-channel = { version = "0.3", optional = true }
 futures-util = { version = "0.3", optional = true, features = ["io"] }
 
 # common
-atomic = "0.5"
-arc-swap = "1.6"
+atomic = "=0.5" # keep on 0.5
 aead = { version = "0.5", features = ["bytes"] }
 aes-gcm = "0.10"
 bytes = { workspace = true, features = ["serde"] }
 base64 = "0.21"
+bytemuck = { version = "1.3", features = ["derive"] }
 cbc = "0.1"
 crc32fast = "1"
 crossbeam-utils = "0.8"
 crossbeam-skiplist = "0.1"
 crossbeam-queue = "0.3"
 local-ip-address = "0.5"
-itertools = "0.10.5"
+itertools = "0.11"
 ipnet = { version = "2.7", features = ["serde"] }
-metrics = { version = "0.20", optional = true }
+metrics = { version = "0.21", optional = true }
 paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
 parking_lot = { version = "0.12", optional = true }
+pollster = "0.3"
 rand = { version = "0.8" }
 rayon = "1.7"
 scopeguard = "1.1"

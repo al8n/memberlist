@@ -25,7 +25,9 @@ mod state;
 mod suspicion;
 pub mod transport;
 mod types;
-pub use types::{Address, CompressionAlgo, Domain, Label, Message, Name, Node, NodeId, Packet};
+pub use types::{
+  Address, CompressionAlgo, Domain, Label, Message, Name, Node, NodeId, NodeState, Packet,
+};
 pub mod util;
 
 pub use bytes;
@@ -50,6 +52,9 @@ pub use futures_util;
 #[cfg(feature = "metrics")]
 #[doc(hidden)]
 pub use metrics;
+
+#[doc(hidden)]
+pub use pollster;
 
 #[doc(hidden)]
 pub use tracing;

@@ -169,7 +169,7 @@ where
     // Check if this is us
     if d.dead_self() {
       // If we are not leaving we need to refute
-      if !self.is_left() {
+      if !self.has_left() {
         // self.refute().await?;
         tracing::warn!(
           target = "showbiz.state",
@@ -377,7 +377,7 @@ where
     // in-queue to be processed but blocked by the locks above. If we let
     // that aliveMsg process, it'll cause us to re-join the cluster. This
     // ensures that we don't.
-    if self.is_left() && alive.node == self.inner.id {
+    if self.has_left() && alive.node == self.inner.id {
       return;
     }
 
@@ -702,6 +702,7 @@ where
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Used to ensure the Tick is performed periodically.
+  // TODO: add Interval trait in agnostic crate.
   pub(crate) async fn schedule(&self, shutdown_rx: async_channel::Receiver<()>) {
     // Create a new probeTicker
     if self.inner.opts.probe_interval > Duration::ZERO {

@@ -78,7 +78,7 @@ pub trait Delegate: Send + Sync + 'static {
   /// Invoked when a merge could take place.
   /// Provides a list of the nodes known by the peer.
   #[cfg(not(feature = "nightly"))]
-  async fn notify_merge(&self, peers: Vec<Node>) -> Result<(), Self::Error>;
+  async fn notify_merge(&self, peers: Vec<Arc<Node>>) -> Result<(), Self::Error>;
 
   /// Invoked when an ack is being sent; the returned bytes will be appended to the ack
   #[cfg(not(feature = "nightly"))]
@@ -285,7 +285,7 @@ impl Delegate for VoidDelegate {
   }
 
   #[cfg(not(feature = "nightly"))]
-  async fn notify_merge(&self, _peers: Vec<Node>) -> Result<(), Self::Error> {
+  async fn notify_merge(&self, _peers: Vec<Arc<Node>>) -> Result<(), Self::Error> {
     Ok(())
   }
 

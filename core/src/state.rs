@@ -4,17 +4,12 @@ use std::{
   time::Instant,
 };
 
-use crate::{
-  types::{AckResponse, NackResponse},
-  Status,
-};
-
 use super::{
   delegate::Delegate,
   error::Error,
   showbiz::Showbiz,
   transport::Transport,
-  types::{Node, NodeId, NodeState, PushNodeState},
+  types::{AckResponse, NackResponse, Node, NodeId, NodeState, PushNodeState},
 };
 
 #[cfg(feature = "async")]
@@ -205,23 +200,21 @@ where
   }
 
   #[inline]
-  pub(crate) fn is_running(&self) -> bool {
+  pub(crate) fn has_shutdown(&self) -> bool {
     self
       .inner
       .hot
-      .status
+      .shutdown
       .load(std::sync::atomic::Ordering::SeqCst)
-      == Status::Running
   }
 
   #[inline]
-  pub(crate) fn is_left(&self) -> bool {
+  pub(crate) fn has_left(&self) -> bool {
     self
       .inner
       .hot
-      .status
+      .leave
       .load(std::sync::atomic::Ordering::SeqCst)
-      == Status::Left
   }
 
   #[inline]

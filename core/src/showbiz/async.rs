@@ -12,7 +12,6 @@ use crate::{
 use super::*;
 
 use agnostic::Runtime;
-use arc_swap::ArcSwapOption;
 use async_lock::{Mutex, RwLock};
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Stream, StreamExt};
 use itertools::{Either, Itertools};
@@ -35,8 +34,9 @@ pub(crate) struct ShowbizCore<T: Transport> {
   awareness: Awareness,
   broadcast: TransmitLimitedQueue<ShowbizBroadcast, DefaultNodeCalculator>,
   leave_broadcast_tx: Sender<()>,
+  leave_lock: Mutex<()>,
   leave_broadcast_rx: Receiver<()>,
-  status_change_lock: Mutex<()>,
+  shutdown_lock: Mutex<()>,
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue>,
@@ -45,14 +45,14 @@ pub(crate) struct ShowbizCore<T: Transport> {
   dns: Option<Dns<T>>,
   transport: T,
   /// We do not call send directly, just directly drop it.
-  shutdown_tx: ArcSwapOption<Sender<()>>,
+  shutdown_tx: Sender<()>,
   advertise: SocketAddr,
   opts: Arc<Options<T>>,
 }
 
 impl<T: Transport> Drop for ShowbizCore<T> {
   fn drop(&mut self) {
-    self.shutdown_tx.store(None);
+    self.shutdown_tx.close();
     if let Err(e) = self.transport.block_shutdown() {
       tracing::error!(target = "showbiz", err=%e, "failed to shutdown");
     }
@@ -82,10 +82,57 @@ where
   D: Delegate,
   T: Transport,
 {
-  /// Returns the local node's name.
+  /// Returns if the showbiz enabled encryption
   #[inline]
-  pub fn name(&self) -> &Name {
-    &self.inner.opts.name
+  pub fn encryption_enabled(&self) -> bool {
+    if let Some(keyring) = &self.inner.opts.secret_keyring {
+      !keyring.is_empty() && !self.inner.opts.encryption_algo.is_none()
+    } else {
+      false
+    }
+  }
+
+  /// Returns the local node ID.
+  #[inline]
+  pub fn local_id(&self) -> &NodeId {
+    &self.inner.id
+  }
+
+  /// Returns the delegate, if any.
+  #[inline]
+  pub fn delegate(&self) -> Option<&D> {
+    self.delegate.as_deref()
+  }
+
+  /// Returns the keyring used for the local node
+  #[inline]
+  pub fn keyring(&self) -> Option<&SecretKeyring> {
+    self.inner.opts.secret_keyring.as_ref()
+  }
+
+  #[inline]
+  pub async fn local_node(&self) -> Arc<Node> {
+    let nodes = self.inner.nodes.read().await;
+    // TODO: return an error
+    nodes
+      .node_map
+      .get(&self.inner.id)
+      .map(|&idx| nodes.nodes[idx].state.node.clone())
+      .unwrap()
+  }
+
+  /// Returns a list of all known nodes.
+  #[inline]
+  pub async fn members(&self) -> Vec<Arc<Node>> {
+    self
+      .inner
+      .nodes
+      .read()
+      .await
+      .nodes
+      .iter()
+      .map(|n| n.state.node.clone())
+      .collect()
   }
 
   /// Returns the number of alive nodes currently known. Between
@@ -103,39 +150,6 @@ where
       .iter()
       .filter(|n| !n.state.dead_or_left())
       .count()
-  }
-
-  /// Returns if the showbiz enabled encryption
-  #[inline]
-  pub fn encryption_enabled(&self) -> bool {
-    if let Some(keyring) = &self.inner.opts.secret_keyring {
-      !keyring.is_empty() && !self.inner.opts.encryption_algo.is_none()
-    } else {
-      false
-    }
-  }
-
-  /// Returns the local node ID.
-  #[inline]
-  pub fn local_id(&self) -> &NodeId {
-    &self.inner.id
-  }
-
-  #[inline]
-  pub async fn local_node(&self) -> Arc<Node> {
-    let nodes = self.inner.nodes.read().await;
-    // TODO: return an error
-    nodes
-      .node_map
-      .get(&self.inner.id)
-      .map(|&idx| nodes.nodes[idx].state.node.clone())
-      .unwrap()
-  }
-
-  /// Returns the keyring used for the local node
-  #[inline]
-  pub fn keyring(&self) -> Option<&SecretKeyring> {
-    self.inner.opts.secret_keyring.as_ref()
   }
 }
 
@@ -361,18 +375,19 @@ where
         awareness,
         broadcast,
         leave_broadcast_tx,
+        leave_lock: Mutex::new(()),
         leave_broadcast_rx,
-        status_change_lock: Mutex::new(()),
+        shutdown_lock: Mutex::new(()),
+        handoff_tx,
+        handoff_rx,
         queue: Mutex::new(MessageQueue::new()),
         nodes: Arc::new(RwLock::new(Memberlist::new(id))),
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
         dns,
         transport,
+        shutdown_tx,
         advertise,
-        shutdown_tx: ArcSwapOption::from_pointee(shutdown_tx),
         opts: Arc::new(opts),
-        handoff_tx,
-        handoff_rx,
       }),
       delegate: delegate.map(Arc::new),
     };
@@ -401,32 +416,8 @@ where
     };
     this.alive_node(alive, None, true).await;
     this.schedule(shutdown_rx).await;
-    this
-      .inner
-      .hot
-      .status
-      .store(Status::Running, Ordering::Relaxed);
     tracing::debug!(target = "showbiz", local = %this.inner.id, advertise_addr = %advertise, "node is living");
     Ok(this)
-  }
-
-  /// Returns the delegate, if any.
-  pub fn delegate(&self) -> Option<&D> {
-    self.delegate.as_deref()
-  }
-
-  /// Returns a list of all known nodes.
-  #[inline]
-  pub async fn members(&self) -> Vec<Arc<Node>> {
-    self
-      .inner
-      .nodes
-      .read()
-      .await
-      .nodes
-      .iter()
-      .map(|n| n.state.node.clone())
-      .collect()
   }
 
   /// Leave will broadcast a leave message but will not shutdown the background
@@ -440,14 +431,14 @@ where
   /// This method is safe to call multiple times, but must not be called
   /// after the cluster is already shut down.
   pub async fn leave(&self, timeout: Duration) -> Result<(), Error<T, D>> {
-    if !self.is_running() {
-      return Err(Error::NotRunning);
+    let _mu = self.inner.leave_lock.lock().await;
+
+    if self.has_shutdown() {
+      panic!("leave after shutdown");
     }
 
-    let _mu = self.inner.status_change_lock.lock().await;
-
-    if !self.is_left() {
-      self.inner.hot.status.store(Status::Left, Ordering::Relaxed);
+    if !self.has_left() {
+      self.inner.hot.leave.store(true, Ordering::Relaxed);
 
       let mut memberlist = self.inner.nodes.write().await;
       if let Some(&idx) = memberlist.node_map.get(&self.inner.id) {
@@ -497,20 +488,41 @@ where
     Ok(())
   }
 
-  /// Used to take an existing Memberlist and attempt to join a cluster
+  /// Join directly by contacting the given node id
+  pub async fn join_node(&self, id: &NodeId) -> Result<(), Error<T, D>> {
+    if self.has_left() || self.has_shutdown() {
+      return Err(Error::NotRunning);
+    }
+
+    self.push_pull_node(id, true).await
+  }
+
+  // /// Join directly by contacting the given node ids
+  // pub async fn join_nodes(
+  //   &self,
+  //   ids: &[NodeId],
+  // ) -> Result<(), Error<T, D>> {
+  //   if !self.is_running() {
+  //     return Err(Error::NotRunning);
+  //   }
+
+  //   self.push_pull_node(ids, true).await
+  // }
+
+  /// Used to take an existing Showbiz and attempt to join a cluster
   /// by contacting all the given hosts and performing a state sync. Initially,
-  /// the Memberlist only contains our own state, so doing this will cause
+  /// the Showbiz only contains our own state, so doing this will cause
   /// remote nodes to become aware of the existence of this node, effectively
   /// joining the cluster.
   ///
   /// This returns the number of hosts successfully contacted and an error if
   /// none could be reached. If an error is returned, the node did not successfully
   /// join the cluster.
-  pub async fn join(
+  pub async fn join_many(
     &self,
     existing: impl Iterator<Item = (Address, Name)>,
   ) -> Result<Vec<NodeId>, JoinError<T, D>> {
-    if !self.is_running() {
+    if self.has_left() || self.has_shutdown() {
       return Err(JoinError {
         joined: Vec::new(),
         errors: existing
@@ -646,7 +658,7 @@ where
   /// broadcasted to a member of the cluster, if any exist or until a specified
   /// timeout is reached.
   pub async fn update_node(&self, timeout: Duration) -> Result<(), Error<T, D>> {
-    if !self.is_running() {
+    if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
 
@@ -704,7 +716,7 @@ where
   /// `packet_buffer_size` for this memberlist instance.
   #[inline]
   pub async fn send(&self, to: &NodeId, msg: Message) -> Result<(), Error<T, D>> {
-    if !self.is_running() {
+    if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
     self.raw_send_msg_packet(to, msg.0).await
@@ -716,10 +728,38 @@ where
   /// limit on the size of the message.
   #[inline]
   pub async fn send_reliable(&self, to: &NodeId, msg: Message) -> Result<(), Error<T, D>> {
-    if !self.is_running() {
+    if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
     self.send_user_msg(to, msg).await
+  }
+
+  /// Stop any background maintenance of network activity
+  /// for this showbiz, causing it to appear "dead". A leave message
+  /// will not be broadcasted prior, so the cluster being left will have
+  /// to detect this node's shutdown using probing. If you wish to more
+  /// gracefully exit the cluster, call Leave prior to shutting down.
+  ///
+  /// This method is safe to call multiple times.
+  pub async fn shutdown(&self) -> Result<(), Error<T, D>> {
+    let _mu = self.inner.shutdown_lock.lock().await;
+
+    if self.has_shutdown() {
+      return Ok(());
+    }
+
+    // Shut down the transport first, which should block until it's
+    // completely torn down. If we kill the memberlist-side handlers
+    // those I/O handlers might get stuck.
+    if let Err(e) = self.inner.transport.shutdown().await {
+      tracing::error!(target = "showbiz", err=%e, "failed to shutdown transport");
+    }
+
+    // Now tear down everything else.
+    self.inner.hot.shutdown.store(true, Ordering::Relaxed);
+    self.inner.shutdown_tx.close();
+    // TODO: self.deschedule().await;
+    Ok(())
   }
 }
 

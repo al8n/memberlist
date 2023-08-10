@@ -215,7 +215,7 @@ where
   let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
-    .join(
+    .join_many(
       [(
         (m1.inner.opts.bind_addr, m1.inner.opts.bind_port.unwrap()).into(),
         m1.inner.opts.name.clone(),
@@ -241,7 +241,7 @@ where
   let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
-    .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
+    .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
     .unwrap()
     .len();
@@ -268,7 +268,7 @@ where
   let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
-    .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
+    .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
     .unwrap()
     .len();
@@ -297,7 +297,7 @@ pub async fn test_join_with_encryption_and_compression<R>(
   let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
-    .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
+    .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
     .unwrap()
     .len();
@@ -339,7 +339,7 @@ pub async fn test_join_with_labels<R>(
   let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
-    .join(std::iter::once((
+    .join_many(std::iter::once((
       m1.inner.opts.bind_addr.into(),
       Name::from_str_unchecked("node1"),
     )))
@@ -364,7 +364,7 @@ pub async fn test_join_with_labels<R>(
     .with_bind_port(m1.inner.opts.bind_port);
   let m3 = Showbiz::new(c3).await.unwrap();
   let JoinError { joined, .. } = m3
-    .join(std::iter::once((
+    .join_many(std::iter::once((
       m1.inner.opts.bind_addr.into(),
       Name::from_str_unchecked("node1"),
     )))
@@ -391,7 +391,7 @@ pub async fn test_join_with_labels<R>(
   let m4 = Showbiz::new(c4).await.unwrap();
 
   let JoinError { joined, .. } = m4
-    .join(std::iter::once((
+    .join_many(std::iter::once((
       m1.inner.opts.bind_addr.into(),
       Name::from_str_unchecked("node1"),
     )))
@@ -427,7 +427,7 @@ where
   let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
-    .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
+    .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
     .unwrap()
     .len();
@@ -517,7 +517,7 @@ async fn join_and_test_member_ship<D: Delegate, R>(
   <R::Interval as Stream>::Item: Send,
 {
   let members_to_join_num = members_to_join.size_hint().0;
-  let num = this.join(members_to_join).await.unwrap().len();
+  let num = this.join_many(members_to_join).await.unwrap().len();
   assert_eq!(num, members_to_join_num);
   assert_eq!(this.members().await.len(), expected_members);
 }
@@ -539,7 +539,7 @@ where
     .unwrap();
 
   let err = m2
-    .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
+    .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
     .unwrap_err();
   // JoinError
@@ -575,7 +575,7 @@ where
     .unwrap();
 
   let num = m2
-    .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
+    .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
     .unwrap()
     .len();
@@ -611,7 +611,7 @@ where
   let m2 = Showbiz::new(c2).await.unwrap();
 
   let num = m2
-    .join([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
+    .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
     .await
     .unwrap()
     .len();
@@ -668,7 +668,7 @@ where
   });
 
   let err = m1
-    .join([(addr2.into(), Name::from_static_unchecked("fake"))].into_iter())
+    .join_many([(addr2.into(), Name::from_static_unchecked("fake"))].into_iter())
     .await
     .unwrap_err();
   eprintln!("{}", err);

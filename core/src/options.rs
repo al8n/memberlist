@@ -306,7 +306,7 @@ impl<T: Transport> Options<T> {
   pub fn lan() -> Self {
     #[cfg(not(any(target_arch = "wasm32", windows)))]
     let hostname = {
-      let uname = rustix::process::uname();
+      let uname = rustix::system::uname();
       Name::from_string(uname.nodename().to_string_lossy().to_string()).unwrap_or_default()
     };
 

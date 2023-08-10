@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 // use agnostic::lock::RwLock;
 use futures_util::{Future, Stream};
 
@@ -62,11 +64,13 @@ where
         let peers = node_state
           .push_states
           .iter()
-          .map(|n| Node {
-            id: NodeId::new(n.node.name.clone(), n.node.addr()),
-            meta: n.meta.clone(),
-            state: n.state,
-            vsn: n.vsn,
+          .map(|n| {
+            Arc::new(Node {
+              id: NodeId::new(n.node.name.clone(), n.node.addr()),
+              meta: n.meta.clone(),
+              state: n.state,
+              vsn: n.vsn,
+            })
           })
           .collect::<Vec<_>>();
         merge.notify_merge(peers).await.map_err(Error::delegate)?;

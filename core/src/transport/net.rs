@@ -14,7 +14,6 @@ use std::{
 
 #[cfg(feature = "tokio-compat")]
 use agnostic::io::ReadBuf;
-use arc_swap::ArcSwapOption;
 use futures_util::FutureExt;
 
 use crate::{
@@ -283,7 +282,7 @@ pub struct NetTransport<R: Runtime> {
   udp_listener: Arc<UnreliableConnection<Self>>,
   wg: AsyncWaitGroup,
   shutdown: Arc<AtomicBool>,
-  shutdown_tx: ArcSwapOption<async_channel::Sender<()>>,
+  shutdown_tx: async_channel::Sender<()>,
   _marker: PhantomData<R>,
 }
 
@@ -405,7 +404,7 @@ impl<R: Runtime> NetTransport<R> {
       shutdown,
       tcp_bind_addr: local_tcp_addr,
       tcp_listener: tcp_ln,
-      shutdown_tx: ArcSwapOption::from_pointee(Some(shutdown_tx)),
+      shutdown_tx,
       udp_listener: udp_ln,
       _marker: PhantomData,
     })
@@ -619,7 +618,7 @@ impl<R: Runtime> Transport for NetTransport<R> {
   async fn shutdown(&self) -> Result<(), TransportError<Self>> {
     // This will avoid log spam about errors when we shut down.
     self.shutdown.store(true, Ordering::SeqCst);
-    self.shutdown_tx.store(None);
+    self.shutdown_tx.close();
 
     // Block until all the listener threads have died.
     self.wg.wait().await;
@@ -627,11 +626,13 @@ impl<R: Runtime> Transport for NetTransport<R> {
   }
 
   fn block_shutdown(&self) -> Result<(), TransportError<Self>> {
+    use pollster::FutureExt as _;
     // This will avoid log spam about errors when we shut down.
     self.shutdown.store(true, Ordering::SeqCst);
-    self.shutdown_tx.store(None);
+    self.shutdown_tx.close();
     let wg = self.wg.clone();
-    R::spawn_detach(async move { wg.wait().await });
+
+    wg.wait().block_on();
     Ok(())
   }
 

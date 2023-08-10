@@ -202,7 +202,7 @@ impl Delegate for MockDelegate {
   }
 
   #[cfg(not(feature = "nightly"))]
-  async fn notify_merge(&self, _peers: Vec<Node>) -> Result<(), Self::Error> {
+  async fn notify_merge(&self, _peers: Vec<Arc<Node>>) -> Result<(), Self::Error> {
     match self.ty {
       MockDelegateType::CancelMerge => {
         use atomic::Ordering;
@@ -307,7 +307,7 @@ impl Delegate for MockDelegate {
   #[cfg(feature = "nightly")]
   fn notify_merge<'a>(
     &'a self,
-    _peers: Vec<Node>,
+    _peers: Vec<Arc<Node>>,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'a {
     async move {
       match self.ty {
