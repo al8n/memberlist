@@ -1,4 +1,4 @@
-use crate::types::Packet;
+use crate::types2::Packet;
 
 use super::*;
 

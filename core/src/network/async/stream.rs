@@ -5,7 +5,7 @@ use futures_util::{Future, Stream};
 
 use crate::{
   transport::ReliableConnection,
-  types::{Node, NodeId},
+  types2::{Node, NodeId},
   util::compress_to_msg,
 };
 
@@ -94,7 +94,7 @@ where
   pub(crate) async fn send_user_msg(
     &self,
     addr: &NodeId,
-    msg: crate::types::Message,
+    msg: crate::types2::Message,
   ) -> Result<(), Error<T, D>> {
     let mut conn = self
       .inner

@@ -7,7 +7,7 @@ use std::{
   },
 };
 
-use crate::{broadcast::Broadcast, types::Message, util::retransmit_limit};
+use crate::{broadcast::Broadcast, types2::Message, util::retransmit_limit};
 
 #[async_trait::async_trait]
 pub trait NodeCalculator {

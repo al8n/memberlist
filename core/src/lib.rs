@@ -25,9 +25,11 @@ mod state;
 mod suspicion;
 pub mod transport;
 mod types;
-pub use types::{
+mod types2;
+pub use types2::{
   Address, CompressionAlgo, Domain, Label, Message, Name, Node, NodeId, NodeState, Packet,
 };
+
 pub mod util;
 
 pub use bytes;

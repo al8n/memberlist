@@ -24,7 +24,7 @@ fn remaining_suspicion_time(
 pub(crate) use r#impl::Suspicion;
 #[cfg(feature = "async")]
 mod r#impl {
-  use crate::types::Name;
+  use crate::types2::Name;
 
   use super::*;
   use agnostic::Runtime;

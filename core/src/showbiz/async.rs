@@ -4,7 +4,7 @@ use crate::{
   delegate::VoidDelegate,
   dns::DnsError,
   transport::TransportError,
-  types::{Address, Dead, Domain},
+  types2::{Address, Dead, Domain},
   util::read_resolv_conf,
   Label,
 };
@@ -410,9 +410,10 @@ where
 
     let alive = Alive {
       incarnation: this.next_incarnation(),
-      vsn: this.inner.opts.build_vsn_array(),
       meta,
       node: this.inner.id.clone(),
+      protocol_version: this.inner.opts.protocol_version,
+      delegate_version: this.inner.opts.delegate_version,
     };
     this.alive_node(alive, None, true).await;
     this.schedule(shutdown_rx).await;
@@ -688,7 +689,8 @@ where
       incarnation: self.next_incarnation(),
       node: node_id,
       meta,
-      vsn: self.inner.opts.build_vsn_array(),
+      protocol_version: self.inner.opts.protocol_version,
+      delegate_version: self.inner.opts.delegate_version,
     };
     let (notify_tx, notify_rx) = async_channel::bounded(1);
     self.alive_node(alive, Some(notify_tx), true).await;

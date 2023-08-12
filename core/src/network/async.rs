@@ -5,7 +5,7 @@ use crate::{
   error::Error,
   security::{append_bytes, EncryptionAlgo, SecretKey, SecretKeyring, SecurityError},
   transport::{ReliableConnection, TransportError},
-  types::MessageType,
+  types2::MessageType,
   util::{compress_payload, decompress_payload},
   Options,
 };

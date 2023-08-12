@@ -2,7 +2,10 @@ use std::net::IpAddr;
 
 use futures_util::{Future, Stream};
 
-use crate::showbiz::MessageHandoff;
+use crate::{
+  showbiz::MessageHandoff,
+  types2::{Alive, Dead, Suspect},
+};
 
 use super::*;
 

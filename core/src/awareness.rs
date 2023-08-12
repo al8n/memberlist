@@ -17,7 +17,7 @@ pub(crate) struct Inner {
 #[derive(Debug, Clone)]
 pub(crate) struct Awareness {
   #[cfg(feature = "metrics")]
-  id: crate::types::NodeId,
+  id: crate::types2::NodeId,
   #[cfg(feature = "async")]
   pub(crate) inner: Arc<async_lock::RwLock<Inner>>,
   #[cfg(feature = "metrics")]
@@ -29,7 +29,7 @@ impl Awareness {
   pub(crate) fn new(
     max: isize,
     #[cfg(feature = "metrics")] metric_labels: Arc<Vec<metrics::Label>>,
-    #[cfg(feature = "metrics")] id: crate::types::NodeId,
+    #[cfg(feature = "metrics")] id: crate::types2::NodeId,
   ) -> Self {
     Self {
       #[cfg(feature = "async")]
@@ -96,7 +96,7 @@ impl Awareness {
 async fn test_awareness() {
   use std::net::SocketAddr;
 
-  use crate::types::{Name, NodeId};
+  use crate::types2::{Name, NodeId};
 
   let cases = vec![
     (0, 0, Duration::from_secs(1)),

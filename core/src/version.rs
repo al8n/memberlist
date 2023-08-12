@@ -1,3 +1,5 @@
+use rkyv::{Archive, Deserialize, Serialize};
+
 pub(crate) const VSN_SIZE: usize = 2;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -11,7 +13,22 @@ impl core::fmt::Display for InvalidDelegateVersion {
 
 impl std::error::Error for InvalidDelegateVersion {}
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+  Debug,
+  Copy,
+  Clone,
+  PartialEq,
+  Eq,
+  Hash,
+  Archive,
+  Serialize,
+  Deserialize,
+  serde::Serialize,
+  serde::Deserialize,
+)]
+#[archive(compare(PartialEq), check_bytes)]
+#[archive_attr(derive(Debug), repr(u8), non_exhaustive)]
+#[non_exhaustive]
 #[repr(u8)]
 pub enum DelegateVersion {
   V0 = 0,
@@ -46,7 +63,22 @@ impl core::fmt::Display for InvalidProtocolVersion {
 
 impl std::error::Error for InvalidProtocolVersion {}
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+  Debug,
+  Copy,
+  Clone,
+  PartialEq,
+  Eq,
+  Hash,
+  Archive,
+  Serialize,
+  Deserialize,
+  serde::Serialize,
+  serde::Deserialize,
+)]
+#[archive(compare(PartialEq), check_bytes)]
+#[archive_attr(derive(Debug), repr(u8), non_exhaustive)]
+#[non_exhaustive]
 #[repr(u8)]
 pub enum ProtocolVersion {
   V0 = 0,

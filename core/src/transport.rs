@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
   dns::DnsError,
-  types::{DecodeError, DecodeU32Error, EncodeError, InvalidLabel, Label, MessageType, Packet},
+  types2::{DecodeError, DecodeU32Error, EncodeError, InvalidLabel, Label, MessageType, Packet},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};

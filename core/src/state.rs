@@ -9,7 +9,7 @@ use super::{
   error::Error,
   showbiz::Showbiz,
   transport::Transport,
-  types::{AckResponse, NackResponse, Node, NodeId, NodeState, PushNodeState},
+  types2::{AckResponse, NackResponse, Node, NodeId, NodeState, PushNodeState},
 };
 
 #[cfg(feature = "async")]

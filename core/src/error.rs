@@ -1,14 +1,12 @@
 use std::borrow::Cow;
 
-use crate::{delegate::Delegate, dns::DnsError, transport::Transport, types::NodeId};
+use crate::{delegate::Delegate, dns::DnsError, transport::Transport, types2::NodeId};
 
 pub use crate::{
   options::ForbiddenIp,
   security::{SecurityError, UnknownEncryptionAlgo},
   transport::TransportError,
-  types::{
-    DecodeError, EncodeError, InvalidCompressionAlgo, InvalidDomain, InvalidLabel, InvalidName,
-  },
+  types::{DecodeError, EncodeError, InvalidDomain, InvalidLabel},
   util::{CompressError, DecompressError},
   version::{InvalidDelegateVersion, InvalidProtocolVersion},
 };

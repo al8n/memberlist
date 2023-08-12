@@ -12,7 +12,7 @@ use crate::security::SecretKeyring;
 use super::{
   security::{EncryptionAlgo, SecretKey},
   transport::{Transport, TransportOptions},
-  types::{CompressionAlgo, Label, Name},
+  types2::{CompressionAlgo, Label, Name},
   version::VSN_SIZE,
 };
 

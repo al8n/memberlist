@@ -4,7 +4,7 @@ use crate::{
   checksum::Checksumer,
   security::{pkcs7encode, BLOCK_SIZE, NONCE_SIZE},
   showbiz::MessageHandoff,
-  types::{Message, NodeId},
+  types2::{AckResponse, Message, NackResponse, NodeId},
   util::decompress_payload,
 };
 use futures_util::{Future, Stream};

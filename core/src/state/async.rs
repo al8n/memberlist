@@ -6,12 +6,12 @@ use crate::{
   showbiz::{AckHandler, Member, Memberlist},
   suspicion::Suspicion,
   timer::Timer,
-  types::{Alive, Dead, IndirectPing, Message, MessageType, Ping, Suspect},
+  types2::{Alive, Dead, IndirectPing, Message, MessageType, Ping, Suspect, Type},
 };
 
 use super::*;
 use agnostic::Runtime;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use futures_util::{future::BoxFuture, Future, FutureExt, Stream};
 use rand::{seq::SliceRandom, Rng};
 
@@ -92,10 +92,11 @@ where
       .await;
 
     // Send a ping to the node.
-    let mut msg = BytesMut::with_capacity(ping.encoded_len() + MessageType::SIZE);
-    msg.put_u8(MessageType::Ping as u8);
-    ping.encode_to(&mut msg);
-    self.send_msg(&node, Message(msg)).await?;
+    let msg = ping.encode::<T::Checksumer>(
+      self.inner.opts.protocol_version,
+      self.inner.opts.delegate_version,
+    );
+    self.send_msg(&node, msg).await?;
     // Mark the sent time here, which should be after any pre-processing and
     // system calls to do the actual send. This probably under-reports a bit,
     // but it's the best we can do.
@@ -180,7 +181,10 @@ where
       }
 
       // If we are leaving, we broadcast and wait
-      let msg = d.encode_to_msg();
+      let msg = d.encode::<T::Checksumer>(
+        self.inner.opts.protocol_version,
+        self.inner.opts.delegate_version,
+      );
       self
         .broadcast_notify(
           d.node.clone(),
@@ -189,7 +193,10 @@ where
         )
         .await;
     } else {
-      let msg = d.encode_to_msg();
+      let msg = d.encode::<T::Checksumer>(
+        self.inner.opts.protocol_version,
+        self.inner.opts.delegate_version,
+      );
       self.broadcast(d.node.clone(), msg).await;
     }
 
@@ -243,9 +250,11 @@ where
     // that's already suspect.
     if let Some(timer) = &mut state.suspicion {
       if timer.confirm(s.from.name()).await {
-        let mut buf = BytesMut::with_capacity(s.encoded_len());
-        s.encode_to(&mut buf);
-        self.broadcast(s.node.clone(), Message(buf)).await;
+        let msg = s.encode::<T::Checksumer>(
+          self.inner.opts.protocol_version,
+          self.inner.opts.delegate_version,
+        );
+        self.broadcast(s.node.clone(), msg).await;
       }
       return Ok(());
     }
@@ -266,9 +275,11 @@ where
       // Do not mark ourself suspect
       return Ok(());
     } else {
-      let mut buf = BytesMut::with_capacity(s.encoded_len());
-      s.encode_to(&mut buf);
-      self.broadcast(s.node.clone(), Message(buf)).await;
+      let msg = s.encode::<T::Checksumer>(
+        self.inner.opts.protocol_version,
+        self.inner.opts.delegate_version,
+      );
+      self.broadcast(s.node.clone(), msg).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -381,12 +392,12 @@ where
       return;
     }
 
-    let vsn = alive.vsn;
     let node = Arc::new(Node {
       id: alive.node.clone(),
       meta: alive.meta.clone(),
       state: NodeState::Alive,
-      vsn,
+      protocol_version: alive.protocol_version,
+      delegate_version: alive.delegate_version,
     });
     // Invoke the Alive delegate if any. This can be used to filter out
     // alive messages based on custom logic. For example, using a cluster name.
@@ -429,7 +440,8 @@ where
                   id: alive.node.clone(),
                   meta: alive.meta.clone(),
                   state: NodeState::Alive,
-                  vsn: alive.vsn,
+                  protocol_version: alive.protocol_version,
+                  delegate_version: alive.delegate_version,
                 }),
               )
               .await
@@ -498,7 +510,10 @@ where
 
     // If this is us we need to refute, otherwise re-broadcast
     if !bootstrap && is_local_node {
-      let versions = member.state.node.vsn();
+      let (pv, dv) = (
+        member.state.node.protocol_version(),
+        member.state.node.delegate_version(),
+      );
 
       // If the Incarnation is the same, we need special handling, since it
       // possible for the following situation to happen:
@@ -513,18 +528,20 @@ where
       //
       if alive.incarnation == local_incarnation
         && alive.meta == member.state.node.meta
-        && alive.vsn == versions
+        && alive.protocol_version == pv
+        && alive.delegate_version == dv
       {
         return;
       }
       self.refute(&member.state, alive.incarnation).await;
       tracing::warn!(target = "showbiz.state", local = %self.inner.id, peer = %alive.node, local_meta = ?member.state.node.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
     } else {
-      let mut buf = BytesMut::with_capacity(alive.encoded_len() + MessageType::SIZE);
-      buf.put_u8(MessageType::Alive as u8);
-      alive.encode_to(&mut buf);
+      let msg = alive.encode::<T::Checksumer>(
+        self.inner.opts.protocol_version,
+        self.inner.opts.delegate_version,
+      );
       self
-        .broadcast_notify(alive.node.clone(), Message(buf), notify_tx)
+        .broadcast_notify(alive.node.clone(), msg, notify_tx)
         .await;
 
       // Update the state and incarnation number
@@ -536,7 +553,8 @@ where
         id: alive.node,
         meta: alive.meta,
         state: NodeState::Alive,
-        vsn: alive.vsn,
+        protocol_version: alive.protocol_version,
+        delegate_version: alive.delegate_version,
       });
       if member.state.state != NodeState::Alive {
         member.state.state = NodeState::Alive;
@@ -571,8 +589,9 @@ where
           let alive = Alive {
             incarnation: r.incarnation,
             node: r.node,
-            vsn: r.vsn,
             meta: r.meta,
+            protocol_version: r.protocol_version,
+            delegate_version: r.delegate_version,
           };
           self.alive_node(alive, None, false).await;
         }
@@ -865,10 +884,11 @@ where
       .await;
 
     if target.state == NodeState::Alive {
-      let mut mbuf = BytesMut::with_capacity(MessageType::SIZE + ping.encoded_len());
-      mbuf.put_u8(MessageType::Ping as u8);
-      ping.encode_to(&mut mbuf);
-      if let Err(e) = self.send_msg(target.id(), Message(mbuf)).await {
+      let pmsg = ping.encode(
+        self.inner.opts.protocol_version,
+        self.inner.opts.delegate_version,
+      );
+      if let Err(e) = self.send_msg(target.id(), pmsg).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
         if e.failed_remote() {
           self
@@ -878,19 +898,20 @@ where
         return;
       }
     } else {
-      let mut ping_buf = BytesMut::with_capacity(MessageType::SIZE + ping.encoded_len());
-      ping_buf.put_u8(MessageType::Ping as u8);
-      ping.encode_to(&mut ping_buf);
-
+      let pmsg = ping.encode(
+        self.inner.opts.protocol_version,
+        self.inner.opts.delegate_version,
+      );
       let suspect = Suspect {
         incarnation: target.incarnation.load(Ordering::SeqCst),
         node: target.id().clone(),
         from: self.inner.id.clone(),
       };
-      let mut suspect_buf = BytesMut::with_capacity(MessageType::SIZE + suspect.encoded_len());
-      suspect_buf.put_u8(MessageType::Suspect as u8);
-      suspect.encode_to(&mut suspect_buf);
-      let compound = Message::compound(vec![Message(ping_buf), Message(suspect_buf)]);
+      let smsg = suspect.encode(
+        self.inner.opts.protocol_version,
+        self.inner.opts.delegate_version,
+      );
+      let compound = Message::compound(vec![pmsg, smsg]);
       if let Err(e) = self.raw_send_msg_packet(target.id(), compound).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
         if e.failed_remote() {
@@ -990,10 +1011,11 @@ where
     for peer in nodes {
       // We only expect nack to be sent from peers who understand
       // version 4 of the protocol.
-      let mut buf = BytesMut::with_capacity(MessageType::SIZE + ind.encoded_len());
-      buf.put_u8(MessageType::IndirectPing as u8);
-      ind.encode_to(&mut buf);
-      if let Err(e) = self.send_msg(&ind.target, Message(buf)).await {
+      let msg = ind.encode(
+        self.inner.opts.protocol_version,
+        self.inner.opts.delegate_version,
+      );
+      if let Err(e) = self.send_msg(&ind.target, msg).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
       }
     }
@@ -1333,15 +1355,17 @@ where
     // Format and broadcast an alive message.
     let a = Alive {
       incarnation: inc,
-      vsn: state.node.vsn(),
       meta: state.node.meta.clone(),
       node: state.node.id.clone(),
+      protocol_version: state.node.protocol_version,
+      delegate_version: state.node.delegate_version,
     };
 
-    let mut buf = BytesMut::with_capacity(a.encoded_len() + 1);
-    buf.put_u8(MessageType::Alive as u8);
-    a.encode_to(&mut buf);
-    self.broadcast(state.node.id.clone(), Message(buf)).await;
+    let msg = a.encode::<T::Checksumer>(
+      self.inner.opts.protocol_version,
+      self.inner.opts.delegate_version,
+    );
+    self.broadcast(state.node.id.clone(), msg).await;
   }
 }
 

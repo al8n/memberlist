@@ -1,9 +1,10 @@
 use crate::{
   checksum::Checksumer,
-  types::{encoded_u32_len, Compress, MessageType},
+  types2::{Compress, EncodeError, Message, MessageType},
+  DelegateVersion, ProtocolVersion,
 };
 
-use super::types::CompressionAlgo;
+use super::types2::CompressionAlgo;
 
 pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
   let node_scale = ((n + 1) as f64).log10().ceil() as usize;
@@ -11,6 +12,29 @@ pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
 }
 
 const LZW_LIT_WIDTH: u8 = 8;
+const PREALLOCATE_SIZE: usize = 128;
+
+use rkyv::{
+  ser::{serializers::AllocSerializer, Serializer},
+  Fallible, Serialize,
+};
+
+// pub(crate) fn encode<C, T>(ty: MessageType, msg: &T) -> std::io::Result<Message>
+// where
+//   C: Checksumer,
+//   T: Serialize<WriteSerializer<Message>>,
+// {
+//   let mut buf = Message(BytesMut::with_capacity(128));
+//   buf.put_u8(ty as u8);
+//   let mut ser = WriteSerializer::with_pos(buf, 1);
+//   ser.serialize_value(msg).map(|pos| {
+//     let mut h = C::new();
+//     h.update(buf.as_slice());
+//     let cks = h.finalize();
+//     buf.put_u32(cks);
+//     buf
+//   })
+// }
 
 #[derive(Debug, thiserror::Error)]
 pub enum CompressError {
@@ -33,12 +57,13 @@ pub(crate) fn compress_to_msg<C: Checksumer>(
     algo,
     buf: b.into(),
   };
-  let basic_size = compress.encoded_len();
-  let total_size = MessageType::SIZE + basic_size + encoded_u32_len(basic_size as u32);
-  let mut b = BytesMut::with_capacity(total_size);
-  b.put_u8(MessageType::Compress as u8);
-  compress.encode_to::<C>(&mut b);
-  Ok(b.freeze())
+  // let basic_size = compress.encoded_len();
+  // let total_size = MessageType::SIZE + basic_size + encoded_u32_len(basic_size as u32);
+  // let mut b = BytesMut::with_capacity(total_size);
+  // b.put_u8(MessageType::Compress as u8);
+  // compress.encode_to::<C>(&mut b);
+  // Ok(b.freeze())
+  todo!()
 }
 
 #[inline]

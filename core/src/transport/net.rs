@@ -26,7 +26,7 @@ use crate::{
     ConnectionError, ConnectionErrorKind, ConnectionKind, ConnectionTimeout, PacketConnection,
     ReliableConnection, Transport, TransportError, UnreliableConnection,
   },
-  types::Packet,
+  types2::Packet,
   Label,
 };
 use agnostic::{
