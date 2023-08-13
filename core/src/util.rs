@@ -1,6 +1,6 @@
 use crate::{
   checksum::Checksumer,
-  types2::{Compress, EncodeError, Message, MessageType},
+  types2::{Compress, EncodeError, Message, MessageType, Type},
   DelegateVersion, ProtocolVersion,
 };
 
@@ -19,23 +19,6 @@ use rkyv::{
   Fallible, Serialize,
 };
 
-// pub(crate) fn encode<C, T>(ty: MessageType, msg: &T) -> std::io::Result<Message>
-// where
-//   C: Checksumer,
-//   T: Serialize<WriteSerializer<Message>>,
-// {
-//   let mut buf = Message(BytesMut::with_capacity(128));
-//   buf.put_u8(ty as u8);
-//   let mut ser = WriteSerializer::with_pos(buf, 1);
-//   ser.serialize_value(msg).map(|pos| {
-//     let mut h = C::new();
-//     h.update(buf.as_slice());
-//     let cks = h.finalize();
-//     buf.put_u32(cks);
-//     buf
-//   })
-// }
-
 #[derive(Debug, thiserror::Error)]
 pub enum CompressError {
   #[error("{0}")]
@@ -50,20 +33,17 @@ pub enum DecompressError {
 
 pub(crate) fn compress_to_msg<C: Checksumer>(
   algo: CompressionAlgo,
-  data: Bytes,
-) -> Result<Bytes, CompressError> {
+  pv: ProtocolVersion,
+  dv: DelegateVersion,
+  data: &[u8],
+) -> Result<Message, CompressError> {
   let b = compress_payload(algo, data.as_ref())?;
   let compress = Compress {
     algo,
     buf: b.into(),
   };
-  // let basic_size = compress.encoded_len();
-  // let total_size = MessageType::SIZE + basic_size + encoded_u32_len(basic_size as u32);
-  // let mut b = BytesMut::with_capacity(total_size);
-  // b.put_u8(MessageType::Compress as u8);
-  // compress.encode_to::<C>(&mut b);
-  // Ok(b.freeze())
-  todo!()
+
+  Ok(compress.encode::<C>(pv, dv))
 }
 
 #[inline]

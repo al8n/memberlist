@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use bytes::Bytes;
 use rkyv::{Archive, Deserialize, Serialize};
 mod random;
@@ -35,6 +37,11 @@ impl Default for Name {
 impl Name {
   /// The maximum size of a name in bytes.
   pub const MAX_SIZE: usize = 512;
+
+  /// Returns a random name
+  pub fn random() -> Self {
+    Self::default()
+  }
 
   /// Creates a new Name from a static str.
   #[inline]
@@ -298,6 +305,30 @@ impl core::fmt::Display for Name {
   }
 }
 
+impl Borrow<str> for Name {
+  fn borrow(&self) -> &str {
+    self.as_str()
+  }
+}
+
+impl Borrow<[u8]> for Name {
+  fn borrow(&self) -> &[u8] {
+    &self.0
+  }
+}
+
+impl Borrow<[u8]> for ArchivedName {
+  fn borrow(&self) -> &[u8] {
+    self.0.as_slice()
+  }
+}
+
+impl Borrow<str> for ArchivedName {
+  fn borrow(&self) -> &str {
+    core::str::from_utf8(self.0.as_slice()).unwrap()
+  }
+}
+
 impl serde::Serialize for Name {
   fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
     if serializer.is_human_readable() {
@@ -321,4 +352,14 @@ impl<'de> serde::Deserialize<'de> for Name {
         .and_then(|n| Name::try_from(n).map_err(serde::de::Error::custom))
     }
   }
+}
+
+#[test]
+fn test_name_borrow() {
+  use std::collections::HashSet;
+
+  let mut m = HashSet::new();
+  m.insert(Name::from_static_unchecked("foo"));
+
+  assert!(m.contains(b"foo".as_slice()));
 }

@@ -31,6 +31,24 @@ impl CompressionAlgo {
   }
 }
 
+impl ArchivedCompressionAlgo {
+  pub fn is_none(&self) -> bool {
+    match self {
+      ArchivedCompressionAlgo::Lzw => false,
+      ArchivedCompressionAlgo::None => true,
+    }
+  }
+}
+
+impl From<ArchivedCompressionAlgo> for CompressionAlgo {
+  fn from(value: ArchivedCompressionAlgo) -> Self {
+    match value {
+      ArchivedCompressionAlgo::Lzw => Self::Lzw,
+      ArchivedCompressionAlgo::None => Self::None,
+    }
+  }
+}
+
 #[viewit::viewit]
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 #[archive(compare(PartialEq), check_bytes)]
@@ -47,3 +65,4 @@ impl super::Type for Compress {
     super::encode::<C, _, { Self::PREALLOCATE }>(MessageType::Compress, pv, dv, self)
   }
 }
+

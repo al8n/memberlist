@@ -455,7 +455,7 @@ where
           from: state.state.node.id.clone(),
         };
 
-        self.dead_node(&mut memberlist, d).await?;
+        self.dead_node(&mut memberlist, d.into()).await?;
 
         // Block until the broadcast goes out
         if memberlist.any_alive() {
@@ -721,7 +721,7 @@ where
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
-    self.raw_send_msg_packet(to, msg.0).await
+    self.raw_send_msg_packet(&to.into(), msg).await
   }
 
   /// Uses the reliable stream-oriented interface of the transport to

@@ -11,6 +11,12 @@ pub(crate) struct ErrorResponse {
   err: String,
 }
 
+impl ErrorResponse {
+  pub(crate) fn new(err: String) -> Self {
+    Self { err }
+  }
+}
+
 impl core::fmt::Display for ErrorResponse {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{}", self.err)

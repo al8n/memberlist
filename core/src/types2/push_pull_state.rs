@@ -30,11 +30,3 @@ pub(crate) struct PushNodeState {
   protocol_version: ProtocolVersion,
   delegate_version: DelegateVersion,
 }
-
-impl super::Type for PushNodeState {
-  const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
-
-  fn encode<C: Checksumer>(&self, pv: ProtocolVersion, dv: DelegateVersion) -> Message {
-    todo!()
-  }
-}

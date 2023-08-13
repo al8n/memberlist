@@ -2,7 +2,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
 
-use crate::{showbiz::Showbiz, transport::Transport, types::*, types2::PushNodeState};
+use crate::{showbiz::Showbiz, transport::Transport, types2::*};
 
 #[cfg(feature = "async")]
 mod r#async;

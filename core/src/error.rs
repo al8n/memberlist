@@ -60,6 +60,12 @@ impl<D: Delegate, T: Transport> core::fmt::Debug for Error<T, D> {
   }
 }
 
+impl<D: Delegate, T: Transport> From<crate::types2::DecodeError> for Error<T, D> {
+  fn from(e: crate::types2::DecodeError) -> Self {
+    Self::Transport(TransportError::Decode(e))
+  }
+}
+
 impl<D: Delegate, T: Transport> Error<T, D> {
   #[inline]
   pub fn delegate(e: D::Error) -> Self {

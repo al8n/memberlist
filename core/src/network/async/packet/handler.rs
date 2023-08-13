@@ -51,15 +51,7 @@ where
   }
 
   async fn handle_suspect(&self, mut msg: MessageHandoff) {
-    let len = match Suspect::decode_len(&mut msg.buf) {
-      Ok(len) => len,
-      Err(e) => {
-        tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode suspect message");
-        return;
-      }
-    };
-
-    let suspect = match Suspect::decode_from(msg.buf.split_to(len)) {
+    let (_, _, suspect) = match Suspect::decode_archived(&msg.buf) {
       Ok(suspect) => suspect,
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode suspect message");
@@ -78,15 +70,7 @@ where
       return;
     }
 
-    let len = match Alive::decode_len(&mut msg.buf) {
-      Ok(len) => len,
-      Err(e) => {
-        tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode alive message");
-        return;
-      }
-    };
-
-    let alive = match Alive::decode_from(msg.buf.split_to(len)) {
+    let (_, _, alive) = match Alive::decode_archived(&msg.buf) {
       Ok(alive) => alive,
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode alive message");
@@ -104,16 +88,8 @@ where
     self.alive_node(alive, None, false).await
   }
 
-  async fn handle_dead(&self, mut msg: MessageHandoff) {
-    let len = match Dead::decode_len(&mut msg.buf) {
-      Ok(len) => len,
-      Err(e) => {
-        tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode dead message");
-        return;
-      }
-    };
-
-    let dead = match Dead::decode_from(msg.buf.split_to(len)) {
+  async fn handle_dead(&self, msg: MessageHandoff) {
+    let (_, _, dead) = match Dead::decode_archived::<T::Checksumer>(&msg.buf) {
       Ok(dead) => dead,
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode dead message");
@@ -122,7 +98,7 @@ where
     };
 
     let mut memberlist = self.inner.nodes.write().await;
-    if let Err(e) = self.dead_node(&mut memberlist, dead).await {
+    if let Err(e) = self.dead_node(&mut memberlist, (dead, msg.buf.clone()).into()).await {
       tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to mark node as dead");
     }
   }

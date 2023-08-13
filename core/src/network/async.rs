@@ -52,21 +52,17 @@ where
       conn.set_timeout(Some(deadline));
     }
 
-    let mut out = BytesMut::with_capacity(MessageType::SIZE + ping.encoded_len());
-    out.put_u8(MessageType::Ping as u8);
-    ping.encode_to(&mut out);
-
     self
       .raw_send_msg_stream(
         &mut conn,
         self.inner.opts.label.clone(),
-        out.freeze(),
+        ping.encode::<T::Checksumer>(self.inner.opts.protocol_version, self.inner.opts.delegate_version),
         target.addr(),
       )
       .await?;
 
     let encryption_enabled = self.encryption_enabled();
-    let (mut data, mt) = Self::read_stream(
+    let (data, mt) = Self::read_stream(
       &mut conn,
       self.inner.opts.label.clone(),
       encryption_enabled,
@@ -86,11 +82,8 @@ where
       )));
     }
 
-    let ack = match AckResponse::decode_len(&mut data) {
-      Ok(len) => AckResponse::decode_from::<T::Checksumer>(data.split_to(len))
-        .map_err(TransportError::Decode)?,
-      Err(e) => return Err(TransportError::Decode(e).into()),
-    };
+    let (_, _, ack) = AckResponse::decode_archived::<T::Checksumer>(&data)
+    .map_err(TransportError::Decode)?;
 
     if ack.seq_no != ping.seq_no {
       return Err(Error::Transport(TransportError::Decode(
@@ -149,10 +142,8 @@ where
     .await?;
 
     if mt == MessageType::ErrorResponse {
-      let err = match ErrorResponse::decode_len(&mut data) {
-        Ok(len) => {
-          ErrorResponse::decode_from(data.split_to(len)).map_err(TransportError::Decode)?
-        }
+      let err = match ErrorResponse::decode_archived(&mut data) {
+        Ok((_, _, _, err)) => err,
         Err(e) => return Err(TransportError::Decode(e).into()),
       };
       return Err(Error::Peer(err.err));

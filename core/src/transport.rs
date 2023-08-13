@@ -198,6 +198,11 @@ mod r#async {
     }
 
     #[inline]
+    pub(crate) fn reader(&mut self) -> &mut BufReader<T::Connection> {
+      &mut self.0
+    }
+
+    #[inline]
     pub(crate) async fn read_u32_varint(&mut self) -> Result<usize, TransportError<T>> {
       let mut n = 0;
       let mut shift = 0;

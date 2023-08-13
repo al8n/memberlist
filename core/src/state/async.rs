@@ -6,12 +6,13 @@ use crate::{
   showbiz::{AckHandler, Member, Memberlist},
   suspicion::Suspicion,
   timer::Timer,
-  types2::{Alive, Dead, IndirectPing, Message, MessageType, Ping, Suspect, Type},
+  types2::{Alive, Dead, IndirectPing, Message, MessageType, Ping, Suspect, Type, CowDead, CowSuspect},
 };
 
 use super::*;
 use agnostic::Runtime;
 use bytes::Bytes;
+use either::Either;
 use futures_util::{future::BoxFuture, Future, FutureExt, Stream};
 use rand::{seq::SliceRandom, Rng};
 
@@ -96,7 +97,7 @@ where
       self.inner.opts.protocol_version,
       self.inner.opts.delegate_version,
     );
-    self.send_msg(&node, msg).await?;
+    self.send_msg((&node).into(), msg).await?;
     // Mark the sent time here, which should be after any pre-processing and
     // system calls to do the actual send. This probably under-reports a bit,
     // but it's the best we can do.
@@ -145,9 +146,10 @@ where
   pub(crate) async fn dead_node(
     &self,
     memberlist: &mut Memberlist<T::Runtime>,
-    d: Dead,
+    d: CowDead<'_>,
   ) -> Result<(), Error<T, D>> {
-    let idx = match memberlist.node_map.get(&d.node) {
+    let node = d.node().to_owned()?;
+    let idx = match memberlist.node_map.get(&node) {
       Some(idx) => *idx,
       // If we've never heard about this node before, ignore it
       None => return Ok(()),
@@ -155,7 +157,7 @@ where
 
     let state = &mut memberlist.nodes[idx];
     // Ignore old incarnation numbers
-    if d.incarnation < state.state.incarnation.load(Ordering::Relaxed) {
+    if d.incarnation() < state.state.incarnation.load(Ordering::Relaxed) {
       return Ok(());
     }
 
@@ -168,14 +170,14 @@ where
     }
 
     // Check if this is us
-    if d.dead_self() {
+    if d.is_self() {
       // If we are not leaving we need to refute
       if !self.has_left() {
         // self.refute().await?;
         tracing::warn!(
           target = "showbiz.state",
           "refuting a dead message (from: {})",
-          d.from
+          d.from()
         );
         return Ok(()); // Do not mark ourself dead
       }
@@ -187,7 +189,7 @@ where
       );
       self
         .broadcast_notify(
-          d.node.clone(),
+          node,
           msg,
           Some(self.inner.leave_broadcast_tx.clone()),
         )
@@ -197,7 +199,7 @@ where
         self.inner.opts.protocol_version,
         self.inner.opts.delegate_version,
       );
-      self.broadcast(d.node.clone(), msg).await;
+      self.broadcast(node, msg).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -209,11 +211,11 @@ where
     state
       .state
       .incarnation
-      .store(d.incarnation, Ordering::Relaxed);
+      .store(d.incarnation(), Ordering::Relaxed);
 
     // If the dead message was send by the node itself, mark it is left
     // instead of dead.
-    if d.dead_self() {
+    if d.is_self() {
       state.state.state = NodeState::Left;
     } else {
       state.state.state = NodeState::Dead;
@@ -231,16 +233,18 @@ where
     Ok(())
   }
 
-  pub(crate) async fn suspect_node(&self, s: Suspect) -> Result<(), Error<T, D>> {
+  pub(crate) async fn suspect_node(&self, s: CowSuspect<'_>) -> Result<(), Error<T, D>> {
+    let node = s.node().to_owned()?;
+    let from = s.from().to_owned()?;
     let mut mu = self.inner.nodes.write().await;
 
-    let Some(&idx) = mu.node_map.get(&s.node) else {
+    let Some(&idx) = mu.node_map.get(&node) else {
       return Ok(());
     };
 
     let state = &mut mu.nodes[idx];
     // Ignore old incarnation numbers
-    if s.incarnation < state.state.incarnation.load(Ordering::Relaxed) {
+    if s.incarnation() < state.state.incarnation.load(Ordering::Relaxed) {
       return Ok(());
     }
 
@@ -249,12 +253,12 @@ where
     // independent confirmations to flow even when a node probes a node
     // that's already suspect.
     if let Some(timer) = &mut state.suspicion {
-      if timer.confirm(s.from.name()).await {
+      if timer.confirm(from.name()).await {
         let msg = s.encode::<T::Checksumer>(
           self.inner.opts.protocol_version,
           self.inner.opts.delegate_version,
         );
-        self.broadcast(s.node.clone(), msg).await;
+        self.broadcast(node.clone(), msg).await;
       }
       return Ok(());
     }
@@ -265,12 +269,12 @@ where
     }
 
     // If this is us we need to refute, otherwise re-broadcast
-    if state.state.node.name() == &self.inner.opts.name {
-      self.refute(&state.state, s.incarnation).await;
+    if state.state.node.id.eq(&self.inner.id) {
+      self.refute(&state.state, s.incarnation()).await;
       tracing::warn!(
         target = "showbiz.state",
         "refuting a suspect message (from: {})",
-        s.from
+        s.from()
       );
       // Do not mark ourself suspect
       return Ok(());
@@ -279,7 +283,7 @@ where
         self.inner.opts.protocol_version,
         self.inner.opts.delegate_version,
       );
-      self.broadcast(s.node.clone(), msg).await;
+      self.broadcast(node.clone(), msg).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -291,7 +295,7 @@ where
     state
       .state
       .incarnation
-      .store(s.incarnation, Ordering::Relaxed);
+      .store(s.incarnation(), Ordering::Relaxed);
     state.state.state = NodeState::Suspect;
     let change_time = Instant::now();
     state.state.state_change = change_time;
@@ -320,13 +324,13 @@ where
 
     let this = self.clone();
     state.suspicion = Some(Suspicion::new(
-      s.from.name().clone(),
+      s.from().name().clone(),
       k as u32,
       Duration::from_millis(min),
       Duration::from_millis(max),
       move |num_confirmations| {
         let t = this.clone();
-        let n = s.node.clone();
+        let n = node.clone();
         async move {
           let timeout = {
             let members = t.inner.nodes.read().await;
@@ -339,7 +343,7 @@ where
                 Some(Dead {
                   node: state.state.node.id.clone(),
                   from: t.inner.id.clone(),
-                  incarnation: s.incarnation,
+                  incarnation: s.incarnation(),
                 })
               } else {
                 None
@@ -363,7 +367,7 @@ where
             );
             let mut memberlist = t.inner.nodes.write().await;
             let err_info = format!("failed to mark {} as failed", dead.node);
-            if let Err(e) = t.dead_node(&mut memberlist, dead).await {
+            if let Err(e) = t.dead_node(&mut memberlist, dead.into()).await {
               tracing::error!(target = "showbiz.state", err=%e, err_info);
             }
           }
@@ -602,7 +606,7 @@ where
             from: self.inner.id.clone(),
           };
           let mut memberlist = self.inner.nodes.write().await;
-          self.dead_node(&mut memberlist, dead).await?;
+          self.dead_node(&mut memberlist, dead.into()).await?;
         }
         // If the remote node believes a node is dead, we prefer to
         // suspect that node instead of declaring it dead instantly
@@ -612,7 +616,7 @@ where
             node: r.node,
             from: self.inner.id.clone(),
           };
-          self.suspect_node(s).await?;
+          self.suspect_node(s.into()).await?;
         }
       }
     }
@@ -884,11 +888,11 @@ where
       .await;
 
     if target.state == NodeState::Alive {
-      let pmsg = ping.encode(
+      let pmsg = ping.encode::<T::Checksumer>(
         self.inner.opts.protocol_version,
         self.inner.opts.delegate_version,
       );
-      if let Err(e) = self.send_msg(target.id(), pmsg).await {
+      if let Err(e) = self.send_msg(target.id().into(), pmsg).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
         if e.failed_remote() {
           self
@@ -898,7 +902,7 @@ where
         return;
       }
     } else {
-      let pmsg = ping.encode(
+      let pmsg = ping.encode::<T::Checksumer>(
         self.inner.opts.protocol_version,
         self.inner.opts.delegate_version,
       );
@@ -907,12 +911,12 @@ where
         node: target.id().clone(),
         from: self.inner.id.clone(),
       };
-      let smsg = suspect.encode(
+      let smsg = suspect.encode::<T::Checksumer>(
         self.inner.opts.protocol_version,
         self.inner.opts.delegate_version,
       );
       let compound = Message::compound(vec![pmsg, smsg]);
-      if let Err(e) = self.raw_send_msg_packet(target.id(), compound).await {
+      if let Err(e) = self.raw_send_msg_packet(&target.id().into(), compound).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
         if e.failed_remote() {
           self
@@ -1015,7 +1019,7 @@ where
         self.inner.opts.protocol_version,
         self.inner.opts.delegate_version,
       );
-      if let Err(e) = self.send_msg(&ind.target, msg).await {
+      if let Err(e) = self.send_msg((&ind.target).into(), msg).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
       }
     }
@@ -1283,16 +1287,16 @@ where
         return;
       }
 
-      let addr = node.id();
+      let addr = node.id().into();
       if msgs.len() == 1 {
         // Send single message as is
-        if let Err(e) = self.raw_send_msg_packet(addr, msgs.pop().unwrap().0).await {
+        if let Err(e) = self.raw_send_msg_packet(&addr, msgs.pop().unwrap()).await {
           tracing::error!(target = "showbiz.state", err = %e, "failed to send gossip to {}", addr);
         }
       } else {
         // Otherwise create and send one or more compound messages
         for compound in Message::compounds(msgs) {
-          if let Err(e) = self.raw_send_msg_packet(addr, compound).await {
+          if let Err(e) = self.raw_send_msg_packet(&addr, compound).await {
             tracing::error!(target = "showbiz.state", err = %e, "failed to send gossip to {}", addr);
           }
         }
