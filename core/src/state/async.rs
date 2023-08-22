@@ -6,7 +6,9 @@ use crate::{
   showbiz::{AckHandler, Member, Memberlist},
   suspicion::Suspicion,
   timer::Timer,
-  types2::{Alive, Dead, IndirectPing, Message, MessageType, Ping, Suspect, Type, CowDead, CowSuspect},
+  types::{
+    Alive, CowDead, CowSuspect, Dead, IndirectPing, Message, MessageType, Ping, Suspect, Type,
+  },
 };
 
 use super::*;
@@ -93,10 +95,7 @@ where
       .await;
 
     // Send a ping to the node.
-    let msg = ping.encode::<T::Checksumer>(
-      self.inner.opts.protocol_version,
-      self.inner.opts.delegate_version,
-    );
+    let msg = ping.encode::<T::Checksumer>(0, 0, 0);
     self.send_msg((&node).into(), msg).await?;
     // Mark the sent time here, which should be after any pre-processing and
     // system calls to do the actual send. This probably under-reports a bit,
@@ -183,22 +182,12 @@ where
       }
 
       // If we are leaving, we broadcast and wait
-      let msg = d.encode::<T::Checksumer>(
-        self.inner.opts.protocol_version,
-        self.inner.opts.delegate_version,
-      );
+      let msg = d.encode::<T::Checksumer>(0, 0, 0);
       self
-        .broadcast_notify(
-          node,
-          msg,
-          Some(self.inner.leave_broadcast_tx.clone()),
-        )
+        .broadcast_notify(node, msg, Some(self.inner.leave_broadcast_tx.clone()))
         .await;
     } else {
-      let msg = d.encode::<T::Checksumer>(
-        self.inner.opts.protocol_version,
-        self.inner.opts.delegate_version,
-      );
+      let msg = d.encode::<T::Checksumer>(0, 0, 0);
       self.broadcast(node, msg).await;
     }
 
@@ -253,11 +242,8 @@ where
     // independent confirmations to flow even when a node probes a node
     // that's already suspect.
     if let Some(timer) = &mut state.suspicion {
-      if timer.confirm(from.name()).await {
-        let msg = s.encode::<T::Checksumer>(
-          self.inner.opts.protocol_version,
-          self.inner.opts.delegate_version,
-        );
+      if timer.confirm(&from).await {
+        let msg = s.encode::<T::Checksumer>(0, 0, 0);
         self.broadcast(node.clone(), msg).await;
       }
       return Ok(());
@@ -279,10 +265,7 @@ where
       // Do not mark ourself suspect
       return Ok(());
     } else {
-      let msg = s.encode::<T::Checksumer>(
-        self.inner.opts.protocol_version,
-        self.inner.opts.delegate_version,
-      );
+      let msg = s.encode::<T::Checksumer>(0, 0, 0);
       self.broadcast(node.clone(), msg).await;
     }
 
@@ -323,8 +306,9 @@ where
     let max = (self.inner.opts.suspicion_max_timeout_mult as u64) * min;
 
     let this = self.clone();
+    let incarnation = s.incarnation();
     state.suspicion = Some(Suspicion::new(
-      s.from().name().clone(),
+      from.clone(),
       k as u32,
       Duration::from_millis(min),
       Duration::from_millis(max),
@@ -343,7 +327,7 @@ where
                 Some(Dead {
                   node: state.state.node.id.clone(),
                   from: t.inner.id.clone(),
-                  incarnation: s.incarnation(),
+                  incarnation,
                 })
               } else {
                 None
@@ -540,10 +524,7 @@ where
       self.refute(&member.state, alive.incarnation).await;
       tracing::warn!(target = "showbiz.state", local = %self.inner.id, peer = %alive.node, local_meta = ?member.state.node.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
     } else {
-      let msg = alive.encode::<T::Checksumer>(
-        self.inner.opts.protocol_version,
-        self.inner.opts.delegate_version,
-      );
+      let msg = alive.encode::<T::Checksumer>(0, 0, 0);
       self
         .broadcast_notify(alive.node.clone(), msg, notify_tx)
         .await;
@@ -888,10 +869,7 @@ where
       .await;
 
     if target.state == NodeState::Alive {
-      let pmsg = ping.encode::<T::Checksumer>(
-        self.inner.opts.protocol_version,
-        self.inner.opts.delegate_version,
-      );
+      let pmsg = ping.encode::<T::Checksumer>(0, 0, 0);
       if let Err(e) = self.send_msg(target.id().into(), pmsg).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
         if e.failed_remote() {
@@ -902,21 +880,18 @@ where
         return;
       }
     } else {
-      let pmsg = ping.encode::<T::Checksumer>(
-        self.inner.opts.protocol_version,
-        self.inner.opts.delegate_version,
-      );
+      let pmsg = ping.encode::<T::Checksumer>(0, 0, 0);
       let suspect = Suspect {
         incarnation: target.incarnation.load(Ordering::SeqCst),
         node: target.id().clone(),
         from: self.inner.id.clone(),
       };
-      let smsg = suspect.encode::<T::Checksumer>(
-        self.inner.opts.protocol_version,
-        self.inner.opts.delegate_version,
-      );
+      let smsg = suspect.encode::<T::Checksumer>(0, 0, 0);
       let compound = Message::compound(vec![pmsg, smsg]);
-      if let Err(e) = self.raw_send_msg_packet(&target.id().into(), compound).await {
+      if let Err(e) = self
+        .raw_send_msg_packet(&target.id().into(), compound)
+        .await
+      {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
         if e.failed_remote() {
           self
@@ -1015,10 +990,7 @@ where
     for peer in nodes {
       // We only expect nack to be sent from peers who understand
       // version 4 of the protocol.
-      let msg = ind.encode(
-        self.inner.opts.protocol_version,
-        self.inner.opts.delegate_version,
-      );
+      let msg = ind.encode(0, 0, 0);
       if let Err(e) = self.send_msg((&ind.target).into(), msg).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
       }
@@ -1122,7 +1094,7 @@ where
       node: target.id().clone(),
       from: self.inner.id.clone(),
     };
-    if let Err(e) = self.suspect_node(s).await {
+    if let Err(e) = self.suspect_node(s.into()).await {
       tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to suspect node");
     }
     if awareness_delta != 0 {
@@ -1365,10 +1337,7 @@ where
       delegate_version: state.node.delegate_version,
     };
 
-    let msg = a.encode::<T::Checksumer>(
-      self.inner.opts.protocol_version,
-      self.inner.opts.delegate_version,
-    );
+    let msg = a.encode::<T::Checksumer>(0, 0, 0);
     self.broadcast(state.node.id.clone(), msg).await;
   }
 }

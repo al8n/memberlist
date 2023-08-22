@@ -1,6 +1,37 @@
-use crate::checksum::Checksumer;
-
 use super::*;
+use bytes::{Buf, Bytes};
+
+#[derive(
+  Debug,
+  Default,
+  Copy,
+  Clone,
+  PartialEq,
+  Eq,
+  Hash,
+  Archive,
+  Serialize,
+  Deserialize,
+  serde::Serialize,
+  serde::Deserialize,
+)]
+#[repr(u8)]
+#[archive(compare(PartialEq), check_bytes)]
+#[archive_attr(derive(Debug, Copy, Clone), repr(u8), non_exhaustive)]
+#[non_exhaustive]
+pub enum CompressionAlgo {
+  None = 0,
+  #[default]
+  Lzw = 1,
+}
+
+impl CompressionAlgo {
+  pub const SIZE: usize = core::mem::size_of::<Self>();
+
+  pub fn is_none(&self) -> bool {
+    matches!(self, Self::None)
+  }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InvalidCompressionAlgo(u8);
@@ -13,169 +44,180 @@ impl core::fmt::Display for InvalidCompressionAlgo {
 
 impl std::error::Error for InvalidCompressionAlgo {}
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[repr(u8)]
-#[non_exhaustive]
-pub enum CompressionAlgo {
-  #[default]
-  Lzw = 0,
-  None = 1,
-}
-
-impl CompressionAlgo {
-  pub fn is_none(&self) -> bool {
-    matches!(self, Self::None)
-  }
-}
-
 impl TryFrom<u8> for CompressionAlgo {
   type Error = InvalidCompressionAlgo;
 
   fn try_from(value: u8) -> Result<Self, Self::Error> {
     match value {
-      0 => Ok(Self::Lzw),
-      1 => Ok(Self::None),
+      0 => Ok(Self::None),
+      1 => Ok(Self::Lzw),
       _ => Err(InvalidCompressionAlgo(value)),
     }
   }
 }
 
-pub(crate) struct CompressEncoder<T: BufMut, C: Checksumer> {
-  buf: T,
-  cks: C,
+impl ArchivedCompressionAlgo {
+  pub fn is_none(&self) -> bool {
+    match self {
+      ArchivedCompressionAlgo::Lzw => false,
+      ArchivedCompressionAlgo::None => true,
+    }
+  }
 }
 
-impl<T: BufMut, C: Checksumer> CompressEncoder<T, C> {
-  #[inline]
-  pub(crate) fn new(buf: T) -> Self {
-    Self { buf, cks: C::new() }
-  }
-
-  #[inline]
-  pub(crate) fn encoded_len(payload: &[u8]) -> usize {
-    let length = if payload.is_empty() {
-      0
-    } else {
-      // payload len + payload + tag
-      encoded_u32_len(payload.len() as u32) + payload.len() + 1
-    } + 1
-      + 1; // seq_no + tag
-    length + encoded_u32_len(length as u32) + CHECKSUM_SIZE
-  }
-
-  #[inline]
-  pub(crate) fn encode_algo(&mut self, algo: CompressionAlgo) {
-    self.buf.put_u8(1); // tag
-    self.cks.update(&[algo as u8]);
-    self.buf.put_u8(algo as u8);
-  }
-
-  #[inline]
-  pub(crate) fn encode_payload(mut self, payload: &[u8]) -> T {
-    if payload.is_empty() {
-      self.buf.put_u32(self.cks.finalize());
-      return self.buf;
+impl From<ArchivedCompressionAlgo> for CompressionAlgo {
+  fn from(value: ArchivedCompressionAlgo) -> Self {
+    match value {
+      ArchivedCompressionAlgo::Lzw => Self::Lzw,
+      ArchivedCompressionAlgo::None => Self::None,
     }
-    self.buf.put_u8(2); // tag
-    encode_u32_to_buf(&mut self.buf, payload.len() as u32);
-    self.cks.update(payload);
-    self.buf.put_slice(payload);
-    self.buf.put_u32(self.cks.finalize());
-    self.buf
   }
 }
 
 #[viewit::viewit]
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Compress {
   algo: CompressionAlgo,
   buf: Bytes,
 }
 
 impl Compress {
-  #[inline]
-  pub fn encoded_len(&self) -> usize {
-    let buf_len = self.buf.len();
-    1 + 1 // algo + tag
-    + if buf_len == 0 {
-      0
-    } else {
-      buf_len + encoded_u32_len(buf_len as u32) + 1 // buf + tag
-    } + CHECKSUM_SIZE
+  const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
+
+  pub(crate) fn encode_slice<C: Checksumer>(
+    algo: CompressionAlgo,
+    r1: u8,
+    r2: u8,
+    r3: u8,
+    src: &[u8],
+  ) -> Result<Message, CompressError> {
+    let mut buf = Vec::with_capacity(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE + src.len());
+    buf[..ENCODE_HEADER_SIZE].copy_from_slice(&[
+      MessageType::Compress as u8,
+      r1,
+      r2,
+      r3,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      algo as u8,
+    ]);
+    match algo {
+      CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+        .into_vec(&mut buf)
+        .encode_all(&src)
+        .status
+        .map(|_| {
+          let mut h = C::new();
+          h.update(&buf);
+          buf[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE].copy_from_slice(
+            ((buf.len() - ENCODE_HEADER_SIZE) as u32)
+              .to_be_bytes()
+              .as_slice(),
+          );
+          buf[ENCODE_META_SIZE + MAX_MESSAGE_SIZE..ENCODE_HEADER_SIZE]
+            .copy_from_slice(h.finalize().to_be_bytes().as_slice());
+          Message(MessageInner::Bytes(buf.into()))
+        })
+        .map_err(CompressError::Lzw),
+      CompressionAlgo::None => unreachable!(),
+    }
   }
 
-  #[inline]
-  pub fn encode_to<C: Checksumer>(&self, mut buf: impl BufMut) {
+  pub(crate) fn decompress(&self) -> Result<Bytes, DecompressError> {
+    match self.algo {
+      CompressionAlgo::Lzw => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+        .decode(&self.buf)
+        .map(|buf| buf.into())
+        .map_err(|e| DecompressError::Lzw(e)),
+      CompressionAlgo::None => Ok(self.buf.clone()),
+    }
+  }
+
+  pub(crate) fn encode<C: Checksumer>(
+    &self,
+    r1: u8,
+    r2: u8,
+    r3: u8,
+  ) -> Result<Message, CompressError> {
+    Self::encode_slice::<C>(self.algo, r1, r2, r3, &self.buf)
+  }
+
+  pub(crate) fn decode_from_bytes<C: Checksumer>(
+    mut src: Bytes,
+  ) -> Result<(EncodeMeta, Self), DecodeError> {
+    let r1 = src[1];
+    let r2 = src[2];
+    let r3 = src[3];
+    let len = u32::from_be_bytes(
+      (&src[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE].try_into()).unwrap(),
+    );
+    let cks = u32::from_be_bytes(
+      (&src[ENCODE_META_SIZE + MAX_MESSAGE_SIZE..ENCODE_HEADER_SIZE].try_into()).unwrap(),
+    );
     let mut h = C::new();
-    encode_u32_to_buf(&mut buf, self.encoded_len() as u32);
-    buf.put_u8(1);
-    buf.put_u8(self.algo as u8);
-    h.update(&[self.algo as u8]);
-    if !self.buf.is_empty() {
-      buf.put_u8(2);
-      encode_u32_to_buf(&mut buf, self.buf.len() as u32);
-      buf.put_slice(self.buf.as_ref());
-      h.update(self.buf.as_ref());
-    }
-    buf.put_u32(h.finalize());
-  }
-
-  #[inline]
-  pub fn decode_len(buf: impl Buf) -> Result<u32, DecodeError> {
-    decode_u32_from_buf(buf).map(|(x, _)| x).map_err(From::from)
-  }
-
-  #[inline]
-  pub fn decode_from<C: Checksumer>(mut buf: Bytes) -> Result<Self, DecodeError> {
-    let mut required = 0;
-    let mut this = Self::default();
-    let mut hasher = C::new();
-    while buf.has_remaining() {
-      match buf.get_u8() {
-        1 => {
-          if !buf.has_remaining() {
-            tracing::error!("here wo cao 5");
-            return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
-          }
-          this.algo = buf.get_u8().try_into()?;
-          hasher.update(&[this.algo as u8]);
-          required += 1;
-        }
-        2 => {
-          if !buf.has_remaining() {
-            tracing::error!("here wo cao 4");
-            return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
-          }
-          let len = decode_u32_from_buf(&mut buf)?.0 as usize;
-          if buf.remaining() < len {
-            tracing::error!("here wo cao 3");
-            return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
-          }
-          this.buf = buf.split_to(len);
-          hasher.update(&this.buf);
-          if required == 1 {
-            break;
-          }
-        }
-        _ => {}
-      }
-    }
-
-    if required != 1 {
-      tracing::error!("here wo cao");
-      return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
-    }
-
-    if buf.remaining() < CHECKSUM_SIZE {
-      tracing::error!("here wo cao 2");
-      return Err(DecodeError::Truncated(MessageType::Compress.as_err_str()));
-    }
-
-    let checksum = buf.get_u32();
-    if hasher.finalize() != checksum {
+    h.update(&src[ENCODE_HEADER_SIZE..]);
+    if cks != h.finalize() {
       return Err(DecodeError::ChecksumMismatch);
     }
+    let algo = CompressionAlgo::try_from(src[ENCODE_HEADER_SIZE])?;
+    match algo {
+      CompressionAlgo::Lzw => {
+        src.advance(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE);
+        Ok((
+          EncodeMeta {
+            ty: MessageType::Compress,
+            r1,
+            r2,
+            r3,
+          },
+          Self { algo, buf: src },
+        ))
+      }
+      CompressionAlgo::None => {
+        src.advance(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE);
+        Ok((
+          EncodeMeta {
+            ty: MessageType::Compress,
+            r1,
+            r2,
+            r3,
+          },
+          Self { algo, buf: src },
+        ))
+      }
+    }
+  }
+}
 
-    Ok(this)
+const LZW_LIT_WIDTH: u8 = 8;
+const PREALLOCATE_SIZE: usize = 128;
+
+#[derive(Debug, thiserror::Error)]
+pub enum CompressError {
+  #[error("{0}")]
+  Lzw(#[from] weezl::LzwError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DecompressError {
+  #[error("{0}")]
+  Lzw(#[from] weezl::LzwError),
+}
+
+pub(crate) fn compress_payload(
+  algo: CompressionAlgo,
+  src: &[u8],
+) -> Result<Vec<u8>, CompressError> {
+  match algo {
+    CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+      .encode(src)
+      .map_err(CompressError::Lzw),
+    CompressionAlgo::None => unreachable!(),
   }
 }

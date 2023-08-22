@@ -16,6 +16,8 @@ use std::{
   sync::{atomic::AtomicU64, Arc},
 };
 
+use crate::types::{MessageType, ENCODE_HEADER_SIZE};
+
 type Aes192Gcm = AesGcm<Aes192, U12>;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -87,18 +89,41 @@ impl EncryptionAlgo {
     *self == EncryptionAlgo::None
   }
 
-  pub const fn encrypted_length(&self, inp: usize) -> usize {
+  pub(crate) const fn encrypted_length(&self, inp: usize) -> usize {
     match self {
-      Self::None => VERSION_SIZE + NONCE_SIZE + inp + TAG_SIZE,
+      Self::None => EncryptionAlgo::SIZE + NONCE_SIZE + inp + TAG_SIZE,
       Self::PKCS7 => {
         // Determine the padding size
         let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
 
         // Sum the extra parts to get total size
-        VERSION_SIZE + NONCE_SIZE + inp + padding + TAG_SIZE
+        EncryptionAlgo::SIZE + NONCE_SIZE + inp + padding + TAG_SIZE
       }
-      Self::NoPadding => VERSION_SIZE + NONCE_SIZE + inp + TAG_SIZE,
+      Self::NoPadding => EncryptionAlgo::SIZE + NONCE_SIZE + inp + TAG_SIZE,
     }
+  }
+
+  pub(crate) fn header(&self, len: usize) -> BytesMut {
+    let enc_len = self.encrypted_length(len);
+    let enc_len_bytes = (enc_len as u32).to_be_bytes();
+    let mut buf = BytesMut::with_capacity(ENCODE_HEADER_SIZE + enc_len);
+
+    // Write the encrypt byte
+    buf.put_slice(&[
+      MessageType::Encrypt as u8,
+      0,
+      0,
+      0,
+      enc_len_bytes[0],
+      enc_len_bytes[1],
+      enc_len_bytes[2],
+      enc_len_bytes[3], // message length
+      0,
+      0,
+      0,
+      0, // checksum
+    ]);
+    buf
   }
 }
 
@@ -568,7 +593,7 @@ fn encrypt_payload_in<A: AeadInPlace + Aead>(
   let mut nonce = [0u8; NONCE_SIZE];
   rand::thread_rng().fill(&mut nonce);
   dst.put_slice(&nonce);
-  let after_nonce = offset + NONCE_SIZE + VERSION_SIZE;
+  let after_nonce = offset + NONCE_SIZE + EncryptionAlgo::SIZE;
   dst.put_slice(msg);
 
   // Encrypt message using GCM
@@ -578,7 +603,12 @@ fn encrypt_payload_in<A: AeadInPlace + Aead>(
     EncryptionAlgo::None => Ok(()),
     EncryptionAlgo::PKCS7 => {
       let buf_len = dst.len();
-      pkcs7encode(dst, buf_len, offset + VERSION_SIZE + NONCE_SIZE, BLOCK_SIZE);
+      pkcs7encode(
+        dst,
+        buf_len,
+        offset + EncryptionAlgo::SIZE + NONCE_SIZE,
+        BLOCK_SIZE,
+      );
       let mut bytes = dst.split_off(after_nonce);
       gcm
         .encrypt_in_place(nonce, data, &mut bytes)

@@ -3,77 +3,89 @@ use super::*;
 macro_rules! bad_bail {
   ($name: ident) => {
     #[viewit::viewit(getters(skip), setters(skip))]
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
+    #[archive(compare(PartialEq), check_bytes)]
+    #[archive_attr(derive(Debug))]
     pub(crate) struct $name {
       incarnation: u32,
       node: NodeId,
       from: NodeId,
     }
 
-    #[allow(dead_code)]
+    impl super::Type for $name {
+      const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
+
+      fn encode<C: Checksumer>(&self, r1: u8, r2: u8, r3: u8) -> Message {
+        super::encode::<C, _, { Self::PREALLOCATE }>(MessageType::$name, r1, r2, r3, self)
+      }
+    }
+
     impl $name {
       #[inline]
-      pub(crate) fn encoded_len(&self) -> usize {
-        let basic = encoded_u32_len(self.incarnation) + 1 // incarnation + tag
-        + self.node.encoded_len() + 1 // node + node tag
-        + self.from.encoded_len() + 1; // from + from tag
-        basic + encoded_u32_len(basic as u32)
+      pub(crate) fn is_self(&self) -> bool {
+        self.node == self.from
+      }
+    }
+
+    paste::paste! {
+      pub(crate) enum [<Cow $name>]<'a> {
+        Owned($name),
+        Archived(&'a [<Archived $name>], Bytes),
       }
 
-      #[inline]
-      pub(crate) fn encode_to_msg(&self) -> Message {
-        let basic_encoded_len = self.encoded_len() + MessageType::SIZE;
-        let encoded_len = basic_encoded_len + encoded_u32_len(basic_encoded_len as u32);
-        let mut buf = BytesMut::with_capacity(encoded_len);
-        buf.put_u8(MessageType::$name as u8);
-        encode_u32_to_buf(&mut buf, encoded_len as u32);
-        self.encode_to(&mut buf);
-        Message(buf)
+      impl<'a> Clone for [<Cow $name>]<'a> {
+        fn clone(&self) -> Self {
+          match self {
+            Self::Owned(arg0) => Self::Owned(arg0.clone()),
+            Self::Archived(arg0, arg1) => Self::Archived(*arg0, arg1.clone()),
+          }
+        }
       }
 
-      #[inline]
-      pub(crate) fn encode_to(&self, mut buf: &mut BytesMut) {
-        encode_u32_to_buf(&mut buf, self.encoded_len() as u32);
-        buf.put_u8(1); // incarnation tag
-        encode_u32_to_buf(&mut buf, self.incarnation);
-        buf.put_u8(2); // node tag
-        self.node.encode_to(buf);
-        buf.put_u8(3); // from tag
-        self.from.encode_to(buf);
+      impl<'a> From<$name> for [<Cow $name>]<'a> {
+        fn from(value: $name) -> Self {
+          Self::Owned(value)
+        }
       }
 
-      #[inline]
-      pub(crate) fn decode_len(buf: impl Buf) -> Result<usize, DecodeError> {
-        decode_u32_from_buf(buf).map(|(len, _)| len as usize).map_err(From::from)
+      impl<'a> From<(&'a [<Archived $name>], Bytes)> for [<Cow $name>]<'a> {
+        fn from(value: (&'a [<Archived $name>], Bytes)) -> Self {
+          Self::Archived(value.0, value.1)
+        }
       }
 
-      #[inline]
-      pub(crate) fn decode_from(mut buf: Bytes) -> Result<Self, DecodeError> {
-        let mut incarnation = None;
-        let mut node = None;
-        let mut from = None;
-        while buf.has_remaining() {
-          match buf.get_u8() {
-            1 => {
-              incarnation = Some(decode_u32_from_buf(&mut buf)?.0);
-            }
-            2 => {
-              let node_len = NodeId::decode_len(&mut buf)?;
-              node = Some(NodeId::decode_from(buf.split_to(node_len))?);
-            }
-            3 => {
-              let from_len = NodeId::decode_len(&mut buf)?;
-              from = Some(NodeId::decode_from(buf.split_to(from_len))?);
-            }
-            _ => {}
+      impl<'a> [<Cow $name>]<'a> {
+        pub(crate) fn from(&self) -> CowNodeId<'_> {
+          match self {
+            Self::Owned(d) => (&d.from).into(),
+            Self::Archived(d, _) => (&d.from).into(),
           }
         }
 
-        Ok(Self {
-          incarnation: incarnation.ok_or_else(|| DecodeError::Truncated(MessageType::$name.as_err_str()))?,
-          node: node.ok_or_else(|| DecodeError::Truncated(MessageType::$name.as_err_str()))?,
-          from: from.ok_or_else(|| DecodeError::Truncated(MessageType::$name.as_err_str()))?,
-        })
+        pub(crate) fn node(&self) -> CowNodeId<'_> {
+          match self {
+            Self::Owned(d) => (&d.node).into(),
+            Self::Archived(d, _) => (&d.node).into(),
+          }
+        }
+
+        pub(crate) fn incarnation(&self) -> u32 {
+          match self {
+            Self::Owned(d) => d.incarnation,
+            Self::Archived(d, _) => d.incarnation,
+          }
+        }
+
+        pub(crate) fn is_self(&self) -> bool {
+          self.from() == self.node()
+        }
+
+        pub(crate) fn encode<C: Checksumer>(&self, r1: u8, r2: u8, r3: u8) -> Message {
+          match self {
+            Self::Owned(d) => d.encode::<C>(r1, r2, r3),
+            Self::Archived(_, src) => Message(MessageInner::Bytes(src.clone())),
+          }
+        }
       }
     }
   };
@@ -81,10 +93,3 @@ macro_rules! bad_bail {
 
 bad_bail!(Suspect);
 bad_bail!(Dead);
-
-impl Dead {
-  #[inline]
-  pub(crate) fn dead_self(&self) -> bool {
-    self.node.name == self.from.name
-  }
-}

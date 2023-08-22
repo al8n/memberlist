@@ -4,7 +4,7 @@ use crate::{
   delegate::VoidDelegate,
   dns::DnsError,
   transport::TransportError,
-  types2::{Address, Dead, Domain},
+  types::{Address, Dead, Domain},
   util::read_resolv_conf,
   Label,
 };

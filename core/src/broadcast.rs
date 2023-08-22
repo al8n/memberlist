@@ -1,6 +1,6 @@
 use crate::{
   delegate::Delegate, error::Error, network::USER_MSG_OVERHEAD, showbiz::Showbiz,
-  transport::Transport, types2::Message, types2::NodeId,
+  transport::Transport, types::Message, types::NodeId,
 };
 use async_channel::Sender;
 

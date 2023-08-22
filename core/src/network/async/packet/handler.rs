@@ -4,7 +4,7 @@ use futures_util::{Future, Stream};
 
 use crate::{
   showbiz::MessageHandoff,
-  types2::{Alive, Dead, Suspect},
+  types::{Alive, Dead, Suspect},
 };
 
 use super::*;
@@ -50,16 +50,16 @@ where
     queue.high.pop_back().or_else(|| queue.low.pop_back())
   }
 
-  async fn handle_suspect(&self, mut msg: MessageHandoff) {
-    let (_, _, suspect) = match Suspect::decode_archived(&msg.buf) {
-      Ok(suspect) => suspect,
+  async fn handle_suspect(&self, msg: MessageHandoff) {
+    let (_, suspect) = match Suspect::decode_archived::<T::Checksumer>(&msg.buf) {
+      Ok(rst) => rst,
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode suspect message");
         return;
       }
     };
 
-    if let Err(e) = self.suspect_node(suspect).await {
+    if let Err(e) = self.suspect_node((suspect, msg.buf.clone()).into()).await {
       tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to suspect node");
     }
   }
@@ -70,7 +70,7 @@ where
       return;
     }
 
-    let (_, _, alive) = match Alive::decode_archived(&msg.buf) {
+    let (_, alive) = match Alive::decode_archived(&msg.buf) {
       Ok(alive) => alive,
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode alive message");
@@ -89,7 +89,7 @@ where
   }
 
   async fn handle_dead(&self, msg: MessageHandoff) {
-    let (_, _, dead) = match Dead::decode_archived::<T::Checksumer>(&msg.buf) {
+    let (_, dead) = match Dead::decode_archived::<T::Checksumer>(&msg.buf) {
       Ok(dead) => dead,
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode dead message");
@@ -98,7 +98,10 @@ where
     };
 
     let mut memberlist = self.inner.nodes.write().await;
-    if let Err(e) = self.dead_node(&mut memberlist, (dead, msg.buf.clone()).into()).await {
+    if let Err(e) = self
+      .dead_node(&mut memberlist, (dead, msg.buf.clone()).into())
+      .await
+    {
       tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to mark node as dead");
     }
   }

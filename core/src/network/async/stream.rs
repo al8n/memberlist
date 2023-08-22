@@ -6,8 +6,7 @@ use futures_util::{Future, Stream};
 
 use crate::{
   transport::ReliableConnection,
-  types2::{Node, NodeId},
-  util::compress_to_msg,
+  types::{Node, NodeId},
 };
 
 use super::*;
@@ -96,7 +95,7 @@ where
   pub(crate) async fn send_user_msg(
     &self,
     addr: &NodeId,
-    msg: crate::types2::Message,
+    msg: crate::types::Message,
   ) -> Result<(), Error<T, D>> {
     let mut conn = self
       .inner
@@ -106,12 +105,7 @@ where
       .map_err(Error::transport)?;
 
     self
-      .raw_send_msg_stream(
-        &mut conn,
-        self.inner.opts.label.clone(),
-        msg,
-        addr.addr(),
-      )
+      .raw_send_msg_stream(&mut conn, self.inner.opts.label.clone(), msg, addr.addr())
       .await
   }
 }
@@ -160,14 +154,20 @@ where
         let (tx, rx) = futures_channel::oneshot::channel();
         rayon::spawn(move || {
           if compression_enabled {
-            buf = match compress_to_msg::<T::Checksumer>(compression_algo, self.inner.opts.protocol_version, self.inner.opts.delegate_version, &buf) {
+            buf = match Compress::encode_slice::<T::Checksumer>(
+              compression_algo,
+              0,
+              0,
+              0,
+              buf.underlying_bytes(),
+            ) {
               Ok(buf) => buf,
               Err(e) => {
                 tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to compress payload");
                 if tx.send(Err(e.into())).is_err() {
                   tracing::error!(
                     target = "showbiz.stream",
-                    "failed to send compressed payload back to the onload thread"
+                    err = "failed to send compressed payload back to the onload thread"
                   );
                 }
                 return;
@@ -180,7 +180,7 @@ where
             match Self::encrypt_local_state(
               primary_key,
               keyring.as_ref().unwrap(),
-              &buf,
+              buf.underlying_bytes(),
               &label,
               encryption_algo,
             ) {
@@ -191,41 +191,57 @@ where
                   incr_tcp_sent_counter(crypt.len() as u64, metric_labels.iter());
                 }
 
-                tx.send(Ok(Either::Left(crypt))).unwrap();
+                if tx.send(Ok(Message::from_bytes(crypt))).is_err() {
+                  tracing::error!(
+                    target = "showbiz.stream",
+                    err = "failed to send encrypt payload back to the onload thread"
+                  );
+                }
               }
               Err(e) => {
                 tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to encrypt local state");
-                tx.send(Err(e)).unwrap();
+                if tx.send(Err(e)).is_err() {
+                  tracing::error!(
+                    target = "showbiz.stream",
+                    err = "failed to send encrypt error back to the onload thread"
+                  );
+                }
               }
             }
-          } else {
-            tx.send(Ok(Either::Right(buf))).unwrap();
+          } else if tx.send(Ok(buf)).is_err() {
+            tracing::error!(
+              target = "showbiz.stream",
+              err = "failed to send compressed payload back to the onload thread"
+            );
           }
         });
 
-        match rx
-          .await
-          .expect("panic in rayon thread (encryption or compression)")
-        {
-          Ok(buf) => {
-            let buf = match &buf {
-              Either::Left(buf) => buf.as_ref(),
-              Either::Right(buf) => buf.0.as_ref(),
-            };
+        match rx.await {
+          Ok(Ok(buf)) => {
             // Write out the entire send buffer
             #[cfg(feature = "metrics")]
             {
               incr_tcp_sent_counter(buf.len() as u64, self.inner.opts.metric_labels.iter());
             }
 
-            return conn.write_all(buf).await.map_err(Error::transport);
+            return conn
+              .write_all(buf.underlying_bytes())
+              .await
+              .map_err(Error::transport);
           }
-          Err(e) => return Err(e),
+          Ok(Err(e)) => return Err(e),
+          Err(_) => return Err(Error::OffloadPanic),
         }
       }
 
       if compression_enabled {
-        buf = match compress_to_msg::<T::Checksumer>(compression_algo, self.inner.opts.protocol_version, self.inner.opts.delegate_version, &buf) {
+        buf = match Compress::encode_slice::<T::Checksumer>(
+          compression_algo,
+          0,
+          0,
+          0,
+          buf.underlying_bytes(),
+        ) {
           Ok(buf) => buf,
           Err(e) => {
             tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to compress payload");
@@ -270,7 +286,7 @@ where
     &self,
     mut data: Bytes,
   ) -> Result<RemoteNodeState, Error<T, D>> {
-    let (_, _, _, header) = match PushPullHeader::decode(&data) {
+    let (_, header) = match PushPullHeader::decode(&data) {
       Ok(header) => header,
       Err(e) => return Err(TransportError::Decode(e).into()),
     };
@@ -441,7 +457,7 @@ where
       set_local_size_gauge(basic_len as f64, self.inner.opts.metric_labels.iter());
     }
     self
-      .raw_send_msg_stream(conn, stream_label, buf, addr)
+      .raw_send_msg_stream(conn, stream_label, Message::from_bytes(buf), addr)
       .await
   }
 
@@ -450,49 +466,39 @@ where
   ///
   /// The provided streamLabel if present will be authenticated during decryption
   /// of each message.
-  pub(super) async fn read_stream(
+  pub(super) async fn read_stream<'a>(
     conn: &mut ReliableConnection<T>,
     label: Label,
     encryption_enabled: bool,
     keyring: Option<SecretKeyring>,
     opts: &Options<T>,
     #[cfg(feature = "metrics")] metric_labels: &[metrics::Label],
-  ) -> Result<(Bytes, MessageType), Error<T, D>> {
-    // Read the message type
-    let mut buf = [0u8; 1];
-    let mut mt = match conn.read_exact(&mut buf).await {
-      Ok(_) => match MessageType::try_from(buf[0]) {
-        Ok(mt) => mt,
-        Err(e) => {
-          return Err(Error::transport(TransportError::Decode(DecodeError::from(
-            e,
-          ))));
-        }
-      },
-      Err(e) => return Err(Error::transport(e)),
-    };
+  ) -> Result<(EncodeHeader, Bytes), Error<T, D>> {
+    let mut h = conn.read_message_header().await.map_err(Error::transport)?;
 
     // Check if the message is encrypted
-    let unencrypted = if mt == MessageType::Encrypt {
+    let unencrypted = if h.meta.ty == MessageType::Encrypt {
       if !encryption_enabled {
         return Err(TransportError::Security(SecurityError::NotConfigured).into());
       }
 
-      let header = Self::read_encrypt_remote_state(
-        conn,
-        #[cfg(feature = "metrics")]
-        metric_labels,
-      )
-      .await?;
-      let mut plain = if header.buf.len() >= opts.offload_size {
+      let encrypted_msg = conn
+        .read_encrypt_message(
+          h,
+          #[cfg(feature = "metrics")]
+          metric_labels,
+        )
+        .await?;
+
+      let plain = if h.len as usize >= opts.offload_size {
         let (tx, rx) = futures_channel::oneshot::channel();
         rayon::spawn(move || {
-          match Self::decrypt_remote_state(&label, header, keyring.as_ref().unwrap()) {
+          match Self::decrypt_remote_state(&label, h, encrypted_msg, keyring.as_ref().unwrap()) {
             Ok(plain) => {
               if tx.send(Ok(plain)).is_err() {
                 tracing::error!(
                   target = "showbiz.stream",
-                  "fail to send decrypted remote state, receiver end closed"
+                  err = "fail to send decrypted remote state, receiver end closed"
                 );
               }
             }
@@ -500,7 +506,7 @@ where
               if tx.send(Err(e)).is_err() {
                 tracing::error!(
                   target = "showbiz.stream",
-                  "fail to send decrypted remote state, receiver end closed"
+                  err = "fail to send decrypted remote state, receiver end closed"
                 );
               }
             }
@@ -508,25 +514,19 @@ where
         });
         match rx.await {
           Ok(plain) => plain?,
-          Err(_) => {
-            return Err(Error::Other(std::borrow::Cow::Borrowed(
-              "offload thread panicked, fail to receive message",
-            )))
-          }
+          Err(_) => return Err(Error::OffloadPanic),
         }
       } else {
-        match Self::decrypt_remote_state(&label, header, keyring.as_ref().unwrap()) {
+        match Self::decrypt_remote_state(&label, h, encrypted_msg, keyring.as_ref().unwrap()) {
           Ok(plain) => plain,
           Err(e) => return Err(e),
         }
       };
       // Reset message type and buf conn
-      mt = match MessageType::try_from(plain[0]) {
+      h.meta.ty = match MessageType::try_from(plain[0]) {
         Ok(mt) => mt,
         Err(e) => return Err(TransportError::Decode(DecodeError::from(e)).into()),
       };
-
-      plain.advance(1);
       Some(plain)
     } else if encryption_enabled && opts.gossip_verify_incoming {
       return Err(TransportError::Security(SecurityError::PlainRemoteState).into());
@@ -534,107 +534,71 @@ where
       None
     };
 
-    if mt == MessageType::Compress {
-      let (_, _, _, compress) = if let Some(unencrypted) = unencrypted {
-        Compress::decode_archived::<T::Checksumer>(&unencrypted)? 
-      } else {
-        let compressed_size = conn.read_u32_varint().await.map_err(Error::transport)?;
-        let mut buf = vec![0; compressed_size];
-        if let Err(e) = conn.read_exact(&mut buf).await {
-          return Err(Error::transport(e));
-        }
-        buf.into()
-      };
-      let compress = match Compress::decode_from::<T::Checksumer>(compressed) {
-        Ok(compress) => compress,
-        Err(e) => {
-          return Err(Error::transport(TransportError::Decode(e)));
-        }
-      };
-      let mut uncompressed_data = if compress.algo.is_none() {
-        compress.buf
-      } else if compress.buf.len() > opts.offload_size {
-        let (tx, rx) = futures_channel::oneshot::channel();
-        rayon::spawn(move || {
-          match decompress_payload(compress.algo, &compress.buf) {
-            Ok(buf) => {
-              if tx.send(Ok(buf)).is_err() {
-                tracing::error!(
-                  target = "showbiz.stream",
-                  "fail to send decompressed buffer, receiver end closed"
-                );
+    if h.meta.ty == MessageType::Compress {
+      if let Some(unencrypted) = unencrypted {
+        let (_, compress) = Compress::decode_from_bytes::<T::Checksumer>(unencrypted)?;
+        let uncompressed_data: Bytes = if compress.algo.is_none() {
+          unreachable!()
+        } else if compress.buf.len() > opts.offload_size {
+          let (tx, rx) = futures_channel::oneshot::channel();
+          rayon::spawn(move || {
+            match compress.decompress() {
+              Ok(buf) => {
+                if tx.send(Ok(buf)).is_err() {
+                  tracing::error!(
+                    target = "showbiz.stream",
+                    err = "fail to send decompressed buffer, receiver end closed"
+                  );
+                }
               }
-            }
-            Err(e) => {
-              if tx.send(Err(e)).is_err() {
-                tracing::error!(
-                  target = "showbiz.stream",
-                  "fail to send decompressed buffer, receiver end closed"
-                );
+              Err(e) => {
+                if tx
+                  .send(Err(Error::transport(DecodeError::Decompress(e).into())))
+                  .is_err()
+                {
+                  tracing::error!(
+                    target = "showbiz.stream",
+                    err = "fail to send decompressed buffer, receiver end closed"
+                  );
+                }
               }
-            }
-          };
-        });
-        match rx.await {
-          Ok(buf) => buf?.into(),
-          Err(_) => {
-            return Err(Error::Other(std::borrow::Cow::Borrowed(
-              "offload thread panicked, fail to receive message",
-            )))
+            };
+          });
+          match rx.await {
+            Ok(buf) => buf?.into(),
+            Err(_) => return Err(Error::OffloadPanic),
           }
-        }
+        } else {
+          match compress.decompress() {
+            Ok(buf) => buf.into(),
+            Err(e) => return Err(Error::transport(DecodeError::Decompress(e).into())),
+          }
+        };
+
+        // do not consume mt byte, let the callee to handle mt advance logic.
+        return Ok((h, uncompressed_data));
       } else {
-        match decompress_payload(compress.algo, &compress.buf) {
-          Ok(buf) => buf.into(),
-          Err(e) => return Err(e.into()),
-        }
-      };
-
-      if !uncompressed_data.has_remaining() {
-        return Err(Error::transport(TransportError::Decode(
-          DecodeError::Truncated(MessageType::Compress.as_err_str()),
-        )));
+        let compress = conn
+          .read_compressed_message(&h)
+          .await
+          .map_err(Error::transport)?;
+        return compress
+          .decompress()
+          .map(|data| (h, data))
+          .map_err(|e| Error::transport(TransportError::Decode(DecodeError::Decompress(e))));
       }
-
-      // Reset the message type
-      mt = match MessageType::try_from(uncompressed_data.get_u8()) {
-        Ok(mt) => mt,
-        Err(e) => {
-          return Err(Error::transport(TransportError::Decode(DecodeError::from(
-            e,
-          ))));
-        }
-      };
-      let len = decode_u32_from_buf(&mut uncompressed_data)
-        .map_err(|e| TransportError::Decode(DecodeError::from(e)))?
-        .0 as usize;
-      if uncompressed_data.remaining() < len {
-        return Err(Error::transport(TransportError::Decode(
-          DecodeError::Truncated(MessageType::Compress.as_err_str()),
-        )));
-      }
-      return Ok((uncompressed_data, mt));
     }
 
-    if let Some(mut unencrypted) = unencrypted {
-      // As we have already read full message from reader, so we need to consume the total msg len
-      let len = decode_u32_from_buf(&mut unencrypted)
-        .map_err(|e| TransportError::Decode(DecodeError::from(e)))?
-        .0 as usize;
-      if unencrypted.remaining() < len {
-        return Err(Error::transport(TransportError::Decode(
-          DecodeError::Truncated(MessageType::Encrypt.as_err_str()),
-        )));
-      }
-      return Ok((unencrypted, mt));
+    if let Some(unencrypted) = unencrypted {
+      return Ok((h, unencrypted));
     }
 
-    let size = conn.read_u32_varint().await.map_err(Error::transport)?;
-    let mut buf = vec![0; size];
-    if let Err(e) = conn.read_exact(&mut buf).await {
-      return Err(Error::transport(e));
-    }
-    Ok((buf.into(), mt))
+    let mut buf = vec![0; h.len as usize];
+    conn
+      .read_exact(&mut buf)
+      .await
+      .map(|_| (h, buf.into()))
+      .map_err(Error::transport)
   }
 }
 
@@ -682,7 +646,7 @@ where
     }
 
     let encryption_enabled = self.encryption_enabled();
-    let (mut data, mt) = match Self::read_stream(
+    let (h, data) = match Self::read_stream(
       &mut conn,
       stream_label.clone(),
       encryption_enabled,
@@ -693,7 +657,7 @@ where
     )
     .await
     {
-      Ok((mt, lr)) => (mt, lr),
+      Ok(data) => data,
       Err(e) => match e {
         Error::Transport(TransportError::Connection(err)) => {
           if err.error.kind() != std::io::ErrorKind::UnexpectedEof {
@@ -702,7 +666,12 @@ where
 
           let err_resp = ErrorResponse::new(err.to_string());
           if let Err(e) = self
-            .raw_send_msg_stream(&mut conn, stream_label, err_resp.encode::<T::Checksumer>(self.inner.opts.protocol_version, self.inner.opts.delegate_version), addr)
+            .raw_send_msg_stream(
+              &mut conn,
+              stream_label,
+              err_resp.encode::<T::Checksumer>(0, 0, 0),
+              addr,
+            )
             .await
           {
             tracing::error!(target = "showbiz.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to send error response");
@@ -716,9 +685,10 @@ where
         }
       },
     };
-    match mt {
+
+    match h.meta.ty {
       MessageType::Ping => {
-        let (_, _, _, ping) = {
+        let (_, ping) = {
           match Ping::decode_archived::<T::Checksumer>(&data) {
             Ok(ping) => ping,
             Err(e) => {
@@ -735,7 +705,12 @@ where
 
         let ack = AckResponse::empty(ping.seq_no);
         if let Err(e) = self
-          .raw_send_msg_stream(&mut conn, stream_label, ack.encode::<T::Checksumer>(self.inner.opts.protocol_version, self.inner.opts.delegate_version), addr)
+          .raw_send_msg_stream(
+            &mut conn,
+            stream_label,
+            ack.encode::<T::Checksumer>(0, 0, 0),
+            addr,
+          )
           .await
         {
           tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to send ack response");
@@ -776,8 +751,8 @@ where
           tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to push/pull merge");
         }
       }
-      mt => {
-        tracing::error!(target = "showbiz.stream", remote_node = %addr, "received invalid msg type {}", mt);
+      _ => {
+        tracing::error!(target = "showbiz.stream", remote_node = %addr, "received invalid msg type {}", h.meta.ty);
       }
     }
   }

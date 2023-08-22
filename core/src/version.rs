@@ -52,6 +52,10 @@ impl TryFrom<u8> for DelegateVersion {
   }
 }
 
+impl DelegateVersion {
+  pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct InvalidProtocolVersion(u8);
 
@@ -82,6 +86,10 @@ impl std::error::Error for InvalidProtocolVersion {}
 #[repr(u8)]
 pub enum ProtocolVersion {
   V0 = 0,
+}
+
+impl ProtocolVersion {
+  pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 
 impl core::fmt::Display for ProtocolVersion {

@@ -1,12 +1,12 @@
 use std::sync::atomic::Ordering;
 
 use crate::{
+  checksum::Checksumer,
   delegate::Delegate,
   error::Error,
   security::{append_bytes, EncryptionAlgo, SecretKey, SecretKeyring, SecurityError},
-  transport::{ReliableConnection, TransportError},
-  types2::MessageType,
-  util::{compress_payload, decompress_payload},
+  transport::TransportError,
+  types::MessageType,
   Options,
 };
 
@@ -56,13 +56,13 @@ where
       .raw_send_msg_stream(
         &mut conn,
         self.inner.opts.label.clone(),
-        ping.encode::<T::Checksumer>(self.inner.opts.protocol_version, self.inner.opts.delegate_version),
+        ping.encode::<T::Checksumer>(0, 0, 0),
         target.addr(),
       )
       .await?;
 
     let encryption_enabled = self.encryption_enabled();
-    let (data, mt) = Self::read_stream(
+    let (h, data) = Self::read_stream(
       &mut conn,
       self.inner.opts.label.clone(),
       encryption_enabled,
@@ -73,17 +73,17 @@ where
     )
     .await?;
 
-    if mt != MessageType::AckResponse {
+    if h.meta.ty != MessageType::AckResponse {
       return Err(Error::Transport(TransportError::Decode(
         DecodeError::MismatchMessageType {
           expected: MessageType::AckResponse.as_str(),
-          got: mt.as_str(),
+          got: h.meta.ty.as_str(),
         },
       )));
     }
 
-    let (_, _, ack) = AckResponse::decode_archived::<T::Checksumer>(&data)
-    .map_err(TransportError::Decode)?;
+    let (_, ack) =
+      AckResponse::decode_archived::<T::Checksumer>(&data).map_err(TransportError::Decode)?;
 
     if ack.seq_no != ping.seq_no {
       return Err(Error::Transport(TransportError::Decode(
@@ -130,7 +130,7 @@ where
     });
 
     let encryption_enabled = self.encryption_enabled();
-    let (mut data, mt) = Self::read_stream(
+    let (h, data) = Self::read_stream(
       &mut conn,
       self.inner.opts.label.clone(),
       encryption_enabled,
@@ -141,20 +141,20 @@ where
     )
     .await?;
 
-    if mt == MessageType::ErrorResponse {
-      let err = match ErrorResponse::decode_archived(&mut data) {
-        Ok((_, _, _, err)) => err,
+    if h.meta.ty == MessageType::ErrorResponse {
+      let err = match ErrorResponse::decode_archived::<T::Checksumer>(&data) {
+        Ok((_, err)) => err,
         Err(e) => return Err(TransportError::Decode(e).into()),
       };
-      return Err(Error::Peer(err.err));
+      return Err(Error::Peer(err.err.to_string()));
     }
 
     // Quit if not push/pull
-    if mt != MessageType::PushPull {
+    if h.meta.ty != MessageType::PushPull {
       return Err(Error::Transport(TransportError::Decode(
         DecodeError::MismatchMessageType {
           expected: MessageType::PushPull.as_str(),
-          got: mt.as_str(),
+          got: h.meta.ty.as_str(),
         },
       )));
     }
@@ -170,26 +170,23 @@ where
     label: &Label,
     algo: EncryptionAlgo,
   ) -> Result<Bytes, Error<T, D>> {
-    let enc_len = algo.encrypted_length(msg.len());
-    let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
-    let mut buf = BytesMut::with_capacity(meta_size + enc_len);
-
-    // Write the encrypt byte
-    buf.put_u8(MessageType::Encrypt as u8);
-
-    // Write the size of the message
-    buf.put_u32(enc_len as u32);
+    let mut buf = algo.header(msg.len());
 
     // Authenticated Data is:
     //
-    //   [messageType; byte] [messageLength; uint32] [encryptionAlgo; byte] [stream_label; optional]
+    //   [messageType; u8] [label length; u8] [reserved2; u8] [reserved3; u8]
+    //   [messageLength; u32] [checksum; u32] [stream_label; optional] [encryptionAlgo; u8]
     //
-    let mut ciphertext = buf.split_off(meta_size);
+    let mut ciphertext = buf.split_off(ENCODE_HEADER_SIZE);
     if label.is_empty() {
       // Write the encrypted cipher text to the buffer
       keyring
         .encrypt_payload(primary_key, algo, msg, &buf, &mut ciphertext)
         .map(|_| {
+          let mut h = <T::Checksumer as Checksumer>::new();
+          h.update(&ciphertext);
+          buf[ENCODE_META_SIZE + MAX_MESSAGE_SIZE..ENCODE_HEADER_SIZE]
+            .copy_from_slice(&h.finalize().to_be_bytes());
           buf.unsplit(ciphertext);
           buf.freeze()
         })
@@ -200,6 +197,10 @@ where
       keyring
         .encrypt_payload(primary_key, algo, msg, &data_bytes, &mut ciphertext)
         .map(|_| {
+          let mut h = <T::Checksumer as Checksumer>::new();
+          h.update(&ciphertext);
+          buf[ENCODE_META_SIZE + MAX_MESSAGE_SIZE..ENCODE_HEADER_SIZE]
+            .copy_from_slice(&h.finalize().to_be_bytes());
           buf.unsplit(ciphertext);
           buf.freeze()
         })
@@ -207,78 +208,54 @@ where
     }
   }
 
-  async fn read_encrypt_remote_state(
-    r: &mut ReliableConnection<T>,
-    #[cfg(feature = "metrics")] metric_labels: &[metrics::Label],
-  ) -> Result<EncryptedRemoteStateHeader, Error<T, D>> {
-    // Read in enough to determine message length
-    // let meta_size = MessageType::SIZE + core::mem::size_of::<u32>() + EncryptionAlgo::SIZE;
-    let meta_size = MessageType::SIZE + core::mem::size_of::<u32>();
-    let mut buf = BytesMut::with_capacity(meta_size);
-    buf.put_u8(MessageType::Encrypt as u8);
-    let mut b = [0u8; core::mem::size_of::<u32>()];
-    r.read_exact(&mut b).await.map_err(Error::transport)?;
-    buf.put_slice(&b);
-    // Ensure we aren't asked to download too much. This is to guard against
-    // an attack vector where a huge amount of state is sent
-    let more_bytes = u32::from_be_bytes(b) as usize;
-    #[cfg(feature = "metrics")]
-    {
-      add_sample_to_remote_size_histogram(more_bytes as f64, metric_labels.iter());
-    }
-
-    if more_bytes > MAX_PUSH_STATE_BYTES {
-      return Err(Error::Transport(TransportError::RemoteStateTooLarge(
-        more_bytes,
-      )));
-    }
-
-    // Start reporting the size before you cross the limit
-    if more_bytes > (0.6 * (MAX_PUSH_STATE_BYTES as f64)).floor() as usize {
-      tracing::warn!(
-        target = "showbiz",
-        "remote state size is {} limit is large: {}",
-        more_bytes,
-        MAX_PUSH_STATE_BYTES
-      );
-    }
-
-    // Read in the rest of the payload
-    buf.resize(meta_size + more_bytes, 0);
-    r.read_exact(&mut buf[meta_size..])
-      .await
-      .map_err(Error::transport)?;
-
-    Ok(EncryptedRemoteStateHeader { meta_size, buf })
-  }
-
   fn decrypt_remote_state(
     stream_label: &Label,
-    header: EncryptedRemoteStateHeader,
+    header: EncodeHeader,
+    mut buf: BytesMut,
     keyring: &SecretKeyring,
   ) -> Result<Bytes, Error<T, D>> {
-    let EncryptedRemoteStateHeader { meta_size, mut buf } = header;
+    let EncodeHeader { meta, len, cks } = header;
 
     // Decrypt the cipherText with some authenticated data
     //
     // Authenticated Data is:
     //
-    //   [messageType; byte] [messageLength; uint32] [label_data; optional]
+    //   [messageType; u8] [label length; u8] [reserved2; u8] [reserved3; u8]
+    //   [messageLength; u32] [checksum; u32] [stream_label; optional] [encryptionAlgo; u8]
     //
-    let mut ciphertext = buf.split_off(meta_size);
+
+    let mut ciphertext = buf.split_off(ENCODE_HEADER_SIZE + EncryptionAlgo::SIZE);
     if stream_label.is_empty() {
       // Decrypt the payload
       keyring
         .decrypt_payload(&mut ciphertext, &buf)
-        .map(|_| ciphertext.freeze())
         .map_err(From::from)
+        .and_then(|_| {
+          let mut h = <T::Checksumer as Checksumer>::new();
+          h.update(&ciphertext);
+          if cks != h.finalize() {
+            return Err(Error::Transport(TransportError::Decode(
+              DecodeError::ChecksumMismatch,
+            )));
+          }
+          Ok(ciphertext.freeze())
+        })
     } else {
       let data_bytes = append_bytes(&buf, stream_label.as_bytes());
       // Decrypt the payload
       keyring
         .decrypt_payload(&mut ciphertext, data_bytes.as_ref())
-        .map(|_| ciphertext.freeze())
         .map_err(From::from)
+        .and_then(|_| {
+          let mut h = <T::Checksumer as Checksumer>::new();
+          h.update(&ciphertext);
+          if cks != h.finalize() {
+            return Err(Error::Transport(TransportError::Decode(
+              DecodeError::ChecksumMismatch,
+            )));
+          }
+          Ok(ciphertext.freeze())
+        })
     }
   }
 }

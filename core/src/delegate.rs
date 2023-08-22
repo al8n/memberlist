@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::types2::Message;
-use crate::types2::{Node, NodeId};
+use crate::types::Message;
+use crate::types::{Node, NodeId};
 
 #[cfg(any(test, feature = "test"))]
 mod mock;

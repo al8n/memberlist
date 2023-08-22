@@ -29,8 +29,8 @@ use super::{
   suspicion::Suspicion,
   timer::Timer,
   transport::Transport,
-  types2::Message,
-  types2::{Alive, MessageType, Name, Node, NodeId, PushNodeState},
+  types::Message,
+  types::{Alive, MessageType, Name, Node, NodeId, PushNodeState},
   Options,
 };
 

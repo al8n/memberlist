@@ -1,72 +1,6 @@
-use crate::{
-  checksum::Checksumer,
-  types2::{Compress, EncodeError, Message, MessageType, Type},
-  DelegateVersion, ProtocolVersion,
-};
-
-use super::types2::CompressionAlgo;
-
 pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
   let node_scale = ((n + 1) as f64).log10().ceil() as usize;
   retransmit_mult * node_scale
-}
-
-const LZW_LIT_WIDTH: u8 = 8;
-const PREALLOCATE_SIZE: usize = 128;
-
-use rkyv::{
-  ser::{serializers::AllocSerializer, Serializer},
-  Fallible, Serialize,
-};
-
-#[derive(Debug, thiserror::Error)]
-pub enum CompressError {
-  #[error("{0}")]
-  Lzw(#[from] weezl::LzwError),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum DecompressError {
-  #[error("{0}")]
-  Lzw(#[from] weezl::LzwError),
-}
-
-pub(crate) fn compress_to_msg<C: Checksumer>(
-  algo: CompressionAlgo,
-  pv: ProtocolVersion,
-  dv: DelegateVersion,
-  data: &[u8],
-) -> Result<Message, CompressError> {
-  let b = compress_payload(algo, data.as_ref())?;
-  let compress = Compress {
-    algo,
-    buf: b.into(),
-  };
-
-  Ok(compress.encode::<C>(pv, dv))
-}
-
-#[inline]
-pub(crate) fn compress_payload(cmp: CompressionAlgo, inp: &[u8]) -> Result<Vec<u8>, CompressError> {
-  match cmp {
-    CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
-      .encode(inp)
-      .map_err(Into::into),
-    CompressionAlgo::None => unreachable!(),
-  }
-}
-
-#[inline]
-pub(crate) fn decompress_payload(
-  cmp: CompressionAlgo,
-  inp: &[u8],
-) -> Result<Vec<u8>, DecompressError> {
-  match cmp {
-    CompressionAlgo::Lzw => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
-      .decode(inp)
-      .map_err(Into::into),
-    CompressionAlgo::None => unreachable!(),
-  }
 }
 
 #[cfg(feature = "metrics")]
@@ -100,7 +34,6 @@ pub mod label_serde {
   }
 }
 
-use bytes::{BufMut, Bytes, BytesMut};
 pub(crate) use is_global_ip::IsGlobalIp;
 
 /// The code in this mod is copied from [libp2p]

@@ -1,13 +1,12 @@
 use std::borrow::Cow;
 
-use crate::{delegate::Delegate, dns::DnsError, transport::Transport, types2::NodeId};
+use crate::{delegate::Delegate, dns::DnsError, transport::Transport, types::NodeId};
 
 pub use crate::{
   options::ForbiddenIp,
   security::{SecurityError, UnknownEncryptionAlgo},
   transport::TransportError,
-  types::{DecodeError, EncodeError, InvalidDomain, InvalidLabel},
-  util::{CompressError, DecompressError},
+  types::{CompressError, DecodeError, DecompressError, EncodeError, InvalidDomain, InvalidLabel},
   version::{InvalidDelegateVersion, InvalidProtocolVersion},
 };
 
@@ -29,21 +28,23 @@ pub enum Error<T: Transport, D: Delegate> {
   ForbiddenIp(#[from] ForbiddenIp),
   #[error("showbiz: peer error: {0}")]
   Peer(String),
+  #[error("showbiz: offload thread panic, fail to receive offload thread message")]
+  OffloadPanic,
   #[error("showbiz: {0}")]
   Other(Cow<'static, str>),
 }
 
-impl<D: Delegate, T: Transport> From<crate::util::CompressError> for Error<T, D> {
+impl<D: Delegate, T: Transport> From<CompressError> for Error<T, D> {
   #[inline]
-  fn from(e: crate::util::CompressError) -> Self {
-    Self::Transport(e.into())
+  fn from(e: CompressError) -> Self {
+    Self::Transport(DecodeError::Compress(e).into())
   }
 }
 
-impl<D: Delegate, T: Transport> From<crate::util::DecompressError> for Error<T, D> {
+impl<D: Delegate, T: Transport> From<DecompressError> for Error<T, D> {
   #[inline]
-  fn from(e: crate::util::DecompressError) -> Self {
-    Self::Transport(e.into())
+  fn from(e: DecompressError) -> Self {
+    Self::Transport(DecodeError::Decompress(e).into())
   }
 }
 
@@ -60,8 +61,8 @@ impl<D: Delegate, T: Transport> core::fmt::Debug for Error<T, D> {
   }
 }
 
-impl<D: Delegate, T: Transport> From<crate::types2::DecodeError> for Error<T, D> {
-  fn from(e: crate::types2::DecodeError) -> Self {
+impl<D: Delegate, T: Transport> From<crate::types::DecodeError> for Error<T, D> {
+  fn from(e: crate::types::DecodeError) -> Self {
     Self::Transport(TransportError::Decode(e))
   }
 }

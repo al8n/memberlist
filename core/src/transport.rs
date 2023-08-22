@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
   dns::DnsError,
-  types2::{DecodeError, DecodeU32Error, EncodeError, InvalidLabel, Label, MessageType, Packet},
+  types::{DecodeError, DecodeU32Error, EncodeError, InvalidLabel, Label, MessageType, Packet},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -24,6 +24,7 @@ pub(crate) mod tests;
 
 const LABEL_MAX_SIZE: usize = 255;
 const DEFAULT_BUFFER_SIZE: usize = 4096;
+const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -131,10 +132,6 @@ pub enum TransportError<T: Transport> {
   Encode(#[from] EncodeError),
   #[error("decode error: {0}")]
   Decode(#[from] DecodeError),
-  #[error("compression error {0}")]
-  Compress(#[from] crate::util::CompressError),
-  #[error("decompress error {0}")]
-  Decompress(#[from] crate::util::DecompressError),
   #[error("security error {0}")]
   Security(#[from] crate::security::SecurityError),
   #[error("dns error: {0}")]
@@ -173,9 +170,16 @@ mod r#async {
     task::{Context, Poll},
   };
 
-  use crate::checksum::Checksumer;
+  use crate::{
+    checksum::Checksumer,
+    types::{
+      Compress, EncodeHeader, EncodeMeta, ENCODE_HEADER_SIZE, ENCODE_META_SIZE, MAX_MESSAGE_SIZE,
+    },
+    DelegateVersion, ProtocolVersion,
+  };
 
   use super::*;
+  use bytes::Buf;
   use futures_util::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
   pub struct ReliableConnection<T: Transport>(BufReader<T::Connection>, SocketAddr);
@@ -200,6 +204,94 @@ mod r#async {
     #[inline]
     pub(crate) fn reader(&mut self) -> &mut BufReader<T::Connection> {
       &mut self.0
+    }
+
+    #[inline]
+    pub(crate) async fn read_message_header(&mut self) -> Result<EncodeHeader, TransportError<T>> {
+      let mut meta = [0; ENCODE_HEADER_SIZE];
+      self.read_exact(&mut meta).await?;
+      let mt = meta[0].try_into().map_err(DecodeError::from)?;
+      let r1 = meta[1];
+      let r2 = meta[2];
+      let r3 = meta[3];
+      let len = u32::from_be_bytes(
+        (&meta[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE].try_into()).unwrap(),
+      );
+      let cks = u32::from_be_bytes(
+        (&meta[ENCODE_META_SIZE + MAX_MESSAGE_SIZE..ENCODE_HEADER_SIZE].try_into()).unwrap(),
+      );
+      Ok(EncodeHeader {
+        meta: EncodeMeta { ty: mt, r1, r2, r3 },
+        len,
+        cks,
+      })
+    }
+
+    #[inline]
+    pub(crate) async fn read_message(
+      &mut self,
+    ) -> Result<(EncodeHeader, Bytes), TransportError<T>> {
+      let header = self.read_message_header().await?;
+      let mut buf = vec![0; header.len as usize];
+      self.read_exact(&mut buf).await?;
+      let mut h = T::Checksumer::new();
+      h.update(&buf);
+      if header.cks != h.finalize() {
+        return Err(TransportError::Decode(DecodeError::ChecksumMismatch));
+      }
+      Ok((header, buf.into()))
+    }
+
+    #[inline]
+    pub(crate) async fn read_encrypt_message(
+      &mut self,
+      header: EncodeHeader,
+      #[cfg(feature = "metrics")] metric_labels: &[metrics::Label],
+    ) -> Result<BytesMut, TransportError<T>> {
+      // Ensure we aren't asked to download too much. This is to guard against
+      // an attack vector where a huge amount of state is sent
+      let more_bytes = header.len as usize;
+      #[cfg(feature = "metrics")]
+      {
+        add_sample_to_remote_size_histogram(more_bytes as f64, metric_labels.iter());
+      }
+
+      if more_bytes > MAX_PUSH_STATE_BYTES {
+        return Err(TransportError::RemoteStateTooLarge(more_bytes));
+      }
+
+      // Start reporting the size before you cross the limit
+      if more_bytes > (0.6 * (MAX_PUSH_STATE_BYTES as f64)).floor() as usize {
+        tracing::warn!(
+          target = "showbiz",
+          "remote state size is {} limit is large: {}",
+          more_bytes,
+          MAX_PUSH_STATE_BYTES
+        );
+      }
+
+      let mut buf = BytesMut::with_capacity(ENCODE_HEADER_SIZE + header.len as usize);
+      buf.put_slice(&header.to_array());
+      buf.resize(ENCODE_HEADER_SIZE + header.len as usize, 0);
+      self.read_exact(&mut buf[ENCODE_HEADER_SIZE..]).await?;
+      let mut h = T::Checksumer::new();
+      h.update(&buf[ENCODE_HEADER_SIZE..]);
+      if header.cks != h.finalize() {
+        return Err(TransportError::Decode(DecodeError::ChecksumMismatch));
+      }
+      Ok(buf)
+    }
+
+    #[inline]
+    pub(crate) async fn read_compressed_message(
+      &mut self,
+      header: &EncodeHeader,
+    ) -> Result<Compress, TransportError<T>> {
+      let mut buf = vec![0; header.len as usize];
+      self.read_exact(&mut buf).await?;
+      let mut buf: Bytes = buf.into();
+      let algo = buf.get_u8().try_into().map_err(DecodeError::from)?;
+      Ok(Compress { algo, buf })
     }
 
     #[inline]
