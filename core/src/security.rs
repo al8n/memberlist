@@ -118,10 +118,6 @@ impl EncryptionAlgo {
       enc_len_bytes[1],
       enc_len_bytes[2],
       enc_len_bytes[3], // message length
-      0,
-      0,
-      0,
-      0, // checksum
     ]);
     buf
   }
@@ -518,7 +514,6 @@ impl SecretKeyring {
   }
 }
 
-const VERSION_SIZE: usize = 1;
 pub(crate) const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
 pub(crate) const BLOCK_SIZE: usize = 16;
@@ -636,14 +631,15 @@ fn decrypt_message_in<A: Aead + AeadInPlace>(
   data: &[u8],
 ) -> Result<(), SecurityError> {
   // Decrypt the message
-  let mut ciphertext = msg.split_off(VERSION_SIZE + NONCE_SIZE);
-  let nonce = GenericArray::from_slice(&msg[VERSION_SIZE..VERSION_SIZE + NONCE_SIZE]);
+  let mut ciphertext = msg.split_off(EncryptionAlgo::SIZE + NONCE_SIZE);
+  let nonce =
+    GenericArray::from_slice(&msg[EncryptionAlgo::SIZE..EncryptionAlgo::SIZE + NONCE_SIZE]);
 
   gcm
     .decrypt_in_place(nonce, data, &mut ciphertext)
     .map_err(SecurityError::AeadError)?;
   msg.unsplit(ciphertext);
-  msg.advance(VERSION_SIZE + NONCE_SIZE);
+  msg.advance(EncryptionAlgo::SIZE + NONCE_SIZE);
   Ok(())
 }
 
@@ -776,7 +772,7 @@ mod tests {
     assert_eq!(encrypted.len(), exp_len);
 
     decrypt_payload([k1].into_iter(), &mut encrypted, extra, vsn).unwrap();
-    assert_eq!(&encrypted[VERSION_SIZE + NONCE_SIZE..], plain_text);
+    assert_eq!(&encrypted[EncryptionAlgo::SIZE + NONCE_SIZE..], plain_text);
   }
 
   #[test]

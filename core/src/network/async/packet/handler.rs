@@ -35,7 +35,7 @@ where
               MessageType::Dead => this.handle_dead(msg).await,
               MessageType::User => this.handle_user(msg).await,
               _ => {
-                tracing::error!(target = "showbiz", "message type ({}) not supported {} (packet handler)", msg.msg_ty, msg.from);
+                tracing::error!(target = "showbiz.packet", "message type ({}) not supported {} (packet handler)", msg.msg_ty, msg.from);
               }
             }
           }
@@ -54,33 +54,33 @@ where
     let (_, suspect) = match Suspect::decode_archived::<T::Checksumer>(&msg.buf) {
       Ok(rst) => rst,
       Err(e) => {
-        tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode suspect message");
+        tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to decode suspect message");
         return;
       }
     };
 
     if let Err(e) = self.suspect_node((suspect, msg.buf.clone()).into()).await {
-      tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to suspect node");
+      tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to suspect node");
     }
   }
 
   async fn handle_alive(&self, msg: MessageHandoff) {
     if let Err(e) = self.ensure_can_connect(msg.from.ip()) {
-      tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "blocked alive message");
+      tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "blocked alive message");
       return;
     }
 
     let (_, alive) = match Alive::decode_archived::<T::Checksumer>(&msg.buf) {
       Ok(alive) => alive,
       Err(e) => {
-        tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode alive message");
+        tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to decode alive message");
         return;
       }
     };
 
     if self.inner.opts.ip_must_be_checked() {
       if let Err(e) = self.inner.opts.ip_allowed(alive.node.addr().ip()) {
-        tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "blocked alive message");
+        tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "blocked alive message");
         return;
       }
     }
@@ -93,7 +93,7 @@ where
     let (_, dead) = match Dead::decode_archived::<T::Checksumer>(&msg.buf) {
       Ok(dead) => dead,
       Err(e) => {
-        tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode dead message");
+        tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to decode dead message");
         return;
       }
     };
@@ -103,14 +103,14 @@ where
       .dead_node(&mut memberlist, (dead, msg.buf.clone()).into())
       .await
     {
-      tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to mark node as dead");
+      tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to mark node as dead");
     }
   }
 
   async fn handle_user(&self, msg: MessageHandoff) {
     if let Some(d) = self.delegate.as_ref() {
       if let Err(e) = d.notify_user_msg(msg.buf).await {
-        tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to handle user message");
+        tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to handle user message");
       }
     }
   }

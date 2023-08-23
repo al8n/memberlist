@@ -95,7 +95,7 @@ where
       .await;
 
     // Send a ping to the node.
-    let msg = ping.encode(0, 0, 0);
+    let msg = ping.encode(0, 0);
     self.send_msg((&node).into(), msg).await?;
     // Mark the sent time here, which should be after any pre-processing and
     // system calls to do the actual send. This probably under-reports a bit,
@@ -182,12 +182,12 @@ where
       }
 
       // If we are leaving, we broadcast and wait
-      let msg = d.encode(0, 0, 0);
+      let msg = d.encode(0, 0);
       self
         .broadcast_notify(node, msg, Some(self.inner.leave_broadcast_tx.clone()))
         .await;
     } else {
-      let msg = d.encode(0, 0, 0);
+      let msg = d.encode(0, 0);
       self.broadcast(node, msg).await;
     }
 
@@ -243,7 +243,7 @@ where
     // that's already suspect.
     if let Some(timer) = &mut state.suspicion {
       if timer.confirm(&from).await {
-        let msg = s.encode(0, 0, 0);
+        let msg = s.encode(0, 0);
         self.broadcast(node.clone(), msg).await;
       }
       return Ok(());
@@ -265,7 +265,7 @@ where
       // Do not mark ourself suspect
       return Ok(());
     } else {
-      let msg = s.encode(0, 0, 0);
+      let msg = s.encode(0, 0);
       self.broadcast(node.clone(), msg).await;
     }
 
@@ -524,7 +524,7 @@ where
       self.refute(&member.state, alive.incarnation).await;
       tracing::warn!(target = "showbiz.state", local = %self.inner.id, peer = %alive.node, local_meta = ?member.state.node.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
     } else {
-      let msg = alive.encode(0, 0, 0);
+      let msg = alive.encode(0, 0);
       self
         .broadcast_notify(alive.node.clone(), msg, notify_tx)
         .await;
@@ -869,7 +869,7 @@ where
       .await;
 
     if target.state == NodeState::Alive {
-      let pmsg = ping.encode(0, 0, 0);
+      let pmsg = ping.encode(0, 0);
       if let Err(e) = self.send_msg(target.id().into(), pmsg).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
         if e.failed_remote() {
@@ -880,13 +880,13 @@ where
         return;
       }
     } else {
-      let pmsg = ping.encode(0, 0, 0);
+      let pmsg = ping.encode(0, 0);
       let suspect = Suspect {
         incarnation: target.incarnation.load(Ordering::SeqCst),
         node: target.id().clone(),
         from: self.inner.id.clone(),
       };
-      let smsg = suspect.encode(0, 0, 0);
+      let smsg = suspect.encode(0, 0);
       let compound = Message::compound(vec![pmsg, smsg]);
       if let Err(e) = self
         .raw_send_msg_packet(&target.id().into(), compound)
@@ -990,7 +990,7 @@ where
     for peer in nodes {
       // We only expect nack to be sent from peers who understand
       // version 4 of the protocol.
-      let msg = ind.encode(0, 0, 0);
+      let msg = ind.encode(0, 0);
       if let Err(e) = self.send_msg((&ind.target).into(), msg).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
       }
@@ -1337,7 +1337,7 @@ where
       delegate_version: state.node.delegate_version,
     };
 
-    let msg = a.encode(0, 0, 0);
+    let msg = a.encode(0, 0);
     self.broadcast(state.node.id.clone(), msg).await;
   }
 }

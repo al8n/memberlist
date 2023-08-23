@@ -15,8 +15,8 @@ macro_rules! bad_bail {
     impl super::Type for $name {
       const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
 
-      fn encode(&self, r1: u8, r2: u8, r3: u8) -> Message {
-        super::encode::<_, { Self::PREALLOCATE }>(MessageType::$name, r1, r2, r3, self)
+      fn encode(&self, r1: u8, r2: u8) -> Message {
+        super::encode::<_, { Self::PREALLOCATE }>(MessageType::$name, r1, r2, self)
       }
     }
 
@@ -80,10 +80,10 @@ macro_rules! bad_bail {
           self.from() == self.node()
         }
 
-        pub(crate) fn encode(&self, r1: u8, r2: u8, r3: u8) -> Message {
+        pub(crate) fn encode(&self, r1: u8, r2: u8) -> Message {
           match self {
-            Self::Owned(d) => d.encode(r1, r2, r3),
-            Self::Archived(_, src) => Message(MessageInner::Bytes(src.clone())),
+            Self::Owned(d) => d.encode(r1, r2),
+            Self::Archived(_, src) => todo!(),
           }
         }
       }

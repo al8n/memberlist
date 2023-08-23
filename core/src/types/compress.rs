@@ -84,23 +84,18 @@ pub(crate) struct Compress {
 impl Compress {
   const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
 
-  pub(crate) fn encode_slice<C: Checksumer>(
+  pub(crate) fn encode_slice(
     algo: CompressionAlgo,
     r1: u8,
     r2: u8,
-    r3: u8,
     src: &[u8],
-  ) -> Result<Message, CompressError> {
+  ) -> Result<Vec<u8>, CompressError> {
     let mut buf = Vec::with_capacity(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE + src.len());
     buf[..ENCODE_HEADER_SIZE].copy_from_slice(&[
       MessageType::Compress as u8,
+      0,
       r1,
       r2,
-      r3,
-      0,
-      0,
-      0,
-      0,
       0,
       0,
       0,
@@ -110,17 +105,50 @@ impl Compress {
     match algo {
       CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
         .into_vec(&mut buf)
-        .encode_all(&src)
+        .encode_all(src)
         .status
         .map(|_| {
-          let mut h = C::new();
-          h.update(&buf);
           let len = buf.len();
           buf[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE]
             .copy_from_slice(((len - ENCODE_HEADER_SIZE) as u32).to_be_bytes().as_slice());
-          buf[ENCODE_META_SIZE + MAX_MESSAGE_SIZE..ENCODE_HEADER_SIZE]
-            .copy_from_slice(h.finalize().to_be_bytes().as_slice());
-          Message(MessageInner::Bytes(buf.into()))
+          buf
+        })
+        .map_err(CompressError::Lzw),
+      CompressionAlgo::None => unreachable!(),
+    }
+  }
+
+  pub(crate) fn encode_slice_with_checksum(
+    algo: CompressionAlgo,
+    r1: u8,
+    r2: u8,
+    src: &[u8],
+  ) -> Result<Vec<u8>, CompressError> {
+    let mut buf =
+      Vec::with_capacity(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE + src.len() + CHECKSUM_SIZE);
+    buf[..ENCODE_HEADER_SIZE].copy_from_slice(&[
+      MessageType::Compress as u8,
+      MessageType::HasCrc as u8,
+      r1,
+      r2,
+      0,
+      0,
+      0,
+      0,
+      algo as u8,
+    ]);
+    match algo {
+      CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+        .into_vec(&mut buf)
+        .encode_all(src)
+        .status
+        .map(|_| {
+          let len = buf.len();
+          buf[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE]
+            .copy_from_slice(((len - ENCODE_HEADER_SIZE) as u32).to_be_bytes().as_slice());
+          let cks = crc32fast::hash(&buf[ENCODE_HEADER_SIZE..]);
+          buf.put_u32(cks);
+          buf
         })
         .map_err(CompressError::Lzw),
       CompressionAlgo::None => unreachable!(),
@@ -132,37 +160,24 @@ impl Compress {
       CompressionAlgo::Lzw => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
         .decode(&self.buf)
         .map(|buf| buf.into())
-        .map_err(|e| DecompressError::Lzw(e)),
+        .map_err(DecompressError::Lzw),
       CompressionAlgo::None => Ok(self.buf.clone()),
     }
   }
 
-  pub(crate) fn encode<C: Checksumer>(
-    &self,
-    r1: u8,
-    r2: u8,
-    r3: u8,
-  ) -> Result<Message, CompressError> {
-    Self::encode_slice::<C>(self.algo, r1, r2, r3, &self.buf)
+  pub(crate) fn encode(&self, r1: u8, r2: u8) -> Result<Vec<u8>, CompressError> {
+    Self::encode_slice(self.algo, r1, r2, &self.buf)
   }
 
-  pub(crate) fn decode_from_bytes<C: Checksumer>(
-    mut src: Bytes,
-  ) -> Result<(EncodeMeta, Self), DecodeError> {
-    let r1 = src[1];
-    let r2 = src[2];
-    let r3 = src[3];
+  pub(crate) fn decode_from_bytes(mut src: Bytes) -> Result<(EncodeMeta, Self), DecodeError> {
+    let marker = src[1];
+    let r1 = src[2];
+    let r2 = src[3];
     let len = u32::from_be_bytes(
-      (&src[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE].try_into()).unwrap(),
+      src[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE]
+        .try_into()
+        .unwrap(),
     );
-    let cks = u32::from_be_bytes(
-      (&src[ENCODE_META_SIZE + MAX_MESSAGE_SIZE..ENCODE_HEADER_SIZE].try_into()).unwrap(),
-    );
-    let mut h = C::new();
-    h.update(&src[ENCODE_HEADER_SIZE..]);
-    if cks != h.finalize() {
-      return Err(DecodeError::ChecksumMismatch);
-    }
     let algo = CompressionAlgo::try_from(src[ENCODE_HEADER_SIZE])?;
     match algo {
       CompressionAlgo::Lzw => {
@@ -170,9 +185,9 @@ impl Compress {
         Ok((
           EncodeMeta {
             ty: MessageType::Compress,
+            marker,
             r1,
             r2,
-            r3,
           },
           Self { algo, buf: src },
         ))
@@ -182,9 +197,9 @@ impl Compress {
         Ok((
           EncodeMeta {
             ty: MessageType::Compress,
+            marker,
             r1,
             r2,
-            r3,
           },
           Self { algo, buf: src },
         ))

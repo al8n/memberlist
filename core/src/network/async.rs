@@ -56,7 +56,7 @@ where
       .raw_send_msg_stream(
         &mut conn,
         self.inner.opts.label.clone(),
-        ping.encode(0, 0, 0),
+        ping.encode(0, 0),
         target.addr(),
       )
       .await?;
@@ -175,7 +175,7 @@ where
     // Authenticated Data is:
     //
     //   [messageType; u8] [label length; u8] [reserved2; u8] [reserved3; u8]
-    //   [messageLength; u32] [checksum; u32] [stream_label; optional] [encryptionAlgo; u8]
+    //   [messageLength; u32] [stream_label; optional] [encryptionAlgo; u8]
     //
     let mut ciphertext = buf.split_off(ENCODE_HEADER_SIZE);
     if label.is_empty() {
@@ -210,18 +210,15 @@ where
 
   fn decrypt_remote_state(
     stream_label: &Label,
-    header: EncodeHeader,
     mut buf: BytesMut,
     keyring: &SecretKeyring,
   ) -> Result<Bytes, Error<T, D>> {
-    let EncodeHeader { meta, len } = header;
-
     // Decrypt the cipherText with some authenticated data
     //
     // Authenticated Data is:
     //
-    //   [messageType; u8] [label length; u8] [reserved2; u8] [reserved3; u8]
-    //   [messageLength; u32] [checksum; u32] [stream_label; optional] [encryptionAlgo; u8]
+    //   [messageType; u8] [reserverd1; u8] [reserved2; u8] [reserved3; u8]
+    //   [messageLength; u32] [stream_label; optional] [encryptionAlgo; u8]
     //
 
     let mut ciphertext = buf.split_off(ENCODE_HEADER_SIZE + EncryptionAlgo::SIZE);
@@ -240,9 +237,4 @@ where
         .map_err(From::from)
     }
   }
-}
-
-struct EncryptedRemoteStateHeader {
-  meta_size: usize,
-  buf: BytesMut,
 }

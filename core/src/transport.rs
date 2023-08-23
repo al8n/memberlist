@@ -211,14 +211,19 @@ mod r#async {
       let mut meta = [0; ENCODE_HEADER_SIZE];
       self.read_exact(&mut meta).await?;
       let mt = meta[0].try_into().map_err(DecodeError::from)?;
-      let r1 = meta[1];
-      let r2 = meta[2];
-      let r3 = meta[3];
+      let marker = meta[1];
+      let r1 = meta[2];
+      let r2 = meta[3];
       let len = u32::from_be_bytes(
         (&meta[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE].try_into()).unwrap(),
       );
       Ok(EncodeHeader {
-        meta: EncodeMeta { ty: mt, r1, r2, r3 },
+        meta: EncodeMeta {
+          ty: mt,
+          marker,
+          r1,
+          r2,
+        },
         len,
       })
     }

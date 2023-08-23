@@ -123,7 +123,7 @@ where
     &self,
     conn: &mut ReliableConnection<T>,
     label: Label,
-    mut buf: Message,
+    buf: Message,
     addr: SocketAddr,
   ) -> Result<(), Error<T, D>> {
     let compression_enabled = !self.inner.opts.compression_algo.is_none();
@@ -154,15 +154,9 @@ where
         let keyring = self.inner.opts.secret_keyring.clone();
         let (tx, rx) = futures_channel::oneshot::channel();
         rayon::spawn(move || {
-          if compression_enabled {
-            buf = match Compress::encode_slice::<T::Checksumer>(
-              compression_algo,
-              0,
-              0,
-              0,
-              buf.underlying_bytes(),
-            ) {
-              Ok(buf) => buf,
+          let data = if compression_enabled {
+            match Compress::encode_slice(compression_algo, 0, 0, buf.underlying_bytes()) {
+              Ok(buf) => Either::Left(buf),
               Err(e) => {
                 tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to compress payload");
                 if tx.send(Err(e.into())).is_err() {
@@ -173,15 +167,21 @@ where
                 }
                 return;
               }
-            };
-          }
+            }
+          } else {
+            Either::Right(buf)
+          };
 
           // Check if encryption is enabled
           if let Some(primary_key) = primary_key {
+            let data = match &data {
+              Either::Left(data) => data.as_slice(),
+              Either::Right(data) => data.underlying_bytes(),
+            };
             match Self::encrypt_local_state(
               primary_key,
               keyring.as_ref().unwrap(),
-              buf.underlying_bytes(),
+              data,
               &label,
               encryption_algo,
             ) {
@@ -192,7 +192,7 @@ where
                   incr_tcp_sent_counter(crypt.len() as u64, metric_labels.iter());
                 }
 
-                if tx.send(Ok(Message::from_bytes(crypt))).is_err() {
+                if tx.send(Ok(Either::Left(crypt))).is_err() {
                   tracing::error!(
                     target = "showbiz.stream",
                     err = "failed to send encrypt payload back to the onload thread"
@@ -209,7 +209,7 @@ where
                 }
               }
             }
-          } else if tx.send(Ok(buf)).is_err() {
+          } else if tx.send(Ok(data.map_left(Into::into))).is_err() {
             tracing::error!(
               target = "showbiz.stream",
               err = "failed to send compressed payload back to the onload thread"
@@ -225,53 +225,50 @@ where
               incr_tcp_sent_counter(buf.len() as u64, self.inner.opts.metric_labels.iter());
             }
 
-            return conn
-              .write_all(buf.underlying_bytes())
-              .await
-              .map_err(Error::transport);
+            let data = match &buf {
+              Either::Left(data) => data,
+              Either::Right(data) => data.underlying_bytes(),
+            };
+            return conn.write_all(data).await.map_err(Error::transport);
           }
           Ok(Err(e)) => return Err(e),
           Err(_) => return Err(Error::OffloadPanic),
         }
       }
 
-      if compression_enabled {
-        buf = match Compress::encode_slice::<T::Checksumer>(
-          compression_algo,
-          0,
-          0,
-          0,
-          buf.underlying_bytes(),
-        ) {
-          Ok(buf) => buf,
+      let data = if compression_enabled {
+        match Compress::encode_slice(compression_algo, 0, 0, buf.underlying_bytes()) {
+          Ok(buf) => buf.into(),
           Err(e) => {
             tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to compress payload");
             return Err(e.into());
           }
-        };
-      }
+        }
+      } else {
+        buf.freeze()
+      };
 
       // Check if encryption is enabled
       if let Some(primary_key) = primary_key {
         match Self::encrypt_local_state(
           primary_key,
           self.inner.opts.secret_keyring.as_ref().unwrap(),
-          &buf,
+          &data,
           &label,
           encryption_algo,
         ) {
           // Write out the entire send buffer
-          Ok(crypt) => Either::Left(crypt),
+          Ok(crypt) => crypt,
           Err(e) => {
             tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to encrypt local state");
             return Err(e);
           }
         }
       } else {
-        Either::Right(buf)
+        data
       }
     } else {
-      Either::Right(buf)
+      buf.freeze()
     };
 
     // Write out the entire send buffer
@@ -385,9 +382,9 @@ where
       user_state_len: user_data.len() as u32,
       join,
     };
-    let mut ser = MessageSerializer::new();
-    ser.serialize_value(&header).unwrap();
-    // let mut buf = header.encode(0, 0, 0);
+    // let mut ser = MessageSerializer::new();
+    // ser.serialize_value(&header).unwrap();
+    // let mut buf = header.encode(0, 0);
     // let encoded_header_size = encoded_u32_len(header_size as u32);
     // let basic_len = header_size
     //   + encoded_header_size
@@ -499,7 +496,7 @@ where
       let plain = if h.len as usize >= opts.offload_size {
         let (tx, rx) = futures_channel::oneshot::channel();
         rayon::spawn(move || {
-          match Self::decrypt_remote_state(&label, h, encrypted_msg, keyring.as_ref().unwrap()) {
+          match Self::decrypt_remote_state(&label, encrypted_msg, keyring.as_ref().unwrap()) {
             Ok(plain) => {
               if tx.send(Ok(plain)).is_err() {
                 tracing::error!(
@@ -523,7 +520,7 @@ where
           Err(_) => return Err(Error::OffloadPanic),
         }
       } else {
-        match Self::decrypt_remote_state(&label, h, encrypted_msg, keyring.as_ref().unwrap()) {
+        match Self::decrypt_remote_state(&label, encrypted_msg, keyring.as_ref().unwrap()) {
           Ok(plain) => plain,
           Err(e) => return Err(e),
         }
@@ -542,7 +539,7 @@ where
 
     if h.meta.ty == MessageType::Compress {
       if let Some(unencrypted) = unencrypted {
-        let (_, compress) = Compress::decode_from_bytes::<T::Checksumer>(unencrypted)?;
+        let (_, compress) = Compress::decode_from_bytes(unencrypted)?;
         let uncompressed_data: Bytes = if compress.algo.is_none() {
           unreachable!()
         } else if compress.buf.len() > opts.offload_size {
@@ -672,7 +669,7 @@ where
 
           let err_resp = ErrorResponse::new(err.to_string());
           if let Err(e) = self
-            .raw_send_msg_stream(&mut conn, stream_label, err_resp.encode(0, 0, 0), addr)
+            .raw_send_msg_stream(&mut conn, stream_label, err_resp.encode(0, 0), addr)
             .await
           {
             tracing::error!(target = "showbiz.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to send error response");
@@ -706,7 +703,7 @@ where
 
         let ack = AckResponse::empty(ping.seq_no);
         if let Err(e) = self
-          .raw_send_msg_stream(&mut conn, stream_label, ack.encode(0, 0, 0), addr)
+          .raw_send_msg_stream(&mut conn, stream_label, ack.encode(0, 0), addr)
           .await
         {
           tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to send ack response");
