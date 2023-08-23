@@ -115,11 +115,9 @@ impl Compress {
         .map(|_| {
           let mut h = C::new();
           h.update(&buf);
-          buf[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE].copy_from_slice(
-            ((buf.len() - ENCODE_HEADER_SIZE) as u32)
-              .to_be_bytes()
-              .as_slice(),
-          );
+          let len = buf.len();
+          buf[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE]
+            .copy_from_slice(((len - ENCODE_HEADER_SIZE) as u32).to_be_bytes().as_slice());
           buf[ENCODE_META_SIZE + MAX_MESSAGE_SIZE..ENCODE_HEADER_SIZE]
             .copy_from_slice(h.finalize().to_be_bytes().as_slice());
           Message(MessageInner::Bytes(buf.into()))

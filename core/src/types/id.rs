@@ -64,12 +64,6 @@ impl Borrow<SocketAddr> for NodeId {
   }
 }
 
-impl Borrow<SocketAddr> for ArchivedNodeId {
-  fn borrow(&self) -> &SocketAddr {
-    &self.addr.as_socket_addr()
-  }
-}
-
 impl ArchivedNodeId {
   pub fn addr(&self) -> SocketAddr {
     self.addr.as_socket_addr()
@@ -106,7 +100,7 @@ impl<'a> CowNodeId<'a> {
   pub fn to_owned(&self) -> Result<NodeId, DecodeError> {
     match self {
       Self::Owned(id) => Ok(id.clone()),
-      Self::Borrowed(id) => Ok(*id.clone()),
+      Self::Borrowed(id) => Ok((*id).clone()),
       Self::Archived(id) => (*id)
         .deserialize(&mut SharedDeserializeMap::default())
         .map_err(DecodeError::Decode),

@@ -25,8 +25,8 @@ impl AckResponse {
 impl super::Type for AckResponse {
   const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
 
-  fn encode<C: Checksumer>(&self, r1: u8, r2: u8, r3: u8) -> Message {
-    super::encode::<C, _, { Self::PREALLOCATE }>(MessageType::AckResponse, r1, r2, r3, self)
+  fn encode(&self, r1: u8, r2: u8, r3: u8) -> Message {
+    super::encode::<_, { Self::PREALLOCATE }>(MessageType::AckResponse, r1, r2, r3, self)
   }
 }
 
@@ -52,7 +52,7 @@ impl NackResponse {
 impl super::Type for NackResponse {
   const PREALLOCATE: usize = super::ENCODE_HEADER_SIZE + 4;
 
-  fn encode<C: Checksumer>(&self, r1: u8, r2: u8, r3: u8) -> Message {
-    super::encode::<C, _, { Self::PREALLOCATE }>(MessageType::NackResponse, r1, r2, r3, self)
+  fn encode(&self, r1: u8, r2: u8, r3: u8) -> Message {
+    super::encode::<_, { Self::PREALLOCATE }>(MessageType::NackResponse, r1, r2, r3, self)
   }
 }

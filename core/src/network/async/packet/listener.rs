@@ -74,14 +74,7 @@ where
       }
 
       match EncodeHeader::from_bytes(&buf.split_to(ENCODE_HEADER_SIZE)) {
-        Ok(header) => {
-          let mut h = T::Checksumer::new();
-          h.update(&buf);
-          if header.cks != h.finalize() {
-            tracing::error!(target = "showbiz.packet", addr = %addr, err=%DecodeError::ChecksumMismatch, "corrupted packet");
-            return;
-          }
-        }
+        Ok(header) => {}
         Err(e) => {
           tracing::error!(target = "showbiz.packet", addr = %addr, err=%e, "invalid packet header");
           return;
@@ -246,13 +239,13 @@ where
         seq_no: p.seq_no,
         payload,
       }
-      .encode::<T::Checksumer>(0, 0, 0)
+      .encode(0, 0, 0)
     } else {
       AckResponse {
         seq_no: p.seq_no,
         payload: Bytes::new(),
       }
-      .encode::<T::Checksumer>(0, 0, 0)
+      .encode(0, 0, 0)
     };
 
     if let Err(e) = self.send_msg((&p.source).into(), msg).await {
@@ -304,7 +297,7 @@ where
             if let Err(e) = this
               .send_msg(
                 ind_source.into(),
-                ack.encode::<T::Checksumer>(h.meta.r1, h.meta.r2, h.meta.r3),
+                ack.encode(h.meta.r1, h.meta.r2, h.meta.r3),
               )
               .await
             {
@@ -319,7 +312,7 @@ where
     if let Err(e) = self
       .send_msg(
         ind.target.into(),
-        ping.encode::<T::Checksumer>(h.meta.r1, h.meta.r2, h.meta.r3),
+        ping.encode(h.meta.r1, h.meta.r2, h.meta.r3),
       )
       .await
     {
@@ -334,7 +327,7 @@ where
         _ = <T::Runtime as Runtime>::sleep(probe_timeout).fuse() => {
           // We've not received an ack, so send a nack.
           let nack = NackResponse::new(ind.seq_no);
-          if let Err(e) = this.send_msg((&ind.source).into(), nack.encode::<T::Checksumer>(h.meta.r1, h.meta.r2, h.meta.r3)).await {
+          if let Err(e) = this.send_msg((&ind.source).into(), nack.encode(h.meta.r1, h.meta.r2, h.meta.r3)).await {
             tracing::error!(target = "showbiz", local = %ind.source, remote = %from, err = %e, "failed to send nack");
           }
         }
@@ -346,7 +339,7 @@ where
   }
 
   async fn handle_ack(&self, buf: Bytes, from: SocketAddr, timestamp: Instant) {
-    match AckResponse::decode::<T::Checksumer>(&buf[1..]) {
+    match AckResponse::decode::<T::Checksumer>(&buf) {
       Ok((_, ack)) => self.invoke_ack_handler(ack, timestamp).await,
       Err(e) => {
         tracing::error!(target = "showbiz", addr = %from, err=%e, "failed to decode ack response");
@@ -355,7 +348,7 @@ where
   }
 
   async fn handle_nack(&self, buf: Bytes, from: SocketAddr) {
-    match NackResponse::decode::<T::Checksumer>(&buf[1..]) {
+    match NackResponse::decode::<T::Checksumer>(&buf) {
       Ok((_, nack)) => self.invoke_nack_handler(nack).await,
       Err(e) => {
         tracing::error!(target = "showbiz", addr = %from, err=%e, "failed to decode nack response");

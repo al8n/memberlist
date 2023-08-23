@@ -19,7 +19,7 @@ pub(crate) struct Alive {
 impl super::Type for Alive {
   const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
 
-  fn encode<C: Checksumer>(&self, r1: u8, r2: u8, r3: u8) -> Message {
-    super::encode::<C, _, { Self::PREALLOCATE }>(MessageType::Alive, r1, r2, r3, self)
+  fn encode(&self, r1: u8, r2: u8, r3: u8) -> Message {
+    super::encode::<_, { Self::PREALLOCATE }>(MessageType::Alive, r1, r2, r3, self)
   }
 }

@@ -217,13 +217,9 @@ mod r#async {
       let len = u32::from_be_bytes(
         (&meta[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE].try_into()).unwrap(),
       );
-      let cks = u32::from_be_bytes(
-        (&meta[ENCODE_META_SIZE + MAX_MESSAGE_SIZE..ENCODE_HEADER_SIZE].try_into()).unwrap(),
-      );
       Ok(EncodeHeader {
         meta: EncodeMeta { ty: mt, r1, r2, r3 },
         len,
-        cks,
       })
     }
 
@@ -234,11 +230,6 @@ mod r#async {
       let header = self.read_message_header().await?;
       let mut buf = vec![0; header.len as usize];
       self.read_exact(&mut buf).await?;
-      let mut h = T::Checksumer::new();
-      h.update(&buf);
-      if header.cks != h.finalize() {
-        return Err(TransportError::Decode(DecodeError::ChecksumMismatch));
-      }
       Ok((header, buf.into()))
     }
 
@@ -253,7 +244,7 @@ mod r#async {
       let more_bytes = header.len as usize;
       #[cfg(feature = "metrics")]
       {
-        add_sample_to_remote_size_histogram(more_bytes as f64, metric_labels.iter());
+        // add_sample_to_remote_size_histogram(more_bytes as f64, metric_labels.iter());
       }
 
       if more_bytes > MAX_PUSH_STATE_BYTES {
@@ -274,11 +265,6 @@ mod r#async {
       buf.put_slice(&header.to_array());
       buf.resize(ENCODE_HEADER_SIZE + header.len as usize, 0);
       self.read_exact(&mut buf[ENCODE_HEADER_SIZE..]).await?;
-      let mut h = T::Checksumer::new();
-      h.update(&buf[ENCODE_HEADER_SIZE..]);
-      if header.cks != h.finalize() {
-        return Err(TransportError::Decode(DecodeError::ChecksumMismatch));
-      }
       Ok(buf)
     }
 

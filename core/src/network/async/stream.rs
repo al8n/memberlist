@@ -3,6 +3,7 @@ use std::sync::Arc;
 // use agnostic::lock::RwLock;
 use either::Either;
 use futures_util::{Future, Stream};
+use rkyv::ser::Serializer;
 
 use crate::{
   transport::ReliableConnection,
@@ -286,51 +287,52 @@ where
     &self,
     mut data: Bytes,
   ) -> Result<RemoteNodeState, Error<T, D>> {
-    let (_, header) = match PushPullHeader::decode(&data) {
-      Ok(header) => header,
-      Err(e) => return Err(TransportError::Decode(e).into()),
-    };
-    // Allocate space for the transfer
-    let mut remote_nodes = Vec::<PushNodeState>::with_capacity(header.nodes as usize);
-    // Try to decode all the states
-    for _ in 0..header.nodes {
-      let len = PushNodeState::decode_len(&mut data).map_err(TransportError::Decode)?;
-      if len > data.remaining() {
-        return Err(
-          TransportError::Decode(DecodeError::FailReadRemoteState(data.remaining(), len)).into(),
-        );
-      }
+    // let (_, header) = match PushPullHeader::decode(&data) {
+    //   Ok(header) => header,
+    //   Err(e) => return Err(TransportError::Decode(e).into()),
+    // };
+    // // Allocate space for the transfer
+    // let mut remote_nodes = Vec::<PushNodeState>::with_capacity(header.nodes as usize);
+    // // Try to decode all the states
+    // for _ in 0..header.nodes {
+    //   let len = PushNodeState::decode_len(&mut data).map_err(TransportError::Decode)?;
+    //   if len > data.remaining() {
+    //     return Err(
+    //       TransportError::Decode(DecodeError::FailReadRemoteState(data.remaining(), len)).into(),
+    //     );
+    //   }
 
-      match PushNodeState::decode_from(data.split_to(len)) {
-        Ok(state) => remote_nodes.push(state),
-        Err(e) => return Err(TransportError::Decode(e).into()),
-      }
-    }
+    //   match PushNodeState::decode_from(data.split_to(len)) {
+    //     Ok(state) => remote_nodes.push(state),
+    //     Err(e) => return Err(TransportError::Decode(e).into()),
+    //   }
+    // }
 
-    // Read the remote user state into a buffer
-    if header.user_state_len > 0 {
-      if header.user_state_len as usize > data.remaining() {
-        return Err(
-          TransportError::Decode(DecodeError::FailReadUserState(
-            data.remaining(),
-            header.user_state_len as usize,
-          ))
-          .into(),
-        );
-      }
-      let user_state = data.split_to(header.user_state_len as usize);
-      return Ok(RemoteNodeState {
-        join: header.join,
-        push_states: remote_nodes,
-        user_state,
-      });
-    }
+    // // Read the remote user state into a buffer
+    // if header.user_state_len > 0 {
+    //   if header.user_state_len as usize > data.remaining() {
+    //     return Err(
+    //       TransportError::Decode(DecodeError::FailReadUserState(
+    //         data.remaining(),
+    //         header.user_state_len as usize,
+    //       ))
+    //       .into(),
+    //     );
+    //   }
+    //   let user_state = data.split_to(header.user_state_len as usize);
+    //   return Ok(RemoteNodeState {
+    //     join: header.join,
+    //     push_states: remote_nodes,
+    //     user_state,
+    //   });
+    // }
 
-    Ok(RemoteNodeState {
-      join: header.join,
-      push_states: remote_nodes,
-      user_state: Bytes::new(),
-    })
+    // Ok(RemoteNodeState {
+    //   join: header.join,
+    //   push_states: remote_nodes,
+    //   user_state: Bytes::new(),
+    // })
+    todo!()
   }
 
   pub(super) async fn send_local_state(
@@ -363,7 +365,8 @@ where
             protocol_version: n.node.protocol_version,
             delegate_version: n.node.delegate_version,
           };
-          states_encoded_size += this.encoded_len();
+          // let encoded = this.encode();
+          // states_encoded_size += encoded.len();
           this
         })
         .collect::<Vec<_>>()
@@ -382,30 +385,32 @@ where
       user_state_len: user_data.len() as u32,
       join,
     };
-    let header_size = header.encoded_len();
-    let encoded_header_size = encoded_u32_len(header_size as u32);
-    let basic_len = header_size
-      + encoded_header_size
-      + if states_encoded_size != 0 {
-        states_encoded_size + encoded_u32_len(states_encoded_size as u32)
-      } else {
-        0
-      }
-      + if user_data.is_empty() {
-        0
-      } else {
-        user_data.len()
-      };
-    let total_len = MessageType::SIZE + basic_len + encoded_u32_len(basic_len as u32);
-    let mut buf = BytesMut::with_capacity(total_len);
-    buf.put_u8(MessageType::PushPull as u8);
-    encode_u32_to_buf(&mut buf, basic_len as u32);
-    header.encode_to(&mut buf);
+    let mut ser = MessageSerializer::new();
+    ser.serialize_value(&header).unwrap();
+    // let mut buf = header.encode(0, 0, 0);
+    // let encoded_header_size = encoded_u32_len(header_size as u32);
+    // let basic_len = header_size
+    //   + encoded_header_size
+    //   + if states_encoded_size != 0 {
+    //     states_encoded_size + encoded_u32_len(states_encoded_size as u32)
+    //   } else {
+    //     0
+    //   }
+    //   + if user_data.is_empty() {
+    //     0
+    //   } else {
+    //     user_data.len()
+    //   };
+    // let total_len = MessageType::SIZE + basic_len + encoded_u32_len(basic_len as u32);
+    // let mut buf = BytesMut::with_capacity(total_len);
+    // buf.put_u8(MessageType::PushPull as u8);
+    // encode_u32_to_buf(&mut buf, basic_len as u32);
+    // header.encode_to(&mut buf);
     #[cfg(feature = "metrics")]
     let mut node_state_counts = NodeState::empty_metrics();
 
     for n in local_nodes {
-      n.encode_to(&mut buf);
+      // n.encode_to(&mut buf);
       #[cfg(feature = "metrics")]
       {
         node_state_counts[n.state as u8 as usize].1 += 1;
@@ -447,18 +452,19 @@ where
     }
 
     // Write the user state as well
-    if !user_data.is_empty() {
-      buf.put_slice(&user_data);
-    }
+    // if !user_data.is_empty() {
+    //   // buf.put_slice(&user_data);
+    // }
 
-    let buf = buf.freeze();
-    #[cfg(feature = "metrics")]
-    {
-      set_local_size_gauge(basic_len as f64, self.inner.opts.metric_labels.iter());
-    }
-    self
-      .raw_send_msg_stream(conn, stream_label, Message::from_bytes(buf), addr)
-      .await
+    // let buf = buf.freeze();
+    // #[cfg(feature = "metrics")]
+    // {
+    //   set_local_size_gauge(basic_len as f64, self.inner.opts.metric_labels.iter());
+    // }
+    // self
+    //   .raw_send_msg_stream(conn, stream_label, Message::from_bytes(buf), addr)
+    //   .await
+    todo!()
   }
 
   /// Used to read messages from a stream connection, decrypting and
@@ -565,12 +571,12 @@ where
             };
           });
           match rx.await {
-            Ok(buf) => buf?.into(),
+            Ok(buf) => buf?,
             Err(_) => return Err(Error::OffloadPanic),
           }
         } else {
           match compress.decompress() {
-            Ok(buf) => buf.into(),
+            Ok(buf) => buf,
             Err(e) => return Err(Error::transport(DecodeError::Decompress(e).into())),
           }
         };
@@ -666,12 +672,7 @@ where
 
           let err_resp = ErrorResponse::new(err.to_string());
           if let Err(e) = self
-            .raw_send_msg_stream(
-              &mut conn,
-              stream_label,
-              err_resp.encode::<T::Checksumer>(0, 0, 0),
-              addr,
-            )
+            .raw_send_msg_stream(&mut conn, stream_label, err_resp.encode(0, 0, 0), addr)
             .await
           {
             tracing::error!(target = "showbiz.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to send error response");
@@ -705,12 +706,7 @@ where
 
         let ack = AckResponse::empty(ping.seq_no);
         if let Err(e) = self
-          .raw_send_msg_stream(
-            &mut conn,
-            stream_label,
-            ack.encode::<T::Checksumer>(0, 0, 0),
-            addr,
-          )
+          .raw_send_msg_stream(&mut conn, stream_label, ack.encode(0, 0, 0), addr)
           .await
         {
           tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to send ack response");

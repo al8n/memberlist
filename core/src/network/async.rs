@@ -56,7 +56,7 @@ where
       .raw_send_msg_stream(
         &mut conn,
         self.inner.opts.label.clone(),
-        ping.encode::<T::Checksumer>(0, 0, 0),
+        ping.encode(0, 0, 0),
         target.addr(),
       )
       .await?;
@@ -214,7 +214,7 @@ where
     mut buf: BytesMut,
     keyring: &SecretKeyring,
   ) -> Result<Bytes, Error<T, D>> {
-    let EncodeHeader { meta, len, cks } = header;
+    let EncodeHeader { meta, len } = header;
 
     // Decrypt the cipherText with some authenticated data
     //
@@ -229,33 +229,15 @@ where
       // Decrypt the payload
       keyring
         .decrypt_payload(&mut ciphertext, &buf)
+        .map(|_| ciphertext.freeze())
         .map_err(From::from)
-        .and_then(|_| {
-          let mut h = <T::Checksumer as Checksumer>::new();
-          h.update(&ciphertext);
-          if cks != h.finalize() {
-            return Err(Error::Transport(TransportError::Decode(
-              DecodeError::ChecksumMismatch,
-            )));
-          }
-          Ok(ciphertext.freeze())
-        })
     } else {
       let data_bytes = append_bytes(&buf, stream_label.as_bytes());
       // Decrypt the payload
       keyring
         .decrypt_payload(&mut ciphertext, data_bytes.as_ref())
+        .map(|_| ciphertext.freeze())
         .map_err(From::from)
-        .and_then(|_| {
-          let mut h = <T::Checksumer as Checksumer>::new();
-          h.update(&ciphertext);
-          if cks != h.finalize() {
-            return Err(Error::Transport(TransportError::Decode(
-              DecodeError::ChecksumMismatch,
-            )));
-          }
-          Ok(ciphertext.freeze())
-        })
     }
   }
 }

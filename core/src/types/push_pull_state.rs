@@ -13,8 +13,8 @@ pub(crate) struct PushPullHeader {
 impl super::Type for PushPullHeader {
   const PREALLOCATE: usize = super::ENCODE_HEADER_SIZE + 12;
 
-  fn encode<C: Checksumer>(&self, r1: u8, r2: u8, r3: u8) -> Message {
-    super::encode::<C, _, { Self::PREALLOCATE }>(MessageType::PushPull, r1, r2, r3, self)
+  fn encode(&self, r1: u8, r2: u8, r3: u8) -> Message {
+    super::encode::<_, { Self::PREALLOCATE }>(MessageType::PushPull, r1, r2, r3, self)
   }
 }
 
@@ -29,4 +29,20 @@ pub(crate) struct PushNodeState {
   state: NodeState,
   protocol_version: ProtocolVersion,
   delegate_version: DelegateVersion,
+}
+
+impl PushNodeState {
+  pub(crate) fn encode(&self) -> Message {
+    let mut ser = AllocSerializer::<{ super::DEFAULT_ENCODE_PREALLOCATE_SIZE }>::default();
+    ser.write(&[0, 0, 0, 0]).unwrap();
+    ser
+      .serialize_value(self)
+      .map(|_| {
+        let mut data = ser.into_serializer().into_inner();
+        let len = (data.len() - 4) as u32;
+        data[..4].copy_from_slice(&len.to_be_bytes());
+        Message(MessageInner::Aligned(data))
+      })
+      .unwrap()
+  }
 }

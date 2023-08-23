@@ -6,7 +6,14 @@ use std::{
 use bytes::{BufMut, Bytes, BytesMut};
 use rkyv::{
   de::deserializers::{SharedDeserializeMap, SharedDeserializeMapError},
-  ser::{serializers::AllocSerializer, Serializer},
+  ser::{
+    serializers::{
+      AllocScratch, AllocScratchError, AllocSerializer, CompositeSerializer,
+      CompositeSerializerError, FallbackScratch, HeapScratch, SharedSerializeMap,
+      SharedSerializeMapError, WriteSerializer,
+    },
+    Serializer,
+  },
   validation::validators::DefaultValidator,
   AlignedVec, Archive, CheckBytes, Deserialize, Serialize,
 };
@@ -54,11 +61,10 @@ mod packet;
 pub use packet::*;
 
 const DEFAULT_ENCODE_PREALLOCATE_SIZE: usize = 128;
-pub(crate) const CHECKSUM_SIZE: usize = core::mem::size_of::<u32>();
 pub(crate) const ENCODE_META_SIZE: usize =
   MessageType::SIZE + ProtocolVersion::SIZE + DelegateVersion::SIZE + 1;
 pub(crate) const MAX_MESSAGE_SIZE: usize = core::mem::size_of::<u32>();
-pub(crate) const ENCODE_HEADER_SIZE: usize = ENCODE_META_SIZE + MAX_MESSAGE_SIZE + CHECKSUM_SIZE; // message length
+pub(crate) const ENCODE_HEADER_SIZE: usize = ENCODE_META_SIZE + MAX_MESSAGE_SIZE; // message length
 
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeU32Error;
@@ -592,6 +598,12 @@ impl NodeState {
       Self::Left => "left",
     }
   }
+
+  #[cfg(feature = "metrics")]
+  #[inline]
+  pub(crate) const fn empty_metrics() -> [(&'static str, usize); 4] {
+    [("alive", 0), ("suspect", 0), ("dead", 0), ("left", 0)]
+  }
 }
 
 impl core::fmt::Display for NodeState {
@@ -663,14 +675,7 @@ impl core::fmt::Display for Node {
 pub(crate) trait Type: Sized + Archive {
   const PREALLOCATE: usize;
 
-  fn encode<C: Checksumer>(&self, r1: u8, r2: u8, r3: u8) -> Message;
-
-  fn decode_meta_size() -> usize {
-    const LENGTH_OFFSET: usize = 3;
-    const CHECKSUM_OFFSET: usize = 3 + core::mem::size_of::<u32>();
-    const PREFIX: usize = 3 + core::mem::size_of::<u32>() * 2;
-    PREFIX
-  }
+  fn encode(&self, r1: u8, r2: u8, r3: u8) -> Message;
 
   fn decode_archived<'a, C: Checksumer>(
     src: &'a [u8],
@@ -683,24 +688,16 @@ pub(crate) trait Type: Sized + Archive {
     let r2 = src[2];
     let r3 = src[3];
     let len = u32::from_be_bytes(
-      (&src[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE].try_into()).unwrap(),
+      src[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE]
+        .try_into()
+        .unwrap(),
     );
-    let cks = u32::from_be_bytes(
-      (&src[ENCODE_META_SIZE + MAX_MESSAGE_SIZE..ENCODE_HEADER_SIZE].try_into()).unwrap(),
-    );
-    let mut h = C::new();
-    h.update(&src[ENCODE_HEADER_SIZE..]);
-
-    if cks != h.finalize() {
-      return Err(DecodeError::ChecksumMismatch);
-    }
 
     rkyv::check_archived_root::<Self>(&src[ENCODE_HEADER_SIZE..])
       .map(|a| {
         (
           EncodeHeader {
             meta: EncodeMeta { ty: mt, r1, r2, r3 },
-            cks,
             len,
           },
           a,
@@ -731,37 +728,22 @@ pub(crate) trait Type: Sized + Archive {
   }
 }
 
-fn encode<C: Checksumer, T, const N: usize>(
-  ty: MessageType,
-  r1: u8,
-  r2: u8,
-  r3: u8,
-  msg: &T,
-) -> Message
+fn encode<T, const N: usize>(ty: MessageType, r1: u8, r2: u8, r3: u8, msg: &T) -> Message
 where
   T: Serialize<AllocSerializer<N>>,
 {
-  const LENGTH_OFFSET: usize = 4;
-  const CHECKSUM_OFFSET: usize = 4 + core::mem::size_of::<u32>();
-  const PREFIX: usize = 4 + core::mem::size_of::<u32>() * 2;
-
   let mut ser = AllocSerializer::<N>::default();
   ser
     .write(&[
       ty as u8, r1, r2, r3, 0, 0, 0, 0, // len
-      0, 0, 0, 0, // checksum
     ])
     .unwrap();
   ser
     .serialize_value(msg)
-    .map(|pos| {
+    .map(|_| {
       let mut data = ser.into_serializer().into_inner();
-      let len = (data.len() - PREFIX) as u32;
-      data[LENGTH_OFFSET..CHECKSUM_OFFSET].copy_from_slice(&len.to_be_bytes());
-      let mut h = C::new();
-      h.update(&data[PREFIX..]);
-      let cks = h.finalize();
-      data[CHECKSUM_OFFSET..PREFIX].copy_from_slice(&cks.to_be_bytes());
+      let len = (data.len() - ENCODE_HEADER_SIZE) as u32;
+      data[ENCODE_META_SIZE..ENCODE_HEADER_SIZE].copy_from_slice(&len.to_be_bytes());
       Message(MessageInner::Aligned(data))
     })
     .unwrap()
@@ -782,14 +764,12 @@ pub(crate) struct EncodeMeta {
 pub(crate) struct EncodeHeader {
   meta: EncodeMeta,
   len: u32,
-  cks: u32,
 }
 
 impl EncodeHeader {
   #[inline]
   pub(crate) const fn to_array(&self) -> [u8; ENCODE_HEADER_SIZE] {
     let len = self.len.to_be_bytes();
-    let cks = self.cks.to_be_bytes();
     [
       self.meta.ty as u8,
       self.meta.r1,
@@ -799,10 +779,6 @@ impl EncodeHeader {
       len[1],
       len[2],
       len[3],
-      cks[0],
-      cks[1],
-      cks[2],
-      cks[3],
     ]
   }
 
@@ -816,7 +792,70 @@ impl EncodeHeader {
         r3: src[3],
       },
       len: u32::from_be_bytes([src[4], src[5], src[6], src[7]]),
-      cks: u32::from_be_bytes([src[8], src[9], src[10], src[11]]),
     })
+  }
+}
+
+pub(crate) struct MessageSerializer<W: std::io::Write = Vec<u8>>(
+  CompositeSerializer<
+    WriteSerializer<W>,
+    FallbackScratch<HeapScratch<DEFAULT_ENCODE_PREALLOCATE_SIZE>, AllocScratch>,
+    SharedSerializeMap,
+  >,
+);
+
+impl MessageSerializer {
+  pub(crate) fn new() -> Self {
+    Self::with_writter(Vec::with_capacity(DEFAULT_ENCODE_PREALLOCATE_SIZE))
+  }
+}
+
+impl<W: std::io::Write> MessageSerializer<W> {
+  pub(crate) fn with_writter(w: W) -> Self {
+    Self(CompositeSerializer::new(
+      WriteSerializer::new(w),
+      Default::default(),
+      Default::default(),
+    ))
+  }
+
+  pub(crate) fn into_writter(self) -> W {
+    self.0.into_serializer().into_inner()
+  }
+
+  pub(crate) fn write_header(
+    &mut self,
+    ty: MessageType,
+    r1: u8,
+    r2: u8,
+    r3: u8,
+  ) -> Result<
+    (),
+    CompositeSerializerError<std::io::Error, AllocScratchError, SharedSerializeMapError>,
+  > {
+    self.0.write(&[
+      ty as u8, r1, r2, r3, 0, 0, 0, 0, // len
+      0, 0, 0, 0, // checksum
+    ])?;
+
+    Ok(())
+  }
+}
+
+impl<W: std::io::Write> core::ops::Deref for MessageSerializer<W> {
+  type Target = CompositeSerializer<
+    WriteSerializer<W>,
+    FallbackScratch<HeapScratch<DEFAULT_ENCODE_PREALLOCATE_SIZE>, AllocScratch>,
+    SharedSerializeMap,
+  >;
+
+  fn deref(&self) -> &Self::Target {
+    &self.0
+  }
+}
+
+impl<W: std::io::Write> core::ops::DerefMut for MessageSerializer<W> {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    &mut self.0
   }
 }

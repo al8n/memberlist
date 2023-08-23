@@ -64,13 +64,13 @@ where
     }
   }
 
-  async fn handle_alive(&self, mut msg: MessageHandoff) {
+  async fn handle_alive(&self, msg: MessageHandoff) {
     if let Err(e) = self.ensure_can_connect(msg.from.ip()) {
       tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "blocked alive message");
       return;
     }
 
-    let (_, alive) = match Alive::decode_archived(&msg.buf) {
+    let (_, alive) = match Alive::decode_archived::<T::Checksumer>(&msg.buf) {
       Ok(alive) => alive,
       Err(e) => {
         tracing::error!(target = "showbiz", err=%e, remote_addr = %msg.from, "failed to decode alive message");
@@ -85,7 +85,8 @@ where
       }
     }
 
-    self.alive_node(alive, None, false).await
+    // self.alive_node(alive, None, false).await
+    todo!()
   }
 
   async fn handle_dead(&self, msg: MessageHandoff) {
