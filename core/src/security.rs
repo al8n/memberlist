@@ -659,36 +659,7 @@ pub(crate) fn encrypt_payload(
   }
 }
 
-#[inline]
-fn encrypt_to<A: AeadInPlace + Aead>(
-  gcm: A,
-  nonce: &[u8],
-  data: &[u8],
-  dst: &mut BytesMut,
-) -> Result<(), SecurityError> {
-  let nonce = GenericArray::from_slice(nonce);
-  gcm
-    .encrypt_in_place(nonce, data, dst)
-    .map_err(SecurityError::AeadError)
-}
-
 impl SecretKeyring {
-  pub(crate) fn encrypt_to(
-    &self,
-    key: SecretKey,
-    nonce: &[u8],
-    auth_data: &[u8],
-    dst: &mut BytesMut,
-  ) -> Result<(), SecurityError> {
-    bail! {
-      enum SecretKey: &key {
-        Aes128(Aes128Gcm),
-        Aes192(Aes192Gcm),
-        Aes256(Aes256Gcm),
-      } -> |algo| encrypt_to(algo, nonce, auth_data, dst)
-    }
-  }
-
   pub(crate) fn encrypt_payload(
     &self,
     primary_key: SecretKey,

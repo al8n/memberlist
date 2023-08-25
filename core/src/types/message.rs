@@ -189,11 +189,6 @@ impl Message {
   pub(crate) fn underlying_bytes(&self) -> &[u8] {
     &self.0
   }
-
-  #[inline]
-  pub(crate) fn underlying_bytes_mut(&mut self) -> &mut [u8] {
-    &mut self.0
-  }
 }
 
 impl std::io::Write for Message {
@@ -373,22 +368,6 @@ impl<W: std::io::Write, const N: usize> MessageSerializer<N, W> {
 
   pub(crate) fn into_writter(self) -> W {
     self.0.into_serializer().into_inner()
-  }
-
-  pub(crate) fn write_header(
-    &mut self,
-    ty: MessageType,
-    r1: u8,
-    r2: u8,
-  ) -> Result<
-    (),
-    CompositeSerializerError<std::io::Error, AllocScratchError, SharedSerializeMapError>,
-  > {
-    self.0.write(&[
-      ty as u8, 0, r1, r2, 0, 0, 0, 0, // len
-    ])?;
-
-    Ok(())
   }
 }
 

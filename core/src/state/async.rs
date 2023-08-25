@@ -7,8 +7,8 @@ use crate::{
   suspicion::Suspicion,
   timer::Timer,
   types::{
-    Alive, ArchivedAlive, ArchivedNodeState, ArchivedPushNodeState, CowDead, CowSuspect, Dead,
-    IndirectPing, Message, Ping, Suspect, Type,
+    Alive, ArchivedAlive, ArchivedNodeState, ArchivedPushNodeState, Dead, IndirectPing, Message,
+    Ping, Suspect, Type,
   },
 };
 
@@ -149,10 +149,10 @@ where
   pub(crate) async fn dead_node(
     &self,
     memberlist: &mut Memberlist<T::Runtime>,
-    d: CowDead<'_>,
+    d: Dead,
   ) -> Result<(), Error<T, D>> {
-    let node = d.node().to_owned()?;
-    let idx = match memberlist.node_map.get(&node) {
+    // let node = d.node.clone();
+    let idx = match memberlist.node_map.get(&d.node) {
       Some(idx) => *idx,
       // If we've never heard about this node before, ignore it
       None => return Ok(()),
@@ -160,7 +160,7 @@ where
 
     let state = &mut memberlist.nodes[idx];
     // Ignore old incarnation numbers
-    if d.incarnation() < state.state.incarnation.load(Ordering::Relaxed) {
+    if d.incarnation < state.state.incarnation.load(Ordering::Relaxed) {
       return Ok(());
     }
 
@@ -180,7 +180,7 @@ where
         tracing::warn!(
           target = "showbiz.state",
           "refuting a dead message (from: {})",
-          d.from()
+          d.from
         );
         return Ok(()); // Do not mark ourself dead
       }
@@ -188,11 +188,15 @@ where
       // If we are leaving, we broadcast and wait
       let msg = d.encode(0, 0);
       self
-        .broadcast_notify(node, msg, Some(self.inner.leave_broadcast_tx.clone()))
+        .broadcast_notify(
+          d.node.clone(),
+          msg,
+          Some(self.inner.leave_broadcast_tx.clone()),
+        )
         .await;
     } else {
       let msg = d.encode(0, 0);
-      self.broadcast(node, msg).await;
+      self.broadcast(d.node.clone(), msg).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -204,7 +208,7 @@ where
     state
       .state
       .incarnation
-      .store(d.incarnation(), Ordering::Relaxed);
+      .store(d.incarnation, Ordering::Relaxed);
 
     // If the dead message was send by the node itself, mark it is left
     // instead of dead.
@@ -226,18 +230,16 @@ where
     Ok(())
   }
 
-  pub(crate) async fn suspect_node(&self, s: CowSuspect<'_>) -> Result<(), Error<T, D>> {
-    let node = s.node().to_owned()?;
-    let from = s.from().to_owned()?;
+  pub(crate) async fn suspect_node(&self, s: Suspect) -> Result<(), Error<T, D>> {
     let mut mu = self.inner.nodes.write().await;
 
-    let Some(&idx) = mu.node_map.get(&node) else {
+    let Some(&idx) = mu.node_map.get(&s.node) else {
       return Ok(());
     };
 
     let state = &mut mu.nodes[idx];
     // Ignore old incarnation numbers
-    if s.incarnation() < state.state.incarnation.load(Ordering::Relaxed) {
+    if s.incarnation < state.state.incarnation.load(Ordering::Relaxed) {
       return Ok(());
     }
 
@@ -246,9 +248,9 @@ where
     // independent confirmations to flow even when a node probes a node
     // that's already suspect.
     if let Some(timer) = &mut state.suspicion {
-      if timer.confirm(&from).await {
+      if timer.confirm(&s.from).await {
         let msg = s.encode(0, 0);
-        self.broadcast(node.clone(), msg).await;
+        self.broadcast(s.node.clone(), msg).await;
       }
       return Ok(());
     }
@@ -260,17 +262,17 @@ where
 
     // If this is us we need to refute, otherwise re-broadcast
     if state.state.node.id.eq(&self.inner.id) {
-      self.refute(&state.state, s.incarnation()).await;
+      self.refute(&state.state, s.incarnation).await;
       tracing::warn!(
         target = "showbiz.state",
         "refuting a suspect message (from: {})",
-        s.from()
+        s.from
       );
       // Do not mark ourself suspect
       return Ok(());
     } else {
       let msg = s.encode(0, 0);
-      self.broadcast(node.clone(), msg).await;
+      self.broadcast(s.node.clone(), msg).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -282,7 +284,7 @@ where
     state
       .state
       .incarnation
-      .store(s.incarnation(), Ordering::Relaxed);
+      .store(s.incarnation, Ordering::Relaxed);
     state.state.state = NodeState::Suspect;
     let change_time = Instant::now();
     state.state.state_change = change_time;
@@ -310,15 +312,15 @@ where
     let max = (self.inner.opts.suspicion_max_timeout_mult as u64) * min;
 
     let this = self.clone();
-    let incarnation = s.incarnation();
+    let incarnation = s.incarnation;
     state.suspicion = Some(Suspicion::new(
-      from.clone(),
+      s.from.clone(),
       k as u32,
       Duration::from_millis(min),
       Duration::from_millis(max),
       move |num_confirmations| {
         let t = this.clone();
-        let n = node.clone();
+        let n = s.node.clone();
         async move {
           let timeout = {
             let members = t.inner.nodes.read().await;
@@ -355,7 +357,7 @@ where
             );
             let mut memberlist = t.inner.nodes.write().await;
             let err_info = format!("failed to mark {} as failed", dead.node);
-            if let Err(e) = t.dead_node(&mut memberlist, dead.into()).await {
+            if let Err(e) = t.dead_node(&mut memberlist, dead).await {
               tracing::error!(target = "showbiz.state", err=%e, err_info);
             }
           }
@@ -610,13 +612,13 @@ where
             State::Left(dead) => {
               let addr = dead.node.addr();
               let mut memberlist = s.inner.nodes.write().await;
-              if let Err(e) = s.dead_node(&mut memberlist, dead.into()).await {
+              if let Err(e) = s.dead_node(&mut memberlist, dead).await {
                 tracing::error!(target = "showbiz.state", addr=%addr, err=%e, "fail to dead node");
               }
             },
             State::Suspect(suspect) => {
               let addr = suspect.node.addr();
-              if let Err(e) = s.suspect_node(suspect.into()).await {
+              if let Err(e) = s.suspect_node(suspect).await {
                 tracing::error!(target = "showbiz.state", addr=%addr, err=%e, "fail to suspect node");
               }
             },
@@ -1175,7 +1177,7 @@ where
       node: target.id().clone(),
       from: self.inner.id.clone(),
     };
-    if let Err(e) = self.suspect_node(s.into()).await {
+    if let Err(e) = self.suspect_node(s).await {
       tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to suspect node");
     }
     if awareness_delta != 0 {

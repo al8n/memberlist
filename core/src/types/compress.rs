@@ -82,8 +82,6 @@ pub(crate) struct Compress {
 }
 
 impl Compress {
-  const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
-
   pub(crate) fn encode_slice(
     algo: CompressionAlgo,
     r1: u8,
@@ -165,11 +163,7 @@ impl Compress {
     }
   }
 
-  pub(crate) fn encode(&self, r1: u8, r2: u8) -> Result<Vec<u8>, CompressError> {
-    Self::encode_slice(self.algo, r1, r2, &self.buf)
-  }
-
-  pub(crate) fn decode_from_bytes(mut src: Bytes) -> Result<(EncodeMeta, Self), DecodeError> {
+  pub(crate) fn decode_from_bytes(mut src: Bytes) -> Result<(EncodeHeader, Self), DecodeError> {
     let marker = src[1];
     let r1 = src[2];
     let r2 = src[3];
@@ -183,11 +177,14 @@ impl Compress {
       CompressionAlgo::Lzw => {
         src.advance(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE);
         Ok((
-          EncodeMeta {
-            ty: MessageType::Compress,
-            marker,
-            r1,
-            r2,
+          EncodeHeader {
+            meta: EncodeMeta {
+              ty: MessageType::Compress,
+              marker,
+              r1,
+              r2,
+            },
+            len,
           },
           Self { algo, buf: src },
         ))
@@ -195,11 +192,14 @@ impl Compress {
       CompressionAlgo::None => {
         src.advance(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE);
         Ok((
-          EncodeMeta {
-            ty: MessageType::Compress,
-            marker,
-            r1,
-            r2,
+          EncodeHeader {
+            meta: EncodeMeta {
+              ty: MessageType::Compress,
+              marker,
+              r1,
+              r2,
+            },
+            len,
           },
           Self { algo, buf: src },
         ))
@@ -209,7 +209,6 @@ impl Compress {
 }
 
 const LZW_LIT_WIDTH: u8 = 8;
-const PREALLOCATE_SIZE: usize = 128;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CompressError {
@@ -221,16 +220,4 @@ pub enum CompressError {
 pub enum DecompressError {
   #[error("{0}")]
   Lzw(#[from] weezl::LzwError),
-}
-
-pub(crate) fn compress_payload(
-  algo: CompressionAlgo,
-  src: &[u8],
-) -> Result<Vec<u8>, CompressError> {
-  match algo {
-    CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
-      .encode(src)
-      .map_err(CompressError::Lzw),
-    CompressionAlgo::None => unreachable!(),
-  }
 }

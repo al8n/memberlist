@@ -8,8 +8,7 @@ use rkyv::{
   de::deserializers::{SharedDeserializeMap, SharedDeserializeMapError},
   ser::{
     serializers::{
-      AllocScratch, AllocScratchError, CompositeSerializerError, FallbackScratch, HeapScratch,
-      SharedSerializeMap, SharedSerializeMapError, WriteSerializer,
+      AllocScratch, FallbackScratch, HeapScratch, SharedSerializeMap, WriteSerializer,
     },
     Serializer,
   },

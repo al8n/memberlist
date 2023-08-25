@@ -1,8 +1,4 @@
-use rkyv::{
-  de::deserializers::{SharedDeserializeMap, SharedDeserializeMapError},
-  validation::validators::CheckDeserializeError,
-  Archive, Deserialize, Serialize,
-};
+use rkyv::{de::deserializers::SharedDeserializeMap, Archive, Deserialize, Serialize};
 use std::{borrow::Borrow, net::SocketAddr};
 
 use super::{DecodeError, Name};
@@ -108,8 +104,6 @@ impl<'a> CowNodeId<'a> {
   }
 }
 
-pub type InvalidNodeId = CheckDeserializeError<ArchivedNodeId, SharedDeserializeMapError>;
-
 impl<'a> From<NodeId> for CowNodeId<'a> {
   fn from(value: NodeId) -> Self {
     Self::Owned(value)
@@ -183,7 +177,7 @@ impl core::fmt::Display for ArchivedNodeId {
 #[test]
 fn test_id_borrow() {
   use std::collections::HashSet;
-
+  #[allow(clippy::mutable_key_type)]
   let mut m = HashSet::new();
   let addr = "127.0.0.1:80".parse().unwrap();
   m.insert(NodeId::new(Name::from_static_unchecked("foo"), addr));

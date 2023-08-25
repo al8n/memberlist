@@ -358,6 +358,7 @@ impl<'de> serde::Deserialize<'de> for Name {
 fn test_name_borrow() {
   use std::collections::HashSet;
 
+  #[allow(clippy::mutable_key_type)]
   let mut m = HashSet::new();
   m.insert(Name::from_static_unchecked("foo"));
 

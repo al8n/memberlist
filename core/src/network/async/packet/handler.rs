@@ -51,7 +51,7 @@ where
   }
 
   async fn handle_suspect(&self, msg: MessageHandoff) {
-    let (_, suspect) = match Suspect::decode_archived(&msg.buf) {
+    let (_, suspect) = match Suspect::decode(&msg.buf) {
       Ok(rst) => rst,
       Err(e) => {
         tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to decode suspect message");
@@ -59,7 +59,7 @@ where
       }
     };
 
-    if let Err(e) = self.suspect_node((suspect, msg.buf.clone()).into()).await {
+    if let Err(e) = self.suspect_node(suspect).await {
       tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to suspect node");
     }
   }
@@ -91,7 +91,7 @@ where
   }
 
   async fn handle_dead(&self, msg: MessageHandoff) {
-    let (_, dead) = match Dead::decode_archived(&msg.buf) {
+    let (_, dead) = match Dead::decode(&msg.buf) {
       Ok(dead) => dead,
       Err(e) => {
         tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to decode dead message");
@@ -100,10 +100,7 @@ where
     };
 
     let mut memberlist = self.inner.nodes.write().await;
-    if let Err(e) = self
-      .dead_node(&mut memberlist, (dead, msg.buf.clone()).into())
-      .await
-    {
+    if let Err(e) = self.dead_node(&mut memberlist, dead).await {
       tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to mark node as dead");
     }
   }

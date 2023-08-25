@@ -11,7 +11,7 @@ use std::{
 use agnostic::Runtime;
 #[cfg(feature = "async")]
 use async_channel::{Receiver, Sender};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crossbeam_utils::CachePadded;
 use futures_util::Future;
 
@@ -30,7 +30,7 @@ use super::{
   timer::Timer,
   transport::Transport,
   types::Message,
-  types::{Alive, MessageType, Name, Node, NodeId, PushNodeState},
+  types::{Alive, MessageType, Name, Node, NodeId},
   Options,
 };
 

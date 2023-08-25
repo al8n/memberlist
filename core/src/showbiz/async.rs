@@ -455,7 +455,7 @@ where
           from: state.state.node.id.clone(),
         };
 
-        self.dead_node(&mut memberlist, d.into()).await?;
+        self.dead_node(&mut memberlist, d).await?;
 
         // Block until the broadcast goes out
         if memberlist.any_alive() {
