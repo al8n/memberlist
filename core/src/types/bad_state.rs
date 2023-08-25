@@ -81,10 +81,11 @@ macro_rules! bad_bail {
         }
 
         pub(crate) fn encode(&self, r1: u8, r2: u8) -> Message {
-          match self {
-            Self::Owned(d) => d.encode(r1, r2),
-            Self::Archived(_, src) => todo!(),
-          }
+          // match self {
+          //   Self::Owned(d) => d.encode(r1, r2),
+          //   Self::Archived(_, src) => todo!(),
+          // }
+          todo!()
         }
       }
     }

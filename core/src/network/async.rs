@@ -12,7 +12,7 @@ use crate::{
 
 use super::*;
 use agnostic::Runtime;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BytesMut};
 use futures_util::{future::FutureExt, Future, Stream};
 
 mod packet;
@@ -82,8 +82,7 @@ where
       )));
     }
 
-    let (_, ack) =
-      AckResponse::decode_archived::<T::Checksumer>(&data).map_err(TransportError::Decode)?;
+    let (_, ack) = AckResponse::decode_archived(&data).map_err(TransportError::Decode)?;
 
     if ack.seq_no != ping.seq_no {
       return Err(Error::Transport(TransportError::Decode(
@@ -99,11 +98,11 @@ where
 
   /// Used to initiate a push/pull over a stream with a
   /// remote host.
-  pub(crate) async fn send_and_receive_state(
-    &self,
-    id: &NodeId,
+  pub(crate) async fn send_and_receive_state<'a>(
+    &'a self,
+    id: &'a NodeId,
     join: bool,
-  ) -> Result<RemoteNodeState, Error<T, D>> {
+  ) -> Result<Bytes, Error<T, D>> {
     // Attempt to connect
     let mut conn = self
       .inner
@@ -142,7 +141,7 @@ where
     .await?;
 
     if h.meta.ty == MessageType::ErrorResponse {
-      let err = match ErrorResponse::decode_archived::<T::Checksumer>(&data) {
+      let err = match ErrorResponse::decode_archived(&data) {
         Ok((_, err)) => err,
         Err(e) => return Err(TransportError::Decode(e).into()),
       };
@@ -159,8 +158,7 @@ where
       )));
     }
 
-    // Read remote state
-    self.read_remote_state(data).await.map_err(From::from)
+    Ok(data)
   }
 
   fn encrypt_local_state(

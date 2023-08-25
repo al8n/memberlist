@@ -157,8 +157,8 @@ impl Delegate for MockDelegate {
   }
 
   #[cfg(not(feature = "nightly"))]
-  async fn merge_remote_state(&self, buf: Bytes, _join: bool) -> Result<(), Self::Error> {
-    self.inner.lock().remote_state = buf;
+  async fn merge_remote_state(&self, buf: &[u8], _join: bool) -> Result<(), Self::Error> {
+    self.inner.lock().remote_state = buf.to_owned().into();
     Ok(())
   }
 

@@ -52,7 +52,7 @@ pub trait Delegate: Send + Sync + 'static {
   /// remote side's LocalState call. The 'join'
   /// boolean indicates this is for a join instead of a push/pull.
   #[cfg(not(feature = "nightly"))]
-  async fn merge_remote_state(&self, buf: Bytes, join: bool) -> Result<(), Self::Error>;
+  async fn merge_remote_state(&self, buf: &[u8], join: bool) -> Result<(), Self::Error>;
 
   /// Invoked when a node is detected to have joined the cluster
   #[cfg(not(feature = "nightly"))]
@@ -252,7 +252,7 @@ impl Delegate for VoidDelegate {
   }
 
   #[cfg(not(feature = "nightly"))]
-  async fn merge_remote_state(&self, _buf: Bytes, _join: bool) -> Result<(), Self::Error> {
+  async fn merge_remote_state(&self, _buf: &[u8], _join: bool) -> Result<(), Self::Error> {
     Ok(())
   }
 

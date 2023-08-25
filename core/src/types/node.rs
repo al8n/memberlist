@@ -3,7 +3,7 @@ use super::*;
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 #[archive(compare(PartialEq), check_bytes)]
-#[archive_attr(derive(Debug), repr(u8), non_exhaustive)]
+#[archive_attr(derive(Debug, Copy, Clone), repr(u8), non_exhaustive)]
 #[non_exhaustive]
 pub enum NodeState {
   #[default]
@@ -33,6 +33,28 @@ impl NodeState {
 impl core::fmt::Display for NodeState {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     write!(f, "{}", self.as_str())
+  }
+}
+
+impl From<NodeState> for ArchivedNodeState {
+  fn from(value: NodeState) -> Self {
+    match value {
+      NodeState::Alive => Self::Alive,
+      NodeState::Suspect => Self::Suspect,
+      NodeState::Dead => Self::Dead,
+      NodeState::Left => Self::Left,
+    }
+  }
+}
+
+impl From<ArchivedNodeState> for NodeState {
+  fn from(value: ArchivedNodeState) -> Self {
+    match value {
+      ArchivedNodeState::Alive => Self::Alive,
+      ArchivedNodeState::Suspect => Self::Suspect,
+      ArchivedNodeState::Dead => Self::Dead,
+      ArchivedNodeState::Left => Self::Left,
+    }
   }
 }
 

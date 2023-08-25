@@ -158,7 +158,7 @@ where
   }
 
   #[async_recursion::async_recursion]
-  async fn handle_command(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
+  async fn handle_command(&self, buf: Bytes, from: SocketAddr, timestamp: Instant) {
     if !buf.has_remaining() {
       tracing::error!(target = "showbiz.packet", addr = %from, err = "missing message type byte");
       return;
@@ -263,7 +263,7 @@ where
       };
 
       match compress.decompress() {
-        Ok(payload) => self.handle_command(payload.into(), from, timestamp).await,
+        Ok(payload) => self.handle_command(payload, from, timestamp).await,
         Err(e) => {
           tracing::error!(target = "showbiz.packet", remote = %from, err = %e, "failed to decompress payload");
         }
@@ -275,7 +275,7 @@ where
 
   async fn handle_ping(&self, buf: Bytes, from: SocketAddr) {
     // Decode the ping
-    let (_, p) = match Ping::decode_archived::<T::Checksumer>(&buf) {
+    let (_, p) = match Ping::decode_archived(&buf) {
       Ok(ping) => ping,
       Err(e) => {
         tracing::error!(target = "showbiz.packet", local=%self.inner.id, remote = %from, err = %e, "failed to decode ping request");
@@ -316,7 +316,7 @@ where
   }
 
   async fn handle_indirect_ping(&self, buf: Bytes, from: SocketAddr) {
-    let (h, ind) = match IndirectPing::decode::<T::Checksumer>(&buf) {
+    let (h, ind) = match IndirectPing::decode(&buf) {
       Ok(ind) => ind,
       Err(e) => {
         tracing::error!(target = "showbiz.packet", addr = %from, err = %e, "failed to decode indirect ping request");
@@ -398,7 +398,7 @@ where
   }
 
   async fn handle_ack(&self, buf: Bytes, from: SocketAddr, timestamp: Instant) {
-    match AckResponse::decode::<T::Checksumer>(&buf) {
+    match AckResponse::decode(&buf) {
       Ok((_, ack)) => self.invoke_ack_handler(ack, timestamp).await,
       Err(e) => {
         tracing::error!(target = "showbiz.packet", addr = %from, err=%e, "failed to decode ack response");
@@ -407,7 +407,7 @@ where
   }
 
   async fn handle_nack(&self, buf: Bytes, from: SocketAddr) {
-    match NackResponse::decode::<T::Checksumer>(&buf) {
+    match NackResponse::decode(&buf) {
       Ok((_, nack)) => self.invoke_nack_handler(nack).await,
       Err(e) => {
         tracing::error!(target = "showbiz.packet", addr = %from, err=%e, "failed to decode nack response");

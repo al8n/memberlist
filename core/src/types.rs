@@ -8,8 +8,8 @@ use rkyv::{
   de::deserializers::{SharedDeserializeMap, SharedDeserializeMapError},
   ser::{
     serializers::{
-      AllocScratch, AllocScratchError, AllocSerializer, CompositeSerializerError, FallbackScratch,
-      HeapScratch, SharedSerializeMap, SharedSerializeMapError, WriteSerializer,
+      AllocScratch, AllocScratchError, CompositeSerializerError, FallbackScratch, HeapScratch,
+      SharedSerializeMap, SharedSerializeMapError, WriteSerializer,
     },
     Serializer,
   },
@@ -48,7 +48,6 @@ mod push_pull_state;
 pub(crate) use push_pull_state::*;
 
 use crate::{
-  checksum::Checksumer,
   version::{InvalidDelegateVersion, InvalidProtocolVersion},
   DelegateVersion, ProtocolVersion,
 };
@@ -154,9 +153,7 @@ pub(crate) trait Type: Sized + Archive {
 
   fn encode(&self, r1: u8, r2: u8) -> Message;
 
-  fn decode_archived<'a, C: Checksumer>(
-    src: &'a [u8],
-  ) -> Result<(EncodeHeader, &'a Self::Archived), DecodeError>
+  fn decode_archived<'a>(src: &'a [u8]) -> Result<(EncodeHeader, &'a Self::Archived), DecodeError>
   where
     <Self as Archive>::Archived: CheckBytes<DefaultValidator<'a>>,
   {
@@ -196,12 +193,12 @@ pub(crate) trait Type: Sized + Archive {
       .map_err(|_| DecodeError::CheckBytesError(std::any::type_name::<Self>()))
   }
 
-  fn decode<'a, C: Checksumer>(src: &'a [u8]) -> Result<(EncodeHeader, Self), DecodeError>
+  fn decode<'a>(src: &'a [u8]) -> Result<(EncodeHeader, Self), DecodeError>
   where
     Self: Archive,
     Self::Archived: 'a + CheckBytes<DefaultValidator<'a>> + Deserialize<Self, SharedDeserializeMap>,
   {
-    Self::decode_archived::<C>(src).and_then(|(h, archived)| {
+    Self::decode_archived(src).and_then(|(h, archived)| {
       archived
         .deserialize(&mut SharedDeserializeMap::new())
         .map(|v| (h, v))
@@ -214,7 +211,7 @@ fn encode<T, const N: usize>(ty: MessageType, r1: u8, r2: u8, msg: &T) -> Messag
 where
   T: Serialize<CompositeSerializer<Message, N>>,
 {
-  let mut ser = MessageSerializer::<N>::new();
+  let mut ser = MessageSerializer::<N>::with_preallocated_size();
   ser
     .write(&[
       ty as u8, 0, r1, r2, 0, 0, 0, 0, // len

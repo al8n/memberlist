@@ -4,7 +4,7 @@ use crate::{
   delegate::VoidDelegate,
   dns::DnsError,
   transport::TransportError,
-  types::{Address, Dead, Domain},
+  types::{Address, ArchivedPushNodeState, Dead, Domain},
   util::read_resolv_conf,
   Label,
 };
@@ -415,7 +415,7 @@ where
       protocol_version: this.inner.opts.protocol_version,
       delegate_version: this.inner.opts.delegate_version,
     };
-    this.alive_node(alive, None, true).await;
+    this.alive_node(Either::Left(alive), None, true).await;
     this.schedule(shutdown_rx).await;
     tracing::debug!(target = "showbiz", local = %this.inner.id, advertise_addr = %advertise, "node is living");
     Ok(this)
@@ -693,7 +693,9 @@ where
       delegate_version: self.inner.opts.delegate_version,
     };
     let (notify_tx, notify_rx) = async_channel::bounded(1);
-    self.alive_node(alive, Some(notify_tx), true).await;
+    self
+      .alive_node(Either::Left(alive), Some(notify_tx), true)
+      .await;
 
     // Wait for the broadcast or a timeout
     if self.any_alive().await {
@@ -902,7 +904,10 @@ where
     });
   }
 
-  pub(crate) async fn verify_protocol(&self, _remote: &[PushNodeState]) -> Result<(), Error<T, D>> {
+  pub(crate) async fn verify_protocol(
+    &self,
+    _remote: &[ArchivedPushNodeState],
+  ) -> Result<(), Error<T, D>> {
     // TODO: now we do not need to handle this situation, because there is no update
     // on protocol.
     Ok(())

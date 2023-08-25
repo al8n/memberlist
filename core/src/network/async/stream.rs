@@ -3,7 +3,10 @@ use std::sync::Arc;
 // use agnostic::lock::RwLock;
 use either::Either;
 use futures_util::{Future, Stream};
-use rkyv::ser::Serializer;
+use rkyv::{
+  de::deserializers::{SharedDeserializeMap, SharedDeserializeMapError},
+  Deserialize,
+};
 
 use crate::{
   transport::ReliableConnection,
@@ -53,39 +56,43 @@ where
   }
 
   /// Used to merge the remote state with our local state
-  pub(crate) async fn merge_remote_state(
-    &self,
-    node_state: RemoteNodeState,
+  pub(crate) async fn merge_remote_state<'a>(
+    &'a self,
+    node_state: &'a ArchivedPushPullMessage,
   ) -> Result<(), Error<T, D>> {
-    self.verify_protocol(&node_state.push_states).await?;
+    self.verify_protocol(node_state.body.as_slice()).await?;
 
     // Invoke the merge delegate if any
-    if node_state.join {
+    if node_state.header.join {
       if let Some(merge) = self.delegate.as_ref() {
         let peers = node_state
-          .push_states
+          .body
           .iter()
           .map(|n| {
-            Arc::new(Node {
-              id: NodeId::new(n.node.name.clone(), n.node.addr()),
-              meta: n.meta.clone(),
-              state: n.state,
-              protocol_version: n.protocol_version,
-              delegate_version: n.delegate_version,
-            })
+            let mut deserializer = SharedDeserializeMap::new();
+            let id = n.node.deserialize(&mut deserializer)?;
+            let meta = n.meta.deserialize(&mut deserializer)?;
+            Result::<_, SharedDeserializeMapError>::Ok(Arc::new(Node {
+              id,
+              meta,
+              state: n.state.into(),
+              protocol_version: n.protocol_version.into(),
+              delegate_version: n.delegate_version.into(),
+            }))
           })
-          .collect::<Vec<_>>();
+          .collect::<Result<Vec<_>, _>>()
+          .map_err(|e| Error::Transport(TransportError::Decode(DecodeError::Decode(e))))?;
         merge.notify_merge(peers).await.map_err(Error::delegate)?;
       }
     }
 
     // Merge the membership state
-    self.merge_state(node_state.push_states).await?;
+    self.merge_state(node_state.body.as_slice()).await;
 
     // Invoke the delegate for user state
     if let Some(d) = &self.delegate {
-      if !node_state.user_state.is_empty() {
-        d.merge_remote_state(node_state.user_state, node_state.join)
+      if let Some(user_data) = node_state.user_data.as_ref() {
+        d.merge_remote_state(user_data.as_slice(), node_state.header.join)
           .await
           .map_err(Error::delegate)?;
       }
@@ -280,56 +287,13 @@ where
   }
 
   /// Used to read the remote state from a connection
-  pub(super) async fn read_remote_state(
-    &self,
-    mut data: Bytes,
-  ) -> Result<RemoteNodeState, Error<T, D>> {
-    // let (_, header) = match PushPullHeader::decode(&data) {
-    //   Ok(header) => header,
-    //   Err(e) => return Err(TransportError::Decode(e).into()),
-    // };
-    // // Allocate space for the transfer
-    // let mut remote_nodes = Vec::<PushNodeState>::with_capacity(header.nodes as usize);
-    // // Try to decode all the states
-    // for _ in 0..header.nodes {
-    //   let len = PushNodeState::decode_len(&mut data).map_err(TransportError::Decode)?;
-    //   if len > data.remaining() {
-    //     return Err(
-    //       TransportError::Decode(DecodeError::FailReadRemoteState(data.remaining(), len)).into(),
-    //     );
-    //   }
-
-    //   match PushNodeState::decode_from(data.split_to(len)) {
-    //     Ok(state) => remote_nodes.push(state),
-    //     Err(e) => return Err(TransportError::Decode(e).into()),
-    //   }
-    // }
-
-    // // Read the remote user state into a buffer
-    // if header.user_state_len > 0 {
-    //   if header.user_state_len as usize > data.remaining() {
-    //     return Err(
-    //       TransportError::Decode(DecodeError::FailReadUserState(
-    //         data.remaining(),
-    //         header.user_state_len as usize,
-    //       ))
-    //       .into(),
-    //     );
-    //   }
-    //   let user_state = data.split_to(header.user_state_len as usize);
-    //   return Ok(RemoteNodeState {
-    //     join: header.join,
-    //     push_states: remote_nodes,
-    //     user_state,
-    //   });
-    // }
-
-    // Ok(RemoteNodeState {
-    //   join: header.join,
-    //   push_states: remote_nodes,
-    //   user_state: Bytes::new(),
-    // })
-    todo!()
+  pub(crate) async fn read_remote_state<'a>(
+    &'a self,
+    data: &'a [u8],
+  ) -> Result<&'a ArchivedPushPullMessage, Error<T, D>> {
+    PushPullMessage::decode_archived(data)
+      .map(|(_, msg)| msg)
+      .map_err(|e| TransportError::Decode(e).into())
   }
 
   pub(super) async fn send_local_state(
@@ -343,7 +307,8 @@ where
     conn.set_timeout(Some(self.inner.opts.tcp_timeout));
 
     // Prepare the local node state
-    let mut states_encoded_size = 0;
+    #[cfg(feature = "metrics")]
+    let mut node_state_counts = NodeState::empty_metrics();
     let local_nodes = {
       self
         .inner
@@ -362,8 +327,11 @@ where
             protocol_version: n.node.protocol_version,
             delegate_version: n.node.delegate_version,
           };
-          // let encoded = this.encode();
-          // states_encoded_size += encoded.len();
+
+          #[cfg(feature = "metrics")]
+          {
+            node_state_counts[this.state as u8 as usize].1 += 1;
+          }
           this
         })
         .collect::<Vec<_>>()
@@ -382,38 +350,9 @@ where
       user_state_len: user_data.len() as u32,
       join,
     };
-    // let mut ser = MessageSerializer::new();
-    // ser.serialize_value(&header).unwrap();
-    // let mut buf = header.encode(0, 0);
-    // let encoded_header_size = encoded_u32_len(header_size as u32);
-    // let basic_len = header_size
-    //   + encoded_header_size
-    //   + if states_encoded_size != 0 {
-    //     states_encoded_size + encoded_u32_len(states_encoded_size as u32)
-    //   } else {
-    //     0
-    //   }
-    //   + if user_data.is_empty() {
-    //     0
-    //   } else {
-    //     user_data.len()
-    //   };
-    // let total_len = MessageType::SIZE + basic_len + encoded_u32_len(basic_len as u32);
-    // let mut buf = BytesMut::with_capacity(total_len);
-    // buf.put_u8(MessageType::PushPull as u8);
-    // encode_u32_to_buf(&mut buf, basic_len as u32);
-    // header.encode_to(&mut buf);
-    #[cfg(feature = "metrics")]
-    let mut node_state_counts = NodeState::empty_metrics();
 
-    for n in local_nodes {
-      // n.encode_to(&mut buf);
-      #[cfg(feature = "metrics")]
-      {
-        node_state_counts[n.state as u8 as usize].1 += 1;
-      }
-    }
-
+    let msg = PushPullMessage::new(header, local_nodes, user_data);
+    let buf = msg.encode(0, 0);
     #[cfg(feature = "metrics")]
     {
       std::thread_local! {
@@ -448,20 +387,13 @@ where
       });
     }
 
-    // Write the user state as well
-    // if !user_data.is_empty() {
-    //   // buf.put_slice(&user_data);
-    // }
-
-    // let buf = buf.freeze();
-    // #[cfg(feature = "metrics")]
-    // {
-    //   set_local_size_gauge(basic_len as f64, self.inner.opts.metric_labels.iter());
-    // }
-    // self
-    //   .raw_send_msg_stream(conn, stream_label, Message::from_bytes(buf), addr)
-    //   .await
-    todo!()
+    #[cfg(feature = "metrics")]
+    {
+      set_local_size_gauge(buf.len() as f64, self.inner.opts.metric_labels.iter());
+    }
+    self
+      .raw_send_msg_stream(conn, stream_label, buf, addr)
+      .await
   }
 
   /// Used to read messages from a stream connection, decrypting and
@@ -687,7 +619,7 @@ where
     match h.meta.ty {
       MessageType::Ping => {
         let (_, ping) = {
-          match Ping::decode_archived::<T::Checksumer>(&data) {
+          match Ping::decode_archived(&data) {
             Ok(ping) => ping,
             Err(e) => {
               tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to decode ping");
@@ -725,7 +657,7 @@ where
           );
           return;
         }
-        let node_state = match self.read_remote_state(data).await {
+        let node_state = match self.read_remote_state(&data).await {
           Ok(ns) => ns,
           Err(e) => {
             tracing::error!(target = "showbiz.stream", err=%e, remote_node = ?addr, "failed to read remote state");
@@ -733,7 +665,7 @@ where
           }
         };
         if let Err(e) = self
-          .send_local_state(&mut conn, addr, node_state.join, stream_label)
+          .send_local_state(&mut conn, addr, node_state.header.join, stream_label)
           .await
         {
           tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to push local state");

@@ -66,14 +66,7 @@ impl Message {
     Self(data)
   }
 
-  #[inline]
-  pub(crate) fn new_with_type(ty: MessageType) -> Self {
-    let mut this = BytesMut::with_capacity(Self::PREFIX_SIZE);
-    this.put_u8(ty as u8);
-    Self(this)
-  }
-
-  pub(crate) fn compounds(mut msgs: Vec<Self>) -> Vec<Message> {
+  pub(crate) fn compounds(mut msgs: Vec<Message>) -> Vec<Message> {
     const MAX_MESSAGES: usize = 255;
 
     let mut bufs = Vec::with_capacity((msgs.len() + MAX_MESSAGES - 1) / MAX_MESSAGES);
@@ -89,14 +82,23 @@ impl Message {
     bufs
   }
 
-  pub(crate) fn compound(msgs: Vec<Self>) -> Message {
+  pub(crate) fn compound(msgs: Vec<Message>) -> Message {
     let num_msgs = msgs.len();
     let total: usize = msgs.iter().map(|m| m.len()).sum();
-    let mut buf = BytesMut::with_capacity(
-      1 + core::mem::size_of::<u8>() + num_msgs * core::mem::size_of::<u16>() + total,
-    );
+    let msg_len = core::mem::size_of::<u8>() + num_msgs * core::mem::size_of::<u16>() + total;
+    let mut buf = BytesMut::with_capacity(ENCODE_HEADER_SIZE + msg_len);
     // Write out the type
-    buf.put_u8(MessageType::Compound as u8);
+    let msg_len = (msg_len as u32).to_be_bytes();
+    buf.put_slice(&[
+      MessageType::Compound as u8,
+      0,
+      0,
+      0,
+      msg_len[0],
+      msg_len[1],
+      msg_len[2],
+      msg_len[3],
+    ]);
     // Write out the number of message
     buf.put_u8(num_msgs as u8);
 
@@ -105,7 +107,7 @@ impl Message {
       // Add the message length
       buf.put_u16(msg.len() as u16);
       // put msg into compound
-      compound.put_slice(msg.underlying_bytes());
+      compound.put_slice(&msg);
     }
 
     buf.unsplit(compound);
@@ -342,15 +344,21 @@ pub(crate) struct MessageSerializer<
   W: std::io::Write = Message,
 >(CompositeSerializer<W, N>);
 
-impl<const N: usize> Default for MessageSerializer<N> {
+impl Default for MessageSerializer {
   fn default() -> Self {
     Self::new()
   }
 }
 
-impl<const N: usize> MessageSerializer<N> {
+impl MessageSerializer {
   pub(crate) fn new() -> Self {
     Self::with_writter(Message::with_capacity(DEFAULT_ENCODE_PREALLOCATE_SIZE - 1))
+  }
+}
+
+impl<const N: usize> MessageSerializer<N> {
+  pub(crate) fn with_preallocated_size() -> Self {
+    Self::with_writter(Message::with_capacity(N - 1))
   }
 }
 

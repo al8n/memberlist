@@ -11,7 +11,7 @@ use std::{
 use agnostic::Runtime;
 #[cfg(feature = "async")]
 use async_channel::{Receiver, Sender};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use crossbeam_utils::CachePadded;
 use futures_util::Future;
 

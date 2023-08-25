@@ -7,7 +7,8 @@ use crate::{
   suspicion::Suspicion,
   timer::Timer,
   types::{
-    Alive, CowDead, CowSuspect, Dead, IndirectPing, Message, MessageType, Ping, Suspect, Type,
+    Alive, ArchivedAlive, ArchivedNodeState, ArchivedPushNodeState, CowDead, CowSuspect, Dead,
+    IndirectPing, Message, Ping, Suspect, Type,
   },
 };
 
@@ -20,6 +21,7 @@ use rand::{seq::SliceRandom, Rng};
 
 #[cfg(any(test, feature = "test"))]
 pub(crate) mod tests;
+use rkyv::{de::deserializers::SharedDeserializeMap, Deserialize};
 #[cfg(any(test, feature = "test"))]
 pub use tests::*;
 
@@ -137,8 +139,10 @@ where
     scopeguard::defer!(
       observe_push_pull_node(now.elapsed().as_millis() as f64, self.inner.opts.metric_labels.iter());
     );
+    // Read remote state
+    let data = self.send_and_receive_state(id, join).await?;
     self
-      .merge_remote_state(self.send_and_receive_state(id, join).await?)
+      .merge_remote_state(self.read_remote_state(&data).await?)
       .await
   }
 
@@ -364,9 +368,9 @@ where
 
   /// Invoked by the network layer when we get a message about a
   /// live node.
-  pub(crate) async fn alive_node(
-    &self,
-    alive: Alive,
+  pub(crate) async fn alive_node<'a>(
+    &'a self,
+    alive: Either<Alive, &'a ArchivedAlive>,
     notify_tx: Option<async_channel::Sender<()>>,
     bootstrap: bool,
   ) {
@@ -376,9 +380,27 @@ where
     // in-queue to be processed but blocked by the locks above. If we let
     // that aliveMsg process, it'll cause us to re-join the cluster. This
     // ensures that we don't.
-    if self.has_left() && alive.node == self.inner.id {
+    if self.has_left()
+      && match &alive {
+        Either::Left(a) => a.node == self.inner.id,
+        Either::Right(a) => a.node == self.inner.id,
+      }
+    {
       return;
     }
+
+    let alive = match alive {
+      Either::Left(a) => a,
+      Either::Right(a) => {
+        match a.deserialize(&mut rkyv::de::deserializers::SharedDeserializeMap::new()) {
+          Ok(a) => a,
+          Err(e) => {
+            tracing::error!(target="showbiz.state", err=%e, "fail to decode alive message");
+            return;
+          }
+        }
+      }
+    };
 
     let node = Arc::new(Node {
       id: alive.node.clone(),
@@ -567,41 +589,100 @@ where
     }
   }
 
-  pub(crate) async fn merge_state(&self, remote: Vec<PushNodeState>) -> Result<(), Error<T, D>> {
-    for r in remote {
-      match r.state {
-        NodeState::Alive => {
-          let alive = Alive {
-            incarnation: r.incarnation,
-            node: r.node,
-            meta: r.meta,
-            protocol_version: r.protocol_version,
-            delegate_version: r.delegate_version,
-          };
-          self.alive_node(alive, None, false).await;
+  pub(crate) async fn merge_state<'a>(&'a self, remote: &'a [ArchivedPushNodeState]) {
+    let futs = remote.iter().filter_map(|r| {
+      enum State {
+        Alive(Alive),
+        Left(Dead),
+        Suspect(Suspect),
+      }
+
+      impl State {
+        async fn run<T, D>(self, s: &Showbiz<T, D>)
+        where
+          T: Transport,
+          D: Delegate,
+          <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
+          <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
+        {
+          match self {
+            State::Alive(alive) => s.alive_node(Either::Left(alive), None, false).await,
+            State::Left(dead) => {
+              let addr = dead.node.addr();
+              let mut memberlist = s.inner.nodes.write().await;
+              if let Err(e) = s.dead_node(&mut memberlist, dead.into()).await {
+                tracing::error!(target = "showbiz.state", addr=%addr, err=%e, "fail to dead node");
+              }
+            },
+            State::Suspect(suspect) => {
+              let addr = suspect.node.addr();
+              if let Err(e) = s.suspect_node(suspect.into()).await {
+                tracing::error!(target = "showbiz.state", addr=%addr, err=%e, "fail to suspect node");
+              }
+            },
+          }
         }
-        NodeState::Left => {
-          let dead = Dead {
-            incarnation: r.incarnation,
-            node: r.node,
-            from: self.inner.id.clone(),
+      }
+
+      let mut deserializer = SharedDeserializeMap::new();
+      let state = match r.state {
+        ArchivedNodeState::Alive => {
+          let node = match r.node.deserialize(&mut deserializer) {
+            Ok(n) => n,
+            Err(e) => {
+              tracing::error!(target = "showbiz.state", err=%e, "fail to decode node id");
+              return None;
+            },
           };
-          let mut memberlist = self.inner.nodes.write().await;
-          self.dead_node(&mut memberlist, dead.into()).await?;
+          let meta = match r.meta.deserialize(&mut deserializer) {
+            Ok(meta) => meta,
+            Err(e) => {
+              tracing::error!(target = "showbiz.state", err=%e, "fail to decode node meta");
+              return None;
+            },
+          };
+          State::Alive(Alive {
+            incarnation: r.incarnation,
+            node,
+            meta,
+            protocol_version: r.protocol_version.into(),
+            delegate_version: r.delegate_version.into(),
+          })
+        }
+        ArchivedNodeState::Left => {
+          let node = match r.node.deserialize(&mut deserializer) {
+            Ok(n) => n,
+            Err(e) => {
+              tracing::error!(target = "showbiz.state", err=%e, "fail to decode node id");
+              return None;
+            },
+          };
+          State::Left(Dead {
+            incarnation: r.incarnation,
+            node,
+            from: self.inner.id.clone(),
+          })
         }
         // If the remote node believes a node is dead, we prefer to
         // suspect that node instead of declaring it dead instantly
-        NodeState::Dead | NodeState::Suspect => {
-          let s = Suspect {
-            incarnation: r.incarnation,
-            node: r.node,
-            from: self.inner.id.clone(),
+        ArchivedNodeState::Dead | ArchivedNodeState::Suspect => {
+          let node = match r.node.deserialize(&mut deserializer) {
+            Ok(n) => n,
+            Err(e) => {
+              tracing::error!(target = "showbiz.state", err=%e, "fail to decode node id");
+              return None;
+            },
           };
-          self.suspect_node(s.into()).await?;
+          State::Suspect(Suspect {
+            incarnation: r.incarnation,
+            node,
+            from: self.inner.id.clone(),
+          })
         }
-      }
-    }
-    Ok(())
+      };
+      Some(state.run(self))
+    });
+    futures_util::future::join_all(futs).await;
   }
 
   pub(crate) async fn set_ack_handler<F>(&self, seq_no: u32, timeout: Duration, f: F)
@@ -1369,3 +1450,6 @@ fn push_pull_scale(interval: Duration, n: usize) -> Duration {
   let multiplier = (f64::log2(n as f64) - f64::log2(PUSH_PULL_SCALE_THRESHOLD as f64) + 1.0).ceil();
   interval * multiplier as u32
 }
+
+#[test]
+fn test_() {}

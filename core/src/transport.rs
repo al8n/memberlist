@@ -175,7 +175,6 @@ mod r#async {
     types::{
       Compress, EncodeHeader, EncodeMeta, ENCODE_HEADER_SIZE, ENCODE_META_SIZE, MAX_MESSAGE_SIZE,
     },
-    DelegateVersion, ProtocolVersion,
   };
 
   use super::*;
@@ -215,7 +214,7 @@ mod r#async {
       let r1 = meta[2];
       let r2 = meta[3];
       let len = u32::from_be_bytes(
-        (&meta[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE].try_into()).unwrap(),
+        (meta[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE].try_into()).unwrap(),
       );
       Ok(EncodeHeader {
         meta: EncodeMeta {
@@ -249,7 +248,10 @@ mod r#async {
       let more_bytes = header.len as usize;
       #[cfg(feature = "metrics")]
       {
-        // add_sample_to_remote_size_histogram(more_bytes as f64, metric_labels.iter());
+        crate::network::sealed_metrics::add_sample_to_remote_size_histogram(
+          more_bytes as f64,
+          metric_labels.iter(),
+        );
       }
 
       if more_bytes > MAX_PUSH_STATE_BYTES {

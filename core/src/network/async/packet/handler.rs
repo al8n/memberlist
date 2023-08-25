@@ -51,7 +51,7 @@ where
   }
 
   async fn handle_suspect(&self, msg: MessageHandoff) {
-    let (_, suspect) = match Suspect::decode_archived::<T::Checksumer>(&msg.buf) {
+    let (_, suspect) = match Suspect::decode_archived(&msg.buf) {
       Ok(rst) => rst,
       Err(e) => {
         tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to decode suspect message");
@@ -70,7 +70,7 @@ where
       return;
     }
 
-    let (_, alive) = match Alive::decode_archived::<T::Checksumer>(&msg.buf) {
+    let (_, alive) = match Alive::decode_archived(&msg.buf) {
       Ok(alive) => alive,
       Err(e) => {
         tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to decode alive message");
@@ -85,12 +85,13 @@ where
       }
     }
 
-    // self.alive_node(alive, None, false).await
-    todo!()
+    self
+      .alive_node(either::Either::Right(alive), None, false)
+      .await
   }
 
   async fn handle_dead(&self, msg: MessageHandoff) {
-    let (_, dead) = match Dead::decode_archived::<T::Checksumer>(&msg.buf) {
+    let (_, dead) = match Dead::decode_archived(&msg.buf) {
       Ok(dead) => dead,
       Err(e) => {
         tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to decode dead message");

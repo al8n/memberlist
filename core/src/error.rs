@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use rkyv::de::deserializers::SharedDeserializeMapError;
+
 use crate::{delegate::Delegate, dns::DnsError, transport::Transport, types::NodeId};
 
 pub use crate::{
@@ -32,6 +34,13 @@ pub enum Error<T: Transport, D: Delegate> {
   OffloadPanic,
   #[error("showbiz: {0}")]
   Other(Cow<'static, str>),
+}
+
+impl<D: Delegate, T: Transport> From<SharedDeserializeMapError> for Error<T, D> {
+  #[inline]
+  fn from(e: SharedDeserializeMapError) -> Self {
+    Self::Transport(DecodeError::Decode(e).into())
+  }
 }
 
 impl<D: Delegate, T: Transport> From<CompressError> for Error<T, D> {
