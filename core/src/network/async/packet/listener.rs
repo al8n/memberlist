@@ -263,7 +263,7 @@ where
       };
 
       match compress.decompress() {
-        Ok(payload) => self.handle_command(payload, from, timestamp).await,
+        Ok((_, payload)) => self.handle_command(payload, from, timestamp).await,
         Err(e) => {
           tracing::error!(target = "showbiz.packet", remote = %from, err = %e, "failed to decompress payload");
         }

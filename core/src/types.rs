@@ -220,8 +220,7 @@ where
     .serialize_value(msg)
     .map(|_| {
       let mut data = ser.into_writter();
-      let len = (data.len() - ENCODE_HEADER_SIZE) as u32;
-      data[ENCODE_META_SIZE..ENCODE_HEADER_SIZE].copy_from_slice(&len.to_be_bytes());
+      data.write_message_len();
       data
     })
     .unwrap()

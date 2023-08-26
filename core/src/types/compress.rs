@@ -89,7 +89,7 @@ impl Compress {
     src: &[u8],
   ) -> Result<Vec<u8>, CompressError> {
     let mut buf = Vec::with_capacity(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE + src.len());
-    buf[..ENCODE_HEADER_SIZE].copy_from_slice(&[
+    buf.put_slice(&[
       MessageType::Compress as u8,
       0,
       r1,
@@ -153,13 +153,18 @@ impl Compress {
     }
   }
 
-  pub(crate) fn decompress(&self) -> Result<Bytes, DecompressError> {
+  pub(crate) fn decompress(&self) -> Result<(EncodeHeader, Bytes), DecodeError> {
     match self.algo {
       CompressionAlgo::Lzw => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
         .decode(&self.buf)
-        .map(|buf| buf.into())
-        .map_err(DecompressError::Lzw),
-      CompressionAlgo::None => Ok(self.buf.clone()),
+        .map_err(|e| DecodeError::Decompress(DecompressError::Lzw(e)))
+        .and_then(|buf| {
+          if buf.len() < ENCODE_HEADER_SIZE {
+            return Err(DecodeError::Corrupted);
+          }
+          EncodeHeader::from_bytes(&buf[..ENCODE_HEADER_SIZE]).map(|h| (h, buf.into()))
+        }),
+      CompressionAlgo::None => EncodeHeader::from_bytes(&self.buf[..ENCODE_HEADER_SIZE]).map(|h| (h, self.buf.clone())),
     }
   }
 

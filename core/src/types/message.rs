@@ -189,6 +189,12 @@ impl Message {
   pub(crate) fn underlying_bytes(&self) -> &[u8] {
     &self.0
   }
+
+  #[inline]
+  pub(crate) fn write_message_len(&mut self) {
+    let len = (self.0.len() - ENCODE_HEADER_SIZE) as u32;
+    self.0[ENCODE_META_SIZE..ENCODE_HEADER_SIZE].copy_from_slice(&len.to_be_bytes());
+  }
 }
 
 impl std::io::Write for Message {
@@ -347,13 +353,13 @@ impl Default for MessageSerializer {
 
 impl MessageSerializer {
   pub(crate) fn new() -> Self {
-    Self::with_writter(Message::with_capacity(DEFAULT_ENCODE_PREALLOCATE_SIZE - 1))
+    Self::with_writter(Message(BytesMut::with_capacity(DEFAULT_ENCODE_PREALLOCATE_SIZE - 1)))
   }
 }
 
 impl<const N: usize> MessageSerializer<N> {
   pub(crate) fn with_preallocated_size() -> Self {
-    Self::with_writter(Message::with_capacity(N - 1))
+    Self::with_writter(Message(BytesMut::with_capacity(N - 1)))
   }
 }
 

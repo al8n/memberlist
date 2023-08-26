@@ -472,7 +472,7 @@ where
     if h.meta.ty == MessageType::Compress {
       if let Some(unencrypted) = unencrypted {
         let (_, compress) = Compress::decode_from_bytes(unencrypted)?;
-        let uncompressed_data: Bytes = if compress.algo.is_none() {
+        let uncompressed_data = if compress.algo.is_none() {
           unreachable!()
         } else if compress.buf.len() > opts.offload_size {
           let (tx, rx) = futures_channel::oneshot::channel();
@@ -488,7 +488,7 @@ where
               }
               Err(e) => {
                 if tx
-                  .send(Err(Error::transport(DecodeError::Decompress(e).into())))
+                  .send(Err(Error::transport(e.into())))
                   .is_err()
                 {
                   tracing::error!(
@@ -506,21 +506,21 @@ where
         } else {
           match compress.decompress() {
             Ok(buf) => buf,
-            Err(e) => return Err(Error::transport(DecodeError::Decompress(e).into())),
+            Err(e) => return Err(Error::transport(e.into())),
           }
         };
 
         // do not consume mt byte, let the callee to handle mt advance logic.
-        return Ok((h, uncompressed_data));
+        return Ok(uncompressed_data);
       } else {
         let compress = conn
           .read_compressed_message(&h)
           .await
           .map_err(Error::transport)?;
+        tracing::error!("compressed: {:?}", compress.buf.as_ref());
         return compress
           .decompress()
-          .map(|data| (h, data))
-          .map_err(|e| Error::transport(TransportError::Decode(DecodeError::Decompress(e))));
+          .map_err(|e| Error::transport(TransportError::Decode(e)));
       }
     }
 
@@ -528,9 +528,10 @@ where
       return Ok((h, unencrypted));
     }
 
-    let mut buf = vec![0; h.len as usize];
+    let mut buf = vec![0; ENCODE_HEADER_SIZE + h.len as usize];
+    buf[..ENCODE_HEADER_SIZE].copy_from_slice(&h.to_array());
     conn
-      .read_exact(&mut buf)
+      .read_exact(&mut buf[ENCODE_HEADER_SIZE..])
       .await
       .map(|_| (h, buf.into()))
       .map_err(Error::transport)
