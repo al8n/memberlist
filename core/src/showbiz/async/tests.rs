@@ -601,6 +601,7 @@ where
       .with_probe_interval(Duration::from_millis(1))
       .with_probe_timeout(Duration::from_micros(100))
       .with_suspicion_max_timeout_mult(1)
+      .with_compression_algo(CompressionAlgo::None)
   };
 
   let c1 = new_config();

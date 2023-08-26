@@ -586,7 +586,7 @@ where
     msg.put_u32(crc32fast::hash(&msg[ENCODE_HEADER_SIZE..]));
 
     // Check if only encryption is enabled
-    if !self.inner.opts.encryption_algo.is_none() && self.inner.opts.gossip_verify_outgoing {
+    if self.encryption_enabled() && self.inner.opts.gossip_verify_outgoing {
       let buf = if msg.underlying_bytes().len() > self.inner.opts.offload_size {
         let kr = self.keyring().unwrap().clone();
         encrypt_packet_offload(

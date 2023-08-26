@@ -124,7 +124,7 @@ impl Compress {
   ) -> Result<Vec<u8>, CompressError> {
     let mut buf =
       Vec::with_capacity(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE + src.len() + CHECKSUM_SIZE);
-    buf[..ENCODE_HEADER_SIZE].copy_from_slice(&[
+    buf.put_slice(&[
       MessageType::Compress as u8,
       MessageType::HasCrc as u8,
       r1,
@@ -175,7 +175,7 @@ impl Compress {
     let r1 = src[2];
     let r2 = src[3];
     let len = u32::from_be_bytes(
-      src[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE]
+      src[ENCODE_META_SIZE..ENCODE_HEADER_SIZE]
         .try_into()
         .unwrap(),
     );
