@@ -109,7 +109,6 @@ impl EncryptionAlgo {
     let enc_len = self.encrypted_length(len);
     let enc_len_bytes = (enc_len as u32).to_be_bytes();
     let mut buf = BytesMut::with_capacity(ENCODE_HEADER_SIZE + enc_len);
-
     // Write the encrypt byte
     buf.put_slice(&[
       MessageType::Encrypt as u8,
@@ -606,7 +605,7 @@ fn encrypt_payload_in<A: AeadInPlace + Aead>(
       pkcs7encode(
         dst,
         buf_len,
-        offset + EncryptionAlgo::SIZE + NONCE_SIZE,
+        offset + EncryptionAlgo::SIZE + ENCRYPT_HEADER_PADDING + NONCE_SIZE,
         BLOCK_SIZE,
       );
       let mut bytes = dst.split_off(after_nonce);

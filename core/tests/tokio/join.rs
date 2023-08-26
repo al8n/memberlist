@@ -20,9 +20,9 @@ fn join_with_encryption() {
     EncryptionAlgo::NoPadding,
   ));
 
-  // run(test_join_with_encryption::<TokioRuntime>(
-  //   EncryptionAlgo::PKCS7,
-  // ));
+  run(test_join_with_encryption::<TokioRuntime>(
+    EncryptionAlgo::PKCS7,
+  ));
 }
 
 #[test]

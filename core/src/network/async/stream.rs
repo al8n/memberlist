@@ -410,7 +410,6 @@ where
     #[cfg(feature = "metrics")] metric_labels: &[metrics::Label],
   ) -> Result<(EncodeHeader, Bytes), Error<T, D>> {
     let mut h = conn.read_message_header().await.map_err(Error::transport)?;
-
     // Check if the message is encrypted
     let unencrypted = if h.meta.ty == MessageType::Encrypt {
       if !encryption_enabled {
@@ -457,7 +456,6 @@ where
           Err(e) => return Err(e),
         }
       };
-      tracing::error!("debug: decrypted {:?}", plain.as_ref());
       // Reset message type and buf conn
       h.meta.ty = match MessageType::try_from(plain[0]) {
         Ok(mt) => mt,
@@ -515,7 +513,6 @@ where
           .read_compressed_message(&h)
           .await
           .map_err(Error::transport)?;
-        tracing::error!("compressed: {:?}", compress.buf.as_ref());
         return compress
           .decompress()
           .map_err(|e| Error::transport(TransportError::Decode(e)));
@@ -561,21 +558,21 @@ where
     let mut stream_label = match conn.remove_label_header().await {
       Ok(label) => label,
       Err(e) => {
-        tracing::error!(target = "showbiz.stream", err = %e, remote_node = ?addr, "failed to remove label header");
+        tracing::error!(target = "showbiz.stream", err = %e, remote_node = %addr, "failed to remove label header");
         return;
       }
     };
 
     if self.inner.opts.skip_inbound_label_check {
       if !stream_label.is_empty() {
-        tracing::error!(target = "showbiz.stream", remote_node = ?addr, "unexpected double stream label header");
+        tracing::error!(target = "showbiz.stream", remote_node = %addr, "unexpected double stream label header");
         return;
       }
       // Set this from config so that the auth data assertions work below
       stream_label = self.inner.opts.label.clone();
     }
     if self.inner.opts.label.ne(&stream_label) {
-      tracing::error!(target = "showbiz.stream", remote_node = ?addr, "discarding stream with unacceptable label: {:?}", self.inner.opts.label.as_ref());
+      tracing::error!(target = "showbiz.stream", remote_node = %addr, "discarding stream with unacceptable label: {:?}", self.inner.opts.label.as_ref());
       return;
     }
 
