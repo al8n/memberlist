@@ -457,6 +457,7 @@ where
           Err(e) => return Err(e),
         }
       };
+      tracing::error!("debug: decrypted {:?}", plain.as_ref());
       // Reset message type and buf conn
       h.meta.ty = match MessageType::try_from(plain[0]) {
         Ok(mt) => mt,
@@ -487,10 +488,7 @@ where
                 }
               }
               Err(e) => {
-                if tx
-                  .send(Err(Error::transport(e.into())))
-                  .is_err()
-                {
+                if tx.send(Err(Error::transport(e.into()))).is_err() {
                   tracing::error!(
                     target = "showbiz.stream",
                     err = "fail to send decompressed buffer, receiver end closed"

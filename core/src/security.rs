@@ -97,9 +97,11 @@ impl EncryptionAlgo {
         let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
 
         // Sum the extra parts to get total size
-        EncryptionAlgo::SIZE + NONCE_SIZE + inp + padding + TAG_SIZE
+        EncryptionAlgo::SIZE + ENCRYPT_HEADER_PADDING + NONCE_SIZE + inp + padding + TAG_SIZE
       }
-      Self::NoPadding => EncryptionAlgo::SIZE + NONCE_SIZE + inp + TAG_SIZE,
+      Self::NoPadding => {
+        EncryptionAlgo::SIZE + ENCRYPT_HEADER_PADDING + NONCE_SIZE + inp + TAG_SIZE
+      }
     }
   }
 
@@ -517,6 +519,7 @@ impl SecretKeyring {
 pub(crate) const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
 pub(crate) const BLOCK_SIZE: usize = 16;
+const ENCRYPT_HEADER_PADDING: usize = 3;
 
 // pkcs7encode is used to pad a byte buffer to a specific block size using
 // the PKCS7 algorithm. "Ignores" some bytes to compensate for IV
@@ -583,12 +586,14 @@ fn encrypt_payload_in<A: AeadInPlace + Aead>(
   dst.reserve(vsn.encrypted_length(msg.len()));
 
   // Write the encryption version
-  dst.put_u8(vsn as u8);
+  dst.put_slice(&[
+    vsn as u8, 0, 0, 0, // 3-bytes padding
+  ]);
   // Add a random nonce
   let mut nonce = [0u8; NONCE_SIZE];
   rand::thread_rng().fill(&mut nonce);
   dst.put_slice(&nonce);
-  let after_nonce = offset + NONCE_SIZE + EncryptionAlgo::SIZE;
+  let after_nonce = offset + NONCE_SIZE + EncryptionAlgo::SIZE + ENCRYPT_HEADER_PADDING;
   dst.put_slice(msg);
 
   // Encrypt message using GCM
@@ -631,15 +636,17 @@ fn decrypt_message_in<A: Aead + AeadInPlace>(
   data: &[u8],
 ) -> Result<(), SecurityError> {
   // Decrypt the message
-  let mut ciphertext = msg.split_off(EncryptionAlgo::SIZE + NONCE_SIZE);
-  let nonce =
-    GenericArray::from_slice(&msg[EncryptionAlgo::SIZE..EncryptionAlgo::SIZE + NONCE_SIZE]);
+  let mut ciphertext = msg.split_off(EncryptionAlgo::SIZE + ENCRYPT_HEADER_PADDING + NONCE_SIZE);
+  let nonce = GenericArray::from_slice(
+    &msg[EncryptionAlgo::SIZE + ENCRYPT_HEADER_PADDING
+      ..EncryptionAlgo::SIZE + ENCRYPT_HEADER_PADDING + NONCE_SIZE],
+  );
 
   gcm
     .decrypt_in_place(nonce, data, &mut ciphertext)
     .map_err(SecurityError::AeadError)?;
   msg.unsplit(ciphertext);
-  msg.advance(EncryptionAlgo::SIZE + NONCE_SIZE);
+  msg.advance(EncryptionAlgo::SIZE + ENCRYPT_HEADER_PADDING + NONCE_SIZE);
   Ok(())
 }
 

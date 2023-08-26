@@ -164,7 +164,9 @@ impl Compress {
           }
           EncodeHeader::from_bytes(&buf[..ENCODE_HEADER_SIZE]).map(|h| (h, buf.into()))
         }),
-      CompressionAlgo::None => EncodeHeader::from_bytes(&self.buf[..ENCODE_HEADER_SIZE]).map(|h| (h, self.buf.clone())),
+      CompressionAlgo::None => {
+        EncodeHeader::from_bytes(&self.buf[..ENCODE_HEADER_SIZE]).map(|h| (h, self.buf.clone()))
+      }
     }
   }
 

@@ -353,7 +353,9 @@ impl Default for MessageSerializer {
 
 impl MessageSerializer {
   pub(crate) fn new() -> Self {
-    Self::with_writter(Message(BytesMut::with_capacity(DEFAULT_ENCODE_PREALLOCATE_SIZE - 1)))
+    Self::with_writter(Message(BytesMut::with_capacity(
+      DEFAULT_ENCODE_PREALLOCATE_SIZE - 1,
+    )))
   }
 }
 

@@ -1,7 +1,6 @@
 use std::sync::atomic::Ordering;
 
 use crate::{
-  checksum::Checksumer,
   delegate::Delegate,
   error::Error,
   security::{append_bytes, EncryptionAlgo, SecretKey, SecretKeyring, SecurityError},
@@ -181,10 +180,6 @@ where
       keyring
         .encrypt_payload(primary_key, algo, msg, &buf, &mut ciphertext)
         .map(|_| {
-          let mut h = <T::Checksumer as Checksumer>::new();
-          h.update(&ciphertext);
-          buf[ENCODE_META_SIZE + MAX_MESSAGE_SIZE..ENCODE_HEADER_SIZE]
-            .copy_from_slice(&h.finalize().to_be_bytes());
           buf.unsplit(ciphertext);
           buf.freeze()
         })
@@ -195,10 +190,6 @@ where
       keyring
         .encrypt_payload(primary_key, algo, msg, &data_bytes, &mut ciphertext)
         .map(|_| {
-          let mut h = <T::Checksumer as Checksumer>::new();
-          h.update(&ciphertext);
-          buf[ENCODE_META_SIZE + MAX_MESSAGE_SIZE..ENCODE_HEADER_SIZE]
-            .copy_from_slice(&h.finalize().to_be_bytes());
           buf.unsplit(ciphertext);
           buf.freeze()
         })
@@ -219,7 +210,7 @@ where
     //   [messageLength; u32] [stream_label; optional] [encryptionAlgo; u8]
     //
 
-    let mut ciphertext = buf.split_off(ENCODE_HEADER_SIZE + EncryptionAlgo::SIZE);
+    let mut ciphertext = buf.split_off(ENCODE_HEADER_SIZE);
     if stream_label.is_empty() {
       // Decrypt the payload
       keyring
