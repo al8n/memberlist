@@ -352,7 +352,7 @@ where
     };
 
     let msg = PushPullMessage::new(header, local_nodes, user_data);
-    let buf = msg.encode(0, 0);
+    let buf = msg.encode();
     #[cfg(feature = "metrics")]
     {
       std::thread_local! {
@@ -597,7 +597,7 @@ where
 
           let err_resp = ErrorResponse::new(err.to_string());
           if let Err(e) = self
-            .raw_send_msg_stream(&mut conn, stream_label, err_resp.encode(0, 0), addr)
+            .raw_send_msg_stream(&mut conn, stream_label, err_resp.encode(), addr)
             .await
           {
             tracing::error!(target = "showbiz.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to send error response");
@@ -631,7 +631,7 @@ where
 
         let ack = AckResponse::empty(ping.seq_no);
         if let Err(e) = self
-          .raw_send_msg_stream(&mut conn, stream_label, ack.encode(0, 0), addr)
+          .raw_send_msg_stream(&mut conn, stream_label, ack.encode(), addr)
           .await
         {
           tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to send ack response");

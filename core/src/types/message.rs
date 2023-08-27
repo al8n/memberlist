@@ -84,32 +84,53 @@ impl Message {
 
   pub(crate) fn compound(msgs: Vec<Message>) -> Message {
     let num_msgs = msgs.len();
-    let total: usize = msgs.iter().map(|m| m.len()).sum();
-    let msg_len = core::mem::size_of::<u8>() + num_msgs * core::mem::size_of::<u16>() + total;
+    let total: usize = msgs
+      .iter()
+      .map(|m| {
+        let len = m.underlying_bytes().len();
+        (8 - len % 8) + len
+      })
+      .sum();
+    let (lengths_padding, lengths) = {
+      let tmp = num_msgs * core::mem::size_of::<u16>();
+      (8 - tmp % 8, (8 - tmp % 8) + tmp)
+    };
+
+    let msg_len = lengths + total;
+    tracing::error!(
+      "debug p: {} l: {} al: {} t: {}",
+      lengths_padding,
+      num_msgs * core::mem::size_of::<u16>(),
+      lengths,
+      total
+    );
     let mut buf = BytesMut::with_capacity(ENCODE_HEADER_SIZE + msg_len);
     // Write out the type
     let msg_len = (msg_len as u32).to_be_bytes();
     buf.put_slice(&[
       MessageType::Compound as u8,
       0,
-      0,
+      num_msgs as u8,
       0,
       msg_len[0],
       msg_len[1],
       msg_len[2],
       msg_len[3],
     ]);
-    // Write out the number of message
-    buf.put_u8(num_msgs as u8);
 
-    let mut compound = buf.split_off(num_msgs * 2);
+    let mut compound = buf.split_off(ENCODE_HEADER_SIZE + lengths);
     for msg in msgs {
+      let data = msg.underlying_bytes();
       // Add the message length
-      buf.put_u16(msg.len() as u16);
+      buf.put_u16(data.len() as u16);
       // put msg into compound
-      compound.put_slice(&msg);
+      compound.put_slice(data);
+      // put padding into compound
+      compound.put_bytes(0, 8 - data.len() % 8);
     }
-
+    if lengths_padding != 0 {
+      buf.put_bytes(0, lengths_padding);
+    }
     buf.unsplit(compound);
     Message(buf)
   }

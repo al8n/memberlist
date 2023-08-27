@@ -172,8 +172,8 @@ impl Compress {
 
   pub(crate) fn decode_from_bytes(mut src: Bytes) -> Result<(EncodeHeader, Self), DecodeError> {
     let marker = src[1];
-    let r1 = src[2];
-    let r2 = src[3];
+    let msgs = src[2];
+    let r1 = src[3];
     let len = u32::from_be_bytes(
       src[ENCODE_META_SIZE..ENCODE_HEADER_SIZE]
         .try_into()
@@ -188,8 +188,8 @@ impl Compress {
             meta: EncodeMeta {
               ty: MessageType::Compress,
               marker,
+              msgs,
               r1,
-              r2,
             },
             len,
           },
@@ -203,8 +203,8 @@ impl Compress {
             meta: EncodeMeta {
               ty: MessageType::Compress,
               marker,
+              msgs,
               r1,
-              r2,
             },
             len,
           },

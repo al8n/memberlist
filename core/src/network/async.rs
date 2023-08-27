@@ -55,7 +55,7 @@ where
       .raw_send_msg_stream(
         &mut conn,
         self.inner.opts.label.clone(),
-        ping.encode(0, 0),
+        ping.encode(),
         target.addr(),
       )
       .await?;

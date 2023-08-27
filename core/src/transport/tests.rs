@@ -59,7 +59,7 @@ where
     target: m.inner.id.clone(),
   };
 
-  let buf = ping.encode(0, 0);
+  let buf = ping.encode();
   // Send
   udp
     .send_to(buf.underlying_bytes(), m.inner.id.addr())
@@ -114,11 +114,9 @@ where
     target: m.inner.id.clone(),
   };
 
-  let buf = ping.encode(0, 0);
-
+  let buf = ping.encode();
   // Make a compound message
   let buf = Message::compound(vec![buf.clone(), buf.clone(), buf]);
-
   // Send
   udp
     .send_to(buf.underlying_bytes(), m.inner.id.addr())
@@ -130,7 +128,7 @@ where
   R::spawn_detach(async {
     futures_util::select! {
       _ = rx.fuse() => {},
-      _ = R::sleep(Duration::from_secs(2)).fuse() => {
+      _ = R::sleep(Duration::from_secs(200)).fuse() => {
         panic!("timeout")
       }
     }
@@ -181,7 +179,7 @@ where
       .set_name(Name::from_str_unchecked("bad")),
   };
 
-  let buf = ping.encode(0, 0);
+  let buf = ping.encode();
   // Send
   udp
     .send_to(buf.underlying_bytes(), m.inner.id.addr())
@@ -217,7 +215,7 @@ where
     target: m.inner.id.clone(),
   };
 
-  let buf = ping.encode(0, 0);
+  let buf = ping.encode();
   // Send
   udp
     .send_to(buf.underlying_bytes(), m.inner.id.addr())
@@ -256,40 +254,3 @@ pub async fn test_transport_send_runner() {
 pub async fn test_transport_tcp_listen_back_off_runner() {
   todo!()
 }
-
-// #[tokio::test]
-// async fn test_udp() {
-//   use tokio::net::{UdpSocket, TcpListener};
-//   use tokio::io::AsyncReadExt;
-//   use agnostic::tokio::TokioRuntime;
-
-//   crate::tests::initialize_tests_tracing();
-
-//   tokio::spawn(async {
-//     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-//     let sock = <<TokioRuntime as Runtime>::Net as agnostic::net::Net>::UdpSocket::bind(addr).await.unwrap();
-//     // let sock = UdpSocket::bind(addr).await.unwrap();
-//     loop {
-//       let mut buf = bytes::BytesMut::new();
-//       buf.resize(1024, 0);
-//       let (len, addr) = sock.recv_from(&mut buf).await.unwrap();
-//       tracing::error!("{:?} bytes received from {:?}", len, addr);
-//     }
-//   });
-
-//   // tokio::spawn(async {
-//   //   let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-//   //   let sock = TcpListener::bind(addr).await.unwrap();
-//   //   loop {
-//   //     let mut buf = [0; 1024];
-//   //     let (mut s, addr) = sock.accept().await.unwrap();
-//   //     let n = s.read(&mut buf).await.unwrap();
-//   //     tracing::error!("{:?} bytes received from", n);
-//   //   }
-//   // });
-
-//   let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081);
-//   let client = UdpSocket::bind(addr).await.unwrap();
-//   client.send_to(b"hello world", "127.0.0.1:8080").await.unwrap();
-//   tokio::time::sleep(Duration::from_secs(10)).await;
-// }

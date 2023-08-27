@@ -150,18 +150,16 @@ pub enum EncodeError {
 pub(crate) trait Type: Sized + Archive {
   const PREALLOCATE: usize;
 
-  fn encode(&self, r1: u8, r2: u8) -> Message;
+  fn encode(&self) -> Message;
 
-  fn decode_archived<'a>(
-    mut src: &'a [u8],
-  ) -> Result<(EncodeHeader, &'a Self::Archived), DecodeError>
+  fn decode_archived<'a>(src: &'a [u8]) -> Result<(EncodeHeader, &'a Self::Archived), DecodeError>
   where
     <Self as Archive>::Archived: CheckBytes<DefaultValidator<'a>>,
   {
     let mt = src[0].try_into()?;
     let marker = src[1];
-    let r1 = src[2];
-    let r2 = src[3];
+    let msgs = src[2];
+    let r1 = src[3];
     let len = u32::from_be_bytes(
       src[ENCODE_META_SIZE..ENCODE_HEADER_SIZE]
         .try_into()
@@ -188,15 +186,15 @@ pub(crate) trait Type: Sized + Archive {
             meta: EncodeMeta {
               ty: mt,
               marker,
+              msgs,
               r1,
-              r2,
             },
             len,
           },
           a,
         )
       })
-      .map_err(|_| DecodeError::CheckBytesError(std::any::type_name::<Self>()))
+      .map_err(|_e| DecodeError::CheckBytesError(std::any::type_name::<Self>()))
   }
 
   fn from_bytes<'a>(src: &'a [u8]) -> Result<&'a Self::Archived, DecodeError>
@@ -221,14 +219,14 @@ pub(crate) trait Type: Sized + Archive {
   }
 }
 
-fn encode<T, const N: usize>(ty: MessageType, r1: u8, r2: u8, msg: &T) -> Message
+fn encode<T, const N: usize>(ty: MessageType, msg: &T) -> Message
 where
   T: Serialize<CompositeSerializer<Message, N>>,
 {
   let mut ser = MessageSerializer::<N>::with_preallocated_size();
   ser
     .write(&[
-      ty as u8, 0, r1, r2, 0, 0, 0, 0, // len
+      ty as u8, 0, 0, 0, 0, 0, 0, 0, // len
     ])
     .unwrap();
   ser
@@ -245,11 +243,12 @@ where
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct EncodeMeta {
   ty: MessageType,
-  // marker byte, currently only has one, value 244 shows that this message need to be verified by checksum
+  // checksum byte, value 244 shows that this message need to be verified by checksum
   marker: u8,
-  // reserved 2 bytes for message specific
+  // compound byte, if messsage ty is Compound, this one will represent how many messages
+  msgs: u8,
+  // reserved byte for message specific
   r1: u8,
-  r2: u8,
 }
 
 #[viewit::viewit]
@@ -266,8 +265,8 @@ impl EncodeHeader {
     [
       self.meta.ty as u8,
       self.meta.marker,
+      self.meta.msgs,
       self.meta.r1,
-      self.meta.r2,
       len[0],
       len[1],
       len[2],
@@ -281,8 +280,8 @@ impl EncodeHeader {
       meta: EncodeMeta {
         ty: src[0].try_into()?,
         marker: src[1],
-        r1: src[2],
-        r2: src[3],
+        msgs: src[2],
+        r1: src[3],
       },
       len: u32::from_be_bytes([src[4], src[5], src[6], src[7]]),
     })

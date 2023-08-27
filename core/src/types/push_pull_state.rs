@@ -36,8 +36,8 @@ pub(crate) struct PushPullMessage {
 impl super::Type for PushPullMessage {
   const PREALLOCATE: usize = super::ENCODE_HEADER_SIZE + 12;
 
-  fn encode(&self, r1: u8, r2: u8) -> Message {
-    super::encode::<_, { Self::PREALLOCATE }>(MessageType::PushPull, r1, r2, self)
+  fn encode(&self) -> Message {
+    super::encode::<_, { Self::PREALLOCATE }>(MessageType::PushPull, self)
   }
 }
 

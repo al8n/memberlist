@@ -20,8 +20,8 @@ macro_rules! bail_ping {
     impl super::Type for $name {
       const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
 
-      fn encode(&self, r1: u8, r2: u8) -> Message {
-        super::encode::<_, { Self::PREALLOCATE }>(MessageType::$name, r1, r2, self)
+      fn encode(&self) -> Message {
+        super::encode::<_, { Self::PREALLOCATE }>(MessageType::$name, self)
       }
     }
   };

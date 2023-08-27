@@ -134,7 +134,6 @@ where
     };
 
     let has_crc = header.meta.marker == MessageType::HasCrc as u8;
-
     if header.len as usize + ENCODE_HEADER_SIZE + if has_crc { CHECKSUM_SIZE } else { 0 }
       > buf.len()
     {
@@ -152,30 +151,34 @@ where
 
       // remove checksum
       buf.truncate(len - CHECKSUM_SIZE);
+      buf[1] = 0;
     }
-
     self.handle_command(buf.freeze(), addr, timestamp).await
   }
 
   #[async_recursion::async_recursion]
-  async fn handle_command(&self, buf: Bytes, from: SocketAddr, timestamp: Instant) {
+  async fn handle_command(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
     if !buf.has_remaining() {
       tracing::error!(target = "showbiz.packet", addr = %from, err = "missing message type byte");
       return;
     }
 
     // Decode the message type
-    let mt = buf[0];
-    let msg_type = match MessageType::try_from(mt) {
-      Ok(msg_type) => msg_type,
+    let h = match EncodeHeader::from_bytes(&buf[..ENCODE_HEADER_SIZE]) {
+      Ok(h) => h,
       Err(e) => {
-        tracing::error!(target = "showbiz.packet", addr = %from, err = %e, "message type ({}) not supported", mt);
+        tracing::error!(target = "showbiz.packet", addr = %from, err = %e, "invalid message header ({:?})", &buf[..ENCODE_HEADER_SIZE]);
         return;
       }
     };
 
-    match msg_type {
-      MessageType::Compound => self.handle_compound(buf, from, timestamp).await,
+    match h.meta.ty {
+      MessageType::Compound => {
+        buf.advance(ENCODE_HEADER_SIZE);
+        self
+          .handle_compound(h.meta.msgs as usize, buf, from, timestamp)
+          .await
+      }
       MessageType::Compress => self.handle_compressed(buf, from, timestamp).await,
       MessageType::Ping => self.handle_ping(buf, from).await,
       MessageType::IndirectPing => self.handle_indirect_ping(buf, from).await,
@@ -186,16 +189,16 @@ where
         {
           let mut mq = self.inner.queue.lock().await;
           let mut queue = &mut mq.low;
-          if msg_type == MessageType::Alive {
+          if h.meta.ty == MessageType::Alive {
             queue = &mut mq.high;
           }
 
           // Check for overflow and append if not full
           if queue.len() >= self.inner.opts.handoff_queue_depth {
-            tracing::warn!(target = "showbiz.packet", addr = %from, "handler queue full, dropping message ({})", msg_type);
+            tracing::warn!(target = "showbiz.packet", addr = %from, "handler queue full, dropping message ({})", h.meta.ty);
           } else {
             queue.push_back(MessageHandoff {
-              msg_ty: msg_type,
+              msg_ty: h.meta.ty,
               buf,
               from,
             });
@@ -214,38 +217,49 @@ where
     }
   }
 
-  async fn handle_compound(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
+  async fn handle_compound(
+    &self,
+    msgs: usize,
+    mut buf: Bytes,
+    from: SocketAddr,
+    timestamp: Instant,
+  ) {
     // Decode the parts
     if !buf.has_remaining() {
       tracing::error!(target = "showbiz.packet", addr = %from, err = %CompoundError::MissingLengthByte, "failed to decode compound request");
       return;
     }
 
-    let num_parts = buf.get_u8() as usize;
-
     // check we have enough bytes
-    if buf.len() < num_parts * 2 {
+    if buf.len() < msgs * 2 {
       tracing::error!(target = "showbiz.packet", addr = %from, err = %CompoundError::Truncated, "failed to decode compound request");
       return;
     }
 
     // Decode the lengths
     let mut trunc = 0usize;
-    let mut lengths = buf.split_to(num_parts * 2);
-    for msg in (0..num_parts).filter_map(|_| {
+    let length_padding = {
+      let tmp = msgs * core::mem::size_of::<u16>();
+      8 - tmp % 8
+    };
+    let mut lengths = buf.split_to(msgs * 2 + length_padding);
+    for msg in (0..msgs).filter_map(|_| {
       let len = lengths.get_u16();
       if buf.len() < len as usize {
         trunc += 1;
         return None;
       }
 
-      Some(buf.split_to(len as usize))
+      let data = buf.split_to(len as usize);
+      // remove padding
+      buf.advance(8 - (len as usize % 8));
+      Some(data)
     }) {
       self.handle_command(msg, from, timestamp).await;
     }
 
     if trunc > 0 {
-      let num = num_parts - trunc;
+      let num = msgs - trunc;
       tracing::warn!(target = "showbiz.packet", addr = %from, err = %CompoundError::TruncatedMsgs(num), "failed to decode compound request");
     }
   }
@@ -301,13 +315,13 @@ where
         seq_no: p.seq_no,
         payload,
       }
-      .encode(0, 0)
+      .encode()
     } else {
       AckResponse {
         seq_no: p.seq_no,
         payload: Bytes::new(),
       }
-      .encode(0, 0)
+      .encode()
     };
 
     if let Err(e) = self.send_msg((&p.source).into(), msg).await {
@@ -316,7 +330,7 @@ where
   }
 
   async fn handle_indirect_ping(&self, buf: Bytes, from: SocketAddr) {
-    let (h, ind) = match IndirectPing::decode(&buf) {
+    let (_, ind) = match IndirectPing::decode(&buf) {
       Ok(ind) => ind,
       Err(e) => {
         tracing::error!(target = "showbiz.packet", addr = %from, err = %e, "failed to decode indirect ping request");
@@ -359,7 +373,7 @@ where
             if let Err(e) = this
               .send_msg(
                 ind_source.into(),
-                ack.encode(h.meta.r1, h.meta.r2),
+                ack.encode(),
               )
               .await
             {
@@ -371,10 +385,7 @@ where
       )
       .await;
 
-    if let Err(e) = self
-      .send_msg(ind.target.into(), ping.encode(h.meta.r1, h.meta.r2))
-      .await
-    {
+    if let Err(e) = self.send_msg(ind.target.into(), ping.encode()).await {
       tracing::error!(target = "showbiz.packet", addr = %from, err = %e, "failed to send ping");
     }
 
@@ -386,7 +397,7 @@ where
         _ = <T::Runtime as Runtime>::sleep(probe_timeout).fuse() => {
           // We've not received an ack, so send a nack.
           let nack = NackResponse::new(ind.seq_no);
-          if let Err(e) = this.send_msg((&ind.source).into(), nack.encode(h.meta.r1, h.meta.r2)).await {
+          if let Err(e) = this.send_msg((&ind.source).into(), nack.encode()).await {
             tracing::error!(target = "showbiz.packet", local = %ind.source, remote = %from, err = %e, "failed to send nack");
           }
         }

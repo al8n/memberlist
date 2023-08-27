@@ -211,8 +211,8 @@ mod r#async {
       self.read_exact(&mut meta).await?;
       let mt = meta[0].try_into().map_err(DecodeError::from)?;
       let marker = meta[1];
-      let r1 = meta[2];
-      let r2 = meta[3];
+      let msgs = meta[2];
+      let r1 = meta[3];
       let len = u32::from_be_bytes(
         (meta[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE].try_into()).unwrap(),
       );
@@ -220,8 +220,8 @@ mod r#async {
         meta: EncodeMeta {
           ty: mt,
           marker,
+          msgs,
           r1,
-          r2,
         },
         len,
       })
