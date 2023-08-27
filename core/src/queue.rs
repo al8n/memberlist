@@ -108,6 +108,14 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
       return Vec::new();
     }
 
+    for old in inner.q.iter() {
+      tracing::warn!(
+        "debug: queue iter id: {} {:?}",
+        old.broadcast.id(),
+        old.broadcast.message().0.as_ref()
+      );
+    }
+
     let transmit_limit = retransmit_limit(self.retransmit_mult, self.num_nodes.num_nodes().await);
 
     // Visit fresher items first, but only look at stuff that will fit.
@@ -202,7 +210,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
 
     let lb = LimitedBroadcast {
       transmits: AtomicUsize::new(initial_transmits),
-      msg_len: b.message().len() as u64,
+      msg_len: b.message().0.len() as u64,
       id,
       broadcast: b,
     };
@@ -213,7 +221,11 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     let id = lb.broadcast.id();
     if let Some(old) = inner.m.remove(id) {
       old.broadcast.finished().await;
-
+      tracing::info!(
+        "debug: dequeue id: {} {:?}",
+        old.broadcast.id(),
+        old.broadcast.message().0.as_ref()
+      );
       inner.q.remove(&old);
       if inner.q.is_empty() {
         inner.id_gen = 0;
@@ -238,6 +250,11 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     }
 
     // Append to the relevant queue.
+    tracing::info!(
+      "debug: queue broadcast id: {} {:?}",
+      lb.broadcast.id(),
+      lb.broadcast.message().0.as_ref()
+    );
     inner.insert(Arc::new(lb));
   }
 
@@ -304,8 +321,8 @@ impl<B: Broadcast> Ord for LimitedBroadcast<B> {
       .transmits
       .load(Ordering::Relaxed)
       .cmp(&other.transmits.load(Ordering::Relaxed))
-      .then_with(|| self.msg_len.cmp(&other.msg_len))
-      .then_with(|| self.id.cmp(&other.id))
+      .then_with(|| other.msg_len.cmp(&self.msg_len))
+      .then_with(|| other.id.cmp(&self.id))
   }
 }
 
@@ -329,8 +346,151 @@ impl<B: Broadcast> PartialOrd<&LimitedBroadcast<B>> for Cmp {
       self
         .transmits
         .cmp(&other.transmits.load(Ordering::Relaxed))
-        .then_with(|| self.msg_len.cmp(&other.msg_len))
-        .then_with(|| self.id.cmp(&other.id)),
+        .then_with(|| other.msg_len.cmp(&self.msg_len))
+        .then_with(|| other.id.cmp(&self.id)),
     )
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use bytes::BytesMut;
+
+  use crate::{broadcast::ShowbizBroadcast, Name, NodeId};
+
+  use super::*;
+
+  #[test]
+  fn test_limited_broadcast_less() {
+    struct Case {
+      name: &'static str,
+      a: Arc<LimitedBroadcast<ShowbizBroadcast>>,
+      b: Arc<LimitedBroadcast<ShowbizBroadcast>>,
+    }
+
+    let cases = [
+      Case {
+        name: "diff-transmits",
+        a: LimitedBroadcast {
+          transmits: AtomicUsize::new(0),
+          msg_len: 10,
+          id: 100,
+          broadcast: ShowbizBroadcast {
+            node: NodeId::new(
+              Name::from_str_unchecked("diff-transmits-a"),
+              "127.0.0.1:10".parse().unwrap(),
+            ),
+            msg: Message(BytesMut::from([0; 10].as_slice())),
+            notify: None,
+          },
+        }
+        .into(),
+        b: LimitedBroadcast {
+          transmits: AtomicUsize::new(1),
+          msg_len: 10,
+          id: 100,
+          broadcast: ShowbizBroadcast {
+            node: NodeId::new(
+              Name::from_str_unchecked("diff-transmits-b"),
+              "127.0.0.1:11".parse().unwrap(),
+            ),
+            msg: Message(BytesMut::from([0; 10].as_slice())),
+            notify: None,
+          },
+        }
+        .into(),
+      },
+      Case {
+        name: "same-transmits--diff-len",
+        a: LimitedBroadcast {
+          transmits: AtomicUsize::new(0),
+          msg_len: 12,
+          id: 100,
+          broadcast: ShowbizBroadcast {
+            node: NodeId::new(
+              Name::from_str_unchecked("same-transmits--diff-len-a"),
+              "127.0.0.1:10".parse().unwrap(),
+            ),
+            msg: Message(BytesMut::from([0; 12].as_slice())),
+            notify: None,
+          },
+        }
+        .into(),
+        b: LimitedBroadcast {
+          transmits: AtomicUsize::new(0),
+          msg_len: 10,
+          id: 100,
+          broadcast: ShowbizBroadcast {
+            node: NodeId::new(
+              Name::from_str_unchecked("same-transmits--diff-len-b"),
+              "127.0.0.1:11".parse().unwrap(),
+            ),
+            msg: Message(BytesMut::from([0; 10].as_slice())),
+            notify: None,
+          },
+        }
+        .into(),
+      },
+      Case {
+        name: "same-transmits--same-len--diff-id",
+        a: LimitedBroadcast {
+          transmits: AtomicUsize::new(0),
+          msg_len: 12,
+          id: 100,
+          broadcast: ShowbizBroadcast {
+            node: NodeId::new(
+              Name::from_str_unchecked("same-transmits--same-len--diff-id-a"),
+              "127.0.0.1:10".parse().unwrap(),
+            ),
+            msg: Message(BytesMut::from([0; 12].as_slice())),
+            notify: None,
+          },
+        }
+        .into(),
+        b: LimitedBroadcast {
+          transmits: AtomicUsize::new(0),
+          msg_len: 12,
+          id: 90,
+          broadcast: ShowbizBroadcast {
+            node: NodeId::new(
+              Name::from_str_unchecked("same-transmits--same-len--diff-id-b"),
+              "127.0.0.1:11".parse().unwrap(),
+            ),
+            msg: Message(BytesMut::from([0; 12].as_slice())),
+            notify: None,
+          },
+        }
+        .into(),
+      },
+    ];
+
+    for c in cases {
+      assert!(c.a < c.b, "case: {}", c.name);
+
+      #[allow(clippy::all)]
+      let mut tree = BTreeSet::new();
+      tree.insert(c.b.clone());
+      tree.insert(c.a.clone());
+
+      let min = tree.iter().min().unwrap();
+      assert_eq!(
+        min.transmits.load(Ordering::Relaxed),
+        c.a.transmits.load(Ordering::Relaxed),
+        "case: {}",
+        c.name
+      );
+      assert_eq!(min.msg_len, c.a.msg_len, "case: {}", c.name);
+      assert_eq!(min.id, c.a.id, "case: {}", c.name);
+
+      let max = tree.iter().max().unwrap();
+      assert_eq!(
+        max.transmits.load(Ordering::Relaxed),
+        c.b.transmits.load(Ordering::Relaxed),
+        "case: {}",
+        c.name
+      );
+      assert_eq!(max.msg_len, c.b.msg_len, "case: {}", c.name);
+      assert_eq!(max.id, c.b.id, "case: {}", c.name);
+    }
   }
 }

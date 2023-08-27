@@ -8,7 +8,7 @@ use async_channel::Sender;
 /// the memberlist cluster.
 #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 pub trait Broadcast: Send + Sync + 'static {
-  type Id: Clone + Eq + core::hash::Hash;
+  type Id: Clone + Eq + core::hash::Hash + core::fmt::Debug + core::fmt::Display;
 
   /// Returns the name of the broadcast, if any
   fn id(&self) -> &Self::Id;
@@ -40,6 +40,7 @@ pub trait Broadcast: Send + Sync + 'static {
   }
 }
 
+#[viewit::viewit]
 pub(crate) struct ShowbizBroadcast {
   node: NodeId,
   msg: Message,
@@ -140,6 +141,9 @@ impl<D: Delegate, T: Transport> Showbiz<T, D> {
       .broadcast
       .get_broadcast_with_prepend(to_send, overhead, limit)
       .await;
+    for (idx, s) in to_send.iter().enumerate() {
+      tracing::error!("debug: idx: {idx} s: {:?}", s.underlying_bytes());
+    }
 
     // Check if the user has anything to broadcast
     if let Some(delegate) = &self.delegate {
