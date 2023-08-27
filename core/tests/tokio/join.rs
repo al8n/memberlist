@@ -128,3 +128,8 @@ fn join_dead_node() {
 fn join_ipv6() {
   run(test_join_ipv6::<TokioRuntime>());
 }
+
+#[test]
+fn gossip_mismatched_keys() {
+  run(test_gossip_mismatched_keys::<TokioRuntime>());
+}

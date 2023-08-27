@@ -20,3 +20,6 @@ mod probe;
 
 #[path = "tokio/ping.rs"]
 mod ping;
+
+#[path = "tokio/net.rs"]
+mod net;

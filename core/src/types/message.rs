@@ -97,13 +97,6 @@ impl Message {
     };
 
     let msg_len = lengths + total;
-    tracing::error!(
-      "debug p: {} l: {} al: {} t: {}",
-      lengths_padding,
-      num_msgs * core::mem::size_of::<u16>(),
-      lengths,
-      total
-    );
     let mut buf = BytesMut::with_capacity(ENCODE_HEADER_SIZE + msg_len);
     // Write out the type
     let msg_len = (msg_len as u32).to_be_bytes();
@@ -133,6 +126,48 @@ impl Message {
     }
     buf.unsplit(compound);
     Message(buf)
+  }
+
+  #[cfg(any(feature = "test", test))]
+  pub(crate) fn decode_compound_message(
+    msgs: usize,
+    mut buf: Bytes,
+  ) -> Result<(usize, Vec<Bytes>), &'static str> {
+    use bytes::Buf;
+
+    // Decode the parts
+    if !buf.has_remaining() {
+      return Err("failed to decode compound request");
+    }
+
+    // check we have enough bytes
+    if buf.len() < msgs * 2 {
+      return Err("failed to decode compound request");
+    }
+
+    // Decode the lengths
+    let mut trunc = 0usize;
+    let length_padding = {
+      let tmp = msgs * core::mem::size_of::<u16>();
+      8 - tmp % 8
+    };
+    let mut lengths = buf.split_to(msgs * 2 + length_padding);
+    let rst = (0..msgs)
+      .filter_map(|_| {
+        let len = lengths.get_u16();
+        if buf.len() < len as usize {
+          trunc += 1;
+          return None;
+        }
+
+        let data = buf.split_to(len as usize);
+        // remove padding
+        buf.advance(8 - (len as usize % 8));
+        Some(data)
+      })
+      .collect::<Vec<_>>();
+
+    Ok((trunc, rst))
   }
 
   #[inline]
