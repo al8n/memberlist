@@ -152,7 +152,9 @@ pub(crate) trait Type: Sized + Archive {
 
   fn encode(&self, r1: u8, r2: u8) -> Message;
 
-  fn decode_archived<'a>(src: &'a [u8]) -> Result<(EncodeHeader, &'a Self::Archived), DecodeError>
+  fn decode_archived<'a>(
+    mut src: &'a [u8],
+  ) -> Result<(EncodeHeader, &'a Self::Archived), DecodeError>
   where
     <Self as Archive>::Archived: CheckBytes<DefaultValidator<'a>>,
   {
@@ -161,12 +163,25 @@ pub(crate) trait Type: Sized + Archive {
     let r1 = src[2];
     let r2 = src[3];
     let len = u32::from_be_bytes(
-      src[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE]
+      src[ENCODE_META_SIZE..ENCODE_HEADER_SIZE]
         .try_into()
         .unwrap(),
     );
+    if marker == MessageType::HasCrc as u8 {
+      if len < CHECKSUM_SIZE as u32 {
+        return Err(DecodeError::Corrupted);
+      }
+      let crc = u32::from_be_bytes(
+        src[len as usize..len as usize + CHECKSUM_SIZE]
+          .try_into()
+          .unwrap(),
+      );
+      if crc != crc32fast::hash(&src[ENCODE_HEADER_SIZE..len as usize - CHECKSUM_SIZE]) {
+        return Err(DecodeError::ChecksumMismatch);
+      }
+    }
 
-    rkyv::check_archived_root::<Self>(&src[ENCODE_HEADER_SIZE..])
+    rkyv::check_archived_root::<Self>(&src[ENCODE_HEADER_SIZE..ENCODE_HEADER_SIZE + len as usize])
       .map(|a| {
         (
           EncodeHeader {

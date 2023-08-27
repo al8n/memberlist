@@ -56,3 +56,6 @@ impl super::Type for NackResponse {
     super::encode::<_, { Self::PREALLOCATE }>(MessageType::NackResponse, r1, r2, self)
   }
 }
+
+#[test]
+fn test() {}

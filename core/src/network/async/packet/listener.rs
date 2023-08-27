@@ -583,7 +583,7 @@ where
     // mark this message should be checksumed
     msg.0[1] = MessageType::HasCrc as u8;
     // append checksum
-    msg.put_u32(crc32fast::hash(&msg[ENCODE_HEADER_SIZE..]));
+    msg.put_u32(crc32fast::hash(&msg.0[ENCODE_HEADER_SIZE..]));
 
     // Check if only encryption is enabled
     if self.encryption_enabled() && self.inner.opts.gossip_verify_outgoing {
