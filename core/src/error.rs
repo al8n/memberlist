@@ -1,15 +1,14 @@
 use std::borrow::Cow;
 
+use rkyv::de::deserializers::SharedDeserializeMapError;
+
 use crate::{delegate::Delegate, dns::DnsError, transport::Transport, types::NodeId};
 
 pub use crate::{
   options::ForbiddenIp,
   security::{SecurityError, UnknownEncryptionAlgo},
   transport::TransportError,
-  types::{
-    DecodeError, EncodeError, InvalidCompressionAlgo, InvalidDomain, InvalidLabel, InvalidName,
-  },
-  util::{CompressError, DecompressError},
+  types::{CompressError, DecodeError, DecompressError, EncodeError, InvalidDomain, InvalidLabel},
   version::{InvalidDelegateVersion, InvalidProtocolVersion},
 };
 
@@ -31,21 +30,30 @@ pub enum Error<T: Transport, D: Delegate> {
   ForbiddenIp(#[from] ForbiddenIp),
   #[error("showbiz: peer error: {0}")]
   Peer(String),
+  #[error("showbiz: offload thread panic, fail to receive offload thread message")]
+  OffloadPanic,
   #[error("showbiz: {0}")]
   Other(Cow<'static, str>),
 }
 
-impl<D: Delegate, T: Transport> From<crate::util::CompressError> for Error<T, D> {
+impl<D: Delegate, T: Transport> From<SharedDeserializeMapError> for Error<T, D> {
   #[inline]
-  fn from(e: crate::util::CompressError) -> Self {
-    Self::Transport(e.into())
+  fn from(e: SharedDeserializeMapError) -> Self {
+    Self::Transport(DecodeError::Decode(e).into())
   }
 }
 
-impl<D: Delegate, T: Transport> From<crate::util::DecompressError> for Error<T, D> {
+impl<D: Delegate, T: Transport> From<CompressError> for Error<T, D> {
   #[inline]
-  fn from(e: crate::util::DecompressError) -> Self {
-    Self::Transport(e.into())
+  fn from(e: CompressError) -> Self {
+    Self::Transport(DecodeError::Compress(e).into())
+  }
+}
+
+impl<D: Delegate, T: Transport> From<DecompressError> for Error<T, D> {
+  #[inline]
+  fn from(e: DecompressError) -> Self {
+    Self::Transport(DecodeError::Decompress(e).into())
   }
 }
 
@@ -59,6 +67,12 @@ impl<D: Delegate, T: Transport> From<crate::security::SecurityError> for Error<T
 impl<D: Delegate, T: Transport> core::fmt::Debug for Error<T, D> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{self}")
+  }
+}
+
+impl<D: Delegate, T: Transport> From<crate::types::DecodeError> for Error<T, D> {
+  fn from(e: crate::types::DecodeError) -> Self {
+    Self::Transport(TransportError::Decode(e))
   }
 }
 

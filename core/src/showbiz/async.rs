@@ -4,7 +4,7 @@ use crate::{
   delegate::VoidDelegate,
   dns::DnsError,
   transport::TransportError,
-  types::{Address, Dead, Domain},
+  types::{Address, ArchivedPushNodeState, Dead, Domain},
   util::read_resolv_conf,
   Label,
 };
@@ -410,11 +410,12 @@ where
 
     let alive = Alive {
       incarnation: this.next_incarnation(),
-      vsn: this.inner.opts.build_vsn_array(),
       meta,
       node: this.inner.id.clone(),
+      protocol_version: this.inner.opts.protocol_version,
+      delegate_version: this.inner.opts.delegate_version,
     };
-    this.alive_node(alive, None, true).await;
+    this.alive_node(Either::Left(alive), None, true).await;
     this.schedule(shutdown_rx).await;
     tracing::debug!(target = "showbiz", local = %this.inner.id, advertise_addr = %advertise, "node is living");
     Ok(this)
@@ -688,10 +689,13 @@ where
       incarnation: self.next_incarnation(),
       node: node_id,
       meta,
-      vsn: self.inner.opts.build_vsn_array(),
+      protocol_version: self.inner.opts.protocol_version,
+      delegate_version: self.inner.opts.delegate_version,
     };
     let (notify_tx, notify_rx) = async_channel::bounded(1);
-    self.alive_node(alive, Some(notify_tx), true).await;
+    self
+      .alive_node(Either::Left(alive), Some(notify_tx), true)
+      .await;
 
     // Wait for the broadcast or a timeout
     if self.any_alive().await {
@@ -719,7 +723,7 @@ where
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
-    self.raw_send_msg_packet(to, msg.0).await
+    self.raw_send_msg_packet(&to.into(), msg).await
   }
 
   /// Uses the reliable stream-oriented interface of the transport to
@@ -900,7 +904,10 @@ where
     });
   }
 
-  pub(crate) async fn verify_protocol(&self, _remote: &[PushNodeState]) -> Result<(), Error<T, D>> {
+  pub(crate) async fn verify_protocol(
+    &self,
+    _remote: &[ArchivedPushNodeState],
+  ) -> Result<(), Error<T, D>> {
     // TODO: now we do not need to handle this situation, because there is no update
     // on protocol.
     Ok(())

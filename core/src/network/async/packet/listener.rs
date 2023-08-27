@@ -1,14 +1,11 @@
 use std::time::Instant;
 
 use crate::{
-  checksum::Checksumer,
-  security::{pkcs7encode, BLOCK_SIZE, NONCE_SIZE},
   showbiz::MessageHandoff,
-  types::{Message, NodeId},
-  util::decompress_payload,
+  types::{AckResponse, Message, NackResponse},
 };
+use either::Either;
 use futures_util::{Future, Stream};
-use rand::Rng;
 
 use super::*;
 
@@ -32,7 +29,7 @@ where
             match packet {
               Ok(packet) => this.ingest_packet(packet).await,
               Err(e) => {
-                tracing::error!(target = "showbiz", "failed to receive packet: {}", e);
+                tracing::error!(target = "showbiz.packet", "failed to receive packet: {}", e);
                 // If we got an error, which means on the other side the transport has been closed,
                 // so we need to return and shutdown the packet listener
                 return;
@@ -50,14 +47,14 @@ where
     let (mut buf, mut packet_label) = match Label::remove_label_header_from(packet.into_inner()) {
       Ok((buf, packet_label)) => (buf, packet_label),
       Err(e) => {
-        tracing::error!(target = "showbiz", err = %e, addr = %addr);
+        tracing::error!(target = "showbiz.packet", err = %e, addr = %addr);
         return;
       }
     };
 
     if self.inner.opts.skip_inbound_label_check {
       if !packet_label.is_empty() {
-        tracing::error!(target = "showbiz", addr = %addr, err = "unexpected double packet label header");
+        tracing::error!(target = "showbiz.packet", addr = %addr, err = "unexpected double packet label header");
       }
 
       // set this from config so that the auth data assertions work below.
@@ -65,80 +62,125 @@ where
     }
 
     if self.inner.opts.label != packet_label {
-      tracing::error!(target = "showbiz", addr = %addr, err = "discarding packet with unacceptable label", label = ?packet_label);
+      tracing::error!(target = "showbiz.packet", addr = %addr, err = "discarding packet with unacceptable label", label = ?packet_label);
       return;
     }
 
     // Check if encryption is enabled
-    if let Some(keyring) = &self.inner.opts.secret_keyring {
+    if self.encryption_enabled() {
+      let keyring = self.keyring().unwrap();
+      if buf.len() < ENCODE_HEADER_SIZE {
+        tracing::error!(target = "showbiz.packet", addr = %addr, "truncated packet");
+        return;
+      }
+
+      if let Err(e) = EncodeHeader::from_bytes(&buf.split_to(ENCODE_HEADER_SIZE)) {
+        tracing::error!(target = "showbiz.packet", addr = %addr, err=%e, "invalid packet header");
+        return;
+      }
+
       // Decrypt the payload
       if !keyring.is_empty() {
-        if let Err(e) = keyring.decrypt_payload(&mut buf, packet_label.as_bytes()) {
+        // msg too large, offload decrypt to rayon thread pool
+        if buf.len() > self.inner.opts.offload_size {
+          let kr = keyring.clone();
+          let (tx, rx) = futures_channel::oneshot::channel();
+          rayon::spawn(move || {
+            if tx
+              .send(
+                kr.decrypt_payload(&mut buf, packet_label.as_bytes())
+                  .map(|_| buf),
+              )
+              .is_err()
+            {
+              tracing::error!(
+                target = "showbiz.packet",
+                err = "fail to send decrypted packet, receiver end closed"
+              );
+            }
+          });
+          buf = match rx.await {
+            Ok(Ok(buf)) => buf,
+            Ok(Err(e)) => {
+              tracing::error!(target = "showbiz.packet", addr = %addr, err = %e, "fail to decrypt packet");
+              return;
+            }
+            Err(_) => {
+              tracing::error!(target = "showbiz.packet", addr = %addr, err = %Error::<T, D>::OffloadPanic);
+              return;
+            }
+          };
+        } else if let Err(e) = keyring.decrypt_payload(&mut buf, packet_label.as_bytes()) {
           if self.inner.opts.gossip_verify_incoming {
-            tracing::error!(target = "showbiz", addr = %addr, err = %e, "decrypt packet failed");
+            tracing::error!(target = "showbiz.packet", addr = %addr, err = %e, "decrypt packet failed");
             return;
           }
         }
       }
     }
 
-    // See if there's a checksum included to verify the contents of the message
-    let meta_size = MessageType::SIZE + core::mem::size_of::<u32>();
-    if buf.len() >= meta_size && buf[0] == MessageType::HasCrc as u8 {
-      let mut buf = buf.freeze();
-      buf.advance(1);
-      match decode_u32_from_buf(&mut buf) {
-        Ok((size, _)) => {
-          if size as usize + 4 > buf.remaining() {
-            tracing::error!(target = "showbiz", addr = %addr, err = "truncated message");
-            return;
-          }
-          let msg = buf.split_to(size as usize);
-          let mut hasher = T::Checksumer::new();
-          hasher.update(&msg);
-          let crc = hasher.finalize();
-          let expected_crc = buf.get_u32();
-          if crc != expected_crc {
-            tracing::warn!(target = "showbiz", addr = %addr, "got invalid checksum for UDP packet: {} vs. {}", crc, expected_crc);
-            return;
-          }
-          self.handle_command(msg, addr, timestamp).await
-        }
-        Err(e) => {
-          tracing::error!(target = "showbiz", addr = %addr, err = %e, "failed to decode plain message")
-        }
-      }
-    } else {
-      self.handle_command(buf.freeze(), addr, timestamp).await
+    // if we need to verify checksum
+    if buf.len() < ENCODE_HEADER_SIZE {
+      tracing::error!(target = "showbiz.packet", addr = %addr, "truncated packet");
+      return;
     }
+
+    let header = match EncodeHeader::from_bytes(&buf[..ENCODE_HEADER_SIZE]) {
+      Ok(header) => header,
+      Err(e) => {
+        tracing::error!(target = "showbiz.packet", addr = %addr, err=%e, "invalid packet header");
+        return;
+      }
+    };
+
+    let has_crc = header.meta.marker == MessageType::HasCrc as u8;
+    if header.len as usize + ENCODE_HEADER_SIZE + if has_crc { CHECKSUM_SIZE } else { 0 }
+      > buf.len()
+    {
+      tracing::error!(target = "showbiz.packet", addr = %addr, "truncated packet");
+      return;
+    }
+
+    if has_crc {
+      let len = buf.len();
+      let cks = crc32fast::hash(&buf[ENCODE_HEADER_SIZE..len - CHECKSUM_SIZE]);
+      if cks != u32::from_be_bytes(buf[len - CHECKSUM_SIZE..len].try_into().unwrap()) {
+        tracing::error!(target = "showbiz.packet", addr = %addr, err=%DecodeError::ChecksumMismatch);
+        return;
+      }
+
+      // remove checksum
+      buf.truncate(len - CHECKSUM_SIZE);
+      buf[1] = 0;
+    }
+    self.handle_command(buf.freeze(), addr, timestamp).await
   }
 
   #[async_recursion::async_recursion]
   async fn handle_command(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
     if !buf.has_remaining() {
-      tracing::error!(target = "showbiz", addr = %from, err = "missing message type byte");
+      tracing::error!(target = "showbiz.packet", addr = %from, err = "missing message type byte");
       return;
     }
 
     // Decode the message type
-    let mt = buf.get_u8();
-    let msg_type = match MessageType::try_from(mt) {
-      Ok(msg_type) => msg_type,
+    let h = match EncodeHeader::from_bytes(&buf[..ENCODE_HEADER_SIZE]) {
+      Ok(h) => h,
       Err(e) => {
-        tracing::error!(target = "showbiz", addr = %from, err = %e, "message type ({}) not supported", mt);
+        tracing::error!(target = "showbiz.packet", addr = %from, err = %e, "invalid message header ({:?})", &buf[..ENCODE_HEADER_SIZE]);
         return;
       }
     };
 
-    match msg_type {
-      MessageType::Compound => self.handle_compound(buf, from, timestamp).await,
+    match h.meta.ty {
+      MessageType::Compound => {
+        buf.advance(ENCODE_HEADER_SIZE);
+        self
+          .handle_compound(h.meta.msgs as usize, buf, from, timestamp)
+          .await
+      }
       MessageType::Compress => self.handle_compressed(buf, from, timestamp).await,
-      MessageType::Ping => match decode_u32_from_buf(&mut buf) {
-        Ok((len, _)) => self.handle_ping(buf.split_to(len as usize), from).await,
-        Err(e) => {
-          tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode ping")
-        }
-      },
+      MessageType::Ping => self.handle_ping(buf, from).await,
       MessageType::IndirectPing => self.handle_indirect_ping(buf, from).await,
       MessageType::AckResponse => self.handle_ack(buf, from, timestamp).await,
       MessageType::NackResponse => self.handle_nack(buf, from).await,
@@ -147,16 +189,16 @@ where
         {
           let mut mq = self.inner.queue.lock().await;
           let mut queue = &mut mq.low;
-          if msg_type == MessageType::Alive {
+          if h.meta.ty == MessageType::Alive {
             queue = &mut mq.high;
           }
 
           // Check for overflow and append if not full
           if queue.len() >= self.inner.opts.handoff_queue_depth {
-            tracing::warn!(target = "showbiz", addr = %from, "handler queue full, dropping message ({})", msg_type);
+            tracing::warn!(target = "showbiz.packet", addr = %from, "handler queue full, dropping message ({})", h.meta.ty);
           } else {
             queue.push_back(MessageHandoff {
-              msg_ty: msg_type,
+              msg_ty: h.meta.ty,
               buf,
               from,
             });
@@ -165,76 +207,79 @@ where
 
         // notify of pending message
         if let Err(e) = self.inner.handoff_tx.send(()).await {
-          tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to notify of pending message");
+          tracing::error!(target = "showbiz.packet", addr = %from, err = %e, "failed to notify of pending message");
         }
       }
 
       mt => {
-        tracing::error!(target = "showbiz", addr = %from, err = "unexpected message type", message_type=%mt);
+        tracing::error!(target = "showbiz.packet", addr = %from, err = "unexpected message type", message_type=%mt);
       }
     }
   }
 
-  async fn handle_compound(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
+  async fn handle_compound(
+    &self,
+    msgs: usize,
+    mut buf: Bytes,
+    from: SocketAddr,
+    timestamp: Instant,
+  ) {
     // Decode the parts
     if !buf.has_remaining() {
-      tracing::error!(target = "showbiz", addr = %from, err = %CompoundError::MissingLengthByte, "failed to decode compound request");
+      tracing::error!(target = "showbiz.packet", addr = %from, err = %CompoundError::MissingLengthByte, "failed to decode compound request");
       return;
     }
 
-    let num_parts = buf.get_u8() as usize;
-
     // check we have enough bytes
-    if buf.len() < num_parts * 2 {
-      tracing::error!(target = "showbiz", addr = %from, err = %CompoundError::Truncated, "failed to decode compound request");
+    if buf.len() < msgs * 2 {
+      tracing::error!(target = "showbiz.packet", addr = %from, err = %CompoundError::Truncated, "failed to decode compound request");
       return;
     }
 
     // Decode the lengths
     let mut trunc = 0usize;
-    let mut lengths = buf.split_to(num_parts * 2);
-    for msg in (0..num_parts).filter_map(|_| {
+    let length_padding = {
+      let tmp = msgs * core::mem::size_of::<u16>();
+      8 - tmp % 8
+    };
+    let mut lengths = buf.split_to(msgs * 2 + length_padding);
+    for msg in (0..msgs).filter_map(|_| {
       let len = lengths.get_u16();
       if buf.len() < len as usize {
         trunc += 1;
         return None;
       }
 
-      Some(buf.split_to(len as usize))
+      let data = buf.split_to(len as usize);
+      // remove padding
+      buf.advance(8 - (len as usize % 8));
+      Some(data)
     }) {
       self.handle_command(msg, from, timestamp).await;
     }
 
     if trunc > 0 {
-      let num = num_parts - trunc;
-      tracing::warn!(target = "showbiz", addr = %from, err = %CompoundError::TruncatedMsgs(num), "failed to decode compound request");
+      let num = msgs - trunc;
+      tracing::warn!(target = "showbiz.packet", addr = %from, err = %CompoundError::TruncatedMsgs(num), "failed to decode compound request");
     }
   }
 
   #[inline]
-  async fn handle_compressed(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
+  async fn handle_compressed(&self, buf: Bytes, from: SocketAddr, timestamp: Instant) {
     // Try to decode the payload
     if !self.inner.opts.compression_algo.is_none() {
-      let size = match Compress::decode_len(&mut buf) {
-        Ok(len) => len as usize,
-        Err(e) => {
-          tracing::error!(target = "showbiz", remote = %from, err = %e, "failed to decode compressed message");
-          return;
-        }
-      };
-
-      let compress = match Compress::decode_from::<T::Checksumer>(buf.split_to(size)) {
+      let (_, compress) = match Compress::decode_from_bytes(buf) {
         Ok(compress) => compress,
         Err(e) => {
-          tracing::error!(target = "showbiz", remote = %from, err = %e, "failed to decode compressed message");
+          tracing::error!(target = "showbiz.packet", remote = %from, err = %e, "failed to decode compressed message");
           return;
         }
       };
 
-      match decompress_payload(compress.algo, &compress.buf) {
-        Ok(payload) => self.handle_command(payload.into(), from, timestamp).await,
+      match compress.decompress() {
+        Ok((_, payload)) => self.handle_command(payload, from, timestamp).await,
         Err(e) => {
-          tracing::error!(target = "showbiz", remote = %from, err = %e, "failed to decompress payload");
+          tracing::error!(target = "showbiz.packet", remote = %from, err = %e, "failed to decompress payload");
         }
       }
     } else {
@@ -244,17 +289,17 @@ where
 
   async fn handle_ping(&self, buf: Bytes, from: SocketAddr) {
     // Decode the ping
-    let p = match Ping::decode_from(buf) {
+    let (_, p) = match Ping::decode_archived(&buf) {
       Ok(ping) => ping,
       Err(e) => {
-        tracing::error!(target = "showbiz", local=%self.inner.id, remote = %from, err = %e, "failed to decode ping request");
+        tracing::error!(target = "showbiz.packet", local=%self.inner.id, remote = %from, err = %e, "failed to decode ping request");
         return;
       }
     };
 
     // If node is provided, verify that it is for us
-    if p.target.name != self.inner.opts.name {
-      tracing::error!(target = "showbiz", local=%self.inner.id, remote = %from, "got ping for unexpected node '{}'", p.target);
+    if p.target != self.inner.id {
+      tracing::error!(target = "showbiz.packet", local=%self.inner.id, remote = %from, "got ping for unexpected node '{}'", p.target);
       return;
     }
 
@@ -262,47 +307,39 @@ where
       let payload = match delegate.ack_payload().await {
         Ok(payload) => payload,
         Err(e) => {
-          tracing::error!(target = "showbiz", local=%self.inner.id, remote = %from, err = %e, "failed to get ack payload from delegate");
+          tracing::error!(target = "showbiz.packet", local=%self.inner.id, remote = %from, err = %e, "failed to get ack payload from delegate");
           return;
         }
       };
-      let mut out = BytesMut::with_capacity(
-        MessageType::SIZE
-          + AckResponseEncoder::<BytesMut, T::Checksumer>::encoded_len(p.seq_no, &payload),
-      );
-      out.put_u8(MessageType::AckResponse as u8);
-      let mut enc = AckResponseEncoder::<_, T::Checksumer>::new(&mut out);
-      enc.encode_seq_no(p.seq_no);
-      enc.encode_payload(&payload);
-      Message(out)
+      AckResponse {
+        seq_no: p.seq_no,
+        payload,
+      }
+      .encode()
     } else {
-      let ack = AckResponse::empty(p.seq_no);
-      let mut out = BytesMut::with_capacity(MessageType::SIZE + ack.encoded_len());
-      out.put_u8(MessageType::AckResponse as u8);
-      ack.encode_to::<T::Checksumer>(&mut out);
-      Message(out)
+      AckResponse {
+        seq_no: p.seq_no,
+        payload: Bytes::new(),
+      }
+      .encode()
     };
 
-    if let Err(e) = self.send_msg(&p.source, msg).await {
-      tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to send ack response");
+    if let Err(e) = self.send_msg((&p.source).into(), msg).await {
+      tracing::error!(target = "showbiz.packet", addr = %from, err = %e, "failed to send ack response");
     }
   }
 
-  async fn handle_indirect_ping(&self, mut buf: Bytes, from: SocketAddr) {
-    let len = match IndirectPing::decode_len(&mut buf) {
-      Ok(len) => len,
-      Err(e) => {
-        tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode indirect ping request");
-        return;
-      }
-    };
-    let ind = match IndirectPing::decode_from(buf.split_to(len)) {
+  async fn handle_indirect_ping(&self, buf: Bytes, from: SocketAddr) {
+    let (_, ind) = match IndirectPing::decode(&buf) {
       Ok(ind) => ind,
       Err(e) => {
-        tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to decode indirect ping request");
+        tracing::error!(target = "showbiz.packet", addr = %from, err = %e, "failed to decode indirect ping request");
         return;
       }
     };
+
+    // TODO: check protocol version and delegate version, currently we do not need to do this
+    // because we only have one version
 
     // Send a ping to the correct host.
     let local_seq_no = self.next_seq_no();
@@ -333,11 +370,14 @@ where
 
             // Try to prevent the nack if we've caught it in time.
             let ack = AckResponse::empty(ind_seq_no);
-            let mut out = BytesMut::with_capacity(MessageType::SIZE + ack.encoded_len());
-            out.put_u8(MessageType::AckResponse as u8);
-            ack.encode_to::<T::Checksumer>(&mut out);
-            if let Err(e) = this.send_msg(&ind_source, Message(out)).await {
-              tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to forward ack");
+            if let Err(e) = this
+              .send_msg(
+                ind_source.into(),
+                ack.encode(),
+              )
+              .await
+            {
+              tracing::error!(target = "showbiz.packet", addr = %from, err = %e, "failed to forward ack");
             }
           }
           .boxed()
@@ -345,12 +385,8 @@ where
       )
       .await;
 
-    let mut out = BytesMut::with_capacity(MessageType::SIZE + ping.encoded_len());
-    out.put_u8(MessageType::Ping as u8);
-    ping.encode_to(&mut out);
-
-    if let Err(e) = self.send_msg(&ind.target, Message(out)).await {
-      tracing::error!(target = "showbiz", addr = %from, err = %e, "failed to send ping");
+    if let Err(e) = self.send_msg(ind.target.into(), ping.encode()).await {
+      tracing::error!(target = "showbiz.packet", addr = %from, err = %e, "failed to send ping");
     }
 
     // Setup a timer to fire off a nack if no ack is seen in time.
@@ -361,11 +397,8 @@ where
         _ = <T::Runtime as Runtime>::sleep(probe_timeout).fuse() => {
           // We've not received an ack, so send a nack.
           let nack = NackResponse::new(ind.seq_no);
-          let mut out = BytesMut::with_capacity(MessageType::SIZE + nack.encoded_len());
-          out.put_u8(MessageType::NackResponse as u8);
-          nack.encode_to::<T::Checksumer>(&mut out);
-          if let Err(e) = this.send_msg(&ind.source, Message(out)).await {
-            tracing::error!(target = "showbiz", local = %ind.source, remote = %from, err = %e, "failed to send nack");
+          if let Err(e) = this.send_msg((&ind.source).into(), nack.encode()).await {
+            tracing::error!(target = "showbiz.packet", local = %ind.source, remote = %from, err = %e, "failed to send nack");
           }
         }
         _ = cancel_rx.fuse() => {
@@ -375,41 +408,29 @@ where
     });
   }
 
-  async fn handle_ack(&self, mut buf: Bytes, from: SocketAddr, timestamp: Instant) {
-    match decode_u32_from_buf(&mut buf) {
-      Ok((size, _)) => {
-        buf.truncate(size as usize);
-        match AckResponse::decode_from::<T::Checksumer>(buf) {
-          Ok(ack) => self.invoke_ack_handler(ack, timestamp).await,
-          Err(e) => {
-            tracing::error!(target = "showbiz", addr = %from, err=%e, "failed to decode ack response");
-          }
-        }
-      }
+  async fn handle_ack(&self, buf: Bytes, from: SocketAddr, timestamp: Instant) {
+    match AckResponse::decode(&buf) {
+      Ok((_, ack)) => self.invoke_ack_handler(ack, timestamp).await,
       Err(e) => {
-        tracing::error!(target = "showbiz", addr = %from, err=%e, "failed to decode ack response");
+        tracing::error!(target = "showbiz.packet", addr = %from, err=%e, "failed to decode ack response");
       }
     }
   }
 
-  async fn handle_nack(&self, mut buf: Bytes, from: SocketAddr) {
-    match decode_u32_from_buf(&mut buf) {
-      Ok((size, _)) => {
-        buf.truncate(size as usize);
-        match NackResponse::decode_from::<T::Checksumer>(buf) {
-          Ok(nack) => self.invoke_nack_handler(nack).await,
-          Err(e) => {
-            tracing::error!(target = "showbiz", addr = %from, err=%e, "failed to decode nack response");
-          }
-        }
-      }
+  async fn handle_nack(&self, buf: Bytes, from: SocketAddr) {
+    match NackResponse::decode(&buf) {
+      Ok((_, nack)) => self.invoke_nack_handler(nack).await,
       Err(e) => {
-        tracing::error!(target = "showbiz", addr = %from, err=%e, "failed to decode nack response");
+        tracing::error!(target = "showbiz.packet", addr = %from, err=%e, "failed to decode nack response");
       }
     }
   }
 
-  pub(crate) async fn send_msg(&self, addr: &NodeId, msg: Message) -> Result<(), Error<T, D>> {
+  pub(crate) async fn send_msg(
+    &self,
+    addr: CowNodeId<'_>,
+    msg: Message,
+  ) -> Result<(), Error<T, D>> {
     // Check if we can piggy back any messages
     let bytes_avail = self.inner.opts.packet_buffer_size
       - msg.len()
@@ -422,63 +443,23 @@ where
 
     // Fast path if nothing to piggypack
     if msgs.len() == 1 {
-      return self.raw_send_msg_packet(addr, msgs.pop().unwrap().0).await;
+      return self.raw_send_msg_packet(&addr, msgs.pop().unwrap()).await;
     }
 
     // Create a compound message
     let compound = Message::compound(msgs);
 
     // Send the message
-    self.raw_send_msg_packet(addr, compound).await
+    self.raw_send_msg_packet(&addr, compound).await
   }
 
   /// Used to send message via packet to another host without
   /// modification, other than compression or encryption if enabled.
   pub(crate) async fn raw_send_msg_packet(
     &self,
-    addr: &NodeId,
-    msg: BytesMut,
+    addr: &CowNodeId<'_>,
+    mut msg: Message,
   ) -> Result<(), Error<T, D>> {
-    macro_rules! encrypt_bail {
-      ($msg: ident.len($compressed_msg_len: ident) -> $this:ident.$node:ident.$addr:ident -> $block: expr) => {{
-        let basic_encrypt_len = MessageType::SIZE // MessageType::Encryption
-        + EncryptionAlgo::SIZE // Encryption algo length
-        + self.inner.opts.encryption_algo.encrypted_length($compressed_msg_len);
-        let encrypted_msg_len = encoded_u32_len(basic_encrypt_len as u32) + basic_encrypt_len;
-
-        let mut buf = BytesMut::with_capacity(encrypted_msg_len);
-        buf.put_u8(MessageType::Encrypt as u8);
-        buf.put_u32(encrypted_msg_len as u32);
-        // encode_u32_to_buf(&mut buf, );
-        let offset = buf.len();
-        buf.put_u8(self.inner.opts.encryption_algo as u8);
-        // Add a random nonce
-        let mut nonce = [0u8; NONCE_SIZE];
-        rand::thread_rng().fill(&mut nonce);
-        buf.put_slice(&nonce);
-        let after_nonce = buf.len();
-        $block(&mut buf);
-
-        if $this.inner.opts.encryption_algo == EncryptionAlgo::PKCS7 {
-          let buf_len = buf.len();
-          pkcs7encode(&mut buf, buf_len, offset + EncryptionAlgo::SIZE + NONCE_SIZE, BLOCK_SIZE);
-        }
-
-        let keyring = $this.inner.opts.secret_keyring.as_ref().unwrap();
-        let mut bytes = buf.split_off(after_nonce);
-        let pk = keyring.primary_key();
-
-        if let Err(e) = keyring.encrypt_to(pk, &nonce, self.inner.opts.label.as_bytes(), &mut bytes)
-          .map(|_| {
-            buf.unsplit(bytes);
-          }) {
-          tracing::error!(target = "showbiz", addr = %$addr, err = %e, "failed to encrypt message");
-          return Err(Error::Transport(TransportError::Security(e)));
-        }
-        buf
-      }};
-    }
-
     macro_rules! return_bail {
       ($this:ident, $buf: ident, $addr: ident) => {{
         #[cfg(feature = "metrics")]
@@ -496,56 +477,154 @@ where
       }};
     }
 
-    // Check if we have compression enabled
-    if !self.inner.opts.compression_algo.is_none() {
-      let data = compress_payload(self.inner.opts.compression_algo, &msg).map_err(|e| {
-        tracing::error!(target = "showbiz", addr = %addr, err = %e, "failed to compress message");
-        e
-      })?;
-
-      let compressed_msg_len = CompressEncoder::<BytesMut, T::Checksumer>::encoded_len(&data) + 1;
-      if !self.inner.opts.encryption_algo.is_none() && self.inner.opts.gossip_verify_outgoing {
-        let buf = encrypt_bail!(data.len(compressed_msg_len) -> self.node.addr -> |mut buf: &mut BytesMut| {
-          buf.put_u8(MessageType::Compress as u8);
-          encode_u32_to_buf(&mut buf, compressed_msg_len as u32);
-          let mut enc = CompressEncoder::<_, T::Checksumer>::new(buf);
-          enc.encode_algo(self.inner.opts.compression_algo);
-          enc.encode_payload(&data);
-        });
-
-        return return_bail!(self, buf, addr);
-      } else {
-        let compressed_msg_len = CompressEncoder::<BytesMut, T::Checksumer>::encoded_len(&data) + 1;
-        let mut buf = BytesMut::with_capacity(compressed_msg_len);
-        buf.put_u8(MessageType::Compress as u8);
-        encode_u32_to_buf(&mut buf, compressed_msg_len as u32);
-        let mut enc = CompressEncoder::<_, T::Checksumer>::new(&mut buf);
-        enc.encode_algo(self.inner.opts.compression_algo);
-        enc.encode_payload(&data);
-        return return_bail!(self, buf, addr);
+    async fn encrypt_packet_offload<TT: Transport, DD: Delegate>(
+      kr: SecretKeyring,
+      algo: EncryptionAlgo,
+      msg: Either<Vec<u8>, Message>,
+      label: Label,
+    ) -> Result<BytesMut, Error<TT, DD>> {
+      let (tx, rx) = futures_channel::oneshot::channel();
+      rayon::spawn(move || {
+        let pk = kr.primary_key();
+        let mut buf = algo.header(msg.len());
+        let msg = match &msg {
+          Either::Left(src) => src.as_slice(),
+          Either::Right(src) => src.underlying_bytes(),
+        };
+        match kr.encrypt_payload(pk, algo, msg, label.as_bytes(), &mut buf) {
+          Ok(_) => {
+            if tx.send(Ok(buf)).is_err() {
+              tracing::error!(
+                target = "showbiz.packet",
+                err = "fail to send encrypt packet, receiver end closed"
+              );
+            }
+          }
+          Err(e) => {
+            tracing::error!(target = "showbiz.packet", err = %e, "failed to compress message");
+            if tx.send(Err(e.into())).is_err() {
+              tracing::error!(
+                target = "showbiz.packet",
+                err = "fail to send encryption error, receiver end closed"
+              );
+            }
+          }
+        }
+      });
+      match rx.await {
+        Ok(Ok(b)) => Ok(b),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(Error::OffloadPanic),
       }
     }
 
-    // Check if encryption is enabled
-    if !self.inner.opts.encryption_algo.is_none() && self.inner.opts.gossip_verify_outgoing {
-      let len = msg.len();
-      let buf = encrypt_bail!(msg.len(len) -> self.node.addr -> |buf: &mut BytesMut| {
-        buf.put_slice(&msg);
-      });
+    let encryption_enabled = self.encryption_enabled();
+    // Check if we have compression enabled
+    if !self.inner.opts.compression_algo.is_none() {
+      // offload compression to a background thread
+      let compressed = if msg.len() > self.inner.opts.offload_size {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        let compression_algo = self.inner.opts.compression_algo;
+        rayon::spawn(move || {
+          match Compress::encode_slice_with_checksum(compression_algo, 0, 0, msg.underlying_bytes())
+          {
+            Ok(compressed) => {
+              if tx.send(Ok(compressed)).is_err() {
+                tracing::error!(
+                  target = "showbiz.packet",
+                  err = "fail to send compressed packet, receiver end closed"
+                );
+              }
+            }
+            Err(e) => {
+              tracing::error!(target = "showbiz.packet", err = %e, "failed to compress message");
+              if tx.send(Err(e)).is_err() {
+                tracing::error!(
+                  target = "showbiz.packet",
+                  err = "fail to send compression error, receiver end closed"
+                );
+              }
+            }
+          }
+        });
+        match rx.await {
+          Ok(Ok(b)) => b,
+          Ok(Err(e)) => return Err(e.into()),
+          Err(_) => return Err(Error::OffloadPanic),
+        }
+      } else {
+        Compress::encode_slice_with_checksum(
+          self.inner.opts.compression_algo,
+          0,
+          0,
+          msg.underlying_bytes(),
+        )?
+      };
 
+      // Check if we also have encryption enabled
+      if encryption_enabled && self.inner.opts.gossip_verify_outgoing {
+        let buf = if compressed.len() > self.inner.opts.offload_size {
+          let kr = self.keyring().unwrap().clone();
+          encrypt_packet_offload(
+            kr,
+            self.inner.opts.encryption_algo,
+            Either::Left(compressed),
+            self.inner.opts.label.clone(),
+          )
+          .await?
+        } else {
+          let kr = self.keyring().unwrap();
+          let pk = kr.primary_key();
+          let mut buf = self.inner.opts.encryption_algo.header(compressed.len());
+          kr.encrypt_payload(
+            pk,
+            self.inner.opts.encryption_algo,
+            &compressed,
+            self.inner.opts.label.as_bytes(),
+            &mut buf,
+          )?;
+          buf
+        };
+        return return_bail!(self, buf, addr);
+      } else {
+        return return_bail!(self, compressed, addr);
+      }
+    }
+
+    // mark this message should be checksumed
+    msg.0[1] = MessageType::HasCrc as u8;
+    // append checksum
+    msg.put_u32(crc32fast::hash(&msg.0[ENCODE_HEADER_SIZE..]));
+
+    // Check if only encryption is enabled
+    if self.encryption_enabled() && self.inner.opts.gossip_verify_outgoing {
+      let buf = if msg.underlying_bytes().len() > self.inner.opts.offload_size {
+        let kr = self.keyring().unwrap().clone();
+        encrypt_packet_offload(
+          kr,
+          self.inner.opts.encryption_algo,
+          Either::Right(msg),
+          self.inner.opts.label.clone(),
+        )
+        .await?
+      } else {
+        let kr = self.keyring().unwrap();
+        let pk = kr.primary_key();
+        let src = msg.underlying_bytes();
+        let mut buf = self.inner.opts.encryption_algo.header(src.len());
+        kr.encrypt_payload(
+          pk,
+          self.inner.opts.encryption_algo,
+          src,
+          self.inner.opts.label.as_bytes(),
+          &mut buf,
+        )?;
+        buf
+      };
       return return_bail!(self, buf, addr);
     }
 
-    let msg_len = msg.len();
-    let mut hasher = <T::Checksumer as Checksumer>::new();
-    hasher.update(&msg);
-    let crc = hasher.finalize();
-    let msg_encoded_len = encoded_u32_len(msg_len as u32) + msg_len + 1;
-    let mut buf = BytesMut::with_capacity(msg_encoded_len);
-    buf.put_u8(MessageType::HasCrc as u8);
-    encode_u32_to_buf(&mut buf, msg_len as u32);
-    buf.put_slice(&msg);
-    buf.put_u32(crc);
+    let buf = msg.underlying_bytes();
     return_bail!(self, buf, addr)
   }
 }

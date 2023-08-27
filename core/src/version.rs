@@ -1,3 +1,5 @@
+use rkyv::{Archive, Deserialize, Serialize};
+
 pub(crate) const VSN_SIZE: usize = 2;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -11,7 +13,22 @@ impl core::fmt::Display for InvalidDelegateVersion {
 
 impl std::error::Error for InvalidDelegateVersion {}
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+  Debug,
+  Copy,
+  Clone,
+  PartialEq,
+  Eq,
+  Hash,
+  Archive,
+  Serialize,
+  Deserialize,
+  serde::Serialize,
+  serde::Deserialize,
+)]
+#[archive(compare(PartialEq), check_bytes)]
+#[archive_attr(derive(Debug, Copy, Clone), repr(u8), non_exhaustive)]
+#[non_exhaustive]
 #[repr(u8)]
 pub enum DelegateVersion {
   V0 = 0,
@@ -35,6 +52,26 @@ impl TryFrom<u8> for DelegateVersion {
   }
 }
 
+impl DelegateVersion {
+  pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+impl From<ArchivedDelegateVersion> for DelegateVersion {
+  fn from(value: ArchivedDelegateVersion) -> Self {
+    match value {
+      ArchivedDelegateVersion::V0 => Self::V0,
+    }
+  }
+}
+
+impl From<DelegateVersion> for ArchivedDelegateVersion {
+  fn from(value: DelegateVersion) -> Self {
+    match value {
+      DelegateVersion::V0 => Self::V0,
+    }
+  }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct InvalidProtocolVersion(u8);
 
@@ -46,10 +83,29 @@ impl core::fmt::Display for InvalidProtocolVersion {
 
 impl std::error::Error for InvalidProtocolVersion {}
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+  Debug,
+  Copy,
+  Clone,
+  PartialEq,
+  Eq,
+  Hash,
+  Archive,
+  Serialize,
+  Deserialize,
+  serde::Serialize,
+  serde::Deserialize,
+)]
+#[archive(compare(PartialEq), check_bytes)]
+#[archive_attr(derive(Debug, Copy, Clone), repr(u8), non_exhaustive)]
+#[non_exhaustive]
 #[repr(u8)]
 pub enum ProtocolVersion {
   V0 = 0,
+}
+
+impl ProtocolVersion {
+  pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 
 impl core::fmt::Display for ProtocolVersion {
@@ -66,6 +122,22 @@ impl TryFrom<u8> for ProtocolVersion {
     match v {
       0 => Ok(Self::V0),
       _ => Err(InvalidProtocolVersion(v)),
+    }
+  }
+}
+
+impl From<ArchivedProtocolVersion> for ProtocolVersion {
+  fn from(value: ArchivedProtocolVersion) -> Self {
+    match value {
+      ArchivedProtocolVersion::V0 => Self::V0,
+    }
+  }
+}
+
+impl From<ProtocolVersion> for ArchivedProtocolVersion {
+  fn from(value: ProtocolVersion) -> Self {
+    match value {
+      ProtocolVersion::V0 => Self::V0,
     }
   }
 }

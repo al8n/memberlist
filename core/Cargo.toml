@@ -59,6 +59,7 @@ crc32fast = "1"
 crossbeam-utils = "0.8"
 crossbeam-skiplist = "0.1"
 crossbeam-queue = "0.3"
+either = "1"
 local-ip-address = "0.5"
 itertools = "0.11"
 ipnet = { version = "2.7", features = ["serde"] }
@@ -68,6 +69,7 @@ parking_lot = { version = "0.12", optional = true }
 pollster = "0.3"
 rand = { version = "0.8" }
 rayon = "1.7"
+rkyv = { git = "https://github.com/rkyv/rkyv.git", rev = "bf39dbc3a61783774fc7e1d47b8bf75db2581be7", features = ["validation", "bytes"] }
 scopeguard = "1.1"
 serde = { workspace = true }
 humantime-serde = "1"
@@ -86,5 +88,5 @@ rmp-serde = { version = "1" }
 bincode = "1"
 agnostic = { path = "../../agnostic/agnostic", features = ["tokio-net", "async-std-net", "smol-net"] }
 parking_lot = "0.12"
-tokio = { version = "1.26", features = ["full"] }
+tokio = { version = "1.32", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }

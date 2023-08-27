@@ -6,17 +6,22 @@ use crate::{
   showbiz::{AckHandler, Member, Memberlist},
   suspicion::Suspicion,
   timer::Timer,
-  types::{Alive, Dead, IndirectPing, Message, MessageType, Ping, Suspect},
+  types::{
+    Alive, ArchivedAlive, ArchivedNodeState, ArchivedPushNodeState, Dead, IndirectPing, Message,
+    Ping, Suspect, Type,
+  },
 };
 
 use super::*;
 use agnostic::Runtime;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
+use either::Either;
 use futures_util::{future::BoxFuture, Future, FutureExt, Stream};
 use rand::{seq::SliceRandom, Rng};
 
 #[cfg(any(test, feature = "test"))]
 pub(crate) mod tests;
+use rkyv::{de::deserializers::SharedDeserializeMap, Deserialize};
 #[cfg(any(test, feature = "test"))]
 pub use tests::*;
 
@@ -92,10 +97,8 @@ where
       .await;
 
     // Send a ping to the node.
-    let mut msg = BytesMut::with_capacity(ping.encoded_len() + MessageType::SIZE);
-    msg.put_u8(MessageType::Ping as u8);
-    ping.encode_to(&mut msg);
-    self.send_msg(&node, Message(msg)).await?;
+    let msg = ping.encode();
+    self.send_msg((&node).into(), msg).await?;
     // Mark the sent time here, which should be after any pre-processing and
     // system calls to do the actual send. This probably under-reports a bit,
     // but it's the best we can do.
@@ -136,8 +139,10 @@ where
     scopeguard::defer!(
       observe_push_pull_node(now.elapsed().as_millis() as f64, self.inner.opts.metric_labels.iter());
     );
+    // Read remote state
+    let data = self.send_and_receive_state(id, join).await?;
     self
-      .merge_remote_state(self.send_and_receive_state(id, join).await?)
+      .merge_remote_state(self.read_remote_state(&data).await?)
       .await
   }
 
@@ -146,6 +151,7 @@ where
     memberlist: &mut Memberlist<T::Runtime>,
     d: Dead,
   ) -> Result<(), Error<T, D>> {
+    // let node = d.node.clone();
     let idx = match memberlist.node_map.get(&d.node) {
       Some(idx) => *idx,
       // If we've never heard about this node before, ignore it
@@ -167,7 +173,7 @@ where
     }
 
     // Check if this is us
-    if d.dead_self() {
+    if d.is_self() {
       // If we are not leaving we need to refute
       if !self.has_left() {
         // self.refute().await?;
@@ -180,7 +186,7 @@ where
       }
 
       // If we are leaving, we broadcast and wait
-      let msg = d.encode_to_msg();
+      let msg = d.encode();
       self
         .broadcast_notify(
           d.node.clone(),
@@ -189,7 +195,7 @@ where
         )
         .await;
     } else {
-      let msg = d.encode_to_msg();
+      let msg = d.encode();
       self.broadcast(d.node.clone(), msg).await;
     }
 
@@ -206,7 +212,7 @@ where
 
     // If the dead message was send by the node itself, mark it is left
     // instead of dead.
-    if d.dead_self() {
+    if d.is_self() {
       state.state.state = NodeState::Left;
     } else {
       state.state.state = NodeState::Dead;
@@ -242,10 +248,9 @@ where
     // independent confirmations to flow even when a node probes a node
     // that's already suspect.
     if let Some(timer) = &mut state.suspicion {
-      if timer.confirm(s.from.name()).await {
-        let mut buf = BytesMut::with_capacity(s.encoded_len());
-        s.encode_to(&mut buf);
-        self.broadcast(s.node.clone(), Message(buf)).await;
+      if timer.confirm(&s.from).await {
+        let msg = s.encode();
+        self.broadcast(s.node.clone(), msg).await;
       }
       return Ok(());
     }
@@ -256,7 +261,7 @@ where
     }
 
     // If this is us we need to refute, otherwise re-broadcast
-    if state.state.node.name() == &self.inner.opts.name {
+    if state.state.node.id.eq(&self.inner.id) {
       self.refute(&state.state, s.incarnation).await;
       tracing::warn!(
         target = "showbiz.state",
@@ -266,9 +271,8 @@ where
       // Do not mark ourself suspect
       return Ok(());
     } else {
-      let mut buf = BytesMut::with_capacity(s.encoded_len());
-      s.encode_to(&mut buf);
-      self.broadcast(s.node.clone(), Message(buf)).await;
+      let msg = s.encode();
+      self.broadcast(s.node.clone(), msg).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -308,8 +312,9 @@ where
     let max = (self.inner.opts.suspicion_max_timeout_mult as u64) * min;
 
     let this = self.clone();
+    let incarnation = s.incarnation;
     state.suspicion = Some(Suspicion::new(
-      s.from.name().clone(),
+      s.from.clone(),
       k as u32,
       Duration::from_millis(min),
       Duration::from_millis(max),
@@ -328,7 +333,7 @@ where
                 Some(Dead {
                   node: state.state.node.id.clone(),
                   from: t.inner.id.clone(),
-                  incarnation: s.incarnation,
+                  incarnation,
                 })
               } else {
                 None
@@ -365,9 +370,9 @@ where
 
   /// Invoked by the network layer when we get a message about a
   /// live node.
-  pub(crate) async fn alive_node(
-    &self,
-    alive: Alive,
+  pub(crate) async fn alive_node<'a>(
+    &'a self,
+    alive: Either<Alive, &'a ArchivedAlive>,
     notify_tx: Option<async_channel::Sender<()>>,
     bootstrap: bool,
   ) {
@@ -377,16 +382,34 @@ where
     // in-queue to be processed but blocked by the locks above. If we let
     // that aliveMsg process, it'll cause us to re-join the cluster. This
     // ensures that we don't.
-    if self.has_left() && alive.node == self.inner.id {
+    if self.has_left()
+      && match &alive {
+        Either::Left(a) => a.node == self.inner.id,
+        Either::Right(a) => a.node == self.inner.id,
+      }
+    {
       return;
     }
 
-    let vsn = alive.vsn;
+    let alive = match alive {
+      Either::Left(a) => a,
+      Either::Right(a) => {
+        match a.deserialize(&mut rkyv::de::deserializers::SharedDeserializeMap::new()) {
+          Ok(a) => a,
+          Err(e) => {
+            tracing::error!(target="showbiz.state", err=%e, "fail to decode alive message");
+            return;
+          }
+        }
+      }
+    };
+
     let node = Arc::new(Node {
       id: alive.node.clone(),
       meta: alive.meta.clone(),
       state: NodeState::Alive,
-      vsn,
+      protocol_version: alive.protocol_version,
+      delegate_version: alive.delegate_version,
     });
     // Invoke the Alive delegate if any. This can be used to filter out
     // alive messages based on custom logic. For example, using a cluster name.
@@ -429,7 +452,8 @@ where
                   id: alive.node.clone(),
                   meta: alive.meta.clone(),
                   state: NodeState::Alive,
-                  vsn: alive.vsn,
+                  protocol_version: alive.protocol_version,
+                  delegate_version: alive.delegate_version,
                 }),
               )
               .await
@@ -498,7 +522,10 @@ where
 
     // If this is us we need to refute, otherwise re-broadcast
     if !bootstrap && is_local_node {
-      let versions = member.state.node.vsn();
+      let (pv, dv) = (
+        member.state.node.protocol_version(),
+        member.state.node.delegate_version(),
+      );
 
       // If the Incarnation is the same, we need special handling, since it
       // possible for the following situation to happen:
@@ -513,18 +540,17 @@ where
       //
       if alive.incarnation == local_incarnation
         && alive.meta == member.state.node.meta
-        && alive.vsn == versions
+        && alive.protocol_version == pv
+        && alive.delegate_version == dv
       {
         return;
       }
       self.refute(&member.state, alive.incarnation).await;
       tracing::warn!(target = "showbiz.state", local = %self.inner.id, peer = %alive.node, local_meta = ?member.state.node.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
     } else {
-      let mut buf = BytesMut::with_capacity(alive.encoded_len() + MessageType::SIZE);
-      buf.put_u8(MessageType::Alive as u8);
-      alive.encode_to(&mut buf);
+      let msg = alive.encode();
       self
-        .broadcast_notify(alive.node.clone(), Message(buf), notify_tx)
+        .broadcast_notify(alive.node.clone(), msg, notify_tx)
         .await;
 
       // Update the state and incarnation number
@@ -536,7 +562,8 @@ where
         id: alive.node,
         meta: alive.meta,
         state: NodeState::Alive,
-        vsn: alive.vsn,
+        protocol_version: alive.protocol_version,
+        delegate_version: alive.delegate_version,
       });
       if member.state.state != NodeState::Alive {
         member.state.state = NodeState::Alive;
@@ -564,40 +591,100 @@ where
     }
   }
 
-  pub(crate) async fn merge_state(&self, remote: Vec<PushNodeState>) -> Result<(), Error<T, D>> {
-    for r in remote {
-      match r.state {
-        NodeState::Alive => {
-          let alive = Alive {
-            incarnation: r.incarnation,
-            node: r.node,
-            vsn: r.vsn,
-            meta: r.meta,
-          };
-          self.alive_node(alive, None, false).await;
+  pub(crate) async fn merge_state<'a>(&'a self, remote: &'a [ArchivedPushNodeState]) {
+    let futs = remote.iter().filter_map(|r| {
+      enum State {
+        Alive(Alive),
+        Left(Dead),
+        Suspect(Suspect),
+      }
+
+      impl State {
+        async fn run<T, D>(self, s: &Showbiz<T, D>)
+        where
+          T: Transport,
+          D: Delegate,
+          <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
+          <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
+        {
+          match self {
+            State::Alive(alive) => s.alive_node(Either::Left(alive), None, false).await,
+            State::Left(dead) => {
+              let addr = dead.node.addr();
+              let mut memberlist = s.inner.nodes.write().await;
+              if let Err(e) = s.dead_node(&mut memberlist, dead).await {
+                tracing::error!(target = "showbiz.state", addr=%addr, err=%e, "fail to dead node");
+              }
+            },
+            State::Suspect(suspect) => {
+              let addr = suspect.node.addr();
+              if let Err(e) = s.suspect_node(suspect).await {
+                tracing::error!(target = "showbiz.state", addr=%addr, err=%e, "fail to suspect node");
+              }
+            },
+          }
         }
-        NodeState::Left => {
-          let dead = Dead {
-            incarnation: r.incarnation,
-            node: r.node,
-            from: self.inner.id.clone(),
+      }
+
+      let mut deserializer = SharedDeserializeMap::new();
+      let state = match r.state {
+        ArchivedNodeState::Alive => {
+          let node = match r.node.deserialize(&mut deserializer) {
+            Ok(n) => n,
+            Err(e) => {
+              tracing::error!(target = "showbiz.state", err=%e, "fail to decode node id");
+              return None;
+            },
           };
-          let mut memberlist = self.inner.nodes.write().await;
-          self.dead_node(&mut memberlist, dead).await?;
+          let meta = match r.meta.deserialize(&mut deserializer) {
+            Ok(meta) => meta,
+            Err(e) => {
+              tracing::error!(target = "showbiz.state", err=%e, "fail to decode node meta");
+              return None;
+            },
+          };
+          State::Alive(Alive {
+            incarnation: r.incarnation,
+            node,
+            meta,
+            protocol_version: r.protocol_version.into(),
+            delegate_version: r.delegate_version.into(),
+          })
+        }
+        ArchivedNodeState::Left => {
+          let node = match r.node.deserialize(&mut deserializer) {
+            Ok(n) => n,
+            Err(e) => {
+              tracing::error!(target = "showbiz.state", err=%e, "fail to decode node id");
+              return None;
+            },
+          };
+          State::Left(Dead {
+            incarnation: r.incarnation,
+            node,
+            from: self.inner.id.clone(),
+          })
         }
         // If the remote node believes a node is dead, we prefer to
         // suspect that node instead of declaring it dead instantly
-        NodeState::Dead | NodeState::Suspect => {
-          let s = Suspect {
-            incarnation: r.incarnation,
-            node: r.node,
-            from: self.inner.id.clone(),
+        ArchivedNodeState::Dead | ArchivedNodeState::Suspect => {
+          let node = match r.node.deserialize(&mut deserializer) {
+            Ok(n) => n,
+            Err(e) => {
+              tracing::error!(target = "showbiz.state", err=%e, "fail to decode node id");
+              return None;
+            },
           };
-          self.suspect_node(s).await?;
+          State::Suspect(Suspect {
+            incarnation: r.incarnation,
+            node,
+            from: self.inner.id.clone(),
+          })
         }
-      }
-    }
-    Ok(())
+      };
+      Some(state.run(self))
+    });
+    futures_util::future::join_all(futs).await;
   }
 
   pub(crate) async fn set_ack_handler<F>(&self, seq_no: u32, timeout: Duration, f: F)
@@ -865,10 +952,8 @@ where
       .await;
 
     if target.state == NodeState::Alive {
-      let mut mbuf = BytesMut::with_capacity(MessageType::SIZE + ping.encoded_len());
-      mbuf.put_u8(MessageType::Ping as u8);
-      ping.encode_to(&mut mbuf);
-      if let Err(e) = self.send_msg(target.id(), Message(mbuf)).await {
+      let pmsg = ping.encode();
+      if let Err(e) = self.send_msg(target.id().into(), pmsg).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
         if e.failed_remote() {
           self
@@ -878,20 +963,18 @@ where
         return;
       }
     } else {
-      let mut ping_buf = BytesMut::with_capacity(MessageType::SIZE + ping.encoded_len());
-      ping_buf.put_u8(MessageType::Ping as u8);
-      ping.encode_to(&mut ping_buf);
-
+      let pmsg = ping.encode();
       let suspect = Suspect {
         incarnation: target.incarnation.load(Ordering::SeqCst),
         node: target.id().clone(),
         from: self.inner.id.clone(),
       };
-      let mut suspect_buf = BytesMut::with_capacity(MessageType::SIZE + suspect.encoded_len());
-      suspect_buf.put_u8(MessageType::Suspect as u8);
-      suspect.encode_to(&mut suspect_buf);
-      let compound = Message::compound(vec![Message(ping_buf), Message(suspect_buf)]);
-      if let Err(e) = self.raw_send_msg_packet(target.id(), compound).await {
+      let smsg = suspect.encode();
+      let compound = Message::compound(vec![pmsg, smsg]);
+      if let Err(e) = self
+        .raw_send_msg_packet(&target.id().into(), compound)
+        .await
+      {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
         if e.failed_remote() {
           self
@@ -990,10 +1073,8 @@ where
     for peer in nodes {
       // We only expect nack to be sent from peers who understand
       // version 4 of the protocol.
-      let mut buf = BytesMut::with_capacity(MessageType::SIZE + ind.encoded_len());
-      buf.put_u8(MessageType::IndirectPing as u8);
-      ind.encode_to(&mut buf);
-      if let Err(e) = self.send_msg(&ind.target, Message(buf)).await {
+      let msg = ind.encode();
+      if let Err(e) = self.send_msg((&ind.target).into(), msg).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
       }
     }
@@ -1261,16 +1342,16 @@ where
         return;
       }
 
-      let addr = node.id();
+      let addr = node.id().into();
       if msgs.len() == 1 {
         // Send single message as is
-        if let Err(e) = self.raw_send_msg_packet(addr, msgs.pop().unwrap().0).await {
+        if let Err(e) = self.raw_send_msg_packet(&addr, msgs.pop().unwrap()).await {
           tracing::error!(target = "showbiz.state", err = %e, "failed to send gossip to {}", addr);
         }
       } else {
         // Otherwise create and send one or more compound messages
         for compound in Message::compounds(msgs) {
-          if let Err(e) = self.raw_send_msg_packet(addr, compound).await {
+          if let Err(e) = self.raw_send_msg_packet(&addr, compound).await {
             tracing::error!(target = "showbiz.state", err = %e, "failed to send gossip to {}", addr);
           }
         }
@@ -1333,15 +1414,14 @@ where
     // Format and broadcast an alive message.
     let a = Alive {
       incarnation: inc,
-      vsn: state.node.vsn(),
       meta: state.node.meta.clone(),
       node: state.node.id.clone(),
+      protocol_version: state.node.protocol_version,
+      delegate_version: state.node.delegate_version,
     };
 
-    let mut buf = BytesMut::with_capacity(a.encoded_len() + 1);
-    buf.put_u8(MessageType::Alive as u8);
-    a.encode_to(&mut buf);
-    self.broadcast(state.node.id.clone(), Message(buf)).await;
+    let msg = a.encode();
+    self.broadcast(state.node.id.clone(), msg).await;
   }
 }
 
@@ -1372,3 +1452,6 @@ fn push_pull_scale(interval: Duration, n: usize) -> Duration {
   let multiplier = (f64::log2(n as f64) - f64::log2(PUSH_PULL_SCALE_THRESHOLD as f64) + 1.0).ceil();
   interval * multiplier as u32
 }
+
+#[test]
+fn test_() {}

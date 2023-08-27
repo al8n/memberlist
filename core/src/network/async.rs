@@ -4,15 +4,14 @@ use crate::{
   delegate::Delegate,
   error::Error,
   security::{append_bytes, EncryptionAlgo, SecretKey, SecretKeyring, SecurityError},
-  transport::{ReliableConnection, TransportError},
+  transport::TransportError,
   types::MessageType,
-  util::{compress_payload, decompress_payload},
   Options,
 };
 
 use super::*;
 use agnostic::Runtime;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BytesMut};
 use futures_util::{future::FutureExt, Future, Stream};
 
 mod packet;
@@ -52,21 +51,17 @@ where
       conn.set_timeout(Some(deadline));
     }
 
-    let mut out = BytesMut::with_capacity(MessageType::SIZE + ping.encoded_len());
-    out.put_u8(MessageType::Ping as u8);
-    ping.encode_to(&mut out);
-
     self
       .raw_send_msg_stream(
         &mut conn,
         self.inner.opts.label.clone(),
-        out.freeze(),
+        ping.encode(),
         target.addr(),
       )
       .await?;
 
     let encryption_enabled = self.encryption_enabled();
-    let (mut data, mt) = Self::read_stream(
+    let (h, data) = Self::read_stream(
       &mut conn,
       self.inner.opts.label.clone(),
       encryption_enabled,
@@ -77,20 +72,16 @@ where
     )
     .await?;
 
-    if mt != MessageType::AckResponse {
+    if h.meta.ty != MessageType::AckResponse {
       return Err(Error::Transport(TransportError::Decode(
         DecodeError::MismatchMessageType {
           expected: MessageType::AckResponse.as_str(),
-          got: mt.as_str(),
+          got: h.meta.ty.as_str(),
         },
       )));
     }
 
-    let ack = match AckResponse::decode_len(&mut data) {
-      Ok(len) => AckResponse::decode_from::<T::Checksumer>(data.split_to(len))
-        .map_err(TransportError::Decode)?,
-      Err(e) => return Err(TransportError::Decode(e).into()),
-    };
+    let (_, ack) = AckResponse::decode_archived(&data).map_err(TransportError::Decode)?;
 
     if ack.seq_no != ping.seq_no {
       return Err(Error::Transport(TransportError::Decode(
@@ -106,11 +97,11 @@ where
 
   /// Used to initiate a push/pull over a stream with a
   /// remote host.
-  pub(crate) async fn send_and_receive_state(
-    &self,
-    id: &NodeId,
+  pub(crate) async fn send_and_receive_state<'a>(
+    &'a self,
+    id: &'a NodeId,
     join: bool,
-  ) -> Result<RemoteNodeState, Error<T, D>> {
+  ) -> Result<Bytes, Error<T, D>> {
     // Attempt to connect
     let mut conn = self
       .inner
@@ -137,7 +128,7 @@ where
     });
 
     let encryption_enabled = self.encryption_enabled();
-    let (mut data, mt) = Self::read_stream(
+    let (h, data) = Self::read_stream(
       &mut conn,
       self.inner.opts.label.clone(),
       encryption_enabled,
@@ -148,28 +139,25 @@ where
     )
     .await?;
 
-    if mt == MessageType::ErrorResponse {
-      let err = match ErrorResponse::decode_len(&mut data) {
-        Ok(len) => {
-          ErrorResponse::decode_from(data.split_to(len)).map_err(TransportError::Decode)?
-        }
+    if h.meta.ty == MessageType::ErrorResponse {
+      let err = match ErrorResponse::decode_archived(&data) {
+        Ok((_, err)) => err,
         Err(e) => return Err(TransportError::Decode(e).into()),
       };
-      return Err(Error::Peer(err.err));
+      return Err(Error::Peer(err.err.to_string()));
     }
 
     // Quit if not push/pull
-    if mt != MessageType::PushPull {
+    if h.meta.ty != MessageType::PushPull {
       return Err(Error::Transport(TransportError::Decode(
         DecodeError::MismatchMessageType {
           expected: MessageType::PushPull.as_str(),
-          got: mt.as_str(),
+          got: h.meta.ty.as_str(),
         },
       )));
     }
 
-    // Read remote state
-    self.read_remote_state(data).await.map_err(From::from)
+    Ok(data)
   }
 
   fn encrypt_local_state(
@@ -179,21 +167,14 @@ where
     label: &Label,
     algo: EncryptionAlgo,
   ) -> Result<Bytes, Error<T, D>> {
-    let enc_len = algo.encrypted_length(msg.len());
-    let meta_size = core::mem::size_of::<u8>() + core::mem::size_of::<u32>();
-    let mut buf = BytesMut::with_capacity(meta_size + enc_len);
-
-    // Write the encrypt byte
-    buf.put_u8(MessageType::Encrypt as u8);
-
-    // Write the size of the message
-    buf.put_u32(enc_len as u32);
+    let mut buf = algo.header(msg.len());
 
     // Authenticated Data is:
     //
-    //   [messageType; byte] [messageLength; uint32] [encryptionAlgo; byte] [stream_label; optional]
+    //   [messageType; u8] [label length; u8] [reserved2; u8] [reserved3; u8]
+    //   [messageLength; u32] [stream_label; optional] [encryptionAlgo; u8]
     //
-    let mut ciphertext = buf.split_off(meta_size);
+    let mut ciphertext = buf.split_off(ENCODE_HEADER_SIZE);
     if label.is_empty() {
       // Write the encrypted cipher text to the buffer
       keyring
@@ -216,65 +197,20 @@ where
     }
   }
 
-  async fn read_encrypt_remote_state(
-    r: &mut ReliableConnection<T>,
-    #[cfg(feature = "metrics")] metric_labels: &[metrics::Label],
-  ) -> Result<EncryptedRemoteStateHeader, Error<T, D>> {
-    // Read in enough to determine message length
-    // let meta_size = MessageType::SIZE + core::mem::size_of::<u32>() + EncryptionAlgo::SIZE;
-    let meta_size = MessageType::SIZE + core::mem::size_of::<u32>();
-    let mut buf = BytesMut::with_capacity(meta_size);
-    buf.put_u8(MessageType::Encrypt as u8);
-    let mut b = [0u8; core::mem::size_of::<u32>()];
-    r.read_exact(&mut b).await.map_err(Error::transport)?;
-    buf.put_slice(&b);
-    // Ensure we aren't asked to download too much. This is to guard against
-    // an attack vector where a huge amount of state is sent
-    let more_bytes = u32::from_be_bytes(b) as usize;
-    #[cfg(feature = "metrics")]
-    {
-      add_sample_to_remote_size_histogram(more_bytes as f64, metric_labels.iter());
-    }
-
-    if more_bytes > MAX_PUSH_STATE_BYTES {
-      return Err(Error::Transport(TransportError::RemoteStateTooLarge(
-        more_bytes,
-      )));
-    }
-
-    // Start reporting the size before you cross the limit
-    if more_bytes > (0.6 * (MAX_PUSH_STATE_BYTES as f64)).floor() as usize {
-      tracing::warn!(
-        target = "showbiz",
-        "remote state size is {} limit is large: {}",
-        more_bytes,
-        MAX_PUSH_STATE_BYTES
-      );
-    }
-
-    // Read in the rest of the payload
-    buf.resize(meta_size + more_bytes, 0);
-    r.read_exact(&mut buf[meta_size..])
-      .await
-      .map_err(Error::transport)?;
-
-    Ok(EncryptedRemoteStateHeader { meta_size, buf })
-  }
-
   fn decrypt_remote_state(
     stream_label: &Label,
-    header: EncryptedRemoteStateHeader,
+    mut buf: BytesMut,
     keyring: &SecretKeyring,
   ) -> Result<Bytes, Error<T, D>> {
-    let EncryptedRemoteStateHeader { meta_size, mut buf } = header;
-
     // Decrypt the cipherText with some authenticated data
     //
     // Authenticated Data is:
     //
-    //   [messageType; byte] [messageLength; uint32] [label_data; optional]
+    //   [messageType; u8] [reserverd1; u8] [reserved2; u8] [reserved3; u8]
+    //   [messageLength; u32] [stream_label; optional] [encryptionAlgo; u8]
     //
-    let mut ciphertext = buf.split_off(meta_size);
+
+    let mut ciphertext = buf.split_off(ENCODE_HEADER_SIZE);
     if stream_label.is_empty() {
       // Decrypt the payload
       keyring
@@ -290,9 +226,4 @@ where
         .map_err(From::from)
     }
   }
-}
-
-struct EncryptedRemoteStateHeader {
-  meta_size: usize,
-  buf: BytesMut,
 }

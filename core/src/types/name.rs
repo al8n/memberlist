@@ -1,7 +1,7 @@
-use super::DecodeError;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 
+use bytes::Bytes;
+use rkyv::{Archive, Deserialize, Serialize};
 mod random;
 
 /// Error returned when a name is invalid.
@@ -21,7 +21,10 @@ pub enum InvalidName {
 /// The name of a node in the showbiz.
 ///
 /// The name is a string with a minimum length 1 and maximum length of 512 bytes.
-#[derive(Clone)]
+#[derive(Archive, Deserialize, Serialize, Clone)]
+#[archive(compare(PartialEq), check_bytes)]
+#[archive_attr(derive(Debug), repr(transparent))]
+#[repr(transparent)]
 pub struct Name(Bytes);
 
 impl Default for Name {
@@ -34,6 +37,11 @@ impl Default for Name {
 impl Name {
   /// The maximum size of a name in bytes.
   pub const MAX_SIZE: usize = 512;
+
+  /// Returns a random name
+  pub fn random() -> Self {
+    Self::default()
+  }
 
   /// Creates a new Name from a static str.
   #[inline]
@@ -176,30 +184,6 @@ impl Name {
     self.0.len()
   }
 
-  #[inline]
-  pub(crate) fn encoded_len(&self) -> usize {
-    core::mem::size_of::<u16>() + self.0.len()
-  }
-
-  #[inline]
-  pub(crate) fn encode_to(&self, buf: &mut BytesMut) {
-    buf.put_u16(self.0.len() as u16);
-    buf.put(self.0.as_ref());
-  }
-
-  #[inline]
-  pub(crate) fn decode_len(mut buf: impl Buf) -> Result<usize, DecodeError> {
-    if buf.remaining() < core::mem::size_of::<u16>() {
-      return Err(DecodeError::Corrupted);
-    }
-    Ok(buf.get_u16() as usize)
-  }
-
-  #[inline]
-  pub(crate) fn decode_from(buf: Bytes) -> Result<Self, DecodeError> {
-    Self::try_from(buf).map_err(From::from)
-  }
-
   /// Returns a reference to the underlying str of the name.
   #[inline]
   pub fn as_str(&self) -> &str {
@@ -210,31 +194,6 @@ impl Name {
   #[inline]
   pub fn as_bytes(&self) -> &[u8] {
     &self.0
-  }
-}
-
-impl Serialize for Name {
-  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-    if serializer.is_human_readable() {
-      serializer.serialize_str(self.as_str())
-    } else {
-      serializer.serialize_bytes(self.as_bytes())
-    }
-  }
-}
-
-impl<'de> Deserialize<'de> for Name {
-  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-  where
-    D: serde::Deserializer<'de>,
-  {
-    if deserializer.is_human_readable() {
-      String::deserialize(deserializer)
-        .and_then(|n| Name::from_string(n).map_err(serde::de::Error::custom))
-    } else {
-      Bytes::deserialize(deserializer)
-        .and_then(|n| Name::try_from(n).map_err(serde::de::Error::custom))
-    }
   }
 }
 
@@ -344,4 +303,64 @@ impl core::fmt::Display for Name {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{}", self.as_str())
   }
+}
+
+impl Borrow<str> for Name {
+  fn borrow(&self) -> &str {
+    self.as_str()
+  }
+}
+
+impl Borrow<[u8]> for Name {
+  fn borrow(&self) -> &[u8] {
+    &self.0
+  }
+}
+
+impl Borrow<[u8]> for ArchivedName {
+  fn borrow(&self) -> &[u8] {
+    self.0.as_slice()
+  }
+}
+
+impl Borrow<str> for ArchivedName {
+  fn borrow(&self) -> &str {
+    core::str::from_utf8(self.0.as_slice()).unwrap()
+  }
+}
+
+impl serde::Serialize for Name {
+  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    if serializer.is_human_readable() {
+      serializer.serialize_str(self.as_str())
+    } else {
+      serializer.serialize_bytes(self.as_bytes())
+    }
+  }
+}
+
+impl<'de> serde::Deserialize<'de> for Name {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    if deserializer.is_human_readable() {
+      <String as serde::Deserialize<'de>>::deserialize(deserializer)
+        .and_then(|n| Name::from_string(n).map_err(serde::de::Error::custom))
+    } else {
+      <Bytes as serde::Deserialize<'de>>::deserialize(deserializer)
+        .and_then(|n| Name::try_from(n).map_err(serde::de::Error::custom))
+    }
+  }
+}
+
+#[test]
+fn test_name_borrow() {
+  use std::collections::HashSet;
+
+  #[allow(clippy::mutable_key_type)]
+  let mut m = HashSet::new();
+  m.insert(Name::from_static_unchecked("foo"));
+
+  assert!(m.contains(b"foo".as_slice()));
 }

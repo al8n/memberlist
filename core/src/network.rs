@@ -20,7 +20,6 @@ pub(crate) const COMPOUND_OVERHEAD: usize = 2;
 
 pub(crate) const USER_MSG_OVERHEAD: usize = 1;
 
-const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
 /// Maximum number of concurrent push/pull requests
 const MAX_PUSH_PULL_REQUESTS: u32 = 128;
 
@@ -28,7 +27,7 @@ const MAX_PUSH_PULL_REQUESTS: u32 = 128;
 use sealed_metrics::*;
 
 #[cfg(feature = "metrics")]
-mod sealed_metrics {
+pub(crate) mod sealed_metrics {
   use std::sync::Once;
 
   static TCP_ACCEPT_COUNTER: Once = Once::new();
@@ -94,7 +93,7 @@ mod sealed_metrics {
 
   static REMOTE_SIZE_HISTOGRAM: Once = Once::new();
   #[inline]
-  pub(super) fn add_sample_to_remote_size_histogram<'a>(
+  pub(crate) fn add_sample_to_remote_size_histogram<'a>(
     val: f64,
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
@@ -118,8 +117,9 @@ mod sealed_metrics {
 }
 
 #[viewit::viewit]
-pub(crate) struct RemoteNodeState {
+pub(crate) struct RemoteNodeState<'a> {
   join: bool,
-  push_states: Vec<PushNodeState>,
-  user_state: Bytes,
+  push_states: Vec<&'a ArchivedPushNodeState>,
+  user_state_pos: usize,
+  src: Bytes,
 }

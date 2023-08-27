@@ -318,18 +318,18 @@ impl<R: Runtime> NetTransport<R> {
       // else.
       let addr = if bind_port == 0 { local_addr } else { addr };
 
-      let (local_addr, udp_ln) =
-        <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::bind(addr)
+      let (local_addr, udp_ln) = <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::bind(addr)
           .await
           .map_err(|e| NetTransportError::ListenUdp(addr, e))
-          .and_then(|udp| {
-            <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::set_read_buffer(
-              &udp,
-              UDP_RECV_BUF_SIZE,
-            )
-            .map(|_| (addr, UnreliableConnection::new(Udp::new(udp))))
-            .map_err(NetTransportError::ResizeUdpBuffer)
-          })
+          // .and_then(|udp| {
+          //   <<R::Net as Net>::UdpSocket as agnostic::net::UdpSocket>::set_read_buffer(
+          //     &udp,
+          //     UDP_RECV_BUF_SIZE,
+          //   )
+          //   .map(|_| (addr, UnreliableConnection::new(Udp::new(udp))))
+          //   .map_err(NetTransportError::ResizeUdpBuffer)
+          // })
+          .map(|udp| (addr, UnreliableConnection::new(Udp::new(udp))))
           .map_err(TransportError::Other)?;
       udp_listeners.push_back((udp_ln, local_addr));
     }
@@ -777,12 +777,15 @@ where
     <T::Runtime as Runtime>::spawn_detach(async move {
       scopeguard::defer!(wg.done());
       let ln = ln.as_ref();
-
+      tracing::info!(
+        target = "showbiz.net.transport",
+        "udp listening on {local_addr}"
+      );
       loop {
         // Do a blocking read into a fresh buffer. Grab a time stamp as
         // close as possible to the I/O.
-        let mut buf = BytesMut::with_capacity(UDP_PACKET_BUF_SIZE);
-        buf.fill(0);
+        let mut buf = BytesMut::new();
+        buf.resize(UDP_PACKET_BUF_SIZE, 0);
         futures_util::select! {
           _ = self.shutdown_rx.recv().fuse() => {
             break;

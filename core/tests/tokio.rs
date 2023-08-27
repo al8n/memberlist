@@ -14,3 +14,12 @@ mod create;
 /// Join related tests
 #[path = "tokio/join.rs"]
 mod join;
+
+#[path = "tokio/probe.rs"]
+mod probe;
+
+#[path = "tokio/ping.rs"]
+mod ping;
+
+#[path = "tokio/net.rs"]
+mod net;
