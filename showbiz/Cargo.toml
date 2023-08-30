@@ -4,8 +4,7 @@ version = "0.0.0"
 edition = "2021"
 
 [features]
-default = ["async", "metrics"]
-async = ["showbiz-core/async"]
+default = ["metrics"]
 metrics = ["showbiz-core/metrics"]
 
 tokio = ["agnostic/tokio-net"]

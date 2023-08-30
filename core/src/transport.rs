@@ -12,14 +12,12 @@ use crate::{
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-#[cfg(feature = "async")]
 pub mod stream;
 use stream::*;
 
-#[cfg(feature = "async")]
 pub mod net;
 
-#[cfg(all(feature = "async", feature = "test"))]
+#[cfg(feature = "test")]
 pub(crate) mod tests;
 
 const LABEL_MAX_SIZE: usize = 255;
@@ -158,10 +156,8 @@ impl<T: Transport> TransportError<T> {
   }
 }
 
-#[cfg(feature = "async")]
 pub use r#async::*;
 
-#[cfg(feature = "async")]
 mod r#async {
   use std::{
     io,

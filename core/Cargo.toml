@@ -7,12 +7,10 @@ version = { workspace= true }
 edition = { workspace= true }
 
 [features]
-default = ["async", "metrics"]
+default = ["metrics"]
 
 # TODO: temporarily disable nightly, wait Rust's issue https://github.com/rust-lang/rust/issues/111105 to be fixed
 # nightly = ["agnostic/nightly"]
-
-async = ["agnostic", "async-channel", "async-recursion", "async-trait", "async-lock", "futures-util", "futures-channel", "weezl/async"]
 
 # implement tokio::io::AsyncRead/AsyncWrite for Tcp/Udp
 tokio-compat = ["agnostic/tokio-compat"]
@@ -20,7 +18,7 @@ metrics = ["dep:metrics"]
 
 # expose all tests fn for users who want to use other runtime
 # see showbiz-wasm for more examples about how to use those tests fn
-test = ["tracing-subscriber", "parking_lot"]
+test = ["tracing-subscriber"]
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 trust-dns-resolver = { version = "0.23.0-alpha.4", default-features = false, features = ["system-config"] }
@@ -39,13 +37,13 @@ hostname = "0.3"
 
 [dependencies]
 # async common
-agnostic = { workspace = true, optional = true, features = ["net"] }
-async-channel = { version = "1.8", optional = true }
-async-lock = { version = "2.7", optional = true }
-async-recursion = { version = "1", optional = true }
-async-trait = { version = "0.1", optional = true }
-futures-channel = { version = "0.3", optional = true }
-futures-util = { version = "0.3", optional = true, features = ["io"] }
+agnostic = { workspace = true, features = ["net"] }
+async-channel = { version = "1.8" }
+async-lock = { version = "2.7" }
+async-recursion = { version = "1" }
+async-trait = { version = "0.1" }
+futures-channel = { version = "0.3" }
+futures-util = { version = "0.3", features = ["io"] }
 
 # common
 atomic = "=0.5" # keep on 0.5
@@ -65,7 +63,7 @@ itertools = "0.11"
 ipnet = { version = "2.7", features = ["serde"] }
 metrics = { version = "0.21", optional = true }
 paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
-parking_lot = { version = "0.12", optional = true }
+parking_lot = { version = "0.12", features = ["send_guard"] }
 pollster = "0.3"
 rand = { version = "0.8" }
 rayon = "1.7"
@@ -76,17 +74,14 @@ humantime-serde = "1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "tracing-log"] }
-trust-dns-proto = { version = "0.23.0-alpha.4", default-features = false }
+trust-dns-proto = { version = "0.23", default-features = false }
 viewit = { workspace = true }
-weezl = "0.1"
+weezl = { version = "0.1", features = ["async"] }
 wg = "0.3"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 prost = "0.11"
-rmp-serde = { version = "1" }
-bincode = "1"
 agnostic = { path = "../../agnostic/agnostic", features = ["tokio-net", "async-std-net", "smol-net"] }
-parking_lot = "0.12"
 tokio = { version = "1.32", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }

@@ -742,7 +742,7 @@ fn move_dead_nodes<R: Runtime>(
 
 macro_rules! apply_delta {
   ($this:ident <= $delta:expr) => {
-    $this.inner.awareness.apply_delta($delta).await;
+    $this.inner.awareness.apply_delta($delta);
   };
 }
 
@@ -907,8 +907,7 @@ where
     let probe_interval = self
       .inner
       .awareness
-      .scale_timeout(self.inner.opts.probe_interval)
-      .await;
+      .scale_timeout(self.inner.opts.probe_interval);
 
     #[cfg(feature = "metrics")]
     {
@@ -1409,7 +1408,7 @@ where
     state.incarnation.store(inc, Ordering::Relaxed);
 
     // Decrease our health because we are being asked to refute a problem.
-    self.inner.awareness.apply_delta(1).await;
+    self.inner.awareness.apply_delta(1);
 
     // Format and broadcast an alive message.
     let a = Alive {

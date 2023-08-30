@@ -22,7 +22,6 @@ fn remaining_suspicion_time(
 }
 
 pub(crate) use r#impl::Suspicion;
-#[cfg(feature = "async")]
 mod r#impl {
   use crate::NodeId;
 
@@ -266,9 +265,7 @@ fn test_suspicion_remaining_suspicion_time() {
 mod tests {
   use super::*;
 
-  #[cfg(feature = "async")]
   use async_channel::TryRecvError;
-  #[cfg(feature = "async")]
   use futures_util::FutureExt;
 
   struct Pair {
@@ -393,7 +390,6 @@ mod tests {
     ]
   }
 
-  // #[cfg(feature = "async")]
   // #[tokio::test]
   // async fn test_suspicion_after_func() {
   //   use agnostic::tokio::TokioRuntime;
@@ -459,7 +455,6 @@ mod tests {
   //   }
   // }
 
-  // #[cfg(feature = "async")]
   // #[tokio::test]
   // async fn test_suspicion_after_func_zero_k() {
   //   use agnostic::tokio::TokioRuntime;
@@ -487,7 +482,6 @@ mod tests {
   //     .unwrap();
   // }
 
-  // #[cfg(feature = "async")]
   // #[tokio::test]
   // async fn test_suspicion_after_func_immediate() {
   //   use agnostic::tokio::TokioRuntime;

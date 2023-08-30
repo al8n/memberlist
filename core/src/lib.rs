@@ -4,9 +4,6 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
-#[cfg(not(feature = "async"))]
-compile_error!("showbiz does not support sync currently, `async` feature must be enabled.");
-
 mod awareness;
 pub mod broadcast;
 pub mod checksum;
@@ -34,20 +31,13 @@ pub mod util;
 pub use bytes;
 pub use ipnet::IpNet;
 
-#[cfg(feature = "async")]
 mod timer;
 mod version;
 
-#[cfg(feature = "async")]
-#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub use agnostic;
 
-#[cfg(feature = "async")]
-#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub use async_trait;
 
-#[cfg(feature = "async")]
-#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub use futures_util;
 
 #[cfg(feature = "metrics")]
@@ -69,7 +59,7 @@ pub use humantime_serde;
 /// See [showbiz-wasm] for more examples about how to use these unit test fn runners.
 ///
 /// [showbiz-wasm]: https://github.com/al8n/showbiz/blob/main/showbiz-wasm/src/lib.rs#L20
-#[cfg(all(feature = "async", feature = "test"))]
+#[cfg(feature = "test")]
 pub mod tests {
   pub use super::network::*;
   pub use super::showbiz::tests::*;

@@ -16,10 +16,9 @@ use async_lock::{Mutex, RwLock};
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Stream, StreamExt};
 use itertools::{Either, Itertools};
 
-#[cfg(all(feature = "async", feature = "test"))]
+#[cfg(feature = "test")]
 pub(crate) mod tests;
 
-#[cfg(feature = "async")]
 pub(crate) struct AckHandler {
   pub(crate) ack_fn:
     Box<dyn FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
@@ -650,7 +649,7 @@ where
   /// means "totally healthy".
   #[inline]
   pub async fn health_score(&self) -> usize {
-    self.inner.awareness.get_health_score().await as usize
+    self.inner.awareness.get_health_score() as usize
   }
 
   /// Used to trigger re-advertising the local node. This is
@@ -892,7 +891,7 @@ where
             return;
           },
           _ = <T::Runtime as Runtime>::sleep(queue_check_interval).fuse() => {
-            let numq = this.inner.broadcast.num_queued().await;
+            let numq = this.inner.broadcast.num_queued();
             QUEUE_BROADCAST.call_once(|| {
               metrics::register_gauge!("showbiz.queue.broadcasts");
             });

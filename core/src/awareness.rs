@@ -18,8 +18,7 @@ pub(crate) struct Inner {
 pub(crate) struct Awareness {
   #[cfg(feature = "metrics")]
   id: crate::types::NodeId,
-  #[cfg(feature = "async")]
-  pub(crate) inner: Arc<async_lock::RwLock<Inner>>,
+  pub(crate) inner: Arc<parking_lot::RwLock<Inner>>,
   #[cfg(feature = "metrics")]
   pub(crate) metric_labels: Arc<Vec<metrics::Label>>,
 }
@@ -32,8 +31,7 @@ impl Awareness {
     #[cfg(feature = "metrics")] id: crate::types::NodeId,
   ) -> Self {
     Self {
-      #[cfg(feature = "async")]
-      inner: Arc::new(async_lock::RwLock::new(Inner { max, score: 0 })),
+      inner: Arc::new(parking_lot::RwLock::new(Inner { max, score: 0 })),
       #[cfg(feature = "metrics")]
       metric_labels,
       #[cfg(feature = "metrics")]
@@ -44,10 +42,9 @@ impl Awareness {
   /// Takes the given delta and applies it to the score in a thread-safe
   /// manner. It also enforces a floor of zero and a max of max, so deltas may not
   /// change the overall score if it's railed at one of the extremes.
-  #[cfg(feature = "async")]
-  pub(crate) async fn apply_delta(&self, delta: isize) {
+  pub(crate) fn apply_delta(&self, delta: isize) {
     let (_initial, _fnl) = {
-      let mut inner = self.inner.write().await;
+      let mut inner = self.inner.write();
       let initial = inner.score;
       inner.score += delta;
       if inner.score < 0 {
@@ -77,23 +74,21 @@ impl Awareness {
   }
 
   /// Returns the raw health score.
-  #[cfg(feature = "async")]
-  pub(crate) async fn get_health_score(&self) -> isize {
-    self.inner.read().await.score
+  pub(crate) fn get_health_score(&self) -> isize {
+    self.inner.read().score
   }
 
   /// Takes the given duration and scales it based on the current
   /// score. Less healthyness will lead to longer timeouts.
-  #[cfg(feature = "async")]
-  pub(crate) async fn scale_timeout(&self, timeout: Duration) -> Duration {
-    let score = self.inner.read().await.score;
+  pub(crate) fn scale_timeout(&self, timeout: Duration) -> Duration {
+    let score = self.inner.read().score;
     timeout * ((score + 1) as u32)
   }
 }
 
-#[tokio::test]
-#[cfg(all(feature = "async", test))]
-async fn test_awareness() {
+#[test]
+#[cfg(test)]
+fn test_awareness() {
   use std::net::SocketAddr;
 
   use crate::types::{Name, NodeId};
@@ -125,8 +120,8 @@ async fn test_awareness() {
     ),
   );
   for (delta, score, timeout) in cases {
-    a.apply_delta(delta).await;
-    assert_eq!(a.get_health_score().await, score);
-    assert_eq!(a.scale_timeout(Duration::from_secs(1)).await, timeout);
+    a.apply_delta(delta);
+    assert_eq!(a.get_health_score(), score);
+    assert_eq!(a.scale_timeout(Duration::from_secs(1)), timeout);
   }
 }

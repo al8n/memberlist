@@ -36,7 +36,7 @@ pub trait Broadcast: Send + Sync + 'static {
   /// intrinsically unique and there is no need to scan the broadcast queue for
   /// duplicates.
   fn is_unique(&self) -> bool {
-    false
+    true
   }
 }
 
@@ -86,11 +86,10 @@ impl Broadcast for ShowbizBroadcast {
   }
 
   fn is_unique(&self) -> bool {
-    false
+    true
   }
 }
 
-#[cfg(feature = "async")]
 impl<D: Delegate, T: Transport> Showbiz<T, D> {
   #[inline]
   pub(crate) async fn broadcast_notify(

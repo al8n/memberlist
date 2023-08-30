@@ -1,7 +1,4 @@
 #![forbid(unsafe_code)]
-#[cfg(not(feature = "async"))]
-compile_error!("showbiz does not support sync currently, `async` feature must be enabled.");
-
 pub use agnostic;
 pub use showbiz_core::*;
 

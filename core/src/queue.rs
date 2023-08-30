@@ -2,21 +2,20 @@ use crossbeam_utils::CachePadded;
 use std::{
   collections::{BTreeSet, HashMap},
   sync::{
-    atomic::{AtomicU32, AtomicUsize, Ordering},
+    atomic::{AtomicU32, Ordering},
     Arc,
   },
 };
 
 use crate::{broadcast::Broadcast, types::Message, util::retransmit_limit};
 
-#[async_trait::async_trait]
 pub trait NodeCalculator {
-  async fn num_nodes(&self) -> usize;
+  fn num_nodes(&self) -> usize;
 }
 
 struct Inner<B: Broadcast> {
-  q: BTreeSet<Arc<LimitedBroadcast<B>>>,
-  m: HashMap<B::Id, Arc<LimitedBroadcast<B>>>,
+  q: BTreeSet<LimitedBroadcast<B>>,
+  m: HashMap<B::Id, LimitedBroadcast<B>>,
   id_gen: u64,
 }
 
@@ -32,7 +31,7 @@ impl<B: Broadcast> Inner<B> {
     }
   }
 
-  fn insert(&mut self, item: Arc<LimitedBroadcast<B>>) {
+  fn insert(&mut self, item: LimitedBroadcast<B>) {
     let id = item.broadcast.id();
     self.m.insert(id.clone(), item.clone());
     self.q.insert(item);
@@ -42,9 +41,8 @@ impl<B: Broadcast> Inner<B> {
 #[derive(Clone)]
 pub(crate) struct DefaultNodeCalculator(Arc<CachePadded<AtomicU32>>);
 
-#[async_trait::async_trait]
 impl NodeCalculator for DefaultNodeCalculator {
-  async fn num_nodes(&self) -> usize {
+  fn num_nodes(&self) -> usize {
     self.0.load(Ordering::SeqCst) as usize
   }
 }
@@ -65,17 +63,15 @@ pub struct TransmitLimitedQueue<B: Broadcast, C: NodeCalculator> {
   /// The multiplier used to determine the maximum
   /// number of retransmissions attempted.
   retransmit_mult: usize,
-  #[cfg(feature = "async")]
-  inner: async_lock::Mutex<Inner<B>>,
+  inner: parking_lot::Mutex<Inner<B>>,
 }
 
 impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
-  #[cfg(feature = "async")]
   pub fn new(calc: C, retransmit_mult: usize) -> Self {
     Self {
       num_nodes: calc,
       retransmit_mult,
-      inner: async_lock::Mutex::new(Inner {
+      inner: parking_lot::Mutex::new(Inner {
         q: BTreeSet::new(),
         m: HashMap::new(),
         id_gen: 0,
@@ -83,19 +79,16 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     }
   }
 
-  #[cfg(feature = "async")]
-  pub async fn num_queued(&self) -> usize {
-    self.inner.lock().await.q.len()
+  pub fn num_queued(&self) -> usize {
+    self.inner.lock().q.len()
   }
 
-  #[cfg(feature = "async")]
   pub async fn get_broadcasts(&self, overhead: usize, limit: usize) -> Vec<Message> {
     self
       .get_broadcast_with_prepend(Vec::new(), overhead, limit)
       .await
   }
 
-  #[cfg(feature = "async")]
   pub(crate) async fn get_broadcast_with_prepend(
     &self,
     prepend: Vec<Message>,
@@ -103,28 +96,17 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     limit: usize,
   ) -> Vec<Message> {
     let mut to_send = prepend;
-    let mut inner = self.inner.lock().await;
+    let mut inner = self.inner.lock();
     if inner.q.is_empty() {
       return Vec::new();
     }
 
-    for old in inner.q.iter() {
-      tracing::warn!(
-        "debug: queue iter id: {} {:?}",
-        old.broadcast.id(),
-        old.broadcast.message().0.as_ref()
-      );
-    }
-
-    let transmit_limit = retransmit_limit(self.retransmit_mult, self.num_nodes.num_nodes().await);
+    let transmit_limit = retransmit_limit(self.retransmit_mult, self.num_nodes.num_nodes());
 
     // Visit fresher items first, but only look at stuff that will fit.
     // We'll go tier by tier, grabbing the largest items first.
     let (min_tr, max_tr) = match (inner.q.first(), inner.q.last()) {
-      (Some(min), Some(max)) => (
-        min.transmits.load(Ordering::Relaxed),
-        max.transmits.load(Ordering::Relaxed),
-      ),
+      (Some(min), Some(max)) => (min.transmits, max.transmits),
       _ => (0, 0),
     };
     let mut bytes_used = 0usize;
@@ -156,7 +138,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
         .cloned();
 
       match keep {
-        Some(keep) => {
+        Some(mut keep) => {
           let msg = keep.broadcast.message();
           bytes_used += msg.len() + overhead;
           // Add to slice to send
@@ -164,7 +146,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
 
           // check if we should stop transmission
           inner.remove(&keep);
-          if keep.transmits.load(Ordering::Relaxed) + 1 >= transmit_limit {
+          if keep.transmits + 1 >= transmit_limit {
             keep.broadcast.finished().await;
           } else {
             // We need to bump this item down to another transmit tier, but
@@ -172,7 +154,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
             // tiers, we will have to delay the reinsertion until we are
             // finished our search. Otherwise we'll possibly re-add the message
             // when we ascend to the next tier.
-            keep.transmits.fetch_add(1, Ordering::Relaxed);
+            keep.transmits += 1;
             reinsert.push(keep);
           }
         }
@@ -191,28 +173,24 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
   }
 
   /// Used to enqueue a broadcast
-  #[cfg(feature = "async")]
   pub async fn queue_broadcast(&self, b: B) {
     self.queue_broadcast_in(b, 0).await
   }
 
-  #[cfg(feature = "async")]
   async fn queue_broadcast_in(&self, b: B, initial_transmits: usize) {
-    let mut inner = self.inner.lock().await;
-
+    let mut inner = self.inner.lock();
     if inner.id_gen == u64::MAX {
       inner.id_gen = 1;
     } else {
       inner.id_gen += 1;
     }
-
     let id = inner.id_gen;
 
     let lb = LimitedBroadcast {
-      transmits: AtomicUsize::new(initial_transmits),
+      transmits: initial_transmits,
       msg_len: b.message().0.len() as u64,
       id,
-      broadcast: b,
+      broadcast: Arc::new(b),
     };
 
     let unique = lb.broadcast.is_unique();
@@ -221,11 +199,6 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     let id = lb.broadcast.id();
     if let Some(old) = inner.m.remove(id) {
       old.broadcast.finished().await;
-      tracing::info!(
-        "debug: dequeue id: {} {:?}",
-        old.broadcast.id(),
-        old.broadcast.message().0.as_ref()
-      );
       inner.q.remove(&old);
       if inner.q.is_empty() {
         inner.id_gen = 0;
@@ -255,13 +228,13 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
       lb.broadcast.id(),
       lb.broadcast.message().0.as_ref()
     );
-    inner.insert(Arc::new(lb));
+    inner.insert(lb);
   }
 
   /// Clears all the queued messages.
-  #[cfg(all(feature = "async", test))]
+  #[cfg(test)]
   pub async fn reset(&self) {
-    let mut inner = self.inner.lock().await;
+    let mut inner = self.inner.lock();
 
     for b in inner.q.iter() {
       b.broadcast.finished().await;
@@ -274,9 +247,8 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
 
   /// Retain the maxRetain latest messages, and the rest
   /// will be discarded. This can be used to prevent unbounded queue sizes
-  #[cfg(feature = "async")]
   pub async fn prune(&self, max_retain: usize) {
-    let mut inner = self.inner.lock().await;
+    let mut inner = self.inner.lock();
     // Do nothing if queue size is less than the limit
     while inner.q.len() > max_retain {
       if let Some(item) = inner.q.pop_last() {
@@ -291,19 +263,37 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
 
 struct LimitedBroadcast<B: Broadcast> {
   // btree-key[0]: Number of transmissions attempted.
-  transmits: AtomicUsize,
+  transmits: usize,
   // btree-key[1]: copied from len(b.Message())
   msg_len: u64,
   // btree-key[2]: unique incrementing id stamped at submission time
   id: u64,
-  broadcast: B,
+  broadcast: Arc<B>,
+}
+
+impl<B: Broadcast> core::clone::Clone for LimitedBroadcast<B> {
+  fn clone(&self) -> Self {
+    Self {
+      broadcast: self.broadcast.clone(),
+      ..*self
+    }
+  }
+}
+
+impl<B: Broadcast> core::fmt::Debug for LimitedBroadcast<B> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct(std::any::type_name::<Self>())
+      .field("transmits", &self.transmits)
+      .field("msg_len", &self.msg_len)
+      .field("id", &self.id)
+      .field("broadcast", self.broadcast.id())
+      .finish()
+  }
 }
 
 impl<B: Broadcast> PartialEq for LimitedBroadcast<B> {
   fn eq(&self, other: &Self) -> bool {
-    self.transmits.load(Ordering::Relaxed) == other.transmits.load(Ordering::Relaxed)
-      && self.msg_len == other.msg_len
-      && self.id == other.id
+    self.transmits == other.transmits && self.msg_len == other.msg_len && self.id == other.id
   }
 }
 
@@ -319,8 +309,7 @@ impl<B: Broadcast> Ord for LimitedBroadcast<B> {
   fn cmp(&self, other: &Self) -> std::cmp::Ordering {
     self
       .transmits
-      .load(Ordering::Relaxed)
-      .cmp(&other.transmits.load(Ordering::Relaxed))
+      .cmp(&other.transmits)
       .then_with(|| other.msg_len.cmp(&self.msg_len))
       .then_with(|| other.id.cmp(&self.id))
   }
@@ -334,9 +323,7 @@ struct Cmp {
 
 impl<B: Broadcast> PartialEq<&LimitedBroadcast<B>> for Cmp {
   fn eq(&self, other: &&LimitedBroadcast<B>) -> bool {
-    self.transmits == other.transmits.load(Ordering::Relaxed)
-      && self.msg_len == other.msg_len
-      && self.id == other.id
+    self.transmits == other.transmits && self.msg_len == other.msg_len && self.id == other.id
   }
 }
 
@@ -345,7 +332,7 @@ impl<B: Broadcast> PartialOrd<&LimitedBroadcast<B>> for Cmp {
     Some(
       self
         .transmits
-        .cmp(&other.transmits.load(Ordering::Relaxed))
+        .cmp(&other.transmits)
         .then_with(|| other.msg_len.cmp(&self.msg_len))
         .then_with(|| other.id.cmp(&self.id)),
     )
@@ -354,11 +341,67 @@ impl<B: Broadcast> PartialOrd<&LimitedBroadcast<B>> for Cmp {
 
 #[cfg(test)]
 mod tests {
-  use bytes::BytesMut;
+  use bytes::{BufMut, BytesMut};
+  use futures_util::FutureExt;
 
   use crate::{broadcast::ShowbizBroadcast, Name, NodeId};
 
   use super::*;
+
+  struct NC(usize);
+
+  impl NodeCalculator for NC {
+    fn num_nodes(&self) -> usize {
+      self.0
+    }
+  }
+
+  impl<B: Broadcast> Inner<B> {
+    fn walk_read_only<F>(&self, reverse: bool, f: F)
+    where
+      F: FnMut(&LimitedBroadcast<B>) -> bool,
+    {
+      fn iter<'a, B: Broadcast, F>(it: impl Iterator<Item = &'a LimitedBroadcast<B>>, mut f: F)
+      where
+        F: FnMut(&LimitedBroadcast<B>) -> bool,
+      {
+        for item in it {
+          let prev_transmits = item.transmits;
+          let prev_msg_len = item.msg_len;
+          let prev_id = item.id;
+
+          let keep_going = f(item);
+
+          if prev_transmits != item.transmits || prev_msg_len != item.msg_len || prev_id != item.id
+          {
+            panic!("edited queue while walking read only");
+          }
+
+          if !keep_going {
+            break;
+          }
+        }
+      }
+      if reverse {
+        iter(self.q.iter().rev(), f)
+      } else {
+        iter(self.q.iter(), f)
+      }
+    }
+  }
+
+  impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
+    async fn ordered_view(&self, reverse: bool) -> Vec<LimitedBroadcast<B>> {
+      let inner = self.inner.lock();
+
+      let mut out = vec![];
+      inner.walk_read_only(reverse, |b| {
+        out.push(b.clone());
+        true
+      });
+      out
+    }
+  }
 
   #[test]
   fn test_limited_broadcast_less() {
@@ -372,93 +415,93 @@ mod tests {
       Case {
         name: "diff-transmits",
         a: LimitedBroadcast {
-          transmits: AtomicUsize::new(0),
+          transmits: 0,
           msg_len: 10,
           id: 100,
-          broadcast: ShowbizBroadcast {
+          broadcast: Arc::new(ShowbizBroadcast {
             node: NodeId::new(
               Name::from_str_unchecked("diff-transmits-a"),
               "127.0.0.1:10".parse().unwrap(),
             ),
             msg: Message(BytesMut::from([0; 10].as_slice())),
             notify: None,
-          },
+          }),
         }
         .into(),
         b: LimitedBroadcast {
-          transmits: AtomicUsize::new(1),
+          transmits: 1,
           msg_len: 10,
           id: 100,
-          broadcast: ShowbizBroadcast {
+          broadcast: Arc::new(ShowbizBroadcast {
             node: NodeId::new(
               Name::from_str_unchecked("diff-transmits-b"),
               "127.0.0.1:11".parse().unwrap(),
             ),
             msg: Message(BytesMut::from([0; 10].as_slice())),
             notify: None,
-          },
+          }),
         }
         .into(),
       },
       Case {
         name: "same-transmits--diff-len",
         a: LimitedBroadcast {
-          transmits: AtomicUsize::new(0),
+          transmits: 0,
           msg_len: 12,
           id: 100,
-          broadcast: ShowbizBroadcast {
+          broadcast: Arc::new(ShowbizBroadcast {
             node: NodeId::new(
               Name::from_str_unchecked("same-transmits--diff-len-a"),
               "127.0.0.1:10".parse().unwrap(),
             ),
             msg: Message(BytesMut::from([0; 12].as_slice())),
             notify: None,
-          },
+          }),
         }
         .into(),
         b: LimitedBroadcast {
-          transmits: AtomicUsize::new(0),
+          transmits: 0,
           msg_len: 10,
           id: 100,
-          broadcast: ShowbizBroadcast {
+          broadcast: Arc::new(ShowbizBroadcast {
             node: NodeId::new(
               Name::from_str_unchecked("same-transmits--diff-len-b"),
               "127.0.0.1:11".parse().unwrap(),
             ),
             msg: Message(BytesMut::from([0; 10].as_slice())),
             notify: None,
-          },
+          }),
         }
         .into(),
       },
       Case {
         name: "same-transmits--same-len--diff-id",
         a: LimitedBroadcast {
-          transmits: AtomicUsize::new(0),
+          transmits: 0,
           msg_len: 12,
           id: 100,
-          broadcast: ShowbizBroadcast {
+          broadcast: Arc::new(ShowbizBroadcast {
             node: NodeId::new(
               Name::from_str_unchecked("same-transmits--same-len--diff-id-a"),
               "127.0.0.1:10".parse().unwrap(),
             ),
             msg: Message(BytesMut::from([0; 12].as_slice())),
             notify: None,
-          },
+          }),
         }
         .into(),
         b: LimitedBroadcast {
-          transmits: AtomicUsize::new(0),
+          transmits: 0,
           msg_len: 12,
           id: 90,
-          broadcast: ShowbizBroadcast {
+          broadcast: Arc::new(ShowbizBroadcast {
             node: NodeId::new(
               Name::from_str_unchecked("same-transmits--same-len--diff-id-b"),
               "127.0.0.1:11".parse().unwrap(),
             ),
             msg: Message(BytesMut::from([0; 12].as_slice())),
             notify: None,
-          },
+          }),
         }
         .into(),
       },
@@ -473,24 +516,300 @@ mod tests {
       tree.insert(c.a.clone());
 
       let min = tree.iter().min().unwrap();
-      assert_eq!(
-        min.transmits.load(Ordering::Relaxed),
-        c.a.transmits.load(Ordering::Relaxed),
-        "case: {}",
-        c.name
-      );
+      assert_eq!(min.transmits, c.a.transmits, "case: {}", c.name);
       assert_eq!(min.msg_len, c.a.msg_len, "case: {}", c.name);
       assert_eq!(min.id, c.a.id, "case: {}", c.name);
 
       let max = tree.iter().max().unwrap();
-      assert_eq!(
-        max.transmits.load(Ordering::Relaxed),
-        c.b.transmits.load(Ordering::Relaxed),
-        "case: {}",
-        c.name
-      );
+      assert_eq!(max.transmits, c.b.transmits, "case: {}", c.name);
       assert_eq!(max.msg_len, c.b.msg_len, "case: {}", c.name);
       assert_eq!(max.id, c.b.id, "case: {}", c.name);
     }
+  }
+
+  #[tokio::test]
+  async fn test_transmit_limited_queue() {
+    let q = TransmitLimitedQueue::new(NC(1), 1);
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      msg: Message(BytesMut::new()),
+      notify: None,
+    })
+    .await;
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
+      msg: Message(BytesMut::new()),
+      notify: None,
+    })
+    .await;
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      msg: Message(BytesMut::new()),
+      notify: None,
+    })
+    .await;
+
+    assert_eq!(q.num_queued(), 3);
+
+    let dump = q.ordered_view(true).await;
+
+    assert_eq!(dump.len(), 3);
+    assert_eq!(dump[0].broadcast.node.name(), "test");
+    assert_eq!(dump[1].broadcast.node.name(), "foo");
+    assert_eq!(dump[2].broadcast.node.name(), "bar");
+
+    // Should invalidate previous message
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      msg: Message(BytesMut::new()),
+      notify: None,
+    })
+    .await;
+
+    assert_eq!(q.num_queued(), 3);
+    let dump = q.ordered_view(true).await;
+
+    assert_eq!(dump.len(), 3);
+    assert_eq!(dump[0].broadcast.node.name(), "foo");
+    assert_eq!(dump[1].broadcast.node.name(), "bar");
+    assert_eq!(dump[2].broadcast.node.name(), "test");
+  }
+
+  #[tokio::test]
+  async fn test_transmit_limited_get_broadcasts() {
+    let q = TransmitLimitedQueue::new(NC(10), 3);
+
+    // 18 bytes per message
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      msg: {
+        let mut msg = BytesMut::new();
+        msg.put_slice(b"1. this is a test.");
+        Message(msg)
+      },
+      notify: None,
+    })
+    .await;
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
+      msg: {
+        let mut msg = BytesMut::new();
+        msg.put_slice(b"2. this is a test.");
+        Message(msg)
+      },
+      notify: None,
+    })
+    .await;
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      msg: {
+        let mut msg = BytesMut::new();
+        msg.put_slice(b"3. this is a test.");
+        Message(msg)
+      },
+      notify: None,
+    })
+    .await;
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("baz".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      msg: {
+        let mut msg = BytesMut::new();
+        msg.put_slice(b"4. this is a test.");
+        Message(msg)
+      },
+      notify: None,
+    })
+    .await;
+
+    // 2 byte overhead per message, should get all 4 messages
+    let all = q.get_broadcasts(2, 80).await;
+    assert_eq!(all.len(), 4);
+
+    // 3 byte overhead, should only get 3 messages back
+    let partial = q.get_broadcasts(3, 80).await;
+    assert_eq!(partial.len(), 3);
+  }
+
+  #[tokio::test]
+  async fn test_transmit_limited_get_broadcasts_limit() {
+    let q = TransmitLimitedQueue::new(NC(10), 1);
+
+    assert_eq!(0, q.inner.lock().id_gen);
+    assert_eq!(
+      2,
+      retransmit_limit(q.retransmit_mult, q.num_nodes.num_nodes())
+    );
+
+    // 18 bytes per message
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      msg: {
+        let mut msg = BytesMut::new();
+        msg.put_slice(b"1. this is a test.");
+        Message(msg)
+      },
+      notify: None,
+    })
+    .await;
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
+      msg: {
+        let mut msg = BytesMut::new();
+        msg.put_slice(b"2. this is a test.");
+        Message(msg)
+      },
+      notify: None,
+    })
+    .await;
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      msg: {
+        let mut msg = BytesMut::new();
+        msg.put_slice(b"3. this is a test.");
+        Message(msg)
+      },
+      notify: None,
+    })
+    .await;
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("baz".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      msg: {
+        let mut msg = BytesMut::new();
+        msg.put_slice(b"4. this is a test.");
+        Message(msg)
+      },
+      notify: None,
+    })
+    .await;
+
+    assert_eq!(4, q.inner.lock().id_gen);
+
+    // 3 byte overhead, should only get 3 messages back
+    let partial = q.get_broadcasts(3, 80).await;
+    assert_eq!(partial.len(), 3);
+
+    assert_eq!(
+      4,
+      q.inner.lock().id_gen,
+      "id generator doesn't reset until empty"
+    );
+
+    let partial = q.get_broadcasts(3, 80).await;
+    assert_eq!(partial.len(), 3);
+    assert_eq!(
+      4,
+      q.inner.lock().id_gen,
+      "id generator doesn't reset until empty"
+    );
+
+    // Only two not expired
+    let partial = q.get_broadcasts(3, 80).await;
+    assert_eq!(partial.len(), 2);
+    assert_eq!(0, q.inner.lock().id_gen, "id generator resets on empty");
+
+    // Should get nothing
+    let partial = q.get_broadcasts(3, 80).await;
+    assert_eq!(partial.len(), 0);
+    assert_eq!(0, q.inner.lock().id_gen, "id generator resets on empty");
+  }
+
+  #[tokio::test]
+  async fn test_transmit_limited_prune() {
+    let q = TransmitLimitedQueue::new(NC(10), 1);
+    let (tx1, rx1) = async_channel::bounded(1);
+    let (tx2, rx2) = async_channel::bounded(1);
+
+    // 18 bytes per message
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      msg: {
+        let mut msg = BytesMut::new();
+        msg.put_slice(b"1. this is a test.");
+        Message(msg)
+      },
+      notify: Some(tx1),
+    })
+    .await;
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
+      msg: {
+        let mut msg = BytesMut::new();
+        msg.put_slice(b"2. this is a test.");
+        Message(msg)
+      },
+      notify: Some(tx2),
+    })
+    .await;
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      msg: {
+        let mut msg = BytesMut::new();
+        msg.put_slice(b"3. this is a test.");
+        Message(msg)
+      },
+      notify: None,
+    })
+    .await;
+    q.queue_broadcast(ShowbizBroadcast {
+      node: NodeId::new("baz".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      msg: {
+        let mut msg = BytesMut::new();
+        msg.put_slice(b"4. this is a test.");
+        Message(msg)
+      },
+      notify: None,
+    })
+    .await;
+
+    // keep only 2
+    q.prune(2).await;
+
+    assert_eq!(2, q.num_queued());
+
+    // Should notify the first two
+    futures_util::select! {
+      _ = rx1.recv().fuse() => {},
+      default => panic!("expected invalidation"),
+    }
+
+    futures_util::select! {
+      _ = rx2.recv().fuse() => {},
+      default => panic!("expected invalidation"),
+    }
+
+    let dump = q.ordered_view(true).await;
+    assert_eq!(dump[0].broadcast.id().name(), "bar");
+    assert_eq!(dump[1].broadcast.id().name(), "baz");
+  }
+
+  #[tokio::test]
+  async fn test_transmit_limited_ordering() {
+    let q = TransmitLimitedQueue::new(NC(10), 1);
+    let insert = |name: &str, transmits: usize| {
+      q.queue_broadcast_in(
+        ShowbizBroadcast {
+          node: NodeId::new(
+            name.try_into().unwrap(),
+            format!("127.0.0.1:{transmits}").parse().unwrap(),
+          ),
+          msg: Message(BytesMut::new()),
+          notify: None,
+        },
+        transmits,
+      )
+    };
+
+    insert("node0", 0).await;
+    insert("node1", 10).await;
+    insert("node2", 3).await;
+    insert("node3", 4).await;
+    insert("node4", 7).await;
+
+    let dump = q.ordered_view(true).await;
+    assert_eq!(dump[0].transmits, 10);
+    assert_eq!(dump[1].transmits, 7);
+    assert_eq!(dump[2].transmits, 4);
+    assert_eq!(dump[3].transmits, 3);
+    assert_eq!(dump[4].transmits, 0);
   }
 }

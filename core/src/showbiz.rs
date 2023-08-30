@@ -9,7 +9,6 @@ use std::{
 };
 
 use agnostic::Runtime;
-#[cfg(feature = "async")]
 use async_channel::{Receiver, Sender};
 use bytes::Bytes;
 use crossbeam_utils::CachePadded;
@@ -34,9 +33,7 @@ use super::{
   Options,
 };
 
-#[cfg(feature = "async")]
 mod r#async;
-#[cfg(feature = "async")]
 pub use r#async::*;
 
 #[viewit::viewit]

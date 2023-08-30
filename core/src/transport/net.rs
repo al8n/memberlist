@@ -763,7 +763,6 @@ where
   T: Transport,
   L: AsRef<UnreliableConnection<T>> + Send + Sync + 'static,
 {
-  #[cfg(feature = "async")]
   pub(super) fn run(self) {
     let Self {
       wg,
