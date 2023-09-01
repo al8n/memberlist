@@ -171,8 +171,8 @@ where
 
     // Authenticated Data is:
     //
-    //   [messageType; u8] [label length; u8] [reserved2; u8] [reserved3; u8]
-    //   [messageLength; u32] [stream_label; optional] [encryptionAlgo; u8]
+    //   [messageType; u8] [marker; u8] [encryptionAlgo; u8] [reserved1; u8]
+    //   [messageLength; u32] [stream_label; optional]
     //
     let mut ciphertext = buf.split_off(ENCODE_HEADER_SIZE);
     if label.is_empty() {
@@ -206,8 +206,8 @@ where
     //
     // Authenticated Data is:
     //
-    //   [messageType; u8] [reserverd1; u8] [reserved2; u8] [reserved3; u8]
-    //   [messageLength; u32] [stream_label; optional] [encryptionAlgo; u8]
+    //   [messageType; u8] [marker; u8] [encryptionAlgo; u8] [reserved1; u8]
+    //   [messageLength; u32] [stream_label; optional]
     //
 
     let mut ciphertext = buf.split_off(ENCODE_HEADER_SIZE);

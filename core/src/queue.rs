@@ -21,6 +21,7 @@ struct Inner<B: Broadcast> {
 
 impl<B: Broadcast> Inner<B> {
   fn remove(&mut self, item: &LimitedBroadcast<B>) {
+    self.q.remove(item);
     let id = item.broadcast.id();
     self.m.remove(id);
 
@@ -35,6 +36,20 @@ impl<B: Broadcast> Inner<B> {
     let id = item.broadcast.id();
     self.m.insert(id.clone(), item.clone());
     self.q.insert(item);
+  }
+
+  /// Returns a pair of min/max values for transmit values
+  /// represented by the current queue contents. Both values represent actual
+  /// transmit values on the interval [0, len).
+  fn get_transmit_range(&self) -> (usize, usize) {
+    if self.q.is_empty() {
+      return (0, 0);
+    }
+    let (min, max) = (self.q.first(), self.q.last());
+    match (min, max) {
+      (Some(min), Some(max)) => (min.transmits, max.transmits),
+      _ => (0, 0),
+    }
   }
 }
 
@@ -105,10 +120,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
 
     // Visit fresher items first, but only look at stuff that will fit.
     // We'll go tier by tier, grabbing the largest items first.
-    let (min_tr, max_tr) = match (inner.q.first(), inner.q.last()) {
-      (Some(min), Some(max)) => (min.transmits, max.transmits),
-      _ => (0, 0),
-    };
+    let (min_tr, max_tr) = inner.get_transmit_range();
     let mut bytes_used = 0usize;
     let mut transmits = min_tr;
     let mut reinsert = Vec::new();
@@ -134,13 +146,13 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
         .q
         .iter()
         .filter(|item| greater_or_equal <= item && less_than > item)
-        .find(|item| item.broadcast.message().len() <= free)
+        .find(|item| item.broadcast.message().underlying_bytes().len() <= free)
         .cloned();
 
       match keep {
         Some(mut keep) => {
           let msg = keep.broadcast.message();
-          bytes_used += msg.len() + overhead;
+          bytes_used += msg.underlying_bytes().len() + overhead;
           // Add to slice to send
           to_send.push(msg.clone());
 
@@ -232,17 +244,19 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
   }
 
   /// Clears all the queued messages.
-  #[cfg(test)]
   pub async fn reset(&self) {
-    let mut inner = self.inner.lock();
+    let q = {
+      let mut inner = self.inner.lock();
+      inner.m.clear();
+      inner.id_gen = 0;
+      std::mem::take(&mut inner.q)
+    };
 
-    for b in inner.q.iter() {
-      b.broadcast.finished().await;
-    }
-
-    inner.q.clear();
-    inner.m.clear();
-    inner.id_gen = 0;
+    futures_util::future::join_all(
+      q.into_iter()
+        .map(|l| async move { l.broadcast.finished().await }),
+    )
+    .await;
   }
 
   /// Retain the maxRetain latest messages, and the rest
@@ -611,7 +625,7 @@ mod tests {
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("baz".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      node: NodeId::new("baz".try_into().unwrap(), "127.0.0.1:13".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"4. this is a test.");
@@ -672,7 +686,7 @@ mod tests {
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("baz".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      node: NodeId::new("baz".try_into().unwrap(), "127.0.0.1:13".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"4. this is a test.");
@@ -751,7 +765,7 @@ mod tests {
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("baz".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      node: NodeId::new("baz".try_into().unwrap(), "127.0.0.1:13".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"4. this is a test.");
