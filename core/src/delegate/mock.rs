@@ -1,6 +1,6 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize};
-
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::time::Duration;
 
 use crate::Name;
 
@@ -14,18 +14,28 @@ pub enum MockDelegateError {
   CustomAliveCancelled,
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum MockDelegateType {
   None,
   CancelMerge,
   CancelAlive,
+  NotifyConflict,
+  Ping,
+  UserData,
 }
 
+#[derive(Default)]
 struct MockDelegateInner {
   meta: Bytes,
   msgs: Vec<Bytes>,
   broadcasts: Vec<Message>,
   state: Bytes,
   remote_state: Bytes,
+  conflict_existing: Option<Arc<Node>>,
+  conflict_other: Option<Arc<Node>>,
+  ping_other: Option<Arc<Node>>,
+  ping_rtt: Duration,
+  ping_payload: Bytes,
 }
 
 pub struct MockDelegate {
@@ -45,13 +55,7 @@ impl Default for MockDelegate {
 impl MockDelegate {
   pub fn new() -> Self {
     Self {
-      inner: Arc::new(Mutex::new(MockDelegateInner {
-        meta: Bytes::new(),
-        msgs: vec![],
-        broadcasts: vec![],
-        state: Bytes::new(),
-        remote_state: Bytes::new(),
-      })),
+      inner: Arc::new(Mutex::new(MockDelegateInner::default())),
       invoked: Arc::new(AtomicBool::new(false)),
       ty: MockDelegateType::None,
       ignore: Name::from_static_unchecked("mock"),
@@ -61,13 +65,7 @@ impl MockDelegate {
 
   pub fn cancel_merge() -> Self {
     Self {
-      inner: Arc::new(Mutex::new(MockDelegateInner {
-        meta: Bytes::new(),
-        msgs: vec![],
-        broadcasts: vec![],
-        state: Bytes::new(),
-        remote_state: Bytes::new(),
-      })),
+      inner: Arc::new(Mutex::new(MockDelegateInner::default())),
       invoked: Arc::new(AtomicBool::new(false)),
       ty: MockDelegateType::CancelMerge,
       ignore: Name::from_static_unchecked("mock"),
@@ -81,16 +79,40 @@ impl MockDelegate {
 
   pub fn cancel_alive(ignore: Name) -> Self {
     Self {
-      inner: Arc::new(Mutex::new(MockDelegateInner {
-        meta: Bytes::new(),
-        msgs: vec![],
-        broadcasts: vec![],
-        state: Bytes::new(),
-        remote_state: Bytes::new(),
-      })),
+      inner: Arc::new(Mutex::new(MockDelegateInner::default())),
       invoked: Arc::new(AtomicBool::new(false)),
       ty: MockDelegateType::CancelAlive,
       ignore,
+      count: Arc::new(AtomicUsize::new(0)),
+    }
+  }
+
+  pub fn notify_conflict() -> Self {
+    Self {
+      inner: Arc::new(Mutex::new(MockDelegateInner::default())),
+      invoked: Arc::new(AtomicBool::new(false)),
+      ty: MockDelegateType::NotifyConflict,
+      ignore: Name::from_static_unchecked("mock"),
+      count: Arc::new(AtomicUsize::new(0)),
+    }
+  }
+
+  pub fn ping() -> Self {
+    Self {
+      inner: Arc::new(Mutex::new(MockDelegateInner::default())),
+      invoked: Arc::new(AtomicBool::new(false)),
+      ty: MockDelegateType::NotifyConflict,
+      ignore: Name::from_static_unchecked("mock"),
+      count: Arc::new(AtomicUsize::new(0)),
+    }
+  }
+
+  pub fn user_data() -> Self {
+    Self {
+      inner: Arc::new(Mutex::new(MockDelegateInner::default())),
+      invoked: Arc::new(AtomicBool::new(false)),
+      ty: MockDelegateType::UserData,
+      ignore: Name::from_static_unchecked("mock"),
       count: Arc::new(AtomicUsize::new(0)),
     }
   }
@@ -122,6 +144,18 @@ impl MockDelegate {
     let mut out = vec![];
     core::mem::swap(&mut out, &mut mu.msgs);
     out
+  }
+
+  pub fn get_contents(&self) -> Option<(Arc<Node>, Duration, Bytes)> {
+    if self.ty == MockDelegateType::Ping {
+      let mut mu = self.inner.lock();
+      let other = mu.ping_other.take()?;
+      let rtt = mu.ping_rtt;
+      let payload = mu.ping_payload.clone();
+      Some((other, rtt, payload))
+    } else {
+      None
+    }
   }
 }
 
@@ -195,9 +229,15 @@ impl Delegate for MockDelegate {
   #[cfg(not(feature = "nightly"))]
   async fn notify_conflict(
     &self,
-    _existing: Arc<Node>,
-    _other: Arc<Node>,
+    existing: Arc<Node>,
+    other: Arc<Node>,
   ) -> Result<(), Self::Error> {
+    if self.ty == MockDelegateType::NotifyConflict {
+      let mut inner = self.inner.lock();
+      inner.conflict_existing = Some(existing);
+      inner.conflict_other = Some(other);
+    }
+
     Ok(())
   }
 
@@ -216,16 +256,25 @@ impl Delegate for MockDelegate {
 
   #[cfg(not(feature = "nightly"))]
   async fn ack_payload(&self) -> Result<Bytes, Self::Error> {
+    if self.ty == MockDelegateType::Ping {
+      return Ok(Bytes::from_static(b"whatever"));
+    }
     Ok(Bytes::new())
   }
 
   #[cfg(not(feature = "nightly"))]
   async fn notify_ping_complete(
     &self,
-    _node: Arc<Node>,
-    _rtt: std::time::Duration,
-    _payload: Bytes,
+    node: Arc<Node>,
+    rtt: std::time::Duration,
+    payload: Bytes,
   ) -> Result<(), Self::Error> {
+    if self.ty == MockDelegateType::Ping {
+      let mut inner = self.inner.lock();
+      inner.ping_other = Some(node);
+      inner.ping_rtt = rtt;
+      inner.ping_payload = payload;
+    }
     Ok(())
   }
 

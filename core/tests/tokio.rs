@@ -15,6 +15,12 @@ mod create;
 #[path = "tokio/join.rs"]
 mod join;
 
+#[path = "tokio/delegate.rs"]
+mod delegate;
+
+#[path = "tokio/leave.rs"]
+mod leave;
+
 #[path = "tokio/probe.rs"]
 mod probe;
 

@@ -243,6 +243,22 @@ where
   tx.send(()).unwrap();
 }
 
+pub async fn test_tcp_ping<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+}
+
+pub async fn test_tcp_push_pull<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+}
+
 pub async fn test_send_msg_piggyback<R>()
 where
   R: Runtime,
@@ -302,7 +318,6 @@ where
   in_.truncate(n);
 
   // get the parts
-  tracing::error!("debug: receive len {} {:?}", in_.len(), in_);
   let mut in_: Bytes = in_.into();
   let h = EncodeHeader::from_bytes(&in_.split_to(ENCODE_HEADER_SIZE)).unwrap();
   assert_eq!(h.meta.ty, MessageType::Compound);
@@ -318,6 +333,14 @@ where
   assert_eq!(alive.incarnation, 10);
   assert_eq!(alive.node, id);
   tx.send(()).unwrap();
+}
+
+pub async fn test_raw_send_udp_crc<R>()
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
 }
 
 pub async fn test_gossip_mismatched_keys<R>()

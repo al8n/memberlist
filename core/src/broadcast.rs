@@ -140,16 +140,13 @@ impl<D: Delegate, T: Transport> Showbiz<T, D> {
       .broadcast
       .get_broadcast_with_prepend(to_send, overhead, limit)
       .await;
-    for (idx, s) in to_send.iter().enumerate() {
-      tracing::error!("debug: idx: {idx} s: {:?}", s.underlying_bytes());
-    }
 
     // Check if the user has anything to broadcast
     if let Some(delegate) = &self.delegate {
       // Determine the bytes used already
       let mut bytes_used = 0;
       for msg in &to_send {
-        bytes_used += msg.len() + overhead;
+        bytes_used += msg.0.len() + overhead;
       }
 
       // Check space remaining for user messages

@@ -1,4 +1,7 @@
-use std::borrow::Borrow;
+use std::{
+  borrow::Borrow,
+  net::{IpAddr, SocketAddr},
+};
 
 use bytes::Bytes;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -290,6 +293,18 @@ impl TryFrom<&Bytes> for Name {
       return Err(InvalidName::TooLarge(s.len()));
     }
     Ok(Self(s.clone()))
+  }
+}
+
+impl From<SocketAddr> for Name {
+  fn from(addr: SocketAddr) -> Self {
+    Self::from_string_unchecked(addr.to_string())
+  }
+}
+
+impl From<IpAddr> for Name {
+  fn from(addr: IpAddr) -> Self {
+    Self::from_string_unchecked(addr.to_string())
   }
 }
 

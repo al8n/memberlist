@@ -226,7 +226,7 @@ where
 {
   #[inline]
   pub async fn new(opts: Options<T>) -> Result<Self, Error<T, VoidDelegate>> {
-    Self::new_in(None, opts).await
+    Self::create(None, opts).await
   }
 }
 
@@ -239,10 +239,38 @@ where
 {
   #[inline]
   pub async fn with_delegate(delegate: D, opts: Options<T>) -> Result<Self, Error<T, D>> {
-    Self::new_in(Some(delegate), opts).await
+    Self::create(Some(delegate), opts).await
   }
 
-  async fn new_in(delegate: Option<D>, mut opts: Options<T>) -> Result<Self, Error<T, D>> {
+  pub(crate) async fn create(delegate: Option<D>, opts: Options<T>) -> Result<Self, Error<T, D>> {
+    let (shutdown_rx, advertise, this) = Self::new_in(delegate, opts).await?;
+    let meta = if let Some(d) = &this.delegate {
+      d.node_meta(META_MAX_SIZE)
+    } else {
+      Bytes::new()
+    };
+
+    if meta.len() > META_MAX_SIZE {
+      panic!("Node meta data provided is longer than the limit");
+    }
+
+    let alive = Alive {
+      incarnation: this.next_incarnation(),
+      meta,
+      node: this.inner.id.clone(),
+      protocol_version: this.inner.opts.protocol_version,
+      delegate_version: this.inner.opts.delegate_version,
+    };
+    this.alive_node(Either::Left(alive), None, true).await;
+    this.schedule(shutdown_rx).await;
+    tracing::debug!(target = "showbiz", local = %this.inner.id, advertise_addr = %advertise, "node is living");
+    Ok(this)
+  }
+
+  pub(crate) async fn new_in(
+    delegate: Option<D>,
+    mut opts: Options<T>,
+  ) -> Result<(Receiver<()>, SocketAddr, Self), Error<T, D>> {
     let (handoff_tx, handoff_rx) = async_channel::bounded(1);
     let (leave_broadcast_tx, leave_broadcast_rx) = async_channel::bounded(1);
 
@@ -397,27 +425,7 @@ where
     #[cfg(feature = "metrics")]
     this.check_broadcast_queue_depth(shutdown_rx.clone());
 
-    let meta = if let Some(d) = &this.delegate {
-      d.node_meta(META_MAX_SIZE)
-    } else {
-      Bytes::new()
-    };
-
-    if meta.len() > META_MAX_SIZE {
-      panic!("Node meta data provided is longer than the limit");
-    }
-
-    let alive = Alive {
-      incarnation: this.next_incarnation(),
-      meta,
-      node: this.inner.id.clone(),
-      protocol_version: this.inner.opts.protocol_version,
-      delegate_version: this.inner.opts.delegate_version,
-    };
-    this.alive_node(Either::Left(alive), None, true).await;
-    this.schedule(shutdown_rx).await;
-    tracing::debug!(target = "showbiz", local = %this.inner.id, advertise_addr = %advertise, "node is living");
-    Ok(this)
+    Ok((shutdown_rx, advertise, this))
   }
 
   /// Leave will broadcast a leave message but will not shutdown the background
@@ -761,7 +769,6 @@ where
     // Now tear down everything else.
     self.inner.hot.shutdown.store(true, Ordering::Relaxed);
     self.inner.shutdown_tx.close();
-    // TODO: self.deschedule().await;
     Ok(())
   }
 }

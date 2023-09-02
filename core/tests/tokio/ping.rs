@@ -1,10 +1,4 @@
-use agnostic::tokio::TokioRuntime;
-use showbiz_core::tests::{
-  test_handle_compound_ping, test_handle_indirect_ping, test_handle_ping,
-  test_handle_ping_wrong_node,
-};
-
-use crate::run;
+use super::*;
 
 #[test]
 fn ping() {
@@ -24,4 +18,9 @@ fn ping_wrong_node() {
 #[test]
 fn indirect_ping() {
   run(test_handle_indirect_ping::<TokioRuntime>());
+}
+
+#[test]
+fn tcp_ping() {
+  run(test_tcp_ping::<TokioRuntime>());
 }

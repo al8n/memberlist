@@ -1,3 +1,6 @@
+// use a sync version mutex here is reasonable, because the lock is only held for a short time.
+#![allow(clippy::await_holding_lock)]
+
 use crossbeam_utils::CachePadded;
 use std::{
   collections::{BTreeSet, HashMap},
@@ -113,7 +116,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     let mut to_send = prepend;
     let mut inner = self.inner.lock();
     if inner.q.is_empty() {
-      return Vec::new();
+      return to_send;
     }
 
     let transmit_limit = retransmit_limit(self.retransmit_mult, self.num_nodes.num_nodes());
@@ -125,7 +128,7 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     let mut transmits = min_tr;
     let mut reinsert = Vec::new();
     while transmits <= max_tr {
-      let free = (limit - bytes_used).saturating_sub(overhead);
+      let free = limit.saturating_sub(bytes_used).saturating_sub(overhead);
       if free == 0 {
         break;
       }
@@ -235,11 +238,6 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     }
 
     // Append to the relevant queue.
-    tracing::info!(
-      "debug: queue broadcast id: {} {:?}",
-      lb.broadcast.id(),
-      lb.broadcast.message().0.as_ref()
-    );
     inner.insert(lb);
   }
 
@@ -252,14 +250,12 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
       std::mem::take(&mut inner.q)
     };
 
-    futures_util::future::join_all(
-      q.into_iter()
-        .map(|l| async move { l.broadcast.finished().await }),
-    )
-    .await;
+    for l in q {
+      l.broadcast.finished().await;
+    }
   }
 
-  /// Retain the maxRetain latest messages, and the rest
+  /// Retain the `max_retain` latest messages, and the rest
   /// will be discarded. This can be used to prevent unbounded queue sizes
   pub async fn prune(&self, max_retain: usize) {
     let mut inner = self.inner.lock();
@@ -291,17 +287,6 @@ impl<B: Broadcast> core::clone::Clone for LimitedBroadcast<B> {
       broadcast: self.broadcast.clone(),
       ..*self
     }
-  }
-}
-
-impl<B: Broadcast> core::fmt::Debug for LimitedBroadcast<B> {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct(std::any::type_name::<Self>())
-      .field("transmits", &self.transmits)
-      .field("msg_len", &self.msg_len)
-      .field("id", &self.id)
-      .field("broadcast", self.broadcast.id())
-      .finish()
   }
 }
 

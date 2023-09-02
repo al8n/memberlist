@@ -130,6 +130,6 @@ fn join_ipv6() {
 }
 
 #[test]
-fn gossip_mismatched_keys() {
-  run(test_gossip_mismatched_keys::<TokioRuntime>());
+fn send_to() {
+  run(test_send_to::<TokioRuntime>());
 }

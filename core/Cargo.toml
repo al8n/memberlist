@@ -18,13 +18,13 @@ metrics = ["dep:metrics"]
 
 # expose all tests fn for users who want to use other runtime
 # see showbiz-wasm for more examples about how to use those tests fn
-test = ["tracing-subscriber"]
+test = ["tracing-subscriber", "pnet"]
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-trust-dns-resolver = { version = "0.23.0-alpha.4", default-features = false, features = ["system-config"] }
+trust-dns-resolver = { version = "0.23", default-features = false, features = ["system-config"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-trust-dns-resolver = { version = "0.23.0-alpha.4", default-features = false }
+trust-dns-resolver = { version = "0.23", default-features = false }
 resolv-conf = { version = "0.7", default-features = false }
 getrandom = { version = "0.2", features = ["js"] }
 once_cell = "1.17"
@@ -61,7 +61,6 @@ either = "1"
 local-ip-address = "0.5"
 itertools = "0.11"
 ipnet = { version = "2.7", features = ["serde"] }
-metrics = { version = "0.21", optional = true }
 paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
 parking_lot = { version = "0.12", features = ["send_guard"] }
 pollster = "0.3"
@@ -73,15 +72,19 @@ serde = { workspace = true }
 humantime-serde = "1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "tracing-log"] }
 trust-dns-proto = { version = "0.23", default-features = false }
 viewit = { workspace = true }
 weezl = { version = "0.1", features = ["async"] }
 wg = "0.3"
 
+# optional
+pnet = { version = "0.34", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "tracing-log"] }
+metrics = { version = "0.21", optional = true }
+
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
-prost = "0.11"
+pnet = "0.34"
 agnostic = { path = "../../agnostic/agnostic", features = ["tokio-net", "async-std-net", "smol-net"] }
 tokio = { version = "1.32", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }

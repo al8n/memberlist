@@ -433,12 +433,12 @@ where
   ) -> Result<(), Error<T, D>> {
     // Check if we can piggy back any messages
     let bytes_avail = self.inner.opts.packet_buffer_size
-      - msg.len()
-      - COMPOUND_HEADER_OVERHEAD
+      - msg.0.len()
+      - ENCODE_HEADER_SIZE // compound msg header
       - self.inner.opts.label.label_overhead();
 
     let mut msgs = self
-      .get_broadcast_with_prepend(vec![msg], COMPOUND_OVERHEAD, bytes_avail)
+      .get_broadcast_with_prepend(vec![msg], ENCODE_HEADER_SIZE, bytes_avail)
       .await?;
 
     // Fast path if nothing to piggypack

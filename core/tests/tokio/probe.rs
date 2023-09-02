@@ -1,7 +1,4 @@
-use agnostic::tokio::TokioRuntime;
-use showbiz_core::tests::test_probe;
-
-use crate::run;
+use super::*;
 
 #[test]
 fn probe() {

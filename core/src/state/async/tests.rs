@@ -27,7 +27,7 @@ where
     .with_bind_port(Some(0));
   let c = if let Some(f) = f { f(c) } else { c };
 
-  Showbiz::new(c).await
+  Showbiz::new_in(None, c).await.map(|(_, _, t)| t)
 }
 
 pub async fn test_probe<R>()
