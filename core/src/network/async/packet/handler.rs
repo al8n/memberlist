@@ -107,7 +107,7 @@ where
 
   async fn handle_user(&self, msg: MessageHandoff) {
     if let Some(d) = self.delegate.as_ref() {
-      if let Err(e) = d.notify_user_msg(msg.buf).await {
+      if let Err(e) = d.notify_message(msg.buf).await {
         tracing::error!(target = "showbiz.packet", err=%e, remote_addr = %msg.from, "failed to handle user message");
       }
     }

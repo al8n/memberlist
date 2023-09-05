@@ -691,7 +691,7 @@ where
     };
 
     if let Some(d) = &self.delegate {
-      if let Err(e) = d.notify_user_msg(user_msg).await {
+      if let Err(e) = d.notify_message(user_msg).await {
         tracing::error!(target = "showbiz.stream", err=%e, remote_node = %addr, "failed to notify user message");
       }
     }

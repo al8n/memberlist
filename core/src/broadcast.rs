@@ -10,8 +10,9 @@ use async_channel::Sender;
 pub trait Broadcast: Send + Sync + 'static {
   type Id: Clone + Eq + core::hash::Hash + core::fmt::Debug + core::fmt::Display;
 
-  /// Returns the name of the broadcast, if any
-  fn id(&self) -> &Self::Id;
+  /// An optional extension of the Broadcast trait that
+  /// gives each message a unique id and that is used to optimize
+  fn id(&self) -> Option<&Self::Id>;
 
   /// Checks if enqueuing the current broadcast
   /// invalidates a previous broadcast
@@ -35,8 +36,11 @@ pub trait Broadcast: Send + Sync + 'static {
   /// Indicates that each message is
   /// intrinsically unique and there is no need to scan the broadcast queue for
   /// duplicates.
+  ///
+  /// You should ensure that `invalidates` always returns false if implementing
+  /// this.
   fn is_unique(&self) -> bool {
-    true
+    false
   }
 }
 
@@ -51,8 +55,8 @@ pub(crate) struct ShowbizBroadcast {
 impl Broadcast for ShowbizBroadcast {
   type Id = NodeId;
 
-  fn id(&self) -> &Self::Id {
-    &self.node
+  fn id(&self) -> Option<&Self::Id> {
+    Some(&self.node)
   }
 
   fn invalidates(&self, other: &Self) -> bool {
@@ -86,7 +90,7 @@ impl Broadcast for ShowbizBroadcast {
   }
 
   fn is_unique(&self) -> bool {
-    true
+    false
   }
 }
 

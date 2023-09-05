@@ -25,8 +25,9 @@ struct Inner<B: Broadcast> {
 impl<B: Broadcast> Inner<B> {
   fn remove(&mut self, item: &LimitedBroadcast<B>) {
     self.q.remove(item);
-    let id = item.broadcast.id();
-    self.m.remove(id);
+    if let Some(id) = item.broadcast.id() {
+      self.m.remove(id);
+    }
 
     if self.q.is_empty() {
       // At idle there's no reason to let the id generator keep going
@@ -36,8 +37,9 @@ impl<B: Broadcast> Inner<B> {
   }
 
   fn insert(&mut self, item: LimitedBroadcast<B>) {
-    let id = item.broadcast.id();
-    self.m.insert(id.clone(), item.clone());
+    if let Some(id) = item.broadcast.id() {
+      self.m.insert(id.clone(), item.clone());
+    }
     self.q.insert(item);
   }
 
@@ -211,12 +213,10 @@ impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
     let unique = lb.broadcast.is_unique();
 
     // Check if this message invalidates another.
-    let id = lb.broadcast.id();
-    if let Some(old) = inner.m.remove(id) {
-      old.broadcast.finished().await;
-      inner.q.remove(&old);
-      if inner.q.is_empty() {
-        inner.id_gen = 0;
+    if let Some(bid) = lb.broadcast.id() {
+      if let Some(old) = inner.m.remove(bid) {
+        old.broadcast.finished().await;
+        inner.remove(&old);
       }
     } else if !unique {
       // Slow path, hopefully nothing hot hits this.
@@ -777,8 +777,8 @@ mod tests {
     }
 
     let dump = q.ordered_view(true).await;
-    assert_eq!(dump[0].broadcast.id().name(), "bar");
-    assert_eq!(dump[1].broadcast.id().name(), "baz");
+    assert_eq!(dump[0].broadcast.id().unwrap().name(), "bar");
+    assert_eq!(dump[1].broadcast.id().unwrap().name(), "baz");
   }
 
   #[tokio::test]

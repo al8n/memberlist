@@ -237,7 +237,7 @@ impl Message {
   }
 
   #[inline]
-  pub(crate) fn freeze(self) -> Bytes {
+  pub fn freeze(self) -> Bytes {
     self.0.freeze()
   }
 
@@ -287,6 +287,12 @@ impl AsRef<[u8]> for Message {
 impl AsMut<[u8]> for Message {
   fn as_mut(&mut self) -> &mut [u8] {
     &mut self.0[Self::PREFIX_SIZE..]
+  }
+}
+
+impl From<Message> for Bytes {
+  fn from(msg: Message) -> Self {
+    msg.0.freeze()
   }
 }
 

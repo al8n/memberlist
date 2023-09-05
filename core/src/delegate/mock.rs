@@ -168,7 +168,7 @@ impl Delegate for MockDelegate {
   }
 
   #[cfg(not(feature = "nightly"))]
-  async fn notify_user_msg(&self, msg: Bytes) -> Result<(), Self::Error> {
+  async fn notify_message(&self, msg: Bytes) -> Result<(), Self::Error> {
     self.inner.lock().msgs.push(msg);
     Ok(())
   }
@@ -279,7 +279,7 @@ impl Delegate for MockDelegate {
   }
 
   #[cfg(feature = "nightly")]
-  fn notify_user_msg<'a>(
+  fn notify_message<'a>(
     &'a self,
     _msg: Bytes,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'a {

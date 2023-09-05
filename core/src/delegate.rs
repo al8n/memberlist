@@ -25,7 +25,7 @@ pub trait Delegate: Send + Sync + 'static {
   /// so would block the entire UDP packet receive loop. Additionally, the byte
   /// slice may be modified after the call returns, so it should be copied if needed
   #[cfg(not(feature = "nightly"))]
-  async fn notify_user_msg(&self, msg: Bytes) -> Result<(), Self::Error>;
+  async fn notify_message(&self, msg: Bytes) -> Result<(), Self::Error>;
 
   /// Called when user data messages can be broadcast.
   /// It can return a list of buffers to send. Each buffer should assume an
@@ -42,14 +42,14 @@ pub trait Delegate: Send + Sync + 'static {
 
   /// Used for a TCP Push/Pull. This is sent to
   /// the remote side in addition to the membership information. Any
-  /// data can be sent here. See MergeRemoteState as well. The `join`
+  /// data can be sent here. See `merge_remote_state` as well. The `join`
   /// boolean indicates this is for a join instead of a push/pull.
   #[cfg(not(feature = "nightly"))]
   async fn local_state(&self, join: bool) -> Result<Bytes, Self::Error>;
 
   /// Invoked after a TCP Push/Pull. This is the
   /// state received from the remote side and is the result of the
-  /// remote side's LocalState call. The 'join'
+  /// remote side's `local_state` call. The 'join'
   /// boolean indicates this is for a join instead of a push/pull.
   #[cfg(not(feature = "nightly"))]
   async fn merge_remote_state(&self, buf: &[u8], join: bool) -> Result<(), Self::Error>;
@@ -99,7 +99,7 @@ pub trait Delegate: Send + Sync + 'static {
   /// so would block the entire UDP packet receive loop. Additionally, the byte
   /// slice may be modified after the call returns, so it should be copied if needed
   #[cfg(feature = "nightly")]
-  fn notify_user_msg<'a>(
+  fn notify_message<'a>(
     &'a self,
     msg: Bytes,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'a;
@@ -119,7 +119,7 @@ pub trait Delegate: Send + Sync + 'static {
 
   /// Used for a TCP Push/Pull. This is sent to
   /// the remote side in addition to the membership information. Any
-  /// data can be sent here. See MergeRemoteState as well. The `join`
+  /// data can be sent here. See `merge_remote_state` as well. The `join`
   /// boolean indicates this is for a join instead of a push/pull.
   #[cfg(feature = "nightly")]
   fn local_state<'a>(
@@ -129,7 +129,7 @@ pub trait Delegate: Send + Sync + 'static {
 
   /// Invoked after a TCP Push/Pull. This is the
   /// state received from the remote side and is the result of the
-  /// remote side's LocalState call. The 'join'
+  /// remote side's `local_state` call. The 'join'
   /// boolean indicates this is for a join instead of a push/pull.
   #[cfg(feature = "nightly")]
   fn merge_remote_state<'a>(
@@ -233,7 +233,7 @@ impl Delegate for VoidDelegate {
   }
 
   #[cfg(not(feature = "nightly"))]
-  async fn notify_user_msg(&self, _msg: Bytes) -> Result<(), Self::Error> {
+  async fn notify_message(&self, _msg: Bytes) -> Result<(), Self::Error> {
     Ok(())
   }
 
@@ -306,7 +306,7 @@ impl Delegate for VoidDelegate {
   }
 
   #[cfg(feature = "nightly")]
-  fn notify_user_msg<'a>(
+  fn notify_message<'a>(
     &'a self,
     _msg: Bytes,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'a {
