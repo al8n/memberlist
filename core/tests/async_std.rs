@@ -13,3 +13,18 @@ mod create;
 /// Join related tests
 #[path = "async_std/join.rs"]
 mod join;
+
+#[path = "async_std/delegate.rs"]
+mod delegate;
+
+#[path = "async_std/leave.rs"]
+mod leave;
+
+#[path = "async_std/probe.rs"]
+mod probe;
+
+#[path = "async_std/ping.rs"]
+mod ping;
+
+#[path = "async_std/net.rs"]
+mod net;

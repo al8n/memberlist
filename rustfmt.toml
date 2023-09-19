@@ -7,6 +7,7 @@ reorder_imports = true
 reorder_modules = true
 remove_nested_parens = true
 merge_derives = true
+imports_granularity="Crate"
 use_try_shorthand = true
 use_field_init_shorthand = true
 force_explicit_abi = true
