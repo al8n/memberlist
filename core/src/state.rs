@@ -30,10 +30,10 @@ mod sealed_metrics {
   pub(super) fn incr_degraded_probe<'a>(
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    DEGRADED_PROBE.call_once(|| {
-      metrics::register_counter!("showbiz.degraded.probe");
-    });
-    metrics::increment_counter!("showbiz.degraded.probe", labels);
+    // DEGRADED_PROBE.call_once(|| {
+    //   metrics::register_counter!("showbiz.degraded.probe");
+    // });
+    metrics::counter!("showbiz.degraded.probe", labels).increment(1);
   }
 
   static DEGRADED_TIMEOUT: Once = Once::new();
@@ -42,10 +42,10 @@ mod sealed_metrics {
   pub(super) fn incr_degraded_timeout<'a>(
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    DEGRADED_TIMEOUT.call_once(|| {
-      metrics::register_counter!("showbiz.degraded.timeout");
-    });
-    metrics::increment_counter!("showbiz.degraded.timeout", labels);
+    // DEGRADED_TIMEOUT.call_once(|| {
+    //   metrics::register_counter!("showbiz.degraded.timeout");
+    // });
+    metrics::counter!("showbiz.degraded.timeout", labels).increment(1);
   }
 
   static MSG_ALIVE: Once = Once::new();
@@ -54,10 +54,10 @@ mod sealed_metrics {
   pub(super) fn incr_msg_alive<'a>(
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    MSG_ALIVE.call_once(|| {
-      metrics::register_counter!("showbiz.msg.alive");
-    });
-    metrics::increment_counter!("showbiz.msg.alive", labels);
+    // MSG_ALIVE.call_once(|| {
+    //   metrics::register_counter!("showbiz.msg.alive");
+    // });
+    metrics::counter!("showbiz.msg.alive", labels).increment(1);
   }
 
   static MSG_SUSPECT: Once = Once::new();
@@ -66,10 +66,10 @@ mod sealed_metrics {
   pub(super) fn incr_msg_suspect<'a>(
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    MSG_SUSPECT.call_once(|| {
-      metrics::register_counter!("showbiz.msg.suspect");
-    });
-    metrics::increment_counter!("showbiz.msg.suspect", labels);
+    // MSG_SUSPECT.call_once(|| {
+    //   metrics::register_counter!("showbiz.msg.suspect");
+    // });
+    metrics::counter!("showbiz.msg.suspect", labels).increment(1);
   }
 
   static MSG_DEAD: Once = Once::new();
@@ -78,10 +78,10 @@ mod sealed_metrics {
   pub(super) fn incr_msg_dead<'a>(
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    MSG_DEAD.call_once(|| {
-      metrics::register_counter!("showbiz.msg.dead");
-    });
-    metrics::increment_counter!("showbiz.msg.dead", labels);
+    // MSG_DEAD.call_once(|| {
+    //   metrics::register_counter!("showbiz.msg.dead");
+    // });
+    metrics::counter!("showbiz.msg.dead", labels).increment(1);
   }
 
   static PUSH_PULL_NODE_HISTOGRAM: Once = Once::new();
@@ -91,10 +91,10 @@ mod sealed_metrics {
     value: f64,
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    PUSH_PULL_NODE_HISTOGRAM.call_once(|| {
-      metrics::register_histogram!("showbiz.push_pull_node");
-    });
-    metrics::histogram!("showbiz.push_pull_node", value, labels);
+    // PUSH_PULL_NODE_HISTOGRAM.call_once(|| {
+    //   metrics::register_histogram!("showbiz.push_pull_node");
+    // });
+    metrics::histogram!("showbiz.push_pull_node", labels).record(value);
   }
 
   static GOSSIP_HISTOGRAM: Once = Once::new();
@@ -104,10 +104,10 @@ mod sealed_metrics {
     value: f64,
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    GOSSIP_HISTOGRAM.call_once(|| {
-      metrics::register_histogram!("showbiz.gossip");
-    });
-    metrics::histogram!("showbiz.gossip", value, labels);
+    // GOSSIP_HISTOGRAM.call_once(|| {
+    //   metrics::register_histogram!("showbiz.gossip");
+    // });
+    metrics::histogram!("showbiz.gossip", labels).record(value);
   }
 
   static PROBE_HISTOGRAM: Once = Once::new();
@@ -117,10 +117,10 @@ mod sealed_metrics {
     value: f64,
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    PROBE_HISTOGRAM.call_once(|| {
-      metrics::register_histogram!("showbiz.probe_node");
-    });
-    metrics::histogram!("showbiz.probe_node", value, labels);
+    // PROBE_HISTOGRAM.call_once(|| {
+    //   metrics::register_histogram!("showbiz.probe_node");
+    // });
+    metrics::histogram!("showbiz.probe_node", labels).record(value);
   }
 }
 

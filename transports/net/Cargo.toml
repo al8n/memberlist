@@ -1,0 +1,10 @@
+[package]
+name = "showbiz-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+metadata.workspace = true
+
+[dependencies]

@@ -1,7 +1,6 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, time::Duration, sync::atomic::Ordering};
 
 use agnostic::Runtime;
-use atomic::Ordering;
 use bytes::Bytes;
 use either::Either;
 use futures_util::{Future, Stream};

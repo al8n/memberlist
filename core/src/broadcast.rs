@@ -1,12 +1,15 @@
 use crate::{
-  delegate::Delegate, error::Error, network::USER_MSG_OVERHEAD, showbiz::Showbiz,
-  transport::Transport, types::Message, types::NodeId,
+  delegate::Delegate,
+  error::Error,
+  network::USER_MSG_OVERHEAD,
+  showbiz::Showbiz,
+  transport::Transport,
+  types::{Message, NodeId},
 };
 use async_channel::Sender;
 
 /// Something that can be broadcasted via gossip to
 /// the memberlist cluster.
-#[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 pub trait Broadcast: Send + Sync + 'static {
   type Id: Clone + Eq + core::hash::Hash + core::fmt::Debug + core::fmt::Display;
 
@@ -24,7 +27,7 @@ pub trait Broadcast: Send + Sync + 'static {
   /// Invoked when the message will no longer
   /// be broadcast, either due to invalidation or to the
   /// transmit limit being reached
-  #[cfg(not(feature = "nightly"))]
+
   async fn finished(&self);
 
   /// Invoked when the message will no longer
@@ -51,7 +54,6 @@ pub(crate) struct ShowbizBroadcast {
   notify: Option<async_channel::Sender<()>>,
 }
 
-#[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 impl Broadcast for ShowbizBroadcast {
   type Id = NodeId;
 
@@ -67,7 +69,6 @@ impl Broadcast for ShowbizBroadcast {
     &self.msg
   }
 
-  #[cfg(not(feature = "nightly"))]
   async fn finished(&self) {
     if let Some(tx) = &self.notify {
       if let Err(e) = tx.send(()).await {

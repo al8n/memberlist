@@ -5,9 +5,8 @@ use std::{
   time::{Duration, Instant},
 };
 
-use crate::{
-  dns::DnsError,
-  types::{DecodeError, DecodeU32Error, EncodeError, InvalidLabel, Label, MessageType, Packet},
+use crate::types::{
+  DecodeError, DecodeU32Error, EncodeError, InvalidLabel, Label, MessageType, Packet,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -132,8 +131,6 @@ pub enum TransportError<T: Transport> {
   Decode(#[from] DecodeError),
   #[error("security error {0}")]
   Security(#[from] crate::security::SecurityError),
-  #[error("dns error: {0}")]
-  Dns(#[from] DnsError),
   #[error("remote node state(size {0}) is larger than limit (20 MB)")]
   RemoteStateTooLarge(usize),
   #[error("other: {0}")]
@@ -175,7 +172,11 @@ mod r#async {
 
   use super::*;
   use bytes::Buf;
-  use futures_util::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+  use futures_util::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    Future,
+  };
+  use nodecraft::{resolver::AddressResolver, Id};
 
   pub struct ReliableConnection<T: Transport>(BufReader<T::Connection>, SocketAddr);
 
@@ -553,7 +554,6 @@ mod r#async {
   }
 
   /// Compressor is used to compress and decompress data from a transport connection.
-  #[async_trait::async_trait]
   pub trait Compressor {
     /// The error type returned by the compressor.
     type Error: std::error::Error;
@@ -596,12 +596,9 @@ mod r#async {
     }
   }
 
-  #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
   pub trait PacketConnection: ConnectionTimeout + Send + Sync + 'static {
-    #[cfg(not(feature = "nightly"))]
     async fn send_to(&self, addr: SocketAddr, buf: &[u8]) -> std::io::Result<usize>;
 
-    #[cfg(not(feature = "nightly"))]
     async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)>;
 
     #[cfg(feature = "nightly")]
@@ -705,9 +702,10 @@ mod r#async {
   /// Transport is used to abstract over communicating with other peers. The packet
   /// interface is assumed to be best-effort and the stream interface is assumed to
   /// be reliable.
-  #[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
-  pub trait Transport: Sized + Unpin + Send + Sync + 'static {
+  pub trait Transport: Sized + Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
+    type Id: Id;
+    type Resolver: AddressResolver;
     type Checksumer: Checksumer + Send + Sync + 'static;
     type Connection: ConnectionTimeout + futures_util::io::AsyncRead + futures_util::io::AsyncWrite;
     type UnreliableConnection: PacketConnection;
@@ -715,107 +713,65 @@ mod r#async {
     type Runtime: agnostic::Runtime;
 
     /// Creates a new transport instance with the given options
-    #[cfg(feature = "nightly")]
-    fn new<'a>(
+    fn new(
       label: Option<Label>,
+      resolver: Self::Resolver,
       opts: Self::Options,
       runtime: Self::Runtime,
-    ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'a
-    where
-      Self: Sized;
-
-    /// Creates a new transport instance with the given options
-    #[cfg(not(feature = "nightly"))]
-    async fn new(label: Option<Label>, opts: Self::Options) -> Result<Self, TransportError<Self>>
+    ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send
     where
       Self: Sized;
 
     /// Creates a new transport instance with the given options and metrics labels
-    #[cfg(all(feature = "metrics", feature = "nightly"))]
+    #[cfg(feature = "metrics")]
     fn with_metric_labels(
       label: Option<Label>,
+      resolver: Self::Resolver,
       opts: Self::Options,
       metric_labels: std::sync::Arc<Vec<metrics::Label>>,
-    ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
+    ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send
     where
       Self: Sized;
 
-    /// Creates a new transport instance with the given options and metrics labels
-    #[cfg(all(feature = "metrics", not(feature = "nightly")))]
-    async fn with_metric_labels(
-      label: Option<Label>,
-      opts: Self::Options,
-      metric_labels: std::sync::Arc<Vec<metrics::Label>>,
-    ) -> Result<Self, TransportError<Self>>
-    where
-      Self: Sized;
+    // /// Given the user's configured values (which
+    // /// might be empty) and returns the desired IP and port to advertise to
+    // /// the rest of the cluster.
+    // fn final_advertise_addr(
+    //   &self,
+    //   addr: Option<IpAddr>,
+    //   port: u16,
+    // ) -> Result<SocketAddr, TransportError<Self>>;
 
-    /// Given the user's configured values (which
-    /// might be empty) and returns the desired IP and port to advertise to
-    /// the rest of the cluster.
-    fn final_advertise_addr(
+    // /// Returns the bind port that was automatically given by the
+    // /// kernel, if a bind port of 0 was given.
+    // fn auto_bind_port(&self) -> u16;
+
+    /// A packet-oriented interface that fires off the given
+    /// payload to the given address in a connectionless fashion. This should
+    /// return a time stamp that's as close as possible to when the packet
+    /// was transmitted to help make accurate RTT measurements during probes.
+    ///
+    /// This is similar to net.PacketConn, though we didn't want to expose
+    /// that full set of required methods to keep assumptions about the
+    /// underlying plumbing to a minimum. We also treat the address here as a
+    /// string, similar to Dial, so it's network neutral, so this usually is
+    /// in the form of "host:port".
+    fn write_to(
       &self,
-      addr: Option<IpAddr>,
-      port: u16,
-    ) -> Result<SocketAddr, TransportError<Self>>;
-
-    /// Returns the bind port that was automatically given by the
-    /// kernel, if a bind port of 0 was given.
-    fn auto_bind_port(&self) -> u16;
-
-    /// A packet-oriented interface that fires off the given
-    /// payload to the given address in a connectionless fashion. This should
-    /// return a time stamp that's as close as possible to when the packet
-    /// was transmitted to help make accurate RTT measurements during probes.
-    ///
-    /// This is similar to net.PacketConn, though we didn't want to expose
-    /// that full set of required methods to keep assumptions about the
-    /// underlying plumbing to a minimum. We also treat the address here as a
-    /// string, similar to Dial, so it's network neutral, so this usually is
-    /// in the form of "host:port".
-    #[cfg(feature = "nightly")]
-    fn write_to<'a>(
-      &'a self,
-      b: &'a [u8],
+      b: &[u8],
       addr: SocketAddr,
-    ) -> impl Future<Output = Result<Instant, TransportError<Self>>> + Send + 'a;
-
-    /// A packet-oriented interface that fires off the given
-    /// payload to the given address in a connectionless fashion. This should
-    /// return a time stamp that's as close as possible to when the packet
-    /// was transmitted to help make accurate RTT measurements during probes.
-    ///
-    /// This is similar to net.PacketConn, though we didn't want to expose
-    /// that full set of required methods to keep assumptions about the
-    /// underlying plumbing to a minimum. We also treat the address here as a
-    /// string, similar to Dial, so it's network neutral, so this usually is
-    /// in the form of "host:port".
-    #[cfg(not(feature = "nightly"))]
-    async fn write_to(&self, b: &[u8], addr: SocketAddr) -> Result<Instant, TransportError<Self>>;
+    ) -> impl Future<Output = Result<Instant, TransportError<Self>>> + Send;
 
     /// Used to create a connection that allows us to perform
     /// two-way communication with a peer. This is generally more expensive
     /// than packet connections so is used for more infrequent operations
     /// such as anti-entropy or fallback probes if the packet-oriented probe
     /// failed.
-    #[cfg(feature = "nightly")]
     fn dial_timeout(
       &self,
       addr: SocketAddr,
       timeout: Duration,
-    ) -> impl Future<Output = Result<ReliableConnection<Self>, TransportError<Self>>> + Send + '_;
-
-    /// Used to create a connection that allows us to perform
-    /// two-way communication with a peer. This is generally more expensive
-    /// than packet connections so is used for more infrequent operations
-    /// such as anti-entropy or fallback probes if the packet-oriented probe
-    /// failed.
-    #[cfg(not(feature = "nightly"))]
-    async fn dial_timeout(
-      &self,
-      addr: SocketAddr,
-      timeout: Duration,
-    ) -> Result<ReliableConnection<Self>, TransportError<Self>>;
+    ) -> impl Future<Output = Result<ReliableConnection<Self>, TransportError<Self>>> + Send;
 
     fn packet(&self) -> PacketSubscriber;
 
@@ -825,12 +781,7 @@ mod r#async {
     fn stream(&self) -> ConnectionSubscriber<Self>;
 
     /// Shutdown the transport
-    #[cfg(feature = "nightly")]
-    fn shutdown(&self) -> impl Future<Output = Result<(), TransportError<Self>>> + Send + '_;
-
-    /// Shutdown the transport
-    #[cfg(not(feature = "nightly"))]
-    async fn shutdown(&self) -> Result<(), TransportError<Self>>;
+    fn shutdown(&self) -> impl Future<Output = Result<(), TransportError<Self>>> + Send;
 
     /// Blocking shutdown the transport
     fn block_shutdown(&self) -> Result<(), TransportError<Self>>;

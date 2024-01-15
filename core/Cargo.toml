@@ -38,10 +38,9 @@ hostname = "0.3"
 [dependencies]
 # async common
 agnostic = { workspace = true, features = ["net"] }
-async-channel = { version = "1.8" }
-async-lock = { version = "2.7" }
+async-channel = { version = "2" }
+async-lock = { version = "3" }
 async-recursion = { version = "1" }
-async-trait = { version = "0.1" }
 futures-channel = { version = "0.3" }
 futures-util = { version = "0.3", features = ["io"] }
 
@@ -59,8 +58,9 @@ crossbeam-skiplist = "0.1"
 crossbeam-queue = "0.3"
 either = "1"
 local-ip-address = "0.5"
-itertools = "0.11"
+itertools = "0.12"
 ipnet = { version = "2.7", features = ["serde"] }
+nodecraft = { workspace = true }
 paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
 parking_lot = { version = "0.12", features = ["send_guard"] }
 pollster = "0.3"
@@ -80,11 +80,11 @@ wg = "0.3"
 # optional
 pnet = { version = "0.34", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "tracing-log"] }
-metrics = { version = "0.21", optional = true }
+metrics = { workspace = true, optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 pnet = "0.34"
-agnostic = { path = "../../agnostic/agnostic", features = ["tokio-net", "async-std-net", "smol-net"] }
+agnostic = { path = "../../agnostic/agnostic", features = ["net"] }
 tokio = { version = "1.32", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }

@@ -18,7 +18,6 @@ use super::{
   awareness::Awareness,
   broadcast::ShowbizBroadcast,
   delegate::Delegate,
-  dns::Dns,
   error::Error,
   network::META_MAX_SIZE,
   queue::DefaultNodeCalculator,

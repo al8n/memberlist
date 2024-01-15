@@ -2,7 +2,6 @@ use std::{future::Future, net::ToSocketAddrs, sync::atomic::Ordering, time::Dura
 
 use crate::{
   delegate::VoidDelegate,
-  dns::DnsError,
   transport::TransportError,
   types::{Address, ArchivedPushNodeState, Dead, Domain},
   util::read_resolv_conf,
@@ -899,11 +898,11 @@ where
           },
           _ = <T::Runtime as Runtime>::sleep(queue_check_interval).fuse() => {
             let numq = this.inner.broadcast.num_queued();
-            QUEUE_BROADCAST.call_once(|| {
-              metrics::register_gauge!("showbiz.queue.broadcasts");
-            });
+            // QUEUE_BROADCAST.call_once(|| {
+            //   metrics::register_gauge!("showbiz.queue.broadcasts");
+            // });
 
-            metrics::gauge!("showbiz.queue.broadcasts", numq as f64);
+            metrics::gauge!("showbiz.queue.broadcasts").set(numq as f64);
           }
         }
       }

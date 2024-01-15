@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use rkyv::de::deserializers::SharedDeserializeMapError;
 
-use crate::{delegate::Delegate, dns::DnsError, transport::Transport, types::NodeId};
+use crate::{delegate::Delegate, transport::Transport, types::NodeId};
 
 pub use crate::{
   options::ForbiddenIp,
@@ -92,10 +92,10 @@ impl<D: Delegate, T: Transport> Error<T, D> {
     Self::Other(e)
   }
 
-  #[inline]
-  pub(crate) fn dns_resolve(e: trust_dns_resolver::error::ResolveError) -> Self {
-    Self::Transport(TransportError::Dns(DnsError::Resolve(e)))
-  }
+  // #[inline]
+  // pub(crate) fn dns_resolve(e: trust_dns_resolver::error::ResolveError) -> Self {
+  //   Self::Transport(TransportError::Dns(DnsError::Resolve(e)))
+  // }
 
   #[inline]
   pub(crate) fn failed_remote(&self) -> bool {

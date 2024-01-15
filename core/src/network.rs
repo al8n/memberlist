@@ -35,10 +35,10 @@ pub(crate) mod sealed_metrics {
   pub(super) fn incr_tcp_accept_counter<'a>(
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    TCP_ACCEPT_COUNTER.call_once(|| {
-      metrics::register_counter!("showbiz.tcp.accept");
-    });
-    metrics::increment_counter!("showbiz.tcp.accept", labels);
+    // TCP_ACCEPT_COUNTER.call_once(|| {
+    //   metrics::register_counter!("showbiz.tcp.accept");
+    // });
+    metrics::counter!("showbiz.tcp.accept", labels).increment(1);
   }
 
   static TCP_SENT_COUNTER: Once = Once::new();
@@ -48,10 +48,10 @@ pub(crate) mod sealed_metrics {
     val: u64,
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    TCP_SENT_COUNTER.call_once(|| {
-      metrics::register_counter!("showbiz.tcp.sent");
-    });
-    metrics::counter!("showbiz.tcp.sent", val, labels);
+    // TCP_SENT_COUNTER.call_once(|| {
+    //   metrics::register_counter!("showbiz.tcp.sent");
+    // });
+    metrics::counter!("showbiz.tcp.sent", labels).increment(val);
   }
 
   static TCP_CONNECT_COUNTER: Once = Once::new();
@@ -60,10 +60,10 @@ pub(crate) mod sealed_metrics {
   pub(super) fn incr_tcp_connect_counter<'a>(
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    TCP_CONNECT_COUNTER.call_once(|| {
-      metrics::register_counter!("showbiz.tcp.connect");
-    });
-    metrics::increment_counter!("showbiz.tcp.connect", labels);
+    // TCP_CONNECT_COUNTER.call_once(|| {
+    //   metrics::register_counter!("showbiz.tcp.connect");
+    // });
+    metrics::counter!("showbiz.tcp.connect", labels).increment(1);
   }
 
   static UDP_SENT_COUNTER: Once = Once::new();
@@ -72,10 +72,10 @@ pub(crate) mod sealed_metrics {
     val: u64,
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    UDP_SENT_COUNTER.call_once(|| {
-      metrics::register_counter!("showbiz.udp.sent");
-    });
-    metrics::counter!("showbiz.udp.sent", val, labels);
+    // UDP_SENT_COUNTER.call_once(|| {
+    //   metrics::register_counter!("showbiz.udp.sent");
+    // });
+    metrics::counter!("showbiz.udp.sent", labels).increment(val);
   }
 
   static LOCAL_SIZE_GAUGE: Once = Once::new();
@@ -84,10 +84,10 @@ pub(crate) mod sealed_metrics {
     val: f64,
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    LOCAL_SIZE_GAUGE.call_once(|| {
-      metrics::register_gauge!("showbiz.local.size");
-    });
-    metrics::gauge!("showbiz.local.size", val, labels);
+    // LOCAL_SIZE_GAUGE.call_once(|| {
+    //   metrics::register_gauge!("showbiz.local.size");
+    // });
+    metrics::gauge!("showbiz.local.size", labels).increment(val);
   }
 
   static REMOTE_SIZE_HISTOGRAM: Once = Once::new();
@@ -96,10 +96,10 @@ pub(crate) mod sealed_metrics {
     val: f64,
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    REMOTE_SIZE_HISTOGRAM.call_once(|| {
-      metrics::register_histogram!("showbiz.remote.size");
-    });
-    metrics::histogram!("showbiz.remote.size", val, labels);
+    // REMOTE_SIZE_HISTOGRAM.call_once(|| {
+    //   metrics::register_histogram!("showbiz.remote.size");
+    // });
+    metrics::histogram!("showbiz.remote.size", labels).record(val);
   }
 
   static NODE_INSTANCES_GAUGE: Once = Once::new();
@@ -108,10 +108,10 @@ pub(crate) mod sealed_metrics {
     val: f64,
     labels: impl Iterator<Item = &'a metrics::Label> + metrics::IntoLabels,
   ) {
-    NODE_INSTANCES_GAUGE.call_once(|| {
-      metrics::register_gauge!("showbiz.node.instances");
-    });
-    metrics::gauge!("showbiz.node.instances", val, labels);
+    // NODE_INSTANCES_GAUGE.call_once(|| {
+    //   metrics::register_gauge!("showbiz.node.instances");
+    // });
+    metrics::gauge!("showbiz.node.instances", labels).set(val);
   }
 }
 

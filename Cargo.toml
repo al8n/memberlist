@@ -1,7 +1,8 @@
 [workspace]
 members = [
   "core",
-  "showbiz", 
+  "showbiz",
+  "transports/net",
   # "js",
   # "nodejs",
   # "py",
@@ -19,17 +20,20 @@ license = "Apache-2.0/MIT"
 repository = "https://github.com/al8n/showbiz"
 homepage = "https://github.com/al8n/showbiz"
 
-[workspace.package.metadata.docs.rs]
+[workspace.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [workspace.dependencies]
 agnostic = { path = "../agnostic/agnostic" }
 bytes = "1.4"
+metrics = "0.22"
+nodecraft = { version = "0.2", features = ["transformable", "async", "resolver"] }
 viewit = "0.1.5"
 scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 thiserror = "1"
 tracing = "0.1"
 
-showbiz-core = { path = "core", version = "0.0.0", default-features = false }
+showbiz-core = { path = "core", default-features = false }
+showbiz-net = { path = "transports/net", default-features = false }

@@ -17,7 +17,7 @@ use agnostic::io::ReadBuf;
 use futures_util::FutureExt;
 
 use crate::{
-  async_trait, futures_util,
+  futures_util,
   transport::{
     stream::{
       connection_stream, packet_stream, ConnectionProducer, ConnectionSubscriber, PacketProducer,
@@ -118,34 +118,13 @@ impl<R: Runtime> Udp<R> {
   }
 }
 
-#[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 impl<R: Runtime> PacketConnection for Udp<R> {
-  #[cfg(not(feature = "nightly"))]
   async fn send_to(&self, addr: SocketAddr, buffer: &[u8]) -> io::Result<usize> {
     self.conn.send_to(buffer, addr).await
   }
 
-  #[cfg(not(feature = "nightly"))]
   async fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
     self.conn.recv_from(buffer).await
-  }
-
-  #[cfg(feature = "nightly")]
-  fn send_to<'a>(
-    &'a self,
-    addr: SocketAddr,
-    buf: &'a [u8],
-  ) -> impl futures_util::Future<Output = Result<usize, std::io::Error>> + Send + 'a {
-    self.conn.send_to(buf, addr)
-  }
-
-  #[cfg(feature = "nightly")]
-  fn recv_from<'a>(
-    &'a self,
-    buf: &'a mut [u8],
-  ) -> impl futures_util::Future<Output = Result<(usize, SocketAddr), std::io::Error>> + Send + 'a
-  {
-    self.conn.recv_from(buf)
   }
 
   fn poll_recv_from(
@@ -411,7 +390,6 @@ impl<R: Runtime> NetTransport<R> {
   }
 }
 
-#[cfg_attr(not(feature = "nightly"), async_trait::async_trait)]
 impl<R: Runtime> Transport for NetTransport<R> {
   type Error = NetTransportError;
 
@@ -423,28 +401,8 @@ impl<R: Runtime> Transport for NetTransport<R> {
 
   type Options = Arc<NetTransportOptions>;
 
-  type Runtime = R;
+  type Runtime = R; 
 
-  #[cfg(feature = "nightly")]
-  fn new<'a>(
-    label: Option<Label>,
-    opts: Self::Options,
-  ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'a
-  where
-    Self: Sized,
-  {
-    #[cfg(feature = "metrics")]
-    {
-      Self::new_in(label, opts, None)
-    }
-
-    #[cfg(not(feature = "metrics"))]
-    {
-      Self::new_in(label, opts)
-    }
-  }
-
-  #[cfg(not(feature = "nightly"))]
   async fn new(label: Option<Label>, opts: Self::Options) -> Result<Self, TransportError<Self>>
   where
     Self: Sized,
@@ -460,19 +418,7 @@ impl<R: Runtime> Transport for NetTransport<R> {
     }
   }
 
-  #[cfg(all(feature = "metrics", feature = "nightly"))]
-  fn with_metric_labels(
-    label: Option<Label>,
-    opts: Self::Options,
-    metric_labels: std::sync::Arc<Vec<crate::metrics::Label>>,
-  ) -> impl Future<Output = Result<Self, TransportError<Self>>> + Send + 'static
-  where
-    Self: Sized,
-  {
-    Self::new_in(label, opts, Some(metric_labels))
-  }
-
-  #[cfg(all(feature = "metrics", not(feature = "nightly")))]
+  #[cfg(feature = "metrics")]
   async fn with_metric_labels(
     label: Option<Label>,
     opts: Self::Options,
@@ -509,20 +455,6 @@ impl<R: Runtime> Transport for NetTransport<R> {
     }
   }
 
-  #[cfg(feature = "nightly")]
-  fn write_to<'a>(
-    &'a self,
-    b: &'a [u8],
-    addr: SocketAddr,
-  ) -> impl Future<Output = Result<Instant, TransportError<Self>>> + Send + 'a {
-    async move {
-      UnreliableConnection::send_to(&self.udp_listener, addr, b)
-        .await
-        .map(|_| Instant::now())
-    }
-  }
-
-  #[cfg(not(feature = "nightly"))]
   async fn write_to(&self, b: &[u8], addr: SocketAddr) -> Result<Instant, TransportError<Self>> {
     if let Some(label) = &self.label {
       // TODO: is there a better way to avoid allocating and copying?
@@ -540,33 +472,6 @@ impl<R: Runtime> Transport for NetTransport<R> {
       .map(|_| Instant::now())
   }
 
-  #[cfg(feature = "nightly")]
-  fn dial_timeout(
-    &self,
-    addr: SocketAddr,
-    timeout: Duration,
-  ) -> impl Future<Output = Result<ReliableConnection<Self>, TransportError<Self>>> + '_ {
-    async move {
-      match <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect_timeout(addr, timeout)
-        .await
-      {
-        Ok(conn) => Ok(ReliableConnection::new(
-          Tcp {
-            conn,
-            timeout: None,
-          },
-          addr,
-        )),
-        Err(_) => Err(TransportError::Connection(ConnectionError {
-          kind: ConnectionKind::Reliable,
-          error_kind: ConnectionErrorKind::Dial,
-          error: Error::new(ErrorKind::TimedOut, "timeout"),
-        })),
-      }
-    }
-  }
-
-  #[cfg(not(feature = "nightly"))]
   async fn dial_timeout(
     &self,
     addr: SocketAddr,
@@ -601,20 +506,6 @@ impl<R: Runtime> Transport for NetTransport<R> {
     self.stream_rx.clone()
   }
 
-  #[cfg(feature = "nightly")]
-  fn shutdown(&self) -> impl Future<Output = Result<(), TransportError<Self>>> + Send + '_ {
-    async move {
-      // This will avoid log spam about errors when we shut down.
-      self.shutdown.store(true, Ordering::SeqCst);
-      self.shutdown_tx.store(None);
-
-      // Block until all the listener threads have died.
-      self.wg.wait().await;
-      Ok(())
-    }
-  }
-
-  #[cfg(not(feature = "nightly"))]
   async fn shutdown(&self) -> Result<(), TransportError<Self>> {
     // This will avoid log spam about errors when we shut down.
     self.shutdown.store(true, Ordering::SeqCst);
@@ -815,10 +706,10 @@ where
                     labels: impl Iterator<Item = &'a metrics::Label>
                       + metrics::IntoLabels,
                   ) {
-                    UDP_RECEIVED.call_once(|| {
-                      metrics::register_counter!("showbiz.udp.received");
-                    });
-                    metrics::counter!("showbiz.udp.received", val, labels);
+                    // UDP_RECEIVED.call_once(|| {
+                    //   metrics::register_counter!("showbiz.udp.received");
+                    // });
+                    metrics::counter!("showbiz.udp.received", labels).increment(val);
                   }
 
                   incr_udp_received(n as u64, self.metric_labels.iter());

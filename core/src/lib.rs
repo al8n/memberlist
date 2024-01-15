@@ -13,7 +13,6 @@ mod network;
 pub use network::META_MAX_SIZE;
 mod options;
 pub use options::{DelegateVersion, Options, ProtocolVersion};
-mod dns;
 pub mod queue;
 pub mod security;
 mod showbiz;
@@ -36,7 +35,6 @@ mod version;
 
 pub use agnostic;
 
-pub use async_trait;
 
 pub use futures_util;
 

@@ -7,11 +7,11 @@ edition = "2021"
 default = ["metrics"]
 metrics = ["showbiz-core/metrics"]
 
-tokio = ["agnostic/tokio-net"]
+tokio = []
 
-async-std = ["agnostic/async-std-net"]
+async-std = []
 
-smol = ["agnostic/smol-net"]
+smol = []
 
 [dependencies]
 agnostic = { workspace = true }

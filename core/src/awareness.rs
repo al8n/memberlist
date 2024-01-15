@@ -60,15 +60,14 @@ impl Awareness {
       static HEALTH_GAUGE: std::sync::Once = std::sync::Once::new();
 
       if _initial != _fnl {
-        HEALTH_GAUGE.call_once(|| {
-          metrics::register_gauge!("showbiz.health.score", "node" => self.id.to_string());
-          metrics::describe_gauge!("showbiz.health.score", "the health score of the local node");
-        });
+        // HEALTH_GAUGE.call_once(|| {
+        //   metrics::register_gauge!("showbiz.health.score", "node" => self.id.to_string());
+        //   metrics::describe_gauge!("showbiz.health.score", "the health score of the local node");
+        // });
         metrics::gauge!(
           "showbiz.health.score",
-          _fnl as f64,
           self.metric_labels.iter()
-        );
+        ).set(_fnl as f64);
       }
     }
   }
