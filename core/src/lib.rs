@@ -21,9 +21,7 @@ mod state;
 mod suspicion;
 pub mod transport;
 mod types;
-pub use types::{
-  Address, CompressionAlgo, Domain, Label, Message, Name, Node, NodeId, NodeState, Packet,
-};
+pub use types::{CompressionAlgo, Label, Message, Packet, Server, ServerState};
 
 pub mod util;
 
@@ -35,8 +33,7 @@ mod version;
 
 pub use agnostic;
 
-
-pub use futures_util;
+pub use futures;
 
 #[cfg(feature = "metrics")]
 #[doc(hidden)]
@@ -59,10 +56,7 @@ pub use humantime_serde;
 /// [showbiz-wasm]: https://github.com/al8n/showbiz/blob/main/showbiz-wasm/src/lib.rs#L20
 #[cfg(feature = "test")]
 pub mod tests {
-  pub use super::network::*;
-  pub use super::showbiz::tests::*;
-  pub use super::state::*;
-  pub use super::transport::tests::*;
+  pub use super::{network::*, showbiz::tests::*, state::*, transport::tests::*};
 
   pub fn initialize_tests_tracing() {
     use std::sync::Once;

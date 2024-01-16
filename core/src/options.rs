@@ -1,7 +1,6 @@
 use std::{
   collections::HashSet,
   net::{IpAddr, Ipv4Addr},
-  path::PathBuf,
   str::FromStr,
   sync::Arc,
   time::Duration,
@@ -11,8 +10,7 @@ use crate::security::SecretKeyring;
 
 use super::{
   security::{EncryptionAlgo, SecretKey},
-  transport::{Transport, TransportOptions},
-  types::{CompressionAlgo, Label, Name},
+  types::{CompressionAlgo, Label},
   version::VSN_SIZE,
 };
 
@@ -21,12 +19,9 @@ pub use super::version::{DelegateVersion, ProtocolVersion};
 const DEFAULT_PORT: u16 = 7946;
 
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct Options<T: Transport> {
-  /// The name of this node. This must be unique in the cluster.
-  #[viewit(getter(const, style = "ref"))]
-  name: Name,
-
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Options {
   /// Label is an optional set of bytes to include on the outside of each
   /// packet and stream.
   ///
@@ -42,16 +37,10 @@ pub struct Options<T: Transport> {
   /// Configuration related to what address to bind to
   /// listen on. The port is used for both UDP and TCP gossip.
   bind_addr: IpAddr,
-  /// Configuration related to what port to bind to
-  /// listen on. The port is used for both UDP and TCP gossip. It is
-  /// assumed other nodes are running on this port, but they do not need
-  /// to.
-  bind_port: Option<u16>,
 
   /// Configuration related to what address to advertise to other
   /// cluster members. Used for nat traversal.
   advertise_addr: Option<IpAddr>,
-  advertise_port: Option<u16>,
 
   /// The configured encryption type that we
   /// will _speak_. This must be between [`EncryptionAlgo::MIN`] and
@@ -63,8 +52,8 @@ pub struct Options<T: Transport> {
   /// operations. This is a legacy name for backwards compatibility, but
   /// should really be called StreamTimeout now that we have generalized
   /// the transport.
-  #[serde(with = "humantime_serde")]
-  tcp_timeout: Duration,
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
+  timeout: Duration,
 
   /// The number of nodes that will be asked to perform
   /// an indirect probe of a node in the case a direct probe fails. Memberlist
@@ -122,18 +111,18 @@ pub struct Options<T: Transport> {
   /// Setting this interval lower (more frequent) will increase convergence
   /// speeds across larger clusters at the expense of increased bandwidth
   /// usage.
-  #[serde(with = "humantime_serde")]
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   push_pull_interval: Duration,
 
   /// The interval between random node probes. Setting
   /// this lower (more frequent) will cause the memberlist cluster to detect
   /// failed nodes more quickly at the expense of increased bandwidth usage
-  #[serde(with = "humantime_serde")]
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   probe_interval: Duration,
   /// The timeout to wait for an ack from a probed node
   /// before assuming it is unhealthy. This should be set to 99-percentile
   /// of RTT (round-trip time) on your network.
-  #[serde(with = "humantime_serde")]
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   probe_timeout: Duration,
   /// Set this field will turn off the fallback TCP pings that are attempted
   /// if the direct UDP ping fails. These get pipelined along with the
@@ -149,7 +138,7 @@ pub struct Options<T: Transport> {
   /// If this is set to zero, non-piggyback gossip is disabled. By lowering
   /// this value (more frequent) gossip messages are propagated across
   /// the cluster more quickly at the expense of increased bandwidth.
-  #[serde(with = "humantime_serde")]
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   gossip_interval: Duration,
   /// The number of random nodes to send gossip messages to
   /// per `gossip_interval`. Increasing this number causes the gossip messages
@@ -158,7 +147,7 @@ pub struct Options<T: Transport> {
   gossip_nodes: usize,
   /// The interval after which a node has died that
   /// we will still try to gossip to it. This gives it a chance to refute.
-  #[serde(with = "humantime_serde")]
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   gossip_to_the_dead_time: Duration,
   /// Controls whether to enforce encryption for incoming
   /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
@@ -209,15 +198,11 @@ pub struct Options<T: Transport> {
   /// versions will just be zero, and version compliance won't be done.
   delegate_version: DelegateVersion,
 
-  /// Points to the system's Dns config file, usually located
-  /// at `/etc/resolv.conf`. It can be overridden via config for easier testing.
-  #[viewit(getter(const, style = "ref"))]
-  dns_config_path: PathBuf,
-
   /// Size of Memberlist's internal channel which handles UDP messages. The
   /// size of this determines the size of the queue which Memberlist will keep
   /// while UDP messages are handled.
   handoff_queue_depth: usize,
+
   /// Maximum number of bytes that memberlist will put in a packet (this
   /// will be for UDP packets by default with a NetTransport). A safe value
   /// for this is typically 1400 bytes (which is the default). However,
@@ -228,33 +213,23 @@ pub struct Options<T: Transport> {
   /// Controls the time before a dead node's name can be
   /// reclaimed by one with a different address or port. By default, this is 0,
   /// meaning nodes cannot be reclaimed this way.
-  #[serde(with = "humantime_serde")]
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   dead_node_reclaim_time: Duration,
 
-  /// If [`None`], allow any connection (default), otherwise specify all networks
-  /// allowed to connect (you must specify IPv6/IPv4 separately)
-  /// Using an empty Vec will block all connections.
-  #[viewit(getter(
-    style = "ref",
-    result(
-      converter(fn = "Option::as_ref"),
-      type = "Option<&HashSet<ipnet::IpNet>>"
-    )
-  ))]
-  allowed_cidrs: Option<HashSet<ipnet::IpNet>>,
-
-  /// Transport options
-  #[viewit(getter(
-    style = "ref",
-    const,
-    result(converter(fn = "Option::as_ref"), type = "Option<&T::Options>")
-  ))]
-  #[serde(bound = "T::Options: TransportOptions")]
-  transport: Option<T::Options>,
-
+  // /// If [`None`], allow any connection (default), otherwise specify all networks
+  // /// allowed to connect (you must specify IPv6/IPv4 separately)
+  // /// Using an empty Vec will block all connections.
+  // #[viewit(getter(
+  //   style = "ref",
+  //   result(
+  //     converter(fn = "Option::as_ref"),
+  //     type = "Option<&HashSet<ipnet::IpNet>>"
+  //   )
+  // ))]
+  // allowed_cidrs: Option<HashSet<ipnet::IpNet>>,
   /// The interval at which we check the message
   /// queue to apply the warning and max depth.
-  #[serde(with = "humantime_serde")]
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   queue_check_interval: Duration,
 
   #[viewit(getter(style = "ref", const, attrs(cfg(feature = "metrics"))))]
@@ -263,34 +238,14 @@ pub struct Options<T: Transport> {
   metric_labels: Arc<Vec<metrics::Label>>,
 }
 
-impl<T> Default for Options<T>
-where
-  T: Transport,
-{
+impl Default for Options {
   #[inline]
   fn default() -> Self {
     Self::lan()
   }
 }
 
-impl<T: Transport> Clone for Options<T> {
-  #[inline]
-  fn clone(&self) -> Self {
-    Self {
-      transport: self.transport.clone(),
-      name: self.name.clone(),
-      label: self.label.clone(),
-      dns_config_path: self.dns_config_path.clone(),
-      allowed_cidrs: self.allowed_cidrs.clone(),
-      secret_keyring: self.secret_keyring.clone(),
-      #[cfg(feature = "metrics")]
-      metric_labels: self.metric_labels.clone(),
-      ..*self
-    }
-  }
-}
-
-impl<T: Transport> Options<T> {
+impl Options {
   #[inline]
   pub const fn build_vsn_array(&self) -> [u8; VSN_SIZE] {
     [self.protocol_version as u8, self.delegate_version as u8]
@@ -304,44 +259,24 @@ impl<T: Transport> Options<T> {
   /// these values are a good starting point when getting started with memberlist.
   #[inline]
   pub fn lan() -> Self {
-    #[cfg(not(any(target_arch = "wasm32", windows)))]
-    let hostname = {
-      let uname = rustix::system::uname();
-      Name::from_string(uname.nodename().to_string_lossy().to_string()).unwrap_or_default()
-    };
-
-    #[cfg(windows)]
-    let hostname = {
-      match hostname::get() {
-        Ok(name) => Name::from_string(name.to_string_lossy().to_string()).unwrap_or_default(),
-        Err(_) => Name::default(),
-      }
-    };
-
-    #[cfg(target_family = "wasm")]
-    let hostname = Name::default();
-
     Self {
-      name: hostname,
       label: Label::empty(),
       skip_inbound_label_check: false,
       bind_addr: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-      bind_port: Some(DEFAULT_PORT),
       advertise_addr: None,
-      advertise_port: Some(DEFAULT_PORT),
       encryption_algo: EncryptionAlgo::MAX,
-      tcp_timeout: Duration::from_secs(10), // Timeout after 10 seconds
-      indirect_checks: 3,                   // Use 3 nodes for the indirect ping
-      retransmit_mult: 4,                   // Retransmit a message 4 * log(N+1) nodes
-      suspicion_mult: 4,                    // Suspect a node for 4 * log(N+1) * Interval
-      suspicion_max_timeout_mult: 6, // For 10k nodes this will give a max timeout of 120 seconds
+      timeout: Duration::from_secs(10), // Timeout after 10 seconds
+      indirect_checks: 3,               // Use 3 nodes for the indirect ping
+      retransmit_mult: 4,               // Retransmit a message 4 * log(N+1) nodes
+      suspicion_mult: 4,                // Suspect a node for 4 * log(N+1) * Interval
+      suspicion_max_timeout_mult: 6,    // For 10k nodes this will give a max timeout of 120 seconds
       push_pull_interval: Duration::from_secs(30), // Low frequency
       probe_interval: Duration::from_millis(500), // Failure check every second
       probe_timeout: Duration::from_secs(1), // Reasonable RTT time for LAN
-      disable_tcp_pings: false,      // TCP pings are safe, even with mixed versions
-      awareness_max_multiplier: 8,   // Probe interval backs off to 8 seconds
+      disable_tcp_pings: false,         // TCP pings are safe, even with mixed versions
+      awareness_max_multiplier: 8,      // Probe interval backs off to 8 seconds
       gossip_interval: Duration::from_millis(200), // Gossip every 200ms
-      gossip_nodes: 3,               // Gossip to 3 nodes
+      gossip_nodes: 3,                  // Gossip to 3 nodes
       gossip_to_the_dead_time: Duration::from_secs(30), // same as push/pull
       gossip_verify_incoming: true,
       gossip_verify_outgoing: true,
@@ -350,13 +285,10 @@ impl<T: Transport> Options<T> {
       secret_keyring: None,
       delegate_version: DelegateVersion::V0,
       protocol_version: ProtocolVersion::V0,
-      dns_config_path: PathBuf::from("/etc/resolv.conf"),
       handoff_queue_depth: 1024,
       offload_size: 1024, // 1KB
       packet_buffer_size: 1400,
       dead_node_reclaim_time: Duration::ZERO,
-      allowed_cidrs: None,
-      transport: None,
       queue_check_interval: Duration::from_secs(30),
       #[cfg(feature = "metrics")]
       metric_labels: Arc::new(Vec::new()),
@@ -396,31 +328,31 @@ impl<T: Transport> Options<T> {
       .with_gossip_to_the_dead_time(Duration::from_secs(15))
   }
 
-  /// Return true if `allowed_cidrs` must be called
-  #[inline]
-  pub fn ip_must_be_checked(&self) -> bool {
-    self
-      .allowed_cidrs
-      .as_ref()
-      .map(|x| !x.is_empty())
-      .unwrap_or(false)
-  }
+  // /// Return true if `allowed_cidrs` must be called
+  // #[inline]
+  // pub fn ip_must_be_checked(&self) -> bool {
+  //   self
+  //     .allowed_cidrs
+  //     .as_ref()
+  //     .map(|x| !x.is_empty())
+  //     .unwrap_or(false)
+  // }
 
-  #[inline]
-  pub fn ip_allowed(&self, addr: IpAddr) -> Result<(), ForbiddenIp> {
-    if !self.ip_must_be_checked() {
-      return Ok(());
-    }
+  // #[inline]
+  // pub fn ip_allowed(&self, addr: IpAddr) -> Result<(), ForbiddenIp> {
+  //   if !self.ip_must_be_checked() {
+  //     return Ok(());
+  //   }
 
-    for n in self.allowed_cidrs.as_ref().unwrap().iter() {
-      let ip = ipnet::IpNet::from(addr);
-      if n.contains(&ip) {
-        return Ok(());
-      }
-    }
+  //   for n in self.allowed_cidrs.as_ref().unwrap().iter() {
+  //     let ip = ipnet::IpNet::from(addr);
+  //     if n.contains(&ip) {
+  //       return Ok(());
+  //     }
+  //   }
 
-    Err(ForbiddenIp(addr))
-  }
+  //   Err(ForbiddenIp(addr))
+  // }
 }
 
 // ParseCIDRs return a possible empty list of all Network that have been parsed

@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use futures_util::{Future, Stream};
+use futures::{Future, Stream};
 
 use crate::{
   showbiz::MessageHandoff,
@@ -24,7 +24,7 @@ where
     let handoff_rx = this.inner.handoff_rx.clone();
     <T::Runtime as Runtime>::spawn_detach(async move {
       loop {
-        futures_util::select! {
+        futures::select! {
           _ = shutdown_rx.recv().fuse() => {
             return;
           }

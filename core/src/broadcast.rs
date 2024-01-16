@@ -1,12 +1,9 @@
 use crate::{
-  delegate::Delegate,
-  error::Error,
-  network::USER_MSG_OVERHEAD,
-  showbiz::Showbiz,
-  transport::Transport,
-  types::{Message, NodeId},
+  delegate::Delegate, error::Error, network::USER_MSG_OVERHEAD, showbiz::Showbiz,
+  transport::Transport, types::Message,
 };
 use async_channel::Sender;
+use nodecraft::{resolver::AddressResolver, Node};
 
 /// Something that can be broadcasted via gossip to
 /// the memberlist cluster.
@@ -48,14 +45,14 @@ pub trait Broadcast: Send + Sync + 'static {
 }
 
 #[viewit::viewit]
-pub(crate) struct ShowbizBroadcast {
-  node: NodeId,
+pub(crate) struct ShowbizBroadcast<I, A> {
+  node: Node<I, A>,
   msg: Message,
   notify: Option<async_channel::Sender<()>>,
 }
 
-impl Broadcast for ShowbizBroadcast {
-  type Id = NodeId;
+impl<I, A> Broadcast for ShowbizBroadcast<I, A> {
+  type Id = Node<I, A>;
 
   fn id(&self) -> Option<&Self::Id> {
     Some(&self.node)
@@ -99,7 +96,7 @@ impl<D: Delegate, T: Transport> Showbiz<T, D> {
   #[inline]
   pub(crate) async fn broadcast_notify(
     &self,
-    node: NodeId,
+    node: Node<T::Id, <T::Resolver as AddressResolver>::Address>,
     msg: Message,
     notify_tx: Option<Sender<()>>,
   ) {
@@ -107,14 +104,18 @@ impl<D: Delegate, T: Transport> Showbiz<T, D> {
   }
 
   #[inline]
-  pub(crate) async fn broadcast(&self, node: NodeId, msg: Message) {
+  pub(crate) async fn broadcast(
+    &self,
+    node: Node<T::Id, <T::Resolver as AddressResolver>::Address>,
+    msg: Message,
+  ) {
     let _ = self.queue_broadcast(node, msg, None).await;
   }
 
   #[inline]
   pub(crate) async fn queue_broadcast(
     &self,
-    node: NodeId,
+    node: Node<T::Id, <T::Resolver as AddressResolver>::Address>,
     msg: Message,
     notify_tx: Option<Sender<()>>,
   ) {

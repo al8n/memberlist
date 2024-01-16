@@ -1,9 +1,9 @@
-use std::{net::SocketAddr, time::Duration, sync::atomic::Ordering};
+use std::{net::SocketAddr, sync::atomic::Ordering, time::Duration};
 
 use agnostic::Runtime;
 use bytes::Bytes;
 use either::Either;
-use futures_util::{Future, Stream};
+use futures::{Future, Stream};
 
 use crate::{
   delegate::VoidDelegate, error::Error, showbiz::tests::get_bind_addr,
@@ -82,7 +82,7 @@ where
   let nodes = m1.inner.nodes.read().await;
   let idx = *nodes.node_map.get(&m2.inner.id).unwrap();
   let n = &nodes.nodes[idx];
-  assert_eq!(n.state.state, crate::NodeState::Alive);
+  assert_eq!(n.state.state, crate::ServerState::Alive);
 
   // Should increment seqno
   let seq_no = m1.inner.hot.sequence_num.load(Ordering::SeqCst);

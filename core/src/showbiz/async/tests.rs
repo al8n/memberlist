@@ -12,7 +12,7 @@ use crate::{
   options::parse_cidrs,
   security::{EncryptionAlgo, SecretKey},
   transport::net::NetTransport,
-  CompressionAlgo, Label, NodeState,
+  CompressionAlgo, Label, ServerState,
 };
 
 use super::*;
@@ -763,7 +763,7 @@ where
 
   let nodes = m2.inner.nodes.read().await;
   let idx = nodes.node_map.get(&m1.inner.id).unwrap();
-  assert_eq!(nodes.nodes[*idx].state.state, NodeState::Left);
+  assert_eq!(nodes.nodes[*idx].state.state, ServerState::Left);
 }
 
 #[allow(clippy::mutable_key_type)]
@@ -1317,8 +1317,10 @@ where
 }
 
 fn reserve_port(ip: IpAddr, purpose: &str) -> u16 {
-  use std::io::ErrorKind;
-  use std::net::{TcpListener, UdpSocket};
+  use std::{
+    io::ErrorKind,
+    net::{TcpListener, UdpSocket},
+  };
 
   for _ in 0..10 {
     let tcp_addr = SocketAddr::new(ip, 0);

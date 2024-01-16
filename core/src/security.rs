@@ -1,5 +1,4 @@
-use aead::KeyInit;
-use aead::{generic_array::GenericArray, Aead, AeadInPlace};
+use aead::{generic_array::GenericArray, Aead, AeadInPlace, KeyInit};
 use aes_gcm::{
   aes::{cipher::consts::U12, Aes192},
   Aes128Gcm, Aes256Gcm, AesGcm,

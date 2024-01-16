@@ -1,12 +1,18 @@
 use super::*;
 
-use rkyv::{Archive, Deserialize, Serialize};
-
 /// Ack response is sent for a ping
 #[viewit::viewit]
-#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
-#[archive(compare(PartialEq), check_bytes)]
-#[archive_attr(derive(Debug))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(
+  feature = "rkyv",
+  derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+)]
+#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+#[cfg_attr(
+  feature = "rkyv",
+  archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash))
+)]
 pub(crate) struct AckResponse {
   seq_no: u32,
   payload: Bytes,
@@ -34,11 +40,20 @@ impl super::Type for AckResponse {
 /// the ping-ee within the configured timeout. This lets the original node know
 /// that the indirect ping attempt happened but didn't succeed.
 #[viewit::viewit]
-#[derive(Archive, Deserialize, Serialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
-#[archive(compare(PartialEq), check_bytes)]
-#[archive_attr(derive(Debug, Copy, Clone), repr(transparent))]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
+#[cfg_attr(
+  feature = "rkyv",
+  derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+)]
+#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+#[cfg_attr(
+  feature = "rkyv",
+  archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash), repr(transparent))
+)]
 #[repr(transparent)]
-pub(crate) struct NackResponse {
+pub struct NackResponse {
   seq_no: u32,
 }
 
@@ -56,6 +71,3 @@ impl super::Type for NackResponse {
     super::encode::<_, { Self::PREALLOCATE }>(MessageType::NackResponse, self)
   }
 }
-
-#[test]
-fn test() {}

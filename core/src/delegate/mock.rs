@@ -1,8 +1,8 @@
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::time::Duration;
-
-use crate::Name;
+use std::{
+  sync::atomic::{AtomicBool, AtomicUsize},
+  time::Duration,
+};
 
 use super::*;
 
@@ -25,40 +25,40 @@ pub enum MockDelegateType {
 }
 
 #[derive(Default)]
-struct MockDelegateInner {
+struct MockDelegateInner<I, A> {
   meta: Bytes,
   msgs: Vec<Bytes>,
   broadcasts: Vec<Message>,
   state: Bytes,
   remote_state: Bytes,
-  conflict_existing: Option<Arc<Node>>,
-  conflict_other: Option<Arc<Node>>,
-  ping_other: Option<Arc<Node>>,
+  conflict_existing: Option<Arc<Server<I, A>>>,
+  conflict_other: Option<Arc<Server<I, A>>>,
+  ping_other: Option<Arc<Server<I, A>>>,
   ping_rtt: Duration,
   ping_payload: Bytes,
 }
 
-pub struct MockDelegate {
-  inner: Arc<Mutex<MockDelegateInner>>,
+pub struct MockDelegate<I, A> {
+  inner: Arc<Mutex<MockDelegateInner<I, A>>>,
   invoked: Arc<AtomicBool>,
   ty: MockDelegateType,
-  ignore: Name,
+  ignore: Option<I>,
   count: Arc<AtomicUsize>,
 }
 
-impl Default for MockDelegate {
+impl<I, A> Default for MockDelegate<I, A> {
   fn default() -> Self {
     Self::new()
   }
 }
 
-impl MockDelegate {
+impl<I, A> MockDelegate<I, A> {
   pub fn new() -> Self {
     Self {
       inner: Arc::new(Mutex::new(MockDelegateInner::default())),
       invoked: Arc::new(AtomicBool::new(false)),
       ty: MockDelegateType::None,
-      ignore: Name::from_static_unchecked("mock"),
+      ignore: None,
       count: Arc::new(AtomicUsize::new(0)),
     }
   }
@@ -68,7 +68,7 @@ impl MockDelegate {
       inner: Arc::new(Mutex::new(MockDelegateInner::default())),
       invoked: Arc::new(AtomicBool::new(false)),
       ty: MockDelegateType::CancelMerge,
-      ignore: Name::from_static_unchecked("mock"),
+      ignore: None,
       count: Arc::new(AtomicUsize::new(0)),
     }
   }
@@ -77,12 +77,12 @@ impl MockDelegate {
     self.invoked.load(atomic::Ordering::SeqCst)
   }
 
-  pub fn cancel_alive(ignore: Name) -> Self {
+  pub fn cancel_alive(ignore: I) -> Self {
     Self {
       inner: Arc::new(Mutex::new(MockDelegateInner::default())),
       invoked: Arc::new(AtomicBool::new(false)),
       ty: MockDelegateType::CancelAlive,
-      ignore,
+      ignore: Some(ignore),
       count: Arc::new(AtomicUsize::new(0)),
     }
   }
@@ -92,7 +92,7 @@ impl MockDelegate {
       inner: Arc::new(Mutex::new(MockDelegateInner::default())),
       invoked: Arc::new(AtomicBool::new(false)),
       ty: MockDelegateType::NotifyConflict,
-      ignore: Name::from_static_unchecked("mock"),
+      ignore: None,
       count: Arc::new(AtomicUsize::new(0)),
     }
   }
@@ -102,7 +102,7 @@ impl MockDelegate {
       inner: Arc::new(Mutex::new(MockDelegateInner::default())),
       invoked: Arc::new(AtomicBool::new(false)),
       ty: MockDelegateType::NotifyConflict,
-      ignore: Name::from_static_unchecked("mock"),
+      ignore: None,
       count: Arc::new(AtomicUsize::new(0)),
     }
   }
@@ -112,7 +112,7 @@ impl MockDelegate {
       inner: Arc::new(Mutex::new(MockDelegateInner::default())),
       invoked: Arc::new(AtomicBool::new(false)),
       ty: MockDelegateType::UserData,
-      ignore: Name::from_static_unchecked("mock"),
+      ignore: None,
       count: Arc::new(AtomicUsize::new(0)),
     }
   }
@@ -122,7 +122,7 @@ impl MockDelegate {
   }
 }
 
-impl MockDelegate {
+impl<I, A> MockDelegate<I, A> {
   pub fn set_meta(&self, meta: Bytes) {
     self.inner.lock().meta = meta;
   }
@@ -146,7 +146,7 @@ impl MockDelegate {
     out
   }
 
-  pub fn get_contents(&self) -> Option<(Arc<Node>, Duration, Bytes)> {
+  pub fn get_contents(&self) -> Option<(Arc<Server<I, A>>, Duration, Bytes)> {
     if self.ty == MockDelegateType::Ping {
       let mut mu = self.inner.lock();
       let other = mu.ping_other.take()?;
@@ -159,20 +159,20 @@ impl MockDelegate {
   }
 }
 
-impl Delegate for MockDelegate {
+impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
   type Error = MockDelegateError;
+  type Address = A;
+  type Id = I;
 
   fn node_meta(&self, _limit: usize) -> Bytes {
     self.inner.lock().meta.clone()
   }
 
-  
   async fn notify_message(&self, msg: Bytes) -> Result<(), Self::Error> {
     self.inner.lock().msgs.push(msg);
     Ok(())
   }
 
-  
   async fn get_broadcasts(
     &self,
     _overhead: usize,
@@ -184,34 +184,28 @@ impl Delegate for MockDelegate {
     Ok(out)
   }
 
-  
   async fn local_state(&self, _join: bool) -> Result<Bytes, Self::Error> {
     Ok(self.inner.lock().state.clone())
   }
 
-  
   async fn merge_remote_state(&self, buf: Bytes, _join: bool) -> Result<(), Self::Error> {
     self.inner.lock().remote_state = buf.to_owned().into();
     Ok(())
   }
 
-  
-  async fn notify_join(&self, _node: Arc<Node>) -> Result<(), Self::Error> {
+  async fn notify_join(&self, _node: Arc<Server<I, A>>) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  
-  async fn notify_leave(&self, _node: Arc<Node>) -> Result<(), Self::Error> {
+  async fn notify_leave(&self, _node: Arc<Server<I, A>>) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  
-  async fn notify_update(&self, _node: Arc<Node>) -> Result<(), Self::Error> {
+  async fn notify_update(&self, _node: Arc<Server<I, A>>) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  
-  async fn notify_alive(&self, peer: Arc<Node>) -> Result<(), Self::Error> {
+  async fn notify_alive(&self, peer: Arc<Server<I, A>>) -> Result<(), Self::Error> {
     match self.ty {
       MockDelegateType::CancelAlive => {
         self.count.fetch_add(1, atomic::Ordering::SeqCst);
@@ -225,11 +219,10 @@ impl Delegate for MockDelegate {
     }
   }
 
-  
   async fn notify_conflict(
     &self,
-    existing: Arc<Node>,
-    other: Arc<Node>,
+    existing: Arc<Server<I, A>>,
+    other: Arc<Server<I, A>>,
   ) -> Result<(), Self::Error> {
     if self.ty == MockDelegateType::NotifyConflict {
       let mut inner = self.inner.lock();
@@ -240,8 +233,7 @@ impl Delegate for MockDelegate {
     Ok(())
   }
 
-  
-  async fn notify_merge(&self, _peers: Vec<Node>) -> Result<(), Self::Error> {
+  async fn notify_merge(&self, _peers: Vec<Server<I, A>>) -> Result<(), Self::Error> {
     match self.ty {
       MockDelegateType::CancelMerge => {
         use atomic::Ordering;
@@ -253,7 +245,6 @@ impl Delegate for MockDelegate {
     }
   }
 
-  
   async fn ack_payload(&self) -> Result<Bytes, Self::Error> {
     if self.ty == MockDelegateType::Ping {
       return Ok(Bytes::from_static(b"whatever"));
@@ -261,10 +252,9 @@ impl Delegate for MockDelegate {
     Ok(Bytes::new())
   }
 
-  
   async fn notify_ping_complete(
     &self,
-    node: Arc<Node>,
+    node: Arc<Server<I, A>>,
     rtt: std::time::Duration,
     payload: Bytes,
   ) -> Result<(), Self::Error> {
@@ -278,7 +268,7 @@ impl Delegate for MockDelegate {
   }
 
   #[inline]
-  fn disable_reliable_pings(&self, _node: &NodeId) -> bool {
+  fn disable_reliable_pings(&self, _node: &Node<I, A>) -> bool {
     false
   }
 }

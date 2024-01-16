@@ -1,3 +1,5 @@
+#[cfg(feature = "metrics")]
+use nodecraft::Node;
 use std::{sync::Arc, time::Duration};
 
 #[derive(Debug)]
@@ -15,20 +17,20 @@ pub(crate) struct Inner {
 /// real-time manner required for correct health checking of other nodes in the
 /// cluster.
 #[derive(Debug, Clone)]
-pub(crate) struct Awareness {
+pub(crate) struct Awareness<I, A> {
   #[cfg(feature = "metrics")]
-  id: crate::types::NodeId,
+  id: Node<I, A>,
   pub(crate) inner: Arc<parking_lot::RwLock<Inner>>,
   #[cfg(feature = "metrics")]
   pub(crate) metric_labels: Arc<Vec<metrics::Label>>,
 }
 
-impl Awareness {
+impl<I, A> Awareness<I, A> {
   /// Returns a new awareness object.
   pub(crate) fn new(
     max: isize,
     #[cfg(feature = "metrics")] metric_labels: Arc<Vec<metrics::Label>>,
-    #[cfg(feature = "metrics")] id: crate::types::NodeId,
+    #[cfg(feature = "metrics")] id: Node<I, A>,
   ) -> Self {
     Self {
       inner: Arc::new(parking_lot::RwLock::new(Inner { max, score: 0 })),
@@ -64,10 +66,7 @@ impl Awareness {
         //   metrics::register_gauge!("showbiz.health.score", "node" => self.id.to_string());
         //   metrics::describe_gauge!("showbiz.health.score", "the health score of the local node");
         // });
-        metrics::gauge!(
-          "showbiz.health.score",
-          self.metric_labels.iter()
-        ).set(_fnl as f64);
+        metrics::gauge!("showbiz.health.score", self.metric_labels.iter()).set(_fnl as f64);
       }
     }
   }
@@ -90,7 +89,7 @@ impl Awareness {
 fn test_awareness() {
   use std::net::SocketAddr;
 
-  use crate::types::{Name, NodeId};
+  use nodecraft::Node;
 
   let cases = vec![
     (0, 0, Duration::from_secs(1)),
@@ -113,8 +112,8 @@ fn test_awareness() {
     #[cfg(feature = "metrics")]
     Arc::new(vec![]),
     #[cfg(feature = "metrics")]
-    NodeId::new(
-      Name::from_static("1").unwrap(),
+    Node::new(
+      smol_str::SmolStr::new("abc"),
       SocketAddr::from(([127, 0, 0, 1], 0)),
     ),
   );

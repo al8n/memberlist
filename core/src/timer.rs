@@ -1,6 +1,5 @@
 use agnostic::Runtime;
-use futures_channel::oneshot;
-use futures_util::{future::FutureExt, select, Future};
+use futures::{channel::oneshot, future::FutureExt, select, Future};
 use std::time::Duration;
 
 pub(crate) struct Timer {

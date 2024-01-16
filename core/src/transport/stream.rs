@@ -1,5 +1,5 @@
 use async_channel::{Receiver, RecvError, SendError, Sender};
-use futures_util::Stream;
+use futures::Stream;
 
 use super::*;
 

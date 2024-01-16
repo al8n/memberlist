@@ -8,7 +8,7 @@ use agnostic::{
   Runtime,
 };
 use bytes::Bytes;
-use futures_util::{Future, FutureExt, Stream};
+use futures::{Future, FutureExt, Stream};
 
 use crate::{
   security::SecretKey,
@@ -17,7 +17,7 @@ use crate::{
   types::{
     AckResponse, Alive, EncodeHeader, IndirectPing, MessageType, Ping, Type, ENCODE_HEADER_SIZE,
   },
-  CompressionAlgo, Message, Name, NodeId, Options, Showbiz,
+  CompressionAlgo, Message, Name, Options, ServerId, Showbiz,
 };
 
 async fn listen_udp<R>() -> Result<<R::Net as Net>::UdpSocket, std::io::Error>
@@ -58,7 +58,7 @@ where
   // Encode a ping
   let ping = Ping {
     seq_no: 42,
-    source: NodeId::new(Name::from_str_unchecked("test"), udp_addr),
+    source: ServerId::new(Name::from_str_unchecked("test"), udp_addr),
     target: m.inner.id.clone(),
   };
 
@@ -70,9 +70,9 @@ where
     .unwrap();
 
   // Wait for response
-  let (tx, rx) = futures_channel::oneshot::channel();
+  let (tx, rx) = futures::channel::oneshot::channel();
   R::spawn_detach(async {
-    futures_util::select! {
+    futures::select! {
       _ = rx.fuse() => {},
       _ = R::sleep(Duration::from_secs(2)).fuse() => {
         panic!("timeout")
@@ -110,7 +110,7 @@ where
   // Encode a ping
   let ping = Ping {
     seq_no: 42,
-    source: NodeId::new(Name::from_str_unchecked("test"), udp_addr),
+    source: ServerId::new(Name::from_str_unchecked("test"), udp_addr),
     target: m.inner.id.clone(),
   };
 
@@ -124,9 +124,9 @@ where
     .unwrap();
 
   // Wait for responses
-  let (tx, rx) = futures_channel::oneshot::channel();
+  let (tx, rx) = futures::channel::oneshot::channel();
   R::spawn_detach(async {
-    futures_util::select! {
+    futures::select! {
       _ = rx.fuse() => {},
       _ = R::sleep(Duration::from_secs(200)).fuse() => {
         panic!("timeout")
@@ -166,7 +166,7 @@ where
   // Encode a ping
   let ping = Ping {
     seq_no: 42,
-    source: NodeId::new(Name::from_str_unchecked("test"), udp_addr),
+    source: ServerId::new(Name::from_str_unchecked("test"), udp_addr),
     target: m
       .inner
       .id
@@ -211,7 +211,7 @@ where
   // Encode a ping
   let ping = IndirectPing {
     seq_no: 100,
-    source: NodeId::new(Name::from_str_unchecked("test"), udp_addr),
+    source: ServerId::new(Name::from_str_unchecked("test"), udp_addr),
     target: m.inner.id.clone(),
   };
 
@@ -223,9 +223,9 @@ where
     .unwrap();
 
   // Wait for response
-  let (tx, rx) = futures_channel::oneshot::channel();
+  let (tx, rx) = futures::channel::oneshot::channel();
   R::spawn_detach(async {
-    futures_util::select! {
+    futures::select! {
       _ = rx.fuse() => {},
       _ = R::sleep(Duration::from_secs(2)).fuse() => {
         panic!("timeout")
@@ -272,7 +272,7 @@ where
   .unwrap();
 
   // Add a message to be broadcast
-  let id = NodeId::new(
+  let id = ServerId::new(
     Name::from_str_unchecked("rand"),
     "127.0.0.255:0".parse().unwrap(),
   );
@@ -291,7 +291,7 @@ where
   // Encode a ping
   let ping = IndirectPing {
     seq_no: 42,
-    source: NodeId::new(Name::from_str_unchecked("test"), udp_addr),
+    source: ServerId::new(Name::from_str_unchecked("test"), udp_addr),
     target: m.inner.id.clone(),
   };
 
@@ -303,9 +303,9 @@ where
     .unwrap();
 
   // Wait for response
-  let (tx, rx) = futures_channel::oneshot::channel();
+  let (tx, rx) = futures::channel::oneshot::channel();
   R::spawn_detach(async {
-    futures_util::select! {
+    futures::select! {
       _ = rx.fuse() => {},
       _ = R::sleep(Duration::from_secs(2)).fuse() => {
         panic!("timeout")

@@ -1,6 +1,5 @@
 use super::{DecodeError, EncodeError, MessageType};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum InvalidLabel {
@@ -145,30 +144,35 @@ impl Label {
   }
 }
 
-impl Serialize for Label {
-  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-    if serializer.is_human_readable() {
-      serializer.serialize_str(self.as_str())
-    } else {
-      serializer.serialize_bytes(self.as_bytes())
-    }
-  }
-}
+#[cfg(feature = "serde")]
+const _: () = {
+  use serde::{Deserialize, Serialize};
 
-impl<'de> Deserialize<'de> for Label {
-  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-  where
-    D: serde::Deserializer<'de>,
-  {
-    if deserializer.is_human_readable() {
-      String::deserialize(deserializer)
-        .and_then(|n| Label::try_from(n).map_err(serde::de::Error::custom))
-    } else {
-      Bytes::deserialize(deserializer)
-        .and_then(|n| Label::try_from(n).map_err(serde::de::Error::custom))
+  impl Serialize for Label {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+      if serializer.is_human_readable() {
+        serializer.serialize_str(self.as_str())
+      } else {
+        serializer.serialize_bytes(self.as_bytes())
+      }
     }
   }
-}
+
+  impl<'de> Deserialize<'de> for Label {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+      D: serde::Deserializer<'de>,
+    {
+      if deserializer.is_human_readable() {
+        String::deserialize(deserializer)
+          .and_then(|n| Label::try_from(n).map_err(serde::de::Error::custom))
+      } else {
+        Bytes::deserialize(deserializer)
+          .and_then(|n| Label::try_from(n).map_err(serde::de::Error::custom))
+      }
+    }
+  }
+};
 
 impl AsRef<str> for Label {
   fn as_ref(&self) -> &str {

@@ -1,7 +1,4 @@
-use std::{
-  net::{IpAddr, SocketAddr},
-  ops::{Deref, DerefMut},
-};
+use std::ops::{Deref, DerefMut};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use rkyv::{
@@ -16,35 +13,29 @@ use rkyv::{
   Archive, CheckBytes, Deserialize, Serialize,
 };
 
-mod name;
-pub use name::*;
-
 mod message;
 pub use message::*;
 
-mod id;
-pub use id::*;
-
 mod ack;
-pub(crate) use ack::*;
+pub use ack::*;
 
 mod alive;
-pub(crate) use alive::*;
+pub use alive::*;
 
 mod compress;
 pub use compress::*;
 
 mod bad_state;
-pub(crate) use bad_state::*;
+pub use bad_state::*;
 
 mod err;
-pub(crate) use err::*;
+pub use err::*;
 
 mod ping;
-pub(crate) use ping::*;
+pub use ping::*;
 
 mod push_pull_state;
-pub(crate) use push_pull_state::*;
+pub use push_pull_state::*;
 
 use crate::{
   version::{InvalidDelegateVersion, InvalidProtocolVersion},
@@ -54,14 +45,11 @@ use crate::{
 mod label;
 pub use label::*;
 
-mod address;
-pub use address::*;
-
 mod packet;
 pub use packet::*;
 
-mod node;
-pub use node::*;
+mod server;
+pub use server::*;
 
 const DEFAULT_ENCODE_PREALLOCATE_SIZE: usize = 128;
 pub(crate) const ENCODE_META_SIZE: usize =
@@ -95,8 +83,6 @@ pub enum DecodeError {
   Length(DecodeU32Error),
   #[error("invalid ip addr length {0}")]
   InvalidIpAddrLength(usize),
-  #[error("invalid domain {0}")]
-  InvalidDomain(#[from] InvalidDomain),
 
   #[error("{0}")]
   Decode(#[from] SharedDeserializeMapError),
@@ -113,7 +99,7 @@ pub enum DecodeError {
   #[error("invalid size {0}")]
   InvalidMessageSize(#[from] DecodeU32Error),
   // #[error("{0}")]
-  // InvalidNodeState(#[from] InvalidNodeState),
+  // InvalidServerState(#[from] InvalidServerState),
   #[error("{0}")]
   InvalidProtocolVersion(#[from] InvalidProtocolVersion),
   #[error("{0}")]

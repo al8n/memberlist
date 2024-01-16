@@ -27,15 +27,19 @@ fn join_with_encryption() {
 
 #[test]
 fn join_with_encryption_and_compression() {
-  run(test_join_with_encryption_and_compression::<AsyncStdRuntime>(
-    EncryptionAlgo::NoPadding,
-    CompressionAlgo::Lzw,
-  ));
+  run(
+    test_join_with_encryption_and_compression::<AsyncStdRuntime>(
+      EncryptionAlgo::NoPadding,
+      CompressionAlgo::Lzw,
+    ),
+  );
 
-  run(test_join_with_encryption_and_compression::<AsyncStdRuntime>(
-    EncryptionAlgo::PKCS7,
-    CompressionAlgo::Lzw,
-  ));
+  run(
+    test_join_with_encryption_and_compression::<AsyncStdRuntime>(
+      EncryptionAlgo::PKCS7,
+      CompressionAlgo::Lzw,
+    ),
+  );
 }
 
 #[test]

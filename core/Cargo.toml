@@ -16,16 +16,14 @@ default = ["metrics"]
 tokio-compat = ["agnostic/tokio-compat"]
 metrics = ["dep:metrics"]
 
+serde = ["dep:serde"]
+rkyv = ["dep:rkyv"]
+
 # expose all tests fn for users who want to use other runtime
 # see showbiz-wasm for more examples about how to use those tests fn
 test = ["tracing-subscriber", "pnet"]
 
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-trust-dns-resolver = { version = "0.23", default-features = false, features = ["system-config"] }
-
 [target.'cfg(target_family = "wasm")'.dependencies]
-trust-dns-resolver = { version = "0.23", default-features = false }
-resolv-conf = { version = "0.7", default-features = false }
 getrandom = { version = "0.2", features = ["js"] }
 once_cell = "1.17"
 
@@ -37,18 +35,17 @@ hostname = "0.3"
 
 [dependencies]
 # async common
-agnostic = { workspace = true, features = ["net"] }
+agnostic = { workspace = true, features = ["net", "dns"] }
 async-channel = { version = "2" }
 async-lock = { version = "3" }
 async-recursion = { version = "1" }
-futures-channel = { version = "0.3" }
-futures-util = { version = "0.3", features = ["io"] }
+futures.workspace = true
 
 # common
 atomic = "=0.5" # keep on 0.5
 aead = { version = "0.5", features = ["bytes"] }
 aes-gcm = "0.10"
-bytes = { workspace = true, features = ["serde"] }
+bytes = { workspace = true }
 base64 = "0.21"
 bytemuck = { version = "1.3", features = ["derive"] }
 cbc = "0.1"
@@ -59,20 +56,20 @@ crossbeam-queue = "0.3"
 either = "1"
 local-ip-address = "0.5"
 itertools = "0.12"
-ipnet = { version = "2.7", features = ["serde"] }
+ipnet = { version = "2.7" }
 nodecraft = { workspace = true }
 paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
 parking_lot = { version = "0.12", features = ["send_guard"] }
 pollster = "0.3"
 rand = { version = "0.8" }
 rayon = "1.7"
-rkyv = { git = "https://github.com/rkyv/rkyv.git", rev = "bf39dbc3a61783774fc7e1d47b8bf75db2581be7", features = ["validation", "bytes"] }
+rkyv = { version = "0.7", features = ["validation", "bytes", "smol_str"], optional = true }
 scopeguard = "1.1"
-serde = { workspace = true }
+smol_str.workspace = true
+serde = { workspace = true, optional = true }
 humantime-serde = "1"
 thiserror = { workspace = true }
-tracing = { workspace = true }
-trust-dns-proto = { version = "0.23", default-features = false }
+tracing.workspace = true
 viewit = { workspace = true }
 weezl = { version = "0.1", features = ["async"] }
 wg = "0.3"

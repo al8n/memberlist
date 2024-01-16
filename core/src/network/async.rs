@@ -12,7 +12,7 @@ use crate::{
 use super::*;
 use agnostic::Runtime;
 use bytes::{Buf, BytesMut};
-use futures_util::{future::FutureExt, Future, Stream};
+use futures::{future::FutureExt, Future, Stream};
 
 mod packet;
 mod stream;
@@ -31,7 +31,7 @@ where
 {
   pub(crate) async fn send_ping_and_wait_for_ack(
     &self,
-    target: &NodeId,
+    target: &ServerId,
     ping: Ping,
     deadline: Duration,
   ) -> Result<bool, Error<T, D>> {
@@ -99,7 +99,7 @@ where
   /// remote host.
   pub(crate) async fn send_and_receive_state<'a>(
     &'a self,
-    id: &'a NodeId,
+    id: &'a ServerId,
     join: bool,
   ) -> Result<Bytes, Error<T, D>> {
     // Attempt to connect

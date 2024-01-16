@@ -116,9 +116,9 @@ pub(crate) mod sealed_metrics {
 }
 
 #[viewit::viewit]
-pub(crate) struct RemoteNodeState<'a> {
+pub(crate) struct RemoteServerState<'a, I, A> {
   join: bool,
-  push_states: Vec<&'a ArchivedPushNodeState>,
+  push_states: Vec<&'a PushServerState<I, A>>,
   user_state_pos: usize,
   src: Bytes,
 }

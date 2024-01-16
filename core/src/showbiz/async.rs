@@ -3,8 +3,7 @@ use std::{future::Future, net::ToSocketAddrs, sync::atomic::Ordering, time::Dura
 use crate::{
   delegate::VoidDelegate,
   transport::TransportError,
-  types::{Address, ArchivedPushNodeState, Dead, Domain},
-  util::read_resolv_conf,
+  types::{Address, ArchivedPushServerState, Dead, Domain},
   Label,
 };
 
@@ -12,8 +11,9 @@ use super::*;
 
 use agnostic::Runtime;
 use async_lock::{Mutex, RwLock};
-use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Stream, StreamExt};
+use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Stream, StreamExt};
 use itertools::{Either, Itertools};
+use nodecraft::resolver::AddressResolver;
 
 #[cfg(feature = "test")]
 pub(crate) mod tests;
@@ -27,10 +27,10 @@ pub(crate) struct AckHandler {
 
 #[viewit::viewit(getters(skip), setters(skip))]
 pub(crate) struct ShowbizCore<T: Transport> {
-  id: NodeId,
+  id: ServerId,
   hot: HotData,
   awareness: Awareness,
-  broadcast: TransmitLimitedQueue<ShowbizBroadcast, DefaultNodeCalculator>,
+  broadcast: TransmitLimitedQueue<ShowbizBroadcast, DefaultServerCalculator>,
   leave_broadcast_tx: Sender<()>,
   leave_lock: Mutex<()>,
   leave_broadcast_rx: Receiver<()>,
@@ -40,7 +40,6 @@ pub(crate) struct ShowbizCore<T: Transport> {
   queue: Mutex<MessageQueue>,
   nodes: Arc<RwLock<Memberlist<T::Runtime>>>,
   ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
-  dns: Option<Dns<T>>,
   transport: T,
   /// We do not call send directly, just directly drop it.
   shutdown_tx: Sender<()>,
@@ -92,7 +91,7 @@ where
 
   /// Returns the local node ID.
   #[inline]
-  pub fn local_id(&self) -> &NodeId {
+  pub fn local_id(&self) -> &ServerId {
     &self.inner.id
   }
 
@@ -109,7 +108,7 @@ where
   }
 
   #[inline]
-  pub async fn local_node(&self) -> Arc<Node> {
+  pub async fn local_node(&self) -> Arc<Server> {
     let nodes = self.inner.nodes.read().await;
     // TODO: return an error
     nodes
@@ -121,7 +120,7 @@ where
 
   /// Returns a list of all known nodes.
   #[inline]
-  pub async fn members(&self) -> Vec<Arc<Node>> {
+  pub async fn members(&self) -> Vec<Arc<Server>> {
     self
       .inner
       .nodes
@@ -152,12 +151,12 @@ where
 }
 
 pub struct JoinError<T: Transport, D: Delegate> {
-  joined: Vec<NodeId>,
+  joined: Vec<ServerId>,
   errors: HashMap<Address, Error<T, D>>,
 }
 
 impl<D: Delegate, T: Transport> From<JoinError<T, D>>
-  for (Vec<NodeId>, HashMap<Address, Error<T, D>>)
+  for (Vec<ServerId>, HashMap<Address, Error<T, D>>)
 {
   fn from(e: JoinError<T, D>) -> Self {
     (e.joined, e.errors)
@@ -207,7 +206,7 @@ impl<D: Delegate, T: Transport> JoinError<T, D> {
   }
 
   /// Return the joined nodes
-  pub const fn joined(&self) -> &Vec<NodeId> {
+  pub const fn joined(&self) -> &Vec<ServerId> {
     &self.joined
   }
 
@@ -250,7 +249,7 @@ where
     };
 
     if meta.len() > META_MAX_SIZE {
-      panic!("Node meta data provided is longer than the limit");
+      panic!("Server meta data provided is longer than the limit");
     }
 
     let alive = Alive {
@@ -267,6 +266,8 @@ where
   }
 
   pub(crate) async fn new_in(
+    advertise_addr: Option<<T::Resolver as AddressResolver>::ResolvedAddress>,
+    transport: T,
     delegate: Option<D>,
     mut opts: Options<T>,
   ) -> Result<(Receiver<()>, SocketAddr, Self), Error<T, D>> {
@@ -284,85 +285,68 @@ where
       }
     }
 
-    let (config, options) = read_resolv_conf(opts.dns_config_path.as_path())
-      .map_err(|e| TransportError::Dns(DnsError::from(e)))?;
-    let dns = if config.name_servers().is_empty() {
-      tracing::warn!(
-        target = "showbiz",
-        "no Dns servers found in {}",
-        opts.dns_config_path.display()
-      );
+    // TODO: move this to concrete transport implementation
+    // opts.transport.get_or_insert_with(|| {
+    //   <T::Options as crate::transport::TransportOptions>::from_addr(opts.bind_addr, opts.bind_port)
+    // });
 
-      None
-    } else {
-      Some(Dns::new(
-        config,
-        options,
-        crate::dns::AsyncConnectionProvider::new(),
-      ))
-    };
+    // async fn retry<D: Delegate, T: Transport>(
+    //   limit: usize,
+    //   label: Option<Label>,
+    //   opts: T::Options,
+    //   #[cfg(feature = "metrics")] metric_labels: Arc<Vec<metrics::Label>>,
+    // ) -> Result<T, Error<T, D>> {
+    //   let mut i = 0;
+    //   loop {
+    //     #[cfg(feature = "metrics")]
+    //     let transport = {
+    //       if !metric_labels.is_empty() {
+    //         T::with_metric_labels(label.clone(), opts.clone(), metric_labels.clone()).await
+    //       } else {
+    //         T::new(label.clone(), opts.clone()).await
+    //       }
+    //     };
+    //     #[cfg(not(feature = "metrics"))]
+    //     let transport = T::new(opts.transport.as_ref().unwrap().clone()).await;
 
-    opts.transport.get_or_insert_with(|| {
-      <T::Options as crate::transport::TransportOptions>::from_addr(opts.bind_addr, opts.bind_port)
-    });
+    //     match transport {
+    //       Ok(t) => return Ok(t),
+    //       Err(e) => {
+    //         tracing::debug!(target="showbiz", err=%e, "fail to create transport");
+    //         if i == limit - 1 {
+    //           return Err(e.into());
+    //         }
+    //         i += 1;
+    //       }
+    //     }
+    //   }
+    // }
 
-    async fn retry<D: Delegate, T: Transport>(
-      limit: usize,
-      label: Option<Label>,
-      opts: T::Options,
-      #[cfg(feature = "metrics")] metric_labels: Arc<Vec<metrics::Label>>,
-    ) -> Result<T, Error<T, D>> {
-      let mut i = 0;
-      loop {
-        #[cfg(feature = "metrics")]
-        let transport = {
-          if !metric_labels.is_empty() {
-            T::with_metric_labels(label.clone(), opts.clone(), metric_labels.clone()).await
-          } else {
-            T::new(label.clone(), opts.clone()).await
-          }
-        };
-        #[cfg(not(feature = "metrics"))]
-        let transport = T::new(opts.transport.as_ref().unwrap().clone()).await;
+    // let limit = match opts.bind_port {
+    //   Some(0) | None => 10,
+    //   Some(_) => 1,
+    // };
+    // let transport = retry(
+    //   limit,
+    //   (!opts.label.is_empty()).then_some(opts.label.clone()),
+    //   opts.transport.as_ref().unwrap().clone(),
+    //   #[cfg(feature = "metrics")]
+    //   opts.metric_labels.clone(),
+    // )
+    // .await?;
 
-        match transport {
-          Ok(t) => return Ok(t),
-          Err(e) => {
-            tracing::debug!(target="showbiz", err=%e, "fail to create transport");
-            if i == limit - 1 {
-              return Err(e.into());
-            }
-            i += 1;
-          }
-        }
-      }
-    }
-
-    let limit = match opts.bind_port {
-      Some(0) | None => 10,
-      Some(_) => 1,
-    };
-    let transport = retry(
-      limit,
-      (!opts.label.is_empty()).then_some(opts.label.clone()),
-      opts.transport.as_ref().unwrap().clone(),
-      #[cfg(feature = "metrics")]
-      opts.metric_labels.clone(),
-    )
-    .await?;
-
-    if let Some(0) | None = opts.bind_port {
-      let port = transport.auto_bind_port();
-      opts.bind_port = Some(port);
-      tracing::warn!(target = "showbiz", "using dynamic bind port {port}");
-    }
+    // if let Some(0) | None = opts.bind_port {
+    //   let port = transport.auto_bind_port();
+    //   opts.bind_port = Some(port);
+    //   tracing::warn!(target = "showbiz", "using dynamic bind port {port}");
+    // }
 
     // Get the final advertise address from the transport, which may need
     // to see which address we bound to. We'll refresh this each time we
     // send out an alive message.
-    let advertise = transport.final_advertise_addr(opts.advertise_addr, opts.bind_port.unwrap())?;
+    let advertise = transport.advertise_addr(advertise_addr)?;
 
-    let id = NodeId {
+    let id = ServerId {
       name: opts.name.clone(),
       addr: advertise,
     };
@@ -375,7 +359,7 @@ where
     );
     let hot = HotData::new();
     let broadcast = TransmitLimitedQueue::new(
-      DefaultNodeCalculator::new(hot.num_nodes),
+      DefaultServerCalculator::new(hot.num_nodes),
       opts.retransmit_mult,
     );
     let encryption_enabled = if let Some(keyring) = &opts.secret_keyring {
@@ -409,7 +393,6 @@ where
         queue: Mutex::new(MessageQueue::new()),
         nodes: Arc::new(RwLock::new(Memberlist::new(id))),
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
-        dns,
         transport,
         shutdown_tx,
         advertise,
@@ -449,9 +432,9 @@ where
 
       let mut memberlist = self.inner.nodes.write().await;
       if let Some(&idx) = memberlist.node_map.get(&self.inner.id) {
-        // This dead message is special, because Node and From are the
+        // This dead message is special, because Server and From are the
         // same. This helps other nodes figure out that a node left
-        // intentionally. When Node equals From, other nodes know for
+        // intentionally. When Server equals From, other nodes know for
         // sure this node is gone.
 
         let state = &memberlist.nodes[idx];
@@ -466,7 +449,7 @@ where
         // Block until the broadcast goes out
         if memberlist.any_alive() {
           if timeout > Duration::ZERO {
-            futures_util::select_biased! {
+            futures::select_biased! {
               rst = self.inner.leave_broadcast_rx.recv().fuse() => {
                 if let Err(e) = rst {
                   tracing::error!(
@@ -496,7 +479,7 @@ where
   }
 
   /// Join directly by contacting the given node id
-  pub async fn join_node(&self, id: &NodeId) -> Result<(), Error<T, D>> {
+  pub async fn join_node(&self, id: &ServerId) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
@@ -507,7 +490,7 @@ where
   // /// Join directly by contacting the given node ids
   // pub async fn join_nodes(
   //   &self,
-  //   ids: &[NodeId],
+  //   ids: &[ServerId],
   // ) -> Result<(), Error<T, D>> {
   //   if !self.is_running() {
   //     return Err(Error::NotRunning);
@@ -528,7 +511,7 @@ where
   pub async fn join_many(
     &self,
     existing: impl Iterator<Item = (Address, Name)>,
-  ) -> Result<Vec<NodeId>, JoinError<T, D>> {
+  ) -> Result<Vec<ServerId>, JoinError<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(JoinError {
         joined: Vec::new(),
@@ -559,7 +542,7 @@ where
           let mut errors = Vec::new();
           let mut joined = Vec::with_capacity(addrs.len());
           for addr in addrs {
-            let id = NodeId::new(name.clone(), addr);
+            let id = ServerId::new(name.clone(), addr);
             tracing::info!(target = "showbiz", local = %self.inner.id, peer = %id, "start join...");
             if let Err(e) = self.push_pull_node(&id, true).await {
               tracing::debug!(
@@ -586,7 +569,7 @@ where
             Address::Domain { .. } => unreachable!(),
           };
           Either::Left(async move {
-            let id = NodeId::new(name, addr);
+            let id = ServerId::new(name, addr);
             tracing::info!(target = "showbiz", local = %self.inner.id, peer = %id, "start join...");
             if let Err(e) = self.push_pull_node(&id, true).await {
               tracing::debug!(
@@ -610,7 +593,7 @@ where
       });
 
     let (left, right) =
-      futures_util::future::join(left.collect::<Vec<_>>(), right.collect::<Vec<_>>()).await;
+      futures::future::join(left.collect::<Vec<_>>(), right.collect::<Vec<_>>()).await;
 
     let num_success = std::cell::RefCell::new(Vec::with_capacity(estimated_total));
     #[allow(clippy::mutable_key_type)]
@@ -706,12 +689,12 @@ where
     // Wait for the broadcast or a timeout
     if self.any_alive().await {
       if timeout > Duration::ZERO {
-        futures_util::select_biased! {
+        futures::select_biased! {
           _ = notify_rx.recv().fuse() => {},
           _ = <T::Runtime as Runtime>::sleep(timeout).fuse() => return Err(Error::UpdateTimeout),
         }
       } else {
-        futures_util::select! {
+        futures::select! {
           _ = notify_rx.recv().fuse() => {},
         }
       }
@@ -725,7 +708,7 @@ where
   /// mechanism). The maximum size of the message depends on the configured
   /// `packet_buffer_size` for this memberlist instance.
   #[inline]
-  pub async fn send(&self, to: &NodeId, msg: Message) -> Result<(), Error<T, D>> {
+  pub async fn send(&self, to: &ServerId, msg: Message) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
@@ -737,7 +720,7 @@ where
   /// mechanism). Delivery is guaranteed if no error is returned, and there is no
   /// limit on the size of the message.
   #[inline]
-  pub async fn send_reliable(&self, to: &NodeId, msg: Message) -> Result<(), Error<T, D>> {
+  pub async fn send_reliable(&self, to: &ServerId, msg: Message) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
@@ -892,7 +875,7 @@ where
 
     <T::Runtime as Runtime>::spawn_detach(async move {
       loop {
-        futures_util::select! {
+        futures::select! {
           _ = shutdown_rx.recv().fuse() => {
             return;
           },
@@ -911,7 +894,7 @@ where
 
   pub(crate) async fn verify_protocol(
     &self,
-    _remote: &[ArchivedPushNodeState],
+    _remote: &[ArchivedPushServerState],
   ) -> Result<(), Error<T, D>> {
     // TODO: now we do not need to handle this situation, because there is no update
     // on protocol.
@@ -921,7 +904,7 @@ where
   // #[cfg(test)]
   // pub(crate) async fn change_node<F>(&self, _addr: SocketAddr, _f: F)
   // where
-  //   F: Fn(&LocalNodeState),
+  //   F: Fn(&LocalServerState),
   // {
   //   // let mut nodes = self.inner.nodes.write().await;
   //   // if let Some(n) = nodes.node_map.get_mut(&addr) {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 // use agnostic::lock::RwLock;
 use either::Either;
-use futures_util::{Future, Stream};
+use futures::{Future, Stream};
 use rkyv::{
   de::deserializers::{SharedDeserializeMap, SharedDeserializeMapError},
   Deserialize,
@@ -10,7 +10,7 @@ use rkyv::{
 
 use crate::{
   transport::ReliableConnection,
-  types::{Node, NodeId},
+  types::{Server, ServerId},
 };
 
 use super::*;
@@ -31,7 +31,7 @@ where
     <T::Runtime as Runtime>::spawn_detach(async move {
       tracing::debug!(target = "showbiz.stream", "stream_listener start");
       loop {
-        futures_util::select! {
+        futures::select! {
           _ = shutdown_rx.recv().fuse() => {
             tracing::debug!(target = "showbiz.stream", "stream_listener shutting down");
             return;
@@ -72,7 +72,7 @@ where
             let mut deserializer = SharedDeserializeMap::new();
             let id = n.node.deserialize(&mut deserializer)?;
             let meta = n.meta.deserialize(&mut deserializer)?;
-            Result::<_, SharedDeserializeMapError>::Ok(Arc::new(Node {
+            Result::<_, SharedDeserializeMapError>::Ok(Arc::new(Server {
               id,
               meta,
               state: n.state.into(),
@@ -102,7 +102,7 @@ where
 
   pub(crate) async fn send_user_msg(
     &self,
-    addr: &NodeId,
+    addr: &ServerId,
     msg: crate::types::Message,
   ) -> Result<(), Error<T, D>> {
     let mut conn = self
@@ -159,7 +159,7 @@ where
         #[cfg(feature = "metrics")]
         let metric_labels = self.inner.opts.metric_labels.clone();
         let keyring = self.inner.opts.secret_keyring.clone();
-        let (tx, rx) = futures_channel::oneshot::channel();
+        let (tx, rx) = futures::channel::oneshot::channel();
         rayon::spawn(move || {
           let data = if compression_enabled {
             match Compress::encode_slice(compression_algo, 0, 0, buf.underlying_bytes()) {
@@ -308,7 +308,7 @@ where
 
     // Prepare the local node state
     #[cfg(feature = "metrics")]
-    let mut node_state_counts = NodeState::empty_metrics();
+    let mut node_state_counts = ServerState::empty_metrics();
     let local_nodes = {
       self
         .inner
@@ -319,7 +319,7 @@ where
         .iter()
         .map(|m| {
           let n = &m.state;
-          let this = PushNodeState {
+          let this = PushServerState {
             node: n.id().clone(),
             meta: n.node.meta().clone(),
             incarnation: n.incarnation.load(Ordering::Relaxed),
@@ -425,7 +425,7 @@ where
         .await?;
 
       let plain = if h.len as usize >= opts.offload_size {
-        let (tx, rx) = futures_channel::oneshot::channel();
+        let (tx, rx) = futures::channel::oneshot::channel();
         rayon::spawn(move || {
           match Self::decrypt_remote_state(&label, encrypted_msg, keyring.as_ref().unwrap()) {
             Ok(plain) => {
@@ -474,7 +474,7 @@ where
         let uncompressed_data = if compress.algo.is_none() {
           unreachable!()
         } else if compress.buf.len() > opts.offload_size {
-          let (tx, rx) = futures_channel::oneshot::channel();
+          let (tx, rx) = futures::channel::oneshot::channel();
           rayon::spawn(move || {
             match compress.decompress() {
               Ok(buf) => {

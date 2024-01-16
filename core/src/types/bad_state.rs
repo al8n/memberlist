@@ -1,23 +1,23 @@
-use super::*;
+use nodecraft::Node;
 
 macro_rules! bad_bail {
   ($name: ident) => {
     #[viewit::viewit(getters(skip), setters(skip))]
-    #[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
-    #[archive(compare(PartialEq), check_bytes)]
-    #[archive_attr(derive(Debug))]
-    pub(crate) struct $name {
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+    #[cfg_attr(
+      feature = "rkyv",
+      derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+    )]
+    #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+    #[cfg_attr(
+      feature = "rkyv",
+      archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash))
+    )]
+    pub struct $name<I, A> {
       incarnation: u32,
-      node: NodeId,
-      from: NodeId,
-    }
-
-    impl super::Type for $name {
-      const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
-
-      fn encode(&self) -> Message {
-        super::encode::<_, { Self::PREALLOCATE }>(MessageType::$name, self)
-      }
+      node: Node<I, A>,
+      from: Node<I, A>,
     }
   };
 }

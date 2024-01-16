@@ -3,6 +3,39 @@ pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
   retransmit_mult * node_scale
 }
 
+/// Returns the hostname of the current machine.
+///
+/// On wasm target, this function always returns `None`.
+///
+/// # Examples
+///
+/// ```
+/// use showbiz::util::hostname;
+///
+/// let hostname = hostname();
+/// println!("hostname: {hostname:?}");
+/// ```
+pub fn hostname() -> Option<std::borrow::Cow<'static, str>> {
+  #[cfg(not(any(target_arch = "wasm32", windows)))]
+  return {
+    let name = rustix::system::uname().nodename().to_string_lossy();
+    name.is_empty().then_some(name)
+  };
+
+  #[cfg(windows)]
+  return {
+    match ::hostname::get() {
+      Ok(name) => {
+        let name = name.to_string_lossy();
+        name.is_empty().then_some(name)
+      }
+      Err(e) => None,
+    }
+  };
+
+  None
+}
+
 #[cfg(feature = "metrics")]
 pub mod label_serde {
   use std::{collections::HashMap, sync::Arc};
@@ -296,108 +329,5 @@ mod is_global_ip {
           || is_unique_local(a)
           || is_unicast_link_local(a))
     }
-  }
-}
-
-pub(crate) use dns_util::read_resolv_conf;
-
-#[cfg(not(target_family = "wasm"))]
-mod dns_util {
-  use std::{io, path::Path};
-
-  use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-
-  pub(crate) fn read_resolv_conf<P: AsRef<Path>>(
-    path: P,
-  ) -> io::Result<(ResolverConfig, ResolverOpts)> {
-    std::fs::read_to_string(path).and_then(trust_dns_resolver::system_conf::parse_resolv_conf)
-  }
-}
-
-#[cfg(target_family = "wasm")]
-mod dns_util {
-  use std::{
-    fs::File,
-    io::{self, Read},
-    net::SocketAddr,
-    path::Path,
-    time::Duration,
-  };
-  use trust_dns_resolver::{
-    config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts},
-    Name,
-  };
-
-  const DEFAULT_PORT: u16 = 53;
-
-  pub(crate) fn read_resolv_conf<P: AsRef<Path>>(
-    path: P,
-  ) -> io::Result<(ResolverConfig, ResolverOpts)> {
-    let mut data = String::new();
-    let mut file = File::open(path)?;
-    file.read_to_string(&mut data)?;
-    parse_resolv_conf(&data)
-  }
-
-  fn parse_resolv_conf<T: AsRef<[u8]>>(data: T) -> io::Result<(ResolverConfig, ResolverOpts)> {
-    let parsed_conf = resolv_conf::Config::parse(&data).map_err(|e| {
-      io::Error::new(
-        io::ErrorKind::Other,
-        format!("Error parsing resolv.conf: {e}"),
-      )
-    })?;
-    into_resolver_config(parsed_conf)
-  }
-
-  fn into_resolver_config(
-    parsed_config: resolv_conf::Config,
-  ) -> io::Result<(ResolverConfig, ResolverOpts)> {
-    let domain = None;
-
-    // nameservers
-    let mut nameservers = Vec::<NameServerConfig>::with_capacity(parsed_config.nameservers.len());
-    for ip in &parsed_config.nameservers {
-      nameservers.push(NameServerConfig {
-        socket_addr: SocketAddr::new(ip.into(), DEFAULT_PORT),
-        protocol: Protocol::Udp,
-        tls_dns_name: None,
-        trust_negative_responses: false,
-        #[cfg(feature = "dns-over-rustls")]
-        tls_config: None,
-        bind_addr: None,
-      });
-      nameservers.push(NameServerConfig {
-        socket_addr: SocketAddr::new(ip.into(), DEFAULT_PORT),
-        protocol: Protocol::Tcp,
-        tls_dns_name: None,
-        trust_negative_responses: false,
-        #[cfg(feature = "dns-over-rustls")]
-        tls_config: None,
-        bind_addr: None,
-      });
-    }
-    if nameservers.is_empty() {
-      tracing::warn!("no nameservers found in config");
-    }
-
-    // search
-    let mut search = vec![];
-    for search_domain in parsed_config.get_last_search_or_domain() {
-      search.push(Name::from_str_relaxed(search_domain).map_err(|e| {
-        io::Error::new(
-          io::ErrorKind::Other,
-          format!("Error parsing resolv.conf: {e}"),
-        )
-      })?);
-    }
-
-    let config = ResolverConfig::from_parts(domain, search, nameservers);
-
-    let mut options = ResolverOpts::default();
-    options.timeout = Duration::from_secs(parsed_config.timeout as u64);
-    options.attempts = parsed_config.attempts as usize;
-    options.ndots = parsed_config.ndots as usize;
-
-    Ok((config, options))
   }
 }

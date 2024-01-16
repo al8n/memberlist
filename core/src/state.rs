@@ -1,5 +1,4 @@
 use std::{
-  net::SocketAddr,
   sync::{atomic::AtomicU32, Arc},
   time::Instant,
 };
@@ -9,7 +8,7 @@ use super::{
   error::Error,
   showbiz::Showbiz,
   transport::Transport,
-  types::{AckResponse, NackResponse, Node, NodeId, NodeState},
+  types::{AckResponse, NackResponse, Server, ServerState},
 };
 
 mod r#async;
@@ -126,26 +125,26 @@ mod sealed_metrics {
 
 #[viewit::viewit]
 #[derive(Debug, Clone)]
-pub(crate) struct LocalNodeState {
-  node: Arc<Node>,
+pub(crate) struct LocalServerState<I, A> {
+  node: Arc<Server<I, A>>,
   incarnation: Arc<AtomicU32>,
   state_change: Instant,
   /// The current state of the node
-  state: NodeState,
+  state: ServerState,
 }
 
-impl LocalNodeState {
-  pub(crate) fn id(&self) -> &NodeId {
+impl<I, A> LocalServerState<I, A> {
+  pub(crate) fn id(&self) -> &I {
     self.node.id()
   }
 
-  pub(crate) fn address(&self) -> SocketAddr {
-    self.node.id().addr()
+  pub(crate) fn address(&self) -> &A {
+    self.node.addr()
   }
 
   #[inline]
   pub(crate) fn dead_or_left(&self) -> bool {
-    self.state == NodeState::Dead || self.state == NodeState::Left
+    self.state == ServerState::Dead || self.state == ServerState::Left
   }
 }
 

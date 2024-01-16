@@ -12,7 +12,7 @@ use std::{
 
 use crate::{broadcast::Broadcast, types::Message, util::retransmit_limit};
 
-pub trait NodeCalculator {
+pub trait ServerCalculator {
   fn num_nodes(&self) -> usize;
 }
 
@@ -59,15 +59,15 @@ impl<B: Broadcast> Inner<B> {
 }
 
 #[derive(Clone)]
-pub(crate) struct DefaultNodeCalculator(Arc<CachePadded<AtomicU32>>);
+pub(crate) struct DefaultServerCalculator(Arc<CachePadded<AtomicU32>>);
 
-impl NodeCalculator for DefaultNodeCalculator {
+impl ServerCalculator for DefaultServerCalculator {
   fn num_nodes(&self) -> usize {
     self.0.load(Ordering::SeqCst) as usize
   }
 }
 
-impl DefaultNodeCalculator {
+impl DefaultServerCalculator {
   #[inline]
   pub(crate) const fn new(num: Arc<CachePadded<AtomicU32>>) -> Self {
     Self(num)
@@ -78,7 +78,7 @@ impl DefaultNodeCalculator {
 /// the cluster (via gossip) but limits the number of transmits per
 /// message. It also prioritizes messages with lower transmit counts
 /// (hence newer messages).
-pub struct TransmitLimitedQueue<B: Broadcast, C: NodeCalculator> {
+pub struct TransmitLimitedQueue<B: Broadcast, C: ServerCalculator> {
   num_nodes: C,
   /// The multiplier used to determine the maximum
   /// number of retransmissions attempted.
@@ -86,7 +86,7 @@ pub struct TransmitLimitedQueue<B: Broadcast, C: NodeCalculator> {
   inner: parking_lot::Mutex<Inner<B>>,
 }
 
-impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
+impl<B: Broadcast, C: ServerCalculator> TransmitLimitedQueue<B, C> {
   pub fn new(calc: C, retransmit_mult: usize) -> Self {
     Self {
       num_nodes: calc,
@@ -340,16 +340,20 @@ impl<B: Broadcast> PartialOrd<&LimitedBroadcast<B>> for Cmp {
 
 #[cfg(test)]
 mod tests {
-  use bytes::{BufMut, BytesMut};
-  use futures_util::FutureExt;
+  use std::net::SocketAddr;
 
-  use crate::{broadcast::ShowbizBroadcast, Name, NodeId};
+  use bytes::{BufMut, BytesMut};
+  use futures::FutureExt;
+  use nodecraft::Node;
+  use smol_str::SmolStr;
+
+  use crate::broadcast::ShowbizBroadcast;
 
   use super::*;
 
   struct NC(usize);
 
-  impl NodeCalculator for NC {
+  impl ServerCalculator for NC {
     fn num_nodes(&self) -> usize {
       self.0
     }
@@ -389,7 +393,7 @@ mod tests {
     }
   }
 
-  impl<B: Broadcast, C: NodeCalculator> TransmitLimitedQueue<B, C> {
+  impl<B: Broadcast, C: ServerCalculator> TransmitLimitedQueue<B, C> {
     async fn ordered_view(&self, reverse: bool) -> Vec<LimitedBroadcast<B>> {
       let inner = self.inner.lock();
 
@@ -406,8 +410,8 @@ mod tests {
   fn test_limited_broadcast_less() {
     struct Case {
       name: &'static str,
-      a: Arc<LimitedBroadcast<ShowbizBroadcast>>,
-      b: Arc<LimitedBroadcast<ShowbizBroadcast>>,
+      a: Arc<LimitedBroadcast<ShowbizBroadcast<SmolStr, SocketAddr>>>,
+      b: Arc<LimitedBroadcast<ShowbizBroadcast<SmolStr, SocketAddr>>>,
     }
 
     let cases = [
@@ -418,10 +422,7 @@ mod tests {
           msg_len: 10,
           id: 100,
           broadcast: Arc::new(ShowbizBroadcast {
-            node: NodeId::new(
-              Name::from_str_unchecked("diff-transmits-a"),
-              "127.0.0.1:10".parse().unwrap(),
-            ),
+            node: Node::new("diff-transmits-a".into(), "127.0.0.1:10".parse().unwrap()),
             msg: Message(BytesMut::from([0; 10].as_slice())),
             notify: None,
           }),
@@ -432,10 +433,7 @@ mod tests {
           msg_len: 10,
           id: 100,
           broadcast: Arc::new(ShowbizBroadcast {
-            node: NodeId::new(
-              Name::from_str_unchecked("diff-transmits-b"),
-              "127.0.0.1:11".parse().unwrap(),
-            ),
+            node: Node::new("diff-transmits-b".into(), "127.0.0.1:11".parse().unwrap()),
             msg: Message(BytesMut::from([0; 10].as_slice())),
             notify: None,
           }),
@@ -449,8 +447,8 @@ mod tests {
           msg_len: 12,
           id: 100,
           broadcast: Arc::new(ShowbizBroadcast {
-            node: NodeId::new(
-              Name::from_str_unchecked("same-transmits--diff-len-a"),
+            node: Node::new(
+              "same-transmits--diff-len-a".into(),
               "127.0.0.1:10".parse().unwrap(),
             ),
             msg: Message(BytesMut::from([0; 12].as_slice())),
@@ -463,8 +461,8 @@ mod tests {
           msg_len: 10,
           id: 100,
           broadcast: Arc::new(ShowbizBroadcast {
-            node: NodeId::new(
-              Name::from_str_unchecked("same-transmits--diff-len-b"),
+            node: Node::new(
+              "same-transmits--diff-len-b".into(),
               "127.0.0.1:11".parse().unwrap(),
             ),
             msg: Message(BytesMut::from([0; 10].as_slice())),
@@ -480,8 +478,8 @@ mod tests {
           msg_len: 12,
           id: 100,
           broadcast: Arc::new(ShowbizBroadcast {
-            node: NodeId::new(
-              Name::from_str_unchecked("same-transmits--same-len--diff-id-a"),
+            node: Node::new(
+              "same-transmits--same-len--diff-id-a".into(),
               "127.0.0.1:10".parse().unwrap(),
             ),
             msg: Message(BytesMut::from([0; 12].as_slice())),
@@ -494,8 +492,8 @@ mod tests {
           msg_len: 12,
           id: 90,
           broadcast: Arc::new(ShowbizBroadcast {
-            node: NodeId::new(
-              Name::from_str_unchecked("same-transmits--same-len--diff-id-b"),
+            node: Node::new(
+              "same-transmits--same-len--diff-id-b".into(),
               "127.0.0.1:11".parse().unwrap(),
             ),
             msg: Message(BytesMut::from([0; 12].as_slice())),
@@ -530,19 +528,19 @@ mod tests {
   async fn test_transmit_limited_queue() {
     let q = TransmitLimitedQueue::new(NC(1), 1);
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      node: Node::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
       msg: Message(BytesMut::new()),
       notify: None,
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
+      node: Node::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
       msg: Message(BytesMut::new()),
       notify: None,
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      node: Node::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
       msg: Message(BytesMut::new()),
       notify: None,
     })
@@ -559,7 +557,7 @@ mod tests {
 
     // Should invalidate previous message
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      node: Node::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
       msg: Message(BytesMut::new()),
       notify: None,
     })
@@ -580,7 +578,7 @@ mod tests {
 
     // 18 bytes per message
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      node: Node::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"1. this is a test.");
@@ -590,7 +588,7 @@ mod tests {
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
+      node: Node::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"2. this is a test.");
@@ -600,7 +598,7 @@ mod tests {
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      node: Node::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"3. this is a test.");
@@ -610,7 +608,7 @@ mod tests {
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("baz".try_into().unwrap(), "127.0.0.1:13".parse().unwrap()),
+      node: Node::new("baz".try_into().unwrap(), "127.0.0.1:13".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"4. this is a test.");
@@ -641,7 +639,7 @@ mod tests {
 
     // 18 bytes per message
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      node: Node::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"1. this is a test.");
@@ -651,7 +649,7 @@ mod tests {
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
+      node: Node::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"2. this is a test.");
@@ -661,7 +659,7 @@ mod tests {
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      node: Node::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"3. this is a test.");
@@ -671,7 +669,7 @@ mod tests {
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("baz".try_into().unwrap(), "127.0.0.1:13".parse().unwrap()),
+      node: Node::new("baz".try_into().unwrap(), "127.0.0.1:13".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"4. this is a test.");
@@ -720,7 +718,7 @@ mod tests {
 
     // 18 bytes per message
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      node: Node::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"1. this is a test.");
@@ -730,7 +728,7 @@ mod tests {
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
+      node: Node::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"2. this is a test.");
@@ -740,7 +738,7 @@ mod tests {
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+      node: Node::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"3. this is a test.");
@@ -750,7 +748,7 @@ mod tests {
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
-      node: NodeId::new("baz".try_into().unwrap(), "127.0.0.1:13".parse().unwrap()),
+      node: Node::new("baz".try_into().unwrap(), "127.0.0.1:13".parse().unwrap()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"4. this is a test.");
@@ -766,12 +764,12 @@ mod tests {
     assert_eq!(2, q.num_queued());
 
     // Should notify the first two
-    futures_util::select! {
+    futures::select! {
       _ = rx1.recv().fuse() => {},
       default => panic!("expected invalidation"),
     }
 
-    futures_util::select! {
+    futures::select! {
       _ = rx2.recv().fuse() => {},
       default => panic!("expected invalidation"),
     }
@@ -787,7 +785,7 @@ mod tests {
     let insert = |name: &str, transmits: usize| {
       q.queue_broadcast_in(
         ShowbizBroadcast {
-          node: NodeId::new(
+          node: Node::new(
             name.try_into().unwrap(),
             format!("127.0.0.1:{transmits}").parse().unwrap(),
           ),

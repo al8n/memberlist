@@ -14,17 +14,17 @@ use std::{
 
 #[cfg(feature = "tokio-compat")]
 use agnostic::io::ReadBuf;
-use futures_util::FutureExt;
+use futures::FutureExt;
 
 use crate::{
-  futures_util,
+  futures,
   transport::{
     stream::{
       connection_stream, packet_stream, ConnectionProducer, ConnectionSubscriber, PacketProducer,
       PacketSubscriber,
     },
-    ConnectionError, ConnectionErrorKind, ConnectionKind, ConnectionTimeout, PacketConnection,
-    ReliableConnection, Transport, TransportError, UnreliableConnection,
+    ConnectionError, ConnectionErrorKind, ConnectionKind, ConnectionTimeout, ReliableConnection,
+    Transport, TransportError,
   },
   types::Packet,
   Label,
@@ -118,7 +118,7 @@ impl<R: Runtime> Udp<R> {
   }
 }
 
-impl<R: Runtime> PacketConnection for Udp<R> {
+impl<R: Runtime> PacketStream for Udp<R> {
   async fn send_to(&self, addr: SocketAddr, buffer: &[u8]) -> io::Result<usize> {
     self.conn.send_to(buffer, addr).await
   }
@@ -168,31 +168,31 @@ pub struct Tcp<R: Runtime> {
   conn: <R::Net as Net>::TcpStream,
 }
 
-impl<R: Runtime> futures_util::io::AsyncRead for Tcp<R> {
+impl<R: Runtime> futures::io::AsyncRead for Tcp<R> {
   fn poll_read(
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
     buf: &mut [u8],
   ) -> Poll<std::io::Result<usize>> {
-    futures_util::io::AsyncRead::poll_read(Pin::new(&mut self.conn), cx, buf)
+    futures::io::AsyncRead::poll_read(Pin::new(&mut self.conn), cx, buf)
   }
 }
 
-impl<R: Runtime> futures_util::io::AsyncWrite for Tcp<R> {
+impl<R: Runtime> futures::io::AsyncWrite for Tcp<R> {
   fn poll_write(
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
     buf: &[u8],
   ) -> Poll<std::io::Result<usize>> {
-    futures_util::io::AsyncWrite::poll_write(Pin::new(&mut self.conn), cx, buf)
+    futures::io::AsyncWrite::poll_write(Pin::new(&mut self.conn), cx, buf)
   }
 
   fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-    futures_util::io::AsyncWrite::poll_flush(Pin::new(&mut self.conn), cx)
+    futures::io::AsyncWrite::poll_flush(Pin::new(&mut self.conn), cx)
   }
 
   fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-    futures_util::io::AsyncWrite::poll_close(Pin::new(&mut self.conn), cx)
+    futures::io::AsyncWrite::poll_close(Pin::new(&mut self.conn), cx)
   }
 }
 
@@ -258,7 +258,7 @@ pub struct NetTransport<R: Runtime> {
   tcp_bind_addr: SocketAddr,
   #[allow(dead_code)]
   tcp_listener: Arc<<R::Net as Net>::TcpListener>,
-  udp_listener: Arc<UnreliableConnection<Self>>,
+  udp_listener: Arc<PacketStream<Self>>,
   wg: AsyncWaitGroup,
   shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
@@ -305,10 +305,10 @@ impl<R: Runtime> NetTransport<R> {
           //     &udp,
           //     UDP_RECV_BUF_SIZE,
           //   )
-          //   .map(|_| (addr, UnreliableConnection::new(Udp::new(udp))))
+          //   .map(|_| (addr, PacketStream::new(Udp::new(udp))))
           //   .map_err(NetTransportError::ResizeUdpBuffer)
           // })
-          .map(|udp| (addr, UnreliableConnection::new(Udp::new(udp))))
+          .map(|udp| (addr, PacketStream::new(Udp::new(udp))))
           .map_err(TransportError::Other)?;
       udp_listeners.push_back((udp_ln, local_addr));
     }
@@ -397,13 +397,17 @@ impl<R: Runtime> Transport for NetTransport<R> {
 
   type Connection = Tcp<R>;
 
-  type UnreliableConnection = Udp<R>;
+  type PacketStream = Udp<R>;
 
   type Options = Arc<NetTransportOptions>;
 
-  type Runtime = R; 
+  type Runtime = R;
 
-  async fn new(label: Option<Label>, opts: Self::Options) -> Result<Self, TransportError<Self>>
+  async fn new(
+    label: Option<Label>,
+    resolver: Self::Resolver,
+    opts: Self::Options,
+  ) -> Result<Self, TransportError<Self>>
   where
     Self: Sized,
   {
@@ -421,6 +425,7 @@ impl<R: Runtime> Transport for NetTransport<R> {
   #[cfg(feature = "metrics")]
   async fn with_metric_labels(
     label: Option<Label>,
+    resolver: Self::Resolver,
     opts: Self::Options,
     metric_labels: Arc<Vec<crate::metrics::Label>>,
   ) -> Result<Self, TransportError<Self>>
@@ -430,7 +435,7 @@ impl<R: Runtime> Transport for NetTransport<R> {
     Self::new_in(label, opts, Some(metric_labels)).await
   }
 
-  fn final_advertise_addr(
+  fn advertise_addr(
     &self,
     addr: Option<IpAddr>,
     port: u16,
@@ -461,13 +466,13 @@ impl<R: Runtime> Transport for NetTransport<R> {
       if !label.is_empty() {
         let b =
           Label::add_label_header_to_packet(b, label.as_bytes()).map_err(TransportError::Encode)?;
-        return UnreliableConnection::send_to(&self.udp_listener, addr, &b)
+        return PacketStream::send_to(&self.udp_listener, addr, &b)
           .await
           .map(|_| Instant::now());
       }
     }
 
-    UnreliableConnection::send_to(&self.udp_listener, addr, b)
+    PacketStream::send_to(&self.udp_listener, addr, b)
       .await
       .map(|_| Instant::now())
   }
@@ -526,10 +531,6 @@ impl<R: Runtime> Transport for NetTransport<R> {
     wg.wait().block_on();
     Ok(())
   }
-
-  fn auto_bind_port(&self) -> u16 {
-    self.tcp_bind_addr.port()
-  }
 }
 
 struct Listener<R: Runtime>(<R::Net as agnostic::net::Net>::TcpListener);
@@ -583,7 +584,7 @@ where
       let mut loop_delay = Duration::ZERO;
       let ln = ln.as_ref();
       loop {
-        futures_util::select! {
+        futures::select! {
           _ = self.shutdown_rx.recv().fuse() => {
             break;
           }
@@ -636,7 +637,7 @@ where
 struct UdpProcessor<T, L>
 where
   T: Transport,
-  L: AsRef<UnreliableConnection<T>>,
+  L: AsRef<PacketStream<T>>,
 {
   wg: AsyncWaitGroup,
   packet_tx: PacketProducer,
@@ -652,7 +653,7 @@ where
 impl<T, L> UdpProcessor<T, L>
 where
   T: Transport,
-  L: AsRef<UnreliableConnection<T>> + Send + Sync + 'static,
+  L: AsRef<PacketStream<T>> + Send + Sync + 'static,
 {
   pub(super) fn run(self) {
     let Self {
@@ -676,7 +677,7 @@ where
         // close as possible to the I/O.
         let mut buf = BytesMut::new();
         buf.resize(UDP_PACKET_BUF_SIZE, 0);
-        futures_util::select! {
+        futures::select! {
           _ = self.shutdown_rx.recv().fuse() => {
             break;
           }

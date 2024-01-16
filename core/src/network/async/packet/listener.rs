@@ -5,7 +5,7 @@ use crate::{
   types::{AckResponse, Message, NackResponse},
 };
 use either::Either;
-use futures_util::{Future, Stream};
+use futures::{Future, Stream};
 
 use super::*;
 
@@ -21,7 +21,7 @@ where
     let transport_rx = this.inner.transport.packet();
     <T::Runtime as Runtime>::spawn_detach(async move {
       loop {
-        futures_util::select! {
+        futures::select! {
           _ = shutdown_rx.recv().fuse() => {
             return;
           }
@@ -84,7 +84,7 @@ where
         // msg too large, offload decrypt to rayon thread pool
         if buf.len() > self.inner.opts.offload_size {
           let kr = keyring.clone();
-          let (tx, rx) = futures_channel::oneshot::channel();
+          let (tx, rx) = futures::channel::oneshot::channel();
           rayon::spawn(move || {
             if tx
               .send(
@@ -354,7 +354,7 @@ where
     // use that otherwise assume that the other end of the UDP socket is
     // usable.
 
-    let (cancel_tx, cancel_rx) = futures_channel::oneshot::channel::<()>();
+    let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel::<()>();
     // Setup a response handler to relay the ack
     let this = self.clone();
     let ind_source = ind.source.clone();
@@ -393,7 +393,7 @@ where
     let this = self.clone();
     let probe_timeout = self.inner.opts.probe_timeout;
     <T::Runtime as Runtime>::spawn_detach(async move {
-      futures_util::select! {
+      futures::select! {
         _ = <T::Runtime as Runtime>::sleep(probe_timeout).fuse() => {
           // We've not received an ack, so send a nack.
           let nack = NackResponse::new(ind.seq_no);
@@ -428,7 +428,7 @@ where
 
   pub(crate) async fn send_msg(
     &self,
-    addr: CowNodeId<'_>,
+    addr: CowServerId<'_>,
     msg: Message,
   ) -> Result<(), Error<T, D>> {
     // Check if we can piggy back any messages
@@ -457,7 +457,7 @@ where
   /// modification, other than compression or encryption if enabled.
   pub(crate) async fn raw_send_msg_packet(
     &self,
-    addr: &CowNodeId<'_>,
+    addr: &CowServerId<'_>,
     mut msg: Message,
   ) -> Result<(), Error<T, D>> {
     macro_rules! return_bail {
@@ -483,7 +483,7 @@ where
       msg: Either<Vec<u8>, Message>,
       label: Label,
     ) -> Result<BytesMut, Error<TT, DD>> {
-      let (tx, rx) = futures_channel::oneshot::channel();
+      let (tx, rx) = futures::channel::oneshot::channel();
       rayon::spawn(move || {
         let pk = kr.primary_key();
         let mut buf = algo.header(msg.len());
@@ -523,7 +523,7 @@ where
     if !self.inner.opts.compression_algo.is_none() {
       // offload compression to a background thread
       let compressed = if msg.len() > self.inner.opts.offload_size {
-        let (tx, rx) = futures_channel::oneshot::channel();
+        let (tx, rx) = futures::channel::oneshot::channel();
         let compression_algo = self.inner.opts.compression_algo;
         rayon::spawn(move || {
           match Compress::encode_slice_with_checksum(compression_algo, 0, 0, msg.underlying_bytes())

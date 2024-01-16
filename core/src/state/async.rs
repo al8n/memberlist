@@ -7,8 +7,8 @@ use crate::{
   suspicion::Suspicion,
   timer::Timer,
   types::{
-    Alive, ArchivedAlive, ArchivedNodeState, ArchivedPushNodeState, Dead, IndirectPing, Message,
-    Ping, Suspect, Type,
+    Alive, ArchivedAlive, ArchivedPushServerState, ArchivedServerState, Dead, IndirectPing,
+    Message, Ping, Suspect, Type,
   },
 };
 
@@ -16,7 +16,7 @@ use super::*;
 use agnostic::Runtime;
 use bytes::Bytes;
 use either::Either;
-use futures_util::{future::BoxFuture, Future, FutureExt, Stream};
+use futures::{future::BoxFuture, Future, FutureExt, Stream};
 use rand::{seq::SliceRandom, Rng};
 
 #[cfg(any(test, feature = "test"))]
@@ -34,7 +34,7 @@ fn random_offset(n: usize) -> usize {
 }
 
 #[inline]
-fn random_nodes(k: usize, mut nodes: Vec<Arc<Node>>) -> Vec<Arc<Node>> {
+fn random_nodes(k: usize, mut nodes: Vec<Arc<Server>>) -> Vec<Arc<Server>> {
   let n = nodes.len();
   if n == 0 {
     return Vec::new();
@@ -73,12 +73,12 @@ where
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Initiates a ping to the node with the specified node.
-  pub async fn ping(&self, node: NodeId) -> Result<Duration, Error<T, D>> {
+  pub async fn ping(&self, node: ServerId) -> Result<Duration, Error<T, D>> {
     // Prepare a ping message and setup an ack handler.
     let self_addr = self.get_advertise();
     let ping = Ping {
       seq_no: self.next_seq_no(),
-      source: NodeId {
+      source: ServerId {
         name: self.inner.opts.name.clone(),
         addr: self_addr,
       },
@@ -105,7 +105,7 @@ where
     let sent = Instant::now();
 
     // Wait for response or timeout.
-    futures_util::select! {
+    futures::select! {
       v = ack_rx.recv().fuse() => {
         // If we got a response, update the RTT.
         if let Ok(AckMessage { complete, .. }) = v {
@@ -132,7 +132,7 @@ where
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Does a complete state exchange with a specific node.
-  pub(crate) async fn push_pull_node(&self, id: &NodeId, join: bool) -> Result<(), Error<T, D>> {
+  pub(crate) async fn push_pull_node(&self, id: &ServerId, join: bool) -> Result<(), Error<T, D>> {
     #[cfg(feature = "metrics")]
     let now = Instant::now();
     #[cfg(feature = "metrics")]
@@ -213,9 +213,9 @@ where
     // If the dead message was send by the node itself, mark it is left
     // instead of dead.
     if d.is_self() {
-      state.state.state = NodeState::Left;
+      state.state.state = ServerState::Left;
     } else {
-      state.state.state = NodeState::Dead;
+      state.state.state = ServerState::Dead;
     }
     state.state.state_change = Instant::now();
 
@@ -256,7 +256,7 @@ where
     }
 
     // Ignore non-alive nodes
-    if state.state.state != NodeState::Alive {
+    if state.state.state != ServerState::Alive {
       return Ok(());
     }
 
@@ -285,7 +285,7 @@ where
       .state
       .incarnation
       .store(s.incarnation, Ordering::Relaxed);
-    state.state.state = NodeState::Suspect;
+    state.state.state = ServerState::Suspect;
     let change_time = Instant::now();
     state.state.state_change = change_time;
 
@@ -327,8 +327,8 @@ where
 
             members.node_map.get(&n).and_then(|&idx| {
               let state = &members.nodes[idx];
-              let timeout =
-                state.state.state == NodeState::Suspect && state.state.state_change == change_time;
+              let timeout = state.state.state == ServerState::Suspect
+                && state.state.state_change == change_time;
               if timeout {
                 Some(Dead {
                   node: state.state.node.id.clone(),
@@ -404,10 +404,10 @@ where
       }
     };
 
-    let node = Arc::new(Node {
+    let node = Arc::new(Server {
       id: alive.node.clone(),
       meta: alive.meta.clone(),
-      state: NodeState::Alive,
+      state: ServerState::Alive,
       protocol_version: alive.protocol_version,
       delegate_version: alive.delegate_version,
     });
@@ -432,12 +432,12 @@ where
           return;
         };
 
-        // If DeadNodeReclaimTime is configured, check if enough time has elapsed since the node died.
+        // If DeadServerReclaimTime is configured, check if enough time has elapsed since the node died.
         let can_reclaim = self.inner.opts.dead_node_reclaim_time > Duration::ZERO
           && state.state_change.elapsed() > self.inner.opts.dead_node_reclaim_time;
 
         // Allow the address to be updated if a dead node is being replaced.
-        if state.state == NodeState::Left || (state.state == NodeState::Dead && can_reclaim) {
+        if state.state == ServerState::Left || (state.state == ServerState::Dead && can_reclaim) {
           tracing::info!(target = "showbiz.state", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.node.name(), state.node.id().addr(), alive.node.addr());
           updates_node = true;
         } else {
@@ -448,10 +448,10 @@ where
             if let Err(e) = delegate
               .notify_conflict(
                 state.node.clone(),
-                Arc::new(Node {
+                Arc::new(Server {
                   id: alive.node.clone(),
                   meta: alive.meta.clone(),
-                  state: NodeState::Alive,
+                  state: ServerState::Alive,
                   protocol_version: alive.protocol_version,
                   delegate_version: alive.delegate_version,
                 }),
@@ -470,11 +470,11 @@ where
         return;
       };
 
-      let state = LocalNodeState {
+      let state = LocalServerState {
         node,
         incarnation: Arc::new(AtomicU32::new(0)),
         state_change: Instant::now(),
-        state: NodeState::Dead,
+        state: ServerState::Dead,
       };
 
       // Get a random offset. This is important to ensure
@@ -496,7 +496,7 @@ where
       let id = memberlist.nodes[n].state.id().clone();
       *memberlist.node_map.get_mut(&id).unwrap() = n;
 
-      // Update numNodes after we've added a new node
+      // Update numServers after we've added a new node
       self.inner.hot.num_nodes.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -558,15 +558,15 @@ where
         .state
         .incarnation
         .store(alive.incarnation, Ordering::Relaxed);
-      member.state.node = Arc::new(Node {
+      member.state.node = Arc::new(Server {
         id: alive.node,
         meta: alive.meta,
-        state: NodeState::Alive,
+        state: ServerState::Alive,
         protocol_version: alive.protocol_version,
         delegate_version: alive.delegate_version,
       });
-      if member.state.state != NodeState::Alive {
-        member.state.state = NodeState::Alive;
+      if member.state.state != ServerState::Alive {
+        member.state.state = ServerState::Alive;
         member.state.state_change = Instant::now();
       }
     }
@@ -577,7 +577,7 @@ where
 
     // Notify the delegate of any relevant updates
     if let Some(delegate) = &self.delegate {
-      if old_state == NodeState::Dead || old_state == NodeState::Left {
+      if old_state == ServerState::Dead || old_state == ServerState::Left {
         // if Dead/Left -> Alive, notify of join
         if let Err(e) = delegate.notify_join(member.state.node.clone()).await {
           tracing::error!(target = "showbiz.state", local = %self.inner.id, err=%e, "failed to notify join");
@@ -591,7 +591,7 @@ where
     }
   }
 
-  pub(crate) async fn merge_state<'a>(&'a self, remote: &'a [ArchivedPushNodeState]) {
+  pub(crate) async fn merge_state<'a>(&'a self, remote: &'a [ArchivedPushServerState]) {
     let futs = remote.iter().filter_map(|r| {
       enum State {
         Alive(Alive),
@@ -628,7 +628,7 @@ where
 
       let mut deserializer = SharedDeserializeMap::new();
       let state = match r.state {
-        ArchivedNodeState::Alive => {
+        ArchivedServerState::Alive => {
           let node = match r.node.deserialize(&mut deserializer) {
             Ok(n) => n,
             Err(e) => {
@@ -651,7 +651,7 @@ where
             delegate_version: r.delegate_version.into(),
           })
         }
-        ArchivedNodeState::Left => {
+        ArchivedServerState::Left => {
           let node = match r.node.deserialize(&mut deserializer) {
             Ok(n) => n,
             Err(e) => {
@@ -667,7 +667,7 @@ where
         }
         // If the remote node believes a node is dead, we prefer to
         // suspect that node instead of declaring it dead instantly
-        ArchivedNodeState::Dead | ArchivedNodeState::Suspect => {
+        ArchivedServerState::Dead | ArchivedServerState::Suspect => {
           let node = match r.node.deserialize(&mut deserializer) {
             Ok(n) => n,
             Err(e) => {
@@ -684,7 +684,7 @@ where
       };
       Some(state.run(self))
     });
-    futures_util::future::join_all(futs).await;
+    futures::future::join_all(futs).await;
   }
 
   pub(crate) async fn set_ack_handler<F>(&self, seq_no: u32, timeout: Duration, f: F)
@@ -759,15 +759,15 @@ macro_rules! bail_trigger {
         <T::Runtime as Runtime>::spawn_detach(async move {
           let delay = <T::Runtime as Runtime>::sleep(rand_stagger);
 
-          futures_util::select! {
+          futures::select! {
             _ = delay.fuse() => {},
             _ = stop_rx.recv().fuse() => return,
           }
 
           let mut timer = <T::Runtime as Runtime>::interval(interval);
           loop {
-            futures_util::select! {
-              _ = futures_util::StreamExt::next(&mut timer).fuse() => {
+            futures::select! {
+              _ = futures::StreamExt::next(&mut timer).fuse() => {
                 this.$fn().await;
               }
               _ = stop_rx.recv().fuse() => {
@@ -831,7 +831,7 @@ where
     let rand_stagger = Duration::from_millis(rng.gen_range(0..interval.as_millis() as u64));
 
     <T::Runtime as Runtime>::spawn_detach(async move {
-      futures_util::select! {
+      futures::select! {
         _ = <T::Runtime as Runtime>::sleep(rand_stagger).fuse() => {},
         _ = stop_rx.recv().fuse() => return,
       }
@@ -840,8 +840,8 @@ where
       loop {
         let tick_time = push_pull_scale(interval, this.estimate_num_nodes() as usize);
         let mut timer = <T::Runtime as Runtime>::interval(tick_time);
-        futures_util::select! {
-          _ = futures_util::StreamExt::next(&mut timer).fuse() => {
+        futures::select! {
+          _ = futures::StreamExt::next(&mut timer).fuse() => {
             this.push_pull().await;
           }
           _ = stop_rx.recv().fuse() => return,
@@ -893,7 +893,7 @@ where
     }
   }
 
-  async fn probe_node(&self, target: &LocalNodeState) {
+  async fn probe_node(&self, target: &LocalServerState) {
     #[cfg(feature = "metrics")]
     let now = Instant::now();
     #[cfg(feature = "metrics")]
@@ -920,7 +920,7 @@ where
     let self_addr = self.get_advertise();
     let ping = Ping {
       seq_no: self.next_seq_no(),
-      source: NodeId {
+      source: ServerId {
         name: self.inner.opts.name.clone(),
         addr: self_addr,
       },
@@ -950,7 +950,7 @@ where
       )
       .await;
 
-    if target.state == NodeState::Alive {
+    if target.state == ServerState::Alive {
       let pmsg = ping.encode();
       if let Err(e) = self.send_msg(target.id().into(), pmsg).await {
         tracing::error!(target = "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
@@ -987,7 +987,7 @@ where
     let delegate = self.delegate.as_ref();
 
     // Wait for response or round-trip-time.
-    futures_util::select! {
+    futures::select! {
       v = ack_rx.recv().fuse() => {
         match v {
           Ok(v) => {
@@ -1036,7 +1036,7 @@ where
 
   async fn handle_remote_failure(
     &self,
-    target: &LocalNodeState,
+    target: &LocalServerState,
     ping: Ping,
     ack_rx: async_channel::Receiver<AckMessage>,
     nack_rx: async_channel::Receiver<()>,
@@ -1054,7 +1054,7 @@ where
         .filter_map(|m| {
           if m.state.id() == &self.inner.id
             || m.state.id() == target.id()
-            || m.state.state != NodeState::Alive
+            || m.state.state != ServerState::Alive
           {
             None
           } else {
@@ -1088,7 +1088,7 @@ where
     // member who understands version 3 of the protocol, regardless of
     // which protocol version we are speaking. That's why we've included a
     // config option to turn this off if desired.
-    let (fallback_tx, fallback_rx) = futures_channel::oneshot::channel();
+    let (fallback_tx, fallback_rx) = futures::channel::oneshot::channel();
 
     let mut disable_reliable_pings = self.inner.opts.disable_tcp_pings;
     if let Some(delegate) = self.delegate.as_ref() {
@@ -1127,7 +1127,7 @@ where
     // channel here because we want to issue a warning below if that's the
     // *only* way we hear back from the peer, so we have to let this time
     // out first to allow the normal unreliable-connection-based acks to come in.
-    futures_util::select! {
+    futures::select! {
       v = ack_rx.recv().fuse() => {
         if let Ok(v) = v {
           if v.complete {
@@ -1230,7 +1230,7 @@ where
     let tx = ack_tx.clone();
     let ack_fn = |payload, timestamp| {
       async move {
-        futures_util::select! {
+        futures::select! {
           _ = tx.send(AckMessage {
             payload,
             timestamp,
@@ -1246,7 +1246,7 @@ where
       let tx = nack_tx.clone();
       async move {
         if let Some(nack_tx) = tx {
-          futures_util::select! {
+          futures::select! {
             _ = nack_tx.send(()).fuse() => {},
             default => {}
           }
@@ -1263,7 +1263,7 @@ where
         nack_fn: Some(Arc::new(nack_fn)),
         timer: Timer::after::<_, T::Runtime>(timeout, async move {
           ack_handlers.lock().await.remove(&seq_no);
-          futures_util::select! {
+          futures::select! {
             _ = ack_tx.send(AckMessage {
               payload: Bytes::new(),
               timestamp: sent,
@@ -1301,8 +1301,8 @@ where
           }
 
           match m.state.state {
-            NodeState::Alive | NodeState::Suspect => Some(m.state.node.clone()),
-            NodeState::Dead => {
+            ServerState::Alive | ServerState::Suspect => Some(m.state.node.clone()),
+            ServerState::Dead => {
               if m.state.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
                 None
               } else {
@@ -1373,7 +1373,7 @@ where
         .nodes
         .iter()
         .filter_map(|n| {
-          if n.state.id() == &self.inner.id || n.state.state != NodeState::Alive {
+          if n.state.id() == &self.inner.id || n.state.state != ServerState::Alive {
             None
           } else {
             Some(n.state.node.clone())
@@ -1399,7 +1399,7 @@ where
   /// accusedInc value, or you can supply 0 to just get the next incarnation number.
   /// This alters the node state that's passed in so this MUST be called while the
   /// nodeLock is held.
-  async fn refute(&self, state: &LocalNodeState, accused_inc: u32) {
+  async fn refute(&self, state: &LocalServerState, accused_inc: u32) {
     // Make sure the incarnation number beats the accusation.
     let mut inc = self.next_incarnation();
     if accused_inc >= inc {
@@ -1438,7 +1438,7 @@ fn suspicion_timeout(suspicion_mult: usize, n: usize, interval: Duration) -> u64
 fn push_pull_scale(interval: Duration, n: usize) -> Duration {
   /// the minimum number of nodes
   /// before we start scaling the push/pull timing. The scale
-  /// effect is the log2(Nodes) - log2(pushPullScale). This means
+  /// effect is the log2(Servers) - log2(pushPullScale). This means
   /// that the 33rd node will cause us to double the interval,
   /// while the 65th will triple it.
   const PUSH_PULL_SCALE_THRESHOLD: usize = 32;

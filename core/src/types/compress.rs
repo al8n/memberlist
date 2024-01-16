@@ -1,23 +1,19 @@
 use super::*;
-use bytes::{Buf, Bytes};
 
-#[derive(
-  Debug,
-  Default,
-  Copy,
-  Clone,
-  PartialEq,
-  Eq,
-  Hash,
-  Archive,
-  Serialize,
-  Deserialize,
-  serde::Serialize,
-  serde::Deserialize,
-)]
+use bytes::Bytes;
+
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(u8)]
-#[archive(compare(PartialEq), check_bytes)]
-#[archive_attr(derive(Debug, Copy, Clone), repr(u8), non_exhaustive)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(
+  feature = "rkyv",
+  derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+)]
+#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+#[cfg_attr(
+  feature = "rkyv",
+  archive_attr(derive(Debug, Copy, Clone), repr(u8), non_exhaustive)
+)]
 #[non_exhaustive]
 pub enum CompressionAlgo {
   None = 0,
@@ -76,144 +72,154 @@ impl From<ArchivedCompressionAlgo> for CompressionAlgo {
 
 #[viewit::viewit]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct Compress {
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(
+  feature = "rkyv",
+  derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+)]
+#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+#[cfg_attr(
+  feature = "rkyv",
+  archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash))
+)]
+pub struct Compress {
   algo: CompressionAlgo,
   buf: Bytes,
 }
 
-impl Compress {
-  pub(crate) fn encode_slice(
-    algo: CompressionAlgo,
-    r1: u8,
-    r2: u8,
-    src: &[u8],
-  ) -> Result<Vec<u8>, CompressError> {
-    let mut buf = Vec::with_capacity(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE + src.len());
-    buf.put_slice(&[
-      MessageType::Compress as u8,
-      0,
-      r1,
-      r2,
-      0,
-      0,
-      0,
-      0,
-      algo as u8,
-    ]);
-    match algo {
-      CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
-        .into_vec(&mut buf)
-        .encode_all(src)
-        .status
-        .map(|_| {
-          let len = buf.len();
-          buf[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE]
-            .copy_from_slice(((len - ENCODE_HEADER_SIZE) as u32).to_be_bytes().as_slice());
-          buf
-        })
-        .map_err(CompressError::Lzw),
-      CompressionAlgo::None => unreachable!(),
-    }
-  }
+// impl Compress {
+//   pub(crate) fn encode_slice(
+//     algo: CompressionAlgo,
+//     r1: u8,
+//     r2: u8,
+//     src: &[u8],
+//   ) -> Result<Vec<u8>, CompressError> {
+//     let mut buf = Vec::with_capacity(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE + src.len());
+//     buf.put_slice(&[
+//       MessageType::Compress as u8,
+//       0,
+//       r1,
+//       r2,
+//       0,
+//       0,
+//       0,
+//       0,
+//       algo as u8,
+//     ]);
+//     match algo {
+//       CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+//         .into_vec(&mut buf)
+//         .encode_all(src)
+//         .status
+//         .map(|_| {
+//           let len = buf.len();
+//           buf[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE]
+//             .copy_from_slice(((len - ENCODE_HEADER_SIZE) as u32).to_be_bytes().as_slice());
+//           buf
+//         })
+//         .map_err(CompressError::Lzw),
+//       CompressionAlgo::None => unreachable!(),
+//     }
+//   }
 
-  pub(crate) fn encode_slice_with_checksum(
-    algo: CompressionAlgo,
-    r1: u8,
-    r2: u8,
-    src: &[u8],
-  ) -> Result<Vec<u8>, CompressError> {
-    let mut buf =
-      Vec::with_capacity(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE + src.len() + CHECKSUM_SIZE);
-    buf.put_slice(&[
-      MessageType::Compress as u8,
-      MessageType::HasCrc as u8,
-      r1,
-      r2,
-      0,
-      0,
-      0,
-      0,
-      algo as u8,
-    ]);
-    match algo {
-      CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
-        .into_vec(&mut buf)
-        .encode_all(src)
-        .status
-        .map(|_| {
-          let len = buf.len();
-          buf[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE]
-            .copy_from_slice(((len - ENCODE_HEADER_SIZE) as u32).to_be_bytes().as_slice());
-          let cks = crc32fast::hash(&buf[ENCODE_HEADER_SIZE..]);
-          buf.put_u32(cks);
-          buf
-        })
-        .map_err(CompressError::Lzw),
-      CompressionAlgo::None => unreachable!(),
-    }
-  }
+//   pub(crate) fn encode_slice_with_checksum(
+//     algo: CompressionAlgo,
+//     r1: u8,
+//     r2: u8,
+//     src: &[u8],
+//   ) -> Result<Vec<u8>, CompressError> {
+//     let mut buf =
+//       Vec::with_capacity(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE + src.len() + CHECKSUM_SIZE);
+//     buf.put_slice(&[
+//       MessageType::Compress as u8,
+//       MessageType::HasCrc as u8,
+//       r1,
+//       r2,
+//       0,
+//       0,
+//       0,
+//       0,
+//       algo as u8,
+//     ]);
+//     match algo {
+//       CompressionAlgo::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+//         .into_vec(&mut buf)
+//         .encode_all(src)
+//         .status
+//         .map(|_| {
+//           let len = buf.len();
+//           buf[ENCODE_META_SIZE..ENCODE_META_SIZE + MAX_MESSAGE_SIZE]
+//             .copy_from_slice(((len - ENCODE_HEADER_SIZE) as u32).to_be_bytes().as_slice());
+//           let cks = crc32fast::hash(&buf[ENCODE_HEADER_SIZE..]);
+//           buf.put_u32(cks);
+//           buf
+//         })
+//         .map_err(CompressError::Lzw),
+//       CompressionAlgo::None => unreachable!(),
+//     }
+//   }
 
-  pub(crate) fn decompress(&self) -> Result<(EncodeHeader, Bytes), DecodeError> {
-    match self.algo {
-      CompressionAlgo::Lzw => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
-        .decode(&self.buf)
-        .map_err(|e| DecodeError::Decompress(DecompressError::Lzw(e)))
-        .and_then(|buf| {
-          if buf.len() < ENCODE_HEADER_SIZE {
-            return Err(DecodeError::Corrupted);
-          }
-          EncodeHeader::from_bytes(&buf[..ENCODE_HEADER_SIZE]).map(|h| (h, buf.into()))
-        }),
-      CompressionAlgo::None => {
-        EncodeHeader::from_bytes(&self.buf[..ENCODE_HEADER_SIZE]).map(|h| (h, self.buf.clone()))
-      }
-    }
-  }
+//   pub(crate) fn decompress(&self) -> Result<(EncodeHeader, Bytes), DecodeError> {
+//     match self.algo {
+//       CompressionAlgo::Lzw => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+//         .decode(&self.buf)
+//         .map_err(|e| DecodeError::Decompress(DecompressError::Lzw(e)))
+//         .and_then(|buf| {
+//           if buf.len() < ENCODE_HEADER_SIZE {
+//             return Err(DecodeError::Corrupted);
+//           }
+//           EncodeHeader::from_bytes(&buf[..ENCODE_HEADER_SIZE]).map(|h| (h, buf.into()))
+//         }),
+//       CompressionAlgo::None => {
+//         EncodeHeader::from_bytes(&self.buf[..ENCODE_HEADER_SIZE]).map(|h| (h, self.buf.clone()))
+//       }
+//     }
+//   }
 
-  pub(crate) fn decode_from_bytes(mut src: Bytes) -> Result<(EncodeHeader, Self), DecodeError> {
-    let marker = src[1];
-    let msgs = src[2];
-    let r1 = src[3];
-    let len = u32::from_be_bytes(
-      src[ENCODE_META_SIZE..ENCODE_HEADER_SIZE]
-        .try_into()
-        .unwrap(),
-    );
-    let algo = CompressionAlgo::try_from(src[ENCODE_HEADER_SIZE])?;
-    match algo {
-      CompressionAlgo::Lzw => {
-        src.advance(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE);
-        Ok((
-          EncodeHeader {
-            meta: EncodeMeta {
-              ty: MessageType::Compress,
-              marker,
-              msgs,
-              r1,
-            },
-            len,
-          },
-          Self { algo, buf: src },
-        ))
-      }
-      CompressionAlgo::None => {
-        src.advance(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE);
-        Ok((
-          EncodeHeader {
-            meta: EncodeMeta {
-              ty: MessageType::Compress,
-              marker,
-              msgs,
-              r1,
-            },
-            len,
-          },
-          Self { algo, buf: src },
-        ))
-      }
-    }
-  }
-}
+//   pub(crate) fn decode_from_bytes(mut src: Bytes) -> Result<(EncodeHeader, Self), DecodeError> {
+//     let marker = src[1];
+//     let msgs = src[2];
+//     let r1 = src[3];
+//     let len = u32::from_be_bytes(
+//       src[ENCODE_META_SIZE..ENCODE_HEADER_SIZE]
+//         .try_into()
+//         .unwrap(),
+//     );
+//     let algo = CompressionAlgo::try_from(src[ENCODE_HEADER_SIZE])?;
+//     match algo {
+//       CompressionAlgo::Lzw => {
+//         src.advance(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE);
+//         Ok((
+//           EncodeHeader {
+//             meta: EncodeMeta {
+//               ty: MessageType::Compress,
+//               marker,
+//               msgs,
+//               r1,
+//             },
+//             len,
+//           },
+//           Self { algo, buf: src },
+//         ))
+//       }
+//       CompressionAlgo::None => {
+//         src.advance(ENCODE_HEADER_SIZE + CompressionAlgo::SIZE);
+//         Ok((
+//           EncodeHeader {
+//             meta: EncodeMeta {
+//               ty: MessageType::Compress,
+//               marker,
+//               msgs,
+//               r1,
+//             },
+//             len,
+//           },
+//           Self { algo, buf: src },
+//         ))
+//       }
+//     }
+//   }
+// }
 
 const LZW_LIT_WIDTH: u8 = 8;
 

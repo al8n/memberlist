@@ -1,25 +1,24 @@
 use crate::{DelegateVersion, ProtocolVersion};
 
 use super::*;
-
-use rkyv::{Archive, Deserialize, Serialize};
+use nodecraft::Node;
 
 #[viewit::viewit]
-#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
-#[archive(compare(PartialEq), check_bytes)]
-#[archive_attr(derive(Debug))]
-pub(crate) struct Alive {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(
+  feature = "rkyv",
+  derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+)]
+#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+#[cfg_attr(
+  feature = "rkyv",
+  archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash))
+)]
+pub struct Alive<I, A> {
   incarnation: u32,
   meta: Bytes,
-  node: NodeId,
+  node: Node<I, A>,
   protocol_version: ProtocolVersion,
   delegate_version: DelegateVersion,
-}
-
-impl super::Type for Alive {
-  const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
-
-  fn encode(&self) -> Message {
-    super::encode::<_, { Self::PREALLOCATE }>(MessageType::Alive, self)
-  }
 }

@@ -1,37 +1,41 @@
-use super::*;
+use nodecraft::Node;
 
 macro_rules! bail_ping {
-  ($name: ident) => {
+  (
+    $(#[$meta:meta])*
+    $name: ident
+  ) => {
+    $(#[$meta])*
     #[viewit::viewit(getters(skip), setters(skip))]
-    #[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
-    #[archive(compare(PartialEq), check_bytes)]
-    #[archive_attr(derive(Debug))]
-    pub(crate) struct $name {
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+    #[cfg_attr(feature = "rkyv", derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive))]
+    #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+    #[cfg_attr(feature = "rkyv", archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash)))]
+    pub struct $name<I, A> {
       seq_no: u32,
       /// Source node, used for a direct reply
-      source: NodeId,
+      source: Node<I, A>,
 
-      /// `NodeId` is sent so the target can verify they are
+      /// [`Node`] is sent so the target can verify they are
       /// the intended recipient. This is to protect again an agent
       /// restart with a new name.
-      target: NodeId,
-    }
-
-    impl super::Type for $name {
-      const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
-
-      fn encode(&self) -> Message {
-        super::encode::<_, { Self::PREALLOCATE }>(MessageType::$name, self)
-      }
+      target: Node<I, A>,
     }
   };
 }
 
-bail_ping!(Ping);
-bail_ping!(IndirectPing);
+bail_ping!(
+  #[doc = "Ping is sent to a node to check if it is alive"]
+  Ping
+);
+bail_ping!(
+  #[doc = "IndirectPing is sent to a node to check if it is alive"]
+  IndirectPing
+);
 
-impl From<Ping> for IndirectPing {
-  fn from(ping: Ping) -> Self {
+impl<I, A> From<Ping<I, A>> for IndirectPing<I, A> {
+  fn from(ping: Ping<I, A>) -> Self {
     Self {
       seq_no: ping.seq_no,
       source: ping.source,
@@ -40,8 +44,8 @@ impl From<Ping> for IndirectPing {
   }
 }
 
-impl From<IndirectPing> for Ping {
-  fn from(ping: IndirectPing) -> Self {
+impl<I, A> From<IndirectPing<I, A>> for Ping<I, A> {
+  fn from(ping: IndirectPing<I, A>) -> Self {
     Self {
       seq_no: ping.seq_no,
       source: ping.source,

@@ -1,19 +1,26 @@
-use rkyv::{Archive, Deserialize, Serialize};
-
-use super::*;
+use smol_str::SmolStr;
 
 #[viewit::viewit]
-#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
-#[archive(compare(PartialEq), check_bytes)]
-#[archive_attr(derive(Debug), repr(transparent))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
+#[cfg_attr(
+  feature = "rkyv",
+  derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+)]
+#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+#[cfg_attr(
+  feature = "rkyv",
+  archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash), repr(transparent))
+)]
 #[repr(transparent)]
-pub(crate) struct ErrorResponse {
-  err: String,
+pub struct ErrorResponse {
+  err: SmolStr,
 }
 
 impl ErrorResponse {
-  pub(crate) fn new(err: String) -> Self {
-    Self { err }
+  pub fn new(err: impl Into<SmolStr>) -> Self {
+    Self { err: err.into() }
   }
 }
 
@@ -24,11 +31,3 @@ impl core::fmt::Display for ErrorResponse {
 }
 
 impl std::error::Error for ErrorResponse {}
-
-impl super::Type for ErrorResponse {
-  const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
-
-  fn encode(&self) -> Message {
-    super::encode::<_, { Self::PREALLOCATE }>(MessageType::ErrorResponse, self)
-  }
-}

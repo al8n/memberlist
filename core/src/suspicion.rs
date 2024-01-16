@@ -1,7 +1,11 @@
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+  collections::HashSet,
+  sync::{
+    atomic::{AtomicBool, AtomicU32, Ordering},
+    Arc,
+  },
+  time::{Duration, Instant},
+};
 
 #[inline]
 fn remaining_suspicion_time(
@@ -21,180 +25,178 @@ fn remaining_suspicion_time(
   }
 }
 
-pub(crate) use r#impl::Suspicion;
-mod r#impl {
-  use crate::NodeId;
+use nodecraft::Node;
 
-  use super::*;
-  use agnostic::Runtime;
-  use futures_util::{future::BoxFuture, Future, FutureExt};
+use super::*;
+use agnostic::Runtime;
+use futures::{future::BoxFuture, Future, FutureExt};
 
-  pub(crate) struct Suspicion<R>
-  where
-    R: Runtime,
-  {
-    n: Arc<AtomicU32>,
+pub(crate) struct Suspicion<I, A, R> {
+  n: Arc<AtomicU32>,
+  k: u32,
+  min: Duration,
+  max: Duration,
+  start: Instant,
+  after_func: AfterFunc<R>,
+  confirmations: HashSet<Node<I, A>>,
+}
+
+impl<I, A, R> Suspicion<I, A, R> {
+  /// Returns a after_func started with the max time, and that will drive
+  /// to the min time after seeing k or more confirmations. The from node will be
+  /// excluded from confirmations since we might get our own suspicion message
+  /// gossiped back to us. The minimum time will be used if no confirmations are
+  /// called for (k = 0).
+  pub(crate) fn new(
+    from: Node<I, A>,
     k: u32,
     min: Duration,
     max: Duration,
-    start: Instant,
-    after_func: AfterFunc<R>,
-    confirmations: HashSet<NodeId>,
+    timeout_fn: impl Fn(u32) -> BoxFuture<'static, ()> + Clone + Send + Sync + 'static,
+  ) -> Self {
+    #[allow(clippy::mutable_key_type)]
+    let confirmations = [from].into_iter().collect();
+    let n = Arc::new(AtomicU32::new(0));
+    let timeout = if k < 1 { min } else { max };
+    let after_func = AfterFunc::new(n.clone(), timeout, Arc::new(timeout_fn));
+    after_func.start();
+    Suspicion {
+      n,
+      k,
+      min,
+      max,
+      start: Instant::now(),
+      after_func,
+      confirmations,
+    }
   }
+}
 
-  impl<R> Suspicion<R>
-  where
-    R: Runtime,
-    <R::Sleep as Future>::Output: Send,
-  {
-    /// Returns a after_func started with the max time, and that will drive
-    /// to the min time after seeing k or more confirmations. The from node will be
-    /// excluded from confirmations since we might get our own suspicion message
-    /// gossiped back to us. The minimum time will be used if no confirmations are
-    /// called for (k = 0).
-    pub(crate) fn new(
-      from: NodeId,
-      k: u32,
-      min: Duration,
-      max: Duration,
-      timeout_fn: impl Fn(u32) -> BoxFuture<'static, ()> + Clone + Send + Sync + 'static,
-    ) -> Self {
-      #[allow(clippy::mutable_key_type)]
-      let confirmations = [from].into_iter().collect();
-      let n = Arc::new(AtomicU32::new(0));
-      let timeout = if k < 1 { min } else { max };
-      let after_func = AfterFunc::new(n.clone(), timeout, Arc::new(timeout_fn));
-      after_func.start();
-      Suspicion {
-        n,
-        k,
-        min,
-        max,
-        start: Instant::now(),
-        after_func,
-        confirmations,
-      }
+impl<I, A, R> Suspicion<I, A, R>
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+{
+  /// Confirm registers that a possibly new peer has also determined the given
+  /// node is suspect. This returns true if this was new information, and false
+  /// if it was a duplicate confirmation, or if we've got enough confirmations to
+  /// hit the minimum.
+  pub(crate) async fn confirm(&mut self, from: &Node<I, A>) -> bool {
+    if self.n.load(Ordering::Relaxed) >= self.k {
+      return false;
     }
 
-    /// Confirm registers that a possibly new peer has also determined the given
-    /// node is suspect. This returns true if this was new information, and false
-    /// if it was a duplicate confirmation, or if we've got enough confirmations to
-    /// hit the minimum.
-    pub(crate) async fn confirm(&mut self, from: &NodeId) -> bool {
-      if self.n.load(Ordering::Relaxed) >= self.k {
-        return false;
-      }
+    if self.confirmations.contains(from) {
+      return false;
+    }
+    self.confirmations.insert(from.clone());
 
-      if self.confirmations.contains(from) {
-        return false;
-      }
-      self.confirmations.insert(from.clone());
+    // Compute the new timeout given the current number of confirmations and
+    // adjust the after_func. If the timeout becomes negative *and* we can cleanly
+    // stop the after_func then we will call the timeout function directly from
+    // here.
+    let n = self.n.fetch_add(1, Ordering::SeqCst) + 1;
+    let elapsed = self.start.elapsed();
+    let remaining = remaining_suspicion_time(n, self.k, elapsed, self.min, self.max);
 
-      // Compute the new timeout given the current number of confirmations and
-      // adjust the after_func. If the timeout becomes negative *and* we can cleanly
-      // stop the after_func then we will call the timeout function directly from
-      // here.
-      let n = self.n.fetch_add(1, Ordering::SeqCst) + 1;
-      let elapsed = self.start.elapsed();
-      let remaining = remaining_suspicion_time(n, self.k, elapsed, self.min, self.max);
-
-      if self.after_func.stop().await {
-        if remaining > Duration::ZERO {
-          self.after_func.reset(remaining).await;
-        } else {
-          let n = self.n.clone();
-          let fut = (self.after_func.f)(n.load(Ordering::SeqCst));
-          R::spawn_detach(async move {
-            fut.await;
-          });
-        }
+    if self.after_func.stop().await {
+      if remaining > Duration::ZERO {
+        self.after_func.reset(remaining).await;
+      } else {
+        let n = self.n.clone();
+        let fut = (self.after_func.f)(n.load(Ordering::SeqCst));
+        R::spawn_detach(async move {
+          fut.await;
+        });
       }
+    }
+    true
+  }
+}
+
+pub(super) struct AfterFunc<R> {
+  n: Arc<AtomicU32>,
+  timeout: Duration,
+  start: Instant,
+  stop_rx: async_channel::Receiver<()>,
+  stop_tx: async_channel::Sender<()>,
+  stopped: Arc<AtomicBool>,
+  f: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
+  _marker: std::marker::PhantomData<R>,
+}
+
+impl<R> AfterFunc<R> {
+  pub fn new(
+    n: Arc<AtomicU32>,
+    timeout: Duration,
+    f: Arc<impl Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
+  ) -> Self {
+    let (tx, rx) = async_channel::bounded(1);
+    let stopped = Arc::new(AtomicBool::new(false));
+
+    Self {
+      n,
+      timeout,
+      stop_rx: rx,
+      stop_tx: tx,
+      stopped,
+      f,
+      start: Instant::now(),
+      _marker: std::marker::PhantomData,
+    }
+  }
+
+  pub async fn stop(&self) -> bool {
+    if self.start.elapsed() >= self.timeout {
+      return false;
+    }
+    if self.stopped.load(Ordering::SeqCst) {
+      false
+    } else {
+      self.stopped.store(true, Ordering::SeqCst);
+      let _ = self.stop_tx.send(()).await;
       true
     }
   }
+}
 
-  pub(super) struct AfterFunc<R: Runtime> {
-    n: Arc<AtomicU32>,
-    timeout: Duration,
-    start: Instant,
-    stop_rx: async_channel::Receiver<()>,
-    stop_tx: async_channel::Sender<()>,
-    stopped: Arc<AtomicBool>,
-    f: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
-    _marker: std::marker::PhantomData<R>,
+impl<R> AfterFunc<R>
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+{
+  pub fn start(&self) {
+    let rx = self.stop_rx.clone();
+    let n = self.n.clone();
+    let f = self.f.clone();
+    let timeout = self.timeout;
+
+    R::spawn_detach(async move {
+      futures::select_biased! {
+        _ = rx.recv().fuse() => {}
+        _ = R::sleep(timeout).fuse() => {
+          f(n.load(Ordering::SeqCst)).await
+        }
+      }
+    });
   }
 
-  impl<R> AfterFunc<R>
-  where
-    R: Runtime,
-    <R::Sleep as Future>::Output: Send,
-  {
-    pub fn new(
-      n: Arc<AtomicU32>,
-      timeout: Duration,
-      f: Arc<impl Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
-    ) -> Self {
-      let (tx, rx) = async_channel::bounded(1);
-      let stopped = Arc::new(AtomicBool::new(false));
+  pub async fn reset(&mut self, remaining: Duration) {
+    self.stop().await;
+    let rx = self.stop_rx.clone();
+    let n = self.n.clone();
+    let f = self.f.clone();
+    self.timeout = remaining;
+    self.start = Instant::now();
 
-      Self {
-        n,
-        timeout,
-        stop_rx: rx,
-        stop_tx: tx,
-        stopped,
-        f,
-        start: Instant::now(),
-        _marker: std::marker::PhantomData,
-      }
-    }
-
-    pub fn start(&self) {
-      let rx = self.stop_rx.clone();
-      let n = self.n.clone();
-      let f = self.f.clone();
-      let timeout = self.timeout;
-
-      R::spawn_detach(async move {
-        futures_util::select_biased! {
-          _ = rx.recv().fuse() => {}
-          _ = R::sleep(timeout).fuse() => {
-            f(n.load(Ordering::SeqCst)).await
-          }
+    R::spawn_detach(async move {
+      futures::select_biased! {
+        _ = rx.recv().fuse() => {}
+        _ = R::sleep(remaining).fuse() => {
+          f(n.load(Ordering::SeqCst)).await
         }
-      });
-    }
-
-    pub async fn reset(&mut self, remaining: Duration) {
-      self.stop().await;
-      let rx = self.stop_rx.clone();
-      let n = self.n.clone();
-      let f = self.f.clone();
-      self.timeout = remaining;
-      self.start = Instant::now();
-
-      R::spawn_detach(async move {
-        futures_util::select_biased! {
-          _ = rx.recv().fuse() => {}
-          _ = R::sleep(remaining).fuse() => {
-            f(n.load(Ordering::SeqCst)).await
-          }
-        }
-      });
-    }
-
-    pub async fn stop(&self) -> bool {
-      if self.start.elapsed() >= self.timeout {
-        return false;
       }
-      if self.stopped.load(Ordering::SeqCst) {
-        false
-      } else {
-        self.stopped.store(true, Ordering::SeqCst);
-        let _ = self.stop_tx.send(()).await;
-        true
-      }
-    }
+    });
   }
 }
 
@@ -264,9 +266,6 @@ fn test_suspicion_remaining_suspicion_time() {
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  use async_channel::TryRecvError;
-  use futures_util::FutureExt;
 
   struct Pair {
     from: &'static str,

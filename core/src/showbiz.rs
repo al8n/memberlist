@@ -12,7 +12,7 @@ use agnostic::Runtime;
 use async_channel::{Receiver, Sender};
 use bytes::Bytes;
 use crossbeam_utils::CachePadded;
-use futures_util::Future;
+use nodecraft::Node;
 
 use super::{
   awareness::Awareness,
@@ -20,15 +20,13 @@ use super::{
   delegate::Delegate,
   error::Error,
   network::META_MAX_SIZE,
-  queue::DefaultNodeCalculator,
-  queue::TransmitLimitedQueue,
+  queue::{DefaultServerCalculator, TransmitLimitedQueue},
   security::SecretKeyring,
-  state::LocalNodeState,
+  state::LocalServerState,
   suspicion::Suspicion,
   timer::Timer,
   transport::Transport,
-  types::Message,
-  types::{Alive, MessageType, Name, Node, NodeId},
+  types::{Alive, Message, MessageType, Server},
   Options,
 };
 
@@ -83,26 +81,19 @@ impl MessageQueue {
 }
 
 // #[viewit::viewit]
-pub(crate) struct Member<R: Runtime>
-where
-  R: Runtime,
-{
-  pub(crate) state: LocalNodeState,
-  pub(crate) suspicion: Option<Suspicion<R>>,
+pub(crate) struct Member<I, A, R> {
+  pub(crate) state: LocalServerState<I, A>,
+  pub(crate) suspicion: Option<Suspicion<I, A, R>>,
 }
 
-pub(crate) struct Memberlist<R>
-where
-  R: Runtime,
-{
-  pub(crate) local: NodeId,
-  pub(crate) nodes: Vec<Member<R>>,
-  #[allow(clippy::mutable_key_type)]
-  pub(crate) node_map: HashMap<NodeId, usize>,
+pub(crate) struct Memberlist<I, A, R> {
+  pub(crate) local: Node<I, A>,
+  pub(crate) nodes: Vec<Member<I, A, R>>,
+  pub(crate) node_map: HashMap<Node<I, A>, usize>,
 }
 
-impl<Run: Runtime> rand::seq::SliceRandom for Memberlist<Run> {
-  type Item = Member<Run>;
+impl<I, A, Run: Runtime> rand::seq::SliceRandom for Memberlist<I, A, Run> {
+  type Item = Member<I, A, Run>;
 
   fn choose<R>(&self, _rng: &mut R) -> Option<&Self::Item>
   where
@@ -218,12 +209,8 @@ impl<Run: Runtime> rand::seq::SliceRandom for Memberlist<Run> {
   }
 }
 
-impl<R> Memberlist<R>
-where
-  R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-{
-  fn new(local: NodeId) -> Self {
+impl<I, A, R> Memberlist<I, A, R> {
+  fn new(local: Node<I, A>) -> Self {
     Self {
       nodes: Vec::new(),
       node_map: HashMap::new(),
