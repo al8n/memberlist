@@ -10,7 +10,7 @@ use crate::security::SecretKeyring;
 
 use super::{
   security::{EncryptionAlgo, SecretKey},
-  types::{CompressionAlgo, Label},
+  types::CompressionAlgo,
   version::VSN_SIZE,
 };
 

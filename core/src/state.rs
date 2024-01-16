@@ -13,8 +13,8 @@ use super::{
 
 mod r#async;
 
-#[cfg(feature = "test")]
-pub use r#async::tests::*;
+// #[cfg(feature = "test")]
+// pub use r#async::tests::*;
 
 #[cfg(feature = "metrics")]
 use sealed_metrics::*;

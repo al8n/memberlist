@@ -28,14 +28,6 @@ impl AckResponse {
   }
 }
 
-impl super::Type for AckResponse {
-  const PREALLOCATE: usize = super::DEFAULT_ENCODE_PREALLOCATE_SIZE;
-
-  fn encode(&self) -> Message {
-    super::encode::<_, { Self::PREALLOCATE }>(MessageType::AckResponse, self)
-  }
-}
-
 /// nack response is sent for an indirect ping when the pinger doesn't hear from
 /// the ping-ee within the configured timeout. This lets the original node know
 /// that the indirect ping attempt happened but didn't succeed.
@@ -64,10 +56,3 @@ impl NackResponse {
   }
 }
 
-impl super::Type for NackResponse {
-  const PREALLOCATE: usize = super::ENCODE_HEADER_SIZE + 4;
-
-  fn encode(&self) -> Message {
-    super::encode::<_, { Self::PREALLOCATE }>(MessageType::NackResponse, self)
-  }
-}

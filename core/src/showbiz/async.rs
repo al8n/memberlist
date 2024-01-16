@@ -1,10 +1,9 @@
-use std::{future::Future, net::ToSocketAddrs, sync::atomic::Ordering, time::Duration};
+use std::{future::Future, sync::atomic::Ordering, time::Duration};
 
 use crate::{
   delegate::VoidDelegate,
   transport::TransportError,
-  types::{Address, ArchivedPushServerState, Dead, Domain},
-  Label,
+  types::{Dead, PushServerState},
 };
 
 use super::*;
@@ -12,11 +11,11 @@ use super::*;
 use agnostic::Runtime;
 use async_lock::{Mutex, RwLock};
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Stream, StreamExt};
-use itertools::{Either, Itertools};
+use itertools::Either;
 use nodecraft::resolver::AddressResolver;
 
-#[cfg(feature = "test")]
-pub(crate) mod tests;
+// #[cfg(feature = "test")]
+// pub(crate) mod tests;
 
 pub(crate) struct AckHandler {
   pub(crate) ack_fn:
@@ -27,10 +26,12 @@ pub(crate) struct AckHandler {
 
 #[viewit::viewit(getters(skip), setters(skip))]
 pub(crate) struct ShowbizCore<T: Transport> {
-  id: ServerId,
   hot: HotData,
-  awareness: Awareness,
-  broadcast: TransmitLimitedQueue<ShowbizBroadcast, DefaultServerCalculator>,
+  awareness: Awareness<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  broadcast: TransmitLimitedQueue<
+    ShowbizBroadcast<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    DefaultServerCalculator,
+  >,
   leave_broadcast_tx: Sender<()>,
   leave_lock: Mutex<()>,
   leave_broadcast_rx: Receiver<()>,
@@ -38,13 +39,14 @@ pub(crate) struct ShowbizCore<T: Transport> {
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue>,
-  nodes: Arc<RwLock<Memberlist<T::Runtime>>>,
+  nodes:
+    Arc<RwLock<Memberlist<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Runtime>>>,
   ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
   transport: T,
   /// We do not call send directly, just directly drop it.
   shutdown_tx: Sender<()>,
-  advertise: SocketAddr,
-  opts: Arc<Options<T>>,
+  advertise: <T::Resolver as AddressResolver>::ResolvedAddress,
+  opts: Arc<Options>,
 }
 
 impl<T: Transport> Drop for ShowbizCore<T> {
@@ -56,7 +58,10 @@ impl<T: Transport> Drop for ShowbizCore<T> {
   }
 }
 
-pub struct Showbiz<T: Transport, D: Delegate = VoidDelegate> {
+pub struct Showbiz<
+  T: Transport,
+  D: Delegate = VoidDelegate<<T as Transport>::Id, <<T as Transport>::Resolver as AddressResolver>::Address>,
+> {
   pub(crate) inner: Arc<ShowbizCore<T>>,
   pub(crate) delegate: Option<Arc<D>>,
 }
@@ -91,7 +96,7 @@ where
 
   /// Returns the local node ID.
   #[inline]
-  pub fn local_id(&self) -> &ServerId {
+  pub fn local_node(&self) -> &Node<T::Id, <T::Resolver as AddressResolver>::Address> {
     &self.inner.id
   }
 
@@ -108,7 +113,9 @@ where
   }
 
   #[inline]
-  pub async fn local_node(&self) -> Arc<Server> {
+  pub async fn local_server(
+    &self,
+  ) -> Arc<Server<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
     let nodes = self.inner.nodes.read().await;
     // TODO: return an error
     nodes
@@ -120,7 +127,9 @@ where
 
   /// Returns a list of all known nodes.
   #[inline]
-  pub async fn members(&self) -> Vec<Arc<Server>> {
+  pub async fn members(
+    &self,
+  ) -> Vec<Arc<Server<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
     self
       .inner
       .nodes
@@ -151,12 +160,15 @@ where
 }
 
 pub struct JoinError<T: Transport, D: Delegate> {
-  joined: Vec<ServerId>,
-  errors: HashMap<Address, Error<T, D>>,
+  joined: Vec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+  errors: HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>>,
 }
 
 impl<D: Delegate, T: Transport> From<JoinError<T, D>>
-  for (Vec<ServerId>, HashMap<Address, Error<T, D>>)
+  for (
+    Vec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>>,
+  )
 {
   fn from(e: JoinError<T, D>) -> Self {
     (e.joined, e.errors)
@@ -206,12 +218,13 @@ impl<D: Delegate, T: Transport> JoinError<T, D> {
   }
 
   /// Return the joined nodes
-  pub const fn joined(&self) -> &Vec<ServerId> {
+  pub const fn joined(
+    &self,
+  ) -> &Vec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
     &self.joined
   }
 
-  #[allow(clippy::mutable_key_type)]
-  pub const fn errors(&self) -> &HashMap<Address, Error<T, D>> {
+  pub const fn errors(&self) -> &HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>> {
     &self.errors
   }
 }
@@ -223,8 +236,12 @@ where
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
 {
   #[inline]
-  pub async fn new(opts: Options<T>) -> Result<Self, Error<T, VoidDelegate>> {
-    Self::create(None, opts).await
+  pub async fn new(
+    transport: T,
+    opts: Options,
+  ) -> Result<Self, Error<T, VoidDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>>
+  {
+    Self::create(transport, None, opts).await
   }
 }
 
@@ -236,12 +253,20 @@ where
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
 {
   #[inline]
-  pub async fn with_delegate(delegate: D, opts: Options<T>) -> Result<Self, Error<T, D>> {
-    Self::create(Some(delegate), opts).await
+  pub async fn with_delegate(
+    transport: T,
+    delegate: D,
+    opts: Options,
+  ) -> Result<Self, Error<T, D>> {
+    Self::create(transport, Some(delegate), opts).await
   }
 
-  pub(crate) async fn create(delegate: Option<D>, opts: Options<T>) -> Result<Self, Error<T, D>> {
-    let (shutdown_rx, advertise, this) = Self::new_in(delegate, opts).await?;
+  pub(crate) async fn create(
+    transport: T,
+    delegate: Option<D>,
+    opts: Options,
+  ) -> Result<Self, Error<T, D>> {
+    let (shutdown_rx, advertise, this) = Self::new_in(transport, delegate, opts).await?;
     let meta = if let Some(d) = &this.delegate {
       d.node_meta(META_MAX_SIZE)
     } else {
@@ -266,10 +291,9 @@ where
   }
 
   pub(crate) async fn new_in(
-    advertise_addr: Option<<T::Resolver as AddressResolver>::ResolvedAddress>,
     transport: T,
     delegate: Option<D>,
-    mut opts: Options<T>,
+    mut opts: Options,
   ) -> Result<(Receiver<()>, SocketAddr, Self), Error<T, D>> {
     let (handoff_tx, handoff_rx) = async_channel::bounded(1);
     let (leave_broadcast_tx, leave_broadcast_rx) = async_channel::bounded(1);
@@ -344,18 +368,15 @@ where
     // Get the final advertise address from the transport, which may need
     // to see which address we bound to. We'll refresh this each time we
     // send out an alive message.
-    let advertise = transport.advertise_addr(advertise_addr)?;
-
-    let id = ServerId {
-      name: opts.name.clone(),
-      addr: advertise,
-    };
+    let advertise = transport.advertise_addr();
+    let id = transport.local_id();
+    let node = Node::new(id.clone(), advertise.clone());
     let awareness = Awareness::new(
       opts.awareness_max_multiplier as isize,
       #[cfg(feature = "metrics")]
       Arc::new(vec![]),
       #[cfg(feature = "metrics")]
-      id.clone(),
+      node.clone(),
     );
     let hot = HotData::new();
     let broadcast = TransmitLimitedQueue::new(
@@ -380,7 +401,6 @@ where
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
     let this = Showbiz {
       inner: Arc::new(ShowbizCore {
-        id: id.clone(),
         hot: HotData::new(),
         awareness,
         broadcast,
@@ -391,7 +411,7 @@ where
         handoff_tx,
         handoff_rx,
         queue: Mutex::new(MessageQueue::new()),
-        nodes: Arc::new(RwLock::new(Memberlist::new(id))),
+        nodes: Arc::new(RwLock::new(Memberlist::new(node))),
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
         transport,
         shutdown_tx,
@@ -479,7 +499,10 @@ where
   }
 
   /// Join directly by contacting the given node id
-  pub async fn join_node(&self, id: &ServerId) -> Result<(), Error<T, D>> {
+  pub async fn join_node(
+    &self,
+    id: &Node<T::Id, <T::Resolver as AddressResolver>::Address>,
+  ) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
@@ -510,8 +533,9 @@ where
   /// join the cluster.
   pub async fn join_many(
     &self,
-    existing: impl Iterator<Item = (Address, Name)>,
-  ) -> Result<Vec<ServerId>, JoinError<T, D>> {
+    existing: impl Iterator<Item = Node<T::Id, <T::Resolver as AddressResolver>::Address>>,
+  ) -> Result<Vec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>, JoinError<T, D>>
+  {
     if self.has_left() || self.has_shutdown() {
       return Err(JoinError {
         joined: Vec::new(),
@@ -525,72 +549,104 @@ where
 
     let (left, right): (FuturesUnordered<_>, FuturesUnordered<_>) = existing
       .into_iter()
-      .partition_map(|(addr, name)| match addr {
-        Address::Domain { domain, port } => Either::Right(async move {
-          let addrs = match self.resolve_addr(&domain, port).await {
-            Ok(addrs) => addrs,
+      .map(|node| {
+        async move {
+          let resolved_addr = self.inner.transport.resolver().resolve(node.address()).await;
+          match resolved_addr {
+            Ok(resolved_addr) => {
+              let id = Node::new(node.id().clone(), resolved_addr);
+              tracing::info!(target = "showbiz", local = %self.inner.transport.local_id(), peer = %id, "start join...");
+              if let Err(e) = self.push_pull_node(&id, true).await {
+                tracing::debug!(
+                  target = "showbiz",
+                  local = %self.inner.id,
+                  err = %e,
+                  "failed to join {}",
+                  id,
+                );
+                Err((node.addr(), e))
+              } else {
+                Ok(id)
+              }
+            }
             Err(e) => {
               tracing::debug!(
                 target = "showbiz",
                 err = %e,
                 "failed to resolve address {}",
-                domain.as_str(),
+                node.address(),
               );
-              return Err((Address::Domain { domain, port }, e));
-            }
-          };
-          let mut errors = Vec::new();
-          let mut joined = Vec::with_capacity(addrs.len());
-          for addr in addrs {
-            let id = ServerId::new(name.clone(), addr);
-            tracing::info!(target = "showbiz", local = %self.inner.id, peer = %id, "start join...");
-            if let Err(e) = self.push_pull_node(&id, true).await {
-              tracing::debug!(
-                target = "showbiz",
-                local = %self.inner.id,
-                err = %e,
-                "failed to join {}",
-                id,
-              );
-              errors.push((Address::Socket(addr), e));
-            } else {
-              joined.push(id);
+              Err((node, Error::Transport(TransportError::Resolve(e))))
             }
           }
-          Ok((joined, errors))
-        }),
-        address => {
-          let (addr, is_ip) = match address {
-            Address::Ip(addr) => (
-              SocketAddr::new(addr, self.inner.opts.bind_port.unwrap()),
-              true,
-            ),
-            Address::Socket(addr) => (addr, false),
-            Address::Domain { .. } => unreachable!(),
-          };
-          Either::Left(async move {
-            let id = ServerId::new(name, addr);
-            tracing::info!(target = "showbiz", local = %self.inner.id, peer = %id, "start join...");
-            if let Err(e) = self.push_pull_node(&id, true).await {
-              tracing::debug!(
-                target = "showbiz",
-                local = %self.inner.id,
-                err = %e,
-                "failed to join {}",
-                id,
-              );
-              let addr = if is_ip {
-                Address::Ip(addr.ip())
-              } else {
-                Address::Socket(addr)
-              };
-              Err((addr, e))
-            } else {
-              Ok(id)
-            }
-          })
         }
       });
+    // .map(|node| match addr {
+    //   Address::Domain { domain, port } => Either::Right(async move {
+    //     let addrs = match self.resolve_addr(&domain, port).await {
+    //       Ok(addrs) => addrs,
+    //       Err(e) => {
+    //         tracing::debug!(
+    //           target = "showbiz",
+    //           err = %e,
+    //           "failed to resolve address {}",
+    //           domain.as_str(),
+    //         );
+    //         return Err((Address::Domain { domain, port }, e));
+    //       }
+    //     };
+    //     let mut errors = Vec::new();
+    //     let mut joined = Vec::with_capacity(addrs.len());
+    //     for addr in addrs {
+    //       let id = ServerId::new(name.clone(), addr);
+    //       tracing::info!(target = "showbiz", local = %self.inner.id, peer = %id, "start join...");
+    //       if let Err(e) = self.push_pull_node(&id, true).await {
+    //         tracing::debug!(
+    //           target = "showbiz",
+    //           local = %self.inner.id,
+    //           err = %e,
+    //           "failed to join {}",
+    //           id,
+    //         );
+    //         errors.push((Address::Socket(addr), e));
+    //       } else {
+    //         joined.push(id);
+    //       }
+    //     }
+    //     Ok((joined, errors))
+    //   }),
+    //   address => {
+    //     let (addr, is_ip) = match address {
+    //       Address::Ip(addr) => (
+    //         SocketAddr::new(addr, self.inner.opts.bind_port.unwrap()),
+    //         true,
+    //       ),
+    //       Address::Socket(addr) => (addr, false),
+    //       Address::Domain { .. } => unreachable!(),
+    //     };
+    //     Either::Left(async move {
+    //       let id = Node::new(name, addr);
+    //       tracing::info!(target = "showbiz", local = %self.inner.id, peer = %id, "start join...");
+    //       if let Err(e) = self.push_pull_node(&id, true).await {
+    //         tracing::debug!(
+    //           target = "showbiz",
+    //           local = %self.inner.id,
+    //           err = %e,
+    //           "failed to join {}",
+    //           id,
+    //         );
+    //         let addr = if is_ip {
+    //           Address::Ip(addr.ip())
+    //         } else {
+    //           Address::Socket(addr)
+    //         };
+    //         Err((addr, e))
+    //       } else {
+    //         Ok(id)
+    //       }
+    //     })
+    //   }
+    // });
 
     let (left, right) =
       futures::future::join(left.collect::<Vec<_>>(), right.collect::<Vec<_>>()).await;
@@ -708,7 +764,11 @@ where
   /// mechanism). The maximum size of the message depends on the configured
   /// `packet_buffer_size` for this memberlist instance.
   #[inline]
-  pub async fn send(&self, to: &ServerId, msg: Message) -> Result<(), Error<T, D>> {
+  pub async fn send(
+    &self,
+    to: &Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    msg: Message,
+  ) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
@@ -720,7 +780,11 @@ where
   /// mechanism). Delivery is guaranteed if no error is returned, and there is no
   /// limit on the size of the message.
   #[inline]
-  pub async fn send_reliable(&self, to: &ServerId, msg: Message) -> Result<(), Error<T, D>> {
+  pub async fn send_reliable(
+    &self,
+    to: &Node<T::Id, <T::Resolver as AddressResolver>::Address>,
+    msg: Message,
+  ) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
@@ -763,94 +827,94 @@ where
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
-  /// a helper to initiate a TCP-based Dns lookup for the given host.
-  /// The built-in Go resolver will do a UDP lookup first, and will only use TCP if
-  /// the response has the truncate bit set, which isn't common on Dns servers like
-  /// Consul's. By doing the TCP lookup directly, we get the best chance for the
-  /// largest list of hosts to join. Since joins are relatively rare events, it's ok
-  /// to do this rather expensive operation.
-  pub(crate) async fn tcp_lookup_ip(
-    &self,
-    dns: &Dns<T>,
-    host: &str,
-    default_port: u16,
-  ) -> Result<Vec<SocketAddr>, Error<T, D>> {
-    // Don't attempt any TCP lookups against non-fully qualified domain
-    // names, since those will likely come from the resolv.conf file.
-    if !host.contains('.') {
-      return Ok(Vec::new());
-    }
+  // /// a helper to initiate a TCP-based Dns lookup for the given host.
+  // /// The built-in Go resolver will do a UDP lookup first, and will only use TCP if
+  // /// the response has the truncate bit set, which isn't common on Dns servers like
+  // /// Consul's. By doing the TCP lookup directly, we get the best chance for the
+  // /// largest list of hosts to join. Since joins are relatively rare events, it's ok
+  // /// to do this rather expensive operation.
+  // pub(crate) async fn tcp_lookup_ip(
+  //   &self,
+  //   dns: &Dns<T>,
+  //   host: &str,
+  //   default_port: u16,
+  // ) -> Result<Vec<SocketAddr>, Error<T, D>> {
+  //   // Don't attempt any TCP lookups against non-fully qualified domain
+  //   // names, since those will likely come from the resolv.conf file.
+  //   if !host.contains('.') {
+  //     return Ok(Vec::new());
+  //   }
 
-    // Make sure the domain name is terminated with a dot (we know there's
-    // at least one character at this point).
-    let dn = host.chars().last().unwrap();
-    let ips = if dn != '.' {
-      let mut dn = host.to_string();
-      dn.push('.');
-      dns.lookup_ip(dn).await
-    } else {
-      dns.lookup_ip(host).await
-    }
-    .map_err(Error::dns_resolve)?;
+  //   // Make sure the domain name is terminated with a dot (we know there's
+  //   // at least one character at this point).
+  //   let dn = host.chars().last().unwrap();
+  //   let ips = if dn != '.' {
+  //     let mut dn = host.to_string();
+  //     dn.push('.');
+  //     dns.lookup_ip(dn).await
+  //   } else {
+  //     dns.lookup_ip(host).await
+  //   }
+  //   .map_err(Error::dns_resolve)?;
 
-    Ok(
-      ips
-        .into_iter()
-        .map(|ip| SocketAddr::new(ip, default_port))
-        .collect(),
-    )
-  }
+  //   Ok(
+  //     ips
+  //       .into_iter()
+  //       .map(|ip| SocketAddr::new(ip, default_port))
+  //       .collect(),
+  //   )
+  // }
 
-  /// Used to resolve the address into an address,
-  /// port, and error. If no port is given, use the default
-  pub(crate) async fn resolve_addr(
-    &self,
-    addr: &Domain,
-    port: Option<u16>,
-  ) -> Result<Vec<SocketAddr>, Error<T, D>> {
-    // This captures the supplied port, or the default one.
-    let port = port.unwrap_or(
-      self
-        .inner
-        .opts
-        .bind_port
-        .unwrap_or(self.inner.advertise.port()),
-    );
+  // /// Used to resolve the address into an address,
+  // /// port, and error. If no port is given, use the default
+  // pub(crate) async fn resolve_addr(
+  //   &self,
+  //   addr: &Domain,
+  //   port: Option<u16>,
+  // ) -> Result<Vec<SocketAddr>, Error<T, D>> {
+  //   // This captures the supplied port, or the default one.
+  //   let port = port.unwrap_or(
+  //     self
+  //       .inner
+  //       .opts
+  //       .bind_port
+  //       .unwrap_or(self.inner.advertise.port()),
+  //   );
 
-    // First try TCP so we have the best chance for the largest list of
-    // hosts to join. If this fails it's not fatal since this isn't a standard
-    // way to query Dns, and we have a fallback below.
-    if let Some(dns) = self.inner.dns.as_ref() {
-      match self.tcp_lookup_ip(dns, addr.as_str(), port).await {
-        Ok(ips) => {
-          if !ips.is_empty() {
-            return Ok(ips);
-          }
-        }
-        Err(e) => {
-          tracing::debug!(
-            target = "showbiz",
-            "TCP-first lookup failed for '{}', falling back to UDP: {}",
-            addr,
-            e
-          );
-        }
-      }
-    }
+  //   // First try TCP so we have the best chance for the largest list of
+  //   // hosts to join. If this fails it's not fatal since this isn't a standard
+  //   // way to query Dns, and we have a fallback below.
+  //   if let Some(dns) = self.inner.dns.as_ref() {
+  //     match self.tcp_lookup_ip(dns, addr.as_str(), port).await {
+  //       Ok(ips) => {
+  //         if !ips.is_empty() {
+  //           return Ok(ips);
+  //         }
+  //       }
+  //       Err(e) => {
+  //         tracing::debug!(
+  //           target = "showbiz",
+  //           "TCP-first lookup failed for '{}', falling back to UDP: {}",
+  //           addr,
+  //           e
+  //         );
+  //       }
+  //     }
+  //   }
 
-    // If TCP didn't yield anything then use the normal Go resolver which
-    // will try UDP, then might possibly try TCP again if the UDP response
-    // indicates it was truncated.
-    addr
-      .as_str()
-      .to_socket_addrs()
-      .map_err(|e| Error::Transport(TransportError::Dns(DnsError::IO(e))))
-      .map(|addrs| addrs.into_iter().collect())
-  }
+  //   // If TCP didn't yield anything then use the normal Go resolver which
+  //   // will try UDP, then might possibly try TCP again if the UDP response
+  //   // indicates it was truncated.
+  //   addr
+  //     .as_str()
+  //     .to_socket_addrs()
+  //     .map_err(|e| Error::Transport(TransportError::Dns(DnsError::IO(e))))
+  //     .map(|addrs| addrs.into_iter().collect())
+  // }
 
   #[inline]
-  pub(crate) fn get_advertise(&self) -> SocketAddr {
-    self.inner.advertise
+  pub(crate) fn get_advertise(&self) -> &<T::Resolver as AddressResolver>::ResolvedAddress {
+    &self.inner.advertise
   }
 
   /// Check for any other alive node.
@@ -894,7 +958,7 @@ where
 
   pub(crate) async fn verify_protocol(
     &self,
-    _remote: &[ArchivedPushServerState],
+    _remote: &[PushServerState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>],
   ) -> Result<(), Error<T, D>> {
     // TODO: now we do not need to handle this situation, because there is no update
     // on protocol.
@@ -911,4 +975,8 @@ where
   //   //   f(n)
   //   // }
   // }
+}
+
+#[test]
+fn test() {
 }

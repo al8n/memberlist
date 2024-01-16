@@ -7,4 +7,19 @@ repository.workspace = true
 homepage.workspace = true
 metadata.workspace = true
 
+[features]
+
+serde = ["showbiz-core/serde", "dep:serde"]
+rkyv = ["showbiz-core/rkyv"]
+
+metrics = ["showbiz-core/metrics", "dep:metrics"]
+
 [dependencies]
+agnostic.workspace = true
+bytes.workspace = true
+futures.workspace = true
+metrics = { workspace = true, optional = true }
+nodecraft.workspace = true
+
+showbiz-core = { workspace = true }
+serde = { working = true, optional = true }

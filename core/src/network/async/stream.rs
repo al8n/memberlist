@@ -3,6 +3,7 @@ use std::sync::Arc;
 // use agnostic::lock::RwLock;
 use either::Either;
 use futures::{Future, Stream};
+use nodecraft::{resolver::AddressResolver, Node};
 use rkyv::{
   de::deserializers::{SharedDeserializeMap, SharedDeserializeMapError},
   Deserialize,
@@ -10,7 +11,7 @@ use rkyv::{
 
 use crate::{
   transport::ReliableConnection,
-  types::{Server, ServerId},
+  types::Server,
 };
 
 use super::*;
@@ -58,7 +59,7 @@ where
   /// Used to merge the remote state with our local state
   pub(crate) async fn merge_remote_state<'a>(
     &'a self,
-    node_state: &'a ArchivedPushPullMessage,
+    node_state: &'a PushPullMessage<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
     self.verify_protocol(node_state.body.as_slice()).await?;
 
@@ -102,7 +103,7 @@ where
 
   pub(crate) async fn send_user_msg(
     &self,
-    addr: &ServerId,
+    addr: &Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     msg: crate::types::Message,
   ) -> Result<(), Error<T, D>> {
     let mut conn = self
@@ -287,10 +288,10 @@ where
   }
 
   /// Used to read the remote state from a connection
-  pub(crate) async fn read_remote_state<'a>(
-    &'a self,
-    data: &'a [u8],
-  ) -> Result<&'a ArchivedPushPullMessage, Error<T, D>> {
+  pub(crate) async fn read_remote_state(
+    &self,
+    data: &[u8],
+  ) -> Result<PushPullMessage, Error<T, D>> {
     PushPullMessage::decode_archived(data)
       .map(|(_, msg)| msg)
       .map_err(|e| TransportError::Decode(e).into())
@@ -406,7 +407,7 @@ where
     label: Label,
     encryption_enabled: bool,
     keyring: Option<SecretKeyring>,
-    opts: &Options<T>,
+    opts: &Options,
     #[cfg(feature = "metrics")] metric_labels: &[metrics::Label],
   ) -> Result<(EncodeHeader, Bytes), Error<T, D>> {
     let mut h = conn.read_message_header().await.map_err(Error::transport)?;

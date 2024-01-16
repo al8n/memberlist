@@ -102,7 +102,7 @@ impl<I, A> Server<I, A> {
   }
 }
 
-impl<I: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for Server {
+impl<I: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for Server<I, A> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{}({})", self.id, self.addr)
   }

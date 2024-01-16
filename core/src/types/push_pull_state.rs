@@ -52,7 +52,7 @@ pub struct PushServerState<I, A> {
   feature = "rkyv",
   archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash))
 )]
-pub struct PushPullMessage<I, A> {
+pub struct PushPull<I, A> {
   header: PushPullHeader,
   body: Vec<PushServerState<I, A>>,
   user_data: Option<Bytes>,

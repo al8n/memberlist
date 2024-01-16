@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::Future;
-use nodecraft::{Address, Id, Node};
+use nodecraft::{Address, Id, Node, CheapClone};
 
 use crate::types::{Message, Server};
 
@@ -19,7 +19,7 @@ pub trait Delegate: Send + Sync + 'static {
   type Id: Id;
 
   /// The address type of the delegate
-  type Address: Address;
+  type Address: CheapClone + Send + Sync + 'static;
 
   /// Used to retrieve meta-data about the current node
   /// when broadcasting an alive message. It's length is limited to
@@ -42,7 +42,7 @@ pub trait Delegate: Send + Sync + 'static {
     &self,
     overhead: usize,
     limit: usize,
-  ) -> impl Future<Output = Result<Vec<Message>, Self::Error>> + Send;
+  ) -> impl Future<Output = Result<Vec<Message<Self::Id, Self::Address>>, Self::Error>> + Send;
 
   /// Used for a TCP Push/Pull. This is sent to
   /// the remote side in addition to the membership information. Any
@@ -134,7 +134,7 @@ impl<I, A> Default for VoidDelegate<I, A> {
   }
 }
 
-impl<I: Id, A: Address> Delegate for VoidDelegate<I, A> {
+impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate for VoidDelegate<I, A> {
   type Error = VoidDelegateError;
   type Id = I;
   type Address = A;
@@ -151,7 +151,7 @@ impl<I: Id, A: Address> Delegate for VoidDelegate<I, A> {
     &self,
     _overhead: usize,
     _limit: usize,
-  ) -> Result<Vec<Message>, Self::Error> {
+  ) -> Result<Vec<Message<Self::Id, Self::Address>>, Self::Error> {
     Ok(Vec::new())
   }
 

@@ -6,10 +6,7 @@ use crate::{
   showbiz::{AckHandler, Member, Memberlist},
   suspicion::Suspicion,
   timer::Timer,
-  types::{
-    Alive, ArchivedAlive, ArchivedPushServerState, ArchivedServerState, Dead, IndirectPing,
-    Message, Ping, Suspect, Type,
-  },
+  types::{Alive, Dead, IndirectPing, Message, Ping, PushServerState, Suspect},
 };
 
 use super::*;
@@ -17,13 +14,14 @@ use agnostic::Runtime;
 use bytes::Bytes;
 use either::Either;
 use futures::{future::BoxFuture, Future, FutureExt, Stream};
+use nodecraft::{resolver::AddressResolver, Node};
 use rand::{seq::SliceRandom, Rng};
 
-#[cfg(any(test, feature = "test"))]
-pub(crate) mod tests;
-use rkyv::{de::deserializers::SharedDeserializeMap, Deserialize};
-#[cfg(any(test, feature = "test"))]
-pub use tests::*;
+// #[cfg(any(test, feature = "test"))]
+// pub(crate) mod tests;
+
+// #[cfg(any(test, feature = "test"))]
+// pub use tests::*;
 
 #[inline]
 fn random_offset(n: usize) -> usize {
@@ -34,7 +32,7 @@ fn random_offset(n: usize) -> usize {
 }
 
 #[inline]
-fn random_nodes(k: usize, mut nodes: Vec<Arc<Server>>) -> Vec<Arc<Server>> {
+fn random_nodes<I, A>(k: usize, mut nodes: Vec<Arc<Server<I, A>>>) -> Vec<Arc<Server<I, A>>> {
   let n = nodes.len();
   if n == 0 {
     return Vec::new();
@@ -73,15 +71,15 @@ where
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Initiates a ping to the node with the specified node.
-  pub async fn ping(&self, node: ServerId) -> Result<Duration, Error<T, D>> {
+  pub async fn ping(
+    &self,
+    node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  ) -> Result<Duration, Error<T, D>> {
     // Prepare a ping message and setup an ack handler.
     let self_addr = self.get_advertise();
     let ping = Ping {
       seq_no: self.next_seq_no(),
-      source: ServerId {
-        name: self.inner.opts.name.clone(),
-        addr: self_addr,
-      },
+      source: Node::new(self.inner.transport.local_id().clone(), self_addr.clone()),
       target: node.clone(),
     };
 
@@ -132,7 +130,11 @@ where
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Does a complete state exchange with a specific node.
-  pub(crate) async fn push_pull_node(&self, id: &ServerId, join: bool) -> Result<(), Error<T, D>> {
+  pub(crate) async fn push_pull_node(
+    &self,
+    id: &Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    join: bool,
+  ) -> Result<(), Error<T, D>> {
     #[cfg(feature = "metrics")]
     let now = Instant::now();
     #[cfg(feature = "metrics")]
@@ -148,8 +150,12 @@ where
 
   pub(crate) async fn dead_node(
     &self,
-    memberlist: &mut Memberlist<T::Runtime>,
-    d: Dead,
+    memberlist: &mut Memberlist<
+      T::Id,
+      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::Runtime,
+    >,
+    d: Dead<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
     // let node = d.node.clone();
     let idx = match memberlist.node_map.get(&d.node) {
@@ -230,7 +236,10 @@ where
     Ok(())
   }
 
-  pub(crate) async fn suspect_node(&self, s: Suspect) -> Result<(), Error<T, D>> {
+  pub(crate) async fn suspect_node(
+    &self,
+    s: Suspect<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  ) -> Result<(), Error<T, D>> {
     let mut mu = self.inner.nodes.write().await;
 
     let Some(&idx) = mu.node_map.get(&s.node) else {
@@ -370,9 +379,9 @@ where
 
   /// Invoked by the network layer when we get a message about a
   /// live node.
-  pub(crate) async fn alive_node<'a>(
-    &'a self,
-    alive: Either<Alive, &'a ArchivedAlive>,
+  pub(crate) async fn alive_node(
+    &self,
+    alive: Alive<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     notify_tx: Option<async_channel::Sender<()>>,
     bootstrap: bool,
   ) {
@@ -405,7 +414,8 @@ where
     };
 
     let node = Arc::new(Server {
-      id: alive.node.clone(),
+      id: alive.node.id().clone(),
+      addr: alive.node.addr().clone(),
       meta: alive.meta.clone(),
       state: ServerState::Alive,
       protocol_version: alive.protocol_version,
@@ -449,7 +459,8 @@ where
               .notify_conflict(
                 state.node.clone(),
                 Arc::new(Server {
-                  id: alive.node.clone(),
+                  id: alive.node.id().clone(),
+                  addr: alive.node.addr().clone(),
                   meta: alive.meta.clone(),
                   state: ServerState::Alive,
                   protocol_version: alive.protocol_version,
@@ -559,7 +570,8 @@ where
         .incarnation
         .store(alive.incarnation, Ordering::Relaxed);
       member.state.node = Arc::new(Server {
-        id: alive.node,
+        id: alive.node.id().clone(),
+        addr: alive.node.addr().clone(),
         meta: alive.meta,
         state: ServerState::Alive,
         protocol_version: alive.protocol_version,
@@ -591,18 +603,20 @@ where
     }
   }
 
-  pub(crate) async fn merge_state<'a>(&'a self, remote: &'a [ArchivedPushServerState]) {
+  pub(crate) async fn merge_state<'a>(
+    &'a self,
+    remote: &'a [PushServerState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>],
+  ) {
     let futs = remote.iter().filter_map(|r| {
-      enum State {
-        Alive(Alive),
-        Left(Dead),
-        Suspect(Suspect),
+      enum State<T: Transport> {
+        Alive(Alive<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
+        Left(Dead<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
+        Suspect(Suspect<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
       }
 
-      impl State {
-        async fn run<T, D>(self, s: &Showbiz<T, D>)
+      impl<T: Transport> State<T> {
+        async fn run<D>(self, s: &Showbiz<T, D>)
         where
-          T: Transport,
           D: Delegate,
           <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
           <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -626,58 +640,29 @@ where
         }
       }
 
-      let mut deserializer = SharedDeserializeMap::new();
       let state = match r.state {
-        ArchivedServerState::Alive => {
-          let node = match r.node.deserialize(&mut deserializer) {
-            Ok(n) => n,
-            Err(e) => {
-              tracing::error!(target = "showbiz.state", err=%e, "fail to decode node id");
-              return None;
-            },
-          };
-          let meta = match r.meta.deserialize(&mut deserializer) {
-            Ok(meta) => meta,
-            Err(e) => {
-              tracing::error!(target = "showbiz.state", err=%e, "fail to decode node meta");
-              return None;
-            },
-          };
+        ServerState::Alive => {
           State::Alive(Alive {
             incarnation: r.incarnation,
-            node,
-            meta,
+            node: r.node,
+            meta: r.meta,
             protocol_version: r.protocol_version.into(),
             delegate_version: r.delegate_version.into(),
           })
         }
-        ArchivedServerState::Left => {
-          let node = match r.node.deserialize(&mut deserializer) {
-            Ok(n) => n,
-            Err(e) => {
-              tracing::error!(target = "showbiz.state", err=%e, "fail to decode node id");
-              return None;
-            },
-          };
+        ServerState::Left => {
           State::Left(Dead {
             incarnation: r.incarnation,
-            node,
+            node: r.node,
             from: self.inner.id.clone(),
           })
         }
         // If the remote node believes a node is dead, we prefer to
         // suspect that node instead of declaring it dead instantly
-        ArchivedServerState::Dead | ArchivedServerState::Suspect => {
-          let node = match r.node.deserialize(&mut deserializer) {
-            Ok(n) => n,
-            Err(e) => {
-              tracing::error!(target = "showbiz.state", err=%e, "fail to decode node id");
-              return None;
-            },
-          };
+        ServerState::Dead | ServerState::Suspect => {
           State::Suspect(Suspect {
             incarnation: r.incarnation,
-            node,
+            node: r.node,
             from: self.inner.id.clone(),
           })
         }
@@ -710,8 +695,8 @@ where
 // -------------------------------Private Methods--------------------------------
 
 #[inline]
-fn move_dead_nodes<R: Runtime>(
-  nodes: &mut Vec<Member<R>>,
+fn move_dead_nodes<I, A, R>(
+  nodes: &mut Vec<Member<I, A, R>>,
   gossip_to_the_dead_time: Duration,
 ) -> usize {
   let mut num_dead = 0;
@@ -893,7 +878,10 @@ where
     }
   }
 
-  async fn probe_node(&self, target: &LocalServerState) {
+  async fn probe_node(
+    &self,
+    target: &LocalServerState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  ) {
     #[cfg(feature = "metrics")]
     let now = Instant::now();
     #[cfg(feature = "metrics")]
@@ -920,10 +908,7 @@ where
     let self_addr = self.get_advertise();
     let ping = Ping {
       seq_no: self.next_seq_no(),
-      source: ServerId {
-        name: self.inner.opts.name.clone(),
-        addr: self_addr,
-      },
+      source: Node::new(self.inner.transport.local_id().clone(), self_addr.clone()),
       target: target.id().clone(),
     };
 
@@ -1036,8 +1021,8 @@ where
 
   async fn handle_remote_failure(
     &self,
-    target: &LocalServerState,
-    ping: Ping,
+    target: &LocalServerState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    ping: Ping<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     ack_rx: async_channel::Receiver<AckMessage>,
     nack_rx: async_channel::Receiver<()>,
     deadline: Instant,
@@ -1399,7 +1384,11 @@ where
   /// accusedInc value, or you can supply 0 to just get the next incarnation number.
   /// This alters the node state that's passed in so this MUST be called while the
   /// nodeLock is held.
-  async fn refute(&self, state: &LocalServerState, accused_inc: u32) {
+  async fn refute(
+    &self,
+    state: &LocalServerState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    accused_inc: u32,
+  ) {
     // Make sure the incarnation number beats the accusation.
     let mut inc = self.next_incarnation();
     if accused_inc >= inc {

@@ -17,7 +17,7 @@ use crate::{
   types::{
     AckResponse, Alive, EncodeHeader, IndirectPing, MessageType, Ping, Type, ENCODE_HEADER_SIZE,
   },
-  CompressionAlgo, Message, Name, Options, ServerId, Showbiz,
+  CompressionAlgo, Message, Options, Showbiz,
 };
 
 async fn listen_udp<R>() -> Result<<R::Net as Net>::UdpSocket, std::io::Error>

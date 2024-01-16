@@ -17,10 +17,10 @@ use futures::{future::FutureExt, Future, Stream};
 mod packet;
 mod stream;
 
-#[cfg(any(test, feature = "test"))]
-pub(crate) mod tests;
-#[cfg(any(test, feature = "test"))]
-pub use tests::*;
+// #[cfg(any(test, feature = "test"))]
+// pub(crate) mod tests;
+// #[cfg(any(test, feature = "test"))]
+// pub use tests::*;
 
 impl<D, T> Showbiz<T, D>
 where

@@ -25,9 +25,9 @@ macro_rules! bad_bail {
 bad_bail!(Suspect);
 bad_bail!(Dead);
 
-impl Dead {
+impl<I: PartialEq, A> Dead<I, A> {
   #[inline]
   pub(crate) fn is_self(&self) -> bool {
-    self.node == self.from
+    self.node.id().eq(self.from.id())
   }
 }

@@ -26,7 +26,7 @@ use super::{
   suspicion::Suspicion,
   timer::Timer,
   transport::Transport,
-  types::{Alive, Message, MessageType, Server},
+  types::{Alive, Message, Server},
   Options,
 };
 
@@ -58,7 +58,7 @@ impl HotData {
 
 #[viewit::viewit]
 pub(crate) struct MessageHandoff {
-  msg_ty: MessageType,
+  // msg_ty: MessageType,
   buf: Bytes,
   from: SocketAddr,
 }

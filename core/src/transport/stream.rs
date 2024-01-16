@@ -1,23 +1,8 @@
-use async_channel::{Receiver, RecvError, SendError, Sender};
+use async_channel::{Receiver, Sender};
+pub use async_channel::{RecvError, TryRecvError, SendError, TrySendError};
 use futures::Stream;
 
 use super::*;
-
-pub struct PacketProducerError(SendError<Packet>);
-
-impl core::fmt::Debug for PacketProducerError {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{:?}", self.0)
-  }
-}
-
-impl core::fmt::Display for PacketProducerError {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{}", self.0)
-  }
-}
-
-impl std::error::Error for PacketProducerError {}
 
 #[derive(Debug, Clone)]
 #[repr(transparent)]
@@ -31,22 +16,45 @@ pub struct PacketSubscriber {
   receiver: Receiver<Packet>,
 }
 
-pub struct PacketSubscriberError(RecvError);
-
 pub fn packet_stream() -> (PacketProducer, PacketSubscriber) {
   let (sender, receiver) = async_channel::unbounded();
   (PacketProducer { sender }, PacketSubscriber { receiver })
 }
 
 impl PacketProducer {
-  pub async fn send(&self, packet: Packet) -> Result<(), PacketProducerError> {
-    self.sender.send(packet).await.map_err(PacketProducerError)
+  /// Sends a packet into the producer.
+  ///
+  /// If the producer is full, this method waits until there is space for a message.
+  ///
+  /// If the producer is closed, this method returns an error.
+  pub async fn send(&self, packet: Packet) -> Result<(), SendError<Packet>> {
+    self.sender.send(packet).await
+  }
+
+  /// Attempts to send a packet into the producer.
+  /// 
+  /// If the channel is full or closed, this method returns an error.
+  pub fn try_send(&self, packet: Packet) -> Result<(), TrySendError<Packet>> {
+    self.sender.try_send(packet)
   }
 }
 
 impl PacketSubscriber {
-  pub async fn recv(&self) -> Result<Packet, PacketSubscriberError> {
-    self.receiver.recv().await.map_err(PacketSubscriberError)
+  /// Receives a packet from the subscriber.
+  ///
+  /// If the subscriber is empty, this method waits until there is a message.
+  ///
+  /// If the subscriber is closed, this method receives a message or returns an error if there are
+  /// no more messages.
+  pub async fn recv(&self) -> Result<Packet, RecvError> {
+    self.receiver.recv().await
+  }
+
+  /// Attempts to receive a message from the subscriber.
+  /// 
+  /// If the subscriber is empty, or empty and closed, this method returns an error.
+  pub fn try_recv(&self) -> Result<Packet, TryRecvError> {
+    self.receiver.try_recv()
   }
 }
 
@@ -61,43 +69,21 @@ impl Stream for PacketSubscriber {
   }
 }
 
-impl core::fmt::Debug for PacketSubscriberError {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{:?}", self.0)
-  }
+pub fn promised_stream<T: Transport>() -> (StreamProducer<T::PromisedStream>, StreamSubscriber<T::PromisedStream>) {
+  let (sender, receiver) = async_channel::bounded(1);
+  (
+    StreamProducer { sender },
+    StreamSubscriber { receiver },
+  )
 }
-
-impl core::fmt::Display for PacketSubscriberError {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{}", self.0)
-  }
-}
-
-impl std::error::Error for PacketSubscriberError {}
-
-pub struct ConnectionProducerError<T: Transport>(SendError<ReliableConnection<T>>);
-
-impl<T: Transport> core::fmt::Debug for ConnectionProducerError<T> {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{:?}", self.0)
-  }
-}
-
-impl<T: Transport> core::fmt::Display for ConnectionProducerError<T> {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{}", self.0)
-  }
-}
-
-impl<T: Transport> std::error::Error for ConnectionProducerError<T> {}
 
 #[derive(Debug)]
 #[repr(transparent)]
-pub struct ConnectionProducer<T: Transport> {
-  sender: Sender<ReliableConnection<T>>,
+pub struct StreamProducer<S> {
+  sender: Sender<S>,
 }
 
-impl<T: Transport> Clone for ConnectionProducer<T> {
+impl<S> Clone for StreamProducer<S> {
   fn clone(&self) -> Self {
     Self {
       sender: self.sender.clone(),
@@ -107,11 +93,11 @@ impl<T: Transport> Clone for ConnectionProducer<T> {
 
 #[derive(Debug)]
 #[repr(transparent)]
-pub struct ConnectionSubscriber<T: Transport> {
-  receiver: Receiver<ReliableConnection<T>>,
+pub struct StreamSubscriber<S> {
+  receiver: Receiver<S>,
 }
 
-impl<T: Transport> Clone for ConnectionSubscriber<T> {
+impl<S> Clone for StreamSubscriber<S> {
   fn clone(&self) -> Self {
     Self {
       receiver: self.receiver.clone(),
@@ -119,52 +105,55 @@ impl<T: Transport> Clone for ConnectionSubscriber<T> {
   }
 }
 
-pub struct ConnectionSubscriberError(RecvError);
-
-impl core::fmt::Debug for ConnectionSubscriberError {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{:?}", self.0)
-  }
-}
-
-impl core::fmt::Display for ConnectionSubscriberError {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{}", self.0)
-  }
-}
-
-impl std::error::Error for ConnectionSubscriberError {}
-
-pub fn connection_stream<T: Transport>() -> (ConnectionProducer<T>, ConnectionSubscriber<T>) {
-  let (sender, receiver) = async_channel::bounded(1);
-  (
-    ConnectionProducer { sender },
-    ConnectionSubscriber { receiver },
-  )
-}
-
-impl<T: Transport> ConnectionProducer<T> {
-  pub async fn send(&self, conn: ReliableConnection<T>) -> Result<(), ConnectionProducerError<T>> {
+impl<S> StreamProducer<S> {
+  /// Sends a promised stream into the producer.
+  ///
+  /// If the producer is full, this method waits until there is space for a stream.
+  ///
+  /// If the producer is closed, this method returns an error.
+  pub async fn send(&self, conn: S) -> Result<(), SendError<S>> {
     self
       .sender
       .send(conn)
       .await
-      .map_err(ConnectionProducerError)
+  }
+
+  /// Attempts to send a promised stream into the producer.
+  ///
+  /// If the producer is full or closed, this method returns an error.
+  pub fn try_send(&self, conn: S) -> Result<(), TrySendError<S>> {
+    self
+      .sender
+      .try_send(conn)
   }
 }
 
-impl<T: Transport> ConnectionSubscriber<T> {
-  pub async fn recv(&self) -> Result<ReliableConnection<T>, ConnectionSubscriberError> {
+impl<S> StreamSubscriber<S> {
+  /// Receives a promised stream from the subscriber.
+  ///
+  /// If the subscriber is empty, this method waits until there is a message.
+  ///
+  /// If the subscriber is closed, this method receives a message or returns an error if there are
+  /// no more messages.
+  pub async fn recv(&self) -> Result<S, RecvError> {
     self
       .receiver
       .recv()
       .await
-      .map_err(ConnectionSubscriberError)
+  }
+
+  /// Attempts to receive a message from the channel.
+  /// 
+  /// If the channel is empty, or empty and closed, this method returns an error.
+  pub fn try_recv(&self) -> Result<S, TryRecvError> {
+    self
+      .receiver
+      .try_recv()
   }
 }
 
-impl<T: Transport> Stream for ConnectionSubscriber<T> {
-  type Item = <Receiver<ReliableConnection<T>> as Stream>::Item;
+impl<S> Stream for StreamSubscriber<S> {
+  type Item = <Receiver<S> as Stream>::Item;
 
   fn poll_next(
     mut self: std::pin::Pin<&mut Self>,
