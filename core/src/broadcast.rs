@@ -1,14 +1,19 @@
 use crate::{
-  delegate::Delegate, error::Error, network::USER_MSG_OVERHEAD, showbiz::Showbiz,
-  transport::Transport, types::Message,
+  delegate::Delegate,
+  error::Error,
+  network::USER_MSG_OVERHEAD,
+  showbiz::Showbiz,
+  transport::{Transport, Wire},
+  types::{CompoundMessage, Message},
 };
 use async_channel::Sender;
-use nodecraft::{resolver::AddressResolver, Node};
+use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 
 /// Something that can be broadcasted via gossip to
 /// the memberlist cluster.
 pub trait Broadcast: Send + Sync + 'static {
   type Id: Clone + Eq + core::hash::Hash + core::fmt::Debug + core::fmt::Display;
+  type Message: Clone + core::fmt::Debug + Send + Sync + 'static;
 
   /// An optional extension of the Broadcast trait that
   /// gives each message a unique id and that is used to optimize
@@ -18,8 +23,8 @@ pub trait Broadcast: Send + Sync + 'static {
   /// invalidates a previous broadcast
   fn invalidates(&self, other: &Self) -> bool;
 
-  /// Returns bytes form of the message
-  fn message(&self) -> &Message;
+  /// Returns the message
+  fn message(&self) -> &Self::Message;
 
   /// Invoked when the message will no longer
   /// be broadcast, either due to invalidation or to the
@@ -47,42 +52,42 @@ pub trait Broadcast: Send + Sync + 'static {
 #[viewit::viewit]
 pub(crate) struct ShowbizBroadcast<I, A> {
   node: Node<I, A>,
-  msg: Message,
+  msg: Message<I, A>,
   notify: Option<async_channel::Sender<()>>,
 }
 
-impl<I, A> Broadcast for ShowbizBroadcast<I, A> {
-  type Id = Node<I, A>;
+impl<I, A> Broadcast for ShowbizBroadcast<I, A>
+where
+  I: CheapClone
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  A: CheapClone + core::fmt::Display + core::fmt::Debug + Send + Sync + 'static,
+{
+  type Id = I;
+  type Message = Message<I, A>;
 
   fn id(&self) -> Option<&Self::Id> {
-    Some(&self.node)
+    Some(self.node.id())
   }
 
   fn invalidates(&self, other: &Self) -> bool {
-    self.node == other.node
+    self.node.id().eq(&other.node.id())
   }
 
-  fn message(&self) -> &Message {
+  fn message(&self) -> &Self::Message {
     &self.msg
   }
 
   async fn finished(&self) {
     if let Some(tx) = &self.notify {
       if let Err(e) = tx.send(()).await {
-        tracing::error!(target = "showbiz", "broadcast failed to notify: {}", e);
+        tracing::error!(target:  "showbiz", "broadcast failed to notify: {}", e);
         return;
-      }
-    }
-  }
-
-  #[cfg(feature = "nightly")]
-  fn finished<'a>(&'a self) -> impl std::future::Future<Output = ()> + Send + 'a {
-    async move {
-      if let Some(tx) = &self.notify {
-        if let Err(e) = tx.send(()).await {
-          tracing::error!(target = "showbiz", "failed to notify: {}", e);
-          return;
-        }
       }
     }
   }
@@ -92,12 +97,16 @@ impl<I, A> Broadcast for ShowbizBroadcast<I, A> {
   }
 }
 
-impl<D: Delegate, T: Transport> Showbiz<T, D> {
+impl<D, T> Showbiz<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
   #[inline]
   pub(crate) async fn broadcast_notify(
     &self,
-    node: Node<T::Id, <T::Resolver as AddressResolver>::Address>,
-    msg: Message,
+    node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     notify_tx: Option<Sender<()>>,
   ) {
     let _ = self.queue_broadcast(node, msg, notify_tx).await;
@@ -106,8 +115,8 @@ impl<D: Delegate, T: Transport> Showbiz<T, D> {
   #[inline]
   pub(crate) async fn broadcast(
     &self,
-    node: Node<T::Id, <T::Resolver as AddressResolver>::Address>,
-    msg: Message,
+    node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) {
     let _ = self.queue_broadcast(node, msg, None).await;
   }
@@ -115,8 +124,8 @@ impl<D: Delegate, T: Transport> Showbiz<T, D> {
   #[inline]
   pub(crate) async fn queue_broadcast(
     &self,
-    node: Node<T::Id, <T::Resolver as AddressResolver>::Address>,
-    msg: Message,
+    node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     notify_tx: Option<Sender<()>>,
   ) {
     self
@@ -136,10 +145,11 @@ impl<D: Delegate, T: Transport> Showbiz<T, D> {
   #[inline]
   pub(crate) async fn get_broadcast_with_prepend(
     &self,
-    to_send: Vec<Message>,
+    to_send: CompoundMessage<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     overhead: usize,
     limit: usize,
-  ) -> Result<Vec<Message>, Error<T, D>> {
+  ) -> Result<CompoundMessage<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>, Error<T, D>>
+  {
     // Get memberlist messages first
     let mut to_send = self
       .inner
@@ -151,8 +161,8 @@ impl<D: Delegate, T: Transport> Showbiz<T, D> {
     if let Some(delegate) = &self.delegate {
       // Determine the bytes used already
       let mut bytes_used = 0;
-      for msg in &to_send {
-        bytes_used += msg.0.len() + overhead;
+      for msg in to_send.iter() {
+        bytes_used += <T::Wire as Wire>::encoded_len(msg) + overhead;
       }
 
       // Check space remaining for user messages
@@ -160,9 +170,16 @@ impl<D: Delegate, T: Transport> Showbiz<T, D> {
       if avail > overhead + USER_MSG_OVERHEAD {
         to_send.extend(
           delegate
-            .get_broadcasts(overhead + USER_MSG_OVERHEAD, avail)
+            .broadcast_messages(overhead + USER_MSG_OVERHEAD, avail, |b| {
+              let msg =
+                Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::UserData(b);
+              let len = <T::Wire as Wire>::encoded_len(&msg);
+              (len, msg.unwrap_user_data())
+            })
             .await
-            .map_err(Error::delegate)?,
+            .map_err(Error::delegate)?
+            .into_iter()
+            .map(|b| Message::UserData(b)),
         );
       }
     }

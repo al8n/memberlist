@@ -28,7 +28,7 @@ pub enum MockDelegateType {
 struct MockDelegateInner<I, A> {
   meta: Bytes,
   msgs: Vec<Bytes>,
-  broadcasts: Vec<Message>,
+  broadcasts: Vec<Bytes>,
   state: Bytes,
   remote_state: Bytes,
   conflict_existing: Option<Arc<Server<I, A>>>,
@@ -131,7 +131,7 @@ impl<I, A> MockDelegate<I, A> {
     self.inner.lock().state = state;
   }
 
-  pub fn set_broadcasts(&self, broadcasts: Vec<Message>) {
+  pub fn set_broadcasts(&self, broadcasts: Vec<Message<I, A>>) {
     self.inner.lock().broadcasts = broadcasts;
   }
 
@@ -173,11 +173,15 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
     Ok(())
   }
 
-  async fn get_broadcasts(
+  async fn broadcast_messages<F>(
     &self,
     _overhead: usize,
     _limit: usize,
-  ) -> Result<Vec<Message>, Self::Error> {
+    _encoded_len: F,
+  ) -> Result<Vec<Bytes>, Self::Error>
+  where
+    F: Fn(Bytes) -> (usize, Bytes),
+  {
     let mut mu = self.inner.lock();
     let mut out = vec![];
     core::mem::swap(&mut out, &mut mu.broadcasts);
@@ -209,10 +213,12 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
     match self.ty {
       MockDelegateType::CancelAlive => {
         self.count.fetch_add(1, atomic::Ordering::SeqCst);
-        if peer.id().name() == &self.ignore {
-          return Ok(());
+        if let Some(ignore) = &self.ignore {
+          if peer.id() == ignore {
+            return Ok(());
+          }
         }
-        tracing::info!(target = "showbiz.mock.delegate", "cancel alive");
+        tracing::info!(target:  "showbiz.mock.delegate", "cancel alive");
         Err(MockDelegateError::CustomAliveCancelled)
       }
       _ => Ok(()),
@@ -233,11 +239,11 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
     Ok(())
   }
 
-  async fn notify_merge(&self, _peers: Vec<Server<I, A>>) -> Result<(), Self::Error> {
+  async fn notify_merge(&self, _peers: Vec<Arc<Server<I, A>>>) -> Result<(), Self::Error> {
     match self.ty {
       MockDelegateType::CancelMerge => {
         use atomic::Ordering;
-        tracing::info!(target = "showbiz.mock.delegate", "cancel merge");
+        tracing::info!(target:  "showbiz.mock.delegate", "cancel merge");
         self.invoked.store(true, Ordering::SeqCst);
         Err(MockDelegateError::CustomMergeCancelled)
       }

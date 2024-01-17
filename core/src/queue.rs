@@ -10,7 +10,7 @@ use std::{
   },
 };
 
-use crate::{broadcast::Broadcast, types::Message, util::retransmit_limit};
+use crate::{broadcast::Broadcast, util::retransmit_limit};
 
 pub trait ServerCalculator {
   fn num_nodes(&self) -> usize;
@@ -103,7 +103,7 @@ impl<B: Broadcast, C: ServerCalculator> TransmitLimitedQueue<B, C> {
     self.inner.lock().q.len()
   }
 
-  pub async fn get_broadcasts(&self, overhead: usize, limit: usize) -> Vec<Message> {
+  pub async fn get_broadcasts(&self, overhead: usize, limit: usize) -> Vec<B::Message> {
     self
       .get_broadcast_with_prepend(Vec::new(), overhead, limit)
       .await
@@ -111,10 +111,10 @@ impl<B: Broadcast, C: ServerCalculator> TransmitLimitedQueue<B, C> {
 
   pub(crate) async fn get_broadcast_with_prepend(
     &self,
-    prepend: Vec<Message>,
+    prepend: Vec<B::Message>,
     overhead: usize,
     limit: usize,
-  ) -> Vec<Message> {
+  ) -> Vec<B::Message> {
     let mut to_send = prepend;
     let mut inner = self.inner.lock();
     if inner.q.is_empty() {
@@ -342,12 +342,12 @@ impl<B: Broadcast> PartialOrd<&LimitedBroadcast<B>> for Cmp {
 mod tests {
   use std::net::SocketAddr;
 
-  use bytes::{BufMut, BytesMut};
+  use bytes::{BufMut, Bytes, BytesMut};
   use futures::FutureExt;
   use nodecraft::Node;
   use smol_str::SmolStr;
 
-  use crate::broadcast::ShowbizBroadcast;
+  use crate::{broadcast::ShowbizBroadcast, types::Message};
 
   use super::*;
 
@@ -423,7 +423,7 @@ mod tests {
           id: 100,
           broadcast: Arc::new(ShowbizBroadcast {
             node: Node::new("diff-transmits-a".into(), "127.0.0.1:10".parse().unwrap()),
-            msg: Message(BytesMut::from([0; 10].as_slice())),
+            msg: Message::UserData(Bytes::from([0; 10].as_slice())),
             notify: None,
           }),
         }
@@ -434,7 +434,7 @@ mod tests {
           id: 100,
           broadcast: Arc::new(ShowbizBroadcast {
             node: Node::new("diff-transmits-b".into(), "127.0.0.1:11".parse().unwrap()),
-            msg: Message(BytesMut::from([0; 10].as_slice())),
+            msg: Message::UserData(Bytes::from([0; 10].as_slice())),
             notify: None,
           }),
         }
@@ -451,7 +451,7 @@ mod tests {
               "same-transmits--diff-len-a".into(),
               "127.0.0.1:10".parse().unwrap(),
             ),
-            msg: Message(BytesMut::from([0; 12].as_slice())),
+            msg: Message::UserData(Bytes::from([0; 12].as_slice())),
             notify: None,
           }),
         }
@@ -465,7 +465,7 @@ mod tests {
               "same-transmits--diff-len-b".into(),
               "127.0.0.1:11".parse().unwrap(),
             ),
-            msg: Message(BytesMut::from([0; 10].as_slice())),
+            msg: Message::UserData(Bytes::from([0; 10].as_slice())),
             notify: None,
           }),
         }
@@ -482,7 +482,7 @@ mod tests {
               "same-transmits--same-len--diff-id-a".into(),
               "127.0.0.1:10".parse().unwrap(),
             ),
-            msg: Message(BytesMut::from([0; 12].as_slice())),
+            msg: Message::UserData(Bytes::from([0; 12].as_slice())),
             notify: None,
           }),
         }
@@ -496,7 +496,7 @@ mod tests {
               "same-transmits--same-len--diff-id-b".into(),
               "127.0.0.1:11".parse().unwrap(),
             ),
-            msg: Message(BytesMut::from([0; 12].as_slice())),
+            msg: Message::UserData(Bytes::from([0; 12].as_slice())),
             notify: None,
           }),
         }
@@ -528,20 +528,23 @@ mod tests {
   async fn test_transmit_limited_queue() {
     let q = TransmitLimitedQueue::new(NC(1), 1);
     q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
-      msg: Message(BytesMut::new()),
+      node: Node::<SmolStr, SocketAddr>::new(
+        "test".try_into().unwrap(),
+        "127.0.0.1:10".parse().unwrap(),
+      ),
+      msg: Message::UserData(Bytes::new()),
       notify: None,
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
       node: Node::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
-      msg: Message(BytesMut::new()),
+      msg: Message::UserData(Bytes::new()),
       notify: None,
     })
     .await;
     q.queue_broadcast(ShowbizBroadcast {
       node: Node::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
-      msg: Message(BytesMut::new()),
+      msg: Message::UserData(Bytes::new()),
       notify: None,
     })
     .await;
@@ -551,14 +554,14 @@ mod tests {
     let dump = q.ordered_view(true).await;
 
     assert_eq!(dump.len(), 3);
-    assert_eq!(dump[0].broadcast.node.name(), "test");
-    assert_eq!(dump[1].broadcast.node.name(), "foo");
-    assert_eq!(dump[2].broadcast.node.name(), "bar");
+    assert_eq!(dump[0].broadcast.node.id(), "test");
+    assert_eq!(dump[1].broadcast.node.id(), "foo");
+    assert_eq!(dump[2].broadcast.node.id(), "bar");
 
     // Should invalidate previous message
     q.queue_broadcast(ShowbizBroadcast {
       node: Node::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
-      msg: Message(BytesMut::new()),
+      msg: Message::UserData(Bytes::new()),
       notify: None,
     })
     .await;
@@ -567,9 +570,9 @@ mod tests {
     let dump = q.ordered_view(true).await;
 
     assert_eq!(dump.len(), 3);
-    assert_eq!(dump[0].broadcast.node.name(), "foo");
-    assert_eq!(dump[1].broadcast.node.name(), "bar");
-    assert_eq!(dump[2].broadcast.node.name(), "test");
+    assert_eq!(dump[0].broadcast.node.id(), "foo");
+    assert_eq!(dump[1].broadcast.node.id(), "bar");
+    assert_eq!(dump[2].broadcast.node.id(), "test");
   }
 
   #[tokio::test]
@@ -578,11 +581,14 @@ mod tests {
 
     // 18 bytes per message
     q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      node: Node::<SmolStr, SocketAddr>::new(
+        "test".try_into().unwrap(),
+        "127.0.0.1:10".parse().unwrap(),
+      ),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"1. this is a test.");
-        Message(msg)
+        Message::UserData(msg.freeze())
       },
       notify: None,
     })
@@ -592,7 +598,7 @@ mod tests {
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"2. this is a test.");
-        Message(msg)
+        Message::UserData(msg.freeze())
       },
       notify: None,
     })
@@ -602,7 +608,7 @@ mod tests {
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"3. this is a test.");
-        Message(msg)
+        Message::UserData(msg.freeze())
       },
       notify: None,
     })
@@ -612,7 +618,7 @@ mod tests {
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"4. this is a test.");
-        Message(msg)
+        Message::UserData(msg.freeze())
       },
       notify: None,
     })
@@ -639,11 +645,14 @@ mod tests {
 
     // 18 bytes per message
     q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      node: Node::<SmolStr, SocketAddr>::new(
+        "test".try_into().unwrap(),
+        "127.0.0.1:10".parse().unwrap(),
+      ),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"1. this is a test.");
-        Message(msg)
+        Message::UserData(msg.freeze())
       },
       notify: None,
     })
@@ -653,7 +662,7 @@ mod tests {
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"2. this is a test.");
-        Message(msg)
+        Message::UserData(msg.freeze())
       },
       notify: None,
     })
@@ -663,7 +672,7 @@ mod tests {
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"3. this is a test.");
-        Message(msg)
+        Message::UserData(msg.freeze())
       },
       notify: None,
     })
@@ -673,7 +682,7 @@ mod tests {
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"4. this is a test.");
-        Message(msg)
+        Message::UserData(msg.freeze())
       },
       notify: None,
     })
@@ -718,11 +727,14 @@ mod tests {
 
     // 18 bytes per message
     q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+      node: Node::<SmolStr, SocketAddr>::new(
+        "test".try_into().unwrap(),
+        "127.0.0.1:10".parse().unwrap(),
+      ),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"1. this is a test.");
-        Message(msg)
+        Message::UserData(msg.freeze())
       },
       notify: Some(tx1),
     })
@@ -732,7 +744,7 @@ mod tests {
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"2. this is a test.");
-        Message(msg)
+        Message::UserData(msg.freeze())
       },
       notify: Some(tx2),
     })
@@ -742,7 +754,7 @@ mod tests {
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"3. this is a test.");
-        Message(msg)
+        Message::UserData(msg.freeze())
       },
       notify: None,
     })
@@ -752,7 +764,7 @@ mod tests {
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"4. this is a test.");
-        Message(msg)
+        Message::UserData(msg.freeze())
       },
       notify: None,
     })
@@ -775,8 +787,8 @@ mod tests {
     }
 
     let dump = q.ordered_view(true).await;
-    assert_eq!(dump[0].broadcast.id().unwrap().name(), "bar");
-    assert_eq!(dump[1].broadcast.id().unwrap().name(), "baz");
+    assert_eq!(dump[0].broadcast.id().unwrap(), "bar");
+    assert_eq!(dump[1].broadcast.id().unwrap(), "baz");
   }
 
   #[tokio::test]
@@ -785,11 +797,11 @@ mod tests {
     let insert = |name: &str, transmits: usize| {
       q.queue_broadcast_in(
         ShowbizBroadcast {
-          node: Node::new(
+          node: Node::<SmolStr, SocketAddr>::new(
             name.try_into().unwrap(),
             format!("127.0.0.1:{transmits}").parse().unwrap(),
           ),
-          msg: Message(BytesMut::new()),
+          msg: Message::UserData(Bytes::new()),
           notify: None,
         },
         transmits,

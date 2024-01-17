@@ -139,7 +139,7 @@ impl<I, A> LocalServerState<I, A> {
   }
 
   pub(crate) fn address(&self) -> &A {
-    self.node.addr()
+    self.node.address()
   }
 
   #[inline]

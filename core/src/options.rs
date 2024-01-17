@@ -1,16 +1,16 @@
 use std::{
   collections::HashSet,
-  net::{IpAddr, Ipv4Addr},
+  // net::{IpAddr, Ipv4Addr},
   str::FromStr,
   sync::Arc,
   time::Duration,
 };
 
-use crate::security::SecretKeyring;
+// use crate::security::SecretKeyring;
 
 use super::{
-  security::{EncryptionAlgo, SecretKey},
-  types::CompressionAlgo,
+  // security::{EncryptionAlgo, SecretKey},
+  // types::CompressionAlgo,
   version::VSN_SIZE,
 };
 
@@ -22,31 +22,29 @@ const DEFAULT_PORT: u16 = 7946;
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Options {
-  /// Label is an optional set of bytes to include on the outside of each
-  /// packet and stream.
-  ///
-  /// If gossip encryption is enabled and this is set it is treated as GCM
-  /// authenticated data.
-  #[viewit(getter(const, style = "ref"))]
-  label: Label,
-
+  // /// Label is an optional set of bytes to include on the outside of each
+  // /// packet and stream.
+  // ///
+  // /// If gossip encryption is enabled and this is set it is treated as GCM
+  // /// authenticated data.
+  // #[viewit(getter(const, style = "ref"))]
+  // label: Label,
   /// Skips the check that inbound packets and gossip
   /// streams need to be label prefixed.
   skip_inbound_label_check: bool,
 
-  /// Configuration related to what address to bind to
-  /// listen on. The port is used for both UDP and TCP gossip.
-  bind_addr: IpAddr,
+  // /// Configuration related to what address to bind to
+  // /// listen on. The port is used for both UDP and TCP gossip.
+  // bind_addr: IpAddr,
 
-  /// Configuration related to what address to advertise to other
-  /// cluster members. Used for nat traversal.
-  advertise_addr: Option<IpAddr>,
+  // /// Configuration related to what address to advertise to other
+  // /// cluster members. Used for nat traversal.
+  // advertise_addr: Option<IpAddr>,
 
-  /// The configured encryption type that we
-  /// will _speak_. This must be between [`EncryptionAlgo::MIN`] and
-  /// [`EncryptionAlgo::MAX`].
-  encryption_algo: EncryptionAlgo,
-
+  // /// The configured encryption type that we
+  // /// will _speak_. This must be between [`EncryptionAlgo::MIN`] and
+  // /// [`EncryptionAlgo::MAX`].
+  // encryption_algo: EncryptionAlgo,
   /// The timeout for establishing a stream connection with
   /// a remote node for a full state sync, and for stream read and write
   /// operations. This is a legacy name for backwards compatibility, but
@@ -158,11 +156,10 @@ pub struct Options {
   /// a running cluster.
   gossip_verify_outgoing: bool,
 
-  /// Used to control message compression. This can
-  /// be used to reduce bandwidth usage at the cost of slightly more CPU
-  /// utilization. This is only available starting at protocol version 1.
-  compression_algo: CompressionAlgo,
-
+  // /// Used to control message compression. This can
+  // /// be used to reduce bandwidth usage at the cost of slightly more CPU
+  // /// utilization. This is only available starting at protocol version 1.
+  // compression_algo: CompressionAlgo,
   /// The size of a message that should be offload to [`rayon`] thread pool
   /// for encryption or compression.
   ///
@@ -170,21 +167,20 @@ pub struct Options {
   /// will be offloaded to [`rayon`] thread pool for encryption or compression.
   offload_size: usize,
 
-  /// Used to initialize the primary encryption key in a keyring.
-  /// The primary encryption key is the only key used to encrypt messages and
-  /// the first key used while attempting to decrypt messages. Providing a
-  /// value for this primary key will enable message-level encryption and
-  /// verification, and automatically install the key onto the keyring.
-  /// The value should be either 16, 24, or 32 bytes to select AES-128,
-  /// AES-192, or AES-256.
-  secret_key: Option<SecretKey>,
+  // /// Used to initialize the primary encryption key in a keyring.
+  // /// The primary encryption key is the only key used to encrypt messages and
+  // /// the first key used while attempting to decrypt messages. Providing a
+  // /// value for this primary key will enable message-level encryption and
+  // /// verification, and automatically install the key onto the keyring.
+  // /// The value should be either 16, 24, or 32 bytes to select AES-128,
+  // /// AES-192, or AES-256.
+  // secret_key: Option<SecretKey>,
 
-  #[viewit(getter(
-    style = "ref",
-    result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeyring>")
-  ))]
-  secret_keyring: Option<SecretKeyring>,
-
+  // #[viewit(getter(
+  //   style = "ref",
+  //   result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeyring>")
+  // ))]
+  // secret_keyring: Option<SecretKeyring>,
   /// Used to guarantee protocol-compatibility
   protocol_version: ProtocolVersion,
 
@@ -260,11 +256,11 @@ impl Options {
   #[inline]
   pub fn lan() -> Self {
     Self {
-      label: Label::empty(),
+      // label: Label::empty(),
       skip_inbound_label_check: false,
-      bind_addr: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-      advertise_addr: None,
-      encryption_algo: EncryptionAlgo::MAX,
+      // bind_addr: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+      // advertise_addr: None,
+      // encryption_algo: EncryptionAlgo::MAX,
       timeout: Duration::from_secs(10), // Timeout after 10 seconds
       indirect_checks: 3,               // Use 3 nodes for the indirect ping
       retransmit_mult: 4,               // Retransmit a message 4 * log(N+1) nodes
@@ -280,9 +276,9 @@ impl Options {
       gossip_to_the_dead_time: Duration::from_secs(30), // same as push/pull
       gossip_verify_incoming: true,
       gossip_verify_outgoing: true,
-      compression_algo: CompressionAlgo::Lzw, // Enable compression by default
-      secret_key: None,
-      secret_keyring: None,
+      // compression_algo: CompressionAlgo::Lzw, // Enable compression by default
+      // secret_key: None,
+      // secret_keyring: None,
       delegate_version: DelegateVersion::V0,
       protocol_version: ProtocolVersion::V0,
       handoff_queue_depth: 1024,
@@ -301,7 +297,7 @@ impl Options {
   #[inline]
   pub fn wan() -> Self {
     Self::lan()
-      .with_tcp_timeout(Duration::from_secs(30))
+      .with_timeout(Duration::from_secs(30))
       .with_suspicion_mult(6)
       .with_push_pull_interval(Duration::from_secs(60))
       .with_probe_timeout(Duration::from_secs(3))
@@ -317,7 +313,7 @@ impl Options {
   #[inline]
   pub fn local() -> Self {
     Self::lan()
-      .with_tcp_timeout(Duration::from_secs(1))
+      .with_timeout(Duration::from_secs(1))
       .with_indirect_checks(1)
       .with_retransmit_mult(2)
       .with_suspicion_mult(3)
@@ -375,13 +371,13 @@ pub fn parse_cidrs(v: &[impl AsRef<str>]) -> (HashSet<ipnet::IpNet>, Option<Vec<
   (nets, (!errs.is_empty()).then_some(errs))
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ForbiddenIp(IpAddr);
+// #[derive(Debug, Clone, Copy)]
+// pub struct ForbiddenIp(IpAddr);
 
-impl core::fmt::Display for ForbiddenIp {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "IP {} is not allowed", self.0)
-  }
-}
+// impl core::fmt::Display for ForbiddenIp {
+//   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+//     write!(f, "IP {} is not allowed", self.0)
+//   }
+// }
 
-impl std::error::Error for ForbiddenIp {}
+// impl std::error::Error for ForbiddenIp {}

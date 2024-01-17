@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::Future;
-use nodecraft::{Address, Id, Node, CheapClone};
+use nodecraft::{Address, CheapClone, Id, Node};
 
 use crate::types::{Message, Server};
 
@@ -38,11 +38,20 @@ pub trait Delegate: Send + Sync + 'static {
   /// The total byte size of the resulting data to send must not exceed
   /// the limit. Care should be taken that this method does not block,
   /// since doing so would block the entire UDP packet receive loop.
-  fn get_broadcasts(
+  ///
+  /// The `encoded_len` function accepts a user data message, and will return
+  /// the same message back and the encoded length of the message calculated by
+  /// [`Transport::Wire`].
+  ///
+  /// [`Transport::Wire`]: trait.Transport.html#associatedtype.Wire
+  fn broadcast_messages<F>(
     &self,
     overhead: usize,
     limit: usize,
-  ) -> impl Future<Output = Result<Vec<Message<Self::Id, Self::Address>>, Self::Error>> + Send;
+    encoded_len: F,
+  ) -> impl Future<Output = Result<Vec<Bytes>, Self::Error>> + Send
+  where
+    F: Fn(Bytes) -> (usize, Bytes) + Send;
 
   /// Used for a TCP Push/Pull. This is sent to
   /// the remote side in addition to the membership information. Any
@@ -96,7 +105,7 @@ pub trait Delegate: Send + Sync + 'static {
   /// Provides a list of the nodes known by the peer.
   fn notify_merge(
     &self,
-    peers: Vec<Server<Self::Id, Self::Address>>,
+    peers: Vec<Arc<Server<Self::Id, Self::Address>>>,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Invoked when an ack is being sent; the returned bytes will be appended to the ack
@@ -110,8 +119,8 @@ pub trait Delegate: Send + Sync + 'static {
     payload: Bytes,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-  /// Invoked when we want to send a ping message to target by reliable connection. Return true if the target node does not expect ping message from reliable connection.
-  fn disable_reliable_pings(&self, target: &Node<Self::Id, Self::Address>) -> bool;
+  /// Invoked when we want to send a ping message to target by promised connection. Return true if the target node does not expect ping message from promised connection.
+  fn disable_promised_pings(&self, target: &Self::Id) -> bool;
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -147,11 +156,15 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate for VoidDelegate<I, 
     Ok(())
   }
 
-  async fn get_broadcasts(
+  async fn broadcast_messages<F>(
     &self,
     _overhead: usize,
     _limit: usize,
-  ) -> Result<Vec<Message<Self::Id, Self::Address>>, Self::Error> {
+    _encoded_len: F,
+  ) -> Result<Vec<Bytes>, Self::Error>
+  where
+    F: Fn(Bytes) -> (usize, Bytes) + Send,
+  {
     Ok(Vec::new())
   }
 
@@ -201,7 +214,7 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate for VoidDelegate<I, 
 
   async fn notify_merge(
     &self,
-    _peers: Vec<Server<Self::Id, Self::Address>>,
+    _peers: Vec<Arc<Server<Self::Id, Self::Address>>>,
   ) -> Result<(), Self::Error> {
     Ok(())
   }
@@ -220,7 +233,7 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate for VoidDelegate<I, 
   }
 
   #[inline]
-  fn disable_reliable_pings(&self, _node: &Node<Self::Id, Self::Address>) -> bool {
+  fn disable_promised_pings(&self, _node: &Self::Id) -> bool {
     false
   }
 }

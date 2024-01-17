@@ -21,7 +21,7 @@ use super::{
   error::Error,
   network::META_MAX_SIZE,
   queue::{DefaultServerCalculator, TransmitLimitedQueue},
-  security::SecretKeyring,
+  // security::SecretKeyring,
   state::LocalServerState,
   suspicion::Suspicion,
   timer::Timer,
@@ -57,21 +57,20 @@ impl HotData {
 }
 
 #[viewit::viewit]
-pub(crate) struct MessageHandoff {
-  // msg_ty: MessageType,
-  buf: Bytes,
-  from: SocketAddr,
+pub(crate) struct MessageHandoff<I, A> {
+  msg: Message<I, A>,
+  from: A,
 }
 
 #[viewit::viewit]
-pub(crate) struct MessageQueue {
+pub(crate) struct MessageQueue<I, A> {
   /// high priority messages queue
-  high: VecDeque<MessageHandoff>,
+  high: VecDeque<MessageHandoff<I, A>>,
   /// low priority messages queue
-  low: VecDeque<MessageHandoff>,
+  low: VecDeque<MessageHandoff<I, A>>,
 }
 
-impl MessageQueue {
+impl<I, A> MessageQueue<I, A> {
   const fn new() -> Self {
     Self {
       high: VecDeque::new(),
@@ -80,7 +79,7 @@ impl MessageQueue {
   }
 }
 
-// #[viewit::viewit]
+#[viewit::viewit]
 pub(crate) struct Member<I, A, R> {
   pub(crate) state: LocalServerState<I, A>,
   pub(crate) suspicion: Option<Suspicion<I, A, R>>,
@@ -89,10 +88,13 @@ pub(crate) struct Member<I, A, R> {
 pub(crate) struct Memberlist<I, A, R> {
   pub(crate) local: Node<I, A>,
   pub(crate) nodes: Vec<Member<I, A, R>>,
-  pub(crate) node_map: HashMap<Node<I, A>, usize>,
+  pub(crate) node_map: HashMap<I, usize>,
 }
 
-impl<I, A, Run: Runtime> rand::seq::SliceRandom for Memberlist<I, A, Run> {
+impl<I, A, Run: Runtime> rand::seq::SliceRandom for Memberlist<I, A, Run>
+where
+  I: Eq + core::hash::Hash,
+{
   type Item = Member<I, A, Run>;
 
   fn choose<R>(&self, _rng: &mut R) -> Option<&Self::Item>
@@ -217,11 +219,13 @@ impl<I, A, R> Memberlist<I, A, R> {
       local,
     }
   }
+}
 
+impl<I: PartialEq, A, R> Memberlist<I, A, R> {
   pub(crate) fn any_alive(&self) -> bool {
     self
       .nodes
       .iter()
-      .any(|m| !m.state.dead_or_left() && m.state.node.id != self.local)
+      .any(|m| !m.state.dead_or_left() && m.state.node.id().ne(self.local.id()))
   }
 }

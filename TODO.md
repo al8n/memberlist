@@ -1,0 +1,5 @@
+- [ ] NetTransport
+  - [ ] Add/Remove label
+  - [ ] Encryption/Decryption
+  - [ ] Compression/Decompression
+  - [ ] retry new transport

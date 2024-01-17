@@ -60,7 +60,7 @@ pub mod tests {
     network::*,
     // showbiz::tests::*,
     // state::*,
-    transport::tests::*
+    transport::tests::*,
   };
 
   pub fn initialize_tests_tracing() {

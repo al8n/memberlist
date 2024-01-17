@@ -51,6 +51,9 @@ pub use packet::*;
 mod server;
 pub use server::*;
 
+#[test]
+fn test_() {}
+
 // const DEFAULT_ENCODE_PREALLOCATE_SIZE: usize = 128;
 // pub(crate) const ENCODE_META_SIZE: usize =
 //   MessageType::SIZE + ProtocolVersion::SIZE + DelegateVersion::SIZE + 1;

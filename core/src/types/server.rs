@@ -2,6 +2,15 @@ use super::*;
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(
+  feature = "rkyv",
+  derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+)]
+#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+#[cfg_attr(
+  feature = "rkyv",
+  archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash))
+)]
 #[repr(u8)]
 #[non_exhaustive]
 pub enum ServerState {
@@ -44,7 +53,7 @@ impl core::fmt::Display for ServerState {
 // }
 
 /// Represents a node in the cluster
-#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub"))]
+#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
@@ -59,7 +68,10 @@ impl core::fmt::Display for ServerState {
 pub struct Server<I, A> {
   #[viewit(getter(const, style = "ref"))]
   id: I,
-  #[viewit(getter(const, style = "ref"))]
+  #[viewit(
+    getter(const, rename = "address", style = "ref"),
+    setter(rename = "with_address")
+  )]
   addr: A,
   /// Metadata from the delegate for this node.
   #[viewit(getter(const, style = "ref"))]
@@ -88,17 +100,6 @@ impl<I, A> Server<I, A> {
       protocol_version,
       delegate_version,
     }
-  }
-
-  /// Return the node name
-  #[inline]
-  pub fn id(&self) -> &I {
-    &self.id
-  }
-
-  #[inline]
-  pub fn address(&self) -> &A {
-    &self.addr
   }
 }
 

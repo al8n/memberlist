@@ -12,7 +12,7 @@ use agnostic::Runtime;
 use async_lock::{Mutex, RwLock};
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Stream, StreamExt};
 use itertools::Either;
-use nodecraft::resolver::AddressResolver;
+use nodecraft::{resolver::AddressResolver, CheapClone};
 
 // #[cfg(feature = "test")]
 // pub(crate) mod tests;
@@ -26,6 +26,7 @@ pub(crate) struct AckHandler {
 
 #[viewit::viewit(getters(skip), setters(skip))]
 pub(crate) struct ShowbizCore<T: Transport> {
+  id: T::Id,
   hot: HotData,
   awareness: Awareness<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   broadcast: TransmitLimitedQueue<
@@ -38,7 +39,7 @@ pub(crate) struct ShowbizCore<T: Transport> {
   shutdown_lock: Mutex<()>,
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
-  queue: Mutex<MessageQueue>,
+  queue: Mutex<MessageQueue<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
   nodes:
     Arc<RwLock<Memberlist<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Runtime>>>,
   ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
@@ -53,15 +54,20 @@ impl<T: Transport> Drop for ShowbizCore<T> {
   fn drop(&mut self) {
     self.shutdown_tx.close();
     if let Err(e) = self.transport.block_shutdown() {
-      tracing::error!(target = "showbiz", err=%e, "failed to shutdown");
+      tracing::error!(target:  "showbiz", err=%e, "failed to shutdown");
     }
   }
 }
 
 pub struct Showbiz<
+  T,
+  D = VoidDelegate<
+    <T as Transport>::Id,
+    <<T as Transport>::Resolver as AddressResolver>::ResolvedAddress,
+  >,
+> where
   T: Transport,
-  D: Delegate = VoidDelegate<<T as Transport>::Id, <<T as Transport>::Resolver as AddressResolver>::Address>,
-> {
+{
   pub(crate) inner: Arc<ShowbizCore<T>>,
   pub(crate) delegate: Option<Arc<D>>,
 }
@@ -84,19 +90,9 @@ where
   D: Delegate,
   T: Transport,
 {
-  /// Returns if the showbiz enabled encryption
-  #[inline]
-  pub fn encryption_enabled(&self) -> bool {
-    if let Some(keyring) = &self.inner.opts.secret_keyring {
-      !keyring.is_empty() && !self.inner.opts.encryption_algo.is_none()
-    } else {
-      false
-    }
-  }
-
   /// Returns the local node ID.
   #[inline]
-  pub fn local_node(&self) -> &Node<T::Id, <T::Resolver as AddressResolver>::Address> {
+  pub fn local_id(&self) -> &T::Id {
     &self.inner.id
   }
 
@@ -106,11 +102,11 @@ where
     self.delegate.as_deref()
   }
 
-  /// Returns the keyring used for the local node
-  #[inline]
-  pub fn keyring(&self) -> Option<&SecretKeyring> {
-    self.inner.opts.secret_keyring.as_ref()
-  }
+  // /// Returns the keyring used for the local node
+  // #[inline]
+  // pub fn keyring(&self) -> Option<&SecretKeyring> {
+  //   self.inner.opts.secret_keyring.as_ref()
+  // }
 
   #[inline]
   pub async fn local_server(
@@ -159,23 +155,31 @@ where
   }
 }
 
-pub struct JoinError<T: Transport, D: Delegate> {
+pub struct JoinError<T: Transport, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
   joined: Vec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
   errors: HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>>,
 }
 
-impl<D: Delegate, T: Transport> From<JoinError<T, D>>
+impl<D, T: Transport> From<JoinError<T, D>>
   for (
     Vec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
     HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>>,
   )
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   fn from(e: JoinError<T, D>) -> Self {
     (e.joined, e.errors)
   }
 }
 
-impl<D: Delegate, T: Transport> core::fmt::Debug for JoinError<T, D> {
+impl<D, T: Transport> core::fmt::Debug for JoinError<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     if !self.joined.is_empty() {
       writeln!(f, "Successes: {:?}", self.joined)?;
@@ -192,7 +196,10 @@ impl<D: Delegate, T: Transport> core::fmt::Debug for JoinError<T, D> {
   }
 }
 
-impl<D: Delegate, T: Transport> core::fmt::Display for JoinError<T, D> {
+impl<D, T: Transport> core::fmt::Display for JoinError<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     if !self.joined.is_empty() {
       writeln!(f, "Successes: {:?}", self.joined)?;
@@ -209,9 +216,15 @@ impl<D: Delegate, T: Transport> core::fmt::Display for JoinError<T, D> {
   }
 }
 
-impl<D: Delegate, T: Transport> std::error::Error for JoinError<T, D> {}
+impl<D: Delegate, T: Transport> std::error::Error for JoinError<T, D> where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>
+{
+}
 
-impl<D: Delegate, T: Transport> JoinError<T, D> {
+impl<D: Delegate, T: Transport> JoinError<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
   /// Return the number of successful joined nodes
   pub fn num_joined(&self) -> usize {
     self.joined.len()
@@ -223,8 +236,15 @@ impl<D: Delegate, T: Transport> JoinError<T, D> {
   ) -> &Vec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
     &self.joined
   }
+}
 
-  pub const fn errors(&self) -> &HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>> {
+impl<D: Delegate, T: Transport> JoinError<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
+  pub const fn errors(
+    &self,
+  ) -> &HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>> {
     &self.errors
   }
 }
@@ -247,7 +267,7 @@ where
 
 impl<D, T> Showbiz<T, D>
 where
-  D: Delegate,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
@@ -280,13 +300,13 @@ where
     let alive = Alive {
       incarnation: this.next_incarnation(),
       meta,
-      node: this.inner.id.clone(),
+      node: Node::new(this.inner.id.clone(), this.inner.advertise.clone()),
       protocol_version: this.inner.opts.protocol_version,
       delegate_version: this.inner.opts.delegate_version,
     };
-    this.alive_node(Either::Left(alive), None, true).await;
+    this.alive_node(alive, None, true).await;
     this.schedule(shutdown_rx).await;
-    tracing::debug!(target = "showbiz", local = %this.inner.id, advertise_addr = %advertise, "node is living");
+    tracing::debug!(target:  "showbiz", local = %this.inner.id, advertise_addr = %advertise, "node is living");
     Ok(this)
   }
 
@@ -294,20 +314,27 @@ where
     transport: T,
     delegate: Option<D>,
     mut opts: Options,
-  ) -> Result<(Receiver<()>, SocketAddr, Self), Error<T, D>> {
+  ) -> Result<
+    (
+      Receiver<()>,
+      <T::Resolver as AddressResolver>::ResolvedAddress,
+      Self,
+    ),
+    Error<T, D>,
+  > {
     let (handoff_tx, handoff_rx) = async_channel::bounded(1);
     let (leave_broadcast_tx, leave_broadcast_rx) = async_channel::bounded(1);
 
-    if let Some(pk) = opts.secret_key() {
-      let has_keyring = opts.secret_keyring.is_some();
-      let keyring = opts.secret_keyring.get_or_insert(SecretKeyring::new(pk));
-      if has_keyring {
-        keyring.insert(pk);
-        keyring
-          .use_key(&pk)
-          .map_err(|e| Error::Transport(TransportError::Security(e)))?;
-      }
-    }
+    // if let Some(pk) = opts.secret_key() {
+    //   let has_keyring = opts.secret_keyring.is_some();
+    //   let keyring = opts.secret_keyring.get_or_insert(SecretKeyring::new(pk));
+    //   if has_keyring {
+    //     keyring.insert(pk);
+    //     keyring
+    //       .use_key(&pk)
+    //       .map_err(|e| Error::Transport(TransportError::Security(e)))?;
+    //   }
+    // }
 
     // TODO: move this to concrete transport implementation
     // opts.transport.get_or_insert_with(|| {
@@ -362,13 +389,13 @@ where
     // if let Some(0) | None = opts.bind_port {
     //   let port = transport.auto_bind_port();
     //   opts.bind_port = Some(port);
-    //   tracing::warn!(target = "showbiz", "using dynamic bind port {port}");
+    //   tracing::warn!(target:  "showbiz", "using dynamic bind port {port}");
     // }
 
     // Get the final advertise address from the transport, which may need
     // to see which address we bound to. We'll refresh this each time we
     // send out an alive message.
-    let advertise = transport.advertise_addr();
+    let advertise = transport.advertise_address();
     let id = transport.local_id();
     let node = Node::new(id.clone(), advertise.clone());
     let awareness = Awareness::new(
@@ -383,17 +410,17 @@ where
       DefaultServerCalculator::new(hot.num_nodes),
       opts.retransmit_mult,
     );
-    let encryption_enabled = if let Some(keyring) = &opts.secret_keyring {
-      !keyring.is_empty() && !opts.encryption_algo.is_none()
-    } else {
-      false
-    };
+    // let encryption_enabled = if let Some(keyring) = &opts.secret_keyring {
+    //   !keyring.is_empty() && !opts.encryption_algo.is_none()
+    // } else {
+    //   false
+    // };
 
     // TODO: replace this with is_global when IpAddr::is_global is stable
     // https://github.com/rust-lang/rust/issues/27709
-    if crate::util::IsGlobalIp::is_global_ip(&advertise.ip()) && !encryption_enabled {
+    if crate::util::IsGlobalIp::is_global_ip(&advertise.ip()) {
       tracing::warn!(
-        target = "showbiz",
+        target: "showbiz",
         "binding to public address without encryption!"
       );
     }
@@ -401,6 +428,7 @@ where
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
     let this = Showbiz {
       inner: Arc::new(ShowbizCore {
+        id: id.cheap_clone(),
         hot: HotData::new(),
         awareness,
         broadcast,
@@ -415,7 +443,7 @@ where
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
         transport,
         shutdown_tx,
-        advertise,
+        advertise: advertise.cheap_clone(),
         opts: Arc::new(opts),
       }),
       delegate: delegate.map(Arc::new),
@@ -427,7 +455,7 @@ where
     #[cfg(feature = "metrics")]
     this.check_broadcast_queue_depth(shutdown_rx.clone());
 
-    Ok((shutdown_rx, advertise, this))
+    Ok((shutdown_rx, advertise.cheap_clone(), this))
   }
 
   /// Leave will broadcast a leave message but will not shutdown the background
@@ -458,10 +486,14 @@ where
         // sure this node is gone.
 
         let state = &memberlist.nodes[idx];
+        let n = Node::new(
+          state.state.node.id().cheap_clone(),
+          state.state.node.address().cheap_clone(),
+        );
         let d = Dead {
           incarnation: state.state.incarnation.load(Ordering::Relaxed),
-          node: state.state.node.id.clone(),
-          from: state.state.node.id.clone(),
+          node: n.cheap_clone(),
+          from: n,
         };
 
         self.dead_node(&mut memberlist, d).await?;
@@ -473,7 +505,7 @@ where
               rst = self.inner.leave_broadcast_rx.recv().fuse() => {
                 if let Err(e) = rst {
                   tracing::error!(
-                    target = "showbiz",
+                    target: "showbiz",
                     "failed to receive leave broadcast: {}",
                     e
                   );
@@ -485,14 +517,14 @@ where
             }
           } else if let Err(e) = self.inner.leave_broadcast_rx.recv().await {
             tracing::error!(
-              target = "showbiz",
+              target: "showbiz",
               "failed to receive leave broadcast: {}",
               e
             );
           }
         }
       } else {
-        tracing::warn!(target = "showbiz", "leave but we're not a member");
+        tracing::warn!(target:  "showbiz", "leave but we're not a member");
       }
     }
     Ok(())
@@ -501,13 +533,20 @@ where
   /// Join directly by contacting the given node id
   pub async fn join_node(
     &self,
-    id: &Node<T::Id, <T::Resolver as AddressResolver>::Address>,
+    node: Node<T::Id, <T::Resolver as AddressResolver>::Address>,
   ) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
 
-    self.push_pull_node(id, true).await
+    let (id, addr) = node.into_components();
+    let addr = self
+      .inner
+      .transport
+      .resolve(&addr)
+      .await
+      .map_err(Error::Transport)?;
+    self.push_pull_node(Node::new(id, addr), true).await
   }
 
   // /// Join directly by contacting the given node ids
@@ -541,143 +580,54 @@ where
         joined: Vec::new(),
         errors: existing
           .into_iter()
-          .map(|(addr, _)| (addr, Error::NotRunning))
+          .map(|n| (n, Error::NotRunning))
           .collect(),
       });
     }
     let estimated_total = existing.size_hint().0;
 
-    let (left, right): (FuturesUnordered<_>, FuturesUnordered<_>) = existing
+    let futs = existing
       .into_iter()
       .map(|node| {
         async move {
-          let resolved_addr = self.inner.transport.resolver().resolve(node.address()).await;
-          match resolved_addr {
-            Ok(resolved_addr) => {
-              let id = Node::new(node.id().clone(), resolved_addr);
-              tracing::info!(target = "showbiz", local = %self.inner.transport.local_id(), peer = %id, "start join...");
-              if let Err(e) = self.push_pull_node(&id, true).await {
-                tracing::debug!(
-                  target = "showbiz",
-                  local = %self.inner.id,
-                  err = %e,
-                  "failed to join {}",
-                  id,
-                );
-                Err((node.addr(), e))
-              } else {
-                Ok(id)
-              }
-            }
-            Err(e) => {
-              tracing::debug!(
-                target = "showbiz",
-                err = %e,
-                "failed to resolve address {}",
-                node.address(),
-              );
-              Err((node, Error::Transport(TransportError::Resolve(e))))
-            }
+          let resolved_addr = self.inner.transport.resolve(node.address()).await.map_err(|e| {
+            tracing::debug!(
+              target: "showbiz",
+              err = %e,
+              "failed to resolve address {}",
+              node.address(),
+            );
+            (node.cheap_clone(), Error::<T, D>::transport(e))
+          })?;
+          let id = Node::new(node.id().cheap_clone(), resolved_addr);
+          tracing::info!(target:  "showbiz", local = %self.inner.transport.local_id(), peer = %id, "start join...");
+          if let Err(e) = self.push_pull_node(id.cheap_clone(), true).await {
+            tracing::debug!(
+              target: "showbiz",
+              local = %self.inner.id,
+              err = %e,
+              "failed to join {}",
+              id,
+            );
+            Err((node, e))
+          } else {
+            Ok(id)
           }
         }
       });
-    // .map(|node| match addr {
-    //   Address::Domain { domain, port } => Either::Right(async move {
-    //     let addrs = match self.resolve_addr(&domain, port).await {
-    //       Ok(addrs) => addrs,
-    //       Err(e) => {
-    //         tracing::debug!(
-    //           target = "showbiz",
-    //           err = %e,
-    //           "failed to resolve address {}",
-    //           domain.as_str(),
-    //         );
-    //         return Err((Address::Domain { domain, port }, e));
-    //       }
-    //     };
-    //     let mut errors = Vec::new();
-    //     let mut joined = Vec::with_capacity(addrs.len());
-    //     for addr in addrs {
-    //       let id = ServerId::new(name.clone(), addr);
-    //       tracing::info!(target = "showbiz", local = %self.inner.id, peer = %id, "start join...");
-    //       if let Err(e) = self.push_pull_node(&id, true).await {
-    //         tracing::debug!(
-    //           target = "showbiz",
-    //           local = %self.inner.id,
-    //           err = %e,
-    //           "failed to join {}",
-    //           id,
-    //         );
-    //         errors.push((Address::Socket(addr), e));
-    //       } else {
-    //         joined.push(id);
-    //       }
-    //     }
-    //     Ok((joined, errors))
-    //   }),
-    //   address => {
-    //     let (addr, is_ip) = match address {
-    //       Address::Ip(addr) => (
-    //         SocketAddr::new(addr, self.inner.opts.bind_port.unwrap()),
-    //         true,
-    //       ),
-    //       Address::Socket(addr) => (addr, false),
-    //       Address::Domain { .. } => unreachable!(),
-    //     };
-    //     Either::Left(async move {
-    //       let id = Node::new(name, addr);
-    //       tracing::info!(target = "showbiz", local = %self.inner.id, peer = %id, "start join...");
-    //       if let Err(e) = self.push_pull_node(&id, true).await {
-    //         tracing::debug!(
-    //           target = "showbiz",
-    //           local = %self.inner.id,
-    //           err = %e,
-    //           "failed to join {}",
-    //           id,
-    //         );
-    //         let addr = if is_ip {
-    //           Address::Ip(addr.ip())
-    //         } else {
-    //           Address::Socket(addr)
-    //         };
-    //         Err((addr, e))
-    //       } else {
-    //         Ok(id)
-    //       }
-    //     })
-    //   }
-    // });
 
-    let (left, right) =
-      futures::future::join(left.collect::<Vec<_>>(), right.collect::<Vec<_>>()).await;
+    let res = futures::future::join_all(futs).await;
 
     let num_success = std::cell::RefCell::new(Vec::with_capacity(estimated_total));
-    #[allow(clippy::mutable_key_type)]
-    let errors = left
+    let errors = res
       .into_iter()
       .filter_map(|rst| match rst {
-        Ok(id) => {
-          num_success.borrow_mut().push(id);
+        Ok(node) => {
+          num_success.borrow_mut().push(node);
           None
         }
-        Err((addr, e)) => Some((addr, e)),
+        Err((node, e)) => Some((node, e)),
       })
-      .chain(
-        right
-          .into_iter()
-          .filter_map(|rst| match rst {
-            Ok((success, errors)) => {
-              num_success.borrow_mut().extend(success);
-              if errors.is_empty() {
-                None
-              } else {
-                Some(errors)
-              }
-            }
-            Err((addr, e)) => Some(vec![(addr, e)]),
-          })
-          .flatten(),
-      )
       .collect::<HashMap<_, _>>();
 
     if errors.is_empty() {
@@ -721,26 +671,25 @@ where
 
     // Get the existing node
     // unwrap safe here this is self
-    let node_id = {
+    let node = {
       let members = self.inner.nodes.read().await;
 
       let idx = *members.node_map.get(&self.inner.id).unwrap();
 
-      members.nodes[idx].state.id().clone()
+      let state = &members.nodes[idx].state;
+      Node::new(state.id().cheap_clone(), state.address().cheap_clone())
     };
 
     // Format a new alive message
     let alive = Alive {
       incarnation: self.next_incarnation(),
-      node: node_id,
+      node,
       meta,
       protocol_version: self.inner.opts.protocol_version,
       delegate_version: self.inner.opts.delegate_version,
     };
     let (notify_tx, notify_rx) = async_channel::bounded(1);
-    self
-      .alive_node(Either::Left(alive), Some(notify_tx), true)
-      .await;
+    self.alive_node(alive, Some(notify_tx), true).await;
 
     // Wait for the broadcast or a timeout
     if self.any_alive().await {
@@ -766,13 +715,19 @@ where
   #[inline]
   pub async fn send(
     &self,
-    to: &Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    msg: Message,
+    to: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    msg: Bytes,
   ) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
-    self.raw_send_msg_packet(&to.into(), msg).await
+    self
+      .inner
+      .transport
+      .send_packet(to, Message::UserData(msg))
+      .await
+      .map(|_| ())
+      .map_err(Error::transport)
   }
 
   /// Uses the reliable stream-oriented interface of the transport to
@@ -782,8 +737,8 @@ where
   #[inline]
   pub async fn send_reliable(
     &self,
-    to: &Node<T::Id, <T::Resolver as AddressResolver>::Address>,
-    msg: Message,
+    to: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    msg: Bytes,
   ) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
@@ -809,7 +764,7 @@ where
     // completely torn down. If we kill the memberlist-side handlers
     // those I/O handlers might get stuck.
     if let Err(e) = self.inner.transport.shutdown().await {
-      tracing::error!(target = "showbiz", err=%e, "failed to shutdown transport");
+      tracing::error!(target:  "showbiz", err=%e, "failed to shutdown transport");
     }
 
     // Now tear down everything else.
@@ -822,96 +777,11 @@ where
 // private impelementation
 impl<D, T> Showbiz<T, D>
 where
-  D: Delegate,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
-  // /// a helper to initiate a TCP-based Dns lookup for the given host.
-  // /// The built-in Go resolver will do a UDP lookup first, and will only use TCP if
-  // /// the response has the truncate bit set, which isn't common on Dns servers like
-  // /// Consul's. By doing the TCP lookup directly, we get the best chance for the
-  // /// largest list of hosts to join. Since joins are relatively rare events, it's ok
-  // /// to do this rather expensive operation.
-  // pub(crate) async fn tcp_lookup_ip(
-  //   &self,
-  //   dns: &Dns<T>,
-  //   host: &str,
-  //   default_port: u16,
-  // ) -> Result<Vec<SocketAddr>, Error<T, D>> {
-  //   // Don't attempt any TCP lookups against non-fully qualified domain
-  //   // names, since those will likely come from the resolv.conf file.
-  //   if !host.contains('.') {
-  //     return Ok(Vec::new());
-  //   }
-
-  //   // Make sure the domain name is terminated with a dot (we know there's
-  //   // at least one character at this point).
-  //   let dn = host.chars().last().unwrap();
-  //   let ips = if dn != '.' {
-  //     let mut dn = host.to_string();
-  //     dn.push('.');
-  //     dns.lookup_ip(dn).await
-  //   } else {
-  //     dns.lookup_ip(host).await
-  //   }
-  //   .map_err(Error::dns_resolve)?;
-
-  //   Ok(
-  //     ips
-  //       .into_iter()
-  //       .map(|ip| SocketAddr::new(ip, default_port))
-  //       .collect(),
-  //   )
-  // }
-
-  // /// Used to resolve the address into an address,
-  // /// port, and error. If no port is given, use the default
-  // pub(crate) async fn resolve_addr(
-  //   &self,
-  //   addr: &Domain,
-  //   port: Option<u16>,
-  // ) -> Result<Vec<SocketAddr>, Error<T, D>> {
-  //   // This captures the supplied port, or the default one.
-  //   let port = port.unwrap_or(
-  //     self
-  //       .inner
-  //       .opts
-  //       .bind_port
-  //       .unwrap_or(self.inner.advertise.port()),
-  //   );
-
-  //   // First try TCP so we have the best chance for the largest list of
-  //   // hosts to join. If this fails it's not fatal since this isn't a standard
-  //   // way to query Dns, and we have a fallback below.
-  //   if let Some(dns) = self.inner.dns.as_ref() {
-  //     match self.tcp_lookup_ip(dns, addr.as_str(), port).await {
-  //       Ok(ips) => {
-  //         if !ips.is_empty() {
-  //           return Ok(ips);
-  //         }
-  //       }
-  //       Err(e) => {
-  //         tracing::debug!(
-  //           target = "showbiz",
-  //           "TCP-first lookup failed for '{}', falling back to UDP: {}",
-  //           addr,
-  //           e
-  //         );
-  //       }
-  //     }
-  //   }
-
-  //   // If TCP didn't yield anything then use the normal Go resolver which
-  //   // will try UDP, then might possibly try TCP again if the UDP response
-  //   // indicates it was truncated.
-  //   addr
-  //     .as_str()
-  //     .to_socket_addrs()
-  //     .map_err(|e| Error::Transport(TransportError::Dns(DnsError::IO(e))))
-  //     .map(|addrs| addrs.into_iter().collect())
-  // }
-
   #[inline]
   pub(crate) fn get_advertise(&self) -> &<T::Resolver as AddressResolver>::ResolvedAddress {
     &self.inner.advertise
@@ -927,7 +797,7 @@ where
       .await
       .nodes
       .iter()
-      .any(|n| !n.state.dead_or_left() && n.state.node.name() != self.inner.opts.name.as_ref())
+      .any(|n| !n.state.dead_or_left() && n.state.node.id().ne(&self.inner.id))
   }
 
   #[cfg(feature = "metrics")]
@@ -978,5 +848,4 @@ where
 }
 
 #[test]
-fn test() {
-}
+fn test() {}

@@ -9,16 +9,14 @@ use super::*;
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
-#[cfg_attr(
-  feature = "rkyv",
-  archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash))
-)]
+#[cfg_attr(feature = "rkyv", archive_attr(derive(Debug, PartialEq, Eq, Hash)))]
 pub(crate) struct AckResponse {
   seq_no: u32,
   payload: Bytes,
 }
 
 impl AckResponse {
+  /// Create a new ack response with the given sequence number and empty payload.
   #[inline]
   pub fn empty(seq_no: u32) -> Self {
     Self {
@@ -55,4 +53,3 @@ impl NackResponse {
     Self { seq_no }
   }
 }
-

@@ -11,7 +11,7 @@ use smol_str::SmolStr;
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 #[cfg_attr(
   feature = "rkyv",
-  archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash), repr(transparent))
+  archive_attr(derive(Debug, PartialEq, Eq, Hash), repr(transparent))
 )]
 #[repr(transparent)]
 pub struct ErrorResponse {

@@ -1,36 +1,149 @@
 use super::*;
 
-pub enum Message<I, A> {
-  /// Ping message
-  Ping(Ping<I, A>),
-  /// Indirect ping message
-  IndirectPing(IndirectPing<I, A>),
-  /// Ack response message
-  AckResponse(AckResponse),
-  /// Suspect message
-  Suspect(Suspect<I, A>),
-  /// Alive message
-  Alive(Alive<I, A>),
-  /// Dead message
-  Dead(Dead<I, A>),
-  /// PushPull message
-  PushPull(PushPull<I, A>),
-  /// Compound message
-  Compound(Vec<Message<I, A>>),
-  /// User mesg, not handled by us
-  User(Bytes),
-  /// Nack response message
-  NackResponse(NackResponse),
-  /// Error response message
-  ErrorResponse(ErrorResponse),
-  // HasCrc = 12,
-  // Compress = 9,
-  // Encrypt(Bytes),
-  // /// HasLabel has a deliberately high value so that you can disambiguate
-  // /// it from the encryptionVersion header which is either 0/1 right now and
-  // /// also any of the existing [`MessageType`].
-  // HasLabel = 244,
+const INLINED_MESSAGES: usize = 2;
+
+/// A compound message.
+pub type CompoundMessage<I, A> = Vec<Message<I, A>>;
+
+macro_rules! enum_wrapper {
+  (
+    $(#[$outer:meta])*
+    $vis:vis enum $name:ident $(<$($generic:tt),+>)? {
+      $(
+        $(#[$variant_meta:meta])*
+        $variant:ident($variant_ty: ident $(<$($variant_generic:tt),+>)?) = $variant_tag:literal
+      ), +$(,)?
+    }
+  ) => {
+    $(#[$outer])*
+    $vis enum $name $(< $($generic),+ >)? {
+      $(
+        $(#[$variant_meta])*
+        $variant($variant_ty $(< $($variant_generic),+ >)?),
+      )*
+    }
+
+    impl $(< $($generic),+ >)? $name $(< $($generic),+ >)? {
+      /// Returns the tag of this message type for encoding/decoding.
+      #[inline]
+      pub const fn tag(&self) -> u8 {
+        match self {
+          $(
+            Self::$variant(_) => $variant_tag,
+          )*
+        }
+      }
+
+      /// Returns the kind of this message.
+      #[inline]
+      pub const fn kind(&self) -> &'static str {
+        match self {
+          $(
+            Self::$variant(_) => stringify!($variant),
+          )*
+        }
+      }
+
+      $(
+        paste::paste! {
+          #[doc = concat!("Returns the contained [`", stringify!($variant_ty), "`] message, consuming the self value. Panics if the value is not [`", stringify!($variant_ty), "`].")]
+          $vis fn [< unwrap_ $variant:snake>] (self) -> $variant_ty $(< $($variant_generic),+ >)? {
+            if let Self::$variant(val) = self {
+              val
+            } else {
+              panic!(concat!("expect ", stringify!($variant), ", buf got {}"), self.kind())
+            }
+          }
+
+          #[doc = concat!("Returns the contained [`", stringify!($variant_ty), "`] message, consuming the self value. Returns `None` if the value is not [`", stringify!($variant_ty), "`].")]
+          $vis fn [< try_unwrap_ $variant:snake>] (self) -> ::std::option::Option<$variant_ty $(< $($variant_generic),+ >)?> {
+            if let Self::$variant(val) = self {
+              ::std::option::Option::Some(val)
+            } else {
+              ::std::option::Option::None
+            }
+          }
+
+          #[doc = concat!("Construct a [`", stringify!($name), "`] from [`", stringify!($variant_ty), "`].")]
+          pub const fn [< $variant:snake >](val: $variant_ty $(< $($variant_generic),+ >)?) -> Self {
+            Self::$variant(val)
+          }
+        }
+      )*
+    }
+  };
 }
+
+enum_wrapper!(
+  /// Request to be sent to the Raft node.
+  #[derive(Debug, Clone, derive_more::From)]
+  #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+  #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+  #[non_exhaustive]
+  pub enum Message<I, A> {
+    /// Ping message
+    Ping(Ping<I, A>) = 0,
+    /// Indirect ping message
+    IndirectPing(IndirectPing<I, A>) = 1,
+    /// Ack response message
+    AckResponse(AckResponse) = 2,
+    /// Suspect message
+    Suspect(Suspect<I, A>) = 3,
+    /// Alive message
+    Alive(Alive<I, A>) = 4,
+    /// Dead message
+    Dead(Dead<I, A>) = 5,
+    /// PushPull message
+    PushPull(PushPull<I, A>) = 6,
+    /// Compound message
+    Compound(CompoundMessage<I, A>) = 7,
+    /// User mesg, not handled by us
+    UserData(Bytes) = 8,
+    /// Nack response message
+    NackResponse(NackResponse) = 9,
+    /// Error response message
+    ErrorResponse(ErrorResponse) = 10,
+    // HasCrc = 12,
+    // Compress = 9,
+    // Encrypt(Bytes),
+    // /// HasLabel has a deliberately high value so that you can disambiguate
+    // /// it from the encryptionVersion header which is either 0/1 right now and
+    // /// also any of the existing [`MessageType`].
+    // HasLabel = 244,
+  }
+);
+
+// pub enum Message<I, A> {
+//   /// Ping message
+//   Ping(Ping<I, A>),
+//   /// Indirect ping message
+//   IndirectPing(IndirectPing<I, A>),
+//   /// Ack response message
+//   AckResponse(AckResponse),
+//   /// Suspect message
+//   Suspect(Suspect<I, A>),
+//   /// Alive message
+//   Alive(Alive<I, A>),
+//   /// Dead message
+//   Dead(Dead<I, A>),
+//   /// PushPull message
+//   PushPull(PushPull<I, A>),
+//   /// Compound message
+//   Compound(Vec<Message<I, A>>),
+//   /// User mesg, not handled by us
+//   UserData(Bytes),
+//   /// Nack response message
+//   NackResponse(NackResponse),
+//   /// Error response message
+//   ErrorResponse(ErrorResponse),
+//   // HasCrc = 12,
+//   // Compress = 9,
+//   // Encrypt(Bytes),
+//   // /// HasLabel has a deliberately high value so that you can disambiguate
+//   // /// it from the encryptionVersion header which is either 0/1 right now and
+//   // /// also any of the existing [`MessageType`].
+//   // HasLabel = 244,
+// }
 
 // #[derive(Clone)]
 // #[repr(transparent)]
@@ -426,4 +539,3 @@ pub enum Message<I, A> {
 //     }
 //   }
 // }
-

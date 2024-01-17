@@ -5,14 +5,11 @@ use std::{
   time::{Duration, Instant},
 };
 
-use futures::{AsyncWrite, AsyncRead};
+use futures::{AsyncRead, AsyncWrite};
 use nodecraft::resolver::AddressResolver;
 pub use nodecraft::*;
 
-use crate::{
-  checksum::Checksumer,
-  types::Packet,
-};
+use crate::{checksum::Checksumer, types::Packet};
 
 use super::*;
 
@@ -136,7 +133,7 @@ const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
 //     // Start reporting the size before you cross the limit
 //     if more_bytes > (0.6 * (MAX_PUSH_STATE_BYTES as f64)).floor() as usize {
 //       tracing::warn!(
-//         target = "showbiz",
+//         target: "showbiz",
 //         "remote state size is {} limit is large: {}",
 //         more_bytes,
 //         MAX_PUSH_STATE_BYTES
@@ -476,27 +473,44 @@ pub trait TimeoutableStream: Unpin + Send + Sync + 'static {
 }
 
 /// The `PromisedStream` trait represents a stream of data with a guarantee of delivery.
-/// This trait is implemented by streams that ensure reliable communication, 
-/// e.g. TCP stream and QUIC stream. It extends various traits to support 
+/// This trait is implemented by streams that ensure reliable communication,
+/// e.g. TCP stream and QUIC stream. It extends various traits to support
 /// asynchronous reading and writing, timeout handling, and thread-safe sharing.
 ///
 /// Implementors of this trait are typically used in scenarios where reliable
-/// message delivery and order are critical. 
-pub trait PromisedStream: TimeoutableStream + AsyncRead + AsyncWrite + Send + Sync + 'static {}
+/// message delivery and order are critical.
+pub trait PromisedStream: TimeoutableStream + Send + Sync + 'static {
+  type Error: std::error::Error + Send + Sync + 'static;
+  type Id: Id;
+  type Address: core::fmt::Debug + CheapClone + Send + Sync + 'static;
+  type Wire: Wire;
 
-impl<T> PromisedStream for T where T: TimeoutableStream + AsyncRead + AsyncWrite + Send + Sync + 'static {}
+  /// Returns the remote address to which this stream is connected.
+  fn remote_address(&self) -> Result<Self::Address, Self::Error>;
 
-impl<T> PromisedStream for Box<T> where T: TimeoutableStream + AsyncRead + AsyncWrite + Send + Sync + 'static {}
+  fn read_message(
+    &mut self,
+  ) -> impl Future<Output = Result<Message<Self::Id, Self::Address>, Self::Error>> + Send;
+
+  fn send_message(
+    &mut self,
+    target: &Self::Address,
+    msg: Message<Self::Id, Self::Address>,
+  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+}
 
 /// The `PacketStream` trait represents a stream of data without guaranteed delivery.
 /// This trait is implemented by streams that operate on a best-effort delivery basis,
-/// e.g. UDP stream. It focuses on providing timeout functionality and 
+/// e.g. UDP stream. It focuses on providing timeout functionality and
 /// thread-safe operations, but without the overhead of ensuring message order or reliability.
-/// 
+///
 /// So implementors of this trait are typically need to add a checksum to the message at the end,
 /// and the receiver needs to verify the checksum to ensure the integrity of the message.
 pub trait PacketStream: TimeoutableStream + Send + Sync + 'static {
-  type Address: core::fmt::Debug + Clone + Send + Sync + 'static;
+  type Error: std::error::Error + Send + Sync + 'static;
+  type Id: Id;
+  type Address: core::fmt::Debug + CheapClone + Send + Sync + 'static;
+  type Wire: Wire;
 
   fn send_to(
     &self,
@@ -572,15 +586,18 @@ pub trait TransportError: std::error::Error + Send + Sync + 'static {
   fn io(err: std::io::Error) -> Self;
 
   /// Returns `true` if the error is a remote failure.
-  /// 
+  ///
   /// e.g. Errors happened when:
   /// 1. Fail to send to a remote node
   /// 2. Fail to receive from a remote node.
   /// 3. Fail to dial a remote node.
   /// ...
-  /// 
+  ///
   /// The above errors can be treated as remote failures.
   fn is_remote_failure(&self) -> bool;
+
+  /// Returns `true` if the error is unexpected EOF.
+  fn is_unexpected_eof(&self) -> bool;
 
   /// Custom the error.
   fn custom(err: std::borrow::Cow<'static, str>) -> Self;
@@ -645,6 +662,10 @@ pub trait TransportError: std::error::Error + Send + Sync + 'static {
 //   ) -> impl Future<Output = std::io::Result<Response<Self::Id, Self::Address>>> + Send;
 // }
 
+pub trait Wire: Send + Sync + 'static {
+  /// Returns the encoded length of the given message
+  fn encoded_len<I, A>(msg: &Message<I, A>) -> usize;
+}
 
 /// Transport is used to abstract over communicating with other peers. The packet
 /// interface is assumed to be best-effort and the stream interface is assumed to
@@ -654,9 +675,20 @@ pub trait Transport: Sized + Send + Sync + 'static {
   type Id: Id;
   type Resolver: AddressResolver;
   type Checksumer: Checksumer + Send + Sync + 'static;
-  type PromisedStream: PromisedStream;
-  type PacketStream: PacketStream;
+  type PromisedStream: PromisedStream<
+    Error = Self::Error,
+    Wire = Self::Wire,
+    Id = Self::Id,
+    Address = <Self::Resolver as AddressResolver>::ResolvedAddress,
+  >;
+  type PacketStream: PacketStream<
+    Error = Self::Error,
+    Wire = Self::Wire,
+    Id = Self::Id,
+    Address = <Self::Resolver as AddressResolver>::ResolvedAddress,
+  >;
   type Options: Clone + Send + Sync + 'static;
+  type Wire: Wire;
   type Runtime: agnostic::Runtime;
 
   /// Creates a new transport instance with the given options
@@ -677,8 +709,12 @@ pub trait Transport: Sized + Send + Sync + 'static {
   where
     Self: Sized;
 
-  /// Returns the resolver used to resolve addresses
-  fn resolver(&self) -> &Self::Resolver;
+  /// Resolves the given address to a resolved address
+  fn resolve(
+    &self,
+    addr: &<Self::Resolver as AddressResolver>::Address,
+  ) -> impl Future<Output = Result<<Self::Resolver as AddressResolver>::ResolvedAddress, Self::Error>>
+       + Send;
 
   /// Returns the local id of the node
   fn local_id(&self) -> &Self::Id;
@@ -689,7 +725,13 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Given the user's configured values (which
   /// might be empty) and returns the desired address to advertise to
   /// the rest of the cluster.
-  fn advertise_addr(&self) -> &<Self::Resolver as AddressResolver>::ResolvedAddress;
+  fn advertise_address(&self) -> &<Self::Resolver as AddressResolver>::ResolvedAddress;
+
+  /// Returns an error if the given address is blocked
+  fn blocked_address(
+    &self,
+    addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
+  ) -> Result<(), Self::Error>;
 
   // /// Returns the bind port that was automatically given by the
   // /// kernel, if a bind port of 0 was given.
@@ -711,6 +753,22 @@ pub trait Transport: Sized + Send + Sync + 'static {
     packet: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> impl Future<Output = Result<Instant, Self::Error>> + Send;
 
+  /// A packet-oriented interface that fires off the given
+  /// payload to the given address in a connectionless fashion. This should
+  /// return a time stamp that's as close as possible to when the packet
+  /// was transmitted to help make accurate RTT measurements during probes.
+  ///
+  /// This is similar to net.PacketConn, though we didn't want to expose
+  /// that full set of required methods to keep assumptions about the
+  /// underlying plumbing to a minimum. We also treat the address here as a
+  /// string, similar to Dial, so it's network neutral, so this usually is
+  /// in the form of "host:port".
+  fn send_packets(
+    &self,
+    addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
+    packets: Vec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
+  ) -> impl Future<Output = Result<Instant, Self::Error>> + Send;
+
   /// Used to create a connection that allows us to perform
   /// two-way communication with a peer. This is generally more expensive
   /// than packet connections so is used for more infrequent operations
@@ -718,7 +776,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// failed.
   fn dial_timeout(
     &self,
-    addr: &<Self::Resolver as AddressResolver>::Address,
+    addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     timeout: Duration,
   ) -> impl Future<Output = Result<Self::PromisedStream, Self::Error>> + Send;
 

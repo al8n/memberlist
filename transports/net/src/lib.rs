@@ -1,4 +1,3 @@
-
 use std::{
   collections::VecDeque,
   io::{self, Error, ErrorKind},
@@ -17,24 +16,24 @@ use std::{
 use agnostic::io::ReadBuf;
 use futures::FutureExt;
 
-use showbiz_core::{
-  transport::{
-    stream::{
-      connection_stream, packet_stream, ConnectionProducer, ConnectionSubscriber, PacketProducer,
-      PacketSubscriber,
-    },
-    resolver::AddressResolver,
-    Address, ConnectionError, ConnectionErrorKind, ConnectionKind, ConnectionTimeout, Id, ReliableConnection,
-    Transport, TransportError,
-  },
-  types::Packet,
-  Label,
-};
 use agnostic::{
   net::{Net, TcpListener, TcpStream, UdpSocket},
   Runtime,
 };
 use bytes::BytesMut;
+use showbiz_core::{
+  transport::{
+    resolver::AddressResolver,
+    stream::{
+      connection_stream, packet_stream, ConnectionProducer, ConnectionSubscriber, PacketProducer,
+      PacketSubscriber,
+    },
+    Address, ConnectionError, ConnectionErrorKind, ConnectionKind, ConnectionTimeout, Id,
+    ReliableConnection, Transport, TransportError,
+  },
+  types::Packet,
+  Label,
+};
 use wg::AsyncWaitGroup;
 
 /// Errors for the net transport.
@@ -501,7 +500,7 @@ impl<I: Id, A: AddressResolver, R: Runtime> Transport for NetTransport<I, A, R> 
         Ok(conn)
       }
       Err(e) => {
-        tracing::error!(target = "showbiz.net.transport", err = %e);
+        tracing::error!(target:  "showbiz.net.transport", err = %e);
         Err(TransportError::Connection(ConnectionError {
           kind: ConnectionKind::Reliable,
           error_kind: ConnectionErrorKind::Dial,
@@ -602,7 +601,7 @@ where
                 let remote_addr = match conn.peer_addr() {
                   Ok(addr) => addr,
                   Err(err) => {
-                    tracing::error!(target = "showbiz.net.transport", local_addr=%local_addr, err = %err, "failed to get TCP peer address");
+                    tracing::error!(target:  "showbiz.net.transport", local_addr=%local_addr, err = %err, "failed to get TCP peer address");
                     continue;
                   }
                 };
@@ -612,7 +611,7 @@ where
                   .send(ReliableConnection::new(Tcp { conn }, remote_addr))
                   .await
                 {
-                  tracing::error!(target = "showbiz.net.transport", local_addr=%local_addr, err = %e, "failed to send TCP connection");
+                  tracing::error!(target:  "showbiz.net.transport", local_addr=%local_addr, err = %e, "failed to send TCP connection");
                 }
               }
               Err(e) => {
@@ -630,7 +629,7 @@ where
                   loop_delay = MAX_DELAY;
                 }
 
-                tracing::error!(target = "showbiz.net.transport", local_addr=%local_addr, err = %e, "error accepting TCP connection");
+                tracing::error!(target:  "showbiz.net.transport", local_addr=%local_addr, err = %e, "error accepting TCP connection");
                 <T::Runtime as Runtime>::sleep(loop_delay).await;
                 continue;
               }
@@ -677,7 +676,7 @@ where
       scopeguard::defer!(wg.done());
       let ln = ln.as_ref();
       tracing::info!(
-        target = "showbiz.net.transport",
+        target: "showbiz.net.transport",
         "udp listening on {local_addr}"
       );
       loop {
@@ -695,14 +694,14 @@ where
                 // Check the length - it needs to have at least one byte to be a
                 // proper message.
                 if n < 1 {
-                  tracing::error!(target = "showbiz.net.transport", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
+                  tracing::error!(target:  "showbiz.net.transport", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
                   continue;
                 }
 
                 buf.truncate(n);
 
                 if let Err(e) = packet_tx.send(Packet::new(buf, addr, Instant::now())).await {
-                  tracing::error!(target = "showbiz.net.transport", local=%local_addr, from=%addr, err = %e, "failed to send packet");
+                  tracing::error!(target:  "showbiz.net.transport", local=%local_addr, from=%addr, err = %e, "failed to send packet");
                 }
 
                 #[cfg(feature = "metrics")]
@@ -729,7 +728,7 @@ where
                   break;
                 }
 
-                tracing::error!(target = "showbiz.net.transport", peer=%local_addr, err = %e, "error reading UDP packet");
+                tracing::error!(target:  "showbiz.net.transport", peer=%local_addr, err = %e, "error reading UDP packet");
                 continue;
               }
             };
@@ -739,5 +738,3 @@ where
     });
   }
 }
-
-

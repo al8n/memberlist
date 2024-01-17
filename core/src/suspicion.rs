@@ -1,5 +1,5 @@
 use std::{
-  collections::HashSet,
+  collections::HashMap,
   sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
@@ -38,10 +38,15 @@ pub(crate) struct Suspicion<I, A, R> {
   max: Duration,
   start: Instant,
   after_func: AfterFunc<R>,
-  confirmations: HashSet<Node<I, A>>,
+  confirmations: HashMap<I, A>,
 }
 
-impl<I, A, R> Suspicion<I, A, R> {
+impl<I, A, R> Suspicion<I, A, R>
+where
+  I: Eq + core::hash::Hash,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+{
   /// Returns a after_func started with the max time, and that will drive
   /// to the min time after seeing k or more confirmations. The from node will be
   /// excluded from confirmations since we might get our own suspicion message
@@ -55,7 +60,7 @@ impl<I, A, R> Suspicion<I, A, R> {
     timeout_fn: impl Fn(u32) -> BoxFuture<'static, ()> + Clone + Send + Sync + 'static,
   ) -> Self {
     #[allow(clippy::mutable_key_type)]
-    let confirmations = [from].into_iter().collect();
+    let confirmations = [from].into_iter().map(|n| n.into_components()).collect();
     let n = Arc::new(AtomicU32::new(0));
     let timeout = if k < 1 { min } else { max };
     let after_func = AfterFunc::new(n.clone(), timeout, Arc::new(timeout_fn));
@@ -74,6 +79,8 @@ impl<I, A, R> Suspicion<I, A, R> {
 
 impl<I, A, R> Suspicion<I, A, R>
 where
+  I: Clone + Eq + core::hash::Hash,
+  A: Clone,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
 {
@@ -86,10 +93,11 @@ where
       return false;
     }
 
-    if self.confirmations.contains(from) {
+    if self.confirmations.contains_key(from.id()) {
       return false;
     }
-    self.confirmations.insert(from.clone());
+    let (id, addr) = from.clone().into_components();
+    self.confirmations.insert(id, addr);
 
     // Compute the new timeout given the current number of confirmations and
     // adjust the after_func. If the timeout becomes negative *and* we can cleanly

@@ -2,21 +2,20 @@ use std::borrow::Cow;
 
 use nodecraft::{resolver::AddressResolver, Node};
 use rkyv::de::deserializers::SharedDeserializeMapError;
+use smol_str::SmolStr;
 
-use crate::{delegate::Delegate, transport::Transport};
+use crate::{delegate::Delegate, transport::Transport, types::ErrorResponse};
 
 pub use crate::{
-  options::ForbiddenIp,
-  security::{SecurityError, UnknownEncryptionAlgo},
   transport::TransportError,
-  types::{CompressError, DecodeError, DecompressError, EncodeError, InvalidLabel},
+  types::{CompressError, DecompressError},
   version::{InvalidDelegateVersion, InvalidProtocolVersion},
 };
 
 #[derive(thiserror::Error)]
 pub enum Error<
   T: Transport,
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::Address>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 > {
   #[error("showbiz: node is not running, please bootstrap first")]
   NotRunning,
@@ -25,95 +24,91 @@ pub enum Error<
   #[error("showbiz: timeout waiting for leave broadcast")]
   LeaveTimeout,
   #[error("showbiz: no response from node {0}")]
-  NoPingResponse(Node<T::Id, <T::Resolver as AddressResolver>::Address>),
+  Lost(Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
   #[error("showbiz: {0}")]
   Delegate(D::Error),
   #[error("showbiz: {0}")]
-  Transport(#[from] TransportError<T>),
-  #[error("showbiz: {0}")]
-  ForbiddenIp(#[from] ForbiddenIp),
-  #[error("showbiz: peer error: {0}")]
-  Peer(String),
-  #[error("showbiz: offload thread panic, fail to receive offload thread message")]
-  OffloadPanic,
+  Transport(T::Error),
+  /// Returned when a message is received with an unexpected type.
+  #[error("showbiz: unexpected message: expected {expected}, got {got}")]
+  UnexpectedMessage {
+    /// The expected message type.
+    expected: &'static str,
+    /// The actual message type.
+    got: &'static str,
+  },
+  /// Returned when the sequence number of [`AckResponse`](crate::types::AckResponse) is not
+  /// match the sequence number of [`Ping`](crate::types::Ping).
+  #[error("showbiz: sequence number mismatch: ping({ping}), ack({ack})")]
+  SequenceNumberMismatch {
+    /// The sequence number of [`Ping`](crate::types::Ping).
+    ping: u32,
+    /// The sequence number of [`AckResponse`](crate::types::AckResponse).
+    ack: u32,
+  },
+  // #[error("showbiz: {0}")]
+  // BlockedAddress(#[from] ForbiddenIp),
+  #[error("showbiz: remote error: {0}")]
+  Remote(SmolStr),
   #[error("showbiz: {0}")]
   Other(Cow<'static, str>),
 }
 
-impl<T: Transport, D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::Address>>
-  From<SharedDeserializeMapError> for Error<T, D>
-{
-  #[inline]
-  fn from(e: SharedDeserializeMapError) -> Self {
-    Self::Transport(DecodeError::Decode(e).into())
-  }
-}
-
-impl<T: Transport, D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::Address>>
-  From<CompressError> for Error<T, D>
-{
-  #[inline]
-  fn from(e: CompressError) -> Self {
-    Self::Transport(DecodeError::Compress(e).into())
-  }
-}
-
-impl<T: Transport, D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::Address>>
-  From<DecompressError> for Error<T, D>
-{
-  #[inline]
-  fn from(e: DecompressError) -> Self {
-    Self::Transport(DecodeError::Decompress(e).into())
-  }
-}
-
-impl<T: Transport, D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::Address>>
-  From<crate::security::SecurityError> for Error<T, D>
-{
-  #[inline]
-  fn from(e: crate::security::SecurityError) -> Self {
-    Self::Transport(e.into())
-  }
-}
-
-impl<T: Transport, D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::Address>>
-  core::fmt::Debug for Error<T, D>
+impl<
+    T: Transport,
+    D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  > core::fmt::Debug for Error<T, D>
 {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{self}")
   }
 }
 
-impl<T: Transport, D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::Address>>
-  From<crate::types::DecodeError> for Error<T, D>
+impl<
+    T: Transport,
+    D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  > Error<T, D>
 {
-  fn from(e: crate::types::DecodeError) -> Self {
-    Self::Transport(TransportError::Decode(e))
-  }
-}
-
-impl<T: Transport, D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::Address>>
-  Error<T, D>
-{
+  /// Creates a new error with the given delegate error.
   #[inline]
   pub fn delegate(e: D::Error) -> Self {
     Self::Delegate(e)
   }
 
+  /// Creates a [`Error::SequenceNumberMismatch`] error.
   #[inline]
-  pub fn transport(e: TransportError<T>) -> Self {
+  pub fn sequence_number_mismatch(ping: u32, ack: u32) -> Self {
+    Self::SequenceNumberMismatch { ping, ack }
+  }
+
+  /// Creates a [`Error::UnexpectedMessage`] error.
+  #[inline]
+  pub fn unexpected_message(expected: &'static str, got: &'static str) -> Self {
+    Self::UnexpectedMessage { expected, got }
+  }
+
+  /// Creates a new error with the given transport error.
+  #[inline]
+  pub fn transport(e: T::Error) -> Self {
     Self::Transport(e)
   }
 
+  /// Creates a new error with the given remote error.
   #[inline]
-  pub fn other(e: std::borrow::Cow<'static, str>) -> Self {
+  pub fn remote(e: ErrorResponse) -> Self {
+    Self::Remote(e.err)
+  }
+
+  /// Creates a new error with the given message.
+  #[inline]
+  pub fn custom(e: std::borrow::Cow<'static, str>) -> Self {
     Self::Other(e)
   }
 
   #[inline]
-  pub(crate) fn failed_remote(&self) -> bool {
+  pub(crate) fn is_remote_failure(&self) -> bool {
     match self {
-      Self::Transport(e) => e.failed_remote(),
+      Self::Transport(e) => e.is_remote_failure(),
       _ => false,
     }
   }

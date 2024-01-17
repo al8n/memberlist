@@ -32,7 +32,12 @@ pub struct PushPullHeader {
   archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash))
 )]
 pub struct PushServerState<I, A> {
-  node: Node<I, A>,
+  id: I,
+  #[viewit(
+    getter(const, rename = "address", style = "ref"),
+    setter(rename = "with_address")
+  )]
+  addr: A,
   meta: Bytes,
   incarnation: u32,
   state: ServerState,
@@ -55,5 +60,21 @@ pub struct PushServerState<I, A> {
 pub struct PushPull<I, A> {
   header: PushPullHeader,
   body: Vec<PushServerState<I, A>>,
-  user_data: Option<Bytes>,
+  user_data: Bytes,
+}
+
+impl<I, A> PushPull<I, A> {
+  /// Create a new [`PushPull`] message.
+  #[inline]
+  pub const fn new(
+    header: PushPullHeader,
+    body: Vec<PushServerState<I, A>>,
+    user_data: Bytes,
+  ) -> Self {
+    Self {
+      header,
+      body,
+      user_data,
+    }
+  }
 }

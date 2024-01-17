@@ -8,104 +8,17 @@
 //   Utf8(#[from] core::str::Utf8Error),
 // }
 
-// #[inline]
-// fn make_label_header(label: &[u8], src: &[u8]) -> Bytes {
-//   let mut dst = BytesMut::with_capacity(2 + src.len() + label.len());
-//   dst.put_u8(MessageType::HasLabel as u8);
-//   dst.put_u8(label.len() as u8);
-//   dst.put_slice(label);
-//   dst.put_slice(src);
-//   dst.freeze()
-// }
-
 // #[derive(Clone)]
 // pub struct Label(Bytes);
 
 // impl Label {
 //   #[inline]
-//   pub(crate) const fn empty() -> Label {
+//   pub const fn empty() -> Label {
 //     Label(Bytes::new())
 //   }
 
-//   /// Rrefixes outgoing packets with the correct header if
-//   /// the label is not empty.
-//   pub fn add_label_header_to_packet(src: &[u8], label: &[u8]) -> Result<Bytes, EncodeError> {
-//     if !label.is_empty() {
-//       if label.len() > Self::MAX_SIZE {
-//         return Err(EncodeError::InvalidLabel(InvalidLabel::InvalidSize(
-//           label.len(),
-//         )));
-//       }
-//       Ok(make_label_header(label, src))
-//     } else {
-//       Ok(Bytes::copy_from_slice(src))
-//     }
-//   }
-
-//   pub fn remove_label_header_from(mut buf: BytesMut) -> Result<(BytesMut, Label), DecodeError> {
-//     #[allow(clippy::declare_interior_mutable_const)]
-//     const EMPTY_LABEL: Label = Label::empty();
-
-//     if buf.is_empty() {
-//       return Ok((buf, EMPTY_LABEL));
-//     }
-
-//     if buf[0] != MessageType::HasLabel as u8 {
-//       return Ok((buf, EMPTY_LABEL));
-//     }
-
-//     if buf.len() < 2 {
-//       return Err(DecodeError::Truncated("label"));
-//     }
-
-//     let label_size = buf[1] as usize;
-//     if label_size < 1 {
-//       return Err(DecodeError::InvalidLabel(InvalidLabel::InvalidSize(0)));
-//     }
-
-//     if buf.len() < 2 + label_size {
-//       return Err(DecodeError::Truncated("label"));
-//     }
-
-//     buf.advance(2);
-//     let label = buf.split_to(label_size);
-//     Label::from_bytes(label.freeze())
-//       .map(|label| (buf, label))
-//       .map_err(From::from)
-//   }
-
-//   pub fn remove_label_header_from_packet(mut buf: Bytes) -> Result<(Bytes, Bytes), DecodeError> {
-//     #[allow(clippy::declare_interior_mutable_const)]
-//     const EMPTY_BYTES: Bytes = Bytes::new();
-
-//     if buf.is_empty() {
-//       return Ok((buf, EMPTY_BYTES));
-//     }
-
-//     if buf[0] != MessageType::HasLabel as u8 {
-//       return Ok((buf, EMPTY_BYTES));
-//     }
-
-//     if buf.len() < 2 {
-//       return Err(DecodeError::Truncated("label"));
-//     }
-
-//     let label_size = buf[1] as usize;
-//     if label_size < 1 {
-//       return Err(DecodeError::InvalidLabel(InvalidLabel::InvalidSize(0)));
-//     }
-
-//     if buf.len() < 2 + label_size {
-//       return Err(DecodeError::Truncated("label"));
-//     }
-
-//     buf.advance(2);
-//     let label = buf.split_to(label_size);
-//     Ok((buf, label))
-//   }
-
 //   #[inline]
-//   pub(crate) fn label_overhead(&self) -> usize {
+//   pub fn label_overhead(&self) -> usize {
 //     if self.is_empty() {
 //       0
 //     } else {

@@ -26,7 +26,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [workspace.dependencies]
 agnostic = { path = "../agnostic/agnostic" }
+async-channel = "2"
 bytes = "1.5"
+derive_more = "0.99"
 futures = "0.3"
 metrics = "0.22"
 nodecraft = { version = "0.2", features = ["transformable", "async", "resolver"] }
@@ -34,6 +36,7 @@ viewit = "0.1.5"
 pin-project = "1"
 scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }
+smallvec = "1"
 smol_str = "0.2"
 thiserror = "1"
 tracing = "0.1"

@@ -16,8 +16,8 @@ default = ["metrics"]
 tokio-compat = ["agnostic/tokio-compat"]
 metrics = ["dep:metrics"]
 
-serde = ["dep:serde"]
-rkyv = ["dep:rkyv"]
+serde = ["dep:serde", "bytes/serde", "nodecraft/serde"]
+rkyv = ["dep:rkyv", "nodecraft/rkyv"]
 
 # expose all tests fn for users who want to use other runtime
 # see showbiz-wasm for more examples about how to use those tests fn
@@ -36,9 +36,10 @@ hostname = "0.3"
 [dependencies]
 # async common
 agnostic = { workspace = true, features = ["net", "dns"] }
-async-channel = { version = "2" }
+async-channel.workspace = true 
 async-lock = { version = "3" }
 async-recursion = { version = "1" }
+derive_more.workspace = true
 futures.workspace = true
 
 # common
@@ -61,11 +62,13 @@ nodecraft = { workspace = true }
 paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
 parking_lot = { version = "0.12", features = ["send_guard"] }
 pollster = "0.3"
+pin-project.workspace = true
 rand = { version = "0.8" }
 rayon = "1.7"
 rkyv = { version = "0.7", features = ["validation", "bytes", "smol_str"], optional = true }
 scopeguard = "1.1"
 smol_str.workspace = true
+smallvec.workspace = true
 serde = { workspace = true, optional = true }
 humantime-serde = "1"
 thiserror = { workspace = true }
