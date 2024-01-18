@@ -200,7 +200,7 @@ where
             let _ = cancel_tx.send(());
 
             // Try to prevent the nack if we've caught it in time.
-            let ack = AckResponse::empty(ind_seq_no);
+            let ack = AckResponse::new(ind_seq_no);
             if let Err(e) = this
               .send_msg(
                 ind_source.address(),

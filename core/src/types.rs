@@ -29,8 +29,7 @@ pub use packet::*;
 mod server;
 pub use server::*;
 
-#[test]
-fn test_() {}
+const MAX_ENCODED_LEN_SIZE: usize = core::mem::size_of::<u32>();
 
 // const DEFAULT_ENCODE_PREALLOCATE_SIZE: usize = 128;
 // pub(crate) const ENCODE_META_SIZE: usize =

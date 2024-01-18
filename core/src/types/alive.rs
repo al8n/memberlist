@@ -1,7 +1,14 @@
-use crate::{DelegateVersion, ProtocolVersion};
+use crate::{
+  version::{InvalidDelegateVersion, InvalidProtocolVersion},
+  DelegateVersion, ProtocolVersion,
+};
 
+use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
 use nodecraft::{CheapClone, Node};
+use transformable::Transformable;
+
+use super::MAX_ENCODED_LEN_SIZE;
 
 #[viewit::viewit]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -28,6 +35,200 @@ impl<I: CheapClone, A: CheapClone> CheapClone for Alive<I, A> {
       protocol_version: self.protocol_version,
       delegate_version: self.delegate_version,
     }
+  }
+}
+
+/// Alive transform error.
+pub enum AliveTransformError<I: Transformable, A: Transformable> {
+  /// Node transform error.
+  Node(<Node<I, A> as Transformable>::Error),
+  /// Message too large.
+  TooLarge(u64),
+  /// Encode buffer too small.
+  BufferTooSmall,
+  /// The buffer did not contain enough bytes to decode Alive.
+  NotEnoughBytes,
+  /// Invalid protocol version.
+  InvalidProtocolVersion(InvalidProtocolVersion),
+  /// Invalid delegate version.
+  InvalidDelegateVersion(InvalidDelegateVersion),
+}
+
+impl<I: Transformable, A: Transformable> core::fmt::Debug for AliveTransformError<I, A> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Node(err) => write!(f, "node transform error: {:?}", err),
+      Self::TooLarge(val) => write!(f, "encoded message too large, max {} got {val}", u32::MAX),
+      Self::BufferTooSmall => write!(f, "encode buffer too small"),
+      Self::NotEnoughBytes => write!(f, "the buffer did not contain enough bytes to decode Alive"),
+      Self::InvalidProtocolVersion(err) => write!(f, "invalid protocol version: {:?}", err),
+      Self::InvalidDelegateVersion(err) => write!(f, "invalid delegate version: {:?}", err),
+    }
+  }
+}
+
+impl<I: Transformable, A: Transformable> core::fmt::Display for AliveTransformError<I, A> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Node(err) => write!(f, "node transform error: {}", err),
+      Self::TooLarge(val) => write!(f, "encoded message too large, max {} got {val}", u32::MAX),
+      Self::BufferTooSmall => write!(f, "encode buffer too small"),
+      Self::NotEnoughBytes => write!(f, "the buffer did not contain enough bytes to decode Alive"),
+      Self::InvalidProtocolVersion(err) => write!(f, "invalid protocol version: {}", err),
+      Self::InvalidDelegateVersion(err) => write!(f, "invalid delegate version: {}", err),
+    }
+  }
+}
+
+impl<I: Transformable, A: Transformable> std::error::Error for AliveTransformError<I, A> {}
+
+impl<I: Transformable, A: Transformable> From<InvalidProtocolVersion>
+  for AliveTransformError<I, A>
+{
+  fn from(err: InvalidProtocolVersion) -> Self {
+    Self::InvalidProtocolVersion(err)
+  }
+}
+
+impl<I: Transformable, A: Transformable> From<InvalidDelegateVersion>
+  for AliveTransformError<I, A>
+{
+  fn from(err: InvalidDelegateVersion) -> Self {
+    Self::InvalidDelegateVersion(err)
+  }
+}
+
+impl<I: Transformable, A: Transformable> Transformable for Alive<I, A> {
+  type Error = AliveTransformError<I, A>;
+
+  fn encode(&self, dst: &mut [u8]) -> Result<usize, Self::Error> {
+    let encoded_len = self.encoded_len();
+    if encoded_len as u64 > u32::MAX as u64 {
+      return Err(Self::Error::TooLarge(encoded_len as u64));
+    }
+
+    if encoded_len > dst.len() {
+      return Err(Self::Error::BufferTooSmall);
+    }
+
+    let mut offset = 0;
+    NetworkEndian::write_u32(&mut dst[offset..], encoded_len as u32);
+    offset += MAX_ENCODED_LEN_SIZE;
+
+    NetworkEndian::write_u32(&mut dst[offset..], self.incarnation);
+    offset += core::mem::size_of::<u32>();
+
+    if !self.meta.is_empty() {
+      dst[offset] = 1;
+      offset += 1;
+      let meta_len = self.meta.len() as u32;
+      NetworkEndian::write_u32(&mut dst[offset..], meta_len);
+      offset += core::mem::size_of::<u32>();
+      dst[offset..offset + meta_len as usize].copy_from_slice(&self.meta);
+      offset += meta_len as usize;
+    } else {
+      dst[offset] = 0;
+      offset += 1;
+    }
+
+    offset += self
+      .node
+      .encode(&mut dst[offset..])
+      .map_err(Self::Error::Node)?;
+
+    dst[offset] = self.protocol_version as u8;
+    offset += ProtocolVersion::SIZE;
+
+    dst[offset] = self.delegate_version as u8;
+    offset += DelegateVersion::SIZE;
+
+    debug_assert_eq!(
+      offset, encoded_len,
+      "expect bytes written ({encoded_len}) not match actual bytes written ({offset})"
+    );
+    Ok(offset)
+  }
+
+  fn encoded_len(&self) -> usize {
+    MAX_ENCODED_LEN_SIZE
+      + core::mem::size_of::<u32>() // incarnation
+      + if self.meta.is_empty() { 1 } else { self.meta.len() + 1 + MAX_ENCODED_LEN_SIZE }
+      + self.node.encoded_len()
+      + ProtocolVersion::SIZE
+      + DelegateVersion::SIZE
+  }
+
+  fn decode(src: &[u8]) -> Result<(usize, Self), Self::Error>
+  where
+    Self: Sized,
+  {
+    let mut offset = 0;
+    if core::mem::size_of::<u32>() > src.len() {
+      return Err(Self::Error::NotEnoughBytes);
+    }
+
+    let encoded_len = NetworkEndian::read_u32(&src[offset..]) as usize;
+    offset += MAX_ENCODED_LEN_SIZE;
+
+    if encoded_len > src.len() {
+      return Err(Self::Error::NotEnoughBytes);
+    }
+
+    let incarnation = NetworkEndian::read_u32(&src[offset..]);
+    offset += core::mem::size_of::<u32>();
+
+    let is_meta_empty = src[offset] == 0;
+    offset += 1;
+
+    let meta_len = if is_meta_empty {
+      0
+    } else {
+      if core::mem::size_of::<u32>() > src.len() - offset {
+        return Err(Self::Error::NotEnoughBytes);
+      }
+      let meta_len = NetworkEndian::read_u32(&src[offset..]) as usize;
+      offset += core::mem::size_of::<u32>();
+      meta_len
+    };
+
+    let meta = if meta_len > 0 {
+      if meta_len > src.len() - offset {
+        return Err(Self::Error::NotEnoughBytes);
+      }
+      let meta = Bytes::copy_from_slice(&src[offset..offset + meta_len]);
+      offset += meta_len;
+      meta
+    } else {
+      Bytes::new()
+    };
+
+    let (node_len, node) = Node::decode(&src[offset..]).map_err(Self::Error::Node)?;
+    offset += node_len;
+
+    if ProtocolVersion::SIZE + offset > src.len() {
+      return Err(Self::Error::NotEnoughBytes);
+    }
+    let protocol_version =
+      ProtocolVersion::try_from(src[offset]).map_err(Self::Error::InvalidProtocolVersion)?;
+    offset += ProtocolVersion::SIZE;
+
+    if DelegateVersion::SIZE + offset > src.len() {
+      return Err(Self::Error::NotEnoughBytes);
+    }
+    let delegate_version =
+      DelegateVersion::try_from(src[offset]).map_err(Self::Error::InvalidDelegateVersion)?;
+    offset += DelegateVersion::SIZE;
+
+    Ok((
+      offset,
+      Self {
+        incarnation,
+        meta,
+        node,
+        protocol_version,
+        delegate_version,
+      },
+    ))
   }
 }
 
@@ -87,3 +288,51 @@ const _: () = {
     }
   }
 };
+
+#[cfg(test)]
+const _: () = {
+  use std::net::SocketAddr;
+
+  use rand::{distributions::Alphanumeric, random, thread_rng, Rng};
+  use smol_str::SmolStr;
+
+  impl Alive<SmolStr, SocketAddr> {
+    fn random(size: usize) -> Self {
+      let id = thread_rng()
+        .sample_iter(Alphanumeric)
+        .take(size)
+        .collect::<Vec<u8>>();
+      let id = String::from_utf8(id).unwrap().into();
+      Self {
+        incarnation: random(),
+        meta: (0..size).map(|_| random::<u8>()).collect::<Vec<_>>().into(),
+        node: Node::new(
+          id,
+          format!("127.0.0.1:{}", thread_rng().gen_range(0..65535))
+            .parse()
+            .unwrap(),
+        ),
+        protocol_version: ProtocolVersion::V0,
+        delegate_version: DelegateVersion::V0,
+      }
+    }
+  }
+};
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_encode_decode() {
+    for i in 0..100 {
+      let alive = Alive::random(i);
+      let mut buf = vec![0; alive.encoded_len()];
+      let encoded_len = alive.encode(&mut buf).unwrap();
+      assert_eq!(encoded_len, alive.encoded_len());
+      let (decoded_len, decoded) = Alive::decode(&buf).unwrap();
+      assert_eq!(decoded_len, encoded_len);
+      assert_eq!(decoded, alive);
+    }
+  }
+}

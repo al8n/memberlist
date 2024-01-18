@@ -16,7 +16,7 @@ default = ["metrics"]
 tokio-compat = ["agnostic/tokio-compat"]
 metrics = ["dep:metrics"]
 
-serde = ["dep:serde", "bytes/serde", "nodecraft/serde"]
+serde = ["dep:serde", "bytes/serde", "nodecraft/serde", "humantime-serde"]
 rkyv = ["dep:rkyv", "nodecraft/rkyv"]
 
 # expose all tests fn for users who want to use other runtime
@@ -39,14 +39,17 @@ agnostic = { workspace = true, features = ["net", "dns"] }
 async-channel.workspace = true 
 async-lock = { version = "3" }
 async-recursion = { version = "1" }
+bytes.workspace = true
+byteorder.workspace = true
 derive_more.workspace = true
 futures.workspace = true
+nodecraft.workspace = true
+transformable.workspace = true
 
 # common
 atomic = "=0.5" # keep on 0.5
 aead = { version = "0.5", features = ["bytes"] }
 aes-gcm = "0.10"
-bytes = { workspace = true }
 base64 = "0.21"
 bytemuck = { version = "1.3", features = ["derive"] }
 cbc = "0.1"
@@ -57,7 +60,6 @@ crossbeam-queue = "0.3"
 either = "1"
 local-ip-address = "0.5"
 itertools = "0.12"
-nodecraft = { workspace = true }
 paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
 parking_lot = { version = "0.12", features = ["send_guard"] }
 pollster = "0.3"
@@ -69,7 +71,7 @@ scopeguard = "1.1"
 smol_str.workspace = true
 smallvec.workspace = true
 serde = { workspace = true, optional = true }
-humantime-serde = "1"
+humantime-serde = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing.workspace = true
 viewit = { workspace = true }
@@ -85,6 +87,7 @@ metrics = { workspace = true, optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 pnet = "0.34"
 agnostic = { workspace = true, features = ["net", "tokio"] }
+rand = "0.8"
 tokio = { version = "1.32", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 
