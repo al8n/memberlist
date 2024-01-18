@@ -1,4 +1,4 @@
-use super::*;
+use bytes::Bytes;
 
 /// Ack response is sent for a ping
 #[viewit::viewit]
@@ -10,7 +10,7 @@ use super::*;
 )]
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 #[cfg_attr(feature = "rkyv", archive_attr(derive(Debug, PartialEq, Eq, Hash)))]
-pub(crate) struct AckResponse {
+pub struct AckResponse {
   seq_no: u32,
   payload: Bytes,
 }

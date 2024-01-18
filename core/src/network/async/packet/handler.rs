@@ -53,7 +53,7 @@ where
   async fn handle_suspect(
     &self,
     from: <T::Resolver as AddressResolver>::ResolvedAddress,
-    suspect: Suspect<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    suspect: Suspect<T::Id>,
   ) {
     if let Err(e) = self.suspect_node(suspect).await {
       tracing::error!(target:  "showbiz.packet", err=%e, remote_addr = %from, "failed to suspect node");
@@ -81,7 +81,7 @@ where
   async fn handle_dead(
     &self,
     from: <T::Resolver as AddressResolver>::ResolvedAddress,
-    dead: Dead<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    dead: Dead<T::Id>,
   ) {
     let mut memberlist = self.inner.nodes.write().await;
     if let Err(e) = self.dead_node(&mut memberlist, dead).await {

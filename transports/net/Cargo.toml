@@ -20,6 +20,7 @@ bytes.workspace = true
 futures.workspace = true
 metrics = { workspace = true, optional = true }
 nodecraft.workspace = true
+ipnet = "2.7"
 
 showbiz-core = { workspace = true }
 serde = { working = true, optional = true }

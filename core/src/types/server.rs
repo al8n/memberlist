@@ -1,4 +1,7 @@
-use super::*;
+use bytes::Bytes;
+use nodecraft::{CheapClone, Node};
+
+use super::{DelegateVersion, ProtocolVersion};
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
@@ -61,10 +64,6 @@ impl core::fmt::Display for ServerState {
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
-#[cfg_attr(
-  feature = "rkyv",
-  archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash))
-)]
 pub struct Server<I, A> {
   #[viewit(getter(const, style = "ref"))]
   id: I,
@@ -103,8 +102,88 @@ impl<I, A> Server<I, A> {
   }
 }
 
+impl<I: CheapClone, A: CheapClone> CheapClone for Server<I, A> {
+  fn cheap_clone(&self) -> Self {
+    Self {
+      id: self.id.cheap_clone(),
+      addr: self.addr.cheap_clone(),
+      meta: self.meta.clone(),
+      state: self.state,
+      protocol_version: self.protocol_version,
+      delegate_version: self.delegate_version,
+    }
+  }
+}
+
+impl<I: CheapClone, A: CheapClone> Server<I, A> {
+  /// Returns a [`Node`] with the same id and address as this [`Server`].
+  pub fn node(&self) -> Node<I, A> {
+    Node::new(self.id.cheap_clone(), self.addr.cheap_clone())
+  }
+}
+
 impl<I: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for Server<I, A> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{}({})", self.id, self.addr)
   }
 }
+
+#[cfg(feature = "rkyv")]
+const _: () = {
+  use core::fmt::Debug;
+  use rkyv::Archive;
+
+  impl<I: Debug + Archive, A: Debug + Archive> core::fmt::Debug for ArchivedServer<I, A>
+  where
+    I::Archived: Debug,
+    A::Archived: Debug,
+  {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+      f.debug_struct("Server")
+        .field("id", &self.id)
+        .field("addr", &self.addr)
+        .field("meta", &self.meta)
+        .field("state", &self.state)
+        .field("protocol_version", &self.protocol_version)
+        .field("delegate_version", &self.delegate_version)
+        .finish()
+    }
+  }
+
+  impl<I: Archive, A: Archive> PartialEq for ArchivedServer<I, A>
+  where
+    I::Archived: PartialEq,
+    A::Archived: PartialEq,
+  {
+    fn eq(&self, other: &Self) -> bool {
+      self.id == other.id
+        && self.addr == other.addr
+        && self.meta == other.meta
+        && self.state == other.state
+        && self.protocol_version == other.protocol_version
+        && self.delegate_version == other.delegate_version
+    }
+  }
+
+  impl<I: Archive, A: Archive> Eq for ArchivedServer<I, A>
+  where
+    I::Archived: Eq,
+    A::Archived: Eq,
+  {
+  }
+
+  impl<I: Archive, A: Archive> core::hash::Hash for ArchivedServer<I, A>
+  where
+    I::Archived: core::hash::Hash,
+    A::Archived: core::hash::Hash,
+  {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+      self.id.hash(state);
+      self.addr.hash(state);
+      self.meta.hash(state);
+      self.state.hash(state);
+      self.protocol_version.hash(state);
+      self.delegate_version.hash(state);
+    }
+  }
+};

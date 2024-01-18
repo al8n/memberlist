@@ -5,7 +5,6 @@ use std::{
   time::{Duration, Instant},
 };
 
-use futures::{AsyncRead, AsyncWrite};
 use nodecraft::resolver::AddressResolver;
 pub use nodecraft::*;
 
@@ -18,10 +17,6 @@ use stream::*;
 
 #[cfg(feature = "test")]
 pub(crate) mod tests;
-
-const LABEL_MAX_SIZE: usize = 255;
-const DEFAULT_BUFFER_SIZE: usize = 4096;
-const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
 
 // #[derive(thiserror::Error)]
 // pub enum TransportError<T: Transport> {
@@ -428,30 +423,6 @@ const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
 //   }
 // }
 
-/// Compressor is used to compress and decompress data from a transport connection.
-pub trait Compressor {
-  /// The error type returned by the compressor.
-  type Error: std::error::Error;
-
-  /// Compress data from a slice, returning compressed data.
-  fn compress(&self, buf: &[u8]) -> Vec<u8>;
-
-  /// Compress data from a slice, writing the compressed data to the given writer.
-  async fn compress_to_writer<W: futures::io::AsyncWrite>(
-    &self,
-    buf: &[u8],
-    writer: W,
-  ) -> Result<(), Self::Error>;
-
-  /// Decompress data from a slice, returning uncompressed data.
-  fn decompress(src: &[u8]) -> Result<Vec<u8>, Self::Error>;
-
-  /// Decompress data from a reader, returning the bytes readed and the uncompressed data.
-  async fn decompress_from_reader<R: futures::io::AsyncRead>(
-    reader: R,
-  ) -> Result<(usize, Vec<u8>), Self::Error>;
-}
-
 /// Ensures that the stream has timeout capabilities.
 pub trait TimeoutableStream: Unpin + Send + Sync + 'static {
   fn set_write_timeout(&self, timeout: Option<Duration>);
@@ -663,8 +634,12 @@ pub trait TransportError: std::error::Error + Send + Sync + 'static {
 // }
 
 pub trait Wire: Send + Sync + 'static {
+  type Error: std::error::Error + Send + Sync + 'static;
+
   /// Returns the encoded length of the given message
   fn encoded_len<I, A>(msg: &Message<I, A>) -> usize;
+
+  fn decode_message<I, A>(src: &[u8]) -> Result<Message<I, A>, Self::Error>;
 }
 
 /// Transport is used to abstract over communicating with other peers. The packet
@@ -721,6 +696,12 @@ pub trait Transport: Sized + Send + Sync + 'static {
 
   /// Returns the local address of the node
   fn local_address(&self) -> &<Self::Resolver as AddressResolver>::Address;
+
+  /// Returns the maximum size of a packet that can be sent
+  fn packet_buffer_size(&self) -> usize;
+
+  /// Returns the size of overhead for each packet
+  fn packet_overhead(&self) -> usize;
 
   /// Given the user's configured values (which
   /// might be empty) and returns the desired address to advertise to
@@ -781,7 +762,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   ) -> impl Future<Output = Result<Self::PromisedStream, Self::Error>> + Send;
 
   /// Returns a packet subscriber that can be used to receive incoming packets
-  fn packet(&self) -> PacketSubscriber;
+  fn packet(&self) -> PacketSubscriber<<Self::Resolver as AddressResolver>::ResolvedAddress>;
 
   /// Returns a receiver that can be read to handle incoming stream
   /// connections from other peers. How this is set up for listening is

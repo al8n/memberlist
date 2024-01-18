@@ -6,65 +6,65 @@ use super::*;
 
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct PacketProducer {
-  sender: Sender<Packet>,
+pub struct PacketProducer<A> {
+  sender: Sender<Packet<A>>,
 }
 
 #[pin_project::pin_project]
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct PacketSubscriber {
+pub struct PacketSubscriber<A> {
   #[pin]
-  receiver: Receiver<Packet>,
+  receiver: Receiver<Packet<A>>,
 }
 
-pub fn packet_stream() -> (PacketProducer, PacketSubscriber) {
+pub fn packet_stream<A>() -> (PacketProducer<A>, PacketSubscriber<A>) {
   let (sender, receiver) = async_channel::unbounded();
   (PacketProducer { sender }, PacketSubscriber { receiver })
 }
 
-impl PacketProducer {
+impl<A> PacketProducer<A> {
   /// Sends a packet into the producer.
   ///
   /// If the producer is full, this method waits until there is space for a message.
   ///
   /// If the producer is closed, this method returns an error.
-  pub async fn send(&self, packet: Packet) -> Result<(), SendError<Packet>> {
+  pub async fn send(&self, packet: Packet<A>) -> Result<(), SendError<Packet<A>>> {
     self.sender.send(packet).await
   }
 
   /// Attempts to send a packet into the producer.
   ///
   /// If the channel is full or closed, this method returns an error.
-  pub fn try_send(&self, packet: Packet) -> Result<(), TrySendError<Packet>> {
+  pub fn try_send(&self, packet: Packet<A>) -> Result<(), TrySendError<Packet<A>>> {
     self.sender.try_send(packet)
   }
 }
 
-impl PacketSubscriber {
+impl<A> PacketSubscriber<A> {
   /// Receives a packet from the subscriber.
   ///
   /// If the subscriber is empty, this method waits until there is a message.
   ///
   /// If the subscriber is closed, this method receives a message or returns an error if there are
   /// no more messages.
-  pub async fn recv(&self) -> Result<Packet, RecvError> {
+  pub async fn recv(&self) -> Result<Packet<A>, RecvError> {
     self.receiver.recv().await
   }
 
   /// Attempts to receive a message from the subscriber.
   ///
   /// If the subscriber is empty, or empty and closed, this method returns an error.
-  pub fn try_recv(&self) -> Result<Packet, TryRecvError> {
+  pub fn try_recv(&self) -> Result<Packet<A>, TryRecvError> {
     self.receiver.try_recv()
   }
 }
 
-impl Stream for PacketSubscriber {
-  type Item = <Receiver<Packet> as Stream>::Item;
+impl<A: Unpin> Stream for PacketSubscriber<A> {
+  type Item = <Receiver<Packet<A>> as Stream>::Item;
 
   fn poll_next(
-    mut self: std::pin::Pin<&mut Self>,
+    self: std::pin::Pin<&mut Self>,
     cx: &mut std::task::Context<'_>,
   ) -> std::task::Poll<Option<Self::Item>> {
     <Receiver<_> as Stream>::poll_next(self.project().receiver, cx)
@@ -150,7 +150,7 @@ impl<S> Stream for StreamSubscriber<S> {
   type Item = <Receiver<S> as Stream>::Item;
 
   fn poll_next(
-    mut self: std::pin::Pin<&mut Self>,
+    self: std::pin::Pin<&mut Self>,
     cx: &mut std::task::Context<'_>,
   ) -> std::task::Poll<Option<Self::Item>> {
     <Receiver<_> as Stream>::poll_next(self.project().receiver, cx)

@@ -69,9 +69,9 @@ where
               id: n.id().clone(),
               addr: n.address().clone(),
               meta: n.meta.clone(),
-              state: n.state.into(),
-              protocol_version: n.protocol_version.into(),
-              delegate_version: n.delegate_version.into(),
+              state: n.state,
+              protocol_version: n.protocol_version,
+              delegate_version: n.delegate_version,
             })
           })
           .collect::<Vec<_>>();
@@ -145,11 +145,11 @@ where
           let this = PushServerState {
             id: n.id().clone(),
             addr: n.address().clone(),
-            meta: n.node.meta().clone(),
+            meta: n.meta().clone(),
             incarnation: n.incarnation.load(Ordering::Relaxed),
             state: n.state,
-            protocol_version: n.node.protocol_version,
-            delegate_version: n.node.delegate_version,
+            protocol_version: n.protocol_version,
+            delegate_version: n.delegate_version,
           };
 
           #[cfg(feature = "metrics")]

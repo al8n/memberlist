@@ -1,14 +1,12 @@
 use std::borrow::Cow;
 
 use nodecraft::{resolver::AddressResolver, Node};
-use rkyv::de::deserializers::SharedDeserializeMapError;
 use smol_str::SmolStr;
 
 use crate::{delegate::Delegate, transport::Transport, types::ErrorResponse};
 
 pub use crate::{
   transport::TransportError,
-  types::{CompressError, DecompressError},
   version::{InvalidDelegateVersion, InvalidProtocolVersion},
 };
 

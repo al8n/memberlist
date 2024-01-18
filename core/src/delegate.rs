@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::Future;
-use nodecraft::{Address, CheapClone, Id, Node};
+use nodecraft::{Address, CheapClone, Id};
 
-use crate::types::{Message, Server};
+use crate::types::Server;
 
 #[cfg(any(test, feature = "test"))]
 mod mock;

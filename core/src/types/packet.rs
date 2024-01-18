@@ -1,17 +1,21 @@
-use std::{net::SocketAddr, time::Instant};
+use std::time::Instant;
 
 use bytes::{Buf, BufMut, BytesMut};
 
-#[viewit::viewit(vis_all = "", getters(vis_all = "pub"), setters(vis_all = "pub"))]
+#[viewit::viewit(
+  vis_all = "",
+  getters(vis_all = "pub", style = "ref"),
+  setters(vis_all = "pub")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Packet {
+pub struct Packet<A> {
   /// The raw contents of the packet.
   #[viewit(getter(skip))]
   buf: BytesMut,
 
-  /// Address of the peer. This is an actual [`SocketAddr`] so we
+  /// Address of the peer. This is an actual address so we
   /// can expose some concrete details about incoming packets.
-  from: SocketAddr,
+  from: A,
 
   /// The time when the packet was received. This should be
   /// taken as close as possible to the actual receipt time to help make an
@@ -19,14 +23,19 @@ pub struct Packet {
   timestamp: Instant,
 }
 
-impl Packet {
+impl<A> Packet<A> {
   #[inline]
-  pub fn new(buf: BytesMut, from: SocketAddr, timestamp: Instant) -> Self {
+  pub fn new(buf: BytesMut, from: A, timestamp: Instant) -> Self {
     Self {
       buf,
       from,
       timestamp,
     }
+  }
+
+  #[inline]
+  pub fn into_components(self) -> (BytesMut, A, Instant) {
+    (self.buf, self.from, self.timestamp)
   }
 
   #[inline]

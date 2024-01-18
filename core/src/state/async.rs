@@ -1,15 +1,16 @@
 use std::{sync::atomic::Ordering, time::Duration};
 
 use crate::{
-  network::{COMPOUND_HEADER_OVERHEAD, COMPOUND_OVERHEAD},
   // security::encrypt_overhead,
   showbiz::{AckHandler, Member, Memberlist},
   suspicion::Suspicion,
   timer::Timer,
-  types::{Alive, Dead, IndirectPing, Message, Ping, PushServerState, Suspect},
+  transport::{Transport, TransportError},
+  types::{Alive, Dead, IndirectPing, Ping, PushServerState, Suspect},
 };
 
 use super::*;
+
 use agnostic::Runtime;
 use bytes::Bytes;
 use either::Either;
@@ -141,7 +142,7 @@ where
       observe_push_pull_node(now.elapsed().as_millis() as f64, self.inner.opts.metric_labels.iter());
     );
     // Read remote state
-    let data = self.send_and_receive_state(id, join).await?;
+    let data = self.send_and_receive_state(&id, join).await?;
     self.merge_remote_state(data).await
   }
 
@@ -152,10 +153,10 @@ where
       <T::Resolver as AddressResolver>::ResolvedAddress,
       T::Runtime,
     >,
-    d: Dead<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    d: Dead<T::Id>,
   ) -> Result<(), Error<T, D>> {
     // let node = d.node.clone();
-    let idx = match memberlist.node_map.get(d.node.id()) {
+    let idx = match memberlist.node_map.get(&d.node) {
       Some(idx) => *idx,
       // If we've never heard about this node before, ignore it
       None => return Ok(()),
@@ -193,13 +194,13 @@ where
       // If we are leaving, we broadcast and wait
       self
         .broadcast_notify(
-          d.node.clone(),
+          Either::Left(d.node.clone()),
           d.into(),
           Some(self.inner.leave_broadcast_tx.clone()),
         )
         .await;
     } else {
-      self.broadcast(d.node.clone(), d.into()).await;
+      self.broadcast(Either::Left(d.node.clone()), d.into()).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -225,7 +226,7 @@ where
     // notify of death
     if let Some(ref delegate) = self.delegate {
       delegate
-        .notify_leave(state.state.node.clone())
+        .notify_leave(state.state.server.clone())
         .await
         .map_err(Error::delegate)?;
     }
@@ -233,13 +234,10 @@ where
     Ok(())
   }
 
-  pub(crate) async fn suspect_node(
-    &self,
-    s: Suspect<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-  ) -> Result<(), Error<T, D>> {
+  pub(crate) async fn suspect_node(&self, s: Suspect<T::Id>) -> Result<(), Error<T, D>> {
     let mut mu = self.inner.nodes.write().await;
 
-    let Some(&idx) = mu.node_map.get(s.node.id()) else {
+    let Some(&idx) = mu.node_map.get(&s.node) else {
       return Ok(());
     };
 
@@ -255,7 +253,9 @@ where
     // that's already suspect.
     if let Some(timer) = &mut state.suspicion {
       if timer.confirm(&s.from).await {
-        self.broadcast(s.node.clone(), s.into()).await;
+        self
+          .broadcast(Either::Left(s.node.cheap_clone()), s.into())
+          .await;
       }
       return Ok(());
     }
@@ -269,7 +269,7 @@ where
     let snode = s.node.cheap_clone();
     let sfrom = s.from.cheap_clone();
     let sincarnation = s.incarnation;
-    if state.state.node.id.eq(&self.inner.id) {
+    if state.id().eq(self.local_id()) {
       self.refute(&state.state, s.incarnation).await;
       tracing::warn!(
         target: "showbiz.state",
@@ -279,7 +279,7 @@ where
       // Do not mark ourself suspect
       return Ok(());
     } else {
-      self.broadcast(s.node.clone(), s.into()).await;
+      self.broadcast(Either::Left(s.node.clone()), s.into()).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -326,19 +326,19 @@ where
       Duration::from_millis(max),
       move |num_confirmations| {
         let t = this.clone();
-        let n = snode.clone();
+        let n = snode.cheap_clone();
         async move {
           let timeout = {
             let members = t.inner.nodes.read().await;
 
-            members.node_map.get(n.id()).and_then(|&idx| {
+            members.node_map.get(&n).and_then(|&idx| {
               let state = &members.nodes[idx];
               let timeout = state.state.state == ServerState::Suspect
                 && state.state.state_change == change_time;
               if timeout {
                 Some(Dead {
-                  node: Node::new(state.state.node.id.clone(), state.state.node.addr.clone()),
-                  from: Node::new(t.inner.id.clone(), t.inner.advertise.clone()),
+                  node: state.id().cheap_clone(),
+                  from: t.local_id().cheap_clone(),
                   incarnation: sincarnation,
                 })
               } else {
@@ -392,7 +392,7 @@ where
       return;
     }
 
-    let node = Arc::new(Server {
+    let server = Arc::new(Server {
       id: alive.node.id().clone(),
       addr: alive.node.address().clone(),
       meta: alive.meta.clone(),
@@ -405,7 +405,7 @@ where
     // Using a merge delegate is not enough, as it is possible for passive
     // cluster merging to still occur.
     if let Some(delegate) = &self.delegate {
-      if let Err(e) = delegate.notify_alive(node.clone()).await {
+      if let Err(e) = delegate.notify_alive(server.clone()).await {
         tracing::warn!(target:  "showbiz.state", local = %self.inner.id, peer = %alive.node, err=%e, "ignoring alive message");
         return;
       }
@@ -416,8 +416,8 @@ where
       // Check if this address is different than the existing node unless the old node is dead.
       let state = &memberlist.nodes[*idx].state;
       if state.address() != alive.node.address() {
-        if let Err(err) = self.inner.opts.ip_allowed(alive.node.addr().ip()) {
-          tracing::warn!(target:  "showbiz.state", local = %self.inner.id, remote = %alive.node, err=%err, "rejected IP update from {} to {} for node {}", alive.node.name(), state.node.id().addr(), alive.node.addr());
+        if let Err(err) = self.inner.transport.blocked_address(alive.node.address()) {
+          tracing::warn!(target:  "showbiz.state", local = %self.inner.id, remote = %alive.node, err=%err, "rejected IP update from {} to {} for node {}", alive.node.id(), state.address(), alive.node.address());
           return;
         };
 
@@ -427,16 +427,16 @@ where
 
         // Allow the address to be updated if a dead node is being replaced.
         if state.state == ServerState::Left || (state.state == ServerState::Dead && can_reclaim) {
-          tracing::info!(target:  "showbiz.state", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.node.id(), state.node.address(), alive.node.address());
+          tracing::info!(target:  "showbiz.state", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.id(), state.address(), alive.node.address());
           updates_node = true;
         } else {
-          tracing::error!(target:  "showbiz.state", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.node.id(), state.node.address(), alive.node, state.state);
+          tracing::error!(target:  "showbiz.state", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.id(), state.address(), alive.node, state.state);
 
           // Inform the conflict delegate if provided
           if let Some(delegate) = self.delegate.as_ref() {
             if let Err(e) = delegate
               .notify_conflict(
-                state.node.clone(),
+                state.server.cheap_clone(),
                 Arc::new(Server {
                   id: alive.node.id().cheap_clone(),
                   addr: alive.node.address().cheap_clone(),
@@ -461,7 +461,7 @@ where
       };
 
       let state = LocalServerState {
-        node,
+        server,
         incarnation: Arc::new(AtomicU32::new(0)),
         state_change: Instant::now(),
         state: ServerState::Dead,
@@ -508,14 +508,11 @@ where
 
     // Store the old state and meta data
     let old_state = member.state.state;
-    let old_meta = member.state.node.meta.clone();
+    let old_meta = member.meta.clone();
 
     // If this is us we need to refute, otherwise re-broadcast
     if !bootstrap && is_local_node {
-      let (pv, dv) = (
-        member.state.node.protocol_version(),
-        member.state.node.delegate_version(),
-      );
+      let (pv, dv) = (member.protocol_version(), member.delegate_version());
 
       // If the Incarnation is the same, we need special handling, since it
       // possible for the following situation to happen:
@@ -529,17 +526,21 @@ where
       // we just ignore, but we may need to refute.
       //
       if alive.incarnation == local_incarnation
-        && alive.meta == member.state.node.meta
+        && alive.meta == member.meta
         && alive.protocol_version == pv
         && alive.delegate_version == dv
       {
         return;
       }
       self.refute(&member.state, alive.incarnation).await;
-      tracing::warn!(target:  "showbiz.state", local = %self.inner.id, peer = %alive.node, local_meta = ?member.state.node.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
+      tracing::warn!(target:  "showbiz.state", local = %self.inner.id, peer = %alive.node, local_meta = ?member.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
     } else {
       self
-        .broadcast_notify(alive.node.clone(), alive.into(), notify_tx)
+        .broadcast_notify(
+          Either::Right(alive.node.address().cheap_clone()),
+          alive.cheap_clone().into(),
+          notify_tx,
+        )
         .await;
 
       // Update the state and incarnation number
@@ -547,7 +548,7 @@ where
         .state
         .incarnation
         .store(alive.incarnation, Ordering::Relaxed);
-      member.state.node = Arc::new(Server {
+      member.state.server = Arc::new(Server {
         id: alive.node.id().clone(),
         addr: alive.node.address().cheap_clone(),
         meta: alive.meta,
@@ -569,12 +570,18 @@ where
     if let Some(delegate) = &self.delegate {
       if old_state == ServerState::Dead || old_state == ServerState::Left {
         // if Dead/Left -> Alive, notify of join
-        if let Err(e) = delegate.notify_join(member.state.node.clone()).await {
+        if let Err(e) = delegate
+          .notify_join(member.state.server.cheap_clone())
+          .await
+        {
           tracing::error!(target:  "showbiz.state", local = %self.inner.id, err=%e, "failed to notify join");
         }
-      } else if old_meta != member.state.node.meta {
+      } else if old_meta != member.state.meta {
         // if Meta changed, trigger an update notification
-        if let Err(e) = delegate.notify_update(member.state.node.clone()).await {
+        if let Err(e) = delegate
+          .notify_update(member.state.server.cheap_clone())
+          .await
+        {
           tracing::error!(target:  "showbiz.state", local = %self.inner.id, err=%e, "failed to notify update");
         }
       }
@@ -585,67 +592,61 @@ where
     &'a self,
     remote: &'a [PushServerState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>],
   ) {
-    let futs = remote.iter().filter_map(|r| {
+    let futs = remote.iter().map(|r| {
       enum State<T: Transport> {
         Alive(Alive<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
-        Left(Dead<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
-        Suspect(Suspect<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
+        Left(Dead<T::Id>),
+        Suspect(Suspect<T::Id>),
       }
 
       impl<T: Transport> State<T> {
         async fn run<D>(self, s: &Showbiz<T, D>)
         where
-          D: Delegate,
+          D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
           <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
           <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
         {
           match self {
-            State::Alive(alive) => s.alive_node(Either::Left(alive), None, false).await,
+            State::Alive(alive) => s.alive_node(alive, None, false).await,
             State::Left(dead) => {
-              let addr = dead.node.address();
+              let id = dead.node.cheap_clone();
               let mut memberlist = s.inner.nodes.write().await;
               if let Err(e) = s.dead_node(&mut memberlist, dead).await {
-                tracing::error!(target:  "showbiz.state", addr=%addr, err=%e, "fail to dead node");
+                tracing::error!(target: "showbiz.state", id=%id, err=%e, "fail to dead node");
               }
-            },
+            }
             State::Suspect(suspect) => {
-              let addr = suspect.node.addr();
+              let id = suspect.node.cheap_clone();
               if let Err(e) = s.suspect_node(suspect).await {
-                tracing::error!(target:  "showbiz.state", addr=%addr, err=%e, "fail to suspect node");
+                tracing::error!(target: "showbiz.state", id=%id, err=%e, "fail to suspect node");
               }
-            },
+            }
           }
         }
       }
 
       let state = match r.state {
-        ServerState::Alive => {
-          State::Alive(Alive {
-            incarnation: r.incarnation,
-            node: r.node,
-            meta: r.meta,
-            protocol_version: r.protocol_version.into(),
-            delegate_version: r.delegate_version.into(),
-          })
-        }
-        ServerState::Left => {
-          State::Left(Dead {
-            incarnation: r.incarnation,
-            node: r.node,
-            from: self.inner.id.clone(),
-          })
-        }
+        ServerState::Alive => State::Alive(Alive {
+          incarnation: r.incarnation,
+          node: r.node(),
+          meta: r.meta.clone(),
+          protocol_version: r.protocol_version,
+          delegate_version: r.delegate_version,
+        }),
+        ServerState::Left => State::Left(Dead {
+          incarnation: r.incarnation,
+          node: r.id().cheap_clone(),
+          from: self.local_id().cheap_clone(),
+        }),
         // If the remote node believes a node is dead, we prefer to
         // suspect that node instead of declaring it dead instantly
-        ServerState::Dead | ServerState::Suspect => {
-          State::Suspect(Suspect {
-            incarnation: r.incarnation,
-            node: r.node,
-            from: self.inner.id.clone(),
-          })
-        }
+        ServerState::Dead | ServerState::Suspect => State::Suspect(Suspect {
+          incarnation: r.incarnation,
+          node: r.id().cheap_clone(),
+          from: self.local_id().cheap_clone(),
+        }),
       };
-      Some(state.run(self))
+      state.run(self)
     });
     futures::future::join_all(futs).await;
   }
@@ -674,7 +675,7 @@ where
 
 #[inline]
 fn move_dead_nodes<I, A, R>(
-  nodes: &mut Vec<Member<I, A, R>>,
+  nodes: &mut [Member<I, A, R>],
   gossip_to_the_dead_time: Duration,
 ) -> usize {
   let mut num_dead = 0;
@@ -838,7 +839,7 @@ where
       // Determine if we should probe this node
       let mut skip = false;
       let node = memberlist.nodes[probe_index].state.clone();
-      if node.dead_or_left() || node.id().name == self.inner.opts.name {
+      if node.dead_or_left() || node.id() == self.local_id() {
         skip = true;
       }
 
@@ -883,11 +884,10 @@ where
     }
 
     // Prepare a ping message and setup an ack handler.
-    let self_addr = self.get_advertise();
     let ping = Ping {
       seq_no: self.next_seq_no(),
-      source: Node::new(self.inner.transport.local_id().clone(), self_addr.clone()),
-      target: target.id().clone(),
+      source: self.advertise_node(),
+      target: target.node(),
     };
 
     let (ack_tx, ack_rx) = async_channel::bounded(self.inner.opts.indirect_checks + 1);
@@ -914,10 +914,12 @@ where
       .await;
 
     if target.state == ServerState::Alive {
-      let pmsg = ping.encode();
-      if let Err(e) = self.send_msg(target.id().into(), pmsg).await {
+      if let Err(e) = self
+        .send_msg(target.address(), ping.cheap_clone().into())
+        .await
+      {
         tracing::error!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
-        if e.failed_remote() {
+        if e.is_remote_failure() {
           self
             .handle_remote_failure(target, ping, ack_rx, nack_rx, deadline)
             .await;
@@ -925,20 +927,22 @@ where
         return;
       }
     } else {
-      let pmsg = ping.encode();
       let suspect = Suspect {
         incarnation: target.incarnation.load(Ordering::SeqCst),
-        node: target.id().clone(),
-        from: self.inner.id.clone(),
+        node: target.id().cheap_clone(),
+        from: self.local_id().cheap_clone(),
       };
-      let smsg = suspect.encode();
-      let compound = Message::compound(vec![pmsg, smsg]);
       if let Err(e) = self
-        .raw_send_msg_packet(&target.id().into(), compound)
+        .inner
+        .transport
+        .send_packets(
+          target.address(),
+          vec![ping.cheap_clone().into(), suspect.into()],
+        )
         .await
       {
         tracing::error!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
-        if e.failed_remote() {
+        if e.is_remote_failure() {
           self
             .handle_remote_failure(target, ping, ack_rx, nack_rx, deadline)
             .await;
@@ -958,7 +962,7 @@ where
               if let Some(delegate) = delegate {
                 let rtt = v.timestamp.elapsed();
 
-                if let Err(e) = delegate.notify_ping_complete(target.node.clone(), rtt, v.payload).await {
+                if let Err(e) = delegate.notify_ping_complete(target.server.cheap_clone(), rtt, v.payload).await {
                   tracing::error!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to notify ping complete ack");
                 }
               }
@@ -1015,13 +1019,13 @@ where
         .nodes
         .iter()
         .filter_map(|m| {
-          if m.state.id() == &self.inner.id
-            || m.state.id() == target.id()
+          if m.id() == &self.inner.id
+            || m.id() == target.id()
             || m.state.state != ServerState::Alive
           {
             None
           } else {
-            Some(m.state.node.clone())
+            Some(m.state.server.cheap_clone())
           }
         })
         .collect::<Vec<_>>();
@@ -1036,7 +1040,10 @@ where
     for peer in nodes {
       // We only expect nack to be sent from peers who understand
       // version 4 of the protocol.
-      if let Err(e) = self.send_msg(ind_target.address(), ind.into()).await {
+      if let Err(e) = self
+        .send_msg(ind_target.address(), ind.cheap_clone().into())
+        .await
+      {
         tracing::error!(target:  "showbiz.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
       }
     }
@@ -1136,11 +1143,8 @@ where
     tracing::info!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), "suspecting has failed, no acks received");
     let s = Suspect {
       incarnation: target.incarnation.load(Ordering::SeqCst),
-      node: Node::new(target.id().cheap_clone(), target.address().cheap_clone()),
-      from: Node::new(
-        self.inner.id.cheap_clone(),
-        self.inner.advertise.cheap_clone(),
-      ),
+      node: target.id().cheap_clone(),
+      from: self.local_id().cheap_clone(),
     };
     if let Err(e) = self.suspect_node(s).await {
       tracing::error!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to suspect node");
@@ -1267,12 +1271,12 @@ where
           }
 
           match m.state.state {
-            ServerState::Alive | ServerState::Suspect => Some(m.state.node.clone()),
+            ServerState::Alive | ServerState::Suspect => Some(m.state.server.clone()),
             ServerState::Dead => {
               if m.state.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
                 None
               } else {
-                Some(m.state.node.clone())
+                Some(m.state.server.clone())
               }
             }
             _ => None,
@@ -1283,23 +1287,18 @@ where
     };
 
     // Compute the bytes available
-    let mut bytes_avail = self.inner.opts.packet_buffer_size
-      - COMPOUND_HEADER_OVERHEAD
-      - self.inner.opts.label.label_overhead();
+    let overhead = self.inner.transport.packet_overhead();
+    let bytes_avail = self.inner.transport.packet_buffer_size() - overhead;
 
-    // if self.encryption_enabled() {
-    //   bytes_avail = bytes_avail.saturating_sub(encrypt_overhead(self.inner.opts.encryption_algo));
-    // }
-
-    for node in nodes {
+    for server in nodes {
       // Get any pending broadcasts
       let mut msgs = match self
-        .get_broadcast_with_prepend(vec![], COMPOUND_OVERHEAD, bytes_avail)
+        .get_broadcast_with_prepend(vec![], overhead, bytes_avail)
         .await
       {
         Ok(msgs) => msgs,
         Err(e) => {
-          tracing::error!(target:  "showbiz.state", err = %e, "failed to get broadcast messages from {}", node);
+          tracing::error!(target:  "showbiz.state", err = %e, "failed to get broadcast messages from {}", server);
           return;
         }
       };
@@ -1307,27 +1306,22 @@ where
         return;
       }
 
-      let addr = node.id().into();
+      let addr = server.address();
       if msgs.len() == 1 {
         // Send single message as is
         if let Err(e) = self
           .inner
           .transport
-          .send_packet(&addr, msgs.pop().unwrap())
+          .send_packet(addr, msgs.pop().unwrap())
           .await
         {
           tracing::error!(target:  "showbiz.state", err = %e, "failed to send gossip to {}", addr);
         }
       } else {
         // Otherwise create and send one or more compound messages
-        if let Err(e) = self.inner.transport.send_packets(&addr, msgs).await {
+        if let Err(e) = self.inner.transport.send_packets(addr, msgs).await {
           tracing::error!(target:  "showbiz.state", err = %e, "failed to send gossip to {}", addr);
         }
-        // for compound in Message::compounds(msgs) {
-        //   if let Err(e) = self.raw_send_msg_packet(&addr, compound).await {
-        //     tracing::error!(target:  "showbiz.state", err = %e, "failed to send gossip to {}", addr);
-        //   }
-        // }
       }
     }
   }
@@ -1350,7 +1344,7 @@ where
           if n.state.id() == &self.inner.id || n.state.state != ServerState::Alive {
             None
           } else {
-            Some(n.state.node.clone())
+            Some(n.state.server.clone())
           }
         })
         .collect::<Vec<_>>();
@@ -1361,10 +1355,10 @@ where
       return;
     }
 
-    let node = &nodes[0];
+    let server = &nodes[0];
     // Attempt a push pull
-    if let Err(e) = self.push_pull_node(node.id(), false).await {
-      tracing::error!(target:  "showbiz.state", err = %e, "push/pull with {} failed", node.id());
+    if let Err(e) = self.push_pull_node(server.node(), false).await {
+      tracing::error!(target:  "showbiz.state", err = %e, "push/pull with {} failed", server.id());
     }
   }
 
@@ -1389,18 +1383,17 @@ where
     self.inner.awareness.apply_delta(1);
 
     // Format and broadcast an alive message.
-    let anode = Node::new(
-      state.node.id.cheap_clone(),
-      state.node.address().cheap_clone(),
-    );
+    let anode = Node::new(state.id().cheap_clone(), state.address().cheap_clone());
     let a = Alive {
       incarnation: inc,
-      meta: state.node.meta.clone(),
+      meta: state.meta.clone(),
       node: anode,
-      protocol_version: state.node.protocol_version,
-      delegate_version: state.node.delegate_version,
+      protocol_version: state.protocol_version,
+      delegate_version: state.delegate_version,
     };
-    self.broadcast(a.node.clone(), a.into()).await;
+    self
+      .broadcast(Either::Right(a.node.address().cheap_clone()), a.into())
+      .await;
   }
 }
 

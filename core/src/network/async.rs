@@ -10,7 +10,6 @@ use crate::{
 
 use super::*;
 use agnostic::Runtime;
-use bytes::Buf;
 use futures::{future::FutureExt, Future, Stream};
 use nodecraft::{resolver::AddressResolver, Node};
 
@@ -74,9 +73,9 @@ where
 
   /// Used to initiate a push/pull over a stream with a
   /// remote host.
-  pub(crate) async fn send_and_receive_state<'a>(
-    &'a self,
-    node: &'a Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  pub(crate) async fn send_and_receive_state(
+    &self,
+    node: &Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     join: bool,
   ) -> Result<PushPull<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>, Error<T, D>> {
     // Attempt to connect
@@ -109,104 +108,5 @@ where
       Message::PushPull(pp) => Ok(pp),
       msg => Err(Error::unexpected_message("PushPull", msg.kind())),
     }
-
-    // let encryption_enabled = self.encryption_enabled();
-    // let (h, data) = Self::read_stream(
-    //   &mut conn,
-    //   self.inner.opts.label.clone(),
-    //   encryption_enabled,
-    //   self.inner.opts.secret_keyring.clone(),
-    //   &self.inner.opts,
-    //   #[cfg(feature = "metrics")]
-    //   &self.inner.opts.metric_labels,
-    // )
-    // .await?;
-
-    // if h.meta.ty == MessageType::ErrorResponse {
-    //   let err = match ErrorResponse::decode_archived(&data) {
-    //     Ok((_, err)) => err,
-    //     Err(e) => return Err(TransportError::Decode(e).into()),
-    //   };
-    //   return Err(Error::Peer(err.err.to_string()));
-    // }
-
-    // // Quit if not push/pull
-    // if h.meta.ty != MessageType::PushPull {
-    //   return Err(Error::Transport(TransportError::Decode(
-    //     DecodeError::MismatchMessageType {
-    //       expected: MessageType::PushPull.as_str(),
-    //       got: h.meta.ty.as_str(),
-    //     },
-    //   )));
-    // }
-
-    // Ok(data)
   }
-
-  // fn encrypt_local_state(
-  //   primary_key: SecretKey,
-  //   keyring: &SecretKeyring,
-  //   msg: &[u8],
-  //   label: &Label,
-  //   algo: EncryptionAlgo,
-  // ) -> Result<Bytes, Error<T, D>> {
-  //   let mut buf = algo.header(msg.len());
-
-  //   // Authenticated Data is:
-  //   //
-  //   //   [messageType; u8] [marker; u8] [encryptionAlgo; u8] [reserved1; u8]
-  //   //   [messageLength; u32] [stream_label; optional]
-  //   //
-  //   let mut ciphertext = buf.split_off(ENCODE_HEADER_SIZE);
-  //   if label.is_empty() {
-  //     // Write the encrypted cipher text to the buffer
-  //     keyring
-  //       .encrypt_payload(primary_key, algo, msg, &buf, &mut ciphertext)
-  //       .map(|_| {
-  //         buf.unsplit(ciphertext);
-  //         buf.freeze()
-  //       })
-  //       .map_err(From::from)
-  //   } else {
-  //     let data_bytes = append_bytes(&buf, label.as_bytes());
-  //     // Write the encrypted cipher text to the buffer
-  //     keyring
-  //       .encrypt_payload(primary_key, algo, msg, &data_bytes, &mut ciphertext)
-  //       .map(|_| {
-  //         buf.unsplit(ciphertext);
-  //         buf.freeze()
-  //       })
-  //       .map_err(From::from)
-  //   }
-  // }
-
-  // fn decrypt_remote_state(
-  //   stream_label: &Label,
-  //   mut buf: BytesMut,
-  //   keyring: &SecretKeyring,
-  // ) -> Result<Bytes, Error<T, D>> {
-  //   // Decrypt the cipherText with some authenticated data
-  //   //
-  //   // Authenticated Data is:
-  //   //
-  //   //   [messageType; u8] [marker; u8] [encryptionAlgo; u8] [reserved1; u8]
-  //   //   [messageLength; u32] [stream_label; optional]
-  //   //
-
-  //   let mut ciphertext = buf.split_off(ENCODE_HEADER_SIZE);
-  //   if stream_label.is_empty() {
-  //     // Decrypt the payload
-  //     keyring
-  //       .decrypt_payload(&mut ciphertext, &buf)
-  //       .map(|_| ciphertext.freeze())
-  //       .map_err(From::from)
-  //   } else {
-  //     let data_bytes = append_bytes(&buf, stream_label.as_bytes());
-  //     // Decrypt the payload
-  //     keyring
-  //       .decrypt_payload(&mut ciphertext, data_bytes.as_ref())
-  //       .map(|_| ciphertext.freeze())
-  //       .map_err(From::from)
-  //   }
-  // }
 }

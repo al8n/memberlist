@@ -2,7 +2,6 @@ use std::{future::Future, sync::atomic::Ordering, time::Duration};
 
 use crate::{
   delegate::VoidDelegate,
-  transport::TransportError,
   types::{Dead, PushServerState},
 };
 
@@ -10,8 +9,7 @@ use super::*;
 
 use agnostic::Runtime;
 use async_lock::{Mutex, RwLock};
-use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Stream, StreamExt};
-use itertools::Either;
+use futures::{future::BoxFuture, FutureExt, Stream};
 use nodecraft::{resolver::AddressResolver, CheapClone};
 
 // #[cfg(feature = "test")]
@@ -30,8 +28,7 @@ pub(crate) struct ShowbizCore<T: Transport> {
   hot: HotData,
   awareness: Awareness<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   broadcast: TransmitLimitedQueue<
-    ShowbizBroadcast<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    DefaultServerCalculator,
+    ShowbizBroadcast<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Wire>,
   >,
   leave_broadcast_tx: Sender<()>,
   leave_lock: Mutex<()>,
@@ -43,7 +40,7 @@ pub(crate) struct ShowbizCore<T: Transport> {
   nodes:
     Arc<RwLock<Memberlist<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Runtime>>>,
   ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
-  transport: T,
+  transport: Arc<T>,
   /// We do not call send directly, just directly drop it.
   shutdown_tx: Sender<()>,
   advertise: <T::Resolver as AddressResolver>::ResolvedAddress,
@@ -96,6 +93,12 @@ where
     &self.inner.id
   }
 
+  /// Returns a [`Node`] with the local id and the advertise address of local node.
+  #[inline]
+  pub fn advertise_node(&self) -> Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> {
+    Node::new(self.inner.id.clone(), self.inner.advertise.clone())
+  }
+
   /// Returns the delegate, if any.
   #[inline]
   pub fn delegate(&self) -> Option<&D> {
@@ -117,7 +120,7 @@ where
     nodes
       .node_map
       .get(&self.inner.id)
-      .map(|&idx| nodes.nodes[idx].state.node.clone())
+      .map(|&idx| nodes.nodes[idx].state.server.clone())
       .unwrap()
   }
 
@@ -133,7 +136,7 @@ where
       .await
       .nodes
       .iter()
-      .map(|n| n.state.node.clone())
+      .map(|n| n.state.server.clone())
       .collect()
   }
 
@@ -313,7 +316,7 @@ where
   pub(crate) async fn new_in(
     transport: T,
     delegate: Option<D>,
-    mut opts: Options,
+    opts: Options,
   ) -> Result<
     (
       Receiver<()>,
@@ -406,30 +409,30 @@ where
       node.clone(),
     );
     let hot = HotData::new();
-    let broadcast = TransmitLimitedQueue::new(
-      DefaultServerCalculator::new(hot.num_nodes),
-      opts.retransmit_mult,
-    );
+    let num_nodes = hot.num_nodes.clone();
+    let broadcast = TransmitLimitedQueue::new(opts.retransmit_mult, move || {
+      num_nodes.load(Ordering::Acquire) as usize
+    });
     // let encryption_enabled = if let Some(keyring) = &opts.secret_keyring {
     //   !keyring.is_empty() && !opts.encryption_algo.is_none()
     // } else {
     //   false
     // };
 
-    // TODO: replace this with is_global when IpAddr::is_global is stable
-    // https://github.com/rust-lang/rust/issues/27709
-    if crate::util::IsGlobalIp::is_global_ip(&advertise.ip()) {
-      tracing::warn!(
-        target: "showbiz",
-        "binding to public address without encryption!"
-      );
-    }
+    // // TODO: replace this with is_global when IpAddr::is_global is stable
+    // // https://github.com/rust-lang/rust/issues/27709
+    // if crate::util::IsGlobalIp::is_global_ip(&advertise.ip()) && encrypted_enable {
+    //   tracing::warn!(
+    //     target: "showbiz",
+    //     "binding to public address without encryption!"
+    //   );
+    // }
 
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
     let this = Showbiz {
       inner: Arc::new(ShowbizCore {
         id: id.cheap_clone(),
-        hot: HotData::new(),
+        hot,
         awareness,
         broadcast,
         leave_broadcast_tx,
@@ -441,9 +444,9 @@ where
         queue: Mutex::new(MessageQueue::new()),
         nodes: Arc::new(RwLock::new(Memberlist::new(node))),
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
-        transport,
         shutdown_tx,
         advertise: advertise.cheap_clone(),
+        transport: Arc::new(transport),
         opts: Arc::new(opts),
       }),
       delegate: delegate.map(Arc::new),
@@ -455,7 +458,7 @@ where
     #[cfg(feature = "metrics")]
     this.check_broadcast_queue_depth(shutdown_rx.clone());
 
-    Ok((shutdown_rx, advertise.cheap_clone(), this))
+    Ok((shutdown_rx, this.inner.advertise.cheap_clone(), this))
   }
 
   /// Leave will broadcast a leave message but will not shutdown the background
@@ -486,14 +489,10 @@ where
         // sure this node is gone.
 
         let state = &memberlist.nodes[idx];
-        let n = Node::new(
-          state.state.node.id().cheap_clone(),
-          state.state.node.address().cheap_clone(),
-        );
         let d = Dead {
           incarnation: state.state.incarnation.load(Ordering::Relaxed),
-          node: n.cheap_clone(),
-          from: n,
+          node: state.id().cheap_clone(),
+          from: state.id().cheap_clone(),
         };
 
         self.dead_node(&mut memberlist, d).await?;
@@ -797,15 +796,13 @@ where
       .await
       .nodes
       .iter()
-      .any(|n| !n.state.dead_or_left() && n.state.node.id().ne(&self.inner.id))
+      .any(|n| !n.state.dead_or_left() && n.state.server.id().ne(&self.inner.id))
   }
 
   #[cfg(feature = "metrics")]
   fn check_broadcast_queue_depth(&self, shutdown_rx: Receiver<()>) {
     let queue_check_interval = self.inner.opts.queue_check_interval;
     let this = self.clone();
-
-    static QUEUE_BROADCAST: std::sync::Once = std::sync::Once::new();
 
     <T::Runtime as Runtime>::spawn_detach(async move {
       loop {
@@ -815,10 +812,6 @@ where
           },
           _ = <T::Runtime as Runtime>::sleep(queue_check_interval).fuse() => {
             let numq = this.inner.broadcast.num_queued();
-            // QUEUE_BROADCAST.call_once(|| {
-            //   metrics::register_gauge!("showbiz.queue.broadcasts");
-            // });
-
             metrics::gauge!("showbiz.queue.broadcasts").set(numq as f64);
           }
         }

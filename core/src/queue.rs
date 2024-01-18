@@ -1,13 +1,9 @@
 // use a sync version mutex here is reasonable, because the lock is only held for a short time.
 #![allow(clippy::await_holding_lock)]
 
-use crossbeam_utils::CachePadded;
 use std::{
   collections::{BTreeSet, HashMap},
-  sync::{
-    atomic::{AtomicU32, Ordering},
-    Arc,
-  },
+  sync::Arc,
 };
 
 use crate::{broadcast::Broadcast, util::retransmit_limit};
@@ -58,38 +54,22 @@ impl<B: Broadcast> Inner<B> {
   }
 }
 
-#[derive(Clone)]
-pub(crate) struct DefaultServerCalculator(Arc<CachePadded<AtomicU32>>);
-
-impl ServerCalculator for DefaultServerCalculator {
-  fn num_nodes(&self) -> usize {
-    self.0.load(Ordering::SeqCst) as usize
-  }
-}
-
-impl DefaultServerCalculator {
-  #[inline]
-  pub(crate) const fn new(num: Arc<CachePadded<AtomicU32>>) -> Self {
-    Self(num)
-  }
-}
-
 /// Used to queue messages to broadcast to
 /// the cluster (via gossip) but limits the number of transmits per
 /// message. It also prioritizes messages with lower transmit counts
 /// (hence newer messages).
-pub struct TransmitLimitedQueue<B: Broadcast, C: ServerCalculator> {
-  num_nodes: C,
+pub struct TransmitLimitedQueue<B: Broadcast> {
+  num_nodes: Box<dyn Fn() -> usize + Send + Sync + 'static>,
   /// The multiplier used to determine the maximum
   /// number of retransmissions attempted.
   retransmit_mult: usize,
   inner: parking_lot::Mutex<Inner<B>>,
 }
 
-impl<B: Broadcast, C: ServerCalculator> TransmitLimitedQueue<B, C> {
-  pub fn new(calc: C, retransmit_mult: usize) -> Self {
+impl<B: Broadcast> TransmitLimitedQueue<B> {
+  pub fn new(retransmit_mult: usize, calc: impl Fn() -> usize + Send + Sync + 'static) -> Self {
     Self {
-      num_nodes: calc,
+      num_nodes: Box::new(calc),
       retransmit_mult,
       inner: parking_lot::Mutex::new(Inner {
         q: BTreeSet::new(),
@@ -121,7 +101,7 @@ impl<B: Broadcast, C: ServerCalculator> TransmitLimitedQueue<B, C> {
       return to_send;
     }
 
-    let transmit_limit = retransmit_limit(self.retransmit_mult, self.num_nodes.num_nodes());
+    let transmit_limit = retransmit_limit(self.retransmit_mult, (self.num_nodes)());
 
     // Visit fresher items first, but only look at stuff that will fit.
     // We'll go tier by tier, grabbing the largest items first.
@@ -151,13 +131,13 @@ impl<B: Broadcast, C: ServerCalculator> TransmitLimitedQueue<B, C> {
         .q
         .iter()
         .filter(|item| greater_or_equal <= item && less_than > item)
-        .find(|item| item.broadcast.message().underlying_bytes().len() <= free)
+        .find(|item| B::encoded_len(item.broadcast.message()) <= free)
         .cloned();
 
       match keep {
         Some(mut keep) => {
           let msg = keep.broadcast.message();
-          bytes_used += msg.underlying_bytes().len() + overhead;
+          bytes_used += B::encoded_len(msg) + overhead;
           // Add to slice to send
           to_send.push(msg.clone());
 
@@ -205,7 +185,7 @@ impl<B: Broadcast, C: ServerCalculator> TransmitLimitedQueue<B, C> {
 
     let lb = LimitedBroadcast {
       transmits: initial_transmits,
-      msg_len: b.message().0.len() as u64,
+      msg_len: B::encoded_len(b.message()) as u64,
       id,
       broadcast: Arc::new(b),
     };
@@ -343,13 +323,30 @@ mod tests {
   use std::net::SocketAddr;
 
   use bytes::{BufMut, Bytes, BytesMut};
+  use either::Either;
   use futures::FutureExt;
-  use nodecraft::Node;
   use smol_str::SmolStr;
 
   use crate::{broadcast::ShowbizBroadcast, types::Message};
 
   use super::*;
+
+  struct DummyWire;
+
+  impl crate::transport::Wire for DummyWire {
+    type Error = std::io::Error;
+
+    fn encoded_len<I, A>(msg: &Message<I, A>) -> usize {
+      match msg {
+        Message::UserData(b) => b.len(),
+        _ => unreachable!(),
+      }
+    }
+
+    fn decode_message<I, A>(_src: &[u8]) -> Result<Message<I, A>, Self::Error> {
+      unreachable!()
+    }
+  }
 
   struct NC(usize);
 
@@ -393,7 +390,7 @@ mod tests {
     }
   }
 
-  impl<B: Broadcast, C: ServerCalculator> TransmitLimitedQueue<B, C> {
+  impl<B: Broadcast> TransmitLimitedQueue<B> {
     async fn ordered_view(&self, reverse: bool) -> Vec<LimitedBroadcast<B>> {
       let inner = self.inner.lock();
 
@@ -410,8 +407,8 @@ mod tests {
   fn test_limited_broadcast_less() {
     struct Case {
       name: &'static str,
-      a: Arc<LimitedBroadcast<ShowbizBroadcast<SmolStr, SocketAddr>>>,
-      b: Arc<LimitedBroadcast<ShowbizBroadcast<SmolStr, SocketAddr>>>,
+      a: Arc<LimitedBroadcast<ShowbizBroadcast<SmolStr, SocketAddr, DummyWire>>>,
+      b: Arc<LimitedBroadcast<ShowbizBroadcast<SmolStr, SocketAddr, DummyWire>>>,
     }
 
     let cases = [
@@ -421,10 +418,11 @@ mod tests {
           transmits: 0,
           msg_len: 10,
           id: 100,
-          broadcast: Arc::new(ShowbizBroadcast {
-            node: Node::new("diff-transmits-a".into(), "127.0.0.1:10".parse().unwrap()),
+          broadcast: Arc::new(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+            node: Either::Left("diff-transmits-a".into()),
             msg: Message::UserData(Bytes::from([0; 10].as_slice())),
             notify: None,
+            _marker: std::marker::PhantomData,
           }),
         }
         .into(),
@@ -432,10 +430,11 @@ mod tests {
           transmits: 1,
           msg_len: 10,
           id: 100,
-          broadcast: Arc::new(ShowbizBroadcast {
-            node: Node::new("diff-transmits-b".into(), "127.0.0.1:11".parse().unwrap()),
+          broadcast: Arc::new(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+            node: Either::Left("diff-transmits-b".into()),
             msg: Message::UserData(Bytes::from([0; 10].as_slice())),
             notify: None,
+            _marker: std::marker::PhantomData,
           }),
         }
         .into(),
@@ -446,13 +445,11 @@ mod tests {
           transmits: 0,
           msg_len: 12,
           id: 100,
-          broadcast: Arc::new(ShowbizBroadcast {
-            node: Node::new(
-              "same-transmits--diff-len-a".into(),
-              "127.0.0.1:10".parse().unwrap(),
-            ),
+          broadcast: Arc::new(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+            node: Either::Left("same-transmits--diff-len-a".into()),
             msg: Message::UserData(Bytes::from([0; 12].as_slice())),
             notify: None,
+            _marker: std::marker::PhantomData,
           }),
         }
         .into(),
@@ -460,13 +457,11 @@ mod tests {
           transmits: 0,
           msg_len: 10,
           id: 100,
-          broadcast: Arc::new(ShowbizBroadcast {
-            node: Node::new(
-              "same-transmits--diff-len-b".into(),
-              "127.0.0.1:11".parse().unwrap(),
-            ),
+          broadcast: Arc::new(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+            node: Either::Left("same-transmits--diff-len-b".into()),
             msg: Message::UserData(Bytes::from([0; 10].as_slice())),
             notify: None,
+            _marker: std::marker::PhantomData,
           }),
         }
         .into(),
@@ -477,13 +472,11 @@ mod tests {
           transmits: 0,
           msg_len: 12,
           id: 100,
-          broadcast: Arc::new(ShowbizBroadcast {
-            node: Node::new(
-              "same-transmits--same-len--diff-id-a".into(),
-              "127.0.0.1:10".parse().unwrap(),
-            ),
+          broadcast: Arc::new(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+            node: Either::Left("same-transmits--same-len--diff-id-a".into()),
             msg: Message::UserData(Bytes::from([0; 12].as_slice())),
             notify: None,
+            _marker: std::marker::PhantomData,
           }),
         }
         .into(),
@@ -491,13 +484,11 @@ mod tests {
           transmits: 0,
           msg_len: 12,
           id: 90,
-          broadcast: Arc::new(ShowbizBroadcast {
-            node: Node::new(
-              "same-transmits--same-len--diff-id-b".into(),
-              "127.0.0.1:11".parse().unwrap(),
-            ),
+          broadcast: Arc::new(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+            node: Either::Left("same-transmits--same-len--diff-id-b".into()),
             msg: Message::UserData(Bytes::from([0; 12].as_slice())),
             notify: None,
+            _marker: std::marker::PhantomData,
           }),
         }
         .into(),
@@ -526,26 +517,26 @@ mod tests {
 
   #[tokio::test]
   async fn test_transmit_limited_queue() {
-    let q = TransmitLimitedQueue::new(NC(1), 1);
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::<SmolStr, SocketAddr>::new(
-        "test".try_into().unwrap(),
-        "127.0.0.1:10".parse().unwrap(),
-      ),
+    let q = TransmitLimitedQueue::new(1, || 1);
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("test".into()),
       msg: Message::UserData(Bytes::new()),
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("foo".into()),
       msg: Message::UserData(Bytes::new()),
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("bar".into()),
       msg: Message::UserData(Bytes::new()),
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
 
@@ -554,15 +545,16 @@ mod tests {
     let dump = q.ordered_view(true).await;
 
     assert_eq!(dump.len(), 3);
-    assert_eq!(dump[0].broadcast.node.id(), "test");
-    assert_eq!(dump[1].broadcast.node.id(), "foo");
-    assert_eq!(dump[2].broadcast.node.id(), "bar");
+    assert_eq!(dump[0].broadcast.node.as_ref().unwrap_left(), "test");
+    assert_eq!(dump[1].broadcast.node.as_ref().unwrap_left(), "foo");
+    assert_eq!(dump[2].broadcast.node.as_ref().unwrap_left(), "bar");
 
     // Should invalidate previous message
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("test".try_into().unwrap(), "127.0.0.1:10".parse().unwrap()),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("test".into()),
       msg: Message::UserData(Bytes::new()),
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
 
@@ -570,57 +562,58 @@ mod tests {
     let dump = q.ordered_view(true).await;
 
     assert_eq!(dump.len(), 3);
-    assert_eq!(dump[0].broadcast.node.id(), "foo");
-    assert_eq!(dump[1].broadcast.node.id(), "bar");
-    assert_eq!(dump[2].broadcast.node.id(), "test");
+    assert_eq!(dump[0].broadcast.node.as_ref().unwrap_left(), "foo");
+    assert_eq!(dump[1].broadcast.node.as_ref().unwrap_left(), "bar");
+    assert_eq!(dump[2].broadcast.node.as_ref().unwrap_left(), "test");
   }
 
   #[tokio::test]
   async fn test_transmit_limited_get_broadcasts() {
-    let q = TransmitLimitedQueue::new(NC(10), 3);
+    let q = TransmitLimitedQueue::new(3, || 10);
 
     // 18 bytes per message
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::<SmolStr, SocketAddr>::new(
-        "test".try_into().unwrap(),
-        "127.0.0.1:10".parse().unwrap(),
-      ),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("test".into()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"1. this is a test.");
         Message::UserData(msg.freeze())
       },
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("foo".into()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"2. this is a test.");
         Message::UserData(msg.freeze())
       },
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("bar".into()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"3. this is a test.");
         Message::UserData(msg.freeze())
       },
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("baz".try_into().unwrap(), "127.0.0.1:13".parse().unwrap()),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("baz".into()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"4. this is a test.");
         Message::UserData(msg.freeze())
       },
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
 
@@ -635,56 +628,54 @@ mod tests {
 
   #[tokio::test]
   async fn test_transmit_limited_get_broadcasts_limit() {
-    let q = TransmitLimitedQueue::new(NC(10), 1);
+    let q = TransmitLimitedQueue::new(1, || 10);
 
     assert_eq!(0, q.inner.lock().id_gen);
-    assert_eq!(
-      2,
-      retransmit_limit(q.retransmit_mult, q.num_nodes.num_nodes())
-    );
+    assert_eq!(2, retransmit_limit(q.retransmit_mult, (q.num_nodes)()));
 
     // 18 bytes per message
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::<SmolStr, SocketAddr>::new(
-        "test".try_into().unwrap(),
-        "127.0.0.1:10".parse().unwrap(),
-      ),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("test".into()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"1. this is a test.");
         Message::UserData(msg.freeze())
       },
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("foo".into()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"2. this is a test.");
         Message::UserData(msg.freeze())
       },
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("bar".into()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"3. this is a test.");
         Message::UserData(msg.freeze())
       },
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("baz".try_into().unwrap(), "127.0.0.1:13".parse().unwrap()),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("baz".into()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"4. this is a test.");
         Message::UserData(msg.freeze())
       },
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
 
@@ -721,52 +712,53 @@ mod tests {
 
   #[tokio::test]
   async fn test_transmit_limited_prune() {
-    let q = TransmitLimitedQueue::new(NC(10), 1);
+    let q = TransmitLimitedQueue::new(1, || 10);
     let (tx1, rx1) = async_channel::bounded(1);
     let (tx2, rx2) = async_channel::bounded(1);
 
     // 18 bytes per message
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::<SmolStr, SocketAddr>::new(
-        "test".try_into().unwrap(),
-        "127.0.0.1:10".parse().unwrap(),
-      ),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("test".into()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"1. this is a test.");
         Message::UserData(msg.freeze())
       },
       notify: Some(tx1),
+      _marker: std::marker::PhantomData,
     })
     .await;
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("foo".try_into().unwrap(), "127.0.0.1:11".parse().unwrap()),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("foo".into()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"2. this is a test.");
         Message::UserData(msg.freeze())
       },
       notify: Some(tx2),
+      _marker: std::marker::PhantomData,
     })
     .await;
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("bar".try_into().unwrap(), "127.0.0.1:12".parse().unwrap()),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("bar".into()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"3. this is a test.");
         Message::UserData(msg.freeze())
       },
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
-    q.queue_broadcast(ShowbizBroadcast {
-      node: Node::new("baz".try_into().unwrap(), "127.0.0.1:13".parse().unwrap()),
+    q.queue_broadcast(ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+      node: Either::Left("baz".into()),
       msg: {
         let mut msg = BytesMut::new();
         msg.put_slice(b"4. this is a test.");
         Message::UserData(msg.freeze())
       },
       notify: None,
+      _marker: std::marker::PhantomData,
     })
     .await;
 
@@ -787,22 +779,26 @@ mod tests {
     }
 
     let dump = q.ordered_view(true).await;
-    assert_eq!(dump[0].broadcast.id().unwrap(), "bar");
-    assert_eq!(dump[1].broadcast.id().unwrap(), "baz");
+    assert_eq!(
+      dump[0].broadcast.id().unwrap().as_ref().unwrap_left(),
+      "bar"
+    );
+    assert_eq!(
+      dump[1].broadcast.id().unwrap().as_ref().unwrap_left(),
+      "baz"
+    );
   }
 
   #[tokio::test]
   async fn test_transmit_limited_ordering() {
-    let q = TransmitLimitedQueue::new(NC(10), 1);
+    let q = TransmitLimitedQueue::new(1, || 10);
     let insert = |name: &str, transmits: usize| {
       q.queue_broadcast_in(
-        ShowbizBroadcast {
-          node: Node::<SmolStr, SocketAddr>::new(
-            name.try_into().unwrap(),
-            format!("127.0.0.1:{transmits}").parse().unwrap(),
-          ),
+        ShowbizBroadcast::<SmolStr, SocketAddr, DummyWire> {
+          node: Either::Left(name.into()),
           msg: Message::UserData(Bytes::new()),
           notify: None,
+          _marker: std::marker::PhantomData,
         },
         transmits,
       )

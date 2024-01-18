@@ -25,7 +25,7 @@ pub(crate) struct Awareness<I, A> {
   pub(crate) metric_labels: Arc<Vec<metrics::Label>>,
 }
 
-impl<I, A> Awareness<I, A> {
+impl<I: core::fmt::Display, A: core::fmt::Display> Awareness<I, A> {
   /// Returns a new awareness object.
   pub(crate) fn new(
     max: isize,
@@ -62,10 +62,12 @@ impl<I, A> Awareness<I, A> {
       static HEALTH_GAUGE: std::sync::Once = std::sync::Once::new();
 
       if _initial != _fnl {
-        // HEALTH_GAUGE.call_once(|| {
-        //   metrics::register_gauge!("showbiz.health.score", "node" => self.id.to_string());
-        //   metrics::describe_gauge!("showbiz.health.score", "the health score of the local node");
-        // });
+        HEALTH_GAUGE.call_once(|| {
+          metrics::describe_gauge!(
+            "showbiz.health.score",
+            format!("the health score of the {}", self.id)
+          );
+        });
         metrics::gauge!("showbiz.health.score", self.metric_labels.iter()).set(_fnl as f64);
       }
     }

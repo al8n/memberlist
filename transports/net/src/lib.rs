@@ -38,6 +38,12 @@ use wg::AsyncWaitGroup;
 
 /// Errors for the net transport.
 pub mod error;
+pub mod util;
+
+const DEFAULT_PORT: u16 = 7946;
+const LABEL_MAX_SIZE: usize = 255;
+const DEFAULT_BUFFER_SIZE: usize = 4096;
+const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
 
 /// Used to buffer incoming packets during read
 /// operations.

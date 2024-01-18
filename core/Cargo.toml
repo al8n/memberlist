@@ -57,7 +57,6 @@ crossbeam-queue = "0.3"
 either = "1"
 local-ip-address = "0.5"
 itertools = "0.12"
-ipnet = { version = "2.7" }
 nodecraft = { workspace = true }
 paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
 parking_lot = { version = "0.12", features = ["send_guard"] }
@@ -85,6 +84,7 @@ metrics = { workspace = true, optional = true }
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 pnet = "0.34"
-agnostic = { path = "../../agnostic/agnostic", features = ["net"] }
+agnostic = { workspace = true, features = ["net", "tokio"] }
 tokio = { version = "1.32", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+

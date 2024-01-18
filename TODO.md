@@ -3,3 +3,4 @@
   - [ ] Encryption/Decryption
   - [ ] Compression/Decompression
   - [ ] retry new transport
+  - [ ] check if address is global

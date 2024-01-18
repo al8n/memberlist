@@ -1,10 +1,4 @@
-use std::{
-  collections::HashSet,
-  // net::{IpAddr, Ipv4Addr},
-  str::FromStr,
-  sync::Arc,
-  time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 // use crate::security::SecretKeyring;
 
@@ -15,8 +9,6 @@ use super::{
 };
 
 pub use super::version::{DelegateVersion, ProtocolVersion};
-
-const DEFAULT_PORT: u16 = 7946;
 
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone)]
@@ -349,26 +341,6 @@ impl Options {
 
   //   Err(ForbiddenIp(addr))
   // }
-}
-
-// ParseCIDRs return a possible empty list of all Network that have been parsed
-// In case of error, it returns succesfully parsed CIDRs and the last error found
-pub fn parse_cidrs(v: &[impl AsRef<str>]) -> (HashSet<ipnet::IpNet>, Option<Vec<String>>) {
-  let mut nets = HashSet::new();
-  let mut errs = Vec::new();
-
-  for p in v.iter() {
-    let p = p.as_ref();
-    match ipnet::IpNet::from_str(p.trim()) {
-      Ok(net) => {
-        nets.insert(net);
-      }
-      Err(_) => {
-        errs.push(format!("invalid cidr: {}", p));
-      }
-    }
-  }
-  (nets, (!errs.is_empty()).then_some(errs))
 }
 
 // #[derive(Debug, Clone, Copy)]

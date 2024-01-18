@@ -1,6 +1,6 @@
-use super::*;
+use bytes::Bytes;
 
-const INLINED_MESSAGES: usize = 2;
+use super::*;
 
 /// A compound message.
 pub type CompoundMessage<I, A> = Vec<Message<I, A>>;
@@ -88,11 +88,11 @@ enum_wrapper!(
     /// Ack response message
     AckResponse(AckResponse) = 2,
     /// Suspect message
-    Suspect(Suspect<I, A>) = 3,
+    Suspect(Suspect<I>) = 3,
     /// Alive message
     Alive(Alive<I, A>) = 4,
     /// Dead message
-    Dead(Dead<I, A>) = 5,
+    Dead(Dead<I>) = 5,
     /// PushPull message
     PushPull(PushPull<I, A>) = 6,
     /// Compound message

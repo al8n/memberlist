@@ -1,6 +1,5 @@
 use std::{
   collections::{HashMap, VecDeque},
-  net::SocketAddr,
   sync::{
     atomic::{AtomicBool, AtomicU32},
     Arc,
@@ -11,7 +10,6 @@ use std::{
 use agnostic::Runtime;
 use async_channel::{Receiver, Sender};
 use bytes::Bytes;
-use crossbeam_utils::CachePadded;
 use nodecraft::Node;
 
 use super::{
@@ -20,7 +18,7 @@ use super::{
   delegate::Delegate,
   error::Error,
   network::META_MAX_SIZE,
-  queue::{DefaultServerCalculator, TransmitLimitedQueue},
+  queue::TransmitLimitedQueue,
   // security::SecretKeyring,
   state::LocalServerState,
   suspicion::Suspicion,
@@ -35,23 +33,23 @@ pub use r#async::*;
 
 #[viewit::viewit]
 pub(crate) struct HotData {
-  sequence_num: CachePadded<AtomicU32>,
-  incarnation: CachePadded<AtomicU32>,
-  push_pull_req: CachePadded<AtomicU32>,
-  shutdown: CachePadded<AtomicBool>,
-  leave: CachePadded<AtomicBool>,
-  num_nodes: Arc<CachePadded<AtomicU32>>,
+  sequence_num: AtomicU32,
+  incarnation: AtomicU32,
+  push_pull_req: AtomicU32,
+  shutdown: AtomicBool,
+  leave: AtomicBool,
+  num_nodes: Arc<AtomicU32>,
 }
 
 impl HotData {
   fn new() -> Self {
     Self {
-      sequence_num: CachePadded::new(AtomicU32::new(0)),
-      incarnation: CachePadded::new(AtomicU32::new(0)),
-      num_nodes: Arc::new(CachePadded::new(AtomicU32::new(0))),
-      push_pull_req: CachePadded::new(AtomicU32::new(0)),
-      shutdown: CachePadded::new(AtomicBool::new(false)),
-      leave: CachePadded::new(AtomicBool::new(false)),
+      sequence_num: AtomicU32::new(0),
+      incarnation: AtomicU32::new(0),
+      num_nodes: Arc::new(AtomicU32::new(0)),
+      push_pull_req: AtomicU32::new(0),
+      shutdown: AtomicBool::new(false),
+      leave: AtomicBool::new(false),
     }
   }
 }
@@ -82,7 +80,15 @@ impl<I, A> MessageQueue<I, A> {
 #[viewit::viewit]
 pub(crate) struct Member<I, A, R> {
   pub(crate) state: LocalServerState<I, A>,
-  pub(crate) suspicion: Option<Suspicion<I, A, R>>,
+  pub(crate) suspicion: Option<Suspicion<I, R>>,
+}
+
+impl<I, A, R> core::ops::Deref for Member<I, A, R> {
+  type Target = LocalServerState<I, A>;
+
+  fn deref(&self) -> &Self::Target {
+    &self.state
+  }
 }
 
 pub(crate) struct Memberlist<I, A, R> {
@@ -226,6 +232,6 @@ impl<I: PartialEq, A, R> Memberlist<I, A, R> {
     self
       .nodes
       .iter()
-      .any(|m| !m.state.dead_or_left() && m.state.node.id().ne(self.local.id()))
+      .any(|m| !m.dead_or_left() && m.id().ne(self.local.id()))
   }
 }

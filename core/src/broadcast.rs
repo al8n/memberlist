@@ -7,7 +7,8 @@ use crate::{
   types::{CompoundMessage, Message},
 };
 use async_channel::Sender;
-use nodecraft::{resolver::AddressResolver, CheapClone, Node};
+use either::Either;
+use nodecraft::{resolver::AddressResolver, CheapClone};
 
 /// Something that can be broadcasted via gossip to
 /// the memberlist cluster.
@@ -26,17 +27,13 @@ pub trait Broadcast: Send + Sync + 'static {
   /// Returns the message
   fn message(&self) -> &Self::Message;
 
-  /// Invoked when the message will no longer
-  /// be broadcast, either due to invalidation or to the
-  /// transmit limit being reached
-
-  async fn finished(&self);
+  /// Returns the encoded length of the message
+  fn encoded_len(msg: &Self::Message) -> usize;
 
   /// Invoked when the message will no longer
   /// be broadcast, either due to invalidation or to the
   /// transmit limit being reached
-  #[cfg(feature = "nightly")]
-  fn finished<'a>(&'a self) -> impl std::future::Future<Output = ()> + Send + 'a;
+  fn finished(&self) -> impl std::future::Future<Output = ()> + Send;
 
   /// Indicates that each message is
   /// intrinsically unique and there is no need to scan the broadcast queue for
@@ -50,13 +47,14 @@ pub trait Broadcast: Send + Sync + 'static {
 }
 
 #[viewit::viewit]
-pub(crate) struct ShowbizBroadcast<I, A> {
-  node: Node<I, A>,
+pub(crate) struct ShowbizBroadcast<I, A, W> {
+  node: Either<I, A>,
   msg: Message<I, A>,
   notify: Option<async_channel::Sender<()>>,
+  _marker: std::marker::PhantomData<W>,
 }
 
-impl<I, A> Broadcast for ShowbizBroadcast<I, A>
+impl<I, A, W> Broadcast for ShowbizBroadcast<I, A, W>
 where
   I: CheapClone
     + Eq
@@ -66,28 +64,39 @@ where
     + Send
     + Sync
     + 'static,
-  A: CheapClone + core::fmt::Display + core::fmt::Debug + Send + Sync + 'static,
+  A: CheapClone
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Display
+    + core::fmt::Debug
+    + Send
+    + Sync
+    + 'static,
+  W: Wire,
 {
-  type Id = I;
+  type Id = Either<I, A>;
   type Message = Message<I, A>;
 
   fn id(&self) -> Option<&Self::Id> {
-    Some(self.node.id())
+    Some(&self.node)
   }
 
   fn invalidates(&self, other: &Self) -> bool {
-    self.node.id().eq(&other.node.id())
+    self.node.eq(&other.node)
   }
 
   fn message(&self) -> &Self::Message {
     &self.msg
   }
 
+  fn encoded_len(msg: &Self::Message) -> usize {
+    W::encoded_len(msg)
+  }
+
   async fn finished(&self) {
     if let Some(tx) = &self.notify {
       if let Err(e) = tx.send(()).await {
         tracing::error!(target:  "showbiz", "broadcast failed to notify: {}", e);
-        return;
       }
     }
   }
@@ -105,7 +114,7 @@ where
   #[inline]
   pub(crate) async fn broadcast_notify(
     &self,
-    node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    node: Either<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     notify_tx: Option<Sender<()>>,
   ) {
@@ -115,7 +124,7 @@ where
   #[inline]
   pub(crate) async fn broadcast(
     &self,
-    node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    node: Either<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) {
     let _ = self.queue_broadcast(node, msg, None).await;
@@ -124,7 +133,7 @@ where
   #[inline]
   pub(crate) async fn queue_broadcast(
     &self,
-    node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    node: Either<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     notify_tx: Option<Sender<()>>,
   ) {
@@ -135,6 +144,7 @@ where
         node,
         msg,
         notify: notify_tx,
+        _marker: std::marker::PhantomData,
       })
       .await
   }
@@ -179,7 +189,7 @@ where
             .await
             .map_err(Error::delegate)?
             .into_iter()
-            .map(|b| Message::UserData(b)),
+            .map(Message::UserData),
         );
       }
     }

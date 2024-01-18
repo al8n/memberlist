@@ -126,22 +126,22 @@ mod sealed_metrics {
 #[viewit::viewit]
 #[derive(Debug, Clone)]
 pub(crate) struct LocalServerState<I, A> {
-  node: Arc<Server<I, A>>,
+  server: Arc<Server<I, A>>,
   incarnation: Arc<AtomicU32>,
   state_change: Instant,
   /// The current state of the node
   state: ServerState,
 }
 
+impl<I, A> core::ops::Deref for LocalServerState<I, A> {
+  type Target = Server<I, A>;
+
+  fn deref(&self) -> &Self::Target {
+    &self.server
+  }
+}
+
 impl<I, A> LocalServerState<I, A> {
-  pub(crate) fn id(&self) -> &I {
-    self.node.id()
-  }
-
-  pub(crate) fn address(&self) -> &A {
-    self.node.address()
-  }
-
   #[inline]
   pub(crate) fn dead_or_left(&self) -> bool {
     self.state == ServerState::Dead || self.state == ServerState::Left

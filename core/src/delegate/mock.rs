@@ -24,7 +24,6 @@ pub enum MockDelegateType {
   UserData,
 }
 
-#[derive(Default)]
 struct MockDelegateInner<I, A> {
   meta: Bytes,
   msgs: Vec<Bytes>,
@@ -36,6 +35,23 @@ struct MockDelegateInner<I, A> {
   ping_other: Option<Arc<Server<I, A>>>,
   ping_rtt: Duration,
   ping_payload: Bytes,
+}
+
+impl<I, A> Default for MockDelegateInner<I, A> {
+  fn default() -> Self {
+    Self {
+      meta: Bytes::new(),
+      msgs: vec![],
+      broadcasts: vec![],
+      state: Bytes::new(),
+      remote_state: Bytes::new(),
+      conflict_existing: None,
+      conflict_other: None,
+      ping_other: None,
+      ping_rtt: Duration::from_secs(0),
+      ping_payload: Bytes::new(),
+    }
+  }
 }
 
 pub struct MockDelegate<I, A> {
@@ -131,7 +147,7 @@ impl<I, A> MockDelegate<I, A> {
     self.inner.lock().state = state;
   }
 
-  pub fn set_broadcasts(&self, broadcasts: Vec<Message<I, A>>) {
+  pub fn set_broadcasts(&self, broadcasts: Vec<Bytes>) {
     self.inner.lock().broadcasts = broadcasts;
   }
 
@@ -193,7 +209,7 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
   }
 
   async fn merge_remote_state(&self, buf: Bytes, _join: bool) -> Result<(), Self::Error> {
-    self.inner.lock().remote_state = buf.to_owned().into();
+    self.inner.lock().remote_state = buf;
     Ok(())
   }
 
@@ -274,7 +290,7 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
   }
 
   #[inline]
-  fn disable_reliable_pings(&self, _node: &Node<I, A>) -> bool {
+  fn disable_promised_pings(&self, _node: &I) -> bool {
     false
   }
 }
