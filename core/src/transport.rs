@@ -459,15 +459,19 @@ pub trait PromisedStream: TimeoutableStream + Send + Sync + 'static {
   /// Returns the remote address to which this stream is connected.
   fn remote_address(&self) -> Result<Self::Address, Self::Error>;
 
+  /// Reads a message from the remote node.
+  /// Returns the number of bytes read and the message.
   fn read_message(
     &mut self,
-  ) -> impl Future<Output = Result<Message<Self::Id, Self::Address>, Self::Error>> + Send;
+  ) -> impl Future<Output = Result<(usize, Message<Self::Id, Self::Address>), Self::Error>> + Send;
 
+  /// Sends a message to the remote node.
+  /// Returns the number of bytes sent.
   fn send_message(
     &mut self,
     target: &Self::Address,
     msg: Message<Self::Id, Self::Address>,
-  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+  ) -> impl Future<Output = Result<usize, Self::Error>> + Send;
 }
 
 /// The `PacketStream` trait represents a stream of data without guaranteed delivery.
@@ -719,36 +723,32 @@ pub trait Transport: Sized + Send + Sync + 'static {
   // fn auto_bind_port(&self) -> u16;
 
   /// A packet-oriented interface that fires off the given
-  /// payload to the given address in a connectionless fashion. This should
-  /// return a time stamp that's as close as possible to when the packet
-  /// was transmitted to help make accurate RTT measurements during probes.
+  /// payload to the given address in a connectionless fashion.
   ///
-  /// This is similar to net.PacketConn, though we didn't want to expose
-  /// that full set of required methods to keep assumptions about the
-  /// underlying plumbing to a minimum. We also treat the address here as a
-  /// string, similar to Dial, so it's network neutral, so this usually is
-  /// in the form of "host:port".
+  /// # Returns
+  ///
+  /// - number of bytes sent
+  /// - a time stamp that's as close as possible to when the packet
+  /// was transmitted to help make accurate RTT measurements during probes.
   fn send_packet(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     packet: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
-  ) -> impl Future<Output = Result<Instant, Self::Error>> + Send;
+  ) -> impl Future<Output = Result<(usize, Instant), Self::Error>> + Send;
 
   /// A packet-oriented interface that fires off the given
-  /// payload to the given address in a connectionless fashion. This should
-  /// return a time stamp that's as close as possible to when the packet
-  /// was transmitted to help make accurate RTT measurements during probes.
+  /// payload to the given address in a connectionless fashion.
   ///
-  /// This is similar to net.PacketConn, though we didn't want to expose
-  /// that full set of required methods to keep assumptions about the
-  /// underlying plumbing to a minimum. We also treat the address here as a
-  /// string, similar to Dial, so it's network neutral, so this usually is
-  /// in the form of "host:port".
+  /// # Returns
+  ///
+  /// - number of bytes sent
+  /// - a time stamp that's as close as possible to when the packet
+  /// was transmitted to help make accurate RTT measurements during probes.
   fn send_packets(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     packets: Vec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
-  ) -> impl Future<Output = Result<Instant, Self::Error>> + Send;
+  ) -> impl Future<Output = Result<(usize, Instant), Self::Error>> + Send;
 
   /// Used to create a connection that allows us to perform
   /// two-way communication with a peer. This is generally more expensive

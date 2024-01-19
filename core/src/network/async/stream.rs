@@ -104,11 +104,9 @@ where
       .dial_timeout(addr, self.inner.opts.timeout)
       .await
       .map_err(Error::transport)?;
-
-    conn
-      .send_message(addr, Message::UserData(msg))
+    self
+      .send_message(&mut conn, addr, Message::UserData(msg))
       .await
-      .map_err(Error::transport)
   }
 }
 
@@ -198,7 +196,7 @@ where
             *labels.last_mut().unwrap() = label;
           }
           let iter = labels.iter();
-          set_node_instances_gauge(cnt as f64, iter);
+          metrics::gauge!("showbiz.node.instances", iter).set(cnt as f64);
         }
         labels.pop();
       });
@@ -206,12 +204,11 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      set_local_size_gauge(
-        <T::Wire as Wire>::encoded_len(&msg) as f64,
-        self.inner.opts.metric_labels.iter(),
-      );
+      metrics::gauge!("showbiz.size.local", self.inner.opts.metric_labels.iter())
+        .set(<T::Wire as Wire>::encoded_len(&msg) as f64);
     }
-    conn.send_message(addr, msg).await.map_err(Error::transport)
+
+    self.send_message(conn, addr, msg).await
   }
 }
 
@@ -236,7 +233,11 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      incr_tcp_accept_counter(self.inner.opts.metric_labels.iter());
+      metrics::counter!(
+        "showbiz.promised.accept",
+        self.inner.opts.metric_labels.iter()
+      )
+      .increment(1);
     }
 
     if self.inner.opts.timeout != Duration::ZERO {
@@ -244,16 +245,19 @@ where
     }
 
     let msg = match conn.read_message().await {
-      Ok(msg) => msg,
+      Ok((_read, msg)) => {
+        #[cfg(feature = "metrics")]
+        {
+          metrics::histogram!("showbiz.size.remote", self.inner.opts.metric_labels.iter())
+            .record(_read as f64);
+        }
+        msg
+      }
       Err(e) => {
         tracing::error!(target:  "showbiz.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to receive");
 
         let err_resp = ErrorResponse::new(SmolStr::new(e.to_string()));
-        if let Err(e) = conn
-          .send_message(&addr, err_resp.into())
-          .await
-          .map_err(Error::<T, D>::transport)
-        {
+        if let Err(e) = self.send_message(&mut conn, &addr, err_resp.into()).await {
           tracing::error!(target:  "showbiz.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to send error response");
           return;
         }
@@ -270,7 +274,7 @@ where
         }
 
         let ack = AckResponse::new(ping.seq_no);
-        if let Err(e) = conn.send_message(&addr, ack.into()).await {
+        if let Err(e) = self.send_message(&mut conn, &addr, ack.into()).await {
           tracing::error!(target:  "showbiz.stream", err=%e, remote_node = %addr, "failed to send ack response");
         }
       }

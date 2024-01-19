@@ -26,7 +26,7 @@ pub(crate) struct AckHandler {
 pub(crate) struct ShowbizCore<T: Transport> {
   id: T::Id,
   hot: HotData,
-  awareness: Awareness<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  awareness: Awareness,
   broadcast: TransmitLimitedQueue<
     ShowbizBroadcast<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Wire>,
   >,
@@ -405,8 +405,6 @@ where
       opts.awareness_max_multiplier as isize,
       #[cfg(feature = "metrics")]
       Arc::new(vec![]),
-      #[cfg(feature = "metrics")]
-      node.clone(),
     );
     let hot = HotData::new();
     let num_nodes = hot.num_nodes.clone();
@@ -720,13 +718,7 @@ where
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
-    self
-      .inner
-      .transport
-      .send_packet(to, Message::UserData(msg))
-      .await
-      .map(|_| ())
-      .map_err(Error::transport)
+    self.send_packet(to, Message::UserData(msg)).await
   }
 
   /// Uses the reliable stream-oriented interface of the transport to
@@ -812,7 +804,7 @@ where
           },
           _ = <T::Runtime as Runtime>::sleep(queue_check_interval).fuse() => {
             let numq = this.inner.broadcast.num_queued();
-            metrics::gauge!("showbiz.queue.broadcasts").set(numq as f64);
+            metrics::histogram!("showbiz.queue.broadcasts").record(numq as f64);
           }
         }
       }

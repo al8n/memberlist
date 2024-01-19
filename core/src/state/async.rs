@@ -5,7 +5,7 @@ use crate::{
   showbiz::{AckHandler, Member, Memberlist},
   suspicion::Suspicion,
   timer::Timer,
-  transport::{Transport, TransportError},
+  transport::Transport,
   types::{Alive, Dead, IndirectPing, Ping, PushServerState, Suspect},
 };
 
@@ -139,7 +139,7 @@ where
     let now = Instant::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer!(
-      observe_push_pull_node(now.elapsed().as_millis() as f64, self.inner.opts.metric_labels.iter());
+      metrics::histogram!("showbiz.push_pull_node", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
     );
     // Read remote state
     let data = self.send_and_receive_state(&id, join).await?;
@@ -205,7 +205,7 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      incr_msg_dead(self.inner.opts.metric_labels.iter());
+      metrics::counter!("showbiz.msg.dead", self.inner.opts.metric_labels.iter()).increment(1);
     }
 
     // Update the state
@@ -284,7 +284,7 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      incr_msg_suspect(self.inner.opts.metric_labels.iter());
+      metrics::counter!("showbiz.msg.suspect", self.inner.opts.metric_labels.iter()).increment(1);
     }
 
     // Update the state
@@ -351,7 +351,11 @@ where
             #[cfg(feature = "metrics")]
             {
               if k > 0 && k > num_confirmations as usize {
-                incr_degraded_timeout(t.inner.opts.metric_labels.iter())
+                metrics::counter!(
+                  "showbiz.degraded.timeout",
+                  t.inner.opts.metric_labels.iter()
+                )
+                .increment(1);
               }
             }
 
@@ -564,7 +568,9 @@ where
 
     // Update metrics
     #[cfg(feature = "metrics")]
-    incr_msg_alive(self.inner.opts.metric_labels.iter());
+    {
+      metrics::counter!("showbiz.msg.alive", self.inner.opts.metric_labels.iter()).increment(1);
+    }
 
     // Notify the delegate of any relevant updates
     if let Some(delegate) = &self.delegate {
@@ -865,7 +871,7 @@ where
     let now = Instant::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer! {
-      observe_probe_node(now.elapsed().as_millis() as f64, self.inner.opts.metric_labels.iter());
+      metrics::histogram!("showbiz.probe_node", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
     }
 
     // We use our health awareness to scale the overall probe interval, so we
@@ -879,7 +885,11 @@ where
     #[cfg(feature = "metrics")]
     {
       if probe_interval > self.inner.opts.probe_interval {
-        incr_degraded_probe(self.inner.opts.metric_labels.iter())
+        metrics::counter!(
+          "showbiz.degraded.probe",
+          self.inner.opts.metric_labels.iter()
+        )
+        .increment(1);
       }
     }
 
@@ -933,8 +943,6 @@ where
         from: self.local_id().cheap_clone(),
       };
       if let Err(e) = self
-        .inner
-        .transport
         .send_packets(
           target.address(),
           vec![ping.cheap_clone().into(), suspect.into()],
@@ -1253,7 +1261,7 @@ where
     let now = Instant::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer!(
-      observe_gossip(now.elapsed().as_millis() as f64, self.inner.opts.metric_labels.iter());
+      metrics::histogram!("showbiz.gossip", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
     );
 
     // Get some random live, suspect, or recently dead nodes
@@ -1309,17 +1317,12 @@ where
       let addr = server.address();
       if msgs.len() == 1 {
         // Send single message as is
-        if let Err(e) = self
-          .inner
-          .transport
-          .send_packet(addr, msgs.pop().unwrap())
-          .await
-        {
+        if let Err(e) = self.send_packet(addr, msgs.pop().unwrap()).await {
           tracing::error!(target:  "showbiz.state", err = %e, "failed to send gossip to {}", addr);
         }
       } else {
         // Otherwise create and send one or more compound messages
-        if let Err(e) = self.inner.transport.send_packets(addr, msgs).await {
+        if let Err(e) = self.send_packets(addr, msgs).await {
           tracing::error!(target:  "showbiz.state", err = %e, "failed to send gossip to {}", addr);
         }
       }

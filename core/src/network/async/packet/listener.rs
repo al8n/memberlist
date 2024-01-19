@@ -263,22 +263,10 @@ where
 
     // Fast path if nothing to piggypack
     if msgs.len() == 1 {
-      return self
-        .inner
-        .transport
-        .send_packet(addr, msgs.pop().unwrap())
-        .await
-        .map(|_| ())
-        .map_err(Error::transport);
+      return self.send_packet(addr, msgs.pop().unwrap()).await;
     }
 
     // Send the message
-    self
-      .inner
-      .transport
-      .send_packets(addr, msgs)
-      .await
-      .map(|_| ())
-      .map_err(Error::transport)
+    self.send_packets(addr, msgs).await
   }
 }

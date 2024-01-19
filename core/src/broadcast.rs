@@ -1,7 +1,6 @@
 use crate::{
   delegate::Delegate,
   error::Error,
-  network::USER_MSG_OVERHEAD,
   showbiz::Showbiz,
   transport::{Transport, Wire},
   types::{CompoundMessage, Message},
@@ -177,10 +176,10 @@ where
 
       // Check space remaining for user messages
       let avail = limit.saturating_sub(bytes_used);
-      if avail > overhead + USER_MSG_OVERHEAD {
+      if avail > overhead {
         to_send.extend(
           delegate
-            .broadcast_messages(overhead + USER_MSG_OVERHEAD, avail, |b| {
+            .broadcast_messages(overhead, avail, |b| {
               let msg =
                 Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::UserData(b);
               let len = <T::Wire as Wire>::encoded_len(&msg);

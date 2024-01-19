@@ -1,5 +1,3 @@
-#[cfg(feature = "metrics")]
-use nodecraft::Node;
 use std::{sync::Arc, time::Duration};
 
 #[derive(Debug)]
@@ -17,27 +15,22 @@ pub(crate) struct Inner {
 /// real-time manner required for correct health checking of other nodes in the
 /// cluster.
 #[derive(Debug, Clone)]
-pub(crate) struct Awareness<I, A> {
-  #[cfg(feature = "metrics")]
-  id: Node<I, A>,
+pub(crate) struct Awareness {
   pub(crate) inner: Arc<parking_lot::RwLock<Inner>>,
   #[cfg(feature = "metrics")]
   pub(crate) metric_labels: Arc<Vec<metrics::Label>>,
 }
 
-impl<I: core::fmt::Display, A: core::fmt::Display> Awareness<I, A> {
+impl Awareness {
   /// Returns a new awareness object.
   pub(crate) fn new(
     max: isize,
     #[cfg(feature = "metrics")] metric_labels: Arc<Vec<metrics::Label>>,
-    #[cfg(feature = "metrics")] id: Node<I, A>,
   ) -> Self {
     Self {
       inner: Arc::new(parking_lot::RwLock::new(Inner { max, score: 0 })),
       #[cfg(feature = "metrics")]
       metric_labels,
-      #[cfg(feature = "metrics")]
-      id,
     }
   }
 
@@ -59,15 +52,7 @@ impl<I: core::fmt::Display, A: core::fmt::Display> Awareness<I, A> {
 
     #[cfg(feature = "metrics")]
     {
-      static HEALTH_GAUGE: std::sync::Once = std::sync::Once::new();
-
       if _initial != _fnl {
-        HEALTH_GAUGE.call_once(|| {
-          metrics::describe_gauge!(
-            "showbiz.health.score",
-            format!("the health score of the {}", self.id)
-          );
-        });
         metrics::gauge!("showbiz.health.score", self.metric_labels.iter()).set(_fnl as f64);
       }
     }
@@ -89,10 +74,6 @@ impl<I: core::fmt::Display, A: core::fmt::Display> Awareness<I, A> {
 #[test]
 #[cfg(test)]
 fn test_awareness() {
-  use std::net::SocketAddr;
-
-  use nodecraft::Node;
-
   let cases = vec![
     (0, 0, Duration::from_secs(1)),
     (-1, 0, Duration::from_secs(1)),
@@ -113,11 +94,6 @@ fn test_awareness() {
     8,
     #[cfg(feature = "metrics")]
     Arc::new(vec![]),
-    #[cfg(feature = "metrics")]
-    Node::new(
-      smol_str::SmolStr::new("abc"),
-      SocketAddr::from(([127, 0, 0, 1], 0)),
-    ),
   );
   for (delta, score, timeout) in cases {
     a.apply_delta(delta);

@@ -50,12 +50,13 @@ where
     }
 
     let ping_seq_no = ping.seq_no;
-    conn
-      .send_message(target, ping.into())
-      .await
-      .map_err(Error::transport)?;
+    self.send_message(&mut conn, target, ping.into()).await?;
 
-    let msg: Message<_, _> = conn.read_message().await.map_err(Error::transport)?;
+    let msg: Message<_, _> = conn
+      .read_message()
+      .await
+      .map(|(_, msg)| msg)
+      .map_err(Error::transport)?;
     let kind = msg.kind();
     if let Some(ack) = msg.try_unwrap_ack_response() {
       if ack.seq_no != ping_seq_no {
@@ -89,7 +90,11 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      incr_tcp_connect_counter(self.inner.opts.metric_labels.iter());
+      metrics::counter!(
+        "showbiz.promised.connect",
+        self.inner.opts.metric_labels.iter()
+      )
+      .increment(1);
     }
 
     // Send our state
@@ -103,10 +108,77 @@ where
       Some(self.inner.opts.timeout)
     });
 
-    match conn.read_message().await.map_err(Error::transport)? {
+    match conn
+      .read_message()
+      .await
+      .map(|(_read, msg)| msg)
+      .map_err(Error::transport)?
+    {
       Message::ErrorResponse(err) => Err(Error::remote(err)),
       Message::PushPull(pp) => Ok(pp),
       msg => Err(Error::unexpected_message("PushPull", msg.kind())),
     }
+  }
+
+  pub(crate) async fn send_packet(
+    &self,
+    addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    packet: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  ) -> Result<(), Error<T, D>> {
+    self
+      .inner
+      .transport
+      .send_packet(addr, packet)
+      .await
+      .map(|(sent, _)| {
+        #[cfg(feature = "metrics")]
+        {
+          metrics::counter!("showbiz.packet.sent", self.inner.opts.metric_labels.iter())
+            .increment(sent as u64);
+        }
+      })
+      .map_err(Error::transport)
+  }
+
+  pub(crate) async fn send_packets(
+    &self,
+    addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    packet: Vec<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+  ) -> Result<(), Error<T, D>> {
+    self
+      .inner
+      .transport
+      .send_packets(addr, packet)
+      .await
+      .map(|(sent, _)| {
+        #[cfg(feature = "metrics")]
+        {
+          metrics::counter!("showbiz.packet.sent", self.inner.opts.metric_labels.iter())
+            .increment(sent as u64);
+        }
+      })
+      .map_err(Error::transport)
+  }
+
+  pub(crate) async fn send_message(
+    &self,
+    conn: &mut T::PromisedStream,
+    target: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  ) -> Result<(), Error<T, D>> {
+    conn
+      .send_message(target, msg)
+      .await
+      .map(|sent| {
+        #[cfg(feature = "metrics")]
+        {
+          metrics::counter!(
+            "showbiz.promised.sent",
+            self.inner.opts.metric_labels.iter()
+          )
+          .increment(sent as u64);
+        }
+      })
+      .map_err(Error::transport)
   }
 }
