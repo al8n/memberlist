@@ -1,7 +1,7 @@
 use crate::{
   delegate::Delegate,
   error::Error,
-  showbiz::Showbiz,
+  showbiz::Memberlist,
   transport::{Transport, Wire},
   types::{CompoundMessage, Message},
 };
@@ -46,14 +46,14 @@ pub trait Broadcast: Send + Sync + 'static {
 }
 
 #[viewit::viewit]
-pub(crate) struct ShowbizBroadcast<I, A, W> {
+pub(crate) struct MemberlistBroadcast<I, A, W> {
   node: Either<I, A>,
   msg: Message<I, A>,
   notify: Option<async_channel::Sender<()>>,
   _marker: std::marker::PhantomData<W>,
 }
 
-impl<I, A, W> Broadcast for ShowbizBroadcast<I, A, W>
+impl<I, A, W> Broadcast for MemberlistBroadcast<I, A, W>
 where
   I: CheapClone
     + Eq
@@ -105,7 +105,7 @@ where
   }
 }
 
-impl<D, T> Showbiz<T, D>
+impl<D, T> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
@@ -139,7 +139,7 @@ where
     self
       .inner
       .broadcast
-      .queue_broadcast(ShowbizBroadcast {
+      .queue_broadcast(MemberlistBroadcast {
         node,
         msg,
         notify: notify_tx,

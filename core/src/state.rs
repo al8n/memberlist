@@ -6,7 +6,7 @@ use std::{
 use super::{
   delegate::Delegate,
   error::Error,
-  showbiz::Showbiz,
+  showbiz::Memberlist,
   transport::Transport,
   types::{Ack, Nack, Server, ServerState},
 };
@@ -42,7 +42,7 @@ impl<I, A> LocalServerState<I, A> {
 }
 
 // private implementation
-impl<D, T> Showbiz<T, D>
+impl<D, T> Memberlist<T, D>
 where
   T: Transport,
   D: Delegate,

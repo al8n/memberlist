@@ -2,7 +2,7 @@ use std::{sync::atomic::Ordering, time::Duration};
 
 use crate::{
   // security::encrypt_overhead,
-  showbiz::{AckHandler, Member, Memberlist},
+  showbiz::{AckHandler, Member, Members},
   suspicion::Suspicion,
   timer::Timer,
   transport::Transport,
@@ -64,7 +64,7 @@ struct AckMessage {
 
 // -------------------------------Public methods---------------------------------
 
-impl<D, T> Showbiz<T, D>
+impl<D, T> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
@@ -122,7 +122,7 @@ where
 }
 
 // ---------------------------------Crate methods-------------------------------
-impl<D, T> Showbiz<T, D>
+impl<D, T> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
@@ -148,11 +148,7 @@ where
 
   pub(crate) async fn dead_node(
     &self,
-    memberlist: &mut Memberlist<
-      T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
-      T::Runtime,
-    >,
+    memberlist: &mut Members<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Runtime>,
     d: Dead<T::Id>,
   ) -> Result<(), Error<T, D>> {
     // let node = d.node.clone();
@@ -606,7 +602,7 @@ where
       }
 
       impl<T: Transport> State<T> {
-        async fn run<D>(self, s: &Showbiz<T, D>)
+        async fn run<D>(self, s: &Memberlist<T, D>)
         where
           D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
           <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
@@ -751,7 +747,7 @@ macro_rules! bail_trigger {
   };
 }
 
-impl<T, D> Showbiz<T, D>
+impl<T, D> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,

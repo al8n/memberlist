@@ -14,7 +14,7 @@ use nodecraft::Node;
 
 use super::{
   awareness::Awareness,
-  broadcast::ShowbizBroadcast,
+  broadcast::MemberlistBroadcast,
   delegate::Delegate,
   error::Error,
   network::META_MAX_SIZE,
@@ -91,13 +91,13 @@ impl<I, A, R> core::ops::Deref for Member<I, A, R> {
   }
 }
 
-pub(crate) struct Memberlist<I, A, R> {
+pub(crate) struct Members<I, A, R> {
   pub(crate) local: Node<I, A>,
   pub(crate) nodes: Vec<Member<I, A, R>>,
   pub(crate) node_map: HashMap<I, usize>,
 }
 
-impl<I, A, Run: Runtime> rand::seq::SliceRandom for Memberlist<I, A, Run>
+impl<I, A, Run: Runtime> rand::seq::SliceRandom for Members<I, A, Run>
 where
   I: Eq + core::hash::Hash,
 {
@@ -217,7 +217,7 @@ where
   }
 }
 
-impl<I, A, R> Memberlist<I, A, R> {
+impl<I, A, R> Members<I, A, R> {
   fn new(local: Node<I, A>) -> Self {
     Self {
       nodes: Vec::new(),
@@ -227,7 +227,7 @@ impl<I, A, R> Memberlist<I, A, R> {
   }
 }
 
-impl<I: PartialEq, A, R> Memberlist<I, A, R> {
+impl<I: PartialEq, A, R> Members<I, A, R> {
   pub(crate) fn any_alive(&self) -> bool {
     self
       .nodes

@@ -12,7 +12,7 @@ use crate::{
 use super::*;
 
 // --------------------------------------------Crate Level Methods-------------------------------------------------
-impl<D, T> Showbiz<T, D>
+impl<D, T> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
@@ -111,7 +111,7 @@ where
 }
 
 // ----------------------------------------Module Level Methods------------------------------------
-impl<D, T> Showbiz<T, D>
+impl<D, T> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
@@ -213,7 +213,7 @@ where
 }
 
 // -----------------------------------------Private Level Methods-----------------------------------
-impl<D, T> Showbiz<T, D>
+impl<D, T> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,

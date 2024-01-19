@@ -53,7 +53,7 @@ pub(crate) fn test_config<R: Runtime>() -> Options<NetTransport<R>> {
 
 pub(crate) async fn get_showbiz<F, R: Runtime>(
   f: Option<F>,
-) -> Result<Showbiz<NetTransport<R>>, Error<NetTransport<R>, VoidDelegate>>
+) -> Result<Memberlist<NetTransport<R>>, Error<NetTransport<R>, VoidDelegate>>
 where
   F: FnOnce(Options<NetTransport<R>>) -> Options<NetTransport<R>>,
   R: Runtime,
@@ -66,7 +66,7 @@ where
     test_config()
   };
 
-  Showbiz::new_in(None, c).await.map(|(_, _, this)| this)
+  Memberlist::new_in(None, c).await.map(|(_, _, this)| this)
 }
 
 pub async fn test_create_secret_key<R>()
@@ -113,7 +113,7 @@ where
     .with_bind_addr(get_bind_addr().ip())
     .with_secret_keyring(Some(SecretKeyring::new(SecretKey::Aes128([0; 16]))));
 
-  let m = Showbiz::<NetTransport<R>>::new(c).await.unwrap();
+  let m = Memberlist::<NetTransport<R>>::new(c).await.unwrap();
 
   yield_now::<R>().await;
   assert!(m.encryption_enabled());
@@ -130,7 +130,7 @@ where
     .with_secret_key(Some(SecretKey::Aes128([1; 16])))
     .with_secret_keyring(Some(SecretKeyring::new(SecretKey::Aes128([0; 16]))));
 
-  let m = Showbiz::<NetTransport<R>>::new(c).await.unwrap();
+  let m = Memberlist::<NetTransport<R>>::new(c).await.unwrap();
 
   yield_now::<R>().await;
   assert!(m.encryption_enabled());
@@ -154,7 +154,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr().ip());
-  let m = Showbiz::new(c).await.unwrap();
+  let m = Memberlist::new(c).await.unwrap();
   yield_now::<R>().await;
   assert_eq!(m.members().await.len(), 1);
 }
@@ -184,10 +184,10 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>().with_compression_algo(CompressionAlgo::None);
-  let m1 = Showbiz::new(c1).await.unwrap();
+  let m1 = Memberlist::new(c1).await.unwrap();
 
   let c2 = test_config::<R>().with_compression_algo(CompressionAlgo::None);
-  let m2 = Showbiz::new(c2).await.unwrap();
+  let m2 = Memberlist::new(c2).await.unwrap();
 
   let num = m2
     .join_many(
@@ -210,10 +210,10 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>();
-  let m1 = Showbiz::new(c1).await.unwrap();
+  let m1 = Memberlist::new(c1).await.unwrap();
 
   let c2 = test_config::<R>().with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::new(c2).await.unwrap();
+  let m2 = Memberlist::new(c2).await.unwrap();
 
   let num = m2
     .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -233,14 +233,14 @@ where
     .with_compression_algo(CompressionAlgo::None)
     .with_encryption_algo(algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])));
-  let m1 = Showbiz::new(c1).await.unwrap();
+  let m1 = Memberlist::new(c1).await.unwrap();
 
   let c2 = test_config::<R>()
     .with_compression_algo(CompressionAlgo::None)
     .with_encryption_algo(algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])))
     .with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::new(c2).await.unwrap();
+  let m2 = Memberlist::new(c2).await.unwrap();
 
   let num = m2
     .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -262,14 +262,14 @@ pub async fn test_join_with_encryption_and_compression<R>(
     .with_compression_algo(compression_algo)
     .with_encryption_algo(encryption_algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])));
-  let m1 = Showbiz::new(c1).await.unwrap();
+  let m1 = Memberlist::new(c1).await.unwrap();
 
   let c2 = test_config::<R>()
     .with_compression_algo(compression_algo)
     .with_encryption_algo(encryption_algo)
     .with_secret_key(Some(SecretKey::Aes128([0; 16])))
     .with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::new(c2).await.unwrap();
+  let m2 = Memberlist::new(c2).await.unwrap();
 
   let num = m2
     .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -301,7 +301,7 @@ pub async fn test_join_with_labels<R>(
     .with_compression_algo(compression_algo)
     .with_name("node1".try_into().unwrap())
     .with_secret_key(key);
-  let m1 = Showbiz::new(c1).await.unwrap();
+  let m1 = Memberlist::new(c1).await.unwrap();
 
   // Create a second node
   let c2 = test_config::<R>()
@@ -311,7 +311,7 @@ pub async fn test_join_with_labels<R>(
     .with_encryption_algo(encryption_algo)
     .with_secret_key(key)
     .with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::new(c2).await.unwrap();
+  let m2 = Memberlist::new(c2).await.unwrap();
 
   let num = m2
     .join_many(std::iter::once((
@@ -337,7 +337,7 @@ pub async fn test_join_with_labels<R>(
     .with_encryption_algo(encryption_algo)
     .with_secret_key(key)
     .with_bind_port(m1.inner.opts.bind_port);
-  let m3 = Showbiz::new(c3).await.unwrap();
+  let m3 = Memberlist::new(c3).await.unwrap();
   let JoinError { joined, .. } = m3
     .join_many(std::iter::once((
       m1.inner.opts.bind_addr.into(),
@@ -363,7 +363,7 @@ pub async fn test_join_with_labels<R>(
     .with_encryption_algo(encryption_algo)
     .with_secret_key(key)
     .with_bind_port(m1.inner.opts.bind_port);
-  let m4 = Showbiz::new(c4).await.unwrap();
+  let m4 = Memberlist::new(c4).await.unwrap();
 
   let JoinError { joined, .. } = m4
     .join_many(std::iter::once((
@@ -393,13 +393,13 @@ where
 {
   let (cidrs, _) = parse_cidrs(&["127.0.0.0/8"]);
   let c1 = test_config_net::<R>(0).with_allowed_cidrs(Some(cidrs.clone()));
-  let m1 = Showbiz::new(c1).await.unwrap();
+  let m1 = Memberlist::new(c1).await.unwrap();
 
   // Create a second node
   let c2 = test_config_net::<R>(1)
     .with_allowed_cidrs(Some(cidrs))
     .with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::new(c2).await.unwrap();
+  let m2 = Memberlist::new(c2).await.unwrap();
 
   let num = m2
     .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -422,13 +422,13 @@ where
 {
   let (cidrs, _) = parse_cidrs(&["127.0.0.0/24", "127.0.1.0/24"]);
   let c1 = test_config_net::<R>(0).with_allowed_cidrs(Some(cidrs.clone()));
-  let m1 = Showbiz::new(c1).await.unwrap();
+  let m1 = Memberlist::new(c1).await.unwrap();
 
   // Create a second node
   let c2 = test_config_net::<R>(1)
     .with_allowed_cidrs(Some(cidrs.clone()))
     .with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::new(c2).await.unwrap();
+  let m2 = Memberlist::new(c2).await.unwrap();
   join_and_test_member_ship(
     &m2,
     [(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter(),
@@ -440,7 +440,7 @@ where
   let c3 = test_config_net::<R>(2)
     .with_allowed_cidrs(Some(parse_cidrs(&["127.0.0.0/8"]).0))
     .with_bind_port(m1.inner.opts.bind_port);
-  let m3 = Showbiz::new(c3).await.unwrap();
+  let m3 = Memberlist::new(c3).await.unwrap();
   // The rogue can see others, but others cannot see it
   join_and_test_member_ship(
     &m3,
@@ -462,7 +462,7 @@ where
   let c4 = test_config_net::<R>(2)
     .with_allowed_cidrs(Some(cidrs.clone()))
     .with_bind_port(m1.inner.opts.bind_port);
-  let m4 = Showbiz::new(c4).await.unwrap();
+  let m4 = Memberlist::new(c4).await.unwrap();
   // This time, the node should not even see itself, so 2 expected nodes
   join_and_test_member_ship(
     &m4,
@@ -483,7 +483,7 @@ where
 }
 
 async fn join_and_test_member_ship<D: Delegate, R>(
-  this: &Showbiz<NetTransport<R>, D>,
+  this: &Memberlist<NetTransport<R>, D>,
   members_to_join: impl Iterator<Item = (Address, Name)>,
   expected_members: usize,
 ) where
@@ -504,12 +504,12 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>();
-  let m1 = Showbiz::with_delegate(MockDelegate::cancel_merge(), c1)
+  let m1 = Memberlist::with_delegate(MockDelegate::cancel_merge(), c1)
     .await
     .unwrap();
 
   let c2 = test_config::<R>().with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::with_delegate(MockDelegate::cancel_merge(), c2)
+  let m2 = Memberlist::with_delegate(MockDelegate::cancel_merge(), c2)
     .await
     .unwrap();
 
@@ -540,12 +540,12 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>();
-  let m1 = Showbiz::with_delegate(MockDelegate::cancel_alive(c1.name.clone()), c1)
+  let m1 = Memberlist::with_delegate(MockDelegate::cancel_alive(c1.name.clone()), c1)
     .await
     .unwrap();
 
   let c2 = test_config::<R>().with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::with_delegate(MockDelegate::cancel_alive(c2.name.clone()), c2)
+  let m2 = Memberlist::with_delegate(MockDelegate::cancel_alive(c2.name.clone()), c2)
     .await
     .unwrap();
 
@@ -579,11 +579,11 @@ where
   };
 
   let c1 = new_config();
-  let m1 = Showbiz::new(c1).await.unwrap();
+  let m1 = Memberlist::new(c1).await.unwrap();
 
   // Create a second node
   let c2 = new_config().with_bind_port(m1.inner.opts.bind_port);
-  let m2 = Showbiz::new(c2).await.unwrap();
+  let m2 = Memberlist::new(c2).await.unwrap();
 
   let num = m2
     .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -635,7 +635,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let c1 = test_config::<R>().with_tcp_timeout(Duration::from_millis(50));
-  let m1 = Showbiz::new(c1).await.unwrap();
+  let m1 = Memberlist::new(c1).await.unwrap();
 
   // Create a second "node", which is just a TCP listener that
   // does not ever respond. This is to test our deadlines
@@ -673,7 +673,7 @@ where
     .with_bind_addr("::1".parse().unwrap())
     .with_bind_port(Some(0));
 
-  let m1 = Showbiz::new(c1).await.unwrap();
+  let m1 = Memberlist::new(c1).await.unwrap();
 
   // Create a second node
   let c2 = Options::<NetTransport<R>>::lan()
@@ -681,7 +681,7 @@ where
     .with_bind_addr("::1".parse().unwrap())
     .with_bind_port(Some(0));
 
-  let m2 = Showbiz::new(c2).await.unwrap();
+  let m2 = Memberlist::new(c2).await.unwrap();
 
   let num = m2
     .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -736,13 +736,13 @@ where
 {
   let new_config = || test_config::<R>().with_gossip_interval(Duration::from_millis(1));
   let c1 = new_config();
-  let m1 = Showbiz::new(c1).await.unwrap();
+  let m1 = Memberlist::new(c1).await.unwrap();
 
   let bind_port = m1.inner.opts.bind_port;
 
   // Create a second node
   let c2 = new_config().with_bind_port(bind_port);
-  let m2 = Showbiz::new(c2).await.unwrap();
+  let m2 = Memberlist::new(c2).await.unwrap();
 
   join_and_test_member_ship(
     &m2,
@@ -776,7 +776,7 @@ where
   let c1 = test_config::<R>();
   let d1 = MockDelegate::new();
   d1.set_meta(Bytes::from_static(b"web"));
-  let m1 = Showbiz::with_delegate(d1, c1).await.unwrap();
+  let m1 = Memberlist::with_delegate(d1, c1).await.unwrap();
 
   let bind_port = m1.inner.opts.bind_port;
 
@@ -785,7 +785,7 @@ where
   let d2 = MockDelegate::new();
   d2.set_meta(Bytes::from_static(b"lb"));
 
-  let m2 = Showbiz::with_delegate(d2, c2).await.unwrap();
+  let m2 = Memberlist::with_delegate(d2, c2).await.unwrap();
 
   m1.join_many([(m2.inner.opts.bind_addr.into(), m2.inner.opts.name.clone())].into_iter())
     .await
@@ -825,7 +825,7 @@ where
   let c1 = test_config::<R>();
   let d1 = MockDelegate::new();
   d1.set_meta(Bytes::from_static(b"web"));
-  let m1 = Showbiz::with_delegate(d1, c1).await.unwrap();
+  let m1 = Memberlist::with_delegate(d1, c1).await.unwrap();
 
   let bind_port = m1.inner.opts.bind_port;
 
@@ -834,7 +834,7 @@ where
   let d2 = MockDelegate::new();
   d2.set_meta(Bytes::from_static(b"lb"));
 
-  let m2 = Showbiz::with_delegate(d2, c2).await.unwrap();
+  let m2 = Memberlist::with_delegate(d2, c2).await.unwrap();
 
   m1.join_many([(m2.inner.opts.bind_addr.into(), m2.inner.opts.name.clone())].into_iter())
     .await
@@ -894,7 +894,7 @@ where
   let d1 = MockDelegate::user_data();
   d1.set_state(Bytes::from_static(b"something"));
   let c1 = new_config();
-  let m1 = Showbiz::with_delegate(d1, c1).await.unwrap();
+  let m1 = Memberlist::with_delegate(d1, c1).await.unwrap();
   let bind_port = m1.inner.opts.bind_port;
 
   let bcasts = (0..=255)
@@ -910,7 +910,7 @@ where
   d2.set_state(Bytes::from_static(b"my state"));
   d2.set_broadcasts(bcasts.clone());
   let c2 = new_config().with_bind_port(bind_port);
-  let m2 = Showbiz::with_delegate(d2, c2).await.unwrap();
+  let m2 = Memberlist::with_delegate(d2, c2).await.unwrap();
 
   let num = m2
     .join_many([(m1.inner.opts.bind_addr.into(), m1.inner.opts.name.clone())].into_iter())
@@ -953,7 +953,7 @@ where
   let new_config = || test_config::<R>().with_probe_interval(Duration::from_millis(100));
 
   let c1 = new_config();
-  let m1 = Showbiz::with_delegate(MockDelegate::ping(), c1)
+  let m1 = Memberlist::with_delegate(MockDelegate::ping(), c1)
     .await
     .unwrap();
 
@@ -961,7 +961,7 @@ where
 
   // Create a second node
   let c2 = new_config().with_bind_port(bind_port);
-  let m2 = Showbiz::with_delegate(MockDelegate::ping(), c2)
+  let m2 = Memberlist::with_delegate(MockDelegate::ping(), c2)
     .await
     .unwrap();
   let mock = m2.delegate.as_ref().unwrap().clone();
@@ -1035,7 +1035,7 @@ where
       opts
     };
 
-    let m = Showbiz::with_delegate(MockDelegate::new(), opts)
+    let m = Memberlist::with_delegate(MockDelegate::new(), opts)
       .await
       .unwrap();
     if *bind_port.borrow() == 0 {
@@ -1044,8 +1044,8 @@ where
     m
   };
 
-  let join_ok = |src: Showbiz<NetTransport<R>, MockDelegate>,
-                 dst: Showbiz<NetTransport<R>, MockDelegate>,
+  let join_ok = |src: Memberlist<NetTransport<R>, MockDelegate>,
+                 dst: Memberlist<NetTransport<R>, MockDelegate>,
                  num_nodes: usize| {
     let pretty = pretty.borrow();
     async move {
@@ -1077,7 +1077,7 @@ where
     }
   };
 
-  let leave_ok = |src: Showbiz<NetTransport<R>, MockDelegate>, why: String| {
+  let leave_ok = |src: Memberlist<NetTransport<R>, MockDelegate>, why: String| {
     let name = pretty.borrow().get(src.inner.id.name()).cloned().unwrap();
     async move {
       tracing::info!("node {}[{}] is leaving {}", name, src.inner.opts.name, why);
@@ -1085,7 +1085,7 @@ where
     }
   };
 
-  let shutdown_ok = |src: Showbiz<NetTransport<R>, MockDelegate>, why: String| {
+  let shutdown_ok = |src: Memberlist<NetTransport<R>, MockDelegate>, why: String| {
     let pretty = pretty.borrow();
     async move {
       let name = pretty.get(src.inner.id.name()).cloned().unwrap();
@@ -1102,8 +1102,8 @@ where
     }
   };
 
-  let leave_and_shutdown = |leaver: Showbiz<NetTransport<R>, MockDelegate>,
-                            bystander: Showbiz<NetTransport<R>, MockDelegate>,
+  let leave_and_shutdown = |leaver: Memberlist<NetTransport<R>, MockDelegate>,
+                            bystander: Memberlist<NetTransport<R>, MockDelegate>,
                             why: String| async {
     leave_ok(leaver.clone(), why.clone()).await;
     wait_until_size(bystander.clone(), 1).await;
@@ -1258,13 +1258,13 @@ where
   };
 
   let c1 = new_config();
-  let m1 = Showbiz::with_delegate(MockDelegate::new(), c1)
+  let m1 = Memberlist::with_delegate(MockDelegate::new(), c1)
     .await
     .unwrap();
 
   let bind_port = m1.inner.opts.bind_port;
   let c2 = new_config().with_bind_port(bind_port);
-  let m2 = Showbiz::with_delegate(MockDelegate::new(), c2)
+  let m2 = Memberlist::with_delegate(MockDelegate::new(), c2)
     .await
     .unwrap();
 
@@ -1374,7 +1374,7 @@ where
     .with_advertise_addr(Some(advertise_addr.ip()))
     .with_advertise_port(Some(advertise_port));
 
-  let m = Showbiz::new(c).await.unwrap();
+  let m = Memberlist::new(c).await.unwrap();
 
   yield_now::<R>().await;
 
@@ -1405,7 +1405,7 @@ where
   }
 }
 
-async fn wait_until_size<R>(m: Showbiz<NetTransport<R>, MockDelegate>, expected: usize)
+async fn wait_until_size<R>(m: Memberlist<NetTransport<R>, MockDelegate>, expected: usize)
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
@@ -1439,7 +1439,7 @@ fn is_port_free(addr: IpAddr, port: u16) -> std::io::Result<()> {
   Ok(())
 }
 
-async fn wait_until_port_is_free<R>(member: Showbiz<NetTransport<R>, MockDelegate>)
+async fn wait_until_port_is_free<R>(member: Memberlist<NetTransport<R>, MockDelegate>)
 where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,

@@ -7,13 +7,13 @@ use futures::{Future, Stream};
 
 use crate::{
   delegate::VoidDelegate, error::Error, showbiz::tests::get_bind_addr,
-  transport::net::NetTransport, types::Alive, Name, Options, Showbiz,
+  transport::net::NetTransport, types::Alive, Memberlist, Name, Options,
 };
 
 async fn host_showbiz<F, R: Runtime>(
   addr: SocketAddr,
   f: Option<F>,
-) -> Result<Showbiz<NetTransport<R>>, Error<NetTransport<R>, VoidDelegate>>
+) -> Result<Memberlist<NetTransport<R>>, Error<NetTransport<R>, VoidDelegate>>
 where
   F: FnOnce(Options<NetTransport<R>>) -> Options<NetTransport<R>>,
   R: Runtime,
@@ -26,7 +26,7 @@ where
     .with_bind_port(Some(0));
   let c = if let Some(f) = f { f(c) } else { c };
 
-  Showbiz::new_in(None, c).await.map(|(_, _, t)| t)
+  Memberlist::new_in(None, c).await.map(|(_, _, t)| t)
 }
 
 pub async fn test_probe<R>()
@@ -38,7 +38,7 @@ where
   let addr1 = get_bind_addr();
   let addr2 = get_bind_addr();
 
-  let m1: Showbiz<NetTransport<R>> = host_showbiz::<_, R>(
+  let m1: Memberlist<NetTransport<R>> = host_showbiz::<_, R>(
     addr1,
     Some(|c: Options<NetTransport<R>>| {
       c.with_probe_timeout(Duration::from_millis(1))
@@ -48,7 +48,7 @@ where
   .await
   .unwrap();
 
-  let m2: Showbiz<NetTransport<R>> = host_showbiz::<_, R>(
+  let m2: Memberlist<NetTransport<R>> = host_showbiz::<_, R>(
     addr2,
     Some(|c: Options<NetTransport<R>>| c.with_bind_port(m1.inner.opts.bind_port())),
   )

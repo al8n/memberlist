@@ -15,7 +15,7 @@ use crate::{
   showbiz::tests::{get_showbiz, test_config},
   transport::net::NetTransport,
   types::{Ack, Alive, EncodeHeader, IndirectPing, MessageType, Ping, Type, ENCODE_HEADER_SIZE},
-  CompressionAlgo, Message, Options, Showbiz,
+  CompressionAlgo, Memberlist, Message, Options,
 };
 
 async fn listen_udp<R>() -> Result<<R::Net as Net>::UdpSocket, std::io::Error>
@@ -351,13 +351,13 @@ where
   let c1 =
     test_config::<R>().with_secret_key(Some(SecretKey::Aes192(*b"4W6DGn2VQVqDEceOdmuRTQ==")));
 
-  let m1 = Showbiz::new(c1).await.unwrap();
+  let m1 = Memberlist::new(c1).await.unwrap();
   let bind_port = m1.inner.id.addr().port();
 
   let c2 = test_config::<R>()
     .with_secret_key(Some(SecretKey::Aes192(*b"XhX/w702/JKKK7/7OtM9Ww==")))
     .with_bind_port(Some(bind_port));
-  let m2 = Showbiz::new(c2).await.unwrap();
+  let m2 = Memberlist::new(c2).await.unwrap();
 
   // Make sure we get this error on the joining side
   m2.join_many(

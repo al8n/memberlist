@@ -21,7 +21,7 @@ mod stream;
 // #[cfg(any(test, feature = "test"))]
 // pub use tests::*;
 
-impl<D, T> Showbiz<T, D>
+impl<D, T> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,

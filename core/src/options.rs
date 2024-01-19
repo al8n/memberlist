@@ -1,15 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-// use crate::security::SecretKeyring;
-
-use super::{
-  // security::{EncryptionAlgo, SecretKey},
-  // types::CompressionAlgo,
-  version::VSN_SIZE,
-};
-
+use super::version::VSN_SIZE;
 pub use super::version::{DelegateVersion, ProtocolVersion};
 
+/// Options used to configure the memberlist.
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -21,9 +15,9 @@ pub struct Options {
   // /// authenticated data.
   // #[viewit(getter(const, style = "ref"))]
   // label: Label,
-  /// Skips the check that inbound packets and gossip
-  /// streams need to be label prefixed.
-  skip_inbound_label_check: bool,
+  // /// Skips the check that inbound packets and gossip
+  // /// streams need to be label prefixed.
+  // skip_inbound_label_check: bool,
 
   // /// Configuration related to what address to bind to
   // /// listen on. The port is used for both UDP and TCP gossip.
@@ -191,13 +185,6 @@ pub struct Options {
   /// while UDP messages are handled.
   handoff_queue_depth: usize,
 
-  /// Maximum number of bytes that memberlist will put in a packet (this
-  /// will be for UDP packets by default with a NetTransport). A safe value
-  /// for this is typically 1400 bytes (which is the default). However,
-  /// depending on your network's MTU (Maximum Transmission Unit) you may
-  /// be able to increase this to get more content into each gossip packet.
-  packet_buffer_size: usize,
-
   /// Controls the time before a dead node's name can be
   /// reclaimed by one with a different address or port. By default, this is 0,
   /// meaning nodes cannot be reclaimed this way.
@@ -249,7 +236,7 @@ impl Options {
   pub fn lan() -> Self {
     Self {
       // label: Label::empty(),
-      skip_inbound_label_check: false,
+      // skip_inbound_label_check: false,
       // bind_addr: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
       // advertise_addr: None,
       // encryption_algo: EncryptionAlgo::MAX,
@@ -275,7 +262,6 @@ impl Options {
       protocol_version: ProtocolVersion::V0,
       handoff_queue_depth: 1024,
       offload_size: 1024, // 1KB
-      packet_buffer_size: 1400,
       dead_node_reclaim_time: Duration::ZERO,
       queue_check_interval: Duration::from_secs(30),
       #[cfg(feature = "metrics")]

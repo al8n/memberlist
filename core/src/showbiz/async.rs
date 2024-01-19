@@ -23,12 +23,12 @@ pub(crate) struct AckHandler {
 }
 
 #[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct ShowbizCore<T: Transport> {
+pub(crate) struct MemberlistCore<T: Transport> {
   id: T::Id,
   hot: HotData,
   awareness: Awareness,
   broadcast: TransmitLimitedQueue<
-    ShowbizBroadcast<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Wire>,
+    MemberlistBroadcast<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Wire>,
   >,
   leave_broadcast_tx: Sender<()>,
   leave_lock: Mutex<()>,
@@ -37,8 +37,7 @@ pub(crate) struct ShowbizCore<T: Transport> {
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-  nodes:
-    Arc<RwLock<Memberlist<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Runtime>>>,
+  nodes: Arc<RwLock<Members<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Runtime>>>,
   ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
   transport: Arc<T>,
   /// We do not call send directly, just directly drop it.
@@ -47,7 +46,7 @@ pub(crate) struct ShowbizCore<T: Transport> {
   opts: Arc<Options>,
 }
 
-impl<T: Transport> Drop for ShowbizCore<T> {
+impl<T: Transport> Drop for MemberlistCore<T> {
   fn drop(&mut self) {
     self.shutdown_tx.close();
     if let Err(e) = self.transport.block_shutdown() {
@@ -56,7 +55,7 @@ impl<T: Transport> Drop for ShowbizCore<T> {
   }
 }
 
-pub struct Showbiz<
+pub struct Memberlist<
   T,
   D = VoidDelegate<
     <T as Transport>::Id,
@@ -65,11 +64,11 @@ pub struct Showbiz<
 > where
   T: Transport,
 {
-  pub(crate) inner: Arc<ShowbizCore<T>>,
+  pub(crate) inner: Arc<MemberlistCore<T>>,
   pub(crate) delegate: Option<Arc<D>>,
 }
 
-impl<D, T> Clone for Showbiz<T, D>
+impl<D, T> Clone for Memberlist<T, D>
 where
   T: Transport,
   D: Delegate,
@@ -82,7 +81,7 @@ where
   }
 }
 
-impl<D, T> Showbiz<T, D>
+impl<D, T> Memberlist<T, D>
 where
   D: Delegate,
   T: Transport,
@@ -252,7 +251,7 @@ where
   }
 }
 
-impl<T> Showbiz<T>
+impl<T> Memberlist<T>
 where
   T: Transport,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -268,7 +267,7 @@ where
   }
 }
 
-impl<D, T> Showbiz<T, D>
+impl<D, T> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
@@ -427,8 +426,8 @@ where
     // }
 
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
-    let this = Showbiz {
-      inner: Arc::new(ShowbizCore {
+    let this = Memberlist {
+      inner: Arc::new(MemberlistCore {
         id: id.cheap_clone(),
         hot,
         awareness,
@@ -440,7 +439,7 @@ where
         handoff_tx,
         handoff_rx,
         queue: Mutex::new(MessageQueue::new()),
-        nodes: Arc::new(RwLock::new(Memberlist::new(node))),
+        nodes: Arc::new(RwLock::new(Members::new(node))),
         ack_handlers: Arc::new(Mutex::new(HashMap::new())),
         shutdown_tx,
         advertise: advertise.cheap_clone(),
@@ -558,9 +557,9 @@ where
   //   self.push_pull_node(ids, true).await
   // }
 
-  /// Used to take an existing Showbiz and attempt to join a cluster
+  /// Used to take an existing Memberlist and attempt to join a cluster
   /// by contacting all the given hosts and performing a state sync. Initially,
-  /// the Showbiz only contains our own state, so doing this will cause
+  /// the Memberlist only contains our own state, so doing this will cause
   /// remote nodes to become aware of the existence of this node, effectively
   /// joining the cluster.
   ///
@@ -766,7 +765,7 @@ where
 }
 
 // private impelementation
-impl<D, T> Showbiz<T, D>
+impl<D, T> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
