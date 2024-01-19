@@ -1296,7 +1296,7 @@ where
 
     // Compute the bytes available
     let overhead = self.inner.transport.packet_overhead();
-    let bytes_avail = self.inner.transport.packet_buffer_size() - overhead;
+    let bytes_avail = self.inner.transport.max_payload_size() - overhead;
 
     for server in nodes {
       // Get any pending broadcasts

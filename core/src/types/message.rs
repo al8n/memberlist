@@ -86,7 +86,7 @@ enum_wrapper!(
     /// Indirect ping message
     IndirectPing(IndirectPing<I, A>) = 1,
     /// Ack response message
-    AckResponse(AckResponse) = 2,
+    Ack(Ack) = 2,
     /// Suspect message
     Suspect(Suspect<I>) = 3,
     /// Alive message
@@ -100,16 +100,9 @@ enum_wrapper!(
     /// User mesg, not handled by us
     UserData(Bytes) = 8,
     /// Nack response message
-    NackResponse(NackResponse) = 9,
+    Nack(Nack) = 9,
     /// Error response message
     ErrorResponse(ErrorResponse) = 10,
-    // HasCrc = 12,
-    // Compress = 9,
-    // Encrypt(Bytes),
-    // /// HasLabel has a deliberately high value so that you can disambiguate
-    // /// it from the encryptionVersion header which is either 0/1 right now and
-    // /// also any of the existing [`MessageType`].
-    // HasLabel = 244,
   }
 );
 
@@ -119,7 +112,7 @@ enum_wrapper!(
 //   /// Indirect ping message
 //   IndirectPing(IndirectPing<I, A>),
 //   /// Ack response message
-//   AckResponse(AckResponse),
+//   Ack(Ack),
 //   /// Suspect message
 //   Suspect(Suspect<I, A>),
 //   /// Alive message
@@ -133,7 +126,7 @@ enum_wrapper!(
 //   /// User mesg, not handled by us
 //   UserData(Bytes),
 //   /// Nack response message
-//   NackResponse(NackResponse),
+//   Nack(Nack),
 //   /// Error response message
 //   ErrorResponse(ErrorResponse),
 //   // HasCrc = 12,
@@ -453,7 +446,7 @@ enum_wrapper!(
 // pub(crate) enum MessageType {
 //   Ping = 0,
 //   IndirectPing = 1,
-//   AckResponse = 2,
+//   Ack = 2,
 //   Suspect = 3,
 //   Alive = 4,
 //   Dead = 5,
@@ -463,7 +456,7 @@ enum_wrapper!(
 //   User = 8,
 //   Compress = 9,
 //   Encrypt = 10,
-//   NackResponse = 11,
+//   Nack = 11,
 //   HasCrc = 12,
 //   ErrorResponse = 13,
 //   /// HasLabel has a deliberately high value so that you can disambiguate
@@ -487,7 +480,7 @@ enum_wrapper!(
 //     match self {
 //       MessageType::Ping => "ping",
 //       MessageType::IndirectPing => "indirect ping",
-//       MessageType::AckResponse => "ack response",
+//       MessageType::Ack => "ack response",
 //       MessageType::Suspect => "suspect",
 //       MessageType::Alive => "alive",
 //       MessageType::Dead => "dead",
@@ -496,7 +489,7 @@ enum_wrapper!(
 //       MessageType::User => "user",
 //       MessageType::Compress => "compress",
 //       MessageType::Encrypt => "encrypt",
-//       MessageType::NackResponse => "nack response",
+//       MessageType::Nack => "nack response",
 //       MessageType::HasCrc => "crc",
 //       MessageType::ErrorResponse => "error",
 //       MessageType::HasLabel => "label",
@@ -522,7 +515,7 @@ enum_wrapper!(
 //     match value {
 //       0 => Ok(Self::Ping),
 //       1 => Ok(Self::IndirectPing),
-//       2 => Ok(Self::AckResponse),
+//       2 => Ok(Self::Ack),
 //       3 => Ok(Self::Suspect),
 //       4 => Ok(Self::Alive),
 //       5 => Ok(Self::Dead),
@@ -531,7 +524,7 @@ enum_wrapper!(
 //       8 => Ok(Self::User),
 //       9 => Ok(Self::Compress),
 //       10 => Ok(Self::Encrypt),
-//       11 => Ok(Self::NackResponse),
+//       11 => Ok(Self::Nack),
 //       12 => Ok(Self::HasCrc),
 //       13 => Ok(Self::ErrorResponse),
 //       244 => Ok(Self::HasLabel),

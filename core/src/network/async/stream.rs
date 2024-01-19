@@ -273,7 +273,7 @@ where
           return;
         }
 
-        let ack = AckResponse::new(ping.seq_no);
+        let ack = Ack::new(ping.seq_no);
         if let Err(e) = self.send_message(&mut conn, &addr, ack.into()).await {
           tracing::error!(target:  "showbiz.stream", err=%e, remote_node = %addr, "failed to send ack response");
         }

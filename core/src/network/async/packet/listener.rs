@@ -3,7 +3,7 @@ use std::time::Instant;
 use crate::{
   showbiz::MessageHandoff,
   transport::Wire,
-  types::{AckResponse, Message, NackResponse},
+  types::{Ack, Message, Nack},
 };
 use futures::{Future, Stream};
 use nodecraft::CheapClone;
@@ -95,8 +95,8 @@ where
       }
       Message::Ping(ping) => self.handle_ping(ping, from).await,
       Message::IndirectPing(ind) => self.handle_indirect_ping(ind, from).await,
-      Message::AckResponse(resp) => self.handle_ack(resp, timestamp).await,
-      Message::NackResponse(resp) => self.handle_nack(resp).await,
+      Message::Ack(resp) => self.handle_ack(resp, timestamp).await,
+      Message::Nack(resp) => self.handle_nack(resp).await,
       Message::Alive(alive) => {
         // Determine the message queue, prioritize alive
         {
@@ -147,12 +147,12 @@ where
           return;
         }
       };
-      AckResponse {
+      Ack {
         seq_no: p.seq_no,
         payload,
       }
     } else {
-      AckResponse {
+      Ack {
         seq_no: p.seq_no,
         payload: Bytes::new(),
       }
@@ -200,7 +200,7 @@ where
             let _ = cancel_tx.send(());
 
             // Try to prevent the nack if we've caught it in time.
-            let ack = AckResponse::new(ind_seq_no);
+            let ack = Ack::new(ind_seq_no);
             if let Err(e) = this
               .send_msg(
                 ind_source.address(),
@@ -227,7 +227,7 @@ where
       futures::select! {
         _ = <T::Runtime as Runtime>::sleep(probe_timeout).fuse() => {
           // We've not received an ack, so send a nack.
-          let nack = NackResponse::new(ind.seq_no);
+          let nack = Nack::new(ind.seq_no);
           if let Err(e) = this.send_msg(ind.source.address(), nack.into()).await {
             tracing::error!(target:  "showbiz.packet", local = %ind.source, remote = %from, err = %e, "failed to send nack");
           }
@@ -239,11 +239,11 @@ where
     });
   }
 
-  async fn handle_ack(&self, ack: AckResponse, timestamp: Instant) {
+  async fn handle_ack(&self, ack: Ack, timestamp: Instant) {
     self.invoke_ack_handler(ack, timestamp).await
   }
 
-  async fn handle_nack(&self, nack: NackResponse) {
+  async fn handle_nack(&self, nack: Nack) {
     self.invoke_nack_handler(nack).await
   }
 
@@ -255,7 +255,7 @@ where
     // Check if we can piggy back any messages
     let overhead = self.inner.transport.packet_overhead();
     let bytes_avail =
-      self.inner.transport.packet_buffer_size() - <T::Wire as Wire>::encoded_len(&msg) - overhead;
+      self.inner.transport.max_payload_size() - <T::Wire as Wire>::encoded_len(&msg) - overhead;
 
     let mut msgs = self
       .get_broadcast_with_prepend(vec![msg], overhead, bytes_avail)

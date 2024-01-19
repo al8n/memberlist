@@ -58,7 +58,7 @@ where
       .map(|(_, msg)| msg)
       .map_err(Error::transport)?;
     let kind = msg.kind();
-    if let Some(ack) = msg.try_unwrap_ack_response() {
+    if let Some(ack) = msg.try_unwrap_ack() {
       if ack.seq_no != ping_seq_no {
         return Err(Error::sequence_number_mismatch(ping_seq_no, ack.seq_no));
       }
@@ -66,7 +66,7 @@ where
       Ok(true)
     } else {
       Err(Error::UnexpectedMessage {
-        expected: "AckResponse",
+        expected: "Ack",
         got: kind,
       })
     }

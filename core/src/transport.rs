@@ -8,7 +8,7 @@ use std::{
 use nodecraft::resolver::AddressResolver;
 pub use nodecraft::*;
 
-use crate::{checksum::Checksumer, types::Packet};
+use crate::types::*;
 
 use super::*;
 
@@ -17,38 +17,6 @@ use stream::*;
 
 #[cfg(feature = "test")]
 pub(crate) mod tests;
-
-// #[derive(thiserror::Error)]
-// pub enum TransportError<T: Transport> {
-//   #[error("connection error: {0}")]
-//   Connection(#[from] ConnectionError),
-//   #[error("encode error: {0}")]
-//   Encode(#[from] EncodeError),
-//   #[error("decode error: {0}")]
-//   Decode(#[from] DecodeError),
-//   #[error("security error {0}")]
-//   Security(#[from] crate::security::SecurityError),
-//   #[error("remote node state(size {0}) is larger than limit (20 MB)")]
-//   RemoteStateTooLarge(usize),
-//   #[error("other: {0}")]
-//   Other(T::Error),
-// }
-
-// impl<T: Transport> core::fmt::Debug for TransportError<T> {
-//   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//     write!(f, "{self}")
-//   }
-// }
-
-// impl<T: Transport> TransportError<T> {
-//   pub(crate) fn failed_remote(&self) -> bool {
-//     if let Self::Connection(e) = self {
-//       e.failed_remote()
-//     } else {
-//       false
-//     }
-//   }
-// }
 
 // pub struct ReliableConnection<T: Transport>(BufReader<T::Connection>, SocketAddr);
 
@@ -482,10 +450,8 @@ pub trait PromisedStream: TimeoutableStream + Send + Sync + 'static {
 /// So implementors of this trait are typically need to add a checksum to the message at the end,
 /// and the receiver needs to verify the checksum to ensure the integrity of the message.
 pub trait PacketStream: TimeoutableStream + Send + Sync + 'static {
-  type Error: std::error::Error + Send + Sync + 'static;
   type Id: Id;
   type Address: core::fmt::Debug + CheapClone + Send + Sync + 'static;
-  type Wire: Wire;
 
   fn send_to(
     &self,
@@ -578,71 +544,28 @@ pub trait TransportError: std::error::Error + Send + Sync + 'static {
   fn custom(err: std::borrow::Cow<'static, str>) -> Self;
 }
 
-// /// Represents the ability to convert between high-level [`Message`] structures
-// /// and their byte-array representations suitable for network transmission.
-// ///
-// /// The trait ensures that implementations provide consistent encoding and decoding functionality,
-// /// accompanied by appropriate error handling.
-// pub trait Wire: Send + Sync + 'static {
-//   /// Specifies the error type for encoding and decoding operations.
-//   ///
-//   /// This associated type provides detailed error categorization,
-//   /// including transformations of the `Id` and `Address` types.
-//   // type Error: WireError<Id = Self::Id, Address = Self::Address>;
-//   type Error: WireError;
-
-//   /// Represents the unique identifier associated with nodes.
-//   type Id: Id;
-
-//   /// Denotes the network address format or specification used for nodes.
-//   type Address: Address;
-
-//   /// Represents the byte-array format produced after encoding,
-//   /// which is then suitable for transmission over the network.
-//   type Bytes: AsRef<[u8]> + Send + Sync + 'static;
-
-//   /// Encodes a [`Request`] into its byte-array representation.
-//   fn encode_message(
-//     msg: &Message<Self::Id, Self::Address>,
-//   ) -> Result<Self::Bytes, Self::Error>;
-
-//   /// Encodes a [`Request`] into its bytes representation to a writer.
-//   fn encode_message_to_writer(
-//     req: &Request<Self::Id, Self::Address, Self::Data>,
-//     writer: impl AsyncWrite + Send + Unpin,
-//   ) -> impl Future<Output = std::io::Result<()>> + Send;
-
-//   /// Encodes a [`Response`] into its bytes representation to a writer.
-//   fn encode_response_to_writer(
-//     resp: &Response<Self::Id, Self::Address>,
-//     writer: impl AsyncWrite + Send + Unpin,
-//   ) -> impl Future<Output = std::io::Result<()>> + Send;
-
-//   /// Decodes a [`Request`] instance from a provided source slice.
-//   fn decode_request(
-//     src: &[u8],
-//   ) -> Result<Request<Self::Id, Self::Address, Self::Data>, Self::Error>;
-
-//   /// Decodes a [`Response`] instance from a provided source slice.
-//   fn decode_response(src: &[u8]) -> Result<Response<Self::Id, Self::Address>, Self::Error>;
-
-//   /// Decodes a [`Request`] instance from a provided asynchronous reader.
-//   fn decode_request_from_reader(
-//     reader: impl AsyncRead + Send + Unpin,
-//   ) -> impl Future<Output = std::io::Result<Request<Self::Id, Self::Address, Self::Data>>> + Send;
-
-//   /// Decodes a [`Response`] instance from a provided asynchronous reader.
-//   fn decode_response_from_reader(
-//     reader: impl AsyncRead + Send + Unpin,
-//   ) -> impl Future<Output = std::io::Result<Response<Self::Id, Self::Address>>> + Send;
-// }
-
+/// The `Wire` trait for encoding and decoding of messages.
 pub trait Wire: Send + Sync + 'static {
+  /// The error type for encoding and decoding
   type Error: std::error::Error + Send + Sync + 'static;
 
   /// Returns the encoded length of the given message
   fn encoded_len<I, A>(msg: &Message<I, A>) -> usize;
 
+  /// Encodes the given message into the given buffer
+  fn encode_message<I, A>(
+    msg: Message<I, A>,
+    dst: &mut [u8],
+  ) -> Result<(), Self::Error>;
+
+  /// Encodes the given message into the vec.
+  fn encode_message_to_vec<I, A>(msg: Message<I, A>) -> Result<Vec<u8>, Self::Error> {
+    let mut buf = vec![0; Self::encoded_len(&msg)];
+    Self::encode_message(msg, &mut buf)?;
+    Ok(buf)
+  }
+
+  /// Decodes the given bytes into a message
   fn decode_message<I, A>(src: &[u8]) -> Result<Message<I, A>, Self::Error>;
 }
 
@@ -650,43 +573,29 @@ pub trait Wire: Send + Sync + 'static {
 /// interface is assumed to be best-effort and the stream interface is assumed to
 /// be reliable.
 pub trait Transport: Sized + Send + Sync + 'static {
+  /// The error type for the transport
   type Error: TransportError;
+  /// The id type used to identify nodes
   type Id: Id;
+  /// The address resolver used to resolve addresses
   type Resolver: AddressResolver;
-  type Checksumer: Checksumer + Send + Sync + 'static;
+  /// The promised stream used to send and receive messages
   type PromisedStream: PromisedStream<
     Error = Self::Error,
     Wire = Self::Wire,
     Id = Self::Id,
     Address = <Self::Resolver as AddressResolver>::ResolvedAddress,
   >;
+  /// The packet stream used to send and receive packets
+  /// for this transport.
   type PacketStream: PacketStream<
-    Error = Self::Error,
-    Wire = Self::Wire,
     Id = Self::Id,
     Address = <Self::Resolver as AddressResolver>::ResolvedAddress,
   >;
-  type Options: Clone + Send + Sync + 'static;
+  /// The wire used to encode and decode messages
   type Wire: Wire;
-  type Runtime: agnostic::Runtime;
-
-  /// Creates a new transport instance with the given options
-  fn new(
-    resolver: Self::Resolver,
-    opts: Self::Options,
-  ) -> impl Future<Output = Result<Self, Self::Error>> + Send
-  where
-    Self: Sized;
-
-  /// Creates a new transport instance with the given options and metrics labels
-  #[cfg(feature = "metrics")]
-  fn with_metric_labels(
-    resolver: Self::Resolver,
-    opts: Self::Options,
-    metric_labels: std::sync::Arc<Vec<metrics::Label>>,
-  ) -> impl Future<Output = Result<Self, Self::Error>> + Send
-  where
-    Self: Sized;
+  /// The async runtime
+  type Runtime: agnostic::Runtime; 
 
   /// Resolves the given address to a resolved address
   fn resolve(
@@ -701,26 +610,27 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns the local address of the node
   fn local_address(&self) -> &<Self::Resolver as AddressResolver>::Address;
 
-  /// Returns the maximum size of a packet that can be sent
-  fn packet_buffer_size(&self) -> usize;
-
-  /// Returns the size of overhead for each packet
-  fn packet_overhead(&self) -> usize;
-
-  /// Given the user's configured values (which
-  /// might be empty) and returns the desired address to advertise to
-  /// the rest of the cluster.
+  /// Returns the advertise address of the node
   fn advertise_address(&self) -> &<Self::Resolver as AddressResolver>::ResolvedAddress;
+
+  /// Returns the maximum size of a packet that can be sent
+  fn max_payload_size(&self) -> usize;
+
+  /// Returns the size of overhead when trying to send through packet stream ([`send_packet`] or [`send_packets`]).
+  /// 
+  /// e.g. if every time invoking [`send_packet`] or [`send_packets`],
+  /// the concrete implementation wants to  add a header of 10 bytes,
+  /// then the packet overhead is 10 bytes.
+  /// 
+  /// [`send_packet`]: #method.send_packet
+  /// [`send_packets`]: #method.send_packets
+  fn packet_overhead(&self) -> usize;
 
   /// Returns an error if the given address is blocked
   fn blocked_address(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
   ) -> Result<(), Self::Error>;
-
-  // /// Returns the bind port that was automatically given by the
-  // /// kernel, if a bind port of 0 was given.
-  // fn auto_bind_port(&self) -> u16;
 
   /// A packet-oriented interface that fires off the given
   /// payload to the given address in a connectionless fashion.
@@ -776,5 +686,3 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn block_shutdown(&self) -> Result<(), Self::Error>;
 }
 
-#[test]
-fn test_() {}

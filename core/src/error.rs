@@ -35,13 +35,13 @@ pub enum Error<
     /// The actual message type.
     got: &'static str,
   },
-  /// Returned when the sequence number of [`AckResponse`](crate::types::AckResponse) is not
+  /// Returned when the sequence number of [`Ack`](crate::types::Ack) is not
   /// match the sequence number of [`Ping`](crate::types::Ping).
   #[error("showbiz: sequence number mismatch: ping({ping}), ack({ack})")]
   SequenceNumberMismatch {
     /// The sequence number of [`Ping`](crate::types::Ping).
     ping: u32,
-    /// The sequence number of [`AckResponse`](crate::types::AckResponse).
+    /// The sequence number of [`Ack`](crate::types::Ack).
     ack: u32,
   },
   // #[error("showbiz: {0}")]

@@ -8,7 +8,7 @@ use super::{
   error::Error,
   showbiz::Showbiz,
   transport::Transport,
-  types::{AckResponse, NackResponse, Server, ServerState},
+  types::{Ack, Nack, Server, ServerState},
 };
 
 mod r#async;
@@ -109,7 +109,7 @@ where
   }
 
   #[inline]
-  pub(crate) async fn invoke_ack_handler(&self, ack: AckResponse, timestamp: Instant) {
+  pub(crate) async fn invoke_ack_handler(&self, ack: Ack, timestamp: Instant) {
     let ah = self.inner.ack_handlers.lock().await.remove(&ack.seq_no);
     if let Some(handler) = ah {
       handler.timer.stop().await;
@@ -118,7 +118,7 @@ where
   }
 
   #[inline]
-  pub(crate) async fn invoke_nack_handler(&self, nack: NackResponse) {
+  pub(crate) async fn invoke_nack_handler(&self, nack: Nack) {
     let ah = self
       .inner
       .ack_handlers

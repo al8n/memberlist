@@ -1,13 +1,11 @@
-#![cfg_attr(not(any(test, feature = "test")), forbid(unsafe_code))]
-// #![deny(warnings)]
+#![forbid(unsafe_code)]
+#![deny(warnings)]
 #![allow(clippy::type_complexity)]
-#![cfg_attr(feature = "nightly", feature(return_position_impl_trait_in_trait))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
 mod awareness;
 pub mod broadcast;
-pub mod checksum;
 pub mod delegate;
 pub mod error;
 mod network;
@@ -21,8 +19,7 @@ pub use showbiz::*;
 mod state;
 mod suspicion;
 pub mod transport;
-mod types;
-pub use types::*;
+pub mod types;
 pub mod util;
 
 pub use bytes;

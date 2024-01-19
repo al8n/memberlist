@@ -14,9 +14,7 @@ use crate::{
   security::SecretKey,
   showbiz::tests::{get_showbiz, test_config},
   transport::net::NetTransport,
-  types::{
-    AckResponse, Alive, EncodeHeader, IndirectPing, MessageType, Ping, Type, ENCODE_HEADER_SIZE,
-  },
+  types::{Ack, Alive, EncodeHeader, IndirectPing, MessageType, Ping, Type, ENCODE_HEADER_SIZE},
   CompressionAlgo, Message, Options, Showbiz,
 };
 
@@ -85,8 +83,8 @@ where
 
   in_.truncate(n);
 
-  assert_eq!(in_[0], MessageType::AckResponse as u8);
-  let (_, ack) = AckResponse::decode(&in_).unwrap();
+  assert_eq!(in_[0], MessageType::Ack as u8);
+  let (_, ack) = Ack::decode(&in_).unwrap();
   assert_eq!(ack.seq_no, 42, "bad sequence no: {}", ack.seq_no);
   tx.send(()).unwrap();
 }
@@ -138,9 +136,9 @@ where
     let mut in_ = vec![0; 1500];
     let (n, _) = udp.recv_from(&mut in_).await.unwrap();
     in_.truncate(n);
-    assert_eq!(in_[0], MessageType::AckResponse as u8);
+    assert_eq!(in_[0], MessageType::Ack as u8);
 
-    let (_, ack) = AckResponse::decode(&in_).unwrap();
+    let (_, ack) = Ack::decode(&in_).unwrap();
     assert_eq!(ack.seq_no, 42, "bad sequence no: {}", ack.seq_no);
   }
 
@@ -236,9 +234,9 @@ where
   let mut in_ = vec![0; 1500];
   let (n, _) = udp.recv_from(&mut in_).await.unwrap();
   in_.truncate(n);
-  assert_eq!(in_[0], MessageType::AckResponse as u8);
+  assert_eq!(in_[0], MessageType::Ack as u8);
 
-  let (_, ack) = AckResponse::decode(&in_).unwrap();
+  let (_, ack) = Ack::decode(&in_).unwrap();
   assert_eq!(ack.seq_no, 100, "bad sequence no: {}", ack.seq_no);
   tx.send(()).unwrap();
 }
@@ -326,7 +324,7 @@ where
   let (trunc, parts) = Message::decode_compound_message(2, in_).unwrap();
   assert_eq!(trunc, 0);
 
-  let (_, ack) = AckResponse::decode(&parts[0]).unwrap();
+  let (_, ack) = Ack::decode(&parts[0]).unwrap();
   assert_eq!(ack.seq_no, 42, "bad sequence no");
 
   let (_, alive) = Alive::decode(&parts[1]).unwrap();

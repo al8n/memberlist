@@ -343,6 +343,13 @@ mod tests {
       }
     }
 
+    fn encode_message<I, A>(
+      _msg: Message<I, A>,
+      _dst: &mut [u8],
+    ) -> Result<(), Self::Error> {
+      unreachable!() 
+    }
+
     fn decode_message<I, A>(_src: &[u8]) -> Result<Message<I, A>, Self::Error> {
       unreachable!()
     }

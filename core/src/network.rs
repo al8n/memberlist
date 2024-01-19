@@ -11,12 +11,6 @@ mod r#async;
 /// Maximum size for node meta data
 pub const META_MAX_SIZE: usize = 512;
 
-/// Assumed header overhead
-pub(crate) const COMPOUND_HEADER_OVERHEAD: usize = 2;
-
-/// Assumed overhead per entry in compound header
-pub(crate) const COMPOUND_OVERHEAD: usize = 2;
-
 /// Maximum number of concurrent push/pull requests
 const MAX_PUSH_PULL_REQUESTS: u32 = 128;
 

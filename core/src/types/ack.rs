@@ -12,12 +12,12 @@ use transformable::{utils::*, Transformable};
 )]
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 #[cfg_attr(feature = "rkyv", archive_attr(derive(Debug, PartialEq, Eq, Hash)))]
-pub struct AckResponse {
+pub struct Ack {
   seq_no: u32,
   payload: Bytes,
 }
 
-impl AckResponse {
+impl Ack {
   /// Create a new ack response with the given sequence number and empty payload.
   #[inline]
   pub const fn new(seq_no: u32) -> Self {
@@ -30,10 +30,10 @@ impl AckResponse {
 
 /// Error that can occur when transforming an ack response.
 #[derive(Debug, thiserror::Error)]
-pub enum AckResponseTransformError {
+pub enum AckTransformError {
   #[error("encode buffer too small")]
   BufferTooSmall,
-  #[error("the buffer did not contain enough bytes to decode AckResponse")]
+  #[error("the buffer did not contain enough bytes to decode Ack")]
   NotEnoughBytes,
   #[error("fail to decode sequence number: {0}")]
   DecodeVarint(#[from] DecodeVarintError),
@@ -41,8 +41,8 @@ pub enum AckResponseTransformError {
   EncodeVarint(#[from] EncodeVarintError),
 }
 
-impl Transformable for AckResponse {
-  type Error = AckResponseTransformError;
+impl Transformable for Ack {
+  type Error = AckTransformError;
 
   fn encode(&self, dst: &mut [u8]) -> Result<usize, Self::Error> {
     let encoded_len = self.encoded_len();
@@ -133,11 +133,11 @@ impl Transformable for AckResponse {
   archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash), repr(transparent))
 )]
 #[repr(transparent)]
-pub struct NackResponse {
+pub struct Nack {
   seq_no: u32,
 }
 
-impl NackResponse {
+impl Nack {
   /// Create a new nack response with the given sequence number.
   #[inline]
   pub const fn new(seq_no: u32) -> Self {
@@ -145,7 +145,7 @@ impl NackResponse {
   }
 }
 
-impl Transformable for NackResponse {
+impl Transformable for Nack {
   type Error = <u32 as Transformable>::Error;
 
   fn encode(&self, dst: &mut [u8]) -> Result<usize, Self::Error> {
@@ -169,7 +169,7 @@ impl Transformable for NackResponse {
 const _: () = {
   use rand::random;
 
-  impl AckResponse {
+  impl Ack {
     /// Create a new ack response with the given sequence number and random payload.
     #[inline]
     pub fn random(payload_size: usize) -> Self {
@@ -182,7 +182,7 @@ const _: () = {
     }
   }
 
-  impl NackResponse {
+  impl Nack {
     /// Create a new nack response with the given sequence number.
     #[inline]
     pub fn random() -> Self {
@@ -199,11 +199,11 @@ mod tests {
   fn test_ack_response_encode_decode() {
     for i in 0..100 {
       // Generate and test 100 random instances
-      let ack_response = AckResponse::random(i);
+      let ack_response = Ack::random(i);
       let mut buf = vec![0; ack_response.encoded_len()];
       let encoded = ack_response.encode(&mut buf).unwrap();
       assert_eq!(encoded, buf.len());
-      let (read, decoded) = AckResponse::decode(&buf).unwrap();
+      let (read, decoded) = Ack::decode(&buf).unwrap();
       assert_eq!(read, buf.len());
       assert_eq!(ack_response.seq_no, decoded.seq_no);
       assert_eq!(ack_response.payload, decoded.payload);
@@ -214,11 +214,11 @@ mod tests {
   fn test_nack_response_encode_decode() {
     for _ in 0..100 {
       // Generate and test 100 random instances
-      let nack_response = NackResponse::random();
+      let nack_response = Nack::random();
       let mut buf = vec![0; nack_response.encoded_len()];
       let encoded = nack_response.encode(&mut buf).unwrap();
       assert_eq!(encoded, buf.len());
-      let (read, decoded) = NackResponse::decode(&buf).unwrap();
+      let (read, decoded) = Nack::decode(&buf).unwrap();
       assert_eq!(read, buf.len());
       assert_eq!(nack_response.seq_no, decoded.seq_no);
     }
