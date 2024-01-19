@@ -25,6 +25,7 @@ pub enum ServerState {
 }
 
 impl ServerState {
+  /// Returns the [`ServerState`] as a `&'static str`.
   pub const fn as_str(&self) -> &'static str {
     match self {
       Self::Alive => "alive",
@@ -47,13 +48,31 @@ impl core::fmt::Display for ServerState {
   }
 }
 
-// /// Represents a node in the cluster, can be thought as an identifier for a node
-// #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-// pub struct RemoteServer<I, A> {
-//   pub name: Option<Name>,
-//   pub addr: IpAddr,
-//   pub port: Option<u16>,
-// }
+impl TryFrom<u8> for ServerState {
+  type Error = UnknownServerState;
+
+  fn try_from(value: u8) -> Result<Self, Self::Error> {
+    Ok(match value {
+      0 => Self::Alive,
+      1 => Self::Suspect,
+      2 => Self::Dead,
+      3 => Self::Left,
+      _ => return Err(UnknownServerState(value)),
+    })
+  }
+}
+
+/// Unknown server state.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct UnknownServerState(u8);
+
+impl core::fmt::Display for UnknownServerState {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "{} is not a valid server state", self.0)
+  }
+}
+
+impl std::error::Error for UnknownServerState {}
 
 /// Represents a node in the cluster
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]

@@ -7,7 +7,7 @@ use crate::{delegate::Delegate, transport::Transport, types::ErrorResponse};
 
 pub use crate::{
   transport::TransportError,
-  version::{InvalidDelegateVersion, InvalidProtocolVersion},
+  version::{UnknownDelegateVersion, UnknownProtocolVersion},
 };
 
 #[derive(thiserror::Error)]

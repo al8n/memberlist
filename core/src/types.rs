@@ -81,9 +81,9 @@ const MAX_ENCODED_LEN_SIZE: usize = core::mem::size_of::<u32>();
 //   // #[error("{0}")]
 //   // InvalidServerState(#[from] InvalidServerState),
 //   #[error("{0}")]
-//   InvalidProtocolVersion(#[from] InvalidProtocolVersion),
+//   UnknownProtocolVersion(#[from] UnknownProtocolVersion),
 //   #[error("{0}")]
-//   InvalidDelegateVersion(#[from] InvalidDelegateVersion),
+//   UnknownDelegateVersion(#[from] UnknownDelegateVersion),
 //   #[error("{0}")]
 //   InvalidMessageType(#[from] InvalidMessageType),
 //   #[error("{0}")]

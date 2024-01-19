@@ -56,13 +56,13 @@ where
     &self,
     node_state: PushPull<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
-    self.verify_protocol(node_state.body.as_slice()).await?;
+    self.verify_protocol(node_state.states.as_slice()).await?;
 
     // Invoke the merge delegate if any
-    if node_state.header.join {
+    if node_state.join {
       if let Some(merge) = self.delegate.as_ref() {
         let peers = node_state
-          .body
+          .states
           .iter()
           .map(|n| {
             Arc::new(Server {
@@ -80,12 +80,12 @@ where
     }
 
     // Merge the membership state
-    self.merge_state(node_state.body.as_slice()).await;
+    self.merge_state(node_state.states.as_slice()).await;
 
     // Invoke the delegate for user state
     if let Some(d) = &self.delegate {
       if !node_state.user_data.is_empty() {
-        d.merge_remote_state(node_state.user_data, node_state.header.join)
+        d.merge_remote_state(node_state.user_data, node_state.join)
           .await
           .map_err(Error::delegate)?;
       }
@@ -142,7 +142,7 @@ where
         .iter()
         .map(|m| {
           let n = &m.state;
-          let this = PushServerState {
+          let this = PushServerState::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> {
             id: n.id().clone(),
             addr: n.address().clone(),
             meta: n.meta().clone(),
@@ -169,13 +169,7 @@ where
     };
 
     // Send our node state
-    let header = PushPullHeader {
-      nodes: local_nodes.len() as u32,
-      user_state_len: user_data.len() as u32,
-      join,
-    };
-
-    let msg: Message<_, _> = PushPull::new(header, local_nodes, user_data).into();
+    let msg: Message<_, _> = PushPull::new(local_nodes, user_data, join).into();
     #[cfg(feature = "metrics")]
     {
       std::thread_local! {
@@ -296,10 +290,7 @@ where
           return;
         }
 
-        if let Err(e) = self
-          .send_local_state(&mut conn, &addr, pp.header.join)
-          .await
-        {
+        if let Err(e) = self.send_local_state(&mut conn, &addr, pp.join).await {
           tracing::error!(target:  "showbiz.stream", err=%e, remote_node = %addr, "failed to push local state");
           return;
         }

@@ -1,15 +1,15 @@
 pub(crate) const VSN_SIZE: usize = 2;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct InvalidDelegateVersion(u8);
+pub struct UnknownDelegateVersion(u8);
 
-impl core::fmt::Display for InvalidDelegateVersion {
+impl core::fmt::Display for UnknownDelegateVersion {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     write!(f, "V{} is not a valid delegate version", self.0)
   }
 }
 
-impl std::error::Error for InvalidDelegateVersion {}
+impl std::error::Error for UnknownDelegateVersion {}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
@@ -41,17 +41,13 @@ impl core::fmt::Display for DelegateVersion {
 }
 
 impl TryFrom<u8> for DelegateVersion {
-  type Error = InvalidDelegateVersion;
+  type Error = UnknownDelegateVersion;
   fn try_from(v: u8) -> Result<Self, Self::Error> {
     match v {
       0 => Ok(DelegateVersion::V0),
-      _ => Err(InvalidDelegateVersion(v)),
+      _ => Err(UnknownDelegateVersion(v)),
     }
   }
-}
-
-impl DelegateVersion {
-  pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 
 impl From<ArchivedDelegateVersion> for DelegateVersion {
@@ -71,15 +67,15 @@ impl From<DelegateVersion> for ArchivedDelegateVersion {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct InvalidProtocolVersion(u8);
+pub struct UnknownProtocolVersion(u8);
 
-impl core::fmt::Display for InvalidProtocolVersion {
+impl core::fmt::Display for UnknownProtocolVersion {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     write!(f, "V{} is not a valid protocol version", self.0)
   }
 }
 
-impl std::error::Error for InvalidProtocolVersion {}
+impl std::error::Error for UnknownProtocolVersion {}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
@@ -102,10 +98,6 @@ pub enum ProtocolVersion {
   V0 = 0,
 }
 
-impl ProtocolVersion {
-  pub const SIZE: usize = core::mem::size_of::<Self>();
-}
-
 impl core::fmt::Display for ProtocolVersion {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
@@ -115,11 +107,11 @@ impl core::fmt::Display for ProtocolVersion {
 }
 
 impl TryFrom<u8> for ProtocolVersion {
-  type Error = InvalidProtocolVersion;
+  type Error = UnknownProtocolVersion;
   fn try_from(v: u8) -> Result<Self, Self::Error> {
     match v {
       0 => Ok(Self::V0),
-      _ => Err(InvalidProtocolVersion(v)),
+      _ => Err(UnknownProtocolVersion(v)),
     }
   }
 }

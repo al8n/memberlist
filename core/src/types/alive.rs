@@ -1,5 +1,5 @@
 use crate::{
-  version::{InvalidDelegateVersion, InvalidProtocolVersion},
+  version::{UnknownDelegateVersion, UnknownProtocolVersion},
   DelegateVersion, ProtocolVersion,
 };
 
@@ -49,9 +49,9 @@ pub enum AliveTransformError<I: Transformable, A: Transformable> {
   /// The buffer did not contain enough bytes to decode Alive.
   NotEnoughBytes,
   /// Invalid protocol version.
-  InvalidProtocolVersion(InvalidProtocolVersion),
+  UnknownProtocolVersion(UnknownProtocolVersion),
   /// Invalid delegate version.
-  InvalidDelegateVersion(InvalidDelegateVersion),
+  UnknownDelegateVersion(UnknownDelegateVersion),
 }
 
 impl<I: Transformable, A: Transformable> core::fmt::Debug for AliveTransformError<I, A> {
@@ -61,8 +61,8 @@ impl<I: Transformable, A: Transformable> core::fmt::Debug for AliveTransformErro
       Self::TooLarge(val) => write!(f, "encoded message too large, max {} got {val}", u32::MAX),
       Self::BufferTooSmall => write!(f, "encode buffer too small"),
       Self::NotEnoughBytes => write!(f, "the buffer did not contain enough bytes to decode Alive"),
-      Self::InvalidProtocolVersion(err) => write!(f, "invalid protocol version: {:?}", err),
-      Self::InvalidDelegateVersion(err) => write!(f, "invalid delegate version: {:?}", err),
+      Self::UnknownProtocolVersion(err) => write!(f, "invalid protocol version: {:?}", err),
+      Self::UnknownDelegateVersion(err) => write!(f, "invalid delegate version: {:?}", err),
     }
   }
 }
@@ -74,27 +74,27 @@ impl<I: Transformable, A: Transformable> core::fmt::Display for AliveTransformEr
       Self::TooLarge(val) => write!(f, "encoded message too large, max {} got {val}", u32::MAX),
       Self::BufferTooSmall => write!(f, "encode buffer too small"),
       Self::NotEnoughBytes => write!(f, "the buffer did not contain enough bytes to decode Alive"),
-      Self::InvalidProtocolVersion(err) => write!(f, "invalid protocol version: {}", err),
-      Self::InvalidDelegateVersion(err) => write!(f, "invalid delegate version: {}", err),
+      Self::UnknownProtocolVersion(err) => write!(f, "invalid protocol version: {}", err),
+      Self::UnknownDelegateVersion(err) => write!(f, "invalid delegate version: {}", err),
     }
   }
 }
 
 impl<I: Transformable, A: Transformable> std::error::Error for AliveTransformError<I, A> {}
 
-impl<I: Transformable, A: Transformable> From<InvalidProtocolVersion>
+impl<I: Transformable, A: Transformable> From<UnknownProtocolVersion>
   for AliveTransformError<I, A>
 {
-  fn from(err: InvalidProtocolVersion) -> Self {
-    Self::InvalidProtocolVersion(err)
+  fn from(err: UnknownProtocolVersion) -> Self {
+    Self::UnknownProtocolVersion(err)
   }
 }
 
-impl<I: Transformable, A: Transformable> From<InvalidDelegateVersion>
+impl<I: Transformable, A: Transformable> From<UnknownDelegateVersion>
   for AliveTransformError<I, A>
 {
-  fn from(err: InvalidDelegateVersion) -> Self {
-    Self::InvalidDelegateVersion(err)
+  fn from(err: UnknownDelegateVersion) -> Self {
+    Self::UnknownDelegateVersion(err)
   }
 }
 
@@ -137,10 +137,10 @@ impl<I: Transformable, A: Transformable> Transformable for Alive<I, A> {
       .map_err(Self::Error::Node)?;
 
     dst[offset] = self.protocol_version as u8;
-    offset += ProtocolVersion::SIZE;
+    offset += 1;
 
     dst[offset] = self.delegate_version as u8;
-    offset += DelegateVersion::SIZE;
+    offset += 1;
 
     debug_assert_eq!(
       offset, encoded_len,
@@ -154,8 +154,8 @@ impl<I: Transformable, A: Transformable> Transformable for Alive<I, A> {
       + core::mem::size_of::<u32>() // incarnation
       + if self.meta.is_empty() { 1 } else { self.meta.len() + 1 + MAX_ENCODED_LEN_SIZE }
       + self.node.encoded_len()
-      + ProtocolVersion::SIZE
-      + DelegateVersion::SIZE
+      + 1 // protocol_version
+      + 1 // delegate_version
   }
 
   fn decode(src: &[u8]) -> Result<(usize, Self), Self::Error>
@@ -205,19 +205,19 @@ impl<I: Transformable, A: Transformable> Transformable for Alive<I, A> {
     let (node_len, node) = Node::decode(&src[offset..]).map_err(Self::Error::Node)?;
     offset += node_len;
 
-    if ProtocolVersion::SIZE + offset > src.len() {
+    if 1 + offset > src.len() {
       return Err(Self::Error::NotEnoughBytes);
     }
     let protocol_version =
-      ProtocolVersion::try_from(src[offset]).map_err(Self::Error::InvalidProtocolVersion)?;
-    offset += ProtocolVersion::SIZE;
+      ProtocolVersion::try_from(src[offset]).map_err(Self::Error::UnknownProtocolVersion)?;
+    offset += 1;
 
-    if DelegateVersion::SIZE + offset > src.len() {
+    if 1 + offset > src.len() {
       return Err(Self::Error::NotEnoughBytes);
     }
     let delegate_version =
-      DelegateVersion::try_from(src[offset]).map_err(Self::Error::InvalidDelegateVersion)?;
-    offset += DelegateVersion::SIZE;
+      DelegateVersion::try_from(src[offset]).map_err(Self::Error::UnknownDelegateVersion)?;
+    offset += 1;
 
     Ok((
       offset,
