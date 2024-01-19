@@ -24,7 +24,7 @@ pub trait Delegate: Send + Sync + 'static {
   /// Used to retrieve meta-data about the current node
   /// when broadcasting an alive message. It's length is limited to
   /// the given byte size. This metadata is available in the Server structure.
-  fn node_meta(&self, limit: usize) -> Bytes;
+  fn node_meta(&self, limit: usize) -> impl Future<Output = Bytes> + Send;
 
   /// Called when a user-data message is received.
   /// Care should be taken that this method does not block, since doing
@@ -148,7 +148,7 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate for VoidDelegate<I, 
   type Id = I;
   type Address = A;
 
-  fn node_meta(&self, _limit: usize) -> Bytes {
+  async fn node_meta(&self, _limit: usize) -> Bytes {
     Bytes::new()
   }
 

@@ -1,6 +1,6 @@
-use parking_lot::Mutex;
+use futures::lock::Mutex;
 use std::{
-  sync::atomic::{AtomicBool, AtomicUsize},
+  sync::atomic::{AtomicBool, AtomicUsize, Ordering},
   time::Duration,
 };
 
@@ -90,7 +90,7 @@ impl<I, A> MockDelegate<I, A> {
   }
 
   pub fn is_invoked(&self) -> bool {
-    self.invoked.load(atomic::Ordering::SeqCst)
+    self.invoked.load(Ordering::SeqCst)
   }
 
   pub fn cancel_alive(ignore: I) -> Self {
@@ -134,37 +134,37 @@ impl<I, A> MockDelegate<I, A> {
   }
 
   pub fn count(&self) -> usize {
-    self.count.load(atomic::Ordering::SeqCst)
+    self.count.load(Ordering::SeqCst)
   }
 }
 
 impl<I, A> MockDelegate<I, A> {
-  pub fn set_meta(&self, meta: Bytes) {
-    self.inner.lock().meta = meta;
+  pub async fn set_meta(&self, meta: Bytes) {
+    self.inner.lock().await.meta = meta;
   }
 
-  pub fn set_state(&self, state: Bytes) {
-    self.inner.lock().state = state;
+  pub async fn set_state(&self, state: Bytes) {
+    self.inner.lock().await.state = state;
   }
 
-  pub fn set_broadcasts(&self, broadcasts: Vec<Bytes>) {
-    self.inner.lock().broadcasts = broadcasts;
+  pub async fn set_broadcasts(&self, broadcasts: Vec<Bytes>) {
+    self.inner.lock().await.broadcasts = broadcasts;
   }
 
-  pub fn get_remote_state(&self) -> Bytes {
-    self.inner.lock().remote_state.clone()
+  pub async fn get_remote_state(&self) -> Bytes {
+    self.inner.lock().await.remote_state.clone()
   }
 
-  pub fn get_messages(&self) -> Vec<Bytes> {
-    let mut mu = self.inner.lock();
+  pub async fn get_messages(&self) -> Vec<Bytes> {
+    let mut mu = self.inner.lock().await;
     let mut out = vec![];
     core::mem::swap(&mut out, &mut mu.msgs);
     out
   }
 
-  pub fn get_contents(&self) -> Option<(Arc<Server<I, A>>, Duration, Bytes)> {
+  pub async fn get_contents(&self) -> Option<(Arc<Server<I, A>>, Duration, Bytes)> {
     if self.ty == MockDelegateType::Ping {
-      let mut mu = self.inner.lock();
+      let mut mu = self.inner.lock().await;
       let other = mu.ping_other.take()?;
       let rtt = mu.ping_rtt;
       let payload = mu.ping_payload.clone();
@@ -180,12 +180,12 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
   type Address = A;
   type Id = I;
 
-  fn node_meta(&self, _limit: usize) -> Bytes {
-    self.inner.lock().meta.clone()
+  async fn node_meta(&self, _limit: usize) -> Bytes {
+    self.inner.lock().await.meta.clone()
   }
 
   async fn notify_message(&self, msg: Bytes) -> Result<(), Self::Error> {
-    self.inner.lock().msgs.push(msg);
+    self.inner.lock().await.msgs.push(msg);
     Ok(())
   }
 
@@ -198,18 +198,18 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
   where
     F: Fn(Bytes) -> (usize, Bytes),
   {
-    let mut mu = self.inner.lock();
+    let mut mu = self.inner.lock().await;
     let mut out = vec![];
     core::mem::swap(&mut out, &mut mu.broadcasts);
     Ok(out)
   }
 
   async fn local_state(&self, _join: bool) -> Result<Bytes, Self::Error> {
-    Ok(self.inner.lock().state.clone())
+    Ok(self.inner.lock().await.state.clone())
   }
 
   async fn merge_remote_state(&self, buf: Bytes, _join: bool) -> Result<(), Self::Error> {
-    self.inner.lock().remote_state = buf;
+    self.inner.lock().await.remote_state = buf;
     Ok(())
   }
 
@@ -228,7 +228,7 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
   async fn notify_alive(&self, peer: Arc<Server<I, A>>) -> Result<(), Self::Error> {
     match self.ty {
       MockDelegateType::CancelAlive => {
-        self.count.fetch_add(1, atomic::Ordering::SeqCst);
+        self.count.fetch_add(1, Ordering::SeqCst);
         if let Some(ignore) = &self.ignore {
           if peer.id() == ignore {
             return Ok(());
@@ -247,7 +247,7 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
     other: Arc<Server<I, A>>,
   ) -> Result<(), Self::Error> {
     if self.ty == MockDelegateType::NotifyConflict {
-      let mut inner = self.inner.lock();
+      let mut inner = self.inner.lock().await;
       inner.conflict_existing = Some(existing);
       inner.conflict_other = Some(other);
     }
@@ -258,7 +258,6 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
   async fn notify_merge(&self, _peers: Vec<Arc<Server<I, A>>>) -> Result<(), Self::Error> {
     match self.ty {
       MockDelegateType::CancelMerge => {
-        use atomic::Ordering;
         tracing::info!(target:  "showbiz.mock.delegate", "cancel merge");
         self.invoked.store(true, Ordering::SeqCst);
         Err(MockDelegateError::CustomMergeCancelled)
@@ -281,7 +280,7 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
     payload: Bytes,
   ) -> Result<(), Self::Error> {
     if self.ty == MockDelegateType::Ping {
-      let mut inner = self.inner.lock();
+      let mut inner = self.inner.lock().await;
       inner.ping_other = Some(node);
       inner.ping_rtt = rtt;
       inner.ping_payload = payload;

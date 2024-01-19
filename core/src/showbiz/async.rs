@@ -291,7 +291,7 @@ where
   ) -> Result<Self, Error<T, D>> {
     let (shutdown_rx, advertise, this) = Self::new_in(transport, delegate, opts).await?;
     let meta = if let Some(d) = &this.delegate {
-      d.node_meta(META_MAX_SIZE)
+      d.node_meta(META_MAX_SIZE).await
     } else {
       Bytes::new()
     };
@@ -642,7 +642,7 @@ where
   /// means "totally healthy".
   #[inline]
   pub async fn health_score(&self) -> usize {
-    self.inner.awareness.get_health_score() as usize
+    self.inner.awareness.get_health_score().await as usize
   }
 
   /// Used to trigger re-advertising the local node. This is
@@ -657,7 +657,7 @@ where
 
     // Get the node meta data
     let meta = if let Some(delegate) = &self.delegate {
-      let meta = delegate.node_meta(META_MAX_SIZE);
+      let meta = delegate.node_meta(META_MAX_SIZE).await;
       if meta.len() > META_MAX_SIZE {
         panic!("node meta data provided is longer than the limit");
       }
@@ -803,7 +803,7 @@ where
             return;
           },
           _ = <T::Runtime as Runtime>::sleep(queue_check_interval).fuse() => {
-            let numq = this.inner.broadcast.num_queued();
+            let numq = this.inner.broadcast.num_queued().await;
             metrics::histogram!("showbiz.queue.broadcasts").record(numq as f64);
           }
         }

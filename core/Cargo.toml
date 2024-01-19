@@ -34,53 +34,39 @@ rustix = { version = "0.38", features = ["system"] }
 hostname = "0.3"
 
 [dependencies]
-# async common
 agnostic = { workspace = true, features = ["net", "dns"] }
 async-channel.workspace = true 
-async-lock = { version = "3" }
-async-recursion = { version = "1" }
+async-lock = "3"
+async-recursion = "1"
 bytes.workspace = true
 byteorder.workspace = true
 derive_more.workspace = true
+either = "1"
 futures.workspace = true
 nodecraft.workspace = true
 transformable.workspace = true
-
-# common
-atomic = "=0.5" # keep on 0.5
-aead = { version = "0.5", features = ["bytes"] }
-aes-gcm = "0.10"
-base64 = "0.21"
-bytemuck = { version = "1.3", features = ["derive"] }
-cbc = "0.1"
-crc32fast = "1"
-crossbeam-utils = "0.8"
-crossbeam-skiplist = "0.1"
-crossbeam-queue = "0.3"
-either = "1"
-local-ip-address = "0.5"
-itertools = "0.12"
-paste = "1" # TODO: remove this dependency when Rust's concat_ident macro stable
-parking_lot = { version = "0.12", features = ["send_guard"] }
-pollster = "0.3"
+paste.workspace = true
 pin-project.workspace = true
-rand = { version = "0.8" }
-rayon = "1.7"
-rkyv = { version = "0.7", features = ["validation", "bytes", "smol_str"], optional = true }
-scopeguard = "1.1"
+rand = "0.8"
+scopeguard.workspace = true
 smol_str.workspace = true
 smallvec.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+viewit.workspace = true
+
+# rkyv feature
+rkyv = { version = "0.7", features = ["validation", "bytes", "smol_str"], optional = true }
+
+# serde feature
 serde = { workspace = true, optional = true }
 humantime-serde = { workspace = true, optional = true }
-thiserror = { workspace = true }
-tracing.workspace = true
-viewit = { workspace = true }
-weezl = { version = "0.1", features = ["async"] }
-wg = "0.3"
 
-# optional
-pnet = { version = "0.34", optional = true }
+# test feature
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "tracing-log"] }
+pnet = { version = "0.34", optional = true }
+
+# metrics feature
 metrics = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -88,6 +74,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"]
 pnet = "0.34"
 agnostic = { workspace = true, features = ["net", "tokio"] }
 rand = "0.8"
-tokio = { version = "1.32", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
-

@@ -712,7 +712,7 @@ fn move_dead_nodes<I, A, R>(
 
 macro_rules! apply_delta {
   ($this:ident <= $delta:expr) => {
-    $this.inner.awareness.apply_delta($delta);
+    $this.inner.awareness.apply_delta($delta).await;
   };
 }
 
@@ -880,7 +880,8 @@ where
     let probe_interval = self
       .inner
       .awareness
-      .scale_timeout(self.inner.opts.probe_interval);
+      .scale_timeout(self.inner.opts.probe_interval)
+      .await;
 
     #[cfg(feature = "metrics")]
     {
@@ -1383,7 +1384,7 @@ where
     state.incarnation.store(inc, Ordering::Relaxed);
 
     // Decrease our health because we are being asked to refute a problem.
-    self.inner.awareness.apply_delta(1);
+    self.inner.awareness.apply_delta(1).await;
 
     // Format and broadcast an alive message.
     let anode = Node::new(state.id().cheap_clone(), state.address().cheap_clone());

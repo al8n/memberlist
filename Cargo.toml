@@ -33,7 +33,7 @@ derive_more = "0.99"
 futures = "0.3"
 metrics = "0.22"
 nodecraft = { version = "0.2", features = ["transformable", "async", "resolver"] }
-viewit = "0.1.5"
+paste = "1"
 pin-project = "1"
 scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }
@@ -43,6 +43,7 @@ smol_str = "0.2"
 transformable = "0.1"
 thiserror = "1"
 tracing = "0.1"
+viewit = "0.1.5"
 
 showbiz-core = { path = "core", default-features = false }
 showbiz-net = { path = "transports/net", default-features = false }

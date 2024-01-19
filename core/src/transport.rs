@@ -553,10 +553,7 @@ pub trait Wire: Send + Sync + 'static {
   fn encoded_len<I, A>(msg: &Message<I, A>) -> usize;
 
   /// Encodes the given message into the given buffer
-  fn encode_message<I, A>(
-    msg: Message<I, A>,
-    dst: &mut [u8],
-  ) -> Result<(), Self::Error>;
+  fn encode_message<I, A>(msg: Message<I, A>, dst: &mut [u8]) -> Result<(), Self::Error>;
 
   /// Encodes the given message into the vec.
   fn encode_message_to_vec<I, A>(msg: Message<I, A>) -> Result<Vec<u8>, Self::Error> {
@@ -595,7 +592,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// The wire used to encode and decode messages
   type Wire: Wire;
   /// The async runtime
-  type Runtime: agnostic::Runtime; 
+  type Runtime: agnostic::Runtime;
 
   /// Resolves the given address to a resolved address
   fn resolve(
@@ -617,11 +614,11 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn max_payload_size(&self) -> usize;
 
   /// Returns the size of overhead when trying to send through packet stream ([`send_packet`] or [`send_packets`]).
-  /// 
+  ///
   /// e.g. if every time invoking [`send_packet`] or [`send_packets`],
   /// the concrete implementation wants to  add a header of 10 bytes,
   /// then the packet overhead is 10 bytes.
-  /// 
+  ///
   /// [`send_packet`]: #method.send_packet
   /// [`send_packets`]: #method.send_packets
   fn packet_overhead(&self) -> usize;
@@ -685,4 +682,3 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Blocking shutdown the transport
   fn block_shutdown(&self) -> Result<(), Self::Error>;
 }
-

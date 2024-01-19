@@ -36,9 +36,6 @@ pub use futures;
 pub use metrics;
 
 #[doc(hidden)]
-pub use pollster;
-
-#[doc(hidden)]
 pub use tracing;
 
 #[doc(hidden)]

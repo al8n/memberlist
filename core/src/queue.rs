@@ -6,6 +6,8 @@ use std::{
   sync::Arc,
 };
 
+use futures::lock::Mutex;
+
 use crate::{broadcast::Broadcast, util::retransmit_limit};
 
 pub trait ServerCalculator {
@@ -63,7 +65,7 @@ pub struct TransmitLimitedQueue<B: Broadcast> {
   /// The multiplier used to determine the maximum
   /// number of retransmissions attempted.
   retransmit_mult: usize,
-  inner: parking_lot::Mutex<Inner<B>>,
+  inner: Mutex<Inner<B>>,
 }
 
 impl<B: Broadcast> TransmitLimitedQueue<B> {
@@ -71,7 +73,7 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
     Self {
       num_nodes: Box::new(calc),
       retransmit_mult,
-      inner: parking_lot::Mutex::new(Inner {
+      inner: Mutex::new(Inner {
         q: BTreeSet::new(),
         m: HashMap::new(),
         id_gen: 0,
@@ -79,10 +81,12 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
     }
   }
 
-  pub fn num_queued(&self) -> usize {
-    self.inner.lock().q.len()
+  /// Returns the number of messages queued.
+  pub async fn num_queued(&self) -> usize {
+    self.inner.lock().await.q.len()
   }
 
+  /// Returns the messages can be broadcast.
   pub async fn get_broadcasts(&self, overhead: usize, limit: usize) -> Vec<B::Message> {
     self
       .get_broadcast_with_prepend(Vec::new(), overhead, limit)
@@ -96,7 +100,7 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
     limit: usize,
   ) -> Vec<B::Message> {
     let mut to_send = prepend;
-    let mut inner = self.inner.lock();
+    let mut inner = self.inner.lock().await;
     if inner.q.is_empty() {
       return to_send;
     }
@@ -175,7 +179,7 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
   }
 
   async fn queue_broadcast_in(&self, b: B, initial_transmits: usize) {
-    let mut inner = self.inner.lock();
+    let mut inner = self.inner.lock().await;
     if inner.id_gen == u64::MAX {
       inner.id_gen = 1;
     } else {
@@ -224,7 +228,7 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
   /// Clears all the queued messages.
   pub async fn reset(&self) {
     let q = {
-      let mut inner = self.inner.lock();
+      let mut inner = self.inner.lock().await;
       inner.m.clear();
       inner.id_gen = 0;
       std::mem::take(&mut inner.q)
@@ -238,7 +242,7 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
   /// Retain the `max_retain` latest messages, and the rest
   /// will be discarded. This can be used to prevent unbounded queue sizes
   pub async fn prune(&self, max_retain: usize) {
-    let mut inner = self.inner.lock();
+    let mut inner = self.inner.lock().await;
     // Do nothing if queue size is less than the limit
     while inner.q.len() > max_retain {
       if let Some(item) = inner.q.pop_last() {
@@ -343,11 +347,8 @@ mod tests {
       }
     }
 
-    fn encode_message<I, A>(
-      _msg: Message<I, A>,
-      _dst: &mut [u8],
-    ) -> Result<(), Self::Error> {
-      unreachable!() 
+    fn encode_message<I, A>(_msg: Message<I, A>, _dst: &mut [u8]) -> Result<(), Self::Error> {
+      unreachable!()
     }
 
     fn decode_message<I, A>(_src: &[u8]) -> Result<Message<I, A>, Self::Error> {
@@ -399,7 +400,7 @@ mod tests {
 
   impl<B: Broadcast> TransmitLimitedQueue<B> {
     async fn ordered_view(&self, reverse: bool) -> Vec<LimitedBroadcast<B>> {
-      let inner = self.inner.lock();
+      let inner = self.inner.lock().await;
 
       let mut out = vec![];
       inner.walk_read_only(reverse, |b| {
@@ -547,7 +548,7 @@ mod tests {
     })
     .await;
 
-    assert_eq!(q.num_queued(), 3);
+    assert_eq!(q.num_queued().await, 3);
 
     let dump = q.ordered_view(true).await;
 
@@ -565,7 +566,7 @@ mod tests {
     })
     .await;
 
-    assert_eq!(q.num_queued(), 3);
+    assert_eq!(q.num_queued().await, 3);
     let dump = q.ordered_view(true).await;
 
     assert_eq!(dump.len(), 3);
@@ -637,7 +638,7 @@ mod tests {
   async fn test_transmit_limited_get_broadcasts_limit() {
     let q = TransmitLimitedQueue::new(1, || 10);
 
-    assert_eq!(0, q.inner.lock().id_gen);
+    assert_eq!(0, q.inner.lock().await.id_gen);
     assert_eq!(2, retransmit_limit(q.retransmit_mult, (q.num_nodes)()));
 
     // 18 bytes per message
@@ -686,7 +687,7 @@ mod tests {
     })
     .await;
 
-    assert_eq!(4, q.inner.lock().id_gen);
+    assert_eq!(4, q.inner.lock().await.id_gen);
 
     // 3 byte overhead, should only get 3 messages back
     let partial = q.get_broadcasts(3, 80).await;
@@ -694,7 +695,7 @@ mod tests {
 
     assert_eq!(
       4,
-      q.inner.lock().id_gen,
+      q.inner.lock().await.id_gen,
       "id generator doesn't reset until empty"
     );
 
@@ -702,19 +703,27 @@ mod tests {
     assert_eq!(partial.len(), 3);
     assert_eq!(
       4,
-      q.inner.lock().id_gen,
+      q.inner.lock().await.id_gen,
       "id generator doesn't reset until empty"
     );
 
     // Only two not expired
     let partial = q.get_broadcasts(3, 80).await;
     assert_eq!(partial.len(), 2);
-    assert_eq!(0, q.inner.lock().id_gen, "id generator resets on empty");
+    assert_eq!(
+      0,
+      q.inner.lock().await.id_gen,
+      "id generator resets on empty"
+    );
 
     // Should get nothing
     let partial = q.get_broadcasts(3, 80).await;
     assert_eq!(partial.len(), 0);
-    assert_eq!(0, q.inner.lock().id_gen, "id generator resets on empty");
+    assert_eq!(
+      0,
+      q.inner.lock().await.id_gen,
+      "id generator resets on empty"
+    );
   }
 
   #[tokio::test]
@@ -772,7 +781,7 @@ mod tests {
     // keep only 2
     q.prune(2).await;
 
-    assert_eq!(2, q.num_queued());
+    assert_eq!(2, q.num_queued().await);
 
     // Should notify the first two
     futures::select! {
