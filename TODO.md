@@ -2,5 +2,5 @@
   - [ ] Add/Remove label
   - [ ] Encryption/Decryption
   - [ ] Compression/Decompression
-  - [ ] retry new transport
+  - [x] retry new transport
   - [ ] check if address is global

@@ -417,38 +417,6 @@ where
 
   type Runtime = <Self::Resolver as AddressResolver>::Runtime;
 
-  // async fn new(
-  //   label: Option<Label>,
-  //   resolver: Self::Resolver,
-  //   opts: Self::Options,
-  // ) -> Result<Self, TransportError<Self>>
-  // where
-  //   Self: Sized,
-  // {
-  //   #[cfg(feature = "metrics")]
-  //   {
-  //     Self::new_in(label, opts, None).await
-  //   }
-
-  //   #[cfg(not(feature = "metrics"))]
-  //   {
-  //     Self::new_in(label, opts).await
-  //   }
-  // }
-
-  // #[cfg(feature = "metrics")]
-  // async fn with_metric_labels(
-  //   label: Option<Label>,
-  //   resolver: Self::Resolver,
-  //   opts: Self::Options,
-  //   metric_labels: Arc<Vec<crate::metrics::Label>>,
-  // ) -> Result<Self, TransportError<Self>>
-  // where
-  //   Self: Sized,
-  // {
-  //   Self::new_in(label, opts, Some(metric_labels)).await
-  // }
-
   // async fn write_to(&self, b: &[u8], addr: SocketAddr) -> Result<Instant, TransportError<Self>> {
   //   if let Some(label) = &self.label {
   //     // TODO: is there a better way to avoid allocating and copying?
