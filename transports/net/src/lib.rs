@@ -13,7 +13,6 @@ use agnostic::Runtime;
 use bytes::BytesMut;
 use futures::FutureExt;
 use showbiz_core::{
-  CheapClone,
   transport::{
     resolver::AddressResolver,
     stream::{
@@ -23,6 +22,7 @@ use showbiz_core::{
     Id, Transport, TransportError, Wire,
   },
   types::{Message, Packet},
+  CheapClone,
 };
 use showbiz_utils::net::CIDRsPolicy;
 use wg::AsyncWaitGroup;
@@ -388,7 +388,7 @@ where
         Err(e) => {
           tracing::debug!(target="showbiz", err=%e, "fail to create transport");
           if i == limit - 1 {
-            return Err(e.into());
+            return Err(e);
           }
           i += 1;
         }
