@@ -13,11 +13,3 @@ pub const META_MAX_SIZE: usize = 512;
 
 /// Maximum number of concurrent push/pull requests
 const MAX_PUSH_PULL_REQUESTS: u32 = 128;
-
-#[viewit::viewit]
-pub(crate) struct RemoteServerState<'a, I, A> {
-  join: bool,
-  push_states: Vec<&'a PushServerState<I, A>>,
-  user_state_pos: usize,
-  src: Bytes,
-}

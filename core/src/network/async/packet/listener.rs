@@ -251,7 +251,7 @@ where
       self.inner.transport.max_payload_size() - <T::Wire as Wire>::encoded_len(&msg) - overhead;
 
     let mut msgs = self
-      .get_broadcast_with_prepend(vec![msg], overhead, bytes_avail)
+      .get_broadcast_with_prepend(std::iter::once(msg).collect(), overhead, bytes_avail)
       .await?;
 
     // Fast path if nothing to piggypack

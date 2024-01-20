@@ -74,7 +74,7 @@ where
               delegate_version: n.delegate_version,
             })
           })
-          .collect::<Vec<_>>();
+          .collect::<SmallVec<_>>();
         merge.notify_merge(peers).await.map_err(Error::delegate)?;
       }
     }
@@ -156,7 +156,7 @@ where
           }
           this
         })
-        .collect::<Vec<_>>()
+        .collect::<TinyVec<_>>()
     };
 
     // Get the delegate state
@@ -172,11 +172,11 @@ where
     {
       std::thread_local! {
         #[cfg(not(target_family = "wasm"))]
-        static NODE_INSTANCES_GAUGE: std::cell::OnceCell<std::cell::RefCell<Vec<metrics::Label>>> = std::cell::OnceCell::new();
+        static NODE_INSTANCES_GAUGE: std::cell::OnceCell<std::cell::RefCell<showbiz_utils::MetricLabels>> = std::cell::OnceCell::new();
 
         // TODO: remove this when cargo wasix toolchain update to rust 1.70
         #[cfg(target_family = "wasm")]
-        static NODE_INSTANCES_GAUGE: once_cell::sync::OnceCell<std::cell::RefCell<Vec<metrics::Label>>> = once_cell::sync::OnceCell::new();
+        static NODE_INSTANCES_GAUGE: once_cell::sync::OnceCell<std::cell::RefCell<showbiz_utils::MetricLabels>> = once_cell::sync::OnceCell::new();
       }
 
       NODE_INSTANCES_GAUGE.with(|g| {

@@ -12,6 +12,8 @@ use async_channel::{Receiver, Sender};
 use bytes::Bytes;
 use nodecraft::Node;
 
+use crate::types::TinyVec;
+
 use super::{
   awareness::Awareness,
   broadcast::MemberlistBroadcast,
@@ -93,7 +95,7 @@ impl<I, A, R> core::ops::Deref for Member<I, A, R> {
 
 pub(crate) struct Members<I, A, R> {
   pub(crate) local: Node<I, A>,
-  pub(crate) nodes: Vec<Member<I, A, R>>,
+  pub(crate) nodes: TinyVec<Member<I, A, R>>,
   pub(crate) node_map: HashMap<I, usize>,
 }
 
@@ -220,7 +222,7 @@ where
 impl<I, A, R> Members<I, A, R> {
   fn new(local: Node<I, A>) -> Self {
     Self {
-      nodes: Vec::new(),
+      nodes: TinyVec::new(),
       node_map: HashMap::new(),
       local,
     }

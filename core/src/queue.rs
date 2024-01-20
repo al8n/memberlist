@@ -8,7 +8,7 @@ use std::{
 
 use futures::lock::Mutex;
 
-use crate::{broadcast::Broadcast, util::retransmit_limit};
+use crate::{broadcast::Broadcast, types::TinyVec, util::retransmit_limit};
 
 pub trait ServerCalculator {
   fn num_nodes(&self) -> usize;
@@ -87,18 +87,18 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
   }
 
   /// Returns the messages can be broadcast.
-  pub async fn get_broadcasts(&self, overhead: usize, limit: usize) -> Vec<B::Message> {
+  pub async fn get_broadcasts(&self, overhead: usize, limit: usize) -> TinyVec<B::Message> {
     self
-      .get_broadcast_with_prepend(Vec::new(), overhead, limit)
+      .get_broadcast_with_prepend(TinyVec::new(), overhead, limit)
       .await
   }
 
   pub(crate) async fn get_broadcast_with_prepend(
     &self,
-    prepend: Vec<B::Message>,
+    prepend: TinyVec<B::Message>,
     overhead: usize,
     limit: usize,
-  ) -> Vec<B::Message> {
+  ) -> TinyVec<B::Message> {
     let mut to_send = prepend;
     let mut inner = self.inner.lock().await;
     if inner.q.is_empty() {
@@ -399,10 +399,10 @@ mod tests {
   }
 
   impl<B: Broadcast> TransmitLimitedQueue<B> {
-    async fn ordered_view(&self, reverse: bool) -> Vec<LimitedBroadcast<B>> {
+    async fn ordered_view(&self, reverse: bool) -> TinyVec<LimitedBroadcast<B>> {
       let inner = self.inner.lock().await;
 
-      let mut out = vec![];
+      let mut out = TinyVec::new();
       inner.walk_read_only(reverse, |b| {
         out.push(b.clone());
         true

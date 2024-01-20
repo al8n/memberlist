@@ -3,7 +3,7 @@ use crate::{
   error::Error,
   showbiz::Memberlist,
   transport::{Transport, Wire},
-  types::{CompoundMessage, Message},
+  types::{Message, TinyVec},
 };
 use async_channel::Sender;
 use either::Either;
@@ -154,10 +154,10 @@ where
   #[inline]
   pub(crate) async fn get_broadcast_with_prepend(
     &self,
-    to_send: CompoundMessage<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    to_send: TinyVec<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
     overhead: usize,
     limit: usize,
-  ) -> Result<CompoundMessage<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>, Error<T, D>>
+  ) -> Result<TinyVec<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>, Error<T, D>>
   {
     // Get memberlist messages first
     let mut to_send = self

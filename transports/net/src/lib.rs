@@ -21,7 +21,7 @@ use showbiz_core::{
     },
     Id, Transport, TransportError, Wire,
   },
-  types::{Message, Packet},
+  types::{Message, Packet, SmallVec, TinyVec},
   CheapClone,
 };
 use showbiz_utils::net::CIDRsPolicy;
@@ -33,7 +33,7 @@ use compressor::Compressor;
 
 /// Encrypt/decrypt related.
 pub mod security;
-use security::{SecretKey, SecretKeyring};
+use security::{SecretKey, SecretKeyring, SecretKeys};
 
 /// Errors for the net transport.
 pub mod error;
@@ -145,11 +145,8 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
 
   /// A list of addresses to bind to for both TCP and UDP
   /// communications.
-  #[viewit(getter(
-    style = "ref",
-    result(type = "&[IpAddr]", converter(fn = "Vec::as_slice"))
-  ))]
-  bind_addrs: Vec<IpAddr>,
+  #[viewit(getter(style = "ref", const,))]
+  bind_addrs: SmallVec<IpAddr>,
   bind_port: Option<u16>,
 
   label: Label,
@@ -182,7 +179,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   /// the first key used while attempting to decrypt messages. Providing a
   /// value for this primary key will enable message-level encryption and
   /// verification, and automatically install the key onto the keyring.
-  secret_key: Option<SecretKey>,
+  primary_key: Option<SecretKey>,
 
   /// Holds all of the encryption keys used internally. It is
   /// automatically initialized using the SecretKey and SecretKeys values.
@@ -190,13 +187,12 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   /// **Note: This field will not be used if the network layer is secure.**
   #[viewit(getter(
     style = "ref",
-    result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeyring>")
+    result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeys>")
   ))]
-  secret_keyring: Option<SecretKeyring>,
+  secret_keys: Option<SecretKeys>,
 
-  #[cfg_attr(feature = "serde", serde(skip))]
   #[cfg(feature = "metrics")]
-  metric_labels: Option<Arc<Vec<metrics::Label>>>,
+  metric_labels: Option<Arc<showbiz_utils::MetricLabels>>,
 }
 
 pub struct NetTransport<
@@ -210,8 +206,8 @@ pub struct NetTransport<
   advertise_addr: A::ResolvedAddress,
   packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
-  promised_listeners: Vec<Arc<S::Listener>>,
-  sockets: Vec<Arc<P::Stream>>,
+  promised_listeners: SmallVec<Arc<S::Listener>>,
+  sockets: SmallVec<Arc<P::Stream>>,
   stream_layer: Arc<S>,
   packet_layer: Arc<P>,
   wg: AsyncWaitGroup,
@@ -246,6 +242,7 @@ where
     resolver: Arc<A>,
     packet_layer: Arc<P>,
     stream_layer: Arc<S>,
+    keyring: Option<SecretKeyring>,
     opts: Arc<NetTransportOptions<I, A>>,
   ) -> Result<Self, NetTransportError<A>> {
     // If we reject the empty list outright we can assume that there's at
@@ -261,7 +258,7 @@ where
     let mut promised_listeners = Vec::with_capacity(opts.bind_addrs.len());
     let mut sockets = Vec::with_capacity(opts.bind_addrs.len());
     let bind_port = opts.bind_port.unwrap_or(0);
-    for &addr in &opts.bind_addrs {
+    for &addr in opts.bind_addrs.iter() {
       let addr = SocketAddr::new(addr, bind_port);
       let (local_addr, ln) = match stream_layer.bind(addr).await {
         Ok(ln) => (ln.local_addr().unwrap(), ln),
@@ -307,7 +304,7 @@ where
         label: opts.label.clone(),
         offload_size: opts.offload_size,
         compressor: opts.compressor,
-        keyring: opts.secret_keyring.clone(),
+        keyring: keyring.clone(),
         socket: socket.clone(),
         local_addr: *socket_addr,
         shutdown: shutdown.clone(),
@@ -365,6 +362,22 @@ where
     let packet_layer = Arc::new(packet_layer);
     let stream_layer = Arc::new(stream_layer);
     let opts = Arc::new(opts);
+    let keyring = if P::is_secure() && S::is_secure() {
+      None
+    } else {
+      match (opts.primary_key, &opts.secret_keys) {
+        (None, Some(keys)) if !keys.is_empty() => {
+          tracing::warn!(target: "showbiz", "using first key in keyring as primary key");
+          let mut iter = keys.iter().copied();
+          let pk = iter.next().unwrap();
+          let keyring = SecretKeyring::with_keys(pk, iter);
+          Some(keyring)
+        }
+        (Some(pk), None) => Some(SecretKeyring::new(pk)),
+        (Some(pk), Some(keys)) => Some(SecretKeyring::with_keys(pk, keys.iter().copied())),
+        _ => None,
+      }
+    };
     loop {
       #[cfg(feature = "metrics")]
       let transport = {
@@ -372,6 +385,7 @@ where
           resolver.clone(),
           packet_layer.clone(),
           stream_layer.clone(),
+          keyring.clone(),
           opts.clone(),
         )
         .await
@@ -519,7 +533,7 @@ where
   async fn send_packets(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    packets: Vec<
+    packets: TinyVec<
       showbiz_core::types::Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
     >,
   ) -> Result<(usize, Instant), Self::Error> {
@@ -696,7 +710,7 @@ where
   keyring: Option<SecretKeyring>,
   offload_size: usize,
   #[cfg(feature = "metrics")]
-  metric_labels: Arc<Vec<metrics::Label>>,
+  metric_labels: Arc<showbiz_utils::MetricLabels>,
 }
 
 impl<A, T, P> PacketProcessor<A, T, P>
@@ -751,7 +765,9 @@ where
                 };
 
                 #[cfg(feature = "metrics")]
-                metrics::counter!("showbiz.packet.bytes.processing", self.metric_labels.iter()).increment(start.elapsed().as_secs_f64().round() as u64);
+                {
+                  metrics::counter!("showbiz.packet.bytes.processing", self.metric_labels.iter()).increment(start.elapsed().as_secs_f64().round() as u64);
+                }
 
                 if let Err(e) = packet_tx.send(Packet::new(msg, addr, start)).await {
                   tracing::error!(target: "showbiz.packet", local=%local_addr, from=%addr, err = %e, "failed to send packet");

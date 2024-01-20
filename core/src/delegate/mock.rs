@@ -255,7 +255,7 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
     Ok(())
   }
 
-  async fn notify_merge(&self, _peers: Vec<Arc<Server<I, A>>>) -> Result<(), Self::Error> {
+  async fn notify_merge(&self, _peers: SmallVec<Arc<Server<I, A>>>) -> Result<(), Self::Error> {
     match self.ty {
       MockDelegateType::CancelMerge => {
         tracing::info!(target:  "showbiz.mock.delegate", "cancel merge");

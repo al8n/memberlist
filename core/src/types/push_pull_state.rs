@@ -300,7 +300,7 @@ const _: () = {
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 pub struct PushPull<I, A> {
   join: bool,
-  states: Arc<Vec<PushServerState<I, A>>>,
+  states: Arc<TinyVec<PushServerState<I, A>>>,
   user_data: Bytes,
 }
 
@@ -327,7 +327,7 @@ impl<I, A> CheapClone for PushPull<I, A> {
 impl<I, A> PushPull<I, A> {
   /// Create a new [`PushPull`] message.
   #[inline]
-  pub fn new(states: Vec<PushServerState<I, A>>, user_data: Bytes, join: bool) -> Self {
+  pub fn new(states: TinyVec<PushServerState<I, A>>, user_data: Bytes, join: bool) -> Self {
     Self {
       states: Arc::new(states),
       user_data,
@@ -418,7 +418,7 @@ impl<I: Transformable, A: Transformable> Transformable for PushPull<I, A> {
     let states_len = NetworkEndian::read_u32(&src[offset..]) as usize;
     offset += core::mem::size_of::<u32>();
 
-    let mut states = Vec::with_capacity(states_len);
+    let mut states = TinyVec::with_capacity(states_len);
     for _ in 0..states_len {
       let (state_len, state) = PushServerState::decode(&src[offset..])?;
       offset += state_len;
@@ -469,7 +469,7 @@ const _: () = {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
       f.debug_struct("PushPull")
         .field("join", &self.join)
-        .field("states", &self.states)
+        .field("states", &self.states.get().0)
         .field("user_data", &self.user_data)
         .finish()
     }
@@ -481,7 +481,9 @@ const _: () = {
     A::Archived: PartialEq,
   {
     fn eq(&self, other: &Self) -> bool {
-      self.join == other.join && self.states == other.states && self.user_data == other.user_data
+      self.join == other.join
+        && self.states.get().0 == other.states.get().0
+        && self.user_data == other.user_data
     }
   }
 
@@ -499,7 +501,7 @@ const _: () = {
   {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
       self.join.hash(state);
-      self.states.hash(state);
+      self.states.get().0.hash(state);
       self.user_data.hash(state);
     }
   }
@@ -537,7 +539,7 @@ const _: () = {
     fn generate(size: usize) -> Self {
       let states = (0..size)
         .map(|_| PushServerState::generate(size))
-        .collect::<Vec<_>>();
+        .collect::<TinyVec<_>>();
       let user_data = (0..size).map(|_| random::<u8>()).collect::<Vec<_>>().into();
       let join = random();
       Self {

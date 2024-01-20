@@ -3,6 +3,9 @@ use std::{sync::Arc, time::Duration};
 use super::version::VSN_SIZE;
 pub use super::version::{DelegateVersion, ProtocolVersion};
 
+#[cfg(feature = "metrics")]
+pub use showbiz_utils::MetricLabels;
+
 /// Options used to configure the memberlist.
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone)]
@@ -172,8 +175,7 @@ pub struct Options {
 
   #[viewit(getter(style = "ref", const, attrs(cfg(feature = "metrics"))))]
   #[cfg(feature = "metrics")]
-  #[serde(with = "crate::util::label_serde")]
-  metric_labels: Arc<Vec<metrics::Label>>,
+  metric_labels: Arc<MetricLabels>,
 }
 
 impl Default for Options {
@@ -227,7 +229,7 @@ impl Options {
       dead_node_reclaim_time: Duration::ZERO,
       queue_check_interval: Duration::from_secs(30),
       #[cfg(feature = "metrics")]
-      metric_labels: Arc::new(Vec::new()),
+      metric_labels: Arc::new(MetricLabels::new()),
     }
   }
 

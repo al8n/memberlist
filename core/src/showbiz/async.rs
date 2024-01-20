@@ -2,7 +2,7 @@ use std::{future::Future, sync::atomic::Ordering, time::Duration};
 
 use crate::{
   delegate::VoidDelegate,
-  types::{Dead, PushServerState},
+  types::{Dead, PushServerState, SmallVec},
 };
 
 use super::*;
@@ -127,7 +127,7 @@ where
   #[inline]
   pub async fn members(
     &self,
-  ) -> Vec<Arc<Server<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
+  ) -> SmallVec<Arc<Server<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
     self
       .inner
       .nodes
@@ -161,13 +161,13 @@ pub struct JoinError<T: Transport, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
-  joined: Vec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+  joined: SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
   errors: HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>>,
 }
 
 impl<D, T: Transport> From<JoinError<T, D>>
   for (
-    Vec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
     HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>>,
   )
 where
@@ -235,7 +235,7 @@ where
   /// Return the joined nodes
   pub const fn joined(
     &self,
-  ) -> &Vec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
+  ) -> &SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
     &self.joined
   }
 }
@@ -569,11 +569,13 @@ where
   pub async fn join_many(
     &self,
     existing: impl Iterator<Item = Node<T::Id, <T::Resolver as AddressResolver>::Address>>,
-  ) -> Result<Vec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>, JoinError<T, D>>
-  {
+  ) -> Result<
+    SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    JoinError<T, D>,
+  > {
     if self.has_left() || self.has_shutdown() {
       return Err(JoinError {
-        joined: Vec::new(),
+        joined: SmallVec::new(),
         errors: existing
           .into_iter()
           .map(|n| (n, Error::NotRunning))
@@ -614,7 +616,7 @@ where
 
     let res = futures::future::join_all(futs).await;
 
-    let num_success = std::cell::RefCell::new(Vec::with_capacity(estimated_total));
+    let num_success = std::cell::RefCell::new(SmallVec::with_capacity(estimated_total));
     let errors = res
       .into_iter()
       .filter_map(|rst| match rst {

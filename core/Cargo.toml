@@ -14,10 +14,10 @@ default = ["metrics"]
 
 # implement tokio::io::AsyncRead/AsyncWrite for Tcp/Udp
 tokio-compat = ["agnostic/tokio-compat"]
-metrics = ["dep:metrics"]
+metrics = ["dep:metrics", "showbiz-utils/metrics"]
 
-serde = ["dep:serde", "bytes/serde", "nodecraft/serde", "humantime-serde"]
-rkyv = ["dep:rkyv", "nodecraft/rkyv"]
+serde = ["dep:serde", "bytes/serde", "nodecraft/serde", "humantime-serde", "showbiz-utils/serde"]
+rkyv = ["dep:rkyv", "nodecraft/rkyv", "showbiz-utils/rkyv"]
 
 # expose all tests fn for users who want to use other runtime
 # see showbiz-wasm for more examples about how to use those tests fn
@@ -51,6 +51,7 @@ rand = "0.8"
 scopeguard.workspace = true
 smol_str.workspace = true
 smallvec.workspace = true
+showbiz-utils.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 viewit.workspace = true

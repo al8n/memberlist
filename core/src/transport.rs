@@ -636,7 +636,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn send_packets(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    packets: Vec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
+    packets: TinyVec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
   ) -> impl Future<Output = Result<(usize, Instant), Self::Error>> + Send;
 
   /// Used to create a connection that allows us to perform

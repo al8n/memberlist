@@ -6,7 +6,7 @@ use crate::{
   suspicion::Suspicion,
   timer::Timer,
   transport::Transport,
-  types::{Alive, Dead, IndirectPing, Ping, PushServerState, Suspect},
+  types::{Alive, Dead, IndirectPing, Ping, PushServerState, SmallVec, Suspect},
 };
 
 use super::*;
@@ -33,10 +33,13 @@ fn random_offset(n: usize) -> usize {
 }
 
 #[inline]
-fn random_nodes<I, A>(k: usize, mut nodes: Vec<Arc<Server<I, A>>>) -> Vec<Arc<Server<I, A>>> {
+fn random_nodes<I, A>(
+  k: usize,
+  mut nodes: SmallVec<Arc<Server<I, A>>>,
+) -> SmallVec<Arc<Server<I, A>>> {
   let n = nodes.len();
   if n == 0 {
-    return Vec::new();
+    return SmallVec::new();
   }
 
   // The modified Fisher-Yates algorithm, but up to 3*n times to ensure exhaustive search for small n.
@@ -942,7 +945,9 @@ where
       if let Err(e) = self
         .send_packets(
           target.address(),
-          vec![ping.cheap_clone().into(), suspect.into()],
+          [ping.cheap_clone().into(), suspect.into()]
+            .into_iter()
+            .collect(),
         )
         .await
       {
@@ -1033,7 +1038,7 @@ where
             Some(m.state.server.cheap_clone())
           }
         })
-        .collect::<Vec<_>>();
+        .collect::<SmallVec<_>>();
       random_nodes(self.inner.opts.indirect_checks, nodes)
     };
 
@@ -1287,7 +1292,7 @@ where
             _ => None,
           }
         })
-        .collect::<Vec<_>>();
+        .collect::<SmallVec<_>>();
       random_nodes(self.inner.opts.gossip_nodes, nodes)
     };
 
@@ -1298,7 +1303,7 @@ where
     for server in nodes {
       // Get any pending broadcasts
       let mut msgs = match self
-        .get_broadcast_with_prepend(vec![], overhead, bytes_avail)
+        .get_broadcast_with_prepend(Default::default(), overhead, bytes_avail)
         .await
       {
         Ok(msgs) => msgs,
@@ -1347,7 +1352,7 @@ where
             Some(n.state.server.clone())
           }
         })
-        .collect::<Vec<_>>();
+        .collect::<SmallVec<_>>();
       random_nodes(1, nodes)
     };
 

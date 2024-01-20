@@ -133,7 +133,7 @@ where
   pub(crate) async fn send_packets(
     &self,
     addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
-    packet: Vec<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    packet: TinyVec<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
   ) -> Result<(), Error<T, D>> {
     self
       .inner

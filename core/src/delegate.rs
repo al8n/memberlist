@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::Future;
 use nodecraft::{Address, CheapClone, Id};
 
-use crate::types::Server;
+use crate::types::{Server, SmallVec};
 
 #[cfg(any(test, feature = "test"))]
 mod mock;
@@ -105,7 +105,7 @@ pub trait Delegate: Send + Sync + 'static {
   /// Provides a list of the nodes known by the peer.
   fn notify_merge(
     &self,
-    peers: Vec<Arc<Server<Self::Id, Self::Address>>>,
+    peers: SmallVec<Arc<Server<Self::Id, Self::Address>>>,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Invoked when an ack is being sent; the returned bytes will be appended to the ack
@@ -214,7 +214,7 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate for VoidDelegate<I, 
 
   async fn notify_merge(
     &self,
-    _peers: Vec<Arc<Server<Self::Id, Self::Address>>>,
+    _peers: SmallVec<Arc<Server<Self::Id, Self::Address>>>,
   ) -> Result<(), Self::Error> {
     Ok(())
   }
