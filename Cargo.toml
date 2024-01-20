@@ -28,7 +28,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [workspace.dependencies]
-agnostic = { path = "../agnostic/agnostic" }
+agnostic = "0.2"
 async-channel = "2"
 bytes = "1.5"
 byteorder = "1"

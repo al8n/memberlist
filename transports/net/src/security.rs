@@ -102,23 +102,23 @@ impl EncryptionAlgo {
     }
   }
 
-  pub(crate) fn header(&self, len: usize) -> BytesMut {
-    let enc_len = self.encrypted_length(len);
-    let enc_len_bytes = (enc_len as u32).to_be_bytes();
-    let mut buf = BytesMut::with_capacity(ENCODE_HEADER_SIZE + enc_len);
-    // Write the encrypt byte
-    buf.put_slice(&[
-      MessageType::Encrypt as u8,
-      0,
-      0,
-      0,
-      enc_len_bytes[0],
-      enc_len_bytes[1],
-      enc_len_bytes[2],
-      enc_len_bytes[3], // message length
-    ]);
-    buf
-  }
+  // pub(crate) fn header(&self, len: usize) -> BytesMut {
+  //   let enc_len = self.encrypted_length(len);
+  //   let enc_len_bytes = (enc_len as u32).to_be_bytes();
+  //   let mut buf = BytesMut::with_capacity(ENCODE_HEADER_SIZE + enc_len);
+  //   // Write the encrypt byte
+  //   buf.put_slice(&[
+  //     MessageType::Encrypt as u8,
+  //     0,
+  //     0,
+  //     0,
+  //     enc_len_bytes[0],
+  //     enc_len_bytes[1],
+  //     enc_len_bytes[2],
+  //     enc_len_bytes[3], // message length
+  //   ]);
+  //   buf
+  // }
 }
 
 /// The key used while attempting to encrypt/decrypt a message

@@ -54,16 +54,18 @@ pub enum DecompressError {
 }
 
 impl Compressor {
-  pub(crate) fn decompress(&self, src: &[u8]) -> Result<Bytes, DecompressError> {
+  /// Decompresses the given buffer.
+  pub fn decompress(&self, src: &[u8]) -> Result<Bytes, DecompressError> {
     match self {
       Self::Lzw => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
         .decode(src)
         .map(Into::into)
-        .map_err(|e| DecompressError::Lzw(e)),
+        .map_err(DecompressError::Lzw),
     }
   }
 
-  pub(crate) fn compress(&self, src: &[u8]) -> Result<Bytes, CompressError> {
+  /// Compresses the given buffer.
+  pub fn compress(&self, src: &[u8]) -> Result<Bytes, CompressError> {
     let mut buf = Vec::with_capacity(src.len());
     match self {
       Self::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)

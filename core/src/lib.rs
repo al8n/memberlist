@@ -26,6 +26,8 @@ pub use bytes;
 mod timer;
 mod version;
 
+pub use nodecraft::CheapClone;
+
 pub use agnostic;
 
 pub use futures;

@@ -407,9 +407,6 @@ pub trait TimeoutableStream: Unpin + Send + Sync + 'static {
   fn timeout(&self) -> (Option<Duration>, Option<Duration>) {
     (Self::read_timeout(self), Self::write_timeout(self))
   }
-
-  // /// Returns the remote address to which this stream is connected.
-  // fn remote_address(&self) -> Result<Self::Address, Self::Error>;
 }
 
 // /// The `PacketStream` trait represents a stream of data without guaranteed delivery.

@@ -71,17 +71,6 @@ impl Label {
   pub fn len(&self) -> usize {
     self.0.len()
   }
-
-  #[inline]
-  pub(crate) fn from_bytes(s: Bytes) -> Result<Self, InvalidLabel> {
-    if s.len() > Self::MAX_SIZE {
-      return Err(InvalidLabel::TooLarge(s.len()));
-    }
-    match core::str::from_utf8(&s) {
-      Ok(_) => Ok(Self(s)),
-      Err(e) => Err(e.into()),
-    }
-  }
 }
 
 #[cfg(feature = "serde")]
@@ -122,7 +111,7 @@ impl AsRef<str> for Label {
 
 impl core::cmp::PartialOrd for Label {
   fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-    self.as_str().partial_cmp(other.as_str())
+    Some(self.cmp(other))
   }
 }
 

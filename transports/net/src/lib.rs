@@ -1,36 +1,26 @@
 use std::{
-  collections::{HashSet, VecDeque},
-  io::{self, Error, ErrorKind},
+  io::{Error, ErrorKind},
   marker::PhantomData,
   net::{IpAddr, SocketAddr},
-  pin::Pin,
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
   },
-  task::{Context, Poll},
   time::{Duration, Instant},
 };
 
-#[cfg(feature = "tokio-compat")]
-use agnostic::io::ReadBuf;
-use futures::FutureExt;
-
-use agnostic::{
-  net::{Net, TcpListener, TcpStream, UdpSocket},
-  Runtime,
-};
+use agnostic::Runtime;
 use bytes::BytesMut;
-use nodecraft::{resolver, CheapClone};
-use security::SecretKey;
+use futures::FutureExt;
 use showbiz_core::{
+  CheapClone,
   transport::{
     resolver::AddressResolver,
     stream::{
       packet_stream, promised_stream, PacketProducer, PacketSubscriber, StreamProducer,
       StreamSubscriber,
     },
-    Address, Id, TimeoutableStream, Transport, TransportError, Wire,
+    Id, Transport, TransportError, Wire,
   },
   types::{Message, Packet},
 };
@@ -64,7 +54,7 @@ const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
 
 /// Used to buffer incoming packets during read
 /// operations.
-const UDP_PACKET_BUF_SIZE: usize = 65536;
+const PACKET_BUF_SIZE: usize = 65536;
 
 /// A large buffer size that we attempt to set UDP
 /// sockets to in order to handle a large volume of messages.
@@ -141,7 +131,7 @@ impl<A: AddressResolver> TransportError for NetTransportError<A> {
     deserialize = "I: for<'a> serde::Deserialize<'a>, A: AddressResolver, A::Address: for<'a> serde::Deserialize<'a>, A::ResolvedAddress: for<'a> serde::Deserialize<'a>"
   ))
 )]
-pub struct NetTransportOptions<I, A: AddressResolver> {
+pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   /// The local node's ID.
   id: I,
 
@@ -203,47 +193,60 @@ pub struct NetTransportOptions<I, A: AddressResolver> {
     result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeyring>")
   ))]
   secret_keyring: Option<SecretKeyring>,
+
+  #[cfg_attr(feature = "serde", serde(skip))]
+  #[cfg(feature = "metrics")]
+  metric_labels: Option<Arc<Vec<metrics::Label>>>,
 }
 
 pub struct NetTransport<
   I,
-  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
   P: PacketLayer,
   S: StreamLayer,
   W,
-  R: Runtime,
 > {
   opts: Arc<NetTransportOptions<I, A>>,
   advertise_addr: A::ResolvedAddress,
   packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
-  promised_bind_addr: SocketAddr,
-  #[allow(dead_code)]
-  promised_listener: Arc<S::Listener>,
-  packet: Arc<P::Stream>,
-  stream_layer: S,
-  packet_layer: P,
+  promised_listeners: Vec<Arc<S::Listener>>,
+  sockets: Vec<Arc<P::Stream>>,
+  stream_layer: Arc<S>,
+  packet_layer: Arc<P>,
   wg: AsyncWaitGroup,
-  resolver: A,
+  resolver: Arc<A>,
   shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
-  _marker: PhantomData<(W, R)>,
+  _marker: PhantomData<W>,
 }
 
-impl<I, A, P, S, W, R> NetTransport<I, A, P, S, W, R>
+impl<I, A, P, S, W> NetTransport<I, A, P, S, W>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
   P: PacketLayer,
   S: StreamLayer,
-  R: Runtime,
+  W: Wire,
 {
-  async fn new_in(
+  /// Creates a new net transport.
+  pub async fn new(
     resolver: A,
     packet_layer: P,
     stream_layer: S,
     opts: NetTransportOptions<I, A>,
-    #[cfg(feature = "metrics")] metric_labels: Option<Arc<Vec<metrics::Label>>>,
+  ) -> Result<Self, NetTransportError<A>> {
+    match opts.bind_port {
+      Some(0) | None => Self::retry(resolver, packet_layer, stream_layer, 10, opts).await,
+      _ => Self::retry(resolver, packet_layer, stream_layer, 1, opts).await,
+    }
+  }
+
+  async fn new_in(
+    resolver: Arc<A>,
+    packet_layer: Arc<P>,
+    stream_layer: Arc<S>,
+    opts: Arc<NetTransportOptions<I, A>>,
   ) -> Result<Self, NetTransportError<A>> {
     // If we reject the empty list outright we can assume that there's at
     // least one listener of each type later during operation.
@@ -251,12 +254,12 @@ where
       return Err(NetTransportError::EmptyBindAddrs);
     }
 
-    let (stream_tx, stream_rx) = promised_stream();
-    let (packet_tx, packet_rx) = packet_stream();
+    let (stream_tx, stream_rx) = promised_stream::<Self>();
+    let (packet_tx, packet_rx) = packet_stream::<Self>();
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
 
-    let mut promised_listeners = VecDeque::with_capacity(opts.bind_addrs.len());
-    let mut packets = VecDeque::with_capacity(opts.bind_addrs.len());
+    let mut promised_listeners = Vec::with_capacity(opts.bind_addrs.len());
+    let mut sockets = Vec::with_capacity(opts.bind_addrs.len());
     let bind_port = opts.bind_port.unwrap_or(0);
     for &addr in &opts.bind_addrs {
       let addr = SocketAddr::new(addr, bind_port);
@@ -264,7 +267,7 @@ where
         Ok(ln) => (ln.local_addr().unwrap(), ln),
         Err(e) => return Err(NetTransportError::ListenPromised(addr, e)),
       };
-      promised_listeners.push_back((ln, local_addr));
+      promised_listeners.push((Arc::new(ln), local_addr));
       // If the config port given was zero, use the first TCP listener
       // to pick an available port and then apply that to everything
       // else.
@@ -275,7 +278,7 @@ where
         .await
         .map(|ln| (addr, ln))
         .map_err(|e| NetTransportError::ListenPacket(addr, e))?;
-      packets.push_back((packet_socket, local_addr));
+      sockets.push((Arc::new(packet_socket), local_addr));
     }
 
     let wg = AsyncWaitGroup::new();
@@ -284,85 +287,123 @@ where
     // Fire them up now that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
-    for _ in 0..opts.bind_addrs.len() - 1 {
+    for ((promised_ln, promised_addr), (socket, socket_addr)) in
+      promised_listeners.iter().zip(sockets.iter())
+    {
       wg.add(2);
-      let (promised_ln, local_addr) = promised_listeners.pop_back().unwrap();
-      TcpProcessor {
+      PromisedProcessor::<A, Self, S> {
         wg: wg.clone(),
         stream_tx: stream_tx.clone(),
-        ln: promised_ln,
+        ln: promised_ln.clone(),
         shutdown: shutdown.clone(),
         shutdown_rx: shutdown_rx.clone(),
-        local_addr,
+        local_addr: *promised_addr,
       }
       .run();
 
-      let (packet_socket, local_addr) = packets.pop_back().unwrap();
-      PacketProcessor {
+      PacketProcessor::<A, Self, P> {
         wg: wg.clone(),
         packet_tx: packet_tx.clone(),
-        ln: Arc::new(packet_socket),
-        local_addr,
+        label: opts.label.clone(),
+        offload_size: opts.offload_size,
+        compressor: opts.compressor,
+        keyring: opts.secret_keyring.clone(),
+        socket: socket.clone(),
+        local_addr: *socket_addr,
         shutdown: shutdown.clone(),
         #[cfg(feature = "metrics")]
-        metric_labels: metric_labels.clone().unwrap_or_default(),
+        metric_labels: opts.metric_labels.clone().unwrap_or_default(),
         shutdown_rx: shutdown_rx.clone(),
       }
       .run();
     }
 
-    wg.add(2);
-    let (promised_ln, local_promised_addr) = promised_listeners.pop_back().unwrap();
-    let promised_ln = Arc::new(promised_ln);
-    TcpProcessor {
-      wg: wg.clone(),
-      stream_tx,
-      ln: promised_ln.clone(),
-      shutdown: shutdown.clone(),
-      shutdown_rx: shutdown_rx.clone(),
-      local_addr: local_promised_addr,
-    }
-    .run();
-    let (packet, local_addr) = packets.pop_back().unwrap();
-    let packet = Arc::new(packet);
-    PacketProcessor {
-      wg: wg.clone(),
-      packet_tx,
-      ln: packet.clone(),
-      local_addr,
-      shutdown: shutdown.clone(),
-      #[cfg(feature = "metrics")]
-      metric_labels: metric_labels.clone().unwrap_or_default(),
-      shutdown_rx,
-    }
-    .run();
+    // find final advertise address
+    let advertise_addr = match opts.advertise_address {
+      Some(addr) => addr,
+      None => {
+        let addr = if opts.bind_addrs[0].is_unspecified() {
+          local_ip_address::local_ip().map_err(|e| match e {
+            local_ip_address::Error::LocalIpAddressNotFound => NetTransportError::NoPrivateIP,
+            e => NetTransportError::NoInterfaceAddresses(e),
+          })?
+        } else {
+          promised_listeners[0].1.ip()
+        };
+
+        // Use the port we are bound to.
+        SocketAddr::new(addr, promised_listeners[0].1.port())
+      }
+    };
 
     Ok(Self {
-      opts: Arc::new(opts),
+      advertise_addr,
+      opts,
       packet_rx,
       stream_rx,
       wg,
       shutdown,
-      promised_bind_addr: local_promised_addr,
-      promised_listener: promised_ln,
+      promised_listeners: promised_listeners.into_iter().map(|(ln, _)| ln).collect(),
+      sockets: sockets.into_iter().map(|(ln, _)| ln).collect(),
       stream_layer,
       packet_layer,
       resolver,
       shutdown_tx,
-      packet,
       _marker: PhantomData,
     })
   }
+
+  async fn retry(
+    resolver: A,
+    packet_layer: P,
+    stream_layer: S,
+    limit: usize,
+    opts: NetTransportOptions<I, A>,
+  ) -> Result<Self, NetTransportError<A>> {
+    let mut i = 0;
+    let resolver = Arc::new(resolver);
+    let packet_layer = Arc::new(packet_layer);
+    let stream_layer = Arc::new(stream_layer);
+    let opts = Arc::new(opts);
+    loop {
+      #[cfg(feature = "metrics")]
+      let transport = {
+        Self::new_in(
+          resolver.clone(),
+          packet_layer.clone(),
+          stream_layer.clone(),
+          opts.clone(),
+        )
+        .await
+      };
+
+      match transport {
+        Ok(t) => {
+          if let Some(0) | None = opts.bind_port {
+            let port = t.advertise_addr.port();
+            tracing::warn!(target:  "showbiz", "using dynamic bind port {port}");
+          }
+          return Ok(t);
+        }
+        Err(e) => {
+          tracing::debug!(target="showbiz", err=%e, "fail to create transport");
+          if i == limit - 1 {
+            return Err(e.into());
+          }
+          i += 1;
+        }
+      }
+    }
+  }
 }
 
-impl<I, A, P, S, W, R> Transport for NetTransport<I, A, P, S, W, R>
+impl<I, A, P, S, W> Transport for NetTransport<I, A, P, S, W>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
   P: PacketLayer,
   S: StreamLayer,
   W: Wire,
-  R: Runtime,
 {
   type Error = NetTransportError<Self::Resolver>;
 
@@ -374,7 +415,7 @@ where
 
   type Wire = W;
 
-  type Runtime = R;
+  type Runtime = <Self::Resolver as AddressResolver>::Runtime;
 
   // async fn new(
   //   label: Option<Label>,
@@ -406,31 +447,6 @@ where
   //   Self: Sized,
   // {
   //   Self::new_in(label, opts, Some(metric_labels)).await
-  // }
-
-  // fn advertise_addr(
-  //   &self,
-  //   addr: Option<IpAddr>,
-  //   port: u16,
-  // ) -> Result<SocketAddr, TransportError<Self>> {
-  //   match addr {
-  //     Some(addr) => Ok(SocketAddr::new(addr, port)),
-  //     None => {
-  //       let addr = if self.opts.bind_addrs[0].is_unspecified() {
-  //         local_ip_address::local_ip().map_err(|e| match e {
-  //           local_ip_address::Error::LocalIpAddressNotFound => {
-  //             TransportError::Other(Self::Error::NoPrivateIP)
-  //           }
-  //           e => TransportError::Other(Self::Error::NoInterfaceAddresses(e)),
-  //         })?
-  //       } else {
-  //         self.tcp_bind_addr.ip()
-  //       };
-
-  //       // Use the port we are bound to.
-  //       Ok(SocketAddr::new(addr, self.tcp_bind_addr.port()))
-  //     }
-  //   }
   // }
 
   // async fn write_to(&self, b: &[u8], addr: SocketAddr) -> Result<Instant, TransportError<Self>> {
@@ -547,7 +563,7 @@ where
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     timeout: Duration,
   ) -> Result<Self::Stream, Self::Error> {
-    let connector = R::timeout(timeout, self.stream_layer.connect(*addr));
+    let connector = <Self::Runtime as Runtime>::timeout(timeout, self.stream_layer.connect(*addr));
     match connector.await {
       Ok(Ok(mut conn)) => {
         if self.opts.label.is_empty() {
@@ -610,27 +626,25 @@ where
   }
 }
 
-struct TcpProcessor<A, T, S, R>
+struct PromisedProcessor<A, T, S>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
-  R: Runtime,
-  T: Transport<Resolver = A, Stream = S::Stream, Runtime = R>,
+  T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer,
 {
   wg: AsyncWaitGroup,
-  stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
-  ln: S::Listener,
+  stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, S::Stream>,
+  ln: Arc<S::Listener>,
   local_addr: SocketAddr,
   shutdown: Arc<AtomicBool>,
   shutdown_rx: async_channel::Receiver<()>,
 }
 
-impl<A, T, S, R> TcpProcessor<A, T, S, R>
+impl<A, T, S> PromisedProcessor<A, T, S>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
-  T: Transport<Resolver = A, Stream = S::Stream, Runtime = R>,
+  T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer,
-  R: Runtime,
 {
   fn run(self) {
     let Self {
@@ -705,10 +719,14 @@ where
 {
   wg: AsyncWaitGroup,
   packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-  ln: Arc<P::Stream>,
+  socket: Arc<P::Stream>,
   local_addr: SocketAddr,
   shutdown: Arc<AtomicBool>,
   shutdown_rx: async_channel::Receiver<()>,
+  label: Label,
+  compressor: Option<Compressor>,
+  keyring: Option<SecretKeyring>,
+  offload_size: usize,
   #[cfg(feature = "metrics")]
   metric_labels: Arc<Vec<metrics::Label>>,
 }
@@ -723,7 +741,7 @@ where
     let Self {
       wg,
       packet_tx,
-      ln,
+      socket,
       shutdown,
       local_addr,
       ..
@@ -731,21 +749,21 @@ where
 
     <T::Runtime as Runtime>::spawn_detach(async move {
       scopeguard::defer!(wg.done());
-      let ln = ln.as_ref();
       tracing::info!(
         target: "showbiz.net.transport",
         "udp listening on {local_addr}"
       );
+
       loop {
         // Do a blocking read into a fresh buffer. Grab a time stamp as
         // close as possible to the I/O.
         let mut buf = BytesMut::new();
-        buf.resize(UDP_PACKET_BUF_SIZE, 0);
+        buf.resize(PACKET_BUF_SIZE, 0);
         futures::select! {
           _ = self.shutdown_rx.recv().fuse() => {
             break;
           }
-          rst = ln.recv_from(&mut buf).fuse() => {
+          rst = socket.recv_from(&mut buf).fuse() => {
             match rst {
               Ok((n, addr)) => {
                 // Check the length - it needs to have at least one byte to be a
@@ -754,9 +772,7 @@ where
                   tracing::error!(target: "showbiz.packet", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
                   continue;
                 }
-
                 buf.truncate(n);
-
                 let start = Instant::now();
                 let msg = match Self::handle_remote_bytes(&buf) {
                   Ok(msg) => msg,

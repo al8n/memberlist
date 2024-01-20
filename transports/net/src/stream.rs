@@ -1,7 +1,7 @@
 use std::{future::Future, io, net::SocketAddr};
 
 use bytes::{BufMut, BytesMut};
-use futures::{io::WriteAll, AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use showbiz_core::transport::TimeoutableStream;
 
 use crate::Label;
@@ -15,7 +15,7 @@ pub trait Listener: Send + Sync + 'static {
   type Stream: PromisedConnection;
 
   /// Accepts an incoming connection.
-  fn accept(&mut self) -> impl Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send;
+  fn accept(&self) -> impl Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send;
 
   /// Retrieves the local socket address of the listener.
   fn local_addr(&self) -> io::Result<SocketAddr>;
@@ -31,20 +31,15 @@ pub trait PromisedConnection:
 }
 
 pub(crate) trait PromisedConnectionExt: PromisedConnection {
-  fn add_label_header(&mut self, label: &Label) -> WriteAll<'_, Self> {
-    thread_local! {
-      static BUF: std::cell::RefCell<BytesMut> = std::cell::RefCell::new(BytesMut::with_capacity(u8::MAX as usize));
-    }
-
-    let buf = BUF.with(|buf| {
-      let mut buf = buf.borrow_mut();
-      buf.clear();
+  fn add_label_header(&mut self, label: &Label) -> impl Future<Output = io::Result<()>> + Send {
+    async move {
+      let mut buf = BytesMut::with_capacity(2 + label.len());
       buf.put_u8(244);
       buf.put_u8(label.len() as u8);
       buf.put_slice(label.as_bytes());
-      buf
-    });
-    self.write_all(&buf)
+
+      self.write_all(&buf).await
+    }
   }
 }
 
@@ -67,7 +62,7 @@ pub trait StreamLayer: Send + Sync + 'static {
   fn connect(&self, addr: SocketAddr) -> impl Future<Output = io::Result<Self::Stream>> + Send;
 
   /// Binds the listener to a given socket address.
-  fn bind(&mut self, addr: SocketAddr) -> impl Future<Output = io::Result<Self::Listener>> + Send;
+  fn bind(&self, addr: SocketAddr) -> impl Future<Output = io::Result<Self::Listener>> + Send;
 
   /// Indicates whether the connection is secure.
   ///

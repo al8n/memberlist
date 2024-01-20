@@ -10,5 +10,5 @@ homepage.workspace = true
 serde = ["dep:serde", "ipnet/serde"]
 
 [dependencies]
-ipnet = "2.9"
+ipnet = { version = "2.9", optional = true }
 serde = { workspace = true, optional = true }

@@ -32,6 +32,7 @@ cbc = "0.1"
 crc32fast = "1"
 crossbeam-utils = "0.8"
 crossbeam-skiplist = "0.1"
+either = "1"
 futures.workspace = true
 local-ip-address = "0.5"
 nodecraft.workspace = true
@@ -39,7 +40,7 @@ pollster = "0.3"
 rand = "0.8"
 scopeguard.workspace = true
 showbiz-core.workspace = true
-showbiz-utils.workspace = true
+showbiz-utils = { workspace = true, features = ["ipnet"] }
 thiserror.workspace = true
 tracing.workspace = true
 viewit.workspace = true
