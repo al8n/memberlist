@@ -30,14 +30,7 @@ where
             match packet {
               Ok(packet) => {
                 let (msg, addr, timestamp) = packet.into_components();
-                match <T::Wire as Wire>::decode_message(&msg) {
-                  Ok(msg) => {
-                    this.handle_command(msg, addr, timestamp).await;
-                  },
-                  Err(e) => {
-                    tracing::error!(target:  "showbiz.packet", "failed to decode packet: {}", e);
-                  },
-                }
+                this.handle_command(msg, addr, timestamp).await;
               },
               Err(e) => {
                 tracing::error!(target:  "showbiz.packet", "failed to receive packet: {}", e);

@@ -1,3 +1,4 @@
+/// The trait used to calculate the checksum of a packet.
 pub trait Checksumer {
   fn new() -> Self;
 
@@ -6,16 +7,20 @@ pub trait Checksumer {
   fn finalize(self) -> u32;
 }
 
-impl Checksumer for crc32fast::Hasher {
+/// Checksumer based on crc32.
+#[derive(Debug, Clone)]
+pub struct Crc32(crc32fast::Hasher);
+
+impl crate::checksum::Checksumer for Crc32 {
   fn new() -> Self {
-    crc32fast::Hasher::new()
+    Self(crc32fast::Hasher::new())
   }
 
   fn update(&mut self, data: &[u8]) {
-    self.update(data);
+    self.0.update(data);
   }
 
   fn finalize(self) -> u32 {
-    self.finalize()
+    self.0.finalize()
   }
 }

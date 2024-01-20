@@ -5,7 +5,7 @@ use nodecraft::resolver::AddressResolver;
 use smol_str::SmolStr;
 
 use crate::{
-  transport::{PromisedStream, TimeoutableStream, Wire},
+  transport::{TimeoutableStream, Wire},
   types::Server,
 };
 
@@ -34,9 +34,9 @@ where
           }
           conn = transport_rx.recv().fuse() => {
             match conn {
-              Ok(conn) => {
+              Ok((remote_addr, conn)) => {
                 let this = this.clone();
-                <T::Runtime as Runtime>::spawn_detach(this.handle_conn(conn))
+                <T::Runtime as Runtime>::spawn_detach(this.handle_conn(remote_addr, conn))
               },
               Err(e) => {
                 tracing::error!(target:  "showbiz.stream", local = %this.inner.id, "failed to accept connection: {}", e);
@@ -120,7 +120,7 @@ where
 {
   pub(super) async fn send_local_state(
     &self,
-    conn: &mut T::PromisedStream,
+    conn: &mut T::Stream,
     addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
     join: bool,
   ) -> Result<(), Error<T, D>> {
@@ -221,14 +221,11 @@ where
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Handles a single incoming stream connection from the transport.
-  async fn handle_conn(self, mut conn: T::PromisedStream) {
-    let addr = match conn.remote_address() {
-      Ok(addr) => addr,
-      Err(e) => {
-        tracing::error!(target:  "showbiz.stream", err=%e, local = %self.inner.id, "failed to get remote address");
-        return;
-      }
-    };
+  async fn handle_conn(
+    self,
+    addr: <T::Resolver as AddressResolver>::ResolvedAddress,
+    mut conn: T::Stream,
+  ) {
     tracing::debug!(target:  "showbiz.stream", local = %self.inner.id, peer = %addr, "handle stream connection");
 
     #[cfg(feature = "metrics")]
@@ -244,7 +241,7 @@ where
       conn.set_timeout(Some(self.inner.opts.timeout));
     }
 
-    let msg = match conn.read_message().await {
+    let msg = match self.read_message(&mut conn).await {
       Ok((_read, msg)) => {
         #[cfg(feature = "metrics")]
         {

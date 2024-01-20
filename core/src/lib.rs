@@ -13,7 +13,6 @@ pub use network::META_MAX_SIZE;
 mod options;
 pub use options::{DelegateVersion, Options, ProtocolVersion};
 pub mod queue;
-pub mod security;
 mod showbiz;
 pub use showbiz::*;
 mod state;

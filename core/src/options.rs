@@ -108,6 +108,7 @@ pub struct Options {
   /// of RTT (round-trip time) on your network.
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   probe_timeout: Duration,
+
   /// Set this field will turn off the fallback TCP pings that are attempted
   /// if the direct UDP ping fails. These get pipelined along with the
   /// indirect UDP pings.
@@ -142,36 +143,9 @@ pub struct Options {
   /// a running cluster.
   gossip_verify_outgoing: bool,
 
-  // /// Used to control message compression. This can
-  // /// be used to reduce bandwidth usage at the cost of slightly more CPU
-  // /// utilization. This is only available starting at protocol version 1.
-  // compression_algo: CompressionAlgo,
-  /// The size of a message that should be offload to [`rayon`] thread pool
-  /// for encryption or compression.
-  ///
-  /// The default value is 1KB, which means that any message larger than 1KB
-  /// will be offloaded to [`rayon`] thread pool for encryption or compression.
-  offload_size: usize,
-
-  // /// Used to initialize the primary encryption key in a keyring.
-  // /// The primary encryption key is the only key used to encrypt messages and
-  // /// the first key used while attempting to decrypt messages. Providing a
-  // /// value for this primary key will enable message-level encryption and
-  // /// verification, and automatically install the key onto the keyring.
-  // /// The value should be either 16, 24, or 32 bytes to select AES-128,
-  // /// AES-192, or AES-256.
-  // secret_key: Option<SecretKey>,
-
-  // #[viewit(getter(
-  //   style = "ref",
-  //   result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeyring>")
-  // ))]
-  // secret_keyring: Option<SecretKeyring>,
   /// Used to guarantee protocol-compatibility
   protocol_version: ProtocolVersion,
 
-  // /// Holds all of the encryption keys used internally. It is
-  // /// automatically initialized using the SecretKey and SecretKeys values.
   // #[viewit(getter(style = "ref", result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeyring>")))]
   // secret_keyring: Option<SecretKeyring>,
   /// Used to guarantee protocol-compatibility
@@ -191,17 +165,6 @@ pub struct Options {
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   dead_node_reclaim_time: Duration,
 
-  // /// If [`None`], allow any connection (default), otherwise specify all networks
-  // /// allowed to connect (you must specify IPv6/IPv4 separately)
-  // /// Using an empty Vec will block all connections.
-  // #[viewit(getter(
-  //   style = "ref",
-  //   result(
-  //     converter(fn = "Option::as_ref"),
-  //     type = "Option<&HashSet<ipnet::IpNet>>"
-  //   )
-  // ))]
-  // allowed_cidrs: Option<HashSet<ipnet::IpNet>>,
   /// The interval at which we check the message
   /// queue to apply the warning and max depth.
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
@@ -261,7 +224,6 @@ impl Options {
       delegate_version: DelegateVersion::V0,
       protocol_version: ProtocolVersion::V0,
       handoff_queue_depth: 1024,
-      offload_size: 1024, // 1KB
       dead_node_reclaim_time: Duration::ZERO,
       queue_check_interval: Duration::from_secs(30),
       #[cfg(feature = "metrics")]
@@ -301,32 +263,6 @@ impl Options {
       .with_gossip_interval(Duration::from_millis(100))
       .with_gossip_to_the_dead_time(Duration::from_secs(15))
   }
-
-  // /// Return true if `allowed_cidrs` must be called
-  // #[inline]
-  // pub fn ip_must_be_checked(&self) -> bool {
-  //   self
-  //     .allowed_cidrs
-  //     .as_ref()
-  //     .map(|x| !x.is_empty())
-  //     .unwrap_or(false)
-  // }
-
-  // #[inline]
-  // pub fn ip_allowed(&self, addr: IpAddr) -> Result<(), ForbiddenIp> {
-  //   if !self.ip_must_be_checked() {
-  //     return Ok(());
-  //   }
-
-  //   for n in self.allowed_cidrs.as_ref().unwrap().iter() {
-  //     let ip = ipnet::IpNet::from(addr);
-  //     if n.contains(&ip) {
-  //       return Ok(());
-  //     }
-  //   }
-
-  //   Err(ForbiddenIp(addr))
-  // }
 }
 
 // #[derive(Debug, Clone, Copy)]

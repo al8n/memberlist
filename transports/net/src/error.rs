@@ -1,8 +1,11 @@
+/// Connection kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ConnectionKind {
-  Reliable,
-  Unreliable,
+  /// Promised connection, e.g. TCP, QUIC.
+  Promised,
+  /// Packet connection, e.g. UDP.
+  Packet,
 }
 
 impl core::fmt::Display for ConnectionKind {
@@ -12,24 +15,33 @@ impl core::fmt::Display for ConnectionKind {
 }
 
 impl ConnectionKind {
+  /// Returns a string representation of the connection kind.
   #[inline]
   pub const fn as_str(&self) -> &'static str {
     match self {
-      ConnectionKind::Reliable => "reliable",
-      ConnectionKind::Unreliable => "unreliable",
+      ConnectionKind::Promised => "promised",
+      ConnectionKind::Packet => "packet",
     }
   }
 }
 
+/// Connection error kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ConnectionErrorKind {
+  /// Failed to accept a connection.
   Accept,
+  /// Failed to close a connection.
   Close,
+  /// Failed to dial a connection.
   Dial,
+  /// Failed to flush a connection.
   Flush,
+  /// Failed to read from a connection.
   Read,
+  /// Failed to write to a connection.
   Write,
+  /// Failed to set a label on a connection.
   Label,
 }
 
@@ -40,6 +52,7 @@ impl core::fmt::Display for ConnectionErrorKind {
 }
 
 impl ConnectionErrorKind {
+  /// Returns a string representation of the error kind.
   #[inline]
   pub const fn as_str(&self) -> &'static str {
     match self {
@@ -54,12 +67,12 @@ impl ConnectionErrorKind {
   }
 }
 
-#[viewit::viewit(vis_all = "pub")]
+/// Connection error.
 #[derive(Debug)]
 pub struct ConnectionError {
-  kind: ConnectionKind,
-  error_kind: ConnectionErrorKind,
-  error: std::io::Error,
+  pub(crate) kind: ConnectionKind,
+  pub(crate) error_kind: ConnectionErrorKind,
+  pub(crate) error: std::io::Error,
 }
 
 impl core::fmt::Display for ConnectionError {
@@ -80,18 +93,32 @@ impl std::error::Error for ConnectionError {
   }
 }
 
+impl From<ConnectionError> for std::io::Error {
+  fn from(value: ConnectionError) -> Self {
+    value.error
+  }
+}
+
 impl ConnectionError {
-  fn failed_remote(&self) -> bool {
+  /// Returns true if the error is a remote failure.
+  #[inline]
+  pub fn is_remote_failure(&self) -> bool {
     #[allow(clippy::match_like_matches_macro)]
     match self.kind {
-      ConnectionKind::Reliable => match self.error_kind {
+      ConnectionKind::Promised => match self.error_kind {
         ConnectionErrorKind::Read | ConnectionErrorKind::Write | ConnectionErrorKind::Dial => true,
         _ => false,
       },
-      ConnectionKind::Unreliable => match self.error_kind {
+      ConnectionKind::Packet => match self.error_kind {
         ConnectionErrorKind::Write => true,
         _ => false,
       },
     }
+  }
+
+  /// Returns true if the error is unexpected EOF
+  #[inline(always)]
+  pub fn is_eof(&self) -> bool {
+    self.error.kind() == std::io::ErrorKind::UnexpectedEof
   }
 }

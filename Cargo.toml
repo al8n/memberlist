@@ -3,6 +3,9 @@ members = [
   "core",
   "showbiz",
   "transports/net",
+  "transports/quinn",
+  "transports/s2n",
+  "utils",
   # "js",
   # "nodejs",
   # "py",
@@ -32,7 +35,7 @@ byteorder = "1"
 derive_more = "0.99"
 futures = "0.3"
 metrics = "0.22"
-nodecraft = { version = "0.2", features = ["transformable", "async", "resolver"] }
+nodecraft = { version = "0.2", features = ["transformable", "async", "resolver", "agnostic"] }
 paste = "1"
 pin-project = "1"
 scopeguard = "1"
@@ -47,3 +50,6 @@ viewit = "0.1.5"
 
 showbiz-core = { path = "core", default-features = false }
 showbiz-net = { path = "transports/net", default-features = false }
+showbiz-quinn = { path = "transports/quinn", default-features = false }
+showbiz-s2n = { path = "transports/s2n", default-features = false }
+showbiz-utils = { path = "utils", default-features = false }

@@ -9,12 +9,15 @@ metadata.workspace = true
 
 [features]
 
-serde = ["showbiz-core/serde", "dep:serde"]
+serde = ["showbiz-core/serde", "dep:serde", "showbiz-utils/serde"]
 rkyv = ["showbiz-core/rkyv"]
 
 metrics = ["showbiz-core/metrics", "dep:metrics"]
 
 test = ["showbiz-core/test"]
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
 
 [dependencies]
 atomic = "=0.5" # keep on 0.5
@@ -30,13 +33,17 @@ crc32fast = "1"
 crossbeam-utils = "0.8"
 crossbeam-skiplist = "0.1"
 futures.workspace = true
-ipnet = "2.7"
 local-ip-address = "0.5"
 nodecraft.workspace = true
 pollster = "0.3"
+rand = "0.8"
 scopeguard.workspace = true
 showbiz-core.workspace = true
-wg = "0.4"
+showbiz-utils.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+viewit.workspace = true
+wg = { version = "0.4", features = ["async"] }
 weezl = { version = "0.1", features = ["async"] }
 
 pnet = { version = "0.34", optional = true }

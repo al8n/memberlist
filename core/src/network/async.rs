@@ -4,7 +4,7 @@ use crate::{
   delegate::Delegate,
   error::Error,
   // security::{append_bytes, EncryptionAlgo, SecretKey, SecretKeyring, SecurityError},
-  transport::{PromisedStream, TimeoutableStream},
+  transport::TimeoutableStream,
   // types::MessageType,
 };
 
@@ -34,17 +34,16 @@ where
     ping: Ping<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     deadline: Duration,
   ) -> Result<bool, Error<T, D>> {
-    let mut conn: T::PromisedStream =
-      match self.inner.transport.dial_timeout(target, deadline).await {
-        Ok(conn) => conn,
-        Err(_) => {
-          // If the node is actually dead we expect this to fail, so we
-          // shouldn't spam the logs with it. After this point, errors
-          // with the connection are real, unexpected errors and should
-          // get propagated up.
-          return Ok(false);
-        }
-      };
+    let mut conn: T::Stream = match self.inner.transport.dial_timeout(target, deadline).await {
+      Ok(conn) => conn,
+      Err(_) => {
+        // If the node is actually dead we expect this to fail, so we
+        // shouldn't spam the logs with it. After this point, errors
+        // with the connection are real, unexpected errors and should
+        // get propagated up.
+        return Ok(false);
+      }
+    };
     if deadline != Duration::ZERO {
       conn.set_timeout(Some(deadline));
     }
@@ -52,11 +51,7 @@ where
     let ping_seq_no = ping.seq_no;
     self.send_message(&mut conn, target, ping.into()).await?;
 
-    let msg: Message<_, _> = conn
-      .read_message()
-      .await
-      .map(|(_, msg)| msg)
-      .map_err(Error::transport)?;
+    let msg: Message<_, _> = self.read_message(&mut conn).await.map(|(_, msg)| msg)?;
     let kind = msg.kind();
     if let Some(ack) = msg.try_unwrap_ack() {
       if ack.seq_no != ping_seq_no {
@@ -108,12 +103,7 @@ where
       Some(self.inner.opts.timeout)
     });
 
-    match conn
-      .read_message()
-      .await
-      .map(|(_read, msg)| msg)
-      .map_err(Error::transport)?
-    {
+    match self.read_message(&mut conn).await.map(|(_read, msg)| msg)? {
       Message::ErrorResponse(err) => Err(Error::remote(err)),
       Message::PushPull(pp) => Ok(pp),
       msg => Err(Error::unexpected_message("PushPull", msg.kind())),
@@ -162,12 +152,14 @@ where
 
   pub(crate) async fn send_message(
     &self,
-    conn: &mut T::PromisedStream,
+    conn: &mut T::Stream,
     target: &<T::Resolver as AddressResolver>::ResolvedAddress,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
-    conn
-      .send_message(target, msg)
+    self
+      .inner
+      .transport
+      .send_message(conn, target, msg)
       .await
       .map(|sent| {
         #[cfg(feature = "metrics")]
@@ -179,6 +171,24 @@ where
           .increment(sent as u64);
         }
       })
+      .map_err(Error::transport)
+  }
+
+  pub(crate) async fn read_message(
+    &self,
+    conn: &mut T::Stream,
+  ) -> Result<
+    (
+      usize,
+      Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    ),
+    Error<T, D>,
+  > {
+    self
+      .inner
+      .transport
+      .read_message(conn)
+      .await
       .map_err(Error::transport)
   }
 }

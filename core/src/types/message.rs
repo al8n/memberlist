@@ -76,7 +76,7 @@ macro_rules! enum_wrapper {
 
 enum_wrapper!(
   /// Request to be sent to the Raft node.
-  #[derive(Debug, Clone, derive_more::From)]
+  #[derive(Debug, Clone, derive_more::From, PartialEq, Eq, Hash)]
   #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
   #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
   #[non_exhaustive]

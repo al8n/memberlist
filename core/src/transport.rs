@@ -1,7 +1,5 @@
 use std::{
   future::Future,
-  io,
-  task::{Context, Poll},
   time::{Duration, Instant},
 };
 
@@ -18,17 +16,17 @@ use stream::*;
 #[cfg(feature = "test")]
 pub(crate) mod tests;
 
-// pub struct ReliableConnection<T: Transport>(BufReader<T::Connection>, SocketAddr);
+// pub struct PromisedConnection<T: Transport>(BufReader<T::Connection>, SocketAddr);
 
-// impl<T: Transport> AsRef<ReliableConnection<T>> for ReliableConnection<T> {
+// impl<T: Transport> AsRef<PromisedConnection<T>> for PromisedConnection<T> {
 //   #[inline]
-//   fn as_ref(&self) -> &ReliableConnection<T> {
+//   fn as_ref(&self) -> &PromisedConnection<T> {
 //     self
 //   }
 // }
 
 // #[allow(dead_code)]
-// impl<T> ReliableConnection<T>
+// impl<T> PromisedConnection<T>
 // where
 //   T: Transport,
 // {
@@ -151,7 +149,7 @@ pub(crate) mod tests;
 //   pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError<T>> {
 //     self.0.read(buf).await.map_err(|e| {
 //       TransportError::Connection(ConnectionError {
-//         kind: ConnectionKind::Reliable,
+//         kind: ConnectionKind::Promised,
 //         error_kind: ConnectionErrorKind::Read,
 //         error: e,
 //       })
@@ -162,7 +160,7 @@ pub(crate) mod tests;
 //   pub async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), TransportError<T>> {
 //     self.0.read_exact(buf).await.map_err(|e| {
 //       TransportError::Connection(ConnectionError {
-//         kind: ConnectionKind::Reliable,
+//         kind: ConnectionKind::Promised,
 //         error_kind: ConnectionErrorKind::Read,
 //         error: e,
 //       })
@@ -173,7 +171,7 @@ pub(crate) mod tests;
 //   pub async fn write(&mut self, buf: &[u8]) -> Result<usize, TransportError<T>> {
 //     self.0.write(buf).await.map_err(|e| {
 //       TransportError::Connection(ConnectionError {
-//         kind: ConnectionKind::Reliable,
+//         kind: ConnectionKind::Promised,
 //         error_kind: ConnectionErrorKind::Write,
 //         error: e,
 //       })
@@ -184,7 +182,7 @@ pub(crate) mod tests;
 //   pub async fn write_all(&mut self, buf: &[u8]) -> Result<(), TransportError<T>> {
 //     self.0.write_all(buf).await.map_err(|e| {
 //       TransportError::Connection(ConnectionError {
-//         kind: ConnectionKind::Reliable,
+//         kind: ConnectionKind::Promised,
 //         error_kind: ConnectionErrorKind::Write,
 //         error: e,
 //       })
@@ -195,7 +193,7 @@ pub(crate) mod tests;
 //   pub async fn flush(&mut self) -> Result<(), TransportError<T>> {
 //     self.0.flush().await.map_err(|e| {
 //       TransportError::Connection(ConnectionError {
-//         kind: ConnectionKind::Reliable,
+//         kind: ConnectionKind::Promised,
 //         error_kind: ConnectionErrorKind::Flush,
 //         error: e,
 //       })
@@ -206,7 +204,7 @@ pub(crate) mod tests;
 //   pub async fn close(&mut self) -> Result<(), TransportError<T>> {
 //     self.0.close().await.map_err(|e| {
 //       TransportError::Connection(ConnectionError {
-//         kind: ConnectionKind::Reliable,
+//         kind: ConnectionKind::Promised,
 //         error_kind: ConnectionErrorKind::Write,
 //         error: e,
 //       })
@@ -268,7 +266,7 @@ pub(crate) mod tests;
 //           Ok(Label::empty())
 //         } else {
 //           Err(TransportError::Connection(ConnectionError {
-//             kind: ConnectionKind::Reliable,
+//             kind: ConnectionKind::Promised,
 //             error_kind: ConnectionErrorKind::Read,
 //             error: e,
 //           }))
@@ -338,7 +336,7 @@ pub(crate) mod tests;
 //       .await
 //       .map_err(|e| {
 //         TransportError::Connection(ConnectionError {
-//           kind: ConnectionKind::Unreliable,
+//           kind: ConnectionKind::Packet,
 //           error_kind: ConnectionErrorKind::Write,
 //           error: e,
 //         })
@@ -354,7 +352,7 @@ pub(crate) mod tests;
 //       .await
 //       .map_err(|e| {
 //         TransportError::Connection(ConnectionError {
-//           kind: ConnectionKind::Unreliable,
+//           kind: ConnectionKind::Packet,
 //           error_kind: ConnectionErrorKind::Read,
 //           error: e,
 //         })
@@ -368,7 +366,7 @@ pub(crate) mod tests;
 //   ) -> Poll<Result<(usize, SocketAddr), TransportError<T>>> {
 //     PacketStream::poll_recv_from(&self.0, cx, buf).map_err(|e| {
 //       TransportError::Connection(ConnectionError {
-//         kind: ConnectionKind::Unreliable,
+//         kind: ConnectionKind::Packet,
 //         error_kind: ConnectionErrorKind::Read,
 //         error: e,
 //       })
@@ -383,7 +381,7 @@ pub(crate) mod tests;
 //   ) -> Poll<Result<usize, TransportError<T>>> {
 //     PacketStream::poll_send_to(&self.0, cx, buf, target).map_err(|e| {
 //       TransportError::Connection(ConnectionError {
-//         kind: ConnectionKind::Unreliable,
+//         kind: ConnectionKind::Packet,
 //         error_kind: ConnectionErrorKind::Write,
 //         error: e,
 //       })
@@ -409,117 +407,89 @@ pub trait TimeoutableStream: Unpin + Send + Sync + 'static {
   fn timeout(&self) -> (Option<Duration>, Option<Duration>) {
     (Self::read_timeout(self), Self::write_timeout(self))
   }
+
+  // /// Returns the remote address to which this stream is connected.
+  // fn remote_address(&self) -> Result<Self::Address, Self::Error>;
 }
 
-/// The `PromisedStream` trait represents a stream of data with a guarantee of delivery.
-/// This trait is implemented by streams that ensure reliable communication,
-/// e.g. TCP stream and QUIC stream. It extends various traits to support
-/// asynchronous reading and writing, timeout handling, and thread-safe sharing.
-///
-/// Implementors of this trait are typically used in scenarios where reliable
-/// message delivery and order are critical.
-pub trait PromisedStream: TimeoutableStream + Send + Sync + 'static {
-  type Error: std::error::Error + Send + Sync + 'static;
-  type Id: Id;
-  type Address: core::fmt::Debug + CheapClone + Send + Sync + 'static;
-  type Wire: Wire;
+// /// The `PacketStream` trait represents a stream of data without guaranteed delivery.
+// /// This trait is implemented by streams that operate on a best-effort delivery basis,
+// /// e.g. UDP stream. It focuses on providing timeout functionality and
+// /// thread-safe operations, but without the overhead of ensuring message order or reliability.
+// ///
+// /// So implementors of this trait are typically need to add a checksum to the message at the end,
+// /// and the receiver needs to verify the checksum to ensure the integrity of the message.
+// pub trait PacketStream: TimeoutableStream + Send + Sync + 'static {
+//   type Id: Id;
+//   type Address: core::fmt::Debug + CheapClone + Send + Sync + 'static;
 
-  /// Returns the remote address to which this stream is connected.
-  fn remote_address(&self) -> Result<Self::Address, Self::Error>;
+//   fn send_to(
+//     &self,
+//     addr: &Self::Address,
+//     buf: &[u8],
+//   ) -> impl futures::Future<Output = Result<usize, std::io::Error>> + Send;
 
-  /// Reads a message from the remote node.
-  /// Returns the number of bytes read and the message.
-  fn read_message(
-    &mut self,
-  ) -> impl Future<Output = Result<(usize, Message<Self::Id, Self::Address>), Self::Error>> + Send;
+//   fn recv_from(
+//     &self,
+//     buf: &mut [u8],
+//   ) -> impl futures::Future<Output = Result<(usize, Self::Address), std::io::Error>> + Send;
 
-  /// Sends a message to the remote node.
-  /// Returns the number of bytes sent.
-  fn send_message(
-    &mut self,
-    target: &Self::Address,
-    msg: Message<Self::Id, Self::Address>,
-  ) -> impl Future<Output = Result<usize, Self::Error>> + Send;
-}
+//   /// Attempts to receive a single datagram on the socket.
+//   ///
+//   /// Note that on multiple calls to a `poll_*` method in the recv direction, only the
+//   /// `Waker` from the `Context` passed to the most recent call will be scheduled to
+//   /// receive a wakeup.
+//   ///
+//   /// # Return value
+//   ///
+//   /// The function returns:
+//   ///
+//   /// * `Poll::Pending` if the socket is not ready to read
+//   /// * `Poll::Ready(Ok(addr))` reads data from `addr` into `ReadBuf` if the socket is ready
+//   /// * `Poll::Ready(Err(e))` if an error is encountered.
+//   ///
+//   /// # Errors
+//   ///
+//   /// This function may encounter any standard I/O error except `WouldBlock`.
+//   ///
+//   /// # Notes
+//   /// Note that the socket address **cannot** be implicitly trusted, because it is relatively
+//   /// trivial to send a UDP datagram with a spoofed origin in a [packet injection attack].
+//   /// Because UDP is stateless and does not validate the origin of a packet,
+//   /// the attacker does not need to be able to intercept traffic in order to interfere.
+//   /// It is important to be aware of this when designing your application-level protocol.
+//   ///
+//   /// [packet injection attack]: https://en.wikipedia.org/wiki/Packet_injection
+//   fn poll_recv_from(
+//     &self,
+//     cx: &mut Context<'_>,
+//     buf: &mut [u8],
+//   ) -> Poll<io::Result<(usize, Self::Address)>>;
 
-/// The `PacketStream` trait represents a stream of data without guaranteed delivery.
-/// This trait is implemented by streams that operate on a best-effort delivery basis,
-/// e.g. UDP stream. It focuses on providing timeout functionality and
-/// thread-safe operations, but without the overhead of ensuring message order or reliability.
-///
-/// So implementors of this trait are typically need to add a checksum to the message at the end,
-/// and the receiver needs to verify the checksum to ensure the integrity of the message.
-pub trait PacketStream: TimeoutableStream + Send + Sync + 'static {
-  type Id: Id;
-  type Address: core::fmt::Debug + CheapClone + Send + Sync + 'static;
-
-  fn send_to(
-    &self,
-    addr: &Self::Address,
-    buf: &[u8],
-  ) -> impl futures::Future<Output = Result<usize, std::io::Error>> + Send;
-
-  fn recv_from(
-    &self,
-    buf: &mut [u8],
-  ) -> impl futures::Future<Output = Result<(usize, Self::Address), std::io::Error>> + Send;
-
-  /// Attempts to receive a single datagram on the socket.
-  ///
-  /// Note that on multiple calls to a `poll_*` method in the recv direction, only the
-  /// `Waker` from the `Context` passed to the most recent call will be scheduled to
-  /// receive a wakeup.
-  ///
-  /// # Return value
-  ///
-  /// The function returns:
-  ///
-  /// * `Poll::Pending` if the socket is not ready to read
-  /// * `Poll::Ready(Ok(addr))` reads data from `addr` into `ReadBuf` if the socket is ready
-  /// * `Poll::Ready(Err(e))` if an error is encountered.
-  ///
-  /// # Errors
-  ///
-  /// This function may encounter any standard I/O error except `WouldBlock`.
-  ///
-  /// # Notes
-  /// Note that the socket address **cannot** be implicitly trusted, because it is relatively
-  /// trivial to send a UDP datagram with a spoofed origin in a [packet injection attack].
-  /// Because UDP is stateless and does not validate the origin of a packet,
-  /// the attacker does not need to be able to intercept traffic in order to interfere.
-  /// It is important to be aware of this when designing your application-level protocol.
-  ///
-  /// [packet injection attack]: https://en.wikipedia.org/wiki/Packet_injection
-  fn poll_recv_from(
-    &self,
-    cx: &mut Context<'_>,
-    buf: &mut [u8],
-  ) -> Poll<io::Result<(usize, Self::Address)>>;
-
-  /// Attempts to send data on the socket to a given address.
-  ///
-  /// Note that on multiple calls to a `poll_*` method in the send direction, only the
-  /// `Waker` from the `Context` passed to the most recent call will be scheduled to
-  /// receive a wakeup.
-  ///
-  /// # Return value
-  ///
-  /// The function returns:
-  ///
-  /// * `Poll::Pending` if the socket is not ready to write
-  /// * `Poll::Ready(Ok(n))` `n` is the number of bytes sent.
-  /// * `Poll::Ready(Err(e))` if an error is encountered.
-  ///
-  /// # Errors
-  ///
-  /// This function may encounter any standard I/O error except `WouldBlock`.
-  fn poll_send_to(
-    &self,
-    cx: &mut Context<'_>,
-    buf: &[u8],
-    target: Self::Address,
-  ) -> Poll<io::Result<usize>>;
-}
+//   /// Attempts to send data on the socket to a given address.
+//   ///
+//   /// Note that on multiple calls to a `poll_*` method in the send direction, only the
+//   /// `Waker` from the `Context` passed to the most recent call will be scheduled to
+//   /// receive a wakeup.
+//   ///
+//   /// # Return value
+//   ///
+//   /// The function returns:
+//   ///
+//   /// * `Poll::Pending` if the socket is not ready to write
+//   /// * `Poll::Ready(Ok(n))` `n` is the number of bytes sent.
+//   /// * `Poll::Ready(Err(e))` if an error is encountered.
+//   ///
+//   /// # Errors
+//   ///
+//   /// This function may encounter any standard I/O error except `WouldBlock`.
+//   fn poll_send_to(
+//     &self,
+//     cx: &mut Context<'_>,
+//     buf: &[u8],
+//     target: Self::Address,
+//   ) -> Poll<io::Result<usize>>;
+// }
 
 /// An error for the transport layer.
 pub trait TransportError: std::error::Error + Send + Sync + 'static {
@@ -575,20 +545,9 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// The id type used to identify nodes
   type Id: Id;
   /// The address resolver used to resolve addresses
-  type Resolver: AddressResolver;
+  type Resolver: AddressResolver<Runtime = Self::Runtime>;
   /// The promised stream used to send and receive messages
-  type PromisedStream: PromisedStream<
-    Error = Self::Error,
-    Wire = Self::Wire,
-    Id = Self::Id,
-    Address = <Self::Resolver as AddressResolver>::ResolvedAddress,
-  >;
-  /// The packet stream used to send and receive packets
-  /// for this transport.
-  type PacketStream: PacketStream<
-    Id = Self::Id,
-    Address = <Self::Resolver as AddressResolver>::ResolvedAddress,
-  >;
+  type Stream: TimeoutableStream + Send + Sync + 'static;
   /// The wire used to encode and decode messages
   type Wire: Wire;
   /// The async runtime
@@ -629,6 +588,32 @@ pub trait Transport: Sized + Send + Sync + 'static {
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
   ) -> Result<(), Self::Error>;
 
+  /// Reads a message from the remote node by promised connection.
+  ///
+  /// Returns the number of bytes read and the message.
+  fn read_message(
+    &self,
+    conn: &mut Self::Stream,
+  ) -> impl Future<
+    Output = Result<
+      (
+        usize,
+        Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
+      ),
+      Self::Error,
+    >,
+  > + Send;
+
+  /// Sends a message to the remote node by promised connection.
+  ///
+  /// Returns the number of bytes sent.
+  fn send_message(
+    &self,
+    conn: &mut Self::Stream,
+    target: &<Self::Resolver as AddressResolver>::ResolvedAddress,
+    msg: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
+  ) -> impl Future<Output = Result<usize, Self::Error>> + Send;
+
   /// A packet-oriented interface that fires off the given
   /// payload to the given address in a connectionless fashion.
   ///
@@ -666,15 +651,19 @@ pub trait Transport: Sized + Send + Sync + 'static {
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     timeout: Duration,
-  ) -> impl Future<Output = Result<Self::PromisedStream, Self::Error>> + Send;
+  ) -> impl Future<Output = Result<Self::Stream, Self::Error>> + Send;
 
   /// Returns a packet subscriber that can be used to receive incoming packets
-  fn packet(&self) -> PacketSubscriber<<Self::Resolver as AddressResolver>::ResolvedAddress>;
+  fn packet(
+    &self,
+  ) -> PacketSubscriber<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>;
 
   /// Returns a receiver that can be read to handle incoming stream
   /// connections from other peers. How this is set up for listening is
   /// left as an exercise for the concrete transport implementations.
-  fn stream(&self) -> StreamSubscriber<Self::PromisedStream>;
+  fn stream(
+    &self,
+  ) -> StreamSubscriber<<Self::Resolver as AddressResolver>::ResolvedAddress, Self::Stream>;
 
   /// Shutdown the transport
   fn shutdown(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
