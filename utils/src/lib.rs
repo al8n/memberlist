@@ -71,6 +71,71 @@ macro_rules! smallvec_wrapper {
   };
 }
 
+smallvec_wrapper!(
+  /// A tiny vec which can inline 1 element on stack.
+  #[derive(PartialEq, Eq, Hash, Clone, Debug, PartialOrd, Ord)]
+  #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+  #[cfg_attr(feature = "serde", serde(transparent))]
+  #[cfg_attr(
+    feature = "rkyv",
+    derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+  )]
+  #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+  pub OneOrMore<T>([T; 1]);
+);
+
+smallvec_wrapper!(
+  /// A tiny vec which can inline 2 elements on stack.
+  #[derive(PartialEq, Eq, Hash, Clone, Debug, PartialOrd, Ord)]
+  #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+  #[cfg_attr(feature = "serde", serde(transparent))]
+  #[cfg_attr(
+    feature = "rkyv",
+    derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+  )]
+  #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+  pub TinyVec<T>([T; 2]);
+);
+
+smallvec_wrapper!(
+  /// A small vec which can inline 4 elements on stack.
+  #[derive(PartialEq, Eq, Hash, Clone, Debug, PartialOrd, Ord)]
+  #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+  #[cfg_attr(feature = "serde", serde(transparent))]
+  #[cfg_attr(
+    feature = "rkyv",
+    derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+  )]
+  #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+  pub SmallVec<T>([T; 4]);
+);
+
+smallvec_wrapper!(
+  /// A medium vec which can inline 8 elements on stack.
+  #[derive(PartialEq, Eq, Hash, Clone, Debug, PartialOrd, Ord)]
+  #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+  #[cfg_attr(feature = "serde", serde(transparent))]
+  #[cfg_attr(
+    feature = "rkyv",
+    derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+  )]
+  #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+  pub MediumVec<T>([T; 8]);
+);
+
+smallvec_wrapper!(
+  /// A big vec which can inline 16 elements on stack.
+  #[derive(PartialEq, Eq, Hash, Clone, Debug, PartialOrd, Ord)]
+  #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+  #[cfg_attr(feature = "serde", serde(transparent))]
+  #[cfg_attr(
+    feature = "rkyv",
+    derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
+  )]
+  #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+  pub BigVec<T>([T; 16]);
+);
+
 #[cfg(feature = "metrics")]
 pub use _metrics::*;
 

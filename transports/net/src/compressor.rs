@@ -16,7 +16,6 @@ impl Compressor {
     matches!(self, Self::Lzw)
   }
 }
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UnknownCompressor(u8);
 
@@ -55,11 +54,10 @@ pub enum DecompressError {
 
 impl Compressor {
   /// Decompresses the given buffer.
-  pub fn decompress(&self, src: &[u8]) -> Result<Bytes, DecompressError> {
+  pub fn decompress(&self, src: &[u8]) -> Result<Vec<u8>, DecompressError> {
     match self {
       Self::Lzw => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
         .decode(src)
-        .map(Into::into)
         .map_err(DecompressError::Lzw),
     }
   }

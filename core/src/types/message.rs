@@ -2,8 +2,6 @@ use bytes::Bytes;
 
 use super::*;
 
-/// A compound message.
-pub type CompoundMessage<I, A> = Vec<Message<I, A>>;
 
 macro_rules! enum_wrapper {
   (
@@ -95,13 +93,31 @@ enum_wrapper!(
     Dead(Dead<I>) = 5,
     /// PushPull message
     PushPull(PushPull<I, A>) = 6,
-    /// Compound message
-    Compound(CompoundMessage<I, A>) = 7,
     /// User mesg, not handled by us
-    UserData(Bytes) = 8,
+    UserData(Bytes) = 7,
     /// Nack response message
-    Nack(Nack) = 9,
+    Nack(Nack) = 8,
     /// Error response message
-    ErrorResponse(ErrorResponse) = 10,
+    ErrorResponse(ErrorResponse) = 9,
   }
 );
+
+impl<I, A> Message<I, A> {
+  /// Defines the range of reserved tags for message types.
+  ///
+  /// This constant specifies a range of tag values that are reserved for internal use
+  /// by the [`Message`] enum variants. When implementing custom
+  /// with [`Wire`](crate::transport::Wire) or [`Transport`](crate::transport::Transport),
+  /// it is important to ensure that any custom header added to the message bytes does not
+  /// start with a tag value within this reserved range.
+  ///
+  /// The reserved range is `0..=128`, meaning that the first byte of any custom message
+  /// must not fall within this range to avoid conflicts with predefined message types. 
+  ///
+  /// # Note
+  ///
+  /// Adhering to this constraint is crucial for ensuring that custom messages
+  /// are correctly distinguishable from the standard messages defined by the `Message` enum.
+  /// Failing to do so may result in incorrect message parsing and handling.
+  pub const RESERVED_TAG_RANGE: std::ops::RangeInclusive<u8> = (0..=128);
+}

@@ -1,4 +1,5 @@
-use bytes::Bytes;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Invalid label error.
 #[derive(Debug, thiserror::Error)]
@@ -219,4 +220,52 @@ impl core::fmt::Display for Label {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{}", self.as_str())
   }
+}
+
+pub(crate) trait LabelAsyncIOExt: AsyncWrite + AsyncRead {
+  fn add_label_header(&mut self, label: &Label) -> impl Future<Output = io::Result<()>> + Send {
+    async move {
+      let mut buf = BytesMut::with_capacity(2 + label.len());
+      buf.put_u8(LABEL_TAG);
+      buf.put_u8(label.len() as u8);
+      buf.put_slice(label.as_bytes());
+
+      self.write_all(&buf).await
+    }
+  }
+
+  fn remove_label_header(&mut self) -> impl Future<Output = io::Result<Option<Label>>> + Send {
+    async move {
+      let mut buf = [0u8; 1];
+      self.read_exact(&mut buf).await?;
+
+      let len = buf[0] as usize;
+      let mut buf = vec![0u8; len];
+      self.read_exact(&mut buf).await?;
+      let buf: Bytes = buf.into();
+      Label::try_from(buf).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+  }
+}
+
+impl<T: AsyncWrite + AsyncRead> LabelAsyncIOExt for T {}
+
+
+
+/// Read and remove a label from the given bytes.
+pub fn remove_label_from_bytes(buf: &mut Bytes) -> std::io::Result<Option<Label>> {
+  if buf.is_empty() {
+    return Ok(None);
+  }
+
+  let len = buf[0] as usize;
+  if len > buf.len() {
+    return Err(std::io::Error::new(
+      std::io::ErrorKind::InvalidData,
+      "not enough bytes to read label",
+    ));
+  }
+  buf.advance(1);
+  let label = buf.split_to(len);
+  Label::try_from(label).map(Some).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }

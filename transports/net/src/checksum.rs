@@ -1,5 +1,7 @@
+pub(crate) const CHECKSUM_SIZE: usize = core::mem::size_of::<u32>();
+
 /// The trait used to calculate the checksum of a packet.
-pub trait Checksumer {
+pub trait Checksumer: Send + Sync + 'static {
   fn new() -> Self;
 
   fn update(&mut self, data: &[u8]);

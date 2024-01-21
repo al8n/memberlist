@@ -9,11 +9,13 @@ metadata.workspace = true
 
 [features]
 
+compression = ["rayon", "weezl"]
+encryption = ["rayon"]
+
 serde = ["showbiz-core/serde", "dep:serde", "showbiz-utils/serde"]
 rkyv = ["showbiz-core/rkyv"]
 
 metrics = ["showbiz-core/metrics", "dep:metrics", "showbiz-utils/metrics"]
-
 test = ["showbiz-core/test"]
 
 [target.'cfg(target_family = "wasm")'.dependencies]
@@ -23,12 +25,8 @@ getrandom = { version = "0.2", features = ["js"] }
 agnostic.workspace = true
 async-channel.workspace = true
 async-lock = "3"
-aead = { version = "0.5", features = ["bytes"] }
-aes-gcm = "0.10"
-base64 = "0.21"
-bytemuck = { version = "1.3", features = ["derive"] }
 bytes.workspace = true
-cbc = "0.1"
+byteorder.workspace = true
 crc32fast = "1"
 either = "1"
 futures.workspace = true
@@ -37,6 +35,7 @@ local-ip-address = "0.5"
 nodecraft.workspace = true
 pollster = "0.3"
 rand = "0.8"
+
 scopeguard.workspace = true
 showbiz-core.workspace = true
 showbiz-utils = { workspace = true, features = ["ipnet"] }
@@ -44,7 +43,14 @@ thiserror.workspace = true
 tracing.workspace = true
 viewit.workspace = true
 wg = { version = "0.4", features = ["async"] }
-weezl = { version = "0.1", features = ["async"] }
+
+# compression & encryption
+aead = { version = "0.5", features = ["bytes"], optional = true }
+aes-gcm = { version = "0.10", optional = true }
+base64 = { version = "0.21", optional = true }
+cbc = { version = "0.1", optional = true }
+rayon = { version = "1.8", optional = true }
+weezl = { version = "0.1", features = ["async"], optional = true }
 
 pnet = { version = "0.34", optional = true }
 serde = { working = true, optional = true }

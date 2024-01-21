@@ -456,57 +456,6 @@ impl<I: Transformable, A: Transformable> Transformable for PushPull<I, A> {
   }
 }
 
-#[cfg(feature = "rkyv")]
-const _: () = {
-  use core::fmt::Debug;
-  use rkyv::Archive;
-
-  impl<I: Debug + Archive, A: Debug + Archive> core::fmt::Debug for ArchivedPushPull<I, A>
-  where
-    I::Archived: Debug,
-    A::Archived: Debug,
-  {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-      f.debug_struct("PushPull")
-        .field("join", &self.join)
-        .field("states", &self.states.get().0)
-        .field("user_data", &self.user_data)
-        .finish()
-    }
-  }
-
-  impl<I: Archive, A: Archive> PartialEq for ArchivedPushPull<I, A>
-  where
-    I::Archived: PartialEq,
-    A::Archived: PartialEq,
-  {
-    fn eq(&self, other: &Self) -> bool {
-      self.join == other.join
-        && self.states.get().0 == other.states.get().0
-        && self.user_data == other.user_data
-    }
-  }
-
-  impl<I: Archive, A: Archive> Eq for ArchivedPushPull<I, A>
-  where
-    I::Archived: Eq,
-    A::Archived: Eq,
-  {
-  }
-
-  impl<I: Archive, A: Archive> core::hash::Hash for ArchivedPushPull<I, A>
-  where
-    I::Archived: core::hash::Hash,
-    A::Archived: core::hash::Hash,
-  {
-    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-      self.join.hash(state);
-      self.states.get().0.hash(state);
-      self.user_data.hash(state);
-    }
-  }
-};
-
 #[cfg(test)]
 const _: () = {
   use std::net::SocketAddr;

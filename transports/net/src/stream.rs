@@ -1,10 +1,10 @@
 use std::{future::Future, io, net::SocketAddr};
 
-use bytes::{BufMut, BytesMut};
-use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use bytes::{BufMut, Bytes, BytesMut};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use showbiz_core::transport::TimeoutableStream;
 
-use crate::Label;
+use crate::{Label, LABEL_TAG};
 
 /// Represents a network listener.
 ///
@@ -28,19 +28,6 @@ pub trait Listener: Send + Sync + 'static {
 pub trait PromisedConnection:
   TimeoutableStream + AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static
 {
-}
-
-pub(crate) trait PromisedConnectionExt: PromisedConnection {
-  fn add_label_header(&mut self, label: &Label) -> impl Future<Output = io::Result<()>> + Send {
-    async move {
-      let mut buf = BytesMut::with_capacity(2 + label.len());
-      buf.put_u8(244);
-      buf.put_u8(label.len() as u8);
-      buf.put_slice(label.as_bytes());
-
-      self.write_all(&buf).await
-    }
-  }
 }
 
 impl<T: PromisedConnection> PromisedConnectionExt for T {}

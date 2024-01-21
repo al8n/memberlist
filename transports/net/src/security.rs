@@ -301,7 +301,7 @@ smallvec_wrapper!(
   #[repr(transparent)]
   #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
   #[cfg_attr(feature = "serde", serde(transparent))]
-  pub SecretKeys([SecretKey; 4]);
+  pub SecretKeys([SecretKey; 3]);
 );
 
 #[derive(Debug)]

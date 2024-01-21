@@ -19,14 +19,14 @@ where
 {
   pub(crate) fn packet_listener(&self, shutdown_rx: async_channel::Receiver<()>) {
     let this = self.clone();
-    let transport_rx = this.inner.transport.packet();
+    let packet_rx = this.inner.transport.packet();
     <T::Runtime as Runtime>::spawn_detach(async move {
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
             return;
           }
-          packet = transport_rx.recv().fuse() => {
+          packet = packet_rx.recv().fuse() => {
             match packet {
               Ok(packet) => {
                 let (msg, addr, timestamp) = packet.into_components();
