@@ -330,8 +330,7 @@ impl Encryptor {
     }
   }
 
-  pub(super) async fn encrypt(&self, nonce: [u8; NONCE_SIZE], auth_data: &[u8], dst: &mut BytesMut) -> Result<(), SecurityError> {
-    let pk = self.kr.primary_key().await;
+  pub(super) fn encrypt(&self, pk: SecretKey, nonce: [u8; NONCE_SIZE], auth_data: &[u8], dst: &mut BytesMut) -> Result<(), SecurityError> {
     match pk {
       SecretKey::Aes128(pk) => {
         let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk));

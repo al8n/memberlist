@@ -677,7 +677,7 @@ where
 
     #[cfg(feature = "encryption")]
     let nonce = if !is_secure {
-      if let (Some(enp), true) = (self.encryptor, self.opts.gossip_verify_outgoing) {
+      if let (Some(enp), true) = (self.encryptor.as_ref(), self.opts.gossip_verify_outgoing) {
         let nonce = enp.write_header(&mut buf);
         Some(nonce)
       } else {
@@ -702,58 +702,89 @@ where
     W::encode_message(packet, &mut buf[offset..offset + packet_encoded_len]).map_err(Self::Error::Wire)?;
 
     #[cfg(feature = "compression")]
-    {
-      if let Some(compressor) = self.opts.compressor {
-        if packet_encoded_len > self.opts.offload_size {
-          let (tx, rx) = futures::channel::oneshot::channel();
-          let mut messages_bytes = buf.split_off(cks_offset);
-          let encryptor = if nonce.is_some() {
-            self.encryptor.clone()
-          } else {
-            None
-          };
-          rayon::spawn(move || {
-            let data_offset = cks_offset + 1 + CHECKSUM_SIZE;
-            let compressed = match compressor
-              .compress_to_bytes(&messages_bytes[data_offset..]).map_err(Self::Error::Compress) {
-              Ok(compressed) => compressed,
-              Err(e) => {
-                if tx.send(Err(e)).is_err() {
-                  tracing::error!(target: "showbiz.net.packet", "failed to send computation task result back to main thread");
-                }
-                return;
+    if let Some(compressor) = self.opts.compressor {
+      if packet_encoded_len > self.opts.offload_size {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let mut messages_bytes = buf.split_off(cks_offset);
+        let encryptor = if nonce.is_some() {
+          let enp = self.encryptor.as_ref().unwrap();
+          let pk = enp.kr.primary_key().await;
+          Some((pk, enp.clone()))
+        } else {
+          None
+        };
+        let label = self.opts.label.cheap_clone();
+        let checksumer = self.opts.checksumer;
+        rayon::spawn(move || {
+          let data_offset = cks_offset + 1 + CHECKSUM_SIZE;
+          let compressed = match compressor
+            .compress_to_bytes(&messages_bytes[data_offset..]).map_err(Self::Error::Compress) {
+            Ok(compressed) => compressed,
+            Err(e) => {
+              if tx.send(Err(e)).is_err() {
+                tracing::error!(target: "showbiz.net.packet", "failed to send computation task result back to main thread");
               }
-            };
-            
-            messages_bytes[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
-            messages_bytes.truncate(data_offset + compressed.len());
+              return;
+            }
+          };
+          
+          messages_bytes[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
+          messages_bytes.truncate(data_offset + compressed.len());
+          if !promised {
+            let cks = checksumer.checksum(&messages_bytes[data_offset..]);
+            NetworkEndian::write_u32(&mut messages_bytes[1..1 + CHECKSUM_SIZE], cks);
+          }
 
-            #[cfg(feature = "encryption")]
-            {
-              if !is_secure {
-                if let Some(enp) = encryptor {
-                  let nonce = nonce.unwrap();
-                  
-                  enp.encrypt(nonce, self.opts.label.as_bytes(), &mut messages_bytes).await.map(|_| {
-                    buf.unsplit(dst);
-                  })?;
-                }
+          #[cfg(feature = "encryption")]
+          {
+            if !is_secure {
+              if let Some((pk, enp)) = encryptor {
+                let nonce = nonce.unwrap();
+                return {
+                  if tx.send(enp.encrypt(pk, nonce, label.as_bytes(), &mut messages_bytes).map(|_| messages_bytes).map_err(Into::into)).is_err() {
+                    tracing::error!(target: "showbiz.net.packet", "failed to send computation task result back to main thread");
+                  }
+                };
               }
             }
+          }
 
-            tx.send(compressed).unwrap_or_default();
-          });
-        } else {
-          let compressed = compressor
-            .compress_to_bytes(&buf[offset..offset + packet_encoded_len]).map_err(Self::Error::Compress)?;
-          buf[offset..offset + compressed.len()].copy_from_slice(&compressed);
-          buf.truncate(offset + compressed.len());
-          if !promised {
-            let cks = self.opts.checksumer.checksum(&buf[offset..]);
-            NetworkEndian::write_u32(&mut buf[cks_offset + 1 .. cks_offset + 1 + CHECKSUM_SIZE], cks);
+          if tx.send(Ok(messages_bytes)).is_err() {
+            tracing::error!(target: "showbiz.net.packet", "failed to send computation task result back to main thread");
+          }
+        });
+
+        match rx.await {
+          Ok(Ok(messages_bytes)) => {
+            buf.unsplit(messages_bytes);
+          }
+          Ok(Err(e)) => return Err(e),
+          Err(_) => return Err(Self::Error::ComputationTaskFailed),
+        }
+      } else {
+        let compressed = compressor
+          .compress_to_bytes(&buf[offset..offset + packet_encoded_len]).map_err(Self::Error::Compress)?;
+        buf[offset..offset + compressed.len()].copy_from_slice(&compressed);
+        buf.truncate(offset + compressed.len());
+        if !promised {
+          let cks = self.opts.checksumer.checksum(&buf[offset..]);
+          NetworkEndian::write_u32(&mut buf[cks_offset + 1 .. cks_offset + 1 + CHECKSUM_SIZE], cks);
+        }
+
+        #[cfg(feature = "encryption")]
+        if !is_secure {
+          if let (Some(enp), true) = (&self.encryptor, self.opts.gossip_verify_outgoing) {
+            let nonce = nonce.unwrap();
+            let pk = enp.kr.primary_key().await;
+            let mut dst = buf.split_off(cks_offset);
+            enp.encrypt(pk, nonce, self.opts.label.as_bytes(), &mut dst).map(|_| {
+              buf.unsplit(dst);
+            })?;
           }
         }
       }
+
+      return self.sockets[0].send_to(addr, &buf).await.map(|sent| (sent, now)).map_err(Into::into);
     }
 
     #[cfg(feature = "encryption")]
@@ -762,7 +793,8 @@ where
         if let (Some(enp), true) = (&self.encryptor, self.opts.gossip_verify_outgoing) {
           let nonce = nonce.unwrap();
           let mut dst = buf.split_off(cks_offset);
-          enp.encrypt(nonce, self.opts.label.as_bytes(), &mut dst).await.map(|_| {
+          let pk = enp.kr.primary_key().await;
+          enp.encrypt(pk, nonce, self.opts.label.as_bytes(), &mut dst).map(|_| {
             buf.unsplit(dst);
           })?;
         }
