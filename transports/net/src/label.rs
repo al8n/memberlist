@@ -1,5 +1,10 @@
+use std::io;
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Future};
+use nodecraft::CheapClone;
+
+use crate::LABEL_TAG;
 
 /// Invalid label error.
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +28,8 @@ pub enum InvalidLabel {
 #[derive(Clone)]
 pub struct Label(Bytes);
 
+impl CheapClone for Label {}
+
 impl Label {
   /// The maximum size of a name in bytes.
   pub const MAX_SIZE: usize = u8::MAX as usize - 2;
@@ -33,9 +40,9 @@ impl Label {
     Label(Bytes::new())
   }
 
-  /// The size of the label in bytes.
+  /// The encoded overhead of a label.
   #[inline]
-  pub fn label_overhead(&self) -> usize {
+  pub fn encoded_overhead(&self) -> usize {
     if self.is_empty() {
       0
     } else {
@@ -210,6 +217,20 @@ impl TryFrom<&Bytes> for Label {
   }
 }
 
+impl TryFrom<BytesMut> for Label {
+  type Error = InvalidLabel;
+
+  fn try_from(s: BytesMut) -> Result<Self, Self::Error> {
+    if s.len() > Self::MAX_SIZE {
+      return Err(InvalidLabel::TooLarge(s.len()));
+    }
+    match core::str::from_utf8(s.as_ref()) {
+      Ok(_) => Ok(Self(s.freeze())),
+      Err(e) => Err(InvalidLabel::Utf8(e)),
+    }
+  }
+}
+
 impl core::fmt::Debug for Label {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{}", self.as_str())
@@ -222,7 +243,9 @@ impl core::fmt::Display for Label {
   }
 }
 
-pub(crate) trait LabelAsyncIOExt: AsyncWrite + AsyncRead {
+pub(crate) trait LabelAsyncIOExt:
+  AsyncWrite + AsyncRead + Unpin + Send + Sync + 'static
+{
   fn add_label_header(&mut self, label: &Label) -> impl Future<Output = io::Result<()>> + Send {
     async move {
       let mut buf = BytesMut::with_capacity(2 + label.len());
@@ -243,29 +266,104 @@ pub(crate) trait LabelAsyncIOExt: AsyncWrite + AsyncRead {
       let mut buf = vec![0u8; len];
       self.read_exact(&mut buf).await?;
       let buf: Bytes = buf.into();
-      Label::try_from(buf).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+      Label::try_from(buf)
+        .map(Some)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
   }
 }
 
-impl<T: AsyncWrite + AsyncRead> LabelAsyncIOExt for T {}
+impl<T: AsyncWrite + AsyncRead + Unpin + Send + Sync + 'static> LabelAsyncIOExt for T {}
 
+/// Label error.
+#[derive(Debug, thiserror::Error)]
+pub enum LabelError {
+  /// Invalid label.
+  #[error("{0}")]
+  InvalidLabel(#[from] InvalidLabel),
+  /// Not enough bytes to decode label.
+  #[error("not enough bytes to decode label")]
+  NotEnoughBytes,
+  /// Label mismatch.
+  #[error("label mismatch: expected {expected}, got {got}")]
+  LabelMismatch {
+    /// Expected label.
+    expected: Label,
+    /// Got label.
+    got: Label,
+  },
 
+  /// Unexpected double label header
+  #[error("unexpected double packet label header, inbound label check is disabled, but got double label header: local={local}, remote={remote}")]
+  Duplicate {
+    /// The local label.
+    local: Label,
+    /// The remote label.
+    remote: Label,
+  },
+}
 
-/// Read and remove a label from the given bytes.
-pub fn remove_label_from_bytes(buf: &mut Bytes) -> std::io::Result<Option<Label>> {
-  if buf.is_empty() {
-    return Ok(None);
+impl LabelError {
+  /// Creates a new `LabelError::LabelMismatch`.
+  pub fn mismatch(expected: Label, got: Label) -> Self {
+    Self::LabelMismatch { expected, got }
   }
 
-  let len = buf[0] as usize;
-  if len > buf.len() {
-    return Err(std::io::Error::new(
-      std::io::ErrorKind::InvalidData,
-      "not enough bytes to read label",
-    ));
+  /// Creates a new `LabelError::Duplicate`.
+  pub fn duplicate(local: Label, remote: Label) -> Self {
+    Self::Duplicate { local, remote }
   }
-  buf.advance(1);
-  let label = buf.split_to(len);
-  Label::try_from(label).map(Some).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+pub(crate) trait LabelBufExt:
+  Buf + Splitable + TryInto<Label, Error = InvalidLabel>
+{
+  fn remove_label_header(&mut self) -> Result<Option<Label>, LabelError>
+  where
+    Self: Sized,
+  {
+    if self.remaining() < 1 {
+      return Ok(None);
+    }
+
+    let data = self.chunk();
+    if data[0] != LABEL_TAG {
+      return Ok(None);
+    }
+    self.advance(1);
+    let len = self.get_u8() as usize;
+    if len > self.remaining() {
+      return Err(LabelError::NotEnoughBytes);
+    }
+    let label = self.split_to(len);
+    Self::try_into(label).map(Some).map_err(Into::into)
+  }
+}
+
+impl<T: Buf + Splitable + TryInto<Label, Error = InvalidLabel>> LabelBufExt for T {}
+
+pub(crate) trait LabelBufMutExt: BufMut {
+  fn add_label_header(&mut self, label: &Label) {
+    self.put_u8(LABEL_TAG);
+    self.put_u8(label.len() as u8);
+    self.put_slice(label.as_bytes());
+  }
+}
+
+impl<T: BufMut> LabelBufMutExt for T {}
+
+pub(crate) trait Splitable {
+  fn split_to(&mut self, len: usize) -> Self;
+}
+
+impl Splitable for BytesMut {
+  fn split_to(&mut self, len: usize) -> Self {
+    self.split_to(len)
+  }
+}
+
+impl Splitable for Bytes {
+  fn split_to(&mut self, len: usize) -> Self {
+    self.split_to(len)
+  }
 }

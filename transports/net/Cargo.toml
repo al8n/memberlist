@@ -45,7 +45,7 @@ viewit.workspace = true
 wg = { version = "0.4", features = ["async"] }
 
 # compression & encryption
-aead = { version = "0.5", features = ["bytes"], optional = true }
+aead = { version = "0.5", features = ["bytes", "std"], optional = true }
 aes-gcm = { version = "0.10", optional = true }
 base64 = { version = "0.21", optional = true }
 cbc = { version = "0.1", optional = true }

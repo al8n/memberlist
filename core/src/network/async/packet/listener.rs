@@ -5,6 +5,7 @@ use crate::{
   transport::Wire,
   types::{Ack, Message, Nack},
 };
+use either::Either;
 use futures::{Future, Stream};
 use nodecraft::CheapClone;
 
@@ -30,7 +31,7 @@ where
             match packet {
               Ok(packet) => {
                 let (msg, addr, timestamp) = packet.into_components();
-                this.handle_command(msg, addr, timestamp).await;
+                this.handle_messages(msg, addr, timestamp).await;
               },
               Err(e) => {
                 tracing::error!(target:  "showbiz.packet", "failed to receive packet: {}", e);
@@ -45,8 +46,7 @@ where
     });
   }
 
-  #[async_recursion::async_recursion]
-  async fn handle_command(
+  async fn handle_message(
     &self,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     from: <T::Resolver as AddressResolver>::ResolvedAddress,
@@ -79,13 +79,6 @@ where
     }
 
     match msg {
-      Message::Compound(msgs) => {
-        for msg in msgs {
-          self
-            .handle_command(msg, from.cheap_clone(), timestamp)
-            .await;
-        }
-      }
       Message::Ping(ping) => self.handle_ping(ping, from).await,
       Message::IndirectPing(ind) => self.handle_indirect_ping(ind, from).await,
       Message::Ack(resp) => self.handle_ack(resp, timestamp).await,
@@ -117,6 +110,25 @@ where
       Message::UserData(msg) => queue!(self.msg),
       mt => {
         tracing::error!(target: "showbiz.packet", addr = %from, err = "unexpected message type", message_type=mt.kind());
+      }
+    }
+  }
+
+  async fn handle_messages(
+    &self,
+    msgs: OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    from: <T::Resolver as AddressResolver>::ResolvedAddress,
+    timestamp: Instant,
+  ) {
+    match msgs.into_either() {
+      Either::Left(None) => {}
+      Either::Left(Some(msg)) => self.handle_message(msg, from, timestamp).await,
+      Either::Right(msgs) => {
+        for msg in msgs {
+          self
+            .handle_message(msg, from.cheap_clone(), timestamp)
+            .await
+        }
       }
     }
   }
@@ -246,20 +258,24 @@ where
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
     // Check if we can piggy back any messages
-    let overhead = self.inner.transport.packet_overhead();
-    let bytes_avail =
-      self.inner.transport.max_payload_size() - <T::Wire as Wire>::encoded_len(&msg) - overhead;
+    let bytes_avail = self.inner.transport.max_payload_size()
+      - <T::Wire as Wire>::encoded_len(&msg)
+      - self.inner.transport.packets_header_overhead();
 
     let mut msgs = self
-      .get_broadcast_with_prepend(std::iter::once(msg).collect(), overhead, bytes_avail)
+      .get_broadcast_with_prepend(
+        std::iter::once(msg).collect(),
+        self.inner.transport.packets_overhead(),
+        bytes_avail,
+      )
       .await?;
 
     // Fast path if nothing to piggypack
     if msgs.len() == 1 {
-      return self.send_packet(addr, msgs.pop().unwrap()).await;
+      return self.transport_send_packet(addr, msgs.pop().unwrap()).await;
     }
 
     // Send the message
-    self.send_packets(addr, msgs).await
+    self.transport_send_packets(addr, msgs).await
   }
 }

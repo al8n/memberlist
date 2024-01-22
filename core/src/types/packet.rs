@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use showbiz_utils::OneOrMore;
+
 use super::Message;
 
 #[viewit::viewit(
@@ -11,7 +13,7 @@ use super::Message;
 pub struct Packet<I, A> {
   /// The raw contents of the packet.
   #[viewit(getter(skip))]
-  buf: Message<I, A>,
+  buf: OneOrMore<Message<I, A>>,
 
   /// Address of the peer. This is an actual address so we
   /// can expose some concrete details about incoming packets.
@@ -25,7 +27,7 @@ pub struct Packet<I, A> {
 
 impl<I, A> Packet<I, A> {
   #[inline]
-  pub fn new(buf: Message<I, A>, from: A, timestamp: Instant) -> Self {
+  pub fn new(buf: OneOrMore<Message<I, A>>, from: A, timestamp: Instant) -> Self {
     Self {
       buf,
       from,
@@ -34,7 +36,7 @@ impl<I, A> Packet<I, A> {
   }
 
   #[inline]
-  pub fn into_components(self) -> (Message<I, A>, A, Instant) {
+  pub fn into_components(self) -> (OneOrMore<Message<I, A>>, A, Instant) {
     (self.buf, self.from, self.timestamp)
   }
 }

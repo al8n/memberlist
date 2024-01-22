@@ -1,16 +1,23 @@
 use std::{
-  borrow::Cow, io::{Error, ErrorKind}, marker::PhantomData, net::{IpAddr, SocketAddr}, sync::{
+  io::{Error, ErrorKind},
+  iter::once,
+  marker::PhantomData,
+  net::{IpAddr, SocketAddr},
+  sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
-  }, time::{Duration, Instant}
+  },
+  time::{Duration, Instant},
 };
 
 use agnostic::Runtime;
-use bytes::{Buf, Bytes, BytesMut};
 use byteorder::{ByteOrder, NetworkEndian};
+use bytes::{Buf, Bytes, BytesMut};
+use checksum::CHECKSUM_SIZE;
 use compressor::UnknownCompressor;
 use futures::FutureExt;
-use label::remove_label_from_bytes;
+use label::{LabelAsyncIOExt, LabelBufExt};
+use security::SecurityError;
 use showbiz_core::{
   transport::{
     resolver::AddressResolver,
@@ -23,14 +30,13 @@ use showbiz_core::{
   types::{Message, Packet, SmallVec, TinyVec},
   CheapClone,
 };
-use showbiz_utils::net::CIDRsPolicy;
+use showbiz_utils::{net::CIDRsPolicy, OneOrMore};
 use wg::AsyncWaitGroup;
 
 const CHECKSUM_TAG: core::ops::RangeInclusive<u8> = 44..=64;
 const ENCRYPT_TAG: core::ops::RangeInclusive<u8> = 65..=85;
 const COMPRESS_TAG: core::ops::RangeInclusive<u8> = 86..=126;
 const LABEL_TAG: u8 = 127;
-
 
 /// Compress/decompress related.
 #[cfg(feature = "compression")]
@@ -44,7 +50,7 @@ use compressor::Compressor;
 #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 pub mod security;
 #[cfg(feature = "encryption")]
-use security::{SecretKey, SecretKeyring, SecretKeys};
+use security::{Encryptor, SecretKey, SecretKeyring, SecretKeys};
 
 /// Errors for the net transport.
 pub mod error;
@@ -58,10 +64,16 @@ pub use label::Label;
 mod checksum;
 pub use checksum::Checksumer;
 
+use crate::label::LabelError;
+
 const DEFAULT_PORT: u16 = 7946;
 const LABEL_MAX_SIZE: usize = 255;
 const DEFAULT_BUFFER_SIZE: usize = 4096;
 const MAX_PUSH_STATE_BYTES: usize = 20 * 1024 * 1024;
+/// tag + num msgs (max number of messages is `255`)
+const COMPOUND_MESSAGE_HEADER_OVERHEAD: usize = 1 + 1;
+/// max message bytes is `u16::MAX`
+const COMPOUND_MESSAGE_OVERHEAD: usize = core::mem::size_of::<u16>();
 
 /// Used to buffer incoming packets during read
 /// operations.
@@ -116,7 +128,23 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   Decompress(#[from] compressor::DecompressError),
   /// Returns when there is a unknown compressor.
   #[cfg(feature = "compression")]
+  #[error("{0}")]
   UnknownCompressor(#[from] UnknownCompressor),
+  /// Returns when there is a security error. e.g. encryption/decryption error.
+  #[error("{0}")]
+  Security(#[from] SecurityError),
+  /// Returns when receiving a compressed message, but compression is disabled.
+  #[error("receive a compressed message, but compression is disabled on this node")]
+  CompressionDisabled,
+  /// Returns when the label error.
+  #[error("{0}")]
+  Label(#[from] label::LabelError),
+  /// Returns when getting unknown checksumer
+  #[error("{0}")]
+  UnknownChecksumer(#[from] checksum::UnknownChecksumer),
+  /// Returns when the computation task panic
+  #[error("computation task panic")]
+  ComputationTaskFailed,
   /// Returns when encode/decode error.
   #[error("wire error: {0}")]
   Wire(W::Error),
@@ -188,6 +216,10 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
 
   label: Label,
 
+  /// Skips the check that inbound packets and gossip
+  /// streams need to be label prefixed.
+  skip_inbound_label_check: bool,
+
   max_payload_size: usize,
 
   /// Policy for Classless Inter-Domain Routing (CIDR).
@@ -237,6 +269,10 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
   secret_keys: Option<SecretKeys>,
 
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  encryptor: Option<Encryptor>,
+
   #[cfg(feature = "metrics")]
   metric_labels: Option<Arc<showbiz_utils::MetricLabels>>,
 }
@@ -247,7 +283,6 @@ pub struct NetTransport<
   P: PacketLayer,
   S: StreamLayer,
   W,
-  C = checksum::Crc32,
 > {
   opts: Arc<NetTransportOptions<I, A>>,
   advertise_addr: A::ResolvedAddress,
@@ -263,17 +298,16 @@ pub struct NetTransport<
   resolver: Arc<A>,
   shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
-  _marker: PhantomData<(W, C)>,
+  _marker: PhantomData<W>,
 }
 
-impl<I, A, P, S, W, C> NetTransport<I, A, P, S, W, C>
+impl<I, A, P, S, W> NetTransport<I, A, P, S, W>
 where
   I: Id,
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   P: PacketLayer,
   S: StreamLayer,
   W: Wire,
-  C: Checksumer,
 {
   /// Creates a new net transport.
   pub async fn new(
@@ -281,7 +315,7 @@ where
     packet_layer: P,
     stream_layer: S,
     opts: NetTransportOptions<I, A>,
-  ) -> Result<Self, NetTransportError<A>> {
+  ) -> Result<Self, NetTransportError<A, W>> {
     match opts.bind_port {
       Some(0) | None => Self::retry(resolver, packet_layer, stream_layer, 10, opts).await,
       _ => Self::retry(resolver, packet_layer, stream_layer, 1, opts).await,
@@ -293,9 +327,8 @@ where
     packet_layer: Arc<P>,
     stream_layer: Arc<S>,
     opts: Arc<NetTransportOptions<I, A>>,
-    #[cfg(feature = "encryption")]
-    keyring: Option<SecretKeyring>,
-  ) -> Result<Self, NetTransportError<A>> {
+    #[cfg(feature = "encryption")] keyring: Option<SecretKeyring>,
+  ) -> Result<Self, NetTransportError<A, W>> {
     // If we reject the empty list outright we can assume that there's at
     // least one listener of each type later during operation.
     if opts.bind_addrs.is_empty() {
@@ -354,7 +387,6 @@ where
         packet_tx: packet_tx.clone(),
         label: opts.label.clone(),
         offload_size: opts.offload_size,
-        compressor: opts.compressor,
         keyring: keyring.clone(),
         socket: socket.clone(),
         local_addr: *socket_addr,
@@ -362,6 +394,7 @@ where
         #[cfg(feature = "metrics")]
         metric_labels: opts.metric_labels.clone().unwrap_or_default(),
         shutdown_rx: shutdown_rx.clone(),
+        skip_inbound_label_check: opts.skip_inbound_label_check,
       }
       .run();
     }
@@ -409,7 +442,7 @@ where
     stream_layer: S,
     limit: usize,
     opts: NetTransportOptions<I, A>,
-  ) -> Result<Self, NetTransportError<A>> {
+  ) -> Result<Self, NetTransportError<A, W>> {
     let mut i = 0;
     let resolver = Arc::new(resolver);
     let packet_layer = Arc::new(packet_layer);
@@ -464,16 +497,37 @@ where
       }
     }
   }
+
+  fn fix_packet_overhead(&self) -> usize {
+    let mut overhead = self.opts.label.encoded_overhead();
+    if !P::is_promised() {
+      overhead += 1;
+      overhead += CHECKSUM_SIZE;
+    }
+
+    #[cfg(feature = "compression")]
+    if self.opts.compressor.is_some() {
+      overhead += 1;
+    }
+
+    #[cfg(feature = "encryption")]
+    if !P::is_secure() {
+      if let (Some(_), Some(encryptor)) = (&self.keyring, &self.opts.encryptor) {
+        overhead += encryptor.encrypt_overhead();
+      }
+    }
+
+    overhead
+  }
 }
 
-impl<I, A, P, S, W, C> Transport for NetTransport<I, A, P, S, W, C>
+impl<I, A, P, S, W> Transport for NetTransport<I, A, P, S, W>
 where
   I: Id,
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   P: PacketLayer,
   S: StreamLayer,
   W: Wire,
-  C: Checksumer,
 {
   type Error = NetTransportError<Self::Resolver, Self::Wire>;
 
@@ -535,7 +589,15 @@ where
   }
 
   fn packet_overhead(&self) -> usize {
-    todo!()
+    self.fix_packet_overhead()
+  }
+
+  fn packets_overhead(&self) -> usize {
+    COMPOUND_MESSAGE_OVERHEAD
+  }
+
+  fn packets_header_overhead(&self) -> usize {
+    self.fix_packet_overhead() + COMPOUND_MESSAGE_HEADER_OVERHEAD
   }
 
   fn blocked_address(
@@ -749,7 +811,7 @@ where
   }
 }
 
-struct PacketProcessor<A, T, P, C = checksum::Crc32>
+struct PacketProcessor<A, T, P>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = T::Runtime>,
   T: Transport<Resolver = A>,
@@ -762,20 +824,18 @@ where
   shutdown: Arc<AtomicBool>,
   shutdown_rx: async_channel::Receiver<()>,
   label: Label,
-  compressor: Option<Compressor>,
   keyring: Option<SecretKeyring>,
   offload_size: usize,
+  skip_inbound_label_check: bool,
   #[cfg(feature = "metrics")]
   metric_labels: Arc<showbiz_utils::MetricLabels>,
-  _checksum: PhantomData<C>,
 }
 
-impl<A, T, P, C> PacketProcessor<A, T, P, C>
+impl<A, T, P> PacketProcessor<A, T, P>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = T::Runtime>,
   T: Transport<Resolver = A>,
   P: PacketLayer,
-  C: Checksumer,
 {
   fn run(self) {
     let Self {
@@ -815,10 +875,9 @@ where
                 buf.truncate(n);
                 let start = Instant::now();
                 let msg = match Self::handle_remote_bytes(
-                  buf.freeze(),
+                  buf,
                   &self.label,
-                  #[cfg(feature = "compression")]
-                  self.compressor.as_ref(),
+                  self.skip_inbound_label_check,
                   #[cfg(feature = "encryption")]
                   self.keyring.as_ref(),
                   #[cfg(any(feature = "compression", feature = "encryption"))]
@@ -859,43 +918,187 @@ where
   }
 
   async fn handle_remote_bytes(
-    mut buf: Bytes,
+    mut buf: BytesMut,
     label: &Label,
-    #[cfg(feature = "compression")] compressor: Option<&Compressor>,
+    skip_inbound_label_check: bool,
     #[cfg(feature = "encryption")] keyring: Option<&SecretKeyring>,
     #[cfg(any(feature = "encryption", feature = "compression"))] offload_size: usize,
   ) -> Result<
-    Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    T::Error,
+    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    NetTransportError<T::Resolver, T::Wire>,
   > {
-    if buf[0] == LABEL_TAG {
-      buf.advance(1);
-      match remove_label_from_bytes(&mut buf)? {
-        Some(stream_label) => {
-          if stream_label.ne(label) {
-            tracing::warn!(target: "showbiz.net.packet", local_label=%label, remote_label=%stream_label, packet=?buf.as_ref(), "label does not match, drop packet");
-            return Err(NetTransportError::IO(Error::new(ErrorKind::InvalidData, "label mismatch")));
-          }
-        }
-        None => {
-          if !label.is_empty() {
-            tracing::warn!(target: "showbiz.net.packet", local_label=%label, remote_label = "", packet=?buf.as_ref(), "label does not match, drop packet");
-            return Err(NetTransportError::IO(Error::new(ErrorKind::InvalidData, "label mismatch")));
-          }
-        },
+    let mut packet_label = buf.remove_label_header()?.unwrap_or_else(Label::empty);
+
+    if skip_inbound_label_check {
+      if !packet_label.is_empty() {
+        return Err(LabelError::duplicate(label.cheap_clone(), packet_label).into());
       }
+
+      // Set this from config so that the auth data assertions work below.
+      packet_label = label.cheap_clone();
     }
 
+    if packet_label.ne(label) {
+      tracing::error!(target: "showbiz.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+      return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
+    }
+
+    let mut buf: Bytes = if ENCRYPT_TAG.contains(&buf[0]) {
+      #[cfg(not(feature = "encryption"))]
+      return Err(NetTransportError::EncryptionDisabled);
+
+      let keyring = match keyring {
+        Some(keyring) => keyring,
+        None => {
+          return Err(SecurityError::Disabled.into());
+        }
+      };
+
+      let buf_len = buf.len();
+      if buf_len > offload_size {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        {
+          let keys = keyring.keys().await;
+          let keyring = keyring.clone();
+          let label = label.cheap_clone();
+          rayon::spawn(move || {
+            match keyring
+              .decrypt_payload(&mut buf, keys, packet_label.as_bytes())
+              .map_err(NetTransportError::Security)
+            {
+              Ok(_) => {}
+              Err(e) => {
+                if tx.send(Err(e)).is_err() {
+                  tracing::error!(target: "showbiz.net.packet", local_label=%label, remote_label=%packet_label, "failed to send decryption result back to main thread");
+                }
+                return;
+              }
+            };
+
+            if CHECKSUM_TAG.contains(&buf[0]) {
+              let checksumer = match Checksumer::try_from(buf[0]) {
+                Ok(checksumer) => checksumer,
+                Err(e) => {
+                  if tx.send(Err(e.into())).is_err() {
+                    tracing::error!(target: "showbiz.net.packet", local_label=%label, remote_label=%packet_label, "failed to send back to main thread");
+                  }
+                  return;
+                }
+              };
+              buf.advance(1);
+              let expected = NetworkEndian::read_u32(&buf[..checksum::CHECKSUM_SIZE]);
+              buf.advance(checksum::CHECKSUM_SIZE);
+              let actual = checksumer.checksum(&buf);
+              if actual != expected {
+                if tx
+                  .send(Err(NetTransportError::IO(Error::new(
+                    ErrorKind::InvalidData,
+                    "checksum mismatch",
+                  ))))
+                  .is_err()
+                {
+                  tracing::error!(target: "showbiz.net.packet", local_label=%label, remote_label=%packet_label, "failed to send back to main thread");
+                }
+                return;
+              }
+            }
+
+            if COMPRESS_TAG.contains(&buf[0]) {
+              #[cfg(not(feature = "compression"))]
+              {
+                if tx
+                  .send(Err(NetTransportError::CompressionDisabled))
+                  .is_err()
+                {
+                  tracing::error!(target: "showbiz.net.packet", local_label=%label, remote_label=%packet_label, "failed to send back to main thread");
+                }
+                return;
+              }
+
+              let compress_tag = buf[0];
+              buf.advance(1);
+              let compressor = match Compressor::try_from(compress_tag)
+                .map_err(NetTransportError::UnknownCompressor)
+              {
+                Ok(compressor) => compressor,
+                Err(e) => {
+                  if tx.send(Err(e)).is_err() {
+                    tracing::error!(target: "showbiz.net.packet", local_label=%label, remote_label=%packet_label, "failed to send back to main thread");
+                  }
+                  return;
+                }
+              };
+
+              if tx
+                .send(
+                  compressor
+                    .decompress(&buf)
+                    .map(Bytes::from)
+                    .map_err(NetTransportError::Decompress),
+                )
+                .is_err()
+              {
+                tracing::error!(target: "showbiz.net.packet", local_label=%label, remote_label=%packet_label, "failed to send back to main thread");
+              }
+              return;
+            }
+
+            if tx.send(Ok(buf.freeze())).is_err() {
+              tracing::error!(target: "showbiz.net.packet", local_label=%label, remote_label=%packet_label, "failed to send decryption result back to main thread");
+            }
+          });
+        }
+
+        match rx.await {
+          Ok(Ok(buf)) => buf,
+          Ok(Err(e)) => return Err(e),
+          Err(_) => return Err(NetTransportError::ComputationTaskFailed),
+        }
+      } else {
+        {
+          let keys = keyring.keys().await;
+          keyring
+            .decrypt_payload(&mut buf, keys, packet_label.as_bytes())
+            .map_err(NetTransportError::Security)?;
+        }
+
+        Self::check_checksum_and_decompress(buf, offload_size).await?
+      }
+    } else {
+      Self::check_checksum_and_decompress(buf, offload_size).await?
+    };
+
+    if buf[0] == Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::COMPOUND_TAG {
+      buf.advance(1);
+      let num_msgs = buf[0] as usize;
+      buf.advance(1);
+      let mut msgs = OneOrMore::with_capacity(num_msgs);
+      while msgs.len() != num_msgs {
+        let msg_len = NetworkEndian::read_u16(&buf[..2]) as usize;
+        buf.advance(2);
+        let msg_bytes = buf.split_to(msg_len);
+        let msg = <T::Wire as Wire>::decode_message(&msg_bytes).map_err(NetTransportError::Wire)?;
+        msgs.push(msg);
+      }
+      Ok(msgs)
+    } else {
+      <T::Wire as Wire>::decode_message(&buf)
+        .map(Into::into)
+        .map_err(NetTransportError::Wire)
+    }
+  }
+
+  async fn check_checksum_and_decompress(
+    mut buf: BytesMut,
+    offload_size: usize,
+  ) -> Result<Bytes, NetTransportError<T::Resolver, T::Wire>> {
     if CHECKSUM_TAG.contains(&buf[0]) {
+      let checksumer = Checksumer::try_from(buf[0])?;
       buf.advance(1);
       let expected = NetworkEndian::read_u32(&buf[..checksum::CHECKSUM_SIZE]);
       buf.advance(checksum::CHECKSUM_SIZE);
-
-      let mut cks = C::new();
-      cks.update(&buf);
-      let checksum = cks.finalize();
-
-      if checksum != expected {
+      let actual = checksumer.checksum(&buf);
+      if actual != expected {
         return Err(NetTransportError::IO(Error::new(
           ErrorKind::InvalidData,
           "checksum mismatch",
@@ -903,89 +1106,34 @@ where
       }
     }
 
-    if COMPRESS_TAG.contains(&buf[0]) {
+    Ok(if COMPRESS_TAG.contains(&buf[0]) {
       #[cfg(not(feature = "compression"))]
-      return Err(NetTransportError::IO(Error::new(
-        ErrorKind::InvalidData,
-        "compression not enabled",
-      )));
+      return Err(NetTransportError::CompressionDisabled);
 
       let compress_tag = buf[0];
       buf.advance(1);
       let compressor = Compressor::try_from(compress_tag)?;
-      let buf_len = buf.len();
-      if buf_len > offload_size {
+
+      if buf.len() > offload_size {
         let (tx, rx) = futures::channel::oneshot::channel();
-        #[cfg(feature = "encryption")]
-        let keyring = keyring.clone();
         rayon::spawn(move || {
-          let buf: Bytes = match compressor.decompress(&buf).map_err(NetTransportError::Decompress) {
-            Ok(buf) => buf.into(),
-            Err(e) => {
-              tx.send(Err(e)).unwrap();
-              return;
-            }
-          };
-
-          if ENCRYPT_TAG.contains(&buf[0]) {
-            #[cfg(not(feature = "encryption"))]
-            return tx.send(Err(NetTransportError::IO(Error::new(
-              ErrorKind::InvalidData,
-              "encryption not enabled",
-            )))).unwrap();
-
-            let encrypt_tag = buf[0];
-            buf.advance(1);
-            let keyring = match keyring {
-              Some(keyring) => keyring,
-              None => {
-                tx.send(Err(NetTransportError::IO(Error::new(ErrorKind::InvalidData, "encryption not enabled")))).unwrap();
-                return;
-              }
-            };
-
-            match keyring.decrypt(&buf).map_err(NetTransportError::Wire) {
-              Ok(buf) => tx.send(Ok(buf)).unwrap(),
-              Err(e) => {
-                tx.send(Err(e)).unwrap();
-                return;
-              }
-            };
-          } else {
-            tx.send(Ok(buf)).unwrap();
+          let buf = compressor
+            .decompress(&buf)
+            .map_err(NetTransportError::Decompress);
+          if tx.send(buf).is_err() {
+            tracing::error!(target: "showbiz.net.packet", "failed to send back to main thread");
           }
         });
-        buf = rx.await.unwrap()?;
+        match rx.await {
+          Ok(Ok(buf)) => buf.into(),
+          Ok(Err(e)) => return Err(e),
+          Err(_) => return Err(NetTransportError::ComputationTaskFailed),
+        }
       } else {
-        buf = compressor.decompress(&buf)?.into();
+        compressor.decompress(&buf)?.into()
       }
-    } else if ENCRYPT_TAG.contains(&buf[0]) {
-      #[cfg(not(feature = "encryption"))]
-      return Err(NetTransportError::IO(Error::new(
-        ErrorKind::InvalidData,
-        "encryption not enabled",
-      )));
-
-      let encrypt_tag = buf[0];
-      buf.advance(1);
-
-      let keyring = keyring.ok_or_else(|| {
-        NetTransportError::IO(Error::new(ErrorKind::InvalidData, "encryption not enabled"))
-      })?;
-      let buf_len = buf.len();
-      if buf_len > offload_size {
-        let (tx, rx) = futures::channel::oneshot::channel();
-        rayon::spawn(move || {
-          let buf = keyring.decrypt(&buf).map_err(NetTransportError::Wire);
-          tx.send(buf).unwrap();
-        });
-        buf = rx.await.unwrap()?.into();
-      } else {
-        buf = keyring.decrypt(&buf)?.into();
-      } 
-    }
-
-    <T::Wire as Wire>::decode_message(&buf)
-      .map_err(NetTransportError::Wire)
+    } else {
+      buf.freeze()
+    })
   }
 }

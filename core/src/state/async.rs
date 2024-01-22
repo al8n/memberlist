@@ -943,7 +943,7 @@ where
         from: self.local_id().cheap_clone(),
       };
       if let Err(e) = self
-        .send_packets(
+        .transport_send_packets(
           target.address(),
           [ping.cheap_clone().into(), suspect.into()]
             .into_iter()
@@ -1297,13 +1297,16 @@ where
     };
 
     // Compute the bytes available
-    let overhead = self.inner.transport.packet_overhead();
-    let bytes_avail = self.inner.transport.max_payload_size() - overhead;
-
+    let bytes_avail =
+      self.inner.transport.max_payload_size() - self.inner.transport.packets_header_overhead();
     for server in nodes {
       // Get any pending broadcasts
       let mut msgs = match self
-        .get_broadcast_with_prepend(Default::default(), overhead, bytes_avail)
+        .get_broadcast_with_prepend(
+          Default::default(),
+          self.inner.transport.packets_overhead(),
+          bytes_avail,
+        )
         .await
       {
         Ok(msgs) => msgs,
@@ -1319,12 +1322,12 @@ where
       let addr = server.address();
       if msgs.len() == 1 {
         // Send single message as is
-        if let Err(e) = self.send_packet(addr, msgs.pop().unwrap()).await {
+        if let Err(e) = self.transport_send_packet(addr, msgs.pop().unwrap()).await {
           tracing::error!(target:  "showbiz.state", err = %e, "failed to send gossip to {}", addr);
         }
       } else {
         // Otherwise create and send one or more compound messages
-        if let Err(e) = self.send_packets(addr, msgs).await {
+        if let Err(e) = self.transport_send_packets(addr, msgs).await {
           tracing::error!(target:  "showbiz.state", err = %e, "failed to send gossip to {}", addr);
         }
       }

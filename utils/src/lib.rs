@@ -1,6 +1,9 @@
 /// Network related utilities
 pub mod net;
 
+/// re-export [`either`] crate
+pub use either;
+
 #[doc(hidden)]
 pub mod __private {
   pub use smallvec;
@@ -31,6 +34,21 @@ macro_rules! smallvec_wrapper {
       /// Creates a new instance of `ApplyBatchResponse` with the given capacity.
       pub fn with_capacity(capacity: usize) -> Self {
         Self($crate::__private::smallvec::SmallVec::with_capacity(capacity))
+      }
+    }
+
+    impl $(< $($generic),+ >)? ::core::convert::From<$inner> for $name $(< $($generic),+ >)? {
+      fn from(value: $inner) -> Self {
+        Self($crate::__private::smallvec::smallvec![value])
+      }
+    }
+
+    impl $(< $($generic),+ >)? ::core::convert::From<::core::option::Option<$inner>> for $name $(< $($generic),+ >)? {
+      fn from(value: ::core::option::Option<$inner>) -> Self {
+        match value {
+          ::core::option::Option::Some(value) => Self($crate::__private::smallvec::smallvec![value]),
+          ::core::option::Option::None => Self($crate::__private::smallvec::SmallVec::new()),
+        }
       }
     }
 
@@ -83,6 +101,37 @@ smallvec_wrapper!(
   #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
   pub OneOrMore<T>([T; 1]);
 );
+
+impl<T> OneOrMore<T> {
+  /// Converts this `OneOrMore` into an [`Either`].
+  #[inline]
+  pub fn into_either(mut self) -> Either<Option<T>, Self> {
+    match self.len() {
+      0..=1 => Either::Left(self.pop()),
+      _ => Either::Right(self),
+    }
+  }
+}
+
+impl<T> From<Either<T, ::smallvec::SmallVec<[T; 1]>>> for OneOrMore<T> {
+  #[inline]
+  fn from(either: Either<T, ::smallvec::SmallVec<[T; 1]>>) -> Self {
+    match either {
+      Either::Left(t) => OneOrMore::from(t),
+      Either::Right(vec) => OneOrMore::from(vec),
+    }
+  }
+}
+
+impl<T> From<Either<Option<T>, ::smallvec::SmallVec<[T; 1]>>> for OneOrMore<T> {
+  #[inline]
+  fn from(either: Either<Option<T>, ::smallvec::SmallVec<[T; 1]>>) -> Self {
+    match either {
+      Either::Left(t) => OneOrMore::from(t),
+      Either::Right(vec) => OneOrMore::from(vec),
+    }
+  }
+}
 
 smallvec_wrapper!(
   /// A tiny vec which can inline 2 elements on stack.
@@ -138,6 +187,7 @@ smallvec_wrapper!(
 
 #[cfg(feature = "metrics")]
 pub use _metrics::*;
+use either::Either;
 
 #[cfg(feature = "metrics")]
 mod _metrics {

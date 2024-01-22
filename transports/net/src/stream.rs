@@ -1,10 +1,7 @@
 use std::{future::Future, io, net::SocketAddr};
 
-use bytes::{BufMut, Bytes, BytesMut};
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures::{AsyncRead, AsyncWrite};
 use showbiz_core::transport::TimeoutableStream;
-
-use crate::{Label, LABEL_TAG};
 
 /// Represents a network listener.
 ///
@@ -29,8 +26,6 @@ pub trait PromisedConnection:
   TimeoutableStream + AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static
 {
 }
-
-impl<T: PromisedConnection> PromisedConnectionExt for T {}
 
 /// A trait defining the necessary components for a stream-based network layer.
 /// This layer must promise a reliable, ordered, and bi-directional stream of data, e.g. TCP, QUIC, gRPC and etc.

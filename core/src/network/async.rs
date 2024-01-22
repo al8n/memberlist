@@ -110,7 +110,7 @@ where
     }
   }
 
-  pub(crate) async fn send_packet(
+  pub(crate) async fn transport_send_packet(
     &self,
     addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
     packet: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
@@ -130,7 +130,7 @@ where
       .map_err(Error::transport)
   }
 
-  pub(crate) async fn send_packets(
+  pub(crate) async fn transport_send_packets(
     &self,
     addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
     packet: TinyVec<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,

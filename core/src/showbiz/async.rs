@@ -719,7 +719,7 @@ where
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
-    self.send_packet(to, Message::UserData(msg)).await
+    self.transport_send_packet(to, Message::UserData(msg)).await
   }
 
   /// Uses the reliable stream-oriented interface of the transport to

@@ -2,7 +2,6 @@ use bytes::Bytes;
 
 use super::*;
 
-
 macro_rules! enum_wrapper {
   (
     $(#[$outer:meta])*
@@ -79,26 +78,29 @@ enum_wrapper!(
   #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
   #[non_exhaustive]
   pub enum Message<I, A> {
+    // DO NOT REMOVE THE COMMENT BELOW!!!
+    // tag 0 is reserved for compound message
+    // Compound(OneOrMore<Message<I, A>>) = 0,
     /// Ping message
-    Ping(Ping<I, A>) = 0,
+    Ping(Ping<I, A>) = 1,
     /// Indirect ping message
-    IndirectPing(IndirectPing<I, A>) = 1,
+    IndirectPing(IndirectPing<I, A>) = 2,
     /// Ack response message
-    Ack(Ack) = 2,
+    Ack(Ack) = 3,
     /// Suspect message
-    Suspect(Suspect<I>) = 3,
+    Suspect(Suspect<I>) = 4,
     /// Alive message
-    Alive(Alive<I, A>) = 4,
+    Alive(Alive<I, A>) = 5,
     /// Dead message
-    Dead(Dead<I>) = 5,
+    Dead(Dead<I>) = 6,
     /// PushPull message
-    PushPull(PushPull<I, A>) = 6,
+    PushPull(PushPull<I, A>) = 7,
     /// User mesg, not handled by us
-    UserData(Bytes) = 7,
+    UserData(Bytes) = 8,
     /// Nack response message
-    Nack(Nack) = 8,
+    Nack(Nack) = 9,
     /// Error response message
-    ErrorResponse(ErrorResponse) = 9,
+    ErrorResponse(ErrorResponse) = 10,
   }
 );
 
@@ -112,7 +114,7 @@ impl<I, A> Message<I, A> {
   /// start with a tag value within this reserved range.
   ///
   /// The reserved range is `0..=128`, meaning that the first byte of any custom message
-  /// must not fall within this range to avoid conflicts with predefined message types. 
+  /// must not fall within this range to avoid conflicts with predefined message types.
   ///
   /// # Note
   ///
@@ -120,4 +122,7 @@ impl<I, A> Message<I, A> {
   /// are correctly distinguishable from the standard messages defined by the `Message` enum.
   /// Failing to do so may result in incorrect message parsing and handling.
   pub const RESERVED_TAG_RANGE: std::ops::RangeInclusive<u8> = (0..=128);
+
+  /// Returns the tag of the compound message type for encoding/decoding.
+  pub const COMPOUND_TAG: u8 = 0;
 }
