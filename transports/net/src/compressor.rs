@@ -63,7 +63,19 @@ impl Compressor {
   }
 
   /// Compresses the given buffer.
-  pub fn compress(&self, src: &[u8]) -> Result<Bytes, CompressError> {
+  pub fn compress_to(&self, src: &[u8], dst: &mut Vec<u8>) -> Result<(), CompressError> {
+    match self {
+      Self::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+        .into_vec(dst)
+        .encode_all(src)
+        .status
+        .map(|_| ())
+        .map_err(CompressError::Lzw),
+    }
+  }
+
+  /// Compresses the given buffer.
+  pub fn compress_to_bytes(&self, src: &[u8]) -> Result<Bytes, CompressError> {
     let mut buf = Vec::with_capacity(src.len());
     match self {
       Self::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)

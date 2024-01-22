@@ -265,7 +265,7 @@ where
     let mut msgs = self
       .get_broadcast_with_prepend(
         std::iter::once(msg).collect(),
-        self.inner.transport.packets_overhead(),
+        self.inner.transport.packet_overhead(),
         bytes_avail,
       )
       .await?;

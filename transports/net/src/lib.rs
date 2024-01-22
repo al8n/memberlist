@@ -12,12 +12,12 @@ use std::{
 
 use agnostic::Runtime;
 use byteorder::{ByteOrder, NetworkEndian};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use checksum::CHECKSUM_SIZE;
 use compressor::UnknownCompressor;
 use futures::FutureExt;
 use label::{LabelAsyncIOExt, LabelBufExt};
-use security::SecurityError;
+use security::{Encryptor, SecurityError};
 use showbiz_core::{
   transport::{
     resolver::AddressResolver,
@@ -50,7 +50,7 @@ use compressor::Compressor;
 #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 pub mod security;
 #[cfg(feature = "encryption")]
-use security::{Encryptor, SecretKey, SecretKeyring, SecretKeys};
+use security::{EncryptionAlgo, SecretKey, SecretKeyring, SecretKeys};
 
 /// Errors for the net transport.
 pub mod error;
@@ -64,7 +64,7 @@ pub use label::Label;
 mod checksum;
 pub use checksum::Checksumer;
 
-use crate::label::LabelError;
+use crate::label::{LabelBufMutExt, LabelError};
 
 const DEFAULT_PORT: u16 = 7946;
 const LABEL_MAX_SIZE: usize = 255;
@@ -148,6 +148,9 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   /// Returns when encode/decode error.
   #[error("wire error: {0}")]
   Wire(W::Error),
+  /// Returns when the packet is too large.
+  #[error("packet too large, the maximum packet can be sent is 65535, got {0}")]
+  PacketTooLarge(usize),
   /// Returns when there is a custom error.
   #[error("custom error: {0}")]
   Custom(std::borrow::Cow<'static, str>),
@@ -185,6 +188,10 @@ impl<A: AddressResolver, W: Wire> TransportError for NetTransportError<A, W> {
   }
 }
 
+fn default_gossip_verify_outgoing() -> bool {
+  true
+}
+
 /// Used to configure a net transport.
 #[viewit::viewit(vis_all = "pub(crate)")]
 #[derive(Debug, Clone)]
@@ -219,6 +226,12 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   /// Skips the check that inbound packets and gossip
   /// streams need to be label prefixed.
   skip_inbound_label_check: bool,
+
+  /// Controls whether to enforce encryption for outgoing
+  /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
+  /// a running cluster.
+  #[cfg_attr(feature = "serde", serde(default = "default_gossip_verify_outgoing"))]
+  gossip_verify_outgoing: bool,
 
   max_payload_size: usize,
 
@@ -271,7 +284,11 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
 
   #[cfg(feature = "encryption")]
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  encryptor: Option<Encryptor>,
+  encryption_algo: Option<EncryptionAlgo>,
+
+  /// The checksumer to use for checksumming packets.
+  #[cfg_attr(feature = "serde", serde(default))]
+  checksumer: Checksumer,
 
   #[cfg(feature = "metrics")]
   metric_labels: Option<Arc<showbiz_utils::MetricLabels>>,
@@ -293,7 +310,8 @@ pub struct NetTransport<
   stream_layer: Arc<S>,
   packet_layer: Arc<P>,
   #[cfg(feature = "encryption")]
-  keyring: Option<SecretKeyring>,
+  encryptor: Option<Encryptor>,
+
   wg: AsyncWaitGroup,
   resolver: Arc<A>,
   shutdown: Arc<AtomicBool>,
@@ -327,7 +345,7 @@ where
     packet_layer: Arc<P>,
     stream_layer: Arc<S>,
     opts: Arc<NetTransportOptions<I, A>>,
-    #[cfg(feature = "encryption")] keyring: Option<SecretKeyring>,
+    #[cfg(feature = "encryption")] encryptor: Option<Encryptor>,
   ) -> Result<Self, NetTransportError<A, W>> {
     // If we reject the empty list outright we can assume that there's at
     // least one listener of each type later during operation.
@@ -387,7 +405,8 @@ where
         packet_tx: packet_tx.clone(),
         label: opts.label.clone(),
         offload_size: opts.offload_size,
-        keyring: keyring.clone(),
+        #[cfg(feature = "encryption")]
+        encryptor: encryptor.clone(),
         socket: socket.clone(),
         local_addr: *socket_addr,
         shutdown: shutdown.clone(),
@@ -429,7 +448,7 @@ where
       stream_layer,
       packet_layer,
       #[cfg(feature = "encryption")]
-      keyring,
+      encryptor,
       resolver,
       shutdown_tx,
       _marker: PhantomData,
@@ -449,7 +468,7 @@ where
     let stream_layer = Arc::new(stream_layer);
     let opts = Arc::new(opts);
     #[cfg(feature = "encryption")]
-    let keyring = if P::is_secure() && S::is_secure() {
+    let keyring = if P::is_secure() && S::is_secure() || opts.encryption_algo.is_none() {
       None
     } else {
       match (opts.primary_key, &opts.secret_keys) {
@@ -464,7 +483,7 @@ where
         (Some(pk), Some(keys)) => Some(SecretKeyring::with_keys(pk, keys.iter().copied())),
         _ => None,
       }
-    };
+    }.map(|kr| Encryptor::new(opts.encryption_algo.unwrap(), kr));
     loop {
       #[cfg(feature = "metrics")]
       let transport = {
@@ -512,7 +531,7 @@ where
 
     #[cfg(feature = "encryption")]
     if !P::is_secure() {
-      if let (Some(_), Some(encryptor)) = (&self.keyring, &self.opts.encryptor) {
+      if let Some(encryptor) = &self.encryptor {
         overhead += encryptor.encrypt_overhead();
       }
     }
@@ -589,10 +608,6 @@ where
   }
 
   fn packet_overhead(&self) -> usize {
-    self.fix_packet_overhead()
-  }
-
-  fn packets_overhead(&self) -> usize {
     COMPOUND_MESSAGE_OVERHEAD
   }
 
@@ -645,7 +660,116 @@ where
       <Self::Resolver as AddressResolver>::ResolvedAddress,
     >,
   ) -> Result<(usize, Instant), Self::Error> {
-    todo!()
+    let now = Instant::now();
+    let packet_encoded_len = W::encoded_len(&packet);
+    let encoded_len = self.fix_packet_overhead() + packet_encoded_len;
+    if encoded_len >= u16::MAX as usize {
+      return Err(Self::Error::PacketTooLarge(encoded_len));
+    }
+    let mut offset = 0;
+    let mut buf = BytesMut::with_capacity(encoded_len);
+    buf.add_label_header(&self.opts.label);
+    offset += self.opts.label.encoded_overhead();
+    debug_assert_eq!(offset, buf.len(), "wrong label encoded length");
+
+    #[cfg(feature = "encryption")]
+    let is_secure = P::is_secure();
+
+    #[cfg(feature = "encryption")]
+    let nonce = if !is_secure {
+      if let (Some(enp), true) = (self.encryptor, self.opts.gossip_verify_outgoing) {
+        let nonce = enp.write_header(&mut buf);
+        Some(nonce)
+      } else {
+        None
+      }
+    } else {
+      None
+    };
+    
+    let cks_offset = buf.len();
+    let mut offset = buf.len();
+    let promised = P::is_promised();
+    if !promised {
+      // reserve to store checksum
+      buf.put_u8(self.opts.checksumer as u8);
+      buf.put_slice(&[0; CHECKSUM_SIZE]);
+      offset += CHECKSUM_SIZE + 1;
+    }
+
+    buf.resize(offset + packet_encoded_len, 0);
+
+    W::encode_message(packet, &mut buf[offset..offset + packet_encoded_len]).map_err(Self::Error::Wire)?;
+
+    #[cfg(feature = "compression")]
+    {
+      if let Some(compressor) = self.opts.compressor {
+        if packet_encoded_len > self.opts.offload_size {
+          let (tx, rx) = futures::channel::oneshot::channel();
+          let mut messages_bytes = buf.split_off(cks_offset);
+          let encryptor = if nonce.is_some() {
+            self.encryptor.clone()
+          } else {
+            None
+          };
+          rayon::spawn(move || {
+            let data_offset = cks_offset + 1 + CHECKSUM_SIZE;
+            let compressed = match compressor
+              .compress_to_bytes(&messages_bytes[data_offset..]).map_err(Self::Error::Compress) {
+              Ok(compressed) => compressed,
+              Err(e) => {
+                if tx.send(Err(e)).is_err() {
+                  tracing::error!(target: "showbiz.net.packet", "failed to send computation task result back to main thread");
+                }
+                return;
+              }
+            };
+            
+            messages_bytes[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
+            messages_bytes.truncate(data_offset + compressed.len());
+
+            #[cfg(feature = "encryption")]
+            {
+              if !is_secure {
+                if let Some(enp) = encryptor {
+                  let nonce = nonce.unwrap();
+                  
+                  enp.encrypt(nonce, self.opts.label.as_bytes(), &mut messages_bytes).await.map(|_| {
+                    buf.unsplit(dst);
+                  })?;
+                }
+              }
+            }
+
+            tx.send(compressed).unwrap_or_default();
+          });
+        } else {
+          let compressed = compressor
+            .compress_to_bytes(&buf[offset..offset + packet_encoded_len]).map_err(Self::Error::Compress)?;
+          buf[offset..offset + compressed.len()].copy_from_slice(&compressed);
+          buf.truncate(offset + compressed.len());
+          if !promised {
+            let cks = self.opts.checksumer.checksum(&buf[offset..]);
+            NetworkEndian::write_u32(&mut buf[cks_offset + 1 .. cks_offset + 1 + CHECKSUM_SIZE], cks);
+          }
+        }
+      }
+    }
+
+    #[cfg(feature = "encryption")]
+    {
+      if !is_secure {
+        if let (Some(enp), true) = (&self.encryptor, self.opts.gossip_verify_outgoing) {
+          let nonce = nonce.unwrap();
+          let mut dst = buf.split_off(cks_offset);
+          enp.encrypt(nonce, self.opts.label.as_bytes(), &mut dst).await.map(|_| {
+            buf.unsplit(dst);
+          })?;
+        }
+      }
+    }
+
+    self.sockets[0].send_to(addr, &buf).await.map(|sent| (sent, now)).map_err(Into::into)
   }
 
   async fn send_packets(
@@ -824,7 +948,8 @@ where
   shutdown: Arc<AtomicBool>,
   shutdown_rx: async_channel::Receiver<()>,
   label: Label,
-  keyring: Option<SecretKeyring>,
+  #[cfg(feature = "encryption")]
+  encryptor: Option<Encryptor>,
   offload_size: usize,
   skip_inbound_label_check: bool,
   #[cfg(feature = "metrics")]
@@ -879,7 +1004,7 @@ where
                   &self.label,
                   self.skip_inbound_label_check,
                   #[cfg(feature = "encryption")]
-                  self.keyring.as_ref(),
+                  self.encryptor.as_ref(),
                   #[cfg(any(feature = "compression", feature = "encryption"))]
                   self.offload_size,
                 ).await {
@@ -921,7 +1046,7 @@ where
     mut buf: BytesMut,
     label: &Label,
     skip_inbound_label_check: bool,
-    #[cfg(feature = "encryption")] keyring: Option<&SecretKeyring>,
+    #[cfg(feature = "encryption")] encryptor: Option<&Encryptor>,
     #[cfg(any(feature = "encryption", feature = "compression"))] offload_size: usize,
   ) -> Result<
     OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
@@ -947,8 +1072,8 @@ where
       #[cfg(not(feature = "encryption"))]
       return Err(NetTransportError::EncryptionDisabled);
 
-      let keyring = match keyring {
-        Some(keyring) => keyring,
+      let encryptor = match encryptor {
+        Some(encryptor) => encryptor,
         None => {
           return Err(SecurityError::Disabled.into());
         }
@@ -958,8 +1083,8 @@ where
       if buf_len > offload_size {
         let (tx, rx) = futures::channel::oneshot::channel();
         {
-          let keys = keyring.keys().await;
-          let keyring = keyring.clone();
+          let keys = encryptor.kr.keys().await;
+          let keyring = encryptor.kr.clone();
           let label = label.cheap_clone();
           rayon::spawn(move || {
             match keyring
@@ -1056,8 +1181,8 @@ where
         }
       } else {
         {
-          let keys = keyring.keys().await;
-          keyring
+          let keys = encryptor.kr.keys().await;
+          encryptor.kr
             .decrypt_payload(&mut buf, keys, packet_label.as_bytes())
             .map_err(NetTransportError::Security)?;
         }

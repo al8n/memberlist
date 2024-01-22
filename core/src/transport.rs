@@ -569,15 +569,6 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns the maximum size of a packet that can be sent
   fn max_payload_size(&self) -> usize;
 
-  /// Returns the size of overhead when trying to send message through packet stream ([`send_packet`]).
-  ///
-  /// e.g. if every time invoking [`send_packet`],
-  /// the concrete implementation wants to  add a header of 10 bytes,
-  /// then the packet overhead is 10 bytes.
-  ///
-  /// [`send_packet`]: #method.send_packet
-  fn packet_overhead(&self) -> usize;
-
   /// Returns the size of header overhead when trying to send messages through packet stream ([`send_packets`]).
   ///
   /// e.g. if every time invoking [`send_packets`],
@@ -588,7 +579,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn packets_header_overhead(&self) -> usize;
 
   /// Returns the size of overhead for per [`Message`] when trying to send messages through packet stream ([`send_packets`]).
-  fn packets_overhead(&self) -> usize;
+  fn packet_overhead(&self) -> usize;
 
   /// Returns an error if the given address is blocked
   fn blocked_address(

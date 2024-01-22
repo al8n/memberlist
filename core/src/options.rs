@@ -18,17 +18,6 @@ pub struct Options {
   // /// authenticated data.
   // #[viewit(getter(const, style = "ref"))]
   // label: Label,
-  // /// Skips the check that inbound packets and gossip
-  // /// streams need to be label prefixed.
-  // skip_inbound_label_check: bool,
-
-  // /// Configuration related to what address to bind to
-  // /// listen on. The port is used for both UDP and TCP gossip.
-  // bind_addr: IpAddr,
-
-  // /// Configuration related to what address to advertise to other
-  // /// cluster members. Used for nat traversal.
-  // advertise_addr: Option<IpAddr>,
 
   // /// The configured encryption type that we
   // /// will _speak_. This must be between [`EncryptionAlgo::MIN`] and
@@ -140,11 +129,7 @@ pub struct Options {
   /// Controls whether to enforce encryption for incoming
   /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
   /// a running cluster.
-  gossip_verify_incoming: bool,
-  /// Controls whether to enforce encryption for outgoing
-  /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
-  /// a running cluster.
-  gossip_verify_outgoing: bool,
+  gossip_verify_incoming: bool, 
 
   /// Used to guarantee protocol-compatibility
   protocol_version: ProtocolVersion,
@@ -219,7 +204,6 @@ impl Options {
       gossip_nodes: 3,                  // Gossip to 3 nodes
       gossip_to_the_dead_time: Duration::from_secs(30), // same as push/pull
       gossip_verify_incoming: true,
-      gossip_verify_outgoing: true,
       // compression_algo: CompressionAlgo::Lzw, // Enable compression by default
       // secret_key: None,
       // secret_keyring: None,
