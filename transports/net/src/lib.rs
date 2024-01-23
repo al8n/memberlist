@@ -1,5 +1,5 @@
 use std::{
-  io::{Error, ErrorKind},
+  io::{self, Error, ErrorKind},
   marker::PhantomData,
   net::{IpAddr, SocketAddr},
   sync::{
@@ -17,7 +17,7 @@ use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use checksum::CHECKSUM_SIZE;
 use compressor::UnknownCompressor;
-use futures::FutureExt;
+use futures::{io::BufReader, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt};
 use label::{LabelAsyncIOExt, LabelBufExt};
 use security::{Encryptor, SecurityError};
 use showbiz_core::{
@@ -76,6 +76,10 @@ const PACKET_OVERHEAD: usize = core::mem::size_of::<u16>();
 /// tag + num msgs (max number of messages is `255`)
 const PACKET_HEADER_OVERHEAD: usize = 1 + 1;
 const NUM_PACKETS_PER_BATCH: usize = 255;
+const MAX_INLINED_BYTES: usize = 64;
+
+#[cfg(feature = "compression")]
+const PROMISED_COMPRESS_OVERHEAD: usize = 1 + core::mem::size_of::<u32>();
 
 const DEFAULT_PORT: u16 = 7946;
 const LABEL_MAX_SIZE: usize = 255;
@@ -688,7 +692,7 @@ where
           Err(_) => return Err(NetTransportError::ComputationTaskFailed),
         }
       } else {
-        let mut offset = checksum_offset + 1 + CHECKSUM_SIZE;
+        let offset = checksum_offset + 1 + CHECKSUM_SIZE;
         let compressed = compressor
           .compress_to_bytes(&buf[offset..offset + data_size])
           .map_err(NetTransportError::Compress)?;
@@ -723,7 +727,13 @@ where
         .send_to(&buf, addr)
         .await
         .map(|sent| (sent, start))
-        .map_err(Into::into);
+        .map_err(|e| {
+          NetTransportError::Connection(ConnectionError {
+            kind: ConnectionKind::Packet,
+            error_kind: ConnectionErrorKind::Write,
+            error: e,
+          })
+        });
     }
 
     #[cfg(feature = "encryption")]
@@ -742,7 +752,247 @@ where
       .send_to(&buf, addr)
       .await
       .map(|sent| (sent, start))
-      .map_err(Into::into)
+      .map_err(|e| {
+        NetTransportError::Connection(ConnectionError {
+          kind: ConnectionKind::Packet,
+          error_kind: ConnectionErrorKind::Write,
+          error: e,
+        })
+      })
+  }
+
+  fn should_offload_for_sending(&self, size: usize) -> bool {
+    #[cfg(feature = "compression")]
+    {
+      let compression_enabled = self.opts.compressor.is_some();
+      if size >= self.opts.offload_size && compression_enabled {
+        return true;
+      }
+    }
+
+    #[cfg(feature = "encryption")]
+    {
+      let encryption_enabled = self.encryptor.is_some();
+      if size >= self.opts.offload_size && encryption_enabled && !S::is_secure() {
+        return true;
+      }
+    }
+
+    false
+  }
+
+  #[cfg(feature = "encryption")]
+  async fn send_message_with_encryption_without_compression(
+    &self,
+    mut conn: impl AsyncWrite + Unpin,
+    target: &A::ResolvedAddress,
+    msg: Message<I, A::ResolvedAddress>,
+    stream_label: &Label,
+  ) -> Result<usize, NetTransportError<A, W>> {
+    let enp = match self.encryptor.as_ref() {
+      Some(enp) if self.opts.gossip_verify_outgoing => enp,
+      _ => {
+        return self
+          .send_message_without_compression_and_encryption(conn, target, msg)
+          .await
+      }
+    };
+
+    let encoded_size = W::encoded_len(&msg);
+    if encoded_size < self.opts.offload_size {
+      let encrypt_header = enp.encrypt_overhead();
+      let total_len = encrypt_header + encoded_size;
+      let mut buf = BytesMut::with_capacity(total_len);
+
+      let pk = enp.kr.primary_key().await;
+      let nonce = enp.write_header(&mut buf);
+      buf.resize(total_len, 0);
+
+      W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)?;
+
+      let mut dst = buf.split_off(encrypt_header);
+      enp
+        .encrypt(pk, nonce, stream_label.as_bytes(), &mut dst)
+        .map(|_| buf.unsplit(dst))
+        .map_err(NetTransportError::Security)?;
+
+      conn
+        .write_all(&buf)
+        .await
+        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
+
+      return conn
+        .flush()
+        .await
+        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
+        .map(|_| total_len);
+    }
+
+    let (tx, rx) = futures::channel::oneshot::channel();
+
+    let encrypt_header = enp.encrypt_overhead();
+    let total_len = encrypt_header + encoded_size;
+    let mut buf = BytesMut::with_capacity(total_len);
+    let pk = enp.kr.primary_key().await;
+    let nonce = enp.write_header(&mut buf);
+    buf.resize(total_len, 0);
+    let stream_label = stream_label.cheap_clone();
+    let enp = enp.clone();
+    rayon::spawn(move || {
+      if let Err(e) =
+        W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)
+      {
+        if tx.send(Err(e)).is_err() {
+          tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+        }
+        return;
+      }
+
+      let mut dst = buf.split_off(encrypt_header);
+      if let Err(e) = enp
+        .encrypt(pk, nonce, stream_label.as_bytes(), &mut dst)
+        .map(|_| buf.unsplit(dst))
+        .map_err(NetTransportError::Security)
+      {
+        if tx.send(Err(e)).is_err() {
+          tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+        }
+        return;
+      }
+
+      if tx.send(Ok(buf)).is_err() {
+        tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+      }
+    });
+
+    match rx.await {
+      Ok(Ok(buf)) => {
+        conn
+          .write_all(&buf)
+          .await
+          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
+        conn
+          .flush()
+          .await
+          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
+          .map(|_| total_len)
+      }
+      Ok(Err(e)) => Err(e),
+      Err(_) => Err(NetTransportError::ComputationTaskFailed),
+    }
+  }
+
+  #[cfg(feature = "compression")]
+  async fn send_message_with_compression_without_encryption(
+    &self,
+    mut conn: impl AsyncWrite + Unpin,
+    target: &A::ResolvedAddress,
+    msg: Message<I, A::ResolvedAddress>,
+  ) -> Result<usize, NetTransportError<A, W>> {
+    let compressor = match self.opts.compressor {
+      Some(c) => c,
+      None => {
+        return self
+          .send_message_without_compression_and_encryption(conn, target, msg)
+          .await
+      }
+    };
+
+    let encoded_size = W::encoded_len(&msg);
+
+    if encoded_size < self.opts.offload_size {
+      let mut buf = Vec::with_capacity(PROMISED_COMPRESS_OVERHEAD + encoded_size);
+      buf.push(compressor as u8);
+      buf.extend(&[0; 4]);
+
+      let data = W::encode_message_to_vec(msg).map_err(NetTransportError::Wire)?;
+      compressor
+        .compress_to_vec(&data, &mut buf)
+        .map_err(NetTransportError::Compress)?;
+
+      let data_len = buf.len() - PROMISED_COMPRESS_OVERHEAD;
+      NetworkEndian::write_u32(&mut buf[1..PROMISED_COMPRESS_OVERHEAD], data_len as u32);
+
+      conn
+        .write_all(&buf)
+        .await
+        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
+      return conn
+        .flush()
+        .await
+        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
+        .map(|_| data_len);
+    }
+
+    let (tx, rx) = futures::channel::oneshot::channel();
+    rayon::spawn(move || {
+      let mut buf = Vec::with_capacity(PROMISED_COMPRESS_OVERHEAD + encoded_size);
+      buf.push(compressor as u8);
+      buf.extend([0; 4].as_slice());
+
+      let data = match W::encode_message_to_vec(msg).map_err(NetTransportError::Wire) {
+        Ok(data) => data,
+        Err(e) => {
+          if tx.send(Err(e)).is_err() {
+            tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+          }
+          return;
+        }
+      };
+
+      if let Err(e) = compressor
+        .compress_to_vec(&data, &mut buf)
+        .map_err(NetTransportError::Compress)
+      {
+        if tx.send(Err(e)).is_err() {
+          tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+        }
+        return;
+      }
+
+      let data_len = buf.len() - PROMISED_COMPRESS_OVERHEAD;
+      NetworkEndian::write_u32(&mut buf[1..PROMISED_COMPRESS_OVERHEAD], data_len as u32);
+
+      if tx.send(Ok(buf)).is_err() {
+        tracing::error!(target: "showbiz.net.packet", "failed to send computation task result back to main thread");
+      }
+    });
+
+    match rx.await {
+      Ok(Ok(buf)) => {
+        conn
+          .write_all(&buf)
+          .await
+          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
+        conn
+          .flush()
+          .await
+          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
+          .map(|_| buf.len())
+      }
+      Ok(Err(e)) => Err(e),
+      Err(_) => Err(NetTransportError::ComputationTaskFailed),
+    }
+  }
+
+  async fn send_message_without_compression_and_encryption(
+    &self,
+    mut conn: impl AsyncWrite + Unpin,
+    target: &A::ResolvedAddress,
+    msg: Message<I, A::ResolvedAddress>,
+  ) -> Result<usize, NetTransportError<A, W>> {
+    let data = W::encode_message_to_bytes(msg).map_err(NetTransportError::Wire)?;
+    let total_data = data.len();
+    conn
+      .write_all(&data)
+      .await
+      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
+
+    conn
+      .flush()
+      .await
+      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
+      .map(|_| total_data)
   }
 }
 
@@ -823,6 +1073,7 @@ where
 
   async fn read_message(
     &self,
+    from: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     conn: &mut Self::Stream,
   ) -> Result<
     (
@@ -831,6 +1082,84 @@ where
     ),
     Self::Error,
   > {
+    let mut conn = BufReader::new(conn);
+    let mut tag = [0; 1];
+    conn.read_exact(&mut tag).await.map_err(|e| {
+      tracing::error!(target: "showbiz.net.promised", remote = %from, err=%e, "failed to receive");
+      Self::Error::Connection(ConnectionError::promised_read(e))
+    })?;
+
+    let mut stream_label = if tag[0] == LABEL_TAG {
+      let mut buf = [0u8; 1];
+      conn.read_exact(&mut buf).await.map_err(|e| {
+        tracing::error!(target: "showbiz.net.promised", remote = %from, err=%e, "failed to receive and remove the stream label header");
+        Self::Error::Connection(ConnectionError::promised_read(e))
+      })?;
+
+      let len = buf[0] as usize;
+      let mut buf = vec![0u8; len];
+      conn.read_exact(&mut buf).await.map_err(|e| {
+        tracing::error!(target: "showbiz.net.promised", remote = %from, err=%e, "failed to receive and remove the stream label header");
+
+        Self::Error::Connection(ConnectionError::promised_read(e))
+      })?;
+
+      let buf: Bytes = buf.into();
+      Label::try_from(buf)
+        .map_err(|e| {
+          tracing::error!(target: "showbiz.net.promised", remote = %from, err=%e, "failed to receive and remove the stream label header");
+
+          Self::Error::IO(io::Error::new(io::ErrorKind::InvalidData, e))
+        })?
+    } else {
+      Label::empty()
+    };
+
+    let label = &self.opts.label;
+
+    if self.opts.skip_inbound_label_check {
+      if !stream_label.is_empty() {
+        tracing::error!(target: "showbiz.net.promised", "unexpected double stream label header");
+        return Err(LabelError::duplicate(label.cheap_clone(), stream_label).into());
+      }
+
+      // Set this from config so that the auth data assertions work below.
+      stream_label = label.cheap_clone();
+    }
+
+    if stream_label.ne(&self.opts.label) {
+      tracing::error!(target: "showbiz.net.promised", local_label=%label, remote_label=%stream_label, "discarding stream with unacceptable label");
+      return Err(LabelError::mismatch(label.cheap_clone(), stream_label).into());
+    }
+
+    let tag = if tag[0] == LABEL_TAG {
+      conn.read_exact(&mut tag)
+        .await
+        .map_err(|e| {
+          tracing::error!(target: "showbiz.net.promised", remote = %from, err=%e, "failed to receive");
+          Self::Error::Connection(ConnectionError::promised_read(e))
+        })?;
+      tag[0]
+    } else {
+      tag[0]
+    };
+
+    // Check if the message is encrypted
+    if ENCRYPT_TAG.contains(&tag) {
+      #[cfg(not(feature = "encryption"))]
+      {
+        tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
+        return Err(Self::Error::Security(SecurityError::Disabled));
+      }
+
+      if self.encryptor.is_none() {
+        tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
+        return Err(Self::Error::Security(SecurityError::Disabled));
+      }
+
+      todo!()
+    }
+
     todo!()
   }
 
@@ -840,7 +1169,162 @@ where
     target: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     msg: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<usize, Self::Error> {
-    todo!()
+    #[cfg(not(any(feature = "compression", feature = "encryption")))]
+    return self
+      .send_message_without_compression_and_encryption(conn, target, msg)
+      .await;
+
+    #[cfg(all(feature = "compression", not(feature = "encryption")))]
+    return self
+      .send_message_with_compression_without_encryption(conn, target, msg)
+      .await;
+
+    #[cfg(all(not(feature = "compression"), feature = "encryption"))]
+    return self
+      .send_message_with_encryption_without_compression(conn, target, msg, &self.opts.label)
+      .await;
+
+    let compression_enabled = self.opts.compressor.is_some();
+    let encryption_enabled = self.encryptor.is_some() && self.opts.gossip_verify_outgoing;
+
+    if !compression_enabled && !encryption_enabled {
+      return self
+        .send_message_without_compression_and_encryption(conn, target, msg)
+        .await;
+    }
+
+    if compression_enabled && !encryption_enabled {
+      return self
+        .send_message_with_compression_without_encryption(conn, target, msg)
+        .await;
+    }
+
+    if !compression_enabled && encryption_enabled {
+      return self
+        .send_message_with_encryption_without_compression(conn, target, msg, &self.opts.label)
+        .await;
+    }
+
+    let encoded_size = W::encoded_len(&msg);
+    let encryptor = self.encryptor.as_ref().unwrap();
+    let compressor = self.opts.compressor.unwrap();
+    if encoded_size < self.opts.offload_size {
+      let encrypt_header = self.encryptor.as_ref().unwrap().encrypt_overhead();
+      let total_len = encrypt_header + PROMISED_COMPRESS_OVERHEAD + encoded_size;
+      let mut buf = BytesMut::with_capacity(total_len);
+
+      let pk = encryptor.kr.primary_key().await;
+      let nonce = encryptor.write_header(&mut buf);
+      buf.resize(total_len, 0);
+
+      W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)?;
+
+      let compressed = compressor
+        .compress_into_vec(&buf[encrypt_header..])
+        .map_err(NetTransportError::Compress)?;
+      let compressed_size = compressed.len();
+      buf.truncate(encrypt_header);
+      buf.put_u8(compressor as u8);
+      let mut compress_size_buf = [0; core::mem::size_of::<u32>()];
+      NetworkEndian::write_u32(&mut compress_size_buf, compressed_size as u32);
+      buf.put_slice(&compress_size_buf);
+      buf.put_slice(&compressed);
+
+      let mut dst = buf.split_off(encrypt_header);
+      self
+        .encryptor
+        .as_ref()
+        .unwrap()
+        .encrypt(pk, nonce, self.opts.label.as_bytes(), &mut dst)
+        .map(|_| buf.unsplit(dst))
+        .map_err(NetTransportError::Security)?;
+
+      conn
+        .write_all(&buf)
+        .await
+        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
+
+      return conn
+        .flush()
+        .await
+        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
+        .map(|_| total_len);
+    }
+
+    let (tx, rx) = futures::channel::oneshot::channel();
+
+    let encrypt_header = self.encryptor.as_ref().unwrap().encrypt_overhead();
+    let total_len = encrypt_header + PROMISED_COMPRESS_OVERHEAD + encoded_size;
+    let mut buf = BytesMut::with_capacity(total_len);
+
+    let pk = encryptor.kr.primary_key().await;
+    let nonce = encryptor.write_header(&mut buf);
+    buf.resize(total_len, 0);
+    let encryptor = encryptor.clone();
+    let stream_label = self.opts.label.cheap_clone();
+
+    rayon::spawn(move || {
+      if let Err(e) =
+        W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)
+      {
+        if tx.send(Err(e)).is_err() {
+          tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+        }
+        return;
+      }
+
+      let compressed = match compressor
+        .compress_into_vec(&buf[encrypt_header..])
+        .map_err(NetTransportError::Compress)
+      {
+        Ok(compressed) => compressed,
+        Err(e) => {
+          if tx.send(Err(e)).is_err() {
+            tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+          }
+          return;
+        }
+      };
+      let compressed_size = compressed.len();
+      buf.truncate(encrypt_header);
+      buf.put_u8(compressor as u8);
+      let mut compress_size_buf = [0; core::mem::size_of::<u32>()];
+      NetworkEndian::write_u32(&mut compress_size_buf, compressed_size as u32);
+      buf.put_slice(&compress_size_buf);
+      buf.put_slice(&compressed);
+
+      let mut dst = buf.split_off(encrypt_header);
+      if let Err(e) = encryptor
+        .encrypt(pk, nonce, stream_label.as_bytes(), &mut dst)
+        .map(|_| buf.unsplit(dst))
+        .map_err(NetTransportError::Security)
+      {
+        if tx.send(Err(e)).is_err() {
+          tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+        }
+        return;
+      }
+
+      if tx.send(Ok(buf)).is_err() {
+        tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+      }
+    });
+
+    match rx.await {
+      Ok(Ok(buf)) => {
+        conn
+          .write_all(&buf)
+          .await
+          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
+        conn
+          .flush()
+          .await
+          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
+          .map(|_| total_len)
+      }
+      Ok(Err(e)) => Err(e),
+      Err(_) => Err(NetTransportError::ComputationTaskFailed),
+    }
   }
 
   async fn send_packet(
@@ -989,13 +1473,10 @@ where
         if self.opts.label.is_empty() {
           Ok(conn)
         } else {
-          conn.add_label_header(&self.opts.label).await.map_err(|e| {
-            Self::Error::Connection(ConnectionError {
-              kind: ConnectionKind::Promised,
-              error_kind: ConnectionErrorKind::Write,
-              error: e,
-            })
-          })?;
+          conn
+            .add_label_header(&self.opts.label)
+            .await
+            .map_err(|e| Self::Error::Connection(ConnectionError::promised_write(e)))?;
           Ok(conn)
         }
       }

@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -70,6 +70,41 @@ impl Compressor {
         .encode_all(src)
         .status
         .map(|_| ())
+        .map_err(CompressError::Lzw),
+    }
+  }
+
+  // pub fn compress_to_bytes_mut(&self, src: &[u8], dst: &mut BytesMut) -> Result<(), CompressError> {
+  //   match self {
+  //     Self::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+  //       .into_stream()
+  //       .encode_all(src)
+  //       .status
+  //       .map(|_| ())
+  //       .map_err(CompressError::Lzw),
+  //   }
+  // }
+
+  /// Compresses to the given vec.
+  pub fn compress_to_vec(&self, src: &[u8], dst: &mut Vec<u8>) -> Result<(), CompressError> {
+    match self {
+      Self::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+        .into_vec(dst)
+        .encode_all(src)
+        .status
+        .map(|_| ())
+        .map_err(CompressError::Lzw),
+    }
+  }
+
+  /// Compresses the given buffer.
+  pub fn compress_into_vec(&self, src: &[u8]) -> Result<Vec<u8>, CompressError> {
+    let mut buf = Vec::with_capacity(src.len());
+    match self {
+      Self::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
+        .into_vec(&mut buf)
+        .encode_all(src)
+        .status
         .map_err(CompressError::Lzw),
     }
   }

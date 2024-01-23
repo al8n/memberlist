@@ -121,4 +121,20 @@ impl ConnectionError {
   pub fn is_eof(&self) -> bool {
     self.error.kind() == std::io::ErrorKind::UnexpectedEof
   }
+
+  pub(super) fn promised_read(err: std::io::Error) -> Self {
+    Self {
+      kind: ConnectionKind::Promised,
+      error_kind: ConnectionErrorKind::Read,
+      error: err,
+    }
+  }
+
+  pub(super) fn promised_write(err: std::io::Error) -> Self {
+    Self {
+      kind: ConnectionKind::Promised,
+      error_kind: ConnectionErrorKind::Write,
+      error: err,
+    }
+  }
 }

@@ -241,7 +241,7 @@ where
       conn.set_timeout(Some(self.inner.opts.timeout));
     }
 
-    let msg = match self.read_message(&mut conn).await {
+    let msg = match self.read_message(&addr, &mut conn).await {
       Ok((_read, msg)) => {
         #[cfg(feature = "metrics")]
         {

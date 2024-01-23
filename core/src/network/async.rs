@@ -51,7 +51,10 @@ where
     let ping_seq_no = ping.seq_no;
     self.send_message(&mut conn, target, ping.into()).await?;
 
-    let msg: Message<_, _> = self.read_message(&mut conn).await.map(|(_, msg)| msg)?;
+    let msg: Message<_, _> = self
+      .read_message(target, &mut conn)
+      .await
+      .map(|(_, msg)| msg)?;
     let kind = msg.kind();
     if let Some(ack) = msg.try_unwrap_ack() {
       if ack.seq_no != ping_seq_no {
@@ -103,7 +106,11 @@ where
       Some(self.inner.opts.timeout)
     });
 
-    match self.read_message(&mut conn).await.map(|(_read, msg)| msg)? {
+    match self
+      .read_message(node.address(), &mut conn)
+      .await
+      .map(|(_read, msg)| msg)?
+    {
       Message::ErrorResponse(err) => Err(Error::remote(err)),
       Message::PushPull(pp) => Ok(pp),
       msg => Err(Error::unexpected_message("PushPull", msg.kind())),
@@ -176,6 +183,7 @@ where
 
   pub(crate) async fn read_message(
     &self,
+    from: &<T::Resolver as AddressResolver>::ResolvedAddress,
     conn: &mut T::Stream,
   ) -> Result<
     (
@@ -187,7 +195,7 @@ where
     self
       .inner
       .transport
-      .read_message(conn)
+      .read_message(from, conn)
       .await
       .map_err(Error::transport)
   }

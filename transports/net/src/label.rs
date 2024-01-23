@@ -243,9 +243,7 @@ impl core::fmt::Display for Label {
   }
 }
 
-pub(crate) trait LabelAsyncIOExt:
-  AsyncWrite + AsyncRead + Unpin + Send + Sync + 'static
-{
+pub(crate) trait LabelAsyncIOExt: AsyncWrite + AsyncRead + Unpin + Send + Sync {
   fn add_label_header(&mut self, label: &Label) -> impl Future<Output = io::Result<()>> + Send {
     async move {
       let mut buf = BytesMut::with_capacity(2 + label.len());
@@ -294,7 +292,7 @@ pub enum LabelError {
   },
 
   /// Unexpected double label header
-  #[error("unexpected double packet label header, inbound label check is disabled, but got double label header: local={local}, remote={remote}")]
+  #[error("unexpected double label header, inbound label check is disabled, but got double label header: local={local}, remote={remote}")]
   Duplicate {
     /// The local label.
     local: Label,

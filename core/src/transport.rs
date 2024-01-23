@@ -3,6 +3,7 @@ use std::{
   time::{Duration, Instant},
 };
 
+use bytes::Bytes;
 use nodecraft::resolver::AddressResolver;
 pub use nodecraft::*;
 
@@ -529,6 +530,11 @@ pub trait Wire: Send + Sync + 'static {
     Ok(buf)
   }
 
+  /// Encodes the given message into the bytes.
+  fn encode_message_to_bytes<I, A>(msg: Message<I, A>) -> Result<Bytes, Self::Error> {
+    Self::encode_message_to_vec(msg).map(Into::into)
+  }
+
   /// Decodes the given bytes into a message
   fn decode_message<I, A>(src: &[u8]) -> Result<Message<I, A>, Self::Error>;
 }
@@ -592,6 +598,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns the number of bytes read and the message.
   fn read_message(
     &self,
+    from: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     conn: &mut Self::Stream,
   ) -> impl Future<
     Output = Result<
