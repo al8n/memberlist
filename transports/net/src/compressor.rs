@@ -98,18 +98,6 @@ impl Compressor {
   }
 
   /// Compresses the given buffer.
-  pub fn compress_into_vec(&self, src: &[u8]) -> Result<Vec<u8>, CompressError> {
-    let mut buf = Vec::with_capacity(src.len());
-    match self {
-      Self::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
-        .into_vec(&mut buf)
-        .encode_all(src)
-        .status
-        .map_err(CompressError::Lzw),
-    }
-  }
-
-  /// Compresses the given buffer.
   pub fn compress_to_bytes(&self, src: &[u8]) -> Result<Bytes, CompressError> {
     let mut buf = Vec::with_capacity(src.len());
     match self {

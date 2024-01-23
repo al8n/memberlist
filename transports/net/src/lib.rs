@@ -781,6 +781,70 @@ where
     false
   }
 
+  #[cfg(all(feature = "compression", feature = "encryption"))]
+  fn compress_and_encrypt(
+    compressor: &Compressor,
+    encryptor: &Encryptor,
+    pk: SecretKey,
+    label: &Label,
+    msg: Message<I, A::ResolvedAddress>,
+    encoded_size: usize,
+  ) -> Result<BytesMut, NetTransportError<A, W>> {
+    let encrypt_header = encryptor.encrypt_overhead();
+    let total_len = encrypt_header + PROMISED_COMPRESS_OVERHEAD + encoded_size;
+    let mut buf = BytesMut::with_capacity(total_len);
+    let nonce = encryptor.write_header(&mut buf);
+    buf.resize(total_len, 0);
+
+    W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)?;
+
+    let compressed = compressor
+      .compress_to_bytes(&buf[encrypt_header..])
+      .map_err(NetTransportError::Compress)?;
+    let compressed_size = compressed.len();
+    buf.truncate(encrypt_header);
+    buf.put_u8(*compressor as u8);
+    let mut compress_size_buf = [0; core::mem::size_of::<u32>()];
+    NetworkEndian::write_u32(&mut compress_size_buf, compressed_size as u32);
+    buf.put_slice(&compress_size_buf);
+    buf.put_slice(&compressed);
+
+    let mut dst = buf.split_off(encrypt_header);
+    encryptor
+      .encrypt(pk, nonce, label.as_bytes(), &mut dst)
+      .map(|_| {
+        buf.unsplit(dst);
+        buf
+      })
+      .map_err(NetTransportError::Security)
+  }
+
+  #[cfg(feature = "encryption")]
+  fn encrypt(
+    encryptor: &Encryptor,
+    pk: SecretKey,
+    label: &Label,
+    msg: Message<I, A::ResolvedAddress>,
+    encoded_size: usize,
+  ) -> Result<BytesMut, NetTransportError<A, W>> {
+    let encrypt_header = encryptor.encrypt_overhead();
+    let total_len = encrypt_header + encoded_size;
+    let mut buf = BytesMut::with_capacity(total_len);
+    let nonce = encryptor.write_header(&mut buf);
+    buf.resize(total_len, 0);
+
+    W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)?;
+
+    let mut dst = buf.split_off(encrypt_header);
+    encryptor
+      .encrypt(pk, nonce, label.as_bytes(), &mut dst)
+      .map(|_| {
+        buf.unsplit(dst);
+        buf
+      })
+      .map_err(NetTransportError::Security)
+  }
+
   #[cfg(feature = "encryption")]
   async fn send_message_with_encryption_without_compression(
     &self,
@@ -799,87 +863,62 @@ where
     };
 
     let encoded_size = W::encoded_len(&msg);
-    if encoded_size < self.opts.offload_size {
-      let encrypt_header = enp.encrypt_overhead();
-      let total_len = encrypt_header + encoded_size;
-      let mut buf = BytesMut::with_capacity(total_len);
-
+    let buf = if encoded_size < self.opts.offload_size {
       let pk = enp.kr.primary_key().await;
-      let nonce = enp.write_header(&mut buf);
-      buf.resize(total_len, 0);
-
-      W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)?;
-
-      let mut dst = buf.split_off(encrypt_header);
-      enp
-        .encrypt(pk, nonce, stream_label.as_bytes(), &mut dst)
-        .map(|_| buf.unsplit(dst))
-        .map_err(NetTransportError::Security)?;
-
-      conn
-        .write_all(&buf)
-        .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
-
-      return conn
-        .flush()
-        .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
-        .map(|_| total_len);
-    }
-
-    let (tx, rx) = futures::channel::oneshot::channel();
-
-    let encrypt_header = enp.encrypt_overhead();
-    let total_len = encrypt_header + encoded_size;
-    let mut buf = BytesMut::with_capacity(total_len);
-    let pk = enp.kr.primary_key().await;
-    let nonce = enp.write_header(&mut buf);
-    buf.resize(total_len, 0);
-    let stream_label = stream_label.cheap_clone();
-    let enp = enp.clone();
-    rayon::spawn(move || {
-      if let Err(e) =
-        W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)
-      {
-        if tx.send(Err(e)).is_err() {
+      Self::encrypt(enp, pk, &self.opts.label, msg, encoded_size)?
+    } else {
+      let (tx, rx) = futures::channel::oneshot::channel();
+      let pk = enp.kr.primary_key().await;
+      let stream_label = stream_label.cheap_clone();
+      let enp = enp.clone();
+      rayon::spawn(move || {
+        if tx
+          .send(Self::encrypt(&enp, pk, &stream_label, msg, encoded_size))
+          .is_err()
+        {
           tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
         }
-        return;
-      }
+      });
 
-      let mut dst = buf.split_off(encrypt_header);
-      if let Err(e) = enp
-        .encrypt(pk, nonce, stream_label.as_bytes(), &mut dst)
-        .map(|_| buf.unsplit(dst))
-        .map_err(NetTransportError::Security)
-      {
-        if tx.send(Err(e)).is_err() {
-          tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
-        }
-        return;
+      match rx.await {
+        Ok(Ok(buf)) => buf,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err(NetTransportError::ComputationTaskFailed),
       }
+    };
 
-      if tx.send(Ok(buf)).is_err() {
-        tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
-      }
-    });
+    let total_len = buf.len();
+    conn
+      .write_all(&buf)
+      .await
+      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
 
-    match rx.await {
-      Ok(Ok(buf)) => {
-        conn
-          .write_all(&buf)
-          .await
-          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
-        conn
-          .flush()
-          .await
-          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
-          .map(|_| total_len)
-      }
-      Ok(Err(e)) => Err(e),
-      Err(_) => Err(NetTransportError::ComputationTaskFailed),
-    }
+    conn
+      .flush()
+      .await
+      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
+      .map(|_| total_len)
+  }
+
+  #[cfg(feature = "compression")]
+  fn compress(
+    compressor: Compressor,
+    msg: Message<I, A::ResolvedAddress>,
+    encoded_size: usize,
+  ) -> Result<Vec<u8>, NetTransportError<A, W>> {
+    let mut buf = Vec::with_capacity(PROMISED_COMPRESS_OVERHEAD + encoded_size);
+    buf.push(compressor as u8);
+    buf.extend(&[0; 4]);
+
+    let data = W::encode_message_to_vec(msg).map_err(NetTransportError::Wire)?;
+    compressor
+      .compress_to_vec(&data, &mut buf)
+      .map_err(NetTransportError::Compress)?;
+
+    let data_len = buf.len() - PROMISED_COMPRESS_OVERHEAD;
+    NetworkEndian::write_u32(&mut buf[1..PROMISED_COMPRESS_OVERHEAD], data_len as u32);
+
+    Ok(buf)
   }
 
   #[cfg(feature = "compression")]
@@ -900,79 +939,36 @@ where
 
     let encoded_size = W::encoded_len(&msg);
 
-    if encoded_size < self.opts.offload_size {
-      let mut buf = Vec::with_capacity(PROMISED_COMPRESS_OVERHEAD + encoded_size);
-      buf.push(compressor as u8);
-      buf.extend(&[0; 4]);
-
-      let data = W::encode_message_to_vec(msg).map_err(NetTransportError::Wire)?;
-      compressor
-        .compress_to_vec(&data, &mut buf)
-        .map_err(NetTransportError::Compress)?;
-
-      let data_len = buf.len() - PROMISED_COMPRESS_OVERHEAD;
-      NetworkEndian::write_u32(&mut buf[1..PROMISED_COMPRESS_OVERHEAD], data_len as u32);
-
-      conn
-        .write_all(&buf)
-        .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
-      return conn
-        .flush()
-        .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
-        .map(|_| data_len);
-    }
-
-    let (tx, rx) = futures::channel::oneshot::channel();
-    rayon::spawn(move || {
-      let mut buf = Vec::with_capacity(PROMISED_COMPRESS_OVERHEAD + encoded_size);
-      buf.push(compressor as u8);
-      buf.extend([0; 4].as_slice());
-
-      let data = match W::encode_message_to_vec(msg).map_err(NetTransportError::Wire) {
-        Ok(data) => data,
-        Err(e) => {
-          if tx.send(Err(e)).is_err() {
-            tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
-          }
-          return;
-        }
-      };
-
-      if let Err(e) = compressor
-        .compress_to_vec(&data, &mut buf)
-        .map_err(NetTransportError::Compress)
-      {
-        if tx.send(Err(e)).is_err() {
+    let buf = if encoded_size < self.opts.offload_size {
+      Self::compress(compressor, msg, encoded_size)?
+    } else {
+      let (tx, rx) = futures::channel::oneshot::channel();
+      rayon::spawn(move || {
+        if tx
+          .send(Self::compress(compressor, msg, encoded_size))
+          .is_err()
+        {
           tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
         }
-        return;
-      }
+      });
 
-      let data_len = buf.len() - PROMISED_COMPRESS_OVERHEAD;
-      NetworkEndian::write_u32(&mut buf[1..PROMISED_COMPRESS_OVERHEAD], data_len as u32);
-
-      if tx.send(Ok(buf)).is_err() {
-        tracing::error!(target: "showbiz.net.packet", "failed to send computation task result back to main thread");
+      match rx.await {
+        Ok(Ok(buf)) => buf,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err(NetTransportError::ComputationTaskFailed),
       }
-    });
+    };
 
-    match rx.await {
-      Ok(Ok(buf)) => {
-        conn
-          .write_all(&buf)
-          .await
-          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
-        conn
-          .flush()
-          .await
-          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
-          .map(|_| buf.len())
-      }
-      Ok(Err(e)) => Err(e),
-      Err(_) => Err(NetTransportError::ComputationTaskFailed),
-    }
+    let total_len = buf.len();
+    conn
+      .write_all(&buf)
+      .await
+      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
+    conn
+      .flush()
+      .await
+      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
+      .map(|_| total_len)
   }
 
   async fn send_message_without_compression_and_encryption(
@@ -1208,123 +1204,57 @@ where
     let encoded_size = W::encoded_len(&msg);
     let encryptor = self.encryptor.as_ref().unwrap();
     let compressor = self.opts.compressor.unwrap();
-    if encoded_size < self.opts.offload_size {
-      let encrypt_header = self.encryptor.as_ref().unwrap().encrypt_overhead();
-      let total_len = encrypt_header + PROMISED_COMPRESS_OVERHEAD + encoded_size;
-      let mut buf = BytesMut::with_capacity(total_len);
 
+    let buf = if encoded_size < self.opts.offload_size {
       let pk = encryptor.kr.primary_key().await;
-      let nonce = encryptor.write_header(&mut buf);
-      buf.resize(total_len, 0);
+      Self::compress_and_encrypt(
+        &compressor,
+        encryptor,
+        pk,
+        &self.opts.label,
+        msg,
+        encoded_size,
+      )?
+    } else {
+      let (tx, rx) = futures::channel::oneshot::channel();
+      let encryptor = encryptor.clone();
+      let pk = encryptor.kr.primary_key().await;
+      let stream_label = self.opts.label.cheap_clone();
 
-      W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)?;
-
-      let compressed = compressor
-        .compress_into_vec(&buf[encrypt_header..])
-        .map_err(NetTransportError::Compress)?;
-      let compressed_size = compressed.len();
-      buf.truncate(encrypt_header);
-      buf.put_u8(compressor as u8);
-      let mut compress_size_buf = [0; core::mem::size_of::<u32>()];
-      NetworkEndian::write_u32(&mut compress_size_buf, compressed_size as u32);
-      buf.put_slice(&compress_size_buf);
-      buf.put_slice(&compressed);
-
-      let mut dst = buf.split_off(encrypt_header);
-      self
-        .encryptor
-        .as_ref()
-        .unwrap()
-        .encrypt(pk, nonce, self.opts.label.as_bytes(), &mut dst)
-        .map(|_| buf.unsplit(dst))
-        .map_err(NetTransportError::Security)?;
-
-      conn
-        .write_all(&buf)
-        .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
-
-      return conn
-        .flush()
-        .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
-        .map(|_| total_len);
-    }
-
-    let (tx, rx) = futures::channel::oneshot::channel();
-
-    let encrypt_header = self.encryptor.as_ref().unwrap().encrypt_overhead();
-    let total_len = encrypt_header + PROMISED_COMPRESS_OVERHEAD + encoded_size;
-    let mut buf = BytesMut::with_capacity(total_len);
-
-    let pk = encryptor.kr.primary_key().await;
-    let nonce = encryptor.write_header(&mut buf);
-    buf.resize(total_len, 0);
-    let encryptor = encryptor.clone();
-    let stream_label = self.opts.label.cheap_clone();
-
-    rayon::spawn(move || {
-      if let Err(e) =
-        W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)
-      {
-        if tx.send(Err(e)).is_err() {
+      rayon::spawn(move || {
+        if tx
+          .send(Self::compress_and_encrypt(
+            &compressor,
+            &encryptor,
+            pk,
+            &stream_label,
+            msg,
+            encoded_size,
+          ))
+          .is_err()
+        {
           tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
         }
-        return;
-      }
+      });
 
-      let compressed = match compressor
-        .compress_into_vec(&buf[encrypt_header..])
-        .map_err(NetTransportError::Compress)
-      {
-        Ok(compressed) => compressed,
-        Err(e) => {
-          if tx.send(Err(e)).is_err() {
-            tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
-          }
-          return;
-        }
-      };
-      let compressed_size = compressed.len();
-      buf.truncate(encrypt_header);
-      buf.put_u8(compressor as u8);
-      let mut compress_size_buf = [0; core::mem::size_of::<u32>()];
-      NetworkEndian::write_u32(&mut compress_size_buf, compressed_size as u32);
-      buf.put_slice(&compress_size_buf);
-      buf.put_slice(&compressed);
-
-      let mut dst = buf.split_off(encrypt_header);
-      if let Err(e) = encryptor
-        .encrypt(pk, nonce, stream_label.as_bytes(), &mut dst)
-        .map(|_| buf.unsplit(dst))
-        .map_err(NetTransportError::Security)
-      {
-        if tx.send(Err(e)).is_err() {
-          tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
-        }
-        return;
+      match rx.await {
+        Ok(Ok(buf)) => buf,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err(NetTransportError::ComputationTaskFailed),
       }
+    };
 
-      if tx.send(Ok(buf)).is_err() {
-        tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
-      }
-    });
+    let total_len = buf.len();
+    conn
+      .write_all(&buf)
+      .await
+      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
 
-    match rx.await {
-      Ok(Ok(buf)) => {
-        conn
-          .write_all(&buf)
-          .await
-          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))?;
-        conn
-          .flush()
-          .await
-          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
-          .map(|_| total_len)
-      }
-      Ok(Err(e)) => Err(e),
-      Err(_) => Err(NetTransportError::ComputationTaskFailed),
-    }
+    conn
+      .flush()
+      .await
+      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_write(e)))
+      .map(|_| total_len)
   }
 
   async fn send_packet(
