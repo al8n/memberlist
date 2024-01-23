@@ -129,7 +129,7 @@ pub struct Options {
   /// Controls whether to enforce encryption for incoming
   /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
   /// a running cluster.
-  gossip_verify_incoming: bool, 
+  gossip_verify_incoming: bool,
 
   /// Used to guarantee protocol-compatibility
   protocol_version: ProtocolVersion,

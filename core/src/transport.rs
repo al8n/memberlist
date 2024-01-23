@@ -519,8 +519,8 @@ pub trait Wire: Send + Sync + 'static {
   /// Returns the encoded length of the given message
   fn encoded_len<I, A>(msg: &Message<I, A>) -> usize;
 
-  /// Encodes the given message into the given buffer
-  fn encode_message<I, A>(msg: Message<I, A>, dst: &mut [u8]) -> Result<(), Self::Error>;
+  /// Encodes the given message into the given buffer, returns the number of bytes written
+  fn encode_message<I, A>(msg: Message<I, A>, dst: &mut [u8]) -> Result<usize, Self::Error>;
 
   /// Encodes the given message into the vec.
   fn encode_message_to_vec<I, A>(msg: Message<I, A>) -> Result<Vec<u8>, Self::Error> {

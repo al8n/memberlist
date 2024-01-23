@@ -15,7 +15,7 @@ use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use checksum::CHECKSUM_SIZE;
 use compressor::UnknownCompressor;
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use label::{LabelAsyncIOExt, LabelBufExt};
 use security::{Encryptor, SecurityError};
 use showbiz_core::{
@@ -30,7 +30,7 @@ use showbiz_core::{
   types::{Message, Packet, SmallVec, TinyVec},
   CheapClone,
 };
-use showbiz_utils::{net::CIDRsPolicy, OneOrMore};
+use showbiz_utils::{net::CIDRsPolicy, BigVec, OneOrMore};
 use wg::AsyncWaitGroup;
 
 const CHECKSUM_TAG: core::ops::RangeInclusive<u8> = 44..=64;
@@ -483,7 +483,8 @@ where
         (Some(pk), Some(keys)) => Some(SecretKeyring::with_keys(pk, keys.iter().copied())),
         _ => None,
       }
-    }.map(|kr| Encryptor::new(opts.encryption_algo.unwrap(), kr));
+    }
+    .map(|kr| Encryptor::new(opts.encryption_algo.unwrap(), kr));
     loop {
       #[cfg(feature = "metrics")]
       let transport = {
@@ -538,6 +539,59 @@ where
 
     overhead
   }
+
+  async fn send_batch(
+    &self,
+    addr: &A::ResolvedAddress,
+    batch: Batch<I, A::ResolvedAddress>,
+  ) -> Result<usize, NetTransportError<A, W>> {
+    let mut offset = 0;
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len);
+    buf.add_label_header(&self.opts.label);
+    offset += self.opts.label.encoded_overhead();
+
+    debug_assert_eq!(offset, buf.len(), "wrong label encoded length");
+
+    #[cfg(feature = "encryption")]
+    let is_secure = P::is_secure();
+
+    #[cfg(feature = "encryption")]
+    let nonce = if !is_secure {
+      if let (Some(enp), true) = (self.encryptor.as_ref(), self.opts.gossip_verify_outgoing) {
+        let nonce = enp.write_header(&mut buf);
+        Some(nonce)
+      } else {
+        None
+      }
+    } else {
+      None
+    };
+
+    let cks_offset = buf.len();
+    let mut offset = buf.len();
+    let promised = P::is_promised();
+    if !promised {
+      // reserve to store checksum
+      buf.put_u8(self.opts.checksumer as u8);
+      buf.put_slice(&[0; CHECKSUM_SIZE]);
+      offset += CHECKSUM_SIZE + 1;
+    }
+
+    buf.resize(batch.estimate_encoded_len, 0);
+    offset += P::write_packets_overhead(&mut buf[offset..]);
+    for packet in batch.packets {
+      offset += W::encode_message(packet, &mut buf[offset..])
+        .map_err(NetTransportError::Wire)?;
+    }
+
+    todo!()
+  }
+}
+
+struct Batch<I, A> {
+  num_packets: usize,
+  packets: TinyVec<Message<I, A>>,
+  estimate_encoded_len: usize,
 }
 
 impl<I, A, P, S, W> Transport for NetTransport<I, A, P, S, W>
@@ -559,23 +613,6 @@ where
   type Wire = W;
 
   type Runtime = <Self::Resolver as AddressResolver>::Runtime;
-
-  // async fn write_to(&self, b: &[u8], addr: SocketAddr) -> Result<Instant, TransportError<Self>> {
-  //   if let Some(label) = &self.label {
-  //     // TODO: is there a better way to avoid allocating and copying?
-  //     if !label.is_empty() {
-  //       let b =
-  //         Label::add_label_header_to_packet(b, label.as_bytes()).map_err(TransportError::Encode)?;
-  //       return PacketStream::send_to(&self.udp_listener, addr, &b)
-  //         .await
-  //         .map(|_| Instant::now());
-  //     }
-  //   }
-
-  //   PacketStream::send_to(&self.udp_listener, addr, b)
-  //     .await
-  //     .map(|_| Instant::now())
-  // }
 
   async fn resolve(
     &self,
@@ -604,15 +641,15 @@ where
   }
 
   fn max_payload_size(&self) -> usize {
-    self.opts.max_payload_size
+    P::max_packet_size().min(self.opts.max_payload_size)
   }
 
   fn packet_overhead(&self) -> usize {
-    COMPOUND_MESSAGE_OVERHEAD
+    P::packet_overhead(&self.packet_layer)
   }
 
   fn packets_header_overhead(&self) -> usize {
-    self.fix_packet_overhead() + COMPOUND_MESSAGE_HEADER_OVERHEAD
+    self.fix_packet_overhead() + P::packets_header_overhead(&self.packet_layer)
   }
 
   fn blocked_address(
@@ -633,7 +670,7 @@ where
   ) -> Result<
     (
       usize,
-      showbiz_core::types::Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
+      Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
     ),
     Self::Error,
   > {
@@ -644,10 +681,7 @@ where
     &self,
     conn: &mut Self::Stream,
     target: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    msg: showbiz_core::types::Message<
-      Self::Id,
-      <Self::Resolver as AddressResolver>::ResolvedAddress,
-    >,
+    msg: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<usize, Self::Error> {
     todo!()
   }
@@ -655,17 +689,18 @@ where
   async fn send_packet(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    packet: showbiz_core::types::Message<
-      Self::Id,
-      <Self::Resolver as AddressResolver>::ResolvedAddress,
-    >,
+    packet: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(usize, Instant), Self::Error> {
     let now = Instant::now();
     let packet_encoded_len = W::encoded_len(&packet);
     let encoded_len = self.fix_packet_overhead() + packet_encoded_len;
-    if encoded_len >= u16::MAX as usize {
+
+    // If compression is not enabled, we can check the packet size first.
+    #[cfg(feature = "compression")]
+    if self.opts.compressor.is_none() && encoded_len >= P::max_packet_size() {
       return Err(Self::Error::PacketTooLarge(encoded_len));
     }
+
     let mut offset = 0;
     let mut buf = BytesMut::with_capacity(encoded_len);
     buf.add_label_header(&self.opts.label);
@@ -686,7 +721,7 @@ where
     } else {
       None
     };
-    
+
     let cks_offset = buf.len();
     let mut offset = buf.len();
     let promised = P::is_promised();
@@ -699,7 +734,8 @@ where
 
     buf.resize(offset + packet_encoded_len, 0);
 
-    W::encode_message(packet, &mut buf[offset..offset + packet_encoded_len]).map_err(Self::Error::Wire)?;
+    W::encode_message(packet, &mut buf[offset..offset + packet_encoded_len])
+      .map_err(Self::Error::Wire)?;
 
     #[cfg(feature = "compression")]
     if let Some(compressor) = self.opts.compressor {
@@ -718,7 +754,9 @@ where
         rayon::spawn(move || {
           let data_offset = cks_offset + 1 + CHECKSUM_SIZE;
           let compressed = match compressor
-            .compress_to_bytes(&messages_bytes[data_offset..]).map_err(Self::Error::Compress) {
+            .compress_to_bytes(&messages_bytes[data_offset..])
+            .map_err(Self::Error::Compress)
+          {
             Ok(compressed) => compressed,
             Err(e) => {
               if tx.send(Err(e)).is_err() {
@@ -727,9 +765,22 @@ where
               return;
             }
           };
-          
+
           messages_bytes[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
           messages_bytes.truncate(data_offset + compressed.len());
+
+          // check if the packet exceeds the max packet size can be sent by the packet layer
+          let packet_size = data_offset + compressed.len();
+          if packet_size >= P::max_packet_size() {
+            if tx
+              .send(Err(Self::Error::PacketTooLarge(packet_size)))
+              .is_err()
+            {
+              tracing::error!(target: "showbiz.net.packet", "failed to send computation task result back to main thread");
+            }
+            return;
+          }
+
           if !promised {
             let cks = checksumer.checksum(&messages_bytes[data_offset..]);
             NetworkEndian::write_u32(&mut messages_bytes[1..1 + CHECKSUM_SIZE], cks);
@@ -741,7 +792,15 @@ where
               if let Some((pk, enp)) = encryptor {
                 let nonce = nonce.unwrap();
                 return {
-                  if tx.send(enp.encrypt(pk, nonce, label.as_bytes(), &mut messages_bytes).map(|_| messages_bytes).map_err(Into::into)).is_err() {
+                  if tx
+                    .send(
+                      enp
+                        .encrypt(pk, nonce, label.as_bytes(), &mut messages_bytes)
+                        .map(|_| messages_bytes)
+                        .map_err(Into::into),
+                    )
+                    .is_err()
+                  {
                     tracing::error!(target: "showbiz.net.packet", "failed to send computation task result back to main thread");
                   }
                 };
@@ -763,12 +822,22 @@ where
         }
       } else {
         let compressed = compressor
-          .compress_to_bytes(&buf[offset..offset + packet_encoded_len]).map_err(Self::Error::Compress)?;
+          .compress_to_bytes(&buf[offset..offset + packet_encoded_len])
+          .map_err(Self::Error::Compress)?;
         buf[offset..offset + compressed.len()].copy_from_slice(&compressed);
         buf.truncate(offset + compressed.len());
+
+        // check if the packet exceeds the max packet size can be sent by the packet layer
+        if buf.len() >= P::max_packet_size() {
+          return Err(Self::Error::PacketTooLarge(encoded_len));
+        }
+
         if !promised {
           let cks = self.opts.checksumer.checksum(&buf[offset..]);
-          NetworkEndian::write_u32(&mut buf[cks_offset + 1 .. cks_offset + 1 + CHECKSUM_SIZE], cks);
+          NetworkEndian::write_u32(
+            &mut buf[cks_offset + 1..cks_offset + 1 + CHECKSUM_SIZE],
+            cks,
+          );
         }
 
         #[cfg(feature = "encryption")]
@@ -777,14 +846,20 @@ where
             let nonce = nonce.unwrap();
             let pk = enp.kr.primary_key().await;
             let mut dst = buf.split_off(cks_offset);
-            enp.encrypt(pk, nonce, self.opts.label.as_bytes(), &mut dst).map(|_| {
-              buf.unsplit(dst);
-            })?;
+            enp
+              .encrypt(pk, nonce, self.opts.label.as_bytes(), &mut dst)
+              .map(|_| {
+                buf.unsplit(dst);
+              })?;
           }
         }
       }
 
-      return self.sockets[0].send_to(addr, &buf).await.map(|sent| (sent, now)).map_err(Into::into);
+      return self.sockets[0]
+        .send_to(addr, &buf)
+        .await
+        .map(|sent| (sent, now))
+        .map_err(Into::into);
     }
 
     #[cfg(feature = "encryption")]
@@ -794,24 +869,98 @@ where
           let nonce = nonce.unwrap();
           let mut dst = buf.split_off(cks_offset);
           let pk = enp.kr.primary_key().await;
-          enp.encrypt(pk, nonce, self.opts.label.as_bytes(), &mut dst).map(|_| {
-            buf.unsplit(dst);
-          })?;
+          enp
+            .encrypt(pk, nonce, self.opts.label.as_bytes(), &mut dst)
+            .map(|_| {
+              buf.unsplit(dst);
+            })?;
         }
       }
     }
 
-    self.sockets[0].send_to(addr, &buf).await.map(|sent| (sent, now)).map_err(Into::into)
+    self.sockets[0]
+      .send_to(addr, &buf)
+      .await
+      .map(|sent| (sent, now))
+      .map_err(Into::into)
   }
 
   async fn send_packets(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    packets: TinyVec<
-      showbiz_core::types::Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
-    >,
+    packets: TinyVec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
   ) -> Result<(usize, Instant), Self::Error> {
-    todo!()
+    let now = Instant::now();
+
+    let mut batches =
+      SmallVec::<Batch<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>::new();
+    let packets_overhead = self.packets_header_overhead();
+    let mut estimate_batch_encoded_size = 0;
+    let mut current_packets_in_batch = 0;
+
+    // get how many packets a batch
+    for (idx, packet) in packets.iter().enumerate() {
+      let ep_len = W::encoded_len(packet);
+      // check if we reach the maximum packet size
+      let current_encoded_size = ep_len
+        + packets_overhead
+        + idx * self.packet_layer.packet_overhead()
+        + estimate_batch_encoded_size;
+      if current_encoded_size >= self.max_payload_size()
+        || current_packets_in_batch >= P::max_num_packets()
+      {
+        batches.push(Batch {
+          packets: TinyVec::with_capacity(current_packets_in_batch),
+          num_packets: current_packets_in_batch,
+          estimate_encoded_len: estimate_batch_encoded_size,
+        });
+        estimate_batch_encoded_size = packets_overhead + self.packet_layer.packets_header_overhead() + self.packet_layer.packet_overhead() + ep_len;
+        current_packets_in_batch = 1;
+      } else {
+        estimate_batch_encoded_size += self.packet_layer.packet_overhead() + ep_len;
+        current_packets_in_batch += 1;
+      }
+    }
+
+    // consume the packets to small batches according to batch_offsets.
+
+    // if batch_offsets is empty, means that packets can be sent by one I/O call
+    if batches.is_empty() {
+      self
+        .send_batch(
+          addr,
+          Batch {
+            num_packets: packets.len(),
+            packets,
+            estimate_encoded_len: estimate_batch_encoded_size,
+          },
+        )
+        .await
+        .map(|sent| (sent, now))
+    } else {
+      let mut batch_idx = 0;
+      for (idx, packet) in packets.into_iter().enumerate() {
+        let batch = &mut batches[batch_idx];
+        batch.packets.push(packet);
+        if batch.num_packets == idx - 1 {
+          batch_idx += 1;
+        }
+      }
+
+      let mut total_bytes_sent = 0;
+      let resps =
+        futures::future::join_all(batches.into_iter().map(|b| self.send_batch(addr, b))).await;
+
+      for res in resps {
+        match res {
+          Ok(sent) => {
+            total_bytes_sent += sent;
+          }
+          Err(e) => return Err(e),
+        }
+      }
+      Ok((total_bytes_sent, now))
+    }
   }
 
   async fn dial_timeout(
@@ -1214,7 +1363,8 @@ where
       } else {
         {
           let keys = encryptor.kr.keys().await;
-          encryptor.kr
+          encryptor
+            .kr
             .decrypt_payload(&mut buf, keys, packet_label.as_bytes())
             .map_err(NetTransportError::Security)?;
         }

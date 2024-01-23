@@ -347,7 +347,7 @@ mod tests {
       }
     }
 
-    fn encode_message<I, A>(_msg: Message<I, A>, _dst: &mut [u8]) -> Result<(), Self::Error> {
+    fn encode_message<I, A>(_msg: Message<I, A>, _dst: &mut [u8]) -> Result<usize, Self::Error> {
       unreachable!()
     }
 

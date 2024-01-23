@@ -324,32 +324,36 @@ impl Encryptor {
         );
         nonce
       }
-      EncryptionAlgo::NoPadding => {
-        nonce
-      }
+      EncryptionAlgo::NoPadding => nonce,
     }
   }
 
-  pub(super) fn encrypt(&self, pk: SecretKey, nonce: [u8; NONCE_SIZE], auth_data: &[u8], dst: &mut BytesMut) -> Result<(), SecurityError> {
+  pub(super) fn encrypt(
+    &self,
+    pk: SecretKey,
+    nonce: [u8; NONCE_SIZE],
+    auth_data: &[u8],
+    dst: &mut BytesMut,
+  ) -> Result<(), SecurityError> {
     match pk {
       SecretKey::Aes128(pk) => {
         let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk));
         gcm
           .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
           .map_err(SecurityError::AeadError)
-      },
+      }
       SecretKey::Aes192(pk) => {
         let gcm = Aes192Gcm::new(GenericArray::from_slice(&pk));
         gcm
           .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
           .map_err(SecurityError::AeadError)
-      },
+      }
       SecretKey::Aes256(pk) => {
         let gcm = Aes256Gcm::new(GenericArray::from_slice(&pk));
         gcm
           .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
           .map_err(SecurityError::AeadError)
-      },
+      }
     }
   }
 }
