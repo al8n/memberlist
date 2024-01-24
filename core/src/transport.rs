@@ -4,6 +4,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use futures::AsyncRead;
 use nodecraft::resolver::AddressResolver;
 pub use nodecraft::*;
 
@@ -537,6 +538,11 @@ pub trait Wire: Send + Sync + 'static {
 
   /// Decodes the given bytes into a message
   fn decode_message<I, A>(src: &[u8]) -> Result<Message<I, A>, Self::Error>;
+
+  /// Decode message from the reader and returns the number of bytes read and the message.
+  fn decode_message_from_reader<I, A>(
+    conn: impl AsyncRead + Unpin,
+  ) -> impl Future<Output = std::io::Result<(usize, Message<I, A>)>> + Send;
 }
 
 /// Transport is used to abstract over communicating with other peers. The packet
