@@ -134,7 +134,7 @@ where
     let mut data_offset = checksum_offset + 1 + CHECKSUM_SIZE;
 
     let compressed = compressor
-      .compress_to_bytes(&buf[data_offset..offset])
+      .compress_into_bytes(&buf[data_offset..offset])
       .map_err(NetTransportError::Compress)?;
     // Write compressor tag
     buf[data_offset] = compressor as u8;
@@ -383,7 +383,7 @@ where
     let mut data_offset = checksum_offset + 1 + CHECKSUM_SIZE;
 
     let compressed = compressor
-      .compress_to_bytes(&buf[data_offset..offset])
+      .compress_into_bytes(&buf[data_offset..offset])
       .map_err(NetTransportError::Compress)?;
     // Write compressor tag
     buf[data_offset] = compressor as u8;

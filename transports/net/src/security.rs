@@ -1,4 +1,4 @@
-use aead::{generic_array::GenericArray, Aead, AeadInPlace, KeyInit};
+use aead::{generic_array::GenericArray, AeadInPlace, KeyInit};
 use aes_gcm::{
   aes::{cipher::consts::U12, Aes192},
   Aes128Gcm, Aes256Gcm, AesGcm,
@@ -67,16 +67,20 @@ pub enum EncryptionAlgo {
   NoPadding = { *ENCRYPT_TAG.start() + 1 },
 }
 
-impl EncryptionAlgo {
-  pub(crate) const SIZE: usize = core::mem::size_of::<Self>();
+impl TryFrom<u8> for EncryptionAlgo {
+  type Error = UnknownEncryptionAlgo;
 
-  pub fn from_u8(val: u8) -> Result<Self, UnknownEncryptionAlgo> {
+  fn try_from(val: u8) -> Result<Self, Self::Error> {
     match val {
       val if val.eq(ENCRYPT_TAG.start()) => Ok(Self::PKCS7),
       val if val == *ENCRYPT_TAG.start() + 1 => Ok(Self::NoPadding),
       val => Err(UnknownEncryptionAlgo(val)),
     }
   }
+}
+
+impl EncryptionAlgo {
+  pub(crate) const SIZE: usize = core::mem::size_of::<Self>();
 
   pub(crate) fn encrypt_overhead(&self) -> usize {
     match self {
@@ -92,9 +96,9 @@ impl EncryptionAlgo {
         let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
 
         // Sum the extra parts to get total size
-        EncryptionAlgo::SIZE + NONCE_SIZE + inp + padding + TAG_SIZE
+        NONCE_SIZE + inp + padding + TAG_SIZE
       }
-      Self::NoPadding => EncryptionAlgo::SIZE + NONCE_SIZE + inp + TAG_SIZE,
+      Self::NoPadding => NONCE_SIZE + inp + TAG_SIZE,
     }
   }
 }
@@ -327,6 +331,13 @@ impl Encryptor {
     }
   }
 
+  pub(super) fn read_nonce(&self, src: &mut BytesMut) -> [u8; NONCE_SIZE] {
+    let mut nonce = [0u8; NONCE_SIZE];
+    nonce.copy_from_slice(&src[..NONCE_SIZE]);
+    src.advance(NONCE_SIZE);
+    nonce
+  }
+
   pub(super) fn encrypt(
     &self,
     pk: SecretKey,
@@ -354,6 +365,43 @@ impl Encryptor {
           .map_err(SecurityError::AeadError)
       }
     }
+  }
+
+  pub(super) fn decrypt(
+    &self,
+    key: SecretKey,
+    algo: EncryptionAlgo,
+    nonce: [u8; NONCE_SIZE],
+    auth_data: &[u8],
+    dst: &mut BytesMut,
+  ) -> Result<(), SecurityError> {
+    // Get the AES block cipher
+    match key {
+      SecretKey::Aes128(pk) => {
+        let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk));
+        gcm
+          .decrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
+          .map_err(SecurityError::AeadError)
+      }
+      SecretKey::Aes192(pk) => {
+        let gcm = Aes192Gcm::new(GenericArray::from_slice(&pk));
+        gcm
+          .decrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
+          .map_err(SecurityError::AeadError)
+      }
+      SecretKey::Aes256(pk) => {
+        let gcm = Aes256Gcm::new(GenericArray::from_slice(&pk));
+        gcm
+          .decrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
+          .map_err(SecurityError::AeadError)
+      }
+    }
+    .map(|_| match algo {
+      EncryptionAlgo::NoPadding => {}
+      EncryptionAlgo::PKCS7 => {
+        pkcs7decode(dst);
+      }
+    })
   }
 }
 
@@ -515,156 +563,7 @@ fn pkcs7decode(buf: &mut BytesMut) {
   buf.truncate(n);
 }
 
-macro_rules! bail {
-  (enum $ty:ident: $key:ident { $($var:ident($algo: ident)),+ $(,)? } -> $fn:expr) => {
-    match $key {
-      $($ty::$var(key) => $fn($algo::new(GenericArray::from_slice(key)))),*
-    }
-  };
-  (enum $ty:ident: &$key:ident { $($var:ident($algo: ident)),+ $(,)? } -> $fn:expr) => {
-    match $key {
-      $($ty::$var(key) => $fn($algo::new(GenericArray::from_slice(&key)))),*
-    }
-  };
-}
-
-#[inline]
-fn decrypt_message(key: &SecretKey, msg: &mut BytesMut, data: &[u8]) -> Result<(), SecurityError> {
-  bail! {
-    enum SecretKey: key {
-      Aes128(Aes128Gcm),
-      Aes192(Aes192Gcm),
-      Aes256(Aes256Gcm),
-    } -> |algo| decrypt_message_in(algo, msg, data)
-  }
-}
-
-#[inline]
-fn encrypt_payload_in<A: AeadInPlace + Aead>(
-  gcm: A,
-  vsn: EncryptionAlgo,
-  data: &[u8],
-  dst: &mut BytesMut,
-) -> Result<(), SecurityError> {
-  let offset = dst.len();
-
-  // Write the encryption version
-  dst.put_u8(vsn as u8);
-  // Add a random nonce
-  let mut nonce = [0u8; NONCE_SIZE];
-  rand::thread_rng().fill(&mut nonce);
-  dst.put_slice(&nonce);
-  let after_nonce = offset + NONCE_SIZE + EncryptionAlgo::SIZE;
-
-  // Encrypt message using GCM
-  let nonce = GenericArray::from_slice(&nonce);
-  // Ensure we are correctly padded (now, only for PKCS7)
-  match vsn {
-    EncryptionAlgo::PKCS7 => {
-      let buf_len = dst.len();
-      pkcs7encode(
-        dst,
-        buf_len,
-        offset + EncryptionAlgo::SIZE + NONCE_SIZE,
-        BLOCK_SIZE,
-      );
-      let mut bytes = dst.split_off(after_nonce);
-      gcm
-        .encrypt_in_place(nonce, data, &mut bytes)
-        .map(|_| {
-          dst.unsplit(bytes);
-        })
-        .map_err(SecurityError::AeadError)
-    }
-    EncryptionAlgo::NoPadding => {
-      let mut bytes = dst.split_off(after_nonce);
-      gcm
-        .encrypt_in_place(nonce, data, &mut bytes)
-        .map(|_| {
-          dst.unsplit(bytes);
-        })
-        .map_err(SecurityError::AeadError)
-    }
-  }
-}
-
-#[inline]
-fn decrypt_message_in<A: Aead + AeadInPlace>(
-  gcm: A,
-  msg: &mut BytesMut,
-  data: &[u8],
-) -> Result<(), SecurityError> {
-  // Decrypt the message
-  let mut ciphertext = msg.split_off(EncryptionAlgo::SIZE + NONCE_SIZE);
-  let nonce =
-    GenericArray::from_slice(&msg[EncryptionAlgo::SIZE..EncryptionAlgo::SIZE + NONCE_SIZE]);
-
-  gcm
-    .decrypt_in_place(nonce, data, &mut ciphertext)
-    .map_err(SecurityError::AeadError)?;
-  msg.unsplit(ciphertext);
-  msg.advance(EncryptionAlgo::SIZE + NONCE_SIZE);
-  Ok(())
-}
-
-impl SecretKeyring {
-  pub(crate) fn decrypt_payload(
-    &self,
-    msg: &mut BytesMut,
-    keys: impl Iterator<Item = SecretKey>,
-    data: &[u8],
-  ) -> Result<(), SecurityError> {
-    // Ensure we have at least one byte
-    if msg.is_empty() {
-      return Err(SecurityError::EmptyPayload);
-    }
-
-    // Verify the version
-    let vsn = EncryptionAlgo::from_u8(msg[0])?;
-
-    // Ensure the length is sane
-    if msg.len() < vsn.encrypted_length(0) {
-      return Err(SecurityError::SmallPayload);
-    }
-
-    decrypt_payload(keys, msg, data, vsn)
-  }
-}
-
-#[inline]
-fn decrypt_payload(
-  keys: impl Iterator<Item = SecretKey>,
-  msg: &mut BytesMut,
-  data: &[u8],
-  vsn: EncryptionAlgo,
-) -> Result<(), SecurityError> {
-  for key in keys {
-    match decrypt_message(&key, msg, data) {
-      Ok(_) => {
-        // Remove the PKCS7 padding for vsn 0
-        if vsn == EncryptionAlgo::PKCS7 {
-          pkcs7decode(msg);
-        }
-        return Ok(());
-      }
-      Err(_) => continue,
-    }
-  }
-
-  Err(SecurityError::NoInstalledKeys)
-}
-
-pub(crate) fn append_bytes(first: &[u8], second: &[u8]) -> Vec<u8> {
-  let has_first = !first.is_empty();
-  let has_second = !second.is_empty();
-
-  match (has_first, has_second) {
-    (true, true) => [first, second].concat(),
-    (true, false) => first.to_vec(),
-    (false, true) => second.to_vec(),
-    (false, false) => Vec::new(),
-  }
-}
+impl SecretKeyring {}
 
 // #[cfg(test)]
 // mod tests {

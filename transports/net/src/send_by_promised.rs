@@ -1,6 +1,5 @@
 use super::*;
 
-
 impl<I, A, S, W> NetTransport<I, A, S, W>
 where
   I: Id,
@@ -133,7 +132,7 @@ where
     W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)?;
 
     let compressed = compressor
-      .compress_to_bytes(&buf[encrypt_header..])
+      .compress_into_bytes(&buf[encrypt_header..])
       .map_err(NetTransportError::Compress)?;
     let compressed_size = compressed.len();
     buf.truncate(encrypt_header);
@@ -177,7 +176,8 @@ where
     let nonce = encryptor.write_header(&mut buf);
     buf.resize(total_len, 0);
 
-    let written = W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)?;
+    let written =
+      W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)?;
     // write actual data size
     NetworkEndian::write_u32(&mut buf[1..5], written as u32);
     let mut dst = buf.split_off(encrypt_header);
@@ -238,7 +238,13 @@ where
       let enp = enp.clone();
       rayon::spawn(move || {
         if tx
-          .send(Self::encrypt_message(&enp, pk, &stream_label, msg, encoded_size))
+          .send(Self::encrypt_message(
+            &enp,
+            pk,
+            &stream_label,
+            msg,
+            encoded_size,
+          ))
           .is_err()
         {
           tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
@@ -318,7 +324,7 @@ where
   async fn send_by_promised_without_compression_and_encryption(
     &self,
     mut conn: impl AsyncWrite + Unpin,
-    target: &A::ResolvedAddress,
+    _target: &A::ResolvedAddress,
     msg: Message<I, A::ResolvedAddress>,
   ) -> Result<usize, NetTransportError<A, W>> {
     let data = W::encode_message_to_bytes(msg).map_err(NetTransportError::Wire)?;

@@ -3,7 +3,7 @@ use std::io;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Future};
 use nodecraft::CheapClone;
-use peekable::future::{AsyncPeekExt, AsyncPeekable};
+use peekable::future::AsyncPeekable;
 
 use crate::LABEL_TAG;
 
@@ -258,28 +258,25 @@ pub(crate) trait LabelAsyncIOExt: Unpin + Send + Sync {
       self.write_all(&buf).await
     }
   }
+}
 
-  fn remove_label_header(this: &mut AsyncPeekable<&mut Self>) -> impl Future<Output = io::Result<Option<Label>>> + Send
-  where
-    Self: AsyncRead + Unpin
-  {
-    async move {
-      let mut meta = [0u8; 2];
-      this.peek_exact(&mut meta).await?;
-      if meta[0] != LABEL_TAG {
-        return Ok(None);
-      }
-
-      let len = meta[0] as usize;
-      let mut buf = vec![0u8; len];
-      this.read_exact(&mut meta).await?;
-      this.read_exact(&mut buf).await?;
-      let buf: Bytes = buf.into();
-      Label::try_from(buf)
-        .map(Some)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-    }
+pub(super) async fn remove_label_header(
+  this: &mut AsyncPeekable<impl AsyncRead + Unpin>,
+) -> io::Result<Option<Label>> {
+  let mut meta = [0u8; 2];
+  this.peek_exact(&mut meta).await?;
+  if meta[0] != LABEL_TAG {
+    return Ok(None);
   }
+
+  let len = meta[0] as usize;
+  let mut buf = vec![0u8; len];
+  this.read_exact(&mut meta).await?;
+  this.read_exact(&mut buf).await?;
+  let buf: Bytes = buf.into();
+  Label::try_from(buf)
+    .map(Some)
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 impl<T: AsyncWrite + AsyncRead + Unpin + Send + Sync + 'static> LabelAsyncIOExt for T {}

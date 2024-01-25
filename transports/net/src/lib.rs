@@ -1,5 +1,5 @@
 use std::{
-  io::{self, Error, ErrorKind},
+  io::{Error, ErrorKind},
   marker::PhantomData,
   net::{IpAddr, SocketAddr},
   sync::{
@@ -17,7 +17,7 @@ use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use checksum::CHECKSUM_SIZE;
 use compressor::UnknownCompressor;
-use futures::{io::BufReader, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt};
+use futures::{io::BufReader, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt};
 use label::{LabelAsyncIOExt, LabelBufExt};
 use peekable::future::AsyncPeekExt;
 use security::{Encryptor, SecurityError};
@@ -64,9 +64,9 @@ pub use label::Label;
 mod checksum;
 pub use checksum::Checksumer;
 
+mod read_from_promised;
 mod send_by_packet;
 mod send_by_promised;
-mod read_from_promised;
 
 use crate::label::{LabelBufMutExt, LabelError};
 
@@ -147,7 +147,7 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   /// Returns when there is a unkstartn compressor.
   #[cfg(feature = "compression")]
   #[error("{0}")]
-  UnkstartnCompressor(#[from] UnknownCompressor),
+  UnknownCompressor(#[from] UnknownCompressor),
   /// Returns when there is a security error. e.g. encryption/decryption error.
   #[error("{0}")]
   Security(#[from] SecurityError),
@@ -159,7 +159,7 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   Label(#[from] label::LabelError),
   /// Returns when getting unkstartn checksumer
   #[error("{0}")]
-  UnkstartnChecksumer(#[from] checksum::UnknownChecksumer),
+  UnknownChecksumer(#[from] checksum::UnknownChecksumer),
   /// Returns when the computation task panic
   #[error("computation task panic")]
   ComputationTaskFailed,
@@ -539,134 +539,6 @@ where
     }
 
     overhead
-  } 
-
-  fn should_offload_for_sending(&self, size: usize) -> bool {
-    #[cfg(feature = "compression")]
-    {
-      let compression_enabled = self.opts.compressor.is_some();
-      if size >= self.opts.offload_size && compression_enabled {
-        return true;
-      }
-    }
-
-    #[cfg(feature = "encryption")]
-    {
-      let encryption_enabled = self.encryptor.is_some();
-      if size >= self.opts.offload_size && encryption_enabled && !S::is_secure() {
-        return true;
-      }
-    }
-
-    false
-  }
-
-  async fn read_message_without_compression_and_encryption(&self, conn: impl AsyncRead + Unpin) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
-    W::decode_message_from_reader(conn).await.map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))
-  }
-
-  #[cfg(feature = "compression")]
-  fn decompress(
-    compressor: Compressor,
-    data: &[u8],
-  ) -> Result<Message<I, A::ResolvedAddress>, NetTransportError<A, W>> {
-    let uncompressed = compressor
-        .decompress(data)
-        .map_err(NetTransportError::Decompress)?;
-
-    W::decode_message(&uncompressed).map_err(NetTransportError::Wire)
-  }
-
-  #[cfg(feature = "compression")]
-  async fn read_message_with_compression_without_encryption(&self, mut conn: peekable::future::AsyncPeekable<impl AsyncRead + Unpin>) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
-    let mut tag = [0u8; 1];
-    conn.peek_exact(&mut tag).await.map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
-    let tag = tag[0];
-    if !COMPRESS_TAG.contains(&tag) {
-      return self.read_message_without_compression_and_encryption(conn).await;
-    }
-
-    let mut readed = 0;
-    let mut compress_header = [0u8; COMPRESS_HEADER];
-    conn.read_exact(&mut compress_header).await.map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
-    readed += COMPRESS_HEADER;
-    let compressor = Compressor::try_from(compress_header[0]).map_err(NetTransportError::UnkstartnCompressor)?;
-    let data_len = NetworkEndian::read_u32(&compress_header[1..]) as usize;
-    if data_len <= self.opts.offload_size {
-      if data_len <= MAX_INLINED_BYTES {
-        let mut data = [0u8; MAX_INLINED_BYTES];
-        conn.read_exact(&mut data[..data_len]).await.map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
-        readed += data_len;
-        let msg = Self::decompress(compressor, &data[..data_len])?;
-        return Ok((readed, msg));
-      }
-
-      let mut data = vec![0u8; data_len];
-      conn.read_exact(&mut data).await.map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
-      readed += data_len;
-      let msg = Self::decompress(compressor, &data)?;
-      return Ok((readed, msg));
-    }
-
-    let (tx, rx) = futures::channel::oneshot::channel();
-    let mut data = vec![0u8; data_len];
-    conn.read_exact(&mut data).await.map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
-    readed += data_len;
-    rayon::spawn(move || {
-      if tx
-        .send(Self::decompress(compressor, &data))
-        .is_err()
-      {
-        tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
-      }
-    });
-
-    match rx.await {
-      Ok(Ok(msg)) => Ok((readed, msg)),
-      Ok(Err(e)) => Err(e),
-      Err(_) => Err(NetTransportError::ComputationTaskFailed),
-    }
-  }
-
-  #[cfg(feature = "encryption")]
-  async fn read_message_with_encryption_without_compression(
-    &self,
-    mut conn: peekable::future::AsyncPeekable<impl AsyncRead + Unpin>,
-    from: &A::ResolvedAddress,
-  ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
-    let mut tag = [0u8; 1];
-    conn.peek_exact(&mut tag).await.map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
-    let tag = tag[0];
-    if !ENCRYPT_TAG.contains(&tag) {
-      return self.read_message_without_compression_and_encryption(conn).await;
-    }
-
-    let mut readed = 1;
-
-    let enp = match self.encryptor.as_ref() {
-      Some(enp) => enp,
-      None => {
-        tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
-        return Err(NetTransportError::Security(SecurityError::Disabled));
-      }
-    };
-
-    let header_size = enp.encrypt_overhead();
-    enp.kr.decrypt_payload(msg, keys, data)
-    let mut readed = 0;
-    let mut encrypt_header = [0u8; ENCRYPT_HEADER];
-    conn.read_exact(&mut encrypt_header).await.map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
-    readed += ENCRYPT_HEADER;
-    let nonce = enp.read_header(&mut encrypt_header)?;
-    let mut data = vec![0u8; encrypt_header.len()];
-    conn.read_exact(&mut data).await.map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
-    readed += data.len();
-    let mut dst = vec![0u8; data.len()];
-    enp
-      .decrypt(&mut dst, &data, nonce, self.opts.label.as_bytes())
-      .map_err(NetTransportError::Security)?;
-    let msg = W::decode_message(&dst).map_err(NetTransportError::Wire)?;
-    Ok((readed, msg))
   }
 }
 
@@ -765,9 +637,8 @@ where
     ),
     Self::Error,
   > {
-    let mut buf_reader = BufReader::new(conn);
-    let mut conn = (&mut buf_reader).peekable();
-    let stream_label = LabelAsyncIOExt::remove_label_header(&mut conn).await.map_err(|e| {
+    let mut conn = BufReader::new(conn).peekable();
+    let mut stream_label = label::remove_label_header(&mut conn).await.map_err(|e| {
       tracing::error!(target: "showbiz.net.promised", remote = %from, err=%e, "failed to receive and remove the stream label header");
       Self::Error::Connection(ConnectionError::promised_read(e))
     })?.unwrap_or_else(Label::empty);
@@ -789,37 +660,31 @@ where
       return Err(LabelError::mismatch(label.cheap_clone(), stream_label).into());
     }
 
-    let mut readed = stream_label.encoded_overhead();
+    let readed = stream_label.encoded_overhead();
 
     #[cfg(not(any(feature = "compression", feature = "encryption")))]
-    return self.read_message_without_compression_and_encryption(conn).await.map(|(read, msg)| (readed + read, msg));
-
-    #[cfg(all(feature = "compression", not(feature = "encryption")))]
-    return self.read_message_with_compression_without_encryption(conn).await.map(|(read, msg)| (readed + read, msg));
-
-    #[cfg(all(not(feature = "compression"), feature = "encryption"))]
     return self
-      .read_message_with_encryption_without_compression(conn, from)
+      .read_from_promised_without_compression_and_encryption(conn)
       .await
       .map(|(read, msg)| (readed + read, msg));
 
-    // Check if the message is encrypted
-    if ENCRYPT_TAG.contains(&tag) {
-      #[cfg(not(feature = "encryption"))]
-      {
-        tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
-        return Err(Self::Error::Security(SecurityError::Disabled));
-      }
+    #[cfg(all(feature = "compression", not(feature = "encryption")))]
+    return self
+      .read_from_promised_with_compression_without_encryption(conn)
+      .await
+      .map(|(read, msg)| (readed + read, msg));
 
-      if self.encryptor.is_none() {
-        tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
-        return Err(Self::Error::Security(SecurityError::Disabled));
-      }
+    #[cfg(all(not(feature = "compression"), feature = "encryption"))]
+    return self
+      .read_from_promised_with_encryption_without_compression(conn, from)
+      .await
+      .map(|(read, msg)| (readed + read, stream_label, msg));
 
-      todo!()
-    }
-
-    todo!()
+    #[cfg(all(feature = "compression", feature = "encryption"))]
+    self
+      .read_from_promised_with_compression_and_encryption(conn, stream_label, from)
+      .await
+      .map(|(read, msg)| (readed + read, msg))
   }
 
   async fn send_message(
@@ -838,12 +703,17 @@ where
   ) -> Result<(usize, Instant), Self::Error> {
     let start = Instant::now();
     let encoded_size = W::encoded_len(&packet);
-    self.send_batch(addr, Batch {
-      packets: TinyVec::from(packet),
-      num_packets: 1,
-      estimate_encoded_len: self.packets_header_overhead() + PACKET_OVERHEAD + encoded_size,
-    }).await
-    .map(|sent| (sent, start))
+    self
+      .send_batch(
+        addr,
+        Batch {
+          packets: TinyVec::from(packet),
+          num_packets: 1,
+          estimate_encoded_len: self.packets_header_overhead() + PACKET_OVERHEAD + encoded_size,
+        },
+      )
+      .await
+      .map(|sent| (sent, start))
   }
 
   async fn send_packets(
@@ -863,8 +733,7 @@ where
     for packet in packets.iter() {
       let ep_len = W::encoded_len(packet);
       // check if we reach the maximum packet size
-      let current_encoded_size =
-        ep_len + estimate_batch_encoded_size;
+      let current_encoded_size = ep_len + estimate_batch_encoded_size;
       if current_encoded_size >= self.max_payload_size()
         || current_packets_in_batch >= NUM_PACKETS_PER_BATCH
       {
@@ -909,8 +778,7 @@ where
 
       let mut total_bytes_sent = 0;
       let resps =
-        futures::future::join_all(batches.into_iter().map(|b| self.send_batch(addr, b)))
-          .await;
+        futures::future::join_all(batches.into_iter().map(|b| self.send_batch(addr, b))).await;
 
       for res in resps {
         match res {
@@ -1280,7 +1148,7 @@ where
               let compress_tag = buf[0];
               buf.advance(1);
               let compressor = match Compressor::try_from(compress_tag)
-                .map_err(NetTransportError::UnkstartnCompressor)
+                .map_err(NetTransportError::UnknownCompressor)
               {
                 Ok(compressor) => compressor,
                 Err(e) => {
