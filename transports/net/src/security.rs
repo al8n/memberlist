@@ -80,8 +80,8 @@ impl EncryptionAlgo {
 
   pub(crate) fn encrypt_overhead(&self) -> usize {
     match self {
-      Self::PKCS7 => 45,     // Version: 1, IV: 12, Padding: 16, Tag: 16
-      Self::NoPadding => 29, // Version: 1, IV: 12, Tag: 16
+      Self::PKCS7 => 49,     // Algo: 1, Len: 4, IV: 12, Padding: 16, Tag: 16
+      Self::NoPadding => 33, // Algo: 1, Len: 4, IV: 12, Tag: 16
     }
   }
 
@@ -305,8 +305,7 @@ impl Encryptor {
 
   pub(super) fn write_header(&self, dst: &mut BytesMut) -> [u8; NONCE_SIZE] {
     let offset = dst.len();
-    // Write the encryption version
-    dst.put_u8(self.algo as u8);
+
     // Add a random nonce
     let mut nonce = [0u8; NONCE_SIZE];
     rand::thread_rng().fill(&mut nonce);

@@ -137,4 +137,12 @@ impl ConnectionError {
       error: err,
     }
   }
+
+  pub(super) fn packet_write(err: std::io::Error) -> Self {
+    Self {
+      kind: ConnectionKind::Packet,
+      error_kind: ConnectionErrorKind::Write,
+      error: err,
+    }
+  }
 }
