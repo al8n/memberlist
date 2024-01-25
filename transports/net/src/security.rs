@@ -7,40 +7,68 @@ use async_lock::RwLock;
 use base64::Engine;
 use bytes::{Buf, BufMut, BytesMut};
 use indexmap::IndexSet;
+use nodecraft::resolver::AddressResolver;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use showbiz_core::transport::Wire;
 use showbiz_utils::smallvec_wrapper;
 
 use std::{iter::once, sync::Arc};
 
-use crate::ENCRYPT_TAG;
+use crate::{NetTransportError, ENCRYPT_TAG};
 
 type Aes192Gcm = AesGcm<Aes192, U12>;
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+impl<A: AddressResolver, W: Wire> From<UnknownEncryptionAlgo> for NetTransportError<A, W> {
+  fn from(value: UnknownEncryptionAlgo) -> Self {
+    Self::Security(SecurityError::UnknownEncryptionAlgo(value))
+  }
+}
+
+impl<A: AddressResolver, W: Wire> From<aead::Error> for NetTransportError<A, W> {
+  fn from(value: aead::Error) -> Self {
+    Self::Security(value.into())
+  }
+}
+
+impl<A: AddressResolver, W: Wire> From<EncryptorError> for NetTransportError<A, W> {
+  fn from(value: EncryptorError) -> Self {
+    Self::Security(value.into())
+  }
+}
+
+/// Encrypt/Decrypt errors.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum EncryptorError {
+  /// AEAD ciphers error
+  #[error("{0}")]
+  Aead(#[from] aead::Error),
+}
+
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum SecurityError {
   #[error("security: unknown encryption version: {0}")]
   UnknownEncryptionAlgo(#[from] UnknownEncryptionAlgo),
   #[error("security: {0}")]
-  AeadError(#[from] aead::Error),
+  Encryptor(#[from] EncryptorError),
   #[error("security: security related feature is disabled")]
   Disabled,
-  #[error("security: cannot decode empty payload")]
-  EmptyPayload,
   #[error("security: payload is too small to decrypt")]
   SmallPayload,
   #[error("security: no installed keys could decrypt the message")]
   NoInstalledKeys,
   #[error("security: no primary key installed")]
   MissingPrimaryKey,
-  #[error("security: remote state is encrypted and encryption is not configured")]
-  NotConfigured,
-  #[error("security: encryption is configured but remote state is not encrypted")]
-  PlainRemoteState,
   #[error("security: secret key is not in the keyring")]
   SecretKeyNotFound,
   #[error("security: removing the primary key is not allowed")]
   RemovePrimaryKey,
+}
+
+impl From<aead::Error> for SecurityError {
+  fn from(value: aead::Error) -> Self {
+    Self::Encryptor(EncryptorError::Aead(value))
+  }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -350,19 +378,19 @@ impl Encryptor {
         let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk));
         gcm
           .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
-          .map_err(SecurityError::AeadError)
+          .map_err(Into::into)
       }
       SecretKey::Aes192(pk) => {
         let gcm = Aes192Gcm::new(GenericArray::from_slice(&pk));
         gcm
           .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
-          .map_err(SecurityError::AeadError)
+          .map_err(Into::into)
       }
       SecretKey::Aes256(pk) => {
         let gcm = Aes256Gcm::new(GenericArray::from_slice(&pk));
         gcm
           .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
-          .map_err(SecurityError::AeadError)
+          .map_err(Into::into)
       }
     }
   }
@@ -381,19 +409,19 @@ impl Encryptor {
         let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk));
         gcm
           .decrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
-          .map_err(SecurityError::AeadError)
+          .map_err(Into::into)
       }
       SecretKey::Aes192(pk) => {
         let gcm = Aes192Gcm::new(GenericArray::from_slice(&pk));
         gcm
           .decrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
-          .map_err(SecurityError::AeadError)
+          .map_err(Into::into)
       }
       SecretKey::Aes256(pk) => {
         let gcm = Aes256Gcm::new(GenericArray::from_slice(&pk));
         gcm
           .decrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
-          .map_err(SecurityError::AeadError)
+          .map_err(Into::into)
       }
     }
     .map(|_| match algo {

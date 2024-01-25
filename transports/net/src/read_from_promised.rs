@@ -16,7 +16,7 @@ where
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
     W::decode_message_from_reader(conn)
       .await
-      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))
+      .map_err(|e| ConnectionError::promised_read(e).into())
   }
 
   #[cfg(all(feature = "compression", not(feature = "encryption")))]
@@ -28,7 +28,7 @@ where
     conn
       .peek_exact(&mut tag)
       .await
-      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
+      .map_err(ConnectionError::promised_read)?;
     let tag = tag[0];
     if !COMPRESS_TAG.contains(&tag) {
       return self
@@ -41,10 +41,9 @@ where
     conn
       .read_exact(&mut compress_header)
       .await
-      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
+      .map_err(ConnectionError::promised_read)?;
     readed += COMPRESS_HEADER;
-    let compressor =
-      Compressor::try_from(compress_header[0]).map_err(NetTransportError::UnknownCompressor)?;
+    let compressor = Compressor::try_from(compress_header[0])?;
     let data_len = NetworkEndian::read_u32(&compress_header[1..]) as usize;
     if data_len <= self.opts.offload_size {
       if data_len <= MAX_INLINED_BYTES {
@@ -52,7 +51,7 @@ where
         conn
           .read_exact(&mut data[..data_len])
           .await
-          .map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
+          .map_err(ConnectionError::promised_read)?;
         readed += data_len;
         let msg = Self::decompress(compressor, &data[..data_len])?;
         return Ok((readed, msg));
@@ -62,7 +61,7 @@ where
       conn
         .read_exact(&mut data)
         .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
+        .map_err(ConnectionError::promised_read)?;
       readed += data_len;
       let msg = Self::decompress(compressor, &data)?;
       return Ok((readed, msg));
@@ -73,7 +72,7 @@ where
     conn
       .read_exact(&mut data)
       .await
-      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
+      .map_err(ConnectionError::promised_read)?;
     readed += data_len;
     rayon::spawn(move || {
       if tx.send(Self::decompress(compressor, &data)).is_err() {
@@ -100,7 +99,7 @@ where
     conn
       .peek_exact(&mut tag)
       .await
-      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
+      .map_err(ConnectionError::promised_read)?;
     let tag = tag[0];
     if !ENCRYPT_TAG.contains(&tag) {
       return self
@@ -113,14 +112,13 @@ where
     conn
       .read_exact(&mut encrypt_message_overhead)
       .await
-      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
-    let encryption_algo = EncryptionAlgo::try_from(encrypt_message_overhead[0])
-      .map_err(|e| NetTransportError::Security(SecurityError::UnknownEncryptionAlgo(e)))?;
+      .map_err(ConnectionError::promised_read)?;
+    let encryption_algo = EncryptionAlgo::try_from(encrypt_message_overhead[0])?;
     let encrypted_message_len = NetworkEndian::read_u32(&encrypt_message_overhead[1..]) as usize;
 
     if encrypted_message_len <= encryption_algo.encrypted_length(0) {
       tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message with small payload");
-      return Err(NetTransportError::Security(SecurityError::SmallPayload));
+      return Err(SecurityError::SmallPayload.into());
     }
 
     // Decrypt message
@@ -128,7 +126,7 @@ where
       Some(enp) => enp,
       None => {
         tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
-        return Err(NetTransportError::Security(SecurityError::Disabled));
+        return Err(SecurityError::Disabled.into());
       }
     };
 
@@ -140,7 +138,7 @@ where
     conn
       .read_exact(&mut buf)
       .await
-      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
+      .map_err(ConnectionError::promised_read)?;
     readed += encrypted_message_len;
 
     // check if we should offload
@@ -184,7 +182,7 @@ where
     conn
       .peek_exact(&mut tag)
       .await
-      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
+      .map_err(ConnectionError::promised_read)?;
     let tag = tag[0];
     if !ENCRYPT_TAG.contains(&tag) {
       return self
@@ -197,7 +195,7 @@ where
       Some(enp) => enp,
       None => {
         tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
-        return Err(NetTransportError::Security(SecurityError::Disabled));
+        return Err(SecurityError::Disabled.into());
       }
     };
 
@@ -206,14 +204,13 @@ where
     conn
       .read_exact(&mut encrypt_message_overhead)
       .await
-      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
-    let encryption_algo = EncryptionAlgo::try_from(encrypt_message_overhead[0])
-      .map_err(|e| NetTransportError::Security(SecurityError::UnknownEncryptionAlgo(e)))?;
+      .map_err(ConnectionError::promised_read)?;
+    let encryption_algo = EncryptionAlgo::try_from(encrypt_message_overhead[0])?;
     let encrypted_message_len = NetworkEndian::read_u32(&encrypt_message_overhead[1..]) as usize;
 
     if encrypted_message_len <= encryption_algo.encrypted_length(0) {
       tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message with small payload");
-      return Err(NetTransportError::Security(SecurityError::SmallPayload));
+      return Err(SecurityError::SmallPayload.into());
     }
 
     let mut readed = ENCRYPT_HEADER;
@@ -224,7 +221,7 @@ where
     conn
       .read_exact(&mut buf)
       .await
-      .map_err(|e| NetTransportError::Connection(ConnectionError::promised_read(e)))?;
+      .map_err(ConnectionError::promised_read)?;
     readed += encrypted_message_len;
 
     // check if we should offload
@@ -269,9 +266,7 @@ where
     compressor: Compressor,
     data: &[u8],
   ) -> Result<Message<I, A::ResolvedAddress>, NetTransportError<A, W>> {
-    let uncompressed = compressor
-      .decompress(data)
-      .map_err(NetTransportError::Decompress)?;
+    let uncompressed = compressor.decompress(data)?;
 
     W::decode_message(&uncompressed).map_err(NetTransportError::Wire)
   }
@@ -313,9 +308,6 @@ where
     }
     let compressed_message_size = NetworkEndian::read_u32(&buf[1..COMPRESS_HEADER]) as usize;
     buf.advance(COMPRESS_HEADER);
-    Self::decompress(
-      Compressor::try_from(tag).map_err(NetTransportError::UnknownCompressor)?,
-      &buf[..compressed_message_size],
-    )
+    Self::decompress(Compressor::try_from(tag)?, &buf[..compressed_message_size])
   }
 }

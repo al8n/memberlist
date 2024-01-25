@@ -125,7 +125,7 @@ pub struct Options {
   /// The interval after which a node has died that
   /// we will still try to gossip to it. This gives it a chance to refute.
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
-  gossip_to_the_dead_time: Duration, 
+  gossip_to_the_dead_time: Duration,
 
   /// Used to guarantee protocol-compatibility
   protocol_version: ProtocolVersion,

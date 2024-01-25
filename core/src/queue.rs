@@ -358,7 +358,7 @@ mod tests {
     async fn decode_message_from_reader<I, A>(
       _conn: impl futures::prelude::AsyncRead + Unpin,
     ) -> std::io::Result<(usize, Message<I, A>)> {
-      unreachable!() 
+      unreachable!()
     }
   }
 

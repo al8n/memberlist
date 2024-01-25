@@ -18,11 +18,9 @@ use agnostic::{
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use checksum::CHECKSUM_SIZE;
-use compressor::UnknownCompressor;
 use futures::{io::BufReader, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt};
-use label::{LabelAsyncIOExt, LabelBufExt};
+use label::LabelBufExt;
 use peekable::future::AsyncPeekExt;
-use security::{Encryptor, SecurityError};
 use showbiz_core::{
   transport::{
     resolver::AddressResolver,
@@ -50,7 +48,7 @@ use compressor::Compressor;
 #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 pub mod security;
 #[cfg(feature = "encryption")]
-use security::{EncryptionAlgo, SecretKey, SecretKeyring, SecretKeys};
+use security::{EncryptionAlgo, Encryptor, SecretKey, SecretKeyring, SecretKeys, SecurityError};
 
 /// Errors for the net transport.
 pub mod error;
@@ -95,7 +93,6 @@ const PACKET_HEADER_OVERHEAD: usize = 1 + 1;
 const NUM_PACKETS_PER_BATCH: usize = 255;
 
 const DEFAULT_PORT: u16 = 7946;
-const DEFAULT_BUFFER_SIZE: usize = 4096;
 
 /// A large buffer size that we attempt to set UDP
 /// sockets to in order to handle a large volume of messages.
@@ -133,36 +130,18 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   ListenPromised(SocketAddr, std::io::Error),
   /// Returns when we fail to resolve an address.
   #[error("failed to resolve address {addr}: {err}")]
-  Resolve { addr: A::Address, err: A::Error },
-  /// Returns when fail to compress
-  #[cfg(feature = "compression")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
-  #[error("failed to compress message: {0}")]
-  Compress(#[from] compressor::CompressError),
-  /// Returns when fail to decompress
-  #[cfg(feature = "compression")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
-  #[error("failed to decompress message: {0}")]
-  Decompress(#[from] compressor::DecompressError),
-  /// Returns when there is a unkstartn compressor.
-  #[cfg(feature = "compression")]
-  #[error("{0}")]
-  UnknownCompressor(#[from] UnknownCompressor),
-  /// Returns when there is a security error. e.g. encryption/decryption error.
-  #[error("{0}")]
-  Security(#[from] SecurityError),
-  /// Returns when receiving a compressed message, but compression is disabled.
-  #[error("receive a compressed message, but compression is disabled on this node")]
-  CompressionDisabled,
+  Resolve {
+    /// The address we failed to resolve.
+    addr: A::Address,
+    /// The error that occurred.
+    err: A::Error,
+  },
   /// Returns when the label error.
   #[error("{0}")]
   Label(#[from] label::LabelError),
   /// Returns when getting unkstartn checksumer
   #[error("{0}")]
   UnknownChecksumer(#[from] checksum::UnknownChecksumer),
-  /// Returns when the computation task panic
-  #[error("computation task panic")]
-  ComputationTaskFailed,
   /// Returns when encode/decode error.
   #[error("wire error: {0}")]
   Wire(W::Error),
@@ -172,6 +151,22 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   /// Returns when there is a custom error.
   #[error("custom error: {0}")]
   Custom(std::borrow::Cow<'static, str>),
+
+  /// Returns when fail to compress/decompress message.
+  #[cfg(feature = "compression")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
+  #[error("{0}")]
+  Compressor(#[from] compressor::CompressorError),
+  /// Returns when there is a security error. e.g. encryption/decryption error.
+  #[error("{0}")]
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  Security(#[from] SecurityError),
+
+  /// Returns when the computation task panic
+  #[error("computation task panic")]
+  #[cfg(any(feature = "compression", feature = "encryption"))]
+  ComputationTaskFailed,
 }
 
 impl<A: AddressResolver, W: Wire> core::fmt::Debug for NetTransportError<A, W> {
@@ -654,7 +649,7 @@ where
     let mut conn = BufReader::new(conn).peekable();
     let mut stream_label = label::remove_label_header(&mut conn).await.map_err(|e| {
       tracing::error!(target: "showbiz.net.promised", remote = %from, err=%e, "failed to receive and remove the stream label header");
-      Self::Error::Connection(ConnectionError::promised_read(e))
+      ConnectionError::promised_read(e)
     })?.unwrap_or_else(Label::empty);
 
     let label = &self.opts.label;
@@ -1088,10 +1083,23 @@ where
     return Self::read_from_packet_with_compression_without_encryption(buf, offload_size).await;
 
     #[cfg(all(not(feature = "compression"), feature = "encryption"))]
-    return Self::read_from_packet_with_encryption_without_compression(buf, encryptor, packet_label, offload_size).await;
+    return Self::read_from_packet_with_encryption_without_compression(
+      buf,
+      encryptor,
+      packet_label,
+      offload_size,
+    )
+    .await;
 
     #[cfg(all(feature = "compression", feature = "encryption"))]
-    Self::read_from_packet_with_compression_and_encryption(buf, encryptor, packet_label, offload_size, verify_incoming).await
+    Self::read_from_packet_with_compression_and_encryption(
+      buf,
+      encryptor,
+      packet_label,
+      offload_size,
+      verify_incoming,
+    )
+    .await
   }
 
   #[cfg(all(feature = "compression", feature = "encryption"))]
@@ -1101,8 +1109,10 @@ where
     packet_label: Label,
     offload_size: usize,
     verify_incoming: bool,
-  ) -> Result<OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-  NetTransportError<T::Resolver, T::Wire>> {
+  ) -> Result<
+    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    NetTransportError<T::Resolver, T::Wire>,
+  > {
     if !ENCRYPT_TAG.contains(&buf[0]) {
       if verify_incoming {
         tracing::error!(target: "showbiz.net.packet", "incoming packet is not encrypted, and verify incoming is forced");
@@ -1111,7 +1121,7 @@ where
         return Self::read_from_packet_without_compression_and_encryption(buf);
       }
     }
-    let algo = EncryptionAlgo::try_from(buf.get_u8()).map_err(|e| NetTransportError::Security(SecurityError::UnknownEncryptionAlgo(e)))?;
+    let algo = EncryptionAlgo::try_from(buf.get_u8())?;
     let encrypted_message_size = NetworkEndian::read_u32(&buf[..MAX_MESSAGE_LEN_SIZE]) as usize;
     buf.advance(MAX_MESSAGE_LEN_SIZE);
     let mut encrypted_message = buf.split_to(encrypted_message_size);
@@ -1124,8 +1134,18 @@ where
     };
     let keys = encryptor.kr.keys().await;
     if encrypted_message_size <= offload_size {
-      Self::decrypt(encryptor, algo, keys, packet_label.as_bytes(), &mut encrypted_message)?;
-      return Self::read_from_packet_with_compression_without_encryption(encrypted_message, offload_size).await;
+      Self::decrypt(
+        encryptor,
+        algo,
+        keys,
+        packet_label.as_bytes(),
+        &mut encrypted_message,
+      )?;
+      return Self::read_from_packet_with_compression_without_encryption(
+        encrypted_message,
+        offload_size,
+      )
+      .await;
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
@@ -1139,15 +1159,25 @@ where
           return Self::read_from_packet_without_compression_and_encryption(buf);
         }
 
-        let compressor = Compressor::try_from(buf.get_u8()).map_err(NetTransportError::UnknownCompressor)?;
+        let compressor = Compressor::try_from(buf.get_u8())?;
         let compressd_message_len = NetworkEndian::read_u32(&buf[..MAX_MESSAGE_LEN_SIZE]) as usize;
         buf.advance(MAX_MESSAGE_LEN_SIZE);
         let compressed_message = buf.split_to(compressd_message_len);
         Self::decompress_and_decode(compressor, compressed_message)
       };
-      if tx.send(Self::decrypt(&encryptor, algo, keys, packet_label.as_bytes(), &mut encrypted_message).and_then(|_| {
-        then(encrypted_message)
-      })).is_err() {
+      if tx
+        .send(
+          Self::decrypt(
+            &encryptor,
+            algo,
+            keys,
+            packet_label.as_bytes(),
+            &mut encrypted_message,
+          )
+          .and_then(|_| then(encrypted_message)),
+        )
+        .is_err()
+      {
         tracing::error!(target: "showbiz.net.packet", "failed to send back to main thread");
       }
     });
@@ -1166,17 +1196,19 @@ where
     packet_label: Label,
     offload_size: usize,
     verify_incoming: bool,
-  ) -> Result<OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-  NetTransportError<T::Resolver, T::Wire>> {
+  ) -> Result<
+    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    NetTransportError<T::Resolver, T::Wire>,
+  > {
     if !ENCRYPT_TAG.contains(&buf[0]) {
       if verify_incoming {
         tracing::error!(target: "showbiz.net.packet", "incoming packet is not encrypted, and verify incoming is forced");
-        return Err(SecurityError::Disabled.into());
+        return Err(security::SecurityError::Disabled.into());
       } else {
         return Self::read_from_packet_without_compression_and_encryption(buf);
       }
     }
-    let algo = EncryptionAlgo::try_from(buf.get_u8()).map_err(|e| NetTransportError::Security(SecurityError::UnknownEncryptionAlgo(e)))?;
+    let algo = EncryptionAlgo::try_from(buf.get_u8())?;
     let encrypted_message_size = NetworkEndian::read_u32(&buf[..MAX_MESSAGE_LEN_SIZE]) as usize;
     buf.advance(MAX_MESSAGE_LEN_SIZE);
     let mut encrypted_message = buf.split_to(encrypted_message_size);
@@ -1184,20 +1216,40 @@ where
     let encryptor = match encryptor {
       Some(encryptor) => encryptor,
       None => {
-        return Err(SecurityError::Disabled.into());
+        return Err(security::SecurityError::Disabled.into());
       }
     };
     let keys = encryptor.kr.keys().await;
     if encrypted_message_size <= offload_size {
-      return Self::decrypt(encryptor, algo, keys, packet_label.as_bytes(), &mut encrypted_message)
-        .and_then(|_| Self::read_from_packet_without_compression_and_encryption(encrypted_message));
+      return Self::decrypt(
+        encryptor,
+        algo,
+        keys,
+        packet_label.as_bytes(),
+        &mut encrypted_message,
+      )
+      .and_then(|_| Self::read_from_packet_without_compression_and_encryption(encrypted_message));
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
     let encryptor = encryptor.clone();
 
     rayon::spawn(move || {
-      if tx.send(Self::decrypt(&encryptor, algo, keys, packet_label.as_bytes(), &mut encrypted_message).and_then(|_| Self::read_from_packet_without_compression_and_encryption(encrypted_message))).is_err() {
+      if tx
+        .send(
+          Self::decrypt(
+            &encryptor,
+            algo,
+            keys,
+            packet_label.as_bytes(),
+            &mut encrypted_message,
+          )
+          .and_then(|_| {
+            Self::read_from_packet_without_compression_and_encryption(encrypted_message)
+          }),
+        )
+        .is_err()
+      {
         tracing::error!(target: "showbiz.net.packet", "failed to send back to main thread");
       }
     });
@@ -1213,15 +1265,17 @@ where
   async fn read_from_packet_with_compression_without_encryption(
     mut buf: BytesMut,
     offload_size: usize,
-  ) -> Result<OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-  NetTransportError<T::Resolver, T::Wire>> {
+  ) -> Result<
+    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    NetTransportError<T::Resolver, T::Wire>,
+  > {
     Self::read_and_check_checksum(&mut buf)?;
 
     if !COMPRESS_TAG.contains(&buf[0]) {
       return Self::read_from_packet_without_compression_and_encryption(buf);
     }
 
-    let compressor = Compressor::try_from(buf.get_u8()).map_err(NetTransportError::UnknownCompressor)?;
+    let compressor = Compressor::try_from(buf.get_u8())?;
     let compressd_message_len = NetworkEndian::read_u32(&buf[..MAX_MESSAGE_LEN_SIZE]) as usize;
     buf.advance(MAX_MESSAGE_LEN_SIZE);
     let compressed_message = buf.split_to(compressd_message_len);
@@ -1232,7 +1286,10 @@ where
 
     let (tx, rx) = futures::channel::oneshot::channel();
     rayon::spawn(move || {
-      if tx.send(Self::decompress_and_decode(compressor, compressed_message)).is_err() {
+      if tx
+        .send(Self::decompress_and_decode(compressor, compressed_message))
+        .is_err()
+      {
         tracing::error!(target: "showbiz.net.packet", "failed to send back to main thread");
       }
     });
@@ -1246,13 +1303,17 @@ where
 
   fn read_from_packet_without_compression_and_encryption(
     mut buf: BytesMut,
-  ) -> Result<OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-  NetTransportError<T::Resolver, T::Wire>> {
+  ) -> Result<
+    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    NetTransportError<T::Resolver, T::Wire>,
+  > {
     Self::read_and_check_checksum(&mut buf)?;
-    Self::decode(buf.freeze()) 
+    Self::decode(buf.freeze())
   }
 
-  fn read_and_check_checksum(buf: &mut BytesMut) -> Result<(), NetTransportError<T::Resolver, T::Wire>> {
+  fn read_and_check_checksum(
+    buf: &mut BytesMut,
+  ) -> Result<(), NetTransportError<T::Resolver, T::Wire>> {
     if !CHECKSUM_TAG.contains(&buf[0]) {
       return Ok(());
     }
@@ -1271,15 +1332,14 @@ where
     Ok(())
   }
 
-  #[cfg(feature="encryption")]
+  #[cfg(feature = "encryption")]
   fn decrypt(
     encryptor: &Encryptor,
     algo: EncryptionAlgo,
     keys: impl Iterator<Item = SecretKey>,
     auth_data: &[u8],
     data: &mut BytesMut,
-  ) -> Result<(), NetTransportError<T::Resolver, T::Wire>>
-  {
+  ) -> Result<(), NetTransportError<T::Resolver, T::Wire>> {
     let nonce = encryptor.read_nonce(data);
     for key in keys {
       match encryptor.decrypt(key, algo, nonce, auth_data, data) {
@@ -1290,18 +1350,27 @@ where
         }
       }
     }
-    Err(NetTransportError::Security(SecurityError::NoInstalledKeys))
-  } 
-
-  #[cfg(feature = "compression")]
-  fn decompress_and_decode(compressor: Compressor, buf: BytesMut) -> Result<OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-  NetTransportError<T::Resolver, T::Wire>> {
-    let buf: Bytes = compressor.decompress(&buf)?.into();
-    Self::decode(buf) 
+    Err(security::SecurityError::NoInstalledKeys.into())
   }
 
-  fn decode(mut buf: Bytes) -> Result<OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-  NetTransportError<T::Resolver, T::Wire>> {
+  #[cfg(feature = "compression")]
+  fn decompress_and_decode(
+    compressor: Compressor,
+    buf: BytesMut,
+  ) -> Result<
+    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    NetTransportError<T::Resolver, T::Wire>,
+  > {
+    let buf: Bytes = compressor.decompress(&buf)?.into();
+    Self::decode(buf)
+  }
+
+  fn decode(
+    mut buf: Bytes,
+  ) -> Result<
+    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    NetTransportError<T::Resolver, T::Wire>,
+  > {
     if buf[0] == Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::COMPOUND_TAG {
       buf.advance(1);
       let num_msgs = buf[0] as usize;

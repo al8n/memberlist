@@ -56,13 +56,10 @@ where
       offset += actual_packet_encoded_size;
     }
 
-    self.sockets[0].send_to(&buf, addr).await.map_err(|e| {
-      NetTransportError::Connection(ConnectionError {
-        kind: ConnectionKind::Packet,
-        error_kind: ConnectionErrorKind::Write,
-        error: e,
-      })
-    })
+    self.sockets[0]
+      .send_to(&buf, addr)
+      .await
+      .map_err(|e| NetTransportError::Connection(ConnectionError::packet_write(e)))
   }
 
   fn encode_batch(
@@ -84,7 +81,7 @@ where
         expected_packet_encoded_size, actual_packet_encoded_size
       );
       offset += actual_packet_encoded_size;
-      return Ok(offset); 
+      return Ok(offset);
     }
 
     // Encode compound message header
@@ -133,9 +130,7 @@ where
     offset += encoded_size;
     let mut data_offset = checksum_offset + 1 + CHECKSUM_SIZE;
 
-    let compressed = compressor
-      .compress_into_bytes(&buf[data_offset..offset])
-      .map_err(NetTransportError::Compress)?;
+    let compressed = compressor.compress_into_bytes(&buf[data_offset..offset])?;
     // Write compressor tag
     buf[data_offset] = compressor as u8;
     data_offset += 1;
@@ -189,7 +184,7 @@ where
       return self.sockets[0]
         .send_to(&buf, addr)
         .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::packet_write(e)));
+        .map_err(|e| ConnectionError::packet_write(e).into());
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
@@ -214,7 +209,7 @@ where
       Ok(Ok(buf)) => self.sockets[0]
         .send_to(&buf, addr)
         .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::packet_write(e))),
+        .map_err(|e| ConnectionError::packet_write(e).into()),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(NetTransportError::ComputationTaskFailed),
     }
@@ -322,7 +317,7 @@ where
       return self.sockets[0]
         .send_to(&buf, addr)
         .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::packet_write(e)));
+        .map_err(|e| ConnectionError::packet_write(e).into());
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
@@ -352,7 +347,7 @@ where
       Ok(Ok(buf)) => self.sockets[0]
         .send_to(&buf, addr)
         .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::packet_write(e))),
+        .map_err(|e| ConnectionError::packet_write(e).into()),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(NetTransportError::ComputationTaskFailed),
     }
@@ -394,9 +389,7 @@ where
     offset += encoded_size;
     let mut data_offset = checksum_offset + 1 + CHECKSUM_SIZE;
 
-    let compressed = compressor
-      .compress_into_bytes(&buf[data_offset..offset])
-      .map_err(NetTransportError::Compress)?;
+    let compressed = compressor.compress_into_bytes(&buf[data_offset..offset])?;
     // Write compressor tag
     buf[data_offset] = compressor as u8;
     data_offset += 1;
@@ -497,7 +490,7 @@ where
       return self.sockets[0]
         .send_to(&buf, addr)
         .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::packet_write(e)));
+        .map_err(|e| ConnectionError::packet_write(e).into());
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
@@ -529,7 +522,7 @@ where
       Ok(Ok(buf)) => self.sockets[0]
         .send_to(&buf, addr)
         .await
-        .map_err(|e| NetTransportError::Connection(ConnectionError::packet_write(e))),
+        .map_err(|e| ConnectionError::packet_write(e).into()),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(NetTransportError::ComputationTaskFailed),
     }
