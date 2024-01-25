@@ -15,6 +15,7 @@ pub enum Checksumer {
 }
 
 impl Checksumer {
+  /// Calculate checksum of the given bytes.
   pub fn checksum(&self, src: &[u8]) -> u32 {
     match self {
       Self::Crc32 => {

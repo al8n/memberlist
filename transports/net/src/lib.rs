@@ -1,4 +1,9 @@
+//!
 #![allow(clippy::type_complexity)]
+#![deny(missing_docs)]
+#![forbid(unsafe_code)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(docsrs, allow(unused_attributes))]
 
 use std::{
   io::{Error, ErrorKind},
@@ -319,6 +324,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   metric_labels: Option<Arc<showbiz_utils::MetricLabels>>,
 }
 
+/// The net transport based on TCP/TLS and UDP
 pub struct NetTransport<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer, W> {
   opts: Arc<NetTransportOptions<I, A>>,
   advertise_addr: A::ResolvedAddress,

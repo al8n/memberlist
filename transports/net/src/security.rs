@@ -45,22 +45,28 @@ pub enum EncryptorError {
   Aead(#[from] aead::Error),
 }
 
+/// Security errors
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum SecurityError {
+  /// Unknown encryption algorithm
   #[error("security: unknown encryption version: {0}")]
   UnknownEncryptionAlgo(#[from] UnknownEncryptionAlgo),
+  /// Encryt/Decrypt errors
   #[error("security: {0}")]
   Encryptor(#[from] EncryptorError),
+  /// Security feature is disabled
   #[error("security: security related feature is disabled")]
   Disabled,
+  /// Payload is too small to decrypt
   #[error("security: payload is too small to decrypt")]
   SmallPayload,
+  /// No installed keys could decrypt the message
   #[error("security: no installed keys could decrypt the message")]
   NoInstalledKeys,
-  #[error("security: no primary key installed")]
-  MissingPrimaryKey,
+  /// Secret key is not in the keyring
   #[error("security: secret key is not in the keyring")]
   SecretKeyNotFound,
+  /// Removing the primary key is not allowed
   #[error("security: removing the primary key is not allowed")]
   RemovePrimaryKey,
 }
@@ -71,17 +77,19 @@ impl From<aead::Error> for SecurityError {
   }
 }
 
+/// Unknown encryption algorithm
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct UnknownEncryptionAlgo(u8);
 
 impl core::fmt::Display for UnknownEncryptionAlgo {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "unknown encryption type {}", self.0)
+    write!(f, "unknown encryption algorithm {}", self.0)
   }
 }
 
 impl std::error::Error for UnknownEncryptionAlgo {}
 
+/// Encryption algorithm
 #[derive(
   Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -247,6 +255,7 @@ impl SecretKey {
     self.len() == 0
   }
 
+  /// Converts the key into a byte vector
   #[inline]
   pub fn to_vec(&self) -> Vec<u8> {
     self.as_ref().to_vec()

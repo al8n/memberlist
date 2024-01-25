@@ -13,6 +13,7 @@ pub enum CompressorError {
   /// Decompress errors
   #[error("compressor: {0}")]
   Decompress(#[from] DecompressError),
+  /// Unknown compressor
   #[error("compressor: {0}")]
   UnknownCompressor(#[from] UnknownCompressor),
 }
@@ -47,8 +48,10 @@ pub enum Compressor {
 }
 
 impl Compressor {
+  /// The size of the compressor in bytes.
   pub const SIZE: usize = core::mem::size_of::<Self>();
 
+  /// Returns true if the compressor is LZW.
   pub fn is_lzw(&self) -> bool {
     matches!(self, Self::Lzw)
   }
@@ -82,6 +85,7 @@ const LZW_LIT_WIDTH: u8 = 8;
 /// Compress errors.
 #[derive(Debug, thiserror::Error)]
 pub enum CompressError {
+  /// LZW compress errors
   #[error("{0}")]
   Lzw(#[from] weezl::LzwError),
 }
@@ -89,6 +93,7 @@ pub enum CompressError {
 /// Decompress errors.
 #[derive(Debug, thiserror::Error)]
 pub enum DecompressError {
+  /// LZW decompress errors
   #[error("{0}")]
   Lzw(#[from] weezl::LzwError),
 }
