@@ -125,11 +125,7 @@ pub struct Options {
   /// The interval after which a node has died that
   /// we will still try to gossip to it. This gives it a chance to refute.
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
-  gossip_to_the_dead_time: Duration,
-  /// Controls whether to enforce encryption for incoming
-  /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
-  /// a running cluster.
-  gossip_verify_incoming: bool,
+  gossip_to_the_dead_time: Duration, 
 
   /// Used to guarantee protocol-compatibility
   protocol_version: ProtocolVersion,
@@ -185,11 +181,6 @@ impl Options {
   #[inline]
   pub fn lan() -> Self {
     Self {
-      // label: Label::empty(),
-      // skip_inbound_label_check: false,
-      // bind_addr: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-      // advertise_addr: None,
-      // encryption_algo: EncryptionAlgo::MAX,
       timeout: Duration::from_secs(10), // Timeout after 10 seconds
       indirect_checks: 3,               // Use 3 nodes for the indirect ping
       retransmit_mult: 4,               // Retransmit a message 4 * log(N+1) nodes
@@ -203,10 +194,6 @@ impl Options {
       gossip_interval: Duration::from_millis(200), // Gossip every 200ms
       gossip_nodes: 3,                  // Gossip to 3 nodes
       gossip_to_the_dead_time: Duration::from_secs(30), // same as push/pull
-      gossip_verify_incoming: true,
-      // compression_algo: CompressionAlgo::Lzw, // Enable compression by default
-      // secret_key: None,
-      // secret_keyring: None,
       delegate_version: DelegateVersion::V0,
       protocol_version: ProtocolVersion::V0,
       handoff_queue_depth: 1024,

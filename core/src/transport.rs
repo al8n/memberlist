@@ -541,7 +541,7 @@ pub trait Wire: Send + Sync + 'static {
 
   /// Decode message from the reader and returns the number of bytes read and the message.
   fn decode_message_from_reader<I, A>(
-    conn: impl AsyncRead + Unpin,
+    conn: impl AsyncRead + Send + Unpin,
   ) -> impl Future<Output = std::io::Result<(usize, Message<I, A>)>> + Send;
 }
 

@@ -119,12 +119,12 @@ where
     encoded_size: usize,
   ) -> Result<BytesMut, NetTransportError<A, W>> {
     let encrypt_header = encryptor.encrypt_overhead();
-    let total_len = encrypt_header + PROMISED_COMPRESS_OVERHEAD + encoded_size;
+    let total_len = encrypt_header + COMPRESS_HEADER + encoded_size;
     let mut buf = BytesMut::with_capacity(total_len);
     // write encryption algo
     buf.put_u8(encryptor.algo as u8);
     // write length placeholder
-    buf.put_slice(&[0; 4]);
+    buf.put_slice(&[0; MAX_MESSAGE_LEN_SIZE]);
 
     let nonce = encryptor.write_header(&mut buf);
     buf.resize(total_len, 0);
@@ -138,14 +138,14 @@ where
     buf.truncate(encrypt_header);
     let compress_offset = buf.len();
     buf.put_u8(*compressor as u8);
-    let mut compress_size_buf = [0; core::mem::size_of::<u32>()];
+    let mut compress_size_buf = [0; MAX_MESSAGE_LEN_SIZE];
     NetworkEndian::write_u32(&mut compress_size_buf, compressed_size as u32);
     buf.put_slice(&compress_size_buf);
     buf.put_slice(&compressed);
     let total_compressed_size = buf.len() - compress_offset;
 
     // update actual data size
-    NetworkEndian::write_u32(&mut buf[1..5], total_compressed_size as u32);
+    NetworkEndian::write_u32(&mut buf[1..ENCRYPT_HEADER], total_compressed_size as u32);
 
     let mut dst = buf.split_off(encrypt_header);
     encryptor
@@ -171,7 +171,7 @@ where
     // write encryption algo
     buf.put_u8(encryptor.algo as u8);
     // write length placeholder
-    buf.put_slice(&[0; 4]);
+    buf.put_slice(&[0; MAX_MESSAGE_LEN_SIZE]);
 
     let nonce = encryptor.write_header(&mut buf);
     buf.resize(total_len, 0);
@@ -179,7 +179,7 @@ where
     let written =
       W::encode_message(msg, &mut buf[encrypt_header..]).map_err(NetTransportError::Wire)?;
     // write actual data size
-    NetworkEndian::write_u32(&mut buf[1..5], written as u32);
+    NetworkEndian::write_u32(&mut buf[1..ENCRYPT_HEADER], written as u32);
     let mut dst = buf.split_off(encrypt_header);
     encryptor
       .encrypt(pk, nonce, label.as_bytes(), &mut dst)
@@ -196,17 +196,17 @@ where
     msg: Message<I, A::ResolvedAddress>,
     encoded_size: usize,
   ) -> Result<Vec<u8>, NetTransportError<A, W>> {
-    let mut buf = Vec::with_capacity(PROMISED_COMPRESS_OVERHEAD + encoded_size);
+    let mut buf = Vec::with_capacity(COMPRESS_HEADER + encoded_size);
     buf.push(compressor as u8);
-    buf.extend(&[0; 4]);
+    buf.extend(&[0; MAX_MESSAGE_LEN_SIZE]);
 
     let data = W::encode_message_to_vec(msg).map_err(NetTransportError::Wire)?;
     compressor
       .compress_to_vec(&data, &mut buf)
       .map_err(NetTransportError::Compress)?;
 
-    let data_len = buf.len() - PROMISED_COMPRESS_OVERHEAD;
-    NetworkEndian::write_u32(&mut buf[1..PROMISED_COMPRESS_OVERHEAD], data_len as u32);
+    let data_len = buf.len() - COMPRESS_HEADER;
+    NetworkEndian::write_u32(&mut buf[1..COMPRESS_HEADER], data_len as u32);
 
     Ok(buf)
   }

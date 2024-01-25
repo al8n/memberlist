@@ -71,26 +71,26 @@ where
   ) -> Result<usize, NetTransportError<A, W>> {
     let mut offset = 0;
 
+    let num_packets = batch.packets.len();
     // Encode messages to buffer
-    if batch.packets.len() <= 1 {
-      for packet in batch.packets.into_iter() {
-        let expected_packet_encoded_size = W::encoded_len(&packet);
-        let actual_packet_encoded_size =
-          W::encode_message(packet, &mut buf[offset..]).map_err(NetTransportError::Wire)?;
-        debug_assert_eq!(
-          expected_packet_encoded_size, actual_packet_encoded_size,
-          "expected packet encoded size {} (calculated by Wire::encoded_len()) is not match the actual encoded size {} returned by Wire::encode_message()",
-          expected_packet_encoded_size, actual_packet_encoded_size
-        );
-        offset += actual_packet_encoded_size;
-        return Ok(offset);
-      }
+    if num_packets <= 1 {
+      let packet = batch.packets.into_iter().next().unwrap();
+      let expected_packet_encoded_size = W::encoded_len(&packet);
+      let actual_packet_encoded_size =
+        W::encode_message(packet, &mut buf[offset..]).map_err(NetTransportError::Wire)?;
+      debug_assert_eq!(
+        expected_packet_encoded_size, actual_packet_encoded_size,
+        "expected packet encoded size {} (calculated by Wire::encoded_len()) is not match the actual encoded size {} returned by Wire::encode_message()",
+        expected_packet_encoded_size, actual_packet_encoded_size
+      );
+      offset += actual_packet_encoded_size;
+      return Ok(offset); 
     }
 
     // Encode compound message header
     buf[offset] = Message::<I, A::ResolvedAddress>::COMPOUND_TAG;
     offset += 1;
-    buf[offset] = batch.packets.len() as u8;
+    buf[offset] = num_packets as u8;
     offset += 1;
 
     for packet in batch.packets {
@@ -140,7 +140,7 @@ where
     buf[data_offset] = compressor as u8;
     data_offset += 1;
     NetworkEndian::write_u32(&mut buf[data_offset..], compressed.len() as u32);
-    data_offset += core::mem::size_of::<u32>();
+    data_offset += MAX_MESSAGE_LEN_SIZE;
 
     buf[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
     buf.truncate(data_offset + compressed.len());
@@ -236,7 +236,7 @@ where
     // write length placeholder
     let encrypt_length_offset = offset;
     buf.put_u32(0);
-    offset += core::mem::size_of::<u32>();
+    offset += MAX_MESSAGE_LEN_SIZE;
     // write encrypt header
     let nonce = encryptor.write_header(&mut buf);
 
@@ -247,7 +247,12 @@ where
     buf.put_slice(&[0; CHECKSUM_SIZE]);
     offset += CHECKSUM_SIZE + 1;
 
-    buf.resize(batch.estimate_encoded_len(), 0);
+    let estimate_encoded_len = batch.estimate_encoded_len();
+    if estimate_encoded_len >= max_payload_size {
+      return Err(NetTransportError::PacketTooLarge(estimate_encoded_len));
+    }
+
+    buf.resize(estimate_encoded_len, 0);
 
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     offset += encoded_size;
@@ -266,10 +271,16 @@ where
       .encrypt(pk, nonce, label.as_bytes(), &mut dst)
       .map(|_| {
         buf.unsplit(dst);
+        let buf_len = buf.len();
+        debug_assert_eq!(
+          buf_len, offset,
+          "wrong encrypt msg length, expected {}, actual {}",
+          offset, buf_len
+        );
         // update encrypt msg length
         NetworkEndian::write_u32(
-          &mut buf[encrypt_length_offset..encrypt_length_offset + core::mem::size_of::<u32>()],
-          (buf.len() - (encrypt_length_offset + core::mem::size_of::<u32>())) as u32,
+          &mut buf[encrypt_length_offset..encrypt_length_offset + MAX_MESSAGE_LEN_SIZE],
+          (buf_len - (encrypt_length_offset + MAX_MESSAGE_LEN_SIZE)) as u32,
         );
         buf
       })
@@ -348,6 +359,7 @@ where
   }
 
   #[cfg(all(feature = "compression", feature = "encryption"))]
+  #[allow(clippy::too_many_arguments)]
   fn encode_and_compress_and_encrypt_batch(
     checksumer: Checksumer,
     compressor: Compressor,
@@ -365,7 +377,7 @@ where
     // write length placeholder
     let encrypt_length_offset = offset;
     buf.put_u32(0);
-    offset += core::mem::size_of::<u32>();
+    offset += MAX_MESSAGE_LEN_SIZE;
     // write encrypt header
     let nonce = encryptor.write_header(&mut buf);
 
@@ -389,7 +401,7 @@ where
     buf[data_offset] = compressor as u8;
     data_offset += 1;
     NetworkEndian::write_u32(&mut buf[data_offset..], compressed.len() as u32);
-    data_offset += core::mem::size_of::<u32>();
+    data_offset += MAX_MESSAGE_LEN_SIZE;
 
     buf[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
     buf.truncate(data_offset + compressed.len());
@@ -411,10 +423,11 @@ where
       .encrypt(pk, nonce, label.as_bytes(), &mut dst)
       .map(|_| {
         buf.unsplit(dst);
+        let buf_len = buf.len();
         // update encrypt msg length
         NetworkEndian::write_u32(
-          &mut buf[encrypt_length_offset..encrypt_length_offset + core::mem::size_of::<u32>()],
-          (buf.len() - (encrypt_length_offset + core::mem::size_of::<u32>())) as u32,
+          &mut buf[encrypt_length_offset..encrypt_length_offset + MAX_MESSAGE_LEN_SIZE],
+          (buf_len - (encrypt_length_offset + MAX_MESSAGE_LEN_SIZE)) as u32,
         );
         buf
       })

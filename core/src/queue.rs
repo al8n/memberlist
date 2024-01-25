@@ -354,6 +354,12 @@ mod tests {
     fn decode_message<I, A>(_src: &[u8]) -> Result<Message<I, A>, Self::Error> {
       unreachable!()
     }
+
+    async fn decode_message_from_reader<I, A>(
+      _conn: impl futures::prelude::AsyncRead + Unpin,
+    ) -> std::io::Result<(usize, Message<I, A>)> {
+      unreachable!() 
+    }
   }
 
   struct NC(usize);
