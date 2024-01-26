@@ -11,6 +11,11 @@ pub mod tcp;
 #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
 pub mod tls;
 
+/// `StreamLayer` implementations based on [`native-tls`](https://crates.io/crates/native-tls).
+#[cfg(feature = "native-tls")]
+#[cfg_attr(docsrs, doc(cfg(feature = "native-tls")))]
+pub mod native_tls;
+
 /// Represents a network listener.
 ///
 /// This trait defines the operations required for a network listener that can bind to an address,
