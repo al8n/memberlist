@@ -10,7 +10,7 @@ where
   S: StreamLayer,
   W: Wire,
 {
-  pub(super) async fn read_from_promised_without_compression_and_encryption(
+  pub(crate) async fn read_from_promised_without_compression_and_encryption(
     &self,
     conn: impl AsyncRead + Send + Unpin,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
@@ -20,7 +20,7 @@ where
   }
 
   #[cfg(all(feature = "compression", not(feature = "encryption")))]
-  pub(super) async fn read_from_promised_with_compression_without_encryption(
+  pub(crate) async fn read_from_promised_with_compression_without_encryption(
     &self,
     mut conn: peekable::future::AsyncPeekable<impl AsyncRead + Send + Unpin>,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
@@ -88,7 +88,7 @@ where
   }
 
   #[cfg(all(feature = "encryption", not(feature = "compression")))]
-  pub(super) async fn read_from_promised_with_encryption_without_compression(
+  pub(crate) async fn read_from_promised_with_encryption_without_compression(
     &self,
     mut conn: peekable::future::AsyncPeekable<impl AsyncRead + Send + Unpin>,
     stream_label: Label,
@@ -171,7 +171,7 @@ where
   }
 
   #[cfg(all(feature = "compression", feature = "encryption"))]
-  pub(super) async fn read_from_promised_with_compression_and_encryption(
+  pub(crate) async fn read_from_promised_with_compression_and_encryption(
     &self,
     mut conn: peekable::future::AsyncPeekable<impl AsyncRead + Send + Unpin>,
     stream_label: Label,

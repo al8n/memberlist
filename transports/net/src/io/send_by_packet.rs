@@ -7,7 +7,7 @@ where
   S: StreamLayer,
   W: Wire,
 {
-  pub(super) fn fix_packet_overhead(&self) -> usize {
+  pub(crate) fn fix_packet_overhead(&self) -> usize {
     let mut overhead = self.opts.label.encoded_overhead();
     overhead += 1 + CHECKSUM_SIZE;
 
@@ -452,7 +452,7 @@ where
       .map_err(NetTransportError::Security)
   }
 
-  pub(super) async fn send_batch(
+  pub(crate) async fn send_batch(
     &self,
     addr: &A::ResolvedAddress,
     batch: Batch<I, A::ResolvedAddress>,
