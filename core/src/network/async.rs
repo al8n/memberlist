@@ -125,14 +125,14 @@ where
       .transport
       .send_packet(addr, packet)
       .await
-      .map(|(sent, _)| {
+      .map(|(_sent, _)| {
         #[cfg(feature = "metrics")]
         {
           metrics::counter!(
             "memberlist.packet.sent",
             self.inner.opts.metric_labels.iter()
           )
-          .increment(sent as u64);
+          .increment(_sent as u64);
         }
       })
       .map_err(Error::transport)
@@ -148,14 +148,14 @@ where
       .transport
       .send_packets(addr, packet)
       .await
-      .map(|(sent, _)| {
+      .map(|(_sent, _)| {
         #[cfg(feature = "metrics")]
         {
           metrics::counter!(
             "memberlist.packet.sent",
             self.inner.opts.metric_labels.iter()
           )
-          .increment(sent as u64);
+          .increment(_sent as u64);
         }
       })
       .map_err(Error::transport)
@@ -171,14 +171,14 @@ where
       .transport
       .send_message(conn, msg)
       .await
-      .map(|sent| {
+      .map(|_sent| {
         #[cfg(feature = "metrics")]
         {
           metrics::counter!(
             "memberlist.promised.sent",
             self.inner.opts.metric_labels.iter()
           )
-          .increment(sent as u64);
+          .increment(_sent as u64);
         }
       })
       .map_err(Error::transport)

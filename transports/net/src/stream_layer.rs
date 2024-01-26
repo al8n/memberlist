@@ -6,6 +6,11 @@ use memberlist_core::transport::TimeoutableStream;
 /// `StreamLayer` implementations based on TCP.
 pub mod tcp;
 
+/// `StreamLayer` implementations based on [`rustls`](https://crates.io/crates/rustls).
+#[cfg(feature = "tls")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
+pub mod tls;
+
 /// Represents a network listener.
 ///
 /// This trait defines the operations required for a network listener that can bind to an address,

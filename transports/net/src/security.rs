@@ -4,14 +4,12 @@ use aes_gcm::{
   Aes128Gcm, Aes256Gcm, AesGcm,
 };
 use async_lock::RwLock;
-use base64::Engine;
 use bytes::{Buf, BufMut, BytesMut};
 use indexmap::IndexSet;
 use memberlist_core::transport::Wire;
 use memberlist_utils::smallvec_wrapper;
 use nodecraft::resolver::AddressResolver;
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 
 use std::{iter::once, sync::Arc};
 
@@ -91,10 +89,12 @@ impl std::error::Error for UnknownEncryptionAlgo {}
 
 /// Encryption algorithm
 #[derive(
-  Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+  Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash
 )]
 #[repr(u8)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum EncryptionAlgo {
   /// AES-GCM, using PKCS7 padding
   #[default]
@@ -151,52 +151,57 @@ pub enum SecretKey {
 }
 
 #[cfg(feature = "serde")]
-impl Serialize for SecretKey {
-  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-  where
-    S: serde::Serializer,
-  {
-    if serializer.is_human_readable() {
-      base64::engine::general_purpose::STANDARD
-        .encode(self)
-        .serialize(serializer)
-    } else {
-      serializer.serialize_bytes(self)
-    }
-  }
-}
+const _: () = {
+  use base64::Engine;
+  use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "serde")]
-impl<'de> Deserialize<'de> for SecretKey {
-  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-  where
-    D: serde::Deserializer<'de>,
-  {
-    macro_rules! parse {
-      ($key:ident) => {{
-        match $key.len() {
-          16 => Ok(Self::Aes128($key.try_into().unwrap())),
-          24 => Ok(Self::Aes192($key.try_into().unwrap())),
-          32 => Ok(Self::Aes256($key.try_into().unwrap())),
-          _ => Err(<D::Error as serde::de::Error>::custom(
-            "invalid secret key length",
-          )),
-        }
-      }};
-    }
-
-    if deserializer.is_human_readable() {
-      <String as Deserialize<'de>>::deserialize(deserializer).and_then(|val| {
+  impl Serialize for SecretKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+      S: serde::Serializer,
+    {
+      if serializer.is_human_readable() {
         base64::engine::general_purpose::STANDARD
-          .decode(val)
-          .map_err(serde::de::Error::custom)
-          .and_then(|key| parse!(key))
-      })
-    } else {
-      <Vec<u8> as Deserialize<'de>>::deserialize(deserializer).and_then(|val| parse!(val))
+          .encode(self)
+          .serialize(serializer)
+      } else {
+        serializer.serialize_bytes(self)
+      }
     }
   }
-}
+  
+  impl<'de> Deserialize<'de> for SecretKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+      D: serde::Deserializer<'de>,
+    {
+      macro_rules! parse {
+        ($key:ident) => {{
+          match $key.len() {
+            16 => Ok(Self::Aes128($key.try_into().unwrap())),
+            24 => Ok(Self::Aes192($key.try_into().unwrap())),
+            32 => Ok(Self::Aes256($key.try_into().unwrap())),
+            _ => Err(<D::Error as serde::de::Error>::custom(
+              "invalid secret key length",
+            )),
+          }
+        }};
+      }
+  
+      if deserializer.is_human_readable() {
+        <String as Deserialize<'de>>::deserialize(deserializer).and_then(|val| {
+          base64::engine::general_purpose::STANDARD
+            .decode(val)
+            .map_err(serde::de::Error::custom)
+            .and_then(|key| parse!(key))
+        })
+      } else {
+        <Vec<u8> as Deserialize<'de>>::deserialize(deserializer).and_then(|val| parse!(val))
+      }
+    }
+  }  
+};
+
 
 impl core::hash::Hash for SecretKey {
   fn hash<H: core::hash::Hasher>(&self, state: &mut H) {

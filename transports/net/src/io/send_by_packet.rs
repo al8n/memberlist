@@ -24,61 +24,11 @@ where
     overhead
   }
 
+  #[cfg(feature = "encryption")]
   fn enable_packet_encryption(&self) -> bool {
     self.encryptor.is_some()
       && self.opts.gossip_verify_outgoing
       && self.opts.encryption_algo.is_some()
-  }
-
-  async fn send_batch_without_compression_and_encryption(
-    &self,
-    addr: &A::ResolvedAddress,
-    batch: Batch<I, A::ResolvedAddress>,
-  ) -> Result<usize, NetTransportError<A, W>> {
-    let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
-    buf.add_label_header(&self.opts.label);
-    offset += self.opts.label.encoded_overhead();
-
-    debug_assert_eq!(offset, buf.len(), "wrong label encoded length");
-
-    let mut offset = buf.len();
-
-    // reserve to store checksum
-    buf.put_u8(self.opts.checksumer as u8);
-    buf.put_slice(&[0; CHECKSUM_SIZE]);
-    offset += CHECKSUM_SIZE + 1;
-
-    buf.resize(batch.estimate_encoded_len(), 0);
-
-    // Encode compound message header
-    buf[offset] = Message::<I, A::ResolvedAddress>::COMPOUND_TAG;
-    offset += 1;
-    buf[offset] = batch.num_packets as u8;
-    offset += 1;
-
-    // Encode messages to buffer
-    for packet in batch.packets {
-      let expected_packet_encoded_size = W::encoded_len(&packet);
-      NetworkEndian::write_u16(
-        &mut buf[offset..offset + PACKET_OVERHEAD],
-        expected_packet_encoded_size as u16,
-      );
-      offset += PACKET_OVERHEAD;
-      let actual_packet_encoded_size =
-        W::encode_message(packet, &mut buf[offset..]).map_err(NetTransportError::Wire)?;
-      debug_assert_eq!(
-        expected_packet_encoded_size, actual_packet_encoded_size,
-        "expected packet encoded size {} (calculated by Wire::encoded_len()) is not match the actual encoded size {} returned by Wire::encode_message()",
-        expected_packet_encoded_size, actual_packet_encoded_size
-      );
-      offset += actual_packet_encoded_size;
-    }
-
-    self.sockets[0]
-      .send_to(&buf, addr)
-      .await
-      .map_err(|e| NetTransportError::Connection(ConnectionError::packet_write(e)))
   }
 
   fn encode_batch(
@@ -129,6 +79,7 @@ where
     Ok(offset)
   }
 
+  #[cfg(feature = "compression")]
   fn encode_and_compress_batch(
     checksumer: Checksumer,
     compressor: Compressor,
@@ -141,13 +92,13 @@ where
     // reserve to store checksum
     buf.put_u8(checksumer as u8);
     buf.put_slice(&[0; CHECKSUM_SIZE]);
-    offset += CHECKSUM_SIZE + 1;
+    offset += CHECKSUM_HEADER;
 
     buf.resize(batch.estimate_encoded_len(), 0);
 
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     offset += encoded_size;
-    let mut data_offset = checksum_offset + 1 + CHECKSUM_SIZE;
+    let mut data_offset = checksum_offset + CHECKSUM_HEADER;
 
     let compressed = compressor.compress_into_bytes(&buf[data_offset..offset])?;
     // Write compressor tag
@@ -166,10 +117,193 @@ where
 
     let cks = checksumer.checksum(&compressed);
     NetworkEndian::write_u32(
-      &mut buf[checksum_offset + 1..checksum_offset + 1 + CHECKSUM_SIZE],
+      &mut buf[checksum_offset + 1..checksum_offset + CHECKSUM_HEADER],
       cks,
     );
     Ok(buf)
+  }
+
+  #[cfg(feature = "encryption")]
+  #[allow(clippy::too_many_arguments)]
+  fn encode_and_encrypt_batch(
+    checksumer: Checksumer,
+    pk: SecretKey,
+    encryptor: &SecretKeyring,
+    encryption_algo: EncryptionAlgo,
+    label: &Label,
+    mut buf: BytesMut,
+    batch: Batch<I, A::ResolvedAddress>,
+    max_payload_size: usize,
+  ) -> Result<BytesMut, NetTransportError<A, W>> {
+    let mut offset = buf.len();
+    // write encryption tag
+    buf.put_u8(encryption_algo as u8);
+    offset += 1;
+    // write length placeholder
+    let encrypt_length_offset = offset;
+    buf.put_u32(0);
+    offset += MAX_MESSAGE_LEN_SIZE;
+    // write encrypt header
+    let nonce = encryptor.write_header(encryption_algo, &mut buf);
+
+    let checksum_offset = buf.len();
+
+    // reserve to store checksum
+    buf.put_u8(checksumer as u8);
+    buf.put_slice(&[0; CHECKSUM_SIZE]);
+    offset += CHECKSUM_SIZE + 1;
+
+    let estimate_encoded_len = batch.estimate_encoded_len();
+    if estimate_encoded_len >= max_payload_size {
+      return Err(NetTransportError::PacketTooLarge(estimate_encoded_len));
+    }
+
+    buf.resize(estimate_encoded_len, 0);
+
+    let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
+    offset += encoded_size;
+    let data_offset = checksum_offset + CHECKSUM_HEADER;
+
+    // update checksum
+    let cks = checksumer.checksum(&buf[data_offset..]);
+    NetworkEndian::write_u32(
+      &mut buf[checksum_offset + 1..data_offset],
+      cks,
+    );
+
+    // encrypt
+    let mut dst = buf.split_off(data_offset);
+    encryptor
+      .encrypt(pk, nonce, label.as_bytes(), &mut dst)
+      .map(|_| {
+        buf.unsplit(dst);
+        let buf_len = buf.len();
+        debug_assert_eq!(
+          buf_len, offset,
+          "wrong encrypt msg length, expected {}, actual {}",
+          offset, buf_len
+        );
+        // update encrypt msg length
+        NetworkEndian::write_u32(
+          &mut buf[encrypt_length_offset..encrypt_length_offset + MAX_MESSAGE_LEN_SIZE],
+          (buf_len - (encrypt_length_offset + MAX_MESSAGE_LEN_SIZE)) as u32,
+        );
+        buf
+      })
+      .map_err(NetTransportError::Security)
+  }
+
+  #[cfg(all(feature = "compression", feature = "encryption"))]
+  #[allow(clippy::too_many_arguments)]
+  fn encode_and_compress_and_encrypt_batch(
+    checksumer: Checksumer,
+    compressor: Compressor,
+    pk: SecretKey,
+    encryptor: &SecretKeyring,
+    encryption_algo: EncryptionAlgo,
+    label: &Label,
+    mut buf: BytesMut,
+    batch: Batch<I, A::ResolvedAddress>,
+    max_payload_size: usize,
+  ) -> Result<BytesMut, NetTransportError<A, W>> {
+    let mut offset = buf.len();
+    // write encryption tag
+    buf.put_u8(encryption_algo as u8);
+    offset += 1;
+    // write length placeholder
+    let encrypt_length_offset = offset;
+    buf.put_u32(0);
+    offset += MAX_MESSAGE_LEN_SIZE;
+    // write encrypt header
+    let nonce = encryptor.write_header(encryption_algo, &mut buf);
+
+    let checksum_offset = buf.len();
+
+    // reserve to store checksum
+    buf.put_u8(checksumer as u8);
+    buf.put_slice(&[0; CHECKSUM_SIZE]);
+    offset += CHECKSUM_SIZE + 1;
+
+    buf.resize(batch.estimate_encoded_len(), 0);
+
+    let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
+    offset += encoded_size;
+    let mut data_offset = checksum_offset + CHECKSUM_HEADER;
+
+    let compressed = compressor.compress_into_bytes(&buf[data_offset..offset])?;
+    // Write compressor tag
+    buf[data_offset] = compressor as u8;
+    data_offset += 1;
+    NetworkEndian::write_u32(&mut buf[data_offset..], compressed.len() as u32);
+    data_offset += MAX_MESSAGE_LEN_SIZE;
+
+    buf[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
+    buf.truncate(data_offset + compressed.len());
+
+    // check if the packet exceeds the max packet size can be sent by the packet layer
+    if buf.len() >= max_payload_size {
+      return Err(NetTransportError::PacketTooLarge(buf.len()));
+    }
+
+    let cks = checksumer.checksum(&compressed);
+    NetworkEndian::write_u32(
+      &mut buf[checksum_offset + 1..checksum_offset + CHECKSUM_HEADER],
+      cks,
+    );
+
+    // encrypt
+    let mut dst = buf.split_off(data_offset);
+    encryptor
+      .encrypt(pk, nonce, label.as_bytes(), &mut dst)
+      .map(|_| {
+        buf.unsplit(dst);
+        let buf_len = buf.len();
+        // update encrypt msg length
+        NetworkEndian::write_u32(
+          &mut buf[encrypt_length_offset..encrypt_length_offset + MAX_MESSAGE_LEN_SIZE],
+          (buf_len - (encrypt_length_offset + MAX_MESSAGE_LEN_SIZE)) as u32,
+        );
+        buf
+      })
+      .map_err(NetTransportError::Security)
+  }
+
+  async fn send_batch_without_compression_and_encryption(
+    &self,
+    addr: &A::ResolvedAddress,
+    batch: Batch<I, A::ResolvedAddress>,
+  ) -> Result<usize, NetTransportError<A, W>> {
+    let mut offset = 0;
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
+    buf.add_label_header(&self.opts.label);
+    offset += self.opts.label.encoded_overhead();
+
+    debug_assert_eq!(offset, buf.len(), "wrong label encoded length");
+
+    let mut offset = buf.len();
+
+    // reserve to store checksum
+    let checksum_offset = offset;
+    buf.put_u8(self.opts.checksumer as u8);
+    buf.put_slice(&[0; CHECKSUM_SIZE]);
+    offset += CHECKSUM_HEADER;
+
+    buf.resize(batch.estimate_encoded_len(), 0);
+
+    Self::encode_batch(&mut buf[offset..], batch)?;
+    let data_offset = checksum_offset + CHECKSUM_HEADER;
+
+    // update checksum
+    let cks = self.opts.checksumer.checksum(&buf[data_offset..]);
+    NetworkEndian::write_u32(
+      &mut buf[checksum_offset + 1..data_offset],
+      cks,
+    );
+
+    self.sockets[0]
+      .send_to(&buf, addr)
+      .await
+      .map_err(|e| NetTransportError::Connection(ConnectionError::packet_write(e)))
   }
 
   #[cfg(feature = "compression")]
@@ -232,75 +366,6 @@ where
       Ok(Err(e)) => Err(e),
       Err(_) => Err(NetTransportError::ComputationTaskFailed),
     }
-  }
-
-  #[allow(clippy::too_many_arguments)]
-  fn encode_and_encrypt_batch(
-    checksumer: Checksumer,
-    pk: SecretKey,
-    encryptor: &SecretKeyring,
-    encryption_algo: EncryptionAlgo,
-    label: &Label,
-    mut buf: BytesMut,
-    batch: Batch<I, A::ResolvedAddress>,
-    max_payload_size: usize,
-  ) -> Result<BytesMut, NetTransportError<A, W>> {
-    let mut offset = buf.len();
-    // write encryption tag
-    buf.put_u8(encryption_algo as u8);
-    offset += 1;
-    // write length placeholder
-    let encrypt_length_offset = offset;
-    buf.put_u32(0);
-    offset += MAX_MESSAGE_LEN_SIZE;
-    // write encrypt header
-    let nonce = encryptor.write_header(encryption_algo, &mut buf);
-
-    let checksum_offset = buf.len();
-
-    // reserve to store checksum
-    buf.put_u8(checksumer as u8);
-    buf.put_slice(&[0; CHECKSUM_SIZE]);
-    offset += CHECKSUM_SIZE + 1;
-
-    let estimate_encoded_len = batch.estimate_encoded_len();
-    if estimate_encoded_len >= max_payload_size {
-      return Err(NetTransportError::PacketTooLarge(estimate_encoded_len));
-    }
-
-    buf.resize(estimate_encoded_len, 0);
-
-    let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
-    offset += encoded_size;
-    let data_offset = checksum_offset;
-
-    // update checksum
-    let cks = checksumer.checksum(&buf[data_offset + CHECKSUM_HEADER..]);
-    NetworkEndian::write_u32(
-      &mut buf[checksum_offset + 1..checksum_offset + CHECKSUM_HEADER],
-      cks,
-    );
-
-    // encrypt
-    let mut dst = buf.split_off(data_offset);
-    encryptor
-      .encrypt(pk, nonce, label.as_bytes(), &mut dst)
-      .map(|_| {
-        buf.unsplit(dst);
-        let buf_len = buf.len();
-        debug_assert_eq!(
-          buf_len, offset,
-          "wrong encrypt msg length, expected {}, actual {}",
-          offset, buf_len
-        );
-        // update encrypt msg length
-        NetworkEndian::write_u32(
-          &mut buf[encrypt_length_offset..encrypt_length_offset + MAX_MESSAGE_LEN_SIZE],
-          (buf_len - (encrypt_length_offset + MAX_MESSAGE_LEN_SIZE)) as u32,
-        );
-        buf
-      })
-      .map_err(NetTransportError::Security)
   }
 
   #[cfg(feature = "encryption")]
@@ -378,100 +443,11 @@ where
   }
 
   #[cfg(all(feature = "compression", feature = "encryption"))]
-  #[allow(clippy::too_many_arguments)]
-  fn encode_and_compress_and_encrypt_batch(
-    checksumer: Checksumer,
-    compressor: Compressor,
-    pk: SecretKey,
-    encryptor: &SecretKeyring,
-    encryption_algo: EncryptionAlgo,
-    label: &Label,
-    mut buf: BytesMut,
-    batch: Batch<I, A::ResolvedAddress>,
-    max_payload_size: usize,
-  ) -> Result<BytesMut, NetTransportError<A, W>> {
-    let mut offset = buf.len();
-    // write encryption tag
-    buf.put_u8(encryption_algo as u8);
-    offset += 1;
-    // write length placeholder
-    let encrypt_length_offset = offset;
-    buf.put_u32(0);
-    offset += MAX_MESSAGE_LEN_SIZE;
-    // write encrypt header
-    let nonce = encryptor.write_header(encryption_algo, &mut buf);
-
-    let checksum_offset = buf.len();
-
-    // reserve to store checksum
-    buf.put_u8(checksumer as u8);
-    buf.put_slice(&[0; CHECKSUM_SIZE]);
-    offset += CHECKSUM_SIZE + 1;
-
-    buf.resize(batch.estimate_encoded_len(), 0);
-
-    let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
-    offset += encoded_size;
-    let mut data_offset = checksum_offset + 1 + CHECKSUM_SIZE;
-
-    let compressed = compressor.compress_into_bytes(&buf[data_offset..offset])?;
-    // Write compressor tag
-    buf[data_offset] = compressor as u8;
-    data_offset += 1;
-    NetworkEndian::write_u32(&mut buf[data_offset..], compressed.len() as u32);
-    data_offset += MAX_MESSAGE_LEN_SIZE;
-
-    buf[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
-    buf.truncate(data_offset + compressed.len());
-
-    // check if the packet exceeds the max packet size can be sent by the packet layer
-    if buf.len() >= max_payload_size {
-      return Err(NetTransportError::PacketTooLarge(buf.len()));
-    }
-
-    let cks = checksumer.checksum(&compressed);
-    NetworkEndian::write_u32(
-      &mut buf[checksum_offset + 1..checksum_offset + 1 + CHECKSUM_SIZE],
-      cks,
-    );
-
-    // encrypt
-    let mut dst = buf.split_off(data_offset);
-    encryptor
-      .encrypt(pk, nonce, label.as_bytes(), &mut dst)
-      .map(|_| {
-        buf.unsplit(dst);
-        let buf_len = buf.len();
-        // update encrypt msg length
-        NetworkEndian::write_u32(
-          &mut buf[encrypt_length_offset..encrypt_length_offset + MAX_MESSAGE_LEN_SIZE],
-          (buf_len - (encrypt_length_offset + MAX_MESSAGE_LEN_SIZE)) as u32,
-        );
-        buf
-      })
-      .map_err(NetTransportError::Security)
-  }
-
-  pub(crate) async fn send_batch(
+  async fn send_batch_with_compression_and_encryption(
     &self,
     addr: &A::ResolvedAddress,
     batch: Batch<I, A::ResolvedAddress>,
   ) -> Result<usize, NetTransportError<A, W>> {
-    #[cfg(not(any(feature = "compression", feature = "encryption")))]
-    return self
-      .send_batch_without_compression_and_encryption(addr, batch)
-      .await;
-
-    #[cfg(all(feature = "compression", not(feature = "encryption")))]
-    return self
-      .send_batch_with_compression_without_encryption(addr, batch)
-      .await;
-
-    #[cfg(all(not(feature = "compression"), feature = "encryption"))]
-    return self
-      .send_batch_with_encryption_without_compression(addr, batch)
-      .await;
-
     let encryption_enabled = self.enable_packet_encryption();
     if self.opts.compressor.is_none() && !encryption_enabled {
       return self
@@ -554,5 +530,31 @@ where
       Ok(Err(e)) => Err(e),
       Err(_) => Err(NetTransportError::ComputationTaskFailed),
     }
+  }
+
+  pub(crate) async fn send_batch(
+    &self,
+    addr: &A::ResolvedAddress,
+    batch: Batch<I, A::ResolvedAddress>,
+  ) -> Result<usize, NetTransportError<A, W>> {
+    #[cfg(not(any(feature = "compression", feature = "encryption")))]
+    return self
+      .send_batch_without_compression_and_encryption(addr, batch)
+      .await;
+
+    #[cfg(all(feature = "compression", not(feature = "encryption")))]
+    return self
+      .send_batch_with_compression_without_encryption(addr, batch)
+      .await;
+
+    #[cfg(all(not(feature = "compression"), feature = "encryption"))]
+    return self
+      .send_batch_with_encryption_without_compression(addr, batch)
+      .await;
+
+    #[cfg(all(feature = "compression", feature = "encryption"))]
+    self
+      .send_batch_with_compression_and_encryption(addr, batch)
+      .await
   }
 }
