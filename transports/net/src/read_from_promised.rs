@@ -225,7 +225,7 @@ where
     readed += encrypted_message_len;
 
     // check if we should offload
-    let keys = enp.kr.keys().await;
+    let keys = enp.keys().await;
     if encrypted_message_len / 2 <= self.opts.offload_size {
       return Self::decrypt_and_decompress(
         enp,
@@ -273,7 +273,7 @@ where
 
   #[cfg(feature = "encryption")]
   fn decrypt(
-    encryptor: &Encryptor,
+    encryptor: &SecretKeyring,
     algo: EncryptionAlgo,
     keys: impl Iterator<Item = SecretKey>,
     auth_data: &[u8],
@@ -294,7 +294,7 @@ where
 
   #[cfg(all(feature = "compression", feature = "encryption"))]
   fn decrypt_and_decompress(
-    encryptor: &Encryptor,
+    encryptor: &SecretKeyring,
     algo: EncryptionAlgo,
     keys: impl Iterator<Item = SecretKey>,
     auth_data: &[u8],

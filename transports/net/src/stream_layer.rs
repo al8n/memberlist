@@ -9,7 +9,7 @@ use showbiz_core::transport::TimeoutableStream;
 /// accept incoming connections, and query its local address.
 pub trait Listener: Send + Sync + 'static {
   /// The type of the network stream associated with this listener.
-  type Stream: PromisedConnection;
+  type Stream: PromisedStream;
 
   /// Accepts an incoming connection.
   fn accept(&self) -> impl Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send;
@@ -22,7 +22,7 @@ pub trait Listener: Send + Sync + 'static {
 ///
 /// This trait encapsulates functionality for a network connection that supports asynchronous
 /// read/write operations and can be split into separate read and write halves.
-pub trait PromisedConnection:
+pub trait PromisedStream:
   TimeoutableStream + AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static
 {
 }
@@ -38,7 +38,7 @@ pub trait StreamLayer: Send + Sync + 'static {
   type Listener: Listener<Stream = Self::Stream>;
 
   /// The connection type for the network stream.
-  type Stream: PromisedConnection;
+  type Stream: PromisedStream;
 
   /// Establishes a connection to a specified socket address.
   fn connect(&self, addr: SocketAddr) -> impl Future<Output = io::Result<Self::Stream>> + Send;
@@ -54,39 +54,4 @@ pub trait StreamLayer: Send + Sync + 'static {
   /// # Returns
   /// `true` if the connection is secure (e.g., TLS), `false` otherwise (e.g., TCP).
   fn is_secure() -> bool;
-}
-
-/// Packet connection. e.g. UDP connection.
-pub trait PacketConnection: TimeoutableStream + Unpin + Send + Sync + 'static {
-  /// Sends a packet to the specified socket address.
-  ///
-  /// This method asynchronously sends the provided buffer as a packet to the given address.
-  ///
-  /// # Arguments
-  /// * `addr` - A reference to the `SocketAddr` where the packet should be sent.
-  /// * `buf` - A byte slice reference representing the packet's contents.
-  ///
-  /// # Returns
-  /// A `Future` that resolves to a `Result` indicating the outcome of the send operation.
-  /// On success, it contains the number of bytes sent.
-  fn send_to(
-    &self,
-    addr: &SocketAddr,
-    buf: &[u8],
-  ) -> impl Future<Output = Result<usize, std::io::Error>> + Send;
-
-  /// Receives a packet, storing its contents into the provided buffer.
-  ///
-  /// This method asynchronously waits for a packet and stores its contents into the given buffer.
-  ///
-  /// # Arguments
-  /// * `buf` - A mutable byte slice where the received packet's contents will be stored.
-  ///
-  /// # Returns
-  /// A `Future` that resolves to a `Result` containing the size of the received data and the
-  /// sender's socket address. If an error occurs, the `Result` will contain the `std::io::Error`.
-  fn recv_from(
-    &self,
-    buf: &mut [u8],
-  ) -> impl Future<Output = Result<(usize, SocketAddr), std::io::Error>> + Send;
 }

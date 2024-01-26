@@ -49,7 +49,7 @@ where
     }
 
     let ping_seq_no = ping.seq_no;
-    self.send_message(&mut conn, target, ping.into()).await?;
+    self.send_message(&mut conn, ping.into()).await?;
 
     let msg: Message<_, _> = self
       .read_message(target, &mut conn)
@@ -96,9 +96,7 @@ where
     }
 
     // Send our state
-    self
-      .send_local_state(&mut conn, node.address(), join)
-      .await?;
+    self.send_local_state(&mut conn, join).await?;
 
     conn.set_timeout(if self.inner.opts.timeout == Duration::ZERO {
       None
@@ -160,13 +158,12 @@ where
   pub(crate) async fn send_message(
     &self,
     conn: &mut T::Stream,
-    target: &<T::Resolver as AddressResolver>::ResolvedAddress,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
     self
       .inner
       .transport
-      .send_message(conn, target, msg)
+      .send_message(conn, msg)
       .await
       .map(|sent| {
         #[cfg(feature = "metrics")]

@@ -4,6 +4,11 @@ pub mod net;
 /// re-export [`either`] crate
 pub use either;
 
+/// Compression related utilities
+#[cfg(feature = "compression")]
+#[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
+pub mod compressor;
+
 #[doc(hidden)]
 pub mod __private {
   pub use smallvec;

@@ -7,8 +7,27 @@ where
   S: StreamLayer,
   W: Wire,
 {
+  pub(super) fn fix_packet_overhead(&self) -> usize {
+    let mut overhead = self.opts.label.encoded_overhead();
+    overhead += 1 + CHECKSUM_SIZE;
+
+    #[cfg(feature = "compression")]
+    if self.opts.compressor.is_some() {
+      overhead += 1 + core::mem::size_of::<u32>();
+    }
+
+    #[cfg(feature = "encryption")]
+    if self.enable_packet_encryption() {
+      overhead += self.opts.encryption_algo.unwrap().encrypt_overhead();
+    }
+
+    overhead
+  }
+
   fn enable_packet_encryption(&self) -> bool {
-    self.encryptor.is_some() && self.opts.gossip_verify_outgoing
+    self.encryptor.is_some()
+      && self.opts.gossip_verify_outgoing
+      && self.opts.encryption_algo.is_some()
   }
 
   async fn send_batch_without_compression_and_encryption(
@@ -215,10 +234,12 @@ where
     }
   }
 
+  #[allow(clippy::too_many_arguments)]
   fn encode_and_encrypt_batch(
     checksumer: Checksumer,
     pk: SecretKey,
-    encryptor: &Encryptor,
+    encryptor: &SecretKeyring,
+    encryption_algo: EncryptionAlgo,
     label: &Label,
     mut buf: BytesMut,
     batch: Batch<I, A::ResolvedAddress>,
@@ -226,14 +247,14 @@ where
   ) -> Result<BytesMut, NetTransportError<A, W>> {
     let mut offset = buf.len();
     // write encryption tag
-    buf.put_u8(encryptor.algo as u8);
+    buf.put_u8(encryption_algo as u8);
     offset += 1;
     // write length placeholder
     let encrypt_length_offset = offset;
     buf.put_u32(0);
     offset += MAX_MESSAGE_LEN_SIZE;
     // write encrypt header
-    let nonce = encryptor.write_header(&mut buf);
+    let nonce = encryptor.write_header(encryption_algo, &mut buf);
 
     let checksum_offset = buf.len();
 
@@ -288,13 +309,14 @@ where
     addr: &A::ResolvedAddress,
     batch: Batch<I, A::ResolvedAddress>,
   ) -> Result<usize, NetTransportError<A, W>> {
-    if self.encryptor.is_none() || !self.opts.gossip_verify_outgoing {
+    if !self.enable_packet_encryption() {
       return self
         .send_batch_without_compression_and_encryption(addr, batch)
         .await;
     }
 
     let encryptor = self.encryptor.as_ref().unwrap();
+    let encryption_algo = self.opts.encryption_algo.unwrap();
     let mut offset = 0;
     let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
     buf.add_label_header(&self.opts.label);
@@ -302,12 +324,13 @@ where
 
     debug_assert_eq!(offset, buf.len(), "wrong label encoded length");
 
-    let pk = encryptor.kr.primary_key().await;
+    let pk = encryptor.primary_key().await;
     if buf.len() <= self.opts.offload_size {
       let buf = Self::encode_and_encrypt_batch(
         self.opts.checksumer,
         pk,
         encryptor,
+        encryption_algo,
         &self.opts.label,
         buf,
         batch,
@@ -332,6 +355,7 @@ where
           checksumer,
           pk,
           &encryptor,
+          encryption_algo,
           &label,
           buf,
           batch,
@@ -359,7 +383,8 @@ where
     checksumer: Checksumer,
     compressor: Compressor,
     pk: SecretKey,
-    encryptor: &Encryptor,
+    encryptor: &SecretKeyring,
+    encryption_algo: EncryptionAlgo,
     label: &Label,
     mut buf: BytesMut,
     batch: Batch<I, A::ResolvedAddress>,
@@ -367,14 +392,14 @@ where
   ) -> Result<BytesMut, NetTransportError<A, W>> {
     let mut offset = buf.len();
     // write encryption tag
-    buf.put_u8(encryptor.algo as u8);
+    buf.put_u8(encryption_algo as u8);
     offset += 1;
     // write length placeholder
     let encrypt_length_offset = offset;
     buf.put_u32(0);
     offset += MAX_MESSAGE_LEN_SIZE;
     // write encrypt header
-    let nonce = encryptor.write_header(&mut buf);
+    let nonce = encryptor.write_header(encryption_algo, &mut buf);
 
     let checksum_offset = buf.len();
 
@@ -474,13 +499,14 @@ where
     debug_assert_eq!(offset, buf.len(), "wrong label encoded length");
 
     let encryptor = self.encryptor.as_ref().unwrap();
-    let pk = encryptor.kr.primary_key().await;
+    let pk = encryptor.primary_key().await;
     if batch.estimate_encoded_len() / 2 <= self.opts.offload_size {
       let buf = Self::encode_and_compress_and_encrypt_batch(
         self.opts.checksumer,
         self.opts.compressor.unwrap(),
         pk,
         encryptor,
+        self.opts.encryption_algo.unwrap(),
         &self.opts.label,
         buf,
         batch,
@@ -498,6 +524,7 @@ where
     let compressor = self.opts.compressor.unwrap();
     let max_payload_size = self.max_payload_size();
     let encryptor = encryptor.clone();
+    let encryption_algo = self.opts.encryption_algo.unwrap();
     let label = self.opts.label.cheap_clone();
 
     rayon::spawn(move || {
@@ -507,6 +534,7 @@ where
           compressor,
           pk,
           &encryptor,
+          encryption_algo,
           &label,
           buf,
           batch,

@@ -1,8 +1,4 @@
 use bytes::Bytes;
-use nodecraft::resolver::AddressResolver;
-use showbiz_core::transport::Wire;
-
-use crate::NetTransportError;
 
 /// Compress/Decompress errors.
 #[derive(Debug, thiserror::Error)]
@@ -16,24 +12,6 @@ pub enum CompressorError {
   /// Unknown compressor
   #[error("compressor: {0}")]
   UnknownCompressor(#[from] UnknownCompressor),
-}
-
-impl<A: AddressResolver, W: Wire> From<CompressError> for NetTransportError<A, W> {
-  fn from(err: CompressError) -> Self {
-    Self::Compressor(err.into())
-  }
-}
-
-impl<A: AddressResolver, W: Wire> From<DecompressError> for NetTransportError<A, W> {
-  fn from(err: DecompressError) -> Self {
-    Self::Compressor(err.into())
-  }
-}
-
-impl<A: AddressResolver, W: Wire> From<UnknownCompressor> for NetTransportError<A, W> {
-  fn from(err: UnknownCompressor) -> Self {
-    Self::Compressor(err.into())
-  }
 }
 
 /// Compressor for compress/decompress bytes for sending over the network.
@@ -100,7 +78,7 @@ pub enum DecompressError {
 
 impl Compressor {
   /// Decompresses the given buffer.
-  pub(crate) fn decompress(&self, src: &[u8]) -> Result<Vec<u8>, DecompressError> {
+  pub fn decompress(&self, src: &[u8]) -> Result<Vec<u8>, DecompressError> {
     match self {
       Self::Lzw => weezl::decode::Decoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
         .decode(src)
@@ -109,7 +87,7 @@ impl Compressor {
   }
 
   /// Compresses the given buffer.
-  pub(crate) fn compress_into_bytes(&self, src: &[u8]) -> Result<Bytes, CompressError> {
+  pub fn compress_into_bytes(&self, src: &[u8]) -> Result<Bytes, CompressError> {
     let mut buf = Vec::with_capacity(src.len());
     match self {
       Self::Lzw => weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)

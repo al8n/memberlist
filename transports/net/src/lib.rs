@@ -44,16 +44,36 @@ use wg::AsyncWaitGroup;
 /// Compress/decompress related.
 #[cfg(feature = "compression")]
 #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
-pub mod compressor;
+#[doc(inline)]
+pub use showbiz_utils::compressor;
+
 #[cfg(feature = "compression")]
-use compressor::Compressor;
+use compressor::*;
+
+impl<A: AddressResolver, W: Wire> From<CompressError> for NetTransportError<A, W> {
+  fn from(err: CompressError) -> Self {
+    Self::Compressor(err.into())
+  }
+}
+
+impl<A: AddressResolver, W: Wire> From<DecompressError> for NetTransportError<A, W> {
+  fn from(err: DecompressError) -> Self {
+    Self::Compressor(err.into())
+  }
+}
+
+impl<A: AddressResolver, W: Wire> From<UnknownCompressor> for NetTransportError<A, W> {
+  fn from(err: UnknownCompressor) -> Self {
+    Self::Compressor(err.into())
+  }
+}
 
 /// Encrypt/decrypt related.
 #[cfg(feature = "encryption")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 pub mod security;
 #[cfg(feature = "encryption")]
-use security::{EncryptionAlgo, Encryptor, SecretKey, SecretKeyring, SecretKeys, SecurityError};
+use security::{EncryptionAlgo, SecretKey, SecretKeyring, SecretKeys, SecurityError};
 
 /// Errors for the net transport.
 pub mod error;
@@ -120,7 +140,7 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   NoInterfaceAddresses(#[from] local_ip_address::Error),
   /// Returns when there is no bind address provided.
   #[error("at least one bind address is required")]
-  EmptyBindAddrs,
+  EmptyBindAddresses,
   /// Returns when the ip is blocked.
   #[error("the ip {0} is blocked")]
   BlockedIp(IpAddr),
@@ -503,7 +523,7 @@ pub struct NetTransport<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: 
   sockets: SmallVec<Arc<<<A::Runtime as Runtime>::Net as Net>::UdpSocket>>,
   stream_layer: Arc<S>,
   #[cfg(feature = "encryption")]
-  encryptor: Option<Encryptor>,
+  encryptor: Option<SecretKeyring>,
 
   wg: AsyncWaitGroup,
   resolver: Arc<A>,
@@ -535,12 +555,12 @@ where
     resolver: Arc<A>,
     stream_layer: Arc<S>,
     opts: Arc<NetTransportOptions<I, A>>,
-    #[cfg(feature = "encryption")] encryptor: Option<Encryptor>,
+    #[cfg(feature = "encryption")] encryptor: Option<SecretKeyring>,
   ) -> Result<Self, NetTransportError<A, W>> {
     // If we reject the empty list outright we can assume that there's at
     // least one listener of each type later during operation.
     if opts.bind_addresses.is_empty() {
-      return Err(NetTransportError::EmptyBindAddrs);
+      return Err(NetTransportError::EmptyBindAddresses);
     }
 
     let (stream_tx, stream_rx) = promised_stream::<Self>();
@@ -656,23 +676,18 @@ where
     let stream_layer = Arc::new(stream_layer);
     let opts = Arc::new(opts);
     #[cfg(feature = "encryption")]
-    let keyring = if S::is_secure() || opts.encryption_algo.is_none() {
-      None
-    } else {
-      match (opts.primary_key, &opts.secret_keys) {
-        (None, Some(keys)) if !keys.is_empty() => {
-          tracing::warn!(target: "showbiz", "using first key in keyring as primary key");
-          let mut iter = keys.iter().copied();
-          let pk = iter.next().unwrap();
-          let keyring = SecretKeyring::with_keys(pk, iter);
-          Some(keyring)
-        }
-        (Some(pk), None) => Some(SecretKeyring::new(pk)),
-        (Some(pk), Some(keys)) => Some(SecretKeyring::with_keys(pk, keys.iter().copied())),
-        _ => None,
+    let keyring = match (opts.primary_key, &opts.secret_keys) {
+      (None, Some(keys)) if !keys.is_empty() => {
+        tracing::warn!(target: "showbiz", "using first key in keyring as primary key");
+        let mut iter = keys.iter().copied();
+        let pk = iter.next().unwrap();
+        let keyring = SecretKeyring::with_keys(pk, iter);
+        Some(keyring)
       }
-    }
-    .map(|kr| Encryptor::new(opts.encryption_algo.unwrap(), kr));
+      (Some(pk), None) => Some(SecretKeyring::new(pk)),
+      (Some(pk), Some(keys)) => Some(SecretKeyring::with_keys(pk, keys.iter().copied())),
+      _ => None,
+    };
     loop {
       #[cfg(feature = "metrics")]
       let transport = {
@@ -703,25 +718,6 @@ where
         }
       }
     }
-  }
-
-  fn fix_packet_overhead(&self) -> usize {
-    let mut overhead = self.opts.label.encoded_overhead();
-    overhead += 1 + CHECKSUM_SIZE;
-
-    #[cfg(feature = "compression")]
-    if self.opts.compressor.is_some() {
-      overhead += 1 + core::mem::size_of::<u32>();
-    }
-
-    #[cfg(feature = "encryption")]
-    if let Some(encryptor) = &self.encryptor {
-      if self.opts.gossip_verify_outgoing {
-        overhead += encryptor.encrypt_overhead();
-      }
-    }
-
-    overhead
   }
 }
 
@@ -873,10 +869,9 @@ where
   async fn send_message(
     &self,
     conn: &mut Self::Stream,
-    target: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     msg: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<usize, Self::Error> {
-    self.send_by_promised(conn, target, msg).await
+    self.send_by_promised(conn, msg).await
   }
 
   async fn send_packet(
@@ -1128,7 +1123,7 @@ where
   shutdown_rx: async_channel::Receiver<()>,
   label: Label,
   #[cfg(feature = "encryption")]
-  encryptor: Option<Encryptor>,
+  encryptor: Option<SecretKeyring>,
   offload_size: usize,
   skip_inbound_label_check: bool,
   verify_incoming: bool,
@@ -1227,7 +1222,7 @@ where
     mut buf: BytesMut,
     label: &Label,
     skip_inbound_label_check: bool,
-    #[cfg(feature = "encryption")] encryptor: Option<&Encryptor>,
+    #[cfg(feature = "encryption")] encryptor: Option<&SecretKeyring>,
     #[cfg(feature = "encryption")] verify_incoming: bool,
     #[cfg(any(feature = "encryption", feature = "compression"))] offload_size: usize,
   ) -> Result<
@@ -1279,7 +1274,7 @@ where
   #[cfg(all(feature = "compression", feature = "encryption"))]
   async fn read_from_packet_with_compression_and_encryption(
     mut buf: BytesMut,
-    encryptor: Option<&Encryptor>,
+    encryptor: Option<&SecretKeyring>,
     packet_label: Label,
     offload_size: usize,
     verify_incoming: bool,
@@ -1306,7 +1301,7 @@ where
         return Err(SecurityError::Disabled.into());
       }
     };
-    let keys = encryptor.kr.keys().await;
+    let keys = encryptor.keys().await;
     if encrypted_message_size <= offload_size {
       Self::decrypt(
         encryptor,
@@ -1508,7 +1503,7 @@ where
 
   #[cfg(feature = "encryption")]
   fn decrypt(
-    encryptor: &Encryptor,
+    encryptor: &SecretKeyring,
     algo: EncryptionAlgo,
     keys: impl Iterator<Item = SecretKey>,
     auth_data: &[u8],

@@ -104,9 +104,7 @@ where
       .dial_timeout(addr, self.inner.opts.timeout)
       .await
       .map_err(Error::transport)?;
-    self
-      .send_message(&mut conn, addr, Message::UserData(msg))
-      .await
+    self.send_message(&mut conn, Message::UserData(msg)).await
   }
 }
 
@@ -121,7 +119,6 @@ where
   pub(super) async fn send_local_state(
     &self,
     conn: &mut T::Stream,
-    addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
     join: bool,
   ) -> Result<(), Error<T, D>> {
     // Setup a deadline
@@ -208,7 +205,7 @@ where
         .set(<T::Wire as Wire>::encoded_len(&msg) as f64);
     }
 
-    self.send_message(conn, addr, msg).await
+    self.send_message(conn, msg).await
   }
 }
 
@@ -254,7 +251,7 @@ where
         tracing::error!(target:  "showbiz.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to receive");
 
         let err_resp = ErrorResponse::new(SmolStr::new(e.to_string()));
-        if let Err(e) = self.send_message(&mut conn, &addr, err_resp.into()).await {
+        if let Err(e) = self.send_message(&mut conn, err_resp.into()).await {
           tracing::error!(target:  "showbiz.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to send error response");
           return;
         }
@@ -271,7 +268,7 @@ where
         }
 
         let ack = Ack::new(ping.seq_no);
-        if let Err(e) = self.send_message(&mut conn, &addr, ack.into()).await {
+        if let Err(e) = self.send_message(&mut conn, ack.into()).await {
           tracing::error!(target:  "showbiz.stream", err=%e, remote_node = %addr, "failed to send ack response");
         }
       }
@@ -291,7 +288,7 @@ where
           return;
         }
 
-        if let Err(e) = self.send_local_state(&mut conn, &addr, pp.join).await {
+        if let Err(e) = self.send_local_state(&mut conn, pp.join).await {
           tracing::error!(target:  "showbiz.stream", err=%e, remote_node = %addr, "failed to push local state");
           return;
         }

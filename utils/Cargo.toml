@@ -11,6 +11,8 @@ serde = ["dep:serde", "ipnet?/serde", "smallvec/serde"]
 metrics = ["dep:metrics"]
 rkyv = ["dep:rkyv"]
 
+compression = ["weezl", "thiserror", "bytes"]
+
 [dependencies]
 either = "1"
 ipnet = { version = "2.9", optional = true }
@@ -18,3 +20,7 @@ serde = { workspace = true, optional = true }
 smallvec = { workspace = true, features = ["const_new"] }
 metrics = { workspace = true, optional = true }
 rkyv = { version = "0.7.43", optional = true, features = ["smallvec"] }
+
+weezl = { version = "0.1", optional = true }
+bytes = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }

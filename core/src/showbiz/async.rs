@@ -55,6 +55,17 @@ impl<T: Transport> Drop for MemberlistCore<T> {
   }
 }
 
+/// A cluster membership and member failure detection using a gossip based protocol.
+///
+/// The use cases for such a library are far-reaching: all distributed systems
+/// require membership, and memberlist is a re-usable solution to managing
+/// cluster membership and node failure detection.
+///
+/// memberlist is eventually consistent but converges quickly on average.
+/// The speed at which it converges can be heavily tuned via various knobs
+/// on the protocol. Node failures are detected and network partitions are partially
+/// tolerated by attempting to communicate to potentially dead nodes through
+/// multiple routes.
 pub struct Memberlist<
   T,
   D = VoidDelegate<
@@ -104,12 +115,7 @@ where
     self.delegate.as_deref()
   }
 
-  // /// Returns the keyring used for the local node
-  // #[inline]
-  // pub fn keyring(&self) -> Option<&SecretKeyring> {
-  //   self.inner.opts.secret_keyring.as_ref()
-  // }
-
+  /// Returns the local server instance.
   #[inline]
   pub async fn local_server(
     &self,
@@ -157,6 +163,7 @@ where
   }
 }
 
+/// Error returned by [`Memberlist::join_many`].
 pub struct JoinError<T: Transport, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
@@ -244,6 +251,7 @@ impl<D: Delegate, T: Transport> JoinError<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
+  /// Return the errors
   pub const fn errors(
     &self,
   ) -> &HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>> {
@@ -257,6 +265,7 @@ where
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
 {
+  /// Create a new memberlist with the given transport and options.
   #[inline]
   pub async fn new(
     transport: T,
@@ -274,6 +283,7 @@ where
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
 {
+  /// Create a new memberlist with the given transport, delegate and options.
   #[inline]
   pub async fn with_delegate(
     transport: T,
@@ -326,73 +336,6 @@ where
   > {
     let (handoff_tx, handoff_rx) = async_channel::bounded(1);
     let (leave_broadcast_tx, leave_broadcast_rx) = async_channel::bounded(1);
-
-    // if let Some(pk) = opts.secret_key() {
-    //   let has_keyring = opts.secret_keyring.is_some();
-    //   let keyring = opts.secret_keyring.get_or_insert(SecretKeyring::new(pk));
-    //   if has_keyring {
-    //     keyring.insert(pk);
-    //     keyring
-    //       .use_key(&pk)
-    //       .map_err(|e| Error::Transport(TransportError::Security(e)))?;
-    //   }
-    // }
-
-    // TODO: move this to concrete transport implementation
-    // opts.transport.get_or_insert_with(|| {
-    //   <T::Options as crate::transport::TransportOptions>::from_addr(opts.bind_addr, opts.bind_port)
-    // });
-
-    // async fn retry<D: Delegate, T: Transport>(
-    //   limit: usize,
-    //   label: Option<Label>,
-    //   opts: T::Options,
-    //   #[cfg(feature = "metrics")] metric_labels: Arc<Vec<metrics::Label>>,
-    // ) -> Result<T, Error<T, D>> {
-    //   let mut i = 0;
-    //   loop {
-    //     #[cfg(feature = "metrics")]
-    //     let transport = {
-    //       if !metric_labels.is_empty() {
-    //         T::with_metric_labels(label.clone(), opts.clone(), metric_labels.clone()).await
-    //       } else {
-    //         T::new(label.clone(), opts.clone()).await
-    //       }
-    //     };
-    //     #[cfg(not(feature = "metrics"))]
-    //     let transport = T::new(opts.transport.as_ref().unwrap().clone()).await;
-
-    //     match transport {
-    //       Ok(t) => return Ok(t),
-    //       Err(e) => {
-    //         tracing::debug!(target="showbiz", err=%e, "fail to create transport");
-    //         if i == limit - 1 {
-    //           return Err(e.into());
-    //         }
-    //         i += 1;
-    //       }
-    //     }
-    //   }
-    // }
-
-    // let limit = match opts.bind_port {
-    //   Some(0) | None => 10,
-    //   Some(_) => 1,
-    // };
-    // let transport = retry(
-    //   limit,
-    //   (!opts.label.is_empty()).then_some(opts.label.clone()),
-    //   opts.transport.as_ref().unwrap().clone(),
-    //   #[cfg(feature = "metrics")]
-    //   opts.metric_labels.clone(),
-    // )
-    // .await?;
-
-    // if let Some(0) | None = opts.bind_port {
-    //   let port = transport.auto_bind_port();
-    //   opts.bind_port = Some(port);
-    //   tracing::warn!(target:  "showbiz", "using dynamic bind port {port}");
-    // }
 
     // Get the final advertise address from the transport, which may need
     // to see which address we bound to. We'll refresh this each time we

@@ -8,28 +8,30 @@ where
   W: Wire,
 {
   fn enable_promised_encryption(&self) -> bool {
-    self.encryptor.is_some() && self.opts.gossip_verify_outgoing && !S::is_secure()
+    self.encryptor.is_some()
+      && self.opts.gossip_verify_outgoing
+      && !S::is_secure()
+      && self.opts.encryption_algo.is_some()
   }
 
   pub(super) async fn send_by_promised(
     &self,
     conn: &mut S::Stream,
-    target: &A::ResolvedAddress,
     msg: Message<I, A::ResolvedAddress>,
   ) -> Result<usize, NetTransportError<A, W>> {
     #[cfg(not(any(feature = "compression", feature = "encryption")))]
     return self
-      .send_by_promised_without_compression_and_encryption(conn, target, &self.opts.label, msg)
+      .send_by_promised_without_compression_and_encryption(conn, &self.opts.label, msg)
       .await;
 
     #[cfg(all(feature = "compression", not(feature = "encryption")))]
     return self
-      .send_by_promised_with_compression_without_encryption(conn, target, &self.opts.label, msg)
+      .send_by_promised_with_compression_without_encryption(conn, &self.opts.label, msg)
       .await;
 
     #[cfg(all(not(feature = "compression"), feature = "encryption"))]
     return self
-      .send_by_promised_with_encryption_without_compression(conn, target, msg, &self.opts.label)
+      .send_by_promised_with_encryption_without_compression(conn, msg, &self.opts.label)
       .await;
 
     let compression_enabled = self.opts.compressor.is_some();
@@ -37,31 +39,33 @@ where
 
     if !compression_enabled && !encryption_enabled {
       return self
-        .send_by_promised_without_compression_and_encryption(conn, target, &self.opts.label, msg)
+        .send_by_promised_without_compression_and_encryption(conn, &self.opts.label, msg)
         .await;
     }
 
     if compression_enabled && !encryption_enabled {
       return self
-        .send_by_promised_with_compression_without_encryption(conn, target, &self.opts.label, msg)
+        .send_by_promised_with_compression_without_encryption(conn, &self.opts.label, msg)
         .await;
     }
 
     if !compression_enabled && encryption_enabled {
       return self
-        .send_by_promised_with_encryption_without_compression(conn, target, msg, &self.opts.label)
+        .send_by_promised_with_encryption_without_compression(conn, msg, &self.opts.label)
         .await;
     }
 
     let encoded_size = W::encoded_len(&msg);
     let encryptor = self.encryptor.as_ref().unwrap();
+    let encryption_algo = self.opts.encryption_algo.unwrap();
     let compressor = self.opts.compressor.unwrap();
 
     let buf = if encoded_size < self.opts.offload_size {
-      let pk = encryptor.kr.primary_key().await;
+      let pk = encryptor.primary_key().await;
       Self::compress_and_encrypt(
         &compressor,
         encryptor,
+        encryption_algo,
         pk,
         &self.opts.label,
         msg,
@@ -70,7 +74,7 @@ where
     } else {
       let (tx, rx) = futures::channel::oneshot::channel();
       let encryptor = encryptor.clone();
-      let pk = encryptor.kr.primary_key().await;
+      let pk = encryptor.primary_key().await;
       let stream_label = self.opts.label.cheap_clone();
 
       rayon::spawn(move || {
@@ -78,6 +82,7 @@ where
           .send(Self::compress_and_encrypt(
             &compressor,
             &encryptor,
+            encryption_algo,
             pk,
             &stream_label,
             msg,
@@ -112,24 +117,25 @@ where
   #[cfg(all(feature = "compression", feature = "encryption"))]
   fn compress_and_encrypt(
     compressor: &Compressor,
-    encryptor: &Encryptor,
+    encryptor: &SecretKeyring,
+    encryption_algo: EncryptionAlgo,
     pk: SecretKey,
     label: &Label,
     msg: Message<I, A::ResolvedAddress>,
     encoded_size: usize,
   ) -> Result<BytesMut, NetTransportError<A, W>> {
     let label_encoded_size = label.encoded_overhead();
-    let encrypt_header = encryptor.encrypt_overhead();
+    let encrypt_header = encryption_algo.encrypt_overhead();
     let total_len = label_encoded_size + encrypt_header + COMPRESS_HEADER + encoded_size;
     let mut buf = BytesMut::with_capacity(total_len);
     // add label header
     buf.add_label_header(label);
     // write encryption algo
-    buf.put_u8(encryptor.algo as u8);
+    buf.put_u8(encryption_algo as u8);
     // write length placeholder
     buf.put_slice(&[0; MAX_MESSAGE_LEN_SIZE]);
 
-    let nonce = encryptor.write_header(&mut buf);
+    let nonce = encryptor.write_header(encryption_algo, &mut buf);
     buf.resize(total_len, 0);
 
     W::encode_message(msg, &mut buf[label_encoded_size + encrypt_header..])
@@ -164,14 +170,15 @@ where
 
   #[cfg(feature = "encryption")]
   fn encrypt_message(
-    encryptor: &Encryptor,
+    encryptor: &SecretKeyring,
+    encryption_algo: EncryptionAlgo,
     pk: SecretKey,
     label: &Label,
     msg: Message<I, A::ResolvedAddress>,
     encoded_size: usize,
   ) -> Result<BytesMut, NetTransportError<A, W>> {
     let label_encoded_size = label.encoded_overhead();
-    let encrypt_header = encryptor.encrypt_overhead();
+    let encrypt_header = encryption_algo.encrypt_overhead();
     let total_len = label_encoded_size + encrypt_header + encoded_size;
 
     // add label header
@@ -179,13 +186,13 @@ where
     buf.add_label_header(label);
 
     // write encryption algo
-    buf.put_u8(encryptor.algo as u8);
+    buf.put_u8(encryption_algo as u8);
 
     let encrypt_message_len_offset = buf.len();
     // write length placeholder
     buf.put_slice(&[0; MAX_MESSAGE_LEN_SIZE]);
 
-    let nonce = encryptor.write_header(&mut buf);
+    let nonce = encryptor.write_header(encryption_algo, &mut buf);
     buf.resize(total_len, 0);
 
     let written = W::encode_message(msg, &mut buf[label_encoded_size + encrypt_header..])
@@ -246,31 +253,32 @@ where
   async fn send_by_promised_with_encryption_without_compression(
     &self,
     mut conn: impl AsyncWrite + Unpin,
-    target: &A::ResolvedAddress,
     msg: Message<I, A::ResolvedAddress>,
     stream_label: &Label,
   ) -> Result<usize, NetTransportError<A, W>> {
     let enable_encryption = self.enable_promised_encryption();
     if !enable_encryption {
       return self
-        .send_by_promised_without_compression_and_encryption(conn, target, stream_label, msg)
+        .send_by_promised_without_compression_and_encryption(conn, stream_label, msg)
         .await;
     }
 
     let enp = self.encryptor.as_ref().unwrap();
+    let encryption_algo = self.opts.encryption_algo.unwrap();
     let encoded_size = W::encoded_len(&msg);
     let buf = if encoded_size < self.opts.offload_size {
-      let pk = enp.kr.primary_key().await;
-      Self::encrypt_message(enp, pk, stream_label, msg, encoded_size)?
+      let pk = enp.primary_key().await;
+      Self::encrypt_message(enp, encryption_algo, pk, stream_label, msg, encoded_size)?
     } else {
       let (tx, rx) = futures::channel::oneshot::channel();
-      let pk = enp.kr.primary_key().await;
+      let pk = enp.primary_key().await;
       let stream_label = stream_label.cheap_clone();
       let enp = enp.clone();
       rayon::spawn(move || {
         if tx
           .send(Self::encrypt_message(
             &enp,
+            encryption_algo,
             pk,
             &stream_label,
             msg,
@@ -306,7 +314,6 @@ where
   async fn send_by_promised_with_compression_without_encryption(
     &self,
     mut conn: impl AsyncWrite + Unpin,
-    target: &A::ResolvedAddress,
     label: &Label,
     msg: Message<I, A::ResolvedAddress>,
   ) -> Result<usize, NetTransportError<A, W>> {
@@ -314,7 +321,7 @@ where
       Some(c) => c,
       None => {
         return self
-          .send_by_promised_without_compression_and_encryption(conn, target, label, msg)
+          .send_by_promised_without_compression_and_encryption(conn, label, msg)
           .await
       }
     };
@@ -362,7 +369,6 @@ where
   async fn send_by_promised_without_compression_and_encryption(
     &self,
     mut conn: impl AsyncWrite + Unpin,
-    _target: &A::ResolvedAddress,
     label: &Label,
     msg: Message<I, A::ResolvedAddress>,
   ) -> Result<usize, NetTransportError<A, W>> {

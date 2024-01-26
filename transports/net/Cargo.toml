@@ -9,7 +9,7 @@ metadata.workspace = true
 
 [features]
 
-compression = ["rayon", "weezl"]
+compression = ["rayon", "showbiz-utils/compression"]
 encryption = ["rayon"]
 
 serde = ["showbiz-core/serde", "dep:serde", "showbiz-utils/serde"]
@@ -51,7 +51,6 @@ aes-gcm = { version = "0.10", optional = true }
 base64 = { version = "0.21", optional = true }
 cbc = { version = "0.1", optional = true }
 rayon = { version = "1.8", optional = true }
-weezl = { version = "0.1", features = ["async"], optional = true }
 
 pnet = { version = "0.34", optional = true }
 serde = { working = true, optional = true }

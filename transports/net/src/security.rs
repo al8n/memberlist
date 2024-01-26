@@ -325,26 +325,8 @@ smallvec_wrapper!(
   pub SecretKeys([SecretKey; 3]);
 );
 
-#[derive(Clone)]
-pub(super) struct Encryptor {
-  pub(super) algo: EncryptionAlgo,
-  pub(super) kr: SecretKeyring,
-}
-
-impl core::ops::Deref for Encryptor {
-  type Target = EncryptionAlgo;
-
-  fn deref(&self) -> &Self::Target {
-    &self.algo
-  }
-}
-
-impl Encryptor {
-  pub(super) fn new(alg: EncryptionAlgo, kr: SecretKeyring) -> Self {
-    Self { algo: alg, kr }
-  }
-
-  pub(super) fn write_header(&self, dst: &mut BytesMut) -> [u8; NONCE_SIZE] {
+impl SecretKeyring {
+  pub(super) fn write_header(&self, algo: EncryptionAlgo, dst: &mut BytesMut) -> [u8; NONCE_SIZE] {
     let offset = dst.len();
 
     // Add a random nonce
@@ -353,7 +335,7 @@ impl Encryptor {
     dst.put_slice(&nonce);
 
     // Ensure we are correctly padded (now, only for PKCS7)
-    match self.algo {
+    match algo {
       EncryptionAlgo::PKCS7 => {
         let buf_len = dst.len();
         pkcs7encode(
