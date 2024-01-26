@@ -5,7 +5,7 @@ where
   I: Id,
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   S: StreamLayer,
-  W: Wire,
+  W: Wire<Id = I, Address = A::ResolvedAddress>,
 {
   pub(crate) fn fix_packet_overhead(&self) -> usize {
     let mut overhead = self.opts.label.encoded_overhead();

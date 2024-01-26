@@ -5,7 +5,7 @@ where
   I: Id,
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   S: StreamLayer,
-  W: Wire,
+  W: Wire<Id = I, Address = A::ResolvedAddress>,
 {
   #[cfg(feature = "encryption")]
   fn enable_promised_encryption(&self) -> bool {
