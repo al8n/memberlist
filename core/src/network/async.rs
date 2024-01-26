@@ -16,10 +16,10 @@ use nodecraft::{resolver::AddressResolver, Node};
 mod packet;
 mod stream;
 
-// #[cfg(any(test, feature = "test"))]
-// pub(crate) mod tests;
-// #[cfg(any(test, feature = "test"))]
-// pub use tests::*;
+#[cfg(any(test, feature = "test"))]
+pub(crate) mod tests;
+#[cfg(any(test, feature = "test"))]
+pub use tests::*;
 
 impl<D, T> Memberlist<T, D>
 where
