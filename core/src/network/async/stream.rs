@@ -5,7 +5,7 @@ use nodecraft::resolver::AddressResolver;
 use smol_str::SmolStr;
 
 use crate::{
-  transport::{TimeoutableStream, Wire},
+  transport::TimeoutableStream,
   types::Server,
 };
 
@@ -201,6 +201,7 @@ where
 
     #[cfg(feature = "metrics")]
     {
+      use crate::transport::Wire;
       metrics::gauge!(
         "memberlist.size.local",
         self.inner.opts.metric_labels.iter()

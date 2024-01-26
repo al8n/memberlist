@@ -1,4 +1,5 @@
 use futures::lock::Mutex;
+use nodecraft::Address;
 use std::{
   sync::atomic::{AtomicBool, AtomicUsize, Ordering},
   time::Duration,

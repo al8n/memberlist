@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::Future;
-use nodecraft::{Address, CheapClone, Id};
+use nodecraft::{CheapClone, Id};
 
 use crate::types::{Server, SmallVec};
 

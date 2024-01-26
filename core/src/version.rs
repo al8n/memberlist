@@ -50,21 +50,25 @@ impl TryFrom<u8> for DelegateVersion {
   }
 }
 
-impl From<ArchivedDelegateVersion> for DelegateVersion {
-  fn from(value: ArchivedDelegateVersion) -> Self {
-    match value {
-      ArchivedDelegateVersion::V0 => Self::V0,
+#[cfg(feature = "rkyv")]
+const _: () = {
+  impl From<ArchivedDelegateVersion> for DelegateVersion {
+    fn from(value: ArchivedDelegateVersion) -> Self {
+      match value {
+        ArchivedDelegateVersion::V0 => Self::V0,
+      }
     }
   }
-}
+  
+  impl From<DelegateVersion> for ArchivedDelegateVersion {
+    fn from(value: DelegateVersion) -> Self {
+      match value {
+        DelegateVersion::V0 => Self::V0,
+      }
+    }
+  }
+};
 
-impl From<DelegateVersion> for ArchivedDelegateVersion {
-  fn from(value: DelegateVersion) -> Self {
-    match value {
-      DelegateVersion::V0 => Self::V0,
-    }
-  }
-}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct UnknownProtocolVersion(u8);
@@ -116,18 +120,21 @@ impl TryFrom<u8> for ProtocolVersion {
   }
 }
 
-impl From<ArchivedProtocolVersion> for ProtocolVersion {
-  fn from(value: ArchivedProtocolVersion) -> Self {
-    match value {
-      ArchivedProtocolVersion::V0 => Self::V0,
+#[cfg(feature = "rkyv")]
+const _: () = {
+  impl From<ArchivedProtocolVersion> for ProtocolVersion {
+    fn from(value: ArchivedProtocolVersion) -> Self {
+      match value {
+        ArchivedProtocolVersion::V0 => Self::V0,
+      }
     }
   }
-}
-
-impl From<ProtocolVersion> for ArchivedProtocolVersion {
-  fn from(value: ProtocolVersion) -> Self {
-    match value {
-      ProtocolVersion::V0 => Self::V0,
+  
+  impl From<ProtocolVersion> for ArchivedProtocolVersion {
+    fn from(value: ProtocolVersion) -> Self {
+      match value {
+        ProtocolVersion::V0 => Self::V0,
+      }
     }
   }
-}
+};

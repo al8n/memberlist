@@ -23,7 +23,7 @@ use agnostic::{
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use checksum::CHECKSUM_SIZE;
-use futures::{io::BufReader, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt};
+use futures::{io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt, FutureExt};
 use label::LabelBufExt;
 use memberlist_core::{
   transport::{
@@ -54,23 +54,28 @@ use compressor::*;
 
 mod io;
 
-impl<A: AddressResolver, W: Wire> From<CompressError> for NetTransportError<A, W> {
-  fn from(err: CompressError) -> Self {
-    Self::Compressor(err.into())
+#[cfg(feature = "compression")]
+const _: () = {
+  impl<A: AddressResolver, W: Wire> From<CompressError> for NetTransportError<A, W> {
+    fn from(err: CompressError) -> Self {
+      Self::Compressor(err.into())
+    }
   }
-}
+  
+  impl<A: AddressResolver, W: Wire> From<DecompressError> for NetTransportError<A, W> {
+    fn from(err: DecompressError) -> Self {
+      Self::Compressor(err.into())
+    }
+  }
+  
+  impl<A: AddressResolver, W: Wire> From<UnknownCompressor> for NetTransportError<A, W> {
+    fn from(err: UnknownCompressor) -> Self {
+      Self::Compressor(err.into())
+    }
+  }
+};
 
-impl<A: AddressResolver, W: Wire> From<DecompressError> for NetTransportError<A, W> {
-  fn from(err: DecompressError) -> Self {
-    Self::Compressor(err.into())
-  }
-}
 
-impl<A: AddressResolver, W: Wire> From<UnknownCompressor> for NetTransportError<A, W> {
-  fn from(err: UnknownCompressor) -> Self {
-    Self::Compressor(err.into())
-  }
-}
 
 /// Encrypt/decrypt related.
 #[cfg(feature = "encryption")]
@@ -108,6 +113,7 @@ const COMPRESS_HEADER: usize = 1 + core::mem::size_of::<u32>();
 const ENCRYPT_HEADER: usize = 1 + core::mem::size_of::<u32>();
 const CHECKSUM_HEADER: usize = 1 + CHECKSUM_SIZE;
 
+#[cfg(any(feature = "compression", feature = "encryption"))]
 const MAX_MESSAGE_LEN_SIZE: usize = core::mem::size_of::<u32>();
 
 const MAX_PACKET_SIZE: usize = u16::MAX as usize;
@@ -350,20 +356,44 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   )]
   checksumer: Checksumer,
 
+  /// Used to control message compression. This can
+  /// be used to reduce bandwidth usage at the cost of slightly more CPU
+  /// utilization.
+  #[cfg(feature = "compression")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
+  #[viewit(
+    getter(const, attrs(
+      doc = "Get the compression algorithm used for outgoing.",
+      cfg(feature = "compression"),
+      cfg_attr(docsrs, doc(cfg(feature = "compression")))
+    ),),
+    setter(attrs(
+      doc = "Set the compression algorithm used for outgoing. (Builder pattern)",
+      cfg(feature = "compression"),
+      cfg_attr(docsrs, doc(cfg(feature = "compression")))
+    ),)
+  )]
+  compressor: Option<Compressor>,
+
   /// Controls whether to enforce encryption for outgoing
   /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
   /// a running cluster.
   #[cfg_attr(feature = "serde", serde(default))]
   #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
   #[viewit(
     getter(
       const,
       attrs(
-        doc = "Get whether to enforce encryption for outgoing gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster."
+        doc = "Get whether to enforce encryption for outgoing gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster.",
+        cfg(feature = "encryption"),
+        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
       ),
     ),
     setter(attrs(
-      doc = "Set whether to enforce encryption for outgoing gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster. (Builder pattern)"
+      doc = "Set whether to enforce encryption for outgoing gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster. (Builder pattern)",
+      cfg(feature = "encryption"),
+      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
     ),)
   )]
   gossip_verify_outgoing: bool,
@@ -373,29 +403,25 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   /// a running cluster.
   #[cfg_attr(feature = "serde", serde(default))]
   #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
   #[viewit(
     getter(
       const,
       attrs(
-        doc = "Get whether to enforce encryption for incoming gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster."
+        doc = "Get whether to enforce encryption for incoming gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster.",
+        cfg(feature = "encryption"),
+        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
       ),
     ),
     setter(attrs(
-      doc = "Set whether to enforce encryption for incoming gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster. (Builder pattern)"
+      doc = "Set whether to enforce encryption for incoming gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster. (Builder pattern)",
+      cfg(feature = "encryption"),
+      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
     ),)
   )]
   gossip_verify_incoming: bool,
 
-  /// Used to control message compression. This can
-  /// be used to reduce bandwidth usage at the cost of slightly more CPU
-  /// utilization.
-  #[cfg(feature = "compression")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
-  #[viewit(
-    getter(const, attrs(doc = "Get the compression algorithm used for outgoing."),),
-    setter(attrs(doc = "Set the compression algorithm used for outgoing. (Builder pattern)"),)
-  )]
-  compressor: Option<Compressor>,
+  
 
   /// The size of a message that should be offload to [`rayon`] thread pool
   /// for encryption or compression.
@@ -408,11 +434,15 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
     getter(
       const,
       attrs(
-        doc = "Get the size of a message that should be offload to [`rayon`] thread pool for encryption or compression."
+        doc = "Get the size of a message that should be offload to [`rayon`] thread pool for encryption or compression.",
+        cfg(any(feature = "compression", feature = "encryption")),
+        cfg_attr(docsrs, doc(cfg(any(feature = "compression", feature = "encryption"))))
       ),
     ),
     setter(attrs(
-      doc = "Set the size of a message that should be offload to [`rayon`] thread pool for encryption or compression. (Builder pattern)"
+      doc = "Set the size of a message that should be offload to [`rayon`] thread pool for encryption or compression. (Builder pattern)",
+      cfg(any(feature = "compression", feature = "encryption")),
+      cfg_attr(docsrs, doc(cfg(any(feature = "compression", feature = "encryption"))))
     ),)
   )]
   offload_size: usize,
@@ -432,9 +462,17 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
       const,
       style = "ref",
       result(converter(fn = "Option::as_ref"), type = "Option<&SecretKey>"),
-      attrs(doc = "Get the primary encryption key in a keyring."),
+      attrs(
+        doc = "Get the primary encryption key in a keyring.",
+        cfg(feature = "encryption"),
+        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+      ),
     ),
-    setter(attrs(doc = "Set the primary encryption key in a keyring. (Builder pattern)"),)
+    setter(attrs(
+      doc = "Set the primary encryption key in a keyring. (Builder pattern)",
+      cfg(feature = "encryption"),
+      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+    ),)
   )]
   primary_key: Option<SecretKey>,
 
@@ -445,9 +483,17 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
     getter(
       style = "ref",
       result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeys>"),
-      attrs(doc = "Get all of the encryption keys used internally."),
+      attrs(
+        doc = "Get all of the encryption keys used internally.",
+        cfg(feature = "encryption"),
+        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+      ),
     ),
-    setter(attrs(doc = "Set all of the encryption keys used internally. (Builder pattern)"))
+    setter(attrs(
+      doc = "Set all of the encryption keys used internally. (Builder pattern)",
+      cfg(feature = "encryption"),
+      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+    ))
   )]
   #[cfg(feature = "encryption")]
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
@@ -461,15 +507,23 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
     getter(
       style = "ref",
       result(converter(fn = "Option::as_ref"), type = "Option<&EncryptionAlgo>"),
-      attrs(doc = "Get the encryption algorithm used to encrypt the outgoing gossip."),
+      attrs(
+        doc = "Get the encryption algorithm used to encrypt the outgoing gossip.",
+        cfg(feature = "encryption"),
+        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+      ),
     ),
     setter(attrs(
-      doc = "Set the encryption algorithm used to encrypt the outgoing gossip. (Builder pattern)"
+      doc = "Set the encryption algorithm used to encrypt the outgoing gossip. (Builder pattern)",
+      cfg(feature = "encryption"),
+      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
     ))
   )]
   encryption_algo: Option<EncryptionAlgo>,
 
   /// The metrics labels.
+  #[cfg(feature = "metrics")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
   #[viewit(
     getter(
       style = "ref",
@@ -477,11 +531,18 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
         converter(fn = "Option::as_deref"),
         type = "Option<&memberlist_utils::MetricLabels>"
       ),
-      attrs(doc = "Get the metrics labels."),
+      attrs(
+        doc = "Get the metrics labels.",
+        cfg(feature = "metrics"),
+        cfg_attr(docsrs, doc(cfg(feature = "metrics")))
+      ),
     ),
-    setter(attrs(doc = "Set the metrics labels. (Builder pattern)"))
+    setter(attrs(
+      doc = "Set the metrics labels. (Builder pattern)",
+      cfg(feature = "metrics"),
+      cfg_attr(docsrs, doc(cfg(feature = "metrics")))
+    ))
   )]
-  #[cfg(feature = "metrics")]
   metric_labels: Option<Arc<memberlist_utils::MetricLabels>>,
 }
 
@@ -499,12 +560,19 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> NetTransportOptions<I,
       cidrs_policy: CIDRsPolicy::allow_all(),
       max_payload_size: 1400,
       checksumer: Checksumer::Crc32,
+      #[cfg(feature = "encryption")]
       gossip_verify_outgoing: false,
+      #[cfg(feature = "encryption")]
       gossip_verify_incoming: false,
+      #[cfg(feature = "compression")]
       compressor: None,
+      #[cfg(any(feature = "compression", feature = "encryption"))]
       offload_size: 1024,
+      #[cfg(feature = "encryption")]
       primary_key: None,
+      #[cfg(feature = "encryption")]
       secret_keys: None,
+      #[cfg(feature = "encryption")]
       encryption_algo: None,
       #[cfg(feature = "metrics")]
       metric_labels: None,
@@ -614,7 +682,9 @@ where
         wg: wg.clone(),
         packet_tx: packet_tx.clone(),
         label: opts.label.clone(),
+        #[cfg(any(feature = "compression", feature = "encryption"))]
         offload_size: opts.offload_size,
+        #[cfg(feature = "encryption")]
         verify_incoming: opts.gossip_verify_incoming,
         #[cfg(feature = "encryption")]
         encryptor: encryptor.clone(),
@@ -707,8 +777,7 @@ where
       (Some(pk), Some(keys)) => Some(SecretKeyring::with_keys(pk, keys.iter().copied())),
       _ => None,
     };
-    loop {
-      #[cfg(feature = "metrics")]
+    loop { 
       let transport = {
         Self::new_in(
           resolver.clone(),
@@ -874,9 +943,9 @@ where
 
     #[cfg(all(not(feature = "compression"), feature = "encryption"))]
     return self
-      .read_from_promised_with_encryption_without_compression(conn, from)
+      .read_from_promised_with_encryption_without_compression(conn, stream_label, from)
       .await
-      .map(|(read, msg)| (readed + read, stream_label, msg));
+      .map(|(read, msg)| (readed + read, msg));
 
     #[cfg(all(feature = "compression", feature = "encryption"))]
     self
@@ -1143,8 +1212,10 @@ where
   label: Label,
   #[cfg(feature = "encryption")]
   encryptor: Option<SecretKeyring>,
+  #[cfg(any(feature = "compression", feature = "encryption"))]
   offload_size: usize,
   skip_inbound_label_check: bool,
+  #[cfg(feature = "encryption")]
   verify_incoming: bool,
   #[cfg(feature = "metrics")]
   metric_labels: Arc<memberlist_utils::MetricLabels>,
@@ -1276,6 +1347,7 @@ where
       encryptor,
       packet_label,
       offload_size,
+      verify_incoming,
     )
     .await;
 
@@ -1380,7 +1452,7 @@ where
   #[cfg(all(not(feature = "compression"), feature = "encryption"))]
   async fn read_from_packet_with_encryption_without_compression(
     mut buf: BytesMut,
-    encryptor: Option<&Encryptor>,
+    encryptor: Option<&SecretKeyring>,
     packet_label: Label,
     offload_size: usize,
     verify_incoming: bool,
@@ -1407,7 +1479,7 @@ where
         return Err(security::SecurityError::Disabled.into());
       }
     };
-    let keys = encryptor.kr.keys().await;
+    let keys = encryptor.keys().await;
     if encrypted_message_size <= offload_size {
       return Self::decrypt(
         encryptor,

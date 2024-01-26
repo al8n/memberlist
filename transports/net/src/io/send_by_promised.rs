@@ -7,6 +7,7 @@ where
   S: StreamLayer,
   W: Wire,
 {
+  #[cfg(feature = "encryption")]
   fn enable_promised_encryption(&self) -> bool {
     self.encryptor.is_some()
       && self.opts.gossip_verify_outgoing
@@ -34,84 +35,10 @@ where
       .send_by_promised_with_encryption_without_compression(conn, msg, &self.opts.label)
       .await;
 
-    let compression_enabled = self.opts.compressor.is_some();
-    let encryption_enabled = self.enable_promised_encryption();
-
-    if !compression_enabled && !encryption_enabled {
-      return self
-        .send_by_promised_without_compression_and_encryption(conn, &self.opts.label, msg)
-        .await;
-    }
-
-    if compression_enabled && !encryption_enabled {
-      return self
-        .send_by_promised_with_compression_without_encryption(conn, &self.opts.label, msg)
-        .await;
-    }
-
-    if !compression_enabled && encryption_enabled {
-      return self
-        .send_by_promised_with_encryption_without_compression(conn, msg, &self.opts.label)
-        .await;
-    }
-
-    let encoded_size = W::encoded_len(&msg);
-    let encryptor = self.encryptor.as_ref().unwrap();
-    let encryption_algo = self.opts.encryption_algo.unwrap();
-    let compressor = self.opts.compressor.unwrap();
-
-    let buf = if encoded_size < self.opts.offload_size {
-      let pk = encryptor.primary_key().await;
-      Self::compress_and_encrypt(
-        &compressor,
-        encryptor,
-        encryption_algo,
-        pk,
-        &self.opts.label,
-        msg,
-        encoded_size,
-      )?
-    } else {
-      let (tx, rx) = futures::channel::oneshot::channel();
-      let encryptor = encryptor.clone();
-      let pk = encryptor.primary_key().await;
-      let stream_label = self.opts.label.cheap_clone();
-
-      rayon::spawn(move || {
-        if tx
-          .send(Self::compress_and_encrypt(
-            &compressor,
-            &encryptor,
-            encryption_algo,
-            pk,
-            &stream_label,
-            msg,
-            encoded_size,
-          ))
-          .is_err()
-        {
-          tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
-        }
-      });
-
-      match rx.await {
-        Ok(Ok(buf)) => buf,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => return Err(NetTransportError::ComputationTaskFailed),
-      }
-    };
-
-    let total_len = buf.len();
-    conn
-      .write_all(&buf)
+    #[cfg(all(feature = "compression", feature = "encryption"))]
+    self
+      .send_by_promised_with_compression_and_encryption(conn, msg, &self.opts.label)
       .await
-      .map_err(ConnectionError::promised_write)?;
-
-    conn
-      .flush()
-      .await
-      .map_err(|e| ConnectionError::promised_write(e).into())
-      .map(|_| total_len)
   }
 
   #[cfg(all(feature = "compression", feature = "encryption"))]
@@ -247,6 +174,93 @@ where
     );
 
     Ok(buf)
+  }
+
+  #[cfg(all(feature = "compression", feature = "encryption"))]
+  async fn send_by_promised_with_compression_and_encryption(
+    &self,
+    mut conn: impl AsyncWrite + Unpin,
+    msg: Message<I, A::ResolvedAddress>,
+    stream_label: &Label,
+  ) -> Result<usize, NetTransportError<A, W>> {
+    let compression_enabled = self.opts.compressor.is_some();
+    let encryption_enabled = self.enable_promised_encryption();
+
+    if !compression_enabled && !encryption_enabled {
+      return self
+        .send_by_promised_without_compression_and_encryption(conn, stream_label, msg)
+        .await;
+    }
+
+    if compression_enabled && !encryption_enabled {
+      return self
+        .send_by_promised_with_compression_without_encryption(conn, stream_label, msg)
+        .await;
+    }
+
+    if !compression_enabled && encryption_enabled {
+      return self
+        .send_by_promised_with_encryption_without_compression(conn, msg, stream_label)
+        .await;
+    }
+
+    let encoded_size = W::encoded_len(&msg);
+    let encryptor = self.encryptor.as_ref().unwrap();
+    let encryption_algo = self.opts.encryption_algo.unwrap();
+    let compressor = self.opts.compressor.unwrap();
+
+    let buf = if encoded_size < self.opts.offload_size {
+      let pk = encryptor.primary_key().await;
+      Self::compress_and_encrypt(
+        &compressor,
+        encryptor,
+        encryption_algo,
+        pk,
+        stream_label,
+        msg,
+        encoded_size,
+      )?
+    } else {
+      let (tx, rx) = futures::channel::oneshot::channel();
+      let encryptor = encryptor.clone();
+      let pk = encryptor.primary_key().await;
+      let stream_label = stream_label.cheap_clone();
+
+      rayon::spawn(move || {
+        if tx
+          .send(Self::compress_and_encrypt(
+            &compressor,
+            &encryptor,
+            encryption_algo,
+            pk,
+            &stream_label,
+            msg,
+            encoded_size,
+          ))
+          .is_err()
+        {
+          tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
+        }
+      });
+
+      match rx.await {
+        Ok(Ok(buf)) => buf,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err(NetTransportError::ComputationTaskFailed),
+      }
+    };
+
+    let total_len = buf.len();
+    conn
+      .write_all(&buf)
+      .await
+      .map_err(ConnectionError::promised_write)?;
+
+    conn
+      .flush()
+      .await
+      .map_err(|e| ConnectionError::promised_write(e).into())
+      .map(|_| total_len)
   }
 
   #[cfg(feature = "encryption")]

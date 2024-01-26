@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use super::version::VSN_SIZE;
 pub use super::version::{DelegateVersion, ProtocolVersion};
@@ -142,9 +142,25 @@ pub struct Options {
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   queue_check_interval: Duration,
 
-  #[viewit(getter(style = "ref", const, attrs(cfg(feature = "metrics"))))]
+  #[viewit(
+    getter(style = "ref",
+      const,
+      attrs(
+        doc = "Get the metric labels for the memberlist.",
+        cfg(feature = "metrics"),
+        cfg_attr(docsrs, doc(cfg(feature = "metrics")))
+      )
+    ),
+    setter(
+      attrs(
+        doc = "Sets the metric labels for the memberlist.",
+        cfg(feature = "metrics"),
+        cfg_attr(docsrs, doc(cfg(feature = "metrics")))
+      )
+    )
+  )]
   #[cfg(feature = "metrics")]
-  metric_labels: Arc<MetricLabels>,
+  metric_labels: std::sync::Arc<MetricLabels>,
 }
 
 impl Default for Options {
@@ -188,7 +204,7 @@ impl Options {
       dead_node_reclaim_time: Duration::ZERO,
       queue_check_interval: Duration::from_secs(30),
       #[cfg(feature = "metrics")]
-      metric_labels: Arc::new(MetricLabels::new()),
+      metric_labels: std::sync::Arc::new(MetricLabels::new()),
     }
   }
 
