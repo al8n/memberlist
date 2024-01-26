@@ -11,18 +11,6 @@ pub use showbiz_utils::MetricLabels;
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Options {
-  // /// Label is an optional set of bytes to include on the outside of each
-  // /// packet and stream.
-  // ///
-  // /// If gossip encryption is enabled and this is set it is treated as GCM
-  // /// authenticated data.
-  // #[viewit(getter(const, style = "ref"))]
-  // label: Label,
-
-  // /// The configured encryption type that we
-  // /// will _speak_. This must be between [`EncryptionAlgo::MIN`] and
-  // /// [`EncryptionAlgo::MAX`].
-  // encryption_algo: EncryptionAlgo,
   /// The timeout for establishing a stream connection with
   /// a remote node for a full state sync, and for stream read and write
   /// operations. This is a legacy name for backwards compatibility, but

@@ -206,16 +206,12 @@ impl<A: AddressResolver, W: Wire> TransportError for NetTransportError<A, W> {
   }
 }
 
-fn default_gossip_verify_outgoing() -> bool {
-  true
-}
-
-fn default_gossip_verify_incoming() -> bool {
-  true
-}
-
 /// Used to configure a net transport.
-#[viewit::viewit(vis_all = "pub(crate)")]
+#[viewit::viewit(
+  vis_all = "pub(crate)",
+  getters(vis_all = "pub"),
+  setters(vis_all = "pub", prefix = "with")
+)]
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -227,56 +223,158 @@ fn default_gossip_verify_incoming() -> bool {
 )]
 pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   /// The local node's ID.
+  #[viewit(
+    getter(const, style = "ref", attrs(doc = "Get the id of the node."),),
+    setter(attrs(doc = "Set the id of the node. (Builder pattern)"),)
+  )]
   id: I,
 
   /// The local node's address.
+  #[viewit(
+    getter(const, style = "ref", attrs(doc = "Get the address of the node."),),
+    setter(attrs(doc = "Set the address of the node. (Builder pattern)"),)
+  )]
   address: A::Address,
 
   /// The address to advertise to other nodes. If not set,
   /// the transport will attempt to discover the local IP address
   /// to use.
+  #[viewit(
+    getter(const, attrs(doc = "Get the advertise address of the node."),),
+    setter(attrs(doc = "Set the advertise address of the node. (Builder pattern)"),)
+  )]
   advertise_address: Option<A::ResolvedAddress>,
 
   /// A list of addresses to bind to for both TCP and UDP
   /// communications.
-  #[viewit(getter(style = "ref", const,))]
-  bind_addrs: SmallVec<IpAddr>,
+  #[viewit(
+    getter(
+      style = "ref",
+      const,
+      attrs(doc = "Get a list of addresses to bind to for both TCP and UDP communications."),
+    ),
+    setter(attrs(
+      doc = "Set the list of addresses to bind to for both TCP and UDP communications. (Builder pattern)"
+    ),)
+  )]
+  bind_addresses: SmallVec<IpAddr>,
+
+  /// The port for bind addresses of the node.
+  ///
+  /// Default is `7946`.
+  #[viewit(
+    getter(const, attrs(doc = "Get the port for bind address of the node."),),
+    setter(attrs(doc = "Set the port for bind address of the node. (Builder pattern)"),)
+  )]
   bind_port: Option<u16>,
 
+  /// Label is an optional set of bytes to include on the outside of each
+  /// packet and stream.
+  ///
+  /// If gossip encryption is enabled and this is set it is treated as GCM
+  /// authenticated data.
+  #[viewit(
+    getter(const, style = "ref", attrs(doc = "Get the label of the node."),),
+    setter(attrs(doc = "Set the label of the node. (Builder pattern)"),)
+  )]
   label: Label,
 
   /// Skips the check that inbound packets and gossip
   /// streams need to be label prefixed.
+  #[viewit(
+    getter(
+      const,
+      attrs(
+        doc = "Get if the check that inbound packets and gossip streams need to be label prefixed."
+      ),
+    ),
+    setter(attrs(
+      doc = "Set if the check that inbound packets and gossip streams need to be label prefixed. (Builder pattern)"
+    ),)
+  )]
   skip_inbound_label_check: bool,
+
+  /// Policy for Classless Inter-Domain Routing (CIDR).
+  ///
+  /// By default, allow any connection
+  #[cfg_attr(feature = "serde", serde(default))]
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      attrs(doc = "Get the policy for Classless Inter-Domain Routing (CIDR)."),
+    ),
+    setter(attrs(
+      doc = "Set the policy for Classless Inter-Domain Routing (CIDR). (Builder pattern)"
+    ),)
+  )]
+  cidrs_policy: CIDRsPolicy,
+
+  /// Set the maximum payload size can be sent by UDP
+  #[viewit(
+    getter(const, attrs(doc = "Get the maximum payload size can be sent by UDP."),),
+    setter(attrs(doc = "Set the maximum payload size can be sent by UDP. (Builder pattern)"),)
+  )]
+  max_payload_size: usize,
+
+  /// The checksumer to use for checksumming packets.
+  #[cfg_attr(feature = "serde", serde(default))]
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Get the checksumer used to calculate checksum for UDP."),
+    ),
+    setter(attrs(
+      doc = "Set the checksumer used to calculate checksum for UDP. (Builder pattern)"
+    ),)
+  )]
+  checksumer: Checksumer,
 
   /// Controls whether to enforce encryption for outgoing
   /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
   /// a running cluster.
-  #[cfg_attr(feature = "serde", serde(default = "default_gossip_verify_outgoing"))]
+  #[cfg_attr(feature = "serde", serde(default))]
   #[cfg(feature = "encryption")]
+  #[viewit(
+    getter(
+      const,
+      attrs(
+        doc = "Get whether to enforce encryption for outgoing gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster."
+      ),
+    ),
+    setter(attrs(
+      doc = "Set whether to enforce encryption for outgoing gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster. (Builder pattern)"
+    ),)
+  )]
   gossip_verify_outgoing: bool,
 
   /// Controls whether to enforce encryption for incoming
   /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
   /// a running cluster.
-  #[cfg_attr(feature = "serde", serde(default = "default_gossip_verify_incoming"))]
-  #[cfg(feature = "encryption")]
-  gossip_verify_incoming: bool,
-
-  max_payload_size: usize,
-
-  /// Policy for Classless Inter-Domain Routing (CIDR).
-  ///
-  /// By default, allow any connection
-  #[viewit(getter(style = "ref", const,))]
   #[cfg_attr(feature = "serde", serde(default))]
-  cidrs_policy: CIDRsPolicy,
+  #[cfg(feature = "encryption")]
+  #[viewit(
+    getter(
+      const,
+      attrs(
+        doc = "Get whether to enforce encryption for incoming gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster."
+      ),
+    ),
+    setter(attrs(
+      doc = "Set whether to enforce encryption for incoming gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster. (Builder pattern)"
+    ),)
+  )]
+  gossip_verify_incoming: bool,
 
   /// Used to control message compression. This can
   /// be used to reduce bandwidth usage at the cost of slightly more CPU
-  /// utilization. This is only available starting at protocol version 1.
+  /// utilization.
   #[cfg(feature = "compression")]
   #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
+  #[viewit(
+    getter(const, attrs(doc = "Get the compression algorithm used for outgoing."),),
+    setter(attrs(doc = "Set the compression algorithm used for outgoing. (Builder pattern)"),)
+  )]
   compressor: Option<Compressor>,
 
   /// The size of a message that should be offload to [`rayon`] thread pool
@@ -286,6 +384,17 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   /// will be offloaded to [`rayon`] thread pool for encryption or compression.
   #[cfg(any(feature = "compression", feature = "encryption"))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "compression", feature = "encryption"))))]
+  #[viewit(
+    getter(
+      const,
+      attrs(
+        doc = "Get the size of a message that should be offload to [`rayon`] thread pool for encryption or compression."
+      ),
+    ),
+    setter(attrs(
+      doc = "Set the size of a message that should be offload to [`rayon`] thread pool for encryption or compression. (Builder pattern)"
+    ),)
+  )]
   offload_size: usize,
 
   /// Used to initialize the primary encryption key in a keyring.
@@ -298,30 +407,89 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   /// verification, and automatically install the key onto the keyring.
   #[cfg(feature = "encryption")]
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      result(converter(fn = "Option::as_ref"), type = "Option<&SecretKey>"),
+      attrs(doc = "Get the primary encryption key in a keyring."),
+    ),
+    setter(attrs(doc = "Set the primary encryption key in a keyring. (Builder pattern)"),)
+  )]
   primary_key: Option<SecretKey>,
 
-  /// Holds all of the encryption keys used internally. It is
-  /// automatically initialized using the SecretKey and SecretKeys values.
+  /// Holds all of the encryption keys used internally.
   ///
   /// **Note: This field will not be used if the network layer is secure.**
-  #[viewit(getter(
-    style = "ref",
-    result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeys>")
-  ))]
+  #[viewit(
+    getter(
+      style = "ref",
+      result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeys>"),
+      attrs(doc = "Get all of the encryption keys used internally."),
+    ),
+    setter(attrs(doc = "Set all of the encryption keys used internally. (Builder pattern)"))
+  )]
   #[cfg(feature = "encryption")]
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
   secret_keys: Option<SecretKeys>,
 
+  /// The configured encryption type that we
+  /// will _speak_.
   #[cfg(feature = "encryption")]
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  #[viewit(
+    getter(
+      style = "ref",
+      result(converter(fn = "Option::as_ref"), type = "Option<&EncryptionAlgo>"),
+      attrs(doc = "Get the encryption algorithm used to encrypt the outgoing gossip."),
+    ),
+    setter(attrs(
+      doc = "Set the encryption algorithm used to encrypt the outgoing gossip. (Builder pattern)"
+    ))
+  )]
   encryption_algo: Option<EncryptionAlgo>,
 
-  /// The checksumer to use for checksumming packets.
-  #[cfg_attr(feature = "serde", serde(default))]
-  checksumer: Checksumer,
-
+  /// The metrics labels.
+  #[viewit(
+    getter(
+      style = "ref",
+      result(
+        converter(fn = "Option::as_deref"),
+        type = "Option<&showbiz_utils::MetricLabels>"
+      ),
+      attrs(doc = "Get the metrics labels."),
+    ),
+    setter(attrs(doc = "Set the metrics labels. (Builder pattern)"))
+  )]
   #[cfg(feature = "metrics")]
   metric_labels: Option<Arc<showbiz_utils::MetricLabels>>,
+}
+
+impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> NetTransportOptions<I, A> {
+  /// Creates a new net transport options by id and address, other configurations are left default.
+  pub fn new(id: I, address: A::Address) -> Self {
+    Self {
+      id,
+      address,
+      advertise_address: None,
+      bind_addresses: SmallVec::new(),
+      bind_port: Some(DEFAULT_PORT),
+      label: Label::empty(),
+      skip_inbound_label_check: false,
+      cidrs_policy: CIDRsPolicy::allow_all(),
+      max_payload_size: 1400,
+      checksumer: Checksumer::Crc32,
+      gossip_verify_outgoing: false,
+      gossip_verify_incoming: false,
+      compressor: None,
+      offload_size: 1024,
+      primary_key: None,
+      secret_keys: None,
+      encryption_algo: None,
+      #[cfg(feature = "metrics")]
+      metric_labels: None,
+    }
+  }
 }
 
 /// The net transport based on TCP/TLS and UDP
@@ -371,7 +539,7 @@ where
   ) -> Result<Self, NetTransportError<A, W>> {
     // If we reject the empty list outright we can assume that there's at
     // least one listener of each type later during operation.
-    if opts.bind_addrs.is_empty() {
+    if opts.bind_addresses.is_empty() {
       return Err(NetTransportError::EmptyBindAddrs);
     }
 
@@ -379,10 +547,10 @@ where
     let (packet_tx, packet_rx) = packet_stream::<Self>();
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
 
-    let mut promised_listeners = Vec::with_capacity(opts.bind_addrs.len());
-    let mut sockets = Vec::with_capacity(opts.bind_addrs.len());
+    let mut promised_listeners = Vec::with_capacity(opts.bind_addresses.len());
+    let mut sockets = Vec::with_capacity(opts.bind_addresses.len());
     let bind_port = opts.bind_port.unwrap_or(0);
-    for &addr in opts.bind_addrs.iter() {
+    for &addr in opts.bind_addresses.iter() {
       let addr = SocketAddr::new(addr, bind_port);
       let (local_addr, ln) = match stream_layer.bind(addr).await {
         Ok(ln) => (ln.local_addr().unwrap(), ln),
@@ -445,7 +613,7 @@ where
     let advertise_addr = match opts.advertise_address {
       Some(addr) => addr,
       None => {
-        let addr = if opts.bind_addrs[0].is_unspecified() {
+        let addr = if opts.bind_addresses[0].is_unspecified() {
           local_ip_address::local_ip().map_err(|e| match e {
             local_ip_address::Error::LocalIpAddressNotFound => NetTransportError::NoPrivateIP,
             e => NetTransportError::NoInterfaceAddresses(e),
