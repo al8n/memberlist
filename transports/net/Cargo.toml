@@ -11,6 +11,7 @@ metadata.workspace = true
 default = ["dns", "compression", "encryption"]
 
 tls = ["dep:futures-rustls"]
+native-tls = ["dep:async-native-tls", "dep:native-tls"]
 
 compression = ["rayon", "weezl"]
 encryption = ["rayon", "aead", "aes-gcm", "cbc"]
@@ -65,6 +66,10 @@ wg = { version = "0.4", features = ["async"] }
 
 # tls
 futures-rustls = { version = "0.25", optional = true }
+
+# native-tls
+async-native-tls = { version = "0.5", optional = true }
+native-tls = { version = "0.2", optional = true }
 
 # compression & encryption
 aead = { version = "0.5", features = ["bytes", "std"], optional = true }

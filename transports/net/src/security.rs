@@ -88,9 +88,7 @@ impl core::fmt::Display for UnknownEncryptionAlgo {
 impl std::error::Error for UnknownEncryptionAlgo {}
 
 /// Encryption algorithm
-#[derive(
-  Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash
-)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
@@ -169,7 +167,7 @@ const _: () = {
       }
     }
   }
-  
+
   impl<'de> Deserialize<'de> for SecretKey {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -187,7 +185,7 @@ const _: () = {
           }
         }};
       }
-  
+
       if deserializer.is_human_readable() {
         <String as Deserialize<'de>>::deserialize(deserializer).and_then(|val| {
           base64::engine::general_purpose::STANDARD
@@ -199,9 +197,8 @@ const _: () = {
         <Vec<u8> as Deserialize<'de>>::deserialize(deserializer).and_then(|val| parse!(val))
       }
     }
-  }  
+  }
 };
-
 
 impl core::hash::Hash for SecretKey {
   fn hash<H: core::hash::Hasher>(&self, state: &mut H) {

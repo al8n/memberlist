@@ -166,10 +166,7 @@ where
 
     // update checksum
     let cks = checksumer.checksum(&buf[data_offset..]);
-    NetworkEndian::write_u32(
-      &mut buf[checksum_offset + 1..data_offset],
-      cks,
-    );
+    NetworkEndian::write_u32(&mut buf[checksum_offset + 1..data_offset], cks);
 
     // encrypt
     let mut dst = buf.split_off(data_offset);
@@ -295,10 +292,7 @@ where
 
     // update checksum
     let cks = self.opts.checksumer.checksum(&buf[data_offset..]);
-    NetworkEndian::write_u32(
-      &mut buf[checksum_offset + 1..data_offset],
-      cks,
-    );
+    NetworkEndian::write_u32(&mut buf[checksum_offset + 1..data_offset], cks);
 
     self.sockets[0]
       .send_to(&buf, addr)

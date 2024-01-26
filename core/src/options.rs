@@ -143,7 +143,8 @@ pub struct Options {
   queue_check_interval: Duration,
 
   #[viewit(
-    getter(style = "ref",
+    getter(
+      style = "ref",
       const,
       attrs(
         doc = "Get the metric labels for the memberlist.",
@@ -151,13 +152,11 @@ pub struct Options {
         cfg_attr(docsrs, doc(cfg(feature = "metrics")))
       )
     ),
-    setter(
-      attrs(
-        doc = "Sets the metric labels for the memberlist.",
-        cfg(feature = "metrics"),
-        cfg_attr(docsrs, doc(cfg(feature = "metrics")))
-      )
-    )
+    setter(attrs(
+      doc = "Sets the metric labels for the memberlist.",
+      cfg(feature = "metrics"),
+      cfg_attr(docsrs, doc(cfg(feature = "metrics")))
+    ))
   )]
   #[cfg(feature = "metrics")]
   metric_labels: std::sync::Arc<MetricLabels>,

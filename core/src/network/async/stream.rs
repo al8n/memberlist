@@ -4,10 +4,7 @@ use futures::{Future, Stream};
 use nodecraft::resolver::AddressResolver;
 use smol_str::SmolStr;
 
-use crate::{
-  transport::TimeoutableStream,
-  types::Server,
-};
+use crate::{transport::TimeoutableStream, types::Server};
 
 use super::*;
 
