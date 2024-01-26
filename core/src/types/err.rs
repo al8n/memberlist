@@ -51,6 +51,39 @@ impl Transformable for ErrorResponse {
     let (len, err) = SmolStr::decode(src)?;
     Ok((len, Self { err }))
   }
+
+  fn encode_to_vec(&self) -> Result<Vec<u8>, Self::Error> {
+    <SmolStr as Transformable>::encode_to_vec(&self.err)
+  }
+
+  async fn encode_to_async_writer<W: futures::io::AsyncWrite + Send + Unpin>(
+    &self,
+    writer: &mut W,
+  ) -> std::io::Result<usize> {
+    <SmolStr as Transformable>::encode_to_async_writer(&self.err, writer).await
+  }
+
+  fn encode_to_writer<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<usize> {
+    <SmolStr as Transformable>::encode_to_writer(&self.err, writer)
+  }
+
+  fn decode_from_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<(usize, Self)>
+  where
+    Self: Sized,
+  {
+    <SmolStr as Transformable>::decode_from_reader(reader).map(|(n, err)| (n, Self { err }))
+  }
+
+  async fn decode_from_async_reader<R: futures::io::AsyncRead + Send + Unpin>(
+    reader: &mut R,
+  ) -> std::io::Result<(usize, Self)>
+  where
+    Self: Sized,
+  {
+    <SmolStr as Transformable>::decode_from_async_reader(reader)
+      .await
+      .map(|(n, err)| (n, Self { err }))
+  }
 }
 
 #[cfg(test)]

@@ -604,7 +604,7 @@ where
   I: Id,
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   S: StreamLayer,
-  W: Wire,
+  W: Wire<Id = I, Address = A::ResolvedAddress>,
 {
   /// Creates a new net transport.
   pub async fn new(
@@ -828,7 +828,7 @@ where
   I: Id,
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   S: StreamLayer,
-  W: Wire,
+  W: Wire<Id = I, Address = A::ResolvedAddress>,
 {
   type Error = NetTransportError<Self::Resolver, Self::Wire>;
 
@@ -1639,13 +1639,14 @@ where
         let msg_len = NetworkEndian::read_u16(&buf[..PACKET_OVERHEAD]) as usize;
         buf.advance(PACKET_OVERHEAD);
         let msg_bytes = buf.split_to(msg_len);
-        let msg = <T::Wire as Wire>::decode_message(&msg_bytes).map_err(NetTransportError::Wire)?;
+        let (_, msg) =
+          <T::Wire as Wire>::decode_message(&msg_bytes).map_err(NetTransportError::Wire)?;
         msgs.push(msg);
       }
       Ok(msgs)
     } else {
       <T::Wire as Wire>::decode_message(&buf)
-        .map(Into::into)
+        .map(|(_, msg)| msg.into())
         .map_err(NetTransportError::Wire)
     }
   }
