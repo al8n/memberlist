@@ -24,6 +24,8 @@ where
     &self,
     mut conn: peekable::future::AsyncPeekable<impl AsyncRead + Send + Unpin>,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
+    use futures::AsyncReadExt;
+
     let mut tag = [0u8; 1];
     conn
       .peek_exact(&mut tag)
@@ -94,6 +96,8 @@ where
     stream_label: Label,
     from: &A::ResolvedAddress,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
+    use futures::AsyncReadExt;
+
     // read and check if the message is encrypted
     let mut tag = [0u8; 1];
     conn
@@ -142,7 +146,7 @@ where
     readed += encrypted_message_len;
 
     // check if we should offload
-    let keys = enp.kr.keys().await;
+    let keys = enp.keys().await;
     if encrypted_message_len <= self.opts.offload_size {
       let buf = Self::decrypt(enp, encryption_algo, keys, stream_label.as_bytes(), buf)?;
       let msg = W::decode_message(&buf).map_err(NetTransportError::Wire)?;
@@ -177,6 +181,8 @@ where
     stream_label: Label,
     from: &A::ResolvedAddress,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
+    use futures::AsyncReadExt;
+
     // read and check if the message is encrypted
     let mut tag = [0u8; 1];
     conn
