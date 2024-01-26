@@ -14,7 +14,7 @@ where
       && self.opts.encryption_algo.is_some()
   }
 
-  pub(super) async fn send_by_promised(
+  pub(crate) async fn send_by_promised(
     &self,
     conn: &mut S::Stream,
     msg: Message<I, A::ResolvedAddress>,

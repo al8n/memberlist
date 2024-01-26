@@ -3,6 +3,9 @@ use std::{future::Future, io, net::SocketAddr};
 use futures::{AsyncRead, AsyncWrite};
 use memberlist_core::transport::TimeoutableStream;
 
+/// `StreamLayer` implementations based on TCP.
+pub mod tcp;
+
 /// Represents a network listener.
 ///
 /// This trait defines the operations required for a network listener that can bind to an address,

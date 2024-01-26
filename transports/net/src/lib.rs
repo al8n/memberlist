@@ -52,6 +52,8 @@ pub mod compressor;
 #[cfg(feature = "compression")]
 use compressor::*;
 
+mod io;
+
 impl<A: AddressResolver, W: Wire> From<CompressError> for NetTransportError<A, W> {
   fn from(err: CompressError) -> Self {
     Self::Compressor(err.into())
@@ -90,10 +92,6 @@ pub use label::Label;
 
 mod checksum;
 pub use checksum::Checksumer;
-
-mod read_from_promised;
-mod send_by_packet;
-mod send_by_promised;
 
 use crate::label::{LabelBufMutExt, LabelError};
 
