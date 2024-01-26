@@ -15,20 +15,20 @@ pub enum Error<
   T: Transport,
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 > {
-  #[error("showbiz: node is not running, please bootstrap first")]
+  #[error("memberlist: node is not running, please bootstrap first")]
   NotRunning,
-  #[error("showbiz: timeout waiting for update broadcast")]
+  #[error("memberlist: timeout waiting for update broadcast")]
   UpdateTimeout,
-  #[error("showbiz: timeout waiting for leave broadcast")]
+  #[error("memberlist: timeout waiting for leave broadcast")]
   LeaveTimeout,
-  #[error("showbiz: no response from node {0}")]
+  #[error("memberlist: no response from node {0}")]
   Lost(Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
-  #[error("showbiz: {0}")]
+  #[error("memberlist: {0}")]
   Delegate(D::Error),
-  #[error("showbiz: {0}")]
+  #[error("memberlist: {0}")]
   Transport(T::Error),
   /// Returned when a message is received with an unexpected type.
-  #[error("showbiz: unexpected message: expected {expected}, got {got}")]
+  #[error("memberlist: unexpected message: expected {expected}, got {got}")]
   UnexpectedMessage {
     /// The expected message type.
     expected: &'static str,
@@ -37,18 +37,18 @@ pub enum Error<
   },
   /// Returned when the sequence number of [`Ack`](crate::types::Ack) is not
   /// match the sequence number of [`Ping`](crate::types::Ping).
-  #[error("showbiz: sequence number mismatch: ping({ping}), ack({ack})")]
+  #[error("memberlist: sequence number mismatch: ping({ping}), ack({ack})")]
   SequenceNumberMismatch {
     /// The sequence number of [`Ping`](crate::types::Ping).
     ping: u32,
     /// The sequence number of [`Ack`](crate::types::Ack).
     ack: u32,
   },
-  // #[error("showbiz: {0}")]
+  // #[error("memberlist: {0}")]
   // BlockedAddress(#[from] ForbiddenIp),
-  #[error("showbiz: remote error: {0}")]
+  #[error("memberlist: remote error: {0}")]
   Remote(SmolStr),
-  #[error("showbiz: {0}")]
+  #[error("memberlist: {0}")]
   Other(Cow<'static, str>),
 }
 

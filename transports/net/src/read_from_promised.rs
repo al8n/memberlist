@@ -76,7 +76,7 @@ where
     readed += data_len;
     rayon::spawn(move || {
       if tx.send(Self::decompress(compressor, &data)).is_err() {
-        tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+        tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
       }
     });
 
@@ -117,7 +117,7 @@ where
     let encrypted_message_len = NetworkEndian::read_u32(&encrypt_message_overhead[1..]) as usize;
 
     if encrypted_message_len <= encryption_algo.encrypted_length(0) {
-      tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message with small payload");
+      tracing::error!(target: "memberlist.net.promised", remote = %from, "received encrypted message with small payload");
       return Err(SecurityError::SmallPayload.into());
     }
 
@@ -125,7 +125,7 @@ where
     let enp = match self.encryptor.as_ref() {
       Some(enp) => enp,
       None => {
-        tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
+        tracing::error!(target: "memberlist.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
         return Err(SecurityError::Disabled.into());
       }
     };
@@ -159,7 +159,7 @@ where
         )
         .is_err()
       {
-        tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+        tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
       }
     });
 
@@ -194,7 +194,7 @@ where
     let enp = match self.encryptor.as_ref() {
       Some(enp) => enp,
       None => {
-        tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
+        tracing::error!(target: "memberlist.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
         return Err(SecurityError::Disabled.into());
       }
     };
@@ -209,7 +209,7 @@ where
     let encrypted_message_len = NetworkEndian::read_u32(&encrypt_message_overhead[1..]) as usize;
 
     if encrypted_message_len <= encryption_algo.encrypted_length(0) {
-      tracing::error!(target: "showbiz.net.promised", remote = %from, "received encrypted message with small payload");
+      tracing::error!(target: "memberlist.net.promised", remote = %from, "received encrypted message with small payload");
       return Err(SecurityError::SmallPayload.into());
     }
 
@@ -250,7 +250,7 @@ where
         ))
         .is_err()
       {
-        tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+        tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
       }
     });
 
@@ -284,7 +284,7 @@ where
       match encryptor.decrypt(key, algo, nonce, auth_data, &mut data) {
         Ok(_) => return Ok(data),
         Err(e) => {
-          tracing::error!(target: "showbiz.net.promised", "failed to decrypt message: {}", e);
+          tracing::error!(target: "memberlist.net.promised", "failed to decrypt message: {}", e);
           continue;
         }
       }

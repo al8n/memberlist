@@ -4,7 +4,7 @@ use super::version::VSN_SIZE;
 pub use super::version::{DelegateVersion, ProtocolVersion};
 
 #[cfg(feature = "metrics")]
-pub use showbiz_utils::MetricLabels;
+pub use memberlist_utils::MetricLabels;
 
 /// Options used to configure the memberlist.
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]

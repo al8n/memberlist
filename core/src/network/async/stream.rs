@@ -25,11 +25,11 @@ where
     let this = self.clone();
     let transport_rx = this.inner.transport.stream();
     <T::Runtime as Runtime>::spawn_detach(async move {
-      tracing::debug!(target:  "showbiz.stream", "stream_listener start");
+      tracing::debug!(target:  "memberlist.stream", "stream_listener start");
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
-            tracing::debug!(target:  "showbiz.stream", "stream_listener shutting down");
+            tracing::debug!(target:  "memberlist.stream", "stream_listener shutting down");
             return;
           }
           conn = transport_rx.recv().fuse() => {
@@ -39,7 +39,7 @@ where
                 <T::Runtime as Runtime>::spawn_detach(this.handle_conn(remote_addr, conn))
               },
               Err(e) => {
-                tracing::error!(target:  "showbiz.stream", local = %this.inner.id, "failed to accept connection: {}", e);
+                tracing::error!(target:  "memberlist.stream", local = %this.inner.id, "failed to accept connection: {}", e);
                 // If we got an error, which means on the other side the transport has been closed,
                 // so we need to return and shutdown the stream listener
                 return;
@@ -169,11 +169,11 @@ where
     {
       std::thread_local! {
         #[cfg(not(target_family = "wasm"))]
-        static NODE_INSTANCES_GAUGE: std::cell::OnceCell<std::cell::RefCell<showbiz_utils::MetricLabels>> = std::cell::OnceCell::new();
+        static NODE_INSTANCES_GAUGE: std::cell::OnceCell<std::cell::RefCell<memberlist_utils::MetricLabels>> = std::cell::OnceCell::new();
 
         // TODO: remove this when cargo wasix toolchain update to rust 1.70
         #[cfg(target_family = "wasm")]
-        static NODE_INSTANCES_GAUGE: once_cell::sync::OnceCell<std::cell::RefCell<showbiz_utils::MetricLabels>> = once_cell::sync::OnceCell::new();
+        static NODE_INSTANCES_GAUGE: once_cell::sync::OnceCell<std::cell::RefCell<memberlist_utils::MetricLabels>> = once_cell::sync::OnceCell::new();
       }
 
       NODE_INSTANCES_GAUGE.with(|g| {
@@ -193,7 +193,7 @@ where
             *labels.last_mut().unwrap() = label;
           }
           let iter = labels.iter();
-          metrics::gauge!("showbiz.node.instances", iter).set(cnt as f64);
+          metrics::gauge!("memberlist.node.instances", iter).set(cnt as f64);
         }
         labels.pop();
       });
@@ -201,8 +201,11 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      metrics::gauge!("showbiz.size.local", self.inner.opts.metric_labels.iter())
-        .set(<T::Wire as Wire>::encoded_len(&msg) as f64);
+      metrics::gauge!(
+        "memberlist.size.local",
+        self.inner.opts.metric_labels.iter()
+      )
+      .set(<T::Wire as Wire>::encoded_len(&msg) as f64);
     }
 
     self.send_message(conn, msg).await
@@ -223,12 +226,12 @@ where
     addr: <T::Resolver as AddressResolver>::ResolvedAddress,
     mut conn: T::Stream,
   ) {
-    tracing::debug!(target:  "showbiz.stream", local = %self.inner.id, peer = %addr, "handle stream connection");
+    tracing::debug!(target:  "memberlist.stream", local = %self.inner.id, peer = %addr, "handle stream connection");
 
     #[cfg(feature = "metrics")]
     {
       metrics::counter!(
-        "showbiz.promised.accept",
+        "memberlist.promised.accept",
         self.inner.opts.metric_labels.iter()
       )
       .increment(1);
@@ -242,17 +245,20 @@ where
       Ok((_read, msg)) => {
         #[cfg(feature = "metrics")]
         {
-          metrics::histogram!("showbiz.size.remote", self.inner.opts.metric_labels.iter())
-            .record(_read as f64);
+          metrics::histogram!(
+            "memberlist.size.remote",
+            self.inner.opts.metric_labels.iter()
+          )
+          .record(_read as f64);
         }
         msg
       }
       Err(e) => {
-        tracing::error!(target:  "showbiz.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to receive");
+        tracing::error!(target:  "memberlist.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to receive");
 
         let err_resp = ErrorResponse::new(SmolStr::new(e.to_string()));
         if let Err(e) = self.send_message(&mut conn, err_resp.into()).await {
-          tracing::error!(target:  "showbiz.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to send error response");
+          tracing::error!(target:  "memberlist.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to send error response");
           return;
         }
 
@@ -263,13 +269,13 @@ where
     match msg {
       Message::Ping(ping) => {
         if ping.target.id().ne(self.local_id()) {
-          tracing::error!(target:  "showbiz.stream", local=%self.inner.id, remote = %addr, "got ping for unexpected node {}", ping.target);
+          tracing::error!(target:  "memberlist.stream", local=%self.inner.id, remote = %addr, "got ping for unexpected node {}", ping.target);
           return;
         }
 
         let ack = Ack::new(ping.seq_no);
         if let Err(e) = self.send_message(&mut conn, ack.into()).await {
-          tracing::error!(target:  "showbiz.stream", err=%e, remote_node = %addr, "failed to send ack response");
+          tracing::error!(target:  "memberlist.stream", err=%e, remote_node = %addr, "failed to send ack response");
         }
       }
       Message::PushPull(pp) => {
@@ -282,30 +288,30 @@ where
         // Check if we have too many open push/pull requests
         if num_concurrent >= MAX_PUSH_PULL_REQUESTS {
           tracing::error!(
-            target: "showbiz.stream",
+            target: "memberlist.stream",
             "too many pending push/pull requests"
           );
           return;
         }
 
         if let Err(e) = self.send_local_state(&mut conn, pp.join).await {
-          tracing::error!(target:  "showbiz.stream", err=%e, remote_node = %addr, "failed to push local state");
+          tracing::error!(target:  "memberlist.stream", err=%e, remote_node = %addr, "failed to push local state");
           return;
         }
 
         if let Err(e) = self.merge_remote_state(pp).await {
-          tracing::error!(target:  "showbiz.stream", err=%e, remote_node = %addr, "failed to push/pull merge");
+          tracing::error!(target:  "memberlist.stream", err=%e, remote_node = %addr, "failed to push/pull merge");
         }
       }
       Message::UserData(data) => {
         if let Some(d) = &self.delegate {
           if let Err(e) = d.notify_message(data).await {
-            tracing::error!(target:  "showbiz.stream", err=%e, remote_node = %addr, "failed to notify user message");
+            tracing::error!(target:  "memberlist.stream", err=%e, remote_node = %addr, "failed to notify user message");
           }
         }
       }
       msg => {
-        tracing::error!(target:  "showbiz.stream", remote_node = %addr, "received invalid msg type {}", msg.kind());
+        tracing::error!(target:  "memberlist.stream", remote_node = %addr, "received invalid msg type {}", msg.kind());
       }
     }
   }

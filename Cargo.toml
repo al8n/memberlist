@@ -1,7 +1,7 @@
 [workspace]
 members = [
   "core",
-  "showbiz",
+  "memberlist",
   "transports/net",
   "transports/quinn",
   "transports/s2n",
@@ -10,9 +10,7 @@ members = [
   # "nodejs",
   # "py",
 ]
-exclude = [
-  "showbiz-wasm"
-]
+exclude = ["memberlist-wasm"]
 
 resolver = "2"
 
@@ -20,8 +18,8 @@ resolver = "2"
 version = "0.0.0"
 edition = "2021"
 license = "Apache-2.0/MIT"
-repository = "https://github.com/al8n/showbiz"
-homepage = "https://github.com/al8n/showbiz"
+repository = "https://github.com/al8n/memberlist"
+homepage = "https://github.com/al8n/memberlist"
 
 [workspace.metadata.docs.rs]
 all-features = true
@@ -35,7 +33,12 @@ byteorder = "1"
 derive_more = "0.99"
 futures = "0.3"
 metrics = "0.22"
-nodecraft = { version = "0.2", features = ["transformable", "async", "resolver", "agnostic"] }
+nodecraft = { version = "0.2", features = [
+  "transformable",
+  "async",
+  "resolver",
+  "agnostic",
+] }
 paste = "1"
 pin-project = "1"
 scopeguard = "1"
@@ -48,8 +51,8 @@ thiserror = "1"
 tracing = "0.1"
 viewit = "0.1.5"
 
-showbiz-core = { path = "core", default-features = false }
-showbiz-net = { path = "transports/net", default-features = false }
-showbiz-quinn = { path = "transports/quinn", default-features = false }
-showbiz-s2n = { path = "transports/s2n", default-features = false }
-showbiz-utils = { path = "utils", default-features = false }
+memberlist-core = { path = "core", default-features = false }
+memberlist-net = { path = "transports/net", default-features = false }
+memberlist-quinn = { path = "transports/quinn", default-features = false }
+memberlist-s2n = { path = "transports/s2n", default-features = false }
+memberlist-utils = { path = "utils", default-features = false }

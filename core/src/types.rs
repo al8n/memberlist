@@ -25,7 +25,7 @@ pub use packet::*;
 mod server;
 pub use server::*;
 
-pub use showbiz_utils::*;
+pub use memberlist_utils::*;
 
 use crate::{DelegateVersion, ProtocolVersion};
 

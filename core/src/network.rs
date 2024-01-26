@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use crate::{showbiz::Memberlist, transport::Transport, types::*};
+use crate::{memberlist::Memberlist, transport::Transport, types::*};
 
 mod r#async;
 // #[cfg(feature = "test")]

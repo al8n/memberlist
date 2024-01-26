@@ -2,7 +2,7 @@ use std::{sync::atomic::Ordering, time::Duration};
 
 use crate::{
   // security::encrypt_overhead,
-  showbiz::{AckHandler, Member, Members},
+  memberlist::{AckHandler, Member, Members},
   suspicion::Suspicion,
   timer::Timer,
   transport::Transport,
@@ -119,7 +119,7 @@ where
     }
 
     // If we timed out, return Error.
-    tracing::debug!(target: "showbiz", "failed UDP ping {} (timeout reached)", node);
+    tracing::debug!(target: "memberlist", "failed UDP ping {} (timeout reached)", node);
     Err(Error::Lost(node))
   }
 }
@@ -142,7 +142,7 @@ where
     let now = Instant::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer!(
-      metrics::histogram!("showbiz.push_pull_node", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
+      metrics::histogram!("memberlist.push_pull_node", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
     );
     // Read remote state
     let data = self.send_and_receive_state(&id, join).await?;
@@ -183,7 +183,7 @@ where
       if !self.has_left() {
         // self.refute().await?;
         tracing::warn!(
-          target: "showbiz.state",
+          target: "memberlist.state",
           "refuting a dead message (from: {})",
           d.from
         );
@@ -204,7 +204,7 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      metrics::counter!("showbiz.msg.dead", self.inner.opts.metric_labels.iter()).increment(1);
+      metrics::counter!("memberlist.msg.dead", self.inner.opts.metric_labels.iter()).increment(1);
     }
 
     // Update the state
@@ -271,7 +271,7 @@ where
     if state.id().eq(self.local_id()) {
       self.refute(&state.state, s.incarnation).await;
       tracing::warn!(
-        target: "showbiz.state",
+        target: "memberlist.state",
         "refuting a suspect message (from: {})",
         s.from
       );
@@ -283,7 +283,11 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      metrics::counter!("showbiz.msg.suspect", self.inner.opts.metric_labels.iter()).increment(1);
+      metrics::counter!(
+        "memberlist.msg.suspect",
+        self.inner.opts.metric_labels.iter()
+      )
+      .increment(1);
     }
 
     // Update the state
@@ -351,7 +355,7 @@ where
             {
               if k > 0 && k > num_confirmations as usize {
                 metrics::counter!(
-                  "showbiz.degraded.timeout",
+                  "memberlist.degraded.timeout",
                   t.inner.opts.metric_labels.iter()
                 )
                 .increment(1);
@@ -359,7 +363,7 @@ where
             }
 
             tracing::info!(
-              target: "showbiz.state",
+              target: "memberlist.state",
               "marking {} as failed, suspect timeout reached ({} peer confirmations)",
               dead.node,
               num_confirmations
@@ -367,7 +371,7 @@ where
             let mut memberlist = t.inner.nodes.write().await;
             let err_info = format!("failed to mark {} as failed", dead.node);
             if let Err(e) = t.dead_node(&mut memberlist, dead).await {
-              tracing::error!(target:  "showbiz.state", err=%e, err_info);
+              tracing::error!(target:  "memberlist.state", err=%e, err_info);
             }
           }
         }
@@ -409,7 +413,7 @@ where
     // cluster merging to still occur.
     if let Some(delegate) = &self.delegate {
       if let Err(e) = delegate.notify_alive(server.clone()).await {
-        tracing::warn!(target:  "showbiz.state", local = %self.inner.id, peer = %alive.node, err=%e, "ignoring alive message");
+        tracing::warn!(target:  "memberlist.state", local = %self.inner.id, peer = %alive.node, err=%e, "ignoring alive message");
         return;
       }
     }
@@ -420,7 +424,7 @@ where
       let state = &memberlist.nodes[*idx].state;
       if state.address() != alive.node.address() {
         if let Err(err) = self.inner.transport.blocked_address(alive.node.address()) {
-          tracing::warn!(target:  "showbiz.state", local = %self.inner.id, remote = %alive.node, err=%err, "rejected IP update from {} to {} for node {}", alive.node.id(), state.address(), alive.node.address());
+          tracing::warn!(target:  "memberlist.state", local = %self.inner.id, remote = %alive.node, err=%err, "rejected IP update from {} to {} for node {}", alive.node.id(), state.address(), alive.node.address());
           return;
         };
 
@@ -430,10 +434,10 @@ where
 
         // Allow the address to be updated if a dead node is being replaced.
         if state.state == ServerState::Left || (state.state == ServerState::Dead && can_reclaim) {
-          tracing::info!(target:  "showbiz.state", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.id(), state.address(), alive.node.address());
+          tracing::info!(target:  "memberlist.state", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.id(), state.address(), alive.node.address());
           updates_node = true;
         } else {
-          tracing::error!(target:  "showbiz.state", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.id(), state.address(), alive.node, state.state);
+          tracing::error!(target:  "memberlist.state", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.id(), state.address(), alive.node, state.state);
 
           // Inform the conflict delegate if provided
           if let Some(delegate) = self.delegate.as_ref() {
@@ -451,7 +455,7 @@ where
               )
               .await
             {
-              tracing::error!(target:  "showbiz.state", local = %self.inner.id, err=%e, "failed to notify conflict delegate");
+              tracing::error!(target:  "memberlist.state", local = %self.inner.id, err=%e, "failed to notify conflict delegate");
             }
           }
           return;
@@ -459,7 +463,7 @@ where
       }
     } else {
       if let Err(err) = self.inner.transport.blocked_address(alive.node.address()) {
-        tracing::warn!(target:  "showbiz.state", local = %self.inner.id, remote = %alive.node, err=%err, "rejected node");
+        tracing::warn!(target:  "memberlist.state", local = %self.inner.id, remote = %alive.node, err=%err, "rejected node");
         return;
       };
 
@@ -536,7 +540,7 @@ where
         return;
       }
       self.refute(&member.state, alive.incarnation).await;
-      tracing::warn!(target:  "showbiz.state", local = %self.inner.id, peer = %alive.node, local_meta = ?member.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
+      tracing::warn!(target:  "memberlist.state", local = %self.inner.id, peer = %alive.node, local_meta = ?member.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
     } else {
       self
         .broadcast_notify(
@@ -568,7 +572,7 @@ where
     // Update metrics
     #[cfg(feature = "metrics")]
     {
-      metrics::counter!("showbiz.msg.alive", self.inner.opts.metric_labels.iter()).increment(1);
+      metrics::counter!("memberlist.msg.alive", self.inner.opts.metric_labels.iter()).increment(1);
     }
 
     // Notify the delegate of any relevant updates
@@ -579,7 +583,7 @@ where
           .notify_join(member.state.server.cheap_clone())
           .await
         {
-          tracing::error!(target:  "showbiz.state", local = %self.inner.id, err=%e, "failed to notify join");
+          tracing::error!(target:  "memberlist.state", local = %self.inner.id, err=%e, "failed to notify join");
         }
       } else if old_meta != member.state.meta {
         // if Meta changed, trigger an update notification
@@ -587,7 +591,7 @@ where
           .notify_update(member.state.server.cheap_clone())
           .await
         {
-          tracing::error!(target:  "showbiz.state", local = %self.inner.id, err=%e, "failed to notify update");
+          tracing::error!(target:  "memberlist.state", local = %self.inner.id, err=%e, "failed to notify update");
         }
       }
     }
@@ -617,13 +621,13 @@ where
               let id = dead.node.cheap_clone();
               let mut memberlist = s.inner.nodes.write().await;
               if let Err(e) = s.dead_node(&mut memberlist, dead).await {
-                tracing::error!(target: "showbiz.state", id=%id, err=%e, "fail to dead node");
+                tracing::error!(target: "memberlist.state", id=%id, err=%e, "fail to dead node");
               }
             }
             State::Suspect(suspect) => {
               let id = suspect.node.cheap_clone();
               if let Err(e) = s.suspect_node(suspect).await {
-                tracing::error!(target: "showbiz.state", id=%id, err=%e, "fail to suspect node");
+                tracing::error!(target: "memberlist.state", id=%id, err=%e, "fail to suspect node");
               }
             }
           }
@@ -870,7 +874,7 @@ where
     let now = Instant::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer! {
-      metrics::histogram!("showbiz.probe_node", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
+      metrics::histogram!("memberlist.probe_node", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
     }
 
     // We use our health awareness to scale the overall probe interval, so we
@@ -886,7 +890,7 @@ where
     {
       if probe_interval > self.inner.opts.probe_interval {
         metrics::counter!(
-          "showbiz.degraded.probe",
+          "memberlist.degraded.probe",
           self.inner.opts.metric_labels.iter()
         )
         .increment(1);
@@ -928,7 +932,7 @@ where
         .send_msg(target.address(), ping.cheap_clone().into())
         .await
       {
-        tracing::error!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
+        tracing::error!(target:  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
         if e.is_remote_failure() {
           self
             .handle_remote_failure(target, ping, ack_rx, nack_rx, deadline)
@@ -951,7 +955,7 @@ where
         )
         .await
       {
-        tracing::error!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
+        tracing::error!(target:  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
         if e.is_remote_failure() {
           self
             .handle_remote_failure(target, ping, ack_rx, nack_rx, deadline)
@@ -973,7 +977,7 @@ where
                 let rtt = v.timestamp.elapsed();
 
                 if let Err(e) = delegate.notify_ping_complete(target.server.cheap_clone(), rtt, v.payload).await {
-                  tracing::error!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to notify ping complete ack");
+                  tracing::error!(target:  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to notify ping complete ack");
                 }
               }
 
@@ -985,13 +989,13 @@ where
             // here to break out of the select below.
             if !v.complete {
               if let Err(e) = ack_tx.send(v).await {
-                tracing::error!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to re-enqueue UDP ping ack");
+                tracing::error!(target:  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to re-enqueue UDP ping ack");
               }
             }
           }
           Err(e) => {
             // This branch should never be reached, if there's an error in your log, please report an issue.
-            tracing::debug!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), err = %e, "failed unreliable connection ping (ack channel closed)");
+            tracing::debug!(target:  "memberlist.state", local = %self.inner.id, remote = %target.id(), err = %e, "failed unreliable connection ping (ack channel closed)");
           }
         }
       },
@@ -1002,7 +1006,7 @@ where
         // probe interval it will give the TCP fallback more time, which
         // is more active in dealing with lost packets, and it gives more
         // time to wait for indirect acks/nacks.
-        tracing::debug!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), "failed unreliable connection ping (timeout reached)");
+        tracing::debug!(target:  "memberlist.state", local = %self.inner.id, remote = %target.id(), "failed unreliable connection ping (timeout reached)");
       }
     }
 
@@ -1054,7 +1058,7 @@ where
         .send_msg(ind_target.address(), ind.cheap_clone().into())
         .await
       {
-        tracing::error!(target:  "showbiz.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
+        tracing::error!(target:  "memberlist.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
       }
     }
 
@@ -1087,16 +1091,16 @@ where
             // handle error here for good manner, and if you see this log, please
             // report an issue.
             if let Err(e) = fallback_tx.send(ack) {
-              tracing::error!(target:  "showbiz.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send fallback");
+              tracing::error!(target:  "memberlist.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send fallback");
             }
           }
           Err(e) => {
-            tracing::error!(target:  "showbiz.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send ping by reliable connection");
+            tracing::error!(target:  "memberlist.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send ping by reliable connection");
             // The error should never happen, because we do not drop the rx,
             // handle error here for good manner, and if you see this log, please
             // report an issue.
             if let Err(e) = fallback_tx.send(false) {
-              tracing::error!(target:  "showbiz.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send fallback");
+              tracing::error!(target:  "memberlist.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send fallback");
             }
           }
         }
@@ -1124,7 +1128,7 @@ where
     if !disable_reliable_pings {
       if let Ok(did_contact) = fallback_rx.await {
         if did_contact {
-          tracing::warn!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), "was able to connect to target over reliable connection but unreliable probes failed, network may be misconfigured");
+          tracing::warn!(target:  "memberlist.state", local = %self.inner.id, remote = %target.id(), "was able to connect to target over reliable connection but unreliable probes failed, network may be misconfigured");
           apply_delta!(self <= -1);
           return;
         }
@@ -1150,14 +1154,14 @@ where
     };
 
     // No acks received from target, suspect it as failed.
-    tracing::info!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), "suspecting has failed, no acks received");
+    tracing::info!(target:  "memberlist.state", local = %self.inner.id, remote = %target.id(), "suspecting has failed, no acks received");
     let s = Suspect {
       incarnation: target.incarnation.load(Ordering::SeqCst),
       node: target.id().cheap_clone(),
       from: self.local_id().cheap_clone(),
     };
     if let Err(e) = self.suspect_node(s).await {
-      tracing::error!(target:  "showbiz.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to suspect node");
+      tracing::error!(target:  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to suspect node");
     }
     if awareness_delta != 0 {
       apply_delta!(self <= awareness_delta);
@@ -1263,7 +1267,7 @@ where
     let now = Instant::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer!(
-      metrics::histogram!("showbiz.gossip", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
+      metrics::histogram!("memberlist.gossip", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
     );
 
     // Get some random live, suspect, or recently dead nodes
@@ -1311,7 +1315,7 @@ where
       {
         Ok(msgs) => msgs,
         Err(e) => {
-          tracing::error!(target:  "showbiz.state", err = %e, "failed to get broadcast messages from {}", server);
+          tracing::error!(target:  "memberlist.state", err = %e, "failed to get broadcast messages from {}", server);
           return;
         }
       };
@@ -1323,12 +1327,12 @@ where
       if msgs.len() == 1 {
         // Send single message as is
         if let Err(e) = self.transport_send_packet(addr, msgs.pop().unwrap()).await {
-          tracing::error!(target:  "showbiz.state", err = %e, "failed to send gossip to {}", addr);
+          tracing::error!(target:  "memberlist.state", err = %e, "failed to send gossip to {}", addr);
         }
       } else {
         // Otherwise create and send one or more compound messages
         if let Err(e) = self.transport_send_packets(addr, msgs).await {
-          tracing::error!(target:  "showbiz.state", err = %e, "failed to send gossip to {}", addr);
+          tracing::error!(target:  "memberlist.state", err = %e, "failed to send gossip to {}", addr);
         }
       }
     }
@@ -1366,7 +1370,7 @@ where
     let server = &nodes[0];
     // Attempt a push pull
     if let Err(e) = self.push_pull_node(server.node(), false).await {
-      tracing::error!(target:  "showbiz.state", err = %e, "push/pull with {} failed", server.id());
+      tracing::error!(target:  "memberlist.state", err = %e, "push/pull with {} failed", server.id());
     }
   }
 

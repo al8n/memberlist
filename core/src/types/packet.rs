@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use showbiz_utils::OneOrMore;
+use memberlist_utils::OneOrMore;
 
 use super::Message;
 

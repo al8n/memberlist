@@ -90,7 +90,7 @@ where
           ))
           .is_err()
         {
-          tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+          tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
         }
       });
 
@@ -286,7 +286,7 @@ where
           ))
           .is_err()
         {
-          tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+          tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
         }
       });
 
@@ -343,7 +343,7 @@ where
           ))
           .is_err()
         {
-          tracing::error!(target: "showbiz.net.promised", "failed to send computation task result back to main thread");
+          tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
         }
       });
 

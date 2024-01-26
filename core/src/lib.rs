@@ -12,9 +12,9 @@ mod network;
 pub use network::META_MAX_SIZE;
 mod options;
 pub use options::{DelegateVersion, Options, ProtocolVersion};
+mod memberlist;
 pub mod queue;
-mod showbiz;
-pub use showbiz::*;
+pub use memberlist::*;
 mod state;
 mod suspicion;
 pub mod transport;
@@ -44,15 +44,15 @@ pub use humantime_serde;
 
 /// All unit test fns are exported in the `tests` module.
 /// This module is used for users want to use other async runtime,
-/// and want to use the test if showbiz also works with their runtime.
-/// See [showbiz-wasm] for more examples about how to use these unit test fn runners.
+/// and want to use the test if memberlist also works with their runtime.
+/// See [memberlist-wasm] for more examples about how to use these unit test fn runners.
 ///
-/// [showbiz-wasm]: https://github.com/al8n/showbiz/blob/main/showbiz-wasm/src/lib.rs#L20
+/// [memberlist-wasm]: https://github.com/al8n/memberlist/blob/main/memberlist-wasm/src/lib.rs#L20
 #[cfg(feature = "test")]
 pub mod tests {
   pub use super::{
     network::*,
-    // showbiz::tests::*,
+    // memberlist::tests::*,
     // state::*,
     transport::tests::*,
   };

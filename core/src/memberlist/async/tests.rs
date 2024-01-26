@@ -51,7 +51,7 @@ pub(crate) fn test_config<R: Runtime>() -> Options<NetTransport<R>> {
   test_config_net(0)
 }
 
-pub(crate) async fn get_showbiz<F, R: Runtime>(
+pub(crate) async fn get_memberlist<F, R: Runtime>(
   f: Option<F>,
 ) -> Result<Memberlist<NetTransport<R>>, Error<NetTransport<R>, VoidDelegate>>
 where
@@ -86,7 +86,7 @@ where
       .with_bind_addr(get_bind_addr().ip())
       .with_secret_key(Some(key));
 
-    get_showbiz::<_, R>(Some(|_| c)).await.unwrap();
+    get_memberlist::<_, R>(Some(|_| c)).await.unwrap();
     yield_now::<R>().await;
   }
 }
@@ -99,7 +99,7 @@ where
 {
   let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr().ip());
 
-  get_showbiz::<_, R>(Some(|_| c)).await.unwrap();
+  get_memberlist::<_, R>(Some(|_| c)).await.unwrap();
   yield_now::<R>().await;
 }
 

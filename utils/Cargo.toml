@@ -1,5 +1,5 @@
 [package]
-name = "showbiz-utils"
+name = "memberlist-utils"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -11,8 +11,8 @@ use bytes::Bytes;
 use futures::{Future, FutureExt, Stream};
 
 use crate::{
+  memberlist::tests::{get_memberlist, test_config},
   security::SecretKey,
-  showbiz::tests::{get_showbiz, test_config},
   transport::net::NetTransport,
   types::{Ack, Alive, EncodeHeader, IndirectPing, MessageType, Ping, Type, ENCODE_HEADER_SIZE},
   CompressionAlgo, Memberlist, Message, Options,
@@ -43,7 +43,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let m = get_showbiz::<_, R>(Some(|c: Options<NetTransport<R>>| {
+  let m = get_memberlist::<_, R>(Some(|c: Options<NetTransport<R>>| {
     c.with_compression_algo(CompressionAlgo::None)
   }))
   .await
@@ -95,7 +95,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let m = get_showbiz::<_, R>(Some(|c: Options<NetTransport<R>>| {
+  let m = get_memberlist::<_, R>(Some(|c: Options<NetTransport<R>>| {
     c.with_compression_algo(CompressionAlgo::None)
   }))
   .await
@@ -151,7 +151,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let m = get_showbiz::<_, R>(Some(|c: Options<NetTransport<R>>| {
+  let m = get_memberlist::<_, R>(Some(|c: Options<NetTransport<R>>| {
     c.with_compression_algo(CompressionAlgo::None)
   }))
   .await
@@ -196,7 +196,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let m = get_showbiz::<_, R>(Some(|c: Options<NetTransport<R>>| {
+  let m = get_memberlist::<_, R>(Some(|c: Options<NetTransport<R>>| {
     c.with_compression_algo(CompressionAlgo::None)
   }))
   .await
@@ -263,7 +263,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let m = get_showbiz::<_, R>(Some(|opts: Options<_>| {
+  let m = get_memberlist::<_, R>(Some(|opts: Options<_>| {
     opts.with_compression_algo(CompressionAlgo::None)
   }))
   .await

@@ -6,7 +6,7 @@ use std::{
 use super::{
   delegate::Delegate,
   error::Error,
-  showbiz::Memberlist,
+  memberlist::Memberlist,
   transport::Transport,
   types::{Ack, Nack, Server, ServerState},
 };

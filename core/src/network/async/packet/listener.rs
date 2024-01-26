@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::{
-  showbiz::MessageHandoff,
+  memberlist::MessageHandoff,
   transport::Wire,
   types::{Ack, Message, Nack},
 };
@@ -34,7 +34,7 @@ where
                 this.handle_messages(msg, addr, timestamp).await;
               },
               Err(e) => {
-                tracing::error!(target:  "showbiz.packet", "failed to receive packet: {}", e);
+                tracing::error!(target:  "memberlist.packet", "failed to receive packet: {}", e);
                 // If we got an error, which means on the other side the transport has been closed,
                 // so we need to return and shutdown the packet listener
                 return;
@@ -62,7 +62,7 @@ where
           let msg: Message<_, _> = $msg.into();
           // Check for overflow and append if not full
           if queue.len() >= $this.inner.opts.handoff_queue_depth {
-            tracing::warn!(target: "showbiz.packet", addr = %from, "handler queue full, dropping message ({})", msg.kind());
+            tracing::warn!(target: "memberlist.packet", addr = %from, "handler queue full, dropping message ({})", msg.kind());
           } else {
             queue.push_back(MessageHandoff {
               msg,
@@ -73,7 +73,7 @@ where
 
         // notify of pending message
         if let Err(e) = $this.inner.handoff_tx.send(()).await {
-          tracing::error!(target: "showbiz.packet", addr = %from, err = %e, "failed to notify of pending message");
+          tracing::error!(target: "memberlist.packet", addr = %from, err = %e, "failed to notify of pending message");
         }
       }};
     }
@@ -91,7 +91,7 @@ where
 
           // Check for overflow and append if not full
           if queue.len() >= self.inner.opts.handoff_queue_depth {
-            tracing::warn!(target: "showbiz.packet", addr = %from, "handler queue full, dropping message (Alive)");
+            tracing::warn!(target: "memberlist.packet", addr = %from, "handler queue full, dropping message (Alive)");
           } else {
             queue.push_back(MessageHandoff {
               msg: alive.into(),
@@ -102,14 +102,14 @@ where
 
         // notify of pending message
         if let Err(e) = self.inner.handoff_tx.send(()).await {
-          tracing::error!(target: "showbiz.packet", addr = %from, err = %e, "failed to notify of pending message");
+          tracing::error!(target: "memberlist.packet", addr = %from, err = %e, "failed to notify of pending message");
         }
       }
       Message::Suspect(msg) => queue!(self.msg),
       Message::Dead(msg) => queue!(self.msg),
       Message::UserData(msg) => queue!(self.msg),
       mt => {
-        tracing::error!(target: "showbiz.packet", addr = %from, err = "unexpected message type", message_type=mt.kind());
+        tracing::error!(target: "memberlist.packet", addr = %from, err = "unexpected message type", message_type=mt.kind());
       }
     }
   }
@@ -140,7 +140,7 @@ where
   ) {
     // If node is provided, verify that it is for us
     if p.target.id().ne(&self.inner.id) {
-      tracing::error!(target:  "showbiz.packet", local=%self.inner.id, remote = %from, "got ping for unexpected node '{}'", p.target);
+      tracing::error!(target:  "memberlist.packet", local=%self.inner.id, remote = %from, "got ping for unexpected node '{}'", p.target);
       return;
     }
 
@@ -148,7 +148,7 @@ where
       let payload = match delegate.ack_payload().await {
         Ok(payload) => payload,
         Err(e) => {
-          tracing::error!(target:  "showbiz.packet", local=%self.inner.id, remote = %from, err = %e, "failed to get ack payload from delegate");
+          tracing::error!(target:  "memberlist.packet", local=%self.inner.id, remote = %from, err = %e, "failed to get ack payload from delegate");
           return;
         }
       };
@@ -164,7 +164,7 @@ where
     };
 
     if let Err(e) = self.send_msg(p.source.address(), msg.into()).await {
-      tracing::error!(target:  "showbiz.packet", addr = %from, err = %e, "failed to send ack response");
+      tracing::error!(target:  "memberlist.packet", addr = %from, err = %e, "failed to send ack response");
     }
   }
 
@@ -213,7 +213,7 @@ where
               )
               .await
             {
-              tracing::error!(target:  "showbiz.packet", addr = %afrom, err = %e, "failed to forward ack");
+              tracing::error!(target:  "memberlist.packet", addr = %afrom, err = %e, "failed to forward ack");
             }
           }
           .boxed()
@@ -222,7 +222,7 @@ where
       .await;
 
     if let Err(e) = self.send_msg(ind.target.address(), ping.into()).await {
-      tracing::error!(target:  "showbiz.packet", addr = %from, err = %e, "failed to send ping");
+      tracing::error!(target:  "memberlist.packet", addr = %from, err = %e, "failed to send ping");
     }
 
     // Setup a timer to fire off a nack if no ack is seen in time.
@@ -234,7 +234,7 @@ where
           // We've not received an ack, so send a nack.
           let nack = Nack::new(ind.seq_no);
           if let Err(e) = this.send_msg(ind.source.address(), nack.into()).await {
-            tracing::error!(target:  "showbiz.packet", local = %ind.source, remote = %from, err = %e, "failed to send nack");
+            tracing::error!(target:  "memberlist.packet", local = %ind.source, remote = %from, err = %e, "failed to send nack");
           }
         }
         _ = cancel_rx.fuse() => {

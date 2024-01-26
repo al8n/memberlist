@@ -1,5 +1,5 @@
 // use agnostic::tokio::TokioRuntime;
-// use showbiz_core::{security::EncryptionAlgo, tests::*, CompressionAlgo};
+// use memberlist_core::{security::EncryptionAlgo, tests::*, CompressionAlgo};
 
 // fn run(fut: impl std::future::Future<Output = ()>) {
 //   initialize_tests_tracing();

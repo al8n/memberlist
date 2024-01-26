@@ -220,7 +220,7 @@ where
         ))
         .is_err()
       {
-        tracing::error!(target: "showbiz.net.packet", "failed to send computation task result back to main thread");
+        tracing::error!(target: "memberlist.net.packet", "failed to send computation task result back to main thread");
       }
     });
 
@@ -363,7 +363,7 @@ where
         ))
         .is_err()
       {
-        tracing::error!(target: "showbiz.net.packet", "failed to send computation task result back to main thread");
+        tracing::error!(target: "memberlist.net.packet", "failed to send computation task result back to main thread");
       }
     });
 
@@ -542,7 +542,7 @@ where
         ))
         .is_err()
       {
-        tracing::error!(target: "showbiz.net.packet", "failed to send computation task result back to main thread");
+        tracing::error!(target: "memberlist.net.packet", "failed to send computation task result back to main thread");
       }
     });
 

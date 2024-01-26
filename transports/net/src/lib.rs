@@ -25,8 +25,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use checksum::CHECKSUM_SIZE;
 use futures::{io::BufReader, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt};
 use label::LabelBufExt;
-use peekable::future::AsyncPeekExt;
-use showbiz_core::{
+use memberlist_core::{
   transport::{
     resolver::AddressResolver,
     stream::{
@@ -38,14 +37,18 @@ use showbiz_core::{
   types::{Message, Packet, SmallVec, TinyVec},
   CheapClone,
 };
-use showbiz_utils::{net::CIDRsPolicy, OneOrMore};
+use memberlist_utils::{
+  net::{CIDRsPolicy, IsGlobalIp},
+  OneOrMore,
+};
+use peekable::future::AsyncPeekExt;
 use wg::AsyncWaitGroup;
 
 /// Compress/decompress related.
 #[cfg(feature = "compression")]
 #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
 #[doc(inline)]
-pub use showbiz_utils::compressor;
+pub use memberlist_utils::compressor;
 
 #[cfg(feature = "compression")]
 use compressor::*;
@@ -475,14 +478,14 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
       style = "ref",
       result(
         converter(fn = "Option::as_deref"),
-        type = "Option<&showbiz_utils::MetricLabels>"
+        type = "Option<&memberlist_utils::MetricLabels>"
       ),
       attrs(doc = "Get the metrics labels."),
     ),
     setter(attrs(doc = "Set the metrics labels. (Builder pattern)"))
   )]
   #[cfg(feature = "metrics")]
-  metric_labels: Option<Arc<showbiz_utils::MetricLabels>>,
+  metric_labels: Option<Arc<memberlist_utils::MetricLabels>>,
 }
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> NetTransportOptions<I, A> {
@@ -647,6 +650,25 @@ where
       }
     };
 
+    if advertise_addr.is_global_ip() {
+      #[cfg(feature = "encryption")]
+      if S::is_secure()
+        && (encryptor.is_none() || opts.encryption_algo.is_none() || !opts.gossip_verify_outgoing)
+      {
+        tracing::warn!(target: "memberlist", "binding to public address without enabling encryption for packet stream layer!");
+      }
+
+      #[cfg(feature = "encryption")]
+      if !S::is_secure()
+        && (encryptor.is_none() || opts.encryption_algo.is_none() || !opts.gossip_verify_outgoing)
+      {
+        tracing::warn!(target: "memberlist", "binding to public address without enabling encryption for stream layer!");
+      }
+
+      #[cfg(not(feature = "encryption"))]
+      tracing::warn!(target: "memberlist", "binding to public address without enabling encryption for stream layer!");
+    }
+
     Ok(Self {
       advertise_addr,
       opts,
@@ -678,7 +700,7 @@ where
     #[cfg(feature = "encryption")]
     let keyring = match (opts.primary_key, &opts.secret_keys) {
       (None, Some(keys)) if !keys.is_empty() => {
-        tracing::warn!(target: "showbiz", "using first key in keyring as primary key");
+        tracing::warn!(target: "memberlist", "using first key in keyring as primary key");
         let mut iter = keys.iter().copied();
         let pk = iter.next().unwrap();
         let keyring = SecretKeyring::with_keys(pk, iter);
@@ -705,12 +727,12 @@ where
         Ok(t) => {
           if let Some(0) | None = opts.bind_port {
             let port = t.advertise_addr.port();
-            tracing::warn!(target:  "showbiz", "using dynamic bind port {port}");
+            tracing::warn!(target:  "memberlist", "using dynamic bind port {port}");
           }
           return Ok(t);
         }
         Err(e) => {
-          tracing::debug!(target="showbiz", err=%e, "fail to create transport");
+          tracing::debug!(target="memberlist", err=%e, "fail to create transport");
           if i == limit - 1 {
             return Err(e);
           }
@@ -818,7 +840,7 @@ where
   > {
     let mut conn = BufReader::new(conn).peekable();
     let mut stream_label = label::remove_label_header(&mut conn).await.map_err(|e| {
-      tracing::error!(target: "showbiz.net.promised", remote = %from, err=%e, "failed to receive and remove the stream label header");
+      tracing::error!(target: "memberlist.net.promised", remote = %from, err=%e, "failed to receive and remove the stream label header");
       ConnectionError::promised_read(e)
     })?.unwrap_or_else(Label::empty);
 
@@ -826,7 +848,7 @@ where
 
     if self.opts.skip_inbound_label_check {
       if !stream_label.is_empty() {
-        tracing::error!(target: "showbiz.net.promised", "unexpected double stream label header");
+        tracing::error!(target: "memberlist.net.promised", "unexpected double stream label header");
         return Err(LabelError::duplicate(label.cheap_clone(), stream_label).into());
       }
 
@@ -835,7 +857,7 @@ where
     }
 
     if stream_label.ne(&self.opts.label) {
-      tracing::error!(target: "showbiz.net.promised", local_label=%label, remote_label=%stream_label, "discarding stream with unacceptable label");
+      tracing::error!(target: "memberlist.net.promised", local_label=%label, remote_label=%stream_label, "discarding stream with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), stream_label).into());
     }
 
@@ -1080,7 +1102,7 @@ where
                   .send(remote_addr, conn)
                   .await
                 {
-                  tracing::error!(target:  "showbiz.net.transport", local_addr=%local_addr, err = %e, "failed to send TCP connection");
+                  tracing::error!(target:  "memberlist.net.transport", local_addr=%local_addr, err = %e, "failed to send TCP connection");
                 }
               }
               Err(e) => {
@@ -1098,7 +1120,7 @@ where
                   loop_delay = MAX_DELAY;
                 }
 
-                tracing::error!(target:  "showbiz.net.transport", local_addr=%local_addr, err = %e, "error accepting TCP connection");
+                tracing::error!(target:  "memberlist.net.transport", local_addr=%local_addr, err = %e, "error accepting TCP connection");
                 <T::Runtime as Runtime>::sleep(loop_delay).await;
                 continue;
               }
@@ -1128,7 +1150,7 @@ where
   skip_inbound_label_check: bool,
   verify_incoming: bool,
   #[cfg(feature = "metrics")]
-  metric_labels: Arc<showbiz_utils::MetricLabels>,
+  metric_labels: Arc<memberlist_utils::MetricLabels>,
 }
 
 impl<A, T> PacketProcessor<A, T>
@@ -1149,7 +1171,7 @@ where
     <T::Runtime as Runtime>::spawn_detach(async move {
       scopeguard::defer!(wg.done());
       tracing::info!(
-        target: "showbiz.net.transport",
+        target: "memberlist.net.transport",
         "udp listening on {local_addr}"
       );
 
@@ -1168,7 +1190,7 @@ where
                 // Check the length - it needs to have at least one byte to be a
                 // proper message.
                 if n < 1 {
-                  tracing::error!(target: "showbiz.packet", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
+                  tracing::error!(target: "memberlist.packet", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
                   continue;
                 }
                 buf.truncate(n);
@@ -1186,29 +1208,29 @@ where
                 ).await {
                   Ok(msg) => msg,
                   Err(e) => {
-                    tracing::error!(target: "showbiz.packet", local=%local_addr, from=%addr, err = %e, "fail to handle UDP packet");
+                    tracing::error!(target: "memberlist.packet", local=%local_addr, from=%addr, err = %e, "fail to handle UDP packet");
                     continue;
                   }
                 };
 
                 #[cfg(feature = "metrics")]
                 {
-                  metrics::counter!("showbiz.packet.bytes.processing", self.metric_labels.iter()).increment(start.elapsed().as_secs_f64().round() as u64);
+                  metrics::counter!("memberlist.packet.bytes.processing", self.metric_labels.iter()).increment(start.elapsed().as_secs_f64().round() as u64);
                 }
 
                 if let Err(e) = packet_tx.send(Packet::new(msg, addr, start)).await {
-                  tracing::error!(target: "showbiz.packet", local=%local_addr, from=%addr, err = %e, "failed to send packet");
+                  tracing::error!(target: "memberlist.packet", local=%local_addr, from=%addr, err = %e, "failed to send packet");
                 }
 
                 #[cfg(feature = "metrics")]
-                metrics::counter!("showbiz.packet.received", self.metric_labels.iter()).increment(n as u64);
+                metrics::counter!("memberlist.packet.received", self.metric_labels.iter()).increment(n as u64);
               }
               Err(e) => {
                 if shutdown.load(Ordering::SeqCst) {
                   break;
                 }
 
-                tracing::error!(target: "showbiz.net.transport", peer=%local_addr, err = %e, "error reading UDP packet");
+                tracing::error!(target: "memberlist.net.transport", peer=%local_addr, err = %e, "error reading UDP packet");
                 continue;
               }
             };
@@ -1241,7 +1263,7 @@ where
     }
 
     if packet_label.ne(label) {
-      tracing::error!(target: "showbiz.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+      tracing::error!(target: "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
     }
 
@@ -1284,7 +1306,7 @@ where
   > {
     if !ENCRYPT_TAG.contains(&buf[0]) {
       if verify_incoming {
-        tracing::error!(target: "showbiz.net.packet", "incoming packet is not encrypted, and verify incoming is forced");
+        tracing::error!(target: "memberlist.net.packet", "incoming packet is not encrypted, and verify incoming is forced");
         return Err(SecurityError::Disabled.into());
       } else {
         return Self::read_from_packet_without_compression_and_encryption(buf);
@@ -1347,7 +1369,7 @@ where
         )
         .is_err()
       {
-        tracing::error!(target: "showbiz.net.packet", "failed to send back to main thread");
+        tracing::error!(target: "memberlist.net.packet", "failed to send back to main thread");
       }
     });
 
@@ -1371,7 +1393,7 @@ where
   > {
     if !ENCRYPT_TAG.contains(&buf[0]) {
       if verify_incoming {
-        tracing::error!(target: "showbiz.net.packet", "incoming packet is not encrypted, and verify incoming is forced");
+        tracing::error!(target: "memberlist.net.packet", "incoming packet is not encrypted, and verify incoming is forced");
         return Err(security::SecurityError::Disabled.into());
       } else {
         return Self::read_from_packet_without_compression_and_encryption(buf);
@@ -1419,7 +1441,7 @@ where
         )
         .is_err()
       {
-        tracing::error!(target: "showbiz.net.packet", "failed to send back to main thread");
+        tracing::error!(target: "memberlist.net.packet", "failed to send back to main thread");
       }
     });
 
@@ -1459,7 +1481,7 @@ where
         .send(Self::decompress_and_decode(compressor, compressed_message))
         .is_err()
       {
-        tracing::error!(target: "showbiz.net.packet", "failed to send back to main thread");
+        tracing::error!(target: "memberlist.net.packet", "failed to send back to main thread");
       }
     });
 
@@ -1514,7 +1536,7 @@ where
       match encryptor.decrypt(key, algo, nonce, auth_data, data) {
         Ok(_) => return Ok(()),
         Err(e) => {
-          tracing::error!(target: "showbiz.net.promised", "failed to decrypt message: {}", e);
+          tracing::error!(target: "memberlist.net.promised", "failed to decrypt message: {}", e);
           continue;
         }
       }

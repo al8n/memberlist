@@ -10,7 +10,7 @@ pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
 /// # Examples
 ///
 /// ```
-/// use showbiz_core::util::hostname;
+/// use memberlist_core::util::hostname;
 ///
 /// let hostname = hostname();
 /// println!("hostname: {hostname:?}");

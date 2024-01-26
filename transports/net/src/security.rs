@@ -7,11 +7,11 @@ use async_lock::RwLock;
 use base64::Engine;
 use bytes::{Buf, BufMut, BytesMut};
 use indexmap::IndexSet;
+use memberlist_core::transport::Wire;
+use memberlist_utils::smallvec_wrapper;
 use nodecraft::resolver::AddressResolver;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use showbiz_core::transport::Wire;
-use showbiz_utils::smallvec_wrapper;
 
 use std::{iter::once, sync::Arc};
 
@@ -431,7 +431,7 @@ pub(super) struct SecretKeyringInner {
 }
 
 /// A lock-free and thread-safe container for a set of encryption keys.
-/// The keyring contains all key data used internally by showbiz.
+/// The keyring contains all key data used internally by memberlist.
 ///
 /// If creating a keyring with multiple keys, one key must be designated
 /// primary by passing it as the primaryKey. If the primaryKey does not exist in
@@ -444,7 +444,7 @@ pub struct SecretKeyring {
 
 impl SecretKeyring {
   /// Constructs a new container for a primary key. The
-  /// keyring contains all key data used internally by showbiz.
+  /// keyring contains all key data used internally by memberlist.
   ///
   /// If only a primary key is passed, then it will be automatically added to the
   /// keyring.
@@ -462,7 +462,7 @@ impl SecretKeyring {
   }
 
   /// Constructs a new container for a set of encryption keys. The
-  /// keyring contains all key data used internally by showbiz.
+  /// keyring contains all key data used internally by memberlist.
   ///
   /// If only a primary key is passed, then it will be automatically added to the
   /// keyring. If creating a keyring with multiple keys, one key must be designated

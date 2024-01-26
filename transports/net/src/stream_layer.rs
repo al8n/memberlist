@@ -1,7 +1,7 @@
 use std::{future::Future, io, net::SocketAddr};
 
 use futures::{AsyncRead, AsyncWrite};
-use showbiz_core::transport::TimeoutableStream;
+use memberlist_core::transport::TimeoutableStream;
 
 /// Represents a network listener.
 ///

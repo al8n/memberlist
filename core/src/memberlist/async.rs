@@ -50,7 +50,7 @@ impl<T: Transport> Drop for MemberlistCore<T> {
   fn drop(&mut self) {
     self.shutdown_tx.close();
     if let Err(e) = self.transport.block_shutdown() {
-      tracing::error!(target:  "showbiz", err=%e, "failed to shutdown");
+      tracing::error!(target:  "memberlist", err=%e, "failed to shutdown");
     }
   }
 }
@@ -318,7 +318,7 @@ where
     };
     this.alive_node(alive, None, true).await;
     this.schedule(shutdown_rx).await;
-    tracing::debug!(target:  "showbiz", local = %this.inner.id, advertise_addr = %advertise, "node is living");
+    tracing::debug!(target:  "memberlist", local = %this.inner.id, advertise_addr = %advertise, "node is living");
     Ok(this)
   }
 
@@ -353,20 +353,6 @@ where
     let broadcast = TransmitLimitedQueue::new(opts.retransmit_mult, move || {
       num_nodes.load(Ordering::Acquire) as usize
     });
-    // let encryption_enabled = if let Some(keyring) = &opts.secret_keyring {
-    //   !keyring.is_empty() && !opts.encryption_algo.is_none()
-    // } else {
-    //   false
-    // };
-
-    // // TODO: replace this with is_global when IpAddr::is_global is stable
-    // // https://github.com/rust-lang/rust/issues/27709
-    // if crate::util::IsGlobalIp::is_global_ip(&advertise.ip()) && encrypted_enable {
-    //   tracing::warn!(
-    //     target: "showbiz",
-    //     "binding to public address without encryption!"
-    //   );
-    // }
 
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
     let this = Memberlist {
@@ -444,7 +430,7 @@ where
               rst = self.inner.leave_broadcast_rx.recv().fuse() => {
                 if let Err(e) = rst {
                   tracing::error!(
-                    target: "showbiz",
+                    target: "memberlist",
                     "failed to receive leave broadcast: {}",
                     e
                   );
@@ -456,14 +442,14 @@ where
             }
           } else if let Err(e) = self.inner.leave_broadcast_rx.recv().await {
             tracing::error!(
-              target: "showbiz",
+              target: "memberlist",
               "failed to receive leave broadcast: {}",
               e
             );
           }
         }
       } else {
-        tracing::warn!(target:  "showbiz", "leave but we're not a member");
+        tracing::warn!(target:  "memberlist", "leave but we're not a member");
       }
     }
     Ok(())
@@ -533,7 +519,7 @@ where
         async move {
           let resolved_addr = self.inner.transport.resolve(node.address()).await.map_err(|e| {
             tracing::debug!(
-              target: "showbiz",
+              target: "memberlist",
               err = %e,
               "failed to resolve address {}",
               node.address(),
@@ -541,10 +527,10 @@ where
             (node.cheap_clone(), Error::<T, D>::transport(e))
           })?;
           let id = Node::new(node.id().cheap_clone(), resolved_addr);
-          tracing::info!(target:  "showbiz", local = %self.inner.transport.local_id(), peer = %id, "start join...");
+          tracing::info!(target:  "memberlist", local = %self.inner.transport.local_id(), peer = %id, "start join...");
           if let Err(e) = self.push_pull_node(id.cheap_clone(), true).await {
             tracing::debug!(
-              target: "showbiz",
+              target: "memberlist",
               local = %self.inner.id,
               err = %e,
               "failed to join {}",
@@ -682,7 +668,7 @@ where
   }
 
   /// Stop any background maintenance of network activity
-  /// for this showbiz, causing it to appear "dead". A leave message
+  /// for this memberlist, causing it to appear "dead". A leave message
   /// will not be broadcasted prior, so the cluster being left will have
   /// to detect this node's shutdown using probing. If you wish to more
   /// gracefully exit the cluster, call Leave prior to shutting down.
@@ -699,7 +685,7 @@ where
     // completely torn down. If we kill the memberlist-side handlers
     // those I/O handlers might get stuck.
     if let Err(e) = self.inner.transport.shutdown().await {
-      tracing::error!(target:  "showbiz", err=%e, "failed to shutdown transport");
+      tracing::error!(target:  "memberlist", err=%e, "failed to shutdown transport");
     }
 
     // Now tear down everything else.
@@ -748,7 +734,7 @@ where
           },
           _ = <T::Runtime as Runtime>::sleep(queue_check_interval).fuse() => {
             let numq = this.inner.broadcast.num_queued().await;
-            metrics::histogram!("showbiz.queue.broadcasts").record(numq as f64);
+            metrics::histogram!("memberlist.queue.broadcasts").record(numq as f64);
           }
         }
       }

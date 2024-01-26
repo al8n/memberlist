@@ -55,7 +55,7 @@ impl Awareness {
     #[cfg(feature = "metrics")]
     {
       if _initial != _fnl {
-        metrics::gauge!("showbiz.health.score", self.metric_labels.iter()).set(_fnl as f64);
+        metrics::gauge!("memberlist.health.score", self.metric_labels.iter()).set(_fnl as f64);
       }
     }
   }

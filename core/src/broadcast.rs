@@ -1,7 +1,7 @@
 use crate::{
   delegate::Delegate,
   error::Error,
-  showbiz::Memberlist,
+  memberlist::Memberlist,
   transport::{Transport, Wire},
   types::{Message, TinyVec},
 };
@@ -95,7 +95,7 @@ where
   async fn finished(&self) {
     if let Some(tx) = &self.notify {
       if let Err(e) = tx.send(()).await {
-        tracing::error!(target:  "showbiz", "broadcast failed to notify: {}", e);
+        tracing::error!(target:  "memberlist", "broadcast failed to notify: {}", e);
       }
     }
   }

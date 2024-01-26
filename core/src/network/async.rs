@@ -84,12 +84,12 @@ where
       .dial_timeout(node.address(), self.inner.opts.timeout)
       .await
       .map_err(Error::transport)?;
-    tracing::debug!(target:  "showbiz", local_addr = %self.inner.id, peer_addr = %node, "initiating push/pull sync");
+    tracing::debug!(target:  "memberlist", local_addr = %self.inner.id, peer_addr = %node, "initiating push/pull sync");
 
     #[cfg(feature = "metrics")]
     {
       metrics::counter!(
-        "showbiz.promised.connect",
+        "memberlist.promised.connect",
         self.inner.opts.metric_labels.iter()
       )
       .increment(1);
@@ -128,8 +128,11 @@ where
       .map(|(sent, _)| {
         #[cfg(feature = "metrics")]
         {
-          metrics::counter!("showbiz.packet.sent", self.inner.opts.metric_labels.iter())
-            .increment(sent as u64);
+          metrics::counter!(
+            "memberlist.packet.sent",
+            self.inner.opts.metric_labels.iter()
+          )
+          .increment(sent as u64);
         }
       })
       .map_err(Error::transport)
@@ -148,8 +151,11 @@ where
       .map(|(sent, _)| {
         #[cfg(feature = "metrics")]
         {
-          metrics::counter!("showbiz.packet.sent", self.inner.opts.metric_labels.iter())
-            .increment(sent as u64);
+          metrics::counter!(
+            "memberlist.packet.sent",
+            self.inner.opts.metric_labels.iter()
+          )
+          .increment(sent as u64);
         }
       })
       .map_err(Error::transport)
@@ -169,7 +175,7 @@ where
         #[cfg(feature = "metrics")]
         {
           metrics::counter!(
-            "showbiz.promised.sent",
+            "memberlist.promised.sent",
             self.inner.opts.metric_labels.iter()
           )
           .increment(sent as u64);
