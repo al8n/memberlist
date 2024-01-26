@@ -59,7 +59,7 @@ const _: () = {
       }
     }
   }
-  
+
   impl From<DelegateVersion> for ArchivedDelegateVersion {
     fn from(value: DelegateVersion) -> Self {
       match value {
@@ -68,7 +68,6 @@ const _: () = {
     }
   }
 };
-
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct UnknownProtocolVersion(u8);
@@ -129,7 +128,7 @@ const _: () = {
       }
     }
   }
-  
+
   impl From<ProtocolVersion> for ArchivedProtocolVersion {
     fn from(value: ProtocolVersion) -> Self {
       match value {

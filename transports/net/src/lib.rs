@@ -61,21 +61,19 @@ const _: () = {
       Self::Compressor(err.into())
     }
   }
-  
+
   impl<A: AddressResolver, W: Wire> From<DecompressError> for NetTransportError<A, W> {
     fn from(err: DecompressError) -> Self {
       Self::Compressor(err.into())
     }
   }
-  
+
   impl<A: AddressResolver, W: Wire> From<UnknownCompressor> for NetTransportError<A, W> {
     fn from(err: UnknownCompressor) -> Self {
       Self::Compressor(err.into())
     }
   }
 };
-
-
 
 /// Encrypt/decrypt related.
 #[cfg(feature = "encryption")]
@@ -362,11 +360,14 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   #[cfg(feature = "compression")]
   #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
   #[viewit(
-    getter(const, attrs(
-      doc = "Get the compression algorithm used for outgoing.",
-      cfg(feature = "compression"),
-      cfg_attr(docsrs, doc(cfg(feature = "compression")))
-    ),),
+    getter(
+      const,
+      attrs(
+        doc = "Get the compression algorithm used for outgoing.",
+        cfg(feature = "compression"),
+        cfg_attr(docsrs, doc(cfg(feature = "compression")))
+      ),
+    ),
     setter(attrs(
       doc = "Set the compression algorithm used for outgoing. (Builder pattern)",
       cfg(feature = "compression"),
@@ -420,8 +421,6 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
     ),)
   )]
   gossip_verify_incoming: bool,
-
-  
 
   /// The size of a message that should be offload to [`rayon`] thread pool
   /// for encryption or compression.
@@ -777,7 +776,7 @@ where
       (Some(pk), Some(keys)) => Some(SecretKeyring::with_keys(pk, keys.iter().copied())),
       _ => None,
     };
-    loop { 
+    loop {
       let transport = {
         Self::new_in(
           resolver.clone(),
