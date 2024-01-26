@@ -15,6 +15,9 @@ use super::*;
 pub mod stream;
 use stream::*;
 
+mod lpe;
+pub use lpe::*;
+
 #[cfg(feature = "test")]
 pub(crate) mod tests;
 
@@ -66,31 +69,40 @@ pub trait Wire: Send + Sync + 'static {
   /// The error type for encoding and decoding
   type Error: std::error::Error + Send + Sync + 'static;
 
+  /// The id type used to identify nodes
+  type Id: Transformable;
+
+  /// The resolved address type used to identify nodes
+  type Address: Transformable;
+
   /// Returns the encoded length of the given message
-  fn encoded_len<I, A>(msg: &Message<I, A>) -> usize;
+  fn encoded_len(msg: &Message<Self::Id, Self::Address>) -> usize;
 
   /// Encodes the given message into the given buffer, returns the number of bytes written
-  fn encode_message<I, A>(msg: Message<I, A>, dst: &mut [u8]) -> Result<usize, Self::Error>;
+  fn encode_message(
+    msg: Message<Self::Id, Self::Address>,
+    dst: &mut [u8],
+  ) -> Result<usize, Self::Error>;
 
   /// Encodes the given message into the vec.
-  fn encode_message_to_vec<I, A>(msg: Message<I, A>) -> Result<Vec<u8>, Self::Error> {
+  fn encode_message_to_vec(msg: Message<Self::Id, Self::Address>) -> Result<Vec<u8>, Self::Error> {
     let mut buf = vec![0; Self::encoded_len(&msg)];
     Self::encode_message(msg, &mut buf)?;
     Ok(buf)
   }
 
   /// Encodes the given message into the bytes.
-  fn encode_message_to_bytes<I, A>(msg: Message<I, A>) -> Result<Bytes, Self::Error> {
+  fn encode_message_to_bytes(msg: Message<Self::Id, Self::Address>) -> Result<Bytes, Self::Error> {
     Self::encode_message_to_vec(msg).map(Into::into)
   }
 
-  /// Decodes the given bytes into a message
-  fn decode_message<I, A>(src: &[u8]) -> Result<Message<I, A>, Self::Error>;
+  /// Decodes the given bytes into a message, returning how many bytes were read
+  fn decode_message(src: &[u8]) -> Result<(usize, Message<Self::Id, Self::Address>), Self::Error>;
 
   /// Decode message from the reader and returns the number of bytes read and the message.
-  fn decode_message_from_reader<I, A>(
+  fn decode_message_from_reader(
     conn: impl AsyncRead + Send + Unpin,
-  ) -> impl Future<Output = std::io::Result<(usize, Message<I, A>)>> + Send;
+  ) -> impl Future<Output = std::io::Result<(usize, Message<Self::Id, Self::Address>)>> + Send;
 }
 
 /// Transport is used to abstract over communicating with other peers. The packet
@@ -106,7 +118,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// The promised stream used to send and receive messages
   type Stream: TimeoutableStream + Send + Sync + 'static;
   /// The wire used to encode and decode messages
-  type Wire: Wire;
+  type Wire: Wire<Id = Self::Id, Address = <Self::Resolver as AddressResolver>::ResolvedAddress>;
   /// The async runtime
   type Runtime: agnostic::Runtime;
 
