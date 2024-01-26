@@ -193,7 +193,7 @@ impl<R: Runtime> AsyncWrite for TlsStreamKind<R> {
   }
 }
 
-/// TLS connection of the TCP stream layer.
+/// [`PromisedStream`] of the TLS stream layer.
 #[pin_project::pin_project]
 pub struct TlsStream<R: Runtime> {
   #[pin]
