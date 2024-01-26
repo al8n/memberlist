@@ -71,7 +71,7 @@ where
     + Send
     + Sync
     + 'static,
-  W: Wire,
+  W: Wire<Id = I, Address = A>,
 {
   type Id = Either<I, A>;
   type Message = Message<I, A>;

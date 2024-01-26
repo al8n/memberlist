@@ -8,7 +8,7 @@ where
   I: Id,
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   S: StreamLayer,
-  W: Wire,
+  W: Wire<Id = I, Address = A::ResolvedAddress>,
 {
   pub(crate) async fn read_from_promised_without_compression_and_encryption(
     &self,
@@ -274,7 +274,9 @@ where
   ) -> Result<Message<I, A::ResolvedAddress>, NetTransportError<A, W>> {
     let uncompressed = compressor.decompress(data)?;
 
-    W::decode_message(&uncompressed).map_err(NetTransportError::Wire)
+    W::decode_message(&uncompressed)
+      .map(|(_, msg)| msg)
+      .map_err(NetTransportError::Wire)
   }
 
   #[cfg(feature = "encryption")]
@@ -309,7 +311,7 @@ where
     let mut buf = Self::decrypt(encryptor, algo, keys, auth_data, data)?;
     let tag = buf[0];
     if !COMPRESS_TAG.contains(&tag) {
-      let msg = W::decode_message(&buf).map_err(NetTransportError::Wire)?;
+      let (_, msg) = W::decode_message(&buf).map_err(NetTransportError::Wire)?;
       return Ok(msg);
     }
     let compressed_message_size = NetworkEndian::read_u32(&buf[1..COMPRESS_HEADER]) as usize;

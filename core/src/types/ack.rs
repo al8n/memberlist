@@ -163,6 +163,39 @@ impl Transformable for Nack {
     let (n, seq_no) = <u32 as Transformable>::decode(src)?;
     Ok((n, Self { seq_no }))
   }
+
+  fn encode_to_vec(&self) -> Result<Vec<u8>, Self::Error> {
+    <u32 as Transformable>::encode_to_vec(&self.seq_no)
+  }
+
+  async fn encode_to_async_writer<W: futures::io::AsyncWrite + Send + Unpin>(
+    &self,
+    writer: &mut W,
+  ) -> std::io::Result<usize> {
+    <u32 as Transformable>::encode_to_async_writer(&self.seq_no, writer).await
+  }
+
+  fn encode_to_writer<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<usize> {
+    <u32 as Transformable>::encode_to_writer(&self.seq_no, writer)
+  }
+
+  fn decode_from_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<(usize, Self)>
+  where
+    Self: Sized,
+  {
+    <u32 as Transformable>::decode_from_reader(reader).map(|(n, seq_no)| (n, Self { seq_no }))
+  }
+
+  async fn decode_from_async_reader<R: futures::io::AsyncRead + Send + Unpin>(
+    reader: &mut R,
+  ) -> std::io::Result<(usize, Self)>
+  where
+    Self: Sized,
+  {
+    <u32 as Transformable>::decode_from_async_reader(reader)
+      .await
+      .map(|(n, seq_no)| (n, Self { seq_no }))
+  }
 }
 
 #[cfg(test)]

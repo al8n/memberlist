@@ -50,7 +50,7 @@ derive_more.workspace = true
 either = "1"
 futures.workspace = true
 nodecraft.workspace = true
-transformable.workspace = true
+transformable = { workspace = true, features = ["bytes", "smol_str"] }
 paste.workspace = true
 pin-project.workspace = true
 rand = "0.8"
