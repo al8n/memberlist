@@ -43,9 +43,6 @@ pub trait TimeoutableStream: Unpin + Send + Sync + 'static {
 
 /// An error for the transport layer.
 pub trait TransportError: std::error::Error + Send + Sync + 'static {
-  /// Constructs a new `TransportError` from an I/O error.
-  fn io(err: std::io::Error) -> Self;
-
   /// Returns `true` if the error is a remote failure.
   ///
   /// e.g. Errors happened when:
@@ -56,9 +53,6 @@ pub trait TransportError: std::error::Error + Send + Sync + 'static {
   ///
   /// The above errors can be treated as remote failures.
   fn is_remote_failure(&self) -> bool;
-
-  /// Returns `true` if the error is unexpected EOF.
-  fn is_unexpected_eof(&self) -> bool;
 
   /// Custom the error.
   fn custom(err: std::borrow::Cow<'static, str>) -> Self;

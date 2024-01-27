@@ -1,6 +1,9 @@
 /// Network related utilities
 pub mod net;
 
+mod label;
+pub use label::*;
+
 /// re-export [`either`] crate
 pub use either;
 

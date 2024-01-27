@@ -3,6 +3,7 @@ members = [
   "core",
   "memberlist",
   "transports/net",
+  "transports/quic",
   "transports/quinn",
   "transports/s2n",
   "utils",
