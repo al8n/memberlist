@@ -196,6 +196,7 @@ pub(super) struct QuinnOptions {
   endpoint_config: quinn::EndpointConfig,
   max_stream_data: usize,
   max_connection_data: usize,
+  handshake_timeout: Duration,
 }
 
 impl From<Options> for QuinnOptions {
@@ -210,7 +211,7 @@ impl From<Options> for QuinnOptions {
       max_connection_data,
       max_stream_data,
       endpoint_config,
-      handshake_timeout: _,
+      handshake_timeout,
       mtu_discovery_config,
     } = config;
     let mut transport = quinn::TransportConfig::default();
@@ -243,6 +244,7 @@ impl From<Options> for QuinnOptions {
       endpoint_config,
       max_stream_data: max_stream_data as usize,
       max_connection_data: max_connection_data as usize,
+      handshake_timeout,
     }
   }
 }

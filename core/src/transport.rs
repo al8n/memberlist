@@ -22,16 +22,17 @@ pub use lpe::*;
 pub(crate) mod tests;
 
 /// Ensures that the stream has timeout capabilities.
+#[auto_impl::auto_impl(Box)]
 pub trait TimeoutableStream: Unpin + Send + Sync + 'static {
-  fn set_write_timeout(&self, timeout: Option<Duration>);
+  fn set_write_timeout(&mut self, timeout: Option<Duration>);
 
   fn write_timeout(&self) -> Option<Duration>;
 
-  fn set_read_timeout(&self, timeout: Option<Duration>);
+  fn set_read_timeout(&mut self, timeout: Option<Duration>);
 
   fn read_timeout(&self) -> Option<Duration>;
 
-  fn set_timeout(&self, timeout: Option<Duration>) {
+  fn set_timeout(&mut self, timeout: Option<Duration>) {
     Self::set_read_timeout(self, timeout);
     Self::set_write_timeout(self, timeout);
   }
@@ -59,6 +60,7 @@ pub trait TransportError: std::error::Error + Send + Sync + 'static {
 }
 
 /// The `Wire` trait for encoding and decoding of messages.
+#[auto_impl::auto_impl(Box, Arc)]
 pub trait Wire: Send + Sync + 'static {
   /// The error type for encoding and decoding
   type Error: std::error::Error + Send + Sync + 'static;
@@ -102,6 +104,7 @@ pub trait Wire: Send + Sync + 'static {
 /// Transport is used to abstract over communicating with other peers. The packet
 /// interface is assumed to be best-effort and the stream interface is assumed to
 /// be reliable.
+#[auto_impl::auto_impl(Box, Arc)]
 pub trait Transport: Sized + Send + Sync + 'static {
   /// The error type for the transport
   type Error: TransportError;

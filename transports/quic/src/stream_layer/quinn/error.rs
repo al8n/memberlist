@@ -11,6 +11,26 @@ pub enum QuinnError {
   Read(#[from] QuinnReadStreamError),
   #[error(transparent)]
   Write(#[from] QuinnWriteStreamError),
+  #[error("timeout")]
+  Timeout,
+}
+
+impl From<WriteError> for QuinnError {
+  fn from(err: WriteError) -> Self {
+    Self::Write(err.into())
+  }
+}
+
+impl From<quinn::ReadError> for QuinnError {
+  fn from(err: quinn::ReadError) -> Self {
+    Self::Read(err.into())
+  }
+}
+
+impl From<quinn::ReadExactError> for QuinnError {
+  fn from(err: quinn::ReadExactError) -> Self {
+    Self::Read(err.into())
+  }
 }
 
 impl From<ConnectError> for QuinnError {
@@ -40,6 +60,7 @@ impl QuicError for QuinnError {
       Self::Connection(err) => err.is_remote_failure(),
       Self::Read(err) => err.is_remote_failure(),
       Self::Write(err) => err.is_remote_failure(),
+      Self::Timeout => false,
     }
   }
 }
@@ -53,6 +74,10 @@ pub enum QuinnConnectionError {
   /// Error on an established connection.
   #[error(transparent)]
   Connection(#[from] ConnectionError),
+
+  /// Returned when establish connection but failed because of timeout.
+  #[error("timeout")]
+  DialTimeout,
 }
 
 impl QuicError for QuinnConnectionError {
@@ -60,6 +85,7 @@ impl QuicError for QuinnConnectionError {
     match self {
       Self::Connect(err) => is_connect_error_remote_failure(err),
       Self::Connection(err) => is_connection_error_remote_failure(err),
+      Self::DialTimeout => true,
     }
   }
 }

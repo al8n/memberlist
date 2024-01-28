@@ -114,7 +114,7 @@ impl<R: Runtime> AsyncWrite for TcpStream<R> {
 }
 
 impl<R: Runtime> TimeoutableStream for TcpStream<R> {
-  fn set_write_timeout(&self, timeout: Option<Duration>) {
+  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
     self.0.set_write_timeout(timeout)
   }
 
@@ -122,7 +122,7 @@ impl<R: Runtime> TimeoutableStream for TcpStream<R> {
     self.0.write_timeout()
   }
 
-  fn set_read_timeout(&self, timeout: Option<Duration>) {
+  fn set_read_timeout(&mut self, timeout: Option<Duration>) {
     self.0.set_read_timeout(timeout)
   }
 

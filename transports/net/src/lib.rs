@@ -1156,7 +1156,7 @@ where
                   .send(remote_addr, conn)
                   .await
                 {
-                  tracing::error!(target:  "memberlist.net.transport", local_addr=%local_addr, err = %e, "failed to send TCP connection");
+                  tracing::error!(target:  "memberlist.transport.net", local_addr=%local_addr, err = %e, "failed to send TCP connection");
                 }
               }
               Err(e) => {
@@ -1174,7 +1174,7 @@ where
                   loop_delay = MAX_DELAY;
                 }
 
-                tracing::error!(target:  "memberlist.net.transport", local_addr=%local_addr, err = %e, "error accepting TCP connection");
+                tracing::error!(target:  "memberlist.transport.net", local_addr=%local_addr, err = %e, "error accepting TCP connection");
                 <T::Runtime as Runtime>::sleep(loop_delay).await;
                 continue;
               }
@@ -1227,7 +1227,7 @@ where
     <T::Runtime as Runtime>::spawn_detach(async move {
       scopeguard::defer!(wg.done());
       tracing::info!(
-        target: "memberlist.net.transport",
+        target: "memberlist.transport.net",
         "udp listening on {local_addr}"
       );
 
@@ -1286,7 +1286,7 @@ where
                   break;
                 }
 
-                tracing::error!(target: "memberlist.net.transport", peer=%local_addr, err = %e, "error reading UDP packet");
+                tracing::error!(target: "memberlist.transport.net", peer=%local_addr, err = %e, "error reading UDP packet");
                 continue;
               }
             };

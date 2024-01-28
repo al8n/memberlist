@@ -10,7 +10,7 @@ homepage.workspace = true
 default = ["compression", "quinn"]
 compression = ["rayon", "weezl"]
 quinn = ["agnostic/quinn", "dep:quinn", "rustls", "socket2"]
-s2n = ["s2n-quic"]
+s2n = ["s2n-quic", "futures/bilock", "futures/unstable"]
 serde = ["memberlist-core/serde", "dep:serde", "memberlist-utils/serde"]
 metrics = ["memberlist-core/metrics", "memberlist-utils/metrics", "dep:metrics"]
 
@@ -29,14 +29,16 @@ dnssec-ring = ["dns", "nodecraft/dnssec-ring"]
 dnssec = ["dns", "nodecraft/dnssec"]
 
 [dependencies]
+auto_impl.workspace = true
 agnostic.workspace = true
 async-channel.workspace = true
 bytes.workspace = true
 byteorder.workspace = true
 futures.workspace = true
-nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
+local-ip-address = "0.5"
 memberlist-core.workspace = true
 memberlist-utils = { workspace = true, features = ["ipnet"] }
+nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
 tracing.workspace = true
 thiserror.workspace = true
 smol_str.workspace = true

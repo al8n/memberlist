@@ -225,7 +225,7 @@ impl<R: Runtime> AsyncWrite for TlsStream<R> {
 }
 
 impl<R: Runtime> TimeoutableStream for TlsStream<R> {
-  fn set_write_timeout(&self, timeout: Option<Duration>) {
+  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
     match self {
       Self {
         stream: TlsStreamKind::Client(s),
@@ -247,7 +247,7 @@ impl<R: Runtime> TimeoutableStream for TlsStream<R> {
     }
   }
 
-  fn set_read_timeout(&self, timeout: Option<Duration>) {
+  fn set_read_timeout(&mut self, timeout: Option<Duration>) {
     match self {
       Self {
         stream: TlsStreamKind::Client(s),

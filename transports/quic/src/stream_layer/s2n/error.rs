@@ -2,17 +2,26 @@ use crate::QuicError;
 
 use s2n_quic::{connection::Error as ConnectionError, stream::Error as StreamError};
 
+/// Error type for s2n stream layer.
 #[derive(Debug, thiserror::Error)]
 pub enum S2nError {
+  /// Connection error.
   #[error(transparent)]
   Connection(#[from] ConnectionError),
 
+  /// Stream error.
   #[error(transparent)]
   Stream(#[from] StreamError),
 
+  /// IO error.
   #[error(transparent)]
   IO(#[from] std::io::Error),
 
+  /// Timeout.
+  #[error("timeout")]
+  Timeout,
+
+  /// Closed.
   #[error("endpoint closed")]
   Closed,
 }
@@ -48,6 +57,7 @@ impl QuicError for S2nError {
         StreamError::NonEmptyOutput { .. } => false,
         _ => false,
       },
+      Self::Timeout => true,
     }
   }
 }

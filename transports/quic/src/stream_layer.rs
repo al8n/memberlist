@@ -1,6 +1,7 @@
-use std::{future::Future, net::SocketAddr};
+use std::{future::Future, net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
+use memberlist_core::transport::TimeoutableStream;
 
 /// QUIC stream layer based on [`quinn`](::quinn).
 #[cfg(feature = "quinn")]
@@ -13,12 +14,14 @@ pub mod quinn;
 pub mod s2n;
 
 /// A error trait for quic stream layer.
+#[auto_impl::auto_impl(Box, Arc)]
 pub trait QuicError: std::error::Error + Send + Sync + 'static {
   /// Returns `true` if the error is caused by the remote peer.
   fn is_remote_failure(&self) -> bool;
 }
 
 /// A trait for QUIC read stream.
+#[auto_impl::auto_impl(Box)]
 pub trait QuicReadStream: Send + Sync + 'static {
   /// The error type for the stream.
   type Error: QuicError;
@@ -34,6 +37,7 @@ pub trait QuicReadStream: Send + Sync + 'static {
 }
 
 /// A trait for QUIC write stream.
+#[auto_impl::auto_impl(Box)]
 pub trait QuicWriteStream: Send + Sync + 'static {
   /// The error type for the stream.
   type Error: QuicError;
@@ -46,7 +50,8 @@ pub trait QuicWriteStream: Send + Sync + 'static {
 }
 
 /// A trait for QUIC bidirectional streams.
-pub trait QuicBiStream: Send + Sync + 'static {
+#[auto_impl::auto_impl(Box)]
+pub trait QuicBiStream: TimeoutableStream + Send + Sync + 'static {
   /// The error type for the stream.
   type Error: QuicError;
 
@@ -64,38 +69,90 @@ pub trait QuicBiStream: Send + Sync + 'static {
 }
 
 /// A trait for QUIC stream layers.
+#[auto_impl::auto_impl(Box, Arc)]
 pub trait StreamLayer: Sized + Send + Sync + 'static {
   /// The error type.
-  type Error: QuicError;
+  type Error: QuicError
+    + From<<Self::Stream as QuicBiStream>::Error>
+    + From<<Self::WriteStream as QuicWriteStream>::Error>
+    + From<<Self::ReadStream as QuicReadStream>::Error>
+    + From<<Self::BiAcceptor as QuicBiAcceptor>::Error>
+    + From<<Self::UniAcceptor as QuicUniAcceptor>::Error>
+    + From<<Self::Connector as QuicConnector>::Error>;
 
-  /// The listener type.
-  type Listener: Listener<BiStream = Self::Stream>;
+  /// The bidirectional acceptor type.
+  type BiAcceptor: QuicBiAcceptor<BiStream = Self::Stream>;
+
+  /// The unidirectional acceptor type.
+  type UniAcceptor: QuicUniAcceptor<ReadStream = Self::ReadStream>;
+
+  /// The connector type.
+  type Connector: QuicConnector<BiStream = Self::Stream, WriteStream = Self::WriteStream>;
 
   /// The bidirectional stream type.
   type Stream: QuicBiStream;
+
+  /// The unidirectional write stream type.
+  type WriteStream: QuicWriteStream;
+
+  /// The unidirectional read stream type.
+  type ReadStream: QuicReadStream;
 
   /// Max unacknowledged data in bytes that may be send on a single stream.
   fn max_stream_data(&self) -> usize;
 
   /// Binds to a local address.
-  fn bind(&self, addr: SocketAddr) -> impl Future<Output = std::io::Result<Self::Listener>> + Send;
+  fn bind(
+    &self,
+    addr: SocketAddr,
+  ) -> impl Future<Output = std::io::Result<((Self::BiAcceptor, Self::UniAcceptor), Self::Connector)>>
+       + Send;
 }
 
-pub trait Listener {
+/// A trait for QUIC acceptors. The stream layer will use this trait to
+/// accept a bi-directional connection from a remote peer.
+#[auto_impl::auto_impl(Box, Arc)]
+pub trait QuicBiAcceptor: Send + Sync + 'static {
   /// The error type.
   type Error: std::error::Error + Send + Sync + 'static;
 
   /// The bidirectional stream type.
   type BiStream: QuicBiStream;
 
+  /// Accepts a bidirectional connection from a remote peer.
+  fn accept_bi(
+    &self,
+  ) -> impl Future<Output = Result<(Self::BiStream, SocketAddr), Self::Error>> + Send;
+}
+
+/// A trait for QUIC acceptors. The stream layer will use this trait to
+/// accept a uni-directional connection from a remote peer.
+#[auto_impl::auto_impl(Box, Arc)]
+pub trait QuicUniAcceptor: Send + Sync + 'static {
+  /// The error type.
+  type Error: std::error::Error + Send + Sync + 'static;
+
   /// The unidirectional read stream type.
   type ReadStream: QuicReadStream;
 
+  /// Accepts a unidirectional read stream from a remote peer.
+  fn accept_uni(
+    &self,
+  ) -> impl Future<Output = Result<(Self::ReadStream, SocketAddr), Self::Error>> + Send;
+}
+
+/// A trait for QUIC connectors. The stream layer will use this trait to
+/// establish a connection to a remote peer.
+#[auto_impl::auto_impl(Box, Arc)]
+pub trait QuicConnector: Send + Sync + 'static {
+  /// The error type.
+  type Error: std::error::Error + Send + Sync + 'static;
+
+  /// The bidirectional stream type.
+  type BiStream: QuicBiStream;
+
   /// The unidirectional write stream type.
   type WriteStream: QuicWriteStream;
-
-  /// Accepts a bidirectional connection from a remote peer.
-  fn accept_bi(&mut self) -> impl Future<Output = Result<Self::BiStream, Self::Error>> + Send;
 
   /// Opens a bidirectional connection to a remote peer.
   fn open_bi(
@@ -103,8 +160,11 @@ pub trait Listener {
     addr: SocketAddr,
   ) -> impl Future<Output = Result<Self::BiStream, Self::Error>> + Send;
 
-  /// Accepts a unidirectional read stream from a remote peer.
-  fn accept_uni(&mut self) -> impl Future<Output = Result<Self::ReadStream, Self::Error>> + Send;
+  fn open_bi_with_timeout(
+    &self,
+    addr: SocketAddr,
+    timeout: Duration,
+  ) -> impl Future<Output = Result<Self::BiStream, Self::Error>> + Send;
 
   /// Opens a unidirectional write stream to a remote peer.
   fn open_uni(
