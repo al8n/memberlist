@@ -43,6 +43,14 @@ pub use stream_layer::*;
 const DEFAULT_PORT: u16 = 7946;
 
 const MAX_MESSAGE_LEN_SIZE: usize = core::mem::size_of::<u32>();
+// compound tag + MAX_MESSAGE_LEN_SIZE
+const PACKET_HEADER_OVERHEAD: usize = 1 + MAX_MESSAGE_LEN_SIZE;
+const PACKET_OVERHEAD: usize = MAX_MESSAGE_LEN_SIZE;
+
+#[cfg(feature = "compression")]
+const COMPRESS_HEADER: usize = 1 + MAX_MESSAGE_LEN_SIZE;
+
+const MAX_INLINED_BYTES: usize = 64;
 
 /// Errors that can occur when using [`NetTransport`].
 #[derive(thiserror::Error)]
@@ -337,10 +345,6 @@ pub struct QuicTransport<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S:
   shutdown_tx: async_channel::Sender<()>,
 
   max_payload_size: usize,
-  packet_overhead: usize,
-  max_num_packets: usize,
-  packet_header_overhead: usize,
-  fix_packet_overhead: usize,
   _marker: PhantomData<W>,
 }
 
@@ -351,16 +355,16 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
 {
-  // fn fix_packet_overhead(&self) -> usize {
-  //   let mut overhead = self.opts.label.encoded_overhead();
+  fn fix_packet_overhead(&self) -> usize {
+    let mut overhead = self.opts.label.encoded_overhead();
 
-  //   #[cfg(feature = "compression")]
-  //   if self.opts.compressor.is_some() {
-  //     overhead += 1 + core::mem::size_of::<u32>();
-  //   }
+    #[cfg(feature = "compression")]
+    if self.opts.compressor.is_some() {
+      overhead += 1 + core::mem::size_of::<u32>();
+    }
 
-  //   overhead
-  // }
+    overhead
+  }
 
   #[inline]
   fn next_connector(&self) -> &S::Connector {
@@ -369,6 +373,21 @@ where
       .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
       % self.connectors.len();
     &self.connectors[idx]
+  }
+}
+
+struct Batch<I, A> {
+  num_packets: usize,
+  packets: TinyVec<Message<I, A>>,
+  estimate_encoded_len: usize,
+}
+
+impl<I, A> Batch<I, A> {
+  fn estimate_encoded_len(&self) -> usize {
+    if self.packets.len() == 1 {
+      return self.estimate_encoded_len - PACKET_HEADER_OVERHEAD - PACKET_OVERHEAD;
+    }
+    self.estimate_encoded_len
   }
 }
 
@@ -427,12 +446,12 @@ where
 
   #[inline(always)]
   fn packet_overhead(&self) -> usize {
-    self.packet_overhead
+    PACKET_OVERHEAD
   }
 
   #[inline(always)]
   fn packets_header_overhead(&self) -> usize {
-    self.fix_packet_overhead + self.packet_header_overhead
+    self.fix_packet_overhead() + PACKET_HEADER_OVERHEAD
   }
 
   fn blocked_address(
@@ -458,7 +477,56 @@ where
     ),
     Self::Error,
   > {
-    todo!()
+    let mut tag = [0u8; 2];
+    let mut readed = 0;
+    conn.peek_exact(&mut tag).await.map_err(|e| QuicTransportError::Stream(e.into()))?;
+    let mut stream_label = if tag[0] == Label::TAG {
+      let label_size = tag[1] as usize;
+      // consume peeked
+      conn.read_exact(&mut tag).await.unwrap();
+
+      let mut label = vec![0u8; label_size];
+      conn
+        .read_exact(&mut label)
+        .await
+        .map_err(|e| QuicTransportError::Stream(e.into()))?;
+      readed += 2 + label_size;
+      Label::try_from(Bytes::from(label)).map_err(|e| QuicTransportError::Label(e.into()))?
+    } else {
+      Label::empty()
+    };
+
+    let label = &self.opts.label;
+
+    if self.opts.skip_inbound_label_check {
+      if !stream_label.is_empty() {
+        tracing::error!(target: "memberlist.transport.quic.read_message", "unexpected double stream label header");
+        return Err(LabelError::duplicate(label.cheap_clone(), stream_label).into());
+      }
+
+      // Set this from config so that the auth data assertions work below.
+      stream_label = label.cheap_clone();
+    }
+
+    if stream_label.ne(&self.opts.label) {
+      tracing::error!(target: "memberlist.transport.quic.read_message", local_label=%label, remote_label=%stream_label, "discarding stream with unacceptable label");
+      return Err(LabelError::mismatch(label.cheap_clone(), stream_label).into());
+    }
+
+    let readed = stream_label.encoded_overhead();
+
+    #[cfg(not(feature = "compression"))]
+    return self
+      .read_message_without_compression(conn)
+      .await
+      .map(|(read, msg)| (readed + read, msg));
+
+
+    #[cfg(feature = "compression")]
+    self
+      .read_message_with_compression(conn)
+      .await
+      .map(|(read, msg)| (readed + read, msg))
   }
 
   async fn send_message(
@@ -474,7 +542,19 @@ where
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     packet: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(usize, std::time::Instant), Self::Error> {
-    todo!()
+    let start = Instant::now();
+    let encoded_size = W::encoded_len(&packet);
+    self
+      .send_batch(
+        *addr,
+        Batch {
+          packets: TinyVec::from(packet),
+          num_packets: 1,
+          estimate_encoded_len: self.packets_header_overhead() + PACKET_OVERHEAD + encoded_size,
+        },
+      )
+      .await
+      .map(|sent| (sent, start))
   }
 
   async fn send_packets(
@@ -482,7 +562,73 @@ where
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     packets: TinyVec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
   ) -> Result<(usize, std::time::Instant), Self::Error> {
-    todo!()
+    let start = Instant::now();
+
+    let mut batches =
+      SmallVec::<Batch<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>::new();
+    let packets_overhead = self.packets_header_overhead();
+    let mut estimate_batch_encoded_size = 0;
+    let mut current_packets_in_batch = 0;
+
+    // get how many packets a batch
+    for packet in packets.iter() {
+      let ep_len = W::encoded_len(packet);
+      // check if we reach the maximum packet size
+      let current_encoded_size = ep_len + estimate_batch_encoded_size;
+      if current_encoded_size >= self.max_payload_size() {
+        batches.push(Batch {
+          packets: TinyVec::with_capacity(current_packets_in_batch),
+          num_packets: current_packets_in_batch,
+          estimate_encoded_len: estimate_batch_encoded_size,
+        });
+        estimate_batch_encoded_size =
+          packets_overhead + PACKET_HEADER_OVERHEAD + PACKET_OVERHEAD + ep_len;
+        current_packets_in_batch = 1;
+      } else {
+        estimate_batch_encoded_size += PACKET_OVERHEAD + ep_len;
+        current_packets_in_batch += 1;
+      }
+    }
+
+    // consume the packets to small batches according to batch_offsets.
+
+    // if batch_offsets is empty, means that packets can be sent by one I/O call
+    if batches.is_empty() {
+      self
+        .send_batch(
+          *addr,
+          Batch {
+            num_packets: packets.len(),
+            packets,
+            estimate_encoded_len: estimate_batch_encoded_size,
+          },
+        )
+        .await
+        .map(|sent| (sent, start))
+    } else {
+      let mut batch_idx = 0;
+      for (idx, packet) in packets.into_iter().enumerate() {
+        let batch = &mut batches[batch_idx];
+        batch.packets.push(packet);
+        if batch.num_packets == idx - 1 {
+          batch_idx += 1;
+        }
+      }
+
+      let mut total_bytes_sent = 0;
+      let resps =
+        futures::future::join_all(batches.into_iter().map(|b| self.send_batch(*addr, b))).await;
+
+      for res in resps {
+        match res {
+          Ok(sent) => {
+            total_bytes_sent += sent;
+          }
+          Err(e) => return Err(e),
+        }
+      }
+      Ok((total_bytes_sent, start))
+    }
   }
 
   async fn dial_timeout(
@@ -679,6 +825,7 @@ where
           match incoming {
             Ok((recv_stream, remote_addr)) => {
               let start = Instant::now();
+              // TODO: set timeout for recv_stream
               let (read, msg) = match Self::handle_packet(
                 recv_stream,
                 &label,
@@ -727,9 +874,6 @@ where
     (usize, OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>),
     QuicTransportError<T::Resolver, S, T::Wire>,
   > {
-    const HEADER_SIZE: usize = 5;
-    const MAX_INLINED_BYTES: usize = 64;
-
     let mut tag = [0u8; 2];
     let mut readed = 0;
     recv_stream.peek_exact(&mut tag).await.map_err(|e| QuicTransportError::Stream(e.into()))?;
@@ -763,16 +907,8 @@ where
       return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
     }
 
-    let mut header = [0; MAX_MESSAGE_LEN_SIZE + 1];
-    recv_stream.read_exact(&mut header).await.map_err(|e| QuicTransportError::Stream(e.into()))?;
-    readed += HEADER_SIZE;
-
-    let tag = header[0];
-
-    let total_len = NetworkEndian::read_u32(&header[1..]) as usize;
-    if total_len == 0 {
-      return Ok((readed, OneOrMore::new()));
-    }
+    #[cfg(not(feature = "compression"))]
+    return Self::decode(&buf[..total_len]).map(|msgs| (readed, msgs));
 
     if total_len <= MAX_INLINED_BYTES {
       let mut buf = [0u8; MAX_INLINED_BYTES];
@@ -782,8 +918,7 @@ where
         .map_err(|e| QuicTransportError::Stream(e.into()))?;
       readed += total_len;
 
-      #[cfg(not(feature = "compression"))]
-      return Self::decode(&buf[..total_len]).map(|msgs| (readed, msgs));
+      
 
       #[cfg(feature = "compression")]
       {

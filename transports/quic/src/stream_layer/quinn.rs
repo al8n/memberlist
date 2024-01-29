@@ -212,6 +212,31 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
       .map(QuinnWriteStream)
       .map_err(Into::into)
   }
+
+  async fn open_uni_with_timeout(
+    &self,
+    addr: SocketAddr,
+    timeout: Duration,
+  ) -> Result<Self::WriteStream, Self::Error> {
+    let fut = async {
+      self
+        .endpoint
+        .connect_with(self.client_config.clone(), addr, &self.server_name)?
+        .await?
+        .open_uni()
+        .await
+        .map(QuinnWriteStream)
+        .map_err(Into::into)
+    };
+
+    if timeout == Duration::ZERO {
+      fut.await
+    } else {
+      R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::Timeout)?
+    }
+  }
 }
 
 /// [`QuinnReadStream`] is an implementation of [`QuicReadStream`] based on [`quinn`].

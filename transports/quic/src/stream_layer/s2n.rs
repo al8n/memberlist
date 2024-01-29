@@ -206,6 +206,30 @@ impl<R: Runtime> QuicConnector for S2nConnector<R> {
       .map(S2nWriteStream)
       .map_err(Into::into)
   }
+
+  async fn open_uni_with_timeout(
+    &self,
+    addr: SocketAddr,
+    timeout: Duration,
+  ) -> Result<Self::WriteStream, Self::Error> {
+    let fut = async {
+      self
+        .client
+        .connect(addr.into())
+        .await?
+        .open_send_stream()
+        .await
+        .map(S2nWriteStream)
+        .map_err(Into::into)
+    };
+    if timeout == Duration::ZERO {
+      fut.await
+    } else {
+      R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::Timeout)?
+    }
+  }
 }
 
 /// [`S2nBiStream`] is an implementation of [`QuicBiStream`] based on [`s2n_quic`].

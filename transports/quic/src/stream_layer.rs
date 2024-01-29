@@ -22,6 +22,7 @@ pub trait QuicError: std::error::Error + Send + Sync + 'static {
 
 /// A trait for QUIC read stream.
 #[auto_impl::auto_impl(Box)]
+// TODO: set timeout
 pub trait QuicReadStream: Send + Sync + 'static {
   /// The error type for the stream.
   type Error: QuicError;
@@ -43,6 +44,7 @@ pub trait QuicReadStream: Send + Sync + 'static {
 }
 
 /// A trait for QUIC write stream.
+// TODO: set timeout
 #[auto_impl::auto_impl(Box)]
 pub trait QuicWriteStream: Send + Sync + 'static {
   /// The error type for the stream.
@@ -182,5 +184,11 @@ pub trait QuicConnector: Send + Sync + 'static {
   fn open_uni(
     &self,
     addr: SocketAddr,
+  ) -> impl Future<Output = Result<Self::WriteStream, Self::Error>> + Send;
+
+  fn open_uni_with_timeout(
+    &self,
+    addr: SocketAddr,
+    timeout: Duration,
   ) -> impl Future<Output = Result<Self::WriteStream, Self::Error>> + Send;
 }
