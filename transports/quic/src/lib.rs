@@ -1,4 +1,6 @@
-mod stream_layer;
+#![allow(clippy::type_complexity)]
+#![forbid(unsafe_code)]
+
 use std::{
   marker::PhantomData,
   net::{IpAddr, SocketAddr},
@@ -23,9 +25,6 @@ use memberlist_core::{
 use memberlist_utils::{net::CIDRsPolicy, Label, LabelError, OneOrMore, SmallVec, TinyVec};
 use nodecraft::{resolver::AddressResolver, CheapClone, Id};
 use peekable::future::AsyncPeekExt;
-pub use stream_layer::*;
-
-mod io;
 
 /// Compress/decompress related.
 #[cfg(feature = "compression")]
@@ -34,6 +33,12 @@ pub mod compressor;
 
 #[cfg(feature = "compression")]
 use compressor::*;
+
+mod io;
+
+mod stream_layer;
+pub use stream_layer::*;
+
 
 const DEFAULT_PORT: u16 = 7946;
 
@@ -786,7 +791,7 @@ where
           return Self::decode(&buf[..total_len]).map(|msgs| (readed, msgs));
         }
 
-        return Self::decompress_and_decode(tag, &buf[..total_len]).map(|msgs| (readed, msgs));
+        Self::decompress_and_decode(tag, &buf[..total_len]).map(|msgs| (readed, msgs))
       }
     } else {
       let mut buf = vec![0; total_len];
@@ -805,7 +810,7 @@ where
           return Self::decode(&buf[..total_len]).map(|msgs| (readed, msgs));
         }
 
-        return Self::handle_compressed(tag, buf, offload_size).await.map(|msgs| (readed, msgs));
+        Self::handle_compressed(tag, buf, offload_size).await.map(|msgs| (readed, msgs))
       }
     }
   }

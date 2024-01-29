@@ -245,11 +245,12 @@ impl QuicReadStream for QuinnReadStream {
   }
 
   async fn close(&mut self) -> Result<(), Self::Error> {
-    // self
-    //   .0
-    //   .stop(VarInt::from_u32(0))
-    //   .map_err(|_| QuinnReadStreamError::Read(quinn::ReadError::UnknownStream))
-    todo!()
+    self
+      .0
+      .get_mut()
+      .1
+      .stop(VarInt::from_u32(0))
+      .map_err(|_| QuinnReadStreamError::Read(quinn::ReadError::UnknownStream))
   }
 }
 
@@ -285,7 +286,7 @@ pub struct QuinnBiStream<R> {
 
 impl<R> QuinnBiStream<R> {
   #[inline]
-  const fn new(send: SendStream, recv: RecvStream) -> Self {
+  fn new(send: SendStream, recv: RecvStream) -> Self {
     Self {
       send,
       recv: recv.peekable(),
@@ -376,10 +377,9 @@ impl<R: Runtime> QuicBiStream for QuinnBiStream<R> {
 
   async fn close(&mut self) -> Result<(), Self::Error> {
     self.send.finish().await.map_err(QuinnBiStreamError::from)?;
-    // self.recv.stop(VarInt::from_u32(0)).map_err(|_| {
-    //   QuinnBiStreamError::Read(QuinnReadStreamError::Read(quinn::ReadError::UnknownStream)).into()
-    // })
-    todo!()
+    self.recv.get_mut().1.stop(VarInt::from_u32(0)).map_err(|_| {
+      QuinnBiStreamError::Read(QuinnReadStreamError::Read(quinn::ReadError::UnknownStream)).into()
+    })
   }
 }
 

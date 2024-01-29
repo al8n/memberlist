@@ -4,6 +4,7 @@ use agnostic::Runtime;
 use bytes::Bytes;
 use futures::{AsyncReadExt, AsyncWriteExt, Future};
 use memberlist_core::transport::TimeoutableStream;
+use peekable::future::{AsyncPeekExt, AsyncPeekable};
 use s2n_quic::{
   stream::{BidirectionalStream, ReceiveStream, SendStream},
   Client, Server,
@@ -140,7 +141,7 @@ impl<R: Runtime> QuicUniAcceptor for S2nUniAcceptor<R> {
         .map_err(Into::into)
         .and_then(|conn| {
           conn
-            .map(|conn| (S2nReadStream(conn), remote))
+            .map(|conn| (S2nReadStream(conn.peekable()), remote))
             .ok_or(Self::Error::Closed)
         })
     };
@@ -209,16 +210,19 @@ impl<R: Runtime> QuicConnector for S2nConnector<R> {
 
 /// [`S2nBiStream`] is an implementation of [`QuicBiStream`] based on [`s2n_quic`].
 pub struct S2nBiStream<R> {
-  stream: BidirectionalStream,
+  recv_stream: AsyncPeekable<ReceiveStream>,
+  send_stream: SendStream,
   read_timeout: Option<Duration>,
   write_timeout: Option<Duration>,
   _marker: PhantomData<R>,
 }
 
 impl<R> S2nBiStream<R> {
-  const fn new(stream: BidirectionalStream) -> Self {
+  fn new(stream: BidirectionalStream) -> Self {
+    let (recv, send) = stream.split();
     Self {
-      stream,
+      recv_stream: recv.peekable(),
+      send_stream: send,
       read_timeout: None,
       write_timeout: None,
       _marker: PhantomData,
@@ -250,8 +254,8 @@ impl<R: Runtime> QuicBiStream for S2nBiStream<R> {
   async fn write_all(&mut self, src: Bytes) -> Result<usize, Self::Error> {
     let len = src.len();
     let fut = async {
-      self.stream.write_all(&src).await?;
-      self.stream.flush().await.map(|_| len).map_err(Into::into)
+      self.send_stream.write_all(&src).await?;
+      self.send_stream.flush().await.map(|_| len).map_err(Into::into)
     };
 
     match self.write_timeout {
@@ -263,7 +267,7 @@ impl<R: Runtime> QuicBiStream for S2nBiStream<R> {
   }
 
   async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-    let fut = async { self.stream.read(buf).await.map_err(Into::into) };
+    let fut = async { self.recv_stream.read(buf).await.map_err(Into::into) };
 
     match self.read_timeout {
       Some(timeout) => R::timeout(timeout, fut)
@@ -274,7 +278,29 @@ impl<R: Runtime> QuicBiStream for S2nBiStream<R> {
   }
 
   async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
-    let fut = async { self.stream.read_exact(buf).await.map_err(Into::into) };
+    let fut = async { self.recv_stream.read_exact(buf).await.map_err(Into::into) };
+
+    match self.read_timeout {
+      Some(timeout) => R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
+      None => fut.await.map_err(Into::into),
+    }
+  }
+
+  async fn peek(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+    let fut = async { self.recv_stream.peek(buf).await.map_err(Into::into) };
+
+    match self.read_timeout {
+      Some(timeout) => R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
+      None => fut.await.map_err(Into::into),
+    }
+  }
+
+  async fn peek_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
+    let fut = async { self.recv_stream.peek_exact(buf).await.map_err(Into::into) };
 
     match self.read_timeout {
       Some(timeout) => R::timeout(timeout, fut)
@@ -285,12 +311,12 @@ impl<R: Runtime> QuicBiStream for S2nBiStream<R> {
   }
 
   async fn close(&mut self) -> Result<(), Self::Error> {
-    self.stream.close().await.map_err(Into::into)
+    self.send_stream.close().await.map_err(Into::into)
   }
 }
 
 /// [`S2nReadStream`] is an implementation of [`QuicReadStream`] based on [`s2n_quic`].
-pub struct S2nReadStream(ReceiveStream);
+pub struct S2nReadStream(AsyncPeekable<ReceiveStream>);
 
 impl QuicReadStream for S2nReadStream {
   type Error = S2nError;
@@ -301,6 +327,14 @@ impl QuicReadStream for S2nReadStream {
 
   async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
     self.0.read_exact(buf).await.map_err(Into::into)
+  }
+
+  async fn peek(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+    self.0.peek(buf).await.map_err(Into::into)
+  }
+
+  async fn peek_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
+    self.0.peek_exact(buf).await.map_err(Into::into)
   }
 
   async fn close(&mut self) -> Result<(), Self::Error> {

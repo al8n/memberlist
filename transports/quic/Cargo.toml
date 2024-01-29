@@ -40,7 +40,7 @@ memberlist-core.workspace = true
 memberlist-utils = { workspace = true, features = ["ipnet"] }
 nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
 pin-project.workspace = true
-peekable = { version = "0.1", features = ["future"] }
+peekable = { version = "0.2", features = ["future"] }
 tracing.workspace = true
 thiserror.workspace = true
 smol_str.workspace = true
