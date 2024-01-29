@@ -1,18 +1,53 @@
 use bytes::Bytes;
 
+use super::*;
+
 pub(super) const COMPRESS_TAG: core::ops::RangeInclusive<u8> = 86..=126;
+
+impl<A, S, W> From<UnknownCompressor> for super::QuicTransportError<A, S, W>
+where
+  A: AddressResolver,
+  S: StreamLayer,
+  W: Wire,
+{
+  fn from(err: UnknownCompressor) -> Self {
+    Self::Compressor(err.into())
+  }
+}
+
+impl<A, S, W> From<CompressError> for super::QuicTransportError<A, S, W>
+where
+  A: AddressResolver,
+  S: StreamLayer,
+  W: Wire,
+{
+  fn from(err: CompressError) -> Self {
+    Self::Compressor(err.into())
+  }
+}
+
+impl<A, S, W> From<DecompressError> for super::QuicTransportError<A, S, W>
+where
+  A: AddressResolver,
+  S: StreamLayer,
+  W: Wire,
+{
+  fn from(err: DecompressError) -> Self {
+    Self::Compressor(err.into())
+  }
+}
 
 /// Compress/Decompress errors.
 #[derive(Debug, thiserror::Error)]
 pub enum CompressorError {
   /// Compress errors
-  #[error("compressor: {0}")]
+  #[error(transparent)]
   Compress(#[from] CompressError),
   /// Decompress errors
-  #[error("compressor: {0}")]
+  #[error(transparent)]
   Decompress(#[from] DecompressError),
   /// Unknown compressor
-  #[error("compressor: {0}")]
+  #[error(transparent)]
   UnknownCompressor(#[from] UnknownCompressor),
 }
 
@@ -66,7 +101,7 @@ const LZW_LIT_WIDTH: u8 = 8;
 #[derive(Debug, thiserror::Error)]
 pub enum CompressError {
   /// LZW compress errors
-  #[error("{0}")]
+  #[error(transparent)]
   Lzw(#[from] weezl::LzwError),
 }
 
@@ -74,7 +109,7 @@ pub enum CompressError {
 #[derive(Debug, thiserror::Error)]
 pub enum DecompressError {
   /// LZW decompress errors
-  #[error("{0}")]
+  #[error(transparent)]
   Lzw(#[from] weezl::LzwError),
 }
 

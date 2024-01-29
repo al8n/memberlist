@@ -32,6 +32,12 @@ pub trait QuicReadStream: Send + Sync + 'static {
   /// Receives exact data from the remote peer.
   fn read_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
+  /// Peek data from the remote peer.
+  fn peek(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, Self::Error>> + Send;
+
+  /// Peek exact data from the remote peer.
+  fn peek_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
   /// Closes the stream.
   fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
@@ -63,6 +69,12 @@ pub trait QuicBiStream: TimeoutableStream + Send + Sync + 'static {
 
   /// Receives exact data from the remote peer.
   fn read_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+  /// Peek data from the remote peer.
+  fn peek(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, Self::Error>> + Send;
+
+  /// Peek exact data from the remote peer.
+  fn peek_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Closes the stream.
   fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;

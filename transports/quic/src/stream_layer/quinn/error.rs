@@ -99,6 +99,10 @@ pub enum QuinnReadStreamError {
   /// Error reading exact data from the stream.
   #[error(transparent)]
   ReadExact(#[from] quinn::ReadExactError),
+
+  /// IO error.
+  #[error(transparent)]
+  IO(#[from] std::io::Error),
 }
 
 impl QuicError for QuinnReadStreamError {
@@ -109,6 +113,7 @@ impl QuicError for QuinnReadStreamError {
         quinn::ReadExactError::FinishedEarly => true,
         quinn::ReadExactError::ReadError(err) => is_read_error_remote_failure(err),
       },
+      Self::IO(_) => true,
     }
   }
 }
