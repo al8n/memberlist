@@ -249,7 +249,4 @@ pub trait Transport: Sized + Send + Sync + 'static {
 
   /// Shutdown the transport
   fn shutdown(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Blocking shutdown the transport
-  fn block_shutdown(&self) -> Result<(), Self::Error>;
 }

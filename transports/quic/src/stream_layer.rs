@@ -121,12 +121,17 @@ pub trait StreamLayer: Sized + Send + Sync + 'static {
   /// Max unacknowledged data in bytes that may be send on a single stream.
   fn max_stream_data(&self) -> usize;
 
-  /// Binds to a local address.
+  /// Binds to a local address. The `BiAcceptor` and `UniAcceptor` must bind to
+  /// the same address.
   fn bind(
     &self,
     addr: SocketAddr,
-  ) -> impl Future<Output = std::io::Result<((Self::BiAcceptor, Self::UniAcceptor), Self::Connector)>>
-       + Send;
+  ) -> impl Future<
+    Output = std::io::Result<(
+      (SocketAddr, Self::BiAcceptor, Self::UniAcceptor),
+      Self::Connector,
+    )>,
+  > + Send;
 }
 
 /// A trait for QUIC acceptors. The stream layer will use this trait to
@@ -143,6 +148,9 @@ pub trait QuicBiAcceptor: Send + Sync + 'static {
   fn accept_bi(
     &self,
   ) -> impl Future<Output = Result<(Self::BiStream, SocketAddr), Self::Error>> + Send;
+
+  /// Returns the local address.
+  fn local_addr(&self) -> SocketAddr;
 }
 
 /// A trait for QUIC acceptors. The stream layer will use this trait to
@@ -159,6 +167,9 @@ pub trait QuicUniAcceptor: Send + Sync + 'static {
   fn accept_uni(
     &self,
   ) -> impl Future<Output = Result<(Self::ReadStream, SocketAddr), Self::Error>> + Send;
+
+  /// Returns the local address.
+  fn local_addr(&self) -> SocketAddr;
 }
 
 /// A trait for QUIC connectors. The stream layer will use this trait to
@@ -197,4 +208,6 @@ pub trait QuicConnector: Send + Sync + 'static {
     addr: SocketAddr,
     timeout: Duration,
   ) -> impl Future<Output = Result<Self::WriteStream, Self::Error>> + Send;
+
+  fn close(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }

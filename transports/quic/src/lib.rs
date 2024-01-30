@@ -14,17 +14,21 @@ use std::{
 use agnostic::Runtime;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
-use futures::{AsyncReadExt, FutureExt};
+use futures::FutureExt;
 use memberlist_core::{
   transport::{
-    stream::{PacketProducer, PacketSubscriber, StreamProducer, StreamSubscriber},
+    stream::{
+      packet_stream, promised_stream, PacketProducer, PacketSubscriber, StreamProducer,
+      StreamSubscriber,
+    },
     TimeoutableReadStream, Transport, TransportError, Wire,
   },
   types::{Message, Packet},
 };
 use memberlist_utils::{net::CIDRsPolicy, Label, LabelError, OneOrMore, SmallVec, TinyVec};
 use nodecraft::{resolver::AddressResolver, CheapClone, Id};
-use peekable::future::AsyncPeekExt;
+use pollster::FutureExt as _;
+use wg::AsyncWaitGroup;
 
 /// Compress/decompress related.
 #[cfg(feature = "compression")]
@@ -44,6 +48,7 @@ pub use stream_layer::*;
 const DEFAULT_PORT: u16 = 7946;
 
 const MAX_MESSAGE_LEN_SIZE: usize = core::mem::size_of::<u32>();
+const MAX_MESSAGE_SIZE: usize = u32::MAX as usize;
 // compound tag + MAX_MESSAGE_LEN_SIZE
 const PACKET_HEADER_OVERHEAD: usize = 1 + 1 + MAX_MESSAGE_LEN_SIZE;
 const PACKET_OVERHEAD: usize = MAX_MESSAGE_LEN_SIZE;
@@ -65,13 +70,158 @@ pub struct QuicTransport<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S:
   connectors: SmallVec<S::Connector>,
   round_robin: AtomicUsize,
 
-  // wg: AsyncWaitGroup,
+  wg: AsyncWaitGroup,
   resolver: Arc<A>,
-  // shutdown: Arc<AtomicBool>,
+  shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
 
   max_payload_size: usize,
   _marker: PhantomData<W>,
+}
+
+impl<I, A, S, W> QuicTransport<I, A, S, W>
+where
+  I: Id,
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  S: StreamLayer,
+  W: Wire<Id = I, Address = A::ResolvedAddress>,
+{
+  /// Creates a new quic transport.
+  pub async fn new(
+    resolver: A,
+    stream_layer: S,
+    opts: QuicTransportOptions<I, A>,
+  ) -> Result<Self, QuicTransportError<A, S, W>> {
+    match opts.bind_port {
+      Some(0) | None => Self::retry(resolver, stream_layer, 10, opts).await,
+      _ => Self::retry(resolver, stream_layer, 1, opts).await,
+    }
+  }
+
+  async fn new_in(
+    resolver: Arc<A>,
+    stream_layer: Arc<S>,
+    opts: Arc<QuicTransportOptions<I, A>>,
+  ) -> Result<Self, QuicTransportError<A, S, W>> {
+    // If we reject the empty list outright we can assume that there's at
+    // least one listener of each type later during operation.
+    if opts.bind_addresses.is_empty() {
+      return Err(QuicTransportError::EmptyBindAddresses);
+    }
+
+    let (stream_tx, stream_rx) = promised_stream::<Self>();
+    let (packet_tx, packet_rx) = packet_stream::<Self>();
+    let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
+
+    let mut connectors = SmallVec::with_capacity(opts.bind_addresses.len());
+    let mut acceptors = SmallVec::with_capacity(opts.bind_addresses.len());
+    let bind_port = opts.bind_port.unwrap_or(0);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    for &addr in opts.bind_addresses.iter() {
+      let addr = SocketAddr::new(addr, bind_port);
+      let (acceptor, connector) = match stream_layer.bind(addr).await {
+        Ok(res) => res,
+        Err(e) => return Err(QuicTransportError::ListenPromised(addr, e)),
+      };
+      connectors.push(connector);
+      acceptors.push(acceptor);
+    }
+
+    let wg = AsyncWaitGroup::new();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let endpoint1_addr = acceptors[0].0;
+
+    // Fire them up start that we've been able to create them all.
+    // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
+    // udp and tcp listener can
+    for (local_addr, bi_acceptor, uni_acceptor) in acceptors {
+      Processor::<A, Self, S> {
+        wg: wg.clone(),
+        bi: bi_acceptor,
+        uni: uni_acceptor,
+        packet_tx: packet_tx.clone(),
+        stream_tx: stream_tx.clone(),
+        label: opts.label.clone(),
+        local_addr,
+        shutdown: shutdown.clone(),
+        timeout: opts.timeout,
+        shutdown_rx: shutdown_rx.clone(),
+        skip_inbound_label_check: opts.skip_inbound_label_check,
+        #[cfg(feature = "compression")]
+        offload_size: opts.offload_size,
+        #[cfg(feature = "metrics")]
+        metric_labels: opts.metric_labels.clone().unwrap_or_default(),
+      }
+      .run();
+    }
+
+    // find final advertise address
+    let advertise_addr = match opts.advertise_address {
+      Some(addr) => addr,
+      None => {
+        let addr = if opts.bind_addresses[0].is_unspecified() {
+          local_ip_address::local_ip().map_err(|e| match e {
+            local_ip_address::Error::LocalIpAddressNotFound => QuicTransportError::NoPrivateIP,
+            e => QuicTransportError::NoInterfaceAddresses(e),
+          })?
+        } else {
+          endpoint1_addr.ip()
+        };
+
+        // Use the port we are bound to.
+        SocketAddr::new(addr, endpoint1_addr.port())
+      }
+    };
+
+    Ok(Self {
+      advertise_addr,
+      max_payload_size: MAX_MESSAGE_SIZE.min(stream_layer.max_stream_data()),
+      opts,
+      packet_rx,
+      stream_rx,
+      wg,
+      shutdown,
+      connectors,
+      round_robin: AtomicUsize::new(0),
+
+      stream_layer,
+      resolver,
+      shutdown_tx,
+      _marker: PhantomData,
+    })
+  }
+
+  async fn retry(
+    resolver: A,
+    stream_layer: S,
+    limit: usize,
+    opts: QuicTransportOptions<I, A>,
+  ) -> Result<Self, QuicTransportError<A, S, W>> {
+    let mut i = 0;
+    let resolver = Arc::new(resolver);
+    let stream_layer = Arc::new(stream_layer);
+    let opts = Arc::new(opts);
+    loop {
+      let transport = { Self::new_in(resolver.clone(), stream_layer.clone(), opts.clone()).await };
+
+      match transport {
+        Ok(t) => {
+          if let Some(0) | None = opts.bind_port {
+            let port = t.advertise_addr.port();
+            tracing::warn!(target:  "memberlist.transport.quic", "using dynamic bind port {port}");
+          }
+          return Ok(t);
+        }
+        Err(e) => {
+          tracing::debug!(target="memberlist.transport.quic", err=%e, "fail to create transport");
+          if i == limit - 1 {
+            return Err(e);
+          }
+          i += 1;
+        }
+      }
+    }
+  }
 }
 
 impl<I, A, S, W> QuicTransport<I, A, S, W>
@@ -390,11 +540,35 @@ where
   }
 
   async fn shutdown(&self) -> Result<(), Self::Error> {
-    todo!()
-  }
+    if self.shutdown_tx.is_closed() {
+      return Ok(());
+    }
 
-  fn block_shutdown(&self) -> Result<(), Self::Error> {
-    todo!()
+    // This will avoid log spam about errors when we shut down.
+    self.shutdown.store(true, Ordering::SeqCst);
+    self.shutdown_tx.close();
+
+    for connector in self.connectors.iter() {
+      connector
+        .close()
+        .await
+        .map_err(|e| Self::Error::Stream(e.into()));
+    }
+
+    // Block until all the listener threads have died.
+    self.wg.wait().await;
+    Ok(())
+  }
+}
+
+impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer, W> Drop
+  for QuicTransport<I, A, S, W>
+{
+  fn drop(&mut self) {
+    if self.shutdown_tx.is_closed() {
+      return;
+    }
+    let _ = self.shutdown().block_on();
   }
 }
 
@@ -415,6 +589,7 @@ struct Processor<
 
   skip_inbound_label_check: bool,
   timeout: Option<Duration>,
+  wg: AsyncWaitGroup,
 
   #[cfg(feature = "compression")]
   offload_size: usize,
@@ -429,7 +604,7 @@ where
   T: Transport<Resolver = A, Stream = S::Stream>,
   S: StreamLayer,
 {
-  async fn run(self) {
+  fn run(self) {
     let Self {
       bi,
       uni,
@@ -441,34 +616,38 @@ where
       label,
       skip_inbound_label_check,
       timeout,
+      wg,
       #[cfg(feature = "compression")]
       offload_size,
       #[cfg(feature = "metrics")]
       metric_labels,
     } = self;
 
-    <T::Runtime as Runtime>::spawn_detach(Self::listen_packet(
-      local_addr,
-      label,
-      uni,
-      packet_tx,
-      shutdown.clone(),
-      shutdown_rx.clone(),
-      skip_inbound_label_check,
-      timeout,
-      #[cfg(feature = "compression")]
-      offload_size,
-      #[cfg(feature = "metrics")]
-      metric_labels,
-    ));
+    let pwg = wg.add(1);
+    <T::Runtime as Runtime>::spawn_detach(async move {
+      Self::listen_packet(
+        local_addr,
+        label,
+        uni,
+        packet_tx,
+        shutdown.clone(),
+        shutdown_rx.clone(),
+        skip_inbound_label_check,
+        timeout,
+        #[cfg(feature = "compression")]
+        offload_size,
+        #[cfg(feature = "metrics")]
+        metric_labels,
+      )
+      .await;
+      pwg.done();
+    });
 
-    <T::Runtime as Runtime>::spawn_detach(Self::listen_stream(
-      local_addr,
-      bi,
-      stream_tx,
-      shutdown,
-      shutdown_rx,
-    ));
+    let swg = wg.add(1);
+    <T::Runtime as Runtime>::spawn_detach(async move {
+      Self::listen_stream(local_addr, bi, stream_tx, shutdown, shutdown_rx).await;
+      swg.done();
+    });
   }
 
   async fn listen_stream(

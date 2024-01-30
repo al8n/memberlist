@@ -1080,6 +1080,10 @@ where
   }
 
   async fn shutdown(&self) -> Result<(), Self::Error> {
+    if self.shutdown_tx.is_closed() {
+      return Ok(());
+    }
+
     // This will avoid log spam about errors when we shut down.
     self.shutdown.store(true, Ordering::SeqCst);
     self.shutdown_tx.close();
@@ -1088,16 +1092,19 @@ where
     self.wg.wait().await;
     Ok(())
   }
+}
 
-  fn block_shutdown(&self) -> Result<(), Self::Error> {
+impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer, W> Drop
+  for NetTransport<I, A, S, W>
+{
+  fn drop(&mut self) {
     use pollster::FutureExt as _;
-    // This will avoid log spam about errors when we shut down.
-    self.shutdown.store(true, Ordering::SeqCst);
-    self.shutdown_tx.close();
-    let wg = self.wg.clone();
 
-    wg.wait().block_on();
-    Ok(())
+    if self.shutdown_tx.is_closed() {
+      return;
+    }
+
+    let _ = self.shutdown().block_on();
   }
 }
 

@@ -4,8 +4,6 @@ members = [
   "memberlist",
   "transports/net",
   "transports/quic",
-  "transports/quinn",
-  "transports/s2n",
   "utils",
   # "js",
   # "nodejs",
@@ -52,6 +50,7 @@ transformable = "0.1.6"
 thiserror = "1"
 tracing = "0.1"
 viewit = "0.1.5"
+wg = { version = "0.4", features = ["async"] }
 
 memberlist-core = { path = "core", default-features = false }
 memberlist-net = { path = "transports/net", default-features = false }

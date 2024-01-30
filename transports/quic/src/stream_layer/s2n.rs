@@ -60,16 +60,22 @@ where
   async fn bind(
     &self,
     addr: SocketAddr,
-  ) -> io::Result<((Self::BiAcceptor, Self::UniAcceptor), Self::Connector)> {
+  ) -> io::Result<(
+    (SocketAddr, Self::BiAcceptor, Self::UniAcceptor),
+    Self::Connector,
+  )> {
     let srv = self.server_creator.build(addr).await?;
     let client = self.client_creator.build(addr).await?;
+    let local_addr = srv.local_addr()?;
     let (bi, uni) = futures::lock::BiLock::new(srv);
     let bi = Self::BiAcceptor {
       server: bi,
+      local_addr,
       _marker: PhantomData,
     };
     let uni = Self::UniAcceptor {
       server: uni,
+      local_addr,
       _marker: PhantomData,
     };
 
@@ -77,13 +83,14 @@ where
       client,
       _marker: PhantomData,
     };
-    Ok(((bi, uni), connector))
+    Ok(((local_addr, bi, uni), connector))
   }
 }
 
 /// [`S2nBiAcceptor`] is an implementation of [`QuicBiAcceptor`] based on [`s2n_quic`].
 pub struct S2nBiAcceptor<R> {
   server: futures::lock::BiLock<Server>,
+  local_addr: SocketAddr,
   _marker: PhantomData<R>,
 }
 
@@ -106,11 +113,16 @@ impl<R: Runtime> QuicBiAcceptor for S2nBiAcceptor<R> {
           .ok_or(Self::Error::Closed)
       })
   }
+
+  fn local_addr(&self) -> SocketAddr {
+    self.local_addr
+  }
 }
 
 /// [`S2nUniAcceptor`] is an implementation of [`QuicUniAcceptor`] based on [`s2n_quic`].
 pub struct S2nUniAcceptor<R> {
   server: futures::lock::BiLock<Server>,
+  local_addr: SocketAddr,
   _marker: PhantomData<R>,
 }
 
@@ -132,6 +144,10 @@ impl<R: Runtime> QuicUniAcceptor for S2nUniAcceptor<R> {
           .map(|conn| (S2nReadStream::new(conn.peekable()), remote))
           .ok_or(Self::Error::Closed)
       })
+  }
+
+  fn local_addr(&self) -> SocketAddr {
+    self.local_addr
   }
 }
 
@@ -212,6 +228,11 @@ impl<R: Runtime> QuicConnector for S2nConnector<R> {
         .await
         .map_err(|_| Self::Error::Timeout)?
     }
+  }
+
+  async fn close(&self) -> Result<(), Self::Error> {
+    // TODO: figure out how to close a client
+    Ok(())
   }
 }
 

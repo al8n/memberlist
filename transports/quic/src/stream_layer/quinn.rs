@@ -41,7 +41,10 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
   async fn bind(
     &self,
     addr: SocketAddr,
-  ) -> std::io::Result<((Self::BiAcceptor, Self::UniAcceptor), Self::Connector)> {
+  ) -> std::io::Result<(
+    (SocketAddr, Self::BiAcceptor, Self::UniAcceptor),
+    Self::Connector,
+  )> {
     let server_name = self.opts.server_name.clone();
 
     let client_config = self.opts.client_config.clone();
@@ -59,15 +62,17 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
       Arc::new(<R::Net as Net>::Quinn::default()),
     )?);
 
+    let local_addr = endpoint.local_addr()?;
+
     let bi_acceptor = Self::BiAcceptor {
       endpoint: endpoint.clone(),
-      handshake_timeout: self.opts.handshake_timeout,
+      local_addr,
       _marker: PhantomData,
     };
 
     let uni_acceptor = Self::UniAcceptor {
       endpoint: endpoint.clone(),
-      handshake_timeout: self.opts.handshake_timeout,
+      local_addr,
       _marker: PhantomData,
     };
 
@@ -77,14 +82,14 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
       client_config,
       _marker: PhantomData,
     };
-    Ok(((bi_acceptor, uni_acceptor), connector))
+    Ok(((local_addr, bi_acceptor, uni_acceptor), connector))
   }
 }
 
 /// [`QuinnAcceptor`] is an implementation of [`QuicAcceptor`] based on [`quinn`].
 pub struct QuinnAcceptor<R> {
   endpoint: Arc<Endpoint>,
-  handshake_timeout: Duration,
+  local_addr: SocketAddr,
   _marker: PhantomData<R>,
 }
 
@@ -92,7 +97,7 @@ impl<R> Clone for QuinnAcceptor<R> {
   fn clone(&self) -> Self {
     Self {
       endpoint: self.endpoint.clone(),
-      handshake_timeout: self.handshake_timeout,
+      local_addr: self.local_addr,
       _marker: PhantomData,
     }
   }
@@ -117,6 +122,10 @@ impl<R: Runtime> QuicBiAcceptor for QuinnAcceptor<R> {
       .map(|(send, recv)| (QuinnBiStream::new(send, recv), remote))
       .map_err(Into::into)
   }
+
+  fn local_addr(&self) -> SocketAddr {
+    self.local_addr
+  }
 }
 
 impl<R: Runtime> QuicUniAcceptor for QuinnAcceptor<R> {
@@ -136,6 +145,10 @@ impl<R: Runtime> QuicUniAcceptor for QuinnAcceptor<R> {
       .await
       .map(|s| (QuinnReadStream::new(s.peekable()), remote))
       .map_err(Into::into)
+  }
+
+  fn local_addr(&self) -> SocketAddr {
+    self.local_addr
   }
 }
 
@@ -222,6 +235,11 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
         .await
         .map_err(|_| Self::Error::connection_timeout())?
     }
+  }
+
+  async fn close(&self) -> Result<(), Self::Error> {
+    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close connector");
+    Ok(())
   }
 }
 

@@ -1,11 +1,7 @@
 use super::*;
 
 /// Used to configure a net transport.
-#[viewit::viewit(
-  vis_all = "pub(crate)",
-  getters(vis_all = "pub"),
-  setters(vis_all = "pub", prefix = "with")
-)]
+#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(

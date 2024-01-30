@@ -41,10 +41,12 @@ memberlist-utils = { workspace = true, features = ["ipnet"] }
 nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
 pin-project.workspace = true
 peekable = { version = "0.2", features = ["future"] }
+pollster = "0.3"
 tracing.workspace = true
 thiserror.workspace = true
 smol_str.workspace = true
 viewit.workspace = true
+wg.workspace = true
 
 # serde
 serde = { workspace = true, optional = true }

@@ -37,22 +37,6 @@ pub struct Options {
   )]
   server_name: SmolStr,
 
-  /// Timeout for the initial handshake when establishing a connection.
-  /// The actual timeout is the minimum of this and the [`Options::max_idle_timeout`].
-  #[viewit(
-    getter(
-      style = "move",
-      const,
-      attrs(
-        doc = "Gets the initial handshake when establishing a connection. The actual timeout is the minimum of this and the [`Options::max_idle_timeout`]."
-      )
-    ),
-    setter(attrs(
-      doc = "Sets the initial handshake when establishing a connection. The actual timeout is the minimum of this and the [`Options::max_idle_timeout`]."
-    ))
-  )]
-  handshake_timeout: Duration,
-
   /// Maximum duration of inactivity in ms to accept before timing out the connection.
   #[viewit(
     getter(
@@ -173,7 +157,6 @@ impl Options {
       client_tls_config: Arc::new(client_tls_config),
       server_tls_config: Arc::new(server_tls_config),
       endpoint_config,
-      handshake_timeout: Duration::from_secs(5),
       max_idle_timeout: 10 * 1000,
       max_concurrent_stream_limit: 256,
       keep_alive_interval: Duration::from_secs(5),
@@ -196,7 +179,6 @@ pub(super) struct QuinnOptions {
   endpoint_config: quinn::EndpointConfig,
   max_stream_data: usize,
   max_connection_data: usize,
-  handshake_timeout: Duration,
 }
 
 impl From<Options> for QuinnOptions {
@@ -211,7 +193,6 @@ impl From<Options> for QuinnOptions {
       max_connection_data,
       max_stream_data,
       endpoint_config,
-      handshake_timeout,
       mtu_discovery_config,
     } = config;
     let mut transport = quinn::TransportConfig::default();
@@ -244,7 +225,6 @@ impl From<Options> for QuinnOptions {
       endpoint_config,
       max_stream_data: max_stream_data as usize,
       max_connection_data: max_connection_data as usize,
-      handshake_timeout,
     }
   }
 }
