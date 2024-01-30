@@ -1,7 +1,9 @@
 use std::{future::Future, net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
-use memberlist_core::transport::TimeoutableStream;
+use memberlist_core::transport::{
+  TimeoutableReadStream, TimeoutableStream, TimeoutableWriteStream,
+};
 
 /// QUIC stream layer based on [`quinn`](::quinn).
 #[cfg(feature = "quinn")]
@@ -22,8 +24,7 @@ pub trait QuicError: std::error::Error + Send + Sync + 'static {
 
 /// A trait for QUIC read stream.
 #[auto_impl::auto_impl(Box)]
-// TODO: set timeout
-pub trait QuicReadStream: Send + Sync + 'static {
+pub trait QuicReadStream: TimeoutableReadStream + Send + Sync + 'static {
   /// The error type for the stream.
   type Error: QuicError;
 
@@ -44,14 +45,16 @@ pub trait QuicReadStream: Send + Sync + 'static {
 }
 
 /// A trait for QUIC write stream.
-// TODO: set timeout
 #[auto_impl::auto_impl(Box)]
-pub trait QuicWriteStream: Send + Sync + 'static {
+pub trait QuicWriteStream: TimeoutableWriteStream + Send + Sync + 'static {
   /// The error type for the stream.
   type Error: QuicError;
 
   /// Sends data to the remote peer.
   fn write_all(&mut self, src: Bytes) -> impl Future<Output = Result<usize, Self::Error>> + Send;
+
+  /// Flushes the stream.
+  fn flush(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Closes the stream.
   fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
@@ -65,6 +68,9 @@ pub trait QuicBiStream: TimeoutableStream + Send + Sync + 'static {
 
   /// Sends data to the remote peer.
   fn write_all(&mut self, src: Bytes) -> impl Future<Output = Result<usize, Self::Error>> + Send;
+
+  /// Flushes the stream.
+  fn flush(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Receives data from the remote peer.
   fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, Self::Error>> + Send;

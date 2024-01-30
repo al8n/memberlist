@@ -15,7 +15,7 @@ use futures::{AsyncRead, AsyncWrite};
 pub use futures_rustls::{
   client, pki_types::ServerName, rustls, server, TlsAcceptor, TlsConnector,
 };
-use memberlist_core::transport::TimeoutableStream;
+use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 use rustls::{client::danger::ServerCertVerifier, SignatureScheme};
 
 use super::{Listener, PromisedStream, StreamLayer};
@@ -224,29 +224,7 @@ impl<R: Runtime> AsyncWrite for TlsStream<R> {
   }
 }
 
-impl<R: Runtime> TimeoutableStream for TlsStream<R> {
-  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
-    match self {
-      Self {
-        stream: TlsStreamKind::Client(s),
-      } => s.get_ref().0.set_write_timeout(timeout),
-      Self {
-        stream: TlsStreamKind::Server(s),
-      } => s.get_ref().0.set_write_timeout(timeout),
-    }
-  }
-
-  fn write_timeout(&self) -> Option<Duration> {
-    match self {
-      Self {
-        stream: TlsStreamKind::Client(s),
-      } => s.get_ref().0.write_timeout(),
-      Self {
-        stream: TlsStreamKind::Server(s),
-      } => s.get_ref().0.write_timeout(),
-    }
-  }
-
+impl<R: Runtime> TimeoutableReadStream for TlsStream<R> {
   fn set_read_timeout(&mut self, timeout: Option<Duration>) {
     match self {
       Self {
@@ -266,6 +244,30 @@ impl<R: Runtime> TimeoutableStream for TlsStream<R> {
       Self {
         stream: TlsStreamKind::Server(s),
       } => s.get_ref().0.read_timeout(),
+    }
+  }
+}
+
+impl<R: Runtime> TimeoutableWriteStream for TlsStream<R> {
+  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
+    match self {
+      Self {
+        stream: TlsStreamKind::Client(s),
+      } => s.get_ref().0.set_write_timeout(timeout),
+      Self {
+        stream: TlsStreamKind::Server(s),
+      } => s.get_ref().0.set_write_timeout(timeout),
+    }
+  }
+
+  fn write_timeout(&self) -> Option<Duration> {
+    match self {
+      Self {
+        stream: TlsStreamKind::Client(s),
+      } => s.get_ref().0.write_timeout(),
+      Self {
+        stream: TlsStreamKind::Server(s),
+      } => s.get_ref().0.write_timeout(),
     }
   }
 }

@@ -15,7 +15,7 @@ use agnostic::{
 use async_native_tls::TlsStream as AsyncNativeTlsStream;
 pub use async_native_tls::{self, TlsAcceptor, TlsConnector};
 use futures::{AsyncRead, AsyncWrite};
-use memberlist_core::transport::TimeoutableStream;
+use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 
 use super::{Listener, PromisedStream, StreamLayer};
 
@@ -123,21 +123,23 @@ impl<R: Runtime> AsyncWrite for NativeTlsStream<R> {
   }
 }
 
-impl<R: Runtime> TimeoutableStream for NativeTlsStream<R> {
-  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
-    self.stream.get_ref().set_write_timeout(timeout)
-  }
-
-  fn write_timeout(&self) -> Option<Duration> {
-    self.stream.get_ref().write_timeout()
-  }
-
+impl<R: Runtime> TimeoutableReadStream for NativeTlsStream<R> {
   fn set_read_timeout(&mut self, timeout: Option<Duration>) {
     self.stream.get_ref().set_read_timeout(timeout)
   }
 
   fn read_timeout(&self) -> Option<Duration> {
     self.stream.get_ref().read_timeout()
+  }
+}
+
+impl<R: Runtime> TimeoutableWriteStream for NativeTlsStream<R> {
+  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
+    self.stream.get_ref().set_write_timeout(timeout)
+  }
+
+  fn write_timeout(&self) -> Option<Duration> {
+    self.stream.get_ref().write_timeout()
   }
 }
 

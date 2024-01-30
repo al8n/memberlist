@@ -11,7 +11,7 @@ default = ["compression", "quinn"]
 compression = ["rayon", "weezl"]
 quinn = ["agnostic/quinn", "dep:quinn", "rustls", "socket2"]
 s2n = ["s2n-quic", "futures/bilock", "futures/unstable"]
-serde = ["memberlist-core/serde", "dep:serde", "memberlist-utils/serde"]
+serde = ["memberlist-core/serde", "dep:serde", "memberlist-utils/serde", "humantime-serde"]
 metrics = ["memberlist-core/metrics", "memberlist-utils/metrics", "dep:metrics"]
 
 # enable DNS node address resolver
@@ -48,6 +48,7 @@ viewit.workspace = true
 
 # serde
 serde = { workspace = true, optional = true }
+humantime-serde = { workspace = true, optional = true }
 
 # metrics
 metrics = { workspace = true, optional = true }

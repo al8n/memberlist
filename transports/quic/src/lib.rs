@@ -12,13 +12,13 @@ use std::{
 };
 
 use agnostic::Runtime;
-use byteorder::{NetworkEndian, ByteOrder};
+use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
 use futures::{AsyncReadExt, FutureExt};
 use memberlist_core::{
   transport::{
     stream::{PacketProducer, PacketSubscriber, StreamProducer, StreamSubscriber},
-    Transport, TransportError, Wire,
+    TimeoutableReadStream, Transport, TransportError, Wire,
   },
   types::{Message, Packet},
 };
@@ -30,304 +30,30 @@ use peekable::future::AsyncPeekExt;
 #[cfg(feature = "compression")]
 #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
 pub mod compressor;
-
 #[cfg(feature = "compression")]
 use compressor::*;
 
+mod error;
+pub use error::*;
 mod io;
-
+mod options;
+pub use options::*;
 mod stream_layer;
 pub use stream_layer::*;
-
 
 const DEFAULT_PORT: u16 = 7946;
 
 const MAX_MESSAGE_LEN_SIZE: usize = core::mem::size_of::<u32>();
 // compound tag + MAX_MESSAGE_LEN_SIZE
-const PACKET_HEADER_OVERHEAD: usize = 1 + MAX_MESSAGE_LEN_SIZE;
+const PACKET_HEADER_OVERHEAD: usize = 1 + 1 + MAX_MESSAGE_LEN_SIZE;
 const PACKET_OVERHEAD: usize = MAX_MESSAGE_LEN_SIZE;
+const NUM_PACKETS_PER_BATCH: usize = 255;
+const HEADER_SIZE: usize = 1 + MAX_MESSAGE_LEN_SIZE;
 
 #[cfg(feature = "compression")]
 const COMPRESS_HEADER: usize = 1 + MAX_MESSAGE_LEN_SIZE;
 
 const MAX_INLINED_BYTES: usize = 64;
-
-/// Errors that can occur when using [`NetTransport`].
-#[derive(thiserror::Error)]
-pub enum QuicTransportError<A: AddressResolver, S: StreamLayer, W: Wire> {
-  /// Returns when there is no explicit advertise address and no private IP address found.
-  #[error("no private IP address found, and explicit IP not provided")]
-  NoPrivateIP,
-  /// Returns when there is no interface addresses found.
-  #[error("failed to get interface addresses {0}")]
-  NoInterfaceAddresses(#[from] local_ip_address::Error),
-  /// Returns when there is no bind address provided.
-  #[error("at least one bind address is required")]
-  EmptyBindAddresses,
-  /// Returns when the ip is blocked.
-  #[error("the ip {0} is blocked")]
-  BlockedIp(IpAddr),
-  /// Returns when the packet buffer size is too small.
-  #[error("failed to resize packet buffer {0}")]
-  ResizePacketBuffer(std::io::Error),
-  /// Returns when the packet socket fails to bind.
-  #[error("failed to start packet listener on {0}: {1}")]
-  ListenPacket(SocketAddr, std::io::Error),
-  /// Returns when the promised listener fails to bind.
-  #[error("failed to start promised listener on {0}: {1}")]
-  ListenPromised(SocketAddr, std::io::Error),
-  /// Returns when we fail to resolve an address.
-  #[error("failed to resolve address {addr}: {err}")]
-  Resolve {
-    /// The address we failed to resolve.
-    addr: A::Address,
-    /// The error that occurred.
-    err: A::Error,
-  },
-  /// Returns when the label error.
-  #[error(transparent)]
-  Label(#[from] LabelError),
-  #[error(transparent)]
-  Stream(S::Error),
-
-  /// Returns when encode/decode error.
-  #[error("wire error: {0}")]
-  Wire(W::Error),
-  /// Returns when the packet is too large.
-  #[error("packet too large, the maximum packet can be sent is 65535, got {0}")]
-  PacketTooLarge(usize),
-  /// Returns when there is a custom error.
-  #[error("custom error: {0}")]
-  Custom(std::borrow::Cow<'static, str>),
-
-  /// Returns when fail to compress/decompress message.
-  #[cfg(feature = "compression")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
-  #[error("compressor: {0}")]
-  Compressor(#[from] compressor::CompressorError),
-
-  /// Returns when the computation task panic
-  #[error("computation task panic")]
-  #[cfg(feature = "compression")]
-  ComputationTaskFailed,
-}
-
-impl<A: AddressResolver, S: StreamLayer, W: Wire> core::fmt::Debug for QuicTransportError<A, S, W> {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    core::fmt::Display::fmt(&self, f)
-  }
-}
-
-impl<A: AddressResolver, S: StreamLayer, W: Wire> TransportError for QuicTransportError<A, S, W> {
-  fn is_remote_failure(&self) -> bool {
-    if let Self::Stream(e) = self {
-      e.is_remote_failure()
-    } else {
-      false
-    }
-  }
-
-  fn custom(err: std::borrow::Cow<'static, str>) -> Self {
-    Self::Custom(err)
-  }
-}
-
-/// Used to configure a net transport.
-#[viewit::viewit(
-  vis_all = "pub(crate)",
-  getters(vis_all = "pub"),
-  setters(vis_all = "pub", prefix = "with")
-)]
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(
-  feature = "serde",
-  serde(bound(
-    serialize = "I: serde::Serialize, A: AddressResolver, A::Address: serde::Serialize, A::ResolvedAddress: serde::Serialize",
-    deserialize = "I: for<'a> serde::Deserialize<'a>, A: AddressResolver, A::Address: for<'a> serde::Deserialize<'a>, A::ResolvedAddress: for<'a> serde::Deserialize<'a>"
-  ))
-)]
-pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
-  /// The local node's ID.
-  #[viewit(
-    getter(const, style = "ref", attrs(doc = "Get the id of the node."),),
-    setter(attrs(doc = "Set the id of the node. (Builder pattern)"),)
-  )]
-  id: I,
-
-  /// The local node's address.
-  #[viewit(
-    getter(const, style = "ref", attrs(doc = "Get the address of the node."),),
-    setter(attrs(doc = "Set the address of the node. (Builder pattern)"),)
-  )]
-  address: A::Address,
-
-  /// The address to advertise to other nodes. If not set,
-  /// the transport will attempt to discover the local IP address
-  /// to use.
-  #[viewit(
-    getter(const, attrs(doc = "Get the advertise address of the node."),),
-    setter(attrs(doc = "Set the advertise address of the node. (Builder pattern)"),)
-  )]
-  advertise_address: Option<A::ResolvedAddress>,
-
-  /// A list of addresses to bind to for both TCP and UDP
-  /// communications.
-  #[viewit(
-    getter(
-      style = "ref",
-      const,
-      attrs(doc = "Get a list of addresses to bind to for both TCP and UDP communications."),
-    ),
-    setter(attrs(
-      doc = "Set the list of addresses to bind to for both TCP and UDP communications. (Builder pattern)"
-    ),)
-  )]
-  bind_addresses: SmallVec<IpAddr>,
-
-  /// The port for bind addresses of the node.
-  ///
-  /// Default is `7946`.
-  #[viewit(
-    getter(const, attrs(doc = "Get the port for bind address of the node."),),
-    setter(attrs(doc = "Set the port for bind address of the node. (Builder pattern)"),)
-  )]
-  bind_port: Option<u16>,
-
-  /// Label is an optional set of bytes to include on the outside of each
-  /// packet and stream.
-  ///
-  /// If gossip encryption is enabled and this is set it is treated as GCM
-  /// authenticated data.
-  #[viewit(
-    getter(const, style = "ref", attrs(doc = "Get the label of the node."),),
-    setter(attrs(doc = "Set the label of the node. (Builder pattern)"),)
-  )]
-  label: Label,
-
-  /// Skips the check that inbound packets and gossip
-  /// streams need to be label prefixed.
-  #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Get if the check that inbound packets and gossip streams need to be label prefixed."
-      ),
-    ),
-    setter(attrs(
-      doc = "Set if the check that inbound packets and gossip streams need to be label prefixed. (Builder pattern)"
-    ),)
-  )]
-  skip_inbound_label_check: bool,
-
-  /// Policy for Classless Inter-Domain Routing (CIDR).
-  ///
-  /// By default, allow any connection
-  #[cfg_attr(feature = "serde", serde(default))]
-  #[viewit(
-    getter(
-      const,
-      style = "ref",
-      attrs(doc = "Get the policy for Classless Inter-Domain Routing (CIDR)."),
-    ),
-    setter(attrs(
-      doc = "Set the policy for Classless Inter-Domain Routing (CIDR). (Builder pattern)"
-    ),)
-  )]
-  cidrs_policy: CIDRsPolicy,
-
-  /// Used to control message compression. This can
-  /// be used to reduce bandwidth usage at the cost of slightly more CPU
-  /// utilization.
-  #[cfg(feature = "compression")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
-  #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Get the compression algorithm used for outgoing.",
-        cfg(feature = "compression"),
-        cfg_attr(docsrs, doc(cfg(feature = "compression")))
-      ),
-    ),
-    setter(attrs(
-      doc = "Set the compression algorithm used for outgoing. (Builder pattern)",
-      cfg(feature = "compression"),
-      cfg_attr(docsrs, doc(cfg(feature = "compression")))
-    ),)
-  )]
-  compressor: Option<Compressor>,
-
-  /// The size of a message that should be offload to [`rayon`] thread pool
-  /// for encryption or compression.
-  ///
-  /// The default value is 1KB, which means that any message larger than 1KB
-  /// will be offloaded to [`rayon`] thread pool for encryption or compression.
-  #[cfg(feature = "compression")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
-  #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Get the size of a message that should be offload to [`rayon`] thread pool for encryption or compression.",
-        cfg(feature = "compression"),
-        cfg_attr(docsrs, doc(cfg(feature = "compression")))
-      ),
-    ),
-    setter(attrs(
-      doc = "Set the size of a message that should be offload to [`rayon`] thread pool for encryption or compression. (Builder pattern)",
-      cfg(feature = "compression"),
-      cfg_attr(docsrs, doc(cfg(feature = "compression")))
-    ),)
-  )]
-  offload_size: usize,
-
-  /// The metrics labels.
-  #[cfg(feature = "metrics")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
-  #[viewit(
-    getter(
-      style = "ref",
-      result(
-        converter(fn = "Option::as_deref"),
-        type = "Option<&memberlist_utils::MetricLabels>"
-      ),
-      attrs(
-        doc = "Get the metrics labels.",
-        cfg(feature = "metrics"),
-        cfg_attr(docsrs, doc(cfg(feature = "metrics")))
-      ),
-    ),
-    setter(attrs(
-      doc = "Set the metrics labels. (Builder pattern)",
-      cfg(feature = "metrics"),
-      cfg_attr(docsrs, doc(cfg(feature = "metrics")))
-    ))
-  )]
-  metric_labels: Option<Arc<memberlist_utils::MetricLabels>>,
-}
-
-impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I, A> {
-  /// Creates a new net transport options by id and address, other configurations are left default.
-  pub fn new(id: I, address: A::Address) -> Self {
-    Self {
-      id,
-      address,
-      advertise_address: None,
-      bind_addresses: SmallVec::new(),
-      bind_port: Some(DEFAULT_PORT),
-      label: Label::empty(),
-      skip_inbound_label_check: false,
-      cidrs_policy: CIDRsPolicy::allow_all(),
-      #[cfg(feature = "compression")]
-      compressor: None,
-      #[cfg(feature = "compression")]
-      offload_size: 1024,
-      #[cfg(feature = "metrics")]
-      metric_labels: None,
-    }
-  }
-}
 
 /// A [`Transport`] implementation based on QUIC
 pub struct QuicTransport<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer, W> {
@@ -385,7 +111,7 @@ struct Batch<I, A> {
 impl<I, A> Batch<I, A> {
   fn estimate_encoded_len(&self) -> usize {
     if self.packets.len() == 1 {
-      return self.estimate_encoded_len - PACKET_HEADER_OVERHEAD - PACKET_OVERHEAD;
+      return self.estimate_encoded_len - PACKET_OVERHEAD;
     }
     self.estimate_encoded_len
   }
@@ -478,8 +204,11 @@ where
     Self::Error,
   > {
     let mut tag = [0u8; 2];
-    let mut readed = 0;
-    conn.peek_exact(&mut tag).await.map_err(|e| QuicTransportError::Stream(e.into()))?;
+
+    conn
+      .peek_exact(&mut tag)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
     let mut stream_label = if tag[0] == Label::TAG {
       let label_size = tag[1] as usize;
       // consume peeked
@@ -490,7 +219,7 @@ where
         .read_exact(&mut label)
         .await
         .map_err(|e| QuicTransportError::Stream(e.into()))?;
-      readed += 2 + label_size;
+
       Label::try_from(Bytes::from(label)).map_err(|e| QuicTransportError::Label(e.into()))?
     } else {
       Label::empty()
@@ -521,7 +250,6 @@ where
       .await
       .map(|(read, msg)| (readed + read, msg));
 
-
     #[cfg(feature = "compression")]
     self
       .read_message_with_compression(conn)
@@ -534,7 +262,11 @@ where
     conn: &mut Self::Stream,
     msg: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<usize, Self::Error> {
-    todo!()
+    #[cfg(not(feature = "compression"))]
+    return self.send_message_without_comression(conn, msg).await;
+
+    #[cfg(feature = "compression")]
+    self.send_message_with_compression(conn, msg).await
   }
 
   async fn send_packet(
@@ -575,7 +307,9 @@ where
       let ep_len = W::encoded_len(packet);
       // check if we reach the maximum packet size
       let current_encoded_size = ep_len + estimate_batch_encoded_size;
-      if current_encoded_size >= self.max_payload_size() {
+      if current_encoded_size >= self.max_payload_size()
+        || current_packets_in_batch >= NUM_PACKETS_PER_BATCH
+      {
         batches.push(Batch {
           packets: TinyVec::with_capacity(current_packets_in_batch),
           num_packets: current_packets_in_batch,
@@ -675,11 +409,12 @@ struct Processor<
   bi: S::BiAcceptor,
   packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
-  
+
   shutdown: Arc<AtomicBool>,
   shutdown_rx: async_channel::Receiver<()>,
 
   skip_inbound_label_check: bool,
+  timeout: Option<Duration>,
 
   #[cfg(feature = "compression")]
   offload_size: usize,
@@ -705,6 +440,7 @@ where
       local_addr,
       label,
       skip_inbound_label_check,
+      timeout,
       #[cfg(feature = "compression")]
       offload_size,
       #[cfg(feature = "metrics")]
@@ -719,6 +455,7 @@ where
       shutdown.clone(),
       shutdown_rx.clone(),
       skip_inbound_label_check,
+      timeout,
       #[cfg(feature = "compression")]
       offload_size,
       #[cfg(feature = "metrics")]
@@ -808,6 +545,7 @@ where
     shutdown: Arc<AtomicBool>,
     shutdown_rx: async_channel::Receiver<()>,
     skip_inbound_label_check: bool,
+    timeout: Option<Duration>,
     #[cfg(feature = "compression")] offload_size: usize,
     #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_utils::MetricLabels>,
   ) {
@@ -823,9 +561,11 @@ where
         }
         incoming = acceptor.accept_uni().fuse() => {
           match incoming {
-            Ok((recv_stream, remote_addr)) => {
+            Ok((mut recv_stream, remote_addr)) => {
               let start = Instant::now();
               // TODO: set timeout for recv_stream
+              recv_stream.set_read_timeout(timeout);
+
               let (read, msg) = match Self::handle_packet(
                 recv_stream,
                 &label,
@@ -871,12 +611,20 @@ where
     skip_inbound_label_check: bool,
     #[cfg(feature = "compression")] offload_size: usize,
   ) -> Result<
-    (usize, OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>),
+    (
+      usize,
+      OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    ),
     QuicTransportError<T::Resolver, S, T::Wire>,
   > {
+    const HEADER_SIZE: usize = 5;
+
     let mut tag = [0u8; 2];
     let mut readed = 0;
-    recv_stream.peek_exact(&mut tag).await.map_err(|e| QuicTransportError::Stream(e.into()))?;
+    recv_stream
+      .peek_exact(&mut tag)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
     let mut packet_label = if tag[0] == Label::TAG {
       let label_size = tag[1] as usize;
       // consume peeked
@@ -908,115 +656,226 @@ where
     }
 
     #[cfg(not(feature = "compression"))]
-    return Self::decode(&buf[..total_len]).map(|msgs| (readed, msgs));
+    return {
+      let (read, msgs) = Self::decode_without_compression(&mut recv_stream).await?;
+      readed += read;
+      if let Err(e) = recv_stream.close().await {
+        tracing::error!(target: "memberlist.transport.quic", err = %e, "failed to close remote packet connection");
+      }
+      Ok((readed, msgs))
+    };
 
-    if total_len <= MAX_INLINED_BYTES {
-      let mut buf = [0u8; MAX_INLINED_BYTES];
-      recv_stream
-        .read_exact(&mut buf[..total_len])
-        .await
-        .map_err(|e| QuicTransportError::Stream(e.into()))?;
-      readed += total_len;
+    #[cfg(feature = "compression")]
+    {
+      let (read, msgs) = Self::decode_with_compression(&mut recv_stream, offload_size).await?;
+      readed += read;
+      if let Err(e) = recv_stream.close().await {
+        tracing::error!(target: "memberlist.transport.quic", err = %e, "failed to close remote packet connection");
+      }
+      Ok((readed, msgs))
+    }
+  }
 
-      
+  fn decode_batch(
+    mut src: &[u8],
+  ) -> Result<
+    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    QuicTransportError<T::Resolver, S, T::Wire>,
+  > {
+    let num_msgs = src[0] as usize;
+    src = &src[1..];
+    let mut msgs = OneOrMore::with_capacity(num_msgs);
 
-      #[cfg(feature = "compression")]
-      {
-        if !COMPRESS_TAG.contains(&tag) {
-          return Self::decode(&buf[..total_len]).map(|msgs| (readed, msgs));
-        }
+    for _ in 0..num_msgs {
+      let expected_msg_len = NetworkEndian::read_u32(&src[..MAX_MESSAGE_LEN_SIZE]) as usize;
+      src = &src[MAX_MESSAGE_LEN_SIZE..];
+      let (readed, msg) =
+        <T::Wire as Wire>::decode_message(src).map_err(QuicTransportError::Wire)?;
 
-        Self::decompress_and_decode(tag, &buf[..total_len]).map(|msgs| (readed, msgs))
+      debug_assert_eq!(
+        expected_msg_len, readed,
+        "expected message length {expected_msg_len} but got {readed}",
+      );
+      src = &src[readed..];
+      msgs.push(msg);
+    }
+
+    Ok(msgs)
+  }
+
+  async fn decode_without_compression(
+    conn: &mut S::ReadStream,
+  ) -> Result<
+    (
+      usize,
+      OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    ),
+    QuicTransportError<T::Resolver, S, T::Wire>,
+  > {
+    let mut read = 0;
+    let mut tag = [0u8; HEADER_SIZE];
+    conn
+      .read_exact(&mut tag)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    read += HEADER_SIZE;
+
+    if Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::COMPOUND_TAG == tag[0] {
+      let msg_len = NetworkEndian::read_u32(&tag[1..]) as usize;
+
+      if msg_len < MAX_INLINED_BYTES {
+        let mut buf = [0u8; MAX_INLINED_BYTES];
+        conn
+          .read_exact(&mut buf[..msg_len + 1])
+          .await
+          .map_err(|e| QuicTransportError::Stream(e.into()))?;
+        read += msg_len + 1;
+        Self::decode_batch(&buf[..msg_len + 1]).map(|msgs| (read, msgs))
+      } else {
+        let mut buf = vec![0; msg_len + 1];
+        conn
+          .read_exact(&mut buf)
+          .await
+          .map_err(|e| QuicTransportError::Stream(e.into()))?;
+        read += msg_len + 1;
+        Self::decode_batch(&buf).map(|msgs| (read, msgs))
       }
     } else {
-      let mut buf = vec![0; total_len];
-      recv_stream
-        .read_exact(&mut buf)
-        .await
-        .map_err(|e| QuicTransportError::Stream(e.into()))?;
-      readed += total_len;
-
-      #[cfg(not(feature = "compression"))]
-      return Self::decode(&buf).map(|msgs| (readed, msgs));
-
-      #[cfg(feature = "compression")]
-      {
-        if !COMPRESS_TAG.contains(&tag) {
-          return Self::decode(&buf[..total_len]).map(|msgs| (readed, msgs));
-        }
-
-        Self::handle_compressed(tag, buf, offload_size).await.map(|msgs| (readed, msgs))
+      let msg_len = NetworkEndian::read_u32(&tag[1..]) as usize;
+      if msg_len <= MAX_INLINED_BYTES {
+        let mut buf = [0u8; MAX_INLINED_BYTES];
+        conn
+          .read_exact(&mut buf[..msg_len])
+          .await
+          .map_err(|e| QuicTransportError::Stream(e.into()))?;
+        read += msg_len;
+        <T::Wire as Wire>::decode_message(&buf[..msg_len])
+          .map(|(_, msg)| (read, msg.into()))
+          .map_err(QuicTransportError::Wire)
+      } else {
+        let mut buf = vec![0; msg_len];
+        conn
+          .read_exact(&mut buf)
+          .await
+          .map_err(|e| QuicTransportError::Stream(e.into()))?;
+        read += msg_len;
+        <T::Wire as Wire>::decode_message(&buf)
+          .map(|(_, msg)| (read, msg.into()))
+          .map_err(QuicTransportError::Wire)
       }
     }
   }
 
-  fn decode(mut src: &[u8]) -> Result<
-    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+  #[cfg(feature = "compression")]
+  async fn decode_with_compression(
+    conn: &mut S::ReadStream,
+    offload_size: usize,
+  ) -> Result<
+    (
+      usize,
+      OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    ),
     QuicTransportError<T::Resolver, S, T::Wire>,
   > {
-    if Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::COMPOUND_TAG == src[0] {
-      src = &src[1..];
-      let num_msgs = NetworkEndian::read_u32(&src[..MAX_MESSAGE_LEN_SIZE]) as usize;
-      src = &src[MAX_MESSAGE_LEN_SIZE..];
-      let mut msgs = OneOrMore::with_capacity(num_msgs);
+    let mut tag = [0u8; HEADER_SIZE];
+    conn
+      .peek_exact(&mut tag)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    if !COMPRESS_TAG.contains(&tag[0]) {
+      return Self::decode_without_compression(conn).await;
+    }
 
-      for _ in 0..num_msgs {
-        let expected_msg_len = NetworkEndian::read_u32(&src[..MAX_MESSAGE_LEN_SIZE]) as usize;
-        src = &src[MAX_MESSAGE_LEN_SIZE..];
-        let (readed, msg) = <T::Wire as Wire>::decode_message(src).map_err(QuicTransportError::Wire)?;
+    // consume peeked header
+    conn.read_exact(&mut tag).await.unwrap();
+    let readed = HEADER_SIZE;
+    let compressor = Compressor::try_from(tag[0])?;
+    let msg_len = NetworkEndian::read_u32(&tag[1..]) as usize;
 
-        debug_assert_eq!(
-          expected_msg_len,
-          readed,
-          "expected message length {expected_msg_len} but got {readed}",
-        );
-        src = &src[readed..];
-        msgs.push(msg);
-      }
-
-      Ok(msgs)
+    if msg_len <= MAX_INLINED_BYTES {
+      let mut buf = [0u8; MAX_INLINED_BYTES];
+      conn
+        .read_exact(&mut buf[..msg_len])
+        .await
+        .map_err(|e| QuicTransportError::Stream(e.into()))?;
+      let compressed = &buf[..msg_len];
+      Self::decompress_and_decode(compressor, compressed).map(|msgs| (readed + msg_len, msgs))
+    } else if msg_len <= offload_size {
+      let mut buf = vec![0; msg_len];
+      conn
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| QuicTransportError::Stream(e.into()))?;
+      let compressed = &buf[..msg_len];
+      Self::decompress_and_decode(compressor, compressed).map(|msgs| (readed + msg_len, msgs))
     } else {
-      <T::Wire as Wire>::decode_message(src).map(|(_, msg)| msg.into()).map_err(QuicTransportError::Wire)
+      let mut buf = vec![0; msg_len];
+      conn
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| QuicTransportError::Stream(e.into()))?;
+      let (tx, rx) = futures::channel::oneshot::channel();
+      rayon::spawn(move || {
+        if tx
+          .send(Self::decompress_and_decode(compressor, &buf))
+          .is_err()
+        {
+          tracing::error!(target: "memberlist.transport.quic", "failed to send decompressed message");
+        }
+      });
+
+      match rx.await {
+        Ok(Ok(msgs)) => Ok((readed + msg_len, msgs)),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(QuicTransportError::ComputationTaskFailed),
+      }
     }
   }
 
   #[cfg(feature = "compression")]
   fn decompress_and_decode(
-    tag: u8,
+    compressor: Compressor,
     src: &[u8],
   ) -> Result<
     OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
     QuicTransportError<T::Resolver, S, T::Wire>,
   > {
-    let compressor = Compressor::try_from(tag)?;
-    let uncompressed = compressor.decompress(src)?;
-    Self::decode(&uncompressed)
-  }
+    use bytes::Buf;
 
-  #[cfg(feature = "compression")]
-  async fn handle_compressed(
-    tag: u8,
-    src: Vec<u8>,
-    offload_size: usize,
-  ) -> Result<
-    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-    QuicTransportError<T::Resolver, S, T::Wire>,
-  > {
-    if src.len() <= offload_size {
-      return Self::decompress_and_decode(tag, &src);
+    let mut uncompressed: Bytes = compressor.decompress(src)?.into();
+    let tag = uncompressed[0];
+    let msg_len = NetworkEndian::read_u32(&uncompressed[1..]) as usize;
+    uncompressed.advance(HEADER_SIZE);
+
+    if uncompressed.remaining() < msg_len + 1 {
+      return Err(QuicTransportError::Custom(
+        "uncompressed data do not have enough bytes to decode".into(),
+      ));
     }
 
-    let (tx, rx) = futures::channel::oneshot::channel();
-    rayon::spawn(move || {
-      if tx.send(Self::decompress_and_decode(tag, &src)).is_err() {
-        tracing::error!(target: "memberlist.transport.quic", "failed to send decompressed message");
+    if Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::COMPOUND_TAG == tag {
+      let num_msgs = uncompressed[0] as usize;
+      let mut msgs = OneOrMore::with_capacity(num_msgs);
+      uncompressed.advance(1);
+      for _ in 0..num_msgs {
+        let expected_msg_len =
+          NetworkEndian::read_u32(&uncompressed[..MAX_MESSAGE_LEN_SIZE]) as usize;
+        uncompressed.advance(MAX_MESSAGE_LEN_SIZE);
+        let (readed, msg) =
+          <T::Wire as Wire>::decode_message(&uncompressed).map_err(QuicTransportError::Wire)?;
+        debug_assert_eq!(
+          expected_msg_len, readed,
+          "expected bytes read {expected_msg_len} but got {readed}",
+        );
+        uncompressed.advance(readed);
+        msgs.push(msg);
       }
-    });
 
-    match rx.await {
-      Ok(Ok(msgs)) => Ok(msgs),
-      Ok(Err(e)) => Err(e),
-      Err(_) => Err(QuicTransportError::ComputationTaskFailed),
+      Ok(msgs)
+    } else {
+      <T::Wire as Wire>::decode_message(&uncompressed)
+        .map(|(_, msg)| msg.into())
+        .map_err(QuicTransportError::Wire)
     }
   }
 }

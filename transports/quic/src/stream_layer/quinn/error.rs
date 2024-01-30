@@ -11,8 +11,20 @@ pub enum QuinnError {
   Read(#[from] QuinnReadStreamError),
   #[error(transparent)]
   Write(#[from] QuinnWriteStreamError),
-  #[error("timeout")]
-  Timeout,
+}
+
+impl QuinnError {
+  pub(super) fn read_timeout() -> Self {
+    Self::Read(QuinnReadStreamError::Timeout)
+  }
+
+  pub(super) fn write_timeout() -> Self {
+    Self::Write(QuinnWriteStreamError::Timeout)
+  }
+
+  pub(super) fn connection_timeout() -> Self {
+    Self::Connection(QuinnConnectionError::DialTimeout)
+  }
 }
 
 impl From<WriteError> for QuinnError {
@@ -60,7 +72,6 @@ impl QuicError for QuinnError {
       Self::Connection(err) => err.is_remote_failure(),
       Self::Read(err) => err.is_remote_failure(),
       Self::Write(err) => err.is_remote_failure(),
-      Self::Timeout => false,
     }
   }
 }
@@ -103,6 +114,10 @@ pub enum QuinnReadStreamError {
   /// IO error.
   #[error(transparent)]
   IO(#[from] std::io::Error),
+
+  /// I/O operation timeout
+  #[error("timeout")]
+  Timeout,
 }
 
 impl QuicError for QuinnReadStreamError {
@@ -114,6 +129,7 @@ impl QuicError for QuinnReadStreamError {
         quinn::ReadExactError::ReadError(err) => is_read_error_remote_failure(err),
       },
       Self::IO(_) => true,
+      Self::Timeout => true,
     }
   }
 }
@@ -124,12 +140,22 @@ pub enum QuinnWriteStreamError {
   /// Error writing to the stream.
   #[error(transparent)]
   Write(#[from] quinn::WriteError),
+
+  /// I/O error
+  #[error(transparent)]
+  IO(#[from] std::io::Error),
+
+  /// I/O operation timeout
+  #[error("timeout")]
+  Timeout,
 }
 
 impl QuicError for QuinnWriteStreamError {
   fn is_remote_failure(&self) -> bool {
     match self {
       Self::Write(err) => is_write_error_remote_failure(err),
+      Self::IO(_) => true,
+      Self::Timeout => true,
     }
   }
 }

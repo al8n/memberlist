@@ -2,9 +2,9 @@ use std::{marker::PhantomData, net::SocketAddr, sync::Arc, time::Duration};
 
 use agnostic::{net::Net, Runtime};
 use bytes::Bytes;
-use futures::AsyncReadExt;
-use memberlist_core::transport::TimeoutableStream;
-use peekable::future::{AsyncPeekable, AsyncPeekExt};
+use futures::{AsyncReadExt, AsyncWriteExt};
+use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
+use peekable::future::{AsyncPeekExt, AsyncPeekable};
 use quinn::{ClientConfig, ConnectError, Endpoint, RecvStream, SendStream, VarInt};
 use smol_str::SmolStr;
 
@@ -31,8 +31,8 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
   type UniAcceptor = QuinnAcceptor<R>;
   type Connector = QuinnConnector<R>;
   type Stream = QuinnBiStream<R>;
-  type ReadStream = QuinnReadStream;
-  type WriteStream = QuinnWriteStream;
+  type ReadStream = QuinnReadStream<R>;
+  type WriteStream = QuinnWriteStream<R>;
 
   fn max_stream_data(&self) -> usize {
     self.opts.max_stream_data.min(self.opts.max_connection_data)
@@ -103,53 +103,39 @@ impl<R: Runtime> QuicBiAcceptor for QuinnAcceptor<R> {
   type BiStream = QuinnBiStream<R>;
 
   async fn accept_bi(&self) -> Result<(Self::BiStream, SocketAddr), Self::Error> {
-    let conn = self.endpoint.accept().await.unwrap();
-    conn.remote_address();
-
-    let fut = async {
-      let conn = self
-        .endpoint
-        .accept()
-        .await
-        .ok_or(ConnectError::EndpointStopping)?;
-
-      let remote = conn.remote_address();
-      conn
-        .await?
-        .accept_bi()
-        .await
-        .map(|(send, recv)| (QuinnBiStream::new(send, recv), remote))
-        .map_err(Into::into)
-    };
-    R::timeout(self.handshake_timeout, fut)
+    let conn = self
+      .endpoint
+      .accept()
       .await
-      .map_err(|_| Self::Error::Timeout)?
+      .ok_or(ConnectError::EndpointStopping)?;
+
+    let remote = conn.remote_address();
+    conn
+      .await?
+      .accept_bi()
+      .await
+      .map(|(send, recv)| (QuinnBiStream::new(send, recv), remote))
+      .map_err(Into::into)
   }
 }
 
 impl<R: Runtime> QuicUniAcceptor for QuinnAcceptor<R> {
   type Error = QuinnError;
-  type ReadStream = QuinnReadStream;
+  type ReadStream = QuinnReadStream<R>;
 
   async fn accept_uni(&self) -> Result<(Self::ReadStream, SocketAddr), Self::Error> {
-    let fut = async {
-      let conn = self
-        .endpoint
-        .accept()
-        .await
-        .ok_or(ConnectError::EndpointStopping)?;
-      let remote = conn.remote_address();
-      conn
-        .await?
-        .accept_uni()
-        .await
-        .map(|s| (QuinnReadStream(s.peekable()), remote))
-        .map_err(Into::into)
-    };
-
-    R::timeout(self.handshake_timeout, fut)
+    let conn = self
+      .endpoint
+      .accept()
       .await
-      .map_err(|_| Self::Error::Timeout)?
+      .ok_or(ConnectError::EndpointStopping)?;
+    let remote = conn.remote_address();
+    conn
+      .await?
+      .accept_uni()
+      .await
+      .map(|s| (QuinnReadStream::new(s.peekable()), remote))
+      .map_err(Into::into)
   }
 }
 
@@ -164,7 +150,7 @@ pub struct QuinnConnector<R> {
 impl<R: Runtime> QuicConnector for QuinnConnector<R> {
   type Error = QuinnError;
   type BiStream = QuinnBiStream<R>;
-  type WriteStream = QuinnWriteStream;
+  type WriteStream = QuinnWriteStream<R>;
 
   async fn open_bi(&self, addr: SocketAddr) -> Result<Self::BiStream, Self::Error> {
     self
@@ -198,7 +184,7 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
     } else {
       R::timeout(timeout, fut)
         .await
-        .map_err(|_| Self::Error::Timeout)?
+        .map_err(|_| Self::Error::connection_timeout())?
     }
   }
 
@@ -209,7 +195,7 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
       .await?
       .open_uni()
       .await
-      .map(QuinnWriteStream)
+      .map(QuinnWriteStream::new)
       .map_err(Into::into)
   }
 
@@ -225,7 +211,7 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
         .await?
         .open_uni()
         .await
-        .map(QuinnWriteStream)
+        .map(QuinnWriteStream::new)
         .map_err(Into::into)
     };
 
@@ -234,44 +220,88 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
     } else {
       R::timeout(timeout, fut)
         .await
-        .map_err(|_| Self::Error::Timeout)?
+        .map_err(|_| Self::Error::connection_timeout())?
     }
   }
 }
 
 /// [`QuinnReadStream`] is an implementation of [`QuicReadStream`] based on [`quinn`].
-pub struct QuinnReadStream(AsyncPeekable<RecvStream>);
+pub struct QuinnReadStream<R> {
+  stream: AsyncPeekable<RecvStream>,
+  timeout: Option<Duration>,
+  _marker: PhantomData<R>,
+}
 
-impl QuicReadStream for QuinnReadStream {
+impl<R> QuinnReadStream<R> {
+  const fn new(stream: AsyncPeekable<RecvStream>) -> Self {
+    Self {
+      stream,
+      timeout: None,
+      _marker: PhantomData,
+    }
+  }
+}
+
+impl<R: Runtime> TimeoutableReadStream for QuinnReadStream<R> {
+  fn set_read_timeout(&mut self, timeout: Option<Duration>) {
+    self.timeout = timeout;
+  }
+
+  fn read_timeout(&self) -> Option<Duration> {
+    self.timeout
+  }
+}
+
+impl<R: Runtime> QuicReadStream for QuinnReadStream<R> {
   type Error = QuinnReadStreamError;
 
-  async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-    self
-      .0
-      .read(buf)
-      .await
-      .map_err(Into::into)
-  }
-
   async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
-    self.0.read_exact(buf).await.map_err(Into::into)
+    let fut = async { self.stream.read_exact(buf).await.map_err(Self::Error::from) };
+
+    match self.timeout {
+      Some(timeout) => R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::Timeout)?,
+      None => fut.await.map_err(Into::into),
+    }
   }
 
-  async fn peek(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-    self
-      .0
-      .peek(buf)
-      .await
-      .map_err(Into::into)
+  async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+    let fut = async { self.stream.read(buf).await.map_err(Self::Error::from) };
+
+    match self.timeout {
+      Some(timeout) => R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::Timeout)?,
+      None => fut.await.map_err(Into::into),
+    }
   }
 
   async fn peek_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
-    self.0.peek_exact(buf).await.map_err(Into::into)
+    let fut = async { self.stream.peek_exact(buf).await.map_err(Self::Error::from) };
+
+    match self.timeout {
+      Some(timeout) => R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::Timeout)?,
+      None => fut.await.map_err(Into::into),
+    }
+  }
+
+  async fn peek(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+    let fut = async { self.stream.peek(buf).await.map_err(Self::Error::from) };
+
+    match self.timeout {
+      Some(timeout) => R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::Timeout)?,
+      None => fut.await.map_err(Into::into),
+    }
   }
 
   async fn close(&mut self) -> Result<(), Self::Error> {
     self
-      .0
+      .stream
       .get_mut()
       .1
       .stop(VarInt::from_u32(0))
@@ -280,23 +310,59 @@ impl QuicReadStream for QuinnReadStream {
 }
 
 /// [`QuinnWriteStream`] is an implementation of [`QuicWriteStream`] based on [`quinn`].
-pub struct QuinnWriteStream(SendStream);
+pub struct QuinnWriteStream<R> {
+  stream: SendStream,
+  timeout: Option<Duration>,
+  _marker: PhantomData<R>,
+}
 
-impl QuicWriteStream for QuinnWriteStream {
+impl<R> QuinnWriteStream<R> {
+  const fn new(stream: SendStream) -> Self {
+    Self {
+      stream,
+      timeout: None,
+      _marker: PhantomData,
+    }
+  }
+}
+
+impl<R: Runtime> TimeoutableWriteStream for QuinnWriteStream<R> {
+  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
+    self.timeout = timeout;
+  }
+
+  fn write_timeout(&self) -> Option<Duration> {
+    self.timeout
+  }
+}
+
+impl<R: Runtime> QuicWriteStream for QuinnWriteStream<R> {
   type Error = QuinnWriteStreamError;
 
   async fn write_all(&mut self, src: Bytes) -> Result<usize, Self::Error> {
-    let sent = src.len();
-    self
-      .0
-      .write_all(&src)
-      .await
-      .map(|_| sent)
-      .map_err(Into::into)
+    let fut = async {
+      self
+        .stream
+        .write_all(&src)
+        .await
+        .map(|_| src.len())
+        .map_err(Into::into)
+    };
+
+    match self.timeout {
+      Some(timeout) => R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::Timeout)?,
+      None => fut.await.map_err(Into::into),
+    }
+  }
+
+  async fn flush(&mut self) -> Result<(), Self::Error> {
+    self.stream.flush().await.map_err(Into::into)
   }
 
   async fn close(&mut self) -> Result<(), Self::Error> {
-    self.0.finish().await.map_err(Into::into)
+    self.stream.finish().await.map_err(Into::into)
   }
 }
 
@@ -339,18 +405,32 @@ impl<R: Runtime> QuicBiStream for QuinnBiStream<R> {
     match self.write_timeout {
       Some(timeout) => R::timeout(timeout, fut)
         .await
-        .map_err(|_| Self::Error::Timeout)?,
+        .map_err(|_| Self::Error::write_timeout())?,
       None => fut.await.map_err(Into::into),
     }
   }
 
+  async fn flush(&mut self) -> Result<(), Self::Error> {
+    self
+      .send
+      .flush()
+      .await
+      .map_err(|e| QuinnError::Write(e.into()))
+  }
+
   async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
-    let fut = async { self.recv.read_exact(buf).await.map_err(|e| QuinnReadStreamError::from(e).into()) };
+    let fut = async {
+      self
+        .recv
+        .read_exact(buf)
+        .await
+        .map_err(|e| QuinnReadStreamError::from(e).into())
+    };
 
     match self.read_timeout {
       Some(timeout) => R::timeout(timeout, fut)
         .await
-        .map_err(|_| Self::Error::Timeout)?,
+        .map_err(|_| Self::Error::read_timeout())?,
       None => fut.await.map_err(Into::into),
     }
   }
@@ -367,18 +447,24 @@ impl<R: Runtime> QuicBiStream for QuinnBiStream<R> {
     match self.read_timeout {
       Some(timeout) => R::timeout(timeout, fut)
         .await
-        .map_err(|_| Self::Error::Timeout)?,
+        .map_err(|_| Self::Error::read_timeout())?,
       None => fut.await.map_err(Into::into),
     }
   }
 
   async fn peek_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
-    let fut = async { self.recv.peek_exact(buf).await.map_err(|e| QuinnReadStreamError::from(e).into()) };
+    let fut = async {
+      self
+        .recv
+        .peek_exact(buf)
+        .await
+        .map_err(|e| QuinnReadStreamError::from(e).into())
+    };
 
     match self.read_timeout {
       Some(timeout) => R::timeout(timeout, fut)
         .await
-        .map_err(|_| Self::Error::Timeout)?,
+        .map_err(|_| Self::Error::read_timeout())?,
       None => fut.await.map_err(Into::into),
     }
   }
@@ -395,33 +481,40 @@ impl<R: Runtime> QuicBiStream for QuinnBiStream<R> {
     match self.read_timeout {
       Some(timeout) => R::timeout(timeout, fut)
         .await
-        .map_err(|_| Self::Error::Timeout)?,
+        .map_err(|_| Self::Error::read_timeout())?,
       None => fut.await.map_err(Into::into),
     }
   }
 
   async fn close(&mut self) -> Result<(), Self::Error> {
     self.send.finish().await.map_err(QuinnBiStreamError::from)?;
-    self.recv.get_mut().1.stop(VarInt::from_u32(0)).map_err(|_| {
-      QuinnBiStreamError::Read(QuinnReadStreamError::Read(quinn::ReadError::UnknownStream)).into()
-    })
+    self
+      .recv
+      .get_mut()
+      .1
+      .stop(VarInt::from_u32(0))
+      .map_err(|_| {
+        QuinnBiStreamError::Read(QuinnReadStreamError::Read(quinn::ReadError::UnknownStream)).into()
+      })
   }
 }
 
-impl<R: Runtime> TimeoutableStream for QuinnBiStream<R> {
-  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
-    self.write_timeout = timeout;
-  }
-
-  fn write_timeout(&self) -> Option<Duration> {
-    self.write_timeout
-  }
-
+impl<R: Runtime> TimeoutableReadStream for QuinnBiStream<R> {
   fn set_read_timeout(&mut self, timeout: Option<Duration>) {
     self.read_timeout = timeout;
   }
 
   fn read_timeout(&self) -> Option<Duration> {
     self.read_timeout
+  }
+}
+
+impl<R: Runtime> TimeoutableWriteStream for QuinnBiStream<R> {
+  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
+    self.write_timeout = timeout;
+  }
+
+  fn write_timeout(&self) -> Option<Duration> {
+    self.write_timeout
   }
 }

@@ -23,15 +23,24 @@ pub(crate) mod tests;
 
 /// Ensures that the stream has timeout capabilities.
 #[auto_impl::auto_impl(Box)]
-pub trait TimeoutableStream: Unpin + Send + Sync + 'static {
-  fn set_write_timeout(&mut self, timeout: Option<Duration>);
-
-  fn write_timeout(&self) -> Option<Duration>;
-
+pub trait TimeoutableReadStream: Unpin + Send + Sync + 'static {
   fn set_read_timeout(&mut self, timeout: Option<Duration>);
 
   fn read_timeout(&self) -> Option<Duration>;
+}
 
+/// Ensures that the stream has timeout capabilities.
+#[auto_impl::auto_impl(Box)]
+pub trait TimeoutableWriteStream: Unpin + Send + Sync + 'static {
+  fn set_write_timeout(&mut self, timeout: Option<Duration>);
+
+  fn write_timeout(&self) -> Option<Duration>;
+}
+
+/// Ensures that the stream has timeout capabilities.
+pub trait TimeoutableStream:
+  TimeoutableReadStream + TimeoutableWriteStream + Unpin + Send + Sync + 'static
+{
   fn set_timeout(&mut self, timeout: Option<Duration>) {
     Self::set_read_timeout(self, timeout);
     Self::set_write_timeout(self, timeout);
@@ -40,6 +49,11 @@ pub trait TimeoutableStream: Unpin + Send + Sync + 'static {
   fn timeout(&self) -> (Option<Duration>, Option<Duration>) {
     (Self::read_timeout(self), Self::write_timeout(self))
   }
+}
+
+impl<T: TimeoutableReadStream + TimeoutableWriteStream + Unpin + Send + Sync + 'static>
+  TimeoutableStream for T
+{
 }
 
 /// An error for the transport layer.

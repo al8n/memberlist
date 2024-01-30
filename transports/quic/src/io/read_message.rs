@@ -13,7 +13,10 @@ where
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), QuicTransportError<A, S, W>> {
     let mut buf = [0u8; MAX_MESSAGE_LEN_SIZE];
     let mut readed = 0;
-    conn.read_exact(&mut buf).await.map_err(|e| QuicTransportError::Stream(e.into()))?;
+    conn
+      .read_exact(&mut buf)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
     readed += MAX_MESSAGE_LEN_SIZE;
 
     let msg_len = NetworkEndian::read_u32(&buf) as usize;
@@ -24,13 +27,13 @@ where
         .await
         .map_err(|e| QuicTransportError::Stream(e.into()))?;
       readed += msg_len;
-      let (decoded_msg_len, msg) = W::decode_message(&data[..msg_len])
-        .map_err(QuicTransportError::Wire)?;
+      let (decoded_msg_len, msg) =
+        W::decode_message(&data[..msg_len]).map_err(QuicTransportError::Wire)?;
 
       debug_assert_eq!(
-        msg_len,
-        decoded_msg_len,
-        "expected bytes read {} is not match the actual bytes read {}", msg_len, decoded_msg_len
+        msg_len, decoded_msg_len,
+        "expected bytes read {} is not match the actual bytes read {}",
+        msg_len, decoded_msg_len
       );
       return Ok((readed, msg));
     }
@@ -42,13 +45,12 @@ where
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
     readed += msg_len;
 
-    let (decoded_msg_len, msg) = W::decode_message(&data)
-      .map_err(QuicTransportError::Wire)?;
+    let (decoded_msg_len, msg) = W::decode_message(&data).map_err(QuicTransportError::Wire)?;
 
     debug_assert_eq!(
-      msg_len,
-      decoded_msg_len,
-      "expected bytes read {} is not match the actual bytes read {}", msg_len, decoded_msg_len
+      msg_len, decoded_msg_len,
+      "expected bytes read {} is not match the actual bytes read {}",
+      msg_len, decoded_msg_len
     );
     Ok((readed, msg))
   }
@@ -77,9 +79,7 @@ where
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
     let tag = tag[0];
     if !COMPRESS_TAG.contains(&tag) {
-      return self
-        .read_message_without_compression(conn)
-        .await;
+      return self.read_message_without_compression(conn).await;
     }
 
     let mut readed = 0;

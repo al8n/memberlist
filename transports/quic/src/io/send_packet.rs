@@ -20,7 +20,15 @@ where
     // Encode messages to buffer
     if num_packets <= 1 {
       let packet = batch.packets.into_iter().next().unwrap();
-      let expected_packet_encoded_size = W::encoded_len(&packet);
+      let tag = packet.tag();
+      let expected_packet_encoded_size = W::encoded_len(&packet) + HEADER_SIZE;
+      buf[offset] = tag;
+      offset += 1;
+      NetworkEndian::write_u32(
+        &mut buf[offset..offset + MAX_MESSAGE_LEN_SIZE],
+        expected_packet_encoded_size as u32,
+      );
+      offset += MAX_MESSAGE_LEN_SIZE;
       let actual_packet_encoded_size =
         W::encode_message(packet, &mut buf[offset..]).map_err(QuicTransportError::Wire)?;
       debug_assert_eq!(
@@ -35,9 +43,14 @@ where
     // Encode compound message header
     buf[offset] = Message::<I, A::ResolvedAddress>::COMPOUND_TAG;
     offset += 1;
-    NetworkEndian::write_u32(&mut buf[offset..], num_packets as u32);
+    let total_msg_len_offset = offset;
+    // just add a place holder for total message length
+    NetworkEndian::write_u32(&mut buf[offset..], 0);
     offset += MAX_MESSAGE_LEN_SIZE;
+    buf[offset] = num_packets as u8;
+    offset += 1;
 
+    let packets_offset = offset;
     for packet in batch.packets {
       let expected_packet_encoded_size = W::encoded_len(&packet);
       NetworkEndian::write_u32(
@@ -54,6 +67,12 @@ where
       );
       offset += actual_packet_encoded_size;
     }
+
+    let actual_encoded_size = offset - packets_offset;
+    NetworkEndian::write_u32(
+      &mut buf[total_msg_len_offset..total_msg_len_offset + MAX_MESSAGE_LEN_SIZE],
+      actual_encoded_size as u32,
+    );
 
     Ok(offset)
   }
@@ -76,7 +95,8 @@ where
 
     Self::encode_batch(&mut buf[offset..], batch)?;
 
-    self.next_connector()
+    self
+      .next_connector()
       .open_uni(addr)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?
@@ -125,9 +145,7 @@ where
     batch: Batch<I, A::ResolvedAddress>,
   ) -> Result<usize, QuicTransportError<A, S, W>> {
     let Some(compressor) = self.opts.compressor else {
-      return self
-        .send_batch_without_compression(addr, batch)
-        .await;
+      return self.send_batch_without_compression(addr, batch).await;
     };
 
     let mut offset = 0;
@@ -138,14 +156,10 @@ where
     debug_assert_eq!(offset, buf.len(), "wrong label encoded length");
 
     if buf.len() <= self.opts.offload_size {
-      let buf = Self::encode_and_compress_batch(
-        compressor,
-        buf,
-        batch,
-        self.max_payload_size(),
-      )?;
+      let buf = Self::encode_and_compress_batch(compressor, buf, batch, self.max_payload_size())?;
 
-      return self.next_connector()
+      return self
+        .next_connector()
         .open_uni(addr)
         .await
         .map_err(|e| QuicTransportError::Stream(e.into()))?
@@ -154,7 +168,7 @@ where
         .map_err(|e| QuicTransportError::Stream(e.into()));
     }
 
-    let (tx, rx) = futures::channel::oneshot::channel(); 
+    let (tx, rx) = futures::channel::oneshot::channel();
     let max_payload_size = self.max_payload_size();
     rayon::spawn(move || {
       if tx
@@ -171,7 +185,8 @@ where
     });
 
     match rx.await {
-      Ok(Ok(buf)) => self.next_connector()
+      Ok(Ok(buf)) => self
+        .next_connector()
         .open_uni(addr)
         .await
         .map_err(|e| QuicTransportError::Stream(e.into()))?
@@ -183,17 +198,15 @@ where
     }
   }
 
-
-  pub(crate) async fn send_batch(&self, addr: SocketAddr, batch: Batch<I, A::ResolvedAddress>) -> Result<usize, QuicTransportError<A, S, W>> {
+  pub(crate) async fn send_batch(
+    &self,
+    addr: SocketAddr,
+    batch: Batch<I, A::ResolvedAddress>,
+  ) -> Result<usize, QuicTransportError<A, S, W>> {
     #[cfg(not(feature = "compression"))]
-    return self
-      .send_batch_without_compression(addr, batch)
-      .await;
-
+    return self.send_batch_without_compression(addr, batch).await;
 
     #[cfg(feature = "compression")]
-    self
-      .send_batch_with_compression(addr, batch)
-      .await
+    self.send_batch_with_compression(addr, batch).await
   }
 }

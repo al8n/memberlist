@@ -110,16 +110,10 @@ impl ConnectionError {
         _ => false,
       },
       ConnectionKind::Packet => match self.error_kind {
-        ConnectionErrorKind::Write => true,
+        ConnectionErrorKind::Read | ConnectionErrorKind::Write => true,
         _ => false,
       },
     }
-  }
-
-  /// Returns true if the error is unexpected EOF
-  #[inline(always)]
-  pub fn is_eof(&self) -> bool {
-    self.error.kind() == std::io::ErrorKind::UnexpectedEof
   }
 
   pub(super) fn promised_read(err: std::io::Error) -> Self {
