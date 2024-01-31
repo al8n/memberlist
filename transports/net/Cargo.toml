@@ -16,11 +16,11 @@ native-tls = ["dep:async-native-tls", "dep:native-tls"]
 compression = ["rayon", "weezl"]
 encryption = ["rayon", "aead", "aes-gcm", "cbc"]
 
-serde = ["memberlist-core/serde", "dep:serde", "memberlist-utils/serde", "base64"]
+serde = ["memberlist-core/serde", "dep:serde", "memberlist-utils/serde", "base64", "indexmap/serde"]
 rkyv = ["memberlist-core/rkyv"]
 
 metrics = ["memberlist-core/metrics", "dep:metrics", "memberlist-utils/metrics"]
-test = ["memberlist-core/test"]
+test = ["memberlist-core/test", "smol_str"]
 
 # enable DNS node address resolver
 dns = ["nodecraft/dns"]
@@ -80,5 +80,19 @@ rayon = { version = "1.8", optional = true }
 weezl = { version = "0.1", optional = true }
 
 pnet = { version = "0.34", optional = true }
+
+# serde
 serde = { working = true, optional = true }
+
+# metrics
 metrics = { workspace = true, optional = true }
+
+# test
+smol_str = { workspace = true, optional = true }
+
+
+[dev-dependencies]
+agnostic = { workspace = true, features = ["async-std", "smol", "tokio", "net"] }
+memberlist-core = { workspace = true, features = ["test"] }
+smol_str.workspace = true
+tokio = { version = "1", features = ["full"] }

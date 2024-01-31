@@ -269,7 +269,6 @@ where
         bytes_avail,
       )
       .await?;
-
     // Fast path if nothing to piggypack
     if msgs.len() == 1 {
       return self.transport_send_packet(addr, msgs.pop().unwrap()).await;

@@ -106,6 +106,12 @@ where
     Node::new(self.inner.id.clone(), self.inner.advertise.clone())
   }
 
+  /// Returns the advertise address of local node.
+  #[inline]
+  pub fn advertise_addr(&self) -> &<T::Resolver as AddressResolver>::ResolvedAddress {
+    &self.inner.advertise
+  }
+
   /// Returns the delegate, if any.
   #[inline]
   pub fn delegate(&self) -> Option<&D> {

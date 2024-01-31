@@ -310,6 +310,9 @@ impl<T: Buf + sealed::Splitable + TryInto<Label, Error = InvalidLabel>> LabelBuf
 /// Label extension for [`BufMut`] types.
 pub trait LabelBufMutExt: BufMut {
   fn add_label_header(&mut self, label: &Label) {
+    if label.is_empty() {
+      return;
+    }
     self.put_u8(Label::TAG);
     self.put_u8(label.len() as u8);
     self.put_slice(label.as_bytes());

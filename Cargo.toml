@@ -45,7 +45,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 humantime-serde = "1"
 smallvec = "1"
 smol_str = "0.2"
-transformable = "0.1.6"
+transformable = { version = "0.1.6", features = ["smol_str", "bytes"] }
 thiserror = "1"
 tracing = "0.1"
 viewit = "0.1.5"

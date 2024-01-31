@@ -47,18 +47,75 @@ pub use tracing;
 /// [memberlist-wasm]: https://github.com/al8n/memberlist/blob/main/memberlist-wasm/src/lib.rs#L20
 #[cfg(feature = "test")]
 pub mod tests {
-  pub use super::{
-    network::*,
-    // memberlist::tests::*,
-    // state::*,
-    transport::tests::*,
-  };
+  use std::{net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr}, sync::atomic::{AtomicU16, Ordering}};
+
+  pub use paste;
+
+  /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`](agonstic::Runtime)
+  #[cfg(any(feature = "test", test))]
+  #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]
+  #[macro_export]
+  macro_rules! unit_tests {
+    ($runtime:ty => $run:ident($($fn:ident), +$(,)?)) => {
+      $(
+        ::memberlist_core::tests::paste::paste! {
+          #[test]
+          fn [< test_ $fn >] () {
+            $run($fn::<$runtime>());
+          }
+        }
+      )*
+    };
+  }
+
+  /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`](agonstic::Runtime)
+  #[cfg(any(feature = "test", test))]
+  #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]
+  #[macro_export]
+  macro_rules! unit_tests_with_expr {
+    ($run:ident($($fn:ident( $expr:expr )), +$(,)?)) => {
+      $(
+        ::memberlist_core::tests::paste::paste! {
+          #[test]
+          fn [< test_ $fn >] () {
+            $run(async move {
+              $expr
+            });
+          }
+        }
+      )*
+    };
+  }
+
+  /// Sequential access lock for tests.
+  static ACCESS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+  static PORT: AtomicU16 = AtomicU16::new(63000);
+  /// Returns the next socket addr v4
+  pub fn next_socket_addr_v4() -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT.fetch_add(1, Ordering::SeqCst))
+  }
+
+  /// Returns the next socket addr v6
+  pub fn next_socket_addr_v6() -> SocketAddr {
+    SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), PORT.fetch_add(1, Ordering::SeqCst))
+  }
+
+  /// Run the unit test with a given async runtime sequentially.
+  pub fn run<B, F>(block_on: B, fut: F)
+  where
+    B: FnOnce(F) -> F::Output,
+    F: std::future::Future<Output = ()>,
+  {
+    let _mu = ACCESS_LOCK.lock();
+    initialize_tests_tracing();
+    block_on(fut);
+  }
 
   pub fn initialize_tests_tracing() {
     use std::sync::Once;
     static TRACE: Once = Once::new();
     TRACE.call_once(|| {
-      let filter = std::env::var("SHOWBIZ_TESTING_LOG").unwrap_or_else(|_| "debug".to_owned());
+      let filter = std::env::var("MEMBERLIST_TESTING_LOG").unwrap_or_else(|_| "debug".to_owned());
       tracing::subscriber::set_global_default(
         tracing_subscriber::fmt::fmt()
           .without_time()

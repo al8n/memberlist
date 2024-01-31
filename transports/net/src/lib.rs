@@ -6,14 +6,10 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
 use std::{
-  io::{Error, ErrorKind},
-  marker::PhantomData,
-  net::{IpAddr, SocketAddr},
-  sync::{
+  io::{Error, ErrorKind}, marker::PhantomData, net::{IpAddr, SocketAddr}, sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
-  },
-  time::{Duration, Instant},
+  }, time::{Duration, Instant}
 };
 
 use agnostic::{
@@ -24,6 +20,7 @@ use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use checksum::CHECKSUM_SIZE;
 use futures::{io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt, FutureExt};
+use indexmap::IndexSet;
 use memberlist_core::{
   transport::{
     resolver::AddressResolver,
@@ -56,26 +53,6 @@ use compressor::*;
 
 mod io;
 
-#[cfg(feature = "compression")]
-const _: () = {
-  impl<A: AddressResolver, W: Wire> From<CompressError> for NetTransportError<A, W> {
-    fn from(err: CompressError) -> Self {
-      Self::Compressor(err.into())
-    }
-  }
-
-  impl<A: AddressResolver, W: Wire> From<DecompressError> for NetTransportError<A, W> {
-    fn from(err: DecompressError) -> Self {
-      Self::Compressor(err.into())
-    }
-  }
-
-  impl<A: AddressResolver, W: Wire> From<UnknownCompressor> for NetTransportError<A, W> {
-    fn from(err: UnknownCompressor) -> Self {
-      Self::Compressor(err.into())
-    }
-  }
-};
 
 /// Encrypt/decrypt related.
 #[cfg(feature = "encryption")]
@@ -98,6 +75,40 @@ pub use label::Label;
 mod checksum;
 pub use checksum::Checksumer;
 
+/// Re-exports [`nodecraft`]'s address resolver.
+pub mod resolver {
+  pub use nodecraft::resolver::{address, socket_addr};
+  #[cfg(feature = "dns")]
+  pub use nodecraft::resolver::dns;
+}
+
+/// Exports unit tests.
+#[cfg(feature = "test")]
+#[cfg_attr(docsrs, doc(cfg(feature = "test")))]
+pub mod test;
+
+
+#[cfg(feature = "compression")]
+const _: () = {
+  impl<A: AddressResolver, W: Wire> From<CompressError> for NetTransportError<A, W> {
+    fn from(err: CompressError) -> Self {
+      Self::Compressor(err.into())
+    }
+  }
+
+  impl<A: AddressResolver, W: Wire> From<DecompressError> for NetTransportError<A, W> {
+    fn from(err: DecompressError) -> Self {
+      Self::Compressor(err.into())
+    }
+  }
+
+  impl<A: AddressResolver, W: Wire> From<UnknownCompressor> for NetTransportError<A, W> {
+    fn from(err: UnknownCompressor) -> Self {
+      Self::Compressor(err.into())
+    }
+  }
+};
+
 const CHECKSUM_TAG: core::ops::RangeInclusive<u8> = 44..=64;
 #[cfg(feature = "encryption")]
 const ENCRYPT_TAG: core::ops::RangeInclusive<u8> = 65..=85;
@@ -119,8 +130,6 @@ const PACKET_OVERHEAD: usize = core::mem::size_of::<u16>();
 /// tag + num msgs (max number of messages is `255`)
 const PACKET_HEADER_OVERHEAD: usize = 1 + 1;
 const NUM_PACKETS_PER_BATCH: usize = 255;
-
-const DEFAULT_PORT: u16 = 7946;
 
 /// A large buffer size that we attempt to set UDP
 /// sockets to in order to handle a large volume of messages.
@@ -242,44 +251,28 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   )]
   id: I,
 
-  /// The local node's address.
-  #[viewit(
-    getter(const, style = "ref", attrs(doc = "Get the address of the node."),),
-    setter(attrs(doc = "Set the address of the node. (Builder pattern)"),)
-  )]
-  address: A::Address,
+  // /// The address to advertise to other nodes. If not set,
+  // /// the transport will attempt to discover the local IP address
+  // /// to use.
+  // #[viewit(
+  //   getter(const, attrs(doc = "Get the advertise address of the node."),),
+  //   setter(attrs(doc = "Set the advertise address of the node. (Builder pattern)"),)
+  // )]
+  // advertise_address: Option<A::ResolvedAddress>,
 
-  /// The address to advertise to other nodes. If not set,
-  /// the transport will attempt to discover the local IP address
-  /// to use.
-  #[viewit(
-    getter(const, attrs(doc = "Get the advertise address of the node."),),
-    setter(attrs(doc = "Set the advertise address of the node. (Builder pattern)"),)
-  )]
-  advertise_address: Option<A::ResolvedAddress>,
-
-  /// A list of addresses to bind to for both TCP and UDP
+  /// A set of addresses to bind to for both TCP and UDP
   /// communications.
   #[viewit(
     getter(
       style = "ref",
       const,
-      attrs(doc = "Get a list of addresses to bind to for both TCP and UDP communications."),
+      attrs(doc = "Get a set of addresses to bind to for both TCP and UDP communications."),
     ),
     setter(attrs(
-      doc = "Set the list of addresses to bind to for both TCP and UDP communications. (Builder pattern)"
+      doc = "Set the set of addresses to bind to for both TCP and UDP communications. (Builder pattern)"
     ),)
   )]
-  bind_addresses: SmallVec<IpAddr>,
-
-  /// The port for bind addresses of the node.
-  ///
-  /// Default is `7946`.
-  #[viewit(
-    getter(const, attrs(doc = "Get the port for bind address of the node."),),
-    setter(attrs(doc = "Set the port for bind address of the node. (Builder pattern)"),)
-  )]
-  bind_port: Option<u16>,
+  bind_addresses: IndexSet<A::Address>,
 
   /// Label is an optional set of bytes to include on the outside of each
   /// packet and stream.
@@ -536,13 +529,11 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> NetTransportOptions<I, A> {
   /// Creates a new net transport options by id and address, other configurations are left default.
-  pub fn new(id: I, address: A::Address) -> Self {
+  pub fn new(id: I) -> Self {
     Self {
       id,
-      address,
-      advertise_address: None,
-      bind_addresses: SmallVec::new(),
-      bind_port: Some(DEFAULT_PORT),
+      // advertise_address: None,
+      bind_addresses: IndexSet::new(),
       label: Label::empty(),
       skip_inbound_label_check: false,
       cidrs_policy: CIDRsPolicy::allow_all(),
@@ -566,6 +557,12 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> NetTransportOptions<I,
       metric_labels: None,
     }
   }
+
+  /// Add bind address
+  pub fn add_bind_address(&mut self, addr: A::Address) -> &mut Self {
+    self.bind_addresses.insert(addr);
+    self
+  }
 }
 
 /// The net transport based on TCP/TLS and UDP
@@ -578,6 +575,7 @@ where
 {
   opts: Arc<NetTransportOptions<I, A>>,
   advertise_addr: A::ResolvedAddress,
+  local_addr: A::Address,
   packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
   #[allow(dead_code)]
@@ -607,10 +605,41 @@ where
     stream_layer: S,
     opts: NetTransportOptions<I, A>,
   ) -> Result<Self, NetTransportError<A, W>> {
-    match opts.bind_port {
-      Some(0) | None => Self::retry(resolver, stream_layer, 10, opts).await,
-      _ => Self::retry(resolver, stream_layer, 1, opts).await,
+    let resolver = Arc::new(resolver);
+    let stream_layer = Arc::new(stream_layer);
+    let opts = Arc::new(opts);
+    #[cfg(feature = "encryption")]
+    let keyring = match (opts.primary_key, &opts.secret_keys) {
+      (None, Some(keys)) if !keys.is_empty() => {
+        tracing::warn!(target: "memberlist", "using first key in keyring as primary key");
+        let mut iter = keys.iter().copied();
+        let pk = iter.next().unwrap();
+        let keyring = SecretKeyring::with_keys(pk, iter);
+        Some(keyring)
+      }
+      (Some(pk), None) => Some(SecretKeyring::new(pk)),
+      (Some(pk), Some(keys)) => Some(SecretKeyring::with_keys(pk, keys.iter().copied())),
+      _ => None,
+    };
+
+    Self::new_in(
+      resolver.clone(),
+      stream_layer.clone(),
+      opts.clone(),
+      #[cfg(feature = "encryption")]
+      keyring.clone(),
+    )
+    .await
+  }
+
+  fn find_advertise_addr_index(addrs: &[SocketAddr]) -> usize {
+    for (i, addr) in addrs.iter().enumerate() {
+      if !addr.ip().is_unspecified() {
+        return i;
+      }
     }
+
+    0
   }
 
   async fn new_in(
@@ -631,18 +660,42 @@ where
 
     let mut promised_listeners = Vec::with_capacity(opts.bind_addresses.len());
     let mut sockets = Vec::with_capacity(opts.bind_addresses.len());
-    let bind_port = opts.bind_port.unwrap_or(0);
-    for &addr in opts.bind_addresses.iter() {
-      let addr = SocketAddr::new(addr, bind_port);
-      let (local_addr, ln) = match stream_layer.bind(addr).await {
-        Ok(ln) => (ln.local_addr().unwrap(), ln),
-        Err(e) => return Err(NetTransportError::ListenPromised(addr, e)),
+    let mut resolved_bind_address = SmallVec::new();
+    for addr in opts.bind_addresses.iter() {
+      let addr = resolver.resolve(addr).await.map_err(|e| {
+        NetTransportError::Resolve {
+          addr: addr.clone(),
+          err: e,
+        }
+      })?;
+      let bind_port = addr.port();
+
+      let (local_addr, ln) = if bind_port == 0 {
+        let mut retries = 0;
+        loop {
+          match stream_layer.bind(addr).await {
+            Ok(ln) => break (ln.local_addr().unwrap(), ln),
+            Err(e) => {
+              if retries < 9 {
+                retries += 1;
+                continue;
+              }
+              return Err(NetTransportError::ListenPromised(addr, e))
+            },
+          }
+        }
+      } else {
+        match stream_layer.bind(addr).await {
+          Ok(ln) => (ln.local_addr().unwrap(), ln),
+          Err(e) => return Err(NetTransportError::ListenPromised(addr, e)),
+        }
       };
       promised_listeners.push((Arc::new(ln), local_addr));
       // If the config port given was zero, use the first TCP listener
       // to pick an available port and then apply that to everything
       // else.
       let addr = if bind_port == 0 { local_addr } else { addr };
+      resolved_bind_address.push(addr);
 
       let (local_addr, packet_socket) =
         <<<A::Runtime as Runtime>::Net as Net>::UdpSocket as UdpSocket>::bind(addr)
@@ -652,6 +705,9 @@ where
       sockets.push((Arc::new(packet_socket), local_addr));
     }
 
+    let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
+    let advertise_addr = resolved_bind_address[expose_addr_index];
+    let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
     let wg = AsyncWaitGroup::new();
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -694,44 +750,38 @@ where
     }
 
     // find final advertise address
-    let advertise_addr = match opts.advertise_address {
-      Some(addr) => addr,
-      None => {
-        let addr = if opts.bind_addresses[0].is_unspecified() {
-          local_ip_address::local_ip().map_err(|e| match e {
-            local_ip_address::Error::LocalIpAddressNotFound => NetTransportError::NoPrivateIP,
-            e => NetTransportError::NoInterfaceAddresses(e),
-          })?
-        } else {
-          promised_listeners[0].1.ip()
-        };
-
-        // Use the port we are bound to.
-        SocketAddr::new(addr, promised_listeners[0].1.port())
-      }
+    let final_advertise_addr = if advertise_addr.ip().is_unspecified() {
+      let ip = local_ip_address::local_ip().map_err(|e| match e {
+        local_ip_address::Error::LocalIpAddressNotFound => NetTransportError::NoPrivateIP,
+        e => NetTransportError::NoInterfaceAddresses(e),
+      })?;
+      SocketAddr::new(ip, advertise_addr.port())
+    } else {
+      advertise_addr
     };
 
-    if advertise_addr.is_global_ip() {
+    if final_advertise_addr.is_global_ip() {
       #[cfg(feature = "encryption")]
       if S::is_secure()
         && (encryptor.is_none() || opts.encryption_algo.is_none() || !opts.gossip_verify_outgoing)
       {
-        tracing::warn!(target: "memberlist", "binding to public address without enabling encryption for packet stream layer!");
+        tracing::warn!(target: "memberlist", advertise_addr=%final_advertise_addr, "binding to public address without enabling encryption for packet stream layer!");
       }
 
       #[cfg(feature = "encryption")]
       if !S::is_secure()
         && (encryptor.is_none() || opts.encryption_algo.is_none() || !opts.gossip_verify_outgoing)
       {
-        tracing::warn!(target: "memberlist", "binding to public address without enabling encryption for stream layer!");
+        tracing::warn!(target: "memberlist", advertise_addr=%final_advertise_addr, "binding to public address without enabling encryption for stream layer!");
       }
 
       #[cfg(not(feature = "encryption"))]
-      tracing::warn!(target: "memberlist", "binding to public address without enabling encryption for stream layer!");
+      tracing::warn!(target: "memberlist", advertise_addr=%final_advertise_addr, "binding to public address without enabling encryption for stream layer!");
     }
 
     Ok(Self {
-      advertise_addr,
+      advertise_addr: final_advertise_addr,
+      local_addr: self_addr,
       opts,
       packet_rx,
       stream_rx,
@@ -746,60 +796,6 @@ where
       shutdown_tx,
       _marker: PhantomData,
     })
-  }
-
-  async fn retry(
-    resolver: A,
-    stream_layer: S,
-    limit: usize,
-    opts: NetTransportOptions<I, A>,
-  ) -> Result<Self, NetTransportError<A, W>> {
-    let mut i = 0;
-    let resolver = Arc::new(resolver);
-    let stream_layer = Arc::new(stream_layer);
-    let opts = Arc::new(opts);
-    #[cfg(feature = "encryption")]
-    let keyring = match (opts.primary_key, &opts.secret_keys) {
-      (None, Some(keys)) if !keys.is_empty() => {
-        tracing::warn!(target: "memberlist", "using first key in keyring as primary key");
-        let mut iter = keys.iter().copied();
-        let pk = iter.next().unwrap();
-        let keyring = SecretKeyring::with_keys(pk, iter);
-        Some(keyring)
-      }
-      (Some(pk), None) => Some(SecretKeyring::new(pk)),
-      (Some(pk), Some(keys)) => Some(SecretKeyring::with_keys(pk, keys.iter().copied())),
-      _ => None,
-    };
-    loop {
-      let transport = {
-        Self::new_in(
-          resolver.clone(),
-          stream_layer.clone(),
-          opts.clone(),
-          #[cfg(feature = "encryption")]
-          keyring.clone(),
-        )
-        .await
-      };
-
-      match transport {
-        Ok(t) => {
-          if let Some(0) | None = opts.bind_port {
-            let port = t.advertise_addr.port();
-            tracing::warn!(target:  "memberlist", "using dynamic bind port {port}");
-          }
-          return Ok(t);
-        }
-        Err(e) => {
-          tracing::debug!(target="memberlist", err=%e, "fail to create transport");
-          if i == limit - 1 {
-            return Err(e);
-          }
-          i += 1;
-        }
-      }
-    }
   }
 }
 
@@ -856,7 +852,7 @@ where
   }
 
   fn local_address(&self) -> &<Self::Resolver as AddressResolver>::Address {
-    &self.opts.address
+    &self.local_addr
   }
 
   fn advertise_address(&self) -> &<Self::Resolver as AddressResolver>::ResolvedAddress {
@@ -986,14 +982,14 @@ where
     let mut batches =
       SmallVec::<Batch<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>::new();
     let packets_overhead = self.packets_header_overhead();
-    let mut estimate_batch_encoded_size = 0;
+    let mut estimate_batch_encoded_size = packets_overhead;
     let mut current_packets_in_batch = 0;
 
     // get how many packets a batch
     for packet in packets.iter() {
       let ep_len = W::encoded_len(packet);
       // check if we reach the maximum packet size
-      let current_encoded_size = ep_len + estimate_batch_encoded_size;
+      let current_encoded_size = estimate_batch_encoded_size + PACKET_OVERHEAD + ep_len;
       if current_encoded_size >= self.max_payload_size()
         || current_packets_in_batch >= NUM_PACKETS_PER_BATCH
       {
