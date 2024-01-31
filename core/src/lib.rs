@@ -49,7 +49,13 @@ pub use tracing;
 pub mod tests {
   use std::{net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr}, sync::atomic::{AtomicU16, Ordering}};
 
-  pub use paste;
+  use agnostic::Runtime;
+use nodecraft::resolver::AddressResolver;
+pub use paste;
+
+  use self::{delegate::Delegate, error::Error, transport::Transport};
+
+  use super::*;
 
   /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`](agonstic::Runtime)
   #[cfg(any(feature = "test", test))]
@@ -128,5 +134,19 @@ pub mod tests {
       )
       .unwrap();
     });
+  }
+
+  /// Returns a [`Memberlist`] but not alive self for testing purposes.
+  pub async fn get_memberlist<T: Transport, D: Delegate>(
+    t: T,
+    d: D,
+    opts: Options,
+  ) -> Result<Memberlist<T, D>, Error<T, D>>
+  where
+    <<<T as Transport>::Runtime as Runtime>::Sleep as futures::Future>::Output: Send,
+    <<<T as Transport>::Runtime as Runtime>::Interval as futures::Stream>::Item: Send,
+    D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  {
+    crate::Memberlist::new_in(t, Some(d), opts).await.map(|(_, _, this)| this)
   }
 }

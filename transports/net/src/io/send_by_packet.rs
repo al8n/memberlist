@@ -67,10 +67,8 @@ where
         expected_packet_encoded_size as u16,
       );
       offset += PACKET_OVERHEAD;
-      let k = packet.kind();
       let actual_packet_encoded_size =
         W::encode_message(packet, &mut buf[offset..]).map_err(NetTransportError::Wire)?;
-      tracing::error!("DEBUG: encode msg: {k} {:?}", buf[offset..].as_ref());
       debug_assert_eq!(
         expected_packet_encoded_size, actual_packet_encoded_size,
         "expected packet encoded size {} is not match the actual encoded size {}",
@@ -290,14 +288,11 @@ where
 
     buf.resize(batch.estimate_encoded_len(), 0);
 
-    tracing::error!("DEBUG: before encode send_batch_without_compression_and_encryption: {:?}", buf.as_ref());
     Self::encode_batch(&mut buf[offset..], batch)?;
     let data_offset = checksum_offset + CHECKSUM_HEADER;
-    tracing::error!("DEBUG: before checksum send_batch_without_compression_and_encryption: {:?}", buf.as_ref());
     // update checksum
     let cks = self.opts.checksumer.checksum(&buf[data_offset..]);
     NetworkEndian::write_u32(&mut buf[checksum_offset + 1..data_offset], cks);
-    tracing::error!("DEBUG: send_batch_without_compression_and_encryption: {:?}", buf.as_ref());
     self.sockets[0]
       .send_to(&buf, addr)
       .await

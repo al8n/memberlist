@@ -2,7 +2,7 @@ use std::{future::Future, net::SocketAddr, time::Duration};
 
 use agnostic::{net::{Net, UdpSocket}, Runtime};
 use futures::{FutureExt, Stream};
-use memberlist_core::{types::{Ack, Ping}, transport::{Node, Wire, AddressResolver}, Memberlist, Options};
+use memberlist_core::{delegate::VoidDelegate, tests::get_memberlist, transport::{Node, Wire, AddressResolver}, types::{Ack, Ping}, Options};
 use smol_str::SmolStr;
 
 use crate::{NetTransport, NetTransportOptions, StreamLayer};
@@ -37,7 +37,7 @@ where
   W: Wire<Id = SmolStr, Address = SocketAddr>,
 {
   let trans = NetTransport::<_, _, S, W>::new(resolver, stream_layer, opts).await.expect("failed to create transport");
-  let m = Memberlist::new(trans, Options::default()).await.expect("failed to create memberlist");
+  let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await.expect("failed to create memberlist");
 
   let udp = listen_udp::<R>(client_addr).await.unwrap();
 
