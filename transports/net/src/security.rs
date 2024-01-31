@@ -514,7 +514,7 @@ impl SecretKeyring {
     if &inner.primary_key == key {
       return Err(SecurityError::RemovePrimaryKey);
     }
-    inner.keys.remove(key);
+    inner.keys.shift_remove(key);
     Ok(())
   }
 
@@ -543,8 +543,10 @@ impl SecretKeyring {
       return Err(SecurityError::SecretKeyNotFound);
     };
 
+    let old_pk = inner.primary_key;
+    inner.keys.insert(old_pk);
     inner.primary_key = key;
-    inner.keys.remove(key_data);
+    inner.keys.swap_remove(key_data);
     Ok(())
   }
 

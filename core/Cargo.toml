@@ -40,6 +40,7 @@ rustix = { version = "0.38", features = ["system"] }
 hostname = "0.3"
 
 [dependencies]
+auto_impl.workspace = true
 agnostic = { workspace = true, features = ["net", "dns"] }
 async-channel.workspace = true
 async-lock = "3"
