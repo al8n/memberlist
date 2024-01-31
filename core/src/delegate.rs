@@ -11,6 +11,7 @@ mod mock;
 #[cfg(any(test, feature = "test"))]
 pub use mock::*;
 
+#[auto_impl::auto_impl(Box, Arc)]
 pub trait Delegate: Send + Sync + 'static {
   /// The error type of the delegate
   type Error: std::error::Error + Send + Sync + 'static;

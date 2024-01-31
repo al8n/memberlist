@@ -7,12 +7,16 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-serde = ["dep:serde", "ipnet?/serde", "smallvec/serde"]
+serde = ["dep:serde", "ipnet?/serde", "smallvec/serde", "bytes/serde", "either/serde"]
 metrics = ["dep:metrics"]
 rkyv = ["dep:rkyv"]
 
 [dependencies]
+bytes.workspace = true
+cheap-clone = "0.1"
 either = "1"
+thiserror.workspace = true
+
 ipnet = { version = "2.9", optional = true }
 serde = { workspace = true, optional = true }
 smallvec = { workspace = true, features = ["const_new"] }

@@ -1,4 +1,4 @@
-//!
+//! [`Transport`](memberlist_core::Transport)'s network transport layer based on TCP and UDP.
 #![allow(clippy::type_complexity)]
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
@@ -24,7 +24,6 @@ use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use checksum::CHECKSUM_SIZE;
 use futures::{io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt, FutureExt};
-use label::LabelBufExt;
 use memberlist_core::{
   transport::{
     resolver::AddressResolver,
@@ -39,10 +38,13 @@ use memberlist_core::{
 };
 use memberlist_utils::{
   net::{CIDRsPolicy, IsGlobalIp},
-  OneOrMore,
+  OneOrMore, *,
 };
 use peekable::future::AsyncPeekExt;
 use wg::AsyncWaitGroup;
+
+#[doc(inline)]
+pub use memberlist_utils as utils;
 
 /// Compress/decompress related.
 #[cfg(feature = "compression")]
@@ -96,14 +98,11 @@ pub use label::Label;
 mod checksum;
 pub use checksum::Checksumer;
 
-use crate::label::{LabelBufMutExt, LabelError};
-
 const CHECKSUM_TAG: core::ops::RangeInclusive<u8> = 44..=64;
 #[cfg(feature = "encryption")]
 const ENCRYPT_TAG: core::ops::RangeInclusive<u8> = 65..=85;
 #[cfg(feature = "compression")]
 const COMPRESS_TAG: core::ops::RangeInclusive<u8> = 86..=126;
-const LABEL_TAG: u8 = 127;
 
 #[cfg(feature = "compression")]
 const COMPRESS_HEADER: usize = 1 + core::mem::size_of::<u32>();
@@ -131,11 +130,8 @@ const PACKET_RECV_BUF_SIZE: usize = 2 * 1024 * 1024;
 #[derive(thiserror::Error)]
 pub enum NetTransportError<A: AddressResolver, W: Wire> {
   /// Connection error.
-  #[error("connection error: {0}")]
+  #[error(transparent)]
   Connection(#[from] ConnectionError),
-  /// IO error.
-  #[error("io error: {0}")]
-  IO(#[from] std::io::Error),
   /// Returns when there is no explicit advertise address and no private IP address found.
   #[error("no private IP address found, and explicit IP not provided")]
   NoPrivateIP,
@@ -166,10 +162,15 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
     err: A::Error,
   },
   /// Returns when the label error.
-  #[error("{0}")]
-  Label(#[from] label::LabelError),
+  #[error(transparent)]
+  Label(#[from] LabelError),
+
+  /// Returns when the checksum of the message bytes comes from the packet stream does not
+  /// match the original checksum.
+  #[error("checksum mismatch")]
+  PacketChecksumMismatch,
   /// Returns when getting unkstartn checksumer
-  #[error("{0}")]
+  #[error(transparent)]
   UnknownChecksumer(#[from] checksum::UnknownChecksumer),
   /// Returns when encode/decode error.
   #[error("wire error: {0}")]
@@ -205,23 +206,11 @@ impl<A: AddressResolver, W: Wire> core::fmt::Debug for NetTransportError<A, W> {
 }
 
 impl<A: AddressResolver, W: Wire> TransportError for NetTransportError<A, W> {
-  fn io(err: std::io::Error) -> Self {
-    Self::IO(err)
-  }
-
   fn is_remote_failure(&self) -> bool {
     if let Self::Connection(e) = self {
       e.is_remote_failure()
     } else {
       false
-    }
-  }
-
-  fn is_unexpected_eof(&self) -> bool {
-    match self {
-      Self::Connection(e) => e.is_eof(),
-      Self::IO(e) => e.kind() == std::io::ErrorKind::UnexpectedEof,
-      _ => false,
     }
   }
 
@@ -580,7 +569,13 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> NetTransportOptions<I,
 }
 
 /// The net transport based on TCP/TLS and UDP
-pub struct NetTransport<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer, W> {
+pub struct NetTransport<I, A, S, W>
+where
+  I: Id,
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  S: StreamLayer,
+  W: Wire<Id = I, Address = A::ResolvedAddress>,
+{
   opts: Arc<NetTransportOptions<I, A>>,
   advertise_addr: A::ResolvedAddress,
   packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
@@ -1091,6 +1086,10 @@ where
   }
 
   async fn shutdown(&self) -> Result<(), Self::Error> {
+    if self.shutdown_tx.is_closed() {
+      return Ok(());
+    }
+
     // This will avoid log spam about errors when we shut down.
     self.shutdown.store(true, Ordering::SeqCst);
     self.shutdown_tx.close();
@@ -1099,16 +1098,23 @@ where
     self.wg.wait().await;
     Ok(())
   }
+}
 
-  fn block_shutdown(&self) -> Result<(), Self::Error> {
+impl<I, A, S, W> Drop for NetTransport<I, A, S, W>
+where
+  I: Id,
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  S: StreamLayer,
+  W: Wire<Id = I, Address = A::ResolvedAddress>,
+{
+  fn drop(&mut self) {
     use pollster::FutureExt as _;
-    // This will avoid log spam about errors when we shut down.
-    self.shutdown.store(true, Ordering::SeqCst);
-    self.shutdown_tx.close();
-    let wg = self.wg.clone();
 
-    wg.wait().block_on();
-    Ok(())
+    if self.shutdown_tx.is_closed() {
+      return;
+    }
+
+    let _ = self.shutdown().block_on();
   }
 }
 
@@ -1167,7 +1173,7 @@ where
                   .send(remote_addr, conn)
                   .await
                 {
-                  tracing::error!(target:  "memberlist.net.transport", local_addr=%local_addr, err = %e, "failed to send TCP connection");
+                  tracing::error!(target:  "memberlist.transport.net", local_addr=%local_addr, err = %e, "failed to send TCP connection");
                 }
               }
               Err(e) => {
@@ -1185,7 +1191,7 @@ where
                   loop_delay = MAX_DELAY;
                 }
 
-                tracing::error!(target:  "memberlist.net.transport", local_addr=%local_addr, err = %e, "error accepting TCP connection");
+                tracing::error!(target:  "memberlist.transport.net", local_addr=%local_addr, err = %e, "error accepting TCP connection");
                 <T::Runtime as Runtime>::sleep(loop_delay).await;
                 continue;
               }
@@ -1238,7 +1244,7 @@ where
     <T::Runtime as Runtime>::spawn_detach(async move {
       scopeguard::defer!(wg.done());
       tracing::info!(
-        target: "memberlist.net.transport",
+        target: "memberlist.transport.net",
         "udp listening on {local_addr}"
       );
 
@@ -1297,7 +1303,7 @@ where
                   break;
                 }
 
-                tracing::error!(target: "memberlist.net.transport", peer=%local_addr, err = %e, "error reading UDP packet");
+                tracing::error!(target: "memberlist.transport.net", peer=%local_addr, err = %e, "error reading UDP packet");
                 continue;
               }
             };
@@ -1582,10 +1588,7 @@ where
     buf.advance(checksum::CHECKSUM_SIZE);
     let actual = checksumer.checksum(buf);
     if actual != expected {
-      return Err(NetTransportError::IO(Error::new(
-        ErrorKind::InvalidData,
-        "checksum mismatch",
-      )));
+      return Err(NetTransportError::PacketChecksumMismatch);
     }
 
     Ok(())

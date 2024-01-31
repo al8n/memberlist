@@ -12,7 +12,7 @@ use agnostic::{
   Runtime,
 };
 use futures::{AsyncRead, AsyncWrite};
-use memberlist_core::transport::TimeoutableStream;
+use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 
 use super::{Listener, PromisedStream, StreamLayer};
 
@@ -113,21 +113,23 @@ impl<R: Runtime> AsyncWrite for TcpStream<R> {
   }
 }
 
-impl<R: Runtime> TimeoutableStream for TcpStream<R> {
-  fn set_write_timeout(&self, timeout: Option<Duration>) {
-    self.0.set_write_timeout(timeout)
-  }
-
-  fn write_timeout(&self) -> Option<Duration> {
-    self.0.write_timeout()
-  }
-
-  fn set_read_timeout(&self, timeout: Option<Duration>) {
+impl<R: Runtime> TimeoutableReadStream for TcpStream<R> {
+  fn set_read_timeout(&mut self, timeout: Option<Duration>) {
     self.0.set_read_timeout(timeout)
   }
 
   fn read_timeout(&self) -> Option<Duration> {
     self.0.read_timeout()
+  }
+}
+
+impl<R: Runtime> TimeoutableWriteStream for TcpStream<R> {
+  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
+    self.0.set_write_timeout(timeout)
+  }
+
+  fn write_timeout(&self) -> Option<Duration> {
+    self.0.write_timeout()
   }
 }
 

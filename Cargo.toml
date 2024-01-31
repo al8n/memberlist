@@ -3,15 +3,13 @@ members = [
   "core",
   "memberlist",
   "transports/net",
-  "transports/quinn",
-  "transports/s2n",
+  "transports/quic",
   "utils",
   # "js",
   # "nodejs",
   # "py",
 ]
 exclude = ["memberlist-wasm"]
-
 resolver = "2"
 
 [workspace.package]
@@ -26,6 +24,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [workspace.dependencies]
+auto_impl = "1"
 agnostic = "0.2"
 async-channel = "2"
 bytes = "1.5"
@@ -50,6 +49,7 @@ transformable = "0.1.6"
 thiserror = "1"
 tracing = "0.1"
 viewit = "0.1.5"
+wg = { version = "0.4", features = ["async"] }
 
 memberlist-core = { path = "core", default-features = false }
 memberlist-net = { path = "transports/net", default-features = false }

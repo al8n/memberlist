@@ -22,16 +22,26 @@ pub use lpe::*;
 pub(crate) mod tests;
 
 /// Ensures that the stream has timeout capabilities.
-pub trait TimeoutableStream: Unpin + Send + Sync + 'static {
-  fn set_write_timeout(&self, timeout: Option<Duration>);
-
-  fn write_timeout(&self) -> Option<Duration>;
-
-  fn set_read_timeout(&self, timeout: Option<Duration>);
+#[auto_impl::auto_impl(Box)]
+pub trait TimeoutableReadStream: Unpin + Send + Sync + 'static {
+  fn set_read_timeout(&mut self, timeout: Option<Duration>);
 
   fn read_timeout(&self) -> Option<Duration>;
+}
 
-  fn set_timeout(&self, timeout: Option<Duration>) {
+/// Ensures that the stream has timeout capabilities.
+#[auto_impl::auto_impl(Box)]
+pub trait TimeoutableWriteStream: Unpin + Send + Sync + 'static {
+  fn set_write_timeout(&mut self, timeout: Option<Duration>);
+
+  fn write_timeout(&self) -> Option<Duration>;
+}
+
+/// Ensures that the stream has timeout capabilities.
+pub trait TimeoutableStream:
+  TimeoutableReadStream + TimeoutableWriteStream + Unpin + Send + Sync + 'static
+{
+  fn set_timeout(&mut self, timeout: Option<Duration>) {
     Self::set_read_timeout(self, timeout);
     Self::set_write_timeout(self, timeout);
   }
@@ -41,11 +51,13 @@ pub trait TimeoutableStream: Unpin + Send + Sync + 'static {
   }
 }
 
+impl<T: TimeoutableReadStream + TimeoutableWriteStream + Unpin + Send + Sync + 'static>
+  TimeoutableStream for T
+{
+}
+
 /// An error for the transport layer.
 pub trait TransportError: std::error::Error + Send + Sync + 'static {
-  /// Constructs a new `TransportError` from an I/O error.
-  fn io(err: std::io::Error) -> Self;
-
   /// Returns `true` if the error is a remote failure.
   ///
   /// e.g. Errors happened when:
@@ -57,14 +69,12 @@ pub trait TransportError: std::error::Error + Send + Sync + 'static {
   /// The above errors can be treated as remote failures.
   fn is_remote_failure(&self) -> bool;
 
-  /// Returns `true` if the error is unexpected EOF.
-  fn is_unexpected_eof(&self) -> bool;
-
   /// Custom the error.
   fn custom(err: std::borrow::Cow<'static, str>) -> Self;
 }
 
 /// The `Wire` trait for encoding and decoding of messages.
+#[auto_impl::auto_impl(Box, Arc)]
 pub trait Wire: Send + Sync + 'static {
   /// The error type for encoding and decoding
   type Error: std::error::Error + Send + Sync + 'static;
@@ -108,6 +118,7 @@ pub trait Wire: Send + Sync + 'static {
 /// Transport is used to abstract over communicating with other peers. The packet
 /// interface is assumed to be best-effort and the stream interface is assumed to
 /// be reliable.
+#[auto_impl::auto_impl(Box, Arc)]
 pub trait Transport: Sized + Send + Sync + 'static {
   /// The error type for the transport
   type Error: TransportError;
@@ -238,7 +249,4 @@ pub trait Transport: Sized + Send + Sync + 'static {
 
   /// Shutdown the transport
   fn shutdown(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Blocking shutdown the transport
-  fn block_shutdown(&self) -> Result<(), Self::Error>;
 }

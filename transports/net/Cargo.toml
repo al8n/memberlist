@@ -52,7 +52,7 @@ indexmap = "2"
 local-ip-address = "0.5"
 nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
 pollster = "0.3"
-peekable = { version = "0.1", features = ["future"] }
+peekable = { version = "0.2", features = ["future"] }
 pin-project.workspace = true
 rand = "0.8"
 

@@ -49,9 +49,6 @@ pub(crate) struct MemberlistCore<T: Transport> {
 impl<T: Transport> Drop for MemberlistCore<T> {
   fn drop(&mut self) {
     self.shutdown_tx.close();
-    if let Err(e) = self.transport.block_shutdown() {
-      tracing::error!(target:  "memberlist", err=%e, "failed to shutdown");
-    }
   }
 }
 

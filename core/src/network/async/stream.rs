@@ -166,7 +166,7 @@ where
     {
       std::thread_local! {
         #[cfg(not(target_family = "wasm"))]
-        static NODE_INSTANCES_GAUGE: std::cell::OnceCell<std::cell::RefCell<memberlist_utils::MetricLabels>> = std::cell::OnceCell::new();
+        static NODE_INSTANCES_GAUGE: std::cell::OnceCell<std::cell::RefCell<memberlist_utils::MetricLabels>> = const { std::cell::OnceCell::new() };
 
         // TODO: remove this when cargo wasix toolchain update to rust 1.70
         #[cfg(target_family = "wasm")]
