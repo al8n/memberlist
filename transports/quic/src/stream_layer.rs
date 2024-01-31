@@ -10,7 +10,7 @@ use memberlist_core::transport::{
 #[cfg_attr(docsrs, doc(cfg(feature = "quinn")))]
 pub mod quinn;
 
-/// QUIC stream layer based on [`s2n`](::s2n).
+/// QUIC stream layer based on [`s2n`](::s2n_quic).
 #[cfg(feature = "s2n")]
 #[cfg_attr(docsrs, doc(cfg(feature = "s2n")))]
 pub mod s2n;
@@ -191,6 +191,7 @@ pub trait QuicConnector: Send + Sync + 'static {
     addr: SocketAddr,
   ) -> impl Future<Output = Result<Self::BiStream, Self::Error>> + Send;
 
+  /// Opens a bidirectional connection to a remote peer with timeout.
   fn open_bi_with_timeout(
     &self,
     addr: SocketAddr,
@@ -203,11 +204,16 @@ pub trait QuicConnector: Send + Sync + 'static {
     addr: SocketAddr,
   ) -> impl Future<Output = Result<Self::WriteStream, Self::Error>> + Send;
 
+  /// Opens a unidirectional write stream to a remote peer with timeout.
   fn open_uni_with_timeout(
     &self,
     addr: SocketAddr,
     timeout: Duration,
   ) -> impl Future<Output = Result<Self::WriteStream, Self::Error>> + Send;
 
+  /// Closes the connector.
   fn close(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+  /// Returns the local address.
+  fn local_addr(&self) -> SocketAddr;
 }

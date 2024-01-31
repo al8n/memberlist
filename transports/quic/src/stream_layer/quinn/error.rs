@@ -5,10 +5,13 @@ use super::super::QuicError;
 /// Error type for quinn stream layer.
 #[derive(Debug, thiserror::Error)]
 pub enum QuinnError {
+  /// Connection error.
   #[error(transparent)]
   Connection(#[from] QuinnConnectionError),
+  /// Read error.
   #[error(transparent)]
   Read(#[from] QuinnReadStreamError),
+  /// Write error.
   #[error(transparent)]
   Write(#[from] QuinnWriteStreamError),
 }

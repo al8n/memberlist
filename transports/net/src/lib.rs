@@ -1,4 +1,4 @@
-//!
+//! [`Transport`](memberlist_core::Transport)'s network transport layer based on TCP and UDP.
 #![allow(clippy::type_complexity)]
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
@@ -569,7 +569,13 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> NetTransportOptions<I,
 }
 
 /// The net transport based on TCP/TLS and UDP
-pub struct NetTransport<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer, W> {
+pub struct NetTransport<I, A, S, W>
+where
+  I: Id,
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  S: StreamLayer,
+  W: Wire<Id = I, Address = A::ResolvedAddress>,
+{
   opts: Arc<NetTransportOptions<I, A>>,
   advertise_addr: A::ResolvedAddress,
   packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
@@ -1094,8 +1100,12 @@ where
   }
 }
 
-impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer, W> Drop
-  for NetTransport<I, A, S, W>
+impl<I, A, S, W> Drop for NetTransport<I, A, S, W>
+where
+  I: Id,
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  S: StreamLayer,
+  W: Wire<Id = I, Address = A::ResolvedAddress>,
 {
   fn drop(&mut self) {
     use pollster::FutureExt as _;

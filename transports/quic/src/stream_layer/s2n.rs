@@ -1,14 +1,16 @@
-use std::{io, marker::PhantomData, net::SocketAddr, sync::Arc, time::Duration};
+use std::{io, marker::PhantomData, net::SocketAddr, path::PathBuf, time::Duration};
 
 use agnostic::Runtime;
 use bytes::Bytes;
-use futures::{AsyncReadExt, AsyncWriteExt, Future};
+use futures::{AsyncReadExt, AsyncWriteExt};
 use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 use peekable::future::{AsyncPeekExt, AsyncPeekable};
 use s2n_quic::{
+  provider::limits::Limits,
   stream::{BidirectionalStream, ReceiveStream, SendStream},
   Client, Server,
 };
+pub use s2n_quic_transport::connection::limits::ValidationError;
 
 use super::{
   QuicBiAcceptor, QuicBiStream, QuicConnector, QuicReadStream, QuicUniAcceptor, QuicWriteStream,
@@ -20,30 +22,29 @@ pub use error::*;
 mod options;
 pub use options::*;
 
-/// A trait which is used to create a s2n [`Server`].
-pub trait ServerCreator: Send + Sync + 'static {
-  /// Build a server
-  fn build(&self, addr: SocketAddr) -> impl Future<Output = io::Result<Server>> + Send;
-}
-
-/// A trait which is used to create a s2n [`Client`].
-pub trait ClientCreator: Send + Sync + 'static {
-  /// Build a client
-  fn build(&self, addr: SocketAddr) -> impl Future<Output = io::Result<Client>> + Send;
-}
-
 /// A QUIC stream layer based on [`s2n`](::s2n_quic).
-pub struct S2n<SC, CC, R> {
-  server_creator: Arc<SC>,
-  client_creator: Arc<CC>,
+pub struct S2n<R> {
+  limits: Limits,
+  max_stream_data: usize,
+  cert: PathBuf,
+  key: PathBuf,
   _marker: PhantomData<R>,
 }
 
-impl<SC, CC, R: Runtime> StreamLayer for S2n<SC, CC, R>
-where
-  SC: ServerCreator,
-  CC: ClientCreator,
-{
+impl<R> S2n<R> {
+  /// Creates a new [`S2n`] stream layer with the given options.
+  pub fn new(opts: Options) -> Result<Self, ValidationError> {
+    Ok(Self {
+      limits: Limits::try_from(&opts)?,
+      max_stream_data: opts.data_window as usize,
+      cert: opts.cert_path,
+      key: opts.key_path,
+      _marker: PhantomData,
+    })
+  }
+}
+
+impl<R: Runtime> StreamLayer for S2n<R> {
   type Error = S2nError;
   type BiAcceptor = S2nBiAcceptor<R>;
   type UniAcceptor = S2nUniAcceptor<R>;
@@ -54,7 +55,7 @@ where
   type WriteStream = S2nWriteStream<R>;
 
   fn max_stream_data(&self) -> usize {
-    todo!()
+    self.max_stream_data
   }
 
   async fn bind(
@@ -64,26 +65,51 @@ where
     (SocketAddr, Self::BiAcceptor, Self::UniAcceptor),
     Self::Connector,
   )> {
-    let srv = self.server_creator.build(addr).await?;
-    let client = self.client_creator.build(addr).await?;
-    let local_addr = srv.local_addr()?;
+    let auto_server_port = addr.port() == 0;
+    let srv = Server::builder()
+      .with_limits(self.limits)
+      .map_err(invalid_data)?
+      .with_io(addr)
+      .map_err(invalid_data)?
+      .with_tls((self.cert.as_path(), self.key.as_path()))
+      .map_err(invalid_data)?
+      .start()
+      .map_err(invalid_data)?;
+    let client_addr = SocketAddr::new(addr.ip(), 0);
+    let client = Client::builder()
+      .with_limits(self.limits)
+      .map_err(invalid_data)?
+      .with_tls((self.cert.as_path(), self.key.as_path()))
+      .map_err(invalid_data)?
+      .with_io(client_addr)?
+      .start()
+      .map_err(invalid_data)?;
+
+    let actual_client_addr = client.local_addr()?;
+    tracing::info!(target: "memberlist.transport.quic", "bind client to dynamic address {}", actual_client_addr);
+
+    let actual_local_addr = srv.local_addr()?;
+    if auto_server_port {
+      tracing::info!(target: "memberlist.transport.quic", "bind server to dynamic address {}", actual_local_addr);
+    }
     let (bi, uni) = futures::lock::BiLock::new(srv);
     let bi = Self::BiAcceptor {
       server: bi,
-      local_addr,
+      local_addr: actual_local_addr,
       _marker: PhantomData,
     };
     let uni = Self::UniAcceptor {
       server: uni,
-      local_addr,
+      local_addr: actual_local_addr,
       _marker: PhantomData,
     };
 
     let connector = Self::Connector {
       client,
+      local_addr: actual_client_addr,
       _marker: PhantomData,
     };
-    Ok(((local_addr, bi, uni), connector))
+    Ok(((actual_local_addr, bi, uni), connector))
   }
 }
 
@@ -154,6 +180,7 @@ impl<R: Runtime> QuicUniAcceptor for S2nUniAcceptor<R> {
 /// [`S2nConnector`] is an implementation of [`QuicConnector`] based on [`s2n_quic`].
 pub struct S2nConnector<R> {
   client: Client,
+  local_addr: SocketAddr,
   _marker: PhantomData<R>,
 }
 
@@ -233,6 +260,10 @@ impl<R: Runtime> QuicConnector for S2nConnector<R> {
   async fn close(&self) -> Result<(), Self::Error> {
     // TODO: figure out how to close a client
     Ok(())
+  }
+
+  fn local_addr(&self) -> SocketAddr {
+    self.local_addr
   }
 }
 
@@ -489,4 +520,8 @@ impl<R: Runtime> QuicWriteStream for S2nWriteStream<R> {
   async fn close(&mut self) -> Result<(), Self::Error> {
     self.stream.close().await.map_err(Into::into)
   }
+}
+
+fn invalid_data<E: std::error::Error + Send + Sync + 'static>(e: E) -> std::io::Error {
+  std::io::Error::new(std::io::ErrorKind::InvalidData, e)
 }

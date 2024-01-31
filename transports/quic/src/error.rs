@@ -35,6 +35,7 @@ pub enum QuicTransportError<A: AddressResolver, S: StreamLayer, W: Wire> {
   /// Returns when the label error.
   #[error(transparent)]
   Label(#[from] LabelError),
+  /// Returns when the stream layer has error.
   #[error(transparent)]
   Stream(S::Error),
 

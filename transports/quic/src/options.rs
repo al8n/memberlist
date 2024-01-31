@@ -84,12 +84,12 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   skip_inbound_label_check: bool,
 
-  /// The timeout for establishing a stream connection with
-  /// a remote node for a full state sync, and for stream read and write
-  /// operations. This is a legacy name for backwards compatibility, but
-  /// should really be called StreamTimeout now that we have generalized
-  /// the transport.
+  /// The timeout used for I/O
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde::option"))]
+  #[viewit(
+    getter(const, attrs(doc = "Get timeout used for I/O."),),
+    setter(attrs(doc = "Set timeout used for I/O. (Builder pattern)"),)
+  )]
   timeout: Option<Duration>,
 
   /// Policy for Classless Inter-Domain Routing (CIDR).

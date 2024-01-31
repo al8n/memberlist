@@ -25,6 +25,16 @@ pub struct Quinn<R> {
   _marker: PhantomData<R>,
 }
 
+impl<R> Quinn<R> {
+  /// Creates a new [`Quinn`] stream layer with the given options.
+  pub fn new(opts: Options) -> Self {
+    Self {
+      opts: opts.into(),
+      _marker: PhantomData,
+    }
+  }
+}
+
 impl<R: Runtime> StreamLayer for Quinn<R> {
   type Error = QuinnError;
   type BiAcceptor = QuinnAcceptor<R>;
@@ -55,6 +65,8 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
     )?;
     sock.set_nonblocking(true)?;
 
+    let auto_port = addr.port() == 0;
+
     let endpoint = Arc::new(Endpoint::new(
       self.opts.endpoint_config.clone(),
       Some(self.opts.server_config.clone()),
@@ -63,6 +75,9 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
     )?);
 
     let local_addr = endpoint.local_addr()?;
+    if auto_port {
+      tracing::info!(target: "memberlist.transports.quic.endpoint", "binding to dynamic addr {}", local_addr);
+    }
 
     let bi_acceptor = Self::BiAcceptor {
       endpoint: endpoint.clone(),
@@ -79,6 +94,7 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
     let connector = Self::Connector {
       server_name,
       endpoint,
+      local_addr,
       client_config,
       _marker: PhantomData,
     };
@@ -157,6 +173,7 @@ pub struct QuinnConnector<R> {
   server_name: SmolStr,
   endpoint: Arc<Endpoint>,
   client_config: ClientConfig,
+  local_addr: SocketAddr,
   _marker: PhantomData<R>,
 }
 
@@ -240,6 +257,10 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
   async fn close(&self) -> Result<(), Self::Error> {
     Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close connector");
     Ok(())
+  }
+
+  fn local_addr(&self) -> SocketAddr {
+    self.local_addr
   }
 }
 

@@ -1,5 +1,9 @@
+//! [`Transport`](memberlist_core::Transport)'s network transport layer based on QUIC.
 #![allow(clippy::type_complexity)]
 #![forbid(unsafe_code)]
+#![deny(warnings, missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(docsrs, allow(unused_attributes))]
 
 use std::{
   marker::PhantomData,
@@ -61,11 +65,18 @@ const COMPRESS_HEADER: usize = 1 + MAX_MESSAGE_LEN_SIZE;
 const MAX_INLINED_BYTES: usize = 64;
 
 /// A [`Transport`] implementation based on QUIC
-pub struct QuicTransport<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer, W> {
+pub struct QuicTransport<I, A, S, W>
+where
+  I: Id,
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  S: StreamLayer,
+  W: Wire<Id = I, Address = A::ResolvedAddress>,
+{
   opts: Arc<QuicTransportOptions<I, A>>,
   advertise_addr: A::ResolvedAddress,
   packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
+  #[allow(dead_code)]
   stream_layer: Arc<S>,
   connectors: SmallVec<S::Connector>,
   round_robin: AtomicUsize,
@@ -116,7 +127,7 @@ where
     let mut connectors = SmallVec::with_capacity(opts.bind_addresses.len());
     let mut acceptors = SmallVec::with_capacity(opts.bind_addresses.len());
     let bind_port = opts.bind_port.unwrap_or(0);
-    let shutdown = Arc::new(AtomicBool::new(false));
+
     for &addr in opts.bind_addresses.iter() {
       let addr = SocketAddr::new(addr, bind_port);
       let (acceptor, connector) = match stream_layer.bind(addr).await {
@@ -344,7 +355,7 @@ where
 
   async fn read_message(
     &self,
-    from: &<Self::Resolver as AddressResolver>::ResolvedAddress,
+    _from: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     conn: &mut Self::Stream,
   ) -> Result<
     (
@@ -549,10 +560,13 @@ where
     self.shutdown_tx.close();
 
     for connector in self.connectors.iter() {
-      connector
+      if let Err(e) = connector
         .close()
         .await
-        .map_err(|e| Self::Error::Stream(e.into()));
+        .map_err(|e| Self::Error::Stream(e.into()))
+      {
+        tracing::error!(target: "memberlist.transport.quic", err = %e, "failed to close connector");
+      }
     }
 
     // Block until all the listener threads have died.
@@ -561,8 +575,12 @@ where
   }
 }
 
-impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer, W> Drop
-  for QuicTransport<I, A, S, W>
+impl<I, A, S, W> Drop for QuicTransport<I, A, S, W>
+where
+  I: Id,
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  S: StreamLayer,
+  W: Wire<Id = I, Address = A::ResolvedAddress>,
 {
   fn drop(&mut self) {
     if self.shutdown_tx.is_closed() {
@@ -624,14 +642,16 @@ where
     } = self;
 
     let pwg = wg.add(1);
+    let pshutdown = shutdown.clone();
+    let pshutdown_rx = shutdown_rx.clone();
     <T::Runtime as Runtime>::spawn_detach(async move {
       Self::listen_packet(
         local_addr,
         label,
         uni,
         packet_tx,
-        shutdown.clone(),
-        shutdown_rx.clone(),
+        pshutdown,
+        pshutdown_rx,
         skip_inbound_label_check,
         timeout,
         #[cfg(feature = "compression")]
@@ -742,7 +762,6 @@ where
           match incoming {
             Ok((mut recv_stream, remote_addr)) => {
               let start = Instant::now();
-              // TODO: set timeout for recv_stream
               recv_stream.set_read_timeout(timeout);
 
               let (read, msg) = match Self::handle_packet(
@@ -796,8 +815,6 @@ where
     ),
     QuicTransportError<T::Resolver, S, T::Wire>,
   > {
-    const HEADER_SIZE: usize = 5;
-
     let mut tag = [0u8; 2];
     let mut readed = 0;
     recv_stream
