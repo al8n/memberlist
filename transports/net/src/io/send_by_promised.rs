@@ -62,7 +62,7 @@ where
     // write length placeholder
     buf.put_slice(&[0; MAX_MESSAGE_LEN_SIZE]);
 
-    let nonce = encryptor.write_header(encryption_algo, &mut buf);
+    let nonce = encryptor.write_header(&mut buf);
     buf.resize(total_len, 0);
 
     W::encode_message(msg, &mut buf[label_encoded_size + encrypt_header..])
@@ -87,7 +87,7 @@ where
 
     let mut dst = buf.split_off(label_encoded_size + encrypt_header);
     encryptor
-      .encrypt(pk, nonce, label.as_bytes(), &mut dst)
+      .encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
       .map(|_| {
         buf.unsplit(dst);
         buf
@@ -119,11 +119,12 @@ where
     // write length placeholder
     buf.put_slice(&[0; MAX_MESSAGE_LEN_SIZE]);
 
-    let nonce = encryptor.write_header(encryption_algo, &mut buf);
+    let nonce = encryptor.write_header(&mut buf);
     buf.resize(total_len, 0);
 
     let written = W::encode_message(msg, &mut buf[label_encoded_size + encrypt_header..])
       .map_err(NetTransportError::Wire)?;
+    buf.truncate(label_encoded_size + encrypt_header + written);
     // write actual data size
     NetworkEndian::write_u32(
       &mut buf[encrypt_message_len_offset..encrypt_message_len_offset + MAX_MESSAGE_LEN_SIZE],
@@ -131,7 +132,7 @@ where
     );
     let mut dst = buf.split_off(encrypt_header);
     encryptor
-      .encrypt(pk, nonce, label.as_bytes(), &mut dst)
+      .encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
       .map(|_| {
         buf.unsplit(dst);
         buf

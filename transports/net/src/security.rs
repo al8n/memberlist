@@ -114,8 +114,6 @@ impl TryFrom<u8> for EncryptionAlgo {
 }
 
 impl EncryptionAlgo {
-  pub(crate) const SIZE: usize = core::mem::size_of::<Self>();
-
   pub(crate) fn encrypt_overhead(&self) -> usize {
     match self {
       Self::PKCS7 => 49,     // Algo: 1, Len: 4, IV: 12, Padding: 16, Tag: 16
@@ -328,28 +326,13 @@ smallvec_wrapper!(
 );
 
 impl SecretKeyring {
-  pub(super) fn write_header(&self, algo: EncryptionAlgo, dst: &mut BytesMut) -> [u8; NONCE_SIZE] {
-    let offset = dst.len();
-
+  pub(super) fn write_header(&self, dst: &mut BytesMut) -> [u8; NONCE_SIZE] {
     // Add a random nonce
     let mut nonce = [0u8; NONCE_SIZE];
     rand::thread_rng().fill(&mut nonce);
     dst.put_slice(&nonce);
 
-    // Ensure we are correctly padded (now, only for PKCS7)
-    match algo {
-      EncryptionAlgo::PKCS7 => {
-        let buf_len = dst.len();
-        pkcs7encode(
-          dst,
-          buf_len,
-          offset + EncryptionAlgo::SIZE + NONCE_SIZE,
-          BLOCK_SIZE,
-        );
-        nonce
-      }
-      EncryptionAlgo::NoPadding => nonce,
-    }
+    nonce
   }
 
   pub(super) fn read_nonce(&self, src: &mut BytesMut) -> [u8; NONCE_SIZE] {
@@ -361,11 +344,20 @@ impl SecretKeyring {
 
   pub(super) fn encrypt(
     &self,
+    algo: EncryptionAlgo,
     pk: SecretKey,
     nonce: [u8; NONCE_SIZE],
     auth_data: &[u8],
     dst: &mut BytesMut,
   ) -> Result<(), SecurityError> {
+    match algo {
+      EncryptionAlgo::NoPadding => {}
+      EncryptionAlgo::PKCS7 => {
+        let buf_len = dst.len();
+        pkcs7encode(dst, buf_len, 0, BLOCK_SIZE);
+      }
+    }
+
     match pk {
       SecretKey::Aes128(pk) => {
         let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk));

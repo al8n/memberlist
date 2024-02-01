@@ -201,6 +201,20 @@ impl TryFrom<Bytes> for Label {
   }
 }
 
+impl TryFrom<&[u8]> for Label {
+  type Error = InvalidLabel;
+
+  fn try_from(s: &[u8]) -> Result<Self, Self::Error> {
+    if s.len() > Self::MAX_SIZE {
+      return Err(InvalidLabel::TooLarge(s.len()));
+    }
+    match core::str::from_utf8(s) {
+      Ok(_) => Ok(Self(Bytes::copy_from_slice(s))),
+      Err(e) => Err(InvalidLabel::Utf8(e)),
+    }
+  }
+}
+
 impl TryFrom<&Bytes> for Label {
   type Error = InvalidLabel;
 

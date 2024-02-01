@@ -6,10 +6,14 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
 use std::{
-  io::{Error, ErrorKind}, marker::PhantomData, net::{IpAddr, SocketAddr}, sync::{
+  io::{Error, ErrorKind},
+  marker::PhantomData,
+  net::{IpAddr, SocketAddr},
+  sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
-  }, time::{Duration, Instant}
+  },
+  time::{Duration, Instant},
 };
 
 use agnostic::{
@@ -53,7 +57,6 @@ use compressor::*;
 
 mod io;
 
-
 /// Encrypt/decrypt related.
 #[cfg(feature = "encryption")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
@@ -77,16 +80,15 @@ pub use checksum::Checksumer;
 
 /// Re-exports [`nodecraft`]'s address resolver.
 pub mod resolver {
-  pub use nodecraft::resolver::{address, socket_addr};
   #[cfg(feature = "dns")]
   pub use nodecraft::resolver::dns;
+  pub use nodecraft::resolver::{address, socket_addr};
 }
 
 /// Exports unit tests.
 #[cfg(feature = "test")]
 #[cfg_attr(docsrs, doc(cfg(feature = "test")))]
 pub mod test;
-
 
 #[cfg(feature = "compression")]
 const _: () = {
@@ -259,7 +261,6 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   //   setter(attrs(doc = "Set the advertise address of the node. (Builder pattern)"),)
   // )]
   // advertise_address: Option<A::ResolvedAddress>,
-
   /// A set of addresses to bind to for both TCP and UDP
   /// communications.
   #[viewit(
@@ -662,12 +663,13 @@ where
     let mut sockets = Vec::with_capacity(opts.bind_addresses.len());
     let mut resolved_bind_address = SmallVec::new();
     for addr in opts.bind_addresses.iter() {
-      let addr = resolver.resolve(addr).await.map_err(|e| {
-        NetTransportError::Resolve {
+      let addr = resolver
+        .resolve(addr)
+        .await
+        .map_err(|e| NetTransportError::Resolve {
           addr: addr.clone(),
           err: e,
-        }
-      })?;
+        })?;
       let bind_port = addr.port();
 
       let (local_addr, ln) = if bind_port == 0 {
@@ -680,8 +682,8 @@ where
                 retries += 1;
                 continue;
               }
-              return Err(NetTransportError::ListenPromised(addr, e))
-            },
+              return Err(NetTransportError::ListenPromised(addr, e));
+            }
           }
         }
       } else {

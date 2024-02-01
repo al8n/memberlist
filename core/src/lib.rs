@@ -47,11 +47,14 @@ pub use tracing;
 /// [memberlist-wasm]: https://github.com/al8n/memberlist/blob/main/memberlist-wasm/src/lib.rs#L20
 #[cfg(feature = "test")]
 pub mod tests {
-  use std::{net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr}, sync::atomic::{AtomicU16, Ordering}};
+  use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::atomic::{AtomicU16, Ordering},
+  };
 
   use agnostic::Runtime;
-use nodecraft::resolver::AddressResolver;
-pub use paste;
+  use nodecraft::resolver::AddressResolver;
+  pub use paste;
 
   use self::{delegate::Delegate, error::Error, transport::Transport};
 
@@ -93,17 +96,26 @@ pub use paste;
     };
   }
 
+  /// Any error type used for testing.
+  pub type AnyError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
   /// Sequential access lock for tests.
   static ACCESS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
   static PORT: AtomicU16 = AtomicU16::new(63000);
   /// Returns the next socket addr v4
   pub fn next_socket_addr_v4() -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT.fetch_add(1, Ordering::SeqCst))
+    SocketAddr::new(
+      IpAddr::V4(Ipv4Addr::LOCALHOST),
+      PORT.fetch_add(1, Ordering::SeqCst),
+    )
   }
 
   /// Returns the next socket addr v6
   pub fn next_socket_addr_v6() -> SocketAddr {
-    SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), PORT.fetch_add(1, Ordering::SeqCst))
+    SocketAddr::new(
+      IpAddr::V6(Ipv6Addr::LOCALHOST),
+      PORT.fetch_add(1, Ordering::SeqCst),
+    )
   }
 
   /// Run the unit test with a given async runtime sequentially.
@@ -147,6 +159,8 @@ pub use paste;
     <<<T as Transport>::Runtime as Runtime>::Interval as futures::Stream>::Item: Send,
     D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   {
-    crate::Memberlist::new_in(t, Some(d), opts).await.map(|(_, _, this)| this)
+    crate::Memberlist::new_in(t, Some(d), opts)
+      .await
+      .map(|(_, _, this)| this)
   }
 }
