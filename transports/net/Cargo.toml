@@ -20,7 +20,7 @@ serde = ["memberlist-core/serde", "dep:serde", "memberlist-utils/serde", "base64
 rkyv = ["memberlist-core/rkyv"]
 
 metrics = ["memberlist-core/metrics", "dep:metrics", "memberlist-utils/metrics"]
-test = ["memberlist-core/test", "smol_str"]
+test = ["memberlist-core/test", "smol_str", "dns", "compression", "encryption"]
 
 # enable DNS node address resolver
 dns = ["nodecraft/dns"]

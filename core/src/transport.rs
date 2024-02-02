@@ -17,8 +17,10 @@ use stream::*;
 mod lpe;
 pub use lpe::*;
 
-#[cfg(feature = "test")]
-pub(crate) mod tests;
+/// Predefined unit tests for the transport module
+#[cfg(any(test, feature = "test"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "test")))]
+pub mod tests;
 
 /// Ensures that the stream has timeout capabilities.
 #[auto_impl::auto_impl(Box)]

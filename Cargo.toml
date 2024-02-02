@@ -53,6 +53,5 @@ wg = { version = "0.4", features = ["async"] }
 
 memberlist-core = { path = "core", default-features = false }
 memberlist-net = { path = "transports/net", default-features = false }
-memberlist-quinn = { path = "transports/quinn", default-features = false }
-memberlist-s2n = { path = "transports/s2n", default-features = false }
+memberlist-quic = { path = "transports/quic", default-features = false }
 memberlist-utils = { path = "utils", default-features = false }

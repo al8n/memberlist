@@ -86,9 +86,9 @@ pub mod resolver {
 }
 
 /// Exports unit tests.
-#[cfg(feature = "test")]
+#[cfg(any(test, feature = "test"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test")))]
-pub mod test;
+pub mod tests;
 
 #[cfg(feature = "compression")]
 const _: () = {

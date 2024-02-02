@@ -37,58 +37,6 @@ where
   ))
 }
 
-pub async fn test_handle_ping<R>()
-where
-  R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
-{
-  let m = get_memberlist::<_, R>(Some(|c: Options<NetTransport<R>>| {
-    c.with_compression_algo(CompressionAlgo::None)
-  }))
-  .await
-  .unwrap();
-
-  let udp = listen_udp::<R>().await.unwrap();
-
-  let udp_addr = udp.local_addr().unwrap();
-
-  // Encode a ping
-  let ping = Ping {
-    seq_no: 42,
-    source: ServerId::new(Name::from_str_unchecked("test"), udp_addr),
-    target: m.inner.id.clone(),
-  };
-
-  let buf = ping.encode();
-  // Send
-  udp
-    .send_to(buf.underlying_bytes(), m.inner.id.addr())
-    .await
-    .unwrap();
-
-  // Wait for response
-  let (tx, rx) = futures::channel::oneshot::channel();
-  R::spawn_detach(async {
-    futures::select! {
-      _ = rx.fuse() => {},
-      _ = R::sleep(Duration::from_secs(2)).fuse() => {
-        panic!("timeout")
-      }
-    }
-  });
-
-  let mut in_ = vec![0; 1500];
-  let (n, _) = udp.recv_from(&mut in_).await.unwrap();
-
-  in_.truncate(n);
-
-  assert_eq!(in_[0], MessageType::Ack as u8);
-  let (_, ack) = Ack::decode(&in_).unwrap();
-  assert_eq!(ack.seq_no, 42, "bad sequence no: {}", ack.seq_no);
-  tx.send(()).unwrap();
-}
-
 pub async fn test_handle_compound_ping<R>()
 where
   R: Runtime,
