@@ -1324,18 +1324,14 @@ where
   > {
     let mut packet_label = buf.remove_label_header()?.unwrap_or_else(Label::empty);
 
-    if skip_inbound_label_check {
-      if !packet_label.is_empty() {
-        return Err(LabelError::duplicate(label.cheap_clone(), packet_label).into());
+    if !skip_inbound_label_check {
+      if packet_label.ne(label) {
+        tracing::error!(target: "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+        return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
       }
-
+    } else {
       // Set this from config so that the auth data assertions work below.
       packet_label = label.cheap_clone();
-    }
-
-    if packet_label.ne(label) {
-      tracing::error!(target: "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
-      return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
     }
 
     #[cfg(not(any(feature = "compression", feature = "encryption")))]

@@ -58,21 +58,32 @@ where
   client.send_to(m.advertise_addr(), &buf).await?;
 
   // Wait for response
-  let (tx, rx) = futures::channel::oneshot::channel();
-  R::spawn_detach(async {
+  let (tx, rx) = async_channel::bounded(1);
+  let tx1 = tx.clone();
+  R::spawn_detach(async move {
     futures::select! {
-      _ = rx.fuse() => {},
+      _ = rx.recv().fuse() => {},
       _ = R::sleep(Duration::from_secs(2)).fuse() => {
-        panic!("timeout")
+        tx1.close();
       }
     }
   });
 
-  let (in_, _) = client.recv_from().await?;
+  let (in_, _) = R::timeout(Duration::from_secs_f64(2.5), client.recv_from())
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
   assert_eq!(ack.seq_no, 42, "bad sequence no: {}", ack.seq_no);
-  tx.send(()).unwrap();
-  Ok(())
+
+  futures::select! {
+    res = tx.send(()).fuse() => {
+      if res.is_err() {
+        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout").into())
+      } else {
+        Ok(())
+      }
+    }
+  }
 }
 
 // pub async fn test_transport_join_runner() {

@@ -82,10 +82,14 @@ pub mod tests {
   #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]
   #[macro_export]
   macro_rules! unit_tests_with_expr {
-    ($run:ident($($fn:ident( $expr:expr )), +$(,)?)) => {
+    ($run:ident($(
+      $($(#[$meta: meta]), +$(,)?)?
+      $fn:ident( $expr:expr )
+    ), +$(,)?)) => {
       $(
         ::memberlist_core::tests::paste::paste! {
           #[test]
+          $($(#[$meta])*)?
           fn [< test_ $fn >] () {
             $run(async move {
               $expr

@@ -1,46 +1,169 @@
 use super::*;
 
-unit_tests_with_expr!(run(
-  handle_v4_ping_server_with_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption ({
-    let label = Label::from_static("test_handle_v4_ping_server_no_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption");
-    let mut opts = NetTransportOptions::new("test_handle_v4_ping_server_no_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption".into())
-      .with_label(label.cheap_clone())
-      .with_skip_inbound_label_check(true);
-    opts.add_bind_address(next_socket_addr_v4());
-    let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<TokioRuntime>::new(), Tcp::<TokioRuntime>::new(), opts).await.unwrap();
-    let res = handle_ping(trans, |p| {
-      Message::ping(p).encode_to_vec().unwrap()
-    }, |mut src| {
-      let received_label = read_label(src)?;
-      assert_eq!(received_label, label);
-      src = &src[label.encoded_overhead()..];
-      verify_checksum(src)?;
-      Message::<SmolStr, SocketAddr>::decode(&src[5..]).map(|(_, msg)| msg.unwrap_ack()).map_err(Into::into)
-    }, next_socket_addr_v4()).await;
+pub async fn v4_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption<
+  S,
+  R,
+>(
+  s: S,
+) -> Result<(), AnyError>
+where
+  S: StreamLayer,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let label = Label::try_from("test_handle_v4_ping_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption")?;
+  let client = NetTransporTestClient::<R>::new(next_socket_addr_v4())
+    .await?
+    .with_label(label.cheap_clone())
+    .with_send_label(true)
+    .with_receive_verify_label(true);
+  let mut opts = NetTransportOptions::new("test_handle_v4_ping_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption".into()).with_label(label);
+  opts.add_bind_address(next_socket_addr_v4());
+  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+    .await
+    .unwrap();
+  handle_ping(trans, client).await?;
+  Ok(())
+}
 
-    if let Err(e) = res {
-      panic!("{:?}", e);
-    }
-  }),
-  handle_v6_ping_server_with_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption ({
-    let label = Label::from_static("test_handle_v6_ping_server_no_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption");
-    let mut opts = NetTransportOptions::new("test_handle_v6_ping_server_no_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption".into())
-      .with_label(label.cheap_clone())
-      .with_skip_inbound_label_check(true);
-    opts.add_bind_address(next_socket_addr_v6());
-    let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<TokioRuntime>::new(), Tcp::<TokioRuntime>::new(), opts).await.unwrap();
-    let res = handle_ping(trans, |p| {
-      Message::ping(p).encode_to_vec().unwrap()
-    }, |mut src| {
-      let received_label = read_label(src)?;
-      assert_eq!(received_label, label);
-      src = &src[label.encoded_overhead()..];
-      verify_checksum(src)?;
-      Message::<SmolStr, SocketAddr>::decode(&src[5..]).map(|(_, msg)| msg.unwrap_ack()).map_err(Into::into)
-    }, next_socket_addr_v6()).await;
+pub async fn v6_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption<
+  S,
+  R,
+>(
+  s: S,
+) -> Result<(), AnyError>
+where
+  S: StreamLayer,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let label = Label::try_from("test_handle_v6_ping_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption")?;
+  let client = NetTransporTestClient::<R>::new(next_socket_addr_v6())
+    .await?
+    .with_label(label.cheap_clone())
+    .with_send_label(true)
+    .with_receive_verify_label(true);
+  let mut opts = NetTransportOptions::new("test_handle_v6_ping_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption".into()).with_label(label);
+  opts.add_bind_address(next_socket_addr_v6());
+  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+    .await
+    .unwrap();
+  handle_ping(trans, client).await?;
+  Ok(())
+}
 
-    if let Err(e) = res {
-      panic!("{:?}", e);
-    }
-  }),
-));
+pub async fn v4_server_with_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption<
+  S,
+  R,
+>(
+  s: S,
+  server_check_label: bool,
+) -> Result<(), AnyError>
+where
+  S: StreamLayer,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let label = Label::try_from("test_handle_v4_ping_server_with_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption")?;
+  let client = NetTransporTestClient::<R>::new(next_socket_addr_v4())
+    .await?
+    .with_label(label.cheap_clone())
+    .with_receive_verify_label(true);
+  let mut opts = NetTransportOptions::new("test_handle_v4_ping_server_with_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption".into())
+    .with_label(label)
+    .with_skip_inbound_label_check(server_check_label);
+  opts.add_bind_address(next_socket_addr_v4());
+  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+    .await
+    .unwrap();
+  handle_ping(trans, client).await?;
+  Ok(())
+}
+
+pub async fn v6_server_with_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption<
+  S,
+  R,
+>(
+  s: S,
+  server_check_label: bool,
+) -> Result<(), AnyError>
+where
+  S: StreamLayer,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let label = Label::try_from("test_handle_v6_ping_server_with_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption")?;
+  let client = NetTransporTestClient::<R>::new(next_socket_addr_v6())
+    .await?
+    .with_label(label.cheap_clone())
+    .with_receive_verify_label(true);
+  let mut opts = NetTransportOptions::new("test_handle_v6_ping_server_with_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption".into())
+    .with_label(label)
+    .with_skip_inbound_label_check(server_check_label);
+  opts.add_bind_address(next_socket_addr_v6());
+  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+    .await
+    .unwrap();
+  handle_ping(trans, client).await?;
+  Ok(())
+}
+
+pub async fn v4_server_no_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption<
+  S,
+  R,
+>(
+  s: S,
+  server_check_label: bool,
+) -> Result<(), AnyError>
+where
+  S: StreamLayer,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let label = Label::try_from("test_handle_v4_ping_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption")?;
+  let client = NetTransporTestClient::<R>::new(next_socket_addr_v4())
+    .await?
+    .with_label(label.cheap_clone())
+    .with_send_label(true);
+  let mut opts = NetTransportOptions::new("test_handle_v4_ping_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption".into())
+    .with_skip_inbound_label_check(server_check_label);
+  opts.add_bind_address(next_socket_addr_v4());
+  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+    .await
+    .unwrap();
+  handle_ping(trans, client).await?;
+  Ok(())
+}
+
+pub async fn v6_server_no_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption<
+  S,
+  R,
+>(
+  s: S,
+  server_check_label: bool,
+) -> Result<(), AnyError>
+where
+  S: StreamLayer,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let label = Label::try_from("test_handle_v6_ping_server_no_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption")?;
+  let client = NetTransporTestClient::<R>::new(next_socket_addr_v6())
+    .await?
+    .with_label(label.cheap_clone())
+    .with_send_label(true);
+  let mut opts = NetTransportOptions::new("test_handle_v6_ping_server_no_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption".into())
+    .with_skip_inbound_label_check(server_check_label);
+  opts.add_bind_address(next_socket_addr_v6());
+  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+    .await
+    .unwrap();
+  handle_ping(trans, client).await?;
+  Ok(())
+}
