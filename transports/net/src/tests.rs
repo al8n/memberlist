@@ -12,8 +12,11 @@ use futures::Stream;
 use memberlist_core::{
   tests::AnyError,
   transport::tests::{AddressKind, Client},
+  types::Message,
 };
 use memberlist_utils::{Label, LabelBufMutExt};
+use nodecraft::Transformable;
+use smol_str::SmolStr;
 
 use crate::{
   security::{EncryptionAlgo, SecretKey, SecretKeyring},
@@ -22,6 +25,18 @@ use crate::{
 
 /// Unit test for handling [`Ping`] message
 pub mod handle_ping;
+
+/// Unit test for handling compound ping message
+pub mod handle_compound_ping;
+
+/// Unit test for handling indirect ping message
+pub mod handle_indirect_ping;
+
+/// Unit test for handling ping from wrong node
+pub mod handle_ping_wrong_node;
+
+/// Unit test for handling send packet with piggyback
+pub mod packet_piggyback;
 
 /// Unit test for handling transport with label or not.
 pub mod label;
@@ -197,4 +212,25 @@ pub fn read_encrypted_data(
   let nonce = kr.read_nonce(&mut buf);
   kr.decrypt(pk, algo, nonce, auth_data, &mut buf)?;
   Ok(buf.freeze())
+}
+
+fn compound_encoder(msgs: &[Message<SmolStr, SocketAddr>]) -> Result<Bytes, AnyError> {
+  let num_msgs = msgs.len() as u8;
+  let total_bytes = 2 + msgs.iter().map(|m| m.encoded_len() + 2).sum::<usize>();
+  let mut out = BytesMut::with_capacity(total_bytes);
+  out.put_u8(Message::<SmolStr, SocketAddr>::COMPOUND_TAG);
+  out.put_u8(num_msgs);
+
+  let mut cur = out.len();
+  out.resize(total_bytes, 0);
+
+  for msg in msgs {
+    let len = msg.encoded_len() as u16;
+    NetworkEndian::write_u16(&mut out[cur..], len);
+    cur += 2;
+    let len = msg.encode(&mut out[cur..])?;
+    cur += len;
+  }
+
+  Ok(out.freeze())
 }
