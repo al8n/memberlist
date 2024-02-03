@@ -286,7 +286,8 @@ where
     // update checksum
     let cks = self.opts.checksumer.checksum(&buf[data_offset..]);
     NetworkEndian::write_u32(&mut buf[checksum_offset + 1..data_offset], cks);
-    self.sockets[0]
+    self
+      .next_socket(addr)
       .send_to(&buf, addr)
       .await
       .map_err(|e| NetTransportError::Connection(ConnectionError::packet_write(e)))
@@ -320,7 +321,8 @@ where
         self.max_payload_size(),
       )?;
 
-      return self.sockets[0]
+      return self
+        .next_socket(addr)
         .send_to(&buf, addr)
         .await
         .map_err(|e| ConnectionError::packet_write(e).into());
@@ -345,7 +347,8 @@ where
     });
 
     match rx.await {
-      Ok(Ok(buf)) => self.sockets[0]
+      Ok(Ok(buf)) => self
+        .next_socket(addr)
         .send_to(&buf, addr)
         .await
         .map_err(|e| ConnectionError::packet_write(e).into()),
@@ -388,7 +391,8 @@ where
         self.max_payload_size(),
       )?;
 
-      return self.sockets[0]
+      return self
+        .next_socket(addr)
         .send_to(&buf, addr)
         .await
         .map_err(|e| ConnectionError::packet_write(e).into());
@@ -419,7 +423,8 @@ where
     });
 
     match rx.await {
-      Ok(Ok(buf)) => self.sockets[0]
+      Ok(Ok(buf)) => self
+        .next_socket(addr)
         .send_to(&buf, addr)
         .await
         .map_err(|e| ConnectionError::packet_write(e).into()),
@@ -475,7 +480,8 @@ where
         self.max_payload_size(),
       )?;
 
-      return self.sockets[0]
+      return self
+        .next_socket(addr)
         .send_to(&buf, addr)
         .await
         .map_err(|e| ConnectionError::packet_write(e).into());
@@ -509,7 +515,8 @@ where
     });
 
     match rx.await {
-      Ok(Ok(buf)) => self.sockets[0]
+      Ok(Ok(buf)) => self
+        .next_socket(addr)
         .send_to(&buf, addr)
         .await
         .map_err(|e| ConnectionError::packet_write(e).into()),

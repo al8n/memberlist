@@ -1,47 +1,98 @@
 use super::*;
 
-unit_tests_with_expr!(run(
-  handle_v4_ping_server_no_label_with_compression_with_encryption_client_no_label_no_compression_no_encryption ({
-    let pk = SecretKey::from([1; 32]);
-    let mut opts = NetTransportOptions::new("test_handle_v4_ping_server_no_label_no_compression_with_encryption_client_no_label_no_compression_no_encryption".into())
-      .with_primary_key(Some(pk))
-      .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
-      .with_gossip_verify_outgoing(true)
-      .with_compressor(Some(Compressor::Lzw));
-    opts.add_bind_address(next_socket_addr_v4());
-    let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<TokioRuntime>::new(), Tcp::<TokioRuntime>::new(), opts).await.unwrap();
-    let res = handle_ping(trans, |p| {
-      Message::ping(p).encode_to_vec().unwrap()
-    }, |src| {
-      let unencrypted = read_encrypted_data(pk, &[], src)?;
-      verify_checksum(&unencrypted)?;
-      let uncompressed = read_compressed_data(&unencrypted[5..])?;
-      Message::<SmolStr, SocketAddr>::decode(&uncompressed).map(|(_, msg)| msg.unwrap_ack()).map_err(Into::into)
-    }, next_socket_addr_v4()).await;
+pub async fn server_no_label_with_compression_with_encryption_client_no_label_no_compression_no_encryption<
+  S,
+  R,
+>(
+  s: S,
+  kind: AddressKind,
+) -> Result<(), AnyError>
+where
+  S: StreamLayer,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let pk = SecretKey::from([1; 32]);
+  let client = NetTransporTestClient::<R>::new(kind.next())
+    .await?
+    .with_receive_encrypted(Some(pk))
+    .with_receive_compressed(true);
 
-    if let Err(e) = res {
-      panic!("{:?}", e);
-    }
-  }),
-  handle_v6_ping_server_no_label_with_compression_with_encryption_client_no_label_no_compression_no_encryption ({
-    let pk = SecretKey::from([1; 32]);
-    let mut opts = NetTransportOptions::new("test_handle_v6_ping_server_no_label_no_compression_with_encryption_client_no_label_no_compression_no_encryption".into())
-      .with_primary_key(Some(pk))
-      .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
-      .with_gossip_verify_outgoing(true)
-      .with_compressor(Some(Compressor::Lzw));
-    opts.add_bind_address(next_socket_addr_v6());
-    let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<TokioRuntime>::new(), Tcp::<TokioRuntime>::new(), opts).await.unwrap();
-    let res = handle_ping(trans, |p| {
-      Message::ping(p).encode_to_vec().unwrap()
-    }, |src| {
-      let unencrypted = read_encrypted_data(pk, &[], src)?;
-      verify_checksum(&unencrypted)?;
-      let uncompressed = read_compressed_data(&unencrypted[5..])?;
-      Message::<SmolStr, SocketAddr>::decode(&uncompressed).map(|(_, msg)| msg.unwrap_ack()).map_err(Into::into)
-    }, next_socket_addr_v6()).await;
-    if let Err(e) = res {
-      panic!("{:?}", e);
-    }
-  }),
-));
+  let mut opts = NetTransportOptions::new(format!("{kind}_ping_server_no_label_with_compression_with_encryption_client_no_label_no_compression_no_encryption").into())
+    .with_primary_key(Some(pk))
+    .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+    .with_gossip_verify_outgoing(true)
+    .with_compressor(Some(Compressor::default()));
+  opts.add_bind_address(kind.next());
+  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+    .await
+    .unwrap();
+  handle_ping(trans, client).await?;
+  Ok(())
+}
+
+pub async fn server_no_label_no_compression_no_encryption_client_no_label_with_compression_with_encryption<
+  S,
+  R,
+>(
+  s: S,
+  kind: AddressKind,
+) -> Result<(), AnyError>
+where
+  S: StreamLayer,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let pk = SecretKey::from([1; 32]);
+  let client = NetTransporTestClient::<R>::new(kind.next())
+    .await?
+    .with_send_encrypted(Some((EncryptionAlgo::PKCS7, pk)))
+    .with_send_compressed(Some(Compressor::default()));
+
+  let mut opts = NetTransportOptions::new(format!("{kind}_ping_server_no_label_no_compression_no_encryption_client_no_label_no_compression_with_encryption").into())
+    .with_primary_key(Some(pk))
+    .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+    .with_gossip_verify_outgoing(false);
+  opts.add_bind_address(kind.next());
+  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+    .await
+    .unwrap();
+  handle_ping(trans, client).await?;
+  Ok(())
+}
+
+pub async fn server_no_label_no_compression_with_encryption_client_no_label_no_compression_with_encryption<
+  S,
+  R,
+>(
+  s: S,
+  kind: AddressKind,
+) -> Result<(), AnyError>
+where
+  S: StreamLayer,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let pk = SecretKey::from([1; 32]);
+  let client = NetTransporTestClient::<R>::new(kind.next())
+    .await?
+    .with_send_encrypted(Some((EncryptionAlgo::PKCS7, pk)))
+    .with_receive_encrypted(Some(pk))
+    .with_send_compressed(Some(Compressor::default()))
+    .with_receive_compressed(true);
+
+  let mut opts = NetTransportOptions::new(format!("{kind}_ping_server_no_label_no_compression_with_encryption_client_no_label_no_compression_with_encryption").into())
+    .with_primary_key(Some(pk))
+    .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+    .with_gossip_verify_outgoing(true)
+    .with_compressor(Some(Compressor::default()));
+  opts.add_bind_address(kind.next());
+  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+    .await
+    .unwrap();
+  handle_ping(trans, client).await?;
+  Ok(())
+}

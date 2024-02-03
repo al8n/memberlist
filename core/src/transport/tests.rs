@@ -9,12 +9,39 @@ use transformable::Transformable;
 
 use crate::{
   delegate::VoidDelegate,
-  tests::{get_memberlist, AnyError},
+  tests::{get_memberlist, next_socket_addr_v4, next_socket_addr_v6, AnyError},
   transport::Message,
   Options,
 };
 
 use super::{Ping, Transport};
+
+/// The kind of address
+pub enum AddressKind {
+  /// V4
+  V4,
+  /// V6
+  V6,
+}
+
+impl core::fmt::Display for AddressKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::V4 => write!(f, "v4"),
+      Self::V6 => write!(f, "v6"),
+    }
+  }
+}
+
+impl AddressKind {
+  /// Get the next address
+  pub fn next(&self) -> SocketAddr {
+    match self {
+      Self::V4 => next_socket_addr_v4(),
+      Self::V6 => next_socket_addr_v6(),
+    }
+  }
+}
 
 /// The client used to send/receive data to a transport
 pub trait Client: Sized + Send + Sync + 'static {

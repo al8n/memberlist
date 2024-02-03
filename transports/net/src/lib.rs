@@ -10,7 +10,7 @@ use std::{
   marker::PhantomData,
   net::{IpAddr, SocketAddr},
   sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
   },
   time::{Duration, Instant},
@@ -208,6 +208,13 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   #[error("computation task panic")]
   #[cfg(any(feature = "compression", feature = "encryption"))]
   ComputationTaskFailed,
+}
+
+impl<A: AddressResolver, W: Wire> NetTransportError<A, W> {
+  #[cfg(feature = "compression")]
+  pub(crate) fn not_enough_bytes_to_decompress() -> Self {
+    Self::Compressor(compressor::CompressorError::NotEnoughBytes)
+  }
 }
 
 impl<A: AddressResolver, W: Wire> core::fmt::Debug for NetTransportError<A, W> {
@@ -579,9 +586,10 @@ where
   local_addr: A::Address,
   packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
-  #[allow(dead_code)]
-  promised_listeners: SmallVec<Arc<S::Listener>>,
-  sockets: SmallVec<Arc<<<A::Runtime as Runtime>::Net as Net>::UdpSocket>>,
+  v4_round_robin: AtomicUsize,
+  v4_sockets: SmallVec<Arc<<<A::Runtime as Runtime>::Net as Net>::UdpSocket>>,
+  v6_round_robin: AtomicUsize,
+  v6_sockets: SmallVec<Arc<<<A::Runtime as Runtime>::Net as Net>::UdpSocket>>,
   stream_layer: Arc<S>,
   #[cfg(feature = "encryption")]
   encryptor: Option<SecretKeyring>,
@@ -659,9 +667,12 @@ where
     let (packet_tx, packet_rx) = packet_stream::<Self>();
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
 
-    let mut promised_listeners = Vec::with_capacity(opts.bind_addresses.len());
-    let mut sockets = Vec::with_capacity(opts.bind_addresses.len());
+    let mut v4_promised_listeners = Vec::with_capacity(opts.bind_addresses.len());
+    let mut v4_sockets = Vec::with_capacity(opts.bind_addresses.len());
+    let mut v6_promised_listeners = Vec::with_capacity(opts.bind_addresses.len());
+    let mut v6_sockets = Vec::with_capacity(opts.bind_addresses.len());
     let mut resolved_bind_address = SmallVec::new();
+
     for addr in opts.bind_addresses.iter() {
       let addr = resolver
         .resolve(addr)
@@ -692,7 +703,12 @@ where
           Err(e) => return Err(NetTransportError::ListenPromised(addr, e)),
         }
       };
-      promised_listeners.push((Arc::new(ln), local_addr));
+
+      if local_addr.is_ipv4() {
+        v4_promised_listeners.push((Arc::new(ln), local_addr));
+      } else {
+        v6_promised_listeners.push((Arc::new(ln), local_addr));
+      }
       // If the config port given was zero, use the first TCP listener
       // to pick an available port and then apply that to everything
       // else.
@@ -704,7 +720,11 @@ where
           .await
           .map(|ln| (addr, ln))
           .map_err(|e| NetTransportError::ListenPacket(addr, e))?;
-      sockets.push((Arc::new(packet_socket), local_addr));
+      if local_addr.is_ipv4() {
+        v4_sockets.push((Arc::new(packet_socket), local_addr));
+      } else {
+        v6_sockets.push((Arc::new(packet_socket), local_addr))
+      }
     }
 
     let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
@@ -716,8 +736,10 @@ where
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
-    for ((promised_ln, promised_addr), (socket, socket_addr)) in
-      promised_listeners.iter().zip(sockets.iter())
+    for ((promised_ln, promised_addr), (socket, socket_addr)) in v4_promised_listeners
+      .iter()
+      .zip(v4_sockets.iter())
+      .chain(v6_promised_listeners.iter().zip(v6_sockets.iter()))
     {
       wg.add(2);
       PromisedProcessor::<A, Self, S> {
@@ -789,8 +811,10 @@ where
       stream_rx,
       wg,
       shutdown,
-      promised_listeners: promised_listeners.into_iter().map(|(ln, _)| ln).collect(),
-      sockets: sockets.into_iter().map(|(ln, _)| ln).collect(),
+      v4_sockets: v4_sockets.into_iter().map(|(ln, _)| ln).collect(),
+      v4_round_robin: AtomicUsize::new(0),
+      v6_sockets: v6_sockets.into_iter().map(|(ln, _)| ln).collect(),
+      v6_round_robin: AtomicUsize::new(0),
       stream_layer,
       #[cfg(feature = "encryption")]
       encryptor,
@@ -798,6 +822,29 @@ where
       shutdown_tx,
       _marker: PhantomData,
     })
+  }
+
+  fn next_socket(
+    &self,
+    addr: &A::ResolvedAddress,
+  ) -> &<<A::Runtime as Runtime>::Net as Net>::UdpSocket {
+    if addr.is_ipv4() {
+      // if there's no v4 sockets, we assume remote addr can accept both v4 and v6
+      // give a try on v6
+      if self.v4_sockets.is_empty() {
+        let idx = self.v6_round_robin.fetch_add(1, Ordering::AcqRel) % self.v6_sockets.len();
+        &self.v6_sockets[idx]
+      } else {
+        let idx = self.v4_round_robin.fetch_add(1, Ordering::AcqRel) % self.v4_sockets.len();
+        &self.v4_sockets[idx]
+      }
+    } else if self.v6_sockets.is_empty() {
+      let idx = self.v4_round_robin.fetch_add(1, Ordering::AcqRel) % self.v4_sockets.len();
+      &self.v4_sockets[idx]
+    } else {
+      let idx = self.v6_round_robin.fetch_add(1, Ordering::AcqRel) % self.v6_sockets.len();
+      &self.v6_sockets[idx]
+    }
   }
 }
 
@@ -1322,16 +1369,18 @@ where
     OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
     NetTransportError<T::Resolver, T::Wire>,
   > {
-    let mut packet_label = buf.remove_label_header()?.unwrap_or_else(Label::empty);
+    let packet_label = buf.remove_label_header()?.unwrap_or_else(Label::empty);
 
-    if !skip_inbound_label_check {
-      if packet_label.ne(label) {
-        tracing::error!(target: "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
-        return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
-      }
-    } else {
-      // Set this from config so that the auth data assertions work below.
-      packet_label = label.cheap_clone();
+    #[cfg(not(feature = "encryption"))]
+    if !skip_inbound_label_check && packet_label.ne(label) {
+      tracing::error!(target: "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+      return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
+    }
+
+    #[cfg(feature = "encryption")]
+    if !skip_inbound_label_check && packet_label.ne(label) && encryptor.is_some() {
+      tracing::error!(target: "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+      return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
     }
 
     #[cfg(not(any(feature = "compression", feature = "encryption")))]
@@ -1345,6 +1394,8 @@ where
       buf,
       encryptor,
       packet_label,
+      label,
+      skip_inbound_label_check,
       offload_size,
       verify_incoming,
     )
@@ -1355,6 +1406,8 @@ where
       buf,
       encryptor,
       packet_label,
+      label,
+      skip_inbound_label_check,
       offload_size,
       verify_incoming,
     )
@@ -1365,7 +1418,9 @@ where
   async fn read_from_packet_with_compression_and_encryption(
     mut buf: BytesMut,
     encryptor: Option<&SecretKeyring>,
-    packet_label: Label,
+    mut packet_label: Label,
+    label: &Label,
+    skip_inbound_label_check: bool,
     offload_size: usize,
     verify_incoming: bool,
   ) -> Result<
@@ -1377,9 +1432,25 @@ where
         tracing::error!(target: "memberlist.net.packet", "incoming packet is not encrypted, and verify incoming is forced");
         return Err(SecurityError::Disabled.into());
       } else {
-        return Self::read_from_packet_without_compression_and_encryption(buf);
+        return Self::read_from_packet_with_compression_without_encryption(buf, offload_size).await;
       }
     }
+
+    if skip_inbound_label_check {
+      if !packet_label.is_empty() {
+        tracing::error!(target: "memberlist.net.promised", "unexpected double stream label header");
+        return Err(LabelError::duplicate(label.cheap_clone(), packet_label).into());
+      }
+
+      // Set this from config so that the auth data assertions work below.
+      packet_label = label.cheap_clone();
+    }
+
+    if packet_label.ne(label) {
+      tracing::error!(target: "memberlist.net.promised", local_label=%label, remote_label=%packet_label, "discarding stream with unacceptable label");
+      return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
+    }
+
     let algo = EncryptionAlgo::try_from(buf.get_u8())?;
     let encrypted_message_size = NetworkEndian::read_u32(&buf[..MAX_MESSAGE_LEN_SIZE]) as usize;
     buf.advance(MAX_MESSAGE_LEN_SIZE);
@@ -1421,8 +1492,11 @@ where
         let compressor = Compressor::try_from(buf.get_u8())?;
         let compressd_message_len = NetworkEndian::read_u32(&buf[..MAX_MESSAGE_LEN_SIZE]) as usize;
         buf.advance(MAX_MESSAGE_LEN_SIZE);
-        let compressed_message = buf.split_to(compressd_message_len);
-        Self::decompress_and_decode(compressor, compressed_message)
+        if compressd_message_len > buf.len() {
+          return Err(NetTransportError::not_enough_bytes_to_decompress());
+        }
+
+        Self::decompress_and_decode(compressor, buf)
       };
       if tx
         .send(
@@ -1452,7 +1526,9 @@ where
   async fn read_from_packet_with_encryption_without_compression(
     mut buf: BytesMut,
     encryptor: Option<&SecretKeyring>,
-    packet_label: Label,
+    mut packet_label: Label,
+    label: &Label,
+    skip_inbound_label_check: bool,
     offload_size: usize,
     verify_incoming: bool,
   ) -> Result<
@@ -1467,6 +1543,22 @@ where
         return Self::read_from_packet_without_compression_and_encryption(buf);
       }
     }
+
+    if skip_inbound_label_check {
+      if !packet_label.is_empty() {
+        tracing::error!(target: "memberlist.net.promised", "unexpected double stream label header");
+        return Err(LabelError::duplicate(label.cheap_clone(), packet_label).into());
+      }
+
+      // Set this from config so that the auth data assertions work below.
+      packet_label = label.cheap_clone();
+    }
+
+    if packet_label.ne(label) {
+      tracing::error!(target: "memberlist.net.promised", local_label=%label, remote_label=%packet_label, "discarding stream with unacceptable label");
+      return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
+    }
+
     let algo = EncryptionAlgo::try_from(buf.get_u8())?;
     let encrypted_message_size = NetworkEndian::read_u32(&buf[..MAX_MESSAGE_LEN_SIZE]) as usize;
     buf.advance(MAX_MESSAGE_LEN_SIZE);
@@ -1529,7 +1621,6 @@ where
     NetTransportError<T::Resolver, T::Wire>,
   > {
     Self::read_and_check_checksum(&mut buf)?;
-
     if !COMPRESS_TAG.contains(&buf[0]) {
       return Self::read_from_packet_without_compression_and_encryption(buf);
     }
@@ -1537,16 +1628,18 @@ where
     let compressor = Compressor::try_from(buf.get_u8())?;
     let compressd_message_len = NetworkEndian::read_u32(&buf[..MAX_MESSAGE_LEN_SIZE]) as usize;
     buf.advance(MAX_MESSAGE_LEN_SIZE);
-    let compressed_message = buf.split_to(compressd_message_len);
-
-    if compressed_message.len() <= offload_size {
-      return Self::decompress_and_decode(compressor, compressed_message);
+    if compressd_message_len > buf.len() {
+      return Err(NetTransportError::not_enough_bytes_to_decompress());
+    }
+    buf.truncate(compressd_message_len);
+    if buf.len() <= offload_size {
+      return Self::decompress_and_decode(compressor, buf);
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
     rayon::spawn(move || {
       if tx
-        .send(Self::decompress_and_decode(compressor, compressed_message))
+        .send(Self::decompress_and_decode(compressor, buf))
         .is_err()
       {
         tracing::error!(target: "memberlist.net.packet", "failed to send back to main thread");

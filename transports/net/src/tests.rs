@@ -9,7 +9,10 @@ use agnostic::{
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::Stream;
-use memberlist_core::{tests::AnyError, transport::tests::Client};
+use memberlist_core::{
+  tests::AnyError,
+  transport::tests::{AddressKind, Client},
+};
 use memberlist_utils::{Label, LabelBufMutExt};
 
 use crate::{
@@ -74,7 +77,7 @@ impl<R: Runtime> Client for NetTransporTestClient<R> {
 
     if let Some(compressor) = self.send_compressed {
       data.put_u8(compressor as u8);
-      let compressed = compressor.compress_into_bytes(&data)?;
+      let compressed = compressor.compress_into_bytes(src)?;
       let cur = data.len();
       // put compressed data length placeholder
       data.put_u32(0);
@@ -104,7 +107,6 @@ impl<R: Runtime> Client for NetTransporTestClient<R> {
     } else {
       out.put_slice(&data);
     }
-
     self.socket.send_to(&out, addr).await?;
     Ok(())
   }

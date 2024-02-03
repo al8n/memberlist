@@ -176,6 +176,14 @@ impl TryFrom<&str> for Label {
   }
 }
 
+impl TryFrom<&String> for Label {
+  type Error = InvalidLabel;
+
+  fn try_from(s: &String) -> Result<Self, Self::Error> {
+    s.as_str().try_into()
+  }
+}
+
 impl TryFrom<String> for Label {
   type Error = InvalidLabel;
 
