@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "tcp/label.rs"]
+mod label;
+
 #[path = "tcp/gossip_mismatched_keys.rs"]
 mod gossip_mismatched_keys;
 

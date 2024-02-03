@@ -23,6 +23,9 @@ use crate::{
 /// Unit test for handling [`Ping`] message
 pub mod handle_ping;
 
+/// Unit test for handling transport with label or not.
+pub mod label;
+
 /// A test client for network transport
 #[viewit::viewit(
   vis_all = "",

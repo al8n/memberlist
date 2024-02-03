@@ -1377,12 +1377,6 @@ where
       return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
     }
 
-    #[cfg(feature = "encryption")]
-    if !skip_inbound_label_check && packet_label.ne(label) && encryptor.is_some() {
-      tracing::error!(target: "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
-      return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
-    }
-
     #[cfg(not(any(feature = "compression", feature = "encryption")))]
     return Self::read_from_packet_without_compression_and_encryption(buf);
 
@@ -1432,6 +1426,10 @@ where
         tracing::error!(target: "memberlist.net.packet", "incoming packet is not encrypted, and verify incoming is forced");
         return Err(SecurityError::Disabled.into());
       } else {
+        if !skip_inbound_label_check && packet_label.ne(label) {
+          tracing::error!(target: "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+          return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
+        }
         return Self::read_from_packet_with_compression_without_encryption(buf, offload_size).await;
       }
     }
@@ -1540,6 +1538,10 @@ where
         tracing::error!(target: "memberlist.net.packet", "incoming packet is not encrypted, and verify incoming is forced");
         return Err(security::SecurityError::Disabled.into());
       } else {
+        if !skip_inbound_label_check && packet_label.ne(label) {
+          tracing::error!(target: "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+          return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
+        }
         return Self::read_from_packet_without_compression_and_encryption(buf);
       }
     }
