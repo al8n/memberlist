@@ -11,7 +11,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::Stream;
 use memberlist_core::{
   tests::AnyError,
-  transport::tests::{AddressKind, Client},
+  transport::tests::{AddressKind, TestPacketClient},
   types::Message,
 };
 use memberlist_utils::{Label, LabelBufMutExt};
@@ -81,7 +81,7 @@ impl<R: Runtime> NetTransporTestClient<R> {
   }
 }
 
-impl<R: Runtime> Client for NetTransporTestClient<R> {
+impl<R: Runtime> TestPacketClient for NetTransporTestClient<R> {
   async fn send_to(&mut self, addr: &SocketAddr, src: &[u8]) -> Result<(), AnyError> {
     let mut out = BytesMut::new();
     if self.send_label {
