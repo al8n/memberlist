@@ -128,9 +128,9 @@ impl EncryptionAlgo {
         let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
 
         // Sum the extra parts to get total size
-        NONCE_SIZE + inp + padding + TAG_SIZE
+        1 + 4 + NONCE_SIZE + inp + padding + TAG_SIZE
       }
-      Self::NoPadding => NONCE_SIZE + inp + TAG_SIZE,
+      Self::NoPadding => 1 + 4 + NONCE_SIZE + inp + TAG_SIZE,
     }
   }
 }
@@ -450,7 +450,7 @@ impl SecretKeyring {
     Self {
       inner: Arc::new(RwLock::new(SecretKeyringInner {
         primary_key,
-        keys: once(primary_key).collect(),
+        keys: IndexSet::new(),
       })),
     }
   }
@@ -580,76 +580,87 @@ fn pkcs7decode(buf: &mut BytesMut) {
 
 impl SecretKeyring {}
 
-// #[cfg(test)]
-// mod tests {
-//   use super::*;
+#[cfg(test)]
+mod tests {
+  use super::*;
 
-//   fn encrypt_decrypt_versioned(vsn: EncryptionAlgo) {
-//     let k1 = SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
-//     let plain_text = b"this is a plain text message";
-//     let extra = b"random data";
-//     let mut encrypted = BytesMut::new();
-//     encrypt_payload(&k1, vsn, plain_text, extra, &mut encrypted).unwrap();
+  fn encrypt_decrypt_versioned(vsn: EncryptionAlgo) {
+    let k1 = SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    let plain_text = b"this is a plain text message";
+    let extra = b"random data";
 
-//     let exp_len = vsn.encrypted_length(plain_text.len());
-//     assert_eq!(encrypted.len(), exp_len);
+    let mut encrypted = BytesMut::new();
+    let kr = SecretKeyring::new(k1);
+    encrypted.put_u8(vsn as u8);
+    encrypted.put_u32(0);
+    let nonce = kr.write_header(&mut encrypted);
+    let data_offset = encrypted.len();
+    encrypted.put_slice(plain_text);
 
-//     decrypt_payload([k1].into_iter(), &mut encrypted, extra, vsn).unwrap();
-//     assert_eq!(&encrypted[EncryptionAlgo::SIZE + NONCE_SIZE..], plain_text);
-//   }
+    let mut dst = encrypted.split_off(data_offset);
+    kr.encrypt(vsn, k1, nonce, extra, &mut dst).unwrap();
+    encrypted.unsplit(dst);
+    let exp_len = vsn.encrypted_length(plain_text.len());
+    assert_eq!(encrypted.len(), exp_len);
 
-//   #[test]
-//   fn test_encrypt_decrypt_v0() {
-//     encrypt_decrypt_versioned(EncryptionAlgo::PKCS7);
-//   }
+    encrypted.advance(5);
+    kr.read_nonce(&mut encrypted);
+    kr.decrypt(k1, vsn, nonce, extra, &mut encrypted).unwrap();
+    assert_eq!(encrypted.as_ref(), plain_text);
+  }
 
-//   #[test]
-//   fn test_encrypt_decrypt_v1() {
-//     encrypt_decrypt_versioned(EncryptionAlgo::NoPadding);
-//   }
+  #[test]
+  fn test_encrypt_decrypt_v0() {
+    encrypt_decrypt_versioned(EncryptionAlgo::PKCS7);
+  }
 
-//   const TEST_KEYS: &[SecretKey] = &[
-//     SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
-//     SecretKey::Aes128([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]),
-//     SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
-//   ];
+  #[test]
+  fn test_encrypt_decrypt_v1() {
+    encrypt_decrypt_versioned(EncryptionAlgo::NoPadding);
+  }
 
-//   #[test]
-//   fn test_primary_only() {
-//     let keyring = SecretKeyring::new(TEST_KEYS[1]);
-//     assert_eq!(keyring.keys().collect::<Vec<_>>().len(), 1);
-//   }
+  const TEST_KEYS: &[SecretKey] = &[
+    SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
+    SecretKey::Aes128([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]),
+    SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
+  ];
 
-//   #[test]
-//   fn test_get_primary_key() {
-//     let keyring = SecretKeyring::with_keys(TEST_KEYS[1], TEST_KEYS.to_vec());
-//     assert_eq!(keyring.primary_key().as_ref(), TEST_KEYS[1].as_ref());
-//   }
+  #[tokio::test]
+  async fn test_primary_only() {
+    let keyring = SecretKeyring::new(TEST_KEYS[1]);
+    assert_eq!(keyring.keys().await.collect::<Vec<_>>().len(), 1);
+  }
 
-//   #[test]
-//   fn test_insert_remove_use() {
-//     let keyring = SecretKeyring::new(TEST_KEYS[1]);
+  #[tokio::test]
+  async fn test_get_primary_key() {
+    let keyring = SecretKeyring::with_keys(TEST_KEYS[1], TEST_KEYS.iter().copied());
+    assert_eq!(keyring.primary_key().await.as_ref(), TEST_KEYS[1].as_ref());
+  }
 
-//     // Use non-existent key throws error
-//     keyring.use_key(&TEST_KEYS[2]).unwrap_err();
+  #[tokio::test]
+  async fn test_insert_remove_use() {
+    let keyring = SecretKeyring::new(TEST_KEYS[1]);
 
-//     // Add key to ring
-//     keyring.insert(TEST_KEYS[2]);
-//     assert_eq!(keyring.len(), 2);
-//     assert_eq!(keyring.keys().next().unwrap(), TEST_KEYS[1]);
+    // Use non-existent key throws error
+    keyring.use_key(&TEST_KEYS[2]).await.unwrap_err();
 
-//     // Use key that exists should succeed
-//     keyring.use_key(&TEST_KEYS[2]).unwrap();
-//     assert_eq!(keyring.keys().next().unwrap(), TEST_KEYS[2]);
+    // Add key to ring
+    keyring.insert(TEST_KEYS[2]).await;
+    assert_eq!(keyring.inner.read().await.keys.len() + 1, 2);
+    assert_eq!(keyring.keys().await.next().unwrap(), TEST_KEYS[1]);
 
-//     let primary_key = keyring.primary_key();
-//     assert_eq!(primary_key.as_ref(), TEST_KEYS[2].as_ref());
+    // Use key that exists should succeed
+    keyring.use_key(&TEST_KEYS[2]).await.unwrap();
+    assert_eq!(keyring.keys().await.next().unwrap(), TEST_KEYS[2]);
 
-//     // Removing primary key should fail
-//     keyring.remove(&TEST_KEYS[2]).unwrap_err();
+    let primary_key = keyring.primary_key().await;
+    assert_eq!(primary_key.as_ref(), TEST_KEYS[2].as_ref());
 
-//     // Removing non-primary key should succeed
-//     keyring.remove(&TEST_KEYS[1]).unwrap();
-//     assert_eq!(keyring.len(), 1);
-//   }
-// }
+    // Removing primary key should fail
+    keyring.remove(&TEST_KEYS[2]).await.unwrap_err();
+
+    // Removing non-primary key should succeed
+    keyring.remove(&TEST_KEYS[1]).await.unwrap();
+    assert_eq!(keyring.inner.read().await.keys.len() + 1, 1);
+  }
+}
