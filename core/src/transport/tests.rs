@@ -14,11 +14,11 @@ use smol_str::SmolStr;
 use transformable::Transformable;
 
 use crate::{
-  delegate::VoidDelegate,
+  delegate::{MockDelegate, VoidDelegate},
   state::LocalServerState,
   tests::{get_memberlist, next_socket_addr_v4, next_socket_addr_v6, AnyError},
   transport::{Ack, Alive, IndirectPing, Message},
-  Member, Options,
+  Member, Memberlist, Options,
 };
 
 use super::{Ping, PushPull, PushServerState, Server, ServerState, Transport};
@@ -682,9 +682,60 @@ where
   Ok(())
 }
 
-// pub async fn test_transport_join_runner() {
-//   todo!()
-// }
+pub async fn join<A, T1, T2, R>(trans1: T1, trans2: T2) -> Result<(), AnyError>
+where
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  T1: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  T2: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1 = Memberlist::new(trans1, Options::default()).await?;
+  let m2 = Memberlist::new(trans2, Options::default()).await?;
+  m2.join(Node::new(
+    m1.local_id().cheap_clone(),
+    m1.local_addr().clone(),
+  ))
+  .await?;
+  assert_eq!(m2.num_members().await, 2);
+  assert_eq!(m2.estimate_num_nodes(), 2);
+  Ok(())
+}
+
+pub async fn send<A, T1, T2, R>(trans1: T1, trans2: T2) -> Result<(), AnyError>
+where
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  T1: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  T2: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1 = Memberlist::with_delegate(trans1, MockDelegate::new(), Options::default()).await?;
+  let m2 = Memberlist::new(trans2, Options::default()).await?;
+
+  m2.join(Node::new(
+    m1.local_id().cheap_clone(),
+    m1.local_addr().clone(),
+  ))
+  .await?;
+  assert_eq!(m2.num_members().await, 2);
+  assert_eq!(m2.estimate_num_nodes(), 2);
+
+  m2.send(m1.advertise_addr(), Bytes::from_static(b"send"))
+    .await?;
+
+  m2.send_reliable(m1.advertise_addr(), Bytes::from_static(b"send_reliable"))
+    .await?;
+
+  R::sleep(Duration::from_millis(100)).await;
+
+  let mut msgs1 = m1.delegate().unwrap().get_messages().await;
+  msgs1.sort();
+  assert_eq!(msgs1, ["send".as_bytes(), "send_reliable".as_bytes()]);
+  Ok(())
+}
 
 // pub async fn test_transport_send_runner() {
 //   todo!()

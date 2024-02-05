@@ -51,6 +51,12 @@ pub mod promised_push_pull;
 #[cfg(feature = "encryption")]
 pub mod gossip_mismatch_keys;
 
+/// Unit test for sending
+pub mod send;
+
+/// Unit test for joining
+pub mod join;
+
 /// A test client for network transport
 #[viewit::viewit(
   vis_all = "",

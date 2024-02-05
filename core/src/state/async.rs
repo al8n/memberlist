@@ -467,7 +467,7 @@ where
       }
     } else {
       if let Err(err) = self.inner.transport.blocked_address(alive.node.address()) {
-        tracing::warn!(target =  "memberlist.state", local = %self.inner.id, remote = %alive.node, err=%err, "rejected node");
+        tracing::warn!(target = "memberlist.state", local = %self.inner.id, remote = %alive.node, err=%err, "rejected node");
         return;
       };
 

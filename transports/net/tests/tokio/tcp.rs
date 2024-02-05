@@ -27,3 +27,9 @@ mod promised_ping;
 
 #[path = "tcp/promised_push_pull.rs"]
 mod promised_push_pull;
+
+#[path = "tcp/send.rs"]
+mod send;
+
+#[path = "tcp/join.rs"]
+mod join;

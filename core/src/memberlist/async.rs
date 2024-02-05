@@ -100,6 +100,12 @@ where
     &self.inner.id
   }
 
+  /// Returns the local node address
+  #[inline]
+  pub fn local_addr(&self) -> &<T::Resolver as AddressResolver>::Address {
+    self.inner.transport.local_address()
+  }
+
   /// Returns a [`Node`] with the local id and the advertise address of local node.
   #[inline]
   pub fn advertise_node(&self) -> Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> {
@@ -146,6 +152,12 @@ where
       .iter()
       .map(|n| n.state.server.clone())
       .collect()
+  }
+
+  /// Returns number of members
+  #[inline]
+  pub async fn num_members(&self) -> usize {
+    self.inner.nodes.read().await.nodes.len()
   }
 
   /// Returns the number of alive nodes currently known. Between
@@ -459,7 +471,7 @@ where
   }
 
   /// Join directly by contacting the given node id
-  pub async fn join_node(
+  pub async fn join(
     &self,
     node: Node<T::Id, <T::Resolver as AddressResolver>::Address>,
   ) -> Result<(), Error<T, D>> {
@@ -476,18 +488,6 @@ where
       .map_err(Error::Transport)?;
     self.push_pull_node(Node::new(id, addr), true).await
   }
-
-  // /// Join directly by contacting the given node ids
-  // pub async fn join_nodes(
-  //   &self,
-  //   ids: &[ServerId],
-  // ) -> Result<(), Error<T, D>> {
-  //   if !self.is_running() {
-  //     return Err(Error::NotRunning);
-  //   }
-
-  //   self.push_pull_node(ids, true).await
-  // }
 
   /// Used to take an existing Memberlist and attempt to join a cluster
   /// by contacting all the given hosts and performing a state sync. Initially,
