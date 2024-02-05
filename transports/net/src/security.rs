@@ -600,13 +600,48 @@ mod tests {
     let mut dst = encrypted.split_off(data_offset);
     kr.encrypt(vsn, k1, nonce, extra, &mut dst).unwrap();
     encrypted.unsplit(dst);
-    let exp_len = vsn.encrypted_length(plain_text.len());
+    let exp_len = vsn.encrypted_length(plain_text.len()) + 5;
     assert_eq!(encrypted.len(), exp_len);
 
     encrypted.advance(5);
     kr.read_nonce(&mut encrypted);
     kr.decrypt(k1, vsn, nonce, extra, &mut encrypted).unwrap();
     assert_eq!(encrypted.as_ref(), plain_text);
+  }
+
+  async fn decrypt_by_other_key(algo: EncryptionAlgo) {
+    let k1 = SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    let plain_text = b"this is a plain text message";
+    let extra = b"random data";
+
+    let mut encrypted = BytesMut::new();
+    let kr = SecretKeyring::new(k1);
+    encrypted.put_u8(algo as u8);
+    encrypted.put_u32(0);
+    let nonce = kr.write_header(&mut encrypted);
+    let data_offset = encrypted.len();
+    encrypted.put_slice(plain_text);
+
+    let mut dst = encrypted.split_off(data_offset);
+    kr.encrypt(algo, k1, nonce, extra, &mut dst).unwrap();
+    encrypted.unsplit(dst);
+    let exp_len = algo.encrypted_length(plain_text.len()) + 5;
+    assert_eq!(encrypted.len(), exp_len);
+
+    encrypted.advance(5);
+    kr.read_nonce(&mut encrypted);
+
+    for (idx, k) in TEST_KEYS.iter().rev().enumerate() {
+      if idx == TEST_KEYS.len() - 1 {
+        kr.decrypt(*k, algo, nonce, extra, &mut encrypted).unwrap();
+        assert_eq!(encrypted.as_ref(), plain_text);
+        return;
+      }
+      let e = kr
+        .decrypt(*k, algo, nonce, extra, &mut encrypted)
+        .unwrap_err();
+      assert_eq!(e.to_string(), "security: aead::Error");
+    }
   }
 
   #[test]
@@ -617,6 +652,18 @@ mod tests {
   #[test]
   fn test_encrypt_decrypt_v1() {
     encrypt_decrypt_versioned(EncryptionAlgo::NoPadding);
+  }
+
+  #[tokio::test]
+  async fn test_decrypt_by_other_key_v0() {
+    let algo = EncryptionAlgo::PKCS7;
+    decrypt_by_other_key(algo).await;
+  }
+
+  #[tokio::test]
+  async fn test_decrypt_by_other_key_v1() {
+    let algo = EncryptionAlgo::NoPadding;
+    decrypt_by_other_key(algo).await;
   }
 
   const TEST_KEYS: &[SecretKey] = &[
