@@ -2,6 +2,8 @@ use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
 use transformable::{utils::*, Transformable};
 
+const MAX_INLINED_BYTES: usize = 64;
+
 /// Ack response is sent for a ping
 #[viewit::viewit(setters(prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -51,21 +53,17 @@ impl Transformable for Ack {
       return Err(Self::Error::BufferTooSmall);
     }
 
-    NetworkEndian::write_u32(dst, self.seq_no);
-    let mut offset = core::mem::size_of::<u32>();
+    let mut offset = 0;
+    NetworkEndian::write_u32(dst, encoded_len as u32);
+    offset += core::mem::size_of::<u32>();
+    NetworkEndian::write_u32(&mut dst[offset..], self.seq_no);
+    offset += core::mem::size_of::<u32>();
 
+    let payload_size = self.payload.len();
     if !self.payload.is_empty() {
-      dst[offset] = 1;
-      offset += 1;
-      let payload_len = self.payload.len() as u32;
-      NetworkEndian::write_u32(&mut dst[offset..], payload_len);
-      offset += core::mem::size_of::<u32>();
-      dst[offset..offset + payload_len as usize].copy_from_slice(&self.payload);
-      offset += payload_len as usize;
-    } else {
-      dst[offset] = 0;
-      offset += 1;
+      dst[offset..offset + payload_size].copy_from_slice(&self.payload);
     }
+
     debug_assert_eq!(
       offset, encoded_len,
       "expect bytes written ({encoded_len}) not match actual bytes writtend ({offset})"
@@ -74,13 +72,7 @@ impl Transformable for Ack {
   }
 
   fn encoded_len(&self) -> usize {
-    core::mem::size_of::<u32>()
-      + 1
-      + if self.payload.is_empty() {
-        0
-      } else {
-        core::mem::size_of::<u32>() + self.payload.len()
-      }
+    core::mem::size_of::<u32>() + core::mem::size_of::<u32>() + self.payload.len()
   }
 
   fn decode(src: &[u8]) -> Result<(usize, Self), Self::Error>
@@ -88,30 +80,111 @@ impl Transformable for Ack {
     Self: Sized,
   {
     let mut offset = 0;
-    if core::mem::size_of::<u32>() + 1 > src.len() {
+    if core::mem::size_of::<u32>() > src.len() {
       return Err(Self::Error::NotEnoughBytes);
     }
 
+    let total_len = NetworkEndian::read_u32(&src[offset..]);
+    offset += core::mem::size_of::<u32>();
     let seq_no = NetworkEndian::read_u32(&src[offset..]);
     offset += core::mem::size_of::<u32>();
 
-    let is_payload_empty = src[offset] == 0;
-    offset += 1;
+    if total_len as usize == core::mem::size_of::<u32>() {
+      return Ok((
+        offset,
+        Self {
+          seq_no,
+          payload: Bytes::new(),
+        },
+      ));
+    }
 
-    if is_payload_empty {
-      Ok((offset, Self::new(seq_no)))
+    if total_len as usize - core::mem::size_of::<u32>() > src.len() {
+      return Err(Self::Error::NotEnoughBytes);
+    }
+
+    let payload = Bytes::copy_from_slice(&src[offset..total_len as usize]);
+    Ok((total_len as usize, Self { seq_no, payload }))
+  }
+
+  fn decode_from_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<(usize, Self)>
+  where
+    Self: Sized,
+  {
+    let mut buf = [0; 8];
+    reader.read_exact(&mut buf)?;
+    let total_len = NetworkEndian::read_u32(&buf) as usize;
+    let seq_no = NetworkEndian::read_u32(&buf[core::mem::size_of::<u32>()..]);
+
+    if total_len == 2 * core::mem::size_of::<u32>() {
+      return Ok((
+        total_len,
+        Self {
+          seq_no,
+          payload: Bytes::new(),
+        },
+      ));
+    }
+
+    let payload_len = total_len - core::mem::size_of::<u32>();
+    if payload_len <= MAX_INLINED_BYTES {
+      let mut buf = [0; MAX_INLINED_BYTES];
+      reader.read_exact(&mut buf[..payload_len])?;
+      let payload = Bytes::copy_from_slice(&buf[..payload_len]);
+      Ok((total_len, Self { seq_no, payload }))
     } else {
-      if offset + core::mem::size_of::<u32>() > src.len() {
-        return Err(Self::Error::NotEnoughBytes);
-      }
-      let payload_len = NetworkEndian::read_u32(&src[offset..]);
-      offset += core::mem::size_of::<u32>();
-      if offset + payload_len as usize > src.len() {
-        return Err(Self::Error::NotEnoughBytes);
-      }
-      let payload = Bytes::copy_from_slice(&src[offset..offset + payload_len as usize]);
-      offset += payload_len as usize;
-      Ok((offset, Self { seq_no, payload }))
+      let mut payload = vec![0; payload_len];
+      reader.read_exact(&mut payload)?;
+      Ok((
+        total_len,
+        Self {
+          seq_no,
+          payload: payload.into(),
+        },
+      ))
+    }
+  }
+
+  async fn decode_from_async_reader<R: futures::AsyncRead + Send + Unpin>(
+    reader: &mut R,
+  ) -> std::io::Result<(usize, Self)>
+  where
+    Self: Sized,
+  {
+    use futures::AsyncReadExt;
+
+    let mut buf = [0; 8];
+    reader.read_exact(&mut buf).await?;
+
+    let total_len = NetworkEndian::read_u32(&buf) as usize;
+    let seq_no = NetworkEndian::read_u32(&buf[core::mem::size_of::<u32>()..]);
+
+    if total_len == 2 * core::mem::size_of::<u32>() {
+      return Ok((
+        total_len,
+        Self {
+          seq_no,
+          payload: Bytes::new(),
+        },
+      ));
+    }
+
+    let payload_len = total_len - core::mem::size_of::<u32>();
+    if payload_len <= MAX_INLINED_BYTES {
+      let mut buf = [0; MAX_INLINED_BYTES];
+      reader.read_exact(&mut buf[..payload_len]).await?;
+      let payload = Bytes::copy_from_slice(&buf[..payload_len]);
+      Ok((total_len, Self { seq_no, payload }))
+    } else {
+      let mut payload = vec![0; payload_len];
+      reader.read_exact(&mut payload).await?;
+      Ok((
+        total_len,
+        Self {
+          seq_no,
+          payload: payload.into(),
+        },
+      ))
     }
   }
 }

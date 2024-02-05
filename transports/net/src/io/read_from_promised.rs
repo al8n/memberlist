@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(all(feature = "compression", not(feature = "encryption")))]
+#[cfg(feature = "compression")]
 const MAX_INLINED_BYTES: usize = 64;
 
 impl<I, A, S, W> NetTransport<I, A, S, W>
@@ -19,7 +19,7 @@ where
       .map_err(|e| ConnectionError::promised_read(e).into())
   }
 
-  #[cfg(all(feature = "compression", not(feature = "encryption")))]
+  #[cfg(feature = "compression")]
   pub(crate) async fn read_from_promised_with_compression_without_encryption(
     &self,
     mut conn: peekable::future::AsyncPeekable<impl AsyncRead + Send + Unpin>,
@@ -78,7 +78,10 @@ where
     readed += data_len;
     rayon::spawn(move || {
       if tx.send(Self::decompress(compressor, &data)).is_err() {
-        tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
+        tracing::error!(
+          target = "memberlist.net.promised",
+          "failed to send computation task result back to main thread"
+        );
       }
     });
 
@@ -120,8 +123,8 @@ where
     let encryption_algo = EncryptionAlgo::try_from(encrypt_message_overhead[0])?;
     let encrypted_message_len = NetworkEndian::read_u32(&encrypt_message_overhead[1..]) as usize;
 
-    if encrypted_message_len <= encryption_algo.encrypted_length(0) {
-      tracing::error!(target: "memberlist.net.promised", remote = %from, "received encrypted message with small payload");
+    if encrypted_message_len < encryption_algo.encrypted_length(0) {
+      tracing::error!(target = "memberlist.net.promised", remote = %from, "received encrypted message with small payload");
       return Err(SecurityError::SmallPayload.into());
     }
 
@@ -129,7 +132,7 @@ where
     let enp = match self.encryptor.as_ref() {
       Some(enp) => enp,
       None => {
-        tracing::error!(target: "memberlist.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
+        tracing::error!(target = "memberlist.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
         return Err(SecurityError::Disabled.into());
       }
     };
@@ -149,7 +152,7 @@ where
     let keys = enp.keys().await;
     if encrypted_message_len <= self.opts.offload_size {
       let buf = Self::decrypt(enp, encryption_algo, keys, stream_label.as_bytes(), buf)?;
-      let msg = W::decode_message(&buf).map_err(NetTransportError::Wire)?;
+      let (_, msg) = W::decode_message(&buf).map_err(NetTransportError::Wire)?;
       return Ok((readed, msg));
     }
 
@@ -163,12 +166,15 @@ where
         )
         .is_err()
       {
-        tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
+        tracing::error!(
+          target = "memberlist.net.promised",
+          "failed to send computation task result back to main thread"
+        );
       }
     });
 
     match rx.await {
-      Ok(Ok(msg)) => Ok((readed, msg)),
+      Ok(Ok((_, msg))) => Ok((readed, msg)),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(NetTransportError::ComputationTaskFailed),
     }
@@ -192,7 +198,7 @@ where
     let tag = tag[0];
     if !ENCRYPT_TAG.contains(&tag) {
       return self
-        .read_from_promised_without_compression_and_encryption(conn)
+        .read_from_promised_with_compression_without_encryption(conn)
         .await;
     }
 
@@ -200,7 +206,7 @@ where
     let enp = match self.encryptor.as_ref() {
       Some(enp) => enp,
       None => {
-        tracing::error!(target: "memberlist.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
+        tracing::error!(target = "memberlist.net.promised", remote = %from, "received encrypted message, but encryption is disabled");
         return Err(SecurityError::Disabled.into());
       }
     };
@@ -214,8 +220,8 @@ where
     let encryption_algo = EncryptionAlgo::try_from(encrypt_message_overhead[0])?;
     let encrypted_message_len = NetworkEndian::read_u32(&encrypt_message_overhead[1..]) as usize;
 
-    if encrypted_message_len <= encryption_algo.encrypted_length(0) {
-      tracing::error!(target: "memberlist.net.promised", remote = %from, "received encrypted message with small payload");
+    if encrypted_message_len < encryption_algo.encrypted_length(0) {
+      tracing::error!(target = "memberlist.net.promised", remote = %from, "received encrypted message with small payload");
       return Err(SecurityError::SmallPayload.into());
     }
 
@@ -256,7 +262,10 @@ where
         ))
         .is_err()
       {
-        tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
+        tracing::error!(
+          target = "memberlist.net.promised",
+          "failed to send computation task result back to main thread"
+        );
       }
     });
 
@@ -292,7 +301,11 @@ where
       match encryptor.decrypt(key, algo, nonce, auth_data, &mut data) {
         Ok(_) => return Ok(data),
         Err(e) => {
-          tracing::error!(target: "memberlist.net.promised", "failed to decrypt message: {}", e);
+          tracing::error!(
+            target = "memberlist.net.promised",
+            "failed to decrypt message: {}",
+            e
+          );
           continue;
         }
       }

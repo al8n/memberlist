@@ -86,11 +86,19 @@ impl<R: Runtime> StreamLayer for S2n<R> {
       .map_err(invalid_data)?;
 
     let actual_client_addr = client.local_addr()?;
-    tracing::info!(target: "memberlist.transport.quic", "bind client to dynamic address {}", actual_client_addr);
+    tracing::info!(
+      target = "memberlist.transport.quic",
+      "bind client to dynamic address {}",
+      actual_client_addr
+    );
 
     let actual_local_addr = srv.local_addr()?;
     if auto_server_port {
-      tracing::info!(target: "memberlist.transport.quic", "bind server to dynamic address {}", actual_local_addr);
+      tracing::info!(
+        target = "memberlist.transport.quic",
+        "bind server to dynamic address {}",
+        actual_local_addr
+      );
     }
     let (bi, uni) = futures::lock::BiLock::new(srv);
     let bi = Self::BiAcceptor {

@@ -79,7 +79,10 @@ where
           ))
           .is_err()
         {
-          tracing::error!(target: "memberlist.quic", "failed to send compressed message back to the main thread");
+          tracing::error!(
+            target = "memberlist.quic",
+            "failed to send compressed message back to the main thread"
+          );
         }
       });
 

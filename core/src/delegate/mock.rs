@@ -235,7 +235,7 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
             return Ok(());
           }
         }
-        tracing::info!(target:  "memberlist.mock.delegate", "cancel alive");
+        tracing::info!(target = "memberlist.mock.delegate", "cancel alive");
         Err(MockDelegateError::CustomAliveCancelled)
       }
       _ => Ok(()),
@@ -259,7 +259,7 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
   async fn notify_merge(&self, _peers: SmallVec<Arc<Server<I, A>>>) -> Result<(), Self::Error> {
     match self.ty {
       MockDelegateType::CancelMerge => {
-        tracing::info!(target:  "memberlist.mock.delegate", "cancel merge");
+        tracing::info!(target = "memberlist.mock.delegate", "cancel merge");
         self.invoked.store(true, Ordering::SeqCst);
         Err(MockDelegateError::CustomMergeCancelled)
       }

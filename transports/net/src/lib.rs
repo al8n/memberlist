@@ -620,7 +620,10 @@ where
     #[cfg(feature = "encryption")]
     let keyring = match (opts.primary_key, &opts.secret_keys) {
       (None, Some(keys)) if !keys.is_empty() => {
-        tracing::warn!(target: "memberlist", "using first key in keyring as primary key");
+        tracing::warn!(
+          target = "memberlist",
+          "using first key in keyring as primary key"
+        );
         let mut iter = keys.iter().copied();
         let pk = iter.next().unwrap();
         let keyring = SecretKeyring::with_keys(pk, iter);
@@ -789,18 +792,18 @@ where
       if S::is_secure()
         && (encryptor.is_none() || opts.encryption_algo.is_none() || !opts.gossip_verify_outgoing)
       {
-        tracing::warn!(target: "memberlist", advertise_addr=%final_advertise_addr, "binding to public address without enabling encryption for packet stream layer!");
+        tracing::warn!(target = "memberlist", advertise_addr=%final_advertise_addr, "binding to public address without enabling encryption for packet stream layer!");
       }
 
       #[cfg(feature = "encryption")]
       if !S::is_secure()
         && (encryptor.is_none() || opts.encryption_algo.is_none() || !opts.gossip_verify_outgoing)
       {
-        tracing::warn!(target: "memberlist", advertise_addr=%final_advertise_addr, "binding to public address without enabling encryption for stream layer!");
+        tracing::warn!(target = "memberlist", advertise_addr=%final_advertise_addr, "binding to public address without enabling encryption for stream layer!");
       }
 
       #[cfg(not(feature = "encryption"))]
-      tracing::warn!(target: "memberlist", advertise_addr=%final_advertise_addr, "binding to public address without enabling encryption for stream layer!");
+      tracing::warn!(target = "memberlist", advertise_addr=%final_advertise_addr, "binding to public address without enabling encryption for stream layer!");
     }
 
     Ok(Self {
@@ -945,7 +948,7 @@ where
   > {
     let mut conn = BufReader::new(conn).peekable();
     let mut stream_label = label::remove_label_header(&mut conn).await.map_err(|e| {
-      tracing::error!(target: "memberlist.net.promised", remote = %from, err=%e, "failed to receive and remove the stream label header");
+      tracing::error!(target = "memberlist.net.promised", remote = %from, err=%e, "failed to receive and remove the stream label header");
       ConnectionError::promised_read(e)
     })?.unwrap_or_else(Label::empty);
 
@@ -953,7 +956,10 @@ where
 
     if self.opts.skip_inbound_label_check {
       if !stream_label.is_empty() {
-        tracing::error!(target: "memberlist.net.promised", "unexpected double stream label header");
+        tracing::error!(
+          target = "memberlist.net.promised",
+          "unexpected double stream label header"
+        );
         return Err(LabelError::duplicate(label.cheap_clone(), stream_label).into());
       }
 
@@ -962,7 +968,7 @@ where
     }
 
     if stream_label.ne(&self.opts.label) {
-      tracing::error!(target: "memberlist.net.promised", local_label=%label, remote_label=%stream_label, "discarding stream with unacceptable label");
+      tracing::error!(target = "memberlist.net.promised", local_label=%label, remote_label=%stream_label, "discarding stream with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), stream_label).into());
     }
 
@@ -1218,7 +1224,7 @@ where
                   .send(remote_addr, conn)
                   .await
                 {
-                  tracing::error!(target:  "memberlist.transport.net", local_addr=%local_addr, err = %e, "failed to send TCP connection");
+                  tracing::error!(target =  "memberlist.transport.net", local_addr=%local_addr, err = %e, "failed to send TCP connection");
                 }
               }
               Err(e) => {
@@ -1236,7 +1242,7 @@ where
                   loop_delay = MAX_DELAY;
                 }
 
-                tracing::error!(target:  "memberlist.transport.net", local_addr=%local_addr, err = %e, "error accepting TCP connection");
+                tracing::error!(target =  "memberlist.transport.net", local_addr=%local_addr, err = %e, "error accepting TCP connection");
                 <T::Runtime as Runtime>::sleep(loop_delay).await;
                 continue;
               }
@@ -1289,7 +1295,7 @@ where
     <T::Runtime as Runtime>::spawn_detach(async move {
       scopeguard::defer!(wg.done());
       tracing::info!(
-        target: "memberlist.transport.net",
+        target = "memberlist.transport.net",
         "udp listening on {local_addr}"
       );
 
@@ -1308,7 +1314,7 @@ where
                 // Check the length - it needs to have at least one byte to be a
                 // proper message.
                 if n < 1 {
-                  tracing::error!(target: "memberlist.packet", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
+                  tracing::error!(target = "memberlist.packet", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
                   continue;
                 }
                 buf.truncate(n);
@@ -1326,7 +1332,7 @@ where
                 ).await {
                   Ok(msg) => msg,
                   Err(e) => {
-                    tracing::error!(target: "memberlist.packet", local=%local_addr, from=%addr, err = %e, "fail to handle UDP packet");
+                    tracing::error!(target = "memberlist.packet", local=%local_addr, from=%addr, err = %e, "fail to handle UDP packet");
                     continue;
                   }
                 };
@@ -1337,7 +1343,7 @@ where
                 }
 
                 if let Err(e) = packet_tx.send(Packet::new(msg, addr, start)).await {
-                  tracing::error!(target: "memberlist.packet", local=%local_addr, from=%addr, err = %e, "failed to send packet");
+                  tracing::error!(target = "memberlist.packet", local=%local_addr, from=%addr, err = %e, "failed to send packet");
                 }
 
                 #[cfg(feature = "metrics")]
@@ -1348,7 +1354,7 @@ where
                   break;
                 }
 
-                tracing::error!(target: "memberlist.transport.net", peer=%local_addr, err = %e, "error reading UDP packet");
+                tracing::error!(target = "memberlist.transport.net", peer=%local_addr, err = %e, "error reading UDP packet");
                 continue;
               }
             };
@@ -1373,7 +1379,7 @@ where
 
     #[cfg(not(feature = "encryption"))]
     if !skip_inbound_label_check && packet_label.ne(label) {
-      tracing::error!(target: "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+      tracing::error!(target = "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
     }
 
@@ -1423,11 +1429,14 @@ where
   > {
     if !ENCRYPT_TAG.contains(&buf[0]) {
       if verify_incoming {
-        tracing::error!(target: "memberlist.net.packet", "incoming packet is not encrypted, and verify incoming is forced");
+        tracing::error!(
+          target = "memberlist.net.packet",
+          "incoming packet is not encrypted, and verify incoming is forced"
+        );
         return Err(SecurityError::Disabled.into());
       } else {
         if !skip_inbound_label_check && packet_label.ne(label) {
-          tracing::error!(target: "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+          tracing::error!(target = "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
           return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
         }
         return Self::read_from_packet_with_compression_without_encryption(buf, offload_size).await;
@@ -1436,7 +1445,10 @@ where
 
     if skip_inbound_label_check {
       if !packet_label.is_empty() {
-        tracing::error!(target: "memberlist.net.promised", "unexpected double stream label header");
+        tracing::error!(
+          target = "memberlist.net.promised",
+          "unexpected double stream label header"
+        );
         return Err(LabelError::duplicate(label.cheap_clone(), packet_label).into());
       }
 
@@ -1445,7 +1457,7 @@ where
     }
 
     if packet_label.ne(label) {
-      tracing::error!(target: "memberlist.net.promised", local_label=%label, remote_label=%packet_label, "discarding stream with unacceptable label");
+      tracing::error!(target = "memberlist.net.promised", local_label=%label, remote_label=%packet_label, "discarding stream with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
     }
 
@@ -1509,7 +1521,10 @@ where
         )
         .is_err()
       {
-        tracing::error!(target: "memberlist.net.packet", "failed to send back to main thread");
+        tracing::error!(
+          target = "memberlist.net.packet",
+          "failed to send back to main thread"
+        );
       }
     });
 
@@ -1535,11 +1550,14 @@ where
   > {
     if !ENCRYPT_TAG.contains(&buf[0]) {
       if verify_incoming {
-        tracing::error!(target: "memberlist.net.packet", "incoming packet is not encrypted, and verify incoming is forced");
+        tracing::error!(
+          target = "memberlist.net.packet",
+          "incoming packet is not encrypted, and verify incoming is forced"
+        );
         return Err(security::SecurityError::Disabled.into());
       } else {
         if !skip_inbound_label_check && packet_label.ne(label) {
-          tracing::error!(target: "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+          tracing::error!(target = "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
           return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
         }
         return Self::read_from_packet_without_compression_and_encryption(buf);
@@ -1548,7 +1566,10 @@ where
 
     if skip_inbound_label_check {
       if !packet_label.is_empty() {
-        tracing::error!(target: "memberlist.net.promised", "unexpected double stream label header");
+        tracing::error!(
+          target = "memberlist.net.promised",
+          "unexpected double stream label header"
+        );
         return Err(LabelError::duplicate(label.cheap_clone(), packet_label).into());
       }
 
@@ -1557,7 +1578,7 @@ where
     }
 
     if packet_label.ne(label) {
-      tracing::error!(target: "memberlist.net.promised", local_label=%label, remote_label=%packet_label, "discarding stream with unacceptable label");
+      tracing::error!(target = "memberlist.net.promised", local_label=%label, remote_label=%packet_label, "discarding stream with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
     }
 
@@ -1603,7 +1624,10 @@ where
         )
         .is_err()
       {
-        tracing::error!(target: "memberlist.net.packet", "failed to send back to main thread");
+        tracing::error!(
+          target = "memberlist.net.packet",
+          "failed to send back to main thread"
+        );
       }
     });
 
@@ -1644,7 +1668,10 @@ where
         .send(Self::decompress_and_decode(compressor, buf))
         .is_err()
       {
-        tracing::error!(target: "memberlist.net.packet", "failed to send back to main thread");
+        tracing::error!(
+          target = "memberlist.net.packet",
+          "failed to send back to main thread"
+        );
       }
     });
 
@@ -1696,7 +1723,11 @@ where
       match encryptor.decrypt(key, algo, nonce, auth_data, data) {
         Ok(_) => return Ok(()),
         Err(e) => {
-          tracing::error!(target: "memberlist.net.promised", "failed to decrypt message: {}", e);
+          tracing::error!(
+            target = "memberlist.net.promised",
+            "failed to decrypt message: {}",
+            e
+          );
           continue;
         }
       }

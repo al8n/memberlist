@@ -128,9 +128,9 @@ impl EncryptionAlgo {
         let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
 
         // Sum the extra parts to get total size
-        1 + 4 + NONCE_SIZE + inp + padding + TAG_SIZE
+        NONCE_SIZE + inp + padding + TAG_SIZE
       }
-      Self::NoPadding => 1 + 4 + NONCE_SIZE + inp + TAG_SIZE,
+      Self::NoPadding => NONCE_SIZE + inp + TAG_SIZE,
     }
   }
 }

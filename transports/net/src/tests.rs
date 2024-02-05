@@ -11,7 +11,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::Stream;
 use memberlist_core::{
   tests::AnyError,
-  transport::tests::{AddressKind, TestPacketClient},
+  transport::tests::{AddressKind, TestPacketClient, TestPromisedClient},
   types::Message,
 };
 use memberlist_utils::{Label, LabelBufMutExt};
@@ -20,7 +20,7 @@ use smol_str::SmolStr;
 
 use crate::{
   security::{EncryptionAlgo, SecretKey, SecretKeyring},
-  Checksumer, Compressor,
+  Checksumer, Compressor, Listener, StreamLayer,
 };
 
 /// Unit test for handling [`Ping`] message
@@ -40,6 +40,9 @@ pub mod packet_piggyback;
 
 /// Unit test for handling transport with label or not.
 pub mod label;
+
+/// Unit test for handling promised ping
+pub mod promised_ping;
 
 /// A test client for network transport
 #[viewit::viewit(
@@ -155,6 +158,40 @@ impl<R: Runtime> TestPacketClient for NetTransporTestClient<R> {
       unencrypted
     };
     Ok((uncompressed, addr))
+  }
+
+  fn local_addr(&self) -> SocketAddr {
+    self.local_addr
+  }
+}
+
+/// A test client for network transport
+#[viewit::viewit(
+  vis_all = "",
+  getters(vis_all = "pub", style = "ref"),
+  setters(vis_all = "pub", prefix = "with")
+)]
+pub struct NetTransporTestPromisedClient<S: StreamLayer> {
+  ln: S::Listener,
+  local_addr: SocketAddr,
+}
+
+impl<S: StreamLayer> NetTransporTestPromisedClient<S> {
+  /// Creates a new test client with the given address
+  pub fn new(addr: SocketAddr, ln: S::Listener) -> Self {
+    Self {
+      local_addr: addr,
+      ln,
+    }
+  }
+}
+
+impl<S: StreamLayer> TestPromisedClient for NetTransporTestPromisedClient<S> {
+  type Stream = S::Stream;
+
+  async fn accept(&self) -> Result<(Self::Stream, SocketAddr), AnyError> {
+    let (stream, addr) = self.ln.accept().await?;
+    Ok((stream, addr))
   }
 
   fn local_addr(&self) -> SocketAddr {

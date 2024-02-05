@@ -84,7 +84,7 @@ where
       .dial_timeout(node.address(), self.inner.opts.timeout)
       .await
       .map_err(Error::transport)?;
-    tracing::debug!(target:  "memberlist", local_addr = %self.inner.id, peer_addr = %node, "initiating push/pull sync");
+    tracing::debug!(target =  "memberlist", local_addr = %self.inner.id, peer_addr = %node, "initiating push/pull sync");
 
     #[cfg(feature = "metrics")]
     {

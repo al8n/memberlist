@@ -370,6 +370,17 @@ macro_rules! unwrap_ok {
   };
 }
 
+macro_rules! panic_on_err {
+  ($expr:expr) => {
+    match $expr {
+      ::std::result::Result::Ok(val) => val,
+      ::std::result::Result::Err(e) => {
+        panic!("{}", e);
+      }
+    }
+  };
+}
+
 pub async fn promised_ping<A, T, P, R>(
   trans: T,
   promised: P,
@@ -435,9 +446,10 @@ where
     ));
   });
 
-  let did_contact = m
-    .send_ping_and_wait_for_ack(&promised_addr, ping_out.clone(), ping_timeout)
-    .await?;
+  let did_contact = panic_on_err!(
+    m.send_ping_and_wait_for_ack(&promised_addr, ping_out.clone(), ping_timeout)
+      .await
+  );
 
   if !did_contact {
     return Err(std::io::Error::new(std::io::ErrorKind::Other, "expected successful ping").into());
@@ -481,11 +493,15 @@ where
     ));
   });
 
-  let did_contact = m
+  let err = m
     .send_ping_and_wait_for_ack(&promised_addr, ping_out.clone(), ping_timeout)
-    .await?;
-  if did_contact {
-    return Err(std::io::Error::new(std::io::ErrorKind::Other, "expected failed ping").into());
+    .await
+    .expect_err("expected failed ping");
+  if !err
+    .to_string()
+    .contains("sequence number mismatch: ping(23), ack(24)")
+  {
+    panic!("should catch sequence number mismatch err, but got err: {err}");
   }
 
   if !ping_err_rx.is_empty() {
@@ -533,7 +549,12 @@ where
     .await
     .expect_err("expected failed ping");
 
-  tracing::error!("{}", err);
+  if !err
+    .to_string()
+    .contains("unexpected message: expected Ack, got IndirectPing")
+  {
+    panic!("should catch unexpected message type err, but got err: {err}");
+  }
 
   if !ping_err_rx.is_empty() {
     panic!("{}", ping_err_rx.recv().await.unwrap());
@@ -543,10 +564,11 @@ where
   // common case of the receiving node being totally down.
   drop(promised);
   let start_ping = Instant::now();
-  m.send_ping_and_wait_for_ack(&promised_addr, ping_out, ping_timeout)
-    .await
-    .expect_err("expected failed ping");
+  let did_contact = m
+    .send_ping_and_wait_for_ack(&promised_addr, ping_out, ping_timeout)
+    .await?;
   let elapsed = start_ping.elapsed();
+  assert!(!did_contact, "expected failed ping");
   assert!(
     elapsed <= ping_time_max,
     "elapsed: {:?}, take too long to fail ping",

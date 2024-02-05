@@ -59,37 +59,39 @@ where
     buf.add_label_header(label);
     // write encryption algo
     buf.put_u8(encryption_algo as u8);
+    let encrypt_message_len_offset = buf.len();
     // write length placeholder
     buf.put_slice(&[0; MAX_MESSAGE_LEN_SIZE]);
 
+    let nonce_start_offset = buf.len();
     let nonce = encryptor.write_header(&mut buf);
+    let nonce_stop_offset = buf.len();
     buf.resize(total_len, 0);
 
-    W::encode_message(msg, &mut buf[label_encoded_size + encrypt_header..])
-      .map_err(NetTransportError::Wire)?;
+    let encoded_len =
+      W::encode_message(msg, &mut buf[nonce_stop_offset..]).map_err(NetTransportError::Wire)?;
 
-    let compressed = compressor.compress_into_bytes(&buf[label_encoded_size + encrypt_header..])?;
+    let compressed =
+      compressor.compress_into_bytes(&buf[nonce_stop_offset..nonce_stop_offset + encoded_len])?;
     let compressed_size = compressed.len();
-    buf.truncate(label_encoded_size + encrypt_header);
-    let compress_offset = buf.len();
+    buf.truncate(nonce_stop_offset);
     buf.put_u8(*compressor as u8);
     let mut compress_size_buf = [0; MAX_MESSAGE_LEN_SIZE];
     NetworkEndian::write_u32(&mut compress_size_buf, compressed_size as u32);
     buf.put_slice(&compress_size_buf);
     buf.put_slice(&compressed);
-    let total_compressed_size = buf.len() - compress_offset;
 
-    // update actual data size
-    NetworkEndian::write_u32(
-      &mut buf[label_encoded_size + 1..label_encoded_size + ENCRYPT_HEADER],
-      total_compressed_size as u32,
-    );
-
-    let mut dst = buf.split_off(label_encoded_size + encrypt_header);
+    let mut dst = buf.split_off(nonce_stop_offset);
     encryptor
       .encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
       .map(|_| {
         buf.unsplit(dst);
+        let buf_len = buf.len();
+        // update actual data size
+        NetworkEndian::write_u32(
+          &mut buf[encrypt_message_len_offset..],
+          (buf_len - nonce_start_offset) as u32,
+        );
         buf
       })
       .map_err(NetTransportError::Security)
@@ -107,34 +109,35 @@ where
     let label_encoded_size = label.encoded_overhead();
     let encrypt_header = encryption_algo.encrypt_overhead();
     let total_len = label_encoded_size + encrypt_header + encoded_size;
-
-    // add label header
     let mut buf = BytesMut::with_capacity(total_len);
+    // add label header
     buf.add_label_header(label);
-
     // write encryption algo
     buf.put_u8(encryption_algo as u8);
-
     let encrypt_message_len_offset = buf.len();
     // write length placeholder
     buf.put_slice(&[0; MAX_MESSAGE_LEN_SIZE]);
 
+    let nonce_start_offset = buf.len();
     let nonce = encryptor.write_header(&mut buf);
+    let nonce_stop_offset = buf.len();
     buf.resize(total_len, 0);
 
-    let written = W::encode_message(msg, &mut buf[label_encoded_size + encrypt_header..])
-      .map_err(NetTransportError::Wire)?;
-    buf.truncate(label_encoded_size + encrypt_header + written);
-    // write actual data size
-    NetworkEndian::write_u32(
-      &mut buf[encrypt_message_len_offset..encrypt_message_len_offset + MAX_MESSAGE_LEN_SIZE],
-      written as u32,
-    );
-    let mut dst = buf.split_off(encrypt_header);
+    let written =
+      W::encode_message(msg, &mut buf[nonce_stop_offset..]).map_err(NetTransportError::Wire)?;
+    buf.truncate(nonce_stop_offset + written);
+
+    let mut dst = buf.split_off(nonce_stop_offset);
     encryptor
       .encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
       .map(|_| {
         buf.unsplit(dst);
+        let buf_len = buf.len();
+        // write actual data size
+        NetworkEndian::write_u32(
+          &mut buf[encrypt_message_len_offset..encrypt_message_len_offset + MAX_MESSAGE_LEN_SIZE],
+          (buf_len - nonce_start_offset) as u32,
+        );
         buf
       })
       .map_err(NetTransportError::Security)
@@ -240,7 +243,10 @@ where
           ))
           .is_err()
         {
-          tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
+          tracing::error!(
+            target = "memberlist.net.promised",
+            "failed to send computation task result back to main thread"
+          );
         }
       });
 
@@ -261,7 +267,10 @@ where
       .flush()
       .await
       .map_err(|e| ConnectionError::promised_write(e).into())
-      .map(|_| total_len)
+      .map(|_| {
+        tracing::trace!(total_len = total_len, sent = ?buf.as_ref());
+        total_len
+      })
   }
 
   #[cfg(feature = "encryption")]
@@ -301,7 +310,10 @@ where
           ))
           .is_err()
         {
-          tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
+          tracing::error!(
+            target = "memberlist.net.promised",
+            "failed to send computation task result back to main thread"
+          );
         }
       });
 
@@ -322,7 +334,10 @@ where
       .flush()
       .await
       .map_err(|e| ConnectionError::promised_write(e).into())
-      .map(|_| total_len)
+      .map(|_| {
+        tracing::trace!(total_len = total_len, sent = ?buf.as_ref());
+        total_len
+      })
   }
 
   #[cfg(feature = "compression")]
@@ -358,7 +373,10 @@ where
           ))
           .is_err()
         {
-          tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
+          tracing::error!(
+            target = "memberlist.net.promised",
+            "failed to send computation task result back to main thread"
+          );
         }
       });
 

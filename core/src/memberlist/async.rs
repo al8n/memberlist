@@ -321,7 +321,7 @@ where
     };
     this.alive_node(alive, None, true).await;
     this.schedule(shutdown_rx).await;
-    tracing::debug!(target:  "memberlist", local = %this.inner.id, advertise_addr = %advertise, "node is living");
+    tracing::debug!(target =  "memberlist", local = %this.inner.id, advertise_addr = %advertise, "node is living");
     Ok(this)
   }
 
@@ -452,7 +452,7 @@ where
           }
         }
       } else {
-        tracing::warn!(target:  "memberlist", "leave but we're not a member");
+        tracing::warn!(target = "memberlist", "leave but we're not a member");
       }
     }
     Ok(())
@@ -530,7 +530,7 @@ where
             (node.cheap_clone(), Error::<T, D>::transport(e))
           })?;
           let id = Node::new(node.id().cheap_clone(), resolved_addr);
-          tracing::info!(target:  "memberlist", local = %self.inner.transport.local_id(), peer = %id, "start join...");
+          tracing::info!(target =  "memberlist", local = %self.inner.transport.local_id(), peer = %id, "start join...");
           if let Err(e) = self.push_pull_node(id.cheap_clone(), true).await {
             tracing::debug!(
               target: "memberlist",
@@ -688,7 +688,7 @@ where
     // completely torn down. If we kill the memberlist-side handlers
     // those I/O handlers might get stuck.
     if let Err(e) = self.inner.transport.shutdown().await {
-      tracing::error!(target:  "memberlist", err=%e, "failed to shutdown transport");
+      tracing::error!(target =  "memberlist", err=%e, "failed to shutdown transport");
     }
 
     // Now tear down everything else.
