@@ -47,6 +47,10 @@ pub mod promised_ping;
 /// Unit test for handling promised push pull
 pub mod promised_push_pull;
 
+/// Unit test for handling gossip with mismatched keys
+#[cfg(feature = "encryption")]
+pub mod gossip_mismatch_keys;
+
 /// A test client for network transport
 #[viewit::viewit(
   vis_all = "",

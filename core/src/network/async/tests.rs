@@ -18,23 +18,6 @@ use crate::{
   CompressionAlgo, Memberlist, Message, Options,
 };
 
-pub async fn test_tcp_ping<R>()
-where
-  R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
-{
-}
-
-pub async fn test_tcp_push_pull<R>()
-where
-  R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
-{
-}
-
-
 pub async fn test_gossip_mismatched_keys<R>()
 where
   R: Runtime,

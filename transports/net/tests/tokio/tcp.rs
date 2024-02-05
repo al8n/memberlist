@@ -19,6 +19,7 @@ mod handle_ping;
 mod send_packet_piggyback;
 
 #[path = "tcp/gossip_mismatched_keys.rs"]
+#[cfg(feature = "encryption")]
 mod gossip_mismatched_keys;
 
 #[path = "tcp/promised_ping.rs"]
