@@ -15,7 +15,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -27,7 +27,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -42,7 +42,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping_no_label::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -54,7 +54,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping_no_label::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -68,7 +68,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping_label_only::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -79,7 +79,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping_label_only::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -94,7 +94,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping_compression_only::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -106,7 +106,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping_compression_only::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -121,7 +121,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping_encryption_only::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -133,7 +133,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping_encryption_only::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -148,7 +148,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping_label_and_encryption::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -160,7 +160,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping_label_and_encryption::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -175,7 +175,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping_label_and_compression::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -187,7 +187,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) = promised_ping_label_and_compression::<_, TokioRuntime>(s, client, kind).await {
       panic!("{}", e);
     }
@@ -201,7 +201,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) =
       promised_ping_no_label_no_compression_no_encryption::<_, TokioRuntime>(s, client, kind).await
     {
@@ -214,7 +214,7 @@ unit_tests_with_expr!(run(
     let c = Tcp::<TokioRuntime>::new();
     let client_addr = kind.next();
     let ln = c.bind(client_addr).await.unwrap();
-    let client = NetTransporTestPromisedClient::new(client_addr, ln);
+    let client = NetTransporTestPromisedClient::new(client_addr, c, ln);
     if let Err(e) =
       promised_ping_no_label_no_compression_no_encryption::<_, TokioRuntime>(s, client, kind).await
     {

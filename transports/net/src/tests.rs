@@ -44,6 +44,9 @@ pub mod label;
 /// Unit test for handling promised ping
 pub mod promised_ping;
 
+/// Unit test for handling promised push pull
+pub mod promised_push_pull;
+
 /// A test client for network transport
 #[viewit::viewit(
   vis_all = "",
@@ -173,14 +176,16 @@ impl<R: Runtime> TestPacketClient for NetTransporTestClient<R> {
 )]
 pub struct NetTransporTestPromisedClient<S: StreamLayer> {
   ln: S::Listener,
+  layer: S,
   local_addr: SocketAddr,
 }
 
 impl<S: StreamLayer> NetTransporTestPromisedClient<S> {
   /// Creates a new test client with the given address
-  pub fn new(addr: SocketAddr, ln: S::Listener) -> Self {
+  pub fn new(addr: SocketAddr, layer: S, ln: S::Listener) -> Self {
     Self {
       local_addr: addr,
+      layer,
       ln,
     }
   }
@@ -188,6 +193,10 @@ impl<S: StreamLayer> NetTransporTestPromisedClient<S> {
 
 impl<S: StreamLayer> TestPromisedClient for NetTransporTestPromisedClient<S> {
   type Stream = S::Stream;
+
+  async fn connect(&self, addr: SocketAddr) -> Result<Self::Stream, AnyError> {
+    self.layer.connect(addr).await.map_err(Into::into)
+  }
 
   async fn accept(&self) -> Result<(Self::Stream, SocketAddr), AnyError> {
     let (stream, addr) = self.ln.accept().await?;

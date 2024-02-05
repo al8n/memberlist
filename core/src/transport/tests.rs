@@ -15,12 +15,13 @@ use transformable::Transformable;
 
 use crate::{
   delegate::VoidDelegate,
+  state::LocalServerState,
   tests::{get_memberlist, next_socket_addr_v4, next_socket_addr_v6, AnyError},
   transport::{Ack, Alive, IndirectPing, Message},
-  Options,
+  Member, Options,
 };
 
-use super::{Ping, Transport};
+use super::{Ping, PushPull, PushServerState, Server, ServerState, Transport};
 
 /// The kind of address
 pub enum AddressKind {
@@ -68,6 +69,12 @@ pub trait TestPacketClient: Sized + Send + Sync + 'static {
 /// The client used to send/receive data to a transport
 pub trait TestPromisedClient: Sized + Send + Sync + 'static {
   type Stream: Send + Sync + 'static;
+
+  /// Connect to the remote address
+  fn connect(
+    &self,
+    addr: SocketAddr,
+  ) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
 
   /// Accept a connection from the remote
   fn accept(&self) -> impl Future<Output = Result<(Self::Stream, SocketAddr), AnyError>> + Send;
@@ -573,6 +580,104 @@ where
     elapsed <= ping_time_max,
     "elapsed: {:?}, take too long to fail ping",
     elapsed
+  );
+  Ok(())
+}
+
+pub async fn promised_push_pull<A, T, P, R>(trans: T, promised: P) -> Result<(), AnyError>
+where
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  T: Transport<Id = SmolStr, Resolver = A, Stream = P::Stream, Runtime = R>,
+  P: TestPromisedClient,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
+  let bind_addr = *m.advertise_addr();
+  let id0: SmolStr = "Test 0".into();
+  {
+    let mut members = m.inner.nodes.write().await;
+    members.nodes.push(Member {
+      state: LocalServerState {
+        server: Arc::new(Server::new(
+          id0.cheap_clone(),
+          bind_addr,
+          ServerState::Alive,
+          Default::default(),
+          Default::default(),
+        )),
+        incarnation: Arc::new(0.into()),
+        state_change: Instant::now() - Duration::from_secs(1),
+        state: ServerState::Suspect,
+      },
+      suspicion: None,
+    });
+
+    members.node_map.insert(id0.cheap_clone(), 0);
+  }
+
+  let mut conn = promised.connect(bind_addr).await?;
+
+  let push_pull = PushPull {
+    join: false,
+    states: Arc::new(
+      [
+        PushServerState {
+          id: id0.cheap_clone(),
+          addr: bind_addr,
+          meta: Bytes::new(),
+          incarnation: 1,
+          state: ServerState::Alive,
+          protocol_version: Default::default(),
+          delegate_version: Default::default(),
+        },
+        PushServerState {
+          id: "Test 1".into(),
+          addr: bind_addr,
+          meta: Bytes::new(),
+          incarnation: 1,
+          state: ServerState::Alive,
+          protocol_version: Default::default(),
+          delegate_version: Default::default(),
+        },
+        PushServerState {
+          id: "Test 2".into(),
+          addr: bind_addr,
+          meta: Bytes::new(),
+          incarnation: 1,
+          state: ServerState::Alive,
+          protocol_version: Default::default(),
+          delegate_version: Default::default(),
+        },
+      ]
+      .into_iter()
+      .collect(),
+    ),
+    user_data: Bytes::new(),
+  };
+
+  // Send the push/pull indicator
+  m.inner
+    .transport
+    .send_message(&mut conn, push_pull.into())
+    .await?;
+
+  // Read the message type
+  let (_, msg) = m
+    .inner
+    .transport
+    .read_message(&bind_addr, &mut conn)
+    .await?;
+  let readed_push_pull = msg.unwrap_push_pull();
+  assert!(!readed_push_pull.join);
+  assert_eq!(readed_push_pull.states.len(), 1);
+  assert_eq!(readed_push_pull.states[0].id, id0);
+  assert_eq!(readed_push_pull.states[0].incarnation, 0, "bad incarnation");
+  assert_eq!(
+    readed_push_pull.states[0].state,
+    ServerState::Suspect,
+    "bad state"
   );
   Ok(())
 }
