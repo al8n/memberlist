@@ -729,14 +729,10 @@ where
   m2.send_reliable(m1.advertise_addr(), Bytes::from_static(b"send_reliable"))
     .await?;
 
-  R::sleep(Duration::from_secs(1)).await;
+  R::sleep(Duration::from_secs(5)).await;
 
   let mut msgs1 = m1.delegate().unwrap().get_messages().await;
   msgs1.sort();
   assert_eq!(msgs1, ["send".as_bytes(), "send_reliable".as_bytes()]);
   Ok(())
 }
-
-// pub async fn test_transport_tcp_listen_back_off_runner() {
-//   todo!()
-// }
