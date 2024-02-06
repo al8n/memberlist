@@ -112,7 +112,7 @@ jobs:
       if: matrix.os != 'windows-latest'
       working-directory: transports/net
     - name: Run test (windows)
-      run: cargo test --feature test,tls
+      run: cargo test --features test,tls
       if: matrix.os == 'windows-latest'
       working-directory: transports/net
 
