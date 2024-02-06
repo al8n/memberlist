@@ -195,16 +195,16 @@ impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> T
     dst = &mut dst[1..];
 
     Ok(match self {
-      Self::Ping(msg) => msg.encode(dst)?,
-      Self::IndirectPing(msg) => msg.encode(dst)?,
-      Self::Ack(msg) => msg.encode(dst)?,
-      Self::Suspect(msg) => msg.encode(dst)?,
-      Self::Alive(msg) => msg.encode(dst)?,
-      Self::Dead(msg) => msg.encode(dst)?,
-      Self::PushPull(msg) => msg.encode(dst)?,
-      Self::UserData(msg) => msg.encode(dst)?,
-      Self::Nack(msg) => msg.encode(dst)?,
-      Self::ErrorResponse(msg) => msg.encode(dst)?,
+      Self::Ping(msg) => msg.encode(dst).map(|w| w + 1)?,
+      Self::IndirectPing(msg) => msg.encode(dst).map(|w| w + 1)?,
+      Self::Ack(msg) => msg.encode(dst).map(|w| w + 1)?,
+      Self::Suspect(msg) => msg.encode(dst).map(|w| w + 1)?,
+      Self::Alive(msg) => msg.encode(dst).map(|w| w + 1)?,
+      Self::Dead(msg) => msg.encode(dst).map(|w| w + 1)?,
+      Self::PushPull(msg) => msg.encode(dst).map(|w| w + 1)?,
+      Self::UserData(msg) => msg.encode(dst).map(|w| w + 1)?,
+      Self::Nack(msg) => msg.encode(dst).map(|w| w + 1)?,
+      Self::ErrorResponse(msg) => msg.encode(dst).map(|w| w + 1)?,
     })
   }
 

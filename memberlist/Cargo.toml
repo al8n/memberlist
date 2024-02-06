@@ -8,6 +8,95 @@ homepage.workspace = true
 description = "A placeholder"
 
 [features]
-default = []
+default = ["tokio-runtime", "compression", "encryption", "dns", "tcp"]
+
+tokio-runtime = ["agnostic/tokio"]
+async-std-runtime = ["agnostic/async-std"]
+smol-runtime = ["agnostic/smol"]
+
+serde = [
+  "memberlist-core/serde", 
+  "memberlist-utils/serde",
+  "memberlist-net?/serde",
+  "memberlist-quic?/serde"
+]
+
+metrics = [
+  "memberlist-core/metrics",
+  "memberlist-utils/metrics",
+  "memberlist-net?/metrics",
+  "memberlist-quic?/metrics",
+]
+
+compression = [
+  "memberlist-net?/compression",
+  "memberlist-quic?/compression"
+]
+
+encryption = ["memberlist-net?/encryption"]
+
+quic = ["memberlist-quic"]
+quinn = ["memberlist-quic/quinn"]
+s2n = ["memberlist-quic/s2n"]
+
+tcp = ["memberlist-net"]
+tls = ["memberlist-net/tls"]
+native-tls = ["memberlist-net/native-tls"]
+
+# enable DNS node address resolver
+dns = [
+  "memberlist-net?/dns",
+  "memberlist-quic?/dns",
+]
+dns-over-quic = [
+  "memberlist-net?/dns-over-quic",
+  "memberlist-quic?/dns-over-quic",
+]
+dns-over-h3 = [
+  "memberlist-net?/dns-over-h3",
+  "memberlist-quic?/dns-over-h3",
+]
+dns-over-https-rustls = [
+  "memberlist-net?/dns-over-https-rustls",
+  "memberlist-quic?/dns-over-https-rustls",
+]
+dns-over-rustls = [
+  "memberlist-net?/dns-over-rustls",
+  "memberlist-quic?/dns-over-rustls",
+]
+dns-over-openssl = [
+  "memberlist-net?/dns-over-openssl",
+  "memberlist-quic?/dns-over-openssl",
+]
+dns-over-native-tls = [
+  "memberlist-net?/dns-over-native-tls",
+  "memberlist-quic?/dns-over-native-tls",
+]
+dns-webpki-roots = [
+  "memberlist-net?/dns-webpki-roots",
+  "memberlist-quic?/dns-webpki-roots",
+]
+dns-native-certs = [
+  "memberlist-net?/dns-native-certs",
+  "memberlist-quic?/dns-native-certs",
+]
+dnssec-openssl = [
+  "memberlist-net?/dnssec-openssl",
+  "memberlist-quic?/dnssec-openssl",
+]
+dnssec-ring = [
+  "memberlist-net?/dnssec-ring",
+  "memberlist-quic?/dnssec-ring",
+]
+dnssec = [
+  "memberlist-net?/dnssec",
+  "memberlist-quic?/dnssec",
+]
+
 
 [dependencies]
+agnostic.workspace = true
+memberlist-core.workspace = true
+memberlist-utils.workspace = true
+memberlist-net = { workspace = true, optional = true }
+memberlist-quic = { workspace = true, optional = true }

@@ -100,10 +100,22 @@ where
     &self.inner.id
   }
 
+  /// Returns the local node address
+  #[inline]
+  pub fn local_addr(&self) -> &<T::Resolver as AddressResolver>::Address {
+    self.inner.transport.local_address()
+  }
+
   /// Returns a [`Node`] with the local id and the advertise address of local node.
   #[inline]
   pub fn advertise_node(&self) -> Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> {
     Node::new(self.inner.id.clone(), self.inner.advertise.clone())
+  }
+
+  /// Returns the advertise address of local node.
+  #[inline]
+  pub fn advertise_addr(&self) -> &<T::Resolver as AddressResolver>::ResolvedAddress {
+    &self.inner.advertise
   }
 
   /// Returns the delegate, if any.
@@ -140,6 +152,12 @@ where
       .iter()
       .map(|n| n.state.server.clone())
       .collect()
+  }
+
+  /// Returns number of members
+  #[inline]
+  pub async fn num_members(&self) -> usize {
+    self.inner.nodes.read().await.nodes.len()
   }
 
   /// Returns the number of alive nodes currently known. Between
@@ -315,7 +333,7 @@ where
     };
     this.alive_node(alive, None, true).await;
     this.schedule(shutdown_rx).await;
-    tracing::debug!(target:  "memberlist", local = %this.inner.id, advertise_addr = %advertise, "node is living");
+    tracing::debug!(target =  "memberlist", local = %this.inner.id, advertise_addr = %advertise, "node is living");
     Ok(this)
   }
 
@@ -446,14 +464,14 @@ where
           }
         }
       } else {
-        tracing::warn!(target:  "memberlist", "leave but we're not a member");
+        tracing::warn!(target = "memberlist", "leave but we're not a member");
       }
     }
     Ok(())
   }
 
   /// Join directly by contacting the given node id
-  pub async fn join_node(
+  pub async fn join(
     &self,
     node: Node<T::Id, <T::Resolver as AddressResolver>::Address>,
   ) -> Result<(), Error<T, D>> {
@@ -470,18 +488,6 @@ where
       .map_err(Error::Transport)?;
     self.push_pull_node(Node::new(id, addr), true).await
   }
-
-  // /// Join directly by contacting the given node ids
-  // pub async fn join_nodes(
-  //   &self,
-  //   ids: &[ServerId],
-  // ) -> Result<(), Error<T, D>> {
-  //   if !self.is_running() {
-  //     return Err(Error::NotRunning);
-  //   }
-
-  //   self.push_pull_node(ids, true).await
-  // }
 
   /// Used to take an existing Memberlist and attempt to join a cluster
   /// by contacting all the given hosts and performing a state sync. Initially,
@@ -524,7 +530,7 @@ where
             (node.cheap_clone(), Error::<T, D>::transport(e))
           })?;
           let id = Node::new(node.id().cheap_clone(), resolved_addr);
-          tracing::info!(target:  "memberlist", local = %self.inner.transport.local_id(), peer = %id, "start join...");
+          tracing::info!(target =  "memberlist", local = %self.inner.transport.local_id(), peer = %id, "start join...");
           if let Err(e) = self.push_pull_node(id.cheap_clone(), true).await {
             tracing::debug!(
               target: "memberlist",
@@ -682,7 +688,7 @@ where
     // completely torn down. If we kill the memberlist-side handlers
     // those I/O handlers might get stuck.
     if let Err(e) = self.inner.transport.shutdown().await {
-      tracing::error!(target:  "memberlist", err=%e, "failed to shutdown transport");
+      tracing::error!(target =  "memberlist", err=%e, "failed to shutdown transport");
     }
 
     // Now tear down everything else.
@@ -758,6 +764,3 @@ where
   //   // }
   // }
 }
-
-#[test]
-fn test() {}
