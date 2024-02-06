@@ -18,10 +18,13 @@ use memberlist_utils::{Label, LabelBufMutExt};
 use nodecraft::Transformable;
 use smol_str::SmolStr;
 
-use crate::{
-  security::{EncryptionAlgo, SecretKey, SecretKeyring},
-  Checksumer, Compressor, Listener, StreamLayer,
-};
+use crate::{Checksumer, Listener, StreamLayer};
+
+#[cfg(feature = "encryption")]
+use crate::security::{EncryptionAlgo, SecretKey, SecretKeyring};
+
+#[cfg(feature = "compression")]
+use crate::compressor::Compressor;
 
 pub use super::promised_processor::listener_backoff;
 
@@ -29,24 +32,30 @@ pub use super::promised_processor::listener_backoff;
 pub mod handle_ping;
 
 /// Unit test for handling compound ping message
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod handle_compound_ping;
 
 /// Unit test for handling indirect ping message
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod handle_indirect_ping;
 
 /// Unit test for handling ping from wrong node
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod handle_ping_wrong_node;
 
 /// Unit test for handling send packet with piggyback
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod packet_piggyback;
 
 /// Unit test for handling transport with label or not.
 pub mod label;
 
 /// Unit test for handling promised ping
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod promised_ping;
 
 /// Unit test for handling promised push pull
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod promised_push_pull;
 
 /// Unit test for handling gossip with mismatched keys
@@ -54,9 +63,11 @@ pub mod promised_push_pull;
 pub mod gossip_mismatch_keys;
 
 /// Unit test for sending
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod send;
 
 /// Unit test for joining
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod join;
 
 /// A test client for network transport
@@ -239,6 +250,7 @@ pub fn verify_checksum(src: &[u8]) -> Result<(), AnyError> {
 }
 
 /// A helper function to decompress data from the given source.
+#[cfg(feature = "compression")]
 pub fn read_compressed_data(src: &[u8]) -> Result<Vec<u8>, AnyError> {
   let compressor = Compressor::try_from(src[0])?;
   let compressed_data_len = NetworkEndian::read_u32(&src[1..]) as usize;
@@ -251,6 +263,7 @@ pub fn read_compressed_data(src: &[u8]) -> Result<Vec<u8>, AnyError> {
 }
 
 /// A helper function to decrypt data from the given source.
+#[cfg(feature = "encryption")]
 pub fn read_encrypted_data(
   pk: SecretKey,
   auth_data: &[u8],

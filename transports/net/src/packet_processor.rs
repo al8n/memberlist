@@ -155,8 +155,9 @@ where
 
     #[cfg(not(feature = "encryption"))]
     if !skip_inbound_label_check && packet_label.ne(label) {
+      
       tracing::error!(target = "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
-      return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
+      return Err(memberlist_utils::LabelError::mismatch(label.clone(), packet_label).into());
     }
 
     #[cfg(not(any(feature = "compression", feature = "encryption")))]
