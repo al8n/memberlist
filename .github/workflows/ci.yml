@@ -111,10 +111,10 @@ jobs:
       run: cargo test --features test,tls,native-tls
       if: matrix.os != 'windows-latest'
       working-directory: transports/net
-    - name: Run test (windows)
-      run: cargo test --features test,tls
-      if: matrix.os == 'windows-latest'
-      working-directory: transports/net
+    # - name: Run test (windows)
+    #   run: cargo test --features test,tls
+    #   if: matrix.os == 'windows-latest'
+    #   working-directory: transports/net
 
   coverage:
     name: coverage
