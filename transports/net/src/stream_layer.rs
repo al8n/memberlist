@@ -27,6 +27,11 @@ pub trait Listener: Send + Sync + 'static {
   /// Accepts an incoming connection.
   fn accept(&self) -> impl Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send;
 
+  // /// Sets the timeout for accepting new connections.
+  // #[cfg(any(feature = "test", test))]
+  // #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]
+  // fn set_accept_timeout(&mut self, timeout: Option<std::time::Duration>);
+
   /// Retrieves the local socket address of the listener.
   fn local_addr(&self) -> io::Result<SocketAddr>;
 }

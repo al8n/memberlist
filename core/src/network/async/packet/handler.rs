@@ -33,7 +33,7 @@ where
               Message::Dead(m) => this.handle_dead(msg.from, m).await,
               Message::UserData(m) => this.handle_user(msg.from, m).await,
               m => {
-                tracing::error!(target:  "memberlist.packet", "message type ({}) not supported {} (packet handler)", m.kind(), msg.from);
+                tracing::error!(target =  "memberlist.packet", "message type ({}) not supported {} (packet handler)", m.kind(), msg.from);
               }
             }
           }
@@ -56,7 +56,7 @@ where
     suspect: Suspect<T::Id>,
   ) {
     if let Err(e) = self.suspect_node(suspect).await {
-      tracing::error!(target:  "memberlist.packet", err=%e, remote_addr = %from, "failed to suspect node");
+      tracing::error!(target =  "memberlist.packet", err=%e, remote_addr = %from, "failed to suspect node");
     }
   }
 
@@ -66,12 +66,12 @@ where
     alive: Alive<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) {
     if let Err(e) = self.inner.transport.blocked_address(&from) {
-      tracing::error!(target:  "memberlist.packet", err=%e, remote_addr = %from, "blocked alive message");
+      tracing::error!(target =  "memberlist.packet", err=%e, remote_addr = %from, "blocked alive message");
       return;
     }
 
     if let Err(e) = self.inner.transport.blocked_address(alive.node.address()) {
-      tracing::error!(target:  "memberlist.packet", err=%e, remote_addr = %from, "blocked alive address {} message from {}", alive.node.address(), from);
+      tracing::error!(target =  "memberlist.packet", err=%e, remote_addr = %from, "blocked alive address {} message from {}", alive.node.address(), from);
       return;
     }
 
@@ -85,7 +85,7 @@ where
   ) {
     let mut memberlist = self.inner.nodes.write().await;
     if let Err(e) = self.dead_node(&mut memberlist, dead).await {
-      tracing::error!(target:  "memberlist.packet", err=%e, remote_addr = %from, "failed to mark node as dead");
+      tracing::error!(target =  "memberlist.packet", err=%e, remote_addr = %from, "failed to mark node as dead");
     }
   }
 
@@ -96,7 +96,7 @@ where
   ) {
     if let Some(d) = self.delegate.as_ref() {
       if let Err(e) = d.notify_message(data).await {
-        tracing::error!(target:  "memberlist.packet", err=%e, remote_addr = %from, "failed to handle user message");
+        tracing::error!(target =  "memberlist.packet", err=%e, remote_addr = %from, "failed to handle user message");
       }
     }
   }

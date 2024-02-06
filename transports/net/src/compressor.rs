@@ -14,6 +14,9 @@ pub enum CompressorError {
   /// Unknown compressor
   #[error("compressor: {0}")]
   UnknownCompressor(#[from] UnknownCompressor),
+  /// Not enough bytes to decompress
+  #[error("compressor: not enough bytes to decompress")]
+  NotEnoughBytes,
 }
 
 /// Compressor for compress/decompress bytes for sending over the network.

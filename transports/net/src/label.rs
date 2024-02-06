@@ -31,7 +31,7 @@ pub(super) async fn remove_label_header(
     return Ok(None);
   }
 
-  let len = meta[0] as usize;
+  let len = meta[1] as usize;
   let mut buf = vec![0u8; len];
   this.read_exact(&mut meta).await?;
   this.read_exact(&mut buf).await?;

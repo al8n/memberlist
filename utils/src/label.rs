@@ -176,6 +176,14 @@ impl TryFrom<&str> for Label {
   }
 }
 
+impl TryFrom<&String> for Label {
+  type Error = InvalidLabel;
+
+  fn try_from(s: &String) -> Result<Self, Self::Error> {
+    s.as_str().try_into()
+  }
+}
+
 impl TryFrom<String> for Label {
   type Error = InvalidLabel;
 
@@ -196,6 +204,20 @@ impl TryFrom<Bytes> for Label {
     }
     match core::str::from_utf8(s.as_ref()) {
       Ok(_) => Ok(Self(s)),
+      Err(e) => Err(InvalidLabel::Utf8(e)),
+    }
+  }
+}
+
+impl TryFrom<&[u8]> for Label {
+  type Error = InvalidLabel;
+
+  fn try_from(s: &[u8]) -> Result<Self, Self::Error> {
+    if s.len() > Self::MAX_SIZE {
+      return Err(InvalidLabel::TooLarge(s.len()));
+    }
+    match core::str::from_utf8(s) {
+      Ok(_) => Ok(Self(Bytes::copy_from_slice(s))),
       Err(e) => Err(InvalidLabel::Utf8(e)),
     }
   }
@@ -310,6 +332,9 @@ impl<T: Buf + sealed::Splitable + TryInto<Label, Error = InvalidLabel>> LabelBuf
 /// Label extension for [`BufMut`] types.
 pub trait LabelBufMutExt: BufMut {
   fn add_label_header(&mut self, label: &Label) {
+    if label.is_empty() {
+      return;
+    }
     self.put_u8(Label::TAG);
     self.put_u8(label.len() as u8);
     self.put_slice(label.as_bytes());

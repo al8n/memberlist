@@ -11,7 +11,7 @@ impl core::fmt::Display for UnknownDelegateVersion {
 
 impl std::error::Error for UnknownDelegateVersion {}
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
   feature = "rkyv",
@@ -29,6 +29,7 @@ impl std::error::Error for UnknownDelegateVersion {}
 #[non_exhaustive]
 #[repr(u8)]
 pub enum DelegateVersion {
+  #[default]
   V0 = 0,
 }
 
@@ -80,7 +81,7 @@ impl core::fmt::Display for UnknownProtocolVersion {
 
 impl std::error::Error for UnknownProtocolVersion {}
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
   feature = "rkyv",
@@ -98,6 +99,7 @@ impl std::error::Error for UnknownProtocolVersion {}
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ProtocolVersion {
+  #[default]
   V0 = 0,
 }
 

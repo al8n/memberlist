@@ -42,11 +42,12 @@ where
     if num_packets <= 1 {
       let packet = batch.packets.into_iter().next().unwrap();
       let expected_packet_encoded_size = W::encoded_len(&packet);
+
       let actual_packet_encoded_size =
         W::encode_message(packet, &mut buf[offset..]).map_err(NetTransportError::Wire)?;
       debug_assert_eq!(
         expected_packet_encoded_size, actual_packet_encoded_size,
-        "expected packet encoded size {} (calculated by Wire::encoded_len()) is not match the actual encoded size {} returned by Wire::encode_message()",
+        "expected packet encoded size {} is not match the actual encoded size {}",
         expected_packet_encoded_size, actual_packet_encoded_size
       );
       offset += actual_packet_encoded_size;
@@ -70,7 +71,7 @@ where
         W::encode_message(packet, &mut buf[offset..]).map_err(NetTransportError::Wire)?;
       debug_assert_eq!(
         expected_packet_encoded_size, actual_packet_encoded_size,
-        "expected packet encoded size {} (calculated by Wire::encoded_len()) is not match the actual encoded size {} returned by Wire::encode_message()",
+        "expected packet encoded size {} is not match the actual encoded size {}",
         expected_packet_encoded_size, actual_packet_encoded_size
       );
       offset += actual_packet_encoded_size;
@@ -99,7 +100,6 @@ where
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     offset += encoded_size;
     let mut data_offset = checksum_offset + CHECKSUM_HEADER;
-
     let compressed = compressor.compress_into_bytes(&buf[data_offset..offset])?;
     // Write compressor tag
     buf[data_offset] = compressor as u8;
@@ -107,15 +107,14 @@ where
     NetworkEndian::write_u32(&mut buf[data_offset..], compressed.len() as u32);
     data_offset += MAX_MESSAGE_LEN_SIZE;
 
-    buf[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
-    buf.truncate(data_offset + compressed.len());
+    buf.truncate(data_offset);
+    buf.put_slice(&compressed);
 
     // check if the packet exceeds the max packet size can be sent by the packet layer
     if buf.len() >= max_payload_size {
       return Err(NetTransportError::PacketTooLarge(buf.len()));
     }
-
-    let cks = checksumer.checksum(&compressed);
+    let cks = checksumer.checksum(&buf[checksum_offset + CHECKSUM_HEADER..]);
     NetworkEndian::write_u32(
       &mut buf[checksum_offset + 1..checksum_offset + CHECKSUM_HEADER],
       cks,
@@ -135,24 +134,23 @@ where
     batch: Batch<I, A::ResolvedAddress>,
     max_payload_size: usize,
   ) -> Result<BytesMut, NetTransportError<A, W>> {
-    let mut offset = buf.len();
     // write encryption tag
     buf.put_u8(encryption_algo as u8);
-    offset += 1;
     // write length placeholder
-    let encrypt_length_offset = offset;
+    let encrypt_length_offset = buf.len();
     buf.put_u32(0);
-    offset += MAX_MESSAGE_LEN_SIZE;
+    let nonce_offset = buf.len();
     // write encrypt header
-    let nonce = encryptor.write_header(encryption_algo, &mut buf);
-
-    let checksum_offset = buf.len();
+    let nonce = encryptor.write_header(&mut buf);
+    let mut offset = buf.len();
+    let checksum_offset = offset;
+    // everything after nonce should be encrypted.
+    let data_offset = nonce_offset + nonce.len();
 
     // reserve to store checksum
     buf.put_u8(checksumer as u8);
     buf.put_slice(&[0; CHECKSUM_SIZE]);
     offset += CHECKSUM_SIZE + 1;
-
     let estimate_encoded_len = batch.estimate_encoded_len();
     if estimate_encoded_len >= max_payload_size {
       return Err(NetTransportError::PacketTooLarge(estimate_encoded_len));
@@ -161,25 +159,22 @@ where
     buf.resize(estimate_encoded_len, 0);
 
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
-    offset += encoded_size;
-    let data_offset = checksum_offset + CHECKSUM_HEADER;
+    buf.truncate(offset + encoded_size);
 
     // update checksum
-    let cks = checksumer.checksum(&buf[data_offset..]);
-    NetworkEndian::write_u32(&mut buf[checksum_offset + 1..data_offset], cks);
+    let cks = checksumer.checksum(&buf[checksum_offset + CHECKSUM_HEADER..]);
+    NetworkEndian::write_u32(
+      &mut buf[checksum_offset + 1..checksum_offset + CHECKSUM_HEADER],
+      cks,
+    );
 
     // encrypt
     let mut dst = buf.split_off(data_offset);
     encryptor
-      .encrypt(pk, nonce, label.as_bytes(), &mut dst)
+      .encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
       .map(|_| {
         buf.unsplit(dst);
         let buf_len = buf.len();
-        debug_assert_eq!(
-          buf_len, offset,
-          "wrong encrypt msg length, expected {}, actual {}",
-          offset, buf_len
-        );
         // update encrypt msg length
         NetworkEndian::write_u32(
           &mut buf[encrypt_length_offset..encrypt_length_offset + MAX_MESSAGE_LEN_SIZE],
@@ -203,18 +198,18 @@ where
     batch: Batch<I, A::ResolvedAddress>,
     max_payload_size: usize,
   ) -> Result<BytesMut, NetTransportError<A, W>> {
-    let mut offset = buf.len();
     // write encryption tag
     buf.put_u8(encryption_algo as u8);
-    offset += 1;
     // write length placeholder
-    let encrypt_length_offset = offset;
+    let encrypt_length_offset = buf.len();
     buf.put_u32(0);
-    offset += MAX_MESSAGE_LEN_SIZE;
+    let nonce_offset = buf.len();
     // write encrypt header
-    let nonce = encryptor.write_header(encryption_algo, &mut buf);
-
-    let checksum_offset = buf.len();
+    let nonce = encryptor.write_header(&mut buf);
+    let mut offset = buf.len();
+    let checksum_offset = offset;
+    // everything after nonce should be encrypted.
+    let data_offset = nonce_offset + nonce.len();
 
     // reserve to store checksum
     buf.put_u8(checksumer as u8);
@@ -222,27 +217,26 @@ where
     offset += CHECKSUM_SIZE + 1;
 
     buf.resize(batch.estimate_encoded_len(), 0);
-
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     offset += encoded_size;
-    let mut data_offset = checksum_offset + CHECKSUM_HEADER;
+    let mut compress_offset = checksum_offset + CHECKSUM_HEADER;
 
-    let compressed = compressor.compress_into_bytes(&buf[data_offset..offset])?;
+    let compressed = compressor.compress_into_bytes(&buf[compress_offset..offset])?;
     // Write compressor tag
-    buf[data_offset] = compressor as u8;
-    data_offset += 1;
-    NetworkEndian::write_u32(&mut buf[data_offset..], compressed.len() as u32);
-    data_offset += MAX_MESSAGE_LEN_SIZE;
+    buf[compress_offset] = compressor as u8;
+    compress_offset += 1;
+    NetworkEndian::write_u32(&mut buf[compress_offset..], compressed.len() as u32);
+    compress_offset += MAX_MESSAGE_LEN_SIZE;
 
-    buf[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
-    buf.truncate(data_offset + compressed.len());
+    buf.truncate(compress_offset);
+    buf.put_slice(&compressed);
 
     // check if the packet exceeds the max packet size can be sent by the packet layer
     if buf.len() >= max_payload_size {
       return Err(NetTransportError::PacketTooLarge(buf.len()));
     }
 
-    let cks = checksumer.checksum(&compressed);
+    let cks = checksumer.checksum(&buf[checksum_offset + CHECKSUM_HEADER..]);
     NetworkEndian::write_u32(
       &mut buf[checksum_offset + 1..checksum_offset + CHECKSUM_HEADER],
       cks,
@@ -251,7 +245,7 @@ where
     // encrypt
     let mut dst = buf.split_off(data_offset);
     encryptor
-      .encrypt(pk, nonce, label.as_bytes(), &mut dst)
+      .encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
       .map(|_| {
         buf.unsplit(dst);
         let buf_len = buf.len();
@@ -289,12 +283,11 @@ where
 
     Self::encode_batch(&mut buf[offset..], batch)?;
     let data_offset = checksum_offset + CHECKSUM_HEADER;
-
     // update checksum
     let cks = self.opts.checksumer.checksum(&buf[data_offset..]);
     NetworkEndian::write_u32(&mut buf[checksum_offset + 1..data_offset], cks);
-
-    self.sockets[0]
+    self
+      .next_socket(addr)
       .send_to(&buf, addr)
       .await
       .map_err(|e| NetTransportError::Connection(ConnectionError::packet_write(e)))
@@ -328,7 +321,8 @@ where
         self.max_payload_size(),
       )?;
 
-      return self.sockets[0]
+      return self
+        .next_socket(addr)
         .send_to(&buf, addr)
         .await
         .map_err(|e| ConnectionError::packet_write(e).into());
@@ -348,12 +342,16 @@ where
         ))
         .is_err()
       {
-        tracing::error!(target: "memberlist.net.packet", "failed to send computation task result back to main thread");
+        tracing::error!(
+          target = "memberlist.net.packet",
+          "failed to send computation task result back to main thread"
+        );
       }
     });
 
     match rx.await {
-      Ok(Ok(buf)) => self.sockets[0]
+      Ok(Ok(buf)) => self
+        .next_socket(addr)
         .send_to(&buf, addr)
         .await
         .map_err(|e| ConnectionError::packet_write(e).into()),
@@ -396,7 +394,8 @@ where
         self.max_payload_size(),
       )?;
 
-      return self.sockets[0]
+      return self
+        .next_socket(addr)
         .send_to(&buf, addr)
         .await
         .map_err(|e| ConnectionError::packet_write(e).into());
@@ -422,12 +421,16 @@ where
         ))
         .is_err()
       {
-        tracing::error!(target: "memberlist.net.packet", "failed to send computation task result back to main thread");
+        tracing::error!(
+          target = "memberlist.net.packet",
+          "failed to send computation task result back to main thread"
+        );
       }
     });
 
     match rx.await {
-      Ok(Ok(buf)) => self.sockets[0]
+      Ok(Ok(buf)) => self
+        .next_socket(addr)
         .send_to(&buf, addr)
         .await
         .map_err(|e| ConnectionError::packet_write(e).into()),
@@ -483,7 +486,8 @@ where
         self.max_payload_size(),
       )?;
 
-      return self.sockets[0]
+      return self
+        .next_socket(addr)
         .send_to(&buf, addr)
         .await
         .map_err(|e| ConnectionError::packet_write(e).into());
@@ -512,12 +516,16 @@ where
         ))
         .is_err()
       {
-        tracing::error!(target: "memberlist.net.packet", "failed to send computation task result back to main thread");
+        tracing::error!(
+          target = "memberlist.net.packet",
+          "failed to send computation task result back to main thread"
+        );
       }
     });
 
     match rx.await {
-      Ok(Ok(buf)) => self.sockets[0]
+      Ok(Ok(buf)) => self
+        .next_socket(addr)
         .send_to(&buf, addr)
         .await
         .map_err(|e| ConnectionError::packet_write(e).into()),

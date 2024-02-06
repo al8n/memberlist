@@ -1,12 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crate::{
-  delegate::Delegate,
-  error::Error,
-  // security::{append_bytes, EncryptionAlgo, SecretKey, SecretKeyring, SecurityError},
-  transport::TimeoutableStream,
-  // types::MessageType,
-};
+use crate::{delegate::Delegate, error::Error, transport::TimeoutableStream};
 
 use super::*;
 use agnostic::Runtime;
@@ -15,11 +9,6 @@ use nodecraft::{resolver::AddressResolver, Node};
 
 mod packet;
 mod stream;
-
-// #[cfg(any(test, feature = "test"))]
-// pub(crate) mod tests;
-// #[cfg(any(test, feature = "test"))]
-// pub use tests::*;
 
 impl<D, T> Memberlist<T, D>
 where
@@ -84,7 +73,7 @@ where
       .dial_timeout(node.address(), self.inner.opts.timeout)
       .await
       .map_err(Error::transport)?;
-    tracing::debug!(target:  "memberlist", local_addr = %self.inner.id, peer_addr = %node, "initiating push/pull sync");
+    tracing::debug!(target =  "memberlist", local_addr = %self.inner.id, peer_addr = %node, "initiating push/pull sync");
 
     #[cfg(feature = "metrics")]
     {
