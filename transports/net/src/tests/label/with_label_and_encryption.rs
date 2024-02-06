@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(feature = "encryption")]
 pub async fn server_with_label_with_encryption_client_with_label_with_encryption<S, R>(
   s: S,
   kind: AddressKind,
@@ -33,6 +34,7 @@ where
   Ok(())
 }
 
+#[cfg(feature = "encryption")]
 pub async fn server_with_label_with_encryption_client_with_label_no_encryption<S, R>(
   s: S,
   kind: AddressKind,

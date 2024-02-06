@@ -5,6 +5,7 @@ use crate::{NetTransport, NetTransportOptions, StreamLayer};
 
 use super::*;
 
+#[cfg(all(feature = "encryption", feature = "compression"))]
 pub async fn packet_piggyback<S, R>(s: S, kind: AddressKind) -> Result<(), AnyError>
 where
   S: StreamLayer,

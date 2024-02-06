@@ -28,7 +28,8 @@ where
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()))
-    .with_label(label);
+    .with_label(label)
+    .with_offload_size(20);
   opts.add_bind_address(kind.next());
   let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await

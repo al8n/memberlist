@@ -83,13 +83,13 @@ pub mod tests {
   #[macro_export]
   macro_rules! unit_tests_with_expr {
     ($run:ident($(
-      $($(#[$meta: meta]), +$(,)?)?
+      $(#[$outer:meta])*
       $fn:ident( $expr:expr )
     ), +$(,)?)) => {
       $(
         ::memberlist_core::tests::paste::paste! {
           #[test]
-          $($(#[$meta])*)?
+          $(#[$outer])*
           fn [< test_ $fn >] () {
             $run(async move {
               $expr

@@ -292,3 +292,61 @@ fn compound_encoder(msgs: &[Message<SmolStr, SocketAddr>]) -> Result<Bytes, AnyE
 
   Ok(out.freeze())
 }
+
+/// A helper function to create TLS stream layer for testing
+#[cfg(feature = "tls")]
+pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::Tls<R> {
+  use std::sync::Arc;
+
+  use crate::tls::{rustls, NoopCertificateVerifier, Tls};
+  use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+  let certs = test_cert_gen::gen_keys();
+
+  let cfg = rustls::ServerConfig::builder()
+    .with_no_client_auth()
+    .with_single_cert(
+      vec![CertificateDer::from(
+        certs.server.cert_and_key.cert.get_der().to_vec(),
+      )],
+      PrivateKeyDer::from(PrivatePkcs8KeyDer::from(
+        certs.server.cert_and_key.key.get_der().to_vec(),
+      )),
+    )
+    .expect("bad certificate/key");
+  let acceptor = futures_rustls::TlsAcceptor::from(Arc::new(cfg));
+
+  let cfg = rustls::ClientConfig::builder()
+    .dangerous()
+    .with_custom_certificate_verifier(NoopCertificateVerifier::new())
+    .with_no_client_auth();
+  let connector = futures_rustls::TlsConnector::from(Arc::new(cfg));
+  Tls::new(
+    rustls::pki_types::ServerName::IpAddress(
+      "127.0.0.1".parse::<std::net::IpAddr>().unwrap().into(),
+    ),
+    acceptor,
+    connector,
+  )
+}
+
+/// A helper function to create native TLS stream layer for testing
+#[cfg(feature = "native-tls")]
+pub async fn native_tls_stream_layer<R: Runtime>() -> crate::native_tls::NativeTls<R> {
+  use async_native_tls::{Identity, TlsAcceptor, TlsConnector};
+
+  use crate::native_tls::NativeTls;
+
+  let keys = test_cert_gen::gen_keys();
+
+  let identity = Identity::from_pkcs12(
+    &keys.server.cert_and_key_pkcs12.pkcs12.0,
+    &keys.server.cert_and_key_pkcs12.password,
+  )
+  .unwrap();
+
+  let acceptor = TlsAcceptor::from(::native_tls::TlsAcceptor::new(identity).unwrap());
+  let connector = TlsConnector::new().danger_accept_invalid_certs(true);
+
+  NativeTls::new("localhost".to_string(), acceptor, connector)
+}
