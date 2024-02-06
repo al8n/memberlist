@@ -23,6 +23,8 @@ use crate::{
   Checksumer, Compressor, Listener, StreamLayer,
 };
 
+pub use super::promised_processor::listener_backoff;
+
 /// Unit test for handling [`Ping`] message
 pub mod handle_ping;
 
