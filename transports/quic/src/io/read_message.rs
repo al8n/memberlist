@@ -122,7 +122,10 @@ where
     readed += data_len;
     rayon::spawn(move || {
       if tx.send(Self::decompress(compressor, &data)).is_err() {
-        tracing::error!(target: "memberlist.net.promised", "failed to send computation task result back to main thread");
+        tracing::error!(
+          target = "memberlist.net.promised",
+          "failed to send computation task result back to main thread"
+        );
       }
     });
 

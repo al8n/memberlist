@@ -180,7 +180,10 @@ where
         ))
         .is_err()
       {
-        tracing::error!(target: "memberlist.transport.quic.packet", "failed to send computation task result back to main thread");
+        tracing::error!(
+          target = "memberlist.transport.quic.packet",
+          "failed to send computation task result back to main thread"
+        );
       }
     });
 

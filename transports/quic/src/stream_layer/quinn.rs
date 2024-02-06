@@ -76,7 +76,11 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
 
     let local_addr = endpoint.local_addr()?;
     if auto_port {
-      tracing::info!(target: "memberlist.transports.quic.endpoint", "binding to dynamic addr {}", local_addr);
+      tracing::info!(
+        target = "memberlist.transports.quic.endpoint",
+        "binding to dynamic addr {}",
+        local_addr
+      );
     }
 
     let bi_acceptor = Self::BiAcceptor {
