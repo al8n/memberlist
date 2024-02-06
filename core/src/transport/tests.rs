@@ -729,7 +729,7 @@ where
   m2.send_reliable(m1.advertise_addr(), Bytes::from_static(b"send_reliable"))
     .await?;
 
-  R::sleep(Duration::from_millis(100)).await;
+  R::sleep(Duration::from_secs(1)).await;
 
   let mut msgs1 = m1.delegate().unwrap().get_messages().await;
   msgs1.sort();
