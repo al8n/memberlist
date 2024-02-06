@@ -97,3 +97,8 @@ smol_str.workspace = true
 tokio = { version = "1", features = ["full"] }
 test-cert-gen = { version = "0.9" }
 paste.workspace = true
+
+[[test]]
+name = "memberlist-net"
+path = "tests/main.rs"
+required-features = ["test"]
