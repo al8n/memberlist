@@ -108,11 +108,11 @@ jobs:
         path: ~/.cargo
         key: ${{ runner.os }}-coverage-dotcargo
     - name: Run test
-      run: cargo hack test --feature-powerset --group-features dns,dns-over-quic,dns-over-https-rustls,dns-over-rustls,dns-over-openssl,dns-over-native-tls,dns-webpki-roots,dns-native-certs,dnssec-openssl,dnssec-ring,dnssec --exclude-features tracing
+      run: cargo test --features test,tls,native-tls
       if: matrix.os != 'windows-latest'
       working-directory: transports/net
     - name: Run test (windows)
-      run: cargo hack test --feature-powerset --group-features dns,dns-over-quic,dns-over-https-rustls,dns-over-rustls,dns-over-native-tls,dns-webpki-roots,dns-native-certs,dnssec-ring,dnssec --exclude-features tracing,dnssec-openssl,dns-over-openssl,native-tls
+      run: cargo test --feature test,tls
       if: matrix.os == 'windows-latest'
       working-directory: transports/net
 
