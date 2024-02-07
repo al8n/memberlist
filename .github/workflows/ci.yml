@@ -109,7 +109,11 @@ jobs:
         key: ${{ runner.os }}-coverage-dotcargo
     - name: Run test
       run: cargo test --features test,tls,native-tls
-      if: matrix.os != 'windows-latest'
+      if: matrix.os == 'ubuntu-latest'
+      working-directory: transports/net
+    - name: Run test
+      run: cargo test async_std::handle_compound_ping::test_tls_v4_compound_ping --features test,tls
+      if: matrix.os == 'macos-latest'
       working-directory: transports/net
     # - name: Run test (windows)
     #   run: cargo test --features test,tls
