@@ -396,7 +396,10 @@ where
       .flush()
       .await
       .map_err(|e| ConnectionError::promised_write(e).into())
-      .map(|_| total_len)
+      .map(|_| {
+        tracing::trace!(total_len = total_len, sent = ?buf.as_ref());
+        total_len
+      })
   }
 
   async fn send_by_promised_without_compression_and_encryption(
@@ -431,6 +434,9 @@ where
       .flush()
       .await
       .map_err(|e| ConnectionError::promised_write(e).into())
-      .map(|_| total_data)
+      .map(|_| {
+        tracing::trace!(total_data = total_data, sent = ?buf.as_ref());
+        total_data
+      })
   }
 }

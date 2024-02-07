@@ -136,7 +136,6 @@ where
   stream_layer: Arc<S>,
   #[cfg(feature = "encryption")]
   encryptor: Option<SecretKeyring>,
-
   wg: AsyncWaitGroup,
   resolver: Arc<A>,
   shutdown: Arc<AtomicBool>,
@@ -665,6 +664,15 @@ where
         error: Error::new(ErrorKind::TimedOut, "timeout"),
       })),
     }
+  }
+
+  async fn cache_stream(
+    &self,
+    addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
+    stream: Self::Stream,
+  ) -> Result<(), Self::Error> {
+    self.stream_layer.cache_stream(*addr, stream);
+    Ok(())
   }
 
   fn packet(

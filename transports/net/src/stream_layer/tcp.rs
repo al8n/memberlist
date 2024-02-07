@@ -60,6 +60,10 @@ impl<R: Runtime> StreamLayer for Tcp<R> {
       .map(TcpListener)
   }
 
+  fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {
+    // Do nothing
+  }
+
   fn is_secure() -> bool {
     false
   }
