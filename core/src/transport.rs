@@ -236,6 +236,13 @@ pub trait Transport: Sized + Send + Sync + 'static {
     timeout: Duration,
   ) -> impl Future<Output = Result<Self::Stream, Self::Error>> + Send;
 
+  /// Used to cache a connection for future use.
+  fn cache_stream(
+    &self,
+    addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
+    stream: Self::Stream,
+  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
   /// Returns a packet subscriber that can be used to receive incoming packets
   fn packet(
     &self,

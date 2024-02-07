@@ -50,6 +50,10 @@ where
         return Err(Error::sequence_number_mismatch(ping_seq_no, ack.seq_no));
       }
 
+      if let Err(e) = self.inner.transport.cache_stream(target, conn).await {
+        tracing::warn!(target = "memberlist.transport", local_addr = %self.inner.id, peer_addr = %target, err = %e, "failed to cache stream");
+      }
+
       Ok(true)
     } else {
       Err(Error::UnexpectedMessage {
@@ -99,7 +103,17 @@ where
       .map(|(_read, msg)| msg)?
     {
       Message::ErrorResponse(err) => Err(Error::remote(err)),
-      Message::PushPull(pp) => Ok(pp),
+      Message::PushPull(pp) => {
+        if let Err(e) = self
+          .inner
+          .transport
+          .cache_stream(node.address(), conn)
+          .await
+        {
+          tracing::warn!(target = "memberlist.transport", local_addr = %self.inner.id, peer_addr = %node, err = %e, "failed to cache stream");
+        }
+        Ok(pp)
+      }
       msg => Err(Error::unexpected_message("PushPull", msg.kind())),
     }
   }
@@ -170,7 +184,8 @@ where
           .increment(_sent as u64);
         }
       })
-      .map_err(Error::transport)
+      .map_err(Error::transport)?;
+    Ok(())
   }
 
   pub(crate) async fn read_message(
