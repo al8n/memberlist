@@ -23,6 +23,16 @@ use crate::{
 
 use super::{Ping, PushPull, PushServerState, Server, ServerState, Transport};
 
+#[cfg(target_os = "macos")]
+const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+#[cfg(target_os = "macos")]
+const WAIT_DURATION: Duration = Duration::from_secs(6);
+
+#[cfg(not(target_os = "macos"))]
+const TIMEOUT_DURATION: Duration = Duration::from_secs(2);
+#[cfg(not(target_os = "macos"))]
+const WAIT_DURATION: Duration = Duration::from_secs(3);
+
 /// The kind of address
 pub enum AddressKind {
   /// V4
@@ -114,13 +124,13 @@ where
   R::spawn_detach(async move {
     futures::select! {
       _ = rx.recv().fuse() => {},
-      _ = R::sleep(Duration::from_secs(2)).fuse() => {
+      _ = R::sleep(TIMEOUT_DURATION).fuse() => {
         tx1.close();
       }
     }
   });
 
-  let (in_, _) = R::timeout(Duration::from_secs_f64(2.5), client.recv_from())
+  let (in_, _) = R::timeout(WAIT_DURATION, client.recv_from())
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
@@ -178,14 +188,14 @@ where
   R::spawn_detach(async move {
     futures::select! {
       _ = rx.recv().fuse() => {},
-      _ = R::sleep(Duration::from_secs(2)).fuse() => {
+      _ = R::sleep(TIMEOUT_DURATION).fuse() => {
         tx1.close();
       }
     }
   });
 
   for _ in 0..3 {
-    let (in_, _) = R::timeout(Duration::from_secs_f64(2.5), client.recv_from())
+    let (in_, _) = R::timeout(WAIT_DURATION, client.recv_from())
       .await
       .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
     let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
@@ -233,13 +243,13 @@ where
   R::spawn_detach(async move {
     futures::select! {
       _ = rx.recv().fuse() => {},
-      _ = R::sleep(Duration::from_secs(2)).fuse() => {
+      _ = R::sleep(TIMEOUT_DURATION).fuse() => {
         tx1.close();
       }
     }
   });
 
-  let (in_, _) = R::timeout(Duration::from_secs_f64(2.5), client.recv_from())
+  let (in_, _) = R::timeout(WAIT_DURATION, client.recv_from())
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
@@ -283,7 +293,7 @@ where
   client.send_to(m.advertise_addr(), &buf).await?;
 
   // Wait for response
-  R::timeout(Duration::from_secs_f64(2.5), client.recv_from()).await??;
+  R::timeout(WAIT_DURATION, client.recv_from()).await??;
   Ok(())
 }
 
@@ -333,13 +343,13 @@ where
   R::spawn_detach(async move {
     futures::select! {
       _ = rx.recv().fuse() => {},
-      _ = R::sleep(Duration::from_secs(2)).fuse() => {
+      _ = R::sleep(TIMEOUT_DURATION).fuse() => {
         tx1.close();
       }
     }
   });
 
-  let (in_, _) = R::timeout(Duration::from_secs_f64(2.5), client.recv_from())
+  let (in_, _) = R::timeout(WAIT_DURATION, client.recv_from())
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
 
@@ -729,7 +739,7 @@ where
   m2.send_reliable(m1.advertise_addr(), Bytes::from_static(b"send_reliable"))
     .await?;
 
-  R::sleep(Duration::from_secs(1)).await;
+  R::sleep(WAIT_DURATION).await;
 
   let mut msgs1 = m1.delegate().unwrap().get_messages().await;
   msgs1.sort();
