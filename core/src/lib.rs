@@ -105,18 +105,12 @@ pub mod tests {
   // static PORT: AtomicU16 = AtomicU16::new(63000);
   /// Returns the next socket addr v4
   pub fn next_socket_addr_v4() -> SocketAddr {
-    SocketAddr::new(
-      IpAddr::V4(Ipv4Addr::LOCALHOST),
-      0,
-    )
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
   }
 
   /// Returns the next socket addr v6
   pub fn next_socket_addr_v6() -> SocketAddr {
-    SocketAddr::new(
-      IpAddr::V6(Ipv6Addr::LOCALHOST),
-      0,
-    )
+    SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)
   }
 
   /// Run the unit test with a given async runtime sequentially.

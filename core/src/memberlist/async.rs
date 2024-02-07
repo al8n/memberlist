@@ -1,7 +1,9 @@
 use std::{future::Future, sync::atomic::Ordering, time::Duration};
 
 use crate::{
-  delegate::VoidDelegate, transport::MaybeResolvedAddress, types::{Dead, PushServerState, SmallVec}
+  delegate::VoidDelegate,
+  transport::MaybeResolvedAddress,
+  types::{Dead, PushServerState, SmallVec},
 };
 
 use super::*;
@@ -266,9 +268,7 @@ where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   /// Return the errors
-  pub const fn errors(
-    &self,
-  ) -> &HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>> {
+  pub const fn errors(&self) -> &HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>> {
     &self.errors
   }
 }
@@ -470,10 +470,7 @@ where
   }
 
   /// Join directly by contacting the given node id
-  pub async fn join(
-    &self,
-    node: Node<T::Id, MaybeResolvedAddress<T>>,
-  ) -> Result<(), Error<T, D>> {
+  pub async fn join(&self, node: Node<T::Id, MaybeResolvedAddress<T>>) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
@@ -481,14 +478,12 @@ where
     let (id, addr) = node.into_components();
     let addr = match addr {
       MaybeResolvedAddress::Resolved(addr) => addr,
-      MaybeResolvedAddress::Unresolved(addr) => {
-        self
-          .inner
-          .transport
-          .resolve(&addr)
-          .await
-          .map_err(Error::Transport)?
-      }
+      MaybeResolvedAddress::Unresolved(addr) => self
+        .inner
+        .transport
+        .resolve(&addr)
+        .await
+        .map_err(Error::Transport)?,
     };
     self.push_pull_node(Node::new(id, addr), true).await
   }

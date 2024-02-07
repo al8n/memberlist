@@ -199,16 +199,13 @@ impl<R: Runtime> TestPacketClient for NetTransporTestClient<R> {
 )]
 pub struct NetTransporTestPromisedClient<S: StreamLayer> {
   ln: S::Listener,
-  layer: S, 
+  layer: S,
 }
 
 impl<S: StreamLayer> NetTransporTestPromisedClient<S> {
   /// Creates a new test client with the given address
   pub fn new(layer: S, ln: S::Listener) -> Self {
-    Self {
-      layer,
-      ln,
-    }
+    Self { layer, ln }
   }
 }
 

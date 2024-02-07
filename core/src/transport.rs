@@ -22,7 +22,6 @@ pub use lpe::*;
 #[cfg_attr(docsrs, doc(cfg(feature = "test")))]
 pub mod tests;
 
-
 /// `MaybeResolvedAddress` is used to represent an address that may or may not be resolved.
 pub enum MaybeResolvedAddress<T: Transport> {
   /// The resolved address, which means that can be directly used to communicate with the remote node.
@@ -133,7 +132,9 @@ impl<T: Transport> MaybeResolvedAddress<T> {
 
   /// Returns the resolved address if it's resolved, otherwise returns `None`.
   #[inline(always)]
-  pub fn as_resolved_mut(&mut self) -> Option<&mut <T::Resolver as AddressResolver>::ResolvedAddress> {
+  pub fn as_resolved_mut(
+    &mut self,
+  ) -> Option<&mut <T::Resolver as AddressResolver>::ResolvedAddress> {
     match self {
       Self::Resolved(addr) => Some(addr),
       Self::Unresolved(_) => None,
