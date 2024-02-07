@@ -322,15 +322,11 @@ pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::Tls<R> {
       vec![CertificateDer::from(
         certs.server.cert_and_key.cert.get_der().to_vec(),
       )],
-      #[cfg(target_os = "macos")]
-      PrivateKeyDer::from(rustls::pki_types::PrivatePkcs1KeyDer::from(
-        certs.server.cert_and_key.key.get_der().to_vec(),
-      )),
       #[cfg(target_os = "linux")]
       PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(
         certs.server.cert_and_key.key.get_der().to_vec(),
       )),
-      #[cfg(target_os = "windows")]
+      #[cfg(not(target_os = "linux"))]
       PrivateKeyDer::from(rustls::pki_types::PrivatePkcs1KeyDer::from(
         certs.server.cert_and_key.key.get_der().to_vec(),
       )),

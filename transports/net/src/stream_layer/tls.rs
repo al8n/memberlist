@@ -122,7 +122,7 @@ impl<R: Runtime> StreamLayer for Tls<R> {
   }
 
   fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {
-    // TODO(al8n): It seems that futures-rustls has a bug on Linux
+    // TODO(al8n): It seems that futures-rustls has a bug on Linux and Windows
     // client side dial remote successfully and finish send bytes successfully,
     // and then drop the connection immediately.
     // But, server side can't accept the connection, and reports `BrokenPipe` error.
@@ -132,9 +132,9 @@ impl<R: Runtime> StreamLayer for Tls<R> {
     // - transports/net/tests/main/async_std/send.rs
     // - transport/net/tests/main/smol/send.rs
     //
-    // On Linux, will fail. I am also not sure if this bug can happen in real environment,
+    // On Linux and Windows, will fail. I am also not sure if this bug can happen in real environment,
     // so just keep it here and not feature-gate it by `cfg(test)`.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     R::spawn_detach(async move {
       R::sleep(std::time::Duration::from_millis(100)).await;
       drop(_stream);
