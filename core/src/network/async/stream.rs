@@ -101,7 +101,13 @@ where
       .dial_timeout(addr, self.inner.opts.timeout)
       .await
       .map_err(Error::transport)?;
-    self.send_message(&mut conn, Message::UserData(msg)).await
+    self.send_message(&mut conn, Message::UserData(msg)).await?;
+    self
+      .inner
+      .transport
+      .cache_stream(addr, conn)
+      .await
+      .map_err(Error::transport)
   }
 }
 

@@ -62,6 +62,7 @@ impl Transformable for Ack {
     let payload_size = self.payload.len();
     if !self.payload.is_empty() {
       dst[offset..offset + payload_size].copy_from_slice(&self.payload);
+      offset += payload_size;
     }
 
     debug_assert_eq!(

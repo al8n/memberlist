@@ -544,6 +544,15 @@ where
       .map_err(|e| Self::Error::Stream(e.into()))
   }
 
+  async fn cache_stream(
+    &self,
+    _addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
+    _stream: Self::Stream,
+  ) -> Result<(), Self::Error> {
+    // Cache QUIC stream make no sense, so just return
+    Ok(())
+  }
+
   fn packet(
     &self,
   ) -> PacketSubscriber<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress> {

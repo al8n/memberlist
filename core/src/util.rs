@@ -33,7 +33,7 @@ pub fn hostname() -> Option<String> {
         let name = name.to_string_lossy();
         name.is_empty().then_some(name.to_string())
       }
-      Err(e) => None,
+      Err(_) => None,
     }
   };
 
