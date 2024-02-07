@@ -17,7 +17,7 @@ use crate::{
   delegate::{MockDelegate, VoidDelegate},
   state::LocalServerState,
   tests::{get_memberlist, next_socket_addr_v4, next_socket_addr_v6, AnyError},
-  transport::{Ack, Alive, IndirectPing, Message},
+  transport::{Ack, Alive, IndirectPing, MaybeResolvedAddress, Message},
   Member, Memberlist, Options,
 };
 
@@ -90,7 +90,7 @@ pub trait TestPromisedClient: Sized + Send + Sync + 'static {
   fn accept(&self) -> impl Future<Output = Result<(Self::Stream, SocketAddr), AnyError>> + Send;
 
   /// Local address of the client
-  fn local_addr(&self) -> SocketAddr;
+  fn local_addr(&self) -> std::io::Result<SocketAddr>;
 }
 
 /// Unit test for handling [`Ping`] message
@@ -411,7 +411,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let promised_addr = promised.local_addr();
+  let promised_addr = promised.local_addr()?;
   let promised = Arc::new(promised);
 
   let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
@@ -705,7 +705,7 @@ where
   let m2 = Memberlist::new(trans2, Options::default()).await?;
   m2.join(Node::new(
     m1.local_id().cheap_clone(),
-    m1.local_addr().clone(),
+    MaybeResolvedAddress::resolved(*m1.advertise_addr()),
   ))
   .await?;
   assert_eq!(m2.num_members().await, 2);
@@ -727,7 +727,7 @@ where
 
   m2.join(Node::new(
     m1.local_id().cheap_clone(),
-    m1.local_addr().clone(),
+    MaybeResolvedAddress::resolved(*m1.advertise_addr()),
   ))
   .await?;
   assert_eq!(m2.num_members().await, 2);

@@ -1,8 +1,7 @@
 use std::{future::Future, sync::atomic::Ordering, time::Duration};
 
 use crate::{
-  delegate::VoidDelegate,
-  types::{Dead, PushServerState, SmallVec},
+  delegate::VoidDelegate, transport::MaybeResolvedAddress, types::{Dead, PushServerState, SmallVec}
 };
 
 use super::*;
@@ -184,13 +183,13 @@ where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   joined: SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-  errors: HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>>,
+  errors: HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>>,
 }
 
 impl<D, T: Transport> From<JoinError<T, D>>
   for (
     SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-    HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>>,
+    HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>>,
   )
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
@@ -269,7 +268,7 @@ where
   /// Return the errors
   pub const fn errors(
     &self,
-  ) -> &HashMap<Node<T::Id, <T::Resolver as AddressResolver>::Address>, Error<T, D>> {
+  ) -> &HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>> {
     &self.errors
   }
 }
@@ -473,19 +472,24 @@ where
   /// Join directly by contacting the given node id
   pub async fn join(
     &self,
-    node: Node<T::Id, <T::Resolver as AddressResolver>::Address>,
+    node: Node<T::Id, MaybeResolvedAddress<T>>,
   ) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
 
     let (id, addr) = node.into_components();
-    let addr = self
-      .inner
-      .transport
-      .resolve(&addr)
-      .await
-      .map_err(Error::Transport)?;
+    let addr = match addr {
+      MaybeResolvedAddress::Resolved(addr) => addr,
+      MaybeResolvedAddress::Unresolved(addr) => {
+        self
+          .inner
+          .transport
+          .resolve(&addr)
+          .await
+          .map_err(Error::Transport)?
+      }
+    };
     self.push_pull_node(Node::new(id, addr), true).await
   }
 
@@ -500,7 +504,7 @@ where
   /// join the cluster.
   pub async fn join_many(
     &self,
-    existing: impl Iterator<Item = Node<T::Id, <T::Resolver as AddressResolver>::Address>>,
+    existing: impl Iterator<Item = Node<T::Id, MaybeResolvedAddress<T>>>,
   ) -> Result<
     SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
     JoinError<T, D>,
@@ -520,28 +524,38 @@ where
       .into_iter()
       .map(|node| {
         async move {
-          let resolved_addr = self.inner.transport.resolve(node.address()).await.map_err(|e| {
-            tracing::debug!(
-              target: "memberlist",
-              err = %e,
-              "failed to resolve address {}",
-              node.address(),
-            );
-            (node.cheap_clone(), Error::<T, D>::transport(e))
-          })?;
-          let id = Node::new(node.id().cheap_clone(), resolved_addr);
-          tracing::info!(target =  "memberlist", local = %self.inner.transport.local_id(), peer = %id, "start join...");
-          if let Err(e) = self.push_pull_node(id.cheap_clone(), true).await {
+          let (id, addr) = node.into_components();
+          let resolved_addr = match addr {
+            MaybeResolvedAddress::Resolved(addr) => addr,
+            MaybeResolvedAddress::Unresolved(addr) => {
+              match self.inner.transport.resolve(&addr).await {
+                Ok(addr) => addr,
+                Err(e) => {
+                  tracing::debug!(
+                    target: "memberlist",
+                    err = %e,
+                    "failed to resolve address {}",
+                    addr,
+                  );
+                  return Err((Node::new(id, MaybeResolvedAddress::unresolved(addr)), Error::<T, D>::transport(e)))
+                }
+              }
+            }
+          };
+          let node = Node::new(id, resolved_addr);
+          tracing::info!(target = "memberlist", local = %self.inner.transport.local_id(), peer = %node, "start join...");
+          if let Err(e) = self.push_pull_node(node.cheap_clone(), true).await {
             tracing::debug!(
               target: "memberlist",
               local = %self.inner.id,
               err = %e,
               "failed to join {}",
-              id,
+              node,
             );
-            Err((node, e))
+            let (id, addr) = node.into_components();
+            Err((Node::new(id, MaybeResolvedAddress::Resolved(addr)), e))
           } else {
-            Ok(id)
+            Ok(node)
           }
         }
       });

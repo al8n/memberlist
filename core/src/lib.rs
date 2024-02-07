@@ -47,10 +47,7 @@ pub use tracing;
 /// [memberlist-wasm]: https://github.com/al8n/memberlist/blob/main/memberlist-wasm/src/lib.rs#L20
 #[cfg(feature = "test")]
 pub mod tests {
-  use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::atomic::{AtomicU16, Ordering},
-  };
+  use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
   use agnostic::Runtime;
   use nodecraft::resolver::AddressResolver;
@@ -105,12 +102,12 @@ pub mod tests {
 
   /// Sequential access lock for tests.
   static ACCESS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
-  static PORT: AtomicU16 = AtomicU16::new(63000);
+  // static PORT: AtomicU16 = AtomicU16::new(63000);
   /// Returns the next socket addr v4
   pub fn next_socket_addr_v4() -> SocketAddr {
     SocketAddr::new(
       IpAddr::V4(Ipv4Addr::LOCALHOST),
-      PORT.fetch_add(1, Ordering::SeqCst),
+      0,
     )
   }
 
@@ -118,7 +115,7 @@ pub mod tests {
   pub fn next_socket_addr_v6() -> SocketAddr {
     SocketAddr::new(
       IpAddr::V6(Ipv6Addr::LOCALHOST),
-      PORT.fetch_add(1, Ordering::SeqCst),
+      0,
     )
   }
 

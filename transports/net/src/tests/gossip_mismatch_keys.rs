@@ -3,7 +3,7 @@ use crate::{NetTransport, NetTransportOptions};
 use super::*;
 use agnostic::Runtime;
 use futures::{Future, Stream};
-use memberlist_core::{transport::Lpe, Memberlist, Options};
+use memberlist_core::{transport::{Lpe, MaybeResolvedAddress}, Memberlist, Options};
 use nodecraft::{resolver::socket_addr::SocketAddrResolver, CheapClone, Node};
 
 pub async fn gossip_mismatched_keys<S, R>(s1: S, s2: S, kind: AddressKind) -> Result<(), AnyError>
@@ -39,7 +39,7 @@ where
   let m2 = Memberlist::new(trans2, Options::default()).await?;
 
   // Make sure we get this error on the joining side
-  m2.join_many([Node::new(name1.into(), *m1_addr)].into_iter())
+  m2.join_many([Node::new(name1.into(), MaybeResolvedAddress::resolved(*m1_addr))].into_iter())
     .await
     .map(|_| {})
     .map_err(Into::into)
@@ -85,7 +85,7 @@ where
   let m2 = Memberlist::new(trans2, Options::default()).await?;
 
   // Make sure we get this error on the joining side
-  m2.join_many([Node::new(name1.into(), *m1_addr)].into_iter())
+  m2.join_many([Node::new(name1.into(), MaybeResolvedAddress::resolved(*m1_addr))].into_iter())
     .await
     .map(|_| {})
     .map_err(Into::into)

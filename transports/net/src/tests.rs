@@ -199,15 +199,13 @@ impl<R: Runtime> TestPacketClient for NetTransporTestClient<R> {
 )]
 pub struct NetTransporTestPromisedClient<S: StreamLayer> {
   ln: S::Listener,
-  layer: S,
-  local_addr: SocketAddr,
+  layer: S, 
 }
 
 impl<S: StreamLayer> NetTransporTestPromisedClient<S> {
   /// Creates a new test client with the given address
-  pub fn new(addr: SocketAddr, layer: S, ln: S::Listener) -> Self {
+  pub fn new(layer: S, ln: S::Listener) -> Self {
     Self {
-      local_addr: addr,
       layer,
       ln,
     }
@@ -226,8 +224,8 @@ impl<S: StreamLayer> TestPromisedClient for NetTransporTestPromisedClient<S> {
     Ok((stream, addr))
   }
 
-  fn local_addr(&self) -> SocketAddr {
-    self.local_addr
+  fn local_addr(&self) -> std::io::Result<SocketAddr> {
+    self.ln.local_addr()
   }
 }
 
