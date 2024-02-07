@@ -330,6 +330,10 @@ pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::Tls<R> {
       PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(
         certs.server.cert_and_key.key.get_der().to_vec(),
       )),
+      #[cfg(target_os = "windows")]
+      PrivateKeyDer::from(rustls::pki_types::PrivatePkcs1KeyDer::from(
+        certs.server.cert_and_key.key.get_der().to_vec(),
+      )),
     )
     .expect("bad certificate/key");
   let acceptor = futures_rustls::TlsAcceptor::from(Arc::new(cfg));
