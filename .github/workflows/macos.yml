@@ -1,4 +1,4 @@
-name: CI
+name: macos
 
 on:
   push:
@@ -92,9 +92,7 @@ jobs:
     strategy:
       matrix:
         os:
-          - ubuntu-latest
-          # - macos-latest
-          # - windows-latest
+          - macos-latest
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v3
@@ -108,13 +106,8 @@ jobs:
         path: ~/.cargo
         key: ${{ runner.os }}-coverage-dotcargo
     - name: Run test
-      run: cargo test --features test,tls,native-tls
-      if: matrix.os != 'windows-latest'
+      run: cargo test async_std::handle_compound_ping::test_tls_v4_compound_ping --features test,tls
       working-directory: transports/net
-    # - name: Run test (windows)
-    #   run: cargo test --features test,tls
-    #   if: matrix.os == 'windows-latest'
-    #   working-directory: transports/net
 
   coverage:
     name: coverage

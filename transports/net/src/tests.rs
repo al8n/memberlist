@@ -312,7 +312,7 @@ pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::Tls<R> {
   use std::sync::Arc;
 
   use crate::tls::{rustls, NoopCertificateVerifier, Tls};
-  use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+  use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer};
 
   let certs = test_cert_gen::gen_keys();
 
@@ -322,7 +322,7 @@ pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::Tls<R> {
       vec![CertificateDer::from(
         certs.server.cert_and_key.cert.get_der().to_vec(),
       )],
-      PrivateKeyDer::from(PrivatePkcs8KeyDer::from(
+      PrivateKeyDer::from(PrivatePkcs1KeyDer::from(
         certs.server.cert_and_key.key.get_der().to_vec(),
       )),
     )
