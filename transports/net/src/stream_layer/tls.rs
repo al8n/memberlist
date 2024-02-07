@@ -136,7 +136,7 @@ impl<R: Runtime> StreamLayer for Tls<R> {
     // so just keep it here and not feature-gate it by `cfg(test)`.
     #[cfg(target_os = "linux")]
     R::spawn_detach(async move {
-      R::sleep(std::time::Duration::from_nanos(1)).await;
+      R::sleep(std::time::Duration::from_millis(1)).await;
       drop(_stream);
     });
   }
