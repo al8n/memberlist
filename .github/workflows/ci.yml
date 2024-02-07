@@ -112,14 +112,20 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/.cargo
-        key: ${{ runner.os }}-coverage-dotcargo
+        key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test
       run: cargo test --features test,tls,native-tls
       working-directory: transports/net 
 
   coverage:
     name: coverage
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
     needs:
       - rustfmt
       - clippy
@@ -152,6 +158,21 @@ jobs:
           args: --all-features --run-types tests --run-types doctests --workspace --out xml
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3.1.1
+        if: matrix.os == 'ubuntu-latest'
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
+          fail_ci_if_error: flase
+      - name: Upload to codecov.io (macos)
+        uses: codecov/codecov-action@v3.1.1
+        if: matrix.os == 'macos-latest'
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          flags: macos
+      - name: Upload to codecov.io (windows)
+        uses: codecov/codecov-action@v3.1.1
+        if: matrix.os == 'windows-latest'
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          flags: windows
