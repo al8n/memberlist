@@ -75,19 +75,20 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
 {
-  opts: Arc<QuicTransportOptions<I, A>>,
+  opts: QuicTransportOptions<I, A>,
   advertise_addr: A::ResolvedAddress,
+  local_addr: A::Address,
   packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
   #[allow(dead_code)]
-  stream_layer: Arc<S>,
+  stream_layer: S,
   v4_round_robin: AtomicUsize,
   v4_connectors: SmallVec<S::Connector>,
   v6_round_robin: AtomicUsize,
   v6_connectors: SmallVec<S::Connector>,
 
   wg: AsyncWaitGroup,
-  resolver: Arc<A>,
+  resolver: A,
   shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
 
@@ -108,16 +109,13 @@ where
     stream_layer: S,
     opts: QuicTransportOptions<I, A>,
   ) -> Result<Self, QuicTransportError<A, S, W>> {
-    match opts.bind_port {
-      Some(0) | None => Self::retry(resolver, stream_layer, 10, opts).await,
-      _ => Self::retry(resolver, stream_layer, 1, opts).await,
-    }
+    Self::new_in(resolver, stream_layer, opts).await
   }
 
   async fn new_in(
-    resolver: Arc<A>,
-    stream_layer: Arc<S>,
-    opts: Arc<QuicTransportOptions<I, A>>,
+    resolver: A,
+    stream_layer: S,
+    opts: QuicTransportOptions<I, A>,
   ) -> Result<Self, QuicTransportError<A, S, W>> {
     // If we reject the empty list outright we can assume that there's at
     // least one listener of each type later during operation.
@@ -129,28 +127,70 @@ where
     let (packet_tx, packet_rx) = packet_stream::<Self>();
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
 
-    let mut connectors = SmallVec::with_capacity(opts.bind_addresses.len());
-    let mut acceptors = SmallVec::with_capacity(opts.bind_addresses.len());
-    let bind_port = opts.bind_port.unwrap_or(0);
+    let mut v4_connectors = SmallVec::with_capacity(opts.bind_addresses.len());
+    let mut v6_connectors = SmallVec::with_capacity(opts.bind_addresses.len());
+    let mut v4_acceptors = SmallVec::with_capacity(opts.bind_addresses.len());
+    let mut v6_acceptors = SmallVec::with_capacity(opts.bind_addresses.len());
+    let mut resolved_bind_address = SmallVec::new();
 
-    for &addr in opts.bind_addresses.iter() {
-      let addr = SocketAddr::new(addr, bind_port);
-      let (acceptor, connector) = match stream_layer.bind(addr).await {
-        Ok(res) => res,
-        Err(e) => return Err(QuicTransportError::ListenPromised(addr, e)),
+    for addr in opts.bind_addresses.iter() {
+      let addr = resolver
+        .resolve(addr)
+        .await
+        .map_err(|e| QuicTransportError::Resolve {
+          addr: addr.cheap_clone(),
+          err: e,
+        })?;
+
+      let bind_port = addr.port();
+
+      let ((local_addr, bi_acceptor, uni_acceptor), connector) = if bind_port == 0 {
+        let mut retries = 0;
+        loop {
+          match stream_layer.bind(addr).await {
+            Ok(res) => break res,
+            Err(e) => {
+              if retries < 9 {
+                retries += 1;
+                continue;
+              }
+              return Err(QuicTransportError::ListenPromised(addr, e));
+            }
+          }
+        }
+      } else {
+        match stream_layer.bind(addr).await {
+          Ok(res) => res,
+          Err(e) => return Err(QuicTransportError::ListenPromised(addr, e)),
+        }
       };
-      connectors.push(connector);
-      acceptors.push(acceptor);
+
+      if local_addr.is_ipv4() {
+        v4_acceptors.push((local_addr, bi_acceptor, uni_acceptor));
+        v4_connectors.push(connector);
+      } else {
+        v6_acceptors.push((local_addr, bi_acceptor, uni_acceptor));
+        v6_connectors.push(connector);
+      }
+      // If the config port given was zero, use the first TCP listener
+      // to pick an available port and then apply that to everything
+      // else.
+      let addr = if bind_port == 0 { local_addr } else { addr };
+      resolved_bind_address.push(addr);
     }
 
     let wg = AsyncWaitGroup::new();
     let shutdown = Arc::new(AtomicBool::new(false));
-    let endpoint1_addr = acceptors[0].0;
+    let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
+    let advertise_addr = resolved_bind_address[expose_addr_index];
+    let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
 
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
-    for (local_addr, bi_acceptor, uni_acceptor) in acceptors {
+    for (local_addr, bi_acceptor, uni_acceptor) in
+      v4_acceptors.into_iter().chain(v6_acceptors.into_iter())
+    {
       Processor::<A, Self, S> {
         wg: wg.clone(),
         bi: bi_acceptor,
@@ -172,34 +212,29 @@ where
     }
 
     // find final advertise address
-    let advertise_addr = match opts.advertise_address {
-      Some(addr) => addr,
-      None => {
-        let addr = if opts.bind_addresses[0].is_unspecified() {
-          local_ip_address::local_ip().map_err(|e| match e {
-            local_ip_address::Error::LocalIpAddressNotFound => QuicTransportError::NoPrivateIP,
-            e => QuicTransportError::NoInterfaceAddresses(e),
-          })?
-        } else {
-          endpoint1_addr.ip()
-        };
-
-        // Use the port we are bound to.
-        SocketAddr::new(addr, endpoint1_addr.port())
-      }
+    let final_advertise_addr = if advertise_addr.ip().is_unspecified() {
+      let ip = local_ip_address::local_ip().map_err(|e| match e {
+        local_ip_address::Error::LocalIpAddressNotFound => QuicTransportError::NoPrivateIP,
+        e => QuicTransportError::NoInterfaceAddresses(e),
+      })?;
+      SocketAddr::new(ip, advertise_addr.port())
+    } else {
+      advertise_addr
     };
 
     Ok(Self {
-      advertise_addr,
+      advertise_addr: final_advertise_addr,
+      local_addr: self_addr,
       max_payload_size: MAX_MESSAGE_SIZE.min(stream_layer.max_stream_data()),
       opts,
       packet_rx,
       stream_rx,
       wg,
       shutdown,
-      connectors,
-      round_robin: AtomicUsize::new(0),
-
+      v4_connectors,
+      v6_connectors,
+      v4_round_robin: AtomicUsize::new(0),
+      v6_round_robin: AtomicUsize::new(0),
       stream_layer,
       resolver,
       shutdown_tx,
@@ -207,39 +242,14 @@ where
     })
   }
 
-  async fn retry(
-    resolver: A,
-    stream_layer: S,
-    limit: usize,
-    opts: QuicTransportOptions<I, A>,
-  ) -> Result<Self, QuicTransportError<A, S, W>> {
-    let mut i = 0;
-    let resolver = Arc::new(resolver);
-    let stream_layer = Arc::new(stream_layer);
-    let opts = Arc::new(opts);
-    loop {
-      let transport = { Self::new_in(resolver.clone(), stream_layer.clone(), opts.clone()).await };
-
-      match transport {
-        Ok(t) => {
-          if let Some(0) | None = opts.bind_port {
-            let port = t.advertise_addr.port();
-            tracing::warn!(
-              target = "memberlist.transport.quic",
-              "using dynamic bind port {port}"
-            );
-          }
-          return Ok(t);
-        }
-        Err(e) => {
-          tracing::debug!(target="memberlist.transport.quic", err=%e, "fail to create transport");
-          if i == limit - 1 {
-            return Err(e);
-          }
-          i += 1;
-        }
+  fn find_advertise_addr_index(addrs: &[SocketAddr]) -> usize {
+    for (i, addr) in addrs.iter().enumerate() {
+      if !addr.ip().is_unspecified() {
+        return i;
       }
     }
+
+    0
   }
 }
 
@@ -261,10 +271,7 @@ where
     overhead
   }
 
-  fn next_connector(
-    &self,
-    addr: &A::ResolvedAddress,
-  ) -> &S::Connector {
+  fn next_connector(&self, addr: &A::ResolvedAddress) -> &S::Connector {
     if addr.is_ipv4() {
       // if there's no v4 sockets, we assume remote addr can accept both v4 and v6
       // give a try on v6
@@ -340,7 +347,7 @@ where
 
   #[inline(always)]
   fn local_address(&self) -> &<Self::Resolver as AddressResolver>::Address {
-    &self.opts.address
+    &self.local_addr
   }
 
   #[inline(always)]

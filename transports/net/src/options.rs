@@ -28,7 +28,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
     setter(attrs(doc = "Set the id of the node. (Builder pattern)"),)
   )]
   id: I,
- 
+
   /// A set of addresses to bind to for both TCP and UDP
   /// communications.
   #[viewit(

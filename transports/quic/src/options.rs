@@ -19,13 +19,6 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   id: I,
 
-  /// The local node's address.
-  #[viewit(
-    getter(const, style = "ref", attrs(doc = "Get the address of the node."),),
-    setter(attrs(doc = "Set the address of the node. (Builder pattern)"),)
-  )]
-  address: A::Address,
-
   /// A set of addresses to bind to for both TCP and UDP
   /// communications.
   #[viewit(
@@ -38,7 +31,7 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
       doc = "Set the list of addresses to bind to for QUIC communications. (Builder pattern)"
     ),)
   )]
-  bind_addresses: SmallVec<IpAddr>,
+  bind_addresses: SmallVec<A::Address>,
 
   /// Label is an optional set of bytes to include on the outside of each
   /// packet and stream.
@@ -163,10 +156,9 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I, A> {
   /// Creates a new net transport options by id and address, other configurations are left default.
-  pub fn new(id: I, address: A::Address) -> Self {
+  pub fn new(id: I) -> Self {
     Self {
       id,
-      address,
       timeout: None,
       bind_addresses: SmallVec::new(),
       label: Label::empty(),
