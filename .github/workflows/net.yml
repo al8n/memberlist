@@ -95,7 +95,7 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run build (unix)
-      run: cargo hack build --feature-powerset --group-features dns,dns-over-quic,dns-over-https-rustls,dns-over-rustls,dns-over-openssl,dns-over-native-tls,dns-webpki-roots,dns-native-certs,dnssec-openssl,dnssec-ring,dnssec --exclude-features tracing,serde
+      run: cargo hack build --feature-powerset --group-features dns,dns-over-quic,dns-over-https-rustls,dns-over-rustls,dns-over-openssl,dns-over-native-tls,dns-webpki-roots,dns-native-certs,dnssec-openssl,dnssec-ring,dnssec --exclude-features serde
       working-directory: transports/net
 
   test:
