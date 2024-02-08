@@ -434,9 +434,7 @@ mod tests {
         );
       }
 
-      let sleep = expected
-        - Duration::from_millis(confirmations.len() as u64 * (fudge.as_millis() as u64))
-        - fudge;
+      let sleep = expected - fudge * (confirmations.len() as u32) - fudge;
       tokio::time::sleep(sleep).await;
       match rx.try_recv() {
         Ok(d) => panic!("case {}: should not have fired ({:?})", i, d),

@@ -22,6 +22,153 @@ pub use lpe::*;
 #[cfg_attr(docsrs, doc(cfg(feature = "test")))]
 pub mod tests;
 
+/// `MaybeResolvedAddress` is used to represent an address that may or may not be resolved.
+pub enum MaybeResolvedAddress<T: Transport> {
+  /// The resolved address, which means that can be directly used to communicate with the remote node.
+  Resolved(<T::Resolver as AddressResolver>::ResolvedAddress),
+  /// The unresolved address, which means that need to be resolved before using it to communicate with the remote node.
+  Unresolved(<T::Resolver as AddressResolver>::Address),
+}
+
+impl<T: Transport> Clone for MaybeResolvedAddress<T> {
+  fn clone(&self) -> Self {
+    match self {
+      Self::Resolved(addr) => Self::Resolved(addr.clone()),
+      Self::Unresolved(addr) => Self::Unresolved(addr.clone()),
+    }
+  }
+}
+
+impl<T: Transport> CheapClone for MaybeResolvedAddress<T> {
+  fn cheap_clone(&self) -> Self {
+    match self {
+      Self::Resolved(addr) => Self::Resolved(addr.cheap_clone()),
+      Self::Unresolved(addr) => Self::Unresolved(addr.cheap_clone()),
+    }
+  }
+}
+
+impl<T: Transport> core::fmt::Debug for MaybeResolvedAddress<T> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Resolved(addr) => write!(f, "{addr:?}"),
+      Self::Unresolved(addr) => write!(f, "{addr:?}"),
+    }
+  }
+}
+
+impl<T: Transport> core::fmt::Display for MaybeResolvedAddress<T> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Resolved(addr) => write!(f, "{addr}"),
+      Self::Unresolved(addr) => write!(f, "{addr}"),
+    }
+  }
+}
+
+impl<T: Transport> PartialEq for MaybeResolvedAddress<T> {
+  fn eq(&self, other: &Self) -> bool {
+    match (self, other) {
+      (Self::Resolved(addr1), Self::Resolved(addr2)) => addr1 == addr2,
+      (Self::Unresolved(addr1), Self::Unresolved(addr2)) => addr1 == addr2,
+      _ => false,
+    }
+  }
+}
+
+impl<T: Transport> Eq for MaybeResolvedAddress<T> {}
+
+impl<T: Transport> core::hash::Hash for MaybeResolvedAddress<T> {
+  fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+    match self {
+      Self::Resolved(addr) => addr.hash(state),
+      Self::Unresolved(addr) => addr.hash(state),
+    }
+  }
+}
+
+impl<T: Transport> MaybeResolvedAddress<T> {
+  /// Creates a resolved address.
+  #[inline(always)]
+  pub const fn resolved(addr: <T::Resolver as AddressResolver>::ResolvedAddress) -> Self {
+    Self::Resolved(addr)
+  }
+
+  /// Creates an unresolved address.
+  #[inline(always)]
+  pub const fn unresolved(addr: <T::Resolver as AddressResolver>::Address) -> Self {
+    Self::Unresolved(addr)
+  }
+
+  /// Returns `true` if the address is resolved.
+  #[inline(always)]
+  pub fn is_resolved(&self) -> bool {
+    matches!(self, Self::Resolved(_))
+  }
+
+  /// Returns `true` if the address is unresolved.
+  #[inline(always)]
+  pub fn is_unresolved(&self) -> bool {
+    matches!(self, Self::Unresolved(_))
+  }
+
+  /// Returns the resolved address if it's resolved, otherwise returns `None`.
+  #[inline(always)]
+  pub fn as_resolved(&self) -> Option<&<T::Resolver as AddressResolver>::ResolvedAddress> {
+    match self {
+      Self::Resolved(addr) => Some(addr),
+      Self::Unresolved(_) => None,
+    }
+  }
+
+  /// Returns the unresolved address if it's unresolved, otherwise returns `None`.
+  #[inline(always)]
+  pub fn as_unresolved(&self) -> Option<&<T::Resolver as AddressResolver>::Address> {
+    match self {
+      Self::Resolved(_) => None,
+      Self::Unresolved(addr) => Some(addr),
+    }
+  }
+
+  /// Returns the resolved address if it's resolved, otherwise returns `None`.
+  #[inline(always)]
+  pub fn as_resolved_mut(
+    &mut self,
+  ) -> Option<&mut <T::Resolver as AddressResolver>::ResolvedAddress> {
+    match self {
+      Self::Resolved(addr) => Some(addr),
+      Self::Unresolved(_) => None,
+    }
+  }
+
+  /// Returns the unresolved address if it's unresolved, otherwise returns `None`.
+  #[inline(always)]
+  pub fn as_unresolved_mut(&mut self) -> Option<&mut <T::Resolver as AddressResolver>::Address> {
+    match self {
+      Self::Resolved(_) => None,
+      Self::Unresolved(addr) => Some(addr),
+    }
+  }
+
+  /// Returns the resolved address if it's resolved, otherwise returns `None`.
+  #[inline(always)]
+  pub fn into_resolved(self) -> Option<<T::Resolver as AddressResolver>::ResolvedAddress> {
+    match self {
+      Self::Resolved(addr) => Some(addr),
+      Self::Unresolved(_) => None,
+    }
+  }
+
+  /// Returns the unresolved address if it's unresolved, otherwise returns `None`.
+  #[inline(always)]
+  pub fn into_unresolved(self) -> Option<<T::Resolver as AddressResolver>::Address> {
+    match self {
+      Self::Resolved(_) => None,
+      Self::Unresolved(addr) => Some(addr),
+    }
+  }
+}
+
 /// Ensures that the stream has timeout capabilities.
 #[auto_impl::auto_impl(Box)]
 pub trait TimeoutableReadStream: Unpin + Send + Sync + 'static {
@@ -235,6 +382,13 @@ pub trait Transport: Sized + Send + Sync + 'static {
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     timeout: Duration,
   ) -> impl Future<Output = Result<Self::Stream, Self::Error>> + Send;
+
+  /// Used to cache a connection for future use.
+  fn cache_stream(
+    &self,
+    addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
+    stream: Self::Stream,
+  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Returns a packet subscriber that can be used to receive incoming packets
   fn packet(

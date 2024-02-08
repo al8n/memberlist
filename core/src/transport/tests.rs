@@ -17,11 +17,21 @@ use crate::{
   delegate::{MockDelegate, VoidDelegate},
   state::LocalServerState,
   tests::{get_memberlist, next_socket_addr_v4, next_socket_addr_v6, AnyError},
-  transport::{Ack, Alive, IndirectPing, Message},
+  transport::{Ack, Alive, IndirectPing, MaybeResolvedAddress, Message},
   Member, Memberlist, Options,
 };
 
 use super::{Ping, PushPull, PushServerState, Server, ServerState, Transport};
+
+#[cfg(target_os = "macos")]
+const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+#[cfg(target_os = "macos")]
+const WAIT_DURATION: Duration = Duration::from_secs(6);
+
+#[cfg(not(target_os = "macos"))]
+const TIMEOUT_DURATION: Duration = Duration::from_secs(2);
+#[cfg(not(target_os = "macos"))]
+const WAIT_DURATION: Duration = Duration::from_secs(3);
 
 /// The kind of address
 pub enum AddressKind {
@@ -80,7 +90,7 @@ pub trait TestPromisedClient: Sized + Send + Sync + 'static {
   fn accept(&self) -> impl Future<Output = Result<(Self::Stream, SocketAddr), AnyError>> + Send;
 
   /// Local address of the client
-  fn local_addr(&self) -> SocketAddr;
+  fn local_addr(&self) -> std::io::Result<SocketAddr>;
 }
 
 /// Unit test for handling [`Ping`] message
@@ -114,13 +124,13 @@ where
   R::spawn_detach(async move {
     futures::select! {
       _ = rx.recv().fuse() => {},
-      _ = R::sleep(Duration::from_secs(2)).fuse() => {
+      _ = R::sleep(TIMEOUT_DURATION).fuse() => {
         tx1.close();
       }
     }
   });
 
-  let (in_, _) = R::timeout(Duration::from_secs_f64(2.5), client.recv_from())
+  let (in_, _) = R::timeout(WAIT_DURATION, client.recv_from())
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
@@ -178,14 +188,14 @@ where
   R::spawn_detach(async move {
     futures::select! {
       _ = rx.recv().fuse() => {},
-      _ = R::sleep(Duration::from_secs(2)).fuse() => {
+      _ = R::sleep(TIMEOUT_DURATION).fuse() => {
         tx1.close();
       }
     }
   });
 
   for _ in 0..3 {
-    let (in_, _) = R::timeout(Duration::from_secs_f64(2.5), client.recv_from())
+    let (in_, _) = R::timeout(WAIT_DURATION, client.recv_from())
       .await
       .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
     let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
@@ -233,13 +243,13 @@ where
   R::spawn_detach(async move {
     futures::select! {
       _ = rx.recv().fuse() => {},
-      _ = R::sleep(Duration::from_secs(2)).fuse() => {
+      _ = R::sleep(TIMEOUT_DURATION).fuse() => {
         tx1.close();
       }
     }
   });
 
-  let (in_, _) = R::timeout(Duration::from_secs_f64(2.5), client.recv_from())
+  let (in_, _) = R::timeout(WAIT_DURATION, client.recv_from())
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
@@ -283,7 +293,7 @@ where
   client.send_to(m.advertise_addr(), &buf).await?;
 
   // Wait for response
-  R::timeout(Duration::from_secs_f64(2.5), client.recv_from()).await??;
+  R::timeout(WAIT_DURATION, client.recv_from()).await??;
   Ok(())
 }
 
@@ -333,13 +343,13 @@ where
   R::spawn_detach(async move {
     futures::select! {
       _ = rx.recv().fuse() => {},
-      _ = R::sleep(Duration::from_secs(2)).fuse() => {
+      _ = R::sleep(TIMEOUT_DURATION).fuse() => {
         tx1.close();
       }
     }
   });
 
-  let (in_, _) = R::timeout(Duration::from_secs_f64(2.5), client.recv_from())
+  let (in_, _) = R::timeout(WAIT_DURATION, client.recv_from())
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
 
@@ -401,7 +411,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let promised_addr = promised.local_addr();
+  let promised_addr = promised.local_addr()?;
   let promised = Arc::new(promised);
 
   let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
@@ -695,7 +705,7 @@ where
   let m2 = Memberlist::new(trans2, Options::default()).await?;
   m2.join(Node::new(
     m1.local_id().cheap_clone(),
-    m1.local_addr().clone(),
+    MaybeResolvedAddress::resolved(*m1.advertise_addr()),
   ))
   .await?;
   assert_eq!(m2.num_members().await, 2);
@@ -717,7 +727,7 @@ where
 
   m2.join(Node::new(
     m1.local_id().cheap_clone(),
-    m1.local_addr().clone(),
+    MaybeResolvedAddress::resolved(*m1.advertise_addr()),
   ))
   .await?;
   assert_eq!(m2.num_members().await, 2);
@@ -729,14 +739,10 @@ where
   m2.send_reliable(m1.advertise_addr(), Bytes::from_static(b"send_reliable"))
     .await?;
 
-  R::sleep(Duration::from_millis(100)).await;
+  R::sleep(WAIT_DURATION).await;
 
   let mut msgs1 = m1.delegate().unwrap().get_messages().await;
   msgs1.sort();
   assert_eq!(msgs1, ["send".as_bytes(), "send_reliable".as_bytes()]);
   Ok(())
 }
-
-// pub async fn test_transport_tcp_listen_back_off_runner() {
-//   todo!()
-// }

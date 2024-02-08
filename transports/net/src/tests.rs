@@ -18,10 +18,13 @@ use memberlist_utils::{Label, LabelBufMutExt};
 use nodecraft::Transformable;
 use smol_str::SmolStr;
 
-use crate::{
-  security::{EncryptionAlgo, SecretKey, SecretKeyring},
-  Checksumer, Compressor, Listener, StreamLayer,
-};
+use crate::{Checksumer, Listener, StreamLayer};
+
+#[cfg(feature = "encryption")]
+use crate::security::{EncryptionAlgo, SecretKey, SecretKeyring};
+
+#[cfg(feature = "compression")]
+use crate::compressor::Compressor;
 
 pub use super::promised_processor::listener_backoff;
 
@@ -29,24 +32,30 @@ pub use super::promised_processor::listener_backoff;
 pub mod handle_ping;
 
 /// Unit test for handling compound ping message
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod handle_compound_ping;
 
 /// Unit test for handling indirect ping message
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod handle_indirect_ping;
 
 /// Unit test for handling ping from wrong node
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod handle_ping_wrong_node;
 
 /// Unit test for handling send packet with piggyback
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod packet_piggyback;
 
 /// Unit test for handling transport with label or not.
 pub mod label;
 
 /// Unit test for handling promised ping
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod promised_ping;
 
 /// Unit test for handling promised push pull
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod promised_push_pull;
 
 /// Unit test for handling gossip with mismatched keys
@@ -54,9 +63,11 @@ pub mod promised_push_pull;
 pub mod gossip_mismatch_keys;
 
 /// Unit test for sending
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod send;
 
 /// Unit test for joining
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod join;
 
 /// A test client for network transport
@@ -189,17 +200,12 @@ impl<R: Runtime> TestPacketClient for NetTransporTestClient<R> {
 pub struct NetTransporTestPromisedClient<S: StreamLayer> {
   ln: S::Listener,
   layer: S,
-  local_addr: SocketAddr,
 }
 
 impl<S: StreamLayer> NetTransporTestPromisedClient<S> {
   /// Creates a new test client with the given address
-  pub fn new(addr: SocketAddr, layer: S, ln: S::Listener) -> Self {
-    Self {
-      local_addr: addr,
-      layer,
-      ln,
-    }
+  pub fn new(layer: S, ln: S::Listener) -> Self {
+    Self { layer, ln }
   }
 }
 
@@ -215,8 +221,8 @@ impl<S: StreamLayer> TestPromisedClient for NetTransporTestPromisedClient<S> {
     Ok((stream, addr))
   }
 
-  fn local_addr(&self) -> SocketAddr {
-    self.local_addr
+  fn local_addr(&self) -> std::io::Result<SocketAddr> {
+    self.ln.local_addr()
   }
 }
 
@@ -239,6 +245,7 @@ pub fn verify_checksum(src: &[u8]) -> Result<(), AnyError> {
 }
 
 /// A helper function to decompress data from the given source.
+#[cfg(feature = "compression")]
 pub fn read_compressed_data(src: &[u8]) -> Result<Vec<u8>, AnyError> {
   let compressor = Compressor::try_from(src[0])?;
   let compressed_data_len = NetworkEndian::read_u32(&src[1..]) as usize;
@@ -251,6 +258,7 @@ pub fn read_compressed_data(src: &[u8]) -> Result<Vec<u8>, AnyError> {
 }
 
 /// A helper function to decrypt data from the given source.
+#[cfg(feature = "encryption")]
 pub fn read_encrypted_data(
   pk: SecretKey,
   auth_data: &[u8],
@@ -299,7 +307,7 @@ pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::Tls<R> {
   use std::sync::Arc;
 
   use crate::tls::{rustls, NoopCertificateVerifier, Tls};
-  use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+  use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
   let certs = test_cert_gen::gen_keys();
 
@@ -309,7 +317,12 @@ pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::Tls<R> {
       vec![CertificateDer::from(
         certs.server.cert_and_key.cert.get_der().to_vec(),
       )],
-      PrivateKeyDer::from(PrivatePkcs8KeyDer::from(
+      #[cfg(target_os = "linux")]
+      PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        certs.server.cert_and_key.key.get_der().to_vec(),
+      )),
+      #[cfg(not(target_os = "linux"))]
+      PrivateKeyDer::from(rustls::pki_types::PrivatePkcs1KeyDer::from(
         certs.server.cert_and_key.key.get_der().to_vec(),
       )),
     )
