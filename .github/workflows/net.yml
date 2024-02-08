@@ -162,10 +162,9 @@ jobs:
           key: ${{ matrix.os }}-coverage-cargo-build-target
       - name: Run tarpaulin
         uses: actions-rs/cargo@v1
-        working-directory: transports/net
         with:
           command: tarpaulin
-          args: --all-features --run-types tests --run-types doctests --workspace --out xml
+          args: --all-features --run-types tests --run-types doctests --lib memberlist-net --out xml
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3.1.1
         if: matrix.os == 'ubuntu-latest'
