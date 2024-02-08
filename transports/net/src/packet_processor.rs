@@ -25,7 +25,6 @@ use wg::AsyncWaitGroup;
 #[cfg(feature = "encryption")]
 use super::security::*;
 
-
 #[cfg(feature = "compression")]
 use super::compressor::*;
 
@@ -330,9 +329,9 @@ where
     OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
     NetTransportError<T::Resolver, T::Wire>,
   > {
-    use nodecraft::CheapClone;
-    use memberlist_utils::LabelError;
     use super::{security, MAX_MESSAGE_LEN_SIZE};
+    use memberlist_utils::LabelError;
+    use nodecraft::CheapClone;
 
     if !super::ENCRYPT_TAG.contains(&buf[0]) {
       if verify_incoming {
