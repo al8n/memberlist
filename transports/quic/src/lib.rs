@@ -41,6 +41,11 @@ pub mod compressor;
 #[cfg(feature = "compression")]
 use compressor::*;
 
+/// Exports unit tests.
+#[cfg(any(test, feature = "test"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "test")))]
+pub mod tests;
+
 mod error;
 pub use error::*;
 mod io;
@@ -48,8 +53,6 @@ mod options;
 pub use options::*;
 mod stream_layer;
 pub use stream_layer::*;
-
-const DEFAULT_PORT: u16 = 7946;
 
 const MAX_MESSAGE_LEN_SIZE: usize = core::mem::size_of::<u32>();
 const MAX_MESSAGE_SIZE: usize = u32::MAX as usize;
@@ -78,8 +81,10 @@ where
   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
   #[allow(dead_code)]
   stream_layer: Arc<S>,
-  connectors: SmallVec<S::Connector>,
-  round_robin: AtomicUsize,
+  v4_round_robin: AtomicUsize,
+  v4_connectors: SmallVec<S::Connector>,
+  v6_round_robin: AtomicUsize,
+  v6_connectors: SmallVec<S::Connector>,
 
   wg: AsyncWaitGroup,
   resolver: Arc<A>,
@@ -256,13 +261,27 @@ where
     overhead
   }
 
-  #[inline]
-  fn next_connector(&self) -> &S::Connector {
-    let idx = self
-      .round_robin
-      .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-      % self.connectors.len();
-    &self.connectors[idx]
+  fn next_connector(
+    &self,
+    addr: &A::ResolvedAddress,
+  ) -> &S::Connector {
+    if addr.is_ipv4() {
+      // if there's no v4 sockets, we assume remote addr can accept both v4 and v6
+      // give a try on v6
+      if self.v4_connectors.is_empty() {
+        let idx = self.v6_round_robin.fetch_add(1, Ordering::AcqRel) % self.v6_connectors.len();
+        &self.v6_connectors[idx]
+      } else {
+        let idx = self.v4_round_robin.fetch_add(1, Ordering::AcqRel) % self.v4_connectors.len();
+        &self.v4_connectors[idx]
+      }
+    } else if self.v6_connectors.is_empty() {
+      let idx = self.v4_round_robin.fetch_add(1, Ordering::AcqRel) % self.v4_connectors.len();
+      &self.v4_connectors[idx]
+    } else {
+      let idx = self.v6_round_robin.fetch_add(1, Ordering::AcqRel) % self.v6_connectors.len();
+      &self.v6_connectors[idx]
+    }
   }
 }
 
@@ -538,7 +557,7 @@ where
     timeout: std::time::Duration,
   ) -> Result<Self::Stream, Self::Error> {
     self
-      .next_connector()
+      .next_connector(addr)
       .open_bi_with_timeout(*addr, timeout)
       .await
       .map_err(|e| Self::Error::Stream(e.into()))
@@ -574,7 +593,7 @@ where
     self.shutdown.store(true, Ordering::SeqCst);
     self.shutdown_tx.close();
 
-    for connector in self.connectors.iter() {
+    for connector in self.v4_connectors.iter().chain(self.v6_connectors.iter()) {
       if let Err(e) = connector
         .close()
         .await

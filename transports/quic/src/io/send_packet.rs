@@ -96,7 +96,7 @@ where
     Self::encode_batch(&mut buf[offset..], batch)?;
 
     self
-      .next_connector()
+      .next_connector(&addr)
       .open_uni(addr)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?
@@ -159,7 +159,7 @@ where
       let buf = Self::encode_and_compress_batch(compressor, buf, batch, self.max_payload_size())?;
 
       return self
-        .next_connector()
+        .next_connector(&addr)
         .open_uni(addr)
         .await
         .map_err(|e| QuicTransportError::Stream(e.into()))?
@@ -189,7 +189,7 @@ where
 
     match rx.await {
       Ok(Ok(buf)) => self
-        .next_connector()
+        .next_connector(&addr)
         .open_uni(addr)
         .await
         .map_err(|e| QuicTransportError::Stream(e.into()))?

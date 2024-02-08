@@ -26,37 +26,19 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   address: A::Address,
 
-  /// The address to advertise to other nodes. If not set,
-  /// the transport will attempt to discover the local IP address
-  /// to use.
-  #[viewit(
-    getter(const, attrs(doc = "Get the advertise address of the node."),),
-    setter(attrs(doc = "Set the advertise address of the node. (Builder pattern)"),)
-  )]
-  advertise_address: Option<A::ResolvedAddress>,
-
-  /// A list of addresses to bind to for both TCP and UDP
+  /// A set of addresses to bind to for both TCP and UDP
   /// communications.
   #[viewit(
     getter(
       style = "ref",
       const,
-      attrs(doc = "Get a list of addresses to bind to for both TCP and UDP communications."),
+      attrs(doc = "Get a list of addresses to bind to for QUIC communications."),
     ),
     setter(attrs(
-      doc = "Set the list of addresses to bind to for both TCP and UDP communications. (Builder pattern)"
+      doc = "Set the list of addresses to bind to for QUIC communications. (Builder pattern)"
     ),)
   )]
   bind_addresses: SmallVec<IpAddr>,
-
-  /// The port for bind addresses of the node.
-  ///
-  /// Default is `7946`.
-  #[viewit(
-    getter(const, attrs(doc = "Get the port for bind address of the node."),),
-    setter(attrs(doc = "Set the port for bind address of the node. (Builder pattern)"),)
-  )]
-  bind_port: Option<u16>,
 
   /// Label is an optional set of bytes to include on the outside of each
   /// packet and stream.
@@ -185,10 +167,8 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I
     Self {
       id,
       address,
-      advertise_address: None,
       timeout: None,
       bind_addresses: SmallVec::new(),
-      bind_port: Some(DEFAULT_PORT),
       label: Label::empty(),
       skip_inbound_label_check: false,
       cidrs_policy: CIDRsPolicy::allow_all(),

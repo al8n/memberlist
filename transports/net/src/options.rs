@@ -28,15 +28,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
     setter(attrs(doc = "Set the id of the node. (Builder pattern)"),)
   )]
   id: I,
-
-  // /// The address to advertise to other nodes. If not set,
-  // /// the transport will attempt to discover the local IP address
-  // /// to use.
-  // #[viewit(
-  //   getter(const, attrs(doc = "Get the advertise address of the node."),),
-  //   setter(attrs(doc = "Set the advertise address of the node. (Builder pattern)"),)
-  // )]
-  // advertise_address: Option<A::ResolvedAddress>,
+ 
   /// A set of addresses to bind to for both TCP and UDP
   /// communications.
   #[viewit(
