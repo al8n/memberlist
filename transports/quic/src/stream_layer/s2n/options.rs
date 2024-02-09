@@ -116,14 +116,14 @@ pub struct Options {
 
   /// Cert path
   #[viewit(
-    getter(const, attrs(doc = "Gets the cert path.")),
+    getter(const, style = "ref", attrs(doc = "Gets the cert path.")),
     setter(attrs(doc = "Sets the cert path."))
   )]
   cert_path: PathBuf,
 
   /// Key path
   #[viewit(
-    getter(const, attrs(doc = "Gets the key path.")),
+    getter(const, style = "ref", attrs(doc = "Gets the key path.")),
     setter(attrs(doc = "Sets the key path."))
   )]
   key_path: PathBuf,
@@ -146,6 +146,7 @@ impl Options {
     }
   }
 }
+
 
 impl TryFrom<&Options> for Limits {
   type Error = ValidationError;

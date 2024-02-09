@@ -28,6 +28,9 @@ dnssec-openssl = ["dns", "nodecraft/dnssec-openssl"]
 dnssec-ring = ["dns", "nodecraft/dnssec-ring"]
 dnssec = ["dns", "nodecraft/dnssec"]
 
+# enable test feature
+test = ["memberlist-core/test", "rustls?/dangerous_configuration", "rcgen"]
+
 [dependencies]
 auto_impl.workspace = true
 agnostic.workspace = true
@@ -61,6 +64,9 @@ quinn = { version = "0.10.2", default-features = false, optional = true, feature
 socket2 = { version = "0.5", optional = true }
 rustls = { version = "0.21.9", default-features = false, optional = true }
 
+# test
+rcgen = { version = "0.12", optional = true }
+
 # s2n
 s2n-quic = { version = "1.32", optional = true }
 s2n-quic-transport = { version = "0.32", optional = true}
@@ -68,3 +74,11 @@ s2n-quic-transport = { version = "0.32", optional = true}
 # compression
 rayon = { version = "1.8", optional = true }
 weezl = { version = "0.1", optional = true }
+
+[dev-dependencies]
+agnostic = { workspace = true, features = ["async-std", "smol", "tokio", "net"] }
+memberlist-core = { workspace = true, features = ["test"] }
+smol_str.workspace = true
+tokio = { version = "1", features = ["full"] }
+test-cert-gen = { version = "0.9" }
+paste.workspace = true

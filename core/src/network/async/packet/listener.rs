@@ -162,7 +162,6 @@ where
         payload: Bytes::new(),
       }
     };
-
     if let Err(e) = self.send_msg(p.source.address(), msg.into()).await {
       tracing::error!(target =  "memberlist.packet", addr = %from, err = %e, "failed to send ack response");
     }

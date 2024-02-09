@@ -1,3 +1,5 @@
+use indexmap::IndexSet;
+
 use super::*;
 
 /// Used to configure a net transport.
@@ -31,7 +33,7 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
       doc = "Set the list of addresses to bind to for QUIC communications. (Builder pattern)"
     ),)
   )]
-  bind_addresses: SmallVec<A::Address>,
+  bind_addresses: IndexSet<A::Address>,
 
   /// Label is an optional set of bytes to include on the outside of each
   /// packet and stream.
@@ -160,7 +162,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I
     Self {
       id,
       timeout: None,
-      bind_addresses: SmallVec::new(),
+      bind_addresses: IndexSet::new(),
       label: Label::empty(),
       skip_inbound_label_check: false,
       cidrs_policy: CIDRsPolicy::allow_all(),
@@ -172,4 +174,11 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I
       metric_labels: None,
     }
   }
+
+  /// Add bind address
+  pub fn add_bind_address(&mut self, addr: A::Address) -> &mut Self {
+    self.bind_addresses.insert(addr);
+    self
+  }
 }
+

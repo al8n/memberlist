@@ -157,7 +157,7 @@ impl Options {
       client_tls_config: Arc::new(client_tls_config),
       server_tls_config: Arc::new(server_tls_config),
       endpoint_config,
-      max_idle_timeout: 10 * 1000,
+      max_idle_timeout: Duration::from_secs(10).as_millis() as u32,
       max_concurrent_stream_limit: 256,
       keep_alive_interval: Duration::from_secs(5),
       max_connection_data: 15_000_000,

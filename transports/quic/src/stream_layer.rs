@@ -62,7 +62,7 @@ pub trait QuicWriteStream: TimeoutableWriteStream + Send + Sync + 'static {
 
 /// A trait for QUIC bidirectional streams.
 #[auto_impl::auto_impl(Box)]
-pub trait QuicBiStream: TimeoutableStream + Send + Sync + 'static {
+pub trait QuicStream: TimeoutableStream + Send + Sync + 'static {
   /// The error type for the stream.
   type Error: QuicError;
 
@@ -77,6 +77,9 @@ pub trait QuicBiStream: TimeoutableStream + Send + Sync + 'static {
 
   /// Receives exact data from the remote peer.
   fn read_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+  /// Receives all data from the remote peer.
+  fn read_to_end(&mut self) -> impl Future<Output = Result<Bytes, Self::Error>> + Send;
 
   /// Peek data from the remote peer.
   fn peek(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, Self::Error>> + Send;
@@ -93,24 +96,20 @@ pub trait QuicBiStream: TimeoutableStream + Send + Sync + 'static {
 pub trait StreamLayer: Sized + Send + Sync + 'static {
   /// The error type.
   type Error: QuicError
-    + From<<Self::Stream as QuicBiStream>::Error>
+    + From<<Self::Stream as QuicStream>::Error>
     + From<<Self::WriteStream as QuicWriteStream>::Error>
     + From<<Self::ReadStream as QuicReadStream>::Error>
-    + From<<Self::BiAcceptor as QuicBiAcceptor>::Error>
-    + From<<Self::UniAcceptor as QuicUniAcceptor>::Error>
+    + From<<Self::Acceptor as QuicAcceptor>::Error>
     + From<<Self::Connector as QuicConnector>::Error>;
 
-  /// The bidirectional acceptor type.
-  type BiAcceptor: QuicBiAcceptor<BiStream = Self::Stream>;
-
-  /// The unidirectional acceptor type.
-  type UniAcceptor: QuicUniAcceptor<ReadStream = Self::ReadStream>;
+  /// The acceptor type.
+  type Acceptor: QuicAcceptor<BiStream = Self::Stream>;
 
   /// The connector type.
-  type Connector: QuicConnector<BiStream = Self::Stream, WriteStream = Self::WriteStream>;
+  type Connector: QuicConnector<Stream = Self::Stream>;
 
   /// The bidirectional stream type.
-  type Stream: QuicBiStream;
+  type Stream: QuicStream;
 
   /// The unidirectional write stream type.
   type WriteStream: QuicWriteStream;
@@ -128,7 +127,8 @@ pub trait StreamLayer: Sized + Send + Sync + 'static {
     addr: SocketAddr,
   ) -> impl Future<
     Output = std::io::Result<(
-      (SocketAddr, Self::BiAcceptor, Self::UniAcceptor),
+      SocketAddr,
+      Self::Acceptor,
       Self::Connector,
     )>,
   > + Send;
@@ -136,17 +136,17 @@ pub trait StreamLayer: Sized + Send + Sync + 'static {
 
 /// A trait for QUIC acceptors. The stream layer will use this trait to
 /// accept a bi-directional connection from a remote peer.
-#[auto_impl::auto_impl(Box, Arc)]
-pub trait QuicBiAcceptor: Send + Sync + 'static {
+#[auto_impl::auto_impl(Box)]
+pub trait QuicAcceptor: Send + Sync + 'static {
   /// The error type.
   type Error: std::error::Error + Send + Sync + 'static;
 
   /// The bidirectional stream type.
-  type BiStream: QuicBiStream;
+  type BiStream: QuicStream;
 
   /// Accepts a bidirectional connection from a remote peer.
   fn accept_bi(
-    &self,
+    &mut self,
   ) -> impl Future<Output = Result<(Self::BiStream, SocketAddr), Self::Error>> + Send;
 
   /// Returns the local address.
@@ -180,39 +180,34 @@ pub trait QuicConnector: Send + Sync + 'static {
   type Error: std::error::Error + Send + Sync + 'static;
 
   /// The bidirectional stream type.
-  type BiStream: QuicBiStream;
+  type Stream: QuicStream;
 
-  /// The unidirectional write stream type.
-  type WriteStream: QuicWriteStream;
 
   /// Opens a bidirectional connection to a remote peer.
   fn open_bi(
     &self,
     addr: SocketAddr,
-  ) -> impl Future<Output = Result<Self::BiStream, Self::Error>> + Send;
+  ) -> impl Future<Output = Result<Self::Stream, Self::Error>> + Send;
 
   /// Opens a bidirectional connection to a remote peer with timeout.
   fn open_bi_with_timeout(
     &self,
     addr: SocketAddr,
     timeout: Duration,
-  ) -> impl Future<Output = Result<Self::BiStream, Self::Error>> + Send;
-
-  /// Opens a unidirectional write stream to a remote peer.
-  fn open_uni(
-    &self,
-    addr: SocketAddr,
-  ) -> impl Future<Output = Result<Self::WriteStream, Self::Error>> + Send;
-
-  /// Opens a unidirectional write stream to a remote peer with timeout.
-  fn open_uni_with_timeout(
-    &self,
-    addr: SocketAddr,
-    timeout: Duration,
-  ) -> impl Future<Output = Result<Self::WriteStream, Self::Error>> + Send;
+  ) -> impl Future<Output = Result<Self::Stream, Self::Error>> + Send;
 
   /// Closes the connector.
   fn close(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+  /// Wait for all connections on the endpoint to be cleanly shut down
+  ///
+  /// Waiting for this condition before exiting ensures that a good-faith effort is made to notify
+  /// peers of recent connection closes, whereas exiting immediately could force them to wait out
+  /// the idle timeout period.
+  ///
+  /// Does not proactively close existing connections or cause incoming connections to be
+  /// rejected. Consider calling `close()` if that is desired.
+  fn wait_idle(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Returns the local address.
   fn local_addr(&self) -> SocketAddr;

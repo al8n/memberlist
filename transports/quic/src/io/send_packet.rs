@@ -1,4 +1,4 @@
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use memberlist_utils::LabelBufMutExt;
 
 use super::*;
@@ -20,20 +20,12 @@ where
     // Encode messages to buffer
     if num_packets <= 1 {
       let packet = batch.packets.into_iter().next().unwrap();
-      let tag = packet.tag();
-      let expected_packet_encoded_size = W::encoded_len(&packet) + HEADER_SIZE;
-      buf[offset] = tag;
-      offset += 1;
-      NetworkEndian::write_u32(
-        &mut buf[offset..offset + MAX_MESSAGE_LEN_SIZE],
-        expected_packet_encoded_size as u32,
-      );
-      offset += MAX_MESSAGE_LEN_SIZE;
+      let expected_packet_encoded_size = W::encoded_len(&packet);
       let actual_packet_encoded_size =
         W::encode_message(packet, &mut buf[offset..]).map_err(QuicTransportError::Wire)?;
       debug_assert_eq!(
         expected_packet_encoded_size, actual_packet_encoded_size,
-        "expected packet encoded size {} (calculated by Wire::encoded_len()) is not match the actual encoded size {} returned by Wire::encode_message()",
+        "expected packet encoded size {} is not match the actual encoded size {}",
         expected_packet_encoded_size, actual_packet_encoded_size
       );
       offset += actual_packet_encoded_size;
@@ -62,7 +54,7 @@ where
         W::encode_message(packet, &mut buf[offset..]).map_err(QuicTransportError::Wire)?;
       debug_assert_eq!(
         expected_packet_encoded_size, actual_packet_encoded_size,
-        "expected packet encoded size {} (calculated by Wire::encoded_len()) is not match the actual encoded size {} returned by Wire::encode_message()",
+        "expected packet encoded size {} is not match the actual encoded size {}",
         expected_packet_encoded_size, actual_packet_encoded_size
       );
       offset += actual_packet_encoded_size;
@@ -79,11 +71,12 @@ where
 
   async fn send_batch_without_compression(
     &self,
-    addr: A::ResolvedAddress,
     batch: Batch<I, A::ResolvedAddress>,
-  ) -> Result<usize, QuicTransportError<A, S, W>> {
+  ) -> Result<Bytes, QuicTransportError<A, S, W>> {
     let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len() + 1);
+    buf.put_u8(super::StreamType::Packet as u8);
+    offset += 1;
     buf.add_label_header(&self.opts.label);
     offset += self.opts.label.encoded_overhead();
 
@@ -95,14 +88,7 @@ where
 
     Self::encode_batch(&mut buf[offset..], batch)?;
 
-    self
-      .next_connector(&addr)
-      .open_uni(addr)
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))?
-      .write_all(buf.freeze())
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))
+    Ok(buf.freeze())
   }
 
   #[cfg(feature = "compression")]
@@ -141,15 +127,16 @@ where
   #[cfg(feature = "compression")]
   async fn send_batch_with_compression(
     &self,
-    addr: A::ResolvedAddress,
     batch: Batch<I, A::ResolvedAddress>,
-  ) -> Result<usize, QuicTransportError<A, S, W>> {
+  ) -> Result<Bytes, QuicTransportError<A, S, W>> {
     let Some(compressor) = self.opts.compressor else {
-      return self.send_batch_without_compression(addr, batch).await;
+      return self.send_batch_without_compression(batch).await;
     };
 
     let mut offset = 0;
     let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
+    buf.put_u8(super::StreamType::Packet as u8);
+    offset += 1;
     buf.add_label_header(&self.opts.label);
     offset += self.opts.label.encoded_overhead();
 
@@ -158,14 +145,7 @@ where
     if buf.len() <= self.opts.offload_size {
       let buf = Self::encode_and_compress_batch(compressor, buf, batch, self.max_payload_size())?;
 
-      return self
-        .next_connector(&addr)
-        .open_uni(addr)
-        .await
-        .map_err(|e| QuicTransportError::Stream(e.into()))?
-        .write_all(buf.freeze())
-        .await
-        .map_err(|e| QuicTransportError::Stream(e.into()));
+      return Ok(buf.freeze());
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
@@ -188,14 +168,7 @@ where
     });
 
     match rx.await {
-      Ok(Ok(buf)) => self
-        .next_connector(&addr)
-        .open_uni(addr)
-        .await
-        .map_err(|e| QuicTransportError::Stream(e.into()))?
-        .write_all(buf.freeze())
-        .await
-        .map_err(|e| QuicTransportError::Stream(e.into())),
+      Ok(Ok(buf)) => Ok(buf.freeze()),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(QuicTransportError::ComputationTaskFailed),
     }
@@ -207,9 +180,30 @@ where
     batch: Batch<I, A::ResolvedAddress>,
   ) -> Result<usize, QuicTransportError<A, S, W>> {
     #[cfg(not(feature = "compression"))]
-    return self.send_batch_without_compression(addr, batch).await;
+    return {
+      let src = self.send_batch_without_compression(addr, batch).await?;
+      self.send_batch_in(src).await
+    };
 
     #[cfg(feature = "compression")]
-    self.send_batch_with_compression(addr, batch).await
+    {
+      let src = self.send_batch_with_compression(batch).await?;
+      self.send_batch_in(addr, src).await
+    }
+  }
+
+  async fn send_batch_in(&self, addr: SocketAddr, src: Bytes) -> Result<usize, QuicTransportError<A, S, W>> {
+    let mut conn = self
+      .next_connector(&addr)
+      .open_bi(addr)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    let written = conn
+      .write_all(src)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    conn.flush().await.map_err(|e| QuicTransportError::Stream(e.into()))?;
+    conn.close().await.map_err(|e| QuicTransportError::Stream(e.into()))?;
+    Ok(written)
   }
 }

@@ -6,14 +6,12 @@ use futures::{AsyncReadExt, AsyncWriteExt};
 use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 use peekable::future::{AsyncPeekExt, AsyncPeekable};
 use s2n_quic::{
-  provider::limits::Limits,
-  stream::{BidirectionalStream, ReceiveStream, SendStream},
-  Client, Server,
+  client::Connect, provider::limits::Limits, stream::{BidirectionalStream, ReceiveStream, SendStream}, Client, Server
 };
 pub use s2n_quic_transport::connection::limits::ValidationError;
 
 use super::{
-  QuicBiAcceptor, QuicBiStream, QuicConnector, QuicReadStream, QuicUniAcceptor, QuicWriteStream,
+  QuicAcceptor, QuicBiStream, QuicConnector, QuicReadStream, QuicWriteStream,
   StreamLayer,
 };
 
@@ -24,6 +22,7 @@ pub use options::*;
 
 /// A QUIC stream layer based on [`s2n`](::s2n_quic).
 pub struct S2n<R> {
+  #[allow(dead_code)]
   limits: Limits,
   max_stream_data: usize,
   cert: PathBuf,
@@ -46,8 +45,7 @@ impl<R> S2n<R> {
 
 impl<R: Runtime> StreamLayer for S2n<R> {
   type Error = S2nError;
-  type BiAcceptor = S2nBiAcceptor<R>;
-  type UniAcceptor = S2nUniAcceptor<R>;
+  type Acceptor = S2nBiAcceptor<R>;
   type Connector = S2nConnector<R>;
 
   type Stream = S2nBiStream<R>;
@@ -62,13 +60,14 @@ impl<R: Runtime> StreamLayer for S2n<R> {
     &self,
     addr: SocketAddr,
   ) -> io::Result<(
-    (SocketAddr, Self::BiAcceptor, Self::UniAcceptor),
+    SocketAddr,
+    Self::Acceptor,
     Self::Connector,
   )> {
     let auto_server_port = addr.port() == 0;
     let srv = Server::builder()
-      .with_limits(self.limits)
-      .map_err(invalid_data)?
+      // .with_limits(self.limits)
+      // .map_err(invalid_data)?
       .with_io(addr)
       .map_err(invalid_data)?
       .with_tls((self.cert.as_path(), self.key.as_path()))
@@ -77,9 +76,9 @@ impl<R: Runtime> StreamLayer for S2n<R> {
       .map_err(invalid_data)?;
     let client_addr = SocketAddr::new(addr.ip(), 0);
     let client = Client::builder()
-      .with_limits(self.limits)
-      .map_err(invalid_data)?
-      .with_tls((self.cert.as_path(), self.key.as_path()))
+      // .with_limits(self.limits)
+      // .map_err(invalid_data)?
+      .with_tls(self.cert.as_path())
       .map_err(invalid_data)?
       .with_io(client_addr)?
       .start()
@@ -100,41 +99,36 @@ impl<R: Runtime> StreamLayer for S2n<R> {
         actual_local_addr
       );
     }
-    let (bi, uni) = futures::lock::BiLock::new(srv);
-    let bi = Self::BiAcceptor {
-      server: bi,
+
+    let acceptor = Self::Acceptor {
+      server: srv,
       local_addr: actual_local_addr,
       _marker: PhantomData,
     };
-    let uni = Self::UniAcceptor {
-      server: uni,
-      local_addr: actual_local_addr,
-      _marker: PhantomData,
-    };
+    
 
     let connector = Self::Connector {
       client,
       local_addr: actual_client_addr,
       _marker: PhantomData,
     };
-    Ok(((actual_local_addr, bi, uni), connector))
+    Ok((actual_local_addr, acceptor, connector))
   }
 }
 
 /// [`S2nBiAcceptor`] is an implementation of [`QuicBiAcceptor`] based on [`s2n_quic`].
 pub struct S2nBiAcceptor<R> {
-  server: futures::lock::BiLock<Server>,
+  server: Server,
   local_addr: SocketAddr,
   _marker: PhantomData<R>,
 }
 
-impl<R: Runtime> QuicBiAcceptor for S2nBiAcceptor<R> {
+impl<R: Runtime> QuicAcceptor for S2nBiAcceptor<R> {
   type Error = S2nError;
   type BiStream = S2nBiStream<R>;
 
-  async fn accept_bi(&self) -> Result<(Self::BiStream, SocketAddr), Self::Error> {
-    let mut server = self.server.lock().await;
-    let mut conn = server.accept().await.ok_or(Self::Error::Closed)?;
+  async fn accept_bi(&mut self) -> Result<(Self::BiStream, SocketAddr), Self::Error> {
+    let mut conn = self.server.accept().await.ok_or(Self::Error::Closed)?;
     conn.keep_alive(true)?;
     let remote = conn.remote_addr()?;
     conn
@@ -144,38 +138,6 @@ impl<R: Runtime> QuicBiAcceptor for S2nBiAcceptor<R> {
       .and_then(|conn| {
         conn
           .map(|conn| (S2nBiStream::<R>::new(conn), remote))
-          .ok_or(Self::Error::Closed)
-      })
-  }
-
-  fn local_addr(&self) -> SocketAddr {
-    self.local_addr
-  }
-}
-
-/// [`S2nUniAcceptor`] is an implementation of [`QuicUniAcceptor`] based on [`s2n_quic`].
-pub struct S2nUniAcceptor<R> {
-  server: futures::lock::BiLock<Server>,
-  local_addr: SocketAddr,
-  _marker: PhantomData<R>,
-}
-
-impl<R: Runtime> QuicUniAcceptor for S2nUniAcceptor<R> {
-  type Error = S2nError;
-  type ReadStream = S2nReadStream<R>;
-
-  async fn accept_uni(&self) -> Result<(Self::ReadStream, SocketAddr), Self::Error> {
-    let mut server = self.server.lock().await;
-    let mut conn = server.accept().await.ok_or(Self::Error::Closed)?;
-
-    let remote = conn.remote_addr()?;
-    conn
-      .accept_receive_stream()
-      .await
-      .map_err(Into::into)
-      .and_then(|conn| {
-        conn
-          .map(|conn| (S2nReadStream::new(conn.peekable()), remote))
           .ok_or(Self::Error::Closed)
       })
   }
@@ -198,7 +160,8 @@ impl<R: Runtime> QuicConnector for S2nConnector<R> {
   type WriteStream = S2nWriteStream<R>;
 
   async fn open_bi(&self, addr: SocketAddr) -> Result<Self::BiStream, Self::Error> {
-    let mut conn = self.client.connect(addr.into()).await?;
+    let connect = Connect::new(addr).with_server_name("localhost");
+    let mut conn = self.client.connect(connect).await?;
     conn.keep_alive(true)?;
     conn
       .open_bidirectional_stream()
@@ -213,7 +176,9 @@ impl<R: Runtime> QuicConnector for S2nConnector<R> {
     timeout: Duration,
   ) -> Result<Self::BiStream, Self::Error> {
     let fut = async {
-      let mut conn = self.client.connect(addr.into()).await?;
+      let connect = Connect::new(addr).with_server_name("localhost");
+
+      let mut conn = self.client.connect(connect).await?;
       conn.keep_alive(true)?;
       conn
         .open_bidirectional_stream()
@@ -230,44 +195,14 @@ impl<R: Runtime> QuicConnector for S2nConnector<R> {
     }
   }
 
-  async fn open_uni(&self, addr: SocketAddr) -> Result<Self::WriteStream, Self::Error> {
-    self
-      .client
-      .connect(addr.into())
-      .await?
-      .open_send_stream()
-      .await
-      .map(S2nWriteStream::new)
-      .map_err(Into::into)
-  }
-
-  async fn open_uni_with_timeout(
-    &self,
-    addr: SocketAddr,
-    timeout: Duration,
-  ) -> Result<Self::WriteStream, Self::Error> {
-    let fut = async {
-      self
-        .client
-        .connect(addr.into())
-        .await?
-        .open_send_stream()
-        .await
-        .map(S2nWriteStream::new)
-        .map_err(Into::into)
-    };
-    if timeout == Duration::ZERO {
-      fut.await
-    } else {
-      R::timeout(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::Timeout)?
-    }
-  }
-
   async fn close(&self) -> Result<(), Self::Error> {
     // TODO: figure out how to close a client
     Ok(())
+  }
+
+  async fn wait_idle(&self) -> Result<(), Self::Error> {
+    // self.client.wait_idle().await.map_err(Into::into)
+    todo!()
   }
 
   fn local_addr(&self) -> SocketAddr {
@@ -366,6 +301,10 @@ impl<R: Runtime> QuicBiStream for S2nBiStream<R> {
     }
   }
 
+  async fn read_to_end(&mut self) -> Result<Bytes, Self::Error> {
+    todo!()
+  }
+
   async fn peek(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
     let fut = async { self.recv_stream.peek(buf).await.map_err(Into::into) };
 
@@ -401,6 +340,7 @@ pub struct S2nReadStream<R> {
 }
 
 impl<R> S2nReadStream<R> {
+  #[allow(dead_code)]
   const fn new(stream: AsyncPeekable<ReceiveStream>) -> Self {
     Self {
       stream,
@@ -480,6 +420,7 @@ pub struct S2nWriteStream<R> {
 }
 
 impl<R> S2nWriteStream<R> {
+  #[allow(dead_code)]
   const fn new(stream: SendStream) -> Self {
     Self {
       stream,

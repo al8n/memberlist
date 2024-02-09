@@ -113,6 +113,9 @@ pub enum QuinnReadStreamError {
   /// Error reading exact data from the stream.
   #[error(transparent)]
   ReadExact(#[from] quinn::ReadExactError),
+  /// Error reading all data from the stream.
+  #[error(transparent)]
+  ReadToEnd(#[from] quinn::ReadToEndError),
 
   /// IO error.
   #[error(transparent)]
@@ -130,6 +133,10 @@ impl QuicError for QuinnReadStreamError {
       Self::ReadExact(err) => match err {
         quinn::ReadExactError::FinishedEarly => true,
         quinn::ReadExactError::ReadError(err) => is_read_error_remote_failure(err),
+      },
+      Self::ReadToEnd(err) => match err {
+        quinn::ReadToEndError::TooLong => false,
+        quinn::ReadToEndError::Read(err) => is_read_error_remote_failure(err),
       },
       Self::IO(_) => true,
       Self::Timeout => true,
