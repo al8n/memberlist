@@ -195,9 +195,7 @@ where
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
-    for (local_addr, acceptor) in
-      v4_acceptors.into_iter().chain(v6_acceptors.into_iter())
-    {
+    for (local_addr, acceptor) in v4_acceptors.into_iter().chain(v6_acceptors.into_iter()) {
       Processor::<A, Self, S> {
         wg: wg.clone(),
         acceptor,
@@ -700,9 +698,12 @@ where
         shutdown_rx,
         skip_inbound_label_check,
         timeout,
-        #[cfg(feature = "compression")] offload_size,
-        #[cfg(feature = "metrics")] metric_labels,
-      ).await;
+        #[cfg(feature = "compression")]
+        offload_size,
+        #[cfg(feature = "metrics")]
+        metric_labels,
+      )
+      .await;
       swg.done();
     });
   }
@@ -712,7 +713,7 @@ where
     local_addr: SocketAddr,
     label: Label,
     mut acceptor: S::Acceptor,
-    packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>, 
+    packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
     wg: AsyncWaitGroup,
     shutdown: Arc<AtomicBool>,
@@ -806,7 +807,7 @@ where
         }
       }
     }
-  } 
+  }
 
   #[allow(clippy::too_many_arguments)]
   async fn handle_packet(
@@ -827,8 +828,11 @@ where
       stream,
       &label,
       skip_inbound_label_check,
-      #[cfg(feature = "compression")] offload_size,
-    ).await {
+      #[cfg(feature = "compression")]
+      offload_size,
+    )
+    .await
+    {
       Ok(msg) => msg,
       Err(e) => {
         tracing::error!(target = "memberlist.packet", local=%local_addr, from=%remote_addr, err = %e, "fail to handle UDP packet");
@@ -838,7 +842,8 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      metrics::counter!("memberlist.packet.bytes.processing", metric_labels.iter()).increment(start.elapsed().as_secs_f64().round() as u64);
+      metrics::counter!("memberlist.packet.bytes.processing", metric_labels.iter())
+        .increment(start.elapsed().as_secs_f64().round() as u64);
     }
 
     if let Err(e) = packet_tx.send(Packet::new(msg, remote_addr, start)).await {
@@ -861,17 +866,28 @@ where
     ),
     QuicTransportError<T::Resolver, S, T::Wire>,
   > {
-    use bytes::Buf;
-    let mut all: bytes::Bytes = recv_stream.read_to_end().await.map_err(|e| QuicTransportError::Stream(e.into()))?;
-    let readed = all.len() + 1;
-    let mut packet_label = if all[0] == Label::TAG {
-      let label_size = all[1] as usize;
+    let mut tag = [0u8; 2];
+    let mut readed = 0;
+    recv_stream
+      .peek_exact(&mut tag)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    let mut packet_label = if tag[0] == Label::TAG {
+      let label_size = tag[1] as usize;
+      // consume peeked
+      recv_stream.read_exact(&mut tag).await.unwrap();
 
-      all.advance(2);
-      Label::try_from(all.split_to(label_size)).map_err(|e| QuicTransportError::Label(e.into()))?
+      let mut label = vec![0u8; label_size];
+      recv_stream
+        .read_exact(&mut label)
+        .await
+        .map_err(|e| QuicTransportError::Stream(e.into()))?;
+      readed += 2 + label_size;
+      Label::try_from(Bytes::from(label)).map_err(|e| QuicTransportError::Label(e.into()))?
     } else {
       Label::empty()
     };
+
     if skip_inbound_label_check {
       if !packet_label.is_empty() {
         return Err(LabelError::duplicate(label.cheap_clone(), packet_label).into());
@@ -888,13 +904,15 @@ where
 
     #[cfg(not(feature = "compression"))]
     return {
-      let msgs = Self::decode_without_compression(all)?;
+      let (read, msgs) = Self::decode_without_compression(&mut recv_stream).await?;
+      readed += read;
       Ok((readed, msgs))
     };
 
     #[cfg(feature = "compression")]
     {
-      let msgs = Self::decode_with_compression(all, offload_size).await?;
+      let (read, msgs) = Self::decode_with_compression(&mut recv_stream, offload_size).await?;
+      readed += read;
       Ok((readed, msgs))
     }
   }
@@ -926,47 +944,104 @@ where
     Ok(msgs)
   }
 
-  fn decode_without_compression(
-    data: Bytes,
+  async fn decode_without_compression(
+    conn: &mut S::Stream,
   ) -> Result<
-    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    (
+      usize,
+      OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    ),
     QuicTransportError<T::Resolver, S, T::Wire>,
   > {
-    if Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::COMPOUND_TAG == data[0] {
-      Self::decode_batch(&data)
+    let mut read = 0;
+    let mut tag = [0u8; HEADER_SIZE];
+    conn
+      .peek_exact(&mut tag)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    read += HEADER_SIZE;
+
+    if Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::COMPOUND_TAG == tag[0] {
+      let msg_len = NetworkEndian::read_u32(&tag[1..]) as usize;
+      // consume peeked header
+      conn.read_exact(&mut tag).await.unwrap();
+
+      if msg_len < MAX_INLINED_BYTES {
+        let mut buf = [0u8; MAX_INLINED_BYTES];
+        conn
+          .read_exact(&mut buf[..msg_len + 1])
+          .await
+          .map_err(|e| QuicTransportError::Stream(e.into()))?;
+        read += msg_len + 1;
+        Self::decode_batch(&buf[..msg_len + 1]).map(|msgs| (read, msgs))
+      } else {
+        let mut buf = vec![0; msg_len + 1];
+        conn
+          .read_exact(&mut buf)
+          .await
+          .map_err(|e| QuicTransportError::Stream(e.into()))?;
+        read += msg_len + 1;
+        Self::decode_batch(&buf).map(|msgs| (read, msgs))
+      }
     } else {
-      <T::Wire as Wire>::decode_message(&data)
-        .map(|(_, msg)| msg.into())
-        .map_err(QuicTransportError::Wire)
+      <T::Wire as Wire>::decode_message_from_reader(conn)
+        .await
+        .map(|(_, msg)| (read, msg.into()))
+        .map_err(QuicTransportError::IO)
     }
   }
 
   #[cfg(feature = "compression")]
   async fn decode_with_compression(
-    mut data: Bytes,
+    conn: &mut S::Stream,
     offload_size: usize,
   ) -> Result<
-    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    (
+      usize,
+      OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    ),
     QuicTransportError<T::Resolver, S, T::Wire>,
   > {
-    use bytes::Buf;
+    let mut tag = [0u8; HEADER_SIZE];
+    conn
+      .peek_exact(&mut tag)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
 
-    if !COMPRESS_TAG.contains(&data[0]) {
-      return Self::decode_without_compression(data);
+    if !COMPRESS_TAG.contains(&tag[0]) {
+      return Self::decode_without_compression(conn).await;
     }
 
-    let compressor = Compressor::try_from(data[0])?;
-    let msg_len = NetworkEndian::read_u32(&data[1..]) as usize;
-    data.advance(HEADER_SIZE);
-    if msg_len <= offload_size {
-      let compressed = data.split_to(msg_len);
-      Self::decompress_and_decode(compressor, &compressed)
+    let readed = HEADER_SIZE;
+    let compressor = Compressor::try_from(tag[0])?;
+    let msg_len = NetworkEndian::read_u32(&tag[1..]) as usize;
+
+    if msg_len <= MAX_INLINED_BYTES {
+      let mut buf = [0u8; MAX_INLINED_BYTES];
+      conn
+        .read_exact(&mut buf[..msg_len])
+        .await
+        .map_err(|e| QuicTransportError::Stream(e.into()))?;
+      let compressed = &buf[..msg_len];
+      Self::decompress_and_decode(compressor, compressed).map(|msgs| (readed + msg_len, msgs))
+    } else if msg_len <= offload_size {
+      let mut buf = vec![0; msg_len];
+      conn
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| QuicTransportError::Stream(e.into()))?;
+      let compressed = &buf[..msg_len];
+      Self::decompress_and_decode(compressor, compressed).map(|msgs| (readed + msg_len, msgs))
     } else {
-      let compressed = data.split_to(msg_len);
+      let mut buf = vec![0; msg_len];
+      conn
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| QuicTransportError::Stream(e.into()))?;
       let (tx, rx) = futures::channel::oneshot::channel();
       rayon::spawn(move || {
         if tx
-          .send(Self::decompress_and_decode(compressor, &compressed))
+          .send(Self::decompress_and_decode(compressor, &buf))
           .is_err()
         {
           tracing::error!(
@@ -977,7 +1052,7 @@ where
       });
 
       match rx.await {
-        Ok(Ok(msgs)) => Ok(msgs),
+        Ok(Ok(msgs)) => Ok((readed + msg_len, msgs)),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(QuicTransportError::ComputationTaskFailed),
       }

@@ -62,7 +62,7 @@ pub trait QuicWriteStream: TimeoutableWriteStream + Send + Sync + 'static {
 
 /// A trait for QUIC bidirectional streams.
 #[auto_impl::auto_impl(Box)]
-pub trait QuicStream: TimeoutableStream + Send + Sync + 'static {
+pub trait QuicStream: TimeoutableStream + futures::AsyncRead + Send + Sync + 'static {
   /// The error type for the stream.
   type Error: QuicError;
 
@@ -77,9 +77,6 @@ pub trait QuicStream: TimeoutableStream + Send + Sync + 'static {
 
   /// Receives exact data from the remote peer.
   fn read_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Receives all data from the remote peer.
-  fn read_to_end(&mut self) -> impl Future<Output = Result<Bytes, Self::Error>> + Send;
 
   /// Peek data from the remote peer.
   fn peek(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, Self::Error>> + Send;
@@ -125,13 +122,7 @@ pub trait StreamLayer: Sized + Send + Sync + 'static {
   fn bind(
     &self,
     addr: SocketAddr,
-  ) -> impl Future<
-    Output = std::io::Result<(
-      SocketAddr,
-      Self::Acceptor,
-      Self::Connector,
-    )>,
-  > + Send;
+  ) -> impl Future<Output = std::io::Result<(SocketAddr, Self::Acceptor, Self::Connector)>> + Send;
 }
 
 /// A trait for QUIC acceptors. The stream layer will use this trait to
@@ -181,7 +172,6 @@ pub trait QuicConnector: Send + Sync + 'static {
 
   /// The bidirectional stream type.
   type Stream: QuicStream;
-
 
   /// Opens a bidirectional connection to a remote peer.
   fn open_bi(

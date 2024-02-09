@@ -209,6 +209,14 @@ impl TryFrom<Bytes> for Label {
   }
 }
 
+impl TryFrom<Vec<u8>> for Label {
+  type Error = InvalidLabel;
+
+  fn try_from(s: Vec<u8>) -> Result<Self, Self::Error> {
+    Label::try_from(Bytes::from(s))
+  }
+}
+
 impl TryFrom<&[u8]> for Label {
   type Error = InvalidLabel;
 

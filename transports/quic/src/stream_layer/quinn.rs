@@ -15,10 +15,8 @@ mod options;
 pub use options::*;
 
 use super::{
-  QuicAcceptor, QuicStream, QuicConnector, QuicReadStream, QuicWriteStream,
-  StreamLayer,
+  QuicAcceptor, QuicConnector, QuicReadStream, QuicStream, QuicWriteStream, StreamLayer,
 };
-
 
 /// [`Quinn`] is an implementation of [`StreamLayer`] based on [`quinn`].
 pub struct Quinn<R> {
@@ -51,11 +49,7 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
   async fn bind(
     &self,
     addr: SocketAddr,
-  ) -> std::io::Result<(
-    SocketAddr,
-    Self::Acceptor,
-    Self::Connector,
-  )> {
+  ) -> std::io::Result<(SocketAddr, Self::Acceptor, Self::Connector)> {
     let server_name = self.opts.server_name.clone();
 
     let client_config = self.opts.client_config.clone();
@@ -97,7 +91,6 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
       endpoint,
       local_addr,
       client_config,
-      size_limit: self.opts.max_stream_data,
       _marker: PhantomData,
     };
     Ok((local_addr, acceptor, connector))
@@ -137,7 +130,7 @@ impl<R: Runtime> QuicAcceptor for QuinnAcceptor<R> {
       .await?
       .accept_bi()
       .await
-      .map(|(send, recv)| (QuinnStream::new(send, recv, None), remote))
+      .map(|(send, recv)| (QuinnStream::new(send, recv), remote))
       .map_err(Into::into)
   }
 
@@ -152,7 +145,6 @@ pub struct QuinnConnector<R> {
   endpoint: Arc<Endpoint>,
   client_config: ClientConfig,
   local_addr: SocketAddr,
-  size_limit: usize,
   _marker: PhantomData<R>,
 }
 
@@ -167,7 +159,7 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
       .await?
       .open_bi()
       .await
-      .map(|(send, recv)| QuinnStream::new(send, recv, Some(self.size_limit)))
+      .map(|(send, recv)| QuinnStream::new(send, recv))
       .map_err(Into::into)
   }
 
@@ -183,7 +175,7 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
         .await?
         .open_bi()
         .await
-        .map(|(send, recv)| QuinnStream::new(send, recv, Some(self.size_limit)))
+        .map(|(send, recv)| QuinnStream::new(send, recv))
         .map_err(Into::into)
     };
 
@@ -360,19 +352,17 @@ pub struct QuinnStream<R> {
   recv: AsyncPeekable<RecvStream>,
   read_timeout: Option<Duration>,
   write_timeout: Option<Duration>,
-  size_limit: usize,
   _marker: PhantomData<R>,
 }
 
 impl<R> QuinnStream<R> {
   #[inline]
-  fn new(send: SendStream, recv: RecvStream, size_limit: Option<usize>) -> Self {
+  fn new(send: SendStream, recv: RecvStream) -> Self {
     Self {
       send,
       recv: recv.peekable(),
       read_timeout: None,
       write_timeout: None,
-      size_limit: size_limit.unwrap_or(usize::MAX),
       _marker: PhantomData,
     }
   }
@@ -415,19 +405,6 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
         .read_exact(buf)
         .await
         .map_err(|e| QuinnReadStreamError::from(e).into())
-    };
-
-    match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::read_timeout())?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn read_to_end(&mut self) -> Result<Bytes, Self::Error> {
-    let fut = async {
-      self.recv.get_mut().1.read_to_end(self.size_limit).await.map(Into::into).map_err(|e| QuinnReadStreamError::from(e).into())
     };
 
     match self.read_timeout {
@@ -502,7 +479,21 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
   }
 }
 
-impl<R: Runtime> TimeoutableReadStream for QuinnBiStream<R> {
+impl<R: Runtime> futures::AsyncRead for QuinnStream<R> {
+  fn poll_read(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+    buf: &mut [u8],
+  ) -> std::task::Poll<std::io::Result<usize>> {
+    use futures::Future;
+
+    let fut = self.recv.read(buf);
+    futures::pin_mut!(fut);
+    fut.poll(cx)
+  }
+}
+
+impl<R: Runtime> TimeoutableReadStream for QuinnStream<R> {
   fn set_read_timeout(&mut self, timeout: Option<Duration>) {
     self.read_timeout = timeout;
   }
@@ -512,7 +503,7 @@ impl<R: Runtime> TimeoutableReadStream for QuinnBiStream<R> {
   }
 }
 
-impl<R: Runtime> TimeoutableWriteStream for QuinnBiStream<R> {
+impl<R: Runtime> TimeoutableWriteStream for QuinnStream<R> {
   fn set_write_timeout(&mut self, timeout: Option<Duration>) {
     self.write_timeout = timeout;
   }

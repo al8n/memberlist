@@ -6,13 +6,15 @@ use futures::{AsyncReadExt, AsyncWriteExt};
 use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 use peekable::future::{AsyncPeekExt, AsyncPeekable};
 use s2n_quic::{
-  client::Connect, provider::limits::Limits, stream::{BidirectionalStream, ReceiveStream, SendStream}, Client, Server
+  client::Connect,
+  provider::limits::Limits,
+  stream::{BidirectionalStream, ReceiveStream, SendStream},
+  Client, Server,
 };
 pub use s2n_quic_transport::connection::limits::ValidationError;
 
 use super::{
-  QuicAcceptor, QuicBiStream, QuicConnector, QuicReadStream, QuicWriteStream,
-  StreamLayer,
+  QuicAcceptor, QuicConnector, QuicReadStream, QuicStream, QuicWriteStream, StreamLayer,
 };
 
 mod error;
@@ -59,11 +61,7 @@ impl<R: Runtime> StreamLayer for S2n<R> {
   async fn bind(
     &self,
     addr: SocketAddr,
-  ) -> io::Result<(
-    SocketAddr,
-    Self::Acceptor,
-    Self::Connector,
-  )> {
+  ) -> io::Result<(SocketAddr, Self::Acceptor, Self::Connector)> {
     let auto_server_port = addr.port() == 0;
     let srv = Server::builder()
       // .with_limits(self.limits)
@@ -105,7 +103,6 @@ impl<R: Runtime> StreamLayer for S2n<R> {
       local_addr: actual_local_addr,
       _marker: PhantomData,
     };
-    
 
     let connector = Self::Connector {
       client,
@@ -156,10 +153,9 @@ pub struct S2nConnector<R> {
 
 impl<R: Runtime> QuicConnector for S2nConnector<R> {
   type Error = S2nError;
-  type BiStream = S2nBiStream<R>;
-  type WriteStream = S2nWriteStream<R>;
+  type Stream = S2nBiStream<R>;
 
-  async fn open_bi(&self, addr: SocketAddr) -> Result<Self::BiStream, Self::Error> {
+  async fn open_bi(&self, addr: SocketAddr) -> Result<Self::Stream, Self::Error> {
     let connect = Connect::new(addr).with_server_name("localhost");
     let mut conn = self.client.connect(connect).await?;
     conn.keep_alive(true)?;
@@ -174,7 +170,7 @@ impl<R: Runtime> QuicConnector for S2nConnector<R> {
     &self,
     addr: SocketAddr,
     timeout: Duration,
-  ) -> Result<Self::BiStream, Self::Error> {
+  ) -> Result<Self::Stream, Self::Error> {
     let fut = async {
       let connect = Connect::new(addr).with_server_name("localhost");
 
@@ -252,7 +248,7 @@ impl<R: Runtime> TimeoutableWriteStream for S2nBiStream<R> {
   }
 }
 
-impl<R: Runtime> QuicBiStream for S2nBiStream<R> {
+impl<R: Runtime> QuicStream for S2nBiStream<R> {
   type Error = S2nError;
 
   async fn write_all(&mut self, src: Bytes) -> Result<usize, Self::Error> {
@@ -301,10 +297,6 @@ impl<R: Runtime> QuicBiStream for S2nBiStream<R> {
     }
   }
 
-  async fn read_to_end(&mut self) -> Result<Bytes, Self::Error> {
-    todo!()
-  }
-
   async fn peek(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
     let fut = async { self.recv_stream.peek(buf).await.map_err(Into::into) };
 
@@ -329,6 +321,20 @@ impl<R: Runtime> QuicBiStream for S2nBiStream<R> {
 
   async fn close(&mut self) -> Result<(), Self::Error> {
     self.send_stream.close().await.map_err(Into::into)
+  }
+}
+
+impl<R: Runtime> futures::AsyncRead for S2nBiStream<R> {
+  fn poll_read(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+    buf: &mut [u8],
+  ) -> std::task::Poll<std::io::Result<usize>> {
+    use futures::Future;
+
+    let fut = self.recv_stream.read(buf);
+    futures::pin_mut!(fut);
+    fut.poll(cx)
   }
 }
 

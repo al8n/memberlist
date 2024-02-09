@@ -192,7 +192,11 @@ where
     }
   }
 
-  async fn send_batch_in(&self, addr: SocketAddr, src: Bytes) -> Result<usize, QuicTransportError<A, S, W>> {
+  async fn send_batch_in(
+    &self,
+    addr: SocketAddr,
+    src: Bytes,
+  ) -> Result<usize, QuicTransportError<A, S, W>> {
     let mut conn = self
       .next_connector(&addr)
       .open_bi(addr)
@@ -202,8 +206,14 @@ where
       .write_all(src)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    conn.flush().await.map_err(|e| QuicTransportError::Stream(e.into()))?;
-    conn.close().await.map_err(|e| QuicTransportError::Stream(e.into()))?;
+    conn
+      .flush()
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    conn
+      .close()
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
     Ok(written)
   }
 }
