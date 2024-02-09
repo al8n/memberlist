@@ -1,20 +1,16 @@
-
 /// No label, no compression
 #[path = "handle_ping/no_label_no_compression.rs"]
 pub mod no_label_no_compression;
-
 
 /// No label, with compression
 #[cfg(feature = "compression")]
 #[path = "handle_ping/no_label_with_compression.rs"]
 pub mod no_label_with_compression;
 
-
 /// With label, with compression, no encryption
 #[cfg(feature = "compression")]
 #[path = "handle_ping/with_label_with_compression.rs"]
 pub mod with_label_with_compression;
-
 
 #[macro_export]
 macro_rules! handle_ping_test_suites {

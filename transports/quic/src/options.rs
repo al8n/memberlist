@@ -181,4 +181,3 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I
     self
   }
 }
-

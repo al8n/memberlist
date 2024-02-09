@@ -1,6 +1,6 @@
+use super::*;
 use agnostic::tokio::TokioRuntime;
 use memberlist_core::tests::run as run_unit_test;
-use super::*;
 
 fn run(fut: impl std::future::Future<Output = ()>) {
   let runtime = ::tokio::runtime::Runtime::new().unwrap();

@@ -11,14 +11,20 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::Stream;
 use memberlist_core::{
   tests::AnyError,
-  transport::{Transport, tests::{AddressKind, TestPacketClient, TestPromisedClient}},
+  transport::{
+    tests::{AddressKind, TestPacketClient, TestPromisedClient},
+    Transport,
+  },
   types::Message,
 };
 use memberlist_utils::{Label, LabelBufMutExt};
 use nodecraft::Transformable;
 use smol_str::SmolStr;
 
-use crate::{QuicAcceptor, QuicConnector, QuicReadStream, QuicUniAcceptor, QuicWriteStream, StreamLayer};
+use crate::{
+  QuicAcceptor, QuicConnector, QuicReadStream, QuicStream, QuicUniAcceptor, QuicWriteStream,
+  StreamLayer,
+};
 
 #[cfg(feature = "compression")]
 use crate::compressor::Compressor;
@@ -97,11 +103,16 @@ impl<S: StreamLayer, R: Runtime> QuicTransportTestClient<S, R> {
     let (tx, rx) = async_channel::bounded(1);
     R::spawn_detach(async move {
       loop {
-        let (stream, addr) = acceptor.accept_bi().await.expect("failed to accept response stream");
-        tx.send((stream, addr)).await.expect("failed to send response stream");
+        let (stream, addr) = acceptor
+          .accept_bi()
+          .await
+          .expect("failed to accept response stream");
+        tx.send((stream, addr))
+          .await
+          .expect("failed to send response stream");
       }
     });
-    
+
     Ok(Self {
       local_addr,
       remote_addr,
@@ -156,27 +167,40 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
 
   async fn recv_from(&mut self) -> Result<(Bytes, SocketAddr), AnyError> {
     let (mut stream, _) = self.recv_stream_rx.recv().await?;
-    let mut all = stream.read_to_end().await?;
-    assert_eq!(all[0], super::StreamType::Packet as u8);
-    all.advance(1);
-    if all[0] == Label::TAG {
-      let len = all[1] as usize;
-      all.advance(2);
-      let label = Label::try_from(all.split_off(len))?;
+    let mut buf = [0u8; 3];
+    stream.peek_exact(&mut buf).await?;
+    assert_eq!(buf[0], super::StreamType::Packet as u8);
+    let mut drop = [0; 1];
+    stream.read_exact(&mut drop).await?;
+
+    if buf[1] == Label::TAG {
+      let len = buf[2] as usize;
+      let mut label_buf = vec![0u8; len];
+      // consume the peeked data
+      let mut drop = [0; 2];
+      stream.read_exact(&mut drop).await.unwrap();
+      stream.read_exact(&mut label_buf).await?;
+
+      let label = Label::try_from(label_buf)?;
       if self.receive_verify_label {
         assert_eq!(label, self.label);
       }
     }
 
     if self.receive_compressed {
-      let compressor = Compressor::try_from(all[0])?;
-      let compressed_data_len = NetworkEndian::read_u32(&all[1..]) as usize;
-      all.advance(5);
-      
+      let mut header = [0u8; 5];
+      stream.read_exact(&mut header).await?;
+      let compressor = Compressor::try_from(header[0])?;
+      let compressed_data_len = NetworkEndian::read_u32(&header[1..]) as usize;
+      let mut all = vec![0u8; compressed_data_len];
+      stream.read_exact(&mut all).await?;
       let uncompressed = compressor.decompress(&all[..compressed_data_len])?;
       Ok((uncompressed.into(), self.local_addr))
     } else {
-      Ok((all, self.local_addr))
+      let mut all = vec![0u8; 1500];
+      let len = stream.read(&mut all).await?;
+      all.truncate(len);
+      Ok((all.into(), self.local_addr))
     }
   }
 
@@ -281,7 +305,6 @@ pub async fn native_tls_stream_layer<R: Runtime>() -> crate::native_tls::NativeT
   NativeTls::new("localhost".to_string(), acceptor, connector)
 }
 
-
 #[cfg(feature = "quinn")]
 pub use quinn_stream_layer::quinn_stream_layer;
 
@@ -361,7 +384,12 @@ mod quinn_stream_layer {
   pub async fn quinn_stream_layer<R: Runtime>() -> Quinn<R> {
     let server_name = "localhost".to_string();
     let (server_config, client_config) = configures().unwrap();
-    Quinn::new(Options::new(server_name, server_config, client_config, Default::default()))
+    Quinn::new(Options::new(
+      server_name,
+      server_config,
+      client_config,
+      Default::default(),
+    ))
   }
 }
 
@@ -373,9 +401,13 @@ mod s2n_stream_layer {
   use agnostic::Runtime;
 
   use crate::stream_layer::s2n::*;
-  
+
   pub async fn s2n_stream_layer<R: Runtime>() -> S2n<R> {
     let p = std::env::current_dir().unwrap().join("tests");
-    S2n::new(Options::new(p.join("s2n-tests.crt"), p.join("s2n-tests.key"))).unwrap()
+    S2n::new(Options::new(
+      p.join("s2n-tests.crt"),
+      p.join("s2n-tests.key"),
+    ))
+    .unwrap()
   }
 }
