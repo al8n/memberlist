@@ -15,7 +15,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::Runtime;
+use agnostic::{Runtime, WaitableSpawner};
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
 use futures::FutureExt;
@@ -32,7 +32,6 @@ use memberlist_core::{
 use memberlist_utils::{net::CIDRsPolicy, Label, LabelError, OneOrMore, SmallVec, TinyVec};
 use nodecraft::{resolver::AddressResolver, CheapClone, Id};
 use pollster::FutureExt as _;
-use wg::AsyncWaitGroup;
 
 /// Compress/decompress related.
 #[cfg(feature = "compression")]
@@ -94,8 +93,7 @@ where
   v6_round_robin: AtomicUsize,
   v6_connectors: SmallVec<S::Connector>,
 
-  #[allow(dead_code)]
-  wg: AsyncWaitGroup,
+  wg: WaitableSpawner<A::Runtime>,
   resolver: A,
   shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
@@ -187,7 +185,7 @@ where
       resolved_bind_address.push(addr);
     }
 
-    let wg = AsyncWaitGroup::new();
+    let wg = WaitableSpawner::<A::Runtime>::new();
     let shutdown = Arc::new(AtomicBool::new(false));
     let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
     let advertise_addr = resolved_bind_address[expose_addr_index];
@@ -653,7 +651,7 @@ struct Processor<
 
   skip_inbound_label_check: bool,
   timeout: Option<Duration>,
-  wg: AsyncWaitGroup,
+  wg: WaitableSpawner<T::Runtime>,
 
   #[cfg(feature = "compression")]
   offload_size: usize,
@@ -686,15 +684,15 @@ where
       metric_labels,
     } = self;
 
-    let swg = wg.add(1);
-    <T::Runtime as Runtime>::spawn_detach(async move {
+    let swg = wg.clone();
+    wg.spawn_detach(async move {
       Self::listen(
         local_addr,
         label,
         acceptor,
         packet_tx,
         stream_tx,
-        wg,
+        swg,
         shutdown,
         shutdown_rx,
         skip_inbound_label_check,
@@ -705,7 +703,6 @@ where
         metric_labels,
       )
       .await;
-      swg.done();
     });
   }
 
@@ -716,7 +713,7 @@ where
     mut acceptor: S::Acceptor,
     packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
-    wg: AsyncWaitGroup,
+    wg: WaitableSpawner<T::Runtime>,
     shutdown: Arc<AtomicBool>,
     shutdown_rx: async_channel::Receiver<()>,
     skip_inbound_label_check: bool,
@@ -767,8 +764,7 @@ where
                 let label = label.cheap_clone();
                 #[cfg(feature = "metrics")]
                 let metric_labels = metric_labels.clone();
-                let wg = wg.add(1);
-                <T::Runtime as Runtime>::spawn_detach(async move {
+                wg.spawn_detach(async move {
                   Self::handle_packet(
                     stream,
                     local_addr,
@@ -780,7 +776,6 @@ where
                     #[cfg(feature = "compression")] offload_size,
                     #[cfg(feature = "metrics")] metric_labels,
                   ).await;
-                  wg.done();
                 });
               }
             }

@@ -50,7 +50,6 @@ tracing.workspace = true
 thiserror.workspace = true
 smol_str.workspace = true
 viewit.workspace = true
-wg.workspace = true
 
 # serde
 serde = { workspace = true, optional = true }

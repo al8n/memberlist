@@ -62,7 +62,7 @@ memberlist-utils = { workspace = true, features = ["ipnet"] }
 thiserror.workspace = true
 tracing.workspace = true
 viewit.workspace = true
-wg = { version = "0.4", features = ["async"] }
+wg.workspace = true
 
 # tls
 futures-rustls = { version = "0.25", optional = true }
