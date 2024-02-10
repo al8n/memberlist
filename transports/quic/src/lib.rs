@@ -94,6 +94,7 @@ where
   v6_round_robin: AtomicUsize,
   v6_connectors: SmallVec<S::Connector>,
 
+  #[allow(dead_code)]
   wg: AsyncWaitGroup,
   resolver: A,
   shutdown: Arc<AtomicBool>,
@@ -824,7 +825,7 @@ where
     let start = Instant::now();
     stream.set_read_timeout(timeout);
 
-    let (read, msg) = match Self::handle_packet_in(
+    let (_read, msg) = match Self::handle_packet_in(
       stream,
       &label,
       skip_inbound_label_check,
@@ -851,7 +852,7 @@ where
     }
 
     #[cfg(feature = "metrics")]
-    metrics::counter!("memberlist.packet.received", metric_labels.iter()).increment(read as u64);
+    metrics::counter!("memberlist.packet.received", metric_labels.iter()).increment(_read as u64);
   }
 
   async fn handle_packet_in(
@@ -1008,7 +1009,6 @@ where
     let readed = HEADER_SIZE;
     let compressor = Compressor::try_from(tag[0])?;
     let msg_len = NetworkEndian::read_u32(&tag[1..]) as usize;
-
     if msg_len <= MAX_INLINED_BYTES {
       let mut buf = [0u8; MAX_INLINED_BYTES];
       conn

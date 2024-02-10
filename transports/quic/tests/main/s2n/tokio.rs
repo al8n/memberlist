@@ -9,3 +9,6 @@ fn run(fut: impl std::future::Future<Output = ()>) {
 
 #[path = "tokio/handle_ping.rs"]
 mod handle_ping;
+
+#[path = "tokio/handle_compound_ping.rs"]
+mod handle_compound_ping;

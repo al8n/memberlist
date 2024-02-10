@@ -162,7 +162,7 @@ impl<R: Runtime> QuicConnector for S2nConnector<R> {
   async fn open_bi(&self, addr: SocketAddr) -> Result<Self::Stream, Self::Error> {
     let connect = Connect::new(addr).with_server_name("localhost");
     let mut conn = self.client.connect(connect).await?;
-    conn.keep_alive(true)?;
+    // conn.keep_alive(true)?;
     conn
       .open_bidirectional_stream()
       .await
@@ -179,7 +179,7 @@ impl<R: Runtime> QuicConnector for S2nConnector<R> {
       let connect = Connect::new(addr).with_server_name("localhost");
 
       let mut conn = self.client.connect(connect).await?;
-      conn.keep_alive(true)?;
+      // conn.keep_alive(true)?;
       conn
         .open_bidirectional_stream()
         .await

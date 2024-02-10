@@ -1,5 +1,6 @@
 #![allow(missing_docs, warnings)]
 
+use core::panic;
 use std::{future::Future, net::SocketAddr};
 
 use agnostic::{
@@ -32,9 +33,10 @@ use crate::compressor::Compressor;
 /// Unit test for handling [`Ping`] message
 pub mod handle_ping;
 
-// /// Unit test for handling compound ping message
-// #[cfg(all(feature = "compression", feature = "encryption"))]
-// pub mod handle_compound_ping;
+/// Unit test for handling compound ping message
+#[cfg(feature = "compression")]
+pub mod handle_compound_ping;
+
 
 // /// Unit test for handling indirect ping message
 // #[cfg(all(feature = "compression", feature = "encryption"))]
@@ -92,8 +94,6 @@ pub struct QuicTransportTestClient<S: StreamLayer, R: Runtime> {
   receive_verify_label: bool,
   #[cfg(feature = "compression")]
   receive_compressed: bool,
-
-
   _runtime: std::marker::PhantomData<R>,
 }
 
@@ -104,10 +104,21 @@ impl<S: StreamLayer, R: Runtime> QuicTransportTestClient<S, R> {
     remote_addr: SocketAddr,
     layer: S,
   ) -> Result<Self, AnyError> {
+    Self::with_num_responses(local_addr, remote_addr, layer, 1).await
+  }
+
+  /// Creates a new test client with the given address
+  pub async fn with_num_responses(
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    layer: S,
+    num_resps: usize,
+  ) -> Result<Self, AnyError> {
     let (local_addr, mut acceptor, client) = layer.bind(local_addr).await?;
     let (tx, rx) = async_channel::bounded(1);
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
     R::spawn_detach(async move {
+      let mut num_accepted = 0;
       #[allow(clippy::never_loop)]
       loop {
         futures::select! {
@@ -117,10 +128,18 @@ impl<S: StreamLayer, R: Runtime> QuicTransportTestClient<S, R> {
             tx.send((stream, addr))
               .await
               .expect("failed to send response stream");
-            return;
+            num_accepted += 1;
+            if num_accepted == num_resps {
+              tracing::info!("accepted all responses, client listener shutdown");
+              return;
+            }
           }
           _ = shutdown_rx.recv().fuse() => {
-            panic!("unexpected shutdown signal");
+            if num_accepted == num_resps {
+              tracing::info!("receive shutdown signal, client listener shutdown");
+              return;
+            }
+            panic!("unexpected shutdown");
           }
         }
       }
@@ -282,26 +301,26 @@ pub fn read_compressed_data(src: &[u8]) -> Result<Vec<u8>, AnyError> {
   compressor.decompress(&src[5..]).map_err(Into::into)
 }
 
-// fn compound_encoder(msgs: &[Message<SmolStr, SocketAddr>]) -> Result<Bytes, AnyError> {
-//   let num_msgs = msgs.len() as u8;
-//   let total_bytes = 2 + msgs.iter().map(|m| m.encoded_len() + 2).sum::<usize>();
-//   let mut out = BytesMut::with_capacity(total_bytes);
-//   out.put_u8(Message::<SmolStr, SocketAddr>::COMPOUND_TAG);
-//   out.put_u8(num_msgs);
+fn compound_encoder(msgs: &[Message<SmolStr, SocketAddr>]) -> Result<Bytes, AnyError> {
+  let num_msgs = msgs.len() as u8;
+  let total_bytes = 4 + msgs.iter().map(|m| m.encoded_len() + 4).sum::<usize>();
+  let mut out = BytesMut::with_capacity(total_bytes);
+  out.put_u8(Message::<SmolStr, SocketAddr>::COMPOUND_TAG);
+  out.put_u8(num_msgs);
 
-//   let mut cur = out.len();
-//   out.resize(total_bytes, 0);
+  let mut cur = out.len();
+  out.resize(total_bytes, 0);
 
-//   for msg in msgs {
-//     let len = msg.encoded_len() as u16;
-//     NetworkEndian::write_u16(&mut out[cur..], len);
-//     cur += 2;
-//     let len = msg.encode(&mut out[cur..])?;
-//     cur += len;
-//   }
+  for msg in msgs {
+    let len = msg.encoded_len() as u32;
+    NetworkEndian::write_u32(&mut out[cur..], len);
+    cur += 4;
+    let len = msg.encode(&mut out[cur..])?;
+    cur += len;
+  }
 
-//   Ok(out.freeze())
-// }
+  Ok(out.freeze())
+}
 
 #[cfg(feature = "quinn")]
 pub use quinn_stream_layer::quinn_stream_layer;
