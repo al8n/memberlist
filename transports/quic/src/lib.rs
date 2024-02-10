@@ -1012,6 +1012,8 @@ where
       return Self::decode_without_compression(conn).await;
     }
 
+    // consume peeked bytes
+    conn.read_exact(&mut tag).await.unwrap();
     let readed = HEADER_SIZE;
     let compressor = Compressor::try_from(tag[0])?;
     let msg_len = NetworkEndian::read_u32(&tag[1..]) as usize;
@@ -1070,17 +1072,11 @@ where
     use bytes::Buf;
 
     let mut uncompressed: Bytes = compressor.decompress(src)?.into();
-    let tag = uncompressed[0];
-    let msg_len = NetworkEndian::read_u32(&uncompressed[1..]) as usize;
-    uncompressed.advance(HEADER_SIZE);
 
-    if uncompressed.remaining() < msg_len + 1 {
-      return Err(QuicTransportError::Custom(
-        "uncompressed data do not have enough bytes to decode".into(),
-      ));
-    }
-
-    if Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::COMPOUND_TAG == tag {
+    if Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::COMPOUND_TAG
+      == uncompressed[0]
+    {
+      uncompressed.advance(1);
       let num_msgs = uncompressed[0] as usize;
       let mut msgs = OneOrMore::with_capacity(num_msgs);
       uncompressed.advance(1);

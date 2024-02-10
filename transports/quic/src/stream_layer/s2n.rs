@@ -1,3 +1,5 @@
+#![allow(warnings)]
+
 use std::{io, marker::PhantomData, net::SocketAddr, path::PathBuf, time::Duration};
 
 use agnostic::Runtime;
@@ -64,24 +66,26 @@ impl<R: Runtime> StreamLayer for S2n<R> {
   ) -> io::Result<(SocketAddr, Self::Acceptor, Self::Connector)> {
     let auto_server_port = addr.port() == 0;
     let srv = Server::builder()
-      // .with_limits(self.limits)
-      // .map_err(invalid_data)?
+      .with_limits(self.limits)
+      .map_err(invalid_data)?
       .with_io(addr)
       .map_err(invalid_data)?
       .with_tls((self.cert.as_path(), self.key.as_path()))
       .map_err(invalid_data)?
       .start()
       .map_err(invalid_data)?;
-    let client_addr = SocketAddr::new(addr.ip(), 0);
+    let client_addr: SocketAddr = match addr {
+      SocketAddr::V4(_) => "0.0.0.0:0".parse().unwrap(),
+      SocketAddr::V6(_) => "[::]:0".parse().unwrap(),
+    };
     let client = Client::builder()
-      // .with_limits(self.limits)
-      // .map_err(invalid_data)?
+      .with_limits(self.limits)
+      .map_err(invalid_data)?
       .with_tls(self.cert.as_path())
       .map_err(invalid_data)?
       .with_io(client_addr)?
       .start()
       .map_err(invalid_data)?;
-
     let actual_client_addr = client.local_addr()?;
     tracing::info!(
       target = "memberlist.transport.quic",
@@ -198,7 +202,7 @@ impl<R: Runtime> QuicConnector for S2nConnector<R> {
 
   async fn wait_idle(&self) -> Result<(), Self::Error> {
     // self.client.wait_idle().await.map_err(Into::into)
-    todo!()
+    Ok(())
   }
 
   fn local_addr(&self) -> SocketAddr {
@@ -254,10 +258,9 @@ impl<R: Runtime> QuicStream for S2nBiStream<R> {
   async fn write_all(&mut self, src: Bytes) -> Result<usize, Self::Error> {
     let len = src.len();
     let fut = async {
-      self.send_stream.write_all(&src).await?;
       self
         .send_stream
-        .flush()
+        .write_all(&src)
         .await
         .map(|_| len)
         .map_err(Into::into)

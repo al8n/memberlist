@@ -8,6 +8,9 @@ use super::*;
 /// No label, no compression
 pub mod no_label_no_compression;
 
+/// With label, no compression
+pub mod with_label_no_compression;
+
 /// No label, with compression
 #[cfg(feature = "compression")]
 pub mod no_label_with_compression;

@@ -78,6 +78,8 @@ where
       }};
     }
 
+    tracing::trace!(target = "memberlist.packet", addr = %from, packet=?msg, "handle packet");
+
     match msg {
       Message::Ping(ping) => self.handle_ping(ping, from).await,
       Message::IndirectPing(ind) => self.handle_indirect_ping(ind, from).await,

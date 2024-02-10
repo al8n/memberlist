@@ -159,9 +159,17 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
     out.put_slice(&data);
     let mut client = self.connector.take().expect("connector is not set");
     let mut stream = client.open_bi(self.remote_addr).await?;
-    stream.write_all(out.freeze()).await?;
-    stream.flush().await?;
+    tracing::error!("DEBUG: send {:?}", out.as_ref());
+    stream.write_all(out.freeze()).await.map_err(|e| {
+      tracing::error!("DEBUG: write fail {:?}", e);
+      e
+    })?;
+    // stream.flush().await.map_err(|e| {
+    //   tracing::error!("DEBUG: flush fail {:?}", e);
+    //   e
+    // })?;
     stream.close().await;
+    client.wait_idle().await;
     Ok(())
   }
 
@@ -284,27 +292,6 @@ pub fn read_compressed_data(src: &[u8]) -> Result<Vec<u8>, AnyError> {
 //   Ok(out.freeze())
 // }
 
-/// A helper function to create native TLS stream layer for testing
-#[cfg(feature = "native-tls")]
-pub async fn native_tls_stream_layer<R: Runtime>() -> crate::native_tls::NativeTls<R> {
-  use async_native_tls::{Identity, TlsAcceptor, TlsConnector};
-
-  use crate::native_tls::NativeTls;
-
-  let keys = test_cert_gen::gen_keys();
-
-  let identity = Identity::from_pkcs12(
-    &keys.server.cert_and_key_pkcs12.pkcs12.0,
-    &keys.server.cert_and_key_pkcs12.password,
-  )
-  .unwrap();
-
-  let acceptor = TlsAcceptor::from(::native_tls::TlsAcceptor::new(identity).unwrap());
-  let connector = TlsConnector::new().danger_accept_invalid_certs(true);
-
-  NativeTls::new("localhost".to_string(), acceptor, connector)
-}
-
 #[cfg(feature = "quinn")]
 pub use quinn_stream_layer::quinn_stream_layer;
 
@@ -404,10 +391,6 @@ mod s2n_stream_layer {
 
   pub async fn s2n_stream_layer<R: Runtime>() -> S2n<R> {
     let p = std::env::current_dir().unwrap().join("tests");
-    S2n::new(Options::new(
-      p.join("s2n-tests.crt"),
-      p.join("s2n-tests.key"),
-    ))
-    .unwrap()
+    S2n::new(Options::new(p.join("cert.pem"), p.join("key.pem"))).unwrap()
   }
 }
