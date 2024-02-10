@@ -189,6 +189,8 @@ impl<R: Runtime> TestPacketClient for NetTransporTestClient<R> {
   fn local_addr(&self) -> SocketAddr {
     self.local_addr
   }
+
+  async fn close(&mut self) {}
 }
 
 /// A test client for network transport

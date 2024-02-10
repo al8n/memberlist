@@ -20,10 +20,12 @@ macro_rules! handle_ping_test_suites {
   ($($prefix:literal: )? $rt:ident::$run:ident({ $s: expr })) => {
     $crate::__handle_ping_no_label_no_compression!($($prefix: )? $rt::$run({ $s }));
 
+    $crate::__handle_ping_with_label_no_compression!($($prefix: )? $rt::$run({ $s }));
+
     #[cfg(feature = "compression")]
     $crate::__handle_ping_no_label_with_compression!($($prefix: )? $rt::$run({ $s }));
 
-    // #[cfg(feature = "compression")]
-    // $crate::__handle_ping_with_label_and_compression!($($prefix: )? $rt::$run({ $s }));
+    #[cfg(feature = "compression")]
+    $crate::__handle_ping_with_label_and_compression!($($prefix: )? $rt::$run({ $s }));
   };
 }

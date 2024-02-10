@@ -8,7 +8,7 @@ use agnostic::{
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::Stream;
+use futures::{Stream, FutureExt};
 use memberlist_core::{
   tests::AnyError,
   transport::{
@@ -82,6 +82,9 @@ pub struct QuicTransportTestClient<S: StreamLayer, R: Runtime> {
   local_addr: SocketAddr,
   #[viewit(getter(skip), setter(skip))]
   remote_addr: SocketAddr,
+  #[viewit(getter(skip), setter(skip))]
+  shutdown_tx: async_channel::Sender<()>,
+
   label: Label,
   send_label: bool,
   #[cfg(feature = "compression")]
@@ -89,6 +92,8 @@ pub struct QuicTransportTestClient<S: StreamLayer, R: Runtime> {
   receive_verify_label: bool,
   #[cfg(feature = "compression")]
   receive_compressed: bool,
+
+
   _runtime: std::marker::PhantomData<R>,
 }
 
@@ -101,15 +106,23 @@ impl<S: StreamLayer, R: Runtime> QuicTransportTestClient<S, R> {
   ) -> Result<Self, AnyError> {
     let (local_addr, mut acceptor, client) = layer.bind(local_addr).await?;
     let (tx, rx) = async_channel::bounded(1);
+    let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
     R::spawn_detach(async move {
+      #[allow(clippy::never_loop)]
       loop {
-        let (stream, addr) = acceptor
-          .accept_bi()
-          .await
-          .expect("failed to accept response stream");
-        tx.send((stream, addr))
-          .await
-          .expect("failed to send response stream");
+        futures::select! {
+          res = acceptor.accept_bi().fuse() => {
+            let (stream, addr) = res
+              .expect("failed to accept response stream");
+            tx.send((stream, addr))
+              .await
+              .expect("failed to send response stream");
+            return;
+          }
+          _ = shutdown_rx.recv().fuse() => {
+            panic!("unexpected shutdown signal");
+          }
+        }
       }
     });
 
@@ -118,6 +131,7 @@ impl<S: StreamLayer, R: Runtime> QuicTransportTestClient<S, R> {
       remote_addr,
       connector: Some(client),
       recv_stream_rx: rx,
+      shutdown_tx,
       label: Label::empty(),
       send_label: false,
       #[cfg(feature = "compression")]
@@ -159,17 +173,8 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
     out.put_slice(&data);
     let mut client = self.connector.take().expect("connector is not set");
     let mut stream = client.open_bi(self.remote_addr).await?;
-    tracing::error!("DEBUG: send {:?}", out.as_ref());
-    stream.write_all(out.freeze()).await.map_err(|e| {
-      tracing::error!("DEBUG: write fail {:?}", e);
-      e
-    })?;
-    // stream.flush().await.map_err(|e| {
-    //   tracing::error!("DEBUG: flush fail {:?}", e);
-    //   e
-    // })?;
-    stream.close().await;
-    client.wait_idle().await;
+    stream.write_all(out.freeze()).await?;
+    stream.close().await?;
     Ok(())
   }
 
@@ -203,17 +208,23 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
       let mut all = vec![0u8; compressed_data_len];
       stream.read_exact(&mut all).await?;
       let uncompressed = compressor.decompress(&all[..compressed_data_len])?;
+      tracing::info!("client received {:?}", uncompressed);
       Ok((uncompressed.into(), self.local_addr))
     } else {
       let mut all = vec![0u8; 1500];
       let len = stream.read(&mut all).await?;
       all.truncate(len);
+      tracing::info!("client received {:?}", all);
       Ok((all.into(), self.local_addr))
     }
   }
 
   fn local_addr(&self) -> SocketAddr {
     self.local_addr
+  }
+
+  async fn close(&mut self) {
+    
   }
 }
 

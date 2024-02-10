@@ -74,6 +74,9 @@ pub trait TestPacketClient: Sized + Send + Sync + 'static {
 
   /// Local address of the client
   fn local_addr(&self) -> SocketAddr;
+
+  /// Close the client
+  fn close(&mut self) -> impl Future<Output = ()> + Send;
 }
 
 /// The client used to send/receive data to a transport
@@ -136,7 +139,7 @@ where
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
   assert_eq!(ack.seq_no, 42, "bad sequence no: {}", ack.seq_no);
 
-  futures::select! {
+  let res = futures::select! {
     res = tx.send(()).fuse() => {
       if res.is_err() {
         Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout").into())
@@ -144,7 +147,10 @@ where
         Ok(())
       }
     }
-  }
+  };
+  let _ = m.shutdown().await;
+  client.close().await;
+  res
 }
 
 pub async fn handle_compound_ping<A, T, C, E, R>(

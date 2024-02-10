@@ -202,6 +202,10 @@ where
       .open_bi(addr)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    tracing::trace!(
+      target = "memberlist.transport.quic.packet",
+      sent = ?src.as_ref(),
+    );
     let written = conn
       .write_all(src)
       .await

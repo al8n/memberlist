@@ -872,7 +872,7 @@ where
       .peek_exact(&mut tag)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    let mut packet_label = if tag[0] == Label::TAG {
+    let packet_label = if tag[0] == Label::TAG {
       let label_size = tag[1] as usize;
       // consume peeked
       recv_stream.read_exact(&mut tag).await.unwrap();
@@ -888,16 +888,7 @@ where
       Label::empty()
     };
 
-    if skip_inbound_label_check {
-      if !packet_label.is_empty() {
-        return Err(LabelError::duplicate(label.cheap_clone(), packet_label).into());
-      }
-
-      // Set this from config so that the auth data assertions work below.
-      packet_label = label.cheap_clone();
-    }
-
-    if packet_label.ne(label) {
+    if !skip_inbound_label_check && packet_label.ne(label) {
       tracing::error!(target = "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
     }
