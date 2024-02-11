@@ -159,7 +159,7 @@ impl Options {
       endpoint_config,
       max_idle_timeout: Duration::from_secs(10).as_millis() as u32,
       max_concurrent_stream_limit: 256,
-      keep_alive_interval: Duration::from_secs(5),
+      keep_alive_interval: Duration::from_secs(8),
       max_connection_data: 15_000_000,
 
       // Ensure that one stream is not consuming the whole connection.

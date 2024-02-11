@@ -79,4 +79,3 @@ macro_rules! __handle_ping_with_label_and_compression {
     }
   };
 }
-

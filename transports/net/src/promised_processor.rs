@@ -11,7 +11,6 @@ use agnostic::Runtime;
 use futures::FutureExt;
 use memberlist_core::transport::{stream::StreamProducer, Transport};
 use nodecraft::resolver::AddressResolver;
-use wg::AsyncWaitGroup;
 
 use super::{Listener, StreamLayer};
 
@@ -26,7 +25,6 @@ where
   T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer,
 {
-  pub(super) wg: AsyncWaitGroup,
   pub(super) stream_tx:
     StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, S::Stream>,
   pub(super) ln: Arc<S::Listener>,
@@ -41,9 +39,8 @@ where
   T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer,
 {
-  pub(super) fn run(self) {
+  pub(super) async fn run(self) {
     let Self {
-      wg,
       stream_tx,
       ln,
       shutdown,
@@ -59,55 +56,52 @@ where
     /// Therefore, changes to `MAX_DELAY` may have an effect on the latency of shutdown.
     const MAX_DELAY: Duration = Duration::from_secs(1);
 
-    <T::Runtime as Runtime>::spawn_detach(async move {
-      scopeguard::defer!(wg.done());
-      let mut loop_delay = Duration::ZERO;
-      loop {
-        futures::select! {
-          _ = self.shutdown_rx.recv().fuse() => {
-            break;
-          }
-          rst = ln.accept().fuse() => {
-            match rst {
-              Ok((conn, remote_addr)) => {
-                // No error, reset loop delay
-                loop_delay = Duration::ZERO;
-                if let Err(e) = stream_tx
-                  .send(remote_addr, conn)
-                  .await
-                {
-                  tracing::error!(target =  "memberlist.transport.net", local_addr=%local_addr, err = %e, "failed to send TCP connection");
-                }
+    let mut loop_delay = Duration::ZERO;
+    loop {
+      futures::select! {
+        _ = self.shutdown_rx.recv().fuse() => {
+          break;
+        }
+        rst = ln.accept().fuse() => {
+          match rst {
+            Ok((conn, remote_addr)) => {
+              // No error, reset loop delay
+              loop_delay = Duration::ZERO;
+              if let Err(e) = stream_tx
+                .send(remote_addr, conn)
+                .await
+              {
+                tracing::error!(target =  "memberlist.transport.net", local_addr=%local_addr, err = %e, "failed to send TCP connection");
               }
-              Err(e) => {
-                if shutdown.load(Ordering::SeqCst) {
-                  break;
-                }
-
-                #[cfg(any(test, feature = "test"))]
-                {
-                  BACKOFFS_COUNT.fetch_add(1, Ordering::SeqCst);
-                }
-
-                if loop_delay == Duration::ZERO {
-                  loop_delay = BASE_DELAY;
-                } else {
-                  loop_delay *= 2;
-                }
-
-                if loop_delay > MAX_DELAY {
-                  loop_delay = MAX_DELAY;
-                }
-
-                tracing::error!(target =  "memberlist.transport.net", local_addr=%local_addr, err = %e, "error accepting TCP connection");
-                <T::Runtime as Runtime>::sleep(loop_delay).await;
-                continue;
+            }
+            Err(e) => {
+              if shutdown.load(Ordering::SeqCst) {
+                break;
               }
+
+              #[cfg(any(test, feature = "test"))]
+              {
+                BACKOFFS_COUNT.fetch_add(1, Ordering::SeqCst);
+              }
+
+              if loop_delay == Duration::ZERO {
+                loop_delay = BASE_DELAY;
+              } else {
+                loop_delay *= 2;
+              }
+
+              if loop_delay > MAX_DELAY {
+                loop_delay = MAX_DELAY;
+              }
+
+              tracing::error!(target =  "memberlist.transport.net", local_addr=%local_addr, err = %e, "error accepting TCP connection");
+              <T::Runtime as Runtime>::sleep(loop_delay).await;
+              continue;
             }
           }
         }
       }
-    });
+    }
   }
 }
 
@@ -171,26 +165,26 @@ where
   let _lock = BACKOFFS_LOCK.lock().unwrap();
   let ln = s.bind(kind.next()).await?;
   let local_addr = ln.local_addr()?;
-  let wg = wg::AsyncWaitGroup::from(1);
   let (_shutdown_tx, shutdown_rx) = async_channel::bounded(1);
   let shutdown = Arc::new(AtomicBool::new(false));
   let (stream_tx, stream_rx) = memberlist_core::transport::stream::promised_stream::<T>();
-  PromisedProcessor::<A, T, TestStreamLayer<S>> {
-    wg: wg.clone(),
-    stream_tx,
-    ln: Arc::new(TestListener { ln }),
-    local_addr,
-    shutdown: shutdown.clone(),
-    shutdown_rx,
-  }
-  .run();
+  let wg = agnostic::WaitableSpawner::<A::Runtime>::new();
+  wg.spawn_detach(
+    PromisedProcessor::<A, T, TestStreamLayer<S>> {
+      stream_tx,
+      ln: Arc::new(TestListener { ln }),
+      local_addr,
+      shutdown: shutdown.clone(),
+      shutdown_rx,
+    }
+    .run(),
+  );
 
   // sleep (+yield) for testTime seconds before asking the accept loop to shut down
   <T::Runtime as Runtime>::sleep(TEST_TIME).await;
   shutdown.store(true, Ordering::SeqCst);
   // Verify that the wg was completed on exit (but without blocking this test)
   // maxDelay == 1s, so we will give the routine 1.25s to loop around and shut down.
-  let wg = wg.clone();
   let (ctx, crx) = async_channel::bounded::<()>(1);
   <T::Runtime as Runtime>::spawn_detach(async move {
     wg.wait().await;

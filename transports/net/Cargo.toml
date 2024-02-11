@@ -56,13 +56,11 @@ peekable = { version = "0.2", features = ["future"] }
 pin-project.workspace = true
 rand = "0.8"
 
-scopeguard.workspace = true
 memberlist-core.workspace = true
 memberlist-utils = { workspace = true, features = ["ipnet"] }
 thiserror.workspace = true
 tracing.workspace = true
 viewit.workspace = true
-wg.workspace = true
 
 # tls
 futures-rustls = { version = "0.25", optional = true }

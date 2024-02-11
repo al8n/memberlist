@@ -9,7 +9,7 @@ use agnostic::{
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::{Stream, FutureExt};
+use futures::{FutureExt, Stream};
 use memberlist_core::{
   tests::AnyError,
   transport::{
@@ -37,21 +37,17 @@ pub mod handle_ping;
 #[cfg(feature = "compression")]
 pub mod handle_compound_ping;
 
+/// Unit test for handling indirect ping message
+#[cfg(feature = "compression")]
+pub mod handle_indirect_ping;
 
-// /// Unit test for handling indirect ping message
-// #[cfg(all(feature = "compression", feature = "encryption"))]
-// pub mod handle_indirect_ping;
+/// Unit test for handling ping from wrong node
+#[cfg(feature = "compression")]
+pub mod handle_ping_wrong_node;
 
-// /// Unit test for handling ping from wrong node
-// #[cfg(all(feature = "compression", feature = "encryption"))]
-// pub mod handle_ping_wrong_node;
-
-// /// Unit test for handling send packet with piggyback
-// #[cfg(all(feature = "compression", feature = "encryption"))]
-// pub mod packet_piggyback;
-
-// /// Unit test for handling transport with label or not.
-// pub mod label;
+/// Unit test for handling send packet with piggyback
+#[cfg(feature = "compression")]
+pub mod packet_piggyback;
 
 // /// Unit test for handling promised ping
 // #[cfg(all(feature = "compression", feature = "encryption"))]
@@ -61,13 +57,13 @@ pub mod handle_compound_ping;
 // #[cfg(all(feature = "compression", feature = "encryption"))]
 // pub mod promised_push_pull;
 
-// /// Unit test for sending
-// #[cfg(all(feature = "compression", feature = "encryption"))]
-// pub mod send;
+/// Unit test for sending
+#[cfg(feature = "compression")]
+pub mod send;
 
-// /// Unit test for joining
-// #[cfg(all(feature = "compression", feature = "encryption"))]
-// pub mod join;
+/// Unit test for joining
+#[cfg(feature = "compression")]
+pub mod join;
 
 /// A test client for network transport
 #[viewit::viewit(
@@ -117,6 +113,7 @@ impl<S: StreamLayer, R: Runtime> QuicTransportTestClient<S, R> {
     let (local_addr, mut acceptor, client) = layer.bind(local_addr).await?;
     let (tx, rx) = async_channel::bounded(1);
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
+    tracing::info!("client listener started at {:?}", local_addr);
     R::spawn_detach(async move {
       let mut num_accepted = 0;
       #[allow(clippy::never_loop)]
@@ -192,15 +189,19 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
     out.put_slice(&data);
     let mut client = self.connector.take().expect("connector is not set");
     let mut stream = client.open_bi(self.remote_addr).await?;
+    tracing::info!(remote = %self.remote_addr, "client send {:?}", out.as_ref());
     stream.write_all(out.freeze()).await?;
     stream.close().await?;
     Ok(())
   }
 
   async fn recv_from(&mut self) -> Result<(Bytes, SocketAddr), AnyError> {
+    tracing::info!("start handle remote stream");
     let (mut stream, _) = self.recv_stream_rx.recv().await?;
+    tracing::info!("receive handle remote stream");
     let mut buf = [0u8; 3];
     stream.peek_exact(&mut buf).await?;
+    tracing::info!("client header {:?}", buf);
     assert_eq!(buf[0], super::StreamType::Packet as u8);
     let mut drop = [0; 1];
     stream.read_exact(&mut drop).await?;
@@ -242,9 +243,7 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
     self.local_addr
   }
 
-  async fn close(&mut self) {
-    
-  }
+  async fn close(&mut self) {}
 }
 
 /// A test client for network transport
@@ -303,9 +302,11 @@ pub fn read_compressed_data(src: &[u8]) -> Result<Vec<u8>, AnyError> {
 
 fn compound_encoder(msgs: &[Message<SmolStr, SocketAddr>]) -> Result<Bytes, AnyError> {
   let num_msgs = msgs.len() as u8;
-  let total_bytes = 4 + msgs.iter().map(|m| m.encoded_len() + 4).sum::<usize>();
+  let total_bytes = 6 + msgs.iter().map(|m| m.encoded_len() + 4).sum::<usize>();
   let mut out = BytesMut::with_capacity(total_bytes);
   out.put_u8(Message::<SmolStr, SocketAddr>::COMPOUND_TAG);
+  out.put_u32(0);
+  NetworkEndian::write_u32(&mut out[1..], total_bytes as u32);
   out.put_u8(num_msgs);
 
   let mut cur = out.len();

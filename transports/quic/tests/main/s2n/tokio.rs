@@ -12,3 +12,18 @@ mod handle_ping;
 
 #[path = "tokio/handle_compound_ping.rs"]
 mod handle_compound_ping;
+
+#[path = "tokio/handle_indirect_ping.rs"]
+mod handle_indirect_ping;
+
+#[path = "tokio/handle_ping_wrong_node.rs"]
+mod handle_ping_wrong_node;
+
+#[path = "tokio/piggyback.rs"]
+mod piggyback;
+
+#[path = "tokio/send.rs"]
+mod send;
+
+#[path = "tokio/join.rs"]
+mod join;

@@ -1,4 +1,4 @@
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use memberlist_utils::LabelBufMutExt;
 
 use super::*;
@@ -18,24 +18,22 @@ where
     compressor: Compressor,
   ) -> Result<BytesMut, QuicTransportError<A, S, W>> {
     let label_encoded_size = label.encoded_overhead();
-    let total_len = label_encoded_size + COMPRESS_HEADER + HEADER_SIZE + msg_encoded_size;
+    let total_len = 1 + label_encoded_size + COMPRESS_HEADER + msg_encoded_size;
     let mut buf = BytesMut::with_capacity(total_len);
+    buf.put_u8(StreamType::Stream as u8);
     buf.add_label_header(label);
 
-    let mut offset = label.encoded_overhead();
+    let mut offset = 1 + label.encoded_overhead();
 
     // write compress header
-    buf[offset] = compressor as u8;
+    buf.put_u8(compressor as u8);
     offset += 1;
     // write compressed data size placeholder
     let compressed_len_offset = offset;
-    buf[offset..offset + MAX_MESSAGE_LEN_SIZE].fill(0);
+    buf.put_u32(0);
     offset += MAX_MESSAGE_LEN_SIZE;
 
     buf.resize(total_len, 0);
-    buf[offset] = msg.tag();
-    NetworkEndian::write_u32(&mut buf[offset + 1..], msg_encoded_size as u32);
-    offset += HEADER_SIZE;
     let data = W::encode_message(msg, &mut buf[offset..]).map_err(QuicTransportError::Wire)?;
     let written = data + offset;
 
@@ -45,22 +43,21 @@ where
       written, total_len
     );
 
-    let compressed = compressor.compress_into_bytes(&buf[offset..offset + data])?;
+    let compressed = compressor.compress_into_bytes(&buf[offset..])?;
     let compressed_size = compressed.len() as u32;
     NetworkEndian::write_u32(&mut buf[compressed_len_offset..], compressed_size);
-    buf[offset..offset + compressed.len()].copy_from_slice(&compressed);
-    buf.truncate(offset + compressed.len());
+    buf.truncate(offset);
+    buf.put_slice(&compressed);
     Ok(buf)
   }
 
   #[cfg(feature = "compression")]
   pub(crate) async fn send_message_with_compression(
     &self,
-    conn: &mut S::Stream,
     msg: Message<I, A::ResolvedAddress>,
-  ) -> Result<usize, QuicTransportError<A, S, W>> {
+  ) -> Result<Bytes, QuicTransportError<A, S, W>> {
     let Some(compressor) = self.opts.compressor else {
-      return self.send_message_without_compression(conn, msg).await;
+      return self.send_message_without_compression(msg).await;
     };
 
     let msg_encoded_size = W::encoded_len(&msg);
@@ -93,35 +90,24 @@ where
       }
     };
 
-    let written = conn
-      .write_all(buf.freeze())
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))?;
-
-    conn
-      .flush()
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))
-      .map(|_| written)
+    Ok(buf.freeze())
   }
 
   pub(crate) async fn send_message_without_compression(
     &self,
-    conn: &mut S::Stream,
     msg: Message<I, A::ResolvedAddress>,
-  ) -> Result<usize, QuicTransportError<A, S, W>> {
+  ) -> Result<Bytes, QuicTransportError<A, S, W>> {
     let label_encoded_size = self.opts.label.encoded_overhead();
     let msg_encoded_size = W::encoded_len(&msg);
-    let total_len = label_encoded_size + HEADER_SIZE + msg_encoded_size;
+    let total_len = 1 + label_encoded_size + msg_encoded_size;
     let mut buf = BytesMut::with_capacity(total_len);
+    buf.put_u8(StreamType::Stream as u8);
     buf.add_label_header(&self.opts.label);
+    let offset = buf.len();
     buf.resize(total_len, 0);
-    buf[label_encoded_size] = msg.tag();
 
-    NetworkEndian::write_u32(&mut buf[label_encoded_size + 1..], msg_encoded_size as u32);
-    let data = W::encode_message(msg, &mut buf[label_encoded_size + HEADER_SIZE..])
-      .map_err(QuicTransportError::Wire)?;
-    let written = data + label_encoded_size + HEADER_SIZE;
+    let data = W::encode_message(msg, &mut buf[offset..]).map_err(QuicTransportError::Wire)?;
+    let written = data + offset;
 
     debug_assert_eq!(
       written, total_len,
@@ -129,15 +115,6 @@ where
       written, total_len
     );
 
-    let written = conn
-      .write_all(buf.freeze())
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))?;
-
-    conn
-      .flush()
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))
-      .map(|_| written)
+    Ok(buf.freeze())
   }
 }

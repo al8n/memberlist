@@ -18,7 +18,7 @@ use std::{
 
 use agnostic::{
   net::{Net, UdpSocket},
-  Runtime,
+  Runtime, WaitableSpawner,
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, BytesMut};
@@ -35,7 +35,6 @@ use memberlist_core::{
 };
 use memberlist_utils::{net::IsGlobalIp, *};
 use peekable::future::AsyncPeekExt;
-use wg::AsyncWaitGroup;
 
 #[doc(inline)]
 pub use memberlist_utils as utils;
@@ -136,7 +135,7 @@ where
   stream_layer: Arc<S>,
   #[cfg(feature = "encryption")]
   encryptor: Option<SecretKeyring>,
-  wg: AsyncWaitGroup,
+  wg: WaitableSpawner<A::Runtime>,
   resolver: Arc<A>,
   shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
@@ -275,7 +274,7 @@ where
     let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
     let advertise_addr = resolved_bind_address[expose_addr_index];
     let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
-    let wg = AsyncWaitGroup::new();
+    let wg = WaitableSpawner::new();
     let shutdown = Arc::new(AtomicBool::new(false));
 
     // Fire them up start that we've been able to create them all.
@@ -286,36 +285,37 @@ where
       .zip(v4_sockets.iter())
       .chain(v6_promised_listeners.iter().zip(v6_sockets.iter()))
     {
-      wg.add(2);
-      PromisedProcessor::<A, Self, S> {
-        wg: wg.clone(),
-        stream_tx: stream_tx.clone(),
-        ln: promised_ln.clone(),
-        shutdown: shutdown.clone(),
-        shutdown_rx: shutdown_rx.clone(),
-        local_addr: *promised_addr,
-      }
-      .run();
+      wg.spawn_detach(
+        PromisedProcessor::<A, Self, S> {
+          stream_tx: stream_tx.clone(),
+          ln: promised_ln.clone(),
+          shutdown: shutdown.clone(),
+          shutdown_rx: shutdown_rx.clone(),
+          local_addr: *promised_addr,
+        }
+        .run(),
+      );
 
-      PacketProcessor::<A, Self> {
-        wg: wg.clone(),
-        packet_tx: packet_tx.clone(),
-        label: opts.label.clone(),
-        #[cfg(any(feature = "compression", feature = "encryption"))]
-        offload_size: opts.offload_size,
-        #[cfg(feature = "encryption")]
-        verify_incoming: opts.gossip_verify_incoming,
-        #[cfg(feature = "encryption")]
-        encryptor: encryptor.clone(),
-        socket: socket.clone(),
-        local_addr: *socket_addr,
-        shutdown: shutdown.clone(),
-        #[cfg(feature = "metrics")]
-        metric_labels: opts.metric_labels.clone().unwrap_or_default(),
-        shutdown_rx: shutdown_rx.clone(),
-        skip_inbound_label_check: opts.skip_inbound_label_check,
-      }
-      .run();
+      wg.spawn_detach(
+        PacketProcessor::<A, Self> {
+          packet_tx: packet_tx.clone(),
+          label: opts.label.clone(),
+          #[cfg(any(feature = "compression", feature = "encryption"))]
+          offload_size: opts.offload_size,
+          #[cfg(feature = "encryption")]
+          verify_incoming: opts.gossip_verify_incoming,
+          #[cfg(feature = "encryption")]
+          encryptor: encryptor.clone(),
+          socket: socket.clone(),
+          local_addr: *socket_addr,
+          shutdown: shutdown.clone(),
+          #[cfg(feature = "metrics")]
+          metric_labels: opts.metric_labels.clone().unwrap_or_default(),
+          shutdown_rx: shutdown_rx.clone(),
+          skip_inbound_label_check: opts.skip_inbound_label_check,
+        }
+        .run(),
+      );
     }
 
     // find final advertise address

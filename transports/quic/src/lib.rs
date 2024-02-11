@@ -295,6 +295,7 @@ where
   }
 }
 
+#[derive(Debug)]
 struct Batch<I, A> {
   num_packets: usize,
   packets: TinyVec<Message<I, A>>,
@@ -397,44 +398,30 @@ where
     ),
     Self::Error,
   > {
-    let mut tag = [0u8; 2];
-
+    let mut tag = [0u8; 3];
     conn
       .peek_exact(&mut tag)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    let mut stream_label = if tag[0] == Label::TAG {
-      let label_size = tag[1] as usize;
+    let stream_label = if tag[1] == Label::TAG {
+      let label_size = tag[2] as usize;
       // consume peeked
       conn.read_exact(&mut tag).await.unwrap();
-
       let mut label = vec![0u8; label_size];
       conn
         .read_exact(&mut label)
         .await
         .map_err(|e| QuicTransportError::Stream(e.into()))?;
-
-      Label::try_from(Bytes::from(label)).map_err(|e| QuicTransportError::Label(e.into()))?
+      Label::try_from(label).map_err(|e| QuicTransportError::Label(e.into()))?
     } else {
+      // consume stream type tag
+      conn.read_exact(&mut [0; 1]).await.unwrap();
       Label::empty()
     };
 
     let label = &self.opts.label;
 
-    if self.opts.skip_inbound_label_check {
-      if !stream_label.is_empty() {
-        tracing::error!(
-          target = "memberlist.transport.quic.read_message",
-          "unexpected double stream label header"
-        );
-        return Err(LabelError::duplicate(label.cheap_clone(), stream_label).into());
-      }
-
-      // Set this from config so that the auth data assertions work below.
-      stream_label = label.cheap_clone();
-    }
-
-    if stream_label.ne(&self.opts.label) {
+    if !self.opts.skip_inbound_label_check && stream_label.ne(label) {
       tracing::error!(target = "memberlist.transport.quic.read_message", local_label=%label, remote_label=%stream_label, "discarding stream with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), stream_label).into());
     }
@@ -460,10 +447,15 @@ where
     msg: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<usize, Self::Error> {
     #[cfg(not(feature = "compression"))]
-    return self.send_message_without_comression(conn, msg).await;
+    let buf = self.send_message_without_comression(msg).await?;
 
     #[cfg(feature = "compression")]
-    self.send_message_with_compression(conn, msg).await
+    let buf = self.send_message_with_compression(msg).await?;
+
+    conn
+      .write_all(buf)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))
   }
 
   async fn send_packet(
@@ -496,7 +488,7 @@ where
     let mut batches =
       SmallVec::<Batch<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>::new();
     let packets_overhead = self.packets_header_overhead();
-    let mut estimate_batch_encoded_size = 0;
+    let mut estimate_batch_encoded_size = packets_overhead;
     let mut current_packets_in_batch = 0;
 
     // get how many packets a batch
@@ -577,9 +569,15 @@ where
   async fn cache_stream(
     &self,
     _addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    _stream: Self::Stream,
+    mut stream: Self::Stream,
   ) -> Result<(), Self::Error> {
     // Cache QUIC stream make no sense, so just return
+    // <A::Runtime as Runtime>::sleep(Duration::from_secs(10)).await;
+    // drop(stream);
+    stream
+      .close()
+      .await
+      .map_err(|e| Self::Error::Stream(e.into()))?;
     Ok(())
   }
 
@@ -747,7 +745,7 @@ where
               // No error, reset loop delay
               loop_delay = Duration::ZERO;
               let mut stream_kind_buf = [0; 1];
-              if let Err(e) = stream.read_exact(&mut stream_kind_buf).await {
+              if let Err(e) = stream.peek_exact(&mut stream_kind_buf).await {
                 tracing::error!(target = "memberlist.transport.quic", local=%local_addr, from=%remote_addr, err = %e, "failed to read stream kind");
                 continue;
               }
@@ -760,6 +758,8 @@ where
                   tracing::error!(target =  "memberlist.transport.quic", local_addr=%local_addr, err = %e, "failed to send stream connection");
                 }
               } else {
+                // consume peeked byte
+                stream.read_exact(&mut stream_kind_buf).await.unwrap();
                 let packet_tx = packet_tx.clone();
                 let label = label.cheap_clone();
                 #[cfg(feature = "metrics")]
@@ -960,9 +960,9 @@ where
           .await
           .map_err(|e| QuicTransportError::Stream(e.into()))?;
         read += msg_len + 1;
-        Self::decode_batch(&buf[..msg_len + 1]).map(|msgs| (read, msgs))
+        Self::decode_batch(&buf[..msg_len]).map(|msgs| (read, msgs))
       } else {
-        let mut buf = vec![0; msg_len + 1];
+        let mut buf = vec![0; msg_len];
         conn
           .read_exact(&mut buf)
           .await
@@ -1063,9 +1063,12 @@ where
       == uncompressed[0]
     {
       uncompressed.advance(1);
+      let _total_len = NetworkEndian::read_u32(&uncompressed[..MAX_MESSAGE_LEN_SIZE]) as usize;
+      uncompressed.advance(MAX_MESSAGE_LEN_SIZE);
       let num_msgs = uncompressed[0] as usize;
-      let mut msgs = OneOrMore::with_capacity(num_msgs);
       uncompressed.advance(1);
+
+      let mut msgs = OneOrMore::with_capacity(num_msgs);
       for _ in 0..num_msgs {
         let expected_msg_len =
           NetworkEndian::read_u32(&uncompressed[..MAX_MESSAGE_LEN_SIZE]) as usize;

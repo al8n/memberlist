@@ -15,7 +15,6 @@ where
     batch: Batch<I, A::ResolvedAddress>,
   ) -> Result<usize, QuicTransportError<A, S, W>> {
     let mut offset = 0;
-
     let num_packets = batch.packets.len();
     // Encode messages to buffer
     if num_packets <= 1 {
@@ -35,14 +34,16 @@ where
     // Encode compound message header
     buf[offset] = Message::<I, A::ResolvedAddress>::COMPOUND_TAG;
     offset += 1;
-    let total_msg_len_offset = offset;
+    let total_packets_len_offset = offset;
     // just add a place holder for total message length
     NetworkEndian::write_u32(&mut buf[offset..], 0);
     offset += MAX_MESSAGE_LEN_SIZE;
+
     buf[offset] = num_packets as u8;
     offset += 1;
 
     let packets_offset = offset;
+
     for packet in batch.packets {
       let expected_packet_encoded_size = W::encoded_len(&packet);
       NetworkEndian::write_u32(
@@ -62,7 +63,7 @@ where
 
     let actual_encoded_size = offset - packets_offset;
     NetworkEndian::write_u32(
-      &mut buf[total_msg_len_offset..total_msg_len_offset + MAX_MESSAGE_LEN_SIZE],
+      &mut buf[total_packets_len_offset..total_packets_len_offset + MAX_MESSAGE_LEN_SIZE],
       actual_encoded_size as u32,
     );
 
@@ -84,7 +85,7 @@ where
 
     let offset = buf.len();
 
-    buf.resize(batch.estimate_encoded_len(), 0);
+    buf.resize(batch.estimate_encoded_len() + offset, 0);
 
     Self::encode_batch(&mut buf[offset..], batch)?;
 
@@ -101,8 +102,7 @@ where
     let mut offset = buf.len();
     let mut data_offset = offset;
 
-    buf.resize(batch.estimate_encoded_len(), 0);
-
+    buf.resize(batch.estimate_encoded_len() + offset, 0);
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     offset += encoded_size;
 
@@ -120,7 +120,6 @@ where
     if buf.len() >= max_payload_size {
       return Err(QuicTransportError::PacketTooLarge(buf.len()));
     }
-
     Ok(buf)
   }
 
@@ -210,10 +209,6 @@ where
       .write_all(src)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    // conn
-    //   .flush()
-    //   .await
-    //   .map_err(|e| QuicTransportError::Stream(e.into()))?;
     conn
       .close()
       .await

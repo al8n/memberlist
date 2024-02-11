@@ -83,5 +83,3 @@ macro_rules! __handle_ping_with_label_no_compression {
     }
   };
 }
-
-

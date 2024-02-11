@@ -76,8 +76,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let name =
-    format!("{kind}_ping_server_no_label_no_compression_client_with_label_no_compression");
+  let name = format!("{kind}_ping_server_no_label_no_compression_client_with_label_no_compression");
   let label = Label::try_from(&name)?;
 
   let mut opts =

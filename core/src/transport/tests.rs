@@ -333,7 +333,7 @@ where
     .await;
 
   // Encode a ping
-  let ping = IndirectPing {
+  let ping = Ping {
     seq_no: 42,
     source: Node::new("test".into(), source_addr),
     target: m.advertise_node(),
@@ -707,15 +707,31 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let m1 = Memberlist::new(trans1, Options::default()).await?;
-  let m2 = Memberlist::new(trans2, Options::default()).await?;
+  let m1 = Memberlist::new(trans1, Options::default())
+    .await
+    .map_err(|e| {
+      tracing::error!("fail to start memberlist node 1: {}", e);
+      e
+    })?;
+  let m2 = Memberlist::new(trans2, Options::default())
+    .await
+    .map_err(|e| {
+      tracing::error!("fail to start memberlist node 2: {}", e);
+      e
+    })?;
   m2.join(Node::new(
     m1.local_id().cheap_clone(),
     MaybeResolvedAddress::resolved(*m1.advertise_addr()),
   ))
-  .await?;
+  .await
+  .map_err(|e| {
+    tracing::error!("fail to join: {}", e);
+    e
+  })?;
   assert_eq!(m2.num_members().await, 2);
   assert_eq!(m2.estimate_num_nodes(), 2);
+  m1.shutdown().await?;
+  m2.shutdown().await?;
   Ok(())
 }
 

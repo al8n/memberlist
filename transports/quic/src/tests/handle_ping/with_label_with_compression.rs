@@ -1,9 +1,6 @@
 use super::*;
 
-pub async fn server_with_label_with_compression_client_with_label_no_compression<
-  S,
-  R,
->(
+pub async fn server_with_label_with_compression_client_with_label_no_compression<S, R>(
   s: S,
   c: S,
   kind: AddressKind,
@@ -14,7 +11,8 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let name = format!("{kind}_ping_server_with_label_with_compression_client_with_label_no_compression");
+  let name =
+    format!("{kind}_ping_server_with_label_with_compression_client_with_label_no_compression");
   let label = Label::try_from(&name)?;
   let mut opts = QuicTransportOptions::new(name.into())
     .with_label(label.cheap_clone())
@@ -35,10 +33,7 @@ where
   Ok(())
 }
 
-pub async fn server_with_label_no_compression_client_with_label_with_compression<
-  S,
-  R,
->(
+pub async fn server_with_label_no_compression_client_with_label_with_compression<S, R>(
   s: S,
   c: S,
   kind: AddressKind,
@@ -49,10 +44,10 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let name = format!("{kind}_ping_server_with_label_no_compression_client_with_label_with_compression");
+  let name =
+    format!("{kind}_ping_server_with_label_no_compression_client_with_label_with_compression");
   let label = Label::try_from(&name)?;
-  let mut opts = QuicTransportOptions::new(name.into())
-  .with_label(label.cheap_clone());
+  let mut opts = QuicTransportOptions::new(name.into()).with_label(label.cheap_clone());
 
   let local_addr = kind.next();
   opts.add_bind_address(local_addr);
@@ -69,10 +64,7 @@ where
   Ok(())
 }
 
-pub async fn server_with_label_with_compression_client_with_label_with_compression<
-  S,
-  R,
->(
+pub async fn server_with_label_with_compression_client_with_label_with_compression<S, R>(
   s: S,
   c: S,
   kind: AddressKind,
@@ -83,7 +75,8 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let name = format!("{kind}_ping_server_with_label_with_compression_client_with_label_with_compression");
+  let name =
+    format!("{kind}_ping_server_with_label_with_compression_client_with_label_with_compression");
   let label = Label::try_from(&name)?;
   let mut opts = QuicTransportOptions::new(name.into())
     .with_label(label.cheap_clone())
@@ -104,4 +97,3 @@ where
   handle_ping(trans, tc).await?;
   Ok(())
 }
-
