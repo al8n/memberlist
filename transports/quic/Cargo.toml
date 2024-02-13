@@ -37,6 +37,7 @@ agnostic.workspace = true
 async-channel.workspace = true
 bytes.workspace = true
 byteorder.workspace = true
+crossbeam-skiplist = "0.1"
 futures.workspace = true
 indexmap = "2"
 local-ip-address = "0.5"

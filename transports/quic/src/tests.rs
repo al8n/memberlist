@@ -3,10 +3,7 @@
 use core::panic;
 use std::{future::Future, net::SocketAddr, sync::Arc};
 
-use agnostic::{
-  net::{Net, UdpSocket},
-  Runtime,
-};
+use agnostic::Runtime;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{lock::Mutex, FutureExt, Stream};
@@ -22,10 +19,7 @@ use memberlist_utils::{Label, LabelBufMutExt};
 use nodecraft::Transformable;
 use smol_str::SmolStr;
 
-use crate::{
-  QuicAcceptor, QuicConnector, QuicReadStream, QuicStream, QuicUniAcceptor, QuicWriteStream,
-  StreamLayer,
-};
+use crate::{QuicAcceptor, QuicConnection, QuicConnector, QuicStream, StreamLayer};
 
 #[cfg(feature = "compression")]
 use crate::compressor::Compressor;
@@ -83,6 +77,9 @@ pub struct QuicTransportTestClient<S: StreamLayer, R: Runtime> {
   #[viewit(getter(skip), setter(skip))]
   shutdown_tx: async_channel::Sender<()>,
 
+  #[viewit(getter(skip), setter(skip))]
+  connections: Arc<Mutex<Vec<S::Connection>>>,
+
   label: Label,
   send_label: bool,
   #[cfg(feature = "compression")]
@@ -114,12 +111,17 @@ impl<S: StreamLayer, R: Runtime> QuicTransportTestClient<S, R> {
     let (tx, rx) = async_channel::bounded(1);
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
     tracing::info!("client listener started at {:?}", local_addr);
+
     R::spawn_detach(async move {
+      let (conn, _) = acceptor
+        .accept()
+        .await
+        .expect("failed to accept connection");
       let mut num_accepted = 0;
       #[allow(clippy::never_loop)]
       loop {
         futures::select! {
-          res = acceptor.accept_bi().fuse() => {
+          res = conn.accept_bi().fuse() => {
             let (stream, addr) = res
               .expect("failed to accept response stream");
             tx.send((stream, addr))
@@ -150,6 +152,7 @@ impl<S: StreamLayer, R: Runtime> QuicTransportTestClient<S, R> {
       shutdown_tx,
       label: Label::empty(),
       send_label: false,
+      connections: Arc::new(Mutex::new(Vec::new())),
       #[cfg(feature = "compression")]
       send_compressed: None,
       receive_verify_label: false,
@@ -187,8 +190,10 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
     data.put_slice(src);
 
     out.put_slice(&data);
-    let mut client = self.connector.take().expect("connector is not set");
-    let mut stream = client.open_bi(self.remote_addr).await?;
+    let connector = self.connector.take().expect("connector is not set");
+    let connection = connector.connect(self.remote_addr).await?;
+    let (mut stream, _) = connection.open_bi().await?;
+    self.connections.lock().await.push(connection);
     tracing::info!(remote = %self.remote_addr, "client send {:?}", out.as_ref());
     stream.write_all(out.freeze()).await?;
     stream.close().await?;
@@ -243,7 +248,12 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
     self.local_addr
   }
 
-  async fn close(&mut self) {}
+  async fn close(&mut self) {
+    let mut conns = self.connections.lock().await;
+    for conn in conns.drain(..) {
+      let _ = conn.close().await;
+    }
+  }
 }
 
 /// A test client for network transport
@@ -256,6 +266,7 @@ pub struct QuicTransportTestPromisedClient<S: StreamLayer> {
   ln: Arc<Mutex<S::Acceptor>>,
   local_addr: SocketAddr,
   connector: S::Connector,
+  connections: Arc<Mutex<Vec<S::Connection>>>,
   layer: S,
 }
 
@@ -267,6 +278,7 @@ impl<S: StreamLayer> QuicTransportTestPromisedClient<S> {
       layer,
       ln: Arc::new(Mutex::new(ln)),
       connector,
+      connections: Arc::new(Mutex::new(Vec::new())),
       local_addr,
     }
   }
@@ -276,11 +288,16 @@ impl<S: StreamLayer> TestPromisedClient for QuicTransportTestPromisedClient<S> {
   type Stream = S::Stream;
 
   async fn connect(&self, addr: SocketAddr) -> Result<Self::Stream, AnyError> {
-    self.connector.open_bi(addr).await.map_err(Into::into)
+    let conn = self.connector.connect(addr).await?;
+    let (stream, _) = conn.open_bi().await?;
+    self.connections.lock().await.push(conn);
+    Ok(stream)
   }
 
   async fn accept(&self) -> Result<(Self::Stream, SocketAddr), AnyError> {
-    let (stream, addr) = self.ln.lock().await.accept_bi().await?;
+    let (conn, _) = self.ln.lock().await.accept().await?;
+    let (stream, addr) = conn.open_bi().await?;
+    self.connections.lock().await.push(conn);
     Ok((stream, addr))
   }
 
@@ -436,6 +453,11 @@ mod s2n_stream_layer {
 
   pub async fn s2n_stream_layer<R: Runtime>() -> S2n<R> {
     let p = std::env::current_dir().unwrap().join("tests");
-    S2n::new(Options::new(p.join("cert.pem"), p.join("key.pem"))).unwrap()
+    S2n::new(Options::new(
+      "localhost".into(),
+      p.join("cert.pem"),
+      p.join("key.pem"),
+    ))
+    .unwrap()
   }
 }

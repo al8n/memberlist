@@ -125,7 +125,6 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
-
   let source_addr = client.local_addr();
 
   // Encode a ping
@@ -773,7 +772,6 @@ where
   assert_eq!(m2.num_members().await, 2);
   assert_eq!(m2.estimate_num_nodes(), 2);
 
-  
   m2.send(m1.advertise_addr(), Bytes::from_static(b"send"))
     .await
     .map_err(|e| {
