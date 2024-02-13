@@ -14,7 +14,7 @@ where
   let name = format!("{kind}_server_with_label_with_encryption_client_with_label_with_encryption");
   let label = Label::try_from(&name)?;
   let pk = SecretKey::from([1; 32]);
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_receive_encrypted(Some(pk))
     .with_label(label.cheap_clone())
@@ -48,7 +48,7 @@ where
   let name = format!("{kind}_server_with_label_with_encryption_client_with_label_no_encryption");
   let label = Label::try_from(&name)?;
   let pk = SecretKey::from([1; 32]);
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_send_label(true)
     .with_label(label.cheap_clone())
@@ -81,7 +81,7 @@ where
   let name = format!("{kind}_server_with_label_no_encryption_client_with_label_with_encryption");
   let label = Label::try_from(&name)?;
   let pk = SecretKey::from([1; 32]);
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_send_encrypted(Some((EncryptionAlgo::PKCS7, pk)))
     .with_receive_verify_label(true)

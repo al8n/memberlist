@@ -8,7 +8,7 @@ use super::*;
 #[cfg(all(feature = "encryption", feature = "compression"))]
 pub async fn promised_ping<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -38,7 +38,7 @@ where
 #[cfg(all(feature = "encryption", feature = "compression"))]
 pub async fn promised_ping_no_label<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -66,7 +66,7 @@ where
 #[cfg(feature = "compression")]
 pub async fn promised_ping_compression_only<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -89,7 +89,7 @@ where
 #[cfg(feature = "compression")]
 pub async fn promised_ping_label_and_compression<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -115,7 +115,7 @@ where
 #[cfg(feature = "encryption")]
 pub async fn promised_ping_encryption_only<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -142,7 +142,7 @@ where
 #[cfg(feature = "encryption")]
 pub async fn promised_ping_label_and_encryption<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -170,7 +170,7 @@ where
 
 pub async fn promised_ping_no_label_no_compression_no_encryption<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -192,7 +192,7 @@ where
 
 pub async fn promised_ping_label_only<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where

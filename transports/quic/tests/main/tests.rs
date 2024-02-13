@@ -17,3 +17,9 @@ mod send;
 
 #[path = "tests/join.rs"]
 mod join;
+
+#[path = "tests/promised_ping.rs"]
+mod promised_ping;
+
+#[path = "tests/promised_push_pull.rs"]
+mod promised_push_pull;

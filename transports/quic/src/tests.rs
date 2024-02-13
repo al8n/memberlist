@@ -1,7 +1,7 @@
 #![allow(missing_docs, warnings)]
 
 use core::panic;
-use std::{future::Future, net::SocketAddr};
+use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use agnostic::{
   net::{Net, UdpSocket},
@@ -9,7 +9,7 @@ use agnostic::{
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::{FutureExt, Stream};
+use futures::{lock::Mutex, FutureExt, Stream};
 use memberlist_core::{
   tests::AnyError,
   transport::{
@@ -49,13 +49,13 @@ pub mod handle_ping_wrong_node;
 #[cfg(feature = "compression")]
 pub mod packet_piggyback;
 
-// /// Unit test for handling promised ping
-// #[cfg(all(feature = "compression", feature = "encryption"))]
-// pub mod promised_ping;
+/// Unit test for handling promised ping
+#[cfg(feature = "compression")]
+pub mod promised_ping;
 
-// /// Unit test for handling promised push pull
-// #[cfg(all(feature = "compression", feature = "encryption"))]
-// pub mod promised_push_pull;
+/// Unit test for handling promised push pull
+#[cfg(feature = "compression")]
+pub mod promised_push_pull;
 
 /// Unit test for sending
 #[cfg(feature = "compression")]
@@ -253,7 +253,8 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
   setters(vis_all = "pub", prefix = "with")
 )]
 pub struct QuicTransportTestPromisedClient<S: StreamLayer> {
-  ln: S::Acceptor,
+  ln: Arc<Mutex<S::Acceptor>>,
+  local_addr: SocketAddr,
   connector: S::Connector,
   layer: S,
 }
@@ -261,10 +262,12 @@ pub struct QuicTransportTestPromisedClient<S: StreamLayer> {
 impl<S: StreamLayer> QuicTransportTestPromisedClient<S> {
   /// Creates a new test client with the given address
   pub fn new(layer: S, ln: S::Acceptor, connector: S::Connector) -> Self {
+    let local_addr = ln.local_addr();
     Self {
       layer,
-      ln,
+      ln: Arc::new(Mutex::new(ln)),
       connector,
+      local_addr,
     }
   }
 }
@@ -277,13 +280,24 @@ impl<S: StreamLayer> TestPromisedClient for QuicTransportTestPromisedClient<S> {
   }
 
   async fn accept(&self) -> Result<(Self::Stream, SocketAddr), AnyError> {
-    // let (stream, addr) = self.ln.accept_bi().await?;
-    // Ok((stream, addr))
-    todo!()
+    let (stream, addr) = self.ln.lock().await.accept_bi().await?;
+    Ok((stream, addr))
+  }
+
+  async fn cache_stream(&self, _: SocketAddr, mut stream: Self::Stream) -> Result<(), AnyError> {
+    stream.finish().await.map_err(Into::into)
+  }
+
+  async fn flush_stream(&self, stream: &mut Self::Stream) -> Result<(), AnyError> {
+    stream.flush().await.map_err(Into::into)
+  }
+
+  async fn close(&self) -> Result<(), AnyError> {
+    self.ln.lock().await.close().await.map_err(Into::into)
   }
 
   fn local_addr(&self) -> std::io::Result<SocketAddr> {
-    Ok(self.ln.local_addr())
+    Ok(self.local_addr)
   }
 }
 

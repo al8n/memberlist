@@ -84,6 +84,11 @@ pub trait QuicStream: TimeoutableStream + futures::AsyncRead + Send + Sync + 'st
   /// Peek exact data from the remote peer.
   fn peek_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
+  /// Shut down the send stream gracefully.
+  ///
+  /// No new data may be written after calling this method. Completes when the peer has acknowledged all sent data, retransmitting data as needed.
+  fn finish(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
   /// Closes the stream.
   fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
@@ -139,6 +144,9 @@ pub trait QuicAcceptor: Send + Sync + 'static {
   fn accept_bi(
     &mut self,
   ) -> impl Future<Output = Result<(Self::BiStream, SocketAddr), Self::Error>> + Send;
+
+  /// Close the acceptor.
+  fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Returns the local address.
   fn local_addr(&self) -> SocketAddr;

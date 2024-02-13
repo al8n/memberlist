@@ -27,3 +27,9 @@ mod send;
 
 #[path = "tokio/join.rs"]
 mod join;
+
+#[path = "tokio/promised_ping.rs"]
+mod promised_ping;
+
+#[path = "tokio/promised_push_pull.rs"]
+mod promised_push_pull;

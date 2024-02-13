@@ -76,7 +76,7 @@ pub mod join;
   getters(vis_all = "pub", style = "ref"),
   setters(vis_all = "pub", prefix = "with")
 )]
-pub struct NetTransporTestClient<R: Runtime> {
+pub struct NetTransportTestClient<R: Runtime> {
   #[viewit(getter(skip), setter(skip))]
   socket: <R::Net as Net>::UdpSocket,
   #[viewit(getter(skip), setter(skip))]
@@ -91,7 +91,7 @@ pub struct NetTransporTestClient<R: Runtime> {
   receive_encrypted: Option<SecretKey>,
 }
 
-impl<R: Runtime> NetTransporTestClient<R> {
+impl<R: Runtime> NetTransportTestClient<R> {
   /// Creates a new test client with the given address
   pub async fn new(addr: SocketAddr) -> Result<Self, AnyError> {
     let socket = <<R::Net as Net>::UdpSocket as UdpSocket>::bind(addr).await?;
@@ -110,7 +110,7 @@ impl<R: Runtime> NetTransporTestClient<R> {
   }
 }
 
-impl<R: Runtime> TestPacketClient for NetTransporTestClient<R> {
+impl<R: Runtime> TestPacketClient for NetTransportTestClient<R> {
   async fn send_to(&mut self, addr: &SocketAddr, src: &[u8]) -> Result<(), AnyError> {
     let mut out = BytesMut::new();
     if self.send_label {
@@ -199,19 +199,19 @@ impl<R: Runtime> TestPacketClient for NetTransporTestClient<R> {
   getters(vis_all = "pub", style = "ref"),
   setters(vis_all = "pub", prefix = "with")
 )]
-pub struct NetTransporTestPromisedClient<S: StreamLayer> {
+pub struct NetTransportTestPromisedClient<S: StreamLayer> {
   ln: S::Listener,
   layer: S,
 }
 
-impl<S: StreamLayer> NetTransporTestPromisedClient<S> {
+impl<S: StreamLayer> NetTransportTestPromisedClient<S> {
   /// Creates a new test client with the given address
   pub fn new(layer: S, ln: S::Listener) -> Self {
     Self { layer, ln }
   }
 }
 
-impl<S: StreamLayer> TestPromisedClient for NetTransporTestPromisedClient<S> {
+impl<S: StreamLayer> TestPromisedClient for NetTransportTestPromisedClient<S> {
   type Stream = S::Stream;
 
   async fn connect(&self, addr: SocketAddr) -> Result<Self::Stream, AnyError> {
@@ -221,6 +221,18 @@ impl<S: StreamLayer> TestPromisedClient for NetTransporTestPromisedClient<S> {
   async fn accept(&self) -> Result<(Self::Stream, SocketAddr), AnyError> {
     let (stream, addr) = self.ln.accept().await?;
     Ok((stream, addr))
+  }
+
+  async fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) -> Result<(), AnyError> {
+    Ok(())
+  }
+
+  async fn flush_stream(&self, _stream: &mut Self::Stream) -> Result<(), AnyError> {
+    Ok(())
+  }
+
+  async fn close(&self) -> Result<(), AnyError> {
+    Ok(())
   }
 
   fn local_addr(&self) -> std::io::Result<SocketAddr> {

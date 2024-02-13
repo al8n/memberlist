@@ -13,7 +13,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_receive_compressed(true);
   let mut opts = NetTransportOptions::new(format!("{kind}_ping_server_with_label_with_compression_no_encryption_client_with_label_no_compression_no_encryption").into())
@@ -39,7 +39,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_send_compressed(Some(Compressor::default()));
   let mut opts = NetTransportOptions::new(format!("{kind}_ping_server_with_label_no_compression_no_encryption_client_with_label_with_compression_no_encryption").into());
@@ -64,7 +64,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_send_compressed(Some(Compressor::default()))
     .with_receive_compressed(true);

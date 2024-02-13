@@ -134,6 +134,11 @@ impl<R: Runtime> QuicAcceptor for QuinnAcceptor<R> {
       .map_err(Into::into)
   }
 
+  async fn close(&mut self) -> Result<(), Self::Error> {
+    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close acceptor");
+    Ok(())
+  }
+
   fn local_addr(&self) -> SocketAddr {
     self.local_addr
   }
@@ -396,6 +401,18 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
       .flush()
       .await
       .map_err(|e| QuinnError::Write(e.into()))
+  }
+
+  async fn finish(&mut self) -> Result<(), Self::Error> {
+    let fut = async { self.send.finish().await.map(|_| ()).map_err(Into::into) };
+
+    match self.write_timeout {
+      Some(timeout) => R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::write_timeout())?,
+      None => fut.await.map_err(Into::into),
+    }
+    // self.send.stopped().await.map(|_| ()).map_err(Into::into)
   }
 
   async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {

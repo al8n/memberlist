@@ -143,6 +143,10 @@ impl<R: Runtime> QuicAcceptor for S2nBiAcceptor<R> {
       })
   }
 
+  async fn close(&mut self) -> Result<(), Self::Error> {
+    Ok(())
+  }
+
   fn local_addr(&self) -> SocketAddr {
     self.local_addr
   }
@@ -276,6 +280,17 @@ impl<R: Runtime> QuicStream for S2nBiStream<R> {
 
   async fn flush(&mut self) -> Result<(), Self::Error> {
     self.send_stream.flush().await.map_err(Into::into)
+  }
+
+  async fn finish(&mut self) -> Result<(), Self::Error> {
+    let fut = async { self.send_stream.flush().await.map_err(Into::into) };
+
+    match self.write_timeout {
+      Some(timeout) => R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
+      None => fut.await.map_err(Into::into),
+    }
   }
 
   async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {

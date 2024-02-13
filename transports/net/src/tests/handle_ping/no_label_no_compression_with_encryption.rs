@@ -14,7 +14,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let pk = SecretKey::from([1; 32]);
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_receive_encrypted(Some(pk));
 
@@ -44,7 +44,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let pk = SecretKey::from([1; 32]);
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_send_encrypted(Some((EncryptionAlgo::PKCS7, pk)));
 
@@ -74,7 +74,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let pk = SecretKey::from([1; 32]);
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_send_encrypted(Some((EncryptionAlgo::PKCS7, pk)))
     .with_receive_encrypted(Some(pk));

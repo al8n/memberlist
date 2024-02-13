@@ -39,7 +39,6 @@ where
 
     let ping_seq_no = ping.seq_no;
     self.send_message(&mut conn, ping.into()).await?;
-
     let msg: Message<_, _> = self
       .read_message(target, &mut conn)
       .await

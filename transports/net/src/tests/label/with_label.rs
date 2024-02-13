@@ -12,7 +12,7 @@ where
 {
   let name = format!("{kind}_server_with_label_client_with_label");
   let label = Label::try_from(&name)?;
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_label(label.cheap_clone())
     .with_send_label(true)
@@ -39,7 +39,7 @@ where
 {
   let name = format!("{kind}_server_with_label_client_no_label");
   let label = Label::try_from(&name)?;
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_label(label.cheap_clone())
     .with_receive_verify_label(true);
@@ -67,7 +67,7 @@ where
 {
   let name = format!("{kind}_server_no_label_client_with_label");
   let label = Label::try_from(&name)?;
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_label(label.cheap_clone())
     .with_send_label(true);

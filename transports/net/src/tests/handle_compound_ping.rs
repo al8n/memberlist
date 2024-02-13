@@ -15,7 +15,7 @@ where
   let name = format!("{kind}_compound_ping");
   let label = Label::try_from(&name)?;
   let pk = SecretKey::from([1; 32]);
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_label(label.cheap_clone())
     .with_send_label(true)

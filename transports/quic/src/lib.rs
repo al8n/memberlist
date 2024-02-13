@@ -50,8 +50,9 @@ pub use error::*;
 mod io;
 mod options;
 pub use options::*;
-mod stream_layer;
-pub use stream_layer::*;
+/// Abstract the [`StremLayer`](crate::stream_layer::StreamLayer) for [`QuicTransport`](crate::QuicTransport).
+pub mod stream_layer;
+use stream_layer::*;
 
 const MAX_MESSAGE_LEN_SIZE: usize = core::mem::size_of::<u32>();
 const MAX_MESSAGE_SIZE: usize = u32::MAX as usize;
@@ -571,11 +572,9 @@ where
     _addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     mut stream: Self::Stream,
   ) -> Result<(), Self::Error> {
-    // Cache QUIC stream make no sense, so just return
-    // <A::Runtime as Runtime>::sleep(Duration::from_secs(10)).await;
-    // drop(stream);
+    // Cache QUIC stream make no sense, so just wait all data have been sent to the client and return
     stream
-      .close()
+      .finish()
       .await
       .map_err(|e| Self::Error::Stream(e.into()))?;
     Ok(())

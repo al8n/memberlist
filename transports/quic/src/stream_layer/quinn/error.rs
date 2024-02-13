@@ -14,6 +14,10 @@ pub enum QuinnError {
   /// Write error.
   #[error(transparent)]
   Write(#[from] QuinnWriteStreamError),
+
+  /// Stopped error.
+  #[error(transparent)]
+  Stopped(#[from] quinn::StoppedError),
 }
 
 impl QuinnError {
@@ -75,6 +79,7 @@ impl QuicError for QuinnError {
       Self::Connection(err) => err.is_remote_failure(),
       Self::Read(err) => err.is_remote_failure(),
       Self::Write(err) => err.is_remote_failure(),
+      Self::Stopped(_) => true,
     }
   }
 }

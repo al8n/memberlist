@@ -1,3 +1,5 @@
+#![allow(clippy::blocks_in_conditions)]
+
 use std::{
   future::Future,
   net::SocketAddr,
@@ -94,6 +96,22 @@ pub trait TestPromisedClient: Sized + Send + Sync + 'static {
 
   /// Local address of the client
   fn local_addr(&self) -> std::io::Result<SocketAddr>;
+
+  /// Flush the stream
+  fn flush_stream(
+    &self,
+    stream: &mut Self::Stream,
+  ) -> impl Future<Output = Result<(), AnyError>> + Send;
+
+  /// Cache the stream
+  fn cache_stream(
+    &self,
+    addr: SocketAddr,
+    stream: Self::Stream,
+  ) -> impl Future<Output = Result<(), AnyError>> + Send;
+
+  /// Close the client
+  fn close(&self) -> impl Future<Output = Result<(), AnyError>> + Send;
 }
 
 /// Unit test for handling [`Ping`] message
@@ -585,6 +603,7 @@ where
 
   // Make sure failed I/O respects the deadline. In this case we try the
   // common case of the receiving node being totally down.
+  promised.close().await?;
   drop(promised);
   let start_ping = Instant::now();
   let did_contact = m
@@ -678,7 +697,6 @@ where
     .transport
     .send_message(&mut conn, push_pull.into())
     .await?;
-
   // Read the message type
   let (_, msg) = m
     .inner
@@ -755,11 +773,20 @@ where
   assert_eq!(m2.num_members().await, 2);
   assert_eq!(m2.estimate_num_nodes(), 2);
 
+  
   m2.send(m1.advertise_addr(), Bytes::from_static(b"send"))
-    .await?;
+    .await
+    .map_err(|e| {
+      tracing::error!("fail to send packet");
+      e
+    })?;
 
   m2.send_reliable(m1.advertise_addr(), Bytes::from_static(b"send_reliable"))
-    .await?;
+    .await
+    .map_err(|e| {
+      tracing::error!("fail to send message {e}");
+      e
+    })?;
 
   R::sleep(WAIT_DURATION).await;
 

@@ -15,7 +15,7 @@ where
 {
   let name = format!("{kind}_ping_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption");
   let label = Label::try_from(&name)?;
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_label(label.cheap_clone())
     .with_send_label(true)
@@ -47,7 +47,7 @@ where
     "{kind}_ping_server_with_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption"
   );
   let label = Label::try_from(&name)?;
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_label(label.cheap_clone())
     .with_receive_verify_label(true);
@@ -80,7 +80,7 @@ where
     "{kind}_ping_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption"
   );
   let label = Label::try_from(&name)?;
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_label(label.cheap_clone())
     .with_send_label(true);
