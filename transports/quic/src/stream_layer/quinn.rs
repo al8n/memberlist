@@ -403,12 +403,6 @@ impl<R> QuinnConnection<R> {
     remote_addr: SocketAddr,
     max_open_streams: usize,
   ) -> Self {
-    tracing::debug!(
-      target = "memberlist.transports.quic.connection",
-      "connection {} to {} established",
-      conn.stable_id(),
-      remote_addr,
-    );
     Self {
       conn,
       local_addr,
@@ -480,17 +474,5 @@ impl<R: Runtime> QuicConnection for QuinnConnection<R> {
 
   fn is_full(&self) -> bool {
     self.current_opening_streams.load(Ordering::Acquire) >= self.max_open_streams
-  }
-}
-
-#[cfg(any(test, feature = "test"))]
-impl<R> Drop for QuinnConnection<R> {
-  fn drop(&mut self) {
-    tracing::debug!(
-      target = "memberlist.transports.quic.connection",
-      "connection {} to {} dropped",
-      self.conn.stable_id(),
-      self.remote_addr,
-    );
   }
 }

@@ -122,6 +122,8 @@ pub mod tests {
     let _mu = ACCESS_LOCK.lock();
     initialize_tests_tracing();
     block_on(fut);
+    // Delay for 1 second to start next test
+    std::thread::sleep(std::time::Duration::from_secs(1));
   }
 
   pub fn initialize_tests_tracing() {
