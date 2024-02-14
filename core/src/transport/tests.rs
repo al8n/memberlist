@@ -1,5 +1,4 @@
 #![allow(clippy::blocks_in_conditions)]
-
 use std::{
   future::Future,
   net::SocketAddr,
@@ -62,17 +61,38 @@ impl AddressKind {
   }
 }
 
-/// The client used to send/receive data to a transport
-pub trait TestPacketClient: Sized + Send + Sync + 'static {
+pub trait TestPacketStream: Send + Sync + 'static {
   /// Send all data to the transport
-  fn send_to(
-    &mut self,
-    addr: &SocketAddr,
-    data: &[u8],
-  ) -> impl Future<Output = Result<(), AnyError>> + Send;
+  fn send_to(&mut self, data: &[u8]) -> impl Future<Output = Result<(), AnyError>> + Send;
 
   /// Receive data from the transport
   fn recv_from(&mut self) -> impl Future<Output = Result<(Bytes, SocketAddr), AnyError>> + Send;
+
+  /// Finish the stream
+  fn finish(&mut self) -> impl Future<Output = Result<(), AnyError>> + Send;
+}
+
+pub trait TestPacketConnection: Send + Sync + 'static {
+  type Stream: TestPacketStream;
+
+  fn accept(&self) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
+
+  fn connect(&self) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
+
+  fn is_closed(&self) -> impl Future<Output = bool> + Send;
+}
+
+/// The client used to send/receive data to a transport
+pub trait TestPacketClient: Sized + Send + Sync + 'static {
+  type Connection: TestPacketConnection;
+  /// Accept from remote
+  fn accept(&mut self) -> impl Future<Output = Result<Self::Connection, AnyError>> + Send;
+
+  /// Connect to the remote address
+  fn connect(
+    &self,
+    addr: SocketAddr,
+  ) -> impl Future<Output = Result<Self::Connection, AnyError>> + Send;
 
   /// Local address of the client
   fn local_addr(&self) -> SocketAddr;
@@ -81,18 +101,35 @@ pub trait TestPacketClient: Sized + Send + Sync + 'static {
   fn close(&mut self) -> impl Future<Output = ()> + Send;
 }
 
+pub trait TestPromisedStream: Send + Sync + 'static {
+  fn finish(&mut self) -> impl Future<Output = Result<(), AnyError>> + Send;
+}
+
+pub trait TestPromisedConnection: Send + Sync + 'static {
+  type Stream: TestPromisedStream;
+
+  fn accept(&self) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
+
+  fn connect(&self) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
+
+  /// is closed or not
+  fn is_closed(&self) -> impl Future<Output = bool> + Send;
+}
+
 /// The client used to send/receive data to a transport
 pub trait TestPromisedClient: Sized + Send + Sync + 'static {
-  type Stream: Send + Sync + 'static;
+  type Stream: TestPromisedStream;
+  type Connection: TestPromisedConnection<Stream = Self::Stream>;
 
   /// Connect to the remote address
   fn connect(
     &self,
     addr: SocketAddr,
-  ) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
+  ) -> impl Future<Output = Result<Self::Connection, AnyError>> + Send;
 
   /// Accept a connection from the remote
-  fn accept(&self) -> impl Future<Output = Result<(Self::Stream, SocketAddr), AnyError>> + Send;
+  fn accept(&self)
+    -> impl Future<Output = Result<(Self::Connection, SocketAddr), AnyError>> + Send;
 
   /// Local address of the client
   fn local_addr(&self) -> std::io::Result<SocketAddr>;
@@ -125,7 +162,6 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
-
   let source_addr = client.local_addr();
 
   // Encode a ping
@@ -137,7 +173,9 @@ where
 
   let buf = Message::from(ping).encode_to_vec()?;
   // Send
-  client.send_to(m.advertise_addr(), &buf).await?;
+  let connection = client.connect(*m.advertise_addr()).await?;
+  let mut send_stream = connection.connect().await?;
+  send_stream.send_to(&buf).await?;
 
   // Wait for response
   let (tx, rx) = async_channel::bounded(1);
@@ -151,7 +189,10 @@ where
     }
   });
 
-  let (in_, _) = R::timeout(WAIT_DURATION, client.recv_from())
+  let connection = client.accept().await?;
+  let mut recv_stream = connection.accept().await?;
+
+  let (in_, _) = R::timeout(WAIT_DURATION, recv_stream.recv_from())
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
@@ -204,7 +245,9 @@ where
   let buf = encoder(&msgs)?;
 
   // Send
-  client.send_to(m.advertise_addr(), &buf).await.unwrap();
+  let connection = client.connect(*m.advertise_addr()).await?;
+  let mut send_stream = connection.connect().await?;
+  send_stream.send_to(&buf).await?;
 
   // Wait for response
   let (tx, rx) = async_channel::bounded(1);
@@ -218,15 +261,17 @@ where
     }
   });
 
+  let connection = client.accept().await?;
   for _ in 0..3 {
-    let (in_, _) = R::timeout(WAIT_DURATION, client.recv_from())
+    let mut recv_stream = connection.accept().await?;
+    let (in_, _) = R::timeout(WAIT_DURATION, recv_stream.recv_from())
       .await
       .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
     let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
     assert_eq!(ack.seq_no, 42, "bad sequence no: {}", ack.seq_no);
   }
 
-  futures::select! {
+  let res = futures::select! {
     res = tx.send(()).fuse() => {
       if res.is_err() {
         Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout").into())
@@ -234,7 +279,11 @@ where
         Ok(())
       }
     }
-  }
+  };
+
+  let _ = m.shutdown().await;
+  client.close().await;
+  res
 }
 
 pub async fn handle_indirect_ping<A, T, C, R>(trans: T, mut client: C) -> Result<(), AnyError>
@@ -258,8 +307,11 @@ where
   };
 
   let buf = Message::from(ping).encode_to_vec()?;
+
   // Send
-  client.send_to(m.advertise_addr(), &buf).await.unwrap();
+  let connection = client.connect(*m.advertise_addr()).await?;
+  let mut send_stream = connection.connect().await?;
+  send_stream.send_to(&buf).await?;
 
   // Wait for response
   let (tx, rx) = async_channel::bounded(1);
@@ -273,12 +325,14 @@ where
     }
   });
 
-  let (in_, _) = R::timeout(WAIT_DURATION, client.recv_from())
+  let connection = client.accept().await?;
+  let mut recv_stream = connection.accept().await?;
+  let (in_, _) = R::timeout(WAIT_DURATION, recv_stream.recv_from())
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
   assert_eq!(ack.seq_no, 100, "bad sequence no: {}", ack.seq_no);
-  futures::select! {
+  let res = futures::select! {
     res = tx.send(()).fuse() => {
       if res.is_err() {
         Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout").into())
@@ -286,7 +340,11 @@ where
         Ok(())
       }
     }
-  }
+  };
+
+  let _ = m.shutdown().await;
+  client.close().await;
+  res
 }
 
 pub async fn handle_ping_wrong_node<A, T, C, R>(trans: T, mut client: C) -> Result<(), AnyError>
@@ -314,10 +372,19 @@ where
 
   let buf = Message::from(ping).encode_to_vec()?;
   // Send
-  client.send_to(m.advertise_addr(), &buf).await?;
+  let connection = client.connect(*m.advertise_addr()).await?;
+  let mut send_stream = connection.connect().await?;
+  send_stream.send_to(&buf).await?;
 
   // Wait for response
-  R::timeout(WAIT_DURATION, client.recv_from()).await??;
+  R::timeout(WAIT_DURATION, async {
+    let connection = client.accept().await?;
+    let mut recv_stream = connection.accept().await?;
+    recv_stream.recv_from().await
+  })
+  .await??;
+  let _ = m.shutdown().await;
+  client.close().await;
   Ok(())
 }
 
@@ -359,7 +426,9 @@ where
 
   let buf = Message::from(ping).encode_to_vec()?;
   // Send
-  client.send_to(m.advertise_addr(), &buf).await?;
+  let connection = client.connect(*m.advertise_addr()).await?;
+  let mut send_stream = connection.connect().await?;
+  send_stream.send_to(&buf).await?;
 
   // Wait for response
   let (tx, rx) = async_channel::bounded(1);
@@ -373,7 +442,9 @@ where
     }
   });
 
-  let (in_, _) = R::timeout(WAIT_DURATION, client.recv_from())
+  let connection = client.accept().await?;
+  let mut recv_stream = connection.accept().await?;
+  let (in_, _) = R::timeout(WAIT_DURATION, recv_stream.recv_from())
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
 
@@ -388,7 +459,7 @@ where
   assert_eq!(alive.incarnation, 10);
   assert_eq!(alive.node, n);
 
-  futures::select! {
+  let res = futures::select! {
     res = tx.send(()).fuse() => {
       if res.is_err() {
         Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout").into())
@@ -396,7 +467,10 @@ where
         Ok(())
       }
     }
-  }
+  };
+  let _ = m.shutdown().await;
+  client.close().await;
+  res
 }
 
 macro_rules! unwrap_ok {
@@ -429,8 +503,9 @@ pub async fn promised_ping<A, T, P, R>(
 ) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  T: Transport<Id = SmolStr, Resolver = A, Stream = P::Stream, Runtime = R>,
+  T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   P: TestPromisedClient,
+  P::Stream: TestPromisedStream + AsMut<T::Stream>,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
@@ -455,36 +530,120 @@ where
   let node1 = node.cheap_clone();
   let p1 = promised.clone();
   let ping_err_tx1 = ping_err_tx.clone();
+  let (tx, rx) = async_channel::bounded(1);
+  let (tx1, rx1) = async_channel::bounded(1);
+  let (tx2, rx2) = async_channel::bounded(1);
+  let (tx3, rx3) = async_channel::bounded(1);
   R::spawn_detach(async move {
-    let (mut stream, addr) = unwrap_ok!(ping_err_tx1.send(unwrap_ok!(ping_err_tx1.send(
+    let mut num_accepted = 0;
+    let (acceptor, addr) = unwrap_ok!(ping_err_tx1.send(unwrap_ok!(ping_err_tx1.send(
       R::timeout(ping_time_max, p1.accept())
         .await
         .map_err(Into::into)
     ))));
+    loop {
+      futures::select! {
+        stream = acceptor.accept().fuse() => {
+          num_accepted += 1;
+          match stream {
+            Ok(mut stream) if num_accepted == 1 => {
+              let (_, p) = unwrap_ok!(ping_err_tx1.send(
+                m1.inner
+                  .transport
+                  .read_message(&addr, stream.as_mut())
+                  .await
+                  .map_err(Into::into)
+              ));
+              let ping_in = p.unwrap_ping();
+              assert_eq!(ping_in.seq_no, 23);
+              assert_eq!(ping_in.target, node1);
 
-    let (_, p) = unwrap_ok!(ping_err_tx1.send(
-      m1.inner
-        .transport
-        .read_message(&addr, &mut stream)
-        .await
-        .map_err(Into::into)
-    ));
-    let ping_in = p.unwrap_ping();
-    assert_eq!(ping_in.seq_no, 23);
-    assert_eq!(ping_in.target, node1);
+              let ack = Ack {
+                seq_no: 23,
+                payload: Bytes::new(),
+              };
 
-    let ack = Ack {
-      seq_no: 23,
-      payload: Bytes::new(),
-    };
+              unwrap_ok!(ping_err_tx1.send(
+                m1.inner
+                  .transport
+                  .send_message(stream.as_mut(), ack.into())
+                  .await
+                  .map_err(Into::into)
+              ));
 
-    unwrap_ok!(ping_err_tx1.send(
-      m1.inner
-        .transport
-        .send_message(&mut stream, ack.into())
-        .await
-        .map_err(Into::into)
-    ));
+              let _ = TestPromisedStream::finish(&mut stream).await;
+              // wait for the next ping
+              let _ = rx1.recv().await;
+            },
+            Ok(mut stream) if num_accepted == 2 => {
+              let (_, p) = unwrap_ok!(ping_err_tx1.send(
+                m1.inner
+                  .transport
+                  .read_message(&addr, stream.as_mut())
+                  .await
+                  .map_err(Into::into)
+              ));
+
+              let ping_in = p.unwrap_ping();
+              let ack = Ack {
+                seq_no: ping_in.seq_no + 1,
+                payload: Bytes::new(),
+              };
+
+              unwrap_ok!(ping_err_tx1.send(
+                m1.inner
+                  .transport
+                  .send_message(stream.as_mut(), ack.into())
+                  .await
+                  .map_err(Into::into)
+              ));
+
+              // wait for the next ping
+              let _ = stream.finish().await;
+              let _ = rx2.recv().await;
+            },
+            Ok(mut stream) if num_accepted == 3 => {
+              let _ = unwrap_ok!(ping_err_tx1.send(
+                m1.inner
+                  .transport
+                  .read_message(&addr, stream.as_mut())
+                  .await
+                  .map_err(Into::into)
+              ));
+
+              unwrap_ok!(ping_err_tx1.send(
+                m1.inner
+                  .transport
+                  .send_message(
+                    stream.as_mut(),
+                    IndirectPing {
+                      seq_no: 0,
+                      source: Node::new("unknown source".into(), kind.next()),
+                      target: Node::new("unknown target".into(), kind.next()),
+                    }
+                    .into()
+                  )
+                  .await
+                  .map_err(Into::into)
+              ));
+
+              let _ = stream.finish().await;
+              // wait for the next ping
+              let _ = rx3.recv().await;
+            }
+            Ok(_) => {
+              let _ = rx.recv().await;
+            },
+            Err(e) => {
+              let _ = ping_err_tx1.send(e).await;
+            }
+          }
+        }
+        _ = rx.recv().fuse() => {
+          return;
+        }
+      }
+    }
   });
 
   let did_contact = panic_on_err!(
@@ -499,41 +658,9 @@ where
   if !ping_err_rx.is_empty() {
     return Err(ping_err_rx.recv().await.unwrap());
   }
+  let _ = tx1.send(()).await;
 
   // Make sure a mis-matched sequence number is caught.
-  let p2 = promised.clone();
-  let m2 = m.clone();
-  let ping_err_tx2 = ping_err_tx.clone();
-  R::spawn_detach(async move {
-    let (mut stream, addr) = unwrap_ok!(ping_err_tx2.send(unwrap_ok!(ping_err_tx2.send(
-      R::timeout(ping_time_max, p2.accept())
-        .await
-        .map_err(Into::into)
-    ))));
-
-    let (_, p) = unwrap_ok!(ping_err_tx2.send(
-      m2.inner
-        .transport
-        .read_message(&addr, &mut stream)
-        .await
-        .map_err(Into::into)
-    ));
-
-    let ping_in = p.unwrap_ping();
-    let ack = Ack {
-      seq_no: ping_in.seq_no + 1,
-      payload: Bytes::new(),
-    };
-
-    unwrap_ok!(ping_err_tx2.send(
-      m2.inner
-        .transport
-        .send_message(&mut stream, ack.into())
-        .await
-        .map_err(Into::into)
-    ));
-  });
-
   let err = m
     .send_ping_and_wait_for_ack(&promised_addr, ping_out.clone(), ping_timeout)
     .await
@@ -548,43 +675,9 @@ where
   if !ping_err_rx.is_empty() {
     panic!("{}", ping_err_rx.recv().await.unwrap());
   }
+  let _ = tx2.send(()).await;
 
   // Make sure an unexpected message type is handled gracefully.
-  let p3 = promised.clone();
-  let m3 = m.clone();
-  let ping_err_tx3 = ping_err_tx.clone();
-  R::spawn_detach(async move {
-    let (mut stream, addr) = unwrap_ok!(ping_err_tx3.send(unwrap_ok!(ping_err_tx3.send(
-      R::timeout(ping_time_max, p3.accept())
-        .await
-        .map_err(Into::into)
-    ))));
-
-    let _ = unwrap_ok!(ping_err_tx3.send(
-      m3.inner
-        .transport
-        .read_message(&addr, &mut stream)
-        .await
-        .map_err(Into::into)
-    ));
-
-    unwrap_ok!(ping_err_tx3.send(
-      m3.inner
-        .transport
-        .send_message(
-          &mut stream,
-          IndirectPing {
-            seq_no: 0,
-            source: Node::new("unknown source".into(), kind.next()),
-            target: Node::new("unknown target".into(), kind.next()),
-          }
-          .into()
-        )
-        .await
-        .map_err(Into::into)
-    ));
-  });
-
   let err = m
     .send_ping_and_wait_for_ack(&promised_addr, ping_out.clone(), ping_timeout)
     .await
@@ -600,11 +693,17 @@ where
   if !ping_err_rx.is_empty() {
     panic!("{}", ping_err_rx.recv().await.unwrap());
   }
+  let _ = tx3.send(()).await;
+  let _ = tx.send(()).await;
 
   // Make sure failed I/O respects the deadline. In this case we try the
   // common case of the receiving node being totally down.
-  promised.close().await?;
+  let _ = promised.close().await;
   drop(promised);
+
+  // Wait the listener task fully exit.
+  R::sleep(Duration::from_secs(1)).await;
+
   let start_ping = Instant::now();
   let did_contact = m
     .send_ping_and_wait_for_ack(&promised_addr, ping_out, ping_timeout)
@@ -616,14 +715,16 @@ where
     "elapsed: {:?}, take too long to fail ping",
     elapsed
   );
+  let _ = m.shutdown().await;
   Ok(())
 }
 
 pub async fn promised_push_pull<A, T, P, R>(trans: T, promised: P) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  T: Transport<Id = SmolStr, Resolver = A, Stream = P::Stream, Runtime = R>,
+  T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   P: TestPromisedClient,
+  P::Stream: TestPromisedStream + AsMut<T::Stream>,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
@@ -652,7 +753,7 @@ where
     members.node_map.insert(id0.cheap_clone(), 0);
   }
 
-  let mut conn = promised.connect(bind_addr).await?;
+  let connector = promised.connect(bind_addr).await?;
 
   let push_pull = PushPull {
     join: false,
@@ -693,15 +794,16 @@ where
   };
 
   // Send the push/pull indicator
+  let mut conn = connector.connect().await?;
   m.inner
     .transport
-    .send_message(&mut conn, push_pull.into())
+    .send_message(conn.as_mut(), push_pull.into())
     .await?;
   // Read the message type
   let (_, msg) = m
     .inner
     .transport
-    .read_message(&bind_addr, &mut conn)
+    .read_message(&bind_addr, conn.as_mut())
     .await?;
   let readed_push_pull = msg.unwrap_push_pull();
   assert!(!readed_push_pull.join);
@@ -713,6 +815,7 @@ where
     ServerState::Suspect,
     "bad state"
   );
+  m.shutdown().await?;
   Ok(())
 }
 
@@ -773,7 +876,6 @@ where
   assert_eq!(m2.num_members().await, 2);
   assert_eq!(m2.estimate_num_nodes(), 2);
 
-  
   m2.send(m1.advertise_addr(), Bytes::from_static(b"send"))
     .await
     .map_err(|e| {
@@ -793,5 +895,7 @@ where
   let mut msgs1 = m1.delegate().unwrap().get_messages().await;
   msgs1.sort();
   assert_eq!(msgs1, ["send".as_bytes(), "send_reliable".as_bytes()]);
+  m1.shutdown().await?;
+  m2.shutdown().await?;
   Ok(())
 }

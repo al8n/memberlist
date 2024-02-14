@@ -3,29 +3,26 @@
 use core::panic;
 use std::{future::Future, net::SocketAddr, sync::Arc};
 
-use agnostic::{
-  net::{Net, UdpSocket},
-  Runtime,
-};
+use agnostic::Runtime;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{lock::Mutex, FutureExt, Stream};
 use memberlist_core::{
   tests::AnyError,
   transport::{
-    tests::{AddressKind, TestPacketClient, TestPromisedClient},
+    tests::{
+      AddressKind, TestPacketClient, TestPacketConnection, TestPacketStream, TestPromisedClient,
+      TestPromisedConnection, TestPromisedStream,
+    },
     Transport,
   },
   types::Message,
 };
 use memberlist_utils::{Label, LabelBufMutExt};
-use nodecraft::Transformable;
+use nodecraft::{CheapClone, Transformable};
 use smol_str::SmolStr;
 
-use crate::{
-  QuicAcceptor, QuicConnector, QuicReadStream, QuicStream, QuicUniAcceptor, QuicWriteStream,
-  StreamLayer,
-};
+use crate::{QuicAcceptor, QuicConnection, QuicConnector, QuicStream, StreamLayer};
 
 #[cfg(feature = "compression")]
 use crate::compressor::Compressor;
@@ -65,24 +62,9 @@ pub mod send;
 #[cfg(feature = "compression")]
 pub mod join;
 
-/// A test client for network transport
-#[viewit::viewit(
-  vis_all = "",
-  getters(vis_all = "pub", style = "ref"),
-  setters(vis_all = "pub", prefix = "with")
-)]
-pub struct QuicTransportTestClient<S: StreamLayer, R: Runtime> {
-  #[viewit(getter(skip), setter(skip))]
-  connector: Option<S::Connector>,
-  #[viewit(getter(skip), setter(skip))]
-  recv_stream_rx: async_channel::Receiver<(S::Stream, SocketAddr)>,
-  #[viewit(getter(skip), setter(skip))]
-  local_addr: SocketAddr,
-  #[viewit(getter(skip), setter(skip))]
-  remote_addr: SocketAddr,
-  #[viewit(getter(skip), setter(skip))]
-  shutdown_tx: async_channel::Sender<()>,
-
+pub struct QuicTestPacketStream<S: StreamLayer> {
+  stream: S::Stream,
+  addr: SocketAddr,
   label: Label,
   send_label: bool,
   #[cfg(feature = "compression")]
@@ -90,78 +72,10 @@ pub struct QuicTransportTestClient<S: StreamLayer, R: Runtime> {
   receive_verify_label: bool,
   #[cfg(feature = "compression")]
   receive_compressed: bool,
-  _runtime: std::marker::PhantomData<R>,
 }
 
-impl<S: StreamLayer, R: Runtime> QuicTransportTestClient<S, R> {
-  /// Creates a new test client with the given address
-  pub async fn new(
-    local_addr: SocketAddr,
-    remote_addr: SocketAddr,
-    layer: S,
-  ) -> Result<Self, AnyError> {
-    Self::with_num_responses(local_addr, remote_addr, layer, 1).await
-  }
-
-  /// Creates a new test client with the given address
-  pub async fn with_num_responses(
-    local_addr: SocketAddr,
-    remote_addr: SocketAddr,
-    layer: S,
-    num_resps: usize,
-  ) -> Result<Self, AnyError> {
-    let (local_addr, mut acceptor, client) = layer.bind(local_addr).await?;
-    let (tx, rx) = async_channel::bounded(1);
-    let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
-    tracing::info!("client listener started at {:?}", local_addr);
-    R::spawn_detach(async move {
-      let mut num_accepted = 0;
-      #[allow(clippy::never_loop)]
-      loop {
-        futures::select! {
-          res = acceptor.accept_bi().fuse() => {
-            let (stream, addr) = res
-              .expect("failed to accept response stream");
-            tx.send((stream, addr))
-              .await
-              .expect("failed to send response stream");
-            num_accepted += 1;
-            if num_accepted == num_resps {
-              tracing::info!("accepted all responses, client listener shutdown");
-              return;
-            }
-          }
-          _ = shutdown_rx.recv().fuse() => {
-            if num_accepted == num_resps {
-              tracing::info!("receive shutdown signal, client listener shutdown");
-              return;
-            }
-            panic!("unexpected shutdown");
-          }
-        }
-      }
-    });
-
-    Ok(Self {
-      local_addr,
-      remote_addr,
-      connector: Some(client),
-      recv_stream_rx: rx,
-      shutdown_tx,
-      label: Label::empty(),
-      send_label: false,
-      #[cfg(feature = "compression")]
-      send_compressed: None,
-      receive_verify_label: false,
-      #[cfg(feature = "compression")]
-      receive_compressed: false,
-      _runtime: std::marker::PhantomData,
-    })
-  }
-}
-
-impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S, R> {
-  async fn send_to(&mut self, _addr: &SocketAddr, src: &[u8]) -> Result<(), AnyError> {
+impl<S: StreamLayer> TestPacketStream for QuicTestPacketStream<S> {
+  async fn send_to(&mut self, src: &[u8]) -> Result<(), AnyError> {
     let mut out = BytesMut::new();
     out.put_u8(1);
     if self.send_label {
@@ -187,18 +101,15 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
     data.put_slice(src);
 
     out.put_slice(&data);
-    let mut client = self.connector.take().expect("connector is not set");
-    let mut stream = client.open_bi(self.remote_addr).await?;
-    tracing::info!(remote = %self.remote_addr, "client send {:?}", out.as_ref());
+    let stream = &mut self.stream;
     stream.write_all(out.freeze()).await?;
     stream.close().await?;
     Ok(())
   }
 
   async fn recv_from(&mut self) -> Result<(Bytes, SocketAddr), AnyError> {
-    tracing::info!("start handle remote stream");
-    let (mut stream, _) = self.recv_stream_rx.recv().await?;
-    tracing::info!("receive handle remote stream");
+    let stream = &mut self.stream;
+
     let mut buf = [0u8; 3];
     stream.peek_exact(&mut buf).await?;
     tracing::info!("client header {:?}", buf);
@@ -229,21 +140,193 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
       stream.read_exact(&mut all).await?;
       let uncompressed = compressor.decompress(&all[..compressed_data_len])?;
       tracing::info!("client received {:?}", uncompressed);
-      Ok((uncompressed.into(), self.local_addr))
+      Ok((uncompressed.into(), self.addr))
     } else {
       let mut all = vec![0u8; 1500];
       let len = stream.read(&mut all).await?;
       all.truncate(len);
       tracing::info!("client received {:?}", all);
-      Ok((all.into(), self.local_addr))
+      Ok((all.into(), self.addr))
     }
+  }
+
+  async fn finish(&mut self) -> Result<(), AnyError> {
+    self.stream.finish().await?;
+    Ok(())
+  }
+}
+
+pub struct QuicTestPacketConnection<S: StreamLayer> {
+  conn: S::Connection,
+  addr: SocketAddr,
+  label: Label,
+  send_label: bool,
+  #[cfg(feature = "compression")]
+  send_compressed: Option<Compressor>,
+  receive_verify_label: bool,
+  #[cfg(feature = "compression")]
+  receive_compressed: bool,
+}
+
+impl<S: StreamLayer> TestPacketConnection for QuicTestPacketConnection<S> {
+  type Stream = QuicTestPacketStream<S>;
+
+  async fn accept(&self) -> Result<Self::Stream, AnyError> {
+    self
+      .conn
+      .accept_bi()
+      .await
+      .map(|(stream, _)| QuicTestPacketStream {
+        stream,
+        addr: self.addr,
+        label: self.label.cheap_clone(),
+        send_label: self.send_label,
+        #[cfg(feature = "compression")]
+        send_compressed: self.send_compressed,
+        receive_verify_label: self.receive_verify_label,
+        #[cfg(feature = "compression")]
+        receive_compressed: self.receive_compressed,
+      })
+      .map_err(Into::into)
+  }
+
+  async fn connect(&self) -> Result<Self::Stream, AnyError> {
+    self
+      .conn
+      .open_bi()
+      .await
+      .map(|(stream, _)| QuicTestPacketStream {
+        stream,
+        addr: self.addr,
+        label: self.label.cheap_clone(),
+        send_label: self.send_label,
+        #[cfg(feature = "compression")]
+        send_compressed: self.send_compressed,
+        receive_verify_label: self.receive_verify_label,
+        #[cfg(feature = "compression")]
+        receive_compressed: self.receive_compressed,
+      })
+      .map_err(Into::into)
+  }
+
+  async fn is_closed(&self) -> bool {
+    self.conn.is_closed().await
+  }
+}
+
+/// A test client for network transport
+#[viewit::viewit(
+  vis_all = "",
+  getters(vis_all = "pub", style = "ref"),
+  setters(vis_all = "pub", prefix = "with")
+)]
+pub struct QuicTransportTestClient<S: StreamLayer, R: Runtime> {
+  #[viewit(getter(skip), setter(skip))]
+  connector: S::Connector,
+  #[viewit(getter(skip), setter(skip))]
+  acceptor: S::Acceptor,
+  #[viewit(getter(skip), setter(skip))]
+  local_addr: SocketAddr,
+  #[viewit(getter(skip), setter(skip))]
+  remote_addr: SocketAddr,
+
+  label: Label,
+  send_label: bool,
+  #[cfg(feature = "compression")]
+  send_compressed: Option<Compressor>,
+  receive_verify_label: bool,
+  #[cfg(feature = "compression")]
+  receive_compressed: bool,
+
+  #[viewit(getter(skip), setter(skip))]
+  _runtime: std::marker::PhantomData<R>,
+}
+
+impl<S: StreamLayer, R: Runtime> QuicTransportTestClient<S, R> {
+  /// Creates a new test client with the given address
+  pub async fn new(
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    layer: S,
+  ) -> Result<Self, AnyError> {
+    Self::with_num_responses(local_addr, remote_addr, layer, 1).await
+  }
+
+  /// Creates a new test client with the given address
+  pub async fn with_num_responses(
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    layer: S,
+    num_resps: usize,
+  ) -> Result<Self, AnyError> {
+    let (local_addr, mut acceptor, client) = layer.bind(local_addr).await?;
+
+    Ok(Self {
+      local_addr,
+      remote_addr,
+      connector: client,
+      acceptor,
+      label: Label::empty(),
+      send_label: false,
+      #[cfg(feature = "compression")]
+      send_compressed: None,
+      receive_verify_label: false,
+      #[cfg(feature = "compression")]
+      receive_compressed: false,
+      _runtime: std::marker::PhantomData,
+    })
+  }
+}
+
+impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S, R> {
+  type Connection = QuicTestPacketConnection<S>;
+
+  async fn accept(&mut self) -> Result<Self::Connection, AnyError> {
+    self
+      .acceptor
+      .accept()
+      .await
+      .map(|(conn, _)| QuicTestPacketConnection {
+        conn,
+        addr: self.local_addr,
+        label: self.label.cheap_clone(),
+        send_label: self.send_label,
+        #[cfg(feature = "compression")]
+        send_compressed: self.send_compressed,
+        receive_verify_label: self.receive_verify_label,
+        #[cfg(feature = "compression")]
+        receive_compressed: self.receive_compressed,
+      })
+      .map_err(Into::into)
+  }
+
+  async fn connect(&self, addr: SocketAddr) -> Result<Self::Connection, AnyError> {
+    self
+      .connector
+      .connect(addr)
+      .await
+      .map(|conn| QuicTestPacketConnection {
+        conn,
+        addr,
+        label: self.label.cheap_clone(),
+        send_label: self.send_label,
+        #[cfg(feature = "compression")]
+        send_compressed: self.send_compressed,
+        receive_verify_label: self.receive_verify_label,
+        #[cfg(feature = "compression")]
+        receive_compressed: self.receive_compressed,
+      })
+      .map_err(Into::into)
   }
 
   fn local_addr(&self) -> SocketAddr {
     self.local_addr
   }
 
-  async fn close(&mut self) {}
+  async fn close(&mut self) {
+    let _ = self.acceptor.close().await;
+    let _ = self.connector.close().await;
+  }
 }
 
 /// A test client for network transport
@@ -256,6 +339,7 @@ pub struct QuicTransportTestPromisedClient<S: StreamLayer> {
   ln: Arc<Mutex<S::Acceptor>>,
   local_addr: SocketAddr,
   connector: S::Connector,
+  connections: Arc<Mutex<Vec<S::Connection>>>,
   layer: S,
 }
 
@@ -267,21 +351,82 @@ impl<S: StreamLayer> QuicTransportTestPromisedClient<S> {
       layer,
       ln: Arc::new(Mutex::new(ln)),
       connector,
+      connections: Arc::new(Mutex::new(Vec::new())),
       local_addr,
     }
   }
 }
 
-impl<S: StreamLayer> TestPromisedClient for QuicTransportTestPromisedClient<S> {
-  type Stream = S::Stream;
+pub struct QuicTestPromisedStream<S: StreamLayer> {
+  stream: S::Stream,
+}
 
-  async fn connect(&self, addr: SocketAddr) -> Result<Self::Stream, AnyError> {
-    self.connector.open_bi(addr).await.map_err(Into::into)
+impl<S: StreamLayer> TestPromisedStream for QuicTestPromisedStream<S> {
+  async fn finish(&mut self) -> Result<(), AnyError> {
+    self.stream.finish().await.map_err(Into::into)
+  }
+}
+
+impl<S: StreamLayer> AsMut<S::Stream> for QuicTestPromisedStream<S> {
+  fn as_mut(&mut self) -> &mut S::Stream {
+    &mut self.stream
+  }
+}
+
+pub struct QuicTestConnection<S: StreamLayer> {
+  conn: S::Connection,
+  addr: SocketAddr,
+}
+
+impl<S: StreamLayer> TestPromisedConnection for QuicTestConnection<S> {
+  type Stream = QuicTestPromisedStream<S>;
+
+  async fn accept(&self) -> Result<Self::Stream, AnyError> {
+    self
+      .conn
+      .accept_bi()
+      .await
+      .map(|(s, _)| QuicTestPromisedStream { stream: s })
+      .map_err(Into::into)
   }
 
-  async fn accept(&self) -> Result<(Self::Stream, SocketAddr), AnyError> {
-    let (stream, addr) = self.ln.lock().await.accept_bi().await?;
-    Ok((stream, addr))
+  async fn connect(&self) -> Result<Self::Stream, AnyError> {
+    self
+      .conn
+      .open_bi()
+      .await
+      .map(|(s, _)| QuicTestPromisedStream { stream: s })
+      .map_err(Into::into)
+  }
+
+  /// is closed or not
+  async fn is_closed(&self) -> bool {
+    self.conn.is_closed().await
+  }
+}
+
+impl<S: StreamLayer> TestPromisedClient for QuicTransportTestPromisedClient<S> {
+  type Stream = QuicTestPromisedStream<S>;
+  type Connection = QuicTestConnection<S>;
+
+  async fn connect(&self, addr: SocketAddr) -> Result<Self::Connection, AnyError> {
+    self
+      .connector
+      .connect(addr)
+      .await
+      .map(|conn| QuicTestConnection { conn, addr })
+      .map_err(Into::into)
+  }
+
+  async fn accept(&self) -> Result<(Self::Connection, SocketAddr), AnyError> {
+    self
+      .ln
+      .lock()
+      .await
+      .accept()
+      .await
+      .map(|(conn, addr)| (QuicTestConnection { conn, addr }, addr))
+      .map_err(Into::into)
   }
 
   async fn cache_stream(&self, _: SocketAddr, mut stream: Self::Stream) -> Result<(), AnyError> {
@@ -289,7 +434,7 @@ impl<S: StreamLayer> TestPromisedClient for QuicTransportTestPromisedClient<S> {
   }
 
   async fn flush_stream(&self, stream: &mut Self::Stream) -> Result<(), AnyError> {
-    stream.flush().await.map_err(Into::into)
+    stream.stream.flush().await.map_err(Into::into)
   }
 
   async fn close(&self) -> Result<(), AnyError> {
@@ -436,6 +581,11 @@ mod s2n_stream_layer {
 
   pub async fn s2n_stream_layer<R: Runtime>() -> S2n<R> {
     let p = std::env::current_dir().unwrap().join("tests");
-    S2n::new(Options::new(p.join("cert.pem"), p.join("key.pem"))).unwrap()
+    S2n::new(Options::new(
+      "localhost".into(),
+      p.join("cert.pem"),
+      p.join("key.pem"),
+    ))
+    .unwrap()
   }
 }

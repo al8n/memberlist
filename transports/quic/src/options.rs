@@ -69,6 +69,20 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   timeout: Option<Duration>,
 
+  /// The period of time to cleanup the connection pool.
+  #[cfg_attr(
+    feature = "serde",
+    serde(
+      with = "humantime_serde",
+      default = "default_connection_pool_cleanup_period"
+    )
+  )]
+  #[viewit(
+    getter(const, attrs(doc = "Get the cleanup period for the connection pool."),),
+    setter(attrs(doc = "Set the cleanup period for the connection pool"),)
+  )]
+  connection_pool_cleanup_period: Duration,
+
   /// Policy for Classless Inter-Domain Routing (CIDR).
   ///
   /// By default, allow any connection
@@ -166,6 +180,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I
       label: Label::empty(),
       skip_inbound_label_check: false,
       cidrs_policy: CIDRsPolicy::allow_all(),
+      connection_pool_cleanup_period: default_connection_pool_cleanup_period(),
       #[cfg(feature = "compression")]
       compressor: None,
       #[cfg(feature = "compression")]
@@ -180,4 +195,9 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I
     self.bind_addresses.insert(addr);
     self
   }
+}
+
+#[inline(always)]
+const fn default_connection_pool_cleanup_period() -> Duration {
+  Duration::from_secs(60)
 }

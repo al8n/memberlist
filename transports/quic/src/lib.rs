@@ -18,20 +18,23 @@ use std::{
 use agnostic::{Runtime, WaitableSpawner};
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
+
+use crossbeam_skiplist::SkipMap;
 use futures::FutureExt;
 use memberlist_core::{
   transport::{
-    stream::{
-      packet_stream, promised_stream, PacketProducer, PacketSubscriber, StreamProducer,
-      StreamSubscriber,
-    },
-    TimeoutableReadStream, Transport, TransportError, Wire,
+    stream::{packet_stream, promised_stream, PacketSubscriber, StreamSubscriber},
+    Transport, TransportError, Wire,
   },
-  types::{Message, Packet},
+  types::Message,
 };
-use memberlist_utils::{net::CIDRsPolicy, Label, LabelError, OneOrMore, SmallVec, TinyVec};
+
+use memberlist_utils::{net::CIDRsPolicy, Label, LabelError, SmallVec, TinyVec};
 use nodecraft::{resolver::AddressResolver, CheapClone, Id};
 use pollster::FutureExt as _;
+
+mod processor;
+use processor::*;
 
 /// Compress/decompress related.
 #[cfg(feature = "compression")]
@@ -89,6 +92,7 @@ where
   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
   #[allow(dead_code)]
   stream_layer: S,
+  connection_pool: Arc<SkipMap<SocketAddr, S::Connection>>,
   v4_round_robin: AtomicUsize,
   v4_connectors: SmallVec<S::Connector>,
   v6_round_robin: AtomicUsize,
@@ -109,6 +113,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  <<A::Runtime as Runtime>::Interval as futures::Stream>::Item: Send + 'static,
 {
   /// Creates a new quic transport.
   pub async fn new(
@@ -226,8 +231,14 @@ where
       advertise_addr
     };
 
+    let connection_pool = Arc::new(SkipMap::new());
+    let interval = <A::Runtime as Runtime>::interval(opts.connection_pool_cleanup_period);
+    let pool = connection_pool.clone();
+    wg.spawn_detach(Self::connection_pool_cleaner(pool, interval, shutdown_rx));
+
     Ok(Self {
       advertise_addr: final_advertise_addr,
+      connection_pool,
       local_addr: self_addr,
       max_payload_size: MAX_MESSAGE_SIZE.min(stream_layer.max_stream_data()),
       opts,
@@ -254,6 +265,31 @@ where
     }
 
     0
+  }
+
+  async fn connection_pool_cleaner(
+    pool: Arc<SkipMap<SocketAddr, S::Connection>>,
+    interval: impl futures::Stream,
+    shutdown_rx: async_channel::Receiver<()>,
+  ) {
+    use futures::StreamExt;
+
+    futures::pin_mut!(interval);
+
+    loop {
+      futures::select! {
+        _ = interval.next().fuse() => {
+          for ent in pool.iter() {
+            if ent.value().is_closed().await {
+              ent.remove();
+            }
+          }
+        }
+        _ = shutdown_rx.recv().fuse() => {
+          return;
+        }
+      }
+    }
   }
 }
 
@@ -293,6 +329,45 @@ where
       let idx = self.v6_round_robin.fetch_add(1, Ordering::AcqRel) % self.v6_connectors.len();
       &self.v6_connectors[idx]
     }
+  }
+
+  async fn fetch_stream(
+    &self,
+    addr: SocketAddr,
+    timeout: Option<Duration>,
+  ) -> Result<S::Stream, QuicTransportError<A, S, W>> {
+    if let Some(ent) = self.connection_pool.get(&addr) {
+      let connection = ent.value();
+      if !connection.is_closed().await {
+        if let Some(timeout) = timeout {
+          return connection
+            .open_bi_with_timeout(timeout)
+            .await
+            .map(|(s, _)| s)
+            .map_err(|e| QuicTransportError::Stream(e.into()));
+        } else {
+          return connection
+            .open_bi()
+            .await
+            .map(|(s, _)| s)
+            .map_err(|e| QuicTransportError::Stream(e.into()));
+        }
+      }
+    }
+
+    let connector = self.next_connector(&addr);
+    let connection = connector
+      .connect(addr)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    connection
+      .open_bi()
+      .await
+      .map(|(s, _)| {
+        self.connection_pool.insert(addr, connection);
+        s
+      })
+      .map_err(|e| QuicTransportError::Stream(e.into()))
   }
 }
 
@@ -560,11 +635,7 @@ where
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     timeout: std::time::Duration,
   ) -> Result<Self::Stream, Self::Error> {
-    self
-      .next_connector(addr)
-      .open_bi_with_timeout(*addr, timeout)
-      .await
-      .map_err(|e| Self::Error::Stream(e.into()))
+    self.fetch_stream(*addr, Some(timeout)).await
   }
 
   async fn cache_stream(
@@ -574,7 +645,7 @@ where
   ) -> Result<(), Self::Error> {
     // Cache QUIC stream make no sense, so just wait all data have been sent to the client and return
     stream
-      .finish()
+      .close()
       .await
       .map_err(|e| Self::Error::Stream(e.into()))?;
     Ok(())
@@ -629,464 +700,5 @@ where
       return;
     }
     let _ = self.shutdown().block_on();
-  }
-}
-
-struct Processor<
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
-  T: Transport<Resolver = A>,
-  S: StreamLayer,
-> {
-  label: Label,
-  local_addr: SocketAddr,
-  acceptor: S::Acceptor,
-  packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-  stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
-
-  shutdown: Arc<AtomicBool>,
-  shutdown_rx: async_channel::Receiver<()>,
-
-  skip_inbound_label_check: bool,
-  timeout: Option<Duration>,
-  wg: WaitableSpawner<T::Runtime>,
-
-  #[cfg(feature = "compression")]
-  offload_size: usize,
-
-  #[cfg(feature = "metrics")]
-  metric_labels: Arc<memberlist_utils::MetricLabels>,
-}
-
-impl<A, T, S> Processor<A, T, S>
-where
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
-  T: Transport<Resolver = A, Stream = S::Stream>,
-  S: StreamLayer,
-{
-  fn run(self) {
-    let Self {
-      acceptor,
-      packet_tx,
-      stream_tx,
-      shutdown_rx,
-      shutdown,
-      local_addr,
-      label,
-      skip_inbound_label_check,
-      timeout,
-      wg,
-      #[cfg(feature = "compression")]
-      offload_size,
-      #[cfg(feature = "metrics")]
-      metric_labels,
-    } = self;
-
-    let swg = wg.clone();
-    wg.spawn_detach(async move {
-      Self::listen(
-        local_addr,
-        label,
-        acceptor,
-        packet_tx,
-        stream_tx,
-        swg,
-        shutdown,
-        shutdown_rx,
-        skip_inbound_label_check,
-        timeout,
-        #[cfg(feature = "compression")]
-        offload_size,
-        #[cfg(feature = "metrics")]
-        metric_labels,
-      )
-      .await;
-    });
-  }
-
-  #[allow(clippy::too_many_arguments)]
-  async fn listen(
-    local_addr: SocketAddr,
-    label: Label,
-    mut acceptor: S::Acceptor,
-    packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
-    wg: WaitableSpawner<T::Runtime>,
-    shutdown: Arc<AtomicBool>,
-    shutdown_rx: async_channel::Receiver<()>,
-    skip_inbound_label_check: bool,
-    timeout: Option<Duration>,
-    #[cfg(feature = "compression")] offload_size: usize,
-    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_utils::MetricLabels>,
-  ) {
-    tracing::info!(
-      target: "memberlist.transport.quic",
-      "listening stream on {local_addr}"
-    );
-
-    /// The initial delay after an `accept()` error before attempting again
-    const BASE_DELAY: Duration = Duration::from_millis(5);
-
-    /// the maximum delay after an `accept()` error before attempting again.
-    /// In the case that tcpListen() is error-looping, it will delay the shutdown check.
-    /// Therefore, changes to `MAX_DELAY` may have an effect on the latency of shutdown.
-    const MAX_DELAY: Duration = Duration::from_secs(1);
-
-    let mut loop_delay = Duration::ZERO;
-    loop {
-      futures::select! {
-        _ = shutdown_rx.recv().fuse() => {
-          tracing::info!(target = "memberlist.transport.quic", local=%local_addr, "shutdown stream listener");
-          return;
-        }
-        incoming = acceptor.accept_bi().fuse() => {
-          match incoming {
-            Ok((mut stream, remote_addr)) => {
-              // No error, reset loop delay
-              loop_delay = Duration::ZERO;
-              let mut stream_kind_buf = [0; 1];
-              if let Err(e) = stream.peek_exact(&mut stream_kind_buf).await {
-                tracing::error!(target = "memberlist.transport.quic", local=%local_addr, from=%remote_addr, err = %e, "failed to read stream kind");
-                continue;
-              }
-              let stream_kind = stream_kind_buf[0];
-              if stream_kind == StreamType::Stream as u8 {
-                if let Err(e) = stream_tx
-                  .send(remote_addr, stream)
-                  .await
-                {
-                  tracing::error!(target =  "memberlist.transport.quic", local_addr=%local_addr, err = %e, "failed to send stream connection");
-                }
-              } else {
-                // consume peeked byte
-                stream.read_exact(&mut stream_kind_buf).await.unwrap();
-                let packet_tx = packet_tx.clone();
-                let label = label.cheap_clone();
-                #[cfg(feature = "metrics")]
-                let metric_labels = metric_labels.clone();
-                wg.spawn_detach(async move {
-                  Self::handle_packet(
-                    stream,
-                    local_addr,
-                    remote_addr,
-                    label,
-                    packet_tx.clone(),
-                    timeout,
-                    skip_inbound_label_check,
-                    #[cfg(feature = "compression")] offload_size,
-                    #[cfg(feature = "metrics")] metric_labels,
-                  ).await;
-                });
-              }
-            }
-            Err(e) => {
-              if shutdown.load(Ordering::SeqCst) {
-                tracing::info!(target = "memberlist.transport.quic", local=%local_addr, "shutdown stream listener");
-                return;
-              }
-
-              if loop_delay == Duration::ZERO {
-                loop_delay = BASE_DELAY;
-              } else {
-                loop_delay *= 2;
-              }
-
-              if loop_delay > MAX_DELAY {
-                loop_delay = MAX_DELAY;
-              }
-
-              tracing::error!(target =  "memberlist.transport.quic", local_addr=%local_addr, err = %e, "error accepting stream connection");
-              <T::Runtime as Runtime>::sleep(loop_delay).await;
-              continue;
-            }
-          }
-        }
-      }
-    }
-  }
-
-  #[allow(clippy::too_many_arguments)]
-  async fn handle_packet(
-    mut stream: S::Stream,
-    local_addr: SocketAddr,
-    remote_addr: SocketAddr,
-    label: Label,
-    packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    timeout: Option<Duration>,
-    skip_inbound_label_check: bool,
-    #[cfg(feature = "compression")] offload_size: usize,
-    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_utils::MetricLabels>,
-  ) {
-    let start = Instant::now();
-    stream.set_read_timeout(timeout);
-
-    let (_read, msg) = match Self::handle_packet_in(
-      stream,
-      &label,
-      skip_inbound_label_check,
-      #[cfg(feature = "compression")]
-      offload_size,
-    )
-    .await
-    {
-      Ok(msg) => msg,
-      Err(e) => {
-        tracing::error!(target = "memberlist.packet", local=%local_addr, from=%remote_addr, err = %e, "fail to handle UDP packet");
-        return;
-      }
-    };
-
-    #[cfg(feature = "metrics")]
-    {
-      metrics::counter!("memberlist.packet.bytes.processing", metric_labels.iter())
-        .increment(start.elapsed().as_secs_f64().round() as u64);
-    }
-
-    if let Err(e) = packet_tx.send(Packet::new(msg, remote_addr, start)).await {
-      tracing::error!(target = "memberlist.packet", local=%local_addr, from=%remote_addr, err = %e, "failed to send packet");
-    }
-
-    #[cfg(feature = "metrics")]
-    metrics::counter!("memberlist.packet.received", metric_labels.iter()).increment(_read as u64);
-  }
-
-  async fn handle_packet_in(
-    mut recv_stream: S::Stream,
-    label: &Label,
-    skip_inbound_label_check: bool,
-    #[cfg(feature = "compression")] offload_size: usize,
-  ) -> Result<
-    (
-      usize,
-      OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-    ),
-    QuicTransportError<T::Resolver, S, T::Wire>,
-  > {
-    let mut tag = [0u8; 2];
-    let mut readed = 0;
-    recv_stream
-      .peek_exact(&mut tag)
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    let packet_label = if tag[0] == Label::TAG {
-      let label_size = tag[1] as usize;
-      // consume peeked
-      recv_stream.read_exact(&mut tag).await.unwrap();
-
-      let mut label = vec![0u8; label_size];
-      recv_stream
-        .read_exact(&mut label)
-        .await
-        .map_err(|e| QuicTransportError::Stream(e.into()))?;
-      readed += 2 + label_size;
-      Label::try_from(Bytes::from(label)).map_err(|e| QuicTransportError::Label(e.into()))?
-    } else {
-      Label::empty()
-    };
-
-    if !skip_inbound_label_check && packet_label.ne(label) {
-      tracing::error!(target = "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
-      return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
-    }
-
-    #[cfg(not(feature = "compression"))]
-    return {
-      let (read, msgs) = Self::decode_without_compression(&mut recv_stream).await?;
-      readed += read;
-      Ok((readed, msgs))
-    };
-
-    #[cfg(feature = "compression")]
-    {
-      let (read, msgs) = Self::decode_with_compression(&mut recv_stream, offload_size).await?;
-      readed += read;
-      Ok((readed, msgs))
-    }
-  }
-
-  fn decode_batch(
-    mut src: &[u8],
-  ) -> Result<
-    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-    QuicTransportError<T::Resolver, S, T::Wire>,
-  > {
-    let num_msgs = src[0] as usize;
-    src = &src[1..];
-    let mut msgs = OneOrMore::with_capacity(num_msgs);
-
-    for _ in 0..num_msgs {
-      let expected_msg_len = NetworkEndian::read_u32(&src[..MAX_MESSAGE_LEN_SIZE]) as usize;
-      src = &src[MAX_MESSAGE_LEN_SIZE..];
-      let (readed, msg) =
-        <T::Wire as Wire>::decode_message(src).map_err(QuicTransportError::Wire)?;
-
-      debug_assert_eq!(
-        expected_msg_len, readed,
-        "expected message length {expected_msg_len} but got {readed}",
-      );
-      src = &src[readed..];
-      msgs.push(msg);
-    }
-
-    Ok(msgs)
-  }
-
-  async fn decode_without_compression(
-    conn: &mut S::Stream,
-  ) -> Result<
-    (
-      usize,
-      OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-    ),
-    QuicTransportError<T::Resolver, S, T::Wire>,
-  > {
-    let mut read = 0;
-    let mut tag = [0u8; HEADER_SIZE];
-    conn
-      .peek_exact(&mut tag)
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    read += HEADER_SIZE;
-
-    if Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::COMPOUND_TAG == tag[0] {
-      let msg_len = NetworkEndian::read_u32(&tag[1..]) as usize;
-      // consume peeked header
-      conn.read_exact(&mut tag).await.unwrap();
-
-      if msg_len < MAX_INLINED_BYTES {
-        let mut buf = [0u8; MAX_INLINED_BYTES];
-        conn
-          .read_exact(&mut buf[..msg_len + 1])
-          .await
-          .map_err(|e| QuicTransportError::Stream(e.into()))?;
-        read += msg_len + 1;
-        Self::decode_batch(&buf[..msg_len]).map(|msgs| (read, msgs))
-      } else {
-        let mut buf = vec![0; msg_len];
-        conn
-          .read_exact(&mut buf)
-          .await
-          .map_err(|e| QuicTransportError::Stream(e.into()))?;
-        read += msg_len + 1;
-        Self::decode_batch(&buf).map(|msgs| (read, msgs))
-      }
-    } else {
-      <T::Wire as Wire>::decode_message_from_reader(conn)
-        .await
-        .map(|(_, msg)| (read, msg.into()))
-        .map_err(QuicTransportError::IO)
-    }
-  }
-
-  #[cfg(feature = "compression")]
-  async fn decode_with_compression(
-    conn: &mut S::Stream,
-    offload_size: usize,
-  ) -> Result<
-    (
-      usize,
-      OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-    ),
-    QuicTransportError<T::Resolver, S, T::Wire>,
-  > {
-    let mut tag = [0u8; HEADER_SIZE];
-    conn
-      .peek_exact(&mut tag)
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))?;
-
-    if !COMPRESS_TAG.contains(&tag[0]) {
-      return Self::decode_without_compression(conn).await;
-    }
-
-    // consume peeked bytes
-    conn.read_exact(&mut tag).await.unwrap();
-    let readed = HEADER_SIZE;
-    let compressor = Compressor::try_from(tag[0])?;
-    let msg_len = NetworkEndian::read_u32(&tag[1..]) as usize;
-    if msg_len <= MAX_INLINED_BYTES {
-      let mut buf = [0u8; MAX_INLINED_BYTES];
-      conn
-        .read_exact(&mut buf[..msg_len])
-        .await
-        .map_err(|e| QuicTransportError::Stream(e.into()))?;
-      let compressed = &buf[..msg_len];
-      Self::decompress_and_decode(compressor, compressed).map(|msgs| (readed + msg_len, msgs))
-    } else if msg_len <= offload_size {
-      let mut buf = vec![0; msg_len];
-      conn
-        .read_exact(&mut buf)
-        .await
-        .map_err(|e| QuicTransportError::Stream(e.into()))?;
-      let compressed = &buf[..msg_len];
-      Self::decompress_and_decode(compressor, compressed).map(|msgs| (readed + msg_len, msgs))
-    } else {
-      let mut buf = vec![0; msg_len];
-      conn
-        .read_exact(&mut buf)
-        .await
-        .map_err(|e| QuicTransportError::Stream(e.into()))?;
-      let (tx, rx) = futures::channel::oneshot::channel();
-      rayon::spawn(move || {
-        if tx
-          .send(Self::decompress_and_decode(compressor, &buf))
-          .is_err()
-        {
-          tracing::error!(
-            target = "memberlist.transport.quic",
-            "failed to send decompressed message"
-          );
-        }
-      });
-
-      match rx.await {
-        Ok(Ok(msgs)) => Ok((readed + msg_len, msgs)),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(QuicTransportError::ComputationTaskFailed),
-      }
-    }
-  }
-
-  #[cfg(feature = "compression")]
-  fn decompress_and_decode(
-    compressor: Compressor,
-    src: &[u8],
-  ) -> Result<
-    OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-    QuicTransportError<T::Resolver, S, T::Wire>,
-  > {
-    use bytes::Buf;
-
-    let mut uncompressed: Bytes = compressor.decompress(src)?.into();
-
-    if Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::COMPOUND_TAG
-      == uncompressed[0]
-    {
-      uncompressed.advance(1);
-      let _total_len = NetworkEndian::read_u32(&uncompressed[..MAX_MESSAGE_LEN_SIZE]) as usize;
-      uncompressed.advance(MAX_MESSAGE_LEN_SIZE);
-      let num_msgs = uncompressed[0] as usize;
-      uncompressed.advance(1);
-
-      let mut msgs = OneOrMore::with_capacity(num_msgs);
-      for _ in 0..num_msgs {
-        let expected_msg_len =
-          NetworkEndian::read_u32(&uncompressed[..MAX_MESSAGE_LEN_SIZE]) as usize;
-        uncompressed.advance(MAX_MESSAGE_LEN_SIZE);
-        let (readed, msg) =
-          <T::Wire as Wire>::decode_message(&uncompressed).map_err(QuicTransportError::Wire)?;
-        debug_assert_eq!(
-          expected_msg_len, readed,
-          "expected bytes read {expected_msg_len} but got {readed}",
-        );
-        uncompressed.advance(readed);
-        msgs.push(msg);
-      }
-
-      Ok(msgs)
-    } else {
-      <T::Wire as Wire>::decode_message(&uncompressed)
-        .map(|(_, msg)| msg.into())
-        .map_err(QuicTransportError::Wire)
-    }
   }
 }

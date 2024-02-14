@@ -179,6 +179,7 @@ pub(super) struct QuinnOptions {
   endpoint_config: quinn::EndpointConfig,
   max_stream_data: usize,
   max_connection_data: usize,
+  max_open_streams: usize,
 }
 
 impl From<Options> for QuinnOptions {
@@ -225,6 +226,7 @@ impl From<Options> for QuinnOptions {
       endpoint_config,
       max_stream_data: max_stream_data as usize,
       max_connection_data: max_connection_data as usize,
+      max_open_streams: max_concurrent_stream_limit as usize,
     }
   }
 }

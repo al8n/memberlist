@@ -5,7 +5,6 @@ handle_join_test_suites!("quinn_tokio": TokioRuntime::tokio_run({
   quinn_stream_layer::<TokioRuntime>().await
 }));
 
-
 handle_join_test_suites!("quinn_async_std": AsyncStdRuntime::async_std_run({
   quinn_stream_layer::<AsyncStdRuntime>().await
 }));

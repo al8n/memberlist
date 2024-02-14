@@ -196,23 +196,20 @@ where
     addr: SocketAddr,
     src: Bytes,
   ) -> Result<usize, QuicTransportError<A, S, W>> {
-    let mut conn = self
-      .next_connector(&addr)
-      .open_bi(addr)
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    let mut stream = self.fetch_stream(addr, None).await?;
+
     tracing::trace!(
       target = "memberlist.transport.quic.packet",
       sent = ?src.as_ref(),
     );
-    let written = conn
+    let written = stream
       .write_all(src)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    conn
-      .close()
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    // stream
+    //   .finish()
+    //   .await
+    //   .map_err(|e| QuicTransportError::Stream(e.into()))?;
     Ok(written)
   }
 }
