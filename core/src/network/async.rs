@@ -42,7 +42,11 @@ where
     let msg: Message<_, _> = self
       .read_message(target, &mut conn)
       .await
-      .map(|(_, msg)| msg)?;
+      .map(|(_, msg)| msg)
+      .map_err(|e| {
+        tracing::error!("DEBUG: fail to read {e}");
+        e
+      })?;
     let kind = msg.kind();
     if let Some(ack) = msg.try_unwrap_ack() {
       if ack.seq_no != ping_seq_no {

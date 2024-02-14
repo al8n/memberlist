@@ -206,10 +206,10 @@ where
       .write_all(src)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    stream
-      .finish()
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    // stream
+    //   .finish()
+    //   .await
+    //   .map_err(|e| QuicTransportError::Stream(e.into()))?;
     Ok(written)
   }
 }

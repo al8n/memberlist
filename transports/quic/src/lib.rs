@@ -273,7 +273,7 @@ where
     shutdown_rx: async_channel::Receiver<()>,
   ) {
     use futures::StreamExt;
-    
+
     futures::pin_mut!(interval);
 
     loop {
@@ -331,17 +331,23 @@ where
     }
   }
 
-  async fn fetch_stream(&self, addr: SocketAddr, timeout: Option<Duration>) -> Result<S::Stream, QuicTransportError<A, S, W>> {
-    if let Some(ent) =  self.connection_pool.get(&addr) {
+  async fn fetch_stream(
+    &self,
+    addr: SocketAddr,
+    timeout: Option<Duration>,
+  ) -> Result<S::Stream, QuicTransportError<A, S, W>> {
+    if let Some(ent) = self.connection_pool.get(&addr) {
       let connection = ent.value();
       if !connection.is_closed().await {
         if let Some(timeout) = timeout {
-          return connection.open_bi_with_timeout(timeout)
+          return connection
+            .open_bi_with_timeout(timeout)
             .await
             .map(|(s, _)| s)
             .map_err(|e| QuicTransportError::Stream(e.into()));
         } else {
-          return connection.open_bi()
+          return connection
+            .open_bi()
             .await
             .map(|(s, _)| s)
             .map_err(|e| QuicTransportError::Stream(e.into()));
@@ -354,10 +360,14 @@ where
       .connect(addr)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    connection.open_bi().await.map(|(s, _)| {
-      self.connection_pool.insert(addr, connection);
-      s
-    }).map_err(|e| QuicTransportError::Stream(e.into()))
+    connection
+      .open_bi()
+      .await
+      .map(|(s, _)| {
+        self.connection_pool.insert(addr, connection);
+        s
+      })
+      .map_err(|e| QuicTransportError::Stream(e.into()))
   }
 }
 
@@ -625,9 +635,7 @@ where
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     timeout: std::time::Duration,
   ) -> Result<Self::Stream, Self::Error> {
-    self
-      .fetch_stream(*addr, Some(timeout))
-      .await
+    self.fetch_stream(*addr, Some(timeout)).await
   }
 
   async fn cache_stream(
@@ -637,7 +645,7 @@ where
   ) -> Result<(), Self::Error> {
     // Cache QUIC stream make no sense, so just wait all data have been sent to the client and return
     stream
-      .finish()
+      .close()
       .await
       .map_err(|e| Self::Error::Stream(e.into()))?;
     Ok(())
