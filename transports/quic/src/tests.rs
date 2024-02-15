@@ -112,7 +112,6 @@ impl<S: StreamLayer> TestPacketStream for QuicTestPacketStream<S> {
 
     let mut buf = [0u8; 3];
     stream.peek_exact(&mut buf).await?;
-    tracing::info!("client header {:?}", buf);
     assert_eq!(buf[0], super::StreamType::Packet as u8);
     let mut drop = [0; 1];
     stream.read_exact(&mut drop).await?;
@@ -131,6 +130,7 @@ impl<S: StreamLayer> TestPacketStream for QuicTestPacketStream<S> {
       }
     }
 
+    #[cfg(feature = "compression")]
     if self.receive_compressed {
       let mut header = [0u8; 5];
       stream.read_exact(&mut header).await?;
@@ -139,13 +139,19 @@ impl<S: StreamLayer> TestPacketStream for QuicTestPacketStream<S> {
       let mut all = vec![0u8; compressed_data_len];
       stream.read_exact(&mut all).await?;
       let uncompressed = compressor.decompress(&all[..compressed_data_len])?;
-      tracing::info!("client received {:?}", uncompressed);
       Ok((uncompressed.into(), self.addr))
     } else {
       let mut all = vec![0u8; 1500];
       let len = stream.read(&mut all).await?;
       all.truncate(len);
-      tracing::info!("client received {:?}", all);
+      Ok((all.into(), self.addr))
+    }
+
+    #[cfg(not(feature = "compression"))]
+    {
+      let mut all = vec![0u8; 1500];
+      let len = stream.read(&mut all).await?;
+      all.truncate(len);
       Ok((all.into(), self.addr))
     }
   }
@@ -228,6 +234,7 @@ pub struct QuicTransportTestClient<S: StreamLayer, R: Runtime> {
 
   label: Label,
   send_label: bool,
+
   #[cfg(feature = "compression")]
   send_compressed: Option<Compressor>,
   receive_verify_label: bool,

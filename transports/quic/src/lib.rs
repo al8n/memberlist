@@ -301,14 +301,19 @@ where
   W: Wire<Id = I, Address = A::ResolvedAddress>,
 {
   fn fix_packet_overhead(&self) -> usize {
-    let mut overhead = self.opts.label.encoded_overhead();
-
     #[cfg(feature = "compression")]
-    if self.opts.compressor.is_some() {
-      overhead += 1 + core::mem::size_of::<u32>();
-    }
+    return {
+      let mut overhead = self.opts.label.encoded_overhead();
 
-    overhead
+      if self.opts.compressor.is_some() {
+        overhead += 1 + core::mem::size_of::<u32>();
+      }
+
+      overhead
+    };
+
+    #[cfg(not(feature = "compression"))]
+    self.opts.label.encoded_overhead()
   }
 
   fn next_connector(&self, addr: &A::ResolvedAddress) -> &S::Connector {
@@ -523,7 +528,7 @@ where
     msg: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<usize, Self::Error> {
     #[cfg(not(feature = "compression"))]
-    let buf = self.send_message_without_comression(msg).await?;
+    let buf = self.send_message_without_compression(msg).await?;
 
     #[cfg(feature = "compression")]
     let buf = self.send_message_with_compression(msg).await?;

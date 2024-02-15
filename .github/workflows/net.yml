@@ -1,4 +1,4 @@
-name: quinn
+name: net
 
 on:
   push:
@@ -22,7 +22,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Check formatting
   rustfmt:
     name: rustfmt
     strategy:
@@ -35,11 +34,10 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
       run: rustup update stable && rustup default stable && rustup component add rustfmt
     - name: Check formatting
       run: cargo fmt --all -- --check
-      working-directory: transports/quic
+      working-directory: transports/net
 
 
   # Apply clippy lints
@@ -55,7 +53,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
       run: rustup update stable && rustup default stable && rustup component add clippy
     - name: Install OpenSSL (Windows)
       if: matrix.os == 'windows-latest'
@@ -65,7 +62,7 @@ jobs:
         vcpkg install openssl:x64-windows-static-md
     - name: Apply clippy lints (unix)
       run: cargo clippy --all-features
-      working-directory: transports/quic
+      working-directory: transports/net
 
   build:
     name: build
@@ -79,7 +76,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
       run: rustup update nightly --no-self-update && rustup default nightly
     - name: Install OpenSSL (Windows)
       if: matrix.os == 'windows-latest'
@@ -95,8 +91,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run build (unix)
-      run: cargo hack build --feature-powerset --exclude-features serde,rkyv,dns-over-quic,dns-over-h3,dns-over-https-rustls,dns-over-rustls,dns-over-openssl,dns-over-native-tls,dns-webpki-roots,dns-native-certs,dnssec-openssl,dnssec-ring,dnssec
-      working-directory: transports/quic
+      run: cargo hack build --feature-powerset --exclude-features serde,rkyv,dns-over-h3,dns-over-quic,dns-over-https-rustls,dns-over-rustls,dns-over-openssl,dns-over-native-tls,dns-webpki-roots,dns-native-certs,dnssec-openssl,dnssec-ring,dnssec
+      working-directory: transports/net
 
   test:
     name: test
@@ -125,8 +121,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test
-      run: cargo test --features test,s2n,quinn
-      working-directory: transports/quic
+      run: cargo test --features test,tls,native-tls
+      working-directory: transports/net 
 
   coverage:
     name: coverage
@@ -164,12 +160,12 @@ jobs:
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --force
       - name: Run cargo-tarpaulin
-        working-directory: transports/quic
-        run: cargo-tarpaulin -- --features compression,quinn,dns,s2n --run-types tests -o xml 
+        working-directory: transports/net
+        run: cargo-tarpaulin -- --all-features --run-types tests -o xml 
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: flase
-          directory: transports/quic
-          flags: transports/quic
+          directory: transports/net
+          flags: transports/net

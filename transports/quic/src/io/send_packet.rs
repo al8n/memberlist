@@ -180,8 +180,8 @@ where
   ) -> Result<usize, QuicTransportError<A, S, W>> {
     #[cfg(not(feature = "compression"))]
     return {
-      let src = self.send_batch_without_compression(addr, batch).await?;
-      self.send_batch_in(src).await
+      let src = self.send_batch_without_compression(batch).await?;
+      self.send_batch_in(addr, src).await
     };
 
     #[cfg(feature = "compression")]
@@ -206,10 +206,10 @@ where
       .write_all(src)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    // stream
-    //   .finish()
-    //   .await
-    //   .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    stream
+      .finish()
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
     Ok(written)
   }
 }
