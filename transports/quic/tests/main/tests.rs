@@ -1,7 +1,17 @@
 #[path = "tests/handle_compound_ping.rs"]
 mod handle_compound_ping;
-#[path = "tests/handle_ping.rs"]
-mod handle_ping;
+
+#[path = "tests/handle_ping_no_label_no_compression.rs"]
+mod handle_ping_no_label_no_compression;
+
+#[path = "tests/handle_ping_no_label_with_compression.rs"]
+mod handle_ping_no_label_with_compression;
+
+#[path = "tests/handle_ping_with_label_no_compression.rs"]
+mod handle_ping_with_label_no_compression;
+
+#[path = "tests/handle_ping_with_label_and_compression.rs"]
+mod handle_ping_with_label_and_compression;
 
 #[path = "tests/handle_indirect_ping.rs"]
 mod handle_indirect_ping;

@@ -11,8 +11,17 @@ fn run(fut: impl std::future::Future<Output = ()>) {
   run_unit_test(|fut| runtime.block_on(fut), fut)
 }
 
-#[path = "tokio/handle_ping.rs"]
-mod handle_ping;
+#[path = "tokio/handle_ping_no_label_no_compression.rs"]
+mod handle_ping_no_label_no_compression;
+
+#[path = "tokio/handle_ping_with_label_no_compression.rs"]
+mod handle_ping_with_label_no_compression;
+
+#[path = "tokio/handle_ping_no_label_with_compression.rs"]
+mod handle_ping_no_label_with_compression;
+
+#[path = "tokio/handle_ping_with_label_and_compression.rs"]
+mod handle_ping_with_label_and_compression;
 
 #[path = "tokio/handle_compound_ping.rs"]
 mod handle_compound_ping;

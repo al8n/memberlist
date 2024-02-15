@@ -31,8 +31,17 @@ fn async_std_run(fut: impl Future<Output = ()>) {
   run_unit_test(AsyncStdRuntime::block_on, fut);
 }
 
-#[path = "quinn/handle_ping.rs"]
-mod handle_ping;
+#[path = "quinn/handle_ping_no_label_no_compression.rs"]
+mod handle_ping_no_label_no_compression;
+
+#[path = "quinn/handle_ping_with_label_no_compression.rs"]
+mod handle_ping_with_label_no_compression;
+
+#[path = "quinn/handle_ping_no_label_with_compression.rs"]
+mod handle_ping_no_label_with_compression;
+
+#[path = "quinn/handle_ping_with_label_and_compression.rs"]
+mod handle_ping_with_label_and_compression;
 
 #[path = "quinn/handle_compound_ping.rs"]
 mod handle_compound_ping;

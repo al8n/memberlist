@@ -9,7 +9,7 @@ homepage.workspace = true
 [features]
 default = ["compression", "quinn"]
 compression = ["rayon", "weezl"]
-quinn = ["agnostic/quinn", "dep:quinn", "rustls", "socket2"]
+quinn = ["agnostic/quinn", "dep:quinn", "rustls"]
 s2n = ["s2n-quic", "s2n-quic-transport", "futures/bilock", "futures/unstable"]
 serde = ["memberlist-core/serde", "dep:serde", "memberlist-utils/serde", "humantime-serde", "indexmap/serde"]
 metrics = ["memberlist-core/metrics", "memberlist-utils/metrics", "dep:metrics"]
@@ -65,7 +65,6 @@ metrics = { workspace = true, optional = true }
 
 # quinn
 quinn = { version = "0.10.2", default-features = false, optional = true, features = ["tls-rustls", "futures-io"] }
-socket2 = { version = "0.5", optional = true }
 rustls = { version = "0.21.9", default-features = false, optional = true, features = ["dangerous_configuration"] }
 
 # test

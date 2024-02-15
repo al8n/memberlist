@@ -1,4 +1,12 @@
 #[macro_export]
+macro_rules! handle_ping_no_label_with_compression_test_suites {
+  ($($prefix:literal: )? $rt:ident::$run:ident({ $s: expr })) => {
+    #[cfg(feature = "compression")]
+    $crate::__handle_ping_no_label_with_compression!($($prefix: )? $rt::$run({ $s }));
+  };
+}
+
+#[macro_export]
 macro_rules! __handle_ping_no_label_with_compression {
   ($($prefix:literal: )? $rt:ident::$run:ident({ $s: expr })) => {
     paste::paste! {
