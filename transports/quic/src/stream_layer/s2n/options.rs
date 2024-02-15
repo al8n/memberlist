@@ -1,11 +1,23 @@
 use s2n_quic::provider::limits::Limits;
 use s2n_quic_transport::connection::limits::ValidationError;
+use smol_str::SmolStr;
 use std::{path::PathBuf, time::Duration};
 
 /// Options for the S2n stream layer.
 #[viewit::viewit(setters(prefix = "with"))]
 #[derive(Debug, Clone)]
 pub struct Options {
+  /// The server name used for TLS.
+  #[viewit(
+    getter(
+      style = "ref",
+      const,
+      attrs(doc = "Gets the server name used for TLS.")
+    ),
+    setter(attrs(doc = "Sets the server name used for TLS."))
+  )]
+  server_name: SmolStr,
+
   /// Maximum amount of data that may be buffered for sending at any time.
   ///
   /// Default is `3_750_000`, tuned for 150Mbps throughput with a 100ms RTT.
@@ -54,22 +66,6 @@ pub struct Options {
   )]
   max_open_remote_bidirectional_streams: u64,
 
-  /// Maximum number of incoming unidirectional streams that may be open concurrently by the remote peer.
-  ///
-  /// Defaults to `100`.
-  #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Gets the maximum number of incoming unidirectional streams that may be open concurrently by the remote peer."
-      )
-    ),
-    setter(attrs(
-      doc = "Sets the maximum number of incoming unidirectional streams that may be open concurrently by the remote peer."
-    ))
-  )]
-  max_open_remote_unidirectional_streams: u64,
-
   /// Maximum number of outgoing bidirectional streams that may be open concurrently by the local peer.
   ///
   /// Defaults to `100`.
@@ -86,22 +82,6 @@ pub struct Options {
   )]
   max_open_local_bidirectional_streams: u64,
 
-  /// Maximum number of outgoing unidirectional streams that may be open concurrently by the local peer.
-  ///
-  /// Defaults to `100`.
-  #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Gets the maximum number of incoming unidirectional streams that may be open concurrently by the local."
-      )
-    ),
-    setter(attrs(
-      doc = "Sets the maximum number of incoming unidirectional streams that may be open concurrently by the local."
-    ))
-  )]
-  max_open_local_unidirectional_streams: u64,
-
   /// Period of inactivity before sending a keep-alive packet.
   ///
   /// Defaults to `30` seconds.
@@ -116,14 +96,14 @@ pub struct Options {
 
   /// Cert path
   #[viewit(
-    getter(const, attrs(doc = "Gets the cert path.")),
+    getter(const, style = "ref", attrs(doc = "Gets the cert path.")),
     setter(attrs(doc = "Sets the cert path."))
   )]
   cert_path: PathBuf,
 
   /// Key path
   #[viewit(
-    getter(const, attrs(doc = "Gets the key path.")),
+    getter(const, style = "ref", attrs(doc = "Gets the key path.")),
     setter(attrs(doc = "Sets the key path."))
   )]
   key_path: PathBuf,
@@ -132,14 +112,13 @@ pub struct Options {
 impl Options {
   /// Creates a new set of options with default values.
   #[inline(always)]
-  pub const fn new(cert: PathBuf, key: PathBuf) -> Self {
+  pub const fn new(server_name: SmolStr, cert: PathBuf, key: PathBuf) -> Self {
     Self {
+      server_name,
       data_window: 3_750_000,
       max_idle_timeout: Duration::from_secs(30),
       max_open_remote_bidirectional_streams: 100,
       max_open_local_bidirectional_streams: 100,
-      max_open_local_unidirectional_streams: 100,
-      max_open_remote_unidirectional_streams: 100,
       keep_alive_interval: Duration::from_secs(30),
       cert_path: cert,
       key_path: key,
@@ -156,9 +135,7 @@ impl TryFrom<&Options> for Limits {
       .with_data_window(options.data_window)?
       .with_max_idle_timeout(options.max_idle_timeout)?
       .with_max_open_remote_bidirectional_streams(options.max_open_remote_bidirectional_streams)?
-      .with_max_open_remote_unidirectional_streams(options.max_open_remote_unidirectional_streams)?
       .with_max_open_local_bidirectional_streams(options.max_open_local_bidirectional_streams)?
-      .with_max_open_local_unidirectional_streams(options.max_open_local_unidirectional_streams)?
       .with_max_keep_alive_period(options.keep_alive_interval)
   }
 }

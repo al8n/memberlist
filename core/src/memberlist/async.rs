@@ -47,9 +47,37 @@ pub(crate) struct MemberlistCore<T: Transport> {
   opts: Arc<Options>,
 }
 
+impl<T: Transport> MemberlistCore<T> {
+  async fn shutdown(&self) -> Result<(), T::Error> {
+    if self.hot.shutdown.load(Ordering::Relaxed) {
+      return Ok(());
+    }
+
+    let _mu = self.shutdown_lock.lock().await;
+
+    // Shut down the transport first, which should block until it's
+    // completely torn down. If we kill the memberlist-side handlers
+    // those I/O handlers might get stuck.
+    if let Err(e) = self.transport.shutdown().await {
+      tracing::error!(target =  "memberlist", err=%e, "failed to shutdown transport");
+      return Err(e);
+    }
+
+    // Now tear down everything else.
+    self.hot.shutdown.store(true, Ordering::Relaxed);
+    self.shutdown_tx.close();
+    Ok(())
+  }
+}
+
 impl<T: Transport> Drop for MemberlistCore<T> {
   fn drop(&mut self) {
-    self.shutdown_tx.close();
+    use pollster::FutureExt as _;
+    if self.hot.shutdown.load(Ordering::Relaxed) {
+      return;
+    }
+
+    let _ = self.shutdown().block_on();
   }
 }
 
@@ -687,23 +715,7 @@ where
   ///
   /// This method is safe to call multiple times.
   pub async fn shutdown(&self) -> Result<(), Error<T, D>> {
-    let _mu = self.inner.shutdown_lock.lock().await;
-
-    if self.has_shutdown() {
-      return Ok(());
-    }
-
-    // Shut down the transport first, which should block until it's
-    // completely torn down. If we kill the memberlist-side handlers
-    // those I/O handlers might get stuck.
-    if let Err(e) = self.inner.transport.shutdown().await {
-      tracing::error!(target =  "memberlist", err=%e, "failed to shutdown transport");
-    }
-
-    // Now tear down everything else.
-    self.inner.hot.shutdown.store(true, Ordering::Relaxed);
-    self.inner.shutdown_tx.close();
-    Ok(())
+    self.inner.shutdown().await.map_err(Error::Transport)
   }
 }
 

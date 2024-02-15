@@ -1,5 +1,6 @@
 use agnostic::{smol::SmolRuntime, Runtime};
 use memberlist_core::tests::run as run_unit_test;
+#[cfg(not(any(feature = "tls", feature = "native-tls")))]
 use memberlist_net::stream_layer::tcp::Tcp;
 
 fn run(fut: impl std::future::Future<Output = ()>) {

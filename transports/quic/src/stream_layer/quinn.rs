@@ -1,11 +1,19 @@
-use std::{marker::PhantomData, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+  marker::PhantomData,
+  net::SocketAddr,
+  sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+  },
+  time::Duration,
+};
 
 use agnostic::{net::Net, Runtime};
 use bytes::Bytes;
 use futures::{AsyncReadExt, AsyncWriteExt};
 use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 use peekable::future::{AsyncPeekExt, AsyncPeekable};
-use quinn::{ClientConfig, ConnectError, Endpoint, RecvStream, SendStream, VarInt};
+use quinn::{ClientConfig, ConnectError, Connection, Endpoint, RecvStream, SendStream, VarInt};
 use smol_str::SmolStr;
 
 mod error;
@@ -14,10 +22,7 @@ pub use error::*;
 mod options;
 pub use options::*;
 
-use super::{
-  QuicBiAcceptor, QuicBiStream, QuicConnector, QuicReadStream, QuicUniAcceptor, QuicWriteStream,
-  StreamLayer,
-};
+use super::{QuicAcceptor, QuicConnection, QuicConnector, QuicStream, StreamLayer};
 
 /// [`Quinn`] is an implementation of [`StreamLayer`] based on [`quinn`].
 pub struct Quinn<R> {
@@ -37,12 +42,10 @@ impl<R> Quinn<R> {
 
 impl<R: Runtime> StreamLayer for Quinn<R> {
   type Error = QuinnError;
-  type BiAcceptor = QuinnAcceptor<R>;
-  type UniAcceptor = QuinnAcceptor<R>;
+  type Acceptor = QuinnAcceptor<R>;
   type Connector = QuinnConnector<R>;
-  type Stream = QuinnBiStream<R>;
-  type ReadStream = QuinnReadStream<R>;
-  type WriteStream = QuinnWriteStream<R>;
+  type Connection = QuinnConnection<R>;
+  type Stream = QuinnStream<R>;
 
   fn max_stream_data(&self) -> usize {
     self.opts.max_stream_data.min(self.opts.max_connection_data)
@@ -51,26 +54,17 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
   async fn bind(
     &self,
     addr: SocketAddr,
-  ) -> std::io::Result<(
-    (SocketAddr, Self::BiAcceptor, Self::UniAcceptor),
-    Self::Connector,
-  )> {
+  ) -> std::io::Result<(SocketAddr, Self::Acceptor, Self::Connector)> {
     let server_name = self.opts.server_name.clone();
 
     let client_config = self.opts.client_config.clone();
-    let sock = socket2::Socket::new(
-      socket2::Domain::for_address(addr),
-      socket2::Type::DGRAM,
-      Some(socket2::Protocol::UDP),
-    )?;
-    sock.set_nonblocking(true)?;
-
+    let sock = std::net::UdpSocket::bind(addr)?;
     let auto_port = addr.port() == 0;
 
     let endpoint = Arc::new(Endpoint::new(
       self.opts.endpoint_config.clone(),
       Some(self.opts.server_config.clone()),
-      sock.into(),
+      sock,
       Arc::new(<R::Net as Net>::Quinn::default()),
     )?);
 
@@ -83,15 +77,10 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
       );
     }
 
-    let bi_acceptor = Self::BiAcceptor {
+    let acceptor = Self::Acceptor {
       endpoint: endpoint.clone(),
       local_addr,
-      _marker: PhantomData,
-    };
-
-    let uni_acceptor = Self::UniAcceptor {
-      endpoint: endpoint.clone(),
-      local_addr,
+      max_open_streams: self.opts.max_open_streams,
       _marker: PhantomData,
     };
 
@@ -100,9 +89,10 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
       endpoint,
       local_addr,
       client_config,
+      max_open_streams: self.opts.max_open_streams,
       _marker: PhantomData,
     };
-    Ok(((local_addr, bi_acceptor, uni_acceptor), connector))
+    Ok((local_addr, acceptor, connector))
   }
 }
 
@@ -110,6 +100,7 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
 pub struct QuinnAcceptor<R> {
   endpoint: Arc<Endpoint>,
   local_addr: SocketAddr,
+  max_open_streams: usize,
   _marker: PhantomData<R>,
 }
 
@@ -118,29 +109,33 @@ impl<R> Clone for QuinnAcceptor<R> {
     Self {
       endpoint: self.endpoint.clone(),
       local_addr: self.local_addr,
+      max_open_streams: self.max_open_streams,
       _marker: PhantomData,
     }
   }
 }
 
-impl<R: Runtime> QuicBiAcceptor for QuinnAcceptor<R> {
+impl<R: Runtime> QuicAcceptor for QuinnAcceptor<R> {
   type Error = QuinnError;
-  type BiStream = QuinnBiStream<R>;
+  type Connection = QuinnConnection<R>;
 
-  async fn accept_bi(&self) -> Result<(Self::BiStream, SocketAddr), Self::Error> {
+  async fn accept(&mut self) -> Result<(Self::Connection, SocketAddr), Self::Error> {
     let conn = self
       .endpoint
       .accept()
       .await
-      .ok_or(ConnectError::EndpointStopping)?;
+      .ok_or(ConnectError::EndpointStopping)?
+      .await?;
+    let remote_addr = conn.remote_address();
+    Ok((
+      QuinnConnection::new(conn, self.local_addr, remote_addr, self.max_open_streams),
+      remote_addr,
+    ))
+  }
 
-    let remote = conn.remote_address();
-    conn
-      .await?
-      .accept_bi()
-      .await
-      .map(|(send, recv)| (QuinnBiStream::new(send, recv), remote))
-      .map_err(Into::into)
+  async fn close(&mut self) -> Result<(), Self::Error> {
+    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close acceptor");
+    Ok(())
   }
 
   fn local_addr(&self) -> SocketAddr {
@@ -148,111 +143,42 @@ impl<R: Runtime> QuicBiAcceptor for QuinnAcceptor<R> {
   }
 }
 
-impl<R: Runtime> QuicUniAcceptor for QuinnAcceptor<R> {
-  type Error = QuinnError;
-  type ReadStream = QuinnReadStream<R>;
-
-  async fn accept_uni(&self) -> Result<(Self::ReadStream, SocketAddr), Self::Error> {
-    let conn = self
-      .endpoint
-      .accept()
-      .await
-      .ok_or(ConnectError::EndpointStopping)?;
-    let remote = conn.remote_address();
-    conn
-      .await?
-      .accept_uni()
-      .await
-      .map(|s| (QuinnReadStream::new(s.peekable()), remote))
-      .map_err(Into::into)
-  }
-
-  fn local_addr(&self) -> SocketAddr {
-    self.local_addr
-  }
-}
-
-/// [`QuinnListener`] is an implementation of [`Listener`] based on [`quinn`].
+/// [`QuinnConnector`] is an implementation of [`QuicConnector`] based on [`quinn`].
 pub struct QuinnConnector<R> {
   server_name: SmolStr,
   endpoint: Arc<Endpoint>,
   client_config: ClientConfig,
   local_addr: SocketAddr,
+  max_open_streams: usize,
   _marker: PhantomData<R>,
 }
 
 impl<R: Runtime> QuicConnector for QuinnConnector<R> {
   type Error = QuinnError;
-  type BiStream = QuinnBiStream<R>;
-  type WriteStream = QuinnWriteStream<R>;
+  type Connection = QuinnConnection<R>;
 
-  async fn open_bi(&self, addr: SocketAddr) -> Result<Self::BiStream, Self::Error> {
-    self
+  async fn connect(&self, addr: SocketAddr) -> Result<Self::Connection, Self::Error> {
+    let conn = self
       .endpoint
       .connect_with(self.client_config.clone(), addr, &self.server_name)?
-      .await?
-      .open_bi()
-      .await
-      .map(|(send, recv)| QuinnBiStream::new(send, recv))
-      .map_err(Into::into)
+      .await?;
+    Ok(QuinnConnection::new(
+      conn,
+      self.local_addr,
+      addr,
+      self.max_open_streams,
+    ))
   }
 
-  async fn open_bi_with_timeout(
+  async fn connect_with_timeout(
     &self,
     addr: SocketAddr,
     timeout: Duration,
-  ) -> Result<Self::BiStream, Self::Error> {
-    let fut = async {
-      self
-        .endpoint
-        .connect_with(self.client_config.clone(), addr, &self.server_name)?
-        .await?
-        .open_bi()
-        .await
-        .map(|(send, recv)| QuinnBiStream::new(send, recv))
-        .map_err(Into::into)
-    };
-
+  ) -> Result<Self::Connection, Self::Error> {
     if timeout == Duration::ZERO {
-      fut.await
+      self.connect(addr).await
     } else {
-      R::timeout(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::connection_timeout())?
-    }
-  }
-
-  async fn open_uni(&self, addr: SocketAddr) -> Result<Self::WriteStream, Self::Error> {
-    self
-      .endpoint
-      .connect_with(self.client_config.clone(), addr, &self.server_name)?
-      .await?
-      .open_uni()
-      .await
-      .map(QuinnWriteStream::new)
-      .map_err(Into::into)
-  }
-
-  async fn open_uni_with_timeout(
-    &self,
-    addr: SocketAddr,
-    timeout: Duration,
-  ) -> Result<Self::WriteStream, Self::Error> {
-    let fut = async {
-      self
-        .endpoint
-        .connect_with(self.client_config.clone(), addr, &self.server_name)?
-        .await?
-        .open_uni()
-        .await
-        .map(QuinnWriteStream::new)
-        .map_err(Into::into)
-    };
-
-    if timeout == Duration::ZERO {
-      fut.await
-    } else {
-      R::timeout(timeout, fut)
+      R::timeout(timeout, async { self.connect(addr).await })
         .await
         .map_err(|_| Self::Error::connection_timeout())?
     }
@@ -263,175 +189,47 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
     Ok(())
   }
 
+  async fn wait_idle(&self) -> Result<(), Self::Error> {
+    self.endpoint.wait_idle().await;
+    Ok(())
+  }
+
   fn local_addr(&self) -> SocketAddr {
     self.local_addr
   }
 }
 
-/// [`QuinnReadStream`] is an implementation of [`QuicReadStream`] based on [`quinn`].
-pub struct QuinnReadStream<R> {
-  stream: AsyncPeekable<RecvStream>,
-  timeout: Option<Duration>,
-  _marker: PhantomData<R>,
-}
-
-impl<R> QuinnReadStream<R> {
-  const fn new(stream: AsyncPeekable<RecvStream>) -> Self {
-    Self {
-      stream,
-      timeout: None,
-      _marker: PhantomData,
-    }
-  }
-}
-
-impl<R: Runtime> TimeoutableReadStream for QuinnReadStream<R> {
-  fn set_read_timeout(&mut self, timeout: Option<Duration>) {
-    self.timeout = timeout;
-  }
-
-  fn read_timeout(&self) -> Option<Duration> {
-    self.timeout
-  }
-}
-
-impl<R: Runtime> QuicReadStream for QuinnReadStream<R> {
-  type Error = QuinnReadStreamError;
-
-  async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
-    let fut = async { self.stream.read_exact(buf).await.map_err(Self::Error::from) };
-
-    match self.timeout {
-      Some(timeout) => R::timeout(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::Timeout)?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-    let fut = async { self.stream.read(buf).await.map_err(Self::Error::from) };
-
-    match self.timeout {
-      Some(timeout) => R::timeout(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::Timeout)?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn peek_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
-    let fut = async { self.stream.peek_exact(buf).await.map_err(Self::Error::from) };
-
-    match self.timeout {
-      Some(timeout) => R::timeout(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::Timeout)?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn peek(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-    let fut = async { self.stream.peek(buf).await.map_err(Self::Error::from) };
-
-    match self.timeout {
-      Some(timeout) => R::timeout(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::Timeout)?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn close(&mut self) -> Result<(), Self::Error> {
-    self
-      .stream
-      .get_mut()
-      .1
-      .stop(VarInt::from_u32(0))
-      .map_err(|_| QuinnReadStreamError::Read(quinn::ReadError::UnknownStream))
-  }
-}
-
-/// [`QuinnWriteStream`] is an implementation of [`QuicWriteStream`] based on [`quinn`].
-pub struct QuinnWriteStream<R> {
-  stream: SendStream,
-  timeout: Option<Duration>,
-  _marker: PhantomData<R>,
-}
-
-impl<R> QuinnWriteStream<R> {
-  const fn new(stream: SendStream) -> Self {
-    Self {
-      stream,
-      timeout: None,
-      _marker: PhantomData,
-    }
-  }
-}
-
-impl<R: Runtime> TimeoutableWriteStream for QuinnWriteStream<R> {
-  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
-    self.timeout = timeout;
-  }
-
-  fn write_timeout(&self) -> Option<Duration> {
-    self.timeout
-  }
-}
-
-impl<R: Runtime> QuicWriteStream for QuinnWriteStream<R> {
-  type Error = QuinnWriteStreamError;
-
-  async fn write_all(&mut self, src: Bytes) -> Result<usize, Self::Error> {
-    let fut = async {
-      self
-        .stream
-        .write_all(&src)
-        .await
-        .map(|_| src.len())
-        .map_err(Into::into)
-    };
-
-    match self.timeout {
-      Some(timeout) => R::timeout(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::Timeout)?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn flush(&mut self) -> Result<(), Self::Error> {
-    self.stream.flush().await.map_err(Into::into)
-  }
-
-  async fn close(&mut self) -> Result<(), Self::Error> {
-    self.stream.finish().await.map_err(Into::into)
-  }
-}
-
-/// [`QuinnBiStream`] is an implementation of [`QuicBiStream`] based on [`quinn`].
-pub struct QuinnBiStream<R> {
+/// [`QuinnStream`] is an implementation of [`QuicStream`] based on [`quinn`].
+pub struct QuinnStream<R> {
   send: SendStream,
   recv: AsyncPeekable<RecvStream>,
   read_timeout: Option<Duration>,
   write_timeout: Option<Duration>,
+  local_id: Arc<AtomicUsize>,
   _marker: PhantomData<R>,
 }
 
-impl<R> QuinnBiStream<R> {
+impl<R> QuinnStream<R> {
   #[inline]
-  fn new(send: SendStream, recv: RecvStream) -> Self {
+  fn new(send: SendStream, recv: RecvStream, local_id: Arc<AtomicUsize>) -> Self {
     Self {
       send,
       recv: recv.peekable(),
       read_timeout: None,
       write_timeout: None,
+      local_id,
       _marker: PhantomData,
     }
   }
 }
 
-impl<R: Runtime> QuicBiStream for QuinnBiStream<R> {
+impl<R> Drop for QuinnStream<R> {
+  fn drop(&mut self) {
+    self.local_id.fetch_sub(1, Ordering::AcqRel);
+  }
+}
+
+impl<R: Runtime> QuicStream for QuinnStream<R> {
   type Error = QuinnError;
 
   async fn write_all(&mut self, src: Bytes) -> Result<usize, Self::Error> {
@@ -459,6 +257,17 @@ impl<R: Runtime> QuicBiStream for QuinnBiStream<R> {
       .flush()
       .await
       .map_err(|e| QuinnError::Write(e.into()))
+  }
+
+  async fn finish(&mut self) -> Result<(), Self::Error> {
+    let fut = async { self.send.finish().await.map(|_| ()).map_err(Into::into) };
+
+    match self.write_timeout {
+      Some(timeout) => R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::write_timeout())?,
+      None => fut.await.map_err(Into::into),
+    }
   }
 
   async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
@@ -542,7 +351,21 @@ impl<R: Runtime> QuicBiStream for QuinnBiStream<R> {
   }
 }
 
-impl<R: Runtime> TimeoutableReadStream for QuinnBiStream<R> {
+impl<R: Runtime> futures::AsyncRead for QuinnStream<R> {
+  fn poll_read(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+    buf: &mut [u8],
+  ) -> std::task::Poll<std::io::Result<usize>> {
+    use futures::Future;
+
+    let fut = self.recv.read(buf);
+    futures::pin_mut!(fut);
+    fut.poll(cx)
+  }
+}
+
+impl<R: Runtime> TimeoutableReadStream for QuinnStream<R> {
   fn set_read_timeout(&mut self, timeout: Option<Duration>) {
     self.read_timeout = timeout;
   }
@@ -552,12 +375,104 @@ impl<R: Runtime> TimeoutableReadStream for QuinnBiStream<R> {
   }
 }
 
-impl<R: Runtime> TimeoutableWriteStream for QuinnBiStream<R> {
+impl<R: Runtime> TimeoutableWriteStream for QuinnStream<R> {
   fn set_write_timeout(&mut self, timeout: Option<Duration>) {
     self.write_timeout = timeout;
   }
 
   fn write_timeout(&self) -> Option<Duration> {
     self.write_timeout
+  }
+}
+
+/// A connection based on [`quinn`].
+pub struct QuinnConnection<R> {
+  conn: Connection,
+  local_addr: SocketAddr,
+  remote_addr: SocketAddr,
+  current_opening_streams: Arc<AtomicUsize>,
+  max_open_streams: usize,
+  _marker: PhantomData<R>,
+}
+
+impl<R> QuinnConnection<R> {
+  #[inline]
+  fn new(
+    conn: Connection,
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    max_open_streams: usize,
+  ) -> Self {
+    Self {
+      conn,
+      local_addr,
+      remote_addr,
+      current_opening_streams: Arc::new(AtomicUsize::new(0)),
+      max_open_streams,
+      _marker: PhantomData,
+    }
+  }
+}
+
+impl<R: Runtime> QuicConnection for QuinnConnection<R> {
+  type Error = QuinnError;
+
+  type Stream = QuinnStream<R>;
+
+  async fn accept_bi(&self) -> Result<(Self::Stream, SocketAddr), Self::Error> {
+    let (send, recv) = self.conn.accept_bi().await?;
+    self.current_opening_streams.fetch_add(1, Ordering::AcqRel);
+    Ok((
+      QuinnStream::new(send, recv, self.current_opening_streams.clone()),
+      self.remote_addr,
+    ))
+  }
+
+  async fn open_bi(&self) -> Result<(Self::Stream, SocketAddr), Self::Error> {
+    let (send, recv) = self.conn.open_bi().await?;
+    self.current_opening_streams.fetch_add(1, Ordering::AcqRel);
+    Ok((
+      QuinnStream::new(send, recv, self.current_opening_streams.clone()),
+      self.remote_addr,
+    ))
+  }
+
+  async fn open_bi_with_timeout(
+    &self,
+    timeout: Duration,
+  ) -> Result<(Self::Stream, SocketAddr), Self::Error> {
+    let fut = async {
+      let (send, recv) = self.conn.open_bi().await?;
+      self.current_opening_streams.fetch_add(1, Ordering::AcqRel);
+      Ok((
+        QuinnStream::new(send, recv, self.current_opening_streams.clone()),
+        self.remote_addr,
+      ))
+    };
+
+    if timeout == Duration::ZERO {
+      fut.await
+    } else {
+      R::timeout(timeout, fut)
+        .await
+        .map_err(|_| Self::Error::connection_timeout())?
+    }
+  }
+
+  async fn close(&self) -> Result<(), Self::Error> {
+    self.conn.close(0u32.into(), b"close connection");
+    Ok(())
+  }
+
+  async fn is_closed(&self) -> bool {
+    self.conn.close_reason().is_some()
+  }
+
+  fn local_addr(&self) -> SocketAddr {
+    self.local_addr
+  }
+
+  fn is_full(&self) -> bool {
+    self.current_opening_streams.load(Ordering::Acquire) >= self.max_open_streams
   }
 }

@@ -28,7 +28,7 @@ where
     .with_label(label.cheap_clone());
   opts.add_bind_address(kind.next());
   let trans1 =
-    NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s1, opts).await?;
+    NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s1, opts).await?;
 
   let mut opts = NetTransportOptions::new("node 2".into())
     .with_primary_key(Some(pk))
@@ -39,7 +39,7 @@ where
   opts.add_bind_address(kind.next());
 
   let trans2 =
-    NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s2, opts).await?;
+    NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s2, opts).await?;
 
   send_in(trans1, trans2).await?;
   Ok(())

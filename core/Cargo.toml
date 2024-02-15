@@ -54,6 +54,7 @@ nodecraft.workspace = true
 transformable = { workspace = true, features = ["bytes", "smol_str"] }
 paste.workspace = true
 pin-project.workspace = true
+pollster.workspace = true
 rand = "0.8"
 scopeguard.workspace = true
 smol_str.workspace = true

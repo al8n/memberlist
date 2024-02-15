@@ -9,7 +9,7 @@ macro_rules! promised_listener_backoff_test_suites {
           let kind = memberlist_core::transport::tests::AddressKind::V4;
           if let Err(e) = memberlist_net::tests::listener_backoff::<
             memberlist_net::resolver::socket_addr::SocketAddrResolver<$rt>,
-            memberlist_net::NetTransport<smol_str::SmolStr, memberlist_net::resolver::socket_addr::SocketAddrResolver<$rt>, $layer<$rt>, memberlist_core::transport::Lpe<_, _>>,
+            memberlist_net::NetTransport<smol_str::SmolStr, memberlist_net::resolver::socket_addr::SocketAddrResolver<$rt>, $layer<$rt>, memberlist_core::transport::Lpe<_, _>, $rt>,
             $layer<$rt>,
           >(s, kind)
           .await
@@ -23,7 +23,7 @@ macro_rules! promised_listener_backoff_test_suites {
           let kind = memberlist_core::transport::tests::AddressKind::V6;
           if let Err(e) = memberlist_net::tests::listener_backoff::<
             memberlist_net::resolver::socket_addr::SocketAddrResolver<$rt>,
-            memberlist_net::NetTransport<smol_str::SmolStr, memberlist_net::resolver::socket_addr::SocketAddrResolver<$rt>, $layer<$rt>, memberlist_core::transport::Lpe<_, _>>,
+            memberlist_net::NetTransport<smol_str::SmolStr, memberlist_net::resolver::socket_addr::SocketAddrResolver<$rt>, $layer<$rt>, memberlist_core::transport::Lpe<_, _>, $rt>,
             $layer<$rt>,
           >(s, kind)
           .await

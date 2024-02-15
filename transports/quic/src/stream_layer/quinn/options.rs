@@ -157,9 +157,9 @@ impl Options {
       client_tls_config: Arc::new(client_tls_config),
       server_tls_config: Arc::new(server_tls_config),
       endpoint_config,
-      max_idle_timeout: 10 * 1000,
+      max_idle_timeout: Duration::from_secs(10).as_millis() as u32,
       max_concurrent_stream_limit: 256,
-      keep_alive_interval: Duration::from_secs(5),
+      keep_alive_interval: Duration::from_secs(8),
       max_connection_data: 15_000_000,
 
       // Ensure that one stream is not consuming the whole connection.
@@ -179,6 +179,7 @@ pub(super) struct QuinnOptions {
   endpoint_config: quinn::EndpointConfig,
   max_stream_data: usize,
   max_connection_data: usize,
+  max_open_streams: usize,
 }
 
 impl From<Options> for QuinnOptions {
@@ -225,6 +226,7 @@ impl From<Options> for QuinnOptions {
       endpoint_config,
       max_stream_data: max_stream_data as usize,
       max_connection_data: max_connection_data as usize,
+      max_open_streams: max_concurrent_stream_limit as usize,
     }
   }
 }
