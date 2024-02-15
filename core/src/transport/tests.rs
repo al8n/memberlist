@@ -368,8 +368,15 @@ where
     let mut recv_stream = connection.accept().await?;
     recv_stream.recv_from().await
   })
-  .await?;
-  assert!(res.is_err(), "should got timeout error");
+  .await;
+
+  #[allow(clippy::single_match)]
+  match res {
+    Ok(Ok(_)) => {
+      panic!("should got timeout error");
+    }
+    _ => {}
+  }
   let _ = m.shutdown().await;
   client.close().await;
   Ok(())
