@@ -1,18 +1,29 @@
+use std::future::Future;
+
+#[cfg(feature = "async-std")]
+use agnostic::async_std::AsyncStdRuntime;
+#[cfg(feature = "smol")]
+use agnostic::smol::SmolRuntime;
+#[cfg(feature = "tokio")]
+use agnostic::tokio::TokioRuntime;
+use agnostic::Runtime;
 use memberlist_quic::tests::quinn_stream_layer;
 
-use agnostic::{async_std::AsyncStdRuntime, smol::SmolRuntime, tokio::TokioRuntime, Runtime};
 use memberlist_core::tests::run as run_unit_test;
 
-fn tokio_run(fut: impl std::future::Future<Output = ()>) {
+#[cfg(feature = "tokio")]
+fn tokio_run(fut: impl Future<Output = ()>) {
   let runtime = ::tokio::runtime::Runtime::new().unwrap();
   run_unit_test(|fut| runtime.block_on(fut), fut)
 }
 
-fn smol_run(fut: impl std::future::Future<Output = ()>) {
+#[cfg(feature = "smol")]
+fn smol_run(fut: impl Future<Output = ()>) {
   run_unit_test(SmolRuntime::block_on, fut);
 }
 
-fn async_std_run(fut: impl std::future::Future<Output = ()>) {
+#[cfg(feature = "async-std")]
+fn async_std_run(fut: impl Future<Output = ()>) {
   run_unit_test(AsyncStdRuntime::block_on, fut);
 }
 
