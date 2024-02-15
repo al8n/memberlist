@@ -20,7 +20,7 @@ where
     .with_label(label.cheap_clone());
   opts.add_bind_address(kind.next());
   let trans =
-    QuicTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
+    QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
   let remote_addr = trans.advertise_address();
   let tc = QuicTransportTestClient::<_, R>::new(kind.next(), *remote_addr, c)
     .await?

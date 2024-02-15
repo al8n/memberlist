@@ -14,6 +14,10 @@ s2n = ["s2n-quic", "s2n-quic-transport", "futures/bilock", "futures/unstable"]
 serde = ["memberlist-core/serde", "dep:serde", "memberlist-utils/serde", "humantime-serde", "indexmap/serde"]
 metrics = ["memberlist-core/metrics", "memberlist-utils/metrics", "dep:metrics"]
 
+tokio = ["agnostic/tokio"]
+async-std = ["agnostic/async-std"]
+smol = ["agnostic/smol"]
+
 # enable DNS node address resolver
 dns = ["nodecraft/dns"]
 dns-over-quic = ["dns", "nodecraft/dns-over-quic"]
@@ -76,7 +80,7 @@ rayon = { version = "1.8", optional = true }
 weezl = { version = "0.1", optional = true }
 
 [dev-dependencies]
-agnostic = { workspace = true, features = ["async-std", "smol", "tokio", "net"] }
+agnostic = { workspace = true, features = ["net"] }
 memberlist-core = { workspace = true, features = ["test"] }
 smol_str.workspace = true
 tokio = { version = "1", features = ["full"] }

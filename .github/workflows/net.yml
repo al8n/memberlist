@@ -94,8 +94,8 @@ jobs:
       run: cargo hack build --feature-powerset --exclude-features serde,rkyv,dns-over-h3,dns-over-quic,dns-over-https-rustls,dns-over-rustls,dns-over-openssl,dns-over-native-tls,dns-webpki-roots,dns-native-certs,dnssec-openssl,dnssec-ring,dnssec
       working-directory: transports/net
 
-  test:
-    name: test
+  tokio-test:
+    name: tokio-test
     strategy:
       matrix:
         os:
@@ -121,7 +121,67 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test
-      run: cargo test --features test,tls,native-tls
+      run: cargo test --features test,tls,native-tls,tokio
+      working-directory: transports/net 
+  
+  async-std-test:
+    name: async-std-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          # - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,tls,native-tls,async-std
+      working-directory: transports/net 
+  
+  smol-test:
+    name: smol-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          # - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,tls,native-tls,smol
       working-directory: transports/net 
 
   coverage:
@@ -134,7 +194,9 @@ jobs:
     needs:
       - rustfmt
       - clippy
-      - test
+      - tokio-test
+      - async-std-test
+      - smol-test
       - build
     steps:
       - uses: actions/checkout@v3
@@ -160,8 +222,8 @@ jobs:
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --force
       - name: Run cargo-tarpaulin
-        working-directory: transports/net
-        run: cargo-tarpaulin -- --all-features --run-types tests -o xml 
+        working-directory: transports/quic
+        run: cargo-tarpaulin -- --features test,tls,native-tls,tokio --run-types tests -o xml 
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3.1.1
         with:

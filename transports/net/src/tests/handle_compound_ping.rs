@@ -31,7 +31,7 @@ where
     .with_label(label)
     .with_offload_size(20);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   handle_compound_ping(trans, client, super::compound_encoder).await?;

@@ -115,13 +115,27 @@ const NUM_PACKETS_PER_BATCH: usize = 255;
 /// sockets to in order to handle a large volume of messages.
 const PACKET_RECV_BUF_SIZE: usize = 2 * 1024 * 1024;
 
+#[cfg(feature = "tokio")]
+/// [`NetTransport`](crate::NetTransport) based on [`tokio`](https://crates.io/crates/tokio).
+pub type TokioNetTransport<I, A, S, W> = NetTransport<I, A, S, W, agnostic::tokio::TokioRuntime>;
+
+#[cfg(feature = "async-std")]
+/// [`NetTransport`](crate::NetTransport) based on [`async-std`](https://crates.io/crates/async-std).
+pub type AsyncStdNetTransport<I, A, S, W> =
+  NetTransport<I, A, S, W, agnostic::async_std::AsyncStdRuntime>;
+
+#[cfg(feature = "smol")]
+/// [`NetTransport`](crate::NetTransport) based on [`smol`](https://crates.io/crates/smol).
+pub type SmolNetTransport<I, A, S, W> = NetTransport<I, A, S, W, agnostic::smol::SmolRuntime>;
+
 /// The net transport based on TCP/TLS and UDP
-pub struct NetTransport<I, A, S, W>
+pub struct NetTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   opts: Arc<NetTransportOptions<I, A>>,
   advertise_addr: A::ResolvedAddress,
@@ -142,12 +156,13 @@ where
   _marker: PhantomData<W>,
 }
 
-impl<I, A, S, W> NetTransport<I, A, S, W>
+impl<I, A, S, W, R> NetTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   /// Creates a new net transport.
   pub async fn new(
@@ -408,12 +423,13 @@ impl<I, A> Batch<I, A> {
   }
 }
 
-impl<I, A, S, W> Transport for NetTransport<I, A, S, W>
+impl<I, A, S, W, R> Transport for NetTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   type Error = NetTransportError<Self::Resolver, Self::Wire>;
 
@@ -702,12 +718,13 @@ where
   }
 }
 
-impl<I, A, S, W> Drop for NetTransport<I, A, S, W>
+impl<I, A, S, W, R> Drop for NetTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   fn drop(&mut self) {
     use pollster::FutureExt as _;

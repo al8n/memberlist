@@ -19,7 +19,7 @@ where
     .with_receive_verify_label(true);
   let mut opts = NetTransportOptions::new(name.into()).with_label(label);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;
@@ -47,7 +47,7 @@ where
     .with_label(label)
     .with_skip_inbound_label_check(server_check_label);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;
@@ -74,7 +74,7 @@ where
   let mut opts =
     NetTransportOptions::new(name.into()).with_skip_inbound_label_check(server_check_label);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;

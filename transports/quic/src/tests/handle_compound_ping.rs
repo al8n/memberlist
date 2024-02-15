@@ -21,7 +21,7 @@ where
     .with_offload_size(20);
   opts.add_bind_address(kind.next());
   let trans =
-    QuicTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
+    QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
   let remote_addr = trans.advertise_address();
   let tc = QuicTransportTestClient::<S, R>::with_num_responses(kind.next(), *remote_addr, c, 3)
     .await?

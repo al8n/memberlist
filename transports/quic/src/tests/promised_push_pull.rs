@@ -26,7 +26,7 @@ where
     .with_offload_size(100);
   opts.add_bind_address(kind.next());
   let trans =
-    QuicTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
+    QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
   promised_push_pull_in(trans, client).await?;
   Ok(())
 }
@@ -48,7 +48,7 @@ where
     QuicTransportOptions::new(name.into()).with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next());
   let trans =
-    QuicTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
+    QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
   promised_push_pull_in(trans, client).await?;
   Ok(())
 }
@@ -70,7 +70,7 @@ where
   let mut opts =
     QuicTransportOptions::new(name.into()).with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next());
-  let trans = QuicTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -96,7 +96,7 @@ where
     .with_compressor(Some(Compressor::default()))
     .with_label(label);
   opts.add_bind_address(kind.next());
-  let trans = QuicTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -118,7 +118,7 @@ where
 
   let mut opts = QuicTransportOptions::new(name.into());
   opts.add_bind_address(kind.next());
-  let trans = QuicTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -141,7 +141,7 @@ where
 
   let mut opts = QuicTransportOptions::new(name.into()).with_label(label);
   opts.add_bind_address(kind.next());
-  let trans = QuicTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;

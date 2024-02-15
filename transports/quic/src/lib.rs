@@ -77,13 +77,27 @@ enum StreamType {
   Packet = 1,
 }
 
+#[cfg(feature = "tokio")]
+/// [`QuicTransport`](crate::QuicTransport) based on [`tokio`](https://crates.io/crates/tokio).
+pub type TokioQuicTransport<I, A, S, W> = QuicTransport<I, A, S, W, agnostic::tokio::TokioRuntime>;
+
+#[cfg(feature = "async-std")]
+/// [`QuicTransport`](crate::QuicTransport) based on [`async-std`](https://crates.io/crates/async-std).
+pub type AsyncStdQuicTransport<I, A, S, W> =
+  QuicTransport<I, A, S, W, agnostic::async_std::AsyncStdRuntime>;
+
+#[cfg(feature = "smol")]
+/// [`QuicTransport`](crate::QuicTransport) based on [`smol`](https://crates.io/crates/smol).
+pub type SmolQuicTransport<I, A, S, W> = QuicTransport<I, A, S, W, agnostic::smol::SmolRuntime>;
+
 /// A [`Transport`] implementation based on QUIC
-pub struct QuicTransport<I, A, S, W>
+pub struct QuicTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   opts: QuicTransportOptions<I, A>,
   advertise_addr: A::ResolvedAddress,
@@ -107,13 +121,14 @@ where
   _marker: PhantomData<W>,
 }
 
-impl<I, A, S, W> QuicTransport<I, A, S, W>
+impl<I, A, S, W, R> QuicTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  <<A::Runtime as Runtime>::Interval as futures::Stream>::Item: Send + 'static,
+  R: Runtime,
+  <R::Interval as futures::Stream>::Item: Send + 'static,
 {
   /// Creates a new quic transport.
   pub async fn new(
@@ -293,12 +308,13 @@ where
   }
 }
 
-impl<I, A, S, W> QuicTransport<I, A, S, W>
+impl<I, A, S, W, R> QuicTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   fn fix_packet_overhead(&self) -> usize {
     #[cfg(feature = "compression")]
@@ -392,12 +408,13 @@ impl<I, A> Batch<I, A> {
   }
 }
 
-impl<I, A, S, W> Transport for QuicTransport<I, A, S, W>
+impl<I, A, S, W, R> Transport for QuicTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   type Error = QuicTransportError<A, S, W>;
 
@@ -693,12 +710,13 @@ where
   }
 }
 
-impl<I, A, S, W> Drop for QuicTransport<I, A, S, W>
+impl<I, A, S, W, R> Drop for QuicTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   fn drop(&mut self) {
     if self.shutdown_tx.is_closed() {
