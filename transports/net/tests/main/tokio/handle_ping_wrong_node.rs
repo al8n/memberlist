@@ -4,7 +4,7 @@ use super::*;
 
 #[cfg(not(any(feature = "tls", feature = "native-tls")))]
 handle_ping_wrong_node_test_suites!("tcp": TokioRuntime::run({
-  Tcp::<TokioRuntime>::new()
+  memberlist_net::stream_layer::tcp::Tcp::<TokioRuntime>::new()
 }));
 
 #[cfg(feature = "tls")]

@@ -6,7 +6,6 @@ use memberlist_net::tests::gossip_mismatch_keys::*;
 
 unit_tests_with_expr!(run(
   #[cfg(feature = "encryption")]
-  // #[should_panic]
   v4_promised_ping({
     let s = Tcp::<TokioRuntime>::new();
     let c = Tcp::<TokioRuntime>::new();

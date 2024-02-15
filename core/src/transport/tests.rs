@@ -170,12 +170,13 @@ where
     }
   });
 
-  let connection = client.accept().await?;
-  let mut recv_stream = connection.accept().await?;
-
-  let (in_, _) = R::timeout(WAIT_DURATION, recv_stream.recv_from())
-    .await
-    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
+  let (in_, _) = R::timeout(WAIT_DURATION, async {
+    let connection = client.accept().await?;
+    let mut recv_stream = connection.accept().await?;
+    recv_stream.recv_from().await
+  })
+  .await
+  .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
   assert_eq!(ack.seq_no, 42, "bad sequence no: {}", ack.seq_no);
 
@@ -242,12 +243,14 @@ where
     }
   });
 
-  let connection = client.accept().await?;
+  let connection = R::timeout(WAIT_DURATION, client.accept()).await??;
   for _ in 0..3 {
-    let mut recv_stream = connection.accept().await?;
-    let (in_, _) = R::timeout(WAIT_DURATION, recv_stream.recv_from())
-      .await
-      .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
+    let (in_, _) = R::timeout(WAIT_DURATION, async {
+      let mut recv_stream = connection.accept().await?;
+      recv_stream.recv_from().await
+    })
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
     let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
     assert_eq!(ack.seq_no, 42, "bad sequence no: {}", ack.seq_no);
   }
@@ -306,11 +309,13 @@ where
     }
   });
 
-  let connection = client.accept().await?;
-  let mut recv_stream = connection.accept().await?;
-  let (in_, _) = R::timeout(WAIT_DURATION, recv_stream.recv_from())
-    .await
-    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
+  let (in_, _) = R::timeout(WAIT_DURATION, async {
+    let connection = client.accept().await?;
+    let mut recv_stream = connection.accept().await?;
+    recv_stream.recv_from().await
+  })
+  .await
+  .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
   assert_eq!(ack.seq_no, 100, "bad sequence no: {}", ack.seq_no);
   let res = futures::select! {
@@ -358,12 +363,13 @@ where
   send_stream.send_to(&buf).await?;
 
   // Wait for response
-  R::timeout(WAIT_DURATION, async {
+  let res = R::timeout(WAIT_DURATION, async {
     let connection = client.accept().await?;
     let mut recv_stream = connection.accept().await?;
     recv_stream.recv_from().await
   })
-  .await??;
+  .await?;
+  assert!(res.is_err(), "should got timeout error");
   let _ = m.shutdown().await;
   client.close().await;
   Ok(())
@@ -423,11 +429,13 @@ where
     }
   });
 
-  let connection = client.accept().await?;
-  let mut recv_stream = connection.accept().await?;
-  let (in_, _) = R::timeout(WAIT_DURATION, recv_stream.recv_from())
-    .await
-    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
+  let (in_, _) = R::timeout(WAIT_DURATION, async {
+    let connection = client.accept().await?;
+    let mut recv_stream = connection.accept().await?;
+    recv_stream.recv_from().await
+  })
+  .await
+  .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
 
   // get the parts
   let parts = decoder(in_)?;

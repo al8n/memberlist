@@ -33,7 +33,7 @@ dnssec-ring = ["dns", "nodecraft/dnssec-ring"]
 dnssec = ["dns", "nodecraft/dnssec"]
 
 # enable test feature
-test = ["memberlist-core/test", "rustls?/dangerous_configuration", "rcgen"]
+test = ["memberlist-core/test", "rustls?/dangerous_configuration", "rcgen", "compression"]
 
 [dependencies]
 auto_impl.workspace = true

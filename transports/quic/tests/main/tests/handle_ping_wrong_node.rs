@@ -3,7 +3,6 @@ macro_rules! __handle_ping_wrong_node {
   ($($prefix:literal: )? $rt:ident::$run:ident({ $s: expr })) => {
     paste::paste! {
       memberlist_core::unit_tests_with_expr!($run(
-        #[should_panic]
         [< $($prefix)? _handle_v4_ping_wrong_node_with_label_and_compression >] ({
           let s = $s;
           let c = $s;
@@ -15,7 +14,6 @@ macro_rules! __handle_ping_wrong_node {
             panic!("{}", e);
           }
         }),
-        #[should_panic]
         [< $($prefix)? _handle_v6_ping_wrong_node_with_label_and_compression >] ({
           let s = $s;
           let c = $s;
