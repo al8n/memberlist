@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use std::{future::Future, net::SocketAddr};
+use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use agnostic::{
   net::{Net, UdpSocket},
@@ -11,7 +11,10 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::Stream;
 use memberlist_core::{
   tests::AnyError,
-  transport::tests::{AddressKind, TestPacketClient, TestPromisedClient},
+  transport::tests::{
+    AddressKind, TestPacketClient, TestPacketConnection, TestPacketStream, TestPromisedClient,
+    TestPromisedConnection, TestPromisedStream,
+  },
   types::Message,
 };
 use memberlist_utils::{Label, LabelBufMutExt};
@@ -70,6 +73,121 @@ pub mod send;
 #[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod join;
 
+/// A test client stream for network transport
+#[viewit::viewit(
+  vis_all = "",
+  getters(vis_all = "pub", style = "ref"),
+  setters(vis_all = "pub", prefix = "with")
+)]
+pub struct NetTransportTestPacketStream<R: Runtime> {
+  #[viewit(getter(skip), setter(skip))]
+  remote_addr: SocketAddr,
+  #[viewit(getter(skip), setter(skip))]
+  client: NetTransportTestClient<R>,
+}
+
+impl<R: Runtime> Clone for NetTransportTestPacketStream<R> {
+  fn clone(&self) -> Self {
+    Self {
+      remote_addr: self.remote_addr,
+      client: self.client.clone(),
+    }
+  }
+}
+
+impl<R: Runtime> TestPacketConnection for NetTransportTestPacketStream<R> {
+  type Stream = Self;
+
+  async fn accept(&self) -> Result<Self::Stream, AnyError> {
+    Ok(self.clone())
+  }
+
+  async fn connect(&self) -> Result<Self::Stream, AnyError> {
+    Ok(self.clone())
+  }
+}
+
+impl<R: Runtime> TestPacketStream for NetTransportTestPacketStream<R> {
+  async fn send_to(&mut self, src: &[u8]) -> Result<(), AnyError> {
+    let mut out = BytesMut::new();
+    if self.client.send_label {
+      out.add_label_header(&self.client.label);
+    }
+
+    let mut data = BytesMut::new();
+    data.put_u8(self.client.checksumer as u8);
+    // put checksum placeholder
+    data.put_u32(0);
+
+    if let Some(compressor) = self.client.send_compressed {
+      data.put_u8(compressor as u8);
+      let compressed = compressor.compress_into_bytes(src)?;
+      let cur = data.len();
+      // put compressed data length placeholder
+      data.put_u32(0);
+      NetworkEndian::write_u32(&mut data[cur..], compressed.len() as u32);
+      data.put_slice(&compressed);
+    } else {
+      data.put_slice(src);
+    }
+
+    let checksum = self.client.checksumer.checksum(&data[5..]);
+    NetworkEndian::write_u32(&mut data[1..], checksum);
+
+    if let Some((algo, pk)) = &self.client.send_encrypted {
+      let kr = SecretKeyring::new(*pk);
+      out.put_u8(*algo as u8);
+      let cur = out.len();
+      out.put_u32(0); // put encrypted data length placeholder
+      let nonce_offset = out.len();
+      let nonce = kr.write_header(&mut out);
+      let data_offset = out.len();
+      out.put_slice(&data);
+      let mut dst = out.split_off(data_offset);
+      kr.encrypt(*algo, *pk, nonce, self.client.label.as_bytes(), &mut dst)?;
+      out.unsplit(dst);
+      let encrypted_data_len = (out.len() - nonce_offset) as u32;
+      NetworkEndian::write_u32(&mut out[cur..], encrypted_data_len);
+    } else {
+      out.put_slice(&data);
+    }
+    self.client.socket.send_to(&out, self.remote_addr).await?;
+    Ok(())
+  }
+
+  async fn recv_from(&mut self) -> Result<(Bytes, SocketAddr), AnyError> {
+    let mut in_ = vec![0; 1500];
+    let (n, addr) = self.client.socket.recv_from(&mut in_).await?;
+    in_.truncate(n);
+    let mut src: Bytes = in_.into();
+    if self.client.receive_verify_label {
+      let received_label = read_label(&src)?;
+      assert_eq!(received_label, self.client.label);
+      src.advance(received_label.encoded_overhead());
+    }
+
+    let mut unencrypted = if let Some(pk) = self.client.receive_encrypted {
+      read_encrypted_data(pk, self.client.label.as_bytes(), &src)?
+    } else {
+      src
+    };
+
+    verify_checksum(&unencrypted)?;
+    unencrypted.advance(5);
+
+    let uncompressed = if self.client.receive_compressed {
+      read_compressed_data(&unencrypted)?.into()
+    } else {
+      unencrypted
+    };
+    Ok((uncompressed, addr))
+  }
+
+  async fn finish(&mut self) -> Result<(), AnyError> {
+    Ok(())
+  }
+}
+
 /// A test client for network transport
 #[viewit::viewit(
   vis_all = "",
@@ -78,7 +196,7 @@ pub mod join;
 )]
 pub struct NetTransportTestClient<R: Runtime> {
   #[viewit(getter(skip), setter(skip))]
-  socket: <R::Net as Net>::UdpSocket,
+  socket: Arc<<R::Net as Net>::UdpSocket>,
   #[viewit(getter(skip), setter(skip))]
   local_addr: SocketAddr,
   checksumer: Checksumer,
@@ -91,13 +209,30 @@ pub struct NetTransportTestClient<R: Runtime> {
   receive_encrypted: Option<SecretKey>,
 }
 
+impl<R: Runtime> Clone for NetTransportTestClient<R> {
+  fn clone(&self) -> Self {
+    Self {
+      socket: self.socket.clone(),
+      local_addr: self.local_addr,
+      checksumer: self.checksumer,
+      label: self.label.clone(),
+      send_label: self.send_label,
+      send_compressed: self.send_compressed,
+      send_encrypted: self.send_encrypted,
+      receive_verify_label: self.receive_verify_label,
+      receive_compressed: self.receive_compressed,
+      receive_encrypted: self.receive_encrypted,
+    }
+  }
+}
+
 impl<R: Runtime> NetTransportTestClient<R> {
   /// Creates a new test client with the given address
   pub async fn new(addr: SocketAddr) -> Result<Self, AnyError> {
     let socket = <<R::Net as Net>::UdpSocket as UdpSocket>::bind(addr).await?;
     Ok(Self {
       local_addr: socket.local_addr()?,
-      socket,
+      socket: Arc::new(socket),
       label: Label::empty(),
       send_label: false,
       checksumer: Checksumer::Crc32,
@@ -111,86 +246,71 @@ impl<R: Runtime> NetTransportTestClient<R> {
 }
 
 impl<R: Runtime> TestPacketClient for NetTransportTestClient<R> {
-  async fn send_to(&mut self, addr: &SocketAddr, src: &[u8]) -> Result<(), AnyError> {
-    let mut out = BytesMut::new();
-    if self.send_label {
-      out.add_label_header(&self.label);
-    }
-
-    let mut data = BytesMut::new();
-    data.put_u8(self.checksumer as u8);
-    // put checksum placeholder
-    data.put_u32(0);
-
-    if let Some(compressor) = self.send_compressed {
-      data.put_u8(compressor as u8);
-      let compressed = compressor.compress_into_bytes(src)?;
-      let cur = data.len();
-      // put compressed data length placeholder
-      data.put_u32(0);
-      NetworkEndian::write_u32(&mut data[cur..], compressed.len() as u32);
-      data.put_slice(&compressed);
-    } else {
-      data.put_slice(src);
-    }
-
-    let checksum = self.checksumer.checksum(&data[5..]);
-    NetworkEndian::write_u32(&mut data[1..], checksum);
-
-    if let Some((algo, pk)) = &self.send_encrypted {
-      let kr = SecretKeyring::new(*pk);
-      out.put_u8(*algo as u8);
-      let cur = out.len();
-      out.put_u32(0); // put encrypted data length placeholder
-      let nonce_offset = out.len();
-      let nonce = kr.write_header(&mut out);
-      let data_offset = out.len();
-      out.put_slice(&data);
-      let mut dst = out.split_off(data_offset);
-      kr.encrypt(*algo, *pk, nonce, self.label.as_bytes(), &mut dst)?;
-      out.unsplit(dst);
-      let encrypted_data_len = (out.len() - nonce_offset) as u32;
-      NetworkEndian::write_u32(&mut out[cur..], encrypted_data_len);
-    } else {
-      out.put_slice(&data);
-    }
-    self.socket.send_to(&out, addr).await?;
-    Ok(())
-  }
-
-  async fn recv_from(&mut self) -> Result<(Bytes, SocketAddr), AnyError> {
-    let mut in_ = vec![0; 1500];
-    let (n, addr) = self.socket.recv_from(&mut in_).await?;
-    in_.truncate(n);
-    let mut src: Bytes = in_.into();
-    if self.receive_verify_label {
-      let received_label = read_label(&src)?;
-      assert_eq!(received_label, self.label);
-      src.advance(received_label.encoded_overhead());
-    }
-
-    let mut unencrypted = if let Some(pk) = self.receive_encrypted {
-      read_encrypted_data(pk, self.label.as_bytes(), &src)?
-    } else {
-      src
-    };
-
-    verify_checksum(&unencrypted)?;
-    unencrypted.advance(5);
-
-    let uncompressed = if self.receive_compressed {
-      read_compressed_data(&unencrypted)?.into()
-    } else {
-      unencrypted
-    };
-    Ok((uncompressed, addr))
-  }
+  type Connection = NetTransportTestPacketStream<R>;
 
   fn local_addr(&self) -> SocketAddr {
     self.local_addr
   }
 
   async fn close(&mut self) {}
+
+  async fn accept(&mut self) -> Result<Self::Connection, AnyError> {
+    Ok(NetTransportTestPacketStream {
+      client: self.clone(),
+      remote_addr: "127.0.0.1:0".parse().unwrap(),
+    })
+  }
+
+  async fn connect(&self, addr: SocketAddr) -> Result<Self::Connection, AnyError> {
+    Ok(NetTransportTestPacketStream {
+      client: self.clone(),
+      remote_addr: addr,
+    })
+  }
+}
+
+pub struct NetTestPromisedStream<S: StreamLayer> {
+  stream: S::Stream,
+}
+
+impl<S: StreamLayer> AsMut<S::Stream> for NetTestPromisedStream<S> {
+  fn as_mut(&mut self) -> &mut S::Stream {
+    &mut self.stream
+  }
+}
+
+impl<S: StreamLayer> TestPromisedStream for NetTestPromisedStream<S> {
+  async fn finish(&mut self) -> Result<(), AnyError> {
+    Ok(())
+  }
+}
+
+pub struct NetTestPromisedConnection<S: StreamLayer> {
+  layer: Arc<S>,
+  remote_addr: SocketAddr,
+  ln: Arc<S::Listener>,
+}
+
+impl<S: StreamLayer> TestPromisedConnection for NetTestPromisedConnection<S> {
+  type Stream = NetTestPromisedStream<S>;
+
+  async fn accept(&self) -> Result<(Self::Stream, SocketAddr), AnyError> {
+    self
+      .ln
+      .accept()
+      .await
+      .map(|(stream, addr)| (NetTestPromisedStream { stream }, addr))
+      .map_err(Into::into)
+  }
+
+  async fn connect(&self) -> Result<Self::Stream, AnyError> {
+    self
+      .layer
+      .connect(self.remote_addr)
+      .await
+      .map(|stream| NetTestPromisedStream { stream })
+      .map_err(Into::into)
+  }
 }
 
 /// A test client for network transport
@@ -200,35 +320,38 @@ impl<R: Runtime> TestPacketClient for NetTransportTestClient<R> {
   setters(vis_all = "pub", prefix = "with")
 )]
 pub struct NetTransportTestPromisedClient<S: StreamLayer> {
-  ln: S::Listener,
-  layer: S,
+  ln: Arc<S::Listener>,
+  layer: Arc<S>,
 }
 
 impl<S: StreamLayer> NetTransportTestPromisedClient<S> {
   /// Creates a new test client with the given address
   pub fn new(layer: S, ln: S::Listener) -> Self {
-    Self { layer, ln }
+    Self {
+      layer: Arc::new(layer),
+      ln: Arc::new(ln),
+    }
   }
 }
 
 impl<S: StreamLayer> TestPromisedClient for NetTransportTestPromisedClient<S> {
-  type Stream = S::Stream;
+  type Stream = NetTestPromisedStream<S>;
+  type Connection = NetTestPromisedConnection<S>;
 
-  async fn connect(&self, addr: SocketAddr) -> Result<Self::Stream, AnyError> {
-    self.layer.connect(addr).await.map_err(Into::into)
+  async fn connect(&self, addr: SocketAddr) -> Result<Self::Connection, AnyError> {
+    Ok(NetTestPromisedConnection {
+      layer: self.layer.clone(),
+      remote_addr: addr,
+      ln: self.ln.clone(),
+    })
   }
 
-  async fn accept(&self) -> Result<(Self::Stream, SocketAddr), AnyError> {
-    let (stream, addr) = self.ln.accept().await?;
-    Ok((stream, addr))
-  }
-
-  async fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) -> Result<(), AnyError> {
-    Ok(())
-  }
-
-  async fn flush_stream(&self, _stream: &mut Self::Stream) -> Result<(), AnyError> {
-    Ok(())
+  async fn accept(&self) -> Result<Self::Connection, AnyError> {
+    Ok(NetTestPromisedConnection {
+      layer: self.layer.clone(),
+      remote_addr: "127.0.0.1:0".parse().unwrap(),
+      ln: self.ln.clone(),
+    })
   }
 
   async fn close(&self) -> Result<(), AnyError> {
@@ -318,8 +441,6 @@ fn compound_encoder(msgs: &[Message<SmolStr, SocketAddr>]) -> Result<Bytes, AnyE
 /// A helper function to create TLS stream layer for testing
 #[cfg(feature = "tls")]
 pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::Tls<R> {
-  use std::sync::Arc;
-
   use crate::tls::{rustls, NoopCertificateVerifier, Tls};
   use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 

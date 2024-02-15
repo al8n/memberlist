@@ -208,10 +208,6 @@ impl<S: StreamLayer> TestPacketConnection for QuicTestPacketConnection<S> {
       })
       .map_err(Into::into)
   }
-
-  async fn is_closed(&self) -> bool {
-    self.conn.is_closed().await
-  }
 }
 
 /// A test client for network transport
@@ -381,12 +377,12 @@ pub struct QuicTestConnection<S: StreamLayer> {
 impl<S: StreamLayer> TestPromisedConnection for QuicTestConnection<S> {
   type Stream = QuicTestPromisedStream<S>;
 
-  async fn accept(&self) -> Result<Self::Stream, AnyError> {
+  async fn accept(&self) -> Result<(Self::Stream, SocketAddr), AnyError> {
     self
       .conn
       .accept_bi()
       .await
-      .map(|(s, _)| QuicTestPromisedStream { stream: s })
+      .map(|(s, _)| (QuicTestPromisedStream { stream: s }, self.addr))
       .map_err(Into::into)
   }
 
@@ -397,11 +393,6 @@ impl<S: StreamLayer> TestPromisedConnection for QuicTestConnection<S> {
       .await
       .map(|(s, _)| QuicTestPromisedStream { stream: s })
       .map_err(Into::into)
-  }
-
-  /// is closed or not
-  async fn is_closed(&self) -> bool {
-    self.conn.is_closed().await
   }
 }
 
@@ -418,23 +409,15 @@ impl<S: StreamLayer> TestPromisedClient for QuicTransportTestPromisedClient<S> {
       .map_err(Into::into)
   }
 
-  async fn accept(&self) -> Result<(Self::Connection, SocketAddr), AnyError> {
+  async fn accept(&self) -> Result<Self::Connection, AnyError> {
     self
       .ln
       .lock()
       .await
       .accept()
       .await
-      .map(|(conn, addr)| (QuicTestConnection { conn, addr }, addr))
+      .map(|(conn, addr)| QuicTestConnection { conn, addr })
       .map_err(Into::into)
-  }
-
-  async fn cache_stream(&self, _: SocketAddr, mut stream: Self::Stream) -> Result<(), AnyError> {
-    stream.finish().await.map_err(Into::into)
-  }
-
-  async fn flush_stream(&self, stream: &mut Self::Stream) -> Result<(), AnyError> {
-    stream.stream.flush().await.map_err(Into::into)
   }
 
   async fn close(&self) -> Result<(), AnyError> {

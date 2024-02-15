@@ -78,8 +78,6 @@ pub trait TestPacketConnection: Send + Sync + 'static {
   fn accept(&self) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
 
   fn connect(&self) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
-
-  fn is_closed(&self) -> impl Future<Output = bool> + Send;
 }
 
 /// The client used to send/receive data to a transport
@@ -108,12 +106,9 @@ pub trait TestPromisedStream: Send + Sync + 'static {
 pub trait TestPromisedConnection: Send + Sync + 'static {
   type Stream: TestPromisedStream;
 
-  fn accept(&self) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
+  fn accept(&self) -> impl Future<Output = Result<(Self::Stream, SocketAddr), AnyError>> + Send;
 
   fn connect(&self) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
-
-  /// is closed or not
-  fn is_closed(&self) -> impl Future<Output = bool> + Send;
 }
 
 /// The client used to send/receive data to a transport
@@ -128,24 +123,10 @@ pub trait TestPromisedClient: Sized + Send + Sync + 'static {
   ) -> impl Future<Output = Result<Self::Connection, AnyError>> + Send;
 
   /// Accept a connection from the remote
-  fn accept(&self)
-    -> impl Future<Output = Result<(Self::Connection, SocketAddr), AnyError>> + Send;
+  fn accept(&self) -> impl Future<Output = Result<Self::Connection, AnyError>> + Send;
 
   /// Local address of the client
   fn local_addr(&self) -> std::io::Result<SocketAddr>;
-
-  /// Flush the stream
-  fn flush_stream(
-    &self,
-    stream: &mut Self::Stream,
-  ) -> impl Future<Output = Result<(), AnyError>> + Send;
-
-  /// Cache the stream
-  fn cache_stream(
-    &self,
-    addr: SocketAddr,
-    stream: Self::Stream,
-  ) -> impl Future<Output = Result<(), AnyError>> + Send;
 
   /// Close the client
   fn close(&self) -> impl Future<Output = Result<(), AnyError>> + Send;
@@ -536,7 +517,7 @@ where
   let (tx3, rx3) = async_channel::bounded(1);
   R::spawn_detach(async move {
     let mut num_accepted = 0;
-    let (acceptor, addr) = unwrap_ok!(ping_err_tx1.send(unwrap_ok!(ping_err_tx1.send(
+    let acceptor = unwrap_ok!(ping_err_tx1.send(unwrap_ok!(ping_err_tx1.send(
       R::timeout(ping_time_max, p1.accept())
         .await
         .map_err(Into::into)
@@ -546,7 +527,7 @@ where
         stream = acceptor.accept().fuse() => {
           num_accepted += 1;
           match stream {
-            Ok(mut stream) if num_accepted == 1 => {
+            Ok((mut stream, addr)) if num_accepted == 1 => {
               let (_, p) = unwrap_ok!(ping_err_tx1.send(
                 m1.inner
                   .transport
@@ -575,7 +556,7 @@ where
               // wait for the next ping
               let _ = rx1.recv().await;
             },
-            Ok(mut stream) if num_accepted == 2 => {
+            Ok((mut stream, addr)) if num_accepted == 2 => {
               let (_, p) = unwrap_ok!(ping_err_tx1.send(
                 m1.inner
                   .transport
@@ -602,7 +583,7 @@ where
               let _ = stream.finish().await;
               let _ = rx2.recv().await;
             },
-            Ok(mut stream) if num_accepted == 3 => {
+            Ok((mut stream, addr)) if num_accepted == 3 => {
               let _ = unwrap_ok!(ping_err_tx1.send(
                 m1.inner
                   .transport
