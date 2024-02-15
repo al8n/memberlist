@@ -256,7 +256,7 @@ jobs:
         run: cargo install cargo-tarpaulin --force
       - name: Run cargo-tarpaulin
         working-directory: transports/quic
-        run: cargo-tarpaulin -- --features quinn,s2n,tokio --run-types tests -o xml 
+        run: cargo-tarpaulin -- --features test,quinn,tokio --run-types tests -o xml 
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3.1.1
         with:
