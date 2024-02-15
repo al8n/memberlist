@@ -166,6 +166,11 @@ jobs:
       - name: Run cargo-tarpaulin
         working-directory: transports/quic
         run: cargo-tarpaulin -- --features compression,quinn,dns,s2n --run-types tests -o xml 
+      - name: Run tarpaulin
+        uses: actions-rs/cargo@v1
+        with:
+          command: tarpaulin
+          args: --all-features --run-types tests --run-types doctests --workspace --out xml
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3.1.1
         with:
