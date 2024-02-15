@@ -372,9 +372,7 @@ jobs:
         os:
           - ubuntu-latest
     runs-on: ${{ matrix.os }}
-    needs:
-      - rustfmt
-      - clippy
+    needs: 
       - tokio-tcp-test
       - async-std-tcp-test
       - smol-tcp-test
@@ -384,7 +382,6 @@ jobs:
       - tokio-native-tls-test
       - async-std-native-tls-test
       - smol-native-tls-test
-      - build
     steps:
       - uses: actions/checkout@v3
       - name: Install latest nightly
@@ -410,7 +407,7 @@ jobs:
         run: cargo install cargo-tarpaulin --force
       - name: Run cargo-tarpaulin
         working-directory: transports/quic
-        run: cargo-tarpaulin -- --features test,tokio --run-types tests -o xml 
+        run: cargo-tarpaulin --features test,tokio --run-types tests -o xml 
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3.1.1
         with:
