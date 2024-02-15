@@ -21,7 +21,7 @@ use agnostic::{
   Runtime,
 };
 use byteorder::{ByteOrder, NetworkEndian};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use checksum::CHECKSUM_SIZE;
 use futures::{io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt};
 use memberlist_core::{

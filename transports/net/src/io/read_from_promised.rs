@@ -321,6 +321,8 @@ where
     auth_data: &[u8],
     data: BytesMut,
   ) -> Result<Message<I, A::ResolvedAddress>, NetTransportError<A, W>> {
+    use bytes::Buf;
+
     let mut buf = Self::decrypt(encryptor, algo, keys, auth_data, data)?;
     let tag = buf[0];
     if !COMPRESS_TAG.contains(&tag) {
