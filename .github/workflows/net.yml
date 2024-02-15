@@ -91,11 +91,11 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run build (unix)
-      run: cargo hack build --feature-powerset --exclude-features serde,rkyv,dns-over-h3,dns-over-quic,dns-over-https-rustls,dns-over-rustls,dns-over-openssl,dns-over-native-tls,dns-webpki-roots,dns-native-certs,dnssec-openssl,dnssec-ring,dnssec
+      run: cargo hack build --feature-powerset --exclude-features tokio,async-std,smol,serde,rkyv,dns-over-h3,dns-over-quic,dns-over-https-rustls,dns-over-rustls,dns-over-openssl,dns-over-native-tls,dns-webpki-roots,dns-native-certs,dnssec-openssl,dnssec-ring,dnssec
       working-directory: transports/net
 
-  tokio-test:
-    name: tokio-test
+  tokio-tcp-test:
+    name: tokio-tcp-test
     strategy:
       matrix:
         os:
@@ -121,11 +121,11 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test
-      run: cargo test --features test,tls,native-tls,tokio
+      run: cargo test --features test,tokio
       working-directory: transports/net 
   
-  async-std-test:
-    name: async-std-test
+  async-std-tcp-test:
+    name: async-std-tcp-test
     strategy:
       matrix:
         os:
@@ -151,11 +151,11 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test
-      run: cargo test --features test,tls,native-tls,async-std
+      run: cargo test --features test,async-std
       working-directory: transports/net 
   
-  smol-test:
-    name: smol-test
+  smol-tcp-test:
+    name: smol-tcp-test
     strategy:
       matrix:
         os:
@@ -181,8 +181,189 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test
-      run: cargo test --features test,tls,native-tls,smol
+      run: cargo test --features test,smol
       working-directory: transports/net 
+
+
+  tokio-tls-test:
+    name: tokio-tls-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          # - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,tls,tokio
+      working-directory: transports/net 
+  
+  async-std-tls-test:
+    name: async-std-tls-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          # - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,tls,async-std
+      working-directory: transports/net 
+  
+  smol-tls-test:
+    name: smol-tls-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          # - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,tls,smol
+      working-directory: transports/net 
+
+  tokio-native-tls-test:
+    name: tokio-native-tls-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          # - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,native-tls,tokio
+      working-directory: transports/net 
+  
+  async-std-native-tls-test:
+    name: async-std-native-tls-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          # - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,native-tls,async-std
+      working-directory: transports/net 
+  
+  smol-native-tls-test:
+    name: smol-native-tls-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          # - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,native-tls,smol
+      working-directory: transports/net
 
   coverage:
     name: coverage
@@ -194,9 +375,15 @@ jobs:
     needs:
       - rustfmt
       - clippy
-      - tokio-test
-      - async-std-test
-      - smol-test
+      - tokio-tcp-test
+      - async-std-tcp-test
+      - smol-tcp-test
+      - tokio-tls-test
+      - async-std-tls-test
+      - smol-tls-test
+      - tokio-native-tls-test
+      - async-std-native-tls-test
+      - smol-native-tls-test
       - build
     steps:
       - uses: actions/checkout@v3
@@ -223,7 +410,7 @@ jobs:
         run: cargo install cargo-tarpaulin --force
       - name: Run cargo-tarpaulin
         working-directory: transports/quic
-        run: cargo-tarpaulin -- --features test,tls,native-tls,tokio --run-types tests -o xml 
+        run: cargo-tarpaulin -- --features test,tokio --run-types tests -o xml 
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3.1.1
         with:

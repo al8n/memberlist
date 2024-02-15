@@ -1,6 +1,7 @@
 use super::*;
 use crate::promised_listener_backoff_test_suites;
 
+#[cfg(not(any(feature = "tls", feature = "native-tls")))]
 promised_listener_backoff_test_suites! {
   "tcp": Tcp<AsyncStdRuntime>::run({ Tcp::<AsyncStdRuntime>::new() })
 }

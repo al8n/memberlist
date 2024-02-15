@@ -1,6 +1,7 @@
 use super::*;
 use crate::handle_indirect_ping_test_suites;
 
+#[cfg(not(any(feature = "tls", feature = "native-tls")))]
 handle_indirect_ping_test_suites!("tcp": TokioRuntime::run({
   Tcp::<TokioRuntime>::new()
 }));
