@@ -170,7 +170,7 @@ where
     }
   });
 
-  let (in_, _) = R::timeout(WAIT_DURATION, async {
+  let (in_, _) = R::timeout_nonblocking(WAIT_DURATION, async {
     let connection = client.accept().await?;
     let mut recv_stream = connection.accept().await?;
     recv_stream.recv_from().await
@@ -243,9 +243,9 @@ where
     }
   });
 
-  let connection = R::timeout(WAIT_DURATION, client.accept()).await??;
+  let connection = R::timeout_nonblocking(WAIT_DURATION, client.accept()).await??;
   for _ in 0..3 {
-    let (in_, _) = R::timeout(WAIT_DURATION, async {
+    let (in_, _) = R::timeout_nonblocking(WAIT_DURATION, async {
       let mut recv_stream = connection.accept().await?;
       recv_stream.recv_from().await
     })
@@ -309,7 +309,7 @@ where
     }
   });
 
-  let (in_, _) = R::timeout(WAIT_DURATION, async {
+  let (in_, _) = R::timeout_nonblocking(WAIT_DURATION, async {
     let connection = client.accept().await?;
     let mut recv_stream = connection.accept().await?;
     recv_stream.recv_from().await
@@ -363,7 +363,7 @@ where
   send_stream.send_to(&buf).await?;
 
   // Wait for response
-  let res = R::timeout(WAIT_DURATION, async {
+  let res = R::timeout_nonblocking(WAIT_DURATION, async {
     let connection = client.accept().await?;
     let mut recv_stream = connection.accept().await?;
     recv_stream.recv_from().await
@@ -436,7 +436,7 @@ where
     }
   });
 
-  let (in_, _) = R::timeout(WAIT_DURATION, async {
+  let (in_, _) = R::timeout_nonblocking(WAIT_DURATION, async {
     let connection = client.accept().await?;
     let mut recv_stream = connection.accept().await?;
     recv_stream.recv_from().await
@@ -533,7 +533,7 @@ where
   R::spawn_detach(async move {
     let mut num_accepted = 0;
     let acceptor = unwrap_ok!(ping_err_tx1.send(unwrap_ok!(ping_err_tx1.send(
-      R::timeout(ping_time_max, p1.accept())
+      R::timeout_nonblocking(ping_time_max, p1.accept())
         .await
         .map_err(Into::into)
     ))));

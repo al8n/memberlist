@@ -196,7 +196,7 @@ impl<R: Runtime> QuicConnector for S2nConnector<R> {
     if timeout == Duration::ZERO {
       self.connect(addr).await
     } else {
-      R::timeout(timeout, async { self.connect(addr).await })
+      R::timeout_nonblocking(timeout, async { self.connect(addr).await })
         .await
         .map_err(|_| Self::Error::Timeout)?
     }
@@ -291,7 +291,7 @@ impl<R: Runtime> QuicConnection for S2nConnection<R> {
     if timeout == Duration::ZERO {
       self.open_bi().await
     } else {
-      R::timeout(timeout, async { self.open_bi().await })
+      R::timeout_nonblocking(timeout, async { self.open_bi().await })
         .await
         .map_err(|_| Self::Error::Timeout)?
     }
@@ -378,7 +378,7 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
     };
 
     match self.write_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+      Some(timeout) => R::timeout_nonblocking(timeout, fut)
         .await
         .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
       None => fut.await.map_err(Into::into),
@@ -393,7 +393,7 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
     let fut = async { self.send_stream.flush().await.map_err(Into::into) };
 
     match self.write_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+      Some(timeout) => R::timeout_nonblocking(timeout, fut)
         .await
         .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
       None => fut.await.map_err(Into::into),
@@ -404,7 +404,7 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
     let fut = async { self.recv_stream.read(buf).await.map_err(Into::into) };
 
     match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+      Some(timeout) => R::timeout_nonblocking(timeout, fut)
         .await
         .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
       None => fut.await.map_err(Into::into),
@@ -415,7 +415,7 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
     let fut = async { self.recv_stream.read_exact(buf).await.map_err(Into::into) };
 
     match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+      Some(timeout) => R::timeout_nonblocking(timeout, fut)
         .await
         .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
       None => fut.await.map_err(Into::into),
@@ -426,7 +426,7 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
     let fut = async { self.recv_stream.peek(buf).await.map_err(Into::into) };
 
     match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+      Some(timeout) => R::timeout_nonblocking(timeout, fut)
         .await
         .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
       None => fut.await.map_err(Into::into),
@@ -437,7 +437,7 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
     let fut = async { self.recv_stream.peek_exact(buf).await.map_err(Into::into) };
 
     match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+      Some(timeout) => R::timeout_nonblocking(timeout, fut)
         .await
         .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
       None => fut.await.map_err(Into::into),
