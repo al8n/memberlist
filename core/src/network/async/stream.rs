@@ -281,6 +281,9 @@ where
         if let Err(e) = self.send_message(&mut conn, ack.into()).await {
           tracing::error!(target =  "memberlist.stream", err=%e, remote_node = %addr, "failed to send ack response");
         }
+        if let Err(e) = self.inner.transport.cache_stream(&addr, conn).await {
+          tracing::warn!(target =  "memberlist.stream", err=%e, remote_node = %addr, "failed to cache stream");
+        }
       }
       Message::PushPull(pp) => {
         // Increment counter of pending push/pulls
@@ -305,6 +308,10 @@ where
 
         if let Err(e) = self.merge_remote_state(pp).await {
           tracing::error!(target =  "memberlist.stream", err=%e, remote_node = %addr, "failed to push/pull merge");
+        }
+
+        if let Err(e) = self.inner.transport.cache_stream(&addr, conn).await {
+          tracing::warn!(target =  "memberlist.stream", err=%e, remote_node = %addr, "failed to cache stream");
         }
       }
       Message::UserData(data) => {

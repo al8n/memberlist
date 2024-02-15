@@ -38,6 +38,9 @@ pub enum QuicTransportError<A: AddressResolver, S: StreamLayer, W: Wire> {
   /// Returns when the stream layer has error.
   #[error(transparent)]
   Stream(S::Error),
+  /// Returns when the using Wire to encode/decode message.
+  #[error(transparent)]
+  IO(#[from] std::io::Error),
 
   /// Returns when encode/decode error.
   #[error("wire error: {0}")]

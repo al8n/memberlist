@@ -78,6 +78,8 @@ where
       }};
     }
 
+    tracing::trace!(target = "memberlist.packet", addr = %from, packet=?msg, "handle packet");
+
     match msg {
       Message::Ping(ping) => self.handle_ping(ping, from).await,
       Message::IndirectPing(ind) => self.handle_indirect_ping(ind, from).await,
@@ -162,7 +164,6 @@ where
         payload: Bytes::new(),
       }
     };
-
     if let Err(e) = self.send_msg(p.source.address(), msg.into()).await {
       tracing::error!(target =  "memberlist.packet", addr = %from, err = %e, "failed to send ack response");
     }

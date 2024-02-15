@@ -10,6 +10,10 @@ metadata.workspace = true
 [features]
 default = ["dns", "compression", "encryption"]
 
+tokio = ["agnostic/tokio"]
+async-std = ["agnostic/async-std"]
+smol = ["agnostic/smol"]
+
 tls = ["dep:futures-rustls"]
 native-tls = ["dep:async-native-tls", "dep:native-tls"]
 
@@ -56,13 +60,11 @@ peekable = { version = "0.2", features = ["future"] }
 pin-project.workspace = true
 rand = "0.8"
 
-scopeguard.workspace = true
 memberlist-core.workspace = true
 memberlist-utils = { workspace = true, features = ["ipnet"] }
 thiserror.workspace = true
 tracing.workspace = true
 viewit.workspace = true
-wg = { version = "0.4", features = ["async"] }
 
 # tls
 futures-rustls = { version = "0.25", optional = true }
@@ -92,7 +94,7 @@ smol_str = { workspace = true, optional = true }
 test-cert-gen = { version = "0.9", optional = true }
 
 [dev-dependencies]
-agnostic = { workspace = true, features = ["async-std", "smol", "tokio", "net"] }
+agnostic = { workspace = true, features = ["net"] }
 memberlist-core = { workspace = true, features = ["test"] }
 smol_str.workspace = true
 tokio = { version = "1", features = ["full"] }

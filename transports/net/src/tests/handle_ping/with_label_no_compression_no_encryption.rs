@@ -15,14 +15,14 @@ where
 {
   let name = format!("{kind}_ping_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption");
   let label = Label::try_from(&name)?;
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_label(label.cheap_clone())
     .with_send_label(true)
     .with_receive_verify_label(true);
   let mut opts = NetTransportOptions::new(name.into()).with_label(label);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;
@@ -47,7 +47,7 @@ where
     "{kind}_ping_server_with_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption"
   );
   let label = Label::try_from(&name)?;
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_label(label.cheap_clone())
     .with_receive_verify_label(true);
@@ -55,7 +55,7 @@ where
     .with_label(label)
     .with_skip_inbound_label_check(server_check_label);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;
@@ -80,14 +80,14 @@ where
     "{kind}_ping_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption"
   );
   let label = Label::try_from(&name)?;
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_label(label.cheap_clone())
     .with_send_label(true);
   let mut opts =
     NetTransportOptions::new(name.into()).with_skip_inbound_label_check(server_check_label);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;

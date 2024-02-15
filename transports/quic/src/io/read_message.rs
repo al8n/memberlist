@@ -1,58 +1,62 @@
 use super::*;
 
-impl<I, A, S, W> QuicTransport<I, A, S, W>
+impl<I, A, S, W, R> QuicTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   pub(crate) async fn read_message_without_compression(
     &self,
     conn: &mut S::Stream,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), QuicTransportError<A, S, W>> {
-    let mut buf = [0u8; MAX_MESSAGE_LEN_SIZE];
-    let mut readed = 0;
-    conn
-      .read_exact(&mut buf)
+    // let mut buf = [0u8; MAX_MESSAGE_LEN_SIZE];
+    // let mut readed = 0;
+    // conn
+    //   .read_exact(&mut buf)
+    //   .await
+    //   .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    // readed += MAX_MESSAGE_LEN_SIZE;
+
+    // let msg_len = NetworkEndian::read_u32(&buf) as usize;
+    // if msg_len <= MAX_INLINED_BYTES {
+    //   let mut data = [0u8; MAX_INLINED_BYTES];
+    //   conn
+    //     .read_exact(&mut data[..msg_len])
+    //     .await
+    //     .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    //   readed += msg_len;
+    //   let (decoded_msg_len, msg) =
+    //     W::decode_message(&data[..msg_len]).map_err(QuicTransportError::Wire)?;
+
+    //   debug_assert_eq!(
+    //     msg_len, decoded_msg_len,
+    //     "expected bytes read {} is not match the actual bytes read {}",
+    //     msg_len, decoded_msg_len
+    //   );
+    //   return Ok((readed, msg));
+    // }
+
+    // let mut data = vec![0u8; msg_len];
+    // conn
+    //   .read_exact(&mut data)
+    //   .await
+    //   .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    // readed += msg_len;
+
+    // let (decoded_msg_len, msg) = W::decode_message(&data).map_err(QuicTransportError::Wire)?;
+
+    // debug_assert_eq!(
+    //   msg_len, decoded_msg_len,
+    //   "expected bytes read {} is not match the actual bytes read {}",
+    //   msg_len, decoded_msg_len
+    // );
+    // Ok((readed, msg))
+    W::decode_message_from_reader(conn)
       .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    readed += MAX_MESSAGE_LEN_SIZE;
-
-    let msg_len = NetworkEndian::read_u32(&buf) as usize;
-    if msg_len <= MAX_INLINED_BYTES {
-      let mut data = [0u8; MAX_INLINED_BYTES];
-      conn
-        .read_exact(&mut data[..msg_len])
-        .await
-        .map_err(|e| QuicTransportError::Stream(e.into()))?;
-      readed += msg_len;
-      let (decoded_msg_len, msg) =
-        W::decode_message(&data[..msg_len]).map_err(QuicTransportError::Wire)?;
-
-      debug_assert_eq!(
-        msg_len, decoded_msg_len,
-        "expected bytes read {} is not match the actual bytes read {}",
-        msg_len, decoded_msg_len
-      );
-      return Ok((readed, msg));
-    }
-
-    let mut data = vec![0u8; msg_len];
-    conn
-      .read_exact(&mut data)
-      .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    readed += msg_len;
-
-    let (decoded_msg_len, msg) = W::decode_message(&data).map_err(QuicTransportError::Wire)?;
-
-    debug_assert_eq!(
-      msg_len, decoded_msg_len,
-      "expected bytes read {} is not match the actual bytes read {}",
-      msg_len, decoded_msg_len
-    );
-    Ok((readed, msg))
+      .map_err(QuicTransportError::IO)
   }
 
   #[cfg(feature = "compression")]

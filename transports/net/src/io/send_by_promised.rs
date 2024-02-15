@@ -1,11 +1,12 @@
 use super::*;
 
-impl<I, A, S, W> NetTransport<I, A, S, W>
+impl<I, A, S, W, R> NetTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   #[cfg(feature = "encryption")]
   fn enable_promised_encryption(&self) -> bool {

@@ -2,6 +2,7 @@ use crate::send_test_suites;
 
 use super::*;
 
+#[cfg(not(any(feature = "tls", feature = "native-tls")))]
 send_test_suites!("tcp": TokioRuntime::run({
   Tcp::<TokioRuntime>::new()
 }));

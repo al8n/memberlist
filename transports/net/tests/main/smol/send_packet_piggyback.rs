@@ -1,6 +1,7 @@
 use super::*;
 use crate::send_packet_piggyback_test_suites;
 
+#[cfg(not(any(feature = "tls", feature = "native-tls")))]
 send_packet_piggyback_test_suites!("tcp": SmolRuntime::run({
   Tcp::<SmolRuntime>::new()
 }));

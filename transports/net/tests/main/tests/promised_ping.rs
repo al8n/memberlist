@@ -10,7 +10,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -22,7 +22,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -37,7 +37,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping_no_label::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -49,7 +49,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping_no_label::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -63,7 +63,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping_label_only::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -74,7 +74,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping_label_only::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -89,7 +89,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping_compression_only::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -101,7 +101,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping_compression_only::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -116,7 +116,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping_encryption_only::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -128,7 +128,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping_encryption_only::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -143,7 +143,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping_label_and_encryption::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -155,7 +155,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping_label_and_encryption::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -170,7 +170,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping_label_and_compression::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -182,7 +182,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) = memberlist_net::tests::promised_ping::promised_ping_label_and_compression::<_, $rt>(s, client, kind).await {
             panic!("{}", e);
           }
@@ -196,7 +196,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) =
           memberlist_net::tests::promised_ping::promised_ping_no_label_no_compression_no_encryption::<_, $rt>(s, client, kind).await
           {
@@ -209,7 +209,7 @@ macro_rules! promised_ping_test_suites {
           let c = $s;
           let client_addr = kind.next();
           let ln = memberlist_net::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
-          let client = memberlist_net::tests::NetTransporTestPromisedClient::new(c, ln);
+          let client = memberlist_net::tests::NetTransportTestPromisedClient::new(c, ln);
           if let Err(e) =
           memberlist_net::tests::promised_ping::promised_ping_no_label_no_compression_no_encryption::<_, $rt>(s, client, kind).await
           {

@@ -40,6 +40,7 @@ nodecraft = { version = "0.2", features = [
 ] }
 paste = "1"
 pin-project = "1"
+pollster = "0.3"
 scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 humantime-serde = "1"
@@ -49,7 +50,7 @@ transformable = { version = "0.1.6", features = ["smol_str", "bytes"] }
 thiserror = "1"
 tracing = "0.1"
 viewit = "0.1.5"
-wg = { version = "0.4", features = ["async"] }
+wg = { version = "0.6", features = ["future"] }
 
 memberlist-core = { path = "core", default-features = false }
 memberlist-net = { path = "transports/net", default-features = false }

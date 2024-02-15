@@ -100,9 +100,6 @@ pub mod tests {
   /// Any error type used for testing.
   pub type AnyError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-  /// Sequential access lock for tests.
-  static ACCESS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
-  // static PORT: AtomicU16 = AtomicU16::new(63000);
   /// Returns the next socket addr v4
   pub fn next_socket_addr_v4() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
@@ -119,7 +116,6 @@ pub mod tests {
     B: FnOnce(F) -> F::Output,
     F: std::future::Future<Output = ()>,
   {
-    let _mu = ACCESS_LOCK.lock();
     initialize_tests_tracing();
     block_on(fut);
   }
