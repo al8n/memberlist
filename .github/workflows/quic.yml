@@ -1,4 +1,4 @@
-name: quinn
+name: quic
 
 on:
   push:
