@@ -36,23 +36,17 @@ macro_rules! __label_only {
             panic!("{}", e);
           }
         }),
-        #[should_panic]
         [< $($prefix:snake)? _v4_server_with_label_client_no_label_panic>] ({
           let s = $s;
-          if let Err(e) =
-          memberlist_net::tests::label::with_label::server_with_label_client_no_label::<_, $rt>(s, memberlist_core::transport::tests::AddressKind::V4, false).await
-          {
-            panic!("{}", e);
-          }
+          let res =
+          memberlist_net::tests::label::with_label::server_with_label_client_no_label::<_, $rt>(s, memberlist_core::transport::tests::AddressKind::V4, false).await;
+          assert!(res.unwrap_err().to_string().contains("timeout"));
         }),
-        #[should_panic]
         [< $($prefix:snake)? _v6_server_with_label_client_no_label_panic>] ({
           let s = $s;
-          if let Err(e) =
-          memberlist_net::tests::label::with_label::server_with_label_client_no_label::<_, $rt>(s, memberlist_core::transport::tests::AddressKind::V6, false).await
-          {
-            panic!("{}", e);
-          }
+          let res =
+          memberlist_net::tests::label::with_label::server_with_label_client_no_label::<_, $rt>(s, memberlist_core::transport::tests::AddressKind::V6, false).await;
+          assert!(res.unwrap_err().to_string().contains("timeout"));
         }),
       ));
 
@@ -73,23 +67,17 @@ macro_rules! __label_only {
             panic!("{}", e);
           }
         }),
-        #[should_panic]
         [< $($prefix:snake)? _v4_server_no_label_client_with_label_panic>] ({
           let s = $s;
-          if let Err(e) =
-          memberlist_net::tests::label::with_label::server_no_label_client_with_label::<_, $rt>(s, memberlist_core::transport::tests::AddressKind::V4, false).await
-          {
-            panic!("{}", e);
-          }
+          let res =
+          memberlist_net::tests::label::with_label::server_no_label_client_with_label::<_, $rt>(s, memberlist_core::transport::tests::AddressKind::V4, false).await;
+          assert!(res.unwrap_err().to_string().contains("timeout"));
         }),
-        #[should_panic]
         [< $($prefix:snake)? _v6_server_no_label_client_with_label_panic>] ({
           let s = $s;
-          if let Err(e) =
-          memberlist_net::tests::label::with_label::server_no_label_client_with_label::<_, $rt>(s, memberlist_core::transport::tests::AddressKind::V6, false).await
-          {
-            panic!("{}", e);
-          }
+          let res =
+          memberlist_net::tests::label::with_label::server_no_label_client_with_label::<_, $rt>(s, memberlist_core::transport::tests::AddressKind::V6, false).await;
+          assert!(res.unwrap_err().to_string().contains("timeout"));
         }),
       ));
     }

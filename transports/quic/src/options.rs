@@ -1,3 +1,5 @@
+use indexmap::IndexSet;
+
 use super::*;
 
 /// Used to configure a net transport.
@@ -19,44 +21,19 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   id: I,
 
-  /// The local node's address.
-  #[viewit(
-    getter(const, style = "ref", attrs(doc = "Get the address of the node."),),
-    setter(attrs(doc = "Set the address of the node. (Builder pattern)"),)
-  )]
-  address: A::Address,
-
-  /// The address to advertise to other nodes. If not set,
-  /// the transport will attempt to discover the local IP address
-  /// to use.
-  #[viewit(
-    getter(const, attrs(doc = "Get the advertise address of the node."),),
-    setter(attrs(doc = "Set the advertise address of the node. (Builder pattern)"),)
-  )]
-  advertise_address: Option<A::ResolvedAddress>,
-
-  /// A list of addresses to bind to for both TCP and UDP
+  /// A set of addresses to bind to for both TCP and UDP
   /// communications.
   #[viewit(
     getter(
       style = "ref",
       const,
-      attrs(doc = "Get a list of addresses to bind to for both TCP and UDP communications."),
+      attrs(doc = "Get a list of addresses to bind to for QUIC communications."),
     ),
     setter(attrs(
-      doc = "Set the list of addresses to bind to for both TCP and UDP communications. (Builder pattern)"
+      doc = "Set the list of addresses to bind to for QUIC communications. (Builder pattern)"
     ),)
   )]
-  bind_addresses: SmallVec<IpAddr>,
-
-  /// The port for bind addresses of the node.
-  ///
-  /// Default is `7946`.
-  #[viewit(
-    getter(const, attrs(doc = "Get the port for bind address of the node."),),
-    setter(attrs(doc = "Set the port for bind address of the node. (Builder pattern)"),)
-  )]
-  bind_port: Option<u16>,
+  bind_addresses: IndexSet<A::Address>,
 
   /// Label is an optional set of bytes to include on the outside of each
   /// packet and stream.
@@ -91,6 +68,20 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
     setter(attrs(doc = "Set timeout used for I/O. (Builder pattern)"),)
   )]
   timeout: Option<Duration>,
+
+  /// The period of time to cleanup the connection pool.
+  #[cfg_attr(
+    feature = "serde",
+    serde(
+      with = "humantime_serde",
+      default = "default_connection_pool_cleanup_period"
+    )
+  )]
+  #[viewit(
+    getter(const, attrs(doc = "Get the cleanup period for the connection pool."),),
+    setter(attrs(doc = "Set the cleanup period for the connection pool"),)
+  )]
+  connection_pool_cleanup_period: Duration,
 
   /// Policy for Classless Inter-Domain Routing (CIDR).
   ///
@@ -181,17 +172,15 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I, A> {
   /// Creates a new net transport options by id and address, other configurations are left default.
-  pub fn new(id: I, address: A::Address) -> Self {
+  pub fn new(id: I) -> Self {
     Self {
       id,
-      address,
-      advertise_address: None,
       timeout: None,
-      bind_addresses: SmallVec::new(),
-      bind_port: Some(DEFAULT_PORT),
+      bind_addresses: IndexSet::new(),
       label: Label::empty(),
       skip_inbound_label_check: false,
       cidrs_policy: CIDRsPolicy::allow_all(),
+      connection_pool_cleanup_period: default_connection_pool_cleanup_period(),
       #[cfg(feature = "compression")]
       compressor: None,
       #[cfg(feature = "compression")]
@@ -200,4 +189,15 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I
       metric_labels: None,
     }
   }
+
+  /// Add bind address
+  pub fn add_bind_address(&mut self, addr: A::Address) -> &mut Self {
+    self.bind_addresses.insert(addr);
+    self
+  }
+}
+
+#[inline(always)]
+const fn default_connection_pool_cleanup_period() -> Duration {
+  Duration::from_secs(60)
 }

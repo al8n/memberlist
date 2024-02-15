@@ -14,6 +14,10 @@ pub enum QuinnError {
   /// Write error.
   #[error(transparent)]
   Write(#[from] QuinnWriteStreamError),
+
+  /// Stopped error.
+  #[error(transparent)]
+  Stopped(#[from] quinn::StoppedError),
 }
 
 impl QuinnError {
@@ -75,6 +79,7 @@ impl QuicError for QuinnError {
       Self::Connection(err) => err.is_remote_failure(),
       Self::Read(err) => err.is_remote_failure(),
       Self::Write(err) => err.is_remote_failure(),
+      Self::Stopped(_) => true,
     }
   }
 }
@@ -113,6 +118,9 @@ pub enum QuinnReadStreamError {
   /// Error reading exact data from the stream.
   #[error(transparent)]
   ReadExact(#[from] quinn::ReadExactError),
+  /// Error reading all data from the stream.
+  #[error(transparent)]
+  ReadToEnd(#[from] quinn::ReadToEndError),
 
   /// IO error.
   #[error(transparent)]
@@ -130,6 +138,10 @@ impl QuicError for QuinnReadStreamError {
       Self::ReadExact(err) => match err {
         quinn::ReadExactError::FinishedEarly => true,
         quinn::ReadExactError::ReadError(err) => is_read_error_remote_failure(err),
+      },
+      Self::ReadToEnd(err) => match err {
+        quinn::ReadToEndError::TooLong => false,
+        quinn::ReadToEndError::Read(err) => is_read_error_remote_failure(err),
       },
       Self::IO(_) => true,
       Self::Timeout => true,

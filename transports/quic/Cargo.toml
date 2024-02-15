@@ -9,10 +9,14 @@ homepage.workspace = true
 [features]
 default = ["compression", "quinn"]
 compression = ["rayon", "weezl"]
-quinn = ["agnostic/quinn", "dep:quinn", "rustls", "socket2"]
+quinn = ["agnostic/quinn", "dep:quinn", "rustls"]
 s2n = ["s2n-quic", "s2n-quic-transport", "futures/bilock", "futures/unstable"]
-serde = ["memberlist-core/serde", "dep:serde", "memberlist-utils/serde", "humantime-serde"]
+serde = ["memberlist-core/serde", "dep:serde", "memberlist-utils/serde", "humantime-serde", "indexmap/serde"]
 metrics = ["memberlist-core/metrics", "memberlist-utils/metrics", "dep:metrics"]
+
+tokio = ["agnostic/tokio"]
+async-std = ["agnostic/async-std"]
+smol = ["agnostic/smol"]
 
 # enable DNS node address resolver
 dns = ["nodecraft/dns"]
@@ -28,13 +32,18 @@ dnssec-openssl = ["dns", "nodecraft/dnssec-openssl"]
 dnssec-ring = ["dns", "nodecraft/dnssec-ring"]
 dnssec = ["dns", "nodecraft/dnssec"]
 
+# enable test feature
+test = ["memberlist-core/test", "rcgen", "compression"]
+
 [dependencies]
 auto_impl.workspace = true
 agnostic.workspace = true
 async-channel.workspace = true
 bytes.workspace = true
 byteorder.workspace = true
+crossbeam-skiplist = "0.1"
 futures.workspace = true
+indexmap = "2"
 local-ip-address = "0.5"
 memberlist-core.workspace = true
 memberlist-utils = { workspace = true, features = ["ipnet"] }
@@ -46,7 +55,6 @@ tracing.workspace = true
 thiserror.workspace = true
 smol_str.workspace = true
 viewit.workspace = true
-wg.workspace = true
 
 # serde
 serde = { workspace = true, optional = true }
@@ -57,13 +65,28 @@ metrics = { workspace = true, optional = true }
 
 # quinn
 quinn = { version = "0.10.2", default-features = false, optional = true, features = ["tls-rustls", "futures-io"] }
-socket2 = { version = "0.5", optional = true }
-rustls = { version = "0.21.9", default-features = false, optional = true }
+rustls = { version = "0.21.9", default-features = false, optional = true, features = ["dangerous_configuration"] }
+
+# test
+rcgen = { version = "0.12", optional = true }
 
 # s2n
 s2n-quic = { version = "1.32", optional = true }
-s2n-quic-transport = { version = "0.32", optional = true}
+s2n-quic-transport = { version = "0.33", optional = true }
 
 # compression
 rayon = { version = "1.8", optional = true }
 weezl = { version = "0.1", optional = true }
+
+[dev-dependencies]
+agnostic = { workspace = true, features = ["net"] }
+memberlist-core = { workspace = true, features = ["test"] }
+smol_str.workspace = true
+tokio = { version = "1", features = ["full"] }
+test-cert-gen = { version = "0.9" }
+paste.workspace = true
+
+[[test]]
+name = "memberlist-quic"
+path = "tests/main.rs"
+required-features = ["test"]

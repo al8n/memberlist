@@ -3,12 +3,13 @@ use super::*;
 #[cfg(feature = "compression")]
 const MAX_INLINED_BYTES: usize = 64;
 
-impl<I, A, S, W> NetTransport<I, A, S, W>
+impl<I, A, S, W, R> NetTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   pub(crate) async fn read_from_promised_without_compression_and_encryption(
     &self,
@@ -321,6 +322,8 @@ where
     auth_data: &[u8],
     data: BytesMut,
   ) -> Result<Message<I, A::ResolvedAddress>, NetTransportError<A, W>> {
+    use bytes::Buf;
+
     let mut buf = Self::decrypt(encryptor, algo, keys, auth_data, data)?;
     let tag = buf[0];
     if !COMPRESS_TAG.contains(&tag) {

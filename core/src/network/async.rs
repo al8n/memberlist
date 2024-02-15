@@ -39,7 +39,6 @@ where
 
     let ping_seq_no = ping.seq_no;
     self.send_message(&mut conn, ping.into()).await?;
-
     let msg: Message<_, _> = self
       .read_message(target, &mut conn)
       .await
@@ -65,6 +64,7 @@ where
 
   /// Used to initiate a push/pull over a stream with a
   /// remote host.
+  #[allow(clippy::blocks_in_conditions)]
   pub(crate) async fn send_and_receive_state(
     &self,
     node: &Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,

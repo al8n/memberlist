@@ -15,7 +15,7 @@ where
   let name = format!("{kind}_ping_wrong_node");
   let label = Label::try_from(&name)?;
   let pk = SecretKey::from([1; 32]);
-  let client = NetTransporTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next())
     .await?
     .with_label(label.cheap_clone())
     .with_send_label(true)
@@ -30,7 +30,7 @@ where
     .with_compressor(Some(Compressor::default()))
     .with_label(label);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   handle_ping_wrong_node(trans, client).await?;

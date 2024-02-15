@@ -20,7 +20,6 @@ use memberlist_core::{
 };
 use memberlist_utils::{Label, LabelBufExt, OneOrMore};
 use nodecraft::resolver::AddressResolver;
-use wg::AsyncWaitGroup;
 
 #[cfg(feature = "encryption")]
 use super::security::*;
@@ -35,7 +34,6 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = T::Runtime>,
   T: Transport<Resolver = A>,
 {
-  pub(super) wg: AsyncWaitGroup,
   pub(super) packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   pub(super) socket: Arc<<<T::Runtime as Runtime>::Net as Net>::UdpSocket>,
   pub(super) local_addr: SocketAddr,
@@ -58,9 +56,8 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = T::Runtime>,
   T: Transport<Resolver = A>,
 {
-  pub(super) fn run(self) {
+  pub(super) async fn run(self) {
     let Self {
-      wg,
       packet_tx,
       socket,
       shutdown,
@@ -68,76 +65,73 @@ where
       ..
     } = self;
 
-    <T::Runtime as Runtime>::spawn_detach(async move {
-      scopeguard::defer!(wg.done());
-      tracing::info!(
-        target = "memberlist.transport.net",
-        "udp listening on {local_addr}"
-      );
+    tracing::info!(
+      target = "memberlist.transport.net",
+      "udp listening on {local_addr}"
+    );
 
-      loop {
-        // Do a blocking read into a fresh buffer. Grab a time stamp as
-        // close as possible to the I/O.
-        let mut buf = BytesMut::new();
-        buf.resize(PACKET_RECV_BUF_SIZE, 0);
-        futures::select! {
-          _ = self.shutdown_rx.recv().fuse() => {
-            break;
-          }
-          rst = socket.recv_from(&mut buf).fuse() => {
-            match rst {
-              Ok((n, addr)) => {
-                // Check the length - it needs to have at least one byte to be a
-                // proper message.
-                if n < 1 {
-                  tracing::error!(target = "memberlist.packet", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
-                  continue;
-                }
-                buf.truncate(n);
-                let start = Instant::now();
-                let msg = match Self::handle_remote_bytes(
-                  buf,
-                  &self.label,
-                  self.skip_inbound_label_check,
-                  #[cfg(feature = "encryption")]
-                  self.encryptor.as_ref(),
-                  #[cfg(feature = "encryption")]
-                  self.verify_incoming,
-                  #[cfg(any(feature = "compression", feature = "encryption"))]
-                  self.offload_size,
-                ).await {
-                  Ok(msg) => msg,
-                  Err(e) => {
-                    tracing::error!(target = "memberlist.packet", local=%local_addr, from=%addr, err = %e, "fail to handle UDP packet");
-                    continue;
-                  }
-                };
-
-                #[cfg(feature = "metrics")]
-                {
-                  metrics::counter!("memberlist.packet.bytes.processing", self.metric_labels.iter()).increment(start.elapsed().as_secs_f64().round() as u64);
-                }
-
-                if let Err(e) = packet_tx.send(Packet::new(msg, addr, start)).await {
-                  tracing::error!(target = "memberlist.packet", local=%local_addr, from=%addr, err = %e, "failed to send packet");
-                }
-
-                #[cfg(feature = "metrics")]
-                metrics::counter!("memberlist.packet.received", self.metric_labels.iter()).increment(n as u64);
-              }
-              Err(e) => {
-                if shutdown.load(Ordering::SeqCst) {
-                  break;
-                }
-
-                tracing::error!(target = "memberlist.transport.net", peer=%local_addr, err = %e, "error reading UDP packet");
+    loop {
+      // Do a blocking read into a fresh buffer. Grab a time stamp as
+      // close as possible to the I/O.
+      let mut buf = BytesMut::new();
+      buf.resize(PACKET_RECV_BUF_SIZE, 0);
+      futures::select! {
+        _ = self.shutdown_rx.recv().fuse() => {
+          break;
+        }
+        rst = socket.recv_from(&mut buf).fuse() => {
+          match rst {
+            Ok((n, addr)) => {
+              // Check the length - it needs to have at least one byte to be a
+              // proper message.
+              if n < 1 {
+                tracing::error!(target = "memberlist.packet", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
                 continue;
               }
-            };
-          }
+              buf.truncate(n);
+              let start = Instant::now();
+              let msg = match Self::handle_remote_bytes(
+                buf,
+                &self.label,
+                self.skip_inbound_label_check,
+                #[cfg(feature = "encryption")]
+                self.encryptor.as_ref(),
+                #[cfg(feature = "encryption")]
+                self.verify_incoming,
+                #[cfg(any(feature = "compression", feature = "encryption"))]
+                self.offload_size,
+              ).await {
+                Ok(msg) => msg,
+                Err(e) => {
+                  tracing::error!(target = "memberlist.packet", local=%local_addr, from=%addr, err = %e, "fail to handle UDP packet");
+                  continue;
+                }
+              };
+
+              #[cfg(feature = "metrics")]
+              {
+                metrics::counter!("memberlist.packet.bytes.processing", self.metric_labels.iter()).increment(start.elapsed().as_secs_f64().round() as u64);
+              }
+
+              if let Err(e) = packet_tx.send(Packet::new(msg, addr, start)).await {
+                tracing::error!(target = "memberlist.packet", local=%local_addr, from=%addr, err = %e, "failed to send packet");
+              }
+
+              #[cfg(feature = "metrics")]
+              metrics::counter!("memberlist.packet.received", self.metric_labels.iter()).increment(n as u64);
+            }
+            Err(e) => {
+              if shutdown.load(Ordering::SeqCst) {
+                break;
+              }
+
+              tracing::error!(target = "memberlist.transport.net", peer=%local_addr, err = %e, "error reading UDP packet");
+              continue;
+            }
+          };
         }
       }
-    });
+    }
   }
 
   async fn handle_remote_bytes(
@@ -329,7 +323,11 @@ where
     OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
     NetTransportError<T::Resolver, T::Wire>,
   > {
-    if !ENCRYPT_TAG.contains(&buf[0]) {
+    use super::{security, MAX_MESSAGE_LEN_SIZE};
+    use memberlist_utils::LabelError;
+    use nodecraft::CheapClone;
+
+    if !super::ENCRYPT_TAG.contains(&buf[0]) {
       if verify_incoming {
         tracing::error!(
           target = "memberlist.net.packet",

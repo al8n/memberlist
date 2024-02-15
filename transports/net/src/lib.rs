@@ -18,10 +18,10 @@ use std::{
 
 use agnostic::{
   net::{Net, UdpSocket},
-  Runtime,
+  Runtime, WaitableSpawner,
 };
 use byteorder::{ByteOrder, NetworkEndian};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use checksum::CHECKSUM_SIZE;
 use futures::{io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt};
 use memberlist_core::{
@@ -35,7 +35,6 @@ use memberlist_core::{
 };
 use memberlist_utils::{net::IsGlobalIp, *};
 use peekable::future::AsyncPeekExt;
-use wg::AsyncWaitGroup;
 
 #[doc(inline)]
 pub use memberlist_utils as utils;
@@ -116,13 +115,27 @@ const NUM_PACKETS_PER_BATCH: usize = 255;
 /// sockets to in order to handle a large volume of messages.
 const PACKET_RECV_BUF_SIZE: usize = 2 * 1024 * 1024;
 
+#[cfg(feature = "tokio")]
+/// [`NetTransport`](crate::NetTransport) based on [`tokio`](https://crates.io/crates/tokio).
+pub type TokioNetTransport<I, A, S, W> = NetTransport<I, A, S, W, agnostic::tokio::TokioRuntime>;
+
+#[cfg(feature = "async-std")]
+/// [`NetTransport`](crate::NetTransport) based on [`async-std`](https://crates.io/crates/async-std).
+pub type AsyncStdNetTransport<I, A, S, W> =
+  NetTransport<I, A, S, W, agnostic::async_std::AsyncStdRuntime>;
+
+#[cfg(feature = "smol")]
+/// [`NetTransport`](crate::NetTransport) based on [`smol`](https://crates.io/crates/smol).
+pub type SmolNetTransport<I, A, S, W> = NetTransport<I, A, S, W, agnostic::smol::SmolRuntime>;
+
 /// The net transport based on TCP/TLS and UDP
-pub struct NetTransport<I, A, S, W>
+pub struct NetTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   opts: Arc<NetTransportOptions<I, A>>,
   advertise_addr: A::ResolvedAddress,
@@ -136,19 +149,20 @@ where
   stream_layer: Arc<S>,
   #[cfg(feature = "encryption")]
   encryptor: Option<SecretKeyring>,
-  wg: AsyncWaitGroup,
+  wg: WaitableSpawner<A::Runtime>,
   resolver: Arc<A>,
   shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
   _marker: PhantomData<W>,
 }
 
-impl<I, A, S, W> NetTransport<I, A, S, W>
+impl<I, A, S, W, R> NetTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   /// Creates a new net transport.
   pub async fn new(
@@ -275,7 +289,7 @@ where
     let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
     let advertise_addr = resolved_bind_address[expose_addr_index];
     let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
-    let wg = AsyncWaitGroup::new();
+    let wg = WaitableSpawner::new();
     let shutdown = Arc::new(AtomicBool::new(false));
 
     // Fire them up start that we've been able to create them all.
@@ -286,36 +300,37 @@ where
       .zip(v4_sockets.iter())
       .chain(v6_promised_listeners.iter().zip(v6_sockets.iter()))
     {
-      wg.add(2);
-      PromisedProcessor::<A, Self, S> {
-        wg: wg.clone(),
-        stream_tx: stream_tx.clone(),
-        ln: promised_ln.clone(),
-        shutdown: shutdown.clone(),
-        shutdown_rx: shutdown_rx.clone(),
-        local_addr: *promised_addr,
-      }
-      .run();
+      wg.spawn_detach(
+        PromisedProcessor::<A, Self, S> {
+          stream_tx: stream_tx.clone(),
+          ln: promised_ln.clone(),
+          shutdown: shutdown.clone(),
+          shutdown_rx: shutdown_rx.clone(),
+          local_addr: *promised_addr,
+        }
+        .run(),
+      );
 
-      PacketProcessor::<A, Self> {
-        wg: wg.clone(),
-        packet_tx: packet_tx.clone(),
-        label: opts.label.clone(),
-        #[cfg(any(feature = "compression", feature = "encryption"))]
-        offload_size: opts.offload_size,
-        #[cfg(feature = "encryption")]
-        verify_incoming: opts.gossip_verify_incoming,
-        #[cfg(feature = "encryption")]
-        encryptor: encryptor.clone(),
-        socket: socket.clone(),
-        local_addr: *socket_addr,
-        shutdown: shutdown.clone(),
-        #[cfg(feature = "metrics")]
-        metric_labels: opts.metric_labels.clone().unwrap_or_default(),
-        shutdown_rx: shutdown_rx.clone(),
-        skip_inbound_label_check: opts.skip_inbound_label_check,
-      }
-      .run();
+      wg.spawn_detach(
+        PacketProcessor::<A, Self> {
+          packet_tx: packet_tx.clone(),
+          label: opts.label.clone(),
+          #[cfg(any(feature = "compression", feature = "encryption"))]
+          offload_size: opts.offload_size,
+          #[cfg(feature = "encryption")]
+          verify_incoming: opts.gossip_verify_incoming,
+          #[cfg(feature = "encryption")]
+          encryptor: encryptor.clone(),
+          socket: socket.clone(),
+          local_addr: *socket_addr,
+          shutdown: shutdown.clone(),
+          #[cfg(feature = "metrics")]
+          metric_labels: opts.metric_labels.clone().unwrap_or_default(),
+          shutdown_rx: shutdown_rx.clone(),
+          skip_inbound_label_check: opts.skip_inbound_label_check,
+        }
+        .run(),
+      );
     }
 
     // find final advertise address
@@ -408,12 +423,13 @@ impl<I, A> Batch<I, A> {
   }
 }
 
-impl<I, A, S, W> Transport for NetTransport<I, A, S, W>
+impl<I, A, S, W, R> Transport for NetTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   type Error = NetTransportError<Self::Resolver, Self::Wire>;
 
@@ -650,7 +666,8 @@ where
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     timeout: Duration,
   ) -> Result<Self::Stream, Self::Error> {
-    let connector = <Self::Runtime as Runtime>::timeout(timeout, self.stream_layer.connect(*addr));
+    let connector =
+      <Self::Runtime as Runtime>::timeout_nonblocking(timeout, self.stream_layer.connect(*addr));
     match connector.await {
       Ok(Ok(conn)) => Ok(conn),
       Ok(Err(e)) => Err(Self::Error::Connection(ConnectionError {
@@ -702,12 +719,13 @@ where
   }
 }
 
-impl<I, A, S, W> Drop for NetTransport<I, A, S, W>
+impl<I, A, S, W, R> Drop for NetTransport<I, A, S, W, R>
 where
   I: Id,
-  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
+  R: Runtime,
 {
   fn drop(&mut self) {
     use pollster::FutureExt as _;

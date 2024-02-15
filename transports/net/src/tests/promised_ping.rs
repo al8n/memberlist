@@ -8,7 +8,7 @@ use super::*;
 #[cfg(all(feature = "encryption", feature = "compression"))]
 pub async fn promised_ping<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -28,7 +28,7 @@ where
     .with_compressor(Some(Compressor::default()))
     .with_label(label);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -38,7 +38,7 @@ where
 #[cfg(all(feature = "encryption", feature = "compression"))]
 pub async fn promised_ping_no_label<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -56,7 +56,7 @@ where
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -66,7 +66,7 @@ where
 #[cfg(feature = "compression")]
 pub async fn promised_ping_compression_only<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -79,7 +79,7 @@ where
 
   let mut opts = NetTransportOptions::new(name.into()).with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -89,7 +89,7 @@ where
 #[cfg(feature = "compression")]
 pub async fn promised_ping_label_and_compression<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -105,7 +105,7 @@ where
     .with_compressor(Some(Compressor::default()))
     .with_label(label);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -115,7 +115,7 @@ where
 #[cfg(feature = "encryption")]
 pub async fn promised_ping_encryption_only<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -132,7 +132,7 @@ where
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -142,7 +142,7 @@ where
 #[cfg(feature = "encryption")]
 pub async fn promised_ping_label_and_encryption<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -161,7 +161,7 @@ where
     .with_gossip_verify_outgoing(true)
     .with_label(label);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -170,7 +170,7 @@ where
 
 pub async fn promised_ping_no_label_no_compression_no_encryption<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -183,7 +183,7 @@ where
 
   let mut opts = NetTransportOptions::new(name.into());
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -192,7 +192,7 @@ where
 
 pub async fn promised_ping_label_only<S, R>(
   s: S,
-  client: NetTransporTestPromisedClient<S>,
+  client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -206,7 +206,7 @@ where
 
   let mut opts = NetTransportOptions::new(name.into()).with_label(label);
   opts.add_bind_address(kind.next());
-  let trans = NetTransport::<_, _, _, Lpe<_, _>>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
