@@ -688,7 +688,7 @@ where
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     stream: Self::Stream,
   ) -> Result<(), Self::Error> {
-    self.stream_layer.cache_stream(*addr, stream);
+    self.stream_layer.cache_stream(*addr, stream).await;
     Ok(())
   }
 

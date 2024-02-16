@@ -1,4 +1,4 @@
-#![allow(clippy::blocks_in_conditions)]
+#![allow(clippy::blocks_in_conditions, unreachable_code)]
 use std::{
   future::Future,
   net::SocketAddr,
@@ -156,7 +156,9 @@ where
   // Send
   let connection = client.connect(*m.advertise_addr()).await?;
   let mut send_stream = connection.connect().await?;
-  send_stream.send_to(&buf).await?;
+  if let Err(e) = send_stream.send_to(&buf).await {
+    panic!("failed to send: {}", e);
+  }
 
   // Wait for response
   let (tx, rx) = async_channel::bounded(1);
@@ -171,12 +173,12 @@ where
   });
 
   let (in_, _) = R::timeout(WAIT_DURATION, async {
-    let connection = client.accept().await?;
-    let mut recv_stream = connection.accept().await?;
-    recv_stream.recv_from().await
+    let connection = client.accept().await.unwrap();
+    let mut recv_stream = connection.accept().await.unwrap();
+    recv_stream.recv_from().await.unwrap()
   })
   .await
-  .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
+  .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))?;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
   assert_eq!(ack.seq_no, 42, "bad sequence no: {}", ack.seq_no);
 

@@ -125,7 +125,7 @@ impl<R: Runtime> StreamLayer for Tls<R> {
       .map(|ln| TlsListener { ln, acceptor })
   }
 
-  fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {
+  async fn cache_stream(&self, _addr: SocketAddr, mut _stream: Self::Stream) {
     // TODO(al8n): It seems that futures-rustls has a bug on Linux and Windows
     // client side dial remote successfully and finish send bytes successfully,
     // and then drop the connection immediately.
@@ -137,12 +137,12 @@ impl<R: Runtime> StreamLayer for Tls<R> {
     // - transport/net/tests/main/smol/send.rs
     //
     // On Linux and Windows, will fail. I am also not sure if this bug can happen in real environment,
-    // so just keep it here and not feature-gate it by `cfg(test)`.
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    R::spawn_detach(async move {
-      R::sleep(std::time::Duration::from_millis(100)).await;
-      drop(_stream);
-    });
+    // so just keep it here and not feature-gate it by `cfg(test)`. 
+    let _ = _stream.flush().await;
+    // R::spawn_detach(async move {
+    //   R::sleep(std::time::Duration::from_millis(100)).await;
+    //   drop(_stream);
+    // });
   }
 
   fn is_secure() -> bool {

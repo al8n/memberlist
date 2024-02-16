@@ -153,7 +153,7 @@ where
       unreachable!()
     }
 
-    fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {}
+    async fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {}
 
     fn is_secure() -> bool {
       unreachable!()
