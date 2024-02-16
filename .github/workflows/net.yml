@@ -406,7 +406,7 @@ jobs:
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --force
       - name: Run cargo-tarpaulin
-        working-directory: transports/quic
+        working-directory: transports/net
         run: cargo-tarpaulin --features test,tokio --run-types tests -o xml 
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3.1.1
@@ -414,4 +414,5 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: flase
           directory: transports/net
+          working-directory: transports/net
           flags: transports.net

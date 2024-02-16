@@ -261,4 +261,5 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: flase
           directory: transports/quic
+          working-directory: transports/quic
           flags: transports.quic

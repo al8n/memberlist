@@ -103,7 +103,7 @@ impl<S: StreamLayer> TestPacketStream for QuicTestPacketStream<S> {
     out.put_slice(&data);
     let stream = &mut self.stream;
     stream.write_all(out.freeze()).await?;
-    stream.close().await?;
+    let _ = stream.finish().await;
     Ok(())
   }
 
