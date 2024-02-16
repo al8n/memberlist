@@ -414,4 +414,4 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: flase
           directory: transports/net
-          flags: transports/net
+          flags: transports.net
