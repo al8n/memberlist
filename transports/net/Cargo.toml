@@ -20,11 +20,25 @@ native-tls = ["dep:async-native-tls", "dep:native-tls"]
 compression = ["rayon", "weezl"]
 encryption = ["rayon", "aead", "aes-gcm", "cbc"]
 
-serde = ["memberlist-core/serde", "dep:serde", "memberlist-utils/serde", "base64", "indexmap/serde", "humantime-serde"]
+serde = [
+  "memberlist-core/serde",
+  "dep:serde",
+  "memberlist-utils/serde",
+  "base64",
+  "indexmap/serde",
+  "humantime-serde",
+]
 rkyv = ["memberlist-core/rkyv"]
 
 metrics = ["memberlist-core/metrics", "dep:metrics", "memberlist-utils/metrics"]
-test = ["memberlist-core/test", "smol_str", "dns", "compression", "encryption", "test-cert-gen"]
+test = [
+  "memberlist-core/test",
+  "smol_str",
+  "dns",
+  "compression",
+  "encryption",
+  "test-cert-gen",
+]
 
 # enable DNS node address resolver
 dns = ["nodecraft/dns"]
@@ -97,9 +111,10 @@ test-cert-gen = { version = "0.9", optional = true }
 agnostic = { workspace = true, features = ["net"] }
 memberlist-core = { workspace = true, features = ["test"] }
 smol_str.workspace = true
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "tracing"] }
 test-cert-gen = { version = "0.9" }
 paste.workspace = true
+console-subscriber = "0.2"
 
 [[test]]
 name = "memberlist-net"

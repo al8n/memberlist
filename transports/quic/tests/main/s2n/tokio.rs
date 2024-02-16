@@ -3,8 +3,9 @@ use agnostic::tokio::TokioRuntime;
 use memberlist_core::tests::run as run_unit_test;
 
 fn run(fut: impl std::future::Future<Output = ()>) {
+  console_subscriber::init();
   let runtime = ::tokio::runtime::Builder::new_multi_thread()
-    .worker_threads(2)
+    .worker_threads(32)
     .enable_all()
     .build()
     .unwrap();

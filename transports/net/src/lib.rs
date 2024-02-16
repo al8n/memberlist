@@ -149,6 +149,7 @@ where
   stream_layer: Arc<S>,
   #[cfg(feature = "encryption")]
   encryptor: Option<SecretKeyring>,
+  #[allow(dead_code)]
   wg: WaitableSpawner<A::Runtime>,
   resolver: Arc<A>,
   shutdown: Arc<AtomicBool>,
@@ -713,7 +714,7 @@ where
     self.shutdown_tx.close();
 
     // Block until all the listener threads have died.
-    self.wg.wait().await;
+    // self.wg.wait().await;
     Ok(())
   }
 }

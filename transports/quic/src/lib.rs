@@ -112,6 +112,7 @@ where
   v6_round_robin: AtomicUsize,
   v6_connectors: SmallVec<S::Connector>,
 
+  #[allow(dead_code)]
   wg: WaitableSpawner<A::Runtime>,
   resolver: A,
   shutdown: Arc<AtomicBool>,
@@ -705,7 +706,7 @@ where
     }
 
     // Block until all the listener threads have died.
-    self.wg.wait().await;
+    // self.wg.wait().await;
     Ok(())
   }
 }

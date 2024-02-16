@@ -83,6 +83,7 @@ agnostic = { workspace = true, features = ["net"] }
 memberlist-core = { workspace = true, features = ["test"] }
 smol_str.workspace = true
 tokio = { version = "1", features = ["full"] }
+console-subscriber = "0.2"
 test-cert-gen = { version = "0.9" }
 paste.workspace = true
 
