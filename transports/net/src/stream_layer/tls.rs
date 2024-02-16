@@ -137,12 +137,12 @@ impl<R: Runtime> StreamLayer for Tls<R> {
     // - transport/net/tests/main/smol/send.rs
     //
     // On Linux and Windows, will fail. I am also not sure if this bug can happen in real environment,
-    // so just keep it here and not feature-gate it by `cfg(test)`. 
-    let _ = _stream.flush().await;
-    // R::spawn_detach(async move {
-    //   R::sleep(std::time::Duration::from_millis(100)).await;
-    //   drop(_stream);
-    // });
+    // so just keep it here and not feature-gate it by `cfg(test)`.
+    R::spawn_detach(async move {
+      let _ = _stream.flush().await;
+      R::sleep(std::time::Duration::from_millis(100)).await;
+      drop(_stream);
+    });
   }
 
   fn is_secure() -> bool {
