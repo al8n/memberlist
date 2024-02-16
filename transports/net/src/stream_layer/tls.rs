@@ -9,9 +9,9 @@ use std::{
 
 use agnostic::{
   net::{Net, TcpListener, TcpStream},
-  Runtime,
+  Runtime, Timeoutable,
 };
-use futures::{AsyncRead, AsyncWrite};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub use futures_rustls::{
   client, pki_types::ServerName, rustls, server, TlsAcceptor, TlsConnector,
 };
@@ -110,7 +110,11 @@ impl<R: Runtime> StreamLayer for Tls<R> {
     let conn = <<R::Net as Net>::TcpStream as TcpStream>::connect(addr).await?;
     let stream = self.connector.connect(self.domain.clone(), conn).await?;
     Ok(TlsStream {
-      stream: TlsStreamKind::Client(stream),
+      stream: TlsStreamKind::Client {
+        stream,
+        read_timeout: None,
+        write_timeout: None,
+      },
     })
   }
 
@@ -160,7 +164,11 @@ impl<R: Runtime> Listener for TlsListener<R> {
     let stream = TlsAcceptor::accept(&self.acceptor, conn).await?;
     Ok((
       TlsStream {
-        stream: TlsStreamKind::Server(stream),
+        stream: TlsStreamKind::Server {
+          stream,
+          read_timeout: None,
+          write_timeout: None,
+        },
       },
       addr,
     ))
@@ -173,8 +181,18 @@ impl<R: Runtime> Listener for TlsListener<R> {
 
 #[pin_project::pin_project]
 enum TlsStreamKind<R: Runtime> {
-  Client(#[pin] client::TlsStream<<R::Net as Net>::TcpStream>),
-  Server(#[pin] server::TlsStream<<R::Net as Net>::TcpStream>),
+  Client {
+    #[pin]
+    stream: client::TlsStream<<R::Net as Net>::TcpStream>,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
+  },
+  Server {
+    #[pin]
+    stream: server::TlsStream<<R::Net as Net>::TcpStream>,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
+  },
 }
 
 impl<R: Runtime> AsyncRead for TlsStreamKind<R> {
@@ -184,8 +202,42 @@ impl<R: Runtime> AsyncRead for TlsStreamKind<R> {
     buf: &mut [u8],
   ) -> Poll<io::Result<usize>> {
     match self.get_mut() {
-      Self::Client(s) => Pin::new(s).poll_read(cx, buf),
-      Self::Server(s) => Pin::new(s).poll_read(cx, buf),
+      Self::Client {
+        stream,
+        read_timeout,
+        ..
+      } => {
+        if let Some(timeout) = read_timeout {
+          let fut = R::timeout(*timeout, stream.read(buf));
+          futures::pin_mut!(fut);
+          return match fut.poll_elapsed(cx) {
+            Poll::Ready(res) => match res {
+              Ok(res) => Poll::Ready(res),
+              Err(err) => Poll::Ready(Err(err.into())),
+            },
+            Poll::Pending => Poll::Pending,
+          };
+        }
+        Pin::new(stream).poll_read(cx, buf)
+      }
+      Self::Server {
+        stream,
+        read_timeout,
+        ..
+      } => {
+        if let Some(timeout) = read_timeout {
+          let fut = R::timeout(*timeout, stream.read(buf));
+          futures::pin_mut!(fut);
+          return match fut.poll_elapsed(cx) {
+            Poll::Ready(res) => match res {
+              Ok(res) => Poll::Ready(res),
+              Err(err) => Poll::Ready(Err(err.into())),
+            },
+            Poll::Pending => Poll::Pending,
+          };
+        }
+        Pin::new(stream).poll_read(cx, buf)
+      }
     }
   }
 }
@@ -193,22 +245,57 @@ impl<R: Runtime> AsyncRead for TlsStreamKind<R> {
 impl<R: Runtime> AsyncWrite for TlsStreamKind<R> {
   fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
     match self.get_mut() {
-      Self::Client(s) => Pin::new(s).poll_write(cx, buf),
-      Self::Server(s) => Pin::new(s).poll_write(cx, buf),
+      Self::Client {
+        stream,
+        write_timeout,
+        ..
+      } => {
+        if let Some(timeout) = write_timeout {
+          let fut = R::timeout(*timeout, stream.write(buf));
+          futures::pin_mut!(fut);
+          return match fut.poll_elapsed(cx) {
+            Poll::Ready(res) => match res {
+              Ok(res) => Poll::Ready(res),
+              Err(err) => Poll::Ready(Err(err.into())),
+            },
+            Poll::Pending => Poll::Pending,
+          };
+        }
+
+        Pin::new(stream).poll_write(cx, buf)
+      }
+      Self::Server {
+        stream,
+        write_timeout,
+        ..
+      } => {
+        if let Some(timeout) = write_timeout {
+          let fut = R::timeout(*timeout, stream.write(buf));
+          futures::pin_mut!(fut);
+          return match fut.poll_elapsed(cx) {
+            Poll::Ready(res) => match res {
+              Ok(res) => Poll::Ready(res),
+              Err(err) => Poll::Ready(Err(err.into())),
+            },
+            Poll::Pending => Poll::Pending,
+          };
+        }
+        Pin::new(stream).poll_write(cx, buf)
+      }
     }
   }
 
   fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     match self.get_mut() {
-      Self::Client(s) => Pin::new(s).poll_flush(cx),
-      Self::Server(s) => Pin::new(s).poll_flush(cx),
+      Self::Client { stream, .. } => Pin::new(stream).poll_flush(cx),
+      Self::Server { stream, .. } => Pin::new(stream).poll_flush(cx),
     }
   }
 
   fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     match self.get_mut() {
-      Self::Client(s) => Pin::new(s).poll_close(cx),
-      Self::Server(s) => Pin::new(s).poll_close(cx),
+      Self::Client { stream, .. } => Pin::new(stream).poll_close(cx),
+      Self::Server { stream, .. } => Pin::new(stream).poll_close(cx),
     }
   }
 }
@@ -248,22 +335,22 @@ impl<R: Runtime> TimeoutableReadStream for TlsStream<R> {
   fn set_read_timeout(&mut self, timeout: Option<Duration>) {
     match self {
       Self {
-        stream: TlsStreamKind::Client(s),
-      } => s.get_ref().0.set_read_timeout(timeout),
+        stream: TlsStreamKind::Client { read_timeout, .. },
+      } => *read_timeout = timeout,
       Self {
-        stream: TlsStreamKind::Server(s),
-      } => s.get_ref().0.set_read_timeout(timeout),
+        stream: TlsStreamKind::Server { read_timeout, .. },
+      } => *read_timeout = timeout,
     }
   }
 
   fn read_timeout(&self) -> Option<Duration> {
     match self {
       Self {
-        stream: TlsStreamKind::Client(s),
-      } => s.get_ref().0.read_timeout(),
+        stream: TlsStreamKind::Client { read_timeout, .. },
+      } => *read_timeout,
       Self {
-        stream: TlsStreamKind::Server(s),
-      } => s.get_ref().0.read_timeout(),
+        stream: TlsStreamKind::Server { read_timeout, .. },
+      } => *read_timeout,
     }
   }
 }
@@ -272,22 +359,22 @@ impl<R: Runtime> TimeoutableWriteStream for TlsStream<R> {
   fn set_write_timeout(&mut self, timeout: Option<Duration>) {
     match self {
       Self {
-        stream: TlsStreamKind::Client(s),
-      } => s.get_ref().0.set_write_timeout(timeout),
+        stream: TlsStreamKind::Client { write_timeout, .. },
+      } => *write_timeout = timeout,
       Self {
-        stream: TlsStreamKind::Server(s),
-      } => s.get_ref().0.set_write_timeout(timeout),
+        stream: TlsStreamKind::Server { write_timeout, .. },
+      } => *write_timeout = timeout,
     }
   }
 
   fn write_timeout(&self) -> Option<Duration> {
     match self {
       Self {
-        stream: TlsStreamKind::Client(s),
-      } => s.get_ref().0.write_timeout(),
+        stream: TlsStreamKind::Client { write_timeout, .. },
+      } => *write_timeout,
       Self {
-        stream: TlsStreamKind::Server(s),
-      } => s.get_ref().0.write_timeout(),
+        stream: TlsStreamKind::Server { write_timeout, .. },
+      } => *write_timeout,
     }
   }
 }

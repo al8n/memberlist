@@ -666,8 +666,7 @@ where
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     timeout: Duration,
   ) -> Result<Self::Stream, Self::Error> {
-    let connector =
-      <Self::Runtime as Runtime>::timeout_nonblocking(timeout, self.stream_layer.connect(*addr));
+    let connector = <Self::Runtime as Runtime>::timeout(timeout, self.stream_layer.connect(*addr));
     match connector.await {
       Ok(Ok(conn)) => Ok(conn),
       Ok(Err(e)) => Err(Self::Error::Connection(ConnectionError {

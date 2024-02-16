@@ -55,7 +55,11 @@ impl<R: Runtime> StreamLayer for NativeTls<R> {
       .connect(self.domain.clone(), conn)
       .await
       .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, e))?;
-    Ok(NativeTlsStream { stream })
+    Ok(NativeTlsStream {
+      stream,
+      read_timeout: None,
+      write_timeout: None,
+    })
   }
 
   async fn bind(&self, addr: SocketAddr) -> io::Result<Self::Listener> {
@@ -86,7 +90,14 @@ impl<R: Runtime> Listener for NativeTlsListener<R> {
     let stream = TlsAcceptor::accept(&self.acceptor, conn)
       .await
       .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, e))?;
-    Ok((NativeTlsStream { stream }, addr))
+    Ok((
+      NativeTlsStream {
+        stream,
+        read_timeout: None,
+        write_timeout: None,
+      },
+      addr,
+    ))
   }
 
   fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
@@ -99,6 +110,8 @@ impl<R: Runtime> Listener for NativeTlsListener<R> {
 pub struct NativeTlsStream<R: Runtime> {
   #[pin]
   stream: AsyncNativeTlsStream<<R::Net as Net>::TcpStream>,
+  read_timeout: Option<Duration>,
+  write_timeout: Option<Duration>,
 }
 
 impl<R: Runtime> AsyncRead for NativeTlsStream<R> {
@@ -127,21 +140,21 @@ impl<R: Runtime> AsyncWrite for NativeTlsStream<R> {
 
 impl<R: Runtime> TimeoutableReadStream for NativeTlsStream<R> {
   fn set_read_timeout(&mut self, timeout: Option<Duration>) {
-    self.stream.get_ref().set_read_timeout(timeout)
+    self.read_timeout = timeout;
   }
 
   fn read_timeout(&self) -> Option<Duration> {
-    self.stream.get_ref().read_timeout()
+    self.read_timeout
   }
 }
 
 impl<R: Runtime> TimeoutableWriteStream for NativeTlsStream<R> {
   fn set_write_timeout(&mut self, timeout: Option<Duration>) {
-    self.stream.get_ref().set_write_timeout(timeout)
+    self.write_timeout = timeout;
   }
 
   fn write_timeout(&self) -> Option<Duration> {
-    self.stream.get_ref().write_timeout()
+    self.write_timeout
   }
 }
 
