@@ -328,6 +328,7 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
 
   async fn close(&mut self) {
     let _ = self.acceptor.close().await;
+    let _ = self.connector.wait_idle().await;
     let _ = self.connector.close().await;
   }
 }

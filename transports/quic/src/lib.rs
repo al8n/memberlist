@@ -706,7 +706,9 @@ where
     }
 
     // Block until all the listener threads have died.
-    // self.wg.wait().await;
+    // TODO(al8n): FIX randomly hangs in test when enable the following line for tokio runtime
+    #[cfg(not(feature = "tokio"))]
+    self.wg.wait().await;
     Ok(())
   }
 }
