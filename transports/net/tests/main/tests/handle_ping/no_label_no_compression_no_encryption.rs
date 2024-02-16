@@ -4,8 +4,6 @@ macro_rules! __handle_ping_no_label_no_compression_no_encryption {
     paste::paste! {
       memberlist_core::unit_tests_with_expr!($run(
         [< $($prefix)? _handle_v4_ping_server_no_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption >] ({
-          #[cfg(feature = "tokio")]
-          console_subscriber::init();
 
           let s = $s;
           if let Err(e) = memberlist_net::tests::handle_ping::no_label_no_compression_no_encryption::server_no_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption::<_, $rt>(
@@ -16,8 +14,7 @@ macro_rules! __handle_ping_no_label_no_compression_no_encryption {
           }
         }),
         [< $($prefix)? _handle_v6_ping_server_no_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption >] ({
-          #[cfg(feature = "tokio")]
-          console_subscriber::init();
+
 
           let s = $s;
           if let Err(e) = memberlist_net::tests::handle_ping::no_label_no_compression_no_encryption::server_no_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption::<_, $rt>(

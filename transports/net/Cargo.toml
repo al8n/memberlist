@@ -114,7 +114,6 @@ smol_str.workspace = true
 tokio = { version = "1", features = ["full", "tracing"] }
 test-cert-gen = { version = "0.9" }
 paste.workspace = true
-console-subscriber = "0.2"
 
 [[test]]
 name = "memberlist-net"
