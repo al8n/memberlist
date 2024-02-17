@@ -2,7 +2,10 @@ use crate::promised_ping_test_suites;
 
 use super::*;
 
-#[cfg(not(any(feature = "tls", feature = "native-tls")))]
+#[cfg(any(
+  not(any(feature = "tls", feature = "native-tls")),
+  all(feature = "tls", feature = "native-tls")
+))]
 promised_ping_test_suites!("tcp": TokioRuntime::run({
   Tcp::<TokioRuntime>::new()
 }));

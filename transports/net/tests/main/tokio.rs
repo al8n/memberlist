@@ -10,7 +10,10 @@ fn run(fut: impl std::future::Future<Output = ()>) {
   run_unit_test(|fut| runtime.block_on(fut), fut)
 }
 
-#[cfg(not(any(feature = "tls", feature = "native-tls")))]
+#[cfg(any(
+  not(any(feature = "tls", feature = "native-tls")),
+  all(feature = "tls", feature = "native-tls")
+))]
 use memberlist_net::stream_layer::tcp::Tcp;
 
 #[path = "tokio/handle_compound_ping.rs"]
