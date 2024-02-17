@@ -101,7 +101,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-          # - windows-latest
+          - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v3
@@ -131,7 +131,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-          # - windows-latest
+          - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v3
@@ -161,7 +161,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-          # - windows-latest
+          - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v3
@@ -184,7 +184,6 @@ jobs:
       run: cargo test --features test,smol
       working-directory: transports/net 
 
-
   tokio-tls-test:
     name: tokio-tls-test
     strategy:
@@ -192,7 +191,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-          # - windows-latest
+          - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v3
@@ -222,7 +221,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-          # - windows-latest
+          - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v3
@@ -252,7 +251,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-          # - windows-latest
+          - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v3
@@ -282,7 +281,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-          # - windows-latest
+          - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v3
@@ -312,7 +311,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-          # - windows-latest
+          - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v3
@@ -342,7 +341,7 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-          # - windows-latest
+          - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v3

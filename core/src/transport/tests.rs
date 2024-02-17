@@ -24,15 +24,8 @@ use crate::{
 
 use super::{Ping, PushPull, PushServerState, Server, ServerState, Transport};
 
-#[cfg(target_os = "macos")]
 const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
-#[cfg(target_os = "macos")]
 const WAIT_DURATION: Duration = Duration::from_secs(6);
-
-#[cfg(not(target_os = "macos"))]
-const TIMEOUT_DURATION: Duration = Duration::from_secs(2);
-#[cfg(not(target_os = "macos"))]
-const WAIT_DURATION: Duration = Duration::from_secs(3);
 
 /// The kind of address
 pub enum AddressKind {
