@@ -103,7 +103,7 @@ impl<S: StreamLayer> TestPacketStream for QuicTestPacketStream<S> {
     out.put_slice(&data);
     let stream = &mut self.stream;
     stream.write_all(out.freeze()).await?;
-    stream.close().await?;
+    let _ = stream.finish().await;
     Ok(())
   }
 
@@ -328,6 +328,7 @@ impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S,
 
   async fn close(&mut self) {
     let _ = self.acceptor.close().await;
+    let _ = self.connector.wait_idle().await;
     let _ = self.connector.close().await;
   }
 }

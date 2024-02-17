@@ -178,7 +178,7 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
     if timeout == Duration::ZERO {
       self.connect(addr).await
     } else {
-      R::timeout_nonblocking(timeout, async { self.connect(addr).await })
+      R::timeout(timeout, async { self.connect(addr).await })
         .await
         .map_err(|_| Self::Error::connection_timeout())?
     }
@@ -244,7 +244,7 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
     };
 
     match self.write_timeout {
-      Some(timeout) => R::timeout_nonblocking(timeout, fut)
+      Some(timeout) => R::timeout(timeout, fut)
         .await
         .map_err(|_| Self::Error::write_timeout())?,
       None => fut.await.map_err(Into::into),
@@ -263,7 +263,7 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
     let fut = async { self.send.finish().await.map(|_| ()).map_err(Into::into) };
 
     match self.write_timeout {
-      Some(timeout) => R::timeout_nonblocking(timeout, fut)
+      Some(timeout) => R::timeout(timeout, fut)
         .await
         .map_err(|_| Self::Error::write_timeout())?,
       None => fut.await.map_err(Into::into),
@@ -280,7 +280,7 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
     };
 
     match self.read_timeout {
-      Some(timeout) => R::timeout_nonblocking(timeout, fut)
+      Some(timeout) => R::timeout(timeout, fut)
         .await
         .map_err(|_| Self::Error::read_timeout())?,
       None => fut.await.map_err(Into::into),
@@ -297,7 +297,7 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
     };
 
     match self.read_timeout {
-      Some(timeout) => R::timeout_nonblocking(timeout, fut)
+      Some(timeout) => R::timeout(timeout, fut)
         .await
         .map_err(|_| Self::Error::read_timeout())?,
       None => fut.await.map_err(Into::into),
@@ -314,7 +314,7 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
     };
 
     match self.read_timeout {
-      Some(timeout) => R::timeout_nonblocking(timeout, fut)
+      Some(timeout) => R::timeout(timeout, fut)
         .await
         .map_err(|_| Self::Error::read_timeout())?,
       None => fut.await.map_err(Into::into),
@@ -331,7 +331,7 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
     };
 
     match self.read_timeout {
-      Some(timeout) => R::timeout_nonblocking(timeout, fut)
+      Some(timeout) => R::timeout(timeout, fut)
         .await
         .map_err(|_| Self::Error::read_timeout())?,
       None => fut.await.map_err(Into::into),
@@ -453,7 +453,7 @@ impl<R: Runtime> QuicConnection for QuinnConnection<R> {
     if timeout == Duration::ZERO {
       fut.await
     } else {
-      R::timeout_nonblocking(timeout, fut)
+      R::timeout(timeout, fut)
         .await
         .map_err(|_| Self::Error::connection_timeout())?
     }

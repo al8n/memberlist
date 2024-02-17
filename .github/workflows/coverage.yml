@@ -1,0 +1,60 @@
+name: coverage
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README'
+      - 'COPYRIGHT'
+      - 'LICENSE*'
+      - '**.md'
+      - '**.txt'
+  pull_request:
+    paths-ignore:
+      - 'README'
+      - 'COPYRIGHT'
+      - 'LICENSE*'
+      - '**.md'
+      - '**.txt'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: coverage
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install latest nightly
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+      - uses: actions-rs/install@v0.1
+        with:
+          crate: cargo-tarpaulin
+          version: latest
+      - name: Cache ~/.cargo
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo
+          key: ${{ matrix.os }}-coverage-dotcargo
+      - name: Cache cargo build
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ matrix.os }}-coverage-cargo-build-target
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --force
+      - name: Run cargo-tarpaulin
+        run: cargo-tarpaulin --all-features --run-types tests --out xml --workspace --no-fail-fast
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v3.1.1
+        with: 
+          fail_ci_if_error: flase

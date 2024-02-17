@@ -8,10 +8,10 @@ use std::{
 };
 
 use agnostic::{
-  net::{Net, TcpListener as _, TcpStream as _},
-  Runtime,
+  net::{Net, TcpListener as _},
+  Runtime, Timeoutable,
 };
-use futures::{AsyncRead, AsyncWrite};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 
 use super::{Listener, PromisedStream, StreamLayer};
@@ -51,7 +51,11 @@ impl<R: Runtime> StreamLayer for Tcp<R> {
   async fn connect(&self, addr: SocketAddr) -> io::Result<Self::Stream> {
     <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect(addr)
       .await
-      .map(TcpStream)
+      .map(|stream| TcpStream {
+        stream,
+        read_timeout: None,
+        write_timeout: None,
+      })
   }
 
   async fn bind(&self, addr: SocketAddr) -> io::Result<Self::Listener> {
@@ -60,7 +64,7 @@ impl<R: Runtime> StreamLayer for Tcp<R> {
       .map(TcpListener)
   }
 
-  fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {
+  async fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {
     // Do nothing
   }
 
@@ -77,11 +81,16 @@ impl<R: Runtime> Listener for TcpListener<R> {
   type Stream = TcpStream<R>;
 
   async fn accept(&self) -> io::Result<(Self::Stream, SocketAddr)> {
-    self
-      .0
-      .accept()
-      .await
-      .map(|(conn, addr)| (TcpStream(conn), addr))
+    self.0.accept().await.map(|(conn, addr)| {
+      (
+        TcpStream {
+          stream: conn,
+          read_timeout: None,
+          write_timeout: None,
+        },
+        addr,
+      )
+    })
   }
 
   fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -91,49 +100,80 @@ impl<R: Runtime> Listener for TcpListener<R> {
 
 /// [`PromisedStream`] of the TCP stream layer
 #[pin_project::pin_project]
-pub struct TcpStream<R: Runtime>(#[pin] <R::Net as Net>::TcpStream);
+pub struct TcpStream<R: Runtime> {
+  #[pin]
+  stream: <R::Net as Net>::TcpStream,
+  read_timeout: Option<Duration>,
+  write_timeout: Option<Duration>,
+}
 
 impl<R: Runtime> AsyncRead for TcpStream<R> {
   fn poll_read(
-    self: Pin<&mut Self>,
+    mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
     buf: &mut [u8],
   ) -> Poll<io::Result<usize>> {
-    self.project().0.poll_read(cx, buf)
+    if let Some(timeout) = self.read_timeout {
+      let fut = R::timeout(timeout, self.stream.read(buf));
+      futures::pin_mut!(fut);
+      return match fut.poll_elapsed(cx) {
+        Poll::Ready(res) => match res {
+          Ok(res) => Poll::Ready(res),
+          Err(err) => Poll::Ready(Err(err.into())),
+        },
+        Poll::Pending => Poll::Pending,
+      };
+    }
+    self.project().stream.poll_read(cx, buf)
   }
 }
 
 impl<R: Runtime> AsyncWrite for TcpStream<R> {
-  fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-    self.project().0.poll_write(cx, buf)
+  fn poll_write(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+  ) -> Poll<io::Result<usize>> {
+    if let Some(timeout) = self.write_timeout {
+      let fut = R::timeout(timeout, self.stream.write(buf));
+      futures::pin_mut!(fut);
+      return match fut.poll_elapsed(cx) {
+        Poll::Ready(res) => match res {
+          Ok(res) => Poll::Ready(res),
+          Err(err) => Poll::Ready(Err(err.into())),
+        },
+        Poll::Pending => Poll::Pending,
+      };
+    }
+    self.project().stream.poll_write(cx, buf)
   }
 
   fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-    self.project().0.poll_flush(cx)
+    self.project().stream.poll_flush(cx)
   }
 
   fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-    self.project().0.poll_close(cx)
+    self.project().stream.poll_close(cx)
   }
 }
 
 impl<R: Runtime> TimeoutableReadStream for TcpStream<R> {
   fn set_read_timeout(&mut self, timeout: Option<Duration>) {
-    self.0.set_read_timeout(timeout)
+    self.read_timeout = timeout;
   }
 
   fn read_timeout(&self) -> Option<Duration> {
-    self.0.read_timeout()
+    self.read_timeout
   }
 }
 
 impl<R: Runtime> TimeoutableWriteStream for TcpStream<R> {
   fn set_write_timeout(&mut self, timeout: Option<Duration>) {
-    self.0.set_write_timeout(timeout)
+    self.write_timeout = timeout;
   }
 
   fn write_timeout(&self) -> Option<Duration> {
-    self.0.write_timeout()
+    self.write_timeout
   }
 }
 

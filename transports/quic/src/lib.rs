@@ -15,12 +15,14 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::{Runtime, WaitableSpawner};
+use agnostic::Runtime;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
-
 use crossbeam_skiplist::SkipMap;
-use futures::FutureExt;
+use futures::{
+  channel::oneshot::{self, channel},
+  FutureExt,
+};
 use memberlist_core::{
   transport::{
     stream::{packet_stream, promised_stream, PacketSubscriber, StreamSubscriber},
@@ -31,7 +33,6 @@ use memberlist_core::{
 
 use memberlist_utils::{net::CIDRsPolicy, Label, LabelError, SmallVec, TinyVec};
 use nodecraft::{resolver::AddressResolver, CheapClone, Id};
-use pollster::FutureExt as _;
 
 mod processor;
 use processor::*;
@@ -111,8 +112,7 @@ where
   v4_connectors: SmallVec<S::Connector>,
   v6_round_robin: AtomicUsize,
   v6_connectors: SmallVec<S::Connector>,
-
-  wg: WaitableSpawner<A::Runtime>,
+  handles: futures::lock::Mutex<SmallVec<oneshot::Receiver<()>>>,
   resolver: A,
   shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
@@ -206,18 +206,18 @@ where
       resolved_bind_address.push(addr);
     }
 
-    let wg = WaitableSpawner::<A::Runtime>::new();
     let shutdown = Arc::new(AtomicBool::new(false));
     let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
     let advertise_addr = resolved_bind_address[expose_addr_index];
     let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
+    let mut handles = SmallVec::new();
 
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
     for (local_addr, acceptor) in v4_acceptors.into_iter().chain(v6_acceptors.into_iter()) {
-      Processor::<A, Self, S> {
-        wg: wg.clone(),
+      let (finish_tx, finish_rx) = channel();
+      let processor = Processor::<A, Self, S> {
         acceptor,
         packet_tx: packet_tx.clone(),
         stream_tx: stream_tx.clone(),
@@ -231,8 +231,13 @@ where
         offload_size: opts.offload_size,
         #[cfg(feature = "metrics")]
         metric_labels: opts.metric_labels.clone().unwrap_or_default(),
-      }
-      .run();
+      };
+
+      R::spawn_detach(async {
+        processor.run().await;
+        let _ = finish_tx.send(());
+      });
+      handles.push(finish_rx);
     }
 
     // find final advertise address
@@ -249,7 +254,13 @@ where
     let connection_pool = Arc::new(SkipMap::new());
     let interval = <A::Runtime as Runtime>::interval(opts.connection_pool_cleanup_period);
     let pool = connection_pool.clone();
-    wg.spawn_detach(Self::connection_pool_cleaner(pool, interval, shutdown_rx));
+    let (cleaner_finish_tx, cleaner_finish_rx) = channel();
+    let shutdown_rx = shutdown_rx.clone();
+    R::spawn_detach(async move {
+      Self::connection_pool_cleaner(pool, interval, shutdown_rx).await;
+      let _ = cleaner_finish_tx.send(());
+    });
+    handles.push(cleaner_finish_rx);
 
     Ok(Self {
       advertise_addr: final_advertise_addr,
@@ -259,7 +270,7 @@ where
       opts,
       packet_rx,
       stream_rx,
-      wg,
+      handles: futures::lock::Mutex::new(handles),
       shutdown,
       v4_connectors,
       v6_connectors,
@@ -705,7 +716,8 @@ where
     }
 
     // Block until all the listener threads have died.
-    self.wg.wait().await;
+    let mut handles = self.handles.lock().await;
+    let _ = futures::future::join_all(handles.drain(..)).await;
     Ok(())
   }
 }
@@ -719,9 +731,6 @@ where
   R: Runtime,
 {
   fn drop(&mut self) {
-    if self.shutdown_tx.is_closed() {
-      return;
-    }
-    let _ = self.shutdown().block_on();
+    self.shutdown_tx.close();
   }
 }

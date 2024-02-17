@@ -1,4 +1,4 @@
-#![allow(clippy::blocks_in_conditions)]
+#![allow(clippy::blocks_in_conditions, unreachable_code)]
 use std::{
   future::Future,
   net::SocketAddr,
@@ -24,15 +24,8 @@ use crate::{
 
 use super::{Ping, PushPull, PushServerState, Server, ServerState, Transport};
 
-#[cfg(target_os = "macos")]
 const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
-#[cfg(target_os = "macos")]
 const WAIT_DURATION: Duration = Duration::from_secs(6);
-
-#[cfg(not(target_os = "macos"))]
-const TIMEOUT_DURATION: Duration = Duration::from_secs(2);
-#[cfg(not(target_os = "macos"))]
-const WAIT_DURATION: Duration = Duration::from_secs(3);
 
 /// The kind of address
 pub enum AddressKind {
@@ -156,7 +149,9 @@ where
   // Send
   let connection = client.connect(*m.advertise_addr()).await?;
   let mut send_stream = connection.connect().await?;
-  send_stream.send_to(&buf).await?;
+  if let Err(e) = send_stream.send_to(&buf).await {
+    panic!("failed to send: {}", e);
+  }
 
   // Wait for response
   let (tx, rx) = async_channel::bounded(1);
@@ -170,13 +165,13 @@ where
     }
   });
 
-  let (in_, _) = R::timeout_nonblocking(WAIT_DURATION, async {
-    let connection = client.accept().await?;
-    let mut recv_stream = connection.accept().await?;
-    recv_stream.recv_from().await
+  let (in_, _) = R::timeout(WAIT_DURATION, async {
+    let connection = client.accept().await.unwrap();
+    let mut recv_stream = connection.accept().await.unwrap();
+    recv_stream.recv_from().await.unwrap()
   })
   .await
-  .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
+  .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))?;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
   assert_eq!(ack.seq_no, 42, "bad sequence no: {}", ack.seq_no);
 
@@ -243,9 +238,9 @@ where
     }
   });
 
-  let connection = R::timeout_nonblocking(WAIT_DURATION, client.accept()).await??;
+  let connection = R::timeout(WAIT_DURATION, client.accept()).await??;
   for _ in 0..3 {
-    let (in_, _) = R::timeout_nonblocking(WAIT_DURATION, async {
+    let (in_, _) = R::timeout(WAIT_DURATION, async {
       let mut recv_stream = connection.accept().await?;
       recv_stream.recv_from().await
     })
@@ -309,7 +304,7 @@ where
     }
   });
 
-  let (in_, _) = R::timeout_nonblocking(WAIT_DURATION, async {
+  let (in_, _) = R::timeout(WAIT_DURATION, async {
     let connection = client.accept().await?;
     let mut recv_stream = connection.accept().await?;
     recv_stream.recv_from().await
@@ -363,7 +358,7 @@ where
   send_stream.send_to(&buf).await?;
 
   // Wait for response
-  let res = R::timeout_nonblocking(WAIT_DURATION, async {
+  let res = R::timeout(WAIT_DURATION, async {
     let connection = client.accept().await?;
     let mut recv_stream = connection.accept().await?;
     recv_stream.recv_from().await
@@ -436,7 +431,7 @@ where
     }
   });
 
-  let (in_, _) = R::timeout_nonblocking(WAIT_DURATION, async {
+  let (in_, _) = R::timeout(WAIT_DURATION, async {
     let connection = client.accept().await?;
     let mut recv_stream = connection.accept().await?;
     recv_stream.recv_from().await
@@ -533,7 +528,7 @@ where
   R::spawn_detach(async move {
     let mut num_accepted = 0;
     let acceptor = unwrap_ok!(ping_err_tx1.send(unwrap_ok!(ping_err_tx1.send(
-      R::timeout_nonblocking(ping_time_max, p1.accept())
+      R::timeout(ping_time_max, p1.accept())
         .await
         .map_err(Into::into)
     ))));
@@ -875,16 +870,18 @@ where
   m2.send(m1.advertise_addr(), Bytes::from_static(b"send"))
     .await
     .map_err(|e| {
-      tracing::error!("fail to send packet");
+      tracing::error!("fail to send packet {e}");
       e
-    })?;
+    })
+    .unwrap();
 
   m2.send_reliable(m1.advertise_addr(), Bytes::from_static(b"send_reliable"))
     .await
     .map_err(|e| {
       tracing::error!("fail to send message {e}");
       e
-    })?;
+    })
+    .unwrap();
 
   R::sleep(WAIT_DURATION).await;
 

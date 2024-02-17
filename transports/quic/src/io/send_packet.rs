@@ -207,7 +207,6 @@ where
       .write_all(src)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    let _ = stream.finish().await;
     Ok(written)
   }
 }
