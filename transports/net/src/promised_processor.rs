@@ -1,9 +1,6 @@
 use std::{
   net::SocketAddr,
-  sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-  },
+  sync::{atomic::Ordering, Arc},
   time::Duration,
 };
 
@@ -15,7 +12,8 @@ use nodecraft::resolver::AddressResolver;
 use super::{Listener, StreamLayer};
 
 #[cfg(any(test, feature = "test"))]
-static BACKOFFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static BACKOFFS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 #[cfg(any(test, feature = "test"))]
 static BACKOFFS_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -29,7 +27,6 @@ where
     StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, S::Stream>,
   pub(super) ln: Arc<S::Listener>,
   pub(super) local_addr: SocketAddr,
-  pub(super) shutdown: Arc<AtomicBool>,
   pub(super) shutdown_rx: async_channel::Receiver<()>,
 }
 
@@ -43,9 +40,8 @@ where
     let Self {
       stream_tx,
       ln,
-      shutdown,
       local_addr,
-      ..
+      shutdown_rx,
     } = self;
 
     /// The initial delay after an `accept()` error before attempting again
@@ -59,7 +55,7 @@ where
     let mut loop_delay = Duration::ZERO;
     loop {
       futures::select! {
-        _ = self.shutdown_rx.recv().fuse() => {
+        _ = shutdown_rx.recv().fuse() => {
           break;
         }
         rst = ln.accept().fuse() => {
@@ -75,7 +71,7 @@ where
               }
             }
             Err(e) => {
-              if shutdown.load(Ordering::SeqCst) {
+              if shutdown_rx.is_closed() {
                 break;
               }
 
@@ -117,6 +113,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer,
+  <<T::Runtime as Runtime>::JoinHandle<()> as std::future::Future>::Output: Send,
 {
   struct TestStreamLayer<TS: StreamLayer> {
     _m: std::marker::PhantomData<TS>,
@@ -153,7 +150,7 @@ where
       unreachable!()
     }
 
-    fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {}
+    async fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {}
 
     fn is_secure() -> bool {
       unreachable!()
@@ -162,19 +159,16 @@ where
 
   const TEST_TIME: std::time::Duration = std::time::Duration::from_secs(4);
 
-  let _lock = BACKOFFS_LOCK.lock().unwrap();
+  let _lock = BACKOFFS_LOCK.lock();
   let ln = s.bind(kind.next()).await?;
   let local_addr = ln.local_addr()?;
-  let (_shutdown_tx, shutdown_rx) = async_channel::bounded(1);
-  let shutdown = Arc::new(AtomicBool::new(false));
+  let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
   let (stream_tx, stream_rx) = memberlist_core::transport::stream::promised_stream::<T>();
-  let wg = agnostic::WaitableSpawner::<A::Runtime>::new();
-  wg.spawn_detach(
+  let task = <T::Runtime as Runtime>::spawn(
     PromisedProcessor::<A, T, TestStreamLayer<S>> {
       stream_tx,
       ln: Arc::new(TestListener { ln }),
       local_addr,
-      shutdown: shutdown.clone(),
       shutdown_rx,
     }
     .run(),
@@ -182,12 +176,12 @@ where
 
   // sleep (+yield) for testTime seconds before asking the accept loop to shut down
   <T::Runtime as Runtime>::sleep(TEST_TIME).await;
-  shutdown.store(true, Ordering::SeqCst);
+  shutdown_tx.close();
   // Verify that the wg was completed on exit (but without blocking this test)
   // maxDelay == 1s, so we will give the routine 1.25s to loop around and shut down.
   let (ctx, crx) = async_channel::bounded::<()>(1);
   <T::Runtime as Runtime>::spawn_detach(async move {
-    wg.wait().await;
+    let _ = task.await;
     ctx.close();
   });
 
@@ -207,7 +201,7 @@ where
   // If the minDelay or maxDelay in NetTransport#tcpListen() are modified, this test may fail
   // and need to be adjusted.
   let calls = BACKOFFS_COUNT.load(Ordering::SeqCst);
-  assert!(8 < calls && calls < 14);
+  assert!(8 < calls && calls < 14, "calls: {calls}");
 
   // no connections should have been accepted and sent to the channel
   assert!(stream_rx.is_empty());

@@ -2,7 +2,10 @@ use crate::join_test_suites;
 
 use super::*;
 
-#[cfg(not(any(feature = "tls", feature = "native-tls")))]
+#[cfg(any(
+  not(any(feature = "tls", feature = "native-tls")),
+  all(feature = "tls", feature = "native-tls")
+))]
 join_test_suites!("tcp": SmolRuntime::run({
   Tcp::<SmolRuntime>::new()
 }));

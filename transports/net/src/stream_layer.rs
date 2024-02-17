@@ -65,7 +65,8 @@ pub trait StreamLayer: Send + Sync + 'static {
   fn bind(&self, addr: SocketAddr) -> impl Future<Output = io::Result<Self::Listener>> + Send;
 
   /// Caches the stream for the given address.
-  fn cache_stream(&self, addr: SocketAddr, stream: Self::Stream);
+  fn cache_stream(&self, addr: SocketAddr, stream: Self::Stream)
+    -> impl Future<Output = ()> + Send;
 
   /// Indicates whether the connection is secure.
   ///

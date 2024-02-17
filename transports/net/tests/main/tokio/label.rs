@@ -1,7 +1,10 @@
 use super::*;
 use crate::label_test_suites;
 
-#[cfg(not(any(feature = "tls", feature = "native-tls")))]
+#[cfg(any(
+  not(any(feature = "tls", feature = "native-tls")),
+  all(feature = "tls", feature = "native-tls")
+))]
 label_test_suites!("tcp": TokioRuntime::run({
   Tcp::<TokioRuntime>::new()
 }));
