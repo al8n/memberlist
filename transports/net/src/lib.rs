@@ -18,12 +18,12 @@ use std::{
 
 use agnostic::{
   net::{Net, UdpSocket},
-  Runtime, WaitableSpawner,
+  Runtime,
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{BufMut, BytesMut};
 use checksum::CHECKSUM_SIZE;
-use futures::{io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::{channel::oneshot, io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt};
 use memberlist_core::{
   transport::{
     resolver::AddressResolver,
@@ -149,9 +149,8 @@ where
   stream_layer: Arc<S>,
   #[cfg(feature = "encryption")]
   encryptor: Option<SecretKeyring>,
-  wg: WaitableSpawner<A::Runtime>,
+  handles: futures::lock::Mutex<SmallVec<oneshot::Receiver<()>>>,
   resolver: Arc<A>,
-  shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
   _marker: PhantomData<W>,
 }
@@ -289,9 +288,8 @@ where
     let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
     let advertise_addr = resolved_bind_address[expose_addr_index];
     let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
-    let wg = WaitableSpawner::new();
     let shutdown = Arc::new(AtomicBool::new(false));
-
+    let mut handles = SmallVec::new();
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
@@ -300,37 +298,42 @@ where
       .zip(v4_sockets.iter())
       .chain(v6_promised_listeners.iter().zip(v6_sockets.iter()))
     {
-      wg.spawn_detach(
-        PromisedProcessor::<A, Self, S> {
-          stream_tx: stream_tx.clone(),
-          ln: promised_ln.clone(),
-          shutdown: shutdown.clone(),
-          shutdown_rx: shutdown_rx.clone(),
-          local_addr: *promised_addr,
-        }
-        .run(),
-      );
+      let (finish_tx, finish_rx) = oneshot::channel();
+      let processor = PromisedProcessor::<A, Self, S> {
+        stream_tx: stream_tx.clone(),
+        ln: promised_ln.clone(),
+        shutdown_rx: shutdown_rx.clone(),
+        local_addr: *promised_addr,
+      };
+      R::spawn_detach(async move {
+        processor.run().await;
+        let _ = finish_tx.send(());
+      });
+      handles.push(finish_rx);
 
-      wg.spawn_detach(
-        PacketProcessor::<A, Self> {
-          packet_tx: packet_tx.clone(),
-          label: opts.label.clone(),
-          #[cfg(any(feature = "compression", feature = "encryption"))]
-          offload_size: opts.offload_size,
-          #[cfg(feature = "encryption")]
-          verify_incoming: opts.gossip_verify_incoming,
-          #[cfg(feature = "encryption")]
-          encryptor: encryptor.clone(),
-          socket: socket.clone(),
-          local_addr: *socket_addr,
-          shutdown: shutdown.clone(),
-          #[cfg(feature = "metrics")]
-          metric_labels: opts.metric_labels.clone().unwrap_or_default(),
-          shutdown_rx: shutdown_rx.clone(),
-          skip_inbound_label_check: opts.skip_inbound_label_check,
-        }
-        .run(),
-      );
+      let (finish_tx, finish_rx) = oneshot::channel();
+      let processor = PacketProcessor::<A, Self> {
+        packet_tx: packet_tx.clone(),
+        label: opts.label.clone(),
+        #[cfg(any(feature = "compression", feature = "encryption"))]
+        offload_size: opts.offload_size,
+        #[cfg(feature = "encryption")]
+        verify_incoming: opts.gossip_verify_incoming,
+        #[cfg(feature = "encryption")]
+        encryptor: encryptor.clone(),
+        socket: socket.clone(),
+        local_addr: *socket_addr,
+        shutdown: shutdown.clone(),
+        #[cfg(feature = "metrics")]
+        metric_labels: opts.metric_labels.clone().unwrap_or_default(),
+        shutdown_rx: shutdown_rx.clone(),
+        skip_inbound_label_check: opts.skip_inbound_label_check,
+      };
+      R::spawn_detach(async move {
+        processor.run().await;
+        let _ = finish_tx.send(());
+      });
+      handles.push(finish_rx);
     }
 
     // find final advertise address
@@ -369,8 +372,7 @@ where
       opts,
       packet_rx,
       stream_rx,
-      wg,
-      shutdown,
+      handles: futures::lock::Mutex::new(handles),
       v4_sockets: v4_sockets.into_iter().map(|(ln, _)| ln).collect(),
       v4_round_robin: AtomicUsize::new(0),
       v6_sockets: v6_sockets.into_iter().map(|(ln, _)| ln).collect(),
@@ -666,8 +668,7 @@ where
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     timeout: Duration,
   ) -> Result<Self::Stream, Self::Error> {
-    let connector =
-      <Self::Runtime as Runtime>::timeout_nonblocking(timeout, self.stream_layer.connect(*addr));
+    let connector = <Self::Runtime as Runtime>::timeout(timeout, self.stream_layer.connect(*addr));
     match connector.await {
       Ok(Ok(conn)) => Ok(conn),
       Ok(Err(e)) => Err(Self::Error::Connection(ConnectionError {
@@ -688,7 +689,7 @@ where
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     stream: Self::Stream,
   ) -> Result<(), Self::Error> {
-    self.stream_layer.cache_stream(*addr, stream);
+    self.stream_layer.cache_stream(*addr, stream).await;
     Ok(())
   }
 
@@ -710,11 +711,11 @@ where
     }
 
     // This will avoid log spam about errors when we shut down.
-    self.shutdown.store(true, Ordering::SeqCst);
     self.shutdown_tx.close();
 
-    // Block until all the listener threads have died.
-    self.wg.wait().await;
+    let mut handles = self.handles.lock().await;
+    let handles = core::mem::take(&mut *handles);
+    futures::future::join_all(handles).await;
     Ok(())
   }
 }
@@ -728,12 +729,6 @@ where
   R: Runtime,
 {
   fn drop(&mut self) {
-    use pollster::FutureExt as _;
-
-    if self.shutdown_tx.is_closed() {
-      return;
-    }
-
-    let _ = self.shutdown().block_on();
+    self.shutdown_tx.close();
   }
 }
