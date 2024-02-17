@@ -870,16 +870,18 @@ where
   m2.send(m1.advertise_addr(), Bytes::from_static(b"send"))
     .await
     .map_err(|e| {
-      tracing::error!("fail to send packet");
+      tracing::error!("fail to send packet {e}");
       e
-    })?;
+    })
+    .unwrap();
 
   m2.send_reliable(m1.advertise_addr(), Bytes::from_static(b"send_reliable"))
     .await
     .map_err(|e| {
       tracing::error!("fail to send message {e}");
       e
-    })?;
+    })
+    .unwrap();
 
   R::sleep(WAIT_DURATION).await;
 

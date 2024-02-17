@@ -10,7 +10,6 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_server_with_label_with_encryption_client_with_label_with_encryption");
   let label = Label::try_from(&name)?;
@@ -45,7 +44,6 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_server_with_label_with_encryption_client_with_label_no_encryption");
   let label = Label::try_from(&name)?;
@@ -79,7 +77,6 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_server_with_label_no_encryption_client_with_label_with_encryption");
   let label = Label::try_from(&name)?;

@@ -10,7 +10,6 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   fn encode_batch(
     buf: &mut [u8],
@@ -208,7 +207,6 @@ where
       .write_all(src)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    let _ = stream.finish().await;
     Ok(written)
   }
 }

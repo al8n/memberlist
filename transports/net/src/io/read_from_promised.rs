@@ -10,7 +10,6 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   pub(crate) async fn read_from_promised_without_compression_and_encryption(
     &self,

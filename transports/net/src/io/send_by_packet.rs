@@ -7,7 +7,6 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   pub(crate) fn fix_packet_overhead(&self) -> usize {
     let mut overhead = self.opts.label.encoded_overhead();

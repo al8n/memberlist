@@ -7,7 +7,6 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   #[cfg(feature = "encryption")]
   fn enable_promised_encryption(&self) -> bool {

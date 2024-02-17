@@ -23,7 +23,7 @@ use agnostic::{
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{BufMut, BytesMut};
 use checksum::CHECKSUM_SIZE;
-use futures::{io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt, Future};
+use futures::{channel::oneshot, io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt};
 use memberlist_core::{
   transport::{
     resolver::AddressResolver,
@@ -136,7 +136,6 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   opts: Arc<NetTransportOptions<I, A>>,
   advertise_addr: A::ResolvedAddress,
@@ -150,7 +149,7 @@ where
   stream_layer: Arc<S>,
   #[cfg(feature = "encryption")]
   encryptor: Option<SecretKeyring>,
-  handles: futures::lock::Mutex<SmallVec<R::JoinHandle<()>>>,
+  handles: futures::lock::Mutex<SmallVec<oneshot::Receiver<()>>>,
   resolver: Arc<A>,
   shutdown_tx: async_channel::Sender<()>,
   _marker: PhantomData<W>,
@@ -163,7 +162,6 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   /// Creates a new net transport.
   pub async fn new(
@@ -300,36 +298,42 @@ where
       .zip(v4_sockets.iter())
       .chain(v6_promised_listeners.iter().zip(v6_sockets.iter()))
     {
-      handles.push(R::spawn(
-        PromisedProcessor::<A, Self, S> {
-          stream_tx: stream_tx.clone(),
-          ln: promised_ln.clone(),
-          shutdown_rx: shutdown_rx.clone(),
-          local_addr: *promised_addr,
-        }
-        .run(),
-      ));
+      let (finish_tx, finish_rx) = oneshot::channel();
+      let processor = PromisedProcessor::<A, Self, S> {
+        stream_tx: stream_tx.clone(),
+        ln: promised_ln.clone(),
+        shutdown_rx: shutdown_rx.clone(),
+        local_addr: *promised_addr,
+      };
+      R::spawn_detach(async move {
+        processor.run().await;
+        let _ = finish_tx.send(());
+      });
+      handles.push(finish_rx);
 
-      handles.push(R::spawn(
-        PacketProcessor::<A, Self> {
-          packet_tx: packet_tx.clone(),
-          label: opts.label.clone(),
-          #[cfg(any(feature = "compression", feature = "encryption"))]
-          offload_size: opts.offload_size,
-          #[cfg(feature = "encryption")]
-          verify_incoming: opts.gossip_verify_incoming,
-          #[cfg(feature = "encryption")]
-          encryptor: encryptor.clone(),
-          socket: socket.clone(),
-          local_addr: *socket_addr,
-          shutdown: shutdown.clone(),
-          #[cfg(feature = "metrics")]
-          metric_labels: opts.metric_labels.clone().unwrap_or_default(),
-          shutdown_rx: shutdown_rx.clone(),
-          skip_inbound_label_check: opts.skip_inbound_label_check,
-        }
-        .run(),
-      ));
+      let (finish_tx, finish_rx) = oneshot::channel();
+      let processor = PacketProcessor::<A, Self> {
+        packet_tx: packet_tx.clone(),
+        label: opts.label.clone(),
+        #[cfg(any(feature = "compression", feature = "encryption"))]
+        offload_size: opts.offload_size,
+        #[cfg(feature = "encryption")]
+        verify_incoming: opts.gossip_verify_incoming,
+        #[cfg(feature = "encryption")]
+        encryptor: encryptor.clone(),
+        socket: socket.clone(),
+        local_addr: *socket_addr,
+        shutdown: shutdown.clone(),
+        #[cfg(feature = "metrics")]
+        metric_labels: opts.metric_labels.clone().unwrap_or_default(),
+        shutdown_rx: shutdown_rx.clone(),
+        skip_inbound_label_check: opts.skip_inbound_label_check,
+      };
+      R::spawn_detach(async move {
+        processor.run().await;
+        let _ = finish_tx.send(());
+      });
+      handles.push(finish_rx);
     }
 
     // find final advertise address
@@ -428,7 +432,6 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   type Error = NetTransportError<Self::Resolver, Self::Wire>;
 
@@ -724,7 +727,6 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   fn drop(&mut self) {
     self.shutdown_tx.close();

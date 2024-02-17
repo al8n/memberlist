@@ -15,7 +15,6 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   // Create two agents with different gossip keys
   let pk1 = SecretKey::Aes192(*b"4W6DGn2VQVqDEceOdmuRTQ==");
@@ -65,7 +64,6 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   // Create two agents with different gossip keys
   let pk1 = SecretKey::Aes192(*b"4W6DGn2VQVqDEceOdmuRTQ==");

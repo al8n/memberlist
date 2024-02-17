@@ -12,7 +12,6 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_packet_piggyback");
   let label = Label::try_from(&name)?;

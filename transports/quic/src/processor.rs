@@ -1,7 +1,11 @@
 use std::{collections::HashMap, mem};
 
 use agnostic::Runtime;
-use futures::{lock::Mutex, FutureExt};
+use futures::{
+  channel::oneshot::{self, channel},
+  lock::Mutex,
+  FutureExt,
+};
 use memberlist_core::{
   transport::{
     stream::{PacketProducer, StreamProducer},
@@ -43,9 +47,8 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Stream = S::Stream>,
   S: StreamLayer,
-  <<T::Runtime as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
-  pub(super) fn run(self) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  pub(super) async fn run(self) {
     let Self {
       acceptor,
       packet_tx,
@@ -62,24 +65,22 @@ where
       metric_labels,
     } = self;
 
-    <T::Runtime as Runtime>::spawn(async move {
-      Self::listen(
-        local_addr,
-        label,
-        acceptor,
-        stream_tx,
-        packet_tx,
-        shutdown,
-        shutdown_rx,
-        skip_inbound_label_check,
-        timeout,
-        #[cfg(feature = "compression")]
-        offload_size,
-        #[cfg(feature = "metrics")]
-        metric_labels,
-      )
-      .await;
-    })
+    Self::listen(
+      local_addr,
+      label,
+      acceptor,
+      stream_tx,
+      packet_tx,
+      shutdown,
+      shutdown_rx,
+      skip_inbound_label_check,
+      timeout,
+      #[cfg(feature = "compression")]
+      offload_size,
+      #[cfg(feature = "metrics")]
+      metric_labels,
+    )
+    .await;
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -130,7 +131,8 @@ where
               task_id += 1;
               let hls = handles.clone();
               let mut l = handles.lock().await;
-              l.insert(task_id, <T::Runtime as Runtime>::spawn(async move {
+              let (finish_tx, finish_rx) = channel();
+              <T::Runtime as Runtime>::spawn_detach(async move {
                 Self::handle_connection(
                   task_id,
                   hls,
@@ -145,8 +147,10 @@ where
                   shutdown_rx,
                   #[cfg(feature = "compression")] offload_size,
                   #[cfg(feature = "metrics")] metric_labels,
-                ).await
-              }));
+                ).await;
+                let _ = finish_tx.send(());
+              });
+              l.insert(task_id, finish_rx);
             }
             Err(e) => {
               if shutdown.load(Ordering::SeqCst) {
@@ -177,7 +181,7 @@ where
   #[allow(clippy::too_many_arguments)]
   async fn handle_connection(
     self_task_id: u64,
-    parent_handles: Arc<Mutex<HashMap<u64, <T::Runtime as Runtime>::JoinHandle<()>>>>,
+    parent_handles: Arc<Mutex<HashMap<u64, oneshot::Receiver<()>>>>,
     conn: S::Connection,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
@@ -220,8 +224,8 @@ where
                 task_id += 1;
                 let hls = handles.clone();
                 let mut l = handles.lock().await;
-
-                l.insert(task_id, <T::Runtime as Runtime>::spawn(async move {
+                let (finish_tx, finish_rx) = channel();
+                <T::Runtime as Runtime>::spawn_detach(async move {
                   Self::handle_packet(
                     task_id,
                     hls,
@@ -235,7 +239,9 @@ where
                     #[cfg(feature = "compression")] offload_size,
                     #[cfg(feature = "metrics")] metric_labels,
                   ).await;
-                }));
+                  let _ = finish_tx.send(());
+                });
+                l.insert(task_id, finish_rx);
               }
 
               let mut parent_handles = parent_handles.lock().await;
@@ -266,7 +272,7 @@ where
   #[allow(clippy::too_many_arguments)]
   async fn handle_packet(
     task_id: u64,
-    handles: Arc<Mutex<HashMap<u64, <T::Runtime as Runtime>::JoinHandle<()>>>>,
+    handles: Arc<Mutex<HashMap<u64, oneshot::Receiver<()>>>>,
     mut stream: S::Stream,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,

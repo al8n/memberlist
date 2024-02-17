@@ -6,7 +6,6 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
 use std::{
-  future::Future,
   marker::PhantomData,
   net::{IpAddr, SocketAddr},
   sync::{
@@ -16,12 +15,14 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::{Runtime, WaitGroup as _};
+use agnostic::Runtime;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
-
 use crossbeam_skiplist::SkipMap;
-use futures::FutureExt;
+use futures::{
+  channel::oneshot::{self, channel},
+  FutureExt,
+};
 use memberlist_core::{
   transport::{
     stream::{packet_stream, promised_stream, PacketSubscriber, StreamSubscriber},
@@ -111,7 +112,7 @@ where
   v4_connectors: SmallVec<S::Connector>,
   v6_round_robin: AtomicUsize,
   v6_connectors: SmallVec<S::Connector>,
-  handles: futures::lock::Mutex<SmallVec<R::JoinHandle<()>>>,
+  handles: futures::lock::Mutex<SmallVec<oneshot::Receiver<()>>>,
   resolver: A,
   shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
@@ -128,7 +129,6 @@ where
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
   <R::Interval as futures::Stream>::Item: Send + 'static,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   /// Creates a new quic transport.
   pub async fn new(
@@ -206,7 +206,6 @@ where
       resolved_bind_address.push(addr);
     }
 
-    let wg = R::waitgroup();
     let shutdown = Arc::new(AtomicBool::new(false));
     let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
     let advertise_addr = resolved_bind_address[expose_addr_index];
@@ -217,24 +216,28 @@ where
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
     for (local_addr, acceptor) in v4_acceptors.into_iter().chain(v6_acceptors.into_iter()) {
-      handles.push(
-        Processor::<A, Self, S> {
-          acceptor,
-          packet_tx: packet_tx.clone(),
-          stream_tx: stream_tx.clone(),
-          label: opts.label.clone(),
-          local_addr,
-          shutdown: shutdown.clone(),
-          timeout: opts.timeout,
-          shutdown_rx: shutdown_rx.clone(),
-          skip_inbound_label_check: opts.skip_inbound_label_check,
-          #[cfg(feature = "compression")]
-          offload_size: opts.offload_size,
-          #[cfg(feature = "metrics")]
-          metric_labels: opts.metric_labels.clone().unwrap_or_default(),
-        }
-        .run(),
-      );
+      let (finish_tx, finish_rx) = channel();
+      let processor = Processor::<A, Self, S> {
+        acceptor,
+        packet_tx: packet_tx.clone(),
+        stream_tx: stream_tx.clone(),
+        label: opts.label.clone(),
+        local_addr,
+        shutdown: shutdown.clone(),
+        timeout: opts.timeout,
+        shutdown_rx: shutdown_rx.clone(),
+        skip_inbound_label_check: opts.skip_inbound_label_check,
+        #[cfg(feature = "compression")]
+        offload_size: opts.offload_size,
+        #[cfg(feature = "metrics")]
+        metric_labels: opts.metric_labels.clone().unwrap_or_default(),
+      };
+
+      R::spawn_detach(async {
+        processor.run().await;
+        let _ = finish_tx.send(());
+      });
+      handles.push(finish_rx);
     }
 
     // find final advertise address
@@ -251,7 +254,13 @@ where
     let connection_pool = Arc::new(SkipMap::new());
     let interval = <A::Runtime as Runtime>::interval(opts.connection_pool_cleanup_period);
     let pool = connection_pool.clone();
-    wg.spawn_detach(Self::connection_pool_cleaner(pool, interval, shutdown_rx));
+    let (cleaner_finish_tx, cleaner_finish_rx) = channel();
+    let shutdown_rx = shutdown_rx.clone();
+    R::spawn_detach(async move {
+      Self::connection_pool_cleaner(pool, interval, shutdown_rx).await;
+      let _ = cleaner_finish_tx.send(());
+    });
+    handles.push(cleaner_finish_rx);
 
     Ok(Self {
       advertise_addr: final_advertise_addr,
@@ -417,7 +426,6 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
-  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   type Error = QuicTransportError<A, S, W>;
 
