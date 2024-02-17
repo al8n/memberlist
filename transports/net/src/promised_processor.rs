@@ -115,9 +115,8 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer,
+  <<T::Runtime as Runtime>::JoinHandle<()> as std::future::Future>::Output: Send,
 {
-  use agnostic::WaitGroup as _;
-
   struct TestStreamLayer<TS: StreamLayer> {
     _m: std::marker::PhantomData<TS>,
   }
@@ -168,8 +167,7 @@ where
   let (_shutdown_tx, shutdown_rx) = async_channel::bounded(1);
   let shutdown = Arc::new(AtomicBool::new(false));
   let (stream_tx, stream_rx) = memberlist_core::transport::stream::promised_stream::<T>();
-  let wg = <A::Runtime as Runtime>::waitgroup();
-  wg.spawn_detach(
+  let task = <T::Runtime as Runtime>::spawn(
     PromisedProcessor::<A, T, TestStreamLayer<S>> {
       stream_tx,
       ln: Arc::new(TestListener { ln }),
@@ -186,7 +184,7 @@ where
   // maxDelay == 1s, so we will give the routine 1.25s to loop around and shut down.
   let (ctx, crx) = async_channel::bounded::<()>(1);
   <T::Runtime as Runtime>::spawn_detach(async move {
-    wg.wait().await;
+    let _ = task.await;
     ctx.close();
   });
 
