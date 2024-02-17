@@ -53,7 +53,7 @@ jobs:
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --force
       - name: Run cargo-tarpaulin
-        run: cargo-tarpaulin --all-features --run-types tests --out xml --workspace 
+        run: cargo-tarpaulin --all-features --run-types tests --out xml --workspace --no-fail-fast
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3.1.1
         with: 
