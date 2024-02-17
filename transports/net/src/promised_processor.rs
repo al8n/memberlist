@@ -12,6 +12,9 @@ use nodecraft::resolver::AddressResolver;
 use super::{Listener, StreamLayer};
 
 #[cfg(any(test, feature = "test"))]
+static BACKOFFS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+#[cfg(any(test, feature = "test"))]
 static BACKOFFS_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub(super) struct PromisedProcessor<A, T, S>
@@ -156,6 +159,7 @@ where
 
   const TEST_TIME: std::time::Duration = std::time::Duration::from_secs(4);
 
+  let _lock = BACKOFFS_LOCK.lock();
   let ln = s.bind(kind.next()).await?;
   let local_addr = ln.local_addr()?;
   let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
@@ -197,7 +201,7 @@ where
   // If the minDelay or maxDelay in NetTransport#tcpListen() are modified, this test may fail
   // and need to be adjusted.
   let calls = BACKOFFS_COUNT.load(Ordering::SeqCst);
-  assert!(8 < calls && calls < 14);
+  assert!(8 < calls && calls < 14, "calls: {calls}");
 
   // no connections should have been accepted and sent to the channel
   assert!(stream_rx.is_empty());
