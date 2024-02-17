@@ -1,9 +1,6 @@
 use std::{
   net::SocketAddr,
-  sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-  },
+  sync::{atomic::Ordering, Arc},
   time::Duration,
 };
 
@@ -161,8 +158,7 @@ where
 
   let ln = s.bind(kind.next()).await?;
   let local_addr = ln.local_addr()?;
-  let (_shutdown_tx, shutdown_rx) = async_channel::bounded(1);
-  let shutdown = Arc::new(AtomicBool::new(false));
+  let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
   let (stream_tx, stream_rx) = memberlist_core::transport::stream::promised_stream::<T>();
   let task = <T::Runtime as Runtime>::spawn(
     PromisedProcessor::<A, T, TestStreamLayer<S>> {
@@ -176,7 +172,7 @@ where
 
   // sleep (+yield) for testTime seconds before asking the accept loop to shut down
   <T::Runtime as Runtime>::sleep(TEST_TIME).await;
-  shutdown.store(true, Ordering::SeqCst);
+  shutdown_tx.close();
   // Verify that the wg was completed on exit (but without blocking this test)
   // maxDelay == 1s, so we will give the routine 1.25s to loop around and shut down.
   let (ctx, crx) = async_channel::bounded::<()>(1);
