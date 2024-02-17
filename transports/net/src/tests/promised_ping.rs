@@ -16,6 +16,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_promised_ping");
   let label = Label::try_from(&name)?;
@@ -46,6 +47,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_promised_ping_no_label");
   let pk = SecretKey::from([1; 32]);
@@ -74,6 +76,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_promised_ping_compression_only");
 
@@ -97,6 +100,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_promised_ping_label_and_compression");
   let label = Label::try_from(&name)?;
@@ -123,6 +127,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_promised_ping_encryption_only");
   let pk = SecretKey::from([1; 32]);
@@ -150,6 +155,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_promised_ping_lable_and_encryption");
   let label = Label::try_from(&name)?;
@@ -178,6 +184,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_promised_ping_no_compression_no_encryption");
 
@@ -200,6 +207,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_promised_ping_label_only");
   let label = Label::try_from(&name)?;

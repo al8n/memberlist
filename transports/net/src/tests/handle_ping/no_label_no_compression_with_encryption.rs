@@ -12,6 +12,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let pk = SecretKey::from([1; 32]);
   let client = NetTransportTestClient::<R>::new(kind.next())
@@ -42,6 +43,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let pk = SecretKey::from([1; 32]);
   let client = NetTransportTestClient::<R>::new(kind.next())
@@ -72,6 +74,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let pk = SecretKey::from([1; 32]);
   let client = NetTransportTestClient::<R>::new(kind.next())

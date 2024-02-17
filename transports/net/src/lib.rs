@@ -18,12 +18,12 @@ use std::{
 
 use agnostic::{
   net::{Net, UdpSocket},
-  Runtime, WaitableSpawner,
+  Runtime,
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{BufMut, BytesMut};
 use checksum::CHECKSUM_SIZE;
-use futures::{io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::{io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt, Future};
 use memberlist_core::{
   transport::{
     resolver::AddressResolver,
@@ -136,6 +136,7 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   opts: Arc<NetTransportOptions<I, A>>,
   advertise_addr: A::ResolvedAddress,
@@ -149,10 +150,8 @@ where
   stream_layer: Arc<S>,
   #[cfg(feature = "encryption")]
   encryptor: Option<SecretKeyring>,
-  #[allow(dead_code)]
-  wg: WaitableSpawner<A::Runtime>,
+  handles: futures::lock::Mutex<SmallVec<R::JoinHandle<()>>>,
   resolver: Arc<A>,
-  shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
   _marker: PhantomData<W>,
 }
@@ -164,6 +163,7 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   /// Creates a new net transport.
   pub async fn new(
@@ -290,9 +290,8 @@ where
     let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
     let advertise_addr = resolved_bind_address[expose_addr_index];
     let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
-    let wg = WaitableSpawner::new();
     let shutdown = Arc::new(AtomicBool::new(false));
-
+    let mut handles = SmallVec::new();
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
@@ -301,18 +300,17 @@ where
       .zip(v4_sockets.iter())
       .chain(v6_promised_listeners.iter().zip(v6_sockets.iter()))
     {
-      wg.spawn_detach(
+      handles.push(R::spawn(
         PromisedProcessor::<A, Self, S> {
           stream_tx: stream_tx.clone(),
           ln: promised_ln.clone(),
-          shutdown: shutdown.clone(),
           shutdown_rx: shutdown_rx.clone(),
           local_addr: *promised_addr,
         }
         .run(),
-      );
+      ));
 
-      wg.spawn_detach(
+      handles.push(R::spawn(
         PacketProcessor::<A, Self> {
           packet_tx: packet_tx.clone(),
           label: opts.label.clone(),
@@ -331,7 +329,7 @@ where
           skip_inbound_label_check: opts.skip_inbound_label_check,
         }
         .run(),
-      );
+      ));
     }
 
     // find final advertise address
@@ -370,8 +368,7 @@ where
       opts,
       packet_rx,
       stream_rx,
-      wg,
-      shutdown,
+      handles: futures::lock::Mutex::new(handles),
       v4_sockets: v4_sockets.into_iter().map(|(ln, _)| ln).collect(),
       v4_round_robin: AtomicUsize::new(0),
       v6_sockets: v6_sockets.into_iter().map(|(ln, _)| ln).collect(),
@@ -431,6 +428,7 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   type Error = NetTransportError<Self::Resolver, Self::Wire>;
 
@@ -710,13 +708,11 @@ where
     }
 
     // This will avoid log spam about errors when we shut down.
-    self.shutdown.store(true, Ordering::SeqCst);
     self.shutdown_tx.close();
 
-    // Block until all the listener threads have died.
-    // TODO(al8n): FIX randomly hangs in test when enable the following line for tokio runtime
-    #[cfg(not(feature = "tokio"))]
-    self.wg.wait().await;
+    let mut handles = self.handles.lock().await;
+    let handles = core::mem::take(&mut *handles);
+    futures::future::join_all(handles).await;
     Ok(())
   }
 }
@@ -728,14 +724,9 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   fn drop(&mut self) {
-    use pollster::FutureExt as _;
-
-    if self.shutdown_tx.is_closed() {
-      return;
-    }
-
-    let _ = self.shutdown().block_on();
+    self.shutdown_tx.close();
   }
 }

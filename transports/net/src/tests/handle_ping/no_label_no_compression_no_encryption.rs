@@ -12,6 +12,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let client = NetTransportTestClient::<R>::new(kind.next()).await?;
   let mut opts = NetTransportOptions::new(format!("{kind}_ping_server_no_label_no_compression_no_encryption_client_no_label_no_compression_no_encryption").into());

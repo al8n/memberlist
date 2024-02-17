@@ -10,6 +10,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name =
     format!("{kind}_ping_server_with_label_with_compression_client_with_label_no_compression");
@@ -43,6 +44,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name =
     format!("{kind}_ping_server_with_label_no_compression_client_with_label_with_compression");
@@ -74,6 +76,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name =
     format!("{kind}_ping_server_with_label_with_compression_client_with_label_with_compression");

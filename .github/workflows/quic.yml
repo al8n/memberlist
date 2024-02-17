@@ -253,13 +253,10 @@ jobs:
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --force
       - name: Run cargo-tarpaulin
-        working-directory: transports/quic
-        run: cargo-tarpaulin --features test,quinn,tokio --run-types tests -o xml 
+        run: cargo-tarpaulin --features test,quinn,tokio --run-types tests --out xml -p memberlist-quic 
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: flase
-          directory: transports/quic
-          working-directory: transports/quic
           flags: transports.quic

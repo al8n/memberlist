@@ -29,7 +29,6 @@ where
     StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, S::Stream>,
   pub(super) ln: Arc<S::Listener>,
   pub(super) local_addr: SocketAddr,
-  pub(super) shutdown: Arc<AtomicBool>,
   pub(super) shutdown_rx: async_channel::Receiver<()>,
 }
 
@@ -43,9 +42,8 @@ where
     let Self {
       stream_tx,
       ln,
-      shutdown,
       local_addr,
-      ..
+      shutdown_rx,
     } = self;
 
     /// The initial delay after an `accept()` error before attempting again
@@ -59,7 +57,7 @@ where
     let mut loop_delay = Duration::ZERO;
     loop {
       futures::select! {
-        _ = self.shutdown_rx.recv().fuse() => {
+        _ = shutdown_rx.recv().fuse() => {
           break;
         }
         rst = ln.accept().fuse() => {
@@ -75,7 +73,7 @@ where
               }
             }
             Err(e) => {
-              if shutdown.load(Ordering::SeqCst) {
+              if shutdown_rx.is_closed() {
                 break;
               }
 
@@ -118,6 +116,8 @@ where
   T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer,
 {
+  use agnostic::WaitGroup as _;
+
   struct TestStreamLayer<TS: StreamLayer> {
     _m: std::marker::PhantomData<TS>,
   }
@@ -168,13 +168,12 @@ where
   let (_shutdown_tx, shutdown_rx) = async_channel::bounded(1);
   let shutdown = Arc::new(AtomicBool::new(false));
   let (stream_tx, stream_rx) = memberlist_core::transport::stream::promised_stream::<T>();
-  let wg = agnostic::WaitableSpawner::<A::Runtime>::new();
+  let wg = <A::Runtime as Runtime>::waitgroup();
   wg.spawn_detach(
     PromisedProcessor::<A, T, TestStreamLayer<S>> {
       stream_tx,
       ln: Arc::new(TestListener { ln }),
       local_addr,
-      shutdown: shutdown.clone(),
       shutdown_rx,
     }
     .run(),

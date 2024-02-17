@@ -6,6 +6,7 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
 use std::{
+  future::Future,
   marker::PhantomData,
   net::{IpAddr, SocketAddr},
   sync::{
@@ -15,7 +16,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::{Runtime, WaitableSpawner};
+use agnostic::{Runtime, WaitGroup as _};
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
 
@@ -31,7 +32,6 @@ use memberlist_core::{
 
 use memberlist_utils::{net::CIDRsPolicy, Label, LabelError, SmallVec, TinyVec};
 use nodecraft::{resolver::AddressResolver, CheapClone, Id};
-use pollster::FutureExt as _;
 
 mod processor;
 use processor::*;
@@ -111,9 +111,7 @@ where
   v4_connectors: SmallVec<S::Connector>,
   v6_round_robin: AtomicUsize,
   v6_connectors: SmallVec<S::Connector>,
-
-  #[allow(dead_code)]
-  wg: WaitableSpawner<A::Runtime>,
+  handles: futures::lock::Mutex<SmallVec<R::JoinHandle<()>>>,
   resolver: A,
   shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
@@ -130,6 +128,7 @@ where
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
   <R::Interval as futures::Stream>::Item: Send + 'static,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   /// Creates a new quic transport.
   pub async fn new(
@@ -207,33 +206,35 @@ where
       resolved_bind_address.push(addr);
     }
 
-    let wg = WaitableSpawner::<A::Runtime>::new();
+    let wg = R::waitgroup();
     let shutdown = Arc::new(AtomicBool::new(false));
     let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
     let advertise_addr = resolved_bind_address[expose_addr_index];
     let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
+    let mut handles = SmallVec::new();
 
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
     for (local_addr, acceptor) in v4_acceptors.into_iter().chain(v6_acceptors.into_iter()) {
-      Processor::<A, Self, S> {
-        wg: wg.clone(),
-        acceptor,
-        packet_tx: packet_tx.clone(),
-        stream_tx: stream_tx.clone(),
-        label: opts.label.clone(),
-        local_addr,
-        shutdown: shutdown.clone(),
-        timeout: opts.timeout,
-        shutdown_rx: shutdown_rx.clone(),
-        skip_inbound_label_check: opts.skip_inbound_label_check,
-        #[cfg(feature = "compression")]
-        offload_size: opts.offload_size,
-        #[cfg(feature = "metrics")]
-        metric_labels: opts.metric_labels.clone().unwrap_or_default(),
-      }
-      .run();
+      handles.push(
+        Processor::<A, Self, S> {
+          acceptor,
+          packet_tx: packet_tx.clone(),
+          stream_tx: stream_tx.clone(),
+          label: opts.label.clone(),
+          local_addr,
+          shutdown: shutdown.clone(),
+          timeout: opts.timeout,
+          shutdown_rx: shutdown_rx.clone(),
+          skip_inbound_label_check: opts.skip_inbound_label_check,
+          #[cfg(feature = "compression")]
+          offload_size: opts.offload_size,
+          #[cfg(feature = "metrics")]
+          metric_labels: opts.metric_labels.clone().unwrap_or_default(),
+        }
+        .run(),
+      );
     }
 
     // find final advertise address
@@ -260,7 +261,7 @@ where
       opts,
       packet_rx,
       stream_rx,
-      wg,
+      handles: futures::lock::Mutex::new(handles),
       shutdown,
       v4_connectors,
       v6_connectors,
@@ -416,6 +417,7 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   type Error = QuicTransportError<A, S, W>;
 
@@ -706,9 +708,8 @@ where
     }
 
     // Block until all the listener threads have died.
-    // TODO(al8n): FIX randomly hangs in test when enable the following line for tokio runtime
-    #[cfg(not(feature = "tokio"))]
-    self.wg.wait().await;
+    let mut handles = self.handles.lock().await;
+    let _ = futures::future::join_all(handles.drain(..)).await;
     Ok(())
   }
 }
@@ -722,9 +723,6 @@ where
   R: Runtime,
 {
   fn drop(&mut self) {
-    if self.shutdown_tx.is_closed() {
-      return;
-    }
-    let _ = self.shutdown().block_on();
+    self.shutdown_tx.close();
   }
 }

@@ -1,5 +1,7 @@
+use std::{collections::HashMap, mem};
+
 use agnostic::Runtime;
-use futures::FutureExt;
+use futures::{lock::Mutex, FutureExt};
 use memberlist_core::{
   transport::{
     stream::{PacketProducer, StreamProducer},
@@ -28,7 +30,6 @@ pub(super) struct Processor<
 
   pub(super) skip_inbound_label_check: bool,
   pub(super) timeout: Option<Duration>,
-  pub(super) wg: WaitableSpawner<T::Runtime>,
 
   #[cfg(feature = "compression")]
   pub(super) offload_size: usize,
@@ -42,8 +43,9 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Stream = S::Stream>,
   S: StreamLayer,
+  <<T::Runtime as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
-  pub(super) fn run(self) {
+  pub(super) fn run(self) -> <T::Runtime as Runtime>::JoinHandle<()> {
     let Self {
       acceptor,
       packet_tx,
@@ -54,22 +56,19 @@ where
       label,
       skip_inbound_label_check,
       timeout,
-      wg,
       #[cfg(feature = "compression")]
       offload_size,
       #[cfg(feature = "metrics")]
       metric_labels,
     } = self;
 
-    let swg = wg.clone();
-    wg.spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn(async move {
       Self::listen(
         local_addr,
         label,
         acceptor,
         stream_tx,
         packet_tx,
-        swg,
         shutdown,
         shutdown_rx,
         skip_inbound_label_check,
@@ -80,7 +79,7 @@ where
         metric_labels,
       )
       .await;
-    });
+    })
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -90,7 +89,6 @@ where
     mut acceptor: S::Acceptor,
     stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
     packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    wg: WaitableSpawner<T::Runtime>,
     shutdown: Arc<AtomicBool>,
     shutdown_rx: async_channel::Receiver<()>,
     skip_inbound_label_check: bool,
@@ -112,7 +110,8 @@ where
     const MAX_DELAY: Duration = Duration::from_secs(1);
 
     let mut loop_delay = Duration::ZERO;
-
+    let handles = Arc::new(Mutex::new(HashMap::new()));
+    let mut task_id = 0u64;
     loop {
       futures::select! {
         _ = shutdown_rx.recv().fuse() => {
@@ -123,14 +122,18 @@ where
           match connection {
             Ok((connection, remote_addr)) => {
               let shutdown_rx = shutdown_rx.clone();
-              let cwg = wg.clone();
               let packet_tx = packet_tx.clone();
               let stream_tx = stream_tx.clone();
               let label = label.cheap_clone();
               #[cfg(feature = "metrics")]
               let metric_labels = metric_labels.clone();
-              wg.spawn_detach(async move {
+              task_id += 1;
+              let hls = handles.clone();
+              let mut l = handles.lock().await;
+              l.insert(task_id, <T::Runtime as Runtime>::spawn(async move {
                 Self::handle_connection(
+                  task_id,
+                  hls,
                   connection,
                   local_addr,
                   remote_addr,
@@ -139,12 +142,11 @@ where
                   packet_tx,
                   timeout,
                   skip_inbound_label_check,
-                  cwg,
                   shutdown_rx,
                   #[cfg(feature = "compression")] offload_size,
                   #[cfg(feature = "metrics")] metric_labels,
                 ).await
-              });
+              }));
             }
             Err(e) => {
               if shutdown.load(Ordering::SeqCst) {
@@ -174,6 +176,8 @@ where
 
   #[allow(clippy::too_many_arguments)]
   async fn handle_connection(
+    self_task_id: u64,
+    parent_handles: Arc<Mutex<HashMap<u64, <T::Runtime as Runtime>::JoinHandle<()>>>>,
     conn: S::Connection,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
@@ -182,11 +186,12 @@ where
     packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     timeout: Option<Duration>,
     skip_inbound_label_check: bool,
-    wg: WaitableSpawner<T::Runtime>,
     shutdown_rx: async_channel::Receiver<()>,
     #[cfg(feature = "compression")] offload_size: usize,
     #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_utils::MetricLabels>,
   ) {
+    let handles = Arc::new(Mutex::new(HashMap::new()));
+    let mut task_id = 0u64;
     loop {
       futures::select! {
         incoming = conn.accept_bi().fuse() => {
@@ -212,8 +217,14 @@ where
                 let label = label.cheap_clone();
                 #[cfg(feature = "metrics")]
                 let metric_labels = metric_labels.clone();
-                wg.spawn_detach(async move {
+                task_id += 1;
+                let hls = handles.clone();
+                let mut l = handles.lock().await;
+
+                l.insert(task_id, <T::Runtime as Runtime>::spawn(async move {
                   Self::handle_packet(
+                    task_id,
+                    hls,
                     stream,
                     local_addr,
                     remote_addr,
@@ -224,17 +235,28 @@ where
                     #[cfg(feature = "compression")] offload_size,
                     #[cfg(feature = "metrics")] metric_labels,
                   ).await;
-                });
+                }));
               }
+
+              let mut parent_handles = parent_handles.lock().await;
+              parent_handles.remove(&self_task_id);
             }
             Err(e) => {
               tracing::debug!(target = "memberlist.transport.quic", local=%local_addr, from=%remote_addr, err = %e, "failed to accept stream, shutting down the connection handler");
+              let handles = mem::take(&mut *handles.lock().await);
+              let _ = futures::future::join_all(handles.into_values()).await;
+              let mut parent_handles = parent_handles.lock().await;
+              parent_handles.remove(&self_task_id);
               return;
             }
           }
         },
         _ = shutdown_rx.recv().fuse() => {
           tracing::info!(target = "memberlist.transport.quic", local=%local_addr, remote=%remote_addr, "shutdown connection handler");
+          let handles = mem::take(&mut *handles.lock().await);
+          let _ = futures::future::join_all(handles.into_values()).await;
+          let mut parent_handles = parent_handles.lock().await;
+          parent_handles.remove(&self_task_id);
           return;
         }
       }
@@ -243,6 +265,8 @@ where
 
   #[allow(clippy::too_many_arguments)]
   async fn handle_packet(
+    task_id: u64,
+    handles: Arc<Mutex<HashMap<u64, <T::Runtime as Runtime>::JoinHandle<()>>>>,
     mut stream: S::Stream,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
@@ -268,6 +292,7 @@ where
       Ok(msg) => msg,
       Err(e) => {
         tracing::error!(target = "memberlist.packet", local=%local_addr, from=%remote_addr, err = %e, "fail to handle UDP packet");
+        handles.lock().await.remove(&task_id);
         return;
       }
     };
@@ -284,6 +309,7 @@ where
 
     #[cfg(feature = "metrics")]
     metrics::counter!("memberlist.packet.received", metric_labels.iter()).increment(_read as u64);
+    handles.lock().await.remove(&task_id);
   }
 
   async fn handle_packet_in(

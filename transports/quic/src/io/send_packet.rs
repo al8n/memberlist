@@ -10,6 +10,7 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   fn encode_batch(
     buf: &mut [u8],

@@ -11,6 +11,7 @@ where
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
+  <<R as Runtime>::JoinHandle<()> as Future>::Output: Send,
 {
   let name = format!("{kind}_compound_ping");
   let label = Label::try_from(&name)?;
