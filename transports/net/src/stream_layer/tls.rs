@@ -321,7 +321,7 @@ impl<R: Runtime> TlsStream<R> {
       TlsStreamKind::Server { stream, .. } => {
         let (_, state) = stream.get_mut();
         state.send_close_notify();
-      },
+      }
     }
   }
 }
