@@ -51,6 +51,7 @@ pub mod tests {
 
   use agnostic::Runtime;
   use nodecraft::resolver::AddressResolver;
+  #[cfg(not(windows))]
   use parking_lot::Mutex;
   pub use paste;
 
