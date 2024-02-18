@@ -160,7 +160,7 @@ where
   const TEST_TIME: std::time::Duration = std::time::Duration::from_secs(4);
 
   let _lock = BACKOFFS_LOCK.lock();
-  let ln = s.bind(kind.next()).await?;
+  let ln = s.bind(kind.next(0)).await?;
   let local_addr = ln.local_addr()?;
   let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
   let (stream_tx, stream_rx) = memberlist_core::transport::stream::promised_stream::<T>();

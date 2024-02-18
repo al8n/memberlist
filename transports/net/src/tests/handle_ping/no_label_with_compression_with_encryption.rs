@@ -14,7 +14,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let pk = SecretKey::from([1; 32]);
-  let client = NetTransportTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next(0))
     .await?
     .with_receive_encrypted(Some(pk))
     .with_receive_compressed(true);
@@ -24,7 +24,7 @@ where
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()));
-  opts.add_bind_address(kind.next());
+  opts.add_bind_address(kind.next(0));
   let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
@@ -46,7 +46,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let pk = SecretKey::from([1; 32]);
-  let client = NetTransportTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next(0))
     .await?
     .with_send_encrypted(Some((EncryptionAlgo::PKCS7, pk)))
     .with_send_compressed(Some(Compressor::default()));
@@ -55,7 +55,7 @@ where
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(false);
-  opts.add_bind_address(kind.next());
+  opts.add_bind_address(kind.next(0));
   let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();
@@ -77,7 +77,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let pk = SecretKey::from([1; 32]);
-  let client = NetTransportTestClient::<R>::new(kind.next())
+  let client = NetTransportTestClient::<R>::new(kind.next(0))
     .await?
     .with_send_encrypted(Some((EncryptionAlgo::PKCS7, pk)))
     .with_receive_encrypted(Some(pk))
@@ -89,7 +89,7 @@ where
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()));
-  opts.add_bind_address(kind.next());
+  opts.add_bind_address(kind.next(0));
   let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
     .unwrap();

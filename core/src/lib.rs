@@ -1,3 +1,4 @@
+#![doc = include_str!("../../README.md")]
 #![forbid(unsafe_code)]
 #![deny(warnings)]
 #![allow(clippy::type_complexity)]
@@ -47,17 +48,19 @@ pub use tracing;
 /// [memberlist-wasm]: https://github.com/al8n/memberlist/blob/main/memberlist-wasm/src/lib.rs#L20
 #[cfg(feature = "test")]
 pub mod tests {
-  use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+  use std::net::SocketAddr;
 
   use agnostic::Runtime;
   use nodecraft::resolver::AddressResolver;
+  #[cfg(not(windows))]
+  use parking_lot::Mutex;
   pub use paste;
 
   use self::{delegate::Delegate, error::Error, transport::Transport};
 
   use super::*;
 
-  /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`](agonstic::Runtime)
+  /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`]
   #[cfg(any(feature = "test", test))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]
   #[macro_export]
@@ -74,7 +77,7 @@ pub mod tests {
     };
   }
 
-  /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`](agonstic::Runtime)
+  /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`]
   #[cfg(any(feature = "test", test))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]
   #[macro_export]
@@ -100,14 +103,45 @@ pub mod tests {
   /// Any error type used for testing.
   pub type AnyError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+  #[cfg(not(windows))]
+  static IPV4_BIND_NUM: Mutex<usize> = Mutex::new(10);
+  #[cfg(not(windows))]
+  static IPV6_BIND_NUM: Mutex<usize> = Mutex::new(10);
+
   /// Returns the next socket addr v4
-  pub fn next_socket_addr_v4() -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+  pub fn next_socket_addr_v4(_network: u8) -> SocketAddr {
+    #[cfg(not(windows))]
+    {
+      let mut mu = IPV4_BIND_NUM.lock();
+      let addr: SocketAddr = format!("127.0.{}.{}:0", _network, *mu).parse().unwrap();
+      *mu += 1;
+      if *mu > 255 {
+        *mu = 10;
+      }
+
+      addr
+    }
+
+    #[cfg(windows)]
+    "127.0.0.1:0".parse().unwrap()
   }
 
   /// Returns the next socket addr v6
   pub fn next_socket_addr_v6() -> SocketAddr {
-    SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)
+    #[cfg(not(windows))]
+    {
+      let mut mu = IPV6_BIND_NUM.lock();
+      let addr: SocketAddr = format!("[fc00::1:{}]:0", *mu).parse().unwrap();
+      *mu += 1;
+      if *mu > 255 {
+        *mu = 10;
+      }
+
+      addr
+    }
+
+    #[cfg(windows)]
+    "[::1]:0".parse().unwrap()
   }
 
   /// Run the unit test with a given async runtime sequentially.

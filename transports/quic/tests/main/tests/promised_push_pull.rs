@@ -7,7 +7,7 @@ macro_rules! promised_push_pull_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V4;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_push_pull::promised_push_pull_label_only::<_, $rt>(s, client, kind).await {
@@ -18,7 +18,7 @@ macro_rules! promised_push_pull_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V6;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_push_pull::promised_push_pull_label_only::<_, $rt>(s, client, kind).await {
@@ -33,7 +33,7 @@ macro_rules! promised_push_pull_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V4;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_push_pull::promised_push_pull_compression_only::<_, $rt>(s, client, kind).await {
@@ -45,7 +45,7 @@ macro_rules! promised_push_pull_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V6;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_push_pull::promised_push_pull_compression_only::<_, $rt>(s, client, kind).await {
@@ -60,7 +60,7 @@ macro_rules! promised_push_pull_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V4;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) =
@@ -74,7 +74,7 @@ macro_rules! promised_push_pull_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V6;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) =
@@ -90,7 +90,7 @@ macro_rules! promised_push_pull_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V4;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) =
@@ -104,7 +104,7 @@ macro_rules! promised_push_pull_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V6;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) =
