@@ -119,7 +119,7 @@ pub mod tests {
   /// Returns the next socket addr v6
   pub fn next_socket_addr_v6() -> SocketAddr {
     let mut mu = IPV6_BIND_NUM.lock();
-    let addr: SocketAddr = format!("[::1:{}]:0", *mu).parse().unwrap();
+    let addr: SocketAddr = format!("[fc00::1:{}]:0", *mu).parse().unwrap();
     *mu += 1;
     if *mu > 255 {
       *mu = 10;
