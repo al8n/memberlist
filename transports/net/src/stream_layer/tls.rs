@@ -125,30 +125,27 @@ impl<R: Runtime> StreamLayer for Tls<R> {
       .map(|ln| TlsListener { ln, acceptor })
   }
 
-  async fn cache_stream(&self, _addr: SocketAddr, mut _stream: Self::Stream) {
-    let _ = _stream.flush().await;
-    let _ = _stream.close().await;
-    // _stream.send_close_notify();
-    // // TODO(al8n): It seems that futures-rustls has a bug
-    // // client side dial remote successfully and finish send bytes successfully,
-    // // and then drop the connection immediately.
-    // // But, server side can't accept the connection, and reports `BrokenPipe` error.
-    // //
-    // // Therefore, if we remove the below code, the send unit tests in
-    // // - transports/net/tests/main/tokio/send.rs
-    // // - transports/net/tests/main/async_std/send.rs
-    // // - transport/net/tests/main/smol/send.rs
-    // //
-    // // I am also not sure if this bug can happen in real environment,
-    // // so just keep it here and not feature-gate it by `cfg(test)`.
-    // //
-    // // To reproduce the bug, you can comment out the below code and run the send unit tests
-    // // on a docker container or a virtual machine with few CPU cores.
-    // R::spawn_detach(async move {
-    //   let _ = _stream.flush().await;
-    //   R::sleep(std::time::Duration::from_millis(100)).await;
-    //   drop(_stream);
-    // });
+  async fn cache_stream(&self, _addr: SocketAddr, mut stream: Self::Stream) {
+    // TODO(al8n): It seems that futures-rustls has a bug
+    // client side dial remote successfully and finish send bytes successfully,
+    // and then drop the connection immediately.
+    // But, server side can't accept the connection, and reports `BrokenPipe` error.
+    //
+    // Therefore, if we remove the below code, the send unit tests in
+    // - transports/net/tests/main/tokio/send.rs
+    // - transports/net/tests/main/async_std/send.rs
+    // - transport/net/tests/main/smol/send.rs
+    //
+    // I am also not sure if this bug can happen in real environment,
+    // so just keep it here and not feature-gate it by `cfg(test)`.
+    //
+    // To reproduce the bug, you can comment out the below code and run the send unit tests
+    // on a docker container or a virtual machine with few CPU cores.
+    R::spawn_detach(async move {
+      let _ = stream.flush().await;
+      let _ = stream.close().await;
+      R::sleep(std::time::Duration::from_millis(100)).await;
+    });
   }
 
   fn is_secure() -> bool {
