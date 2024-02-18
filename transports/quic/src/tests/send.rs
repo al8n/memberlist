@@ -22,14 +22,14 @@ where
   let mut opts = QuicTransportOptions::new("node 1".into())
     .with_compressor(Some(Compressor::default()))
     .with_label(label.cheap_clone());
-  opts.add_bind_address(kind.next());
+  opts.add_bind_address(kind.next(0));
   let trans1 =
     QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s1, opts).await?;
 
   let mut opts = QuicTransportOptions::new("node 2".into())
     .with_compressor(Some(Compressor::default()))
     .with_label(label);
-  opts.add_bind_address(kind.next());
+  opts.add_bind_address(kind.next(0));
 
   let trans2 =
     QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s2, opts).await?;

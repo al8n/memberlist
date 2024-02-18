@@ -8,7 +8,7 @@ macro_rules! promised_ping_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V4;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_ping::promised_ping::<_, $rt>(s, client, kind).await {
@@ -20,7 +20,7 @@ macro_rules! promised_ping_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V6;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_ping::promised_ping::<_, $rt>(s, client, kind).await {
@@ -35,7 +35,7 @@ macro_rules! promised_ping_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V4;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_ping::promised_ping_no_label::<_, $rt>(s, client, kind).await {
@@ -47,7 +47,7 @@ macro_rules! promised_ping_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V6;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_ping::promised_ping_no_label::<_, $rt>(s, client, kind).await {
@@ -61,7 +61,7 @@ macro_rules! promised_ping_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V4;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_ping::promised_ping_label_only::<_, $rt>(s, client, kind).await {
@@ -72,7 +72,7 @@ macro_rules! promised_ping_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V6;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_ping::promised_ping_label_only::<_, $rt>(s, client, kind).await {
@@ -87,7 +87,7 @@ macro_rules! promised_ping_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V4;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_ping::promised_ping_compression_only::<_, $rt>(s, client, kind).await {
@@ -99,7 +99,7 @@ macro_rules! promised_ping_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V6;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_ping::promised_ping_compression_only::<_, $rt>(s, client, kind).await {
@@ -114,7 +114,7 @@ macro_rules! promised_ping_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V4;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_ping::promised_ping_label_and_compression::<_, $rt>(s, client, kind).await {
@@ -126,7 +126,7 @@ macro_rules! promised_ping_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V6;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) = memberlist_quic::tests::promised_ping::promised_ping_label_and_compression::<_, $rt>(s, client, kind).await {
@@ -140,7 +140,7 @@ macro_rules! promised_ping_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V4;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) =
@@ -153,7 +153,7 @@ macro_rules! promised_ping_test_suites {
           let s = $s;
           let kind = memberlist_core::transport::tests::AddressKind::V6;
           let c = $s;
-          let client_addr = kind.next();
+          let client_addr = kind.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
           if let Err(e) =
