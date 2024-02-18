@@ -1,9 +1,7 @@
-# This script adds or removes a range of IP addresses to the loopback interface on Windows.
 param (
     [string]$action = "up"
 )
 
-# Function to check if an IP is already assigned
 function Test-IPAddress {
     param (
         [string]$IPAddress,
@@ -13,12 +11,10 @@ function Test-IPAddress {
     return $ipExists -ne $null
 }
 
-# Get the loopback interface for IPv4 and IPv6
 $loopbackInterfaceIPv4 = Get-NetIPInterface -AddressFamily IPv4 | Where-Object { $_.InterfaceDescription -like "*Loopback*" }
 $loopbackInterfaceIPv6 = Get-NetIPInterface -AddressFamily IPv6 | Where-Object { $_.InterfaceDescription -like "*Loopback*" }
 
 if ($action -eq "up") {
-    # Add IPv4 addresses to the loopback interface
     0..2 | ForEach-Object {
         $subnet = $_
         2..255 | ForEach-Object {
@@ -30,17 +26,17 @@ if ($action -eq "up") {
         }
     }
 
-    # Add IPv6 addresses to the loopback interface
-    # Example: Adding ::1:x addresses, adjust according to your needs
+    # Adjusting the IPv6 address addition logic for clarity and correctness
     2..255 | ForEach-Object {
+        # Constructing a proper IPv6 address string
         $ipAddress = "fc00::1:$_"
         if (-not (Test-IPAddress -IPAddress $ipAddress -AddressFamily IPv6)) {
             Write-Host "Adding IPv6 address $ipAddress"
+            # Note: Specifying the correct prefix length for IPv6 ULA addresses, which is commonly 64, but here it is kept as 128 for individual addresses
             New-NetIPAddress -IPAddress $ipAddress -PrefixLength 128 -InterfaceIndex $loopbackInterfaceIPv6.InterfaceIndex -ErrorAction SilentlyContinue
         }
     }
 } else {
-    # Remove IPv4 addresses from the loopback interface
     0..2 | ForEach-Object {
         $subnet = $_
         2..255 | ForEach-Object {
@@ -52,7 +48,6 @@ if ($action -eq "up") {
         }
     }
 
-    # Remove IPv6 addresses from the loopback interface
     2..255 | ForEach-Object {
         $ipAddress = "fc00::1:$_"
         if (Test-IPAddress -IPAddress $ipAddress -AddressFamily IPv6) {
