@@ -9,11 +9,6 @@ edition = { workspace = true }
 [features]
 default = ["metrics"]
 
-# TODO: temporarily disable nightly, wait Rust's issue https://github.com/rust-lang/rust/issues/111105 to be fixed
-# nightly = ["agnostic/nightly"]
-
-# implement tokio::io::AsyncRead/AsyncWrite for Tcp/Udp
-tokio-compat = ["agnostic/tokio-compat"]
 metrics = ["dep:metrics", "memberlist-utils/metrics"]
 
 serde = [
@@ -97,3 +92,5 @@ agnostic = { workspace = true, features = ["net", "tokio"] }
 rand = "0.8"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+parking_lot = "0.12"
+

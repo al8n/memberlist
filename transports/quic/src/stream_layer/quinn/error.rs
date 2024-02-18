@@ -175,7 +175,7 @@ impl QuicError for QuinnWriteStreamError {
   }
 }
 
-/// Error type for [`QuinnBiStream`].
+/// Error type for [`QuinnStream`](super::QuinnStream).
 #[derive(Debug, thiserror::Error)]
 pub enum QuinnBiStreamError {
   /// Error writing to the stream.

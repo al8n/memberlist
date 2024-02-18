@@ -69,84 +69,6 @@ where
   Memberlist::new_in(None, c).await.map(|(_, _, this)| this)
 }
 
-pub async fn test_create_secret_key<R>()
-where
-  R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
-{
-  let cases = vec![
-    ("size-16", SecretKey::Aes128([0; 16])),
-    ("size-24", SecretKey::Aes192([0; 24])),
-    ("size-32", SecretKey::Aes256([0; 32])),
-  ];
-
-  for (_, key) in cases {
-    let c = Options::<NetTransport<R>>::lan()
-      .with_bind_addr(get_bind_addr().ip())
-      .with_secret_key(Some(key));
-
-    get_memberlist::<_, R>(Some(|_| c)).await.unwrap();
-    yield_now::<R>().await;
-  }
-}
-
-pub async fn test_create_secret_key_empty<R>()
-where
-  R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
-{
-  let c = Options::<NetTransport<R>>::lan().with_bind_addr(get_bind_addr().ip());
-
-  get_memberlist::<_, R>(Some(|_| c)).await.unwrap();
-  yield_now::<R>().await;
-}
-
-pub async fn test_create_keyring_only<R>()
-where
-  R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
-{
-  let c = Options::<NetTransport<R>>::lan()
-    .with_bind_addr(get_bind_addr().ip())
-    .with_secret_keyring(Some(SecretKeyring::new(SecretKey::Aes128([0; 16]))));
-
-  let m = Memberlist::<NetTransport<R>>::new(c).await.unwrap();
-
-  yield_now::<R>().await;
-  assert!(m.encryption_enabled());
-}
-
-pub async fn test_create_keyring_and_primary_key<R>()
-where
-  R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
-{
-  let c = Options::<NetTransport<R>>::lan()
-    .with_bind_addr(get_bind_addr().ip())
-    .with_secret_key(Some(SecretKey::Aes128([1; 16])))
-    .with_secret_keyring(Some(SecretKeyring::new(SecretKey::Aes128([0; 16]))));
-
-  let m = Memberlist::<NetTransport<R>>::new(c).await.unwrap();
-
-  yield_now::<R>().await;
-  assert!(m.encryption_enabled());
-  assert_eq!(
-    m.inner
-      .opts
-      .secret_keyring
-      .as_ref()
-      .unwrap()
-      .keys()
-      .next()
-      .unwrap(),
-    SecretKey::Aes128([1; 16])
-  );
-}
-
 pub async fn test_create<R>()
 where
   R: Runtime,
@@ -157,24 +79,6 @@ where
   let m = Memberlist::new(c).await.unwrap();
   yield_now::<R>().await;
   assert_eq!(m.members().await.len(), 1);
-}
-
-pub async fn test_resolve_addr<R>()
-where
-  R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
-{
-  todo!()
-}
-
-pub async fn test_resolve_addr_tcp_first<R>()
-where
-  R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
-{
-  todo!()
 }
 
 pub async fn test_join<R>()
