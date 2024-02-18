@@ -1,3 +1,4 @@
+#![doc = include_str!("../../README.md")]
 #![forbid(unsafe_code)]
 #![deny(warnings)]
 #![allow(clippy::type_complexity)]
@@ -59,7 +60,7 @@ pub mod tests {
 
   use super::*;
 
-  /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`](agonstic::Runtime)
+  /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`]
   #[cfg(any(feature = "test", test))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]
   #[macro_export]
@@ -76,7 +77,7 @@ pub mod tests {
     };
   }
 
-  /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`](agonstic::Runtime)
+  /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`]
   #[cfg(any(feature = "test", test))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]
   #[macro_export]
