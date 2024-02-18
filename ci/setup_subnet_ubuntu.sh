@@ -36,11 +36,11 @@ if [ "$action" = "up" ]; then
       echo "IPv6 loopback address already set up."
   else
     for i in {2..255}; do
-      sudo ip -6 addr add ::1:$i/128 dev lo
+      sudo ip -6 addr add fc00::1:$i/128 dev lo
     done
   fi
 else
   for i in {2..255}; do
-    sudo ip -6 addr del ::1:$i/128 dev lo
+    sudo ip -6 addr del fc00::1:$i/128 dev lo
   done
 fi
