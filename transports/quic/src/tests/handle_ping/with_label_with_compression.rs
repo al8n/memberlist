@@ -18,7 +18,7 @@ where
     .with_label(label.cheap_clone())
     .with_compressor(Some(Default::default()));
 
-  let local_addr = kind.next();
+  let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
   let trans =
     QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
@@ -49,7 +49,7 @@ where
   let label = Label::try_from(&name)?;
   let mut opts = QuicTransportOptions::new(name.into()).with_label(label.cheap_clone());
 
-  let local_addr = kind.next();
+  let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
   let trans =
     QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
@@ -82,7 +82,7 @@ where
     .with_label(label.cheap_clone())
     .with_compressor(Some(Default::default()));
 
-  let local_addr = kind.next();
+  let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
   let trans =
     QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;

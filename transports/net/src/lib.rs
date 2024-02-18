@@ -1,4 +1,4 @@
-//! [`Transport`](memberlist_core::Transport)'s network transport layer based on TCP and UDP.
+//! [`Transport`]'s network transport layer based on TCP and UDP.
 #![allow(clippy::type_complexity)]
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
@@ -67,7 +67,7 @@ use security::{EncryptionAlgo, SecretKey, SecretKeyring, SecurityError};
 pub mod error;
 use error::*;
 
-/// Abstract the [`StremLayer`](crate::stream_layer::StreamLayer) for [`NetTransport`](crate::NetTransport).
+/// Abstract the [`StremLayer`](crate::stream_layer::StreamLayer) for [`NetTransport`].
 pub mod stream_layer;
 use stream_layer::*;
 
@@ -116,16 +116,16 @@ const NUM_PACKETS_PER_BATCH: usize = 255;
 const PACKET_RECV_BUF_SIZE: usize = 2 * 1024 * 1024;
 
 #[cfg(feature = "tokio")]
-/// [`NetTransport`](crate::NetTransport) based on [`tokio`](https://crates.io/crates/tokio).
+/// [`NetTransport`] based on [`tokio`](https://crates.io/crates/tokio).
 pub type TokioNetTransport<I, A, S, W> = NetTransport<I, A, S, W, agnostic::tokio::TokioRuntime>;
 
 #[cfg(feature = "async-std")]
-/// [`NetTransport`](crate::NetTransport) based on [`async-std`](https://crates.io/crates/async-std).
+/// [`NetTransport`] based on [`async-std`](https://crates.io/crates/async-std).
 pub type AsyncStdNetTransport<I, A, S, W> =
   NetTransport<I, A, S, W, agnostic::async_std::AsyncStdRuntime>;
 
 #[cfg(feature = "smol")]
-/// [`NetTransport`](crate::NetTransport) based on [`smol`](https://crates.io/crates/smol).
+/// [`NetTransport`] based on [`smol`](https://crates.io/crates/smol).
 pub type SmolNetTransport<I, A, S, W> = NetTransport<I, A, S, W, agnostic::smol::SmolRuntime>;
 
 /// The net transport based on TCP/TLS and UDP

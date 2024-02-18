@@ -15,7 +15,7 @@ where
     format!("{kind}_ping_server_no_label_with_compression_client_no_label_with_compression").into(),
   )
   .with_compressor(Some(Default::default()));
-  let local_addr = kind.next();
+  let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
   let trans =
     QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
@@ -43,7 +43,7 @@ where
     format!("{kind}_ping_server_no_label_with_compression_client_no_label_no_compression").into(),
   )
   .with_compressor(Some(Default::default()));
-  let local_addr = kind.next();
+  let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
   let trans =
     QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
@@ -69,7 +69,7 @@ where
   let mut opts = QuicTransportOptions::new(
     format!("{kind}_ping_server_no_label_with_compression_client_no_label_no_compression").into(),
   );
-  let local_addr = kind.next();
+  let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
   let trans =
     QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;

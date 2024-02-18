@@ -1,4 +1,4 @@
-//! [`Transport`](memberlist_core::Transport)'s network transport layer based on QUIC.
+//! [`Transport`]'s network transport layer based on QUIC.
 #![allow(clippy::type_complexity)]
 #![forbid(unsafe_code)]
 #![deny(warnings, missing_docs)]
@@ -54,7 +54,7 @@ pub use error::*;
 mod io;
 mod options;
 pub use options::*;
-/// Abstract the [`StremLayer`](crate::stream_layer::StreamLayer) for [`QuicTransport`](crate::QuicTransport).
+/// Abstract the [`StremLayer`](crate::stream_layer::StreamLayer) for [`QuicTransport`].
 pub mod stream_layer;
 use stream_layer::*;
 
@@ -79,16 +79,16 @@ enum StreamType {
 }
 
 #[cfg(feature = "tokio")]
-/// [`QuicTransport`](crate::QuicTransport) based on [`tokio`](https://crates.io/crates/tokio).
+/// [`QuicTransport`] based on [`tokio`](https://crates.io/crates/tokio).
 pub type TokioQuicTransport<I, A, S, W> = QuicTransport<I, A, S, W, agnostic::tokio::TokioRuntime>;
 
 #[cfg(feature = "async-std")]
-/// [`QuicTransport`](crate::QuicTransport) based on [`async-std`](https://crates.io/crates/async-std).
+/// [`QuicTransport`] based on [`async-std`](https://crates.io/crates/async-std).
 pub type AsyncStdQuicTransport<I, A, S, W> =
   QuicTransport<I, A, S, W, agnostic::async_std::AsyncStdRuntime>;
 
 #[cfg(feature = "smol")]
-/// [`QuicTransport`](crate::QuicTransport) based on [`smol`](https://crates.io/crates/smol).
+/// [`QuicTransport`] based on [`smol`](https://crates.io/crates/smol).
 pub type SmolQuicTransport<I, A, S, W> = QuicTransport<I, A, S, W, agnostic::smol::SmolRuntime>;
 
 /// A [`Transport`] implementation based on QUIC

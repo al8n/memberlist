@@ -14,7 +14,7 @@ where
   let mut opts = QuicTransportOptions::new(
     format!("{kind}_ping_server_no_label_no_compression_client_no_label_no_compression").into(),
   );
-  let local_addr = kind.next();
+  let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
   let trans =
     QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
