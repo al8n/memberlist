@@ -101,7 +101,9 @@ pub mod tests {
   /// Any error type used for testing.
   pub type AnyError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+  #[cfg(not(windows))]
   static IPV4_BIND_NUM: Mutex<usize> = Mutex::new(10);
+  #[cfg(not(windows))]
   static IPV6_BIND_NUM: Mutex<usize> = Mutex::new(10);
 
   /// Returns the next socket addr v4
