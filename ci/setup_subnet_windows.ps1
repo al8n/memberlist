@@ -33,7 +33,7 @@ if ($action -eq "up") {
     # Add IPv6 addresses to the loopback interface
     # Example: Adding ::1:x addresses, adjust according to your needs
     2..255 | ForEach-Object {
-        $ipAddress = "::1:$_"
+        $ipAddress = "fc00::1:$_"
         if (-not (Test-IPAddress -IPAddress $ipAddress -AddressFamily IPv6)) {
             Write-Host "Adding IPv6 address $ipAddress"
             New-NetIPAddress -IPAddress $ipAddress -PrefixLength 128 -InterfaceIndex $loopbackInterfaceIPv6.InterfaceIndex -ErrorAction SilentlyContinue
@@ -54,7 +54,7 @@ if ($action -eq "up") {
 
     # Remove IPv6 addresses from the loopback interface
     2..255 | ForEach-Object {
-        $ipAddress = "::1:$_"
+        $ipAddress = "fc00::1:$_"
         if (Test-IPAddress -IPAddress $ipAddress -AddressFamily IPv6) {
             Write-Host "Removing IPv6 address $ipAddress"
             Remove-NetIPAddress -IPAddress $ipAddress -Confirm:$false -ErrorAction SilentlyContinue
