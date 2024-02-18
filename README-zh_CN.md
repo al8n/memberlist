@@ -1,14 +1,5 @@
 > **NOTE:** Please do not use this crate, this crate have not been tested, and there are several known bugs need to be fixed.
 
-<div align="center">
-<h1>Memberlist</h1>
-</div>
-<div align="center">
-
-A highly customable, adaptable, runtime agnostic Gossip protocol which helps manage cluster membership and member failure detection.
-
-Port and improve [HashiCorp's memberlist](https://github.com/hashicorp/memberlist) to Rust.
-
 [<img alt="github" src="https://img.shields.io/badge/github-al8n/memberlist-8da0cb?style=for-the-badge&logo=Github" height="22">][Github-url]
 [<img alt="Build" src="https://img.shields.io/github/actions/workflow/status/al8n/memberlist/ci.yml?logo=Github-Actions&style=for-the-badge" height="22">][CI-url]
 [<img alt="codecov" src="https://img.shields.io/codecov/c/gh/al8n/memberlist?style=for-the-badge&token=6R3QFWRWHL&logo=codecov" height="22">][codecov-url]
