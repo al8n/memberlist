@@ -105,27 +105,39 @@ pub mod tests {
   static IPV6_BIND_NUM: Mutex<usize> = Mutex::new(10);
 
   /// Returns the next socket addr v4
-  pub fn next_socket_addr_v4(network: u8) -> SocketAddr {
-    let mut mu = IPV4_BIND_NUM.lock();
-    let addr: SocketAddr = format!("127.0.{}.{}:0", network, *mu).parse().unwrap();
-    *mu += 1;
-    if *mu > 255 {
-      *mu = 10;
+  pub fn next_socket_addr_v4(_network: u8) -> SocketAddr {
+    #[cfg(not(windows))]
+    {
+      let mut mu = IPV4_BIND_NUM.lock();
+      let addr: SocketAddr = format!("127.0.{}.{}:0", _network, *mu).parse().unwrap();
+      *mu += 1;
+      if *mu > 255 {
+        *mu = 10;
+      }
+
+      addr
     }
 
-    addr
+    #[cfg(windows)]
+    "127.0.0.1:0".parse().unwrap()
   }
 
   /// Returns the next socket addr v6
   pub fn next_socket_addr_v6() -> SocketAddr {
-    let mut mu = IPV6_BIND_NUM.lock();
-    let addr: SocketAddr = format!("[fc00::1:{}]:0", *mu).parse().unwrap();
-    *mu += 1;
-    if *mu > 255 {
-      *mu = 10;
+    #[cfg(not(windows))]
+    {
+      let mut mu = IPV6_BIND_NUM.lock();
+      let addr: SocketAddr = format!("[fc00::1:{}]:0", *mu).parse().unwrap();
+      *mu += 1;
+      if *mu > 255 {
+        *mu = 10;
+      }
+
+      addr
     }
 
-    addr
+    #[cfg(windows)]
+    "[::1]:0".parse().unwrap()
   }
 
   /// Run the unit test with a given async runtime sequentially.
