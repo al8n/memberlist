@@ -46,9 +46,9 @@ impl core::fmt::Display for AddressKind {
 
 impl AddressKind {
   /// Get the next address
-  pub fn next(&self) -> SocketAddr {
+  pub fn next(&self, network: u8) -> SocketAddr {
     match self {
-      Self::V4 => next_socket_addr_v4(),
+      Self::V4 => next_socket_addr_v4(network),
       Self::V6 => next_socket_addr_v6(),
     }
   }
@@ -509,7 +509,7 @@ where
   let ping_time_max = m.inner.opts.probe_interval + Duration::from_secs(10);
 
   // Do a normal rount trip
-  let node = Node::new("mongo".into(), kind.next());
+  let node = Node::new("mongo".into(), kind.next(0));
   let ping_out = Ping {
     seq_no: 23,
     source: m.advertise_node(),
@@ -609,8 +609,8 @@ where
                     stream.as_mut(),
                     IndirectPing {
                       seq_no: 0,
-                      source: Node::new("unknown source".into(), kind.next()),
-                      target: Node::new("unknown target".into(), kind.next()),
+                      source: Node::new("unknown source".into(), kind.next(0)),
+                      target: Node::new("unknown target".into(), kind.next(0)),
                     }
                     .into()
                   )

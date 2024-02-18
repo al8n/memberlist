@@ -24,7 +24,7 @@ where
     .with_primary_key(Some(pk1))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true);
-  opts.add_bind_address(kind.next());
+  opts.add_bind_address(kind.next(0));
   let trans1 =
     NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s1, opts).await?;
   let m1 = Memberlist::new(trans1, Options::default()).await?;
@@ -36,7 +36,7 @@ where
     .with_primary_key(Some(pk2))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true);
-  opts.add_bind_address(kind.next());
+  opts.add_bind_address(kind.next(0));
   let trans2 =
     NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s2, opts).await?;
   let m2 = Memberlist::new(trans2, Options::default()).await?;
@@ -75,7 +75,7 @@ where
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_label(label.cheap_clone());
-  opts.add_bind_address(kind.next());
+  opts.add_bind_address(kind.next(0));
   let trans1 =
     NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s1, opts).await?;
   let m1 = Memberlist::new(trans1, Options::default()).await?;
@@ -88,7 +88,7 @@ where
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_label(label);
-  opts.add_bind_address(kind.next());
+  opts.add_bind_address(kind.next(0));
   let trans2 =
     NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s2, opts).await?;
   let m2 = Memberlist::new(trans2, Options::default()).await?;

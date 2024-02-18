@@ -117,6 +117,16 @@ jobs:
       run: |
         echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
         vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Cache ~/.cargo
@@ -147,6 +157,16 @@ jobs:
       run: |
         echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
         vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Cache ~/.cargo
@@ -177,6 +197,16 @@ jobs:
       run: |
         echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
         vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Cache ~/.cargo
@@ -207,6 +237,16 @@ jobs:
       run: |
         echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
         vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Cache ~/.cargo

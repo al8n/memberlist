@@ -125,7 +125,7 @@ impl<R: Runtime> StreamLayer for Tls<R> {
       .map(|ln| TlsListener { ln, acceptor })
   }
 
-  async fn cache_stream(&self, _addr: SocketAddr, mut _stream: Self::Stream) {
+  async fn cache_stream(&self, _addr: SocketAddr, mut stream: Self::Stream) {
     // TODO(al8n): It seems that futures-rustls has a bug
     // client side dial remote successfully and finish send bytes successfully,
     // and then drop the connection immediately.
@@ -142,9 +142,9 @@ impl<R: Runtime> StreamLayer for Tls<R> {
     // To reproduce the bug, you can comment out the below code and run the send unit tests
     // on a docker container or a virtual machine with few CPU cores.
     R::spawn_detach(async move {
-      let _ = _stream.flush().await;
+      let _ = stream.flush().await;
+      let _ = stream.close().await;
       R::sleep(std::time::Duration::from_millis(100)).await;
-      drop(_stream);
     });
   }
 
@@ -308,6 +308,22 @@ impl<R: Runtime> AsyncWrite for TlsStreamKind<R> {
 pub struct TlsStream<R: Runtime> {
   #[pin]
   stream: TlsStreamKind<R>,
+}
+
+impl<R: Runtime> TlsStream<R> {
+  /// Queues a close_notify warning alert to be sent in the next `write_tls` call. This informs the peer that the connection is being closed.
+  pub fn send_close_notify(&mut self) {
+    match &mut self.stream {
+      TlsStreamKind::Client { stream, .. } => {
+        let (_, state) = stream.get_mut();
+        state.send_close_notify();
+      }
+      TlsStreamKind::Server { stream, .. } => {
+        let (_, state) = stream.get_mut();
+        state.send_close_notify();
+      }
+    }
+  }
 }
 
 impl<R: Runtime> AsyncRead for TlsStream<R> {
