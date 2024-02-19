@@ -1,21 +1,41 @@
 use super::*;
 
-macro_rules! probe {
+macro_rules! reset_nodes {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_probe >]() {
+      fn [< test_ $rt:snake _ $kind:snake _net_reset_nodes >]() {
+        use std::net::SocketAddr;
+
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_1".into());
+          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("reset_nodes_node_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();
           let t1_opts = Options::lan();
 
-          let mut t2_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_2".into());
-          t2_opts.add_bind_address(next_socket_addr_v4(0));
-          let t2 = NetTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t2_opts).await.unwrap();
-          probe(t1, t1_opts, t2).await;
+          let mut addr: SocketAddr = "127.0.0.1:7969".parse().unwrap();
+          addr.set_port(t1.advertise_address().port());
+          let n1 = Node::new(
+            "node1".into(),
+            addr,
+          );
+
+          let mut addr: SocketAddr = "127.0.0.2:7969".parse().unwrap();
+          addr.set_port(t1.advertise_address().port());
+          let n2 = Node::new(
+            "node2".into(),
+            addr,
+          );
+
+          let mut addr: SocketAddr = "127.0.0.3:7969".parse().unwrap();
+          addr.set_port(t1.advertise_address().port());
+          let n3 = Node::new(
+            "node3".into(),
+            addr,
+          );
+
+          reset_nodes(t1, t1_opts, n1, n2, n3).await;
         });
       }
     }
@@ -30,16 +50,16 @@ mod tokio {
   use super::*;
   use crate::tokio_run;
 
-  probe!(tokio("tcp", Tcp::<TokioRuntime>::new()));
+  reset_nodes!(tokio("tcp", Tcp::<TokioRuntime>::new()));
 
   #[cfg(feature = "tls")]
-  probe!(tokio(
+  reset_nodes!(tokio(
     "tls",
     memberlist_net::tests::tls_stream_layer::<TokioRuntime>().await
   ));
 
   #[cfg(feature = "native-tls")]
-  probe!(tokio(
+  reset_nodes!(tokio(
     "native-tls",
     memberlist_net::tests::native_tls_stream_layer::<TokioRuntime>().await
   ));
@@ -53,16 +73,16 @@ mod async_std {
   use super::*;
   use crate::async_std_run;
 
-  probe!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
+  reset_nodes!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
 
   #[cfg(feature = "tls")]
-  probe!(async_std(
+  reset_nodes!(async_std(
     "tls",
     memberlist_net::tests::tls_stream_layer::<AsyncStdRuntime>().await
   ));
 
   #[cfg(feature = "native-tls")]
-  probe!(async_std(
+  reset_nodes!(async_std(
     "native-tls",
     memberlist_net::tests::native_tls_stream_layer::<AsyncStdRuntime>().await
   ));
@@ -76,16 +96,16 @@ mod smol {
   use super::*;
   use crate::smol_run;
 
-  probe!(smol("tcp", Tcp::<SmolRuntime>::new()));
+  reset_nodes!(smol("tcp", Tcp::<SmolRuntime>::new()));
 
   #[cfg(feature = "tls")]
-  probe!(smol(
+  reset_nodes!(smol(
     "tls",
     memberlist_net::tests::tls_stream_layer::<SmolRuntime>().await
   ));
 
   #[cfg(feature = "native-tls")]
-  probe!(smol(
+  reset_nodes!(smol(
     "native-tls",
     memberlist_net::tests::native_tls_stream_layer::<SmolRuntime>().await
   ));

@@ -1,11 +1,14 @@
 use std::{
-  sync::atomic::Ordering,
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+  },
   time::{Duration, Instant},
 };
 
 use agnostic::Runtime;
 use bytes::Bytes;
-use futures::{Future, Stream};
+use futures::{Future, FutureExt, Stream};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 
 use crate::{
@@ -13,7 +16,7 @@ use crate::{
   delegate::VoidDelegate,
   error::Error,
   transport::Transport,
-  types::{Alive, Message, ServerState},
+  types::{Ack, Alive, Dead, Message, Nack, ServerState},
   Memberlist, Options,
 };
 
@@ -667,36 +670,367 @@ where
   assert_eq!(seq_no, 1, "bad seq no: {seq_no}");
 }
 
-pub async fn test_ping() {
-  todo!()
+/// Unit test to test the ping functionality
+pub async fn ping<T, R>(
+  t1: T,
+  t1_opts: Options,
+  t2: T,
+  bad_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+) where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1: Memberlist<T> = host_memberlist(
+    t1,
+    t1_opts
+      .with_probe_timeout(Duration::from_secs(1))
+      .with_probe_interval(Duration::from_secs(10)),
+  )
+  .await
+  .unwrap();
+
+  let m2: Memberlist<T> = host_memberlist(t2, Options::lan()).await.unwrap();
+
+  let a1 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: m1.advertise_node(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m1.alive_node(a1, None, true).await;
+
+  let a2 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: m2.advertise_node(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m1.alive_node(a2, None, false).await;
+
+  // Do a legit ping.
+  let rtt = {
+    let n = m1
+      .inner
+      .nodes
+      .read()
+      .await
+      .get_state(m2.local_id())
+      .unwrap();
+    m1.ping(n.node()).await.unwrap()
+  };
+
+  assert!(rtt > Duration::ZERO, "bad: {rtt:?}");
+
+  // This ping has a bad node name so should timeout.
+  let err = m1.ping(bad_node.cheap_clone()).await.unwrap_err();
+  assert!(matches!(err, Error::Lost(_)), "bad: {err}");
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
 }
 
-pub async fn test_reset_nodes() {
-  todo!()
+/// Unit test to test the reset nodes functionality
+pub async fn reset_nodes<T, R>(
+  t1: T,
+  t1_opts: Options,
+  n1: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  n2: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  n3: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+) where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1: Memberlist<T> = host_memberlist(
+    t1,
+    t1_opts.with_gossip_to_the_dead_time(Duration::from_millis(100)),
+  )
+  .await
+  .unwrap();
+
+  let a1 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: n1,
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m1.alive_node(a1, None, false).await;
+
+  let a2 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: n2.cheap_clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m1.alive_node(a2, None, false).await;
+
+  let a3 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: n3,
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m1.alive_node(a3, None, false).await;
+
+  let d = Dead {
+    incarnation: 1,
+    node: n2.id().cheap_clone(),
+    from: m1.local_id().cheap_clone(),
+  };
+  {
+    let mut members = m1.inner.nodes.write().await;
+    m1.dead_node(&mut *members, d).await.unwrap();
+  }
+
+  m1.reset_nodes().await;
+
+  {
+    let nodes = m1.inner.nodes.read().await;
+    assert_eq!(nodes.node_map.len(), 3, "bad: {}", nodes.node_map.len());
+    assert!(
+      nodes.node_map.get(n2.id()).is_some(),
+      "{} should not be unmapped",
+      n2
+    );
+  }
+
+  R::sleep(Duration::from_millis(200)).await;
+  m1.reset_nodes().await;
+  {
+    let nodes = m1.inner.nodes.read().await;
+    assert_eq!(nodes.node_map.len(), 2, "bad: {}", nodes.node_map.len());
+    assert!(
+      nodes.node_map.get(n2.id()).is_none(),
+      "{} should be unmapped",
+      n2
+    );
+  }
+
+  m1.shutdown().await.unwrap();
 }
 
-pub async fn test_next_seq() {
-  todo!()
+async fn ack_handler_exists<T: Transport>(m: &Memberlist<T>, idx: u32) -> bool {
+  let acks = m.inner.ack_handlers.lock().await;
+  acks.contains_key(&idx)
 }
 
-pub async fn test_set_probe_channels() {
-  todo!()
+/// Unit test to test the set probe channels functionality
+pub async fn set_probe_channels<T, R>(t1: T)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1: Memberlist<T> = host_memberlist(t1, Options::lan()).await.unwrap();
+
+  let (tx, _rx) = async_channel::bounded(1);
+
+  m1.set_probe_channels(0, tx, None, Instant::now(), Duration::from_millis(10))
+    .await;
+
+  assert!(ack_handler_exists(&m1, 0).await, "missing handler");
+
+  R::sleep(Duration::from_millis(20)).await;
+
+  assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
+
+  m1.shutdown().await.unwrap();
 }
 
-pub async fn test_set_ack_handler() {
-  todo!()
+/// Unit test to test the set ack handler functionality
+pub async fn set_ack_handler<T, R>(t1: T)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1: Memberlist<T> = host_memberlist(t1, Options::lan()).await.unwrap();
+
+  m1.set_ack_handler(0, Duration::from_millis(10), |_1, _2| {
+    Box::pin(async move {})
+  })
+  .await;
+
+  assert!(ack_handler_exists(&m1, 0).await, "missing handler");
+
+  R::sleep(Duration::from_millis(20)).await;
+
+  assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
+
+  m1.shutdown().await.unwrap();
 }
 
-pub async fn test_invoke_handler() {
-  todo!()
+pub async fn invoke_ack_handler<T, R>(t1: T)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1: Memberlist<T> = host_memberlist(t1, Options::lan()).await.unwrap();
+
+  // Does nothing
+  m1.invoke_ack_handler(
+    Ack {
+      seq_no: 0,
+      payload: Default::default(),
+    },
+    Instant::now(),
+  )
+  .await;
+
+  let b = Arc::new(AtomicBool::new(false));
+  let b1 = b.clone();
+  m1.set_ack_handler(0, Duration::from_millis(10), |_, _| {
+    Box::pin(async move {
+      b1.store(true, Ordering::SeqCst);
+    })
+  })
+  .await;
+
+  // Should set b
+  m1.invoke_ack_handler(
+    Ack {
+      seq_no: 0,
+      payload: Default::default(),
+    },
+    Instant::now(),
+  )
+  .await;
+  assert!(b.load(Ordering::SeqCst), "b not set");
+
+  m1.shutdown().await.unwrap();
 }
 
-pub async fn test_invoke_ack_handler_channel_ack() {
-  todo!()
+/// Unit test to test the invoke ack handler channel ack functionality
+pub async fn invoke_ack_handler_channel_ack<T, R>(t1: T)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1: Memberlist<T> = host_memberlist(t1, Options::lan()).await.unwrap();
+
+  let ack = Ack {
+    seq_no: 0,
+    payload: Bytes::from_static(&[0, 0, 0]),
+  };
+
+  // Does nothing
+  m1.invoke_ack_handler(ack.clone(), Instant::now()).await;
+
+  let (ack_tx, ack_rx) = async_channel::bounded(1);
+  let (nack_tx, nack_rx) = async_channel::bounded(1);
+  m1.set_probe_channels(
+    0,
+    ack_tx,
+    Some(nack_tx),
+    Instant::now(),
+    Duration::from_millis(10),
+  )
+  .await;
+
+  // Should send message
+  m1.invoke_ack_handler(ack.clone(), Instant::now()).await;
+
+  futures::select! {
+    v = ack_rx.recv().fuse() => {
+      let v = v.unwrap();
+      assert!(v.complete, "bad value");
+      assert_eq!(v.payload, ack.payload, "wrong payload. expected: {:?}; actual: {:?}", ack.payload, v.payload);
+    },
+    _ = nack_rx.recv().fuse() => panic!("should not get a nack"),
+    default => {
+      panic!("message not sent");
+    }
+  }
+
+  assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
+
+  m1.shutdown().await.unwrap();
 }
 
-pub async fn test_invoke_ack_handler_channel_nack() {
-  todo!()
+/// Unit test to test the invoke ack handler channel nack functionality
+pub async fn invoke_ack_handler_channel_nack<T, R>(t1: T)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1: Memberlist<T> = host_memberlist(t1, Options::lan()).await.unwrap();
+
+  // Does nothing
+  let nack = Nack { seq_no: 0 };
+  m1.invoke_nack_handler(nack).await;
+
+  let (ack_tx, ack_rx) = async_channel::bounded(1);
+  let (nack_tx, nack_rx) = async_channel::bounded(1);
+  m1.set_probe_channels(
+    0,
+    ack_tx,
+    Some(nack_tx),
+    Instant::now(),
+    Duration::from_millis(10),
+  )
+  .await;
+
+  // Should send message
+  m1.invoke_nack_handler(nack).await;
+
+  futures::select! {
+    _ = ack_rx.recv().fuse() => panic!("should not get an ack"),
+    _ = nack_rx.recv().fuse() => {
+      // Good
+    },
+    default => {
+      panic!("message not sent");
+    }
+  }
+
+  // Getting a nack doesn't reap the handler so that we can still forward
+  // an ack up to the reap time, if we get one.
+  assert!(
+    ack_handler_exists(&m1, 0).await,
+    "handler should not be reaped"
+  );
+
+  let ack = Ack {
+    seq_no: 0,
+    payload: Bytes::from_static(&[0, 0, 0]),
+  };
+  m1.invoke_ack_handler(ack.clone(), Instant::now()).await;
+
+  futures::select! {
+    v = ack_rx.recv().fuse() => {
+      let v = v.unwrap();
+      assert!(v.complete, "bad value");
+      assert_eq!(v.payload, ack.payload, "wrong payload. expected: {:?}; actual: {:?}", ack.payload, v.payload);
+    },
+    _ = nack_rx.recv().fuse() => panic!("should not get a nack"),
+    default => {
+      panic!("message not sent");
+    }
+  }
+
+  assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
+
+  m1.shutdown().await.unwrap();
 }
 
 pub async fn test_alive_node_new_node() {

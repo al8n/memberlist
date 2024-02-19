@@ -1,21 +1,17 @@
 use super::*;
 
-macro_rules! probe {
+macro_rules! invoke_ack_handler {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_probe >]() {
+      fn [< test_ $rt:snake _ $kind:snake _net_invoke_ack_handler >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_1".into());
+          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("invoke_ack_handler_node_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();
-          let t1_opts = Options::lan();
 
-          let mut t2_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_2".into());
-          t2_opts.add_bind_address(next_socket_addr_v4(0));
-          let t2 = NetTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t2_opts).await.unwrap();
-          probe(t1, t1_opts, t2).await;
+          invoke_ack_handler(t1).await;
         });
       }
     }
@@ -30,16 +26,16 @@ mod tokio {
   use super::*;
   use crate::tokio_run;
 
-  probe!(tokio("tcp", Tcp::<TokioRuntime>::new()));
+  invoke_ack_handler!(tokio("tcp", Tcp::<TokioRuntime>::new()));
 
   #[cfg(feature = "tls")]
-  probe!(tokio(
+  invoke_ack_handler!(tokio(
     "tls",
     memberlist_net::tests::tls_stream_layer::<TokioRuntime>().await
   ));
 
   #[cfg(feature = "native-tls")]
-  probe!(tokio(
+  invoke_ack_handler!(tokio(
     "native-tls",
     memberlist_net::tests::native_tls_stream_layer::<TokioRuntime>().await
   ));
@@ -53,16 +49,16 @@ mod async_std {
   use super::*;
   use crate::async_std_run;
 
-  probe!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
+  invoke_ack_handler!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
 
   #[cfg(feature = "tls")]
-  probe!(async_std(
+  invoke_ack_handler!(async_std(
     "tls",
     memberlist_net::tests::tls_stream_layer::<AsyncStdRuntime>().await
   ));
 
   #[cfg(feature = "native-tls")]
-  probe!(async_std(
+  invoke_ack_handler!(async_std(
     "native-tls",
     memberlist_net::tests::native_tls_stream_layer::<AsyncStdRuntime>().await
   ));
@@ -76,16 +72,16 @@ mod smol {
   use super::*;
   use crate::smol_run;
 
-  probe!(smol("tcp", Tcp::<SmolRuntime>::new()));
+  invoke_ack_handler!(smol("tcp", Tcp::<SmolRuntime>::new()));
 
   #[cfg(feature = "tls")]
-  probe!(smol(
+  invoke_ack_handler!(smol(
     "tls",
     memberlist_net::tests::tls_stream_layer::<SmolRuntime>().await
   ));
 
   #[cfg(feature = "native-tls")]
-  probe!(smol(
+  invoke_ack_handler!(smol(
     "native-tls",
     memberlist_net::tests::native_tls_stream_layer::<SmolRuntime>().await
   ));

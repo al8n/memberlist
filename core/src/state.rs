@@ -220,7 +220,7 @@ where
     // If we timed out, return Error.
     tracing::debug!(
       target = "memberlist",
-      "failed UDP ping {} (timeout reached)",
+      "failed ping {} by packet (timeout reached)",
       node
     );
     Err(Error::Lost(node))

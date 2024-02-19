@@ -1,21 +1,28 @@
 use super::*;
 
-macro_rules! probe {
+macro_rules! ping {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_probe >]() {
+      fn [< test_ $rt:snake _ $kind:snake _net_ping >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_1".into());
+          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("ping_node_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();
           let t1_opts = Options::lan();
 
-          let mut t2_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_2".into());
+          let mut t2_opts = NetTransportOptions::<SmolStr, _>::new("ping_node_2".into());
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t2_opts).await.unwrap();
-          probe(t1, t1_opts, t2).await;
+
+          let mut addr = next_socket_addr_v4(0);
+          addr.set_port(t1.advertise_address().port());
+          let bad = Node::new(
+            "bad".into(),
+            addr,
+          );
+          ping(t1, t1_opts, t2, bad).await;
         });
       }
     }
@@ -30,16 +37,16 @@ mod tokio {
   use super::*;
   use crate::tokio_run;
 
-  probe!(tokio("tcp", Tcp::<TokioRuntime>::new()));
+  ping!(tokio("tcp", Tcp::<TokioRuntime>::new()));
 
   #[cfg(feature = "tls")]
-  probe!(tokio(
+  ping!(tokio(
     "tls",
     memberlist_net::tests::tls_stream_layer::<TokioRuntime>().await
   ));
 
   #[cfg(feature = "native-tls")]
-  probe!(tokio(
+  ping!(tokio(
     "native-tls",
     memberlist_net::tests::native_tls_stream_layer::<TokioRuntime>().await
   ));
@@ -53,16 +60,16 @@ mod async_std {
   use super::*;
   use crate::async_std_run;
 
-  probe!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
+  ping!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
 
   #[cfg(feature = "tls")]
-  probe!(async_std(
+  ping!(async_std(
     "tls",
     memberlist_net::tests::tls_stream_layer::<AsyncStdRuntime>().await
   ));
 
   #[cfg(feature = "native-tls")]
-  probe!(async_std(
+  ping!(async_std(
     "native-tls",
     memberlist_net::tests::native_tls_stream_layer::<AsyncStdRuntime>().await
   ));
@@ -76,16 +83,16 @@ mod smol {
   use super::*;
   use crate::smol_run;
 
-  probe!(smol("tcp", Tcp::<SmolRuntime>::new()));
+  ping!(smol("tcp", Tcp::<SmolRuntime>::new()));
 
   #[cfg(feature = "tls")]
-  probe!(smol(
+  ping!(smol(
     "tls",
     memberlist_net::tests::tls_stream_layer::<SmolRuntime>().await
   ));
 
   #[cfg(feature = "native-tls")]
-  probe!(smol(
+  ping!(smol(
     "native-tls",
     memberlist_net::tests::native_tls_stream_layer::<SmolRuntime>().await
   ));
