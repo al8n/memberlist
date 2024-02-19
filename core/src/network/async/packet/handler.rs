@@ -75,6 +75,7 @@ where
       return;
     }
 
+    tracing::error!("DEBUG: self {} handle alive node {}", self.advertise_node(), alive.node);
     self.alive_node(alive, None, false).await
   }
 

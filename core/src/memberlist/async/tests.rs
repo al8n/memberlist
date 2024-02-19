@@ -17,57 +17,6 @@ use crate::{
 
 use super::*;
 
-static BIND_NUM: Mutex<u8> = Mutex::new(10u8);
-
-fn get_bind_addr_net(network: u8) -> SocketAddr {
-  let mut bind_num = BIND_NUM.lock().unwrap();
-  let ip = IpAddr::V4(Ipv4Addr::new(127, 0, network, *bind_num));
-
-  *bind_num += 1;
-  if *bind_num == 255 {
-    *bind_num = 10;
-  }
-
-  SocketAddr::new(ip, 7949)
-}
-
-pub(crate) fn get_bind_addr() -> SocketAddr {
-  get_bind_addr_net(0)
-}
-
-async fn yield_now<R: Runtime>() {
-  R::sleep(Duration::from_millis(250)).await;
-}
-
-fn test_config_net<R: Runtime>(network: u8) -> Options<NetTransport<R>> {
-  let bind_addr = get_bind_addr_net(network);
-  Options::lan()
-    .with_bind_addr(bind_addr.ip())
-    .with_bind_port(Some(0))
-    .with_name(Name::from_string(bind_addr.ip().to_string()).unwrap())
-}
-
-pub(crate) fn test_config<R: Runtime>() -> Options<NetTransport<R>> {
-  test_config_net(0)
-}
-
-pub(crate) async fn get_memberlist<F, R: Runtime>(
-  f: Option<F>,
-) -> Result<Memberlist<NetTransport<R>>, Error<NetTransport<R>, VoidDelegate>>
-where
-  F: FnOnce(Options<NetTransport<R>>) -> Options<NetTransport<R>>,
-  R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
-{
-  let c = if let Some(f) = f {
-    f(test_config())
-  } else {
-    test_config()
-  };
-
-  Memberlist::new_in(None, c).await.map(|(_, _, this)| this)
-}
 
 pub async fn test_create<R>()
 where

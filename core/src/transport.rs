@@ -5,7 +5,7 @@ use std::{
 
 use bytes::Bytes;
 use futures::AsyncRead;
-pub use nodecraft::{resolver::AddressResolver, *};
+pub use nodecraft::{resolver::AddressResolver, Transformable, CheapClone, *};
 
 use crate::types::*;
 

@@ -89,6 +89,9 @@ where
                 continue;
               }
               buf.truncate(n);
+
+              tracing::debug!(target = "memberlist.packet", local=%local_addr, from=%addr, packet=?buf.as_ref());
+
               let start = Instant::now();
               let msg = match Self::handle_remote_bytes(
                 buf,

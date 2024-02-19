@@ -57,8 +57,11 @@ pub mod tests {
   pub use paste;
 
   use self::{delegate::Delegate, error::Error, transport::Transport};
-
   use super::*;
+
+  pub mod state {
+    pub use crate::state::tests::*;
+  }
 
   /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`]
   #[cfg(any(feature = "test", test))]
@@ -158,7 +161,7 @@ pub mod tests {
     use std::sync::Once;
     static TRACE: Once = Once::new();
     TRACE.call_once(|| {
-      let filter = std::env::var("MEMBERLIST_TESTING_LOG").unwrap_or_else(|_| "debug".to_owned());
+      let filter = std::env::var("MEMBERLIST_TESTING_LOG").unwrap_or_else(|_| "trace".to_owned());
       tracing::subscriber::set_global_default(
         tracing_subscriber::fmt::fmt()
           .without_time()

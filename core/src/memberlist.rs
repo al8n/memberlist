@@ -1,10 +1,8 @@
 use std::{
-  collections::{HashMap, VecDeque},
-  sync::{
+  collections::{HashMap, VecDeque}, sync::{
     atomic::{AtomicBool, AtomicU32},
     Arc,
-  },
-  time::Instant,
+  }, time::Instant
 };
 
 use agnostic::Runtime;
@@ -235,5 +233,27 @@ impl<I: PartialEq, A, R> Members<I, A, R> {
       .nodes
       .iter()
       .any(|m| !m.dead_or_left() && m.id().ne(self.local.id()))
+  }
+}
+
+#[cfg(any(test, feature = "test"))]
+impl<I: Eq + core::hash::Hash, A, R> Members<I, A, R> {
+  pub(crate) fn get_state<Q>(&self, id: &Q) -> Option<LocalServerState<I, A>>
+  where
+    I: core::borrow::Borrow<Q>,
+    Q: core::hash::Hash + Eq,
+  {
+    self.node_map.get(id).map(|idx| self.nodes[*idx].state.clone())
+  }
+
+  pub(crate) fn set_state<Q>(&mut self, id: &Q, new_state: crate::types::ServerState)
+  where
+    I: core::borrow::Borrow<Q>,
+    Q: core::hash::Hash + Eq,
+  {
+    if let Some(idx) = self.node_map.get(id) {
+      let state = &mut self.nodes[*idx].state;
+      state.state = new_state;
+    }
   }
 }

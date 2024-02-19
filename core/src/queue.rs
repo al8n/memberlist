@@ -255,14 +255,14 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
   }
 }
 
-struct LimitedBroadcast<B: Broadcast> {
+pub(crate) struct LimitedBroadcast<B: Broadcast> {
   // btree-key[0]: Number of transmissions attempted.
   transmits: usize,
   // btree-key[1]: copied from len(b.Message())
   msg_len: u64,
   // btree-key[2]: unique incrementing id stamped at submission time
   id: u64,
-  broadcast: Arc<B>,
+  pub(crate) broadcast: Arc<B>,
 }
 
 impl<B: Broadcast> core::clone::Clone for LimitedBroadcast<B> {
@@ -322,6 +322,56 @@ impl<B: Broadcast> PartialOrd<&LimitedBroadcast<B>> for Cmp {
   }
 }
 
+#[cfg(any(test, feature = "test"))]
+impl<B: Broadcast> Inner<B> {
+  fn walk_read_only<F>(&self, reverse: bool, f: F)
+  where
+    F: FnMut(&LimitedBroadcast<B>) -> bool,
+  {
+    fn iter<'a, B: Broadcast, F>(it: impl Iterator<Item = &'a LimitedBroadcast<B>>, mut f: F)
+    where
+      F: FnMut(&LimitedBroadcast<B>) -> bool,
+    {
+      for item in it {
+        let prev_transmits = item.transmits;
+        let prev_msg_len = item.msg_len;
+        let prev_id = item.id;
+
+        let keep_going = f(item);
+
+        if prev_transmits != item.transmits || prev_msg_len != item.msg_len || prev_id != item.id
+        {
+          panic!("edited queue while walking read only");
+        }
+
+        if !keep_going {
+          break;
+        }
+      }
+    }
+    if reverse {
+      iter(self.q.iter().rev(), f)
+    } else {
+      iter(self.q.iter(), f)
+    }
+  }
+}
+
+
+#[cfg(any(test, feature = "test"))]
+impl<B: Broadcast> TransmitLimitedQueue<B> {
+  pub(crate) async fn ordered_view(&self, reverse: bool) -> TinyVec<LimitedBroadcast<B>> {
+    let inner = self.inner.lock().await;
+
+    let mut out = TinyVec::new();
+    inner.walk_read_only(reverse, |b| {
+      out.push(b.clone());
+      true
+    });
+    out
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use std::{marker::PhantomData, net::SocketAddr};
@@ -377,52 +427,6 @@ mod tests {
     }
   }
 
-  impl<B: Broadcast> Inner<B> {
-    fn walk_read_only<F>(&self, reverse: bool, f: F)
-    where
-      F: FnMut(&LimitedBroadcast<B>) -> bool,
-    {
-      fn iter<'a, B: Broadcast, F>(it: impl Iterator<Item = &'a LimitedBroadcast<B>>, mut f: F)
-      where
-        F: FnMut(&LimitedBroadcast<B>) -> bool,
-      {
-        for item in it {
-          let prev_transmits = item.transmits;
-          let prev_msg_len = item.msg_len;
-          let prev_id = item.id;
-
-          let keep_going = f(item);
-
-          if prev_transmits != item.transmits || prev_msg_len != item.msg_len || prev_id != item.id
-          {
-            panic!("edited queue while walking read only");
-          }
-
-          if !keep_going {
-            break;
-          }
-        }
-      }
-      if reverse {
-        iter(self.q.iter().rev(), f)
-      } else {
-        iter(self.q.iter(), f)
-      }
-    }
-  }
-
-  impl<B: Broadcast> TransmitLimitedQueue<B> {
-    async fn ordered_view(&self, reverse: bool) -> TinyVec<LimitedBroadcast<B>> {
-      let inner = self.inner.lock().await;
-
-      let mut out = TinyVec::new();
-      inner.walk_read_only(reverse, |b| {
-        out.push(b.clone());
-        true
-      });
-      out
-    }
-  }
 
   #[test]
   fn test_limited_broadcast_less() {

@@ -8,11 +8,11 @@ homepage.workspace = true
 description = "A placeholder"
 
 [features]
-default = ["tokio-runtime", "compression", "encryption", "dns", "tcp"]
+default = ["tokio", "compression", "encryption", "dns", "tcp"]
 
-tokio-runtime = ["agnostic/tokio"]
-async-std-runtime = ["agnostic/async-std"]
-smol-runtime = ["agnostic/smol"]
+tokio = ["agnostic/tokio"]
+async-std = ["agnostic/async-std"]
+smol = ["agnostic/smol"]
 
 serde = [
   "memberlist-core/serde", 
@@ -93,6 +93,7 @@ dnssec = [
   "memberlist-quic?/dnssec",
 ]
 
+test = ["memberlist-core/test", "memberlist-net?/test", "memberlist-quic?/test"]
 
 [dependencies]
 agnostic.workspace = true
@@ -100,3 +101,14 @@ memberlist-core.workspace = true
 memberlist-utils.workspace = true
 memberlist-net = { workspace = true, optional = true }
 memberlist-quic = { workspace = true, optional = true }
+nodecraft.workspace = true
+smol_str.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+paste.workspace = true
+
+[[test]]
+name = "memberlist"
+path = "tests/main.rs"
+required-features = ["test"]
