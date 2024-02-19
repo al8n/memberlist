@@ -1,17 +1,23 @@
 use std::{
-  sync::{atomic::{AtomicU32, Ordering}, Arc},
-  time::{Instant, Duration},
+  sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+  },
+  time::{Duration, Instant},
 };
 
 use super::{
   delegate::Delegate,
   error::Error,
   memberlist::Memberlist,
-  transport::Transport,
-  types::{Ack, Nack, Server, ServerState, Alive, Dead, IndirectPing, Ping, PushServerState, SmallVec, Suspect},
   suspicion::Suspicion,
   timer::Timer,
-  AckHandler, Member, Members
+  transport::Transport,
+  types::{
+    Ack, Alive, Dead, IndirectPing, Nack, Ping, PushServerState, Server, ServerState, SmallVec,
+    Suspect,
+  },
+  AckHandler, Member, Members,
 };
 
 use agnostic::Runtime;

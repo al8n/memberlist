@@ -1,21 +1,39 @@
 use super::*;
 
-macro_rules! probe {
+macro_rules! probe_node_awareness_degraded {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake $kind:snake _net_probe >]() {
+      fn [< test_ $rt:snake $kind:snake _net_probe_node_awareness_degraded >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_1".into());
+          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_awareness_degraded_node_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();
           let t1_opts = Options::lan();
 
-          let mut t2_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_2".into());
+          let mut t2_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_awareness_degraded_node_2".into());
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t2_opts).await.unwrap();
-          probe(t1, t1_opts, t2).await;
+
+          let mut t3_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_awareness_degraded_node_3".into());
+          t3_opts.add_bind_address(next_socket_addr_v4(0));
+          let t3 = NetTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t3_opts).await.unwrap();
+
+          let mut addr = next_socket_addr_v4(0);
+          addr.set_port(t1.advertise_address().port());
+          let suspect_node = Node::new(
+            "probe_node_awareness_degraded_node_4".into(),
+            addr,
+          );
+
+          probe_node_awareness_degraded(
+            t1,
+            t1_opts,
+            t2,
+            t3,
+            suspect_node,
+          ).await;
         });
       }
     }
@@ -30,16 +48,16 @@ mod tokio {
   use super::*;
   use crate::tokio_run;
 
-  probe!(tokio("tcp", Tcp::<TokioRuntime>::new()));
+  probe_node_awareness_degraded!(tokio("tcp", Tcp::<TokioRuntime>::new()));
 
   #[cfg(feature = "tls")]
-  probe!(tokio(
+  probe_node_awareness_degraded!(tokio(
     "tls",
     memberlist_net::tests::tls_stream_layer::<TokioRuntime>().await
   ));
 
   #[cfg(feature = "native-tls")]
-  probe!(tokio(
+  probe_node_awareness_degraded!(tokio(
     "native-tls",
     memberlist_net::tests::native_tls_stream_layer::<TokioRuntime>().await
   ));
@@ -53,16 +71,16 @@ mod async_std {
   use super::*;
   use crate::async_std_run;
 
-  probe!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
+  probe_node_awareness_degraded!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
 
   #[cfg(feature = "tls")]
-  probe!(async_std(
+  probe_node_awareness_degraded!(async_std(
     "tls",
     memberlist_net::tests::tls_stream_layer::<AsyncStdRuntime>().await
   ));
 
   #[cfg(feature = "native-tls")]
-  probe!(async_std(
+  probe_node_awareness_degraded!(async_std(
     "native-tls",
     memberlist_net::tests::native_tls_stream_layer::<AsyncStdRuntime>().await
   ));
@@ -76,16 +94,16 @@ mod smol {
   use super::*;
   use crate::smol_run;
 
-  probe!(smol("tcp", Tcp::<SmolRuntime>::new()));
+  probe_node_awareness_degraded!(smol("tcp", Tcp::<SmolRuntime>::new()));
 
   #[cfg(feature = "tls")]
-  probe!(smol(
+  probe_node_awareness_degraded!(smol(
     "tls",
     memberlist_net::tests::tls_stream_layer::<SmolRuntime>().await
   ));
 
   #[cfg(feature = "native-tls")]
-  probe!(smol(
+  probe_node_awareness_degraded!(smol(
     "native-tls",
     memberlist_net::tests::native_tls_stream_layer::<SmolRuntime>().await
   ));

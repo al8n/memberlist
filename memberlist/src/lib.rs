@@ -5,7 +5,10 @@ pub use memberlist_core::*;
 
 /// Re-export of [`memberlist_net`] crate.
 #[cfg(feature = "memberlist-net")]
-#[cfg_attr(docsrs, doc(cfg(any(feature = "tcp", feature = "tls", feature = "native-tls"))))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(feature = "tcp", feature = "tls", feature = "native-tls")))
+)]
 pub mod net {
   pub use memberlist_net::*;
 }

@@ -1,8 +1,10 @@
 use std::{
-  collections::{HashMap, VecDeque}, sync::{
+  collections::{HashMap, VecDeque},
+  sync::{
     atomic::{AtomicBool, AtomicU32},
     Arc,
-  }, time::Instant
+  },
+  time::Instant,
 };
 
 use agnostic::Runtime;
@@ -243,7 +245,10 @@ impl<I: Eq + core::hash::Hash, A, R> Members<I, A, R> {
     I: core::borrow::Borrow<Q>,
     Q: core::hash::Hash + Eq,
   {
-    self.node_map.get(id).map(|idx| self.nodes[*idx].state.clone())
+    self
+      .node_map
+      .get(id)
+      .map(|idx| self.nodes[*idx].state.clone())
   }
 
   pub(crate) fn set_state<Q>(&mut self, id: &Q, new_state: crate::types::ServerState)

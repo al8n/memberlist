@@ -157,6 +157,27 @@ pub mod tests {
     block_on(fut);
   }
 
+  // pub(crate) async fn retry<'a, R, F, Fut>(n: usize, w: Duration, mut f: F)
+  // where
+  //   R: Runtime,
+  //   <R::Sleep as Future>::Output: Send,
+  //   <R::Interval as Stream>::Item: Send,
+  //   F: FnMut() -> Fut + Clone,
+  //   Fut: Future<Output = (bool, String)> + Send + Sync + 'a,
+  // {
+  //   for idx in 1..=n {
+  //     let (failed, failed_msg) = f().await;
+  //     if !failed {
+  //       return;
+  //     }
+  //     if idx == n {
+  //       panic!("failed after {} attempts: {}", n, failed_msg);
+  //     }
+
+  //     R::sleep(w).await;
+  //   }
+  // }
+
   pub fn initialize_tests_tracing() {
     use std::sync::Once;
     static TRACE: Once = Once::new();

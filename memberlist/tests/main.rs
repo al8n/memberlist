@@ -7,7 +7,6 @@ use agnostic::tokio::TokioRuntime;
 use agnostic::Runtime;
 use std::future::Future;
 
-
 use memberlist_core::tests::run as run_unit_test;
 
 #[cfg(feature = "tokio")]
@@ -41,4 +40,3 @@ mod quinn;
 #[path = "main/s2n.rs"]
 #[cfg(feature = "s2n")]
 mod s2n;
-

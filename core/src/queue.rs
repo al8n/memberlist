@@ -339,8 +339,7 @@ impl<B: Broadcast> Inner<B> {
 
         let keep_going = f(item);
 
-        if prev_transmits != item.transmits || prev_msg_len != item.msg_len || prev_id != item.id
-        {
+        if prev_transmits != item.transmits || prev_msg_len != item.msg_len || prev_id != item.id {
           panic!("edited queue while walking read only");
         }
 
@@ -356,7 +355,6 @@ impl<B: Broadcast> Inner<B> {
     }
   }
 }
-
 
 #[cfg(any(test, feature = "test"))]
 impl<B: Broadcast> TransmitLimitedQueue<B> {
@@ -426,7 +424,6 @@ mod tests {
       self.0
     }
   }
-
 
   #[test]
   fn test_limited_broadcast_less() {
