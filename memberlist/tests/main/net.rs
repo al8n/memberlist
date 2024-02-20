@@ -35,18 +35,3 @@ mod ping;
 
 #[path = "net/reset_nodes.rs"]
 mod reset_nodes;
-
-#[path = "net/set_probe_channels.rs"]
-mod set_probe_channels;
-
-#[path = "net/set_ack_handler.rs"]
-mod set_ack_handler;
-
-#[path = "net/invoke_ack_handler.rs"]
-mod invoke_ack_handler;
-
-#[path = "net/invoke_ack_handler_channel_ack.rs"]
-mod invoke_ack_handler_channel_ack;
-
-#[path = "net/invoke_ack_handler_channel_nack.rs"]
-mod invoke_ack_handler_channel_nack;

@@ -22,7 +22,7 @@ rkyv = ["dep:rkyv", "nodecraft/rkyv", "memberlist-utils/rkyv"]
 
 # expose all tests fn for users who want to use other runtime
 # see memberlist-wasm for more examples about how to use those tests fn
-test = ["tracing-subscriber", "pnet", "parking_lot"]
+test = ["tracing-subscriber", "pnet"]
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
@@ -48,6 +48,7 @@ futures.workspace = true
 nodecraft.workspace = true
 transformable = { workspace = true, features = ["bytes", "smol_str"] }
 paste.workspace = true
+parking_lot = "0.12"
 pin-project.workspace = true
 pollster.workspace = true
 rand = "0.8"
@@ -75,7 +76,6 @@ tracing-subscriber = { version = "0.3", optional = true, features = [
   "env-filter",
   "tracing-log",
 ] }
-parking_lot = { version = "0.12", optional = true }
 pnet = { version = "0.34", optional = true }
 
 

@@ -2,6 +2,7 @@ use std::{future::Future, sync::atomic::Ordering, time::Duration};
 
 use crate::{
   delegate::VoidDelegate,
+  state::AckManager,
   transport::MaybeResolvedAddress,
   types::{Dead, PushServerState, SmallVec},
 };
@@ -10,18 +11,11 @@ use super::*;
 
 use agnostic::Runtime;
 use async_lock::{Mutex, RwLock};
-use futures::{future::BoxFuture, FutureExt, Stream};
+use futures::{FutureExt, Stream};
 use nodecraft::{resolver::AddressResolver, CheapClone};
 
 // #[cfg(feature = "test")]
 // pub(crate) mod tests;
-
-pub(crate) struct AckHandler {
-  pub(crate) ack_fn:
-    Box<dyn FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
-  pub(crate) nack_fn: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static>>,
-  pub(crate) timer: Timer,
-}
 
 #[viewit::viewit(getters(skip), setters(skip))]
 pub(crate) struct MemberlistCore<T: Transport> {
@@ -39,7 +33,7 @@ pub(crate) struct MemberlistCore<T: Transport> {
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
   nodes: Arc<RwLock<Members<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Runtime>>>,
-  ack_handlers: Arc<Mutex<HashMap<u32, AckHandler>>>,
+  ack_manager: AckManager,
   transport: Arc<T>,
   /// We do not call send directly, just directly drop it.
   shutdown_tx: Sender<()>,
@@ -411,7 +405,7 @@ where
         handoff_rx,
         queue: Mutex::new(MessageQueue::new()),
         nodes: Arc::new(RwLock::new(Members::new(node))),
-        ack_handlers: Arc::new(Mutex::new(HashMap::new())),
+        ack_manager: AckManager::new(),
         shutdown_tx,
         advertise: advertise.cheap_clone(),
         transport: Arc::new(transport),

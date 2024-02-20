@@ -15,6 +15,7 @@ use crate::{
   broadcast::Broadcast,
   delegate::VoidDelegate,
   error::Error,
+  state::AckManager,
   transport::Transport,
   types::{Ack, Alive, Dead, Message, Nack, ServerState},
   Memberlist, Options,
@@ -821,67 +822,55 @@ pub async fn reset_nodes<T, R>(
   m1.shutdown().await.unwrap();
 }
 
-async fn ack_handler_exists<T: Transport>(m: &Memberlist<T>, idx: u32) -> bool {
-  let acks = m.inner.ack_handlers.lock().await;
+async fn ack_handler_exists(m: &AckManager, idx: u32) -> bool {
+  let acks = m.0.lock();
   acks.contains_key(&idx)
 }
 
 /// Unit test to test the set probe channels functionality
-pub async fn set_probe_channels<T, R>(t1: T)
+pub async fn set_probe_channels<R>()
 where
-  T: Transport<Runtime = R>,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
-  let m1: Memberlist<T> = host_memberlist(t1, Options::lan()).await.unwrap();
+  let m = AckManager::new();
 
   let (tx, _rx) = async_channel::bounded(1);
 
-  m1.set_probe_channels(0, tx, None, Instant::now(), Duration::from_millis(10))
-    .await;
+  m.set_probe_channels::<R>(0, tx, None, Instant::now(), Duration::from_millis(10));
 
-  assert!(ack_handler_exists(&m1, 0).await, "missing handler");
+  assert!(ack_handler_exists(&m, 0).await, "missing handler");
 
   R::sleep(Duration::from_millis(20)).await;
 
-  assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
-
-  m1.shutdown().await.unwrap();
+  assert!(!ack_handler_exists(&m, 0).await, "non-reaped handler");
 }
 
 /// Unit test to test the set ack handler functionality
-pub async fn set_ack_handler<T, R>(t1: T)
+pub async fn set_ack_handler<R>()
 where
-  T: Transport<Runtime = R>,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
-  let m1: Memberlist<T> = host_memberlist(t1, Options::lan()).await.unwrap();
+  let m1 = AckManager::new();
 
-  m1.set_ack_handler(0, Duration::from_millis(10), |_1, _2| {
+  m1.set_ack_handler::<_, R>(0, Duration::from_millis(10), |_1, _2| {
     Box::pin(async move {})
-  })
-  .await;
+  });
 
   assert!(ack_handler_exists(&m1, 0).await, "missing handler");
 
   R::sleep(Duration::from_millis(20)).await;
 
   assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
-
-  m1.shutdown().await.unwrap();
 }
 
-pub async fn invoke_ack_handler<T, R>(t1: T)
+pub async fn invoke_ack_handler<R>()
 where
-  T: Transport<Runtime = R>,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
-  let m1: Memberlist<T> = host_memberlist(t1, Options::lan()).await.unwrap();
+  let m1 = AckManager::new();
 
   // Does nothing
   m1.invoke_ack_handler(
@@ -895,12 +884,11 @@ where
 
   let b = Arc::new(AtomicBool::new(false));
   let b1 = b.clone();
-  m1.set_ack_handler(0, Duration::from_millis(10), |_, _| {
+  m1.set_ack_handler::<_, R>(0, Duration::from_millis(10), |_, _| {
     Box::pin(async move {
       b1.store(true, Ordering::SeqCst);
     })
-  })
-  .await;
+  });
 
   // Should set b
   m1.invoke_ack_handler(
@@ -912,19 +900,15 @@ where
   )
   .await;
   assert!(b.load(Ordering::SeqCst), "b not set");
-
-  m1.shutdown().await.unwrap();
 }
 
 /// Unit test to test the invoke ack handler channel ack functionality
-pub async fn invoke_ack_handler_channel_ack<T, R>(t1: T)
+pub async fn invoke_ack_handler_channel_ack<R>()
 where
-  T: Transport<Runtime = R>,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
-  let m1: Memberlist<T> = host_memberlist(t1, Options::lan()).await.unwrap();
+  let m = AckManager::new();
 
   let ack = Ack {
     seq_no: 0,
@@ -932,48 +916,50 @@ where
   };
 
   // Does nothing
-  m1.invoke_ack_handler(ack.clone(), Instant::now()).await;
+  m.invoke_ack_handler(ack.clone(), Instant::now()).await;
 
   let (ack_tx, ack_rx) = async_channel::bounded(1);
   let (nack_tx, nack_rx) = async_channel::bounded(1);
-  m1.set_probe_channels(
+  m.set_probe_channels::<R>(
     0,
     ack_tx,
     Some(nack_tx),
     Instant::now(),
     Duration::from_millis(10),
-  )
-  .await;
+  );
 
   // Should send message
-  m1.invoke_ack_handler(ack.clone(), Instant::now()).await;
+  m.invoke_ack_handler(ack.clone(), Instant::now()).await;
 
-  futures::select! {
-    v = ack_rx.recv().fuse() => {
-      let v = v.unwrap();
-      assert!(v.complete, "bad value");
-      assert_eq!(v.payload, ack.payload, "wrong payload. expected: {:?}; actual: {:?}", ack.payload, v.payload);
-    },
-    _ = nack_rx.recv().fuse() => panic!("should not get a nack"),
-    default => {
-      panic!("message not sent");
+  loop {
+    futures::select! {
+      v = ack_rx.recv().fuse() => {
+        let v = v.unwrap();
+        assert!(v.complete, "bad value");
+        assert_eq!(v.payload, ack.payload, "wrong payload. expected: {:?}; actual: {:?}", ack.payload, v.payload);
+        break;
+      },
+      res = nack_rx.recv().fuse() => {
+        if res.is_ok() {
+          panic!("should not get a nack")
+        }
+      },
+      default => {
+        panic!("message not sent");
+      }
     }
   }
 
-  assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
-
-  m1.shutdown().await.unwrap();
+  assert!(!ack_handler_exists(&m, 0).await, "non-reaped handler");
 }
 
 /// Unit test to test the invoke ack handler channel nack functionality
-pub async fn invoke_ack_handler_channel_nack<T, R>(t1: T)
+pub async fn invoke_ack_handler_channel_nack<R>()
 where
-  T: Transport<Runtime = R>,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
-  let m1: Memberlist<T> = host_memberlist(t1, Options::lan()).await.unwrap();
+  let m1 = AckManager::new();
 
   // Does nothing
   let nack = Nack { seq_no: 0 };
@@ -981,14 +967,13 @@ where
 
   let (ack_tx, ack_rx) = async_channel::bounded(1);
   let (nack_tx, nack_rx) = async_channel::bounded(1);
-  m1.set_probe_channels(
+  m1.set_probe_channels::<R>(
     0,
     ack_tx,
     Some(nack_tx),
     Instant::now(),
     Duration::from_millis(10),
-  )
-  .await;
+  );
 
   // Should send message
   m1.invoke_nack_handler(nack).await;
@@ -1016,21 +1001,26 @@ where
   };
   m1.invoke_ack_handler(ack.clone(), Instant::now()).await;
 
-  futures::select! {
-    v = ack_rx.recv().fuse() => {
-      let v = v.unwrap();
-      assert!(v.complete, "bad value");
-      assert_eq!(v.payload, ack.payload, "wrong payload. expected: {:?}; actual: {:?}", ack.payload, v.payload);
-    },
-    _ = nack_rx.recv().fuse() => panic!("should not get a nack"),
-    default => {
-      panic!("message not sent");
+  loop {
+    futures::select! {
+      v = ack_rx.recv().fuse() => {
+        let v = v.unwrap();
+        assert!(v.complete, "bad value");
+        assert_eq!(v.payload, ack.payload, "wrong payload. expected: {:?}; actual: {:?}", ack.payload, v.payload);
+        break;
+      },
+      res = nack_rx.recv().fuse() => {
+        if res.is_ok() {
+          panic!("should not get a nack")
+        }
+      },
+      default => {
+        panic!("message not sent");
+      }
     }
   }
 
   assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
-
-  m1.shutdown().await.unwrap();
 }
 
 pub async fn test_alive_node_new_node() {

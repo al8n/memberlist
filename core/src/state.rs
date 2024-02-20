@@ -11,25 +11,25 @@ use super::{
   error::Error,
   memberlist::Memberlist,
   suspicion::Suspicion,
-  timer::Timer,
   transport::Transport,
   types::{
-    Ack, Alive, Dead, IndirectPing, Nack, Ping, PushServerState, Server, ServerState, SmallVec,
-    Suspect,
+    Alive, Dead, IndirectPing, Ping, PushServerState, Server, ServerState, SmallVec, Suspect,
   },
-  AckHandler, Member, Members,
+  Member, Members,
 };
 
 use agnostic::Runtime;
-use bytes::Bytes;
 use either::Either;
-use futures::{future::BoxFuture, Future, FutureExt, Stream};
+use futures::{Future, FutureExt, Stream};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 use rand::{seq::SliceRandom, Rng};
 
 /// Exports the state unit test cases.
 #[cfg(any(test, feature = "test"))]
 pub mod tests;
+
+mod ack_manager;
+pub(crate) use ack_manager::*;
 
 #[viewit::viewit]
 #[derive(Debug)]
@@ -134,34 +134,15 @@ where
       .load(std::sync::atomic::Ordering::SeqCst)
   }
 
-  #[inline]
-  pub(crate) async fn invoke_ack_handler(&self, ack: Ack, timestamp: Instant) {
-    let ah = self.inner.ack_handlers.lock().await.remove(&ack.seq_no);
-    if let Some(handler) = ah {
-      handler.timer.stop().await;
-      (handler.ack_fn)(ack.payload, timestamp).await;
-    }
-  }
+  // #[inline]
+  // pub(crate) async fn invoke_ack_handler(&self, ack: Ack, timestamp: Instant) {
+  //   self.inner.ack_manager.invoke_ack_handler(ack, timestamp).await
+  // }
 
-  #[inline]
-  pub(crate) async fn invoke_nack_handler(&self, nack: Nack) {
-    let ah = self
-      .inner
-      .ack_handlers
-      .lock()
-      .await
-      .get(&nack.seq_no)
-      .and_then(|ah| ah.nack_fn.clone());
-    if let Some(nack_fn) = ah {
-      (nack_fn)().await;
-    }
-  }
-}
-
-struct AckMessage {
-  complete: bool,
-  payload: Bytes,
-  timestamp: Instant,
+  // #[inline]
+  // pub(crate) async fn invoke_nack_handler(&self, nack: Nack) {
+  //   self.inner.ack_manager.invoke_nack_handler(nack).await
+  // }
 }
 
 // -------------------------------Public methods---------------------------------
@@ -187,15 +168,13 @@ where
     };
 
     let (ack_tx, ack_rx) = async_channel::bounded(self.inner.opts.indirect_checks + 1);
-    self
-      .set_probe_channels(
-        ping.seq_no,
-        ack_tx,
-        None,
-        Instant::now(),
-        self.inner.opts.probe_interval,
-      )
-      .await;
+    self.inner.ack_manager.set_probe_channels::<T::Runtime>(
+      ping.seq_no,
+      ack_tx,
+      None,
+      Instant::now(),
+      self.inner.opts.probe_interval,
+    );
 
     // Send a ping to the node.
     self.send_msg(node.address(), ping.into()).await?;
@@ -763,25 +742,6 @@ where
     });
     futures::future::join_all(futs).await;
   }
-
-  pub(crate) async fn set_ack_handler<F>(&self, seq_no: u32, timeout: Duration, f: F)
-  where
-    F: FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static,
-  {
-    // Add the handler
-    let tlock = self.inner.ack_handlers.clone();
-    let mut mu = self.inner.ack_handlers.lock().await;
-    mu.insert(
-      seq_no,
-      AckHandler {
-        ack_fn: Box::new(f),
-        nack_fn: None,
-        timer: Timer::after::<_, T::Runtime>(timeout, async move {
-          tlock.lock().await.remove(&seq_no);
-        }),
-      },
-    );
-  }
 }
 
 // -------------------------------Private Methods--------------------------------
@@ -1021,15 +981,13 @@ where
     // also tack on a suspect message so that it has a chance to refute as
     // soon as possible.
     let deadline = sent + probe_interval;
-    self
-      .set_probe_channels(
-        ping.seq_no,
-        ack_tx.clone(),
-        Some(nack_tx),
-        sent,
-        probe_interval,
-      )
-      .await;
+    self.inner.ack_manager.set_probe_channels::<T::Runtime>(
+      ping.seq_no,
+      ack_tx.clone(),
+      Some(nack_tx),
+      sent,
+      probe_interval,
+    );
 
     if target.state == ServerState::Alive {
       if let Err(e) = self
@@ -1301,67 +1259,6 @@ where
 
     // Shuffle live nodes
     memberlist.shuffle(&mut rand::thread_rng());
-  }
-
-  /// Used to attach the ackCh to receive a message when an ack
-  /// with a given sequence number is received. The `complete` field of the message
-  /// will be false on timeout. Any nack messages will cause an empty struct to be
-  /// passed to the nackCh, which can be nil if not needed.
-  async fn set_probe_channels(
-    &self,
-    seq_no: u32,
-    ack_tx: async_channel::Sender<AckMessage>,
-    nack_tx: Option<async_channel::Sender<()>>,
-    sent: Instant,
-    timeout: Duration,
-  ) {
-    let tx = ack_tx.clone();
-    let ack_fn = |payload, timestamp| {
-      async move {
-        futures::select! {
-          _ = tx.send(AckMessage {
-            payload,
-            timestamp,
-            complete: true,
-          }).fuse() => {},
-          default => {}
-        }
-      }
-      .boxed()
-    };
-
-    let nack_fn = move || {
-      let tx = nack_tx.clone();
-      async move {
-        if let Some(nack_tx) = tx {
-          futures::select! {
-            _ = nack_tx.send(()).fuse() => {},
-            default => {}
-          }
-        }
-      }
-      .boxed()
-    };
-
-    let ack_handlers = self.inner.ack_handlers.clone();
-    self.inner.ack_handlers.lock().await.insert(
-      seq_no,
-      AckHandler {
-        ack_fn: Box::new(ack_fn),
-        nack_fn: Some(Arc::new(nack_fn)),
-        timer: Timer::after::<_, T::Runtime>(timeout, async move {
-          ack_handlers.lock().await.remove(&seq_no);
-          futures::select! {
-            _ = ack_tx.send(AckMessage {
-              payload: Bytes::new(),
-              timestamp: sent,
-              complete: false,
-            }).fuse() => {},
-            default => {}
-          }
-        }),
-      },
-    );
   }
 
   /// Invoked every GossipInterval period to broadcast our gossip

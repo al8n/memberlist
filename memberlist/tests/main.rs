@@ -2,12 +2,11 @@
 use agnostic::async_std::AsyncStdRuntime;
 #[cfg(feature = "smol")]
 use agnostic::smol::SmolRuntime;
-#[cfg(feature = "tokio")]
-use agnostic::tokio::TokioRuntime;
+
 use agnostic::Runtime;
 use std::future::Future;
 
-use memberlist_core::tests::run as run_unit_test;
+use memberlist_core::tests::{run as run_unit_test, state::*};
 
 #[cfg(feature = "tokio")]
 fn tokio_run(fut: impl Future<Output = ()>) {
@@ -40,3 +39,18 @@ mod quinn;
 #[path = "main/s2n.rs"]
 #[cfg(feature = "s2n")]
 mod s2n;
+
+#[path = "main/set_probe_channels.rs"]
+mod set_probe_channels;
+
+#[path = "main/set_ack_handler.rs"]
+mod set_ack_handler;
+
+#[path = "main/invoke_ack_handler.rs"]
+mod invoke_ack_handler;
+
+#[path = "main/invoke_ack_handler_channel_ack.rs"]
+mod invoke_ack_handler_channel_ack;
+
+#[path = "main/invoke_ack_handler_channel_nack.rs"]
+mod invoke_ack_handler_channel_nack;

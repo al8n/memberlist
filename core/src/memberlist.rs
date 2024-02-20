@@ -4,7 +4,6 @@ use std::{
     atomic::{AtomicBool, AtomicU32},
     Arc,
   },
-  time::Instant,
 };
 
 use agnostic::Runtime;
@@ -21,10 +20,8 @@ use super::{
   error::Error,
   network::META_MAX_SIZE,
   queue::TransmitLimitedQueue,
-  // security::SecretKeyring,
   state::LocalServerState,
   suspicion::Suspicion,
-  timer::Timer,
   transport::Transport,
   types::{Alive, Message, Server},
   Options,

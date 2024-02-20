@@ -203,7 +203,9 @@ where
     let afrom = from.cheap_clone();
 
     self
-      .set_ack_handler(
+      .inner
+      .ack_manager
+      .set_ack_handler::<_, T::Runtime>(
         local_seq_no,
         self.inner.opts.probe_timeout,
         move |_payload, _timestamp| {
@@ -224,8 +226,7 @@ where
           }
           .boxed()
         },
-      )
-      .await;
+      );
 
     if let Err(e) = self.send_msg(ind.target.address(), ping.into()).await {
       tracing::error!(target =  "memberlist.packet", addr = %from, err = %e, "failed to send ping");
@@ -251,11 +252,15 @@ where
   }
 
   async fn handle_ack(&self, ack: Ack, timestamp: Instant) {
-    self.invoke_ack_handler(ack, timestamp).await
+    self
+      .inner
+      .ack_manager
+      .invoke_ack_handler(ack, timestamp)
+      .await
   }
 
   async fn handle_nack(&self, nack: Nack) {
-    self.invoke_nack_handler(nack).await
+    self.inner.ack_manager.invoke_nack_handler(nack).await
   }
 
   pub(crate) async fn send_msg(
