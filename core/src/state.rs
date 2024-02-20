@@ -12,9 +12,7 @@ use super::{
   memberlist::Memberlist,
   suspicion::Suspicion,
   transport::Transport,
-  types::{
-    Alive, Dead, IndirectPing, Ping, PushServerState, Server, ServerState, SmallVec, Suspect,
-  },
+  types::{Alive, Dead, IndirectPing, NodeState, Ping, PushNodeState, SmallVec, State, Suspect},
   Member, Members,
 };
 
@@ -33,15 +31,15 @@ pub(crate) use ack_manager::*;
 
 #[viewit::viewit]
 #[derive(Debug)]
-pub(crate) struct LocalServerState<I, A> {
-  server: Arc<Server<I, A>>,
+pub(crate) struct LocalNodeState<I, A> {
+  server: Arc<NodeState<I, A>>,
   incarnation: Arc<AtomicU32>,
   state_change: Instant,
   /// The current state of the node
-  state: ServerState,
+  state: State,
 }
 
-impl<I, A> Clone for LocalServerState<I, A> {
+impl<I, A> Clone for LocalNodeState<I, A> {
   fn clone(&self) -> Self {
     Self {
       server: self.server.clone(),
@@ -52,18 +50,18 @@ impl<I, A> Clone for LocalServerState<I, A> {
   }
 }
 
-impl<I, A> core::ops::Deref for LocalServerState<I, A> {
-  type Target = Server<I, A>;
+impl<I, A> core::ops::Deref for LocalNodeState<I, A> {
+  type Target = NodeState<I, A>;
 
   fn deref(&self) -> &Self::Target {
     &self.server
   }
 }
 
-impl<I, A> LocalServerState<I, A> {
+impl<I, A> LocalNodeState<I, A> {
   #[inline]
   pub(crate) fn dead_or_left(&self) -> bool {
-    self.state == ServerState::Dead || self.state == ServerState::Left
+    self.state == State::Dead || self.state == State::Left
   }
 }
 
@@ -298,9 +296,9 @@ where
     // If the dead message was send by the node itself, mark it is left
     // instead of dead.
     if is_self {
-      state.state.state = ServerState::Left;
+      state.state.state = State::Left;
     } else {
-      state.state.state = ServerState::Dead;
+      state.state.state = State::Dead;
     }
     state.state.state_change = Instant::now();
 
@@ -342,7 +340,7 @@ where
     }
 
     // Ignore non-alive nodes
-    if state.state.state != ServerState::Alive {
+    if state.state.state != State::Alive {
       return Ok(());
     }
 
@@ -377,7 +375,7 @@ where
       .state
       .incarnation
       .store(sincarnation, Ordering::Relaxed);
-    state.state.state = ServerState::Suspect;
+    state.state.state = State::Suspect;
     let change_time = Instant::now();
     state.state.state_change = change_time;
 
@@ -391,7 +389,7 @@ where
     // set k to 0 to say that we don't expect any. Note we subtract 2 from n
     // here to take out ourselves and the node being probed.
     let n = self.estimate_num_nodes() as usize;
-    if n - 2 < k {
+    if n < k + 2 {
       k = 0;
     }
 
@@ -418,8 +416,8 @@ where
 
             members.node_map.get(&n).and_then(|&idx| {
               let state = &members.nodes[idx];
-              let timeout = state.state.state == ServerState::Suspect
-                && state.state.state_change == change_time;
+              let timeout =
+                state.state.state == State::Suspect && state.state.state_change == change_time;
               if timeout {
                 Some(Dead {
                   node: state.id().cheap_clone(),
@@ -482,11 +480,11 @@ where
       return;
     }
 
-    let server = Arc::new(Server {
+    let server = Arc::new(NodeState {
       id: alive.node.id().clone(),
       addr: alive.node.address().clone(),
       meta: alive.meta.clone(),
-      state: ServerState::Alive,
+      state: State::Alive,
       protocol_version: alive.protocol_version,
       delegate_version: alive.delegate_version,
     });
@@ -511,12 +509,12 @@ where
           return;
         };
 
-        // If DeadServerReclaimTime is configured, check if enough time has elapsed since the node died.
+        // If DeadNodeStateReclaimTime is configured, check if enough time has elapsed since the node died.
         let can_reclaim = self.inner.opts.dead_node_reclaim_time > Duration::ZERO
           && state.state_change.elapsed() > self.inner.opts.dead_node_reclaim_time;
 
         // Allow the address to be updated if a dead node is being replaced.
-        if state.state == ServerState::Left || (state.state == ServerState::Dead && can_reclaim) {
+        if state.state == State::Left || (state.state == State::Dead && can_reclaim) {
           tracing::info!(target =  "memberlist.state", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.id(), state.address(), alive.node.address());
           updates_node = true;
         } else {
@@ -527,11 +525,11 @@ where
             if let Err(e) = delegate
               .notify_conflict(
                 state.server.cheap_clone(),
-                Arc::new(Server {
+                Arc::new(NodeState {
                   id: alive.node.id().cheap_clone(),
                   addr: alive.node.address().cheap_clone(),
                   meta: alive.meta.clone(),
-                  state: ServerState::Alive,
+                  state: State::Alive,
                   protocol_version: alive.protocol_version,
                   delegate_version: alive.delegate_version,
                 }),
@@ -550,11 +548,11 @@ where
         return;
       };
 
-      let state = LocalServerState {
+      let state = LocalNodeState {
         server,
         incarnation: Arc::new(AtomicU32::new(0)),
         state_change: Instant::now(),
-        state: ServerState::Dead,
+        state: State::Dead,
       };
 
       // Get a random offset. This is important to ensure
@@ -576,7 +574,7 @@ where
       let id = memberlist.nodes[n].state.id().clone();
       *memberlist.node_map.get_mut(&id).unwrap() = n;
 
-      // Update numServers after we've added a new node
+      // Update numNodeStates after we've added a new node
       self.inner.hot.num_nodes.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -638,16 +636,16 @@ where
         .state
         .incarnation
         .store(alive.incarnation, Ordering::Relaxed);
-      member.state.server = Arc::new(Server {
+      member.state.server = Arc::new(NodeState {
         id: alive.node.id().clone(),
         addr: alive.node.address().cheap_clone(),
         meta: alive.meta,
-        state: ServerState::Alive,
+        state: State::Alive,
         protocol_version: alive.protocol_version,
         delegate_version: alive.delegate_version,
       });
-      if member.state.state != ServerState::Alive {
-        member.state.state = ServerState::Alive;
+      if member.state.state != State::Alive {
+        member.state.state = State::Alive;
         member.state.state_change = Instant::now();
       }
     }
@@ -660,7 +658,7 @@ where
 
     // Notify the delegate of any relevant updates
     if let Some(delegate) = &self.delegate {
-      if old_state == ServerState::Dead || old_state == ServerState::Left {
+      if old_state == State::Dead || old_state == State::Left {
         // if Dead/Left -> Alive, notify of join
         if let Err(e) = delegate
           .notify_join(member.state.server.cheap_clone())
@@ -682,16 +680,16 @@ where
 
   pub(crate) async fn merge_state<'a>(
     &'a self,
-    remote: &'a [PushServerState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>],
+    remote: &'a [PushNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>],
   ) {
     let futs = remote.iter().map(|r| {
-      enum State<T: Transport> {
+      enum StateMessage<T: Transport> {
         Alive(Alive<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
         Left(Dead<T::Id>),
         Suspect(Suspect<T::Id>),
       }
 
-      impl<T: Transport> State<T> {
+      impl<T: Transport> StateMessage<T> {
         async fn run<D>(self, s: &Memberlist<T, D>)
         where
           D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
@@ -699,15 +697,15 @@ where
           <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
         {
           match self {
-            State::Alive(alive) => s.alive_node(alive, None, false).await,
-            State::Left(dead) => {
+            StateMessage::Alive(alive) => s.alive_node(alive, None, false).await,
+            StateMessage::Left(dead) => {
               let id = dead.node.cheap_clone();
               let mut memberlist = s.inner.nodes.write().await;
               if let Err(e) = s.dead_node(&mut memberlist, dead).await {
                 tracing::error!(target = "memberlist.state", id=%id, err=%e, "fail to dead node");
               }
             }
-            State::Suspect(suspect) => {
+            StateMessage::Suspect(suspect) => {
               let id = suspect.node.cheap_clone();
               if let Err(e) = s.suspect_node(suspect).await {
                 tracing::error!(target = "memberlist.state", id=%id, err=%e, "fail to suspect node");
@@ -718,21 +716,21 @@ where
       }
 
       let state = match r.state {
-        ServerState::Alive => State::Alive(Alive {
+        State::Alive => StateMessage::Alive(Alive {
           incarnation: r.incarnation,
           node: r.node(),
           meta: r.meta.clone(),
           protocol_version: r.protocol_version,
           delegate_version: r.delegate_version,
         }),
-        ServerState::Left => State::Left(Dead {
+        State::Left => StateMessage::Left(Dead {
           incarnation: r.incarnation,
           node: r.id().cheap_clone(),
           from: self.local_id().cheap_clone(),
         }),
         // If the remote node believes a node is dead, we prefer to
         // suspect that node instead of declaring it dead instantly
-        ServerState::Dead | ServerState::Suspect => State::Suspect(Suspect {
+        State::Dead | State::Suspect => StateMessage::Suspect(Suspect {
           incarnation: r.incarnation,
           node: r.id().cheap_clone(),
           from: self.local_id().cheap_clone(),
@@ -932,7 +930,7 @@ where
 
   async fn probe_node(
     &self,
-    target: &LocalServerState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    target: &LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) {
     #[cfg(feature = "metrics")]
     let now = Instant::now();
@@ -989,7 +987,7 @@ where
       probe_interval,
     );
 
-    if target.state == ServerState::Alive {
+    if target.state == State::Alive {
       if let Err(e) = self
         .send_msg(target.address(), ping.cheap_clone().into())
         .await
@@ -1079,7 +1077,7 @@ where
 
   async fn handle_remote_failure(
     &self,
-    target: &LocalServerState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    target: &LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     ping: Ping<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     ack_rx: async_channel::Receiver<AckMessage>,
     nack_rx: async_channel::Receiver<()>,
@@ -1095,10 +1093,7 @@ where
         .nodes
         .iter()
         .filter_map(|m| {
-          if m.id() == &self.inner.id
-            || m.id() == target.id()
-            || m.state.state != ServerState::Alive
-          {
+          if m.id() == &self.inner.id || m.id() == target.id() || m.state.state != State::Alive {
             None
           } else {
             Some(m.state.server.cheap_clone())
@@ -1286,8 +1281,8 @@ where
           }
 
           match m.state.state {
-            ServerState::Alive | ServerState::Suspect => Some(m.state.server.clone()),
-            ServerState::Dead => {
+            State::Alive | State::Suspect => Some(m.state.server.clone()),
+            State::Dead => {
               if m.state.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
                 None
               } else {
@@ -1354,7 +1349,7 @@ where
         .nodes
         .iter()
         .filter_map(|n| {
-          if n.state.id() == &self.inner.id || n.state.state != ServerState::Alive {
+          if n.state.id() == &self.inner.id || n.state.state != State::Alive {
             None
           } else {
             Some(n.state.server.clone())
@@ -1382,7 +1377,7 @@ where
   /// nodeLock is held.
   async fn refute(
     &self,
-    state: &LocalServerState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    state: &LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     accused_inc: u32,
   ) {
     // Make sure the incarnation number beats the accusation.
@@ -1424,7 +1419,7 @@ fn suspicion_timeout(suspicion_mult: usize, n: usize, interval: Duration) -> u64
 fn push_pull_scale(interval: Duration, n: usize) -> Duration {
   /// the minimum number of nodes
   /// before we start scaling the push/pull timing. The scale
-  /// effect is the log2(Servers) - log2(pushPullScale). This means
+  /// effect is the log2(NodeStates) - log2(pushPullScale). This means
   /// that the 33rd node will cause us to double the interval,
   /// while the 65th will triple it.
   const PUSH_PULL_SCALE_THRESHOLD: usize = 32;
@@ -1449,8 +1444,8 @@ fn random_offset(n: usize) -> usize {
 #[inline]
 fn random_nodes<I, A>(
   k: usize,
-  mut nodes: SmallVec<Arc<Server<I, A>>>,
-) -> SmallVec<Arc<Server<I, A>>> {
+  mut nodes: SmallVec<Arc<NodeState<I, A>>>,
+) -> SmallVec<Arc<NodeState<I, A>>> {
   let n = nodes.len();
   if n == 0 {
     return SmallVec::new();

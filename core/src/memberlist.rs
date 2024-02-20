@@ -20,10 +20,10 @@ use super::{
   error::Error,
   network::META_MAX_SIZE,
   queue::TransmitLimitedQueue,
-  state::LocalServerState,
+  state::LocalNodeState,
   suspicion::Suspicion,
   transport::Transport,
-  types::{Alive, Message, Server},
+  types::{Alive, Message, NodeState},
   Options,
 };
 
@@ -78,12 +78,12 @@ impl<I, A> MessageQueue<I, A> {
 
 #[viewit::viewit]
 pub(crate) struct Member<I, A, R> {
-  pub(crate) state: LocalServerState<I, A>,
+  pub(crate) state: LocalNodeState<I, A>,
   pub(crate) suspicion: Option<Suspicion<I, R>>,
 }
 
 impl<I, A, R> core::ops::Deref for Member<I, A, R> {
-  type Target = LocalServerState<I, A>;
+  type Target = LocalNodeState<I, A>;
 
   fn deref(&self) -> &Self::Target {
     &self.state
@@ -237,7 +237,7 @@ impl<I: PartialEq, A, R> Members<I, A, R> {
 
 #[cfg(any(test, feature = "test"))]
 impl<I: Eq + core::hash::Hash, A, R> Members<I, A, R> {
-  pub(crate) fn get_state<Q>(&self, id: &Q) -> Option<LocalServerState<I, A>>
+  pub(crate) fn get_state<Q>(&self, id: &Q) -> Option<LocalNodeState<I, A>>
   where
     I: core::borrow::Borrow<Q>,
     Q: core::hash::Hash + Eq,
@@ -248,7 +248,7 @@ impl<I: Eq + core::hash::Hash, A, R> Members<I, A, R> {
       .map(|idx| self.nodes[*idx].state.clone())
   }
 
-  pub(crate) fn set_state<Q>(&mut self, id: &Q, new_state: crate::types::ServerState)
+  pub(crate) fn set_state<Q>(&mut self, id: &Q, new_state: crate::types::State)
   where
     I: core::borrow::Borrow<Q>,
     Q: core::hash::Hash + Eq,

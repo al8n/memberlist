@@ -4,7 +4,7 @@ use crate::{
   delegate::VoidDelegate,
   state::AckManager,
   transport::MaybeResolvedAddress,
-  types::{Dead, PushServerState, SmallVec},
+  types::{Dead, PushNodeState, SmallVec},
 };
 
 use super::*;
@@ -151,7 +151,7 @@ where
   #[inline]
   pub async fn local_server(
     &self,
-  ) -> Arc<Server<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
+  ) -> Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
     let nodes = self.inner.nodes.read().await;
     // TODO: return an error
     nodes
@@ -165,7 +165,7 @@ where
   #[inline]
   pub async fn members(
     &self,
-  ) -> SmallVec<Arc<Server<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
+  ) -> SmallVec<Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
     self
       .inner
       .nodes
@@ -342,7 +342,7 @@ where
     };
 
     if meta.len() > META_MAX_SIZE {
-      panic!("Server meta data provided is longer than the limit");
+      panic!("NodeState meta data provided is longer than the limit");
     }
 
     let alive = Alive {
@@ -445,9 +445,9 @@ where
 
       let mut memberlist = self.inner.nodes.write().await;
       if let Some(&idx) = memberlist.node_map.get(&self.inner.id) {
-        // This dead message is special, because Server and From are the
+        // This dead message is special, because NodeState and From are the
         // same. This helps other nodes figure out that a node left
-        // intentionally. When Server equals From, other nodes know for
+        // intentionally. When NodeState equals From, other nodes know for
         // sure this node is gone.
 
         let state = &memberlist.nodes[idx];
@@ -761,21 +761,33 @@ where
 
   pub(crate) async fn verify_protocol(
     &self,
-    _remote: &[PushServerState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>],
+    _remote: &[PushNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>],
   ) -> Result<(), Error<T, D>> {
     // TODO: now we do not need to handle this situation, because there is no update
     // on protocol.
     Ok(())
   }
 
-  // #[cfg(test)]
-  // pub(crate) async fn change_node<F>(&self, _addr: SocketAddr, _f: F)
-  // where
-  //   F: Fn(&LocalServerState),
-  // {
-  //   // let mut nodes = self.inner.nodes.write().await;
-  //   // if let Some(n) = nodes.node_map.get_mut(&addr) {
-  //   //   f(n)
-  //   // }
-  // }
+  #[cfg(any(test, feature = "test"))]
+  pub(crate) async fn change_node<F>(&self, id: &T::Id, f: F)
+  where
+    F: Fn(&mut LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
+  {
+    let mut nodes = self.inner.nodes.write().await;
+    if let Some(n) = nodes.node_map.get(id).copied() {
+      f(&mut nodes.nodes[n].state);
+    }
+  }
+
+  #[cfg(any(test, feature = "test"))]
+  pub(crate) async fn get_node_state(&self, id: &T::Id) -> Option<crate::types::State> {
+    let nodes = self.inner.nodes.read().await;
+    nodes.node_map.get(id).map(|n| nodes.nodes[*n].state.state)
+  }
+
+  #[cfg(any(test, feature = "test"))]
+  pub(crate) async fn get_node_state_change(&self, id: &T::Id) -> Option<std::time::Instant> {
+    let nodes = self.inner.nodes.read().await;
+    nodes.node_map.get(id).map(|n| nodes.nodes[*n].state_change)
+  }
 }

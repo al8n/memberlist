@@ -4,7 +4,7 @@ use futures::{Future, Stream};
 use nodecraft::resolver::AddressResolver;
 use smol_str::SmolStr;
 
-use crate::{transport::TimeoutableStream, types::Server};
+use crate::{transport::TimeoutableStream, types::NodeState};
 
 use super::*;
 
@@ -62,7 +62,7 @@ where
           .states
           .iter()
           .map(|n| {
-            Arc::new(Server {
+            Arc::new(NodeState {
               id: n.id().clone(),
               addr: n.address().clone(),
               meta: n.meta.clone(),
@@ -129,7 +129,7 @@ where
 
     // Prepare the local node state
     #[cfg(feature = "metrics")]
-    let mut node_state_counts = ServerState::empty_metrics();
+    let mut node_state_counts = State::empty_metrics();
     let local_nodes = {
       self
         .inner
@@ -140,7 +140,7 @@ where
         .iter()
         .map(|m| {
           let n = &m.state;
-          let this = PushServerState::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> {
+          let this = PushNodeState::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> {
             id: n.id().clone(),
             addr: n.address().clone(),
             meta: n.meta().clone(),

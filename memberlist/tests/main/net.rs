@@ -35,3 +35,24 @@ mod ping;
 
 #[path = "net/reset_nodes.rs"]
 mod reset_nodes;
+
+#[path = "net/alive_node_conflict.rs"]
+mod alive_node_conflict;
+
+#[path = "net/alive_node_refute.rs"]
+mod alive_node_refute;
+
+#[path = "net/suspect_node_no_node.rs"]
+mod suspect_node_no_node;
+
+#[path = "net/suspect_node.rs"]
+mod suspect_node;
+
+#[path = "net/suspect_node_double_suspect.rs"]
+mod suspect_node_double_suspect;
+
+#[path = "net/suspect_node_refute.rs"]
+mod suspect_node_refute;
+
+#[path = "net/dead_node_no_node.rs"]
+mod dead_node_no_node;

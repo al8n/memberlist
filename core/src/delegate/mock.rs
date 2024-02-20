@@ -31,9 +31,9 @@ struct MockDelegateInner<I, A> {
   broadcasts: Vec<Bytes>,
   state: Bytes,
   remote_state: Bytes,
-  conflict_existing: Option<Arc<Server<I, A>>>,
-  conflict_other: Option<Arc<Server<I, A>>>,
-  ping_other: Option<Arc<Server<I, A>>>,
+  conflict_existing: Option<Arc<NodeState<I, A>>>,
+  conflict_other: Option<Arc<NodeState<I, A>>>,
+  ping_other: Option<Arc<NodeState<I, A>>>,
   ping_rtt: Duration,
   ping_payload: Bytes,
 }
@@ -163,7 +163,7 @@ impl<I, A> MockDelegate<I, A> {
     out
   }
 
-  pub async fn get_contents(&self) -> Option<(Arc<Server<I, A>>, Duration, Bytes)> {
+  pub async fn get_contents(&self) -> Option<(Arc<NodeState<I, A>>, Duration, Bytes)> {
     if self.ty == MockDelegateType::Ping {
       let mut mu = self.inner.lock().await;
       let other = mu.ping_other.take()?;
@@ -214,19 +214,19 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
     Ok(())
   }
 
-  async fn notify_join(&self, _node: Arc<Server<I, A>>) -> Result<(), Self::Error> {
+  async fn notify_join(&self, _node: Arc<NodeState<I, A>>) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  async fn notify_leave(&self, _node: Arc<Server<I, A>>) -> Result<(), Self::Error> {
+  async fn notify_leave(&self, _node: Arc<NodeState<I, A>>) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  async fn notify_update(&self, _node: Arc<Server<I, A>>) -> Result<(), Self::Error> {
+  async fn notify_update(&self, _node: Arc<NodeState<I, A>>) -> Result<(), Self::Error> {
     Ok(())
   }
 
-  async fn notify_alive(&self, peer: Arc<Server<I, A>>) -> Result<(), Self::Error> {
+  async fn notify_alive(&self, peer: Arc<NodeState<I, A>>) -> Result<(), Self::Error> {
     match self.ty {
       MockDelegateType::CancelAlive => {
         self.count.fetch_add(1, Ordering::SeqCst);
@@ -244,8 +244,8 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
 
   async fn notify_conflict(
     &self,
-    existing: Arc<Server<I, A>>,
-    other: Arc<Server<I, A>>,
+    existing: Arc<NodeState<I, A>>,
+    other: Arc<NodeState<I, A>>,
   ) -> Result<(), Self::Error> {
     if self.ty == MockDelegateType::NotifyConflict {
       let mut inner = self.inner.lock().await;
@@ -256,7 +256,7 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
     Ok(())
   }
 
-  async fn notify_merge(&self, _peers: SmallVec<Arc<Server<I, A>>>) -> Result<(), Self::Error> {
+  async fn notify_merge(&self, _peers: SmallVec<Arc<NodeState<I, A>>>) -> Result<(), Self::Error> {
     match self.ty {
       MockDelegateType::CancelMerge => {
         tracing::info!(target = "memberlist.mock.delegate", "cancel merge");
@@ -276,7 +276,7 @@ impl<I: Id, A: Address> Delegate for MockDelegate<I, A> {
 
   async fn notify_ping_complete(
     &self,
-    node: Arc<Server<I, A>>,
+    node: Arc<NodeState<I, A>>,
     rtt: std::time::Duration,
     payload: Bytes,
   ) -> Result<(), Self::Error> {

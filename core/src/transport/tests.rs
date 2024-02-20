@@ -16,13 +16,13 @@ use transformable::Transformable;
 
 use crate::{
   delegate::{MockDelegate, VoidDelegate},
-  state::LocalServerState,
+  state::LocalNodeState,
   tests::{get_memberlist, next_socket_addr_v4, next_socket_addr_v6, AnyError},
   transport::{Ack, Alive, IndirectPing, MaybeResolvedAddress, Message},
   Member, Memberlist, Options,
 };
 
-use super::{Ping, PushPull, PushServerState, Server, ServerState, Transport};
+use super::{NodeState, Ping, PushNodeState, PushPull, State, Transport};
 
 const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 const WAIT_DURATION: Duration = Duration::from_secs(6);
@@ -726,17 +726,17 @@ where
   {
     let mut members = m.inner.nodes.write().await;
     members.nodes.push(Member {
-      state: LocalServerState {
-        server: Arc::new(Server::new(
+      state: LocalNodeState {
+        server: Arc::new(NodeState::new(
           id0.cheap_clone(),
           bind_addr,
-          ServerState::Alive,
+          State::Alive,
           Default::default(),
           Default::default(),
         )),
         incarnation: Arc::new(0.into()),
         state_change: Instant::now() - Duration::from_secs(1),
-        state: ServerState::Suspect,
+        state: State::Suspect,
       },
       suspicion: None,
     });
@@ -750,30 +750,30 @@ where
     join: false,
     states: Arc::new(
       [
-        PushServerState {
+        PushNodeState {
           id: id0.cheap_clone(),
           addr: bind_addr,
           meta: Bytes::new(),
           incarnation: 1,
-          state: ServerState::Alive,
+          state: State::Alive,
           protocol_version: Default::default(),
           delegate_version: Default::default(),
         },
-        PushServerState {
+        PushNodeState {
           id: "Test 1".into(),
           addr: bind_addr,
           meta: Bytes::new(),
           incarnation: 1,
-          state: ServerState::Alive,
+          state: State::Alive,
           protocol_version: Default::default(),
           delegate_version: Default::default(),
         },
-        PushServerState {
+        PushNodeState {
           id: "Test 2".into(),
           addr: bind_addr,
           meta: Bytes::new(),
           incarnation: 1,
-          state: ServerState::Alive,
+          state: State::Alive,
           protocol_version: Default::default(),
           delegate_version: Default::default(),
         },
@@ -803,7 +803,7 @@ where
   assert_eq!(readed_push_pull.states[0].incarnation, 0, "bad incarnation");
   assert_eq!(
     readed_push_pull.states[0].state,
-    ServerState::Suspect,
+    State::Suspect,
     "bad state"
   );
   m.shutdown().await?;

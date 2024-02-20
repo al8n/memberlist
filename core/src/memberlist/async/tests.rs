@@ -12,11 +12,10 @@ use crate::{
   options::parse_cidrs,
   security::{EncryptionAlgo, SecretKey},
   transport::net::NetTransport,
-  CompressionAlgo, Label, ServerState,
+  CompressionAlgo, Label, State,
 };
 
 use super::*;
-
 
 pub async fn test_create<R>()
 where
@@ -616,7 +615,7 @@ where
 
   let nodes = m2.inner.nodes.read().await;
   let idx = nodes.node_map.get(&m1.inner.id).unwrap();
-  assert_eq!(nodes.nodes[*idx].state.state, ServerState::Left);
+  assert_eq!(nodes.nodes[*idx].state.state, State::Left);
 }
 
 #[allow(clippy::mutable_key_type)]

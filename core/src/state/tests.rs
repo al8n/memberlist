@@ -1,4 +1,6 @@
 use std::{
+  net::SocketAddr,
+  ops::Sub,
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -15,9 +17,10 @@ use crate::{
   broadcast::Broadcast,
   delegate::VoidDelegate,
   error::Error,
-  state::AckManager,
+  state::{AckManager, LocalNodeState},
+  tests::get_memberlist,
   transport::Transport,
-  types::{Ack, Alive, Dead, Message, Nack, ServerState},
+  types::{Ack, Alive, Dead, Message, Nack, State, Suspect},
   Memberlist, Options,
 };
 
@@ -83,7 +86,7 @@ where
   let nodes = m1.inner.nodes.read().await;
   let idx = *nodes.node_map.get(&m2.inner.id).unwrap();
   let n = &nodes.nodes[idx];
-  assert_eq!(n.state.state, ServerState::Alive);
+  assert_eq!(n.state.state, State::Alive);
 
   // Should increment seqno
   let seq_no = m1.inner.hot.sequence_num.load(Ordering::SeqCst);
@@ -177,7 +180,7 @@ pub async fn probe_node_suspect<T, R>(
     .unwrap()
     .state;
   // Should be marked suspect.
-  assert_eq!(state, ServerState::Suspect, "bad state: {state}");
+  assert_eq!(state, State::Suspect, "bad state: {state}");
   R::sleep(Duration::from_millis(1000)).await;
 
   // One of the peers should have attempted an indirect probe.
@@ -304,7 +307,7 @@ pub async fn probe_node_awareness_degraded<T, R>(
       .get_state(node4.id())
       .unwrap()
       .state;
-    assert_eq!(state, ServerState::Suspect, "expect node to be suspect");
+    assert_eq!(state, State::Suspect, "expect node to be suspect");
   }
 
   // Make sure we timed out approximately on time (note that we accounted
@@ -402,7 +405,7 @@ where
       .get_state(m2.local_id())
       .unwrap()
       .state;
-    assert_eq!(state, ServerState::Alive, "expect node to be alive");
+    assert_eq!(state, State::Alive, "expect node to be alive");
   }
 
   // Our score should have improved since we did a good probe.
@@ -510,7 +513,7 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
       .get_state(node4.id())
       .unwrap()
       .state;
-    assert_eq!(state, ServerState::Suspect, "expect node to be suspect");
+    assert_eq!(state, State::Suspect, "expect node to be suspect");
   }
 
   // Make sure we timed out approximately on time.
@@ -579,7 +582,7 @@ where
   {
     let mut members = m1.inner.nodes.write().await;
     let id = m2.local_id();
-    members.set_state(id, ServerState::Suspect);
+    members.set_state(id, State::Suspect);
     let n = members.get_state(id).unwrap();
     drop(members);
     m1.probe_node(&n).await;
@@ -660,11 +663,7 @@ where
     .get_state(m2.local_id())
     .unwrap()
     .state;
-  assert_eq!(
-    state,
-    ServerState::Alive,
-    "expect node to be alive: {state}"
-  );
+  assert_eq!(state, State::Alive, "expect node to be alive: {state}");
 
   // Should increment seqno
   let seq_no = m1.inner.hot.sequence_num.load(Ordering::SeqCst);
@@ -1023,7 +1022,16 @@ where
   assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
 }
 
-pub async fn test_alive_node_new_node() {
+pub async fn test_alive_node_new_node<T, R>(
+  _t1: T,
+  _t1_opts: Options,
+  _test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+) where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
   todo!()
 }
 
@@ -1039,36 +1047,523 @@ pub async fn test_alive_node_change_meta() {
   todo!()
 }
 
-pub async fn test_alive_node_refute() {
-  todo!()
+/// Unit test to test the alive node refute functionality
+pub async fn alive_node_refute<T, R>(t1: T, t1_opts: Options)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m: Memberlist<T> = get_memberlist(
+    t1,
+    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: m.advertise_node(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, true).await;
+
+  // Clear queue
+  m.inner.broadcast.reset().await;
+
+  // Conflicting alive
+  let a = Alive {
+    incarnation: 2,
+    meta: Bytes::from_static(b"foo"),
+    node: m.advertise_node(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, false).await;
+
+  {
+    let nodes = m.inner.nodes.read().await;
+    let n = nodes.get_state(m.local_id()).unwrap();
+    assert_eq!(n.state, State::Alive, "should still be alive");
+    assert!(n.meta.is_empty(), "meta should still be empty");
+  }
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 1, "expected only one queued message: {num}");
+
+  // Should be alive msg
+  let broadcasts = m.inner.broadcast.ordered_view(true).await;
+  let msg = broadcasts[0].broadcast.message();
+  assert!(matches!(msg, Message::Alive(_)), "bad message: {msg:?}");
+
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_alive_node_conflict() {
-  todo!()
+/// Unit test to test the alive node conflict functionality
+pub async fn alive_node_conflict<A, T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
+where
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  T: Transport<Resolver = A, Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m: Memberlist<T> = get_memberlist(
+    t1,
+    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let test_node1 = Node::new(
+    test_node_id.cheap_clone(),
+    "127.0.0.1:8000".parse().unwrap(),
+  );
+  let a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: test_node1.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+  m.alive_node(a, None, true).await;
+
+  // Clear queue
+  m.inner.broadcast.reset().await;
+
+  // Conflicting alive
+  let test_node2 = Node::new(
+    test_node_id.cheap_clone(),
+    "127.0.0.2:9000".parse().unwrap(),
+  );
+  let a = Alive {
+    incarnation: 2,
+    meta: Bytes::from_static(b"foo"),
+    node: test_node2.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, false).await;
+
+  {
+    let nodes = m.inner.nodes.read().await;
+    let n = nodes.get_state(&test_node_id).unwrap();
+    assert_eq!(n.state, State::Alive, "should still be alive");
+    assert!(n.meta.is_empty(), "meta should still be empty");
+    assert_eq!(n.id, test_node_id, "id should not be update");
+    assert_eq!(&n.addr, test_node1.address(), "addr should not be updated");
+  }
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 0, "expected 0 queued message: {num}");
+
+  // Change the node to dead
+  let d = Dead {
+    incarnation: 2,
+    node: test_node_id.clone(),
+    from: m.local_id().cheap_clone(),
+  };
+  {
+    let mut members = m.inner.nodes.write().await;
+    m.dead_node(&mut *members, d).await.unwrap();
+  }
+
+  m.inner.broadcast.reset().await;
+
+  {
+    let nodes = m.inner.nodes.read().await;
+    let n = nodes.get_state(&test_node_id).unwrap();
+    assert_eq!(n.state, State::Dead, "should be dead");
+  }
+
+  R::sleep(m.inner.opts.dead_node_reclaim_time).await;
+
+  // New alive node
+  let a = Alive {
+    incarnation: 3,
+    meta: Bytes::from_static(b"foo"),
+    node: test_node2.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, false).await;
+
+  {
+    let nodes = m.inner.nodes.read().await;
+    let n = nodes.get_state(&test_node_id).unwrap();
+    assert_eq!(n.state, State::Alive, "should still be alive");
+    assert_eq!(n.meta, Bytes::from_static(b"foo"), "meta should be updated");
+    assert_eq!(&n.addr, test_node2.address(), "addr should be updated");
+  }
+
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_suspect_node_no_node() {
-  todo!()
+/// Unit test to test the suspect node no node functionality
+pub async fn suspect_node_no_node<T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m: Memberlist<T> = get_memberlist(
+    t1,
+    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let s = Suspect {
+    incarnation: 1,
+    node: test_node_id,
+    from: m.local_id().cheap_clone(),
+  };
+
+  m.suspect_node(s).await.unwrap();
+
+  {
+    let nodes = m.inner.nodes.read().await.node_map.len();
+    assert_eq!(nodes, 0, "don't expect nodes");
+  }
+
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_suspect_node() {
-  todo!()
+/// Unit test to test the suspect node functionality
+pub async fn suspect_node<A, T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
+where
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  T: Transport<Resolver = A, Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m: Memberlist<T> = get_memberlist(
+    t1,
+    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    t1_opts
+      .with_probe_interval(Duration::from_millis(1))
+      .with_suspicion_mult(1),
+  )
+  .await
+  .unwrap();
+
+  let test_node1 = Node::new(
+    test_node_id.cheap_clone(),
+    "127.0.0.1:8000".parse().unwrap(),
+  );
+  let a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: test_node1.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, false).await;
+
+  m.change_node(&test_node_id, |state| {
+    *state = LocalNodeState {
+      state_change: state.state_change.sub(Duration::from_secs(3600)),
+      ..state.clone()
+    };
+  })
+  .await;
+
+  let s = Suspect {
+    incarnation: 1,
+    node: test_node_id.clone(),
+    from: m.local_id().cheap_clone(),
+  };
+
+  m.suspect_node(s).await.unwrap();
+
+  let state = m.get_node_state(&test_node_id).await.unwrap();
+  assert_eq!(state, State::Suspect, "bad state");
+
+  let change = m.get_node_state_change(&test_node_id).await.unwrap();
+  assert!(
+    Instant::now() - change <= Duration::from_secs(1),
+    "bad change delta"
+  );
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 1, "expected only one queued message: {num}");
+
+  // Check its a suspect message
+  let broadcasts = m.inner.broadcast.ordered_view(true).await;
+  let msg = broadcasts[0].broadcast.message();
+  assert!(matches!(msg, Message::Suspect(_)), "bad message: {msg:?}");
+
+  // Wait for the timeout
+  R::sleep(Duration::from_millis(10)).await;
+
+  let state = m.get_node_state(&test_node_id).await.unwrap();
+  assert_eq!(state, State::Dead, "bad state");
+
+  let new_change = m.get_node_state_change(&test_node_id).await.unwrap();
+  assert!(
+    Instant::now() - new_change <= Duration::from_secs(1),
+    "bad change delta"
+  );
+
+  assert!(
+    new_change.checked_duration_since(change).is_some(),
+    "should increment time"
+  );
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 1, "expected only one queued message: {num}");
+
+  // Check its a suspect message
+  let broadcasts = m.inner.broadcast.ordered_view(true).await;
+  let msg = broadcasts[0].broadcast.message();
+  assert!(matches!(msg, Message::Dead(_)), "bad message: {msg:?}");
+
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_suspect_node_double_suspect() {
-  todo!()
+/// Unit test to test the suspect node double suspect functionality
+pub async fn suspect_node_double_suspect<A, T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
+where
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  T: Transport<Resolver = A, Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m: Memberlist<T> = get_memberlist(
+    t1,
+    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let test_node1 = Node::new(
+    test_node_id.cheap_clone(),
+    "127.0.0.1:8000".parse().unwrap(),
+  );
+  let a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: test_node1.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, false).await;
+
+  m.change_node(&test_node_id, |state| {
+    *state = LocalNodeState {
+      state_change: state.state_change.sub(Duration::from_secs(3600)),
+      ..state.clone()
+    };
+  })
+  .await;
+
+  let s = Suspect {
+    incarnation: 1,
+    node: test_node_id.clone(),
+    from: m.local_id().cheap_clone(),
+  };
+
+  m.suspect_node(s.clone()).await.unwrap();
+
+  let state = m.get_node_state(&test_node_id).await.unwrap();
+  assert_eq!(state, State::Suspect, "bad state");
+
+  let change = m.get_node_state_change(&test_node_id).await.unwrap();
+  assert!(
+    Instant::now() - change <= Duration::from_secs(1),
+    "bad change delta"
+  );
+
+  // clear the broadcast queue
+  m.inner.broadcast.reset().await;
+
+  // suspect again
+  m.suspect_node(s).await.unwrap();
+
+  let new_change = m.get_node_state_change(&test_node_id).await.unwrap();
+  assert_eq!(new_change, change, "unexpected change");
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 0, "expected no queued message: {num}");
+
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_suspect_node_old_suspect() {
-  todo!()
+/// Unit test to test the suspect node old suspect functionality
+pub async fn suspect_node_old_suspect<A, T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
+where
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  T: Transport<Resolver = A, Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let now = Instant::now();
+  let m: Memberlist<T> = get_memberlist(
+    t1,
+    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let test_node1 = Node::new(
+    test_node_id.cheap_clone(),
+    "127.0.0.1:8000".parse().unwrap(),
+  );
+  let a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: test_node1.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, false).await;
+
+  m.change_node(&test_node_id, |state| {
+    *state = LocalNodeState {
+      state_change: now,
+      ..state.clone()
+    };
+  })
+  .await;
+
+  // clear queue
+  m.inner.broadcast.reset().await;
+
+  let s = Suspect {
+    incarnation: 1,
+    node: test_node_id.clone(),
+    from: m.local_id().cheap_clone(),
+  };
+
+  m.suspect_node(s.clone()).await.unwrap();
+
+  let state = m.get_node_state(&test_node_id).await.unwrap();
+  assert_eq!(state, State::Alive, "bad state");
+
+  // check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 0, "expected 0 queued message: {num}");
+
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_suspect_node_refute() {
-  todo!()
+/// Unit test to test the suspect node refute functionality
+pub async fn suspect_node_refute<T, R>(t1: T, t1_opts: Options)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m = get_memberlist(
+    t1,
+    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: m.advertise_node(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, true).await;
+
+  // clear queue
+  m.inner.broadcast.reset().await;
+
+  // make sure health is in a good state
+  let health = m.inner.awareness.get_health_score().await;
+  assert_eq!(health, 0, "bad: {health}");
+
+  let s = Suspect {
+    incarnation: 1,
+    node: m.local_id().cheap_clone(),
+    from: m.local_id().cheap_clone(),
+  };
+
+  m.suspect_node(s).await.unwrap();
+
+  let state = m.get_node_state(m.local_id()).await.unwrap();
+  assert_eq!(state, State::Alive, "should still be alive");
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 1, "expected only 1 queued message: {num}");
+
+  // should be alive msg
+  let broadcasts = m.inner.broadcast.ordered_view(true).await;
+  let msg = broadcasts[0].broadcast.message();
+  assert!(matches!(msg, Message::Alive(_)), "bad message: {msg:?}");
+
+  // Health should have been dinged
+  let health = m.inner.awareness.get_health_score().await;
+  assert_eq!(health, 1, "bad: {health}");
+
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_dead_node_no_node() {
-  todo!()
+/// Unit test to test the dead node no node functionality
+pub async fn dead_node_no_node<T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m: Memberlist<T> = get_memberlist(
+    t1,
+    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let d = Dead {
+    incarnation: 1,
+    node: test_node_id,
+    from: m.local_id().cheap_clone(),
+  };
+
+  {
+    let mut members = m.inner.nodes.write().await;
+    m.dead_node(&mut members, d).await.unwrap();
+  }
+
+  {
+    let nodes = m.inner.nodes.read().await.node_map.len();
+    assert_eq!(nodes, 0, "don't expect nodes");
+  }
+
+  m.shutdown().await.unwrap();
 }
 
 pub async fn test_dead_node_left() {
@@ -1104,10 +1599,6 @@ pub async fn test_gossip() {
 }
 
 pub async fn test_gossip_to_dead() {
-  todo!()
-}
-
-pub async fn test_failed_remote() {
   todo!()
 }
 

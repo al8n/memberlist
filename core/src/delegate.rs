@@ -4,12 +4,15 @@ use bytes::Bytes;
 use futures::Future;
 use nodecraft::{CheapClone, Id};
 
-use crate::types::{Server, SmallVec};
+use crate::types::{NodeState, SmallVec};
 
 #[cfg(any(test, feature = "test"))]
 mod mock;
 #[cfg(any(test, feature = "test"))]
 pub use mock::*;
+
+mod event;
+pub use event::*;
 
 #[auto_impl::auto_impl(Box, Arc)]
 pub trait Delegate: Send + Sync + 'static {
@@ -24,7 +27,7 @@ pub trait Delegate: Send + Sync + 'static {
 
   /// Used to retrieve meta-data about the current node
   /// when broadcasting an alive message. It's length is limited to
-  /// the given byte size. This metadata is available in the Server structure.
+  /// the given byte size. This metadata is available in the NodeState structure.
   fn node_meta(&self, limit: usize) -> impl Future<Output = Bytes> + Send;
 
   /// Called when a user-data message is received.
@@ -73,40 +76,40 @@ pub trait Delegate: Send + Sync + 'static {
   /// Invoked when a node is detected to have joined the cluster
   fn notify_join(
     &self,
-    node: Arc<Server<Self::Id, Self::Address>>,
+    node: Arc<NodeState<Self::Id, Self::Address>>,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Invoked when a node is detected to have left the cluster
   fn notify_leave(
     &self,
-    node: Arc<Server<Self::Id, Self::Address>>,
+    node: Arc<NodeState<Self::Id, Self::Address>>,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Invoked when a node is detected to have
   /// updated, usually involving the meta data.
   fn notify_update(
     &self,
-    node: Arc<Server<Self::Id, Self::Address>>,
+    node: Arc<NodeState<Self::Id, Self::Address>>,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Invoked when a name conflict is detected
   fn notify_alive(
     &self,
-    peer: Arc<Server<Self::Id, Self::Address>>,
+    peer: Arc<NodeState<Self::Id, Self::Address>>,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Invoked when a name conflict is detected
   fn notify_conflict(
     &self,
-    existing: Arc<Server<Self::Id, Self::Address>>,
-    other: Arc<Server<Self::Id, Self::Address>>,
+    existing: Arc<NodeState<Self::Id, Self::Address>>,
+    other: Arc<NodeState<Self::Id, Self::Address>>,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Invoked when a merge could take place.
   /// Provides a list of the nodes known by the peer.
   fn notify_merge(
     &self,
-    peers: SmallVec<Arc<Server<Self::Id, Self::Address>>>,
+    peers: SmallVec<Arc<NodeState<Self::Id, Self::Address>>>,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Invoked when an ack is being sent; the returned bytes will be appended to the ack
@@ -115,7 +118,7 @@ pub trait Delegate: Send + Sync + 'static {
   /// Invoked when an ack for a ping is received
   fn notify_ping_complete(
     &self,
-    node: Arc<Server<Self::Id, Self::Address>>,
+    node: Arc<NodeState<Self::Id, Self::Address>>,
     rtt: std::time::Duration,
     payload: Bytes,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send;
@@ -179,43 +182,43 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate for VoidDelegate<I, 
 
   async fn notify_join(
     &self,
-    _node: Arc<Server<Self::Id, Self::Address>>,
+    _node: Arc<NodeState<Self::Id, Self::Address>>,
   ) -> Result<(), Self::Error> {
     Ok(())
   }
 
   async fn notify_leave(
     &self,
-    _node: Arc<Server<Self::Id, Self::Address>>,
+    _node: Arc<NodeState<Self::Id, Self::Address>>,
   ) -> Result<(), Self::Error> {
     Ok(())
   }
 
   async fn notify_update(
     &self,
-    _node: Arc<Server<Self::Id, Self::Address>>,
+    _node: Arc<NodeState<Self::Id, Self::Address>>,
   ) -> Result<(), Self::Error> {
     Ok(())
   }
 
   async fn notify_alive(
     &self,
-    _peer: Arc<Server<Self::Id, Self::Address>>,
+    _peer: Arc<NodeState<Self::Id, Self::Address>>,
   ) -> Result<(), Self::Error> {
     Ok(())
   }
 
   async fn notify_conflict(
     &self,
-    _existing: Arc<Server<Self::Id, Self::Address>>,
-    _other: Arc<Server<Self::Id, Self::Address>>,
+    _existing: Arc<NodeState<Self::Id, Self::Address>>,
+    _other: Arc<NodeState<Self::Id, Self::Address>>,
   ) -> Result<(), Self::Error> {
     Ok(())
   }
 
   async fn notify_merge(
     &self,
-    _peers: SmallVec<Arc<Server<Self::Id, Self::Address>>>,
+    _peers: SmallVec<Arc<NodeState<Self::Id, Self::Address>>>,
   ) -> Result<(), Self::Error> {
     Ok(())
   }
@@ -226,7 +229,7 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate for VoidDelegate<I, 
 
   async fn notify_ping_complete(
     &self,
-    _node: Arc<Server<Self::Id, Self::Address>>,
+    _node: Arc<NodeState<Self::Id, Self::Address>>,
     _rtt: std::time::Duration,
     _payload: Bytes,
   ) -> Result<(), Self::Error> {

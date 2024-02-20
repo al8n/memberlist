@@ -10,7 +10,7 @@ use futures::lock::Mutex;
 
 use crate::{broadcast::Broadcast, types::TinyVec, util::retransmit_limit};
 
-pub trait ServerCalculator {
+pub trait NodeStateCalculator {
   fn num_nodes(&self) -> usize;
 }
 
@@ -419,7 +419,7 @@ mod tests {
 
   struct NC(usize);
 
-  impl ServerCalculator for NC {
+  impl NodeStateCalculator for NC {
     fn num_nodes(&self) -> usize {
       self.0
     }

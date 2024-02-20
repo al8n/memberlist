@@ -16,7 +16,7 @@ use transformable::Transformable;
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
-pub struct PushServerState<I, A> {
+pub struct PushNodeState<I, A> {
   id: I,
   #[viewit(
     getter(const, rename = "address", style = "ref"),
@@ -25,12 +25,12 @@ pub struct PushServerState<I, A> {
   addr: A,
   meta: Bytes,
   incarnation: u32,
-  state: ServerState,
+  state: State,
   protocol_version: ProtocolVersion,
   delegate_version: DelegateVersion,
 }
 
-impl<I: CheapClone, A: CheapClone> CheapClone for PushServerState<I, A> {
+impl<I: CheapClone, A: CheapClone> CheapClone for PushNodeState<I, A> {
   fn cheap_clone(&self) -> Self {
     Self {
       id: self.id.cheap_clone(),
@@ -44,8 +44,8 @@ impl<I: CheapClone, A: CheapClone> CheapClone for PushServerState<I, A> {
   }
 }
 
-impl<I: CheapClone, A: CheapClone> PushServerState<I, A> {
-  /// Returns a [`Node`] with the same id and address as this [`PushServerState`].
+impl<I: CheapClone, A: CheapClone> PushNodeState<I, A> {
+  /// Returns a [`Node`] with the same id and address as this [`PushNodeState`].
   pub fn node(&self) -> Node<I, A> {
     Node::new(self.id.cheap_clone(), self.addr.cheap_clone())
   }
@@ -64,7 +64,7 @@ pub enum PushPullTransformError<I: Transformable, A: Transformable> {
   /// Not enough bytes to decode.
   NotEnoughBytes,
   /// Invalid server state.
-  UnknownServerState(UnknownServerState),
+  UnknownState(UnknownState),
   /// Invalid protocol version.
   UnknownProtocolVersion(UnknownProtocolVersion),
   /// Invalid delegate version.
@@ -85,7 +85,7 @@ impl<I: Transformable, A: Transformable> core::fmt::Display for PushPullTransfor
       Self::BufferTooSmall => write!(f, "encode buffer is too small"),
       Self::TooLarge => write!(f, "the encoded bytes is too large"),
       Self::NotEnoughBytes => write!(f, "not enough bytes to decode"),
-      Self::UnknownServerState(err) => write!(f, "{err}"),
+      Self::UnknownState(err) => write!(f, "{err}"),
       Self::UnknownProtocolVersion(err) => write!(f, "{err}"),
       Self::UnknownDelegateVersion(err) => write!(f, "{err}"),
     }
@@ -94,7 +94,7 @@ impl<I: Transformable, A: Transformable> core::fmt::Display for PushPullTransfor
 
 impl<I: Transformable, A: Transformable> std::error::Error for PushPullTransformError<I, A> {}
 
-impl<I: Transformable, A: Transformable> Transformable for PushServerState<I, A> {
+impl<I: Transformable, A: Transformable> Transformable for PushNodeState<I, A> {
   type Error = PushPullTransformError<I, A>;
 
   fn encode(&self, dst: &mut [u8]) -> Result<usize, Self::Error> {
@@ -179,7 +179,7 @@ impl<I: Transformable, A: Transformable> Transformable for PushServerState<I, A>
 
     let incarnation = NetworkEndian::read_u32(&src[offset..]);
     offset += core::mem::size_of::<u32>();
-    let state = ServerState::try_from(src[offset]).map_err(Self::Error::UnknownServerState)?;
+    let state = State::try_from(src[offset]).map_err(Self::Error::UnknownState)?;
     offset += 1;
     let protocol_version =
       ProtocolVersion::try_from(src[offset]).map_err(Self::Error::UnknownProtocolVersion)?;
@@ -232,13 +232,13 @@ const _: () = {
   use core::fmt::Debug;
   use rkyv::Archive;
 
-  impl<I: Debug + Archive, A: Debug + Archive> core::fmt::Debug for ArchivedPushServerState<I, A>
+  impl<I: Debug + Archive, A: Debug + Archive> core::fmt::Debug for ArchivedPushNodeState<I, A>
   where
     I::Archived: Debug,
     A::Archived: Debug,
   {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-      f.debug_struct("PushServerState")
+      f.debug_struct("PushNodeState")
         .field("id", &self.id)
         .field("addr", &self.addr)
         .field("meta", &self.meta)
@@ -250,7 +250,7 @@ const _: () = {
     }
   }
 
-  impl<I: Archive, A: Archive> PartialEq for ArchivedPushServerState<I, A>
+  impl<I: Archive, A: Archive> PartialEq for ArchivedPushNodeState<I, A>
   where
     I::Archived: PartialEq,
     A::Archived: PartialEq,
@@ -266,14 +266,14 @@ const _: () = {
     }
   }
 
-  impl<I: Archive, A: Archive> Eq for ArchivedPushServerState<I, A>
+  impl<I: Archive, A: Archive> Eq for ArchivedPushNodeState<I, A>
   where
     I::Archived: Eq,
     A::Archived: Eq,
   {
   }
 
-  impl<I: Archive, A: Archive> core::hash::Hash for ArchivedPushServerState<I, A>
+  impl<I: Archive, A: Archive> core::hash::Hash for ArchivedPushNodeState<I, A>
   where
     I::Archived: core::hash::Hash,
     A::Archived: core::hash::Hash,
@@ -300,7 +300,7 @@ const _: () = {
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 pub struct PushPull<I, A> {
   join: bool,
-  states: Arc<TinyVec<PushServerState<I, A>>>,
+  states: Arc<TinyVec<PushNodeState<I, A>>>,
   user_data: Bytes,
 }
 
@@ -327,7 +327,7 @@ impl<I, A> CheapClone for PushPull<I, A> {
 impl<I, A> PushPull<I, A> {
   /// Create a new [`PushPull`] message.
   #[inline]
-  pub fn new(states: TinyVec<PushServerState<I, A>>, user_data: Bytes, join: bool) -> Self {
+  pub fn new(states: TinyVec<PushNodeState<I, A>>, user_data: Bytes, join: bool) -> Self {
     Self {
       states: Arc::new(states),
       user_data,
@@ -420,7 +420,7 @@ impl<I: Transformable, A: Transformable> Transformable for PushPull<I, A> {
 
     let mut states = TinyVec::with_capacity(states_len);
     for _ in 0..states_len {
-      let (state_len, state) = PushServerState::decode(&src[offset..])?;
+      let (state_len, state) = PushNodeState::decode(&src[offset..])?;
       offset += state_len;
       states.push(state);
     }
@@ -463,7 +463,7 @@ const _: () = {
   use rand::{distributions::Alphanumeric, random, thread_rng, Rng};
   use smol_str::SmolStr;
 
-  impl PushServerState<SmolStr, SocketAddr> {
+  impl PushNodeState<SmolStr, SocketAddr> {
     fn generate(size: usize) -> Self {
       Self {
         id: String::from_utf8(
@@ -477,7 +477,7 @@ const _: () = {
         addr: SocketAddr::from(([127, 0, 0, 1], thread_rng().gen_range(0..65535))),
         meta: (0..size).map(|_| random::<u8>()).collect::<Vec<_>>().into(),
         incarnation: random(),
-        state: ServerState::try_from(thread_rng().gen_range(0..=3)).unwrap(),
+        state: State::try_from(thread_rng().gen_range(0..=3)).unwrap(),
         protocol_version: ProtocolVersion::V0,
         delegate_version: DelegateVersion::V0,
       }
@@ -487,7 +487,7 @@ const _: () = {
   impl PushPull<SmolStr, SocketAddr> {
     fn generate(size: usize) -> Self {
       let states = (0..size)
-        .map(|_| PushServerState::generate(size))
+        .map(|_| PushNodeState::generate(size))
         .collect::<TinyVec<_>>();
       let user_data = (0..size).map(|_| random::<u8>()).collect::<Vec<_>>().into();
       let join = random();
@@ -507,11 +507,11 @@ mod tests {
   #[test]
   fn test_push_server_state() {
     for i in 0..100 {
-      let state = PushServerState::generate(i);
+      let state = PushNodeState::generate(i);
       let mut buf = vec![0; state.encoded_len()];
       let encoded_len = state.encode(&mut buf).unwrap();
       assert_eq!(encoded_len, state.encoded_len());
-      let (readed, decoded) = PushServerState::decode(&buf).unwrap();
+      let (readed, decoded) = PushNodeState::decode(&buf).unwrap();
       assert_eq!(readed, encoded_len);
       assert_eq!(decoded, state);
     }
