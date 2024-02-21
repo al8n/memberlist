@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::{
-  memberlist::MessageHandoff,
+  base::MessageHandoff,
   transport::Wire,
   types::{Ack, Message, Nack},
 };

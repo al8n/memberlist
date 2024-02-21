@@ -1,7 +1,7 @@
 use futures::{Future, Stream};
 
 use crate::{
-  memberlist::MessageHandoff,
+  base::MessageHandoff,
   types::{Alive, Dead, Suspect},
 };
 

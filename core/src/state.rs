@@ -7,9 +7,9 @@ use std::{
 };
 
 use super::{
+  base::Memberlist,
   delegate::Delegate,
   error::Error,
-  memberlist::Memberlist,
   suspicion::Suspicion,
   transport::Transport,
   types::{Alive, Dead, IndirectPing, NodeState, Ping, PushNodeState, SmallVec, State, Suspect},

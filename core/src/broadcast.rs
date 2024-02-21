@@ -1,7 +1,7 @@
 use crate::{
+  base::Memberlist,
   delegate::Delegate,
   error::Error,
-  memberlist::Memberlist,
   transport::{Transport, Wire},
   types::{Message, TinyVec},
 };
