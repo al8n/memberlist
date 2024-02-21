@@ -198,7 +198,7 @@ pub mod tests {
   }
 
   /// Returns a [`Memberlist`] but not alive self for testing purposes.
-  pub async fn get_memberlist<T: Transport, D: Delegate>(
+  pub async fn get_memberlist<T, D>(
     t: T,
     d: D,
     opts: Options,
@@ -206,7 +206,8 @@ pub mod tests {
   where
     <<<T as Transport>::Runtime as Runtime>::Sleep as futures::Future>::Output: Send,
     <<<T as Transport>::Runtime as Runtime>::Interval as futures::Stream>::Item: Send,
-    D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+    D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    T: Transport,
   {
     crate::Memberlist::new_in(t, Some(d), opts)
       .await

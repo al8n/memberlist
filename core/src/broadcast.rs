@@ -107,7 +107,7 @@ where
 
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
 {
   #[inline]
@@ -186,7 +186,6 @@ where
               (len, msg.unwrap_user_data())
             })
             .await
-            .map_err(Error::delegate)?
             .into_iter()
             .map(Message::UserData),
         );

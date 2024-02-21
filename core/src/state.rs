@@ -66,10 +66,10 @@ impl<I, A> LocalNodeState<I, A> {
 }
 
 // private implementation
-impl<D, T> Memberlist<T, D>
+impl<T, D> Memberlist<T, D>
 where
   T: Transport,
-  D: Delegate,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   /// Returns a usable sequence number in a thread safe way
   #[inline]
@@ -145,9 +145,9 @@ where
 
 // -------------------------------Public methods---------------------------------
 
-impl<D, T> Memberlist<T, D>
+impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -205,9 +205,9 @@ where
 }
 
 // ---------------------------------Crate methods-------------------------------
-impl<D, T> Memberlist<T, D>
+impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -304,10 +304,7 @@ where
 
     // notify of death
     if let Some(ref delegate) = self.delegate {
-      delegate
-        .notify_leave(state.state.server.clone())
-        .await
-        .map_err(Error::delegate)?;
+      delegate.notify_leave(state.state.server.clone()).await;
     }
 
     Ok(())
@@ -522,7 +519,7 @@ where
 
           // Inform the conflict delegate if provided
           if let Some(delegate) = self.delegate.as_ref() {
-            if let Err(e) = delegate
+            delegate
               .notify_conflict(
                 state.server.cheap_clone(),
                 Arc::new(NodeState {
@@ -534,10 +531,7 @@ where
                   delegate_version: alive.delegate_version,
                 }),
               )
-              .await
-            {
-              tracing::error!(target =  "memberlist.state", local = %self.inner.id, err=%e, "failed to notify conflict delegate");
-            }
+              .await;
           }
           return;
         }
@@ -660,20 +654,14 @@ where
     if let Some(delegate) = &self.delegate {
       if old_state == State::Dead || old_state == State::Left {
         // if Dead/Left -> Alive, notify of join
-        if let Err(e) = delegate
+        delegate
           .notify_join(member.state.server.cheap_clone())
           .await
-        {
-          tracing::error!(target =  "memberlist.state", local = %self.inner.id, err=%e, "failed to notify join");
-        }
       } else if old_meta != member.state.meta {
         // if Meta changed, trigger an update notification
-        if let Err(e) = delegate
+        delegate
           .notify_update(member.state.server.cheap_clone())
           .await
-        {
-          tracing::error!(target =  "memberlist.state", local = %self.inner.id, err=%e, "failed to notify update");
-        }
       }
     }
   }
@@ -692,7 +680,7 @@ where
       impl<T: Transport> StateMessage<T> {
         async fn run<D>(self, s: &Memberlist<T, D>)
         where
-          D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+          D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
           <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
           <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
         {
@@ -818,7 +806,7 @@ macro_rules! bail_trigger {
 
 impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -1035,10 +1023,8 @@ where
             if v.complete {
               if let Some(delegate) = delegate {
                 let rtt = v.timestamp.elapsed();
-
-                if let Err(e) = delegate.notify_ping_complete(target.server.cheap_clone(), rtt, v.payload).await {
-                  tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to notify ping complete ack");
-                }
+                tracing::trace!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), "notify ping complete ack");
+                delegate.notify_ping_complete(target.server.cheap_clone(), rtt, v.payload).await;
               }
 
               apply_delta!(self <= -1);

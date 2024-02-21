@@ -15,7 +15,7 @@ use smol_str::SmolStr;
 use transformable::Transformable;
 
 use crate::{
-  delegate::{MockDelegate, VoidDelegate},
+  delegate::{CompositeDelegate, MockDelegate, VoidDelegate},
   state::LocalNodeState,
   tests::{get_memberlist, next_socket_addr_v4, next_socket_addr_v6, AnyError},
   transport::{Ack, Alive, IndirectPing, MaybeResolvedAddress, Message},
@@ -856,7 +856,12 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let m1 = Memberlist::with_delegate(trans1, MockDelegate::new(), Options::default()).await?;
+  let m1 = Memberlist::with_delegate(
+    trans1,
+    CompositeDelegate::new().with_node_delegate(MockDelegate::new()),
+    Options::default(),
+  )
+  .await?;
   let m2 = Memberlist::new(trans2, Options::default()).await?;
 
   m2.join(Node::new(
@@ -885,7 +890,7 @@ where
 
   R::sleep(WAIT_DURATION).await;
 
-  let mut msgs1 = m1.delegate().unwrap().get_messages().await;
+  let mut msgs1 = m1.delegate().unwrap().node_delegate().get_messages().await;
   msgs1.sort();
   assert_eq!(msgs1, ["send".as_bytes(), "send_reliable".as_bytes()]);
   m1.shutdown().await?;

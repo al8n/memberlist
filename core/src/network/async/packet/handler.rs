@@ -9,7 +9,7 @@ use super::*;
 
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -100,9 +100,8 @@ where
     data: Bytes,
   ) {
     if let Some(d) = self.delegate.as_ref() {
-      if let Err(e) = d.notify_message(data).await {
-        tracing::error!(target =  "memberlist.packet", err=%e, remote_addr = %from, "failed to handle user message");
-      }
+      tracing::trace!(target = "memberlist.packet", remote_addr = %from, data=?data.as_ref(), "handle user data");
+      d.notify_message(data).await
     }
   }
 }

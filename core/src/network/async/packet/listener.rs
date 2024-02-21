@@ -13,7 +13,7 @@ use super::*;
 
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -152,16 +152,9 @@ where
     }
 
     let msg = if let Some(delegate) = &self.delegate {
-      let payload = match delegate.ack_payload().await {
-        Ok(payload) => payload,
-        Err(e) => {
-          tracing::error!(target =  "memberlist.packet", local=%self.inner.id, remote = %from, err = %e, "failed to get ack payload from delegate");
-          return;
-        }
-      };
       Ack {
         seq_no: p.seq_no,
-        payload,
+        payload: delegate.ack_payload().await,
       }
     } else {
       Ack {

@@ -4,14 +4,14 @@ use futures::{Future, Stream};
 use nodecraft::resolver::AddressResolver;
 use smol_str::SmolStr;
 
-use crate::{transport::TimeoutableStream, types::NodeState};
+use crate::{delegate::DelegateError, transport::TimeoutableStream, types::NodeState};
 
 use super::*;
 
 // --------------------------------------------Crate Level Methods-------------------------------------------------
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -72,7 +72,9 @@ where
             })
           })
           .collect::<SmallVec<_>>();
-        merge.notify_merge(peers).await.map_err(Error::delegate)?;
+        merge.notify_merge(peers).await.map_err(|e| {
+          Error::delegate(<<D as Delegate<_, _>>::Error as DelegateError>::merge(e))
+        })?;
       }
     }
 
@@ -83,8 +85,7 @@ where
     if let Some(d) = &self.delegate {
       if !node_state.user_data.is_empty() {
         d.merge_remote_state(node_state.user_data, node_state.join)
-          .await
-          .map_err(Error::delegate)?;
+          .await;
       }
     }
     Ok(())
@@ -114,7 +115,7 @@ where
 // ----------------------------------------Module Level Methods------------------------------------
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -161,7 +162,7 @@ where
 
     // Get the delegate state
     let user_data = if let Some(delegate) = &self.delegate {
-      delegate.local_state(join).await.map_err(Error::delegate)?
+      delegate.local_state(join).await
     } else {
       Bytes::new()
     };
@@ -219,7 +220,7 @@ where
 // -----------------------------------------Private Level Methods-----------------------------------
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -316,9 +317,8 @@ where
       }
       Message::UserData(data) => {
         if let Some(d) = &self.delegate {
-          if let Err(e) = d.notify_message(data).await {
-            tracing::error!(target =  "memberlist.stream", err=%e, remote_node = %addr, "failed to notify user message");
-          }
+          tracing::trace!(target =  "memberlist.stream", remote_node = %addr, data=?data.as_ref(), "notify user message");
+          d.notify_message(data).await
         }
       }
       msg => {

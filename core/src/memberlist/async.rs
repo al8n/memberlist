@@ -99,10 +99,10 @@ pub struct Memberlist<
   pub(crate) delegate: Option<Arc<D>>,
 }
 
-impl<D, T> Clone for Memberlist<T, D>
+impl<T, D> Clone for Memberlist<T, D>
 where
   T: Transport,
-  D: Delegate,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   fn clone(&self) -> Self {
     Self {
@@ -114,7 +114,7 @@ where
 
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
 {
   /// Returns the local node ID.
@@ -204,7 +204,7 @@ where
 /// Error returned by [`Memberlist::join_many`].
 pub struct JoinError<T: Transport, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   joined: SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
   errors: HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>>,
@@ -216,7 +216,7 @@ impl<D, T: Transport> From<JoinError<T, D>>
     HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>>,
   )
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   fn from(e: JoinError<T, D>) -> Self {
     (e.joined, e.errors)
@@ -225,7 +225,7 @@ where
 
 impl<D, T: Transport> core::fmt::Debug for JoinError<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     if !self.joined.is_empty() {
@@ -245,7 +245,7 @@ where
 
 impl<D, T: Transport> core::fmt::Display for JoinError<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     if !self.joined.is_empty() {
@@ -263,14 +263,14 @@ where
   }
 }
 
-impl<D: Delegate, T: Transport> std::error::Error for JoinError<T, D> where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>
+impl<T: Transport, D> std::error::Error for JoinError<T, D> where
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>
 {
 }
 
-impl<D: Delegate, T: Transport> JoinError<T, D>
+impl<T: Transport, D> JoinError<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   /// Return the number of successful joined nodes
   pub fn num_joined(&self) -> usize {
@@ -285,9 +285,9 @@ where
   }
 }
 
-impl<D: Delegate, T: Transport> JoinError<T, D>
+impl<T: Transport, D> JoinError<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   /// Return the errors
   pub const fn errors(&self) -> &HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>> {
@@ -314,7 +314,7 @@ where
 
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
@@ -716,7 +716,7 @@ where
 // private impelementation
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,

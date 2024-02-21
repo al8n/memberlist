@@ -11,10 +11,8 @@ pub use crate::{
 };
 
 #[derive(thiserror::Error)]
-pub enum Error<
-  T: Transport,
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
-> {
+pub enum Error<T: Transport, D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>
+{
   #[error("memberlist: node is not running, please bootstrap first")]
   NotRunning,
   #[error("memberlist: timeout waiting for update broadcast")]
@@ -24,7 +22,7 @@ pub enum Error<
   #[error("memberlist: no response from node {0}")]
   Lost(Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
   #[error("memberlist: {0}")]
-  Delegate(D::Error),
+  Delegate(<D as Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>::Error),
   #[error("memberlist: {0}")]
   Transport(T::Error),
   /// Returned when a message is received with an unexpected type.
@@ -52,24 +50,22 @@ pub enum Error<
   Other(Cow<'static, str>),
 }
 
-impl<
-    T: Transport,
-    D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
-  > core::fmt::Debug for Error<T, D>
+impl<T: Transport, D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>
+  core::fmt::Debug for Error<T, D>
 {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{self}")
   }
 }
 
-impl<
-    T: Transport,
-    D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
-  > Error<T, D>
+impl<T: Transport, D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>
+  Error<T, D>
 {
   /// Creates a new error with the given delegate error.
   #[inline]
-  pub fn delegate(e: D::Error) -> Self {
+  pub fn delegate(
+    e: <D as Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>::Error,
+  ) -> Self {
     Self::Delegate(e)
   }
 
