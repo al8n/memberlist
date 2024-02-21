@@ -59,9 +59,15 @@ pub mod tests {
   use self::{delegate::Delegate, error::Error, transport::Transport};
   use super::*;
 
+  /// Re-export the all unit test cases for state
   pub mod state {
     pub use crate::state::tests::*;
   }
+
+  // /// Re-export the all unit test cases for memberlist
+  // pub mod memberlist {
+  //   pub use crate::memberlist::tests::*;
+  // };
 
   /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`]
   #[cfg(any(feature = "test", test))]
