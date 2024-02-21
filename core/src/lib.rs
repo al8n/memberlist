@@ -5,7 +5,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
+mod api;
 mod awareness;
+mod base;
+pub use base::*;
 pub mod broadcast;
 pub mod delegate;
 pub mod error;
@@ -13,9 +16,7 @@ mod network;
 pub use network::META_MAX_SIZE;
 mod options;
 pub use options::{DelegateVersion, Options, ProtocolVersion};
-mod base;
 pub mod queue;
-pub use base::*;
 mod state;
 mod suspicion;
 pub mod transport;
@@ -64,10 +65,10 @@ pub mod tests {
     pub use crate::state::tests::*;
   }
 
-  // /// Re-export the all unit test cases for memberlist
-  // pub mod memberlist {
-  //   pub use crate::memberlist::tests::*;
-  // };
+  /// Re-export the all unit test cases for memberlist
+  pub mod memberlist {
+    pub use crate::base::tests::*;
+  }
 
   /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`]
   #[cfg(any(feature = "test", test))]

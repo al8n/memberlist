@@ -54,3 +54,51 @@ where
     nodes.node_map.get(id).map(|n| nodes.nodes[*n].state_change)
   }
 }
+
+/// Unit tests for create a `Memberlist`.
+pub async fn test_memberlist_create() {}
+
+/// Unit tests for create a `Memberlist` and shutdown.
+pub async fn test_memberlist_create_shutdown() {}
+
+/// Unit tests for the members of a `Memberlist`.
+pub async fn test_memberlist_members() {}
+
+/// Unit tests for join a `Memberlist`.
+pub async fn test_memberlist_join() {}
+
+/// Unit tests for join a `Memberlist` and cancel.
+pub async fn test_memberlist_join_cancel() {}
+
+/// Unit tests for join a `Memberlist` and cancel passive.
+pub async fn test_memberlist_join_cancel_passive() {}
+
+/// Unit tests for join and shutdown a `Memberlist`.
+pub async fn test_memberlist_join_shutdown() {}
+
+/// Unit test for join a dead node
+pub async fn test_memberlist_join_dead_node() {}
+
+/// Unit test for node delegate meta
+pub async fn test_memberlist_node_delegate_meta() {}
+
+/// Unit test for node delegate meta update
+pub async fn test_memberlist_node_delegate_meta_update() {}
+
+/// Unit test for user data
+pub async fn test_memberlist_user_data() {}
+
+/// Unit test for send
+pub async fn test_memberlist_send() {}
+
+/// Unit tests for leave
+pub async fn test_memberlist_leave() {}
+
+/// Unit test for advertise addr
+pub async fn test_memberlist_advertise_addr() {}
+
+/// Unit test for conflict delegate
+pub async fn test_memberlist_conflict_delegate() {}
+
+/// Unit test for ping delegate
+pub async fn test_memberlist_ping_delegate() {}

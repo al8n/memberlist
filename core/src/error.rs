@@ -1,14 +1,112 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashMap};
 
 use nodecraft::{resolver::AddressResolver, Node};
 use smol_str::SmolStr;
 
-use crate::{delegate::Delegate, transport::Transport, types::ErrorResponse};
+use crate::{
+  delegate::Delegate,
+  transport::{MaybeResolvedAddress, Transport},
+  types::{ErrorResponse, SmallVec},
+};
 
 pub use crate::{
   transport::TransportError,
   version::{UnknownDelegateVersion, UnknownProtocolVersion},
 };
+
+/// Error returned by `Memberlist::join_many`.
+pub struct JoinError<T: Transport, D>
+where
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
+  pub(crate) joined: SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+  pub(crate) errors: HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>>,
+}
+
+impl<D, T: Transport> From<JoinError<T, D>>
+  for (
+    SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>>,
+  )
+where
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
+  fn from(e: JoinError<T, D>) -> Self {
+    (e.joined, e.errors)
+  }
+}
+
+impl<D, T: Transport> core::fmt::Debug for JoinError<T, D>
+where
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    if !self.joined.is_empty() {
+      writeln!(f, "Successes: {:?}", self.joined)?;
+    }
+
+    if !self.errors.is_empty() {
+      writeln!(f, "Failures:")?;
+      for (addr, err) in self.errors.iter() {
+        writeln!(f, "\t{}: {}", addr, err)?;
+      }
+    }
+
+    Ok(())
+  }
+}
+
+impl<D, T: Transport> core::fmt::Display for JoinError<T, D>
+where
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    if !self.joined.is_empty() {
+      writeln!(f, "Successes: {:?}", self.joined)?;
+    }
+
+    if !self.errors.is_empty() {
+      writeln!(f, "Failures:")?;
+      for (addr, err) in self.errors.iter() {
+        writeln!(f, "\t{addr}: {err}")?;
+      }
+    }
+
+    Ok(())
+  }
+}
+
+impl<T: Transport, D> std::error::Error for JoinError<T, D> where
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>
+{
+}
+
+impl<T: Transport, D> JoinError<T, D>
+where
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
+  /// Return the number of successful joined nodes
+  pub fn num_joined(&self) -> usize {
+    self.joined.len()
+  }
+
+  /// Return the joined nodes
+  pub const fn joined(
+    &self,
+  ) -> &SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
+    &self.joined
+  }
+}
+
+impl<T: Transport, D> JoinError<T, D>
+where
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
+  /// Return the errors
+  pub const fn errors(&self) -> &HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>> {
+    &self.errors
+  }
+}
 
 #[derive(thiserror::Error)]
 pub enum Error<T: Transport, D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>
