@@ -1,10 +1,15 @@
 
 - Not pass
-  - alive_node_conflict
-  - suspect_node
-  - probe_node_awareness_degraded
-  - probe_node_suspect
-  - dead_node
-  - dead_node_left
+  1. alive_node_conflict
+  2. suspect_node
+  3. probe_node_awareness_degraded
+  4. probe_node_suspect
+  5. probe_node_dogpile
+  6. dead_node
+  7. dead_node_left
+  8. gossip
+  9. gossip_to_dead
+  10. push_pull
 - Random Failure
-  - suspect_node_double_suspect
+  1. suspect_node_double_suspect
+  2. merge_state

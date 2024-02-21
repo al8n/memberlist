@@ -15,6 +15,9 @@ mod probe;
 #[path = "net/probe_node.rs"]
 mod probe_node;
 
+#[path = "net/probe_node_dogpile.rs"]
+mod probe_node_dogpile;
+
 #[path = "net/probe_node_buddy.rs"]
 mod probe_node_buddy;
 
@@ -86,3 +89,15 @@ mod dead_node_alive_replay;
 
 #[path = "net/dead_node_refute.rs"]
 mod dead_node_refute;
+
+#[path = "net/merge_state.rs"]
+mod merge_state;
+
+#[path = "net/gossip.rs"]
+mod gossip;
+
+#[path = "net/gossip_to_dead.rs"]
+mod gossip_to_dead;
+
+#[path = "net/push_pull.rs"]
+mod push_pull;

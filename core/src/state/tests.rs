@@ -16,14 +16,14 @@ use nodecraft::{resolver::AddressResolver, CheapClone, Id, Node};
 use crate::{
   broadcast::Broadcast,
   delegate::{
-    CompositeDelegate, EventDelegate, EventKind, EventSubscriber, SubscribleEventDelegate,
-    VoidDelegate,
+    CompositeDelegate, Delegate, EventDelegate, EventKind, EventSubscriber,
+    SubscribleEventDelegate, VoidDelegate,
   },
   error::Error,
   state::{AckManager, LocalNodeState},
   tests::get_memberlist,
   transport::Transport,
-  types::{Ack, Alive, Dead, Message, Nack, State, Suspect},
+  types::{Ack, Alive, Dead, Message, Nack, PushNodeState, State, Suspect},
   Memberlist, Options,
 };
 
@@ -41,6 +41,23 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   Memberlist::new_in(t, None, opts).await.map(|(_, _, t)| t)
+}
+
+async fn host_memberlist_with_delegate<D, T, R: Runtime>(
+  t: T,
+  d: D,
+  opts: Options,
+) -> Result<Memberlist<T, D>, Error<T, D>>
+where
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  Memberlist::new_in(t, Some(d), opts)
+    .await
+    .map(|(_, _, t)| t)
 }
 
 /// Unit test to test the probe functionality
@@ -199,8 +216,186 @@ pub async fn probe_node_suspect<T, R>(
   m3.shutdown().await.unwrap();
 }
 
-pub async fn test_probe_node_dogpile() {
-  todo!()
+struct DogpileTestCase {
+  name: &'static str,
+  num_peers: usize,
+  comfirmations: usize,
+  expected: Duration,
+}
+
+/// Unit test to test the probe node dogpile functionality
+pub async fn probe_node_dogpile<F, T, R>(
+  mut get_transport: impl FnMut(usize) -> F,
+  bad_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+) where
+  F: Future<Output = T>,
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  const CASES: &[DogpileTestCase] = &[
+    DogpileTestCase {
+      name: "n=2, k=3 (max timeout disabled)",
+      num_peers: 1,
+      comfirmations: 0,
+      expected: Duration::from_millis(500),
+    },
+    DogpileTestCase {
+      name: "n=3, k=3",
+      num_peers: 2,
+      comfirmations: 0,
+      expected: Duration::from_millis(500),
+    },
+    DogpileTestCase {
+      name: "n=4, k=3",
+      num_peers: 3,
+      comfirmations: 0,
+      expected: Duration::from_millis(500),
+    },
+    DogpileTestCase {
+      name: "n=5, k=3 (max timeout starts to take effect)",
+      num_peers: 4,
+      comfirmations: 0,
+      expected: Duration::from_millis(1000),
+    },
+    DogpileTestCase {
+      name: "n=6, k=3",
+      num_peers: 5,
+      comfirmations: 0,
+      expected: Duration::from_millis(1000),
+    },
+    DogpileTestCase {
+      name: "n=6, k=3 (confirmations start to lower timeout)",
+      num_peers: 5,
+      comfirmations: 1,
+      expected: Duration::from_millis(750),
+    },
+    DogpileTestCase {
+      name: "n=6, k=3",
+      num_peers: 5,
+      comfirmations: 2,
+      expected: Duration::from_millis(604),
+    },
+    DogpileTestCase {
+      name: "n=6, k=3 (timeout driven to nominal value)",
+      num_peers: 5,
+      comfirmations: 3,
+      expected: Duration::from_millis(500),
+    },
+    DogpileTestCase {
+      name: "n=6, k=3",
+      num_peers: 5,
+      comfirmations: 4,
+      expected: Duration::from_millis(500),
+    },
+  ];
+
+  for c in CASES.iter() {
+    let t = get_transport(0).await;
+
+    let m = host_memberlist(
+      t,
+      Options::lan()
+        .with_probe_timeout(Duration::from_millis(1))
+        .with_probe_interval(Duration::from_millis(100))
+        .with_suspicion_mult(5)
+        .with_suspicion_max_timeout_mult(2),
+    )
+    .await
+    .unwrap();
+
+    let a = Alive {
+      incarnation: 1,
+      meta: Bytes::new(),
+      node: m.advertise_node(),
+      protocol_version: crate::ProtocolVersion::V0,
+      delegate_version: crate::DelegateVersion::V0,
+    };
+
+    m.alive_node(a, None, true).await;
+
+    // Make all but one peer be an real, alive instance.
+    let mut peers = vec![];
+    for j in 0..c.num_peers - 1 {
+      let t = get_transport(j + 1).await;
+      let peer = host_memberlist(t, Options::lan()).await.unwrap();
+      let a = Alive {
+        incarnation: 1,
+        meta: Bytes::new(),
+        node: peer.advertise_node(),
+        protocol_version: crate::ProtocolVersion::V0,
+        delegate_version: crate::DelegateVersion::V0,
+      };
+      m.alive_node(a, None, false).await;
+      peers.push(peer);
+    }
+
+    // Just use a bogus address for the last peer so it doesn't respond
+    // to pings, but tell the memberlist it's alive.
+    let a = Alive {
+      incarnation: 1,
+      meta: Bytes::new(),
+      node: bad_node.cheap_clone(),
+      protocol_version: crate::ProtocolVersion::V0,
+      delegate_version: crate::DelegateVersion::V0,
+    };
+    m.alive_node(a, None, false).await;
+
+    // Force a probe, which should start us into the suspect state.
+    {
+      let n = m.inner.nodes.read().await.get_state(bad_node.id()).unwrap();
+      m.probe_node(&n).await;
+    }
+
+    let state = m.get_node_state(bad_node.id()).await.unwrap();
+    assert_eq!(
+      state,
+      State::Suspect,
+      "case {}: expected node to be suspect",
+      c.name
+    );
+
+    // Add the requested number of confirmations.
+    for peer in peers.iter().take(c.comfirmations) {
+      let s = Suspect {
+        node: bad_node.id().clone(),
+        incarnation: 1,
+        from: peer.local_id().clone(),
+      };
+      m.suspect_node(s).await.unwrap();
+    }
+
+    // Wait until right before the timeout and make sure the timer
+    // hasn't fired.
+    let fudge = Duration::from_millis(25);
+    R::sleep(c.expected - fudge).await;
+
+    let state = m.get_node_state(bad_node.id()).await.unwrap();
+    assert_eq!(
+      state,
+      State::Suspect,
+      "case {}: expected node to still be suspect",
+      c.name
+    );
+
+    // Wait through the timeout and a little after to make sure the
+    // timer fires.
+    R::sleep(fudge * 2).await;
+
+    let state = m.get_node_state(bad_node.id()).await.unwrap();
+    assert_eq!(
+      state,
+      State::Dead,
+      "case {}: expected node to be dead",
+      c.name
+    );
+
+    m.shutdown().await.unwrap();
+    for peer in peers {
+      peer.shutdown().await.unwrap();
+    }
+  }
 }
 
 /// Unit test to test the probe node awareness degraded functionality
@@ -2314,18 +2509,436 @@ pub async fn dead_node_refute<T, R>(
   m.shutdown().await.unwrap();
 }
 
-pub async fn test_merge_state() {
-  todo!()
+/// Unit test to test the merge state functionality
+pub async fn merge_state<A, T, R>(
+  t1: T,
+  t1_opts: Options,
+  node_id1: T::Id,
+  node_id2: T::Id,
+  node_id3: T::Id,
+  node_id4: T::Id,
+) where
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  T: Transport<Resolver = A, Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
+  let m = get_memberlist(
+    t1,
+    CompositeDelegate::new().with_event_delegate(event_delegate),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let node1 = Node::new(node_id1.clone(), "127.0.0.1:8000".parse().unwrap());
+  let a1 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: node1.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+  m.alive_node(a1, None, false).await;
+
+  let node2 = Node::new(node_id2.clone(), "127.0.0.2:8000".parse().unwrap());
+  let a2 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: node2.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+  m.alive_node(a2, None, false).await;
+
+  let node3 = Node::new(node_id3.clone(), "127.0.0.3:8000".parse().unwrap());
+  let a3 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: node3.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+  m.alive_node(a3, None, false).await;
+
+  let s = Suspect {
+    incarnation: 1,
+    node: node_id1.clone(),
+    from: m.local_id().cheap_clone(),
+  };
+  m.suspect_node(s).await.unwrap();
+
+  while !subscriber.is_empty() {
+    subscriber.recv().await.unwrap();
+  }
+
+  let node4: Node<_, SocketAddr> = Node::new(node_id4.clone(), "127.0.0.4:8000".parse().unwrap());
+
+  let remote = vec![
+    PushNodeState {
+      id: node1.id().clone(),
+      addr: *node1.address(),
+      meta: Bytes::new(),
+      incarnation: 2,
+      state: State::Alive,
+      protocol_version: crate::ProtocolVersion::V0,
+      delegate_version: crate::DelegateVersion::V0,
+    },
+    PushNodeState {
+      id: node2.id().clone(),
+      addr: *node2.address(),
+      meta: Bytes::new(),
+      incarnation: 1,
+      state: State::Suspect,
+      protocol_version: crate::ProtocolVersion::V0,
+      delegate_version: crate::DelegateVersion::V0,
+    },
+    PushNodeState {
+      id: node3.id().clone(),
+      addr: *node3.address(),
+      meta: Bytes::new(),
+      incarnation: 1,
+      state: State::Dead,
+      protocol_version: crate::ProtocolVersion::V0,
+      delegate_version: crate::DelegateVersion::V0,
+    },
+    PushNodeState {
+      id: node4.id().clone(),
+      addr: *node4.address(),
+      meta: Bytes::new(),
+      incarnation: 2,
+      state: State::Alive,
+      protocol_version: crate::ProtocolVersion::V0,
+      delegate_version: crate::DelegateVersion::V0,
+    },
+  ];
+
+  // Merge remote state
+  m.merge_state(remote.as_slice()).await;
+
+  // Check the state
+  {
+    let nodes = m.inner.nodes.read().await;
+    let n = nodes.get_state(node1.id()).unwrap();
+    assert_eq!(n.state, State::Alive, "bad state");
+    assert_eq!(n.incarnation.load(Ordering::Relaxed), 2, "bad incarnation");
+
+    let n = nodes.get_state(node2.id()).unwrap();
+    assert_eq!(n.state, State::Suspect, "bad state");
+    assert_eq!(n.incarnation.load(Ordering::Relaxed), 1, "bad incarnation");
+
+    let n = nodes.get_state(node3.id()).unwrap();
+    assert_eq!(n.state, State::Suspect, "bad state");
+
+    let n = nodes.get_state(node4.id()).unwrap();
+    assert_eq!(n.state, State::Alive, "bad state");
+    assert_eq!(n.incarnation.load(Ordering::Relaxed), 2, "bad incarnation");
+  }
+
+  // Check the channels
+  futures::select! {
+    event = subscriber.recv().fuse() => {
+      let event = event.unwrap();
+      let kind = event.kind();
+      assert!(matches!(kind, EventKind::Join), "bad event: {kind:?}");
+      assert_eq!(event.node_state().id(), node4.id(), "bad node");
+    },
+    default => {
+      panic!("Expect join");
+    }
+  }
+
+  futures::select! {
+    _ = subscriber.recv().fuse() => {
+      panic!("unexpected event");
+    },
+    default => {}
+  }
+
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_gossip() {
-  todo!()
+pub async fn gossip<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options, t3: T, t3_opts: Options)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R as agnostic::Runtime>::Sleep: Send + Sync,
+  <R::Sleep as Future>::Output: Send + Sync,
+  <R::Interval as Stream>::Item: Send + Sync,
+{
+  let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
+  let m1 = host_memberlist(t1, t1_opts.with_gossip_interval(Duration::from_millis(10)))
+    .await
+    .unwrap();
+
+  let m2 = host_memberlist_with_delegate(
+    t2,
+    CompositeDelegate::new().with_event_delegate(event_delegate),
+    t2_opts.with_gossip_interval(Duration::from_millis(10)),
+  )
+  .await
+  .unwrap();
+
+  let m3 = host_memberlist(t3, t3_opts).await.unwrap();
+
+  let a1 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: m1.advertise_node(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m1.alive_node(a1, None, true).await;
+
+  let a2 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: m2.advertise_node(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m2.alive_node(a2, None, false).await;
+
+  let a3 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: m3.advertise_node(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m3.alive_node(a3, None, false).await;
+
+  // Gossip should send all this to m2. Retry a few times because it's UDP and
+  // timing and stuff makes this flaky without.
+
+  for idx in 1..=15 {
+    let (failed, failed_msg) = {
+      m1.gossip().await;
+
+      R::sleep(Duration::from_millis(3)).await;
+
+      if subscriber.len() < 3 {
+        panic!("expected 3 events, got {}", subscriber.len());
+      }
+
+      (false, "".to_string())
+    };
+    if !failed {
+      break;
+    }
+    if idx == 15 {
+      panic!("failed after {} attempts: {}", 15, failed_msg);
+    }
+
+    R::sleep(Duration::from_millis(250)).await;
+  }
+
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
+  m3.shutdown().await.unwrap();
 }
 
-pub async fn test_gossip_to_dead() {
-  todo!()
+/// Unit test to test the gossip to dead functionality
+pub async fn gossip_to_dead<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R as agnostic::Runtime>::Sleep: Send + Sync,
+  <R::Sleep as Future>::Output: Send + Sync,
+  <R::Interval as Stream>::Item: Send + Sync,
+{
+  let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
+  let m1 = host_memberlist(
+    t1,
+    t1_opts
+      .with_gossip_interval(Duration::from_millis(1))
+      .with_gossip_to_the_dead_time(Duration::from_millis(100)),
+  )
+  .await
+  .unwrap();
+
+  let m2 = host_memberlist_with_delegate(
+    t2,
+    CompositeDelegate::new().with_event_delegate(event_delegate),
+    t2_opts.with_gossip_interval(Duration::from_millis(10)),
+  )
+  .await
+  .unwrap();
+
+  let a1 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: m1.advertise_node(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m1.alive_node(a1, None, true).await;
+
+  let a2 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: m2.advertise_node(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m2.alive_node(a2, None, false).await;
+
+  // Shouldn't send anything to m2 here, node has been dead for 2x the GossipToTheDeadTime
+  m1.change_node(m2.local_id(), |state| {
+    *state = LocalNodeState {
+      state: State::Dead,
+      state_change: state.state_change.sub(Duration::from_millis(200)),
+      ..state.clone()
+    };
+  })
+  .await;
+
+  m1.gossip().await;
+
+  futures::select! {
+    _ = R::sleep(Duration::from_millis(50)).fuse() => {
+      assert_eq!(subscriber.len(), 0, "expected no events");
+    },
+    ev = subscriber.recv().fuse() => {
+      panic!("unexpected event: {:?}", ev);
+    }
+  }
+
+  // Should gossip to m2 because its state has changed within GossipToTheDeadTime
+  m1.change_node(m2.local_id(), |state| {
+    *state = LocalNodeState {
+      state_change: state.state_change.sub(Duration::from_millis(20)),
+      ..state.clone()
+    };
+  })
+  .await;
+
+  for idx in 1..=5 {
+    let (failed, failed_msg) = {
+      m1.gossip().await;
+
+      R::sleep(Duration::from_millis(3)).await;
+
+      if subscriber.len() < 2 {
+        panic!("expected 2 messages from gossip, got {}", subscriber.len());
+      }
+
+      (false, "".to_string())
+    };
+    if !failed {
+      break;
+    }
+    if idx == 5 {
+      panic!("failed after {} attempts: {}", 5, failed_msg);
+    }
+
+    R::sleep(Duration::from_millis(10)).await;
+  }
+
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
 }
 
-pub async fn test_push_pull() {
-  todo!()
+/// Unit test to test the push pull functionality
+pub async fn push_pull<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R as agnostic::Runtime>::Sleep: Send + Sync,
+  <R::Sleep as Future>::Output: Send + Sync,
+  <R::Interval as Stream>::Item: Send + Sync,
+{
+  let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
+  let m1 = host_memberlist(
+    t1,
+    t1_opts
+      .with_push_pull_interval(Duration::from_millis(1))
+      .with_gossip_interval(Duration::from_secs(10)),
+  )
+  .await
+  .unwrap();
+
+  let m2 = host_memberlist_with_delegate(
+    t2,
+    CompositeDelegate::new().with_event_delegate(event_delegate),
+    t2_opts.with_gossip_interval(Duration::from_secs(10)),
+  )
+  .await
+  .unwrap();
+
+  let a1 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: m1.advertise_node(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m1.alive_node(a1, None, true).await;
+
+  let a2 = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: m2.advertise_node(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m2.alive_node(a2, None, false).await;
+
+  for idx in 1..=5 {
+    let (failed, failed_msg) = {
+      m1.gossip().await;
+
+      R::sleep(Duration::from_millis(3)).await;
+
+      if subscriber.len() < 2 {
+        panic!(
+          "expected 2 messages from push pull, got {}",
+          subscriber.len()
+        );
+      }
+
+      (false, "".to_string())
+    };
+    if !failed {
+      break;
+    }
+    if idx == 5 {
+      panic!("failed after {} attempts: {}", 5, failed_msg);
+    }
+
+    R::sleep(Duration::from_millis(10)).await;
+  }
+
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
 }
+
+// pub(crate) async fn retry<'a, R, F, Fut>(n: usize, w: Duration, mut f: F)
+// where
+//   R: Runtime,
+//   <R::Sleep as Future>::Output: Send,
+//   <R::Interval as Stream>::Item: Send,
+//   F: FnMut() -> Fut + Clone,
+//   Fut: Future<Output = (bool, String)> + Send + Sync + 'a,
+// {
+//   for idx in 1..=n {
+//     let (failed, failed_msg) = f().await;
+//     if !failed {
+//       return;
+//     }
+//     if idx == n {
+//       panic!("failed after {} attempts: {}", n, failed_msg);
+//     }
+
+//     R::sleep(w).await;
+//   }
+// }
