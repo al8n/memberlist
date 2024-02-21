@@ -10,12 +10,15 @@ use std::{
 
 use agnostic::Runtime;
 use bytes::Bytes;
-use futures::{Future, FutureExt, Stream};
-use nodecraft::{resolver::AddressResolver, CheapClone, Node};
+use futures::{lock::Mutex, Future, FutureExt, Stream};
+use nodecraft::{resolver::AddressResolver, CheapClone, Id, Node};
 
 use crate::{
   broadcast::Broadcast,
-  delegate::VoidDelegate,
+  delegate::{
+    CompositeDelegate, EventDelegate, EventKind, EventSubscriber, SubscribleEventDelegate,
+    VoidDelegate,
+  },
   error::Error,
   state::{AckManager, LocalNodeState},
   tests::get_memberlist,
@@ -1022,29 +1025,351 @@ where
   assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
 }
 
-pub async fn test_alive_node_new_node<T, R>(
-  _t1: T,
-  _t1_opts: Options,
-  _test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+/// Unit test to test the alive node new node functionality
+pub async fn alive_node_new_node<T, R>(
+  t1: T,
+  t1_opts: Options,
+  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  todo!()
+  let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
+  let m = get_memberlist(
+    t1,
+    CompositeDelegate::new().with_event_delegate(event_delegate),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: test_node.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, false).await;
+
+  let len = m.inner.nodes.read().await.node_map.len();
+  assert_eq!(len, 1, "bad: {len}");
+
+  {
+    let state = m
+      .inner
+      .nodes
+      .read()
+      .await
+      .get_state(test_node.id())
+      .unwrap();
+    assert_eq!(state.state, State::Alive, "bad state");
+    assert_eq!(
+      state.incarnation.load(Ordering::Relaxed),
+      1,
+      "bad incarnation"
+    );
+
+    assert!(
+      Instant::now() - state.state_change < Duration::from_millis(1),
+      "bad change delta"
+    );
+  }
+
+  // Check for a join message
+  futures::select! {
+    ev = subscriber.recv().fuse() => {
+      let ev = ev.unwrap();
+      let node = ev.node_state();
+      let kind = ev.kind();
+      assert_eq!(kind, EventKind::Join, "bad state: {kind:?}");
+      assert_eq!(node.id(), test_node.id(), "bad node: {}", node.id());
+    },
+    default => {
+      panic!("no join message");
+    }
+  }
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 1, "expected only one queued message: {num}");
+
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_alive_node_suspect_node() {
-  todo!()
+struct ToggledEventDelegate<I, A> {
+  real: SubscribleEventDelegate<I, A>,
+  enabled: Mutex<bool>,
 }
 
-pub async fn test_alive_node_idempotent() {
-  todo!()
+impl<I, A> ToggledEventDelegate<I, A> {
+  fn new(enabled: bool) -> (Self, EventSubscriber<I, A>) {
+    let (real, subscriber) = SubscribleEventDelegate::unbounded();
+    (
+      Self {
+        real,
+        enabled: Mutex::new(enabled),
+      },
+      subscriber,
+    )
+  }
+
+  async fn toggle(&self, enabled: bool) {
+    *self.enabled.lock().await = enabled;
+  }
 }
 
-pub async fn test_alive_node_change_meta() {
-  todo!()
+impl<I, A> EventDelegate for ToggledEventDelegate<I, A>
+where
+  I: Id,
+  A: CheapClone + Send + Sync + 'static,
+{
+  type Id = I;
+  type Address = A;
+
+  async fn notify_join(&self, node: Arc<crate::types::NodeState<Self::Id, Self::Address>>) {
+    let mu = self.enabled.lock().await;
+    if *mu {
+      self.real.notify_join(node).await;
+    }
+  }
+
+  async fn notify_leave(&self, node: Arc<crate::types::NodeState<Self::Id, Self::Address>>) {
+    let mu = self.enabled.lock().await;
+    if *mu {
+      self.real.notify_leave(node).await;
+    }
+  }
+
+  async fn notify_update(&self, node: Arc<crate::types::NodeState<Self::Id, Self::Address>>) {
+    let mu = self.enabled.lock().await;
+    if *mu {
+      self.real.notify_update(node).await;
+    }
+  }
+}
+
+/// Unit test to test the alive node suspect node functionality
+pub async fn alive_node_suspect_node<T, R>(
+  t1: T,
+  t1_opts: Options,
+  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+) where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let (event_delegate, subscriber) = ToggledEventDelegate::new(false);
+
+  let m = get_memberlist(
+    t1,
+    CompositeDelegate::new().with_event_delegate(event_delegate),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let mut a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: test_node.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a.clone(), None, false).await;
+
+  // Listen only after first join
+  m.delegate
+    .as_ref()
+    .unwrap()
+    .event_delegate()
+    .toggle(true)
+    .await;
+
+  // Make suspect
+  m.change_node(test_node.id(), |state| {
+    *state = LocalNodeState {
+      state: State::Suspect,
+      state_change: state.state_change.sub(Duration::from_secs(3600)),
+      ..state.clone()
+    };
+  })
+  .await;
+
+  // Old incarnation number, should not change
+  m.alive_node(a.clone(), None, false).await;
+  let state = m.get_node_state(test_node.id()).await.unwrap();
+  assert_eq!(state, State::Suspect, "update with old incarnation!");
+
+  // Should reset to alive now
+  a.incarnation = 2;
+  m.alive_node(a, None, false).await;
+
+  let state = m.get_node_state(test_node.id()).await.unwrap();
+  assert_eq!(state, State::Alive, "no update with new incarnation!");
+
+  let change = m.get_node_state_change(test_node.id()).await.unwrap();
+  assert!(
+    Instant::now() - change < Duration::from_millis(1),
+    "bad change delta"
+  );
+
+  // Check for a join message
+  futures::select! {
+    ev = subscriber.recv().fuse() => {
+      panic!("got bad event {ev:?}");
+    },
+    default => {}
+  }
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 1, "expected only one queued message: {num}");
+
+  m.shutdown().await.unwrap();
+}
+
+/// Unit test to test the alive node idempotent functionality
+pub async fn alive_node_idempotent<T, R>(
+  t1: T,
+  t1_opts: Options,
+  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+) where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let (event_delegate, subscriber) = ToggledEventDelegate::new(false);
+
+  let m = get_memberlist(
+    t1,
+    CompositeDelegate::new().with_event_delegate(event_delegate),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let mut a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: test_node.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a.clone(), None, false).await;
+
+  // Listen only after first join
+  m.delegate
+    .as_ref()
+    .unwrap()
+    .event_delegate()
+    .toggle(true)
+    .await;
+
+  // Make suspect
+  let change = m.get_node_state_change(test_node.id()).await.unwrap();
+
+  // Should reset to alive now
+  a.incarnation = 2;
+  m.alive_node(a, None, false).await;
+
+  let state = m.get_node_state(test_node.id()).await.unwrap();
+  assert_eq!(state, State::Alive, "non idempotent");
+  let new_change = m.get_node_state_change(test_node.id()).await.unwrap();
+  assert_eq!(change, new_change, "should not change state");
+
+  // Check for a join message
+  futures::select! {
+    ev = subscriber.recv().fuse() => {
+      panic!("got bad event {ev:?}");
+    },
+    default => {}
+  }
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 1, "expected only one queued message: {num}");
+}
+
+/// Unit test to test the alive node change meta functionality
+pub async fn alive_node_change_meta<T, R>(
+  t1: T,
+  t1_opts: Options,
+  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+) where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let (event_delegate, subscriber) = ToggledEventDelegate::new(false);
+
+  let m = get_memberlist(
+    t1,
+    CompositeDelegate::new().with_event_delegate(event_delegate),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let mut a = Alive {
+    incarnation: 1,
+    meta: Bytes::from_static(b"val1"),
+    node: test_node.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a.clone(), None, false).await;
+
+  // Listen only after first join
+  m.delegate
+    .as_ref()
+    .unwrap()
+    .event_delegate()
+    .toggle(true)
+    .await;
+
+  a.incarnation = 2;
+  a.meta = Bytes::from_static(b"val2");
+  m.alive_node(a.clone(), None, false).await;
+
+  // check updates
+  {
+    let state = m
+      .inner
+      .nodes
+      .read()
+      .await
+      .get_state(test_node.id())
+      .unwrap();
+    assert_eq!(state.state, State::Alive, "bad state");
+    assert_eq!(state.meta, a.meta, "meta did not update");
+  }
+
+  // Check for a notify update message
+  futures::select! {
+    ev = subscriber.recv().fuse() => {
+      let ev = ev.unwrap();
+      let node = ev.node_state();
+      let kind = ev.kind();
+      assert_eq!(kind, EventKind::Update, "bad state: {kind:?}");
+      assert_eq!(node.id(), test_node.id(), "bad node: {}", node.id());
+      assert_eq!(node.meta(), &a.meta, "bad meta: {:?}", node.meta().as_ref());
+    },
+    default => {
+      panic!("missing event!");
+    }
+  }
+
+  m.shutdown().await.unwrap();
 }
 
 /// Unit test to test the alive node refute functionality
@@ -1566,28 +1891,427 @@ where
   m.shutdown().await.unwrap();
 }
 
-pub async fn test_dead_node_left() {
-  todo!()
+/// Unit test to test the dead node left functionality
+pub async fn dead_node_left<A, T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
+where
+  A: AddressResolver<ResolvedAddress = SocketAddr>,
+  T: Transport<Resolver = A, Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
+  let m = get_memberlist(
+    t1,
+    CompositeDelegate::new().with_event_delegate(event_delegate),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let test_node = Node::new(
+    test_node_id.cheap_clone(),
+    "127.0.0.1:8000".parse().unwrap(),
+  );
+  let a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: test_node.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+  m.alive_node(a, None, false).await;
+
+  // Read the join event
+  subscriber.recv().await.unwrap();
+
+  let d = Dead {
+    incarnation: 1,
+    node: test_node_id.clone(),
+    from: test_node_id.clone(),
+  };
+
+  {
+    let mut members = m.inner.nodes.write().await;
+    m.dead_node(&mut members, d).await.unwrap();
+  }
+
+  // Read the dead event
+  subscriber.recv().await.unwrap();
+
+  {
+    let nodes = m.inner.nodes.read().await;
+    let n = nodes.get_state(&test_node_id).unwrap();
+    assert_eq!(n.state, State::Left, "bad state");
+  }
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 1, "expected only one queued message: {num}");
+
+  // Check its a dead message
+  let broadcasts = m.inner.broadcast.ordered_view(true).await;
+  let msg = broadcasts[0].broadcast.message();
+  assert!(matches!(msg, Message::Dead(_)), "expected queued dead msg");
+
+  // Clear queue
+
+  // New alive node
+  let test_node1 = Node::new(test_node_id.clone(), "127.0.0.2:9000".parse().unwrap());
+  let a = Alive {
+    incarnation: 3,
+    meta: Bytes::from_static(b"foo"),
+    node: test_node1.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, false).await;
+
+  // Read the join event
+  subscriber.recv().await.unwrap();
+
+  {
+    let nodes = m.inner.nodes.read().await;
+    let n = nodes.get_state(&test_node_id).unwrap();
+    assert_eq!(n.state, State::Alive, "bad state");
+    assert_eq!(n.meta, Bytes::from_static(b"foo"), "meta should be updated");
+    assert_eq!(&n.addr, test_node1.address(), "addr should be updated");
+  }
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_dead_node() {
-  todo!()
+pub async fn dead_node<T, R>(
+  t1: T,
+  t1_opts: Options,
+  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+) where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
+  let m = get_memberlist(
+    t1,
+    CompositeDelegate::new().with_event_delegate(event_delegate),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: test_node.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+  m.alive_node(a, None, false).await;
+
+  // Read the join event
+  subscriber.recv().await.unwrap();
+
+  m.change_node(test_node.id(), |state| {
+    *state = LocalNodeState {
+      state_change: state.state_change.sub(Duration::from_secs(3600)),
+      ..state.clone()
+    };
+  })
+  .await;
+
+  let d = Dead {
+    incarnation: 1,
+    node: test_node.id().clone(),
+    from: m.local_id().cheap_clone(),
+  };
+
+  {
+    let mut members = m.inner.nodes.write().await;
+    m.dead_node(&mut members, d).await.unwrap();
+  }
+
+  let state = m.get_node_state(test_node.id()).await.unwrap();
+  assert_eq!(state, State::Dead, "bad state");
+
+  let change = m.get_node_state_change(test_node.id()).await.unwrap();
+  assert!(
+    Instant::now() - change <= Duration::from_secs(1),
+    "bad change delta"
+  );
+
+  futures::select! {
+    event = subscriber.recv().fuse() => {
+      let event = event.unwrap();
+      let kind = event.kind();
+      assert!(matches!(kind, EventKind::Leave), "bad event: {kind:?}");
+    },
+    default => {
+      panic!("no leave message");
+    }
+  }
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 1, "expected only one queued message: {num}");
+
+  // Check its a dead message
+  let broadcasts = m.inner.broadcast.ordered_view(true).await;
+  let msg = broadcasts[0].broadcast.message();
+  assert!(matches!(msg, Message::Dead(_)), "expected queued dead msg");
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_dead_node_double() {
-  todo!()
+/// Unit test to test the dead node double functionality
+pub async fn dead_node_double<T, R>(
+  t1: T,
+  t1_opts: Options,
+  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+) where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
+
+  let m = get_memberlist(
+    t1,
+    CompositeDelegate::new().with_event_delegate(event_delegate),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: test_node.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, false).await;
+
+  m.change_node(test_node.id(), |state| {
+    *state = LocalNodeState {
+      state_change: state.state_change.sub(Duration::from_secs(3600)),
+      ..state.clone()
+    };
+  })
+  .await;
+
+  let mut d = Dead {
+    incarnation: 1,
+    node: test_node.id().clone(),
+    from: m.local_id().cheap_clone(),
+  };
+
+  {
+    let mut members = m.inner.nodes.write().await;
+    m.dead_node(&mut members, d.clone()).await.unwrap();
+  }
+
+  // Clear queue
+  m.inner.broadcast.reset().await;
+
+  // Consume events
+  while !subscriber.is_empty() {
+    subscriber.recv().await.unwrap();
+  }
+
+  // should do nothing
+  d.incarnation = 2;
+
+  {
+    let mut members = m.inner.nodes.write().await;
+    m.dead_node(&mut members, d).await.unwrap();
+  }
+
+  futures::select! {
+    event = subscriber.recv().fuse() => {
+      let event = event.unwrap();
+      let kind = event.kind();
+      assert!(matches!(kind, EventKind::Leave), "should not get leave: {kind:?}");
+    },
+    default => {}
+  }
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 0, "expected 0 queued message: {num}");
+
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_dead_node_old_dead() {
-  todo!()
+/// Unit test to test the dead node old dead functionality
+pub async fn dead_node_old_dead<T, R>(
+  t1: T,
+  t1_opts: Options,
+  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+) where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m = get_memberlist(
+    t1,
+    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: test_node.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, false).await;
+
+  m.change_node(test_node.id(), |state| {
+    *state = LocalNodeState {
+      state_change: state.state_change.sub(Duration::from_secs(3600)),
+      ..state.clone()
+    };
+  })
+  .await;
+
+  let d = Dead {
+    incarnation: 1,
+    node: test_node.id().clone(),
+    from: m.local_id().cheap_clone(),
+  };
+
+  {
+    let mut members = m.inner.nodes.write().await;
+    m.dead_node(&mut members, d).await.unwrap();
+  }
+
+  let state = m.get_node_state(test_node.id()).await.unwrap();
+  assert_eq!(state, State::Alive, "bad state");
+
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_dead_node_alive_replay() {
-  todo!()
+/// Unit test to test the dead node alive replay functionality
+pub async fn dead_node_alive_replay<T, R>(
+  t1: T,
+  t1_opts: Options,
+  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+) where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m = get_memberlist(
+    t1,
+    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let a = Alive {
+    incarnation: 10,
+    meta: Bytes::new(),
+    node: test_node.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a.clone(), None, false).await;
+
+  let d = Dead {
+    incarnation: 10,
+    node: test_node.id().clone(),
+    from: m.local_id().cheap_clone(),
+  };
+
+  {
+    let mut members = m.inner.nodes.write().await;
+    m.dead_node(&mut members, d).await.unwrap();
+  }
+
+  // Replay alive at same incarnation
+  m.alive_node(a, None, false).await;
+
+  // Should remain dead
+  let state = m.get_node_state(test_node.id()).await.unwrap();
+  assert_eq!(state, State::Dead, "bad state");
+
+  m.shutdown().await.unwrap();
 }
 
-pub async fn test_dead_node_refute() {
-  todo!()
+/// Unit test to test the dead node refute functionality
+pub async fn dead_node_refute<T, R>(
+  t1: T,
+  t1_opts: Options,
+  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+) where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m = get_memberlist(
+    t1,
+    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let a = Alive {
+    incarnation: 1,
+    meta: Bytes::new(),
+    node: test_node.clone(),
+    protocol_version: crate::ProtocolVersion::V0,
+    delegate_version: crate::DelegateVersion::V0,
+  };
+
+  m.alive_node(a, None, true).await;
+
+  // Clear queue
+  m.inner.broadcast.reset().await;
+
+  // Make sure health is in a good state
+  let health = m.inner.awareness.get_health_score().await;
+  assert_eq!(health, 0, "bad: {health}");
+
+  let d = Dead {
+    incarnation: 1,
+    node: test_node.id().clone(),
+    from: m.local_id().cheap_clone(),
+  };
+
+  {
+    let mut members = m.inner.nodes.write().await;
+    m.dead_node(&mut members, d).await.unwrap();
+  }
+
+  let state = m.get_node_state(test_node.id()).await.unwrap();
+  assert_eq!(state, State::Alive, "should still be Alive");
+
+  // Check a broad cast is queued
+  let num = m.inner.broadcast.num_queued().await;
+  assert_eq!(num, 1, "expected only one queued message: {num}");
+
+  // Sould be alive msg
+  let broadcasts = m.inner.broadcast.ordered_view(true).await;
+  let msg = broadcasts[0].broadcast.message();
+  assert!(matches!(msg, Message::Alive(_)), "bad message: {msg:?}");
+
+  // We should have been dinged
+  let health = m.inner.awareness.get_health_score().await;
+  assert_eq!(health, 1, "bad: {health}");
+
+  m.shutdown().await.unwrap();
 }
 
 pub async fn test_merge_state() {

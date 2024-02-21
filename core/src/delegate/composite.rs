@@ -197,6 +197,10 @@ impl<I, Address, A, C, E, M, N, P> CompositeDelegate<I, Address, A, C, E, M, N, 
   pub(crate) fn node_delegate(&self) -> &N {
     &self.node_delegate
   }
+
+  pub(crate) fn event_delegate(&self) -> &E {
+    &self.event_delegate
+  }
 }
 
 impl<I, Address, A, C, E, M, N, P> AliveDelegate for CompositeDelegate<I, Address, A, C, E, M, N, P>

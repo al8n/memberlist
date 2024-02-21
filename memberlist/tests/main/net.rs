@@ -36,8 +36,20 @@ mod ping;
 #[path = "net/reset_nodes.rs"]
 mod reset_nodes;
 
+#[path = "net/alive_node_new_node.rs"]
+mod alive_node_new_node;
+
 #[path = "net/alive_node_conflict.rs"]
 mod alive_node_conflict;
+
+#[path = "net/alive_node_suspect_node.rs"]
+mod alive_node_suspect_node;
+
+#[path = "net/alive_node_idempotent.rs"]
+mod alive_node_idempotent;
+
+#[path = "net/alive_node_change_meta.rs"]
+mod alive_node_change_meta;
 
 #[path = "net/alive_node_refute.rs"]
 mod alive_node_refute;
@@ -56,3 +68,21 @@ mod suspect_node_refute;
 
 #[path = "net/dead_node_no_node.rs"]
 mod dead_node_no_node;
+
+#[path = "net/dead_node_left.rs"]
+mod dead_node_left;
+
+#[path = "net/dead_node.rs"]
+mod dead_node;
+
+#[path = "net/dead_node_double.rs"]
+mod dead_node_double;
+
+#[path = "net/dead_node_old_dead.rs"]
+mod dead_node_old_dead;
+
+#[path = "net/dead_node_alive_replay.rs"]
+mod dead_node_alive_replay;
+
+#[path = "net/dead_node_refute.rs"]
+mod dead_node_refute;

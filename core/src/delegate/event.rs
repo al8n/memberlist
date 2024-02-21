@@ -32,7 +32,21 @@ impl<I, A> Clone for EventInner<I, A> {
   }
 }
 
+/// Represents the kind of event that has occurred.
+#[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum EventKind {
+  /// A node has joined the cluster.
+  Join,
+  /// A node has left the cluster.
+  Leave,
+  /// A node has updated, usually involving the meta data.
+  Update,
+}
+
 /// A single event related to node activity in the memberlist.
+#[derive(Debug)]
 pub struct Event<I, A>(EventInner<I, A>);
 
 impl<I, A> Clone for Event<I, A> {
@@ -43,11 +57,22 @@ impl<I, A> Clone for Event<I, A> {
 
 impl<I, A> Event<I, A> {
   /// Returns the node state associated with the event.
+  #[inline]
   pub fn node_state(&self) -> &NodeState<I, A> {
     match &self.0 {
       EventInner::Join(node) => node,
       EventInner::Leave(node) => node,
       EventInner::Update(node) => node,
+    }
+  }
+
+  /// Returns the kind of event that has occurred.
+  #[inline]
+  pub const fn kind(&self) -> EventKind {
+    match &self.0 {
+      EventInner::Join(_) => EventKind::Join,
+      EventInner::Leave(_) => EventKind::Leave,
+      EventInner::Update(_) => EventKind::Update,
     }
   }
 
