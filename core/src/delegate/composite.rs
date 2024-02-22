@@ -209,6 +209,14 @@ impl<I, Address, A, C, E, M, N, P> CompositeDelegate<I, Address, A, C, E, M, N, 
   pub(crate) fn alive_delegate(&self) -> &A {
     &self.alive_delegate
   }
+
+  pub(crate) fn conflict_delegate(&self) -> &C {
+    &self.conflict_delegate
+  }
+
+  pub(crate) fn ping_delegate(&self) -> &P {
+    &self.ping_delegate
+  }
 }
 
 impl<I, Address, A, C, E, M, N, P> AliveDelegate for CompositeDelegate<I, Address, A, C, E, M, N, P>

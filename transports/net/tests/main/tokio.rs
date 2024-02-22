@@ -34,6 +34,9 @@ mod label;
 #[path = "tokio/join.rs"]
 mod join;
 
+#[path = "tokio/join_dead_node.rs"]
+mod join_dead_node;
+
 #[path = "tokio/promised_listener_backoff.rs"]
 mod promised_listener_backoff;
 

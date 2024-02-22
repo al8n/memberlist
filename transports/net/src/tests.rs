@@ -73,6 +73,9 @@ pub mod send;
 #[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod join;
 
+/// Unit test for joining dead node
+pub mod join_dead_node;
+
 /// A test client stream for network transport
 #[viewit::viewit(
   vis_all = "",

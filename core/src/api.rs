@@ -103,6 +103,35 @@ where
     self.inner.nodes.read().await.nodes.len()
   }
 
+  /// Returns a list of all known nodes that are alive.
+  pub async fn alive_members(
+    &self,
+  ) -> SmallVec<Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
+    self
+      .inner
+      .nodes
+      .read()
+      .await
+      .nodes
+      .iter()
+      .filter(|n| !n.dead_or_left())
+      .map(|n| n.state.server.clone())
+      .collect()
+  }
+
+  /// Returns the number of alive members.
+  pub async fn num_alive_members(&self) -> usize {
+    self
+      .inner
+      .nodes
+      .read()
+      .await
+      .nodes
+      .iter()
+      .filter(|n| !n.dead_or_left())
+      .count()
+  }
+
   /// Returns a list of all known nodes that match the given predicate.
   pub async fn members_by(
     &self,

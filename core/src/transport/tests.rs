@@ -847,6 +847,36 @@ where
   Ok(())
 }
 
+/// Unit test for join a dead node
+pub async fn join_dead_node<A, T, P, R>(trans1: T, promised: P, fake_id: T::Id)
+where
+  A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  P: TestPromisedClient,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let local_addr = promised.local_addr().unwrap();
+
+  let m = Memberlist::new(
+    trans1,
+    Options::default().with_timeout(Duration::from_millis(50)),
+  )
+  .await
+  .unwrap();
+
+  // Ensure we don't hang forever
+  R::spawn_detach(async move {
+    R::sleep(Duration::from_millis(100)).await;
+    panic!("should have timed out by now");
+  });
+
+  let target = Node::new(fake_id, MaybeResolvedAddress::resolved(local_addr));
+  m.join(target).await.unwrap_err();
+  m.shutdown().await.unwrap();
+}
+
 pub async fn send<A, T1, T2, R>(trans1: T1, trans2: T2) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,

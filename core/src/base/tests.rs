@@ -4,11 +4,15 @@ use std::{
   time::{Duration, Instant},
 };
 
+use bytes::Bytes;
 use memberlist_utils::SmallVec;
 use nodecraft::Id;
 
 use crate::{
-  delegate::{mock::MockDelegate, AliveDelegate, CompositeDelegate, MergeDelegate},
+  delegate::{
+    mock::MockDelegate, AliveDelegate, CompositeDelegate, ConflictDelegate, MergeDelegate,
+    PingDelegate,
+  },
   transport::MaybeResolvedAddress,
   types::{NodeState, State},
 };
@@ -367,9 +371,6 @@ where
   m2.shutdown().await.unwrap();
 }
 
-/// Unit test for join a dead node
-pub async fn test_memberlist_join_dead_node() {}
-
 /// Unit test for node delegate meta
 pub async fn memberlist_node_delegate_meta<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
@@ -451,13 +452,255 @@ where
 }
 
 /// Unit test for node delegate meta update
-pub async fn memberlist_node_delegate_meta_update() {}
+pub async fn memberlist_node_delegate_meta_update<T, R>(
+  t1: T,
+  t1_opts: Options,
+  t2: T,
+  t2_opts: Options,
+) where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1 = Memberlist::with_delegate(
+    t1,
+    CompositeDelegate::new().with_node_delegate(MockDelegate::<
+      T::Id,
+      <T::Resolver as AddressResolver>::ResolvedAddress,
+    >::with_meta("web".into())),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let m2 = Memberlist::with_delegate(
+    t2,
+    CompositeDelegate::new().with_node_delegate(MockDelegate::with_meta("lb".into())),
+    t2_opts,
+  )
+  .await
+  .unwrap();
+
+  let target = Node::new(
+    m2.local_id().clone(),
+    MaybeResolvedAddress::resolved(m2.advertise_address().clone()),
+  );
+
+  m1.join(target).await.unwrap();
+
+  R::sleep(Duration::from_millis(250)).await;
+
+  // Update the meta data roles
+  m1.delegate()
+    .unwrap()
+    .node_delegate()
+    .set_meta("api".into())
+    .await;
+
+  m2.delegate()
+    .unwrap()
+    .node_delegate()
+    .set_meta("db".into())
+    .await;
+
+  m1.update_node(Duration::ZERO).await.unwrap();
+
+  m2.update_node(Duration::ZERO).await.unwrap();
+
+  R::sleep(Duration::from_millis(250)).await;
+
+  // Check the roles of members of m1
+  let m1m = m1.members().await;
+  assert_eq!(m1m.len(), 2, "expected 2 members, got {}", m1m.len());
+
+  let roles = m1m
+    .into_iter()
+    .map(|state| (state.id().clone(), state.meta().clone()))
+    .collect::<HashMap<_, _>>();
+
+  assert_eq!(
+    roles.get(m1.local_id()).unwrap(),
+    "api",
+    "bad role for {}",
+    m1.local_id()
+  );
+  assert_eq!(
+    roles.get(m2.local_id()).unwrap(),
+    "db",
+    "bad role for {}",
+    m2.local_id()
+  );
+
+  let m2m = m2.members().await;
+  assert_eq!(m2m.len(), 2, "expected 2 members, got {}", m2m.len());
+
+  let roles = m2m
+    .into_iter()
+    .map(|state| (state.id().clone(), state.meta().clone()))
+    .collect::<HashMap<_, _>>();
+
+  assert_eq!(
+    roles.get(m1.local_id()).unwrap(),
+    "api",
+    "bad role for {}",
+    m1.local_id()
+  );
+  assert_eq!(
+    roles.get(m2.local_id()).unwrap(),
+    "db",
+    "bad role for {}",
+    m2.local_id()
+  );
+}
 
 /// Unit test for user data
-pub async fn test_memberlist_user_data() {}
+pub async fn memberlist_user_data<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1 = Memberlist::with_delegate(
+    t1,
+    CompositeDelegate::new()
+      .with_node_delegate(MockDelegate::with_state(Bytes::from_static(b"something"))),
+    t1_opts
+      .with_gossip_interval(Duration::from_millis(100))
+      .with_push_pull_interval(Duration::from_millis(100)),
+  )
+  .await
+  .unwrap();
+
+  let bcasts = (0..256)
+    .map(|i| i.to_string().as_bytes().to_vec().into())
+    .collect::<SmallVec<_>>();
+
+  let m2 = Memberlist::with_delegate(
+    t2,
+    CompositeDelegate::new().with_node_delegate(MockDelegate::with_state_and_broadcasts(
+      Bytes::from_static(b"my state"),
+      bcasts.clone(),
+    )),
+    t2_opts
+      .with_gossip_interval(Duration::from_millis(100))
+      .with_push_pull_interval(Duration::from_millis(100)),
+  )
+  .await
+  .unwrap();
+
+  let target = Node::new(
+    m1.local_id().clone(),
+    MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
+  );
+
+  m2.join(target).await.unwrap();
+
+  // Check the hosts
+  let num = m2.num_alive_members().await;
+  assert_eq!(num, 2, "should have 2 nodes! got {}", num);
+
+  // Wait for a little while
+  R::sleep(Duration::from_millis(500)).await;
+
+  let msg1 = m1.delegate().unwrap().node_delegate().get_messages().await;
+
+  assert_eq!(msg1.len(), 256, "expected 256 messages, got {}", msg1.len());
+  assert_eq!(msg1.as_slice(), bcasts.as_slice());
+
+  let rs1 = m1
+    .delegate()
+    .unwrap()
+    .node_delegate()
+    .get_remote_state()
+    .await;
+  let rs2 = m2
+    .delegate()
+    .unwrap()
+    .node_delegate()
+    .get_remote_state()
+    .await;
+
+  assert_eq!(rs1.as_ref(), b"my state");
+  assert_eq!(rs2.as_ref(), b"something");
+}
 
 /// Unit test for send
-pub async fn test_memberlist_send() {}
+pub async fn memberlist_send<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1 = Memberlist::with_delegate(
+    t1,
+    CompositeDelegate::new().with_node_delegate(MockDelegate::new()),
+    t1_opts
+      .with_gossip_interval(Duration::from_millis(1))
+      .with_push_pull_interval(Duration::from_millis(1)),
+  )
+  .await
+  .unwrap();
+
+  let m2 = Memberlist::with_delegate(
+    t2,
+    CompositeDelegate::new().with_node_delegate(MockDelegate::new()),
+    t2_opts
+      .with_gossip_interval(Duration::from_millis(1))
+      .with_push_pull_interval(Duration::from_millis(1)),
+  )
+  .await
+  .unwrap();
+
+  let target = Node::new(
+    m1.local_id().clone(),
+    MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
+  );
+
+  m2.join(target).await.unwrap();
+
+  // Check the hots
+  let num = m2.num_alive_members().await;
+  assert_eq!(num, 2, "should have 2 nodes! got {}", num);
+
+  // Try to do a direct send
+  m1.send(m2.advertise_address(), "ping".into())
+    .await
+    .unwrap();
+
+  m2.send(m1.advertise_address(), "pong".into())
+    .await
+    .unwrap();
+
+  wait_for_condition(|| async {
+    let msgs = m1.delegate().unwrap().node_delegate().get_messages().await;
+
+    (
+      msgs.len() == 1,
+      format!("expected 1 messages, got {}", msgs.len()),
+    )
+  })
+  .await;
+
+  let msgs = m1.delegate().unwrap().node_delegate().get_messages().await;
+
+  assert_eq!(msgs[0].as_ref(), b"pong", "bad msg {:?}", msgs[0].as_ref());
+
+  wait_for_condition(|| async {
+    let msgs = m2.delegate().unwrap().node_delegate().get_messages().await;
+
+    (
+      msgs.len() == 1,
+      format!("expected 1 messages, got {}", msgs.len()),
+    )
+  })
+  .await;
+
+  let msgs = m2.delegate().unwrap().node_delegate().get_messages().await;
+  assert_eq!(msgs[0].as_ref(), b"ping", "bad msg {:?}", msgs[0].as_ref());
+}
 
 /// Unit tests for leave
 pub async fn memberlist_leave<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
@@ -497,14 +740,214 @@ where
   assert_eq!(state, State::Left, "bad state");
 }
 
-/// Unit test for advertise addr
-pub async fn test_memberlist_advertise_addr() {}
+struct CustomConflictDelegateInner<I, A> {
+  existing: Option<Node<I, A>>,
+  other: Option<Node<I, A>>,
+  _marker: PhantomData<(I, A)>,
+}
+
+struct CustomConflictDelegate<I, A>(Mutex<CustomConflictDelegateInner<I, A>>);
+
+impl<I, A> CustomConflictDelegate<I, A> {
+  fn new() -> Self {
+    Self(Mutex::new(CustomConflictDelegateInner {
+      existing: None,
+      other: None,
+      _marker: PhantomData,
+    }))
+  }
+}
+
+impl<I, A> ConflictDelegate for CustomConflictDelegate<I, A>
+where
+  I: Id,
+  A: CheapClone + Send + Sync + 'static,
+{
+  type Id = I;
+  type Address = A;
+
+  async fn notify_conflict(
+    &self,
+    existing: Arc<NodeState<Self::Id, Self::Address>>,
+    other: Arc<NodeState<Self::Id, Self::Address>>,
+  ) {
+    let mut inner = self.0.lock().await;
+    inner.existing = Some(Node::new(existing.id().clone(), existing.address().clone()));
+    inner.other = Some(Node::new(other.id().clone(), other.address().clone()));
+  }
+}
 
 /// Unit test for conflict delegate
-pub async fn test_memberlist_conflict_delegate() {}
+pub async fn memberlist_conflict_delegate<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let m1 = Memberlist::with_delegate(
+    t1,
+    CompositeDelegate::new().with_conflict_delegate(CustomConflictDelegate::new()),
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let m2 = Memberlist::with_delegate(
+    t2,
+    CompositeDelegate::new().with_conflict_delegate(CustomConflictDelegate::new()),
+    t2_opts,
+  )
+  .await
+  .unwrap();
+
+  let target = Node::new(
+    m2.local_id().clone(),
+    MaybeResolvedAddress::resolved(m2.advertise_address().clone()),
+  );
+
+  m1.join(target).await.unwrap();
+
+  R::sleep(Duration::from_millis(250)).await;
+
+  // Ensure we were notified
+  let inner = m1.delegate().unwrap().conflict_delegate().0.lock().await;
+
+  assert!(inner.existing.is_some());
+  assert!(inner.other.is_some());
+
+  assert_eq!(inner.existing, inner.other);
+}
+
+struct CustomPingDelegateInner<I, A> {
+  payload: Bytes,
+  rtt: Duration,
+  other: Option<Node<I, A>>,
+  _marker: PhantomData<(I, A)>,
+}
+
+struct CustomPingDelegate<I, A>(Mutex<CustomPingDelegateInner<I, A>>);
+
+impl<I, A> CustomPingDelegate<I, A> {
+  fn new() -> Self {
+    Self(Mutex::new(CustomPingDelegateInner {
+      payload: Bytes::new(),
+      rtt: Duration::from_secs(0),
+      other: None,
+      _marker: PhantomData,
+    }))
+  }
+}
+
+impl<I, A> PingDelegate for CustomPingDelegate<I, A>
+where
+  I: Id,
+  A: CheapClone + Send + Sync + 'static,
+{
+  type Id = I;
+  type Address = A;
+
+  async fn ack_payload(&self) -> Bytes {
+    Bytes::from_static(b"whatever")
+  }
+
+  async fn notify_ping_complete(
+    &self,
+    node: Arc<NodeState<Self::Id, Self::Address>>,
+    rtt: Duration,
+    payload: Bytes,
+  ) {
+    let mut inner = self.0.lock().await;
+    inner.rtt = rtt;
+    inner.payload = payload;
+    inner.other = Some(Node::new(node.id().clone(), node.address().clone()));
+  }
+}
 
 /// Unit test for ping delegate
-pub async fn test_memberlist_ping_delegate() {}
+pub async fn memberlist_ping_delegate<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
+where
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let probe_interval = t1_opts.probe_interval();
+  let m1 = Memberlist::with_delegate(
+    t1,
+    CompositeDelegate::new().with_ping_delegate(CustomPingDelegate::new()),
+    t1_opts.with_probe_interval(Duration::from_millis(100)),
+  )
+  .await
+  .unwrap();
+
+  let m2 = Memberlist::with_delegate(
+    t2,
+    CompositeDelegate::new().with_ping_delegate(CustomPingDelegate::new()),
+    t2_opts.with_probe_interval(Duration::from_millis(100)),
+  )
+  .await
+  .unwrap();
+
+  let target = Node::new(
+    m2.local_id().clone(),
+    MaybeResolvedAddress::resolved(m2.advertise_address().clone()),
+  );
+
+  m1.join(target).await.unwrap();
+
+  wait_until_size::<_, _, R>(&m1, 2).await;
+  wait_until_size::<_, _, R>(&m2, 2).await;
+
+  R::sleep(probe_interval).await;
+
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
+
+  let delegate = m1.delegate().unwrap().ping_delegate();
+
+  let inner = delegate.0.lock().await;
+  assert!(inner.other.is_some(), "should get notified");
+  assert_eq!(
+    inner.other.as_ref().unwrap(),
+    &m1.advertise_node(),
+    "not notified about the correct node; expected: {} actual: {}",
+    m1.advertise_node(),
+    inner.other.as_ref().unwrap()
+  );
+  assert!(inner.rtt > Duration::ZERO, "rtt should be greater than 0");
+  assert_eq!(
+    inner.payload.as_ref(),
+    b"whatever",
+    "incorrect payload. expected: {:?}, actual: {:?}",
+    b"whatever",
+    inner.payload.as_ref()
+  );
+}
+
+async fn wait_until_size<T, D, R>(m: &Memberlist<T, D>, expected: usize)
+where
+  T: Transport<Runtime = R>,
+  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  retry::<R, _, _>(15, Duration::from_millis(500), || async {
+    if m.alive_members().await.len() != expected {
+      return (
+        true,
+        format!(
+          "expected {} nodes, got {}",
+          expected,
+          m.num_alive_members().await
+        ),
+      );
+    }
+    (false, "".to_string())
+  })
+  .await
+}
 
 async fn wait_for_condition<'a, Fut, F>(mut f: F)
 where
@@ -522,4 +965,25 @@ where
     std::thread::sleep(Duration::from_secs(5));
   }
   panic!("timeout waiting for condition {}", msg);
+}
+
+async fn retry<'a, R, F, Fut>(n: usize, w: Duration, mut f: F)
+where
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+  F: FnMut() -> Fut + Clone,
+  Fut: Future<Output = (bool, String)> + Send + Sync + 'a,
+{
+  for idx in 1..=n {
+    let (failed, failed_msg) = f().await;
+    if !failed {
+      return;
+    }
+    if idx == n {
+      panic!("failed after {} attempts: {}", n, failed_msg);
+    }
+
+    R::sleep(w).await;
+  }
 }

@@ -62,6 +62,9 @@ pub mod send;
 #[cfg(feature = "compression")]
 pub mod join;
 
+/// Unit test for joining dead node
+pub mod join_dead_node;
+
 pub struct QuicTestPacketStream<S: StreamLayer> {
   stream: S::Stream,
   addr: SocketAddr,

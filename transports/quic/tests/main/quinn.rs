@@ -61,6 +61,9 @@ mod send;
 #[path = "quinn/join.rs"]
 mod join;
 
+#[path = "quinn/join_dead_node.rs"]
+mod join_dead_node;
+
 #[path = "quinn/promised_ping.rs"]
 mod promise_ping;
 

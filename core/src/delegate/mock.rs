@@ -49,19 +49,30 @@ impl<I, A> MockDelegate<I, A> {
       })),
     }
   }
+
+  pub fn with_state(state: Bytes) -> Self {
+    Self {
+      inner: Arc::new(Mutex::new(MockDelegateInner {
+        state,
+        ..Default::default()
+      })),
+    }
+  }
+
+  pub fn with_state_and_broadcasts(state: Bytes, broadcasts: SmallVec<Bytes>) -> Self {
+    Self {
+      inner: Arc::new(Mutex::new(MockDelegateInner {
+        state,
+        broadcasts,
+        ..Default::default()
+      })),
+    }
+  }
 }
 
 impl<I, A> MockDelegate<I, A> {
   pub async fn set_meta(&self, meta: Bytes) {
     self.inner.lock().await.meta = meta;
-  }
-
-  pub async fn set_state(&self, state: Bytes) {
-    self.inner.lock().await.state = state;
-  }
-
-  pub async fn set_broadcasts(&self, broadcasts: SmallVec<Bytes>) {
-    self.inner.lock().await.broadcasts = broadcasts;
   }
 
   pub async fn get_remote_state(&self) -> Bytes {

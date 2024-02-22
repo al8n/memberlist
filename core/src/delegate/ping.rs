@@ -28,6 +28,9 @@ pub trait PingDelegate: Send + Sync + 'static {
     payload: Bytes,
   ) -> impl Future<Output = ()> + Send;
 
-  /// Invoked when we want to send a ping message to target by promised connection. Return true if the target node does not expect ping message from promised connection.
-  fn disable_promised_pings(&self, target: &Self::Id) -> bool;
+  /// Invoked when we want to send a ping message to target by promised connection.
+  /// Return true if the target node does not expect ping message from promised connection.
+  fn disable_promised_pings(&self, _target: &Self::Id) -> bool {
+    false
+  }
 }
