@@ -85,12 +85,7 @@ where
       Message::IndirectPing(ind) => self.handle_indirect_ping(ind, from).await,
       Message::Ack(resp) => self.handle_ack(resp, timestamp).await,
       Message::Nack(resp) => self.handle_nack(resp).await,
-      Message::Alive(alive) => {
-        tracing::error!(
-          "DEBUG: self {} succesfully receive alive packet {}",
-          self.advertise_node(),
-          alive.node
-        );
+      Message::Alive(alive) => { 
         // Determine the message queue, prioritize alive
         {
           let mut mq = self.inner.queue.lock().await;

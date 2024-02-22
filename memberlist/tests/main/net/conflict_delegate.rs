@@ -6,17 +6,12 @@ macro_rules! conflict_delegate {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _net_conflict_delegate >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("conflict_delegate_node_1".into());
-          t1_opts.add_bind_address(next_socket_addr_v4(0));
+          memberlist_conflict_delegate(|id| async move {
+            let mut t1_opts = NetTransportOptions::<SmolStr, _>::new(id);
+            t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let t1 = NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();
-          let t1_opts = Options::lan();
-
-          let mut t2_opts = NetTransportOptions::<SmolStr, _>::new("conflict_delegate_node_2".into());
-          t2_opts.add_bind_address(next_socket_addr_v4(0));
-          let t2 = NetTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t2_opts).await.unwrap();
-
-          memberlist_conflict_delegate(t1, t1_opts, t2, Options::lan()).await;
+            NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap()
+          }, "conflict".into()).await;
         });
       }
     }

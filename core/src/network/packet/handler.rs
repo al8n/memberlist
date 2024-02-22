@@ -74,12 +74,7 @@ where
       tracing::error!(target =  "memberlist.packet", err=%e, remote_addr = %from, "blocked alive address {} message from {}", alive.node.address(), from);
       return;
     }
-
-    tracing::error!(
-      "DEBUG: self {} handle alive node {}",
-      self.advertise_node(),
-      alive.node
-    );
+ 
     self.alive_node(alive, None, false).await
   }
 

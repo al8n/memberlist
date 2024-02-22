@@ -466,7 +466,6 @@ where
     notify_tx: Option<async_channel::Sender<()>>,
     bootstrap: bool,
   ) {
-    tracing::error!("DEBUG: self {} alive {}", self.advertise_node(), alive.node);
     let mut memberlist = self.inner.nodes.write().await;
 
     // It is possible that during a Leave(), there is already an aliveMsg

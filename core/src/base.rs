@@ -10,7 +10,7 @@ use std::{
 use agnostic::Runtime;
 use async_channel::{Receiver, Sender};
 use async_lock::{Mutex, RwLock};
-use futures::{FutureExt, Stream};
+use futures::Stream;
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 
 use super::{
@@ -430,6 +430,8 @@ where
 
   #[cfg(feature = "metrics")]
   fn check_broadcast_queue_depth(&self, shutdown_rx: Receiver<()>) {
+    use futures::FutureExt;
+
     let queue_check_interval = self.inner.opts.queue_check_interval;
     let this = self.clone();
 

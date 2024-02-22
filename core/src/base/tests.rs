@@ -865,25 +865,25 @@ where
 }
 
 /// Unit test for conflict delegate
-pub async fn memberlist_conflict_delegate<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
+pub async fn memberlist_conflict_delegate<F, T, R>(mut get_transport: impl FnMut(T::Id) -> F, id: T::Id)
 where
+  F: Future<Output = T>,
   T: Transport<Runtime = R>,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
   let m1 = Memberlist::with_delegate(
-    t1,
+    get_transport(id.clone()).await,
     CompositeDelegate::new().with_conflict_delegate(CustomConflictDelegate::new()),
-    t1_opts,
+    Options::lan(),
   )
   .await
   .unwrap();
 
-  let m2 = Memberlist::with_delegate(
-    t2,
-    CompositeDelegate::new().with_conflict_delegate(CustomConflictDelegate::new()),
-    t2_opts,
+  let m2 = Memberlist::new(
+    get_transport(id).await,
+    Options::lan(),
   )
   .await
   .unwrap();
@@ -903,7 +903,7 @@ where
   assert!(inner.existing.is_some());
   assert!(inner.other.is_some());
 
-  assert_eq!(inner.existing, inner.other);
+  assert_eq!(inner.existing.as_ref().map(|n| n.id()), inner.other.as_ref().map(|n| n.id()));
 }
 
 struct CustomPingDelegateInner<I, A> {
