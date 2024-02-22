@@ -6,7 +6,7 @@ macro_rules! join_with_labels {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _net_join_with_labels >]() {
         [< $rt:snake _run >](async move {
-          memberlist_join_with_labels(|idx, label| async {
+          memberlist_join_with_labels(|idx, label| async move {
             let mut t1_opts = NetTransportOptions::<SmolStr, _>::new(format!("join_with_labels_node_{idx}").into()).
               with_label(label);
             t1_opts.add_bind_address(next_socket_addr_v4(0));

@@ -40,10 +40,10 @@ pub async fn memberlist_join_with_labels_and_encryption<F, T, R>(
   );
   m2.join(target.clone()).await.unwrap();
 
-  let m1m = m1.num_alive_members().await;
+  let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
 
-  let m2m = m2.num_alive_members().await;
+  let m2m = m2.num_online_members().await;
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
 
   // Create a third node that uses no label
@@ -55,13 +55,13 @@ pub async fn memberlist_join_with_labels_and_encryption<F, T, R>(
   .unwrap();
   m3.join(target.clone()).await.unwrap();
 
-  let m1m = m1.num_alive_members().await;
+  let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
 
-  let m2m = m2.num_alive_members().await;
+  let m2m = m2.num_online_members().await;
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
 
-  let m3m = m3.num_alive_members().await;
+  let m3m = m3.num_online_members().await;
   assert_eq!(m3m, 1, "expected 1 member, got {}", m3m);
 
   // Create a fourth node that uses a mismatched label
@@ -71,16 +71,16 @@ pub async fn memberlist_join_with_labels_and_encryption<F, T, R>(
     .unwrap();
   m4.join(target).await.unwrap();
 
-  let m1m = m1.num_alive_members().await;
+  let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
 
-  let m2m = m2.num_alive_members().await;
+  let m2m = m2.num_online_members().await;
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
 
-  let m3m = m3.num_alive_members().await;
+  let m3m = m3.num_online_members().await;
   assert_eq!(m3m, 1, "expected 1 member, got {}", m3m);
 
-  let m4m = m4.num_alive_members().await;
+  let m4m = m4.num_online_members().await;
   assert_eq!(m4m, 1, "expected 1 member, got {}", m4m);
 
   m1.shutdown().await.unwrap();

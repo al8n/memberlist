@@ -24,7 +24,8 @@ impl<I, A> Default for MockDelegateInner<I, A> {
   }
 }
 
-pub(crate) struct MockDelegate<I, A> {
+#[doc(hidden)]
+pub struct MockDelegate<I, A> {
   inner: Arc<Mutex<MockDelegateInner<I, A>>>,
 }
 

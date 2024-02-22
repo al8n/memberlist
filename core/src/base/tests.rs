@@ -179,12 +179,12 @@ where
   );
   m2.join(target.clone()).await.unwrap();
 
-  let m1m = m1.num_alive_members().await;
+  let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
   let m1m = m1.estimate_num_nodes();
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
 
-  let m2m = m2.num_alive_members().await;
+  let m2m = m2.num_online_members().await;
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
   let m2m = m2.estimate_num_nodes();
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
@@ -195,17 +195,17 @@ where
     .unwrap();
   m3.join(target.clone()).await.unwrap();
 
-  let m1m = m1.num_alive_members().await;
+  let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
   let m1m = m1.estimate_num_nodes();
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
 
-  let m2m = m2.num_alive_members().await;
+  let m2m = m2.num_online_members().await;
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
   let m2m = m2.estimate_num_nodes();
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
 
-  let m3m = m3.num_alive_members().await;
+  let m3m = m3.num_online_members().await;
   assert_eq!(m3m, 1, "expected 1 member, got {}", m3m);
   let m3m = m3.estimate_num_nodes();
   assert_eq!(m3m, 1, "expected 1 member, got {}", m3m);
@@ -217,22 +217,22 @@ where
     .unwrap();
   m4.join(target).await.unwrap();
 
-  let m1m = m1.num_alive_members().await;
+  let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
   let m1m = m1.estimate_num_nodes();
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
 
-  let m2m = m2.num_alive_members().await;
+  let m2m = m2.num_online_members().await;
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
   let m2m = m2.estimate_num_nodes();
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
 
-  let m3m = m3.num_alive_members().await;
+  let m3m = m3.num_online_members().await;
   assert_eq!(m3m, 1, "expected 1 member, got {}", m3m);
   let m3m = m3.estimate_num_nodes();
   assert_eq!(m3m, 1, "expected 1 member, got {}", m3m);
 
-  let m4m = m4.num_alive_members().await;
+  let m4m = m4.num_online_members().await;
   assert_eq!(m4m, 1, "expected 1 member, got {}", m4m);
   let m4m = m4.estimate_num_nodes();
   assert_eq!(m4m, 1, "expected 1 member, got {}", m4m);
@@ -685,7 +685,7 @@ where
   m2.join(target).await.unwrap();
 
   // Check the hosts
-  let num = m2.num_alive_members().await;
+  let num = m2.num_online_members().await;
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
 
   // Wait for a little while
@@ -749,7 +749,7 @@ where
   m2.join(target).await.unwrap();
 
   // Check the hots
-  let num = m2.num_alive_members().await;
+  let num = m2.num_online_members().await;
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
 
   // Try to do a direct send
@@ -1012,7 +1012,7 @@ where
   );
 }
 
-async fn wait_until_size<T, D, R>(m: &Memberlist<T, D>, expected: usize)
+pub async fn wait_until_size<T, D, R>(m: &Memberlist<T, D>, expected: usize)
 where
   T: Transport<Runtime = R>,
   D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
@@ -1021,13 +1021,13 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   retry::<R, _, _>(15, Duration::from_millis(500), || async {
-    if m.alive_members().await.len() != expected {
+    if m.online_members().await.len() != expected {
       return (
         true,
         format!(
           "expected {} nodes, got {}",
           expected,
-          m.num_alive_members().await
+          m.num_online_members().await
         ),
       );
     }
@@ -1036,7 +1036,7 @@ where
   .await
 }
 
-async fn wait_for_condition<'a, Fut, F>(mut f: F)
+pub async fn wait_for_condition<'a, Fut, F>(mut f: F)
 where
   F: FnMut() -> Fut,
   Fut: Future<Output = (bool, String)> + 'a,

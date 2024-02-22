@@ -103,8 +103,8 @@ where
     self.inner.nodes.read().await.nodes.len()
   }
 
-  /// Returns a list of all known nodes that are alive.
-  pub async fn alive_members(
+  /// Returns a list of all known nodes that are online.
+  pub async fn online_members(
     &self,
   ) -> SmallVec<Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
     self
@@ -119,8 +119,8 @@ where
       .collect()
   }
 
-  /// Returns the number of alive members.
-  pub async fn num_alive_members(&self) -> usize {
+  /// Returns the number of online members.
+  pub async fn num_online_members(&self) -> usize {
     self
       .inner
       .nodes

@@ -103,6 +103,7 @@ memberlist-net = { workspace = true, optional = true }
 memberlist-quic = { workspace = true, optional = true }
 nodecraft.workspace = true
 smol_str.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

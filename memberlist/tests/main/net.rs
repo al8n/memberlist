@@ -114,6 +114,9 @@ mod push_pull;
 
 // ------- memberlist tests ----------
 
+#[path = "net/encrypted_gossip_transition.rs"]
+mod encrypted_gossip_transition;
+
 #[path = "net/join.rs"]
 mod join;
 
@@ -127,6 +130,16 @@ mod join_with_labels_and_encryption;
 #[path = "net/join_with_labels_and_compression.rs"]
 #[cfg(feature = "compression")]
 mod join_with_labels_and_compression;
+
+#[path = "net/join_with_labels_and_compression_and_encryption.rs"]
+#[cfg(all(feature = "compression", feature = "encryption"))]
+mod join_with_labels_and_compression_and_encryption;
+
+#[path = "net/join_different_networks_unique_mask.rs"]
+mod join_different_networks_unique_mask;
+
+#[path = "net/join_different_networks_multi_masks.rs"]
+mod join_different_networks_multi_masks;
 
 #[path = "net/join_cancel.rs"]
 mod join_cancel;
