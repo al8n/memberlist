@@ -6,9 +6,7 @@ use nodecraft::{CheapClone, Id};
 use crate::types::{NodeState, SmallVec};
 
 #[cfg(any(test, feature = "test"))]
-mod mock;
-#[cfg(any(test, feature = "test"))]
-pub use mock::*;
+pub(crate) mod mock;
 
 mod alive;
 pub use alive::*;

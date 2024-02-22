@@ -15,7 +15,7 @@ use smol_str::SmolStr;
 use transformable::Transformable;
 
 use crate::{
-  delegate::{CompositeDelegate, MockDelegate, VoidDelegate},
+  delegate::{mock::MockDelegate, CompositeDelegate, VoidDelegate},
   state::LocalNodeState,
   tests::{get_memberlist, next_socket_addr_v4, next_socket_addr_v6, AnyError},
   transport::{Ack, Alive, IndirectPing, MaybeResolvedAddress, Message},
@@ -147,7 +147,7 @@ where
 
   let buf = Message::from(ping).encode_to_vec()?;
   // Send
-  let connection = client.connect(*m.advertise_addr()).await?;
+  let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
   if let Err(e) = send_stream.send_to(&buf).await {
     panic!("failed to send: {}", e);
@@ -222,7 +222,7 @@ where
   let buf = encoder(&msgs)?;
 
   // Send
-  let connection = client.connect(*m.advertise_addr()).await?;
+  let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
   send_stream.send_to(&buf).await?;
 
@@ -288,7 +288,7 @@ where
   let buf = Message::from(ping).encode_to_vec()?;
 
   // Send
-  let connection = client.connect(*m.advertise_addr()).await?;
+  let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
   send_stream.send_to(&buf).await?;
 
@@ -353,7 +353,7 @@ where
 
   let buf = Message::from(ping).encode_to_vec()?;
   // Send
-  let connection = client.connect(*m.advertise_addr()).await?;
+  let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
   send_stream.send_to(&buf).await?;
 
@@ -395,7 +395,7 @@ where
   let source_addr = client.local_addr();
 
   // Add a message to be broadcast
-  let n: Node<SmolStr, SocketAddr> = Node::new("rand".into(), *m.advertise_addr());
+  let n: Node<SmolStr, SocketAddr> = Node::new("rand".into(), *m.advertise_address());
   let a = Alive {
     incarnation: 10,
     meta: Bytes::new(),
@@ -415,7 +415,7 @@ where
 
   let buf = Message::from(ping).encode_to_vec()?;
   // Send
-  let connection = client.connect(*m.advertise_addr()).await?;
+  let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
   send_stream.send_to(&buf).await?;
 
@@ -721,7 +721,7 @@ where
   <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
-  let bind_addr = *m.advertise_addr();
+  let bind_addr = *m.advertise_address();
   let id0: SmolStr = "Test 0".into();
   {
     let mut members = m.inner.nodes.write().await;
@@ -833,7 +833,7 @@ where
     })?;
   m2.join(Node::new(
     m1.local_id().cheap_clone(),
-    MaybeResolvedAddress::resolved(*m1.advertise_addr()),
+    MaybeResolvedAddress::resolved(*m1.advertise_address()),
   ))
   .await
   .map_err(|e| {
@@ -866,13 +866,13 @@ where
 
   m2.join(Node::new(
     m1.local_id().cheap_clone(),
-    MaybeResolvedAddress::resolved(*m1.advertise_addr()),
+    MaybeResolvedAddress::resolved(*m1.advertise_address()),
   ))
   .await?;
   assert_eq!(m2.num_members().await, 2);
   assert_eq!(m2.estimate_num_nodes(), 2);
 
-  m2.send(m1.advertise_addr(), Bytes::from_static(b"send"))
+  m2.send(m1.advertise_address(), Bytes::from_static(b"send"))
     .await
     .map_err(|e| {
       tracing::error!("fail to send packet {e}");
@@ -880,7 +880,7 @@ where
     })
     .unwrap();
 
-  m2.send_reliable(m1.advertise_addr(), Bytes::from_static(b"send_reliable"))
+  m2.send_reliable(m1.advertise_address(), Bytes::from_static(b"send_reliable"))
     .await
     .map_err(|e| {
       tracing::error!("fail to send message {e}");

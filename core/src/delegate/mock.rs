@@ -1,5 +1,4 @@
 use futures::lock::Mutex;
-use nodecraft::Address;
 
 use super::*;
 
@@ -25,7 +24,7 @@ impl<I, A> Default for MockDelegateInner<I, A> {
   }
 }
 
-pub struct MockDelegate<I, A> {
+pub(crate) struct MockDelegate<I, A> {
   inner: Arc<Mutex<MockDelegateInner<I, A>>>,
 }
 
@@ -39,6 +38,15 @@ impl<I, A> MockDelegate<I, A> {
   pub fn new() -> Self {
     Self {
       inner: Arc::new(Mutex::new(MockDelegateInner::default())),
+    }
+  }
+
+  pub fn with_meta(meta: Bytes) -> Self {
+    Self {
+      inner: Arc::new(Mutex::new(MockDelegateInner {
+        meta,
+        ..Default::default()
+      })),
     }
   }
 }
@@ -68,7 +76,10 @@ impl<I, A> MockDelegate<I, A> {
   }
 }
 
-impl<I: Id, A: Address> NodeDelegate for MockDelegate<I, A> {
+impl<I: Id, A> NodeDelegate for MockDelegate<I, A>
+where
+  A: CheapClone + Send + Sync + 'static,
+{
   type Address = A;
   type Id = I;
 

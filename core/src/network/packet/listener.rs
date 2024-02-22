@@ -78,7 +78,7 @@ where
       }};
     }
 
-    tracing::trace!(target = "memberlist.packet", local = %self.advertise_addr(), from = %from, packet=?msg, "handle packet");
+    tracing::trace!(target = "memberlist.packet", local = %self.advertise_address(), from = %from, packet=?msg, "handle packet");
 
     match msg {
       Message::Ping(ping) => self.handle_ping(ping, from).await,

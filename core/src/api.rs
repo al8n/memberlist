@@ -44,7 +44,7 @@ where
 
   /// Returns the advertise address of local node.
   #[inline]
-  pub fn advertise_addr(&self) -> &<T::Resolver as AddressResolver>::ResolvedAddress {
+  pub fn advertise_address(&self) -> &<T::Resolver as AddressResolver>::ResolvedAddress {
     &self.inner.advertise
   }
 
@@ -54,9 +54,9 @@ where
     self.delegate.as_deref()
   }
 
-  /// Returns the local server instance.
+  /// Returns the local node instance state.
   #[inline]
-  pub async fn local_server(
+  pub async fn local_state(
     &self,
   ) -> Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
     let nodes = self.inner.nodes.read().await;
@@ -66,6 +66,19 @@ where
       .get(&self.inner.id)
       .map(|&idx| nodes.nodes[idx].state.server.clone())
       .unwrap()
+  }
+
+  /// Returns the node state of the given id. (if any).
+  pub async fn by_id(
+    &self,
+    id: &T::Id,
+  ) -> Option<Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
+    let members = self.inner.nodes.read().await;
+
+    members
+      .node_map
+      .get(id)
+      .map(|&idx| members.nodes[idx].state.server.clone())
   }
 
   /// Returns a list of all known nodes.
@@ -90,12 +103,11 @@ where
     self.inner.nodes.read().await.nodes.len()
   }
 
-  /// Returns the number of alive nodes currently known. Between
-  /// the time of calling this and calling Members, the number of alive nodes
-  /// may have changed, so this shouldn't be used to determine how many
-  /// members will be returned by Members.
-  #[inline]
-  pub async fn alive_members(&self) -> usize {
+  /// Returns a list of all known nodes that match the given predicate.
+  pub async fn members_by(
+    &self,
+    mut f: impl FnMut(&NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>) -> bool,
+  ) -> SmallVec<Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
     self
       .inner
       .nodes
@@ -103,8 +115,41 @@ where
       .await
       .nodes
       .iter()
-      .filter(|n| !n.state.dead_or_left())
+      .filter(|n| f(&n.state))
+      .map(|n| n.state.server.clone())
+      .collect()
+  }
+
+  /// Returns the number of members match the given predicate.
+  pub async fn num_members_by(
+    &self,
+    mut f: impl FnMut(&NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>) -> bool,
+  ) -> usize {
+    self
+      .inner
+      .nodes
+      .read()
+      .await
+      .nodes
+      .iter()
+      .filter(|n| f(&n.state))
       .count()
+  }
+
+  /// Returns a list of map result on all known members that match the given predicate.
+  pub async fn members_map_by<O>(
+    &self,
+    mut f: impl FnMut(&NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>) -> Option<O>,
+  ) -> SmallVec<O> {
+    self
+      .inner
+      .nodes
+      .read()
+      .await
+      .nodes
+      .iter()
+      .filter_map(|n| f(&n.state))
+      .collect()
   }
 }
 

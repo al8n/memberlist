@@ -75,7 +75,11 @@ impl core::fmt::Display for UnknownState {
 impl std::error::Error for UnknownState {}
 
 /// Represents a node in the cluster
-#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
+#[viewit::viewit(
+  vis_all = "pub(crate)",
+  getters(vis_all = "pub"),
+  setters(vis_all = "pub(crate)", prefix = "with")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
