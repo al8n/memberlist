@@ -5,7 +5,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use memberlist_utils::SmallVec;
+use memberlist_utils::{Label, SmallVec};
 use nodecraft::Id;
 
 use crate::{
@@ -154,6 +154,93 @@ where
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
   let num = m2.estimate_num_nodes();
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
+}
+
+/// Unit tests for join a `Memberlist` with labels.
+pub async fn memberlist_join_with_labels<F, T, R>(mut get_transport: impl FnMut(usize, Label) -> F)
+where
+  F: Future<Output = T>,
+  T: Transport<Runtime = R>,
+  R: Runtime,
+  <R::Sleep as Future>::Output: Send,
+  <R::Interval as Stream>::Item: Send,
+{
+  let label1 = Label::try_from("blah").unwrap();
+  let m1 = Memberlist::new(get_transport(1, label1.clone()).await, Options::lan())
+    .await
+    .unwrap();
+  let m2 = Memberlist::new(get_transport(2, label1.clone()).await, Options::lan())
+    .await
+    .unwrap();
+
+  let target = Node::new(
+    m1.local_id().clone(),
+    MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
+  );
+  m2.join(target.clone()).await.unwrap();
+
+  let m1m = m1.num_alive_members().await;
+  assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
+  let m1m = m1.estimate_num_nodes();
+  assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
+
+  let m2m = m2.num_alive_members().await;
+  assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
+  let m2m = m2.estimate_num_nodes();
+  assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
+
+  // Create a third node that uses no label
+  let m3 = Memberlist::new(get_transport(3, Label::empty()).await, Options::lan())
+    .await
+    .unwrap();
+  m3.join(target.clone()).await.unwrap();
+
+  let m1m = m1.num_alive_members().await;
+  assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
+  let m1m = m1.estimate_num_nodes();
+  assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
+
+  let m2m = m2.num_alive_members().await;
+  assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
+  let m2m = m2.estimate_num_nodes();
+  assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
+
+  let m3m = m3.num_alive_members().await;
+  assert_eq!(m3m, 1, "expected 1 member, got {}", m3m);
+  let m3m = m3.estimate_num_nodes();
+  assert_eq!(m3m, 1, "expected 1 member, got {}", m3m);
+
+  // Create a fourth node that uses a mismatched label
+  let label = Label::try_from("not-blah").unwrap();
+  let m4 = Memberlist::new(get_transport(4, label).await, Options::lan())
+    .await
+    .unwrap();
+  m4.join(target).await.unwrap();
+
+  let m1m = m1.num_alive_members().await;
+  assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
+  let m1m = m1.estimate_num_nodes();
+  assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
+
+  let m2m = m2.num_alive_members().await;
+  assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
+  let m2m = m2.estimate_num_nodes();
+  assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
+
+  let m3m = m3.num_alive_members().await;
+  assert_eq!(m3m, 1, "expected 1 member, got {}", m3m);
+  let m3m = m3.estimate_num_nodes();
+  assert_eq!(m3m, 1, "expected 1 member, got {}", m3m);
+
+  let m4m = m4.num_alive_members().await;
+  assert_eq!(m4m, 1, "expected 1 member, got {}", m4m);
+  let m4m = m4.estimate_num_nodes();
+  assert_eq!(m4m, 1, "expected 1 member, got {}", m4m);
+
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
+  m3.shutdown().await.unwrap();
+  m4.shutdown().await.unwrap();
 }
 
 struct Canceled(&'static str);

@@ -1,8 +1,7 @@
-use std::{
-  net::SocketAddr,
-  sync::{atomic::Ordering, Arc},
-  time::Duration,
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+
+#[cfg(any(test, feature = "test"))]
+use std::sync::atomic::Ordering;
 
 use agnostic::Runtime;
 use futures::FutureExt;

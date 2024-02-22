@@ -6,24 +6,26 @@ macro_rules! __handle_join_dead_node {
         [< $($prefix)? _handle_v4_join_dead_node_with_label_and_compression >] ({
           let s = $s;
           let c = $s;
+          let client_addr = memberlist_core::transport::tests::AddressKind::V4.next(0);
+          let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
-          memberlist_quic::tests::join_dead_node::join_dead_node::<_, _, $rt>(
+          memberlist_quic::tests::join_dead_node::join_dead_node::<_, $rt>(
             s,
-            c,
+            client,
             memberlist_core::transport::tests::AddressKind::V4,
-          ).await
+          ).await.unwrap()
         }),
         [< $($prefix)? _handle_v6_join_dead_node_with_label_and_compression >] ({
           let s = $s;
           let c = $s;
-          let client_addr = kind.next(0);
+          let client_addr = memberlist_core::transport::tests::AddressKind::V6.next(0);
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
-          memberlist_quic::tests::join_dead_node::join_dead_node::<_, _, $rt>(
+          memberlist_quic::tests::join_dead_node::join_dead_node::<_, $rt>(
             s,
-            c,
+            client,
             memberlist_core::transport::tests::AddressKind::V6,
-          ).await
+          ).await.unwrap()
         }),
       ));
     }

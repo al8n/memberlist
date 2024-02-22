@@ -17,17 +17,11 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  use nodecraft::CheapClone;
-
-  let name = format!("{kind}_join_dead_node");
-  let label = Label::try_from(&name)?;
-  let pk = SecretKey::from([1; 32]);
-
   let mut opts = NetTransportOptions::new("node 1".into());
   opts.add_bind_address(kind.next(0));
   let trans1 =
     NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s1, opts).await?;
 
-  join_dead_node_in(trans1, client, "fake".into()).await?;
+  join_dead_node_in(trans1, client, "fake".into()).await;
   Ok(())
 }

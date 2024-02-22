@@ -5,13 +5,13 @@ use crate::{QuicTransport, QuicTransportOptions, StreamLayer};
 
 use super::*;
 
-pub async fn join_dead_node<S1, S2, R>(
-  s1: S1,
+pub async fn join_dead_node<S, R>(
+  s1: S,
   client: QuicTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S1: StreamLayer,
+  S: StreamLayer,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
