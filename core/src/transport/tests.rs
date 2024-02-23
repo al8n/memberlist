@@ -8,7 +8,7 @@ use std::{
 
 use agnostic::Runtime;
 use bytes::Bytes;
-use either::Either;
+
 use futures::{FutureExt, Stream};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 use smol_str::SmolStr;
@@ -403,8 +403,7 @@ where
     protocol_version: crate::ProtocolVersion::V0,
     delegate_version: crate::DelegateVersion::V0,
   };
-  m.broadcast(Either::Left(n.id().clone()), Message::from(a))
-    .await;
+  m.broadcast(n.id().clone(), Message::from(a)).await;
 
   // Encode a ping
   let ping = Ping {

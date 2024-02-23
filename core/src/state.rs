@@ -17,7 +17,7 @@ use super::{
 };
 
 use agnostic::Runtime;
-use either::Either;
+
 use futures::{Future, FutureExt, Stream};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 use rand::{seq::SliceRandom, Rng};
@@ -275,15 +275,17 @@ where
       }
 
       // If we are leaving, we broadcast and wait
+      tracing::error!("DEBUG: broadcast dead msg in dead node 1");
       self
         .broadcast_notify(
-          Either::Left(d.node.cheap_clone()),
+          d.node.cheap_clone(),
           d.into(),
           Some(self.inner.leave_broadcast_tx.clone()),
         )
         .await;
     } else {
-      self.broadcast(Either::Left(d.node.cheap_clone()), d.into()).await;
+      tracing::error!("DEBUG: broadcast dead msg in dead node 2");
+      self.broadcast(d.node.cheap_clone(), d.into()).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -333,9 +335,8 @@ where
     // that's already suspect.
     if let Some(timer) = &mut state.suspicion {
       if timer.confirm(&s.from).await {
-        self
-          .broadcast(Either::Left(s.node.cheap_clone()), s.into())
-          .await;
+        tracing::error!("DEBUG: broadcast suspect msg in suspect node 1");
+        self.broadcast(s.node.cheap_clone(), s.into()).await;
       }
       return Ok(());
     }
@@ -359,7 +360,8 @@ where
       // Do not mark ourself suspect
       return Ok(());
     } else {
-      self.broadcast(Either::Left(s.node.clone()), s.into()).await;
+      tracing::error!("DEBUG: broadcast suspect msg in suspect node 2");
+      self.broadcast(s.node.clone(), s.into()).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -620,9 +622,10 @@ where
       self.refute(&member.state, alive.incarnation).await;
       tracing::warn!(target =  "memberlist.state", local = %self.inner.id, peer = %alive.node, local_meta = ?member.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
     } else {
+      tracing::error!("DEBUG: broadcast alive msg in alive node");
       self
         .broadcast_notify(
-          Either::Right(alive.node.address().cheap_clone()),
+          alive.node.id().cheap_clone(),
           alive.cheap_clone().into(),
           notify_tx,
         )
@@ -1388,9 +1391,8 @@ where
       protocol_version: state.protocol_version,
       delegate_version: state.delegate_version,
     };
-    self
-      .broadcast(Either::Right(a.node.address().cheap_clone()), a.into())
-      .await;
+    tracing::error!("DEBUG: broadcast alive msg in refute");
+    self.broadcast(a.node.id().cheap_clone(), a.into()).await;
   }
 }
 

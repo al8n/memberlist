@@ -9,9 +9,7 @@
   5. probe_node_dogpile
   6. dead_node
   7. dead_node_left
-  8. gossip
-  9. gossip_to_dead
-  10. push_pull
+  8. push_pull
 - Random Failure
   1. suspect_node_double_suspect
   2. merge_state
@@ -20,4 +18,5 @@
   2. `create*`
   3. `node_delegate*`
   4. `ping*`
-  5. 
+  5. `gossip*`
+  6. 

@@ -6,7 +6,7 @@ use crate::{
   types::{Message, TinyVec},
 };
 use async_channel::Sender;
-use either::Either;
+
 use nodecraft::{resolver::AddressResolver, CheapClone};
 
 /// Something that can be broadcasted via gossip to
@@ -47,13 +47,15 @@ pub trait Broadcast: core::fmt::Debug + Send + Sync + 'static {
 
 #[viewit::viewit]
 pub(crate) struct MemberlistBroadcast<I, A, W> {
-  node: Either<I, A>,
+  node: I,
   msg: Message<I, A>,
   notify: Option<async_channel::Sender<()>>,
   _marker: std::marker::PhantomData<W>,
 }
 
-impl<I: core::fmt::Debug, A: core::fmt::Debug, W> core::fmt::Debug for MemberlistBroadcast<I, A, W> {
+impl<I: core::fmt::Debug, A: core::fmt::Debug, W> core::fmt::Debug
+  for MemberlistBroadcast<I, A, W>
+{
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct(std::any::type_name::<Self>())
       .field("node", &self.node)
@@ -82,7 +84,7 @@ where
     + 'static,
   W: Wire<Id = I, Address = A>,
 {
-  type Id = Either<I, A>;
+  type Id = I;
   type Message = Message<I, A>;
 
   fn id(&self) -> Option<&Self::Id> {
@@ -122,7 +124,7 @@ where
   #[inline]
   pub(crate) async fn broadcast_notify(
     &self,
-    node: Either<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    node: T::Id,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     notify_tx: Option<Sender<()>>,
   ) {
@@ -132,16 +134,16 @@ where
   #[inline]
   pub(crate) async fn broadcast(
     &self,
-    node: Either<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    node: T::Id,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) {
     let _ = self.queue_broadcast(node, msg, None).await;
   }
 
   #[inline]
-  pub(crate) async fn queue_broadcast(
+  async fn queue_broadcast(
     &self,
-    node: Either<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    node: T::Id,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     notify_tx: Option<Sender<()>>,
   ) {

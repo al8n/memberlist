@@ -2701,7 +2701,7 @@ where
     delegate_version: crate::DelegateVersion::V0,
   };
 
-  m2.alive_node(a2, None, false).await;
+  m1.alive_node(a2, None, false).await;
 
   let a3 = Alive {
     incarnation: 1,
@@ -2711,28 +2711,18 @@ where
     delegate_version: crate::DelegateVersion::V0,
   };
 
-  m3.alive_node(a3, None, false).await;
+  m1.alive_node(a3, None, false).await;
 
   // Gossip should send all this to m2. Retry a few times because it's UDP and
   // timing and stuff makes this flaky without.
 
   for idx in 1..=15 {
-    let (failed, failed_msg) = {
-      m1.gossip().await;
+    m1.gossip().await;
 
-      R::sleep(Duration::from_millis(3)).await;
+    R::sleep(Duration::from_millis(3)).await;
 
-      if subscriber.len() < 3 {
-        panic!("expected 3 events, got {}", subscriber.len());
-      }
-
-      (false, "".to_string())
-    };
-    if !failed {
-      break;
-    }
-    if idx == 15 {
-      panic!("failed after {} attempts: {}", 15, failed_msg);
+    if subscriber.len() < 3 && idx == 15 {
+      panic!("expected 3 events, got {}", subscriber.len());
     }
 
     R::sleep(Duration::from_millis(250)).await;
@@ -2765,7 +2755,7 @@ where
   let m2 = host_memberlist_with_delegate(
     t2,
     CompositeDelegate::new().with_event_delegate(event_delegate),
-    t2_opts.with_gossip_interval(Duration::from_millis(10)),
+    t2_opts,
   )
   .await
   .unwrap();
@@ -2788,7 +2778,7 @@ where
     delegate_version: crate::DelegateVersion::V0,
   };
 
-  m2.alive_node(a2, None, false).await;
+  m1.alive_node(a2, None, false).await;
 
   // Shouldn't send anything to m2 here, node has been dead for 2x the GossipToTheDeadTime
   m1.change_node(m2.local_id(), |state| {
@@ -2814,29 +2804,19 @@ where
   // Should gossip to m2 because its state has changed within GossipToTheDeadTime
   m1.change_node(m2.local_id(), |state| {
     *state = LocalNodeState {
-      state_change: state.state_change.sub(Duration::from_millis(20)),
+      state_change: Instant::now().sub(Duration::from_millis(20)),
       ..state.clone()
     };
   })
   .await;
 
   for idx in 1..=5 {
-    let (failed, failed_msg) = {
-      m1.gossip().await;
+    m1.gossip().await;
 
-      R::sleep(Duration::from_millis(3)).await;
+    R::sleep(Duration::from_millis(3)).await;
 
-      if subscriber.len() < 2 {
-        panic!("expected 2 messages from gossip, got {}", subscriber.len());
-      }
-
-      (false, "".to_string())
-    };
-    if !failed {
-      break;
-    }
-    if idx == 5 {
-      panic!("failed after {} attempts: {}", 5, failed_msg);
+    if subscriber.len() < 2 && idx == 5 {
+      panic!("expected 2 messages from gossip, got {}", subscriber.len());
     }
 
     R::sleep(Duration::from_millis(10)).await;
