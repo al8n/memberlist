@@ -284,16 +284,8 @@ where
         // Block until the broadcast goes out
         if memberlist.any_alive() {
           if timeout > Duration::ZERO {
-            futures::select_biased! {
-              rst = self.inner.leave_broadcast_rx.recv().fuse() => {
-                if let Err(e) = rst {
-                  tracing::error!(
-                    target: "memberlist",
-                    "failed to receive leave broadcast: {}",
-                    e
-                  );
-                }
-              },
+            futures::select! {
+              _ = self.inner.leave_broadcast_rx.recv().fuse() => {},
               _ = <T::Runtime as Runtime>::sleep(timeout).fuse() => {
                 return Err(Error::LeaveTimeout);
               }
@@ -477,7 +469,7 @@ where
     // Wait for the broadcast or a timeout
     if self.any_alive().await {
       if timeout > Duration::ZERO {
-        futures::select_biased! {
+        futures::select! {
           _ = notify_rx.recv().fuse() => {},
           _ = <T::Runtime as Runtime>::sleep(timeout).fuse() => return Err(Error::UpdateTimeout),
         }

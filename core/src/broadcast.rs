@@ -11,7 +11,7 @@ use nodecraft::{resolver::AddressResolver, CheapClone};
 
 /// Something that can be broadcasted via gossip to
 /// the memberlist cluster.
-pub trait Broadcast: Send + Sync + 'static {
+pub trait Broadcast: core::fmt::Debug + Send + Sync + 'static {
   type Id: Clone + Eq + core::hash::Hash + core::fmt::Debug + core::fmt::Display;
   type Message: Clone + core::fmt::Debug + Send + Sync + 'static;
 
@@ -51,6 +51,15 @@ pub(crate) struct MemberlistBroadcast<I, A, W> {
   msg: Message<I, A>,
   notify: Option<async_channel::Sender<()>>,
   _marker: std::marker::PhantomData<W>,
+}
+
+impl<I: core::fmt::Debug, A: core::fmt::Debug, W> core::fmt::Debug for MemberlistBroadcast<I, A, W> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct(std::any::type_name::<Self>())
+      .field("node", &self.node)
+      .field("msg", &self.msg)
+      .finish()
+  }
 }
 
 impl<I, A, W> Broadcast for MemberlistBroadcast<I, A, W>
@@ -136,6 +145,7 @@ where
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     notify_tx: Option<Sender<()>>,
   ) {
+    // tracing::error!("DEBUG: queuing {:?}", msg);
     self
       .inner
       .broadcast

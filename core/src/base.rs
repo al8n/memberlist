@@ -227,10 +227,16 @@ impl<I, A, R> Members<I, A, R> {
 
 impl<I: PartialEq, A, R> Members<I, A, R> {
   pub(crate) fn any_alive(&self) -> bool {
-    self
+    for m in self
       .nodes
       .iter()
-      .any(|m| !m.dead_or_left() && m.id().ne(self.local.id()))
+    {
+      if !m.dead_or_left() && m.id().ne(self.local.id()) {
+        return true;
+      }
+    }
+
+    false
   }
 }
 

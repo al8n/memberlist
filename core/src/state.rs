@@ -248,7 +248,9 @@ where
     }
 
     // Clear out any suspicion timer that may be in effect.
-    state.suspicion = None;
+    if let Some(suspicion) = state.suspicion.take() {
+      suspicion.stop().await;
+    }
 
     // Ignore if node is already dead
     if state.state.dead_or_left() {
@@ -256,12 +258,14 @@ where
     }
 
     let incarnation = d.incarnation;
-    let is_self = d.is_self();
+    let is_dead_self = d.node == d.from;
+    let is_self = state.id().eq(self.local_id());
+
     // Check if this is us
     if is_self {
       // If we are not leaving we need to refute
       if !self.has_left() {
-        // self.refute().await?;
+        self.refute(state, incarnation).await;
         tracing::warn!(
           target: "memberlist.state",
           "refuting a dead message (from: {})",
@@ -273,13 +277,13 @@ where
       // If we are leaving, we broadcast and wait
       self
         .broadcast_notify(
-          Either::Left(d.node.clone()),
+          Either::Left(d.node.cheap_clone()),
           d.into(),
           Some(self.inner.leave_broadcast_tx.clone()),
         )
         .await;
     } else {
-      self.broadcast(Either::Left(d.node.clone()), d.into()).await;
+      self.broadcast(Either::Left(d.node.cheap_clone()), d.into()).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -295,7 +299,7 @@ where
 
     // If the dead message was send by the node itself, mark it is left
     // instead of dead.
-    if is_self {
+    if is_dead_self {
       state.state.state = State::Left;
     } else {
       state.state.state = State::Dead;

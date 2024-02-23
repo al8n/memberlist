@@ -221,13 +221,6 @@ macro_rules! bad_bail {
 bad_bail!(Suspect);
 bad_bail!(Dead);
 
-impl<I: PartialEq> Dead<I> {
-  #[inline]
-  pub(crate) fn is_self(&self) -> bool {
-    self.node.eq(&self.from)
-  }
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;

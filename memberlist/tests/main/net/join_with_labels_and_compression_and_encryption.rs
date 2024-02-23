@@ -53,7 +53,7 @@ pub async fn memberlist_join_with_labels_and_compression_and_encryption<F, T, R>
   )
   .await
   .unwrap();
-  m3.join(target.clone()).await.unwrap();
+  m3.join(target.clone()).await.unwrap_err();
 
   let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
@@ -72,7 +72,7 @@ pub async fn memberlist_join_with_labels_and_compression_and_encryption<F, T, R>
   )
   .await
   .unwrap();
-  m4.join(target).await.unwrap();
+  m4.join(target).await.unwrap_err();
 
   let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);

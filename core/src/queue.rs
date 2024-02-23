@@ -198,7 +198,10 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
 
     // Check if this message invalidates another.
     if let Some(bid) = lb.broadcast.id() {
+      // tracing::error!("DEBUG: should go into here {} {:?}", bid, inner.m);
+
       if let Some(old) = inner.m.remove(bid) {
+        // tracing::error!("DEBUG: should finish here {}", bid);
         old.broadcast.finished().await;
         inner.remove(&old);
       }
@@ -222,6 +225,7 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
     }
 
     // Append to the relevant queue.
+    tracing::error!("DEBUG: Add {:?}", lb.broadcast.id());
     inner.insert(lb);
   }
 
@@ -255,6 +259,7 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
   }
 }
 
+#[derive(Debug)]
 pub(crate) struct LimitedBroadcast<B: Broadcast> {
   // btree-key[0]: Number of transmissions attempted.
   transmits: usize,

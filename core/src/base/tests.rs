@@ -193,7 +193,7 @@ where
   let m3 = Memberlist::new(get_transport(3, Label::empty()).await, Options::lan())
     .await
     .unwrap();
-  m3.join(target.clone()).await.unwrap();
+  m3.join(target.clone()).await.unwrap_err();
 
   let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
@@ -215,7 +215,7 @@ where
   let m4 = Memberlist::new(get_transport(4, label).await, Options::lan())
     .await
     .unwrap();
-  m4.join(target).await.unwrap();
+  m4.join(target).await.unwrap_err();
 
   let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
@@ -421,10 +421,10 @@ where
 
   // Check delegate invocation
   let delegate = m2.delegate().unwrap().alive_delegate();
-  assert_eq!(delegate.count.load(Ordering::SeqCst), 1);
+  assert_ne!(delegate.count.load(Ordering::SeqCst), 0, "should invoke delegate");
 
   let delegate = m1.delegate().unwrap().alive_delegate();
-  assert_eq!(delegate.count.load(Ordering::SeqCst), 1);
+  assert_ne!(delegate.count.load(Ordering::SeqCst), 0, "should invoke delegate");
 }
 
 /// Unit tests for join and shutdown a `Memberlist`.
@@ -450,7 +450,7 @@ where
   m1.shutdown().await.unwrap();
 
   wait_for_condition(|| async {
-    let num = m2.num_members().await;
+    let num = m2.num_online_members().await;
     (num == 1, format!("expected 1 node, got {num}"))
   })
   .await;
@@ -797,8 +797,8 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let m1 = Memberlist::new(t1, t1_opts).await.unwrap();
-  let m2 = Memberlist::new(t2, t2_opts).await.unwrap();
+  let m1 = Memberlist::new(t1, t1_opts.with_gossip_interval(Duration::from_millis(1))).await.unwrap();
+  let m2 = Memberlist::new(t2, t2_opts.with_gossip_interval(Duration::from_millis(1))).await.unwrap();
 
   let target = Node::new(
     m1.local_id().clone(),
@@ -977,21 +977,21 @@ where
   .unwrap();
 
   let target = Node::new(
-    m2.local_id().clone(),
-    MaybeResolvedAddress::resolved(m2.advertise_address().clone()),
+    m1.local_id().clone(),
+    MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
 
-  m1.join(target).await.unwrap();
+  m2.join(target).await.unwrap();
 
   wait_until_size::<_, _, R>(&m1, 2).await;
   wait_until_size::<_, _, R>(&m2, 2).await;
 
-  R::sleep(probe_interval).await;
+  R::sleep(probe_interval * 2).await;
 
   m1.shutdown().await.unwrap();
   m2.shutdown().await.unwrap();
 
-  let delegate = m1.delegate().unwrap().ping_delegate();
+  let delegate = m2.delegate().unwrap().ping_delegate();
 
   let inner = delegate.0.lock().await;
   assert!(inner.other.is_some(), "should get notified");

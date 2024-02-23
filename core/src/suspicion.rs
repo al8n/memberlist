@@ -119,6 +119,10 @@ where
     }
     true
   }
+
+  pub(crate) async fn stop(&self) {
+    self.after_func.stop().await;
+  }
 }
 
 pub(super) struct AfterFunc<R> {

@@ -1,4 +1,6 @@
 
+# Net
+
 - Not pass
   1. alive_node_conflict
   2. suspect_node
@@ -13,3 +15,9 @@
 - Random Failure
   1. suspect_node_double_suspect
   2. merge_state
+- pass
+  1. `join*`
+  2. `create*`
+  3. `node_delegate*`
+  4. `ping*`
+  5. 
