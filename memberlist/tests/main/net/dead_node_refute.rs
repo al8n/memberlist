@@ -11,9 +11,8 @@ macro_rules! dead_node_refute {
 
           let t1 = NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();
           let t1_opts = Options::lan();
-
-          let test_node = Node::new("test".into(), "127.0.0.1:8000".parse().unwrap());
-          dead_node_refute(t1, t1_opts, test_node).await;
+ 
+          dead_node_refute(t1, t1_opts).await;
         });
       }
     }

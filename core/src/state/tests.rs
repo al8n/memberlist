@@ -1638,7 +1638,7 @@ where
   let m: Memberlist<T> = get_memberlist(
     t1,
     VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
-    t1_opts,
+    t1_opts.with_dead_node_reclaim_time(Duration::from_millis(10)),
   )
   .await
   .unwrap();
@@ -2359,7 +2359,7 @@ pub async fn dead_node_old_dead<T, R>(
   .unwrap();
 
   let a = Alive {
-    incarnation: 1,
+    incarnation: 10,
     meta: Bytes::new(),
     node: test_node.clone(),
     protocol_version: crate::ProtocolVersion::V0,
@@ -2447,7 +2447,6 @@ pub async fn dead_node_alive_replay<T, R>(
 pub async fn dead_node_refute<T, R>(
   t1: T,
   t1_opts: Options,
-  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
@@ -2465,7 +2464,7 @@ pub async fn dead_node_refute<T, R>(
   let a = Alive {
     incarnation: 1,
     meta: Bytes::new(),
-    node: test_node.clone(),
+    node: m.advertise_node(),
     protocol_version: crate::ProtocolVersion::V0,
     delegate_version: crate::DelegateVersion::V0,
   };
@@ -2481,7 +2480,7 @@ pub async fn dead_node_refute<T, R>(
 
   let d = Dead {
     incarnation: 1,
-    node: test_node.id().clone(),
+    node: m.local_id().clone(),
     from: m.local_id().cheap_clone(),
   };
 
@@ -2490,7 +2489,7 @@ pub async fn dead_node_refute<T, R>(
     m.dead_node(&mut members, d).await.unwrap();
   }
 
-  let state = m.get_node_state(test_node.id()).await.unwrap();
+  let state = m.get_node_state(m.local_id()).await.unwrap();
   assert_eq!(state, State::Alive, "should still be Alive");
 
   // Check a broad cast is queued
@@ -2871,28 +2870,18 @@ where
     delegate_version: crate::DelegateVersion::V0,
   };
 
-  m2.alive_node(a2, None, false).await;
+  m1.alive_node(a2, None, false).await;
 
   for idx in 1..=5 {
-    let (failed, failed_msg) = {
-      m1.gossip().await;
+    m1.gossip().await;
 
-      R::sleep(Duration::from_millis(3)).await;
+    R::sleep(Duration::from_millis(3)).await;
 
-      if subscriber.len() < 2 {
-        panic!(
-          "expected 2 messages from push pull, got {}",
-          subscriber.len()
-        );
-      }
-
-      (false, "".to_string())
-    };
-    if !failed {
-      break;
-    }
-    if idx == 5 {
-      panic!("failed after {} attempts: {}", 5, failed_msg);
+    if subscriber.len() < 2 && idx == 5 {
+      panic!(
+        "expected 2 messages from push pull, got {}",
+        subscriber.len()
+      );
     }
 
     R::sleep(Duration::from_millis(10)).await;
