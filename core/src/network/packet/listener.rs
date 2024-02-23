@@ -171,6 +171,7 @@ where
     // because we only have one version
 
     // Send a ping to the correct host.
+    tracing::error!("DEBUG: call next seq no from handle indirect ping");
     let local_seq_no = self.next_seq_no();
 
     let ping = Ping {

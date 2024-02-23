@@ -410,6 +410,7 @@ where
   }
 }
 
+#[derive(Debug)]
 struct Batch<I, A> {
   num_packets: usize,
   packets: TinyVec<Message<I, A>>,

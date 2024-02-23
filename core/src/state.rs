@@ -986,13 +986,14 @@ where
         .send_msg(target.address(), ping.cheap_clone().into())
         .await
       {
-        tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
+        tracing::error!(target = "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
         if e.is_remote_failure() {
           self
-            .handle_remote_failure(target, ping, ack_rx, nack_rx, deadline)
+            .handle_remote_failure(target, ping.seq_no, &ack_rx, &nack_rx, deadline)
             .await;
+        } else {
+          return;
         }
-        return;
       }
     } else {
       let suspect = Suspect {
@@ -1012,10 +1013,11 @@ where
         tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
         if e.is_remote_failure() {
           self
-            .handle_remote_failure(target, ping, ack_rx, nack_rx, deadline)
+            .handle_remote_failure(target, ping.seq_no, &ack_rx, &nack_rx, deadline)
             .await;
+        } else {
+          return;
         }
-        return;
       }
     }
 
@@ -1063,16 +1065,16 @@ where
     }
 
     self
-      .handle_remote_failure(target, ping, ack_rx, nack_rx, deadline)
+      .handle_remote_failure(target, ping.seq_no, &ack_rx, &nack_rx, deadline)
       .await
   }
 
   async fn handle_remote_failure(
     &self,
     target: &LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    ping: Ping<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    ack_rx: async_channel::Receiver<AckMessage>,
-    nack_rx: async_channel::Receiver<()>,
+    ping_seq_no: u32,
+    ack_rx: &async_channel::Receiver<AckMessage>,
+    nack_rx: &async_channel::Receiver<()>,
     deadline: Instant,
   ) {
     // Get some random live nodes.
@@ -1097,14 +1099,17 @@ where
 
     // Attempt an indirect ping.
     let expected_nacks = nodes.len() as isize;
-    let ind = IndirectPing::from(ping);
-    let ind_target = ind.target.cheap_clone();
+    let ind = IndirectPing {
+      seq_no: ping_seq_no,
+      source: self.advertise_node(),
+      target: target.node(),
+    };
 
     for peer in nodes {
       // We only expect nack to be sent from peers who understand
       // version 4 of the protocol.
       if let Err(e) = self
-        .send_msg(ind_target.address(), ind.cheap_clone().into())
+        .send_msg(peer.address(), ind.cheap_clone().into())
         .await
       {
         tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");

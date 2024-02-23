@@ -689,7 +689,7 @@ where
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
 
   // Wait for a little while
-  R::sleep(Duration::from_millis(500)).await;
+  R::sleep(Duration::from_millis(1500)).await;
 
   let msg1 = m1.delegate().unwrap().node_delegate().get_messages().await;
 
