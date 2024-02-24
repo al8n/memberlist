@@ -106,7 +106,11 @@ where
   async fn finished(&self) {
     if let Some(tx) = &self.notify {
       if let Err(e) = tx.send(()).await {
-        tracing::error!(target = "memberlist", "broadcast failed to notify: {}", e);
+        tracing::error!(
+          target = "memberlist.broadcast",
+          "broadcast failed to notify: {}",
+          e
+        );
       }
     }
   }
@@ -147,7 +151,6 @@ where
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     notify_tx: Option<Sender<()>>,
   ) {
-    // tracing::error!("DEBUG: queuing {:?}", msg);
     self
       .inner
       .broadcast

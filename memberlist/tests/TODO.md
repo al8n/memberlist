@@ -2,11 +2,10 @@
 # Net
 
 - Not pass
-  1. probe_node_dogpile
-  2. leave
-  3. user_data
-  4. send
-  5. encrypted_gossip_transition
+  1. leave
+  2. user_data
+  3. send
+  4. encrypted_gossip_transition
 
 # TODO
 

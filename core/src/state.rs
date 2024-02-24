@@ -244,9 +244,7 @@ where
     }
 
     // Clear out any suspicion timer that may be in effect.
-    if let Some(suspicion) = state.suspicion.take() {
-      suspicion.stop().await;
-    }
+    state.suspicion = None;
 
     // Ignore if node is already dead
     if state.state.dead_or_left() {
@@ -271,7 +269,6 @@ where
       }
 
       // If we are leaving, we broadcast and wait
-      tracing::error!("DEBUG: broadcast dead msg in dead node 1");
       self
         .broadcast_notify(
           d.node.cheap_clone(),
@@ -280,7 +277,6 @@ where
         )
         .await;
     } else {
-      tracing::error!("DEBUG: broadcast dead msg in dead node 2");
       self.broadcast(d.node.cheap_clone(), d.into()).await;
     }
 
@@ -331,7 +327,6 @@ where
     // that's already suspect.
     if let Some(timer) = &mut state.suspicion {
       if timer.confirm(&s.from).await {
-        tracing::error!("DEBUG: broadcast suspect msg in suspect node 1");
         self.broadcast(s.node.cheap_clone(), s.into()).await;
       }
       return Ok(());
@@ -356,7 +351,6 @@ where
       // Do not mark ourself suspect
       return Ok(());
     } else {
-      tracing::error!("DEBUG: broadcast suspect msg in suspect node 2");
       self.broadcast(s.node.clone(), s.into()).await;
     }
 
@@ -382,30 +376,30 @@ where
     // relationship with our peers, we set up k such that we hit the nominal
     // timeout two probe intervals short of what we expect given the suspicion
     // multiplier.
-    let mut k = self.inner.opts.suspicion_mult.saturating_sub(2);
+    let mut k = self.inner.opts.suspicion_mult as isize - 2;
 
     // If there aren't enough nodes to give the expected confirmations, just
     // set k to 0 to say that we don't expect any. Note we subtract 2 from n
     // here to take out ourselves and the node being probed.
-    let n = self.estimate_num_nodes() as usize;
-    if n < k + 2 {
+    let n = self.estimate_num_nodes() as isize;
+    if n - 2 < k {
       k = 0;
     }
 
     // Compute the timeouts based on the size of the cluster.
     let min = suspicion_timeout(
       self.inner.opts.suspicion_mult,
-      n,
+      n as usize,
       self.inner.opts.probe_interval,
     );
-    let max = (self.inner.opts.suspicion_max_timeout_mult as u64) * min;
+    let max = min * (self.inner.opts.suspicion_max_timeout_mult as u32);
 
     let this = self.clone();
     state.suspicion = Some(Suspicion::new(
       sfrom,
       k as u32,
-      Duration::from_millis(min),
-      Duration::from_millis(max),
+      min,
+      max,
       move |num_confirmations| {
         let t = this.clone();
         let n = snode.cheap_clone();
@@ -432,7 +426,7 @@ where
           if let Some(dead) = timeout {
             #[cfg(feature = "metrics")]
             {
-              if k > 0 && k > num_confirmations as usize {
+              if k > 0 && k > num_confirmations as isize {
                 metrics::counter!(
                   "memberlist.degraded.timeout",
                   t.inner.opts.metric_labels.iter()
@@ -618,7 +612,6 @@ where
       self.refute(&member.state, alive.incarnation).await;
       tracing::warn!(target =  "memberlist.state", local = %self.inner.id, peer = %alive.node, local_meta = ?member.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
     } else {
-      tracing::error!("DEBUG: broadcast alive msg in alive node");
       self
         .broadcast_notify(
           alive.node.id().cheap_clone(),
@@ -772,9 +765,7 @@ macro_rules! bail_trigger {
       {
         let this = self.clone();
         // Use a random stagger to avoid syncronizing
-        let mut rng = rand::thread_rng();
-        let rand_stagger = Duration::from_millis(rng.gen_range(0..stagger.as_millis() as u64));
-
+        let rand_stagger = random_stagger(stagger);
         <T::Runtime as Runtime>::spawn(async move {
           let delay = <T::Runtime as Runtime>::sleep(rand_stagger);
 
@@ -990,7 +981,7 @@ where
       {
         tracing::error!(target = "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
         if e.is_remote_failure() {
-          self
+          return self
             .handle_remote_failure(
               target,
               ping.seq_no,
@@ -1021,7 +1012,7 @@ where
       {
         tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
         if e.is_remote_failure() {
-          self
+          return self
             .handle_remote_failure(
               target,
               ping.seq_no,
@@ -1127,7 +1118,6 @@ where
       random_nodes(self.inner.opts.indirect_checks, nodes)
     };
 
-    tracing::error!("DEBUG: random nodes {nodes:?} for target {}", target.node());
     // Attempt an indirect ping.
     let expected_nacks = nodes.len() as isize;
     let ind = IndirectPing {
@@ -1231,15 +1221,9 @@ where
     if expected_nacks > 0 {
       let nack_count = nack_rx.len() as isize;
       if nack_count < expected_nacks {
-        tracing::error!(
-          "DEBUG: delta add {} for {}",
-          expected_nacks - nack_count,
-          target.node()
-        );
         awareness_delta.fetch_add(expected_nacks - nack_count, Ordering::Relaxed);
       }
     } else {
-      tracing::error!("DEBUG: current {} delta add 1 for {}", awareness_delta.load(Ordering::Relaxed), target.node());
       awareness_delta.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1418,7 +1402,6 @@ where
     state.incarnation.store(inc, Ordering::Relaxed);
 
     // Decrease our health because we are being asked to refute a problem.
-    tracing::error!("DEBUG: apply delta for {}", state.node());
     self.inner.awareness.apply_delta(1);
 
     // Format and broadcast an alive message.
@@ -1430,16 +1413,16 @@ where
       protocol_version: state.protocol_version,
       delegate_version: state.delegate_version,
     };
-    tracing::error!("DEBUG: broadcast alive msg in refute");
     self.broadcast(a.node.id().cheap_clone(), a.into()).await;
   }
 }
 
 #[inline]
-fn suspicion_timeout(suspicion_mult: usize, n: usize, interval: Duration) -> u64 {
-  let node_scale = (n as f64).log10().max(1.0);
-  // multiply by 1000 to keep some precision because time.Duration is an int64 type
-  (suspicion_mult as u64) * ((node_scale * 1000.0) as u64) * (interval.as_millis() as u64 / 1000)
+fn suspicion_timeout(suspicion_mult: usize, n: usize, interval: Duration) -> Duration {
+  let node_scale = ((n as f64).max(1.0)).log10().max(1.0);
+  let interval = interval * (suspicion_mult as u32);
+  let interval = (interval.as_millis() as f64 * node_scale * 1000.0) as u64;
+  Duration::from_millis(interval / 1000)
 }
 
 /// push_pull_scale is used to scale the time interval at which push/pull
@@ -1459,7 +1442,7 @@ fn push_pull_scale(interval: Duration, n: usize) -> Duration {
     return interval;
   }
 
-  let multiplier = (f64::log2(n as f64) - f64::log2(PUSH_PULL_SCALE_THRESHOLD as f64) + 1.0).ceil();
+  let multiplier = (f64::log2(n as f64) - f64::log2(PUSH_PULL_SCALE_THRESHOLD as f64)).ceil() + 1.0;
   interval * multiplier as u32
 }
 
@@ -1496,4 +1479,69 @@ fn random_nodes<I, A>(
 
   nodes.truncate(k);
   nodes
+}
+
+#[inline]
+fn random_stagger(duration: Duration) -> Duration {
+  let mut rng = rand::thread_rng();
+  Duration::from_nanos(rng.gen_range(0..u64::MAX) % (duration.as_nanos() as u64))
+}
+
+#[test]
+fn test_random_stagger() {
+  let d = Duration::from_millis(1);
+  let stagger = random_stagger(d);
+  assert!(stagger <= d, "bad stagger");
+}
+
+#[test]
+fn test_push_pull_scale() {
+  let sec = Duration::from_secs(1);
+  for i in 0..=32 {
+    let s = push_pull_scale(sec, i);
+    assert_eq!(s, sec, "Bad time scale {s:?}");
+  }
+
+  for i in 33..=64 {
+    let s = push_pull_scale(sec, i);
+    assert_eq!(s, sec * 2, "Bad time scale {s:?}");
+  }
+
+  for i in 65..=128 {
+    let s = push_pull_scale(sec, i);
+    assert_eq!(s, sec * 3, "Bad time scale {s:?}");
+  }
+}
+
+#[test]
+fn test_suspicion_timeout() {
+  let timeouts: &[(usize, Duration)] = &[
+    (5, Duration::from_millis(1000)),
+    (10, Duration::from_millis(1000)),
+    (50, Duration::from_secs_f64(1.698666666)),
+    (100, Duration::from_millis(2000)),
+    (500, Duration::from_secs_f64(2.698666666)),
+    (1000, Duration::from_millis(3000)),
+  ];
+
+  for (n, expected) in timeouts {
+    let actual = suspicion_timeout(3, *n, Duration::from_secs(1)) / 3;
+    assert_eq!(actual, *expected);
+  }
+}
+
+#[test]
+fn test_random_offset() {
+  let mut vals = std::collections::HashSet::new();
+  for _ in 0..100 {
+    let offset = random_offset(2 << 30);
+    assert!(!vals.contains(&offset), "got collision");
+    vals.insert(offset);
+  }
+}
+
+#[test]
+fn test_random_offset_zero() {
+  let offset = random_offset(0);
+  assert_eq!(offset, 0, "bad offset");
 }

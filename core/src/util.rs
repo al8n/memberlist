@@ -3,6 +3,18 @@ pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
   retransmit_mult * node_scale
 }
 
+#[test]
+fn test_retransmit_limit() {
+  let lim = retransmit_limit(3, 0);
+  assert_eq!(lim, 0, "bad val {lim}");
+
+  let lim = retransmit_limit(3, 1);
+  assert_eq!(lim, 3, "bad val {lim}");
+
+  let lim = retransmit_limit(3, 99);
+  assert_eq!(lim, 6, "bad val {lim}");
+}
+
 /// Returns the hostname of the current machine.
 ///
 /// On wasm target, this function always returns `None`.

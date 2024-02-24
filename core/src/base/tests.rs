@@ -818,7 +818,10 @@ where
   );
   m2.join(target).await.unwrap();
 
-  let num = m2.num_members().await;
+  let num = m2.num_online_members().await;
+  assert_eq!(num, 2, "should have 2 nodes! got {}", num);
+
+  let num = m1.num_online_members().await;
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
 
   m1.leave(Duration::from_secs(1)).await.unwrap();
@@ -826,14 +829,10 @@ where
   R::sleep(Duration::from_millis(10)).await;
 
   // m1 should think dead
-  let num = m1
-    .num_members_by(|state| state.state != State::Dead && state.state != State::Left)
-    .await;
+  let num = m1.num_online_members().await;
   assert_eq!(num, 1, "should have 1 node! got {}", num);
 
-  let num = m2
-    .num_members_by(|state| state.state != State::Dead && state.state != State::Left)
-    .await;
+  let num = m2.num_online_members().await;
   assert_eq!(num, 1, "should have 1 node! got {}", num);
   let state = m2.get_node_state(m1.local_id()).await.unwrap();
   assert_eq!(state, State::Left, "bad state");

@@ -260,7 +260,7 @@ pub async fn probe_node_dogpile<F, T, R>(
       expected: Duration::from_millis(1000),
     },
     DogpileTestCase {
-      name: "n=6, k=3",
+      name: "n=6, k=3 (5 0 1000)",
       num_peers: 5,
       comfirmations: 0,
       expected: Duration::from_millis(1000),
@@ -272,7 +272,7 @@ pub async fn probe_node_dogpile<F, T, R>(
       expected: Duration::from_millis(750),
     },
     DogpileTestCase {
-      name: "n=6, k=3",
+      name: "n=6, k=3 (5 2 604)",
       num_peers: 5,
       comfirmations: 2,
       expected: Duration::from_millis(604),
@@ -284,7 +284,7 @@ pub async fn probe_node_dogpile<F, T, R>(
       expected: Duration::from_millis(500),
     },
     DogpileTestCase {
-      name: "n=6, k=3",
+      name: "n=6, k=3 (5 4 500)",
       num_peers: 5,
       comfirmations: 4,
       expected: Duration::from_millis(500),
@@ -381,7 +381,7 @@ pub async fn probe_node_dogpile<F, T, R>(
 
     // Wait through the timeout and a little after to make sure the
     // timer fires.
-    R::sleep(fudge * 2).await;
+    R::sleep(Duration::from_millis(500)).await;
 
     let state = m.get_node_state(bad_node.id()).await.unwrap();
     assert_eq!(

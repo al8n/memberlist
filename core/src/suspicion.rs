@@ -119,9 +119,11 @@ where
     }
     true
   }
+}
 
-  pub(crate) async fn stop(&self) {
-    self.after_func.stop().await;
+impl<I, R> Drop for Suspicion<I, R> {
+  fn drop(&mut self) {
+    self.after_func.force_stop();
   }
 }
 
@@ -168,6 +170,10 @@ impl<R> AfterFunc<R> {
       let _ = self.stop_tx.send(()).await;
       true
     }
+  }
+
+  pub fn force_stop(&self) {
+    self.stop_tx.close();
   }
 }
 

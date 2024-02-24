@@ -280,9 +280,11 @@ where
         };
 
         self.dead_node(&mut memberlist, d).await?;
+        let any_alive = memberlist.any_alive();
+        drop(memberlist);
 
         // Block until the broadcast goes out
-        if memberlist.any_alive() {
+        if any_alive {
           if timeout > Duration::ZERO {
             futures::select! {
               _ = self.inner.leave_broadcast_rx.recv().fuse() => {},
