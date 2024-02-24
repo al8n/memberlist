@@ -118,9 +118,8 @@ where
   pub(crate) fn has_shutdown(&self) -> bool {
     self
       .inner
-      .hot
-      .shutdown
-      .load(std::sync::atomic::Ordering::SeqCst)
+      .shutdown_tx
+      .is_closed()
   }
 
   #[inline]
@@ -771,21 +770,21 @@ fn move_dead_nodes<I, A, R>(
 
 macro_rules! apply_delta {
   ($this:ident <= $delta:expr) => {
-    $this.inner.awareness.apply_delta($delta).await;
+    $this.inner.awareness.apply_delta($delta);
   };
 }
 
 macro_rules! bail_trigger {
   ($fn:ident) => {
     paste::paste! {
-      async fn [<trigger _ $fn>](&self, stagger: Duration, interval: Duration, stop_rx: async_channel::Receiver<()>)
+      async fn [<trigger _ $fn>](&self, stagger: Duration, interval: Duration, stop_rx: async_channel::Receiver<()>) -> <T::Runtime as Runtime>::JoinHandle<()>
       {
         let this = self.clone();
         // Use a random stagger to avoid syncronizing
         let mut rng = rand::thread_rng();
         let rand_stagger = Duration::from_millis(rng.gen_range(0..stagger.as_millis() as u64));
 
-        <T::Runtime as Runtime>::spawn_detach(async move {
+        <T::Runtime as Runtime>::spawn(async move {
           let delay = <T::Runtime as Runtime>::sleep(rand_stagger);
 
           futures::select! {
@@ -804,7 +803,7 @@ macro_rules! bail_trigger {
               }
             }
           }
-        });
+        })
       }
     }
   };
@@ -818,33 +817,33 @@ where
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Used to ensure the Tick is performed periodically.
-  // TODO: add Interval trait in agnostic crate.
   pub(crate) async fn schedule(&self, shutdown_rx: async_channel::Receiver<()>) {
+    let mut handles = self.inner.shutdown_lock.lock().await;
     // Create a new probeTicker
     if self.inner.opts.probe_interval > Duration::ZERO {
-      self
+      handles.push(self
         .trigger_probe(
           self.inner.opts.probe_interval,
           self.inner.opts.probe_interval,
           shutdown_rx.clone(),
         )
-        .await;
+        .await);
     }
 
     // Create a push pull ticker if needed
     if self.inner.opts.push_pull_interval > Duration::ZERO {
-      self.trigger_push_pull(shutdown_rx.clone()).await;
+      handles.push(self.trigger_push_pull(shutdown_rx.clone()).await);
     }
 
     // Create a gossip ticker if needed
     if self.inner.opts.gossip_interval > Duration::ZERO && self.inner.opts.gossip_nodes > 0 {
-      self
+      handles.push(self
         .trigger_gossip(
           self.inner.opts.gossip_interval,
           self.inner.opts.gossip_interval,
           shutdown_rx.clone(),
         )
-        .await;
+        .await);
     }
   }
 
@@ -852,14 +851,14 @@ where
 
   bail_trigger!(gossip);
 
-  async fn trigger_push_pull(&self, stop_rx: async_channel::Receiver<()>) {
+  async fn trigger_push_pull(&self, stop_rx: async_channel::Receiver<()>) -> <T::Runtime as Runtime>::JoinHandle<()> {
     let interval = self.inner.opts.push_pull_interval;
     let this = self.clone();
     // Use a random stagger to avoid syncronizing
     let mut rng = rand::thread_rng();
     let rand_stagger = Duration::from_millis(rng.gen_range(0..interval.as_millis() as u64));
 
-    <T::Runtime as Runtime>::spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn(async move {
       futures::select! {
         _ = <T::Runtime as Runtime>::sleep(rand_stagger).fuse() => {},
         _ = stop_rx.recv().fuse() => return,
@@ -876,7 +875,7 @@ where
           _ = stop_rx.recv().fuse() => return,
         }
       }
-    });
+    })
   }
 
   // Used to perform a single round of failure detection and gossip
@@ -939,8 +938,7 @@ where
     let probe_interval = self
       .inner
       .awareness
-      .scale_timeout(self.inner.opts.probe_interval)
-      .await;
+      .scale_timeout(self.inner.opts.probe_interval);
 
     #[cfg(feature = "metrics")]
     {
@@ -1385,7 +1383,7 @@ where
     state.incarnation.store(inc, Ordering::Relaxed);
 
     // Decrease our health because we are being asked to refute a problem.
-    self.inner.awareness.apply_delta(1).await;
+    self.inner.awareness.apply_delta(1);
 
     // Format and broadcast an alive message.
     let anode = Node::new(state.id().cheap_clone(), state.address().cheap_clone());

@@ -17,10 +17,10 @@ where
   /// a long running thread that processes messages received
   /// over the packet interface, but is decoupled from the listener to avoid
   /// blocking the listener which may cause ping/ack messages to be delayed.
-  pub(crate) fn packet_handler(&self, shutdown_rx: async_channel::Receiver<()>) {
+  pub(crate) fn packet_handler(&self, shutdown_rx: async_channel::Receiver<()>) -> <T::Runtime as Runtime>::JoinHandle<()> {
     let this = self.clone();
     let handoff_rx = this.inner.handoff_rx.clone();
-    <T::Runtime as Runtime>::spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn(async move {
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -39,7 +39,7 @@ where
           }
         }
       }
-    });
+    })
   }
 
   /// Returns the next message to process in priority order, using LIFO

@@ -34,7 +34,6 @@ pub(crate) struct HotData {
   sequence_num: AtomicU32,
   incarnation: AtomicU32,
   push_pull_req: AtomicU32,
-  shutdown: AtomicBool,
   leave: AtomicBool,
   num_nodes: Arc<AtomicU32>,
 }
@@ -46,7 +45,6 @@ impl HotData {
       incarnation: AtomicU32::new(0),
       num_nodes: Arc::new(AtomicU32::new(0)),
       push_pull_req: AtomicU32::new(0),
-      shutdown: AtomicBool::new(false),
       leave: AtomicBool::new(false),
     }
   }
@@ -251,7 +249,7 @@ pub(crate) struct MemberlistCore<T: Transport> {
   leave_broadcast_tx: Sender<()>,
   leave_lock: Mutex<()>,
   leave_broadcast_rx: Receiver<()>,
-  shutdown_lock: Mutex<()>,
+  shutdown_lock: Mutex<Vec<<T::Runtime as Runtime>::JoinHandle<()>>>,
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
@@ -266,11 +264,12 @@ pub(crate) struct MemberlistCore<T: Transport> {
 
 impl<T: Transport> MemberlistCore<T> {
   pub(crate) async fn shutdown(&self) -> Result<(), T::Error> {
-    if self.hot.shutdown.load(Ordering::Relaxed) {
+    if !self.shutdown_tx.close() {
       return Ok(());
     }
 
-    let _mu = self.shutdown_lock.lock().await;
+    let mut mu = self.shutdown_lock.lock().await;
+    futures::future::join_all(core::mem::take(&mut *mu)).await;
 
     // Shut down the transport first, which should block until it's
     // completely torn down. If we kill the memberlist-side handlers
@@ -280,21 +279,13 @@ impl<T: Transport> MemberlistCore<T> {
       return Err(e);
     }
 
-    // Now tear down everything else.
-    self.hot.shutdown.store(true, Ordering::Relaxed);
-    self.shutdown_tx.close();
     Ok(())
   }
 }
 
 impl<T: Transport> Drop for MemberlistCore<T> {
   fn drop(&mut self) {
-    use pollster::FutureExt as _;
-    if self.hot.shutdown.load(Ordering::Relaxed) {
-      return;
-    }
-
-    let _ = self.shutdown().block_on();
+    self.shutdown_tx.close();
   }
 }
 
@@ -374,6 +365,10 @@ where
       num_nodes.load(Ordering::Acquire) as usize
     });
 
+    #[cfg(not(feature = "metrics"))]
+    let mut handles = Vec::with_capacity(7);
+    #[cfg(feature = "metrics")]
+    let mut handles = Vec::with_capacity(8);
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
     let this = Memberlist {
       inner: Arc::new(MemberlistCore {
@@ -384,7 +379,7 @@ where
         leave_broadcast_tx,
         leave_lock: Mutex::new(()),
         leave_broadcast_rx,
-        shutdown_lock: Mutex::new(()),
+        shutdown_lock: Mutex::new(Vec::new()),
         handoff_tx,
         handoff_rx,
         queue: Mutex::new(MessageQueue::new()),
@@ -398,12 +393,13 @@ where
       delegate: delegate.map(Arc::new),
     };
 
-    this.stream_listener(shutdown_rx.clone());
-    this.packet_handler(shutdown_rx.clone());
-    this.packet_listener(shutdown_rx.clone());
+    handles.push(this.stream_listener(shutdown_rx.clone()));
+    handles.push(this.packet_handler(shutdown_rx.clone()));
+    handles.push(this.packet_listener(shutdown_rx.clone()));
     #[cfg(feature = "metrics")]
-    this.check_broadcast_queue_depth(shutdown_rx.clone());
+    handles.push(this.check_broadcast_queue_depth(shutdown_rx.clone()));
 
+    *this.inner.shutdown_lock.lock().await = handles;
     Ok((shutdown_rx, this.inner.advertise.cheap_clone(), this))
   }
 }
@@ -435,13 +431,13 @@ where
   }
 
   #[cfg(feature = "metrics")]
-  fn check_broadcast_queue_depth(&self, shutdown_rx: Receiver<()>) {
+  fn check_broadcast_queue_depth(&self, shutdown_rx: Receiver<()>) -> <T::Runtime as Runtime>::JoinHandle<()> {
     use futures::FutureExt;
 
     let queue_check_interval = self.inner.opts.queue_check_interval;
     let this = self.clone();
 
-    <T::Runtime as Runtime>::spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn(async move {
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -453,7 +449,7 @@ where
           }
         }
       }
-    });
+    })
   }
 
   pub(crate) async fn verify_protocol(

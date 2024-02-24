@@ -481,8 +481,8 @@ pub async fn probe_node_awareness_degraded<T, R>(
   m1.alive_node(a4, None, false).await;
 
   // Start the health in a degraded state.
-  m1.inner.awareness.apply_delta(1).await;
-  let score = m1.inner.awareness.get_health_score().await;
+  m1.inner.awareness.apply_delta(1);
+  let score = m1.health_score();
   assert_eq!(score, 1, "bad: {score}");
 
   // Have node m1 probe m4.
@@ -523,7 +523,7 @@ pub async fn probe_node_awareness_degraded<T, R>(
 
   // We should have gotten all the nacks, so our score should remain the
   // same, since we didn't get a successful probe.
-  let score = m1.inner.awareness.get_health_score().await;
+  let score = m1.health_score();
   assert_eq!(score, 1, "bad: {score}");
   m1.shutdown().await.unwrap();
   m2.shutdown().await.unwrap();
@@ -577,8 +577,8 @@ where
   m1.alive_node(a2, None, false).await;
 
   // Start the health in a degraded state.
-  m1.inner.awareness.apply_delta(1).await;
-  let score = m1.inner.awareness.get_health_score().await;
+  m1.inner.awareness.apply_delta(1);
+  let score = m1.health_score();
   assert_eq!(score, 1, "bad: {score}");
 
   // Have node m1 probe m2.
@@ -607,7 +607,7 @@ where
   }
 
   // Our score should have improved since we did a good probe.
-  let score = m1.inner.awareness.get_health_score().await;
+  let score = m1.health_score();
   assert_eq!(score, 0, "bad: {score}");
 
   m1.shutdown().await.unwrap();
@@ -689,7 +689,7 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
   m1.alive_node(a4, None, false).await;
 
   // Make sure health looks good
-  let health = m1.inner.awareness.get_health_score().await;
+  let health = m1.health_score();
   assert_eq!(health, 0, "bad: {health}");
 
   // Have node m1 probe m4.
@@ -722,7 +722,7 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
   );
 
   for i in 0..10 {
-    let score = m1.inner.awareness.get_health_score().await;
+    let score = m1.health_score();
     if score == 1 {
       break;
     }
@@ -2021,7 +2021,7 @@ where
   m.inner.broadcast.reset().await;
 
   // make sure health is in a good state
-  let health = m.inner.awareness.get_health_score().await;
+  let health = m.health_score();
   assert_eq!(health, 0, "bad: {health}");
 
   let s = Suspect {
@@ -2045,7 +2045,7 @@ where
   assert!(matches!(msg, Message::Alive(_)), "bad message: {msg:?}");
 
   // Health should have been dinged
-  let health = m.inner.awareness.get_health_score().await;
+  let health = m.health_score();
   assert_eq!(health, 1, "bad: {health}");
 
   m.shutdown().await.unwrap();
@@ -2475,7 +2475,7 @@ pub async fn dead_node_refute<T, R>(
   m.inner.broadcast.reset().await;
 
   // Make sure health is in a good state
-  let health = m.inner.awareness.get_health_score().await;
+  let health = m.health_score();
   assert_eq!(health, 0, "bad: {health}");
 
   let d = Dead {
@@ -2502,7 +2502,7 @@ pub async fn dead_node_refute<T, R>(
   assert!(matches!(msg, Message::Alive(_)), "bad message: {msg:?}");
 
   // We should have been dinged
-  let health = m.inner.awareness.get_health_score().await;
+  let health = m.health_score();
   assert_eq!(health, 1, "bad: {health}");
 
   m.shutdown().await.unwrap();

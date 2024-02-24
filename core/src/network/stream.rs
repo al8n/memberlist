@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, mem, sync::Arc};
 
 use futures::{Future, Stream};
 use nodecraft::resolver::AddressResolver;
@@ -18,25 +18,40 @@ where
 {
   /// A long running thread that pulls incoming streams from the
   /// transport and hands them off for processing.
-  pub(crate) fn stream_listener(&self, shutdown_rx: async_channel::Receiver<()>) {
+  pub(crate) fn stream_listener(&self, shutdown_rx: async_channel::Receiver<()>) -> <T::Runtime as Runtime>::JoinHandle<()> {
     let this = self.clone();
     let transport_rx = this.inner.transport.stream();
-    <T::Runtime as Runtime>::spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn(async move {
       tracing::debug!("memberlist stream listener start");
+      let mut handle_id = 0u64;
+      let handles = Arc::new(parking_lot::Mutex::new(HashMap::new()));
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
             tracing::debug!("memberlist stream listener shutting down");
+            let handles = mem::take(&mut *handles.lock());
+            futures::future::join_all(handles.into_values()).await;
             return;
           }
           conn = transport_rx.recv().fuse() => {
             match conn {
               Ok((remote_addr, conn)) => {
                 let this = this.clone();
-                <T::Runtime as Runtime>::spawn_detach(this.handle_conn(remote_addr, conn))
+                handle_id = handle_id.overflowing_add(1).0;
+                let handles1 = handles.clone();
+                let (finish_tx, finish_rx) = futures::channel::oneshot::channel();
+                <T::Runtime as Runtime>::spawn_detach(async move {
+                  this.handle_conn(handle_id, handles1, remote_addr, conn).await;
+                  let _ = finish_tx.send(());
+                });
+                handles.lock().insert(handle_id, finish_rx);
               },
               Err(e) => {
-                tracing::error!(local = %this.inner.id, "memberlist stream listener failed to accept connection: {}", e);
+                if !this.inner.shutdown_tx.is_closed() {
+                  tracing::error!(local = %this.inner.id, "memberlist stream listener failed to accept connection: {}", e);
+                }
+                let handles = mem::take(&mut *handles.lock());
+                futures::future::join_all(handles.into_values()).await;
                 // If we got an error, which means on the other side the transport has been closed,
                 // so we need to return and shutdown the stream listener
                 return;
@@ -45,7 +60,7 @@ where
           }
         }
       }
-    });
+    })
   }
 
   /// Used to merge the remote state with our local state
@@ -228,9 +243,15 @@ where
   /// Handles a single incoming stream connection from the transport.
   async fn handle_conn(
     self,
+    task_id: u64,
+    handles: Arc<parking_lot::Mutex<HashMap<u64, futures::channel::oneshot::Receiver<()>>>>,
     addr: <T::Resolver as AddressResolver>::ResolvedAddress,
     mut conn: T::Stream,
   ) {
+    scopeguard::defer! {
+      handles.lock().remove(&task_id);
+    }
+
     tracing::debug!(target =  "memberlist.stream", local = %self.inner.id, peer = %addr, "handle stream connection");
 
     #[cfg(feature = "metrics")]

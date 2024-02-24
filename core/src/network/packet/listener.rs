@@ -18,10 +18,10 @@ where
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
-  pub(crate) fn packet_listener(&self, shutdown_rx: async_channel::Receiver<()>) {
+  pub(crate) fn packet_listener(&self, shutdown_rx: async_channel::Receiver<()>) -> <T::Runtime as Runtime>::JoinHandle<()> {
     let this = self.clone();
     let packet_rx = this.inner.transport.packet();
-    <T::Runtime as Runtime>::spawn_detach(async move {
+    <T::Runtime as Runtime>::spawn(async move {
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -34,7 +34,9 @@ where
                 this.handle_messages(msg, addr, timestamp).await;
               },
               Err(e) => {
-                tracing::error!(target =  "memberlist.packet", "failed to receive packet: {}", e);
+                if !this.inner.shutdown_tx.is_closed() {
+                  tracing::error!(target =  "memberlist.packet", "failed to receive packet: {}", e);
+                }
                 // If we got an error, which means on the other side the transport has been closed,
                 // so we need to return and shutdown the packet listener
                 return;
@@ -43,7 +45,7 @@ where
           }
         }
       }
-    });
+    })
   }
 
   async fn handle_message(

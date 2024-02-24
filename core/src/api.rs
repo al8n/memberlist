@@ -419,8 +419,8 @@ where
   /// real-time requirements of the protocol. Lower numbers are better, and zero
   /// means "totally healthy".
   #[inline]
-  pub async fn health_score(&self) -> usize {
-    self.inner.awareness.get_health_score().await as usize
+  pub fn health_score(&self) -> usize {
+    self.inner.awareness.get_health_score() as usize
   }
 
   /// Used to trigger re-advertising the local node. This is
