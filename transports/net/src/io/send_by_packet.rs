@@ -38,10 +38,10 @@ where
   ) -> Result<usize, NetTransportError<A, W>> {
     let mut offset = 0;
 
-    let num_packets = batch.packets.len();
+    let num_packets = batch.len();
     // Encode messages to buffer
     if num_packets <= 1 {
-      let packet = batch.packets.into_iter().next().unwrap();
+      let packet = batch.into_iter().next().unwrap();
       let expected_packet_encoded_size = W::encoded_len(&packet);
 
       let actual_packet_encoded_size =
@@ -61,7 +61,7 @@ where
     buf[offset] = num_packets as u8;
     offset += 1;
 
-    for packet in batch.packets {
+    for packet in batch {
       let expected_packet_encoded_size = W::encoded_len(&packet);
       NetworkEndian::write_u16(
         &mut buf[offset..offset + PACKET_OVERHEAD],
@@ -96,7 +96,7 @@ where
     buf.put_slice(&[0; CHECKSUM_SIZE]);
     offset += CHECKSUM_HEADER;
 
-    buf.resize(batch.estimate_encoded_len(), 0);
+    buf.resize(batch.estimate_encoded_size(), 0);
 
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     offset += encoded_size;
@@ -152,12 +152,12 @@ where
     buf.put_u8(checksumer as u8);
     buf.put_slice(&[0; CHECKSUM_SIZE]);
     offset += CHECKSUM_SIZE + 1;
-    let estimate_encoded_len = batch.estimate_encoded_len();
-    if estimate_encoded_len >= max_payload_size {
-      return Err(NetTransportError::PacketTooLarge(estimate_encoded_len));
+    let estimate_encoded_size = batch.estimate_encoded_size();
+    if estimate_encoded_size >= max_payload_size {
+      return Err(NetTransportError::PacketTooLarge(estimate_encoded_size));
     }
 
-    buf.resize(estimate_encoded_len, 0);
+    buf.resize(estimate_encoded_size, 0);
 
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     buf.truncate(offset + encoded_size);
@@ -217,7 +217,7 @@ where
     buf.put_slice(&[0; CHECKSUM_SIZE]);
     offset += CHECKSUM_SIZE + 1;
 
-    buf.resize(batch.estimate_encoded_len(), 0);
+    buf.resize(batch.estimate_encoded_size(), 0);
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     offset += encoded_size;
     let mut compress_offset = checksum_offset + CHECKSUM_HEADER;
@@ -266,7 +266,7 @@ where
     batch: Batch<I, A::ResolvedAddress>,
   ) -> Result<usize, NetTransportError<A, W>> {
     let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_size());
     buf.add_label_header(&self.opts.label);
     offset += self.opts.label.encoded_overhead();
 
@@ -280,7 +280,7 @@ where
     buf.put_slice(&[0; CHECKSUM_SIZE]);
     offset += CHECKSUM_HEADER;
 
-    buf.resize(batch.estimate_encoded_len(), 0);
+    buf.resize(batch.estimate_encoded_size(), 0);
 
     Self::encode_batch(&mut buf[offset..], batch)?;
     let data_offset = checksum_offset + CHECKSUM_HEADER;
@@ -307,7 +307,7 @@ where
     };
 
     let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_size());
     buf.add_label_header(&self.opts.label);
     offset += self.opts.label.encoded_overhead();
 
@@ -376,7 +376,7 @@ where
     let encryptor = self.encryptor.as_ref().unwrap();
     let encryption_algo = self.opts.encryption_algo.unwrap();
     let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_size());
     buf.add_label_header(&self.opts.label);
     offset += self.opts.label.encoded_overhead();
 
@@ -466,7 +466,7 @@ where
     }
 
     let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_size());
     buf.add_label_header(&self.opts.label);
     offset += self.opts.label.encoded_overhead();
 
@@ -474,7 +474,7 @@ where
 
     let encryptor = self.encryptor.as_ref().unwrap();
     let pk = encryptor.primary_key().await;
-    if batch.estimate_encoded_len() / 2 <= self.opts.offload_size {
+    if batch.estimate_encoded_size() / 2 <= self.opts.offload_size {
       let buf = Self::encode_and_compress_and_encrypt_batch(
         self.opts.checksumer,
         self.opts.compressor.unwrap(),

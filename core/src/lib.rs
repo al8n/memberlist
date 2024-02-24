@@ -168,7 +168,7 @@ pub mod tests {
     use std::sync::Once;
     static TRACE: Once = Once::new();
     TRACE.call_once(|| {
-      let filter = std::env::var("MEMBERLIST_TESTING_LOG").unwrap_or_else(|_| "debug".to_owned());
+      let filter = std::env::var("MEMBERLIST_TESTING_LOG").unwrap_or_else(|_| "warn".to_owned());
       tracing::subscriber::set_global_default(
         tracing_subscriber::fmt::fmt()
           .without_time()

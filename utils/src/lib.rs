@@ -75,6 +75,30 @@ macro_rules! smallvec_wrapper {
       }
     }
 
+    impl $(< $($generic),+ >)? ::core::convert::AsRef<$crate::__private::smallvec::SmallVec<[$inner; { $inlined }]>> for $name $(< $($generic),+ >)? {
+      fn as_ref(&self) -> &$crate::__private::smallvec::SmallVec<[$inner; { $inlined }]> {
+        &self.0
+      }
+    }
+
+    impl $(< $($generic),+ >)? ::core::convert::AsMut<$crate::__private::smallvec::SmallVec<[$inner; { $inlined }]>> for $name $(< $($generic),+ >)? {
+      fn as_mut(&mut self) -> &mut $crate::__private::smallvec::SmallVec<[$inner; { $inlined }]> {
+        &mut self.0
+      }
+    }
+
+    impl $(< $($generic),+ >)? ::core::convert::AsRef<[$inner]> for $name $(< $($generic),+ >)? {
+      fn as_ref(&self) -> &[$inner] {
+        &self.0
+      }
+    }
+
+    impl $(< $($generic),+ >)? ::core::convert::AsMut<[$inner]> for $name $(< $($generic),+ >)? {
+      fn as_mut(&mut self) -> &mut [$inner] {
+        &mut self.0
+      }
+    }
+
     impl $(< $($generic),+ >)? ::core::iter::FromIterator<$inner> for $name $(< $($generic),+ >)? {
       fn from_iter<__T: ::core::iter::IntoIterator<Item = $inner>>(iter: __T) -> Self {
         Self(iter.into_iter().collect())

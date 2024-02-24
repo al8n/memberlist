@@ -2,10 +2,8 @@
 # Net
 
 - Not pass
-  1. leave
-  2. user_data
-  3. send
-  4. encrypted_gossip_transition
+  1. user_data
+  2. send
 
 # TODO
 

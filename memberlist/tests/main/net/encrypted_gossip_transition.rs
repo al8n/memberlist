@@ -110,8 +110,8 @@ where
       wait_until_size(&dst, num_nodes).await;
 
       // Check the hosts
-      assert_eq!(src.members().await.len(), num_nodes);
-      assert_eq!(dst.members().await.len(), num_nodes);
+      assert_eq!(src.online_members().await.len(), num_nodes);
+      assert_eq!(dst.online_members().await.len(), num_nodes);
     }
   };
 

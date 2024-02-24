@@ -697,28 +697,36 @@ where
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
 
   // Wait for a little while
-  R::sleep(Duration::from_millis(1500)).await;
+  for i in 0..10 {
+    let msg1 = m1.delegate().unwrap().node_delegate().get_messages().await;
 
-  let msg1 = m1.delegate().unwrap().node_delegate().get_messages().await;
+    if msg1.len() != 256 && i == 9 {
+      panic!("expected 256 messages, got {}", msg1.len());
+    }
 
-  assert_eq!(msg1.len(), 256, "expected 256 messages, got {}", msg1.len());
-  assert_eq!(msg1.as_slice(), bcasts.as_slice());
+    if msg1.len() != 256 && i < 9 {
+      R::sleep(Duration::from_millis(100)).await;
+      continue;
+    }
 
-  let rs1 = m1
-    .delegate()
-    .unwrap()
-    .node_delegate()
-    .get_remote_state()
-    .await;
-  let rs2 = m2
-    .delegate()
-    .unwrap()
-    .node_delegate()
-    .get_remote_state()
-    .await;
+    assert_eq!(msg1.as_slice(), bcasts.as_slice());
+    let rs1 = m1
+      .delegate()
+      .unwrap()
+      .node_delegate()
+      .get_remote_state()
+      .await;
+    let rs2 = m2
+      .delegate()
+      .unwrap()
+      .node_delegate()
+      .get_remote_state()
+      .await;
 
-  assert_eq!(rs1.as_ref(), b"my state");
-  assert_eq!(rs2.as_ref(), b"something");
+    assert_eq!(rs1.as_ref(), b"my state");
+    assert_eq!(rs2.as_ref(), b"something");
+    assert_eq!(msg1.len(), 256, "expected 256 messages, got {}", msg1.len());
+  }
 }
 
 /// Unit test for send
