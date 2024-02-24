@@ -421,10 +421,18 @@ where
 
   // Check delegate invocation
   let delegate = m2.delegate().unwrap().alive_delegate();
-  assert_ne!(delegate.count.load(Ordering::SeqCst), 0, "should invoke delegate");
+  assert_ne!(
+    delegate.count.load(Ordering::SeqCst),
+    0,
+    "should invoke delegate"
+  );
 
   let delegate = m1.delegate().unwrap().alive_delegate();
-  assert_ne!(delegate.count.load(Ordering::SeqCst), 0, "should invoke delegate");
+  assert_ne!(
+    delegate.count.load(Ordering::SeqCst),
+    0,
+    "should invoke delegate"
+  );
 }
 
 /// Unit tests for join and shutdown a `Memberlist`.
@@ -797,8 +805,12 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let m1 = Memberlist::new(t1, t1_opts.with_gossip_interval(Duration::from_millis(1))).await.unwrap();
-  let m2 = Memberlist::new(t2, t2_opts.with_gossip_interval(Duration::from_millis(1))).await.unwrap();
+  let m1 = Memberlist::new(t1, t1_opts.with_gossip_interval(Duration::from_millis(1)))
+    .await
+    .unwrap();
+  let m2 = Memberlist::new(t2, t2_opts.with_gossip_interval(Duration::from_millis(1)))
+    .await
+    .unwrap();
 
   let target = Node::new(
     m1.local_id().clone(),
@@ -865,8 +877,10 @@ where
 }
 
 /// Unit test for conflict delegate
-pub async fn memberlist_conflict_delegate<F, T, R>(mut get_transport: impl FnMut(T::Id) -> F, id: T::Id)
-where
+pub async fn memberlist_conflict_delegate<F, T, R>(
+  mut get_transport: impl FnMut(T::Id) -> F,
+  id: T::Id,
+) where
   F: Future<Output = T>,
   T: Transport<Runtime = R>,
   R: Runtime,
@@ -881,12 +895,9 @@ where
   .await
   .unwrap();
 
-  let m2 = Memberlist::new(
-    get_transport(id).await,
-    Options::lan(),
-  )
-  .await
-  .unwrap();
+  let m2 = Memberlist::new(get_transport(id).await, Options::lan())
+    .await
+    .unwrap();
 
   let target = Node::new(
     m2.local_id().clone(),
@@ -903,7 +914,10 @@ where
   assert!(inner.existing.is_some());
   assert!(inner.other.is_some());
 
-  assert_eq!(inner.existing.as_ref().map(|n| n.id()), inner.other.as_ref().map(|n| n.id()));
+  assert_eq!(
+    inner.existing.as_ref().map(|n| n.id()),
+    inner.other.as_ref().map(|n| n.id())
+  );
 }
 
 struct CustomPingDelegateInner<I, A> {

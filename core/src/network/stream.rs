@@ -18,7 +18,10 @@ where
 {
   /// A long running thread that pulls incoming streams from the
   /// transport and hands them off for processing.
-  pub(crate) fn stream_listener(&self, shutdown_rx: async_channel::Receiver<()>) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  pub(crate) fn stream_listener(
+    &self,
+    shutdown_rx: async_channel::Receiver<()>,
+  ) -> <T::Runtime as Runtime>::JoinHandle<()> {
     let this = self.clone();
     let transport_rx = this.inner.transport.stream();
     <T::Runtime as Runtime>::spawn(async move {

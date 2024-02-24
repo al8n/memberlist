@@ -225,10 +225,7 @@ impl<I, A, R> Members<I, A, R> {
 
 impl<I: PartialEq, A, R> Members<I, A, R> {
   pub(crate) fn any_alive(&self) -> bool {
-    for m in self
-      .nodes
-      .iter()
-    {
+    for m in self.nodes.iter() {
       if !m.dead_or_left() && m.id().ne(self.local.id()) {
         return true;
       }
@@ -431,7 +428,10 @@ where
   }
 
   #[cfg(feature = "metrics")]
-  fn check_broadcast_queue_depth(&self, shutdown_rx: Receiver<()>) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  fn check_broadcast_queue_depth(
+    &self,
+    shutdown_rx: Receiver<()>,
+  ) -> <T::Runtime as Runtime>::JoinHandle<()> {
     use futures::FutureExt;
 
     let queue_check_interval = self.inner.opts.queue_check_interval;

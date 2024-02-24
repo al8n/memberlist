@@ -873,14 +873,8 @@ mod tests {
     }
 
     let dump = q.ordered_view(true).await;
-    assert_eq!(
-      dump[0].broadcast.id().unwrap().as_ref(),
-      "bar"
-    );
-    assert_eq!(
-      dump[1].broadcast.id().unwrap().as_ref(),
-      "baz"
-    );
+    assert_eq!(dump[0].broadcast.id().unwrap().as_ref(), "bar");
+    assert_eq!(dump[1].broadcast.id().unwrap().as_ref(), "baz");
   }
 
   #[tokio::test]

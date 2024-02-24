@@ -1,6 +1,6 @@
 use std::{
   sync::{
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicIsize, AtomicU32, Ordering},
     Arc,
   },
   time::{Duration, Instant},
@@ -18,7 +18,7 @@ use super::{
 
 use agnostic::Runtime;
 
-use futures::{Future, FutureExt, Stream};
+use futures::{Future, FutureExt, Stream, StreamExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 use rand::{seq::SliceRandom, Rng};
 
@@ -116,10 +116,7 @@ where
 
   #[inline]
   pub(crate) fn has_shutdown(&self) -> bool {
-    self
-      .inner
-      .shutdown_tx
-      .is_closed()
+    self.inner.shutdown_tx.is_closed()
   }
 
   #[inline]
@@ -768,12 +765,6 @@ fn move_dead_nodes<I, A, R>(
   n - num_dead
 }
 
-macro_rules! apply_delta {
-  ($this:ident <= $delta:expr) => {
-    $this.inner.awareness.apply_delta($delta);
-  };
-}
-
 macro_rules! bail_trigger {
   ($fn:ident) => {
     paste::paste! {
@@ -821,13 +812,15 @@ where
     let mut handles = self.inner.shutdown_lock.lock().await;
     // Create a new probeTicker
     if self.inner.opts.probe_interval > Duration::ZERO {
-      handles.push(self
-        .trigger_probe(
-          self.inner.opts.probe_interval,
-          self.inner.opts.probe_interval,
-          shutdown_rx.clone(),
-        )
-        .await);
+      handles.push(
+        self
+          .trigger_probe(
+            self.inner.opts.probe_interval,
+            self.inner.opts.probe_interval,
+            shutdown_rx.clone(),
+          )
+          .await,
+      );
     }
 
     // Create a push pull ticker if needed
@@ -837,13 +830,15 @@ where
 
     // Create a gossip ticker if needed
     if self.inner.opts.gossip_interval > Duration::ZERO && self.inner.opts.gossip_nodes > 0 {
-      handles.push(self
-        .trigger_gossip(
-          self.inner.opts.gossip_interval,
-          self.inner.opts.gossip_interval,
-          shutdown_rx.clone(),
-        )
-        .await);
+      handles.push(
+        self
+          .trigger_gossip(
+            self.inner.opts.gossip_interval,
+            self.inner.opts.gossip_interval,
+            shutdown_rx.clone(),
+          )
+          .await,
+      );
     }
   }
 
@@ -851,7 +846,10 @@ where
 
   bail_trigger!(gossip);
 
-  async fn trigger_push_pull(&self, stop_rx: async_channel::Receiver<()>) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  async fn trigger_push_pull(
+    &self,
+    stop_rx: async_channel::Receiver<()>,
+  ) -> <T::Runtime as Runtime>::JoinHandle<()> {
     let interval = self.inner.opts.push_pull_interval;
     let this = self.clone();
     // Use a random stagger to avoid syncronizing
@@ -979,6 +977,12 @@ where
       probe_interval,
     );
 
+    let awareness_delta = AtomicIsize::new(0);
+    scopeguard::defer!(self
+      .inner
+      .awareness
+      .apply_delta(awareness_delta.load(Ordering::Relaxed)));
+
     if target.state == State::Alive {
       if let Err(e) = self
         .send_msg(target.address(), ping.cheap_clone().into())
@@ -987,7 +991,14 @@ where
         tracing::error!(target = "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
         if e.is_remote_failure() {
           self
-            .handle_remote_failure(target, ping.seq_no, &ack_rx, &nack_rx, deadline)
+            .handle_remote_failure(
+              target,
+              ping.seq_no,
+              &ack_rx,
+              &nack_rx,
+              deadline,
+              &awareness_delta,
+            )
             .await;
         } else {
           return;
@@ -1011,13 +1022,27 @@ where
         tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
         if e.is_remote_failure() {
           self
-            .handle_remote_failure(target, ping.seq_no, &ack_rx, &nack_rx, deadline)
+            .handle_remote_failure(
+              target,
+              ping.seq_no,
+              &ack_rx,
+              &nack_rx,
+              deadline,
+              &awareness_delta,
+            )
             .await;
         } else {
           return;
         }
       }
     }
+
+    // Arrange for our self-awareness to get updated. At this point we've
+    // sent the ping, so any return statement means the probe succeeded
+    // which will improve our health until we get to the failure scenarios
+    // at the end of this function, which will alter this delta variable
+    // accordingly.
+    awareness_delta.store(-1, Ordering::Relaxed);
 
     let delegate = self.delegate.as_ref();
 
@@ -1033,7 +1058,6 @@ where
                 delegate.notify_ping_complete(target.server.cheap_clone(), rtt, v.payload).await;
               }
 
-              apply_delta!(self <= -1);
               return;
             }
 
@@ -1063,7 +1087,14 @@ where
     }
 
     self
-      .handle_remote_failure(target, ping.seq_no, &ack_rx, &nack_rx, deadline)
+      .handle_remote_failure(
+        target,
+        ping.seq_no,
+        &ack_rx,
+        &nack_rx,
+        deadline,
+        &awareness_delta,
+      )
       .await
   }
 
@@ -1074,6 +1105,7 @@ where
     ack_rx: &async_channel::Receiver<AckMessage>,
     nack_rx: &async_channel::Receiver<()>,
     deadline: Instant,
+    awareness_delta: &AtomicIsize,
   ) {
     // Get some random live nodes.
     let nodes = {
@@ -1095,6 +1127,7 @@ where
       random_nodes(self.inner.opts.indirect_checks, nodes)
     };
 
+    tracing::error!("DEBUG: random nodes {nodes:?} for target {}", target.node());
     // Attempt an indirect ping.
     let expected_nacks = nodes.len() as isize;
     let ind = IndirectPing {
@@ -1124,7 +1157,7 @@ where
     // member who understands version 3 of the protocol, regardless of
     // which protocol version we are speaking. That's why we've included a
     // config option to turn this off if desired.
-    let (fallback_tx, fallback_rx) = futures::channel::oneshot::channel();
+    let (fallback_tx, fallback_rx) = async_channel::bounded(1);
 
     let mut disable_reliable_pings = self.inner.opts.disable_tcp_pings;
     if let Some(delegate) = self.delegate.as_ref() {
@@ -1134,15 +1167,16 @@ where
       let target_addr = target.address().cheap_clone();
       let this = self.clone();
       <T::Runtime as Runtime>::spawn_detach(async move {
+        scopeguard::defer!(fallback_tx.close(););
         match this
           .send_ping_and_wait_for_ack(&target_addr, ind.into(), deadline - Instant::now())
           .await
         {
-          Ok(ack) => {
+          Ok(did_contact) => {
             // The error should never happen, because we do not drop the rx,
             // handle error here for good manner, and if you see this log, please
             // report an issue.
-            if let Err(e) = fallback_tx.send(ack) {
+            if let Err(e) = fallback_tx.send(did_contact).await {
               tracing::error!(target =  "memberlist.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send fallback");
             }
           }
@@ -1151,7 +1185,7 @@ where
             // The error should never happen, because we do not drop the rx,
             // handle error here for good manner, and if you see this log, please
             // report an issue.
-            if let Err(e) = fallback_tx.send(false) {
+            if let Err(e) = fallback_tx.send(false).await {
               tracing::error!(target =  "memberlist.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send fallback");
             }
           }
@@ -1167,7 +1201,6 @@ where
       v = ack_rx.recv().fuse() => {
         if let Ok(v) = v {
           if v.complete {
-            apply_delta!(self <= -1);
             return;
           }
         }
@@ -1178,10 +1211,10 @@ where
     // the channel will have something or be closed without having to wait
     // any additional time here.
     if !disable_reliable_pings {
-      if let Ok(did_contact) = fallback_rx.await {
+      futures::pin_mut!(fallback_rx);
+      while let Some(did_contact) = fallback_rx.next().await {
         if did_contact {
           tracing::warn!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), "was able to connect to target over reliable connection but unreliable probes failed, network may be misconfigured");
-          apply_delta!(self <= -1);
           return;
         }
       }
@@ -1194,16 +1227,21 @@ where
     // health because we assume them to be working, and they can help us
     // decide if the probed node was really dead or if it was something wrong
     // with ourselves.
-    let awareness_delta = if expected_nacks > 0 {
+    awareness_delta.store(0, Ordering::Relaxed);
+    if expected_nacks > 0 {
       let nack_count = nack_rx.len() as isize;
       if nack_count < expected_nacks {
-        expected_nacks - nack_count - 1
-      } else {
-        0
+        tracing::error!(
+          "DEBUG: delta add {} for {}",
+          expected_nacks - nack_count,
+          target.node()
+        );
+        awareness_delta.fetch_add(expected_nacks - nack_count, Ordering::Relaxed);
       }
     } else {
-      0
-    };
+      tracing::error!("DEBUG: current {} delta add 1 for {}", awareness_delta.load(Ordering::Relaxed), target.node());
+      awareness_delta.fetch_add(1, Ordering::Relaxed);
+    }
 
     // No acks received from target, suspect it as failed.
     tracing::info!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), "suspecting has failed, no acks received");
@@ -1214,9 +1252,6 @@ where
     };
     if let Err(e) = self.suspect_node(s).await {
       tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to suspect node");
-    }
-    if awareness_delta != 0 {
-      apply_delta!(self <= awareness_delta);
     }
   }
 
@@ -1383,6 +1418,7 @@ where
     state.incarnation.store(inc, Ordering::Relaxed);
 
     // Decrease our health because we are being asked to refute a problem.
+    tracing::error!("DEBUG: apply delta for {}", state.node());
     self.inner.awareness.apply_delta(1);
 
     // Format and broadcast an alive message.

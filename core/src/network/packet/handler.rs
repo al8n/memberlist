@@ -17,7 +17,10 @@ where
   /// a long running thread that processes messages received
   /// over the packet interface, but is decoupled from the listener to avoid
   /// blocking the listener which may cause ping/ack messages to be delayed.
-  pub(crate) fn packet_handler(&self, shutdown_rx: async_channel::Receiver<()>) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  pub(crate) fn packet_handler(
+    &self,
+    shutdown_rx: async_channel::Receiver<()>,
+  ) -> <T::Runtime as Runtime>::JoinHandle<()> {
     let this = self.clone();
     let handoff_rx = this.inner.handoff_rx.clone();
     <T::Runtime as Runtime>::spawn(async move {
@@ -74,7 +77,7 @@ where
       tracing::error!(target =  "memberlist.packet", err=%e, remote_addr = %from, "blocked alive address {} message from {}", alive.node.address(), from);
       return;
     }
- 
+
     self.alive_node(alive, None, false).await
   }
 

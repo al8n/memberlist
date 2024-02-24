@@ -3,11 +3,10 @@
 
 - Not pass
   1. probe_node_dogpile
-  2. probe_node_awareness_missed_nack
-  3. leave
-  4. user_data
-  5. send
-  6. encrypted_gossip_transition
+  2. leave
+  3. user_data
+  4. send
+  5. encrypted_gossip_transition
 
 # TODO
 

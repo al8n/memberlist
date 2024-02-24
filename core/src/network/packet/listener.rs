@@ -18,7 +18,10 @@ where
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
-  pub(crate) fn packet_listener(&self, shutdown_rx: async_channel::Receiver<()>) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  pub(crate) fn packet_listener(
+    &self,
+    shutdown_rx: async_channel::Receiver<()>,
+  ) -> <T::Runtime as Runtime>::JoinHandle<()> {
     let this = self.clone();
     let packet_rx = this.inner.transport.packet();
     <T::Runtime as Runtime>::spawn(async move {
@@ -87,7 +90,7 @@ where
       Message::IndirectPing(ind) => self.handle_indirect_ping(ind, from).await,
       Message::Ack(resp) => self.handle_ack(resp, timestamp).await,
       Message::Nack(resp) => self.handle_nack(resp).await,
-      Message::Alive(alive) => { 
+      Message::Alive(alive) => {
         // Determine the message queue, prioritize alive
         {
           let mut mq = self.inner.queue.lock().await;
@@ -173,7 +176,6 @@ where
     // because we only have one version
 
     // Send a ping to the correct host.
-    tracing::error!("DEBUG: call next seq no from handle indirect ping");
     let local_seq_no = self.next_seq_no();
 
     let ping = Ping {

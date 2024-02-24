@@ -727,7 +727,7 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
       break;
     }
     if i == 9 {
-      panic!("expected health score to decrement on missed nack. want 1  got {score}");
+      panic!("expected health score to decrement on missed nack. want 1 got {score}");
     }
     R::sleep(Duration::from_millis(25)).await;
   }
@@ -2444,10 +2444,8 @@ pub async fn dead_node_alive_replay<T, R>(
 }
 
 /// Unit test to test the dead node refute functionality
-pub async fn dead_node_refute<T, R>(
-  t1: T,
-  t1_opts: Options,
-) where
+pub async fn dead_node_refute<T, R>(t1: T, t1_opts: Options)
+where
   T: Transport<Runtime = R>,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
