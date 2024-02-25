@@ -1,0 +1,456 @@
+name: net_transport
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README'
+      - 'COPYRIGHT'
+      - 'LICENSE*'
+      - '**.md'
+      - '**.txt'
+  pull_request:
+    paths-ignore:
+      - 'README'
+      - 'COPYRIGHT'
+      - 'LICENSE*'
+      - '**.md'
+      - '**.txt'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rustfmt:
+    name: rustfmt
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable && rustup component add rustfmt
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+      working-directory: transports/net
+
+
+  # Apply clippy lints
+  clippy:
+    name: clippy
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable && rustup component add clippy
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Apply clippy lints (unix)
+      run: cargo clippy --all-features
+      working-directory: transports/net
+
+  build:
+    name: build
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update nightly --no-self-update && rustup default nightly
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run build (unix)
+      run: cargo hack build --feature-powerset --exclude-features tokio,async-std,smol,serde,rkyv,dns-over-h3,dns-over-quic,dns-over-https-rustls,dns-over-rustls,dns-over-openssl,dns-over-native-tls,dns-webpki-roots,dns-native-certs,dnssec-openssl,dnssec-ring,dnssec
+      working-directory: transports/net
+
+  tokio-tcp-test:
+    name: tokio-tcp-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,tokio
+      working-directory: transports/net 
+  
+  async-std-tcp-test:
+    name: async-std-tcp-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,async-std
+      working-directory: transports/net 
+  
+  smol-tcp-test:
+    name: smol-tcp-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,smol
+      working-directory: transports/net 
+
+  tokio-tls-test:
+    name: tokio-tls-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,tls,tokio
+      working-directory: transports/net 
+  
+  async-std-tls-test:
+    name: async-std-tls-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,tls,async-std
+      working-directory: transports/net 
+  
+  smol-tls-test:
+    name: smol-tls-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,tls,smol
+      working-directory: transports/net 
+
+  tokio-native-tls-test:
+    name: tokio-native-tls-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,native-tls,tokio
+      working-directory: transports/net 
+  
+  async-std-native-tls-test:
+    name: async-std-native-tls-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,native-tls,async-std
+      working-directory: transports/net 
+  
+  smol-native-tls-test:
+    name: smol-native-tls-test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+    - name: Install OpenSSL (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: |
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+        vcpkg install openssl:x64-windows-static-md
+    - name: Setup loopback interface (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: powershell
+      run: ci\setup_subnet_windows.ps1
+    - name: Setup loopback interface (MacOS)
+      if: matrix.os == 'macos-latest'
+      run: ci/setup_subnet_macos.sh
+    - name: Setup loopback interface (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: ci/setup_subnet_ubuntu.sh
+    - name: Install cargo-hack
+      run: cargo install cargo-hack
+    - name: Cache ~/.cargo
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo
+        key: ${{ matrix.os }}-coverage-dotcargo
+    - name: Run test
+      run: cargo test --features test,native-tls,smol
+      working-directory: transports/net
+

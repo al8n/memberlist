@@ -36,12 +36,13 @@ compression = [
 encryption = ["memberlist-net?/encryption"]
 
 quic = ["memberlist-quic"]
-quinn = ["memberlist-quic/quinn"]
-s2n = ["memberlist-quic/s2n"]
+quinn = ["memberlist-quic/quinn", "quic"]
+s2n = ["memberlist-quic/s2n", "quic"]
 
-tcp = ["memberlist-net"]
-tls = ["memberlist-net/tls"]
-native-tls = ["memberlist-net/native-tls"]
+net = ["memberlist-net"]
+tcp = ["net"]
+tls = ["memberlist-net/tls", "tcp"]
+native-tls = ["memberlist-net/native-tls", "tcp"]
 
 # enable DNS node address resolver
 dns = [

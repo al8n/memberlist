@@ -1,4 +1,4 @@
-name: quic
+name: quic_transport
 
 on:
   push:
