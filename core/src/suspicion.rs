@@ -7,6 +7,11 @@ use std::{
   time::{Duration, Instant},
 };
 
+use super::*;
+use agnostic::Runtime;
+use futures::{future::BoxFuture, Future, FutureExt};
+
+
 #[inline]
 fn remaining_suspicion_time(
   n: u32,
@@ -25,11 +30,6 @@ fn remaining_suspicion_time(
   }
 }
 
-use nodecraft::CheapClone;
-
-use super::*;
-use agnostic::Runtime;
-use futures::{future::BoxFuture, Future, FutureExt};
 
 pub(crate) struct Suspicion<I, R> {
   n: Arc<AtomicU32>,

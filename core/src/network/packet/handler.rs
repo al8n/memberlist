@@ -1,9 +1,6 @@
-use futures::{Future, Stream};
+use futures::Stream;
 
-use crate::{
-  base::MessageHandoff,
-  types::{Alive, Dead, Suspect},
-};
+use crate::base::MessageHandoff;
 
 use super::*;
 

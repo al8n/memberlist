@@ -3,10 +3,8 @@ use std::time::Instant;
 use crate::{
   base::MessageHandoff,
   transport::Wire,
-  types::{Ack, Message, Nack},
 };
 use either::Either;
-use futures::{Future, Stream};
 use nodecraft::CheapClone;
 
 use super::*;

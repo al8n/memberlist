@@ -1,10 +1,8 @@
 use std::{collections::HashMap, mem, sync::Arc};
 
-use futures::{Future, Stream};
-use nodecraft::resolver::AddressResolver;
 use smol_str::SmolStr;
 
-use crate::{delegate::DelegateError, transport::TimeoutableStream, types::NodeState};
+use crate::{delegate::DelegateError, types::NodeState};
 
 use super::*;
 
