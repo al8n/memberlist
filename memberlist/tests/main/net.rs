@@ -29,6 +29,10 @@ macro_rules! test_mods {
       use super::*;
       use crate::tokio_run;
 
+      #[cfg(any(
+        not(any(feature = "tls", feature = "native-tls")),
+        all(feature = "tls", feature = "native-tls")
+      ))]
       $fn!(tokio("tcp", Tcp::<TokioRuntime>::new()));
 
       #[cfg(feature = "tls")]
@@ -52,6 +56,10 @@ macro_rules! test_mods {
       use super::*;
       use crate::async_std_run;
 
+      #[cfg(any(
+        not(any(feature = "tls", feature = "native-tls")),
+        all(feature = "tls", feature = "native-tls")
+      ))]
       $fn!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
 
       #[cfg(feature = "tls")]
@@ -75,6 +83,10 @@ macro_rules! test_mods {
       use super::*;
       use crate::smol_run;
 
+      #[cfg(any(
+        not(any(feature = "tls", feature = "native-tls")),
+        all(feature = "tls", feature = "native-tls")
+      ))]
       $fn!(smol("tcp", Tcp::<SmolRuntime>::new()));
 
       #[cfg(feature = "tls")]
