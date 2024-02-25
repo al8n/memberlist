@@ -16,10 +16,10 @@ where
     batch: Batch<I, A::ResolvedAddress>,
   ) -> Result<usize, QuicTransportError<A, S, W>> {
     let mut offset = 0;
-    let num_packets = batch.packets.len();
+    let num_packets = batch.len();
     // Encode messages to buffer
     if num_packets <= 1 {
-      let packet = batch.packets.into_iter().next().unwrap();
+      let packet = batch.into_iter().next().unwrap();
       let expected_packet_encoded_size = W::encoded_len(&packet);
       let actual_packet_encoded_size =
         W::encode_message(packet, &mut buf[offset..]).map_err(QuicTransportError::Wire)?;
@@ -45,7 +45,7 @@ where
 
     let packets_offset = offset;
 
-    for packet in batch.packets {
+    for packet in batch {
       let expected_packet_encoded_size = W::encoded_len(&packet);
       NetworkEndian::write_u32(
         &mut buf[offset..offset + PACKET_OVERHEAD],
@@ -76,7 +76,7 @@ where
     batch: Batch<I, A::ResolvedAddress>,
   ) -> Result<Bytes, QuicTransportError<A, S, W>> {
     let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len() + 1);
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_size() + 1);
     buf.put_u8(super::StreamType::Packet as u8);
     offset += 1;
     buf.add_label_header(&self.opts.label);
@@ -86,7 +86,7 @@ where
 
     let offset = buf.len();
 
-    buf.resize(batch.estimate_encoded_len() + offset, 0);
+    buf.resize(batch.estimate_encoded_size() + offset, 0);
 
     Self::encode_batch(&mut buf[offset..], batch)?;
 
@@ -103,7 +103,7 @@ where
     let mut offset = buf.len();
     let mut data_offset = offset;
 
-    buf.resize(batch.estimate_encoded_len() + offset, 0);
+    buf.resize(batch.estimate_encoded_size() + offset, 0);
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     offset += encoded_size;
 
@@ -134,7 +134,7 @@ where
     };
 
     let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_size());
     buf.put_u8(super::StreamType::Packet as u8);
     offset += 1;
     buf.add_label_header(&self.opts.label);

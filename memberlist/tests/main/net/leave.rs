@@ -1,6 +1,6 @@
 use super::*;
 
-macro_rules! memberlist_leave {
+macro_rules! leave {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
@@ -23,71 +23,4 @@ macro_rules! memberlist_leave {
   };
 }
 
-#[cfg(feature = "tokio")]
-mod tokio {
-  use agnostic::tokio::TokioRuntime;
-  use memberlist_net::stream_layer::tcp::Tcp;
-
-  use super::*;
-  use crate::tokio_run;
-
-  memberlist_leave!(tokio("tcp", Tcp::<TokioRuntime>::new()));
-
-  #[cfg(feature = "tls")]
-  memberlist_leave!(tokio(
-    "tls",
-    memberlist_net::tests::tls_stream_layer::<TokioRuntime>().await
-  ));
-
-  #[cfg(feature = "native-tls")]
-  memberlist_leave!(tokio(
-    "native-tls",
-    memberlist_net::tests::native_tls_stream_layer::<TokioRuntime>().await
-  ));
-}
-
-#[cfg(feature = "async-std")]
-mod async_std {
-  use agnostic::async_std::AsyncStdRuntime;
-  use memberlist_net::stream_layer::tcp::Tcp;
-
-  use super::*;
-  use crate::async_std_run;
-
-  memberlist_leave!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
-
-  #[cfg(feature = "tls")]
-  memberlist_leave!(async_std(
-    "tls",
-    memberlist_net::tests::tls_stream_layer::<AsyncStdRuntime>().await
-  ));
-
-  #[cfg(feature = "native-tls")]
-  memberlist_leave!(async_std(
-    "native-tls",
-    memberlist_net::tests::native_tls_stream_layer::<AsyncStdRuntime>().await
-  ));
-}
-
-#[cfg(feature = "smol")]
-mod smol {
-  use agnostic::smol::SmolRuntime;
-  use memberlist_net::stream_layer::tcp::Tcp;
-
-  use super::*;
-  use crate::smol_run;
-
-  memberlist_leave!(smol("tcp", Tcp::<SmolRuntime>::new()));
-
-  #[cfg(feature = "tls")]
-  memberlist_leave!(smol(
-    "tls",
-    memberlist_net::tests::tls_stream_layer::<SmolRuntime>().await
-  ));
-
-  #[cfg(feature = "native-tls")]
-  memberlist_leave!(smol(
-    "native-tls",
-    memberlist_net::tests::native_tls_stream_layer::<SmolRuntime>().await
-  ));
-}
+test_mods!(leave);

@@ -32,6 +32,10 @@ fn async_std_run(fut: impl Future<Output = ()>) {
 #[cfg(feature = "memberlist-net")]
 mod net;
 
+#[path = "main/quic.rs"]
+#[cfg(feature = "memberlist-quic")]
+mod quic;
+
 #[path = "main/set_probe_channels.rs"]
 mod set_probe_channels;
 

@@ -19,6 +19,79 @@ pub const TEST_KEYS: &[SecretKey] = &[
   SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
 ];
 
+macro_rules! test_mods {
+  ($fn:ident) => {
+    #[cfg(feature = "tokio")]
+    mod tokio {
+      use agnostic::tokio::TokioRuntime;
+      use memberlist_net::stream_layer::tcp::Tcp;
+
+      use super::*;
+      use crate::tokio_run;
+
+      $fn!(tokio("tcp", Tcp::<TokioRuntime>::new()));
+
+      #[cfg(feature = "tls")]
+      $fn!(tokio(
+        "tls",
+        memberlist_net::tests::tls_stream_layer::<TokioRuntime>().await
+      ));
+
+      #[cfg(feature = "native-tls")]
+      $fn!(tokio(
+        "native-tls",
+        memberlist_net::tests::native_tls_stream_layer::<TokioRuntime>().await
+      ));
+    }
+
+    #[cfg(feature = "async-std")]
+    mod async_std {
+      use agnostic::async_std::AsyncStdRuntime;
+      use memberlist_net::stream_layer::tcp::Tcp;
+
+      use super::*;
+      use crate::async_std_run;
+
+      $fn!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
+
+      #[cfg(feature = "tls")]
+      $fn!(async_std(
+        "tls",
+        memberlist_net::tests::tls_stream_layer::<AsyncStdRuntime>().await
+      ));
+
+      #[cfg(feature = "native-tls")]
+      $fn!(async_std(
+        "native-tls",
+        memberlist_net::tests::native_tls_stream_layer::<AsyncStdRuntime>().await
+      ));
+    }
+
+    #[cfg(feature = "smol")]
+    mod smol {
+      use agnostic::smol::SmolRuntime;
+      use memberlist_net::stream_layer::tcp::Tcp;
+
+      use super::*;
+      use crate::smol_run;
+
+      $fn!(smol("tcp", Tcp::<SmolRuntime>::new()));
+
+      #[cfg(feature = "tls")]
+      $fn!(smol(
+        "tls",
+        memberlist_net::tests::tls_stream_layer::<SmolRuntime>().await
+      ));
+
+      #[cfg(feature = "native-tls")]
+      $fn!(smol(
+        "native-tls",
+        memberlist_net::tests::native_tls_stream_layer::<SmolRuntime>().await
+      ));
+    }
+  };
+}
+
 #[path = "net/probe.rs"]
 mod probe;
 

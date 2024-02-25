@@ -29,9 +29,11 @@ use memberlist_core::{
     Transport, TransportError, Wire,
   },
   types::Message,
+  util::{batch, Batch},
 };
 
-use memberlist_utils::{net::CIDRsPolicy, Label, LabelError, SmallVec, TinyVec};
+pub use memberlist_utils::{net::CIDRsPolicy, Label, LabelError};
+use memberlist_utils::{SmallVec, TinyVec};
 use nodecraft::{resolver::AddressResolver, CheapClone, Id};
 
 mod processor;
@@ -403,22 +405,6 @@ where
   }
 }
 
-#[derive(Debug)]
-struct Batch<I, A> {
-  num_packets: usize,
-  packets: TinyVec<Message<I, A>>,
-  estimate_encoded_len: usize,
-}
-
-impl<I, A> Batch<I, A> {
-  fn estimate_encoded_len(&self) -> usize {
-    if self.packets.len() == 1 {
-      return self.estimate_encoded_len - PACKET_OVERHEAD;
-    }
-    self.estimate_encoded_len
-  }
-}
-
 impl<I, A, S, W, R> Transport for QuicTransport<I, A, S, W, R>
 where
   I: Id,
@@ -577,10 +563,9 @@ where
     self
       .send_batch(
         *addr,
-        Batch {
-          packets: TinyVec::from(packet),
-          num_packets: 1,
-          estimate_encoded_len: self.packets_header_overhead() + PACKET_OVERHEAD + encoded_size,
+        Batch::One {
+          msg: packet,
+          estimate_encoded_size: self.packets_header_overhead() - PACKET_OVERHEAD + encoded_size,
         },
       )
       .await
@@ -594,73 +579,30 @@ where
   ) -> Result<(usize, std::time::Instant), Self::Error> {
     let start = Instant::now();
 
-    let mut batches =
-      SmallVec::<Batch<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>::new();
     let packets_overhead = self.packets_header_overhead();
-    let mut estimate_batch_encoded_size = packets_overhead;
-    let mut current_packets_in_batch = 0;
+    let batches = batch::<_, _, _, Self::Wire>(
+      packets_overhead - PACKET_HEADER_OVERHEAD,
+      PACKET_HEADER_OVERHEAD,
+      PACKET_OVERHEAD,
+      self.max_payload_size(),
+      u16::MAX as usize,
+      NUM_PACKETS_PER_BATCH,
+      packets,
+    );
 
-    // get how many packets a batch
-    for packet in packets.iter() {
-      let ep_len = W::encoded_len(packet);
-      // check if we reach the maximum packet size
-      let current_encoded_size = ep_len + estimate_batch_encoded_size;
-      if current_encoded_size >= self.max_payload_size()
-        || current_packets_in_batch >= NUM_PACKETS_PER_BATCH
-      {
-        batches.push(Batch {
-          packets: TinyVec::with_capacity(current_packets_in_batch),
-          num_packets: current_packets_in_batch,
-          estimate_encoded_len: estimate_batch_encoded_size,
-        });
-        estimate_batch_encoded_size =
-          packets_overhead + PACKET_HEADER_OVERHEAD + PACKET_OVERHEAD + ep_len;
-        current_packets_in_batch = 1;
-      } else {
-        estimate_batch_encoded_size += PACKET_OVERHEAD + ep_len;
-        current_packets_in_batch += 1;
+    let mut total_bytes_sent = 0;
+    let resps =
+      futures::future::join_all(batches.into_iter().map(|b| self.send_batch(*addr, b))).await;
+
+    for res in resps {
+      match res {
+        Ok(sent) => {
+          total_bytes_sent += sent;
+        }
+        Err(e) => return Err(e),
       }
     }
-
-    // consume the packets to small batches according to batch_offsets.
-
-    // if batch_offsets is empty, means that packets can be sent by one I/O call
-    if batches.is_empty() {
-      self
-        .send_batch(
-          *addr,
-          Batch {
-            num_packets: packets.len(),
-            packets,
-            estimate_encoded_len: estimate_batch_encoded_size,
-          },
-        )
-        .await
-        .map(|sent| (sent, start))
-    } else {
-      let mut batch_idx = 0;
-      for (idx, packet) in packets.into_iter().enumerate() {
-        let batch = &mut batches[batch_idx];
-        batch.packets.push(packet);
-        if batch.num_packets == idx - 1 {
-          batch_idx += 1;
-        }
-      }
-
-      let mut total_bytes_sent = 0;
-      let resps =
-        futures::future::join_all(batches.into_iter().map(|b| self.send_batch(*addr, b))).await;
-
-      for res in resps {
-        match res {
-          Ok(sent) => {
-            total_bytes_sent += sent;
-          }
-          Err(e) => return Err(e),
-        }
-      }
-      Ok((total_bytes_sent, start))
-    }
+    Ok((total_bytes_sent, start))
   }
 
   async fn dial_timeout(
