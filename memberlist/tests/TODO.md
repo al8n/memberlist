@@ -1,9 +1,6 @@
 
 # Net
 
-- Not pass
-  1. user_data
-
 # TODO
 
 - metrics

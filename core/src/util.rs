@@ -177,7 +177,7 @@ where
     let need = msg_overhead + msg_encoded_len;
     if idx + 1 == total_len {
       infos.push(BatchHint::More {
-        range: batch_start_idx..idx,
+        range: batch_start_idx..idx + 1,
         encoded_size: current_encoded_size + need,
       });
       return infos;
@@ -226,7 +226,6 @@ where
     max_messages_per_batch,
     msgs.as_ref(),
   );
-
   let mut batches = SmallVec::with_capacity(hints.len());
   let mut msgs = msgs.into_iter();
   for hint in hints {
@@ -263,9 +262,21 @@ fn test_batch() {
 
   let single = Message::<SmolStr, SocketAddr>::UserData("ping".into());
   let encoded_len = Lpe::<_, _>::encoded_len(&single);
-  let batches = batch::<_, _, _, Lpe<_, _>>(0, 2, 2, 1400, u16::MAX as usize, 255, SmallVec::from(single));
+  let batches = batch::<_, _, _, Lpe<_, _>>(
+    0,
+    2,
+    2,
+    1400,
+    u16::MAX as usize,
+    255,
+    SmallVec::from(single),
+  );
   assert_eq!(batches.len(), 1, "bad len {}", batches.len());
-  assert_eq!(batches[0].estimate_encoded_size(), encoded_len, "bad estimate len");
+  assert_eq!(
+    batches[0].estimate_encoded_size(),
+    encoded_len,
+    "bad estimate len"
+  );
 
   let mut total_encoded_len = 0;
   let bcasts = (0..256)
@@ -279,8 +290,12 @@ fn test_batch() {
 
   let batches = batch::<_, _, _, Lpe<_, _>>(0, 2, 2, 1400, u16::MAX as usize, 255, bcasts);
   assert_eq!(batches.len(), 2, "bad len {}", batches.len());
-  assert_eq!(batches[0].len() + batches[1].len(), 255, "missing packets");
-  assert_eq!(batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(), total_encoded_len + 2 + 2, "bad estimate len");
+  assert_eq!(batches[0].len() + batches[1].len(), 256, "missing packets");
+  assert_eq!(
+    batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(),
+    total_encoded_len + 2 + 2,
+    "bad estimate len"
+  );
 }
 
 #[test]

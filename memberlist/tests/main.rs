@@ -32,14 +32,6 @@ fn async_std_run(fut: impl Future<Output = ()>) {
 #[cfg(feature = "memberlist-net")]
 mod net;
 
-#[path = "main/quinn.rs"]
-#[cfg(feature = "quinn")]
-mod quinn;
-
-#[path = "main/s2n.rs"]
-#[cfg(feature = "s2n")]
-mod s2n;
-
 #[path = "main/set_probe_channels.rs"]
 mod set_probe_channels;
 

@@ -436,7 +436,7 @@ where
       .await
       .map_err(|e| ConnectionError::promised_write(e).into())
       .map(|_| {
-        tracing::trace!(total_data = total_data, sent = ?buf.as_ref());
+        tracing::trace!(total_bytes = total_data, sent = ?buf.as_ref());
         total_data
       })
   }
