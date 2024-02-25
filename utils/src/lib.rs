@@ -55,6 +55,12 @@ macro_rules! smallvec_wrapper {
       }
     }
 
+    impl $(< $($generic),+ >)? ::core::convert::From<[$inner; { $inlined }]> for $name $(< $($generic),+ >)? {
+      fn from(value: [$inner; { $inlined }]) -> Self {
+        Self(value.into())
+      }
+    }
+
     impl $(< $($generic),+ >)? ::core::convert::From<$crate::__private::smallvec::SmallVec<[$inner; { $inlined }]>> for $name $(< $($generic),+ >)? {
       fn from(value: $crate::__private::smallvec::SmallVec<[$inner; { $inlined }]>) -> Self {
         Self(value)

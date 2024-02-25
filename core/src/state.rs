@@ -127,16 +127,6 @@ where
       .leave
       .load(std::sync::atomic::Ordering::SeqCst)
   }
-
-  // #[inline]
-  // pub(crate) async fn invoke_ack_handler(&self, ack: Ack, timestamp: Instant) {
-  //   self.inner.ack_manager.invoke_ack_handler(ack, timestamp).await
-  // }
-
-  // #[inline]
-  // pub(crate) async fn invoke_nack_handler(&self, nack: Nack) {
-  //   self.inner.ack_manager.invoke_nack_handler(nack).await
-  // }
 }
 
 // -------------------------------Public methods---------------------------------
@@ -972,7 +962,7 @@ where
     scopeguard::defer!(self
       .inner
       .awareness
-      .apply_delta(awareness_delta.load(Ordering::Relaxed)));
+      .apply_delta(awareness_delta.load(Ordering::Acquire)));
 
     if target.state == State::Alive {
       if let Err(e) = self
@@ -991,9 +981,9 @@ where
               &awareness_delta,
             )
             .await;
-        } else {
-          return;
         }
+
+        return;
       }
     } else {
       let suspect = Suspect {
@@ -1004,9 +994,7 @@ where
       if let Err(e) = self
         .transport_send_packets(
           target.address(),
-          [ping.cheap_clone().into(), suspect.into()]
-            .into_iter()
-            .collect(),
+          [ping.cheap_clone().into(), suspect.into()].into(),
         )
         .await
       {
@@ -1022,9 +1010,9 @@ where
               &awareness_delta,
             )
             .await;
-        } else {
-          return;
         }
+
+        return;
       }
     }
 
@@ -1033,7 +1021,7 @@ where
     // which will improve our health until we get to the failure scenarios
     // at the end of this function, which will alter this delta variable
     // accordingly.
-    awareness_delta.store(-1, Ordering::Relaxed);
+    awareness_delta.store(-1, Ordering::Release);
 
     let delegate = self.delegate.as_ref();
 
@@ -1217,14 +1205,14 @@ where
     // health because we assume them to be working, and they can help us
     // decide if the probed node was really dead or if it was something wrong
     // with ourselves.
-    awareness_delta.store(0, Ordering::Relaxed);
+    awareness_delta.store(0, Ordering::Release);
     if expected_nacks > 0 {
       let nack_count = nack_rx.len() as isize;
       if nack_count < expected_nacks {
-        awareness_delta.fetch_add(expected_nacks - nack_count, Ordering::Relaxed);
+        awareness_delta.fetch_add(expected_nacks - nack_count, Ordering::AcqRel);
       }
     } else {
-      awareness_delta.fetch_add(1, Ordering::Relaxed);
+      awareness_delta.fetch_add(1, Ordering::AcqRel);
     }
 
     // No acks received from target, suspect it as failed.
