@@ -4,7 +4,7 @@ macro_rules! user_data {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_user_data >]() {
+      fn [< test_ $rt:snake _ $kind:snake _user_data >]() {
         [< $rt:snake _run >](async move {
           let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("user_data_node_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));

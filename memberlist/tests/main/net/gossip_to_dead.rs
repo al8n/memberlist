@@ -4,7 +4,7 @@ macro_rules! gossip_to_dead {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_gossip_to_dead >]() {
+      fn [< test_ $rt:snake _ $kind:snake _gossip_to_dead >]() {
         [< $rt:snake _run >](async move {
           let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("gossip_to_dead_node_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));

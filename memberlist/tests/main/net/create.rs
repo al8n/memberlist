@@ -4,7 +4,7 @@ macro_rules! create {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_create >]() {
+      fn [< test_ $rt:snake _ $kind:snake _create >]() {
         [< $rt:snake _run >](async move {
           let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("create_node_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));

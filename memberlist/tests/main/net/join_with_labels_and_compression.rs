@@ -96,7 +96,7 @@ macro_rules! join_with_labels_and_compression {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_join_with_labels >]() {
+      fn [< test_ $rt:snake _ $kind:snake _join_with_labels >]() {
         [< $rt:snake _run >](async move {
           memberlist_join_with_labels_and_compression(|idx, label, compressor| async move {
             let mut t1_opts = NetTransportOptions::<SmolStr, _>::new(format!("join_with_labels_and_compression_node_{idx}").into())

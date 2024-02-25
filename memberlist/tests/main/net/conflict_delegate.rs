@@ -4,7 +4,7 @@ macro_rules! conflict_delegate {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_conflict_delegate >]() {
+      fn [< test_ $rt:snake _ $kind:snake _conflict_delegate >]() {
         [< $rt:snake _run >](async move {
           memberlist_conflict_delegate(|id| async move {
             let mut t1_opts = NetTransportOptions::<SmolStr, _>::new(id);

@@ -4,7 +4,7 @@ macro_rules! reset_nodes {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_reset_nodes >]() {
+      fn [< test_ $rt:snake _ $kind:snake _reset_nodes >]() {
         use std::net::SocketAddr;
 
         [< $rt:snake _run >](async move {

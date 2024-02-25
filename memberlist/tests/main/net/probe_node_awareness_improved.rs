@@ -4,7 +4,7 @@ macro_rules! probe_node_awareness_improved {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_probe_node_awareness_improved >]() {
+      fn [< test_ $rt:snake _ $kind:snake _probe_node_awareness_improved >]() {
         [< $rt:snake _run >](async move {
           let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_awareness_improved_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));

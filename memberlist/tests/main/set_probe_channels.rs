@@ -4,7 +4,7 @@ macro_rules! set_probe_channels {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_set_probe_channels >]() {
+      fn [< test_ $rt:snake _ $kind:snake _set_probe_channels >]() {
         [< $rt:snake _run >](async move {
           set_probe_channels::<[< $rt:camel Runtime >]>().await;
         });

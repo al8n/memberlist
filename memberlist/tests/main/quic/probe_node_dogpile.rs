@@ -4,7 +4,7 @@ macro_rules! probe_node_dogpile {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_probe_node_dogpile >]() {
+      fn [< test_ $rt:snake _ $kind:snake _probe_node_dogpile >]() {
         [< $rt:snake _run >](async move {
 
           let bad = Node::new("bad".into(), "127.0.0.1:8000".parse().unwrap());

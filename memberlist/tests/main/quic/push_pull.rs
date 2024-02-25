@@ -4,7 +4,7 @@ macro_rules! push_pull {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_push_pull >]() {
+      fn [< test_ $rt:snake _ $kind:snake _push_pull >]() {
         [< $rt:snake _run >](async move {
           let mut t1_opts = QuicTransportOptions::<SmolStr, _>::new("push_pull_node_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));

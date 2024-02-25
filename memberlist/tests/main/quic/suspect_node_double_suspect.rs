@@ -4,7 +4,7 @@ macro_rules! suspect_node_double_suspect {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_suspect_node_double_suspect >]() {
+      fn [< test_ $rt:snake _ $kind:snake _suspect_node_double_suspect >]() {
         [< $rt:snake _run >](async move {
           let mut t1_opts = QuicTransportOptions::<SmolStr, _>::new("suspect_node_double_suspect_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));

@@ -4,7 +4,7 @@ macro_rules! alive_node_idempotent {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_alive_node_idempotent >]() {
+      fn [< test_ $rt:snake _ $kind:snake _alive_node_idempotent >]() {
         [< $rt:snake _run >](async move {
           let mut t1_opts = QuicTransportOptions::<SmolStr, _>::new("alive_node_idempotent_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));

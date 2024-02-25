@@ -4,7 +4,7 @@ macro_rules! alive_node_suspect_node {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_alive_node_suspect_node >]() {
+      fn [< test_ $rt:snake _ $kind:snake _alive_node_suspect_node >]() {
         [< $rt:snake _run >](async move {
           let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("alive_node_suspect_node_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));

@@ -74,7 +74,7 @@ macro_rules! join_different_networks_multi_masks {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_join_different_networks_multi_masks >]() {
+      fn [< test_ $rt:snake _ $kind:snake _join_different_networks_multi_masks >]() {
         [< $rt:snake _run >](async move {
           join_different_networks_multi_masks(|idx, cidrs| async move {
             let mut t1_opts = QuicTransportOptions::<SmolStr, _>::new(format!("join_different_networks_multi_masks_node_{idx}").into())

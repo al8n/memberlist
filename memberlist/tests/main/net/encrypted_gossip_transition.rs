@@ -289,7 +289,7 @@ macro_rules! encrypted_gossip_transition {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_encrypted_gossip_transition >]() {
+      fn [< test_ $rt:snake _ $kind:snake _encrypted_gossip_transition >]() {
         [< $rt:snake _run >](async move {
           encrypted_gossip_transition::<_, _, [< $rt:camel Runtime >]>(|| async move { $expr }).await;
         });

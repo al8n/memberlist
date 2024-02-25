@@ -4,7 +4,7 @@ macro_rules! leave {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_memberlist_leave >]() {
+      fn [< test_ $rt:snake _ $kind:snake _memberlist_leave >]() {
         [< $rt:snake _run >](async move {
           let mut t1_opts = QuicTransportOptions::<SmolStr, _>::new("memberlist_leave_node_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));

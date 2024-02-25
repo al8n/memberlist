@@ -4,7 +4,7 @@ macro_rules! join {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_join >]() {
+      fn [< test_ $rt:snake _ $kind:snake _join >]() {
         [< $rt:snake _run >](async move {
           let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("join_node_1".into());
           t1_opts.add_bind_address(next_socket_addr_v4(0));

@@ -4,7 +4,7 @@ macro_rules! join_with_labels {
   ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _net_join_with_labels >]() {
+      fn [< test_ $rt:snake _ $kind:snake _join_with_labels >]() {
         [< $rt:snake _run >](async move {
           memberlist_join_with_labels(|idx, label| async move {
             let mut t1_opts = QuicTransportOptions::<SmolStr, _>::new(format!("join_with_labels_node_{idx}").into()).
