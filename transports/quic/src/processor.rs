@@ -1,11 +1,6 @@
 use std::{collections::HashMap, mem};
 
-use agnostic::Runtime;
-use futures::{
-  channel::oneshot::{self, channel},
-  lock::Mutex,
-  FutureExt,
-};
+use futures::lock::Mutex;
 use memberlist_core::{
   transport::{
     stream::{PacketProducer, StreamProducer},

@@ -699,7 +699,9 @@ where
   // Wait for a little while
   R::sleep(Duration::from_millis(1500)).await;
 
-  let msg1 = m1.delegate().unwrap().node_delegate().get_messages().await;
+  let mut msg1 = m1.delegate().unwrap().node_delegate().get_messages().await;
+  msg1.sort();
+
   assert_eq!(msg1.as_slice(), bcasts.as_slice());
   let rs1 = m1
     .delegate()

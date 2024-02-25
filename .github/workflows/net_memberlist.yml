@@ -91,7 +91,7 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run build (unix)
-      run: cargo hack build --feature-powerset --exclude-features tokio,async-std,smol,serde,rkyv,dns-over-h3,dns-over-quic,dns-over-https-rustls,dns-over-rustls,dns-over-openssl,dns-over-native-tls,dns-webpki-roots,dns-native-certs,dnssec-openssl,dnssec-ring,dnssec
+      run: cargo hack build --feature-powerset --exclude-features tokio,async-std,smol,serde,rkyv,dns-over-h3,dns-over-quic,dns-over-https-rustls,dns-over-rustls,dns-over-openssl,dns-over-native-tls,dns-webpki-roots,dns-native-certs,dnssec-openssl,dnssec-ring,dnssec,metrics,quic,quinn,s2n
       working-directory: memberlist
 
   tokio-tcp-test:
