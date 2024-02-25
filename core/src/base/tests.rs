@@ -668,7 +668,7 @@ where
   .await
   .unwrap();
 
-  let bcasts = (0..256)
+  let mut bcasts = (0..256)
     .map(|i| i.to_string().as_bytes().to_vec().into())
     .collect::<SmallVec<_>>();
 
@@ -700,7 +700,10 @@ where
   R::sleep(Duration::from_millis(1500)).await;
 
   let mut msg1 = m1.delegate().unwrap().node_delegate().get_messages().await;
+
+  // udp is unordered, so sort the messages
   msg1.sort();
+  bcasts.sort();
 
   assert_eq!(msg1.as_slice(), bcasts.as_slice());
   let rs1 = m1
