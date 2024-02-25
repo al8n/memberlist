@@ -1,3 +1,4 @@
+use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
 use futures::AsyncRead;
 use smol_str::SmolStr;
@@ -180,6 +181,9 @@ pub enum MessageTransformError<I: Transformable, A: Transformable> {
   ErrorResponse(#[from] StringTransformError),
 }
 
+const USER_DATA_LEN_SIZE: usize = core::mem::size_of::<u32>();
+const INLINED_BYTES_SIZE: usize = 64;
+
 impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> Transformable
   for Message<I, A>
 {
@@ -202,7 +206,13 @@ impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> T
       Self::Alive(msg) => msg.encode(dst).map(|w| w + 1)?,
       Self::Dead(msg) => msg.encode(dst).map(|w| w + 1)?,
       Self::PushPull(msg) => msg.encode(dst).map(|w| w + 1)?,
-      Self::UserData(msg) => msg.encode(dst).map(|w| w + 1)?,
+      Self::UserData(msg) => {
+        let len = msg.len();
+        NetworkEndian::write_u32(dst, len as u32);
+        dst = &mut dst[USER_DATA_LEN_SIZE..];
+        dst[..len].copy_from_slice(msg);
+        1 + USER_DATA_LEN_SIZE + len
+      },
       Self::Nack(msg) => msg.encode(dst).map(|w| w + 1)?,
       Self::ErrorResponse(msg) => msg.encode(dst).map(|w| w + 1)?,
     })
@@ -217,7 +227,7 @@ impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> T
       Self::Alive(msg) => msg.encoded_len(),
       Self::Dead(msg) => msg.encoded_len(),
       Self::PushPull(msg) => msg.encoded_len(),
-      Self::UserData(msg) => msg.encoded_len(),
+      Self::UserData(msg) => USER_DATA_LEN_SIZE + msg.len(),
       Self::Nack(msg) => msg.encoded_len(),
       Self::ErrorResponse(msg) => msg.encoded_len(),
     }
@@ -264,8 +274,10 @@ impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> T
         (len + 1, Self::PushPull(msg))
       }
       Self::USERDATA_TAG => {
-        let (len, msg) = Bytes::decode(src)?;
-        (len + 1, Self::UserData(msg))
+        let len = NetworkEndian::read_u32(src) as usize;
+        let src = &src[USER_DATA_LEN_SIZE..];
+        let msg = Bytes::copy_from_slice(&src[..len]);
+        (len + 1 + USER_DATA_LEN_SIZE, Self::UserData(msg))
       }
       Self::NACK_TAG => {
         let (len, msg) = u32::decode(src)?;
@@ -316,8 +328,18 @@ impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> T
         (len + 1, Self::PushPull(msg))
       }
       Self::USERDATA_TAG => {
-        let (len, msg) = Bytes::decode_from_reader(reader)?;
-        (len + 1, Self::UserData(msg))
+        let mut len_buf = [0u8; USER_DATA_LEN_SIZE];
+        reader.read_exact(&mut len_buf)?;
+        let len = NetworkEndian::read_u32(&len_buf) as usize;
+        if len <= INLINED_BYTES_SIZE {
+          let mut buf = [0u8; INLINED_BYTES_SIZE];
+          reader.read_exact(&mut buf[..len])?;
+          (len + 1 + USER_DATA_LEN_SIZE, Self::UserData(Bytes::copy_from_slice(&buf[..len])))
+        } else {
+          let mut buf = vec![0u8; len];
+          reader.read_exact(&mut buf)?; 
+          (len + 1 + USER_DATA_LEN_SIZE, Self::UserData(buf.into()))
+        }
       }
       Self::NACK_TAG => {
         let (len, msg) = u32::decode_from_reader(reader)?;
@@ -378,8 +400,18 @@ impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> T
         (len + 1, Self::PushPull(msg))
       }
       Self::USERDATA_TAG => {
-        let (len, msg) = Bytes::decode_from_async_reader(reader).await?;
-        (len + 1, Self::UserData(msg))
+        let mut len_buf = [0u8; USER_DATA_LEN_SIZE];
+        reader.read_exact(&mut len_buf).await?;
+        let len = NetworkEndian::read_u32(&len_buf) as usize;
+        if len <= INLINED_BYTES_SIZE {
+          let mut buf = [0u8; INLINED_BYTES_SIZE];
+          reader.read_exact(&mut buf[..len]).await?;
+          (len + 1 + USER_DATA_LEN_SIZE, Self::UserData(Bytes::copy_from_slice(&buf[..len])))
+        } else {
+          let mut buf = vec![0u8; len];
+          reader.read_exact(&mut buf).await?; 
+          (len + 1 + USER_DATA_LEN_SIZE, Self::UserData(buf.into()))
+        }
       }
       Self::NACK_TAG => {
         let (len, msg) = u32::decode_from_async_reader(reader).await?;

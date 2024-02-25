@@ -3,7 +3,6 @@
 
 - Not pass
   1. user_data
-  2. send
 
 # TODO
 

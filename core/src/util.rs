@@ -46,6 +46,7 @@ pub fn hostname() -> Option<String> {
 }
 
 /// A batch of messages.
+#[derive(Debug, Clone)]
 pub enum Batch<I, A> {
   /// Batch contains only one [`Message`].
   One {
@@ -112,6 +113,7 @@ impl<I, A> Batch<I, A> {
 }
 
 /// Used to indicate how to batch a collection of messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BatchHint {
   /// Batch should contains only one [`Message`]
   One {
@@ -131,6 +133,7 @@ pub enum BatchHint {
 
 /// Calculate batch hints for a slice of messages.
 fn batch_hints<I, A, W>(
+  fixed_payload_overhead: usize,
   batch_overhead: usize,
   msg_overhead: usize,
   max_encoded_batch_size: usize,
@@ -144,30 +147,50 @@ where
   W: crate::transport::Wire<Id = I, Address = A>,
 {
   let mut infos = SmallVec::new();
-  let mut current_encoded_size = batch_overhead;
+  let mut current_encoded_size = fixed_payload_overhead + batch_overhead;
   let mut batch_start_idx = 0;
   let total_len = msgs.len();
+
+  if total_len == 0 {
+    return infos;
+  }
+
+  if total_len == 1 {
+    let msg_encoded_len = W::encoded_len(&msgs[0]);
+    infos.push(BatchHint::One {
+      idx: 0,
+      encoded_size: fixed_payload_overhead + msg_encoded_len,
+    });
+    return infos;
+  }
 
   for (idx, msg) in msgs.iter().enumerate() {
     let msg_encoded_len = W::encoded_len(msg);
     if msg_encoded_len > max_encoded_message_size {
       infos.push(BatchHint::One {
         idx,
-        encoded_size: msg_encoded_len,
+        encoded_size: fixed_payload_overhead + msg_encoded_len,
       });
       continue;
     }
 
     let need = msg_overhead + msg_encoded_len;
+    if idx + 1 == total_len {
+      infos.push(BatchHint::More {
+        range: batch_start_idx..idx,
+        encoded_size: current_encoded_size + need,
+      });
+      return infos;
+    }
+
     if need + current_encoded_size >= max_encoded_batch_size
-      || idx + 1 == total_len
       || idx > max_messages_per_batch + batch_start_idx
     {
       infos.push(BatchHint::More {
         range: batch_start_idx..idx,
         encoded_size: current_encoded_size,
       });
-      current_encoded_size = batch_overhead + need;
+      current_encoded_size = fixed_payload_overhead + batch_overhead + need;
       batch_start_idx = idx;
       continue;
     }
@@ -180,6 +203,7 @@ where
 
 /// Batch a collection of messages.
 pub fn batch<I, A, M, W>(
+  fixed_payload_overhead: usize,
   batch_overhead: usize,
   msg_overhead: usize,
   max_encoded_batch_size: usize,
@@ -194,6 +218,7 @@ where
   W: crate::transport::Wire<Id = I, Address = A>,
 {
   let hints = batch_hints::<_, _, W>(
+    fixed_payload_overhead,
     batch_overhead,
     msg_overhead,
     max_encoded_batch_size,
@@ -228,6 +253,34 @@ where
     }
   }
   batches
+}
+
+#[test]
+fn test_batch() {
+  use crate::transport::{Lpe, Wire};
+  use smol_str::SmolStr;
+  use std::net::SocketAddr;
+
+  let single = Message::<SmolStr, SocketAddr>::UserData("ping".into());
+  let encoded_len = Lpe::<_, _>::encoded_len(&single);
+  let batches = batch::<_, _, _, Lpe<_, _>>(0, 2, 2, 1400, u16::MAX as usize, 255, SmallVec::from(single));
+  assert_eq!(batches.len(), 1, "bad len {}", batches.len());
+  assert_eq!(batches[0].estimate_encoded_size(), encoded_len, "bad estimate len");
+
+  let mut total_encoded_len = 0;
+  let bcasts = (0..256)
+    .map(|i| {
+      let msg = Message::UserData(i.to_string().as_bytes().to_vec().into());
+      let encoded_len = Lpe::<_, _>::encoded_len(&msg);
+      total_encoded_len += 2 + encoded_len;
+      msg
+    })
+    .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
+
+  let batches = batch::<_, _, _, Lpe<_, _>>(0, 2, 2, 1400, u16::MAX as usize, 255, bcasts);
+  assert_eq!(batches.len(), 2, "bad len {}", batches.len());
+  assert_eq!(batches[0].len() + batches[1].len(), 255, "missing packets");
+  assert_eq!(batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(), total_encoded_len + 2 + 2, "bad estimate len");
 }
 
 #[test]

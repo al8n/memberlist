@@ -42,8 +42,9 @@ where
     // Encode messages to buffer
     if num_packets <= 1 {
       let packet = batch.into_iter().next().unwrap();
+      
       let expected_packet_encoded_size = W::encoded_len(&packet);
-
+      tracing::error!("DEBUG: encode {} here: need {expected_packet_encoded_size}, has {}", packet.kind(), buf.len());
       let actual_packet_encoded_size =
         W::encode_message(packet, &mut buf[offset..]).map_err(NetTransportError::Wire)?;
       debug_assert_eq!(
@@ -54,6 +55,8 @@ where
       offset += actual_packet_encoded_size;
       return Ok(offset);
     }
+
+    tracing::error!("DEBUG: encode batch here {:?}", batch);
 
     // Encode compound message header
     buf[offset] = Message::<I, A::ResolvedAddress>::COMPOUND_TAG;
@@ -281,7 +284,7 @@ where
     offset += CHECKSUM_HEADER;
 
     buf.resize(batch.estimate_encoded_size(), 0);
-
+    tracing::error!("estimate_encoded_size: {} offset: {}", batch.estimate_encoded_size(), offset);
     Self::encode_batch(&mut buf[offset..], batch)?;
     let data_offset = checksum_offset + CHECKSUM_HEADER;
     // update checksum

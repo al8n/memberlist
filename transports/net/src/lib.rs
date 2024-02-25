@@ -560,12 +560,13 @@ where
   ) -> Result<(usize, Instant), Self::Error> {
     let start = Instant::now();
     let encoded_size = W::encoded_len(&packet);
+    let packets_overhead = self.packets_header_overhead();
     self
       .send_batch(
         addr,
         Batch::One {
           msg: packet,
-          estimate_encoded_size: encoded_size,
+          estimate_encoded_size: packets_overhead - PACKET_HEADER_OVERHEAD + encoded_size,
         },
       )
       .await
@@ -579,8 +580,10 @@ where
   ) -> Result<(usize, Instant), Self::Error> {
     let start = Instant::now();
 
+    let packets_overhead = self.packets_header_overhead();
     let batches = batch::<_, _, _, Self::Wire>(
-      self.packets_header_overhead(),
+      packets_overhead - PACKET_HEADER_OVERHEAD,
+      PACKET_HEADER_OVERHEAD,
       PACKET_OVERHEAD,
       self.max_payload_size(),
       u16::MAX as usize,

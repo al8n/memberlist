@@ -696,6 +696,7 @@ where
   let num = m2.num_online_members().await;
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
 
+  R::sleep(Duration::from_millis(1500)).await;
   // Wait for a little while
   for i in 0..10 {
     let msg1 = m1.delegate().unwrap().node_delegate().get_messages().await;
@@ -781,28 +782,21 @@ where
     let msgs = m1.delegate().unwrap().node_delegate().get_messages().await;
 
     (
-      msgs.len() == 1,
+      msgs.len() == 1 && msgs[0].as_ref() == b"pong",
       format!("expected 1 messages, got {}", msgs.len()),
     )
   })
   .await;
-
-  let msgs = m1.delegate().unwrap().node_delegate().get_messages().await;
-
-  assert_eq!(msgs[0].as_ref(), b"pong", "bad msg {:?}", msgs[0].as_ref());
 
   wait_for_condition(|| async {
     let msgs = m2.delegate().unwrap().node_delegate().get_messages().await;
 
     (
-      msgs.len() == 1,
+      msgs.len() == 1 && msgs[0].as_ref() == b"ping",
       format!("expected 1 messages, got {}", msgs.len()),
     )
   })
   .await;
-
-  let msgs = m2.delegate().unwrap().node_delegate().get_messages().await;
-  assert_eq!(msgs[0].as_ref(), b"ping", "bad msg {:?}", msgs[0].as_ref());
 }
 
 /// Unit tests for leave
