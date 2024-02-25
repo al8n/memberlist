@@ -867,7 +867,7 @@ where
 
   // Ensure we don't hang forever
   R::spawn_detach(async move {
-    R::sleep(Duration::from_millis(100)).await;
+    R::sleep(TIMEOUT_DURATION).await;
     panic!("should have timed out by now");
   });
 
