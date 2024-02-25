@@ -1,5 +1,3 @@
-use futures::Stream;
-
 use crate::base::MessageHandoff;
 
 use super::*;
