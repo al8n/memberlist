@@ -11,7 +11,6 @@ use super::*;
 use agnostic::Runtime;
 use futures::{future::BoxFuture, Future, FutureExt};
 
-
 #[inline]
 fn remaining_suspicion_time(
   n: u32,
@@ -29,7 +28,6 @@ fn remaining_suspicion_time(
     Duration::from_millis(timeout as u64).saturating_sub(elapsed)
   }
 }
-
 
 pub(crate) struct Suspicion<I, R> {
   n: Arc<AtomicU32>,

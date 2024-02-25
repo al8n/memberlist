@@ -1,9 +1,6 @@
 use std::time::Instant;
 
-use crate::{
-  base::MessageHandoff,
-  transport::Wire,
-};
+use crate::{base::MessageHandoff, transport::Wire};
 use either::Either;
 use nodecraft::CheapClone;
 
