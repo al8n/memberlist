@@ -19,6 +19,7 @@ use crate::{
   state::LocalNodeState,
   tests::{get_memberlist, next_socket_addr_v4, next_socket_addr_v6, AnyError},
   transport::{Ack, Alive, IndirectPing, MaybeResolvedAddress, Message},
+  types::Epoch,
   Member, Memberlist, Options,
 };
 
@@ -734,7 +735,7 @@ where
           Default::default(),
         )),
         incarnation: Arc::new(0.into()),
-        state_change: Instant::now() - Duration::from_secs(1),
+        state_change: Epoch::now() - Duration::from_secs(1),
         state: State::Suspect,
       },
       suspicion: None,
@@ -874,6 +875,7 @@ where
   let target = Node::new(fake_id, MaybeResolvedAddress::resolved(local_addr));
   m.join(target).await.unwrap_err();
   m.shutdown().await.unwrap();
+  promised.close().await.unwrap();
 }
 
 pub async fn send<A, T1, T2, R>(trans1: T1, trans2: T2) -> Result<(), AnyError>

@@ -6,6 +6,8 @@ use std::{
   time::{Duration, Instant},
 };
 
+use crate::types::Epoch;
+
 use super::{
   base::Memberlist,
   delegate::Delegate,
@@ -34,7 +36,7 @@ pub(crate) use ack_manager::*;
 pub(crate) struct LocalNodeState<I, A> {
   server: Arc<NodeState<I, A>>,
   incarnation: Arc<AtomicU32>,
-  state_change: Instant,
+  state_change: Epoch,
   /// The current state of the node
   state: State,
 }
@@ -288,7 +290,7 @@ where
     } else {
       state.state.state = State::Dead;
     }
-    state.state.state_change = Instant::now();
+    state.state.state_change = Epoch::now();
 
     // notify of death
     if let Some(ref delegate) = self.delegate {
@@ -359,7 +361,7 @@ where
       .incarnation
       .store(sincarnation, Ordering::Relaxed);
     state.state.state = State::Suspect;
-    let change_time = Instant::now();
+    let change_time = Epoch::now();
     state.state.state_change = change_time;
 
     // Setup a suspicion timer. Given that we don't have any known phase
@@ -530,7 +532,7 @@ where
       let state = LocalNodeState {
         server,
         incarnation: Arc::new(AtomicU32::new(0)),
-        state_change: Instant::now(),
+        state_change: Epoch::now(),
         state: State::Dead,
       };
 
@@ -625,7 +627,7 @@ where
       });
       if member.state.state != State::Alive {
         member.state.state = State::Alive;
-        member.state.state_change = Instant::now();
+        member.state.state_change = Epoch::now();
       }
     }
 

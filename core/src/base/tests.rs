@@ -68,7 +68,7 @@ where
   }
 
   #[cfg(any(test, feature = "test"))]
-  pub(crate) async fn get_node_state_change(&self, id: &T::Id) -> Option<std::time::Instant> {
+  pub(crate) async fn get_node_state_change(&self, id: &T::Id) -> Option<crate::types::Epoch> {
     let nodes = self.inner.nodes.read().await;
     nodes.node_map.get(id).map(|n| nodes.nodes[*n].state_change)
   }

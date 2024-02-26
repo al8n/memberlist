@@ -23,7 +23,7 @@ use crate::{
   state::{AckManager, LocalNodeState},
   tests::get_memberlist,
   transport::Transport,
-  types::{Ack, Alive, Dead, Message, Nack, PushNodeState, State, Suspect},
+  types::{Ack, Alive, Dead, Epoch, Message, Nack, PushNodeState, State, Suspect},
   Memberlist, Options,
 };
 
@@ -1269,7 +1269,7 @@ pub async fn alive_node_new_node<T, R>(
     );
 
     assert!(
-      Instant::now() - state.state_change < Duration::from_millis(1),
+      Epoch::now() - state.state_change < Duration::from_millis(1),
       "bad change delta"
     );
   }
@@ -1410,7 +1410,7 @@ pub async fn alive_node_suspect_node<T, R>(
 
   let change = m.get_node_state_change(test_node.id()).await.unwrap();
   assert!(
-    Instant::now() - change < Duration::from_millis(1),
+    Epoch::now() - change < Duration::from_millis(1),
     "bad change delta"
   );
 
@@ -1816,7 +1816,7 @@ where
 
   let change = m.get_node_state_change(&test_node_id).await.unwrap();
   assert!(
-    Instant::now() - change <= Duration::from_secs(1),
+    Epoch::now() - change <= Duration::from_secs(1),
     "bad change delta"
   );
 
@@ -1837,7 +1837,7 @@ where
 
   let new_change = m.get_node_state_change(&test_node_id).await.unwrap();
   assert!(
-    Instant::now() - new_change <= Duration::from_secs(1),
+    Epoch::now() - new_change <= Duration::from_secs(1),
     "bad change delta"
   );
 
@@ -1910,7 +1910,7 @@ where
 
   let change = m.get_node_state_change(&test_node_id).await.unwrap();
   assert!(
-    Instant::now() - change <= Duration::from_secs(1),
+    Epoch::now() - change <= Duration::from_secs(1),
     "bad change delta"
   );
 
@@ -1939,7 +1939,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  let now = Instant::now();
+  let now = Epoch::now();
   let m: Memberlist<T> = get_memberlist(
     t1,
     VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
@@ -2231,7 +2231,7 @@ pub async fn dead_node<T, R>(
 
   let change = m.get_node_state_change(test_node.id()).await.unwrap();
   assert!(
-    Instant::now() - change <= Duration::from_secs(1),
+    Epoch::now() - change <= Duration::from_secs(1),
     "bad change delta"
   );
 
@@ -2801,7 +2801,7 @@ where
   // Should gossip to m2 because its state has changed within GossipToTheDeadTime
   m1.change_node(m2.local_id(), |state| {
     *state = LocalNodeState {
-      state_change: Instant::now().sub(Duration::from_millis(20)),
+      state_change: Epoch::now().sub(Duration::from_millis(20)),
       ..state.clone()
     };
   })

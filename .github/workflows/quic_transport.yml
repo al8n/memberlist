@@ -17,6 +17,7 @@ on:
       - 'LICENSE*'
       - '**.md'
       - '**.txt'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -40,7 +41,6 @@ jobs:
     - name: Check formatting
       run: cargo fmt --all -- --check
       working-directory: transports/quic
-
 
   # Apply clippy lints
   clippy:

@@ -27,6 +27,9 @@ pub use server::*;
 
 pub use memberlist_utils::*;
 
+mod epoch;
+pub(crate) use epoch::*;
+
 use crate::{DelegateVersion, ProtocolVersion};
 
 const MAX_ENCODED_LEN_SIZE: usize = core::mem::size_of::<u32>();
