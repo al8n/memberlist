@@ -2,7 +2,7 @@ use std::{
   collections::HashMap,
   future::Future,
   sync::{atomic::Ordering, Arc},
-  time::Duration,
+  time::{Duration, Instant},
 };
 
 use agnostic::Runtime;
@@ -14,8 +14,9 @@ use super::{
   delegate::{Delegate, VoidDelegate},
   error::{Error, JoinError},
   network::META_MAX_SIZE,
+  state::AckMessage,
   transport::{AddressResolver, CheapClone, MaybeResolvedAddress, Node, Transport},
-  types::{Alive, Dead, Message, NodeState, SmallVec},
+  types::{Alive, Dead, Message, NodeState, Ping, SmallVec},
   Options,
 };
 
@@ -515,6 +516,70 @@ where
       return Err(Error::NotRunning);
     }
     self.send_user_msg(to, msg).await
+  }
+
+  /// Initiates a ping to the node with the specified node.
+  pub async fn ping(
+    &self,
+    node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  ) -> Result<Duration, Error<T, D>> {
+    // Prepare a ping message and setup an ack handler.
+    let self_addr = self.get_advertise();
+    let ping = Ping {
+      seq_no: self.next_seq_no(),
+      source: Node::new(self.inner.transport.local_id().clone(), self_addr.clone()),
+      target: node.clone(),
+    };
+
+    let (ack_tx, ack_rx) = async_channel::bounded(self.inner.opts.indirect_checks + 1);
+    self.inner.ack_manager.set_probe_channels::<T::Runtime>(
+      ping.seq_no,
+      ack_tx,
+      None,
+      Instant::now(),
+      self.inner.opts.probe_interval,
+    );
+
+    // Send a ping to the node.
+    // Wait to send or timeout.
+    futures::select! {
+      res = self.send_msg(node.address(), ping.into()).fuse() => res?,
+      _ = <T::Runtime as Runtime>::sleep(self.inner.opts.probe_timeout).fuse() => {
+        // If we timed out, return Error.
+        tracing::debug!(
+          target = "memberlist",
+          "failed ping {} by packet (timeout reached)",
+          node
+        );
+        return Err(Error::Lost(node));
+      }
+    }
+
+    // Mark the sent time here, which should be after any pre-processing and
+    // system calls to do the actual send. This probably under-reports a bit,
+    // but it's the best we can do.
+    let sent = Instant::now();
+
+    // Wait for response or timeout.
+    futures::select! {
+      v = ack_rx.recv().fuse() => {
+        // If we got a response, update the RTT.
+        if let Ok(AckMessage { complete, .. }) = v {
+          if complete {
+            return Ok(sent.elapsed());
+          }
+        }
+      }
+      _ = <T::Runtime as Runtime>::sleep(self.inner.opts.probe_timeout).fuse() => {}
+    }
+
+    // If we timed out, return Error.
+    tracing::debug!(
+      target = "memberlist",
+      "failed ping {} by packet (timeout reached)",
+      node
+    );
+    Err(Error::Lost(node))
   }
 
   /// Stop any background maintenance of network activity

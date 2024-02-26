@@ -56,6 +56,21 @@ macro_rules! join_different_networks_unique_mask {
           }).await;
         });
       }
+
+      #[cfg(feature = "compression")]
+      #[test]
+      fn [< test_ $rt:snake _ $kind:snake _join_different_networks_unique_mask_with_compression >]() {
+        [< $rt:snake _run >](async move {
+          join_different_networks_unique_mask(|idx, cidrs| async move {
+            let mut t1_opts = QuicTransportOptions::<SmolStr, _>::new(format!("join_different_networks_unique_mask_node_{idx}").into())
+              .with_cidrs_policy(cidrs)
+              .with_compressor(Some(Default::default()));
+            t1_opts.add_bind_address(next_socket_addr_v4(idx as u8));
+
+            QuicTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap()
+          }).await;
+        });
+      }
     }
   };
 }

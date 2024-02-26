@@ -131,67 +131,6 @@ where
   }
 }
 
-// -------------------------------Public methods---------------------------------
-
-impl<T, D> Memberlist<T, D>
-where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-  T: Transport,
-  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
-  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
-{
-  /// Initiates a ping to the node with the specified node.
-  pub async fn ping(
-    &self,
-    node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-  ) -> Result<Duration, Error<T, D>> {
-    // Prepare a ping message and setup an ack handler.
-    let self_addr = self.get_advertise();
-    let ping = Ping {
-      seq_no: self.next_seq_no(),
-      source: Node::new(self.inner.transport.local_id().clone(), self_addr.clone()),
-      target: node.clone(),
-    };
-
-    let (ack_tx, ack_rx) = async_channel::bounded(self.inner.opts.indirect_checks + 1);
-    self.inner.ack_manager.set_probe_channels::<T::Runtime>(
-      ping.seq_no,
-      ack_tx,
-      None,
-      Instant::now(),
-      self.inner.opts.probe_interval,
-    );
-
-    // Send a ping to the node.
-    self.send_msg(node.address(), ping.into()).await?;
-    // Mark the sent time here, which should be after any pre-processing and
-    // system calls to do the actual send. This probably under-reports a bit,
-    // but it's the best we can do.
-    let sent = Instant::now();
-
-    // Wait for response or timeout.
-    futures::select! {
-      v = ack_rx.recv().fuse() => {
-        // If we got a response, update the RTT.
-        if let Ok(AckMessage { complete, .. }) = v {
-          if complete {
-            return Ok(sent.elapsed());
-          }
-        }
-      }
-      _ = <T::Runtime as Runtime>::sleep(self.inner.opts.probe_timeout).fuse() => {}
-    }
-
-    // If we timed out, return Error.
-    tracing::debug!(
-      target = "memberlist",
-      "failed ping {} by packet (timeout reached)",
-      node
-    );
-    Err(Error::Lost(node))
-  }
-}
-
 // ---------------------------------Crate methods-------------------------------
 impl<T, D> Memberlist<T, D>
 where
@@ -301,6 +240,7 @@ where
   }
 
   pub(crate) async fn suspect_node(&self, s: Suspect<T::Id>) -> Result<(), Error<T, D>> {
+    tracing::error!("DEBUG: enter in suspect_node");
     let mut mu = self.inner.nodes.write().await;
 
     let Some(&idx) = mu.node_map.get(&s.node) else {
@@ -906,6 +846,7 @@ where
     &self,
     target: &LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) {
+    tracing::error!("DEBUG: enter probe node");
     #[cfg(feature = "metrics")]
     let now = Instant::now();
     #[cfg(feature = "metrics")]
@@ -973,6 +914,7 @@ where
       {
         tracing::error!(target = "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
         if e.is_remote_failure() {
+          tracing::error!("DEBUG: enter here 1");
           return self
             .handle_remote_failure(
               target,
@@ -985,6 +927,7 @@ where
             .await;
         }
 
+        tracing::error!("DEBUG: enter here 2");
         return;
       }
     } else {
@@ -1088,6 +1031,7 @@ where
     deadline: Instant,
     awareness_delta: &AtomicIsize,
   ) {
+    tracing::error!("DEBUG: handle remote failure");
     // Get some random live nodes.
     let nodes = {
       let nodes = self
@@ -1263,6 +1207,7 @@ where
   /// Invoked every GossipInterval period to broadcast our gossip
   /// messages to a few random nodes.
   async fn gossip(&self) {
+    tracing::error!("DEBUG: enter gossip node");
     #[cfg(feature = "metrics")]
     let now = Instant::now();
     #[cfg(feature = "metrics")]

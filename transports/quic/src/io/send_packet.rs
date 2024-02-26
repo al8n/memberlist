@@ -113,8 +113,8 @@ where
     NetworkEndian::write_u32(&mut buf[data_offset..], compressed.len() as u32);
     data_offset += MAX_MESSAGE_LEN_SIZE;
 
-    buf[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
-    buf.truncate(data_offset + compressed.len());
+    buf.truncate(data_offset);
+    buf.put_slice(&compressed);
 
     // check if the packet exceeds the max packet size can be sent by the packet layer
     if buf.len() >= max_payload_size {

@@ -18,10 +18,9 @@
 
 # QUINN
 1. join_shutdown
-2. ping
-3. probe_node_awareness_degraded
-4. probe_node_awareness_missed_nack
-5. user_data
+2. probe_node_awareness_degraded
+3. probe_node_awareness_missed_nack
+4. user_data
 
 # TODO
 

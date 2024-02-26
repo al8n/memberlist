@@ -11,8 +11,8 @@ description = "A placeholder"
 default = ["tokio", "compression", "encryption", "dns", "tcp"]
 
 tokio = ["agnostic/tokio"]
-async-std = ["agnostic/async-std"]
-smol = ["agnostic/smol"]
+# async-std = ["agnostic/async-std"]
+# smol = ["agnostic/smol"]
 
 serde = [
   "memberlist-core/serde", 
@@ -37,7 +37,7 @@ encryption = ["memberlist-net?/encryption"]
 
 quic = ["memberlist-quic"]
 quinn = ["memberlist-quic/quinn", "quic"]
-s2n = ["memberlist-quic/s2n", "quic"]
+# s2n = ["memberlist-quic/s2n", "quic"]
 
 net = ["memberlist-net"]
 tcp = ["net"]

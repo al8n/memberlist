@@ -67,6 +67,7 @@ mod system_epoch {
       self.0.elapsed().unwrap()
     }
 
+    #[cfg(any(feature = "test", test))]
     pub(crate) fn checked_duration_since(&self, earlier: Self) -> Option<Duration> {
       self.0.duration_since(earlier.0).ok()
     }
@@ -134,6 +135,7 @@ mod instant_epoch {
       self.0.elapsed()
     }
 
+    #[cfg(any(feature = "test", test))]
     pub(crate) fn checked_duration_since(&self, earlier: Self) -> Option<Duration> {
       self.0.checked_duration_since(earlier.0)
     }
