@@ -169,7 +169,6 @@ impl<I: Transformable, A: Transformable> Transformable for Alive<I, A> {
 
     let encoded_len = NetworkEndian::read_u32(&src[offset..]) as usize;
     offset += MAX_ENCODED_LEN_SIZE;
-
     if encoded_len > src.len() {
       return Err(Self::Error::NotEnoughBytes);
     }

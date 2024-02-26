@@ -40,10 +40,9 @@ where
     NetworkEndian::write_u32(&mut buf[offset..], 0);
     offset += MAX_MESSAGE_LEN_SIZE;
 
+    let packets_offset = offset;
     buf[offset] = num_packets as u8;
     offset += 1;
-
-    let packets_offset = offset;
 
     for packet in batch {
       let expected_packet_encoded_size = W::encoded_len(&packet);
@@ -76,7 +75,7 @@ where
     batch: Batch<I, A::ResolvedAddress>,
   ) -> Result<Bytes, QuicTransportError<A, S, W>> {
     let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_size() + 1);
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_size());
     buf.put_u8(super::StreamType::Packet as u8);
     offset += 1;
     buf.add_label_header(&self.opts.label);
@@ -86,7 +85,7 @@ where
 
     let offset = buf.len();
 
-    buf.resize(batch.estimate_encoded_size() + offset, 0);
+    buf.resize(batch.estimate_encoded_size(), 0);
 
     Self::encode_batch(&mut buf[offset..], batch)?;
 
@@ -103,7 +102,7 @@ where
     let mut offset = buf.len();
     let mut data_offset = offset;
 
-    buf.resize(batch.estimate_encoded_size() + offset, 0);
+    buf.resize(batch.estimate_encoded_size(), 0);
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     offset += encoded_size;
 
@@ -200,7 +199,8 @@ where
     let mut stream = self.fetch_stream(addr, None).await?;
 
     tracing::trace!(
-      target = "memberlist.transport.quic.packet",
+      target = "memberlist.transport.quic",
+      total_bytes = %src.len(),
       sent = ?src.as_ref(),
     );
     let written = stream

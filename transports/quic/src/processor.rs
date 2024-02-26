@@ -379,10 +379,10 @@ where
 
     for _ in 0..num_msgs {
       let expected_msg_len = NetworkEndian::read_u32(&src[..MAX_MESSAGE_LEN_SIZE]) as usize;
+
       src = &src[MAX_MESSAGE_LEN_SIZE..];
       let (readed, msg) =
         <T::Wire as Wire>::decode_message(src).map_err(QuicTransportError::Wire)?;
-
       debug_assert_eq!(
         expected_msg_len, readed,
         "expected message length {expected_msg_len} but got {readed}",

@@ -578,7 +578,6 @@ where
     packets: TinyVec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
   ) -> Result<(usize, std::time::Instant), Self::Error> {
     let start = Instant::now();
-
     let packets_overhead = self.packets_header_overhead();
     let batches = batch::<_, _, _, Self::Wire>(
       packets_overhead - PACKET_HEADER_OVERHEAD,

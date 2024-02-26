@@ -2687,7 +2687,6 @@ where
     protocol_version: crate::ProtocolVersion::V0,
     delegate_version: crate::DelegateVersion::V0,
   };
-
   m1.alive_node(a1, None, true).await;
 
   let a2 = Alive {

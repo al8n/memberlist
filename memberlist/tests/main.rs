@@ -3,7 +3,6 @@ use agnostic::async_std::AsyncStdRuntime;
 #[cfg(feature = "smol")]
 use agnostic::smol::SmolRuntime;
 
-use agnostic::Runtime;
 use std::future::Future;
 
 use memberlist_core::tests::{run as run_unit_test, state::*};
@@ -20,11 +19,13 @@ fn tokio_run(fut: impl Future<Output = ()>) {
 
 #[cfg(feature = "smol")]
 fn smol_run(fut: impl Future<Output = ()>) {
+  use agnostic::Runtime;
   run_unit_test(SmolRuntime::block_on, fut);
 }
 
 #[cfg(feature = "async-std")]
 fn async_std_run(fut: impl Future<Output = ()>) {
+  use agnostic::Runtime;
   run_unit_test(AsyncStdRuntime::block_on, fut);
 }
 
