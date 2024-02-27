@@ -458,7 +458,6 @@ where
   m1.shutdown().await.unwrap();
 
   wait_for_condition(|| async {
-    let num = m2.num_members().await;
     let num = m2.num_online_members().await;
     (num == 1, format!("expected 1 node, got {num}"))
   })
