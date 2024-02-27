@@ -136,13 +136,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --no-default-features --features compression,test,tokio,s2n,metrics
-      working-directory: memberlist
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --no-default-features --features compression,test,tokio,s2n,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
+      working-directory: memberlist
 
   tokio-quinn-test:
     name: tokio-quinn-test
@@ -181,13 +176,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --no-default-features --features compression,test,tokio,quinn,metrics
-      working-directory: memberlist
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --no-default-features --features compression,test,tokio,quinn,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
+      working-directory: memberlist
 
   async-std-quinn-test:
     name: async-std-quinn-test
@@ -226,13 +216,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test
-      run: cargo test --no-default-features --features compression,test,async-std,quinn,metrics
-      working-directory: memberlist
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --no-default-features --features compression,test,async-std,quinn,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
+      working-directory: memberlist
   
   smol-quinn-test:
     name: smol-quinn-test
@@ -271,10 +256,5 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test
-      run: cargo test --no-default-features --features compression,test,smol,quinn,metrics
-      working-directory: memberlist
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --no-default-features --features compression,test,smol,quinn,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
+      working-directory: memberlist

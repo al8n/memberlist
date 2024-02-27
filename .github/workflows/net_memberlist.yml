@@ -132,13 +132,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --no-default-features --features compression,encryption,test,tokio,tcp,metrics
-      working-directory: memberlist
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --no-default-features --features compression,encryption,test,tokio,tcp,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
+      working-directory: memberlist
   
   async-std-tcp-test:
     name: async-std-tcp-test
@@ -177,13 +172,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --no-default-features --features compression,encryption,test,async-std,tcp,metrics
-      working-directory: memberlist
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --no-default-features --features compression,encryption,test,async-std,tcp,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
+      working-directory: memberlist
   
   smol-tcp-test:
     name: smol-tcp-test
@@ -222,13 +212,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --no-default-features --features compression,encryption,test,smol,tcp,metrics
-      working-directory: memberlist
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --no-default-features --features compression,encryption,test,smol,tcp,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
+      working-directory: memberlist
 
   tokio-tls-test:
     name: tokio-tls-test
@@ -267,13 +252,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --no-default-features --features compression,encryption,test,tokio,tls,metrics
-      working-directory: memberlist
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --no-default-features --features compression,encryption,test,tokio,tls,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
+      working-directory: memberlist
   
   async-std-tls-test:
     name: async-std-tls-test
@@ -312,13 +292,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --no-default-features --features compression,encryption,test,async-std,tls,metrics
-      working-directory: memberlist
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --no-default-features --features compression,encryption,test,async-std,tls,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
+      working-directory: memberlist
   
   smol-tls-test:
     name: smol-tls-test
@@ -357,13 +332,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --no-default-features --features compression,encryption,test,smol,tls,metrics
-      working-directory: memberlist
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --no-default-features --features compression,encryption,test,smol,tls,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
+      working-directory: memberlist
 
   tokio-native-tls-test:
     name: tokio-native-tls-test
@@ -402,13 +372,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --no-default-features --features compression,encryption,test,tokio,native-tls,metrics
-      working-directory: memberlist
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --no-default-features --features compression,encryption,test,tokio,native-tls,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
+      working-directory: memberlist
   
   async-std-native-tls-test:
     name: async-std-native-tls-test
@@ -447,13 +412,9 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --no-default-features --features compression,encryption,test,async-std,native-tls,metrics
+      run: cargo test --no-default-features --features compression,encryption,test,async-std,native-tls,metrics -- --test-threads 1
       working-directory: memberlist
       if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
-      run: cargo test --no-default-features --features compression,encryption,test,async-std,native-tls,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
   
   smol-native-tls-test:
     name: smol-native-tls-test
@@ -492,11 +453,7 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --no-default-features --features compression,encryption,test,smol,native-tls,metrics
-      working-directory: transports/net
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --no-default-features --features compression,encryption,test,smol,native-tls,metrics -- --test-threads 1
-      working-directory: memberlist 
-      if: matrix.os == 'windows-latest'
+      working-directory: memberlist
+
 

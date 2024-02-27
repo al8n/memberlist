@@ -198,7 +198,7 @@ where
   ) -> Result<usize, QuicTransportError<A, S, W>> {
     let mut stream = self.fetch_stream(addr, None).await?;
 
-    tracing::error!(
+    tracing::trace!(
       target = "memberlist.transport.quic",
       total_bytes = %src.len(),
       sent = ?src.as_ref(),

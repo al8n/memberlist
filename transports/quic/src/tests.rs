@@ -563,7 +563,7 @@ mod quinn_stream_layer {
         client_config,
         Default::default(),
       )
-      .with_connect_timeout(Duration::from_millis(10)),
+      .with_connect_timeout(Duration::from_millis(50)),
     )
   }
 }

@@ -132,13 +132,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --features test,tokio
-      working-directory: transports/net 
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --features test,tokio -- --test-threads 1
-      working-directory: transports/net 
-      if: matrix.os == 'windows-latest'
+      working-directory: transports/net
   
   async-std-tcp-test:
     name: async-std-tcp-test
@@ -177,13 +172,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --features test,async-std
-      working-directory: transports/net 
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --features test,async-std -- --test-threads 1
-      working-directory: transports/net 
-      if: matrix.os == 'windows-latest'
+      working-directory: transports/net
   
   smol-tcp-test:
     name: smol-tcp-test
@@ -222,13 +212,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --features test,smol
-      working-directory: transports/net 
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --features test,smol -- --test-threads 1
-      working-directory: transports/net 
-      if: matrix.os == 'windows-latest'
+      working-directory: transports/net
 
   tokio-tls-test:
     name: tokio-tls-test
@@ -267,13 +252,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --features test,tls,tokio
-      working-directory: transports/net 
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --features test,tls,tokio -- --test-threads 1
-      working-directory: transports/net 
-      if: matrix.os == 'windows-latest'
+      working-directory: transports/net
   
   async-std-tls-test:
     name: async-std-tls-test
@@ -312,13 +292,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --features test,tls,async-std
-      working-directory: transports/net 
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --features test,tls,async-std -- --test-threads 1
-      working-directory: transports/net 
-      if: matrix.os == 'windows-latest'
+      working-directory: transports/net
   
   smol-tls-test:
     name: smol-tls-test
@@ -357,13 +332,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --features test,tls,smol
-      working-directory: transports/net 
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --features test,tls,smol -- --test-threads 1
-      working-directory: transports/net 
-      if: matrix.os == 'windows-latest'
+      working-directory: transports/net
 
   tokio-native-tls-test:
     name: tokio-native-tls-test
@@ -402,13 +372,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --features test,native-tls,tokio
-      working-directory: transports/net 
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --features test,native-tls,tokio -- --test-threads 1
-      working-directory: transports/net 
-      if: matrix.os == 'windows-latest'
+      working-directory: transports/net
   
   async-std-native-tls-test:
     name: async-std-native-tls-test
@@ -447,13 +412,8 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --features test,native-tls,async-std
-      working-directory: transports/net 
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --features test,native-tls,async-std -- --test-threads 1
-      working-directory: transports/net 
-      if: matrix.os == 'windows-latest'
+      working-directory: transports/net
   
   smol-native-tls-test:
     name: smol-native-tls-test
@@ -492,10 +452,5 @@ jobs:
         path: ~/.cargo
         key: ${{ matrix.os }}-coverage-dotcargo
     - name: Run test (Unix)
-      run: cargo test --features test,native-tls,smol
-      working-directory: transports/net
-      if: matrix.os != 'windows-latest'
-    - name: Run test (Windows)
       run: cargo test --features test,native-tls,smol -- --test-threads 1
-      working-directory: transports/net 
-      if: matrix.os == 'windows-latest'
+      working-directory: transports/net
