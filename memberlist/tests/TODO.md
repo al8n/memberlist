@@ -15,13 +15,6 @@
 - probe_node_awareness_degraded
 - probe_node_awareness_missed_nack
 
-
-# QUINN
-
-1. join_shutdown
-2. probe_node_awareness_degraded
-3. probe_node_awareness_missed_nack
-
 # TODO
 
 - metrics

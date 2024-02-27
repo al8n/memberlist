@@ -459,7 +459,6 @@ where
 
   wait_for_condition(|| async {
     let num = m2.num_members().await;
-    tracing::error!("DEBUG: {num}");
     let num = m2.num_online_members().await;
     (num == 1, format!("expected 1 node, got {num}"))
   })
@@ -701,8 +700,19 @@ where
   // Wait for a little while
   R::sleep(Duration::from_millis(1500)).await;
 
-  let mut msg1 = m1.delegate().unwrap().node_delegate().get_messages().await.into_iter().map(|s| u32::from_be_bytes(s.as_ref().try_into().unwrap())).collect::<Vec<u32>>();
-  let mut bcasts = bcasts.into_iter().map(|s| u32::from_be_bytes(s.as_ref().try_into().unwrap())).collect::<Vec<u32>>();
+  let mut msg1 = m1
+    .delegate()
+    .unwrap()
+    .node_delegate()
+    .get_messages()
+    .await
+    .into_iter()
+    .map(|s| u32::from_be_bytes(s.as_ref().try_into().unwrap()))
+    .collect::<Vec<u32>>();
+  let mut bcasts = bcasts
+    .into_iter()
+    .map(|s| u32::from_be_bytes(s.as_ref().try_into().unwrap()))
+    .collect::<Vec<u32>>();
 
   // udp is unordered, so sort the messages
   msg1.sort();

@@ -112,7 +112,6 @@ where
         connection = acceptor.accept().fuse() => {
           match connection {
             Ok((connection, remote_addr)) => {
-              tracing::error!("DEBUG: local {local_addr} accept a connection for {remote_addr}");
               let shutdown_rx = shutdown_rx.clone();
               let packet_tx = packet_tx.clone();
               let stream_tx = stream_tx.clone();
@@ -177,7 +176,6 @@ where
     #[cfg(feature = "compression")] offload_size: usize,
     #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_utils::MetricLabels>,
   ) {
-    tracing::error!("DEBUG: local {local_addr} handle_connection for {remote_addr}");
     loop {
       futures::select! {
         incoming = conn.accept_bi().fuse() => {
@@ -273,7 +271,6 @@ where
         .increment(start.elapsed().as_secs_f64().round() as u64);
     }
 
-    tracing::error!("DEBUG: loacl {local_addr} receive msg {:?}", msg);
     if let Err(e) = packet_tx.send(Packet::new(msg, remote_addr, start)).await {
       tracing::error!(target = "memberlist.packet", local=%local_addr, from=%remote_addr, err = %e, "failed to send packet");
     }
@@ -344,7 +341,6 @@ where
   > {
     let num_msgs = src[0] as usize;
     src = &src[1..];
-    tracing::error!("DEBUG: how many num msgs {num_msgs}");
     let mut msgs = OneOrMore::with_capacity(num_msgs);
 
     for _ in 0..num_msgs {
@@ -387,7 +383,6 @@ where
       conn.read_exact(&mut tag).await.unwrap();
 
       if msg_len < MAX_INLINED_BYTES {
-        tracing::error!("DEBUG: recv inlined {tag:?} len {msg_len}");
         let mut buf = [0u8; MAX_INLINED_BYTES];
         conn
           .read_exact(&mut buf[..msg_len])
@@ -396,13 +391,11 @@ where
         read += msg_len + 1;
         Self::decode_batch(&buf[..msg_len]).map(|msgs| (read, msgs))
       } else {
-        tracing::error!("DEBUG: recv {tag:?} {msg_len}");
         let mut buf = vec![0; msg_len];
         conn
           .read_exact(&mut buf)
           .await
           .map_err(|e| QuicTransportError::Stream(e.into()))?;
-        tracing::error!("DEBUG: recv {buf:?}");
         read += msg_len + 1;
         Self::decode_batch(&buf).map(|msgs| (read, msgs))
       }

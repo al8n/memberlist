@@ -389,17 +389,10 @@ where
     }
 
     let connector = self.next_connector(&addr);
-    let debug_start = std::time::Instant::now();
-    tracing::error!(local=%self.local_id(), remote=%addr, "DEBUG: start to create a connection");
     let connection = connector
       .connect(addr)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
-    tracing::error!(local=%self.local_id(), remote=%addr, "DEBUG: connect took {:?}", debug_start.elapsed());
-    let debug_start = std::time::Instant::now();
-    scopeguard::defer!({
-      tracing::error!(local=%self.local_id(), remote=%addr, "DEBUG: open bi took {:?}", debug_start.elapsed());
-    });
     connection
       .open_bi()
       .await
@@ -598,10 +591,7 @@ where
     let mut total_bytes_sent = 0;
     let mut futs = batches
       .into_iter()
-      .map(|b| {
-        tracing::error!("DEBUG: sent batch here {b:?}");
-        self.send_batch(*addr, b)
-      })
+      .map(|b| self.send_batch(*addr, b))
       .collect::<FuturesUnordered<_>>();
     while let Some(res) = futs.next().await {
       match res {

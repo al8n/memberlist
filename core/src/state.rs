@@ -240,7 +240,6 @@ where
   }
 
   pub(crate) async fn suspect_node(&self, s: Suspect<T::Id>) -> Result<(), Error<T, D>> {
-    tracing::error!("DEBUG: enter in suspect_node");
     let mut mu = self.inner.nodes.write().await;
 
     let Some(&idx) = mu.node_map.get(&s.node) else {
@@ -847,7 +846,6 @@ where
     &self,
     target: &LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) {
-    tracing::error!("DEBUG: enter probe node");
     #[cfg(feature = "metrics")]
     let now = Instant::now();
     #[cfg(feature = "metrics")]
@@ -919,7 +917,6 @@ where
         Ok(Err(e)) => {
           tracing::error!(target = "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
           if e.is_remote_failure() {
-            tracing::error!("DEBUG: enter here 1");
             return self
               .handle_remote_failure(
                 target,
@@ -1067,14 +1064,6 @@ where
     deadline: Instant,
     awareness_delta: &AtomicIsize,
   ) {
-    let debug_start = std::time::Instant::now();
-    scopeguard::defer!({
-      tracing::info!(
-        "DEBUG: handle remote failure took {:?}",
-        debug_start.elapsed()
-      );
-    });
-    tracing::error!("DEBUG: handle remote failure");
     // Get some random live nodes.
     let nodes = {
       let nodes = self
@@ -1103,13 +1092,10 @@ where
       target: target.node(),
     };
 
-    tracing::info!("DEBUG: reach here peers {nodes:?}");
     let mut futs = nodes.into_iter().map(|peer| {
       let ind = ind.cheap_clone();
       let ping_timeout = self.inner.opts.ping_timeout;
       async move {
-        let debug_start_send = std::time::Instant::now();
-        tracing::info!("DEBUG: send ind {ind:?} to peer {}", peer.node());
         match <T::Runtime as Runtime>::timeout(ping_timeout, self
           .send_msg(peer.address(), ind.into()))
           .await {
@@ -1121,16 +1107,10 @@ where
             tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping (reach timeout)");
           }
         }
-        tracing::info!("DEBUG: finish send ind to peer {} took {:?}", peer.node(), debug_start_send.elapsed());
       }
     }).collect::<futures::stream::FuturesUnordered<_>>();
 
     while futs.next().await.is_some() {}
-
-    tracing::info!(
-      "DEBUG: finish send msg to peers took {:?}",
-      debug_start.elapsed()
-    );
 
     // Also make an attempt to contact the node directly over TCP. This
     // helps prevent confused clients who get isolated from UDP traffic
@@ -1148,14 +1128,11 @@ where
     if let Some(delegate) = self.delegate.as_ref() {
       disable_reliable_pings |= delegate.disable_promised_pings(target.id());
     }
-    let debug_reliable_pings = std::time::Instant::now();
     if !disable_reliable_pings {
       let target_addr = target.address().cheap_clone();
       let this = self.clone();
       <T::Runtime as Runtime>::spawn_detach(async move {
         scopeguard::defer!(fallback_tx.close(););
-        let debug_start_send = std::time::Instant::now();
-        // tracing::info!("DEBUG: local {} send ping and wait ack for remote {target_addr} ddl {ddl:?}", this.local_id());
         match this
           .send_ping_and_wait_for_ack(&target_addr, ind.into(), deadline)
           .await
@@ -1165,11 +1142,11 @@ where
             // handle error here for good manner, and if you see this log, please
             // report an issue.
             if let Err(e) = fallback_tx.send(did_contact).await {
-              tracing::error!(target =  "memberlist.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send fallback");
+              tracing::error!(target = "memberlist.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send fallback");
             }
           }
           Err(e) => {
-            tracing::error!(target =  "memberlist.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send ping by reliable connection");
+            tracing::error!(target = "memberlist.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send ping by reliable connection");
             // The error should never happen, because we do not drop the rx,
             // handle error here for good manner, and if you see this log, please
             // report an issue.
@@ -1178,11 +1155,6 @@ where
             }
           }
         }
-        tracing::info!(
-          "DEBUG: local {} finish send ping and wait ack for remote {target_addr} took {:?}",
-          this.local_id(),
-          debug_start_send.elapsed()
-        );
       });
     }
 
@@ -1199,10 +1171,6 @@ where
         }
       }
     }
-    tracing::info!(
-      "DEBUG: finish wait for acks took {:?}",
-      debug_reliable_pings.elapsed()
-    );
 
     // Finally, poll the fallback channel. The timeouts are set such that
     // the channel will have something or be closed without having to wait
@@ -1280,7 +1248,6 @@ where
   /// Invoked every GossipInterval period to broadcast our gossip
   /// messages to a few random nodes.
   async fn gossip(&self) {
-    tracing::error!("DEBUG: enter gossip node");
     #[cfg(feature = "metrics")]
     let now = Instant::now();
     #[cfg(feature = "metrics")]
@@ -1345,7 +1312,6 @@ where
     }).collect::<FuturesUnordered<_>>();
 
     futs.filter_map(|batch| async { batch }).for_each_concurrent(None, |(addr, mut msgs)| async move {
-      tracing::error!("DEBUG: sent {:?}", msgs);
       let fut = if msgs.len() == 1 {
         futures::future::Either::Left(async {
           // Send single message as is

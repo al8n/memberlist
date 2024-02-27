@@ -373,11 +373,20 @@ fn test_batch_large_max_encoded_batch_size() {
     })
     .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
 
-  let batches = batch::<_, _, _, Lpe<_, _>>(0, 6, 4, u32::MAX as usize, u32::MAX as usize, 255, bcasts);
+  let batches =
+    batch::<_, _, _, Lpe<_, _>>(0, 6, 4, u32::MAX as usize, u32::MAX as usize, 255, bcasts);
   assert_eq!(batches.len(), 2, "bad len {}", batches.len());
   assert_eq!(batches[0].len() + batches[1].len(), 256, "missing packets");
-  assert_eq!(batches[0].estimate_encoded_size(), 6 + batches[0].len() * 4 + total_encoded_len, "bad encoded len for batch 0");
-  assert_eq!(batches[1].estimate_encoded_size(), last_one_encoded_len, "bad encoded len for batch 1");
+  assert_eq!(
+    batches[0].estimate_encoded_size(),
+    6 + batches[0].len() * 4 + total_encoded_len,
+    "bad encoded len for batch 0"
+  );
+  assert_eq!(
+    batches[1].estimate_encoded_size(),
+    last_one_encoded_len,
+    "bad encoded len for batch 1"
+  );
   assert_eq!(
     batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(),
     6 + batches[0].len() * 4 + total_encoded_len + last_one_encoded_len,

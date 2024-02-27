@@ -224,10 +224,10 @@ where
     {
       Ok(Ok(_)) => {}
       Ok(Err(e)) => {
-        tracing::error!(target = "memberlist.packet", addr = %from, target=%ind.target, err = %e, "failed to send ping");
+        tracing::error!(target = "memberlist.packet", local = %self.local_id(), source = %ind.source, target=%ind.target, err = %e, "failed to send indirect ping");
       }
       Err(e) => {
-        tracing::error!(target = "memberlist.packet", addr = %from, target=%ind.target, err = %e, "failed to send ping (reach ping timeout)");
+        tracing::error!(target = "memberlist.packet", local = %self.local_id(), source = %ind.source, target=%ind.target, err = %e, "failed to send indirect ping (reach ping timeout)");
       }
     }
 
@@ -239,12 +239,29 @@ where
         _ = <T::Runtime as Runtime>::sleep(probe_timeout).fuse() => {
           // We've not received an ack, so send a nack.
           let nack = Nack::new(ind.seq_no);
+
           if let Err(e) = this.send_msg(ind.source.address(), nack.into()).await {
-            tracing::error!(target =  "memberlist.packet", local = %ind.source, remote = %from, err = %e, "failed to send nack");
+            tracing::error!(target = "memberlist.packet", local = %ind.source, remote = %from, err = %e, "failed to send nack");
+          } else {
+            tracing::trace!(target = "memberlist.packet", local = %this.local_id(), source = %ind.source, "send nack");
           }
         }
-        _ = cancel_rx.fuse() => {
-          // We've received an ack, so we can cancel the nack.
+        res = cancel_rx.fuse() => {
+          match res {
+            Ok(_) => {
+              // We've received an ack, so we can cancel the nack.
+            }
+            Err(_) => {
+              // We've not received an ack, so send a nack.
+              let nack = Nack::new(ind.seq_no);
+
+              if let Err(e) = this.send_msg(ind.source.address(), nack.into()).await {
+                tracing::error!(target = "memberlist.packet", local = %ind.source, remote = %from, err = %e, "failed to send nack");
+              } else {
+                tracing::trace!(target = "memberlist.packet", local = %this.local_id(), source = %ind.source, "send nack");
+              }
+            }
+          }
         }
       }
     });
@@ -259,7 +276,6 @@ where
   }
 
   async fn handle_nack(&self, nack: Nack) {
-    tracing::error!("DEBUG: invoke nack handler {}", self.local_id());
     self.inner.ack_manager.invoke_nack_handler(nack).await
   }
 
