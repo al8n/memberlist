@@ -164,6 +164,7 @@ where
     return infos;
   }
 
+  let mut current_num_packets_in_batch = 0;
   for (idx, msg) in msgs.iter().enumerate() {
     let msg_encoded_len = W::encoded_len(msg);
     if msg_encoded_len > max_encoded_message_size {
@@ -175,7 +176,41 @@ where
     }
 
     let need = msg_overhead + msg_encoded_len;
+
+    // if we are the last one, we need to finish the current batch anyway.
     if idx + 1 == total_len {
+      // If we cannot fit in the current batch because of max encoded size reached
+      if need + current_encoded_size > max_encoded_batch_size {
+        // finish the current batch
+        infos.push(BatchHint::More {
+          range: batch_start_idx..idx,
+          encoded_size: current_encoded_size,
+        });
+
+        // add the last one to a new batch which only contains one message
+        infos.push(BatchHint::One {
+          idx,
+          encoded_size: fixed_payload_overhead + msg_encoded_len,
+        });
+        return infos;
+      }
+
+      // If we cannot fit in the current batch because of max packets per batch reached
+      if current_num_packets_in_batch >= max_messages_per_batch {
+        // finish the current batch
+        infos.push(BatchHint::More {
+          range: batch_start_idx..idx,
+          encoded_size: current_encoded_size,
+        });
+
+        // add the last one to a new batch which only contains one message
+        infos.push(BatchHint::One {
+          idx,
+          encoded_size: fixed_payload_overhead + msg_encoded_len,
+        });
+        return infos;
+      }
+
       infos.push(BatchHint::More {
         range: batch_start_idx..idx + 1,
         encoded_size: current_encoded_size + need,
@@ -183,18 +218,37 @@ where
       return infos;
     }
 
-    if need + current_encoded_size >= max_encoded_batch_size
-      || idx > max_messages_per_batch + batch_start_idx
-    {
+    // if the current packet cannot fit in the current batch because of max encoded size reached
+    if need + current_encoded_size > max_encoded_batch_size {
+      // finish the current batch
       infos.push(BatchHint::More {
         range: batch_start_idx..idx,
         encoded_size: current_encoded_size,
       });
+
+      // start a new batch
       current_encoded_size = fixed_payload_overhead + batch_overhead + need;
+      current_num_packets_in_batch = 1;
       batch_start_idx = idx;
       continue;
     }
 
+    // if the current packet cannot fit in the current batch because of max packets per batch reached
+    if current_num_packets_in_batch >= max_messages_per_batch {
+      // finish the current batch
+      infos.push(BatchHint::More {
+        range: batch_start_idx..idx,
+        encoded_size: current_encoded_size,
+      });
+
+      // start a new batch
+      current_encoded_size = fixed_payload_overhead + batch_overhead + need;
+      current_num_packets_in_batch = 1;
+      batch_start_idx = idx;
+      continue;
+    }
+
+    current_num_packets_in_batch += 1;
     current_encoded_size += need;
   }
 
@@ -294,6 +348,39 @@ fn test_batch() {
   assert_eq!(
     batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(),
     total_encoded_len + 2 + 2,
+    "bad estimate len"
+  );
+}
+
+#[test]
+fn test_batch_large_max_encoded_batch_size() {
+  use crate::transport::{Lpe, Wire};
+  use smol_str::SmolStr;
+  use std::net::SocketAddr;
+
+  let mut total_encoded_len = 0;
+  let mut last_one_encoded_len = 0;
+  let bcasts = (0..256)
+    .map(|i| {
+      let msg = Message::UserData(i.to_string().as_bytes().to_vec().into());
+      let encoded_len = Lpe::<_, _>::encoded_len(&msg);
+      if i == 255 {
+        last_one_encoded_len = encoded_len;
+      } else {
+        total_encoded_len += encoded_len;
+      }
+      msg
+    })
+    .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
+
+  let batches = batch::<_, _, _, Lpe<_, _>>(0, 6, 4, u32::MAX as usize, u32::MAX as usize, 255, bcasts);
+  assert_eq!(batches.len(), 2, "bad len {}", batches.len());
+  assert_eq!(batches[0].len() + batches[1].len(), 256, "missing packets");
+  assert_eq!(batches[0].estimate_encoded_size(), 6 + batches[0].len() * 4 + total_encoded_len, "bad encoded len for batch 0");
+  assert_eq!(batches[1].estimate_encoded_size(), last_one_encoded_len, "bad encoded len for batch 1");
+  assert_eq!(
+    batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(),
+    6 + batches[0].len() * 4 + total_encoded_len + last_one_encoded_len,
     "bad estimate len"
   );
 }

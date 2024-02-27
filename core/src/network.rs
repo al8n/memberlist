@@ -1,4 +1,4 @@
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{sync::atomic::Ordering, time::Instant};
 
 use super::{
   base::Memberlist,
@@ -33,9 +33,14 @@ where
     &self,
     target: &<T::Resolver as AddressResolver>::ResolvedAddress,
     ping: Ping<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    deadline: Duration,
+    deadline: Instant,
   ) -> Result<bool, Error<T, D>> {
-    let mut conn: T::Stream = match self.inner.transport.dial_timeout(target, deadline).await {
+    let mut conn: T::Stream = match self
+      .inner
+      .transport
+      .dial_with_deadline(target, deadline)
+      .await
+    {
       Ok(conn) => conn,
       Err(_) => {
         // If the node is actually dead we expect this to fail, so we
@@ -45,9 +50,7 @@ where
         return Ok(false);
       }
     };
-    if deadline != Duration::ZERO {
-      conn.set_timeout(Some(deadline));
-    }
+    conn.set_deadline(Some(deadline));
 
     let ping_seq_no = ping.seq_no;
     self.send_message(&mut conn, ping.into()).await?;
@@ -86,7 +89,7 @@ where
     let mut conn = self
       .inner
       .transport
-      .dial_timeout(node.address(), self.inner.opts.timeout)
+      .dial_with_deadline(node.address(), Instant::now() + self.inner.opts.timeout)
       .await
       .map_err(Error::transport)?;
     tracing::debug!(target =  "memberlist", local_addr = %self.inner.id, peer_addr = %node, "initiating push/pull sync");
@@ -103,11 +106,7 @@ where
     // Send our state
     self.send_local_state(&mut conn, join).await?;
 
-    conn.set_timeout(if self.inner.opts.timeout == Duration::ZERO {
-      None
-    } else {
-      Some(self.inner.opts.timeout)
-    });
+    conn.set_deadline(Some(Instant::now() + self.inner.opts.timeout));
 
     match self
       .read_message(node.address(), &mut conn)
@@ -122,7 +121,7 @@ where
           .cache_stream(node.address(), conn)
           .await
         {
-          tracing::warn!(target = "memberlist.transport", local_addr = %self.inner.id, peer_addr = %node, err = %e, "failed to cache stream");
+          tracing::debug!(target = "memberlist.transport", local_addr = %self.inner.id, peer_addr = %node, err = %e, "failed to cache stream");
         }
         Ok(pp)
       }

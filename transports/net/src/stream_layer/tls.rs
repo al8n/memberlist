@@ -4,7 +4,7 @@ use std::{
   pin::Pin,
   sync::Arc,
   task::{Context, Poll},
-  time::Duration,
+  time::Instant,
 };
 
 use agnostic::{
@@ -112,8 +112,8 @@ impl<R: Runtime> StreamLayer for Tls<R> {
     Ok(TlsStream {
       stream: TlsStreamKind::Client {
         stream,
-        read_timeout: None,
-        write_timeout: None,
+        read_deadline: None,
+        write_deadline: None,
       },
     })
   }
@@ -169,8 +169,8 @@ impl<R: Runtime> Listener for TlsListener<R> {
       TlsStream {
         stream: TlsStreamKind::Server {
           stream,
-          read_timeout: None,
-          write_timeout: None,
+          read_deadline: None,
+          write_deadline: None,
         },
       },
       addr,
@@ -187,14 +187,14 @@ enum TlsStreamKind<R: Runtime> {
   Client {
     #[pin]
     stream: client::TlsStream<<R::Net as Net>::TcpStream>,
-    read_timeout: Option<Duration>,
-    write_timeout: Option<Duration>,
+    read_deadline: Option<Instant>,
+    write_deadline: Option<Instant>,
   },
   Server {
     #[pin]
     stream: server::TlsStream<<R::Net as Net>::TcpStream>,
-    read_timeout: Option<Duration>,
-    write_timeout: Option<Duration>,
+    read_deadline: Option<Instant>,
+    write_deadline: Option<Instant>,
   },
 }
 
@@ -207,11 +207,11 @@ impl<R: Runtime> AsyncRead for TlsStreamKind<R> {
     match self.get_mut() {
       Self::Client {
         stream,
-        read_timeout,
+        read_deadline,
         ..
       } => {
-        if let Some(timeout) = read_timeout {
-          let fut = R::timeout(*timeout, stream.read(buf));
+        if let Some(timeout) = read_deadline {
+          let fut = R::timeout_at(*timeout, stream.read(buf));
           futures::pin_mut!(fut);
           return match fut.poll_elapsed(cx) {
             Poll::Ready(res) => match res {
@@ -225,11 +225,11 @@ impl<R: Runtime> AsyncRead for TlsStreamKind<R> {
       }
       Self::Server {
         stream,
-        read_timeout,
+        read_deadline,
         ..
       } => {
-        if let Some(timeout) = read_timeout {
-          let fut = R::timeout(*timeout, stream.read(buf));
+        if let Some(timeout) = read_deadline {
+          let fut = R::timeout_at(*timeout, stream.read(buf));
           futures::pin_mut!(fut);
           return match fut.poll_elapsed(cx) {
             Poll::Ready(res) => match res {
@@ -250,11 +250,11 @@ impl<R: Runtime> AsyncWrite for TlsStreamKind<R> {
     match self.get_mut() {
       Self::Client {
         stream,
-        write_timeout,
+        write_deadline,
         ..
       } => {
-        if let Some(timeout) = write_timeout {
-          let fut = R::timeout(*timeout, stream.write(buf));
+        if let Some(timeout) = write_deadline {
+          let fut = R::timeout_at(*timeout, stream.write(buf));
           futures::pin_mut!(fut);
           return match fut.poll_elapsed(cx) {
             Poll::Ready(res) => match res {
@@ -269,11 +269,11 @@ impl<R: Runtime> AsyncWrite for TlsStreamKind<R> {
       }
       Self::Server {
         stream,
-        write_timeout,
+        write_deadline,
         ..
       } => {
-        if let Some(timeout) = write_timeout {
-          let fut = R::timeout(*timeout, stream.write(buf));
+        if let Some(timeout) = write_deadline {
+          let fut = R::timeout_at(*timeout, stream.write(buf));
           futures::pin_mut!(fut);
           return match fut.poll_elapsed(cx) {
             Poll::Ready(res) => match res {
@@ -351,49 +351,49 @@ impl<R: Runtime> AsyncWrite for TlsStream<R> {
 }
 
 impl<R: Runtime> TimeoutableReadStream for TlsStream<R> {
-  fn set_read_timeout(&mut self, timeout: Option<Duration>) {
+  fn set_read_deadline(&mut self, deadline: Option<Instant>) {
     match self {
       Self {
-        stream: TlsStreamKind::Client { read_timeout, .. },
-      } => *read_timeout = timeout,
+        stream: TlsStreamKind::Client { read_deadline, .. },
+      } => *read_deadline = deadline,
       Self {
-        stream: TlsStreamKind::Server { read_timeout, .. },
-      } => *read_timeout = timeout,
+        stream: TlsStreamKind::Server { read_deadline, .. },
+      } => *read_deadline = deadline,
     }
   }
 
-  fn read_timeout(&self) -> Option<Duration> {
+  fn read_deadline(&self) -> Option<Instant> {
     match self {
       Self {
-        stream: TlsStreamKind::Client { read_timeout, .. },
-      } => *read_timeout,
+        stream: TlsStreamKind::Client { read_deadline, .. },
+      } => *read_deadline,
       Self {
-        stream: TlsStreamKind::Server { read_timeout, .. },
-      } => *read_timeout,
+        stream: TlsStreamKind::Server { read_deadline, .. },
+      } => *read_deadline,
     }
   }
 }
 
 impl<R: Runtime> TimeoutableWriteStream for TlsStream<R> {
-  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
+  fn set_write_deadline(&mut self, deadline: Option<Instant>) {
     match self {
       Self {
-        stream: TlsStreamKind::Client { write_timeout, .. },
-      } => *write_timeout = timeout,
+        stream: TlsStreamKind::Client { write_deadline, .. },
+      } => *write_deadline = deadline,
       Self {
-        stream: TlsStreamKind::Server { write_timeout, .. },
-      } => *write_timeout = timeout,
+        stream: TlsStreamKind::Server { write_deadline, .. },
+      } => *write_deadline = deadline,
     }
   }
 
-  fn write_timeout(&self) -> Option<Duration> {
+  fn write_deadline(&self) -> Option<Instant> {
     match self {
       Self {
-        stream: TlsStreamKind::Client { write_timeout, .. },
-      } => *write_timeout,
+        stream: TlsStreamKind::Client { write_deadline, .. },
+      } => *write_deadline,
       Self {
-        stream: TlsStreamKind::Server { write_timeout, .. },
-      } => *write_timeout,
+        stream: TlsStreamKind::Server { write_deadline, .. },
+      } => *write_deadline,
     }
   }
 }

@@ -10,7 +10,7 @@ use memberlist_core::tests::{run as run_unit_test, state::*};
 #[cfg(feature = "tokio")]
 fn tokio_run(fut: impl Future<Output = ()>) {
   let runtime = ::tokio::runtime::Builder::new_multi_thread()
-    .worker_threads(16)
+    .worker_threads(32)
     .enable_all()
     .build()
     .unwrap();

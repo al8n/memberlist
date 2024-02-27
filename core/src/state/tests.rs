@@ -729,7 +729,7 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
     if i == 9 {
       panic!("expected health score to decrement on missed nack. want 1 got {score}");
     }
-    R::sleep(Duration::from_millis(25)).await;
+    R::sleep(Duration::from_millis(100)).await;
   }
 
   m1.shutdown().await.unwrap();

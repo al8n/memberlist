@@ -89,6 +89,10 @@ pub struct Options {
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   probe_timeout: Duration,
 
+  /// The timeout to wait for a ping
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
+  ping_timeout: Duration,
+
   /// Set this field will turn off the fallback TCP pings that are attempted
   /// if the direct UDP ping fails. These get pipelined along with the
   /// indirect UDP pings.
@@ -105,6 +109,11 @@ pub struct Options {
   /// the cluster more quickly at the expense of increased bandwidth.
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
   gossip_interval: Duration,
+
+  /// The timeout to wait for gossip to send messages.
+  #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
+  gossip_timeout: Duration,
+
   /// The number of random nodes to send gossip messages to
   /// per `gossip_interval`. Increasing this number causes the gossip messages
   /// to propagate across the cluster more quickly at the expense of
@@ -176,7 +185,7 @@ impl Options {
   }
 
   /// Returns a sane set of configurations for Memberlist.
-  /// It uses the hostname as the node name, and otherwise sets very conservative
+  /// Sets very conservative
   /// values that are sane for most LAN environments. The default configuration
   /// errs on the side of caution, choosing values that are optimized
   /// for higher convergence at the cost of higher bandwidth usage. Regardless,
@@ -192,9 +201,11 @@ impl Options {
       push_pull_interval: Duration::from_secs(30), // Low frequency
       probe_interval: Duration::from_millis(500), // Failure check every second
       probe_timeout: Duration::from_secs(1), // Reasonable RTT time for LAN
+      ping_timeout: Duration::from_secs(1), // Reasonable RTT time for LAN
       disable_tcp_pings: false,         // TCP pings are safe, even with mixed versions
       awareness_max_multiplier: 8,      // Probe interval backs off to 8 seconds
       gossip_interval: Duration::from_millis(200), // Gossip every 200ms
+      gossip_timeout: Duration::from_secs(1), // Gossip timeout
       gossip_nodes: 3,                  // Gossip to 3 nodes
       gossip_to_the_dead_time: Duration::from_secs(30), // same as push/pull
       delegate_version: DelegateVersion::V0,
@@ -217,9 +228,11 @@ impl Options {
       .with_suspicion_mult(6)
       .with_push_pull_interval(Duration::from_secs(60))
       .with_probe_timeout(Duration::from_secs(3))
+      .with_ping_timeout(Duration::from_secs(3))
       .with_probe_interval(Duration::from_secs(5))
       .with_gossip_nodes(4)
       .with_gossip_interval(Duration::from_millis(500))
+      .with_gossip_timeout(Duration::from_secs(3))
       .with_gossip_to_the_dead_time(Duration::from_secs(60))
   }
 
@@ -235,8 +248,10 @@ impl Options {
       .with_suspicion_mult(3)
       .with_push_pull_interval(Duration::from_secs(15))
       .with_probe_timeout(Duration::from_millis(200))
+      .with_ping_timeout(Duration::from_millis(200))
       .with_probe_interval(Duration::from_secs(1))
       .with_gossip_interval(Duration::from_millis(100))
+      .with_gossip_timeout(Duration::from_millis(200))
       .with_gossip_to_the_dead_time(Duration::from_secs(15))
   }
 }

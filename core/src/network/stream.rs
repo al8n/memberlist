@@ -115,7 +115,7 @@ where
     let mut conn = self
       .inner
       .transport
-      .dial_timeout(addr, self.inner.opts.timeout)
+      .dial_with_deadline(addr, Instant::now() + self.inner.opts.timeout)
       .await
       .map_err(Error::transport)?;
     self.send_message(&mut conn, Message::UserData(msg)).await?;
@@ -142,7 +142,7 @@ where
     join: bool,
   ) -> Result<(), Error<T, D>> {
     // Setup a deadline
-    conn.set_timeout(Some(self.inner.opts.timeout));
+    conn.set_deadline(Some(Instant::now() + self.inner.opts.timeout));
 
     // Prepare the local node state
     #[cfg(feature = "metrics")]
@@ -264,9 +264,7 @@ where
       .increment(1);
     }
 
-    if self.inner.opts.timeout != Duration::ZERO {
-      conn.set_timeout(Some(self.inner.opts.timeout));
-    }
+    conn.set_deadline(Some(Instant::now() + self.inner.opts.timeout));
 
     let msg = match self.read_message(&addr, &mut conn).await {
       Ok((_read, msg)) => {

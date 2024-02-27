@@ -670,8 +670,8 @@ where
   .await
   .unwrap();
 
-  let mut bcasts = (0..256)
-    .map(|i| i.to_string().as_bytes().to_vec().into())
+  let bcasts = (0..256u32)
+    .map(|i| Bytes::copy_from_slice(&i.to_be_bytes()))
     .collect::<SmallVec<_>>();
 
   let m2 = Memberlist::with_delegate(
@@ -701,13 +701,14 @@ where
   // Wait for a little while
   R::sleep(Duration::from_millis(1500)).await;
 
-  let mut msg1 = m1.delegate().unwrap().node_delegate().get_messages().await;
+  let mut msg1 = m1.delegate().unwrap().node_delegate().get_messages().await.into_iter().map(|s| u32::from_be_bytes(s.as_ref().try_into().unwrap())).collect::<Vec<u32>>();
+  let mut bcasts = bcasts.into_iter().map(|s| u32::from_be_bytes(s.as_ref().try_into().unwrap())).collect::<Vec<u32>>();
 
   // udp is unordered, so sort the messages
   msg1.sort();
   bcasts.sort();
 
-  assert_eq!(msg1.as_slice(), bcasts.as_slice());
+  assert_eq!(msg1, bcasts);
   let rs1 = m1
     .delegate()
     .unwrap()

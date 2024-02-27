@@ -216,8 +216,19 @@ where
         },
       );
 
-    if let Err(e) = self.send_msg(ind.target.address(), ping.into()).await {
-      tracing::error!(target =  "memberlist.packet", addr = %from, err = %e, "failed to send ping");
+    match <T::Runtime as Runtime>::timeout(
+      self.inner.opts.ping_timeout,
+      self.send_msg(ind.target.address(), ping.into()),
+    )
+    .await
+    {
+      Ok(Ok(_)) => {}
+      Ok(Err(e)) => {
+        tracing::error!(target = "memberlist.packet", addr = %from, target=%ind.target, err = %e, "failed to send ping");
+      }
+      Err(e) => {
+        tracing::error!(target = "memberlist.packet", addr = %from, target=%ind.target, err = %e, "failed to send ping (reach ping timeout)");
+      }
     }
 
     // Setup a timer to fire off a nack if no ack is seen in time.
@@ -248,6 +259,7 @@ where
   }
 
   async fn handle_nack(&self, nack: Nack) {
+    tracing::error!("DEBUG: invoke nack handler {}", self.local_id());
     self.inner.ack_manager.invoke_nack_handler(nack).await
   }
 

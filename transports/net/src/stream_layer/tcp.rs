@@ -4,7 +4,7 @@ use std::{
   net::SocketAddr,
   pin::Pin,
   task::{Context, Poll},
-  time::Duration,
+  time::Instant,
 };
 
 use agnostic::{
@@ -53,8 +53,8 @@ impl<R: Runtime> StreamLayer for Tcp<R> {
       .await
       .map(|stream| TcpStream {
         stream,
-        read_timeout: None,
-        write_timeout: None,
+        read_deadline: None,
+        write_deadline: None,
       })
   }
 
@@ -85,8 +85,8 @@ impl<R: Runtime> Listener for TcpListener<R> {
       (
         TcpStream {
           stream: conn,
-          read_timeout: None,
-          write_timeout: None,
+          read_deadline: None,
+          write_deadline: None,
         },
         addr,
       )
@@ -103,8 +103,8 @@ impl<R: Runtime> Listener for TcpListener<R> {
 pub struct TcpStream<R: Runtime> {
   #[pin]
   stream: <R::Net as Net>::TcpStream,
-  read_timeout: Option<Duration>,
-  write_timeout: Option<Duration>,
+  read_deadline: Option<Instant>,
+  write_deadline: Option<Instant>,
 }
 
 impl<R: Runtime> AsyncRead for TcpStream<R> {
@@ -113,8 +113,8 @@ impl<R: Runtime> AsyncRead for TcpStream<R> {
     cx: &mut Context<'_>,
     buf: &mut [u8],
   ) -> Poll<io::Result<usize>> {
-    if let Some(timeout) = self.read_timeout {
-      let fut = R::timeout(timeout, self.stream.read(buf));
+    if let Some(timeout) = self.read_deadline {
+      let fut = R::timeout_at(timeout, self.stream.read(buf));
       futures::pin_mut!(fut);
       return match fut.poll_elapsed(cx) {
         Poll::Ready(res) => match res {
@@ -134,8 +134,8 @@ impl<R: Runtime> AsyncWrite for TcpStream<R> {
     cx: &mut Context<'_>,
     buf: &[u8],
   ) -> Poll<io::Result<usize>> {
-    if let Some(timeout) = self.write_timeout {
-      let fut = R::timeout(timeout, self.stream.write(buf));
+    if let Some(timeout) = self.write_deadline {
+      let fut = R::timeout_at(timeout, self.stream.write(buf));
       futures::pin_mut!(fut);
       return match fut.poll_elapsed(cx) {
         Poll::Ready(res) => match res {
@@ -158,22 +158,22 @@ impl<R: Runtime> AsyncWrite for TcpStream<R> {
 }
 
 impl<R: Runtime> TimeoutableReadStream for TcpStream<R> {
-  fn set_read_timeout(&mut self, timeout: Option<Duration>) {
-    self.read_timeout = timeout;
+  fn set_read_deadline(&mut self, deadline: Option<Instant>) {
+    self.read_deadline = deadline;
   }
 
-  fn read_timeout(&self) -> Option<Duration> {
-    self.read_timeout
+  fn read_deadline(&self) -> Option<Instant> {
+    self.read_deadline
   }
 }
 
 impl<R: Runtime> TimeoutableWriteStream for TcpStream<R> {
-  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
-    self.write_timeout = timeout;
+  fn set_write_deadline(&mut self, deadline: Option<Instant>) {
+    self.write_deadline = deadline;
   }
 
-  fn write_timeout(&self) -> Option<Duration> {
-    self.write_timeout
+  fn write_deadline(&self) -> Option<Instant> {
+    self.write_deadline
   }
 }
 

@@ -62,6 +62,7 @@ where
     offset += 1;
     buf[offset] = num_packets as u8;
     offset += 1;
+    tracing::error!("DEBUG: num packets {} {}", buf[offset], buf.len() as u8);
 
     for packet in batch {
       let expected_packet_encoded_size = W::encoded_len(&packet);

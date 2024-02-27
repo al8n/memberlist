@@ -4,7 +4,7 @@ use std::{
   pin::Pin,
   sync::Arc,
   task::{Context, Poll},
-  time::Duration,
+  time::Instant,
 };
 
 pub use ::native_tls;
@@ -57,8 +57,8 @@ impl<R: Runtime> StreamLayer for NativeTls<R> {
       .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, e))?;
     Ok(NativeTlsStream {
       stream,
-      read_timeout: None,
-      write_timeout: None,
+      read_deadline: None,
+      write_deadline: None,
     })
   }
 
@@ -93,8 +93,8 @@ impl<R: Runtime> Listener for NativeTlsListener<R> {
     Ok((
       NativeTlsStream {
         stream,
-        read_timeout: None,
-        write_timeout: None,
+        read_deadline: None,
+        write_deadline: None,
       },
       addr,
     ))
@@ -110,8 +110,8 @@ impl<R: Runtime> Listener for NativeTlsListener<R> {
 pub struct NativeTlsStream<R: Runtime> {
   #[pin]
   stream: AsyncNativeTlsStream<<R::Net as Net>::TcpStream>,
-  read_timeout: Option<Duration>,
-  write_timeout: Option<Duration>,
+  read_deadline: Option<Instant>,
+  write_deadline: Option<Instant>,
 }
 
 impl<R: Runtime> AsyncRead for NativeTlsStream<R> {
@@ -139,22 +139,22 @@ impl<R: Runtime> AsyncWrite for NativeTlsStream<R> {
 }
 
 impl<R: Runtime> TimeoutableReadStream for NativeTlsStream<R> {
-  fn set_read_timeout(&mut self, timeout: Option<Duration>) {
-    self.read_timeout = timeout;
+  fn set_read_deadline(&mut self, deadline: Option<Instant>) {
+    self.read_deadline = deadline;
   }
 
-  fn read_timeout(&self) -> Option<Duration> {
-    self.read_timeout
+  fn read_deadline(&self) -> Option<Instant> {
+    self.read_deadline
   }
 }
 
 impl<R: Runtime> TimeoutableWriteStream for NativeTlsStream<R> {
-  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
-    self.write_timeout = timeout;
+  fn set_write_deadline(&mut self, deadline: Option<Instant>) {
+    self.write_deadline = deadline;
   }
 
-  fn write_timeout(&self) -> Option<Duration> {
-    self.write_timeout
+  fn write_deadline(&self) -> Option<Instant> {
+    self.write_deadline
   }
 }
 

@@ -638,8 +638,12 @@ where
   });
 
   let did_contact = panic_on_err!(
-    m.send_ping_and_wait_for_ack(&promised_addr, ping_out.clone(), ping_timeout)
-      .await
+    m.send_ping_and_wait_for_ack(
+      &promised_addr,
+      ping_out.clone(),
+      Instant::now() + ping_timeout
+    )
+    .await
   );
 
   if !did_contact {
@@ -653,7 +657,11 @@ where
 
   // Make sure a mis-matched sequence number is caught.
   let err = m
-    .send_ping_and_wait_for_ack(&promised_addr, ping_out.clone(), ping_timeout)
+    .send_ping_and_wait_for_ack(
+      &promised_addr,
+      ping_out.clone(),
+      Instant::now() + ping_timeout,
+    )
     .await
     .expect_err("expected failed ping");
   if !err
@@ -670,7 +678,11 @@ where
 
   // Make sure an unexpected message type is handled gracefully.
   let err = m
-    .send_ping_and_wait_for_ack(&promised_addr, ping_out.clone(), ping_timeout)
+    .send_ping_and_wait_for_ack(
+      &promised_addr,
+      ping_out.clone(),
+      Instant::now() + ping_timeout,
+    )
     .await
     .expect_err("expected failed ping");
 
@@ -697,7 +709,7 @@ where
 
   let start_ping = Instant::now();
   let did_contact = m
-    .send_ping_and_wait_for_ack(&promised_addr, ping_out, ping_timeout)
+    .send_ping_and_wait_for_ack(&promised_addr, ping_out, Instant::now() + ping_timeout)
     .await?;
   let elapsed = start_ping.elapsed();
   assert!(!did_contact, "expected failed ping");

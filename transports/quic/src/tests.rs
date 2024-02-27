@@ -493,6 +493,7 @@ mod quinn_stream_layer {
       atomic::{AtomicU16, Ordering},
       Arc,
     },
+    time::Duration,
   };
 
   struct SkipServerVerification;
@@ -555,12 +556,15 @@ mod quinn_stream_layer {
   pub async fn quinn_stream_layer<R: Runtime>() -> Quinn<R> {
     let server_name = "localhost".to_string();
     let (server_config, client_config) = configures().unwrap();
-    Quinn::new(Options::new(
-      server_name,
-      server_config,
-      client_config,
-      Default::default(),
-    ))
+    Quinn::new(
+      Options::new(
+        server_name,
+        server_config,
+        client_config,
+        Default::default(),
+      )
+      .with_connect_timeout(Duration::from_millis(10)),
+    )
   }
 }
 

@@ -13,7 +13,7 @@ use std::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
   },
-  time::{Duration, Instant},
+  time::Instant,
 };
 
 use agnostic::{
@@ -23,7 +23,10 @@ use agnostic::{
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{BufMut, BytesMut};
 use checksum::CHECKSUM_SIZE;
-use futures::{channel::oneshot, io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::{
+  channel::oneshot, io::BufReader, stream::FuturesUnordered, AsyncRead, AsyncWrite, AsyncWriteExt,
+  StreamExt,
+};
 use memberlist_core::{
   transport::{
     resolver::AddressResolver,
@@ -592,10 +595,11 @@ where
     );
 
     let mut total_bytes_sent = 0;
-    let resps =
-      futures::future::join_all(batches.into_iter().map(|b| self.send_batch(addr, b))).await;
-
-    for res in resps {
+    let mut futs = batches
+      .into_iter()
+      .map(|b| self.send_batch(addr, b))
+      .collect::<FuturesUnordered<_>>();
+    while let Some(res) = futs.next().await {
       match res {
         Ok(sent) => {
           total_bytes_sent += sent;
@@ -606,12 +610,13 @@ where
     Ok((total_bytes_sent, start))
   }
 
-  async fn dial_timeout(
+  async fn dial_with_deadline(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    timeout: Duration,
+    deadline: Instant,
   ) -> Result<Self::Stream, Self::Error> {
-    let connector = <Self::Runtime as Runtime>::timeout(timeout, self.stream_layer.connect(*addr));
+    let connector =
+      <Self::Runtime as Runtime>::timeout_at(deadline, self.stream_layer.connect(*addr));
     match connector.await {
       Ok(Ok(conn)) => Ok(conn),
       Ok(Err(e)) => Err(Self::Error::Connection(ConnectionError {

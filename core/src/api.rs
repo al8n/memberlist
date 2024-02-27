@@ -7,7 +7,7 @@ use std::{
 
 use agnostic::Runtime;
 use bytes::Bytes;
-use futures::{FutureExt, Stream};
+use futures::{FutureExt, Stream, StreamExt};
 
 use super::{
   base::Memberlist,
@@ -392,21 +392,21 @@ where
             Ok(node)
           }
         }
-      });
-
-    let res = futures::future::join_all(futs).await;
+      }).collect::<futures::stream::FuturesUnordered<_>>();
 
     let num_success = std::cell::RefCell::new(SmallVec::with_capacity(estimated_total));
-    let errors = res
-      .into_iter()
-      .filter_map(|rst| match rst {
-        Ok(node) => {
-          num_success.borrow_mut().push(node);
-          None
+    let errors = futs
+      .filter_map(|rst| async {
+        match rst {
+          Ok(node) => {
+            num_success.borrow_mut().push(node);
+            None
+          }
+          Err((node, e)) => Some((node, e)),
         }
-        Err((node, e)) => Some((node, e)),
       })
-      .collect::<HashMap<_, _>>();
+      .collect::<HashMap<_, _>>()
+      .await;
 
     if errors.is_empty() {
       return Ok(num_success.into_inner());

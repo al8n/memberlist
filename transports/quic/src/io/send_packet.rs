@@ -196,17 +196,21 @@ where
     addr: SocketAddr,
     src: Bytes,
   ) -> Result<usize, QuicTransportError<A, S, W>> {
+    let debug_start = std::time::Instant::now();
     let mut stream = self.fetch_stream(addr, None).await?;
+    tracing::warn!(local=%self.local_id(), remote=%addr, "DEBUG: fetch stream took {:?}", debug_start.elapsed());
 
-    tracing::trace!(
+    tracing::error!(
       target = "memberlist.transport.quic",
       total_bytes = %src.len(),
       sent = ?src.as_ref(),
     );
+    let debug_start = std::time::Instant::now();
     let written = stream
       .write_all(src)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    tracing::warn!(local=%self.local_id(), remote=%addr, "DEBUG: write all took {:?}", debug_start.elapsed());
     Ok(written)
   }
 }

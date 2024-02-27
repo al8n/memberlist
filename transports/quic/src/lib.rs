@@ -21,7 +21,8 @@ use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use futures::{
   channel::oneshot::{self, channel},
-  FutureExt,
+  stream::FuturesUnordered,
+  FutureExt, StreamExt,
 };
 use memberlist_core::{
   transport::{
@@ -300,8 +301,6 @@ where
     interval: impl futures::Stream,
     shutdown_rx: async_channel::Receiver<()>,
   ) {
-    use futures::StreamExt;
-
     futures::pin_mut!(interval);
 
     loop {
@@ -368,14 +367,14 @@ where
   async fn fetch_stream(
     &self,
     addr: SocketAddr,
-    timeout: Option<Duration>,
+    timeout: Option<Instant>,
   ) -> Result<S::Stream, QuicTransportError<A, S, W>> {
     if let Some(ent) = self.connection_pool.get(&addr) {
       let connection = ent.value();
       if !connection.is_closed().await {
         if let Some(timeout) = timeout {
           return connection
-            .open_bi_with_timeout(timeout)
+            .open_bi_with_deadline(timeout)
             .await
             .map(|(s, _)| s)
             .map_err(|e| QuicTransportError::Stream(e.into()));
@@ -390,10 +389,17 @@ where
     }
 
     let connector = self.next_connector(&addr);
+    let debug_start = std::time::Instant::now();
+    tracing::error!(local=%self.local_id(), remote=%addr, "DEBUG: start to create a connection");
     let connection = connector
       .connect(addr)
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    tracing::error!(local=%self.local_id(), remote=%addr, "DEBUG: connect took {:?}", debug_start.elapsed());
+    let debug_start = std::time::Instant::now();
+    scopeguard::defer!({
+      tracing::error!(local=%self.local_id(), remote=%addr, "DEBUG: open bi took {:?}", debug_start.elapsed());
+    });
     connection
       .open_bi()
       .await
@@ -584,16 +590,20 @@ where
       PACKET_HEADER_OVERHEAD,
       PACKET_OVERHEAD,
       self.max_payload_size(),
-      u16::MAX as usize,
+      u32::MAX as usize,
       NUM_PACKETS_PER_BATCH,
       packets,
     );
 
     let mut total_bytes_sent = 0;
-    let resps =
-      futures::future::join_all(batches.into_iter().map(|b| self.send_batch(*addr, b))).await;
-
-    for res in resps {
+    let mut futs = batches
+      .into_iter()
+      .map(|b| {
+        tracing::error!("DEBUG: sent batch here {b:?}");
+        self.send_batch(*addr, b)
+      })
+      .collect::<FuturesUnordered<_>>();
+    while let Some(res) = futs.next().await {
       match res {
         Ok(sent) => {
           total_bytes_sent += sent;
@@ -604,12 +614,12 @@ where
     Ok((total_bytes_sent, start))
   }
 
-  async fn dial_timeout(
+  async fn dial_with_deadline(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    timeout: std::time::Duration,
+    deadline: std::time::Instant,
   ) -> Result<Self::Stream, Self::Error> {
-    self.fetch_stream(*addr, Some(timeout)).await
+    self.fetch_stream(*addr, Some(deadline)).await
   }
 
   async fn cache_stream(
