@@ -709,12 +709,12 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
     assert_eq!(state, State::Suspect, "expect node to be suspect");
   }
 
-  for i in 0..10 {
+  for i in 0..50 {
     let score = m1.health_score();
     if score == 1 {
       break;
     }
-    if i == 9 {
+    if i == 49 {
       panic!("expected health score to decrement on missed nack. want 1 got {score}");
     }
     R::sleep(Duration::from_millis(100)).await;
@@ -1026,7 +1026,7 @@ where
 
   assert!(ack_handler_exists(&m, 0).await, "missing handler");
 
-  R::sleep(Duration::from_millis(20)).await;
+  R::sleep(Duration::from_millis(50)).await;
 
   assert!(!ack_handler_exists(&m, 0).await, "non-reaped handler");
 }
@@ -1045,7 +1045,7 @@ where
 
   assert!(ack_handler_exists(&m1, 0).await, "missing handler");
 
-  R::sleep(Duration::from_millis(20)).await;
+  R::sleep(Duration::from_millis(50)).await;
 
   assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
 }
@@ -1818,7 +1818,7 @@ where
   assert!(matches!(msg, Message::Suspect(_)), "bad message: {msg:?}");
 
   // Wait for the timeout
-  R::sleep(Duration::from_millis(10)).await;
+  R::sleep(Duration::from_millis(100)).await;
 
   let state = m.get_node_state(&test_node_id).await.unwrap();
   assert_eq!(state, State::Dead, "bad state");

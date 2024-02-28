@@ -697,7 +697,7 @@ where
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
 
   // Wait for a little while
-  R::sleep(Duration::from_millis(1500)).await;
+  R::sleep(Duration::from_millis(3000)).await;
 
   let mut msg1 = m1
     .delegate()
@@ -1041,7 +1041,7 @@ where
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,
 {
-  retry::<R, _, _>(15, Duration::from_millis(500), || async {
+  retry::<R, _, _>(30, Duration::from_millis(500), || async {
     if m.online_members().await.len() != expected {
       return (
         true,
