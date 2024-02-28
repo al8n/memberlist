@@ -124,8 +124,6 @@ jobs:
     - name: Setup loopback interface (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: ci/setup_subnet_ubuntu.sh
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
     - name: Cache ~/.cargo
       uses: actions/cache@v3
       with:
@@ -164,8 +162,6 @@ jobs:
     - name: Setup loopback interface (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: ci/setup_subnet_ubuntu.sh
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
     - name: Cache ~/.cargo
       uses: actions/cache@v3
       with:
@@ -204,8 +200,6 @@ jobs:
     - name: Setup loopback interface (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: ci/setup_subnet_ubuntu.sh
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
     - name: Cache ~/.cargo
       uses: actions/cache@v3
       with:
@@ -244,8 +238,6 @@ jobs:
     - name: Setup loopback interface (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: ci/setup_subnet_ubuntu.sh
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
     - name: Cache ~/.cargo
       uses: actions/cache@v3
       with:
@@ -284,8 +276,6 @@ jobs:
     - name: Setup loopback interface (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: ci/setup_subnet_ubuntu.sh
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
     - name: Cache ~/.cargo
       uses: actions/cache@v3
       with:
@@ -324,8 +314,6 @@ jobs:
     - name: Setup loopback interface (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: ci/setup_subnet_ubuntu.sh
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
     - name: Cache ~/.cargo
       uses: actions/cache@v3
       with:
@@ -364,8 +352,6 @@ jobs:
     - name: Setup loopback interface (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: ci/setup_subnet_ubuntu.sh
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
     - name: Cache ~/.cargo
       uses: actions/cache@v3
       with:
@@ -404,8 +390,6 @@ jobs:
     - name: Setup loopback interface (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: ci/setup_subnet_ubuntu.sh
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
     - name: Cache ~/.cargo
       uses: actions/cache@v3
       with:
@@ -444,8 +428,6 @@ jobs:
     - name: Setup loopback interface (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: ci/setup_subnet_ubuntu.sh
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
     - name: Cache ~/.cargo
       uses: actions/cache@v3
       with:
