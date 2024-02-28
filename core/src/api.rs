@@ -542,9 +542,15 @@ where
 
     // Send a ping to the node.
     // Wait to send or timeout.
-    futures::select! {
-      res = self.send_msg(node.address(), ping.into()).fuse() => res?,
-      _ = <T::Runtime as Runtime>::sleep(self.inner.opts.probe_timeout).fuse() => {
+    match <T::Runtime as Runtime>::timeout(
+      self.inner.opts.probe_timeout,
+      self.send_msg(node.address(), ping.into()),
+    )
+    .await
+    {
+      Ok(Ok(())) => {}
+      Ok(Err(e)) => return Err(e),
+      Err(_) => {
         // If we timed out, return Error.
         tracing::debug!(
           target = "memberlist",

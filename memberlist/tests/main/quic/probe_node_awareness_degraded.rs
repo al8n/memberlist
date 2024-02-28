@@ -75,4 +75,6 @@ macro_rules! probe_node_awareness_degraded {
   };
 }
 
-test_mods!(probe_node_awareness_degraded);
+test_mods!(probe_node_awareness_degraded(
+  std::time::Duration::from_millis(50)
+));

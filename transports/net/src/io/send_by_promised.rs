@@ -1,4 +1,5 @@
 use super::*;
+use bytes::Bytes;
 
 impl<I, A, S, W, R> NetTransport<I, A, S, W, R>
 where
@@ -18,28 +19,45 @@ where
 
   pub(crate) async fn send_by_promised(
     &self,
-    conn: &mut S::Stream,
+    mut conn: Deadline<&mut S::Stream>,
     msg: Message<I, A::ResolvedAddress>,
   ) -> Result<usize, NetTransportError<A, W>> {
     #[cfg(not(any(feature = "compression", feature = "encryption")))]
-    return self
-      .send_by_promised_without_compression_and_encryption(conn, &self.opts.label, msg)
-      .await;
+    let buf = self
+      .send_by_promised_without_compression_and_encryption(&self.opts.label, msg)
+      .await?;
 
     #[cfg(all(feature = "compression", not(feature = "encryption")))]
-    return self
-      .send_by_promised_with_compression_without_encryption(conn, &self.opts.label, msg)
-      .await;
+    let buf = self
+      .send_by_promised_with_compression_without_encryption(&self.opts.label, msg)
+      .await?;
 
     #[cfg(all(not(feature = "compression"), feature = "encryption"))]
-    return self
-      .send_by_promised_with_encryption_without_compression(conn, msg, &self.opts.label)
-      .await;
+    let buf = self
+      .send_by_promised_with_encryption_without_compression(msg, &self.opts.label)
+      .await?;
 
     #[cfg(all(feature = "compression", feature = "encryption"))]
-    self
-      .send_by_promised_with_compression_and_encryption(conn, msg, &self.opts.label)
+    let buf = self
+      .send_by_promised_with_compression_and_encryption(msg, &self.opts.label)
+      .await?;
+
+    let total_len = buf.len();
+    conn
+      .write_all::<R>(&buf)
       .await
+      .map_err(ConnectionError::promised_write)?;
+
+    conn
+      .op
+      .flush()
+      .await
+      .map_err(|e| ConnectionError::promised_write(e).into())
+      .map(|_| {
+        let peer_addr = conn.op.peer_addr();
+        tracing::trace!(target = "memberlist.transport.net.promised", remote_addr = %peer_addr, total_len = total_len, sent = ?buf.as_ref());
+        total_len
+      })
   }
 
   #[cfg(all(feature = "compression", feature = "encryption"))]
@@ -184,28 +202,27 @@ where
   #[cfg(all(feature = "compression", feature = "encryption"))]
   async fn send_by_promised_with_compression_and_encryption(
     &self,
-    mut conn: impl AsyncWrite + Unpin,
     msg: Message<I, A::ResolvedAddress>,
     stream_label: &Label,
-  ) -> Result<usize, NetTransportError<A, W>> {
+  ) -> Result<Bytes, NetTransportError<A, W>> {
     let compression_enabled = self.opts.compressor.is_some();
     let encryption_enabled = self.enable_promised_encryption();
 
     if !compression_enabled && !encryption_enabled {
       return self
-        .send_by_promised_without_compression_and_encryption(conn, stream_label, msg)
+        .send_by_promised_without_compression_and_encryption(stream_label, msg)
         .await;
     }
 
     if compression_enabled && !encryption_enabled {
       return self
-        .send_by_promised_with_compression_without_encryption(conn, stream_label, msg)
+        .send_by_promised_with_compression_without_encryption(stream_label, msg)
         .await;
     }
 
     if !compression_enabled && encryption_enabled {
       return self
-        .send_by_promised_with_encryption_without_compression(conn, msg, stream_label)
+        .send_by_promised_with_encryption_without_compression(msg, stream_label)
         .await;
     }
 
@@ -257,34 +274,19 @@ where
         Err(_) => return Err(NetTransportError::ComputationTaskFailed),
       }
     };
-
-    let total_len = buf.len();
-    conn
-      .write_all(&buf)
-      .await
-      .map_err(ConnectionError::promised_write)?;
-
-    conn
-      .flush()
-      .await
-      .map_err(|e| ConnectionError::promised_write(e).into())
-      .map(|_| {
-        tracing::trace!(total_len = total_len, sent = ?buf.as_ref());
-        total_len
-      })
+    Ok(buf.freeze())
   }
 
   #[cfg(feature = "encryption")]
   async fn send_by_promised_with_encryption_without_compression(
     &self,
-    mut conn: impl AsyncWrite + Unpin,
     msg: Message<I, A::ResolvedAddress>,
     stream_label: &Label,
-  ) -> Result<usize, NetTransportError<A, W>> {
+  ) -> Result<Bytes, NetTransportError<A, W>> {
     let enable_encryption = self.enable_promised_encryption();
     if !enable_encryption {
       return self
-        .send_by_promised_without_compression_and_encryption(conn, stream_label, msg)
+        .send_by_promised_without_compression_and_encryption(stream_label, msg)
         .await;
     }
 
@@ -325,34 +327,20 @@ where
       }
     };
 
-    let total_len = buf.len();
-    conn
-      .write_all(&buf)
-      .await
-      .map_err(ConnectionError::promised_write)?;
-
-    conn
-      .flush()
-      .await
-      .map_err(|e| ConnectionError::promised_write(e).into())
-      .map(|_| {
-        tracing::trace!(total_len = total_len, sent = ?buf.as_ref());
-        total_len
-      })
+    Ok(buf.freeze())
   }
 
   #[cfg(feature = "compression")]
   async fn send_by_promised_with_compression_without_encryption(
     &self,
-    mut conn: impl AsyncWrite + Unpin,
     label: &Label,
     msg: Message<I, A::ResolvedAddress>,
-  ) -> Result<usize, NetTransportError<A, W>> {
+  ) -> Result<Bytes, NetTransportError<A, W>> {
     let compressor = match self.opts.compressor {
       Some(c) => c,
       None => {
         return self
-          .send_by_promised_without_compression_and_encryption(conn, label, msg)
+          .send_by_promised_without_compression_and_encryption(label, msg)
           .await
       }
     };
@@ -388,27 +376,14 @@ where
       }
     };
 
-    let total_len = buf.len();
-    conn
-      .write_all(&buf)
-      .await
-      .map_err(ConnectionError::promised_write)?;
-    conn
-      .flush()
-      .await
-      .map_err(|e| ConnectionError::promised_write(e).into())
-      .map(|_| {
-        tracing::trace!(total_len = total_len, sent = ?buf.as_ref());
-        total_len
-      })
+    Ok(buf.freeze())
   }
 
   async fn send_by_promised_without_compression_and_encryption(
     &self,
-    mut conn: impl AsyncWrite + Unpin,
     label: &Label,
     msg: Message<I, A::ResolvedAddress>,
-  ) -> Result<usize, NetTransportError<A, W>> {
+  ) -> Result<Bytes, NetTransportError<A, W>> {
     let label_encoded_size = label.encoded_overhead();
     let msg_encoded_size = W::encoded_len(&msg);
     let mut buf = BytesMut::with_capacity(label_encoded_size + msg_encoded_size);
@@ -426,18 +401,6 @@ where
       label_encoded_size + msg_encoded_size
     );
 
-    conn
-      .write_all(&buf)
-      .await
-      .map_err(ConnectionError::promised_write)?;
-
-    conn
-      .flush()
-      .await
-      .map_err(|e| ConnectionError::promised_write(e).into())
-      .map(|_| {
-        tracing::trace!(total_bytes = total_data, sent = ?buf.as_ref());
-        total_data
-      })
+    Ok(buf.freeze())
   }
 }

@@ -175,7 +175,7 @@ impl Options {
       max_concurrent_stream_limit: 256,
       keep_alive_interval: Duration::from_secs(8),
       max_connection_data: 15_000_000,
-      connect_timeout: Duration::from_millis(100),
+      connect_timeout: Duration::from_secs(10),
 
       // Ensure that one stream is not consuming the whole connection.
       max_stream_data: 10_000_000,

@@ -9,9 +9,9 @@ use std::{
 
 use agnostic::{
   net::{Net, TcpListener, TcpStream},
-  Runtime, Timeoutable,
+  Runtime,
 };
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
 pub use futures_rustls::{
   client, pki_types::ServerName, rustls, server, TlsAcceptor, TlsConnector,
 };
@@ -108,6 +108,7 @@ impl<R: Runtime> StreamLayer for Tls<R> {
 
   async fn connect(&self, addr: SocketAddr) -> io::Result<Self::Stream> {
     let conn = <<R::Net as Net>::TcpStream as TcpStream>::connect(addr).await?;
+    let local_addr = conn.local_addr()?;
     let stream = self.connector.connect(self.domain.clone(), conn).await?;
     Ok(TlsStream {
       stream: TlsStreamKind::Client {
@@ -115,6 +116,8 @@ impl<R: Runtime> StreamLayer for Tls<R> {
         read_deadline: None,
         write_deadline: None,
       },
+      peer_addr: addr,
+      local_addr,
     })
   }
 
@@ -122,7 +125,13 @@ impl<R: Runtime> StreamLayer for Tls<R> {
     let acceptor = self.acceptor.clone();
     <<R::Net as Net>::TcpListener as TcpListener>::bind(addr)
       .await
-      .map(|ln| TlsListener { ln, acceptor })
+      .and_then(|ln| {
+        ln.local_addr().map(|local_addr| TlsListener {
+          ln,
+          acceptor,
+          local_addr,
+        })
+      })
   }
 
   async fn cache_stream(&self, _addr: SocketAddr, mut stream: Self::Stream) {
@@ -157,6 +166,7 @@ impl<R: Runtime> StreamLayer for Tls<R> {
 pub struct TlsListener<R: Runtime> {
   ln: <R::Net as Net>::TcpListener,
   acceptor: Arc<TlsAcceptor>,
+  local_addr: SocketAddr,
 }
 
 impl<R: Runtime> Listener for TlsListener<R> {
@@ -172,13 +182,15 @@ impl<R: Runtime> Listener for TlsListener<R> {
           read_deadline: None,
           write_deadline: None,
         },
+        peer_addr: addr,
+        local_addr: self.local_addr,
       },
       addr,
     ))
   }
 
-  fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
-    self.ln.local_addr()
+  fn local_addr(&self) -> std::net::SocketAddr {
+    self.local_addr
   }
 }
 
@@ -205,42 +217,8 @@ impl<R: Runtime> AsyncRead for TlsStreamKind<R> {
     buf: &mut [u8],
   ) -> Poll<io::Result<usize>> {
     match self.get_mut() {
-      Self::Client {
-        stream,
-        read_deadline,
-        ..
-      } => {
-        if let Some(timeout) = read_deadline {
-          let fut = R::timeout_at(*timeout, stream.read(buf));
-          futures::pin_mut!(fut);
-          return match fut.poll_elapsed(cx) {
-            Poll::Ready(res) => match res {
-              Ok(res) => Poll::Ready(res),
-              Err(err) => Poll::Ready(Err(err.into())),
-            },
-            Poll::Pending => Poll::Pending,
-          };
-        }
-        Pin::new(stream).poll_read(cx, buf)
-      }
-      Self::Server {
-        stream,
-        read_deadline,
-        ..
-      } => {
-        if let Some(timeout) = read_deadline {
-          let fut = R::timeout_at(*timeout, stream.read(buf));
-          futures::pin_mut!(fut);
-          return match fut.poll_elapsed(cx) {
-            Poll::Ready(res) => match res {
-              Ok(res) => Poll::Ready(res),
-              Err(err) => Poll::Ready(Err(err.into())),
-            },
-            Poll::Pending => Poll::Pending,
-          };
-        }
-        Pin::new(stream).poll_read(cx, buf)
-      }
+      Self::Client { stream, .. } => Pin::new(stream).poll_read(cx, buf),
+      Self::Server { stream, .. } => Pin::new(stream).poll_read(cx, buf),
     }
   }
 }
@@ -248,43 +226,8 @@ impl<R: Runtime> AsyncRead for TlsStreamKind<R> {
 impl<R: Runtime> AsyncWrite for TlsStreamKind<R> {
   fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
     match self.get_mut() {
-      Self::Client {
-        stream,
-        write_deadline,
-        ..
-      } => {
-        if let Some(timeout) = write_deadline {
-          let fut = R::timeout_at(*timeout, stream.write(buf));
-          futures::pin_mut!(fut);
-          return match fut.poll_elapsed(cx) {
-            Poll::Ready(res) => match res {
-              Ok(res) => Poll::Ready(res),
-              Err(err) => Poll::Ready(Err(err.into())),
-            },
-            Poll::Pending => Poll::Pending,
-          };
-        }
-
-        Pin::new(stream).poll_write(cx, buf)
-      }
-      Self::Server {
-        stream,
-        write_deadline,
-        ..
-      } => {
-        if let Some(timeout) = write_deadline {
-          let fut = R::timeout_at(*timeout, stream.write(buf));
-          futures::pin_mut!(fut);
-          return match fut.poll_elapsed(cx) {
-            Poll::Ready(res) => match res {
-              Ok(res) => Poll::Ready(res),
-              Err(err) => Poll::Ready(Err(err.into())),
-            },
-            Poll::Pending => Poll::Pending,
-          };
-        }
-        Pin::new(stream).poll_write(cx, buf)
-      }
+      Self::Client { stream, .. } => Pin::new(stream).poll_write(cx, buf),
+      Self::Server { stream, .. } => Pin::new(stream).poll_write(cx, buf),
     }
   }
 
@@ -308,6 +251,8 @@ impl<R: Runtime> AsyncWrite for TlsStreamKind<R> {
 pub struct TlsStream<R: Runtime> {
   #[pin]
   stream: TlsStreamKind<R>,
+  local_addr: SocketAddr,
+  peer_addr: SocketAddr,
 }
 
 impl<R: Runtime> TlsStream<R> {
@@ -355,9 +300,11 @@ impl<R: Runtime> TimeoutableReadStream for TlsStream<R> {
     match self {
       Self {
         stream: TlsStreamKind::Client { read_deadline, .. },
+        ..
       } => *read_deadline = deadline,
       Self {
         stream: TlsStreamKind::Server { read_deadline, .. },
+        ..
       } => *read_deadline = deadline,
     }
   }
@@ -366,9 +313,11 @@ impl<R: Runtime> TimeoutableReadStream for TlsStream<R> {
     match self {
       Self {
         stream: TlsStreamKind::Client { read_deadline, .. },
+        ..
       } => *read_deadline,
       Self {
         stream: TlsStreamKind::Server { read_deadline, .. },
+        ..
       } => *read_deadline,
     }
   }
@@ -379,9 +328,11 @@ impl<R: Runtime> TimeoutableWriteStream for TlsStream<R> {
     match self {
       Self {
         stream: TlsStreamKind::Client { write_deadline, .. },
+        ..
       } => *write_deadline = deadline,
       Self {
         stream: TlsStreamKind::Server { write_deadline, .. },
+        ..
       } => *write_deadline = deadline,
     }
   }
@@ -390,12 +341,24 @@ impl<R: Runtime> TimeoutableWriteStream for TlsStream<R> {
     match self {
       Self {
         stream: TlsStreamKind::Client { write_deadline, .. },
+        ..
       } => *write_deadline,
       Self {
         stream: TlsStreamKind::Server { write_deadline, .. },
+        ..
       } => *write_deadline,
     }
   }
 }
 
-impl<R: Runtime> PromisedStream for TlsStream<R> {}
+impl<R: Runtime> PromisedStream for TlsStream<R> {
+  #[inline]
+  fn local_addr(&self) -> SocketAddr {
+    self.local_addr
+  }
+
+  #[inline]
+  fn peer_addr(&self) -> SocketAddr {
+    self.peer_addr
+  }
+}

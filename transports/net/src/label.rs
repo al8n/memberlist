@@ -1,7 +1,7 @@
 use std::io;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Future};
+use futures::{AsyncRead, AsyncWrite, AsyncWriteExt, Future};
 use peekable::future::AsyncPeekable;
 
 pub use memberlist_utils::Label;
@@ -22,19 +22,19 @@ pub(crate) trait LabelAsyncIOExt: Unpin + Send + Sync {
   }
 }
 
-pub(super) async fn remove_label_header(
-  this: &mut AsyncPeekable<impl AsyncRead + Unpin>,
+pub(super) async fn remove_label_header<R: agnostic::Runtime>(
+  this: &mut super::Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>>,
 ) -> io::Result<Option<Label>> {
   let mut meta = [0u8; 2];
-  this.peek_exact(&mut meta).await?;
+  this.peek_exact::<R>(&mut meta).await?;
   if meta[0] != Label::TAG {
     return Ok(None);
   }
 
   let len = meta[1] as usize;
   let mut buf = vec![0u8; len];
-  this.read_exact(&mut meta).await?;
-  this.read_exact(&mut buf).await?;
+  this.read_exact::<R>(&mut meta).await?;
+  this.read_exact::<R>(&mut buf).await?;
   let buf: Bytes = buf.into();
   Label::try_from(buf)
     .map(Some)

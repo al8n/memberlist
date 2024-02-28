@@ -54,6 +54,56 @@ macro_rules! test_mods {
       $fn!(smol("quinn", quinn_stream_layer::<SmolRuntime>().await));
     }
   };
+  ($fn:ident($expr:expr)) => {
+    #[cfg(all(feature = "tokio", any(feature = "quinn", feature = "s2n")))]
+    mod tokio {
+      use agnostic::tokio::TokioRuntime;
+      #[cfg(feature = "quinn")]
+      use memberlist_quic::tests::quinn_stream_layer_with_connect_timeout;
+      #[cfg(feature = "s2n")]
+      use memberlist_quic::tests::s2n_stream_layer;
+
+      use super::*;
+      use crate::tokio_run;
+
+      #[cfg(feature = "quinn")]
+      $fn!(tokio(
+        "quinn",
+        quinn_stream_layer_with_connect_timeout::<TokioRuntime>($expr).await
+      ));
+
+      #[cfg(feature = "s2n")]
+      $fn!(tokio("s2n", s2n_stream_layer::<TokioRuntime>().await));
+    }
+
+    #[cfg(all(feature = "async-std", feature = "quinn"))]
+    mod async_std {
+      use agnostic::async_std::AsyncStdRuntime;
+      use memberlist_quic::tests::quinn_stream_layer_with_connect_timeout;
+
+      use super::*;
+      use crate::async_std_run;
+
+      $fn!(async_std(
+        "quinn",
+        quinn_stream_layer_with_connect_timeout::<AsyncStdRuntime>($expr).await
+      ));
+    }
+
+    #[cfg(all(feature = "smol", feature = "quinn"))]
+    mod smol {
+      use agnostic::smol::SmolRuntime;
+      use memberlist_quic::tests::quinn_stream_layer_with_connect_timeout;
+
+      use super::*;
+      use crate::smol_run;
+
+      $fn!(smol(
+        "quinn",
+        quinn_stream_layer_with_connect_timeout::<SmolRuntime>($expr).await
+      ));
+    }
+  };
 }
 
 #[path = "quic/probe.rs"]

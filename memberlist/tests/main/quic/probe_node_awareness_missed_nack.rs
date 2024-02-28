@@ -87,4 +87,6 @@ macro_rules! probe_node_awareness_missed_nack {
   };
 }
 
-test_mods!(probe_node_awareness_missed_nack);
+test_mods!(probe_node_awareness_missed_nack(
+  std::time::Duration::from_millis(50)
+));

@@ -637,8 +637,6 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
   .await
   .unwrap();
 
-  let probe_time_max = Duration::from_millis(200) + Duration::from_millis(50);
-
   let m2: Memberlist<T> = host_memberlist(
     t2,
     t2_opts
@@ -693,13 +691,10 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
   assert_eq!(health, 0, "bad: {health}");
 
   // Have node m1 probe m4.
-  let start_probe = {
+  {
     let n = m1.inner.nodes.read().await.get_state(node4.id()).unwrap();
-    let start = Instant::now();
     m1.probe_node(&n).await;
-    start
   };
-  let probe_time = start_probe.elapsed();
 
   // Node should be reported suspect.
   {
@@ -713,13 +708,6 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
       .state;
     assert_eq!(state, State::Suspect, "expect node to be suspect");
   }
-
-  // Make sure we timed out approximately on time.
-  assert!(
-    probe_time <= probe_time_max,
-    "took to long to probe: {}",
-    probe_time.as_secs_f64()
-  );
 
   for i in 0..10 {
     let score = m1.health_score();

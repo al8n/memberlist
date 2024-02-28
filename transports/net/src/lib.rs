@@ -24,21 +24,21 @@ use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{BufMut, BytesMut};
 use checksum::CHECKSUM_SIZE;
 use futures::{
-  channel::oneshot, io::BufReader, stream::FuturesUnordered, AsyncRead, AsyncWrite, AsyncWriteExt,
-  StreamExt,
+  channel::oneshot, io::BufReader, stream::FuturesUnordered, AsyncRead, AsyncReadExt, AsyncWrite,
+  AsyncWriteExt, StreamExt,
 };
 use memberlist_core::{
   transport::{
     resolver::AddressResolver,
     stream::{packet_stream, promised_stream, PacketSubscriber, StreamSubscriber},
-    Id, Transport, Wire,
+    Id, TimeoutableReadStream, TimeoutableWriteStream, Transport, Wire,
   },
   types::{Message, SmallVec, TinyVec},
   util::{batch, Batch},
   CheapClone,
 };
 use memberlist_utils::{net::IsGlobalIp, *};
-use peekable::future::AsyncPeekExt;
+use peekable::future::{AsyncPeekExt, AsyncPeekable};
 
 #[doc(inline)]
 pub use memberlist_utils as utils;
@@ -249,7 +249,7 @@ where
         let mut retries = 0;
         loop {
           match stream_layer.bind(addr).await {
-            Ok(ln) => break (ln.local_addr().unwrap(), ln),
+            Ok(ln) => break (ln.local_addr(), ln),
             Err(e) => {
               if retries < 9 {
                 retries += 1;
@@ -261,7 +261,7 @@ where
         }
       } else {
         match stream_layer.bind(addr).await {
-          Ok(ln) => (ln.local_addr().unwrap(), ln),
+          Ok(ln) => (ln.local_addr(), ln),
           Err(e) => return Err(NetTransportError::ListenPromised(addr, e)),
         }
       };
@@ -495,8 +495,9 @@ where
     ),
     Self::Error,
   > {
-    let mut conn = BufReader::new(conn).peekable();
-    let mut stream_label = label::remove_label_header(&mut conn).await.map_err(|e| {
+    let ddl = conn.read_deadline();
+    let mut conn = BufReader::new(conn).peekable().with_deadline(ddl);
+    let mut stream_label = label::remove_label_header::<R>(&mut conn).await.map_err(|e| {
       tracing::error!(target = "memberlist.net.promised", remote = %from, err=%e, "failed to receive and remove the stream label header");
       ConnectionError::promised_read(e)
     })?.unwrap_or_else(Label::empty);
@@ -553,7 +554,8 @@ where
     conn: &mut Self::Stream,
     msg: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<usize, Self::Error> {
-    self.send_by_promised(conn, msg).await
+    let ddl = conn.write_deadline();
+    self.send_by_promised(conn.with_deadline(ddl), msg).await
   }
 
   async fn send_packet(
@@ -678,5 +680,45 @@ where
 {
   fn drop(&mut self) {
     self.shutdown_tx.close();
+  }
+}
+
+trait WithDeadline: Sized {
+  fn with_deadline(self, deadline: Option<Instant>) -> Deadline<Self> {
+    Deadline { op: self, deadline }
+  }
+}
+
+impl<T> WithDeadline for T {}
+
+struct Deadline<T> {
+  op: T,
+  deadline: Option<Instant>,
+}
+
+impl<T: AsyncRead + Send + Unpin> Deadline<T> {
+  async fn read_exact<R: Runtime>(&mut self, dst: &mut [u8]) -> std::io::Result<()> {
+    match self.deadline {
+      Some(ddl) => R::timeout_at(ddl, self.op.read_exact(dst)).await?,
+      None => self.op.read_exact(dst).await,
+    }
+  }
+}
+
+impl<T: AsyncWrite + Send + Unpin> Deadline<T> {
+  async fn write_all<R: Runtime>(&mut self, src: &[u8]) -> std::io::Result<()> {
+    match self.deadline {
+      Some(ddl) => R::timeout_at(ddl, self.op.write_all(src)).await?,
+      None => self.op.write_all(src).await,
+    }
+  }
+}
+
+impl<T: AsyncRead + Send + Unpin> Deadline<AsyncPeekable<T>> {
+  async fn peek_exact<R: Runtime>(&mut self, dst: &mut [u8]) -> std::io::Result<()> {
+    match self.deadline {
+      Some(ddl) => R::timeout_at(ddl, self.op.peek_exact(dst)).await?,
+      None => self.op.peek_exact(dst).await,
+    }
   }
 }

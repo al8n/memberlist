@@ -132,7 +132,7 @@ where
       ))
     }
 
-    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+    fn local_addr(&self) -> SocketAddr {
       self.ln.local_addr()
     }
   }
@@ -160,7 +160,7 @@ where
 
   let _lock = BACKOFFS_LOCK.lock();
   let ln = s.bind(kind.next(0)).await?;
-  let local_addr = ln.local_addr()?;
+  let local_addr = ln.local_addr();
   let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
   let (stream_tx, stream_rx) = memberlist_core::transport::stream::promised_stream::<T>();
   let task = <T::Runtime as Runtime>::spawn(

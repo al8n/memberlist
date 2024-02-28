@@ -362,7 +362,7 @@ impl<S: StreamLayer> TestPromisedClient for NetTransportTestPromisedClient<S> {
   }
 
   fn local_addr(&self) -> std::io::Result<SocketAddr> {
-    self.ln.local_addr()
+    Ok(self.ln.local_addr())
   }
 }
 

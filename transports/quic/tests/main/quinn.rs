@@ -6,7 +6,7 @@ use agnostic::async_std::AsyncStdRuntime;
 use agnostic::smol::SmolRuntime;
 #[cfg(feature = "tokio")]
 use agnostic::tokio::TokioRuntime;
-use agnostic::Runtime;
+
 use memberlist_quic::tests::quinn_stream_layer;
 
 use memberlist_core::tests::run as run_unit_test;
@@ -23,11 +23,13 @@ fn tokio_run(fut: impl Future<Output = ()>) {
 
 #[cfg(feature = "smol")]
 fn smol_run(fut: impl Future<Output = ()>) {
+  use agnostic::Runtime;
   run_unit_test(SmolRuntime::block_on, fut);
 }
 
 #[cfg(feature = "async-std")]
 fn async_std_run(fut: impl Future<Output = ()>) {
+  use agnostic::Runtime;
   run_unit_test(AsyncStdRuntime::block_on, fut);
 }
 

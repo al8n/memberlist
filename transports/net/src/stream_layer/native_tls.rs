@@ -50,6 +50,8 @@ impl<R: Runtime> StreamLayer for NativeTls<R> {
 
   async fn connect(&self, addr: SocketAddr) -> io::Result<Self::Stream> {
     let conn = <<R::Net as Net>::TcpStream as TcpStream>::connect(addr).await?;
+    let local_addr = conn.local_addr()?;
+    let peer_addr = conn.peer_addr()?;
     let stream = self
       .connector
       .connect(self.domain.clone(), conn)
@@ -59,6 +61,8 @@ impl<R: Runtime> StreamLayer for NativeTls<R> {
       stream,
       read_deadline: None,
       write_deadline: None,
+      local_addr,
+      peer_addr,
     })
   }
 
@@ -66,7 +70,13 @@ impl<R: Runtime> StreamLayer for NativeTls<R> {
     let acceptor = self.acceptor.clone();
     <<R::Net as Net>::TcpListener as TcpListener>::bind(addr)
       .await
-      .map(|ln| NativeTlsListener { ln, acceptor })
+      .and_then(|ln| {
+        ln.local_addr().map(|local_addr| NativeTlsListener {
+          local_addr,
+          ln,
+          acceptor,
+        })
+      })
   }
 
   async fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {}
@@ -80,6 +90,7 @@ impl<R: Runtime> StreamLayer for NativeTls<R> {
 pub struct NativeTlsListener<R: Runtime> {
   ln: <R::Net as Net>::TcpListener,
   acceptor: Arc<TlsAcceptor>,
+  local_addr: SocketAddr,
 }
 
 impl<R: Runtime> Listener for NativeTlsListener<R> {
@@ -95,13 +106,15 @@ impl<R: Runtime> Listener for NativeTlsListener<R> {
         stream,
         read_deadline: None,
         write_deadline: None,
+        local_addr: self.local_addr,
+        peer_addr: addr,
       },
       addr,
     ))
   }
 
-  fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
-    self.ln.local_addr()
+  fn local_addr(&self) -> std::net::SocketAddr {
+    self.local_addr
   }
 }
 
@@ -112,6 +125,8 @@ pub struct NativeTlsStream<R: Runtime> {
   stream: AsyncNativeTlsStream<<R::Net as Net>::TcpStream>,
   read_deadline: Option<Instant>,
   write_deadline: Option<Instant>,
+  local_addr: SocketAddr,
+  peer_addr: SocketAddr,
 }
 
 impl<R: Runtime> AsyncRead for NativeTlsStream<R> {
@@ -158,4 +173,14 @@ impl<R: Runtime> TimeoutableWriteStream for NativeTlsStream<R> {
   }
 }
 
-impl<R: Runtime> PromisedStream for NativeTlsStream<R> {}
+impl<R: Runtime> PromisedStream for NativeTlsStream<R> {
+  #[inline]
+  fn local_addr(&self) -> SocketAddr {
+    self.local_addr
+  }
+
+  #[inline]
+  fn peer_addr(&self) -> SocketAddr {
+    self.peer_addr
+  }
+}
