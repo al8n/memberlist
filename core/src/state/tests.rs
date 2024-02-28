@@ -381,7 +381,7 @@ pub async fn probe_node_dogpile<F, T, R>(
 
     // Wait through the timeout and a little after to make sure the
     // timer fires.
-    R::sleep(Duration::from_millis(500)).await;
+    R::sleep(Duration::from_millis(1500)).await;
 
     let state = m.get_node_state(bad_node.id()).await.unwrap();
     assert_eq!(

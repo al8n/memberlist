@@ -54,11 +54,69 @@ jobs:
           path: target
           key: ${{ matrix.os }}-coverage-cargo-build-target
       - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin --force
-      - name: Run cargo-tarpaulin
-        run: cargo-tarpaulin --all-features --run-types tests --out xml --workspace --no-fail-fast
+        run: cargo install cargo-tarpaulin --force 
+      - name: Coverage and Upload for memberlist 
+        run: |
+          pushd memberlist
+          cargo tarpaulin --out Xml --features test,tokio,quinn --no-fail-fast
+          curl -Os https://uploader.codecov.io/latest/linux/codecov
+          chmod +x codecov
+          ./codecov -t ${{ secrets.CODECOV_TOKEN }} -f "cobertura.xml" -F memberlist_quinn
+          popd
         continue-on-error: true
+        env:
+          RUSTFLAGS: "-C link-dead-code"
+          CARGO_INCREMENTAL: 0
+      - name: Coverage and Upload for memberlist 
+        run: |
+          pushd memberlist
+          cargo tarpaulin --out Xml --features test,tokio,tcp,tls,native-tls --no-fail-fast
+          curl -Os https://uploader.codecov.io/latest/linux/codecov
+          chmod +x codecov
+          ./codecov -t ${{ secrets.CODECOV_TOKEN }} -f "cobertura.xml" -F memberlist_net
+          popd
+        continue-on-error: true
+        env:
+          RUSTFLAGS: "-C link-dead-code"
+          CARGO_INCREMENTAL: 0
+      - name: Coverage and Upload for transports/net
+        run: |
+          pushd transports/net
+          cargo tarpaulin --out Xml --features test,tokio,async-std,smol,tls,native-tls --no-fail-fast
+          curl -Os https://uploader.codecov.io/latest/linux/codecov
+          chmod +x codecov
+          ./codecov -t ${{ secrets.CODECOV_TOKEN }} -f "cobertura.xml" -F transports_net
+          popd
+        continue-on-error: true
+        env:
+          RUSTFLAGS: "-C link-dead-code"
+          CARGO_INCREMENTAL: 0
+      - name: Coverage and Upload for transports/quinn
+        run: |
+          pushd transports/quic
+          cargo tarpaulin --out Xml --features test,tokio,quinn --no-fail-fast
+          curl -Os https://uploader.codecov.io/latest/linux/codecov
+          chmod +x codecov
+          ./codecov -t ${{ secrets.CODECOV_TOKEN }} -f "cobertura.xml" -F transports_quinn
+          popd
+        continue-on-error: true
+        env:
+          RUSTFLAGS: "-C link-dead-code"
+          CARGO_INCREMENTAL: 0
+      - name: Coverage and Upload for transports/s2n
+        run: |
+          pushd transports/quic
+          cargo tarpaulin --out Xml --features test,tokio,s2n --no-fail-fast
+          curl -Os https://uploader.codecov.io/latest/linux/codecov
+          chmod +x codecov
+          ./codecov -t ${{ secrets.CODECOV_TOKEN }} -f "cobertura.xml" -F transports_s2n
+          popd
+        continue-on-error: true
+        env:
+          RUSTFLAGS: "-C link-dead-code"
+          CARGO_INCREMENTAL: 0
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v3.1.1
+        uses: codecov/codecov-action@v3
         with: 
           fail_ci_if_error: flase
+          files: ./*/cobertura.xml
