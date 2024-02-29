@@ -9,7 +9,7 @@ use super::*;
 // --------------------------------------------Crate Level Methods-------------------------------------------------
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -77,9 +77,10 @@ where
             })
           })
           .collect::<SmallVec<_>>();
-        merge.notify_merge(peers).await.map_err(|e| {
-          Error::delegate(<<D as Delegate<_, _>>::Error as DelegateError>::merge(e))
-        })?;
+        merge
+          .notify_merge(peers)
+          .await
+          .map_err(|e| Error::delegate(DelegateError::merge(e)))?;
       }
     }
 
@@ -120,7 +121,7 @@ where
 // ----------------------------------------Module Level Methods------------------------------------
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -225,7 +226,7 @@ where
 // -----------------------------------------Private Level Methods-----------------------------------
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,

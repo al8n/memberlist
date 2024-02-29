@@ -22,7 +22,7 @@ use super::{
 
 impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
 {
   /// Returns the local node ID.
@@ -200,9 +200,9 @@ where
   }
 }
 
-impl<D, T> Memberlist<T, D>
+impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,

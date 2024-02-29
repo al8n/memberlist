@@ -4,7 +4,7 @@ use nodecraft::{resolver::AddressResolver, Node};
 use smol_str::SmolStr;
 
 use crate::{
-  delegate::Delegate,
+  delegate::{Delegate, DelegateError},
   transport::{MaybeResolvedAddress, Transport},
   types::{ErrorResponse, SmallVec},
 };
@@ -17,7 +17,7 @@ pub use crate::{
 /// Error returned by `Memberlist::join_many`.
 pub struct JoinError<T: Transport, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   pub(crate) joined: SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
   pub(crate) errors: HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>>,
@@ -29,7 +29,7 @@ impl<D, T: Transport> From<JoinError<T, D>>
     HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>>,
   )
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   fn from(e: JoinError<T, D>) -> Self {
     (e.joined, e.errors)
@@ -38,7 +38,7 @@ where
 
 impl<D, T: Transport> core::fmt::Debug for JoinError<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     if !self.joined.is_empty() {
@@ -58,7 +58,7 @@ where
 
 impl<D, T: Transport> core::fmt::Display for JoinError<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     if !self.joined.is_empty() {
@@ -77,13 +77,13 @@ where
 }
 
 impl<T: Transport, D> std::error::Error for JoinError<T, D> where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>
 {
 }
 
 impl<T: Transport, D> JoinError<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   /// Return the number of successful joined nodes
   pub fn num_joined(&self) -> usize {
@@ -100,7 +100,7 @@ where
 
 impl<T: Transport, D> JoinError<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   /// Return the errors
   pub const fn errors(&self) -> &HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>> {
@@ -109,8 +109,7 @@ where
 }
 
 #[derive(thiserror::Error)]
-pub enum Error<T: Transport, D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>
-{
+pub enum Error<T: Transport, D: Delegate> {
   #[error("memberlist: node is not running, please bootstrap first")]
   NotRunning,
   #[error("memberlist: timeout waiting for update broadcast")]
@@ -120,7 +119,7 @@ pub enum Error<T: Transport, D: Delegate<T::Id, <T::Resolver as AddressResolver>
   #[error("memberlist: no response from node {0}")]
   Lost(Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
   #[error("memberlist: {0}")]
-  Delegate(<D as Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>::Error),
+  Delegate(#[from] DelegateError<D>),
   #[error("memberlist: {0}")]
   Transport(T::Error),
   /// Returned when a message is received with an unexpected type.
@@ -148,22 +147,16 @@ pub enum Error<T: Transport, D: Delegate<T::Id, <T::Resolver as AddressResolver>
   Other(Cow<'static, str>),
 }
 
-impl<T: Transport, D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>
-  core::fmt::Debug for Error<T, D>
-{
+impl<T: Transport, D: Delegate> core::fmt::Debug for Error<T, D> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{self}")
   }
 }
 
-impl<T: Transport, D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>
-  Error<T, D>
-{
+impl<T: Transport, D: Delegate> Error<T, D> {
   /// Creates a new error with the given delegate error.
   #[inline]
-  pub fn delegate(
-    e: <D as Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>::Error,
-  ) -> Self {
+  pub fn delegate(e: DelegateError<D>) -> Self {
     Self::Delegate(e)
   }
 

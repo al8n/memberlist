@@ -192,7 +192,7 @@ pub mod tests {
   where
     <<<T as Transport>::Runtime as Runtime>::Sleep as futures::Future>::Output: Send,
     <<<T as Transport>::Runtime as Runtime>::Interval as futures::Stream>::Item: Send,
-    D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
     T: Transport,
   {
     crate::Memberlist::new_in(t, Some(d), opts)

@@ -49,7 +49,7 @@ async fn host_memberlist_with_delegate<D, T, R: Runtime>(
   opts: Options,
 ) -> Result<Memberlist<T, D>, Error<T, D>>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport<Runtime = R>,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,

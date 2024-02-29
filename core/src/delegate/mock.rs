@@ -92,9 +92,6 @@ impl<I: Id, A> NodeDelegate for MockDelegate<I, A>
 where
   A: CheapClone + Send + Sync + 'static,
 {
-  type Address = A;
-  type Id = I;
-
   async fn node_meta(&self, _limit: usize) -> Bytes {
     self.inner.lock().await.meta.clone()
   }

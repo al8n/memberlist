@@ -901,7 +901,7 @@ where
 {
   let m1 = Memberlist::with_delegate(
     trans1,
-    CompositeDelegate::new().with_node_delegate(MockDelegate::new()),
+    CompositeDelegate::new().with_node_delegate(MockDelegate::<SmolStr, SocketAddr>::new()),
     Options::default(),
   )
   .await?;

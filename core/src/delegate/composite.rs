@@ -1,45 +1,5 @@
 use super::*;
 
-/// Error type for [`CompositeDelegate`]
-pub enum CompositeDelegateError<A: AliveDelegate, M: MergeDelegate> {
-  AliveDelegate(A::Error),
-  MergeDelegate(M::Error),
-}
-
-impl<A: AliveDelegate, M: MergeDelegate> core::fmt::Debug for CompositeDelegateError<A, M> {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match self {
-      Self::AliveDelegate(err) => write!(f, "{err:?}"),
-      Self::MergeDelegate(err) => write!(f, "{err:?}"),
-    }
-  }
-}
-
-impl<A: AliveDelegate, M: MergeDelegate> core::fmt::Display for CompositeDelegateError<A, M> {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match self {
-      Self::AliveDelegate(err) => write!(f, "{err}"),
-      Self::MergeDelegate(err) => write!(f, "{err}"),
-    }
-  }
-}
-
-impl<A: AliveDelegate, M: MergeDelegate> std::error::Error for CompositeDelegateError<A, M> {}
-
-impl<A: AliveDelegate, M: MergeDelegate> DelegateError for CompositeDelegateError<A, M> {
-  type AliveDelegateError = A::Error;
-
-  type MergeDelegateError = M::Error;
-
-  fn alive(err: Self::AliveDelegateError) -> Self {
-    Self::AliveDelegate(err)
-  }
-
-  fn merge(err: Self::MergeDelegateError) -> Self {
-    Self::MergeDelegate(err)
-  }
-}
-
 /// `CompositeDelegate` is a helpful struct to split the [`Delegate`] into multiple small delegates,
 /// so that users do not need to implement full [`Delegate`] when they only want to custom some methods
 /// in the [`Delegate`].
@@ -227,7 +187,7 @@ where
   C: ConflictDelegate<Id = I, Address = Address>,
   E: EventDelegate<Id = I, Address = Address>,
   M: MergeDelegate<Id = I, Address = Address>,
-  N: NodeDelegate<Id = I, Address = Address>,
+  N: NodeDelegate,
   P: PingDelegate<Id = I, Address = Address>,
 {
   type Error = A::Error;
@@ -250,7 +210,7 @@ where
   C: ConflictDelegate<Id = I, Address = Address>,
   E: EventDelegate<Id = I, Address = Address>,
   M: MergeDelegate<Id = I, Address = Address>,
-  N: NodeDelegate<Id = I, Address = Address>,
+  N: NodeDelegate,
   P: PingDelegate<Id = I, Address = Address>,
 {
   type Error = M::Error;
@@ -274,7 +234,7 @@ where
   C: ConflictDelegate<Id = I, Address = Address>,
   E: EventDelegate<Id = I, Address = Address>,
   M: MergeDelegate<Id = I, Address = Address>,
-  N: NodeDelegate<Id = I, Address = Address>,
+  N: NodeDelegate,
   P: PingDelegate<Id = I, Address = Address>,
 {
   type Id = I;
@@ -300,7 +260,7 @@ where
   C: ConflictDelegate<Id = I, Address = Address>,
   E: EventDelegate<Id = I, Address = Address>,
   M: MergeDelegate<Id = I, Address = Address>,
-  N: NodeDelegate<Id = I, Address = Address>,
+  N: NodeDelegate,
   P: PingDelegate<Id = I, Address = Address>,
 {
   type Id = I;
@@ -335,7 +295,7 @@ where
   C: ConflictDelegate<Id = I, Address = Address>,
   E: EventDelegate<Id = I, Address = Address>,
   M: MergeDelegate<Id = I, Address = Address>,
-  N: NodeDelegate<Id = I, Address = Address>,
+  N: NodeDelegate,
   P: PingDelegate<Id = I, Address = Address>,
 {
   type Id = I;
@@ -363,12 +323,9 @@ where
   C: ConflictDelegate<Id = I, Address = Address>,
   E: EventDelegate<Id = I, Address = Address>,
   M: MergeDelegate<Id = I, Address = Address>,
-  N: NodeDelegate<Id = I, Address = Address>,
+  N: NodeDelegate,
   P: PingDelegate<Id = I, Address = Address>,
 {
-  type Id = I;
-  type Address = Address;
-
   async fn node_meta(&self, limit: usize) -> Bytes {
     self.node_delegate.node_meta(limit).await
   }
@@ -401,8 +358,7 @@ where
   }
 }
 
-impl<I, Address, A, C, E, M, N, P> Delegate<I, Address>
-  for CompositeDelegate<I, Address, A, C, E, M, N, P>
+impl<I, Address, A, C, E, M, N, P> Delegate for CompositeDelegate<I, Address, A, C, E, M, N, P>
 where
   I: Id,
   Address: CheapClone + Send + Sync + 'static,
@@ -410,8 +366,9 @@ where
   C: ConflictDelegate<Id = I, Address = Address>,
   E: EventDelegate<Id = I, Address = Address>,
   M: MergeDelegate<Id = I, Address = Address>,
-  N: NodeDelegate<Id = I, Address = Address>,
+  N: NodeDelegate,
   P: PingDelegate<Id = I, Address = Address>,
 {
-  type Error = CompositeDelegateError<A, M>;
+  type Address = Address;
+  type Id = I;
 }

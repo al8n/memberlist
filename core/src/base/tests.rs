@@ -45,7 +45,7 @@ impl<I: Eq + core::hash::Hash, A, R> Members<I, A, R> {
 
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -487,7 +487,10 @@ where
 
   let m2 = Memberlist::with_delegate(
     t2,
-    CompositeDelegate::new().with_node_delegate(MockDelegate::with_meta("lb".into())),
+    CompositeDelegate::new().with_node_delegate(MockDelegate::<
+      T::Id,
+      <T::Resolver as AddressResolver>::ResolvedAddress,
+    >::with_meta("lb".into())),
     t2_opts,
   )
   .await
@@ -571,7 +574,10 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
 
   let m2 = Memberlist::with_delegate(
     t2,
-    CompositeDelegate::new().with_node_delegate(MockDelegate::with_meta("lb".into())),
+    CompositeDelegate::new().with_node_delegate(MockDelegate::<
+      T::Id,
+      <T::Resolver as AddressResolver>::ResolvedAddress,
+    >::with_meta("lb".into())),
     t2_opts,
   )
   .await
@@ -659,8 +665,12 @@ where
 {
   let m1 = Memberlist::with_delegate(
     t1,
-    CompositeDelegate::new()
-      .with_node_delegate(MockDelegate::with_state(Bytes::from_static(b"something"))),
+    CompositeDelegate::new().with_node_delegate(MockDelegate::<
+      T::Id,
+      <T::Resolver as AddressResolver>::ResolvedAddress,
+    >::with_state(Bytes::from_static(
+      b"something",
+    ))),
     t1_opts
       .with_gossip_interval(Duration::from_millis(100))
       .with_push_pull_interval(Duration::from_millis(100)),
@@ -674,9 +684,11 @@ where
 
   let m2 = Memberlist::with_delegate(
     t2,
-    CompositeDelegate::new().with_node_delegate(MockDelegate::with_state_and_broadcasts(
-      Bytes::from_static(b"my state"),
-      bcasts.clone(),
+    CompositeDelegate::new().with_node_delegate(MockDelegate::<
+      T::Id,
+      <T::Resolver as AddressResolver>::ResolvedAddress,
+    >::with_state_and_broadcasts(
+      Bytes::from_static(b"my state"), bcasts.clone()
     )),
     t2_opts
       .with_gossip_interval(Duration::from_millis(100))
@@ -746,7 +758,10 @@ where
 {
   let m1 = Memberlist::with_delegate(
     t1,
-    CompositeDelegate::new().with_node_delegate(MockDelegate::new()),
+    CompositeDelegate::new().with_node_delegate(MockDelegate::<
+      T::Id,
+      <T::Resolver as AddressResolver>::ResolvedAddress,
+    >::new()),
     t1_opts
       .with_gossip_interval(Duration::from_millis(1))
       .with_push_pull_interval(Duration::from_millis(1)),
@@ -756,7 +771,10 @@ where
 
   let m2 = Memberlist::with_delegate(
     t2,
-    CompositeDelegate::new().with_node_delegate(MockDelegate::new()),
+    CompositeDelegate::new().with_node_delegate(MockDelegate::<
+      T::Id,
+      <T::Resolver as AddressResolver>::ResolvedAddress,
+    >::new()),
     t2_opts
       .with_gossip_interval(Duration::from_millis(1))
       .with_push_pull_interval(Duration::from_millis(1)),
@@ -1036,7 +1054,7 @@ where
 pub async fn wait_until_size<T, D, R>(m: &Memberlist<T, D>, expected: usize)
 where
   T: Transport<Runtime = R>,
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   R: Runtime,
   <R::Sleep as Future>::Output: Send,
   <R::Interval as Stream>::Item: Send,

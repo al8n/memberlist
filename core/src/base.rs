@@ -313,7 +313,7 @@ pub struct Memberlist<
 impl<T, D> Clone for Memberlist<T, D>
 where
   T: Transport,
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   fn clone(&self) -> Self {
     Self {
@@ -325,7 +325,7 @@ where
 
 impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -404,7 +404,7 @@ where
 // private impelementation
 impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,

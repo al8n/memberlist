@@ -31,28 +31,63 @@ mod ping;
 pub use ping::*;
 
 /// Error trait for [`Delegate`]
-pub trait DelegateError: std::error::Error + Send + Sync + 'static {
-  type AliveDelegateError: std::error::Error + Send + Sync + 'static;
-  type MergeDelegateError: std::error::Error + Send + Sync + 'static;
-
-  fn alive(err: Self::AliveDelegateError) -> Self;
-
-  fn merge(err: Self::MergeDelegateError) -> Self;
+pub enum DelegateError<D: Delegate> {
+  /// [`AliveDelegate`] error
+  AliveDelegate(<D as AliveDelegate>::Error),
+  /// [`MergeDelegate`] error
+  MergeDelegate(<D as MergeDelegate>::Error),
 }
 
-pub trait Delegate<I, A>:
-  NodeDelegate<Id = I, Address = A>
-  + PingDelegate<Id = I, Address = A>
-  + EventDelegate<Id = I, Address = A>
-  + ConflictDelegate<Id = I, Address = A>
-  + AliveDelegate<Id = I, Address = A>
-  + MergeDelegate<Id = I, Address = A>
+impl<D: Delegate> core::fmt::Debug for DelegateError<D> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::AliveDelegate(err) => write!(f, "{err:?}"),
+      Self::MergeDelegate(err) => write!(f, "{err:?}"),
+    }
+  }
+}
+
+impl<D: Delegate> core::fmt::Display for DelegateError<D> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::AliveDelegate(err) => write!(f, "{err}"),
+      Self::MergeDelegate(err) => write!(f, "{err}"),
+    }
+  }
+}
+
+impl<D: Delegate> std::error::Error for DelegateError<D> {}
+
+impl<D: Delegate> DelegateError<D> {
+  /// Create a delegate error from an alive delegate error.
+  #[inline]
+  pub const fn alive(err: <D as AliveDelegate>::Error) -> Self {
+    Self::AliveDelegate(err)
+  }
+
+  /// Create a delegate error from a merge delegate error.
+  #[inline]
+  pub const fn merge(err: <D as MergeDelegate>::Error) -> Self {
+    Self::MergeDelegate(err)
+  }
+}
+
+/// [`Delegate`] is the trait that clients must implement if they want to hook
+/// into the gossip layer of [`Memberlist`](crate::Memberlist). All the methods must be thread-safe,
+/// as they can and generally will be called concurrently.
+pub trait Delegate:
+  NodeDelegate
+  + PingDelegate<Id = <Self as Delegate>::Id, Address = <Self as Delegate>::Address>
+  + EventDelegate<Id = <Self as Delegate>::Id, Address = <Self as Delegate>::Address>
+  + ConflictDelegate<Id = <Self as Delegate>::Id, Address = <Self as Delegate>::Address>
+  + AliveDelegate<Id = <Self as Delegate>::Id, Address = <Self as Delegate>::Address>
+  + MergeDelegate<Id = <Self as Delegate>::Id, Address = <Self as Delegate>::Address>
 {
-  /// The error type of the delegate
-  type Error: DelegateError<
-    AliveDelegateError = <Self as AliveDelegate>::Error,
-    MergeDelegateError = <Self as MergeDelegate>::Error,
-  >;
+  /// The id type of the delegate
+  type Id: Id;
+
+  /// The address type of the delegate
+  type Address: CheapClone + Send + Sync + 'static;
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -65,20 +100,6 @@ impl std::fmt::Display for VoidDelegateError {
 }
 
 impl std::error::Error for VoidDelegateError {}
-
-impl DelegateError for VoidDelegateError {
-  type AliveDelegateError = Self;
-
-  type MergeDelegateError = Self;
-
-  fn alive(err: Self::AliveDelegateError) -> Self {
-    err
-  }
-
-  fn merge(err: Self::MergeDelegateError) -> Self {
-    err
-  }
-}
 
 #[derive(Debug, Copy, Clone)]
 pub struct VoidDelegate<I, A>(core::marker::PhantomData<(I, A)>);
@@ -168,9 +189,6 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> EventDelegate for VoidDelegat
 }
 
 impl<I: Id, A: CheapClone + Send + Sync + 'static> NodeDelegate for VoidDelegate<I, A> {
-  type Id = I;
-  type Address = A;
-
   async fn node_meta(&self, _limit: usize) -> Bytes {
     Bytes::new()
   }
@@ -196,6 +214,7 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> NodeDelegate for VoidDelegate
   async fn merge_remote_state(&self, _buf: Bytes, _join: bool) {}
 }
 
-impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate<I, A> for VoidDelegate<I, A> {
-  type Error = VoidDelegateError;
+impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate for VoidDelegate<I, A> {
+  type Id = I;
+  type Address = A;
 }

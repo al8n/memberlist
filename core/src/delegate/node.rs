@@ -2,16 +2,10 @@ use std::future::Future;
 
 use bytes::Bytes;
 use memberlist_utils::SmallVec;
-use nodecraft::{CheapClone, Id};
 
+/// Used to manage node related events.
 #[auto_impl::auto_impl(Box, Arc)]
 pub trait NodeDelegate: Send + Sync + 'static {
-  /// The id type of the delegate
-  type Id: Id;
-
-  /// The address type of the delegate
-  type Address: CheapClone + Send + Sync + 'static;
-
   /// Used to retrieve meta-data about the current node
   /// when broadcasting an alive message. It's length is limited to
   /// the given byte size. This metadata is available in the NodeState structure.

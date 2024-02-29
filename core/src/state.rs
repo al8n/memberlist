@@ -71,7 +71,7 @@ impl<I, A> LocalNodeState<I, A> {
 impl<T, D> Memberlist<T, D>
 where
   T: Transport,
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   /// Returns a usable sequence number in a thread safe way
   #[inline]
@@ -134,7 +134,7 @@ where
 // ---------------------------------Crate methods-------------------------------
 impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
@@ -606,7 +606,7 @@ where
       impl<T: Transport> StateMessage<T> {
         async fn run<D>(self, s: &Memberlist<T, D>)
         where
-          D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+          D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
           <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
           <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
         {
@@ -725,7 +725,7 @@ macro_rules! bail_trigger {
 
 impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
   <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
   <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
