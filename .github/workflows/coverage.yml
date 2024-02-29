@@ -33,7 +33,7 @@ jobs:
             features: "test,tokio,quinn,tcp"
             name: "coverage-report-memberlist"
           - crate: transports/net
-            features: "test,tokio,tcp"
+            features: "test,tokio"
             name: "coverage-report-net"
           - crate: transports/quic
             features: "test,tokio,quinn"
