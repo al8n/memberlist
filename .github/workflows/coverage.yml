@@ -48,14 +48,14 @@ jobs:
         run: cargo install cargo-tarpaulin
       - name: Run Coverage and Generate Report
         run: |
-          cargo tarpaulin --out xml --features ${{ matrix.features }} --no-fail-fast
+          cargo tarpaulin --out xml --features ${{ matrix.features }} --no-fail-fast --output-dir $PWD
         working-directory: ${{ matrix.crate }}
         continue-on-error: true
       - name: Upload Coverage Report as Artifact
         uses: actions/upload-artifact@v3
         with:
           name: coverage-report-${{ matrix.crate }}
-          path: ${{ matrix.crate }}/*.xml
+          path: ${{ matrix.crate }}/cobertura.xml
 
   upload-codecov:
     needs: coverage-report
