@@ -1,6 +1,16 @@
 codecov:
   require_ci_to_pass: false
 
+ignore:
+  - core/src/state/tests.rs
+  - core/src/base/tests.rs
+  - core/src/transport/tests.rs
+  - core/src/delegate/mock.rs
+  - transports/net/src/tests.rs
+  - transports/net/src/tests/*
+  - transports/quic/src/tests.rs
+  - transports/quic/src/tests/*
+
 flags: # Define flags for each sub-crate
   memberlist:
     paths:
