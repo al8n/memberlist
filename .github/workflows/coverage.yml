@@ -24,38 +24,38 @@ env:
 
 jobs:
   coverage-report:
-    name: Generate Coverage for ${{ matrix.crate }}
+    name: Generate Coverage for ${{ matrix.crate }}-${{ matrix.name }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
           - crate: memberlist
             features: "test,tokio,tcp,compression,encryption,metrics"
-            name: "coverage-report-memberlist-tcp"
+            name: "memberlist-tcp"
           - crate: memberlist
             features: "test,tokio,tls,compression,encryption,metrics"
-            name: "coverage-report-memberlist-tls"
+            name: "memberlist-tls"
           - crate: memberlist
             features: "test,tokio,native-tls,compression,encryption,metrics"
-            name: "coverage-report-memberlist-native-tls"
+            name: "memberlist-native-tls"
           - crate: memberlist
             features: "test,tokio,quinn,compression,metrics"
-            name: "coverage-report-memberlist-quinn"
+            name: "memberlist-quinn"
           - crate: transports/net
             features: "test,tokio,tcp,compression,encryption,metrics"
-            name: "coverage-report-net-tcp"
+            name: "net-tcp"
           - crate: transports/net
             features: "test,tokio,tls,compression,encryption,metrics"
-            name: "coverage-report-net-tls"
+            name: "net-tls"
           - crate: transports/net
             features: "test,tokio,native-tls,compression,encryption,metrics"
-            name: "coverage-report-net-native-tls"
+            name: "net-native-tls"
           - crate: transports/quic
             features: "test,tokio,quinn,compression,metrics"
-            name: "coverage-report-quic-quinn"
+            name: "quic-quinn"
           - crate: transports/quic
             features: "test,tokio,s2n,compression,metrics"
-            name: "coverage-report-quic-s2n"
+            name: "quic-s2n"
     steps:
       - uses: actions/checkout@v3
       - name: Install latest nightly
