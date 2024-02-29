@@ -1,0 +1,74 @@
+name: s2n
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'COPYRIGHT'
+      - 'LICENSE*'
+      - '**.md'
+      - '**.txt'
+  pull_request:
+    paths-ignore:
+      - 'README.md'
+      - 'COPYRIGHT'
+      - 'LICENSE*'
+      - '**.md'
+      - '**.txt'
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust
+        run: |
+          rustup update stable && rustup default stable
+          rustup component add clippy
+          rustup component add rustfmt
+
+      - name: Install OpenSSL (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+          vcpkg install openssl:x64-windows-static-md
+
+      - name: Setup loopback interface (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: ci\setup_subnet_windows.ps1
+      - name: Setup loopback interface (MacOS)
+        if: matrix.os == 'macos-latest'
+        run: ci/setup_subnet_macos.sh
+      - name: Setup loopback interface (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: ci/setup_subnet_ubuntu.sh
+
+      - name: Run Transport Tests
+        run: |
+          cargo test --no-default-features --features "test,compression,s2n,tokio,metrics" -- --test-threads=1
+        working-directory: transports/net
+
+      - name: Run Memberlist Tests
+        run: |
+          cargo test --no-default-features --features "test,compression,s2n,tokio,metrics" -- --test-threads=1
+        working-directory: memberlist
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
