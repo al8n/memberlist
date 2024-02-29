@@ -57,51 +57,28 @@ jobs:
         run: cargo install cargo-tarpaulin --force
       - name: Create reports directory
         run: mkdir -p reports
-      - name: Coverage and Upload for memberlist 
+      - name: Coverage for memberlist 
         run: |
           pushd memberlist
-          cargo tarpaulin --out xml --features test,tokio,quinn --no-fail-fast
-          mv cobertura.xml ../reports/memberlist_quinn.xml
+          cargo tarpaulin --out xml --no-default-features --features test,tokio,quinn,tcp,tls-native-tls --no-fail-fast
           popd
         continue-on-error: true
         env:
           RUSTFLAGS: "-C link-dead-code"
           CARGO_INCREMENTAL: 0
-      - name: Coverage and Upload for memberlist 
-        run: |
-          pushd memberlist
-          cargo tarpaulin --out Xml --features test,tokio,tcp,tls,native-tls --no-fail-fast
-          mv cobertura.xml ../reports/memberlist_net.xml
-          popd
-        continue-on-error: true
-        env:
-          RUSTFLAGS: "-C link-dead-code"
-          CARGO_INCREMENTAL: 0
-      - name: Coverage and Upload for transports/net
+      - name: Coverage for transports/net
         run: |
           pushd transports/net
-          cargo tarpaulin --out Xml --features test,tokio,async-std,smol,tls,native-tls --no-fail-fast
-          mv cobertura.xml ../reports/transports_net.xml
+          cargo tarpaulin --out xml --features test,tokio,async-std,smol,tls,native-tls --no-fail-fast
           popd
         continue-on-error: true
         env:
           RUSTFLAGS: "-C link-dead-code"
           CARGO_INCREMENTAL: 0
-      - name: Coverage and Upload for transports/quinn
+      - name: Coverage for transports/quinn
         run: |
           pushd transports/quic
-          cargo tarpaulin --out Xml --features test,tokio,quinn --no-fail-fast
-          mv cobertura.xml ../reports/transports_quinn.xml
-          popd
-        continue-on-error: true
-        env:
-          RUSTFLAGS: "-C link-dead-code"
-          CARGO_INCREMENTAL: 0
-      - name: Coverage and Upload for transports/s2n
-        run: |
-          pushd transports/quic
-          cargo tarpaulin --out Xml --features test,tokio,s2n --no-fail-fast
-          mv cobertura.xml ../reports/transports_s2n.xml
+          cargo tarpaulin --out xml --features test,tokio,quinn,s2n --no-fail-fast
           popd
         continue-on-error: true
         env:
