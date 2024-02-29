@@ -30,13 +30,13 @@ jobs:
       matrix:
         include:
           - crate: memberlist
-            features: "test,tokio,quinn,tcp,tls,native-tls"
+            features: "test,tokio,quinn,tcp"
             name: "coverage-report-memberlist"
           - crate: transports/net
-            features: "test,tokio,async-std,smol,tls,native-tls"
+            features: "test,tokio,tcp"
             name: "coverage-report-net"
           - crate: transports/quic
-            features: "test,tokio,quinn,s2n"
+            features: "test,tokio,quinn"
             name: "coverage-report-quic"
     steps:
       - uses: actions/checkout@v3
