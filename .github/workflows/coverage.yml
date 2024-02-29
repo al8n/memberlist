@@ -31,10 +31,13 @@ jobs:
         include:
           - crate: memberlist
             features: "test,tokio,quinn,tcp,tls,native-tls"
+            name: "coverage-report-memberlist"
           - crate: transports/net
             features: "test,tokio,async-std,smol,tls,native-tls"
+            name: "coverage-report-net"
           - crate: transports/quic
             features: "test,tokio,quinn,s2n"
+            name: "coverage-report-quic"
     steps:
       - uses: actions/checkout@v3
       - name: Install latest nightly
@@ -54,7 +57,7 @@ jobs:
       - name: Upload Coverage Report as Artifact
         uses: actions/upload-artifact@v3
         with:
-          name: coverage-report-${{ matrix.crate }}
+          name: ${{ matrix.name }}
           path: ${{ matrix.crate }}/cobertura.xml
 
   upload-codecov:
