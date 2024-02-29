@@ -14,6 +14,7 @@ tokio = ["agnostic/tokio"]
 async-std = ["agnostic/async-std"]
 smol = ["agnostic/smol"]
 
+tcp = []
 tls = ["dep:futures-rustls"]
 native-tls = ["dep:async-native-tls", "dep:native-tls"]
 

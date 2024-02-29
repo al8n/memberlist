@@ -33,10 +33,10 @@ jobs:
             features: "test,tokio,quinn,tcp"
             name: "coverage-report-memberlist"
           - crate: transports/net
-            features: "test,tokio"
+            features: "test,tokio,tcp,tls,native-tls"
             name: "coverage-report-net"
           - crate: transports/quic
-            features: "test,tokio,quinn"
+            features: "test,tokio,quinn,s2n"
             name: "coverage-report-quic"
     steps:
       - uses: actions/checkout@v3
