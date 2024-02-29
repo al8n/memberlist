@@ -30,14 +30,32 @@ jobs:
       matrix:
         include:
           - crate: memberlist
-            features: "test,tokio,quinn,tcp"
-            name: "coverage-report-memberlist"
+            features: "test,tokio,tcp,compression,encryption,metrics"
+            name: "coverage-report-memberlist-tcp"
+          - crate: memberlist
+            features: "test,tokio,tls,compression,encryption,metrics"
+            name: "coverage-report-memberlist-tls"
+          - crate: memberlist
+            features: "test,tokio,native-tls,compression,encryption,metrics"
+            name: "coverage-report-memberlist-native-tls"
+          - crate: memberlist
+            features: "test,tokio,quinn,compression,metrics"
+            name: "coverage-report-memberlist-quinn"
           - crate: transports/net
-            features: "test,tokio,tcp,tls,native-tls"
-            name: "coverage-report-net"
+            features: "test,tokio,tcp,compression,encryption,metrics"
+            name: "coverage-report-net-tcp"
+          - crate: transports/net
+            features: "test,tokio,tls,compression,encryption,metrics"
+            name: "coverage-report-net-tls"
+          - crate: transports/net
+            features: "test,tokio,native-tls,compression,encryption,metrics"
+            name: "coverage-report-net-native-tls"
           - crate: transports/quic
-            features: "test,tokio,quinn,s2n"
-            name: "coverage-report-quic"
+            features: "test,tokio,quinn,compression,metrics"
+            name: "coverage-report-quic-quinn"
+          - crate: transports/quic
+            features: "test,tokio,s2n,compression,metrics"
+            name: "coverage-report-quic-s2n"
     steps:
       - uses: actions/checkout@v3
       - name: Install latest nightly
@@ -51,7 +69,7 @@ jobs:
         run: cargo install cargo-tarpaulin
       - name: Run Coverage and Generate Report
         run: |
-          cargo tarpaulin --out xml --features ${{ matrix.features }} --no-fail-fast --output-dir $PWD
+          cargo tarpaulin --out xml --no-default-features --features ${{ matrix.features }} --no-fail-fast --output-dir $PWD
         working-directory: ${{ matrix.crate }}
         continue-on-error: true
       - name: Upload Coverage Report as Artifact
