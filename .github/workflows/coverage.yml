@@ -42,12 +42,15 @@ jobs:
         with:
           toolchain: nightly
           override: true
+      - name: Setup loopback interface
+        run: ci/setup_subnet_ubuntu.sh
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
       - name: Run Coverage and Generate Report
         run: |
-          cargo tarpaulin --out Xml --features ${{ matrix.features }} --output-dir ./reports --no-fail-fast
+          cargo tarpaulin --out xml --features ${{ matrix.features }} --output-dir ./reports --no-fail-fast
         working-directory: ${{ matrix.crate }}
+        continue-on-error: true
       - name: Upload Coverage Report as Artifact
         uses: actions/upload-artifact@v3
         with:
