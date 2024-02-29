@@ -214,18 +214,10 @@ where
         },
       );
 
-    match <T::Runtime as Runtime>::timeout(
-      self.inner.opts.ping_timeout,
-      self.send_msg(ind.target.address(), ping.into()),
-    )
-    .await
-    {
-      Ok(Ok(_)) => {}
-      Ok(Err(e)) => {
-        tracing::error!(target = "memberlist.packet", local = %self.local_id(), source = %ind.source, target=%ind.target, err = %e, "failed to send indirect ping");
-      }
+    match self.send_msg(ind.target.address(), ping.into()).await {
+      Ok(_) => {}
       Err(e) => {
-        tracing::error!(target = "memberlist.packet", local = %self.local_id(), source = %ind.source, target=%ind.target, err = %e, "failed to send indirect ping (reach ping timeout)");
+        tracing::error!(target = "memberlist.packet", local = %self.local_id(), source = %ind.source, target=%ind.target, err = %e, "failed to send indirect ping");
       }
     }
 

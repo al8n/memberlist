@@ -907,14 +907,12 @@ where
       .apply_delta(awareness_delta.load(Ordering::Acquire)));
 
     if target.state == State::Alive {
-      match <T::Runtime as Runtime>::timeout(
-        self.inner.opts.ping_timeout,
-        self.send_msg(target.address(), ping.cheap_clone().into()),
-      )
-      .await
+      match self
+        .send_msg(target.address(), ping.cheap_clone().into())
+        .await
       {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => {
+        Ok(_) => {}
+        Err(e) => {
           tracing::error!(target = "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
           if e.is_remote_failure() {
             return self
@@ -931,19 +929,6 @@ where
 
           return;
         }
-        Err(e) => {
-          tracing::error!(target = "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection (reach ping timeout)");
-          return self
-            .handle_remote_failure(
-              target,
-              ping.seq_no,
-              &ack_rx,
-              &nack_rx,
-              deadline,
-              &awareness_delta,
-            )
-            .await;
-        }
       }
     } else {
       let suspect = Suspect {
@@ -951,17 +936,15 @@ where
         node: target.id().cheap_clone(),
         from: self.local_id().cheap_clone(),
       };
-      match <T::Runtime as Runtime>::timeout(
-        self.inner.opts.ping_timeout,
-        self.transport_send_packets(
+      match self
+        .transport_send_packets(
           target.address(),
           [ping.cheap_clone().into(), suspect.into()].into(),
-        ),
-      )
-      .await
+        )
+        .await
       {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => {
+        Ok(_) => {}
+        Err(e) => {
           tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
           if e.is_remote_failure() {
             return self
@@ -977,19 +960,6 @@ where
           }
 
           return;
-        }
-        Err(e) => {
-          tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection (reach timeout)");
-          return self
-            .handle_remote_failure(
-              target,
-              ping.seq_no,
-              &ack_rx,
-              &nack_rx,
-              deadline,
-              &awareness_delta,
-            )
-            .await;
         }
       }
     }
@@ -1022,7 +992,7 @@ where
             // here to break out of the select below.
             if !v.complete {
               if let Err(e) = ack_tx.send(v).await {
-                tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to re-enqueue UDP ping ack");
+                tracing::error!(target = "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to re-enqueue UDP ping ack");
               }
             }
           }
@@ -1094,17 +1064,13 @@ where
 
     let mut futs = nodes.into_iter().map(|peer| {
       let ind = ind.cheap_clone();
-      let ping_timeout = self.inner.opts.ping_timeout;
       async move {
-        match <T::Runtime as Runtime>::timeout(ping_timeout, self
-          .send_msg(peer.address(), ind.into()))
+        match self
+          .send_msg(peer.address(), ind.into())
           .await {
-          Ok(Ok(_)) => {},
-          Ok(Err(e)) => {
-            tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
-          }
+          Ok(_) => {},
           Err(e) => {
-            tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping (reach timeout)");
+            tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
           }
         }
       }
@@ -1328,9 +1294,7 @@ where
         })
       };
 
-      if let Err(e) = <T::Runtime as Runtime>::timeout(self.inner.opts.gossip_timeout, fut).await {
-        tracing::error!(target =  "memberlist.state", err = %e, "failed to send gossip to {} (reach gossip timeout)", addr);
-      }
+      fut.await
     }).await;
   }
 

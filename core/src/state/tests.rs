@@ -72,7 +72,7 @@ where
     t1,
     t1_opts
       .with_probe_timeout(Duration::from_millis(1))
-      .with_probe_interval(Duration::from_millis(10)),
+      .with_probe_interval(Duration::from_millis(1000)),
   )
   .await
   .unwrap();
@@ -802,7 +802,7 @@ where
     t1,
     t1_opts
       .with_probe_timeout(Duration::from_millis(1))
-      .with_probe_interval(Duration::from_millis(10)),
+      .with_probe_interval(Duration::from_millis(1000)),
   )
   .await
   .unwrap();
@@ -840,7 +840,7 @@ where
     m1.probe_node(&n).await;
   };
 
-  // Should not be marked alive
+  // Should be marked alive
   let state = m1
     .inner
     .nodes

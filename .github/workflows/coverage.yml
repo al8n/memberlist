@@ -5,14 +5,14 @@ on:
     branches:
       - main
     paths-ignore:
-      - 'README'
+      - 'README.md'
       - 'COPYRIGHT'
       - 'LICENSE*'
       - '**.md'
       - '**.txt'
   pull_request:
     paths-ignore:
-      - 'README'
+      - 'README.md'
       - 'COPYRIGHT'
       - 'LICENSE*'
       - '**.md'
@@ -23,13 +23,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  coverage:
-    name: coverage
+  coverage-report:
+    name: Generate Coverage for ${{ matrix.crate }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        os:
-          - ubuntu-latest
-    runs-on: ${{ matrix.os }}
+        include:
+          - crate: memberlist
+            features: "test,tokio,quinn,tcp,tls,native-tls"
+          - crate: transports/net
+            features: "test,tokio,async-std,smol,tls,native-tls"
+          - crate: transports/quic
+            features: "test,tokio,quinn,s2n"
     steps:
       - uses: actions/checkout@v3
       - name: Install latest nightly
@@ -37,55 +42,29 @@ jobs:
         with:
           toolchain: nightly
           override: true
-      - uses: actions-rs/install@v0.1
-        with:
-          crate: cargo-tarpaulin
-          version: latest
-      - name: Cache ~/.cargo
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo
-          key: ${{ matrix.os }}-coverage-dotcargo
-      - name: Setup loopback interface
-        run: ci/setup_subnet_ubuntu.sh
-      - name: Cache cargo build
-        uses: actions/cache@v3
-        with:
-          path: target
-          key: ${{ matrix.os }}-coverage-cargo-build-target
       - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin --force
-      - name: Create reports directory
-        run: mkdir -p reports
-      - name: Coverage for memberlist 
+        run: cargo install cargo-tarpaulin
+      - name: Run Coverage and Generate Report
         run: |
-          pushd memberlist
-          cargo tarpaulin --out xml --no-default-features --features test,tokio,quinn,tcp,tls-native-tls --no-fail-fast
-          popd
-        continue-on-error: true
-        env:
-          RUSTFLAGS: "-C link-dead-code"
-          CARGO_INCREMENTAL: 0
-      - name: Coverage for transports/net
-        run: |
-          pushd transports/net
-          cargo tarpaulin --out xml --features test,tokio,async-std,smol,tls,native-tls --no-fail-fast
-          popd
-        continue-on-error: true
-        env:
-          RUSTFLAGS: "-C link-dead-code"
-          CARGO_INCREMENTAL: 0
-      - name: Coverage for transports/quinn
-        run: |
-          pushd transports/quic
-          cargo tarpaulin --out xml --features test,tokio,quinn,s2n --no-fail-fast
-          popd
-        continue-on-error: true
-        env:
-          RUSTFLAGS: "-C link-dead-code"
-          CARGO_INCREMENTAL: 0
+          cargo tarpaulin --out Xml --features ${{ matrix.features }} --output-dir ./reports --no-fail-fast
+        working-directory: ${{ matrix.crate }}
+      - name: Upload Coverage Report as Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report-${{ matrix.crate }}
+          path: ${{ matrix.crate }}/reports
+
+  upload-codecov:
+    needs: coverage-report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Download all coverage reports
+        uses: actions/download-artifact@v3
+        with:
+          path: reports/
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3
         with: 
-          fail_ci_if_error: flase
-          files: ./reports/*.xml
+          fail_ci_if_error: false
+          files: ./reports/*/*.xml
