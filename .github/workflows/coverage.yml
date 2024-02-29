@@ -54,14 +54,14 @@ jobs:
           path: target
           key: ${{ matrix.os }}-coverage-cargo-build-target
       - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin --force 
+        run: cargo install cargo-tarpaulin --force
+      - name: Create reports directory
+        run: mkdir -p reports
       - name: Coverage and Upload for memberlist 
         run: |
           pushd memberlist
-          cargo tarpaulin --out Xml --features test,tokio,quinn --no-fail-fast
-          curl -Os https://uploader.codecov.io/latest/linux/codecov
-          chmod +x codecov
-          ./codecov -t ${{ secrets.CODECOV_TOKEN }} -f "cobertura.xml" -F memberlist_quinn
+          cargo tarpaulin --out xml --features test,tokio,quinn --no-fail-fast
+          mv cobertura.xml ../reports/memberlist_quinn.xml
           popd
         continue-on-error: true
         env:
@@ -71,9 +71,7 @@ jobs:
         run: |
           pushd memberlist
           cargo tarpaulin --out Xml --features test,tokio,tcp,tls,native-tls --no-fail-fast
-          curl -Os https://uploader.codecov.io/latest/linux/codecov
-          chmod +x codecov
-          ./codecov -t ${{ secrets.CODECOV_TOKEN }} -f "cobertura.xml" -F memberlist_net
+          mv cobertura.xml ../reports/memberlist_net.xml
           popd
         continue-on-error: true
         env:
@@ -83,9 +81,7 @@ jobs:
         run: |
           pushd transports/net
           cargo tarpaulin --out Xml --features test,tokio,async-std,smol,tls,native-tls --no-fail-fast
-          curl -Os https://uploader.codecov.io/latest/linux/codecov
-          chmod +x codecov
-          ./codecov -t ${{ secrets.CODECOV_TOKEN }} -f "cobertura.xml" -F transports_net
+          mv cobertura.xml ../reports/transports_net.xml
           popd
         continue-on-error: true
         env:
@@ -95,9 +91,7 @@ jobs:
         run: |
           pushd transports/quic
           cargo tarpaulin --out Xml --features test,tokio,quinn --no-fail-fast
-          curl -Os https://uploader.codecov.io/latest/linux/codecov
-          chmod +x codecov
-          ./codecov -t ${{ secrets.CODECOV_TOKEN }} -f "cobertura.xml" -F transports_quinn
+          mv cobertura.xml ../reports/transports_quinn.xml
           popd
         continue-on-error: true
         env:
@@ -107,9 +101,7 @@ jobs:
         run: |
           pushd transports/quic
           cargo tarpaulin --out Xml --features test,tokio,s2n --no-fail-fast
-          curl -Os https://uploader.codecov.io/latest/linux/codecov
-          chmod +x codecov
-          ./codecov -t ${{ secrets.CODECOV_TOKEN }} -f "cobertura.xml" -F transports_s2n
+          mv cobertura.xml ../reports/transports_s2n.xml
           popd
         continue-on-error: true
         env:
@@ -119,4 +111,4 @@ jobs:
         uses: codecov/codecov-action@v3
         with: 
           fail_ci_if_error: flase
-          files: ./*/cobertura.xml
+          files: ./reports/*.xml
