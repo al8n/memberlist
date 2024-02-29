@@ -58,7 +58,7 @@ jobs:
       - name: Run Transport Tests
         run: |
           cargo test --no-default-features --features "test,compression,quinn,${{ matrix.runtime }},metrics" -- --test-threads=1
-        working-directory: transports/net
+        working-directory: transports/quic
 
       - name: Run Memberlist Tests
         run: |
