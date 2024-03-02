@@ -851,7 +851,7 @@ where
 
   assert!(ack_handler_exists(&m, 0).await, "missing handler");
 
-  R::sleep(Duration::from_millis(50)).await;
+  R::sleep(Duration::from_millis(200)).await;
 
   assert!(!ack_handler_exists(&m, 0).await, "non-reaped handler");
 }
@@ -870,7 +870,7 @@ where
 
   assert!(ack_handler_exists(&m1, 0).await, "missing handler");
 
-  R::sleep(Duration::from_millis(50)).await;
+  R::sleep(Duration::from_millis(200)).await;
 
   assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
 }

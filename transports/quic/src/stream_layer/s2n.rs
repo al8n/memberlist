@@ -85,9 +85,16 @@ impl<R: Runtime> StreamLayer for S2n<R> {
       .map_err(invalid_data)?
       .start()
       .map_err(invalid_data)?;
+    let mut addr = srv.local_addr()?;
     let client_addr: SocketAddr = match addr {
-      SocketAddr::V4(_) => "0.0.0.0:0".parse().unwrap(),
-      SocketAddr::V6(_) => "[::]:0".parse().unwrap(),
+      SocketAddr::V4(_) => {
+        addr.set_port(0);
+        addr
+      }
+      SocketAddr::V6(_) => {
+        addr.set_port(0);
+        addr
+      }
     };
     let client = Client::builder()
       .with_limits(self.limits)
