@@ -1,11 +1,9 @@
-> **NOTE:** Please do not use this crate, this crate have not been tested, and there are several known bugs need to be fixed.
-
 <div align="center">
 <h1>Memberlist</h1>
 </div>
 <div align="center">
 
-A highly customable, adaptable, runtime agnostic Gossip protocol which helps manage cluster membership and member failure detection.
+A highly customable, adaptable, async runtime agnostic Gossip protocol which helps manage cluster membership and member failure detection.
 
 Port and improve [HashiCorp's memberlist](https://github.com/hashicorp/memberlist) to Rust.
 
@@ -78,6 +76,40 @@ Here are the layers:
 - **Delegate Layer**
   
   This layer is used as a reactor for different kinds of messages.
+
+  - `Delegate`:
+  
+    Delegate is the trait that clients must implement if they want to hook into the gossip layer of Memberlist. All the methods must be thread-safe, as they can and generally will be called concurrently.
+
+    Here are the sub delegate traits:
+
+    - `AliveDelegate`:
+
+      Used to involve a client in processing a node "alive" message. When a node joins, either through a packet gossip or promised push/pull, we update the state of that node via an alive message. This can be used to filter a node out and prevent it from being considered a peer using application specific logic.
+
+    - `ConflictDelegate`:
+
+      Used to inform a client that a node has attempted to join which would result in a name conflict. This happens if two clients are configured with the same name but different addresses.
+
+    - `EventDelegate`:
+
+      A simpler delegate that is used only to receive notifications about members joining and leaving. The methods in this delegate may be called by multiple threads, but never concurrently. This allows you to reason about ordering.
+
+    - `MergeDelegate`:
+
+      Used to involve a client in a potential cluster merge operation. Namely, when a node does a promised push/pull (as part of a join), the delegate is involved and allowed to cancel the join based on custom logic. The merge delegate is NOT invoked as part of the push-pull anti-entropy.
+
+    - `NodeDelegate`:
+
+      Used to manage node related events. e.g. metadata
+
+    - `PingDelegate`:
+
+      Used to notify an observer how long it took for a ping message to complete a round trip. It can also be used for writing arbitrary byte slices into ack messages. Note that in order to be meaningful for RTT estimates, this delegate does not apply to indirect pings, nor fallback pings sent over promised connection.
+
+  - `CompositeDelegate`
+
+    CompositeDelegate is a helpful struct to split the `Delegate` into multiple small delegates, so that users do not need to implement full `Delegate` when they only want to custom some methods in the Delegate.
 
 ### Protocol
 
