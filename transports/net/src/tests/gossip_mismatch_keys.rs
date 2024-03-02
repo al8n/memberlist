@@ -1,8 +1,6 @@
 use crate::{NetTransport, NetTransportOptions};
 
 use super::*;
-use agnostic::Runtime;
-use futures::{Future, Stream};
 use memberlist_core::{
   transport::{Lpe, MaybeResolvedAddress},
   Memberlist, Options,
@@ -28,7 +26,7 @@ where
   let trans1 =
     NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s1, opts).await?;
   let m1 = Memberlist::new(trans1, Options::default()).await?;
-  let m1_addr = m1.advertise_addr();
+  let m1_addr = m1.advertise_address();
 
   let name2 = "gossip_mismatched_keys2";
   let pk2 = SecretKey::Aes192(*b"XhX/w702/JKKK7/7OtM9Ww==");
@@ -79,7 +77,7 @@ where
   let trans1 =
     NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s1, opts).await?;
   let m1 = Memberlist::new(trans1, Options::default()).await?;
-  let m1_addr = m1.advertise_addr();
+  let m1_addr = m1.advertise_address();
 
   let name2 = "gossip_mismatched_keys2";
   let pk2 = SecretKey::Aes192(*b"XhX/w702/JKKK7/7OtM9Ww==");

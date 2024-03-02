@@ -6,7 +6,7 @@ use std::{
   net::SocketAddr,
   path::PathBuf,
   sync::{atomic::AtomicUsize, Arc},
-  time::Duration,
+  time::{Duration, Instant},
 };
 
 use agnostic::Runtime;
@@ -85,9 +85,16 @@ impl<R: Runtime> StreamLayer for S2n<R> {
       .map_err(invalid_data)?
       .start()
       .map_err(invalid_data)?;
+    let mut addr = srv.local_addr()?;
     let client_addr: SocketAddr = match addr {
-      SocketAddr::V4(_) => "0.0.0.0:0".parse().unwrap(),
-      SocketAddr::V6(_) => "[::]:0".parse().unwrap(),
+      SocketAddr::V4(_) => {
+        addr.set_port(0);
+        addr
+      }
+      SocketAddr::V6(_) => {
+        addr.set_port(0);
+        addr
+      }
     };
     let client = Client::builder()
       .with_limits(self.limits)
@@ -284,17 +291,13 @@ impl<R: Runtime> QuicConnection for S2nConnection<R> {
       .map_err(Into::into)
   }
 
-  async fn open_bi_with_timeout(
+  async fn open_bi_with_deadline(
     &self,
-    timeout: Duration,
+    deadline: Instant,
   ) -> Result<(Self::Stream, SocketAddr), Self::Error> {
-    if timeout == Duration::ZERO {
-      self.open_bi().await
-    } else {
-      R::timeout(timeout, async { self.open_bi().await })
-        .await
-        .map_err(|_| Self::Error::Timeout)?
-    }
+    R::timeout_at(deadline, async { self.open_bi().await })
+      .await
+      .map_err(|_| Self::Error::Timeout)?
   }
 
   async fn close(&self) -> Result<(), Self::Error> {
@@ -325,8 +328,8 @@ impl<R: Runtime> QuicConnection for S2nConnection<R> {
 pub struct S2nStream<R> {
   recv_stream: AsyncPeekable<ReceiveStream>,
   send_stream: SendStream,
-  read_timeout: Option<Duration>,
-  write_timeout: Option<Duration>,
+  read_deadline: Option<Instant>,
+  write_deadline: Option<Instant>,
   _marker: PhantomData<R>,
 }
 
@@ -336,30 +339,30 @@ impl<R> S2nStream<R> {
     Self {
       recv_stream: recv.peekable(),
       send_stream: send,
-      read_timeout: None,
-      write_timeout: None,
+      read_deadline: None,
+      write_deadline: None,
       _marker: PhantomData,
     }
   }
 }
 
 impl<R: Runtime> TimeoutableReadStream for S2nStream<R> {
-  fn set_read_timeout(&mut self, timeout: Option<Duration>) {
-    self.read_timeout = timeout;
+  fn set_read_deadline(&mut self, deadline: Option<Instant>) {
+    self.read_deadline = deadline;
   }
 
-  fn read_timeout(&self) -> Option<Duration> {
-    self.read_timeout
+  fn read_deadline(&self) -> Option<Instant> {
+    self.read_deadline
   }
 }
 
 impl<R: Runtime> TimeoutableWriteStream for S2nStream<R> {
-  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
-    self.write_timeout = timeout;
+  fn set_write_deadline(&mut self, deadline: Option<Instant>) {
+    self.write_deadline = deadline;
   }
 
-  fn write_timeout(&self) -> Option<Duration> {
-    self.write_timeout
+  fn write_deadline(&self) -> Option<Instant> {
+    self.write_deadline
   }
 }
 
@@ -377,8 +380,8 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
         .map_err(Into::into)
     };
 
-    match self.write_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+    match self.write_deadline {
+      Some(timeout) => R::timeout_at(timeout, fut)
         .await
         .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
       None => fut.await.map_err(Into::into),
@@ -392,8 +395,8 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
   async fn finish(&mut self) -> Result<(), Self::Error> {
     let fut = async { self.send_stream.flush().await.map_err(Into::into) };
 
-    match self.write_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+    match self.write_deadline {
+      Some(timeout) => R::timeout_at(timeout, fut)
         .await
         .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
       None => fut.await.map_err(Into::into),
@@ -403,8 +406,8 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
   async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
     let fut = async { self.recv_stream.read(buf).await.map_err(Into::into) };
 
-    match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+    match self.read_deadline {
+      Some(timeout) => R::timeout_at(timeout, fut)
         .await
         .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
       None => fut.await.map_err(Into::into),
@@ -414,8 +417,8 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
   async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
     let fut = async { self.recv_stream.read_exact(buf).await.map_err(Into::into) };
 
-    match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+    match self.read_deadline {
+      Some(timeout) => R::timeout_at(timeout, fut)
         .await
         .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
       None => fut.await.map_err(Into::into),
@@ -425,8 +428,8 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
   async fn peek(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
     let fut = async { self.recv_stream.peek(buf).await.map_err(Into::into) };
 
-    match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+    match self.read_deadline {
+      Some(timeout) => R::timeout_at(timeout, fut)
         .await
         .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
       None => fut.await.map_err(Into::into),
@@ -436,8 +439,8 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
   async fn peek_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
     let fut = async { self.recv_stream.peek_exact(buf).await.map_err(Into::into) };
 
-    match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+    match self.read_deadline {
+      Some(timeout) => R::timeout_at(timeout, fut)
         .await
         .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
       None => fut.await.map_err(Into::into),

@@ -21,17 +21,18 @@ use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use futures::{
   channel::oneshot::{self, channel},
-  FutureExt,
+  stream::FuturesUnordered,
+  FutureExt, StreamExt,
 };
+pub use memberlist_core::types::{Label, LabelError};
 use memberlist_core::{
   transport::{
-    stream::{packet_stream, promised_stream, PacketSubscriber, StreamSubscriber},
-    Transport, TransportError, Wire,
+    packet_stream, promised_stream, PacketSubscriber, StreamSubscriber, Transport, TransportError,
+    Wire,
   },
-  types::Message,
+  types::{CIDRsPolicy, Message, SmallVec, TinyVec},
+  util::{batch, Batch},
 };
-
-use memberlist_utils::{net::CIDRsPolicy, Label, LabelError, SmallVec, TinyVec};
 use nodecraft::{resolver::AddressResolver, CheapClone, Id};
 
 mod processor;
@@ -298,8 +299,6 @@ where
     interval: impl futures::Stream,
     shutdown_rx: async_channel::Receiver<()>,
   ) {
-    use futures::StreamExt;
-
     futures::pin_mut!(interval);
 
     loop {
@@ -366,14 +365,14 @@ where
   async fn fetch_stream(
     &self,
     addr: SocketAddr,
-    timeout: Option<Duration>,
+    timeout: Option<Instant>,
   ) -> Result<S::Stream, QuicTransportError<A, S, W>> {
     if let Some(ent) = self.connection_pool.get(&addr) {
       let connection = ent.value();
       if !connection.is_closed().await {
         if let Some(timeout) = timeout {
           return connection
-            .open_bi_with_timeout(timeout)
+            .open_bi_with_deadline(timeout)
             .await
             .map(|(s, _)| s)
             .map_err(|e| QuicTransportError::Stream(e.into()));
@@ -400,22 +399,6 @@ where
         s
       })
       .map_err(|e| QuicTransportError::Stream(e.into()))
-  }
-}
-
-#[derive(Debug)]
-struct Batch<I, A> {
-  num_packets: usize,
-  packets: TinyVec<Message<I, A>>,
-  estimate_encoded_len: usize,
-}
-
-impl<I, A> Batch<I, A> {
-  fn estimate_encoded_len(&self) -> usize {
-    if self.packets.len() == 1 {
-      return self.estimate_encoded_len - PACKET_OVERHEAD;
-    }
-    self.estimate_encoded_len
   }
 }
 
@@ -577,10 +560,9 @@ where
     self
       .send_batch(
         *addr,
-        Batch {
-          packets: TinyVec::from(packet),
-          num_packets: 1,
-          estimate_encoded_len: self.packets_header_overhead() + PACKET_OVERHEAD + encoded_size,
+        Batch::One {
+          msg: packet,
+          estimate_encoded_size: self.packets_header_overhead() - PACKET_OVERHEAD + encoded_size,
         },
       )
       .await
@@ -593,82 +575,39 @@ where
     packets: TinyVec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
   ) -> Result<(usize, std::time::Instant), Self::Error> {
     let start = Instant::now();
-
-    let mut batches =
-      SmallVec::<Batch<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>::new();
     let packets_overhead = self.packets_header_overhead();
-    let mut estimate_batch_encoded_size = packets_overhead;
-    let mut current_packets_in_batch = 0;
+    let batches = batch::<_, _, _, Self::Wire>(
+      packets_overhead - PACKET_HEADER_OVERHEAD,
+      PACKET_HEADER_OVERHEAD,
+      PACKET_OVERHEAD,
+      self.max_payload_size(),
+      u32::MAX as usize,
+      NUM_PACKETS_PER_BATCH,
+      packets,
+    );
 
-    // get how many packets a batch
-    for packet in packets.iter() {
-      let ep_len = W::encoded_len(packet);
-      // check if we reach the maximum packet size
-      let current_encoded_size = ep_len + estimate_batch_encoded_size;
-      if current_encoded_size >= self.max_payload_size()
-        || current_packets_in_batch >= NUM_PACKETS_PER_BATCH
-      {
-        batches.push(Batch {
-          packets: TinyVec::with_capacity(current_packets_in_batch),
-          num_packets: current_packets_in_batch,
-          estimate_encoded_len: estimate_batch_encoded_size,
-        });
-        estimate_batch_encoded_size =
-          packets_overhead + PACKET_HEADER_OVERHEAD + PACKET_OVERHEAD + ep_len;
-        current_packets_in_batch = 1;
-      } else {
-        estimate_batch_encoded_size += PACKET_OVERHEAD + ep_len;
-        current_packets_in_batch += 1;
+    let mut total_bytes_sent = 0;
+    let mut futs = batches
+      .into_iter()
+      .map(|b| self.send_batch(*addr, b))
+      .collect::<FuturesUnordered<_>>();
+    while let Some(res) = futs.next().await {
+      match res {
+        Ok(sent) => {
+          total_bytes_sent += sent;
+        }
+        Err(e) => return Err(e),
       }
     }
-
-    // consume the packets to small batches according to batch_offsets.
-
-    // if batch_offsets is empty, means that packets can be sent by one I/O call
-    if batches.is_empty() {
-      self
-        .send_batch(
-          *addr,
-          Batch {
-            num_packets: packets.len(),
-            packets,
-            estimate_encoded_len: estimate_batch_encoded_size,
-          },
-        )
-        .await
-        .map(|sent| (sent, start))
-    } else {
-      let mut batch_idx = 0;
-      for (idx, packet) in packets.into_iter().enumerate() {
-        let batch = &mut batches[batch_idx];
-        batch.packets.push(packet);
-        if batch.num_packets == idx - 1 {
-          batch_idx += 1;
-        }
-      }
-
-      let mut total_bytes_sent = 0;
-      let resps =
-        futures::future::join_all(batches.into_iter().map(|b| self.send_batch(*addr, b))).await;
-
-      for res in resps {
-        match res {
-          Ok(sent) => {
-            total_bytes_sent += sent;
-          }
-          Err(e) => return Err(e),
-        }
-      }
-      Ok((total_bytes_sent, start))
-    }
+    Ok((total_bytes_sent, start))
   }
 
-  async fn dial_timeout(
+  async fn dial_with_deadline(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    timeout: std::time::Duration,
+    deadline: std::time::Instant,
   ) -> Result<Self::Stream, Self::Error> {
-    self.fetch_stream(*addr, Some(timeout)).await
+    self.fetch_stream(*addr, Some(deadline)).await
   }
 
   async fn cache_stream(

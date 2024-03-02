@@ -1,10 +1,9 @@
 use std::time::Duration;
 
-use super::version::VSN_SIZE;
-pub use super::version::{DelegateVersion, ProtocolVersion};
+use super::types::{DelegateVersion, ProtocolVersion};
 
 #[cfg(feature = "metrics")]
-pub use memberlist_utils::MetricLabels;
+pub use super::types::MetricLabels;
 
 /// Options used to configure the memberlist.
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
@@ -13,17 +12,43 @@ pub use memberlist_utils::MetricLabels;
 pub struct Options {
   /// The timeout for establishing a stream connection with
   /// a remote node for a full state sync, and for stream read and write
-  /// operations. This is a legacy name for backwards compatibility, but
-  /// should really be called StreamTimeout now that we have generalized
-  /// the transport.
+  /// operations.
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
+  #[viewit(
+    getter(
+      const,
+      attrs(
+        doc = "Returns the timeout for establishing a stream connection with a remote node for a full state sync, and for stream read and write operations."
+      )
+    ),
+    setter(
+      const,
+      attrs(
+        doc = "Sets the timeout for establishing a stream connection with a remote node for a full state sync, and for stream read and write operations (Builder pattern)."
+      )
+    )
+  )]
   timeout: Duration,
 
   /// The number of nodes that will be asked to perform
-  /// an indirect probe of a node in the case a direct probe fails. Memberlist
+  /// an indirect probe of a node in the case a direct probe fails. [`Memberlist`](crate::Memberlist)
   /// waits for an ack from any single indirect node, so increasing this
   /// number will increase the likelihood that an indirect probe will succeed
   /// at the expense of bandwidth.
+  #[viewit(
+    getter(
+      const,
+      attrs(
+        doc = "Returns the number of nodes that will be asked to perform an indirect probe of a node in the case a direct probe fails."
+      )
+    ),
+    setter(
+      const,
+      attrs(
+        doc = "Sets the number of nodes that will be asked to perform an indirect probe of a node in the case a direct probe fails (Builder pattern)."
+      )
+    )
+  )]
   indirect_checks: usize,
 
   /// The multiplier for the number of retransmissions
@@ -35,6 +60,10 @@ pub struct Options {
   /// This allows the retransmits to scale properly with cluster size. The
   /// higher the multiplier, the more likely a failed broadcast is to converge
   /// at the expense of increased bandwidth.
+  #[viewit(
+    getter(const, attrs(doc = "Returns the retransmit mult")),
+    setter(const, attrs(doc = "Sets the retransmit mult (Builder pattern)."))
+  )]
   retransmit_mult: usize,
 
   /// The multiplier for determining the time an
@@ -48,6 +77,10 @@ pub struct Options {
   /// an inaccessible node is considered part of the cluster before declaring
   /// it dead, giving that suspect node more time to refute if it is indeed
   /// still alive.
+  #[viewit(
+    getter(const, attrs(doc = "Returns the suspicion mult")),
+    setter(const, attrs(doc = "Sets the suspicion mult (Builder pattern)."))
+  )]
   suspicion_mult: usize,
 
   /// The multiplier applied to the
@@ -65,6 +98,13 @@ pub struct Options {
   /// recover before falsely declaring other nodes as failed, but short
   /// enough for a legitimately isolated node to still make progress marking
   /// nodes failed in a reasonable amount of time.
+  #[viewit(
+    getter(const, attrs(doc = "Returns the suspicion max timeout mult")),
+    setter(
+      const,
+      attrs(doc = "Sets the suspicion max timeout mult (Builder pattern).")
+    )
+  )]
   suspicion_max_timeout_mult: usize,
 
   /// The interval between complete state syncs.
@@ -76,46 +116,99 @@ pub struct Options {
   /// speeds across larger clusters at the expense of increased bandwidth
   /// usage.
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
+  #[viewit(
+    getter(const, attrs(doc = "Returns the push pull interval")),
+    setter(const, attrs(doc = "Sets the push pull interval (Builder pattern)."))
+  )]
   push_pull_interval: Duration,
 
   /// The interval between random node probes. Setting
   /// this lower (more frequent) will cause the memberlist cluster to detect
   /// failed nodes more quickly at the expense of increased bandwidth usage
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
+  #[viewit(
+    getter(const, attrs(doc = "Returns the probe interval")),
+    setter(const, attrs(doc = "Sets the probe interval (Builder pattern)."))
+  )]
   probe_interval: Duration,
   /// The timeout to wait for an ack from a probed node
   /// before assuming it is unhealthy. This should be set to 99-percentile
   /// of RTT (round-trip time) on your network.
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
+  #[viewit(
+    getter(const, attrs(doc = "Returns the probe timeout")),
+    setter(const, attrs(doc = "Sets the probe timeout (Builder pattern)."))
+  )]
   probe_timeout: Duration,
 
-  /// Set this field will turn off the fallback TCP pings that are attempted
-  /// if the direct UDP ping fails. These get pipelined along with the
-  /// indirect UDP pings.
-  disable_tcp_pings: bool,
+  /// Set this field will turn off the fallback promised pings that are attempted
+  /// if the direct unreliable ping fails. These get pipelined along with the
+  /// indirect unreliable pings.
+  #[viewit(
+    getter(const, attrs(doc = "Returns whether disable promised pings or not")),
+    setter(
+      const,
+      attrs(doc = "Sets whether disable promised pings or not (Builder pattern).")
+    )
+  )]
+  disable_promised_pings: bool,
 
   /// Increase the probe interval if the node
   /// becomes aware that it might be degraded and not meeting the soft real
   /// time requirements to reliably probe other nodes.
+  #[viewit(
+    getter(const, attrs(doc = "Returns the awareness max multiplier")),
+    setter(
+      const,
+      attrs(doc = "Sets the awareness max multiplier (Builder pattern).")
+    )
+  )]
   awareness_max_multiplier: usize,
+
   /// The interval between sending messages that need
   /// to be gossiped that haven't been able to piggyback on probing messages.
   /// If this is set to zero, non-piggyback gossip is disabled. By lowering
   /// this value (more frequent) gossip messages are propagated across
   /// the cluster more quickly at the expense of increased bandwidth.
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
+  #[viewit(
+    getter(const, attrs(doc = "Returns the gossip interval")),
+    setter(const, attrs(doc = "Sets the gossip interval (Builder pattern)."))
+  )]
   gossip_interval: Duration,
+
   /// The number of random nodes to send gossip messages to
   /// per `gossip_interval`. Increasing this number causes the gossip messages
   /// to propagate across the cluster more quickly at the expense of
   /// increased bandwidth.
+  #[viewit(
+    getter(const, attrs(doc = "Returns the gossip nodes")),
+    setter(const, attrs(doc = "Sets the gossip nodes (Builder pattern)."))
+  )]
   gossip_nodes: usize,
   /// The interval after which a node has died that
   /// we will still try to gossip to it. This gives it a chance to refute.
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
+  #[viewit(
+    getter(const, attrs(doc = "Returns the gossip to the dead timeout")),
+    setter(
+      const,
+      attrs(doc = "Sets the gossip to the dead timeout (Builder pattern).")
+    )
+  )]
   gossip_to_the_dead_time: Duration,
 
   /// Used to guarantee protocol-compatibility
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Returns the protocol version this node is speaking")
+    ),
+    setter(
+      const,
+      attrs(doc = "Sets the protocol version this node is speaking (Builder pattern).")
+    )
+  )]
   protocol_version: ProtocolVersion,
 
   // #[viewit(getter(style = "ref", result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeyring>")))]
@@ -124,24 +217,50 @@ pub struct Options {
   /// for any custom messages that the delegate might do (broadcasts,
   /// local/remote state, etc.). If you don't set these, then the protocol
   /// versions will just be zero, and version compliance won't be done.
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Returns the delegate version this node is speaking")
+    ),
+    setter(
+      const,
+      attrs(doc = "Sets the delegate version this node is speaking (Builder pattern).")
+    )
+  )]
   delegate_version: DelegateVersion,
 
   /// Size of Memberlist's internal channel which handles UDP messages. The
   /// size of this determines the size of the queue which Memberlist will keep
   /// while UDP messages are handled.
+  #[viewit(
+    getter(const, attrs(doc = "Returns the handoff queue depth")),
+    setter(const, attrs(doc = "Sets the handoff queue depth (Builder pattern)."))
+  )]
   handoff_queue_depth: usize,
 
   /// Controls the time before a dead node's name can be
   /// reclaimed by one with a different address or port. By default, this is 0,
   /// meaning nodes cannot be reclaimed this way.
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
+  #[viewit(
+    getter(const, attrs(doc = "Returns the dead node reclaim time")),
+    setter(
+      const,
+      attrs(doc = "Sets the dead node reclaim time (Builder pattern).")
+    )
+  )]
   dead_node_reclaim_time: Duration,
 
   /// The interval at which we check the message
   /// queue to apply the warning and max depth.
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde"))]
+  #[viewit(
+    getter(const, attrs(doc = "Returns the queue check interval")),
+    setter(const, attrs(doc = "Sets the queue check interval (Builder pattern)."))
+  )]
   queue_check_interval: Duration,
 
+  /// The metric labels for the memberlist.
   #[viewit(
     getter(
       style = "ref",
@@ -170,13 +289,8 @@ impl Default for Options {
 }
 
 impl Options {
-  #[inline]
-  pub const fn build_vsn_array(&self) -> [u8; VSN_SIZE] {
-    [self.protocol_version as u8, self.delegate_version as u8]
-  }
-
   /// Returns a sane set of configurations for Memberlist.
-  /// It uses the hostname as the node name, and otherwise sets very conservative
+  /// Sets very conservative
   /// values that are sane for most LAN environments. The default configuration
   /// errs on the side of caution, choosing values that are optimized
   /// for higher convergence at the cost of higher bandwidth usage. Regardless,
@@ -192,7 +306,7 @@ impl Options {
       push_pull_interval: Duration::from_secs(30), // Low frequency
       probe_interval: Duration::from_millis(500), // Failure check every second
       probe_timeout: Duration::from_secs(1), // Reasonable RTT time for LAN
-      disable_tcp_pings: false,         // TCP pings are safe, even with mixed versions
+      disable_promised_pings: false,    // TCP pings are safe, even with mixed versions
       awareness_max_multiplier: 8,      // Probe interval backs off to 8 seconds
       gossip_interval: Duration::from_millis(200), // Gossip every 200ms
       gossip_nodes: 3,                  // Gossip to 3 nodes
@@ -240,14 +354,3 @@ impl Options {
       .with_gossip_to_the_dead_time(Duration::from_secs(15))
   }
 }
-
-// #[derive(Debug, Clone, Copy)]
-// pub struct ForbiddenIp(IpAddr);
-
-// impl core::fmt::Display for ForbiddenIp {
-//   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-//     write!(f, "IP {} is not allowed", self.0)
-//   }
-// }
-
-// impl std::error::Error for ForbiddenIp {}

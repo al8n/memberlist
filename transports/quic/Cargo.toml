@@ -11,8 +11,8 @@ default = ["compression", "quinn"]
 compression = ["rayon", "weezl"]
 quinn = ["agnostic/quinn", "dep:quinn", "rustls"]
 s2n = ["s2n-quic", "s2n-quic-transport", "futures/bilock", "futures/unstable"]
-serde = ["memberlist-core/serde", "dep:serde", "memberlist-utils/serde", "humantime-serde", "indexmap/serde"]
-metrics = ["memberlist-core/metrics", "memberlist-utils/metrics", "dep:metrics"]
+serde = ["memberlist-core/serde", "dep:serde", "humantime-serde", "indexmap/serde"]
+metrics = ["memberlist-core/metrics", "dep:metrics"]
 
 tokio = ["agnostic/tokio"]
 async-std = ["agnostic/async-std"]
@@ -44,9 +44,8 @@ byteorder.workspace = true
 crossbeam-skiplist = "0.1"
 futures.workspace = true
 indexmap = "2"
-local-ip-address = "0.5"
+local-ip-address.workspace = true
 memberlist-core.workspace = true
-memberlist-utils = { workspace = true, features = ["ipnet"] }
 nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
 pin-project.workspace = true
 peekable = { version = "0.2", features = ["future"] }

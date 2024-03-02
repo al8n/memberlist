@@ -1,18 +1,20 @@
 use crate::{
+  base::Memberlist,
   delegate::Delegate,
   error::Error,
-  memberlist::Memberlist,
   transport::{Transport, Wire},
   types::{Message, TinyVec},
 };
 use async_channel::Sender;
-use either::Either;
+
 use nodecraft::{resolver::AddressResolver, CheapClone};
 
 /// Something that can be broadcasted via gossip to
 /// the memberlist cluster.
-pub trait Broadcast: Send + Sync + 'static {
+pub trait Broadcast: core::fmt::Debug + Send + Sync + 'static {
+  /// The id type
   type Id: Clone + Eq + core::hash::Hash + core::fmt::Debug + core::fmt::Display;
+  /// The message type
   type Message: Clone + core::fmt::Debug + Send + Sync + 'static;
 
   /// An optional extension of the Broadcast trait that
@@ -47,10 +49,21 @@ pub trait Broadcast: Send + Sync + 'static {
 
 #[viewit::viewit]
 pub(crate) struct MemberlistBroadcast<I, A, W> {
-  node: Either<I, A>,
+  node: I,
   msg: Message<I, A>,
   notify: Option<async_channel::Sender<()>>,
   _marker: std::marker::PhantomData<W>,
+}
+
+impl<I: core::fmt::Debug, A: core::fmt::Debug, W> core::fmt::Debug
+  for MemberlistBroadcast<I, A, W>
+{
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct(std::any::type_name::<Self>())
+      .field("node", &self.node)
+      .field("msg", &self.msg)
+      .finish()
+  }
 }
 
 impl<I, A, W> Broadcast for MemberlistBroadcast<I, A, W>
@@ -73,7 +86,7 @@ where
     + 'static,
   W: Wire<Id = I, Address = A>,
 {
-  type Id = Either<I, A>;
+  type Id = I;
   type Message = Message<I, A>;
 
   fn id(&self) -> Option<&Self::Id> {
@@ -95,7 +108,11 @@ where
   async fn finished(&self) {
     if let Some(tx) = &self.notify {
       if let Err(e) = tx.send(()).await {
-        tracing::error!(target = "memberlist", "broadcast failed to notify: {}", e);
+        tracing::error!(
+          target = "memberlist.broadcast",
+          "broadcast failed to notify: {}",
+          e
+        );
       }
     }
   }
@@ -113,7 +130,7 @@ where
   #[inline]
   pub(crate) async fn broadcast_notify(
     &self,
-    node: Either<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    node: T::Id,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     notify_tx: Option<Sender<()>>,
   ) {
@@ -123,16 +140,16 @@ where
   #[inline]
   pub(crate) async fn broadcast(
     &self,
-    node: Either<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    node: T::Id,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) {
     let _ = self.queue_broadcast(node, msg, None).await;
   }
 
   #[inline]
-  pub(crate) async fn queue_broadcast(
+  async fn queue_broadcast(
     &self,
-    node: Either<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    node: T::Id,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     notify_tx: Option<Sender<()>>,
   ) {
@@ -186,7 +203,6 @@ where
               (len, msg.unwrap_user_data())
             })
             .await
-            .map_err(Error::delegate)?
             .into_iter()
             .map(Message::UserData),
         );

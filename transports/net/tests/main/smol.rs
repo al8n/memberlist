@@ -28,6 +28,9 @@ mod label;
 #[path = "smol/join.rs"]
 mod join;
 
+#[path = "smol/join_dead_node.rs"]
+mod join_dead_node;
+
 #[path = "smol/promised_listener_backoff.rs"]
 mod promised_listener_backoff;
 

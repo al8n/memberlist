@@ -13,23 +13,27 @@ where
 {
   pub(crate) async fn read_from_promised_without_compression_and_encryption(
     &self,
-    conn: impl AsyncRead + Send + Unpin,
+    conn: Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>>,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
-    W::decode_message_from_reader(conn)
-      .await
-      .map_err(|e| ConnectionError::promised_read(e).into())
+    match conn.deadline {
+      Some(ddl) => R::timeout_at(ddl, W::decode_message_from_reader(conn.op))
+        .await
+        .map_err(|e| ConnectionError::promised_read(e.into()))?
+        .map_err(|e| ConnectionError::promised_read(e).into()),
+      None => W::decode_message_from_reader(conn.op)
+        .await
+        .map_err(|e| ConnectionError::promised_read(e).into()),
+    }
   }
 
   #[cfg(feature = "compression")]
   pub(crate) async fn read_from_promised_with_compression_without_encryption(
     &self,
-    mut conn: peekable::future::AsyncPeekable<impl AsyncRead + Send + Unpin>,
+    mut conn: Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>>,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
-    use futures::AsyncReadExt;
-
     let mut tag = [0u8; 1];
     conn
-      .peek_exact(&mut tag)
+      .peek_exact::<R>(&mut tag)
       .await
       .map_err(ConnectionError::promised_read)?;
     let tag = tag[0];
@@ -42,7 +46,7 @@ where
     let mut readed = 0;
     let mut compress_header = [0u8; COMPRESS_HEADER];
     conn
-      .read_exact(&mut compress_header)
+      .read_exact::<R>(&mut compress_header)
       .await
       .map_err(ConnectionError::promised_read)?;
     readed += COMPRESS_HEADER;
@@ -52,7 +56,7 @@ where
       if data_len <= MAX_INLINED_BYTES {
         let mut data = [0u8; MAX_INLINED_BYTES];
         conn
-          .read_exact(&mut data[..data_len])
+          .read_exact::<R>(&mut data[..data_len])
           .await
           .map_err(ConnectionError::promised_read)?;
         readed += data_len;
@@ -62,7 +66,7 @@ where
 
       let mut data = vec![0u8; data_len];
       conn
-        .read_exact(&mut data)
+        .read_exact::<R>(&mut data)
         .await
         .map_err(ConnectionError::promised_read)?;
       readed += data_len;
@@ -73,7 +77,7 @@ where
     let (tx, rx) = futures::channel::oneshot::channel();
     let mut data = vec![0u8; data_len];
     conn
-      .read_exact(&mut data)
+      .read_exact::<R>(&mut data)
       .await
       .map_err(ConnectionError::promised_read)?;
     readed += data_len;
@@ -96,16 +100,14 @@ where
   #[cfg(all(feature = "encryption", not(feature = "compression")))]
   pub(crate) async fn read_from_promised_with_encryption_without_compression(
     &self,
-    mut conn: peekable::future::AsyncPeekable<impl AsyncRead + Send + Unpin>,
+    mut conn: Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>>,
     stream_label: Label,
     from: &A::ResolvedAddress,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
-    use futures::AsyncReadExt;
-
     // read and check if the message is encrypted
     let mut tag = [0u8; 1];
     conn
-      .peek_exact(&mut tag)
+      .peek_exact::<R>(&mut tag)
       .await
       .map_err(ConnectionError::promised_read)?;
     let tag = tag[0];
@@ -118,7 +120,7 @@ where
     // Read encrypted message overhead
     let mut encrypt_message_overhead = [0u8; ENCRYPT_HEADER];
     conn
-      .read_exact(&mut encrypt_message_overhead)
+      .read_exact::<R>(&mut encrypt_message_overhead)
       .await
       .map_err(ConnectionError::promised_read)?;
     let encryption_algo = EncryptionAlgo::try_from(encrypt_message_overhead[0])?;
@@ -144,7 +146,7 @@ where
     let mut buf = BytesMut::with_capacity(encrypted_message_len);
     buf.resize(encrypted_message_len, 0);
     conn
-      .read_exact(&mut buf)
+      .read_exact::<R>(&mut buf)
       .await
       .map_err(ConnectionError::promised_read)?;
     readed += encrypted_message_len;
@@ -184,16 +186,14 @@ where
   #[cfg(all(feature = "compression", feature = "encryption"))]
   pub(crate) async fn read_from_promised_with_compression_and_encryption(
     &self,
-    mut conn: peekable::future::AsyncPeekable<impl AsyncRead + Send + Unpin>,
+    mut conn: Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>>,
     stream_label: Label,
     from: &A::ResolvedAddress,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
-    use futures::AsyncReadExt;
-
     // read and check if the message is encrypted
     let mut tag = [0u8; 1];
     conn
-      .peek_exact(&mut tag)
+      .peek_exact::<R>(&mut tag)
       .await
       .map_err(ConnectionError::promised_read)?;
     let tag = tag[0];
@@ -215,7 +215,7 @@ where
     // Read encrypted message overhead
     let mut encrypt_message_overhead = [0u8; ENCRYPT_HEADER];
     conn
-      .read_exact(&mut encrypt_message_overhead)
+      .read_exact::<R>(&mut encrypt_message_overhead)
       .await
       .map_err(ConnectionError::promised_read)?;
     let encryption_algo = EncryptionAlgo::try_from(encrypt_message_overhead[0])?;
@@ -232,7 +232,7 @@ where
     let mut buf = BytesMut::with_capacity(encrypted_message_len);
     buf.resize(encrypted_message_len, 0);
     conn
-      .read_exact(&mut buf)
+      .read_exact::<R>(&mut buf)
       .await
       .map_err(ConnectionError::promised_read)?;
     readed += encrypted_message_len;

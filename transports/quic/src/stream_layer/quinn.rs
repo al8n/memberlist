@@ -5,7 +5,7 @@ use std::{
     atomic::{AtomicUsize, Ordering},
     Arc,
   },
-  time::Duration,
+  time::{Duration, Instant},
 };
 
 use agnostic::{net::Net, Runtime};
@@ -90,6 +90,7 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
       local_addr,
       client_config,
       max_open_streams: self.opts.max_open_streams,
+      connect_timeout: self.opts.connect_timeout,
       _marker: PhantomData,
     };
     Ok((local_addr, acceptor, connector))
@@ -148,6 +149,7 @@ pub struct QuinnConnector<R> {
   server_name: SmolStr,
   endpoint: Arc<Endpoint>,
   client_config: ClientConfig,
+  connect_timeout: Duration,
   local_addr: SocketAddr,
   max_open_streams: usize,
   _marker: PhantomData<R>,
@@ -158,10 +160,13 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
   type Connection = QuinnConnection<R>;
 
   async fn connect(&self, addr: SocketAddr) -> Result<Self::Connection, Self::Error> {
-    let conn = self
-      .endpoint
-      .connect_with(self.client_config.clone(), addr, &self.server_name)?
-      .await?;
+    let connecting =
+      self
+        .endpoint
+        .connect_with(self.client_config.clone(), addr, &self.server_name)?;
+    let conn = R::timeout(self.connect_timeout, connecting)
+      .await
+      .map_err(|_| QuinnConnectionError::DialTimeout)??;
     Ok(QuinnConnection::new(
       conn,
       self.local_addr,
@@ -203,8 +208,8 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
 pub struct QuinnStream<R> {
   send: SendStream,
   recv: AsyncPeekable<RecvStream>,
-  read_timeout: Option<Duration>,
-  write_timeout: Option<Duration>,
+  read_deadline: Option<Instant>,
+  write_deadline: Option<Instant>,
   local_id: Arc<AtomicUsize>,
   _marker: PhantomData<R>,
 }
@@ -215,8 +220,8 @@ impl<R> QuinnStream<R> {
     Self {
       send,
       recv: recv.peekable(),
-      read_timeout: None,
-      write_timeout: None,
+      read_deadline: None,
+      write_deadline: None,
       local_id,
       _marker: PhantomData,
     }
@@ -243,8 +248,8 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
         .map_err(Into::into)
     };
 
-    match self.write_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+    match self.write_deadline {
+      Some(timeout) => R::timeout_at(timeout, fut)
         .await
         .map_err(|_| Self::Error::write_timeout())?,
       None => fut.await.map_err(Into::into),
@@ -262,8 +267,8 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
   async fn finish(&mut self) -> Result<(), Self::Error> {
     let fut = async { self.send.finish().await.map(|_| ()).map_err(Into::into) };
 
-    match self.write_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+    match self.write_deadline {
+      Some(timeout) => R::timeout_at(timeout, fut)
         .await
         .map_err(|_| Self::Error::write_timeout())?,
       None => fut.await.map_err(Into::into),
@@ -279,8 +284,8 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
         .map_err(|e| QuinnReadStreamError::from(e).into())
     };
 
-    match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+    match self.read_deadline {
+      Some(timeout) => R::timeout_at(timeout, fut)
         .await
         .map_err(|_| Self::Error::read_timeout())?,
       None => fut.await.map_err(Into::into),
@@ -296,8 +301,8 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
         .map_err(|e| QuinnReadStreamError::from(e).into())
     };
 
-    match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+    match self.read_deadline {
+      Some(timeout) => R::timeout_at(timeout, fut)
         .await
         .map_err(|_| Self::Error::read_timeout())?,
       None => fut.await.map_err(Into::into),
@@ -313,8 +318,8 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
         .map_err(|e| QuinnReadStreamError::from(e).into())
     };
 
-    match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+    match self.read_deadline {
+      Some(timeout) => R::timeout_at(timeout, fut)
         .await
         .map_err(|_| Self::Error::read_timeout())?,
       None => fut.await.map_err(Into::into),
@@ -330,8 +335,8 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
         .map_err(|e| QuinnReadStreamError::from(e).into())
     };
 
-    match self.read_timeout {
-      Some(timeout) => R::timeout(timeout, fut)
+    match self.read_deadline {
+      Some(timeout) => R::timeout_at(timeout, fut)
         .await
         .map_err(|_| Self::Error::read_timeout())?,
       None => fut.await.map_err(Into::into),
@@ -366,22 +371,22 @@ impl<R: Runtime> futures::AsyncRead for QuinnStream<R> {
 }
 
 impl<R: Runtime> TimeoutableReadStream for QuinnStream<R> {
-  fn set_read_timeout(&mut self, timeout: Option<Duration>) {
-    self.read_timeout = timeout;
+  fn set_read_deadline(&mut self, deadline: Option<Instant>) {
+    self.read_deadline = deadline;
   }
 
-  fn read_timeout(&self) -> Option<Duration> {
-    self.read_timeout
+  fn read_deadline(&self) -> Option<Instant> {
+    self.read_deadline
   }
 }
 
 impl<R: Runtime> TimeoutableWriteStream for QuinnStream<R> {
-  fn set_write_timeout(&mut self, timeout: Option<Duration>) {
-    self.write_timeout = timeout;
+  fn set_write_deadline(&mut self, deadline: Option<Instant>) {
+    self.write_deadline = deadline;
   }
 
-  fn write_timeout(&self) -> Option<Duration> {
-    self.write_timeout
+  fn write_deadline(&self) -> Option<Instant> {
+    self.write_deadline
   }
 }
 
@@ -437,9 +442,9 @@ impl<R: Runtime> QuicConnection for QuinnConnection<R> {
     ))
   }
 
-  async fn open_bi_with_timeout(
+  async fn open_bi_with_deadline(
     &self,
-    timeout: Duration,
+    deadline: Instant,
   ) -> Result<(Self::Stream, SocketAddr), Self::Error> {
     let fut = async {
       let (send, recv) = self.conn.open_bi().await?;
@@ -450,13 +455,9 @@ impl<R: Runtime> QuicConnection for QuinnConnection<R> {
       ))
     };
 
-    if timeout == Duration::ZERO {
-      fut.await
-    } else {
-      R::timeout(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::connection_timeout())?
-    }
+    R::timeout_at(deadline, fut)
+      .await
+      .map_err(|_| Self::Error::connection_timeout())?
   }
 
   async fn close(&self) -> Result<(), Self::Error> {

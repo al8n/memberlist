@@ -28,6 +28,9 @@ mod send;
 #[path = "tests/join.rs"]
 mod join;
 
+#[path = "tests/join_dead_node.rs"]
+mod join_dead_node;
+
 #[path = "tests/promised_ping.rs"]
 mod promised_ping;
 

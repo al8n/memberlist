@@ -167,9 +167,9 @@ pub trait QuicConnection: Send + Sync + 'static {
     -> impl Future<Output = Result<(Self::Stream, SocketAddr), Self::Error>> + Send;
 
   /// Opens a bidirectional stream to a remote peer.
-  fn open_bi_with_timeout(
+  fn open_bi_with_deadline(
     &self,
-    timeout: std::time::Duration,
+    deadline: std::time::Instant,
   ) -> impl Future<Output = Result<(Self::Stream, SocketAddr), Self::Error>> + Send;
 
   /// Closes the connection.

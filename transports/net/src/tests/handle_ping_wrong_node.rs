@@ -1,7 +1,7 @@
 use memberlist_core::transport::{tests::handle_ping_wrong_node, Lpe};
 use nodecraft::{resolver::socket_addr::SocketAddrResolver, CheapClone};
 
-use crate::{NetTransport, NetTransportOptions, StreamLayer};
+use crate::{NetTransport, NetTransportOptions};
 
 use super::*;
 

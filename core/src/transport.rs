@@ -1,18 +1,15 @@
-use std::{
-  future::Future,
-  time::{Duration, Instant},
-};
+use std::{future::Future, time::Instant};
 
 use bytes::Bytes;
 use futures::AsyncRead;
-pub use nodecraft::{resolver::AddressResolver, *};
+pub use nodecraft::{resolver::AddressResolver, CheapClone, Transformable, *};
 
 use crate::types::*;
 
 use super::*;
 
-pub mod stream;
-use stream::*;
+mod stream;
+pub use stream::*;
 
 mod lpe;
 pub use lpe::*;
@@ -172,30 +169,36 @@ impl<T: Transport> MaybeResolvedAddress<T> {
 /// Ensures that the stream has timeout capabilities.
 #[auto_impl::auto_impl(Box)]
 pub trait TimeoutableReadStream: Unpin + Send + Sync + 'static {
-  fn set_read_timeout(&mut self, timeout: Option<Duration>);
+  /// Set the read deadline.
+  fn set_read_deadline(&mut self, deadline: Option<Instant>);
 
-  fn read_timeout(&self) -> Option<Duration>;
+  /// Returns the read deadline.
+  fn read_deadline(&self) -> Option<Instant>;
 }
 
 /// Ensures that the stream has timeout capabilities.
 #[auto_impl::auto_impl(Box)]
 pub trait TimeoutableWriteStream: Unpin + Send + Sync + 'static {
-  fn set_write_timeout(&mut self, timeout: Option<Duration>);
+  /// Set the write deadline.
+  fn set_write_deadline(&mut self, deadline: Option<Instant>);
 
-  fn write_timeout(&self) -> Option<Duration>;
+  /// Returns the write deadline.
+  fn write_deadline(&self) -> Option<Instant>;
 }
 
 /// Ensures that the stream has timeout capabilities.
 pub trait TimeoutableStream:
   TimeoutableReadStream + TimeoutableWriteStream + Unpin + Send + Sync + 'static
 {
-  fn set_timeout(&mut self, timeout: Option<Duration>) {
-    Self::set_read_timeout(self, timeout);
-    Self::set_write_timeout(self, timeout);
+  /// Set the deadline for both read and write.
+  fn set_deadline(&mut self, deadline: Option<Instant>) {
+    Self::set_read_deadline(self, deadline);
+    Self::set_write_deadline(self, deadline);
   }
 
-  fn timeout(&self) -> (Option<Duration>, Option<Duration>) {
-    (Self::read_timeout(self), Self::write_timeout(self))
+  /// Returns the read deadline and the write deadline.
+  fn deadline(&self) -> (Option<Instant>, Option<Instant>) {
+    (Self::read_deadline(self), Self::write_deadline(self))
   }
 }
 
@@ -375,10 +378,10 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// than packet connections so is used for more infrequent operations
   /// such as anti-entropy or fallback probes if the packet-oriented probe
   /// failed.
-  fn dial_timeout(
+  fn dial_with_deadline(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    timeout: Duration,
+    deadline: Instant,
   ) -> impl Future<Output = Result<Self::Stream, Self::Error>> + Send;
 
   /// Used to cache a connection for future use.

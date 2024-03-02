@@ -10,10 +10,6 @@ use futures::lock::Mutex;
 
 use crate::{broadcast::Broadcast, types::TinyVec, util::retransmit_limit};
 
-pub trait ServerCalculator {
-  fn num_nodes(&self) -> usize;
-}
-
 struct Inner<B: Broadcast> {
   q: BTreeSet<LimitedBroadcast<B>>,
   m: HashMap<B::Id, LimitedBroadcast<B>>,
@@ -69,6 +65,7 @@ pub struct TransmitLimitedQueue<B: Broadcast> {
 }
 
 impl<B: Broadcast> TransmitLimitedQueue<B> {
+  /// Creates a new [`TransmitLimitedQueue`].
   pub fn new(retransmit_mult: usize, calc: impl Fn() -> usize + Send + Sync + 'static) -> Self {
     Self {
       num_nodes: Box::new(calc),
@@ -255,14 +252,15 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
   }
 }
 
-struct LimitedBroadcast<B: Broadcast> {
+#[derive(Debug)]
+pub(crate) struct LimitedBroadcast<B: Broadcast> {
   // btree-key[0]: Number of transmissions attempted.
   transmits: usize,
   // btree-key[1]: copied from len(b.Message())
   msg_len: u64,
   // btree-key[2]: unique incrementing id stamped at submission time
   id: u64,
-  broadcast: Arc<B>,
+  pub(crate) broadcast: Arc<B>,
 }
 
 impl<B: Broadcast> core::clone::Clone for LimitedBroadcast<B> {
@@ -322,12 +320,59 @@ impl<B: Broadcast> PartialOrd<&LimitedBroadcast<B>> for Cmp {
   }
 }
 
+#[cfg(any(test, feature = "test"))]
+impl<B: Broadcast> Inner<B> {
+  fn walk_read_only<F>(&self, reverse: bool, f: F)
+  where
+    F: FnMut(&LimitedBroadcast<B>) -> bool,
+  {
+    fn iter<'a, B: Broadcast, F>(it: impl Iterator<Item = &'a LimitedBroadcast<B>>, mut f: F)
+    where
+      F: FnMut(&LimitedBroadcast<B>) -> bool,
+    {
+      for item in it {
+        let prev_transmits = item.transmits;
+        let prev_msg_len = item.msg_len;
+        let prev_id = item.id;
+
+        let keep_going = f(item);
+
+        if prev_transmits != item.transmits || prev_msg_len != item.msg_len || prev_id != item.id {
+          panic!("edited queue while walking read only");
+        }
+
+        if !keep_going {
+          break;
+        }
+      }
+    }
+    if reverse {
+      iter(self.q.iter().rev(), f)
+    } else {
+      iter(self.q.iter(), f)
+    }
+  }
+}
+
+#[cfg(any(test, feature = "test"))]
+impl<B: Broadcast> TransmitLimitedQueue<B> {
+  pub(crate) async fn ordered_view(&self, reverse: bool) -> TinyVec<LimitedBroadcast<B>> {
+    let inner = self.inner.lock().await;
+
+    let mut out = TinyVec::new();
+    inner.walk_read_only(reverse, |b| {
+      out.push(b.clone());
+      true
+    });
+    out
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use std::{marker::PhantomData, net::SocketAddr};
 
   use bytes::{BufMut, Bytes, BytesMut};
-  use either::Either;
   use futures::FutureExt;
   use smol_str::SmolStr;
   use transformable::Transformable;
@@ -369,61 +414,6 @@ mod tests {
     }
   }
 
-  struct NC(usize);
-
-  impl ServerCalculator for NC {
-    fn num_nodes(&self) -> usize {
-      self.0
-    }
-  }
-
-  impl<B: Broadcast> Inner<B> {
-    fn walk_read_only<F>(&self, reverse: bool, f: F)
-    where
-      F: FnMut(&LimitedBroadcast<B>) -> bool,
-    {
-      fn iter<'a, B: Broadcast, F>(it: impl Iterator<Item = &'a LimitedBroadcast<B>>, mut f: F)
-      where
-        F: FnMut(&LimitedBroadcast<B>) -> bool,
-      {
-        for item in it {
-          let prev_transmits = item.transmits;
-          let prev_msg_len = item.msg_len;
-          let prev_id = item.id;
-
-          let keep_going = f(item);
-
-          if prev_transmits != item.transmits || prev_msg_len != item.msg_len || prev_id != item.id
-          {
-            panic!("edited queue while walking read only");
-          }
-
-          if !keep_going {
-            break;
-          }
-        }
-      }
-      if reverse {
-        iter(self.q.iter().rev(), f)
-      } else {
-        iter(self.q.iter(), f)
-      }
-    }
-  }
-
-  impl<B: Broadcast> TransmitLimitedQueue<B> {
-    async fn ordered_view(&self, reverse: bool) -> TinyVec<LimitedBroadcast<B>> {
-      let inner = self.inner.lock().await;
-
-      let mut out = TinyVec::new();
-      inner.walk_read_only(reverse, |b| {
-        out.push(b.clone());
-        true
-      });
-      out
-    }
-  }
-
   #[test]
   fn test_limited_broadcast_less() {
     struct Case {
@@ -448,7 +438,7 @@ mod tests {
             SocketAddr,
             DummyWire<SmolStr, SocketAddr>,
           > {
-            node: Either::Left("diff-transmits-a".into()),
+            node: "diff-transmits-a".into(),
             msg: Message::UserData(Bytes::from([0; 10].as_slice())),
             notify: None,
             _marker: std::marker::PhantomData,
@@ -464,7 +454,7 @@ mod tests {
             SocketAddr,
             DummyWire<SmolStr, SocketAddr>,
           > {
-            node: Either::Left("diff-transmits-b".into()),
+            node: "diff-transmits-b".into(),
             msg: Message::UserData(Bytes::from([0; 10].as_slice())),
             notify: None,
             _marker: std::marker::PhantomData,
@@ -483,7 +473,7 @@ mod tests {
             SocketAddr,
             DummyWire<SmolStr, SocketAddr>,
           > {
-            node: Either::Left("same-transmits--diff-len-a".into()),
+            node: "same-transmits--diff-len-a".into(),
             msg: Message::UserData(Bytes::from([0; 12].as_slice())),
             notify: None,
             _marker: std::marker::PhantomData,
@@ -499,7 +489,7 @@ mod tests {
             SocketAddr,
             DummyWire<SmolStr, SocketAddr>,
           > {
-            node: Either::Left("same-transmits--diff-len-b".into()),
+            node: "same-transmits--diff-len-b".into(),
             msg: Message::UserData(Bytes::from([0; 10].as_slice())),
             notify: None,
             _marker: std::marker::PhantomData,
@@ -518,7 +508,7 @@ mod tests {
             SocketAddr,
             DummyWire<SmolStr, SocketAddr>,
           > {
-            node: Either::Left("same-transmits--same-len--diff-id-a".into()),
+            node: "same-transmits--same-len--diff-id-a".into(),
             msg: Message::UserData(Bytes::from([0; 12].as_slice())),
             notify: None,
             _marker: std::marker::PhantomData,
@@ -534,7 +524,7 @@ mod tests {
             SocketAddr,
             DummyWire<SmolStr, SocketAddr>,
           > {
-            node: Either::Left("same-transmits--same-len--diff-id-b".into()),
+            node: "same-transmits--same-len--diff-id-b".into(),
             msg: Message::UserData(Bytes::from([0; 12].as_slice())),
             notify: None,
             _marker: std::marker::PhantomData,
@@ -569,7 +559,7 @@ mod tests {
     let q = TransmitLimitedQueue::new(1, || 1);
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("test".into()),
+        node: "test".into(),
         msg: Message::UserData(Bytes::new()),
         notify: None,
         _marker: std::marker::PhantomData,
@@ -578,7 +568,7 @@ mod tests {
     .await;
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("foo".into()),
+        node: "foo".into(),
         msg: Message::UserData(Bytes::new()),
         notify: None,
         _marker: std::marker::PhantomData,
@@ -587,7 +577,7 @@ mod tests {
     .await;
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("bar".into()),
+        node: "bar".into(),
         msg: Message::UserData(Bytes::new()),
         notify: None,
         _marker: std::marker::PhantomData,
@@ -600,14 +590,14 @@ mod tests {
     let dump = q.ordered_view(true).await;
 
     assert_eq!(dump.len(), 3);
-    assert_eq!(dump[0].broadcast.node.as_ref().unwrap_left(), "test");
-    assert_eq!(dump[1].broadcast.node.as_ref().unwrap_left(), "foo");
-    assert_eq!(dump[2].broadcast.node.as_ref().unwrap_left(), "bar");
+    assert_eq!(dump[0].broadcast.node.as_ref(), "test");
+    assert_eq!(dump[1].broadcast.node.as_ref(), "foo");
+    assert_eq!(dump[2].broadcast.node.as_ref(), "bar");
 
     // Should invalidate previous message
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("test".into()),
+        node: "test".into(),
         msg: Message::UserData(Bytes::new()),
         notify: None,
         _marker: std::marker::PhantomData,
@@ -619,9 +609,9 @@ mod tests {
     let dump = q.ordered_view(true).await;
 
     assert_eq!(dump.len(), 3);
-    assert_eq!(dump[0].broadcast.node.as_ref().unwrap_left(), "foo");
-    assert_eq!(dump[1].broadcast.node.as_ref().unwrap_left(), "bar");
-    assert_eq!(dump[2].broadcast.node.as_ref().unwrap_left(), "test");
+    assert_eq!(dump[0].broadcast.node.as_ref(), "foo");
+    assert_eq!(dump[1].broadcast.node.as_ref(), "bar");
+    assert_eq!(dump[2].broadcast.node.as_ref(), "test");
   }
 
   #[tokio::test]
@@ -631,7 +621,7 @@ mod tests {
     // 18 bytes per message
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("test".into()),
+        node: "test".into(),
         msg: {
           let mut msg = BytesMut::new();
           msg.put_slice(b"1. this is a test.");
@@ -644,7 +634,7 @@ mod tests {
     .await;
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("foo".into()),
+        node: "foo".into(),
         msg: {
           let mut msg = BytesMut::new();
           msg.put_slice(b"2. this is a test.");
@@ -657,7 +647,7 @@ mod tests {
     .await;
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("bar".into()),
+        node: "bar".into(),
         msg: {
           let mut msg = BytesMut::new();
           msg.put_slice(b"3. this is a test.");
@@ -670,7 +660,7 @@ mod tests {
     .await;
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("baz".into()),
+        node: "baz".into(),
         msg: {
           let mut msg = BytesMut::new();
           msg.put_slice(b"4. this is a test.");
@@ -701,7 +691,7 @@ mod tests {
     // 18 bytes per message
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("test".into()),
+        node: "test".into(),
         msg: {
           let mut msg = BytesMut::new();
           msg.put_slice(b"1. this is a test.");
@@ -714,7 +704,7 @@ mod tests {
     .await;
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("foo".into()),
+        node: "foo".into(),
         msg: {
           let mut msg = BytesMut::new();
           msg.put_slice(b"2. this is a test.");
@@ -727,7 +717,7 @@ mod tests {
     .await;
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("bar".into()),
+        node: "bar".into(),
         msg: {
           let mut msg = BytesMut::new();
           msg.put_slice(b"3. this is a test.");
@@ -740,7 +730,7 @@ mod tests {
     .await;
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("baz".into()),
+        node: "baz".into(),
         msg: {
           let mut msg = BytesMut::new();
           msg.put_slice(b"4. this is a test.");
@@ -800,7 +790,7 @@ mod tests {
     // 18 bytes per message
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("test".into()),
+        node: "test".into(),
         msg: {
           let mut msg = BytesMut::new();
           msg.put_slice(b"1. this is a test.");
@@ -813,7 +803,7 @@ mod tests {
     .await;
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("foo".into()),
+        node: "foo".into(),
         msg: {
           let mut msg = BytesMut::new();
           msg.put_slice(b"2. this is a test.");
@@ -826,7 +816,7 @@ mod tests {
     .await;
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("bar".into()),
+        node: "bar".into(),
         msg: {
           let mut msg = BytesMut::new();
           msg.put_slice(b"3. this is a test.");
@@ -839,7 +829,7 @@ mod tests {
     .await;
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-        node: Either::Left("baz".into()),
+        node: "baz".into(),
         msg: {
           let mut msg = BytesMut::new();
           msg.put_slice(b"4. this is a test.");
@@ -868,14 +858,8 @@ mod tests {
     }
 
     let dump = q.ordered_view(true).await;
-    assert_eq!(
-      dump[0].broadcast.id().unwrap().as_ref().unwrap_left(),
-      "bar"
-    );
-    assert_eq!(
-      dump[1].broadcast.id().unwrap().as_ref().unwrap_left(),
-      "baz"
-    );
+    assert_eq!(dump[0].broadcast.id().unwrap().as_ref(), "bar");
+    assert_eq!(dump[1].broadcast.id().unwrap().as_ref(), "baz");
   }
 
   #[tokio::test]
@@ -884,7 +868,7 @@ mod tests {
     let insert = |name: &str, transmits: usize| {
       q.queue_broadcast_in(
         MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
-          node: Either::Left(name.into()),
+          node: name.into(),
           msg: Message::UserData(Bytes::new()),
           notify: None,
           _marker: std::marker::PhantomData,

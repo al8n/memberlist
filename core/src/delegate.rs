@@ -1,129 +1,97 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::Future;
+use memberlist_types::Meta;
 use nodecraft::{CheapClone, Id};
 
-use crate::types::{Server, SmallVec};
+use crate::types::{NodeState, SmallVec};
 
 #[cfg(any(test, feature = "test"))]
-mod mock;
-#[cfg(any(test, feature = "test"))]
-pub use mock::*;
+#[doc(hidden)]
+pub mod mock;
 
-#[auto_impl::auto_impl(Box, Arc)]
-pub trait Delegate: Send + Sync + 'static {
-  /// The error type of the delegate
-  type Error: std::error::Error + Send + Sync + 'static;
+mod alive;
+pub use alive::*;
 
+mod conflict;
+pub use conflict::*;
+
+mod composite;
+pub use composite::*;
+
+mod event;
+pub use event::*;
+
+mod node;
+pub use node::*;
+
+mod merge;
+pub use merge::*;
+
+mod ping;
+pub use ping::*;
+
+/// Error trait for [`Delegate`]
+pub enum DelegateError<D: Delegate> {
+  /// [`AliveDelegate`] error
+  AliveDelegate(<D as AliveDelegate>::Error),
+  /// [`MergeDelegate`] error
+  MergeDelegate(<D as MergeDelegate>::Error),
+}
+
+impl<D: Delegate> core::fmt::Debug for DelegateError<D> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::AliveDelegate(err) => write!(f, "{err:?}"),
+      Self::MergeDelegate(err) => write!(f, "{err:?}"),
+    }
+  }
+}
+
+impl<D: Delegate> core::fmt::Display for DelegateError<D> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::AliveDelegate(err) => write!(f, "{err}"),
+      Self::MergeDelegate(err) => write!(f, "{err}"),
+    }
+  }
+}
+
+impl<D: Delegate> std::error::Error for DelegateError<D> {}
+
+impl<D: Delegate> DelegateError<D> {
+  /// Create a delegate error from an alive delegate error.
+  #[inline]
+  pub const fn alive(err: <D as AliveDelegate>::Error) -> Self {
+    Self::AliveDelegate(err)
+  }
+
+  /// Create a delegate error from a merge delegate error.
+  #[inline]
+  pub const fn merge(err: <D as MergeDelegate>::Error) -> Self {
+    Self::MergeDelegate(err)
+  }
+}
+
+/// [`Delegate`] is the trait that clients must implement if they want to hook
+/// into the gossip layer of [`Memberlist`](crate::Memberlist). All the methods must be thread-safe,
+/// as they can and generally will be called concurrently.
+pub trait Delegate:
+  NodeDelegate
+  + PingDelegate<Id = <Self as Delegate>::Id, Address = <Self as Delegate>::Address>
+  + EventDelegate<Id = <Self as Delegate>::Id, Address = <Self as Delegate>::Address>
+  + ConflictDelegate<Id = <Self as Delegate>::Id, Address = <Self as Delegate>::Address>
+  + AliveDelegate<Id = <Self as Delegate>::Id, Address = <Self as Delegate>::Address>
+  + MergeDelegate<Id = <Self as Delegate>::Id, Address = <Self as Delegate>::Address>
+{
   /// The id type of the delegate
   type Id: Id;
 
   /// The address type of the delegate
   type Address: CheapClone + Send + Sync + 'static;
-
-  /// Used to retrieve meta-data about the current node
-  /// when broadcasting an alive message. It's length is limited to
-  /// the given byte size. This metadata is available in the Server structure.
-  fn node_meta(&self, limit: usize) -> impl Future<Output = Bytes> + Send;
-
-  /// Called when a user-data message is received.
-  /// Care should be taken that this method does not block, since doing
-  /// so would block the entire UDP packet receive loop. Additionally, the byte
-  /// slice may be modified after the call returns, so it should be copied if needed
-  fn notify_message(&self, msg: Bytes) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Called when user data messages can be broadcast.
-  /// It can return a list of buffers to send. Each buffer should assume an
-  /// overhead as provided with a limit on the total byte size allowed.
-  /// The total byte size of the resulting data to send must not exceed
-  /// the limit. Care should be taken that this method does not block,
-  /// since doing so would block the entire UDP packet receive loop.
-  ///
-  /// The `encoded_len` function accepts a user data message, and will return
-  /// the same message back and the encoded length of the message calculated by
-  /// [`Transport::Wire`].
-  ///
-  /// [`Transport::Wire`]: trait.Transport.html#associatedtype.Wire
-  fn broadcast_messages<F>(
-    &self,
-    overhead: usize,
-    limit: usize,
-    encoded_len: F,
-  ) -> impl Future<Output = Result<Vec<Bytes>, Self::Error>> + Send
-  where
-    F: Fn(Bytes) -> (usize, Bytes) + Send;
-
-  /// Used for a TCP Push/Pull. This is sent to
-  /// the remote side in addition to the membership information. Any
-  /// data can be sent here. See `merge_remote_state` as well. The `join`
-  /// boolean indicates this is for a join instead of a push/pull.
-  fn local_state(&self, join: bool) -> impl Future<Output = Result<Bytes, Self::Error>> + Send;
-
-  /// Invoked after a TCP Push/Pull. This is the
-  /// state received from the remote side and is the result of the
-  /// remote side's `local_state` call. The 'join'
-  /// boolean indicates this is for a join instead of a push/pull.
-  fn merge_remote_state(
-    &self,
-    buf: Bytes,
-    join: bool,
-  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Invoked when a node is detected to have joined the cluster
-  fn notify_join(
-    &self,
-    node: Arc<Server<Self::Id, Self::Address>>,
-  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Invoked when a node is detected to have left the cluster
-  fn notify_leave(
-    &self,
-    node: Arc<Server<Self::Id, Self::Address>>,
-  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Invoked when a node is detected to have
-  /// updated, usually involving the meta data.
-  fn notify_update(
-    &self,
-    node: Arc<Server<Self::Id, Self::Address>>,
-  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Invoked when a name conflict is detected
-  fn notify_alive(
-    &self,
-    peer: Arc<Server<Self::Id, Self::Address>>,
-  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Invoked when a name conflict is detected
-  fn notify_conflict(
-    &self,
-    existing: Arc<Server<Self::Id, Self::Address>>,
-    other: Arc<Server<Self::Id, Self::Address>>,
-  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Invoked when a merge could take place.
-  /// Provides a list of the nodes known by the peer.
-  fn notify_merge(
-    &self,
-    peers: SmallVec<Arc<Server<Self::Id, Self::Address>>>,
-  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Invoked when an ack is being sent; the returned bytes will be appended to the ack
-  fn ack_payload(&self) -> impl Future<Output = Result<Bytes, Self::Error>> + Send;
-
-  /// Invoked when an ack for a ping is received
-  fn notify_ping_complete(
-    &self,
-    node: Arc<Server<Self::Id, Self::Address>>,
-    rtt: std::time::Duration,
-    payload: Bytes,
-  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Invoked when we want to send a ping message to target by promised connection. Return true if the target node does not expect ping message from promised connection.
-  fn disable_promised_pings(&self, target: &Self::Id) -> bool;
 }
 
+/// Error type for [`VoidDelegate`].
 #[derive(Debug, Copy, Clone)]
 pub struct VoidDelegateError;
 
@@ -135,106 +103,121 @@ impl std::fmt::Display for VoidDelegateError {
 
 impl std::error::Error for VoidDelegateError {}
 
+/// Void delegate
 #[derive(Debug, Copy, Clone)]
 pub struct VoidDelegate<I, A>(core::marker::PhantomData<(I, A)>);
 
 impl<I, A> Default for VoidDelegate<I, A> {
   fn default() -> Self {
+    Self::new()
+  }
+}
+
+impl<I, A> VoidDelegate<I, A> {
+  /// Creates a new [`VoidDelegate`].
+  #[inline]
+  pub const fn new() -> Self {
     Self(core::marker::PhantomData)
   }
 }
 
-impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate for VoidDelegate<I, A> {
+impl<I: Id, A: CheapClone + Send + Sync + 'static> AliveDelegate for VoidDelegate<I, A> {
   type Error = VoidDelegateError;
   type Id = I;
   type Address = A;
 
-  async fn node_meta(&self, _limit: usize) -> Bytes {
+  async fn notify_alive(
+    &self,
+    _peer: Arc<NodeState<Self::Id, Self::Address>>,
+  ) -> Result<(), Self::Error> {
+    Ok(())
+  }
+}
+
+impl<I: Id, A: CheapClone + Send + Sync + 'static> MergeDelegate for VoidDelegate<I, A> {
+  type Error = VoidDelegateError;
+  type Id = I;
+  type Address = A;
+
+  async fn notify_merge(
+    &self,
+    _peers: SmallVec<Arc<NodeState<Self::Id, Self::Address>>>,
+  ) -> Result<(), Self::Error> {
+    Ok(())
+  }
+}
+
+impl<I: Id, A: CheapClone + Send + Sync + 'static> ConflictDelegate for VoidDelegate<I, A> {
+  type Id = I;
+  type Address = A;
+
+  async fn notify_conflict(
+    &self,
+    _existing: Arc<NodeState<Self::Id, Self::Address>>,
+    _other: Arc<NodeState<Self::Id, Self::Address>>,
+  ) {
+  }
+}
+
+impl<I: Id, A: CheapClone + Send + Sync + 'static> PingDelegate for VoidDelegate<I, A> {
+  type Id = I;
+  type Address = A;
+
+  async fn ack_payload(&self) -> Bytes {
     Bytes::new()
   }
 
-  async fn notify_message(&self, _msg: Bytes) -> Result<(), Self::Error> {
-    Ok(())
+  async fn notify_ping_complete(
+    &self,
+    _node: Arc<NodeState<Self::Id, Self::Address>>,
+    _rtt: std::time::Duration,
+    _payload: Bytes,
+  ) {
   }
+
+  fn disable_promised_pings(&self, _target: &Self::Id) -> bool {
+    false
+  }
+}
+
+impl<I: Id, A: CheapClone + Send + Sync + 'static> EventDelegate for VoidDelegate<I, A> {
+  type Id = I;
+  type Address = A;
+
+  async fn notify_join(&self, _node: Arc<NodeState<Self::Id, Self::Address>>) {}
+
+  async fn notify_leave(&self, _node: Arc<NodeState<Self::Id, Self::Address>>) {}
+
+  async fn notify_update(&self, _node: Arc<NodeState<Self::Id, Self::Address>>) {}
+}
+
+impl<I: Id, A: CheapClone + Send + Sync + 'static> NodeDelegate for VoidDelegate<I, A> {
+  async fn node_meta(&self, _limit: usize) -> Meta {
+    Meta::empty()
+  }
+
+  async fn notify_message(&self, _msg: Bytes) {}
 
   async fn broadcast_messages<F>(
     &self,
     _overhead: usize,
     _limit: usize,
     _encoded_len: F,
-  ) -> Result<Vec<Bytes>, Self::Error>
+  ) -> SmallVec<Bytes>
   where
     F: Fn(Bytes) -> (usize, Bytes) + Send,
   {
-    Ok(Vec::new())
+    SmallVec::new()
   }
 
-  async fn local_state(&self, _join: bool) -> Result<Bytes, Self::Error> {
-    Ok(Bytes::new())
+  async fn local_state(&self, _join: bool) -> Bytes {
+    Bytes::new()
   }
 
-  async fn merge_remote_state(&self, _buf: Bytes, _join: bool) -> Result<(), Self::Error> {
-    Ok(())
-  }
+  async fn merge_remote_state(&self, _buf: Bytes, _join: bool) {}
+}
 
-  async fn notify_join(
-    &self,
-    _node: Arc<Server<Self::Id, Self::Address>>,
-  ) -> Result<(), Self::Error> {
-    Ok(())
-  }
-
-  async fn notify_leave(
-    &self,
-    _node: Arc<Server<Self::Id, Self::Address>>,
-  ) -> Result<(), Self::Error> {
-    Ok(())
-  }
-
-  async fn notify_update(
-    &self,
-    _node: Arc<Server<Self::Id, Self::Address>>,
-  ) -> Result<(), Self::Error> {
-    Ok(())
-  }
-
-  async fn notify_alive(
-    &self,
-    _peer: Arc<Server<Self::Id, Self::Address>>,
-  ) -> Result<(), Self::Error> {
-    Ok(())
-  }
-
-  async fn notify_conflict(
-    &self,
-    _existing: Arc<Server<Self::Id, Self::Address>>,
-    _other: Arc<Server<Self::Id, Self::Address>>,
-  ) -> Result<(), Self::Error> {
-    Ok(())
-  }
-
-  async fn notify_merge(
-    &self,
-    _peers: SmallVec<Arc<Server<Self::Id, Self::Address>>>,
-  ) -> Result<(), Self::Error> {
-    Ok(())
-  }
-
-  async fn ack_payload(&self) -> Result<Bytes, Self::Error> {
-    Ok(Bytes::new())
-  }
-
-  async fn notify_ping_complete(
-    &self,
-    _node: Arc<Server<Self::Id, Self::Address>>,
-    _rtt: std::time::Duration,
-    _payload: Bytes,
-  ) -> Result<(), Self::Error> {
-    Ok(())
-  }
-
-  #[inline]
-  fn disable_promised_pings(&self, _node: &Self::Id) -> bool {
-    false
-  }
+impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate for VoidDelegate<I, A> {
+  type Id = I;
+  type Address = A;
 }

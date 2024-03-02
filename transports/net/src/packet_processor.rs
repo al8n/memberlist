@@ -15,10 +15,9 @@ use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, Bytes, BytesMut};
 use futures::FutureExt;
 use memberlist_core::{
-  transport::{stream::PacketProducer, Transport, Wire},
-  types::{Message, Packet},
+  transport::{PacketProducer, Transport, Wire},
+  types::{Label, LabelBufExt, Message, OneOrMore, Packet},
 };
-use memberlist_utils::{Label, LabelBufExt, OneOrMore};
 use nodecraft::resolver::AddressResolver;
 
 #[cfg(feature = "encryption")]
@@ -48,7 +47,7 @@ where
   #[cfg(feature = "encryption")]
   pub(super) verify_incoming: bool,
   #[cfg(feature = "metrics")]
-  pub(super) metric_labels: std::sync::Arc<memberlist_utils::MetricLabels>,
+  pub(super) metric_labels: std::sync::Arc<memberlist_core::types::MetricLabels>,
 }
 
 impl<A, T> PacketProcessor<A, T>
@@ -89,6 +88,9 @@ where
                 continue;
               }
               buf.truncate(n);
+
+              tracing::trace!(target = "memberlist.packet", local=%local_addr, from=%addr, packet=?buf.as_ref());
+
               let start = Instant::now();
               let msg = match Self::handle_remote_bytes(
                 buf,
@@ -150,7 +152,7 @@ where
     #[cfg(not(feature = "encryption"))]
     if !skip_inbound_label_check && packet_label.ne(label) {
       tracing::error!(target = "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
-      return Err(memberlist_utils::LabelError::mismatch(label.clone(), packet_label).into());
+      return Err(memberlist_core::types::LabelError::mismatch(label.clone(), packet_label).into());
     }
 
     #[cfg(not(any(feature = "compression", feature = "encryption")))]
@@ -197,7 +199,7 @@ where
     OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
     NetTransportError<T::Resolver, T::Wire>,
   > {
-    use memberlist_utils::LabelError;
+    use memberlist_core::types::LabelError;
     use nodecraft::CheapClone;
 
     use crate::{COMPRESS_TAG, ENCRYPT_TAG, MAX_MESSAGE_LEN_SIZE};
@@ -324,7 +326,7 @@ where
     NetTransportError<T::Resolver, T::Wire>,
   > {
     use super::{security, MAX_MESSAGE_LEN_SIZE};
-    use memberlist_utils::LabelError;
+    use memberlist_core::types::LabelError;
     use nodecraft::CheapClone;
 
     if !super::ENCRYPT_TAG.contains(&buf[0]) {

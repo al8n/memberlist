@@ -15,9 +15,8 @@ use memberlist_core::{
     AddressKind, TestPacketClient, TestPacketConnection, TestPacketStream, TestPromisedClient,
     TestPromisedConnection, TestPromisedStream,
   },
-  types::Message,
+  types::{Label, LabelBufMutExt, Message},
 };
-use memberlist_utils::{Label, LabelBufMutExt};
 use nodecraft::Transformable;
 use smol_str::SmolStr;
 
@@ -72,6 +71,9 @@ pub mod send;
 /// Unit test for joining
 #[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod join;
+
+/// Unit test for joining dead node
+pub mod join_dead_node;
 
 /// A test client stream for network transport
 #[viewit::viewit(
@@ -359,7 +361,7 @@ impl<S: StreamLayer> TestPromisedClient for NetTransportTestPromisedClient<S> {
   }
 
   fn local_addr(&self) -> std::io::Result<SocketAddr> {
-    self.ln.local_addr()
+    Ok(self.ln.local_addr())
   }
 }
 

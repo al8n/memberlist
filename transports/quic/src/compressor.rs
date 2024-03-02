@@ -1,5 +1,3 @@
-use bytes::Bytes;
-
 use super::*;
 
 pub(super) const COMPRESS_TAG: core::ops::RangeInclusive<u8> = 86..=126;

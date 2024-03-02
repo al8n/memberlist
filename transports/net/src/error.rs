@@ -40,7 +40,7 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   },
   /// Returns when the label error.
   #[error(transparent)]
-  Label(#[from] memberlist_utils::LabelError),
+  Label(#[from] super::LabelError),
 
   /// Returns when the checksum of the message bytes comes from the packet stream does not
   /// match the original checksum.

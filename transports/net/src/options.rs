@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use indexmap::IndexSet;
-use memberlist_utils::{net::CIDRsPolicy, Label};
+use memberlist_core::types::{CIDRsPolicy, Label};
 use nodecraft::resolver::AddressResolver;
 
 use crate::Checksumer;
@@ -288,7 +288,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
       style = "ref",
       result(
         converter(fn = "Option::as_deref"),
-        type = "Option<&memberlist_utils::MetricLabels>"
+        type = "Option<&memberlist_core::types::MetricLabels>"
       ),
       attrs(
         doc = "Get the metrics labels.",
@@ -302,7 +302,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
       cfg_attr(docsrs, doc(cfg(feature = "metrics")))
     ))
   )]
-  metric_labels: Option<std::sync::Arc<memberlist_utils::MetricLabels>>,
+  metric_labels: Option<std::sync::Arc<memberlist_core::types::MetricLabels>>,
 }
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> NetTransportOptions<I, A> {

@@ -1,31 +1,42 @@
 #![doc = include_str!("../../README.md")]
 #![forbid(unsafe_code)]
-#![deny(warnings)]
+#![deny(warnings, missing_docs)]
 #![allow(clippy::type_complexity)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
+mod api;
 mod awareness;
-pub mod broadcast;
+mod base;
+pub use base::*;
+
+mod broadcast;
+pub use broadcast::*;
+/// Trait can be implemented to hook into the memberlist lifecycle.
 pub mod delegate;
+/// Error related to memberlist
 pub mod error;
 mod network;
 pub use network::META_MAX_SIZE;
 mod options;
-pub use options::{DelegateVersion, Options, ProtocolVersion};
-mod memberlist;
+pub use options::Options;
+
+/// The transimit queue implementation.
 pub mod queue;
-pub use memberlist::*;
 mod state;
 mod suspicion;
+/// The transport layer for memberlist
 pub mod transport;
+
+/// The types used in memberlist
 pub mod types;
+
+/// The utils used in memberlist
 pub mod util;
 
 pub use bytes;
 
 mod timer;
-mod version;
 
 pub use nodecraft::CheapClone;
 
@@ -57,8 +68,17 @@ pub mod tests {
   pub use paste;
 
   use self::{delegate::Delegate, error::Error, transport::Transport};
-
   use super::*;
+
+  /// Re-export the all unit test cases for state
+  pub mod state {
+    pub use crate::state::tests::*;
+  }
+
+  /// Re-export the all unit test cases for memberlist
+  pub mod memberlist {
+    pub use crate::base::tests::*;
+  }
 
   /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`]
   #[cfg(any(feature = "test", test))]
@@ -154,11 +174,12 @@ pub mod tests {
     block_on(fut);
   }
 
+  /// Initialize the tracing for the unit tests.
   pub fn initialize_tests_tracing() {
     use std::sync::Once;
     static TRACE: Once = Once::new();
     TRACE.call_once(|| {
-      let filter = std::env::var("MEMBERLIST_TESTING_LOG").unwrap_or_else(|_| "debug".to_owned());
+      let filter = std::env::var("MEMBERLIST_TESTING_LOG").unwrap_or_else(|_| "info".to_owned());
       tracing::subscriber::set_global_default(
         tracing_subscriber::fmt::fmt()
           .without_time()
@@ -174,7 +195,7 @@ pub mod tests {
   }
 
   /// Returns a [`Memberlist`] but not alive self for testing purposes.
-  pub async fn get_memberlist<T: Transport, D: Delegate>(
+  pub async fn get_memberlist<T, D>(
     t: T,
     d: D,
     opts: Options,
@@ -183,6 +204,7 @@ pub mod tests {
     <<<T as Transport>::Runtime as Runtime>::Sleep as futures::Future>::Output: Send,
     <<<T as Transport>::Runtime as Runtime>::Interval as futures::Stream>::Item: Send,
     D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+    T: Transport,
   {
     crate::Memberlist::new_in(t, Some(d), opts)
       .await
