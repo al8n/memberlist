@@ -182,25 +182,35 @@ impl<I: CheapClone, A: CheapClone> PushNodeState<I, A> {
 }
 
 /// Transform errors for [`PushPull`].
+#[derive(thiserror::Error)]
 pub enum PushPullTransformError<I: Transformable, A: Transformable> {
   /// Error transforming the id.
+  #[error("id transforming error: {0}")]
   Id(I::Error),
   /// Error transforming the address.
+  #[error("address transforming error: {0}")]
   Address(A::Error),
   /// Error transforming the meta.
-  Meta(<Meta as Transformable>::Error),
+  #[error("meta transforming error: {0}")]
+  Meta(#[from] MetaError),
   /// The encode buffer is too small.
+  #[error("encode buffer is too small")]
   BufferTooSmall,
   /// The encoded bytes is too large.
+  #[error("the encoded bytes is too large")]
   TooLarge,
   /// Not enough bytes to decode.
+  #[error("not enough bytes to decode `PushPull`")]
   NotEnoughBytes,
   /// Invalid server state.
-  UnknownState(UnknownState),
+  #[error(transparent)]
+  UnknownState(#[from] UnknownState),
   /// Invalid protocol version.
-  UnknownProtocolVersion(UnknownProtocolVersion),
+  #[error(transparent)]
+  UnknownProtocolVersion(#[from] UnknownProtocolVersion),
   /// Invalid delegate version.
-  UnknownDelegateVersion(UnknownDelegateVersion),
+  #[error(transparent)]
+  UnknownDelegateVersion(#[from] UnknownDelegateVersion),
 }
 
 impl<I: Transformable, A: Transformable> core::fmt::Debug for PushPullTransformError<I, A> {
@@ -208,24 +218,6 @@ impl<I: Transformable, A: Transformable> core::fmt::Debug for PushPullTransformE
     core::fmt::Display::fmt(self, f)
   }
 }
-
-impl<I: Transformable, A: Transformable> core::fmt::Display for PushPullTransformError<I, A> {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    match self {
-      Self::Id(err) => write!(f, "id transforming error: {err}"),
-      Self::Address(err) => write!(f, "address transforming error: {err}"),
-      Self::Meta(err) => write!(f, "meta transforming error: {err}"),
-      Self::BufferTooSmall => write!(f, "encode buffer is too small"),
-      Self::TooLarge => write!(f, "the encoded bytes is too large"),
-      Self::NotEnoughBytes => write!(f, "not enough bytes to decode"),
-      Self::UnknownState(err) => write!(f, "{err}"),
-      Self::UnknownProtocolVersion(err) => write!(f, "{err}"),
-      Self::UnknownDelegateVersion(err) => write!(f, "{err}"),
-    }
-  }
-}
-
-impl<I: Transformable, A: Transformable> std::error::Error for PushPullTransformError<I, A> {}
 
 impl<I: Transformable, A: Transformable> Transformable for PushNodeState<I, A> {
   type Error = PushPullTransformError<I, A>;
@@ -636,7 +628,7 @@ const _: () = {
   }
 
   impl PushPull<SmolStr, SocketAddr> {
-    fn generate(size: usize) -> Self {
+    pub(crate) fn generate(size: usize) -> Self {
       let states = (0..size)
         .map(|_| PushNodeState::generate(size))
         .collect::<TinyVec<_>>();
@@ -679,5 +671,17 @@ mod tests {
       assert_eq!(readed, encoded_len);
       assert_eq!(decoded, push_pull);
     }
+  }
+
+  #[test]
+  fn test_push_pull_clone_and_cheap_clone() {
+    let push_pull = PushPull::generate(100);
+    let cloned = push_pull.clone();
+    let cheap_cloned = push_pull.cheap_clone();
+    assert_eq!(cloned, push_pull);
+    assert_eq!(cheap_cloned, push_pull);
+    let cloned1 = format!("{:?}", cloned);
+    let cheap_cloned1 = format!("{:?}", cheap_cloned);
+    assert_eq!(cloned1, cheap_cloned1);
   }
 }

@@ -1,10 +1,12 @@
+use crate::MetaError;
+
 use super::{
   version::{UnknownDelegateVersion, UnknownProtocolVersion},
   DelegateVersion, Meta, ProtocolVersion, MAX_ENCODED_LEN_SIZE,
 };
 
 use byteorder::{ByteOrder, NetworkEndian};
-use nodecraft::{CheapClone, Node};
+use nodecraft::{CheapClone, Node, NodeTransformError};
 use transformable::Transformable;
 
 /// Alive message
@@ -133,66 +135,34 @@ impl<I: CheapClone, A: CheapClone> CheapClone for Alive<I, A> {
 }
 
 /// Alive transform error.
+#[derive(thiserror::Error)]
 pub enum AliveTransformError<I: Transformable, A: Transformable> {
   /// Node transform error.
-  Node(<Node<I, A> as Transformable>::Error),
+  #[error("node transform error: {0}")]
+  Node(#[from] NodeTransformError<I, A>),
   /// Meta transform error.
-  Meta(<Meta as Transformable>::Error),
+  #[error("meta transform error: {0}")]
+  Meta(#[from] MetaError),
   /// Message too large.
+  #[error("encoded message too large, max {} got {0}", u32::MAX)]
   TooLarge(u64),
   /// Encode buffer too small.
+  #[error("encode buffer too small")]
   BufferTooSmall,
   /// The buffer did not contain enough bytes to decode Alive.
+  #[error("the buffer did not contain enough bytes to decode Alive")]
   NotEnoughBytes,
   /// Invalid protocol version.
-  UnknownProtocolVersion(UnknownProtocolVersion),
+  #[error("unknown protocol version: {0}")]
+  UnknownProtocolVersion(#[from] UnknownProtocolVersion),
   /// Invalid delegate version.
-  UnknownDelegateVersion(UnknownDelegateVersion),
+  #[error("unknown delegate version: {0}")]
+  UnknownDelegateVersion(#[from] UnknownDelegateVersion),
 }
 
 impl<I: Transformable, A: Transformable> core::fmt::Debug for AliveTransformError<I, A> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match self {
-      Self::Node(err) => write!(f, "node transform error: {:?}", err),
-      Self::Meta(err) => write!(f, "meta transform error: {:?}", err),
-      Self::TooLarge(val) => write!(f, "encoded message too large, max {} got {val}", u32::MAX),
-      Self::BufferTooSmall => write!(f, "encode buffer too small"),
-      Self::NotEnoughBytes => write!(f, "the buffer did not contain enough bytes to decode Alive"),
-      Self::UnknownProtocolVersion(err) => write!(f, "invalid protocol version: {:?}", err),
-      Self::UnknownDelegateVersion(err) => write!(f, "invalid delegate version: {:?}", err),
-    }
-  }
-}
-
-impl<I: Transformable, A: Transformable> core::fmt::Display for AliveTransformError<I, A> {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match self {
-      Self::Node(err) => write!(f, "node transform error: {}", err),
-      Self::Meta(err) => write!(f, "meta transform error: {}", err),
-      Self::TooLarge(val) => write!(f, "encoded message too large, max {} got {val}", u32::MAX),
-      Self::BufferTooSmall => write!(f, "encode buffer too small"),
-      Self::NotEnoughBytes => write!(f, "the buffer did not contain enough bytes to decode Alive"),
-      Self::UnknownProtocolVersion(err) => write!(f, "invalid protocol version: {}", err),
-      Self::UnknownDelegateVersion(err) => write!(f, "invalid delegate version: {}", err),
-    }
-  }
-}
-
-impl<I: Transformable, A: Transformable> std::error::Error for AliveTransformError<I, A> {}
-
-impl<I: Transformable, A: Transformable> From<UnknownProtocolVersion>
-  for AliveTransformError<I, A>
-{
-  fn from(err: UnknownProtocolVersion) -> Self {
-    Self::UnknownProtocolVersion(err)
-  }
-}
-
-impl<I: Transformable, A: Transformable> From<UnknownDelegateVersion>
-  for AliveTransformError<I, A>
-{
-  fn from(err: UnknownDelegateVersion) -> Self {
-    Self::UnknownDelegateVersion(err)
+    write!(f, "{}", self)
   }
 }
 
@@ -364,7 +334,7 @@ const _: () = {
   use smol_str::SmolStr;
 
   impl Alive<SmolStr, SocketAddr> {
-    fn random(size: usize) -> Self {
+    pub(crate) fn random(size: usize) -> Self {
       let id = thread_rng()
         .sample_iter(Alphanumeric)
         .take(size)

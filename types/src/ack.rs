@@ -172,7 +172,7 @@ impl Transformable for Ack {
       ));
     }
 
-    let payload_len = total_len - core::mem::size_of::<u32>();
+    let payload_len = total_len - core::mem::size_of::<u32>() * 2;
     if payload_len <= MAX_INLINED_BYTES {
       let mut buf = [0; MAX_INLINED_BYTES];
       reader.read_exact(&mut buf[..payload_len])?;
@@ -221,7 +221,7 @@ impl Transformable for Ack {
       ));
     }
 
-    let payload_len = total_len - core::mem::size_of::<u32>();
+    let payload_len = total_len - core::mem::size_of::<u32>() * 2;
     if payload_len <= MAX_INLINED_BYTES {
       let mut buf = [0; MAX_INLINED_BYTES];
       reader.read_exact(&mut buf[..payload_len]).await?;
@@ -311,10 +311,6 @@ impl Transformable for Nack {
   {
     let (n, sequence_number) = <u32 as Transformable>::decode(src)?;
     Ok((n, Self { sequence_number }))
-  }
-
-  fn encode_to_vec(&self) -> Result<Vec<u8>, Self::Error> {
-    <u32 as Transformable>::encode_to_vec(&self.sequence_number)
   }
 
   async fn encode_to_async_writer<W: futures::io::AsyncWrite + Send + Unpin>(

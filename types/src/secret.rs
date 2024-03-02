@@ -113,9 +113,9 @@ impl SecretKey {
   }
 
   /// Returns true if the key is empty
-  #[inline]
+  #[inline(always)]
   pub const fn is_empty(&self) -> bool {
-    self.len() == 0
+    false
   }
 
   /// Converts the key into a byte vector
@@ -187,3 +187,57 @@ smallvec_wrapper!(
   #[cfg_attr(feature = "serde", serde(transparent))]
   pub SecretKeys([SecretKey; 3]);
 );
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_secret_key() {
+    let key = SecretKey::Aes128([0; 16]);
+    assert_eq!(key.len(), 16);
+    assert!(!key.is_empty());
+    assert_eq!(key.to_vec(), vec![0; 16]);
+
+    let key = SecretKey::Aes192([0; 24]);
+    assert_eq!(key.len(), 24);
+    assert!(!key.is_empty());
+    assert_eq!(key.to_vec(), vec![0; 24]);
+
+    let key = SecretKey::Aes256([0; 32]);
+    assert_eq!(key.len(), 32);
+    assert!(!key.is_empty());
+    assert_eq!(key.to_vec(), vec![0; 32]);
+
+    let mut key = SecretKey::from([0; 16]);
+    assert_eq!(key.as_ref(), &[0; 16]);
+    assert_eq!(key.as_mut(), &mut [0; 16]);
+
+    let mut key = SecretKey::from([0; 24]);
+    assert_eq!(key.as_ref(), &[0; 24]);
+    assert_eq!(key.as_mut(), &mut [0; 24]);
+
+    let mut key = SecretKey::from([0; 32]);
+    assert_eq!(key.as_ref(), &[0; 32]);
+    assert_eq!(key.as_mut(), &mut [0; 32]);
+
+    let key = SecretKey::Aes128([0; 16]);
+    assert_eq!(key.to_vec(), vec![0; 16]);
+
+    let key = SecretKey::Aes192([0; 24]);
+    assert_eq!(key.to_vec(), vec![0; 24]);
+
+    let key = SecretKey::Aes256([0; 32]);
+    assert_eq!(key.to_vec(), vec![0; 32]);
+  }
+
+  #[test]
+  fn test_try_from() {
+    assert!(SecretKey::try_from([0; 15].as_slice()).is_err());
+    assert!(SecretKey::try_from([0; 16].as_slice()).is_ok());
+    assert!(SecretKey::try_from([0; 23].as_slice()).is_err());
+    assert!(SecretKey::try_from([0; 24].as_slice()).is_ok());
+    assert!(SecretKey::try_from([0; 31].as_slice()).is_err());
+    assert!(SecretKey::try_from([0; 32].as_slice()).is_ok());
+  }
+}

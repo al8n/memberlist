@@ -19,6 +19,13 @@ pub struct LargeMeta(usize);
 #[cfg_attr(feature = "rkyv", archive_attr(derive(Debug, PartialEq, Eq, Hash)))]
 pub struct Meta(Bytes);
 
+impl Default for Meta {
+  #[inline]
+  fn default() -> Self {
+    Self::empty()
+  }
+}
+
 impl CheapClone for Meta {}
 
 impl Meta {
@@ -85,6 +92,12 @@ impl core::ops::Deref for Meta {
 impl core::cmp::PartialEq<[u8]> for Meta {
   fn eq(&self, other: &[u8]) -> bool {
     self.as_bytes().eq(other)
+  }
+}
+
+impl core::cmp::PartialEq<&[u8]> for Meta {
+  fn eq(&self, other: &&[u8]) -> bool {
+    self.as_bytes().eq(*other)
   }
 }
 
@@ -219,5 +232,49 @@ impl Transformable for Meta {
     Self::try_from(&src[2..len])
       .map_err(Self::Error::LargeMeta)
       .map(|meta| (len, meta))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_try_from_string() {
+    let meta = Meta::try_from("hello".to_string()).unwrap();
+    assert_eq!(meta, Meta::from_static_str("hello").unwrap());
+    assert!(Meta::from_static([0; 513].as_slice()).is_err());
+  }
+
+  #[test]
+  fn test_try_from_bytes() {
+    let meta = Meta::try_from(Bytes::from("hello")).unwrap();
+    assert_eq!(meta, Bytes::from("hello"));
+
+    assert!(Meta::try_from(Bytes::from("a".repeat(513).into_bytes())).is_err());
+  }
+
+  #[test]
+  fn test_try_from_bytes_mut() {
+    let meta = Meta::try_from(BytesMut::from("hello")).unwrap();
+    assert_eq!(meta, "hello".as_bytes().to_vec());
+
+    assert!(Meta::try_from(BytesMut::from([0; 513].as_slice())).is_err());
+  }
+
+  #[test]
+  fn test_try_from_bytes_ref() {
+    let meta = Meta::try_from(&Bytes::from("hello")).unwrap();
+    assert_eq!(meta, "hello".as_bytes());
+
+    assert!(Meta::try_from(&Bytes::from("a".repeat(513).into_bytes())).is_err());
+  }
+
+  #[test]
+  fn test_default() {
+    let meta = Meta::default();
+    assert!(meta.is_empty());
+
+    assert_eq!(Meta::empty().as_ref(), &[]);
   }
 }

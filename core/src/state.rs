@@ -582,51 +582,67 @@ where
     &'a self,
     remote: &'a [PushNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>],
   ) {
-    let mut futs = remote.iter().map(|r| {
-      enum StateMessage<T: Transport> {
-        Alive(Alive<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
-        Left(Dead<T::Id>),
-        Suspect(Suspect<T::Id>),
-      }
-
-      impl<T: Transport> StateMessage<T> {
-        async fn run<D>(self, s: &Memberlist<T, D>)
-        where
-          D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
-          <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
-          <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
-        {
-          match self {
-            StateMessage::Alive(alive) => s.alive_node(alive, None, false).await,
-            StateMessage::Left(dead) => {
-              let id = dead.node().cheap_clone();
-              let mut memberlist = s.inner.nodes.write().await;
-              if let Err(e) = s.dead_node(&mut memberlist, dead).await {
-                tracing::error!(target = "memberlist.state", id=%id, err=%e, "fail to dead node");
-              }
-            }
-            StateMessage::Suspect(suspect) => {
-              let id = suspect.node().cheap_clone();
-              if let Err(e) = s.suspect_node(suspect).await {
-                tracing::error!(target = "memberlist.state", id=%id, err=%e, "fail to suspect node");
-              }
-            }
-          }
-        }
-      }
-
-      let state = match r.state() {
-        State::Alive => StateMessage::Alive(Alive::new(r.incarnation(), r.node()).with_meta(r.meta().cheap_clone()).with_protocol_version(r.protocol_version()).with_delegate_version(r.delegate_version())),
-        State::Left => StateMessage::Left(Dead::new(r.incarnation(), r.id().cheap_clone(), self.local_id().cheap_clone())),
-        // If the remote node believes a node is dead, we prefer to
-        // suspect that node instead of declaring it dead instantly
-        State::Dead | State::Suspect => StateMessage::Suspect(Suspect::new(r.incarnation(), r.id().cheap_clone(), self.local_id().cheap_clone())),
-        _ => unreachable!(),
-      };
-      state.run(self)
-    }).collect::<FuturesUnordered<_>>();
+    let mut futs = remote
+      .iter()
+      .map(|r| {
+        let state = match r.state() {
+          State::Alive => StateMessage::Alive(
+            Alive::new(r.incarnation(), r.node())
+              .with_meta(r.meta().cheap_clone())
+              .with_protocol_version(r.protocol_version())
+              .with_delegate_version(r.delegate_version()),
+          ),
+          State::Left => StateMessage::Left(Dead::new(
+            r.incarnation(),
+            r.id().cheap_clone(),
+            self.local_id().cheap_clone(),
+          )),
+          // If the remote node believes a node is dead, we prefer to
+          // suspect that node instead of declaring it dead instantly
+          State::Dead | State::Suspect => StateMessage::Suspect(Suspect::new(
+            r.incarnation(),
+            r.id().cheap_clone(),
+            self.local_id().cheap_clone(),
+          )),
+          _ => unreachable!(),
+        };
+        state.run(self)
+      })
+      .collect::<FuturesUnordered<_>>();
 
     while futs.next().await.is_some() {}
+  }
+}
+
+enum StateMessage<T: Transport> {
+  Alive(Alive<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
+  Left(Dead<T::Id>),
+  Suspect(Suspect<T::Id>),
+}
+
+impl<T: Transport> StateMessage<T> {
+  async fn run<D>(self, s: &Memberlist<T, D>)
+  where
+    D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+    <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
+    <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
+  {
+    match self {
+      StateMessage::Alive(alive) => s.alive_node(alive, None, false).await,
+      StateMessage::Left(dead) => {
+        let id = dead.node().cheap_clone();
+        let mut memberlist = s.inner.nodes.write().await;
+        if let Err(e) = s.dead_node(&mut memberlist, dead).await {
+          tracing::error!(target = "memberlist.state", id=%id, err=%e, "fail to dead node");
+        }
+      }
+      StateMessage::Suspect(suspect) => {
+        let id = suspect.node().cheap_clone();
+        if let Err(e) = s.suspect_node(suspect).await {
+          tracing::error!(target = "memberlist.state", id=%id, err=%e, "fail to suspect node");
+        }
+      }
+    }
   }
 }
 
