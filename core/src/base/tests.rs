@@ -5,7 +5,6 @@ use std::{
 };
 
 use bytes::Bytes;
-use memberlist_utils::{Label, SmallVec};
 use nodecraft::Id;
 
 use crate::{
@@ -14,7 +13,7 @@ use crate::{
     PingDelegate,
   },
   transport::MaybeResolvedAddress,
-  types::{NodeState, State},
+  types::{Label, NodeState, SmallVec, State},
 };
 
 use super::*;
@@ -89,13 +88,15 @@ where
   let num = m.members().await;
   assert_eq!(num.len(), 1);
 
-  let num = m.members_by(|state| state.state == State::Alive).await;
+  let num = m.members_by(|state| state.state() == State::Alive).await;
   assert_eq!(num.len(), 1);
 
   let num = m.num_members().await;
   assert_eq!(num, 1);
 
-  let num = m.num_members_by(|state| state.state == State::Alive).await;
+  let num = m
+    .num_members_by(|state| state.state() == State::Alive)
+    .await;
   assert_eq!(num, 1);
 }
 
@@ -116,8 +117,8 @@ where
 
   let num = m
     .members_map_by(|state| {
-      if state.state == State::Alive {
-        Some(state.state)
+      if state.state() == State::Alive {
+        Some(state.state())
       } else {
         None
       }
@@ -173,8 +174,8 @@ where
     .await
     .unwrap();
 
-  let target = Node::new(
-    m1.local_id().clone(),
+  let target = Node::<T::Id, MaybeResolvedAddress<T>>::new(
+    m1.local_id().cheap_clone(),
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
   m2.join(target.clone()).await.unwrap();
@@ -479,7 +480,7 @@ where
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
       <T::Resolver as AddressResolver>::ResolvedAddress,
-    >::with_meta("web".into())),
+    >::with_meta("web".try_into().unwrap())),
     t1_opts,
   )
   .await
@@ -490,7 +491,7 @@ where
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
       <T::Resolver as AddressResolver>::ResolvedAddress,
-    >::with_meta("lb".into())),
+    >::with_meta("lb".try_into().unwrap())),
     t2_opts,
   )
   .await
@@ -515,14 +516,14 @@ where
     .collect::<HashMap<_, _>>();
 
   assert_eq!(
-    roles.get(m1.local_id()).unwrap(),
-    "web",
+    roles.get(m1.local_id()).unwrap().as_bytes(),
+    b"web",
     "bad role for {}",
     m1.local_id()
   );
   assert_eq!(
-    roles.get(m2.local_id()).unwrap(),
-    "lb",
+    roles.get(m2.local_id()).unwrap().as_bytes(),
+    b"lb",
     "bad role for {}",
     m2.local_id()
   );
@@ -536,14 +537,14 @@ where
     .collect::<HashMap<_, _>>();
 
   assert_eq!(
-    roles.get(m1.local_id()).unwrap(),
-    "web",
+    roles.get(m1.local_id()).unwrap().as_bytes(),
+    b"web",
     "bad role for {}",
     m1.local_id()
   );
   assert_eq!(
-    roles.get(m2.local_id()).unwrap(),
-    "lb",
+    roles.get(m2.local_id()).unwrap().as_bytes(),
+    b"lb",
     "bad role for {}",
     m2.local_id()
   );
@@ -566,7 +567,7 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
       <T::Resolver as AddressResolver>::ResolvedAddress,
-    >::with_meta("web".into())),
+    >::with_meta("web".try_into().unwrap())),
     t1_opts,
   )
   .await
@@ -577,7 +578,7 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
       <T::Resolver as AddressResolver>::ResolvedAddress,
-    >::with_meta("lb".into())),
+    >::with_meta("lb".try_into().unwrap())),
     t2_opts,
   )
   .await
@@ -596,13 +597,13 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
   m1.delegate()
     .unwrap()
     .node_delegate()
-    .set_meta("api".into())
+    .set_meta("api".try_into().unwrap())
     .await;
 
   m2.delegate()
     .unwrap()
     .node_delegate()
-    .set_meta("db".into())
+    .set_meta("db".try_into().unwrap())
     .await;
 
   m1.update_node(Duration::ZERO).await.unwrap();
@@ -621,14 +622,14 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
     .collect::<HashMap<_, _>>();
 
   assert_eq!(
-    roles.get(m1.local_id()).unwrap(),
-    "api",
+    roles.get(m1.local_id()).unwrap().as_bytes(),
+    b"api",
     "bad role for {}",
     m1.local_id()
   );
   assert_eq!(
-    roles.get(m2.local_id()).unwrap(),
-    "db",
+    roles.get(m2.local_id()).unwrap().as_bytes(),
+    b"db",
     "bad role for {}",
     m2.local_id()
   );
@@ -642,14 +643,14 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
     .collect::<HashMap<_, _>>();
 
   assert_eq!(
-    roles.get(m1.local_id()).unwrap(),
-    "api",
+    roles.get(m1.local_id()).unwrap().as_bytes(),
+    b"api",
     "bad role for {}",
     m1.local_id()
   );
   assert_eq!(
-    roles.get(m2.local_id()).unwrap(),
-    "db",
+    roles.get(m2.local_id()).unwrap().as_bytes(),
+    b"db",
     "bad role for {}",
     m2.local_id()
   );
@@ -1051,6 +1052,7 @@ where
   );
 }
 
+/// Util function to wait until the memberlist has a certain size.
 pub async fn wait_until_size<T, D, R>(m: &Memberlist<T, D>, expected: usize)
 where
   T: Transport<Runtime = R>,
@@ -1075,6 +1077,7 @@ where
   .await
 }
 
+/// Util function to wait until the condition reaches.
 pub async fn wait_for_condition<'a, Fut, F>(mut f: F)
 where
   F: FnMut() -> Fut,

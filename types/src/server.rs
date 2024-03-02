@@ -1,8 +1,8 @@
-use bytes::Bytes;
 use nodecraft::{CheapClone, Node};
 
-use super::{DelegateVersion, ProtocolVersion};
+use super::{DelegateVersion, Meta, ProtocolVersion};
 
+/// State for the memberlist
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
@@ -17,10 +17,14 @@ use super::{DelegateVersion, ProtocolVersion};
 #[repr(u8)]
 #[non_exhaustive]
 pub enum State {
+  /// Alive state
   #[default]
   Alive = 0,
+  /// Suspect state
   Suspect = 1,
+  /// Dead state
   Dead = 2,
+  /// Left state
   Left = 3,
 }
 
@@ -35,9 +39,11 @@ impl State {
     }
   }
 
+  /// Returns an array of the default state metrics.
   #[cfg(feature = "metrics")]
+  #[cfg_attr(feature = "docs", doc(cfg(feature = "metrics")))]
   #[inline]
-  pub(crate) const fn empty_metrics() -> [(&'static str, usize); 4] {
+  pub const fn metrics_array() -> [(&'static str, usize); 4] {
     [("alive", 0), ("suspect", 0), ("dead", 0), ("left", 0)]
   }
 }
@@ -78,7 +84,7 @@ impl std::error::Error for UnknownState {}
 #[viewit::viewit(
   vis_all = "pub(crate)",
   getters(vis_all = "pub"),
-  setters(vis_all = "pub(crate)", prefix = "with")
+  setters(vis_all = "pub", prefix = "with")
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
@@ -88,40 +94,142 @@ impl std::error::Error for UnknownState {}
 )]
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 pub struct NodeState<I, A> {
-  #[viewit(getter(const, style = "ref"))]
+  #[viewit(
+    getter(const, style = "ref", attrs(doc = "Returns the id of the node")),
+    setter(attrs(doc = "Sets the id of the node (Builder pattern)"))
+  )]
   id: I,
   #[viewit(
-    getter(const, rename = "address", style = "ref"),
-    setter(rename = "with_address")
+    getter(
+      const,
+      rename = "address",
+      style = "ref",
+      attrs(doc = "Returns the address of the node")
+    ),
+    setter(
+      rename = "with_address",
+      attrs(doc = "Sets the address of the node (Builder pattern)")
+    )
   )]
   addr: A,
   /// Metadata from the delegate for this node.
-  #[viewit(getter(const, style = "ref"))]
-  meta: Bytes,
+  #[viewit(
+    getter(const, style = "ref", attrs(doc = "Returns the meta of the node")),
+    setter(attrs(doc = "Sets the meta of the node (Builder pattern)"))
+  )]
+  meta: Meta,
   /// State of the node.
+  #[viewit(
+    getter(const, attrs(doc = "Returns the state of the node")),
+    setter(const, attrs(doc = "Sets the state of the node (Builder pattern)"))
+  )]
   state: State,
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Returns the protocol version of the node is speaking")
+    ),
+    setter(
+      const,
+      attrs(doc = "Sets the protocol version of the node is speaking (Builder pattern)")
+    )
+  )]
   protocol_version: ProtocolVersion,
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Returns the delegate version of the node is speaking")
+    ),
+    setter(
+      const,
+      attrs(doc = "Sets the delegate version of the node is speaking (Builder pattern)")
+    )
+  )]
   delegate_version: DelegateVersion,
+}
+
+impl<I: CheapClone, A: CheapClone> From<super::Alive<I, A>> for NodeState<I, A> {
+  fn from(value: super::Alive<I, A>) -> Self {
+    let (id, addr) = value.node.into_components();
+    Self {
+      id,
+      addr,
+      meta: value.meta,
+      state: State::Alive,
+      protocol_version: value.protocol_version,
+      delegate_version: value.delegate_version,
+    }
+  }
+}
+
+impl<I: CheapClone, A: CheapClone> From<&super::Alive<I, A>> for NodeState<I, A> {
+  fn from(value: &super::Alive<I, A>) -> Self {
+    let anode = value.node();
+    Self {
+      id: anode.id().cheap_clone(),
+      addr: anode.address().cheap_clone(),
+      meta: value.meta.cheap_clone(),
+      state: State::Alive,
+      protocol_version: value.protocol_version,
+      delegate_version: value.delegate_version,
+    }
+  }
 }
 
 impl<I, A> NodeState<I, A> {
   /// Construct a new node with the given name, address and state.
   #[inline]
-  pub fn new(
-    id: I,
-    addr: A,
-    state: State,
-    protocol_version: ProtocolVersion,
-    delegate_version: DelegateVersion,
-  ) -> Self {
+  pub const fn new(id: I, addr: A, state: State) -> Self {
     Self {
       id,
       addr,
-      meta: Bytes::new(),
+      meta: Meta::empty(),
       state,
-      protocol_version,
-      delegate_version,
+      protocol_version: ProtocolVersion::V0,
+      delegate_version: DelegateVersion::V0,
     }
+  }
+
+  /// Sets the id of the node state
+  #[inline]
+  pub fn set_id(&mut self, id: I) -> &mut Self {
+    self.id = id;
+    self
+  }
+
+  /// Sets the address of the node state
+  #[inline]
+  pub fn set_address(&mut self, addr: A) -> &mut Self {
+    self.addr = addr;
+    self
+  }
+
+  /// Sets the metadata for the node.
+  #[inline]
+  pub fn set_meta(&mut self, meta: Meta) -> &mut Self {
+    self.meta = meta;
+    self
+  }
+
+  /// Sets the state for the node.
+  #[inline]
+  pub fn set_state(&mut self, state: State) -> &mut Self {
+    self.state = state;
+    self
+  }
+
+  /// Set the protocol version of the alive message is speaking.
+  #[inline]
+  pub fn set_protocol_version(&mut self, protocol_version: ProtocolVersion) -> &mut Self {
+    self.protocol_version = protocol_version;
+    self
+  }
+
+  /// Set the delegate version of the alive message is speaking.
+  #[inline]
+  pub fn set_delegate_version(&mut self, delegate_version: DelegateVersion) -> &mut Self {
+    self.delegate_version = delegate_version;
+    self
   }
 }
 

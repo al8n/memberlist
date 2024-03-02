@@ -9,7 +9,7 @@ edition = { workspace = true }
 [features]
 default = ["metrics"]
 
-metrics = ["dep:metrics", "memberlist-utils/metrics"]
+metrics = ["dep:metrics", "memberlist-types/metrics"]
 
 serde = [
   "dep:serde",
@@ -17,9 +17,9 @@ serde = [
   "base64",
   "nodecraft/serde",
   "humantime-serde",
-  "memberlist-utils/serde",
+  "memberlist-types/serde",
 ]
-rkyv = ["dep:rkyv", "nodecraft/rkyv", "memberlist-utils/rkyv"]
+rkyv = ["dep:rkyv", "nodecraft/rkyv", "memberlist-types/rkyv"]
 
 # expose all tests fn for users who want to use other runtime
 # see memberlist-wasm for more examples about how to use those tests fn
@@ -56,7 +56,7 @@ rand = "0.8"
 scopeguard.workspace = true
 smol_str.workspace = true
 smallvec.workspace = true
-memberlist-utils.workspace = true
+memberlist-types.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 viewit.workspace = true

@@ -10,26 +10,78 @@ macro_rules! bail_ping {
     $name: ident
   ) => {
     $(#[$meta])*
-    #[viewit::viewit(getters(skip), setters(skip))]
+    #[viewit::viewit(
+      vis_all = "pub(crate)",
+      getters(vis_all = "pub"),
+      setters(vis_all = "pub", prefix = "with")
+    )]
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
     #[cfg_attr(feature = "rkyv", derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive))]
     #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
     pub struct $name<I, A> {
-      seq_no: u32,
+      #[viewit(
+        getter(const, attrs(doc = "Returns the sequence number of the ack")),
+        setter(
+          const,
+          attrs(doc = "Sets the sequence number of the ack (Builder pattern)")
+        )
+      )]
+      sequence_number: u32,
       /// Source target, used for a direct reply
+      #[viewit(
+        getter(const, style = "ref", attrs(doc = "Returns the source node of the ping message")),
+        setter(attrs(doc = "Sets the source node of the ping message (Builder pattern)"))
+      )]
       source: Node<I, A>,
 
       /// [`Node`] is sent so the target can verify they are
       /// the intended recipient. This is to protect again an agent
       /// restart with a new name.
+      #[viewit(
+        getter(const, style = "ref", attrs(doc = "Returns the target node of the ping message")),
+        setter(attrs(doc = "Sets the target node of the ping message (Builder pattern)"))
+      )]
       target: Node<I, A>,
+    }
+
+    impl<I, A> $name<I, A> {
+      /// Create a new message
+      #[inline]
+      pub const fn new(sequence_number: u32, source: Node<I, A>, target: Node<I, A>) -> Self {
+        Self {
+          sequence_number,
+          source,
+          target,
+        }
+      }
+
+      /// Sets the sequence number of the message
+      #[inline]
+      pub fn set_sequence_number(&mut self, sequence_number: u32) -> &mut Self {
+        self.sequence_number = sequence_number;
+        self
+      }
+
+      /// Sets the source node of the message
+      #[inline]
+      pub fn set_source(&mut self, source: Node<I, A>) -> &mut Self {
+        self.source = source;
+        self
+      }
+
+      /// Sets the target node of the message
+      #[inline]
+      pub fn set_target(&mut self, target: Node<I, A>) -> &mut Self {
+        self.target = target;
+        self
+      }
     }
 
     impl<I: CheapClone, A: CheapClone> CheapClone for $name<I, A> {
       fn cheap_clone(&self) -> Self {
         Self {
-          seq_no: self.seq_no,
+          sequence_number: self.sequence_number,
           source: self.source.cheap_clone(),
           target: self.target.cheap_clone(),
         }
@@ -49,7 +101,7 @@ macro_rules! bail_ping {
         {
           fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct(std::any::type_name::<Self>())
-              .field("seq_no", &self.seq_no)
+              .field("sequence_number", &self.sequence_number)
               .field("target", &self.target)
               .field("source", &self.source)
               .finish()
@@ -62,7 +114,7 @@ macro_rules! bail_ping {
           A::Archived: PartialEq,
         {
           fn eq(&self, other: &Self) -> bool {
-            self.seq_no == other.seq_no
+            self.sequence_number == other.sequence_number
               && self.target == other.target
               && self.source == other.source
           }
@@ -82,7 +134,7 @@ macro_rules! bail_ping {
         {
           fn clone(&self) -> Self {
             Self {
-              seq_no: self.seq_no,
+              sequence_number: self.sequence_number,
               target: self.target.clone(),
               source: self.source.clone(),
             }
@@ -95,7 +147,7 @@ macro_rules! bail_ping {
           A::Archived: core::hash::Hash,
         {
           fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-            self.seq_no.hash(state);
+            self.sequence_number.hash(state);
             self.target.hash(state);
             self.source.hash(state);
           }
@@ -160,7 +212,7 @@ macro_rules! bail_ping {
           let mut offset = 0;
           NetworkEndian::write_u32(&mut dst[offset..], encoded_len as u32);
           offset += MAX_ENCODED_LEN_SIZE;
-          NetworkEndian::write_u32(&mut dst[offset..], self.seq_no);
+          NetworkEndian::write_u32(&mut dst[offset..], self.sequence_number);
           offset += core::mem::size_of::<u32>();
           offset += self.source.encode(&mut dst[offset..]).map_err(Self::Error::Source)?;
           offset += self.target.encode(&mut dst[offset..]).map_err(Self::Error::Target)?;
@@ -191,7 +243,7 @@ macro_rules! bail_ping {
             return Err(Self::Error::NotEnoughBytes);
           }
           let mut offset = MAX_ENCODED_LEN_SIZE;
-          let seq_no = NetworkEndian::read_u32(&src[offset..]);
+          let sequence_number = NetworkEndian::read_u32(&src[offset..]);
           offset += core::mem::size_of::<u32>();
           let (source_len, source) = Node::decode(&src[offset..]).map_err(Self::Error::Source)?;
           offset += source_len;
@@ -202,7 +254,7 @@ macro_rules! bail_ping {
             offset, encoded_len,
             "expect bytes read ({encoded_len}) not match actual bytes read ({offset})"
           );
-          Ok((offset, Self { seq_no, source, target }))
+          Ok((offset, Self { sequence_number, source, target }))
         }
       }
     }
@@ -225,7 +277,7 @@ macro_rules! bail_ping {
           let target = Node::new(target.into(), format!("127.0.0.1:{}", thread_rng().gen_range(0..65535)).parse().unwrap());
 
           Self {
-            seq_no: random(),
+            sequence_number: random(),
             source,
             target,
           }
@@ -247,7 +299,7 @@ bail_ping!(
 impl<I, A> From<Ping<I, A>> for IndirectPing<I, A> {
   fn from(ping: Ping<I, A>) -> Self {
     Self {
-      seq_no: ping.seq_no,
+      sequence_number: ping.sequence_number,
       source: ping.source,
       target: ping.target,
     }
@@ -257,7 +309,7 @@ impl<I, A> From<Ping<I, A>> for IndirectPing<I, A> {
 impl<I, A> From<IndirectPing<I, A>> for Ping<I, A> {
   fn from(ping: IndirectPing<I, A>) -> Self {
     Self {
-      seq_no: ping.seq_no,
+      sequence_number: ping.sequence_number,
       source: ping.source,
       target: ping.target,
     }

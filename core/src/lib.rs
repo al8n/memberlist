@@ -1,6 +1,6 @@
 #![doc = include_str!("../../README.md")]
 #![forbid(unsafe_code)]
-#![deny(warnings)]
+#![deny(warnings, missing_docs)]
 #![allow(clippy::type_complexity)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
@@ -9,24 +9,34 @@ mod api;
 mod awareness;
 mod base;
 pub use base::*;
-pub mod broadcast;
+
+mod broadcast;
+pub use broadcast::*;
+/// Trait can be implemented to hook into the memberlist lifecycle.
 pub mod delegate;
+/// Error related to memberlist
 pub mod error;
 mod network;
 pub use network::META_MAX_SIZE;
 mod options;
-pub use options::{DelegateVersion, Options, ProtocolVersion};
+pub use options::Options;
+
+/// The transimit queue implementation.
 pub mod queue;
 mod state;
 mod suspicion;
+/// The transport layer for memberlist
 pub mod transport;
+
+/// The types used in memberlist
 pub mod types;
+
+/// The utils used in memberlist
 pub mod util;
 
 pub use bytes;
 
 mod timer;
-mod version;
 
 pub use nodecraft::CheapClone;
 
@@ -164,6 +174,7 @@ pub mod tests {
     block_on(fut);
   }
 
+  /// Initialize the tracing for the unit tests.
   pub fn initialize_tests_tracing() {
     use std::sync::Once;
     static TRACE: Once = Once::new();

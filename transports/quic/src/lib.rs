@@ -24,17 +24,15 @@ use futures::{
   stream::FuturesUnordered,
   FutureExt, StreamExt,
 };
+pub use memberlist_core::types::{Label, LabelError};
 use memberlist_core::{
   transport::{
-    stream::{packet_stream, promised_stream, PacketSubscriber, StreamSubscriber},
-    Transport, TransportError, Wire,
+    packet_stream, promised_stream, PacketSubscriber, StreamSubscriber, Transport, TransportError,
+    Wire,
   },
-  types::Message,
+  types::{CIDRsPolicy, Message, SmallVec, TinyVec},
   util::{batch, Batch},
 };
-
-pub use memberlist_utils::{net::CIDRsPolicy, Label, LabelError};
-use memberlist_utils::{SmallVec, TinyVec};
 use nodecraft::{resolver::AddressResolver, CheapClone, Id};
 
 mod processor;

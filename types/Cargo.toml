@@ -1,0 +1,38 @@
+[package]
+name = "memberlist-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+default = []
+metrics = ["dep:metrics"]
+
+serde = ["dep:serde", "smol_str/serde", "smallvec-wrapper/serde", "base64", "ipnet/serde"]
+rkyv = ["dep:rkyv", "smallvec-wrapper/rkyv32"]
+
+[dependencies]
+bytes.workspace = true
+byteorder.workspace = true
+derive_more.workspace = true
+futures.workspace = true
+ipnet = "2.9"
+nodecraft.workspace = true
+paste.workspace = true
+transformable = { workspace = true, features = ["bytes", "smol_str"] }
+thiserror.workspace = true
+smol_str.workspace = true
+smallvec-wrapper.workspace = true
+viewit.workspace = true
+
+metrics = { workspace = true, optional = true }
+
+serde = { workspace = true, optional = true }
+base64 = { version = "0.22", optional = true }
+
+rkyv = { version = "0.7", optional = true, features = ["smol_str"] }
+
+[dev-dependencies]
+rand = "0.8"

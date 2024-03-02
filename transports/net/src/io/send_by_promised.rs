@@ -1,5 +1,7 @@
 use super::*;
+
 use bytes::Bytes;
+use memberlist_core::types::LabelBufMutExt;
 
 impl<I, A, S, W, R> NetTransport<I, A, S, W, R>
 where

@@ -27,21 +27,17 @@ use futures::{
   channel::oneshot, io::BufReader, stream::FuturesUnordered, AsyncRead, AsyncReadExt, AsyncWrite,
   AsyncWriteExt, StreamExt,
 };
+pub use memberlist_core::types::{Label, LabelError};
 use memberlist_core::{
   transport::{
-    resolver::AddressResolver,
-    stream::{packet_stream, promised_stream, PacketSubscriber, StreamSubscriber},
-    Id, TimeoutableReadStream, TimeoutableWriteStream, Transport, Wire,
+    packet_stream, promised_stream, resolver::AddressResolver, Id, PacketSubscriber,
+    StreamSubscriber, TimeoutableReadStream, TimeoutableWriteStream, Transport, Wire,
   },
   types::{Message, SmallVec, TinyVec},
-  util::{batch, Batch},
+  util::{batch, Batch, IsGlobalIp},
   CheapClone,
 };
-use memberlist_utils::{net::IsGlobalIp, *};
 use peekable::future::{AsyncPeekExt, AsyncPeekable};
-
-#[doc(inline)]
-pub use memberlist_utils as utils;
 
 /// Compress/decompress related.
 #[cfg(feature = "compression")]
@@ -76,7 +72,6 @@ pub mod stream_layer;
 use stream_layer::*;
 
 mod label;
-pub use label::Label;
 
 mod checksum;
 pub use checksum::Checksumer;

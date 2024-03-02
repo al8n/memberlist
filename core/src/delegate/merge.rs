@@ -1,9 +1,8 @@
 use std::{future::Future, sync::Arc};
 
-use memberlist_utils::SmallVec;
 use nodecraft::{CheapClone, Id};
 
-use crate::types::NodeState;
+use crate::types::{NodeState, SmallVec};
 
 /// Used to involve a client in
 /// a potential cluster merge operation. Namely, when

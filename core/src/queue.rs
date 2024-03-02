@@ -10,10 +10,6 @@ use futures::lock::Mutex;
 
 use crate::{broadcast::Broadcast, types::TinyVec, util::retransmit_limit};
 
-pub trait NodeStateCalculator {
-  fn num_nodes(&self) -> usize;
-}
-
 struct Inner<B: Broadcast> {
   q: BTreeSet<LimitedBroadcast<B>>,
   m: HashMap<B::Id, LimitedBroadcast<B>>,
@@ -69,6 +65,7 @@ pub struct TransmitLimitedQueue<B: Broadcast> {
 }
 
 impl<B: Broadcast> TransmitLimitedQueue<B> {
+  /// Creates a new [`TransmitLimitedQueue`].
   pub fn new(retransmit_mult: usize, calc: impl Fn() -> usize + Send + Sync + 'static) -> Self {
     Self {
       num_nodes: Box::new(calc),
@@ -414,14 +411,6 @@ mod tests {
       _conn: impl futures::prelude::AsyncRead + Unpin,
     ) -> std::io::Result<(usize, Message<I, A>)> {
       unreachable!()
-    }
-  }
-
-  struct NC(usize);
-
-  impl NodeStateCalculator for NC {
-    fn num_nodes(&self) -> usize {
-      self.0
     }
   }
 

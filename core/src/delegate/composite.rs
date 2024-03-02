@@ -1,3 +1,5 @@
+use memberlist_types::Meta;
+
 use super::*;
 
 /// `CompositeDelegate` is a helpful struct to split the [`Delegate`] into multiple small delegates,
@@ -326,7 +328,7 @@ where
   N: NodeDelegate,
   P: PingDelegate<Id = I, Address = Address>,
 {
-  async fn node_meta(&self, limit: usize) -> Bytes {
+  async fn node_meta(&self, limit: usize) -> Meta {
     self.node_delegate.node_meta(limit).await
   }
 

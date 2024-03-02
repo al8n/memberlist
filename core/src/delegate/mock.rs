@@ -1,9 +1,10 @@
 use futures::lock::Mutex;
+use memberlist_types::Meta;
 
 use super::*;
 
 struct MockDelegateInner<I, A> {
-  meta: Bytes,
+  meta: Meta,
   msgs: Vec<Bytes>,
   broadcasts: SmallVec<Bytes>,
   state: Bytes,
@@ -14,7 +15,7 @@ struct MockDelegateInner<I, A> {
 impl<I, A> Default for MockDelegateInner<I, A> {
   fn default() -> Self {
     Self {
-      meta: Bytes::new(),
+      meta: Meta::empty(),
       msgs: vec![],
       broadcasts: SmallVec::new(),
       state: Bytes::new(),
@@ -42,7 +43,7 @@ impl<I, A> MockDelegate<I, A> {
     }
   }
 
-  pub fn with_meta(meta: Bytes) -> Self {
+  pub fn with_meta(meta: Meta) -> Self {
     Self {
       inner: Arc::new(Mutex::new(MockDelegateInner {
         meta,
@@ -72,7 +73,7 @@ impl<I, A> MockDelegate<I, A> {
 }
 
 impl<I, A> MockDelegate<I, A> {
-  pub async fn set_meta(&self, meta: Bytes) {
+  pub async fn set_meta(&self, meta: Meta) {
     self.inner.lock().await.meta = meta;
   }
 
@@ -92,7 +93,7 @@ impl<I: Id, A> NodeDelegate for MockDelegate<I, A>
 where
   A: CheapClone + Send + Sync + 'static,
 {
-  async fn node_meta(&self, _limit: usize) -> Bytes {
+  async fn node_meta(&self, _limit: usize) -> Meta {
     self.inner.lock().await.meta.clone()
   }
 

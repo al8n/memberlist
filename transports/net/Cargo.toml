@@ -24,13 +24,12 @@ encryption = ["rayon", "aead", "aes-gcm", "cbc"]
 serde = [
   "memberlist-core/serde",
   "dep:serde",
-  "memberlist-utils/serde",
   "indexmap/serde",
   "humantime-serde",
 ]
 rkyv = ["memberlist-core/rkyv"]
 
-metrics = ["memberlist-core/metrics", "dep:metrics", "memberlist-utils/metrics"]
+metrics = ["memberlist-core/metrics", "dep:metrics"]
 test = [
   "memberlist-core/test",
   "smol_str",
@@ -68,14 +67,12 @@ crc32fast = "1"
 either = "1"
 futures.workspace = true
 indexmap = "2"
-local-ip-address = "0.6"
+local-ip-address.workspace = true
 nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
 peekable = { version = "0.2", features = ["future"] }
 pin-project.workspace = true
 rand = "0.8"
-
 memberlist-core.workspace = true
-memberlist-utils = { workspace = true, features = ["ipnet"] }
 thiserror.workspace = true
 tracing.workspace = true
 viewit.workspace = true

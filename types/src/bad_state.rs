@@ -4,8 +4,16 @@ use transformable::Transformable;
 use super::MAX_ENCODED_LEN_SIZE;
 
 macro_rules! bad_bail {
-  ($name: ident) => {
-    #[viewit::viewit(getters(skip), setters(skip))]
+  (
+    $(#[$meta:meta])*
+    $name: ident
+  ) => {
+    $(#[$meta])*
+    #[viewit::viewit(
+      vis_all = "pub(crate)",
+      getters(vis_all = "pub"),
+      setters(vis_all = "pub", prefix = "with")
+    )]
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
     #[cfg_attr(
@@ -14,9 +22,57 @@ macro_rules! bad_bail {
     )]
     #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
     pub struct $name<I> {
+      #[viewit(
+        getter(const, attrs(doc = "Returns the incarnation of the message")),
+        setter(
+          const,
+          attrs(doc = "Sets the incarnation of the message (Builder pattern)")
+        )
+      )]
       incarnation: u32,
+      #[viewit(
+        getter(const, style = "ref", attrs(doc = "Returns the node of the message")),
+        setter(attrs(doc = "Sets the node of the message (Builder pattern)"))
+      )]
       node: I,
+      #[viewit(
+        getter(const, style = "ref", attrs(doc = "Returns the source node of the message")),
+        setter(attrs(doc = "Sets the source node of the message (Builder pattern)"))
+      )]
       from: I,
+    }
+
+    impl<I> $name<I> {
+      /// Create a new message
+      #[inline]
+      pub const fn new(incarnation: u32, node: I, from: I) -> Self {
+        Self {
+          incarnation,
+          node,
+          from,
+        }
+      }
+
+      /// Sets the incarnation of the message
+      #[inline]
+      pub fn set_incarnation(&mut self, incarnation: u32) -> &mut Self {
+        self.incarnation = incarnation;
+        self
+      }
+
+      /// Sets the source node of the message
+      #[inline]
+      pub fn set_from(&mut self, source: I) -> &mut Self {
+        self.from = source;
+        self
+      }
+
+      /// Sets the node which in this state
+      #[inline]
+      pub fn set_node(&mut self, target: I) -> &mut Self {
+        self.node = target;
+        self
+      }
     }
 
     #[cfg(feature = "rkyv")]
@@ -218,8 +274,14 @@ macro_rules! bad_bail {
   };
 }
 
-bad_bail!(Suspect);
-bad_bail!(Dead);
+bad_bail!(
+  /// Suspect message
+  Suspect
+);
+bad_bail!(
+  /// Dead message
+  Dead
+);
 
 #[cfg(test)]
 mod tests {

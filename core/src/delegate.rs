@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use memberlist_types::Meta;
 use nodecraft::{CheapClone, Id};
 
 use crate::types::{NodeState, SmallVec};
@@ -90,6 +91,7 @@ pub trait Delegate:
   type Address: CheapClone + Send + Sync + 'static;
 }
 
+/// Error type for [`VoidDelegate`].
 #[derive(Debug, Copy, Clone)]
 pub struct VoidDelegateError;
 
@@ -101,6 +103,7 @@ impl std::fmt::Display for VoidDelegateError {
 
 impl std::error::Error for VoidDelegateError {}
 
+/// Void delegate
 #[derive(Debug, Copy, Clone)]
 pub struct VoidDelegate<I, A>(core::marker::PhantomData<(I, A)>);
 
@@ -189,8 +192,8 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> EventDelegate for VoidDelegat
 }
 
 impl<I: Id, A: CheapClone + Send + Sync + 'static> NodeDelegate for VoidDelegate<I, A> {
-  async fn node_meta(&self, _limit: usize) -> Bytes {
-    Bytes::new()
+  async fn node_meta(&self, _limit: usize) -> Meta {
+    Meta::empty()
   }
 
   async fn notify_message(&self, _msg: Bytes) {}

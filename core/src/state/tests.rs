@@ -79,23 +79,11 @@ where
 
   let m2: Memberlist<T> = host_memberlist(t2, Options::lan()).await.unwrap();
 
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m1.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, m1.advertise_node());
 
   m1.alive_node(a1, None, true).await;
 
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m2.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, m2.advertise_node());
 
   m1.alive_node(a2, None, false).await;
 
@@ -109,8 +97,8 @@ where
   assert_eq!(n.state.state, State::Alive);
 
   // Should increment seqno
-  let seq_no = m1.inner.hot.sequence_num.load(Ordering::SeqCst);
-  assert_eq!(seq_no, 1, "bad seq no: {seq_no}");
+  let sequence_number = m1.inner.hot.sequence_num.load(Ordering::SeqCst);
+  assert_eq!(sequence_number, 1, "bad seq no: {sequence_number}");
   m1.shutdown().await.unwrap();
   m2.shutdown().await.unwrap();
 }
@@ -141,43 +129,18 @@ pub async fn probe_node_suspect<T, R>(
 
   let m3: Memberlist<T> = host_memberlist(t3, Options::lan()).await.unwrap();
 
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m1.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, m1.advertise_node());
 
   m1.alive_node(a1, None, true).await;
 
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m2.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, m2.advertise_node());
 
   m1.alive_node(a2, None, false).await;
 
-  let a3 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m3.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
-
+  let a3 = Alive::new(1, m3.advertise_node());
   m1.alive_node(a3, None, false).await;
 
-  let a4 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: suspect_node.cheap_clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a4 = Alive::new(1, suspect_node.cheap_clone());
   m1.alive_node(a4, None, false).await;
 
   {
@@ -305,13 +268,7 @@ pub async fn probe_node_dogpile<F, T, R>(
     .await
     .unwrap();
 
-    let a = Alive {
-      incarnation: 1,
-      meta: Bytes::new(),
-      node: m.advertise_node(),
-      protocol_version: crate::ProtocolVersion::V0,
-      delegate_version: crate::DelegateVersion::V0,
-    };
+    let a = Alive::new(1, m.advertise_node());
 
     m.alive_node(a, None, true).await;
 
@@ -320,26 +277,14 @@ pub async fn probe_node_dogpile<F, T, R>(
     for j in 0..c.num_peers - 1 {
       let t = get_transport(j + 1).await;
       let peer = host_memberlist(t, Options::lan()).await.unwrap();
-      let a = Alive {
-        incarnation: 1,
-        meta: Bytes::new(),
-        node: peer.advertise_node(),
-        protocol_version: crate::ProtocolVersion::V0,
-        delegate_version: crate::DelegateVersion::V0,
-      };
+      let a = Alive::new(1, peer.advertise_node());
       m.alive_node(a, None, false).await;
       peers.push(peer);
     }
 
     // Just use a bogus address for the last peer so it doesn't respond
     // to pings, but tell the memberlist it's alive.
-    let a = Alive {
-      incarnation: 1,
-      meta: Bytes::new(),
-      node: bad_node.cheap_clone(),
-      protocol_version: crate::ProtocolVersion::V0,
-      delegate_version: crate::DelegateVersion::V0,
-    };
+    let a = Alive::new(1, bad_node.cheap_clone());
     m.alive_node(a, None, false).await;
 
     // Force a probe, which should start us into the suspect state.
@@ -358,11 +303,7 @@ pub async fn probe_node_dogpile<F, T, R>(
 
     // Add the requested number of confirmations.
     for peer in peers.iter().take(c.comfirmations) {
-      let s = Suspect {
-        node: bad_node.id().clone(),
-        incarnation: 1,
-        from: peer.local_id().clone(),
-      };
+      let s = Suspect::new(1, bad_node.id().clone(), peer.local_id().clone());
       m.suspect_node(s).await.unwrap();
     }
 
@@ -440,44 +381,20 @@ pub async fn probe_node_awareness_degraded<T, R>(
   .await
   .unwrap();
 
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m1.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, m1.advertise_node());
 
   m1.alive_node(a1, None, true).await;
 
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m2.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, m2.advertise_node());
 
   m1.alive_node(a2, None, false).await;
 
-  let a3 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m3.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a3 = Alive::new(1, m3.advertise_node());
 
   m1.alive_node(a3, None, false).await;
 
   // Node 4 never gets started.
-  let a4 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: node4.cheap_clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a4 = Alive::new(1, node4.cheap_clone());
   m1.alive_node(a4, None, false).await;
 
   // Start the health in a degraded state.
@@ -556,23 +473,11 @@ where
   .await
   .unwrap();
 
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m1.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, m1.advertise_node());
 
   m1.alive_node(a1, None, true).await;
 
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m2.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, m2.advertise_node());
 
   m1.alive_node(a2, None, false).await;
 
@@ -646,42 +551,18 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
   .await
   .unwrap();
 
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m1.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, m1.advertise_node());
 
   m1.alive_node(a1, None, true).await;
 
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m2.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, m2.advertise_node());
 
   m1.alive_node(a2, None, false).await;
 
   // Node 3 and node 4 never get started.
-  let a3 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: node3,
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a3 = Alive::new(1, node3);
 
-  let a4 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: node4.cheap_clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a4 = Alive::new(1, node4.cheap_clone());
   // Node 3 and node 4 never get started.
   m1.alive_node(a3, None, false).await;
   m1.alive_node(a4, None, false).await;
@@ -724,6 +605,7 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
   m2.shutdown().await.unwrap();
 }
 
+/// Unit test to test the probe node buddy functionality
 pub async fn probe_node_buddy<T, R>(t1: T, t1_opts: Options, t2: T)
 where
   T: Transport<Runtime = R>,
@@ -742,23 +624,11 @@ where
 
   let m2: Memberlist<T> = host_memberlist(t2, Options::lan()).await.unwrap();
 
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m1.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, m1.advertise_node());
 
   m1.alive_node(a1, None, true).await;
 
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m2.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, m2.advertise_node());
 
   m1.alive_node(a2.cheap_clone(), None, false).await;
   m2.alive_node(a2, None, true).await;
@@ -775,8 +645,8 @@ where
   };
 
   // Make sure a ping was sent.
-  let seq_no = m1.inner.hot.sequence_num.load(Ordering::SeqCst);
-  assert_eq!(seq_no, 1, "bad seq no: {seq_no}");
+  let sequence_number = m1.inner.hot.sequence_num.load(Ordering::SeqCst);
+  assert_eq!(sequence_number, 1, "bad seq no: {sequence_number}");
 
   // Check a broadcast is queued.
   let num = m2.inner.broadcast.num_queued().await;
@@ -809,23 +679,11 @@ where
 
   let m2: Memberlist<T> = host_memberlist(t2, Options::lan()).await.unwrap();
 
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m1.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, m1.advertise_node());
 
   m1.alive_node(a1, None, true).await;
 
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m2.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, m2.advertise_node());
 
   m1.alive_node(a2, None, false).await;
 
@@ -852,8 +710,8 @@ where
   assert_eq!(state, State::Alive, "expect node to be alive: {state}");
 
   // Should increment seqno
-  let seq_no = m1.inner.hot.sequence_num.load(Ordering::SeqCst);
-  assert_eq!(seq_no, 1, "bad seq no: {seq_no}");
+  let sequence_number = m1.inner.hot.sequence_num.load(Ordering::SeqCst);
+  assert_eq!(sequence_number, 1, "bad seq no: {sequence_number}");
 }
 
 /// Unit test to test the ping functionality
@@ -879,23 +737,11 @@ pub async fn ping<T, R>(
 
   let m2: Memberlist<T> = host_memberlist(t2, Options::lan()).await.unwrap();
 
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m1.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, m1.advertise_node());
 
   m1.alive_node(a1, None, true).await;
 
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m2.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, m2.advertise_node());
 
   m1.alive_node(a2, None, false).await;
 
@@ -940,41 +786,20 @@ pub async fn reset_nodes<T, R>(
   .await
   .unwrap();
 
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: n1,
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, n1);
 
   m1.alive_node(a1, None, false).await;
 
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: n2.cheap_clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, n2.cheap_clone());
 
   m1.alive_node(a2, None, false).await;
 
-  let a3 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: n3,
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a3 = Alive::new(1, n3);
 
   m1.alive_node(a3, None, false).await;
 
-  let d = Dead {
-    incarnation: 1,
-    node: n2.id().cheap_clone(),
-    from: m1.local_id().cheap_clone(),
-  };
+  let d = Dead::new(1, n2.id().cheap_clone(), m1.local_id().cheap_clone());
+
   {
     let mut members = m1.inner.nodes.write().await;
     m1.dead_node(&mut *members, d).await.unwrap();
@@ -1050,6 +875,7 @@ where
   assert!(!ack_handler_exists(&m1, 0).await, "non-reaped handler");
 }
 
+/// Unit test to test the invoke ack handler functionality.
 pub async fn invoke_ack_handler<R>()
 where
   R: Runtime,
@@ -1058,14 +884,7 @@ where
   let m1 = AckManager::new();
 
   // Does nothing
-  m1.invoke_ack_handler(
-    Ack {
-      seq_no: 0,
-      payload: Default::default(),
-    },
-    Instant::now(),
-  )
-  .await;
+  m1.invoke_ack_handler(Ack::new(0), Instant::now()).await;
 
   let b = Arc::new(AtomicBool::new(false));
   let b1 = b.clone();
@@ -1076,14 +895,7 @@ where
   });
 
   // Should set b
-  m1.invoke_ack_handler(
-    Ack {
-      seq_no: 0,
-      payload: Default::default(),
-    },
-    Instant::now(),
-  )
-  .await;
+  m1.invoke_ack_handler(Ack::new(0), Instant::now()).await;
   assert!(b.load(Ordering::SeqCst), "b not set");
 }
 
@@ -1095,10 +907,7 @@ where
 {
   let m = AckManager::new();
 
-  let ack = Ack {
-    seq_no: 0,
-    payload: Bytes::from_static(&[0, 0, 0]),
-  };
+  let ack = Ack::new(0).with_payload(Bytes::from_static(&[0, 0, 0]));
 
   // Does nothing
   m.invoke_ack_handler(ack.clone(), Instant::now()).await;
@@ -1121,7 +930,7 @@ where
       v = ack_rx.recv().fuse() => {
         let v = v.unwrap();
         assert!(v.complete, "bad value");
-        assert_eq!(v.payload, ack.payload, "wrong payload. expected: {:?}; actual: {:?}", ack.payload, v.payload);
+        assert_eq!(&v.payload, ack.payload(), "wrong payload. expected: {:?}; actual: {:?}", ack.payload(), v.payload);
         break;
       },
       res = nack_rx.recv().fuse() => {
@@ -1147,7 +956,7 @@ where
   let m1 = AckManager::new();
 
   // Does nothing
-  let nack = Nack { seq_no: 0 };
+  let nack = Nack::new(0);
   m1.invoke_nack_handler(nack).await;
 
   let (ack_tx, ack_rx) = async_channel::bounded(1);
@@ -1180,10 +989,7 @@ where
     "handler should not be reaped"
   );
 
-  let ack = Ack {
-    seq_no: 0,
-    payload: Bytes::from_static(&[0, 0, 0]),
-  };
+  let ack = Ack::new(0).with_payload(Bytes::from_static(&[0, 0, 0]));
   m1.invoke_ack_handler(ack.clone(), Instant::now()).await;
 
   loop {
@@ -1191,7 +997,7 @@ where
       v = ack_rx.recv().fuse() => {
         let v = v.unwrap();
         assert!(v.complete, "bad value");
-        assert_eq!(v.payload, ack.payload, "wrong payload. expected: {:?}; actual: {:?}", ack.payload, v.payload);
+        assert_eq!(&v.payload, ack.payload(), "wrong payload. expected: {:?}; actual: {:?}", ack.payload(), v.payload);
         break;
       },
       res = nack_rx.recv().fuse() => {
@@ -1228,13 +1034,7 @@ pub async fn alive_node_new_node<T, R>(
   .await
   .unwrap();
 
-  let a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: test_node.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(1, test_node.clone());
 
   m.alive_node(a, None, false).await;
 
@@ -1356,13 +1156,7 @@ pub async fn alive_node_suspect_node<T, R>(
   .await
   .unwrap();
 
-  let mut a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: test_node.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let mut a = Alive::new(1, test_node.clone());
 
   m.alive_node(a.clone(), None, false).await;
 
@@ -1390,7 +1184,7 @@ pub async fn alive_node_suspect_node<T, R>(
   assert_eq!(state, State::Suspect, "update with old incarnation!");
 
   // Should reset to alive now
-  a.incarnation = 2;
+  a.set_incarnation(2);
   m.alive_node(a, None, false).await;
 
   let state = m.get_node_state(test_node.id()).await.unwrap();
@@ -1438,13 +1232,7 @@ pub async fn alive_node_idempotent<T, R>(
   .await
   .unwrap();
 
-  let mut a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: test_node.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let mut a = Alive::new(1, test_node.clone());
 
   m.alive_node(a.clone(), None, false).await;
 
@@ -1460,7 +1248,7 @@ pub async fn alive_node_idempotent<T, R>(
   let change = m.get_node_state_change(test_node.id()).await.unwrap();
 
   // Should reset to alive now
-  a.incarnation = 2;
+  a.set_incarnation(2);
   m.alive_node(a, None, false).await;
 
   let state = m.get_node_state(test_node.id()).await.unwrap();
@@ -1502,13 +1290,7 @@ pub async fn alive_node_change_meta<T, R>(
   .await
   .unwrap();
 
-  let mut a = Alive {
-    incarnation: 1,
-    meta: Bytes::from_static(b"val1"),
-    node: test_node.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let mut a = Alive::new(1, test_node.clone()).with_meta("val1".try_into().unwrap());
 
   m.alive_node(a.clone(), None, false).await;
 
@@ -1520,8 +1302,8 @@ pub async fn alive_node_change_meta<T, R>(
     .toggle(true)
     .await;
 
-  a.incarnation = 2;
-  a.meta = Bytes::from_static(b"val2");
+  a.set_incarnation(2);
+  a.set_meta("val2".try_into().unwrap());
   m.alive_node(a.clone(), None, false).await;
 
   // check updates
@@ -1534,7 +1316,7 @@ pub async fn alive_node_change_meta<T, R>(
       .get_state(test_node.id())
       .unwrap();
     assert_eq!(state.state, State::Alive, "bad state");
-    assert_eq!(state.meta, a.meta, "meta did not update");
+    assert_eq!(state.meta(), a.meta(), "meta did not update");
   }
 
   // Check for a notify update message
@@ -1545,7 +1327,7 @@ pub async fn alive_node_change_meta<T, R>(
       let kind = ev.kind();
       assert_eq!(kind, EventKind::Update, "bad state: {kind:?}");
       assert_eq!(node.id(), test_node.id(), "bad node: {}", node.id());
-      assert_eq!(node.meta(), &a.meta, "bad meta: {:?}", node.meta().as_ref());
+      assert_eq!(node.meta(), a.meta(), "bad meta: {:?}", node.meta().as_ref());
     },
     default => {
       panic!("missing event!");
@@ -1571,13 +1353,7 @@ where
   .await
   .unwrap();
 
-  let a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(1, m.advertise_node());
 
   m.alive_node(a, None, true).await;
 
@@ -1585,13 +1361,7 @@ where
   m.inner.broadcast.reset().await;
 
   // Conflicting alive
-  let a = Alive {
-    incarnation: 2,
-    meta: Bytes::from_static(b"foo"),
-    node: m.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(2, m.advertise_node()).with_meta("foo".try_into().unwrap());
 
   m.alive_node(a, None, false).await;
 
@@ -1599,7 +1369,7 @@ where
     let nodes = m.inner.nodes.read().await;
     let n = nodes.get_state(m.local_id()).unwrap();
     assert_eq!(n.state, State::Alive, "should still be alive");
-    assert!(n.meta.is_empty(), "meta should still be empty");
+    assert!(n.meta().is_empty(), "meta should still be empty");
   }
 
   // Check a broad cast is queued
@@ -1635,13 +1405,7 @@ where
     test_node_id.cheap_clone(),
     "127.0.0.1:8000".parse().unwrap(),
   );
-  let a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: test_node1.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(1, test_node1.clone());
   m.alive_node(a, None, true).await;
 
   // Clear queue
@@ -1652,23 +1416,20 @@ where
     test_node_id.cheap_clone(),
     "127.0.0.2:9000".parse().unwrap(),
   );
-  let a = Alive {
-    incarnation: 2,
-    meta: Bytes::from_static(b"foo"),
-    node: test_node2.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
-
+  let a = Alive::new(2, test_node2.clone()).with_meta("foo".try_into().unwrap());
   m.alive_node(a, None, false).await;
 
   {
     let nodes = m.inner.nodes.read().await;
     let n = nodes.get_state(&test_node_id).unwrap();
     assert_eq!(n.state, State::Alive, "should still be alive");
-    assert!(n.meta.is_empty(), "meta should still be empty");
-    assert_eq!(n.id, test_node_id, "id should not be update");
-    assert_eq!(&n.addr, test_node1.address(), "addr should not be updated");
+    assert!(n.meta().is_empty(), "meta should still be empty");
+    assert_eq!(n.id(), &test_node_id, "id should not be update");
+    assert_eq!(
+      n.address(),
+      test_node1.address(),
+      "addr should not be updated"
+    );
   }
 
   // Check a broad cast is queued
@@ -1676,11 +1437,8 @@ where
   assert_eq!(num, 0, "expected 0 queued message: {num}");
 
   // Change the node to dead
-  let d = Dead {
-    incarnation: 2,
-    node: test_node_id.clone(),
-    from: m.local_id().cheap_clone(),
-  };
+  let d = Dead::new(2, test_node_id.clone(), m.local_id().cheap_clone());
+
   {
     let mut members = m.inner.nodes.write().await;
     m.dead_node(&mut *members, d).await.unwrap();
@@ -1697,13 +1455,7 @@ where
   R::sleep(m.inner.opts.dead_node_reclaim_time).await;
 
   // New alive node
-  let a = Alive {
-    incarnation: 3,
-    meta: Bytes::from_static(b"foo"),
-    node: test_node2.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(3, test_node2.clone()).with_meta("foo".try_into().unwrap());
 
   m.alive_node(a, None, false).await;
 
@@ -1711,8 +1463,8 @@ where
     let nodes = m.inner.nodes.read().await;
     let n = nodes.get_state(&test_node_id).unwrap();
     assert_eq!(n.state, State::Alive, "should still be alive");
-    assert_eq!(n.meta, Bytes::from_static(b"foo"), "meta should be updated");
-    assert_eq!(&n.addr, test_node2.address(), "addr should be updated");
+    assert_eq!(n.meta().as_bytes(), b"foo", "meta should be updated");
+    assert_eq!(n.address(), test_node2.address(), "addr should be updated");
   }
 
   m.shutdown().await.unwrap();
@@ -1734,11 +1486,7 @@ where
   .await
   .unwrap();
 
-  let s = Suspect {
-    incarnation: 1,
-    node: test_node_id,
-    from: m.local_id().cheap_clone(),
-  };
+  let s = Suspect::new(1, test_node_id, m.local_id().cheap_clone());
 
   m.suspect_node(s).await.unwrap();
 
@@ -1773,13 +1521,7 @@ where
     test_node_id.cheap_clone(),
     "127.0.0.1:8000".parse().unwrap(),
   );
-  let a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: test_node1.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(1, test_node1.clone());
 
   m.alive_node(a, None, false).await;
 
@@ -1791,11 +1533,7 @@ where
   })
   .await;
 
-  let s = Suspect {
-    incarnation: 1,
-    node: test_node_id.clone(),
-    from: m.local_id().cheap_clone(),
-  };
+  let s = Suspect::new(1, test_node_id.clone(), m.local_id().cheap_clone());
 
   m.suspect_node(s).await.unwrap();
 
@@ -1867,13 +1605,7 @@ where
     test_node_id.cheap_clone(),
     "127.0.0.1:8000".parse().unwrap(),
   );
-  let a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: test_node1.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(1, test_node1.clone());
 
   m.alive_node(a, None, false).await;
 
@@ -1885,11 +1617,7 @@ where
   })
   .await;
 
-  let s = Suspect {
-    incarnation: 1,
-    node: test_node_id.clone(),
-    from: m.local_id().cheap_clone(),
-  };
+  let s = Suspect::new(1, test_node_id.clone(), m.local_id().cheap_clone());
 
   m.suspect_node(s.clone()).await.unwrap();
 
@@ -1940,13 +1668,7 @@ where
     test_node_id.cheap_clone(),
     "127.0.0.1:8000".parse().unwrap(),
   );
-  let a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: test_node1.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(1, test_node1.clone());
 
   m.alive_node(a, None, false).await;
 
@@ -1961,11 +1683,7 @@ where
   // clear queue
   m.inner.broadcast.reset().await;
 
-  let s = Suspect {
-    incarnation: 1,
-    node: test_node_id.clone(),
-    from: m.local_id().cheap_clone(),
-  };
+  let s = Suspect::new(1, test_node_id.clone(), m.local_id().cheap_clone());
 
   m.suspect_node(s.clone()).await.unwrap();
 
@@ -1995,13 +1713,7 @@ where
   .await
   .unwrap();
 
-  let a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(1, m.advertise_node());
 
   m.alive_node(a, None, true).await;
 
@@ -2012,11 +1724,7 @@ where
   let health = m.health_score();
   assert_eq!(health, 0, "bad: {health}");
 
-  let s = Suspect {
-    incarnation: 1,
-    node: m.local_id().cheap_clone(),
-    from: m.local_id().cheap_clone(),
-  };
+  let s = Suspect::new(1, m.local_id().cheap_clone(), m.local_id().cheap_clone());
 
   m.suspect_node(s).await.unwrap();
 
@@ -2055,11 +1763,7 @@ where
   .await
   .unwrap();
 
-  let d = Dead {
-    incarnation: 1,
-    node: test_node_id,
-    from: m.local_id().cheap_clone(),
-  };
+  let d = Dead::new(1, test_node_id, m.local_id().cheap_clone());
 
   {
     let mut members = m.inner.nodes.write().await;
@@ -2096,23 +1800,13 @@ where
     test_node_id.cheap_clone(),
     "127.0.0.1:8000".parse().unwrap(),
   );
-  let a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: test_node.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(1, test_node.clone());
   m.alive_node(a, None, false).await;
 
   // Read the join event
   subscriber.recv().await.unwrap();
 
-  let d = Dead {
-    incarnation: 1,
-    node: test_node_id.clone(),
-    from: test_node_id.clone(),
-  };
+  let d = Dead::new(1, test_node_id.clone(), m.local_id().cheap_clone());
 
   {
     let mut members = m.inner.nodes.write().await;
@@ -2141,13 +1835,7 @@ where
 
   // New alive node
   let test_node1 = Node::new(test_node_id.clone(), "127.0.0.2:9000".parse().unwrap());
-  let a = Alive {
-    incarnation: 3,
-    meta: Bytes::from_static(b"foo"),
-    node: test_node1.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(3, test_node1.clone()).with_meta("foo".try_into().unwrap());
 
   m.alive_node(a, None, false).await;
 
@@ -2158,12 +1846,13 @@ where
     let nodes = m.inner.nodes.read().await;
     let n = nodes.get_state(&test_node_id).unwrap();
     assert_eq!(n.state, State::Alive, "bad state");
-    assert_eq!(n.meta, Bytes::from_static(b"foo"), "meta should be updated");
-    assert_eq!(&n.addr, test_node1.address(), "addr should be updated");
+    assert_eq!(n.meta().as_bytes(), b"foo", "meta should be updated");
+    assert_eq!(n.address(), test_node1.address(), "addr should be updated");
   }
   m.shutdown().await.unwrap();
 }
 
+/// Unit test to test the dead node functionality
 pub async fn dead_node<T, R>(
   t1: T,
   t1_opts: Options,
@@ -2183,13 +1872,7 @@ pub async fn dead_node<T, R>(
   .await
   .unwrap();
 
-  let a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: test_node.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(1, test_node.clone());
   m.alive_node(a, None, false).await;
 
   // Read the join event
@@ -2203,11 +1886,7 @@ pub async fn dead_node<T, R>(
   })
   .await;
 
-  let d = Dead {
-    incarnation: 1,
-    node: test_node.id().clone(),
-    from: m.local_id().cheap_clone(),
-  };
+  let d = Dead::new(1, test_node.id().clone(), m.local_id().cheap_clone());
 
   {
     let mut members = m.inner.nodes.write().await;
@@ -2266,13 +1945,7 @@ pub async fn dead_node_double<T, R>(
   .await
   .unwrap();
 
-  let a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: test_node.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(1, test_node.clone());
 
   m.alive_node(a, None, false).await;
 
@@ -2284,11 +1957,7 @@ pub async fn dead_node_double<T, R>(
   })
   .await;
 
-  let mut d = Dead {
-    incarnation: 1,
-    node: test_node.id().clone(),
-    from: m.local_id().cheap_clone(),
-  };
+  let mut d = Dead::new(1, test_node.id().clone(), m.local_id().cheap_clone());
 
   {
     let mut members = m.inner.nodes.write().await;
@@ -2304,7 +1973,7 @@ pub async fn dead_node_double<T, R>(
   }
 
   // should do nothing
-  d.incarnation = 2;
+  d.set_incarnation(2);
 
   {
     let mut members = m.inner.nodes.write().await;
@@ -2346,13 +2015,7 @@ pub async fn dead_node_old_dead<T, R>(
   .await
   .unwrap();
 
-  let a = Alive {
-    incarnation: 10,
-    meta: Bytes::new(),
-    node: test_node.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(10, test_node.clone());
 
   m.alive_node(a, None, false).await;
 
@@ -2364,11 +2027,7 @@ pub async fn dead_node_old_dead<T, R>(
   })
   .await;
 
-  let d = Dead {
-    incarnation: 1,
-    node: test_node.id().clone(),
-    from: m.local_id().cheap_clone(),
-  };
+  let d = Dead::new(1, test_node.id().clone(), m.local_id().cheap_clone());
 
   {
     let mut members = m.inner.nodes.write().await;
@@ -2400,21 +2059,11 @@ pub async fn dead_node_alive_replay<T, R>(
   .await
   .unwrap();
 
-  let a = Alive {
-    incarnation: 10,
-    meta: Bytes::new(),
-    node: test_node.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(10, test_node.clone());
 
   m.alive_node(a.clone(), None, false).await;
 
-  let d = Dead {
-    incarnation: 10,
-    node: test_node.id().clone(),
-    from: m.local_id().cheap_clone(),
-  };
+  let d = Dead::new(10, test_node.id().clone(), m.local_id().cheap_clone());
 
   {
     let mut members = m.inner.nodes.write().await;
@@ -2447,14 +2096,7 @@ where
   .await
   .unwrap();
 
-  let a = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
-
+  let a = Alive::new(1, m.advertise_node());
   m.alive_node(a, None, true).await;
 
   // Clear queue
@@ -2464,12 +2106,7 @@ where
   let health = m.health_score();
   assert_eq!(health, 0, "bad: {health}");
 
-  let d = Dead {
-    incarnation: 1,
-    node: m.local_id().clone(),
-    from: m.local_id().cheap_clone(),
-  };
-
+  let d = Dead::new(1, m.local_id().cheap_clone(), m.local_id().cheap_clone());
   {
     let mut members = m.inner.nodes.write().await;
     m.dead_node(&mut members, d).await.unwrap();
@@ -2519,40 +2156,18 @@ pub async fn merge_state<A, T, R>(
   .unwrap();
 
   let node1 = Node::new(node_id1.clone(), "127.0.0.1:8000".parse().unwrap());
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: node1.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, node1.clone());
   m.alive_node(a1, None, false).await;
 
   let node2 = Node::new(node_id2.clone(), "127.0.0.2:8000".parse().unwrap());
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: node2.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, node2.clone());
   m.alive_node(a2, None, false).await;
 
   let node3 = Node::new(node_id3.clone(), "127.0.0.3:8000".parse().unwrap());
-  let a3 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: node3.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a3 = Alive::new(1, node3.clone());
   m.alive_node(a3, None, false).await;
 
-  let s = Suspect {
-    incarnation: 1,
-    node: node_id1.clone(),
-    from: m.local_id().cheap_clone(),
-  };
+  let s = Suspect::new(1, node_id1.clone(), m.local_id().cheap_clone());
   m.suspect_node(s).await.unwrap();
 
   while !subscriber.is_empty() {
@@ -2562,42 +2177,10 @@ pub async fn merge_state<A, T, R>(
   let node4: Node<_, SocketAddr> = Node::new(node_id4.clone(), "127.0.0.4:8000".parse().unwrap());
 
   let remote = vec![
-    PushNodeState {
-      id: node1.id().clone(),
-      addr: *node1.address(),
-      meta: Bytes::new(),
-      incarnation: 2,
-      state: State::Alive,
-      protocol_version: crate::ProtocolVersion::V0,
-      delegate_version: crate::DelegateVersion::V0,
-    },
-    PushNodeState {
-      id: node2.id().clone(),
-      addr: *node2.address(),
-      meta: Bytes::new(),
-      incarnation: 1,
-      state: State::Suspect,
-      protocol_version: crate::ProtocolVersion::V0,
-      delegate_version: crate::DelegateVersion::V0,
-    },
-    PushNodeState {
-      id: node3.id().clone(),
-      addr: *node3.address(),
-      meta: Bytes::new(),
-      incarnation: 1,
-      state: State::Dead,
-      protocol_version: crate::ProtocolVersion::V0,
-      delegate_version: crate::DelegateVersion::V0,
-    },
-    PushNodeState {
-      id: node4.id().clone(),
-      addr: *node4.address(),
-      meta: Bytes::new(),
-      incarnation: 2,
-      state: State::Alive,
-      protocol_version: crate::ProtocolVersion::V0,
-      delegate_version: crate::DelegateVersion::V0,
-    },
+    PushNodeState::new(2, node1.id().clone(), *node1.address(), State::Alive),
+    PushNodeState::new(1, node2.id().clone(), *node2.address(), State::Suspect),
+    PushNodeState::new(1, node3.id().clone(), *node3.address(), State::Dead),
+    PushNodeState::new(2, node4.id().clone(), *node4.address(), State::Alive),
   ];
 
   // Merge remote state
@@ -2645,6 +2228,7 @@ pub async fn merge_state<A, T, R>(
   m.shutdown().await.unwrap();
 }
 
+/// Unit test to gossip functionality
 pub async fn gossip<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options, t3: T, t3_opts: Options)
 where
   T: Transport<Runtime = R>,
@@ -2668,32 +2252,14 @@ where
 
   let m3 = host_memberlist(t3, t3_opts).await.unwrap();
 
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m1.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, m1.advertise_node());
   m1.alive_node(a1, None, true).await;
 
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m2.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, m2.advertise_node());
 
   m1.alive_node(a2, None, false).await;
 
-  let a3 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m3.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a3 = Alive::new(1, m3.advertise_node());
 
   m1.alive_node(a3, None, false).await;
 
@@ -2744,23 +2310,11 @@ where
   .await
   .unwrap();
 
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m1.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, m1.advertise_node());
 
   m1.alive_node(a1, None, true).await;
 
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m2.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, m2.advertise_node());
 
   m1.alive_node(a2, None, false).await;
 
@@ -2837,23 +2391,11 @@ where
   .await
   .unwrap();
 
-  let a1 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m1.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a1 = Alive::new(1, m1.advertise_node());
 
   m1.alive_node(a1, None, true).await;
 
-  let a2 = Alive {
-    incarnation: 1,
-    meta: Bytes::new(),
-    node: m2.advertise_node(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a2 = Alive::new(1, m2.advertise_node());
 
   m1.alive_node(a2, None, false).await;
 

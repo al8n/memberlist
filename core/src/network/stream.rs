@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use nodecraft::CheapClone;
 use smol_str::SmolStr;
 
 use crate::delegate::DelegateError;
@@ -58,23 +59,21 @@ where
     &self,
     node_state: PushPull<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
-    self.verify_protocol(node_state.states.as_slice()).await?;
+    self.verify_protocol(node_state.states().as_slice()).await?;
 
     // Invoke the merge delegate if any
-    if node_state.join {
+    if node_state.join() {
       if let Some(merge) = self.delegate.as_ref() {
         let peers = node_state
-          .states
+          .states()
           .iter()
           .map(|n| {
-            Arc::new(NodeState {
-              id: n.id().clone(),
-              addr: n.address().clone(),
-              meta: n.meta.clone(),
-              state: n.state,
-              protocol_version: n.protocol_version,
-              delegate_version: n.delegate_version,
-            })
+            Arc::new(
+              NodeState::new(n.id().cheap_clone(), n.address().cheap_clone(), n.state())
+                .with_meta(n.meta().cheap_clone())
+                .with_protocol_version(n.protocol_version())
+                .with_delegate_version(n.delegate_version()),
+            )
           })
           .collect::<SmallVec<_>>();
         merge
@@ -85,13 +84,13 @@ where
     }
 
     // Merge the membership state
-    self.merge_state(node_state.states.as_slice()).await;
+    let (join, user_data, states) = node_state.into_components();
+    self.merge_state(states.as_slice()).await;
 
     // Invoke the delegate for user state
     if let Some(d) = &self.delegate {
-      if !node_state.user_data.is_empty() {
-        d.merge_remote_state(node_state.user_data, node_state.join)
-          .await;
+      if !user_data.is_empty() {
+        d.merge_remote_state(user_data, join).await;
       }
     }
     Ok(())
@@ -136,7 +135,7 @@ where
 
     // Prepare the local node state
     #[cfg(feature = "metrics")]
-    let mut node_state_counts = State::empty_metrics();
+    let mut node_state_counts = State::metrics_array();
     let local_nodes = {
       self
         .inner
@@ -147,19 +146,19 @@ where
         .iter()
         .map(|m| {
           let n = &m.state;
-          let this = PushNodeState::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> {
-            id: n.id().clone(),
-            addr: n.address().clone(),
-            meta: n.meta().clone(),
-            incarnation: n.incarnation.load(Ordering::Relaxed),
-            state: n.state,
-            protocol_version: n.protocol_version,
-            delegate_version: n.delegate_version,
-          };
+          let this = PushNodeState::new(
+            n.incarnation.load(Ordering::Acquire),
+            n.id().cheap_clone(),
+            n.address().cheap_clone(),
+            n.state,
+          )
+          .with_meta(n.meta().cheap_clone())
+          .with_protocol_version(n.protocol_version())
+          .with_delegate_version(n.delegate_version());
 
           #[cfg(feature = "metrics")]
           {
-            node_state_counts[this.state as u8 as usize].1 += 1;
+            node_state_counts[this.state() as u8 as usize].1 += 1;
           }
           this
         })
@@ -167,23 +166,24 @@ where
     };
 
     // Get the delegate state
-    let user_data = if let Some(delegate) = &self.delegate {
-      delegate.local_state(join).await
+    // Send our node state
+    let msg: Message<_, _> = if let Some(delegate) = &self.delegate {
+      PushPull::new(join, local_nodes)
+        .with_user_data(delegate.local_state(join).await)
+        .into()
     } else {
-      Bytes::new()
+      PushPull::new(join, local_nodes).into()
     };
 
-    // Send our node state
-    let msg: Message<_, _> = PushPull::new(local_nodes, user_data, join).into();
     #[cfg(feature = "metrics")]
     {
       std::thread_local! {
         #[cfg(not(target_family = "wasm"))]
-        static NODE_INSTANCES_GAUGE: std::cell::OnceCell<std::cell::RefCell<memberlist_utils::MetricLabels>> = const { std::cell::OnceCell::new() };
+        static NODE_INSTANCES_GAUGE: std::cell::OnceCell<std::cell::RefCell<crate::types::MetricLabels>> = const { std::cell::OnceCell::new() };
 
         // TODO: remove this when cargo wasix toolchain update to rust 1.70
         #[cfg(target_family = "wasm")]
-        static NODE_INSTANCES_GAUGE: once_cell::sync::OnceCell<std::cell::RefCell<memberlist_utils::MetricLabels>> = once_cell::sync::OnceCell::new();
+        static NODE_INSTANCES_GAUGE: once_cell::sync::OnceCell<std::cell::RefCell<crate::types::MetricLabels>> = once_cell::sync::OnceCell::new();
       }
 
       NODE_INSTANCES_GAUGE.with(|g| {
@@ -277,12 +277,12 @@ where
 
     match msg {
       Message::Ping(ping) => {
-        if ping.target.id().ne(self.local_id()) {
-          tracing::error!(target =  "memberlist.stream", local=%self.inner.id, remote = %addr, "got ping for unexpected node {}", ping.target);
+        if ping.target().id().ne(self.local_id()) {
+          tracing::error!(target =  "memberlist.stream", local=%self.inner.id, remote = %addr, "got ping for unexpected node {}", ping.target());
           return;
         }
 
-        let ack = Ack::new(ping.seq_no);
+        let ack = Ack::new(ping.sequence_number());
         if let Err(e) = self.send_message(&mut conn, ack.into()).await {
           tracing::error!(target =  "memberlist.stream", err=%e, remote_node = %addr, "failed to send ack response");
         }
@@ -306,7 +306,7 @@ where
           return;
         }
 
-        if let Err(e) = self.send_local_state(&mut conn, pp.join).await {
+        if let Err(e) = self.send_local_state(&mut conn, pp.join()).await {
           tracing::error!(target =  "memberlist.stream", err=%e, remote_node = %addr, "failed to push local state");
           return;
         }

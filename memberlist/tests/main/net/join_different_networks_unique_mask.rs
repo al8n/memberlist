@@ -4,9 +4,9 @@ use agnostic::Runtime;
 use memberlist::{
   futures::Stream,
   transport::{MaybeResolvedAddress, Node, Transport},
+  types::CIDRsPolicy,
   Memberlist, Options,
 };
-use memberlist_utils::net::CIDRsPolicy;
 
 use super::*;
 

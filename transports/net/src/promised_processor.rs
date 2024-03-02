@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use agnostic::Runtime;
 use futures::FutureExt;
-use memberlist_core::transport::{stream::StreamProducer, Transport};
+use memberlist_core::transport::{StreamProducer, Transport};
 use nodecraft::resolver::AddressResolver;
 
 use super::{Listener, StreamLayer};
@@ -162,7 +162,7 @@ where
   let ln = s.bind(kind.next(0)).await?;
   let local_addr = ln.local_addr();
   let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
-  let (stream_tx, stream_rx) = memberlist_core::transport::stream::promised_stream::<T>();
+  let (stream_tx, stream_rx) = memberlist_core::transport::promised_stream::<T>();
   let task = <T::Runtime as Runtime>::spawn(
     PromisedProcessor::<A, T, TestStreamLayer<S>> {
       stream_tx,

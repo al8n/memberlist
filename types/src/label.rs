@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use cheap_clone::CheapClone;
+use nodecraft::CheapClone;
 
 /// Invalid label error.
 #[derive(Debug, thiserror::Error)]
@@ -50,8 +50,8 @@ impl Label {
 
   /// Create a label from a static str.
   #[inline]
-  pub const fn from_static(s: &'static str) -> Self {
-    Self(Bytes::from_static(s.as_bytes()))
+  pub fn from_static(s: &'static str) -> Result<Self, InvalidLabel> {
+    Self::try_from(s)
   }
 
   /// Returns the label as a byte slice.
@@ -313,6 +313,7 @@ impl LabelError {
 
 /// Label extension for [`Buf`] types.
 pub trait LabelBufExt: Buf + sealed::Splitable + TryInto<Label, Error = InvalidLabel> {
+  /// Remove the label prefix from the buffer.
   fn remove_label_header(&mut self) -> Result<Option<Label>, LabelError>
   where
     Self: Sized,
@@ -339,6 +340,7 @@ impl<T: Buf + sealed::Splitable + TryInto<Label, Error = InvalidLabel>> LabelBuf
 
 /// Label extension for [`BufMut`] types.
 pub trait LabelBufMutExt: BufMut {
+  /// Add label prefix to the buffer.
   fn add_label_header(&mut self, label: &Label) {
     if label.is_empty() {
       return;

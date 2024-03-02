@@ -16,7 +16,7 @@ use super::{
   network::META_MAX_SIZE,
   state::AckMessage,
   transport::{AddressResolver, CheapClone, MaybeResolvedAddress, Node, Transport},
-  types::{Alive, Dead, Message, NodeState, Ping, SmallVec},
+  types::{Alive, Dead, Message, Meta, NodeState, Ping, SmallVec},
   Options,
 };
 
@@ -226,23 +226,23 @@ where
     let meta = if let Some(d) = &this.delegate {
       d.node_meta(META_MAX_SIZE).await
     } else {
-      Bytes::new()
+      Meta::empty()
     };
 
     if meta.len() > META_MAX_SIZE {
       panic!("NodeState meta data provided is longer than the limit");
     }
 
-    let alive = Alive {
-      incarnation: this.next_incarnation(),
-      meta,
-      node: Node::new(this.inner.id.clone(), this.inner.advertise.clone()),
-      protocol_version: this.inner.opts.protocol_version,
-      delegate_version: this.inner.opts.delegate_version,
-    };
+    let alive = Alive::new(
+      this.next_incarnation(),
+      Node::new(this.inner.id.clone(), this.inner.advertise.clone()),
+    )
+    .with_meta(meta)
+    .with_protocol_version(this.inner.opts.protocol_version)
+    .with_delegate_version(this.inner.opts.delegate_version);
     this.alive_node(alive, None, true).await;
     this.schedule(shutdown_rx).await;
-    tracing::debug!(target =  "memberlist", local = %this.inner.id, advertise_addr = %advertise, "node is living");
+    tracing::debug!(target = "memberlist", local = %this.inner.id, advertise_addr = %advertise, "node is living");
     Ok(this)
   }
 
@@ -264,7 +264,7 @@ where
     }
 
     if !self.has_left() {
-      self.inner.hot.leave.store(true, Ordering::Relaxed);
+      self.inner.hot.leave.store(true, Ordering::Release);
 
       let mut memberlist = self.inner.nodes.write().await;
       if let Some(&idx) = memberlist.node_map.get(&self.inner.id) {
@@ -274,11 +274,11 @@ where
         // sure this node is gone.
 
         let state = &memberlist.nodes[idx];
-        let d = Dead {
-          incarnation: state.state.incarnation.load(Ordering::Relaxed),
-          node: state.id().cheap_clone(),
-          from: state.id().cheap_clone(),
-        };
+        let d = Dead::new(
+          state.state.incarnation.load(Ordering::Acquire),
+          state.id().cheap_clone(),
+          state.id().cheap_clone(),
+        );
 
         self.dead_node(&mut memberlist, d).await?;
         let any_alive = memberlist.any_alive();
@@ -444,7 +444,7 @@ where
       }
       meta
     } else {
-      Bytes::new()
+      Meta::empty()
     };
 
     // Get the existing node
@@ -459,13 +459,10 @@ where
     };
 
     // Format a new alive message
-    let alive = Alive {
-      incarnation: self.next_incarnation(),
-      node,
-      meta,
-      protocol_version: self.inner.opts.protocol_version,
-      delegate_version: self.inner.opts.delegate_version,
-    };
+    let alive = Alive::new(self.next_incarnation(), node)
+      .with_meta(meta)
+      .with_protocol_version(self.inner.opts.protocol_version)
+      .with_delegate_version(self.inner.opts.delegate_version);
     let (notify_tx, notify_rx) = async_channel::bounded(1);
     self.alive_node(alive, Some(notify_tx), true).await;
 
@@ -525,15 +522,15 @@ where
   ) -> Result<Duration, Error<T, D>> {
     // Prepare a ping message and setup an ack handler.
     let self_addr = self.get_advertise();
-    let ping = Ping {
-      seq_no: self.next_seq_no(),
-      source: Node::new(self.inner.transport.local_id().clone(), self_addr.clone()),
-      target: node.clone(),
-    };
+    let ping = Ping::new(
+      self.next_sequence_number(),
+      Node::new(self.inner.transport.local_id().clone(), self_addr.clone()),
+      node.clone(),
+    );
 
     let (ack_tx, ack_rx) = async_channel::bounded(self.inner.opts.indirect_checks + 1);
     self.inner.ack_manager.set_probe_channels::<T::Runtime>(
-      ping.seq_no,
+      ping.sequence_number(),
       ack_tx,
       None,
       Instant::now(),

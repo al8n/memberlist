@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use memberlist_utils::SmallVec;
+use memberlist_types::{Meta, SmallVec};
 
 /// Used to manage node related events.
 #[auto_impl::auto_impl(Box, Arc)]
@@ -9,7 +9,7 @@ pub trait NodeDelegate: Send + Sync + 'static {
   /// Used to retrieve meta-data about the current node
   /// when broadcasting an alive message. It's length is limited to
   /// the given byte size. This metadata is available in the NodeState structure.
-  fn node_meta(&self, limit: usize) -> impl Future<Output = Bytes> + Send;
+  fn node_meta(&self, limit: usize) -> impl Future<Output = Meta> + Send;
 
   /// Called when a user-data message is received.
   /// Care should be taken that this method does not block, since doing

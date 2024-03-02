@@ -4,7 +4,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use futures::{AsyncRead, AsyncWrite, AsyncWriteExt, Future};
 use peekable::future::AsyncPeekable;
 
-pub use memberlist_utils::Label;
+use super::Label;
 
 pub(crate) trait LabelAsyncIOExt: Unpin + Send + Sync {
   fn add_label_header(&mut self, label: &Label) -> impl Future<Output = io::Result<()>> + Send

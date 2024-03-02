@@ -64,12 +64,12 @@ where
     alive: Alive<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) {
     if let Err(e) = self.inner.transport.blocked_address(&from) {
-      tracing::error!(target =  "memberlist.packet", err=%e, remote_addr = %from, "blocked alive message");
+      tracing::error!(target = "memberlist.packet", err=%e, remote_addr = %from, "blocked alive message");
       return;
     }
 
-    if let Err(e) = self.inner.transport.blocked_address(alive.node.address()) {
-      tracing::error!(target =  "memberlist.packet", err=%e, remote_addr = %from, "blocked alive address {} message from {}", alive.node.address(), from);
+    if let Err(e) = self.inner.transport.blocked_address(alive.node().address()) {
+      tracing::error!(target = "memberlist.packet", err=%e, remote_addr = %from, "blocked alive address {} message from {}", alive.node().address(), from);
       return;
     }
 

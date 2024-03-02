@@ -1,7 +1,12 @@
 use smol_str::SmolStr;
 use transformable::Transformable;
 
-#[viewit::viewit]
+/// Error response from the remote peer
+#[viewit::viewit(
+  vis_all = "pub(crate)",
+  getters(vis_all = "pub"),
+  setters(vis_all = "pub", prefix = "with")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
@@ -16,62 +21,91 @@ use transformable::Transformable;
 )]
 #[repr(transparent)]
 pub struct ErrorResponse {
-  err: SmolStr,
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      attrs(doc = "Returns the msg of the error response")
+    ),
+    setter(attrs(doc = "Sets the msg of the error response (Builder pattern)"))
+  )]
+  message: SmolStr,
 }
 
 impl ErrorResponse {
-  pub fn new(err: impl Into<SmolStr>) -> Self {
-    Self { err: err.into() }
+  /// Create a new error response
+  pub fn new(message: impl Into<SmolStr>) -> Self {
+    Self {
+      message: message.into(),
+    }
+  }
+
+  /// Returns the msg of the error response
+  pub fn set_message(&mut self, msg: impl Into<SmolStr>) -> &mut Self {
+    self.message = msg.into();
+    self
   }
 }
 
 impl core::fmt::Display for ErrorResponse {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(f, "{}", self.err)
+    write!(f, "{}", self.message)
   }
 }
 
 impl std::error::Error for ErrorResponse {}
 
+impl From<ErrorResponse> for SmolStr {
+  fn from(err: ErrorResponse) -> Self {
+    err.message
+  }
+}
+
+impl From<SmolStr> for ErrorResponse {
+  fn from(msg: SmolStr) -> Self {
+    Self { message: msg }
+  }
+}
+
 impl Transformable for ErrorResponse {
   type Error = <SmolStr as Transformable>::Error;
 
   fn encode(&self, dst: &mut [u8]) -> Result<usize, Self::Error> {
-    self.err.encode(dst)
+    self.message.encode(dst)
   }
 
   fn encoded_len(&self) -> usize {
-    self.err.encoded_len()
+    self.message.encoded_len()
   }
 
   fn decode(src: &[u8]) -> Result<(usize, Self), Self::Error>
   where
     Self: Sized,
   {
-    let (len, err) = SmolStr::decode(src)?;
-    Ok((len, Self { err }))
+    let (len, message) = SmolStr::decode(src)?;
+    Ok((len, Self { message }))
   }
 
   fn encode_to_vec(&self) -> Result<Vec<u8>, Self::Error> {
-    <SmolStr as Transformable>::encode_to_vec(&self.err)
+    <SmolStr as Transformable>::encode_to_vec(&self.message)
   }
 
   async fn encode_to_async_writer<W: futures::io::AsyncWrite + Send + Unpin>(
     &self,
     writer: &mut W,
   ) -> std::io::Result<usize> {
-    <SmolStr as Transformable>::encode_to_async_writer(&self.err, writer).await
+    <SmolStr as Transformable>::encode_to_async_writer(&self.message, writer).await
   }
 
   fn encode_to_writer<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<usize> {
-    <SmolStr as Transformable>::encode_to_writer(&self.err, writer)
+    <SmolStr as Transformable>::encode_to_writer(&self.message, writer)
   }
 
   fn decode_from_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<(usize, Self)>
   where
     Self: Sized,
   {
-    <SmolStr as Transformable>::decode_from_reader(reader).map(|(n, err)| (n, Self { err }))
+    <SmolStr as Transformable>::decode_from_reader(reader).map(|(n, message)| (n, Self { message }))
   }
 
   async fn decode_from_async_reader<R: futures::io::AsyncRead + Send + Unpin>(
@@ -82,7 +116,7 @@ impl Transformable for ErrorResponse {
   {
     <SmolStr as Transformable>::decode_from_async_reader(reader)
       .await
-      .map(|(n, err)| (n, Self { err }))
+      .map(|(n, message)| (n, Self { message }))
   }
 }
 

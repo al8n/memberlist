@@ -1,5 +1,4 @@
-pub(crate) const VSN_SIZE: usize = 2;
-
+/// Unknown delegate version
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct UnknownDelegateVersion(u8);
 
@@ -11,6 +10,7 @@ impl core::fmt::Display for UnknownDelegateVersion {
 
 impl std::error::Error for UnknownDelegateVersion {}
 
+/// Delegate version
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
@@ -29,6 +29,7 @@ impl std::error::Error for UnknownDelegateVersion {}
 #[non_exhaustive]
 #[repr(u8)]
 pub enum DelegateVersion {
+  /// Version 0
   #[default]
   V0 = 0,
 }
@@ -70,6 +71,7 @@ const _: () = {
   }
 };
 
+/// Unknown protocol version
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct UnknownProtocolVersion(u8);
 
@@ -81,6 +83,7 @@ impl core::fmt::Display for UnknownProtocolVersion {
 
 impl std::error::Error for UnknownProtocolVersion {}
 
+/// Protocol version
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
@@ -99,6 +102,7 @@ impl std::error::Error for UnknownProtocolVersion {}
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ProtocolVersion {
+  /// Version 0
   #[default]
   V0 = 0,
 }

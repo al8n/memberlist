@@ -75,7 +75,7 @@ where
 {
   /// Returns a usable sequence number in a thread safe way
   #[inline]
-  pub(crate) fn next_seq_no(&self) -> u32 {
+  pub(crate) fn next_sequence_number(&self) -> u32 {
     self
       .inner
       .hot
@@ -162,7 +162,7 @@ where
     d: Dead<T::Id>,
   ) -> Result<(), Error<T, D>> {
     // let node = d.node.clone();
-    let idx = match memberlist.node_map.get(&d.node) {
+    let idx = match memberlist.node_map.get(d.node()) {
       Some(idx) => *idx,
       // If we've never heard about this node before, ignore it
       None => return Ok(()),
@@ -170,7 +170,7 @@ where
 
     let state = &mut memberlist.nodes[idx];
     // Ignore old incarnation numbers
-    if d.incarnation < state.state.incarnation.load(Ordering::Relaxed) {
+    if d.incarnation() < state.state.incarnation.load(Ordering::Acquire) {
       return Ok(());
     }
 
@@ -182,8 +182,8 @@ where
       return Ok(());
     }
 
-    let incarnation = d.incarnation;
-    let is_dead_self = d.node == d.from;
+    let incarnation = d.incarnation();
+    let is_dead_self = d.node() == d.from();
     let is_self = state.id().eq(self.local_id());
 
     // Check if this is us
@@ -194,7 +194,7 @@ where
         tracing::warn!(
           target: "memberlist.state",
           "refuting a dead message (from: {})",
-          d.from
+          d.from()
         );
         return Ok(()); // Do not mark ourself dead
       }
@@ -202,13 +202,13 @@ where
       // If we are leaving, we broadcast and wait
       self
         .broadcast_notify(
-          d.node.cheap_clone(),
+          d.node().cheap_clone(),
           d.into(),
           Some(self.inner.leave_broadcast_tx.clone()),
         )
         .await;
     } else {
-      self.broadcast(d.node.cheap_clone(), d.into()).await;
+      self.broadcast(d.node().cheap_clone(), d.into()).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -242,13 +242,13 @@ where
   pub(crate) async fn suspect_node(&self, s: Suspect<T::Id>) -> Result<(), Error<T, D>> {
     let mut mu = self.inner.nodes.write().await;
 
-    let Some(&idx) = mu.node_map.get(&s.node) else {
+    let Some(&idx) = mu.node_map.get(s.node()) else {
       return Ok(());
     };
 
     let state = &mut mu.nodes[idx];
     // Ignore old incarnation numbers
-    if s.incarnation < state.state.incarnation.load(Ordering::Relaxed) {
+    if s.incarnation() < state.state.incarnation.load(Ordering::Relaxed) {
       return Ok(());
     }
 
@@ -257,8 +257,8 @@ where
     // independent confirmations to flow even when a node probes a node
     // that's already suspect.
     if let Some(timer) = &mut state.suspicion {
-      if timer.confirm(&s.from).await {
-        self.broadcast(s.node.cheap_clone(), s.into()).await;
+      if timer.confirm(s.from()).await {
+        self.broadcast(s.node().cheap_clone(), s.into()).await;
       }
       return Ok(());
     }
@@ -269,20 +269,20 @@ where
     }
 
     // If this is us we need to refute, otherwise re-broadcast
-    let snode = s.node.cheap_clone();
-    let sfrom = s.from.cheap_clone();
-    let sincarnation = s.incarnation;
+    let snode = s.node().cheap_clone();
+    let sfrom = s.from().cheap_clone();
+    let sincarnation = s.incarnation();
     if state.id().eq(self.local_id()) {
-      self.refute(&state.state, s.incarnation).await;
+      self.refute(&state.state, s.incarnation()).await;
       tracing::warn!(
         target: "memberlist.state",
         "refuting a suspect message (from: {})",
-        s.from
+        s.from()
       );
       // Do not mark ourself suspect
       return Ok(());
     } else {
-      self.broadcast(s.node.clone(), s.into()).await;
+      self.broadcast(s.node().clone(), s.into()).await;
     }
 
     #[cfg(feature = "metrics")]
@@ -343,11 +343,11 @@ where
               let timeout =
                 state.state.state == State::Suspect && state.state.state_change == change_time;
               if timeout {
-                Some(Dead {
-                  node: state.id().cheap_clone(),
-                  from: t.local_id().cheap_clone(),
-                  incarnation: sincarnation,
-                })
+                Some(Dead::new(
+                  sincarnation,
+                  state.id().cheap_clone(),
+                  t.local_id().cheap_clone(),
+                ))
               } else {
                 None
               }
@@ -369,11 +369,11 @@ where
             tracing::info!(
               target: "memberlist.state",
               "marking {} as failed, suspect timeout reached ({} peer confirmations)",
-              dead.node,
+              dead.node(),
               num_confirmations
             );
             let mut memberlist = t.inner.nodes.write().await;
-            let err_info = format!("failed to mark {} as failed", dead.node);
+            let err_info = format!("failed to mark {} as failed", dead.node());
             if let Err(e) = t.dead_node(&mut memberlist, dead).await {
               tracing::error!(target = "memberlist.state", err=%e, err_info);
             }
@@ -399,36 +399,39 @@ where
     // in-queue to be processed but blocked by the locks above. If we let
     // that aliveMsg process, it'll cause us to re-join the cluster. This
     // ensures that we don't.
-    if self.has_left() && alive.node.id().eq(&self.inner.id) {
+    if self.has_left() && alive.node().id().eq(&self.inner.id) {
       return;
     }
 
-    let server = Arc::new(NodeState {
-      id: alive.node.id().clone(),
-      addr: alive.node.address().clone(),
-      meta: alive.meta.clone(),
-      state: State::Alive,
-      protocol_version: alive.protocol_version,
-      delegate_version: alive.delegate_version,
-    });
+    let anode = alive.node();
+    let server = Arc::new(
+      NodeState::new(
+        anode.id().cheap_clone(),
+        anode.address().cheap_clone(),
+        State::Alive,
+      )
+      .with_meta(alive.meta().cheap_clone())
+      .with_protocol_version(alive.protocol_version())
+      .with_delegate_version(alive.delegate_version()),
+    );
     // Invoke the Alive delegate if any. This can be used to filter out
     // alive messages based on custom logic. For example, using a cluster name.
     // Using a merge delegate is not enough, as it is possible for passive
     // cluster merging to still occur.
     if let Some(delegate) = &self.delegate {
       if let Err(e) = delegate.notify_alive(server.clone()).await {
-        tracing::warn!(target =  "memberlist.state", local = %self.inner.id, peer = %alive.node, err=%e, "ignoring alive message");
+        tracing::warn!(target =  "memberlist.state", local = %self.inner.id, peer = %anode, err=%e, "ignoring alive message");
         return;
       }
     }
 
     let mut updates_node = false;
-    if let Some(idx) = memberlist.node_map.get(alive.node.id()) {
+    if let Some(idx) = memberlist.node_map.get(anode.id()) {
       // Check if this address is different than the existing node unless the old node is dead.
       let state = &memberlist.nodes[*idx].state;
-      if state.address() != alive.node.address() {
-        if let Err(err) = self.inner.transport.blocked_address(alive.node.address()) {
-          tracing::warn!(target =  "memberlist.state", local = %self.inner.id, remote = %alive.node, err=%err, "rejected IP update from {} to {} for node {}", alive.node.id(), state.address(), alive.node.address());
+      if state.address() != alive.node().address() {
+        if let Err(err) = self.inner.transport.blocked_address(anode.address()) {
+          tracing::warn!(target =  "memberlist.state", local = %self.inner.id, remote = %anode, err=%err, "rejected IP update from {} to {} for node {}", alive.node().id(), state.address(), anode.address());
           return;
         };
 
@@ -438,33 +441,23 @@ where
 
         // Allow the address to be updated if a dead node is being replaced.
         if state.state == State::Left || (state.state == State::Dead && can_reclaim) {
-          tracing::info!(target =  "memberlist.state", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.id(), state.address(), alive.node.address());
+          tracing::info!(target =  "memberlist.state", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.id(), state.address(), alive.node().address());
           updates_node = true;
         } else {
-          tracing::error!(target =  "memberlist.state", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.id(), state.address(), alive.node, state.state);
+          tracing::error!(target =  "memberlist.state", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.id(), state.address(), alive.node(), state.state);
 
           // Inform the conflict delegate if provided
           if let Some(delegate) = self.delegate.as_ref() {
             delegate
-              .notify_conflict(
-                state.server.cheap_clone(),
-                Arc::new(NodeState {
-                  id: alive.node.id().cheap_clone(),
-                  addr: alive.node.address().cheap_clone(),
-                  meta: alive.meta.clone(),
-                  state: State::Alive,
-                  protocol_version: alive.protocol_version,
-                  delegate_version: alive.delegate_version,
-                }),
-              )
+              .notify_conflict(state.server.cheap_clone(), Arc::new(NodeState::from(alive)))
               .await;
           }
           return;
         }
       }
     } else {
-      if let Err(err) = self.inner.transport.blocked_address(alive.node.address()) {
-        tracing::warn!(target = "memberlist.state", local = %self.inner.id, remote = %alive.node, err=%err, "rejected node");
+      if let Err(err) = self.inner.transport.blocked_address(anode.address()) {
+        tracing::warn!(target = "memberlist.state", local = %self.inner.id, remote = %anode, err=%err, "rejected node");
         return;
       };
 
@@ -490,7 +483,7 @@ where
       memberlist.nodes.swap(n, offset);
 
       // Add to map
-      memberlist.node_map.insert(alive.node.id().clone(), offset);
+      memberlist.node_map.insert(anode.id().cheap_clone(), offset);
       let id = memberlist.nodes[n].state.id().clone();
       *memberlist.node_map.get_mut(&id).unwrap() = n;
 
@@ -498,16 +491,16 @@ where
       self.inner.hot.num_nodes.fetch_add(1, Ordering::Relaxed);
     }
 
-    let idx = memberlist.node_map.get(alive.node.id()).copied().unwrap();
+    let idx = memberlist.node_map.get(anode.id()).copied().unwrap();
     let member = &mut memberlist.nodes[idx];
     let local_incarnation = member.state.incarnation.load(Ordering::Relaxed);
     // Bail if the incarnation number is older, and this is not about us
-    let is_local_node = alive.node.id().eq(&self.inner.id);
-    if !updates_node && !is_local_node && alive.incarnation <= local_incarnation {
+    let is_local_node = anode.id().eq(&self.inner.id);
+    if !updates_node && !is_local_node && alive.incarnation() <= local_incarnation {
       return;
     }
     // Bail if strictly less and this is about us
-    if is_local_node && alive.incarnation < local_incarnation {
+    if is_local_node && alive.incarnation() < local_incarnation {
       return;
     }
 
@@ -516,7 +509,7 @@ where
 
     // Store the old state and meta data
     let old_state = member.state.state;
-    let old_meta = member.meta.clone();
+    let old_meta = member.meta().cheap_clone();
 
     // If this is us we need to refute, otherwise re-broadcast
     if !bootstrap && is_local_node {
@@ -533,19 +526,19 @@ where
       // need to do an equality check for this Incarnation. In most cases,
       // we just ignore, but we may need to refute.
       //
-      if alive.incarnation == local_incarnation
-        && alive.meta == member.meta
-        && alive.protocol_version == pv
-        && alive.delegate_version == dv
+      if alive.incarnation() == local_incarnation
+        && alive.meta() == member.meta()
+        && alive.protocol_version() == pv
+        && alive.delegate_version() == dv
       {
         return;
       }
-      self.refute(&member.state, alive.incarnation).await;
-      tracing::warn!(target =  "memberlist.state", local = %self.inner.id, peer = %alive.node, local_meta = ?member.meta.as_ref(), remote_meta = ?alive.meta.as_ref(), "refuting an alive message");
+      self.refute(&member.state, alive.incarnation()).await;
+      tracing::warn!(target =  "memberlist.state", local = %self.inner.id, peer = %alive.node(), local_meta = ?member.meta(), remote_meta = ?alive.meta(), "refuting an alive message");
     } else {
       self
         .broadcast_notify(
-          alive.node.id().cheap_clone(),
+          alive.node().id().cheap_clone(),
           alive.cheap_clone().into(),
           notify_tx,
         )
@@ -555,15 +548,8 @@ where
       member
         .state
         .incarnation
-        .store(alive.incarnation, Ordering::Relaxed);
-      member.state.server = Arc::new(NodeState {
-        id: alive.node.id().clone(),
-        addr: alive.node.address().cheap_clone(),
-        meta: alive.meta,
-        state: State::Alive,
-        protocol_version: alive.protocol_version,
-        delegate_version: alive.delegate_version,
-      });
+        .store(alive.incarnation(), Ordering::Release);
+      member.state.server = Arc::new(NodeState::from(alive));
       if member.state.state != State::Alive {
         member.state.state = State::Alive;
         member.state.state_change = Epoch::now();
@@ -583,7 +569,7 @@ where
         delegate
           .notify_join(member.state.server.cheap_clone())
           .await
-      } else if old_meta != member.state.meta {
+      } else if old_meta.ne(member.state.meta()) {
         // if Meta changed, trigger an update notification
         delegate
           .notify_update(member.state.server.cheap_clone())
@@ -613,14 +599,14 @@ where
           match self {
             StateMessage::Alive(alive) => s.alive_node(alive, None, false).await,
             StateMessage::Left(dead) => {
-              let id = dead.node.cheap_clone();
+              let id = dead.node().cheap_clone();
               let mut memberlist = s.inner.nodes.write().await;
               if let Err(e) = s.dead_node(&mut memberlist, dead).await {
                 tracing::error!(target = "memberlist.state", id=%id, err=%e, "fail to dead node");
               }
             }
             StateMessage::Suspect(suspect) => {
-              let id = suspect.node.cheap_clone();
+              let id = suspect.node().cheap_clone();
               if let Err(e) = s.suspect_node(suspect).await {
                 tracing::error!(target = "memberlist.state", id=%id, err=%e, "fail to suspect node");
               }
@@ -629,26 +615,13 @@ where
         }
       }
 
-      let state = match r.state {
-        State::Alive => StateMessage::Alive(Alive {
-          incarnation: r.incarnation,
-          node: r.node(),
-          meta: r.meta.clone(),
-          protocol_version: r.protocol_version,
-          delegate_version: r.delegate_version,
-        }),
-        State::Left => StateMessage::Left(Dead {
-          incarnation: r.incarnation,
-          node: r.id().cheap_clone(),
-          from: self.local_id().cheap_clone(),
-        }),
+      let state = match r.state() {
+        State::Alive => StateMessage::Alive(Alive::new(r.incarnation(), r.node()).with_meta(r.meta().cheap_clone()).with_protocol_version(r.protocol_version()).with_delegate_version(r.delegate_version())),
+        State::Left => StateMessage::Left(Dead::new(r.incarnation(), r.id().cheap_clone(), self.local_id().cheap_clone())),
         // If the remote node believes a node is dead, we prefer to
         // suspect that node instead of declaring it dead instantly
-        State::Dead | State::Suspect => StateMessage::Suspect(Suspect {
-          incarnation: r.incarnation,
-          node: r.id().cheap_clone(),
-          from: self.local_id().cheap_clone(),
-        }),
+        State::Dead | State::Suspect => StateMessage::Suspect(Suspect::new(r.incarnation(), r.id().cheap_clone(), self.local_id().cheap_clone())),
+        _ => unreachable!(),
       };
       state.run(self)
     }).collect::<FuturesUnordered<_>>();
@@ -873,11 +846,11 @@ where
     }
 
     // Prepare a ping message and setup an ack handler.
-    let ping = Ping {
-      seq_no: self.next_seq_no(),
-      source: self.advertise_node(),
-      target: target.node(),
-    };
+    let ping = Ping::new(
+      self.next_sequence_number(),
+      self.advertise_node(),
+      target.node(),
+    );
 
     let (ack_tx, ack_rx) = async_channel::bounded(self.inner.opts.indirect_checks + 1);
     let (nack_tx, nack_rx) = async_channel::bounded(self.inner.opts.indirect_checks + 1);
@@ -893,7 +866,7 @@ where
     // soon as possible.
     let deadline = sent + probe_interval;
     self.inner.ack_manager.set_probe_channels::<T::Runtime>(
-      ping.seq_no,
+      ping.sequence_number(),
       ack_tx.clone(),
       Some(nack_tx),
       sent,
@@ -918,7 +891,7 @@ where
             return self
               .handle_remote_failure(
                 target,
-                ping.seq_no,
+                ping.sequence_number(),
                 &ack_rx,
                 &nack_rx,
                 deadline,
@@ -931,11 +904,11 @@ where
         }
       }
     } else {
-      let suspect = Suspect {
-        incarnation: target.incarnation.load(Ordering::SeqCst),
-        node: target.id().cheap_clone(),
-        from: self.local_id().cheap_clone(),
-      };
+      let suspect = Suspect::new(
+        target.incarnation.load(Ordering::SeqCst),
+        target.id().cheap_clone(),
+        self.local_id().cheap_clone(),
+      );
       match self
         .transport_send_packets(
           target.address(),
@@ -950,7 +923,7 @@ where
             return self
               .handle_remote_failure(
                 target,
-                ping.seq_no,
+                ping.sequence_number(),
                 &ack_rx,
                 &nack_rx,
                 deadline,
@@ -1016,7 +989,7 @@ where
     self
       .handle_remote_failure(
         target,
-        ping.seq_no,
+        ping.sequence_number(),
         &ack_rx,
         &nack_rx,
         deadline,
@@ -1028,7 +1001,7 @@ where
   async fn handle_remote_failure(
     &self,
     target: &LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    ping_seq_no: u32,
+    ping_sequence_number: u32,
     ack_rx: &async_channel::Receiver<AckMessage>,
     nack_rx: &async_channel::Receiver<()>,
     deadline: Instant,
@@ -1056,11 +1029,7 @@ where
 
     // Attempt an indirect ping.
     let expected_nacks = nodes.len() as isize;
-    let ind = IndirectPing {
-      seq_no: ping_seq_no,
-      source: self.advertise_node(),
-      target: target.node(),
-    };
+    let ind = IndirectPing::new(ping_sequence_number, self.advertise_node(), target.node());
 
     let mut futs = nodes.into_iter().map(|peer| {
       let ind = ind.cheap_clone();
@@ -1090,7 +1059,7 @@ where
     // config option to turn this off if desired.
     let (fallback_tx, fallback_rx) = async_channel::bounded(1);
 
-    let mut disable_reliable_pings = self.inner.opts.disable_tcp_pings;
+    let mut disable_reliable_pings = self.inner.opts.disable_promised_pings;
     if let Some(delegate) = self.delegate.as_ref() {
       disable_reliable_pings |= delegate.disable_promised_pings(target.id());
     }
@@ -1170,11 +1139,11 @@ where
 
     // No acks received from target, suspect it as failed.
     tracing::info!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), "suspecting has failed, no acks received");
-    let s = Suspect {
-      incarnation: target.incarnation.load(Ordering::SeqCst),
-      node: target.id().cheap_clone(),
-      from: self.local_id().cheap_clone(),
-    };
+    let s = Suspect::new(
+      target.incarnation.load(Ordering::SeqCst),
+      target.id().cheap_clone(),
+      self.local_id().cheap_clone(),
+    );
     if let Err(e) = self.suspect_node(s).await {
       tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to suspect node");
     }
@@ -1356,14 +1325,11 @@ where
 
     // Format and broadcast an alive message.
     let anode = Node::new(state.id().cheap_clone(), state.address().cheap_clone());
-    let a = Alive {
-      incarnation: inc,
-      meta: state.meta.clone(),
-      node: anode,
-      protocol_version: state.protocol_version,
-      delegate_version: state.delegate_version,
-    };
-    self.broadcast(a.node.id().cheap_clone(), a.into()).await;
+    let a = Alive::new(inc, anode)
+      .with_meta(state.meta().cheap_clone())
+      .with_protocol_version(state.protocol_version())
+      .with_delegate_version(state.delegate_version());
+    self.broadcast(a.node().id().cheap_clone(), a.into()).await;
   }
 }
 

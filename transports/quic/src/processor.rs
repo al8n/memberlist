@@ -1,11 +1,7 @@
 use memberlist_core::{
-  transport::{
-    stream::{PacketProducer, StreamProducer},
-    TimeoutableReadStream,
-  },
-  types::Packet,
+  transport::{PacketProducer, StreamProducer, TimeoutableReadStream},
+  types::{OneOrMore, Packet},
 };
-use memberlist_utils::OneOrMore;
 
 use super::*;
 
@@ -31,7 +27,7 @@ pub(super) struct Processor<
   pub(super) offload_size: usize,
 
   #[cfg(feature = "metrics")]
-  pub(super) metric_labels: Arc<memberlist_utils::MetricLabels>,
+  pub(super) metric_labels: Arc<memberlist_core::types::MetricLabels>,
 }
 
 impl<A, T, S> Processor<A, T, S>
@@ -87,7 +83,7 @@ where
     skip_inbound_label_check: bool,
     timeout: Option<Duration>,
     #[cfg(feature = "compression")] offload_size: usize,
-    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_utils::MetricLabels>,
+    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::types::MetricLabels>,
   ) {
     tracing::info!(
       target: "memberlist.transport.quic",
@@ -174,7 +170,7 @@ where
     skip_inbound_label_check: bool,
     shutdown_rx: async_channel::Receiver<()>,
     #[cfg(feature = "compression")] offload_size: usize,
-    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_utils::MetricLabels>,
+    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::types::MetricLabels>,
   ) {
     loop {
       futures::select! {
@@ -242,7 +238,7 @@ where
     timeout: Option<Duration>,
     skip_inbound_label_check: bool,
     #[cfg(feature = "compression")] offload_size: usize,
-    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_utils::MetricLabels>,
+    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::types::MetricLabels>,
   ) {
     let start = Instant::now();
     if let Some(timeout) = timeout {

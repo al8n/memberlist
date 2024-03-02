@@ -16,9 +16,8 @@ use memberlist_core::{
     },
     Transport,
   },
-  types::Message,
+  types::{Label, LabelBufMutExt, Message},
 };
-use memberlist_utils::{Label, LabelBufMutExt};
 use nodecraft::{CheapClone, Transformable};
 use smol_str::SmolStr;
 

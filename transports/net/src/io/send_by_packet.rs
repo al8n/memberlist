@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use memberlist_core::types::LabelBufMutExt;
 
 use super::*;
 

@@ -11,7 +11,7 @@ use crate::{
 
 pub use crate::{
   transport::TransportError,
-  version::{UnknownDelegateVersion, UnknownProtocolVersion},
+  types::{UnknownDelegateVersion, UnknownProtocolVersion},
 };
 
 /// Error returned by `Memberlist::join_many`.
@@ -108,18 +108,25 @@ where
   }
 }
 
+/// Error type for the [`Memberlist`](crate::Memberlist)
 #[derive(thiserror::Error)]
 pub enum Error<T: Transport, D: Delegate> {
+  /// Returns when the node is not running.
   #[error("memberlist: node is not running, please bootstrap first")]
   NotRunning,
+  /// Returns when timeout waiting for update broadcast.
   #[error("memberlist: timeout waiting for update broadcast")]
   UpdateTimeout,
+  /// Returns when timeout waiting for leave broadcast.
   #[error("memberlist: timeout waiting for leave broadcast")]
   LeaveTimeout,
+  /// Returns when lost connection with a peer.
   #[error("memberlist: no response from node {0}")]
   Lost(Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
+  /// Delegate error
   #[error("memberlist: {0}")]
   Delegate(#[from] DelegateError<D>),
+  /// Transport error
   #[error("memberlist: {0}")]
   Transport(T::Error),
   /// Returned when a message is received with an unexpected type.
@@ -139,10 +146,10 @@ pub enum Error<T: Transport, D: Delegate> {
     /// The sequence number of [`Ack`](crate::types::Ack).
     ack: u32,
   },
-  // #[error("memberlist: {0}")]
-  // BlockedAddress(#[from] ForbiddenIp),
+  /// Returned when a remote error is received.
   #[error("memberlist: remote error: {0}")]
   Remote(SmolStr),
+  /// Returned when a custom error is created by users.
   #[error("memberlist: {0}")]
   Other(Cow<'static, str>),
 }
@@ -181,7 +188,7 @@ impl<T: Transport, D: Delegate> Error<T, D> {
   /// Creates a new error with the given remote error.
   #[inline]
   pub fn remote(e: ErrorResponse) -> Self {
-    Self::Remote(e.err)
+    Self::Remote(e.into())
   }
 
   /// Creates a new error with the given message.

@@ -1,4 +1,9 @@
+#![doc = include_str!("../../README.md")]
 #![forbid(unsafe_code)]
+#![deny(warnings, missing_docs)]
+#![allow(clippy::type_complexity)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(docsrs, allow(unused_attributes))]
 
 pub use agnostic;
 pub use memberlist_core::*;

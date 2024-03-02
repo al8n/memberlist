@@ -138,23 +138,17 @@ where
     from: <T::Resolver as AddressResolver>::ResolvedAddress,
   ) {
     // If node is provided, verify that it is for us
-    if p.target.id().ne(&self.inner.id) {
-      tracing::error!(target =  "memberlist.packet", local=%self.inner.id, remote = %from, "got ping for unexpected node '{}'", p.target);
+    if p.target().id().ne(&self.inner.id) {
+      tracing::error!(target =  "memberlist.packet", local=%self.inner.id, remote = %from, "got ping for unexpected node '{}'", p.target());
       return;
     }
 
     let msg = if let Some(delegate) = &self.delegate {
-      Ack {
-        seq_no: p.seq_no,
-        payload: delegate.ack_payload().await,
-      }
+      Ack::new(p.sequence_number()).with_payload(delegate.ack_payload().await)
     } else {
-      Ack {
-        seq_no: p.seq_no,
-        payload: Bytes::new(),
-      }
+      Ack::new(p.sequence_number())
     };
-    if let Err(e) = self.send_msg(p.source.address(), msg.into()).await {
+    if let Err(e) = self.send_msg(p.source().address(), msg.into()).await {
       tracing::error!(target =  "memberlist.packet", addr = %from, err = %e, "failed to send ack response");
     }
   }
@@ -168,13 +162,13 @@ where
     // because we only have one version
 
     // Send a ping to the correct host.
-    let local_seq_no = self.next_seq_no();
+    let local_sequence_number = self.next_sequence_number();
 
-    let ping = Ping {
-      seq_no: local_seq_no,
-      source: self.advertise_node(),
-      target: ind.target.cheap_clone(),
-    };
+    let ping = Ping::new(
+      local_sequence_number,
+      self.advertise_node(),
+      ind.target().cheap_clone(),
+    );
 
     // Forward the ack back to the requestor. If the request encodes an origin
     // use that otherwise assume that the other end of the UDP socket is
@@ -183,22 +177,22 @@ where
     let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel::<()>();
     // Setup a response handler to relay the ack
     let this = self.clone();
-    let ind_source = ind.source.cheap_clone();
-    let ind_seq_no = ind.seq_no;
+    let ind_source = ind.source().cheap_clone();
+    let ind_sequence_number = ind.sequence_number();
     let afrom = from.cheap_clone();
 
     self
       .inner
       .ack_manager
       .set_ack_handler::<_, T::Runtime>(
-        local_seq_no,
+        local_sequence_number,
         self.inner.opts.probe_timeout,
         move |_payload, _timestamp| {
           async move {
             let _ = cancel_tx.send(());
 
             // Try to prevent the nack if we've caught it in time.
-            let ack = Ack::new(ind_seq_no);
+            let ack = Ack::new(ind_sequence_number);
             if let Err(e) = this
               .send_msg(
                 ind_source.address(),
@@ -213,10 +207,10 @@ where
         },
       );
 
-    match self.send_msg(ind.target.address(), ping.into()).await {
+    match self.send_msg(ind.target().address(), ping.into()).await {
       Ok(_) => {}
       Err(e) => {
-        tracing::error!(target = "memberlist.packet", local = %self.local_id(), source = %ind.source, target=%ind.target, err = %e, "failed to send indirect ping");
+        tracing::error!(target = "memberlist.packet", local = %self.local_id(), source = %ind.source(), target=%ind.target(), err = %e, "failed to send indirect ping");
       }
     }
 
@@ -227,12 +221,12 @@ where
       futures::select! {
         _ = <T::Runtime as Runtime>::sleep(probe_timeout).fuse() => {
           // We've not received an ack, so send a nack.
-          let nack = Nack::new(ind.seq_no);
+          let nack = Nack::new(ind.sequence_number());
 
-          if let Err(e) = this.send_msg(ind.source.address(), nack.into()).await {
-            tracing::error!(target = "memberlist.packet", local = %ind.source, remote = %from, err = %e, "failed to send nack");
+          if let Err(e) = this.send_msg(ind.source().address(), nack.into()).await {
+            tracing::error!(target = "memberlist.packet", local = %ind.source(), remote = %from, err = %e, "failed to send nack");
           } else {
-            tracing::trace!(target = "memberlist.packet", local = %this.local_id(), source = %ind.source, "send nack");
+            tracing::trace!(target = "memberlist.packet", local = %this.local_id(), source = %ind.source(), "send nack");
           }
         }
         res = cancel_rx.fuse() => {
@@ -242,12 +236,12 @@ where
             }
             Err(_) => {
               // We've not received an ack, so send a nack.
-              let nack = Nack::new(ind.seq_no);
+              let nack = Nack::new(ind.sequence_number());
 
-              if let Err(e) = this.send_msg(ind.source.address(), nack.into()).await {
-                tracing::error!(target = "memberlist.packet", local = %ind.source, remote = %from, err = %e, "failed to send nack");
+              if let Err(e) = this.send_msg(ind.source().address(), nack.into()).await {
+                tracing::error!(target = "memberlist.packet", local = %ind.source(), remote = %from, err = %e, "failed to send nack");
               } else {
-                tracing::trace!(target = "memberlist.packet", local = %this.local_id(), source = %ind.source, "send nack");
+                tracing::trace!(target = "memberlist.packet", local = %this.local_id(), source = %ind.source(), "send nack");
               }
             }
           }

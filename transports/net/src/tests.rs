@@ -15,9 +15,8 @@ use memberlist_core::{
     AddressKind, TestPacketClient, TestPacketConnection, TestPacketStream, TestPromisedClient,
     TestPromisedConnection, TestPromisedStream,
   },
-  types::Message,
+  types::{Label, LabelBufMutExt, Message},
 };
-use memberlist_utils::{Label, LabelBufMutExt};
 use nodecraft::Transformable;
 use smol_str::SmolStr;
 

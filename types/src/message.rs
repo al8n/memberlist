@@ -281,11 +281,16 @@ impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> T
       }
       Self::NACK_TAG => {
         let (len, msg) = u32::decode(src)?;
-        (len + 1, Self::Nack(Nack { seq_no: msg }))
+        (
+          len + 1,
+          Self::Nack(Nack {
+            sequence_number: msg,
+          }),
+        )
       }
       Self::ERRORRESPONSE_TAG => {
         let (len, msg) = <SmolStr as Transformable>::decode(src)?;
-        (len + 1, Self::ErrorResponse(ErrorResponse { err: msg }))
+        (len + 1, Self::ErrorResponse(ErrorResponse { message: msg }))
       }
       _ => return Err(Self::Error::NotEnoughBytes),
     })
@@ -346,11 +351,16 @@ impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> T
       }
       Self::NACK_TAG => {
         let (len, msg) = u32::decode_from_reader(reader)?;
-        (len + 1, Self::Nack(Nack { seq_no: msg }))
+        (
+          len + 1,
+          Self::Nack(Nack {
+            sequence_number: msg,
+          }),
+        )
       }
       Self::ERRORRESPONSE_TAG => {
         let (len, msg) = <SmolStr as Transformable>::decode_from_reader(reader)?;
-        (len + 1, Self::ErrorResponse(ErrorResponse { err: msg }))
+        (len + 1, Self::ErrorResponse(ErrorResponse { message: msg }))
       }
       _ => {
         return Err(std::io::Error::new(
@@ -421,11 +431,16 @@ impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> T
       }
       Self::NACK_TAG => {
         let (len, msg) = u32::decode_from_async_reader(reader).await?;
-        (len + 1, Self::Nack(Nack { seq_no: msg }))
+        (
+          len + 1,
+          Self::Nack(Nack {
+            sequence_number: msg,
+          }),
+        )
       }
       Self::ERRORRESPONSE_TAG => {
         let (len, msg) = <SmolStr as Transformable>::decode_from_async_reader(reader).await?;
-        (len + 1, Self::ErrorResponse(ErrorResponse { err: msg }))
+        (len + 1, Self::ErrorResponse(ErrorResponse { message: msg }))
       }
       _ => {
         return Err(std::io::Error::new(

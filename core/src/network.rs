@@ -52,7 +52,7 @@ where
     };
     conn.set_deadline(Some(deadline));
 
-    let ping_seq_no = ping.seq_no;
+    let ping_sequence_number = ping.sequence_number();
     self.send_message(&mut conn, ping.into()).await?;
     let msg: Message<_, _> = self
       .read_message(target, &mut conn)
@@ -60,8 +60,11 @@ where
       .map(|(_, msg)| msg)?;
     let kind = msg.kind();
     if let Some(ack) = msg.try_unwrap_ack() {
-      if ack.seq_no != ping_seq_no {
-        return Err(Error::sequence_number_mismatch(ping_seq_no, ack.seq_no));
+      if ack.sequence_number() != ping_sequence_number {
+        return Err(Error::sequence_number_mismatch(
+          ping_sequence_number,
+          ack.sequence_number(),
+        ));
       }
 
       if let Err(e) = self.inner.transport.cache_stream(target, conn).await {

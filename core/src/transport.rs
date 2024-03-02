@@ -8,8 +8,8 @@ use crate::types::*;
 
 use super::*;
 
-pub mod stream;
-use stream::*;
+mod stream;
+pub use stream::*;
 
 mod lpe;
 pub use lpe::*;
@@ -169,16 +169,20 @@ impl<T: Transport> MaybeResolvedAddress<T> {
 /// Ensures that the stream has timeout capabilities.
 #[auto_impl::auto_impl(Box)]
 pub trait TimeoutableReadStream: Unpin + Send + Sync + 'static {
+  /// Set the read deadline.
   fn set_read_deadline(&mut self, deadline: Option<Instant>);
 
+  /// Returns the read deadline.
   fn read_deadline(&self) -> Option<Instant>;
 }
 
 /// Ensures that the stream has timeout capabilities.
 #[auto_impl::auto_impl(Box)]
 pub trait TimeoutableWriteStream: Unpin + Send + Sync + 'static {
+  /// Set the write deadline.
   fn set_write_deadline(&mut self, deadline: Option<Instant>);
 
+  /// Returns the write deadline.
   fn write_deadline(&self) -> Option<Instant>;
 }
 
@@ -186,11 +190,13 @@ pub trait TimeoutableWriteStream: Unpin + Send + Sync + 'static {
 pub trait TimeoutableStream:
   TimeoutableReadStream + TimeoutableWriteStream + Unpin + Send + Sync + 'static
 {
+  /// Set the deadline for both read and write.
   fn set_deadline(&mut self, deadline: Option<Instant>) {
     Self::set_read_deadline(self, deadline);
     Self::set_write_deadline(self, deadline);
   }
 
+  /// Returns the read deadline and the write deadline.
   fn deadline(&self) -> (Option<Instant>, Option<Instant>) {
     (Self::read_deadline(self), Self::write_deadline(self))
   }

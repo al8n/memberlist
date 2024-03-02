@@ -1,16 +1,18 @@
-use crate::{
+use super::{
   version::{UnknownDelegateVersion, UnknownProtocolVersion},
-  DelegateVersion, ProtocolVersion,
+  DelegateVersion, Meta, ProtocolVersion, MAX_ENCODED_LEN_SIZE,
 };
 
 use byteorder::{ByteOrder, NetworkEndian};
-use bytes::Bytes;
 use nodecraft::{CheapClone, Node};
 use transformable::Transformable;
 
-use super::MAX_ENCODED_LEN_SIZE;
-
-#[viewit::viewit]
+/// Alive message
+#[viewit::viewit(
+  vis_all = "pub(crate)",
+  getters(vis_all = "pub"),
+  setters(vis_all = "pub", prefix = "with")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
@@ -19,11 +21,103 @@ use super::MAX_ENCODED_LEN_SIZE;
 )]
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 pub struct Alive<I, A> {
+  #[viewit(
+    getter(const, attrs(doc = "Returns the incarnation of the alive message")),
+    setter(
+      const,
+      attrs(doc = "Sets the incarnation of the alive message (Builder pattern)")
+    )
+  )]
   incarnation: u32,
-  meta: Bytes,
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      attrs(doc = "Returns the meta of the alive message")
+    ),
+    setter(attrs(doc = "Sets the meta of the alive message (Builder pattern)"))
+  )]
+  meta: Meta,
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      attrs(doc = "Returns the node of the alive message")
+    ),
+    setter(attrs(doc = "Sets the node of the alive message (Builder pattern)"))
+  )]
   node: Node<I, A>,
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Returns the protocol version of the alive message is speaking")
+    ),
+    setter(
+      const,
+      attrs(doc = "Sets the protocol version of the alive message is speaking (Builder pattern)")
+    )
+  )]
   protocol_version: ProtocolVersion,
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Returns the delegate version of the alive message is speaking")
+    ),
+    setter(
+      const,
+      attrs(doc = "Sets the delegate version of the alive message is speaking (Builder pattern)")
+    )
+  )]
   delegate_version: DelegateVersion,
+}
+
+impl<I, A> Alive<I, A> {
+  /// Construct a new alive message with the given incarnation, meta, node, protocol version and delegate version.
+  #[inline]
+  pub const fn new(incarnation: u32, node: Node<I, A>) -> Self {
+    Self {
+      incarnation,
+      meta: Meta::empty(),
+      node,
+      protocol_version: ProtocolVersion::V0,
+      delegate_version: DelegateVersion::V0,
+    }
+  }
+
+  /// Sets the incarnation of the alive message.
+  #[inline]
+  pub fn set_incarnation(&mut self, incarnation: u32) -> &mut Self {
+    self.incarnation = incarnation;
+    self
+  }
+
+  /// Sets the meta of the alive message.
+  #[inline]
+  pub fn set_meta(&mut self, meta: Meta) -> &mut Self {
+    self.meta = meta;
+    self
+  }
+
+  /// Sets the node of the alive message.
+  #[inline]
+  pub fn set_node(&mut self, node: Node<I, A>) -> &mut Self {
+    self.node = node;
+    self
+  }
+
+  /// Set the protocol version of the alive message is speaking.
+  #[inline]
+  pub fn set_protocol_version(&mut self, protocol_version: ProtocolVersion) -> &mut Self {
+    self.protocol_version = protocol_version;
+    self
+  }
+
+  /// Set the delegate version of the alive message is speaking.
+  #[inline]
+  pub fn set_delegate_version(&mut self, delegate_version: DelegateVersion) -> &mut Self {
+    self.delegate_version = delegate_version;
+    self
+  }
 }
 
 impl<I: CheapClone, A: CheapClone> CheapClone for Alive<I, A> {
@@ -42,6 +136,8 @@ impl<I: CheapClone, A: CheapClone> CheapClone for Alive<I, A> {
 pub enum AliveTransformError<I: Transformable, A: Transformable> {
   /// Node transform error.
   Node(<Node<I, A> as Transformable>::Error),
+  /// Meta transform error.
+  Meta(<Meta as Transformable>::Error),
   /// Message too large.
   TooLarge(u64),
   /// Encode buffer too small.
@@ -58,6 +154,7 @@ impl<I: Transformable, A: Transformable> core::fmt::Debug for AliveTransformErro
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
       Self::Node(err) => write!(f, "node transform error: {:?}", err),
+      Self::Meta(err) => write!(f, "meta transform error: {:?}", err),
       Self::TooLarge(val) => write!(f, "encoded message too large, max {} got {val}", u32::MAX),
       Self::BufferTooSmall => write!(f, "encode buffer too small"),
       Self::NotEnoughBytes => write!(f, "the buffer did not contain enough bytes to decode Alive"),
@@ -71,6 +168,7 @@ impl<I: Transformable, A: Transformable> core::fmt::Display for AliveTransformEr
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
       Self::Node(err) => write!(f, "node transform error: {}", err),
+      Self::Meta(err) => write!(f, "meta transform error: {}", err),
       Self::TooLarge(val) => write!(f, "encoded message too large, max {} got {val}", u32::MAX),
       Self::BufferTooSmall => write!(f, "encode buffer too small"),
       Self::NotEnoughBytes => write!(f, "the buffer did not contain enough bytes to decode Alive"),
@@ -118,18 +216,10 @@ impl<I: Transformable, A: Transformable> Transformable for Alive<I, A> {
     NetworkEndian::write_u32(&mut dst[offset..], self.incarnation);
     offset += core::mem::size_of::<u32>();
 
-    if !self.meta.is_empty() {
-      dst[offset] = 1;
-      offset += 1;
-      let meta_len = self.meta.len() as u32;
-      NetworkEndian::write_u32(&mut dst[offset..], meta_len);
-      offset += core::mem::size_of::<u32>();
-      dst[offset..offset + meta_len as usize].copy_from_slice(&self.meta);
-      offset += meta_len as usize;
-    } else {
-      dst[offset] = 0;
-      offset += 1;
-    }
+    offset += self
+      .meta
+      .encode(&mut dst[offset..])
+      .map_err(Self::Error::Meta)?;
 
     offset += self
       .node
@@ -152,7 +242,7 @@ impl<I: Transformable, A: Transformable> Transformable for Alive<I, A> {
   fn encoded_len(&self) -> usize {
     MAX_ENCODED_LEN_SIZE
       + core::mem::size_of::<u32>() // incarnation
-      + if self.meta.is_empty() { 1 } else { self.meta.len() + 1 + MAX_ENCODED_LEN_SIZE }
+      + self.meta.encoded_len()
       + self.node.encoded_len()
       + 1 // protocol_version
       + 1 // delegate_version
@@ -176,30 +266,8 @@ impl<I: Transformable, A: Transformable> Transformable for Alive<I, A> {
     let incarnation = NetworkEndian::read_u32(&src[offset..]);
     offset += core::mem::size_of::<u32>();
 
-    let is_meta_empty = src[offset] == 0;
-    offset += 1;
-
-    let meta_len = if is_meta_empty {
-      0
-    } else {
-      if core::mem::size_of::<u32>() > src.len() - offset {
-        return Err(Self::Error::NotEnoughBytes);
-      }
-      let meta_len = NetworkEndian::read_u32(&src[offset..]) as usize;
-      offset += core::mem::size_of::<u32>();
-      meta_len
-    };
-
-    let meta = if meta_len > 0 {
-      if meta_len > src.len() - offset {
-        return Err(Self::Error::NotEnoughBytes);
-      }
-      let meta = Bytes::copy_from_slice(&src[offset..offset + meta_len]);
-      offset += meta_len;
-      meta
-    } else {
-      Bytes::new()
-    };
+    let (meta_len, meta) = Meta::decode(&src[offset..]).map_err(Self::Error::Meta)?;
+    offset += meta_len;
 
     let (node_len, node) = Node::decode(&src[offset..]).map_err(Self::Error::Node)?;
     offset += node_len;
@@ -304,7 +372,11 @@ const _: () = {
       let id = String::from_utf8(id).unwrap().into();
       Self {
         incarnation: random(),
-        meta: (0..size).map(|_| random::<u8>()).collect::<Vec<_>>().into(),
+        meta: (0..size)
+          .map(|_| random::<u8>())
+          .collect::<Vec<_>>()
+          .try_into()
+          .unwrap(),
         node: Node::new(
           id,
           format!("127.0.0.1:{}", thread_rng().gen_range(0..65535))

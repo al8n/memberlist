@@ -23,7 +23,7 @@ use crate::{
   Member, Memberlist, Options,
 };
 
-use super::{NodeState, Ping, PushNodeState, PushPull, State, Transport};
+use super::{Meta, NodeState, Ping, PushNodeState, PushPull, State, Transport};
 
 const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 const WAIT_DURATION: Duration = Duration::from_secs(6);
@@ -55,6 +55,7 @@ impl AddressKind {
   }
 }
 
+/// A trait for testing packet
 pub trait TestPacketStream: Send + Sync + 'static {
   /// Send all data to the transport
   fn send_to(&mut self, data: &[u8]) -> impl Future<Output = Result<(), AnyError>> + Send;
@@ -66,16 +67,21 @@ pub trait TestPacketStream: Send + Sync + 'static {
   fn finish(&mut self) -> impl Future<Output = Result<(), AnyError>> + Send;
 }
 
+/// A trait for testing packet connection
 pub trait TestPacketConnection: Send + Sync + 'static {
+  /// The stream type
   type Stream: TestPacketStream;
 
+  /// Accept from remote
   fn accept(&self) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
 
+  /// Connect to the remote address
   fn connect(&self) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
 }
 
 /// The client used to send/receive data to a transport
 pub trait TestPacketClient: Sized + Send + Sync + 'static {
+  /// The connection type
   type Connection: TestPacketConnection;
   /// Accept from remote
   fn accept(&mut self) -> impl Future<Output = Result<Self::Connection, AnyError>> + Send;
@@ -93,21 +99,29 @@ pub trait TestPacketClient: Sized + Send + Sync + 'static {
   fn close(&mut self) -> impl Future<Output = ()> + Send;
 }
 
+/// A trait for testing promised stream
 pub trait TestPromisedStream: Send + Sync + 'static {
+  /// finish the stream
   fn finish(&mut self) -> impl Future<Output = Result<(), AnyError>> + Send;
 }
 
+/// A trait for testing promised connection
 pub trait TestPromisedConnection: Send + Sync + 'static {
+  /// The stream type
   type Stream: TestPromisedStream;
 
+  /// Accept from remote
   fn accept(&self) -> impl Future<Output = Result<(Self::Stream, SocketAddr), AnyError>> + Send;
 
+  /// Connect to the remote address
   fn connect(&self) -> impl Future<Output = Result<Self::Stream, AnyError>> + Send;
 }
 
 /// The client used to send/receive data to a transport
 pub trait TestPromisedClient: Sized + Send + Sync + 'static {
+  /// The stream type
   type Stream: TestPromisedStream;
+  /// The connection type
   type Connection: TestPromisedConnection<Stream = Self::Stream>;
 
   /// Connect to the remote address
@@ -140,11 +154,11 @@ where
   let source_addr = client.local_addr();
 
   // Encode a ping
-  let ping = Ping {
-    seq_no: 42,
-    source: Node::new("test".into(), source_addr),
-    target: m.advertise_node(),
-  };
+  let ping = Ping::new(
+    42,
+    Node::new("test".into(), source_addr),
+    m.advertise_node(),
+  );
 
   let buf = Message::from(ping).encode_to_vec()?;
   // Send
@@ -174,7 +188,12 @@ where
   .await
   .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))?;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
-  assert_eq!(ack.seq_no, 42, "bad sequence no: {}", ack.seq_no);
+  assert_eq!(
+    ack.sequence_number(),
+    42,
+    "bad sequence no: {}",
+    ack.sequence_number()
+  );
 
   let res = futures::select! {
     res = tx.send(()).fuse() => {
@@ -190,6 +209,7 @@ where
   res
 }
 
+/// Unit test for handle compound ping functionality.
 pub async fn handle_compound_ping<A, T, C, E, R>(
   trans: T,
   mut client: C,
@@ -209,12 +229,11 @@ where
   let source_addr = client.local_addr();
 
   // Encode a ping
-  let ping = Ping {
-    seq_no: 42,
-    source: Node::new("test".into(), source_addr),
-    target: m.advertise_node(),
-  };
-
+  let ping = Ping::new(
+    42,
+    Node::new("test".into(), source_addr),
+    m.advertise_node(),
+  );
   let msgs = [
     Message::from(ping.cheap_clone()),
     Message::from(ping.cheap_clone()),
@@ -248,7 +267,12 @@ where
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
     let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
-    assert_eq!(ack.seq_no, 42, "bad sequence no: {}", ack.seq_no);
+    assert_eq!(
+      ack.sequence_number(),
+      42,
+      "bad sequence no: {}",
+      ack.sequence_number()
+    );
   }
 
   let res = futures::select! {
@@ -266,6 +290,7 @@ where
   res
 }
 
+/// Unit test for handle indirect ping functionality.
 pub async fn handle_indirect_ping<A, T, C, R>(trans: T, mut client: C) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
@@ -280,11 +305,11 @@ where
   let source_addr = client.local_addr();
 
   // Encode a ping
-  let ping = IndirectPing {
-    seq_no: 100,
-    source: Node::new("test".into(), source_addr),
-    target: m.advertise_node(),
-  };
+  let ping = IndirectPing::new(
+    100,
+    Node::new("test".into(), source_addr),
+    m.advertise_node(),
+  );
 
   let buf = Message::from(ping).encode_to_vec()?;
 
@@ -313,7 +338,12 @@ where
   .await
   .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))??;
   let ack = Message::<SmolStr, SocketAddr>::decode(&in_).map(|(_, msg)| msg.unwrap_ack())?;
-  assert_eq!(ack.seq_no, 100, "bad sequence no: {}", ack.seq_no);
+  assert_eq!(
+    ack.sequence_number(),
+    100,
+    "bad sequence no: {}",
+    ack.sequence_number()
+  );
   let res = futures::select! {
     res = tx.send(()).fuse() => {
       if res.is_err() {
@@ -329,6 +359,7 @@ where
   res
 }
 
+/// Unit test for handle ping wrong node functionality.
 pub async fn handle_ping_wrong_node<A, T, C, R>(trans: T, mut client: C) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
@@ -342,15 +373,15 @@ where
   let source_addr = client.local_addr();
 
   // Encode a ping
-  let ping: Ping<SmolStr, _> = Ping {
-    seq_no: 42,
-    source: Node::new("test".into(), source_addr),
-    target: Node::new("bad".into(), {
+  let ping: Ping<SmolStr, _> = Ping::new(
+    42,
+    Node::new("test".into(), source_addr),
+    Node::new("bad".into(), {
       let mut a = source_addr;
       a.set_port(12345);
       a
     }),
-  };
+  );
 
   let buf = Message::from(ping).encode_to_vec()?;
   // Send
@@ -378,6 +409,7 @@ where
   Ok(())
 }
 
+/// Unit test for send packet piggyback functionality.
 pub async fn send_packet_piggyback<A, T, C, D, R>(
   trans: T,
   mut client: C,
@@ -397,21 +429,15 @@ where
 
   // Add a message to be broadcast
   let n: Node<SmolStr, SocketAddr> = Node::new("rand".into(), *m.advertise_address());
-  let a = Alive {
-    incarnation: 10,
-    meta: Bytes::new(),
-    node: n.clone(),
-    protocol_version: crate::ProtocolVersion::V0,
-    delegate_version: crate::DelegateVersion::V0,
-  };
+  let a = Alive::new(10, n.clone()).with_meta(Meta::empty());
   m.broadcast(n.id().clone(), Message::from(a)).await;
 
   // Encode a ping
-  let ping = Ping {
-    seq_no: 42,
-    source: Node::new("test".into(), source_addr),
-    target: m.advertise_node(),
-  };
+  let ping = Ping::new(
+    42,
+    Node::new("test".into(), source_addr),
+    m.advertise_node(),
+  );
 
   let buf = Message::from(ping).encode_to_vec()?;
   // Send
@@ -444,11 +470,11 @@ where
 
   let [m1, m2] = parts;
   let ack = m1.unwrap_ack();
-  assert_eq!(ack.seq_no, 42, "bad sequence no");
+  assert_eq!(ack.sequence_number(), 42, "bad sequence no");
 
   let alive = m2.unwrap_alive();
-  assert_eq!(alive.incarnation, 10);
-  assert_eq!(alive.node, n);
+  assert_eq!(alive.incarnation(), 10);
+  assert_eq!(alive.node(), &n);
 
   let res = futures::select! {
     res = tx.send(()).fuse() => {
@@ -487,6 +513,7 @@ macro_rules! panic_on_err {
   };
 }
 
+/// Unit test for send ping through promised connection.
 pub async fn promised_ping<A, T, P, R>(
   trans: T,
   promised: P,
@@ -510,11 +537,7 @@ where
 
   // Do a normal rount trip
   let node = Node::new("mongo".into(), kind.next(0));
-  let ping_out = Ping {
-    seq_no: 23,
-    source: m.advertise_node(),
-    target: node.cheap_clone(),
-  };
+  let ping_out = Ping::new(23, m.advertise_node(), node.cheap_clone());
 
   let (ping_err_tx, ping_err_rx) = async_channel::bounded::<AnyError>(1);
   let m1 = m.clone();
@@ -546,13 +569,10 @@ where
                   .map_err(Into::into)
               ));
               let ping_in = p.unwrap_ping();
-              assert_eq!(ping_in.seq_no, 23);
-              assert_eq!(ping_in.target, node1);
+              assert_eq!(ping_in.sequence_number(), 23);
+              assert_eq!(ping_in.target(), &node1);
 
-              let ack = Ack {
-                seq_no: 23,
-                payload: Bytes::new(),
-              };
+              let ack = Ack::new(23);
 
               unwrap_ok!(ping_err_tx1.send(
                 m1.inner
@@ -576,10 +596,7 @@ where
               ));
 
               let ping_in = p.unwrap_ping();
-              let ack = Ack {
-                seq_no: ping_in.seq_no + 1,
-                payload: Bytes::new(),
-              };
+              let ack = Ack::new(ping_in.sequence_number() + 1);
 
               unwrap_ok!(ping_err_tx1.send(
                 m1.inner
@@ -607,11 +624,7 @@ where
                   .transport
                   .send_message(
                     stream.as_mut(),
-                    IndirectPing {
-                      seq_no: 0,
-                      source: Node::new("unknown source".into(), kind.next(0)),
-                      target: Node::new("unknown target".into(), kind.next(0)),
-                    }
+                    IndirectPing::new(0, Node::new("unknown source".into(), kind.next(0)), Node::new("unknown target".into(), kind.next(0)))
                     .into()
                   )
                   .await
@@ -722,6 +735,7 @@ where
   Ok(())
 }
 
+/// Unit test for send push/pull through promised connection.
 pub async fn promised_push_pull<A, T, P, R>(trans: T, promised: P) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
@@ -739,13 +753,7 @@ where
     let mut members = m.inner.nodes.write().await;
     members.nodes.push(Member {
       state: LocalNodeState {
-        server: Arc::new(NodeState::new(
-          id0.cheap_clone(),
-          bind_addr,
-          State::Alive,
-          Default::default(),
-          Default::default(),
-        )),
+        server: Arc::new(NodeState::new(id0.cheap_clone(), bind_addr, State::Alive)),
         incarnation: Arc::new(0.into()),
         state_change: Epoch::now() - Duration::from_secs(1),
         state: State::Suspect,
@@ -758,43 +766,16 @@ where
 
   let connector = promised.connect(bind_addr).await?;
 
-  let push_pull = PushPull {
-    join: false,
-    states: Arc::new(
-      [
-        PushNodeState {
-          id: id0.cheap_clone(),
-          addr: bind_addr,
-          meta: Bytes::new(),
-          incarnation: 1,
-          state: State::Alive,
-          protocol_version: Default::default(),
-          delegate_version: Default::default(),
-        },
-        PushNodeState {
-          id: "Test 1".into(),
-          addr: bind_addr,
-          meta: Bytes::new(),
-          incarnation: 1,
-          state: State::Alive,
-          protocol_version: Default::default(),
-          delegate_version: Default::default(),
-        },
-        PushNodeState {
-          id: "Test 2".into(),
-          addr: bind_addr,
-          meta: Bytes::new(),
-          incarnation: 1,
-          state: State::Alive,
-          protocol_version: Default::default(),
-          delegate_version: Default::default(),
-        },
-      ]
-      .into_iter()
-      .collect(),
-    ),
-    user_data: Bytes::new(),
-  };
+  let push_pull = PushPull::new(
+    false,
+    [
+      PushNodeState::new(1, id0.cheap_clone(), bind_addr, State::Alive),
+      PushNodeState::new(1, "Test 1".into(), bind_addr, State::Alive),
+      PushNodeState::new(1, "Test 2".into(), bind_addr, State::Alive),
+    ]
+    .into_iter()
+    .collect(),
+  );
 
   // Send the push/pull indicator
   let mut conn = connector.connect().await?;
@@ -809,12 +790,16 @@ where
     .read_message(&bind_addr, conn.as_mut())
     .await?;
   let readed_push_pull = msg.unwrap_push_pull();
-  assert!(!readed_push_pull.join);
-  assert_eq!(readed_push_pull.states.len(), 1);
-  assert_eq!(readed_push_pull.states[0].id, id0);
-  assert_eq!(readed_push_pull.states[0].incarnation, 0, "bad incarnation");
+  assert!(!readed_push_pull.join());
+  assert_eq!(readed_push_pull.states().len(), 1);
+  assert_eq!(readed_push_pull.states()[0].id(), &id0);
   assert_eq!(
-    readed_push_pull.states[0].state,
+    readed_push_pull.states()[0].incarnation(),
+    0,
+    "bad incarnation"
+  );
+  assert_eq!(
+    readed_push_pull.states()[0].state(),
     State::Suspect,
     "bad state"
   );
@@ -822,6 +807,7 @@ where
   Ok(())
 }
 
+/// Unit test for join functionality for the transport.
 pub async fn join<A, T1, T2, R>(trans1: T1, trans2: T2) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
@@ -890,6 +876,7 @@ where
   promised.close().await.unwrap();
 }
 
+/// Unit test for send functionality for the transport.
 pub async fn send<A, T1, T2, R>(trans1: T1, trans2: T2) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,

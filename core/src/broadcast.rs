@@ -12,7 +12,9 @@ use nodecraft::{resolver::AddressResolver, CheapClone};
 /// Something that can be broadcasted via gossip to
 /// the memberlist cluster.
 pub trait Broadcast: core::fmt::Debug + Send + Sync + 'static {
+  /// The id type
   type Id: Clone + Eq + core::hash::Hash + core::fmt::Debug + core::fmt::Display;
+  /// The message type
   type Message: Clone + core::fmt::Debug + Send + Sync + 'static;
 
   /// An optional extension of the Broadcast trait that
