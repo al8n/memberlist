@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "A placeholder"
+readme.workspace = true
+rust-version.workspace = true
+description = "A highly customable, adaptable, async runtime agnostic Gossip protocol which helps manage cluster membership and member failure detection."
 
 [features]
 default = ["tokio", "compression", "encryption", "dns", "tcp"]

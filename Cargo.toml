@@ -9,15 +9,16 @@ members = [
   # "bindings/nodejs",
   # "bindings/py",
 ]
-exclude = ["memberlist-wasm"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0/MIT"
+license = "MPL-2.0"
 repository = "https://github.com/al8n/memberlist"
 homepage = "https://github.com/al8n/memberlist"
+readme = "README.md"
+rust-version = "1.75.0"
 
 [workspace.metadata.docs.rs]
 all-features = true
@@ -53,7 +54,7 @@ thiserror = "1"
 tracing = "0.1"
 viewit = "0.1.5"
 
-memberlist-core = { path = "core", default-features = false }
-memberlist-net = { path = "transports/net", default-features = false }
-memberlist-types ={ path = "types", default-features = false }
-memberlist-quic = { path = "transports/quic", default-features = false }
+memberlist-core = { version = "0.1", path = "core", default-features = false }
+memberlist-net = { version = "0.1", path = "transports/net", default-features = false }
+memberlist-types ={ version = "0.1", path = "types", default-features = false }
+memberlist-quic = { version = "0.1", path = "transports/quic", default-features = false }

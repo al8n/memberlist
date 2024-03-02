@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-metadata.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "memberlist's transport layer based on TCP and UDP."
 
 [features]
 default = ["dns", "compression", "encryption"]
