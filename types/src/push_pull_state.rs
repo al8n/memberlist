@@ -281,7 +281,7 @@ impl<I: Transformable, A: Transformable> Transformable for PushNodeState<I, A> {
     + 1 // server state
     + 1 // protocol version
     + 1 // delegate version
-    + 1 + self.meta.encoded_len() + self.id.encoded_len() + self.addr.encoded_len()
+    + self.meta.encoded_len() + self.id.encoded_len() + self.addr.encoded_len()
   }
 
   fn decode(src: &[u8]) -> Result<(usize, Self), Self::Error>
