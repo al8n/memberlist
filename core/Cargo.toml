@@ -14,6 +14,7 @@ metrics = ["dep:metrics", "memberlist-utils/metrics"]
 serde = [
   "dep:serde",
   "bytes/serde",
+  "base64",
   "nodecraft/serde",
   "humantime-serde",
   "memberlist-utils/serde",
@@ -59,6 +60,8 @@ memberlist-utils.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 viewit.workspace = true
+
+base64 = { version = "0.22", optional = true }
 
 # rkyv feature
 rkyv = { version = "0.7", features = [

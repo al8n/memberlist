@@ -121,8 +121,7 @@ where
     timestamp: Instant,
   ) {
     match msgs.into_either() {
-      Either::Left(None) => {}
-      Either::Left(Some(msg)) => self.handle_message(msg, from, timestamp).await,
+      Either::Left([msg]) => self.handle_message(msg, from, timestamp).await,
       Either::Right(msgs) => {
         for msg in msgs {
           self

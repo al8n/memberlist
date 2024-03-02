@@ -45,6 +45,7 @@ scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 humantime-serde = "1"
 smallvec = "1"
+smallvec-wrapper = { version = "0.1", features = ["const_new", "either"] }
 smol_str = "0.2"
 transformable = { version = "0.1.6", features = ["smol_str", "bytes"] }
 thiserror = "1"

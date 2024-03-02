@@ -25,6 +25,9 @@ pub use packet::*;
 mod server;
 pub use server::*;
 
+mod secret;
+pub use secret::*;
+
 pub use memberlist_utils::*;
 
 mod epoch;
