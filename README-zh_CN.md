@@ -76,37 +76,37 @@ Here are the layers:
   
   This layer is used as a reactor for different kinds of messages.
 
-  - `Delegate`:
+  - **`Delegate`**
   
     Delegate is the trait that clients must implement if they want to hook into the gossip layer of Memberlist. All the methods must be thread-safe, as they can and generally will be called concurrently.
 
     Here are the sub delegate traits:
 
-    - `AliveDelegate`:
+    - **`AliveDelegate`**
 
       Used to involve a client in processing a node "alive" message. When a node joins, either through a packet gossip or promised push/pull, we update the state of that node via an alive message. This can be used to filter a node out and prevent it from being considered a peer using application specific logic.
 
-    - `ConflictDelegate`:
+    - **`ConflictDelegate`**
 
       Used to inform a client that a node has attempted to join which would result in a name conflict. This happens if two clients are configured with the same name but different addresses.
 
-    - `EventDelegate`:
+    - **`EventDelegate`**
 
       A simpler delegate that is used only to receive notifications about members joining and leaving. The methods in this delegate may be called by multiple threads, but never concurrently. This allows you to reason about ordering.
 
-    - `MergeDelegate`:
+    - **`MergeDelegate`**
 
       Used to involve a client in a potential cluster merge operation. Namely, when a node does a promised push/pull (as part of a join), the delegate is involved and allowed to cancel the join based on custom logic. The merge delegate is NOT invoked as part of the push-pull anti-entropy.
 
-    - `NodeDelegate`:
+    - **`NodeDelegate`**
 
       Used to manage node related events. e.g. metadata
 
-    - `PingDelegate`:
+    - **`PingDelegate`**
 
       Used to notify an observer how long it took for a ping message to complete a round trip. It can also be used for writing arbitrary byte slices into ack messages. Note that in order to be meaningful for RTT estimates, this delegate does not apply to indirect pings, nor fallback pings sent over promised connection.
 
-  - `CompositeDelegate`
+  - **`CompositeDelegate`**
 
     CompositeDelegate is a helpful struct to split the `Delegate` into multiple small delegates, so that users do not need to implement full `Delegate` when they only want to custom some methods in the Delegate.
 

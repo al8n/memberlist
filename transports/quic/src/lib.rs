@@ -1,4 +1,4 @@
-//! [`Transport`]'s network transport layer based on QUIC.
+//! [`memberlist`](https://crates.io/crates/memberlist)'s [`Transport`] layer based on QUIC.
 #![allow(clippy::type_complexity)]
 #![forbid(unsafe_code)]
 #![deny(warnings, missing_docs)]

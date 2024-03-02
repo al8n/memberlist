@@ -1,4 +1,4 @@
-//! [`Transport`]'s network transport layer based on TCP and UDP.
+//! [`memberlist`](https://crates.io/crates/memberlist)'s [`Transport`] layer based on TCP and UDP.
 #![allow(clippy::type_complexity)]
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Types used in the memberlist crate."
 
 [features]
 default = []
