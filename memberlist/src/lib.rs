@@ -1,4 +1,4 @@
-#![doc = include_str!("../../README.md")]
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 #![deny(warnings, missing_docs)]
 #![allow(clippy::type_complexity)]
