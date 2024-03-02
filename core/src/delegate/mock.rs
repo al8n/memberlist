@@ -1,5 +1,4 @@
 use futures::lock::Mutex;
-use memberlist_types::Meta;
 
 use super::*;
 
