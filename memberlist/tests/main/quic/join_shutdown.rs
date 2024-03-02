@@ -41,4 +41,4 @@ macro_rules! join_shutdown {
   };
 }
 
-test_mods!(join_shutdown);
+test_mods!(join_shutdown(std::time::Duration::from_millis(50)));

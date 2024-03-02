@@ -1806,7 +1806,7 @@ where
   // Read the join event
   subscriber.recv().await.unwrap();
 
-  let d = Dead::new(1, test_node_id.clone(), m.local_id().cheap_clone());
+  let d = Dead::new(1, test_node_id.clone(), test_node_id.clone());
 
   {
     let mut members = m.inner.nodes.write().await;
