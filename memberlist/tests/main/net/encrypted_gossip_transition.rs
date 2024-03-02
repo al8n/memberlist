@@ -4,8 +4,8 @@ use agnostic::Runtime;
 use memberlist::{
   delegate::{mock::MockDelegate, CompositeDelegate},
   futures::Stream,
-  transport::{tests::AddressKind, MaybeResolvedAddress, Node},
-  Memberlist, Options,
+  transport::{tests::AddressKind, MaybeResolvedAddress},
+  Memberlist,
 };
 use memberlist_net::stream_layer::StreamLayer;
 

@@ -27,7 +27,7 @@ use crate::{
   Memberlist, Options,
 };
 
-async fn host_memberlist<T, R: Runtime>(
+async fn host_memberlist<T, R>(
   t: T,
   opts: Options,
 ) -> Result<
@@ -43,7 +43,7 @@ where
   Memberlist::new_in(t, None, opts).await.map(|(_, _, t)| t)
 }
 
-async fn host_memberlist_with_delegate<D, T, R: Runtime>(
+async fn host_memberlist_with_delegate<D, T, R>(
   t: T,
   d: D,
   opts: Options,
@@ -811,7 +811,7 @@ pub async fn reset_nodes<T, R>(
     let nodes = m1.inner.nodes.read().await;
     assert_eq!(nodes.node_map.len(), 3, "bad: {}", nodes.node_map.len());
     assert!(
-      nodes.node_map.get(n2.id()).is_some(),
+      nodes.node_map.contains_key(n2.id()),
       "{} should not be unmapped",
       n2
     );
@@ -823,7 +823,7 @@ pub async fn reset_nodes<T, R>(
     let nodes = m1.inner.nodes.read().await;
     assert_eq!(nodes.node_map.len(), 2, "bad: {}", nodes.node_map.len());
     assert!(
-      nodes.node_map.get(n2.id()).is_none(),
+      !nodes.node_map.contains_key(n2.id()),
       "{} should be unmapped",
       n2
     );

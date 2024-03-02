@@ -1,11 +1,7 @@
 use std::future::Future;
 
 use agnostic::Runtime;
-use memberlist::{
-  futures::Stream,
-  transport::{MaybeResolvedAddress, Node, Transport},
-  Memberlist, Options,
-};
+use memberlist::{futures::Stream, transport::MaybeResolvedAddress, Memberlist};
 use memberlist_net::{compressor::Compressor, Label};
 
 use super::*;

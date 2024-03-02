@@ -1,5 +1,3 @@
-use memberlist_types::Meta;
-
 use super::*;
 
 /// `CompositeDelegate` is a helpful struct to split the [`Delegate`] into multiple small delegates,

@@ -1,8 +1,6 @@
 use crate::{NetTransport, NetTransportOptions};
 
 use super::*;
-use agnostic::Runtime;
-use futures::{Future, Stream};
 use memberlist_core::{
   transport::{Lpe, MaybeResolvedAddress},
   Memberlist, Options,

@@ -2,10 +2,7 @@ use std::future::Future;
 
 use agnostic::Runtime;
 use memberlist::{
-  futures::Stream,
-  transport::{MaybeResolvedAddress, Node, Transport},
-  types::CIDRsPolicy,
-  Memberlist, Options,
+  futures::Stream, transport::MaybeResolvedAddress, types::CIDRsPolicy, Memberlist,
 };
 
 use super::*;

@@ -18,7 +18,6 @@ mod tokio {
   use agnostic::tokio::TokioRuntime;
 
   use super::*;
-  use crate::tokio_run;
 
   set_probe_channels!(tokio("tcp", Tcp::<TokioRuntime>::new()));
 
@@ -37,10 +36,8 @@ mod tokio {
 
 #[cfg(feature = "async-std")]
 mod async_std {
-  use agnostic::async_std::AsyncStdRuntime;
 
   use super::*;
-  use crate::async_std_run;
 
   set_probe_channels!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
 
@@ -59,10 +56,8 @@ mod async_std {
 
 #[cfg(feature = "smol")]
 mod smol {
-  use agnostic::smol::SmolRuntime;
 
   use super::*;
-  use crate::smol_run;
 
   set_probe_channels!(smol("tcp", Tcp::<SmolRuntime>::new()));
 
