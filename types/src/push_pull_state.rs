@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use crate::version::{UnknownDelegateVersion, UnknownProtocolVersion};
-
 use super::*;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;

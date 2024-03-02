@@ -10,8 +10,8 @@ homepage.workspace = true
 default = []
 metrics = ["dep:metrics"]
 
-serde = ["dep:serde", "smol_str/serde", "smallvec-wrapper/serde", "base64", "ipnet/serde"]
-rkyv = ["dep:rkyv", "smallvec-wrapper/rkyv32"]
+serde = ["dep:serde", "smol_str/serde", "smallvec-wrapper/serde", "base64", "ipnet/serde", "bytes/serde", "nodecraft/serde"]
+rkyv = ["dep:rkyv", "smallvec-wrapper/rkyv32", "nodecraft/rkyv"]
 
 [dependencies]
 bytes.workspace = true
@@ -32,7 +32,7 @@ metrics = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 base64 = { version = "0.22", optional = true }
 
-rkyv = { version = "0.7", optional = true, features = ["smol_str"] }
+rkyv = { version = "0.7", optional = true, features = ["smol_str", "bytes"] }
 
 [dev-dependencies]
 rand = "0.8"
