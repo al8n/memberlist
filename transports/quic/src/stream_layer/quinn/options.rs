@@ -37,6 +37,20 @@ pub struct Options {
   )]
   server_name: SmolStr,
 
+  /// In QUIC, if you're trying to connect to a unreachable address,
+  /// you might not get an immediate error because of how QUIC and the underlying networking stack work.
+  /// QUIC attempts to establish connections asynchronously, and depending on the configuration,
+  /// it might retry or wait for a timeout before reporting a failure.
+  /// To handle such scenarios more gracefully and detect errors like attempting
+  /// to connect to a unreachable address more promptly, you need to set this config properly.
+  ///
+  /// Default value is 100ms.
+  #[viewit(
+    getter(const, attrs(doc = "Gets the timeout of the connect phase.")),
+    setter(attrs(doc = "Sets the timeout for connecting to an address."))
+  )]
+  connect_timeout: Duration,
+
   /// Maximum duration of inactivity in ms to accept before timing out the connection.
   #[viewit(
     getter(
@@ -161,6 +175,7 @@ impl Options {
       max_concurrent_stream_limit: 256,
       keep_alive_interval: Duration::from_secs(8),
       max_connection_data: 15_000_000,
+      connect_timeout: Duration::from_secs(10),
 
       // Ensure that one stream is not consuming the whole connection.
       max_stream_data: 10_000_000,
@@ -177,6 +192,7 @@ pub(super) struct QuinnOptions {
   client_config: quinn::ClientConfig,
   server_config: quinn::ServerConfig,
   endpoint_config: quinn::EndpointConfig,
+  connect_timeout: Duration,
   max_stream_data: usize,
   max_connection_data: usize,
   max_open_streams: usize,
@@ -195,6 +211,7 @@ impl From<Options> for QuinnOptions {
       max_stream_data,
       endpoint_config,
       mtu_discovery_config,
+      connect_timeout,
     } = config;
     let mut transport = quinn::TransportConfig::default();
     transport.max_concurrent_uni_streams(max_concurrent_stream_limit.into());
@@ -227,6 +244,7 @@ impl From<Options> for QuinnOptions {
       max_stream_data: max_stream_data as usize,
       max_connection_data: max_connection_data as usize,
       max_open_streams: max_concurrent_stream_limit as usize,
+      connect_timeout,
     }
   }
 }

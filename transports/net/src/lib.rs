@@ -13,7 +13,7 @@ use std::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
   },
-  time::{Duration, Instant},
+  time::Instant,
 };
 
 use agnostic::{
@@ -23,21 +23,21 @@ use agnostic::{
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{BufMut, BytesMut};
 use checksum::CHECKSUM_SIZE;
-use futures::{channel::oneshot, io::BufReader, AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::{
+  channel::oneshot, io::BufReader, stream::FuturesUnordered, AsyncRead, AsyncReadExt, AsyncWrite,
+  AsyncWriteExt, StreamExt,
+};
+pub use memberlist_core::types::{Label, LabelError};
 use memberlist_core::{
   transport::{
-    resolver::AddressResolver,
-    stream::{packet_stream, promised_stream, PacketSubscriber, StreamSubscriber},
-    Id, Transport, Wire,
+    packet_stream, promised_stream, resolver::AddressResolver, Id, PacketSubscriber,
+    StreamSubscriber, TimeoutableReadStream, TimeoutableWriteStream, Transport, Wire,
   },
   types::{Message, SmallVec, TinyVec},
+  util::{batch, Batch, IsGlobalIp},
   CheapClone,
 };
-use memberlist_utils::{net::IsGlobalIp, *};
-use peekable::future::AsyncPeekExt;
-
-#[doc(inline)]
-pub use memberlist_utils as utils;
+use peekable::future::{AsyncPeekExt, AsyncPeekable};
 
 /// Compress/decompress related.
 #[cfg(feature = "compression")]
@@ -72,7 +72,6 @@ pub mod stream_layer;
 use stream_layer::*;
 
 mod label;
-pub use label::Label;
 
 mod checksum;
 pub use checksum::Checksumer;
@@ -245,7 +244,7 @@ where
         let mut retries = 0;
         loop {
           match stream_layer.bind(addr).await {
-            Ok(ln) => break (ln.local_addr().unwrap(), ln),
+            Ok(ln) => break (ln.local_addr(), ln),
             Err(e) => {
               if retries < 9 {
                 retries += 1;
@@ -257,7 +256,7 @@ where
         }
       } else {
         match stream_layer.bind(addr).await {
-          Ok(ln) => (ln.local_addr().unwrap(), ln),
+          Ok(ln) => (ln.local_addr(), ln),
           Err(e) => return Err(NetTransportError::ListenPromised(addr, e)),
         }
       };
@@ -410,21 +409,6 @@ where
   }
 }
 
-struct Batch<I, A> {
-  num_packets: usize,
-  packets: TinyVec<Message<I, A>>,
-  estimate_encoded_len: usize,
-}
-
-impl<I, A> Batch<I, A> {
-  fn estimate_encoded_len(&self) -> usize {
-    if self.packets.len() == 1 {
-      return self.estimate_encoded_len - PACKET_HEADER_OVERHEAD - PACKET_OVERHEAD;
-    }
-    self.estimate_encoded_len
-  }
-}
-
 impl<I, A, S, W, R> Transport for NetTransport<I, A, S, W, R>
 where
   I: Id,
@@ -506,8 +490,9 @@ where
     ),
     Self::Error,
   > {
-    let mut conn = BufReader::new(conn).peekable();
-    let mut stream_label = label::remove_label_header(&mut conn).await.map_err(|e| {
+    let ddl = conn.read_deadline();
+    let mut conn = BufReader::new(conn).peekable().with_deadline(ddl);
+    let mut stream_label = label::remove_label_header::<R>(&mut conn).await.map_err(|e| {
       tracing::error!(target = "memberlist.net.promised", remote = %from, err=%e, "failed to receive and remove the stream label header");
       ConnectionError::promised_read(e)
     })?.unwrap_or_else(Label::empty);
@@ -564,7 +549,8 @@ where
     conn: &mut Self::Stream,
     msg: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<usize, Self::Error> {
-    self.send_by_promised(conn, msg).await
+    let ddl = conn.write_deadline();
+    self.send_by_promised(conn.with_deadline(ddl), msg).await
   }
 
   async fn send_packet(
@@ -574,13 +560,13 @@ where
   ) -> Result<(usize, Instant), Self::Error> {
     let start = Instant::now();
     let encoded_size = W::encoded_len(&packet);
+    let packets_overhead = self.packets_header_overhead();
     self
       .send_batch(
         addr,
-        Batch {
-          packets: TinyVec::from(packet),
-          num_packets: 1,
-          estimate_encoded_len: self.packets_header_overhead() + PACKET_OVERHEAD + encoded_size,
+        Batch::One {
+          msg: packet,
+          estimate_encoded_size: packets_overhead - PACKET_HEADER_OVERHEAD + encoded_size,
         },
       )
       .await
@@ -594,81 +580,40 @@ where
   ) -> Result<(usize, Instant), Self::Error> {
     let start = Instant::now();
 
-    let mut batches =
-      SmallVec::<Batch<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>::new();
     let packets_overhead = self.packets_header_overhead();
-    let mut estimate_batch_encoded_size = packets_overhead;
-    let mut current_packets_in_batch = 0;
+    let batches = batch::<_, _, _, Self::Wire>(
+      packets_overhead - PACKET_HEADER_OVERHEAD,
+      PACKET_HEADER_OVERHEAD,
+      PACKET_OVERHEAD,
+      self.max_payload_size(),
+      u16::MAX as usize,
+      NUM_PACKETS_PER_BATCH,
+      packets,
+    );
 
-    // get how many packets a batch
-    for packet in packets.iter() {
-      let ep_len = W::encoded_len(packet);
-      // check if we reach the maximum packet size
-      let current_encoded_size = estimate_batch_encoded_size + PACKET_OVERHEAD + ep_len;
-      if current_encoded_size >= self.max_payload_size()
-        || current_packets_in_batch >= NUM_PACKETS_PER_BATCH
-      {
-        batches.push(Batch {
-          packets: TinyVec::with_capacity(current_packets_in_batch),
-          num_packets: current_packets_in_batch,
-          estimate_encoded_len: estimate_batch_encoded_size,
-        });
-        estimate_batch_encoded_size =
-          packets_overhead + PACKET_HEADER_OVERHEAD + PACKET_OVERHEAD + ep_len;
-        current_packets_in_batch = 1;
-      } else {
-        estimate_batch_encoded_size += PACKET_OVERHEAD + ep_len;
-        current_packets_in_batch += 1;
+    let mut total_bytes_sent = 0;
+    let mut futs = batches
+      .into_iter()
+      .map(|b| self.send_batch(addr, b))
+      .collect::<FuturesUnordered<_>>();
+    while let Some(res) = futs.next().await {
+      match res {
+        Ok(sent) => {
+          total_bytes_sent += sent;
+        }
+        Err(e) => return Err(e),
       }
     }
-
-    // consume the packets to small batches according to batch_offsets.
-
-    // if batch_offsets is empty, means that packets can be sent by one I/O call
-    if batches.is_empty() {
-      self
-        .send_batch(
-          addr,
-          Batch {
-            num_packets: packets.len(),
-            packets,
-            estimate_encoded_len: estimate_batch_encoded_size,
-          },
-        )
-        .await
-        .map(|sent| (sent, start))
-    } else {
-      let mut batch_idx = 0;
-      for (idx, packet) in packets.into_iter().enumerate() {
-        let batch = &mut batches[batch_idx];
-        batch.packets.push(packet);
-        if batch.num_packets == idx - 1 {
-          batch_idx += 1;
-        }
-      }
-
-      let mut total_bytes_sent = 0;
-      let resps =
-        futures::future::join_all(batches.into_iter().map(|b| self.send_batch(addr, b))).await;
-
-      for res in resps {
-        match res {
-          Ok(sent) => {
-            total_bytes_sent += sent;
-          }
-          Err(e) => return Err(e),
-        }
-      }
-      Ok((total_bytes_sent, start))
-    }
+    Ok((total_bytes_sent, start))
   }
 
-  async fn dial_timeout(
+  async fn dial_with_deadline(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    timeout: Duration,
+    deadline: Instant,
   ) -> Result<Self::Stream, Self::Error> {
-    let connector = <Self::Runtime as Runtime>::timeout(timeout, self.stream_layer.connect(*addr));
+    let connector =
+      <Self::Runtime as Runtime>::timeout_at(deadline, self.stream_layer.connect(*addr));
     match connector.await {
       Ok(Ok(conn)) => Ok(conn),
       Ok(Err(e)) => Err(Self::Error::Connection(ConnectionError {
@@ -730,5 +675,45 @@ where
 {
   fn drop(&mut self) {
     self.shutdown_tx.close();
+  }
+}
+
+trait WithDeadline: Sized {
+  fn with_deadline(self, deadline: Option<Instant>) -> Deadline<Self> {
+    Deadline { op: self, deadline }
+  }
+}
+
+impl<T> WithDeadline for T {}
+
+struct Deadline<T> {
+  op: T,
+  deadline: Option<Instant>,
+}
+
+impl<T: AsyncRead + Send + Unpin> Deadline<T> {
+  async fn read_exact<R: Runtime>(&mut self, dst: &mut [u8]) -> std::io::Result<()> {
+    match self.deadline {
+      Some(ddl) => R::timeout_at(ddl, self.op.read_exact(dst)).await?,
+      None => self.op.read_exact(dst).await,
+    }
+  }
+}
+
+impl<T: AsyncWrite + Send + Unpin> Deadline<T> {
+  async fn write_all<R: Runtime>(&mut self, src: &[u8]) -> std::io::Result<()> {
+    match self.deadline {
+      Some(ddl) => R::timeout_at(ddl, self.op.write_all(src)).await?,
+      None => self.op.write_all(src).await,
+    }
+  }
+}
+
+impl<T: AsyncRead + Send + Unpin> Deadline<AsyncPeekable<T>> {
+  async fn peek_exact<R: Runtime>(&mut self, dst: &mut [u8]) -> std::io::Result<()> {
+    match self.deadline {
+      Some(ddl) => R::timeout_at(ddl, self.op.peek_exact(dst)).await?,
+      None => self.op.peek_exact(dst).await,
+    }
   }
 }

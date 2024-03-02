@@ -27,13 +27,8 @@ pub trait Listener: Send + Sync + 'static {
   /// Accepts an incoming connection.
   fn accept(&self) -> impl Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send;
 
-  // /// Sets the timeout for accepting new connections.
-  // #[cfg(any(feature = "test", test))]
-  // #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]
-  // fn set_accept_timeout(&mut self, timeout: Option<std::time::Duration>);
-
   /// Retrieves the local socket address of the listener.
-  fn local_addr(&self) -> io::Result<SocketAddr>;
+  fn local_addr(&self) -> SocketAddr;
 }
 
 /// Represents a network connection.
@@ -43,6 +38,11 @@ pub trait Listener: Send + Sync + 'static {
 pub trait PromisedStream:
   TimeoutableStream + AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static
 {
+  /// Returns the address of the local endpoint of the connection.
+  fn local_addr(&self) -> SocketAddr;
+
+  /// Returns the address of the remote endpoint of the connection.
+  fn peer_addr(&self) -> SocketAddr;
 }
 
 /// A trait defining the necessary components for a stream-based network layer.

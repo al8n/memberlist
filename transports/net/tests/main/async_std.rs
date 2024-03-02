@@ -29,6 +29,9 @@ mod label;
 #[path = "async_std/join.rs"]
 mod join;
 
+#[path = "async_std/join_dead_node.rs"]
+mod join_dead_node;
+
 #[path = "async_std/promised_listener_backoff.rs"]
 mod promised_listener_backoff;
 

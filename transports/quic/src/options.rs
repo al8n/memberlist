@@ -153,7 +153,7 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
       style = "ref",
       result(
         converter(fn = "Option::as_deref"),
-        type = "Option<&memberlist_utils::MetricLabels>"
+        type = "Option<&memberlist_core::types::MetricLabels>"
       ),
       attrs(
         doc = "Get the metrics labels.",
@@ -167,7 +167,7 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
       cfg_attr(docsrs, doc(cfg(feature = "metrics")))
     ))
   )]
-  metric_labels: Option<Arc<memberlist_utils::MetricLabels>>,
+  metric_labels: Option<Arc<memberlist_core::types::MetricLabels>>,
 }
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I, A> {

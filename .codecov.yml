@@ -1,0 +1,45 @@
+codecov:
+  require_ci_to_pass: false
+
+ignore:
+  - core/src/state/tests.rs
+  - core/src/base/tests.rs
+  - core/src/transport/tests.rs
+  - core/src/delegate/mock.rs
+  - transports/net/src/tests.rs
+  - transports/net/src/tests/*
+  - transports/net/tests/*
+  - transports/quic/src/tests.rs
+  - transports/quic/src/tests/*
+  - transports/quic/tests/*
+  - memberlist/tests/*
+
+flags: # Define flags for each sub-crate
+  memberlist:
+    paths:
+      - memberlist
+  transport_net:
+    paths:
+      - transports/net
+  transport_quic:
+    paths:
+      - transports/quic
+
+coverage:
+  status:
+    project: # Overall project status
+      default:
+        target: auto
+        if_not_found: success
+        only_pulls: false
+    patch: # Status for the patch in pull requests
+      default:
+        target: auto
+        if_not_found: success
+        only_pulls: true
+    changes: false # Whether to comment on the coverage changes in pull requests
+
+comment:
+  layout: "header, diff, files, footer"
+  behavior: default
+  require_changes: false

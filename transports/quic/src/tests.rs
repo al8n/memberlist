@@ -16,9 +16,8 @@ use memberlist_core::{
     },
     Transport,
   },
-  types::Message,
+  types::{Label, LabelBufMutExt, Message},
 };
-use memberlist_utils::{Label, LabelBufMutExt};
 use nodecraft::{CheapClone, Transformable};
 use smol_str::SmolStr;
 
@@ -61,6 +60,9 @@ pub mod send;
 /// Unit test for joining
 #[cfg(feature = "compression")]
 pub mod join;
+
+/// Unit test for joining dead node
+pub mod join_dead_node;
 
 pub struct QuicTestPacketStream<S: StreamLayer> {
   stream: S::Stream,
@@ -474,7 +476,7 @@ fn compound_encoder(msgs: &[Message<SmolStr, SocketAddr>]) -> Result<Bytes, AnyE
 }
 
 #[cfg(feature = "quinn")]
-pub use quinn_stream_layer::quinn_stream_layer;
+pub use quinn_stream_layer::*;
 
 #[cfg(feature = "quinn")]
 mod quinn_stream_layer {
@@ -490,6 +492,7 @@ mod quinn_stream_layer {
       atomic::{AtomicU16, Ordering},
       Arc,
     },
+    time::Duration,
   };
 
   struct SkipServerVerification;
@@ -558,6 +561,21 @@ mod quinn_stream_layer {
       client_config,
       Default::default(),
     ))
+  }
+
+  /// Returns a new quinn stream layer
+  pub async fn quinn_stream_layer_with_connect_timeout<R: Runtime>(timeout: Duration) -> Quinn<R> {
+    let server_name = "localhost".to_string();
+    let (server_config, client_config) = configures().unwrap();
+    Quinn::new(
+      Options::new(
+        server_name,
+        server_config,
+        client_config,
+        Default::default(),
+      )
+      .with_connect_timeout(timeout),
+    )
   }
 }
 

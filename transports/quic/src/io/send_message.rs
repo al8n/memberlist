@@ -1,5 +1,5 @@
 use bytes::{BufMut, BytesMut};
-use memberlist_utils::LabelBufMutExt;
+use memberlist_core::types::LabelBufMutExt;
 
 use super::*;
 

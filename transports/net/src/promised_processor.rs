@@ -1,12 +1,11 @@
-use std::{
-  net::SocketAddr,
-  sync::{atomic::Ordering, Arc},
-  time::Duration,
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+
+#[cfg(any(test, feature = "test"))]
+use std::sync::atomic::Ordering;
 
 use agnostic::Runtime;
 use futures::FutureExt;
-use memberlist_core::transport::{stream::StreamProducer, Transport};
+use memberlist_core::transport::{StreamProducer, Transport};
 use nodecraft::resolver::AddressResolver;
 
 use super::{Listener, StreamLayer};
@@ -133,7 +132,7 @@ where
       ))
     }
 
-    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+    fn local_addr(&self) -> SocketAddr {
       self.ln.local_addr()
     }
   }
@@ -161,9 +160,9 @@ where
 
   let _lock = BACKOFFS_LOCK.lock();
   let ln = s.bind(kind.next(0)).await?;
-  let local_addr = ln.local_addr()?;
+  let local_addr = ln.local_addr();
   let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
-  let (stream_tx, stream_rx) = memberlist_core::transport::stream::promised_stream::<T>();
+  let (stream_tx, stream_rx) = memberlist_core::transport::promised_stream::<T>();
   let task = <T::Runtime as Runtime>::spawn(
     PromisedProcessor::<A, T, TestStreamLayer<S>> {
       stream_tx,

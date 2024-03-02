@@ -2,9 +2,9 @@
 members = [
   "core",
   "memberlist",
+  "types",
   "transports/net",
   "transports/quic",
-  "utils",
   # "bindings/js",
   # "bindings/nodejs",
   # "bindings/py",
@@ -31,6 +31,7 @@ bytes = "1.5"
 byteorder = "1"
 derive_more = "0.99"
 futures = "0.3"
+local-ip-address = "0.6"
 metrics = "0.22"
 nodecraft = { version = "0.2", features = [
   "transformable",
@@ -45,6 +46,7 @@ scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 humantime-serde = "1"
 smallvec = "1"
+smallvec-wrapper = { version = "0.1", features = ["const_new", "either"] }
 smol_str = "0.2"
 transformable = { version = "0.1.6", features = ["smol_str", "bytes"] }
 thiserror = "1"
@@ -53,5 +55,5 @@ viewit = "0.1.5"
 
 memberlist-core = { path = "core", default-features = false }
 memberlist-net = { path = "transports/net", default-features = false }
+memberlist-types ={ path = "types", default-features = false }
 memberlist-quic = { path = "transports/quic", default-features = false }
-memberlist-utils = { path = "utils", default-features = false }

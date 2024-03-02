@@ -1,3 +1,6 @@
+use bytes::Bytes;
+use memberlist_core::types::LabelBufMutExt;
+
 use super::*;
 
 impl<I, A, S, W, R> NetTransport<I, A, S, W, R>
@@ -38,12 +41,12 @@ where
   ) -> Result<usize, NetTransportError<A, W>> {
     let mut offset = 0;
 
-    let num_packets = batch.packets.len();
+    let num_packets = batch.len();
     // Encode messages to buffer
     if num_packets <= 1 {
-      let packet = batch.packets.into_iter().next().unwrap();
-      let expected_packet_encoded_size = W::encoded_len(&packet);
+      let packet = batch.into_iter().next().unwrap();
 
+      let expected_packet_encoded_size = W::encoded_len(&packet);
       let actual_packet_encoded_size =
         W::encode_message(packet, &mut buf[offset..]).map_err(NetTransportError::Wire)?;
       debug_assert_eq!(
@@ -61,7 +64,7 @@ where
     buf[offset] = num_packets as u8;
     offset += 1;
 
-    for packet in batch.packets {
+    for packet in batch {
       let expected_packet_encoded_size = W::encoded_len(&packet);
       NetworkEndian::write_u16(
         &mut buf[offset..offset + PACKET_OVERHEAD],
@@ -96,7 +99,7 @@ where
     buf.put_slice(&[0; CHECKSUM_SIZE]);
     offset += CHECKSUM_HEADER;
 
-    buf.resize(batch.estimate_encoded_len(), 0);
+    buf.resize(batch.estimate_encoded_size(), 0);
 
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     offset += encoded_size;
@@ -152,12 +155,12 @@ where
     buf.put_u8(checksumer as u8);
     buf.put_slice(&[0; CHECKSUM_SIZE]);
     offset += CHECKSUM_SIZE + 1;
-    let estimate_encoded_len = batch.estimate_encoded_len();
-    if estimate_encoded_len >= max_payload_size {
-      return Err(NetTransportError::PacketTooLarge(estimate_encoded_len));
+    let estimate_encoded_size = batch.estimate_encoded_size();
+    if estimate_encoded_size >= max_payload_size {
+      return Err(NetTransportError::PacketTooLarge(estimate_encoded_size));
     }
 
-    buf.resize(estimate_encoded_len, 0);
+    buf.resize(estimate_encoded_size, 0);
 
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     buf.truncate(offset + encoded_size);
@@ -217,7 +220,7 @@ where
     buf.put_slice(&[0; CHECKSUM_SIZE]);
     offset += CHECKSUM_SIZE + 1;
 
-    buf.resize(batch.estimate_encoded_len(), 0);
+    buf.resize(batch.estimate_encoded_size(), 0);
     let encoded_size = Self::encode_batch(&mut buf[offset..], batch)?;
     offset += encoded_size;
     let mut compress_offset = checksum_offset + CHECKSUM_HEADER;
@@ -262,11 +265,10 @@ where
 
   async fn send_batch_without_compression_and_encryption(
     &self,
-    addr: &A::ResolvedAddress,
     batch: Batch<I, A::ResolvedAddress>,
-  ) -> Result<usize, NetTransportError<A, W>> {
+  ) -> Result<Bytes, NetTransportError<A, W>> {
     let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_size());
     buf.add_label_header(&self.opts.label);
     offset += self.opts.label.encoded_overhead();
 
@@ -280,34 +282,28 @@ where
     buf.put_slice(&[0; CHECKSUM_SIZE]);
     offset += CHECKSUM_HEADER;
 
-    buf.resize(batch.estimate_encoded_len(), 0);
-
+    buf.resize(batch.estimate_encoded_size(), 0);
     Self::encode_batch(&mut buf[offset..], batch)?;
     let data_offset = checksum_offset + CHECKSUM_HEADER;
     // update checksum
     let cks = self.opts.checksumer.checksum(&buf[data_offset..]);
     NetworkEndian::write_u32(&mut buf[checksum_offset + 1..data_offset], cks);
-    self
-      .next_socket(addr)
-      .send_to(&buf, addr)
-      .await
-      .map_err(|e| NetTransportError::Connection(ConnectionError::packet_write(e)))
+    Ok(buf.freeze())
   }
 
   #[cfg(feature = "compression")]
   async fn send_batch_with_compression_without_encryption(
     &self,
-    addr: &A::ResolvedAddress,
     batch: Batch<I, A::ResolvedAddress>,
-  ) -> Result<usize, NetTransportError<A, W>> {
+  ) -> Result<Bytes, NetTransportError<A, W>> {
     let Some(compressor) = self.opts.compressor else {
       return self
-        .send_batch_without_compression_and_encryption(addr, batch)
+        .send_batch_without_compression_and_encryption(batch)
         .await;
     };
 
     let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_size());
     buf.add_label_header(&self.opts.label);
     offset += self.opts.label.encoded_overhead();
 
@@ -322,11 +318,7 @@ where
         self.max_payload_size(),
       )?;
 
-      return self
-        .next_socket(addr)
-        .send_to(&buf, addr)
-        .await
-        .map_err(|e| ConnectionError::packet_write(e).into());
+      return Ok(buf.freeze());
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
@@ -351,11 +343,7 @@ where
     });
 
     match rx.await {
-      Ok(Ok(buf)) => self
-        .next_socket(addr)
-        .send_to(&buf, addr)
-        .await
-        .map_err(|e| ConnectionError::packet_write(e).into()),
+      Ok(Ok(buf)) => Ok(buf.freeze()),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(NetTransportError::ComputationTaskFailed),
     }
@@ -364,19 +352,18 @@ where
   #[cfg(feature = "encryption")]
   async fn send_batch_with_encryption_without_compression(
     &self,
-    addr: &A::ResolvedAddress,
     batch: Batch<I, A::ResolvedAddress>,
-  ) -> Result<usize, NetTransportError<A, W>> {
+  ) -> Result<Bytes, NetTransportError<A, W>> {
     if !self.enable_packet_encryption() {
       return self
-        .send_batch_without_compression_and_encryption(addr, batch)
+        .send_batch_without_compression_and_encryption(batch)
         .await;
     }
 
     let encryptor = self.encryptor.as_ref().unwrap();
     let encryption_algo = self.opts.encryption_algo.unwrap();
     let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_size());
     buf.add_label_header(&self.opts.label);
     offset += self.opts.label.encoded_overhead();
 
@@ -395,11 +382,7 @@ where
         self.max_payload_size(),
       )?;
 
-      return self
-        .next_socket(addr)
-        .send_to(&buf, addr)
-        .await
-        .map_err(|e| ConnectionError::packet_write(e).into());
+      return Ok(buf.freeze());
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
@@ -430,11 +413,7 @@ where
     });
 
     match rx.await {
-      Ok(Ok(buf)) => self
-        .next_socket(addr)
-        .send_to(&buf, addr)
-        .await
-        .map_err(|e| ConnectionError::packet_write(e).into()),
+      Ok(Ok(buf)) => Ok(buf.freeze()),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(NetTransportError::ComputationTaskFailed),
     }
@@ -443,30 +422,29 @@ where
   #[cfg(all(feature = "compression", feature = "encryption"))]
   async fn send_batch_with_compression_and_encryption(
     &self,
-    addr: &A::ResolvedAddress,
     batch: Batch<I, A::ResolvedAddress>,
-  ) -> Result<usize, NetTransportError<A, W>> {
+  ) -> Result<Bytes, NetTransportError<A, W>> {
     let encryption_enabled = self.enable_packet_encryption();
     if self.opts.compressor.is_none() && !encryption_enabled {
       return self
-        .send_batch_without_compression_and_encryption(addr, batch)
+        .send_batch_without_compression_and_encryption(batch)
         .await;
     }
 
     if self.opts.compressor.is_some() && !encryption_enabled {
       return self
-        .send_batch_with_compression_without_encryption(addr, batch)
+        .send_batch_with_compression_without_encryption(batch)
         .await;
     }
 
     if self.opts.compressor.is_none() && encryption_enabled {
       return self
-        .send_batch_with_encryption_without_compression(addr, batch)
+        .send_batch_with_encryption_without_compression(batch)
         .await;
     }
 
     let mut offset = 0;
-    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_len());
+    let mut buf = BytesMut::with_capacity(batch.estimate_encoded_size());
     buf.add_label_header(&self.opts.label);
     offset += self.opts.label.encoded_overhead();
 
@@ -474,7 +452,7 @@ where
 
     let encryptor = self.encryptor.as_ref().unwrap();
     let pk = encryptor.primary_key().await;
-    if batch.estimate_encoded_len() / 2 <= self.opts.offload_size {
+    if batch.estimate_encoded_size() / 2 <= self.opts.offload_size {
       let buf = Self::encode_and_compress_and_encrypt_batch(
         self.opts.checksumer,
         self.opts.compressor.unwrap(),
@@ -487,11 +465,7 @@ where
         self.max_payload_size(),
       )?;
 
-      return self
-        .next_socket(addr)
-        .send_to(&buf, addr)
-        .await
-        .map_err(|e| ConnectionError::packet_write(e).into());
+      return Ok(buf.freeze());
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
@@ -525,11 +499,7 @@ where
     });
 
     match rx.await {
-      Ok(Ok(buf)) => self
-        .next_socket(addr)
-        .send_to(&buf, addr)
-        .await
-        .map_err(|e| ConnectionError::packet_write(e).into()),
+      Ok(Ok(buf)) => Ok(buf.freeze()),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(NetTransportError::ComputationTaskFailed),
     }
@@ -541,23 +511,51 @@ where
     batch: Batch<I, A::ResolvedAddress>,
   ) -> Result<usize, NetTransportError<A, W>> {
     #[cfg(not(any(feature = "compression", feature = "encryption")))]
-    return self
-      .send_batch_without_compression_and_encryption(addr, batch)
-      .await;
+    {
+      let buf = self
+        .send_batch_without_compression_and_encryption(batch)
+        .await?;
+      return self.send_batch_in(addr, &buf).await;
+    };
 
     #[cfg(all(feature = "compression", not(feature = "encryption")))]
-    return self
-      .send_batch_with_compression_without_encryption(addr, batch)
-      .await;
+    {
+      let buf = self
+        .send_batch_with_compression_without_encryption(batch)
+        .await?;
+      return self.send_batch_in(addr, &buf).await;
+    }
 
     #[cfg(all(not(feature = "compression"), feature = "encryption"))]
-    return self
-      .send_batch_with_encryption_without_compression(addr, batch)
-      .await;
+    {
+      let buf = self
+        .send_batch_with_encryption_without_compression(batch)
+        .await?;
+      return self.send_batch_in(addr, &buf).await;
+    }
 
     #[cfg(all(feature = "compression", feature = "encryption"))]
+    {
+      let buf = self
+        .send_batch_with_compression_and_encryption(batch)
+        .await?;
+      self.send_batch_in(addr, &buf).await
+    }
+  }
+
+  async fn send_batch_in(
+    &self,
+    addr: &A::ResolvedAddress,
+    buf: &[u8],
+  ) -> Result<usize, NetTransportError<A, W>> {
     self
-      .send_batch_with_compression_and_encryption(addr, batch)
+      .next_socket(addr)
+      .send_to(buf, addr)
       .await
+      .map(|num| {
+        tracing::trace!(target = "memberlist.transport.net.packet", remote=%addr, total_bytes = %num, sent=?buf);
+        num
+      })
+      .map_err(|e| ConnectionError::packet_write(e).into())
   }
 }

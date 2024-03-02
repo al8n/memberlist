@@ -8,22 +8,20 @@ homepage.workspace = true
 description = "A placeholder"
 
 [features]
-default = ["tokio-runtime", "compression", "encryption", "dns", "tcp"]
+default = ["tokio", "compression", "encryption", "dns", "tcp"]
 
-tokio-runtime = ["agnostic/tokio"]
-async-std-runtime = ["agnostic/async-std"]
-smol-runtime = ["agnostic/smol"]
+tokio = ["agnostic/tokio"]
+async-std = ["agnostic/async-std"]
+smol = ["agnostic/smol"]
 
 serde = [
   "memberlist-core/serde", 
-  "memberlist-utils/serde",
   "memberlist-net?/serde",
   "memberlist-quic?/serde"
 ]
 
 metrics = [
   "memberlist-core/metrics",
-  "memberlist-utils/metrics",
   "memberlist-net?/metrics",
   "memberlist-quic?/metrics",
 ]
@@ -36,12 +34,13 @@ compression = [
 encryption = ["memberlist-net?/encryption"]
 
 quic = ["memberlist-quic"]
-quinn = ["memberlist-quic/quinn"]
-s2n = ["memberlist-quic/s2n"]
+quinn = ["memberlist-quic/quinn", "quic"]
+s2n = ["memberlist-quic/s2n", "quic"]
 
-tcp = ["memberlist-net"]
-tls = ["memberlist-net/tls"]
-native-tls = ["memberlist-net/native-tls"]
+net = ["memberlist-net"]
+tcp = ["net"]
+tls = ["memberlist-net/tls", "tcp"]
+native-tls = ["memberlist-net/native-tls", "tcp"]
 
 # enable DNS node address resolver
 dns = [
@@ -93,10 +92,22 @@ dnssec = [
   "memberlist-quic?/dnssec",
 ]
 
+test = ["memberlist-core/test", "memberlist-net?/test", "memberlist-quic?/test"]
 
 [dependencies]
 agnostic.workspace = true
 memberlist-core.workspace = true
-memberlist-utils.workspace = true
 memberlist-net = { workspace = true, optional = true }
 memberlist-quic = { workspace = true, optional = true }
+nodecraft.workspace = true
+smol_str.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+paste.workspace = true
+
+[[test]]
+name = "memberlist"
+path = "tests/main.rs"
+required-features = ["test"]

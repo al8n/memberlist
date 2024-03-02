@@ -32,5 +32,8 @@ mod send;
 #[path = "tests/join.rs"]
 mod join;
 
+#[path = "tests/join_dead_node.rs"]
+mod join_dead_node;
+
 #[path = "tests/promised_listener_backoff.rs"]
 mod promised_listener_backoff;

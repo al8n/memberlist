@@ -1,30 +1,132 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashMap};
 
 use nodecraft::{resolver::AddressResolver, Node};
 use smol_str::SmolStr;
 
-use crate::{delegate::Delegate, transport::Transport, types::ErrorResponse};
+use crate::{
+  delegate::{Delegate, DelegateError},
+  transport::{MaybeResolvedAddress, Transport},
+  types::{ErrorResponse, SmallVec},
+};
 
 pub use crate::{
   transport::TransportError,
-  version::{UnknownDelegateVersion, UnknownProtocolVersion},
+  types::{UnknownDelegateVersion, UnknownProtocolVersion},
 };
 
-#[derive(thiserror::Error)]
-pub enum Error<
-  T: Transport,
+/// Error returned by `Memberlist::join_many`.
+pub struct JoinError<T: Transport, D>
+where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
-> {
+{
+  pub(crate) joined: SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+  pub(crate) errors: HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>>,
+}
+
+impl<D, T: Transport> From<JoinError<T, D>>
+  for (
+    SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>>,
+  )
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
+  fn from(e: JoinError<T, D>) -> Self {
+    (e.joined, e.errors)
+  }
+}
+
+impl<D, T: Transport> core::fmt::Debug for JoinError<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    if !self.joined.is_empty() {
+      writeln!(f, "Successes: {:?}", self.joined)?;
+    }
+
+    if !self.errors.is_empty() {
+      writeln!(f, "Failures:")?;
+      for (addr, err) in self.errors.iter() {
+        writeln!(f, "\t{}: {}", addr, err)?;
+      }
+    }
+
+    Ok(())
+  }
+}
+
+impl<D, T: Transport> core::fmt::Display for JoinError<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    if !self.joined.is_empty() {
+      writeln!(f, "Successes: {:?}", self.joined)?;
+    }
+
+    if !self.errors.is_empty() {
+      writeln!(f, "Failures:")?;
+      for (addr, err) in self.errors.iter() {
+        writeln!(f, "\t{addr}: {err}")?;
+      }
+    }
+
+    Ok(())
+  }
+}
+
+impl<T: Transport, D> std::error::Error for JoinError<T, D> where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>
+{
+}
+
+impl<T: Transport, D> JoinError<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
+  /// Return the number of successful joined nodes
+  pub fn num_joined(&self) -> usize {
+    self.joined.len()
+  }
+
+  /// Return the joined nodes
+  pub const fn joined(
+    &self,
+  ) -> &SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
+    &self.joined
+  }
+}
+
+impl<T: Transport, D> JoinError<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+{
+  /// Return the errors
+  pub const fn errors(&self) -> &HashMap<Node<T::Id, MaybeResolvedAddress<T>>, Error<T, D>> {
+    &self.errors
+  }
+}
+
+/// Error type for the [`Memberlist`](crate::Memberlist)
+#[derive(thiserror::Error)]
+pub enum Error<T: Transport, D: Delegate> {
+  /// Returns when the node is not running.
   #[error("memberlist: node is not running, please bootstrap first")]
   NotRunning,
+  /// Returns when timeout waiting for update broadcast.
   #[error("memberlist: timeout waiting for update broadcast")]
   UpdateTimeout,
+  /// Returns when timeout waiting for leave broadcast.
   #[error("memberlist: timeout waiting for leave broadcast")]
   LeaveTimeout,
+  /// Returns when lost connection with a peer.
   #[error("memberlist: no response from node {0}")]
   Lost(Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
+  /// Delegate error
   #[error("memberlist: {0}")]
-  Delegate(D::Error),
+  Delegate(#[from] DelegateError<D>),
+  /// Transport error
   #[error("memberlist: {0}")]
   Transport(T::Error),
   /// Returned when a message is received with an unexpected type.
@@ -44,32 +146,24 @@ pub enum Error<
     /// The sequence number of [`Ack`](crate::types::Ack).
     ack: u32,
   },
-  // #[error("memberlist: {0}")]
-  // BlockedAddress(#[from] ForbiddenIp),
+  /// Returned when a remote error is received.
   #[error("memberlist: remote error: {0}")]
   Remote(SmolStr),
+  /// Returned when a custom error is created by users.
   #[error("memberlist: {0}")]
   Other(Cow<'static, str>),
 }
 
-impl<
-    T: Transport,
-    D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
-  > core::fmt::Debug for Error<T, D>
-{
+impl<T: Transport, D: Delegate> core::fmt::Debug for Error<T, D> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{self}")
   }
 }
 
-impl<
-    T: Transport,
-    D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
-  > Error<T, D>
-{
+impl<T: Transport, D: Delegate> Error<T, D> {
   /// Creates a new error with the given delegate error.
   #[inline]
-  pub fn delegate(e: D::Error) -> Self {
+  pub fn delegate(e: DelegateError<D>) -> Self {
     Self::Delegate(e)
   }
 
@@ -94,7 +188,7 @@ impl<
   /// Creates a new error with the given remote error.
   #[inline]
   pub fn remote(e: ErrorResponse) -> Self {
-    Self::Remote(e.err)
+    Self::Remote(e.into())
   }
 
   /// Creates a new error with the given message.

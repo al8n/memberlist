@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use async_lock::RwLock;
+use parking_lot::RwLock;
 
 #[derive(Debug)]
 pub(crate) struct Inner {
@@ -39,9 +39,9 @@ impl Awareness {
   /// Takes the given delta and applies it to the score in a thread-safe
   /// manner. It also enforces a floor of zero and a max of max, so deltas may not
   /// change the overall score if it's railed at one of the extremes.
-  pub(crate) async fn apply_delta(&self, delta: isize) {
+  pub(crate) fn apply_delta(&self, delta: isize) {
     let (_initial, _fnl) = {
-      let mut inner = self.inner.write().await;
+      let mut inner = self.inner.write();
       let initial = inner.score;
       inner.score += delta;
       if inner.score < 0 {
@@ -61,21 +61,21 @@ impl Awareness {
   }
 
   /// Returns the raw health score.
-  pub(crate) async fn get_health_score(&self) -> isize {
-    self.inner.read().await.score
+  pub(crate) fn get_health_score(&self) -> isize {
+    self.inner.read().score
   }
 
   /// Takes the given duration and scales it based on the current
   /// score. Less healthyness will lead to longer timeouts.
-  pub(crate) async fn scale_timeout(&self, timeout: Duration) -> Duration {
-    let score = self.inner.read().await.score;
+  pub(crate) fn scale_timeout(&self, timeout: Duration) -> Duration {
+    let score = self.inner.read().score;
     timeout * ((score + 1) as u32)
   }
 }
 
-#[tokio::test]
 #[cfg(test)]
-async fn test_awareness() {
+#[test]
+fn test_awareness() {
   let cases = vec![
     (0, 0, Duration::from_secs(1)),
     (-1, 0, Duration::from_secs(1)),
@@ -98,8 +98,8 @@ async fn test_awareness() {
     Arc::new(vec![]),
   );
   for (delta, score, timeout) in cases {
-    a.apply_delta(delta).await;
-    assert_eq!(a.get_health_score().await, score);
-    assert_eq!(a.scale_timeout(Duration::from_secs(1)).await, timeout);
+    a.apply_delta(delta);
+    assert_eq!(a.get_health_score(), score);
+    assert_eq!(a.scale_timeout(Duration::from_secs(1)), timeout);
   }
 }

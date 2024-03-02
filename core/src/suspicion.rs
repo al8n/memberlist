@@ -7,6 +7,10 @@ use std::{
   time::{Duration, Instant},
 };
 
+use super::*;
+use agnostic::Runtime;
+use futures::{future::BoxFuture, Future, FutureExt};
+
 #[inline]
 fn remaining_suspicion_time(
   n: u32,
@@ -24,12 +28,6 @@ fn remaining_suspicion_time(
     Duration::from_millis(timeout as u64).saturating_sub(elapsed)
   }
 }
-
-use nodecraft::CheapClone;
-
-use super::*;
-use agnostic::Runtime;
-use futures::{future::BoxFuture, Future, FutureExt};
 
 pub(crate) struct Suspicion<I, R> {
   n: Arc<AtomicU32>,
@@ -121,6 +119,12 @@ where
   }
 }
 
+impl<I, R> Drop for Suspicion<I, R> {
+  fn drop(&mut self) {
+    self.after_func.force_stop();
+  }
+}
+
 pub(super) struct AfterFunc<R> {
   n: Arc<AtomicU32>,
   timeout: Duration,
@@ -164,6 +168,10 @@ impl<R> AfterFunc<R> {
       let _ = self.stop_tx.send(()).await;
       true
     }
+  }
+
+  pub fn force_stop(&self) {
+    self.stop_tx.close();
   }
 }
 

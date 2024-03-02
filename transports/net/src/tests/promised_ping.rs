@@ -1,7 +1,7 @@
 use memberlist_core::transport::{tests::promised_ping as promised_ping_in, Lpe};
 use nodecraft::resolver::socket_addr::SocketAddrResolver;
 
-use crate::{NetTransport, NetTransportOptions, StreamLayer};
+use crate::{NetTransport, NetTransportOptions};
 
 use super::*;
 
