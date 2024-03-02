@@ -157,44 +157,30 @@ macro_rules! bail_ping {
 
     paste::paste! {
       #[doc = concat!("Error when transforming a [`", stringify!($name), "`]")]
+      #[derive(thiserror::Error)]
       pub enum [< $name TransformError >]<I: Transformable, A: Transformable> {
         /// Error transforming the source node
+        #[error("source node: {0}")]
         Source(<Node<I, A> as Transformable>::Error),
         /// Error transforming the target node
+        #[error("target node: {0}")]
         Target(<Node<I, A> as Transformable>::Error),
         /// Encode buffer is too small
+        #[error("encode buffer is too small")]
         BufferTooSmall,
         /// Not enough bytes to decode
+        #[error("not enough bytes to decode")]
         NotEnoughBytes,
         /// The encoded bytes is too large
+        #[error("the encoded bytes is too large")]
         TooLarge,
       }
 
       impl<I: Transformable, A: Transformable> core::fmt::Debug for [< $name TransformError >]<I, A> {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-          match self {
-            Self::Source(err) => write!(f, "source node: {:?}", err),
-            Self::Target(err) => write!(f, "target node: {:?}", err),
-            Self::BufferTooSmall => write!(f, "encode buffer is too small"),
-            Self::NotEnoughBytes => write!(f, "not enough bytes to decode"),
-            Self::TooLarge => write!(f, "the encoded bytes is too large"),
-          }
+          write!(f, "{}", self)
         }
       }
-
-      impl<I: Transformable, A: Transformable> core::fmt::Display for [< $name TransformError >]<I, A> {
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-          match self {
-            Self::Source(err) => write!(f, "source node: {}", err),
-            Self::Target(err) => write!(f, "target node: {}", err),
-            Self::BufferTooSmall => write!(f, "encode buffer is too small"),
-            Self::NotEnoughBytes => write!(f, "not enough bytes to decode"),
-            Self::TooLarge => write!(f, "the encoded bytes is too large"),
-          }
-        }
-      }
-
-      impl<I: Transformable, A: Transformable> std::error::Error for [< $name TransformError >]<I, A> {}
 
       impl<I: Transformable, A: Transformable> Transformable for $name<I, A> {
         type Error = [< $name TransformError >]<I, A>;
@@ -264,7 +250,7 @@ macro_rules! bail_ping {
       use rand::{Rng, distributions::Alphanumeric, thread_rng, random};
 
       impl $name<smol_str::SmolStr, std::net::SocketAddr> {
-        fn generate(size: usize) -> Self {
+        pub(crate) fn generate(size: usize) -> Self {
           let rng = thread_rng();
           let source = rng.sample_iter(&Alphanumeric).take(size).collect::<Vec<u8>>();
           let source = String::from_utf8(source).unwrap();
@@ -295,16 +281,6 @@ bail_ping!(
   #[doc = "IndirectPing is sent to a target to check if it is alive"]
   IndirectPing
 );
-
-impl<I, A> From<Ping<I, A>> for IndirectPing<I, A> {
-  fn from(ping: Ping<I, A>) -> Self {
-    Self {
-      sequence_number: ping.sequence_number,
-      source: ping.source,
-      target: ping.target,
-    }
-  }
-}
 
 impl<I, A> From<IndirectPing<I, A>> for Ping<I, A> {
   fn from(ping: IndirectPing<I, A>) -> Self {

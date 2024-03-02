@@ -86,10 +86,6 @@ impl Transformable for ErrorResponse {
     Ok((len, Self { message }))
   }
 
-  fn encode_to_vec(&self) -> Result<Vec<u8>, Self::Error> {
-    <SmolStr as Transformable>::encode_to_vec(&self.message)
-  }
-
   async fn encode_to_async_writer<W: futures::io::AsyncWrite + Send + Unpin>(
     &self,
     writer: &mut W,
