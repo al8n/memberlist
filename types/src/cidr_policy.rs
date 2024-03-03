@@ -55,10 +55,13 @@ impl CIDRsPolicy {
     }
   }
 
-  /// Remove an [`IpNet`]s from the list of allowed [`IpNet`] by [`IpAddr`].
+  /// Remove [`IpNet`]s from the list of allowed [`IpNet`] by [`IpAddr`].
   pub fn remove_by_ip(&mut self, ip: &IpAddr) {
     if let Some(allowed_cidrs) = self.allowed_cidrs.as_mut() {
-      allowed_cidrs.retain(|cidr| !cidr.contains(ip));
+      allowed_cidrs.retain(|cidr| !cidr.addr().eq(ip));
+      if allowed_cidrs.is_empty() {
+        self.allowed_cidrs = None;
+      }
     }
   }
 
@@ -71,12 +74,14 @@ impl CIDRsPolicy {
       .flat_map(|x| x.iter())
   }
 
-  /// Reports whether the network includes ip.
-  pub fn contains(&self, ip: &IpAddr) -> bool {
-    self
-      .allowed_cidrs
-      .as_ref()
-      .map_or(true, |x| x.contains(&IpNet::from(*ip)))
+  /// Reports whether the network is allowed.
+  pub fn is_allowed_net(&self, ip: &IpNet) -> bool {
+    self.allowed_cidrs.as_ref().map_or(true, |x| x.contains(ip))
+  }
+
+  /// Returns `true` if the [`IpNet`] is blocked.
+  pub fn is_blocked_net(&self, ip: &IpNet) -> bool {
+    !self.is_allowed_net(ip)
   }
 
   /// Returns `true` if the [`IpAddr`] is allowed.
@@ -84,7 +89,7 @@ impl CIDRsPolicy {
     self
       .allowed_cidrs
       .as_ref()
-      .map_or(true, |x| x.iter().any(|cidr| cidr.contains(ip)))
+      .map_or(true, |x| x.iter().any(|cidr| cidr.addr().eq(ip)))
   }
 
   /// Returns `true` if the [`IpAddr`] is blocked.
@@ -161,5 +166,46 @@ impl<A: TryInto<IpNet, Error = AddrParseError>> TryFrom<Vec<A>> for CIDRsPolicy 
     Ok(Self {
       allowed_cidrs: (!allowed_cidrs.is_empty()).then_some(allowed_cidrs),
     })
+  }
+}
+
+#[cfg(test)]
+mod test {
+  use super::*;
+
+  #[test]
+  fn test_cidr_policy() {
+    let mut policy = CIDRsPolicy::new();
+    assert!(policy.is_allow_all());
+    assert!(!policy.is_block_all());
+
+    let net0: IpNet = "127.0.0.1/16".parse().unwrap();
+    let net1: IpNet = "127.0.0.1/24".parse().unwrap();
+    let net2: IpNet = "127.0.0.2/16".parse().unwrap();
+    policy.add(net0);
+    policy.add(net1);
+    policy.add(net2);
+
+    assert!(policy.is_allowed(&net0.addr()));
+    // should not remove
+    policy.remove(&net0);
+    assert!(!policy.is_allowed_net(&net0));
+    assert!(policy.is_allowed(&"127.0.0.1".parse().unwrap()));
+    assert!(policy.is_allowed_net(&net1));
+    policy.remove_by_ip(&net1.addr());
+    assert!(!policy.is_allowed(&"127.0.0.1".parse().unwrap()));
+    policy.remove_by_ip(&"127.0.0.2".parse().unwrap());
+    // we have removed all the allowed cidrs, so we should allow all now
+    assert!(policy.is_allowed(&"127.0.0.2".parse().unwrap()));
+    assert!(policy.is_allowed_net(&"127.0.0.2/8".parse().unwrap()));
+    assert!(policy.is_allow_all());
+  }
+
+  #[test]
+  fn test_block_all() {
+    let policy = CIDRsPolicy::block_all();
+    assert!(policy.is_block_all());
+    assert!(policy.is_blocked(&"127.0.0.1".parse().unwrap()));
+    assert!(policy.is_blocked_net(&"127.0.0.1/8".parse().unwrap()));
   }
 }

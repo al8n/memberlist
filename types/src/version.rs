@@ -1,14 +1,7 @@
 /// Unknown delegate version
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, thiserror::Error)]
+#[error("V{0} is not a valid delegate version")]
 pub struct UnknownDelegateVersion(u8);
-
-impl core::fmt::Display for UnknownDelegateVersion {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "V{} is not a valid delegate version", self.0)
-  }
-}
-
-impl std::error::Error for UnknownDelegateVersion {}
 
 /// Delegate version
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
@@ -72,16 +65,9 @@ const _: () = {
 };
 
 /// Unknown protocol version
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, thiserror::Error)]
+#[error("V{0} is not a valid protocol version")]
 pub struct UnknownProtocolVersion(u8);
-
-impl core::fmt::Display for UnknownProtocolVersion {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "V{} is not a valid protocol version", self.0)
-  }
-}
-
-impl std::error::Error for UnknownProtocolVersion {}
 
 /// Protocol version
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]

@@ -469,14 +469,11 @@ where
     // Wait for the broadcast or a timeout
     if self.any_alive().await {
       if timeout > Duration::ZERO {
-        futures::select! {
-          _ = notify_rx.recv().fuse() => {},
-          _ = <T::Runtime as Runtime>::sleep(timeout).fuse() => return Err(Error::UpdateTimeout),
-        }
+        let _ = <T::Runtime as Runtime>::timeout(timeout, notify_rx.recv())
+          .await
+          .map_err(|_| Error::UpdateTimeout)?;
       } else {
-        futures::select! {
-          _ = notify_rx.recv().fuse() => {},
-        }
+        let _ = notify_rx.recv().await;
       }
     }
 

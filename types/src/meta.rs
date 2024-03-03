@@ -19,6 +19,13 @@ pub struct LargeMeta(usize);
 #[cfg_attr(feature = "rkyv", archive_attr(derive(Debug, PartialEq, Eq, Hash)))]
 pub struct Meta(Bytes);
 
+impl Default for Meta {
+  #[inline]
+  fn default() -> Self {
+    Self::empty()
+  }
+}
+
 impl CheapClone for Meta {}
 
 impl Meta {

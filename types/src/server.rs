@@ -69,16 +69,9 @@ impl TryFrom<u8> for State {
 }
 
 /// Unknown server state.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, thiserror::Error)]
+#[error("{0} is not a valid state")]
 pub struct UnknownState(u8);
-
-impl core::fmt::Display for UnknownState {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "{} is not a valid state", self.0)
-  }
-}
-
-impl std::error::Error for UnknownState {}
 
 /// Represents a node in the cluster
 #[viewit::viewit(
@@ -162,20 +155,6 @@ impl<I: CheapClone, A: CheapClone> From<super::Alive<I, A>> for NodeState<I, A> 
   }
 }
 
-impl<I: CheapClone, A: CheapClone> From<&super::Alive<I, A>> for NodeState<I, A> {
-  fn from(value: &super::Alive<I, A>) -> Self {
-    let anode = value.node();
-    Self {
-      id: anode.id().cheap_clone(),
-      addr: anode.address().cheap_clone(),
-      meta: value.meta.cheap_clone(),
-      state: State::Alive,
-      protocol_version: value.protocol_version,
-      delegate_version: value.delegate_version,
-    }
-  }
-}
-
 impl<I, A> NodeState<I, A> {
   /// Construct a new node with the given name, address and state.
   #[inline]
@@ -238,7 +217,7 @@ impl<I: CheapClone, A: CheapClone> CheapClone for NodeState<I, A> {
     Self {
       id: self.id.cheap_clone(),
       addr: self.addr.cheap_clone(),
-      meta: self.meta.clone(),
+      meta: self.meta.cheap_clone(),
       state: self.state,
       protocol_version: self.protocol_version,
       delegate_version: self.delegate_version,
