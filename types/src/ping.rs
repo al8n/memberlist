@@ -264,7 +264,7 @@ macro_rules! bail_ping {
       use rand::{Rng, distributions::Alphanumeric, thread_rng, random};
 
       impl $name<smol_str::SmolStr, std::net::SocketAddr> {
-        fn generate(size: usize) -> Self {
+        pub(crate) fn generate(size: usize) -> Self {
           let rng = thread_rng();
           let source = rng.sample_iter(&Alphanumeric).take(size).collect::<Vec<u8>>();
           let source = String::from_utf8(source).unwrap();

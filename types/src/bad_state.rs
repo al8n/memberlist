@@ -250,7 +250,7 @@ macro_rules! bad_bail {
     const _: () = {
       use rand::{random, Rng, thread_rng, distributions::Alphanumeric};
       impl $name<::smol_str::SmolStr> {
-        fn generate(size: usize) -> Self {
+        pub(crate) fn generate(size: usize) -> Self {
           let node = thread_rng()
             .sample_iter(Alphanumeric)
             .take(size)

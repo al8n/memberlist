@@ -281,12 +281,7 @@ impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> T
       }
       Self::NACK_TAG => {
         let (len, msg) = u32::decode(src)?;
-        (
-          len + 1,
-          Self::Nack(Nack {
-            sequence_number: msg,
-          }),
-        )
+        (len + 1, Self::Nack(Nack::new(msg)))
       }
       Self::ERRORRESPONSE_TAG => {
         let (len, msg) = <SmolStr as Transformable>::decode(src)?;
@@ -450,5 +445,185 @@ impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> T
       }
     };
     Ok((len, msg))
+  }
+}
+
+#[cfg(test)]
+mod test {
+  use std::net::SocketAddr;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn test_ping_transformable_round_trip() {
+    let msg = Message::Ping(Ping::generate(1));
+    let mut buf = vec![0u8; msg.encoded_len()];
+    msg.encode(&mut buf).unwrap();
+    let (len, decoded) = Message::decode_from_reader(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+
+    let (len, decoded) = Message::decode_from_async_reader(&mut futures::io::Cursor::new(&buf))
+      .await
+      .unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+  }
+
+  #[tokio::test]
+  async fn test_ack_transformable_round_trip() {
+    let msg = Message::<SmolStr, SocketAddr>::Ack(Ack::random(10));
+    let mut buf = vec![0u8; msg.encoded_len()];
+    msg.encode(&mut buf).unwrap();
+    let (len, decoded) = Message::decode_from_reader(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+
+    let (len, decoded) = Message::decode_from_async_reader(&mut futures::io::Cursor::new(&buf))
+      .await
+      .unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+  }
+
+  #[tokio::test]
+  async fn test_indirect_ping_transformable_round_trip() {
+    let msg = Message::IndirectPing(IndirectPing::generate(1));
+    let mut buf = vec![0u8; msg.encoded_len()];
+    msg.encode(&mut buf).unwrap();
+    let (len, decoded) = Message::decode_from_reader(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+
+    let (len, decoded) = Message::decode_from_async_reader(&mut futures::io::Cursor::new(&buf))
+      .await
+      .unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+  }
+
+  #[tokio::test]
+  async fn test_nack_transformable_round_trip() {
+    let msg = Message::<SmolStr, SocketAddr>::Nack(Nack::new(10));
+    let mut buf = vec![0u8; msg.encoded_len()];
+    msg.encode(&mut buf).unwrap();
+    let (len, decoded) = Message::decode_from_reader(&mut std::io::Cursor::new(&buf)).unwrap();
+
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+
+    let (len, decoded) = Message::decode_from_async_reader(&mut futures::io::Cursor::new(&buf))
+      .await
+      .unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+  }
+
+  #[tokio::test]
+  async fn test_suspect_transformable_round_trip() {
+    let msg = Message::<SmolStr, SocketAddr>::Suspect(Suspect::generate(10));
+    let mut buf = vec![0u8; msg.encoded_len()];
+    msg.encode(&mut buf).unwrap();
+    let (len, decoded) = Message::decode_from_reader(&mut std::io::Cursor::new(&buf)).unwrap();
+
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+
+    let (len, decoded) = Message::decode_from_async_reader(&mut futures::io::Cursor::new(&buf))
+      .await
+      .unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+  }
+
+  #[tokio::test]
+  async fn test_dead_transformable_round_trip() {
+    let msg = Message::<SmolStr, SocketAddr>::Dead(Dead::generate(10));
+    let mut buf = vec![0u8; msg.encoded_len()];
+    msg.encode(&mut buf).unwrap();
+    let (len, decoded) = Message::decode_from_reader(&mut std::io::Cursor::new(&buf)).unwrap();
+
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+
+    let (len, decoded) = Message::decode_from_async_reader(&mut futures::io::Cursor::new(&buf))
+      .await
+      .unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+  }
+
+  #[tokio::test]
+  async fn test_alive_transformable_round_trip() {
+    let msg = Message::<SmolStr, SocketAddr>::Alive(Alive::random(10));
+    let mut buf = vec![0u8; msg.encoded_len()];
+    msg.encode(&mut buf).unwrap();
+    let (len, decoded) = Message::decode_from_reader(&mut std::io::Cursor::new(&buf)).unwrap();
+
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+
+    let (len, decoded) = Message::decode_from_async_reader(&mut futures::io::Cursor::new(&buf))
+      .await
+      .unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+  }
+
+  #[tokio::test]
+  async fn test_push_pull_transformable_round_trip() {
+    let msg = Message::<SmolStr, SocketAddr>::PushPull(PushPull::generate(10));
+    let mut buf = vec![0u8; msg.encoded_len()];
+    msg.encode(&mut buf).unwrap();
+    let (len, decoded) = Message::decode_from_reader(&mut std::io::Cursor::new(&buf)).unwrap();
+
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+
+    let (len, decoded) = Message::decode_from_async_reader(&mut futures::io::Cursor::new(&buf))
+      .await
+      .unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+  }
+
+  #[tokio::test]
+  async fn test_user_data_transformable_round_trip() {
+    let msg = Message::<SmolStr, SocketAddr>::UserData(Bytes::from_static(b"hello world"));
+    let mut buf = vec![0u8; msg.encoded_len()];
+    msg.encode(&mut buf).unwrap();
+    let (len, decoded) = Message::decode_from_reader(&mut std::io::Cursor::new(&buf)).unwrap();
+
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+
+    let (len, decoded) = Message::decode_from_async_reader(&mut futures::io::Cursor::new(&buf))
+      .await
+      .unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+  }
+
+  #[tokio::test]
+  async fn test_error_response_transformable_round_trip() {
+    let msg = Message::<SmolStr, SocketAddr>::ErrorResponse(ErrorResponse {
+      message: "hello world".into(),
+    });
+    let mut buf = vec![0u8; msg.encoded_len()];
+    msg.encode(&mut buf).unwrap();
+    let (len, decoded) = Message::decode(&buf).unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+
+    let (len, decoded) = Message::decode_from_reader(&mut std::io::Cursor::new(&buf)).unwrap();
+
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
+
+    let (len, decoded) = Message::decode_from_async_reader(&mut futures::io::Cursor::new(&buf))
+      .await
+      .unwrap();
+    assert_eq!(len, buf.len());
+    assert_eq!(decoded, msg);
   }
 }

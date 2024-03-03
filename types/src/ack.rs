@@ -172,7 +172,7 @@ impl Transformable for Ack {
       ));
     }
 
-    let payload_len = total_len - core::mem::size_of::<u32>();
+    let payload_len = total_len - core::mem::size_of::<u32>() * 2;
     if payload_len <= MAX_INLINED_BYTES {
       let mut buf = [0; MAX_INLINED_BYTES];
       reader.read_exact(&mut buf[..payload_len])?;
@@ -221,7 +221,7 @@ impl Transformable for Ack {
       ));
     }
 
-    let payload_len = total_len - core::mem::size_of::<u32>();
+    let payload_len = total_len - core::mem::size_of::<u32>() * 2;
     if payload_len <= MAX_INLINED_BYTES {
       let mut buf = [0; MAX_INLINED_BYTES];
       reader.read_exact(&mut buf[..payload_len]).await?;

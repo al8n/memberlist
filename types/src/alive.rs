@@ -364,7 +364,7 @@ const _: () = {
   use smol_str::SmolStr;
 
   impl Alive<SmolStr, SocketAddr> {
-    fn random(size: usize) -> Self {
+    pub(crate) fn random(size: usize) -> Self {
       let id = thread_rng()
         .sample_iter(Alphanumeric)
         .take(size)

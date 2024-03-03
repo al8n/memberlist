@@ -636,7 +636,7 @@ const _: () = {
   }
 
   impl PushPull<SmolStr, SocketAddr> {
-    fn generate(size: usize) -> Self {
+    pub(crate) fn generate(size: usize) -> Self {
       let states = (0..size)
         .map(|_| PushNodeState::generate(size))
         .collect::<TinyVec<_>>();
