@@ -372,3 +372,60 @@ mod sealed {
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use std::hash::{Hash, Hasher};
+
+  use super::*;
+
+  #[test]
+  fn test_try_from_string() {
+    let label = Label::try_from("hello".to_string()).unwrap();
+    assert_eq!(label, "hello");
+
+    assert!(Label::try_from("a".repeat(256)).is_err());
+  }
+
+  #[test]
+  fn test_try_from_bytes() {
+    let label = Label::try_from(Bytes::from("hello")).unwrap();
+    assert_eq!(label, *"hello");
+
+    assert!(Label::try_from(Bytes::from("a".repeat(256).into_bytes())).is_err());
+    assert!(Label::try_from(Bytes::from_static(&[255; 25])).is_err());
+  }
+
+  #[test]
+  fn test_try_from_bytes_mut() {
+    let label = Label::try_from(BytesMut::from("hello")).unwrap();
+    assert_eq!(label, "hello".to_string());
+
+    assert!(Label::try_from(BytesMut::from([255; 25].as_slice())).is_err());
+    assert!(Label::try_from(BytesMut::from([0; 256].as_slice())).is_err());
+  }
+
+  #[test]
+  fn test_try_from_bytes_ref() {
+    let label = Label::try_from(&Bytes::from("hello")).unwrap();
+    assert_eq!(label, &"hello".to_string());
+
+    assert!(Label::try_from(&Bytes::from("a".repeat(256).into_bytes())).is_err());
+    assert!(Label::try_from(&Bytes::from_static(&[255; 25])).is_err());
+  }
+
+  #[test]
+  fn test_debug_and_hash() {
+    let label = Label::from_static("hello").unwrap();
+    assert_eq!(format!("{:?}", label), "hello");
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    label.hash(&mut hasher);
+    let h1 = hasher.finish();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "hello".hash(&mut hasher);
+    let h2 = hasher.finish();
+    assert_eq!(h1, h2);
+    assert_eq!(label.as_ref(), "hello");
+  }
+}

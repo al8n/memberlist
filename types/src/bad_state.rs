@@ -139,44 +139,30 @@ macro_rules! bad_bail {
 
     paste::paste! {
       #[doc = concat!("Transform error for [`", stringify!($name), "`]")]
+      #[derive(thiserror::Error)]
       pub enum [< $name TransformError >] <I: Transformable> {
         /// Transform error for node field
+        #[error("node: {0}")]
         Node(I::Error),
         /// Transform error for from field
+        #[error("from: {0}")]
         From(I::Error),
         /// Encode buffer too small
+        #[error("encode buffer too small")]
         BufferTooSmall,
         /// The buffer did not contain enough bytes to decode
+        #[error("the buffer did not contain enough bytes to decode {}", stringify!($name))]
         NotEnoughBytes,
         /// The encoded size is too large
+        #[error("encoded size too large, max {} got {0}", u32::MAX)]
         TooLarge(u64),
       }
 
       impl<I: Transformable> core::fmt::Debug for [< $name TransformError >] <I> {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-          match self {
-            Self::Node(e) => write!(f, "node: {:?}", e),
-            Self::From(e) => write!(f, "from: {:?}", e),
-            Self::BufferTooSmall => write!(f, "encode buffer too small"),
-            Self::NotEnoughBytes => write!(f, concat!("the buffer did not contain enough bytes to decode ", stringify!($name))),
-            Self::TooLarge(val) => write!(f, "encoded size too large, max {} got {val}", u32::MAX)
-          }
+          write!(f, "{}", self)
         }
       }
-
-      impl<I: Transformable> core::fmt::Display for [< $name TransformError >] <I> {
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-          match self {
-            Self::Node(e) => write!(f, "node: {}", e),
-            Self::From(e) => write!(f, "from: {}", e),
-            Self::BufferTooSmall => write!(f, "encode buffer too small"),
-            Self::NotEnoughBytes => write!(f, concat!("the buffer did not contain enough bytes to decode ", stringify!($name))),
-            Self::TooLarge(val) => write!(f, "encoded message too large, max {} got {val}", u32::MAX),
-          }
-        }
-      }
-
-      impl<I: Transformable> std::error::Error for [< $name TransformError >] <I> {}
 
       impl<I: Transformable> Transformable for $name <I> {
         type Error = [< $name TransformError >] <I>;
@@ -250,7 +236,7 @@ macro_rules! bad_bail {
     const _: () = {
       use rand::{random, Rng, thread_rng, distributions::Alphanumeric};
       impl $name<::smol_str::SmolStr> {
-        fn generate(size: usize) -> Self {
+        pub(crate) fn generate(size: usize) -> Self {
           let node = thread_rng()
             .sample_iter(Alphanumeric)
             .take(size)
