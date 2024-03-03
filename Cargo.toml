@@ -12,13 +12,15 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MPL-2.0"
 repository = "https://github.com/al8n/memberlist"
 homepage = "https://github.com/al8n/memberlist"
 readme = "README.md"
 rust-version = "1.75.0"
+keywords = ["swim", "gossip", "service-discovery"]
+categories = ["network-programming", "asynchronous"]
 
 [workspace.metadata.docs.rs]
 all-features = true
@@ -56,5 +58,5 @@ viewit = "0.1.5"
 
 memberlist-core = { version = "0.1", path = "core", default-features = false }
 memberlist-net = { version = "0.1", path = "transports/net", default-features = false }
-memberlist-types ={ version = "0.1", path = "types", default-features = false }
+memberlist-types = { version = "0.1", path = "types", default-features = false }
 memberlist-quic = { version = "0.1", path = "transports/quic", default-features = false }
