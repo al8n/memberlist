@@ -1,5 +1,5 @@
 #![doc = include_str!("../../README.md")]
-#![doc(html_logo_url = "https://github.com/al8n/memberlist/blob/main/art/logo.svg")]
+#![doc(html_logo_url = "https://raw.githubusercontent.com/al8n/memberlist/main/art/logo_72x72.png")]
 #![forbid(unsafe_code)]
 #![deny(warnings, missing_docs)]
 #![allow(clippy::type_complexity)]
