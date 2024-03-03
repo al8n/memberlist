@@ -1,4 +1,5 @@
 //! [`memberlist`](https://crates.io/crates/memberlist)'s [`Transport`] layer based on TCP and UDP.
+#![doc(html_logo_url = "https://raw.githubusercontent.com/al8n/memberlist/main/art/logo_72x72.png")]
 #![allow(clippy::type_complexity)]
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
