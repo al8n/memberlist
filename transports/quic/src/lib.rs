@@ -1,4 +1,5 @@
 //! [`memberlist`](https://crates.io/crates/memberlist)'s [`Transport`] layer based on QUIC.
+#![doc(html_logo_url = "https://github.com/al8n/memberlist/blob/main/art/logo.svg")]
 #![allow(clippy::type_complexity)]
 #![forbid(unsafe_code)]
 #![deny(warnings, missing_docs)]
