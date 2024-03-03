@@ -1,9 +1,12 @@
 <div align="center">
+
+<img src="./art/logo.svg" height = "200px">
+
 <h1>Memberlist</h1>
 </div>
 <div align="center">
 
-A highly customable, adaptable, async runtime agnostic Gossip protocol which helps manage cluster membership and member failure detection.
+A highly customable, adaptable, runtime agnostic and WASM/WASI friendly Gossip protocol which helps manage cluster membership and member failure detection.
 
 Port and improve [HashiCorp's memberlist](https://github.com/hashicorp/memberlist) to Rust.
 
@@ -28,6 +31,8 @@ memberlist is a rust crate that manages cluster membership and member failure de
 The use cases for such a library are far-reaching: all distributed systems require membership, and memberlist is a re-usable solution to managing cluster membership and node failure detection.
 
 memberlist is eventually consistent but converges quickly on average. The speed at which it converges can be heavily tuned via various knobs on the protocol. Node failures are detected and network partitions are partially tolerated by attempting to communicate to potentially dead nodes through multiple routes.
+
+memberlist is WASM/WASI friendly, all crates can be compiled to `wasm-wasi` and `wasm-unknown-unknown` (need to configure the crate features).
 
 ### Design
 
