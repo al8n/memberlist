@@ -1,0 +1,58 @@
+name: loc 
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'COPYRIGHT'
+      - 'LICENSE*'
+      - '**.md'
+      - '**.txt'
+  pull_request:
+    paths-ignore:
+      - 'README.md'
+      - 'COPYRIGHT'
+      - 'LICENSE*'
+      - '**.md'
+      - '**.txt'
+  workflow_dispatch:
+
+jobs:
+  loc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust
+        run: |
+          rustup update stable && rustup default stable
+          rustup component add clippy
+          rustup component add rustfmt
+      
+      - name: Install tokeit
+        run: |
+          cargo install tokeit --force
+      
+      - name: Count lines of code
+        run: |
+          tokeit
+
+      - name: Upload loc to GitHub Gist
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const fs = require('fs');
+            const output = fs.readFileSync('tokeit.json', 'utf8');
+            const gistId = 'd29ceff54c025fe4e8b144a51efb9324';
+            await github.rest.gists.update({
+              gist_id: gistId,
+              files: {
+                "memberlist": {
+                  content: output
+                }
+              }
+            });
+            console.log("Gist updated"); 
