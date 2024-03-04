@@ -37,9 +37,7 @@ metrics = ["memberlist-core/metrics", "dep:metrics"]
 test = [
   "memberlist-core/test",
   "smol_str",
-  "dns",
-  "compression",
-  "encryption",
+  "dns", 
   "test-cert-gen",
   "parking_lot",
 ]

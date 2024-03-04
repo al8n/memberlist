@@ -101,8 +101,8 @@ test = ["memberlist-core/test", "memberlist-net?/test", "memberlist-quic?/test"]
 [dependencies]
 agnostic.workspace = true
 memberlist-core.workspace = true
-memberlist-net = { workspace = true, optional = true }
-memberlist-quic = { workspace = true, optional = true }
+memberlist-net = { workspace = true, optional = true, default-features = false }
+memberlist-quic = { workspace = true, optional = true, default-features = false }
 nodecraft.workspace = true
 smol_str.workspace = true
 tracing.workspace = true

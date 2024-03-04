@@ -18,7 +18,7 @@ where
   let mut opts = QuicTransportOptions::new(name.into())
     .with_compressor(Some(Compressor::default()))
     .with_label(label.cheap_clone())
-    .with_offload_size(20);
+    .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
   let trans =
     QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;

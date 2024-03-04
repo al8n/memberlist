@@ -121,6 +121,7 @@ impl<R: Runtime> TestPacketStream for NetTransportTestPacketStream<R> {
     // put checksum placeholder
     data.put_u32(0);
 
+    #[cfg(feature = "compression")]
     if let Some(compressor) = self.client.send_compressed {
       data.put_u8(compressor as u8);
       let compressed = compressor.compress_into_bytes(src)?;
@@ -133,9 +134,13 @@ impl<R: Runtime> TestPacketStream for NetTransportTestPacketStream<R> {
       data.put_slice(src);
     }
 
+    #[cfg(not(feature = "compression"))]
+    data.put_slice(src);
+
     let checksum = self.client.checksumer.checksum(&data[5..]);
     NetworkEndian::write_u32(&mut data[1..], checksum);
 
+    #[cfg(feature = "encryption")]
     if let Some((algo, pk)) = &self.client.send_encrypted {
       let kr = SecretKeyring::new(*pk);
       out.put_u8(*algo as u8);
@@ -153,6 +158,10 @@ impl<R: Runtime> TestPacketStream for NetTransportTestPacketStream<R> {
     } else {
       out.put_slice(&data);
     }
+
+    #[cfg(not(feature = "encryption"))]
+    out.put_slice(&data);
+
     self.client.socket.send_to(&out, self.remote_addr).await?;
     Ok(())
   }
@@ -168,20 +177,29 @@ impl<R: Runtime> TestPacketStream for NetTransportTestPacketStream<R> {
       src.advance(received_label.encoded_overhead());
     }
 
+    #[cfg(feature = "encryption")]
     let mut unencrypted = if let Some(pk) = self.client.receive_encrypted {
       read_encrypted_data(pk, self.client.label.as_bytes(), &src)?
     } else {
       src
     };
 
+    #[cfg(not(feature = "encryption"))]
+    let mut unencrypted = src;
+
     verify_checksum(&unencrypted)?;
     unencrypted.advance(5);
 
+    #[cfg(feature = "compression")]
     let uncompressed = if self.client.receive_compressed {
       read_compressed_data(&unencrypted)?.into()
     } else {
       unencrypted
     };
+
+    #[cfg(not(feature = "compression"))]
+    let uncompressed = unencrypted;
+
     Ok((uncompressed, addr))
   }
 
@@ -204,10 +222,30 @@ pub struct NetTransportTestClient<R: Runtime> {
   checksumer: Checksumer,
   label: Label,
   send_label: bool,
+  #[cfg(feature = "compression")]
+  #[viewit(
+    getter(attrs(cfg(feature = "compression"))),
+    setter(attrs(cfg(feature = "compression")))
+  )]
   send_compressed: Option<Compressor>,
+  #[cfg(feature = "encryption")]
+  #[viewit(
+    getter(attrs(cfg(feature = "encryption"))),
+    setter(attrs(cfg(feature = "encryption")))
+  )]
   send_encrypted: Option<(EncryptionAlgo, SecretKey)>,
   receive_verify_label: bool,
+  #[cfg(feature = "compression")]
+  #[viewit(
+    getter(attrs(cfg(feature = "compression"))),
+    setter(attrs(cfg(feature = "compression")))
+  )]
   receive_compressed: bool,
+  #[cfg(feature = "encryption")]
+  #[viewit(
+    getter(attrs(cfg(feature = "encryption"))),
+    setter(attrs(cfg(feature = "encryption")))
+  )]
   receive_encrypted: Option<SecretKey>,
 }
 
@@ -219,10 +257,14 @@ impl<R: Runtime> Clone for NetTransportTestClient<R> {
       checksumer: self.checksumer,
       label: self.label.clone(),
       send_label: self.send_label,
+      #[cfg(feature = "compression")]
       send_compressed: self.send_compressed,
+      #[cfg(feature = "encryption")]
       send_encrypted: self.send_encrypted,
       receive_verify_label: self.receive_verify_label,
+      #[cfg(feature = "compression")]
       receive_compressed: self.receive_compressed,
+      #[cfg(feature = "encryption")]
       receive_encrypted: self.receive_encrypted,
     }
   }
@@ -238,10 +280,14 @@ impl<R: Runtime> NetTransportTestClient<R> {
       label: Label::empty(),
       send_label: false,
       checksumer: Checksumer::Crc32,
+      #[cfg(feature = "compression")]
       send_compressed: None,
+      #[cfg(feature = "encryption")]
       send_encrypted: None,
       receive_verify_label: false,
+      #[cfg(feature = "compression")]
       receive_compressed: false,
+      #[cfg(feature = "encryption")]
       receive_encrypted: None,
     })
   }
