@@ -37,15 +37,45 @@ jobs:
             name: "memberlist-types"
           - crate: memberlist
             features: "test,tokio,tcp,compression,encryption,metrics"
-            name: "memberlist-tcp"
+            name: "memberlist-tcp-compression-encryption"
           - crate: memberlist
             features: "test,tokio,tls,compression,encryption,metrics"
-            name: "memberlist-tls"
+            name: "memberlist-tls-compression-encryption"
           - crate: memberlist
             features: "test,tokio,native-tls,compression,encryption,metrics"
+            name: "memberlist-native-tls-compression-encryption"
+          - crate: memberlist
+            features: "test,tokio,tcp,compression,metrics"
+            name: "memberlist-tcp-compression-only"
+          - crate: memberlist
+            features: "test,tokio,tls,compression,metrics"
+            name: "memberlist-tls-compression-only"
+          - crate: memberlist
+            features: "test,tokio,native-tls,compression,metrics"
+            name: "memberlist-native-tls-compression-only"
+          - crate: memberlist
+            features: "test,tokio,tcp,encryption,metrics"
+            name: "memberlist-tcp-encryption-only"
+          - crate: memberlist
+            features: "test,tokio,tls,compression,metrics"
+            name: "memberlist-tls-encryption-only"
+          - crate: memberlist
+            features: "test,tokio,native-tls,encryption,metrics"
+            name: "memberlist-native-tls-encryption-only"
+          - crate: memberlist
+            features: "test,tokio,tcp,metrics"
+            name: "memberlist-tcp"
+          - crate: memberlist
+            features: "test,tokio,tls,metrics"
+            name: "memberlist-tls"
+          - crate: memberlist
+            features: "test,tokio,native-tls,metrics"
             name: "memberlist-native-tls"
           - crate: memberlist
             features: "test,tokio,quinn,compression,metrics"
+            name: "memberlist-quinn-compression"
+          - crate: memberlist
+            features: "test,tokio,quinn,metrics"
             name: "memberlist-quinn"
           - crate: transports/net
             features: "test,tokio,tcp,compression,encryption,metrics"
