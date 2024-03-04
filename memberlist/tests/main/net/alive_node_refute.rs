@@ -20,7 +20,7 @@ macro_rules! alive_node_refute {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _alive_node_refute_with_compression >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("alive_node_refute_1".into()).with_compressor(Some(Default::default()));
+          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("alive_node_refute_1".into()).with_compressor(Some(Default::default())).with_offload_size(10);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();
@@ -34,7 +34,7 @@ macro_rules! alive_node_refute {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _alive_node_refute_with_encryption >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("alive_node_refute_1".into()).with_primary_key(Some(TEST_KEYS[0]));
+          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("alive_node_refute_1".into()).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();
@@ -48,7 +48,7 @@ macro_rules! alive_node_refute {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _alive_node_refute_with_compression_and_encryption >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("alive_node_refute_1".into()).with_primary_key(Some(TEST_KEYS[0])).with_compressor(Some(Default::default()));
+          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("alive_node_refute_1".into()).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10).with_compressor(Some(Default::default()));
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();

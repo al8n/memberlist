@@ -5,6 +5,7 @@ use crate::{NetTransport, NetTransportOptions};
 
 use super::*;
 
+#[cfg(all(feature = "compression", feature = "encryption"))]
 pub async fn compound_ping<S, R>(s: S, kind: AddressKind) -> Result<(), AnyError>
 where
   S: StreamLayer,

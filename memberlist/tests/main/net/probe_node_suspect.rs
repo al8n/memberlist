@@ -41,17 +41,17 @@ macro_rules! probe_node_suspect {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _probe_node_suspect_with_compression >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_suspect_node_1".into()).with_compressor(Some(Default::default()));
+          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_suspect_node_1".into()).with_compressor(Some(Default::default())).with_offload_size(10);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();
           let t1_opts = Options::lan();
 
-          let mut t2_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_suspect_node_2".into()).with_compressor(Some(Default::default()));
+          let mut t2_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_suspect_node_2".into()).with_compressor(Some(Default::default())).with_offload_size(10);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t2_opts).await.unwrap();
 
-          let mut t3_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_suspect_node_3".into()).with_compressor(Some(Default::default()));
+          let mut t3_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_suspect_node_3".into()).with_compressor(Some(Default::default())).with_offload_size(10);
           t3_opts.add_bind_address(next_socket_addr_v4(0));
           let t3 = NetTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t3_opts).await.unwrap();
 
@@ -76,7 +76,7 @@ macro_rules! probe_node_suspect {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _probe_node_suspect_with_encryption >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_suspect_node_1".into()).with_primary_key(Some(TEST_KEYS[0]));
+          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_suspect_node_1".into()).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();
@@ -111,7 +111,7 @@ macro_rules! probe_node_suspect {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _probe_node_suspect_with_encryption_and_compression >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_suspect_node_1".into()).with_primary_key(Some(TEST_KEYS[0])).with_compressor(Some(Default::default()));
+          let mut t1_opts = NetTransportOptions::<SmolStr, _>::new("probe_node_suspect_node_1".into()).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10).with_compressor(Some(Default::default()));
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();

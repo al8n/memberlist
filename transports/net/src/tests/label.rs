@@ -9,4 +9,5 @@ use super::*;
 pub mod with_label;
 
 /// No label, no compression, with encryption
+#[cfg(feature = "encryption")]
 pub mod with_label_and_encryption;
