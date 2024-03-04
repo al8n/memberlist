@@ -201,6 +201,7 @@ mod push_pull;
 // ------- memberlist tests ----------
 
 #[path = "net/encrypted_gossip_transition.rs"]
+#[cfg(feature = "encryption")]
 #[cfg(not(windows))] // TODO: I do not have a windows machine to test and fix this, need helps
 mod encrypted_gossip_transition;
 
