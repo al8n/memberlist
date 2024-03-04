@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use std::{future::Future, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use agnostic::{
   net::{Net, UdpSocket},
@@ -8,7 +8,7 @@ use agnostic::{
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::Stream;
+
 use memberlist_core::{
   tests::AnyError,
   transport::tests::{

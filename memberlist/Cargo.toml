@@ -1,6 +1,6 @@
 [package]
 name = "memberlist"
-version.workspace = true
+version = "0.1.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -12,7 +12,7 @@ categories.workspace = true
 description = "A highly customable, adaptable, async runtime agnostic Gossip protocol which helps manage cluster membership and member failure detection."
 
 [features]
-default = ["tokio", "compression", "encryption", "dns", "tcp"]
+default = ["tokio", "compression", "encryption", "dns", "tcp", "quic"]
 
 tokio = ["agnostic/tokio"]
 async-std = ["agnostic/async-std"]
@@ -35,7 +35,7 @@ compression = [
   "memberlist-quic?/compression"
 ]
 
-encryption = ["memberlist-net?/encryption"]
+encryption = ["memberlist-net?/encryption", "memberlist-core/encryption"]
 
 quic = ["memberlist-quic"]
 quinn = ["memberlist-quic/quinn", "quic"]

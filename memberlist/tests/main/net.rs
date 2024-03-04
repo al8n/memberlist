@@ -24,7 +24,6 @@ macro_rules! test_mods {
     #[cfg(feature = "tokio")]
     mod tokio {
       use agnostic::tokio::TokioRuntime;
-      use memberlist_net::stream_layer::tcp::Tcp;
 
       use super::*;
       use crate::tokio_run;
@@ -33,7 +32,10 @@ macro_rules! test_mods {
         not(any(feature = "tls", feature = "native-tls")),
         all(feature = "tls", feature = "native-tls")
       ))]
-      $fn!(tokio("tcp", Tcp::<TokioRuntime>::new()));
+      $fn!(tokio(
+        "tcp",
+        memberlist_net::stream_layer::tcp::Tcp::<TokioRuntime>::new()
+      ));
 
       #[cfg(feature = "tls")]
       $fn!(tokio(
@@ -51,7 +53,6 @@ macro_rules! test_mods {
     #[cfg(feature = "async-std")]
     mod async_std {
       use agnostic::async_std::AsyncStdRuntime;
-      use memberlist_net::stream_layer::tcp::Tcp;
 
       use super::*;
       use crate::async_std_run;
@@ -60,7 +61,10 @@ macro_rules! test_mods {
         not(any(feature = "tls", feature = "native-tls")),
         all(feature = "tls", feature = "native-tls")
       ))]
-      $fn!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
+      $fn!(async_std(
+        "tcp",
+        memberlist_net::stream_layer::tcp::Tcp::<AsyncStdRuntime>::new()
+      ));
 
       #[cfg(feature = "tls")]
       $fn!(async_std(
@@ -78,7 +82,6 @@ macro_rules! test_mods {
     #[cfg(feature = "smol")]
     mod smol {
       use agnostic::smol::SmolRuntime;
-      use memberlist_net::stream_layer::tcp::Tcp;
 
       use super::*;
       use crate::smol_run;
@@ -87,7 +90,10 @@ macro_rules! test_mods {
         not(any(feature = "tls", feature = "native-tls")),
         all(feature = "tls", feature = "native-tls")
       ))]
-      $fn!(smol("tcp", Tcp::<SmolRuntime>::new()));
+      $fn!(smol(
+        "tcp",
+        memberlist_net::stream_layer::tcp::Tcp::<SmolRuntime>::new()
+      ));
 
       #[cfg(feature = "tls")]
       $fn!(smol(

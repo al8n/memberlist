@@ -14,8 +14,6 @@ pub async fn join_dead_node<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let mut opts = NetTransportOptions::new("node 1".into());
   opts.add_bind_address(kind.next(0));

@@ -23,7 +23,7 @@ tls = ["dep:futures-rustls"]
 native-tls = ["dep:async-native-tls", "dep:native-tls"]
 
 compression = ["rayon", "weezl"]
-encryption = ["rayon", "aead", "aes-gcm", "cbc"]
+encryption = ["rayon", "aead", "aes-gcm", "cbc", "memberlist-core/encryption"]
 
 serde = [
   "memberlist-core/serde",

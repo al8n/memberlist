@@ -112,7 +112,6 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer,
-  <<T::Runtime as Runtime>::JoinHandle<()> as std::future::Future>::Output: Send,
 {
   struct TestStreamLayer<TS: StreamLayer> {
     _m: std::marker::PhantomData<TS>,

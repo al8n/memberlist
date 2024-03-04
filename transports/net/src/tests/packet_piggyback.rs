@@ -10,8 +10,6 @@ pub async fn packet_piggyback<S, R>(s: S, kind: AddressKind) -> Result<(), AnyEr
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_packet_piggyback");
   let label = Label::try_from(&name)?;

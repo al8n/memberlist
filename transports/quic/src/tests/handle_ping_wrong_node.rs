@@ -9,8 +9,6 @@ pub async fn ping_wrong_node<S, R>(s: S, c: S, kind: AddressKind) -> Result<(), 
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_ping_wrong_node");
   let label = Label::try_from(&name)?;

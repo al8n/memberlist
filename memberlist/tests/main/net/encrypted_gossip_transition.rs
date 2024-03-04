@@ -3,7 +3,6 @@ use std::{cell::RefCell, collections::HashMap, future::Future, net::SocketAddr, 
 use agnostic::Runtime;
 use memberlist::{
   delegate::{mock::MockDelegate, CompositeDelegate},
-  futures::Stream,
   transport::{tests::AddressKind, MaybeResolvedAddress},
   Memberlist,
 };
@@ -38,8 +37,6 @@ where
   F: Future<Output = S>,
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let pretty = RefCell::new(HashMap::new());
   let new_config = |short_name: SmolStr, addr: Option<SocketAddr>| {

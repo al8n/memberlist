@@ -14,8 +14,6 @@ pub async fn promised_ping<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping");
   let label = Label::try_from(&name)?;
@@ -44,8 +42,6 @@ pub async fn promised_ping_no_label<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping_no_label");
   let pk = SecretKey::from([1; 32]);
@@ -72,8 +68,6 @@ pub async fn promised_ping_compression_only<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping_compression_only");
 
@@ -95,8 +89,6 @@ pub async fn promised_ping_label_and_compression<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping_label_and_compression");
   let label = Label::try_from(&name)?;
@@ -121,8 +113,6 @@ pub async fn promised_ping_encryption_only<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping_encryption_only");
   let pk = SecretKey::from([1; 32]);
@@ -148,8 +138,6 @@ pub async fn promised_ping_label_and_encryption<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping_lable_and_encryption");
   let label = Label::try_from(&name)?;
@@ -176,8 +164,6 @@ pub async fn promised_ping_no_label_no_compression_no_encryption<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping_no_compression_no_encryption");
 
@@ -198,8 +184,6 @@ pub async fn promised_ping_label_only<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping_label_only");
   let label = Label::try_from(&name)?;
