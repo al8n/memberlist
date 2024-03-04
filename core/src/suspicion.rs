@@ -9,7 +9,7 @@ use std::{
 
 use super::*;
 use agnostic::Runtime;
-use futures::{future::BoxFuture, Future, FutureExt};
+use futures::{future::BoxFuture, FutureExt};
 
 #[inline]
 fn remaining_suspicion_time(
@@ -43,7 +43,6 @@ impl<I, R> Suspicion<I, R>
 where
   I: Eq + core::hash::Hash,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
 {
   /// Returns a after_func started with the max time, and that will drive
   /// to the min time after seeing k or more confirmations. The from node will be
@@ -79,7 +78,6 @@ impl<I, R> Suspicion<I, R>
 where
   I: CheapClone + Eq + core::hash::Hash,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
 {
   /// Confirm registers that a possibly new peer has also determined the given
   /// node is suspect. This returns true if this was new information, and false
@@ -178,7 +176,6 @@ impl<R> AfterFunc<R> {
 impl<R> AfterFunc<R>
 where
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
 {
   pub fn start(&self) {
     let rx = self.stop_rx.clone();

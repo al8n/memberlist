@@ -1,13 +1,12 @@
 use std::{
   collections::HashMap,
-  future::Future,
   sync::{atomic::Ordering, Arc},
   time::{Duration, Instant},
 };
 
 use agnostic::Runtime;
 use bytes::Bytes;
-use futures::{FutureExt, Stream, StreamExt};
+use futures::{FutureExt, StreamExt};
 
 use super::{
   base::Memberlist,
@@ -186,8 +185,6 @@ where
 impl<T> Memberlist<T>
 where
   T: Transport,
-  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
-  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
 {
   /// Create a new memberlist with the given transport and options.
   #[inline]
@@ -204,8 +201,6 @@ impl<T, D> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
-  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
-  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
 {
   /// Create a new memberlist with the given transport, delegate and options.
   #[inline]

@@ -1,6 +1,5 @@
 use std::{
   collections::{HashMap, VecDeque},
-  future::Future,
   sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
@@ -10,7 +9,7 @@ use std::{
 use agnostic::Runtime;
 use async_channel::{Receiver, Sender};
 use async_lock::{Mutex, RwLock};
-use futures::Stream;
+
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 
 use super::{
@@ -327,8 +326,6 @@ impl<T, D> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
-  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
-  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   pub(crate) async fn new_in(
     transport: T,
@@ -406,8 +403,6 @@ impl<T, D> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
-  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
-  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   #[inline]
   pub(crate) fn get_advertise(&self) -> &<T::Resolver as AddressResolver>::ResolvedAddress {

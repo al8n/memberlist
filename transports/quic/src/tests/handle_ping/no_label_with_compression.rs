@@ -8,8 +8,6 @@ pub async fn server_no_label_with_compression_client_no_label_with_compression<S
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let mut opts = QuicTransportOptions::new(
     format!("{kind}_ping_server_no_label_with_compression_client_no_label_with_compression").into(),
@@ -36,8 +34,6 @@ pub async fn server_no_label_with_compression_client_no_label_no_compression<S, 
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let mut opts = QuicTransportOptions::new(
     format!("{kind}_ping_server_no_label_with_compression_client_no_label_no_compression").into(),
@@ -63,8 +59,6 @@ pub async fn server_no_label_no_compression_client_no_label_with_compression<S, 
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let mut opts = QuicTransportOptions::new(
     format!("{kind}_ping_server_no_label_with_compression_client_no_label_no_compression").into(),

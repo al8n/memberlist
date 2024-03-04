@@ -130,7 +130,6 @@ where
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
-  <R::Interval as futures::Stream>::Item: Send + 'static,
 {
   /// Creates a new quic transport.
   pub async fn new(

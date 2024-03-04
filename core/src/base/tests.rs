@@ -1,4 +1,5 @@
 use std::{
+  future::Future,
   marker::PhantomData,
   sync::atomic::AtomicUsize,
   time::{Duration, Instant},
@@ -46,8 +47,6 @@ impl<D, T> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
-  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
-  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   #[cfg(any(test, feature = "test"))]
   pub(crate) async fn change_node<F>(&self, id: &T::Id, f: F)
@@ -78,8 +77,6 @@ pub async fn memberlist_create<T, R>(t1: T, t1_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m = Memberlist::new(t1, t1_opts).await.unwrap();
 
@@ -105,8 +102,6 @@ pub async fn memberlist_create_shutdown<T, R>(t1: T, t1_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m = Memberlist::new(t1, t1_opts).await.unwrap();
 
@@ -137,8 +132,6 @@ pub async fn memberlist_join<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Opti
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1 = Memberlist::new(t1, t1_opts).await.unwrap();
   let m2 = Memberlist::new(t2, t2_opts).await.unwrap();
@@ -163,8 +156,6 @@ where
   F: Future<Output = T>,
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let label1 = Label::try_from("blah").unwrap();
   let m1 = Memberlist::new(get_transport(1, label1.clone()).await, Options::lan())
@@ -298,8 +289,6 @@ pub async fn memberlist_join_cancel<T, R>(t1: T, t1_opts: Options, t2: T, t2_opt
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1 = Memberlist::with_delegate(
     t1,
@@ -387,8 +376,6 @@ pub async fn memberlist_join_cancel_passive<T, R>(t1: T, t1_opts: Options, t2: T
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let id1 = t1.local_id().clone();
   let m1 = Memberlist::with_delegate(
@@ -441,8 +428,6 @@ pub async fn memberlist_join_shutdown<T, R>(t1: T, t1_opts: Options, t2: T, t2_o
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1 = Memberlist::new(t1, t1_opts).await.unwrap();
   let m2 = Memberlist::new(t2, t2_opts).await.unwrap();
@@ -472,8 +457,6 @@ pub async fn memberlist_node_delegate_meta<T, R>(t1: T, t1_opts: Options, t2: T,
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1 = Memberlist::with_delegate(
     t1,
@@ -559,8 +542,6 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1 = Memberlist::with_delegate(
     t1,
@@ -661,8 +642,6 @@ pub async fn memberlist_user_data<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts:
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1 = Memberlist::with_delegate(
     t1,
@@ -710,7 +689,7 @@ where
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
 
   // Wait for a little while
-  R::sleep(Duration::from_millis(3000)).await;
+  R::sleep(Duration::from_secs(10)).await;
 
   let mut msg1 = m1
     .delegate()
@@ -754,8 +733,6 @@ pub async fn memberlist_send<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Opti
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1 = Memberlist::with_delegate(
     t1,
@@ -829,8 +806,6 @@ pub async fn memberlist_leave<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Opt
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1 = Memberlist::new(t1, t1_opts.with_gossip_interval(Duration::from_millis(1)))
     .await
@@ -910,8 +885,6 @@ pub async fn memberlist_conflict_delegate<F, T, R>(
   F: Future<Output = T>,
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1 = Memberlist::with_delegate(
     get_transport(id.clone()).await,
@@ -996,8 +969,6 @@ pub async fn memberlist_ping_delegate<T, R>(t1: T, t1_opts: Options, t2: T, t2_o
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let probe_interval = t1_opts.probe_interval();
   let m1 = Memberlist::with_delegate(
@@ -1058,8 +1029,6 @@ where
   T: Transport<Runtime = R>,
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   retry::<R, _, _>(30, Duration::from_millis(500), || async {
     if m.online_members().await.len() != expected {
@@ -1099,8 +1068,7 @@ where
 async fn retry<'a, R, F, Fut>(n: usize, w: Duration, mut f: F)
 where
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
+
   F: FnMut() -> Fut + Clone,
   Fut: Future<Output = (bool, String)> + Send + Sync + 'a,
 {

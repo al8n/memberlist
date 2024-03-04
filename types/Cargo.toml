@@ -14,6 +14,7 @@ description = "Types used in the memberlist crate."
 [features]
 default = []
 metrics = ["dep:metrics"]
+encryption = []
 
 serde = ["dep:serde", "smol_str/serde", "smallvec-wrapper/serde", "base64", "ipnet/serde", "bytes/serde", "nodecraft/serde"]
 rkyv = ["dep:rkyv", "smallvec-wrapper/rkyv32", "nodecraft/rkyv"]

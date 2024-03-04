@@ -179,7 +179,7 @@ impl AsMut<[u8]> for SecretKey {
   }
 }
 
-smallvec_wrapper!(
+smallvec_wrapper::smallvec_wrapper!(
   /// A collection of secret keys, you can just treat it as a `Vec<SecretKey>`.
   #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
   #[repr(transparent)]

@@ -10,8 +10,6 @@ pub async fn indirect_ping<S, R>(s: S, kind: AddressKind) -> Result<(), AnyError
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_indirect_ping");
   let label = Label::try_from(&name)?;
@@ -44,8 +42,6 @@ pub async fn indirect_ping_compression_only<S, R>(s: S, kind: AddressKind) -> Re
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_indirect_ping");
   let label = Label::try_from(&name)?;
@@ -73,8 +69,6 @@ pub async fn indirect_ping_encryption_only<S, R>(s: S, kind: AddressKind) -> Res
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_indirect_ping");
   let label = Label::try_from(&name)?;
@@ -107,8 +101,6 @@ pub async fn indirect_ping_no_encryption_no_compression<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_indirect_ping");
   let label = Label::try_from(&name)?;

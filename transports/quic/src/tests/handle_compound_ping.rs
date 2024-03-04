@@ -9,8 +9,6 @@ pub async fn compound_ping<S, R>(s: S, c: S, kind: AddressKind) -> Result<(), An
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_compound_ping");
   let label = Label::try_from(&name)?;

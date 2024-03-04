@@ -11,8 +11,6 @@ where
   S1: StreamLayer,
   S2: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   use nodecraft::CheapClone;
 

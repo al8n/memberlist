@@ -10,8 +10,6 @@ pub async fn server_with_label_with_compression_no_encryption_client_with_label_
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let client = NetTransportTestClient::<R>::new(kind.next(0))
     .await?
@@ -36,8 +34,6 @@ pub async fn server_with_label_no_compression_no_encryption_client_with_label_wi
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let client = NetTransportTestClient::<R>::new(kind.next(0))
     .await?
@@ -61,8 +57,6 @@ pub async fn server_with_label_with_compression_no_encryption_client_with_label_
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let client = NetTransportTestClient::<R>::new(kind.next(0))
     .await?

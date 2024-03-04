@@ -1,6 +1,6 @@
 use metrics::Label;
 
-smallvec_wrapper!(
+smallvec_wrapper::smallvec_wrapper!(
   /// A vector of `Label`s.
   #[derive(PartialEq, Eq, Hash, Clone, Debug, PartialOrd, Ord)]
   pub MetricLabels([Label; 2]);
