@@ -78,8 +78,17 @@ jobs:
             features: "test,tokio,quinn,metrics"
             name: "memberlist-quinn"
           - crate: transports/net
-            features: "test,tokio,tcp,compression,encryption,metrics"
+            features: "test,tokio,tcp,compression,metrics"
+            name: "net-tcp-compression-only"
+          - crate: transports/net
+            features: "test,tokio,tcp,encryption,metrics"
+            name: "net-tcp-encryption-only"
+          - crate: transports/net
+            features: "test,tokio,tcp,metrics"
             name: "net-tcp"
+          - crate: transports/net
+            features: "test,tokio,tcp,compression,encryption,metrics"
+            name: "net-tcp-compression-and-encryption"
           - crate: transports/net
             features: "test,tokio,tls,compression,encryption,metrics"
             name: "net-tls"
