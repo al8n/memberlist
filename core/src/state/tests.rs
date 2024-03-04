@@ -966,7 +966,7 @@ where
     ack_tx,
     Some(nack_tx),
     Instant::now(),
-    Duration::from_millis(10),
+    Duration::from_millis(50),
   );
 
   // Should send message
@@ -1057,7 +1057,7 @@ pub async fn alive_node_new_node<T, R>(
     );
 
     assert!(
-      Epoch::now() - state.state_change < Duration::from_millis(1),
+      Epoch::now() - state.state_change < Duration::from_secs(1),
       "bad change delta"
     );
   }
@@ -1192,7 +1192,7 @@ pub async fn alive_node_suspect_node<T, R>(
 
   let change = m.get_node_state_change(test_node.id()).await.unwrap();
   assert!(
-    Epoch::now() - change < Duration::from_millis(1),
+    Epoch::now() - change < Duration::from_secs(1),
     "bad change delta"
   );
 

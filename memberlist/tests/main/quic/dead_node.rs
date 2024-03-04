@@ -21,7 +21,7 @@ macro_rules! dead_node {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _dead_node_with_compression >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = QuicTransportOptions::<SmolStr, _>::new("dead_node_1".into()).with_compressor(Some(Default::default()));
+          let mut t1_opts = QuicTransportOptions::<SmolStr, _>::new("dead_node_1".into()).with_compressor(Some(Default::default())).with_offload_size(10);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = QuicTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap();
