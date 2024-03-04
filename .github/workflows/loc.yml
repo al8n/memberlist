@@ -42,7 +42,7 @@ jobs:
       - name: Upload loc to GitHub Gist
         uses: actions/github-script@v6
         with:
-          github-token: ${{secrets.GITHUB_TOKEN}}
+          github-token: ${{secrets.GIST_PAT}}
           script: |
             const fs = require('fs');
             const output = fs.readFileSync('tokeit.json', 'utf8');
