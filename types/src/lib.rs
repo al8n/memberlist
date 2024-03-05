@@ -6,8 +6,6 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
-#[macro_use]
-extern crate smallvec_wrapper;
 pub use smallvec_wrapper::smallvec_wrapper;
 
 mod message;
