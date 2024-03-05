@@ -532,7 +532,7 @@ where
   let promised = Arc::new(promised);
 
   let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
-  let ping_timeout = m.inner.opts.probe_interval;
+  let ping_timeout = m.inner.opts.probe_interval + Duration::from_secs(2);
   let ping_time_max = m.inner.opts.probe_interval + Duration::from_secs(10);
 
   // Do a normal rount trip

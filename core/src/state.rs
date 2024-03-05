@@ -1267,14 +1267,14 @@ where
         futures::future::Either::Left(async {
           // Send single message as is
           if let Err(e) = self.transport_send_packet(&addr, msgs.pop().unwrap()).await {
-            tracing::error!(target =  "memberlist.state", err = %e, "failed to send gossip to {}", addr);
+            tracing::error!(target = "memberlist.state", err = %e, "failed to send gossip to {}", addr);
           }
         })
       } else {
         futures::future::Either::Right(async {
           // Otherwise create and send one or more compound messages
           if let Err(e) = self.transport_send_packets(&addr, msgs).await {
-            tracing::error!(target =  "memberlist.state", err = %e, "failed to send gossip to {}", addr);
+            tracing::error!(target = "memberlist.state", err = %e, "failed to send gossip to {}", addr);
           }
         })
       };

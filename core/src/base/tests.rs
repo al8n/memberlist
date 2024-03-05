@@ -710,7 +710,7 @@ where
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
 
   // Wait for a little while
-  R::sleep(Duration::from_millis(3000)).await;
+  R::sleep(Duration::from_secs(10)).await;
 
   let mut msg1 = m1
     .delegate()

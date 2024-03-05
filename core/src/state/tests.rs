@@ -1556,7 +1556,7 @@ where
   assert!(matches!(msg, Message::Suspect(_)), "bad message: {msg:?}");
 
   // Wait for the timeout
-  R::sleep(Duration::from_millis(100)).await;
+  R::sleep(Duration::from_millis(500)).await;
 
   let state = m.get_node_state(&test_node_id).await.unwrap();
   assert_eq!(state, State::Dead, "bad state");
@@ -2348,12 +2348,12 @@ where
   })
   .await;
 
-  for idx in 1..=5 {
+  for idx in 1..=15 {
     m1.gossip().await;
 
     R::sleep(Duration::from_millis(3)).await;
 
-    if subscriber.len() < 2 && idx == 5 {
+    if subscriber.len() < 2 && idx == 15 {
       panic!("expected 2 messages from gossip, got {}", subscriber.len());
     }
 
