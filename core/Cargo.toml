@@ -14,6 +14,7 @@ description = "A highly customable, adaptable, async runtime agnostic Gossip pro
 [features]
 default = ["metrics"]
 metrics = ["dep:metrics", "memberlist-types/metrics"]
+encryption = ["memberlist-types/encryption"]
 
 serde = [
   "dep:serde",

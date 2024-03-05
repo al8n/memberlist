@@ -35,7 +35,7 @@ compression = [
   "memberlist-quic?/compression"
 ]
 
-encryption = ["memberlist-net?/encryption"]
+encryption = ["memberlist-net?/encryption", "memberlist-core/encryption"]
 
 quic = ["memberlist-quic"]
 quinn = ["memberlist-quic/quinn", "quic"]

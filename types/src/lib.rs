@@ -8,6 +8,7 @@
 
 #[macro_use]
 extern crate smallvec_wrapper;
+pub use smallvec_wrapper::smallvec_wrapper;
 
 mod message;
 pub use message::*;
@@ -31,8 +32,10 @@ mod meta;
 pub use meta::*;
 
 #[cfg(feature = "metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
 mod metrics_label;
 #[cfg(feature = "metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
 pub use metrics_label::*;
 
 mod cidr_policy;
@@ -50,7 +53,11 @@ pub use packet::*;
 mod server;
 pub use server::*;
 
+#[cfg(feature = "encryption")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 mod secret;
+#[cfg(feature = "encryption")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 pub use secret::*;
 
 mod version;
