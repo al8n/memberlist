@@ -14,8 +14,6 @@ pub async fn promised_ping<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping");
   let label = Label::try_from(&name)?;
@@ -39,8 +37,6 @@ pub async fn promised_ping_no_label<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping_no_label");
 
@@ -62,8 +58,6 @@ pub async fn promised_ping_compression_only<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping_compression_only");
 
@@ -86,8 +80,6 @@ pub async fn promised_ping_label_and_compression<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping_label_and_compression");
   let label = Label::try_from(&name)?;
@@ -111,8 +103,6 @@ pub async fn promised_ping_no_label_no_compression<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping_no_compression");
 
@@ -132,8 +122,6 @@ pub async fn promised_ping_label_only<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_promised_ping_label_only");
   let label = Label::try_from(&name)?;

@@ -10,7 +10,7 @@ use super::{
 
 use agnostic::Runtime;
 use bytes::Bytes;
-use futures::{future::FutureExt, Future, Stream};
+use futures::{future::FutureExt};
 use nodecraft::{resolver::AddressResolver, Node};
 
 mod packet;
@@ -26,8 +26,6 @@ impl<D, T> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
-  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
-  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   pub(crate) async fn send_ping_and_wait_for_ack(
     &self,

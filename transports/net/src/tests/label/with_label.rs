@@ -7,8 +7,6 @@ pub async fn server_with_label_client_with_label<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_server_with_label_client_with_label");
   let label = Label::try_from(&name)?;
@@ -34,8 +32,6 @@ pub async fn server_with_label_client_no_label<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_server_with_label_client_no_label");
   let label = Label::try_from(&name)?;
@@ -62,8 +58,6 @@ pub async fn server_no_label_client_with_label<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_server_no_label_client_with_label");
   let label = Label::try_from(&name)?;

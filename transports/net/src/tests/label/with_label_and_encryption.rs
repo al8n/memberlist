@@ -8,8 +8,6 @@ pub async fn server_with_label_with_encryption_client_with_label_with_encryption
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_server_with_label_with_encryption_client_with_label_with_encryption");
   let label = Label::try_from(&name)?;
@@ -42,8 +40,6 @@ pub async fn server_with_label_with_encryption_client_with_label_no_encryption<S
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_server_with_label_with_encryption_client_with_label_no_encryption");
   let label = Label::try_from(&name)?;
@@ -75,8 +71,6 @@ pub async fn server_with_label_no_encryption_client_with_label_with_encryption<S
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_server_with_label_no_encryption_client_with_label_with_encryption");
   let label = Label::try_from(&name)?;

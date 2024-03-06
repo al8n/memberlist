@@ -9,7 +9,7 @@ use std::{
 use agnostic::Runtime;
 use bytes::Bytes;
 
-use futures::{FutureExt, Stream};
+use futures::{FutureExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 use smol_str::SmolStr;
 use transformable::Transformable;
@@ -147,8 +147,6 @@ where
   T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   C: TestPacketClient,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
   let source_addr = client.local_addr();
@@ -221,8 +219,6 @@ where
   C: TestPacketClient,
   E: FnOnce(&[Message<SmolStr, SocketAddr>]) -> Result<Bytes, AnyError>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
 
@@ -297,8 +293,6 @@ where
   T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   C: TestPacketClient,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
 
@@ -366,8 +360,6 @@ where
   T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   C: TestPacketClient,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
   let source_addr = client.local_addr();
@@ -421,8 +413,6 @@ where
   C: TestPacketClient,
   D: FnOnce(Bytes) -> Result<[Message<SmolStr, SocketAddr>; 2], AnyError>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
   let source_addr = client.local_addr();
@@ -525,8 +515,6 @@ where
   P: TestPromisedClient,
   P::Stream: TestPromisedStream + AsMut<T::Stream>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let promised_addr = promised.local_addr()?;
   let promised = Arc::new(promised);
@@ -743,8 +731,6 @@ where
   P: TestPromisedClient,
   P::Stream: TestPromisedStream + AsMut<T::Stream>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(trans, VoidDelegate::default(), Options::default()).await?;
   let bind_addr = *m.advertise_address();
@@ -814,8 +800,6 @@ where
   T1: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   T2: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1 = Memberlist::new(trans1, Options::default())
     .await
@@ -852,8 +836,6 @@ where
   T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   P: TestPromisedClient,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let local_addr = promised.local_addr().unwrap();
 
@@ -883,8 +865,6 @@ where
   T1: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   T2: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1 = Memberlist::with_delegate(
     trans1,

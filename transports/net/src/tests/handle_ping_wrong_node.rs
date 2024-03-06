@@ -13,8 +13,6 @@ pub async fn ping_wrong_node_no_encryption_no_compression<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_ping_wrong_node");
   let label = Label::try_from(&name)?;
@@ -38,8 +36,6 @@ pub async fn ping_wrong_node<S, R>(s: S, kind: AddressKind) -> Result<(), AnyErr
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_ping_wrong_node");
   let label = Label::try_from(&name)?;
@@ -72,8 +68,6 @@ pub async fn ping_wrong_node_compression_only<S, R>(s: S, kind: AddressKind) -> 
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_ping_wrong_node");
   let label = Label::try_from(&name)?;
@@ -102,8 +96,6 @@ pub async fn ping_wrong_node_encryption_only<S, R>(s: S, kind: AddressKind) -> R
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let name = format!("{kind}_ping_wrong_node");
   let label = Label::try_from(&name)?;

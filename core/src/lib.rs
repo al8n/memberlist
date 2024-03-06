@@ -62,7 +62,6 @@ pub use tracing;
 pub mod tests {
   use std::net::SocketAddr;
 
-  use agnostic::Runtime;
   use nodecraft::resolver::AddressResolver;
   #[cfg(not(windows))]
   use parking_lot::Mutex;
@@ -202,8 +201,6 @@ pub mod tests {
     opts: Options,
   ) -> Result<Memberlist<T, D>, Error<T, D>>
   where
-    <<<T as Transport>::Runtime as Runtime>::Sleep as futures::Future>::Output: Send,
-    <<<T as Transport>::Runtime as Runtime>::Interval as futures::Stream>::Item: Send,
     D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
     T: Transport,
   {

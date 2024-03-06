@@ -10,7 +10,7 @@ use std::{
 
 use agnostic::Runtime;
 use bytes::Bytes;
-use futures::{lock::Mutex, Future, FutureExt, Stream};
+use futures::{lock::Mutex, Future, FutureExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Id, Node};
 
 use crate::{
@@ -37,8 +37,6 @@ async fn host_memberlist<T, R>(
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   Memberlist::new_in(t, None, opts).await.map(|(_, _, t)| t)
 }
@@ -52,8 +50,6 @@ where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   Memberlist::new_in(t, Some(d), opts)
     .await
@@ -65,8 +61,6 @@ pub async fn probe<T, R>(t1: T, t1_opts: Options, t2: T)
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -113,8 +107,6 @@ pub async fn probe_node_suspect<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -194,8 +186,6 @@ pub async fn probe_node_dogpile<F, T, R>(
   F: Future<Output = T>,
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   const CASES: &[DogpileTestCase] = &[
     DogpileTestCase {
@@ -349,8 +339,6 @@ pub async fn probe_node_awareness_degraded<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -452,8 +440,6 @@ pub async fn probe_node_awareness_improved<T, R>(t1: T, t1_opts: Options, t2: T)
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -530,8 +516,6 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -610,8 +594,6 @@ pub async fn probe_node_buddy<T, R>(t1: T, t1_opts: Options, t2: T)
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -665,8 +647,6 @@ pub async fn probe_node<T, R>(t1: T, t1_opts: Options, t2: T)
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -723,8 +703,6 @@ pub async fn ping<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -776,8 +754,6 @@ pub async fn reset_nodes<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -841,7 +817,6 @@ async fn ack_handler_exists(m: &AckManager, idx: u32) -> bool {
 pub async fn set_probe_channels<R>()
 where
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
 {
   let m = AckManager::new();
 
@@ -860,7 +835,6 @@ where
 pub async fn set_ack_handler<R>()
 where
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
 {
   let m1 = AckManager::new();
 
@@ -879,7 +853,6 @@ where
 pub async fn invoke_ack_handler<R>()
 where
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
 {
   let m1 = AckManager::new();
 
@@ -903,7 +876,6 @@ where
 pub async fn invoke_ack_handler_channel_ack<R>()
 where
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
 {
   let m = AckManager::new();
 
@@ -951,7 +923,6 @@ where
 pub async fn invoke_ack_handler_channel_nack<R>()
 where
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
 {
   let m1 = AckManager::new();
 
@@ -1022,8 +993,6 @@ pub async fn alive_node_new_node<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m = get_memberlist(
@@ -1143,8 +1112,6 @@ pub async fn alive_node_suspect_node<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let (event_delegate, subscriber) = ToggledEventDelegate::new(false);
 
@@ -1219,8 +1186,6 @@ pub async fn alive_node_idempotent<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let (event_delegate, subscriber) = ToggledEventDelegate::new(false);
 
@@ -1277,8 +1242,6 @@ pub async fn alive_node_change_meta<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let (event_delegate, subscriber) = ToggledEventDelegate::new(false);
 
@@ -1342,8 +1305,6 @@ pub async fn alive_node_refute<T, R>(t1: T, t1_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
@@ -1390,8 +1351,6 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
@@ -1475,8 +1434,6 @@ pub async fn suspect_node_no_node<T, R>(t1: T, t1_opts: Options, test_node_id: T
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
@@ -1504,8 +1461,6 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
@@ -1590,8 +1545,6 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
@@ -1652,8 +1605,6 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let now = Epoch::now();
   let m: Memberlist<T> = get_memberlist(
@@ -1702,8 +1653,6 @@ pub async fn suspect_node_refute<T, R>(t1: T, t1_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(
     t1,
@@ -1752,8 +1701,6 @@ pub async fn dead_node_no_node<T, R>(t1: T, t1_opts: Options, test_node_id: T::I
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
@@ -1784,8 +1731,6 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m = get_memberlist(
@@ -1860,8 +1805,6 @@ pub async fn dead_node<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m = get_memberlist(
@@ -1932,8 +1875,6 @@ pub async fn dead_node_double<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
 
@@ -2004,8 +1945,6 @@ pub async fn dead_node_old_dead<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(
     t1,
@@ -2048,8 +1987,6 @@ pub async fn dead_node_alive_replay<T, R>(
 ) where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(
     t1,
@@ -2085,8 +2022,6 @@ pub async fn dead_node_refute<T, R>(t1: T, t1_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let m = get_memberlist(
     t1,
@@ -2143,8 +2078,6 @@ pub async fn merge_state<A, T, R>(
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m = get_memberlist(
@@ -2234,8 +2167,6 @@ where
   T: Transport<Runtime = R>,
   R: Runtime,
   <R as agnostic::Runtime>::Sleep: Send + Sync,
-  <R::Sleep as Future>::Output: Send + Sync,
-  <R::Interval as Stream>::Item: Send + Sync,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m1 = host_memberlist(t1, t1_opts.with_gossip_interval(Duration::from_millis(10)))
@@ -2289,8 +2220,6 @@ where
   T: Transport<Runtime = R>,
   R: Runtime,
   <R as agnostic::Runtime>::Sleep: Send + Sync,
-  <R::Sleep as Future>::Output: Send + Sync,
-  <R::Interval as Stream>::Item: Send + Sync,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m1 = host_memberlist(
@@ -2370,8 +2299,6 @@ where
   T: Transport<Runtime = R>,
   R: Runtime,
   <R as agnostic::Runtime>::Sleep: Send + Sync,
-  <R::Sleep as Future>::Output: Send + Sync,
-  <R::Interval as Stream>::Item: Send + Sync,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m1 = host_memberlist(

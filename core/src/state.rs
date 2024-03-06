@@ -20,7 +20,7 @@ use super::{
 
 use agnostic::Runtime;
 
-use futures::{stream::FuturesUnordered, Future, FutureExt, Stream, StreamExt};
+use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 use rand::{seq::SliceRandom, Rng};
 
@@ -136,8 +136,6 @@ impl<T, D> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
-  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
-  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Does a complete state exchange with a specific node.
   pub(crate) async fn push_pull_node(
@@ -624,8 +622,6 @@ impl<T: Transport> StateMessage<T> {
   async fn run<D>(self, s: &Memberlist<T, D>)
   where
     D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
-    <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
-    <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
   {
     match self {
       StateMessage::Alive(alive) => s.alive_node(alive, None, false).await,
@@ -716,8 +712,6 @@ impl<T, D> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
-  <<T::Runtime as Runtime>::Interval as Stream>::Item: Send,
-  <<T::Runtime as Runtime>::Sleep as Future>::Output: Send,
 {
   /// Used to ensure the Tick is performed periodically.
   pub(crate) async fn schedule(&self, shutdown_rx: async_channel::Receiver<()>) {

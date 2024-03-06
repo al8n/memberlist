@@ -10,8 +10,6 @@ pub async fn server_no_label_no_compression_with_encryption_client_no_label_no_c
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let pk = SecretKey::from([1; 32]);
   let client = NetTransportTestClient::<R>::new(kind.next(0))
@@ -40,8 +38,6 @@ pub async fn server_no_label_no_compression_no_encryption_client_no_label_no_com
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let pk = SecretKey::from([1; 32]);
   let client = NetTransportTestClient::<R>::new(kind.next(0))
@@ -70,8 +66,6 @@ pub async fn server_no_label_no_compression_with_encryption_client_no_label_no_c
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let pk = SecretKey::from([1; 32]);
   let client = NetTransportTestClient::<R>::new(kind.next(0))

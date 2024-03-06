@@ -11,8 +11,6 @@ pub async fn gossip_mismatched_keys<S, R>(s1: S, s2: S, kind: AddressKind) -> Re
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   // Create two agents with different gossip keys
   let pk1 = SecretKey::Aes192(*b"4W6DGn2VQVqDEceOdmuRTQ==");
@@ -60,8 +58,6 @@ pub async fn gossip_mismatched_keys_with_label<S, R>(
 where
   S: StreamLayer,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   // Create two agents with different gossip keys
   let pk1 = SecretKey::Aes192(*b"4W6DGn2VQVqDEceOdmuRTQ==");

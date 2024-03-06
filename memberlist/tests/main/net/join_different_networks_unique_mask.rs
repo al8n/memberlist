@@ -2,7 +2,7 @@ use std::future::Future;
 
 use agnostic::Runtime;
 use memberlist::{
-  futures::Stream, transport::MaybeResolvedAddress, types::CIDRsPolicy, Memberlist,
+  transport::MaybeResolvedAddress, types::CIDRsPolicy, Memberlist,
 };
 
 use super::*;
@@ -14,8 +14,6 @@ async fn join_different_networks_unique_mask<F, T, R>(
   F: Future<Output = T>,
   T: Transport<Runtime = R>,
   R: Runtime,
-  <R::Sleep as Future>::Output: Send,
-  <R::Interval as Stream>::Item: Send,
 {
   let cidr = CIDRsPolicy::try_from(["127.0.0.0/8"].as_slice()).unwrap();
   let m1 = Memberlist::new(get_transport(0, cidr.clone()).await, Options::lan())
