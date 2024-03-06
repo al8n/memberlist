@@ -9,7 +9,7 @@ use std::{
 use agnostic::Runtime;
 use bytes::Bytes;
 
-use futures::{FutureExt};
+use futures::FutureExt;
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 use smol_str::SmolStr;
 use transformable::Transformable;

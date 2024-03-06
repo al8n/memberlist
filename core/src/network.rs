@@ -10,7 +10,7 @@ use super::{
 
 use agnostic::Runtime;
 use bytes::Bytes;
-use futures::{future::FutureExt};
+use futures::future::FutureExt;
 use nodecraft::{resolver::AddressResolver, Node};
 
 mod packet;
