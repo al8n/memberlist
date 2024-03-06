@@ -32,7 +32,10 @@ macro_rules! test_mods {
         not(any(feature = "tls", feature = "native-tls")),
         all(feature = "tls", feature = "native-tls")
       ))]
-      $fn!(tokio("tcp", memberlist_net::stream_layer::tcp::Tcp::<TokioRuntime>::new()));
+      $fn!(tokio(
+        "tcp",
+        memberlist_net::stream_layer::tcp::Tcp::<TokioRuntime>::new()
+      ));
 
       #[cfg(feature = "tls")]
       $fn!(tokio(
@@ -58,7 +61,10 @@ macro_rules! test_mods {
         not(any(feature = "tls", feature = "native-tls")),
         all(feature = "tls", feature = "native-tls")
       ))]
-      $fn!(async_std("tcp", memberlist_net::stream_layer::tcp::Tcp::<AsyncStdRuntime>::new()));
+      $fn!(async_std(
+        "tcp",
+        memberlist_net::stream_layer::tcp::Tcp::<AsyncStdRuntime>::new()
+      ));
 
       #[cfg(feature = "tls")]
       $fn!(async_std(
@@ -84,7 +90,10 @@ macro_rules! test_mods {
         not(any(feature = "tls", feature = "native-tls")),
         all(feature = "tls", feature = "native-tls")
       ))]
-      $fn!(smol("tcp", memberlist_net::stream_layer::tcp::Tcp::<SmolRuntime>::new()));
+      $fn!(smol(
+        "tcp",
+        memberlist_net::stream_layer::tcp::Tcp::<SmolRuntime>::new()
+      ));
 
       #[cfg(feature = "tls")]
       $fn!(smol(
