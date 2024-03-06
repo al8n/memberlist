@@ -44,7 +44,6 @@ nodecraft = { version = "0.2", features = [
 ] }
 paste = "1"
 pin-project = "1"
-pollster = "0.3"
 scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 humantime-serde = "1"
