@@ -1,4 +1,5 @@
 use std::{
+  future::Future,
   marker::PhantomData,
   sync::atomic::AtomicUsize,
   time::{Duration, Instant},

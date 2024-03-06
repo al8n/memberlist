@@ -1,6 +1,5 @@
 use std::{
   collections::{HashMap, VecDeque},
-  future::Future,
   sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
