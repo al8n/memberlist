@@ -81,7 +81,7 @@ rcgen = { version = "0.12", optional = true }
 
 # s2n
 s2n-quic = { version = "1.32", optional = true }
-s2n-quic-transport = { version = "0.33", optional = true }
+s2n-quic-transport = { version = "0.34", optional = true }
 
 # compression
 rayon = { version = "1.8", optional = true }

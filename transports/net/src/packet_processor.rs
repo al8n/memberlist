@@ -32,6 +32,7 @@ pub(super) struct PacketProcessor<A, T>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = T::Runtime>,
   T: Transport<Resolver = A>,
+  T::Runtime: Runtime,
 {
   pub(super) packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   pub(super) socket: Arc<<<T::Runtime as Runtime>::Net as Net>::UdpSocket>,
@@ -54,6 +55,7 @@ impl<A, T> PacketProcessor<A, T>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = T::Runtime>,
   T: Transport<Resolver = A>,
+  T::Runtime: Runtime,
 {
   pub(super) async fn run(self) {
     let Self {

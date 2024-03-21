@@ -19,7 +19,7 @@ use std::{
 
 use agnostic::{
   net::{Net, UdpSocket},
-  Runtime,
+  Runtime, RuntimeLite,
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{BufMut, BytesMut};
@@ -614,7 +614,7 @@ where
     deadline: Instant,
   ) -> Result<Self::Stream, Self::Error> {
     let connector =
-      <Self::Runtime as Runtime>::timeout_at(deadline, self.stream_layer.connect(*addr));
+      <Self::Runtime as RuntimeLite>::timeout_at(deadline, self.stream_layer.connect(*addr));
     match connector.await {
       Ok(Ok(conn)) => Ok(conn),
       Ok(Err(e)) => Err(Self::Error::Connection(ConnectionError {

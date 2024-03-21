@@ -41,11 +41,11 @@ compression = [
 
 encryption = ["memberlist-net?/encryption", "memberlist-core/encryption"]
 
-quic = ["memberlist-quic"]
+quic = ["memberlist-quic", "agnostic/quinn"]
 quinn = ["memberlist-quic/quinn", "quic"]
 s2n = ["memberlist-quic/s2n", "quic"]
 
-net = ["memberlist-net"]
+net = ["memberlist-net", "agnostic/net"]
 tcp = ["net"]
 tls = ["memberlist-net/tls", "tcp"]
 native-tls = ["memberlist-net/native-tls", "tcp"]
@@ -54,6 +54,7 @@ native-tls = ["memberlist-net/native-tls", "tcp"]
 dns = [
   "memberlist-net?/dns",
   "memberlist-quic?/dns",
+  "agnostic/dns",
 ]
 dns-over-quic = [
   "memberlist-net?/dns-over-quic",
@@ -103,7 +104,8 @@ dnssec = [
 test = ["memberlist-core/test", "memberlist-net?/test", "memberlist-quic?/test"]
 
 [dependencies]
-agnostic.workspace = true
+agnostic-lite.workspace = true
+agnostic = { workspace = true, optional = true }
 memberlist-core.workspace = true
 memberlist-net = { workspace = true, optional = true, default-features = false }
 memberlist-quic = { workspace = true, optional = true, default-features = false }

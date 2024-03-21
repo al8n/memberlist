@@ -1,4 +1,4 @@
-use agnostic::{async_std::AsyncStdRuntime, Runtime};
+use agnostic::{async_std::AsyncStdRuntime, RuntimeLite};
 use memberlist_core::tests::run as run_unit_test;
 
 #[cfg(any(
