@@ -18,7 +18,7 @@ use super::{
   Member, Members,
 };
 
-use agnostic::Runtime;
+use agnostic_lite::{RuntimeLite, AsyncSpawner};
 
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
@@ -678,20 +678,21 @@ fn move_dead_nodes<I, A, R>(
 macro_rules! bail_trigger {
   ($fn:ident) => {
     paste::paste! {
-      async fn [<trigger _ $fn>](&self, stagger: Duration, interval: Duration, stop_rx: async_channel::Receiver<()>) -> <T::Runtime as Runtime>::JoinHandle<()>
+      async fn [<trigger _ $fn>](&self, stagger: Duration, interval: Duration, stop_rx: async_channel::Receiver<()>) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()>
       {
         let this = self.clone();
         // Use a random stagger to avoid syncronizing
         let rand_stagger = random_stagger(stagger);
-        <T::Runtime as Runtime>::spawn(async move {
-          let delay = <T::Runtime as Runtime>::sleep(rand_stagger);
+        <T::Runtime as RuntimeLite>::spawn(async move {
+          let delay = <T::Runtime as RuntimeLite>::sleep(rand_stagger);
 
           futures::select! {
             _ = delay.fuse() => {},
             _ = stop_rx.recv().fuse() => return,
           }
 
-          let mut timer = <T::Runtime as Runtime>::interval(interval);
+          let timer = <T::Runtime as RuntimeLite>::interval(interval);
+          futures::pin_mut!(timer);
           loop {
             futures::select! {
               _ = futures::StreamExt::next(&mut timer).fuse() => {
@@ -755,23 +756,24 @@ where
   async fn trigger_push_pull(
     &self,
     stop_rx: async_channel::Receiver<()>,
-  ) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  ) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()> {
     let interval = self.inner.opts.push_pull_interval;
     let this = self.clone();
     // Use a random stagger to avoid syncronizing
     let mut rng = rand::thread_rng();
     let rand_stagger = Duration::from_millis(rng.gen_range(0..interval.as_millis() as u64));
 
-    <T::Runtime as Runtime>::spawn(async move {
+    <T::Runtime as RuntimeLite>::spawn(async move {
       futures::select! {
-        _ = <T::Runtime as Runtime>::sleep(rand_stagger).fuse() => {},
+        _ = <T::Runtime as RuntimeLite>::sleep(rand_stagger).fuse() => {},
         _ = stop_rx.recv().fuse() => return,
       }
 
       // Tick using a dynamic timer
       loop {
         let tick_time = push_pull_scale(interval, this.estimate_num_nodes() as usize);
-        let mut timer = <T::Runtime as Runtime>::interval(tick_time);
+        let timer = <T::Runtime as RuntimeLite>::interval(tick_time);
+        futures::pin_mut!(timer);
         futures::select! {
           _ = futures::StreamExt::next(&mut timer).fuse() => {
             this.push_pull().await;
@@ -985,7 +987,7 @@ where
           }
         }
       },
-      _ = <T::Runtime as Runtime>::sleep(self.inner.opts.probe_timeout).fuse() => {
+      _ = <T::Runtime as RuntimeLite>::sleep(self.inner.opts.probe_timeout).fuse() => {
         // Note that we don't scale this timeout based on awareness and
         // the health score. That's because we don't really expect waiting
         // longer to help get UDP through. Since health does extend the
@@ -1076,7 +1078,7 @@ where
     if !disable_reliable_pings {
       let target_addr = target.address().cheap_clone();
       let this = self.clone();
-      <T::Runtime as Runtime>::spawn_detach(async move {
+      <T::Runtime as RuntimeLite>::spawn_detach(async move {
         scopeguard::defer!(fallback_tx.close(););
         match this
           .send_ping_and_wait_for_ack(&target_addr, ind.into(), deadline)

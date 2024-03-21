@@ -8,7 +8,7 @@ use super::*;
 pub async fn ping_wrong_node<S, R>(s: S, c: S, kind: AddressKind) -> Result<(), AnyError>
 where
   S: StreamLayer,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let name = format!("{kind}_ping_wrong_node");
   let label = Label::try_from(&name)?;

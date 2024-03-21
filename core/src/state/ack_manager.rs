@@ -4,7 +4,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::Runtime;
+use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
 use futures::{future::BoxFuture, FutureExt};
 use parking_lot::Mutex;
@@ -59,7 +59,7 @@ impl AckManager {
   }
 
   #[inline]
-  pub(crate) fn set_ack_handler<F, R: Runtime>(&self, sequence_number: u32, timeout: Duration, f: F)
+  pub(crate) fn set_ack_handler<F, R: RuntimeLite>(&self, sequence_number: u32, timeout: Duration, f: F)
   where
     F: FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static,
   {
@@ -90,7 +90,7 @@ impl AckManager {
     sent: Instant,
     timeout: Duration,
   ) where
-    R: Runtime,
+    R: RuntimeLite,
   {
     let tx = ack_tx.clone();
     let ack_fn = |payload, timestamp| {

@@ -6,7 +6,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   pub(crate) async fn read_message_without_compression(
     &self,

@@ -11,6 +11,10 @@ keywords.workspace = true
 categories.workspace = true
 description = "A highly customable, adaptable, async runtime agnostic Gossip protocol which helps manage cluster membership and member failure detection."
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = ["tokio", "compression", "encryption", "dns", "tcp", "quic"]
 

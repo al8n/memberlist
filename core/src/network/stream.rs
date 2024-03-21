@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use agnostic_lite::AsyncSpawner;
 use nodecraft::CheapClone;
 use smol_str::SmolStr;
 
@@ -18,10 +19,10 @@ where
   pub(crate) fn stream_listener(
     &self,
     shutdown_rx: async_channel::Receiver<()>,
-  ) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  ) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()> {
     let this = self.clone();
     let transport_rx = this.inner.transport.stream();
-    <T::Runtime as Runtime>::spawn(async move {
+    <T::Runtime as RuntimeLite>::spawn(async move {
       tracing::debug!("memberlist stream listener start");
       loop {
         futures::select! {
@@ -33,7 +34,7 @@ where
             match conn {
               Ok((remote_addr, conn)) => {
                 let this = this.clone();
-                <T::Runtime as Runtime>::spawn_detach(async move {
+                <T::Runtime as RuntimeLite>::spawn_detach(async move {
                   this.handle_conn(remote_addr, conn).await;
                 });
               },

@@ -6,7 +6,7 @@ use std::{
   },
 };
 
-use agnostic::Runtime;
+use agnostic_lite::{AsyncSpawner, RuntimeLite};
 use async_channel::{Receiver, Sender};
 use async_lock::{Mutex, RwLock};
 
@@ -92,7 +92,7 @@ pub(crate) struct Members<I, A, R> {
   pub(crate) node_map: HashMap<I, usize>,
 }
 
-impl<I, A, Run: Runtime> rand::seq::SliceRandom for Members<I, A, Run>
+impl<I, A, Run: RuntimeLite> rand::seq::SliceRandom for Members<I, A, Run>
 where
   I: Eq + core::hash::Hash,
 {
@@ -245,7 +245,7 @@ pub(crate) struct MemberlistCore<T: Transport> {
   leave_broadcast_tx: Sender<()>,
   leave_lock: Mutex<()>,
   leave_broadcast_rx: Receiver<()>,
-  shutdown_lock: Mutex<Vec<<T::Runtime as Runtime>::JoinHandle<()>>>,
+  shutdown_lock: Mutex<Vec<<<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()>>>,
   handoff_tx: Sender<()>,
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
@@ -426,19 +426,19 @@ where
   fn check_broadcast_queue_depth(
     &self,
     shutdown_rx: Receiver<()>,
-  ) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  ) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()> {
     use futures::FutureExt;
 
     let queue_check_interval = self.inner.opts.queue_check_interval;
     let this = self.clone();
 
-    <T::Runtime as Runtime>::spawn(async move {
+    <T::Runtime as RuntimeLite>::spawn(async move {
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
             return;
           },
-          _ = <T::Runtime as Runtime>::sleep(queue_check_interval).fuse() => {
+          _ = <T::Runtime as RuntimeLite>::sleep(queue_check_interval).fuse() => {
             let numq = this.inner.broadcast.num_queued().await;
             metrics::histogram!("memberlist.queue.broadcasts").record(numq as f64);
           }

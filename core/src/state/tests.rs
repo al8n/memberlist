@@ -8,7 +8,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::Runtime;
+use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
 use futures::{lock::Mutex, Future, FutureExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Id, Node};
@@ -36,7 +36,7 @@ async fn host_memberlist<T, R>(
 >
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   Memberlist::new_in(t, None, opts).await.map(|(_, _, t)| t)
 }
@@ -49,7 +49,7 @@ async fn host_memberlist_with_delegate<D, T, R>(
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   Memberlist::new_in(t, Some(d), opts)
     .await
@@ -60,7 +60,7 @@ where
 pub async fn probe<T, R>(t1: T, t1_opts: Options, t2: T)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -106,7 +106,7 @@ pub async fn probe_node_suspect<T, R>(
   suspect_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -185,7 +185,7 @@ pub async fn probe_node_dogpile<F, T, R>(
 ) where
   F: Future<Output = T>,
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   const CASES: &[DogpileTestCase] = &[
     DogpileTestCase {
@@ -338,7 +338,7 @@ pub async fn probe_node_awareness_degraded<T, R>(
   node4: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -439,7 +439,7 @@ pub async fn probe_node_awareness_degraded<T, R>(
 pub async fn probe_node_awareness_improved<T, R>(t1: T, t1_opts: Options, t2: T)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -515,7 +515,7 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
   node4: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -593,7 +593,7 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
 pub async fn probe_node_buddy<T, R>(t1: T, t1_opts: Options, t2: T)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -646,7 +646,7 @@ where
 pub async fn probe_node<T, R>(t1: T, t1_opts: Options, t2: T)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -702,7 +702,7 @@ pub async fn ping<T, R>(
   bad_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -753,7 +753,7 @@ pub async fn reset_nodes<T, R>(
   n3: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1: Memberlist<T> = host_memberlist(
     t1,
@@ -816,7 +816,7 @@ async fn ack_handler_exists(m: &AckManager, idx: u32) -> bool {
 /// Unit test to test the set probe channels functionality
 pub async fn set_probe_channels<R>()
 where
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m = AckManager::new();
 
@@ -834,7 +834,7 @@ where
 /// Unit test to test the set ack handler functionality
 pub async fn set_ack_handler<R>()
 where
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1 = AckManager::new();
 
@@ -852,7 +852,7 @@ where
 /// Unit test to test the invoke ack handler functionality.
 pub async fn invoke_ack_handler<R>()
 where
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1 = AckManager::new();
 
@@ -875,7 +875,7 @@ where
 /// Unit test to test the invoke ack handler channel ack functionality
 pub async fn invoke_ack_handler_channel_ack<R>()
 where
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m = AckManager::new();
 
@@ -922,7 +922,7 @@ where
 /// Unit test to test the invoke ack handler channel nack functionality
 pub async fn invoke_ack_handler_channel_nack<R>()
 where
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1 = AckManager::new();
 
@@ -992,7 +992,7 @@ pub async fn alive_node_new_node<T, R>(
   test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m = get_memberlist(
@@ -1111,7 +1111,7 @@ pub async fn alive_node_suspect_node<T, R>(
   test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let (event_delegate, subscriber) = ToggledEventDelegate::new(false);
 
@@ -1185,7 +1185,7 @@ pub async fn alive_node_idempotent<T, R>(
   test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let (event_delegate, subscriber) = ToggledEventDelegate::new(false);
 
@@ -1241,7 +1241,7 @@ pub async fn alive_node_change_meta<T, R>(
   test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let (event_delegate, subscriber) = ToggledEventDelegate::new(false);
 
@@ -1304,7 +1304,7 @@ pub async fn alive_node_change_meta<T, R>(
 pub async fn alive_node_refute<T, R>(t1: T, t1_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
@@ -1350,7 +1350,7 @@ pub async fn alive_node_conflict<A, T, R>(t1: T, t1_opts: Options, test_node_id:
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
@@ -1433,7 +1433,7 @@ where
 pub async fn suspect_node_no_node<T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
@@ -1460,7 +1460,7 @@ pub async fn suspect_node<A, T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
@@ -1544,7 +1544,7 @@ pub async fn suspect_node_double_suspect<A, T, R>(t1: T, t1_opts: Options, test_
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
@@ -1604,7 +1604,7 @@ pub async fn suspect_node_old_suspect<A, T, R>(t1: T, t1_opts: Options, test_nod
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let now = Epoch::now();
   let m: Memberlist<T> = get_memberlist(
@@ -1652,7 +1652,7 @@ where
 pub async fn suspect_node_refute<T, R>(t1: T, t1_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m = get_memberlist(
     t1,
@@ -1700,7 +1700,7 @@ where
 pub async fn dead_node_no_node<T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
@@ -1730,7 +1730,7 @@ pub async fn dead_node_left<A, T, R>(t1: T, t1_opts: Options, test_node_id: T::I
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m = get_memberlist(
@@ -1804,7 +1804,7 @@ pub async fn dead_node<T, R>(
   test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m = get_memberlist(
@@ -1874,7 +1874,7 @@ pub async fn dead_node_double<T, R>(
   test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
 
@@ -1944,7 +1944,7 @@ pub async fn dead_node_old_dead<T, R>(
   test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m = get_memberlist(
     t1,
@@ -1986,7 +1986,7 @@ pub async fn dead_node_alive_replay<T, R>(
   test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m = get_memberlist(
     t1,
@@ -2021,7 +2021,7 @@ pub async fn dead_node_alive_replay<T, R>(
 pub async fn dead_node_refute<T, R>(t1: T, t1_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m = get_memberlist(
     t1,
@@ -2077,7 +2077,7 @@ pub async fn merge_state<A, T, R>(
 ) where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m = get_memberlist(
@@ -2165,8 +2165,8 @@ pub async fn merge_state<A, T, R>(
 pub async fn gossip<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options, t3: T, t3_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
-  <R as agnostic::Runtime>::Sleep: Send + Sync,
+  R: RuntimeLite,
+  <R as agnostic_lite::RuntimeLite>::Sleep: Send + Sync,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m1 = host_memberlist(t1, t1_opts.with_gossip_interval(Duration::from_millis(10)))
@@ -2218,8 +2218,8 @@ where
 pub async fn gossip_to_dead<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
-  <R as agnostic::Runtime>::Sleep: Send + Sync,
+  R: RuntimeLite,
+  <R as agnostic_lite::RuntimeLite>::Sleep: Send + Sync,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m1 = host_memberlist(
@@ -2297,8 +2297,8 @@ where
 pub async fn push_pull<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
-  <R as agnostic::Runtime>::Sleep: Send + Sync,
+  R: RuntimeLite,
+  <R as agnostic_lite::RuntimeLite>::Sleep: Send + Sync,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
   let m1 = host_memberlist(

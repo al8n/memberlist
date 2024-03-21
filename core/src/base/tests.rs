@@ -76,7 +76,7 @@ where
 pub async fn memberlist_create<T, R>(t1: T, t1_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m = Memberlist::new(t1, t1_opts).await.unwrap();
 
@@ -101,7 +101,7 @@ where
 pub async fn memberlist_create_shutdown<T, R>(t1: T, t1_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m = Memberlist::new(t1, t1_opts).await.unwrap();
 
@@ -131,7 +131,7 @@ where
 pub async fn memberlist_join<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1 = Memberlist::new(t1, t1_opts).await.unwrap();
   let m2 = Memberlist::new(t2, t2_opts).await.unwrap();
@@ -155,7 +155,7 @@ pub async fn memberlist_join_with_labels<F, T, R>(mut get_transport: impl FnMut(
 where
   F: Future<Output = T>,
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let label1 = Label::try_from("blah").unwrap();
   let m1 = Memberlist::new(get_transport(1, label1.clone()).await, Options::lan())
@@ -288,7 +288,7 @@ where
 pub async fn memberlist_join_cancel<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1 = Memberlist::with_delegate(
     t1,
@@ -375,7 +375,7 @@ where
 pub async fn memberlist_join_cancel_passive<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let id1 = t1.local_id().clone();
   let m1 = Memberlist::with_delegate(
@@ -427,7 +427,7 @@ where
 pub async fn memberlist_join_shutdown<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1 = Memberlist::new(t1, t1_opts).await.unwrap();
   let m2 = Memberlist::new(t2, t2_opts).await.unwrap();
@@ -456,7 +456,7 @@ where
 pub async fn memberlist_node_delegate_meta<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1 = Memberlist::with_delegate(
     t1,
@@ -541,7 +541,7 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
   t2_opts: Options,
 ) where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1 = Memberlist::with_delegate(
     t1,
@@ -641,7 +641,7 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
 pub async fn memberlist_user_data<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1 = Memberlist::with_delegate(
     t1,
@@ -732,7 +732,7 @@ where
 pub async fn memberlist_send<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1 = Memberlist::with_delegate(
     t1,
@@ -805,7 +805,7 @@ where
 pub async fn memberlist_leave<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1 = Memberlist::new(t1, t1_opts.with_gossip_interval(Duration::from_millis(1)))
     .await
@@ -884,7 +884,7 @@ pub async fn memberlist_conflict_delegate<F, T, R>(
 ) where
   F: Future<Output = T>,
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let m1 = Memberlist::with_delegate(
     get_transport(id.clone()).await,
@@ -968,7 +968,7 @@ where
 pub async fn memberlist_ping_delegate<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let probe_interval = t1_opts.probe_interval();
   let m1 = Memberlist::with_delegate(
@@ -1028,7 +1028,7 @@ pub async fn wait_until_size<T, D, R>(m: &Memberlist<T, D>, expected: usize)
 where
   T: Transport<Runtime = R>,
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   retry::<R, _, _>(30, Duration::from_millis(500), || async {
     if m.online_members().await.len() != expected {
@@ -1067,7 +1067,7 @@ where
 
 async fn retry<'a, R, F, Fut>(n: usize, w: Duration, mut f: F)
 where
-  R: Runtime,
+  R: RuntimeLite,
 
   F: FnMut() -> Fut + Clone,
   Fut: Future<Output = (bool, String)> + Send + Sync + 'a,

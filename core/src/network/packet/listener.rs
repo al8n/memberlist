@@ -1,4 +1,5 @@
 use crate::{base::MessageHandoff, transport::Wire};
+use agnostic_lite::AsyncSpawner;
 use either::Either;
 use nodecraft::CheapClone;
 
@@ -12,10 +13,10 @@ where
   pub(crate) fn packet_listener(
     &self,
     shutdown_rx: async_channel::Receiver<()>,
-  ) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  ) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()> {
     let this = self.clone();
     let packet_rx = this.inner.transport.packet();
-    <T::Runtime as Runtime>::spawn(async move {
+    <T::Runtime as RuntimeLite>::spawn(async move {
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -215,9 +216,9 @@ where
     // Setup a timer to fire off a nack if no ack is seen in time.
     let this = self.clone();
     let probe_timeout = self.inner.opts.probe_timeout;
-    <T::Runtime as Runtime>::spawn_detach(async move {
+    <T::Runtime as RuntimeLite>::spawn_detach(async move {
       futures::select! {
-        _ = <T::Runtime as Runtime>::sleep(probe_timeout).fuse() => {
+        _ = <T::Runtime as RuntimeLite>::sleep(probe_timeout).fuse() => {
           // We've not received an ack, so send a nack.
           let nack = Nack::new(ind.sequence_number());
 

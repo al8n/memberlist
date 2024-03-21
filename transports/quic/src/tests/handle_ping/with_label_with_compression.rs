@@ -7,7 +7,7 @@ pub async fn server_with_label_with_compression_client_with_label_no_compression
 ) -> Result<(), AnyError>
 where
   S: StreamLayer,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let name =
     format!("{kind}_ping_server_with_label_with_compression_client_with_label_no_compression");
@@ -38,7 +38,7 @@ pub async fn server_with_label_no_compression_client_with_label_with_compression
 ) -> Result<(), AnyError>
 where
   S: StreamLayer,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let name =
     format!("{kind}_ping_server_with_label_no_compression_client_with_label_with_compression");
@@ -67,7 +67,7 @@ pub async fn server_with_label_with_compression_client_with_label_with_compressi
 ) -> Result<(), AnyError>
 where
   S: StreamLayer,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let name =
     format!("{kind}_ping_server_with_label_with_compression_client_with_label_with_compression");

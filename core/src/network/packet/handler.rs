@@ -1,5 +1,7 @@
 use crate::base::MessageHandoff;
 
+use agnostic_lite::AsyncSpawner;
+
 use super::*;
 
 impl<D, T> Memberlist<T, D>
@@ -13,10 +15,10 @@ where
   pub(crate) fn packet_handler(
     &self,
     shutdown_rx: async_channel::Receiver<()>,
-  ) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  ) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()> {
     let this = self.clone();
     let handoff_rx = this.inner.handoff_rx.clone();
-    <T::Runtime as Runtime>::spawn(async move {
+    <T::Runtime as RuntimeLite>::spawn(async move {
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {

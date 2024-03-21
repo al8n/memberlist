@@ -9,7 +9,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   fn encode_batch(
     buf: &mut [u8],

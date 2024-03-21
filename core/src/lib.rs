@@ -41,7 +41,7 @@ mod timer;
 
 pub use nodecraft::CheapClone;
 
-pub use agnostic;
+pub use agnostic_lite;
 
 pub use futures;
 

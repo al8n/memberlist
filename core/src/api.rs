@@ -4,7 +4,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::Runtime;
+use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt};
 
@@ -284,7 +284,7 @@ where
           if timeout > Duration::ZERO {
             futures::select! {
               _ = self.inner.leave_broadcast_rx.recv().fuse() => {},
-              _ = <T::Runtime as Runtime>::sleep(timeout).fuse() => {
+              _ = <T::Runtime as RuntimeLite>::sleep(timeout).fuse() => {
                 return Err(Error::LeaveTimeout);
               }
             }
@@ -464,7 +464,7 @@ where
     // Wait for the broadcast or a timeout
     if self.any_alive().await {
       if timeout > Duration::ZERO {
-        let _ = <T::Runtime as Runtime>::timeout(timeout, notify_rx.recv())
+        let _ = <T::Runtime as RuntimeLite>::timeout(timeout, notify_rx.recv())
           .await
           .map_err(|_| Error::UpdateTimeout)?;
       } else {
@@ -531,7 +531,7 @@ where
 
     // Send a ping to the node.
     // Wait to send or timeout.
-    match <T::Runtime as Runtime>::timeout(
+    match <T::Runtime as RuntimeLite>::timeout(
       self.inner.opts.probe_timeout,
       self.send_msg(node.address(), ping.into()),
     )
@@ -565,7 +565,7 @@ where
           }
         }
       }
-      _ = <T::Runtime as Runtime>::sleep(self.inner.opts.probe_timeout).fuse() => {}
+      _ = <T::Runtime as RuntimeLite>::sleep(self.inner.opts.probe_timeout).fuse() => {}
     }
 
     // If we timed out, return Error.

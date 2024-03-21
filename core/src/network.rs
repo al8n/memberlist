@@ -8,7 +8,7 @@ use super::{
   types::*,
 };
 
-use agnostic::Runtime;
+use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
 use futures::future::FutureExt;
 use nodecraft::{resolver::AddressResolver, Node};

@@ -115,7 +115,7 @@ where
               #[cfg(feature = "metrics")]
               let metric_labels = metric_labels.clone();
               let (finish_tx, _finish_rx) = channel();
-              <T::Runtime as Runtime>::spawn_detach(async move {
+              <T::Runtime as RuntimeLite>::spawn_detach(async move {
                 Self::handle_connection(
                   connection,
                   local_addr,
@@ -149,7 +149,7 @@ where
               }
 
               tracing::error!(target =  "memberlist.transport.quic", local_addr=%local_addr, err = %e, "error accepting stream connection");
-              <T::Runtime as Runtime>::sleep(loop_delay).await;
+              <T::Runtime as RuntimeLite>::sleep(loop_delay).await;
               continue;
             }
           }
@@ -198,7 +198,7 @@ where
                 #[cfg(feature = "metrics")]
                 let metric_labels = metric_labels.clone();
                 let (finish_tx, _finish_rx) = channel();
-                <T::Runtime as Runtime>::spawn_detach(async move {
+                <T::Runtime as RuntimeLite>::spawn_detach(async move {
                   Self::handle_packet(
                     stream,
                     local_addr,

@@ -1,5 +1,6 @@
 use std::{future::Future, time::Instant};
 
+use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
 use futures::AsyncRead;
 pub use nodecraft::{resolver::AddressResolver, CheapClone, Transformable, *};
@@ -282,7 +283,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// The wire used to encode and decode messages
   type Wire: Wire<Id = Self::Id, Address = <Self::Resolver as AddressResolver>::ResolvedAddress>;
   /// The async runtime
-  type Runtime: agnostic::Runtime;
+  type Runtime: RuntimeLite;
 
   /// Resolves the given address to a resolved address
   fn resolve(

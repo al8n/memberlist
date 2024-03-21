@@ -11,10 +11,14 @@ keywords.workspace = true
 categories.workspace = true
 description = "memberlist's transport layer based on QUIC"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = ["compression", "quinn"]
 compression = ["rayon", "weezl"]
-quinn = ["agnostic/quinn", "dep:quinn", "rustls"]
+quinn = ["agnostic/quinn", "dep:quinn", "rustls", "agnostic/net"]
 s2n = ["s2n-quic", "s2n-quic-transport", "futures/bilock", "futures/unstable"]
 serde = ["memberlist-core/serde", "dep:serde", "humantime-serde", "indexmap/serde"]
 metrics = ["memberlist-core/metrics", "dep:metrics"]
@@ -24,7 +28,7 @@ async-std = ["agnostic/async-std"]
 smol = ["agnostic/smol"]
 
 # enable DNS node address resolver
-dns = ["nodecraft/dns"]
+dns = ["nodecraft/dns", "agnostic/dns"]
 dns-over-quic = ["dns", "nodecraft/dns-over-quic"]
 dns-over-h3 = ["dns", "nodecraft/dns-over-h3"]
 dns-over-https-rustls = ["dns", "nodecraft/dns-over-https-rustls"]
@@ -42,7 +46,8 @@ test = ["memberlist-core/test", "rcgen"]
 
 [dependencies]
 auto_impl.workspace = true
-agnostic.workspace = true
+agnostic-lite.workspace = true
+agnostic = { workspace = true, optional = true, features = ["net"] }
 async-channel.workspace = true
 bytes.workspace = true
 byteorder.workspace = true

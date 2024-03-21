@@ -1,4 +1,4 @@
-use agnostic::Runtime;
+use agnostic_lite::RuntimeLite;
 use futures::{channel::oneshot, future::FutureExt, select};
 use std::time::Duration;
 
@@ -11,8 +11,7 @@ pub(crate) struct Timer {
 impl Timer {
   pub(crate) fn after<F, R>(dur: Duration, future: F) -> Self
   where
-    R: Runtime,
-
+    R: RuntimeLite,
     F: std::future::Future<Output = ()> + Send + 'static,
   {
     let (cancel_tx, cancel_rx) = oneshot::channel();

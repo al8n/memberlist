@@ -9,7 +9,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::Runtime;
+use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
 use futures::{lock::Mutex, AsyncReadExt, AsyncWriteExt};
 use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
@@ -60,7 +60,7 @@ impl<R> S2n<R> {
   }
 }
 
-impl<R: Runtime> StreamLayer for S2n<R> {
+impl<R: RuntimeLite> StreamLayer for S2n<R> {
   type Error = S2nError;
   type Acceptor = S2nBiAcceptor<R>;
   type Connector = S2nConnector<R>;
@@ -146,7 +146,7 @@ pub struct S2nBiAcceptor<R> {
   _marker: PhantomData<R>,
 }
 
-impl<R: Runtime> QuicAcceptor for S2nBiAcceptor<R> {
+impl<R: RuntimeLite> QuicAcceptor for S2nBiAcceptor<R> {
   type Error = S2nError;
   type Connection = S2nConnection<R>;
 
@@ -178,7 +178,7 @@ pub struct S2nConnector<R> {
   _marker: PhantomData<R>,
 }
 
-impl<R: Runtime> QuicConnector for S2nConnector<R> {
+impl<R: RuntimeLite> QuicConnector for S2nConnector<R> {
   type Error = S2nError;
   type Connection = S2nConnection<R>;
 
@@ -253,7 +253,7 @@ impl<R> S2nConnection<R> {
   }
 }
 
-impl<R: Runtime> QuicConnection for S2nConnection<R> {
+impl<R: RuntimeLite> QuicConnection for S2nConnection<R> {
   type Error = S2nError;
   type Stream = S2nStream<R>;
 
@@ -346,7 +346,7 @@ impl<R> S2nStream<R> {
   }
 }
 
-impl<R: Runtime> TimeoutableReadStream for S2nStream<R> {
+impl<R: RuntimeLite> TimeoutableReadStream for S2nStream<R> {
   fn set_read_deadline(&mut self, deadline: Option<Instant>) {
     self.read_deadline = deadline;
   }
@@ -356,7 +356,7 @@ impl<R: Runtime> TimeoutableReadStream for S2nStream<R> {
   }
 }
 
-impl<R: Runtime> TimeoutableWriteStream for S2nStream<R> {
+impl<R: RuntimeLite> TimeoutableWriteStream for S2nStream<R> {
   fn set_write_deadline(&mut self, deadline: Option<Instant>) {
     self.write_deadline = deadline;
   }
@@ -366,7 +366,7 @@ impl<R: Runtime> TimeoutableWriteStream for S2nStream<R> {
   }
 }
 
-impl<R: Runtime> QuicStream for S2nStream<R> {
+impl<R: RuntimeLite> QuicStream for S2nStream<R> {
   type Error = S2nError;
 
   async fn write_all(&mut self, src: Bytes) -> Result<usize, Self::Error> {
@@ -452,7 +452,7 @@ impl<R: Runtime> QuicStream for S2nStream<R> {
   }
 }
 
-impl<R: Runtime> futures::AsyncRead for S2nStream<R> {
+impl<R: RuntimeLite> futures::AsyncRead for S2nStream<R> {
   fn poll_read(
     mut self: std::pin::Pin<&mut Self>,
     cx: &mut std::task::Context<'_>,

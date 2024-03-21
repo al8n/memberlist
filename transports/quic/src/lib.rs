@@ -16,7 +16,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::Runtime;
+use agnostic_lite::RuntimeLite;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
@@ -82,16 +82,16 @@ enum StreamType {
 
 #[cfg(feature = "tokio")]
 /// [`QuicTransport`] based on [`tokio`](https://crates.io/crates/tokio).
-pub type TokioQuicTransport<I, A, S, W> = QuicTransport<I, A, S, W, agnostic::tokio::TokioRuntime>;
+pub type TokioQuicTransport<I, A, S, W> = QuicTransport<I, A, S, W, agnostic_lite::tokio::TokioRuntime>;
 
 #[cfg(feature = "async-std")]
 /// [`QuicTransport`] based on [`async-std`](https://crates.io/crates/async-std).
 pub type AsyncStdQuicTransport<I, A, S, W> =
-  QuicTransport<I, A, S, W, agnostic::async_std::AsyncStdRuntime>;
+  QuicTransport<I, A, S, W, agnostic_lite::async_std::AsyncStdRuntime>;
 
 #[cfg(feature = "smol")]
 /// [`QuicTransport`] based on [`smol`](https://crates.io/crates/smol).
-pub type SmolQuicTransport<I, A, S, W> = QuicTransport<I, A, S, W, agnostic::smol::SmolRuntime>;
+pub type SmolQuicTransport<I, A, S, W> = QuicTransport<I, A, S, W, agnostic_lite::smol::SmolRuntime>;
 
 /// A [`Transport`] implementation based on QUIC
 pub struct QuicTransport<I, A, S, W, R>
@@ -100,7 +100,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   opts: QuicTransportOptions<I, A>,
   advertise_addr: A::ResolvedAddress,
@@ -129,7 +129,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   /// Creates a new quic transport.
   pub async fn new(
@@ -253,7 +253,7 @@ where
     };
 
     let connection_pool = Arc::new(SkipMap::new());
-    let interval = <A::Runtime as Runtime>::interval(opts.connection_pool_cleanup_period);
+    let interval = <A::Runtime as RuntimeLite>::interval(opts.connection_pool_cleanup_period);
     let pool = connection_pool.clone();
     let (cleaner_finish_tx, cleaner_finish_rx) = channel();
     let shutdown_rx = shutdown_rx.clone();
@@ -324,7 +324,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   fn fix_packet_overhead(&self) -> usize {
     #[cfg(feature = "compression")]
@@ -408,7 +408,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   type Error = QuicTransportError<A, S, W>;
 
@@ -667,7 +667,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   fn drop(&mut self) {
     self.shutdown_tx.close();
