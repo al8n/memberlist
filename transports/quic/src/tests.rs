@@ -238,9 +238,17 @@ pub struct QuicTransportTestClient<S: StreamLayer, R: RuntimeLite> {
   send_label: bool,
 
   #[cfg(feature = "compression")]
+  #[viewit(
+    getter(attrs(cfg(feature = "compression"))),
+    setter(attrs(cfg(feature = "compression")))
+  )]
   send_compressed: Option<Compressor>,
   receive_verify_label: bool,
   #[cfg(feature = "compression")]
+  #[viewit(
+    getter(attrs(cfg(feature = "compression"))),
+    setter(attrs(cfg(feature = "compression")))
+  )]
   receive_compressed: bool,
 
   #[viewit(getter(skip), setter(skip))]

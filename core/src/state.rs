@@ -872,7 +872,7 @@ where
     // also tack on a suspect message so that it has a chance to refute as
     // soon as possible.
     let deadline = sent + probe_interval;
-    self.inner.ack_manager.set_probe_channels::<T::Runtime>(
+    self.inner.ack_manager.set_probe_channels(
       ping.sequence_number(),
       ack_tx.clone(),
       Some(nack_tx),

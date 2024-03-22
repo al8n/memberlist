@@ -250,7 +250,7 @@ pub(crate) struct MemberlistCore<T: Transport> {
   handoff_rx: Receiver<()>,
   queue: Mutex<MessageQueue<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
   nodes: Arc<RwLock<Members<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Runtime>>>,
-  ack_manager: AckManager,
+  ack_manager: AckManager<T::Runtime>,
   transport: Arc<T>,
   /// We do not call send directly, just directly drop it.
   shutdown_tx: Sender<()>,

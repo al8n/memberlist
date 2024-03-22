@@ -4,13 +4,13 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic_lite::RuntimeLite;
+use agnostic_lite::{time::AsyncDelay, RuntimeLite};
 use bytes::Bytes;
 use futures::{future::BoxFuture, FutureExt};
 use parking_lot::Mutex;
 
 use crate::{
-  timer::Timer,
+  // timer::Timer,
   types::{Ack, Nack},
 };
 
@@ -21,17 +21,17 @@ pub(crate) struct AckMessage {
   timestamp: Instant,
 }
 
-pub(crate) struct AckHandler {
+pub(crate) struct AckHandler<R: RuntimeLite> {
   pub(crate) ack_fn:
     Box<dyn FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
   pub(crate) nack_fn: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static>>,
-  pub(crate) timer: Timer,
+  pub(crate) timer: R::Delay<BoxFuture<'static, ()>>,
 }
 
 #[derive(Clone)]
-pub(crate) struct AckManager(pub(super) Arc<Mutex<HashMap<u32, AckHandler>>>);
+pub(crate) struct AckManager<R: RuntimeLite>(pub(super) Arc<Mutex<HashMap<u32, AckHandler<R>>>>);
 
-impl AckManager {
+impl<R: RuntimeLite> AckManager<R> {
   pub(crate) fn new() -> Self {
     Self(Arc::new(Mutex::new(HashMap::new())))
   }
@@ -41,7 +41,7 @@ impl AckManager {
     let (seq_no, payload) = ack.into_components();
     let ah = self.0.lock().remove(&seq_no);
     if let Some(handler) = ah {
-      handler.timer.stop().await;
+      handler.timer.abort();
       (handler.ack_fn)(payload, timestamp).await;
     }
   }
@@ -59,12 +59,8 @@ impl AckManager {
   }
 
   #[inline]
-  pub(crate) fn set_ack_handler<F, R: RuntimeLite>(
-    &self,
-    sequence_number: u32,
-    timeout: Duration,
-    f: F,
-  ) where
+  pub(crate) fn set_ack_handler<F>(&self, sequence_number: u32, timeout: Duration, f: F)
+  where
     F: FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static,
   {
     // Add the handler
@@ -75,9 +71,13 @@ impl AckManager {
       AckHandler {
         ack_fn: Box::new(f),
         nack_fn: None,
-        timer: Timer::after::<_, R>(timeout, async move {
-          tlock.0.lock().remove(&sequence_number);
-        }),
+        timer: R::delay(
+          timeout,
+          async move {
+            tlock.0.lock().remove(&sequence_number);
+          }
+          .boxed(),
+        ),
       },
     );
   }
@@ -86,16 +86,14 @@ impl AckManager {
   /// with a given sequence number is received. The `complete` field of the message
   /// will be false on timeout. Any nack messages will cause an empty struct to be
   /// passed to the nackCh, which can be nil if not needed.
-  pub(crate) fn set_probe_channels<R>(
+  pub(crate) fn set_probe_channels(
     &self,
     sequence_number: u32,
     ack_tx: async_channel::Sender<AckMessage>,
     nack_tx: Option<async_channel::Sender<()>>,
     sent: Instant,
     timeout: Duration,
-  ) where
-    R: RuntimeLite,
-  {
+  ) {
     let tx = ack_tx.clone();
     let ack_fn = |payload, timestamp| {
       async move {
@@ -130,23 +128,27 @@ impl AckManager {
       AckHandler {
         ack_fn: Box::new(ack_fn),
         nack_fn: Some(Arc::new(nack_fn)),
-        timer: Timer::after::<_, R>(timeout, async move {
-          ack_manager.remove(sequence_number);
-          futures::select! {
-            _ = ack_tx.send(AckMessage {
-              payload: Bytes::new(),
-              timestamp: sent,
-              complete: false,
-            }).fuse() => {},
-            default => {}
+        timer: R::delay(
+          timeout,
+          async move {
+            ack_manager.remove(sequence_number);
+            futures::select! {
+              _ = ack_tx.send(AckMessage {
+                payload: Bytes::new(),
+                timestamp: sent,
+                complete: false,
+              }).fuse() => {},
+              default => {}
+            }
           }
-        }),
+          .boxed(),
+        ),
       },
     );
   }
 
   #[inline]
-  pub(crate) fn insert(&self, sequence_number: u32, handler: AckHandler) {
+  pub(crate) fn insert(&self, sequence_number: u32, handler: AckHandler<R>) {
     self.0.lock().insert(sequence_number, handler);
   }
 
