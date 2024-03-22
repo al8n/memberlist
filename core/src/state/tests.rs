@@ -808,7 +808,7 @@ pub async fn reset_nodes<T, R>(
   m1.shutdown().await.unwrap();
 }
 
-async fn ack_handler_exists(m: &AckManager, idx: u32) -> bool {
+async fn ack_handler_exists<R: RuntimeLite>(m: &AckManager<R>, idx: u32) -> bool {
   let acks = m.0.lock();
   acks.contains_key(&idx)
 }
@@ -818,11 +818,11 @@ pub async fn set_probe_channels<R>()
 where
   R: RuntimeLite,
 {
-  let m = AckManager::new();
+  let m = AckManager::<R>::new();
 
   let (tx, _rx) = async_channel::bounded(1);
 
-  m.set_probe_channels::<R>(0, tx, None, Instant::now(), Duration::from_millis(10));
+  m.set_probe_channels(0, tx, None, Instant::now(), Duration::from_millis(10));
 
   assert!(ack_handler_exists(&m, 0).await, "missing handler");
 
@@ -836,9 +836,9 @@ pub async fn set_ack_handler<R>()
 where
   R: RuntimeLite,
 {
-  let m1 = AckManager::new();
+  let m1 = AckManager::<R>::new();
 
-  m1.set_ack_handler::<_, R>(0, Duration::from_millis(10), |_1, _2| {
+  m1.set_ack_handler::<_>(0, Duration::from_millis(10), |_1, _2| {
     Box::pin(async move {})
   });
 
@@ -854,14 +854,14 @@ pub async fn invoke_ack_handler<R>()
 where
   R: RuntimeLite,
 {
-  let m1 = AckManager::new();
+  let m1 = AckManager::<R>::new();
 
   // Does nothing
   m1.invoke_ack_handler(Ack::new(0), Instant::now()).await;
 
   let b = Arc::new(AtomicBool::new(false));
   let b1 = b.clone();
-  m1.set_ack_handler::<_, R>(0, Duration::from_millis(10), |_, _| {
+  m1.set_ack_handler::<_>(0, Duration::from_millis(10), |_, _| {
     Box::pin(async move {
       b1.store(true, Ordering::SeqCst);
     })
@@ -877,7 +877,7 @@ pub async fn invoke_ack_handler_channel_ack<R>()
 where
   R: RuntimeLite,
 {
-  let m = AckManager::new();
+  let m = AckManager::<R>::new();
 
   let ack = Ack::new(0).with_payload(Bytes::from_static(&[0, 0, 0]));
 
@@ -886,7 +886,7 @@ where
 
   let (ack_tx, ack_rx) = async_channel::bounded(1);
   let (nack_tx, nack_rx) = async_channel::bounded(1);
-  m.set_probe_channels::<R>(
+  m.set_probe_channels(
     0,
     ack_tx,
     Some(nack_tx),
@@ -924,7 +924,7 @@ pub async fn invoke_ack_handler_channel_nack<R>()
 where
   R: RuntimeLite,
 {
-  let m1 = AckManager::new();
+  let m1 = AckManager::<R>::new();
 
   // Does nothing
   let nack = Nack::new(0);
@@ -932,7 +932,7 @@ where
 
   let (ack_tx, ack_rx) = async_channel::bounded(1);
   let (nack_tx, nack_rx) = async_channel::bounded(1);
-  m1.set_probe_channels::<R>(
+  m1.set_probe_channels(
     0,
     ack_tx,
     Some(nack_tx),

@@ -515,7 +515,7 @@ where
     );
 
     let (ack_tx, ack_rx) = async_channel::bounded(self.inner.opts.indirect_checks + 1);
-    self.inner.ack_manager.set_probe_channels::<T::Runtime>(
+    self.inner.ack_manager.set_probe_channels(
       ping.sequence_number(),
       ack_tx,
       None,

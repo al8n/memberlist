@@ -180,7 +180,7 @@ where
     let ind_sequence_number = ind.sequence_number();
     let afrom = from.cheap_clone();
 
-    self.inner.ack_manager.set_ack_handler::<_, T::Runtime>(
+    self.inner.ack_manager.set_ack_handler::<_>(
       local_sequence_number,
       self.inner.opts.probe_timeout,
       move |_payload, _timestamp| {

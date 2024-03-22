@@ -37,8 +37,6 @@ pub mod util;
 
 pub use bytes;
 
-mod timer;
-
 pub use nodecraft::CheapClone;
 
 pub use agnostic_lite;
