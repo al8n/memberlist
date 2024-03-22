@@ -82,7 +82,8 @@ enum StreamType {
 
 #[cfg(feature = "tokio")]
 /// [`QuicTransport`] based on [`tokio`](https://crates.io/crates/tokio).
-pub type TokioQuicTransport<I, A, S, W> = QuicTransport<I, A, S, W, agnostic_lite::tokio::TokioRuntime>;
+pub type TokioQuicTransport<I, A, S, W> =
+  QuicTransport<I, A, S, W, agnostic_lite::tokio::TokioRuntime>;
 
 #[cfg(feature = "async-std")]
 /// [`QuicTransport`] based on [`async-std`](https://crates.io/crates/async-std).
@@ -91,7 +92,8 @@ pub type AsyncStdQuicTransport<I, A, S, W> =
 
 #[cfg(feature = "smol")]
 /// [`QuicTransport`] based on [`smol`](https://crates.io/crates/smol).
-pub type SmolQuicTransport<I, A, S, W> = QuicTransport<I, A, S, W, agnostic_lite::smol::SmolRuntime>;
+pub type SmolQuicTransport<I, A, S, W> =
+  QuicTransport<I, A, S, W, agnostic_lite::smol::SmolRuntime>;
 
 /// A [`Transport`] implementation based on QUIC
 pub struct QuicTransport<I, A, S, W, R>
@@ -296,11 +298,9 @@ where
 
   async fn connection_pool_cleaner(
     pool: Arc<SkipMap<SocketAddr, S::Connection>>,
-    interval: impl futures::Stream,
+    mut interval: impl agnostic_lite::time::AsyncInterval,
     shutdown_rx: async_channel::Receiver<()>,
   ) {
-    futures::pin_mut!(interval);
-
     loop {
       futures::select! {
         _ = interval.next().fuse() => {

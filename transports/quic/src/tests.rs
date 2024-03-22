@@ -564,7 +564,9 @@ mod quinn_stream_layer {
   }
 
   /// Returns a new quinn stream layer
-  pub async fn quinn_stream_layer_with_connect_timeout<R: RuntimeLite>(timeout: Duration) -> Quinn<R> {
+  pub async fn quinn_stream_layer_with_connect_timeout<R: RuntimeLite>(
+    timeout: Duration,
+  ) -> Quinn<R> {
     let server_name = "localhost".to_string();
     let (server_config, client_config) = configures().unwrap();
     Quinn::new(

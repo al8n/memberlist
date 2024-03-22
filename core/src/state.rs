@@ -18,7 +18,7 @@ use super::{
   Member, Members,
 };
 
-use agnostic_lite::{RuntimeLite, AsyncSpawner};
+use agnostic_lite::{AsyncSpawner, RuntimeLite};
 
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
@@ -691,8 +691,7 @@ macro_rules! bail_trigger {
             _ = stop_rx.recv().fuse() => return,
           }
 
-          let timer = <T::Runtime as RuntimeLite>::interval(interval);
-          futures::pin_mut!(timer);
+          let mut timer = <T::Runtime as RuntimeLite>::interval(interval);
           loop {
             futures::select! {
               _ = futures::StreamExt::next(&mut timer).fuse() => {
@@ -772,8 +771,7 @@ where
       // Tick using a dynamic timer
       loop {
         let tick_time = push_pull_scale(interval, this.estimate_num_nodes() as usize);
-        let timer = <T::Runtime as RuntimeLite>::interval(tick_time);
-        futures::pin_mut!(timer);
+        let mut timer = <T::Runtime as RuntimeLite>::interval(tick_time);
         futures::select! {
           _ = futures::StreamExt::next(&mut timer).fuse() => {
             this.push_pull().await;

@@ -59,8 +59,12 @@ impl AckManager {
   }
 
   #[inline]
-  pub(crate) fn set_ack_handler<F, R: RuntimeLite>(&self, sequence_number: u32, timeout: Duration, f: F)
-  where
+  pub(crate) fn set_ack_handler<F, R: RuntimeLite>(
+    &self,
+    sequence_number: u32,
+    timeout: Duration,
+    f: F,
+  ) where
     F: FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static,
   {
     // Add the handler
