@@ -85,10 +85,7 @@ where
     #[cfg(feature = "compression")] offload_size: usize,
     #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::types::MetricLabels>,
   ) {
-    tracing::info!(
-      target: "memberlist.transport.quic",
-      "listening stream on {local_addr}"
-    );
+    tracing::info!("memberlist_quic: listening stream on {local_addr}");
 
     /// The initial delay after an `accept()` error before attempting again
     const BASE_DELAY: Duration = Duration::from_millis(5);
@@ -102,7 +99,7 @@ where
     loop {
       futures::select! {
         _ = shutdown_rx.recv().fuse() => {
-          tracing::info!(target = "memberlist.transport.quic", local=%local_addr, "shutdown stream listener");
+          tracing::info!(local=%local_addr, "memberlist_quic: shutdown stream listener");
           return;
         }
         connection = acceptor.accept().fuse() => {
@@ -134,7 +131,7 @@ where
             }
             Err(e) => {
               if shutdown.load(Ordering::SeqCst) {
-                tracing::info!(target = "memberlist.transport.quic", local=%local_addr, "shutdown stream listener");
+                tracing::info!(local=%local_addr, "memberlist_quic: shutdown stream listener");
                 return;
               }
 
@@ -179,7 +176,7 @@ where
             Ok((mut stream, remote_addr)) => {
               let mut stream_kind_buf = [0; 1];
               if let Err(e) = stream.peek_exact(&mut stream_kind_buf).await {
-                tracing::error!(target = "memberlist.transport.quic", local=%local_addr, from=%remote_addr, err = %e, "failed to read stream kind");
+                tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist_quic: failed to read stream kind");
                 continue;
               }
               let stream_kind = stream_kind_buf[0];
@@ -188,7 +185,7 @@ where
                   .send(remote_addr, stream)
                   .await
                 {
-                  tracing::error!(target =  "memberlist.transport.quic", local_addr=%local_addr, err = %e, "failed to send stream connection");
+                  tracing::error!(local_addr=%local_addr, err = %e, "memberlist_quic: failed to send stream connection");
                 }
               } else {
                 // consume peeked byte
@@ -215,13 +212,13 @@ where
               }
             }
             Err(e) => {
-              tracing::debug!(target = "memberlist.transport.quic", local=%local_addr, from=%remote_addr, err = %e, "failed to accept stream, shutting down the connection handler");
+              tracing::debug!(local=%local_addr, from=%remote_addr, err = %e, "memberlist_quic: failed to accept stream, shutting down the connection handler");
               return;
             }
           }
         },
         _ = shutdown_rx.recv().fuse() => {
-          tracing::info!(target = "memberlist.transport.quic", local=%local_addr, remote=%remote_addr, "shutdown connection handler");
+          tracing::info!(local=%local_addr, remote=%remote_addr, "memberlist_quic: shutdown connection handler");
           return;
         }
       }
@@ -256,7 +253,7 @@ where
     {
       Ok(msg) => msg,
       Err(e) => {
-        tracing::error!(target = "memberlist.packet", local=%local_addr, from=%remote_addr, err = %e, "fail to handle UDP packet");
+        tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist_quic.packet: fail to handle UDP packet");
         return;
       }
     };
@@ -268,7 +265,7 @@ where
     }
 
     if let Err(e) = packet_tx.send(Packet::new(msg, remote_addr, start)).await {
-      tracing::error!(target = "memberlist.packet", local=%local_addr, from=%remote_addr, err = %e, "failed to send packet");
+      tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist_quic.packet: failed to send packet");
     }
 
     #[cfg(feature = "metrics")]
@@ -310,7 +307,7 @@ where
     };
 
     if !skip_inbound_label_check && packet_label.ne(label) {
-      tracing::error!(target = "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+      tracing::error!(local_label=%label, remote_label=%packet_label, "memberlist_quic.promised: discarding packet with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
     }
 
@@ -457,10 +454,7 @@ where
           .send(Self::decompress_and_decode(compressor, &buf))
           .is_err()
         {
-          tracing::error!(
-            target = "memberlist.transport.quic",
-            "failed to send decompressed message"
-          );
+          tracing::error!("memberlist_quic.promised: failed to send decompressed message");
         }
       });
 

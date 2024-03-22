@@ -127,8 +127,7 @@ where
     rayon::spawn(move || {
       if tx.send(Self::decompress(compressor, &data)).is_err() {
         tracing::error!(
-          target = "memberlist.net.promised",
-          "failed to send computation task result back to main thread"
+          "memberlist_quic.promised: failed to send computation task result back to main thread"
         );
       }
     });

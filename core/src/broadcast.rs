@@ -108,11 +108,7 @@ where
   async fn finished(&self) {
     if let Some(tx) = &self.notify {
       if let Err(e) = tx.send(()).await {
-        tracing::error!(
-          target = "memberlist.broadcast",
-          "broadcast failed to notify: {}",
-          e
-        );
+        tracing::error!("memberlist: broadcast failed to notify: {}", e);
       }
     }
   }

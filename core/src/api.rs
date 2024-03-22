@@ -237,7 +237,7 @@ where
     .with_delegate_version(this.inner.opts.delegate_version);
     this.alive_node(alive, None, true).await;
     this.schedule(shutdown_rx).await;
-    tracing::debug!(target = "memberlist", local = %this.inner.id, advertise_addr = %advertise, "node is living");
+    tracing::debug!(local = %this.inner.id, advertise_addr = %advertise, "memberlist: node is living");
     Ok(this)
   }
 
@@ -289,15 +289,11 @@ where
               }
             }
           } else if let Err(e) = self.inner.leave_broadcast_rx.recv().await {
-            tracing::error!(
-              target: "memberlist",
-              "failed to receive leave broadcast: {}",
-              e
-            );
+            tracing::error!("memberlist: failed to receive leave broadcast: {}", e);
           }
         }
       } else {
-        tracing::warn!(target = "memberlist", "leave but we're not a member");
+        tracing::warn!("memberlist: leave but we're not a member");
       }
     }
     Ok(())
@@ -361,9 +357,8 @@ where
                 Ok(addr) => addr,
                 Err(e) => {
                   tracing::debug!(
-                    target: "memberlist",
                     err = %e,
-                    "failed to resolve address {}",
+                    "memberlist: failed to resolve address {}",
                     addr,
                   );
                   return Err((Node::new(id, MaybeResolvedAddress::unresolved(addr)), Error::<T, D>::transport(e)))
@@ -372,13 +367,12 @@ where
             }
           };
           let node = Node::new(id, resolved_addr);
-          tracing::info!(target = "memberlist", local = %self.inner.transport.local_id(), peer = %node, "start join...");
+          tracing::info!(local = %self.inner.transport.local_id(), peer = %node, "memberlist: start join...");
           if let Err(e) = self.push_pull_node(node.cheap_clone(), true).await {
             tracing::debug!(
-              target: "memberlist",
               local = %self.inner.id,
               err = %e,
-              "failed to join {}",
+              "memberlist: failed to join {}",
               node,
             );
             let (id, addr) = node.into_components();
@@ -542,8 +536,7 @@ where
       Err(_) => {
         // If we timed out, return Error.
         tracing::debug!(
-          target = "memberlist",
-          "failed ping {} by packet (timeout reached)",
+          "memberlist: failed ping {} by packet (timeout reached)",
           node
         );
         return Err(Error::Lost(node));
@@ -570,8 +563,7 @@ where
 
     // If we timed out, return Error.
     tracing::debug!(
-      target = "memberlist",
-      "failed ping {} by packet (timeout reached)",
+      "memberlist: failed ping {} by packet (timeout reached)",
       node
     );
     Err(Error::Lost(node))

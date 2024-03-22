@@ -190,8 +190,7 @@ where
       if !self.has_left() {
         self.refute(state, incarnation).await;
         tracing::warn!(
-          target: "memberlist.state",
-          "refuting a dead message (from: {})",
+          "memberlist.state: refuting a dead message (from: {})",
           d.from()
         );
         return Ok(()); // Do not mark ourself dead
@@ -273,8 +272,7 @@ where
     if state.id().eq(self.local_id()) {
       self.refute(&state.state, s.incarnation()).await;
       tracing::warn!(
-        target: "memberlist.state",
-        "refuting a suspect message (from: {})",
+        "memberlist.state: refuting a suspect message (from: {})",
         s.from()
       );
       // Do not mark ourself suspect
@@ -365,15 +363,14 @@ where
             }
 
             tracing::info!(
-              target: "memberlist.state",
-              "marking {} as failed, suspect timeout reached ({} peer confirmations)",
+              "memberlist.state: marking {} as failed, suspect timeout reached ({} peer confirmations)",
               dead.node(),
               num_confirmations
             );
             let mut memberlist = t.inner.nodes.write().await;
-            let err_info = format!("failed to mark {} as failed", dead.node());
+            let dead_node = dead.node().cheap_clone();
             if let Err(e) = t.dead_node(&mut memberlist, dead).await {
-              tracing::error!(target = "memberlist.state", err=%e, err_info);
+              tracing::error!(err=%e, "memberlist.state: failed to mark {dead_node} as failed");
             }
           }
         }
@@ -455,7 +452,7 @@ where
       }
     } else {
       if let Err(err) = self.inner.transport.blocked_address(anode.address()) {
-        tracing::warn!(target = "memberlist.state", local = %self.inner.id, remote = %anode, err=%err, "rejected node");
+        tracing::warn!(local = %self.inner.id, remote = %anode, err=%err, "memberlist.state: rejected node");
         return;
       };
 
@@ -629,13 +626,13 @@ impl<T: Transport> StateMessage<T> {
         let id = dead.node().cheap_clone();
         let mut memberlist = s.inner.nodes.write().await;
         if let Err(e) = s.dead_node(&mut memberlist, dead).await {
-          tracing::error!(target = "memberlist.state", id=%id, err=%e, "fail to dead node");
+          tracing::error!(id=%id, err=%e, "memberlist.state: fail to dead node");
         }
       }
       StateMessage::Suspect(suspect) => {
         let id = suspect.node().cheap_clone();
         if let Err(e) = s.suspect_node(suspect).await {
-          tracing::error!(target = "memberlist.state", id=%id, err=%e, "fail to suspect node");
+          tracing::error!(id=%id, err=%e, "memberlist.state: fail to suspect node");
         }
       }
     }
@@ -896,7 +893,7 @@ where
       {
         Ok(_) => {}
         Err(e) => {
-          tracing::error!(target = "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send ping by unreliable connection");
+          tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to send ping by unreliable connection");
           if e.is_remote_failure() {
             return self
               .handle_remote_failure(
@@ -964,7 +961,7 @@ where
             if v.complete {
               if let Some(delegate) = delegate {
                 let rtt = v.timestamp.elapsed();
-                tracing::trace!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), "notify ping complete ack");
+                tracing::trace!(local = %self.inner.id, remote = %target.id(), "memberlist.state: notify ping complete ack");
                 delegate.notify_ping_complete(target.server.cheap_clone(), rtt, v.payload).await;
               }
 
@@ -975,13 +972,13 @@ where
             // here to break out of the select below.
             if !v.complete {
               if let Err(e) = ack_tx.send(v).await {
-                tracing::error!(target = "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to re-enqueue UDP ping ack");
+                tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to re-enqueue UDP ping ack");
               }
             }
           }
           Err(e) => {
             // This branch should never be reached, if there's an error in your log, please report an issue.
-            tracing::debug!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err = %e, "failed unreliable connection ping (ack channel closed)");
+            tracing::debug!(local = %self.inner.id, remote = %target.id(), err = %e, "memberlist.state: failed unreliable connection ping (ack channel closed)");
           }
         }
       },
@@ -1087,16 +1084,16 @@ where
             // handle error here for good manner, and if you see this log, please
             // report an issue.
             if let Err(e) = fallback_tx.send(did_contact).await {
-              tracing::error!(target = "memberlist.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send fallback");
+              tracing::error!(local = %this.inner.id, remote_addr = %target_addr, err=%e, "memberlist.state: failed to send fallback");
             }
           }
           Err(e) => {
-            tracing::error!(target = "memberlist.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send ping by reliable connection");
+            tracing::error!(local = %this.inner.id, remote_addr = %target_addr, err=%e, "memberlist.state: failed to send ping by reliable connection");
             // The error should never happen, because we do not drop the rx,
             // handle error here for good manner, and if you see this log, please
             // report an issue.
             if let Err(e) = fallback_tx.send(false).await {
-              tracing::error!(target =  "memberlist.state", local = %this.inner.id, remote_addr = %target_addr, err=%e, "failed to send fallback");
+              tracing::error!(local = %this.inner.id, remote_addr = %target_addr, err=%e, "memberlist.state: failed to send fallback");
             }
           }
         }
@@ -1245,7 +1242,7 @@ where
       {
         Ok(msgs) => msgs,
         Err(e) => {
-          tracing::error!(target = "memberlist.state", err = %e, "failed to get broadcast messages from {}", server);
+          tracing::error!(err = %e, "memberlist.state: failed to get broadcast messages from {}", server);
           return None;
         }
       };
@@ -1256,25 +1253,28 @@ where
       Some((server.address().cheap_clone(), msgs))
     }).collect::<FuturesUnordered<_>>();
 
-    futs.filter_map(|batch| async { batch }).for_each_concurrent(None, |(addr, mut msgs)| async move {
-      let fut = if msgs.len() == 1 {
-        futures::future::Either::Left(async {
-          // Send single message as is
-          if let Err(e) = self.transport_send_packet(&addr, msgs.pop().unwrap()).await {
-            tracing::error!(target = "memberlist.state", err = %e, "failed to send gossip to {}", addr);
-          }
-        })
-      } else {
-        futures::future::Either::Right(async {
-          // Otherwise create and send one or more compound messages
-          if let Err(e) = self.transport_send_packets(&addr, msgs).await {
-            tracing::error!(target = "memberlist.state", err = %e, "failed to send gossip to {}", addr);
-          }
-        })
-      };
+    futs
+      .filter_map(|batch| async { batch })
+      .for_each_concurrent(None, |(addr, mut msgs)| async move {
+        let fut = if msgs.len() == 1 {
+          futures::future::Either::Left(async {
+            // Send single message as is
+            if let Err(e) = self.transport_send_packet(&addr, msgs.pop().unwrap()).await {
+              tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
+            }
+          })
+        } else {
+          futures::future::Either::Right(async {
+            // Otherwise create and send one or more compound messages
+            if let Err(e) = self.transport_send_packets(&addr, msgs).await {
+              tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
+            }
+          })
+        };
 
-      fut.await
-    }).await;
+        fut.await
+      })
+      .await;
   }
 
   /// invoked periodically to randomly perform a complete state

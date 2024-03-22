@@ -514,7 +514,7 @@ where
     let label = &self.opts.label;
 
     if !self.opts.skip_inbound_label_check && stream_label.ne(label) {
-      tracing::error!(target = "memberlist.transport.quic.read_message", local_label=%label, remote_label=%stream_label, "discarding stream with unacceptable label");
+      tracing::error!(local_label=%label, remote_label=%stream_label, "memberlist_quic.promised: discarding stream with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), stream_label).into());
     }
 
@@ -650,7 +650,7 @@ where
         .await
         .map_err(|e| Self::Error::Stream(e.into()))
       {
-        tracing::error!(target = "memberlist.transport.quic", err = %e, "failed to close connector");
+        tracing::error!(err = %e, "memberlist_quic: failed to close connector");
       }
     }
 

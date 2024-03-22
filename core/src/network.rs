@@ -66,7 +66,7 @@ where
       }
 
       if let Err(e) = self.inner.transport.cache_stream(target, conn).await {
-        tracing::warn!(target = "memberlist.transport", local_addr = %self.inner.id, peer_addr = %target, err = %e, "failed to cache stream");
+        tracing::warn!(local_addr = %self.inner.id, peer_addr = %target, err = %e, "memberlist.transport: failed to cache stream");
       }
 
       Ok(true)
@@ -122,7 +122,7 @@ where
           .cache_stream(node.address(), conn)
           .await
         {
-          tracing::debug!(target = "memberlist.transport", local_addr = %self.inner.id, peer_addr = %node, err = %e, "failed to cache stream");
+          tracing::debug!(local_addr = %self.inner.id, peer_addr = %node, err = %e, "memberlist.transport: failed to cache stream");
         }
         Ok(pp)
       }

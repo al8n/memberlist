@@ -294,10 +294,7 @@ where
 
         // Check if we have too many open push/pull requests
         if num_concurrent >= MAX_PUSH_PULL_REQUESTS {
-          tracing::error!(
-            target: "memberlist.stream",
-            "too many pending push/pull requests"
-          );
+          tracing::error!("memberlist.stream: too many pending push/pull requests");
           return;
         }
 

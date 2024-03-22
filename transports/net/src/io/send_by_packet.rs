@@ -336,8 +336,7 @@ where
         .is_err()
       {
         tracing::error!(
-          target = "memberlist.net.packet",
-          "failed to send computation task result back to main thread"
+          "memberlist_net.packet: failed to send computation task result back to main thread"
         );
       }
     });
@@ -406,8 +405,7 @@ where
         .is_err()
       {
         tracing::error!(
-          target = "memberlist.net.packet",
-          "failed to send computation task result back to main thread"
+          "memberlist_net.packet: failed to send computation task result back to main thread"
         );
       }
     });
@@ -492,8 +490,7 @@ where
         .is_err()
       {
         tracing::error!(
-          target = "memberlist.net.packet",
-          "failed to send computation task result back to main thread"
+          "memberlist_net.packet: failed to send computation task result back to main thread"
         );
       }
     });
@@ -553,7 +550,7 @@ where
       .send_to(buf, addr)
       .await
       .map(|num| {
-        tracing::trace!(target = "memberlist.transport.net.packet", remote=%addr, total_bytes = %num, sent=?buf);
+        tracing::trace!(remote=%addr, total_bytes = %num, sent=?buf, "memberlist_net.packet");
         num
       })
       .map_err(|e| ConnectionError::packet_write(e).into())

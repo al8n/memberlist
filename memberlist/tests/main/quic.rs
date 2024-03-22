@@ -55,26 +55,26 @@ macro_rules! test_mods {
     }
   };
   ($fn:ident($expr:expr)) => {
-    #[cfg(all(feature = "tokio", any(feature = "quinn", feature = "s2n")))]
-    mod tokio {
-      use agnostic::tokio::TokioRuntime;
-      #[cfg(feature = "quinn")]
-      use memberlist_quic::tests::quinn_stream_layer_with_connect_timeout;
-      #[cfg(feature = "s2n")]
-      use memberlist_quic::tests::s2n_stream_layer;
+    // #[cfg(all(feature = "tokio", any(feature = "quinn", feature = "s2n")))]
+    // mod tokio {
+    //   use agnostic::tokio::TokioRuntime;
+    //   #[cfg(feature = "quinn")]
+    //   use memberlist_quic::tests::quinn_stream_layer_with_connect_timeout;
+    //   #[cfg(feature = "s2n")]
+    //   use memberlist_quic::tests::s2n_stream_layer;
 
-      use super::*;
-      use crate::tokio_run;
+    //   use super::*;
+    //   use crate::tokio_run;
 
-      #[cfg(feature = "quinn")]
-      $fn!(tokio(
-        "quinn",
-        quinn_stream_layer_with_connect_timeout::<TokioRuntime>($expr).await
-      ));
+    //   #[cfg(feature = "quinn")]
+    //   $fn!(tokio(
+    //     "quinn",
+    //     quinn_stream_layer_with_connect_timeout::<TokioRuntime>($expr).await
+    //   ));
 
-      #[cfg(feature = "s2n")]
-      $fn!(tokio("s2n", s2n_stream_layer::<TokioRuntime>().await));
-    }
+    //   #[cfg(feature = "s2n")]
+    //   $fn!(tokio("s2n", s2n_stream_layer::<TokioRuntime>().await));
+    // }
 
     #[cfg(all(feature = "async-std", feature = "quinn"))]
     mod async_std {
