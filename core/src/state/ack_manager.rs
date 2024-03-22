@@ -4,15 +4,12 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic_lite::{time::AsyncDelay, RuntimeLite};
+use agnostic_lite::{AfterHandle, AsyncAfterSpawner, RuntimeLite};
 use bytes::Bytes;
 use futures::{future::BoxFuture, FutureExt};
 use parking_lot::Mutex;
 
-use crate::{
-  // timer::Timer,
-  types::{Ack, Nack},
-};
+use crate::types::{Ack, Nack};
 
 #[viewit::viewit]
 pub(crate) struct AckMessage {
@@ -25,7 +22,7 @@ pub(crate) struct AckHandler<R: RuntimeLite> {
   pub(crate) ack_fn:
     Box<dyn FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
   pub(crate) nack_fn: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static>>,
-  pub(crate) timer: R::Delay<BoxFuture<'static, ()>>,
+  pub(crate) timer: <R::AfterSpawner as AsyncAfterSpawner>::JoinHandle<()>,
 }
 
 #[derive(Clone)]
@@ -41,7 +38,7 @@ impl<R: RuntimeLite> AckManager<R> {
     let (seq_no, payload) = ack.into_components();
     let ah = self.0.lock().remove(&seq_no);
     if let Some(handler) = ah {
-      handler.timer.abort();
+      handler.timer.cancel().await;
       (handler.ack_fn)(payload, timestamp).await;
     }
   }
@@ -71,13 +68,9 @@ impl<R: RuntimeLite> AckManager<R> {
       AckHandler {
         ack_fn: Box::new(f),
         nack_fn: None,
-        timer: R::delay(
-          timeout,
-          async move {
-            tlock.0.lock().remove(&sequence_number);
-          }
-          .boxed(),
-        ),
+        timer: R::spawn_after(timeout, async move {
+          tlock.0.lock().remove(&sequence_number);
+        }),
       },
     );
   }
@@ -128,21 +121,17 @@ impl<R: RuntimeLite> AckManager<R> {
       AckHandler {
         ack_fn: Box::new(ack_fn),
         nack_fn: Some(Arc::new(nack_fn)),
-        timer: R::delay(
-          timeout,
-          async move {
-            ack_manager.remove(sequence_number);
-            futures::select! {
-              _ = ack_tx.send(AckMessage {
-                payload: Bytes::new(),
-                timestamp: sent,
-                complete: false,
-              }).fuse() => {},
-              default => {}
-            }
+        timer: R::spawn_after(timeout, async move {
+          ack_manager.remove(sequence_number);
+          futures::select! {
+            _ = ack_tx.send(AckMessage {
+              payload: Bytes::new(),
+              timestamp: sent,
+              complete: false,
+            }).fuse() => {},
+            default => {}
           }
-          .boxed(),
-        ),
+        }),
       },
     );
   }
