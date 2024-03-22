@@ -26,7 +26,6 @@ pub use options::Options;
 pub mod queue;
 mod state;
 mod suspicion;
-mod timer;
 
 /// The transport layer for memberlist
 pub mod transport;
