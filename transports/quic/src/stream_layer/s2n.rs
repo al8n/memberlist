@@ -385,7 +385,7 @@ impl<R: RuntimeLite> QuicStream for S2nStream<R> {
   }
 
   async fn flush(&mut self) -> Result<(), Self::Error> {
-    self.send_stream.flush().await.map_err(Into::into)
+    Ok(())
   }
 
   async fn finish(&mut self) -> Result<(), Self::Error> {
