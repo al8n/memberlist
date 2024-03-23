@@ -1,5 +1,7 @@
 use crate::base::MessageHandoff;
 
+use agnostic_lite::AsyncSpawner;
+
 use super::*;
 
 impl<D, T> Memberlist<T, D>
@@ -13,10 +15,10 @@ where
   pub(crate) fn packet_handler(
     &self,
     shutdown_rx: async_channel::Receiver<()>,
-  ) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  ) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()> {
     let this = self.clone();
     let handoff_rx = this.inner.handoff_rx.clone();
-    <T::Runtime as Runtime>::spawn(async move {
+    <T::Runtime as RuntimeLite>::spawn(async move {
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -52,7 +54,7 @@ where
     suspect: Suspect<T::Id>,
   ) {
     if let Err(e) = self.suspect_node(suspect).await {
-      tracing::error!(target =  "memberlist.packet", err=%e, remote_addr = %from, "failed to suspect node");
+      tracing::error!(err=%e, remote_addr = %from, "memberlist.packet: failed to suspect node");
     }
   }
 
@@ -62,12 +64,12 @@ where
     alive: Alive<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) {
     if let Err(e) = self.inner.transport.blocked_address(&from) {
-      tracing::error!(target = "memberlist.packet", err=%e, remote_addr = %from, "blocked alive message");
+      tracing::error!(err=%e, remote_addr = %from, "memberlist.packet: blocked alive message");
       return;
     }
 
     if let Err(e) = self.inner.transport.blocked_address(alive.node().address()) {
-      tracing::error!(target = "memberlist.packet", err=%e, remote_addr = %from, "blocked alive address {} message from {}", alive.node().address(), from);
+      tracing::error!(err=%e, remote_addr = %from, "memberlist.packet: blocked alive address {} message from {}", alive.node().address(), from);
       return;
     }
 
@@ -81,7 +83,7 @@ where
   ) {
     let mut memberlist = self.inner.nodes.write().await;
     if let Err(e) = self.dead_node(&mut memberlist, dead).await {
-      tracing::error!(target =  "memberlist.packet", err=%e, remote_addr = %from, "failed to mark node as dead");
+      tracing::error!(err=%e, remote_addr = %from, "memberlist.packet: failed to mark node as dead");
     }
   }
 
@@ -91,7 +93,7 @@ where
     data: Bytes,
   ) {
     if let Some(d) = self.delegate.as_ref() {
-      tracing::trace!(target = "memberlist.packet", remote_addr = %from, data=?data.as_ref(), "handle user data");
+      tracing::trace!(remote_addr = %from, data=?data.as_ref(), "memberlist.packet: handle user data");
       d.notify_message(data).await
     }
   }

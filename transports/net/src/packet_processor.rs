@@ -32,6 +32,7 @@ pub(super) struct PacketProcessor<A, T>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = T::Runtime>,
   T: Transport<Resolver = A>,
+  T::Runtime: Runtime,
 {
   pub(super) packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   pub(super) socket: Arc<<<T::Runtime as Runtime>::Net as Net>::UdpSocket>,
@@ -54,6 +55,7 @@ impl<A, T> PacketProcessor<A, T>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = T::Runtime>,
   T: Transport<Resolver = A>,
+  T::Runtime: Runtime,
 {
   pub(super) async fn run(self) {
     let Self {
@@ -64,10 +66,7 @@ where
       ..
     } = self;
 
-    tracing::info!(
-      target = "memberlist.transport.net",
-      "udp listening on {local_addr}"
-    );
+    tracing::info!("memberlist_net: udp listening on {local_addr}");
 
     loop {
       // Do a blocking read into a fresh buffer. Grab a time stamp as
@@ -84,12 +83,12 @@ where
               // Check the length - it needs to have at least one byte to be a
               // proper message.
               if n < 1 {
-                tracing::error!(target = "memberlist.packet", local=%local_addr, from=%addr, err = "UDP packet too short (0 bytes)");
+                tracing::error!(local=%local_addr, from=%addr, err = "memberlist_net.packet: UDP packet too short (0 bytes)");
                 continue;
               }
               buf.truncate(n);
 
-              tracing::trace!(target = "memberlist.packet", local=%local_addr, from=%addr, packet=?buf.as_ref());
+              tracing::trace!(local=%local_addr, from=%addr, packet=?buf.as_ref(), "memberlist_net.packet");
 
               let start = Instant::now();
               let msg = match Self::handle_remote_bytes(
@@ -105,7 +104,7 @@ where
               ).await {
                 Ok(msg) => msg,
                 Err(e) => {
-                  tracing::error!(target = "memberlist.packet", local=%local_addr, from=%addr, err = %e, "fail to handle UDP packet");
+                  tracing::error!(local=%local_addr, from=%addr, err = %e, "memberlist_net.packet: fail to handle UDP packet");
                   continue;
                 }
               };
@@ -116,7 +115,7 @@ where
               }
 
               if let Err(e) = packet_tx.send(Packet::new(msg, addr, start)).await {
-                tracing::error!(target = "memberlist.packet", local=%local_addr, from=%addr, err = %e, "failed to send packet");
+                tracing::error!(local=%local_addr, from=%addr, err = %e, "memberlist_net.packet: failed to send packet");
               }
 
               #[cfg(feature = "metrics")]
@@ -127,7 +126,7 @@ where
                 break;
               }
 
-              tracing::error!(target = "memberlist.transport.net", peer=%local_addr, err = %e, "error reading UDP packet");
+              tracing::error!(peer=%local_addr, err = %e, "memberlist_net.packet: error reading UDP packet");
               continue;
             }
           };
@@ -151,7 +150,7 @@ where
 
     #[cfg(not(feature = "encryption"))]
     if !skip_inbound_label_check && packet_label.ne(label) {
-      tracing::error!(target = "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+      tracing::error!(local_label=%label, remote_label=%packet_label, "memberlist_net.packet: discarding packet with unacceptable label");
       return Err(memberlist_core::types::LabelError::mismatch(label.clone(), packet_label).into());
     }
 
@@ -207,13 +206,12 @@ where
     if !ENCRYPT_TAG.contains(&buf[0]) {
       if verify_incoming {
         tracing::error!(
-          target = "memberlist.net.packet",
-          "incoming packet is not encrypted, and verify incoming is forced"
+          "memberlist_net.packet: incoming packet is not encrypted, and verify incoming is forced"
         );
         return Err(super::security::SecurityError::Disabled.into());
       } else {
         if !skip_inbound_label_check && packet_label.ne(label) {
-          tracing::error!(target = "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+          tracing::error!(local_label=%label, remote_label=%packet_label, "memberlist_net.packet: discarding packet with unacceptable label");
           return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
         }
         return Self::read_from_packet_with_compression_without_encryption(buf, offload_size).await;
@@ -222,10 +220,7 @@ where
 
     if skip_inbound_label_check {
       if !packet_label.is_empty() {
-        tracing::error!(
-          target = "memberlist.net.promised",
-          "unexpected double stream label header"
-        );
+        tracing::error!("memberlist_net.packet: unexpected double stream label header");
         return Err(LabelError::duplicate(label.cheap_clone(), packet_label).into());
       }
 
@@ -234,7 +229,7 @@ where
     }
 
     if packet_label.ne(label) {
-      tracing::error!(target = "memberlist.net.promised", local_label=%label, remote_label=%packet_label, "discarding stream with unacceptable label");
+      tracing::error!(local_label=%label, remote_label=%packet_label, "memberlist_net.packet: discarding stream with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
     }
 
@@ -298,10 +293,7 @@ where
         )
         .is_err()
       {
-        tracing::error!(
-          target = "memberlist.net.packet",
-          "failed to send back to main thread"
-        );
+        tracing::error!("memberlist_net.packet: failed to send back to main thread");
       }
     });
 
@@ -332,13 +324,12 @@ where
     if !super::ENCRYPT_TAG.contains(&buf[0]) {
       if verify_incoming {
         tracing::error!(
-          target = "memberlist.net.packet",
-          "incoming packet is not encrypted, and verify incoming is forced"
+          "memberlist_net.packet: incoming packet is not encrypted, and verify incoming is forced"
         );
         return Err(security::SecurityError::Disabled.into());
       } else {
         if !skip_inbound_label_check && packet_label.ne(label) {
-          tracing::error!(target = "memberlist.net.packet", local_label=%label, remote_label=%packet_label, "discarding packet with unacceptable label");
+          tracing::error!(local_label=%label, remote_label=%packet_label, "memberlist_net.packet: discarding packet with unacceptable label");
           return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
         }
         return Self::read_from_packet_without_compression_and_encryption(buf);
@@ -347,10 +338,7 @@ where
 
     if skip_inbound_label_check {
       if !packet_label.is_empty() {
-        tracing::error!(
-          target = "memberlist.net.promised",
-          "unexpected double stream label header"
-        );
+        tracing::error!("memberlist_net.packet: unexpected double stream label header");
         return Err(LabelError::duplicate(label.cheap_clone(), packet_label).into());
       }
 
@@ -359,7 +347,7 @@ where
     }
 
     if packet_label.ne(label) {
-      tracing::error!(target = "memberlist.net.promised", local_label=%label, remote_label=%packet_label, "discarding stream with unacceptable label");
+      tracing::error!(local_label=%label, remote_label=%packet_label, "memberlist_net.packet: discarding stream with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), packet_label).into());
     }
 
@@ -405,10 +393,7 @@ where
         )
         .is_err()
       {
-        tracing::error!(
-          target = "memberlist.net.packet",
-          "failed to send back to main thread"
-        );
+        tracing::error!("memberlist_net.packet: failed to send back to main thread");
       }
     });
 
@@ -451,10 +436,7 @@ where
         .send(Self::decompress_and_decode(compressor, buf))
         .is_err()
       {
-        tracing::error!(
-          target = "memberlist.net.packet",
-          "failed to send back to main thread"
-        );
+        tracing::error!("memberlist_net.packet: failed to send back to main thread");
       }
     });
 
@@ -506,11 +488,7 @@ where
       match encryptor.decrypt(key, algo, nonce, auth_data, data) {
         Ok(_) => return Ok(()),
         Err(e) => {
-          tracing::error!(
-            target = "memberlist.net.promised",
-            "failed to decrypt message: {}",
-            e
-          );
+          tracing::error!("memberlist_net.packet: failed to decrypt message: {}", e);
           continue;
         }
       }

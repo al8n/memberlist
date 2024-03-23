@@ -26,6 +26,7 @@ pub use options::Options;
 pub mod queue;
 mod state;
 mod suspicion;
+
 /// The transport layer for memberlist
 pub mod transport;
 
@@ -37,11 +38,9 @@ pub mod util;
 
 pub use bytes;
 
-mod timer;
-
 pub use nodecraft::CheapClone;
 
-pub use agnostic;
+pub use agnostic_lite;
 
 pub use futures;
 

@@ -645,6 +645,8 @@ const _: () = {
 
 #[cfg(test)]
 mod tests {
+  use std::net::SocketAddr;
+
   use super::*;
 
   #[test]
@@ -683,5 +685,29 @@ mod tests {
     let cloned1 = format!("{:?}", cloned);
     let cheap_cloned1 = format!("{:?}", cheap_cloned);
     assert_eq!(cloned1, cheap_cloned1);
+  }
+
+  #[test]
+  fn test_push_node_state() {
+    let mut state = PushNodeState::generate(100);
+    state.set_id("test".into());
+    assert_eq!(state.id(), "test");
+    state.set_address(SocketAddr::from(([127, 0, 0, 1], 8080)));
+    assert_eq!(state.address(), &SocketAddr::from(([127, 0, 0, 1], 8080)));
+    state.set_meta(Meta::try_from("test").unwrap());
+    assert_eq!(state.meta(), &Meta::try_from("test").unwrap());
+    state.set_incarnation(100);
+    assert_eq!(state.incarnation(), 100);
+
+    state.set_state(State::Alive);
+    assert_eq!(state.state(), State::Alive);
+
+    state.set_protocol_version(ProtocolVersion::V0);
+    assert_eq!(state.protocol_version(), ProtocolVersion::V0);
+
+    state.set_delegate_version(DelegateVersion::V0);
+    assert_eq!(state.delegate_version(), DelegateVersion::V0);
+
+    let _cloned = state.cheap_clone();
   }
 }

@@ -8,7 +8,7 @@ use super::{Message, MessageTransformError, Wire};
 pub struct Lpe<I, A>(PhantomData<(I, A)>);
 
 impl<I, A> Default for Lpe<I, A> {
-  #[inline(always)]
+  #[inline]
   fn default() -> Self {
     Self(PhantomData)
   }
@@ -16,14 +16,14 @@ impl<I, A> Default for Lpe<I, A> {
 
 impl<I, A> Lpe<I, A> {
   /// Create a new `Lpe` instance
-  #[inline(always)]
+  #[inline]
   pub const fn new() -> Self {
     Self(PhantomData)
   }
 }
 
 impl<I, A> Clone for Lpe<I, A> {
-  #[inline(always)]
+  #[inline]
   fn clone(&self) -> Self {
     *self
   }

@@ -1,8 +1,35 @@
 use crate::{base::MessageHandoff, transport::Wire};
+use agnostic_lite::AsyncSpawner;
 use either::Either;
 use nodecraft::CheapClone;
 
 use super::*;
+
+macro_rules! queue {
+  ($this:ident.$msg:ident.$from:ident) => {{
+    // Determine the message queue, prioritize alive
+    {
+      let mut mq = $this.inner.queue.lock().await;
+      let queue = &mut mq.low;
+
+      let msg: Message<_, _> = $msg.into();
+      // Check for overflow and append if not full
+      if queue.len() >= $this.inner.opts.handoff_queue_depth {
+        tracing::warn!(addr = %$from, "memberlist.packet: handler queue full, dropping message ({})", msg.kind());
+      } else {
+        queue.push_back(MessageHandoff {
+          msg,
+          from: $from.cheap_clone(),
+        });
+      }
+    }
+
+    // notify of pending message
+    if let Err(e) = $this.inner.handoff_tx.send(()).await {
+      tracing::error!(addr = %$from, err = %e, "memberlist.packet: failed to notify of pending message");
+    }
+  }};
+}
 
 impl<D, T> Memberlist<T, D>
 where
@@ -12,10 +39,10 @@ where
   pub(crate) fn packet_listener(
     &self,
     shutdown_rx: async_channel::Receiver<()>,
-  ) -> <T::Runtime as Runtime>::JoinHandle<()> {
+  ) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()> {
     let this = self.clone();
     let packet_rx = this.inner.transport.packet();
-    <T::Runtime as Runtime>::spawn(async move {
+    <T::Runtime as RuntimeLite>::spawn(async move {
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -48,33 +75,7 @@ where
     from: <T::Resolver as AddressResolver>::ResolvedAddress,
     timestamp: Instant,
   ) {
-    macro_rules! queue {
-      ($this:ident.$msg:ident) => {{
-        // Determine the message queue, prioritize alive
-        {
-          let mut mq = $this.inner.queue.lock().await;
-          let queue = &mut mq.low;
-
-          let msg: Message<_, _> = $msg.into();
-          // Check for overflow and append if not full
-          if queue.len() >= $this.inner.opts.handoff_queue_depth {
-            tracing::warn!(target = "memberlist.packet", addr = %from, "handler queue full, dropping message ({})", msg.kind());
-          } else {
-            queue.push_back(MessageHandoff {
-              msg,
-              from: from.cheap_clone(),
-            });
-          }
-        }
-
-        // notify of pending message
-        if let Err(e) = $this.inner.handoff_tx.send(()).await {
-          tracing::error!(target = "memberlist.packet", addr = %from, err = %e, "failed to notify of pending message");
-        }
-      }};
-    }
-
-    tracing::trace!(target = "memberlist.packet", local = %self.advertise_address(), from = %from, packet=?msg, "handle packet");
+    tracing::trace!(local = %self.advertise_address(), from = %from, packet=?msg, "memberlist.packet: handle packet");
 
     match msg {
       Message::Ping(ping) => self.handle_ping(ping, from).await,
@@ -89,7 +90,7 @@ where
 
           // Check for overflow and append if not full
           if queue.len() >= self.inner.opts.handoff_queue_depth {
-            tracing::warn!(target = "memberlist.packet", addr = %from, "handler queue full, dropping message (Alive)");
+            tracing::warn!(addr = %from, "memberlist.packet: handler queue full, dropping message (Alive)");
           } else {
             queue.push_back(MessageHandoff {
               msg: alive.into(),
@@ -100,14 +101,14 @@ where
 
         // notify of pending message
         if let Err(e) = self.inner.handoff_tx.send(()).await {
-          tracing::error!(target = "memberlist.packet", addr = %from, err = %e, "failed to notify of pending message");
+          tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to notify of pending message");
         }
       }
-      Message::Suspect(msg) => queue!(self.msg),
-      Message::Dead(msg) => queue!(self.msg),
-      Message::UserData(msg) => queue!(self.msg),
+      Message::Suspect(msg) => queue!(self.msg.from),
+      Message::Dead(msg) => queue!(self.msg.from),
+      Message::UserData(msg) => queue!(self.msg.from),
       mt => {
-        tracing::error!(target = "memberlist.packet", addr = %from, err = "unexpected message type", message_type=mt.kind());
+        tracing::error!(addr = %from, err = "unexpected message type", message_type=mt.kind(), "memberlist.packet");
       }
     }
   }
@@ -179,52 +180,43 @@ where
     let ind_sequence_number = ind.sequence_number();
     let afrom = from.cheap_clone();
 
-    self
-      .inner
-      .ack_manager
-      .set_ack_handler::<_, T::Runtime>(
-        local_sequence_number,
-        self.inner.opts.probe_timeout,
-        move |_payload, _timestamp| {
-          async move {
-            let _ = cancel_tx.send(());
+    self.inner.ack_manager.set_ack_handler::<_>(
+      local_sequence_number,
+      self.inner.opts.probe_timeout,
+      move |_payload, _timestamp| {
+        async move {
+          let _ = cancel_tx.send(());
 
-            // Try to prevent the nack if we've caught it in time.
-            let ack = Ack::new(ind_sequence_number);
-            if let Err(e) = this
-              .send_msg(
-                ind_source.address(),
-                ack.into(),
-              )
-              .await
-            {
-              tracing::error!(target =  "memberlist.packet", addr = %afrom, err = %e, "failed to forward ack");
-            }
+          // Try to prevent the nack if we've caught it in time.
+          let ack = Ack::new(ind_sequence_number);
+          if let Err(e) = this.send_msg(ind_source.address(), ack.into()).await {
+            tracing::error!(addr = %afrom, err = %e, "memberlist.packet: failed to forward ack");
           }
-          .boxed()
-        },
-      );
+        }
+        .boxed()
+      },
+    );
 
     match self.send_msg(ind.target().address(), ping.into()).await {
       Ok(_) => {}
       Err(e) => {
-        tracing::error!(target = "memberlist.packet", local = %self.local_id(), source = %ind.source(), target=%ind.target(), err = %e, "failed to send indirect ping");
+        tracing::error!(local = %self.local_id(), source = %ind.source(), target=%ind.target(), err = %e, "memberlist.packet: failed to send indirect ping");
       }
     }
 
     // Setup a timer to fire off a nack if no ack is seen in time.
     let this = self.clone();
     let probe_timeout = self.inner.opts.probe_timeout;
-    <T::Runtime as Runtime>::spawn_detach(async move {
+    <T::Runtime as RuntimeLite>::spawn_detach(async move {
       futures::select! {
-        _ = <T::Runtime as Runtime>::sleep(probe_timeout).fuse() => {
+        _ = <T::Runtime as RuntimeLite>::sleep(probe_timeout).fuse() => {
           // We've not received an ack, so send a nack.
           let nack = Nack::new(ind.sequence_number());
 
           if let Err(e) = this.send_msg(ind.source().address(), nack.into()).await {
-            tracing::error!(target = "memberlist.packet", local = %ind.source(), remote = %from, err = %e, "failed to send nack");
+            tracing::error!(local = %ind.source(), remote = %from, err = %e, "memberlist.packet: failed to send nack");
           } else {
-            tracing::trace!(target = "memberlist.packet", local = %this.local_id(), source = %ind.source(), "send nack");
+            tracing::trace!(local = %this.local_id(), source = %ind.source(), "memberlist.packet: send nack");
           }
         }
         res = cancel_rx.fuse() => {
@@ -237,9 +229,9 @@ where
               let nack = Nack::new(ind.sequence_number());
 
               if let Err(e) = this.send_msg(ind.source().address(), nack.into()).await {
-                tracing::error!(target = "memberlist.packet", local = %ind.source(), remote = %from, err = %e, "failed to send nack");
+                tracing::error!(local = %ind.source(), remote = %from, err = %e, "memberlist.packet: failed to send nack");
               } else {
-                tracing::trace!(target = "memberlist.packet", local = %this.local_id(), source = %ind.source(), "send nack");
+                tracing::trace!(local = %this.local_id(), source = %ind.source(), "memberlist.packet: send nack");
               }
             }
           }

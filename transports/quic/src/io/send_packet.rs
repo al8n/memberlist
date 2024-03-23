@@ -9,7 +9,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   fn encode_batch(
     buf: &mut [u8],
@@ -160,8 +160,7 @@ where
         .is_err()
       {
         tracing::error!(
-          target = "memberlist.transport.quic.packet",
-          "failed to send computation task result back to main thread"
+          "memberlist_quic.packet: failed to send computation task result back to main thread"
         );
       }
     });
@@ -199,12 +198,16 @@ where
     let mut stream = self.fetch_stream(addr, None).await?;
 
     tracing::trace!(
-      target = "memberlist.transport.quic",
       total_bytes = %src.len(),
       sent = ?src.as_ref(),
+      "memberlist_quic.packet"
     );
     let written = stream
       .write_all(src)
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    stream
+      .flush()
       .await
       .map_err(|e| QuicTransportError::Stream(e.into()))?;
     Ok(written)

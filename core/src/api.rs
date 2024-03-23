@@ -4,7 +4,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::Runtime;
+use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt};
 
@@ -237,7 +237,7 @@ where
     .with_delegate_version(this.inner.opts.delegate_version);
     this.alive_node(alive, None, true).await;
     this.schedule(shutdown_rx).await;
-    tracing::debug!(target = "memberlist", local = %this.inner.id, advertise_addr = %advertise, "node is living");
+    tracing::debug!(local = %this.inner.id, advertise_addr = %advertise, "memberlist: node is living");
     Ok(this)
   }
 
@@ -284,20 +284,16 @@ where
           if timeout > Duration::ZERO {
             futures::select! {
               _ = self.inner.leave_broadcast_rx.recv().fuse() => {},
-              _ = <T::Runtime as Runtime>::sleep(timeout).fuse() => {
+              _ = <T::Runtime as RuntimeLite>::sleep(timeout).fuse() => {
                 return Err(Error::LeaveTimeout);
               }
             }
           } else if let Err(e) = self.inner.leave_broadcast_rx.recv().await {
-            tracing::error!(
-              target: "memberlist",
-              "failed to receive leave broadcast: {}",
-              e
-            );
+            tracing::error!("memberlist: failed to receive leave broadcast: {}", e);
           }
         }
       } else {
-        tracing::warn!(target = "memberlist", "leave but we're not a member");
+        tracing::warn!("memberlist: leave but we're not a member");
       }
     }
     Ok(())
@@ -361,9 +357,8 @@ where
                 Ok(addr) => addr,
                 Err(e) => {
                   tracing::debug!(
-                    target: "memberlist",
                     err = %e,
-                    "failed to resolve address {}",
+                    "memberlist: failed to resolve address {}",
                     addr,
                   );
                   return Err((Node::new(id, MaybeResolvedAddress::unresolved(addr)), Error::<T, D>::transport(e)))
@@ -372,13 +367,12 @@ where
             }
           };
           let node = Node::new(id, resolved_addr);
-          tracing::info!(target = "memberlist", local = %self.inner.transport.local_id(), peer = %node, "start join...");
+          tracing::info!(local = %self.inner.transport.local_id(), peer = %node, "memberlist: start join...");
           if let Err(e) = self.push_pull_node(node.cheap_clone(), true).await {
             tracing::debug!(
-              target: "memberlist",
               local = %self.inner.id,
               err = %e,
-              "failed to join {}",
+              "memberlist: failed to join {}",
               node,
             );
             let (id, addr) = node.into_components();
@@ -464,7 +458,7 @@ where
     // Wait for the broadcast or a timeout
     if self.any_alive().await {
       if timeout > Duration::ZERO {
-        let _ = <T::Runtime as Runtime>::timeout(timeout, notify_rx.recv())
+        let _ = <T::Runtime as RuntimeLite>::timeout(timeout, notify_rx.recv())
           .await
           .map_err(|_| Error::UpdateTimeout)?;
       } else {
@@ -521,7 +515,7 @@ where
     );
 
     let (ack_tx, ack_rx) = async_channel::bounded(self.inner.opts.indirect_checks + 1);
-    self.inner.ack_manager.set_probe_channels::<T::Runtime>(
+    self.inner.ack_manager.set_probe_channels(
       ping.sequence_number(),
       ack_tx,
       None,
@@ -531,7 +525,7 @@ where
 
     // Send a ping to the node.
     // Wait to send or timeout.
-    match <T::Runtime as Runtime>::timeout(
+    match <T::Runtime as RuntimeLite>::timeout(
       self.inner.opts.probe_timeout,
       self.send_msg(node.address(), ping.into()),
     )
@@ -542,8 +536,7 @@ where
       Err(_) => {
         // If we timed out, return Error.
         tracing::debug!(
-          target = "memberlist",
-          "failed ping {} by packet (timeout reached)",
+          "memberlist: failed ping {} by packet (timeout reached)",
           node
         );
         return Err(Error::Lost(node));
@@ -565,13 +558,12 @@ where
           }
         }
       }
-      _ = <T::Runtime as Runtime>::sleep(self.inner.opts.probe_timeout).fuse() => {}
+      _ = <T::Runtime as RuntimeLite>::sleep(self.inner.opts.probe_timeout).fuse() => {}
     }
 
     // If we timed out, return Error.
     tracing::debug!(
-      target = "memberlist",
-      "failed ping {} by packet (timeout reached)",
+      "memberlist: failed ping {} by packet (timeout reached)",
       node
     );
     Err(Error::Lost(node))

@@ -8,7 +8,7 @@ use super::*;
 pub async fn compound_ping<S, R>(s: S, c: S, kind: AddressKind) -> Result<(), AnyError>
 where
   S: StreamLayer,
-  R: Runtime,
+  R: RuntimeLite,
 {
   let name = format!("{kind}_compound_ping");
   let label = Label::try_from(&name)?;

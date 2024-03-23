@@ -376,4 +376,19 @@ mod tests {
       assert_eq!(decoded, alive);
     }
   }
+
+  #[test]
+  fn test_access() {
+    let mut alive = Alive::random(16);
+    alive.set_incarnation(1);
+    assert_eq!(alive.incarnation(), 1);
+    alive.set_meta(Meta::empty());
+    assert_eq!(alive.meta(), &Meta::empty());
+    alive.set_node(Node::new("a".into(), "127.0.0.1:8081".parse().unwrap()));
+    assert_eq!(alive.node().id(), "a");
+    alive.set_protocol_version(ProtocolVersion::V0);
+    assert_eq!(alive.protocol_version(), ProtocolVersion::V0);
+    alive.set_delegate_version(DelegateVersion::V0);
+    assert_eq!(alive.delegate_version(), DelegateVersion::V0);
+  }
 }

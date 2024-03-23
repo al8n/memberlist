@@ -5,7 +5,6 @@ use crate::{NetTransport, NetTransportOptions};
 
 use super::*;
 
-#[cfg(all(feature = "encryption", feature = "compression"))]
 pub async fn join_dead_node<S, R>(
   s1: S,
   client: NetTransportTestPromisedClient<S>,

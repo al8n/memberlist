@@ -57,7 +57,7 @@ where
       .map_err(|e| ConnectionError::promised_write(e).into())
       .map(|_| {
         let peer_addr = conn.op.peer_addr();
-        tracing::trace!(target = "memberlist.transport.net.promised", remote_addr = %peer_addr, total_len = total_len, sent = ?buf.as_ref());
+        tracing::trace!(remote_addr = %peer_addr, total_len = total_len, sent = ?buf.as_ref(), "memberlist_net.promised");
         total_len
       })
   }
@@ -264,8 +264,7 @@ where
           .is_err()
         {
           tracing::error!(
-            target = "memberlist.net.promised",
-            "failed to send computation task result back to main thread"
+            "memberlist_net.promised: failed to send computation task result back to main thread"
           );
         }
       });
@@ -316,8 +315,7 @@ where
           .is_err()
         {
           tracing::error!(
-            target = "memberlist.net.promised",
-            "failed to send computation task result back to main thread"
+            "memberlist_net.promised: failed to send computation task result back to main thread"
           );
         }
       });
@@ -365,8 +363,7 @@ where
           .is_err()
         {
           tracing::error!(
-            target = "memberlist.net.promised",
-            "failed to send computation task result back to main thread"
+            "memberlist_net.promised: failed to send computation task result back to main thread"
           );
         }
       });

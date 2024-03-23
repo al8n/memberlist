@@ -11,6 +11,10 @@ keywords.workspace = true
 categories.workspace = true
 description = "memberlist's transport layer based on TCP and UDP."
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = ["dns", "compression", "encryption"]
 

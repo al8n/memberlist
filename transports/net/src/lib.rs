@@ -19,7 +19,7 @@ use std::{
 
 use agnostic::{
   net::{Net, UdpSocket},
-  Runtime,
+  Runtime, RuntimeLite,
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{BufMut, BytesMut};
@@ -175,10 +175,7 @@ where
     #[cfg(feature = "encryption")]
     let keyring = match (opts.primary_key, &opts.secret_keys) {
       (None, Some(keys)) if !keys.is_empty() => {
-        tracing::warn!(
-          target = "memberlist",
-          "using first key in keyring as primary key"
-        );
+        tracing::warn!("memberlist: using first key in keyring as primary key");
         let mut iter = keys.iter().copied();
         let pk = iter.next().unwrap();
         let keyring = SecretKeyring::with_keys(pk, iter);
@@ -352,18 +349,18 @@ where
       if S::is_secure()
         && (encryptor.is_none() || opts.encryption_algo.is_none() || !opts.gossip_verify_outgoing)
       {
-        tracing::warn!(target = "memberlist", advertise_addr=%final_advertise_addr, "binding to public address without enabling encryption for packet stream layer!");
+        tracing::warn!(advertise_addr=%final_advertise_addr, "memberlist_net: binding to public address without enabling encryption for packet stream layer!");
       }
 
       #[cfg(feature = "encryption")]
       if !S::is_secure()
         && (encryptor.is_none() || opts.encryption_algo.is_none() || !opts.gossip_verify_outgoing)
       {
-        tracing::warn!(target = "memberlist", advertise_addr=%final_advertise_addr, "binding to public address without enabling encryption for stream layer!");
+        tracing::warn!(advertise_addr=%final_advertise_addr, "memberlist_net: binding to public address without enabling encryption for stream layer!");
       }
 
       #[cfg(not(feature = "encryption"))]
-      tracing::warn!(target = "memberlist", advertise_addr=%final_advertise_addr, "binding to public address without enabling encryption for stream layer!");
+      tracing::warn!(advertise_addr=%final_advertise_addr, "memberlist_net: binding to public address without enabling encryption for stream layer!");
     }
 
     Ok(Self {
@@ -494,7 +491,7 @@ where
     let ddl = conn.read_deadline();
     let mut conn = BufReader::new(conn).peekable().with_deadline(ddl);
     let mut stream_label = label::remove_label_header::<R>(&mut conn).await.map_err(|e| {
-      tracing::error!(target = "memberlist.net.promised", remote = %from, err=%e, "failed to receive and remove the stream label header");
+      tracing::error!(remote = %from, err=%e, "memberlist_net.promised: failed to receive and remove the stream label header");
       ConnectionError::promised_read(e)
     })?.unwrap_or_else(Label::empty);
 
@@ -502,10 +499,7 @@ where
 
     if self.opts.skip_inbound_label_check {
       if !stream_label.is_empty() {
-        tracing::error!(
-          target = "memberlist.net.promised",
-          "unexpected double stream label header"
-        );
+        tracing::error!("memberlist_net.promised: unexpected double stream label header");
         return Err(LabelError::duplicate(label.cheap_clone(), stream_label).into());
       }
 
@@ -514,7 +508,7 @@ where
     }
 
     if stream_label.ne(&self.opts.label) {
-      tracing::error!(target = "memberlist.net.promised", local_label=%label, remote_label=%stream_label, "discarding stream with unacceptable label");
+      tracing::error!(local_label=%label, remote_label=%stream_label, "memberlist_net.promised: discarding stream with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), stream_label).into());
     }
 
@@ -614,7 +608,7 @@ where
     deadline: Instant,
   ) -> Result<Self::Stream, Self::Error> {
     let connector =
-      <Self::Runtime as Runtime>::timeout_at(deadline, self.stream_layer.connect(*addr));
+      <Self::Runtime as RuntimeLite>::timeout_at(deadline, self.stream_layer.connect(*addr));
     match connector.await {
       Ok(Ok(conn)) => Ok(conn),
       Ok(Err(e)) => Err(Self::Error::Connection(ConnectionError {
