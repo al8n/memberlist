@@ -327,7 +327,7 @@ mod tests {
   fn test_node_state_cheap_clone() {
     let node = NodeState::<_, SocketAddr>::new(
       SmolStr::from("a"),
-      "127.0.0.1".parse().unwrap(),
+      "127.0.0.1:8080".parse().unwrap(),
       State::Alive,
     );
     let node2 = node.cheap_clone();
