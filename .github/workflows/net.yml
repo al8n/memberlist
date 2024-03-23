@@ -68,7 +68,7 @@ jobs:
 
       - name: Run Memberlist Tests
         run: |
-          cargo test --features "test,compression,encryption,${{ matrix.stream_layer }},${{ matrix.runtime }},metrics"
+          cargo test --features "test,compression,encryption,${{ matrix.stream_layer }},${{ matrix.runtime }},metrics" -- --test-threads=1
         working-directory: memberlist
 
       - name: Cache Cargo registry

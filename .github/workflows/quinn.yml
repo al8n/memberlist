@@ -67,7 +67,7 @@ jobs:
 
       - name: Run Memberlist Tests
         run: |
-          cargo test --no-default-features --features "test,compression,quinn,${{ matrix.runtime }},metrics"
+          cargo test --no-default-features --features "test,compression,quinn,${{ matrix.runtime }},metrics" -- --test-threads=1
         working-directory: memberlist
 
       - name: Cache Cargo registry
