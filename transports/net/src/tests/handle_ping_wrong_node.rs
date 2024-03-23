@@ -79,7 +79,6 @@ where
     .with_receive_verify_label(true);
 
   let mut opts = NetTransportOptions::new(name.into())
-    .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()))
     .with_offload_size(10)
     .with_label(label);
