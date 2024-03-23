@@ -5,6 +5,32 @@ use nodecraft::CheapClone;
 
 use super::*;
 
+macro_rules! queue {
+  ($this:ident.$msg:ident.$from:ident) => {{
+    // Determine the message queue, prioritize alive
+    {
+      let mut mq = $this.inner.queue.lock().await;
+      let queue = &mut mq.low;
+
+      let msg: Message<_, _> = $msg.into();
+      // Check for overflow and append if not full
+      if queue.len() >= $this.inner.opts.handoff_queue_depth {
+        tracing::warn!(addr = %$from, "memberlist.packet: handler queue full, dropping message ({})", msg.kind());
+      } else {
+        queue.push_back(MessageHandoff {
+          msg,
+          from: $from.cheap_clone(),
+        });
+      }
+    }
+
+    // notify of pending message
+    if let Err(e) = $this.inner.handoff_tx.send(()).await {
+      tracing::error!(addr = %$from, err = %e, "memberlist.packet: failed to notify of pending message");
+    }
+  }};
+}
+
 impl<D, T> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
@@ -49,32 +75,6 @@ where
     from: <T::Resolver as AddressResolver>::ResolvedAddress,
     timestamp: Instant,
   ) {
-    macro_rules! queue {
-      ($this:ident.$msg:ident) => {{
-        // Determine the message queue, prioritize alive
-        {
-          let mut mq = $this.inner.queue.lock().await;
-          let queue = &mut mq.low;
-
-          let msg: Message<_, _> = $msg.into();
-          // Check for overflow and append if not full
-          if queue.len() >= $this.inner.opts.handoff_queue_depth {
-            tracing::warn!(addr = %from, "memberlist.packet: handler queue full, dropping message ({})", msg.kind());
-          } else {
-            queue.push_back(MessageHandoff {
-              msg,
-              from: from.cheap_clone(),
-            });
-          }
-        }
-
-        // notify of pending message
-        if let Err(e) = $this.inner.handoff_tx.send(()).await {
-          tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to notify of pending message");
-        }
-      }};
-    }
-
     tracing::trace!(local = %self.advertise_address(), from = %from, packet=?msg, "memberlist.packet: handle packet");
 
     match msg {
@@ -104,9 +104,9 @@ where
           tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to notify of pending message");
         }
       }
-      Message::Suspect(msg) => queue!(self.msg),
-      Message::Dead(msg) => queue!(self.msg),
-      Message::UserData(msg) => queue!(self.msg),
+      Message::Suspect(msg) => queue!(self.msg.from),
+      Message::Dead(msg) => queue!(self.msg.from),
+      Message::UserData(msg) => queue!(self.msg.from),
       mt => {
         tracing::error!(addr = %from, err = "unexpected message type", message_type=mt.kind(), "memberlist.packet");
       }

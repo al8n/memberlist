@@ -95,6 +95,11 @@ where
     .num_members_by(|state| state.state() == State::Alive)
     .await;
   assert_eq!(num, 1);
+
+  m.local_addr();
+  m.local_state().await;
+  let id = m.local_id();
+  m.by_id(id).await.unwrap();
 }
 
 /// Unit tests for create a `Memberlist` and shutdown.
