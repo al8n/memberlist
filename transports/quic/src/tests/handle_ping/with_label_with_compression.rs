@@ -74,7 +74,8 @@ where
   let label = Label::try_from(&name)?;
   let mut opts = QuicTransportOptions::new(name.into())
     .with_label(label.cheap_clone())
-    .with_compressor(Some(Default::default()));
+    .with_compressor(Some(Default::default()))
+    .with_offload_size(10);
 
   let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);

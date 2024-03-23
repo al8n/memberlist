@@ -197,7 +197,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I
   }
 }
 
-#[inline(always)]
+#[inline]
 const fn default_connection_pool_cleanup_period() -> Duration {
   Duration::from_secs(60)
 }

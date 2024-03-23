@@ -12,6 +12,8 @@ ignore:
   - transports/quic/src/tests.rs
   - transports/quic/src/tests
   - transports/quic/tests
+  - transports/quic/src/stream_layer/quinn/error.rs
+  - transports/quic/src/stream_layer/s2n/error.rs
   - memberlist/tests
 
 coverage:

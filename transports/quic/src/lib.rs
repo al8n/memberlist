@@ -369,7 +369,7 @@ where
   ) -> Result<S::Stream, QuicTransportError<A, S, W>> {
     if let Some(ent) = self.connection_pool.get(&addr) {
       let connection = ent.value();
-      if !connection.is_closed().await {
+      if !connection.is_full() && !connection.is_closed().await {
         if let Some(timeout) = timeout {
           return connection
             .open_bi_with_deadline(timeout)
@@ -436,32 +436,32 @@ where
       })
   }
 
-  #[inline(always)]
+  #[inline]
   fn local_id(&self) -> &Self::Id {
     &self.opts.id
   }
 
-  #[inline(always)]
+  #[inline]
   fn local_address(&self) -> &<Self::Resolver as AddressResolver>::Address {
     &self.local_addr
   }
 
-  #[inline(always)]
+  #[inline]
   fn advertise_address(&self) -> &<Self::Resolver as AddressResolver>::ResolvedAddress {
     &self.advertise_addr
   }
 
-  #[inline(always)]
+  #[inline]
   fn max_payload_size(&self) -> usize {
     self.max_payload_size
   }
 
-  #[inline(always)]
+  #[inline]
   fn packet_overhead(&self) -> usize {
     PACKET_OVERHEAD
   }
 
-  #[inline(always)]
+  #[inline]
   fn packets_header_overhead(&self) -> usize {
     // 1 for StreamType
     1 + self.fix_packet_overhead() + PACKET_HEADER_OVERHEAD
@@ -544,10 +544,15 @@ where
     #[cfg(feature = "compression")]
     let buf = self.send_message_with_compression(msg).await?;
 
-    conn
+    let written = conn
       .write_all(buf)
       .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    conn
+      .flush()
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    Ok(written)
   }
 
   async fn send_packet(
@@ -644,13 +649,22 @@ where
     self.shutdown.store(true, Ordering::SeqCst);
     self.shutdown_tx.close();
 
+    for conn in self.connection_pool.iter() {
+      let conn = conn.value();
+      let addr = conn.local_addr();
+      if let Err(e) = conn.close().await {
+        tracing::error!(err = %e, local_addr=%addr, "memberlist_quic: failed to close connection");
+      }
+    }
+
     for connector in self.v4_connectors.iter().chain(self.v6_connectors.iter()) {
+      let addr = connector.local_addr();
       if let Err(e) = connector
         .close()
         .await
         .map_err(|e| Self::Error::Stream(e.into()))
       {
-        tracing::error!(err = %e, "memberlist_quic: failed to close connector");
+        tracing::error!(err = %e, local_addr=%addr, "memberlist_quic: failed to close connector");
       }
     }
 

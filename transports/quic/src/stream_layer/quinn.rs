@@ -174,20 +174,6 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
     ))
   }
 
-  async fn connect_with_timeout(
-    &self,
-    addr: SocketAddr,
-    timeout: Duration,
-  ) -> Result<Self::Connection, Self::Error> {
-    if timeout == Duration::ZERO {
-      self.connect(addr).await
-    } else {
-      R::timeout(timeout, async { self.connect(addr).await })
-        .await
-        .map_err(|_| Self::Error::connection_timeout())?
-    }
-  }
-
   async fn close(&self) -> Result<(), Self::Error> {
     Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close connector");
     Ok(())
@@ -313,23 +299,6 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
       self
         .recv
         .peek_exact(buf)
-        .await
-        .map_err(|e| QuinnReadStreamError::from(e).into())
-    };
-
-    match self.read_deadline {
-      Some(timeout) => R::timeout_at(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::read_timeout())?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn peek(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-    let fut = async {
-      self
-        .recv
-        .peek(buf)
         .await
         .map_err(|e| QuinnReadStreamError::from(e).into())
     };

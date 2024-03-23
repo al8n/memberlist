@@ -5,7 +5,10 @@ use std::{
   marker::PhantomData,
   net::SocketAddr,
   path::PathBuf,
-  sync::{atomic::AtomicUsize, Arc},
+  sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+  },
   time::{Duration, Instant},
 };
 
@@ -193,20 +196,6 @@ impl<R: RuntimeLite> QuicConnector for S2nConnector<R> {
     ))
   }
 
-  async fn connect_with_timeout(
-    &self,
-    addr: SocketAddr,
-    timeout: Duration,
-  ) -> Result<Self::Connection, Self::Error> {
-    if timeout == Duration::ZERO {
-      self.connect(addr).await
-    } else {
-      R::timeout(timeout, async { self.connect(addr).await })
-        .await
-        .map_err(|_| Self::Error::Timeout)?
-    }
-  }
-
   async fn close(&self) -> Result<(), Self::Error> {
     // TODO: figure out how to close a client
     Ok(())
@@ -264,11 +253,14 @@ impl<R: RuntimeLite> QuicConnection for S2nConnection<R> {
       .await
       .map_err(Into::into)
       .and_then(|conn| {
-        self
-          .current_open_streams
-          .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.current_open_streams.fetch_add(1, Ordering::AcqRel);
         conn
-          .map(|conn| (S2nStream::<R>::new(conn), self.remote_addr))
+          .map(|conn| {
+            (
+              S2nStream::<R>::new(conn, self.current_open_streams.clone()),
+              self.remote_addr,
+            )
+          })
           .ok_or(Self::Error::Closed)
       })
   }
@@ -281,10 +273,11 @@ impl<R: RuntimeLite> QuicConnection for S2nConnection<R> {
       .open_bidirectional_stream()
       .await
       .map(|conn| {
-        self
-          .current_open_streams
-          .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        (S2nStream::<R>::new(conn), self.remote_addr)
+        self.current_open_streams.fetch_add(1, Ordering::AcqRel);
+        (
+          S2nStream::<R>::new(conn, self.current_open_streams.clone()),
+          self.remote_addr,
+        )
       })
       .map_err(Into::into)
   }
@@ -311,10 +304,7 @@ impl<R: RuntimeLite> QuicConnection for S2nConnection<R> {
   }
 
   fn is_full(&self) -> bool {
-    self
-      .current_open_streams
-      .load(std::sync::atomic::Ordering::Acquire)
-      >= self.max_open_streams
+    self.current_open_streams.load(Ordering::Acquire) >= self.max_open_streams
   }
 
   fn local_addr(&self) -> SocketAddr {
@@ -328,19 +318,27 @@ pub struct S2nStream<R> {
   send_stream: SendStream,
   read_deadline: Option<Instant>,
   write_deadline: Option<Instant>,
+  ctr: Arc<AtomicUsize>,
   _marker: PhantomData<R>,
 }
 
 impl<R> S2nStream<R> {
-  fn new(stream: BidirectionalStream) -> Self {
+  fn new(stream: BidirectionalStream, ctr: Arc<AtomicUsize>) -> Self {
     let (recv, send) = stream.split();
     Self {
       recv_stream: recv.peekable(),
       send_stream: send,
       read_deadline: None,
       write_deadline: None,
+      ctr,
       _marker: PhantomData,
     }
+  }
+}
+
+impl<R> Drop for S2nStream<R> {
+  fn drop(&mut self) {
+    self.ctr.fetch_sub(1, Ordering::AcqRel);
   }
 }
 
@@ -414,17 +412,6 @@ impl<R: RuntimeLite> QuicStream for S2nStream<R> {
 
   async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
     let fut = async { self.recv_stream.read_exact(buf).await.map_err(Into::into) };
-
-    match self.read_deadline {
-      Some(timeout) => R::timeout_at(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn peek(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-    let fut = async { self.recv_stream.peek(buf).await.map_err(Into::into) };
 
     match self.read_deadline {
       Some(timeout) => R::timeout_at(timeout, fut)
