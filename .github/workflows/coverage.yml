@@ -35,7 +35,7 @@ jobs:
             features: "test,metrics"
             name: "memberlist-core"
           - crate: types 
-            features: "metrics"
+            features: "metrics,encryption"
             name: "memberlist-types"
           - crate: memberlist
             features: "test,tokio,tcp,compression,encryption,metrics"
