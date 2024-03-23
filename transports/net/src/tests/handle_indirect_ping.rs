@@ -103,7 +103,7 @@ where
   R: Runtime,
 {
   let name = format!("{kind}_indirect_ping");
-  let label = Label::try_from(&name)?; 
+  let label = Label::try_from(&name)?;
   let client = NetTransportTestClient::<R>::new(kind.next(0))
     .await?
     .with_label(label.cheap_clone())
