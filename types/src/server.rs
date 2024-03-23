@@ -120,6 +120,7 @@ pub struct NodeState<I, A> {
   #[viewit(
     getter(
       const,
+      style = "move",
       attrs(doc = "Returns the protocol version of the node is speaking")
     ),
     setter(
@@ -131,6 +132,7 @@ pub struct NodeState<I, A> {
   #[viewit(
     getter(
       const,
+      style = "move",
       attrs(doc = "Returns the delegate version of the node is speaking")
     ),
     setter(
@@ -327,10 +329,33 @@ mod tests {
   fn test_node_state_cheap_clone() {
     let node = NodeState::<_, SocketAddr>::new(
       SmolStr::from("a"),
-      "127.0.0.1".parse().unwrap(),
+      "127.0.0.1:8080".parse().unwrap(),
       State::Alive,
     );
     let node2 = node.cheap_clone();
     assert_eq!(node, node2);
+  }
+
+  #[test]
+  fn test_access() {
+    let mut node = NodeState::<_, SocketAddr>::new(
+      SmolStr::from("a"),
+      "127.0.0.1:8080".parse().unwrap(),
+      State::Alive,
+    );
+
+    node.set_address("127.0.0.1:8081".parse().unwrap());
+    assert_eq!(node.address(), &SocketAddr::from(([127, 0, 0, 1], 8081)));
+    node.set_id(SmolStr::from("b"));
+    assert_eq!(node.id(), &SmolStr::from("b"));
+    node.set_meta(Meta::empty());
+    assert_eq!(node.meta(), &Meta::empty());
+    node.set_state(State::Dead);
+    assert_eq!(node.state(), State::Dead);
+    node.set_protocol_version(ProtocolVersion::V0);
+    assert_eq!(node.protocol_version(), ProtocolVersion::V0);
+    node.set_delegate_version(DelegateVersion::V0);
+    assert_eq!(node.delegate_version(), DelegateVersion::V0);
+    println!("{}", node);
   }
 }

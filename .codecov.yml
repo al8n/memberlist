@@ -6,12 +6,16 @@ ignore:
   - core/src/base/tests.rs
   - core/src/transport/tests.rs
   - core/src/delegate/mock.rs
+  - core/src/error.rs
   - transports/net/src/tests.rs
   - transports/net/src/tests
+  - transports/net/src/error.rs
   - transports/net/tests
   - transports/quic/src/tests.rs
   - transports/quic/src/tests
   - transports/quic/tests
+  - transports/quic/src/stream_layer/quinn/error.rs
+  - transports/quic/src/stream_layer/s2n/error.rs
   - memberlist/tests
 
 coverage:

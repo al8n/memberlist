@@ -3,7 +3,7 @@
 use core::panic;
 use std::{future::Future, net::SocketAddr, sync::Arc};
 
-use agnostic::Runtime;
+use agnostic_lite::RuntimeLite;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{lock::Mutex, FutureExt, Stream};
@@ -224,7 +224,7 @@ impl<S: StreamLayer> TestPacketConnection for QuicTestPacketConnection<S> {
   getters(vis_all = "pub", style = "ref"),
   setters(vis_all = "pub", prefix = "with")
 )]
-pub struct QuicTransportTestClient<S: StreamLayer, R: Runtime> {
+pub struct QuicTransportTestClient<S: StreamLayer, R: RuntimeLite> {
   #[viewit(getter(skip), setter(skip))]
   connector: S::Connector,
   #[viewit(getter(skip), setter(skip))]
@@ -238,16 +238,24 @@ pub struct QuicTransportTestClient<S: StreamLayer, R: Runtime> {
   send_label: bool,
 
   #[cfg(feature = "compression")]
+  #[viewit(
+    getter(attrs(cfg(feature = "compression"))),
+    setter(attrs(cfg(feature = "compression")))
+  )]
   send_compressed: Option<Compressor>,
   receive_verify_label: bool,
   #[cfg(feature = "compression")]
+  #[viewit(
+    getter(attrs(cfg(feature = "compression"))),
+    setter(attrs(cfg(feature = "compression")))
+  )]
   receive_compressed: bool,
 
   #[viewit(getter(skip), setter(skip))]
   _runtime: std::marker::PhantomData<R>,
 }
 
-impl<S: StreamLayer, R: Runtime> QuicTransportTestClient<S, R> {
+impl<S: StreamLayer, R: RuntimeLite> QuicTransportTestClient<S, R> {
   /// Creates a new test client with the given address
   pub async fn new(
     local_addr: SocketAddr,
@@ -283,7 +291,7 @@ impl<S: StreamLayer, R: Runtime> QuicTransportTestClient<S, R> {
   }
 }
 
-impl<S: StreamLayer, R: Runtime> TestPacketClient for QuicTransportTestClient<S, R> {
+impl<S: StreamLayer, R: RuntimeLite> TestPacketClient for QuicTransportTestClient<S, R> {
   type Connection = QuicTestPacketConnection<S>;
 
   async fn accept(&mut self) -> Result<Self::Connection, AnyError> {
@@ -552,7 +560,7 @@ mod quinn_stream_layer {
   const ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
 
   /// Returns a new quinn stream layer
-  pub async fn quinn_stream_layer<R: Runtime>() -> Quinn<R> {
+  pub async fn quinn_stream_layer<R: RuntimeLite>() -> Quinn<R> {
     let server_name = "localhost".to_string();
     let (server_config, client_config) = configures().unwrap();
     Quinn::new(Options::new(
@@ -564,7 +572,9 @@ mod quinn_stream_layer {
   }
 
   /// Returns a new quinn stream layer
-  pub async fn quinn_stream_layer_with_connect_timeout<R: Runtime>(timeout: Duration) -> Quinn<R> {
+  pub async fn quinn_stream_layer_with_connect_timeout<R: RuntimeLite>(
+    timeout: Duration,
+  ) -> Quinn<R> {
     let server_name = "localhost".to_string();
     let (server_config, client_config) = configures().unwrap();
     Quinn::new(
@@ -584,11 +594,11 @@ pub use s2n_stream_layer::s2n_stream_layer;
 
 #[cfg(feature = "s2n")]
 mod s2n_stream_layer {
-  use agnostic::Runtime;
+  use agnostic_lite::RuntimeLite;
 
   use crate::stream_layer::s2n::*;
 
-  pub async fn s2n_stream_layer<R: Runtime>() -> S2n<R> {
+  pub async fn s2n_stream_layer<R: RuntimeLite>() -> S2n<R> {
     let p = std::env::current_dir().unwrap().join("tests");
     S2n::new(Options::new(
       "localhost".into(),

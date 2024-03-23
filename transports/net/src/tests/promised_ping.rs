@@ -50,7 +50,8 @@ where
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
-    .with_compressor(Some(Compressor::default()));
+    .with_compressor(Some(Compressor::default()))
+    .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
   let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
@@ -95,7 +96,8 @@ where
 
   let mut opts = NetTransportOptions::new(name.into())
     .with_compressor(Some(Compressor::default()))
-    .with_label(label);
+    .with_label(label)
+    .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
   let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
@@ -120,7 +122,8 @@ where
   let mut opts = NetTransportOptions::new(name.into())
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
-    .with_gossip_verify_outgoing(true);
+    .with_gossip_verify_outgoing(true)
+    .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
   let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await

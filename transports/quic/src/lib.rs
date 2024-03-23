@@ -16,7 +16,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::Runtime;
+use agnostic_lite::RuntimeLite;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
@@ -82,16 +82,18 @@ enum StreamType {
 
 #[cfg(feature = "tokio")]
 /// [`QuicTransport`] based on [`tokio`](https://crates.io/crates/tokio).
-pub type TokioQuicTransport<I, A, S, W> = QuicTransport<I, A, S, W, agnostic::tokio::TokioRuntime>;
+pub type TokioQuicTransport<I, A, S, W> =
+  QuicTransport<I, A, S, W, agnostic_lite::tokio::TokioRuntime>;
 
 #[cfg(feature = "async-std")]
 /// [`QuicTransport`] based on [`async-std`](https://crates.io/crates/async-std).
 pub type AsyncStdQuicTransport<I, A, S, W> =
-  QuicTransport<I, A, S, W, agnostic::async_std::AsyncStdRuntime>;
+  QuicTransport<I, A, S, W, agnostic_lite::async_std::AsyncStdRuntime>;
 
 #[cfg(feature = "smol")]
 /// [`QuicTransport`] based on [`smol`](https://crates.io/crates/smol).
-pub type SmolQuicTransport<I, A, S, W> = QuicTransport<I, A, S, W, agnostic::smol::SmolRuntime>;
+pub type SmolQuicTransport<I, A, S, W> =
+  QuicTransport<I, A, S, W, agnostic_lite::smol::SmolRuntime>;
 
 /// A [`Transport`] implementation based on QUIC
 pub struct QuicTransport<I, A, S, W, R>
@@ -100,7 +102,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   opts: QuicTransportOptions<I, A>,
   advertise_addr: A::ResolvedAddress,
@@ -129,7 +131,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   /// Creates a new quic transport.
   pub async fn new(
@@ -253,7 +255,7 @@ where
     };
 
     let connection_pool = Arc::new(SkipMap::new());
-    let interval = <A::Runtime as Runtime>::interval(opts.connection_pool_cleanup_period);
+    let interval = <A::Runtime as RuntimeLite>::interval(opts.connection_pool_cleanup_period);
     let pool = connection_pool.clone();
     let (cleaner_finish_tx, cleaner_finish_rx) = channel();
     let shutdown_rx = shutdown_rx.clone();
@@ -296,11 +298,9 @@ where
 
   async fn connection_pool_cleaner(
     pool: Arc<SkipMap<SocketAddr, S::Connection>>,
-    interval: impl futures::Stream,
+    mut interval: impl agnostic_lite::time::AsyncInterval,
     shutdown_rx: async_channel::Receiver<()>,
   ) {
-    futures::pin_mut!(interval);
-
     loop {
       futures::select! {
         _ = interval.next().fuse() => {
@@ -324,7 +324,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   fn fix_packet_overhead(&self) -> usize {
     #[cfg(feature = "compression")]
@@ -369,7 +369,7 @@ where
   ) -> Result<S::Stream, QuicTransportError<A, S, W>> {
     if let Some(ent) = self.connection_pool.get(&addr) {
       let connection = ent.value();
-      if !connection.is_closed().await {
+      if !connection.is_full() && !connection.is_closed().await {
         if let Some(timeout) = timeout {
           return connection
             .open_bi_with_deadline(timeout)
@@ -408,7 +408,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   type Error = QuicTransportError<A, S, W>;
 
@@ -436,32 +436,32 @@ where
       })
   }
 
-  #[inline(always)]
+  #[inline]
   fn local_id(&self) -> &Self::Id {
     &self.opts.id
   }
 
-  #[inline(always)]
+  #[inline]
   fn local_address(&self) -> &<Self::Resolver as AddressResolver>::Address {
     &self.local_addr
   }
 
-  #[inline(always)]
+  #[inline]
   fn advertise_address(&self) -> &<Self::Resolver as AddressResolver>::ResolvedAddress {
     &self.advertise_addr
   }
 
-  #[inline(always)]
+  #[inline]
   fn max_payload_size(&self) -> usize {
     self.max_payload_size
   }
 
-  #[inline(always)]
+  #[inline]
   fn packet_overhead(&self) -> usize {
     PACKET_OVERHEAD
   }
 
-  #[inline(always)]
+  #[inline]
   fn packets_header_overhead(&self) -> usize {
     // 1 for StreamType
     1 + self.fix_packet_overhead() + PACKET_HEADER_OVERHEAD
@@ -514,7 +514,7 @@ where
     let label = &self.opts.label;
 
     if !self.opts.skip_inbound_label_check && stream_label.ne(label) {
-      tracing::error!(target = "memberlist.transport.quic.read_message", local_label=%label, remote_label=%stream_label, "discarding stream with unacceptable label");
+      tracing::error!(local_label=%label, remote_label=%stream_label, "memberlist_quic.promised: discarding stream with unacceptable label");
       return Err(LabelError::mismatch(label.cheap_clone(), stream_label).into());
     }
 
@@ -544,10 +544,15 @@ where
     #[cfg(feature = "compression")]
     let buf = self.send_message_with_compression(msg).await?;
 
-    conn
+    let written = conn
       .write_all(buf)
       .await
-      .map_err(|e| QuicTransportError::Stream(e.into()))
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    conn
+      .flush()
+      .await
+      .map_err(|e| QuicTransportError::Stream(e.into()))?;
+    Ok(written)
   }
 
   async fn send_packet(
@@ -644,13 +649,22 @@ where
     self.shutdown.store(true, Ordering::SeqCst);
     self.shutdown_tx.close();
 
+    for conn in self.connection_pool.iter() {
+      let conn = conn.value();
+      let addr = conn.local_addr();
+      if let Err(e) = conn.close().await {
+        tracing::error!(err = %e, local_addr=%addr, "memberlist_quic: failed to close connection");
+      }
+    }
+
     for connector in self.v4_connectors.iter().chain(self.v6_connectors.iter()) {
+      let addr = connector.local_addr();
       if let Err(e) = connector
         .close()
         .await
         .map_err(|e| Self::Error::Stream(e.into()))
       {
-        tracing::error!(target = "memberlist.transport.quic", err = %e, "failed to close connector");
+        tracing::error!(err = %e, local_addr=%addr, "memberlist_quic: failed to close connector");
       }
     }
 
@@ -667,7 +681,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   fn drop(&mut self) {
     self.shutdown_tx.close();

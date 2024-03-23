@@ -3,7 +3,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 #[cfg(any(test, feature = "test"))]
 use std::sync::atomic::Ordering;
 
-use agnostic::Runtime;
+use agnostic::RuntimeLite;
 use futures::FutureExt;
 use memberlist_core::transport::{StreamProducer, Transport};
 use nodecraft::resolver::AddressResolver;
@@ -90,7 +90,7 @@ where
               }
 
               tracing::error!(target =  "memberlist.transport.net", local_addr=%local_addr, err = %e, "error accepting TCP connection");
-              <T::Runtime as Runtime>::sleep(loop_delay).await;
+              <T::Runtime as RuntimeLite>::sleep(loop_delay).await;
               continue;
             }
           }
@@ -162,7 +162,7 @@ where
   let local_addr = ln.local_addr();
   let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
   let (stream_tx, stream_rx) = memberlist_core::transport::promised_stream::<T>();
-  let task = <T::Runtime as Runtime>::spawn(
+  let task = <T::Runtime as RuntimeLite>::spawn(
     PromisedProcessor::<A, T, TestStreamLayer<S>> {
       stream_tx,
       ln: Arc::new(TestListener { ln }),
@@ -173,19 +173,19 @@ where
   );
 
   // sleep (+yield) for testTime seconds before asking the accept loop to shut down
-  <T::Runtime as Runtime>::sleep(TEST_TIME).await;
+  <T::Runtime as RuntimeLite>::sleep(TEST_TIME).await;
   shutdown_tx.close();
   // Verify that the wg was completed on exit (but without blocking this test)
   // maxDelay == 1s, so we will give the routine 1.25s to loop around and shut down.
   let (ctx, crx) = async_channel::bounded::<()>(1);
-  <T::Runtime as Runtime>::spawn_detach(async move {
+  <T::Runtime as RuntimeLite>::spawn_detach(async move {
     let _ = task.await;
     ctx.close();
   });
 
   futures::select! {
     _ = crx.recv().fuse() => {}
-    _ = <T::Runtime as Runtime>::sleep(Duration::from_millis(1250)).fuse() => {
+    _ = <T::Runtime as RuntimeLite>::sleep(Duration::from_millis(1250)).fuse() => {
       panic!("timed out waiting for transport waitgroup to be done after flagging shutdown");
     }
   }

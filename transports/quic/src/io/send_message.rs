@@ -9,7 +9,7 @@ where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
-  R: Runtime,
+  R: RuntimeLite,
 {
   #[cfg(feature = "compression")]
   fn encode_and_compress(
@@ -78,8 +78,7 @@ where
           .is_err()
         {
           tracing::error!(
-            target = "memberlist.quic",
-            "failed to send compressed message back to the main thread"
+            "memberlist_quic.promised: failed to send compressed message back to the main thread"
           );
         }
       });

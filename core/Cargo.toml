@@ -11,6 +11,10 @@ keywords.workspace = true
 categories.workspace = true
 description = "A highly customable, adaptable, async runtime agnostic Gossip protocol which helps manage cluster membership and member failure detection."
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = ["metrics"]
 metrics = ["dep:metrics", "memberlist-types/metrics"]
@@ -42,7 +46,8 @@ hostname = "0.3"
 
 [dependencies]
 auto_impl.workspace = true
-agnostic = { workspace = true, features = ["net", "dns"] }
+agnostic-lite.workspace = true
+# agnostic = { workspace = true, features = ["net", "dns"] }
 async-channel.workspace = true
 async-lock = "3"
 bytes.workspace = true

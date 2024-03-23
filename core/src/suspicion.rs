@@ -8,7 +8,7 @@ use std::{
 };
 
 use super::*;
-use agnostic::Runtime;
+use agnostic_lite::RuntimeLite;
 use futures::{future::BoxFuture, FutureExt};
 
 #[inline]
@@ -42,7 +42,7 @@ pub(crate) struct Suspicion<I, R> {
 impl<I, R> Suspicion<I, R>
 where
   I: Eq + core::hash::Hash,
-  R: Runtime,
+  R: RuntimeLite,
 {
   /// Returns a after_func started with the max time, and that will drive
   /// to the min time after seeing k or more confirmations. The from node will be
@@ -77,7 +77,7 @@ where
 impl<I, R> Suspicion<I, R>
 where
   I: CheapClone + Eq + core::hash::Hash,
-  R: Runtime,
+  R: RuntimeLite,
 {
   /// Confirm registers that a possibly new peer has also determined the given
   /// node is suspect. This returns true if this was new information, and false
@@ -175,7 +175,7 @@ impl<R> AfterFunc<R> {
 
 impl<R> AfterFunc<R>
 where
-  R: Runtime,
+  R: RuntimeLite,
 {
   pub fn start(&self) {
     let rx = self.stop_rx.clone();

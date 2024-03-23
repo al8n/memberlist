@@ -84,7 +84,8 @@ where
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
-    .with_label(label);
+    .with_label(label)
+    .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
   let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
     .await
@@ -104,7 +105,6 @@ where
 {
   let name = format!("{kind}_indirect_ping");
   let label = Label::try_from(&name)?;
-  let pk = SecretKey::from([1; 32]);
   let client = NetTransportTestClient::<R>::new(kind.next(0))
     .await?
     .with_label(label.cheap_clone())

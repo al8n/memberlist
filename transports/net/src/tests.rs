@@ -34,30 +34,24 @@ pub use super::promised_processor::listener_backoff;
 pub mod handle_ping;
 
 /// Unit test for handling compound ping message
-#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod handle_compound_ping;
 
 /// Unit test for handling indirect ping message
-#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod handle_indirect_ping;
 
 /// Unit test for handling ping from wrong node
-#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod handle_ping_wrong_node;
 
 /// Unit test for handling send packet with piggyback
-#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod packet_piggyback;
 
 /// Unit test for handling transport with label or not.
 pub mod label;
 
 /// Unit test for handling promised ping
-#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod promised_ping;
 
 /// Unit test for handling promised push pull
-#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod promised_push_pull;
 
 /// Unit test for handling gossip with mismatched keys
@@ -65,11 +59,9 @@ pub mod promised_push_pull;
 pub mod gossip_mismatch_keys;
 
 /// Unit test for sending
-#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod send;
 
 /// Unit test for joining
-#[cfg(all(feature = "compression", feature = "encryption"))]
 pub mod join;
 
 /// Unit test for joining dead node

@@ -38,9 +38,6 @@ pub trait QuicStream: TimeoutableStream + futures::AsyncRead + Send + Sync + 'st
   /// Receives exact data from the remote peer.
   fn read_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-  /// Peek data from the remote peer.
-  fn peek(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, Self::Error>> + Send;
-
   /// Peek exact data from the remote peer.
   fn peek_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
@@ -122,13 +119,6 @@ pub trait QuicConnector: Send + Sync + 'static {
   fn connect(
     &self,
     addr: SocketAddr,
-  ) -> impl Future<Output = Result<Self::Connection, Self::Error>> + Send;
-
-  /// Connects to a remote peer with timeout.
-  fn connect_with_timeout(
-    &self,
-    addr: SocketAddr,
-    timeout: std::time::Duration,
   ) -> impl Future<Output = Result<Self::Connection, Self::Error>> + Send;
 
   /// Closes the connector.

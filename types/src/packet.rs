@@ -41,7 +41,7 @@ pub struct Packet<I, A> {
   #[viewit(
     getter(
       const,
-      style = "ref",
+      style = "move",
       attrs(doc = "Returns the instant when the packet was received")
     ),
     setter(attrs(doc = "Sets the instant when the packet was received (Builder pattern)"))
@@ -85,5 +85,41 @@ impl<I, A> Packet<I, A> {
   pub fn set_messages(&mut self, messages: OneOrMore<Message<I, A>>) -> &mut Self {
     self.messages = messages;
     self
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::net::SocketAddr;
+
+  use bytes::Bytes;
+  use smol_str::SmolStr;
+
+  use super::*;
+
+  #[test]
+  fn test_access() {
+    let messages = OneOrMore::from(Message::<SmolStr, SocketAddr>::user_data(Bytes::new()));
+    let timestamp = Instant::now();
+    let mut packet = Packet::new(messages, "127.0.0.1:8080".parse().unwrap(), timestamp);
+    packet.set_from("127.0.0.1:8081".parse().unwrap());
+
+    let start = Instant::now();
+    packet.set_timestamp(start);
+    let messages = OneOrMore::from(Message::<SmolStr, SocketAddr>::user_data(
+      Bytes::from_static(b"a"),
+    ));
+    packet.set_messages(messages);
+    assert_eq!(
+      packet.messages(),
+      &OneOrMore::from(Message::<SmolStr, SocketAddr>::user_data(
+        Bytes::from_static(b"a")
+      ))
+    );
+    assert_eq!(
+      *packet.from(),
+      "127.0.0.1:8081".parse::<SocketAddr>().unwrap()
+    );
+    assert_eq!(packet.timestamp(), start);
   }
 }

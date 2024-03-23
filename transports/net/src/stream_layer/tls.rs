@@ -255,22 +255,6 @@ pub struct TlsStream<R: Runtime> {
   peer_addr: SocketAddr,
 }
 
-impl<R: Runtime> TlsStream<R> {
-  /// Queues a close_notify warning alert to be sent in the next `write_tls` call. This informs the peer that the connection is being closed.
-  pub fn send_close_notify(&mut self) {
-    match &mut self.stream {
-      TlsStreamKind::Client { stream, .. } => {
-        let (_, state) = stream.get_mut();
-        state.send_close_notify();
-      }
-      TlsStreamKind::Server { stream, .. } => {
-        let (_, state) = stream.get_mut();
-        state.send_close_notify();
-      }
-    }
-  }
-}
-
 impl<R: Runtime> AsyncRead for TlsStream<R> {
   fn poll_read(
     self: Pin<&mut Self>,

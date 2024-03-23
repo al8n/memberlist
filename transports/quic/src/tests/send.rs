@@ -10,7 +10,7 @@ pub async fn send<S1, S2, R>(s1: S1, s2: S2, kind: AddressKind) -> Result<(), An
 where
   S1: StreamLayer,
   S2: StreamLayer,
-  R: Runtime,
+  R: RuntimeLite,
 {
   use nodecraft::CheapClone;
 

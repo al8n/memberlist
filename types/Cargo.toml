@@ -11,6 +11,10 @@ keywords.workspace = true
 categories.workspace = true
 description = "Types used in the memberlist crate."
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = []
 metrics = ["dep:metrics"]

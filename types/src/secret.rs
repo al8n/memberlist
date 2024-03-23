@@ -101,30 +101,6 @@ impl core::ops::DerefMut for SecretKey {
   }
 }
 
-impl SecretKey {
-  /// Returns the size of the key in bytes
-  #[inline]
-  pub const fn len(&self) -> usize {
-    match self {
-      Self::Aes128(_) => 16,
-      Self::Aes192(_) => 24,
-      Self::Aes256(_) => 32,
-    }
-  }
-
-  /// Returns true if the key is empty
-  #[inline(always)]
-  pub const fn is_empty(&self) -> bool {
-    false
-  }
-
-  /// Converts the key into a byte vector
-  #[inline]
-  pub fn to_vec(&self) -> Vec<u8> {
-    self.as_ref().to_vec()
-  }
-}
-
 impl From<[u8; 16]> for SecretKey {
   fn from(k: [u8; 16]) -> Self {
     Self::Aes128(k)
@@ -190,21 +166,35 @@ smallvec_wrapper::smallvec_wrapper!(
 
 #[cfg(test)]
 mod tests {
+  use std::ops::{Deref, DerefMut};
+
   use super::*;
 
   #[test]
   fn test_secret_key() {
-    let key = SecretKey::Aes128([0; 16]);
+    let mut key = SecretKey::from([0; 16]);
+    assert_eq!(key.deref(), &[0; 16]);
+    assert_eq!(key.deref_mut(), &mut [0; 16]);
+    assert_eq!(key.as_ref(), &[0; 16]);
+    assert_eq!(key.as_mut(), &mut [0; 16]);
     assert_eq!(key.len(), 16);
     assert!(!key.is_empty());
     assert_eq!(key.to_vec(), vec![0; 16]);
 
-    let key = SecretKey::Aes192([0; 24]);
+    let mut key = SecretKey::from([0; 24]);
+    assert_eq!(key.deref(), &[0; 24]);
+    assert_eq!(key.deref_mut(), &mut [0; 24]);
+    assert_eq!(key.as_ref(), &[0; 24]);
+    assert_eq!(key.as_mut(), &mut [0; 24]);
     assert_eq!(key.len(), 24);
     assert!(!key.is_empty());
     assert_eq!(key.to_vec(), vec![0; 24]);
 
-    let key = SecretKey::Aes256([0; 32]);
+    let mut key = SecretKey::from([0; 32]);
+    assert_eq!(key.deref(), &[0; 32]);
+    assert_eq!(key.deref_mut(), &mut [0; 32]);
+    assert_eq!(key.as_ref(), &[0; 32]);
+    assert_eq!(key.as_mut(), &mut [0; 32]);
     assert_eq!(key.len(), 32);
     assert!(!key.is_empty());
     assert_eq!(key.to_vec(), vec![0; 32]);

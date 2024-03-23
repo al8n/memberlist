@@ -111,7 +111,7 @@ pub struct Options {
 
 impl Options {
   /// Creates a new set of options with default values.
-  #[inline(always)]
+  #[inline]
   pub const fn new(server_name: SmolStr, cert: PathBuf, key: PathBuf) -> Self {
     Self {
       server_name,
@@ -129,7 +129,7 @@ impl Options {
 impl TryFrom<&Options> for Limits {
   type Error = ValidationError;
 
-  #[inline(always)]
+  #[inline]
   fn try_from(options: &Options) -> Result<Self, Self::Error> {
     Limits::new()
       .with_data_window(options.data_window)?

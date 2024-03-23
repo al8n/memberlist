@@ -1,5 +1,6 @@
 use std::{future::Future, time::Instant};
 
+use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
 use futures::AsyncRead;
 pub use nodecraft::{resolver::AddressResolver, CheapClone, Transformable, *};
@@ -86,31 +87,31 @@ impl<T: Transport> core::hash::Hash for MaybeResolvedAddress<T> {
 
 impl<T: Transport> MaybeResolvedAddress<T> {
   /// Creates a resolved address.
-  #[inline(always)]
+  #[inline]
   pub const fn resolved(addr: <T::Resolver as AddressResolver>::ResolvedAddress) -> Self {
     Self::Resolved(addr)
   }
 
   /// Creates an unresolved address.
-  #[inline(always)]
+  #[inline]
   pub const fn unresolved(addr: <T::Resolver as AddressResolver>::Address) -> Self {
     Self::Unresolved(addr)
   }
 
   /// Returns `true` if the address is resolved.
-  #[inline(always)]
+  #[inline]
   pub fn is_resolved(&self) -> bool {
     matches!(self, Self::Resolved(_))
   }
 
   /// Returns `true` if the address is unresolved.
-  #[inline(always)]
+  #[inline]
   pub fn is_unresolved(&self) -> bool {
     matches!(self, Self::Unresolved(_))
   }
 
   /// Returns the resolved address if it's resolved, otherwise returns `None`.
-  #[inline(always)]
+  #[inline]
   pub fn as_resolved(&self) -> Option<&<T::Resolver as AddressResolver>::ResolvedAddress> {
     match self {
       Self::Resolved(addr) => Some(addr),
@@ -119,7 +120,7 @@ impl<T: Transport> MaybeResolvedAddress<T> {
   }
 
   /// Returns the unresolved address if it's unresolved, otherwise returns `None`.
-  #[inline(always)]
+  #[inline]
   pub fn as_unresolved(&self) -> Option<&<T::Resolver as AddressResolver>::Address> {
     match self {
       Self::Resolved(_) => None,
@@ -128,7 +129,7 @@ impl<T: Transport> MaybeResolvedAddress<T> {
   }
 
   /// Returns the resolved address if it's resolved, otherwise returns `None`.
-  #[inline(always)]
+  #[inline]
   pub fn as_resolved_mut(
     &mut self,
   ) -> Option<&mut <T::Resolver as AddressResolver>::ResolvedAddress> {
@@ -139,7 +140,7 @@ impl<T: Transport> MaybeResolvedAddress<T> {
   }
 
   /// Returns the unresolved address if it's unresolved, otherwise returns `None`.
-  #[inline(always)]
+  #[inline]
   pub fn as_unresolved_mut(&mut self) -> Option<&mut <T::Resolver as AddressResolver>::Address> {
     match self {
       Self::Resolved(_) => None,
@@ -148,7 +149,7 @@ impl<T: Transport> MaybeResolvedAddress<T> {
   }
 
   /// Returns the resolved address if it's resolved, otherwise returns `None`.
-  #[inline(always)]
+  #[inline]
   pub fn into_resolved(self) -> Option<<T::Resolver as AddressResolver>::ResolvedAddress> {
     match self {
       Self::Resolved(addr) => Some(addr),
@@ -157,7 +158,7 @@ impl<T: Transport> MaybeResolvedAddress<T> {
   }
 
   /// Returns the unresolved address if it's unresolved, otherwise returns `None`.
-  #[inline(always)]
+  #[inline]
   pub fn into_unresolved(self) -> Option<<T::Resolver as AddressResolver>::Address> {
     match self {
       Self::Resolved(_) => None,
@@ -282,7 +283,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// The wire used to encode and decode messages
   type Wire: Wire<Id = Self::Id, Address = <Self::Resolver as AddressResolver>::ResolvedAddress>;
   /// The async runtime
-  type Runtime: agnostic::Runtime;
+  type Runtime: RuntimeLite;
 
   /// Resolves the given address to a resolved address
   fn resolve(

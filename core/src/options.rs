@@ -354,3 +354,15 @@ impl Options {
       .with_gossip_to_the_dead_time(Duration::from_secs(15))
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_constructor() {
+    let _ = Options::wan();
+    let _ = Options::lan();
+    let _ = Options::local();
+  }
+}

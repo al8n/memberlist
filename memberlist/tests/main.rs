@@ -19,13 +19,13 @@ fn tokio_run(fut: impl Future<Output = ()>) {
 
 #[cfg(feature = "smol")]
 fn smol_run(fut: impl Future<Output = ()>) {
-  use agnostic::Runtime;
+  use agnostic::RuntimeLite;
   run_unit_test(SmolRuntime::block_on, fut);
 }
 
 #[cfg(feature = "async-std")]
 fn async_std_run(fut: impl Future<Output = ()>) {
-  use agnostic::Runtime;
+  use agnostic::RuntimeLite;
   run_unit_test(AsyncStdRuntime::block_on, fut);
 }
 

@@ -21,7 +21,7 @@ use super::{Listener, PromisedStream, StreamLayer};
 pub struct Tcp<R>(PhantomData<R>);
 
 impl<R> Clone for Tcp<R> {
-  #[inline(always)]
+  #[inline]
   fn clone(&self) -> Self {
     *self
   }
@@ -30,7 +30,7 @@ impl<R> Clone for Tcp<R> {
 impl<R> Copy for Tcp<R> {}
 
 impl<R> Default for Tcp<R> {
-  #[inline(always)]
+  #[inline]
   fn default() -> Self {
     Self(PhantomData)
   }
@@ -38,7 +38,7 @@ impl<R> Default for Tcp<R> {
 
 impl<R> Tcp<R> {
   /// Creates a new instance.
-  #[inline(always)]
+  #[inline]
   pub const fn new() -> Self {
     Self(PhantomData)
   }

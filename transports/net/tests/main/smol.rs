@@ -1,4 +1,4 @@
-use agnostic::{smol::SmolRuntime, Runtime};
+use agnostic::{smol::SmolRuntime, RuntimeLite};
 use memberlist_core::tests::run as run_unit_test;
 #[cfg(any(
   not(any(feature = "tls", feature = "native-tls")),

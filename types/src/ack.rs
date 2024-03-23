@@ -129,7 +129,7 @@ impl Transformable for Ack {
     let sequence_number = NetworkEndian::read_u32(&src[offset..]);
     offset += core::mem::size_of::<u32>();
 
-    if total_len as usize == core::mem::size_of::<u32>() {
+    if total_len as usize == 2 * core::mem::size_of::<u32>() {
       return Ok((
         offset,
         Self {
@@ -378,9 +378,11 @@ const _: () = {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use futures::io::Cursor as FCursor;
+  use std::io::Cursor;
 
-  #[test]
-  fn test_ack_response_encode_decode() {
+  #[tokio::test]
+  async fn test_ack_response_encode_decode() {
     for i in 0..100 {
       // Generate and test 100 random instances
       let ack_response = Ack::random(i);
@@ -391,11 +393,35 @@ mod tests {
       assert_eq!(read, buf.len());
       assert_eq!(ack_response.sequence_number, decoded.sequence_number);
       assert_eq!(ack_response.payload, decoded.payload);
+      let mut cur = Cursor::new(&buf);
+      let (_, decoded) = Ack::decode_from_reader(&mut cur).unwrap();
+      assert_eq!(ack_response.sequence_number, decoded.sequence_number);
+      assert_eq!(ack_response.payload, decoded.payload);
+      let mut cur = FCursor::new(&buf);
+      let (_, decoded) = Ack::decode_from_async_reader(&mut cur).await.unwrap();
+      assert_eq!(ack_response.sequence_number, decoded.sequence_number);
+      assert_eq!(ack_response.payload, decoded.payload);
+
+      // Test encode/decode from reader
+      let mut buf = Vec::new();
+      ack_response.encode_to_writer(&mut buf).unwrap();
+      let mut buf = Cursor::new(buf);
+      let (_, decoded) = Ack::decode_from_reader(&mut buf).unwrap();
+      assert_eq!(ack_response.sequence_number, decoded.sequence_number);
+      assert_eq!(ack_response.payload, decoded.payload);
+
+      // Test encode/decode from async reader
+      let mut buf = Vec::new();
+      ack_response.encode_to_async_writer(&mut buf).await.unwrap();
+      let mut buf = FCursor::new(buf);
+      let (_, decoded) = Ack::decode_from_async_reader(&mut buf).await.unwrap();
+      assert_eq!(ack_response.sequence_number, decoded.sequence_number);
+      assert_eq!(ack_response.payload, decoded.payload);
     }
   }
 
-  #[test]
-  fn test_nack_response_encode_decode() {
+  #[tokio::test]
+  async fn test_nack_response_encode_decode() {
     for _ in 0..100 {
       // Generate and test 100 random instances
       let nack_response = Nack::random();
@@ -405,6 +431,42 @@ mod tests {
       let (read, decoded) = Nack::decode(&buf).unwrap();
       assert_eq!(read, buf.len());
       assert_eq!(nack_response.sequence_number, decoded.sequence_number);
+      let mut cur = Cursor::new(&buf);
+      let (_, decoded) = Nack::decode_from_reader(&mut cur).unwrap();
+      assert_eq!(nack_response.sequence_number, decoded.sequence_number);
+      let mut cur = FCursor::new(&buf);
+      let (_, decoded) = Nack::decode_from_async_reader(&mut cur).await.unwrap();
+      assert_eq!(nack_response.sequence_number, decoded.sequence_number);
+
+      // Test encode/decode from reader
+      let mut buf = Vec::new();
+      nack_response.encode_to_writer(&mut buf).unwrap();
+      let mut buf = Cursor::new(buf);
+      let (_, decoded) = Nack::decode_from_reader(&mut buf).unwrap();
+      assert_eq!(nack_response.sequence_number, decoded.sequence_number);
+
+      // Test encode/decode from async reader
+      let mut buf = Vec::new();
+      nack_response
+        .encode_to_async_writer(&mut buf)
+        .await
+        .unwrap();
+      let mut buf = FCursor::new(buf);
+      let (_, decoded) = Nack::decode_from_async_reader(&mut buf).await.unwrap();
+      assert_eq!(nack_response.sequence_number, decoded.sequence_number);
     }
+  }
+
+  #[test]
+  fn test_access() {
+    let mut ack = Ack::random(100);
+    ack.set_payload(Bytes::from_static(b"hello world"));
+    ack.set_sequence_number(100);
+    assert_eq!(ack.sequence_number(), 100);
+    assert_eq!(ack.payload(), &Bytes::from_static(b"hello world"));
+
+    let mut nack = Nack::random();
+    nack.set_sequence_number(100);
+    assert_eq!(nack.sequence_number(), 100);
   }
 }

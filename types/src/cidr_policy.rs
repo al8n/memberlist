@@ -19,7 +19,7 @@ impl Default for CIDRsPolicy {
 
 impl CIDRsPolicy {
   /// Allow connection from any [`IpNet`].
-  #[inline(always)]
+  #[inline]
   pub const fn allow_all() -> Self {
     Self {
       allowed_cidrs: None,
@@ -35,7 +35,7 @@ impl CIDRsPolicy {
   }
 
   /// Create a default [`CIDRsPolicy`].
-  #[inline(always)]
+  #[inline]
   pub const fn new() -> Self {
     Self::allow_all()
   }
