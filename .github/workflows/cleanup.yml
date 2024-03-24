@@ -19,18 +19,17 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            const threshold = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000)  // 1 day ago
-            const runs = await github.actions.listWorkflowRunsForRepo({
+            const threshold = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000);  // 30 days ago
+            const response = await github.rest.actions.listWorkflowRunsForRepo({
               owner: context.repo.owner,
-              repo: context.repo.repo,
-              status: 'completed'
-            })
-            for (const run of runs.data.workflow_runs) {
-              if (new Date(run.created_at) < threshold) {
-                await github.actions.deleteWorkflowRun({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  run_id: run.id
-                })
-              }
+              repo: context.repo.repo
+            });
+            const runs = response.data.workflow_runs.filter(run => new Date(run.created_at) < threshold);
+            
+            for (const run of runs) {
+              await github.rest.actions.deleteWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: run.id
+              });
             }
