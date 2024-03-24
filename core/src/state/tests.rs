@@ -937,7 +937,7 @@ where
     ack_tx,
     Some(nack_tx),
     Instant::now(),
-    Duration::from_millis(50),
+    Duration::from_millis(100),
   );
 
   // Should send message
