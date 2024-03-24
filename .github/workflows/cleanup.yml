@@ -24,7 +24,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo
             });
-            const runs = response.data.workflow_runs.filter(run => new Date(run.created_at) < threshold);
+            const runs = response.data.workflow_runs;
             
             for (const run of runs) {
               await github.rest.actions.deleteWorkflowRun({
