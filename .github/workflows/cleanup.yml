@@ -1,8 +1,15 @@
 name: Cleanup Workflow Runs
 
 on:
-  schedule:
-    - cron: '0 0 * * *'  # Runs daily at midnight
+  # schedule:
+  #   - cron: '0 0 * * *'  # Runs daily at midnight
+  push:
+    branches:
+      - suspicion-refactor
+  
+  pull_request:
+    branches:
+      - suspicion-refactor
 
 jobs:
   cleanup:
