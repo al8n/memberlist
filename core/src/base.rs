@@ -72,31 +72,44 @@ impl<I, A> MessageQueue<I, A> {
   }
 }
 
-#[viewit::viewit]
-pub(crate) struct Member<I, A, R: RuntimeLite> {
-  pub(crate) state: LocalNodeState<I, A>,
-  pub(crate) suspicion: Option<Suspicion<I, R>>,
+// #[viewit::viewit]
+pub(crate) struct Member<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
+  pub(crate) state: LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  pub(crate) suspicion: Option<Suspicion<T, D>>,
 }
 
-impl<I, A, R: RuntimeLite> core::ops::Deref for Member<I, A, R> {
-  type Target = LocalNodeState<I, A>;
+impl<T, D> core::ops::Deref for Member<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
+  type Target = LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>;
 
   fn deref(&self) -> &Self::Target {
     &self.state
   }
 }
 
-pub(crate) struct Members<I, A, R: RuntimeLite> {
-  pub(crate) local: Node<I, A>,
-  pub(crate) nodes: TinyVec<Member<I, A, R>>,
-  pub(crate) node_map: HashMap<I, usize>,
+pub(crate) struct Members<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
+  pub(crate) local: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  pub(crate) nodes: TinyVec<Member<T, D>>,
+  pub(crate) node_map: HashMap<T::Id, usize>,
 }
 
-impl<I, A, Run: RuntimeLite> rand::seq::SliceRandom for Members<I, A, Run>
+impl<T, D> rand::seq::SliceRandom for Members<T, D>
 where
-  I: Eq + core::hash::Hash,
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
 {
-  type Item = Member<I, A, Run>;
+  type Item = Member<T, D>;
 
   fn choose<R>(&self, _rng: &mut R) -> Option<&Self::Item>
   where
@@ -212,8 +225,12 @@ where
   }
 }
 
-impl<I, A, R: RuntimeLite> Members<I, A, R> {
-  fn new(local: Node<I, A>) -> Self {
+impl<T, D> Members<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
+  fn new(local: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>) -> Self {
     Self {
       nodes: TinyVec::new(),
       node_map: HashMap::new(),
@@ -222,7 +239,11 @@ impl<I, A, R: RuntimeLite> Members<I, A, R> {
   }
 }
 
-impl<I: PartialEq, A, R: RuntimeLite> Members<I, A, R> {
+impl<T, D> Members<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
   pub(crate) fn any_alive(&self) -> bool {
     for m in self.nodes.iter() {
       if !m.dead_or_left() && m.id().ne(self.local.id()) {
@@ -234,31 +255,40 @@ impl<I: PartialEq, A, R: RuntimeLite> Members<I, A, R> {
   }
 }
 
-#[viewit::viewit(getters(skip), setters(skip))]
-pub(crate) struct MemberlistCore<T: Transport> {
-  id: T::Id,
-  hot: HotData,
-  awareness: Awareness,
-  broadcast: TransmitLimitedQueue<
+// #[viewit::viewit(getters(skip), setters(skip))]
+pub(crate) struct MemberlistCore<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
+  pub(crate) id: T::Id,
+  pub(crate) hot: HotData,
+  pub(crate) awareness: Awareness,
+  pub(crate) broadcast: TransmitLimitedQueue<
     MemberlistBroadcast<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Wire>,
   >,
-  leave_broadcast_tx: Sender<()>,
-  leave_lock: Mutex<()>,
-  leave_broadcast_rx: Receiver<()>,
-  shutdown_lock: Mutex<Vec<<<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()>>>,
-  handoff_tx: Sender<()>,
-  handoff_rx: Receiver<()>,
-  queue: Mutex<MessageQueue<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-  nodes: Arc<RwLock<Members<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Runtime>>>,
-  ack_manager: AckManager<T::Runtime>,
-  transport: Arc<T>,
+  pub(crate) leave_broadcast_tx: Sender<()>,
+  pub(crate) leave_lock: Mutex<()>,
+  pub(crate) leave_broadcast_rx: Receiver<()>,
+  pub(crate) shutdown_lock:
+    Mutex<Vec<<<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()>>>,
+  pub(crate) handoff_tx: Sender<()>,
+  pub(crate) handoff_rx: Receiver<()>,
+  pub(crate) queue: Mutex<MessageQueue<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+  pub(crate) nodes: Arc<RwLock<Members<T, D>>>,
+  pub(crate) ack_manager: AckManager<T::Runtime>,
+  pub(crate) transport: Arc<T>,
   /// We do not call send directly, just directly drop it.
-  shutdown_tx: Sender<()>,
-  advertise: <T::Resolver as AddressResolver>::ResolvedAddress,
-  opts: Arc<Options>,
+  pub(crate) shutdown_tx: Sender<()>,
+  pub(crate) advertise: <T::Resolver as AddressResolver>::ResolvedAddress,
+  pub(crate) opts: Arc<Options>,
 }
 
-impl<T: Transport> MemberlistCore<T> {
+impl<T, D> MemberlistCore<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
   pub(crate) async fn shutdown(&self) -> Result<(), T::Error> {
     if !self.shutdown_tx.close() {
       return Ok(());
@@ -279,7 +309,11 @@ impl<T: Transport> MemberlistCore<T> {
   }
 }
 
-impl<T: Transport> Drop for MemberlistCore<T> {
+impl<T, D> Drop for MemberlistCore<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
   fn drop(&mut self) {
     self.shutdown_tx.close();
   }
@@ -303,9 +337,10 @@ pub struct Memberlist<
     <<T as Transport>::Resolver as AddressResolver>::ResolvedAddress,
   >,
 > where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
 {
-  pub(crate) inner: Arc<MemberlistCore<T>>,
+  pub(crate) inner: Arc<MemberlistCore<T, D>>,
   pub(crate) delegate: Option<Arc<D>>,
 }
 
