@@ -184,7 +184,7 @@ where
     let timeout = self.timeout;
 
     R::spawn_detach(async move {
-      futures::select_biased! {
+      futures::select! {
         _ = rx.recv().fuse() => {}
         _ = R::sleep(timeout).fuse() => {
           f(n.load(Ordering::SeqCst)).await
@@ -202,7 +202,7 @@ where
     self.start = Instant::now();
 
     R::spawn_detach(async move {
-      futures::select_biased! {
+      futures::select! {
         _ = rx.recv().fuse() => {}
         _ = R::sleep(remaining).fuse() => {
           f(n.load(Ordering::SeqCst)).await
