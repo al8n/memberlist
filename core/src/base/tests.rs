@@ -19,10 +19,17 @@ use crate::{
 
 use super::*;
 
-impl<I: Eq + core::hash::Hash, A, R> Members<I, A, R> {
-  pub(crate) fn get_state<Q>(&self, id: &Q) -> Option<LocalNodeState<I, A>>
+impl<T, D> Members<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
+  pub(crate) fn get_state<Q>(
+    &self,
+    id: &Q,
+  ) -> Option<LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>
   where
-    I: core::borrow::Borrow<Q>,
+    T::Id: core::borrow::Borrow<Q>,
     Q: core::hash::Hash + Eq,
   {
     self
@@ -33,7 +40,7 @@ impl<I: Eq + core::hash::Hash, A, R> Members<I, A, R> {
 
   pub(crate) fn set_state<Q>(&mut self, id: &Q, new_state: crate::types::State)
   where
-    I: core::borrow::Borrow<Q>,
+    T::Id: core::borrow::Borrow<Q>,
     Q: core::hash::Hash + Eq,
   {
     if let Some(idx) = self.node_map.get(id) {
