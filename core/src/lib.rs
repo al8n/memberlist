@@ -45,7 +45,7 @@ pub use agnostic_lite;
 pub use futures;
 
 #[cfg(feature = "metrics")]
-#[doc(hidden)]
+#[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
 pub use metrics;
 
 #[doc(hidden)]
@@ -54,10 +54,8 @@ pub use tracing;
 /// All unit test fns are exported in the `tests` module.
 /// This module is used for users want to use other async runtime,
 /// and want to use the test if memberlist also works with their runtime.
-/// See [memberlist-wasm] for more examples about how to use these unit test fn runners.
-///
-/// [memberlist-wasm]: https://github.com/al8n/memberlist/blob/main/memberlist-wasm/src/lib.rs#L20
 #[cfg(feature = "test")]
+#[cfg_attr(docsrs, doc(cfg(feature = "test")))]
 pub mod tests {
   use std::net::SocketAddr;
 

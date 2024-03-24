@@ -1,6 +1,6 @@
 [package]
 name = "memberlist"
-version = "0.1.3"
+version = "0.1.5"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -23,9 +23,9 @@ async-std = ["agnostic/async-std"]
 smol = ["agnostic/smol"]
 
 serde = [
-  "memberlist-core/serde", 
+  "memberlist-core/serde",
   "memberlist-net?/serde",
-  "memberlist-quic?/serde"
+  "memberlist-quic?/serde",
 ]
 
 metrics = [
@@ -34,10 +34,7 @@ metrics = [
   "memberlist-quic?/metrics",
 ]
 
-compression = [
-  "memberlist-net?/compression",
-  "memberlist-quic?/compression"
-]
+compression = ["memberlist-net?/compression", "memberlist-quic?/compression"]
 
 encryption = ["memberlist-net?/encryption", "memberlist-core/encryption"]
 
@@ -51,19 +48,12 @@ tls = ["memberlist-net/tls", "tcp"]
 native-tls = ["memberlist-net/native-tls", "tcp"]
 
 # enable DNS node address resolver
-dns = [
-  "memberlist-net?/dns",
-  "memberlist-quic?/dns",
-  "agnostic/dns",
-]
+dns = ["memberlist-net?/dns", "memberlist-quic?/dns", "agnostic/dns"]
 dns-over-quic = [
   "memberlist-net?/dns-over-quic",
   "memberlist-quic?/dns-over-quic",
 ]
-dns-over-h3 = [
-  "memberlist-net?/dns-over-h3",
-  "memberlist-quic?/dns-over-h3",
-]
+dns-over-h3 = ["memberlist-net?/dns-over-h3", "memberlist-quic?/dns-over-h3"]
 dns-over-https-rustls = [
   "memberlist-net?/dns-over-https-rustls",
   "memberlist-quic?/dns-over-https-rustls",
@@ -92,14 +82,8 @@ dnssec-openssl = [
   "memberlist-net?/dnssec-openssl",
   "memberlist-quic?/dnssec-openssl",
 ]
-dnssec-ring = [
-  "memberlist-net?/dnssec-ring",
-  "memberlist-quic?/dnssec-ring",
-]
-dnssec = [
-  "memberlist-net?/dnssec",
-  "memberlist-quic?/dnssec",
-]
+dnssec-ring = ["memberlist-net?/dnssec-ring", "memberlist-quic?/dnssec-ring"]
+dnssec = ["memberlist-net?/dnssec", "memberlist-quic?/dnssec"]
 
 test = ["memberlist-core/test", "memberlist-net?/test", "memberlist-quic?/test"]
 
