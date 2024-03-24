@@ -19,7 +19,7 @@ use crate::{
 
 use super::*;
 
-impl<I: Eq + core::hash::Hash, A, R> Members<I, A, R> {
+impl<I: Eq + core::hash::Hash, A, R: RuntimeLite> Members<I, A, R> {
   pub(crate) fn get_state<Q>(&self, id: &Q) -> Option<LocalNodeState<I, A>>
   where
     I: core::borrow::Borrow<Q>,

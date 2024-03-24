@@ -73,12 +73,12 @@ impl<I, A> MessageQueue<I, A> {
 }
 
 #[viewit::viewit]
-pub(crate) struct Member<I, A, R> {
+pub(crate) struct Member<I, A, R: RuntimeLite> {
   pub(crate) state: LocalNodeState<I, A>,
   pub(crate) suspicion: Option<Suspicion<I, R>>,
 }
 
-impl<I, A, R> core::ops::Deref for Member<I, A, R> {
+impl<I, A, R: RuntimeLite> core::ops::Deref for Member<I, A, R> {
   type Target = LocalNodeState<I, A>;
 
   fn deref(&self) -> &Self::Target {
@@ -86,7 +86,7 @@ impl<I, A, R> core::ops::Deref for Member<I, A, R> {
   }
 }
 
-pub(crate) struct Members<I, A, R> {
+pub(crate) struct Members<I, A, R: RuntimeLite> {
   pub(crate) local: Node<I, A>,
   pub(crate) nodes: TinyVec<Member<I, A, R>>,
   pub(crate) node_map: HashMap<I, usize>,
@@ -212,7 +212,7 @@ where
   }
 }
 
-impl<I, A, R> Members<I, A, R> {
+impl<I, A, R: RuntimeLite> Members<I, A, R> {
   fn new(local: Node<I, A>) -> Self {
     Self {
       nodes: TinyVec::new(),
@@ -222,7 +222,7 @@ impl<I, A, R> Members<I, A, R> {
   }
 }
 
-impl<I: PartialEq, A, R> Members<I, A, R> {
+impl<I: PartialEq, A, R: RuntimeLite> Members<I, A, R> {
   pub(crate) fn any_alive(&self) -> bool {
     for m in self.nodes.iter() {
       if !m.dead_or_left() && m.id().ne(self.local.id()) {

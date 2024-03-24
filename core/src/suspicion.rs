@@ -1,15 +1,15 @@
 use std::{
   collections::HashSet,
   sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicU32, Ordering},
     Arc,
   },
   time::{Duration, Instant},
 };
 
 use super::*;
-use agnostic_lite::RuntimeLite;
-use futures::{future::BoxFuture, FutureExt};
+use agnostic_lite::{AfterHandle, AsyncAfterSpawner, RuntimeLite};
+use futures::future::BoxFuture;
 
 #[inline]
 fn remaining_suspicion_time(
@@ -29,13 +29,14 @@ fn remaining_suspicion_time(
   }
 }
 
-pub(crate) struct Suspicion<I, R> {
+pub(crate) struct Suspicion<I, R: RuntimeLite> {
   n: Arc<AtomicU32>,
   k: u32,
   min: Duration,
   max: Duration,
   start: Instant,
-  after_func: AfterFunc<R>,
+  timeout_fn: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
+  handle: Option<<R::AfterSpawner as AsyncAfterSpawner>::JoinHandle<()>>,
   confirmations: HashSet<I>,
 }
 
@@ -60,15 +61,20 @@ where
     let confirmations = [from].into_iter().collect();
     let n = Arc::new(AtomicU32::new(0));
     let timeout = if k < 1 { min } else { max };
-    let after_func = AfterFunc::new(n.clone(), timeout, Arc::new(timeout_fn));
-    after_func.start();
+    let timeout_fn = Arc::new(timeout_fn);
+    let n1 = n.clone();
+    let timeout_fn1 = timeout_fn.clone();
+    let handle = R::spawn_after(timeout, async move {
+      (timeout_fn1)(n1.load(Ordering::SeqCst)).await;
+    });
     Suspicion {
       n,
       k,
       min,
       max,
       start: Instant::now(),
-      after_func,
+      timeout_fn,
+      handle: Some(handle),
       confirmations,
     }
   }
@@ -94,121 +100,42 @@ where
 
     self.confirmations.insert(from.cheap_clone());
 
-    // Compute the new timeout given the current number of confirmations and
-    // adjust the after_func. If the timeout becomes negative *and* we can cleanly
-    // stop the after_func then we will call the timeout function directly from
-    // here.
-    let n = self.n.fetch_add(1, Ordering::SeqCst) + 1;
-    let elapsed = self.start.elapsed();
-    let remaining = remaining_suspicion_time(n, self.k, elapsed, self.min, self.max);
+    if let Some(h) = self.handle.take() {
+      if !h.is_expired() {
+        // Compute the new timeout given the current number of confirmations and
+        // adjust the after_func. If the timeout becomes negative *and* we can cleanly
+        // stop the after_func then we will call the timeout function directly from
+        // here.
+        let n = self.n.fetch_add(1, Ordering::SeqCst) + 1;
+        let elapsed = self.start.elapsed();
+        let remaining = remaining_suspicion_time(n, self.k, elapsed, self.min, self.max);
 
-    if self.after_func.stop().await {
-      if remaining > Duration::ZERO {
-        self.after_func.reset(remaining).await;
-      } else {
-        let n = self.n.clone();
-        let fut = (self.after_func.f)(n.load(Ordering::SeqCst));
-        R::spawn_detach(async move {
-          fut.await;
-        });
+        if remaining > Duration::ZERO {
+          h.abort();
+          let n = self.n.clone();
+          let timeout_fn = self.timeout_fn.clone();
+          self.handle = Some(R::spawn_after_at(Instant::now() + remaining, async move {
+            (timeout_fn)(n.load(Ordering::SeqCst)).await;
+          }));
+        } else {
+          let n = self.n.clone();
+          let timeout_fn = self.timeout_fn.clone();
+          R::spawn_detach(async move {
+            (timeout_fn)(n.load(Ordering::SeqCst)).await;
+          });
+        }
       }
     }
+
     true
   }
 }
 
-impl<I, R> Drop for Suspicion<I, R> {
+impl<I, R: RuntimeLite> Drop for Suspicion<I, R> {
   fn drop(&mut self) {
-    self.after_func.force_stop();
-  }
-}
-
-pub(super) struct AfterFunc<R> {
-  n: Arc<AtomicU32>,
-  timeout: Duration,
-  start: Instant,
-  stop_rx: async_channel::Receiver<()>,
-  stop_tx: async_channel::Sender<()>,
-  stopped: Arc<AtomicBool>,
-  f: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
-  _marker: std::marker::PhantomData<R>,
-}
-
-impl<R> AfterFunc<R> {
-  pub fn new(
-    n: Arc<AtomicU32>,
-    timeout: Duration,
-    f: Arc<impl Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
-  ) -> Self {
-    let (tx, rx) = async_channel::bounded(1);
-    let stopped = Arc::new(AtomicBool::new(false));
-
-    Self {
-      n,
-      timeout,
-      stop_rx: rx,
-      stop_tx: tx,
-      stopped,
-      f,
-      start: Instant::now(),
-      _marker: std::marker::PhantomData,
+    if let Some(h) = self.handle.take() {
+      h.abort();
     }
-  }
-
-  pub async fn stop(&self) -> bool {
-    if self.start.elapsed() >= self.timeout {
-      return false;
-    }
-    if self.stopped.load(Ordering::SeqCst) {
-      false
-    } else {
-      self.stopped.store(true, Ordering::SeqCst);
-      let _ = self.stop_tx.send(()).await;
-      true
-    }
-  }
-
-  pub fn force_stop(&self) {
-    self.stop_tx.close();
-  }
-}
-
-impl<R> AfterFunc<R>
-where
-  R: RuntimeLite,
-{
-  pub fn start(&self) {
-    let rx = self.stop_rx.clone();
-    let n = self.n.clone();
-    let f = self.f.clone();
-    let timeout = self.timeout;
-
-    R::spawn_detach(async move {
-      futures::select! {
-        _ = rx.recv().fuse() => {}
-        _ = R::sleep(timeout).fuse() => {
-          f(n.load(Ordering::SeqCst)).await
-        }
-      }
-    });
-  }
-
-  pub async fn reset(&mut self, remaining: Duration) {
-    self.stop().await;
-    let rx = self.stop_rx.clone();
-    let n = self.n.clone();
-    let f = self.f.clone();
-    self.timeout = remaining;
-    self.start = Instant::now();
-
-    R::spawn_detach(async move {
-      futures::select! {
-        _ = rx.recv().fuse() => {}
-        _ = R::sleep(remaining).fuse() => {
-          f(n.load(Ordering::SeqCst)).await
-        }
-      }
-    });
   }
 }
 
@@ -407,6 +334,7 @@ mod tests {
   #[tokio::test]
   async fn test_suspicion_after_func() {
     use agnostic::tokio::TokioRuntime;
+    use futures::FutureExt;
 
     for (i, (num_confirmations, from, confirmations, expected)) in
       test_cases().into_iter().enumerate()
@@ -470,6 +398,7 @@ mod tests {
   #[tokio::test]
   async fn test_suspicion_after_func_zero_k() {
     use agnostic::tokio::TokioRuntime;
+    use futures::FutureExt;
 
     let (tx, rx) = async_channel::unbounded();
     let f = move |_| {
@@ -497,6 +426,7 @@ mod tests {
   #[tokio::test]
   async fn test_suspicion_after_func_immediate() {
     use agnostic::tokio::TokioRuntime;
+    use futures::FutureExt;
 
     let (tx, rx) = async_channel::unbounded();
     let f = move |_| {

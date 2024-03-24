@@ -642,7 +642,7 @@ impl<T: Transport> StateMessage<T> {
 // -------------------------------Private Methods--------------------------------
 
 #[inline]
-fn move_dead_nodes<I, A, R>(
+fn move_dead_nodes<I, A, R: RuntimeLite>(
   nodes: &mut [Member<I, A, R>],
   gossip_to_the_dead_time: Duration,
 ) -> usize {
