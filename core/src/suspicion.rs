@@ -59,8 +59,9 @@ where
       memberlist,
       node,
       change_time,
-      k,
       incarnation,
+      #[cfg(feature = "metrics")]
+      k,
     }
   }
 
@@ -242,17 +243,6 @@ where
 
 #[cfg(test)]
 mod tests {
-  //   use std::net::SocketAddr;
-
-  //   use async_channel::TryRecvError;
-  //   use memberlist_types::{Message, TinyVec};
-  //   use nodecraft::resolver::socket_addr::SocketAddrResolver;
-  // use smol_str::SmolStr;
-
-  //   use self::{
-  //     delegate::VoidDelegate, error::TransportError, transport::{PacketSubscriber, StreamSubscriber, TimeoutableReadStream, TimeoutableWriteStream}
-  //   };
-
   use super::*;
 
   #[test]
@@ -317,6 +307,9 @@ mod tests {
       );
     }
   }
+
+  // TODO: find a way to test the suspicioner and suspicion structs
+
   // struct Pair {
   //   from: &'static str,
   //   new_info: bool,
@@ -437,245 +430,6 @@ mod tests {
   //       MIN,
   //     ),
   //   ]
-  // }
-
-  // struct DummyWire;
-
-  // impl crate::transport::Wire for DummyWire {
-  //   type Error = std::io::Error;
-  //   type Address = SocketAddr;
-  //   type Id = SmolStr;
-
-  //   fn encoded_len(_msg: &Message<Self::Id, Self::Address>) -> usize {
-  //     unreachable!()
-  //   }
-
-  //   fn encode_message(
-  //     _msg: Message<Self::Id, Self::Address>,
-  //     _dst: &mut [u8],
-  //   ) -> Result<usize, Self::Error> {
-  //     unreachable!()
-  //   }
-
-  //   fn decode_message(
-  //     _src: &[u8],
-  //   ) -> Result<(usize, Message<Self::Id, Self::Address>), Self::Error> {
-  //     unreachable!()
-  //   }
-
-  //   async fn decode_message_from_reader(
-  //     _conn: impl futures::prelude::AsyncRead + Send + Unpin,
-  //   ) -> std::io::Result<(usize, Message<Self::Id, Self::Address>)> {
-  //     unreachable!()
-  //   }
-  // }
-
-  // #[derive(thiserror::Error, Debug)]
-  // #[error("dummy transport error")]
-  // struct DummyTransportError;
-
-  // impl TransportError for DummyTransportError {
-  //   fn is_remote_failure(&self) -> bool {
-  //     unreachable!()
-  //   }
-
-  //   fn custom(_err: std::borrow::Cow<'static, str>) -> Self {
-  //     unreachable!()
-  //   }
-  // }
-
-  // struct DummyStream;
-
-  // impl TimeoutableWriteStream for DummyStream {
-  //   fn set_write_deadline(&mut self, _deadline:Option<Instant>) {
-  //     unreachable!()
-  //   }
-
-  //   fn write_deadline(&self) -> Option<Instant>{
-  //     unreachable!()
-  //   }
-  // }
-
-  // impl TimeoutableReadStream for DummyStream {
-  //   fn set_read_deadline(&mut self, _deadline:Option<Instant>) {
-  //     unreachable!()
-  //   }
-
-  //   fn read_deadline(&self) -> Option<Instant>{
-  //     unreachable!()
-  //   }
-  // }
-
-  // type DummyDelegate = VoidDelegate<SmolStr, SocketAddr>;
-
-  // struct DummyTransport;
-
-  // impl Transport for DummyTransport {
-  //   /// The error type for the transport
-  //   type Error = DummyTransportError;
-  //   /// The id type used to identify nodes
-  //   type Id = SmolStr;
-  //   /// The address resolver used to resolve addresses
-  //   type Resolver = SocketAddrResolver<agnostic_lite::tokio::TokioRuntime>;
-  //   /// The promised stream used to send and receive messages
-  //   type Stream = DummyStream;
-  //   /// The wire used to encode and decode messages
-  //   type Wire = DummyWire;
-  //   /// The async runtime
-  //   type Runtime = agnostic_lite::tokio::TokioRuntime;
-
-  //   /// Resolves the given address to a resolved address
-  //   async fn resolve(
-  //     &self,
-  //     _addr: &<Self::Resolver as AddressResolver>::Address,
-  //   ) -> Result<<Self::Resolver as AddressResolver>::ResolvedAddress, Self::Error> {
-  //     unreachable!()
-  //   }
-
-  //   /// Returns the local id of the node
-  //   fn local_id(&self) -> &Self::Id {
-  //     unreachable!()
-  //   }
-
-  //   /// Returns the local address of the node
-  //   fn local_address(&self) -> &<Self::Resolver as AddressResolver>::Address {
-  //     unreachable!()
-  //   }
-
-  //   /// Returns the advertise address of the node
-  //   fn advertise_address(&self) -> &<Self::Resolver as AddressResolver>::ResolvedAddress {
-  //     unreachable!()
-  //   }
-
-  //   /// Returns the maximum size of a packet that can be sent
-  //   fn max_payload_size(&self) -> usize {
-  //     unreachable!()
-  //   }
-
-  //   /// Returns the size of header overhead when trying to send messages through packet stream ([`Transport::send_packets`]).
-  //   ///
-  //   /// e.g. if every time invoking [`Transport::send_packets`],
-  //   /// the concrete implementation wants to  add a header of 10 bytes,
-  //   /// then the packet overhead is 10 bytes.
-  //   fn packets_header_overhead(&self) -> usize {
-  //     unreachable!()
-  //   }
-
-  //   /// Returns the size of overhead for per [`Message`] when trying to send messages through packet stream ([`Transport::send_packets`]).
-  //   fn packet_overhead(&self) -> usize {
-  //     unreachable!()
-  //   }
-
-  //   /// Returns an error if the given address is blocked
-  //   fn blocked_address(
-  //     &self,
-  //     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-  //   ) -> Result<(), Self::Error> {
-  //     unreachable!()
-  //   }
-
-  //   /// Reads a message from the remote node by promised connection.
-  //   ///
-  //   /// Returns the number of bytes read and the message.
-  //   async fn read_message(
-  //     &self,
-  //     _from: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-  //     _conn: &mut Self::Stream,
-  //   ) -> Result<
-  //     (
-  //       usize,
-  //       Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
-  //     ),
-  //     Self::Error,
-  //   > {
-  //     unreachable!()
-  //   }
-
-  //   /// Sends a message to the remote node by promised connection.
-  //   ///
-  //   /// Returns the number of bytes sent.
-  //   async fn send_message(
-  //     &self,
-  //     _conn: &mut Self::Stream,
-  //     _msg: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
-  //   ) -> Result<usize, Self::Error> {
-  //     unreachable!()
-  //   }
-
-  //   /// A packet-oriented interface that fires off the given
-  //   /// payload to the given address in a connectionless fashion.
-  //   ///
-  //   /// # Returns
-  //   ///
-  //   /// - number of bytes sent
-  //   /// - a time stamp that's as close as possible to when the packet
-  //   /// was transmitted to help make accurate RTT measurements during probes.
-  //   async fn send_packet(
-  //     &self,
-  //     _addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-  //     _packet: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
-  //   ) -> Result<(usize, Instant), Self::Error> {
-  //     unreachable!()
-  //   }
-
-  //   /// A packet-oriented interface that fires off the given
-  //   /// payload to the given address in a connectionless fashion.
-  //   ///
-  //   /// # Returns
-  //   ///
-  //   /// - number of bytes sent
-  //   /// - a time stamp that's as close as possible to when the packet
-  //   /// was transmitted to help make accurate RTT measurements during probes.
-  //   async fn send_packets(
-  //     &self,
-  //     _addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-  //     _packets: TinyVec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
-  //   ) -> Result<(usize, Instant), Self::Error> {
-  //     unreachable!()
-  //   }
-
-  //   /// Used to create a connection that allows us to perform
-  //   /// two-way communication with a peer. This is generally more expensive
-  //   /// than packet connections so is used for more infrequent operations
-  //   /// such as anti-entropy or fallback probes if the packet-oriented probe
-  //   /// failed.
-  //   async fn dial_with_deadline(
-  //     &self,
-  //     _addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-  //     _deadline: Instant,
-  //   ) -> Result<Self::Stream, Self::Error> {
-  //     unreachable!()
-  //   }
-
-  //   /// Used to cache a connection for future use.
-  //   async fn cache_stream(
-  //     &self,
-  //     _addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-  //     _stream: Self::Stream,
-  //   ) -> Result<(), Self::Error> {
-  //     unreachable!()
-  //   }
-
-  //   /// Returns a packet subscriber that can be used to receive incoming packets
-  //   fn packet(
-  //     &self,
-  //   ) -> PacketSubscriber<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress> {
-  //     unreachable!()
-  //   }
-
-  //   /// Returns a receiver that can be read to handle incoming stream
-  //   /// connections from other peers. How this is set up for listening is
-  //   /// left as an exercise for the concrete transport implementations.
-  //   fn stream(
-  //     &self,
-  //   ) -> StreamSubscriber<<Self::Resolver as AddressResolver>::ResolvedAddress, Self::Stream> {
-  //     unreachable!()
-  //   }
-
-  //   /// Shutdown the transport
-  //   async fn shutdown(&self) -> Result<(), Self::Error> {
-  //     unreachable!()
-  //   }
   // }
 
   // #[tokio::test]
