@@ -205,11 +205,17 @@ where
         let elapsed = self.start.elapsed();
         let remaining = remaining_suspicion_time(n, self.k, elapsed, self.min, self.max);
 
+        h.abort();
         if remaining > Duration::ZERO {
-          h.reset(remaining);
-          self.handle = Some(h);
+          let n = self.n.clone();
+          let suspicioner = self.suspicioner.clone();
+          self.handle = Some(<T::Runtime as RuntimeLite>::spawn_after_at(
+            Instant::now() + remaining,
+            async move {
+              suspicioner.suspicion(n.load(Ordering::SeqCst)).await;
+            },
+          ));
         } else {
-          h.abort();
           let n = self.n.clone();
           let suspicioner = self.suspicioner.clone();
           <T::Runtime as RuntimeLite>::spawn_detach(async move {

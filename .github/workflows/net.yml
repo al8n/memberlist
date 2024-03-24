@@ -63,12 +63,12 @@ jobs:
 
       - name: Run Transport Tests
         run: |
-          cargo test --features "test,${{ matrix.stream_layer }},${{ matrix.runtime }}"
+          cargo test --no-default-features --features "test,${{ matrix.stream_layer }},${{ matrix.runtime }}"
         working-directory: transports/net
 
       - name: Run Memberlist Tests
         run: |
-          cargo test --features "test,compression,encryption,${{ matrix.stream_layer }},${{ matrix.runtime }},metrics" -- --test-threads=1
+          cargo test --no-default-features --features "test,compression,encryption,${{ matrix.stream_layer }},${{ matrix.runtime }},metrics" -- --test-threads=1
         working-directory: memberlist
 
       - name: Cache Cargo registry
