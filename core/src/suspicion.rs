@@ -38,8 +38,9 @@ where
   memberlist: Memberlist<T, D>,
   node: T::Id,
   change_time: Epoch,
-  k: isize,
   incarnation: u32,
+  #[cfg(feature = "metrics")]
+  k: isize,
 }
 
 impl<T, D> Suspicioner<T, D>
@@ -51,8 +52,8 @@ where
     memberlist: Memberlist<T, D>,
     node: T::Id,
     change_time: Epoch,
-    k: isize,
     incarnation: u32,
+    #[cfg(feature = "metrics")] k: isize,
   ) -> Self {
     Suspicioner {
       memberlist,
@@ -68,8 +69,9 @@ where
       memberlist: t,
       node: n,
       change_time,
-      k,
       incarnation,
+      #[cfg(feature = "metrics")]
+      k,
     } = self;
     let timeout = {
       let members = t.inner.nodes.read().await;
@@ -126,7 +128,6 @@ where
   min: Duration,
   max: Duration,
   start: Instant,
-  // timeout_fn: Arc<dyn Fn(u32) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
   handle: Option<<<T::Runtime as RuntimeLite>::AfterSpawner as AsyncAfterSpawner>::JoinHandle<()>>,
   suspicioner: Arc<Suspicioner<T, D>>,
   confirmations: HashSet<T::Id>,
@@ -147,7 +148,6 @@ where
     k: isize,
     min: Duration,
     max: Duration,
-    // timeout_fn: impl Fn(u32) -> BoxFuture<'static, ()> + Clone + Send + Sync + 'static,
     suspicioner: Suspicioner<T, D>,
   ) -> Self {
     #[allow(clippy::mutable_key_type)]

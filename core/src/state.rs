@@ -327,56 +327,14 @@ where
       k,
       min,
       max,
-      Suspicioner::new(this, snode, change_time, k, sincarnation),
-      // move |num_confirmations| {
-      //   let t = this.clone();
-      //   let n = snode.cheap_clone();
-      //   async move {
-      //     let timeout = {
-      //       let members = t.inner.nodes.read().await;
-
-      //       members.node_map.get(&n).and_then(|&idx| {
-      //         let state = &members.nodes[idx];
-      //         let timeout =
-      //           state.state.state == State::Suspect && state.state.state_change == change_time;
-      //         if timeout {
-      //           Some(Dead::new(
-      //             sincarnation,
-      //             state.id().cheap_clone(),
-      //             t.local_id().cheap_clone(),
-      //           ))
-      //         } else {
-      //           None
-      //         }
-      //       })
-      //     };
-
-      //     if let Some(dead) = timeout {
-      //       #[cfg(feature = "metrics")]
-      //       {
-      //         if k > 0 && k > num_confirmations as isize {
-      //           metrics::counter!(
-      //             "memberlist.degraded.timeout",
-      //             t.inner.opts.metric_labels.iter()
-      //           )
-      //           .increment(1);
-      //         }
-      //       }
-
-      //       tracing::info!(
-      //         "memberlist.state: marking {} as failed, suspect timeout reached ({} peer confirmations)",
-      //         dead.node(),
-      //         num_confirmations
-      //       );
-      //       let mut memberlist = t.inner.nodes.write().await;
-      //       let dead_node = dead.node().cheap_clone();
-      //       if let Err(e) = t.dead_node(&mut memberlist, dead).await {
-      //         tracing::error!(err=%e, "memberlist.state: failed to mark {dead_node} as failed");
-      //       }
-      //     }
-      //   }
-      //   .boxed()
-      // },
+      Suspicioner::new(
+        this,
+        snode,
+        change_time,
+        sincarnation,
+        #[cfg(feature = "metrics")]
+        k,
+      ),
     ));
     Ok(())
   }
