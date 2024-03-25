@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use memberlist_types::{Meta, SmallVec};
+use memberlist_types::{Meta, TinyVec};
 
 /// Used to manage node related events.
 #[auto_impl::auto_impl(Box, Arc)]
@@ -34,7 +34,7 @@ pub trait NodeDelegate: Send + Sync + 'static {
     overhead: usize,
     limit: usize,
     encoded_len: F,
-  ) -> impl Future<Output = SmallVec<Bytes>> + Send
+  ) -> impl Future<Output = TinyVec<Bytes>> + Send
   where
     F: Fn(Bytes) -> (usize, Bytes) + Send;
 

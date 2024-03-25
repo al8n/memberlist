@@ -5,7 +5,7 @@ use super::*;
 struct MockDelegateInner<I, A> {
   meta: Meta,
   msgs: Vec<Bytes>,
-  broadcasts: SmallVec<Bytes>,
+  broadcasts: TinyVec<Bytes>,
   state: Bytes,
   remote_state: Bytes,
   _marker: std::marker::PhantomData<(I, A)>,
@@ -16,7 +16,7 @@ impl<I, A> Default for MockDelegateInner<I, A> {
     Self {
       meta: Meta::empty(),
       msgs: vec![],
-      broadcasts: SmallVec::new(),
+      broadcasts: TinyVec::new(),
       state: Bytes::new(),
       remote_state: Bytes::new(),
       _marker: std::marker::PhantomData,
@@ -60,7 +60,7 @@ impl<I, A> MockDelegate<I, A> {
     }
   }
 
-  pub fn with_state_and_broadcasts(state: Bytes, broadcasts: SmallVec<Bytes>) -> Self {
+  pub fn with_state_and_broadcasts(state: Bytes, broadcasts: TinyVec<Bytes>) -> Self {
     Self {
       inner: Arc::new(Mutex::new(MockDelegateInner {
         state,
@@ -105,12 +105,12 @@ where
     _overhead: usize,
     _limit: usize,
     _encoded_len: F,
-  ) -> SmallVec<Bytes>
+  ) -> TinyVec<Bytes>
   where
     F: Fn(Bytes) -> (usize, Bytes),
   {
     let mut mu = self.inner.lock().await;
-    let mut out = SmallVec::new();
+    let mut out = TinyVec::new();
     core::mem::swap(&mut out, &mut mu.broadcasts);
     out
   }
