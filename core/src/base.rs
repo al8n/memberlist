@@ -295,7 +295,9 @@ where
     }
 
     let mut mu = self.shutdown_lock.lock().await;
-    futures::future::join_all(core::mem::take(&mut *mu)).await;
+    for h in core::mem::take(&mut *mu) {
+      let _ = h.await;
+    }
 
     // Shut down the transport first, which should block until it's
     // completely torn down. If we kill the memberlist-side handlers
