@@ -3,6 +3,7 @@
 
 use std::{
   collections::{BTreeSet, HashMap},
+  future::Future,
   sync::Arc,
 };
 
@@ -52,23 +53,68 @@ impl<B: Broadcast> Inner<B> {
   }
 }
 
+/// Used to calculate the number of nodes in the cluster.
+pub trait NodeCalculator: Send + Sync + 'static {
+  /// Returns the number of nodes in the cluster.
+  fn num_nodes(&self) -> impl Future<Output = usize> + Send;
+}
+
+macro_rules! impl_node_calculator {
+  ($($ty:ty),+$(,)?) => {
+    $(
+      impl NodeCalculator for ::std::sync::Arc<$ty> {
+        async fn num_nodes(&self) -> usize {
+          self.load(::std::sync::atomic::Ordering::SeqCst) as usize
+        }
+      }
+    )*
+  };
+}
+
+impl_node_calculator! {
+  ::core::sync::atomic::AtomicUsize,
+  ::core::sync::atomic::AtomicIsize,
+  ::core::sync::atomic::AtomicU8,
+  ::core::sync::atomic::AtomicI8,
+  ::core::sync::atomic::AtomicU16,
+  ::core::sync::atomic::AtomicI16,
+  ::core::sync::atomic::AtomicU32,
+  ::core::sync::atomic::AtomicI32,
+  ::core::sync::atomic::AtomicU64,
+  ::core::sync::atomic::AtomicI64,
+}
+
 /// Used to queue messages to broadcast to
 /// the cluster (via gossip) but limits the number of transmits per
 /// message. It also prioritizes messages with lower transmit counts
 /// (hence newer messages).
-pub struct TransmitLimitedQueue<B: Broadcast> {
-  num_nodes: Box<dyn Fn() -> usize + Send + Sync + 'static>,
+pub struct TransmitLimitedQueue<B: Broadcast, N> {
+  // num_nodes: Box<dyn Fn() -> usize + Send + Sync + 'static>,
+  num_nodes: N,
   /// The multiplier used to determine the maximum
   /// number of retransmissions attempted.
   retransmit_mult: usize,
   inner: Mutex<Inner<B>>,
 }
 
-impl<B: Broadcast> TransmitLimitedQueue<B> {
+impl<B: Broadcast, N: NodeCalculator> TransmitLimitedQueue<B, N> {
+  // /// Creates a new [`TransmitLimitedQueue`].
+  // pub fn new(retransmit_mult: usize, calc: impl Fn() -> usize + Send + Sync + 'static) -> Self {
+  //   Self {
+  //     num_nodes: Box::new(calc),
+  //     retransmit_mult,
+  //     inner: Mutex::new(Inner {
+  //       q: BTreeSet::new(),
+  //       m: HashMap::new(),
+  //       id_gen: 0,
+  //     }),
+  //   }
+  // }
+
   /// Creates a new [`TransmitLimitedQueue`].
-  pub fn new(retransmit_mult: usize, calc: impl Fn() -> usize + Send + Sync + 'static) -> Self {
+  pub fn new(retransmit_mult: usize, calc: N) -> Self {
     Self {
-      num_nodes: Box::new(calc),
+      num_nodes: calc,
       retransmit_mult,
       inner: Mutex::new(Inner {
         q: BTreeSet::new(),
@@ -102,7 +148,7 @@ impl<B: Broadcast> TransmitLimitedQueue<B> {
       return to_send;
     }
 
-    let transmit_limit = retransmit_limit(self.retransmit_mult, (self.num_nodes)());
+    let transmit_limit = retransmit_limit(self.retransmit_mult, self.num_nodes.num_nodes().await);
 
     // Visit fresher items first, but only look at stuff that will fit.
     // We'll go tier by tier, grabbing the largest items first.
@@ -355,7 +401,7 @@ impl<B: Broadcast> Inner<B> {
 }
 
 #[cfg(any(test, feature = "test"))]
-impl<B: Broadcast> TransmitLimitedQueue<B> {
+impl<B: Broadcast, N: NodeCalculator> TransmitLimitedQueue<B, N> {
   pub(crate) async fn ordered_view(&self, reverse: bool) -> TinyVec<LimitedBroadcast<B>> {
     let inner = self.inner.lock().await;
 
@@ -380,6 +426,12 @@ mod tests {
   use crate::{broadcast::MemberlistBroadcast, types::Message};
 
   use super::*;
+
+  impl NodeCalculator for usize {
+    async fn num_nodes(&self) -> usize {
+      *self
+    }
+  }
 
   struct DummyWire<I, A>(PhantomData<(I, A)>);
 
@@ -556,7 +608,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_transmit_limited_queue() {
-    let q = TransmitLimitedQueue::new(1, || 1);
+    let q = TransmitLimitedQueue::new(1, 1);
     q.queue_broadcast(
       MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
         node: "test".into(),
@@ -616,7 +668,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_transmit_limited_get_broadcasts() {
-    let q = TransmitLimitedQueue::new(3, || 10);
+    let q = TransmitLimitedQueue::new(3, 10);
 
     // 18 bytes per message
     q.queue_broadcast(
@@ -683,10 +735,13 @@ mod tests {
 
   #[tokio::test]
   async fn test_transmit_limited_get_broadcasts_limit() {
-    let q = TransmitLimitedQueue::new(1, || 10);
+    let q = TransmitLimitedQueue::new(1, 10);
 
     assert_eq!(0, q.inner.lock().await.id_gen);
-    assert_eq!(2, retransmit_limit(q.retransmit_mult, (q.num_nodes)()));
+    assert_eq!(
+      2,
+      retransmit_limit(q.retransmit_mult, q.num_nodes.num_nodes().await)
+    );
 
     // 18 bytes per message
     q.queue_broadcast(
@@ -783,7 +838,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_transmit_limited_prune() {
-    let q = TransmitLimitedQueue::new(1, || 10);
+    let q = TransmitLimitedQueue::new(1, 10);
     let (tx1, rx1) = async_channel::bounded(1);
     let (tx2, rx2) = async_channel::bounded(1);
 
@@ -864,7 +919,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_transmit_limited_ordering() {
-    let q = TransmitLimitedQueue::new(1, || 10);
+    let q = TransmitLimitedQueue::new(1, 10);
     let insert = |name: &str, transmits: usize| {
       q.queue_broadcast_in(
         MemberlistBroadcast::<SmolStr, SocketAddr, DummyWire<SmolStr, SocketAddr>> {
