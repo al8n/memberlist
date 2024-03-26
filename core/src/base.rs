@@ -255,7 +255,6 @@ where
   }
 }
 
-// #[viewit::viewit(getters(skip), setters(skip))]
 pub(crate) struct MemberlistCore<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
@@ -266,6 +265,7 @@ where
   pub(crate) awareness: Awareness,
   pub(crate) broadcast: TransmitLimitedQueue<
     MemberlistBroadcast<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Wire>,
+    Arc<AtomicU32>,
   >,
   pub(crate) leave_broadcast_tx: Sender<()>,
   pub(crate) leave_lock: Mutex<()>,
@@ -390,9 +390,7 @@ where
     );
     let hot = HotData::new();
     let num_nodes = hot.num_nodes.clone();
-    let broadcast = TransmitLimitedQueue::new(opts.retransmit_mult, move || {
-      num_nodes.load(Ordering::Acquire) as usize
-    });
+    let broadcast = TransmitLimitedQueue::new(opts.retransmit_mult, num_nodes);
 
     #[cfg(not(feature = "metrics"))]
     let mut handles = Vec::with_capacity(7);
