@@ -1,7 +1,7 @@
 use std::{
   collections::{HashMap, VecDeque},
   sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32},
     Arc,
   },
 };
