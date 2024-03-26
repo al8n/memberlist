@@ -453,6 +453,11 @@ where
     &self.advertise_addr
   }
 
+  #[cfg(feature = "encryption")]
+  fn keyring(&self) -> Option<&SecretKeyring> {
+    self.encryptor.as_ref()
+  }
+
   fn max_payload_size(&self) -> usize {
     MAX_PACKET_SIZE.min(self.opts.max_payload_size)
   }

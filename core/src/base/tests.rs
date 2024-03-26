@@ -672,7 +672,7 @@ where
 
   let bcasts = (0..256u32)
     .map(|i| Bytes::copy_from_slice(&i.to_be_bytes()))
-    .collect::<SmallVec<_>>();
+    .collect::<TinyVec<_>>();
 
   let m2 = Memberlist::with_delegate(
     t2,
