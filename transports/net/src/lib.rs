@@ -458,6 +458,13 @@ where
     self.encryptor.as_ref()
   }
 
+  #[cfg(feature = "encryption")]
+  fn encryption_enabled(&self) -> bool {
+    self.encryptor.is_some()
+      && self.opts.encryption_algo.is_some()
+      && self.opts.gossip_verify_outgoing
+  }
+
   fn max_payload_size(&self) -> usize {
     MAX_PACKET_SIZE.min(self.opts.max_payload_size)
   }

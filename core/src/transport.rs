@@ -306,6 +306,11 @@ pub trait Transport: Sized + Send + Sync + 'static {
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
   fn keyring(&self) -> Option<&SecretKeyring>;
 
+  /// Returns if this transport enables encryption
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  fn encryption_enabled(&self) -> bool;
+
   /// Returns the maximum size of a packet that can be sent
   fn max_payload_size(&self) -> usize;
 
