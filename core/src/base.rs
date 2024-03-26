@@ -303,7 +303,7 @@ where
     // completely torn down. If we kill the memberlist-side handlers
     // those I/O handlers might get stuck.
     if let Err(e) = self.transport.shutdown().await {
-      tracing::error!(target =  "memberlist", err=%e, "failed to shutdown transport");
+      tracing::error!(err=%e, "memberlist: failed to shutdown transport");
       return Err(e);
     }
 
