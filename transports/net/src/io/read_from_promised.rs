@@ -238,22 +238,14 @@ where
     // check if we should offload
     let keys = enp.keys().await;
     if encrypted_message_len / 2 <= self.opts.offload_size {
-      return Self::decrypt_and_decompress(
-        enp,
-        encryption_algo,
-        keys,
-        stream_label.as_bytes(),
-        buf,
-      )
-      .map(|msg| (readed, msg));
+      return Self::decrypt_and_decompress(encryption_algo, keys, stream_label.as_bytes(), buf)
+        .map(|msg| (readed, msg));
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
-    let enp = enp.clone();
     rayon::spawn(move || {
       if tx
         .send(Self::decrypt_and_decompress(
-          &enp,
           encryption_algo,
           keys,
           stream_label.as_bytes(),
@@ -288,15 +280,14 @@ where
 
   #[cfg(feature = "encryption")]
   fn decrypt(
-    encryptor: &SecretKeyring,
     algo: EncryptionAlgo,
     keys: impl Iterator<Item = SecretKey>,
     auth_data: &[u8],
     mut data: BytesMut,
   ) -> Result<BytesMut, NetTransportError<A, W>> {
-    let nonce = encryptor.read_nonce(&mut data);
+    let nonce = security::read_nonce(&mut data);
     for key in keys {
-      match encryptor.decrypt(key, algo, nonce, auth_data, &mut data) {
+      match security::decrypt(key, algo, nonce, auth_data, &mut data) {
         Ok(_) => return Ok(data),
         Err(e) => {
           tracing::error!("memberlist_net.promised: failed to decrypt message: {}", e);
@@ -309,7 +300,6 @@ where
 
   #[cfg(all(feature = "compression", feature = "encryption"))]
   fn decrypt_and_decompress(
-    encryptor: &SecretKeyring,
     algo: EncryptionAlgo,
     keys: impl Iterator<Item = SecretKey>,
     auth_data: &[u8],
@@ -317,7 +307,7 @@ where
   ) -> Result<Message<I, A::ResolvedAddress>, NetTransportError<A, W>> {
     use bytes::Buf;
 
-    let mut buf = Self::decrypt(encryptor, algo, keys, auth_data, data)?;
+    let mut buf = Self::decrypt(algo, keys, auth_data, data)?;
     let tag = buf[0];
     if !COMPRESS_TAG.contains(&tag) {
       let (_, msg) = W::decode_message(&buf).map_err(NetTransportError::Wire)?;

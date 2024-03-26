@@ -131,7 +131,6 @@ where
   fn encode_and_encrypt_batch(
     checksumer: Checksumer,
     pk: SecretKey,
-    encryptor: &SecretKeyring,
     encryption_algo: EncryptionAlgo,
     label: &Label,
     mut buf: BytesMut,
@@ -145,7 +144,7 @@ where
     buf.put_u32(0);
     let nonce_offset = buf.len();
     // write encrypt header
-    let nonce = encryptor.write_header(&mut buf);
+    let nonce = security::write_header(&mut buf);
     let mut offset = buf.len();
     let checksum_offset = offset;
     // everything after nonce should be encrypted.
@@ -174,8 +173,7 @@ where
 
     // encrypt
     let mut dst = buf.split_off(data_offset);
-    encryptor
-      .encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
+    security::encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
       .map(|_| {
         buf.unsplit(dst);
         let buf_len = buf.len();
@@ -195,7 +193,6 @@ where
     checksumer: Checksumer,
     compressor: Compressor,
     pk: SecretKey,
-    encryptor: &SecretKeyring,
     encryption_algo: EncryptionAlgo,
     label: &Label,
     mut buf: BytesMut,
@@ -209,7 +206,7 @@ where
     buf.put_u32(0);
     let nonce_offset = buf.len();
     // write encrypt header
-    let nonce = encryptor.write_header(&mut buf);
+    let nonce = security::write_header(&mut buf);
     let mut offset = buf.len();
     let checksum_offset = offset;
     // everything after nonce should be encrypted.
@@ -248,8 +245,7 @@ where
 
     // encrypt
     let mut dst = buf.split_off(data_offset);
-    encryptor
-      .encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
+    security::encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
       .map(|_| {
         buf.unsplit(dst);
         let buf_len = buf.len();
@@ -373,7 +369,6 @@ where
       let buf = Self::encode_and_encrypt_batch(
         self.opts.checksumer,
         pk,
-        encryptor,
         encryption_algo,
         &self.opts.label,
         buf,
@@ -387,7 +382,6 @@ where
     let (tx, rx) = futures::channel::oneshot::channel();
     let checksumer = self.opts.checksumer;
     let max_payload_size = self.max_payload_size();
-    let encryptor = encryptor.clone();
     let label = self.opts.label.cheap_clone();
 
     rayon::spawn(move || {
@@ -395,7 +389,6 @@ where
         .send(Self::encode_and_encrypt_batch(
           checksumer,
           pk,
-          &encryptor,
           encryption_algo,
           &label,
           buf,
@@ -455,7 +448,6 @@ where
         self.opts.checksumer,
         self.opts.compressor.unwrap(),
         pk,
-        encryptor,
         self.opts.encryption_algo.unwrap(),
         &self.opts.label,
         buf,
@@ -470,7 +462,6 @@ where
     let checksumer = self.opts.checksumer;
     let compressor = self.opts.compressor.unwrap();
     let max_payload_size = self.max_payload_size();
-    let encryptor = encryptor.clone();
     let encryption_algo = self.opts.encryption_algo.unwrap();
     let label = self.opts.label.cheap_clone();
 
@@ -480,7 +471,6 @@ where
           checksumer,
           compressor,
           pk,
-          &encryptor,
           encryption_algo,
           &label,
           buf,

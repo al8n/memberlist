@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use memberlist_types::Meta;
+use memberlist_types::{Meta, TinyVec};
 use nodecraft::{CheapClone, Id};
 
 use crate::types::{NodeState, SmallVec};
@@ -203,11 +203,11 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> NodeDelegate for VoidDelegate
     _overhead: usize,
     _limit: usize,
     _encoded_len: F,
-  ) -> SmallVec<Bytes>
+  ) -> TinyVec<Bytes>
   where
     F: Fn(Bytes) -> (usize, Bytes) + Send,
   {
-    SmallVec::new()
+    TinyVec::new()
   }
 
   async fn local_state(&self, _join: bool) -> Bytes {

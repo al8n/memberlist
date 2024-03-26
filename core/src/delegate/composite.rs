@@ -339,7 +339,7 @@ where
     overhead: usize,
     limit: usize,
     encoded_len: F,
-  ) -> SmallVec<Bytes>
+  ) -> TinyVec<Bytes>
   where
     F: Fn(Bytes) -> (usize, Bytes) + Send,
   {

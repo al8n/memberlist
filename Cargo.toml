@@ -30,11 +30,13 @@ rustdoc-args = ["--cfg", "docsrs"]
 auto_impl = "1"
 agnostic-lite = { version = "0.3", features = ["time"] }
 agnostic = "0.3"
+async-lock = "3"
 async-channel = "2"
 bytes = "1.5"
 byteorder = "1"
 derive_more = "0.99"
 futures = "0.3"
+indexmap = "2"
 local-ip-address = "0.6"
 metrics = "0.22"
 nodecraft = { version = "0.3", features = [

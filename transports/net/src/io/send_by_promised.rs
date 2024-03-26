@@ -65,7 +65,6 @@ where
   #[cfg(all(feature = "compression", feature = "encryption"))]
   fn compress_and_encrypt(
     compressor: &Compressor,
-    encryptor: &SecretKeyring,
     encryption_algo: EncryptionAlgo,
     pk: SecretKey,
     label: &Label,
@@ -85,7 +84,7 @@ where
     buf.put_slice(&[0; MAX_MESSAGE_LEN_SIZE]);
 
     let nonce_start_offset = buf.len();
-    let nonce = encryptor.write_header(&mut buf);
+    let nonce = security::write_header(&mut buf);
     let nonce_stop_offset = buf.len();
     buf.resize(total_len, 0);
 
@@ -103,8 +102,7 @@ where
     buf.put_slice(&compressed);
 
     let mut dst = buf.split_off(nonce_stop_offset);
-    encryptor
-      .encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
+    security::encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
       .map(|_| {
         buf.unsplit(dst);
         let buf_len = buf.len();
@@ -120,7 +118,6 @@ where
 
   #[cfg(feature = "encryption")]
   fn encrypt_message(
-    encryptor: &SecretKeyring,
     encryption_algo: EncryptionAlgo,
     pk: SecretKey,
     label: &Label,
@@ -140,7 +137,7 @@ where
     buf.put_slice(&[0; MAX_MESSAGE_LEN_SIZE]);
 
     let nonce_start_offset = buf.len();
-    let nonce = encryptor.write_header(&mut buf);
+    let nonce = security::write_header(&mut buf);
     let nonce_stop_offset = buf.len();
     buf.resize(total_len, 0);
 
@@ -149,8 +146,7 @@ where
     buf.truncate(nonce_stop_offset + written);
 
     let mut dst = buf.split_off(nonce_stop_offset);
-    encryptor
-      .encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
+    security::encrypt(encryption_algo, pk, nonce, label.as_bytes(), &mut dst)
       .map(|_| {
         buf.unsplit(dst);
         let buf_len = buf.len();
@@ -237,7 +233,6 @@ where
       let pk = encryptor.primary_key().await;
       Self::compress_and_encrypt(
         &compressor,
-        encryptor,
         encryption_algo,
         pk,
         stream_label,
@@ -246,7 +241,6 @@ where
       )?
     } else {
       let (tx, rx) = futures::channel::oneshot::channel();
-      let encryptor = encryptor.clone();
       let pk = encryptor.primary_key().await;
       let stream_label = stream_label.cheap_clone();
 
@@ -254,7 +248,6 @@ where
         if tx
           .send(Self::compress_and_encrypt(
             &compressor,
-            &encryptor,
             encryption_algo,
             pk,
             &stream_label,
@@ -296,16 +289,14 @@ where
     let encoded_size = W::encoded_len(&msg);
     let buf = if encoded_size < self.opts.offload_size {
       let pk = enp.primary_key().await;
-      Self::encrypt_message(enp, encryption_algo, pk, stream_label, msg, encoded_size)?
+      Self::encrypt_message(encryption_algo, pk, stream_label, msg, encoded_size)?
     } else {
       let (tx, rx) = futures::channel::oneshot::channel();
       let pk = enp.primary_key().await;
       let stream_label = stream_label.cheap_clone();
-      let enp = enp.clone();
       rayon::spawn(move || {
         if tx
           .send(Self::encrypt_message(
-            &enp,
             encryption_algo,
             pk,
             &stream_label,

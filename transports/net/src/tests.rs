@@ -23,7 +23,7 @@ use smol_str::SmolStr;
 use crate::{Checksumer, Listener, StreamLayer};
 
 #[cfg(feature = "encryption")]
-use crate::security::{EncryptionAlgo, SecretKey, SecretKeyring};
+use crate::security::{EncryptionAlgo, SecretKey};
 
 #[cfg(feature = "compression")]
 use crate::compressor::Compressor;
@@ -134,16 +134,15 @@ impl<R: Runtime> TestPacketStream for NetTransportTestPacketStream<R> {
 
     #[cfg(feature = "encryption")]
     if let Some((algo, pk)) = &self.client.send_encrypted {
-      let kr = SecretKeyring::new(*pk);
       out.put_u8(*algo as u8);
       let cur = out.len();
       out.put_u32(0); // put encrypted data length placeholder
       let nonce_offset = out.len();
-      let nonce = kr.write_header(&mut out);
+      let nonce = crate::security::write_header(&mut out);
       let data_offset = out.len();
       out.put_slice(&data);
       let mut dst = out.split_off(data_offset);
-      kr.encrypt(*algo, *pk, nonce, self.client.label.as_bytes(), &mut dst)?;
+      crate::security::encrypt(*algo, *pk, nonce, self.client.label.as_bytes(), &mut dst)?;
       out.unsplit(dst);
       let encrypted_data_len = (out.len() - nonce_offset) as u32;
       NetworkEndian::write_u32(&mut out[cur..], encrypted_data_len);
@@ -451,9 +450,8 @@ pub fn read_encrypted_data(
   src = &src[5..];
   let mut buf = BytesMut::new();
   buf.put_slice(src);
-  let kr = SecretKeyring::new(pk);
-  let nonce = kr.read_nonce(&mut buf);
-  kr.decrypt(pk, algo, nonce, auth_data, &mut buf)?;
+  let nonce = crate::security::read_nonce(&mut buf);
+  crate::security::decrypt(pk, algo, nonce, auth_data, &mut buf)?;
   Ok(buf.freeze())
 }
 

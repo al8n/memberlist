@@ -66,13 +66,13 @@ getrandom = { version = "0.2", features = ["js"] }
 [dependencies]
 agnostic.workspace = true
 async-channel.workspace = true
-async-lock = "3"
+async-lock.workspace = true
 bytes.workspace = true
 byteorder.workspace = true
 crc32fast = "1"
 either = "1"
 futures.workspace = true
-indexmap = "2"
+indexmap.workspace = true
 local-ip-address.workspace = true
 nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
 peekable = { version = "0.2", features = ["future"] }

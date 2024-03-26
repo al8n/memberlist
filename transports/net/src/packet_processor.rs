@@ -246,13 +246,7 @@ where
     };
     let keys = encryptor.keys().await;
     if encrypted_message_size <= offload_size {
-      Self::decrypt(
-        encryptor,
-        algo,
-        keys,
-        packet_label.as_bytes(),
-        &mut encrypted_message,
-      )?;
+      Self::decrypt(algo, keys, packet_label.as_bytes(), &mut encrypted_message)?;
       return Self::read_from_packet_with_compression_without_encryption(
         encrypted_message,
         offload_size,
@@ -261,7 +255,6 @@ where
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
-    let encryptor = encryptor.clone();
 
     rayon::spawn(move || {
       let then = |mut buf: BytesMut| {
@@ -282,14 +275,8 @@ where
       };
       if tx
         .send(
-          Self::decrypt(
-            &encryptor,
-            algo,
-            keys,
-            packet_label.as_bytes(),
-            &mut encrypted_message,
-          )
-          .and_then(|_| then(encrypted_message)),
+          Self::decrypt(algo, keys, packet_label.as_bytes(), &mut encrypted_message)
+            .and_then(|_| then(encrypted_message)),
         )
         .is_err()
       {
@@ -477,15 +464,16 @@ where
 
   #[cfg(feature = "encryption")]
   fn decrypt(
-    encryptor: &SecretKeyring,
     algo: EncryptionAlgo,
     keys: impl Iterator<Item = SecretKey>,
     auth_data: &[u8],
     data: &mut BytesMut,
   ) -> Result<(), NetTransportError<T::Resolver, T::Wire>> {
-    let nonce = encryptor.read_nonce(data);
+    use crate::security;
+
+    let nonce = security::read_nonce(data);
     for key in keys {
-      match encryptor.decrypt(key, algo, nonce, auth_data, data) {
+      match security::decrypt(key, algo, nonce, auth_data, data) {
         Ok(_) => return Ok(()),
         Err(e) => {
           tracing::error!("memberlist_net.packet: failed to decrypt message: {}", e);

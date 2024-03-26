@@ -18,9 +18,18 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = []
 metrics = ["dep:metrics"]
-encryption = []
+encryption = ["async-lock", "indexmap"]
 
-serde = ["dep:serde", "smol_str/serde", "smallvec-wrapper/serde", "base64", "ipnet/serde", "bytes/serde", "nodecraft/serde"]
+serde = [
+  "dep:serde",
+  "smol_str/serde",
+  "smallvec-wrapper/serde",
+  "base64",
+  "ipnet/serde",
+  "bytes/serde",
+  "nodecraft/serde",
+  "indexmap?/serde"
+]
 rkyv = ["dep:rkyv", "smallvec-wrapper/rkyv32", "nodecraft/rkyv"]
 
 [dependencies]
@@ -36,6 +45,9 @@ thiserror.workspace = true
 smol_str.workspace = true
 smallvec-wrapper.workspace = true
 viewit.workspace = true
+
+indexmap = { workspace = true, optional = true }
+async-lock = { workspace = true, optional = true }
 
 metrics = { workspace = true, optional = true }
 

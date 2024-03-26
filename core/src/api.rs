@@ -36,6 +36,14 @@ where
     self.inner.transport.local_address()
   }
 
+  /// Returns the keyring (only used for encryption) of the node
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  #[inline]
+  pub fn keyring(&self) -> Option<&super::types::SecretKeyring> {
+    self.inner.transport.keyring()
+  }
+
   /// Returns a [`Node`] with the local id and the advertise address of local node.
   #[inline]
   pub fn advertise_node(&self) -> Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> {
