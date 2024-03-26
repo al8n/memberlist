@@ -330,7 +330,7 @@ where
       max_payload_size: self.max_payload_size,
       checksumer: self.checksumer,
       #[cfg(feature = "compression")]
-      compressor: self.compressor.clone(),
+      compressor: self.compressor,
       #[cfg(any(feature = "compression", feature = "encryption"))]
       offload_size: self.offload_size,
       #[cfg(feature = "encryption")]
@@ -338,11 +338,11 @@ where
       #[cfg(feature = "encryption")]
       gossip_verify_incoming: self.gossip_verify_incoming,
       #[cfg(feature = "encryption")]
-      primary_key: self.primary_key.clone(),
+      primary_key: self.primary_key,
       #[cfg(feature = "encryption")]
       secret_keys: self.secret_keys.clone(),
       #[cfg(feature = "encryption")]
-      encryption_algo: self.encryption_algo.clone(),
+      encryption_algo: self.encryption_algo,
       #[cfg(feature = "metrics")]
       metric_labels: self.metric_labels.clone(),
     }

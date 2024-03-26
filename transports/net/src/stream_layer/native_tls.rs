@@ -24,10 +24,22 @@ use super::{Listener, PromisedStream, StreamLayer};
 #[viewit::viewit(getters(style = "ref"), setters(prefix = "with"))]
 pub struct NativeTlsOptions {
   /// The acceptor for the server.
+  #[viewit(
+    getter(const, style = "ref", attrs(doc = "Get the TLS acceptor."),),
+    setter(attrs(doc = "Set the TLS acceptor. (Builder pattern)"),)
+  )]
   acceptor: TlsAcceptor,
   /// The connector for the client.
+  #[viewit(
+    getter(const, style = "ref", attrs(doc = "Get the TLS connector."),),
+    setter(attrs(doc = "Set the TLS connector. (Builder pattern)"),)
+  )]
   connector: TlsConnector,
   /// The server name for the client.
+  #[viewit(
+    getter(const, style = "ref", attrs(doc = "Get the server name."),),
+    setter(attrs(doc = "Set the server name. (Builder pattern)"),)
+  )]
   server_name: String,
 }
 

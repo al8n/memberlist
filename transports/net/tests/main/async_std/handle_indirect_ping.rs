@@ -5,16 +5,16 @@ use crate::handle_indirect_ping_test_suites;
   not(any(feature = "tls", feature = "native-tls")),
   all(feature = "tls", feature = "native-tls")
 ))]
-handle_indirect_ping_test_suites!("tcp": AsyncStdRuntime::run({
-  Tcp::<AsyncStdRuntime>::new()
+handle_indirect_ping_test_suites!("tcp": Tcp<AsyncStdRuntime>::run({
+  ()
 }));
 
 #[cfg(feature = "tls")]
-handle_indirect_ping_test_suites!("tls": AsyncStdRuntime::run({
+handle_indirect_ping_test_suites!("tls": Tls<AsyncStdRuntime>::run({
   memberlist_net::tests::tls_stream_layer::<AsyncStdRuntime>().await
 }));
 
 #[cfg(feature = "native-tls")]
-handle_indirect_ping_test_suites!("native_tls": AsyncStdRuntime::run({
+handle_indirect_ping_test_suites!("native_tls": NativeTls<AsyncStdRuntime>::run({
   memberlist_net::tests::native_tls_stream_layer::<AsyncStdRuntime>().await
 }));

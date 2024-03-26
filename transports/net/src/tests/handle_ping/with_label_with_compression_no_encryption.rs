@@ -4,7 +4,7 @@ pub async fn server_with_label_with_compression_no_encryption_client_with_label_
   S,
   R,
 >(
-  s: S,
+  s: S::Options,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -14,10 +14,11 @@ where
   let client = NetTransportTestClient::<R>::new(kind.next(0))
     .await?
     .with_receive_compressed(true);
-  let mut opts = NetTransportOptions::new(format!("{kind}_ping_server_with_label_with_compression_no_encryption_client_with_label_no_compression_no_encryption").into())
+  let name = format!("{kind}_ping_server_with_label_with_compression_no_encryption_client_with_label_no_compression_no_encryption");
+  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
     .with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;
@@ -28,7 +29,7 @@ pub async fn server_with_label_no_compression_no_encryption_client_with_label_wi
   S,
   R,
 >(
-  s: S,
+  s: S::Options,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -38,9 +39,10 @@ where
   let client = NetTransportTestClient::<R>::new(kind.next(0))
     .await?
     .with_send_compressed(Some(Compressor::default()));
-  let mut opts = NetTransportOptions::new(format!("{kind}_ping_server_with_label_no_compression_no_encryption_client_with_label_with_compression_no_encryption").into());
+  let name = format!("{kind}_ping_server_with_label_no_compression_no_encryption_client_with_label_with_compression_no_encryption");
+  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;
@@ -51,7 +53,7 @@ pub async fn server_with_label_with_compression_no_encryption_client_with_label_
   S,
   R,
 >(
-  s: S,
+  s: S::Options,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -62,10 +64,11 @@ where
     .await?
     .with_send_compressed(Some(Compressor::default()))
     .with_receive_compressed(true);
-  let mut opts = NetTransportOptions::new(format!("{kind}_ping_server_with_label_with_compression_no_encryption_client_with_label_with_compression_no_encryption").into())
+  let name = format!("{kind}_ping_server_with_label_with_compression_no_encryption_client_with_label_with_compression_no_encryption");
+  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
     .with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;

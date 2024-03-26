@@ -1,6 +1,6 @@
 #[macro_export]
 macro_rules! handle_ping_with_label_and_compression_test_suites {
-  ($($prefix:literal: )? $rt:ident::$run:ident({ $s: expr })) => {
+  ($($prefix:literal: )? $layer:ident<$rt:ident>::$run:ident({ $s: expr })) => {
     #[cfg(feature = "compression")]
     $crate::__handle_ping_with_label_and_compression!($($prefix: )? $rt::$run({ $s }));
   };
@@ -8,7 +8,7 @@ macro_rules! handle_ping_with_label_and_compression_test_suites {
 
 #[macro_export]
 macro_rules! __handle_ping_with_label_and_compression {
-  ($($prefix:literal: )? $rt:ident::$run:ident({ $s: expr })) => {
+  ($($prefix:literal: )? $layer:ident<$rt:ident>::$run:ident({ $s: expr })) => {
     paste::paste! {
       memberlist_core::unit_tests_with_expr!($run(
         [< $($prefix)? _handle_v4_ping_server_with_label_with_compression_client_with_label_with_compression >] ({

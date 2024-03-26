@@ -7,7 +7,11 @@ use memberlist_core::{
 };
 use nodecraft::{resolver::socket_addr::SocketAddrResolver, CheapClone, Node};
 
-pub async fn gossip_mismatched_keys<S, R>(s1: S, s2: S, kind: AddressKind) -> Result<(), AnyError>
+pub async fn gossip_mismatched_keys<S, R>(
+  s1: S::Options,
+  s2: S::Options,
+  kind: AddressKind,
+) -> Result<(), AnyError>
 where
   S: StreamLayer,
   R: Runtime,
@@ -16,25 +20,23 @@ where
   let pk1 = SecretKey::Aes192(*b"4W6DGn2VQVqDEceOdmuRTQ==");
 
   let name1 = "gossip_mismatched_keys1";
-  let mut opts = NetTransportOptions::new(SmolStr::from(name1))
+  let mut opts = NetTransportOptions::<_, _, S>::new(SmolStr::from(name1), s1)
     .with_primary_key(Some(pk1))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true);
   opts.add_bind_address(kind.next(0));
-  let trans1 =
-    NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s1, opts).await?;
+  let trans1 = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts).await?;
   let m1 = Memberlist::new(trans1, Options::default()).await?;
   let m1_addr = m1.advertise_address();
 
   let name2 = "gossip_mismatched_keys2";
   let pk2 = SecretKey::Aes192(*b"XhX/w702/JKKK7/7OtM9Ww==");
-  let mut opts = NetTransportOptions::new(SmolStr::from(name2))
+  let mut opts = NetTransportOptions::<_, _, S>::new(SmolStr::from(name2), s2)
     .with_primary_key(Some(pk2))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true);
   opts.add_bind_address(kind.next(0));
-  let trans2 =
-    NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s2, opts).await?;
+  let trans2 = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts).await?;
   let m2 = Memberlist::new(trans2, Options::default()).await?;
 
   // Make sure we get this error on the joining side
@@ -51,8 +53,8 @@ where
 }
 
 pub async fn gossip_mismatched_keys_with_label<S, R>(
-  s1: S,
-  s2: S,
+  s1: S::Options,
+  s2: S::Options,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -64,27 +66,25 @@ where
 
   let name1 = "gossip_mismatched_keys1";
   let label = Label::try_from("gossip_mismatched_keys")?;
-  let mut opts = NetTransportOptions::new(SmolStr::from(name1))
+  let mut opts = NetTransportOptions::<_, _, S>::new(SmolStr::from(name1), s1)
     .with_primary_key(Some(pk1))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_label(label.cheap_clone());
   opts.add_bind_address(kind.next(0));
-  let trans1 =
-    NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s1, opts).await?;
+  let trans1 = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts).await?;
   let m1 = Memberlist::new(trans1, Options::default()).await?;
   let m1_addr = m1.advertise_address();
 
   let name2 = "gossip_mismatched_keys2";
   let pk2 = SecretKey::Aes192(*b"XhX/w702/JKKK7/7OtM9Ww==");
-  let mut opts = NetTransportOptions::new(SmolStr::from(name2))
+  let mut opts = NetTransportOptions::<_, _, S>::new(SmolStr::from(name2), s2)
     .with_primary_key(Some(pk2))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans2 =
-    NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s2, opts).await?;
+  let trans2 = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts).await?;
   let m2 = Memberlist::new(trans2, Options::default()).await?;
 
   // Make sure we get this error on the joining side

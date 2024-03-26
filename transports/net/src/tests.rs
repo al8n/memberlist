@@ -16,7 +16,7 @@ use memberlist_core::{
       AddressKind, TestPacketClient, TestPacketConnection, TestPacketStream, TestPromisedClient,
       TestPromisedConnection, TestPromisedStream,
     },
-    AddressResolver, Transport,
+    Transport,
   },
   types::{Label, LabelBufMutExt, Message},
 };

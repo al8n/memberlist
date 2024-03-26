@@ -1,6 +1,6 @@
 #[macro_export]
 macro_rules! promised_ping_test_suites {
-  ($($prefix:literal: )? $rt:ident::$run:ident({ $s: expr })) => {
+  ($($prefix:literal: )? $layer:ident<$rt:ident>::$run:ident({ $s: expr })) => {
     paste::paste! {
       memberlist_core::unit_tests_with_expr!($run(
         #[cfg(feature = "compression")]

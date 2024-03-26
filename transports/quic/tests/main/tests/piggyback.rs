@@ -1,6 +1,6 @@
 #[macro_export]
 macro_rules! __handle_piggyback {
-  ($($prefix:literal: )? $rt:ident::$run:ident({ $s: expr })) => {
+  ($($prefix:literal: )? $layer:ident<$rt:ident>::$run:ident({ $s: expr })) => {
     paste::paste! {
       memberlist_core::unit_tests_with_expr!($run(
         [< $($prefix)? _handle_v4_piggyback_with_label_and_compression >] ({
@@ -32,7 +32,7 @@ macro_rules! __handle_piggyback {
 
 #[macro_export]
 macro_rules! handle_piggyback_test_suites {
-  ($($prefix:literal: )? $rt:ident::$run:ident({ $s: expr })) => {
+  ($($prefix:literal: )? $layer:ident<$rt:ident>::$run:ident({ $s: expr })) => {
     $crate::__handle_piggyback!($($prefix: )? $rt::$run({ $s }));
   };
 }
