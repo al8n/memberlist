@@ -301,6 +301,11 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns the advertise address of the node
   fn advertise_address(&self) -> &<Self::Resolver as AddressResolver>::ResolvedAddress;
 
+  /// Returns the keyring (only used for encryption) of the node
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  fn keyring(&self) -> Option<&SecretKeyring>;
+
   /// Returns the maximum size of a packet that can be sent
   fn max_payload_size(&self) -> usize;
 
