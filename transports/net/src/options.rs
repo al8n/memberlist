@@ -4,7 +4,7 @@ use indexmap::IndexSet;
 use memberlist_core::types::{CIDRsPolicy, Label};
 use nodecraft::resolver::AddressResolver;
 
-use crate::Checksumer;
+use crate::{Checksumer, StreamLayer};
 
 /// Used to configure a net transport.
 #[viewit::viewit(
@@ -12,16 +12,17 @@ use crate::Checksumer;
   getters(vis_all = "pub"),
   setters(vis_all = "pub", prefix = "with")
 )]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
   feature = "serde",
   serde(bound(
-    serialize = "I: serde::Serialize, A: AddressResolver, A::Address: serde::Serialize, A::ResolvedAddress: serde::Serialize",
-    deserialize = "I: for<'a> serde::Deserialize<'a>, A: AddressResolver, A::Address: for<'a> serde::Deserialize<'a>, A::ResolvedAddress: for<'a> serde::Deserialize<'a>"
+    serialize = "I: serde::Serialize, A: AddressResolver, A::Address: serde::Serialize, A::ResolvedAddress: serde::Serialize, S::Options: serde::Serialize",
+    deserialize = "I: serde::Deserialize<'de>, A: AddressResolver, A::Address: serde::Deserialize<'de>, A::ResolvedAddress: serde::Deserialize<'de>, S::Options: serde::Deserialize<'de>"
   ))
 )]
-pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
+pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
+{
   /// The local node's ID.
   #[viewit(
     getter(const, style = "ref", attrs(doc = "Get the id of the node."),),
@@ -53,6 +54,13 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
     setter(attrs(doc = "Set the label of the node. (Builder pattern)"),)
   )]
   label: Label,
+
+  /// Stream layer options, which used to construct the stream layer for this transport.
+  #[viewit(
+    getter(const, style = "ref", attrs(doc = "Get the stream layer options."),),
+    setter(attrs(doc = "Set the stream layer options. (Builder pattern)"),)
+  )]
+  stream_layer_options: S::Options,
 
   /// Skips the check that inbound packets and gossip
   /// streams need to be label prefixed.
@@ -304,15 +312,54 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   )]
   metric_labels: Option<std::sync::Arc<memberlist_core::types::MetricLabels>>,
 }
+impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer> Clone
+  for NetTransportOptions<I, A, S>
+where
+  I: Clone,
+  A::Options: Clone,
+  S::Options: Clone,
+{
+  fn clone(&self) -> Self {
+    Self {
+      id: self.id.clone(),
+      bind_addresses: self.bind_addresses.clone(),
+      label: self.label.clone(),
+      stream_layer_options: self.stream_layer_options.clone(),
+      skip_inbound_label_check: self.skip_inbound_label_check,
+      cidrs_policy: self.cidrs_policy.clone(),
+      max_payload_size: self.max_payload_size,
+      checksumer: self.checksumer,
+      #[cfg(feature = "compression")]
+      compressor: self.compressor.clone(),
+      #[cfg(any(feature = "compression", feature = "encryption"))]
+      offload_size: self.offload_size,
+      #[cfg(feature = "encryption")]
+      gossip_verify_outgoing: self.gossip_verify_outgoing,
+      #[cfg(feature = "encryption")]
+      gossip_verify_incoming: self.gossip_verify_incoming,
+      #[cfg(feature = "encryption")]
+      primary_key: self.primary_key.clone(),
+      #[cfg(feature = "encryption")]
+      secret_keys: self.secret_keys.clone(),
+      #[cfg(feature = "encryption")]
+      encryption_algo: self.encryption_algo.clone(),
+      #[cfg(feature = "metrics")]
+      metric_labels: self.metric_labels.clone(),
+    }
+  }
+}
 
-impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> NetTransportOptions<I, A> {
+impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
+  NetTransportOptions<I, A, S>
+{
   /// Creates a new net transport options by id and address, other configurations are left default.
-  pub fn new(id: I) -> Self {
+  pub fn new(id: I, stream_layer_opts: S::Options) -> Self {
     Self {
       id,
       // advertise_address: None,
       bind_addresses: IndexSet::new(),
       label: Label::empty(),
+      stream_layer_options: stream_layer_opts,
       skip_inbound_label_check: false,
       cidrs_policy: CIDRsPolicy::allow_all(),
       max_payload_size: 1400,
@@ -341,4 +388,66 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> NetTransportOptions<I,
     self.bind_addresses.insert(addr);
     self
   }
+}
+
+impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
+  From<NetTransportOptions<I, A, S>> for (S::Options, Options<I, A>)
+{
+  fn from(opts: NetTransportOptions<I, A, S>) -> (S::Options, Options<I, A>) {
+    (
+      opts.stream_layer_options,
+      Options {
+        id: opts.id,
+        bind_addresses: opts.bind_addresses,
+        label: opts.label,
+        skip_inbound_label_check: opts.skip_inbound_label_check,
+        cidrs_policy: opts.cidrs_policy,
+        max_payload_size: opts.max_payload_size,
+        checksumer: opts.checksumer,
+        #[cfg(feature = "compression")]
+        compressor: opts.compressor,
+        #[cfg(feature = "encryption")]
+        gossip_verify_outgoing: opts.gossip_verify_outgoing,
+        #[cfg(feature = "encryption")]
+        gossip_verify_incoming: opts.gossip_verify_incoming,
+        #[cfg(any(feature = "compression", feature = "encryption"))]
+        offload_size: opts.offload_size,
+        #[cfg(feature = "encryption")]
+        primary_key: opts.primary_key,
+        #[cfg(feature = "encryption")]
+        secret_keys: opts.secret_keys,
+        #[cfg(feature = "encryption")]
+        encryption_algo: opts.encryption_algo,
+        #[cfg(feature = "metrics")]
+        metric_labels: opts.metric_labels,
+      },
+    )
+  }
+}
+
+#[viewit::viewit]
+pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
+  id: I,
+  bind_addresses: IndexSet<A::Address>,
+  label: Label,
+  skip_inbound_label_check: bool,
+  cidrs_policy: CIDRsPolicy,
+  max_payload_size: usize,
+  checksumer: Checksumer,
+  #[cfg(feature = "compression")]
+  compressor: Option<super::compressor::Compressor>,
+  #[cfg(feature = "encryption")]
+  gossip_verify_outgoing: bool,
+  #[cfg(feature = "encryption")]
+  gossip_verify_incoming: bool,
+  #[cfg(any(feature = "compression", feature = "encryption"))]
+  offload_size: usize,
+  #[cfg(feature = "encryption")]
+  primary_key: Option<super::security::SecretKey>,
+  #[cfg(feature = "encryption")]
+  secret_keys: Option<super::security::SecretKeys>,
+  #[cfg(feature = "encryption")]
+  encryption_algo: Option<super::security::EncryptionAlgo>,
+  #[cfg(feature = "metrics")]
+  metric_labels: Option<std::sync::Arc<memberlist_core::types::MetricLabels>>,
 }

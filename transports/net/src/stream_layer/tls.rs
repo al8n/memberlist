@@ -81,6 +81,33 @@ impl ServerCertVerifier for NoopCertificateVerifier {
   }
 }
 
+/// The options for the tls stream layer.
+#[viewit::viewit(getters(style = "ref"), setters(prefix = "with"))]
+pub struct TlsOptions {
+  /// The acceptor for the server.
+  acceptor: TlsAcceptor,
+  /// The connector for the client.
+  connector: TlsConnector,
+  /// The server name
+  server_name: ServerName<'static>,
+}
+
+impl TlsOptions {
+  /// Constructs a new `TlsOptions`.
+  #[inline]
+  pub const fn new(
+    server_name: ServerName<'static>,
+    acceptor: TlsAcceptor,
+    connector: TlsConnector,
+  ) -> Self {
+    Self {
+      acceptor,
+      connector,
+      server_name,
+    }
+  }
+}
+
 /// Tls stream layer
 pub struct Tls<R> {
   domain: ServerName<'static>,
@@ -92,7 +119,7 @@ pub struct Tls<R> {
 impl<R> Tls<R> {
   /// Create a new tcp stream layer
   #[inline]
-  pub fn new(domain: ServerName<'static>, acceptor: TlsAcceptor, connector: TlsConnector) -> Self {
+  fn new_in(domain: ServerName<'static>, acceptor: TlsAcceptor, connector: TlsConnector) -> Self {
     Self {
       domain,
       acceptor: Arc::new(acceptor),
@@ -105,6 +132,16 @@ impl<R> Tls<R> {
 impl<R: Runtime> StreamLayer for Tls<R> {
   type Listener = TlsListener<R>;
   type Stream = TlsStream<R>;
+  type Options = TlsOptions;
+
+  #[inline]
+  async fn new(options: Self::Options) -> io::Result<Self> {
+    Ok(Self::new_in(
+      options.server_name,
+      options.acceptor,
+      options.connector,
+    ))
+  }
 
   async fn connect(&self, addr: SocketAddr) -> io::Result<Self::Stream> {
     let conn = <<R::Net as Net>::TcpStream as TcpStream>::connect(addr).await?;

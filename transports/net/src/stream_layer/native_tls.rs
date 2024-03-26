@@ -19,6 +19,34 @@ use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 
 use super::{Listener, PromisedStream, StreamLayer};
 
+/// The options for the native-tls stream layer.
+#[derive(Debug)]
+#[viewit::viewit(getters(style = "ref"), setters(prefix = "with"))]
+pub struct NativeTlsOptions {
+  /// The acceptor for the server.
+  acceptor: TlsAcceptor,
+  /// The connector for the client.
+  connector: TlsConnector,
+  /// The server name for the client.
+  server_name: String,
+}
+
+impl NativeTlsOptions {
+  /// Creates a new instance.
+  #[inline]
+  pub fn new(
+    server_name: impl Into<String>,
+    acceptor: TlsAcceptor,
+    connector: TlsConnector,
+  ) -> Self {
+    Self {
+      acceptor,
+      connector,
+      server_name: server_name.into(),
+    }
+  }
+}
+
 /// Tls stream layer
 pub struct NativeTls<R> {
   acceptor: Arc<TlsAcceptor>,
@@ -30,7 +58,7 @@ pub struct NativeTls<R> {
 impl<R> NativeTls<R> {
   /// Create a new tcp stream layer
   #[inline]
-  pub fn new(
+  fn new_in(
     server_name: impl Into<String>,
     acceptor: TlsAcceptor,
     connector: TlsConnector,
@@ -47,6 +75,16 @@ impl<R> NativeTls<R> {
 impl<R: Runtime> StreamLayer for NativeTls<R> {
   type Listener = NativeTlsListener<R>;
   type Stream = NativeTlsStream<R>;
+  type Options = NativeTlsOptions;
+
+  #[inline]
+  async fn new(options: Self::Options) -> io::Result<Self> {
+    Ok(Self::new_in(
+      options.server_name,
+      options.acceptor,
+      options.connector,
+    ))
+  }
 
   async fn connect(&self, addr: SocketAddr) -> io::Result<Self::Stream> {
     let conn = <<R::Net as Net>::TcpStream as TcpStream>::connect(addr).await?;

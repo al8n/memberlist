@@ -11,9 +11,12 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use memberlist_core::{
   tests::AnyError,
-  transport::tests::{
-    AddressKind, TestPacketClient, TestPacketConnection, TestPacketStream, TestPromisedClient,
-    TestPromisedConnection, TestPromisedStream,
+  transport::{
+    tests::{
+      AddressKind, TestPacketClient, TestPacketConnection, TestPacketStream, TestPromisedClient,
+      TestPromisedConnection, TestPromisedStream,
+    },
+    AddressResolver, Transport,
   },
   types::{Label, LabelBufMutExt, Message},
 };
@@ -478,8 +481,8 @@ fn compound_encoder(msgs: &[Message<SmolStr, SocketAddr>]) -> Result<Bytes, AnyE
 
 /// A helper function to create TLS stream layer for testing
 #[cfg(feature = "tls")]
-pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::Tls<R> {
-  use crate::tls::{rustls, NoopCertificateVerifier, Tls};
+pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::TlsOptions {
+  use crate::tls::{rustls, NoopCertificateVerifier, TlsOptions};
   use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
   let certs = test_cert_gen::gen_keys();
@@ -507,7 +510,7 @@ pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::Tls<R> {
     .with_custom_certificate_verifier(NoopCertificateVerifier::new())
     .with_no_client_auth();
   let connector = futures_rustls::TlsConnector::from(Arc::new(cfg));
-  Tls::new(
+  TlsOptions::new(
     rustls::pki_types::ServerName::IpAddress(
       "127.0.0.1".parse::<std::net::IpAddr>().unwrap().into(),
     ),
@@ -518,10 +521,10 @@ pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::Tls<R> {
 
 /// A helper function to create native TLS stream layer for testing
 #[cfg(feature = "native-tls")]
-pub async fn native_tls_stream_layer<R: Runtime>() -> crate::native_tls::NativeTls<R> {
+pub async fn native_tls_stream_layer<R: Runtime>() -> crate::native_tls::NativeTlsOptions {
   use async_native_tls::{Identity, TlsAcceptor, TlsConnector};
 
-  use crate::native_tls::NativeTls;
+  use crate::native_tls::NativeTlsOptions;
 
   let keys = test_cert_gen::gen_keys();
 
@@ -534,5 +537,5 @@ pub async fn native_tls_stream_layer<R: Runtime>() -> crate::native_tls::NativeT
   let acceptor = TlsAcceptor::from(::native_tls::TlsAcceptor::new(identity).unwrap());
   let connector = TlsConnector::new().danger_accept_invalid_certs(true);
 
-  NativeTls::new("localhost".to_string(), acceptor, connector)
+  NativeTlsOptions::new("localhost".to_string(), acceptor, connector)
 }
