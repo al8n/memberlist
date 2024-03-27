@@ -12,7 +12,7 @@ macro_rules! dead_node_no_node {
           let t1 = QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
           let t1_opts = Options::lan();
 
-          dead_node_no_node(t1, t1_opts, "test".into(), $expr).await;
+          dead_node_no_node(t1, t1_opts, "test".into()).await;
         });
       }
 
@@ -26,7 +26,7 @@ macro_rules! dead_node_no_node {
           let t1 = QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
           let t1_opts = Options::lan();
 
-          dead_node_no_node(t1, t1_opts, "test".into(), $expr).await;
+          dead_node_no_node(t1, t1_opts, "test".into()).await;
         });
       }
     }

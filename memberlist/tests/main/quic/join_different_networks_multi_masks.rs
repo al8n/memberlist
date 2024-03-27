@@ -69,12 +69,11 @@ macro_rules! join_different_networks_multi_masks {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_different_networks_multi_masks >]() {
         [< $rt:snake _run >](async move {
-          join_different_networks_multi_masks(|idx, cidrs| async move {
-            let mut t1_opts = QuicTransportOptions::<SmolStr, _>::with_stream_layer_options(format!("join_different_networks_multi_masks_node_{idx}").into(), $expr)
+          join_different_networks_multi_masks::<_, QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(|idx, cidrs| async move {
+            let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_different_networks_multi_masks_node_{idx}").into(), $expr)
               .with_cidrs_policy(cidrs);
             t1_opts.add_bind_address(next_socket_addr_v4(idx as u8));
-
-            QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
+            t1_opts
           }).await;
         });
       }
@@ -83,12 +82,11 @@ macro_rules! join_different_networks_multi_masks {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_different_networks_multi_masks_with_compression >]() {
         [< $rt:snake _run >](async move {
-          join_different_networks_multi_masks(|idx, cidrs| async move {
-            let mut t1_opts = QuicTransportOptions::<SmolStr, _>::with_stream_layer_options(format!("join_different_networks_multi_masks_node_{idx}").into(), $expr)
+          join_different_networks_multi_masks::<_, QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(|idx, cidrs| async move {
+            let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_different_networks_multi_masks_node_{idx}").into(), $expr)
               .with_cidrs_policy(cidrs).with_compressor(Some(Default::default()));
             t1_opts.add_bind_address(next_socket_addr_v4(idx as u8));
-
-            QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
+            t1_opts
           }).await;
         });
       }

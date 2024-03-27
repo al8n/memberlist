@@ -12,7 +12,7 @@ macro_rules! alive_node_conflict {
           let t1 = QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
           let t1_opts = Options::lan();
 
-          alive_node_conflict(t1, t1_opts, "test".into(), $expr).await;
+          alive_node_conflict(t1, t1_opts, "test".into()).await;
         });
       }
 
@@ -26,7 +26,7 @@ macro_rules! alive_node_conflict {
           let t1 = QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
           let t1_opts = Options::lan();
 
-          alive_node_conflict(t1, t1_opts, "test".into(), $expr).await;
+          alive_node_conflict(t1, t1_opts, "test".into()).await;
         });
       }
     }
