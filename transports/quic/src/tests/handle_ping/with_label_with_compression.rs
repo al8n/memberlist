@@ -12,13 +12,13 @@ where
   let name =
     format!("{kind}_ping_server_with_label_with_compression_client_with_label_no_compression");
   let label = Label::try_from(&name)?;
-  let mut opts = QuicTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = QuicTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_label(label.cheap_clone())
     .with_compressor(Some(Default::default()));
 
   let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts).await?;
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
   let remote_addr = trans.advertise_address();
   let c = S::new(c).await.unwrap();
   let tc = QuicTransportTestClient::<S, R>::new(local_addr, *remote_addr, c)
@@ -43,12 +43,12 @@ where
   let name =
     format!("{kind}_ping_server_with_label_no_compression_client_with_label_with_compression");
   let label = Label::try_from(&name)?;
-  let mut opts =
-    QuicTransportOptions::<_, _, S>::new(name.into(), s).with_label(label.cheap_clone());
+  let mut opts = QuicTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
+    .with_label(label.cheap_clone());
 
   let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts).await?;
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
   let remote_addr = trans.advertise_address();
   let c = S::new(c).await.unwrap();
   let tc = QuicTransportTestClient::<S, R>::new(local_addr, *remote_addr, c)
@@ -73,14 +73,14 @@ where
   let name =
     format!("{kind}_ping_server_with_label_with_compression_client_with_label_with_compression");
   let label = Label::try_from(&name)?;
-  let mut opts = QuicTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = QuicTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_label(label.cheap_clone())
     .with_compressor(Some(Default::default()))
     .with_offload_size(10);
 
   let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts).await?;
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
   let remote_addr = trans.advertise_address();
   let c = S::new(c).await.unwrap();
   let tc = QuicTransportTestClient::<S, R>::new(local_addr, *remote_addr, c)

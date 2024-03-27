@@ -19,7 +19,7 @@ where
   let label = Label::try_from(&name)?;
   let pk = SecretKey::from([1; 32]);
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
@@ -27,7 +27,7 @@ where
     .with_label(label)
     .with_offload_size(100);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -47,13 +47,13 @@ where
   let name = format!("{kind}_promised_push_pull_no_label");
   let pk = SecretKey::from([1; 32]);
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -72,10 +72,10 @@ where
 {
   let name = format!("{kind}_promised_push_pull_compression_only");
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -95,11 +95,11 @@ where
   let name = format!("{kind}_promised_push_pull_label_and_compression");
   let label = Label::try_from(&name)?;
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_compressor(Some(Compressor::default()))
     .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -119,12 +119,12 @@ where
   let name = format!("{kind}_promised_push_pull_encryption_only");
   let pk = SecretKey::from([1; 32]);
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -145,13 +145,13 @@ where
   let label = Label::try_from(&name)?;
   let pk = SecretKey::from([1; 32]);
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -169,9 +169,9 @@ where
 {
   let name = format!("{kind}_promised_push_pull_no_compression_no_encryption");
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s);
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -190,9 +190,10 @@ where
   let name = format!("{kind}_promised_push_pull_label_only");
   let label = Label::try_from(&name)?;
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s).with_label(label);
+  let mut opts =
+    NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s).with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;

@@ -19,10 +19,18 @@ where
   let name = format!("{kind}_join_dead_node");
   let label = Label::try_from(&name)?;
 
-  let mut opts = QuicTransportOptions::<_, _, S>::new("node 1".into(), s1);
+  let mut opts =
+    QuicTransportOptions::<SmolStr, SocketAddrResolver<R>, S>::with_stream_layer_options(
+      "node 1".into(),
+      s1,
+    );
   opts.add_bind_address(kind.next(0));
-  let trans1 = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts).await?;
 
-  join_dead_node_in(trans1, client, "fake".into()).await;
+  join_dead_node_in::<_, QuicTransport<SmolStr, SocketAddrResolver<R>, _, Lpe<_, _>, _>, _, _>(
+    opts,
+    client,
+    "fake".into(),
+  )
+  .await;
   Ok(())
 }

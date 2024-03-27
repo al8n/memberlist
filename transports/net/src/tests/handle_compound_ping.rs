@@ -22,7 +22,7 @@ where
     .with_receive_compressed(true)
     .with_receive_verify_label(true);
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
@@ -30,7 +30,7 @@ where
     .with_label(label)
     .with_offload_size(20);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   handle_compound_ping(trans, client, super::compound_encoder).await?;
@@ -55,12 +55,12 @@ where
     .with_receive_compressed(true)
     .with_receive_verify_label(true);
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_compressor(Some(Compressor::default()))
     .with_label(label)
     .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   handle_compound_ping(trans, client, super::compound_encoder).await?;
@@ -86,13 +86,13 @@ where
     .with_receive_encrypted(Some(pk))
     .with_receive_verify_label(true);
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_label(label)
     .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   handle_compound_ping(trans, client, super::compound_encoder).await?;
@@ -116,9 +116,10 @@ where
     .with_send_label(true)
     .with_receive_verify_label(true);
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s).with_label(label);
+  let mut opts =
+    NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s).with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   handle_compound_ping(trans, client, super::compound_encoder).await?;

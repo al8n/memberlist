@@ -9,8 +9,8 @@ use super::*;
 #[cfg_attr(
   feature = "serde",
   serde(bound(
-    serialize = "I: serde::Serialize, A: AddressResolver, A::Address: serde::Serialize, A::ResolvedAddress: serde::Serialize, S::Options: serde::Serialize",
-    deserialize = "I: for<'a> serde::Deserialize<'a>, A: AddressResolver, A::Address: for<'a> serde::Deserialize<'a>, A::ResolvedAddress: for<'a> serde::Deserialize<'a>, S::Options: serde::Deserialize<'de>"
+    serialize = "I: serde::Serialize, A: AddressResolver, A::Address: serde::Serialize, A::ResolvedAddress: serde::Serialize, A::Options: serde::Serialize, S::Options: serde::Serialize",
+    deserialize = "I: serde::Deserialize<'de>, A: AddressResolver, A::Address: serde::Deserialize<'de>, A::ResolvedAddress: serde::Deserialize<'de>, A::Options: serde::Deserialize<'de>, S::Options: serde::Deserialize<'de>"
   ))
 )]
 pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
@@ -47,12 +47,19 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   label: Label,
 
+  /// Resolver options, which used to construct the address resolver for this transport.
+  #[viewit(
+    getter(const, style = "ref", attrs(doc = "Get the address resolver options."),),
+    setter(attrs(doc = "Set the address resolver options. (Builder pattern)"),)
+  )]
+  resolver: A::Options,
+
   /// Stream layer options, which used to construct the stream layer for this transport.
   #[viewit(
     getter(const, style = "ref", attrs(doc = "Get the stream layer options."),),
     setter(attrs(doc = "Set the stream layer options. (Builder pattern)"),)
   )]
-  stream_layer_options: S::Options,
+  stream_layer: S::Options,
 
   /// Skips the check that inbound packets and gossip
   /// streams need to be label prefixed.
@@ -180,15 +187,61 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
   QuicTransportOptions<I, A, S>
+where
+  A::Options: Default,
+  S::Options: Default,
 {
-  /// Creates a new net transport options by id and address, other configurations are left default.
-  pub fn new(id: I, stream_layer_opts: S::Options) -> Self {
+  /// Creates a new net transport options by id, other configurations are left default.
+  #[inline]
+  pub fn new(id: I) -> Self {
+    Self::with_resolver_options_and_stream_layer_options(id, Default::default(), Default::default())
+  }
+}
+
+impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
+  QuicTransportOptions<I, A, S>
+where
+  A::Options: Default,
+{
+  /// Creates a new net transport options by id, other configurations are left default.
+  #[inline]
+  pub fn with_stream_layer_options(id: I, stream_layer_options: S::Options) -> Self {
+    Self::with_resolver_options_and_stream_layer_options(
+      id,
+      Default::default(),
+      stream_layer_options,
+    )
+  }
+}
+
+impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
+  QuicTransportOptions<I, A, S>
+where
+  S::Options: Default,
+{
+  /// Creates a new net transport options by id, other configurations are left default.
+  #[inline]
+  pub fn with_resolver_options(id: I, resolver_options: A::Options) -> Self {
+    Self::with_resolver_options_and_stream_layer_options(id, resolver_options, Default::default())
+  }
+}
+
+impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
+  QuicTransportOptions<I, A, S>
+{
+  /// Creates a new net transport options by id, resolver options and stream layer options, other configurations are left default.
+  pub fn with_resolver_options_and_stream_layer_options(
+    id: I,
+    resolver_options: A::Options,
+    stream_layer_opts: S::Options,
+  ) -> Self {
     Self {
       id,
       timeout: None,
       bind_addresses: IndexSet::new(),
       label: Label::empty(),
-      stream_layer_options: stream_layer_opts,
+      resolver: resolver_options,
+      stream_layer: stream_layer_opts,
       skip_inbound_label_check: false,
       cidrs_policy: CIDRsPolicy::allow_all(),
       connection_pool_cleanup_period: default_connection_pool_cleanup_period(),
@@ -214,11 +267,12 @@ const fn default_connection_pool_cleanup_period() -> Duration {
 }
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
-  From<QuicTransportOptions<I, A, S>> for (S::Options, Options<I, A>)
+  From<QuicTransportOptions<I, A, S>> for (A::Options, S::Options, Options<I, A>)
 {
   fn from(opts: QuicTransportOptions<I, A, S>) -> Self {
     (
-      opts.stream_layer_options,
+      opts.resolver,
+      opts.stream_layer,
       Options {
         id: opts.id,
         bind_addresses: opts.bind_addresses,

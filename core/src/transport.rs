@@ -287,10 +287,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   type Options: Send + Sync + 'static;
 
   /// Creates a new transport with the given options
-  fn new(
-    resolver_options: <Self::Resolver as AddressResolver>::Options,
-    transport_options: Self::Options,
-  ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+  fn new(options: Self::Options) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
   /// Resolves the given address to a resolved address
   fn resolve(

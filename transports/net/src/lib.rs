@@ -164,16 +164,14 @@ where
   R: Runtime,
 {
   /// Creates a new net transport.
-  async fn _new(
-    resolver_opts: A::Options,
-    opts: NetTransportOptions<I, A, S>,
-  ) -> Result<Self, NetTransportError<A, W>> {
+  async fn _new(opts: NetTransportOptions<I, A, S>) -> Result<Self, NetTransportError<A, W>> {
+    let (resolver_opts, stream_layer_opts, opts) = opts.into();
     let resolver = Arc::new(
       <A as AddressResolver>::new(resolver_opts)
         .await
         .map_err(NetTransportError::Resolver)?,
     );
-    let (stream_layer_opts, opts) = opts.into();
+
     let stream_layer = Arc::new(
       <S as StreamLayer>::new(stream_layer_opts)
         .await
@@ -437,11 +435,8 @@ where
 
   type Options = NetTransportOptions<Self::Id, Self::Resolver, S>;
 
-  async fn new(
-    resolver_opts: <Self::Resolver as AddressResolver>::Options,
-    transport_opts: Self::Options,
-  ) -> Result<Self, Self::Error> {
-    Self::_new(resolver_opts, transport_opts).await
+  async fn new(transport_opts: Self::Options) -> Result<Self, Self::Error> {
+    Self::_new(transport_opts).await
   }
 
   async fn resolve(

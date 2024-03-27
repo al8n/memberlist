@@ -415,14 +415,12 @@ where
 
   type Options = QuicTransportOptions<I, A, S>;
 
-  async fn new(
-    resolver_opts: A::Options,
-    transport_opts: Self::Options,
-  ) -> Result<Self, Self::Error> {
-    let resolver = <A as AddressResolver>::new(resolver_opts)
+  async fn new(transport_opts: Self::Options) -> Result<Self, Self::Error> {
+    let (resolver_options, stream_layer_options, opts) = transport_opts.into();
+    let resolver = <A as AddressResolver>::new(resolver_options)
       .await
       .map_err(Self::Error::Resolver)?;
-    let (stream_layer_options, opts) = transport_opts.into();
+
     let stream_layer = S::new(stream_layer_options)
       .await
       .map_err(Self::Error::Stream)?;

@@ -5,7 +5,6 @@ use crate::{QuicTransport, QuicTransportOptions, StreamLayer};
 
 use super::*;
 
-#[cfg(feature = "compression")]
 pub async fn join<S1, S2, R>(
   s1: S1::Options,
   s2: S2::Options,
@@ -21,19 +20,20 @@ where
   let name = format!("{kind}_join");
   let label = Label::try_from(&name)?;
 
-  let mut opts = QuicTransportOptions::<_, _, S1>::new("node 1".into(), s1)
-    // .with_compressor(Some(Compressor::default()))
+  let mut opts1 = QuicTransportOptions::<_, _, S1>::with_stream_layer_options("node 1".into(), s1)
     .with_label(label.cheap_clone());
-  opts.add_bind_address(kind.next(0));
-  let trans1 = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts).await?;
+  opts1.add_bind_address(kind.next(0));
 
-  let mut opts = QuicTransportOptions::<_, _, S2>::new("node 2".into(), s2)
-    // .with_compressor(Some(Compressor::default()))
+  let mut opts2 = QuicTransportOptions::<_, _, S2>::with_stream_layer_options("node 2".into(), s2)
     .with_label(label);
-  opts.add_bind_address(kind.next(0));
+  opts2.add_bind_address(kind.next(0));
 
-  let trans2 = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts).await?;
-
-  join_in(trans1, trans2).await?;
+  join_in::<
+    _,
+    QuicTransport<SmolStr, SocketAddrResolver<R>, _, Lpe<_, _>, _>,
+    QuicTransport<SmolStr, SocketAddrResolver<R>, _, Lpe<_, _>, _>,
+    _,
+  >(opts1, opts2)
+  .await?;
   Ok(())
 }

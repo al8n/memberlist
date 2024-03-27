@@ -19,14 +19,14 @@ where
   let label = Label::try_from(&name)?;
   let pk = SecretKey::from([1; 32]);
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()))
     .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -46,14 +46,14 @@ where
   let name = format!("{kind}_promised_ping_no_label");
   let pk = SecretKey::from([1; 32]);
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()))
     .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -72,10 +72,10 @@ where
 {
   let name = format!("{kind}_promised_ping_compression_only");
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -95,12 +95,12 @@ where
   let name = format!("{kind}_promised_ping_label_and_compression");
   let label = Label::try_from(&name)?;
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_compressor(Some(Compressor::default()))
     .with_label(label)
     .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -120,13 +120,13 @@ where
   let name = format!("{kind}_promised_ping_encryption_only");
   let pk = SecretKey::from([1; 32]);
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -147,13 +147,13 @@ where
   let label = Label::try_from(&name)?;
   let pk = SecretKey::from([1; 32]);
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -171,9 +171,9 @@ where
 {
   let name = format!("{kind}_promised_ping_no_compression_no_encryption");
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s);
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -192,9 +192,10 @@ where
   let name = format!("{kind}_promised_ping_label_only");
   let label = Label::try_from(&name)?;
 
-  let mut opts = NetTransportOptions::<_, _, S>::new(name.into(), s).with_label(label);
+  let mut opts =
+    NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s).with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;

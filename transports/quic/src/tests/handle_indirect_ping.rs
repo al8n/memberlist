@@ -17,11 +17,11 @@ where
   let name = format!("{kind}_indirect_ping");
   let label = Label::try_from(&name)?;
 
-  let mut opts = QuicTransportOptions::<_, _, S>::new(name.into(), s)
+  let mut opts = QuicTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_compressor(Some(Compressor::default()))
     .with_label(label.cheap_clone());
   opts.add_bind_address(kind.next(0));
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts).await?;
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
   let remote_addr = trans.advertise_address();
   let c = S::new(c).await.unwrap();
   let tc = QuicTransportTestClient::<_, R>::new(kind.next(0), *remote_addr, c)
