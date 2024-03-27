@@ -7,7 +7,7 @@ use agnostic::smol::SmolRuntime;
 #[cfg(feature = "tokio")]
 use agnostic::tokio::TokioRuntime;
 
-use memberlist_quic::tests::quinn_stream_layer;
+use memberlist_quic::{stream_layer::quinn::Quinn, tests::quinn_stream_layer};
 
 use memberlist_core::tests::run as run_unit_test;
 

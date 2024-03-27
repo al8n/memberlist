@@ -1,12 +1,12 @@
 #[macro_export]
 macro_rules! __handle_join {
-  ($($prefix:literal: )? $rt:ident::$run:ident({ $s: expr })) => {
+  ($($prefix:literal: )? $layer:ident<$rt:ident>::$run:ident({ $s: expr })) => {
     paste::paste! {
       memberlist_core::unit_tests_with_expr!($run(
         [< $($prefix)? _handle_v4_join_with_label_and_compression >] ({
           let s = $s;
           let c = $s;
-          if let Err(e) = memberlist_quic::tests::join::join::<_, _, $rt>(
+          if let Err(e) = memberlist_quic::tests::join::join::<$layer<$rt>, $layer<$rt>, $rt>(
             s,
             c,
             memberlist_core::transport::tests::AddressKind::V4,
@@ -17,7 +17,7 @@ macro_rules! __handle_join {
         [< $($prefix)? _handle_v6_join_with_label_and_compression >] ({
           let s = $s;
           let c = $s;
-          if let Err(e) = memberlist_quic::tests::join::join::<_, _, $rt>(
+          if let Err(e) = memberlist_quic::tests::join::join::<$layer<$rt>, $layer<$rt>, $rt>(
             s,
             c,
             memberlist_core::transport::tests::AddressKind::V6,
@@ -32,7 +32,7 @@ macro_rules! __handle_join {
 
 #[macro_export]
 macro_rules! handle_join_test_suites {
-  ($($prefix:literal: )? $rt:ident::$run:ident({ $s: expr })) => {
-    $crate::__handle_join!($($prefix: )? $rt::$run({ $s }));
+  ($($prefix:literal: )? $layer:ident<$rt:ident>::$run:ident({ $s: expr })) => {
+    $crate::__handle_join!($($prefix: )? $layer<$rt>::$run({ $s }));
   };
 }

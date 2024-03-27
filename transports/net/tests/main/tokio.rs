@@ -1,3 +1,4 @@
+use super::*;
 use agnostic::tokio::TokioRuntime;
 use memberlist_core::tests::run as run_unit_test;
 
@@ -9,12 +10,6 @@ fn run(fut: impl std::future::Future<Output = ()>) {
     .unwrap();
   run_unit_test(|fut| runtime.block_on(fut), fut)
 }
-
-#[cfg(any(
-  not(any(feature = "tls", feature = "native-tls")),
-  all(feature = "tls", feature = "native-tls")
-))]
-use memberlist_net::stream_layer::tcp::Tcp;
 
 #[path = "tokio/handle_compound_ping.rs"]
 mod handle_compound_ping;

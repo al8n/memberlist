@@ -1,4 +1,12 @@
-use std::{cell::RefCell, collections::HashMap, future::Future, net::SocketAddr, time::Duration};
+#![allow(clippy::await_holding_lock)]
+
+use std::{
+  collections::HashMap,
+  future::Future,
+  net::SocketAddr,
+  sync::{Arc, Mutex},
+  time::Duration,
+};
 
 use agnostic::Runtime;
 use memberlist::{
@@ -34,47 +42,45 @@ type Delegate = CompositeDelegate<
 /// 3. Change `gossip_verify_incoming=true` to all nodes.
 async fn encrypted_gossip_transition<F, S, R>(mut create_stream_layer: impl FnMut() -> F + Copy)
 where
-  F: Future<Output = S>,
+  F: Future<Output = S::Options>,
   S: StreamLayer,
   R: Runtime,
 {
-  let pretty = RefCell::new(HashMap::new());
-  let new_config = |short_name: SmolStr, addr: Option<SocketAddr>| {
-    let opts = match addr {
-      Some(addr) => {
-        let mut opts = NetTransportOptions::new(short_name.clone());
-        opts.add_bind_address(addr);
-        opts
-      }
-      None => {
-        let addr = AddressKind::V4.next(0);
-        let mut opts = NetTransportOptions::new(addr.to_string().into());
+  let pretty = Arc::new(Mutex::new(HashMap::new()));
+  let mut new_config = |short_name: SmolStr, addr: Option<SocketAddr>| {
+    let s = create_stream_layer();
+    let pretty = pretty.clone();
+    async move {
+      let opts = match addr {
+        Some(addr) => {
+          let mut opts =
+            NetTransportOptions::with_stream_layer_options(short_name.clone(), s.await);
+          opts.add_bind_address(addr);
+          opts
+        }
+        None => {
+          let addr = AddressKind::V4.next(0);
+          let mut opts =
+            NetTransportOptions::with_stream_layer_options(addr.to_string().into(), s.await);
+          opts.add_bind_address(addr);
+          opts
+        }
+      };
 
-        opts.add_bind_address(addr);
-        opts
-      }
-    };
+      // Set the gossip interval fast enough to get a reasonable test,
+      // but slow enough to avoid "sendto: operation not permitted"
 
-    // Set the gossip interval fast enough to get a reasonable test,
-    // but slow enough to avoid "sendto: operation not permitted"
+      let mopts = Options::lan().with_gossip_interval(Duration::from_millis(100));
 
-    let mopts = Options::lan().with_gossip_interval(Duration::from_millis(100));
-
-    pretty.borrow_mut().insert(opts.id().clone(), short_name);
-    (mopts, opts)
+      pretty.lock().unwrap().insert(opts.id().clone(), short_name);
+      (mopts, opts)
+    }
   };
 
-  let create_ok = |opts: Options, topts: NetTransportOptions<SmolStr, SocketAddrResolver<R>>| async move {
-    let t = NetTransport::new(
-      SocketAddrResolver::new(),
-      create_stream_layer().await,
-      topts,
-    )
-    .await
-    .unwrap();
-    Memberlist::with_delegate(
-      t,
+  let create_ok = |opts: Options, topts: NetTransportOptions<SmolStr, SocketAddrResolver<R>, S>| async move {
+    Memberlist::<NetTransport<S, R>, _>::with_delegate(
       CompositeDelegate::new().with_node_delegate(MockDelegate::new()),
+      topts,
       opts,
     )
     .await
@@ -84,8 +90,9 @@ where
   let join_ok = |src: Memberlist<NetTransport<S, R>, Delegate>,
                  dst: Memberlist<NetTransport<S, R>, Delegate>,
                  num_nodes: usize| {
-    let pretty = pretty.borrow();
+    let pretty = pretty.clone();
     async move {
+      let pretty = pretty.lock().unwrap();
       let src_name = pretty.get(src.local_id()).unwrap();
       let dst_name = pretty.get(dst.local_id()).unwrap();
       tracing::info!(
@@ -113,7 +120,7 @@ where
   };
 
   let leave_ok = |src: Memberlist<NetTransport<S, R>, Delegate>, why: String| {
-    let name = pretty.borrow().get(src.local_id()).cloned().unwrap();
+    let name = pretty.lock().unwrap().get(src.local_id()).cloned().unwrap();
     async move {
       tracing::info!("node {}[{}] is leaving {}", name, src.local_id(), why);
       src.leave(Duration::from_secs(1)).await.unwrap();
@@ -121,7 +128,7 @@ where
   };
 
   let shutdown_ok = |src: Memberlist<NetTransport<S, R>, Delegate>, why: String| {
-    let pretty = pretty.borrow();
+    let pretty = pretty.lock().unwrap();
     async move {
       let name = pretty.get(src.local_id()).cloned().unwrap();
       tracing::info!(
@@ -146,10 +153,10 @@ where
   // ==== STEP 0 ====
 
   // Create a first cluster of 2 nodes with no gossip encryption settings.
-  let (conf0, topts) = new_config(SmolStr::from("m0"), None);
+  let (conf0, topts) = new_config(SmolStr::from("m0"), None).await;
   let m0 = create_ok(conf0, topts).await;
 
-  let (conf1, topts) = new_config(SmolStr::from("m1"), None);
+  let (conf1, topts) = new_config(SmolStr::from("m1"), None).await;
   let m1 = create_ok(conf1, topts).await;
 
   join_ok(m0.clone(), m1.clone(), 2).await;
@@ -167,7 +174,7 @@ where
   .await;
 
   // Resurrect the first node with the first stage of gossip transition settings.
-  let (conf0, topts) = new_config(SmolStr::from("m0"), None);
+  let (conf0, topts) = new_config(SmolStr::from("m0"), None).await;
   let topts = topts
     .with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")))
     .with_gossip_verify_incoming(false)
@@ -186,7 +193,7 @@ where
   .await;
 
   // Resurrect the second node with the first stage of gossip transition settings.
-  let (conf1, topts) = new_config(SmolStr::from("m1"), None);
+  let (conf1, topts) = new_config(SmolStr::from("m1"), None).await;
   let topts = topts
     .with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")))
     .with_gossip_verify_incoming(false)
@@ -211,7 +218,7 @@ where
   .await;
 
   // Resurrect the first node with the second stage of gossip transition settings.
-  let (conf0, topts) = new_config(SmolStr::from("m0"), None);
+  let (conf0, topts) = new_config(SmolStr::from("m0"), None).await;
   let topts = topts
     .with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")))
     .with_gossip_verify_incoming(false);
@@ -230,7 +237,7 @@ where
   .await;
 
   // Resurrect the second node with the second stage of gossip transition settings.
-  let (conf1, topts) = new_config(SmolStr::from("m1"), None);
+  let (conf1, topts) = new_config(SmolStr::from("m1"), None).await;
   let topts = topts
     .with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")))
     .with_gossip_verify_incoming(false);
@@ -254,7 +261,7 @@ where
   .await;
 
   // Resurrect the first node with the final stage of gossip transition settings.
-  let (conf0, topts) = new_config(SmolStr::from("m0"), None);
+  let (conf0, topts) = new_config(SmolStr::from("m0"), None).await;
   let topts = topts.with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")));
   let m0 = create_ok(conf0, topts).await;
 
@@ -271,7 +278,7 @@ where
   .await;
 
   // Resurrect the second node with the final stage of gossip transition settings.
-  let (conf1, topts) = new_config(SmolStr::from("m1"), None);
+  let (conf1, topts) = new_config(SmolStr::from("m1"), None).await;
   let topts = topts.with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")));
   let m1 = create_ok(conf1, topts).await;
 
@@ -283,12 +290,12 @@ where
 }
 
 macro_rules! encrypted_gossip_transition {
-  ($rt: ident ($kind:literal, $expr: expr)) => {
+  ($layer:ident<$rt: ident> ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _encrypted_gossip_transition >]() {
         [< $rt:snake _run >](async move {
-          encrypted_gossip_transition::<_, _, [< $rt:camel Runtime >]>(|| async move { $expr }).await;
+          encrypted_gossip_transition::<_, $layer<[< $rt:camel Runtime >]>, [< $rt:camel Runtime >]>(|| async move { $expr }).await;
         });
       }
     }

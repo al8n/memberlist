@@ -794,20 +794,20 @@ where
 }
 
 /// Unit test for join functionality for the transport.
-pub async fn join<A, T1, T2, R>(trans1: T1, trans2: T2) -> Result<(), AnyError>
+pub async fn join<A, T1, T2, R>(trans1: T1::Options, trans2: T2::Options) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   T1: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   T2: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   R: RuntimeLite,
 {
-  let m1 = Memberlist::new(trans1, Options::default())
+  let m1 = Memberlist::<T1, _>::new(trans1, Options::default())
     .await
     .map_err(|e| {
       tracing::error!("fail to start memberlist node 1: {}", e);
       e
     })?;
-  let m2 = Memberlist::new(trans2, Options::default())
+  let m2 = Memberlist::<T2, _>::new(trans2, Options::default())
     .await
     .map_err(|e| {
       tracing::error!("fail to start memberlist node 2: {}", e);
@@ -830,7 +830,7 @@ where
 }
 
 /// Unit test for join a dead node
-pub async fn join_dead_node<A, T, P, R>(trans1: T, promised: P, fake_id: T::Id)
+pub async fn join_dead_node<A, T, P, R>(trans1: T::Options, promised: P, fake_id: T::Id)
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
@@ -839,7 +839,7 @@ where
 {
   let local_addr = promised.local_addr().unwrap();
 
-  let m = Memberlist::new(
+  let m = Memberlist::<T, _>::new(
     trans1,
     Options::default().with_timeout(Duration::from_millis(50)),
   )
@@ -859,20 +859,20 @@ where
 }
 
 /// Unit test for send functionality for the transport.
-pub async fn send<A, T1, T2, R>(trans1: T1, trans2: T2) -> Result<(), AnyError>
+pub async fn send<A, T1, T2, R>(trans1: T1::Options, trans2: T2::Options) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   T1: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   T2: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
   R: RuntimeLite,
 {
-  let m1 = Memberlist::with_delegate(
-    trans1,
+  let m1 = Memberlist::<T1, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<SmolStr, SocketAddr>::new()),
+    trans1,
     Options::default(),
   )
   .await?;
-  let m2 = Memberlist::new(trans2, Options::default()).await?;
+  let m2 = Memberlist::<T2, _>::new(trans2, Options::default()).await?;
 
   m2.join(Node::new(
     m1.local_id().cheap_clone(),

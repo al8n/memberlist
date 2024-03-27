@@ -139,6 +139,14 @@ where
   impl<TS: StreamLayer> StreamLayer for TestStreamLayer<TS> {
     type Listener = TestListener<TS>;
     type Stream = TS::Stream;
+    type Options = ();
+
+    async fn new(_: Self::Options) -> std::io::Result<Self>
+    where
+      Self: Sized,
+    {
+      unreachable!()
+    }
 
     async fn connect(&self, _addr: SocketAddr) -> std::io::Result<Self::Stream> {
       unreachable!()

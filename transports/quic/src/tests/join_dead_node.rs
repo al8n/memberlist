@@ -6,7 +6,7 @@ use crate::{QuicTransport, QuicTransportOptions, StreamLayer};
 use super::*;
 
 pub async fn join_dead_node<S, R>(
-  s1: S,
+  s1: S::Options,
   client: QuicTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
@@ -19,11 +19,18 @@ where
   let name = format!("{kind}_join_dead_node");
   let label = Label::try_from(&name)?;
 
-  let mut opts = QuicTransportOptions::new("node 1".into());
+  let mut opts =
+    QuicTransportOptions::<SmolStr, SocketAddrResolver<R>, S>::with_stream_layer_options(
+      "node 1".into(),
+      s1,
+    );
   opts.add_bind_address(kind.next(0));
-  let trans1 =
-    QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s1, opts).await?;
 
-  join_dead_node_in(trans1, client, "fake".into()).await;
+  join_dead_node_in::<_, QuicTransport<SmolStr, SocketAddrResolver<R>, _, Lpe<_, _>, _>, _, _>(
+    opts,
+    client,
+    "fake".into(),
+  )
+  .await;
   Ok(())
 }

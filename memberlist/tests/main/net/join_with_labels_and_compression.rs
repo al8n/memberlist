@@ -10,18 +10,18 @@ use super::*;
 pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
   mut get_transport: impl FnMut(usize, Label, Compressor) -> F,
 ) where
-  F: Future<Output = T>,
+  F: Future<Output = T::Options>,
   T: Transport<Runtime = R>,
   R: Runtime,
 {
   let label1 = Label::try_from("blah").unwrap();
-  let m1 = Memberlist::new(
+  let m1 = Memberlist::<T, _>::new(
     get_transport(1, label1.clone(), Compressor::default()).await,
     Options::lan(),
   )
   .await
   .unwrap();
-  let m2 = Memberlist::new(
+  let m2 = Memberlist::<T, _>::new(
     get_transport(2, label1.clone(), Compressor::default()).await,
     Options::lan(),
   )
@@ -41,7 +41,7 @@ pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
 
   // Create a third node that uses no label
-  let m3 = Memberlist::new(
+  let m3 = Memberlist::<T, _>::new(
     get_transport(3, Label::empty(), Compressor::default()).await,
     Options::lan(),
   )
@@ -60,7 +60,7 @@ pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
 
   // Create a fourth node that uses a mismatched label
   let label = Label::try_from("not-blah").unwrap();
-  let m4 = Memberlist::new(
+  let m4 = Memberlist::<T, _>::new(
     get_transport(4, label, Compressor::default()).await,
     Options::lan(),
   )
@@ -87,18 +87,18 @@ pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
 }
 
 macro_rules! join_with_labels_and_compression {
-  ($rt: ident ($kind:literal, $expr: expr)) => {
+  ($layer:ident<$rt: ident> ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_with_labels >]() {
         [< $rt:snake _run >](async move {
-          memberlist_join_with_labels_and_compression(|idx, label, compressor| async move {
-            let mut t1_opts = NetTransportOptions::<SmolStr, _>::new(format!("join_with_labels_and_compression_node_{idx}").into())
+          memberlist_join_with_labels_and_compression::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(|idx, label, compressor| async move {
+            let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_with_labels_and_compression_node_{idx}").into(), $expr)
               .with_label(label)
               .with_compressor(Some(compressor));
             t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-            NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap()
+            t1_opts
           }).await;
         });
       }

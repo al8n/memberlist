@@ -34,7 +34,7 @@ pub use meta::*;
 mod metrics_label;
 #[cfg(feature = "metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
-pub use metrics_label::*;
+pub use metrics_label::MetricLabels;
 
 mod cidr_policy;
 pub use cidr_policy::*;

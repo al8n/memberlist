@@ -19,6 +19,18 @@ pub const TEST_KEYS: &[SecretKey] = &[
   SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
 ];
 
+#[cfg(any(
+  not(any(feature = "tls", feature = "native-tls")),
+  all(feature = "tls", feature = "native-tls")
+))]
+use memberlist_net::stream_layer::tcp::Tcp;
+
+#[cfg(feature = "tls")]
+use memberlist_net::stream_layer::tls::Tls;
+
+#[cfg(feature = "native-tls")]
+use memberlist_net::stream_layer::native_tls::NativeTls;
+
 macro_rules! test_mods {
   ($fn:ident) => {
     #[cfg(feature = "tokio")]
@@ -32,19 +44,19 @@ macro_rules! test_mods {
         not(any(feature = "tls", feature = "native-tls")),
         all(feature = "tls", feature = "native-tls")
       ))]
-      $fn!(tokio(
+      $fn!(Tcp<tokio>(
         "tcp",
-        memberlist_net::stream_layer::tcp::Tcp::<TokioRuntime>::new()
+        ()
       ));
 
       #[cfg(feature = "tls")]
-      $fn!(tokio(
+      $fn!(Tls<tokio>(
         "tls",
         memberlist_net::tests::tls_stream_layer::<TokioRuntime>().await
       ));
 
       #[cfg(feature = "native-tls")]
-      $fn!(tokio(
+      $fn!(NativeTls<tokio>(
         "native-tls",
         memberlist_net::tests::native_tls_stream_layer::<TokioRuntime>().await
       ));
@@ -61,19 +73,19 @@ macro_rules! test_mods {
         not(any(feature = "tls", feature = "native-tls")),
         all(feature = "tls", feature = "native-tls")
       ))]
-      $fn!(async_std(
+      $fn!(Tcp<async_std>(
         "tcp",
-        memberlist_net::stream_layer::tcp::Tcp::<AsyncStdRuntime>::new()
+        ()
       ));
 
       #[cfg(feature = "tls")]
-      $fn!(async_std(
+      $fn!(Tls<async_std>(
         "tls",
         memberlist_net::tests::tls_stream_layer::<AsyncStdRuntime>().await
       ));
 
       #[cfg(feature = "native-tls")]
-      $fn!(async_std(
+      $fn!(NativeTls<async_std>(
         "native-tls",
         memberlist_net::tests::native_tls_stream_layer::<AsyncStdRuntime>().await
       ));
@@ -90,19 +102,19 @@ macro_rules! test_mods {
         not(any(feature = "tls", feature = "native-tls")),
         all(feature = "tls", feature = "native-tls")
       ))]
-      $fn!(smol(
+      $fn!(Tcp<smol>(
         "tcp",
-        memberlist_net::stream_layer::tcp::Tcp::<SmolRuntime>::new()
+        ()
       ));
 
       #[cfg(feature = "tls")]
-      $fn!(smol(
+      $fn!(Tls<smol>(
         "tls",
         memberlist_net::tests::tls_stream_layer::<SmolRuntime>().await
       ));
 
       #[cfg(feature = "native-tls")]
-      $fn!(smol(
+      $fn!(NativeTls<smol>(
         "native-tls",
         memberlist_net::tests::native_tls_stream_layer::<SmolRuntime>().await
       ));

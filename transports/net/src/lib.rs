@@ -137,7 +137,7 @@ where
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
 {
-  opts: Arc<NetTransportOptions<I, A>>,
+  opts: Arc<Options<I, A>>,
   advertise_addr: A::ResolvedAddress,
   local_addr: A::Address,
   packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
@@ -164,13 +164,19 @@ where
   R: Runtime,
 {
   /// Creates a new net transport.
-  pub async fn new(
-    resolver: A,
-    stream_layer: S,
-    opts: NetTransportOptions<I, A>,
-  ) -> Result<Self, NetTransportError<A, W>> {
-    let resolver = Arc::new(resolver);
-    let stream_layer = Arc::new(stream_layer);
+  async fn _new(opts: NetTransportOptions<I, A, S>) -> Result<Self, NetTransportError<A, W>> {
+    let (resolver_opts, stream_layer_opts, opts) = opts.into();
+    let resolver = Arc::new(
+      <A as AddressResolver>::new(resolver_opts)
+        .await
+        .map_err(NetTransportError::Resolver)?,
+    );
+
+    let stream_layer = Arc::new(
+      <S as StreamLayer>::new(stream_layer_opts)
+        .await
+        .map_err(NetTransportError::StreamLayer)?,
+    );
     let opts = Arc::new(opts);
     #[cfg(feature = "encryption")]
     let keyring = match (opts.primary_key, &opts.secret_keys) {
@@ -209,7 +215,7 @@ where
   async fn new_in(
     resolver: Arc<A>,
     stream_layer: Arc<S>,
-    opts: Arc<NetTransportOptions<I, A>>,
+    opts: Arc<Options<I, A>>,
     #[cfg(feature = "encryption")] encryptor: Option<SecretKeyring>,
   ) -> Result<Self, NetTransportError<A, W>> {
     // If we reject the empty list outright we can assume that there's at
@@ -426,6 +432,12 @@ where
   type Wire = W;
 
   type Runtime = <Self::Resolver as AddressResolver>::Runtime;
+
+  type Options = NetTransportOptions<Self::Id, Self::Resolver, S>;
+
+  async fn new(transport_opts: Self::Options) -> Result<Self, Self::Error> {
+    Self::_new(transport_opts).await
+  }
 
   async fn resolve(
     &self,

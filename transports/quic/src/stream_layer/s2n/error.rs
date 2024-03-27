@@ -2,9 +2,15 @@ use crate::QuicError;
 
 use s2n_quic::{connection::Error as ConnectionError, stream::Error as StreamError};
 
+pub use s2n_quic_transport::connection::limits::ValidationError;
+
 /// Error type for s2n stream layer.
 #[derive(Debug, thiserror::Error)]
 pub enum S2nError {
+  /// Validation error.
+  #[error(transparent)]
+  Validation(#[from] ValidationError),
+
   /// Connection error.
   #[error(transparent)]
   Connection(#[from] ConnectionError),
@@ -29,6 +35,7 @@ pub enum S2nError {
 impl QuicError for S2nError {
   fn is_remote_failure(&self) -> bool {
     match self {
+      Self::Validation(_) => false,
       Self::Connection(err) => match err {
         ConnectionError::Closed { .. } => false,
         ConnectionError::Transport { .. } => true,
