@@ -32,9 +32,15 @@ macro_rules! test_mods {
         not(any(feature = "tls", feature = "native-tls")),
         all(feature = "tls", feature = "native-tls")
       ))]
-      $fn!(tokio(
+      use memberlist_net::stream_layer::tcp::Tcp;
+
+      #[cfg(any(
+        not(any(feature = "tls", feature = "native-tls")),
+        all(feature = "tls", feature = "native-tls")
+      ))]
+      $fn!(Tcp<tokio>(
         "tcp",
-        memberlist_net::stream_layer::tcp::Tcp::<TokioRuntime>::new()
+        ()
       ));
 
       #[cfg(feature = "tls")]

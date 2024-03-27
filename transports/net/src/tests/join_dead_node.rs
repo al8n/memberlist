@@ -16,8 +16,12 @@ where
 {
   let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options("node 1".into(), s1);
   opts.add_bind_address(kind.next(0));
-  let trans1 = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
 
-  join_dead_node_in(trans1, client, "fake".into()).await;
+  join_dead_node_in::<_, NetTransport<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>, _, _>(
+    opts,
+    client,
+    "fake".into(),
+  )
+  .await;
   Ok(())
 }

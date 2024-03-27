@@ -8,17 +8,17 @@ use super::*;
 async fn join_different_networks_multi_masks<F, T, R>(
   mut get_transport: impl FnMut(usize, CIDRsPolicy) -> F,
 ) where
-  F: Future<Output = T>,
+  F: Future<Output = T::Options>,
   T: Transport<Runtime = R>,
   R: Runtime,
 {
   let cidrs = CIDRsPolicy::try_from(["127.0.0.0/24", "127.0.1.0/24"].as_slice()).unwrap();
-  let m1 = Memberlist::new(get_transport(0, cidrs.clone()).await, Options::lan())
+  let m1 = Memberlist::<T, _>::new(get_transport(0, cidrs.clone()).await, Options::lan())
     .await
     .unwrap();
 
   // Create a second node
-  let m2 = Memberlist::new(get_transport(1, cidrs.clone()).await, Options::lan())
+  let m2 = Memberlist::<T, _>::new(get_transport(1, cidrs.clone()).await, Options::lan())
     .await
     .unwrap();
   let target = Node::new(
@@ -34,7 +34,7 @@ async fn join_different_networks_multi_masks<F, T, R>(
   // Create a rogue node that allows all networks
   // It should see others, but will not be seen by others
   let cidrs1 = CIDRsPolicy::try_from(["127.0.0.0/8"].as_slice()).unwrap();
-  let m3 = Memberlist::new(get_transport(2, cidrs1).await, Options::lan())
+  let m3 = Memberlist::<T, _>::new(get_transport(2, cidrs1).await, Options::lan())
     .await
     .unwrap();
   // The rogue can see others, but others cannot see it
@@ -48,7 +48,7 @@ async fn join_different_networks_multi_masks<F, T, R>(
   // Another rogue, this time with a config that denies itself
   // Create a rogue node that allows all networks
   // It should see others, but will not be seen by others
-  let m4 = Memberlist::new(get_transport(2, cidrs.clone()).await, Options::lan())
+  let m4 = Memberlist::<T, _>::new(get_transport(2, cidrs.clone()).await, Options::lan())
     .await
     .unwrap();
 
@@ -64,17 +64,17 @@ async fn join_different_networks_multi_masks<F, T, R>(
 }
 
 macro_rules! join_different_networks_multi_masks {
-  ($rt: ident ($kind:literal, $expr: expr)) => {
+  ($layer:ident<$rt: ident> ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_different_networks_multi_masks >]() {
         [< $rt:snake _run >](async move {
           join_different_networks_multi_masks(|idx, cidrs| async move {
-            let mut t1_opts = QuicTransportOptions::<SmolStr, _>::new(format!("join_different_networks_multi_masks_node_{idx}").into())
+            let mut t1_opts = QuicTransportOptions::<SmolStr, _>::with_stream_layer_options(format!("join_different_networks_multi_masks_node_{idx}").into(), $expr)
               .with_cidrs_policy(cidrs);
             t1_opts.add_bind_address(next_socket_addr_v4(idx as u8));
 
-            QuicTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap()
+            QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
           }).await;
         });
       }
@@ -84,11 +84,11 @@ macro_rules! join_different_networks_multi_masks {
       fn [< test_ $rt:snake _ $kind:snake _join_different_networks_multi_masks_with_compression >]() {
         [< $rt:snake _run >](async move {
           join_different_networks_multi_masks(|idx, cidrs| async move {
-            let mut t1_opts = QuicTransportOptions::<SmolStr, _>::new(format!("join_different_networks_multi_masks_node_{idx}").into())
+            let mut t1_opts = QuicTransportOptions::<SmolStr, _>::with_stream_layer_options(format!("join_different_networks_multi_masks_node_{idx}").into(), $expr)
               .with_cidrs_policy(cidrs).with_compressor(Some(Default::default()));
             t1_opts.add_bind_address(next_socket_addr_v4(idx as u8));
 
-            QuicTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap()
+            QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
           }).await;
         });
       }

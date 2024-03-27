@@ -26,8 +26,11 @@ where
       .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
       .with_gossip_verify_outgoing(true);
   opts.add_bind_address(kind.next(0));
-  let trans1 = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
-  let m1 = Memberlist::new(trans1, Options::default()).await?;
+  let m1 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, S, Lpe<_, _>, _>, _>::new(
+    opts,
+    Options::default(),
+  )
+  .await?;
   let m1_addr = m1.advertise_address();
 
   let name2 = "gossip_mismatched_keys2";
@@ -38,8 +41,11 @@ where
       .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
       .with_gossip_verify_outgoing(true);
   opts.add_bind_address(kind.next(0));
-  let trans2 = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
-  let m2 = Memberlist::new(trans2, Options::default()).await?;
+  let m2 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>, _>::new(
+    opts,
+    Options::default(),
+  )
+  .await?;
 
   // Make sure we get this error on the joining side
   m2.join_many(
@@ -75,8 +81,11 @@ where
       .with_gossip_verify_outgoing(true)
       .with_label(label.cheap_clone());
   opts.add_bind_address(kind.next(0));
-  let trans1 = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
-  let m1 = Memberlist::new(trans1, Options::default()).await?;
+  let m1 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>, _>::new(
+    opts,
+    Options::default(),
+  )
+  .await?;
   let m1_addr = m1.advertise_address();
 
   let name2 = "gossip_mismatched_keys2";
@@ -88,8 +97,11 @@ where
       .with_gossip_verify_outgoing(true)
       .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans2 = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
-  let m2 = Memberlist::new(trans2, Options::default()).await?;
+  let m2 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>, _>::new(
+    opts,
+    Options::default(),
+  )
+  .await?;
 
   // Make sure we get this error on the joining side
   m2.join_many(

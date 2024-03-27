@@ -87,18 +87,18 @@ pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
 }
 
 macro_rules! join_with_labels_and_compression {
-  ($rt: ident ($kind:literal, $expr: expr)) => {
+  ($layer:ident<$rt: ident> ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_with_labels >]() {
         [< $rt:snake _run >](async move {
           memberlist_join_with_labels_and_compression(|idx, label, compressor| async move {
-            let mut t1_opts = NetTransportOptions::<SmolStr, _>::new(format!("join_with_labels_and_compression_node_{idx}").into())
+            let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_with_labels_and_compression_node_{idx}").into(), $expr)
               .with_label(label)
               .with_compressor(Some(compressor));
             t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-            NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap()
+            NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
           }).await;
         });
       }

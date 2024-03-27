@@ -64,17 +64,17 @@ async fn join_different_networks_multi_masks<F, T, R>(
 }
 
 macro_rules! join_different_networks_multi_masks {
-  ($rt: ident ($kind:literal, $expr: expr)) => {
+  ($layer:ident<$rt: ident> ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_different_networks_multi_masks >]() {
         [< $rt:snake _run >](async move {
           join_different_networks_multi_masks(|idx, cidrs| async move {
-            let mut t1_opts = NetTransportOptions::<SmolStr, _>::new(format!("join_different_networks_multi_masks_node_{idx}").into())
+            let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_different_networks_multi_masks_node_{idx}").into())
               .with_cidrs_policy(cidrs);
             t1_opts.add_bind_address(next_socket_addr_v4(idx as u8));
 
-            NetTransport::<_, _, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t1_opts).await.unwrap()
+            NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
           }).await;
         });
       }
