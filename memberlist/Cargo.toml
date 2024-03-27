@@ -1,6 +1,6 @@
 [package]
 name = "memberlist"
-version = "0.1.5"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
