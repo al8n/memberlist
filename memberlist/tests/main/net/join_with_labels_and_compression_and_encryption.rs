@@ -10,18 +10,18 @@ use super::*;
 pub async fn memberlist_join_with_labels_and_compression_and_encryption<F, T, R>(
   mut get_transport: impl FnMut(usize, Label, Compressor, SecretKey) -> F,
 ) where
-  F: Future<Output = T>,
+  F: Future<Output = T::Options>,
   T: Transport<Runtime = R>,
   R: Runtime,
 {
   let label1 = Label::try_from("blah").unwrap();
-  let m1 = Memberlist::new(
+  let m1 = Memberlist::<T, _>::new(
     get_transport(1, label1.clone(), Compressor::default(), TEST_KEYS[0]).await,
     Options::lan(),
   )
   .await
   .unwrap();
-  let m2 = Memberlist::new(
+  let m2 = Memberlist::<T, _>::new(
     get_transport(2, label1.clone(), Compressor::default(), TEST_KEYS[0]).await,
     Options::lan(),
   )
@@ -41,7 +41,7 @@ pub async fn memberlist_join_with_labels_and_compression_and_encryption<F, T, R>
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
 
   // Create a third node that uses no label
-  let m3 = Memberlist::new(
+  let m3 = Memberlist::<T, _>::new(
     get_transport(3, Label::empty(), Compressor::default(), TEST_KEYS[0]).await,
     Options::lan(),
   )
@@ -60,7 +60,7 @@ pub async fn memberlist_join_with_labels_and_compression_and_encryption<F, T, R>
 
   // Create a fourth node that uses a mismatched label
   let label = Label::try_from("not-blah").unwrap();
-  let m4 = Memberlist::new(
+  let m4 = Memberlist::<T, _>::new(
     get_transport(4, label, Compressor::default(), TEST_KEYS[0]).await,
     Options::lan(),
   )
@@ -92,14 +92,13 @@ macro_rules! join_with_labels_and_compression_and_encryption {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_with_labels >]() {
         [< $rt:snake _run >](async move {
-          memberlist_join_with_labels_and_compression_and_encryption(|idx, label, compressor, pk| async move {
-            let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options_options(format!("join_with_labels_and_compression_and_encryption_node_{idx}").into(), $expr)
+          memberlist_join_with_labels_and_compression_and_encryption::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(|idx, label, compressor, pk| async move {
+            let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_with_labels_and_compression_and_encryption_node_{idx}").into(), $expr)
               .with_label(label)
               .with_compressor(Some(compressor))
               .with_primary_key(Some(pk));
             t1_opts.add_bind_address(next_socket_addr_v4(0));
-
-            NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
+            t1_opts
           }).await;
         });
       }

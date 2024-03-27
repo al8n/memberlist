@@ -10,7 +10,7 @@ macro_rules! probe_node_dogpile {
           let bad = Node::new("bad".into(), "127.0.0.1:8000".parse().unwrap());
           probe_node_dogpile(|idx| {
             async move {
-              let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options_options(format!("probe_node_dogpile_{idx}").into(), $expr);
+              let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("probe_node_dogpile_{idx}").into(), $expr);
               t1_opts.add_bind_address(next_socket_addr_v4(0));
 
               NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()

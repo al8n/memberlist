@@ -6,17 +6,15 @@ macro_rules! join_cancel_passive {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_cancel_passive >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options_options("join_cancel_passive_node_1".into(), $expr);
+          let id1: SmolStr = "join_cancel_passive_node_1".into();
+          let id2: SmolStr = "join_cancel_passive_node_2".into();
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(id1.clone(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan();
-
-          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options_options("join_cancel_passive_node_2".into(), $expr);
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(id2.clone(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
-          let t2 = NetTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t2_opts).await.unwrap();
 
-          memberlist_join_cancel_passive(t1, t1_opts, t2, Options::lan()).await;
+          memberlist_join_cancel_passive::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(id1, t1_opts, Options::lan(), id2, t2_opts, Options::lan()).await;
         });
       }
 
@@ -24,17 +22,15 @@ macro_rules! join_cancel_passive {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_cancel_passive_with_compression >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options_options("join_cancel_passive_node_1".into(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
+          let id1: SmolStr = "join_cancel_passive_node_1".into();
+          let id2: SmolStr = "join_cancel_passive_node_2".into();
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(id1.clone(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan();
-
-          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options_options("join_cancel_passive_node_2".into(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(id2.clone(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
-          let t2 = NetTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t2_opts).await.unwrap();
 
-          memberlist_join_cancel_passive(t1, t1_opts, t2, Options::lan()).await;
+          memberlist_join_cancel_passive::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(id1, t1_opts, Options::lan(), id2, t2_opts, Options::lan()).await;
         });
       }
 
@@ -42,17 +38,15 @@ macro_rules! join_cancel_passive {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_cancel_passive_with_encryption >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options_options("join_cancel_passive_node_1".into(), $expr).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10);
+          let id1: SmolStr = "join_cancel_passive_node_1".into();
+          let id2: SmolStr = "join_cancel_passive_node_2".into();
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(id1.clone(), $expr).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan();
-
-          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options_options("join_cancel_passive_node_2".into(), $expr).with_primary_key(Some(TEST_KEYS[1]));
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(id2.clone(), $expr).with_primary_key(Some(TEST_KEYS[1]));
           t2_opts.add_bind_address(next_socket_addr_v4(0));
-          let t2 = NetTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t2_opts).await.unwrap();
 
-          memberlist_join_cancel_passive(t1, t1_opts, t2, Options::lan()).await;
+          memberlist_join_cancel_passive::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(id1, t1_opts, Options::lan(), id2, t2_opts, Options::lan()).await;
         });
       }
 
@@ -60,17 +54,15 @@ macro_rules! join_cancel_passive {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_cancel_passive_with_compression_and_encryption >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options_options("join_cancel_passive_node_1".into(), $expr).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10).with_compressor(Some(Default::default()));
+          let id1: SmolStr = "join_cancel_passive_node_1".into();
+          let id2: SmolStr = "join_cancel_passive_node_2".into();
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(id1.clone(), $expr).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10).with_compressor(Some(Default::default()));
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan();
-
-          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options_options("join_cancel_passive_node_2".into(), $expr).with_primary_key(Some(TEST_KEYS[1])).with_compressor(Some(Default::default()));
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(id2.clone(), $expr).with_primary_key(Some(TEST_KEYS[1])).with_compressor(Some(Default::default()));
           t2_opts.add_bind_address(next_socket_addr_v4(0));
-          let t2 = NetTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t2_opts).await.unwrap();
 
-          memberlist_join_cancel_passive(t1, t1_opts, t2, Options::lan()).await;
+          memberlist_join_cancel_passive::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(id1, t1_opts, Options::lan(), id2, t2_opts, Options::lan()).await;
         });
       }
     }

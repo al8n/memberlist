@@ -89,13 +89,13 @@ macro_rules! join_with_labels_and_encryption {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_with_labels >]() {
         [< $rt:snake _run >](async move {
-          memberlist_join_with_labels_and_encryption(|idx, label, pk| async move {
-            let mut t1_opts = NetTransportOptions::<SmolStr, _>::with_stream_layer_options(format!("join_with_labels_and_encryption_node_{idx}").into(), $expr)
+          memberlist_join_with_labels_and_encryption::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(|idx, label, pk| async move {
+            let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_with_labels_and_encryption_node_{idx}").into(), $expr)
               .with_label(label)
               .with_primary_key(Some(pk));
             t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-            NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
+            t1_opts
           }).await;
         });
       }

@@ -1,4 +1,12 @@
-use std::{cell::RefCell, collections::HashMap, future::Future, net::SocketAddr, time::Duration};
+#![allow(clippy::await_holding_lock)]
+
+use std::{
+  collections::HashMap,
+  future::Future,
+  net::SocketAddr,
+  sync::{Arc, Mutex},
+  time::Duration,
+};
 
 use agnostic::Runtime;
 use memberlist::{
@@ -38,9 +46,10 @@ where
   S: StreamLayer,
   R: Runtime,
 {
-  let pretty = RefCell::new(HashMap::new());
-  let new_config = |short_name: SmolStr, addr: Option<SocketAddr>| {
+  let pretty = Arc::new(Mutex::new(HashMap::new()));
+  let mut new_config = |short_name: SmolStr, addr: Option<SocketAddr>| {
     let s = create_stream_layer();
+    let pretty = pretty.clone();
     async move {
       let opts = match addr {
         Some(addr) => {
@@ -63,7 +72,7 @@ where
 
       let mopts = Options::lan().with_gossip_interval(Duration::from_millis(100));
 
-      pretty.borrow_mut().insert(opts.id().clone(), short_name);
+      pretty.lock().unwrap().insert(opts.id().clone(), short_name);
       (mopts, opts)
     }
   };
@@ -81,8 +90,9 @@ where
   let join_ok = |src: Memberlist<NetTransport<S, R>, Delegate>,
                  dst: Memberlist<NetTransport<S, R>, Delegate>,
                  num_nodes: usize| {
-    let pretty = pretty.borrow();
+    let pretty = pretty.clone();
     async move {
+      let pretty = pretty.lock().unwrap();
       let src_name = pretty.get(src.local_id()).unwrap();
       let dst_name = pretty.get(dst.local_id()).unwrap();
       tracing::info!(
@@ -110,7 +120,7 @@ where
   };
 
   let leave_ok = |src: Memberlist<NetTransport<S, R>, Delegate>, why: String| {
-    let name = pretty.borrow().get(src.local_id()).cloned().unwrap();
+    let name = pretty.lock().unwrap().get(src.local_id()).cloned().unwrap();
     async move {
       tracing::info!("node {}[{}] is leaving {}", name, src.local_id(), why);
       src.leave(Duration::from_secs(1)).await.unwrap();
@@ -118,7 +128,7 @@ where
   };
 
   let shutdown_ok = |src: Memberlist<NetTransport<S, R>, Delegate>, why: String| {
-    let pretty = pretty.borrow();
+    let pretty = pretty.lock().unwrap();
     async move {
       let name = pretty.get(src.local_id()).cloned().unwrap();
       tracing::info!(
@@ -285,7 +295,7 @@ macro_rules! encrypted_gossip_transition {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _encrypted_gossip_transition >]() {
         [< $rt:snake _run >](async move {
-          encrypted_gossip_transition::<_, _, [< $rt:camel Runtime >]>(|| async move { $expr }).await;
+          encrypted_gossip_transition::<_, $layer<[< $rt:camel Runtime >]>, [< $rt:camel Runtime >]>(|| async move { $expr }).await;
         });
       }
     }
