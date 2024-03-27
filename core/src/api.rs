@@ -44,6 +44,14 @@ where
     self.inner.transport.keyring()
   }
 
+  /// Returns `true` if the node enables encryption.
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  #[inline]
+  pub fn encryption_enabled(&self) -> bool {
+    self.inner.transport.encryption_enabled()
+  }
+
   /// Returns a [`Node`] with the local id and the advertise address of local node.
   #[inline]
   pub fn advertise_node(&self) -> Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> {
