@@ -292,7 +292,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
   }
 }
 
-#[viewit::viewit]
+#[viewit::viewit(setters(skip), getters(skip))]
 pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   id: I,
   bind_addresses: IndexSet<A::Address>,

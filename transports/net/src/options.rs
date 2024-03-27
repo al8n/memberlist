@@ -6,6 +6,12 @@ use nodecraft::resolver::AddressResolver;
 
 use crate::{Checksumer, StreamLayer};
 
+#[cfg(feature = "compression")]
+use super::compressor::Compressor;
+
+#[cfg(feature = "encryption")]
+use super::security::{SecretKey, SecretKeys};
+
 /// Used to configure a net transport.
 #[viewit::viewit(
   vis_all = "pub(crate)",
@@ -140,7 +146,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
       cfg_attr(docsrs, doc(cfg(feature = "compression")))
     ),)
   )]
-  compressor: Option<super::compressor::Compressor>,
+  compressor: Option<Compressor>,
 
   /// Controls whether to enforce encryption for outgoing
   /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
@@ -242,7 +248,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
       cfg_attr(docsrs, doc(cfg(feature = "encryption")))
     ),)
   )]
-  primary_key: Option<super::security::SecretKey>,
+  primary_key: Option<SecretKey>,
 
   /// Holds all of the encryption keys used internally.
   ///
@@ -268,7 +274,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   )]
   #[cfg(feature = "encryption")]
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  secret_keys: Option<super::security::SecretKeys>,
+  secret_keys: Option<SecretKeys>,
 
   /// The configured encryption type that we
   /// will _speak_.
@@ -293,7 +299,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
       cfg_attr(docsrs, doc(cfg(feature = "encryption")))
     ))
   )]
-  encryption_algo: Option<super::security::EncryptionAlgo>,
+  encryption_algo: Option<crate::security::EncryptionAlgo>,
 
   /// The metrics labels.
   #[cfg(feature = "metrics")]
@@ -479,7 +485,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
   }
 }
 
-#[viewit::viewit]
+#[viewit::viewit(getters(skip), setters(skip))]
 pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   id: I,
   bind_addresses: IndexSet<A::Address>,
@@ -489,7 +495,7 @@ pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   max_payload_size: usize,
   checksumer: Checksumer,
   #[cfg(feature = "compression")]
-  compressor: Option<super::compressor::Compressor>,
+  compressor: Option<Compressor>,
   #[cfg(feature = "encryption")]
   gossip_verify_outgoing: bool,
   #[cfg(feature = "encryption")]
@@ -497,11 +503,11 @@ pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   #[cfg(any(feature = "compression", feature = "encryption"))]
   offload_size: usize,
   #[cfg(feature = "encryption")]
-  primary_key: Option<super::security::SecretKey>,
+  primary_key: Option<SecretKey>,
   #[cfg(feature = "encryption")]
-  secret_keys: Option<super::security::SecretKeys>,
+  secret_keys: Option<SecretKeys>,
   #[cfg(feature = "encryption")]
-  encryption_algo: Option<super::security::EncryptionAlgo>,
+  encryption_algo: Option<crate::security::EncryptionAlgo>,
   #[cfg(feature = "metrics")]
   metric_labels: Option<std::sync::Arc<memberlist_core::types::MetricLabels>>,
 }

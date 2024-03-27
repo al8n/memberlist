@@ -1,8 +1,4 @@
-use memberlist_core::transport::{tests::send_packet_piggyback, Lpe};
-use nodecraft::{resolver::socket_addr::SocketAddrResolver, CheapClone};
-
-use crate::{NetTransport, NetTransportOptions};
-
+#[cfg(all(feature = "encryption", feature = "compression"))]
 use super::*;
 
 #[cfg(all(feature = "encryption", feature = "compression"))]
@@ -11,6 +7,11 @@ where
   S: StreamLayer,
   R: Runtime,
 {
+  use memberlist_core::transport::{tests::send_packet_piggyback, Lpe};
+  use nodecraft::{resolver::socket_addr::SocketAddrResolver, CheapClone};
+
+  use crate::{NetTransport, NetTransportOptions};
+
   let name = format!("{kind}_packet_piggyback");
   let label = Label::try_from(&name)?;
   let pk = SecretKey::from([1; 32]);

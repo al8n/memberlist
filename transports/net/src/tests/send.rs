@@ -1,8 +1,4 @@
-use memberlist_core::transport::{tests::send as send_in, Lpe};
-use nodecraft::resolver::socket_addr::SocketAddrResolver;
-
-use crate::{NetTransport, NetTransportOptions};
-
+#[cfg(all(feature = "encryption", feature = "compression"))]
 use super::*;
 
 #[cfg(all(feature = "encryption", feature = "compression"))]
@@ -16,6 +12,10 @@ where
   S2: StreamLayer,
   R: Runtime,
 {
+  use memberlist_core::transport::{tests::send as send_in, Lpe};
+  use nodecraft::resolver::socket_addr::SocketAddrResolver;
+
+  use crate::{NetTransport, NetTransportOptions};
   use nodecraft::CheapClone;
 
   let name = format!("{kind}_send");
