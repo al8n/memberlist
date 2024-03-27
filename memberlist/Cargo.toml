@@ -36,7 +36,7 @@ metrics = [
 
 compression = ["memberlist-net?/compression", "memberlist-quic?/compression"]
 
-encryption = ["memberlist-net?/encryption", "memberlist-core/encryption"]
+encryption = ["memberlist-net?/encryption", "memberlist-quic?/encryption", "memberlist-core/encryption"]
 
 quic = ["memberlist-quic", "agnostic/quinn"]
 quinn = ["memberlist-quic/quinn", "quic"]

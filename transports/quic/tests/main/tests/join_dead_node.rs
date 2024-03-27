@@ -7,9 +7,10 @@ macro_rules! __handle_join_dead_node {
           let s = $s;
           let c = $s;
           let client_addr = memberlist_core::transport::tests::AddressKind::V4.next(0);
+          let c = <$layer<$rt> as memberlist_quic::stream_layer::StreamLayer>::new(c).await.unwrap();
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
-          memberlist_quic::tests::join_dead_node::join_dead_node::<_, $rt>(
+          memberlist_quic::tests::join_dead_node::join_dead_node::<$layer<$rt>, $rt>(
             s,
             client,
             memberlist_core::transport::tests::AddressKind::V4,
@@ -19,9 +20,10 @@ macro_rules! __handle_join_dead_node {
           let s = $s;
           let c = $s;
           let client_addr = memberlist_core::transport::tests::AddressKind::V6.next(0);
+          let c = <$layer<$rt> as memberlist_quic::stream_layer::StreamLayer>::new(c).await.unwrap();
           let (_, ln, connector) = memberlist_quic::stream_layer::StreamLayer::bind(&c, client_addr).await.unwrap();
           let client = memberlist_quic::tests::QuicTransportTestPromisedClient::new(c, ln, connector);
-          memberlist_quic::tests::join_dead_node::join_dead_node::<_, $rt>(
+          memberlist_quic::tests::join_dead_node::join_dead_node::<$layer<$rt>, $rt>(
             s,
             client,
             memberlist_core::transport::tests::AddressKind::V6,
@@ -35,6 +37,6 @@ macro_rules! __handle_join_dead_node {
 #[macro_export]
 macro_rules! handle_join_dead_node_test_suites {
   ($($prefix:literal: )? $layer:ident<$rt:ident>::$run:ident({ $s: expr })) => {
-    $crate::__handle_join_dead_node!($($prefix: )? $rt::$run({ $s }));
+    $crate::__handle_join_dead_node!($($prefix: )? $layer<$rt>::$run({ $s }));
   };
 }

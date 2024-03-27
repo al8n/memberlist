@@ -9,11 +9,12 @@ use super::*;
 #[cfg_attr(
   feature = "serde",
   serde(bound(
-    serialize = "I: serde::Serialize, A: AddressResolver, A::Address: serde::Serialize, A::ResolvedAddress: serde::Serialize",
-    deserialize = "I: for<'a> serde::Deserialize<'a>, A: AddressResolver, A::Address: for<'a> serde::Deserialize<'a>, A::ResolvedAddress: for<'a> serde::Deserialize<'a>"
+    serialize = "I: serde::Serialize, A: AddressResolver, A::Address: serde::Serialize, A::ResolvedAddress: serde::Serialize, S::Options: serde::Serialize",
+    deserialize = "I: for<'a> serde::Deserialize<'a>, A: AddressResolver, A::Address: for<'a> serde::Deserialize<'a>, A::ResolvedAddress: for<'a> serde::Deserialize<'a>, S::Options: serde::Deserialize<'de>"
   ))
 )]
-pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
+pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
+{
   /// The local node's ID.
   #[viewit(
     getter(const, style = "ref", attrs(doc = "Get the id of the node."),),
@@ -45,6 +46,13 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
     setter(attrs(doc = "Set the label of the node. (Builder pattern)"),)
   )]
   label: Label,
+
+  /// Stream layer options, which used to construct the stream layer for this transport.
+  #[viewit(
+    getter(const, style = "ref", attrs(doc = "Get the stream layer options."),),
+    setter(attrs(doc = "Set the stream layer options. (Builder pattern)"),)
+  )]
+  stream_layer_options: S::Options,
 
   /// Skips the check that inbound packets and gossip
   /// streams need to be label prefixed.
@@ -170,14 +178,17 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   metric_labels: Option<Arc<memberlist_core::types::MetricLabels>>,
 }
 
-impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I, A> {
+impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
+  QuicTransportOptions<I, A, S>
+{
   /// Creates a new net transport options by id and address, other configurations are left default.
-  pub fn new(id: I) -> Self {
+  pub fn new(id: I, stream_layer_opts: S::Options) -> Self {
     Self {
       id,
       timeout: None,
       bind_addresses: IndexSet::new(),
       label: Label::empty(),
+      stream_layer_options: stream_layer_opts,
       skip_inbound_label_check: false,
       cidrs_policy: CIDRsPolicy::allow_all(),
       connection_pool_cleanup_period: default_connection_pool_cleanup_period(),
@@ -200,4 +211,46 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>> QuicTransportOptions<I
 #[inline]
 const fn default_connection_pool_cleanup_period() -> Duration {
   Duration::from_secs(60)
+}
+
+impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
+  From<QuicTransportOptions<I, A, S>> for (S::Options, Options<I, A>)
+{
+  fn from(opts: QuicTransportOptions<I, A, S>) -> Self {
+    (
+      opts.stream_layer_options,
+      Options {
+        id: opts.id,
+        bind_addresses: opts.bind_addresses,
+        label: opts.label,
+        skip_inbound_label_check: opts.skip_inbound_label_check,
+        timeout: opts.timeout,
+        connection_pool_cleanup_period: opts.connection_pool_cleanup_period,
+        cidrs_policy: opts.cidrs_policy,
+        #[cfg(feature = "compression")]
+        compressor: opts.compressor,
+        #[cfg(feature = "compression")]
+        offload_size: opts.offload_size,
+        #[cfg(feature = "metrics")]
+        metric_labels: opts.metric_labels,
+      },
+    )
+  }
+}
+
+#[viewit::viewit]
+pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
+  id: I,
+  bind_addresses: IndexSet<A::Address>,
+  label: Label,
+  skip_inbound_label_check: bool,
+  timeout: Option<Duration>,
+  connection_pool_cleanup_period: Duration,
+  cidrs_policy: CIDRsPolicy,
+  #[cfg(feature = "compression")]
+  compressor: Option<Compressor>,
+  #[cfg(feature = "compression")]
+  offload_size: usize,
+  #[cfg(feature = "metrics")]
+  metric_labels: Option<Arc<memberlist_core::types::MetricLabels>>,
 }

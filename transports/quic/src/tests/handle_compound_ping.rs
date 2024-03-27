@@ -5,7 +5,11 @@ use crate::{QuicTransport, QuicTransportOptions, StreamLayer};
 
 use super::*;
 
-pub async fn compound_ping<S, R>(s: S, c: S, kind: AddressKind) -> Result<(), AnyError>
+pub async fn compound_ping<S, R>(
+  s: S::Options,
+  c: S::Options,
+  kind: AddressKind,
+) -> Result<(), AnyError>
 where
   S: StreamLayer,
   R: RuntimeLite,
@@ -13,14 +17,14 @@ where
   let name = format!("{kind}_compound_ping");
   let label = Label::try_from(&name)?;
 
-  let mut opts = QuicTransportOptions::new(name.into())
+  let mut opts = QuicTransportOptions::<_, _, S>::new(name.into(), s)
     .with_compressor(Some(Compressor::default()))
     .with_label(label.cheap_clone())
     .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
-  let trans =
-    QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new((), opts).await?;
   let remote_addr = trans.advertise_address();
+  let c = S::new(c).await.unwrap();
   let tc = QuicTransportTestClient::<S, R>::with_num_responses(kind.next(0), *remote_addr, c, 3)
     .await?
     .with_label(label)
