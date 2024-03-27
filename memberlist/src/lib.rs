@@ -6,8 +6,14 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
-#[cfg(feature = "agnostic")]
-pub use agnostic::*;
+/// Re-export of [`agnostic`] crate.
+pub mod agnostic {
+  #[cfg(not(feature = "agnostic"))]
+  pub use agnostic_lite::*;
+
+  #[cfg(feature = "agnostic")]
+  pub use agnostic::*;
+}
 
 pub use memberlist_core::*;
 
