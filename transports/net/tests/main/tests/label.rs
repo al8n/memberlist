@@ -7,11 +7,11 @@ mod with_label_and_encryption;
 
 #[macro_export]
 macro_rules! label_test_suites {
-  ($($prefix:literal: )? $rt:ident::$run:ident({ $s: expr })) => {
-    $crate::__label_only!($($prefix: )? $rt::$run({ $s }));
+  ($($prefix:literal: )? $layer:ident<$rt:ident>::$run:ident({ $s: expr })) => {
+    $crate::__label_only!($($prefix: )? $layer<$rt>::$run({ $s }));
 
 
     #[cfg(feature = "encryption")]
-    $crate::__label_and_encryption!($($prefix: )? $rt::$run({ $s }));
+    $crate::__label_and_encryption!($($prefix: )? $layer<$rt>::$run({ $s }));
   };
 }

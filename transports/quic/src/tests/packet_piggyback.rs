@@ -6,7 +6,11 @@ use crate::{QuicTransport, QuicTransportOptions, StreamLayer};
 use super::*;
 
 #[cfg(feature = "compression")]
-pub async fn packet_piggyback<S, R>(s: S, c: S, kind: AddressKind) -> Result<(), AnyError>
+pub async fn packet_piggyback<S, R>(
+  s: S::Options,
+  c: S::Options,
+  kind: AddressKind,
+) -> Result<(), AnyError>
 where
   S: StreamLayer,
   R: RuntimeLite,
@@ -14,13 +18,13 @@ where
   let name = format!("{kind}_packet_piggyback");
   let label = Label::try_from(&name)?;
 
-  let mut opts = QuicTransportOptions::new(name.into())
+  let mut opts = QuicTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_compressor(Some(Compressor::default()))
     .with_label(label.cheap_clone());
   opts.add_bind_address(kind.next(0));
-  let trans =
-    QuicTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts).await?;
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
   let remote_addr = trans.advertise_address();
+  let c = S::new(c).await.unwrap();
   let client = QuicTransportTestClient::<_, R>::new(kind.next(0), *remote_addr, c)
     .await?
     .with_label(label)

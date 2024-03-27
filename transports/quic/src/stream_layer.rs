@@ -51,7 +51,6 @@ pub trait QuicStream: TimeoutableStream + futures::AsyncRead + Send + Sync + 'st
 }
 
 /// A trait for QUIC stream layers.
-#[auto_impl::auto_impl(Box, Arc)]
 pub trait StreamLayer: Sized + Send + Sync + 'static {
   /// The error type.
   type Error: QuicError
@@ -72,8 +71,14 @@ pub trait StreamLayer: Sized + Send + Sync + 'static {
   /// The connection type.
   type Connection: QuicConnection<Stream = Self::Stream>;
 
+  /// The options type used to construct the stream layer.
+  type Options: Send + Sync + 'static;
+
   /// Max unacknowledged data in bytes that may be send on a single stream.
   fn max_stream_data(&self) -> usize;
+
+  /// Creates a new stream layer.
+  fn new(options: Self::Options) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
   /// Binds to a local address. The `BiAcceptor` and `UniAcceptor` must bind to
   /// the same address.

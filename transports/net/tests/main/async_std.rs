@@ -1,11 +1,7 @@
 use agnostic::{async_std::AsyncStdRuntime, RuntimeLite};
 use memberlist_core::tests::run as run_unit_test;
 
-#[cfg(any(
-  not(any(feature = "tls", feature = "native-tls")),
-  all(feature = "tls", feature = "native-tls")
-))]
-use memberlist_net::stream_layer::tcp::Tcp;
+use super::*;
 
 fn run(fut: impl std::future::Future<Output = ()>) {
   run_unit_test(AsyncStdRuntime::block_on, fut);

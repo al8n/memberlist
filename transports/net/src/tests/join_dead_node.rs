@@ -6,7 +6,7 @@ use crate::{NetTransport, NetTransportOptions};
 use super::*;
 
 pub async fn join_dead_node<S, R>(
-  s1: S,
+  s1: S::Options,
   client: NetTransportTestPromisedClient<S>,
   kind: AddressKind,
 ) -> Result<(), AnyError>
@@ -14,11 +14,14 @@ where
   S: StreamLayer,
   R: Runtime,
 {
-  let mut opts = NetTransportOptions::new("node 1".into());
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options("node 1".into(), s1);
   opts.add_bind_address(kind.next(0));
-  let trans1 =
-    NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s1, opts).await?;
 
-  join_dead_node_in(trans1, client, "fake".into()).await;
+  join_dead_node_in::<_, NetTransport<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>, _, _>(
+    opts,
+    client,
+    "fake".into(),
+  )
+  .await;
   Ok(())
 }

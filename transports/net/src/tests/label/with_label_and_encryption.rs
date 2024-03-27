@@ -2,7 +2,7 @@ use super::*;
 
 #[cfg(feature = "encryption")]
 pub async fn server_with_label_with_encryption_client_with_label_with_encryption<S, R>(
-  s: S,
+  s: S::Options,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -19,14 +19,14 @@ where
     .with_send_label(true)
     .with_receive_verify_label(true);
 
-  let mut opts = NetTransportOptions::new(name.into())
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_label(label)
     .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;
@@ -35,7 +35,7 @@ where
 
 #[cfg(feature = "encryption")]
 pub async fn server_with_label_with_encryption_client_with_label_no_encryption<S, R>(
-  s: S,
+  s: S::Options,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -52,13 +52,13 @@ where
     .with_receive_verify_label(true)
     .with_receive_encrypted(Some(pk));
 
-  let mut opts = NetTransportOptions::new(name.into())
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;
@@ -66,7 +66,7 @@ where
 }
 
 pub async fn server_with_label_no_encryption_client_with_label_with_encryption<S, R>(
-  s: S,
+  s: S::Options,
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
@@ -83,13 +83,13 @@ where
     .with_label(label.cheap_clone())
     .with_send_label(true);
 
-  let mut opts = NetTransportOptions::new(name.into())
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_label(label)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(false);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;

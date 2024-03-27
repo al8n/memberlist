@@ -80,12 +80,12 @@ where
 }
 
 /// Unit tests for create a `Memberlist`.
-pub async fn memberlist_create<T, R>(t1: T, t1_opts: Options)
+pub async fn memberlist_create<T, R>(t1: T::Options, t1_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
-  let m = Memberlist::new(t1, t1_opts).await.unwrap();
+  let m = Memberlist::<T, _>::new(t1, t1_opts).await.unwrap();
 
   R::sleep(Duration::from_millis(250)).await;
 
@@ -110,12 +110,12 @@ where
 }
 
 /// Unit tests for create a `Memberlist` and shutdown.
-pub async fn memberlist_create_shutdown<T, R>(t1: T, t1_opts: Options)
+pub async fn memberlist_create_shutdown<T, R>(t1: T::Options, t1_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
-  let m = Memberlist::new(t1, t1_opts).await.unwrap();
+  let m = Memberlist::<T, _>::new(t1, t1_opts).await.unwrap();
 
   R::sleep(Duration::from_millis(250)).await;
 
@@ -140,13 +140,17 @@ where
 }
 
 /// Unit tests for join a `Memberlist`.
-pub async fn memberlist_join<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
-where
+pub async fn memberlist_join<T, R>(
+  t1: T::Options,
+  t1_opts: Options,
+  t2: T::Options,
+  t2_opts: Options,
+) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
-  let m1 = Memberlist::new(t1, t1_opts).await.unwrap();
-  let m2 = Memberlist::new(t2, t2_opts).await.unwrap();
+  let m1 = Memberlist::<T, _>::new(t1, t1_opts).await.unwrap();
+  let m2 = Memberlist::<T, _>::new(t2, t2_opts).await.unwrap();
 
   let target = Node::new(
     m1.local_id().clone(),
@@ -165,15 +169,15 @@ where
 /// Unit tests for join a `Memberlist` with labels.
 pub async fn memberlist_join_with_labels<F, T, R>(mut get_transport: impl FnMut(usize, Label) -> F)
 where
-  F: Future<Output = T>,
+  F: Future<Output = T::Options>,
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
   let label1 = Label::try_from("blah").unwrap();
-  let m1 = Memberlist::new(get_transport(1, label1.clone()).await, Options::lan())
+  let m1 = Memberlist::<T, _>::new(get_transport(1, label1.clone()).await, Options::lan())
     .await
     .unwrap();
-  let m2 = Memberlist::new(get_transport(2, label1.clone()).await, Options::lan())
+  let m2 = Memberlist::<T, _>::new(get_transport(2, label1.clone()).await, Options::lan())
     .await
     .unwrap();
 
@@ -297,21 +301,25 @@ where
 }
 
 /// Unit tests for join a `Memberlist` and cancel.
-pub async fn memberlist_join_cancel<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
-where
+pub async fn memberlist_join_cancel<T, R>(
+  t1: T::Options,
+  t1_opts: Options,
+  t2: T::Options,
+  t2_opts: Options,
+) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
-  let m1 = Memberlist::with_delegate(
-    t1,
+  let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_merge_delegate(CustomMergeDelegate::new()),
+    t1,
     t1_opts,
   )
   .await
   .unwrap();
-  let m2 = Memberlist::with_delegate(
-    t2,
+  let m2 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_merge_delegate(CustomMergeDelegate::new()),
+    t2,
     t2_opts,
   )
   .await
@@ -384,23 +392,27 @@ where
 }
 
 /// Unit tests for join a `Memberlist` and cancel passive.
-pub async fn memberlist_join_cancel_passive<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
-where
+pub async fn memberlist_join_cancel_passive<T, R>(
+  id1: T::Id,
+  t1: T::Options,
+  t1_opts: Options,
+  id2: T::Id,
+  t2: T::Options,
+  t2_opts: Options,
+) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
-  let id1 = t1.local_id().clone();
-  let m1 = Memberlist::with_delegate(
-    t1,
+  let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_alive_delegate(CustomAliveDelegate::new(id1)),
+    t1,
     t1_opts,
   )
   .await
   .unwrap();
-  let id2 = t2.local_id().clone();
-  let m2 = Memberlist::with_delegate(
-    t2,
+  let m2 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_alive_delegate(CustomAliveDelegate::new(id2)),
+    t2,
     t2_opts,
   )
   .await
@@ -436,13 +448,17 @@ where
 }
 
 /// Unit tests for join and shutdown a `Memberlist`.
-pub async fn memberlist_join_shutdown<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
-where
+pub async fn memberlist_join_shutdown<T, R>(
+  t1: T::Options,
+  t1_opts: Options,
+  t2: T::Options,
+  t2_opts: Options,
+) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
-  let m1 = Memberlist::new(t1, t1_opts).await.unwrap();
-  let m2 = Memberlist::new(t2, t2_opts).await.unwrap();
+  let m1 = Memberlist::<T, _>::new(t1, t1_opts).await.unwrap();
+  let m2 = Memberlist::<T, _>::new(t2, t2_opts).await.unwrap();
 
   let target = Node::new(
     m1.local_id().clone(),
@@ -465,28 +481,32 @@ where
 }
 
 /// Unit test for node delegate meta
-pub async fn memberlist_node_delegate_meta<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
-where
+pub async fn memberlist_node_delegate_meta<T, R>(
+  t1: T::Options,
+  t1_opts: Options,
+  t2: T::Options,
+  t2_opts: Options,
+) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
-  let m1 = Memberlist::with_delegate(
-    t1,
+  let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
       <T::Resolver as AddressResolver>::ResolvedAddress,
     >::with_meta("web".try_into().unwrap())),
+    t1,
     t1_opts,
   )
   .await
   .unwrap();
 
-  let m2 = Memberlist::with_delegate(
-    t2,
+  let m2 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
       <T::Resolver as AddressResolver>::ResolvedAddress,
     >::with_meta("lb".try_into().unwrap())),
+    t2,
     t2_opts,
   )
   .await
@@ -547,31 +567,31 @@ where
 
 /// Unit test for node delegate meta update
 pub async fn memberlist_node_delegate_meta_update<T, R>(
-  t1: T,
+  t1: T::Options,
   t1_opts: Options,
-  t2: T,
+  t2: T::Options,
   t2_opts: Options,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
-  let m1 = Memberlist::with_delegate(
-    t1,
+  let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
       <T::Resolver as AddressResolver>::ResolvedAddress,
     >::with_meta("web".try_into().unwrap())),
+    t1,
     t1_opts,
   )
   .await
   .unwrap();
 
-  let m2 = Memberlist::with_delegate(
-    t2,
+  let m2 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
       <T::Resolver as AddressResolver>::ResolvedAddress,
     >::with_meta("lb".try_into().unwrap())),
+    t2,
     t2_opts,
   )
   .await
@@ -650,19 +670,23 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
 }
 
 /// Unit test for user data
-pub async fn memberlist_user_data<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
-where
+pub async fn memberlist_user_data<T, R>(
+  t1: T::Options,
+  t1_opts: Options,
+  t2: T::Options,
+  t2_opts: Options,
+) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
-  let m1 = Memberlist::with_delegate(
-    t1,
+  let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
       <T::Resolver as AddressResolver>::ResolvedAddress,
     >::with_state(Bytes::from_static(
       b"something",
     ))),
+    t1,
     t1_opts
       .with_gossip_interval(Duration::from_millis(100))
       .with_push_pull_interval(Duration::from_millis(100)),
@@ -674,14 +698,14 @@ where
     .map(|i| Bytes::copy_from_slice(&i.to_be_bytes()))
     .collect::<TinyVec<_>>();
 
-  let m2 = Memberlist::with_delegate(
-    t2,
+  let m2 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
       <T::Resolver as AddressResolver>::ResolvedAddress,
     >::with_state_and_broadcasts(
       Bytes::from_static(b"my state"), bcasts.clone()
     )),
+    t2,
     t2_opts
       .with_gossip_interval(Duration::from_millis(100))
       .with_push_pull_interval(Duration::from_millis(100)),
@@ -741,17 +765,21 @@ where
 }
 
 /// Unit test for send
-pub async fn memberlist_send<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
-where
+pub async fn memberlist_send<T, R>(
+  t1: T::Options,
+  t1_opts: Options,
+  t2: T::Options,
+  t2_opts: Options,
+) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
-  let m1 = Memberlist::with_delegate(
-    t1,
+  let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
       <T::Resolver as AddressResolver>::ResolvedAddress,
     >::new()),
+    t1,
     t1_opts
       .with_gossip_interval(Duration::from_millis(1))
       .with_push_pull_interval(Duration::from_millis(1)),
@@ -759,12 +787,12 @@ where
   .await
   .unwrap();
 
-  let m2 = Memberlist::with_delegate(
-    t2,
+  let m2 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
       <T::Resolver as AddressResolver>::ResolvedAddress,
     >::new()),
+    t2,
     t2_opts
       .with_gossip_interval(Duration::from_millis(1))
       .with_push_pull_interval(Duration::from_millis(1)),
@@ -814,15 +842,19 @@ where
 }
 
 /// Unit tests for leave
-pub async fn memberlist_leave<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
-where
+pub async fn memberlist_leave<T, R>(
+  t1: T::Options,
+  t1_opts: Options,
+  t2: T::Options,
+  t2_opts: Options,
+) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
-  let m1 = Memberlist::new(t1, t1_opts.with_gossip_interval(Duration::from_millis(1)))
+  let m1 = Memberlist::<T, _>::new(t1, t1_opts.with_gossip_interval(Duration::from_millis(1)))
     .await
     .unwrap();
-  let m2 = Memberlist::new(t2, t2_opts.with_gossip_interval(Duration::from_millis(1)))
+  let m2 = Memberlist::<T, _>::new(t2, t2_opts.with_gossip_interval(Duration::from_millis(1)))
     .await
     .unwrap();
 
@@ -894,19 +926,19 @@ pub async fn memberlist_conflict_delegate<F, T, R>(
   mut get_transport: impl FnMut(T::Id) -> F,
   id: T::Id,
 ) where
-  F: Future<Output = T>,
+  F: Future<Output = T::Options>,
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
-  let m1 = Memberlist::with_delegate(
-    get_transport(id.clone()).await,
+  let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_conflict_delegate(CustomConflictDelegate::new()),
+    get_transport(id.clone()).await,
     Options::lan(),
   )
   .await
   .unwrap();
 
-  let m2 = Memberlist::new(get_transport(id).await, Options::lan())
+  let m2 = Memberlist::<T, _>::new(get_transport(id).await, Options::lan())
     .await
     .unwrap();
 
@@ -977,23 +1009,27 @@ where
 }
 
 /// Unit test for ping delegate
-pub async fn memberlist_ping_delegate<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
-where
+pub async fn memberlist_ping_delegate<T, R>(
+  t1: T::Options,
+  t1_opts: Options,
+  t2: T::Options,
+  t2_opts: Options,
+) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
   let probe_interval = t1_opts.probe_interval();
-  let m1 = Memberlist::with_delegate(
-    t1,
+  let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_ping_delegate(CustomPingDelegate::new()),
+    t1,
     t1_opts.with_probe_interval(Duration::from_millis(100)),
   )
   .await
   .unwrap();
 
-  let m2 = Memberlist::with_delegate(
-    t2,
+  let m2 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_ping_delegate(CustomPingDelegate::new()),
+    t2,
     t2_opts.with_probe_interval(Duration::from_millis(100)),
   )
   .await

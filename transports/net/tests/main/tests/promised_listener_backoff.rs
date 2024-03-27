@@ -11,7 +11,7 @@ macro_rules! promised_listener_backoff_test_suites {
             memberlist_net::resolver::socket_addr::SocketAddrResolver<$rt>,
             memberlist_net::NetTransport<smol_str::SmolStr, memberlist_net::resolver::socket_addr::SocketAddrResolver<$rt>, $layer<$rt>, memberlist_core::transport::Lpe<_, _>, $rt>,
             $layer<$rt>,
-          >(s, kind)
+          >(<$layer<$rt> as memberlist_net::stream_layer::StreamLayer>::new(s).await.unwrap(), kind)
           .await
           {
             panic!("{}", e);
@@ -25,7 +25,7 @@ macro_rules! promised_listener_backoff_test_suites {
             memberlist_net::resolver::socket_addr::SocketAddrResolver<$rt>,
             memberlist_net::NetTransport<smol_str::SmolStr, memberlist_net::resolver::socket_addr::SocketAddrResolver<$rt>, $layer<$rt>, memberlist_core::transport::Lpe<_, _>, $rt>,
             $layer<$rt>,
-          >(s, kind)
+          >(<$layer<$rt> as memberlist_net::stream_layer::StreamLayer>::new(s).await.unwrap(), kind)
           .await
           {
             panic!("{}", e);

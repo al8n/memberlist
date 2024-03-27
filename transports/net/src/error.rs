@@ -30,6 +30,12 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   /// Returns when the promised listener fails to bind.
   #[error("failed to start promised listener on {0}: {1}")]
   ListenPromised(SocketAddr, std::io::Error),
+  /// Returns when the failed to create a resolver for the transport.
+  #[error("failed to create resolver: {0}")]
+  Resolver(A::Error),
+  /// Returns when the failed to create a stream layer for the transport.
+  #[error("failed to create stream layer: {0}")]
+  StreamLayer(std::io::Error),
   /// Returns when we fail to resolve an address.
   #[error("failed to resolve address {addr}: {err}")]
   Resolve {

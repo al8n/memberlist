@@ -560,32 +560,30 @@ mod quinn_stream_layer {
   const ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
 
   /// Returns a new quinn stream layer
-  pub async fn quinn_stream_layer<R: RuntimeLite>() -> Quinn<R> {
+  pub async fn quinn_stream_layer<R: RuntimeLite>() -> crate::quinn::Options {
     let server_name = "localhost".to_string();
     let (server_config, client_config) = configures().unwrap();
-    Quinn::new(Options::new(
+    Options::new(
       server_name,
       server_config,
       client_config,
       Default::default(),
-    ))
+    )
   }
 
   /// Returns a new quinn stream layer
   pub async fn quinn_stream_layer_with_connect_timeout<R: RuntimeLite>(
     timeout: Duration,
-  ) -> Quinn<R> {
+  ) -> crate::quinn::Options {
     let server_name = "localhost".to_string();
     let (server_config, client_config) = configures().unwrap();
-    Quinn::new(
-      Options::new(
-        server_name,
-        server_config,
-        client_config,
-        Default::default(),
-      )
-      .with_connect_timeout(timeout),
+    Options::new(
+      server_name,
+      server_config,
+      client_config,
+      Default::default(),
     )
+    .with_connect_timeout(timeout)
   }
 }
 
@@ -598,13 +596,8 @@ mod s2n_stream_layer {
 
   use crate::stream_layer::s2n::*;
 
-  pub async fn s2n_stream_layer<R: RuntimeLite>() -> S2n<R> {
+  pub async fn s2n_stream_layer<R: RuntimeLite>() -> crate::s2n::Options {
     let p = std::env::current_dir().unwrap().join("tests");
-    S2n::new(Options::new(
-      "localhost".into(),
-      p.join("cert.pem"),
-      p.join("key.pem"),
-    ))
-    .unwrap()
+    Options::new("localhost".into(), p.join("cert.pem"), p.join("key.pem"))
   }
 }

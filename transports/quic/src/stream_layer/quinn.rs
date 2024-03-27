@@ -32,7 +32,7 @@ pub struct Quinn<R> {
 
 impl<R> Quinn<R> {
   /// Creates a new [`Quinn`] stream layer with the given options.
-  pub fn new(opts: Options) -> Self {
+  fn new_in(opts: Options) -> Self {
     Self {
       opts: opts.into(),
       _marker: PhantomData,
@@ -46,9 +46,14 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
   type Connector = QuinnConnector<R>;
   type Connection = QuinnConnection<R>;
   type Stream = QuinnStream<R>;
+  type Options = Options;
 
   fn max_stream_data(&self) -> usize {
     self.opts.max_stream_data.min(self.opts.max_connection_data)
+  }
+
+  async fn new(opts: Self::Options) -> Result<Self, Self::Error> {
+    Ok(Self::new_in(opts))
   }
 
   async fn bind(

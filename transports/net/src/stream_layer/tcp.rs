@@ -47,6 +47,12 @@ impl<R> Tcp<R> {
 impl<R: Runtime> StreamLayer for Tcp<R> {
   type Listener = TcpListener<R>;
   type Stream = TcpStream<R>;
+  type Options = ();
+
+  #[inline]
+  async fn new(_: Self::Options) -> io::Result<Self> {
+    Ok(Self::default())
+  }
 
   async fn connect(&self, addr: SocketAddr) -> io::Result<Self::Stream> {
     <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect(addr)

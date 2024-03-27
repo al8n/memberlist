@@ -104,7 +104,7 @@ where
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: RuntimeLite,
 {
-  opts: QuicTransportOptions<I, A>,
+  opts: Options<I, A>,
   advertise_addr: A::ResolvedAddress,
   local_addr: A::Address,
   packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
@@ -133,19 +133,10 @@ where
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: RuntimeLite,
 {
-  /// Creates a new quic transport.
-  pub async fn new(
-    resolver: A,
-    stream_layer: S,
-    opts: QuicTransportOptions<I, A>,
-  ) -> Result<Self, QuicTransportError<A, S, W>> {
-    Self::new_in(resolver, stream_layer, opts).await
-  }
-
   async fn new_in(
     resolver: A,
     stream_layer: S,
-    opts: QuicTransportOptions<I, A>,
+    opts: Options<I, A>,
   ) -> Result<Self, QuicTransportError<A, S, W>> {
     // If we reject the empty list outright we can assume that there's at
     // least one listener of each type later during operation.
@@ -422,6 +413,20 @@ where
 
   type Runtime = A::Runtime;
 
+  type Options = QuicTransportOptions<I, A, S>;
+
+  async fn new(transport_opts: Self::Options) -> Result<Self, Self::Error> {
+    let (resolver_options, stream_layer_options, opts) = transport_opts.into();
+    let resolver = <A as AddressResolver>::new(resolver_options)
+      .await
+      .map_err(Self::Error::Resolver)?;
+
+    let stream_layer = S::new(stream_layer_options)
+      .await
+      .map_err(Self::Error::Stream)?;
+    Self::new_in(resolver, stream_layer, opts).await
+  }
+
   async fn resolve(
     &self,
     addr: &<Self::Resolver as AddressResolver>::Address,
@@ -434,6 +439,16 @@ where
         addr: addr.cheap_clone(),
         err: e,
       })
+  }
+
+  #[cfg(feature = "encryption")]
+  fn keyring(&self) -> Option<&memberlist_core::types::SecretKeyring> {
+    None
+  }
+
+  #[cfg(feature = "encryption")]
+  fn encryption_enabled(&self) -> bool {
+    false
   }
 
   #[inline]

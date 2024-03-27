@@ -1,6 +1,7 @@
 use super::*;
 use agnostic::tokio::TokioRuntime;
 use memberlist_core::tests::run as run_unit_test;
+use memberlist_quic::stream_layer::s2n::S2n;
 
 fn run(fut: impl std::future::Future<Output = ()>) {
   let runtime = ::tokio::runtime::Builder::new_multi_thread()

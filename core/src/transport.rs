@@ -270,7 +270,6 @@ pub trait Wire: Send + Sync + 'static {
 /// Transport is used to abstract over communicating with other peers. The packet
 /// interface is assumed to be best-effort and the stream interface is assumed to
 /// be reliable.
-#[auto_impl::auto_impl(Box, Arc)]
 pub trait Transport: Sized + Send + Sync + 'static {
   /// The error type for the transport
   type Error: TransportError;
@@ -284,6 +283,11 @@ pub trait Transport: Sized + Send + Sync + 'static {
   type Wire: Wire<Id = Self::Id, Address = <Self::Resolver as AddressResolver>::ResolvedAddress>;
   /// The async runtime
   type Runtime: RuntimeLite;
+  /// The options used to construct the transport
+  type Options: Send + Sync + 'static;
+
+  /// Creates a new transport with the given options
+  fn new(options: Self::Options) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
   /// Resolves the given address to a resolved address
   fn resolve(

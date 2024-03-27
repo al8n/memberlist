@@ -23,7 +23,6 @@ use s2n_quic::{
   stream::{BidirectionalStream, ReceiveStream, SendStream},
   Client, Connection, Server,
 };
-pub use s2n_quic_transport::connection::limits::ValidationError;
 use smol_str::SmolStr;
 
 use crate::QuicConnection;
@@ -49,7 +48,7 @@ pub struct S2n<R> {
 
 impl<R> S2n<R> {
   /// Creates a new [`S2n`] stream layer with the given options.
-  pub fn new(opts: Options) -> Result<Self, ValidationError> {
+  fn new_in(opts: Options) -> Result<Self, ValidationError> {
     Ok(Self {
       limits: Limits::try_from(&opts)?,
       server_name: opts.server_name,
@@ -69,9 +68,14 @@ impl<R: RuntimeLite> StreamLayer for S2n<R> {
   type Connector = S2nConnector<R>;
   type Connection = S2nConnection<R>;
   type Stream = S2nStream<R>;
+  type Options = options::Options;
 
   fn max_stream_data(&self) -> usize {
     self.max_stream_data
+  }
+
+  async fn new(opts: Self::Options) -> Result<Self, Self::Error> {
+    Self::new_in(opts).map_err(Self::Error::Validation)
   }
 
   async fn bind(

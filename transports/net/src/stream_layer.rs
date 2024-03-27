@@ -58,6 +58,14 @@ pub trait StreamLayer: Send + Sync + 'static {
   /// The connection type for the network stream.
   type Stream: PromisedStream;
 
+  /// The options type for constructing the stream layer.
+  type Options: Send + Sync + 'static;
+
+  /// Creates a new instance of the stream layer with the given options.
+  fn new(options: Self::Options) -> impl Future<Output = io::Result<Self>> + Send
+  where
+    Self: Sized;
+
   /// Establishes a connection to a specified socket address.
   fn connect(&self, addr: SocketAddr) -> impl Future<Output = io::Result<Self::Stream>> + Send;
 

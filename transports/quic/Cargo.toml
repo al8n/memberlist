@@ -18,6 +18,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = ["compression", "quinn"]
 compression = ["rayon", "weezl"]
+# encryption feature enables nothing, because of quic is secure by default, this feature only for adapt to other transport layer
+encryption = ["memberlist-core/encryption"]
 quinn = ["agnostic/quinn", "dep:quinn", "rustls", "agnostic/net"]
 s2n = ["s2n-quic", "s2n-quic-transport", "futures/bilock", "futures/unstable"]
 serde = ["memberlist-core/serde", "dep:serde", "humantime-serde", "indexmap/serde"]

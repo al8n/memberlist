@@ -197,11 +197,11 @@ where
   /// Create a new memberlist with the given transport and options.
   #[inline]
   pub async fn new(
-    transport: T,
+    transport_options: T::Options,
     opts: Options,
   ) -> Result<Self, Error<T, VoidDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>>
   {
-    Self::create(transport, None, opts).await
+    Self::create(None, transport_options, opts).await
   }
 }
 
@@ -213,18 +213,19 @@ where
   /// Create a new memberlist with the given transport, delegate and options.
   #[inline]
   pub async fn with_delegate(
-    transport: T,
     delegate: D,
+    transport_options: T::Options,
     opts: Options,
   ) -> Result<Self, Error<T, D>> {
-    Self::create(transport, Some(delegate), opts).await
+    Self::create(Some(delegate), transport_options, opts).await
   }
 
   pub(crate) async fn create(
-    transport: T,
     delegate: Option<D>,
+    transport_options: T::Options,
     opts: Options,
   ) -> Result<Self, Error<T, D>> {
+    let transport = T::new(transport_options).await.map_err(Error::Transport)?;
     let (shutdown_rx, advertise, this) = Self::new_in(transport, delegate, opts).await?;
     let meta = if let Some(d) = &this.delegate {
       d.node_meta(META_MAX_SIZE).await

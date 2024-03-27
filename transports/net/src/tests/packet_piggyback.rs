@@ -1,16 +1,17 @@
-use memberlist_core::transport::{tests::send_packet_piggyback, Lpe};
-use nodecraft::{resolver::socket_addr::SocketAddrResolver, CheapClone};
-
-use crate::{NetTransport, NetTransportOptions};
-
+#[cfg(all(feature = "encryption", feature = "compression"))]
 use super::*;
 
 #[cfg(all(feature = "encryption", feature = "compression"))]
-pub async fn packet_piggyback<S, R>(s: S, kind: AddressKind) -> Result<(), AnyError>
+pub async fn packet_piggyback<S, R>(s: S::Options, kind: AddressKind) -> Result<(), AnyError>
 where
   S: StreamLayer,
   R: Runtime,
 {
+  use memberlist_core::transport::{tests::send_packet_piggyback, Lpe};
+  use nodecraft::{resolver::socket_addr::SocketAddrResolver, CheapClone};
+
+  use crate::{NetTransport, NetTransportOptions};
+
   let name = format!("{kind}_packet_piggyback");
   let label = Label::try_from(&name)?;
   let pk = SecretKey::from([1; 32]);
@@ -22,14 +23,14 @@ where
     .with_receive_compressed(true)
     .with_receive_verify_label(true);
 
-  let mut opts = NetTransportOptions::new(name.into())
+  let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()))
     .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, _, _, Lpe<_, _>, _>::new(SocketAddrResolver::<R>::new(), s, opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
     .await
     .unwrap();
   send_packet_piggyback(trans, client, |mut src| {
