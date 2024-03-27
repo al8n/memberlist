@@ -485,7 +485,7 @@ mod tests {
 
   //     // Confirm after to make sure it handles a negative remaining
   //     // time correctly and doesn't fire again.
-  //     s.confirm(&"late".into()).await;
+  //     s.confirm(&"late".into(), $expr).await;
   //     tokio::time::sleep(expected + 2 * fudge).await;
   //     match rx.try_recv() {
   //       Ok(d) => panic!("case {}: should not have fired ({:?})", i, d),
@@ -517,7 +517,7 @@ mod tests {
   //     f,
   //   );
 
-  //   assert!(!s.confirm(&"foo".into()).await);
+  //   assert!(!s.confirm(&"foo".into(), $expr).await);
   //   let _ = tokio::time::timeout(Duration::from_millis(50), rx.recv())
   //     .await
   //     .unwrap();
@@ -545,7 +545,7 @@ mod tests {
   //   );
 
   //   tokio::time::sleep(Duration::from_millis(200)).await;
-  //   s.confirm(&"foo".into()).await;
+  //   s.confirm(&"foo".into(), $expr).await;
 
   //   let _ = tokio::time::timeout(Duration::from_millis(25), rx.recv())
   //     .await

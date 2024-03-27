@@ -1,7 +1,7 @@
 use super::*;
 
 macro_rules! set_probe_channels {
-  ($layer:ident<$rt: ident> ($kind:literal, $expr: expr)) => {
+  ($rt: ident ($kind:literal, $expr: expr)) => {
     paste::paste! {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _set_probe_channels >]() {

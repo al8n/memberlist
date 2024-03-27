@@ -70,7 +70,7 @@ macro_rules! join_different_networks_multi_masks {
       fn [< test_ $rt:snake _ $kind:snake _join_different_networks_multi_masks >]() {
         [< $rt:snake _run >](async move {
           join_different_networks_multi_masks(|idx, cidrs| async move {
-            let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_different_networks_multi_masks_node_{idx}").into())
+            let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options_options(format!("join_different_networks_multi_masks_node_{idx}").into())
               .with_cidrs_policy(cidrs);
             t1_opts.add_bind_address(next_socket_addr_v4(idx as u8));
 

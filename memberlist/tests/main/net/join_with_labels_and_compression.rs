@@ -93,7 +93,7 @@ macro_rules! join_with_labels_and_compression {
       fn [< test_ $rt:snake _ $kind:snake _join_with_labels >]() {
         [< $rt:snake _run >](async move {
           memberlist_join_with_labels_and_compression(|idx, label, compressor| async move {
-            let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_with_labels_and_compression_node_{idx}").into(), $expr)
+            let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options_options(format!("join_with_labels_and_compression_node_{idx}").into(), $expr)
               .with_label(label)
               .with_compressor(Some(compressor));
             t1_opts.add_bind_address(next_socket_addr_v4(0));

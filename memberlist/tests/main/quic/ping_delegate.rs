@@ -6,17 +6,15 @@ macro_rules! ping_delegate {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _ping_delegate >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer("ping_delegate_node_1".into());
+          let mut t1_opts = QuicTransportOptions::<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("ping_delegate_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let t1 = QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan();
+          let opts = Options::lan();
 
-          let mut t2_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer("ping_delegate_node_2".into());
+          let mut t2_opts = QuicTransportOptions::<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("ping_delegate_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
-          let t2 = QuicTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t2_opts).await.unwrap();
 
-          memberlist_ping_delegate(t1, t1_opts, t2, Options::lan()).await;
+          memberlist_ping_delegate::<QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(t1_opts, opts, t2_opts, Options::lan()).await;
         });
       }
 
@@ -24,17 +22,15 @@ macro_rules! ping_delegate {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _ping_delegate_with_compression >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer("ping_delegate_node_1".into()).with_compressor(Some(Default::default())).with_offload_size(10);
+          let mut t1_opts = QuicTransportOptions::<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("ping_delegate_node_1".into(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let t1 = QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan();
+          let opts = Options::lan();
 
-          let mut t2_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer("ping_delegate_node_2".into()).with_compressor(Some(Default::default())).with_offload_size(10);
+          let mut t2_opts = QuicTransportOptions::<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("ping_delegate_node_2".into(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
-          let t2 = QuicTransport::new(SocketAddrResolver::<[< $rt:camel Runtime >]>::new(), $expr, t2_opts).await.unwrap();
 
-          memberlist_ping_delegate(t1, t1_opts, t2, Options::lan()).await;
+          memberlist_ping_delegate::<QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(t1_opts, opts, t2_opts, Options::lan()).await;
         });
       }
     }
