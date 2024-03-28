@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use super::*;
+
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
-use nodecraft::{CheapClone, Node};
 use transformable::Transformable;
 
 /// Push node state is the state push to the remote server.

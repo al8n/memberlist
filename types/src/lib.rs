@@ -63,4 +63,6 @@ pub use version::*;
 
 pub use smallvec_wrapper::*;
 
+pub use nodecraft::{CheapClone, Node, NodeTransformError, NodeId, NodeIdTransformError, NodeAddress, NodeAddressError};
+
 const MAX_ENCODED_LEN_SIZE: usize = core::mem::size_of::<u32>();

@@ -1,7 +1,6 @@
 use crate::{base::MessageHandoff, transport::Wire};
 use agnostic_lite::AsyncSpawner;
 use either::Either;
-use nodecraft::CheapClone;
 
 use super::*;
 
