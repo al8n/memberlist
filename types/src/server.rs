@@ -74,11 +74,7 @@ impl TryFrom<u8> for State {
 pub struct UnknownState(u8);
 
 /// Represents a node in the cluster
-#[viewit::viewit(
-  vis_all = "pub(crate)",
-  getters(vis_all = "pub"),
-  setters(vis_all = "pub", prefix = "with")
-)]
+#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
@@ -87,11 +83,13 @@ pub struct UnknownState(u8);
 )]
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 pub struct NodeState<I, A> {
+  /// The id of the node.
   #[viewit(
     getter(const, style = "ref", attrs(doc = "Returns the id of the node")),
     setter(attrs(doc = "Sets the id of the node (Builder pattern)"))
   )]
   id: I,
+  /// The address of the node.
   #[viewit(
     getter(
       const,
@@ -117,6 +115,7 @@ pub struct NodeState<I, A> {
     setter(const, attrs(doc = "Sets the state of the node (Builder pattern)"))
   )]
   state: State,
+  /// The protocol version of the node is speaking.
   #[viewit(
     getter(
       const,
@@ -129,6 +128,7 @@ pub struct NodeState<I, A> {
     )
   )]
   protocol_version: ProtocolVersion,
+  /// The delegate version of the node is speaking.
   #[viewit(
     getter(
       const,

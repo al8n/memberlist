@@ -10,11 +10,7 @@ use nodecraft::{CheapClone, Node, NodeTransformError};
 use transformable::Transformable;
 
 /// Alive message
-#[viewit::viewit(
-  vis_all = "pub(crate)",
-  getters(vis_all = "pub"),
-  setters(vis_all = "pub", prefix = "with")
-)]
+#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
@@ -23,6 +19,7 @@ use transformable::Transformable;
 )]
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 pub struct Alive<I, A> {
+  /// The incarnation of the alive message
   #[viewit(
     getter(const, attrs(doc = "Returns the incarnation of the alive message")),
     setter(
@@ -31,6 +28,7 @@ pub struct Alive<I, A> {
     )
   )]
   incarnation: u32,
+  /// The meta of the alive message
   #[viewit(
     getter(
       const,
@@ -40,6 +38,7 @@ pub struct Alive<I, A> {
     setter(attrs(doc = "Sets the meta of the alive message (Builder pattern)"))
   )]
   meta: Meta,
+  /// The node of the alive message
   #[viewit(
     getter(
       const,
@@ -49,6 +48,7 @@ pub struct Alive<I, A> {
     setter(attrs(doc = "Sets the node of the alive message (Builder pattern)"))
   )]
   node: Node<I, A>,
+  /// The protocol version of the alive message is speaking
   #[viewit(
     getter(
       const,
@@ -60,6 +60,7 @@ pub struct Alive<I, A> {
     )
   )]
   protocol_version: ProtocolVersion,
+  /// The delegate version of the alive message is speaking
   #[viewit(
     getter(
       const,

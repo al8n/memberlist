@@ -8,6 +8,8 @@
 
 pub use smallvec_wrapper::smallvec_wrapper;
 
+pub use bytes;
+
 mod message;
 pub use message::*;
 
@@ -63,6 +65,8 @@ pub use version::*;
 
 pub use smallvec_wrapper::*;
 
-pub use nodecraft::{CheapClone, Node, NodeTransformError, NodeId, NodeIdTransformError, NodeAddress, NodeAddressError};
+pub use nodecraft::{
+  CheapClone, Node, NodeAddress, NodeAddressError, NodeId, NodeIdTransformError, NodeTransformError,
+};
 
 const MAX_ENCODED_LEN_SIZE: usize = core::mem::size_of::<u32>();

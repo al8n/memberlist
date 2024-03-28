@@ -7,11 +7,7 @@ use bytes::Bytes;
 use transformable::Transformable;
 
 /// Push node state is the state push to the remote server.
-#[viewit::viewit(
-  vis_all = "pub(crate)",
-  getters(vis_all = "pub"),
-  setters(vis_all = "pub", prefix = "with")
-)]
+#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
@@ -20,6 +16,7 @@ use transformable::Transformable;
 )]
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 pub struct PushNodeState<I, A> {
+  /// The id of the push node state.
   #[viewit(
     getter(
       const,
@@ -29,6 +26,7 @@ pub struct PushNodeState<I, A> {
     setter(attrs(doc = "Sets the id of the push node state (Builder pattern)"))
   )]
   id: I,
+  /// The address of the push node state.
   #[viewit(
     getter(
       const,
@@ -42,6 +40,7 @@ pub struct PushNodeState<I, A> {
     )
   )]
   addr: A,
+  /// Metadata from the delegate for this push node state.
   #[viewit(
     getter(
       const,
@@ -51,6 +50,7 @@ pub struct PushNodeState<I, A> {
     setter(attrs(doc = "Sets the meta of the push node state (Builder pattern)"))
   )]
   meta: Meta,
+  /// The incarnation of the push node state.
   #[viewit(
     getter(const, attrs(doc = "Returns the incarnation of the push node state")),
     setter(
@@ -59,6 +59,7 @@ pub struct PushNodeState<I, A> {
     )
   )]
   incarnation: u32,
+  /// The state of the push node state.
   #[viewit(
     getter(const, attrs(doc = "Returns the state of the push node state")),
     setter(
@@ -67,6 +68,7 @@ pub struct PushNodeState<I, A> {
     )
   )]
   state: State,
+  /// The protocol version of the push node state is speaking.
   #[viewit(
     getter(
       const,
@@ -80,6 +82,7 @@ pub struct PushNodeState<I, A> {
     )
   )]
   protocol_version: ProtocolVersion,
+  /// The delegate version of the push node state is speaking.
   #[viewit(
     getter(
       const,
@@ -393,11 +396,7 @@ const _: () = {
 };
 
 /// Push pull message.
-#[viewit::viewit(
-  vis_all = "pub(crate)",
-  getters(vis_all = "pub"),
-  setters(vis_all = "pub", prefix = "with")
-)]
+#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
@@ -406,6 +405,7 @@ const _: () = {
 )]
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 pub struct PushPull<I, A> {
+  /// Whether the push pull message is a join message.
   #[viewit(
     getter(
       const,
@@ -417,6 +417,7 @@ pub struct PushPull<I, A> {
     )
   )]
   join: bool,
+  /// The states of the push pull message.
   #[viewit(
     getter(
       const,
@@ -426,6 +427,7 @@ pub struct PushPull<I, A> {
     setter(attrs(doc = "Sets the states of the push pull message (Builder pattern)"))
   )]
   states: Arc<TinyVec<PushNodeState<I, A>>>,
+  /// The user data of the push pull message.
   #[viewit(
     getter(
       const,
