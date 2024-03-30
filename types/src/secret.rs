@@ -435,11 +435,9 @@ impl Transformable for SecretKeys {
     }
 
     debug_assert_eq!(
-      offset,
-      src.len(),
+      offset, len,
       "expect read {} bytes, but actual read {} bytes",
-      src.len(),
-      offset
+      len, offset
     );
 
     Ok((offset, keys))
