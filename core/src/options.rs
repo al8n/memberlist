@@ -311,8 +311,8 @@ impl Options {
       gossip_interval: Duration::from_millis(200), // Gossip every 200ms
       gossip_nodes: 3,                  // Gossip to 3 nodes
       gossip_to_the_dead_time: Duration::from_secs(30), // same as push/pull
-      delegate_version: DelegateVersion::V0,
-      protocol_version: ProtocolVersion::V0,
+      delegate_version: DelegateVersion::V1,
+      protocol_version: ProtocolVersion::V1,
       handoff_queue_depth: 1024,
       dead_node_reclaim_time: Duration::ZERO,
       queue_check_interval: Duration::from_secs(30),

@@ -82,8 +82,8 @@ impl<I, A> Alive<I, A> {
       incarnation,
       meta: Meta::empty(),
       node,
-      protocol_version: ProtocolVersion::V0,
-      delegate_version: DelegateVersion::V0,
+      protocol_version: ProtocolVersion::V1,
+      delegate_version: DelegateVersion::V1,
     }
   }
 
@@ -354,8 +354,8 @@ const _: () = {
             .parse()
             .unwrap(),
         ),
-        protocol_version: ProtocolVersion::V0,
-        delegate_version: DelegateVersion::V0,
+        protocol_version: ProtocolVersion::V1,
+        delegate_version: DelegateVersion::V1,
       }
     }
   }
@@ -387,9 +387,9 @@ mod tests {
     assert_eq!(alive.meta(), &Meta::empty());
     alive.set_node(Node::new("a".into(), "127.0.0.1:8081".parse().unwrap()));
     assert_eq!(alive.node().id(), "a");
-    alive.set_protocol_version(ProtocolVersion::V0);
-    assert_eq!(alive.protocol_version(), ProtocolVersion::V0);
-    alive.set_delegate_version(DelegateVersion::V0);
-    assert_eq!(alive.delegate_version(), DelegateVersion::V0);
+    alive.set_protocol_version(ProtocolVersion::V1);
+    assert_eq!(alive.protocol_version(), ProtocolVersion::V1);
+    alive.set_delegate_version(DelegateVersion::V1);
+    assert_eq!(alive.delegate_version(), DelegateVersion::V1);
   }
 }

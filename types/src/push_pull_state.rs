@@ -108,8 +108,8 @@ impl<I, A> PushNodeState<I, A> {
       meta: Meta::empty(),
       incarnation,
       state,
-      protocol_version: ProtocolVersion::V0,
-      delegate_version: DelegateVersion::V0,
+      protocol_version: ProtocolVersion::V1,
+      delegate_version: DelegateVersion::V1,
     }
   }
 
@@ -623,8 +623,8 @@ const _: () = {
           .unwrap(),
         incarnation: random(),
         state: State::try_from(thread_rng().gen_range(0..=3)).unwrap(),
-        protocol_version: ProtocolVersion::V0,
-        delegate_version: DelegateVersion::V0,
+        protocol_version: ProtocolVersion::V1,
+        delegate_version: DelegateVersion::V1,
       }
     }
   }
@@ -704,11 +704,11 @@ mod tests {
     state.set_state(State::Alive);
     assert_eq!(state.state(), State::Alive);
 
-    state.set_protocol_version(ProtocolVersion::V0);
-    assert_eq!(state.protocol_version(), ProtocolVersion::V0);
+    state.set_protocol_version(ProtocolVersion::V1);
+    assert_eq!(state.protocol_version(), ProtocolVersion::V1);
 
-    state.set_delegate_version(DelegateVersion::V0);
-    assert_eq!(state.delegate_version(), DelegateVersion::V0);
+    state.set_delegate_version(DelegateVersion::V1);
+    assert_eq!(state.delegate_version(), DelegateVersion::V1);
 
     let _cloned = state.cheap_clone();
   }

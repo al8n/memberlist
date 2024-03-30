@@ -166,8 +166,8 @@ impl<I, A> NodeState<I, A> {
       addr,
       meta: Meta::empty(),
       state,
-      protocol_version: ProtocolVersion::V0,
-      delegate_version: DelegateVersion::V0,
+      protocol_version: ProtocolVersion::V1,
+      delegate_version: DelegateVersion::V1,
     }
   }
 
@@ -352,10 +352,10 @@ mod tests {
     assert_eq!(node.meta(), &Meta::empty());
     node.set_state(State::Dead);
     assert_eq!(node.state(), State::Dead);
-    node.set_protocol_version(ProtocolVersion::V0);
-    assert_eq!(node.protocol_version(), ProtocolVersion::V0);
-    node.set_delegate_version(DelegateVersion::V0);
-    assert_eq!(node.delegate_version(), DelegateVersion::V0);
+    node.set_protocol_version(ProtocolVersion::V1);
+    assert_eq!(node.protocol_version(), ProtocolVersion::V1);
+    node.set_delegate_version(DelegateVersion::V1);
+    assert_eq!(node.delegate_version(), DelegateVersion::V1);
     println!("{}", node);
   }
 }
