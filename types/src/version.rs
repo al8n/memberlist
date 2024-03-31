@@ -39,7 +39,7 @@ impl TryFrom<u8> for DelegateVersion {
   type Error = UnknownDelegateVersion;
   fn try_from(v: u8) -> Result<Self, Self::Error> {
     match v {
-      0 => Ok(DelegateVersion::V1),
+      1 => Ok(DelegateVersion::V1),
       _ => Err(UnknownDelegateVersion(v)),
     }
   }
@@ -105,7 +105,7 @@ impl TryFrom<u8> for ProtocolVersion {
   type Error = UnknownProtocolVersion;
   fn try_from(v: u8) -> Result<Self, Self::Error> {
     match v {
-      0 => Ok(Self::V1),
+      1 => Ok(Self::V1),
       _ => Err(UnknownProtocolVersion(v)),
     }
   }
@@ -136,17 +136,17 @@ mod tests {
 
   #[test]
   fn test_delegate_version() {
-    assert_eq!(DelegateVersion::V1 as u8, 0);
+    assert_eq!(DelegateVersion::V1 as u8, 1);
     assert_eq!(DelegateVersion::V1.to_string(), "V1");
-    assert_eq!(DelegateVersion::try_from(0), Ok(DelegateVersion::V1));
+    assert_eq!(DelegateVersion::try_from(1), Ok(DelegateVersion::V1));
     assert_eq!(DelegateVersion::try_from(1), Err(UnknownDelegateVersion(1)));
   }
 
   #[test]
   fn test_protocol_version() {
-    assert_eq!(ProtocolVersion::V1 as u8, 0);
+    assert_eq!(ProtocolVersion::V1 as u8, 1);
     assert_eq!(ProtocolVersion::V1.to_string(), "V1");
-    assert_eq!(ProtocolVersion::try_from(0), Ok(ProtocolVersion::V1));
+    assert_eq!(ProtocolVersion::try_from(1), Ok(ProtocolVersion::V1));
     assert_eq!(ProtocolVersion::try_from(1), Err(UnknownProtocolVersion(1)));
   }
 }
