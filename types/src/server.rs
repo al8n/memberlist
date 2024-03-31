@@ -74,11 +74,7 @@ impl TryFrom<u8> for State {
 pub struct UnknownState(u8);
 
 /// Represents a node in the cluster
-#[viewit::viewit(
-  vis_all = "pub(crate)",
-  getters(vis_all = "pub"),
-  setters(vis_all = "pub", prefix = "with")
-)]
+#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
@@ -87,11 +83,13 @@ pub struct UnknownState(u8);
 )]
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 pub struct NodeState<I, A> {
+  /// The id of the node.
   #[viewit(
     getter(const, style = "ref", attrs(doc = "Returns the id of the node")),
     setter(attrs(doc = "Sets the id of the node (Builder pattern)"))
   )]
   id: I,
+  /// The address of the node.
   #[viewit(
     getter(
       const,
@@ -117,6 +115,7 @@ pub struct NodeState<I, A> {
     setter(const, attrs(doc = "Sets the state of the node (Builder pattern)"))
   )]
   state: State,
+  /// The protocol version of the node is speaking.
   #[viewit(
     getter(
       const,
@@ -129,6 +128,7 @@ pub struct NodeState<I, A> {
     )
   )]
   protocol_version: ProtocolVersion,
+  /// The delegate version of the node is speaking.
   #[viewit(
     getter(
       const,
@@ -166,8 +166,8 @@ impl<I, A> NodeState<I, A> {
       addr,
       meta: Meta::empty(),
       state,
-      protocol_version: ProtocolVersion::V0,
-      delegate_version: DelegateVersion::V0,
+      protocol_version: ProtocolVersion::V1,
+      delegate_version: DelegateVersion::V1,
     }
   }
 
@@ -352,10 +352,10 @@ mod tests {
     assert_eq!(node.meta(), &Meta::empty());
     node.set_state(State::Dead);
     assert_eq!(node.state(), State::Dead);
-    node.set_protocol_version(ProtocolVersion::V0);
-    assert_eq!(node.protocol_version(), ProtocolVersion::V0);
-    node.set_delegate_version(DelegateVersion::V0);
-    assert_eq!(node.delegate_version(), DelegateVersion::V0);
+    node.set_protocol_version(ProtocolVersion::V1);
+    assert_eq!(node.protocol_version(), ProtocolVersion::V1);
+    node.set_delegate_version(DelegateVersion::V1);
+    assert_eq!(node.delegate_version(), DelegateVersion::V1);
     println!("{}", node);
   }
 }

@@ -22,15 +22,15 @@ pub struct UnknownDelegateVersion(u8);
 #[non_exhaustive]
 #[repr(u8)]
 pub enum DelegateVersion {
-  /// Version 0
+  /// Version 1
   #[default]
-  V0 = 0,
+  V1 = 1,
 }
 
 impl core::fmt::Display for DelegateVersion {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
-      DelegateVersion::V0 => write!(f, "V0"),
+      DelegateVersion::V1 => write!(f, "V1"),
     }
   }
 }
@@ -39,7 +39,7 @@ impl TryFrom<u8> for DelegateVersion {
   type Error = UnknownDelegateVersion;
   fn try_from(v: u8) -> Result<Self, Self::Error> {
     match v {
-      0 => Ok(DelegateVersion::V0),
+      0 => Ok(DelegateVersion::V1),
       _ => Err(UnknownDelegateVersion(v)),
     }
   }
@@ -50,7 +50,7 @@ const _: () = {
   impl From<ArchivedDelegateVersion> for DelegateVersion {
     fn from(value: ArchivedDelegateVersion) -> Self {
       match value {
-        ArchivedDelegateVersion::V0 => Self::V0,
+        ArchivedDelegateVersion::V1 => Self::V1,
       }
     }
   }
@@ -58,7 +58,7 @@ const _: () = {
   impl From<DelegateVersion> for ArchivedDelegateVersion {
     fn from(value: DelegateVersion) -> Self {
       match value {
-        DelegateVersion::V0 => Self::V0,
+        DelegateVersion::V1 => Self::V1,
       }
     }
   }
@@ -88,15 +88,15 @@ pub struct UnknownProtocolVersion(u8);
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ProtocolVersion {
-  /// Version 0
+  /// Version 1
   #[default]
-  V0 = 0,
+  V1 = 1,
 }
 
 impl core::fmt::Display for ProtocolVersion {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
-      Self::V0 => write!(f, "V0"),
+      Self::V1 => write!(f, "V1"),
     }
   }
 }
@@ -105,7 +105,7 @@ impl TryFrom<u8> for ProtocolVersion {
   type Error = UnknownProtocolVersion;
   fn try_from(v: u8) -> Result<Self, Self::Error> {
     match v {
-      0 => Ok(Self::V0),
+      0 => Ok(Self::V1),
       _ => Err(UnknownProtocolVersion(v)),
     }
   }
@@ -116,7 +116,7 @@ const _: () = {
   impl From<ArchivedProtocolVersion> for ProtocolVersion {
     fn from(value: ArchivedProtocolVersion) -> Self {
       match value {
-        ArchivedProtocolVersion::V0 => Self::V0,
+        ArchivedProtocolVersion::V1 => Self::V1,
       }
     }
   }
@@ -124,7 +124,7 @@ const _: () = {
   impl From<ProtocolVersion> for ArchivedProtocolVersion {
     fn from(value: ProtocolVersion) -> Self {
       match value {
-        ProtocolVersion::V0 => Self::V0,
+        ProtocolVersion::V1 => Self::V1,
       }
     }
   }
@@ -136,17 +136,17 @@ mod tests {
 
   #[test]
   fn test_delegate_version() {
-    assert_eq!(DelegateVersion::V0 as u8, 0);
-    assert_eq!(DelegateVersion::V0.to_string(), "V0");
-    assert_eq!(DelegateVersion::try_from(0), Ok(DelegateVersion::V0));
+    assert_eq!(DelegateVersion::V1 as u8, 0);
+    assert_eq!(DelegateVersion::V1.to_string(), "V1");
+    assert_eq!(DelegateVersion::try_from(0), Ok(DelegateVersion::V1));
     assert_eq!(DelegateVersion::try_from(1), Err(UnknownDelegateVersion(1)));
   }
 
   #[test]
   fn test_protocol_version() {
-    assert_eq!(ProtocolVersion::V0 as u8, 0);
-    assert_eq!(ProtocolVersion::V0.to_string(), "V0");
-    assert_eq!(ProtocolVersion::try_from(0), Ok(ProtocolVersion::V0));
+    assert_eq!(ProtocolVersion::V1 as u8, 0);
+    assert_eq!(ProtocolVersion::V1.to_string(), "V1");
+    assert_eq!(ProtocolVersion::try_from(0), Ok(ProtocolVersion::V1));
     assert_eq!(ProtocolVersion::try_from(1), Err(UnknownProtocolVersion(1)));
   }
 }

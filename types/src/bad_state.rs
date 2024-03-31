@@ -10,7 +10,6 @@ macro_rules! bad_bail {
   ) => {
     $(#[$meta])*
     #[viewit::viewit(
-      vis_all = "pub(crate)",
       getters(vis_all = "pub"),
       setters(vis_all = "pub", prefix = "with")
     )]
@@ -22,6 +21,7 @@ macro_rules! bad_bail {
     )]
     #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
     pub struct $name<I> {
+      /// The incarnation of the message.
       #[viewit(
         getter(const, attrs(doc = "Returns the incarnation of the message")),
         setter(
@@ -30,11 +30,13 @@ macro_rules! bad_bail {
         )
       )]
       incarnation: u32,
+      /// The node of the message.
       #[viewit(
         getter(const, style = "ref", attrs(doc = "Returns the node of the message")),
         setter(attrs(doc = "Sets the node of the message (Builder pattern)"))
       )]
       node: I,
+      /// The source node of the message.
       #[viewit(
         getter(const, style = "ref", attrs(doc = "Returns the source node of the message")),
         setter(attrs(doc = "Sets the source node of the message (Builder pattern)"))

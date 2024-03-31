@@ -11,7 +11,6 @@ macro_rules! bail_ping {
   ) => {
     $(#[$meta])*
     #[viewit::viewit(
-      vis_all = "pub(crate)",
       getters(vis_all = "pub"),
       setters(vis_all = "pub", prefix = "with")
     )]
@@ -20,6 +19,7 @@ macro_rules! bail_ping {
     #[cfg_attr(feature = "rkyv", derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive))]
     #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
     pub struct $name<I, A> {
+      /// The sequence number of the ack
       #[viewit(
         getter(const, attrs(doc = "Returns the sequence number of the ack")),
         setter(
