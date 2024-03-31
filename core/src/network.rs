@@ -11,7 +11,7 @@ use super::{
 use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
 use futures::future::FutureExt;
-use nodecraft::{resolver::AddressResolver, Node};
+use nodecraft::resolver::AddressResolver;
 
 mod packet;
 mod stream;

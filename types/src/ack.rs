@@ -5,11 +5,7 @@ use transformable::{utils::*, Transformable};
 const MAX_INLINED_BYTES: usize = 64;
 
 /// Ack response is sent for a ping
-#[viewit::viewit(
-  vis_all = "pub(crate)",
-  getters(vis_all = "pub"),
-  setters(vis_all = "pub", prefix = "with")
-)]
+#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(
@@ -19,6 +15,7 @@ const MAX_INLINED_BYTES: usize = 64;
 #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 #[cfg_attr(feature = "rkyv", archive_attr(derive(Debug, PartialEq, Eq, Hash)))]
 pub struct Ack {
+  /// The sequence number of the ack
   #[viewit(
     getter(const, attrs(doc = "Returns the sequence number of the ack")),
     setter(
@@ -27,6 +24,7 @@ pub struct Ack {
     )
   )]
   sequence_number: u32,
+  /// The payload of the ack
   #[viewit(
     getter(const, style = "ref", attrs(doc = "Returns the payload of the ack")),
     setter(attrs(doc = "Sets the payload of the ack (Builder pattern)"))
