@@ -5,6 +5,7 @@ ignore:
   - core/src/state/tests.rs
   - core/src/base/tests.rs
   - core/src/transport/tests.rs
+  - core/src/transport/tests
   - core/src/delegate/mock.rs
   - core/src/error.rs
   - transports/net/src/tests.rs
