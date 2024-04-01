@@ -316,8 +316,12 @@ where
     Ok(())
   }
 
-  /// Join directly by contacting the given node id
-  pub async fn join(&self, node: Node<T::Id, MaybeResolvedAddress<T>>) -> Result<(), Error<T, D>> {
+  /// Join directly by contacting the given node id,
+  /// Returns the node if successfully joined, or an error if the node could not be reached.
+  pub async fn join(
+    &self,
+    node: Node<T::Id, MaybeResolvedAddress<T>>,
+  ) -> Result<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>, Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
@@ -332,7 +336,8 @@ where
         .await
         .map_err(Error::Transport)?,
     };
-    self.push_pull_node(Node::new(id, addr), true).await
+    let n = Node::new(id, addr);
+    self.push_pull_node(n.cheap_clone(), true).await.map(|_| n)
   }
 
   /// Used to take an existing Memberlist and attempt to join a cluster
