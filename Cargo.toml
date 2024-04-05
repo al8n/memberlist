@@ -12,7 +12,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.6"
+version = "0.2.0-alpha.1"
 edition = "2021"
 license = "MPL-2.0"
 repository = "https://github.com/al8n/memberlist"
@@ -58,7 +58,7 @@ thiserror = "1"
 tracing = "0.1"
 viewit = "0.1.5"
 
-memberlist-core = { version = "0.1", path = "core", default-features = false }
-memberlist-net = { version = "0.1", path = "transports/net", default-features = false }
-memberlist-types = { version = "0.1", path = "types", default-features = false }
-memberlist-quic = { version = "0.1", path = "transports/quic", default-features = false }
+memberlist-core = { version = "0.2.0-alpha.1", path = "core", default-features = false }
+memberlist-net = { version = "0.2.0-alpha.1", path = "transports/net", default-features = false }
+memberlist-types = { version = "0.2.0-alpha.1", path = "types", default-features = false }
+memberlist-quic = { version = "0.2.0-alpha.1", path = "transports/quic", default-features = false }
