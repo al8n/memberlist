@@ -4,7 +4,7 @@ use super::*;
 
 /// Used to configure a net transport.
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
   feature = "serde",
@@ -183,6 +183,34 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
     ))
   )]
   metric_labels: Option<Arc<memberlist_core::types::MetricLabels>>,
+}
+
+impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer> Clone
+  for QuicTransportOptions<I, A, S>
+where
+  I: Clone,
+  A::Options: Clone,
+  S::Options: Clone,
+{
+  fn clone(&self) -> Self {
+    Self {
+      id: self.id.clone(),
+      bind_addresses: self.bind_addresses.clone(),
+      label: self.label.clone(),
+      resolver: self.resolver.clone(),
+      stream_layer: self.stream_layer.clone(),
+      skip_inbound_label_check: self.skip_inbound_label_check,
+      timeout: self.timeout,
+      connection_pool_cleanup_period: self.connection_pool_cleanup_period,
+      cidrs_policy: self.cidrs_policy.clone(),
+      #[cfg(feature = "compression")]
+      compressor: self.compressor,
+      #[cfg(feature = "compression")]
+      offload_size: self.offload_size,
+      #[cfg(feature = "metrics")]
+      metric_labels: self.metric_labels.clone(),
+    }
+  }
 }
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
