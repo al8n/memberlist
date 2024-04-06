@@ -325,6 +325,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   )]
   metric_labels: Option<std::sync::Arc<memberlist_core::types::MetricLabels>>,
 }
+
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer> Clone
   for NetTransportOptions<I, A, S>
 where
