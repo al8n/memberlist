@@ -1,7 +1,4 @@
-use memberlist_core::{
-  transport::{PacketProducer, StreamProducer, TimeoutableReadStream},
-  types::{OneOrMore, Packet},
-};
+use memberlist_core::types::{OneOrMore, Packet};
 
 use super::*;
 

@@ -1,7 +1,7 @@
 //! [`memberlist`](https://crates.io/crates/memberlist)'s [`Transport`] layer based on TCP and UDP.
 #![doc(html_logo_url = "https://raw.githubusercontent.com/al8n/memberlist/main/art/logo_72x72.png")]
 #![allow(clippy::type_complexity)]
-#![deny(missing_docs)]
+#![deny(missing_docs, warnings)]
 #![forbid(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
@@ -28,15 +28,13 @@ use futures::{
   channel::oneshot, io::BufReader, stream::FuturesUnordered, AsyncRead, AsyncReadExt, AsyncWrite,
   AsyncWriteExt, StreamExt,
 };
-pub use memberlist_core::types::{Label, LabelError};
+pub use memberlist_core::{
+  transport::*,
+  types::{CIDRsPolicy, Label, LabelError},
+};
 use memberlist_core::{
-  transport::{
-    packet_stream, promised_stream, resolver::AddressResolver, Id, PacketSubscriber,
-    StreamSubscriber, TimeoutableReadStream, TimeoutableWriteStream, Transport, Wire,
-  },
   types::{Message, SmallVec, TinyVec},
   util::{batch, Batch, IsGlobalIp},
-  CheapClone,
 };
 use peekable::future::{AsyncPeekExt, AsyncPeekable};
 
