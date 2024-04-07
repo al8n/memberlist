@@ -22,11 +22,11 @@ where
     let this = self.clone();
     let transport_rx = this.inner.transport.stream();
     <T::Runtime as RuntimeLite>::spawn(async move {
-      tracing::debug!("memberlist stream listener start");
+      tracing::debug!("memberlist: stream listener start");
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
-            tracing::debug!("memberlist stream listener shutting down");
+            tracing::debug!("memberlist: stream listener exits");
             return;
           }
           conn = transport_rx.recv().fuse() => {
@@ -231,7 +231,7 @@ where
     addr: <T::Resolver as AddressResolver>::ResolvedAddress,
     mut conn: T::Stream,
   ) {
-    tracing::debug!(target =  "memberlist.stream", local = %self.inner.id, peer = %addr, "handle stream connection");
+    tracing::debug!(local = %self.inner.id, peer = %addr, "memberlist.stream: handle stream connection");
 
     #[cfg(feature = "metrics")]
     {
@@ -257,11 +257,11 @@ where
         msg
       }
       Err(e) => {
-        tracing::error!(target =  "memberlist.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to receive");
+        tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to receive");
 
         let err_resp = ErrorResponse::new(SmolStr::new(e.to_string()));
         if let Err(e) = self.send_message(&mut conn, err_resp.into()).await {
-          tracing::error!(target =  "memberlist.stream", err=%e, local = %self.inner.id, remote_node = %addr, "failed to send error response");
+          tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to send error response");
           return;
         }
 
@@ -272,16 +272,16 @@ where
     match msg {
       Message::Ping(ping) => {
         if ping.target().id().ne(self.local_id()) {
-          tracing::error!(target =  "memberlist.stream", local=%self.inner.id, remote = %addr, "got ping for unexpected node {}", ping.target());
+          tracing::error!(local=%self.inner.id, remote = %addr, "memberlist.stream: got ping for unexpected node {}", ping.target());
           return;
         }
 
         let ack = Ack::new(ping.sequence_number());
         if let Err(e) = self.send_message(&mut conn, ack.into()).await {
-          tracing::error!(target =  "memberlist.stream", err=%e, remote_node = %addr, "failed to send ack response");
+          tracing::error!(err=%e, remote_node = %addr, "memberlist.stream: failed to send ack response");
         }
         if let Err(e) = self.inner.transport.cache_stream(&addr, conn).await {
-          tracing::warn!(target =  "memberlist.stream", err=%e, remote_node = %addr, "failed to cache stream");
+          tracing::warn!(err=%e, remote_node = %addr, "memberlist.stream: failed to cache stream");
         }
       }
       Message::PushPull(pp) => {
@@ -298,26 +298,26 @@ where
         }
 
         if let Err(e) = self.send_local_state(&mut conn, pp.join()).await {
-          tracing::error!(target =  "memberlist.stream", err=%e, remote_node = %addr, "failed to push local state");
+          tracing::error!(err=%e, remote_node = %addr, "memberlist.stream: failed to push local state");
           return;
         }
 
         if let Err(e) = self.merge_remote_state(pp).await {
-          tracing::error!(target =  "memberlist.stream", err=%e, remote_node = %addr, "failed to push/pull merge");
+          tracing::error!(err=%e, remote_node = %addr, "memberlist.stream: failed to push/pull merge");
         }
 
         if let Err(e) = self.inner.transport.cache_stream(&addr, conn).await {
-          tracing::warn!(target =  "memberlist.stream", err=%e, remote_node = %addr, "failed to cache stream");
+          tracing::warn!(err=%e, remote_node = %addr, "memberlist.stream: failed to cache stream");
         }
       }
       Message::UserData(data) => {
         if let Some(d) = &self.delegate {
-          tracing::trace!(target =  "memberlist.stream", remote_node = %addr, data=?data.as_ref(), "notify user message");
+          tracing::trace!(remote_node = %addr, data=?data.as_ref(), "memberlist.stream: notify user message");
           d.notify_message(data).await
         }
       }
       msg => {
-        tracing::error!(target =  "memberlist.stream", remote_node = %addr, "received invalid msg type {}", msg.kind());
+        tracing::error!(remote_node = %addr, "memberlist.stream: received invalid msg type {}", msg.kind());
       }
     }
   }

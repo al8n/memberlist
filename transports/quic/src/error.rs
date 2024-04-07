@@ -18,12 +18,9 @@ pub enum QuicTransportError<A: AddressResolver, S: StreamLayer, W: Wire> {
   /// Returns when the packet buffer size is too small.
   #[error("failed to resize packet buffer {0}")]
   ResizePacketBuffer(std::io::Error),
-  /// Returns when the packet socket fails to bind.
-  #[error("failed to start packet listener on {0}: {1}")]
-  ListenPacket(SocketAddr, std::io::Error),
-  /// Returns when the promised listener fails to bind.
-  #[error("failed to start promised listener on {0}: {1}")]
-  ListenPromised(SocketAddr, std::io::Error),
+  /// Returns when the listener fails to bind.
+  #[error("failed to start listener on {0}: {1}")]
+  Listen(SocketAddr, std::io::Error),
   /// Returns when the failed to create a resolver for the transport.
   #[error("failed to create resolver: {0}")]
   Resolver(A::Error),

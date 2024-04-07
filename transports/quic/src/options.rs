@@ -98,6 +98,16 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   connection_pool_cleanup_period: Duration,
 
+  /// The time to live for each connection in the connection pool. Default is `None`.
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Get the time to live for each connection in the connection pool."),
+    ),
+    setter(attrs(doc = "Set the time to live for each connection for the connection pool"),)
+  )]
+  connection_ttl: Option<Duration>,
+
   /// Policy for Classless Inter-Domain Routing (CIDR).
   ///
   /// By default, allow any connection
@@ -196,6 +206,7 @@ where
     Self {
       id: self.id.clone(),
       bind_addresses: self.bind_addresses.clone(),
+      connection_ttl: self.connection_ttl,
       label: self.label.clone(),
       resolver: self.resolver.clone(),
       stream_layer: self.stream_layer.clone(),
@@ -267,6 +278,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
       id,
       timeout: None,
       bind_addresses: IndexSet::new(),
+      connection_ttl: None,
       label: Label::empty(),
       resolver: resolver_options,
       stream_layer: stream_layer_opts,
@@ -305,6 +317,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
         id: opts.id,
         bind_addresses: opts.bind_addresses,
         label: opts.label,
+        connection_ttl: opts.connection_ttl,
         skip_inbound_label_check: opts.skip_inbound_label_check,
         timeout: opts.timeout,
         connection_pool_cleanup_period: opts.connection_pool_cleanup_period,
@@ -328,6 +341,7 @@ pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   skip_inbound_label_check: bool,
   timeout: Option<Duration>,
   connection_pool_cleanup_period: Duration,
+  connection_ttl: Option<Duration>,
   cidrs_policy: CIDRsPolicy,
   #[cfg(feature = "compression")]
   compressor: Option<Compressor>,

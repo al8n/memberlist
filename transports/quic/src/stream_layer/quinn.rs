@@ -132,6 +132,7 @@ impl<R: Runtime> QuicAcceptor for QuinnAcceptor<R> {
       .ok_or(ConnectError::EndpointStopping)?
       .await?;
     let remote_addr = conn.remote_address();
+
     Ok((
       QuinnConnection::new(conn, self.local_addr, remote_addr, self.max_open_streams),
       remote_addr,
@@ -145,6 +146,12 @@ impl<R: Runtime> QuicAcceptor for QuinnAcceptor<R> {
 
   fn local_addr(&self) -> SocketAddr {
     self.local_addr
+  }
+}
+
+impl<R> Drop for QuinnAcceptor<R> {
+  fn drop(&mut self) {
+    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close acceptor");
   }
 }
 
@@ -191,6 +198,12 @@ impl<R: Runtime> QuicConnector for QuinnConnector<R> {
 
   fn local_addr(&self) -> SocketAddr {
     self.local_addr
+  }
+}
+
+impl<R> Drop for QuinnConnector<R> {
+  fn drop(&mut self) {
+    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close connector");
   }
 }
 

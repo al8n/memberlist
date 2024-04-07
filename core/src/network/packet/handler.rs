@@ -22,6 +22,7 @@ where
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
+            tracing::debug!("memberlist: packet handler exits");
             return;
           }
           _ = handoff_rx.recv().fuse() => while let Some(msg) = this.get_next_message().await {
@@ -31,7 +32,7 @@ where
               Message::Dead(m) => this.handle_dead(msg.from, m).await,
               Message::UserData(m) => this.handle_user(msg.from, m).await,
               m => {
-                tracing::error!(target =  "memberlist.packet", "message type ({}) not supported {} (packet handler)", m.kind(), msg.from);
+                tracing::error!("memberlist: message type ({}) not supported {} (packet handler)", m.kind(), msg.from);
               }
             }
           }

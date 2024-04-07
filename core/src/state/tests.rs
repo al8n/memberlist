@@ -82,7 +82,8 @@ where
   m1.alive_node(a2, None, false).await;
 
   // should ping addr2
-  m1.probe().await;
+  let (_tx, rx) = async_channel::bounded(1);
+  m1.probe(&rx).await;
 
   // Should not be marked suspect
   let nodes = m1.inner.nodes.read().await;
@@ -2196,9 +2197,9 @@ where
 
   // Gossip should send all this to m2. Retry a few times because it's UDP and
   // timing and stuff makes this flaky without.
-
+  let (_tx, rx) = async_channel::bounded(1);
   for idx in 1..=15 {
-    m1.gossip().await;
+    m1.gossip(&rx).await;
 
     R::sleep(Duration::from_millis(3)).await;
 
@@ -2257,7 +2258,8 @@ where
   })
   .await;
 
-  m1.gossip().await;
+  let (_tx, rx) = async_channel::bounded(1);
+  m1.gossip(&rx).await;
 
   futures::select! {
     _ = R::sleep(Duration::from_millis(50)).fuse() => {
@@ -2277,8 +2279,9 @@ where
   })
   .await;
 
+  let (_tx, rx) = async_channel::bounded(1);
   for idx in 1..=15 {
-    m1.gossip().await;
+    m1.gossip(&rx).await;
 
     R::sleep(Duration::from_millis(3)).await;
 
@@ -2326,8 +2329,9 @@ where
 
   m1.alive_node(a2, None, false).await;
 
+  let (_tx, rx) = async_channel::bounded(1);
   for idx in 1..=5 {
-    m1.gossip().await;
+    m1.gossip(&rx).await;
 
     R::sleep(Duration::from_millis(3)).await;
 

@@ -66,7 +66,7 @@ where
                 .send(remote_addr, conn)
                 .await
               {
-                tracing::error!(target =  "memberlist.transport.net", local_addr=%local_addr, err = %e, "failed to send TCP connection");
+                tracing::error!(local_addr=%local_addr, err = %e, "memberlist.transport.net: failed to send TCP connection");
               }
             }
             Err(e) => {
@@ -89,7 +89,7 @@ where
                 loop_delay = MAX_DELAY;
               }
 
-              tracing::error!(target =  "memberlist.transport.net", local_addr=%local_addr, err = %e, "error accepting TCP connection");
+              tracing::error!(local_addr=%local_addr, err = %e, "memberlist.transport.net: error accepting TCP connection");
               <T::Runtime as RuntimeLite>::sleep(loop_delay).await;
               continue;
             }
@@ -97,6 +97,11 @@ where
         }
       }
     }
+    let _ = ln.shutdown().await;
+    tracing::info!(
+      "memberlist.transport.net: promised processor on {} exit",
+      local_addr
+    );
   }
 }
 
@@ -133,6 +138,10 @@ where
 
     fn local_addr(&self) -> SocketAddr {
       self.ln.local_addr()
+    }
+
+    async fn shutdown(&self) -> std::io::Result<()> {
+      self.ln.shutdown().await
     }
   }
 
