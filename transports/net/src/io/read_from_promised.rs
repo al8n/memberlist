@@ -153,17 +153,16 @@ where
     // check if we should offload
     let keys = enp.keys().await;
     if encrypted_message_len <= self.opts.offload_size {
-      let buf = Self::decrypt(enp, encryption_algo, keys, stream_label.as_bytes(), buf)?;
+      let buf = Self::decrypt(encryption_algo, keys, stream_label.as_bytes(), buf)?;
       let (_, msg) = W::decode_message(&buf).map_err(NetTransportError::Wire)?;
       return Ok((readed, msg));
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
-    let enp = enp.clone();
     rayon::spawn(move || {
       if tx
         .send(
-          Self::decrypt(&enp, encryption_algo, keys, stream_label.as_bytes(), buf)
+          Self::decrypt(encryption_algo, keys, stream_label.as_bytes(), buf)
             .and_then(|b| W::decode_message(&b).map_err(NetTransportError::Wire)),
         )
         .is_err()

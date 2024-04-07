@@ -32,8 +32,20 @@ where
 
   /// Returns the local node address
   #[inline]
-  pub fn local_addr(&self) -> &<T::Resolver as AddressResolver>::Address {
+  pub fn local_address(&self) -> &<T::Resolver as AddressResolver>::Address {
     self.inner.transport.local_address()
+  }
+
+  /// Returns a [`Node`] with the local id and the advertise address of local node.
+  #[inline]
+  pub fn advertise_node(&self) -> Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> {
+    Node::new(self.inner.id.clone(), self.inner.advertise.clone())
+  }
+
+  /// Returns the advertise address of local node.
+  #[inline]
+  pub fn advertise_address(&self) -> &<T::Resolver as AddressResolver>::ResolvedAddress {
+    &self.inner.advertise
   }
 
   /// Returns the keyring (only used for encryption) of the node
@@ -52,18 +64,6 @@ where
     self.inner.transport.encryption_enabled()
   }
 
-  /// Returns a [`Node`] with the local id and the advertise address of local node.
-  #[inline]
-  pub fn advertise_node(&self) -> Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> {
-    Node::new(self.inner.id.clone(), self.inner.advertise.clone())
-  }
-
-  /// Returns the advertise address of local node.
-  #[inline]
-  pub fn advertise_address(&self) -> &<T::Resolver as AddressResolver>::ResolvedAddress {
-    &self.inner.advertise
-  }
-
   /// Returns the delegate, if any.
   #[inline]
   pub fn delegate(&self) -> Option<&D> {
@@ -74,14 +74,12 @@ where
   #[inline]
   pub async fn local_state(
     &self,
-  ) -> Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
+  ) -> Option<Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
     let nodes = self.inner.nodes.read().await;
-    // TODO: return an error
     nodes
       .node_map
       .get(&self.inner.id)
       .map(|&idx| nodes.nodes[idx].state.server.clone())
-      .unwrap()
   }
 
   /// Returns the node state of the given id. (if any).

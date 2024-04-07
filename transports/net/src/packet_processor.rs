@@ -126,13 +126,18 @@ where
                 break;
               }
 
-              tracing::error!(peer=%local_addr, err = %e, "memberlist_net.packet: error reading UDP packet");
+              tracing::error!(local=%local_addr, err = %e, "memberlist_net.packet: error reading UDP packet");
               continue;
             }
           };
         }
       }
     }
+    let _ = socket.shutdown().await;
+    tracing::info!(
+      "memberlist.transport.net: packet processor on {} exit",
+      local_addr
+    );
   }
 
   async fn handle_remote_bytes(
@@ -351,8 +356,7 @@ where
     };
     let keys = encryptor.keys().await;
     if encrypted_message_size <= offload_size {
-      return Self::decrypt(
-        encryptor,
+      return Self::decrypt( 
         algo,
         keys,
         packet_label.as_bytes(),
@@ -362,13 +366,11 @@ where
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
-    let encryptor = encryptor.clone();
 
     rayon::spawn(move || {
       if tx
         .send(
           Self::decrypt(
-            &encryptor,
             algo,
             keys,
             packet_label.as_bytes(),

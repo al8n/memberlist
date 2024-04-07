@@ -93,7 +93,7 @@ where
       .dial_with_deadline(node.address(), Instant::now() + self.inner.opts.timeout)
       .await
       .map_err(Error::transport)?;
-    tracing::debug!(target =  "memberlist", local_addr = %self.inner.id, peer_addr = %node, "initiating push/pull sync");
+    tracing::debug!(local_addr = %self.inner.id, peer_addr = %node, "memberlist: initiating push/pull sync");
 
     #[cfg(feature = "metrics")]
     {

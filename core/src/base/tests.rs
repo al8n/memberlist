@@ -1,7 +1,7 @@
 use std::{
   future::Future,
   marker::PhantomData,
-  sync::atomic::{AtomicUsize, Ordering},
+  sync::atomic::Ordering,
   time::{Duration, Instant},
 };
 
@@ -103,7 +103,7 @@ where
     .await;
   assert_eq!(num, 1);
 
-  m.local_addr();
+  m.local_address();
   m.local_state().await;
   let id = m.local_id();
   m.by_id(id).await.unwrap();
@@ -137,6 +137,59 @@ where
   assert_eq!(num, 1);
 
   m.shutdown().await.unwrap();
+}
+
+/// Unit tests for create a `Memberlist` and shutdown cleanup.
+pub async fn memberlist_shutdown_cleanup<T, F, R>(
+  t1: T::Options,
+  get_transport_opts: impl FnOnce(<T::Resolver as AddressResolver>::ResolvedAddress) -> F,
+  t1_opts: Options,
+) where
+  T: Transport<Runtime = R>,
+  F: Future<Output = T::Options>,
+  R: RuntimeLite,
+{
+  let m = Memberlist::<T, _>::new(t1, t1_opts.clone()).await.unwrap();
+  m.shutdown().await.unwrap();
+  R::sleep(Duration::from_millis(250)).await;
+
+  let addr = m.advertise_address().clone();
+  drop(m);
+  let topts = get_transport_opts(addr).await;
+  let _ = Memberlist::<T, _>::new(topts, t1_opts.clone())
+    .await
+    .unwrap();
+}
+
+/// Unit tests for create a `Memberlist` and shutdown cleanup.
+pub async fn memberlist_shutdown_cleanup2<T, F, R>(
+  t1: T::Options,
+  t1_opts: Options,
+  t2: T::Options,
+  t2_opts: Options,
+  get_transport_opts: impl FnOnce(<T::Resolver as AddressResolver>::ResolvedAddress) -> F,
+) where
+  T: Transport<Runtime = R>,
+  F: Future<Output = T::Options>,
+  R: RuntimeLite,
+{
+  let m = Memberlist::<T, _>::new(t1, t1_opts.clone()).await.unwrap();
+  let m2 = Memberlist::<T, _>::new(t2, t2_opts.clone()).await.unwrap();
+  R::sleep(Duration::from_millis(250)).await;
+  m.join(
+    m2.advertise_node()
+      .map_address(MaybeResolvedAddress::resolved),
+  )
+  .await
+  .unwrap();
+  m.shutdown().await.unwrap();
+
+  let addr = m.advertise_address().clone();
+  drop(m);
+  let topts = get_transport_opts(addr).await;
+  let _ = Memberlist::<T, _>::new(topts, t1_opts.clone())
+    .await
+    .unwrap();
 }
 
 /// Unit tests for join a `Memberlist`.

@@ -10,31 +10,27 @@ use std::{
   marker::PhantomData,
   net::{IpAddr, SocketAddr},
   sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
     Arc,
   },
   time::{Duration, Instant},
 };
 
+use agnostic::AsyncSpawner;
 use agnostic_lite::RuntimeLite;
+use atomic_refcell::AtomicRefCell;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
-use futures::{
-  channel::oneshot::{self, channel},
-  stream::FuturesUnordered,
-  FutureExt, StreamExt,
+use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
+pub use memberlist_core::{
+  transport::*,
+  types::{CIDRsPolicy, Label, LabelError},
 };
-pub use memberlist_core::types::{Label, LabelError};
 use memberlist_core::{
-  transport::{
-    packet_stream, promised_stream, PacketSubscriber, StreamSubscriber, Transport, TransportError,
-    Wire,
-  },
-  types::{CIDRsPolicy, Message, SmallVec, TinyVec},
+  types::{Message, SmallVec, TinyVec},
   util::{batch, Batch},
 };
-use nodecraft::{resolver::AddressResolver, CheapClone, Id};
 
 mod processor;
 use processor::*;
@@ -111,14 +107,13 @@ where
   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
   #[allow(dead_code)]
   stream_layer: S,
-  connection_pool: Arc<SkipMap<SocketAddr, S::Connection>>,
+  connection_pool: Arc<SkipMap<SocketAddr, (Instant, S::Connection)>>,
   v4_round_robin: AtomicUsize,
   v4_connectors: SmallVec<S::Connector>,
   v6_round_robin: AtomicUsize,
   v6_connectors: SmallVec<S::Connector>,
-  handles: futures::lock::Mutex<SmallVec<oneshot::Receiver<()>>>,
+  handles: AtomicRefCell<FuturesUnordered<<R::Spawner as AsyncSpawner>::JoinHandle<()>>>,
   resolver: A,
-  shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
 
   max_payload_size: usize,
@@ -175,14 +170,14 @@ where
                 retries += 1;
                 continue;
               }
-              return Err(QuicTransportError::ListenPromised(addr, e));
+              return Err(QuicTransportError::Listen(addr, e));
             }
           }
         }
       } else {
         match stream_layer.bind(addr).await {
           Ok(res) => res,
-          Err(e) => return Err(QuicTransportError::ListenPromised(addr, e)),
+          Err(e) => return Err(QuicTransportError::Listen(addr, e)),
         }
       };
 
@@ -200,24 +195,21 @@ where
       resolved_bind_address.push(addr);
     }
 
-    let shutdown = Arc::new(AtomicBool::new(false));
     let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
     let advertise_addr = resolved_bind_address[expose_addr_index];
     let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
-    let mut handles = SmallVec::new();
+    let handles = FuturesUnordered::new();
 
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
     for (local_addr, acceptor) in v4_acceptors.into_iter().chain(v6_acceptors.into_iter()) {
-      let (finish_tx, finish_rx) = channel();
       let processor = Processor::<A, Self, S> {
         acceptor,
         packet_tx: packet_tx.clone(),
         stream_tx: stream_tx.clone(),
         label: opts.label.clone(),
         local_addr,
-        shutdown: shutdown.clone(),
         timeout: opts.timeout,
         shutdown_rx: shutdown_rx.clone(),
         skip_inbound_label_check: opts.skip_inbound_label_check,
@@ -227,11 +219,7 @@ where
         metric_labels: opts.metric_labels.clone().unwrap_or_default(),
       };
 
-      R::spawn_detach(async {
-        processor.run().await;
-        let _ = finish_tx.send(());
-      });
-      handles.push(finish_rx);
+      handles.push(R::spawn(processor.run()));
     }
 
     // find final advertise address
@@ -248,13 +236,13 @@ where
     let connection_pool = Arc::new(SkipMap::new());
     let interval = <A::Runtime as RuntimeLite>::interval(opts.connection_pool_cleanup_period);
     let pool = connection_pool.clone();
-    let (cleaner_finish_tx, cleaner_finish_rx) = channel();
     let shutdown_rx = shutdown_rx.clone();
-    R::spawn_detach(async move {
-      Self::connection_pool_cleaner(pool, interval, shutdown_rx).await;
-      let _ = cleaner_finish_tx.send(());
-    });
-    handles.push(cleaner_finish_rx);
+    handles.push(R::spawn(Self::connection_pool_cleaner(
+      pool,
+      interval,
+      shutdown_rx,
+      opts.connection_ttl.unwrap_or(Duration::ZERO),
+    )));
 
     Ok(Self {
       advertise_addr: final_advertise_addr,
@@ -264,8 +252,7 @@ where
       opts,
       packet_rx,
       stream_rx,
-      handles: futures::lock::Mutex::new(handles),
-      shutdown,
+      handles: AtomicRefCell::new(handles),
       v4_connectors,
       v6_connectors,
       v4_round_robin: AtomicUsize::new(0),
@@ -288,20 +275,34 @@ where
   }
 
   async fn connection_pool_cleaner(
-    pool: Arc<SkipMap<SocketAddr, S::Connection>>,
+    pool: Arc<SkipMap<SocketAddr, (Instant, S::Connection)>>,
     mut interval: impl agnostic_lite::time::AsyncInterval,
     shutdown_rx: async_channel::Receiver<()>,
+    max_conn_idle: Duration,
   ) {
     loop {
       futures::select! {
         _ = interval.next().fuse() => {
           for ent in pool.iter() {
-            if ent.value().is_closed().await {
+            let (deadline, conn) = ent.value();
+            if max_conn_idle == Duration::ZERO {
+              if conn.is_closed().await {
+                let _ = conn.close().await;
+                ent.remove();
+              }
+              continue;
+            }
+
+            if deadline.elapsed() >= max_conn_idle || conn.is_closed().await {
+              let _ = conn.close().await;
               ent.remove();
             }
           }
         }
         _ = shutdown_rx.recv().fuse() => {
+          for ent in pool.iter() {
+            let _ = ent.value().1.close().await;
+          }
           return;
         }
       }
@@ -359,7 +360,7 @@ where
     timeout: Option<Instant>,
   ) -> Result<S::Stream, QuicTransportError<A, S, W>> {
     if let Some(ent) = self.connection_pool.get(&addr) {
-      let connection = ent.value();
+      let (_, connection) = ent.value();
       if !connection.is_full() && !connection.is_closed().await {
         if let Some(timeout) = timeout {
           return connection
@@ -386,7 +387,9 @@ where
       .open_bi()
       .await
       .map(|(s, _)| {
-        self.connection_pool.insert(addr, connection);
+        self
+          .connection_pool
+          .insert(addr, (Instant::now(), connection));
         s
       })
       .map_err(|e| QuicTransportError::Stream(e.into()))
@@ -656,19 +659,15 @@ where
   }
 
   async fn shutdown(&self) -> Result<(), Self::Error> {
-    if self.shutdown_tx.is_closed() {
+    if !self.shutdown_tx.close() {
       return Ok(());
     }
 
-    // This will avoid log spam about errors when we shut down.
-    self.shutdown.store(true, Ordering::SeqCst);
-    self.shutdown_tx.close();
-
     for conn in self.connection_pool.iter() {
-      let conn = conn.value();
+      let (_, conn) = conn.value();
       let addr = conn.local_addr();
       if let Err(e) = conn.close().await {
-        tracing::error!(err = %e, local_addr=%addr, "memberlist_quic: failed to close connection");
+        tracing::error!(err = %e, local_addr=%addr, "memberlist.transport.quic: failed to close connection");
       }
     }
 
@@ -679,13 +678,13 @@ where
         .await
         .map_err(|e| Self::Error::Stream(e.into()))
       {
-        tracing::error!(err = %e, local_addr=%addr, "memberlist_quic: failed to close connector");
+        tracing::error!(err = %e, local_addr=%addr, "memberlist.transport.quic: failed to close connector");
       }
     }
 
     // Block until all the listener threads have died.
-    let mut handles = self.handles.lock().await;
-    let _ = futures::future::join_all(handles.drain(..)).await;
+    let mut handles = core::mem::take(&mut *self.handles.borrow_mut());
+    while handles.next().await.is_some() {}
     Ok(())
   }
 }

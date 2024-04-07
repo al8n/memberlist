@@ -374,7 +374,7 @@ where
     // cluster merging to still occur.
     if let Some(delegate) = &self.delegate {
       if let Err(e) = delegate.notify_alive(server.clone()).await {
-        tracing::warn!(target =  "memberlist.state", local = %self.inner.id, peer = %anode, err=%e, "ignoring alive message");
+        tracing::warn!(local = %self.inner.id, peer = %anode, err=%e, "memberlist.state: ignoring alive message");
         return;
       }
     }
@@ -385,7 +385,7 @@ where
       let state = &memberlist.nodes[*idx].state;
       if state.address() != alive.node().address() {
         if let Err(err) = self.inner.transport.blocked_address(anode.address()) {
-          tracing::warn!(target =  "memberlist.state", local = %self.inner.id, remote = %anode, err=%err, "rejected IP update from {} to {} for node {}", alive.node().id(), state.address(), anode.address());
+          tracing::warn!(local = %self.inner.id, remote = %anode, err=%err, "memberlist.state: rejected IP update from {} to {} for node {}", alive.node().id(), state.address(), anode.address());
           return;
         };
 
@@ -395,10 +395,10 @@ where
 
         // Allow the address to be updated if a dead node is being replaced.
         if state.state == State::Left || (state.state == State::Dead && can_reclaim) {
-          tracing::info!(target =  "memberlist.state", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.id(), state.address(), alive.node().address());
+          tracing::info!(local = %self.inner.id, "memberlist.state: updating address for left or failed node {} from {} to {}", state.id(), state.address(), alive.node().address());
           updates_node = true;
         } else {
-          tracing::error!(target =  "memberlist.state", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.id(), state.address(), alive.node(), state.state);
+          tracing::error!(local = %self.inner.id, "memberlist.state: conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.id(), state.address(), alive.node(), state.state);
 
           // Inform the conflict delegate if provided
           if let Some(delegate) = self.delegate.as_ref() {
@@ -488,7 +488,7 @@ where
         return;
       }
       self.refute(&member.state, alive.incarnation()).await;
-      tracing::warn!(target =  "memberlist.state", local = %self.inner.id, peer = %alive.node(), local_meta = ?member.meta(), remote_meta = ?alive.meta(), "refuting an alive message");
+      tracing::warn!(local = %self.inner.id, peer = %alive.node(), local_meta = ?member.meta(), remote_meta = ?alive.meta(), "memberlist.state: refuting an alive message");
     } else {
       self
         .broadcast_notify(
@@ -645,16 +645,20 @@ macro_rules! bail_trigger {
 
           futures::select! {
             _ = delay.fuse() => {},
-            _ = stop_rx.recv().fuse() => return,
+            _ = stop_rx.recv().fuse() => {
+              tracing::debug!(concat!("memberlist.state: ", stringify!($fn), " trigger exits"));
+              return;
+            },
           }
 
           let mut timer = <T::Runtime as RuntimeLite>::interval(interval);
           loop {
             futures::select! {
               _ = futures::StreamExt::next(&mut timer).fuse() => {
-                this.$fn().await;
+                this.$fn(&stop_rx).await;
               }
               _ = stop_rx.recv().fuse() => {
+                tracing::debug!(concat!("memberlist.state: ", stringify!($fn), " trigger exits"));
                 return;
               }
             }
@@ -672,7 +676,7 @@ where
 {
   /// Used to ensure the Tick is performed periodically.
   pub(crate) async fn schedule(&self, shutdown_rx: async_channel::Receiver<()>) {
-    let mut handles = self.inner.shutdown_lock.lock().await;
+    let handles = self.inner.handles.borrow();
     // Create a new probeTicker
     if self.inner.opts.probe_interval > Duration::ZERO {
       handles.push(
@@ -722,7 +726,10 @@ where
     <T::Runtime as RuntimeLite>::spawn(async move {
       futures::select! {
         _ = <T::Runtime as RuntimeLite>::sleep(rand_stagger).fuse() => {},
-        _ = stop_rx.recv().fuse() => return,
+        _ = stop_rx.recv().fuse() => {
+          tracing::debug!("memberlist.state: push pull trigger exits");
+          return;
+        },
       }
 
       // Tick using a dynamic timer
@@ -733,52 +740,62 @@ where
           _ = futures::StreamExt::next(&mut timer).fuse() => {
             this.push_pull().await;
           }
-          _ = stop_rx.recv().fuse() => return,
+          _ = stop_rx.recv().fuse() => {
+            tracing::debug!("memberlist.state: push pull trigger exits");
+            return;
+          },
         }
       }
     })
   }
 
   // Used to perform a single round of failure detection and gossip
-  async fn probe(&self) {
+  // TODO(al8n): maybe an infinite loop happening here when graceful shutdown.
+  // use shutdown_rx for temporary fix.
+  async fn probe(&self, shutdown_rx: &async_channel::Receiver<()>) {
     // Track the number of indexes we've considered probing
     let mut num_check = 0;
-    let mut probe_index = 0;
     loop {
-      let memberlist = self.inner.nodes.read().await;
+      futures::select_biased! {
+        _ = shutdown_rx.recv().fuse() => return,
+        default => {
+          let memberlist = self.inner.nodes.read().await;
+          let num_nodes = memberlist.nodes.len();
+          // Make sure we don't wrap around infinitely
+          if num_check >= num_nodes {
+            return;
+          }
 
-      // Make sure we don't wrap around infinitely
-      if num_check >= memberlist.nodes.len() {
-        return;
+          // Handle the wrap around case
+          let probe_index = self.inner.probe_index.load(Ordering::Acquire);
+          if probe_index >= num_nodes {
+            drop(memberlist);
+            self.reset_nodes().await;
+            self.inner.probe_index.store(0, Ordering::Release);
+            num_check += 1;
+            continue;
+          }
+
+          // Determine if we should probe this node
+          let mut skip = false;
+          let node = memberlist.nodes[probe_index].state.clone();
+          if node.dead_or_left() || node.id() == self.local_id() {
+            skip = true;
+          }
+
+          // Potentially skip
+          drop(memberlist);
+          self.inner.probe_index.store(probe_index + 1, Ordering::Release);
+          if skip {
+            num_check += 1;
+            continue;
+          }
+
+          // Probe the specific node
+          self.probe_node(&node).await;
+          return;
+        }
       }
-
-      // Handle the wrap around case
-      if probe_index >= memberlist.nodes.len() {
-        drop(memberlist);
-        self.reset_nodes().await;
-        probe_index = 0;
-        num_check += 1;
-        continue;
-      }
-
-      // Determine if we should probe this node
-      let mut skip = false;
-      let node = memberlist.nodes[probe_index].state.clone();
-      if node.dead_or_left() || node.id() == self.local_id() {
-        skip = true;
-      }
-
-      // Potentially skip
-      drop(memberlist);
-      probe_index += 1;
-      if skip {
-        num_check += 1;
-        continue;
-      }
-
-      // Probe the specific node
-      self.probe_node(&node).await;
-      return;
     }
   }
 
@@ -885,7 +902,7 @@ where
       {
         Ok(_) => {}
         Err(e) => {
-          tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
+          tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to send compound ping and suspect message by unreliable connection");
           if e.is_remote_failure() {
             return self
               .handle_remote_failure(
@@ -949,7 +966,7 @@ where
         // probe interval it will give the TCP fallback more time, which
         // is more active in dealing with lost packets, and it gives more
         // time to wait for indirect acks/nacks.
-        tracing::debug!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), "failed unreliable connection ping (timeout reached)");
+        tracing::debug!(local = %self.inner.id, remote = %target.id(), "memberlist.state: failed unreliable connection ping (timeout reached)");
       }
     }
 
@@ -1006,7 +1023,7 @@ where
           .await {
           Ok(_) => {},
           Err(e) => {
-            tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
+            tracing::error!(local = %self.inner.id, remote = %peer, err=%e, "memberlist.state: failed to send indirect unreliable ping");
           }
         }
       }
@@ -1081,7 +1098,7 @@ where
       futures::pin_mut!(fallback_rx);
       while let Some(did_contact) = fallback_rx.next().await {
         if did_contact {
-          tracing::warn!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), "was able to connect to target over reliable connection but unreliable probes failed, network may be misconfigured");
+          tracing::warn!(local = %self.inner.id, remote = %target.id(), "memberlist.state: was able to connect to target over reliable connection but unreliable probes failed, network may be misconfigured");
           return;
         }
       }
@@ -1105,14 +1122,14 @@ where
     }
 
     // No acks received from target, suspect it as failed.
-    tracing::info!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), "suspecting has failed, no acks received");
+    tracing::info!(local = %self.inner.id, remote = %target.id(), "memberlist.state: suspecting has failed, no acks received");
     let s = Suspect::new(
       target.incarnation.load(Ordering::SeqCst),
       target.id().cheap_clone(),
       self.local_id().cheap_clone(),
     );
     if let Err(e) = self.suspect_node(s).await {
-      tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to suspect node");
+      tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to suspect node");
     }
   }
 
@@ -1141,7 +1158,7 @@ where
       .inner
       .hot
       .num_nodes
-      .store(dead_idx as u32, Ordering::Relaxed);
+      .store(dead_idx as u32, Ordering::Release);
 
     // Shuffle live nodes
     memberlist.shuffle(&mut rand::thread_rng());
@@ -1149,92 +1166,97 @@ where
 
   /// Invoked every GossipInterval period to broadcast our gossip
   /// messages to a few random nodes.
-  async fn gossip(&self) {
-    #[cfg(feature = "metrics")]
-    let now = Instant::now();
-    #[cfg(feature = "metrics")]
-    scopeguard::defer!(
-      metrics::histogram!("memberlist.gossip", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
-    );
+  async fn gossip(&self, shutdown_rx: &async_channel::Receiver<()>) {
+    futures::select_biased! {
+      _ = shutdown_rx.recv().fuse() => {},
+      default => {
+        #[cfg(feature = "metrics")]
+        let now = Instant::now();
+        #[cfg(feature = "metrics")]
+        scopeguard::defer!(
+          metrics::histogram!("memberlist.gossip", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
+        );
 
-    // Get some random live, suspect, or recently dead nodes
-    let nodes = {
-      let nodes = self
-        .inner
-        .nodes
-        .read()
-        .await
-        .nodes
-        .iter()
-        .filter_map(|m| {
-          if m.state.id() == &self.inner.id {
+        // Get some random live, suspect, or recently dead nodes
+        let nodes = {
+          let nodes = self
+            .inner
+            .nodes
+            .read()
+            .await
+            .nodes
+            .iter()
+            .filter_map(|m| {
+              if m.state.id() == &self.inner.id {
+                return None;
+              }
+
+              match m.state.state {
+                State::Alive | State::Suspect => Some(m.state.server.clone()),
+                State::Dead => {
+                  if m.state.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
+                    None
+                  } else {
+                    Some(m.state.server.clone())
+                  }
+                }
+                _ => None,
+              }
+            })
+            .collect::<SmallVec<_>>();
+          random_nodes(self.inner.opts.gossip_nodes, nodes)
+        };
+
+        // Compute the bytes available
+        let bytes_avail =
+          self.inner.transport.max_payload_size() - self.inner.transport.packets_header_overhead();
+        let futs = nodes.into_iter().map(|server| async move {
+          // Get any pending broadcasts
+          let msgs = match self
+            .get_broadcast_with_prepend(
+              Default::default(),
+              self.inner.transport.packet_overhead(),
+              bytes_avail,
+            )
+            .await
+          {
+            Ok(msgs) => msgs,
+            Err(e) => {
+              tracing::error!(err = %e, "memberlist.state: failed to get broadcast messages from {}", server);
+              return None;
+            }
+          };
+          if msgs.is_empty() {
             return None;
           }
 
-          match m.state.state {
-            State::Alive | State::Suspect => Some(m.state.server.clone()),
-            State::Dead => {
-              if m.state.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
-                None
-              } else {
-                Some(m.state.server.clone())
-              }
-            }
-            _ => None,
-          }
-        })
-        .collect::<SmallVec<_>>();
-      random_nodes(self.inner.opts.gossip_nodes, nodes)
-    };
+          Some((server.address().cheap_clone(), msgs))
+        }).collect::<FuturesUnordered<_>>();
 
-    // Compute the bytes available
-    let bytes_avail =
-      self.inner.transport.max_payload_size() - self.inner.transport.packets_header_overhead();
-    let futs = nodes.into_iter().map(|server| async move {
-      // Get any pending broadcasts
-      let msgs = match self
-        .get_broadcast_with_prepend(
-          Default::default(),
-          self.inner.transport.packet_overhead(),
-          bytes_avail,
-        )
-        .await
-      {
-        Ok(msgs) => msgs,
-        Err(e) => {
-          tracing::error!(err = %e, "memberlist.state: failed to get broadcast messages from {}", server);
-          return None;
-        }
-      };
-      if msgs.is_empty() {
-        return None;
-      }
+        futs
+          .filter_map(|batch| async { batch })
+          .for_each_concurrent(None, |(addr, mut msgs)| async move {
+            let fut = if msgs.len() == 1 {
+              futures::future::Either::Left(async {
+                // Send single message as is
+                if let Err(e) = self.transport_send_packet(&addr, msgs.pop().unwrap()).await {
+                  tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
+                }
+              })
+            } else {
+              futures::future::Either::Right(async {
+                // Otherwise create and send one or more compound messages
+                if let Err(e) = self.transport_send_packets(&addr, msgs).await {
+                  tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
+                }
+              })
+            };
 
-      Some((server.address().cheap_clone(), msgs))
-    }).collect::<FuturesUnordered<_>>();
-
-    futs
-      .filter_map(|batch| async { batch })
-      .for_each_concurrent(None, |(addr, mut msgs)| async move {
-        let fut = if msgs.len() == 1 {
-          futures::future::Either::Left(async {
-            // Send single message as is
-            if let Err(e) = self.transport_send_packet(&addr, msgs.pop().unwrap()).await {
-              tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
-            }
+            fut.await
           })
-        } else {
-          futures::future::Either::Right(async {
-            // Otherwise create and send one or more compound messages
-            if let Err(e) = self.transport_send_packets(&addr, msgs).await {
-              tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
-            }
-          })
-        };
-
-        fut.await
-      })
-      .await;
+          .await;
+      },
+    }
   }
 
   /// invoked periodically to randomly perform a complete state
@@ -1269,7 +1291,7 @@ where
     let server = &nodes[0];
     // Attempt a push pull
     if let Err(e) = self.push_pull_node(server.node(), false).await {
-      tracing::error!(target =  "memberlist.state", err = %e, "push/pull with {} failed", server.id());
+      tracing::error!(err = %e, "memberlist.state: push/pull with {} failed", server.id());
     }
   }
 
