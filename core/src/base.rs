@@ -1,7 +1,7 @@
 use std::{
   collections::{HashMap, VecDeque},
   sync::{
-    atomic::{AtomicBool, AtomicU32},
+    atomic::{AtomicBool, AtomicU32, AtomicUsize},
     Arc,
   },
 };
@@ -10,6 +10,7 @@ use agnostic_lite::{AsyncSpawner, RuntimeLite};
 use async_channel::{Receiver, Sender};
 use async_lock::{Mutex, RwLock};
 
+use futures::{stream::FuturesUnordered, StreamExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 
 use super::{
@@ -80,6 +81,18 @@ where
 {
   pub(crate) state: LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   pub(crate) suspicion: Option<Suspicion<T, D>>,
+}
+
+impl<T, D> core::fmt::Debug for Member<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("Member")
+      .field("state", &self.state)
+      .finish()
+  }
 }
 
 impl<T, D> core::ops::Deref for Member<T, D>
@@ -271,7 +284,8 @@ where
   pub(crate) leave_lock: Mutex<()>,
   pub(crate) leave_broadcast_rx: Receiver<()>,
   pub(crate) shutdown_lock:
-    Mutex<Vec<<<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()>>>,
+    Mutex<FuturesUnordered<<<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()>>>,
+  pub(crate) probe_index: AtomicUsize,
   pub(crate) handoff_tx: Sender<()>,
   pub(crate) handoff_rx: Receiver<()>,
   pub(crate) queue: Mutex<MessageQueue<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
@@ -294,10 +308,11 @@ where
       return Ok(());
     }
 
-    let mut mu = self.shutdown_lock.lock().await;
-    for h in core::mem::take(&mut *mu) {
-      let _ = h.await;
-    }
+    let mut futs = {
+      let mut mu = self.shutdown_lock.lock().await;
+      core::mem::take(&mut *mu)
+    };
+    while futs.next().await.is_some() {}
 
     // Shut down the transport first, which should block until it's
     // completely torn down. If we kill the memberlist-side handlers
@@ -394,10 +409,7 @@ where
     let num_nodes = hot.num_nodes.clone();
     let broadcast = TransmitLimitedQueue::new(opts.retransmit_mult, num_nodes);
 
-    #[cfg(not(feature = "metrics"))]
-    let mut handles = Vec::with_capacity(7);
-    #[cfg(feature = "metrics")]
-    let mut handles = Vec::with_capacity(8);
+    let handles = FuturesUnordered::new();
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
     let this = Memberlist {
       inner: Arc::new(MemberlistCore {
@@ -408,7 +420,8 @@ where
         leave_broadcast_tx,
         leave_lock: Mutex::new(()),
         leave_broadcast_rx,
-        shutdown_lock: Mutex::new(Vec::new()),
+        probe_index: AtomicUsize::new(0),
+        shutdown_lock: Mutex::new(FuturesUnordered::new()),
         handoff_tx,
         handoff_rx,
         queue: Mutex::new(MessageQueue::new()),
@@ -468,12 +481,15 @@ where
     let this = self.clone();
 
     <T::Runtime as RuntimeLite>::spawn(async move {
+      let tick = <T::Runtime as RuntimeLite>::interval(queue_check_interval);
+      futures::pin_mut!(tick);
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
+            tracing::info!("memberlist: broadcast queue checker exits");
             return;
           },
-          _ = <T::Runtime as RuntimeLite>::sleep(queue_check_interval).fuse() => {
+          _ = tick.next().fuse() => {
             let numq = this.inner.broadcast.num_queued().await;
             metrics::histogram!("memberlist.queue.broadcasts").record(numq as f64);
           }

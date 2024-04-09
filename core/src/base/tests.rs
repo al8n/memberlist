@@ -1,7 +1,7 @@
 use std::{
   future::Future,
   marker::PhantomData,
-  sync::atomic::{AtomicUsize, Ordering},
+  sync::atomic::Ordering,
   time::{Duration, Instant},
 };
 

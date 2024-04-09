@@ -45,6 +45,7 @@ where
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
+            tracing::info!("memberlist: packet listener exits");
             return;
           }
           packet = packet_rx.recv().fuse() => {

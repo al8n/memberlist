@@ -645,16 +645,20 @@ macro_rules! bail_trigger {
 
           futures::select! {
             _ = delay.fuse() => {},
-            _ = stop_rx.recv().fuse() => return,
+            _ = stop_rx.recv().fuse() => {
+              tracing::info!(concat!("memberlist.state: ", stringify!($fn), " trigger exits"));
+              return;
+            },
           }
 
           let mut timer = <T::Runtime as RuntimeLite>::interval(interval);
           loop {
             futures::select! {
               _ = futures::StreamExt::next(&mut timer).fuse() => {
-                this.$fn().await;
+                this.$fn(&stop_rx).await;
               }
               _ = stop_rx.recv().fuse() => {
+                tracing::info!(concat!("memberlist.state: ", stringify!($fn), " trigger exits"));
                 return;
               }
             }
@@ -672,7 +676,7 @@ where
 {
   /// Used to ensure the Tick is performed periodically.
   pub(crate) async fn schedule(&self, shutdown_rx: async_channel::Receiver<()>) {
-    let mut handles = self.inner.shutdown_lock.lock().await;
+    let handles = self.inner.shutdown_lock.lock().await;
     // Create a new probeTicker
     if self.inner.opts.probe_interval > Duration::ZERO {
       handles.push(
@@ -722,7 +726,10 @@ where
     <T::Runtime as RuntimeLite>::spawn(async move {
       futures::select! {
         _ = <T::Runtime as RuntimeLite>::sleep(rand_stagger).fuse() => {},
-        _ = stop_rx.recv().fuse() => return,
+        _ = stop_rx.recv().fuse() => {
+          tracing::info!("memberlist.state: push pull trigger exits");
+          return;
+        },
       }
 
       // Tick using a dynamic timer
@@ -733,55 +740,66 @@ where
           _ = futures::StreamExt::next(&mut timer).fuse() => {
             this.push_pull().await;
           }
-          _ = stop_rx.recv().fuse() => return,
+          _ = stop_rx.recv().fuse() => {
+            tracing::info!("memberlist.state: push pull trigger exits");
+            return;
+          },
         }
       }
     })
   }
 
   // Used to perform a single round of failure detection and gossip
-  async fn probe(&self) {
+  // TODO(al8n): maybe an infinite loop happening here when graceful shutdown.
+  // use shutdown_rx for temporary fix.
+  async fn probe(&self, shutdown_rx: &async_channel::Receiver<()>) {
     // Track the number of indexes we've considered probing
     let mut num_check = 0;
-    let mut probe_index = 0;
     loop {
-      let memberlist = self.inner.nodes.read().await;
+      futures::select_biased! {
+        _ = shutdown_rx.recv().fuse() => return,
+        default => {
+          // tracing::error!("debug: probe loop {num_check} {probe_index}");
+          let memberlist = self.inner.nodes.read().await;
+          let num_nodes = memberlist.nodes.len();
+          // Make sure we don't wrap around infinitely
+          if num_check >= num_nodes {
+            return;
+          }
 
-      // Make sure we don't wrap around infinitely
-      if num_check >= memberlist.nodes.len() {
-        return;
+          // Handle the wrap around case
+          // tracing::info!("debug: idx {} num nodes {}", probe_index, memberlist.nodes.len());
+          let probe_index = self.inner.probe_index.load(Ordering::Acquire);
+          if probe_index >= num_nodes {
+            drop(memberlist);
+            self.reset_nodes().await;
+            self.inner.probe_index.store(0, Ordering::Release);
+            num_check += 1;
+            continue;
+          }
+
+          // Determine if we should probe this node
+          let mut skip = false;
+          let node = memberlist.nodes[probe_index].state.clone();
+          // tracing::error!("debug: id {} state {}", node.id(), node.state());
+          if node.dead_or_left() || node.id() == self.local_id() {
+            skip = true;
+          }
+
+          // Potentially skip
+          drop(memberlist);
+          self.inner.probe_index.store(probe_index + 1, Ordering::Release);
+          // tracing::warn!("debug: idx {} num_check {}", probe_index, num_check);
+          if skip {
+            num_check += 1;
+            continue;
+          }
+
+          // Probe the specific node
+          self.probe_node(&node).await;
+          return;
+        }
       }
-
-      // Handle the wrap around case
-      // tracing::info!("debug: idx {} num nodes {}", probe_index, memberlist.nodes.len());
-      if probe_index >= memberlist.nodes.len() {
-        drop(memberlist);
-        self.reset_nodes().await;
-        probe_index = 0;
-        num_check += 1;
-        continue;
-      }
-
-      // Determine if we should probe this node
-      let mut skip = false;
-      let node = memberlist.nodes[probe_index].state.clone();
-      // tracing::error!("debug: id {} state {}", node.id(), node.state());
-      if node.dead_or_left() || node.id() == self.local_id() {
-        skip = true;
-      }
-
-      // Potentially skip
-      drop(memberlist);
-      probe_index += 1;
-      // tracing::warn!("debug: idx {} num_check {}", probe_index, num_check);
-      if skip {
-        num_check += 1;
-        continue;
-      }
-
-      // Probe the specific node
-      self.probe_node(&node).await;
-      return;
     }
   }
 
@@ -1144,7 +1162,7 @@ where
       .inner
       .hot
       .num_nodes
-      .store(dead_idx as u32, Ordering::Relaxed);
+      .store(dead_idx as u32, Ordering::Release);
 
     // Shuffle live nodes
     memberlist.shuffle(&mut rand::thread_rng());
@@ -1152,92 +1170,97 @@ where
 
   /// Invoked every GossipInterval period to broadcast our gossip
   /// messages to a few random nodes.
-  async fn gossip(&self) {
-    #[cfg(feature = "metrics")]
-    let now = Instant::now();
-    #[cfg(feature = "metrics")]
-    scopeguard::defer!(
-      metrics::histogram!("memberlist.gossip", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
-    );
+  async fn gossip(&self, shutdown_rx: &async_channel::Receiver<()>) {
+    futures::select_biased! {
+      _ = shutdown_rx.recv().fuse() => {},
+      default => {
+        #[cfg(feature = "metrics")]
+        let now = Instant::now();
+        #[cfg(feature = "metrics")]
+        scopeguard::defer!(
+          metrics::histogram!("memberlist.gossip", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
+        );
 
-    // Get some random live, suspect, or recently dead nodes
-    let nodes = {
-      let nodes = self
-        .inner
-        .nodes
-        .read()
-        .await
-        .nodes
-        .iter()
-        .filter_map(|m| {
-          if m.state.id() == &self.inner.id {
+        // Get some random live, suspect, or recently dead nodes
+        let nodes = {
+          let nodes = self
+            .inner
+            .nodes
+            .read()
+            .await
+            .nodes
+            .iter()
+            .filter_map(|m| {
+              if m.state.id() == &self.inner.id {
+                return None;
+              }
+
+              match m.state.state {
+                State::Alive | State::Suspect => Some(m.state.server.clone()),
+                State::Dead => {
+                  if m.state.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
+                    None
+                  } else {
+                    Some(m.state.server.clone())
+                  }
+                }
+                _ => None,
+              }
+            })
+            .collect::<SmallVec<_>>();
+          random_nodes(self.inner.opts.gossip_nodes, nodes)
+        };
+
+        // Compute the bytes available
+        let bytes_avail =
+          self.inner.transport.max_payload_size() - self.inner.transport.packets_header_overhead();
+        let futs = nodes.into_iter().map(|server| async move {
+          // Get any pending broadcasts
+          let msgs = match self
+            .get_broadcast_with_prepend(
+              Default::default(),
+              self.inner.transport.packet_overhead(),
+              bytes_avail,
+            )
+            .await
+          {
+            Ok(msgs) => msgs,
+            Err(e) => {
+              tracing::error!(err = %e, "memberlist.state: failed to get broadcast messages from {}", server);
+              return None;
+            }
+          };
+          if msgs.is_empty() {
             return None;
           }
 
-          match m.state.state {
-            State::Alive | State::Suspect => Some(m.state.server.clone()),
-            State::Dead => {
-              if m.state.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
-                None
-              } else {
-                Some(m.state.server.clone())
-              }
-            }
-            _ => None,
-          }
-        })
-        .collect::<SmallVec<_>>();
-      random_nodes(self.inner.opts.gossip_nodes, nodes)
-    };
+          Some((server.address().cheap_clone(), msgs))
+        }).collect::<FuturesUnordered<_>>();
 
-    // Compute the bytes available
-    let bytes_avail =
-      self.inner.transport.max_payload_size() - self.inner.transport.packets_header_overhead();
-    let futs = nodes.into_iter().map(|server| async move {
-      // Get any pending broadcasts
-      let msgs = match self
-        .get_broadcast_with_prepend(
-          Default::default(),
-          self.inner.transport.packet_overhead(),
-          bytes_avail,
-        )
-        .await
-      {
-        Ok(msgs) => msgs,
-        Err(e) => {
-          tracing::error!(err = %e, "memberlist.state: failed to get broadcast messages from {}", server);
-          return None;
-        }
-      };
-      if msgs.is_empty() {
-        return None;
-      }
+        futs
+          .filter_map(|batch| async { batch })
+          .for_each_concurrent(None, |(addr, mut msgs)| async move {
+            let fut = if msgs.len() == 1 {
+              futures::future::Either::Left(async {
+                // Send single message as is
+                if let Err(e) = self.transport_send_packet(&addr, msgs.pop().unwrap()).await {
+                  tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
+                }
+              })
+            } else {
+              futures::future::Either::Right(async {
+                // Otherwise create and send one or more compound messages
+                if let Err(e) = self.transport_send_packets(&addr, msgs).await {
+                  tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
+                }
+              })
+            };
 
-      Some((server.address().cheap_clone(), msgs))
-    }).collect::<FuturesUnordered<_>>();
-
-    futs
-      .filter_map(|batch| async { batch })
-      .for_each_concurrent(None, |(addr, mut msgs)| async move {
-        let fut = if msgs.len() == 1 {
-          futures::future::Either::Left(async {
-            // Send single message as is
-            if let Err(e) = self.transport_send_packet(&addr, msgs.pop().unwrap()).await {
-              tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
-            }
+            fut.await
           })
-        } else {
-          futures::future::Either::Right(async {
-            // Otherwise create and send one or more compound messages
-            if let Err(e) = self.transport_send_packets(&addr, msgs).await {
-              tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
-            }
-          })
-        };
-
-        fut.await
-      })
-      .await;
+          .await;
+      },
+    }
   }
 
   /// invoked periodically to randomly perform a complete state

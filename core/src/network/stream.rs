@@ -22,11 +22,11 @@ where
     let this = self.clone();
     let transport_rx = this.inner.transport.stream();
     <T::Runtime as RuntimeLite>::spawn(async move {
-      tracing::debug!("memberlist stream listener start");
+      tracing::debug!("memberlist: stream listener start");
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
-            tracing::debug!("memberlist stream listener shutting down");
+            tracing::info!("memberlist: stream listener exits");
             return;
           }
           conn = transport_rx.recv().fuse() => {
