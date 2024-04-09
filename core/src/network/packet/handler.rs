@@ -31,7 +31,7 @@ where
               Message::Dead(m) => this.handle_dead(msg.from, m).await,
               Message::UserData(m) => this.handle_user(msg.from, m).await,
               m => {
-                tracing::error!(target =  "memberlist.packet", "message type ({}) not supported {} (packet handler)", m.kind(), msg.from);
+                tracing::error!("memberlist.packet: message type ({}) not supported {} (packet handler)", m.kind(), msg.from);
               }
             }
           }

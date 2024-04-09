@@ -55,7 +55,7 @@ where
               },
               Err(e) => {
                 if !this.inner.shutdown_tx.is_closed() {
-                  tracing::error!(target =  "memberlist.packet", "failed to receive packet: {}", e);
+                  tracing::error!("memberlist.packet: failed to receive packet: {}", e);
                 }
                 // If we got an error, which means on the other side the transport has been closed,
                 // so we need to return and shutdown the packet listener
@@ -137,7 +137,7 @@ where
   ) {
     // If node is provided, verify that it is for us
     if p.target().id().ne(&self.inner.id) {
-      tracing::error!(target =  "memberlist.packet", local=%self.inner.id, remote = %from, "got ping for unexpected node '{}'", p.target());
+      tracing::error!(local=%self.inner.id, remote = %from, "memberlist.packet: got ping for unexpected node '{}'", p.target());
       return;
     }
 
@@ -147,7 +147,7 @@ where
       Ack::new(p.sequence_number())
     };
     if let Err(e) = self.send_msg(p.source().address(), msg.into()).await {
-      tracing::error!(target =  "memberlist.packet", addr = %from, err = %e, "failed to send ack response");
+      tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to send ack response");
     }
   }
 

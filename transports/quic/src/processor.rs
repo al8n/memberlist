@@ -82,7 +82,7 @@ where
     #[cfg(feature = "compression")] offload_size: usize,
     #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::types::MetricLabels>,
   ) {
-    tracing::info!("memberlist_quic: listening stream on {local_addr}");
+    tracing::info!("memberlist.transport.quic: listening stream on {local_addr}");
 
     /// The initial delay after an `accept()` error before attempting again
     const BASE_DELAY: Duration = Duration::from_millis(5);
@@ -96,8 +96,8 @@ where
     loop {
       futures::select! {
         _ = shutdown_rx.recv().fuse() => {
-          tracing::info!(local=%local_addr, "memberlist_quic: shutdown stream listener");
-          return;
+          tracing::info!(local=%local_addr, "memberlist.transport.quic: shutdown stream listener");
+          break;
         }
         connection = acceptor.accept().fuse() => {
           match connection {
@@ -128,8 +128,7 @@ where
             }
             Err(e) => {
               if shutdown.load(Ordering::SeqCst) {
-                tracing::info!(local=%local_addr, "memberlist_quic: shutdown stream listener");
-                return;
+                break;
               }
 
               if loop_delay == Duration::ZERO {
@@ -142,7 +141,7 @@ where
                 loop_delay = MAX_DELAY;
               }
 
-              tracing::error!(target =  "memberlist.transport.quic", local_addr=%local_addr, err = %e, "error accepting stream connection");
+              tracing::error!(local_addr=%local_addr, err = %e, "memberlist.transport.quic: error accepting stream connection");
               <T::Runtime as RuntimeLite>::sleep(loop_delay).await;
               continue;
             }
@@ -150,6 +149,9 @@ where
         }
       }
     }
+
+    tracing::info!(local=%local_addr, "memberlist.transport.quic: processor exits");
+    let _ = acceptor.close().await;
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -173,7 +175,7 @@ where
             Ok((mut stream, remote_addr)) => {
               let mut stream_kind_buf = [0; 1];
               if let Err(e) = stream.peek_exact(&mut stream_kind_buf).await {
-                tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist_quic: failed to read stream kind");
+                tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist.transport.quic: failed to read stream kind");
                 continue;
               }
               let stream_kind = stream_kind_buf[0];
@@ -182,7 +184,7 @@ where
                   .send(remote_addr, stream)
                   .await
                 {
-                  tracing::error!(local_addr=%local_addr, err = %e, "memberlist_quic: failed to send stream connection");
+                  tracing::error!(local_addr=%local_addr, err = %e, "memberlist.transport.quic: failed to send stream connection");
                 }
               } else {
                 // consume peeked byte
@@ -209,17 +211,19 @@ where
               }
             }
             Err(e) => {
-              tracing::debug!(local=%local_addr, from=%remote_addr, err = %e, "memberlist_quic: failed to accept stream, shutting down the connection handler");
-              return;
+              tracing::debug!(local=%local_addr, from=%remote_addr, err = %e, "memberlist.transport.quic: failed to accept stream, shutting down the connection handler");
+              break;
             }
           }
         },
         _ = shutdown_rx.recv().fuse() => {
-          tracing::info!(local=%local_addr, remote=%remote_addr, "memberlist_quic: shutdown connection handler");
-          return;
+          break;
         }
       }
     }
+
+    tracing::info!(local=%local_addr, remote=%remote_addr, "memberlist.transport.quic: connection handler exits");
+    let _ = conn.close().await;
   }
 
   #[allow(clippy::too_many_arguments)]

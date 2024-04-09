@@ -29,6 +29,9 @@ pub trait Listener: Send + Sync + 'static {
 
   /// Retrieves the local socket address of the listener.
   fn local_addr(&self) -> SocketAddr;
+
+  /// Shuts down the listener.
+  fn shutdown(&self) -> impl Future<Output = io::Result<()>> + Send;
 }
 
 /// Represents a network connection.

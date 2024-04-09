@@ -82,8 +82,8 @@ rustls = { version = "0.21.9", default-features = false, optional = true, featur
 rcgen = { version = "0.12", optional = true }
 
 # s2n
-s2n-quic = { version = "1.32", optional = true }
-s2n-quic-transport = { version = "0.35", optional = true }
+s2n-quic = { version = "1.36", optional = true }
+s2n-quic-transport = { version = "0.36", optional = true }
 
 # compression
 rayon = { version = "1.8", optional = true }

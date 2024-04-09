@@ -74,14 +74,12 @@ where
   #[inline]
   pub async fn local_state(
     &self,
-  ) -> Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
+  ) -> Option<Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
     let nodes = self.inner.nodes.read().await;
-    // TODO: return an error
     nodes
       .node_map
       .get(&self.inner.id)
       .map(|&idx| nodes.nodes[idx].state.server.clone())
-      .unwrap()
   }
 
   /// Returns the node state of the given id. (if any).

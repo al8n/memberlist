@@ -126,13 +126,18 @@ where
                 break;
               }
 
-              tracing::error!(peer=%local_addr, err = %e, "memberlist_net.packet: error reading UDP packet");
+              tracing::error!(local=%local_addr, err = %e, "memberlist_net.packet: error reading UDP packet");
               continue;
             }
           };
         }
       }
     }
+    let _ = socket.shutdown().await;
+    tracing::info!(
+      "memberlist.transport.net: packet processor on {} exit",
+      local_addr
+    );
   }
 
   async fn handle_remote_bytes(

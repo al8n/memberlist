@@ -374,7 +374,7 @@ where
     // cluster merging to still occur.
     if let Some(delegate) = &self.delegate {
       if let Err(e) = delegate.notify_alive(server.clone()).await {
-        tracing::warn!(target =  "memberlist.state", local = %self.inner.id, peer = %anode, err=%e, "ignoring alive message");
+        tracing::warn!(local = %self.inner.id, peer = %anode, err=%e, "memberlist.state: ignoring alive message");
         return;
       }
     }
@@ -385,7 +385,7 @@ where
       let state = &memberlist.nodes[*idx].state;
       if state.address() != alive.node().address() {
         if let Err(err) = self.inner.transport.blocked_address(anode.address()) {
-          tracing::warn!(target =  "memberlist.state", local = %self.inner.id, remote = %anode, err=%err, "rejected IP update from {} to {} for node {}", alive.node().id(), state.address(), anode.address());
+          tracing::warn!(local = %self.inner.id, remote = %anode, err=%err, "memberlist.state: rejected IP update from {} to {} for node {}", alive.node().id(), state.address(), anode.address());
           return;
         };
 
@@ -395,10 +395,10 @@ where
 
         // Allow the address to be updated if a dead node is being replaced.
         if state.state == State::Left || (state.state == State::Dead && can_reclaim) {
-          tracing::info!(target =  "memberlist.state", local = %self.inner.id, "updating address for left or failed node {} from {} to {}", state.id(), state.address(), alive.node().address());
+          tracing::info!(local = %self.inner.id, "memberlist.state: updating address for left or failed node {} from {} to {}", state.id(), state.address(), alive.node().address());
           updates_node = true;
         } else {
-          tracing::error!(target =  "memberlist.state", local = %self.inner.id, "conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.id(), state.address(), alive.node(), state.state);
+          tracing::error!(local = %self.inner.id, "memberlist.state: conflicting address for {}(mine: {}, theirs: {}, old state: {})", state.id(), state.address(), alive.node(), state.state);
 
           // Inform the conflict delegate if provided
           if let Some(delegate) = self.delegate.as_ref() {
@@ -488,7 +488,7 @@ where
         return;
       }
       self.refute(&member.state, alive.incarnation()).await;
-      tracing::warn!(target =  "memberlist.state", local = %self.inner.id, peer = %alive.node(), local_meta = ?member.meta(), remote_meta = ?alive.meta(), "refuting an alive message");
+      tracing::warn!(local = %self.inner.id, peer = %alive.node(), local_meta = ?member.meta(), remote_meta = ?alive.meta(), "memberlist.state: refuting an alive message");
     } else {
       self
         .broadcast_notify(
@@ -753,6 +753,7 @@ where
       }
 
       // Handle the wrap around case
+      // tracing::info!("debug: idx {} num nodes {}", probe_index, memberlist.nodes.len());
       if probe_index >= memberlist.nodes.len() {
         drop(memberlist);
         self.reset_nodes().await;
@@ -764,6 +765,7 @@ where
       // Determine if we should probe this node
       let mut skip = false;
       let node = memberlist.nodes[probe_index].state.clone();
+      // tracing::error!("debug: id {} state {}", node.id(), node.state());
       if node.dead_or_left() || node.id() == self.local_id() {
         skip = true;
       }
@@ -771,6 +773,7 @@ where
       // Potentially skip
       drop(memberlist);
       probe_index += 1;
+      // tracing::warn!("debug: idx {} num_check {}", probe_index, num_check);
       if skip {
         num_check += 1;
         continue;
@@ -885,7 +888,7 @@ where
       {
         Ok(_) => {}
         Err(e) => {
-          tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to send compound ping and suspect message by unreliable connection");
+          tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to send compound ping and suspect message by unreliable connection");
           if e.is_remote_failure() {
             return self
               .handle_remote_failure(
@@ -949,7 +952,7 @@ where
         // probe interval it will give the TCP fallback more time, which
         // is more active in dealing with lost packets, and it gives more
         // time to wait for indirect acks/nacks.
-        tracing::debug!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), "failed unreliable connection ping (timeout reached)");
+        tracing::debug!(local = %self.inner.id, remote = %target.id(), "memberlist.state: failed unreliable connection ping (timeout reached)");
       }
     }
 
@@ -1006,7 +1009,7 @@ where
           .await {
           Ok(_) => {},
           Err(e) => {
-            tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %peer, err=%e, "failed to send indirect unreliable ping");
+            tracing::error!(local = %self.inner.id, remote = %peer, err=%e, "memberlist.state: failed to send indirect unreliable ping");
           }
         }
       }
@@ -1081,7 +1084,7 @@ where
       futures::pin_mut!(fallback_rx);
       while let Some(did_contact) = fallback_rx.next().await {
         if did_contact {
-          tracing::warn!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), "was able to connect to target over reliable connection but unreliable probes failed, network may be misconfigured");
+          tracing::warn!(local = %self.inner.id, remote = %target.id(), "memberlist.state: was able to connect to target over reliable connection but unreliable probes failed, network may be misconfigured");
           return;
         }
       }
@@ -1105,14 +1108,14 @@ where
     }
 
     // No acks received from target, suspect it as failed.
-    tracing::info!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), "suspecting has failed, no acks received");
+    tracing::info!(local = %self.inner.id, remote = %target.id(), "memberlist.state: suspecting has failed, no acks received");
     let s = Suspect::new(
       target.incarnation.load(Ordering::SeqCst),
       target.id().cheap_clone(),
       self.local_id().cheap_clone(),
     );
     if let Err(e) = self.suspect_node(s).await {
-      tracing::error!(target =  "memberlist.state", local = %self.inner.id, remote = %target.id(), err=%e, "failed to suspect node");
+      tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to suspect node");
     }
   }
 
@@ -1269,7 +1272,7 @@ where
     let server = &nodes[0];
     // Attempt a push pull
     if let Err(e) = self.push_pull_node(server.node(), false).await {
-      tracing::error!(target =  "memberlist.state", err = %e, "push/pull with {} failed", server.id());
+      tracing::error!(err = %e, "memberlist.state: push/pull with {} failed", server.id());
     }
   }
 

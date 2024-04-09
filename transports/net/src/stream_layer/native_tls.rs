@@ -163,6 +163,10 @@ impl<R: Runtime> Listener for NativeTlsListener<R> {
     ))
   }
 
+  async fn shutdown(&self) -> io::Result<()> {
+    TcpListener::shutdown(&self.ln).await
+  }
+
   fn local_addr(&self) -> std::net::SocketAddr {
     self.local_addr
   }

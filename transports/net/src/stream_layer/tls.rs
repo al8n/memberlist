@@ -241,6 +241,10 @@ impl<R: Runtime> Listener for TlsListener<R> {
   fn local_addr(&self) -> std::net::SocketAddr {
     self.local_addr
   }
+
+  async fn shutdown(&self) -> io::Result<()> {
+    TcpListener::shutdown(&self.ln).await
+  }
 }
 
 #[pin_project::pin_project]

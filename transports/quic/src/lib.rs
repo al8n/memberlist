@@ -294,12 +294,17 @@ where
       futures::select! {
         _ = interval.next().fuse() => {
           for ent in pool.iter() {
-            if ent.value().is_closed().await {
+            let conn = ent.value();
+            if conn.is_closed().await {
+              let _ = conn.close().await;
               ent.remove();
             }
           }
         }
         _ = shutdown_rx.recv().fuse() => {
+          for ent in pool.iter() {
+            let _ = ent.value().close().await;
+          }
           return;
         }
       }
@@ -666,7 +671,7 @@ where
       let conn = conn.value();
       let addr = conn.local_addr();
       if let Err(e) = conn.close().await {
-        tracing::error!(err = %e, local_addr=%addr, "memberlist_quic: failed to close connection");
+        tracing::error!(err = %e, local_addr=%addr, "memberlist.transport.quic: failed to close connection");
       }
     }
 
@@ -677,7 +682,7 @@ where
         .await
         .map_err(|e| Self::Error::Stream(e.into()))
       {
-        tracing::error!(err = %e, local_addr=%addr, "memberlist_quic: failed to close connector");
+        tracing::error!(err = %e, local_addr=%addr, "memberlist.transport.quic: failed to close connector");
       }
     }
 
