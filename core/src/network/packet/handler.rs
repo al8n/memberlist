@@ -22,7 +22,7 @@ where
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
-            tracing::info!("memberlist: packet handler exits");
+            tracing::debug!("memberlist: packet handler exits");
             return;
           }
           _ = handoff_rx.recv().fuse() => while let Some(msg) = this.get_next_message().await {

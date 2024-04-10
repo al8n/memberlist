@@ -26,7 +26,7 @@ where
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
-            tracing::info!("memberlist: stream listener exits");
+            tracing::debug!("memberlist: stream listener exits");
             return;
           }
           conn = transport_rx.recv().fuse() => {

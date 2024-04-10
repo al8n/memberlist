@@ -148,7 +148,7 @@ where
       }
     }
 
-    tracing::info!(local=%local_addr, "memberlist.transport.quic: processor exits");
+    tracing::debug!(local=%local_addr, "memberlist.transport.quic: processor exits");
     let _ = acceptor.close().await;
   }
 
@@ -218,7 +218,7 @@ where
       }
     }
 
-    tracing::info!(local=%local_addr, remote=%remote_addr, "memberlist.transport.quic: connection handler exits");
+    tracing::debug!(local=%local_addr, remote=%remote_addr, "memberlist.transport.quic: connection handler exits");
     let _ = conn.close().await;
   }
 

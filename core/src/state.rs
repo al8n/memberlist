@@ -646,7 +646,7 @@ macro_rules! bail_trigger {
           futures::select! {
             _ = delay.fuse() => {},
             _ = stop_rx.recv().fuse() => {
-              tracing::info!(concat!("memberlist.state: ", stringify!($fn), " trigger exits"));
+              tracing::debug!(concat!("memberlist.state: ", stringify!($fn), " trigger exits"));
               return;
             },
           }
@@ -658,7 +658,7 @@ macro_rules! bail_trigger {
                 this.$fn(&stop_rx).await;
               }
               _ = stop_rx.recv().fuse() => {
-                tracing::info!(concat!("memberlist.state: ", stringify!($fn), " trigger exits"));
+                tracing::debug!(concat!("memberlist.state: ", stringify!($fn), " trigger exits"));
                 return;
               }
             }
@@ -727,7 +727,7 @@ where
       futures::select! {
         _ = <T::Runtime as RuntimeLite>::sleep(rand_stagger).fuse() => {},
         _ = stop_rx.recv().fuse() => {
-          tracing::info!("memberlist.state: push pull trigger exits");
+          tracing::debug!("memberlist.state: push pull trigger exits");
           return;
         },
       }
@@ -741,7 +741,7 @@ where
             this.push_pull().await;
           }
           _ = stop_rx.recv().fuse() => {
-            tracing::info!("memberlist.state: push pull trigger exits");
+            tracing::debug!("memberlist.state: push pull trigger exits");
             return;
           },
         }
@@ -759,7 +759,6 @@ where
       futures::select_biased! {
         _ = shutdown_rx.recv().fuse() => return,
         default => {
-          // tracing::error!("debug: probe loop {num_check} {probe_index}");
           let memberlist = self.inner.nodes.read().await;
           let num_nodes = memberlist.nodes.len();
           // Make sure we don't wrap around infinitely
@@ -768,7 +767,6 @@ where
           }
 
           // Handle the wrap around case
-          // tracing::info!("debug: idx {} num nodes {}", probe_index, memberlist.nodes.len());
           let probe_index = self.inner.probe_index.load(Ordering::Acquire);
           if probe_index >= num_nodes {
             drop(memberlist);
@@ -781,7 +779,6 @@ where
           // Determine if we should probe this node
           let mut skip = false;
           let node = memberlist.nodes[probe_index].state.clone();
-          // tracing::error!("debug: id {} state {}", node.id(), node.state());
           if node.dead_or_left() || node.id() == self.local_id() {
             skip = true;
           }
@@ -789,7 +786,6 @@ where
           // Potentially skip
           drop(memberlist);
           self.inner.probe_index.store(probe_index + 1, Ordering::Release);
-          // tracing::warn!("debug: idx {} num_check {}", probe_index, num_check);
           if skip {
             num_check += 1;
             continue;
