@@ -108,7 +108,6 @@ where
               let label = label.cheap_clone();
               #[cfg(feature = "metrics")]
               let metric_labels = metric_labels.clone();
-              let (finish_tx, _finish_rx) = channel();
               <T::Runtime as RuntimeLite>::spawn_detach(async move {
                 Self::handle_connection(
                   connection,
@@ -123,7 +122,6 @@ where
                   #[cfg(feature = "compression")] offload_size,
                   #[cfg(feature = "metrics")] metric_labels,
                 ).await;
-                let _ = finish_tx.send(());
               });
             }
             Err(e) => {
@@ -193,7 +191,6 @@ where
                 let label = label.cheap_clone();
                 #[cfg(feature = "metrics")]
                 let metric_labels = metric_labels.clone();
-                let (finish_tx, _finish_rx) = channel();
                 <T::Runtime as RuntimeLite>::spawn_detach(async move {
                   Self::handle_packet(
                     stream,
@@ -206,7 +203,6 @@ where
                     #[cfg(feature = "compression")] offload_size,
                     #[cfg(feature = "metrics")] metric_labels,
                   ).await;
-                  let _ = finish_tx.send(());
                 });
               }
             }

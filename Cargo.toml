@@ -28,6 +28,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [workspace.dependencies]
 auto_impl = "1"
+atomic_refcell = "0.1"
 agnostic-lite = { version = "0.3", features = ["time"] }
 agnostic = "0.3.5"
 async-lock = "3"

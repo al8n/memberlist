@@ -16,15 +16,13 @@ use std::{
   time::{Duration, Instant},
 };
 
+use agnostic::AsyncSpawner;
 use agnostic_lite::RuntimeLite;
+use atomic_refcell::AtomicRefCell;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
-use futures::{
-  channel::oneshot::{self, channel},
-  stream::FuturesUnordered,
-  FutureExt, StreamExt,
-};
+use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 pub use memberlist_core::{
   transport::*,
   types::{CIDRsPolicy, Label, LabelError},
@@ -114,7 +112,7 @@ where
   v4_connectors: SmallVec<S::Connector>,
   v6_round_robin: AtomicUsize,
   v6_connectors: SmallVec<S::Connector>,
-  handles: futures::lock::Mutex<SmallVec<oneshot::Receiver<()>>>,
+  handles: AtomicRefCell<FuturesUnordered<<R::Spawner as AsyncSpawner>::JoinHandle<()>>>,
   resolver: A,
   shutdown: Arc<AtomicBool>,
   shutdown_tx: async_channel::Sender<()>,
@@ -173,14 +171,14 @@ where
                 retries += 1;
                 continue;
               }
-              return Err(QuicTransportError::ListenPromised(addr, e));
+              return Err(QuicTransportError::Listen(addr, e));
             }
           }
         }
       } else {
         match stream_layer.bind(addr).await {
           Ok(res) => res,
-          Err(e) => return Err(QuicTransportError::ListenPromised(addr, e)),
+          Err(e) => return Err(QuicTransportError::Listen(addr, e)),
         }
       };
 
@@ -202,13 +200,12 @@ where
     let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
     let advertise_addr = resolved_bind_address[expose_addr_index];
     let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
-    let mut handles = SmallVec::new();
+    let handles = FuturesUnordered::new();
 
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
     for (local_addr, acceptor) in v4_acceptors.into_iter().chain(v6_acceptors.into_iter()) {
-      let (finish_tx, finish_rx) = channel();
       let processor = Processor::<A, Self, S> {
         acceptor,
         packet_tx: packet_tx.clone(),
@@ -225,11 +222,7 @@ where
         metric_labels: opts.metric_labels.clone().unwrap_or_default(),
       };
 
-      R::spawn_detach(async {
-        processor.run().await;
-        let _ = finish_tx.send(());
-      });
-      handles.push(finish_rx);
+      handles.push(R::spawn(processor.run()));
     }
 
     // find final advertise address
@@ -246,13 +239,12 @@ where
     let connection_pool = Arc::new(SkipMap::new());
     let interval = <A::Runtime as RuntimeLite>::interval(opts.connection_pool_cleanup_period);
     let pool = connection_pool.clone();
-    let (cleaner_finish_tx, cleaner_finish_rx) = channel();
     let shutdown_rx = shutdown_rx.clone();
-    R::spawn_detach(async move {
-      Self::connection_pool_cleaner(pool, interval, shutdown_rx).await;
-      let _ = cleaner_finish_tx.send(());
-    });
-    handles.push(cleaner_finish_rx);
+    handles.push(R::spawn(Self::connection_pool_cleaner(
+      pool,
+      interval,
+      shutdown_rx,
+    )));
 
     Ok(Self {
       advertise_addr: final_advertise_addr,
@@ -262,7 +254,7 @@ where
       opts,
       packet_rx,
       stream_rx,
-      handles: futures::lock::Mutex::new(handles),
+      handles: AtomicRefCell::new(handles),
       shutdown,
       v4_connectors,
       v6_connectors,
@@ -659,13 +651,12 @@ where
   }
 
   async fn shutdown(&self) -> Result<(), Self::Error> {
-    if self.shutdown_tx.is_closed() {
+    if !self.shutdown_tx.close() {
       return Ok(());
     }
 
     // This will avoid log spam about errors when we shut down.
     self.shutdown.store(true, Ordering::SeqCst);
-    self.shutdown_tx.close();
 
     for conn in self.connection_pool.iter() {
       let conn = conn.value();
@@ -687,8 +678,8 @@ where
     }
 
     // Block until all the listener threads have died.
-    let mut handles = self.handles.lock().await;
-    let _ = futures::future::join_all(handles.drain(..)).await;
+    let mut handles = core::mem::take(&mut *self.handles.borrow_mut());
+    while handles.next().await.is_some() {}
     Ok(())
   }
 }

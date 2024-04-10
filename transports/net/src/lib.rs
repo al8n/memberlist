@@ -19,14 +19,15 @@ use std::{
 
 use agnostic::{
   net::{Net, UdpSocket},
-  Runtime, RuntimeLite,
+  AsyncSpawner, Runtime, RuntimeLite,
 };
+use atomic_refcell::AtomicRefCell;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{BufMut, BytesMut};
 use checksum::CHECKSUM_SIZE;
 use futures::{
-  channel::oneshot, io::BufReader, stream::FuturesUnordered, AsyncRead, AsyncReadExt, AsyncWrite,
-  AsyncWriteExt, StreamExt,
+  io::BufReader, stream::FuturesUnordered, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
+  StreamExt,
 };
 pub use memberlist_core::{
   transport::*,
@@ -147,7 +148,7 @@ where
   stream_layer: Arc<S>,
   #[cfg(feature = "encryption")]
   encryptor: Option<SecretKeyring>,
-  handles: futures::lock::Mutex<SmallVec<oneshot::Receiver<()>>>,
+  handles: AtomicRefCell<FuturesUnordered<<R::Spawner as AsyncSpawner>::JoinHandle<()>>>,
   resolver: Arc<A>,
   shutdown_tx: async_channel::Sender<()>,
   _marker: PhantomData<W>,
@@ -290,7 +291,7 @@ where
     let advertise_addr = resolved_bind_address[expose_addr_index];
     let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
     let shutdown = Arc::new(AtomicBool::new(false));
-    let mut handles = SmallVec::new();
+    let handles = FuturesUnordered::new();
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
@@ -299,20 +300,14 @@ where
       .zip(v4_sockets.iter())
       .chain(v6_promised_listeners.iter().zip(v6_sockets.iter()))
     {
-      let (finish_tx, finish_rx) = oneshot::channel();
       let processor = PromisedProcessor::<A, Self, S> {
         stream_tx: stream_tx.clone(),
         ln: promised_ln.clone(),
         shutdown_rx: shutdown_rx.clone(),
         local_addr: *promised_addr,
       };
-      R::spawn_detach(async move {
-        processor.run().await;
-        let _ = finish_tx.send(());
-      });
-      handles.push(finish_rx);
+      handles.push(R::spawn(processor.run()));
 
-      let (finish_tx, finish_rx) = oneshot::channel();
       let processor = PacketProcessor::<A, Self> {
         packet_tx: packet_tx.clone(),
         label: opts.label.clone(),
@@ -330,11 +325,8 @@ where
         shutdown_rx: shutdown_rx.clone(),
         skip_inbound_label_check: opts.skip_inbound_label_check,
       };
-      R::spawn_detach(async move {
-        processor.run().await;
-        let _ = finish_tx.send(());
-      });
-      handles.push(finish_rx);
+
+      handles.push(R::spawn(processor.run()));
     }
 
     // find final advertise address
@@ -373,7 +365,7 @@ where
       opts,
       packet_rx,
       stream_rx,
-      handles: futures::lock::Mutex::new(handles),
+      handles: AtomicRefCell::new(handles),
       v4_sockets: v4_sockets.into_iter().map(|(ln, _)| ln).collect(),
       v4_round_robin: AtomicUsize::new(0),
       v6_sockets: v6_sockets.into_iter().map(|(ln, _)| ln).collect(),
@@ -668,16 +660,12 @@ where
   }
 
   async fn shutdown(&self) -> Result<(), Self::Error> {
-    if self.shutdown_tx.is_closed() {
+    if !self.shutdown_tx.close() {
       return Ok(());
     }
 
-    // This will avoid log spam about errors when we shut down.
-    self.shutdown_tx.close();
-
-    let mut handles = self.handles.lock().await;
-    let handles = core::mem::take(&mut *handles);
-    futures::future::join_all(handles).await;
+    let mut handles = core::mem::take(&mut *self.handles.borrow_mut());
+    while handles.next().await.is_some() {}
     Ok(())
   }
 }

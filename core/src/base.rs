@@ -10,6 +10,7 @@ use agnostic_lite::{AsyncSpawner, RuntimeLite};
 use async_channel::{Receiver, Sender};
 use async_lock::{Mutex, RwLock};
 
+use atomic_refcell::AtomicRefCell;
 use futures::{stream::FuturesUnordered, StreamExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 
@@ -283,8 +284,9 @@ where
   pub(crate) leave_broadcast_tx: Sender<()>,
   pub(crate) leave_lock: Mutex<()>,
   pub(crate) leave_broadcast_rx: Receiver<()>,
-  pub(crate) shutdown_lock:
-    Mutex<FuturesUnordered<<<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()>>>,
+  pub(crate) handles: AtomicRefCell<
+    FuturesUnordered<<<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()>>,
+  >,
   pub(crate) probe_index: AtomicUsize,
   pub(crate) handoff_tx: Sender<()>,
   pub(crate) handoff_rx: Receiver<()>,
@@ -308,12 +310,6 @@ where
       return Ok(());
     }
 
-    let mut futs = {
-      let mut mu = self.shutdown_lock.lock().await;
-      core::mem::take(&mut *mu)
-    };
-    while futs.next().await.is_some() {}
-
     // Shut down the transport first, which should block until it's
     // completely torn down. If we kill the memberlist-side handlers
     // those I/O handlers might get stuck.
@@ -321,6 +317,9 @@ where
       tracing::error!(err=%e, "memberlist: failed to shutdown transport");
       return Err(e);
     }
+
+    let mut futs = core::mem::take(&mut *self.handles.borrow_mut());
+    while futs.next().await.is_some() {}
 
     Ok(())
   }
@@ -409,7 +408,6 @@ where
     let num_nodes = hot.num_nodes.clone();
     let broadcast = TransmitLimitedQueue::new(opts.retransmit_mult, num_nodes);
 
-    let handles = FuturesUnordered::new();
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
     let this = Memberlist {
       inner: Arc::new(MemberlistCore {
@@ -421,7 +419,7 @@ where
         leave_lock: Mutex::new(()),
         leave_broadcast_rx,
         probe_index: AtomicUsize::new(0),
-        shutdown_lock: Mutex::new(FuturesUnordered::new()),
+        handles: AtomicRefCell::new(FuturesUnordered::new()),
         handoff_tx,
         handoff_rx,
         queue: Mutex::new(MessageQueue::new()),
@@ -435,13 +433,15 @@ where
       delegate: delegate.map(Arc::new),
     };
 
-    handles.push(this.stream_listener(shutdown_rx.clone()));
-    handles.push(this.packet_handler(shutdown_rx.clone()));
-    handles.push(this.packet_listener(shutdown_rx.clone()));
-    #[cfg(feature = "metrics")]
-    handles.push(this.check_broadcast_queue_depth(shutdown_rx.clone()));
+    {
+      let handles = this.inner.handles.borrow();
+      handles.push(this.stream_listener(shutdown_rx.clone()));
+      handles.push(this.packet_handler(shutdown_rx.clone()));
+      handles.push(this.packet_listener(shutdown_rx.clone()));
+      #[cfg(feature = "metrics")]
+      handles.push(this.check_broadcast_queue_depth(shutdown_rx.clone()));
+    }
 
-    *this.inner.shutdown_lock.lock().await = handles;
     Ok((shutdown_rx, this.inner.advertise.cheap_clone(), this))
   }
 }

@@ -676,7 +676,7 @@ where
 {
   /// Used to ensure the Tick is performed periodically.
   pub(crate) async fn schedule(&self, shutdown_rx: async_channel::Receiver<()>) {
-    let handles = self.inner.shutdown_lock.lock().await;
+    let handles = self.inner.handles.borrow();
     // Create a new probeTicker
     if self.inner.opts.probe_interval > Duration::ZERO {
       handles.push(

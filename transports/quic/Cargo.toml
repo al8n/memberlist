@@ -48,6 +48,7 @@ test = ["memberlist-core/test", "rcgen"]
 
 [dependencies]
 auto_impl.workspace = true
+atomic_refcell.workspace = true
 agnostic-lite.workspace = true
 agnostic = { workspace = true, optional = true, features = ["net"] }
 async-channel.workspace = true
