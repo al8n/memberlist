@@ -14,7 +14,6 @@ pub(super) struct Processor<
   pub(super) stream_tx:
     StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
 
-  pub(super) shutdown: Arc<AtomicBool>,
   pub(super) shutdown_rx: async_channel::Receiver<()>,
 
   pub(super) skip_inbound_label_check: bool,
@@ -39,7 +38,6 @@ where
       packet_tx,
       stream_tx,
       shutdown_rx,
-      shutdown,
       local_addr,
       label,
       skip_inbound_label_check,
@@ -56,7 +54,6 @@ where
       acceptor,
       stream_tx,
       packet_tx,
-      shutdown,
       shutdown_rx,
       skip_inbound_label_check,
       timeout,
@@ -75,7 +72,6 @@ where
     mut acceptor: S::Acceptor,
     stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
     packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    shutdown: Arc<AtomicBool>,
     shutdown_rx: async_channel::Receiver<()>,
     skip_inbound_label_check: bool,
     timeout: Option<Duration>,
@@ -125,7 +121,7 @@ where
               });
             }
             Err(e) => {
-              if shutdown.load(Ordering::SeqCst) {
+              if shutdown_rx.is_closed() {
                 break;
               }
 

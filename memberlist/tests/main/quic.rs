@@ -256,3 +256,6 @@ mod node_delegate_meta_update;
 
 #[path = "quic/ping_delegate.rs"]
 mod ping_delegate;
+
+#[path = "quic/shutdown_cleanup.rs"]
+mod shutdown_cleanup;
