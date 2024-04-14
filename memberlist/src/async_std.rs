@@ -1,5 +1,3 @@
-use agnostic::async_std::AsyncStdRuntime;
-
 /// Memberlist type alias for using [`NetTransport`](memberlist_net::NetTransport) and [`Tcp`](memberlist_net::stream_layer::tcp::Tcp) stream layer with `async_std` runtime.
 #[cfg(all(
   any(feature = "tcp", feature = "tls", feature = "native-tls"),
@@ -16,9 +14,9 @@ pub type AsyncStdTcpMemberlist<I, A, W, D> = memberlist_core::Memberlist<
   memberlist_net::NetTransport<
     I,
     A,
-    memberlist_net::stream_layer::tcp::Tcp<AsyncStdRuntime>,
+    memberlist_net::stream_layer::tcp::Tcp<agnostic::async_std::AsyncStdRuntime>,
     W,
-    AsyncStdRuntime,
+    agnostic::async_std::AsyncStdRuntime,
   >,
   D,
 >;
@@ -30,9 +28,9 @@ pub type AsyncStdTlsMemberlist<I, A, W, D> = memberlist_core::Memberlist<
   memberlist_net::NetTransport<
     I,
     A,
-    memberlist_net::stream_layer::tls::Tls<AsyncStdRuntime>,
+    memberlist_net::stream_layer::tls::Tls<agnostic::async_std::AsyncStdRuntime>,
     W,
-    AsyncStdRuntime,
+    agnostic::async_std::AsyncStdRuntime,
   >,
   D,
 >;
@@ -47,9 +45,9 @@ pub type AsyncStdNativeTlsMemberlist<I, A, W, D> = memberlist_core::Memberlist<
   memberlist_net::NetTransport<
     I,
     A,
-    memberlist_net::stream_layer::native_tls::NativeTls<AsyncStdRuntime>,
+    memberlist_net::stream_layer::native_tls::NativeTls<agnostic::async_std::AsyncStdRuntime>,
     W,
-    AsyncStdRuntime,
+    agnostic::async_std::AsyncStdRuntime,
   >,
   D,
 >;
@@ -61,23 +59,9 @@ pub type AsyncStdQuicMemberlist<I, A, W, D> = memberlist_core::Memberlist<
   memberlist_quic::QuicTransport<
     I,
     A,
-    memberlist_quic::stream_layer::quinn::Quinn<AsyncStdRuntime>,
+    memberlist_quic::stream_layer::quinn::Quinn<agnostic::async_std::AsyncStdRuntime>,
     W,
-    AsyncStdRuntime,
-  >,
-  D,
->;
-
-/// Memberlist type alias for using [`QuicTransport`](memberlist_quic::QuicTransport) and [`S2n`](memberlist_quic::stream_layer::s2n::S2n) stream layer with `async_std` runtime.
-#[cfg(all(feature = "s2n", not(target_family = "wasm")))]
-#[cfg_attr(docsrs, doc(cfg(all(feature = "s2n", not(target_family = "wasm")))))]
-pub type AsyncStdS2nMemberlist<I, A, W, D> = memberlist_core::Memberlist<
-  memberlist_quic::QuicTransport<
-    I,
-    A,
-    memberlist_quic::stream_layer::s2n::S2n<AsyncStdRuntime>,
-    W,
-    AsyncStdRuntime,
+    agnostic::async_std::AsyncStdRuntime,
   >,
   D,
 >;

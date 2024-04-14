@@ -1,5 +1,3 @@
-use agnostic::smol::SmolRuntime;
-
 /// Memberlist type alias for using [`NetTransport`](memberlist_net::NetTransport) and [`Tcp`](memberlist_net::stream_layer::tcp::Tcp) stream layer with `smol` runtime.
 #[cfg(all(
   any(feature = "tcp", feature = "tls", feature = "native-tls"),
@@ -16,9 +14,9 @@ pub type SmolTcpMemberlist<I, A, W, D> = memberlist_core::Memberlist<
   memberlist_net::NetTransport<
     I,
     A,
-    memberlist_net::stream_layer::tcp::Tcp<SmolRuntime>,
+    memberlist_net::stream_layer::tcp::Tcp<agnostic::smol::SmolRuntime>,
     W,
-    SmolRuntime,
+    agnostic::smol::SmolRuntime,
   >,
   D,
 >;
@@ -30,9 +28,9 @@ pub type SmolTlsMemberlist<I, A, W, D> = memberlist_core::Memberlist<
   memberlist_net::NetTransport<
     I,
     A,
-    memberlist_net::stream_layer::tls::Tls<SmolRuntime>,
+    memberlist_net::stream_layer::tls::Tls<agnostic::smol::SmolRuntime>,
     W,
-    SmolRuntime,
+    agnostic::smol::SmolRuntime,
   >,
   D,
 >;
@@ -47,9 +45,9 @@ pub type SmolNativeTlsMemberlist<I, A, W, D> = memberlist_core::Memberlist<
   memberlist_net::NetTransport<
     I,
     A,
-    memberlist_net::stream_layer::native_tls::NativeTls<SmolRuntime>,
+    memberlist_net::stream_layer::native_tls::NativeTls<agnostic::smol::SmolRuntime>,
     W,
-    SmolRuntime,
+    agnostic::smol::SmolRuntime,
   >,
   D,
 >;
@@ -61,23 +59,9 @@ pub type SmolQuicMemberlist<I, A, W, D> = memberlist_core::Memberlist<
   memberlist_quic::QuicTransport<
     I,
     A,
-    memberlist_quic::stream_layer::quinn::Quinn<SmolRuntime>,
+    memberlist_quic::stream_layer::quinn::Quinn<agnostic::smol::SmolRuntime>,
     W,
-    SmolRuntime,
-  >,
-  D,
->;
-
-/// Memberlist type alias for using [`QuicTransport`](memberlist_quic::QuicTransport) and [`S2n`](memberlist_quic::stream_layer::s2n::S2n) stream layer with `smol` runtime.
-#[cfg(all(feature = "s2n", not(target_family = "wasm")))]
-#[cfg_attr(docsrs, doc(cfg(all(feature = "s2n", not(target_family = "wasm")))))]
-pub type SmolS2nMemberlist<I, A, W, D> = memberlist_core::Memberlist<
-  memberlist_quic::QuicTransport<
-    I,
-    A,
-    memberlist_quic::stream_layer::s2n::S2n<SmolRuntime>,
-    W,
-    SmolRuntime,
+    agnostic::smol::SmolRuntime,
   >,
   D,
 >;
