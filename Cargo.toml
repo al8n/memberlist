@@ -12,7 +12,6 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.1"
 edition = "2021"
 license = "MPL-2.0"
 repository = "https://github.com/al8n/memberlist"
