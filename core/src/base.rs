@@ -316,7 +316,7 @@ where
     if let Err(e) = self.transport.shutdown().await {
       tracing::error!(err=%e, "memberlist: failed to shutdown transport");
       return Err(e);
-    }
+    } 
 
     Ok(())
   }

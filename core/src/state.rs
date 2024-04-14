@@ -661,10 +661,7 @@ macro_rules! bail_trigger {
                 if this.inner.shutdown_tx.is_closed() {
                   break 'outer;
                 }
-                let shutdown = this.$fn(&stop_rx).await;
-                if shutdown {
-                  break 'outer;
-                }
+                this.$fn(&stop_rx).await;
               }
             }
           }

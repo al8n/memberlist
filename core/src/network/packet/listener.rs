@@ -42,10 +42,10 @@ where
     let this = self.clone();
     let packet_rx = this.inner.transport.packet();
     <T::Runtime as RuntimeLite>::spawn(async move {
-      loop {
+      'outer: loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
-            break;
+            break 'outer;
           }
           packet = packet_rx.recv().fuse() => {
             match packet {
@@ -59,7 +59,7 @@ where
                 }
                 // If we got an error, which means on the other side the transport has been closed,
                 // so we need to return and shutdown the packet listener
-                break;
+                break 'outer;
               },
             }
           }
