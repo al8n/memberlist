@@ -11,7 +11,7 @@ use async_channel::{Receiver, Sender};
 use async_lock::{Mutex, RwLock};
 
 use atomic_refcell::AtomicRefCell;
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::stream::FuturesUnordered;
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 
 use super::{
@@ -316,7 +316,7 @@ where
     if let Err(e) = self.transport.shutdown().await {
       tracing::error!(err=%e, "memberlist: failed to shutdown transport");
       return Err(e);
-    } 
+    }
 
     Ok(())
   }
@@ -472,7 +472,7 @@ where
     &self,
     shutdown_rx: Receiver<()>,
   ) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()> {
-    use futures::FutureExt;
+    use futures::{FutureExt, StreamExt};
 
     let queue_check_interval = self.inner.opts.queue_check_interval;
     let this = self.clone();
