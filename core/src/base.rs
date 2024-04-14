@@ -316,10 +316,7 @@ where
     if let Err(e) = self.transport.shutdown().await {
       tracing::error!(err=%e, "memberlist: failed to shutdown transport");
       return Err(e);
-    }
-
-    let mut futs = core::mem::take(&mut *self.handles.borrow_mut());
-    while futs.next().await.is_some() {}
+    } 
 
     Ok(())
   }
@@ -486,7 +483,7 @@ where
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
-            tracing::info!("memberlist: broadcast queue checker exits");
+            tracing::debug!("memberlist: broadcast queue checker exits");
             return;
           },
           _ = tick.next().fuse() => {
