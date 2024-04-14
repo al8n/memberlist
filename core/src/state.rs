@@ -652,17 +652,24 @@ macro_rules! bail_trigger {
           }
 
           let mut timer = <T::Runtime as RuntimeLite>::interval(interval);
-          loop {
-            futures::select! {
-              _ = futures::StreamExt::next(&mut timer).fuse() => {
-                this.$fn(&stop_rx).await;
-              }
+          'outer: loop {
+            futures::select_biased! {
               _ = stop_rx.recv().fuse() => {
-                tracing::debug!(concat!("memberlist.state: ", stringify!($fn), " trigger exits"));
-                return;
+                break 'outer;
+              }
+              _ = futures::StreamExt::next(&mut timer).fuse() => {
+                if this.inner.shutdown_tx.is_closed() {
+                  break 'outer;
+                }
+                let shutdown = this.$fn(&stop_rx).await;
+                if shutdown {
+                  break 'outer;
+                }
               }
             }
           }
+
+          tracing::debug!(concat!("memberlist.state: ", stringify!($fn), " trigger exits"));
         })
       }
     }
@@ -750,52 +757,52 @@ where
   }
 
   // Used to perform a single round of failure detection and gossip
-  // TODO(al8n): maybe an infinite loop happening here when graceful shutdown.
-  // use shutdown_rx for temporary fix.
-  async fn probe(&self, shutdown_rx: &async_channel::Receiver<()>) {
+  // FIX(al8n): maybe an infinite loop happening here when graceful shutdown.
+  async fn probe(&self, shutdown_rx: &async_channel::Receiver<()>) -> bool {
     // Track the number of indexes we've considered probing
     let mut num_check = 0;
     loop {
-      futures::select_biased! {
-        _ = shutdown_rx.recv().fuse() => return,
-        default => {
-          let memberlist = self.inner.nodes.read().await;
-          let num_nodes = memberlist.nodes.len();
-          // Make sure we don't wrap around infinitely
-          if num_check >= num_nodes {
-            return;
-          }
-
-          // Handle the wrap around case
-          let probe_index = self.inner.probe_index.load(Ordering::Acquire);
-          if probe_index >= num_nodes {
-            drop(memberlist);
-            self.reset_nodes().await;
-            self.inner.probe_index.store(0, Ordering::Release);
-            num_check += 1;
-            continue;
-          }
-
-          // Determine if we should probe this node
-          let mut skip = false;
-          let node = memberlist.nodes[probe_index].state.clone();
-          if node.dead_or_left() || node.id() == self.local_id() {
-            skip = true;
-          }
-
-          // Potentially skip
-          drop(memberlist);
-          self.inner.probe_index.store(probe_index + 1, Ordering::Release);
-          if skip {
-            num_check += 1;
-            continue;
-          }
-
-          // Probe the specific node
-          self.probe_node(&node).await;
-          return;
-        }
+      match shutdown_rx.try_recv() {
+        Ok(_) => return true,
+        Err(async_channel::TryRecvError::Empty) => {}
+        Err(async_channel::TryRecvError::Closed) => return true,
       }
+
+      let memberlist = self.inner.nodes.read().await;
+      let num_nodes = memberlist.nodes.len();
+      // Make sure we don't wrap around infinitely
+      if num_check >= num_nodes {
+        return false;
+      }
+
+      // Handle the wrap around case
+      let probe_index = self.inner.probe_index.load(Ordering::Acquire);
+      if probe_index >= num_nodes {
+        drop(memberlist);
+        self.reset_nodes().await;
+        self.inner.probe_index.store(0, Ordering::Release);
+        num_check += 1;
+        continue;
+      }
+
+      // Determine if we should probe this node
+      let mut skip = false;
+      let node = memberlist.nodes[probe_index].state.clone();
+      if node.dead_or_left() || node.id() == self.local_id() {
+        skip = true;
+      }
+
+      // Potentially skip
+      drop(memberlist);
+      self.inner.probe_index.fetch_add(1, Ordering::AcqRel);
+      if skip {
+        num_check += 1;
+        continue;
+      }
+
+      // Probe the specific node
+      self.probe_node(&node).await;
+      return false;
     }
   }
 
@@ -1166,9 +1173,9 @@ where
 
   /// Invoked every GossipInterval period to broadcast our gossip
   /// messages to a few random nodes.
-  async fn gossip(&self, shutdown_rx: &async_channel::Receiver<()>) {
+  async fn gossip(&self, shutdown_rx: &async_channel::Receiver<()>) -> bool {
     futures::select_biased! {
-      _ = shutdown_rx.recv().fuse() => {},
+      _ = shutdown_rx.recv().fuse() => true,
       default => {
         #[cfg(feature = "metrics")]
         let now = Instant::now();
@@ -1255,6 +1262,7 @@ where
             fut.await
           })
           .await;
+        false
       },
     }
   }

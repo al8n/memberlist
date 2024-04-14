@@ -45,8 +45,7 @@ where
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
-            tracing::debug!("memberlist: packet listener exits");
-            return;
+            break;
           }
           packet = packet_rx.recv().fuse() => {
             match packet {
@@ -60,12 +59,14 @@ where
                 }
                 // If we got an error, which means on the other side the transport has been closed,
                 // so we need to return and shutdown the packet listener
-                return;
+                break;
               },
             }
           }
         }
       }
+
+      tracing::debug!("memberlist: packet listener exits");
     })
   }
 

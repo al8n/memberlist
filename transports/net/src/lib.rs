@@ -666,6 +666,7 @@ where
 
     let mut handles = core::mem::take(&mut *self.handles.borrow_mut());
     while handles.next().await.is_some() {}
+
     Ok(())
   }
 }

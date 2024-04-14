@@ -356,32 +356,19 @@ where
     };
     let keys = encryptor.keys().await;
     if encrypted_message_size <= offload_size {
-      return Self::decrypt(
-        encryptor,
-        algo,
-        keys,
-        packet_label.as_bytes(),
-        &mut encrypted_message,
-      )
-      .and_then(|_| Self::read_from_packet_without_compression_and_encryption(encrypted_message));
+      return Self::decrypt(algo, keys, packet_label.as_bytes(), &mut encrypted_message).and_then(
+        |_| Self::read_from_packet_without_compression_and_encryption(encrypted_message),
+      );
     }
 
     let (tx, rx) = futures::channel::oneshot::channel();
-    let encryptor = encryptor.clone();
 
     rayon::spawn(move || {
       if tx
         .send(
-          Self::decrypt(
-            &encryptor,
-            algo,
-            keys,
-            packet_label.as_bytes(),
-            &mut encrypted_message,
-          )
-          .and_then(|_| {
-            Self::read_from_packet_without_compression_and_encryption(encrypted_message)
-          }),
+          Self::decrypt(algo, keys, packet_label.as_bytes(), &mut encrypted_message).and_then(
+            |_| Self::read_from_packet_without_compression_and_encryption(encrypted_message),
+          ),
         )
         .is_err()
       {
