@@ -167,7 +167,7 @@ pub mod tests {
     B: FnOnce(F) -> F::Output,
     F: std::future::Future<Output = ()>,
   {
-    initialize_tests_tracing();
+    // initialize_tests_tracing();
     block_on(fut);
   }
 
