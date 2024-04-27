@@ -16,6 +16,7 @@ pub(super) struct Processor<
 
   pub(super) shutdown_rx: async_channel::Receiver<()>,
 
+  pub(super) wg: AsyncWaitGroup,
   pub(super) skip_inbound_label_check: bool,
   pub(super) timeout: Option<Duration>,
 
@@ -42,6 +43,7 @@ where
       label,
       skip_inbound_label_check,
       timeout,
+      wg,
       #[cfg(feature = "compression")]
       offload_size,
       #[cfg(feature = "metrics")]
@@ -57,6 +59,7 @@ where
       shutdown_rx,
       skip_inbound_label_check,
       timeout,
+      wg,
       #[cfg(feature = "compression")]
       offload_size,
       #[cfg(feature = "metrics")]
@@ -75,6 +78,7 @@ where
     shutdown_rx: async_channel::Receiver<()>,
     skip_inbound_label_check: bool,
     timeout: Option<Duration>,
+    wg: AsyncWaitGroup,
     #[cfg(feature = "compression")] offload_size: usize,
     #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::types::MetricLabels>,
   ) {
@@ -104,6 +108,7 @@ where
               let label = label.cheap_clone();
               #[cfg(feature = "metrics")]
               let metric_labels = metric_labels.clone();
+              let twg = wg.add(1);
               <T::Runtime as RuntimeLite>::spawn_detach(async move {
                 Self::handle_connection(
                   connection,
@@ -115,9 +120,11 @@ where
                   timeout,
                   skip_inbound_label_check,
                   shutdown_rx,
+                  twg.clone(),
                   #[cfg(feature = "compression")] offload_size,
                   #[cfg(feature = "metrics")] metric_labels,
                 ).await;
+                twg.done();
               });
             }
             Err(e) => {
@@ -159,6 +166,7 @@ where
     timeout: Option<Duration>,
     skip_inbound_label_check: bool,
     shutdown_rx: async_channel::Receiver<()>,
+    wg: AsyncWaitGroup,
     #[cfg(feature = "compression")] offload_size: usize,
     #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::types::MetricLabels>,
   ) {
@@ -187,6 +195,7 @@ where
                 let label = label.cheap_clone();
                 #[cfg(feature = "metrics")]
                 let metric_labels = metric_labels.clone();
+                let twg = wg.add(1);
                 <T::Runtime as RuntimeLite>::spawn_detach(async move {
                   Self::handle_packet(
                     stream,
@@ -199,6 +208,7 @@ where
                     #[cfg(feature = "compression")] offload_size,
                     #[cfg(feature = "metrics")] metric_labels,
                   ).await;
+                  twg.done();
                 });
               }
             }

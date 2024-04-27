@@ -16,9 +16,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::AsyncSpawner;
 use agnostic_lite::RuntimeLite;
-use atomic_refcell::AtomicRefCell;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
@@ -55,6 +53,7 @@ pub use options::*;
 /// Abstract the [`StremLayer`](crate::stream_layer::StreamLayer) for [`QuicTransport`].
 pub mod stream_layer;
 use stream_layer::*;
+use wg::AsyncWaitGroup;
 
 const MAX_MESSAGE_LEN_SIZE: usize = core::mem::size_of::<u32>();
 const MAX_MESSAGE_SIZE: usize = u32::MAX as usize;
@@ -112,7 +111,7 @@ where
   v4_connectors: SmallVec<S::Connector>,
   v6_round_robin: AtomicUsize,
   v6_connectors: SmallVec<S::Connector>,
-  handles: AtomicRefCell<FuturesUnordered<<R::Spawner as AsyncSpawner>::JoinHandle<()>>>,
+  wg: AsyncWaitGroup,
   resolver: A,
   shutdown_tx: async_channel::Sender<()>,
 
@@ -148,6 +147,7 @@ where
     let mut v4_acceptors = SmallVec::with_capacity(opts.bind_addresses.len());
     let mut v6_acceptors = SmallVec::with_capacity(opts.bind_addresses.len());
     let mut resolved_bind_address = SmallVec::new();
+    let wg = AsyncWaitGroup::new();
 
     for addr in opts.bind_addresses.iter() {
       let addr = resolver
@@ -198,7 +198,6 @@ where
     let expose_addr_index = Self::find_advertise_addr_index(&resolved_bind_address);
     let advertise_addr = resolved_bind_address[expose_addr_index];
     let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
-    let handles = FuturesUnordered::new();
 
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
@@ -212,6 +211,7 @@ where
         local_addr,
         timeout: opts.timeout,
         shutdown_rx: shutdown_rx.clone(),
+        wg: wg.clone(),
         skip_inbound_label_check: opts.skip_inbound_label_check,
         #[cfg(feature = "compression")]
         offload_size: opts.offload_size,
@@ -219,7 +219,11 @@ where
         metric_labels: opts.metric_labels.clone().unwrap_or_default(),
       };
 
-      handles.push(R::spawn(processor.run()));
+      let pwg = wg.add(1);
+      R::spawn_detach(async move {
+        processor.run().await;
+        pwg.done();
+      });
     }
 
     // find final advertise address
@@ -237,12 +241,17 @@ where
     let interval = <A::Runtime as RuntimeLite>::interval(opts.connection_pool_cleanup_period);
     let pool = connection_pool.clone();
     let shutdown_rx = shutdown_rx.clone();
-    handles.push(R::spawn(Self::connection_pool_cleaner(
-      pool,
-      interval,
-      shutdown_rx,
-      opts.connection_ttl.unwrap_or(Duration::ZERO),
-    )));
+    let pwg = wg.add(1);
+    R::spawn_detach(async move {
+      Self::connection_pool_cleaner(
+        pool,
+        interval,
+        shutdown_rx,
+        opts.connection_ttl.unwrap_or(Duration::ZERO),
+      )
+      .await;
+      pwg.done();
+    });
 
     Ok(Self {
       advertise_addr: final_advertise_addr,
@@ -252,7 +261,7 @@ where
       opts,
       packet_rx,
       stream_rx,
-      handles: AtomicRefCell::new(handles),
+      wg,
       v4_connectors,
       v6_connectors,
       v4_round_robin: AtomicUsize::new(0),
@@ -682,9 +691,8 @@ where
       }
     }
 
-    // Block until all the listener threads have died.
-    let mut handles = core::mem::take(&mut *self.handles.borrow_mut());
-    while handles.next().await.is_some() {}
+    self.wg.wait().await;
+
     Ok(())
   }
 }

@@ -42,11 +42,10 @@ once_cell = "1.17"
 rustix = { version = "0.38", features = ["system"] }
 
 [target.'cfg(windows)'.dependencies]
-hostname = "0.3"
+hostname = "0.4"
 
 [dependencies]
 auto_impl.workspace = true
-atomic_refcell.workspace = true
 agnostic-lite.workspace = true
 async-channel.workspace = true
 async-lock.workspace = true
@@ -68,6 +67,7 @@ memberlist-types.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 viewit.workspace = true
+wg.workspace = true
 
 base64 = { version = "0.22", optional = true }
 

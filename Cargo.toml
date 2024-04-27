@@ -27,7 +27,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [workspace.dependencies]
 auto_impl = "1"
-atomic_refcell = "0.1"
 agnostic-lite = { version = "0.3", features = ["time"] }
 agnostic = "0.3.5"
 async-lock = "3"
@@ -57,6 +56,7 @@ transformable = { version = "0.1.6", features = ["smol_str", "bytes"] }
 thiserror = "1"
 tracing = "0.1"
 viewit = "0.1.5"
+wg = { version = "0.9", default-features = false, features = ["future", "std", "triomphe"] }
 
 memberlist-core = { version = "0.2", path = "core", default-features = false }
 memberlist-net = { version = "0.2", path = "transports/net", default-features = false }

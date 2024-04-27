@@ -1,7 +1,5 @@
 use crate::base::MessageHandoff;
 
-use agnostic_lite::AsyncSpawner;
-
 use super::*;
 
 impl<D, T> Memberlist<T, D>
@@ -12,13 +10,12 @@ where
   /// a long running thread that processes messages received
   /// over the packet interface, but is decoupled from the listener to avoid
   /// blocking the listener which may cause ping/ack messages to be delayed.
-  pub(crate) fn packet_handler(
-    &self,
-    shutdown_rx: async_channel::Receiver<()>,
-  ) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()> {
+  pub(crate) fn packet_handler(&self, shutdown_rx: async_channel::Receiver<()>) {
     let this = self.clone();
     let handoff_rx = this.inner.handoff_rx.clone();
-    <T::Runtime as RuntimeLite>::spawn(async move {
+    let wg = this.inner.wg.add(1);
+    <T::Runtime as RuntimeLite>::spawn_detach(async move {
+      scopeguard::defer!(wg.done(););
       loop {
         futures::select! {
           _ = shutdown_rx.recv().fuse() => {
@@ -38,7 +35,7 @@ where
           }
         }
       }
-    })
+    });
   }
 
   /// Returns the next message to process in priority order, using LIFO

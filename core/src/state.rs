@@ -18,7 +18,7 @@ use super::{
   Member, Members,
 };
 
-use agnostic_lite::{AsyncSpawner, RuntimeLite};
+use agnostic_lite::RuntimeLite;
 
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
@@ -635,12 +635,14 @@ where
 macro_rules! bail_trigger {
   ($fn:ident) => {
     paste::paste! {
-      async fn [<trigger _ $fn>](&self, stagger: Duration, interval: Duration, stop_rx: async_channel::Receiver<()>) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()>
+      async fn [<trigger _ $fn>](&self, stagger: Duration, interval: Duration, stop_rx: async_channel::Receiver<()>)
       {
         let this = self.clone();
         // Use a random stagger to avoid syncronizing
         let rand_stagger = random_stagger(stagger);
-        <T::Runtime as RuntimeLite>::spawn(async move {
+        let wg = this.inner.wg.add(1);
+        <T::Runtime as RuntimeLite>::spawn_detach(async move {
+          scopeguard::defer!(wg.done(););
           let delay = <T::Runtime as RuntimeLite>::sleep(rand_stagger);
 
           futures::select! {
@@ -667,7 +669,7 @@ macro_rules! bail_trigger {
           }
 
           tracing::debug!(concat!("memberlist.state: ", stringify!($fn), " trigger exits"));
-        })
+        });
       }
     }
   };
@@ -680,36 +682,31 @@ where
 {
   /// Used to ensure the Tick is performed periodically.
   pub(crate) async fn schedule(&self, shutdown_rx: async_channel::Receiver<()>) {
-    let handles = self.inner.handles.borrow();
     // Create a new probeTicker
     if self.inner.opts.probe_interval > Duration::ZERO {
-      handles.push(
-        self
-          .trigger_probe(
-            self.inner.opts.probe_interval,
-            self.inner.opts.probe_interval,
-            shutdown_rx.clone(),
-          )
-          .await,
-      );
+      self
+        .trigger_probe(
+          self.inner.opts.probe_interval,
+          self.inner.opts.probe_interval,
+          shutdown_rx.clone(),
+        )
+        .await;
     }
 
     // Create a push pull ticker if needed
     if self.inner.opts.push_pull_interval > Duration::ZERO {
-      handles.push(self.trigger_push_pull(shutdown_rx.clone()).await);
+      self.trigger_push_pull(shutdown_rx.clone()).await;
     }
 
     // Create a gossip ticker if needed
     if self.inner.opts.gossip_interval > Duration::ZERO && self.inner.opts.gossip_nodes > 0 {
-      handles.push(
-        self
-          .trigger_gossip(
-            self.inner.opts.gossip_interval,
-            self.inner.opts.gossip_interval,
-            shutdown_rx.clone(),
-          )
-          .await,
-      );
+      self
+        .trigger_gossip(
+          self.inner.opts.gossip_interval,
+          self.inner.opts.gossip_interval,
+          shutdown_rx.clone(),
+        )
+        .await;
     }
   }
 
@@ -717,17 +714,16 @@ where
 
   bail_trigger!(gossip);
 
-  async fn trigger_push_pull(
-    &self,
-    stop_rx: async_channel::Receiver<()>,
-  ) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()> {
+  async fn trigger_push_pull(&self, stop_rx: async_channel::Receiver<()>) {
     let interval = self.inner.opts.push_pull_interval;
     let this = self.clone();
+    let wg = this.inner.wg.add(1);
     // Use a random stagger to avoid syncronizing
     let mut rng = rand::thread_rng();
     let rand_stagger = Duration::from_millis(rng.gen_range(0..interval.as_millis() as u64));
 
-    <T::Runtime as RuntimeLite>::spawn(async move {
+    <T::Runtime as RuntimeLite>::spawn_detach(async move {
+      scopeguard::defer!(wg.done(););
       futures::select! {
         _ = <T::Runtime as RuntimeLite>::sleep(rand_stagger).fuse() => {},
         _ = stop_rx.recv().fuse() => {
@@ -750,7 +746,7 @@ where
           },
         }
       }
-    })
+    });
   }
 
   // Used to perform a single round of failure detection and gossip
