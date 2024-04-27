@@ -19,9 +19,8 @@ use std::{
 
 use agnostic::{
   net::{Net, UdpSocket},
-  AsyncSpawner, Runtime, RuntimeLite,
+  Runtime, RuntimeLite,
 };
-use atomic_refcell::AtomicRefCell;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{BufMut, BytesMut};
 use checksum::CHECKSUM_SIZE;
@@ -38,6 +37,7 @@ use memberlist_core::{
   util::{batch, Batch, IsGlobalIp},
 };
 use peekable::future::{AsyncPeekExt, AsyncPeekable};
+use wg::AsyncWaitGroup;
 
 /// Compress/decompress related.
 #[cfg(feature = "compression")]
@@ -148,7 +148,7 @@ where
   stream_layer: Arc<S>,
   #[cfg(feature = "encryption")]
   encryptor: Option<SecretKeyring>,
-  handles: AtomicRefCell<FuturesUnordered<<R::Spawner as AsyncSpawner>::JoinHandle<()>>>,
+  wg: AsyncWaitGroup,
   resolver: Arc<A>,
   shutdown_tx: async_channel::Sender<()>,
   _marker: PhantomData<W>,
@@ -291,7 +291,7 @@ where
     let advertise_addr = resolved_bind_address[expose_addr_index];
     let self_addr = opts.bind_addresses[expose_addr_index].cheap_clone();
     let shutdown = Arc::new(AtomicBool::new(false));
-    let handles = FuturesUnordered::new();
+    let wg = AsyncWaitGroup::new();
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
@@ -306,7 +306,11 @@ where
         shutdown_rx: shutdown_rx.clone(),
         local_addr: *promised_addr,
       };
-      handles.push(R::spawn(processor.run()));
+      let pwg = wg.add(1);
+      R::spawn_detach(async move {
+        processor.run().await;
+        pwg.done();
+      });
 
       let processor = PacketProcessor::<A, Self> {
         packet_tx: packet_tx.clone(),
@@ -326,7 +330,11 @@ where
         skip_inbound_label_check: opts.skip_inbound_label_check,
       };
 
-      handles.push(R::spawn(processor.run()));
+      let pwg = wg.add(1);
+      R::spawn_detach(async move {
+        processor.run().await;
+        pwg.done();
+      });
     }
 
     // find final advertise address
@@ -365,7 +373,7 @@ where
       opts,
       packet_rx,
       stream_rx,
-      handles: AtomicRefCell::new(handles),
+      wg: AsyncWaitGroup::new(),
       v4_sockets: v4_sockets.into_iter().map(|(ln, _)| ln).collect(),
       v4_round_robin: AtomicUsize::new(0),
       v6_sockets: v6_sockets.into_iter().map(|(ln, _)| ln).collect(),
@@ -664,8 +672,7 @@ where
       return Ok(());
     }
 
-    let mut handles = core::mem::take(&mut *self.handles.borrow_mut());
-    while handles.next().await.is_some() {}
+    self.wg.wait().await;
     Ok(())
   }
 }

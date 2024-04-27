@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use agnostic_lite::AsyncSpawner;
 use smol_str::SmolStr;
 
 use crate::delegate::DelegateError;
@@ -15,13 +14,12 @@ where
 {
   /// A long running thread that pulls incoming streams from the
   /// transport and hands them off for processing.
-  pub(crate) fn stream_listener(
-    &self,
-    shutdown_rx: async_channel::Receiver<()>,
-  ) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()> {
+  pub(crate) fn stream_listener(&self, shutdown_rx: async_channel::Receiver<()>) {
     let this = self.clone();
     let transport_rx = this.inner.transport.stream();
-    <T::Runtime as RuntimeLite>::spawn(async move {
+    let wg = this.inner.wg.add(1);
+    <T::Runtime as RuntimeLite>::spawn_detach(async move {
+      scopeguard::defer!(wg.done(););
       tracing::debug!("memberlist: stream listener start");
       loop {
         futures::select! {
@@ -49,7 +47,7 @@ where
           }
         }
       }
-    })
+    });
   }
 
   /// Used to merge the remote state with our local state

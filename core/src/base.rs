@@ -6,13 +6,12 @@ use std::{
   },
 };
 
-use agnostic_lite::{AsyncSpawner, RuntimeLite};
+use agnostic_lite::RuntimeLite;
 use async_channel::{Receiver, Sender};
 use async_lock::{Mutex, RwLock};
 
-use atomic_refcell::AtomicRefCell;
-use futures::stream::FuturesUnordered;
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
+use wg::AsyncWaitGroup;
 
 use super::{
   awareness::Awareness,
@@ -284,9 +283,7 @@ where
   pub(crate) leave_broadcast_tx: Sender<()>,
   pub(crate) leave_lock: Mutex<()>,
   pub(crate) leave_broadcast_rx: Receiver<()>,
-  pub(crate) handles: AtomicRefCell<
-    FuturesUnordered<<<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()>>,
-  >,
+  pub(crate) wg: AsyncWaitGroup,
   pub(crate) probe_index: AtomicUsize,
   pub(crate) handoff_tx: Sender<()>,
   pub(crate) handoff_rx: Receiver<()>,
@@ -416,7 +413,7 @@ where
         leave_lock: Mutex::new(()),
         leave_broadcast_rx,
         probe_index: AtomicUsize::new(0),
-        handles: AtomicRefCell::new(FuturesUnordered::new()),
+        wg: AsyncWaitGroup::new(),
         handoff_tx,
         handoff_rx,
         queue: Mutex::new(MessageQueue::new()),
@@ -431,12 +428,11 @@ where
     };
 
     {
-      let handles = this.inner.handles.borrow();
-      handles.push(this.stream_listener(shutdown_rx.clone()));
-      handles.push(this.packet_handler(shutdown_rx.clone()));
-      handles.push(this.packet_listener(shutdown_rx.clone()));
+      this.stream_listener(shutdown_rx.clone());
+      this.packet_handler(shutdown_rx.clone());
+      this.packet_listener(shutdown_rx.clone());
       #[cfg(feature = "metrics")]
-      handles.push(this.check_broadcast_queue_depth(shutdown_rx.clone()));
+      this.check_broadcast_queue_depth(shutdown_rx.clone());
     }
 
     Ok((shutdown_rx, this.inner.advertise.cheap_clone(), this))
@@ -468,16 +464,14 @@ where
   }
 
   #[cfg(feature = "metrics")]
-  fn check_broadcast_queue_depth(
-    &self,
-    shutdown_rx: Receiver<()>,
-  ) -> <<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()> {
+  fn check_broadcast_queue_depth(&self, shutdown_rx: Receiver<()>) {
     use futures::{FutureExt, StreamExt};
 
     let queue_check_interval = self.inner.opts.queue_check_interval;
     let this = self.clone();
-
-    <T::Runtime as RuntimeLite>::spawn(async move {
+    let wg = this.inner.wg.add(1);
+    <T::Runtime as RuntimeLite>::spawn_detach(async move {
+      scopeguard::defer!(wg.done(););
       let tick = <T::Runtime as RuntimeLite>::interval(queue_check_interval);
       futures::pin_mut!(tick);
       loop {

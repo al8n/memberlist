@@ -540,8 +540,8 @@ mod quinn_stream_layer {
 
   fn configure_server() -> Result<rustls::ServerConfig, Box<dyn Error>> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let cert_der = cert.serialize_der().unwrap();
-    let priv_key = cert.serialize_private_key_der();
+    let cert_der = cert.cert.der().to_vec();
+    let priv_key = cert.key_pair.serialize_der();
     let priv_key = rustls::PrivateKey(priv_key);
     let cert_chain = vec![rustls::Certificate(cert_der.clone())];
 

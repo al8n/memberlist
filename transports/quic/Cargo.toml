@@ -48,7 +48,6 @@ test = ["memberlist-core/test", "rcgen"]
 
 [dependencies]
 auto_impl.workspace = true
-atomic_refcell.workspace = true
 agnostic-lite.workspace = true
 agnostic = { workspace = true, optional = true, features = ["net"] }
 async-channel.workspace = true
@@ -67,6 +66,7 @@ thiserror.workspace = true
 smol_str.workspace = true
 scopeguard.workspace = true
 viewit.workspace = true
+wg.workspace = true
 
 # serde
 serde = { workspace = true, optional = true }
@@ -80,11 +80,11 @@ quinn = { version = "0.10.2", default-features = false, optional = true, feature
 rustls = { version = "0.21.9", default-features = false, optional = true, features = ["dangerous_configuration"] }
 
 # test
-rcgen = { version = "0.12", optional = true }
+rcgen = { version = "0.13", optional = true }
 
 # s2n
-s2n-quic = { version = "1.36", optional = true }
-s2n-quic-transport = { version = "0.36", optional = true }
+s2n-quic = { version = "1.37", optional = true }
+s2n-quic-transport = { version = "0.37", optional = true }
 
 # compression
 rayon = { version = "1.8", optional = true }
