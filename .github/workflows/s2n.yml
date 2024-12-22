@@ -71,7 +71,7 @@ jobs:
       #   working-directory: memberlist
 
       - name: Cache Cargo registry
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
