@@ -16,7 +16,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic_lite::{RuntimeLite, AsyncSpawner};
+use agnostic_lite::{AsyncSpawner, RuntimeLite};
 use atomic_refcell::AtomicRefCell;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;

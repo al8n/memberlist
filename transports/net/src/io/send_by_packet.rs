@@ -540,9 +540,8 @@ where
       .next_socket(addr)
       .send_to(buf, addr)
       .await
-      .map(|num| {
+      .inspect(|num| {
         tracing::trace!(remote=%addr, total_bytes = %num, sent=?buf, "memberlist_net.packet");
-        num
       })
       .map_err(|e| ConnectionError::packet_write(e).into())
   }

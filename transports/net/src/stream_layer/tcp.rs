@@ -111,7 +111,7 @@ impl<R: Runtime> Listener for TcpListener<R> {
   }
 
   async fn shutdown(&self) -> io::Result<()> {
-    agnostic::net::TcpListener::shutdown(&self.ln).await
+    Ok(())
   }
 
   fn local_addr(&self) -> SocketAddr {

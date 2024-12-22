@@ -134,7 +134,7 @@ where
         }
       }
     }
-    let _ = socket.shutdown().await;
+    drop(socket);
     tracing::info!(
       "memberlist.transport.net: packet processor on {} exit",
       local_addr
