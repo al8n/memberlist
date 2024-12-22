@@ -85,7 +85,7 @@ tracing.workspace = true
 viewit.workspace = true
 
 # tls
-futures-rustls = { version = "0.25", optional = true }
+futures-rustls = { version = "0.26", optional = true }
 
 # native-tls
 async-native-tls = { version = "0.5", optional = true }
