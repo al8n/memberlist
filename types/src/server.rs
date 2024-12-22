@@ -9,10 +9,9 @@ use super::{DelegateVersion, Meta, ProtocolVersion};
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 #[cfg_attr(
   feature = "rkyv",
-  archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash))
+  rkyv(compare(PartialEq), derive(Debug, Clone, PartialEq, Eq, Hash))
 )]
 #[repr(u8)]
 #[non_exhaustive]
@@ -81,7 +80,7 @@ pub struct UnknownState(u8);
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+#[cfg_attr(feature = "rkyv", rkyv(compare(PartialEq)))]
 pub struct NodeState<I, A> {
   /// The id of the node.
   #[viewit(

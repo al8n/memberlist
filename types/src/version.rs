@@ -10,14 +10,9 @@ pub struct UnknownDelegateVersion(u8);
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 #[cfg_attr(
   feature = "rkyv",
-  archive_attr(
-    derive(Debug, Copy, Clone, Eq, PartialEq, Hash),
-    repr(u8),
-    non_exhaustive
-  )
+  rkyv(compare(PartialEq), derive(Debug, Copy, Clone, Eq, PartialEq, Hash),)
 )]
 #[non_exhaustive]
 #[repr(u8)]
@@ -76,14 +71,9 @@ pub struct UnknownProtocolVersion(u8);
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 #[cfg_attr(
   feature = "rkyv",
-  archive_attr(
-    derive(Debug, Copy, Clone, Eq, PartialEq, Hash),
-    repr(u8),
-    non_exhaustive
-  )
+  rkyv(compare(PartialEq), derive(Debug, Copy, Clone, Eq, PartialEq, Hash),)
 )]
 #[non_exhaustive]
 #[repr(u8)]
@@ -139,7 +129,7 @@ mod tests {
     assert_eq!(DelegateVersion::V1 as u8, 1);
     assert_eq!(DelegateVersion::V1.to_string(), "V1");
     assert_eq!(DelegateVersion::try_from(1), Ok(DelegateVersion::V1));
-    assert_eq!(DelegateVersion::try_from(1), Err(UnknownDelegateVersion(1)));
+    assert_eq!(DelegateVersion::try_from(2), Err(UnknownDelegateVersion(2)));
   }
 
   #[test]
@@ -147,6 +137,6 @@ mod tests {
     assert_eq!(ProtocolVersion::V1 as u8, 1);
     assert_eq!(ProtocolVersion::V1.to_string(), "V1");
     assert_eq!(ProtocolVersion::try_from(1), Ok(ProtocolVersion::V1));
-    assert_eq!(ProtocolVersion::try_from(1), Err(UnknownProtocolVersion(1)));
+    assert_eq!(ProtocolVersion::try_from(2), Err(UnknownProtocolVersion(2)));
   }
 }

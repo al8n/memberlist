@@ -156,8 +156,9 @@ where
 
 impl<I, A, S, W, R> NetTransport<I, A, S, W, R>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  A::Address: Send + Sync + 'static,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
@@ -405,8 +406,9 @@ where
 
 impl<I, A, S, W, R> Transport for NetTransport<I, A, S, W, R>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  A::Address: Send + Sync + 'static,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,

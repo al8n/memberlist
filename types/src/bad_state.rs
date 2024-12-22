@@ -19,7 +19,7 @@ macro_rules! bad_bail {
       feature = "rkyv",
       derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
     )]
-    #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+    #[cfg_attr(feature = "rkyv", rkyv(compare(PartialEq)))]
     pub struct $name<I> {
       /// The incarnation of the message.
       #[viewit(
@@ -156,7 +156,7 @@ macro_rules! bad_bail {
         #[error("the buffer did not contain enough bytes to decode {}", stringify!($name))]
         NotEnoughBytes,
         /// The encoded size is too large
-        #[error("encoded size too large, max {} got {0}", u32::MAX)]
+        #[error("encoded size too large, max 4294967295 got {0}")]
         TooLarge(u64),
       }
 

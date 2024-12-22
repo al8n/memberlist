@@ -243,7 +243,7 @@ impl<R: Runtime> Listener for TlsListener<R> {
   }
 
   async fn shutdown(&self) -> io::Result<()> {
-    TcpListener::shutdown(&self.ln).await
+    Ok(())
   }
 }
 

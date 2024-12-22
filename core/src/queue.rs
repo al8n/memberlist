@@ -437,8 +437,8 @@ mod tests {
 
   impl<I, A> crate::transport::Wire for DummyWire<I, A>
   where
-    I: Transformable,
-    A: Transformable,
+    I: Transformable + Send + Sync + 'static,
+    A: Transformable + Send + Sync + 'static,
   {
     type Error = std::io::Error;
     type Address = A;
@@ -642,9 +642,9 @@ mod tests {
     let dump = q.ordered_view(true).await;
 
     assert_eq!(dump.len(), 3);
-    assert_eq!(dump[0].broadcast.node.as_ref(), "test");
-    assert_eq!(dump[1].broadcast.node.as_ref(), "foo");
-    assert_eq!(dump[2].broadcast.node.as_ref(), "bar");
+    assert_eq!(dump[0].broadcast.node.as_str(), "test");
+    assert_eq!(dump[1].broadcast.node.as_str(), "foo");
+    assert_eq!(dump[2].broadcast.node.as_str(), "bar");
 
     // Should invalidate previous message
     q.queue_broadcast(
@@ -661,9 +661,9 @@ mod tests {
     let dump = q.ordered_view(true).await;
 
     assert_eq!(dump.len(), 3);
-    assert_eq!(dump[0].broadcast.node.as_ref(), "foo");
-    assert_eq!(dump[1].broadcast.node.as_ref(), "bar");
-    assert_eq!(dump[2].broadcast.node.as_ref(), "test");
+    assert_eq!(dump[0].broadcast.node.as_str(), "foo");
+    assert_eq!(dump[1].broadcast.node.as_str(), "bar");
+    assert_eq!(dump[2].broadcast.node.as_str(), "test");
   }
 
   #[tokio::test]
@@ -913,8 +913,8 @@ mod tests {
     }
 
     let dump = q.ordered_view(true).await;
-    assert_eq!(dump[0].broadcast.id().unwrap().as_ref(), "bar");
-    assert_eq!(dump[1].broadcast.id().unwrap().as_ref(), "baz");
+    assert_eq!(dump[0].broadcast.id().unwrap().as_str(), "bar");
+    assert_eq!(dump[1].broadcast.id().unwrap().as_str(), "baz");
   }
 
   #[tokio::test]

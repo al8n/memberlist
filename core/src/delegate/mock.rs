@@ -88,8 +88,9 @@ impl<I, A> MockDelegate<I, A> {
   }
 }
 
-impl<I: Id, A> NodeDelegate for MockDelegate<I, A>
+impl<I, A> NodeDelegate for MockDelegate<I, A>
 where
+  I: Send + Sync + 'static,
   A: CheapClone + Send + Sync + 'static,
 {
   async fn node_meta(&self, _limit: usize) -> Meta {

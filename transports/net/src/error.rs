@@ -68,10 +68,10 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   /// Returns when fail to compress/decompress message.
   #[cfg(feature = "compression")]
   #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
-  #[error("{0}")]
+  #[error(transparent)]
   Compressor(#[from] super::compressor::CompressorError),
   /// Returns when there is a security error. e.g. encryption/decryption error.
-  #[error("{0}")]
+  #[error(transparent)]
   #[cfg(feature = "encryption")]
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
   Security(#[from] super::security::SecurityError),
@@ -118,7 +118,12 @@ impl<A: AddressResolver, W: Wire> core::fmt::Debug for NetTransportError<A, W> {
   }
 }
 
-impl<A: AddressResolver, W: Wire> TransportError for NetTransportError<A, W> {
+impl<A, W> TransportError for NetTransportError<A, W>
+where
+  A: AddressResolver,
+  A::Address: Send + Sync + 'static,
+  W: Wire,
+{
   fn is_remote_failure(&self) -> bool {
     if let Self::Connection(e) = self {
       e.is_remote_failure()
