@@ -14,6 +14,9 @@ pub enum QuinnError {
   /// Write error.
   #[error(transparent)]
   Write(#[from] QuinnWriteStreamError),
+  /// Stream is closed.
+  #[error(transparent)]
+  Closed(#[from] quinn::ClosedStream),
 
   /// Stopped error.
   #[error(transparent)]
@@ -69,6 +72,7 @@ impl From<QuinnBiStreamError> for QuinnError {
     match err {
       QuinnBiStreamError::Write(err) => Self::Write(err),
       QuinnBiStreamError::Read(err) => Self::Read(err),
+      QuinnBiStreamError::Closed(err) => Self::Closed(err),
     }
   }
 }
@@ -80,6 +84,7 @@ impl QuicError for QuinnError {
       Self::Read(err) => err.is_remote_failure(),
       Self::Write(err) => err.is_remote_failure(),
       Self::Stopped(_) => true,
+      Self::Closed(_) => false,
     }
   }
 }
@@ -136,7 +141,7 @@ impl QuicError for QuinnReadStreamError {
     match self {
       Self::Read(err) => is_read_error_remote_failure(err),
       Self::ReadExact(err) => match err {
-        quinn::ReadExactError::FinishedEarly => true,
+        quinn::ReadExactError::FinishedEarly(_) => true,
         quinn::ReadExactError::ReadError(err) => is_read_error_remote_failure(err),
       },
       Self::ReadToEnd(err) => match err {
@@ -184,6 +189,9 @@ pub enum QuinnBiStreamError {
   /// Error reading from the stream.
   #[error(transparent)]
   Read(#[from] QuinnReadStreamError),
+  /// Error on closed stream.
+  #[error(transparent)]
+  Closed(#[from] quinn::ClosedStream),
 }
 
 impl From<quinn::ReadError> for QuinnBiStreamError {
@@ -209,6 +217,7 @@ impl QuicError for QuinnBiStreamError {
     match self {
       Self::Write(err) => err.is_remote_failure(),
       Self::Read(err) => err.is_remote_failure(),
+      Self::Closed(_) => false,
     }
   }
 }
@@ -218,7 +227,7 @@ const fn is_read_error_remote_failure(err: &quinn::ReadError) -> bool {
   match err {
     quinn::ReadError::Reset(_) => true,
     quinn::ReadError::ConnectionLost(_) => false,
-    quinn::ReadError::UnknownStream => false,
+    quinn::ReadError::ClosedStream => false,
     quinn::ReadError::IllegalOrderedRead => true,
     quinn::ReadError::ZeroRttRejected => true,
   }
@@ -234,6 +243,7 @@ const fn is_connection_error_remote_failure(err: &ConnectionError) -> bool {
     ConnectionError::Reset => true,
     ConnectionError::TimedOut => true,
     ConnectionError::LocallyClosed => false,
+    ConnectionError::CidsExhausted => false,
   }
 }
 
@@ -241,11 +251,11 @@ const fn is_connection_error_remote_failure(err: &ConnectionError) -> bool {
 const fn is_connect_error_remote_failure(err: &ConnectError) -> bool {
   match err {
     ConnectError::EndpointStopping => false,
-    ConnectError::TooManyConnections => false,
-    ConnectError::InvalidDnsName(_) => false,
     ConnectError::InvalidRemoteAddress(_) => false,
     ConnectError::NoDefaultClientConfig => false,
     ConnectError::UnsupportedVersion => false,
+    ConnectError::CidsExhausted => false,
+    ConnectError::InvalidServerName(_) => false,
   }
 }
 
@@ -254,7 +264,7 @@ const fn is_write_error_remote_failure(err: &WriteError) -> bool {
   match err {
     WriteError::Stopped(_) => true,
     WriteError::ConnectionLost(_) => false,
-    WriteError::UnknownStream => false,
+    WriteError::ClosedStream => false,
     WriteError::ZeroRttRejected => true,
   }
 }

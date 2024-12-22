@@ -69,7 +69,7 @@ const LZW_LIT_WIDTH: u8 = 8;
 #[derive(Debug, thiserror::Error)]
 pub enum CompressError {
   /// LZW compress errors
-  #[error("{0}")]
+  #[error(transparent)]
   Lzw(#[from] weezl::LzwError),
 }
 
@@ -77,7 +77,7 @@ pub enum CompressError {
 #[derive(Debug, thiserror::Error)]
 pub enum DecompressError {
   /// LZW decompress errors
-  #[error("{0}")]
+  #[error(transparent)]
   Lzw(#[from] weezl::LzwError),
 }
 

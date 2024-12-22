@@ -102,7 +102,7 @@ impl CIDRsPolicy {
 
   /// Returns `true` connection from any IP is blocked.
   pub fn is_block_all(&self) -> bool {
-    self.allowed_cidrs.as_ref().map_or(false, |x| x.is_empty())
+    self.allowed_cidrs.as_ref().is_some_and(|x| x.is_empty())
   }
 
   /// Returns `true` connection from any IP is allowed.

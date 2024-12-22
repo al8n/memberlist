@@ -2,8 +2,9 @@ use super::*;
 
 impl<I, A, S, W, R> QuicTransport<I, A, S, W, R>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  A::Address: Send + Sync + 'static,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: RuntimeLite,

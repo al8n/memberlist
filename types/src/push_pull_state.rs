@@ -14,7 +14,7 @@ use transformable::Transformable;
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+#[cfg_attr(feature = "rkyv", rkyv(compare(PartialEq)))]
 pub struct PushNodeState<I, A> {
   /// The id of the push node state.
   #[viewit(
@@ -403,7 +403,7 @@ const _: () = {
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+#[cfg_attr(feature = "rkyv", rkyv(compare(PartialEq)))]
 pub struct PushPull<I, A> {
   /// Whether the push pull message is a join message.
   #[viewit(

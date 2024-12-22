@@ -1077,7 +1077,7 @@ impl<I, A> ToggledEventDelegate<I, A> {
 
 impl<I, A> EventDelegate for ToggledEventDelegate<I, A>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: CheapClone + Send + Sync + 'static,
 {
   type Id = I;

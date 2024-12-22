@@ -70,7 +70,13 @@ impl<A: AddressResolver, S: StreamLayer, W: Wire> core::fmt::Debug for QuicTrans
   }
 }
 
-impl<A: AddressResolver, S: StreamLayer, W: Wire> TransportError for QuicTransportError<A, S, W> {
+impl<A, S, W> TransportError for QuicTransportError<A, S, W>
+where
+  A: AddressResolver,
+  A::Address: Send + Sync + 'static,
+  S: StreamLayer,
+  W: Wire,
+{
   fn is_remote_failure(&self) -> bool {
     if let Self::Stream(e) = self {
       e.is_remote_failure()

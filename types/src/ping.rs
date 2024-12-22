@@ -17,7 +17,7 @@ macro_rules! bail_ping {
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
     #[cfg_attr(feature = "rkyv", derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive))]
-    #[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+    #[cfg_attr(feature = "rkyv", rkyv(compare(PartialEq)))]
     pub struct $name<I, A> {
       /// The sequence number of the ack
       #[viewit(

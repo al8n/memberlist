@@ -51,8 +51,9 @@ pub struct UnimplementedTransport<I, A, W, R>(PhantomData<(I, A, W, R)>);
 
 impl<I, A, W, R> Transport for UnimplementedTransport<I, A, W, R>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: AddressResolver<Runtime = R>,
+  A::Address: Send + Sync + 'static,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: RuntimeLite,
 {

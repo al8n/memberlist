@@ -35,7 +35,7 @@ impl<A: AddressResolver, W: Wire> From<EncryptorError> for NetTransportError<A, 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum EncryptorError {
   /// AEAD ciphers error
-  #[error("{0}")]
+  #[error(transparent)]
   Aead(#[from] aead::Error),
 }
 

@@ -17,7 +17,7 @@ use transformable::Transformable;
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
+#[cfg_attr(feature = "rkyv", rkyv(compare(PartialEq)))]
 pub struct Alive<I, A> {
   /// The incarnation of the alive message
   #[viewit(
@@ -145,7 +145,7 @@ pub enum AliveTransformError<I: Transformable, A: Transformable> {
   #[error("meta transform error: {0}")]
   Meta(#[from] MetaError),
   /// Message too large.
-  #[error("encoded message too large, max {} got {0}", u32::MAX)]
+  #[error("encoded message too large, max 4294967295 got {0}")]
   TooLarge(u64),
   /// Encode buffer too small.
   #[error("encode buffer too small")]
@@ -167,7 +167,11 @@ impl<I: Transformable, A: Transformable> core::fmt::Debug for AliveTransformErro
   }
 }
 
-impl<I: Transformable, A: Transformable> Transformable for Alive<I, A> {
+impl<I, A> Transformable for Alive<I, A>
+where
+  I: Transformable + 'static,
+  A: Transformable + 'static,
+{
   type Error = AliveTransformError<I, A>;
 
   fn encode(&self, dst: &mut [u8]) -> Result<usize, Self::Error> {

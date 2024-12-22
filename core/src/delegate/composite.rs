@@ -181,7 +181,7 @@ impl<I, Address, A, C, E, M, N, P> CompositeDelegate<I, Address, A, C, E, M, N, 
 
 impl<I, Address, A, C, E, M, N, P> AliveDelegate for CompositeDelegate<I, Address, A, C, E, M, N, P>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   Address: CheapClone + Send + Sync + 'static,
   A: AliveDelegate<Id = I, Address = Address>,
   C: ConflictDelegate<Id = I, Address = Address>,
@@ -204,7 +204,7 @@ where
 
 impl<I, Address, A, C, E, M, N, P> MergeDelegate for CompositeDelegate<I, Address, A, C, E, M, N, P>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   Address: CheapClone + Send + Sync + 'static,
   A: AliveDelegate<Id = I, Address = Address>,
   C: ConflictDelegate<Id = I, Address = Address>,
@@ -228,7 +228,7 @@ where
 impl<I, Address, A, C, E, M, N, P> ConflictDelegate
   for CompositeDelegate<I, Address, A, C, E, M, N, P>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   Address: CheapClone + Send + Sync + 'static,
   A: AliveDelegate<Id = I, Address = Address>,
   C: ConflictDelegate<Id = I, Address = Address>,
@@ -254,7 +254,7 @@ where
 
 impl<I, Address, A, C, E, M, N, P> PingDelegate for CompositeDelegate<I, Address, A, C, E, M, N, P>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   Address: CheapClone + Send + Sync + 'static,
   A: AliveDelegate<Id = I, Address = Address>,
   C: ConflictDelegate<Id = I, Address = Address>,
@@ -289,7 +289,7 @@ where
 
 impl<I, Address, A, C, E, M, N, P> EventDelegate for CompositeDelegate<I, Address, A, C, E, M, N, P>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   Address: CheapClone + Send + Sync + 'static,
   A: AliveDelegate<Id = I, Address = Address>,
   C: ConflictDelegate<Id = I, Address = Address>,
@@ -317,7 +317,7 @@ where
 
 impl<I, Address, A, C, E, M, N, P> NodeDelegate for CompositeDelegate<I, Address, A, C, E, M, N, P>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   Address: CheapClone + Send + Sync + 'static,
   A: AliveDelegate<Id = I, Address = Address>,
   C: ConflictDelegate<Id = I, Address = Address>,
@@ -360,7 +360,7 @@ where
 
 impl<I, Address, A, C, E, M, N, P> Delegate for CompositeDelegate<I, Address, A, C, E, M, N, P>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   Address: CheapClone + Send + Sync + 'static,
   A: AliveDelegate<Id = I, Address = Address>,
   C: ConflictDelegate<Id = I, Address = Address>,

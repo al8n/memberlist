@@ -15,8 +15,10 @@ pub struct LargeMeta(usize);
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
-#[cfg_attr(feature = "rkyv", archive_attr(derive(Debug, PartialEq, Eq, Hash)))]
+#[cfg_attr(
+  feature = "rkyv",
+  rkyv(derive(Debug, PartialEq, Eq, Hash), compare(PartialEq))
+)]
 pub struct Meta(Bytes);
 
 impl Default for Meta {

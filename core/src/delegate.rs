@@ -121,7 +121,11 @@ impl<I, A> VoidDelegate<I, A> {
   }
 }
 
-impl<I: Id, A: CheapClone + Send + Sync + 'static> AliveDelegate for VoidDelegate<I, A> {
+impl<I, A> AliveDelegate for VoidDelegate<I, A>
+where
+  I: Id + Send + Sync + 'static,
+  A: CheapClone + Send + Sync + 'static,
+{
   type Error = VoidDelegateError;
   type Id = I;
   type Address = A;
@@ -134,7 +138,11 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> AliveDelegate for VoidDelegat
   }
 }
 
-impl<I: Id, A: CheapClone + Send + Sync + 'static> MergeDelegate for VoidDelegate<I, A> {
+impl<I, A> MergeDelegate for VoidDelegate<I, A>
+where
+  I: Id + Send + Sync + 'static,
+  A: CheapClone + Send + Sync + 'static,
+{
   type Error = VoidDelegateError;
   type Id = I;
   type Address = A;
@@ -147,7 +155,11 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> MergeDelegate for VoidDelegat
   }
 }
 
-impl<I: Id, A: CheapClone + Send + Sync + 'static> ConflictDelegate for VoidDelegate<I, A> {
+impl<I, A> ConflictDelegate for VoidDelegate<I, A>
+where
+  I: Id + Send + Sync + 'static,
+  A: CheapClone + Send + Sync + 'static,
+{
   type Id = I;
   type Address = A;
 
@@ -159,7 +171,11 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> ConflictDelegate for VoidDele
   }
 }
 
-impl<I: Id, A: CheapClone + Send + Sync + 'static> PingDelegate for VoidDelegate<I, A> {
+impl<I, A> PingDelegate for VoidDelegate<I, A>
+where
+  I: Id + Send + Sync + 'static,
+  A: CheapClone + Send + Sync + 'static,
+{
   type Id = I;
   type Address = A;
 
@@ -180,7 +196,11 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> PingDelegate for VoidDelegate
   }
 }
 
-impl<I: Id, A: CheapClone + Send + Sync + 'static> EventDelegate for VoidDelegate<I, A> {
+impl<I, A> EventDelegate for VoidDelegate<I, A>
+where
+  I: Id + Send + Sync + 'static,
+  A: CheapClone + Send + Sync + 'static,
+{
   type Id = I;
   type Address = A;
 
@@ -191,7 +211,11 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> EventDelegate for VoidDelegat
   async fn notify_update(&self, _node: Arc<NodeState<Self::Id, Self::Address>>) {}
 }
 
-impl<I: Id, A: CheapClone + Send + Sync + 'static> NodeDelegate for VoidDelegate<I, A> {
+impl<I, A> NodeDelegate for VoidDelegate<I, A>
+where
+  I: Id + Send + Sync + 'static,
+  A: CheapClone + Send + Sync + 'static,
+{
   async fn node_meta(&self, _limit: usize) -> Meta {
     Meta::empty()
   }
@@ -217,7 +241,11 @@ impl<I: Id, A: CheapClone + Send + Sync + 'static> NodeDelegate for VoidDelegate
   async fn merge_remote_state(&self, _buf: Bytes, _join: bool) {}
 }
 
-impl<I: Id, A: CheapClone + Send + Sync + 'static> Delegate for VoidDelegate<I, A> {
+impl<I, A> Delegate for VoidDelegate<I, A>
+where
+  I: Id + Send + Sync + 'static,
+  A: CheapClone + Send + Sync + 'static,
+{
   type Id = I;
   type Address = A;
 }
