@@ -216,7 +216,6 @@ pub trait TransportError: std::error::Error + Send + Sync + 'static {
   /// 1. Fail to send to a remote node
   /// 2. Fail to receive from a remote node.
   /// 3. Fail to dial a remote node.
-  /// ...
   ///
   /// The above errors can be treated as remote failures.
   fn is_remote_failure(&self) -> bool;
@@ -274,7 +273,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// The error type for the transport
   type Error: TransportError;
   /// The id type used to identify nodes
-  type Id: Id;
+  type Id: Id + Send + Sync + 'static;
   /// The address resolver used to resolve addresses
   type Resolver: AddressResolver<Runtime = Self::Runtime>;
   /// The promised stream used to send and receive messages
@@ -367,7 +366,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   ///
   /// - number of bytes sent
   /// - a time stamp that's as close as possible to when the packet
-  /// was transmitted to help make accurate RTT measurements during probes.
+  ///   was transmitted to help make accurate RTT measurements during probes.
   fn send_packet(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
@@ -381,7 +380,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   ///
   /// - number of bytes sent
   /// - a time stamp that's as close as possible to when the packet
-  /// was transmitted to help make accurate RTT measurements during probes.
+  ///   was transmitted to help make accurate RTT measurements during probes.
   fn send_packets(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,

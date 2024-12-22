@@ -94,7 +94,7 @@ pub type SmolQuicTransport<I, A, S, W> =
 /// A [`Transport`] implementation based on QUIC
 pub struct QuicTransport<I, A, S, W, R>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
@@ -122,8 +122,9 @@ where
 
 impl<I, A, S, W, R> QuicTransport<I, A, S, W, R>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  A::Address: Send + Sync + 'static,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: RuntimeLite,
@@ -312,7 +313,7 @@ where
 
 impl<I, A, S, W, R> QuicTransport<I, A, S, W, R>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
@@ -398,8 +399,9 @@ where
 
 impl<I, A, S, W, R> Transport for QuicTransport<I, A, S, W, R>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  A::Address: Send + Sync + 'static,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: RuntimeLite,
@@ -691,7 +693,7 @@ where
 
 impl<I, A, S, W, R> Drop for QuicTransport<I, A, S, W, R>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,

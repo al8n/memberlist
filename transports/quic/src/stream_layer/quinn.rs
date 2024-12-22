@@ -268,7 +268,7 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
   }
 
   async fn finish(&mut self) -> Result<(), Self::Error> {
-    let fut = async { self.send.finish().await.map(|_| ()).map_err(Into::into) };
+    let fut = async { self.send.finish().map(|_| ()).map_err(Into::into) };
 
     match self.write_deadline {
       Some(timeout) => R::timeout_at(timeout, fut)
@@ -330,14 +330,14 @@ impl<R: Runtime> QuicStream for QuinnStream<R> {
   }
 
   async fn close(&mut self) -> Result<(), Self::Error> {
-    self.send.finish().await.map_err(QuinnBiStreamError::from)?;
+    self.send.finish().map_err(QuinnBiStreamError::from)?;
     self
       .recv
       .get_mut()
       .1
       .stop(VarInt::from_u32(0))
       .map_err(|_| {
-        QuinnBiStreamError::Read(QuinnReadStreamError::Read(quinn::ReadError::UnknownStream)).into()
+        QuinnBiStreamError::Read(QuinnReadStreamError::Read(quinn::ReadError::ClosedStream)).into()
       })
   }
 }

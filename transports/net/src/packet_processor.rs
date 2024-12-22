@@ -54,6 +54,7 @@ where
 impl<A, T> PacketProcessor<A, T>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = T::Runtime>,
+  A::Address: Send + Sync + 'static,
   T: Transport<Resolver = A>,
   T::Runtime: Runtime,
 {

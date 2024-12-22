@@ -47,8 +47,10 @@ impl<I, A> core::fmt::Display for Lpe<I, A> {
 
 impl<I, A> Wire for Lpe<I, A>
 where
-  I: Transformable + core::fmt::Debug,
-  A: Transformable + core::fmt::Debug,
+  I: Transformable + core::fmt::Debug + Send + Sync + 'static,
+  I::Error: Send + Sync + 'static,
+  A: Transformable + core::fmt::Debug + Send + Sync + 'static,
+  A::Error: Send + Sync + 'static,
 {
   type Error = MessageTransformError<I, A>;
   type Id = I;

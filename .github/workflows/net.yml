@@ -35,7 +35,7 @@ jobs:
         runtime: [tokio, async-std, smol]
         stream_layer: [tls, native-tls, tcp]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Install Rust
         run: |

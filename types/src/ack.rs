@@ -12,8 +12,10 @@ const MAX_INLINED_BYTES: usize = 64;
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
-#[cfg_attr(feature = "rkyv", archive_attr(derive(Debug, PartialEq, Eq, Hash)))]
+#[cfg_attr(
+  feature = "rkyv",
+  rkyv(compare(PartialEq), derive(Debug, PartialEq, Eq, Hash),)
+)]
 pub struct Ack {
   /// The sequence number of the ack
   #[viewit(
@@ -68,16 +70,13 @@ impl Ack {
 pub enum AckTransformError {
   /// The buffer did not contain enough bytes to encode an ack response.
   #[error("encode buffer too small")]
-  BufferTooSmall,
+  InsufficientBuffer(#[from] InsufficientBuffer),
   /// The buffer did not contain enough bytes to decode an ack response.
   #[error("the buffer did not contain enough bytes to decode Ack")]
   NotEnoughBytes,
   /// Varint decoding error
   #[error("fail to decode sequence number: {0}")]
   DecodeVarint(#[from] DecodeVarintError),
-  /// Varint encoding error
-  #[error("fail to encode sequence number: {0}")]
-  EncodeVarint(#[from] EncodeVarintError),
 }
 
 impl Transformable for Ack {
@@ -87,7 +86,9 @@ impl Transformable for Ack {
     let encoded_len = self.encoded_len();
 
     if encoded_len > dst.len() {
-      return Err(Self::Error::BufferTooSmall);
+      return Err(Self::Error::InsufficientBuffer(
+        InsufficientBuffer::with_information(encoded_len as u64, dst.len() as u64),
+      ));
     }
 
     let mut offset = 0;
@@ -260,10 +261,9 @@ impl Transformable for Ack {
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 #[cfg_attr(
   feature = "rkyv",
-  archive_attr(derive(Debug, Clone, PartialEq, Eq, Hash), repr(transparent))
+  rkyv(derive(Debug, Clone, PartialEq, Eq, Hash), compare(PartialEq))
 )]
 #[repr(transparent)]
 pub struct Nack {

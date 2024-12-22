@@ -132,7 +132,7 @@ pub struct Options {
     ),
     setter(attrs(doc = "Sets the TLS client config for the inner [`quinn::ClientConfig`]."))
   )]
-  client_tls_config: Arc<rustls::ClientConfig>,
+  client_config: quinn::ClientConfig,
   /// TLS server config for the inner [`quinn::ServerConfig`].
   #[viewit(
     getter(
@@ -141,7 +141,7 @@ pub struct Options {
     ),
     setter(attrs(doc = "Sets the TLS server config for the inner [`quinn::ServerConfig`]."))
   )]
-  server_tls_config: Arc<rustls::ServerConfig>,
+  server_config: quinn::ServerConfig,
 
   /// Quinn [`EndpointConfig`](quinn::EndpointConfig).
   #[viewit(
@@ -162,14 +162,14 @@ impl Options {
   /// Creates a new configuration object with default values.
   pub fn new(
     server_name: impl Into<SmolStr>,
-    server_tls_config: rustls::ServerConfig,
-    client_tls_config: rustls::ClientConfig,
+    server_config: quinn::ServerConfig,
+    client_config: quinn::ClientConfig,
     endpoint_config: EndpointConfig,
   ) -> Self {
     Self {
       server_name: server_name.into(),
-      client_tls_config: Arc::new(client_tls_config),
-      server_tls_config: Arc::new(server_tls_config),
+      client_config,
+      server_config,
       endpoint_config,
       max_idle_timeout: Duration::from_secs(10).as_millis() as u32,
       max_concurrent_stream_limit: 256,
@@ -202,8 +202,8 @@ impl From<Options> for QuinnOptions {
   fn from(config: Options) -> QuinnOptions {
     let Options {
       server_name,
-      client_tls_config,
-      server_tls_config,
+      mut client_config,
+      mut server_config,
       max_idle_timeout,
       max_concurrent_stream_limit,
       keep_alive_interval,
@@ -226,14 +226,11 @@ impl From<Options> for QuinnOptions {
     transport.mtu_discovery_config(mtu_discovery_config);
     let transport = Arc::new(transport);
 
-    let mut server_config = quinn::ServerConfig::with_crypto(server_tls_config);
     server_config.transport = Arc::clone(&transport);
     // Disables connection migration.
     // Long-term this should be enabled, however we then need to handle address change
     // on connections in the `Connection`.
     server_config.migration(false);
-
-    let mut client_config = quinn::ClientConfig::new(client_tls_config);
     client_config.transport_config(transport);
 
     QuinnOptions {

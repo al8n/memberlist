@@ -8,7 +8,7 @@ pub use s2n_quic_transport::connection::limits::ValidationError;
 #[derive(Debug, thiserror::Error)]
 pub enum S2nError {
   /// Validation error.
-  #[error(transparent)]
+  #[error("{0}")]
   Validation(#[from] ValidationError),
 
   /// Connection error.

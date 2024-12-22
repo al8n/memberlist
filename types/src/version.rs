@@ -10,14 +10,9 @@ pub struct UnknownDelegateVersion(u8);
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 #[cfg_attr(
   feature = "rkyv",
-  archive_attr(
-    derive(Debug, Copy, Clone, Eq, PartialEq, Hash),
-    repr(u8),
-    non_exhaustive
-  )
+  rkyv(compare(PartialEq), derive(Debug, Copy, Clone, Eq, PartialEq, Hash),)
 )]
 #[non_exhaustive]
 #[repr(u8)]
@@ -76,14 +71,9 @@ pub struct UnknownProtocolVersion(u8);
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 #[cfg_attr(
   feature = "rkyv",
-  archive_attr(
-    derive(Debug, Copy, Clone, Eq, PartialEq, Hash),
-    repr(u8),
-    non_exhaustive
-  )
+  rkyv(compare(PartialEq), derive(Debug, Copy, Clone, Eq, PartialEq, Hash),)
 )]
 #[non_exhaustive]
 #[repr(u8)]

@@ -150,42 +150,46 @@ pub enum MessageTransformError<I: Transformable, A: Transformable> {
   #[error("not enough bytes to decode message")]
   NotEnoughBytes,
   /// Returned when the fail to transform ping message.
-  #[error("{0}")]
+  #[error(transparent)]
   Ping(#[from] PingTransformError<I, A>),
   /// Returned when the fail to transform indirect ping message.
-  #[error("{0}")]
+  #[error(transparent)]
   IndirectPing(#[from] IndirectPingTransformError<I, A>),
   /// Returned when the fail to transform ack message.
-  #[error("{0}")]
+  #[error(transparent)]
   Ack(#[from] AckTransformError),
   /// Returned when the fail to transform suspect message.
-  #[error("{0}")]
+  #[error(transparent)]
   Suspect(#[from] SuspectTransformError<I>),
   /// Returned when the fail to transform alive message.
-  #[error("{0}")]
+  #[error(transparent)]
   Alive(#[from] AliveTransformError<I, A>),
   /// Returned when the fail to transform dead message.
-  #[error("{0}")]
+  #[error(transparent)]
   Dead(#[from] DeadTransformError<I>),
   /// Returned when the fail to transform push pull message.
-  #[error("{0}")]
+  #[error(transparent)]
   PushPull(#[from] PushPullTransformError<I, A>),
   /// Returned when the fail to transform user data message.
-  #[error("{0}")]
+  #[error(transparent)]
   UserData(#[from] BytesTransformError),
   /// Returned when the fail to transform nack message.
-  #[error("{0}")]
+  #[error(transparent)]
   Nack(#[from] NumberTransformError),
   /// Returned when the fail to transform error response message.
-  #[error("{0}")]
+  #[error(transparent)]
   ErrorResponse(#[from] StringTransformError),
 }
 
 const USER_DATA_LEN_SIZE: usize = core::mem::size_of::<u32>();
 const INLINED_BYTES_SIZE: usize = 64;
 
-impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> Transformable
-  for Message<I, A>
+impl<I, A> Transformable for Message<I, A>
+where
+  I: Transformable + core::fmt::Debug + 'static,
+  I::Error: Send + Sync + 'static,
+  A: Transformable + core::fmt::Debug + 'static,
+  A::Error: Send + Sync + 'static,
 {
   type Error = MessageTransformError<I, A>;
 
@@ -285,7 +289,7 @@ impl<I: Transformable + core::fmt::Debug, A: Transformable + core::fmt::Debug> T
       }
       Self::ERRORRESPONSE_TAG => {
         let (len, msg) = <SmolStr as Transformable>::decode(src)?;
-        (len + 1, Self::ErrorResponse(ErrorResponse { message: msg }))
+        (len + 1, Self::ErrorResponse(ErrorResponse::new(msg)))
       }
       _ => return Err(Self::Error::NotEnoughBytes),
     })
@@ -596,9 +600,7 @@ mod test {
 
   #[tokio::test]
   async fn test_error_response_transformable_round_trip() {
-    let msg = Message::<SmolStr, SocketAddr>::ErrorResponse(ErrorResponse {
-      message: "hello world".into(),
-    });
+    let msg = Message::<SmolStr, SocketAddr>::ErrorResponse(ErrorResponse::new("hello world"));
     let mut buf = vec![0u8; msg.encoded_len()];
     msg.encode(&mut buf).unwrap();
     let (len, decoded) = Message::decode(&buf).unwrap();

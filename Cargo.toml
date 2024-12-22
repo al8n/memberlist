@@ -29,17 +29,17 @@ rustdoc-args = ["--cfg", "docsrs"]
 auto_impl = "1"
 atomic_refcell = "0.1"
 agnostic-lite = { version = "0.3", features = ["time"] }
-agnostic = "0.3.5"
+agnostic = "0.3"
 async-lock = "3"
 async-channel = "2"
-bytes = "1.5"
+bytes = "1"
 byteorder = "1"
-derive_more = "0.99"
+derive_more = { version = "1", features = ["full"] }
 futures = "0.3"
 indexmap = "2"
 local-ip-address = "0.6"
 metrics = "0.22"
-nodecraft = { version = "0.3", features = [
+nodecraft = { version = "0.4", features = [
   "transformable",
   "async",
   "resolver",
@@ -51,14 +51,14 @@ scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 humantime-serde = "1"
 smallvec = "1"
-smallvec-wrapper = { version = "0.1", features = ["const_new", "either"] }
-smol_str = "0.2"
-transformable = { version = "0.1.6", features = ["smol_str", "bytes"] }
-thiserror = "1"
+smallvec-wrapper = { version = "0.2", features = ["const_new", "either"] }
+smol_str = "0.3"
+transformable = { version = "0.2", features = ["smol_str03", "bytes1"] }
+thiserror = "2"
 tracing = "0.1"
 viewit = "0.1.5"
 
-memberlist-core = { version = "0.2", path = "core", default-features = false }
-memberlist-net = { version = "0.2", path = "transports/net", default-features = false }
-memberlist-types = { version = "0.2", path = "types", default-features = false }
-memberlist-quic = { version = "0.2", path = "transports/quic", default-features = false }
+memberlist-core = { version = "0.3", path = "core", default-features = false }
+memberlist-net = { version = "0.3", path = "transports/net", default-features = false }
+memberlist-types = { version = "0.3", path = "types", default-features = false }
+memberlist-quic = { version = "0.3", path = "transports/quic", default-features = false }

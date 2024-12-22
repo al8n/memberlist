@@ -1,6 +1,6 @@
 [package]
 name = "memberlist-core"
-version = "0.2.1"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -56,7 +56,7 @@ derive_more.workspace = true
 either = "1"
 futures.workspace = true
 nodecraft.workspace = true
-transformable = { workspace = true, features = ["bytes", "smol_str"] }
+transformable = { workspace = true, features = ["bytes1", "smol_str03"] }
 paste.workspace = true
 parking_lot = "0.12"
 pin-project.workspace = true
