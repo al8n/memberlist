@@ -574,7 +574,10 @@ enum StateMessage<T: Transport> {
   Suspect(Suspect<T::Id>),
 }
 
-impl<T: Transport> StateMessage<T> {
+impl<T> StateMessage<T>
+where
+  T: Transport,
+{
   async fn run<D>(self, s: &Memberlist<T, D>)
   where
     D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,

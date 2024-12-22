@@ -127,7 +127,7 @@ For details on all of these extensions, please read Hashicorp's paper ["Lifeguar
 
 ```toml
 [dependencies]
-memberlist = "0.1"
+memberlist = "0.3"
 ```
 
 ## Q & A

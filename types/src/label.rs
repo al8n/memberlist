@@ -8,7 +8,7 @@ pub enum InvalidLabel {
   #[error("the size of label must between [0-255] bytes, got {0}")]
   TooLarge(usize),
   /// The label is not valid utf8.
-  #[error("{0}")]
+  #[error(transparent)]
   Utf8(#[from] core::str::Utf8Error),
 }
 
@@ -275,7 +275,7 @@ impl core::fmt::Display for Label {
 #[derive(Debug, thiserror::Error)]
 pub enum LabelError {
   /// Invalid label.
-  #[error("{0}")]
+  #[error(transparent)]
   InvalidLabel(#[from] InvalidLabel),
   /// Not enough bytes to decode label.
   #[error("not enough bytes to decode label")]

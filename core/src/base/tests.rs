@@ -336,7 +336,7 @@ impl<I, A> CustomMergeDelegate<I, A> {
 
 impl<I, A> MergeDelegate for CustomMergeDelegate<I, A>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: CheapClone + Send + Sync + 'static,
 {
   type Id = I;
@@ -424,7 +424,7 @@ impl<I, A> CustomAliveDelegate<I, A> {
 
 impl<I, A> AliveDelegate for CustomAliveDelegate<I, A>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: CheapClone + Send + Sync + 'static,
 {
   type Id = I;
@@ -957,7 +957,7 @@ impl<I, A> CustomConflictDelegate<I, A> {
 
 impl<I, A> ConflictDelegate for CustomConflictDelegate<I, A>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: CheapClone + Send + Sync + 'static,
 {
   type Id = I;
@@ -1038,7 +1038,7 @@ impl<I, A> CustomPingDelegate<I, A> {
 
 impl<I, A> PingDelegate for CustomPingDelegate<I, A>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: CheapClone + Send + Sync + 'static,
 {
   type Id = I;

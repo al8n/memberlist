@@ -14,10 +14,9 @@ use transformable::Transformable;
   feature = "rkyv",
   derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
 )]
-#[cfg_attr(feature = "rkyv", archive(compare(PartialEq), check_bytes))]
 #[cfg_attr(
   feature = "rkyv",
-  archive_attr(derive(Debug, PartialEq, Eq, Hash), repr(transparent))
+  rkyv(derive(Debug, PartialEq, Eq, Hash), compare(PartialEq))
 )]
 #[repr(transparent)]
 pub struct ErrorResponse {

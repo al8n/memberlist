@@ -5,8 +5,9 @@ use super::*;
 
 impl<I, A, S, W, R> NetTransport<I, A, S, W, R>
 where
-  I: Id,
+  I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
+  A::Address: Send + Sync + 'static,
   S: StreamLayer,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
@@ -539,9 +540,8 @@ where
       .next_socket(addr)
       .send_to(buf, addr)
       .await
-      .map(|num| {
+      .inspect(|num| {
         tracing::trace!(remote=%addr, total_bytes = %num, sent=?buf, "memberlist_net.packet");
-        num
       })
       .map_err(|e| ConnectionError::packet_write(e).into())
   }

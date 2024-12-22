@@ -29,6 +29,7 @@ pub(super) struct Processor<
 impl<A, T, S> Processor<A, T, S>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
+  A::Address: Send + Sync + 'static,
   T: Transport<Resolver = A, Stream = S::Stream>,
   S: StreamLayer,
 {
