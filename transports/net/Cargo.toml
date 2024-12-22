@@ -97,7 +97,7 @@ aes-gcm = { version = "0.10", optional = true }
 cbc = { version = "0.1", optional = true }
 rayon = { version = "1.8", optional = true }
 weezl = { version = "0.1", optional = true }
-pnet = { version = "0.34", optional = true }
+pnet = { version = "0.35", optional = true }
 
 # serde
 serde = { workspace = true, optional = true }

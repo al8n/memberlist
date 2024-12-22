@@ -87,7 +87,7 @@ tracing-subscriber = { version = "0.3", optional = true, features = [
   "env-filter",
   "tracing-log",
 ] }
-pnet = { version = "0.34", optional = true }
+pnet = { version = "0.35", optional = true }
 
 
 # metrics feature
@@ -98,7 +98,7 @@ tracing-subscriber = { version = "0.3", features = [
   "env-filter",
   "tracing-log",
 ] }
-pnet = "0.34"
+pnet = "0.35"
 agnostic = { workspace = true, features = ["net", "tokio"] }
 rand = "0.8"
 tokio = { version = "1", features = ["full"] }
