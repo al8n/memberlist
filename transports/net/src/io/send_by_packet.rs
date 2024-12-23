@@ -536,13 +536,24 @@ where
     addr: &A::ResolvedAddress,
     buf: &[u8],
   ) -> Result<usize, NetTransportError<A, W>> {
-    self
-      .next_socket(addr)
-      .send_to(buf, addr)
-      .await
-      .inspect(|num| {
-        tracing::trace!(remote=%addr, total_bytes = %num, sent=?buf, "memberlist_net.packet");
-      })
-      .map_err(|e| ConnectionError::packet_write(e).into())
+    match self.next_socket(addr) {
+      Some(skt) => skt
+        .send_to(buf, addr)
+        .await
+        .inspect(|num| {
+          tracing::trace!(remote=%addr, total_bytes = %num, sent=?buf, "memberlist_net.packet");
+        })
+        .map_err(|e| ConnectionError::packet_write(e).into()),
+      None => {
+        tracing::error!("memberlist_net.packet: transport is being shutdown");
+        Err(
+          ConnectionError::packet_write_on_transport_shutdown(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "transport is being shutdown",
+          ))
+          .into(),
+        )
+      }
+    }
   }
 }
