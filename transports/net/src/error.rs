@@ -140,6 +140,7 @@ where
 /// Connection kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum ConnectionKind {
   /// Promised connection, e.g. TCP, QUIC.
   Promised,
@@ -167,6 +168,7 @@ impl ConnectionKind {
 /// Connection error kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum ConnectionErrorKind {
   /// Failed to accept a connection.
   Accept,
@@ -275,6 +277,14 @@ impl ConnectionError {
     Self {
       kind: ConnectionKind::Packet,
       error_kind: ConnectionErrorKind::Write,
+      error: err,
+    }
+  }
+
+  pub(super) fn packet_write_on_transport_shutdown(err: std::io::Error) -> Self {
+    Self {
+      kind: ConnectionKind::Packet,
+      error_kind: ConnectionErrorKind::Close,
       error: err,
     }
   }
