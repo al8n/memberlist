@@ -186,10 +186,8 @@ const INLINED_BYTES_SIZE: usize = 64;
 
 impl<I, A> Transformable for Message<I, A>
 where
-  I: Transformable + core::fmt::Debug + 'static,
-  I::Error: Send + Sync + 'static,
-  A: Transformable + core::fmt::Debug + 'static,
-  A::Error: Send + Sync + 'static,
+  I: Transformable + core::fmt::Debug,
+  A: Transformable + core::fmt::Debug,
 {
   type Error = MessageTransformError<I, A>;
 

@@ -46,7 +46,6 @@ where
 impl<T, D> Suspicioner<T, D>
 where
   T: Transport,
-  T::Id: Send + Sync + 'static,
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   pub(crate) fn new(
@@ -138,7 +137,6 @@ where
 impl<T, D> Suspicion<T, D>
 where
   T: Transport,
-  T::Id: Send + Sync + 'static,
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   /// Returns a after_func started with the max time, and that will drive
@@ -180,7 +178,6 @@ where
 impl<T, D> Suspicion<T, D>
 where
   T: Transport,
-  T::Id: Send + Sync + 'static,
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
 {
   /// Confirm registers that a possibly new peer has also determined the given

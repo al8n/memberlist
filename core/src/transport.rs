@@ -273,7 +273,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// The error type for the transport
   type Error: TransportError;
   /// The id type used to identify nodes
-  type Id: Id + Send + Sync + 'static;
+  type Id: Id;
   /// The address resolver used to resolve addresses
   type Resolver: AddressResolver<Runtime = Self::Runtime>;
   /// The promised stream used to send and receive messages

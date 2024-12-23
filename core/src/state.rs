@@ -136,7 +136,6 @@ impl<T, D> Memberlist<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
-  T::Id: Send + Sync + 'static,
 {
   /// Does a complete state exchange with a specific node.
   pub(crate) async fn push_pull_node(
@@ -578,7 +577,6 @@ enum StateMessage<T: Transport> {
 impl<T> StateMessage<T>
 where
   T: Transport,
-  T::Id: Send + Sync + 'static,
 {
   async fn run<D>(self, s: &Memberlist<T, D>)
   where
