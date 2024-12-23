@@ -141,10 +141,12 @@ where
   local_addr: A::Address,
   packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
+  num_v4_sockets: usize,
   v4_round_robin: AtomicUsize,
-  v4_sockets: SmallVec<Arc<<<A::Runtime as Runtime>::Net as Net>::UdpSocket>>,
+  v4_sockets: AtomicRefCell<SmallVec<Arc<<<A::Runtime as Runtime>::Net as Net>::UdpSocket>>>,
+  num_v6_sockets: usize,
   v6_round_robin: AtomicUsize,
-  v6_sockets: SmallVec<Arc<<<A::Runtime as Runtime>::Net as Net>::UdpSocket>>,
+  v6_sockets: AtomicRefCell<SmallVec<Arc<<<A::Runtime as Runtime>::Net as Net>::UdpSocket>>>,
   stream_layer: Arc<S>,
   #[cfg(feature = "encryption")]
   encryptor: Option<SecretKeyring>,
@@ -367,9 +369,11 @@ where
       packet_rx,
       stream_rx,
       handles: AtomicRefCell::new(handles),
-      v4_sockets: v4_sockets.into_iter().map(|(ln, _)| ln).collect(),
+      num_v4_sockets: v4_sockets.len(),
+      v4_sockets: AtomicRefCell::new(v4_sockets.into_iter().map(|(ln, _)| ln).collect()),
       v4_round_robin: AtomicUsize::new(0),
-      v6_sockets: v6_sockets.into_iter().map(|(ln, _)| ln).collect(),
+      num_v6_sockets: v6_sockets.len(),
+      v6_sockets: AtomicRefCell::new(v6_sockets.into_iter().map(|(ln, _)| ln).collect()),
       v6_round_robin: AtomicUsize::new(0),
       stream_layer,
       #[cfg(feature = "encryption")]
@@ -383,23 +387,47 @@ where
   fn next_socket(
     &self,
     addr: &A::ResolvedAddress,
-  ) -> &<<A::Runtime as Runtime>::Net as Net>::UdpSocket {
-    if addr.is_ipv4() {
+  ) -> Option<Arc<<<A::Runtime as Runtime>::Net as Net>::UdpSocket>> {
+    enum Kind {
+      V4(usize),
+      V6(usize),
+    }
+
+    let kind = if addr.is_ipv4() {
       // if there's no v4 sockets, we assume remote addr can accept both v4 and v6
       // give a try on v6
-      if self.v4_sockets.is_empty() {
-        let idx = self.v6_round_robin.fetch_add(1, Ordering::AcqRel) % self.v6_sockets.len();
-        &self.v6_sockets[idx]
+      if self.num_v4_sockets == 0 {
+        let idx = self.v6_round_robin.fetch_add(1, Ordering::AcqRel) % self.num_v6_sockets;
+        Kind::V6(idx)
       } else {
-        let idx = self.v4_round_robin.fetch_add(1, Ordering::AcqRel) % self.v4_sockets.len();
-        &self.v4_sockets[idx]
+        let idx = self.v4_round_robin.fetch_add(1, Ordering::AcqRel) % self.num_v4_sockets;
+        Kind::V4(idx)
       }
-    } else if self.v6_sockets.is_empty() {
-      let idx = self.v4_round_robin.fetch_add(1, Ordering::AcqRel) % self.v4_sockets.len();
-      &self.v4_sockets[idx]
+    } else if self.num_v6_sockets == 0 {
+      let idx = self.v4_round_robin.fetch_add(1, Ordering::AcqRel) % self.num_v4_sockets;
+      Kind::V4(idx)
     } else {
-      let idx = self.v6_round_robin.fetch_add(1, Ordering::AcqRel) % self.v6_sockets.len();
-      &self.v6_sockets[idx]
+      let idx = self.v6_round_robin.fetch_add(1, Ordering::AcqRel) % self.num_v6_sockets;
+      Kind::V6(idx)
+    };
+
+    // if we failed to borrow, it means that this transport is being shut down.
+
+    match kind {
+      Kind::V4(idx) => {
+        if let Ok(sockets) = self.v4_sockets.try_borrow() {
+          Some(sockets[idx].clone())
+        } else {
+          None
+        }
+      }
+      Kind::V6(idx) => {
+        if let Ok(sockets) = self.v6_sockets.try_borrow() {
+          Some(sockets[idx].clone())
+        } else {
+          None
+        }
+      }
     }
   }
 }
@@ -664,6 +692,21 @@ where
   async fn shutdown(&self) -> Result<(), Self::Error> {
     if !self.shutdown_tx.close() {
       return Ok(());
+    }
+
+    // clear all udp sockets
+    loop {
+      if let Ok(mut s) = self.v4_sockets.try_borrow_mut() {
+        s.clear();
+        break;
+      }
+    }
+
+    loop {
+      if let Ok(mut s) = self.v6_sockets.try_borrow_mut() {
+        s.clear();
+        break;
+      }
     }
 
     let mut handles = core::mem::take(&mut *self.handles.borrow_mut());
