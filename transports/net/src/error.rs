@@ -12,9 +12,6 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   /// Returns when there is no explicit advertise address and no private IP address found.
   #[error("no private IP address found, and explicit IP not provided")]
   NoPrivateIP,
-  /// Returns when there is no interface addresses found.
-  #[error("failed to get interface addresses {0}")]
-  NoInterfaceAddresses(#[from] local_ip_address::Error),
   /// Returns when there is no bind address provided.
   #[error("at least one bind address is required")]
   EmptyBindAddresses,
