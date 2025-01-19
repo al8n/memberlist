@@ -29,9 +29,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 auto_impl = "1"
 atomic_refcell = "0.1"
 agnostic-lite = { version = "0.3", features = ["time"] }
-agnostic = "0.4"
+agnostic = "0.5"
 # agnostic-lite = { version = "0.3", features = ["time"], path = "../agnostic/lite" }
-# agnostic = { version = "0.4", path = "../agnostic/agnostic" }
+# agnostic = { version = "0.5", path = "../agnostic/agnostic" }
 async-lock = "3"
 async-channel = "2"
 bytes = "1"
@@ -39,7 +39,7 @@ byteorder = "1"
 derive_more = { version = "1", features = ["full"] }
 futures = "0.3"
 indexmap = "2"
-local-ip-address = "0.6"
+getifs = "0.2"
 metrics = "0.24"
 nodecraft = { version = "0.4", features = [
   "transformable",
