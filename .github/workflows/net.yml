@@ -35,10 +35,10 @@ jobs:
           # - windows-latest
         runtime: [tokio, async-std, smol]
         stream_layer: [tls, native-tls, tcp]
-        # TODO: remove this exlucde when figuring out why native-tls with smol leads to a user_data* unit tests failure
-        exclude:
-          - runtime: smol
-            stream_layer: native-tls
+        # # TODO: remove this exlucde when figuring out why native-tls with smol leads to a user_data* unit tests failure
+        # exclude:
+        #   - runtime: smol
+        #     stream_layer: native-tls
     steps:
       - uses: actions/checkout@v4
 
