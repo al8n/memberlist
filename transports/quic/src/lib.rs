@@ -224,10 +224,15 @@ where
 
     // find final advertise address
     let final_advertise_addr = if advertise_addr.ip().is_unspecified() {
-      let ip = local_ip_address::local_ip().map_err(|e| match e {
-        local_ip_address::Error::LocalIpAddressNotFound => QuicTransportError::NoPrivateIP,
-        e => QuicTransportError::NoInterfaceAddresses(e),
-      })?;
+      let ip = getifs::private_addrs()
+        .map_err(|_| QuicTransportError::NoPrivateIP)
+        .and_then(|ips| {
+          if let Some(ip) = ips.into_iter().next().map(|ip| ip.addr()) {
+            Ok(ip)
+          } else {
+            Err(QuicTransportError::NoPrivateIP)
+          }
+        })?;
       SocketAddr::new(ip, advertise_addr.port())
     } else {
       advertise_addr

@@ -20,7 +20,7 @@ on:
       - '**.txt'
       - 'art'
   workflow_dispatch:
-  schedule: [cron: "40 1 * * *"]
+  schedule: [cron: "0 1 */7 * *"]
 
 jobs:
   test:

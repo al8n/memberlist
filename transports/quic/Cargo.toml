@@ -1,6 +1,6 @@
 [package]
 name = "memberlist-quic"
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -57,7 +57,7 @@ byteorder.workspace = true
 crossbeam-skiplist = "0.1"
 futures.workspace = true
 indexmap = "2"
-local-ip-address.workspace = true
+getifs.workspace = true
 memberlist-core.workspace = true
 nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
 pin-project.workspace = true
@@ -83,8 +83,8 @@ rustls = { version = "0.23", default-features = false, optional = true }
 rcgen = { version = "0.13", optional = true }
 
 # s2n
-s2n-quic = { version = "1.51", optional = true }
-s2n-quic-transport = { version = "0.51", optional = true }
+s2n-quic = { version = "1.52", optional = true }
+s2n-quic-transport = { version = "0.52", optional = true }
 
 # compression
 rayon = { version = "1.8", optional = true }
