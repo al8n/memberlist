@@ -35,7 +35,7 @@ rkyv = ["dep:rkyv", "nodecraft/rkyv", "memberlist-types/rkyv"]
 test = ["tracing-subscriber"]
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-getrandom = { version = "0.2", features = ["js"] }
+getrandom = { version = "0.3", features = ["js"] }
 once_cell = "1.17"
 
 [target.'cfg(not(any(target_family = "wasm", windows)))'.dependencies]

@@ -61,7 +61,7 @@ dnssec-ring = ["dns", "nodecraft/dnssec-ring"]
 dnssec = ["dns", "nodecraft/dnssec"]
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-getrandom = { version = "0.2", features = ["js"] }
+getrandom = { version = "0.3", features = ["js"] }
 
 [dependencies]
 atomic_refcell.workspace = true
