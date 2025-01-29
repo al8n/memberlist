@@ -335,12 +335,12 @@ const _: () = {
 const _: () = {
   use std::net::SocketAddr;
 
-  use rand::{distributions::Alphanumeric, random, thread_rng, Rng};
+  use rand::{distr::Alphanumeric, random, rng, Rng};
   use smol_str::SmolStr;
 
   impl Alive<SmolStr, SocketAddr> {
     pub(crate) fn random(size: usize) -> Self {
-      let id = thread_rng()
+      let id = rng()
         .sample_iter(Alphanumeric)
         .take(size)
         .collect::<Vec<u8>>();
@@ -354,7 +354,7 @@ const _: () = {
           .unwrap(),
         node: Node::new(
           id,
-          format!("127.0.0.1:{}", thread_rng().gen_range(0..65535))
+          format!("127.0.0.1:{}", rng().random_range(0..65535))
             .parse()
             .unwrap(),
         ),

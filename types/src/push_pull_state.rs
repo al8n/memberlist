@@ -601,28 +601,28 @@ impl<I: Transformable, A: Transformable> Transformable for PushPull<I, A> {
 const _: () = {
   use std::net::SocketAddr;
 
-  use rand::{distributions::Alphanumeric, random, thread_rng, Rng};
+  use rand::{distr::Alphanumeric, random, rng, Rng};
   use smol_str::SmolStr;
 
   impl PushNodeState<SmolStr, SocketAddr> {
     fn generate(size: usize) -> Self {
       Self {
         id: String::from_utf8(
-          thread_rng()
+          rng()
             .sample_iter(&Alphanumeric)
             .take(size)
             .collect::<Vec<_>>(),
         )
         .unwrap()
         .into(),
-        addr: SocketAddr::from(([127, 0, 0, 1], thread_rng().gen_range(0..65535))),
+        addr: SocketAddr::from(([127, 0, 0, 1], rng().random_range(0..65535))),
         meta: (0..size)
           .map(|_| random::<u8>())
           .collect::<Vec<_>>()
           .try_into()
           .unwrap(),
         incarnation: random(),
-        state: State::try_from(thread_rng().gen_range(0..=3)).unwrap(),
+        state: State::try_from(rng().random_range(0..=3)).unwrap(),
         protocol_version: ProtocolVersion::V1,
         delegate_version: DelegateVersion::V1,
       }

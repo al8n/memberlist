@@ -236,16 +236,16 @@ macro_rules! bad_bail {
 
     #[cfg(test)]
     const _: () = {
-      use rand::{random, Rng, thread_rng, distributions::Alphanumeric};
+      use rand::{random, Rng, rng, distr::Alphanumeric};
       impl $name<::smol_str::SmolStr> {
         pub(crate) fn generate(size: usize) -> Self {
-          let node = thread_rng()
+          let node = rng()
             .sample_iter(Alphanumeric)
             .take(size)
             .collect::<Vec<u8>>();
           let node = String::from_utf8(node).unwrap().into();
 
-          let from = thread_rng()
+          let from = rng()
             .sample_iter(Alphanumeric)
             .take(size)
             .collect::<Vec<u8>>();

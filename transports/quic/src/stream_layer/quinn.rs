@@ -8,7 +8,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use agnostic::{net::Net, Runtime};
+use agnostic::Runtime;
 use bytes::Bytes;
 use futures::{AsyncReadExt, AsyncWriteExt};
 use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
@@ -70,7 +70,7 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
       self.opts.endpoint_config.clone(),
       Some(self.opts.server_config.clone()),
       sock,
-      Arc::new(<R::Net as Net>::Quinn::default()),
+      Arc::new(R::quinn()),
     )?);
 
     let local_addr = endpoint.local_addr()?;

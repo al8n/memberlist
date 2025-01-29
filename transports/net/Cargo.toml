@@ -1,6 +1,6 @@
 [package]
 name = "memberlist-net"
-version = "0.3.2"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -61,7 +61,7 @@ dnssec-ring = ["dns", "nodecraft/dnssec-ring"]
 dnssec = ["dns", "nodecraft/dnssec"]
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-getrandom = { version = "0.2", features = ["js"] }
+getrandom.workspace = true
 
 [dependencies]
 atomic_refcell.workspace = true
@@ -78,7 +78,7 @@ getifs.workspace = true
 nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
 peekable = { version = "0.2", features = ["future"] }
 pin-project.workspace = true
-rand = "0.8"
+rand = "0.9"
 memberlist-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
