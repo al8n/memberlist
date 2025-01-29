@@ -727,8 +727,9 @@ where
     let interval = self.inner.opts.push_pull_interval;
     let this = self.clone();
     // Use a random stagger to avoid syncronizing
-    let mut rng = rand::thread_rng();
-    let rand_stagger = Duration::from_millis(rng.gen_range(0..interval.as_millis() as u64));
+    let mut rng = rand::rng();
+
+    let rand_stagger = Duration::from_millis(rng.random_range(0..interval.as_millis() as u64));
 
     <T::Runtime as RuntimeLite>::spawn(async move {
       futures::select! {
@@ -1168,7 +1169,7 @@ where
       .store(dead_idx as u32, Ordering::Release);
 
     // Shuffle live nodes
-    memberlist.shuffle(&mut rand::thread_rng());
+    memberlist.shuffle(&mut rand::rng());
   }
 
   /// Invoked every GossipInterval period to broadcast our gossip
@@ -1385,7 +1386,7 @@ fn random_nodes<I, A>(
   let mut i = 0;
 
   while i < rounds && i < n {
-    let j = rand::random::<usize>() % (n - i) + i;
+    let j = (rand::random::<u64>() as usize) % (n - i) + i;
     nodes.swap(i, j);
     i += 1;
     if i >= k && i >= rounds {
@@ -1399,8 +1400,8 @@ fn random_nodes<I, A>(
 
 #[inline]
 fn random_stagger(duration: Duration) -> Duration {
-  let mut rng = rand::thread_rng();
-  Duration::from_nanos(rng.gen_range(0..u64::MAX) % (duration.as_nanos() as u64))
+  let mut rng = rand::rng();
+  Duration::from_nanos(rng.random_range(0..u64::MAX) % (duration.as_nanos() as u64))
 }
 
 #[test]

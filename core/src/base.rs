@@ -118,88 +118,43 @@ where
   pub(crate) node_map: HashMap<T::Id, usize>,
 }
 
+impl<T, D> core::ops::Index<usize> for Members<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
+  type Output = Member<T, D>;
+
+  fn index(&self, index: usize) -> &Self::Output {
+    &self.nodes[index]
+  }
+}
+
+impl<T, D> core::ops::IndexMut<usize> for Members<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
+  fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+    &mut self.nodes[index]
+  }
+}
+
+impl<T, D> rand::seq::IndexedRandom for Members<T, D>
+where
+  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  T: Transport,
+{
+  fn len(&self) -> usize {
+    self.nodes.len()
+  }
+}
+
 impl<T, D> rand::seq::SliceRandom for Members<T, D>
 where
   D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
   T: Transport,
 {
-  type Item = Member<T, D>;
-
-  fn choose<R>(&self, _rng: &mut R) -> Option<&Self::Item>
-  where
-    R: rand::Rng + ?Sized,
-  {
-    unreachable!()
-  }
-
-  fn choose_mut<R>(&mut self, _rng: &mut R) -> Option<&mut Self::Item>
-  where
-    R: rand::Rng + ?Sized,
-  {
-    unreachable!()
-  }
-
-  fn choose_multiple<R>(
-    &self,
-    _rng: &mut R,
-    _amount: usize,
-  ) -> rand::seq::SliceChooseIter<Self, Self::Item>
-  where
-    R: rand::Rng + ?Sized,
-  {
-    unreachable!()
-  }
-
-  fn choose_weighted<R, F, B, X>(
-    &self,
-    _rng: &mut R,
-    _weight: F,
-  ) -> Result<&Self::Item, rand::distributions::WeightedError>
-  where
-    R: rand::Rng + ?Sized,
-    F: Fn(&Self::Item) -> B,
-    B: rand::distributions::uniform::SampleBorrow<X>,
-    X: rand::distributions::uniform::SampleUniform
-      + for<'a> core::ops::AddAssign<&'a X>
-      + core::cmp::PartialOrd<X>
-      + Clone
-      + Default,
-  {
-    unreachable!()
-  }
-
-  fn choose_weighted_mut<R, F, B, X>(
-    &mut self,
-    _rng: &mut R,
-    _weight: F,
-  ) -> Result<&mut Self::Item, rand::distributions::WeightedError>
-  where
-    R: rand::Rng + ?Sized,
-    F: Fn(&Self::Item) -> B,
-    B: rand::distributions::uniform::SampleBorrow<X>,
-    X: rand::distributions::uniform::SampleUniform
-      + for<'a> core::ops::AddAssign<&'a X>
-      + core::cmp::PartialOrd<X>
-      + Clone
-      + Default,
-  {
-    unreachable!()
-  }
-
-  fn choose_multiple_weighted<R, F, X>(
-    &self,
-    _rng: &mut R,
-    _amount: usize,
-    _weight: F,
-  ) -> Result<rand::seq::SliceChooseIter<Self, Self::Item>, rand::distributions::WeightedError>
-  where
-    R: rand::Rng + ?Sized,
-    F: Fn(&Self::Item) -> X,
-    X: Into<f64>,
-  {
-    unreachable!()
-  }
-
   fn shuffle<R>(&mut self, rng: &mut R)
   where
     R: rand::Rng + ?Sized,
@@ -210,9 +165,9 @@ where
     #[inline]
     fn gen_index<R: rand::Rng + ?Sized>(rng: &mut R, ubound: usize) -> usize {
       if ubound <= (u32::MAX as usize) {
-        rng.gen_range(0..ubound as u32) as usize
+        rng.random_range(0..ubound as u32) as usize
       } else {
-        rng.gen_range(0..ubound)
+        rng.random_range(0..ubound)
       }
     }
 
@@ -231,8 +186,9 @@ where
     &mut self,
     _rng: &mut R,
     _amount: usize,
-  ) -> (&mut [Self::Item], &mut [Self::Item])
+  ) -> (&mut [Self::Output], &mut [Self::Output])
   where
+    Self::Output: Sized,
     R: rand::Rng + ?Sized,
   {
     unreachable!()

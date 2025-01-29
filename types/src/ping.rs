@@ -247,20 +247,20 @@ macro_rules! bail_ping {
 
     #[cfg(test)]
     const _: () = {
-      use rand::{Rng, distributions::Alphanumeric, thread_rng, random};
+      use rand::{Rng, distr::Alphanumeric, rng, random};
 
       impl $name<smol_str::SmolStr, std::net::SocketAddr> {
         pub(crate) fn generate(size: usize) -> Self {
-          let rng = thread_rng();
-          let source = rng.sample_iter(&Alphanumeric).take(size).collect::<Vec<u8>>();
+          let trng = rng();
+          let source = trng.sample_iter(&Alphanumeric).take(size).collect::<Vec<u8>>();
           let source = String::from_utf8(source).unwrap();
-          let source = Node::new(source.into(), format!("127.0.0.1:{}", thread_rng().gen_range(0..65535))
+          let source = Node::new(source.into(), format!("127.0.0.1:{}", rng().random_range(0..65535))
           .parse()
           .unwrap());
-          let rng = thread_rng();
-          let target = rng.sample_iter(&Alphanumeric).take(size).collect::<Vec<u8>>();
+          let trng = rng();
+          let target = trng.sample_iter(&Alphanumeric).take(size).collect::<Vec<u8>>();
           let target = String::from_utf8(target).unwrap();
-          let target = Node::new(target.into(), format!("127.0.0.1:{}", thread_rng().gen_range(0..65535)).parse().unwrap());
+          let target = Node::new(target.into(), format!("127.0.0.1:{}", rng().random_range(0..65535)).parse().unwrap());
 
           Self {
             sequence_number: random(),

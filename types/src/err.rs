@@ -117,11 +117,11 @@ impl Transformable for ErrorResponse {
 
 #[cfg(test)]
 const _: () = {
-  use rand::{distributions::Alphanumeric, Rng};
+  use rand::{distr::Alphanumeric, Rng};
 
   impl ErrorResponse {
     fn generate(size: usize) -> Self {
-      let rng = rand::thread_rng();
+      let rng = rand::rng();
       let err = rng
         .sample_iter(&Alphanumeric)
         .take(size)

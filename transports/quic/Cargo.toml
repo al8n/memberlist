@@ -1,6 +1,6 @@
 [package]
 name = "memberlist-quic"
-version = "0.3.1"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -31,17 +31,17 @@ smol = ["agnostic/smol"]
 
 # enable DNS node address resolver
 dns = ["nodecraft/dns", "agnostic/dns"]
-dns-over-quic = ["dns", "nodecraft/dns-over-quic"]
-dns-over-h3 = ["dns", "nodecraft/dns-over-h3"]
-dns-over-https-rustls = ["dns", "nodecraft/dns-over-https-rustls"]
-dns-over-rustls = ["dns", "nodecraft/dns-over-rustls"]
-dns-over-openssl = ["dns", "nodecraft/dns-over-openssl"]
-dns-over-native-tls = ["dns", "nodecraft/dns-over-native-tls"]
-dns-webpki-roots = ["dns", "nodecraft/dns-webpki-roots"]
-dns-native-certs = ["dns", "nodecraft/dns-native-certs"]
-dnssec-openssl = ["dns", "nodecraft/dnssec-openssl"]
-dnssec-ring = ["dns", "nodecraft/dnssec-ring"]
-dnssec = ["dns", "nodecraft/dnssec"]
+dns-over-quic = ["dns", "nodecraft/dns-over-quic", "agnostic/dns-over-quic"]
+dns-over-h3 = ["dns", "nodecraft/dns-over-h3", "agnostic/dns-over-h3"]
+dns-over-https-rustls = ["dns", "nodecraft/dns-over-https-rustls", "agnostic/dns-over-https-rustls"]
+dns-over-rustls = ["dns", "nodecraft/dns-over-rustls", "agnostic/dns-over-rustls"]
+dns-over-openssl = ["dns", "nodecraft/dns-over-openssl", "agnostic/dns-over-openssl"]
+dns-over-native-tls = ["dns", "nodecraft/dns-over-native-tls", "agnostic/dns-over-native-tls"]
+dns-webpki-roots = ["dns", "nodecraft/dns-webpki-roots", "agnostic/dns-webpki-roots"]
+dns-native-certs = ["dns", "nodecraft/dns-native-certs", "agnostic/dns-native-certs"]
+dnssec-openssl = ["dns", "nodecraft/dnssec-openssl", "agnostic/dnssec-openssl"]
+dnssec-ring = ["dns", "nodecraft/dnssec-ring", "agnostic/dnssec-ring"]
+dnssec = ["dns", "nodecraft/dnssec", "agnostic/dnssec"]
 
 # enable test feature
 test = ["memberlist-core/test", "rcgen"]
