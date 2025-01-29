@@ -28,10 +28,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 [workspace.dependencies]
 auto_impl = "1"
 atomic_refcell = "0.1"
-agnostic-lite = { version = "0.3", features = ["time"] }
-agnostic = "0.5"
-# agnostic-lite = { version = "0.3", features = ["time"], path = "../agnostic/lite" }
-# agnostic = { version = "0.5", path = "../agnostic/agnostic" }
+agnostic-lite = { version = "0.4", features = ["time"] }
+agnostic = "0.6"
+# agnostic-lite = { version = "0.4", features = ["time"], path = "../agnostic/agnostic-lite" }
+# agnostic = { version = "0.6", path = "../agnostic/agnostic" }
 async-lock = "3"
 async-channel = "2"
 bytes = "1"
@@ -40,14 +40,15 @@ derive_more = { version = "1", features = ["full"] }
 futures = "0.3"
 indexmap = "2"
 getifs = "0.2"
+getrandom = "0.3"
 metrics = "0.24"
-nodecraft = { version = "0.4", features = [
+nodecraft = { version = "0.5", features = [
   "transformable",
   "async",
   "resolver",
   "agnostic",
 ] }
-# nodecraft = { version = "0.4", path = "../nodecraft", features = [
+# nodecraft = { version = "0.5", path = "../nodecraft", features = [
 #   "transformable",
 #   "async",
 #   "resolver",
@@ -67,7 +68,7 @@ thiserror = "2"
 tracing = "0.1"
 viewit = "0.1.5"
 
-memberlist-core = { version = "0.3", path = "core", default-features = false }
-memberlist-net = { version = "0.3", path = "transports/net", default-features = false }
+memberlist-core = { version = "0.4", path = "core", default-features = false }
+memberlist-net = { version = "0.4", path = "transports/net", default-features = false }
 memberlist-types = { version = "0.3", path = "types", default-features = false }
-memberlist-quic = { version = "0.3", path = "transports/quic", default-features = false }
+memberlist-quic = { version = "0.4", path = "transports/quic", default-features = false }

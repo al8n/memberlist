@@ -156,7 +156,7 @@ fn pkcs7decode(buf: &mut BytesMut) {
 pub(super) fn write_header(dst: &mut BytesMut) -> [u8; NONCE_SIZE] {
   // Add a random nonce
   let mut nonce = [0u8; NONCE_SIZE];
-  rand::thread_rng().fill(&mut nonce);
+  rand::rng().fill(&mut nonce);
   dst.put_slice(&nonce);
 
   nonce
