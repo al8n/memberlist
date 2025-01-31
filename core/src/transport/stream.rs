@@ -4,45 +4,141 @@ use futures::Stream;
 
 use super::*;
 
+use memberlist_types::OneOrMore;
+
+use super::Message;
+
+/// The packet receives from the unreliable connection.
+#[viewit::viewit(
+  vis_all = "",
+  getters(vis_all = "pub", style = "ref"),
+  setters(vis_all = "pub", prefix = "with")
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Packet<I, A, T> {
+  /// The raw contents of the packet.
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      attrs(doc = "Returns the messages of the packet")
+    ),
+    setter(attrs(doc = "Sets the messages of the packet (Builder pattern)"))
+  )]
+  messages: OneOrMore<Message<I, A>>,
+
+  /// Address of the peer. This is an actual address so we
+  /// can expose some concrete details about incoming packets.
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      attrs(doc = "Returns the address sent the packet")
+    ),
+    setter(attrs(doc = "Sets the address who sent the packet (Builder pattern)"))
+  )]
+  from: A,
+
+  /// The time when the packet was received. This should be
+  /// taken as close as possible to the actual receipt time to help make an
+  /// accurate RTT measurement during probes.
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      attrs(doc = "Returns the instant when the packet was received")
+    ),
+    setter(attrs(doc = "Sets the instant when the packet was received (Builder pattern)"))
+  )]
+  timestamp: T,
+}
+
+impl<I, A, T> Packet<I, A, T> {
+  /// Create a new packet
+  #[inline]
+  pub const fn new(messages: OneOrMore<Message<I, A>>, from: A, timestamp: T) -> Self {
+    Self {
+      messages,
+      from,
+      timestamp,
+    }
+  }
+
+  /// Returns the raw contents of the packet.
+  #[inline]
+  pub fn into_components(self) -> (OneOrMore<Message<I, A>>, A, T) {
+    (self.messages, self.from, self.timestamp)
+  }
+
+  /// Sets the address who sent the packet
+  #[inline]
+  pub fn set_from(&mut self, from: A) -> &mut Self {
+    self.from = from;
+    self
+  }
+
+  /// Sets the instant when the packet was received
+  #[inline]
+  pub fn set_timestamp(&mut self, timestamp: T) -> &mut Self {
+    self.timestamp = timestamp;
+    self
+  }
+
+  /// Sets the messages of the packet
+  #[inline]
+  pub fn set_messages(&mut self, messages: OneOrMore<Message<I, A>>) -> &mut Self {
+    self.messages = messages;
+    self
+  }
+}
+
 /// A producer for packets.
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct PacketProducer<I, A> {
-  sender: Sender<Packet<I, A>>,
+pub struct PacketProducer<I, A, T> {
+  sender: Sender<Packet<I, A, T>>,
 }
 
 /// A subscriber for packets.
 #[pin_project::pin_project]
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct PacketSubscriber<I, A> {
+pub struct PacketSubscriber<I, A, T> {
   #[pin]
-  receiver: Receiver<Packet<I, A>>,
+  receiver: Receiver<Packet<I, A, T>>,
 }
 
 /// Returns producer and subscriber for packet.
 pub fn packet_stream<T: Transport>() -> (
-  PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-  PacketSubscriber<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  PacketProducer<
+    T::Id,
+    <T::Resolver as AddressResolver>::ResolvedAddress,
+    <T::Runtime as RuntimeLite>::Instant,
+  >,
+  PacketSubscriber<
+    T::Id,
+    <T::Resolver as AddressResolver>::ResolvedAddress,
+    <T::Runtime as RuntimeLite>::Instant,
+  >,
 ) {
   let (sender, receiver) = async_channel::unbounded();
   (PacketProducer { sender }, PacketSubscriber { receiver })
 }
 
-impl<I, A> PacketProducer<I, A> {
+impl<I, A, T> PacketProducer<I, A, T> {
   /// Sends a packet into the producer.
   ///
   /// If the producer is full, this method waits until there is space for a message.
   ///
   /// If the producer is closed, this method returns an error.
-  pub async fn send(&self, packet: Packet<I, A>) -> Result<(), SendError<Packet<I, A>>> {
+  pub async fn send(&self, packet: Packet<I, A, T>) -> Result<(), SendError<Packet<I, A, T>>> {
     self.sender.send(packet).await
   }
 
   /// Attempts to send a packet into the producer.
   ///
   /// If the channel is full or closed, this method returns an error.
-  pub fn try_send(&self, packet: Packet<I, A>) -> Result<(), TrySendError<Packet<I, A>>> {
+  pub fn try_send(&self, packet: Packet<I, A, T>) -> Result<(), TrySendError<Packet<I, A, T>>> {
     self.sender.try_send(packet)
   }
 
@@ -72,21 +168,21 @@ impl<I, A> PacketProducer<I, A> {
   }
 }
 
-impl<I, A> PacketSubscriber<I, A> {
+impl<I, A, T> PacketSubscriber<I, A, T> {
   /// Receives a packet from the subscriber.
   ///
   /// If the subscriber is empty, this method waits until there is a message.
   ///
   /// If the subscriber is closed, this method receives a message or returns an error if there are
   /// no more messages.
-  pub async fn recv(&self) -> Result<Packet<I, A>, RecvError> {
+  pub async fn recv(&self) -> Result<Packet<I, A, T>, RecvError> {
     self.receiver.recv().await
   }
 
   /// Attempts to receive a message from the subscriber.
   ///
   /// If the subscriber is empty, or empty and closed, this method returns an error.
-  pub fn try_recv(&self) -> Result<Packet<I, A>, TryRecvError> {
+  pub fn try_recv(&self) -> Result<Packet<I, A, T>, TryRecvError> {
     self.receiver.try_recv()
   }
 
@@ -116,8 +212,8 @@ impl<I, A> PacketSubscriber<I, A> {
   }
 }
 
-impl<I, A> Stream for PacketSubscriber<I, A> {
-  type Item = <Receiver<Packet<I, A>> as Stream>::Item;
+impl<I, A, T> Stream for PacketSubscriber<I, A, T> {
+  type Item = <Receiver<Packet<I, A, T>> as Stream>::Item;
 
   fn poll_next(
     self: std::pin::Pin<&mut Self>,
@@ -263,5 +359,50 @@ impl<A, S> Stream for StreamSubscriber<A, S> {
     cx: &mut std::task::Context<'_>,
   ) -> std::task::Poll<Option<Self::Item>> {
     <Receiver<_> as Stream>::poll_next(self.project().receiver, cx)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::net::SocketAddr;
+
+  use bytes::Bytes;
+  use smol_str::SmolStr;
+
+  use super::*;
+
+  async fn access<R: RuntimeLite>() {
+    let messages = OneOrMore::from(Message::<SmolStr, SocketAddr>::user_data(Bytes::new()));
+    let timestamp = R::now();
+    let mut packet = Packet::new(messages, "127.0.0.1:8080".parse().unwrap(), timestamp);
+    packet.set_from("127.0.0.1:8081".parse().unwrap());
+
+    let start = R::now();
+    packet.set_timestamp(start);
+    let messages = OneOrMore::from(Message::<SmolStr, SocketAddr>::user_data(
+      Bytes::from_static(b"a"),
+    ));
+    packet.set_messages(messages);
+    assert_eq!(
+      packet.messages(),
+      &OneOrMore::from(Message::<SmolStr, SocketAddr>::user_data(
+        Bytes::from_static(b"a")
+      ))
+    );
+    assert_eq!(
+      *packet.from(),
+      "127.0.0.1:8081".parse::<SocketAddr>().unwrap()
+    );
+    assert_eq!(*packet.timestamp(), start);
+  }
+
+  #[test]
+  fn tokio_access() {
+    tokio::runtime::Builder::new_current_thread()
+      .worker_threads(1)
+      .enable_all()
+      .build()
+      .unwrap()
+      .block_on(access::<agnostic_lite::tokio::TokioRuntime>());
   }
 }

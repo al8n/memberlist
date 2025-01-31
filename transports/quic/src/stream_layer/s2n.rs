@@ -9,10 +9,10 @@ use std::{
     atomic::{AtomicUsize, Ordering},
     Arc,
   },
-  time::{Duration, Instant},
+  time::Duration,
 };
 
-use agnostic_lite::RuntimeLite;
+use agnostic_lite::{time::Instant, RuntimeLite};
 use bytes::Bytes;
 use futures::{lock::Mutex, AsyncReadExt, AsyncWriteExt};
 use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
@@ -63,6 +63,7 @@ impl<R> S2n<R> {
 }
 
 impl<R: RuntimeLite> StreamLayer for S2n<R> {
+  type Runtime = R;
   type Error = S2nError;
   type Acceptor = S2nBiAcceptor<R>;
   type Connector = S2nConnector<R>;
@@ -247,6 +248,7 @@ impl<R> S2nConnection<R> {
 impl<R: RuntimeLite> QuicConnection for S2nConnection<R> {
   type Error = S2nError;
   type Stream = S2nStream<R>;
+  type Instant = R::Instant;
 
   async fn accept_bi(&self) -> Result<(Self::Stream, SocketAddr), Self::Error> {
     self
@@ -288,7 +290,7 @@ impl<R: RuntimeLite> QuicConnection for S2nConnection<R> {
 
   async fn open_bi_with_deadline(
     &self,
-    deadline: Instant,
+    deadline: R::Instant,
   ) -> Result<(Self::Stream, SocketAddr), Self::Error> {
     R::timeout_at(deadline, async { self.open_bi().await })
       .await
@@ -317,16 +319,16 @@ impl<R: RuntimeLite> QuicConnection for S2nConnection<R> {
 }
 
 /// [`S2nStream`] is an implementation of [`QuicBiStream`] based on [`s2n_quic`].
-pub struct S2nStream<R> {
+pub struct S2nStream<R: RuntimeLite> {
   recv_stream: AsyncPeekable<ReceiveStream>,
   send_stream: SendStream,
-  read_deadline: Option<Instant>,
-  write_deadline: Option<Instant>,
+  read_deadline: Option<R::Instant>,
+  write_deadline: Option<R::Instant>,
   ctr: Arc<AtomicUsize>,
   _marker: PhantomData<R>,
 }
 
-impl<R> S2nStream<R> {
+impl<R: RuntimeLite> S2nStream<R> {
   fn new(stream: BidirectionalStream, ctr: Arc<AtomicUsize>) -> Self {
     let (recv, send) = stream.split();
     Self {
@@ -340,34 +342,39 @@ impl<R> S2nStream<R> {
   }
 }
 
-impl<R> Drop for S2nStream<R> {
+impl<R: RuntimeLite> Drop for S2nStream<R> {
   fn drop(&mut self) {
     self.ctr.fetch_sub(1, Ordering::AcqRel);
   }
 }
 
 impl<R: RuntimeLite> TimeoutableReadStream for S2nStream<R> {
-  fn set_read_deadline(&mut self, deadline: Option<Instant>) {
+  type Instant = R::Instant;
+
+  fn set_read_deadline(&mut self, deadline: Option<Self::Instant>) {
     self.read_deadline = deadline;
   }
 
-  fn read_deadline(&self) -> Option<Instant> {
+  fn read_deadline(&self) -> Option<Self::Instant> {
     self.read_deadline
   }
 }
 
 impl<R: RuntimeLite> TimeoutableWriteStream for S2nStream<R> {
-  fn set_write_deadline(&mut self, deadline: Option<Instant>) {
+  type Instant = R::Instant;
+
+  fn set_write_deadline(&mut self, deadline: Option<Self::Instant>) {
     self.write_deadline = deadline;
   }
 
-  fn write_deadline(&self) -> Option<Instant> {
+  fn write_deadline(&self) -> Option<Self::Instant> {
     self.write_deadline
   }
 }
 
 impl<R: RuntimeLite> QuicStream for S2nStream<R> {
   type Error = S2nError;
+  type Instant = R::Instant;
 
   async fn write_all(&mut self, src: Bytes) -> Result<usize, Self::Error> {
     let len = src.len();

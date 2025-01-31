@@ -5,7 +5,7 @@ pub async fn server_with_label_client_with_label<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_server_with_label_client_with_label");
@@ -31,7 +31,7 @@ pub async fn server_with_label_client_no_label<S, R>(
   server_check_label: bool,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_server_with_label_client_no_label");
@@ -57,7 +57,7 @@ pub async fn server_no_label_client_with_label<S, R>(
   server_check_label: bool,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_server_no_label_client_with_label");

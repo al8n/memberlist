@@ -12,7 +12,7 @@ pub async fn promised_push_pull<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: RuntimeLite,
 {
   let name = format!("{kind}_promised_push_pull");
@@ -35,7 +35,7 @@ pub async fn promised_push_pull_no_label<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: RuntimeLite,
 {
   let name = format!("{kind}_promised_push_pull_no_label");
@@ -54,7 +54,7 @@ pub async fn promised_push_pull_compression_only<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: RuntimeLite,
 {
   let name = format!("{kind}_promised_push_pull_compression_only");
@@ -76,7 +76,7 @@ pub async fn promised_push_pull_label_and_compression<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: RuntimeLite,
 {
   let name = format!("{kind}_promised_push_pull_label_and_compression");
@@ -99,7 +99,7 @@ pub async fn promised_push_pull_no_label_no_compression<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: RuntimeLite,
 {
   let name = format!("{kind}_promised_push_pull_no_compression");
@@ -119,7 +119,7 @@ pub async fn promised_push_pull_label_only<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: RuntimeLite,
 {
   let name = format!("{kind}_promised_push_pull_label_only");

@@ -6,7 +6,7 @@ pub async fn server_with_label_with_compression_client_with_label_no_compression
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: RuntimeLite,
 {
   let name =
@@ -37,7 +37,7 @@ pub async fn server_with_label_no_compression_client_with_label_with_compression
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: RuntimeLite,
 {
   let name =
@@ -67,7 +67,7 @@ pub async fn server_with_label_with_compression_client_with_label_with_compressi
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: RuntimeLite,
 {
   let name =

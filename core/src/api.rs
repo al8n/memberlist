@@ -1,10 +1,10 @@
 use std::{
   collections::HashMap,
   sync::{atomic::Ordering, Arc},
-  time::{Duration, Instant},
+  time::Duration,
 };
 
-use agnostic_lite::RuntimeLite;
+use agnostic_lite::{time::Instant, RuntimeLite};
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt};
 
@@ -539,7 +539,7 @@ where
       ping.sequence_number(),
       ack_tx,
       None,
-      Instant::now(),
+      <T::Runtime as RuntimeLite>::now(),
       self.inner.opts.probe_interval,
     );
 
@@ -566,7 +566,7 @@ where
     // Mark the sent time here, which should be after any pre-processing and
     // system calls to do the actual send. This probably under-reports a bit,
     // but it's the best we can do.
-    let sent = Instant::now();
+    let sent = <T::Runtime as RuntimeLite>::now();
 
     // Wait for response or timeout.
     futures::select! {

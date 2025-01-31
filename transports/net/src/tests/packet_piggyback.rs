@@ -4,7 +4,7 @@ use super::*;
 #[cfg(all(feature = "encryption", feature = "compression"))]
 pub async fn packet_piggyback<S, R>(s: S::Options, kind: AddressKind) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   use memberlist_core::transport::{tests::send_packet_piggyback, Lpe};

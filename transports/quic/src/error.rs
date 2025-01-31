@@ -2,7 +2,7 @@ use super::*;
 
 /// Errors that can occur when using [`QuicTransport`].
 #[derive(thiserror::Error)]
-pub enum QuicTransportError<A: AddressResolver, S: StreamLayer, W: Wire> {
+pub enum QuicTransportError<A: AddressResolver, S: StreamLayer<Runtime = A::Runtime>, W: Wire> {
   /// Returns when there is no explicit advertise address and no private IP address found.
   #[error("no private IP address found, and explicit IP not provided")]
   NoPrivateIP,
@@ -61,7 +61,9 @@ pub enum QuicTransportError<A: AddressResolver, S: StreamLayer, W: Wire> {
   ComputationTaskFailed,
 }
 
-impl<A: AddressResolver, S: StreamLayer, W: Wire> core::fmt::Debug for QuicTransportError<A, S, W> {
+impl<A: AddressResolver, S: StreamLayer<Runtime = A::Runtime>, W: Wire> core::fmt::Debug
+  for QuicTransportError<A, S, W>
+{
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     core::fmt::Display::fmt(&self, f)
   }
@@ -71,7 +73,7 @@ impl<A, S, W> TransportError for QuicTransportError<A, S, W>
 where
   A: AddressResolver,
   A::Address: Send + Sync + 'static,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = A::Runtime>,
   W: Wire,
 {
   fn is_remote_failure(&self) -> bool {

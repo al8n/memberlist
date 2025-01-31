@@ -43,7 +43,7 @@ type Delegate = CompositeDelegate<
 async fn encrypted_gossip_transition<F, S, R>(mut create_stream_layer: impl FnMut() -> F + Copy)
 where
   F: Future<Output = S::Options>,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let pretty = Arc::new(Mutex::new(HashMap::new()));

@@ -8,7 +8,7 @@ pub async fn server_no_label_with_compression_with_encryption_client_no_label_no
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let pk = SecretKey::from([1; 32]);
@@ -39,7 +39,7 @@ pub async fn server_no_label_no_compression_no_encryption_client_no_label_with_c
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let pk = SecretKey::from([1; 32]);
@@ -69,7 +69,7 @@ pub async fn server_no_label_with_compression_with_encryption_client_no_label_wi
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let pk = SecretKey::from([1; 32]);

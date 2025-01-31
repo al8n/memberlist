@@ -1,8 +1,4 @@
-use std::{
-  collections::HashMap,
-  sync::Arc,
-  time::{Duration, Instant},
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use agnostic_lite::{AfterHandle, AsyncAfterSpawner, RuntimeLite};
 use bytes::Bytes;
@@ -12,15 +8,15 @@ use parking_lot::Mutex;
 use crate::types::{Ack, Nack};
 
 #[viewit::viewit]
-pub(crate) struct AckMessage {
+pub(crate) struct AckMessage<I> {
   complete: bool,
   payload: Bytes,
-  timestamp: Instant,
+  timestamp: I,
 }
 
 pub(crate) struct AckHandler<R: RuntimeLite> {
   pub(crate) ack_fn:
-    Box<dyn FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
+    Box<dyn FnOnce(Bytes, R::Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static>,
   pub(crate) nack_fn: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static>>,
   pub(crate) timer: <R::AfterSpawner as AsyncAfterSpawner>::JoinHandle<()>,
 }
@@ -34,7 +30,7 @@ impl<R: RuntimeLite> AckManager<R> {
   }
 
   #[inline]
-  pub(crate) async fn invoke_ack_handler(&self, ack: Ack, timestamp: Instant) {
+  pub(crate) async fn invoke_ack_handler(&self, ack: Ack, timestamp: R::Instant) {
     let (seq_no, payload) = ack.into_components();
     let ah = self.0.lock().remove(&seq_no);
     if let Some(handler) = ah {
@@ -58,7 +54,7 @@ impl<R: RuntimeLite> AckManager<R> {
   #[inline]
   pub(crate) fn set_ack_handler<F>(&self, sequence_number: u32, timeout: Duration, f: F)
   where
-    F: FnOnce(Bytes, Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static,
+    F: FnOnce(Bytes, R::Instant) -> BoxFuture<'static, ()> + Send + Sync + 'static,
   {
     // Add the handler
     let tlock = self.clone();
@@ -82,9 +78,9 @@ impl<R: RuntimeLite> AckManager<R> {
   pub(crate) fn set_probe_channels(
     &self,
     sequence_number: u32,
-    ack_tx: async_channel::Sender<AckMessage>,
+    ack_tx: async_channel::Sender<AckMessage<R::Instant>>,
     nack_tx: Option<async_channel::Sender<()>>,
-    sent: Instant,
+    sent: R::Instant,
     timeout: Duration,
   ) {
     let tx = ack_tx.clone();

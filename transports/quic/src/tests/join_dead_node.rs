@@ -11,7 +11,7 @@ pub async fn join_dead_node<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: RuntimeLite,
 {
   use nodecraft::CheapClone;

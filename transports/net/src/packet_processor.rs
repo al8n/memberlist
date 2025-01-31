@@ -4,19 +4,19 @@ use std::{
     atomic::{AtomicBool, Ordering},
     Arc,
   },
-  time::Instant,
 };
 
 use agnostic::{
   net::{Net, UdpSocket as _},
-  Runtime,
+  time::Instant,
+  Runtime, RuntimeLite,
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, Bytes, BytesMut};
 use futures::FutureExt;
 use memberlist_core::{
-  transport::{PacketProducer, Transport, Wire},
-  types::{Label, LabelBufExt, Message, OneOrMore, Packet},
+  transport::{Packet, PacketProducer, Transport, Wire},
+  types::{Label, LabelBufExt, Message, OneOrMore},
 };
 use nodecraft::resolver::AddressResolver;
 
@@ -34,7 +34,11 @@ where
   T: Transport<Resolver = A>,
   T::Runtime: Runtime,
 {
-  pub(super) packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  pub(super) packet_tx: PacketProducer<
+    T::Id,
+    <T::Resolver as AddressResolver>::ResolvedAddress,
+    <T::Runtime as RuntimeLite>::Instant,
+  >,
   pub(super) socket: Arc<<<T::Runtime as Runtime>::Net as Net>::UdpSocket>,
   pub(super) local_addr: SocketAddr,
   pub(super) shutdown: Arc<AtomicBool>,
@@ -91,7 +95,7 @@ where
 
               tracing::trace!(local=%local_addr, from=%addr, packet=?buf.as_ref(), "memberlist_net.packet");
 
-              let start = Instant::now();
+              let start = <T::Runtime as RuntimeLite>::now();
               let msg = match Self::handle_remote_bytes(
                 buf,
                 &self.label,

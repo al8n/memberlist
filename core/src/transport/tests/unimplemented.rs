@@ -23,24 +23,28 @@ impl TransportError for UnimplementedTransportError {
 
 /// A stream that does not implement any of the required methods.
 /// Which can be only used for testing purposes.
-pub struct UnimplementedStream;
+pub struct UnimplementedStream<R>(PhantomData<R>);
 
-impl TimeoutableReadStream for UnimplementedStream {
-  fn set_read_deadline(&mut self, _: Option<Instant>) {
+impl<R: RuntimeLite> TimeoutableReadStream for UnimplementedStream<R> {
+  type Instant = R::Instant;
+
+  fn set_read_deadline(&mut self, _: Option<Self::Instant>) {
     unimplemented!()
   }
 
-  fn read_deadline(&self) -> Option<Instant> {
+  fn read_deadline(&self) -> Option<Self::Instant> {
     unimplemented!()
   }
 }
 
-impl TimeoutableWriteStream for UnimplementedStream {
-  fn set_write_deadline(&mut self, _: Option<Instant>) {
+impl<R: RuntimeLite> TimeoutableWriteStream for UnimplementedStream<R> {
+  type Instant = R::Instant;
+
+  fn set_write_deadline(&mut self, _: Option<Self::Instant>) {
     unimplemented!()
   }
 
-  fn write_deadline(&self) -> Option<Instant> {
+  fn write_deadline(&self) -> Option<Self::Instant> {
     unimplemented!()
   }
 }
@@ -63,7 +67,7 @@ where
 
   type Resolver = A;
 
-  type Stream = UnimplementedStream;
+  type Stream = UnimplementedStream<R>;
 
   type Wire = W;
 
@@ -149,7 +153,7 @@ where
     &self,
     _: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     _: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
-  ) -> Result<(usize, Instant), Self::Error> {
+  ) -> Result<(usize, R::Instant), Self::Error> {
     unimplemented!()
   }
 
@@ -159,14 +163,14 @@ where
     _: memberlist_types::TinyVec<
       Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
     >,
-  ) -> Result<(usize, Instant), Self::Error> {
+  ) -> Result<(usize, R::Instant), Self::Error> {
     unimplemented!()
   }
 
   async fn dial_with_deadline(
     &self,
     _: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    _: Instant,
+    _: R::Instant,
   ) -> Result<Self::Stream, Self::Error> {
     unimplemented!()
   }
@@ -184,6 +188,7 @@ where
   ) -> crate::transport::PacketSubscriber<
     Self::Id,
     <Self::Resolver as AddressResolver>::ResolvedAddress,
+    <Self::Runtime as RuntimeLite>::Instant,
   > {
     unimplemented!()
   }

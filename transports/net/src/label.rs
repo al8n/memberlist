@@ -7,7 +7,7 @@ use peekable::future::AsyncPeekable;
 use super::Label;
 
 pub(super) async fn remove_label_header<R: agnostic::Runtime>(
-  this: &mut super::Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>>,
+  this: &mut super::Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>, R::Instant>,
 ) -> io::Result<Option<Label>> {
   let mut meta = [0u8; 2];
   this.peek_exact::<R>(&mut meta).await?;

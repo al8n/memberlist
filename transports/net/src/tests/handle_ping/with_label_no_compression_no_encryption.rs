@@ -8,7 +8,7 @@ pub async fn server_with_label_no_compression_no_encryption_client_with_label_no
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_ping_server_with_label_no_compression_no_encryption_client_with_label_no_compression_no_encryption");
@@ -37,7 +37,7 @@ pub async fn server_with_label_no_compression_no_encryption_client_no_label_no_c
   server_check_label: bool,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!(
@@ -68,7 +68,7 @@ pub async fn server_no_label_no_compression_no_encryption_client_with_label_no_c
   server_check_label: bool,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!(

@@ -8,7 +8,7 @@ where
   I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   A::Address: Send + Sync + 'static,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
 {

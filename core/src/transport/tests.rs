@@ -1,12 +1,7 @@
 #![allow(clippy::blocks_in_conditions, unreachable_code)]
-use std::{
-  future::Future,
-  net::SocketAddr,
-  sync::Arc,
-  time::{Duration, Instant},
-};
+use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
-use agnostic_lite::RuntimeLite;
+use agnostic_lite::{time::Instant, RuntimeLite};
 use bytes::Bytes;
 
 use futures::FutureExt;
@@ -642,12 +637,8 @@ where
   });
 
   let did_contact = panic_on_err!(
-    m.send_ping_and_wait_for_ack(
-      &promised_addr,
-      ping_out.clone(),
-      Instant::now() + ping_timeout
-    )
-    .await
+    m.send_ping_and_wait_for_ack(&promised_addr, ping_out.clone(), R::now() + ping_timeout)
+      .await
   );
 
   if !did_contact {
@@ -661,11 +652,7 @@ where
 
   // Make sure a mis-matched sequence number is caught.
   let err = m
-    .send_ping_and_wait_for_ack(
-      &promised_addr,
-      ping_out.clone(),
-      Instant::now() + ping_timeout,
-    )
+    .send_ping_and_wait_for_ack(&promised_addr, ping_out.clone(), R::now() + ping_timeout)
     .await
     .expect_err("expected failed ping");
   if !err
@@ -682,11 +669,7 @@ where
 
   // Make sure an unexpected message type is handled gracefully.
   let err = m
-    .send_ping_and_wait_for_ack(
-      &promised_addr,
-      ping_out.clone(),
-      Instant::now() + ping_timeout,
-    )
+    .send_ping_and_wait_for_ack(&promised_addr, ping_out.clone(), R::now() + ping_timeout)
     .await
     .expect_err("expected failed ping");
 
@@ -711,9 +694,9 @@ where
   // Wait the listener task fully exit.
   R::sleep(Duration::from_secs(1)).await;
 
-  let start_ping = Instant::now();
+  let start_ping = R::now();
   let did_contact = m
-    .send_ping_and_wait_for_ack(&promised_addr, ping_out, Instant::now() + ping_timeout)
+    .send_ping_and_wait_for_ack(&promised_addr, ping_out, R::now() + ping_timeout)
     .await?;
   let elapsed = start_ping.elapsed();
   assert!(!did_contact, "expected failed ping");
