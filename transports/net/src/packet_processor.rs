@@ -8,7 +8,6 @@ use std::{
 
 use agnostic::{
   net::{Net, UdpSocket as _},
-  time::Instant,
   Runtime, RuntimeLite,
 };
 use byteorder::{ByteOrder, NetworkEndian};
@@ -116,6 +115,8 @@ where
 
               #[cfg(feature = "metrics")]
               {
+                use agnostic::time::Instant;
+
                 metrics::counter!("memberlist.packet.bytes.processing", self.metric_labels.iter()).increment(start.elapsed().as_secs_f64().round() as u64);
               }
 
