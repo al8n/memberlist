@@ -5,10 +5,10 @@ use std::{
     atomic::{AtomicUsize, Ordering},
     Arc,
   },
-  time::{Duration, Instant},
+  time::Duration,
 };
 
-use agnostic::Runtime;
+use agnostic::{Runtime, RuntimeLite};
 use bytes::Bytes;
 use futures::{AsyncReadExt, AsyncWriteExt};
 use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
@@ -47,6 +47,7 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
   type Connection = QuinnConnection<R>;
   type Stream = QuinnStream<R>;
   type Options = Options;
+  type Runtime = R;
 
   fn max_stream_data(&self) -> usize {
     self.opts.max_stream_data.min(self.opts.max_connection_data)
@@ -208,16 +209,16 @@ impl<R> Drop for QuinnConnector<R> {
 }
 
 /// [`QuinnStream`] is an implementation of [`QuicStream`] based on [`quinn`].
-pub struct QuinnStream<R> {
+pub struct QuinnStream<R: Runtime> {
   send: SendStream,
   recv: AsyncPeekable<RecvStream>,
-  read_deadline: Option<Instant>,
-  write_deadline: Option<Instant>,
+  read_deadline: Option<R::Instant>,
+  write_deadline: Option<R::Instant>,
   local_id: Arc<AtomicUsize>,
   _marker: PhantomData<R>,
 }
 
-impl<R> QuinnStream<R> {
+impl<R: Runtime> QuinnStream<R> {
   #[inline]
   fn new(send: SendStream, recv: RecvStream, local_id: Arc<AtomicUsize>) -> Self {
     Self {
@@ -231,7 +232,7 @@ impl<R> QuinnStream<R> {
   }
 }
 
-impl<R> Drop for QuinnStream<R> {
+impl<R: Runtime> Drop for QuinnStream<R> {
   fn drop(&mut self) {
     self.local_id.fetch_sub(1, Ordering::AcqRel);
   }
@@ -239,6 +240,7 @@ impl<R> Drop for QuinnStream<R> {
 
 impl<R: Runtime> QuicStream for QuinnStream<R> {
   type Error = QuinnError;
+  type Instant = <R as RuntimeLite>::Instant;
 
   async fn write_all(&mut self, src: Bytes) -> Result<usize, Self::Error> {
     let sent = src.len();
@@ -357,21 +359,25 @@ impl<R: Runtime> futures::AsyncRead for QuinnStream<R> {
 }
 
 impl<R: Runtime> TimeoutableReadStream for QuinnStream<R> {
-  fn set_read_deadline(&mut self, deadline: Option<Instant>) {
+  type Instant = R::Instant;
+
+  fn set_read_deadline(&mut self, deadline: Option<Self::Instant>) {
     self.read_deadline = deadline;
   }
 
-  fn read_deadline(&self) -> Option<Instant> {
+  fn read_deadline(&self) -> Option<Self::Instant> {
     self.read_deadline
   }
 }
 
 impl<R: Runtime> TimeoutableWriteStream for QuinnStream<R> {
-  fn set_write_deadline(&mut self, deadline: Option<Instant>) {
+  type Instant = R::Instant;
+
+  fn set_write_deadline(&mut self, deadline: Option<Self::Instant>) {
     self.write_deadline = deadline;
   }
 
-  fn write_deadline(&self) -> Option<Instant> {
+  fn write_deadline(&self) -> Option<Self::Instant> {
     self.write_deadline
   }
 }
@@ -409,6 +415,7 @@ impl<R: Runtime> QuicConnection for QuinnConnection<R> {
   type Error = QuinnError;
 
   type Stream = QuinnStream<R>;
+  type Instant = R::Instant;
 
   async fn accept_bi(&self) -> Result<(Self::Stream, SocketAddr), Self::Error> {
     let (send, recv) = self.conn.accept_bi().await?;
@@ -430,7 +437,7 @@ impl<R: Runtime> QuicConnection for QuinnConnection<R> {
 
   async fn open_bi_with_deadline(
     &self,
-    deadline: Instant,
+    deadline: R::Instant,
   ) -> Result<(Self::Stream, SocketAddr), Self::Error> {
     let fut = async {
       let (send, recv) = self.conn.open_bi().await?;

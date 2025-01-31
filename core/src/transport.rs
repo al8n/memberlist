@@ -1,4 +1,4 @@
-use std::{future::Future, time::Instant};
+use core::future::Future;
 
 use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
@@ -170,42 +170,68 @@ impl<T: Transport> MaybeResolvedAddress<T> {
 /// Ensures that the stream has timeout capabilities.
 #[auto_impl::auto_impl(Box)]
 pub trait TimeoutableReadStream: Unpin + Send + Sync + 'static {
+  /// The instant type used to represent the deadline.
+  type Instant: agnostic_lite::time::Instant + Send + Sync + 'static;
+
   /// Set the read deadline.
-  fn set_read_deadline(&mut self, deadline: Option<Instant>);
+  fn set_read_deadline(&mut self, deadline: Option<Self::Instant>);
 
   /// Returns the read deadline.
-  fn read_deadline(&self) -> Option<Instant>;
+  fn read_deadline(&self) -> Option<Self::Instant>;
 }
 
 /// Ensures that the stream has timeout capabilities.
 #[auto_impl::auto_impl(Box)]
 pub trait TimeoutableWriteStream: Unpin + Send + Sync + 'static {
+  /// The instant type used to represent the deadline.
+  type Instant: agnostic_lite::time::Instant + Send + Sync + 'static;
+
   /// Set the write deadline.
-  fn set_write_deadline(&mut self, deadline: Option<Instant>);
+  fn set_write_deadline(&mut self, deadline: Option<Self::Instant>);
 
   /// Returns the write deadline.
-  fn write_deadline(&self) -> Option<Instant>;
+  fn write_deadline(&self) -> Option<Self::Instant>;
 }
 
 /// Ensures that the stream has timeout capabilities.
 pub trait TimeoutableStream:
-  TimeoutableReadStream + TimeoutableWriteStream + Unpin + Send + Sync + 'static
+  TimeoutableReadStream<Instant = <Self as TimeoutableStream>::Instant>
+  + TimeoutableWriteStream<Instant = <Self as TimeoutableStream>::Instant>
+  + Unpin
+  + Send
+  + Sync
+  + 'static
 {
+  /// The instant type used to represent the deadline.
+  type Instant: agnostic_lite::time::Instant + Send + Sync + 'static;
+
   /// Set the deadline for both read and write.
-  fn set_deadline(&mut self, deadline: Option<Instant>) {
+  fn set_deadline(&mut self, deadline: Option<<Self as TimeoutableStream>::Instant>) {
     Self::set_read_deadline(self, deadline);
     Self::set_write_deadline(self, deadline);
   }
 
   /// Returns the read deadline and the write deadline.
-  fn deadline(&self) -> (Option<Instant>, Option<Instant>) {
+  fn deadline(
+    &self,
+  ) -> (
+    Option<<Self as TimeoutableStream>::Instant>,
+    Option<<Self as TimeoutableStream>::Instant>,
+  ) {
     (Self::read_deadline(self), Self::write_deadline(self))
   }
 }
 
-impl<T: TimeoutableReadStream + TimeoutableWriteStream + Unpin + Send + Sync + 'static>
-  TimeoutableStream for T
+impl<T> TimeoutableStream for T
+where
+  T: TimeoutableReadStream
+    + TimeoutableWriteStream<Instant = <T as TimeoutableReadStream>::Instant>
+    + Unpin
+    + Send
+    + Sync
+    + 'static,
 {
+  type Instant = <T as TimeoutableReadStream>::Instant;
 }
 
 /// An error for the transport layer.
@@ -277,7 +303,10 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// The address resolver used to resolve addresses
   type Resolver: AddressResolver<Runtime = Self::Runtime>;
   /// The promised stream used to send and receive messages
-  type Stream: TimeoutableStream + Send + Sync + 'static;
+  type Stream: TimeoutableStream<Instant = <Self::Runtime as RuntimeLite>::Instant>
+    + Send
+    + Sync
+    + 'static;
   /// The wire used to encode and decode messages
   type Wire: Wire<Id = Self::Id, Address = <Self::Resolver as AddressResolver>::ResolvedAddress>;
   /// The async runtime
@@ -371,7 +400,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     packet: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
-  ) -> impl Future<Output = Result<(usize, Instant), Self::Error>> + Send;
+  ) -> impl Future<Output = Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error>> + Send;
 
   /// A packet-oriented interface that fires off the given
   /// payload to the given address in a connectionless fashion.
@@ -385,7 +414,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     packets: TinyVec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
-  ) -> impl Future<Output = Result<(usize, Instant), Self::Error>> + Send;
+  ) -> impl Future<Output = Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error>> + Send;
 
   /// Used to create a connection that allows us to perform
   /// two-way communication with a peer. This is generally more expensive
@@ -395,7 +424,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn dial_with_deadline(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    deadline: Instant,
+    deadline: <Self::Runtime as RuntimeLite>::Instant,
   ) -> impl Future<Output = Result<Self::Stream, Self::Error>> + Send;
 
   /// Used to cache a connection for future use.
@@ -408,7 +437,11 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns a packet subscriber that can be used to receive incoming packets
   fn packet(
     &self,
-  ) -> PacketSubscriber<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>;
+  ) -> PacketSubscriber<
+    Self::Id,
+    <Self::Resolver as AddressResolver>::ResolvedAddress,
+    <Self::Runtime as RuntimeLite>::Instant,
+  >;
 
   /// Returns a receiver that can be read to handle incoming stream
   /// connections from other peers. How this is set up for listening is

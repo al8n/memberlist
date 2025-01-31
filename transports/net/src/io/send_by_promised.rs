@@ -8,7 +8,7 @@ where
   I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   A::Address: Send + Sync + 'static,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
 {
@@ -22,7 +22,7 @@ where
 
   pub(crate) async fn send_by_promised(
     &self,
-    mut conn: Deadline<&mut S::Stream>,
+    mut conn: Deadline<&mut S::Stream, R::Instant>,
     msg: Message<I, A::ResolvedAddress>,
   ) -> Result<usize, NetTransportError<A, W>> {
     #[cfg(not(any(feature = "compression", feature = "encryption")))]

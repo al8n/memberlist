@@ -33,7 +33,7 @@ use crate::compressor::Compressor;
 
 pub use super::promised_processor::listener_backoff;
 
-/// Unit test for handling [`Ping`] message
+/// Unit test for handling `Ping` message
 pub mod handle_ping;
 
 /// Unit test for handling compound ping message

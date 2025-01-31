@@ -1,16 +1,20 @@
-use memberlist_core::types::{OneOrMore, Packet};
+use memberlist_core::{transport::Packet, types::OneOrMore};
 
 use super::*;
 
 pub(super) struct Processor<
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A>,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = A::Runtime>,
 > {
   pub(super) label: Label,
   pub(super) local_addr: SocketAddr,
   pub(super) acceptor: S::Acceptor,
-  pub(super) packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  pub(super) packet_tx: PacketProducer<
+    T::Id,
+    <T::Resolver as AddressResolver>::ResolvedAddress,
+    <T::Runtime as RuntimeLite>::Instant,
+  >,
   pub(super) stream_tx:
     StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
 
@@ -30,8 +34,8 @@ impl<A, T, S> Processor<A, T, S>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   A::Address: Send + Sync + 'static,
-  T: Transport<Resolver = A, Stream = S::Stream>,
-  S: StreamLayer,
+  T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
+  S: StreamLayer<Runtime = A::Runtime>,
 {
   pub(super) async fn run(self) {
     let Self {
@@ -72,7 +76,11 @@ where
     label: Label,
     mut acceptor: S::Acceptor,
     stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
-    packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    packet_tx: PacketProducer<
+      T::Id,
+      <T::Resolver as AddressResolver>::ResolvedAddress,
+      <T::Runtime as RuntimeLite>::Instant,
+    >,
     shutdown_rx: async_channel::Receiver<()>,
     skip_inbound_label_check: bool,
     timeout: Option<Duration>,
@@ -156,7 +164,11 @@ where
     remote_addr: SocketAddr,
     label: Label,
     stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
-    packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    packet_tx: PacketProducer<
+      T::Id,
+      <T::Resolver as AddressResolver>::ResolvedAddress,
+      <T::Runtime as RuntimeLite>::Instant,
+    >,
     timeout: Option<Duration>,
     skip_inbound_label_check: bool,
     shutdown_rx: async_channel::Receiver<()>,
@@ -225,13 +237,17 @@ where
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
     label: Label,
-    packet_tx: PacketProducer<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    packet_tx: PacketProducer<
+      T::Id,
+      <T::Resolver as AddressResolver>::ResolvedAddress,
+      <T::Runtime as RuntimeLite>::Instant,
+    >,
     timeout: Option<Duration>,
     skip_inbound_label_check: bool,
     #[cfg(feature = "compression")] offload_size: usize,
     #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::types::MetricLabels>,
   ) {
-    let start = Instant::now();
+    let start = <T::Runtime as RuntimeLite>::now();
     if let Some(timeout) = timeout {
       stream.set_read_deadline(Some(start + timeout));
     }

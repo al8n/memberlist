@@ -11,7 +11,7 @@ pub async fn ping_wrong_node_no_encryption_no_compression<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_ping_wrong_node");
@@ -35,7 +35,7 @@ where
 #[cfg(all(feature = "compression", feature = "encryption"))]
 pub async fn ping_wrong_node<S, R>(s: S::Options, kind: AddressKind) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_ping_wrong_node");
@@ -70,7 +70,7 @@ pub async fn ping_wrong_node_compression_only<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_ping_wrong_node");
@@ -100,7 +100,7 @@ pub async fn ping_wrong_node_encryption_only<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_ping_wrong_node");

@@ -4,7 +4,6 @@ use std::{
   net::SocketAddr,
   pin::Pin,
   task::{Context, Poll},
-  time::Instant,
 };
 
 use agnostic::{
@@ -45,6 +44,7 @@ impl<R> Tcp<R> {
 }
 
 impl<R: Runtime> StreamLayer for Tcp<R> {
+  type Runtime = R;
   type Listener = TcpListener<R>;
   type Stream = TcpStream<R>;
   type Options = ();
@@ -124,8 +124,8 @@ impl<R: Runtime> Listener for TcpListener<R> {
 pub struct TcpStream<R: Runtime> {
   #[pin]
   stream: <R::Net as Net>::TcpStream,
-  read_deadline: Option<Instant>,
-  write_deadline: Option<Instant>,
+  read_deadline: Option<R::Instant>,
+  write_deadline: Option<R::Instant>,
   local_addr: SocketAddr,
   peer_addr: SocketAddr,
 }
@@ -155,26 +155,32 @@ impl<R: Runtime> AsyncWrite for TcpStream<R> {
 }
 
 impl<R: Runtime> TimeoutableReadStream for TcpStream<R> {
-  fn set_read_deadline(&mut self, deadline: Option<Instant>) {
+  type Instant = R::Instant;
+
+  fn set_read_deadline(&mut self, deadline: Option<Self::Instant>) {
     self.read_deadline = deadline;
   }
 
-  fn read_deadline(&self) -> Option<Instant> {
+  fn read_deadline(&self) -> Option<Self::Instant> {
     self.read_deadline
   }
 }
 
 impl<R: Runtime> TimeoutableWriteStream for TcpStream<R> {
-  fn set_write_deadline(&mut self, deadline: Option<Instant>) {
+  type Instant = R::Instant;
+
+  fn set_write_deadline(&mut self, deadline: Option<Self::Instant>) {
     self.write_deadline = deadline;
   }
 
-  fn write_deadline(&self) -> Option<Instant> {
+  fn write_deadline(&self) -> Option<Self::Instant> {
     self.write_deadline
   }
 }
 
 impl<R: Runtime> PromisedStream for TcpStream<R> {
+  type Instant = R::Instant;
+
   #[inline]
   fn local_addr(&self) -> SocketAddr {
     self.local_addr

@@ -1,4 +1,4 @@
-use std::{sync::atomic::Ordering, time::Instant};
+use std::sync::atomic::Ordering;
 
 use super::{
   base::Memberlist,
@@ -31,7 +31,7 @@ where
     &self,
     target: &<T::Resolver as AddressResolver>::ResolvedAddress,
     ping: Ping<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    deadline: Instant,
+    deadline: <T::Runtime as RuntimeLite>::Instant,
   ) -> Result<bool, Error<T, D>> {
     let mut conn: T::Stream = match self
       .inner
@@ -90,7 +90,10 @@ where
     let mut conn = self
       .inner
       .transport
-      .dial_with_deadline(node.address(), Instant::now() + self.inner.opts.timeout)
+      .dial_with_deadline(
+        node.address(),
+        <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
+      )
       .await
       .map_err(Error::transport)?;
     tracing::debug!(local_addr = %self.inner.id, peer_addr = %node, "memberlist: initiating push/pull sync");
@@ -107,7 +110,9 @@ where
     // Send our state
     self.send_local_state(&mut conn, join).await?;
 
-    conn.set_deadline(Some(Instant::now() + self.inner.opts.timeout));
+    conn.set_deadline(Some(
+      <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
+    ));
 
     match self
       .read_message(node.address(), &mut conn)

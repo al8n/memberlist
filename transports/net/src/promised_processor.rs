@@ -20,7 +20,7 @@ pub(super) struct PromisedProcessor<A, T, S>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = A::Runtime>,
 {
   pub(super) stream_tx:
     StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, S::Stream>,
@@ -33,7 +33,7 @@ impl<A, T, S> PromisedProcessor<A, T, S>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = A::Runtime>,
 {
   pub(super) async fn run(self) {
     let Self {
@@ -116,7 +116,7 @@ pub async fn listener_backoff<A, T, S>(
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = A::Runtime>,
 {
   struct TestStreamLayer<TS: StreamLayer> {
     _m: std::marker::PhantomData<TS>,
@@ -146,6 +146,7 @@ where
   }
 
   impl<TS: StreamLayer> StreamLayer for TestStreamLayer<TS> {
+    type Runtime = TS::Runtime;
     type Listener = TestListener<TS>;
     type Stream = TS::Stream;
     type Options = ();

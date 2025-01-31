@@ -11,7 +11,7 @@ pub async fn indirect_ping<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: RuntimeLite,
 {
   let name = format!("{kind}_indirect_ping");

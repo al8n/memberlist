@@ -4,7 +4,6 @@ use std::{
   pin::Pin,
   sync::Arc,
   task::{Context, Poll},
-  time::Instant,
 };
 
 pub use ::native_tls;
@@ -85,6 +84,7 @@ impl<R> NativeTls<R> {
 }
 
 impl<R: Runtime> StreamLayer for NativeTls<R> {
+  type Runtime = R;
   type Listener = NativeTlsListener<R>;
   type Stream = NativeTlsStream<R>;
   type Options = NativeTlsOptions;
@@ -177,8 +177,8 @@ impl<R: Runtime> Listener for NativeTlsListener<R> {
 pub struct NativeTlsStream<R: Runtime> {
   #[pin]
   stream: AsyncNativeTlsStream<<R::Net as Net>::TcpStream>,
-  read_deadline: Option<Instant>,
-  write_deadline: Option<Instant>,
+  read_deadline: Option<R::Instant>,
+  write_deadline: Option<R::Instant>,
   local_addr: SocketAddr,
   peer_addr: SocketAddr,
 }
@@ -208,26 +208,31 @@ impl<R: Runtime> AsyncWrite for NativeTlsStream<R> {
 }
 
 impl<R: Runtime> TimeoutableReadStream for NativeTlsStream<R> {
-  fn set_read_deadline(&mut self, deadline: Option<Instant>) {
+  type Instant = R::Instant;
+  fn set_read_deadline(&mut self, deadline: Option<Self::Instant>) {
     self.read_deadline = deadline;
   }
 
-  fn read_deadline(&self) -> Option<Instant> {
+  fn read_deadline(&self) -> Option<Self::Instant> {
     self.read_deadline
   }
 }
 
 impl<R: Runtime> TimeoutableWriteStream for NativeTlsStream<R> {
-  fn set_write_deadline(&mut self, deadline: Option<Instant>) {
+  type Instant = R::Instant;
+
+  fn set_write_deadline(&mut self, deadline: Option<Self::Instant>) {
     self.write_deadline = deadline;
   }
 
-  fn write_deadline(&self) -> Option<Instant> {
+  fn write_deadline(&self) -> Option<Self::Instant> {
     self.write_deadline
   }
 }
 
 impl<R: Runtime> PromisedStream for NativeTlsStream<R> {
+  type Instant = R::Instant;
+
   #[inline]
   fn local_addr(&self) -> SocketAddr {
     self.local_addr

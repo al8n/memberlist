@@ -13,7 +13,7 @@ pub async fn gossip_mismatched_keys<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   // Create two agents with different gossip keys
@@ -66,7 +66,7 @@ pub async fn gossip_mismatched_keys_with_label<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   // Create two agents with different gossip keys

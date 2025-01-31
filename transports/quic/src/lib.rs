@@ -13,10 +13,10 @@ use std::{
     atomic::{AtomicUsize, Ordering},
     Arc,
   },
-  time::{Duration, Instant},
+  time::Duration,
 };
 
-use agnostic_lite::{AsyncSpawner, RuntimeLite};
+use agnostic_lite::{time::Instant, AsyncSpawner, RuntimeLite};
 use atomic_refcell::AtomicRefCell;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::Bytes;
@@ -95,18 +95,18 @@ pub struct QuicTransport<I, A, S, W, R>
 where
   I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: RuntimeLite,
 {
   opts: Options<I, A>,
   advertise_addr: A::ResolvedAddress,
   local_addr: A::Address,
-  packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
+  packet_rx: PacketSubscriber<I, A::ResolvedAddress, R::Instant>,
   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
   #[allow(dead_code)]
   stream_layer: S,
-  connection_pool: Arc<SkipMap<SocketAddr, (Instant, S::Connection)>>,
+  connection_pool: Arc<SkipMap<SocketAddr, (R::Instant, S::Connection)>>,
   v4_round_robin: AtomicUsize,
   v4_connectors: SmallVec<S::Connector>,
   v6_round_robin: AtomicUsize,
@@ -124,7 +124,7 @@ where
   I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   A::Address: Send + Sync + 'static,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: RuntimeLite,
 {
@@ -280,7 +280,7 @@ where
   }
 
   async fn connection_pool_cleaner(
-    pool: Arc<SkipMap<SocketAddr, (Instant, S::Connection)>>,
+    pool: Arc<SkipMap<SocketAddr, (R::Instant, S::Connection)>>,
     mut interval: impl agnostic_lite::time::AsyncInterval,
     shutdown_rx: async_channel::Receiver<()>,
     max_conn_idle: Duration,
@@ -319,7 +319,7 @@ impl<I, A, S, W, R> QuicTransport<I, A, S, W, R>
 where
   I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: RuntimeLite,
 {
@@ -362,7 +362,7 @@ where
   async fn fetch_stream(
     &self,
     addr: SocketAddr,
-    timeout: Option<Instant>,
+    timeout: Option<R::Instant>,
   ) -> Result<S::Stream, QuicTransportError<A, S, W>> {
     if let Some(ent) = self.connection_pool.get(&addr) {
       let (_, connection) = ent.value();
@@ -406,7 +406,7 @@ where
   I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   A::Address: Send + Sync + 'static,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: RuntimeLite,
 {
@@ -583,7 +583,7 @@ where
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     packet: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
-  ) -> Result<(usize, std::time::Instant), Self::Error> {
+  ) -> Result<(usize, R::Instant), Self::Error> {
     let start = Instant::now();
     let encoded_size = W::encoded_len(&packet);
     self
@@ -602,7 +602,7 @@ where
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     packets: TinyVec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
-  ) -> Result<(usize, std::time::Instant), Self::Error> {
+  ) -> Result<(usize, R::Instant), Self::Error> {
     let start = Instant::now();
     let packets_overhead = self.packets_header_overhead();
     let batches = batch::<_, _, _, Self::Wire>(
@@ -634,7 +634,7 @@ where
   async fn dial_with_deadline(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    deadline: std::time::Instant,
+    deadline: R::Instant,
   ) -> Result<Self::Stream, Self::Error> {
     self.fetch_stream(*addr, Some(deadline)).await
   }
@@ -654,7 +654,8 @@ where
 
   fn packet(
     &self,
-  ) -> PacketSubscriber<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress> {
+  ) -> PacketSubscriber<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress, R::Instant>
+  {
     self.packet_rx.clone()
   }
 
@@ -699,7 +700,7 @@ impl<I, A, S, W, R> Drop for QuicTransport<I, A, S, W, R>
 where
   I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: RuntimeLite,
 {
