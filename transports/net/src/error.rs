@@ -3,7 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use memberlist_core::transport::{TransportError, Wire};
 use nodecraft::resolver::AddressResolver;
 
-/// Errors that can occur when using [`NetTransport`].
+/// Errors that can occur when using [`NetTransport`](super::NetTransport).
 #[derive(thiserror::Error)]
 pub enum NetTransportError<A: AddressResolver, W: Wire> {
   /// Connection error.
