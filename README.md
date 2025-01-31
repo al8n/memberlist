@@ -37,7 +37,22 @@ memberlist is eventually consistent but converges quickly on average. The speed 
 
 memberlist is WASM/WASI friendly, all crates can be compiled to `wasm-wasi` and `wasm-unknown-unknown` (need to configure the crate features).
 
-### Design
+## Installation
+
+```toml
+[dependencies]
+memberlist = "0.5"
+```
+
+## Protocol
+
+memberlist is based on ["SWIM: Scalable Weakly-consistent Infection-style Process Group Membership Protocol"](http://ieeexplore.ieee.org/document/1028914/). However, Hashicorp developers extends the protocol in a number of ways:
+
+Several extensions are made to increase propagation speed and convergence rate.
+Another set of extensions, that Hashicorp developers call Lifeguard, are made to make memberlist more robust in the presence of slow message processing (due to factors such as CPU starvation, and network delay or loss).
+For details on all of these extensions, please read Hashicorp's paper ["Lifeguard : SWIM-ing with Situational Awareness"](https://arxiv.org/abs/1707.00788), along with the memberlist source.
+
+## Design
 
 Unlike the original Go implementation, Rust's memberlist use highly generic and layered architecture, users can easily implement a component by themselves and plug it to the memberlist. Users can even custom their own `Id` and `Address`.
 
@@ -118,21 +133,6 @@ Here are the layers:
 
     CompositeDelegate is a helpful struct to split the `Delegate` into multiple small delegates, so that users do not need to implement full `Delegate` when they only want to custom some methods in the Delegate.
 
-### Protocol
-
-memberlist is based on ["SWIM: Scalable Weakly-consistent Infection-style Process Group Membership Protocol"](http://ieeexplore.ieee.org/document/1028914/). However, Hashicorp developers extends the protocol in a number of ways:
-
-Several extensions are made to increase propagation speed and convergence rate.
-Another set of extensions, that Hashicorp developers call Lifeguard, are made to make memberlist more robust in the presence of slow message processing (due to factors such as CPU starvation, and network delay or loss).
-For details on all of these extensions, please read Hashicorp's paper ["Lifeguard : SWIM-ing with Situational Awareness"](https://arxiv.org/abs/1707.00788), along with the memberlist source.
-
-## Installation
-
-```toml
-[dependencies]
-memberlist = "0.3"
-```
-
 ## Q & A
 
 - ***Does Rust's memberlist implemenetation compatible to Go's memberlist?***
@@ -146,6 +146,7 @@ memberlist = "0.3"
 ## Related Projects
 
 - [`agnostic`](https://github.com/al8n/agnostic): helps you to develop runtime agnostic crates
+- [`getifs`](https://github.com/al8n/getifs): A bunch of cross platform network tools for fetching interfaces, multicast addresses, local ip addresses, private ip addresses, public ip addresses and etc.
 - [`nodecraft`](https://github.com/al8n/nodecraft): crafting seamless node operations for distributed systems, which provides foundational traits for node identification and address resolution.
 - [`transformable`](https://github.com/al8n/transformable): transform its representation between structured and byte form.
 - [`peekable`](https://github.com/al8n/peekable): peekable reader and async reader

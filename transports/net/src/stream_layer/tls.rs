@@ -4,7 +4,6 @@ use std::{
   pin::Pin,
   sync::Arc,
   task::{Context, Poll},
-  time::Instant,
 };
 
 use agnostic::{
@@ -145,6 +144,7 @@ impl<R: Runtime> StreamLayer for Tls<R> {
   type Listener = TlsListener<R>;
   type Stream = TlsStream<R>;
   type Options = TlsOptions;
+  type Runtime = R;
 
   #[inline]
   async fn new(options: Self::Options) -> io::Result<Self> {
@@ -252,14 +252,14 @@ enum TlsStreamKind<R: Runtime> {
   Client {
     #[pin]
     stream: client::TlsStream<<R::Net as Net>::TcpStream>,
-    read_deadline: Option<Instant>,
-    write_deadline: Option<Instant>,
+    read_deadline: Option<R::Instant>,
+    write_deadline: Option<R::Instant>,
   },
   Server {
     #[pin]
     stream: server::TlsStream<<R::Net as Net>::TcpStream>,
-    read_deadline: Option<Instant>,
-    write_deadline: Option<Instant>,
+    read_deadline: Option<R::Instant>,
+    write_deadline: Option<R::Instant>,
   },
 }
 
@@ -333,7 +333,8 @@ impl<R: Runtime> AsyncWrite for TlsStream<R> {
 }
 
 impl<R: Runtime> TimeoutableReadStream for TlsStream<R> {
-  fn set_read_deadline(&mut self, deadline: Option<Instant>) {
+  type Instant = R::Instant;
+  fn set_read_deadline(&mut self, deadline: Option<Self::Instant>) {
     match self {
       Self {
         stream: TlsStreamKind::Client { read_deadline, .. },
@@ -346,7 +347,7 @@ impl<R: Runtime> TimeoutableReadStream for TlsStream<R> {
     }
   }
 
-  fn read_deadline(&self) -> Option<Instant> {
+  fn read_deadline(&self) -> Option<Self::Instant> {
     match self {
       Self {
         stream: TlsStreamKind::Client { read_deadline, .. },
@@ -361,7 +362,9 @@ impl<R: Runtime> TimeoutableReadStream for TlsStream<R> {
 }
 
 impl<R: Runtime> TimeoutableWriteStream for TlsStream<R> {
-  fn set_write_deadline(&mut self, deadline: Option<Instant>) {
+  type Instant = R::Instant;
+
+  fn set_write_deadline(&mut self, deadline: Option<Self::Instant>) {
     match self {
       Self {
         stream: TlsStreamKind::Client { write_deadline, .. },
@@ -374,7 +377,7 @@ impl<R: Runtime> TimeoutableWriteStream for TlsStream<R> {
     }
   }
 
-  fn write_deadline(&self) -> Option<Instant> {
+  fn write_deadline(&self) -> Option<Self::Instant> {
     match self {
       Self {
         stream: TlsStreamKind::Client { write_deadline, .. },
@@ -389,6 +392,8 @@ impl<R: Runtime> TimeoutableWriteStream for TlsStream<R> {
 }
 
 impl<R: Runtime> PromisedStream for TlsStream<R> {
+  type Instant = R::Instant;
+
   #[inline]
   fn local_addr(&self) -> SocketAddr {
     self.local_addr

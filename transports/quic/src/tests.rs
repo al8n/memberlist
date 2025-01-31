@@ -224,7 +224,7 @@ impl<S: StreamLayer> TestPacketConnection for QuicTestPacketConnection<S> {
   getters(vis_all = "pub", style = "ref"),
   setters(vis_all = "pub", prefix = "with")
 )]
-pub struct QuicTransportTestClient<S: StreamLayer, R: RuntimeLite> {
+pub struct QuicTransportTestClient<S: StreamLayer<Runtime = R>, R: RuntimeLite> {
   #[viewit(getter(skip), setter(skip))]
   connector: S::Connector,
   #[viewit(getter(skip), setter(skip))]
@@ -255,7 +255,7 @@ pub struct QuicTransportTestClient<S: StreamLayer, R: RuntimeLite> {
   _runtime: std::marker::PhantomData<R>,
 }
 
-impl<S: StreamLayer, R: RuntimeLite> QuicTransportTestClient<S, R> {
+impl<S: StreamLayer<Runtime = R>, R: RuntimeLite> QuicTransportTestClient<S, R> {
   /// Creates a new test client with the given address
   pub async fn new(
     local_addr: SocketAddr,
@@ -291,7 +291,9 @@ impl<S: StreamLayer, R: RuntimeLite> QuicTransportTestClient<S, R> {
   }
 }
 
-impl<S: StreamLayer, R: RuntimeLite> TestPacketClient for QuicTransportTestClient<S, R> {
+impl<S: StreamLayer<Runtime = R>, R: RuntimeLite> TestPacketClient
+  for QuicTransportTestClient<S, R>
+{
   type Connection = QuicTestPacketConnection<S>;
 
   async fn accept(&mut self) -> Result<Self::Connection, AnyError> {

@@ -1,5 +1,6 @@
 use std::{future::Future, io, net::SocketAddr};
 
+use agnostic::RuntimeLite;
 use futures::{AsyncRead, AsyncWrite};
 use memberlist_core::transport::TimeoutableStream;
 
@@ -39,8 +40,17 @@ pub trait Listener: Send + Sync + 'static {
 /// This trait encapsulates functionality for a network connection that supports asynchronous
 /// read/write operations and can be split into separate read and write halves.
 pub trait PromisedStream:
-  TimeoutableStream + AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static
+  TimeoutableStream<Instant = <Self as PromisedStream>::Instant>
+  + AsyncRead
+  + AsyncWrite
+  + Unpin
+  + Send
+  + Sync
+  + 'static
 {
+  /// The instant type
+  type Instant: agnostic::time::Instant + Send + Sync + 'static;
+
   /// Returns the address of the local endpoint of the connection.
   fn local_addr(&self) -> SocketAddr;
 
@@ -55,11 +65,14 @@ pub trait PromisedStream:
 /// an abstraction over the underlying network stream. It specifies the types for listeners
 /// and connections that operate on this stream.
 pub trait StreamLayer: Send + Sync + 'static {
+  /// The runtime for this stream layer
+  type Runtime: RuntimeLite;
+
   /// The listener type for the network stream.
   type Listener: Listener<Stream = Self::Stream>;
 
   /// The connection type for the network stream.
-  type Stream: PromisedStream;
+  type Stream: PromisedStream<Instant = <Self::Runtime as RuntimeLite>::Instant>;
 
   /// The options type for constructing the stream layer.
   type Options: Send + Sync + 'static;

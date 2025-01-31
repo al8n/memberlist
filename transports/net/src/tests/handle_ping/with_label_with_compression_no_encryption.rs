@@ -8,7 +8,7 @@ pub async fn server_with_label_with_compression_no_encryption_client_with_label_
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let client = NetTransportTestClient::<R>::new(kind.next(0))
@@ -33,7 +33,7 @@ pub async fn server_with_label_no_compression_no_encryption_client_with_label_wi
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let client = NetTransportTestClient::<R>::new(kind.next(0))
@@ -57,7 +57,7 @@ pub async fn server_with_label_with_compression_no_encryption_client_with_label_
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let client = NetTransportTestClient::<R>::new(kind.next(0))

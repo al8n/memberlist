@@ -122,7 +122,7 @@ impl<I, A> Message<I, A> {
   ///
   /// This constant specifies a range of tag values that are reserved for internal use
   /// by the [`Message`] enum variants. When implementing custom
-  /// with [`Wire`](crate::transport::Wire) or [`Transport`](crate::transport::Transport),
+  /// with [`Wire`] or [`Transport`],
   /// it is important to ensure that any custom header added to the message bytes does not
   /// start with a tag value within this reserved range.
   ///
@@ -134,6 +134,9 @@ impl<I, A> Message<I, A> {
   /// Adhering to this constraint is crucial for ensuring that custom messages
   /// are correctly distinguishable from the standard messages defined by the `Message` enum.
   /// Failing to do so may result in incorrect message parsing and handling.
+  ///
+  /// [`Wire`]: https://docs.rs/memberlist/latest/memberlist/transport/trait.Wire.html
+  /// [`Transport`]: https://docs.rs/memberlist/latest/memberlist/transport/trait.Transport.html
   pub const RESERVED_TAG_RANGE: std::ops::RangeInclusive<u8> = (0..=128);
 
   /// Returns the tag of the compound message type for encoding/decoding.

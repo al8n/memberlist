@@ -5,7 +5,7 @@ pub(super) const COMPRESS_TAG: core::ops::RangeInclusive<u8> = 86..=126;
 impl<A, S, W> From<UnknownCompressor> for super::QuicTransportError<A, S, W>
 where
   A: AddressResolver,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = A::Runtime>,
   W: Wire,
 {
   fn from(err: UnknownCompressor) -> Self {
@@ -16,7 +16,7 @@ where
 impl<A, S, W> From<CompressError> for super::QuicTransportError<A, S, W>
 where
   A: AddressResolver,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = A::Runtime>,
   W: Wire,
 {
   fn from(err: CompressError) -> Self {
@@ -27,7 +27,7 @@ where
 impl<A, S, W> From<DecompressError> for super::QuicTransportError<A, S, W>
 where
   A: AddressResolver,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = A::Runtime>,
   W: Wire,
 {
   fn from(err: DecompressError) -> Self {

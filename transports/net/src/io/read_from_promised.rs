@@ -8,13 +8,13 @@ where
   I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   A::Address: Send + Sync + 'static,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
 {
   pub(crate) async fn read_from_promised_without_compression_and_encryption(
     &self,
-    conn: Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>>,
+    conn: Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>, R::Instant>,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
     match conn.deadline {
       Some(ddl) => R::timeout_at(ddl, W::decode_message_from_reader(conn.op))
@@ -30,7 +30,7 @@ where
   #[cfg(feature = "compression")]
   pub(crate) async fn read_from_promised_with_compression_without_encryption(
     &self,
-    mut conn: Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>>,
+    mut conn: Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>, R::Instant>,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {
     let mut tag = [0u8; 1];
     conn
@@ -184,7 +184,7 @@ where
   #[cfg(all(feature = "compression", feature = "encryption"))]
   pub(crate) async fn read_from_promised_with_compression_and_encryption(
     &self,
-    mut conn: Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>>,
+    mut conn: Deadline<AsyncPeekable<impl AsyncRead + Send + Unpin>, R::Instant>,
     stream_label: Label,
     from: &A::ResolvedAddress,
   ) -> Result<(usize, Message<I, A::ResolvedAddress>), NetTransportError<A, W>> {

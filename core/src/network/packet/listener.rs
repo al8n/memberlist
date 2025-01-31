@@ -74,7 +74,7 @@ where
     &self,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     from: <T::Resolver as AddressResolver>::ResolvedAddress,
-    timestamp: Instant,
+    timestamp: <T::Runtime as RuntimeLite>::Instant,
   ) {
     tracing::trace!(local = %self.advertise_address(), from = %from, packet=?msg, "memberlist.packet: handle packet");
 
@@ -118,7 +118,7 @@ where
     &self,
     msgs: OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
     from: <T::Resolver as AddressResolver>::ResolvedAddress,
-    timestamp: Instant,
+    timestamp: <T::Runtime as RuntimeLite>::Instant,
   ) {
     match msgs.into_either() {
       Either::Left([msg]) => self.handle_message(msg, from, timestamp).await,
@@ -241,7 +241,7 @@ where
     });
   }
 
-  async fn handle_ack(&self, ack: Ack, timestamp: Instant) {
+  async fn handle_ack(&self, ack: Ack, timestamp: <T::Runtime as RuntimeLite>::Instant) {
     self
       .inner
       .ack_manager

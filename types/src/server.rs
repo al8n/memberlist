@@ -28,7 +28,7 @@ pub enum State {
 }
 
 impl State {
-  /// Returns the [`NodeStateState`] as a `&'static str`.
+  /// Returns the [`State`] as a `&'static str`.
   pub const fn as_str(&self) -> &'static str {
     match self {
       Self::Alive => "alive",

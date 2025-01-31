@@ -4,11 +4,11 @@ use std::{
     atomic::{AtomicU32, Ordering},
     Arc,
   },
-  time::{Duration, Instant},
+  time::Duration,
 };
 
 use super::{delegate::Delegate, transport::Transport, types::Epoch, *};
-use agnostic_lite::{AfterHandle, AsyncAfterSpawner, RuntimeLite};
+use agnostic_lite::{time::Instant, AfterHandle, AsyncAfterSpawner, RuntimeLite};
 use memberlist_types::{Dead, State};
 use nodecraft::resolver::AddressResolver;
 
@@ -128,7 +128,7 @@ where
   k: u32,
   min: Duration,
   max: Duration,
-  start: Instant,
+  start: <T::Runtime as RuntimeLite>::Instant,
   handle: Option<<<T::Runtime as RuntimeLite>::AfterSpawner as AsyncAfterSpawner>::JoinHandle<()>>,
   suspicioner: Arc<Suspicioner<T, D>>,
   confirmations: HashSet<T::Id>,
@@ -210,7 +210,8 @@ where
           let n = self.n.clone();
           let suspicioner = self.suspicioner.clone();
           self.handle = Some(<T::Runtime as RuntimeLite>::spawn_after_at(
-            Instant::now() + remaining,
+            <<T::Runtime as RuntimeLite>::Instant as agnostic_lite::time::Instant>::now()
+              + remaining,
             async move {
               suspicioner.suspicion(n.load(Ordering::SeqCst)).await;
             },

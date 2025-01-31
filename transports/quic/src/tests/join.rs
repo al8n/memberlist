@@ -11,8 +11,8 @@ pub async fn join<S1, S2, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S1: StreamLayer,
-  S2: StreamLayer,
+  S1: StreamLayer<Runtime = R>,
+  S2: StreamLayer<Runtime = R>,
   R: RuntimeLite,
 {
   use nodecraft::CheapClone;

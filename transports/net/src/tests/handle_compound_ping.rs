@@ -8,7 +8,7 @@ use super::*;
 #[cfg(all(feature = "compression", feature = "encryption"))]
 pub async fn compound_ping<S, R>(s: S::Options, kind: AddressKind) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_compound_ping");
@@ -43,7 +43,7 @@ pub async fn compound_ping_compression_only<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_compound_ping");
@@ -73,7 +73,7 @@ pub async fn compound_ping_encryption_only<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_compound_ping");
@@ -105,7 +105,7 @@ pub async fn compound_ping_no_encryption_no_compression<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_compound_ping");

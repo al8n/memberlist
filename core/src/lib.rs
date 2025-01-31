@@ -77,10 +77,10 @@ pub mod tests {
     pub use crate::base::tests::*;
   }
 
-  /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`]
   #[cfg(any(feature = "test", test))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]
   #[macro_export]
+  #[doc(hidden)]
   macro_rules! unit_tests {
     ($runtime:ty => $run:ident($($fn:ident), +$(,)?)) => {
       $(
@@ -94,10 +94,10 @@ pub mod tests {
     };
   }
 
-  /// Add `test` prefix to the predefined unit test fn with a given [`Runtime`]
   #[cfg(any(feature = "test", test))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]
   #[macro_export]
+  #[doc(hidden)]
   macro_rules! unit_tests_with_expr {
     ($run:ident($(
       $(#[$outer:meta])*

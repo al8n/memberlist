@@ -12,7 +12,7 @@ pub async fn promised_ping<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_promised_ping");
@@ -40,7 +40,7 @@ pub async fn promised_ping_no_label<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_promised_ping_no_label");
@@ -67,7 +67,7 @@ pub async fn promised_ping_compression_only<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_promised_ping_compression_only");
@@ -89,7 +89,7 @@ pub async fn promised_ping_label_and_compression<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_promised_ping_label_and_compression");
@@ -114,7 +114,7 @@ pub async fn promised_ping_encryption_only<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_promised_ping_encryption_only");
@@ -140,7 +140,7 @@ pub async fn promised_ping_label_and_encryption<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_promised_ping_lable_and_encryption");
@@ -166,7 +166,7 @@ pub async fn promised_ping_no_label_no_compression_no_encryption<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_promised_ping_no_compression_no_encryption");
@@ -186,7 +186,7 @@ pub async fn promised_ping_label_only<S, R>(
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let name = format!("{kind}_promised_ping_label_only");

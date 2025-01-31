@@ -1,10 +1,6 @@
-use std::{
-  future::Future,
-  marker::PhantomData,
-  sync::atomic::Ordering,
-  time::{Duration, Instant},
-};
+use std::{future::Future, marker::PhantomData, sync::atomic::Ordering, time::Duration};
 
+use agnostic_lite::time::Instant;
 use bytes::Bytes;
 use nodecraft::Id;
 
@@ -524,7 +520,7 @@ pub async fn memberlist_join_shutdown<T, R>(
 
   m1.shutdown().await.unwrap();
 
-  wait_for_condition(|| async {
+  wait_for_condition::<_, _, R>(|| async {
     let num = m2.num_online_members().await;
     (num == 1, format!("expected 1 node, got {num}"))
   })
@@ -873,7 +869,7 @@ pub async fn memberlist_send<T, R>(
     .await
     .unwrap();
 
-  wait_for_condition(|| async {
+  wait_for_condition::<_, _, R>(|| async {
     let msgs = m1.delegate().unwrap().node_delegate().get_messages().await;
 
     (
@@ -883,7 +879,7 @@ pub async fn memberlist_send<T, R>(
   })
   .await;
 
-  wait_for_condition(|| async {
+  wait_for_condition::<_, _, R>(|| async {
     let msgs = m2.delegate().unwrap().node_delegate().get_messages().await;
 
     (
@@ -1148,12 +1144,13 @@ where
 }
 
 /// Util function to wait until the condition reaches.
-pub async fn wait_for_condition<'a, Fut, F>(mut f: F)
+pub async fn wait_for_condition<'a, Fut, F, R>(mut f: F)
 where
   F: FnMut() -> Fut,
   Fut: Future<Output = (bool, String)> + 'a,
+  R: RuntimeLite,
 {
-  let start = Instant::now();
+  let start = R::now();
   let mut msg = String::new();
   while start.elapsed() < Duration::from_secs(20) {
     let (done, msg1) = f().await;
@@ -1161,7 +1158,7 @@ where
       return;
     }
     msg = msg1;
-    std::thread::sleep(Duration::from_secs(5));
+    R::sleep(Duration::from_secs(5)).await;
   }
   panic!("timeout waiting for condition {}", msg);
 }

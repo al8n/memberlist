@@ -14,7 +14,6 @@ use std::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
   },
-  time::Instant,
 };
 
 use agnostic::{
@@ -132,14 +131,14 @@ pub struct NetTransport<I, A, S, W, R>
 where
   I: Id,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
 {
   opts: Arc<Options<I, A>>,
   advertise_addr: A::ResolvedAddress,
   local_addr: A::Address,
-  packet_rx: PacketSubscriber<I, A::ResolvedAddress>,
+  packet_rx: PacketSubscriber<I, A::ResolvedAddress, R::Instant>,
   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
   num_v4_sockets: usize,
   v4_round_robin: AtomicUsize,
@@ -161,7 +160,7 @@ where
   I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   A::Address: Send + Sync + 'static,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
 {
@@ -442,7 +441,7 @@ where
   I: Id + Send + Sync + 'static,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
   A::Address: Send + Sync + 'static,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
 {
@@ -601,8 +600,8 @@ where
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     packet: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
-  ) -> Result<(usize, Instant), Self::Error> {
-    let start = Instant::now();
+  ) -> Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error> {
+    let start = <Self::Runtime as RuntimeLite>::now();
     let encoded_size = W::encoded_len(&packet);
     let packets_overhead = self.packets_header_overhead();
     self
@@ -621,8 +620,8 @@ where
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     packets: TinyVec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
-  ) -> Result<(usize, Instant), Self::Error> {
-    let start = Instant::now();
+  ) -> Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error> {
+    let start = <Self::Runtime as RuntimeLite>::now();
 
     let packets_overhead = self.packets_header_overhead();
     let batches = batch::<_, _, _, Self::Wire>(
@@ -654,7 +653,7 @@ where
   async fn dial_with_deadline(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    deadline: Instant,
+    deadline: <Self::Runtime as RuntimeLite>::Instant,
   ) -> Result<Self::Stream, Self::Error> {
     let connector =
       <Self::Runtime as RuntimeLite>::timeout_at(deadline, self.stream_layer.connect(*addr));
@@ -684,7 +683,11 @@ where
 
   fn packet(
     &self,
-  ) -> PacketSubscriber<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress> {
+  ) -> PacketSubscriber<
+    Self::Id,
+    <Self::Resolver as AddressResolver>::ResolvedAddress,
+    <Self::Runtime as RuntimeLite>::Instant,
+  > {
     self.packet_rx.clone()
   }
 
@@ -724,7 +727,7 @@ impl<I, A, S, W, R> Drop for NetTransport<I, A, S, W, R>
 where
   I: Id,
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   W: Wire<Id = I, Address = A::ResolvedAddress>,
   R: Runtime,
 {
@@ -733,21 +736,25 @@ where
   }
 }
 
-trait WithDeadline: Sized {
-  fn with_deadline(self, deadline: Option<Instant>) -> Deadline<Self> {
+trait WithDeadline<I>: Sized {
+  fn with_deadline(self, deadline: Option<I>) -> Deadline<Self, I> {
     Deadline { op: self, deadline }
   }
 }
 
-impl<T> WithDeadline for T {}
+impl<T, I> WithDeadline<I> for T {}
 
-struct Deadline<T> {
+struct Deadline<T, I> {
   op: T,
-  deadline: Option<Instant>,
+  deadline: Option<I>,
 }
 
-impl<T: AsyncRead + Send + Unpin> Deadline<T> {
-  async fn read_exact<R: Runtime>(&mut self, dst: &mut [u8]) -> std::io::Result<()> {
+impl<T, I> Deadline<T, I>
+where
+  T: AsyncRead + Send + Unpin,
+  I: agnostic::time::Instant,
+{
+  async fn read_exact<R: Runtime<Instant = I>>(&mut self, dst: &mut [u8]) -> std::io::Result<()> {
     match self.deadline {
       Some(ddl) => R::timeout_at(ddl, self.op.read_exact(dst)).await?,
       None => self.op.read_exact(dst).await,
@@ -755,8 +762,12 @@ impl<T: AsyncRead + Send + Unpin> Deadline<T> {
   }
 }
 
-impl<T: AsyncWrite + Send + Unpin> Deadline<T> {
-  async fn write_all<R: Runtime>(&mut self, src: &[u8]) -> std::io::Result<()> {
+impl<T: AsyncWrite + Send + Unpin, I> Deadline<T, I>
+where
+  T: AsyncWrite + Send + Unpin,
+  I: agnostic::time::Instant,
+{
+  async fn write_all<R: Runtime<Instant = I>>(&mut self, src: &[u8]) -> std::io::Result<()> {
     match self.deadline {
       Some(ddl) => R::timeout_at(ddl, self.op.write_all(src)).await?,
       None => self.op.write_all(src).await,
@@ -764,8 +775,12 @@ impl<T: AsyncWrite + Send + Unpin> Deadline<T> {
   }
 }
 
-impl<T: AsyncRead + Send + Unpin> Deadline<AsyncPeekable<T>> {
-  async fn peek_exact<R: Runtime>(&mut self, dst: &mut [u8]) -> std::io::Result<()> {
+impl<T: AsyncRead + Send + Unpin, I> Deadline<AsyncPeekable<T>, I>
+where
+  T: AsyncRead + Send + Unpin,
+  I: agnostic::time::Instant,
+{
+  async fn peek_exact<R: Runtime<Instant = I>>(&mut self, dst: &mut [u8]) -> std::io::Result<()> {
     match self.deadline {
       Some(ddl) => R::timeout_at(ddl, self.op.peek_exact(dst)).await?,
       None => self.op.peek_exact(dst).await,

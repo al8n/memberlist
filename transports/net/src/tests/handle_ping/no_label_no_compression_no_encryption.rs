@@ -8,7 +8,7 @@ pub async fn server_no_label_no_compression_no_encryption_client_no_label_no_com
   kind: AddressKind,
 ) -> Result<(), AnyError>
 where
-  S: StreamLayer,
+  S: StreamLayer<Runtime = R>,
   R: Runtime,
 {
   let client = NetTransportTestClient::<R>::new(kind.next(0)).await?;

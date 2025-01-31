@@ -5,10 +5,10 @@ use std::{
     atomic::{AtomicBool, Ordering},
     Arc,
   },
-  time::{Duration, Instant},
+  time::Duration,
 };
 
-use agnostic_lite::RuntimeLite;
+use agnostic_lite::{time::Instant, RuntimeLite};
 use bytes::Bytes;
 use futures::{lock::Mutex, Future, FutureExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Id, Node};
@@ -394,7 +394,7 @@ pub async fn probe_node_awareness_degraded<T, R>(
   // Have node m1 probe m4.
   let start_probe = {
     let n = m1.inner.nodes.read().await.get_state(node4.id()).unwrap();
-    let start = Instant::now();
+    let start = R::now();
     m1.probe_node(&n).await;
     start
   };
@@ -823,7 +823,7 @@ where
 
   let (tx, _rx) = async_channel::bounded(1);
 
-  m.set_probe_channels(0, tx, None, Instant::now(), Duration::from_millis(10));
+  m.set_probe_channels(0, tx, None, R::now(), Duration::from_millis(10));
 
   assert!(ack_handler_exists(&m, 0).await, "missing handler");
 
@@ -858,7 +858,7 @@ where
   let m1 = AckManager::<R>::new();
 
   // Does nothing
-  m1.invoke_ack_handler(Ack::new(0), Instant::now()).await;
+  m1.invoke_ack_handler(Ack::new(0), R::now()).await;
 
   let b = Arc::new(AtomicBool::new(false));
   let b1 = b.clone();
@@ -869,7 +869,7 @@ where
   });
 
   // Should set b
-  m1.invoke_ack_handler(Ack::new(0), Instant::now()).await;
+  m1.invoke_ack_handler(Ack::new(0), R::now()).await;
   assert!(b.load(Ordering::SeqCst), "b not set");
 }
 
@@ -883,7 +883,7 @@ where
   let ack = Ack::new(0).with_payload(Bytes::from_static(&[0, 0, 0]));
 
   // Does nothing
-  m.invoke_ack_handler(ack.clone(), Instant::now()).await;
+  m.invoke_ack_handler(ack.clone(), R::now()).await;
 
   let (ack_tx, ack_rx) = async_channel::bounded(1);
   let (nack_tx, nack_rx) = async_channel::bounded(1);
@@ -891,12 +891,12 @@ where
     0,
     ack_tx,
     Some(nack_tx),
-    Instant::now(),
+    R::now(),
     Duration::from_millis(10),
   );
 
   // Should send message
-  m.invoke_ack_handler(ack.clone(), Instant::now()).await;
+  m.invoke_ack_handler(ack.clone(), R::now()).await;
 
   loop {
     futures::select! {
@@ -937,7 +937,7 @@ where
     0,
     ack_tx,
     Some(nack_tx),
-    Instant::now(),
+    R::now(),
     Duration::from_millis(100),
   );
 
@@ -962,7 +962,7 @@ where
   );
 
   let ack = Ack::new(0).with_payload(Bytes::from_static(&[0, 0, 0]));
-  m1.invoke_ack_handler(ack.clone(), Instant::now()).await;
+  m1.invoke_ack_handler(ack.clone(), R::now()).await;
 
   loop {
     futures::select! {

@@ -3,7 +3,7 @@ use std::{
     atomic::{AtomicIsize, AtomicU32, Ordering},
     Arc,
   },
-  time::{Duration, Instant},
+  time::Duration,
 };
 
 use crate::{suspicion::Suspicioner, types::Epoch};
@@ -18,7 +18,7 @@ use super::{
   Member, Members,
 };
 
-use agnostic_lite::{AsyncSpawner, RuntimeLite};
+use agnostic_lite::{time::Instant, AsyncSpawner, RuntimeLite};
 
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
@@ -144,7 +144,7 @@ where
     join: bool,
   ) -> Result<(), Error<T, D>> {
     #[cfg(feature = "metrics")]
-    let now = Instant::now();
+    let now = <T::Runtime as RuntimeLite>::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer!(
       metrics::histogram!("memberlist.push_pull_node", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
@@ -812,7 +812,7 @@ where
     target: &LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) {
     #[cfg(feature = "metrics")]
-    let now = Instant::now();
+    let now = <T::Runtime as RuntimeLite>::now();
     #[cfg(feature = "metrics")]
     scopeguard::defer! {
       metrics::histogram!("memberlist.probe_node", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
@@ -852,7 +852,7 @@ where
     // a bit, but it's the best we can do. We had originally put this right
     // after the I/O, but that would sometimes give negative RTT measurements
     // which was not desirable.
-    let sent = Instant::now();
+    let sent = <T::Runtime as RuntimeLite>::now();
     // Send a ping to the node. If this node looks like it's suspect or dead,
     // also tack on a suspect message so that it has a chance to refute as
     // soon as possible.
@@ -994,9 +994,9 @@ where
     &self,
     target: &LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     ping_sequence_number: u32,
-    ack_rx: &async_channel::Receiver<AckMessage>,
+    ack_rx: &async_channel::Receiver<AckMessage<<T::Runtime as RuntimeLite>::Instant>>,
     nack_rx: &async_channel::Receiver<()>,
-    deadline: Instant,
+    deadline: <T::Runtime as RuntimeLite>::Instant,
     awareness_delta: &AtomicIsize,
   ) {
     // Get some random live nodes.
@@ -1179,7 +1179,7 @@ where
       _ = shutdown_rx.recv().fuse() => true,
       default => {
         #[cfg(feature = "metrics")]
-        let now = Instant::now();
+        let now = <T::Runtime as RuntimeLite>::now();
         #[cfg(feature = "metrics")]
         scopeguard::defer!(
           metrics::histogram!("memberlist.gossip", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);

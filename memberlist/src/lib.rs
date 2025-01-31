@@ -34,17 +34,17 @@ pub mod quic {
   pub use memberlist_quic::*;
 }
 
-/// [`Memberlist`](memberlist_core::Memberlist) for `tokio` runtime.
+/// [`Memberlist`] for `tokio` runtime.
 #[cfg(feature = "tokio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub mod tokio;
 
-/// [`Memberlist`](memberlist_core::Memberlist) for `async-std` runtime.
+/// [`Memberlist`] for `async-std` runtime.
 #[cfg(feature = "async-std")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async-std")))]
 pub mod async_std;
 
-/// [`Memberlist`](memberlist_core::Memberlist) for `smol` runtime.
+/// [`Memberlist`] for `smol` runtime.
 #[cfg(feature = "smol")]
 #[cfg_attr(docsrs, doc(cfg(feature = "smol")))]
 pub mod smol;

@@ -1,5 +1,7 @@
 use std::{future::Future, net::SocketAddr};
 
+use agnostic::RuntimeLite;
+use agnostic_lite::time::Instant;
 use bytes::Bytes;
 use memberlist_core::transport::TimeoutableStream;
 
@@ -21,8 +23,17 @@ pub trait QuicError: std::error::Error + Send + Sync + 'static {
 }
 
 /// A trait for QUIC bidirectional streams.
-#[auto_impl::auto_impl(Box)]
-pub trait QuicStream: TimeoutableStream + futures::AsyncRead + Send + Sync + 'static {
+// #[auto_impl::auto_impl(Box)]
+pub trait QuicStream:
+  TimeoutableStream<Instant = <Self as QuicStream>::Instant>
+  + futures::AsyncRead
+  + Send
+  + Sync
+  + 'static
+{
+  /// The instant type.
+  type Instant: Instant + Send + Sync + 'static;
+
   /// The error type for the stream.
   type Error: QuicError;
 
@@ -52,6 +63,9 @@ pub trait QuicStream: TimeoutableStream + futures::AsyncRead + Send + Sync + 'st
 
 /// A trait for QUIC stream layers.
 pub trait StreamLayer: Sized + Send + Sync + 'static {
+  /// The runtime used for this stream layer
+  type Runtime: RuntimeLite;
+
   /// The error type.
   type Error: QuicError
     + From<<Self::Stream as QuicStream>::Error>
@@ -66,10 +80,13 @@ pub trait StreamLayer: Sized + Send + Sync + 'static {
   type Connector: QuicConnector<Connection = Self::Connection>;
 
   /// The bidirectional stream type.
-  type Stream: QuicStream;
+  type Stream: QuicStream<Instant = <Self::Runtime as RuntimeLite>::Instant>;
 
   /// The connection type.
-  type Connection: QuicConnection<Stream = Self::Stream>;
+  type Connection: QuicConnection<
+    Stream = Self::Stream,
+    Instant = <Self::Runtime as RuntimeLite>::Instant,
+  >;
 
   /// The options type used to construct the stream layer.
   type Options: Send + Sync + 'static;
@@ -149,8 +166,11 @@ pub trait QuicConnection: Send + Sync + 'static {
   /// The error type.
   type Error: std::error::Error + Send + Sync + 'static;
 
+  /// The instant type
+  type Instant: agnostic_lite::time::Instant + Send + Sync + 'static;
+
   /// The bidirectional stream type.
-  type Stream: QuicStream;
+  type Stream: QuicStream<Instant = Self::Instant>;
 
   /// Accepts a bidirectional stream from a remote peer.
   fn accept_bi(
@@ -164,7 +184,7 @@ pub trait QuicConnection: Send + Sync + 'static {
   /// Opens a bidirectional stream to a remote peer.
   fn open_bi_with_deadline(
     &self,
-    deadline: std::time::Instant,
+    deadline: Self::Instant,
   ) -> impl Future<Output = Result<(Self::Stream, SocketAddr), Self::Error>> + Send;
 
   /// Closes the connection.
