@@ -42,7 +42,7 @@ indexmap = "2"
 getifs = "0.2"
 getrandom = "0.3"
 metrics = "0.24"
-nodecraft = { version = "0.6", features = [
+nodecraft = { version = "0.7", features = [
   "transformable",
   "async",
   "resolver",
