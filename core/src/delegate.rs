@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use memberlist_types::{Meta, TinyVec};
 use nodecraft::{CheapClone, Id};
 
-use crate::types::{NodeState, SmallVec};
+use crate::types::{Meta, NodeState, SmallVec, TinyVec};
 
 #[cfg(any(test, feature = "test"))]
 #[doc(hidden)]

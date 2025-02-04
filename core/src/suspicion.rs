@@ -7,9 +7,13 @@ use std::{
   time::Duration,
 };
 
-use super::{delegate::Delegate, transport::Transport, types::Epoch, *};
+use super::{
+  delegate::Delegate,
+  transport::Transport,
+  types::{Dead, Epoch, State},
+  *,
+};
 use agnostic_lite::{time::Instant, AfterHandle, AsyncAfterSpawner, RuntimeLite};
-use memberlist_types::{Dead, State};
 use nodecraft::resolver::AddressResolver;
 
 #[inline]

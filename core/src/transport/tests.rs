@@ -7,7 +7,6 @@ use bytes::Bytes;
 use futures::FutureExt;
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 use smol_str::SmolStr;
-use transformable::Transformable;
 
 use crate::{
   delegate::{mock::MockDelegate, CompositeDelegate, VoidDelegate},

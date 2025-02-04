@@ -20,7 +20,6 @@ use memberlist_core::{
   },
   types::{Label, LabelBufMutExt, Message},
 };
-use nodecraft::Transformable;
 use smol_str::SmolStr;
 
 use crate::{Checksumer, Listener, StreamLayer};

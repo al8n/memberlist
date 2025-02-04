@@ -1,9 +1,7 @@
 use std::{iter::once, sync::Arc};
 
 use async_lock::RwLock;
-use byteorder::{ByteOrder, NetworkEndian};
 use indexmap::IndexSet;
-use transformable::Transformable;
 
 /// Unknown secret key kind error
 #[derive(Debug, thiserror::Error)]
@@ -34,166 +32,6 @@ pub enum SecretKeyTransformError {
   /// Returned when the key is not a valid length
   #[error("invalid key length")]
   UnknownSecretKeyKind(#[from] UnknownSecretKeyKind),
-}
-
-impl Transformable for SecretKey {
-  type Error = SecretKeyTransformError;
-
-  fn encode(&self, dst: &mut [u8]) -> Result<usize, Self::Error> {
-    let encoded_len = self.encoded_len();
-    if dst.len() < encoded_len {
-      return Err(Self::Error::BufferTooSmall);
-    }
-
-    let len = match self {
-      Self::Aes128(_) => 16,
-      Self::Aes192(_) => 24,
-      Self::Aes256(_) => 32,
-    };
-    dst[0] = len as u8;
-
-    match self {
-      Self::Aes128(k) => dst[1..17].copy_from_slice(k),
-      Self::Aes192(k) => dst[1..25].copy_from_slice(k),
-      Self::Aes256(k) => dst[1..33].copy_from_slice(k),
-    }
-
-    Ok(len + 1)
-  }
-
-  fn encoded_len(&self) -> usize {
-    self.len() + 1
-  }
-
-  fn encode_to_writer<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<usize> {
-    match self {
-      Self::Aes128(k) => {
-        let mut buf = [0; 17];
-        buf[0] = 16;
-        buf[1..17].copy_from_slice(k);
-        writer.write_all(&buf).map(|_| 17)
-      }
-      Self::Aes192(k) => {
-        let mut buf = [0; 25];
-        buf[0] = 24;
-        buf[1..25].copy_from_slice(k);
-        writer.write_all(&buf).map(|_| 25)
-      }
-      Self::Aes256(k) => {
-        let mut buf = [0; 33];
-        buf[0] = 32;
-        buf[1..33].copy_from_slice(k);
-        writer.write_all(&buf).map(|_| 33)
-      }
-    }
-  }
-
-  async fn encode_to_async_writer<W: futures::io::AsyncWrite + Send + Unpin>(
-    &self,
-    writer: &mut W,
-  ) -> std::io::Result<usize> {
-    use futures::io::AsyncWriteExt;
-
-    match self {
-      Self::Aes128(k) => {
-        let mut buf = [0; 17];
-        buf[0] = 16;
-        buf[1..17].copy_from_slice(k);
-        writer.write_all(&buf).await.map(|_| 17)
-      }
-      Self::Aes192(k) => {
-        let mut buf = [0; 25];
-        buf[0] = 24;
-        buf[1..25].copy_from_slice(k);
-        writer.write_all(&buf).await.map(|_| 25)
-      }
-      Self::Aes256(k) => {
-        let mut buf = [0; 33];
-        buf[0] = 32;
-        buf[1..33].copy_from_slice(k);
-        writer.write_all(&buf).await.map(|_| 33)
-      }
-    }
-  }
-
-  fn decode(src: &[u8]) -> Result<(usize, Self), Self::Error>
-  where
-    Self: Sized,
-  {
-    if src.len() < 17 {
-      return Err(Self::Error::NotEnoughBytes);
-    }
-
-    let len = src[0];
-    let key = match len {
-      16 => Self::Aes128(src[1..17].try_into().unwrap()),
-      24 => Self::Aes192(src[1..25].try_into().unwrap()),
-      32 => Self::Aes256(src[1..33].try_into().unwrap()),
-      x => return Err(Self::Error::UnknownSecretKeyKind(UnknownSecretKeyKind(x))),
-    };
-
-    Ok((len as usize + 1, key))
-  }
-
-  fn decode_from_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<(usize, Self)>
-  where
-    Self: Sized,
-  {
-    let mut buf = [0; 17];
-    reader.read_exact(&mut buf)?;
-    let len = buf[0] as usize;
-    match len {
-      16 => Ok((17, Self::Aes128(buf[1..17].try_into().unwrap()))),
-      24 => {
-        let mut key = [0; 24];
-        key[..16].copy_from_slice(&buf[1..]);
-        reader.read_exact(&mut key[16..])?;
-        Ok((25, Self::Aes192(key)))
-      }
-      32 => {
-        let mut key = [0; 32];
-        key[..16].copy_from_slice(&buf[1..]);
-        reader.read_exact(&mut key[16..])?;
-        Ok((33, Self::Aes256(key)))
-      }
-      x => Err(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        Self::Error::UnknownSecretKeyKind(UnknownSecretKeyKind(x as u8)),
-      )),
-    }
-  }
-
-  async fn decode_from_async_reader<R: futures::io::AsyncRead + Send + Unpin>(
-    reader: &mut R,
-  ) -> std::io::Result<(usize, Self)>
-  where
-    Self: Sized,
-  {
-    use futures::io::AsyncReadExt;
-
-    let mut buf = [0; 17];
-    reader.read_exact(&mut buf).await?;
-    let len = buf[0] as usize;
-    match len {
-      16 => Ok((17, Self::Aes128(buf[1..17].try_into().unwrap()))),
-      24 => {
-        let mut key = [0; 24];
-        key[..16].copy_from_slice(&buf[1..]);
-        reader.read_exact(&mut key[16..]).await?;
-        Ok((25, Self::Aes192(key)))
-      }
-      32 => {
-        let mut key = [0; 32];
-        key[..16].copy_from_slice(&buf[1..]);
-        reader.read_exact(&mut key[16..]).await?;
-        Ok((33, Self::Aes256(key)))
-      }
-      x => Err(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        Self::Error::UnknownSecretKeyKind(UnknownSecretKeyKind(x as u8)),
-      )),
-    }
-  }
 }
 
 #[cfg(feature = "serde")]
@@ -346,8 +184,8 @@ smallvec_wrapper::smallvec_wrapper!(
   /// A collection of secret keys, you can just treat it as a `Vec<SecretKey>`.
   #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
   #[repr(transparent)]
-  #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-  #[cfg_attr(feature = "serde", serde(transparent))]
+  // #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+  // #[cfg_attr(feature = "serde", serde(transparent))]
   pub SecretKeys([SecretKey; 3]);
 );
 
@@ -373,75 +211,6 @@ pub enum SecretKeysTransformError {
     /// Actual number of keys
     actual: usize,
   },
-}
-
-impl Transformable for SecretKeys {
-  type Error = SecretKeysTransformError;
-
-  fn encode(&self, dst: &mut [u8]) -> Result<usize, Self::Error> {
-    let encoded_len = self.encoded_len();
-    if dst.len() < encoded_len {
-      return Err(Self::Error::BufferTooSmall);
-    }
-
-    let mut offset = 0;
-    NetworkEndian::write_u32(&mut dst[offset..], encoded_len as u32);
-    offset += 4;
-
-    let num_keys = self.len();
-    NetworkEndian::write_u32(&mut dst[offset..], num_keys as u32);
-    offset += 4;
-
-    for key in self.iter() {
-      let len = key.encode(&mut dst[offset..])?;
-      offset += len;
-    }
-
-    debug_assert_eq!(
-      offset, encoded_len,
-      "expect write {} bytes, but actual write {} bytes",
-      encoded_len, offset
-    );
-
-    Ok(encoded_len)
-  }
-
-  fn encoded_len(&self) -> usize {
-    4 + 4 + self.iter().map(SecretKey::encoded_len).sum::<usize>()
-  }
-
-  fn decode(src: &[u8]) -> Result<(usize, Self), Self::Error>
-  where
-    Self: Sized,
-  {
-    if src.len() < 4 {
-      return Err(Self::Error::NotEnoughBytes);
-    }
-
-    let len = NetworkEndian::read_u32(&src[0..4]) as usize;
-    if src.len() < len {
-      return Err(Self::Error::NotEnoughBytes);
-    }
-
-    let mut offset = 4;
-    let keys_len = NetworkEndian::read_u32(&src[offset..]) as usize;
-    offset += 4;
-
-    let mut keys = SecretKeys::with_capacity(keys_len);
-    for _ in 0..keys_len {
-      let (len, key) = SecretKey::decode(&src[offset..])?;
-      offset += len;
-      keys.push(key);
-    }
-
-    debug_assert_eq!(
-      offset, len,
-      "expect read {} bytes, but actual read {} bytes",
-      len, offset
-    );
-
-    Ok((offset, keys))
-  }
 }
 
 /// Error for [`SecretKeyring`]
@@ -727,95 +496,5 @@ mod tests {
     // Removing non-primary key should succeed
     keyring.remove(&TEST_KEYS[1]).await.unwrap();
     assert_eq!(keyring.inner.read().await.keys.len() + 1, 1);
-  }
-
-  #[tokio::test]
-  async fn test_secret_key_transform() {
-    for i in 0..100 {
-      let kind = match i % 3 {
-        0 => 16,
-        1 => 24,
-        2 => 32,
-        _ => unreachable!(),
-      };
-      let key = SecretKey::random(kind);
-      let mut buf = vec![0; key.encoded_len()];
-      let encoded_len = key.encode(&mut buf).unwrap();
-      assert_eq!(encoded_len, key.encoded_len());
-      let mut buf1 = vec![];
-      let encoded_len1 = key.encode_to_writer(&mut buf1).unwrap();
-      assert_eq!(encoded_len1, key.encoded_len());
-      let mut buf2 = vec![];
-      let encoded_len2 = key.encode_to_async_writer(&mut buf2).await.unwrap();
-      assert_eq!(encoded_len2, key.encoded_len());
-
-      let (decoded_len, decoded) = SecretKey::decode(&buf).unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, key);
-      let (decoded_len, decoded) = SecretKey::decode(&buf1).unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, key);
-      let (decoded_len, decoded) = SecretKey::decode(&buf2).unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, key);
-
-      let (decoded_len, decoded) =
-        SecretKey::decode_from_reader(&mut std::io::Cursor::new(&buf)).unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, key);
-      let (decoded_len, decoded) =
-        SecretKey::decode_from_reader(&mut std::io::Cursor::new(&buf1)).unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, key);
-      let (decoded_len, decoded) =
-        SecretKey::decode_from_reader(&mut std::io::Cursor::new(&buf2)).unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, key);
-
-      let (decoded_len, decoded) =
-        SecretKey::decode_from_async_reader(&mut futures::io::Cursor::new(&buf))
-          .await
-          .unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, key);
-      let (decoded_len, decoded) =
-        SecretKey::decode_from_async_reader(&mut futures::io::Cursor::new(&buf1))
-          .await
-          .unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, key);
-      let (decoded_len, decoded) =
-        SecretKey::decode_from_async_reader(&mut futures::io::Cursor::new(&buf2))
-          .await
-          .unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, key);
-    }
-  }
-
-  #[tokio::test]
-  async fn test_secret_keys_transform() {
-    for i in 0..100 {
-      let keys = SecretKeys::random(i);
-      let mut buf = vec![0; keys.encoded_len()];
-      let encoded_len = keys.encode(&mut buf).unwrap();
-      assert_eq!(encoded_len, keys.encoded_len());
-
-      let (decoded_len, decoded) = SecretKeys::decode(&buf).unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, keys);
-
-      let (decoded_len, decoded) =
-        SecretKeys::decode_from_reader(&mut std::io::Cursor::new(&buf)).unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, keys);
-
-      let (decoded_len, decoded) =
-        SecretKeys::decode_from_async_reader(&mut futures::io::Cursor::new(&buf))
-          .await
-          .unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, keys);
-    }
   }
 }

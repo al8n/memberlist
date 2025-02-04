@@ -1,7 +1,7 @@
 use std::future::Future;
 
+use crate::types::{Meta, TinyVec};
 use bytes::Bytes;
-use memberlist_types::{Meta, TinyVec};
 
 /// Used to manage node related events.
 #[auto_impl::auto_impl(Box, Arc)]

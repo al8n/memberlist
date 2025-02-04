@@ -5,8 +5,6 @@ use std::{collections::HashSet, net::IpAddr, str::FromStr};
 /// Classless Inter-Domain Routing (CIDR) policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[repr(transparent)]
-#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct CIDRsPolicy {
   allowed_cidrs: Option<HashSet<IpNet>>,
 }

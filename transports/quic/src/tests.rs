@@ -18,7 +18,7 @@ use memberlist_core::{
   },
   types::{Label, LabelBufMutExt, Message},
 };
-use nodecraft::{CheapClone, Transformable};
+use nodecraft::CheapClone;
 use smol_str::SmolStr;
 
 use crate::{QuicAcceptor, QuicConnection, QuicConnector, QuicStream, StreamLayer};

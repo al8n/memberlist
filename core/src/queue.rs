@@ -421,7 +421,6 @@ mod tests {
   use bytes::{BufMut, Bytes, BytesMut};
   use futures::FutureExt;
   use smol_str::SmolStr;
-  use transformable::Transformable;
 
   use crate::{broadcast::MemberlistBroadcast, types::Message};
 
@@ -437,8 +436,8 @@ mod tests {
 
   impl<I, A> crate::transport::Wire for DummyWire<I, A>
   where
-    I: Transformable + Send + Sync + 'static,
-    A: Transformable + Send + Sync + 'static,
+    I: Send + Sync + 'static,
+    A: Send + Sync + 'static,
   {
     type Error = std::io::Error;
     type Address = A;

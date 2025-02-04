@@ -558,7 +558,6 @@ where
             r.id().cheap_clone(),
             self.local_id().cheap_clone(),
           )),
-          _ => unreachable!(),
         };
         state.run(self)
       })

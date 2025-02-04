@@ -1,6 +1,5 @@
-use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Bytes, BytesMut};
-use nodecraft::{CheapClone, Transformable};
+use nodecraft::CheapClone;
 
 /// Invalid meta error.
 #[derive(Debug, thiserror::Error)]
@@ -198,43 +197,6 @@ pub enum MetaError {
   /// Encode buffer too small.
   #[error("the buffer did not contain enough bytes to encode meta")]
   BufferTooSmall,
-}
-
-impl Transformable for Meta {
-  type Error = MetaError;
-
-  fn encode(&self, dst: &mut [u8]) -> Result<usize, Self::Error> {
-    let encoded_len = self.encoded_len();
-    if dst.len() < self.encoded_len() {
-      return Err(Self::Error::BufferTooSmall);
-    }
-
-    NetworkEndian::write_u16(dst, encoded_len as u16);
-    dst[2..encoded_len].copy_from_slice(self.as_bytes());
-    Ok(encoded_len)
-  }
-
-  fn encoded_len(&self) -> usize {
-    core::mem::size_of::<u16>() + self.len()
-  }
-
-  fn decode(src: &[u8]) -> Result<(usize, Self), Self::Error>
-  where
-    Self: Sized,
-  {
-    if src.len() < core::mem::size_of::<u16>() {
-      return Err(Self::Error::NotEnoughBytes);
-    }
-
-    let len = NetworkEndian::read_u16(&src[0..2]) as usize;
-    if len > src.len() {
-      return Err(Self::Error::NotEnoughBytes);
-    }
-
-    Self::try_from(&src[2..len])
-      .map_err(Self::Error::LargeMeta)
-      .map(|meta| (len, meta))
-  }
 }
 
 #[cfg(test)]

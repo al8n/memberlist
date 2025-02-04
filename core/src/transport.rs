@@ -3,7 +3,7 @@ use core::future::Future;
 use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
 use futures::AsyncRead;
-pub use nodecraft::{resolver::AddressResolver, CheapClone, Transformable, *};
+pub use nodecraft::{resolver::AddressResolver, CheapClone, *};
 
 use crate::types::*;
 
@@ -11,9 +11,6 @@ use super::*;
 
 mod stream;
 pub use stream::*;
-
-mod lpe;
-pub use lpe::*;
 
 /// Predefined unit tests for the transport module
 #[cfg(any(test, feature = "test"))]
@@ -257,10 +254,10 @@ pub trait Wire: Send + Sync + 'static {
   type Error: std::error::Error + Send + Sync + 'static;
 
   /// The id type used to identify nodes
-  type Id: Transformable;
+  type Id: Send + Sync + 'static;
 
   /// The resolved address type used to identify nodes
-  type Address: Transformable;
+  type Address: Send + Sync + 'static;
 
   /// Returns the encoded length of the given message
   fn encoded_len(msg: &Message<Self::Id, Self::Address>) -> usize;

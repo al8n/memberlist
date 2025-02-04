@@ -99,7 +99,7 @@ where
   }
 
   #[cfg(feature = "encryption")]
-  fn keyring(&self) -> Option<&memberlist_types::SecretKeyring> {
+  fn keyring(&self) -> Option<&crate::types::SecretKeyring> {
     unimplemented!()
   }
 
@@ -160,7 +160,7 @@ where
   async fn send_packets(
     &self,
     _: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    _: memberlist_types::TinyVec<
+    _: crate::types::TinyVec<
       Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
     >,
   ) -> Result<(usize, R::Instant), Self::Error> {

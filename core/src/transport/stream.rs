@@ -4,7 +4,7 @@ use futures::Stream;
 
 use super::*;
 
-use memberlist_types::OneOrMore;
+use crate::types::OneOrMore;
 
 use super::Message;
 

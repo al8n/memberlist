@@ -6,14 +6,6 @@ pub struct UnknownDelegateVersion(u8);
 /// Delegate version
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
-#[cfg_attr(
-  feature = "rkyv",
-  derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
-)]
-#[cfg_attr(
-  feature = "rkyv",
-  rkyv(compare(PartialEq), derive(Debug, Copy, Clone, Eq, PartialEq, Hash),)
-)]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum DelegateVersion {
@@ -40,24 +32,6 @@ impl TryFrom<u8> for DelegateVersion {
   }
 }
 
-#[cfg(feature = "rkyv")]
-const _: () = {
-  impl From<ArchivedDelegateVersion> for DelegateVersion {
-    fn from(value: ArchivedDelegateVersion) -> Self {
-      match value {
-        ArchivedDelegateVersion::V1 => Self::V1,
-      }
-    }
-  }
-
-  impl From<DelegateVersion> for ArchivedDelegateVersion {
-    fn from(value: DelegateVersion) -> Self {
-      match value {
-        DelegateVersion::V1 => Self::V1,
-      }
-    }
-  }
-};
 
 /// Unknown protocol version
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, thiserror::Error)]
@@ -67,14 +41,6 @@ pub struct UnknownProtocolVersion(u8);
 /// Protocol version
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
-#[cfg_attr(
-  feature = "rkyv",
-  derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
-)]
-#[cfg_attr(
-  feature = "rkyv",
-  rkyv(compare(PartialEq), derive(Debug, Copy, Clone, Eq, PartialEq, Hash),)
-)]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ProtocolVersion {
@@ -100,25 +66,6 @@ impl TryFrom<u8> for ProtocolVersion {
     }
   }
 }
-
-#[cfg(feature = "rkyv")]
-const _: () = {
-  impl From<ArchivedProtocolVersion> for ProtocolVersion {
-    fn from(value: ArchivedProtocolVersion) -> Self {
-      match value {
-        ArchivedProtocolVersion::V1 => Self::V1,
-      }
-    }
-  }
-
-  impl From<ProtocolVersion> for ArchivedProtocolVersion {
-    fn from(value: ProtocolVersion) -> Self {
-      match value {
-        ProtocolVersion::V1 => Self::V1,
-      }
-    }
-  }
-};
 
 #[cfg(test)]
 mod tests {

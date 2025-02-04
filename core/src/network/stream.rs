@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use agnostic_lite::AsyncSpawner;
+use nodecraft::CheapClone;
 use smol_str::SmolStr;
 
 use crate::delegate::DelegateError;
