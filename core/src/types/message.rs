@@ -12,6 +12,63 @@ macro_rules! enum_wrapper {
       ), +$(,)?
     }
   ) => {
+    paste::paste! {
+      #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      #[repr(u8)]
+      #[non_exhaustive]
+      $vis enum [< $name Type >] {
+        Compound = 0,
+        $(
+          $(#[$variant_meta])*
+          $variant = $variant_tag,
+        )*
+      }
+
+      impl core::fmt::Display for [< $name Type >] {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+          write!(f, "{}", self.kind())
+        }
+      }
+
+      impl TryFrom<u8> for [< $name Type >] {
+        type Error = u8;
+
+        fn try_from(value: u8) -> Result<Self, Self::Error> {
+          match value {
+            0 => Ok(Self::Compound),
+            $(
+              $variant_tag => Ok(Self::$variant),
+            )*
+            _ => Err(value),
+          }
+        }
+      }
+
+      impl [< $name Type >] {
+        /// Returns the tag of this message type for encoding/decoding.
+        #[inline]
+        pub const fn tag(&self) -> u8 {
+          match self {
+            Self::Compound => 0,
+            $(
+              Self::$variant => $variant_tag,
+            )*
+          }
+        }
+
+        /// Returns the kind of this message.
+        #[inline]
+        pub const fn kind(&self) -> &'static str {
+          match self {
+            Self::Compound => "Compound",
+            $(
+              Self::$variant => stringify!([< $variant:camel >]),
+            )*
+          }
+        }
+      }
+    }
+
     $(#[$outer])*
     $vis enum $name $(< $($generic),+ >)? {
       $(
@@ -133,6 +190,26 @@ impl<I, A> Message<I, A> {
 
   /// Returns the tag of the compound message type for encoding/decoding.
   pub const COMPOUND_TAG: u8 = 0;
+
+  /// Returns the encoded length of the message
+  pub fn encoded_len(&self) -> usize
+  where
+    I: Data,
+    A: Data,
+  {
+    1 + match self {
+      Self::Ping(ping) => ping.encoded_len(),
+      Self::IndirectPing(indirect_ping) => indirect_ping.encoded_len(),
+      Self::Ack(ack) => ack.encoded_len(),
+      Self::Suspect(suspect) => suspect.encoded_len(),
+      Self::Alive(alive) => alive.encoded_len(),
+      Self::Dead(dead) => dead.encoded_len(),
+      Self::PushPull(push_pull) => push_pull.encoded_len(),
+      Self::UserData(bytes) => super::encoded_length_delimited_len(bytes.len()),
+      Self::Nack(nack) => nack.encoded_len(),
+      Self::ErrorResponse(error_response) => error_response.encoded_len(),
+    }
+  }
 }
 
 const USER_DATA_LEN_SIZE: usize = core::mem::size_of::<u32>();

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use agnostic_lite::AsyncSpawner;
+use bytes::Buf;
 use nodecraft::CheapClone;
 use smol_str::SmolStr;
 
@@ -58,7 +59,7 @@ where
     &self,
     node_state: PushPull<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
-    self.verify_protocol(node_state.states().as_slice()).await?;
+    self.verify_protocol(node_state.states()).await?;
 
     // Invoke the merge delegate if any
     if node_state.join() {
@@ -84,7 +85,7 @@ where
 
     // Merge the membership state
     let (join, user_data, states) = node_state.into_components();
-    self.merge_state(states.as_slice()).await;
+    self.merge_state(&states).await;
 
     // Invoke the delegate for user state
     if let Some(d) = &self.delegate {
@@ -160,7 +161,8 @@ where
 
           #[cfg(feature = "metrics")]
           {
-            node_state_counts[this.state() as u8 as usize].1 += 1;
+            let state: u8 = this.state().into();
+            node_state_counts[state as usize].1 += 1;
           }
           this
         })
@@ -213,12 +215,11 @@ where
 
     #[cfg(feature = "metrics")]
     {
-      use crate::transport::Wire;
       metrics::gauge!(
         "memberlist.size.local",
         self.inner.opts.metric_labels.iter()
       )
-      .set(<T::Wire as Wire>::encoded_len(&msg) as f64);
+      .set(msg.encoded_len() as f64);
     }
 
     self.send_message(conn, msg).await
@@ -252,7 +253,7 @@ where
       <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
     ));
 
-    let msg = match self.read_message(&addr, &mut conn).await {
+    let mut msg = match self.read_message(&addr, &mut conn).await {
       Ok((_read, msg)) => {
         #[cfg(feature = "metrics")]
         {
@@ -277,8 +278,29 @@ where
       }
     };
 
-    match msg {
-      Message::Ping(ping) => {
+    if msg.is_empty() {
+      tracing::warn!(local=%self.inner.id, remote = %addr, "memberlist.stream: received empty message");
+      return;
+    }
+
+    let mt = match MessageType::try_from(msg[0]) {
+      Ok(mt) => mt,
+      Err(e) => {
+        tracing::error!(local=%self.inner.id, remote = %addr, "memberlist.stream: receive unknown message type value {e}");
+        return;
+      }
+    };
+
+    msg.advance(1);
+    match mt {
+      MessageType::Ping => {
+        let ping = match Ping::<T::Id, T::ResolvedAddress>::decode(&mut msg) {
+          Ok(p) => p.1,
+          Err(e) => {
+            tracing::error!(local=%self.inner.id, remote = %addr, err=%e, "memberlist.stream: failed to decode ping message");
+            return;
+          }
+        };
         if ping.target().id().ne(self.local_id()) {
           tracing::error!(local=%self.inner.id, remote = %addr, "memberlist.stream: got ping for unexpected node {}", ping.target());
           return;
@@ -292,7 +314,14 @@ where
           tracing::warn!(err=%e, remote_node = %addr, "memberlist.stream: failed to cache stream");
         }
       }
-      Message::PushPull(pp) => {
+      MessageType::PushPull => {
+        let pp = match PushPull::<T::Id, T::ResolvedAddress>::decode(&msg) {
+          Ok(pp) => pp.1,
+          Err(e) => {
+            tracing::error!(local=%self.inner.id, remote = %addr, err=%e, "memberlist.stream: failed to decode push pull message");
+            return;
+          }
+        };
         // Increment counter of pending push/pulls
         let num_concurrent = self.inner.hot.push_pull_req.fetch_add(1, Ordering::SeqCst);
         scopeguard::defer! {
@@ -318,14 +347,14 @@ where
           tracing::warn!(err=%e, remote_node = %addr, "memberlist.stream: failed to cache stream");
         }
       }
-      Message::UserData(data) => {
+      MessageType::UserData => {
         if let Some(d) = &self.delegate {
-          tracing::trace!(remote_node = %addr, data=?data.as_ref(), "memberlist.stream: notify user message");
-          d.notify_message(data).await
+          tracing::trace!(remote_node = %addr, data=?msg.as_ref(), "memberlist.stream: notify user message");
+          d.notify_message(msg).await
         }
       }
-      msg => {
-        tracing::error!(remote_node = %addr, "memberlist.stream: received invalid msg type {}", msg.kind());
+      mt => {
+        tracing::error!(remote_node = %addr, type=%mt, "memberlist.stream: received invalid msg");
       }
     }
   }

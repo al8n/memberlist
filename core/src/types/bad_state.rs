@@ -147,7 +147,7 @@ macro_rules! bad_bail {
                 let wire_type = super::WireType::try_from(wire_type)
                   .map_err(|_| super::DecodeError::new(format!("invalid wire type value {wire_type}")))?;
                 offset += super::skip(wire_type, &src[offset..])?;
-              } 
+              }
             }
           }
 
@@ -197,27 +197,37 @@ macro_rules! bad_bail {
       }
     }
 
-    #[cfg(test)]
+    #[cfg(feature = "arbitrary")]
     const _: () = {
-      use rand::{random, Rng, rng, distr::Alphanumeric};
-      impl $name<::smol_str::SmolStr> {
-        pub(crate) fn generate(size: usize) -> Self {
-          let node = rng()
-            .sample_iter(Alphanumeric)
-            .take(size)
-            .collect::<Vec<u8>>();
-          let node = String::from_utf8(node).unwrap().into();
+      use arbitrary::{Arbitrary, Unstructured};
 
-          let from = rng()
-            .sample_iter(Alphanumeric)
-            .take(size)
-            .collect::<Vec<u8>>();
-          let from = String::from_utf8(from).unwrap().into();
+      impl<'a, I> Arbitrary<'a> for $name<I>
+      where
+        I: Arbitrary<'a>,
+      {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+          Ok(Self {
+            incarnation: u.arbitrary()?,
+            node: u.arbitrary()?,
+            from: u.arbitrary()?,
+          })
+        }
+      }
+    };
 
+    #[cfg(feature = "quickcheck")]
+    const _: () = {
+      use quickcheck::{Arbitrary, Gen};
+
+      impl<I> Arbitrary for $name<I>
+      where
+        I: Arbitrary,
+      {
+        fn arbitrary(g: &mut Gen) -> Self {
           Self {
-            incarnation: random(),
-            node,
-            from,
+            incarnation: u32::arbitrary(g),
+            node: I::arbitrary(g),
+            from: I::arbitrary(g),
           }
         }
       }

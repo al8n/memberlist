@@ -34,8 +34,11 @@ impl Ack {
   #[inline]
   pub fn encoded_len(&self) -> usize {
     let sequence_number_len = 1 + encoded_u32_varint_len(self.sequence_number);
-    let payload_len = 1 + encoded_u32_varint_len(self.payload.len() as u32) + self.payload.len();
+    if self.payload.is_empty() {
+      return sequence_number_len;
+    }
 
+    let payload_len = 1 + encoded_u32_varint_len(self.payload.len() as u32) + self.payload.len();
     sequence_number_len + payload_len
   }
 
@@ -57,6 +60,10 @@ impl Ack {
       .sequence_number
       .encode(&mut buf[offset..])
       .map_err(|_| InsufficientBuffer::with_information(self.encoded_len() as u64, len as u64))?;
+
+    if self.payload.is_empty() {
+      return Ok(offset);
+    }
 
     if offset + 1 >= len {
       return Err(InsufficientBuffer::with_information(
@@ -133,18 +140,19 @@ impl Ack {
 
     while offset < src.len() {
       // Parse the tag and wire type
-      let (wire_type, tag) = split(src[offset]);
+      let b = src[offset];
       offset += 1;
 
-      let wire_type = WireType::try_from(wire_type)
-        .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
-      match tag {
-        Self::SEQUENCE_NUMBER_TAG => {
-          let (bytes_read, value) = decode_varint::<u32>(wire_type, &src[offset..])?;
+      match b {
+        Self::SEQUENCE_NUMBER_BYTE => {
+          let (bytes_read, value) = decode_varint::<u32>(WireType::Varint, &src[offset..])?;
           offset += bytes_read;
           sequence_number = Some(value);
         }
         _ => {
+          let (wire_type, _) = split(src[offset]);
+          let wire_type = WireType::try_from(wire_type)
+            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
           // Skip unknown fields
           offset += skip(wire_type, &src[offset..])?;
         }
@@ -285,32 +293,45 @@ impl Nack {
   }
 }
 
-#[cfg(test)]
+#[cfg(feature = "arbitrary")]
 const _: () = {
-  use rand::random;
+  use arbitrary::{Arbitrary, Unstructured};
 
-  impl Ack {
-    /// Create a new ack response with the given sequence number and random payload.
-    #[inline]
-    pub fn random(payload_size: usize) -> Self {
-      let sequence_number = random();
-      let payload = (0..payload_size)
-        .map(|_| random())
-        .collect::<Vec<_>>()
-        .into();
+  impl<'a> Arbitrary<'a> for Ack {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+      Ok(Self {
+        sequence_number: u.arbitrary()?,
+        payload: u.arbitrary::<Vec<u8>>()?.into(),
+      })
+    }
+  }
+
+  impl<'a> Arbitrary<'a> for Nack {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+      Ok(Self {
+        sequence_number: u.arbitrary()?,
+      })
+    }
+  }
+};
+
+#[cfg(feature = "quickcheck")]
+const _: () = {
+  use quickcheck::{Arbitrary, Gen};
+
+  impl Arbitrary for Ack {
+    fn arbitrary(g: &mut Gen) -> Self {
       Self {
-        sequence_number,
-        payload,
+        sequence_number: u32::arbitrary(g),
+        payload: Vec::<u8>::arbitrary(g).into(),
       }
     }
   }
 
-  impl Nack {
-    /// Create a new nack response with the given sequence number.
-    #[inline]
-    pub fn random() -> Self {
+  impl Arbitrary for Nack {
+    fn arbitrary(g: &mut Gen) -> Self {
       Self {
-        sequence_number: random(),
+        sequence_number: u32::arbitrary(g),
       }
     }
   }
@@ -319,45 +340,45 @@ const _: () = {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use arbitrary::{Arbitrary, Unstructured};
+  use quickcheck_macros::quickcheck;
 
-  #[test]
-  fn test_ack_response_encode_decode() {
-    for i in 0..100 {
-      // Generate and test 100 random instances
-      let ack_response = Ack::random(i);
-      let mut buf = vec![0; ack_response.encoded_len()];
-      let encoded = ack_response.encode(&mut buf).unwrap();
-      assert_eq!(encoded, buf.len());
-      let (read, decoded) = Ack::decode(&buf).unwrap();
-      assert_eq!(read, buf.len());
-      assert_eq!(ack_response.sequence_number, decoded.sequence_number);
-      assert_eq!(ack_response.payload, decoded.payload);
-    }
+  #[quickcheck]
+  fn fuzzy_ack_encode_decode(ack: Ack) -> bool {
+    let mut buf = vec![0; ack.encoded_len()];
+    let Ok(written) = ack.encode(&mut buf) else {
+      return false;
+    };
+    let Ok((readed, decoded)) = Ack::decode(&buf) else {
+      return false;
+    };
+    ack == decoded && written == readed
   }
 
-  #[test]
-  fn test_nack_response_encode_decode() {
-    for _ in 0..100 {
-      // Generate and test 100 random instances
-      let nack_response = Nack::random();
-      let mut buf = vec![0; nack_response.encoded_len()];
-      let encoded = nack_response.encode(&mut buf).unwrap();
-      assert_eq!(encoded, buf.len());
-      let (read, decoded) = Nack::decode(&buf).unwrap();
-      assert_eq!(read, buf.len());
-      assert_eq!(nack_response.sequence_number, decoded.sequence_number);
-    }
+  #[quickcheck]
+  fn fuzzy_nack_encode_decode(nack: Nack) -> bool {
+    let mut buf = vec![0; nack.encoded_len()];
+    let Ok(written) = nack.encode(&mut buf) else {
+      return false;
+    };
+    let Ok((readed, decoded)) = Nack::decode(&buf) else {
+      return false;
+    };
+    nack == decoded && written == readed
   }
 
   #[test]
   fn test_access() {
-    let mut ack = Ack::random(100);
+    let mut data = vec![0; 1024];
+    rand::fill(&mut data[..]);
+    let mut data = Unstructured::new(&data);
+    let mut ack = Ack::arbitrary(&mut data).unwrap();
     ack.set_payload(Bytes::from_static(b"hello world"));
     ack.set_sequence_number(100);
     assert_eq!(ack.sequence_number(), 100);
     assert_eq!(ack.payload(), &Bytes::from_static(b"hello world"));
 
-    let mut nack = Nack::random();
+    let mut nack = Nack::arbitrary(&mut data).unwrap();
     nack.set_sequence_number(100);
     assert_eq!(nack.sequence_number(), 100);
   }

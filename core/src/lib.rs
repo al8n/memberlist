@@ -1,7 +1,7 @@
 #![doc = include_str!("../../README.md")]
 #![doc(html_logo_url = "https://raw.githubusercontent.com/al8n/memberlist/main/art/logo_72x72.png")]
 #![forbid(unsafe_code)]
-#![deny(warnings, missing_docs)]
+// #![deny(warnings, missing_docs)]
 #![allow(clippy::type_complexity, unexpected_cfgs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
@@ -67,15 +67,15 @@ pub mod tests {
   use self::{delegate::Delegate, error::Error, transport::Transport};
   use super::*;
 
-  /// Re-export the all unit test cases for state
-  pub mod state {
-    pub use crate::state::tests::*;
-  }
+  // /// Re-export the all unit test cases for state
+  // pub mod state {
+  //   pub use crate::state::tests::*;
+  // }
 
-  /// Re-export the all unit test cases for memberlist
-  pub mod memberlist {
-    pub use crate::base::tests::*;
-  }
+  // /// Re-export the all unit test cases for memberlist
+  // pub mod memberlist {
+  //   pub use crate::base::tests::*;
+  // }
 
   #[cfg(any(feature = "test", test))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]

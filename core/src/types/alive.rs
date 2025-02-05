@@ -1,9 +1,9 @@
 use crate::types::encode_data;
 
 use super::{
-  decode_data, decode_length_delimited, decode_varint, encode_length_delimited,
-  encoded_data_len, encoded_length_delimited_len, merge, skip, split,
-  DecodeError, DelegateVersion, EncodeError, Meta, ProtocolVersion, WireType,
+  decode_data, decode_length_delimited, decode_varint, encode_length_delimited, encoded_data_len,
+  encoded_length_delimited_len, merge, skip, split, DecodeError, DelegateVersion, EncodeError,
+  Meta, ProtocolVersion, WireType,
 };
 
 use length_delimited::{encoded_u32_varint_len, InsufficientBuffer, LengthDelimitedEncoder};
@@ -105,7 +105,10 @@ impl<I, A> Alive<I, A> {
     A: super::Data,
   {
     let mut len = 1 + encoded_u32_varint_len(self.incarnation);
-    len += 1 + encoded_length_delimited_len(self.meta.len());
+
+    if !self.meta.is_empty() {
+      len += 1 + encoded_length_delimited_len(self.meta.len());
+    }
     len += 1 + encoded_data_len(self.node.id());
     len += 1 + encoded_data_len(self.node.address());
     len += 1 + 1;
@@ -121,8 +124,8 @@ impl<I, A> Alive<I, A> {
     A: super::Data,
   {
     macro_rules! bail {
-      ($this:ident($offset:ident, $len:ident)) => {
-        if $offset + 1 >= $len {
+      ($this:ident($offset:expr, $len:ident)) => {
+        if $offset >= $len {
           return Err(
             InsufficientBuffer::with_information($this.encoded_len() as u64, $len as u64).into(),
           );
@@ -141,11 +144,13 @@ impl<I, A> Alive<I, A> {
       .encode(&mut buf[offset..])
       .map_err(|_| InsufficientBuffer::with_information(self.encoded_len() as u64, len as u64))?;
 
-    bail!(self(offset, len));
-    buf[offset] = META_BYTE;
-    offset += 1;
-    offset += encode_length_delimited(self.meta.as_bytes(), &mut buf[offset..])
-      .map_err(|_| InsufficientBuffer::with_information(self.encoded_len() as u64, len as u64))?;
+    if !self.meta.is_empty() {
+      bail!(self(offset, len));
+      buf[offset] = META_BYTE;
+      offset += 1;
+      offset += encode_length_delimited(self.meta.as_bytes(), &mut buf[offset..])
+        .map_err(|_| InsufficientBuffer::with_information(self.encoded_len() as u64, len as u64))?;
+    }
 
     bail!(self(offset, len));
     buf[offset] = Self::id_byte();
@@ -160,13 +165,11 @@ impl<I, A> Alive<I, A> {
     offset += encode_data(self.node.address(), &mut buf[offset..])
       .map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
 
-    offset += 3;
-    bail!(self(offset, len));
-
+    bail!(self(offset + 4, len));
     buf[offset] = PROTOCOL_VERSION_BYTE;
-    buf[offset] = self.protocol_version as u8;
+    buf[offset] = self.protocol_version.into();
     buf[offset] = DELEGATE_VERSION_BYTE;
-    buf[offset] = self.delegate_version as u8;
+    buf[offset] = self.delegate_version.into();
     offset += 1;
 
     Ok(offset)
@@ -206,22 +209,14 @@ impl<I, A> Alive<I, A> {
           if offset >= src.len() {
             return Err(DecodeError::new("buffer underflow"));
           }
-          delegate_version = Some(
-            src[offset]
-              .try_into()
-              .map_err(|_| DecodeError::new("invalid delegate version"))?,
-          );
+          delegate_version = Some(src[offset].into());
           offset += 1;
         }
         PROTOCOL_VERSION_BYTE => {
           if offset >= src.len() {
             return Err(DecodeError::new("buffer underflow"));
           }
-          protocol_version = Some(
-            src[offset]
-              .try_into()
-              .map_err(|_| DecodeError::new("invalid protocol version"))?,
-          );
+          protocol_version = Some(src[offset].into());
           offset += 1;
         }
         b if b == Self::id_byte() => {
@@ -320,35 +315,47 @@ impl<I: CheapClone, A: CheapClone> CheapClone for Alive<I, A> {
   }
 }
 
-#[cfg(test)]
+#[cfg(feature = "arbitrary")]
 const _: () = {
-  use std::net::SocketAddr;
+  use arbitrary::{Arbitrary, Unstructured};
 
-  use rand::{distr::Alphanumeric, random, rng, Rng};
-  use smol_str::SmolStr;
+  impl<'a, I, A> Arbitrary<'a> for Alive<I, A>
+  where
+    I: Arbitrary<'a>,
+    A: Arbitrary<'a>,
+  {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+      Ok(Self {
+        incarnation: u.arbitrary()?,
+        meta: u.arbitrary()?,
+        node: {
+          let id = u.arbitrary()?;
+          let addr = u.arbitrary()?;
+          Node::new(id, addr)
+        },
+        protocol_version: u.arbitrary()?,
+        delegate_version: u.arbitrary()?,
+      })
+    }
+  }
+};
 
-  impl Alive<SmolStr, SocketAddr> {
-    pub(crate) fn random(size: usize) -> Self {
-      let id = rng()
-        .sample_iter(Alphanumeric)
-        .take(size)
-        .collect::<Vec<u8>>();
-      let id = String::from_utf8(id).unwrap().into();
+#[cfg(feature = "quickcheck")]
+const _: () = {
+  use quickcheck::Arbitrary;
+
+  impl<I, A> Arbitrary for Alive<I, A>
+  where
+    I: Arbitrary,
+    A: Arbitrary,
+  {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
       Self {
-        incarnation: random(),
-        meta: (0..size)
-          .map(|_| random::<u8>())
-          .collect::<Vec<_>>()
-          .try_into()
-          .unwrap(),
-        node: Node::new(
-          id,
-          format!("127.0.0.1:{}", rng().random_range(0..65535))
-            .parse()
-            .unwrap(),
-        ),
-        protocol_version: ProtocolVersion::V1,
-        delegate_version: DelegateVersion::V1,
+        incarnation: u32::arbitrary(g),
+        meta: Meta::arbitrary(g),
+        node: Node::new(I::arbitrary(g), A::arbitrary(g)),
+        protocol_version: ProtocolVersion::arbitrary(g),
+        delegate_version: DelegateVersion::arbitrary(g),
       }
     }
   }
@@ -356,6 +363,10 @@ const _: () = {
 
 #[cfg(test)]
 mod tests {
+  use std::net::SocketAddr;
+
+  use arbitrary::{Arbitrary, Unstructured};
+
   use super::*;
 
   // #[test]
@@ -373,7 +384,11 @@ mod tests {
 
   #[test]
   fn test_access() {
-    let mut alive = Alive::random(16);
+    let mut data = vec![0; 1024];
+    rand::fill(&mut data[..]);
+    let mut data = Unstructured::new(&data);
+
+    let mut alive = Alive::<String, SocketAddr>::arbitrary(&mut data).unwrap();
     alive.set_incarnation(1);
     assert_eq!(alive.incarnation(), 1);
     alive.set_meta(Meta::empty());

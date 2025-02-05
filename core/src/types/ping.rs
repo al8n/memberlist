@@ -1,5 +1,5 @@
-use nodecraft::{CheapClone, Node};
 use length_delimited::Varint;
+use nodecraft::{CheapClone, Node};
 
 macro_rules! bail_ping {
   (
@@ -106,8 +106,8 @@ macro_rules! bail_ping {
           A: super::Data,
         {
           macro_rules! bail {
-            ($this:ident($offset:ident, $len:ident)) => {
-              if $offset + 1 >= $len {
+            ($this:ident($offset:expr, $len:ident)) => {
+              if $offset >= $len {
                 return Err(super::EncodeError::InsufficientBuffer(super::InsufficientBuffer::with_information($this.encoded_len() as u64, $len as u64)));
               }
             }
@@ -129,20 +129,19 @@ macro_rules! bail_ping {
 
           bail!(self(offset, len));
           offset += super::encode_data(self.target.id(), &mut buf[offset..]).map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
-          
+
           bail!(self(offset, len));
           offset += super::encode_data(self.target.address(), &mut buf[offset..]).map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
 
           Ok(offset)
         }
-      
+
         /// Decodes the message from the buffer
         pub fn decode(src: &[u8]) -> Result<(usize, Self), super::DecodeError>
         where
           I: super::Data,
           A: super::Data,
         {
-          let mut offset = 0;
           let mut sequence_number = None;
           let mut source_id = None;
           let mut source_addr = None;
@@ -185,7 +184,7 @@ macro_rules! bail_ping {
                 let wire_type = super::WireType::try_from(wire_type)
                   .map_err(|_| super::DecodeError::new(format!("invalid wire type value {wire_type}")))?;
                 offset += super::skip(wire_type, &src[offset..])?;
-              } 
+              }
             }
           }
 
@@ -247,28 +246,39 @@ macro_rules! bail_ping {
       }
     }
 
-    #[cfg(test)]
+    #[cfg(feature = "arbitrary")]
     const _: () = {
-      use rand::{Rng, distr::Alphanumeric, rng, random};
+      use arbitrary::{Arbitrary, Unstructured};
 
-      impl $name<smol_str::SmolStr, std::net::SocketAddr> {
-        pub(crate) fn generate(size: usize) -> Self {
-          let trng = rng();
-          let source = trng.sample_iter(&Alphanumeric).take(size).collect::<Vec<u8>>();
-          let source = String::from_utf8(source).unwrap();
-          let source = Node::new(source.into(), format!("127.0.0.1:{}", rng().random_range(0..65535))
-          .parse()
-          .unwrap());
-          let trng = rng();
-          let target = trng.sample_iter(&Alphanumeric).take(size).collect::<Vec<u8>>();
-          let target = String::from_utf8(target).unwrap();
-          let target = Node::new(target.into(), format!("127.0.0.1:{}", rng().random_range(0..65535)).parse().unwrap());
+      impl<'a, I, A> Arbitrary<'a> for $name<I, A>
+      where
+        I: Arbitrary<'a>,
+        A: Arbitrary<'a>,
+      {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+          let sequence_number = u.arbitrary()?;
+          let source_id = I::arbitrary(u)?;
+          let source_addr = A::arbitrary(u)?;
+          let target_id = I::arbitrary(u)?;
+          let target_addr = A::arbitrary(u)?;
+          Ok(Self::new(sequence_number, Node::new(source_id, source_addr), Node::new(target_id, target_addr)))
+        }
+      }
+    };
 
-          Self {
-            sequence_number: random(),
-            source,
-            target,
-          }
+    #[cfg(feature = "quickcheck")]
+    const _: () = {
+      use quickcheck::{Arbitrary, Gen};
+
+      impl<I: Arbitrary, A: Arbitrary> Arbitrary for $name<I, A> {
+        fn arbitrary(g: &mut Gen) -> Self {
+          let sequence_number = u32::arbitrary(g);
+          let source_id = I::arbitrary(g);
+          let source_addr = A::arbitrary(g);
+          let target_id = I::arbitrary(g);
+          let target_addr = A::arbitrary(g);
+
+          Self::new(sequence_number, Node::new(source_id, source_addr), Node::new(target_id, target_addr))
         }
       }
     };

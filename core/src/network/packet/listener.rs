@@ -1,4 +1,4 @@
-use crate::{base::MessageHandoff, transport::Wire};
+use crate::base::MessageHandoff;
 use agnostic_lite::AsyncSpawner;
 use either::Either;
 use nodecraft::CheapClone;
@@ -261,7 +261,7 @@ where
   ) -> Result<(), Error<T, D>> {
     // Check if we can piggy back any messages
     let bytes_avail = self.inner.transport.max_payload_size()
-      - <T::Wire as Wire>::encoded_len(&msg)
+      - msg.encoded_len()
       - self.inner.transport.packets_header_overhead();
 
     let mut msgs = self

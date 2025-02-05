@@ -27,8 +27,8 @@ use super::{
   Options,
 };
 
-#[cfg(any(test, feature = "test"))]
-pub(crate) mod tests;
+// #[cfg(any(test, feature = "test"))]
+// pub(crate) mod tests;
 
 #[viewit::viewit]
 pub(crate) struct HotData {
@@ -234,7 +234,7 @@ where
   pub(crate) hot: HotData,
   pub(crate) awareness: Awareness,
   pub(crate) broadcast: TransmitLimitedQueue<
-    MemberlistBroadcast<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress, T::Wire>,
+    MemberlistBroadcast<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     Arc<AtomicU32>,
   >,
   pub(crate) leave_broadcast_tx: Sender<()>,

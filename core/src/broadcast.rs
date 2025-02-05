@@ -2,8 +2,8 @@ use crate::{
   base::Memberlist,
   delegate::Delegate,
   error::Error,
-  transport::{Transport, Wire},
-  types::{Message, TinyVec},
+  transport::Transport,
+  types::{Data, Message, TinyVec},
 };
 use async_channel::Sender;
 
@@ -48,16 +48,13 @@ pub trait Broadcast: core::fmt::Debug + Send + Sync + 'static {
 }
 
 #[viewit::viewit]
-pub(crate) struct MemberlistBroadcast<I, A, W> {
+pub(crate) struct MemberlistBroadcast<I, A> {
   node: I,
   msg: Message<I, A>,
   notify: Option<async_channel::Sender<()>>,
-  _marker: std::marker::PhantomData<W>,
 }
 
-impl<I: core::fmt::Debug, A: core::fmt::Debug, W> core::fmt::Debug
-  for MemberlistBroadcast<I, A, W>
-{
+impl<I: core::fmt::Debug, A: core::fmt::Debug> core::fmt::Debug for MemberlistBroadcast<I, A> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct(std::any::type_name::<Self>())
       .field("node", &self.node)
@@ -66,9 +63,10 @@ impl<I: core::fmt::Debug, A: core::fmt::Debug, W> core::fmt::Debug
   }
 }
 
-impl<I, A, W> Broadcast for MemberlistBroadcast<I, A, W>
+impl<I, A> Broadcast for MemberlistBroadcast<I, A>
 where
   I: CheapClone
+    + Data
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -77,6 +75,7 @@ where
     + Sync
     + 'static,
   A: CheapClone
+    + Data
     + Eq
     + core::hash::Hash
     + core::fmt::Display
@@ -84,7 +83,6 @@ where
     + Send
     + Sync
     + 'static,
-  W: Wire<Id = I, Address = A>,
 {
   type Id = I;
   type Message = Message<I, A>;
@@ -102,7 +100,7 @@ where
   }
 
   fn encoded_len(msg: &Self::Message) -> usize {
-    W::encoded_len(msg)
+    msg.encoded_len()
   }
 
   async fn finished(&self) {
@@ -156,7 +154,6 @@ where
         node,
         msg,
         notify: notify_tx,
-        _marker: std::marker::PhantomData,
       })
       .await
   }
@@ -184,7 +181,7 @@ where
       // Determine the bytes used already
       let mut bytes_used = 0;
       for msg in to_send.iter() {
-        bytes_used += <T::Wire as Wire>::encoded_len(msg) + overhead;
+        bytes_used += msg.encoded_len() + overhead;
       }
 
       // Check space remaining for user messages
@@ -195,7 +192,7 @@ where
             .broadcast_messages(overhead, avail, |b| {
               let msg =
                 Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::UserData(b);
-              let len = <T::Wire as Wire>::encoded_len(&msg);
+              let len = msg.encoded_len();
               (len, msg.unwrap_user_data())
             })
             .await

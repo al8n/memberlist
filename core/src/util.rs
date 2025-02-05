@@ -1,7 +1,7 @@
 pub use is_global_ip::IsGlobalIp;
 pub use length_delimited::*;
 
-use crate::types::{Message, SmallVec, TinyVec};
+use crate::types::{Data, Message, SmallVec, TinyVec};
 
 pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
   let node_scale = ((n + 1) as f64).log10().ceil() as usize;
@@ -132,7 +132,7 @@ pub enum BatchHint {
 }
 
 /// Calculate batch hints for a slice of messages.
-fn batch_hints<I, A, W>(
+fn batch_hints<I, A>(
   fixed_payload_overhead: usize,
   batch_overhead: usize,
   msg_overhead: usize,
@@ -142,9 +142,8 @@ fn batch_hints<I, A, W>(
   msgs: &[Message<I, A>],
 ) -> SmallVec<BatchHint>
 where
-  I: Send + Sync + 'static,
-  A: Send + Sync + 'static,
-  W: crate::transport::Wire<Id = I, Address = A>,
+  I: Data + Send + Sync + 'static,
+  A: Data + Send + Sync + 'static,
 {
   let mut infos = SmallVec::new();
   let mut current_encoded_size = fixed_payload_overhead + batch_overhead;
@@ -156,7 +155,7 @@ where
   }
 
   if total_len == 1 {
-    let msg_encoded_len = W::encoded_len(&msgs[0]);
+    let msg_encoded_len = msgs[0].encoded_len();
     infos.push(BatchHint::One {
       idx: 0,
       encoded_size: fixed_payload_overhead + msg_encoded_len,
@@ -166,7 +165,7 @@ where
 
   let mut current_num_packets_in_batch = 0;
   for (idx, msg) in msgs.iter().enumerate() {
-    let msg_encoded_len = W::encoded_len(msg);
+    let msg_encoded_len = msg.encoded_len();
     if msg_encoded_len > max_encoded_message_size {
       infos.push(BatchHint::One {
         idx,
@@ -266,12 +265,11 @@ pub fn batch<I, A, M, W>(
   msgs: M,
 ) -> SmallVec<Batch<I, A>>
 where
-  I: Send + Sync + 'static,
-  A: Send + Sync + 'static,
+  I: Data + Send + Sync + 'static,
+  A: Data + Send + Sync + 'static,
   M: AsRef<[Message<I, A>]> + IntoIterator<Item = Message<I, A>>,
-  W: crate::transport::Wire<Id = I, Address = A>,
 {
-  let hints = batch_hints::<_, _, W>(
+  let hints = batch_hints(
     fixed_payload_overhead,
     batch_overhead,
     msg_overhead,

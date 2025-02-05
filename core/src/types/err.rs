@@ -30,18 +30,26 @@ impl ErrorResponse {
   /// Returns the encoded length of the error response
   #[inline]
   pub fn encoded_len(&self) -> usize {
+    if self.message.is_empty() {
+      return 0;
+    }
+
     let len = self.message.len();
     1 + encoded_u32_varint_len(len as u32) + len
   }
 
   /// Encodes the error response into the buffer
   pub fn encode(&self, buf: &mut [u8]) -> Result<usize, InsufficientBuffer> {
+    let msg_len = self.message.len();
+    if msg_len == 0 {
+      return Ok(0);
+    }
+
     let len = buf.len();
     let mut offset = 0;
     buf[offset] = Self::MESSAGE_BYTE;
     offset += 1;
 
-    let msg_len = self.message.len();
     offset += (msg_len as u32)
       .encode(&mut buf[offset..])
       .map_err(|_| InsufficientBuffer::with_information(self.encoded_len() as u64, len as u64))?;
@@ -70,7 +78,8 @@ impl ErrorResponse {
 
       match b {
         Self::MESSAGE_BYTE => {
-          let (bytes_read, value) = decode_length_delimited(WireType::Varint, &src[offset..])?;
+          let (bytes_read, value) =
+            decode_length_delimited(WireType::LengthDelimited, &src[offset..])?;
           offset += bytes_read;
 
           match core::str::from_utf8(value) {
@@ -133,37 +142,57 @@ impl From<SmolStr> for ErrorResponse {
   }
 }
 
-#[cfg(test)]
+#[cfg(feature = "arbitrary")]
 const _: () = {
-  use rand::{distr::Alphanumeric, Rng};
+  use arbitrary::{Arbitrary, Unstructured};
 
-  impl ErrorResponse {
-    fn generate(size: usize) -> Self {
-      let rng = rand::rng();
-      let err = rng
-        .sample_iter(&Alphanumeric)
-        .take(size)
-        .collect::<Vec<u8>>();
-      let err = String::from_utf8(err).unwrap();
-      Self::new(err)
+  impl<'a> Arbitrary<'a> for ErrorResponse {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+      let message = u.arbitrary::<String>()?;
+      Ok(Self::new(message))
+    }
+  }
+};
+
+#[cfg(feature = "quickcheck")]
+const _: () = {
+  use quickcheck::{Arbitrary, Gen};
+
+  impl Arbitrary for ErrorResponse {
+    fn arbitrary(g: &mut Gen) -> Self {
+      Self::new(String::arbitrary(g))
     }
   }
 };
 
 #[cfg(test)]
 mod tests {
+  use arbitrary::{Arbitrary, Unstructured};
+
   use super::*;
 
-  #[test]
-  fn test_error_response() {
-    for i in 0..100 {
-      let err = ErrorResponse::generate(i);
-      let mut buf = vec![0; err.encoded_len()];
-      let encoded_len = err.encode(&mut buf).unwrap();
-      assert_eq!(encoded_len, err.encoded_len());
-      let (decoded_len, decoded) = ErrorResponse::decode(&buf).unwrap();
-      assert_eq!(decoded_len, encoded_len);
-      assert_eq!(decoded, err);
+  #[quickcheck_macros::quickcheck]
+  fn fuzzy_error_message_encode_decode(err: ErrorResponse) -> bool {
+    let mut buf = vec![0; err.encoded_len()];
+    let Ok(written) = err.encode(&mut buf) else {
+      return false;
+    };
+    match ErrorResponse::decode(&buf) {
+      Ok((readed, decoded)) => err == decoded && written == readed,
+      Err(e) => {
+        println!("Error: {e}");
+        false
+      }
     }
+  }
+
+  #[test]
+  fn test_access() {
+    let mut data = vec![0; 1024];
+    rand::fill(&mut data[..]);
+
+    let mut data = Unstructured::new(&data);
+    let err = ErrorResponse::arbitrary(&mut data).unwrap();
+    assert_eq!(err.message(), &err.message);
   }
 }

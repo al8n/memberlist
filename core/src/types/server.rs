@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use nodecraft::{CheapClone, Node};
 
 use super::{DelegateVersion, Meta, ProtocolVersion};
@@ -5,28 +7,54 @@ use super::{DelegateVersion, Meta, ProtocolVersion};
 /// State for the memberlist
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
-#[repr(u8)]
 #[non_exhaustive]
 pub enum State {
   /// Alive state
   #[default]
-  Alive = 0,
+  Alive,
   /// Suspect state
-  Suspect = 1,
+  Suspect,
   /// Dead state
-  Dead = 2,
+  Dead,
   /// Left state
-  Left = 3,
+  Left,
+  /// Unknown state (used for forwards and backwards compatibility)
+  Unknown(u8),
+}
+
+impl From<u8> for State {
+  fn from(value: u8) -> Self {
+    match value {
+      0 => Self::Alive,
+      1 => Self::Suspect,
+      2 => Self::Dead,
+      3 => Self::Left,
+      val => Self::Unknown(val),
+    }
+  }
+}
+
+impl From<State> for u8 {
+  fn from(value: State) -> Self {
+    match value {
+      State::Alive => 0,
+      State::Suspect => 1,
+      State::Dead => 2,
+      State::Left => 3,
+      State::Unknown(val) => val,
+    }
+  }
 }
 
 impl State {
   /// Returns the [`State`] as a `&'static str`.
-  pub const fn as_str(&self) -> &'static str {
+  pub fn as_str(&self) -> Cow<'static, str> {
     match self {
-      Self::Alive => "alive",
-      Self::Suspect => "suspect",
-      Self::Dead => "dead",
-      Self::Left => "left",
+      Self::Alive => Cow::Borrowed("alive"),
+      Self::Suspect => Cow::Borrowed("suspect"),
+      Self::Dead => Cow::Borrowed("dead"),
+      Self::Left => Cow::Borrowed("left"),
+      Self::Unknown(val) => Cow::Owned(format!("Unknown({val})")),
     }
   }
 
@@ -44,25 +72,6 @@ impl core::fmt::Display for State {
     write!(f, "{}", self.as_str())
   }
 }
-
-impl TryFrom<u8> for State {
-  type Error = UnknownState;
-
-  fn try_from(value: u8) -> Result<Self, Self::Error> {
-    Ok(match value {
-      0 => Self::Alive,
-      1 => Self::Suspect,
-      2 => Self::Dead,
-      3 => Self::Left,
-      _ => return Err(UnknownState(value)),
-    })
-  }
-}
-
-/// Unknown server state.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, thiserror::Error)]
-#[error("{0} is not a valid state")]
-pub struct UnknownState(u8);
 
 /// Represents a node in the cluster
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
@@ -226,6 +235,62 @@ impl<I: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for NodeSt
   }
 }
 
+#[cfg(feature = "arbitrary")]
+const _: () = {
+  use arbitrary::{Arbitrary, Unstructured};
+
+  impl<'a, I, A> Arbitrary<'a> for NodeState<I, A>
+  where
+    I: Arbitrary<'a>,
+    A: Arbitrary<'a>,
+  {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+      Ok(Self {
+        id: u.arbitrary()?,
+        addr: u.arbitrary()?,
+        meta: u.arbitrary()?,
+        state: u.arbitrary()?,
+        protocol_version: u.arbitrary()?,
+        delegate_version: u.arbitrary()?,
+      })
+    }
+  }
+
+  impl<'a> Arbitrary<'a> for State {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+      Ok(u.arbitrary::<u8>()?.into())
+    }
+  }
+};
+
+#[cfg(feature = "quickcheck")]
+const _: () = {
+  use quickcheck::{Arbitrary, Gen};
+
+  impl<I, A> Arbitrary for NodeState<I, A>
+  where
+    I: Arbitrary,
+    A: Arbitrary,
+  {
+    fn arbitrary(g: &mut Gen) -> Self {
+      Self {
+        id: I::arbitrary(g),
+        addr: A::arbitrary(g),
+        meta: Meta::arbitrary(g),
+        state: State::arbitrary(g),
+        protocol_version: ProtocolVersion::arbitrary(g),
+        delegate_version: DelegateVersion::arbitrary(g),
+      }
+    }
+  }
+
+  impl Arbitrary for State {
+    fn arbitrary(g: &mut Gen) -> Self {
+      u8::arbitrary(g).into()
+    }
+  }
+};
+
 #[cfg(test)]
 mod tests {
   use std::net::SocketAddr;
@@ -235,20 +300,12 @@ mod tests {
   use super::*;
 
   #[test]
-  fn test_state_try_from() {
-    assert_eq!(State::try_from(0), Ok(State::Alive));
-    assert_eq!(State::try_from(1), Ok(State::Suspect));
-    assert_eq!(State::try_from(2), Ok(State::Dead));
-    assert_eq!(State::try_from(3), Ok(State::Left));
-    assert_eq!(State::try_from(4), Err(UnknownState(4)));
-  }
-
-  #[test]
   fn test_state_as_str() {
     assert_eq!(State::Alive.as_str(), "alive");
     assert_eq!(State::Suspect.as_str(), "suspect");
     assert_eq!(State::Dead.as_str(), "dead");
     assert_eq!(State::Left.as_str(), "left");
+    assert_eq!(State::Unknown(4).as_str(), "unknown(4)");
   }
 
   #[test]

@@ -9,10 +9,7 @@ use crate::{
   types::{ErrorResponse, SmallVec},
 };
 
-pub use crate::{
-  transport::TransportError,
-  types::{UnknownDelegateVersion, UnknownProtocolVersion},
-};
+pub use crate::transport::TransportError;
 
 /// Error returned by `Memberlist::join_many`.
 pub struct JoinError<T: Transport, D>

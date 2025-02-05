@@ -3,21 +3,13 @@ use nodecraft::CheapClone;
 
 /// Invalid meta error.
 #[derive(Debug, thiserror::Error)]
-#[error("the size of meta must between [0-255] bytes, got {0}")]
+#[error("the size of meta must between [0-512] bytes, got {0}")]
 pub struct LargeMeta(usize);
 
 /// The metadata of a node in the cluster.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
-#[cfg_attr(
-  feature = "rkyv",
-  derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive)
-)]
-#[cfg_attr(
-  feature = "rkyv",
-  rkyv(derive(Debug, PartialEq, Eq, Hash), compare(PartialEq))
-)]
 pub struct Meta(Bytes);
 
 impl Default for Meta {
@@ -185,19 +177,37 @@ impl TryFrom<BytesMut> for Meta {
   }
 }
 
-/// Meta error.
-#[derive(Debug, thiserror::Error)]
-pub enum MetaError {
-  /// Invalid meta.
-  #[error(transparent)]
-  LargeMeta(#[from] LargeMeta),
-  /// Not enough bytes to decode meta.
-  #[error("not enough bytes to decode meta")]
-  NotEnoughBytes,
-  /// Encode buffer too small.
-  #[error("the buffer did not contain enough bytes to encode meta")]
-  BufferTooSmall,
-}
+#[cfg(feature = "arbitrary")]
+const _: () = {
+  use arbitrary::{Arbitrary, Unstructured};
+
+  impl<'a> Arbitrary<'a> for Meta {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+      let len = u.int_in_range(0..=Self::MAX_SIZE)?;
+      let mut buf = Vec::with_capacity(len);
+      for _ in 0..len {
+        buf.push(u.arbitrary::<u8>()?);
+      }
+      Ok(Meta::try_from(buf).unwrap())
+    }
+  }
+};
+
+#[cfg(feature = "quickcheck")]
+const _: () = {
+  use quickcheck::Arbitrary;
+
+  impl Arbitrary for Meta {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+      let len = usize::arbitrary(g) % Self::MAX_SIZE;
+      let mut buf = Vec::with_capacity(len);
+      for _ in 0..len {
+        buf.push(u8::arbitrary(g));
+      }
+      Meta::try_from(buf).unwrap()
+    }
+  }
+};
 
 #[cfg(test)]
 mod tests {

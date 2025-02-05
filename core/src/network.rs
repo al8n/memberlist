@@ -9,7 +9,7 @@ use super::{
 };
 
 use agnostic_lite::RuntimeLite;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use futures::future::FutureExt;
 use nodecraft::resolver::AddressResolver;
 
@@ -52,17 +52,34 @@ where
 
     let ping_sequence_number = ping.sequence_number();
     self.send_message(&mut conn, ping.into()).await?;
-    let msg: Message<_, _> = self
+    let mut msg = self
       .read_message(target, &mut conn)
       .await
       .map(|(_, msg)| msg)?;
-    let kind = msg.kind();
-    if let Some(ack) = msg.try_unwrap_ack() {
-      if ack.sequence_number() != ping_sequence_number {
-        return Err(Error::sequence_number_mismatch(
-          ping_sequence_number,
-          ack.sequence_number(),
-        ));
+
+    if msg.is_empty() {
+      return Err(Error::custom("receive empty message".into()));
+    }
+    let mt = match MessageType::try_from(msg[0]) {
+      Ok(mt) => mt,
+      // TODO: handle error correctly
+      Err(_e) => return Err(Error::unexpected_message("Ack", "unknown")),
+    };
+    msg.advance(1);
+
+    if let MessageType::Ack = mt {
+      let seqn = match Ack::decode_sequence_number(&msg) {
+        Ok(seqn) => seqn.1,
+        // TODO: handle error correctly
+        Err(e) => {
+          return Err(Error::custom(
+            format!("failed to decode ack sequence number: {}", e).into(),
+          ))
+        }
+      };
+
+      if seqn != ping_sequence_number {
+        return Err(Error::sequence_number_mismatch(ping_sequence_number, seqn));
       }
 
       if let Err(e) = self.inner.transport.cache_stream(target, conn).await {
@@ -73,7 +90,7 @@ where
     } else {
       Err(Error::UnexpectedMessage {
         expected: "Ack",
-        got: kind,
+        got: mt.kind(),
       })
     }
   }
@@ -114,13 +131,28 @@ where
       <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
     ));
 
-    match self
-      .read_message(node.address(), &mut conn)
-      .await
-      .map(|(_read, msg)| msg)?
-    {
-      Message::ErrorResponse(err) => Err(Error::remote(err)),
-      Message::PushPull(pp) => {
+    let (_, mut msg) = self.read_message(node.address(), &mut conn).await?;
+
+    if msg.is_empty() {
+      return Err(Error::custom("receive empty message".into()));
+    }
+
+    let mt = match MessageType::try_from(msg[0]) {
+      Ok(mt) => mt,
+      // TODO: make error make more sense
+      Err(_e) => return Err(Error::unexpected_message("PushPull", "unknown")),
+    };
+    msg.advance(1);
+    match mt {
+      MessageType::ErrorResponse => {
+        // TODO: make error make more sense
+        let (_, err) = ErrorResponse::decode(&msg[1..])
+          .map_err(|e| Error::custom(format!("failed to decode error response: {}", e).into()))?;
+        Err(Error::remote(err))
+      }
+      MessageType::PushPull => {
+        let (_, pp) = PushPull::decode(&msg).map_err(|_| Error::custom("TODO".into()))?;
+
         if let Err(e) = self
           .inner
           .transport
@@ -131,7 +163,7 @@ where
         }
         Ok(pp)
       }
-      msg => Err(Error::unexpected_message("PushPull", msg.kind())),
+      mt => Err(Error::unexpected_message("PushPull", mt.kind())),
     }
   }
 
@@ -209,13 +241,7 @@ where
     &self,
     from: &<T::Resolver as AddressResolver>::ResolvedAddress,
     conn: &mut T::Stream,
-  ) -> Result<
-    (
-      usize,
-      Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    ),
-    Error<T, D>,
-  > {
+  ) -> Result<(usize, Bytes), Error<T, D>> {
     self
       .inner
       .transport

@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 pub use nodecraft::Node;
 pub use smallvec_wrapper::*;
 
@@ -25,8 +23,7 @@ pub use server::*;
 pub use version::*;
 
 use length_delimited::{
-  decode_u32_varint, decode_u64_varint, encode_u32_varint, encoded_u32_varint_len,
-  InsufficientBuffer, LengthDelimitedEncoder, Varint,
+  decode_u32_varint, decode_u64_varint, encoded_u32_varint_len, InsufficientBuffer, Varint,
 };
 
 mod ack;
@@ -50,7 +47,7 @@ mod secret;
 mod server;
 mod version;
 
-const MAX_ENCODED_LEN_SIZE: usize = core::mem::size_of::<u32>();
+// const MAX_ENCODED_LEN_SIZE: usize = core::mem::size_of::<u32>();
 
 /// A wire type used in Protobuf-like encoding/decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

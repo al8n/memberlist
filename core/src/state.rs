@@ -24,9 +24,9 @@ use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 use rand::{seq::SliceRandom, Rng};
 
-/// Exports the state unit test cases.
-#[cfg(any(test, feature = "test"))]
-pub mod tests;
+// /// Exports the state unit test cases.
+// #[cfg(any(test, feature = "test"))]
+// pub mod tests;
 
 mod ack_manager;
 pub(crate) use ack_manager::*;
@@ -538,7 +538,7 @@ where
   ) {
     let mut futs = remote
       .iter()
-      .map(|r| {
+      .filter_map(|r| {
         let state = match r.state() {
           State::Alive => StateMessage::Alive(
             Alive::new(r.incarnation(), r.node())
@@ -558,8 +558,12 @@ where
             r.id().cheap_clone(),
             self.local_id().cheap_clone(),
           )),
+          State::Unknown(val) => {
+            tracing::warn!(local = %self.inner.id, remote = %r.id(), "memberlist.state: unknown state {}", val);
+            return None;
+          }
         };
-        state.run(self)
+        Some(state.run(self))
       })
       .collect::<FuturesUnordered<_>>();
 

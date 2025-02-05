@@ -83,12 +83,21 @@ tracing-subscriber = { version = "0.3", optional = true, features = [
   "tracing-log",
 ] }
 
+# arbitrary feature
+arbitrary = { version = "1", optional = true }
+quickcheck = { version = "1", optional = true }
+quickcheck_macros = { version = "1", optional = true }
+
+
 # metrics feature
 metrics = { workspace = true, optional = true }
 
 indexmap = { workspace = true, optional = true }
 
 [dev-dependencies]
+arbitrary = "1"
+quickcheck = "1"
+quickcheck_macros = "1"
 tracing-subscriber = { version = "0.3", features = [
   "env-filter",
   "tracing-log",
