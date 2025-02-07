@@ -17,15 +17,15 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["metrics"]
-metrics = ["dep:metrics"]
-encryption = ["indexmap", "base64"]
+metrics = ["dep:metrics", "memberlist-types/metrics"]
+encryption = ["indexmap", "memberlist-types/encryption"]
 
 serde = [
   "dep:serde",
   "bytes/serde",
-  "base64",
   "nodecraft/serde",
   "humantime-serde",
+  "memberlist-types/serde",
 ]
 rkyv = ["dep:rkyv", "nodecraft/rkyv"]
 
@@ -51,12 +51,12 @@ async-channel.workspace = true
 async-lock.workspace = true
 bytes.workspace = true
 byteorder.workspace = true
+const-varint.workspace = true
 derive_more.workspace = true
 either = "1"
 futures.workspace = true
 ipnet = "2"
-length-delimited = "0.2"
-nodecraft.workspace = true
+nodecraft = { workspace = true, features = ["default", "async", "agnostic", "resolver"] }
 paste.workspace = true
 parking_lot = "0.12"
 pin-project.workspace = true
@@ -64,7 +64,7 @@ rand = "0.9"
 scopeguard.workspace = true
 smol_str.workspace = true
 smallvec.workspace = true
-memberlist-types.workspace = true
+memberlist-types = { workspace = true, features = ["default"] }
 smallvec-wrapper.workspace = true
 triomphe.workspace = true
 thiserror.workspace = true

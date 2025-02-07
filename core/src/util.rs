@@ -1,5 +1,5 @@
+pub use const_varint::*;
 pub use is_global_ip::IsGlobalIp;
-pub use length_delimited::*;
 
 use crate::types::{Data, Message, SmallVec, TinyVec};
 

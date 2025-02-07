@@ -6,6 +6,7 @@ use super::WireType;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 mod bytes;
+#[cfg(any(feature = "std", feature = "alloc"))]
 mod nodecraft;
 mod primitives;
 #[cfg(any(feature = "std", feature = "alloc"))]

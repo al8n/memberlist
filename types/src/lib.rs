@@ -10,6 +10,7 @@ pub use meta::*;
 #[cfg(feature = "metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
 pub use metrics_label::MetricLabels;
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub use nodecraft::{
   Domain, HostAddr, Node, NodeId, ParseDomainError, ParseHostAddrError, ParseNodeIdError,
 };

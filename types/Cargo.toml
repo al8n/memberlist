@@ -41,7 +41,7 @@ arbitrary = ["dep:arbitrary", "nodecraft/arbitrary"]
 quickcheck = ["dep:quickcheck", "nodecraft/quickcheck"]
 
 encryption = ["base64"]
-serde = ["dep:serde", "smol_str/serde", "bytes/serde", "nodecraft/serde"]
+serde = ["dep:serde", "smol_str/serde", "bytes/serde", "nodecraft/serde", "smallvec-wrapper/serde"]
 
 [dependencies]
 bytes.workspace = true
@@ -71,16 +71,6 @@ arbitrary = "1"
 quickcheck = "1"
 quickcheck_macros = "1"
 rand = "0.9"
-
-[profile.bench]
-opt-level = 3
-debug = false
-codegen-units = 1
-lto = 'thin'
-incremental = false
-debug-assertions = false
-overflow-checks = false
-rpath = false
 
 [package.metadata.docs.rs]
 all-features = true
