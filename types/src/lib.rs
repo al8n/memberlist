@@ -1,6 +1,7 @@
 pub use ack::*;
 pub use alive::*;
 pub use bad_state::*;
+pub use bytes;
 pub use cidr_policy::*;
 pub use data::*;
 pub use err::*;

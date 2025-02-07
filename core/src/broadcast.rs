@@ -100,7 +100,7 @@ where
   }
 
   fn encoded_len(msg: &Self::Message) -> usize {
-    msg.encoded_len()
+    msg.encoded_len_with_length_delimited()
   }
 
   async fn finished(&self) {

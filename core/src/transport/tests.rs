@@ -5,6 +5,7 @@ use agnostic_lite::{time::Instant, RuntimeLite};
 use bytes::Bytes;
 
 use futures::FutureExt;
+use memberlist_types::Data;
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 use smol_str::SmolStr;
 
@@ -553,7 +554,7 @@ where
                   .await
                   .map_err(Into::into)
               ));
-              let ping_in = p.unwrap_ping();
+              let ping_in = Message::decode(&p).unwrap().1.unwrap_ping();
               assert_eq!(ping_in.sequence_number(), 23);
               assert_eq!(ping_in.target(), &node1);
 
@@ -580,7 +581,7 @@ where
                   .map_err(Into::into)
               ));
 
-              let ping_in = p.unwrap_ping();
+              let ping_in = Message::<SmolStr, SocketAddr>::decode(&p).unwrap().1.unwrap_ping();
               let ack = Ack::new(ping_in.sequence_number() + 1);
 
               unwrap_ok!(ping_err_tx1.send(
@@ -744,8 +745,7 @@ where
       PushNodeState::new(1, "Test 1".into(), bind_addr, State::Alive),
       PushNodeState::new(1, "Test 2".into(), bind_addr, State::Alive),
     ]
-    .into_iter()
-    .collect(),
+    .into_iter(),
   );
 
   // Send the push/pull indicator
@@ -760,7 +760,10 @@ where
     .transport
     .read_message(&bind_addr, conn.as_mut())
     .await?;
-  let readed_push_pull = msg.unwrap_push_pull();
+  let readed_push_pull = Message::<SmolStr, SocketAddr>::decode(&msg)
+    .unwrap()
+    .1
+    .unwrap_push_pull();
   assert!(!readed_push_pull.join());
   assert_eq!(readed_push_pull.states().len(), 1);
   assert_eq!(readed_push_pull.states()[0].id(), &id0);

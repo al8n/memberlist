@@ -34,6 +34,20 @@ pub trait Data: core::fmt::Debug + Send + Sync {
   /// An error will be returned if the buffer does not have sufficient capacity.
   fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError>;
 
+  /// Encodes the message into a vec.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  fn encode_to_vec(&self) -> Result<std::vec::Vec<u8>, EncodeError> {
+    let len = self.encoded_len();
+    let mut vec = std::vec![0; len];
+    self.encode(&mut vec).map(|_| vec)
+  }
+
+  /// Encodes the message into a [`Bytes`](bytes::Bytes).
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  fn encode_to_bytes(&self) -> Result<::bytes::Bytes, EncodeError> {
+    self.encode_to_vec().map(Into::into)
+  }
+
   /// Encodes the message with a length-delimiter to a buffer.
   ///
   /// An error will be returned if the buffer does not have sufficient capacity.
@@ -55,6 +69,20 @@ pub trait Data: core::fmt::Debug + Send + Sync {
     super::debug_assert_write_eq(offset, self.encoded_len_with_length_delimited());
 
     Ok(offset)
+  }
+
+  /// Encodes the message with a length-delimiter into a vec.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  fn encode_length_delimited_to_vec(&self) -> Result<std::vec::Vec<u8>, EncodeError> {
+    let len = self.encoded_len_with_length_delimited();
+    let mut vec = std::vec![0; len];
+    self.encode_length_delimited(&mut vec).map(|_| vec)
+  }
+
+  /// Encodes the message with a length-delimiter into a [`Bytes`](bytes::Bytes).
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  fn encode_length_delimited_to_bytes(&self) -> Result<::bytes::Bytes, EncodeError> {
+    self.encode_length_delimited_to_vec().map(Into::into)
   }
 
   /// Decodes an instance of the message from a buffer.

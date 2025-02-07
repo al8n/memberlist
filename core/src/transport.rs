@@ -292,7 +292,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn resolve(
     &self,
     addr: &<Self::Resolver as AddressResolver>::Address,
-  ) -> impl Future<Output = Result<<Self::Resolver as AddressResolver>::ResolvedAddress, Self::Error>>
+  ) -> impl Future<Output = Result<Self::ResolvedAddress, Self::Error>>
        + Send;
 
   /// Returns the local id of the node
@@ -302,7 +302,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn local_address(&self) -> &<Self::Resolver as AddressResolver>::Address;
 
   /// Returns the advertise address of the node
-  fn advertise_address(&self) -> &<Self::Resolver as AddressResolver>::ResolvedAddress;
+  fn advertise_address(&self) -> &Self::ResolvedAddress;
 
   /// Returns the keyring (only used for encryption) of the node
   #[cfg(feature = "encryption")]
@@ -330,7 +330,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns an error if the given address is blocked
   fn blocked_address(
     &self,
-    addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
+    addr: &Self::ResolvedAddress,
   ) -> Result<(), Self::Error>;
 
   /// Reads a message from the remote node by promised connection.
@@ -338,21 +338,33 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns the number of bytes read and the message.
   fn read_message(
     &self,
-    from: &<Self::Resolver as AddressResolver>::ResolvedAddress,
+    from: &Self::ResolvedAddress,
     conn: &mut Self::Stream,
   ) -> impl Future<Output = Result<(usize, Bytes), Self::Error>> + Send;
 
   /// Sends a message to the remote node by promised connection.
   ///
+  /// The payload is encoded by [`Message::encode`] method,
+  /// and can be decoded back by [`Message::decode`] method.
+  ///
+  /// The payload is not compressed or encrypted, the transport
+  /// layer is expected to handle that by themselves.
+  ///
   /// Returns the number of bytes sent.
   fn send_message(
     &self,
     conn: &mut Self::Stream,
-    msg: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
+    msg: Bytes,
   ) -> impl Future<Output = Result<usize, Self::Error>> + Send;
 
   /// A packet-oriented interface that fires off the given
   /// payload to the given address in a connectionless fashion.
+  ///
+  /// The payload is encoded by [`Message::encode`] method,
+  /// and can be decoded back by [`Message::decode`] method.
+  ///
+  /// The payload is not compressed or encrypted, the transport
+  /// layer is expected to handle that by themselves.
   ///
   /// # Returns
   ///
@@ -361,12 +373,18 @@ pub trait Transport: Sized + Send + Sync + 'static {
   ///   was transmitted to help make accurate RTT measurements during probes.
   fn send_packet(
     &self,
-    addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    packet: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
+    addr: &Self::ResolvedAddress,
+    packet: Bytes,
   ) -> impl Future<Output = Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error>> + Send;
 
   /// A packet-oriented interface that fires off the given
   /// payload to the given address in a connectionless fashion.
+  ///
+  /// The payload is encoded by [`Messages::encode`] method,
+  /// and can be decoded back by [`Messages::decode`] method.
+  ///
+  /// The payload is not compressed or encrypted, the transport
+  /// layer is expected to handle that by themselves.
   ///
   /// # Returns
   ///
@@ -375,8 +393,8 @@ pub trait Transport: Sized + Send + Sync + 'static {
   ///   was transmitted to help make accurate RTT measurements during probes.
   fn send_packets(
     &self,
-    addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    packets: TinyVec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
+    addr: &Self::ResolvedAddress,
+    packet: Bytes,
   ) -> impl Future<Output = Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error>> + Send;
 
   /// Used to create a connection that allows us to perform
@@ -386,14 +404,14 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// failed.
   fn dial_with_deadline(
     &self,
-    addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
+    addr: &Self::ResolvedAddress,
     deadline: <Self::Runtime as RuntimeLite>::Instant,
   ) -> impl Future<Output = Result<Self::Stream, Self::Error>> + Send;
 
   /// Used to cache a connection for future use.
   fn cache_stream(
     &self,
-    addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
+    addr: &Self::ResolvedAddress,
     stream: Self::Stream,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
@@ -401,8 +419,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn packet(
     &self,
   ) -> PacketSubscriber<
-    Self::Id,
-    <Self::Resolver as AddressResolver>::ResolvedAddress,
+    Self::ResolvedAddress,
     <Self::Runtime as RuntimeLite>::Instant,
   >;
 
@@ -411,7 +428,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// left as an exercise for the concrete transport implementations.
   fn stream(
     &self,
-  ) -> StreamSubscriber<<Self::Resolver as AddressResolver>::ResolvedAddress, Self::Stream>;
+  ) -> StreamSubscriber<Self::ResolvedAddress, Self::Stream>;
 
   /// Shutdown the transport
   fn shutdown(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;

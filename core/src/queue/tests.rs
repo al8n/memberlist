@@ -215,11 +215,11 @@ async fn test_transmit_limited_get_broadcasts() {
   .await;
 
   // 2 byte overhead per message, should get all 4 messages
-  let all = q.get_broadcasts(2, 80).await;
+  let all = q.get_broadcasts(2, 100).await;
   assert_eq!(all.len(), 4);
 
-  // 3 byte overhead, should only get 3 messages back
-  let partial = q.get_broadcasts(3, 80).await;
+  // 5 byte overhead, should only get 3 messages back
+  let partial = q.get_broadcasts(5, 100).await;
   assert_eq!(partial.len(), 3);
 }
 

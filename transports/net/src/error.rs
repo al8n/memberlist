@@ -1,11 +1,11 @@
 use std::net::{IpAddr, SocketAddr};
 
-use memberlist_core::transport::{TransportError, Wire};
+use memberlist_core::transport::TransportError;
 use nodecraft::resolver::AddressResolver;
 
 /// Errors that can occur when using [`NetTransport`](super::NetTransport).
 #[derive(thiserror::Error)]
-pub enum NetTransportError<A: AddressResolver, W: Wire> {
+pub enum NetTransportError<A: AddressResolver> {
   /// Connection error.
   #[error(transparent)]
   Connection(#[from] ConnectionError),
@@ -52,9 +52,6 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
   /// Returns when getting unkstartn checksumer
   #[error(transparent)]
   UnknownChecksumer(#[from] super::checksum::UnknownChecksumer),
-  /// Returns when encode/decode error.
-  #[error("wire error: {0}")]
-  Wire(W::Error),
   /// Returns when the packet is too large.
   #[error("packet too large, the maximum packet can be sent is 65535, got {0}")]
   PacketTooLarge(usize),
@@ -83,43 +80,42 @@ pub enum NetTransportError<A: AddressResolver, W: Wire> {
 const _: () = {
   use super::compressor::*;
 
-  impl<A: AddressResolver, W: Wire> From<CompressError> for NetTransportError<A, W> {
+  impl<A: AddressResolver> From<CompressError> for NetTransportError<A> {
     fn from(err: CompressError) -> Self {
       Self::Compressor(err.into())
     }
   }
 
-  impl<A: AddressResolver, W: Wire> From<DecompressError> for NetTransportError<A, W> {
+  impl<A: AddressResolver> From<DecompressError> for NetTransportError<A> {
     fn from(err: DecompressError) -> Self {
       Self::Compressor(err.into())
     }
   }
 
-  impl<A: AddressResolver, W: Wire> From<UnknownCompressor> for NetTransportError<A, W> {
+  impl<A: AddressResolver> From<UnknownCompressor> for NetTransportError<A> {
     fn from(err: UnknownCompressor) -> Self {
       Self::Compressor(err.into())
     }
   }
 };
 
-impl<A: AddressResolver, W: Wire> NetTransportError<A, W> {
+impl<A: AddressResolver> NetTransportError<A> {
   #[cfg(feature = "compression")]
   pub(crate) fn not_enough_bytes_to_decompress() -> Self {
     Self::Compressor(super::compressor::CompressorError::NotEnoughBytes)
   }
 }
 
-impl<A: AddressResolver, W: Wire> core::fmt::Debug for NetTransportError<A, W> {
+impl<A: AddressResolver> core::fmt::Debug for NetTransportError<A> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     core::fmt::Display::fmt(&self, f)
   }
 }
 
-impl<A, W> TransportError for NetTransportError<A, W>
+impl<A> TransportError for NetTransportError<A>
 where
   A: AddressResolver,
   A::Address: Send + Sync + 'static,
-  W: Wire,
 {
   fn is_remote_failure(&self) -> bool {
     if let Self::Connection(e) = self {

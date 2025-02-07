@@ -22,7 +22,7 @@
 // };
 // use atomic_refcell::AtomicRefCell;
 // use byteorder::{ByteOrder, NetworkEndian};
-// use bytes::{BufMut, BytesMut};
+// use bytes::{BufMut, Bytes, BytesMut};
 // use checksum::CHECKSUM_SIZE;
 // use futures::{
 //   io::BufReader, stream::FuturesUnordered, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
@@ -33,7 +33,7 @@
 //   types::{CIDRsPolicy, Label, LabelError},
 // };
 // use memberlist_core::{
-//   types::{Message, SmallVec, TinyVec},
+//   types::{Data, Message, SmallVec, TinyVec},
 //   util::{batch, Batch, IsGlobalIp},
 // };
 // use peekable::future::{AsyncPeekExt, AsyncPeekable};
@@ -115,24 +115,23 @@
 
 // #[cfg(feature = "tokio")]
 // /// [`NetTransport`] based on [`tokio`](https://crates.io/crates/tokio).
-// pub type TokioNetTransport<I, A, S, W> = NetTransport<I, A, S, W, agnostic::tokio::TokioRuntime>;
+// pub type TokioNetTransport<I, A, S> = NetTransport<I, A, S, agnostic::tokio::TokioRuntime>;
 
 // #[cfg(feature = "async-std")]
 // /// [`NetTransport`] based on [`async-std`](https://crates.io/crates/async-std).
-// pub type AsyncStdNetTransport<I, A, S, W> =
-//   NetTransport<I, A, S, W, agnostic::async_std::AsyncStdRuntime>;
+// pub type AsyncStdNetTransport<I, A, S> =
+//   NetTransport<I, A, S, agnostic::async_std::AsyncStdRuntime>;
 
 // #[cfg(feature = "smol")]
 // /// [`NetTransport`] based on [`smol`](https://crates.io/crates/smol).
-// pub type SmolNetTransport<I, A, S, W> = NetTransport<I, A, S, W, agnostic::smol::SmolRuntime>;
+// pub type SmolNetTransport<I, A, S> = NetTransport<I, A, S, agnostic::smol::SmolRuntime>;
 
 // /// The net transport based on TCP/TLS and UDP
-// pub struct NetTransport<I, A, S, W, R>
+// pub struct NetTransport<I, A, S, R>
 // where
 //   I: Id,
 //   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
 //   S: StreamLayer<Runtime = R>,
-//   W: Wire<Id = I, Address = A::ResolvedAddress>,
 //   R: Runtime,
 // {
 //   opts: Arc<Options<I, A>>,
@@ -152,20 +151,18 @@
 //   handles: AtomicRefCell<FuturesUnordered<<R::Spawner as AsyncSpawner>::JoinHandle<()>>>,
 //   resolver: Arc<A>,
 //   shutdown_tx: async_channel::Sender<()>,
-//   _marker: PhantomData<W>,
 // }
 
-// impl<I, A, S, W, R> NetTransport<I, A, S, W, R>
+// impl<I, A, S, R> NetTransport<I, A, S, R>
 // where
 //   I: Id + Send + Sync + 'static,
 //   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
 //   A::Address: Send + Sync + 'static,
 //   S: StreamLayer<Runtime = R>,
-//   W: Wire<Id = I, Address = A::ResolvedAddress>,
 //   R: Runtime,
 // {
 //   /// Creates a new net transport.
-//   async fn _new(opts: NetTransportOptions<I, A, S>) -> Result<Self, NetTransportError<A, W>> {
+//   async fn _new(opts: NetTransportOptions<I, A, S>) -> Result<Self, NetTransportError<A>> {
 //     let (resolver_opts, stream_layer_opts, opts) = opts.into();
 //     let resolver = Arc::new(
 //       <A as AddressResolver>::new(resolver_opts)
@@ -218,7 +215,7 @@
 //     stream_layer: Arc<S>,
 //     opts: Arc<Options<I, A>>,
 //     #[cfg(feature = "encryption")] encryptor: Option<Keyring>,
-//   ) -> Result<Self, NetTransportError<A, W>> {
+//   ) -> Result<Self, NetTransportError<A>> {
 //     // If we reject the empty list outright we can assume that there's at
 //     // least one listener of each type later during operation.
 //     if opts.bind_addresses.is_empty() {
@@ -384,7 +381,6 @@
 //       encryptor,
 //       resolver,
 //       shutdown_tx,
-//       _marker: PhantomData,
 //     })
 //   }
 
@@ -436,24 +432,22 @@
 //   }
 // }
 
-// impl<I, A, S, W, R> Transport for NetTransport<I, A, S, W, R>
+// impl<I, A, S, R> Transport for NetTransport<I, A, S, R>
 // where
-//   I: Id + Send + Sync + 'static,
+//   I: Id + Data + Send + Sync + 'static,
 //   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-//   A::Address: Send + Sync + 'static,
+//   A::Address: Data + Send + Sync + 'static,
 //   S: StreamLayer<Runtime = R>,
-//   W: Wire<Id = I, Address = A::ResolvedAddress>,
 //   R: Runtime,
 // {
-//   type Error = NetTransportError<Self::Resolver, Self::Wire>;
+//   type Error = NetTransportError<Self::Resolver>;
 
 //   type Id = I;
-
 //   type Resolver = A;
+//   type Address = A::Address;
+//   type ResolvedAddress = SocketAddr;
 
 //   type Stream = S::Stream;
-
-//   type Wire = W;
 
 //   type Runtime = <Self::Resolver as AddressResolver>::Runtime;
 
@@ -532,7 +526,7 @@
 //   ) -> Result<
 //     (
 //       usize,
-//       Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
+//       Bytes,
 //     ),
 //     Self::Error,
 //   > {

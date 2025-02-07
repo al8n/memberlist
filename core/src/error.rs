@@ -6,7 +6,7 @@ use smol_str::SmolStr;
 use crate::{
   delegate::{Delegate, DelegateError},
   transport::{MaybeResolvedAddress, Transport},
-  types::{ErrorResponse, SmallVec},
+  types::{DecodeError, EncodeError, ErrorResponse, SmallVec},
 };
 
 pub use crate::transport::TransportError;
@@ -109,25 +109,25 @@ where
 #[derive(thiserror::Error)]
 pub enum Error<T: Transport, D: Delegate> {
   /// Returns when the node is not running.
-  #[error("memberlist: node is not running, please bootstrap first")]
+  #[error("node is not running, please bootstrap first")]
   NotRunning,
   /// Returns when timeout waiting for update broadcast.
-  #[error("memberlist: timeout waiting for update broadcast")]
+  #[error("timeout waiting for update broadcast")]
   UpdateTimeout,
   /// Returns when timeout waiting for leave broadcast.
-  #[error("memberlist: timeout waiting for leave broadcast")]
+  #[error("timeout waiting for leave broadcast")]
   LeaveTimeout,
   /// Returns when lost connection with a peer.
-  #[error("memberlist: no response from node {0}")]
+  #[error("no response from node {0}")]
   Lost(Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
   /// Delegate error
-  #[error("memberlist: {0}")]
+  #[error(transparent)]
   Delegate(#[from] DelegateError<D>),
   /// Transport error
-  #[error("memberlist: {0}")]
+  #[error(transparent)]
   Transport(T::Error),
   /// Returned when a message is received with an unexpected type.
-  #[error("memberlist: unexpected message: expected {expected}, got {got}")]
+  #[error("unexpected message: expected {expected}, got {got}")]
   UnexpectedMessage {
     /// The expected message type.
     expected: &'static str,
@@ -136,18 +136,24 @@ pub enum Error<T: Transport, D: Delegate> {
   },
   /// Returned when the sequence number of [`Ack`](crate::types::Ack) is not
   /// match the sequence number of [`Ping`](crate::types::Ping).
-  #[error("memberlist: sequence number mismatch: ping({ping}), ack({ack})")]
+  #[error("sequence number mismatch: ping({ping}), ack({ack})")]
   SequenceNumberMismatch {
     /// The sequence number of [`Ping`](crate::types::Ping).
     ping: u32,
     /// The sequence number of [`Ack`](crate::types::Ack).
     ack: u32,
   },
+  /// Failed to encode message
+  #[error(transparent)]
+  Encode(#[from] EncodeError),
+  /// Failed to decode message
+  #[error(transparent)]
+  Decode(#[from] DecodeError),
   /// Returned when a remote error is received.
-  #[error("memberlist: remote error: {0}")]
+  #[error("remote error: {0}")]
   Remote(SmolStr),
   /// Returned when a custom error is created by users.
-  #[error("memberlist: {0}")]
+  #[error("{0}")]
   Other(Cow<'static, str>),
 }
 

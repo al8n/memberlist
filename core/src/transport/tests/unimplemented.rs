@@ -1,8 +1,9 @@
 use std::marker::PhantomData;
 
+use memberlist_types::Data;
 use nodecraft::Id;
 
-use crate::transport::{TimeoutableReadStream, TimeoutableWriteStream, TransportError, Wire};
+use crate::transport::{TimeoutableReadStream, TimeoutableWriteStream, TransportError};
 
 use super::*;
 
@@ -51,25 +52,25 @@ impl<R: RuntimeLite> TimeoutableWriteStream for UnimplementedStream<R> {
 
 /// A transport that does not implement any of the required methods.
 /// Which can be only used for testing purposes.
-pub struct UnimplementedTransport<I, A, W, R>(PhantomData<(I, A, W, R)>);
+pub struct UnimplementedTransport<I, A, R>(PhantomData<(I, A, R)>);
 
-impl<I, A, W, R> Transport for UnimplementedTransport<I, A, W, R>
+impl<I, A, R> Transport for UnimplementedTransport<I, A, R>
 where
-  I: Id + Send + Sync + 'static,
+  I: Id + Data + Send + Sync + 'static,
   A: AddressResolver<Runtime = R>,
   A::Address: Send + Sync + 'static,
-  W: Wire<Id = I, Address = A::ResolvedAddress>,
+  A::ResolvedAddress: Data + Send + Sync + 'static,
   R: RuntimeLite,
 {
   type Error = UnimplementedTransportError;
 
   type Id = I;
+  type Address = A::Address;
+  type ResolvedAddress = A::ResolvedAddress;
 
   type Resolver = A;
 
   type Stream = UnimplementedStream<R>;
-
-  type Wire = W;
 
   type Runtime = R;
 
@@ -99,7 +100,7 @@ where
   }
 
   #[cfg(feature = "encryption")]
-  fn keyring(&self) -> Option<&crate::types::Keyring> {
+  fn keyring(&self) -> Option<&crate::keyring::Keyring> {
     unimplemented!()
   }
 
@@ -131,28 +132,18 @@ where
     &self,
     _: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     _: &mut Self::Stream,
-  ) -> Result<
-    (
-      usize,
-      Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
-    ),
-    Self::Error,
-  > {
+  ) -> Result<(usize, Bytes), Self::Error> {
     unimplemented!()
   }
 
-  async fn send_message(
-    &self,
-    _: &mut Self::Stream,
-    _: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
-  ) -> Result<usize, Self::Error> {
+  async fn send_message(&self, _: &mut Self::Stream, _: Bytes) -> Result<usize, Self::Error> {
     unimplemented!()
   }
 
   async fn send_packet(
     &self,
     _: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    _: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
+    _: Bytes,
   ) -> Result<(usize, R::Instant), Self::Error> {
     unimplemented!()
   }
@@ -160,9 +151,7 @@ where
   async fn send_packets(
     &self,
     _: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    _: crate::types::TinyVec<
-      Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
-    >,
+    _: Bytes,
   ) -> Result<(usize, R::Instant), Self::Error> {
     unimplemented!()
   }

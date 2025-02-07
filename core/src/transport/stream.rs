@@ -4,10 +4,6 @@ use futures::Stream;
 
 use super::*;
 
-use crate::types::OneOrMore;
-
-use super::Message;
-
 /// The packet receives from the unreliable connection.
 #[viewit::viewit(
   vis_all = "",
@@ -15,7 +11,7 @@ use super::Message;
   setters(vis_all = "pub", prefix = "with")
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Packet<I, A, T> {
+pub struct Packet<A, T> {
   /// The raw contents of the packet.
   #[viewit(
     getter(
@@ -25,7 +21,7 @@ pub struct Packet<I, A, T> {
     ),
     setter(attrs(doc = "Sets the messages of the packet (Builder pattern)"))
   )]
-  messages: OneOrMore<Message<I, A>>,
+  payload: Bytes,
 
   /// Address of the peer. This is an actual address so we
   /// can expose some concrete details about incoming packets.
@@ -53,12 +49,12 @@ pub struct Packet<I, A, T> {
   timestamp: T,
 }
 
-impl<I, A, T> Packet<I, A, T> {
+impl<A, T> Packet<A, T> {
   /// Create a new packet
   #[inline]
-  pub const fn new(messages: OneOrMore<Message<I, A>>, from: A, timestamp: T) -> Self {
+  pub const fn new(from: A, timestamp: T, payload: Bytes,) -> Self {
     Self {
-      messages,
+      payload,
       from,
       timestamp,
     }
@@ -66,8 +62,8 @@ impl<I, A, T> Packet<I, A, T> {
 
   /// Returns the raw contents of the packet.
   #[inline]
-  pub fn into_components(self) -> (OneOrMore<Message<I, A>>, A, T) {
-    (self.messages, self.from, self.timestamp)
+  pub fn into_components(self) -> (A, T, Bytes) {
+    (self.from, self.timestamp, self.payload)
   }
 
   /// Sets the address who sent the packet
@@ -84,10 +80,10 @@ impl<I, A, T> Packet<I, A, T> {
     self
   }
 
-  /// Sets the messages of the packet
+  /// Sets the payload of the packet
   #[inline]
-  pub fn set_messages(&mut self, messages: OneOrMore<Message<I, A>>) -> &mut Self {
-    self.messages = messages;
+  pub fn set_payload(&mut self, payload: Bytes) -> &mut Self {
+    self.payload = payload;
     self
   }
 }
@@ -95,29 +91,27 @@ impl<I, A, T> Packet<I, A, T> {
 /// A producer for packets.
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct PacketProducer<I, A, T> {
-  sender: Sender<Packet<I, A, T>>,
+pub struct PacketProducer<A, T> {
+  sender: Sender<Packet<A, T>>,
 }
 
 /// A subscriber for packets.
 #[pin_project::pin_project]
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct PacketSubscriber<I, A, T> {
+pub struct PacketSubscriber<A, T> {
   #[pin]
-  receiver: Receiver<Packet<I, A, T>>,
+  receiver: Receiver<Packet<A, T>>,
 }
 
 /// Returns producer and subscriber for packet.
 pub fn packet_stream<T: Transport>() -> (
   PacketProducer<
-    T::Id,
-    <T::Resolver as AddressResolver>::ResolvedAddress,
+    T::ResolvedAddress,
     <T::Runtime as RuntimeLite>::Instant,
   >,
   PacketSubscriber<
-    T::Id,
-    <T::Resolver as AddressResolver>::ResolvedAddress,
+    T::ResolvedAddress,
     <T::Runtime as RuntimeLite>::Instant,
   >,
 ) {
@@ -125,20 +119,20 @@ pub fn packet_stream<T: Transport>() -> (
   (PacketProducer { sender }, PacketSubscriber { receiver })
 }
 
-impl<I, A, T> PacketProducer<I, A, T> {
+impl<A, T> PacketProducer<A, T> {
   /// Sends a packet into the producer.
   ///
   /// If the producer is full, this method waits until there is space for a message.
   ///
   /// If the producer is closed, this method returns an error.
-  pub async fn send(&self, packet: Packet<I, A, T>) -> Result<(), SendError<Packet<I, A, T>>> {
+  pub async fn send(&self, packet: Packet<A, T>) -> Result<(), SendError<Packet<A, T>>> {
     self.sender.send(packet).await
   }
 
   /// Attempts to send a packet into the producer.
   ///
   /// If the channel is full or closed, this method returns an error.
-  pub fn try_send(&self, packet: Packet<I, A, T>) -> Result<(), TrySendError<Packet<I, A, T>>> {
+  pub fn try_send(&self, packet: Packet<A, T>) -> Result<(), TrySendError<Packet<A, T>>> {
     self.sender.try_send(packet)
   }
 
@@ -168,21 +162,21 @@ impl<I, A, T> PacketProducer<I, A, T> {
   }
 }
 
-impl<I, A, T> PacketSubscriber<I, A, T> {
+impl<A, T> PacketSubscriber<A, T> {
   /// Receives a packet from the subscriber.
   ///
   /// If the subscriber is empty, this method waits until there is a message.
   ///
   /// If the subscriber is closed, this method receives a message or returns an error if there are
   /// no more messages.
-  pub async fn recv(&self) -> Result<Packet<I, A, T>, RecvError> {
+  pub async fn recv(&self) -> Result<Packet<A, T>, RecvError> {
     self.receiver.recv().await
   }
 
   /// Attempts to receive a message from the subscriber.
   ///
   /// If the subscriber is empty, or empty and closed, this method returns an error.
-  pub fn try_recv(&self) -> Result<Packet<I, A, T>, TryRecvError> {
+  pub fn try_recv(&self) -> Result<Packet<A, T>, TryRecvError> {
     self.receiver.try_recv()
   }
 
@@ -212,8 +206,8 @@ impl<I, A, T> PacketSubscriber<I, A, T> {
   }
 }
 
-impl<I, A, T> Stream for PacketSubscriber<I, A, T> {
-  type Item = <Receiver<Packet<I, A, T>> as Stream>::Item;
+impl<A, T> Stream for PacketSubscriber<A, T> {
+  type Item = <Receiver<Packet<A, T>> as Stream>::Item;
 
   fn poll_next(
     self: std::pin::Pin<&mut Self>,
@@ -372,22 +366,22 @@ mod tests {
   use super::*;
 
   async fn access<R: RuntimeLite>() {
-    let messages = OneOrMore::from(Message::<SmolStr, SocketAddr>::user_data(Bytes::new()));
+    let messages = Message::<SmolStr, SocketAddr>::user_data(Bytes::new());
     let timestamp = R::now();
-    let mut packet = Packet::new(messages, "127.0.0.1:8080".parse().unwrap(), timestamp);
+    let mut packet = Packet::<SocketAddr, _>::new("127.0.0.1:8080".parse().unwrap(), timestamp, messages.encode_to_bytes().unwrap());
     packet.set_from("127.0.0.1:8081".parse().unwrap());
 
     let start = R::now();
     packet.set_timestamp(start);
-    let messages = OneOrMore::from(Message::<SmolStr, SocketAddr>::user_data(
+    let messages = Message::<SmolStr, SocketAddr>::user_data(
       Bytes::from_static(b"a"),
-    ));
-    packet.set_messages(messages);
+    ).encode_to_bytes().unwrap();
+    packet.set_payload(messages);
     assert_eq!(
-      packet.messages(),
-      &OneOrMore::from(Message::<SmolStr, SocketAddr>::user_data(
+      packet.payload(),
+      &Message::<SmolStr, SocketAddr>::user_data(
         Bytes::from_static(b"a")
-      ))
+      ).encode_to_bytes().unwrap(),
     );
     assert_eq!(
       *packet.from(),

@@ -15,7 +15,7 @@ use super::{
   network::META_MAX_SIZE,
   state::AckMessage,
   transport::{AddressResolver, CheapClone, MaybeResolvedAddress, Node, Transport},
-  types::{Alive, Dead, Message, Meta, NodeState, Ping, SmallVec},
+  types::{Alive, Dead, Data, Message, Meta, NodeState, Ping, SmallVec},
   Options,
 };
 
@@ -502,7 +502,9 @@ where
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
-    self.transport_send_packet(to, Message::UserData(msg)).await
+
+    let packet = Message::<T::Id, T::ResolvedAddress>::UserData(msg).encode_to_bytes()?;
+    self.transport_send_packet(to, packet).await
   }
 
   /// Uses the reliable stream-oriented interface of the transport to

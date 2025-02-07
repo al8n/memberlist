@@ -170,7 +170,7 @@ where
   pub(crate) async fn transport_send_packet(
     &self,
     addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
-    packet: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    packet: Bytes,
   ) -> Result<(), Error<T, D>> {
     self
       .inner
@@ -193,7 +193,7 @@ where
   pub(crate) async fn transport_send_packets(
     &self,
     addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
-    packet: TinyVec<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    packet: Bytes,
   ) -> Result<(), Error<T, D>> {
     self
       .inner
@@ -218,6 +218,7 @@ where
     conn: &mut T::Stream,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
+    let msg = msg.encode_to_bytes()?;
     self
       .inner
       .transport

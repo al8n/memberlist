@@ -1,7 +1,8 @@
-use crate::base::MessageHandoff;
 use agnostic_lite::AsyncSpawner;
 use either::Either;
 use nodecraft::CheapClone;
+
+use crate::{base::MessageHandoff, types::{Data, Messages}};
 
 use super::*;
 
@@ -51,8 +52,8 @@ where
           packet = packet_rx.recv().fuse() => {
             match packet {
               Ok(packet) => {
-                let (msg, addr, timestamp) = packet.into_components();
-                this.handle_messages(msg, addr, timestamp).await;
+                let (addr, timestamp, packet) = packet.into_components();
+                this.handle_messages(addr, timestamp, packet).await;
               },
               Err(e) => {
                 if !this.inner.shutdown_tx.is_closed() {
@@ -73,9 +74,9 @@ where
 
   async fn handle_message(
     &self,
-    msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
     from: <T::Resolver as AddressResolver>::ResolvedAddress,
     timestamp: <T::Runtime as RuntimeLite>::Instant,
+    payload: Bytes,
   ) {
     tracing::trace!(local = %self.advertise_address(), from = %from, packet=?msg, "memberlist.packet: handle packet");
 
@@ -117,16 +118,16 @@ where
 
   async fn handle_messages(
     &self,
-    msgs: OneOrMore<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
     from: <T::Resolver as AddressResolver>::ResolvedAddress,
     timestamp: <T::Runtime as RuntimeLite>::Instant,
+    payload: Bytes,
   ) {
     match msgs.into_either() {
       Either::Left([msg]) => self.handle_message(msg, from, timestamp).await,
       Either::Right(msgs) => {
         for msg in msgs {
           self
-            .handle_message(msg, from.cheap_clone(), timestamp)
+            .handle_message(from.cheap_clone(), timestamp, msg)
             .await
         }
       }
@@ -271,12 +272,15 @@ where
         bytes_avail,
       )
       .await?;
+
     // Fast path if nothing to piggypack
     if msgs.len() == 1 {
-      return self.transport_send_packet(addr, msgs.pop().unwrap()).await;
+      let msg = msgs.pop().unwrap().encode_to_bytes()?;
+      return self.transport_send_packet(addr, msg).await;
     }
 
     // Send the message
+    let msgs = Messages::from(msgs.as_ref()).encode_to_bytes()?;
     self.transport_send_packets(addr, msgs).await
   }
 }
