@@ -60,7 +60,7 @@
 // #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 // pub mod security;
 // #[cfg(feature = "encryption")]
-// use security::{EncryptionAlgo, SecretKey, SecretKeyring, SecurityError};
+// use security::{EncryptionAlgo, SecretKey, Keyring, SecurityError};
 
 // /// Errors for the net transport.
 // pub mod error;
@@ -148,7 +148,7 @@
 //   v6_sockets: AtomicRefCell<SmallVec<Arc<<<A::Runtime as Runtime>::Net as Net>::UdpSocket>>>,
 //   stream_layer: Arc<S>,
 //   #[cfg(feature = "encryption")]
-//   encryptor: Option<SecretKeyring>,
+//   encryptor: Option<Keyring>,
 //   handles: AtomicRefCell<FuturesUnordered<<R::Spawner as AsyncSpawner>::JoinHandle<()>>>,
 //   resolver: Arc<A>,
 //   shutdown_tx: async_channel::Sender<()>,
@@ -185,11 +185,11 @@
 //         tracing::warn!("memberlist: using first key in keyring as primary key");
 //         let mut iter = keys.iter().copied();
 //         let pk = iter.next().unwrap();
-//         let keyring = SecretKeyring::with_keys(pk, iter);
+//         let keyring = Keyring::with_keys(pk, iter);
 //         Some(keyring)
 //       }
-//       (Some(pk), None) => Some(SecretKeyring::new(pk)),
-//       (Some(pk), Some(keys)) => Some(SecretKeyring::with_keys(pk, keys.iter().copied())),
+//       (Some(pk), None) => Some(Keyring::new(pk)),
+//       (Some(pk), Some(keys)) => Some(Keyring::with_keys(pk, keys.iter().copied())),
 //       _ => None,
 //     };
 
@@ -217,7 +217,7 @@
 //     resolver: Arc<A>,
 //     stream_layer: Arc<S>,
 //     opts: Arc<Options<I, A>>,
-//     #[cfg(feature = "encryption")] encryptor: Option<SecretKeyring>,
+//     #[cfg(feature = "encryption")] encryptor: Option<Keyring>,
 //   ) -> Result<Self, NetTransportError<A, W>> {
 //     // If we reject the empty list outright we can assume that there's at
 //     // least one listener of each type later during operation.
@@ -490,7 +490,7 @@
 //   }
 
 //   #[cfg(feature = "encryption")]
-//   fn keyring(&self) -> Option<&SecretKeyring> {
+//   fn keyring(&self) -> Option<&Keyring> {
 //     self.encryptor.as_ref()
 //   }
 

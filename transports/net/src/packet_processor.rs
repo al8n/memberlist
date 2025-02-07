@@ -44,7 +44,7 @@ where
   pub(super) shutdown_rx: async_channel::Receiver<()>,
   pub(super) label: Label,
   #[cfg(feature = "encryption")]
-  pub(super) encryptor: Option<super::security::SecretKeyring>,
+  pub(super) encryptor: Option<super::security::Keyring>,
   #[cfg(any(feature = "compression", feature = "encryption"))]
   pub(super) offload_size: usize,
   pub(super) skip_inbound_label_check: bool,
@@ -150,7 +150,7 @@ where
     mut buf: BytesMut,
     label: &Label,
     skip_inbound_label_check: bool,
-    #[cfg(feature = "encryption")] encryptor: Option<&super::security::SecretKeyring>,
+    #[cfg(feature = "encryption")] encryptor: Option<&super::security::Keyring>,
     #[cfg(feature = "encryption")] verify_incoming: bool,
     #[cfg(any(feature = "encryption", feature = "compression"))] offload_size: usize,
   ) -> Result<
@@ -199,7 +199,7 @@ where
   #[cfg(all(feature = "compression", feature = "encryption"))]
   async fn read_from_packet_with_compression_and_encryption(
     mut buf: BytesMut,
-    encryptor: Option<&super::security::SecretKeyring>,
+    encryptor: Option<&super::security::Keyring>,
     mut packet_label: Label,
     label: &Label,
     skip_inbound_label_check: bool,
@@ -305,7 +305,7 @@ where
   #[cfg(all(not(feature = "compression"), feature = "encryption"))]
   async fn read_from_packet_with_encryption_without_compression(
     mut buf: BytesMut,
-    encryptor: Option<&SecretKeyring>,
+    encryptor: Option<&Keyring>,
     mut packet_label: Label,
     label: &Label,
     skip_inbound_label_check: bool,

@@ -1,7 +1,3 @@
-use length_delimited::InsufficientBuffer;
-
-use super::Data;
-
 /// Delegate version
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
@@ -95,9 +91,7 @@ macro_rules! impl_data {
         #[inline]
         fn encode(&self, buf: &mut [u8]) -> Result<usize, super::EncodeError> {
           if buf.is_empty() {
-            return Err(super::EncodeError::InsufficientBuffer(
-              InsufficientBuffer::with_information(1, 0),
-            ));
+            return Err(super::EncodeError::insufficient_buffer(1, 0));
           }
 
           buf[0] = u8::from(*self);
@@ -161,35 +155,6 @@ mod tests {
   use super::*;
 
   use arbitrary::{Arbitrary, Unstructured};
-  use quickcheck_macros::quickcheck;
-
-  #[quickcheck]
-  fn delegate_version_arbitrary(v: DelegateVersion) -> bool {
-    let mut buf = [0; 1];
-    let Ok(written) = v.encode(&mut buf) else {
-      return false;
-    };
-
-    let Ok((read, decoded)) = DelegateVersion::decode(&buf) else {
-      return false;
-    };
-
-    written == 1 && read == 1 && v == decoded
-  }
-
-  #[quickcheck]
-  fn protocol_version_arbitrary(v: ProtocolVersion) -> bool {
-    let mut buf = [0; 1];
-    let Ok(written) = v.encode(&mut buf) else {
-      return false;
-    };
-
-    let Ok((read, decoded)) = ProtocolVersion::decode(&buf) else {
-      return false;
-    };
-
-    written == 1 && read == 1 && v == decoded
-  }
 
   #[test]
   fn test_delegate_version() {

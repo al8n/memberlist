@@ -1,221 +1,13 @@
-use std::{iter::once, sync::Arc};
+use std::iter::once;
 
 use async_lock::RwLock;
 use indexmap::IndexSet;
+use memberlist_types::SecretKey;
+use triomphe::Arc;
 
-/// Unknown secret key kind error
-#[derive(Debug, thiserror::Error)]
-#[error("unknown secret key kind: {0}")]
-pub struct UnknownSecretKeyKind(u8);
-
-/// The key used while attempting to encrypt/decrypt a message
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SecretKey {
-  /// secret key for AES128
-  Aes128([u8; 16]),
-  /// secret key for AES192
-  Aes192([u8; 24]),
-  /// secret key for AES256
-  Aes256([u8; 32]),
-}
-
-/// Error occurred while transforming the [`SecretKey`].
-#[derive(Debug, thiserror::Error)]
-pub enum SecretKeyTransformError {
-  /// Returned when the buffer is too small to encode the key
-  #[error("encode buffer is too small")]
-  BufferTooSmall,
-  /// Returned when the buffer is too small to decode the key
-  #[error("not enough bytes to decode")]
-  NotEnoughBytes,
-
-  /// Returned when the key is not a valid length
-  #[error("invalid key length")]
-  UnknownSecretKeyKind(#[from] UnknownSecretKeyKind),
-}
-
-#[cfg(feature = "serde")]
-const _: () = {
-  use base64::Engine;
-  use serde::{Deserialize, Serialize};
-
-  impl Serialize for SecretKey {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-      S: serde::Serializer,
-    {
-      if serializer.is_human_readable() {
-        base64::engine::general_purpose::STANDARD
-          .encode(self)
-          .serialize(serializer)
-      } else {
-        serializer.serialize_bytes(self)
-      }
-    }
-  }
-
-  impl<'de> Deserialize<'de> for SecretKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-      D: serde::Deserializer<'de>,
-    {
-      macro_rules! parse {
-        ($key:ident) => {{
-          match $key.len() {
-            16 => Ok(Self::Aes128($key.try_into().unwrap())),
-            24 => Ok(Self::Aes192($key.try_into().unwrap())),
-            32 => Ok(Self::Aes256($key.try_into().unwrap())),
-            _ => Err(<D::Error as serde::de::Error>::custom(
-              "invalid secret key length",
-            )),
-          }
-        }};
-      }
-
-      if deserializer.is_human_readable() {
-        <String as Deserialize<'de>>::deserialize(deserializer).and_then(|val| {
-          base64::engine::general_purpose::STANDARD
-            .decode(val)
-            .map_err(serde::de::Error::custom)
-            .and_then(|key| parse!(key))
-        })
-      } else {
-        <Vec<u8> as Deserialize<'de>>::deserialize(deserializer).and_then(|val| parse!(val))
-      }
-    }
-  }
-};
-
-impl core::hash::Hash for SecretKey {
-  fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-    self.as_ref().hash(state);
-  }
-}
-
-impl core::borrow::Borrow<[u8]> for SecretKey {
-  fn borrow(&self) -> &[u8] {
-    self.as_ref()
-  }
-}
-
-impl PartialEq<[u8]> for SecretKey {
-  fn eq(&self, other: &[u8]) -> bool {
-    self.as_ref() == other
-  }
-}
-
-impl core::ops::Deref for SecretKey {
-  type Target = [u8];
-
-  fn deref(&self) -> &Self::Target {
-    match self {
-      Self::Aes128(k) => k,
-      Self::Aes192(k) => k,
-      Self::Aes256(k) => k,
-    }
-  }
-}
-
-impl core::ops::DerefMut for SecretKey {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    match self {
-      Self::Aes128(k) => k,
-      Self::Aes192(k) => k,
-      Self::Aes256(k) => k,
-    }
-  }
-}
-
-impl From<[u8; 16]> for SecretKey {
-  fn from(k: [u8; 16]) -> Self {
-    Self::Aes128(k)
-  }
-}
-
-impl From<[u8; 24]> for SecretKey {
-  fn from(k: [u8; 24]) -> Self {
-    Self::Aes192(k)
-  }
-}
-
-impl From<[u8; 32]> for SecretKey {
-  fn from(k: [u8; 32]) -> Self {
-    Self::Aes256(k)
-  }
-}
-
-impl TryFrom<&[u8]> for SecretKey {
-  type Error = String;
-
-  fn try_from(k: &[u8]) -> Result<Self, Self::Error> {
-    match k.len() {
-      16 => Ok(Self::Aes128(k.try_into().unwrap())),
-      24 => Ok(Self::Aes192(k.try_into().unwrap())),
-      32 => Ok(Self::Aes256(k.try_into().unwrap())),
-      x => Err(format!(
-        "invalid key size: {}, secret key size must be 16, 24 or 32 bytes",
-        x
-      )),
-    }
-  }
-}
-
-impl AsRef<[u8]> for SecretKey {
-  fn as_ref(&self) -> &[u8] {
-    match self {
-      Self::Aes128(k) => k,
-      Self::Aes192(k) => k,
-      Self::Aes256(k) => k,
-    }
-  }
-}
-
-impl AsMut<[u8]> for SecretKey {
-  fn as_mut(&mut self) -> &mut [u8] {
-    match self {
-      Self::Aes128(k) => k,
-      Self::Aes192(k) => k,
-      Self::Aes256(k) => k,
-    }
-  }
-}
-
-smallvec_wrapper::smallvec_wrapper!(
-  /// A collection of secret keys, you can just treat it as a `Vec<SecretKey>`.
-  #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-  #[repr(transparent)]
-  // #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-  // #[cfg_attr(feature = "serde", serde(transparent))]
-  pub SecretKeys([SecretKey; 3]);
-);
-
-/// Error occurred while transforming the [`SecretKeys`].
-#[derive(Debug, thiserror::Error)]
-pub enum SecretKeysTransformError {
-  /// Returned when the buffer is too small to encode the keys
-  #[error("encode buffer is too small")]
-  BufferTooSmall,
-  /// Returned when the buffer is too small to decode the keys
-  #[error("not enough bytes to decode")]
-  NotEnoughBytes,
-
-  /// Returned when transforming the secret key
-  #[error(transparent)]
-  SecretKey(#[from] SecretKeyTransformError),
-
-  /// Returned when missing keys
-  #[error("expect {expected} keys, but actual decode {actual} keys")]
-  MissingKeys {
-    /// Expected number of keys
-    expected: usize,
-    /// Actual number of keys
-    actual: usize,
-  },
-}
-
-/// Error for [`SecretKeyring`]
+/// Error for [`Keyring`]
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
-pub enum SecretKeyringError {
+pub enum KeyringError {
   /// Secret key is not in the keyring
   #[error("secret key is not in the keyring")]
   SecretKeyNotFound,
@@ -225,7 +17,7 @@ pub enum SecretKeyringError {
 }
 
 #[derive(Debug)]
-pub(super) struct SecretKeyringInner {
+pub(super) struct KeyringInner {
   pub(super) primary_key: SecretKey,
   pub(super) keys: IndexSet<SecretKey>,
 }
@@ -238,11 +30,11 @@ pub(super) struct SecretKeyringInner {
 /// the list of secondary keys, it will be automatically added at position 0.
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct SecretKeyring {
-  pub(super) inner: Arc<RwLock<SecretKeyringInner>>,
+pub struct Keyring {
+  pub(super) inner: Arc<RwLock<KeyringInner>>,
 }
 
-impl SecretKeyring {
+impl Keyring {
   /// Constructs a new container for a primary key. The
   /// keyring contains all key data used internally by memberlist.
   ///
@@ -254,7 +46,7 @@ impl SecretKeyring {
   #[inline]
   pub fn new(primary_key: SecretKey) -> Self {
     Self {
-      inner: Arc::new(RwLock::new(SecretKeyringInner {
+      inner: Arc::new(RwLock::new(KeyringInner {
         primary_key,
         keys: IndexSet::new(),
       })),
@@ -278,7 +70,7 @@ impl SecretKeyring {
   ) -> Self {
     if keys.size_hint().0 != 0 {
       return Self {
-        inner: Arc::new(RwLock::new(SecretKeyringInner {
+        inner: Arc::new(RwLock::new(KeyringInner {
           primary_key,
           keys: keys
             .filter_map(|k| {
@@ -307,10 +99,10 @@ impl SecretKeyring {
   /// Drops a key from the keyring. This will return an error if the key
   /// requested for removal is currently at position 0 (primary key).
   #[inline]
-  pub async fn remove(&self, key: &[u8]) -> Result<(), SecretKeyringError> {
+  pub async fn remove(&self, key: &[u8]) -> Result<(), KeyringError> {
     let mut inner = self.inner.write().await;
     if &inner.primary_key == key {
-      return Err(SecretKeyringError::RemovePrimaryKey);
+      return Err(KeyringError::RemovePrimaryKey);
     }
     inner.keys.shift_remove(key);
     Ok(())
@@ -330,7 +122,7 @@ impl SecretKeyring {
   /// Changes the key used to encrypt messages. This is the only key used to
   /// encrypt messages, so peers should know this key before this method is called.
   #[inline]
-  pub async fn use_key(&self, key_data: &[u8]) -> Result<(), SecretKeyringError> {
+  pub async fn use_key(&self, key_data: &[u8]) -> Result<(), KeyringError> {
     let mut inner = self.inner.write().await;
     if key_data == inner.primary_key.as_ref() {
       return Ok(());
@@ -338,7 +130,7 @@ impl SecretKeyring {
 
     // Try to find the key to set as primary
     let Some(&key) = inner.keys.get(key_data) else {
-      return Err(SecretKeyringError::SecretKeyNotFound);
+      return Err(KeyringError::SecretKeyNotFound);
     };
 
     let old_pk = inner.primary_key;
@@ -363,33 +155,17 @@ impl SecretKeyring {
 mod tests {
   use std::ops::{Deref, DerefMut};
 
+  use arbitrary::Arbitrary;
+
   use super::*;
 
-  impl SecretKey {
-    fn random(kind: u8) -> Self {
-      match kind {
-        16 => Self::Aes128(rand::random()),
-        24 => Self::Aes192(rand::random()),
-        32 => Self::Aes256(rand::random()),
-        x => panic!("invalid key kind: {}", x),
-      }
-    }
-  }
-
-  impl SecretKeys {
-    fn random(num_keys: usize) -> Self {
-      let mut keys = SecretKeys::new();
-      for i in 0..num_keys {
-        let kind = match i % 3 {
-          0 => 16,
-          1 => 24,
-          2 => 32,
-          _ => unreachable!(),
-        };
-        keys.push(SecretKey::random(kind));
-      }
-      keys
-    }
+  #[test]
+  fn arbitrary_secret_key() {
+    let key = SecretKey::arbitrary(&mut arbitrary::Unstructured::new(&[0; 128])).unwrap();
+    assert!(matches!(
+      key,
+      SecretKey::Aes128(_) | SecretKey::Aes192(_) | SecretKey::Aes256(_)
+    ));
   }
 
   #[test]
@@ -461,19 +237,19 @@ mod tests {
 
   #[tokio::test]
   async fn test_primary_only() {
-    let keyring = SecretKeyring::new(TEST_KEYS[1]);
+    let keyring = Keyring::new(TEST_KEYS[1]);
     assert_eq!(keyring.keys().await.collect::<Vec<_>>().len(), 1);
   }
 
   #[tokio::test]
   async fn test_get_primary_key() {
-    let keyring = SecretKeyring::with_keys(TEST_KEYS[1], TEST_KEYS.iter().copied());
+    let keyring = Keyring::with_keys(TEST_KEYS[1], TEST_KEYS.iter().copied());
     assert_eq!(keyring.primary_key().await.as_ref(), TEST_KEYS[1].as_ref());
   }
 
   #[tokio::test]
   async fn test_insert_remove_use() {
-    let keyring = SecretKeyring::new(TEST_KEYS[1]);
+    let keyring = Keyring::new(TEST_KEYS[1]);
 
     // Use non-existent key throws error
     keyring.use_key(&TEST_KEYS[2]).await.unwrap_err();

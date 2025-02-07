@@ -451,7 +451,7 @@
 //   }
 
 //   #[cfg(feature = "encryption")]
-//   fn keyring(&self) -> Option<&memberlist_core::types::SecretKeyring> {
+//   fn keyring(&self) -> Option<&memberlist_core::types::Keyring> {
 //     None
 //   }
 

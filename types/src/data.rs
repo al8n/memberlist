@@ -1,34 +1,106 @@
 use std::borrow::Cow;
 
-use length_delimited::InsufficientBuffer;
+use const_varint::{decode_u32_varint, encode_u32_varint_to, encoded_u32_varint_len};
 
 use super::WireType;
 
+#[cfg(any(feature = "std", feature = "alloc"))]
+mod bytes;
+mod nodecraft;
+mod primitives;
+#[cfg(any(feature = "std", feature = "alloc"))]
+mod string;
+
 /// The memberlist data can be transmitted through the network.
-pub trait Data: Send + Sync + 'static {
+pub trait Data: core::fmt::Debug + Send + Sync {
   /// The wire type of the data.
   const WIRE_TYPE: WireType = WireType::LengthDelimited;
 
   /// Returns the encoded length of the data only considering the data itself, (e.g. no length prefix, no wire type).
   fn encoded_len(&self) -> usize;
 
-  /// Encodes the data to a buffer without the wire type and length prefix.
+  /// Returns the encoded length of the data including the length delimited.
+  fn encoded_len_with_length_delimited(&self) -> usize {
+    let len = self.encoded_len();
+    match Self::WIRE_TYPE {
+      WireType::LengthDelimited => encoded_u32_varint_len(len as u32) + len,
+      _ => len,
+    }
+  }
+
+  /// Encodes the message to a buffer.
   ///
   /// An error will be returned if the buffer does not have sufficient capacity.
   fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError>;
 
-  /// Decodes an instance of the message from the `src`, the `src` should not contain the wire type or length prefix.
+  /// Encodes the message with a length-delimiter to a buffer.
+  ///
+  /// An error will be returned if the buffer does not have sufficient capacity.
+  fn encode_length_delimited(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+    if Self::WIRE_TYPE != WireType::LengthDelimited {
+      return self.encode(buf);
+    }
+
+    let len = self.encoded_len();
+    if len > u32::MAX as usize {
+      return Err(EncodeError::TooLarge);
+    }
+
+    let mut offset = 0;
+    offset += encode_u32_varint_to(len as u32, buf)?;
+    offset += self.encode(&mut buf[offset..])?;
+
+    #[cfg(debug_assertions)]
+    super::debug_assert_write_eq(offset, self.encoded_len_with_length_delimited());
+
+    Ok(offset)
+  }
+
+  /// Decodes an instance of the message from a buffer.
+  ///
+  /// The entire buffer will be consumed.
   fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
   where
     Self: Sized;
+
+  /// Decodes a length-delimited instance of the message from the buffer.
+  fn decode_length_delimited(buf: &[u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized,
+  {
+    if Self::WIRE_TYPE != WireType::LengthDelimited {
+      return Self::decode(buf);
+    }
+
+    let (mut offset, len) =
+      decode_u32_varint(buf).map_err(|_| DecodeError::new("invalid varint"))?;
+    let len = len as usize;
+    if len + offset > buf.len() {
+      return Err(DecodeError::new("buffer underflow"));
+    }
+
+    let buf = &buf[offset..offset + len];
+    let (bytes_read, value) = Self::decode(buf)?;
+
+    #[cfg(debug_assertions)]
+    super::debug_assert_read_eq(bytes_read, len);
+
+    offset += bytes_read;
+    Ok((offset, value))
+  }
 }
 
 /// A data encoding error
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
   /// Returned when the encoded buffer is too small to hold the bytes format of the types.
-  #[error(transparent)]
-  InsufficientBuffer(#[from] InsufficientBuffer),
+  #[error("insufficient buffer capacity, required: {required}, remaining: {remaining}")]
+  InsufficientBuffer {
+    /// The required buffer capacity.
+    required: usize,
+    /// The remaining buffer capacity.
+    remaining: usize,
+  },
   /// Returned when the data in encoded format is larger than the maximum allowed size.
   #[error("encoded data is too large, the maximum allowed size is {MAX} bytes", MAX = u32::MAX)]
   TooLarge,
@@ -38,6 +110,15 @@ pub enum EncodeError {
 }
 
 impl EncodeError {
+  /// Creates an insufficient buffer error.
+  #[inline]
+  pub const fn insufficient_buffer(required: usize, remaining: usize) -> Self {
+    Self::InsufficientBuffer {
+      required,
+      remaining,
+    }
+  }
+
   /// Creates a custom encoding error.
   pub fn custom<T>(value: T) -> Self
   where
@@ -46,24 +127,32 @@ impl EncodeError {
     Self::Custom(value.into())
   }
 
-  #[inline]
-  pub(crate) fn with_information(self, required: u64, available: u64) -> Self {
+  pub(crate) fn update(mut self, required: usize, remaining: usize) -> Self {
     match self {
-      Self::InsufficientBuffer(_) => {
-        Self::InsufficientBuffer(InsufficientBuffer::with_information(required, available))
+      Self::InsufficientBuffer {
+        required: ref mut r,
+        remaining: ref mut rem,
+      } => {
+        *r = required;
+        *rem = remaining;
+        self
       }
-      e => e,
+      _ => self,
     }
   }
 }
 
-impl From<length_delimited::EncodeError> for EncodeError {
+impl From<const_varint::EncodeError> for EncodeError {
   #[inline]
-  fn from(value: length_delimited::EncodeError) -> Self {
+  fn from(value: const_varint::EncodeError) -> Self {
     match value {
-      length_delimited::EncodeError::Underflow => {
-        Self::InsufficientBuffer(InsufficientBuffer::new())
-      }
+      const_varint::EncodeError::Underflow {
+        required,
+        remaining,
+      } => Self::InsufficientBuffer {
+        required,
+        remaining,
+      },
     }
   }
 }

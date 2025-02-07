@@ -9,47 +9,42 @@
 mod api;
 mod awareness;
 mod base;
-pub use base::*;
-
 mod broadcast;
-pub use broadcast::*;
+mod network;
+mod options;
+mod state;
+mod suspicion;
+
 /// Trait can be implemented to hook into the memberlist lifecycle.
 pub mod delegate;
 /// Error related to memberlist
 pub mod error;
-mod network;
-pub use network::META_MAX_SIZE;
-mod options;
-pub use options::Options;
-
-/// The transimit queue implementation.
-pub mod queue;
-mod state;
-mod suspicion;
-
-/// The transport layer for memberlist
-pub mod transport;
-
-/// The types used in memberlist
-pub mod types;
-
-/// The utils used in memberlist
-pub mod util;
-
-pub use bytes;
-
-pub use nodecraft::CheapClone;
-
-pub use agnostic_lite;
-
-pub use futures;
+/// The keyring implementation.
+#[cfg(feature = "encryption")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+pub mod keyring;
 
 #[cfg(feature = "metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
 pub use metrics;
-
-#[doc(hidden)]
+/// The transimit queue implementation.
+pub mod queue;
 pub use tracing;
+/// The transport layer for memberlist
+pub mod transport;
+/// The types used in memberlist
+pub mod types;
+/// The utils used in memberlist
+pub mod util;
+
+pub use agnostic_lite;
+pub use base::*;
+pub use broadcast::*;
+pub use bytes;
+pub use futures;
+pub use network::META_MAX_SIZE;
+pub use nodecraft::CheapClone;
+pub use options::Options;
 
 /// All unit test fns are exported in the `tests` module.
 /// This module is used for users want to use other async runtime,
@@ -67,15 +62,15 @@ pub mod tests {
   use self::{delegate::Delegate, error::Error, transport::Transport};
   use super::*;
 
-  // /// Re-export the all unit test cases for state
-  // pub mod state {
-  //   pub use crate::state::tests::*;
-  // }
+  /// Re-export the all unit test cases for state
+  pub mod state {
+    pub use crate::state::tests::*;
+  }
 
-  // /// Re-export the all unit test cases for memberlist
-  // pub mod memberlist {
-  //   pub use crate::base::tests::*;
-  // }
+  /// Re-export the all unit test cases for memberlist
+  pub mod memberlist {
+    pub use crate::base::tests::*;
+  }
 
   #[cfg(any(feature = "test", test))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]

@@ -18,7 +18,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = ["metrics"]
 metrics = ["dep:metrics"]
-encryption = ["indexmap"]
+encryption = ["indexmap", "base64"]
 
 serde = [
   "dep:serde",
@@ -64,8 +64,9 @@ rand = "0.9"
 scopeguard.workspace = true
 smol_str.workspace = true
 smallvec.workspace = true
-# memberlist-types.workspace = true
+memberlist-types.workspace = true
 smallvec-wrapper.workspace = true
+triomphe.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 viewit.workspace = true

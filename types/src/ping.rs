@@ -1,5 +1,6 @@
-use length_delimited::Varint;
 use nodecraft::{CheapClone, Node};
+
+use super::{Data, DecodeError, EncodeError};
 
 macro_rules! bail_ping {
   (
@@ -13,8 +14,6 @@ macro_rules! bail_ping {
     )]
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
-    #[cfg_attr(feature = "rkyv", derive(::rkyv::Serialize, ::rkyv::Deserialize, ::rkyv::Archive))]
-    #[cfg_attr(feature = "rkyv", rkyv(compare(PartialEq)))]
     pub struct $name<I, A> {
       /// The sequence number of the ack
       #[viewit(
@@ -63,7 +62,7 @@ macro_rules! bail_ping {
         #[inline]
         const fn source_addr_byte() -> u8
         where
-          A: super::Data,
+          A: Data,
         {
           super::merge(A::WIRE_TYPE, [< $name:upper _SOURCE_ADDR_TAG >])
         }
@@ -71,7 +70,7 @@ macro_rules! bail_ping {
         #[inline]
         const fn target_id_byte() -> u8
         where
-          I: super::Data,
+          I: Data,
         {
           super::merge(I::WIRE_TYPE, [< $name:upper _TARGET_ID_TAG >])
         }
@@ -79,36 +78,32 @@ macro_rules! bail_ping {
         #[inline]
         const fn target_addr_byte() -> u8
         where
-          A: super::Data,
+          A: Data,
         {
           super::merge(A::WIRE_TYPE, [< $name:upper _TARGET_ADDR_TAG >])
         }
+      }
 
-        /// Returns the encoded length of the message
-        #[inline]
-        pub fn encoded_len(&self) -> usize
-        where
-          I: super::Data,
-          A: super::Data,
-        {
-          let mut len = 1 + super::encoded_u32_varint_len(self.sequence_number);
-          len += 1 + super::encoded_data_len(self.source.id());
-          len += 1 + super::encoded_data_len(self.source.address());
-          len += 1 + super::encoded_data_len(self.target.id());
-          len += 1 + super::encoded_data_len(self.target.address());
+      impl<I, A> Data for $name<I, A>
+      where
+        I: Data,
+        A: Data,
+      {
+        fn encoded_len(&self) -> usize {
+          let mut len = 1 + self.sequence_number.encoded_len();
+          len += 1 + self.source.id().encoded_len_with_length_delimited();
+          len += 1 + self.source.address().encoded_len_with_length_delimited();
+          len += 1 + self.target.id().encoded_len_with_length_delimited();
+          len += 1 + self.target.address().encoded_len_with_length_delimited();
           len
         }
 
-        /// Encodes the message into the buffer
-        pub fn encode(&self, buf: &mut [u8]) -> Result<usize, super::EncodeError>
-        where
-          I: super::Data,
-          A: super::Data,
+        fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError>
         {
           macro_rules! bail {
             ($this:ident($offset:expr, $len:ident)) => {
               if $offset >= $len {
-                return Err(super::EncodeError::InsufficientBuffer(super::InsufficientBuffer::with_information($this.encoded_len() as u64, $len as u64)));
+                return Err(EncodeError::insufficient_buffer($this.encoded_len(), $len));
               }
             }
           }
@@ -119,28 +114,36 @@ macro_rules! bail_ping {
           bail!(self(offset, len));
           buf[offset] = [< $name:upper _SEQUENCE_NUMBER_BYTE >];
           offset += 1;
-          offset += self.sequence_number.encode(&mut buf[offset..]).map_err(|_| super::InsufficientBuffer::with_information(self.encoded_len() as u64, len as u64))?;
+          offset += self.sequence_number.encode(&mut buf[offset..]).map_err(|e| EncodeError::from(e).update(self.encoded_len(), len))?;
 
           bail!(self(offset, len));
-          offset += super::encode_data(self.source.id(), &mut buf[offset..]).map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
+          buf[offset] = Self::source_id_byte();
+          offset += 1;
+          offset += self.source.id().encode_length_delimited(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
 
           bail!(self(offset, len));
-          offset += super::encode_data(self.source.address(), &mut buf[offset..]).map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
+          buf[offset] = Self::source_addr_byte();
+          offset += 1;
+          offset += self.source.address().encode_length_delimited(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
 
           bail!(self(offset, len));
-          offset += super::encode_data(self.target.id(), &mut buf[offset..]).map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
+          buf[offset] = Self::target_id_byte();
+          offset += 1;
+          offset += self.target.id().encode_length_delimited(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
 
           bail!(self(offset, len));
-          offset += super::encode_data(self.target.address(), &mut buf[offset..]).map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
+          buf[offset] = Self::target_addr_byte();
+          offset += 1;
+          offset += self.target.address().encode_length_delimited(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
 
+          #[cfg(debug_assertions)]
+          super::debug_assert_write_eq(offset, self.encoded_len());
           Ok(offset)
         }
 
-        /// Decodes the message from the buffer
-        pub fn decode(src: &[u8]) -> Result<(usize, Self), super::DecodeError>
+        fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
         where
-          I: super::Data,
-          A: super::Data,
+          Self: Sized,
         {
           let mut sequence_number = None;
           let mut source_id = None;
@@ -155,44 +158,44 @@ macro_rules! bail_ping {
 
             match b {
               [< $name:upper _SEQUENCE_NUMBER_BYTE >] => {
-                let (bytes_read, value) = super::decode_varint(super::WireType::Varint, &src[offset..])?;
+                let (bytes_read, value) = u32::decode(&src[offset..])?;
                 offset += bytes_read;
                 sequence_number = Some(value);
               }
               b if b == Self::source_id_byte() => {
-                let (bytes_read, value) = super::decode_data::<I>(&src[offset..])?;
+                let (bytes_read, value) = I::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
                 source_id = Some(value);
               }
               b if b == Self::source_addr_byte() => {
-                let (bytes_read, value) = super::decode_data::<A>(&src[offset..])?;
+                let (bytes_read, value) = A::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
                 source_addr = Some(value);
               }
               b if b == Self::target_id_byte() => {
-                let (bytes_read, value) = super::decode_data::<I>(&src[offset..])?;
+                let (bytes_read, value) = I::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
                 target_id = Some(value);
               }
               b if b == Self::target_addr_byte() => {
-                let (bytes_read, value) = super::decode_data::<A>(&src[offset..])?;
+                let (bytes_read, value) = A::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
                 target_addr = Some(value);
               }
               b => {
                 let (wire_type, _) = super::split(b);
                 let wire_type = super::WireType::try_from(wire_type)
-                  .map_err(|_| super::DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+                  .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
                 offset += super::skip(wire_type, &src[offset..])?;
               }
             }
           }
 
-          let sequence_number = sequence_number.ok_or_else(|| super::DecodeError::new("missing sequence number"))?;
-          let source_id = source_id.ok_or_else(|| super::DecodeError::new("missing source id"))?;
-          let source_addr = source_addr.ok_or_else(|| super::DecodeError::new("missing source address"))?;
-          let target_id = target_id.ok_or_else(|| super::DecodeError::new("missing target id"))?;
-          let target_addr = target_addr.ok_or_else(|| super::DecodeError::new("missing target address"))?;
+          let sequence_number = sequence_number.ok_or_else(|| DecodeError::new("missing sequence number"))?;
+          let source_id = source_id.ok_or_else(|| DecodeError::new("missing source id"))?;
+          let source_addr = source_addr.ok_or_else(|| DecodeError::new("missing source address"))?;
+          let target_id = target_id.ok_or_else(|| DecodeError::new("missing target id"))?;
+          let target_addr = target_addr.ok_or_else(|| DecodeError::new("missing target address"))?;
 
           Ok((offset, Self {
             sequence_number,
@@ -302,35 +305,4 @@ impl<I, A> From<IndirectPing<I, A>> for Ping<I, A> {
       target: ping.target,
     }
   }
-}
-
-#[cfg(test)]
-mod tests {
-  // use super::*;
-
-  // #[test]
-  // fn test_ping() {
-  //   for i in 0..100 {
-  //     let ping = Ping::<_, std::net::SocketAddr>::generate(i);
-  //     let mut buf = vec![0; ping.encoded_len()];
-  //     let encoded_len = ping.encode(&mut buf).unwrap();
-  //     assert_eq!(encoded_len, ping.encoded_len());
-  //     let (readed, decoded) = Ping::<_, std::net::SocketAddr>::decode(&buf).unwrap();
-  //     assert_eq!(readed, encoded_len);
-  //     assert_eq!(decoded, ping);
-  //   }
-  // }
-
-  // #[test]
-  // fn test_indirect_ping() {
-  //   for i in 0..100 {
-  //     let ping = IndirectPing::<_, std::net::SocketAddr>::generate(i);
-  //     let mut buf = vec![0; ping.encoded_len()];
-  //     let encoded_len = ping.encode(&mut buf).unwrap();
-  //     assert_eq!(encoded_len, ping.encoded_len());
-  //     let (readed, decoded) = IndirectPing::<_, std::net::SocketAddr>::decode(&buf).unwrap();
-  //     assert_eq!(readed, encoded_len);
-  //     assert_eq!(decoded, ping);
-  //   }
-  // }
 }

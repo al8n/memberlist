@@ -1,10 +1,11 @@
-use std::sync::Arc;
-
-use super::*;
-
 use bytes::Bytes;
-use either::Either;
 use nodecraft::{CheapClone, Node};
+use triomphe::Arc;
+
+use super::{
+  merge, skip, split, Data, DecodeError, DelegateVersion, EncodeError, Meta, ProtocolVersion,
+  State, WireType,
+};
 
 /// Push node state is the state push to the remote server.
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
@@ -95,36 +96,39 @@ pub struct PushNodeState<I, A> {
 const ID_TAG: u8 = 1;
 const ADDR_TAG: u8 = 2;
 const META_TAG: u8 = 3;
-const META_BYTE: u8 = super::merge(WireType::LengthDelimited, META_TAG);
+const META_BYTE: u8 = merge(WireType::LengthDelimited, META_TAG);
 const INCARNATION_TAG: u8 = 4;
-const INCARNATION_BYTE: u8 = super::merge(WireType::Varint, INCARNATION_TAG);
+const INCARNATION_BYTE: u8 = merge(WireType::Varint, INCARNATION_TAG);
 const STATE_TAG: u8 = 5;
-const STATE_BYTE: u8 = super::merge(WireType::Byte, STATE_TAG);
+const STATE_BYTE: u8 = merge(WireType::Byte, STATE_TAG);
 const PROTOCOL_VERSION_TAG: u8 = 6;
-const PROTOCOL_VERSION_BYTE: u8 = super::merge(WireType::Byte, PROTOCOL_VERSION_TAG);
+const PROTOCOL_VERSION_BYTE: u8 = merge(WireType::Byte, PROTOCOL_VERSION_TAG);
 const DELEGATE_VERSION_TAG: u8 = 7;
-const DELEGATE_VERSION_BYTE: u8 = super::merge(WireType::Byte, DELEGATE_VERSION_TAG);
+const DELEGATE_VERSION_BYTE: u8 = merge(WireType::Byte, DELEGATE_VERSION_TAG);
 
 impl<I, A> PushNodeState<I, A>
 where
-  I: super::Data,
-  A: super::Data,
+  I: Data,
+  A: Data,
 {
   const fn id_byte() -> u8 {
-    super::merge(I::WIRE_TYPE, ID_TAG)
+    merge(I::WIRE_TYPE, ID_TAG)
   }
 
   const fn addr_byte() -> u8 {
-    super::merge(A::WIRE_TYPE, ADDR_TAG)
+    merge(A::WIRE_TYPE, ADDR_TAG)
   }
+}
 
-  /// Returns the encoded length of the push node state.
-  pub fn encoded_len(&self) -> usize {
-    let mut len = 1 + super::encoded_data_len(&self.id);
-    len += 1 + super::encoded_data_len(&self.addr);
-    if !self.meta().is_empty() {
-      len += 1 + super::encoded_length_delimited_len(self.meta.len());
-    }
+impl<I, A> Data for PushNodeState<I, A>
+where
+  I: Data,
+  A: Data,
+{
+  fn encoded_len(&self) -> usize {
+    let mut len = 1 + self.id.encoded_len_with_length_delimited();
+    len += 1 + self.addr.encoded_len_with_length_delimited();
+    len += 1 + self.meta.encoded_len_with_length_delimited();
     len += 1 + self.incarnation.encoded_len();
     len += 1 + 1; // state
     len += 1 + 1; // protocol version
@@ -132,42 +136,48 @@ where
     len
   }
 
-  /// Encodes the push node state into the buffer.
-  pub fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, crate::EncodeError> {
     let mut offset = 0;
     macro_rules! bail {
       ($this:ident($offset:expr, $len:ident)) => {
         if $offset >= $len {
-          return Err(
-            length_delimited::InsufficientBuffer::with_information($offset as u64, $len as u64)
-              .into(),
-          );
+          return Err(EncodeError::insufficient_buffer($offset, $len));
         }
       };
     }
 
     let len = buf.len();
-    bail!(self(1, len));
+    bail!(self(0, len));
     buf[offset] = Self::id_byte();
     offset += 1;
-    offset += super::encode_data(&self.id, &mut buf[offset..])
-      .map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
+    offset += self
+      .id
+      .encode_length_delimited(&mut buf[offset..])
+      .map_err(|e| e.update(self.encoded_len(), len))?;
 
-    bail!(self(offset + 1, len));
+    bail!(self(offset, len));
     buf[offset] = Self::addr_byte();
     offset += 1;
-    offset += super::encode_data(&self.addr, &mut buf[offset..])
-      .map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
+    offset += self
+      .addr
+      .encode_length_delimited(&mut buf[offset..])
+      .map_err(|e| e.update(self.encoded_len(), len))?;
 
-    if !self.meta().is_empty() {
-      bail!(self(offset + 1, len));
-      buf[offset] = META_BYTE;
-      offset += 1;
-      offset += super::encode_length_delimited(&self.meta, &mut buf[offset..])
-        .map_err(|_| InsufficientBuffer::with_information(self.encoded_len() as u64, len as u64))?;
-    }
-    bail!(self(offset + 1, len));
-    offset += self.incarnation.encode(&mut buf[offset..])?;
+    bail!(self(offset, len));
+    buf[offset] = META_BYTE;
+    offset += 1;
+    offset += self
+      .meta
+      .encode_length_delimited(&mut buf[offset..])
+      .map_err(|e| e.update(self.encoded_len(), len))?;
+
+    bail!(self(offset, len));
+    buf[offset] = INCARNATION_BYTE;
+    offset += 1;
+    offset += self
+      .incarnation
+      .encode(&mut buf[offset..])
+      .map_err(|e| e.update(self.encoded_len(), len))?;
 
     bail!(self(offset + 6, len));
     buf[offset] = STATE_BYTE;
@@ -182,11 +192,16 @@ where
     offset += 1;
     buf[offset] = self.delegate_version.into();
     offset += 1;
+
+    #[cfg(debug_assertions)]
+    super::debug_assert_write_eq(offset, self.encoded_len());
     Ok(offset)
   }
 
-  /// Decodes the push node state from the buffer.
-  pub fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError> {
+  fn decode(src: &[u8]) -> Result<(usize, Self), crate::DecodeError>
+  where
+    Self: Sized,
+  {
     let mut offset = 0;
     let mut id = None;
     let mut addr = None;
@@ -202,24 +217,22 @@ where
 
       match b {
         b if b == Self::id_byte() => {
-          let (readed, value) = super::decode_data::<I>(&src[offset..])?;
+          let (readed, value) = I::decode_length_delimited(&src[offset..])?;
           offset += readed;
           id = Some(value);
         }
         b if b == Self::addr_byte() => {
-          let (readed, value) = super::decode_data::<A>(&src[offset..])?;
+          let (readed, value) = A::decode_length_delimited(&src[offset..])?;
           offset += readed;
           addr = Some(value);
         }
         META_BYTE => {
-          let (readed, value) =
-            super::decode_length_delimited(WireType::LengthDelimited, &src[offset..])?;
-          let val = Meta::try_from(value).map_err(|e| DecodeError::new(e.to_string()))?;
+          let (readed, value) = Meta::decode_length_delimited(&src[offset..])?;
           offset += readed;
-          meta = Some(val);
+          meta = Some(value);
         }
         INCARNATION_BYTE => {
-          let (readed, value) = super::decode_varint::<u32>(WireType::Varint, &src[offset..])?;
+          let (readed, value) = u32::decode(&src[offset..])?;
           offset += readed;
           incarnation = Some(value);
         }
@@ -231,7 +244,7 @@ where
           offset += 1;
           state = Some(value);
         }
-        PROTOCOL_VERSION_TAG => {
+        PROTOCOL_VERSION_BYTE => {
           if offset >= src.len() {
             return Err(DecodeError::new("buffer underflow"));
           }
@@ -239,7 +252,7 @@ where
           offset += 1;
           protocol_version = Some(value);
         }
-        DELEGATE_VERSION_TAG => {
+        DELEGATE_VERSION_BYTE => {
           if offset >= src.len() {
             return Err(DecodeError::new("buffer underflow"));
           }
@@ -409,29 +422,25 @@ impl<I, A> CheapClone for PushPull<I, A> {
   fn cheap_clone(&self) -> Self {
     Self {
       join: self.join,
-      states: self.states.cheap_clone(),
+      states: self.states.clone(),
       user_data: self.user_data.clone(),
     }
   }
 }
 
 const JOIN_TAG: u8 = 1;
-const JOIN_BYTE: u8 = super::merge(WireType::Varint, JOIN_TAG);
+const JOIN_BYTE: u8 = merge(WireType::Varint, JOIN_TAG);
 const STATES_TAG: u8 = 2;
-const STATES_BYTE: u8 = super::merge(WireType::LengthDelimited, STATES_TAG);
+const STATES_BYTE: u8 = merge(WireType::LengthDelimited, STATES_TAG);
 const USER_DATA_TAG: u8 = 3;
-const USER_DATA_BYTE: u8 = super::merge(WireType::LengthDelimited, USER_DATA_TAG);
+const USER_DATA_BYTE: u8 = merge(WireType::LengthDelimited, USER_DATA_TAG);
 
 impl<I, A> PushPull<I, A> {
   /// Create a new [`PushPull`] message.
   #[inline]
-  pub fn new(join: bool, states: TinyVec<PushNodeState<I, A>>) -> Self {
+  pub fn new(join: bool, states: impl Iterator<Item = PushNodeState<I, A>>) -> Self {
     Self {
-      states: match TinyVec::into_either(states) {
-        Either::Left(states) => Arc::from_iter(states),
-        Either::Right(states) => Arc::from(states.into_vec()),
-      },
-
+      states: Arc::from_iter(states),
       user_data: Bytes::new(),
       join,
     }
@@ -442,40 +451,28 @@ impl<I, A> PushPull<I, A> {
   pub fn into_components(self) -> (bool, Bytes, Arc<[PushNodeState<I, A>]>) {
     (self.join, self.user_data, self.states)
   }
+}
 
-  /// Returns the encoded length of the push pull message.
-  #[inline]
-  pub fn encoded_len(&self) -> usize
-  where
-    I: super::Data,
-    A: super::Data,
-  {
+impl<I, A> Data for PushPull<I, A>
+where
+  I: Data,
+  A: Data,
+{
+  fn encoded_len(&self) -> usize {
     let mut len = 1 + 1; // join
     for i in self.states.iter() {
-      len += 1 + i.encoded_len();
+      len += 1 + i.encoded_len_with_length_delimited();
     }
-    let udl = self.user_data.len();
-    if udl != 0 {
-      len += 1 + super::encoded_length_delimited_len(udl);
-    }
+    len += 1 + self.user_data.encoded_len_with_length_delimited();
     len
   }
 
-  /// Encodes the push pull message into the buffer.
-  #[inline]
-  pub fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError>
-  where
-    I: super::Data,
-    A: super::Data,
-  {
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
     let mut offset = 0;
     macro_rules! bail {
       ($this:ident($offset:expr, $len:ident)) => {
         if $offset >= $len {
-          return Err(
-            length_delimited::InsufficientBuffer::with_information($offset as u64, $len as u64)
-              .into(),
-          );
+          return Err(EncodeError::insufficient_buffer($offset, $len).into());
         }
       };
     }
@@ -488,33 +485,33 @@ impl<I, A> PushPull<I, A> {
     offset += 1;
 
     for i in self.states.iter() {
-      bail!(self(offset + 1, len));
+      bail!(self(offset, len));
       buf[offset] = STATES_BYTE;
       offset += 1;
-      offset += i.encode(&mut buf[offset..])?;
+      {
+        offset += i
+          .encode_length_delimited(&mut buf[offset..])
+          .map_err(|e| e.update(self.encoded_len(), len))?
+      }
     }
 
-    let udl = self.user_data.len();
-    if udl != 0 {
-      bail!(self(offset + 1, len));
-      buf[offset] = USER_DATA_BYTE;
-      offset += 1;
-      offset += super::encode_length_delimited(&self.user_data, &mut buf[offset..])?;
-    }
+    bail!(self(offset, len));
+    buf[offset] = USER_DATA_BYTE;
+    offset += 1;
+    offset += self.user_data.encode_length_delimited(&mut buf[offset..])?;
 
+    #[cfg(debug_assertions)]
+    super::debug_assert_write_eq(offset, self.encoded_len());
     Ok(offset)
   }
 
-  /// Decodes the push pull message from the buffer.
-  #[inline]
-  pub fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
   where
-    I: super::Data,
-    A: super::Data,
+    Self: Sized,
   {
     let mut offset = 0;
     let mut join = None;
-    let mut states = TinyVec::new();
+    let mut states = Vec::new();
     let mut user_data = None;
 
     while offset < src.len() {
@@ -532,15 +529,14 @@ impl<I, A> PushPull<I, A> {
           join = Some(val);
         }
         STATES_BYTE => {
-          let (readed, value) = PushNodeState::<I, A>::decode(&src[offset..])?;
+          let (readed, value) = PushNodeState::decode_length_delimited(&src[offset..])?;
           offset += readed;
           states.push(value);
         }
         USER_DATA_BYTE => {
-          let (readed, value) =
-            super::decode_length_delimited(WireType::LengthDelimited, &src[offset..])?;
+          let (readed, value) = Bytes::decode_length_delimited(&src[offset..])?;
           offset += readed;
-          user_data = Some(Bytes::copy_from_slice(value));
+          user_data = Some(value);
         }
         _ => {
           let (wire_type, _) = split(b);
@@ -552,10 +548,7 @@ impl<I, A> PushPull<I, A> {
     }
 
     let join = join.ok_or(DecodeError::new("missing join"))? != 0;
-    let states = match states.into_either() {
-      Either::Left(states) => Arc::from_iter(states),
-      Either::Right(states) => Arc::from(states.into_vec()),
-    };
+    let states = Arc::from(states);
     let user_data = user_data.unwrap_or_default();
     Ok((
       offset,
@@ -657,32 +650,6 @@ mod tests {
   use arbitrary::{Arbitrary, Unstructured};
 
   use super::*;
-
-  // #[test]
-  // fn test_push_server_state() {
-  //   for i in 0..100 {
-  //     let state = PushNodeState::generate(i);
-  //     let mut buf = vec![0; state.encoded_len()];
-  //     let encoded_len = state.encode(&mut buf).unwrap();
-  //     assert_eq!(encoded_len, state.encoded_len());
-  //     let (readed, decoded) = PushNodeState::decode(&buf).unwrap();
-  //     assert_eq!(readed, encoded_len);
-  //     assert_eq!(decoded, state);
-  //   }
-  // }
-
-  // #[test]
-  // fn test_push_pull() {
-  //   for i in 0..100 {
-  //     let push_pull = PushPull::generate(i);
-  //     let mut buf = vec![0; push_pull.encoded_len()];
-  //     let encoded_len = push_pull.encode(&mut buf).unwrap();
-  //     assert_eq!(encoded_len, push_pull.encoded_len());
-  //     let (readed, decoded) = PushPull::decode(&buf).unwrap();
-  //     assert_eq!(readed, encoded_len);
-  //     assert_eq!(decoded, push_pull);
-  //   }
-  // }
 
   #[test]
   fn test_push_pull_clone_and_cheap_clone() {

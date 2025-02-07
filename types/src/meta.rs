@@ -1,6 +1,8 @@
 use bytes::{Bytes, BytesMut};
 use nodecraft::CheapClone;
 
+use super::{Data, DecodeError, EncodeError};
+
 /// Invalid meta error.
 #[derive(Debug, thiserror::Error)]
 #[error("the size of meta must between [0-512] bytes, got {0}")]
@@ -174,6 +176,25 @@ impl TryFrom<BytesMut> for Meta {
       return Err(LargeMeta(s.len()));
     }
     Ok(Self(s.freeze()))
+  }
+}
+
+impl Data for Meta {
+  fn encoded_len(&self) -> usize {
+    self.len()
+  }
+
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+    <Bytes as Data>::encode(&self.0, buf)
+  }
+
+  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized,
+  {
+    Self::try_from(src)
+      .map(|meta| (meta.len(), meta))
+      .map_err(|e| DecodeError::new(e.to_string()))
   }
 }
 

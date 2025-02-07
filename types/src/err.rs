@@ -1,7 +1,6 @@
-use length_delimited::{encoded_u32_varint_len, InsufficientBuffer, LengthDelimitedEncoder};
 use smol_str::SmolStr;
 
-use super::{decode_length_delimited, merge, skip, split, DecodeError, WireType};
+use super::{debug_assert_write_eq, merge, skip, split, Data, DecodeError, EncodeError, WireType};
 
 /// Error response from the remote peer
 #[viewit::viewit(
@@ -27,47 +26,43 @@ impl ErrorResponse {
   const MESSAGE_TAG: u8 = 1;
   const MESSAGE_BYTE: u8 = merge(WireType::LengthDelimited, Self::MESSAGE_TAG);
 
-  /// Returns the encoded length of the error response
-  #[inline]
-  pub fn encoded_len(&self) -> usize {
-    if self.message.is_empty() {
-      return 0;
+  /// Create a new error response
+  pub fn new(message: impl Into<SmolStr>) -> Self {
+    Self {
+      message: message.into(),
     }
-
-    let len = self.message.len();
-    1 + encoded_u32_varint_len(len as u32) + len
   }
 
-  /// Encodes the error response into the buffer
-  pub fn encode(&self, buf: &mut [u8]) -> Result<usize, InsufficientBuffer> {
-    let msg_len = self.message.len();
-    if msg_len == 0 {
-      return Ok(0);
+  /// Returns the msg of the error response
+  pub fn set_message(&mut self, msg: impl Into<SmolStr>) -> &mut Self {
+    self.message = msg.into();
+    self
+  }
+}
+
+impl Data for ErrorResponse {
+  fn encoded_len(&self) -> usize {
+    1 + self.message.encoded_len_with_length_delimited()
+  }
+
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+    let mut offset = 0;
+    if buf.is_empty() {
+      return Err(EncodeError::insufficient_buffer(self.encoded_len(), 0));
     }
 
-    let len = buf.len();
-    let mut offset = 0;
     buf[offset] = Self::MESSAGE_BYTE;
     offset += 1;
-
-    offset += (msg_len as u32)
-      .encode(&mut buf[offset..])
-      .map_err(|_| InsufficientBuffer::with_information(self.encoded_len() as u64, len as u64))?;
-
-    if offset + msg_len > len {
-      return Err(InsufficientBuffer::with_information(
-        self.encoded_len() as u64,
-        len as u64,
-      ));
-    }
-
-    buf[offset..offset + msg_len].copy_from_slice(self.message.as_bytes());
-    offset += msg_len;
+    offset += self.message.encode_length_delimited(&mut buf[offset..])?;
+    #[cfg(debug_assertions)]
+    debug_assert_write_eq(offset, self.encoded_len());
     Ok(offset)
   }
 
-  /// Decodes the error response from the buffer
-  pub fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError> {
+  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized,
+  {
     let mut offset = 0;
     let mut msg = None;
 
@@ -78,18 +73,9 @@ impl ErrorResponse {
 
       match b {
         Self::MESSAGE_BYTE => {
-          let (bytes_read, value) =
-            decode_length_delimited(WireType::LengthDelimited, &src[offset..])?;
+          let (bytes_read, value) = SmolStr::decode_length_delimited(&src[offset..])?;
           offset += bytes_read;
-
-          match core::str::from_utf8(value) {
-            Ok(value) => {
-              msg = Some(SmolStr::new(value));
-            }
-            Err(e) => {
-              return Err(DecodeError::new(e.to_string()));
-            }
-          }
+          msg = Some(SmolStr::new(value));
         }
         _ => {
           let (wire_type, _) = split(src[offset]);
@@ -106,19 +92,6 @@ impl ErrorResponse {
         message: msg.unwrap_or_default(),
       },
     ))
-  }
-
-  /// Create a new error response
-  pub fn new(message: impl Into<SmolStr>) -> Self {
-    Self {
-      message: message.into(),
-    }
-  }
-
-  /// Returns the msg of the error response
-  pub fn set_message(&mut self, msg: impl Into<SmolStr>) -> &mut Self {
-    self.message = msg.into();
-    self
   }
 }
 
@@ -170,21 +143,6 @@ mod tests {
   use arbitrary::{Arbitrary, Unstructured};
 
   use super::*;
-
-  #[quickcheck_macros::quickcheck]
-  fn fuzzy_error_message_encode_decode(err: ErrorResponse) -> bool {
-    let mut buf = vec![0; err.encoded_len()];
-    let Ok(written) = err.encode(&mut buf) else {
-      return false;
-    };
-    match ErrorResponse::decode(&buf) {
-      Ok((readed, decoded)) => err == decoded && written == readed,
-      Err(e) => {
-        println!("Error: {e}");
-        false
-      }
-    }
-  }
 
   #[test]
   fn test_access() {

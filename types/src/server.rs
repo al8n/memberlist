@@ -54,7 +54,7 @@ impl State {
       Self::Suspect => Cow::Borrowed("suspect"),
       Self::Dead => Cow::Borrowed("dead"),
       Self::Left => Cow::Borrowed("left"),
-      Self::Unknown(val) => Cow::Owned(format!("Unknown({val})")),
+      Self::Unknown(val) => Cow::Owned(format!("unknown({val})")),
     }
   }
 

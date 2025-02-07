@@ -211,8 +211,8 @@ pub struct Options {
   )]
   protocol_version: ProtocolVersion,
 
-  // #[viewit(getter(style = "ref", result(converter(fn = "Option::as_ref"), type = "Option<&SecretKeyring>")))]
-  // secret_keyring: Option<SecretKeyring>,
+  // #[viewit(getter(style = "ref", result(converter(fn = "Option::as_ref"), type = "Option<&Keyring>")))]
+  // secret_keyring: Option<Keyring>,
   /// Used to guarantee protocol-compatibility
   /// for any custom messages that the delegate might do (broadcasts,
   /// local/remote state, etc.). If you don't set these, then the protocol

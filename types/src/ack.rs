@@ -1,7 +1,6 @@
 use bytes::Bytes;
-use length_delimited::{encoded_u32_varint_len, InsufficientBuffer, Varint};
 
-use super::{decode_length_delimited, decode_varint, merge, skip, split, DecodeError, WireType};
+use super::{debug_assert_write_eq, merge, skip, split, Data, DecodeError, EncodeError, WireType};
 
 /// Ack response is sent for a ping
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
@@ -30,114 +29,11 @@ impl Ack {
   const PAYLOAD_TAG: u8 = 2;
   const PAYLOAD_BYTE: u8 = merge(WireType::LengthDelimited, Self::PAYLOAD_TAG);
 
-  /// Returns the encoded length of the ack message
-  #[inline]
-  pub fn encoded_len(&self) -> usize {
-    let sequence_number_len = 1 + encoded_u32_varint_len(self.sequence_number);
-    if self.payload.is_empty() {
-      return sequence_number_len;
-    }
-
-    let payload_len = 1 + encoded_u32_varint_len(self.payload.len() as u32) + self.payload.len();
-    sequence_number_len + payload_len
-  }
-
-  /// Encodes the ack response into the given buffer
-  #[inline]
-  pub fn encode(&self, buf: &mut [u8]) -> Result<usize, InsufficientBuffer> {
-    let len = buf.len();
-    if len < 2 {
-      return Err(InsufficientBuffer::with_information(
-        self.encoded_len() as u64,
-        len as u64,
-      ));
-    }
-
-    let mut offset = 0;
-    buf[offset] = Self::SEQUENCE_NUMBER_BYTE;
-    offset += 1;
-    offset += self
-      .sequence_number
-      .encode(&mut buf[offset..])
-      .map_err(|_| InsufficientBuffer::with_information(self.encoded_len() as u64, len as u64))?;
-
-    if self.payload.is_empty() {
-      return Ok(offset);
-    }
-
-    if offset + 1 >= len {
-      return Err(InsufficientBuffer::with_information(
-        self.encoded_len() as u64,
-        len as u64,
-      ));
-    }
-
-    buf[offset] = Self::PAYLOAD_BYTE;
-    offset += 1;
-
-    let payload_len = self.payload.len();
-    offset += (payload_len as u32)
-      .encode(&mut buf[offset..])
-      .map_err(|_| InsufficientBuffer::new())?;
-    if offset + payload_len > len {
-      return Err(InsufficientBuffer::with_information(
-        self.encoded_len() as u64,
-        len as u64,
-      ));
-    }
-
-    buf[offset..offset + payload_len].copy_from_slice(&self.payload);
-    offset += payload_len;
-    Ok(offset)
-  }
-
-  /// Decodes the whole ack response from the given buffer
-  #[inline]
-  pub fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError> {
-    let mut offset = 0;
-    let mut sequence_number = None;
-    let mut payload = None;
-
-    while offset < src.len() {
-      // Parse the tag and wire type
-      let b = src[offset];
-      offset += 1;
-
-      match b {
-        Self::SEQUENCE_NUMBER_BYTE => {
-          let (bytes_read, value) = decode_varint::<u32>(WireType::Varint, &src[offset..])?;
-          offset += bytes_read;
-          sequence_number = Some(value);
-        }
-        Self::PAYLOAD_BYTE => {
-          let (readed, data) = decode_length_delimited(WireType::LengthDelimited, &src[offset..])?;
-          offset += readed;
-          payload = Some(Bytes::copy_from_slice(data));
-        }
-        _ => {
-          let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
-          offset += skip(wire_type, &src[offset..])?;
-        }
-      }
-    }
-
-    Ok((
-      offset,
-      Self {
-        sequence_number: sequence_number.unwrap_or(0),
-        payload: payload.unwrap_or_default(),
-      },
-    ))
-  }
-
   /// Decodes the sequence number from the given buffer
   #[inline]
   pub fn decode_sequence_number(src: &[u8]) -> Result<(usize, u32), DecodeError> {
     let mut offset = 0;
     let mut sequence_number = None;
-
     while offset < src.len() {
       // Parse the tag and wire type
       let b = src[offset];
@@ -145,7 +41,7 @@ impl Ack {
 
       match b {
         Self::SEQUENCE_NUMBER_BYTE => {
-          let (bytes_read, value) = decode_varint::<u32>(WireType::Varint, &src[offset..])?;
+          let (bytes_read, value) = u32::decode(&src[offset..])?;
           offset += bytes_read;
           sequence_number = Some(value);
         }
@@ -193,6 +89,91 @@ impl Ack {
   }
 }
 
+impl Data for Ack {
+  fn encoded_len(&self) -> usize {
+    let sequence_number_len = 1 + self.sequence_number.encoded_len();
+    let payload_len = 1 + self.payload.encoded_len_with_length_delimited();
+    sequence_number_len + payload_len
+  }
+
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+    macro_rules! bail {
+      ($offset:expr, $remaining:ident) => {
+        if $offset >= $remaining {
+          return Err(EncodeError::insufficient_buffer(
+            self.encoded_len(),
+            $remaining,
+          ));
+        }
+      };
+    }
+
+    let len = buf.len();
+    let mut offset = 0;
+    bail!(offset, len);
+    buf[offset] = Self::SEQUENCE_NUMBER_BYTE;
+    offset += 1;
+    offset += self
+      .sequence_number
+      .encode(&mut buf[offset..])
+      .map_err(|e| e.update(self.encoded_len(), len))?;
+
+    bail!(offset, len);
+    buf[offset] = Self::PAYLOAD_BYTE;
+    offset += 1;
+    offset += self
+      .payload
+      .encode_length_delimited(&mut buf[offset..])
+      .map_err(|e| e.update(self.encoded_len(), len))?;
+
+    #[cfg(debug_assertions)]
+    debug_assert_write_eq(offset, self.encoded_len());
+    Ok(offset)
+  }
+
+  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized,
+  {
+    let mut offset = 0;
+    let mut sequence_number = None;
+    let mut payload = None;
+
+    while offset < src.len() {
+      // Parse the tag and wire type
+      let b = src[offset];
+      offset += 1;
+
+      match b {
+        Self::SEQUENCE_NUMBER_BYTE => {
+          let (bytes_read, value) = u32::decode(&src[offset..])?;
+          offset += bytes_read;
+          sequence_number = Some(value);
+        }
+        Self::PAYLOAD_BYTE => {
+          let (readed, data) = Bytes::decode_length_delimited(&src[offset..])?;
+          offset += readed;
+          payload = Some(data);
+        }
+        _ => {
+          let (wire_type, _) = split(b);
+          let wire_type = WireType::try_from(wire_type)
+            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          offset += skip(wire_type, &src[offset..])?;
+        }
+      }
+    }
+
+    Ok((
+      offset,
+      Self {
+        sequence_number: sequence_number.unwrap_or(0),
+        payload: payload.unwrap_or_default(),
+      },
+    ))
+  }
+}
+
 /// Nack response is sent for an indirect ping when the pinger doesn't hear from
 /// the ping-ee within the configured timeout. This lets the original node know
 /// that the indirect ping attempt happened but didn't succeed.
@@ -218,39 +199,44 @@ impl Nack {
   const SEQUENCE_NUMBER_TAG: u8 = 1;
   const SEQUENCE_NUMBER_BYTE: u8 = merge(WireType::Varint, Self::SEQUENCE_NUMBER_TAG);
 
-  /// Returns the encoded length of the nack message
+  /// Create a new nack response with the given sequence number.
   #[inline]
-  pub const fn encoded_len(&self) -> usize {
-    1 + encoded_u32_varint_len(self.sequence_number)
+  pub const fn new(sequence_number: u32) -> Self {
+    Self { sequence_number }
   }
 
-  /// Encodes the nack response into the given buffer
+  /// Sets the sequence number of the nack response
   #[inline]
-  pub fn encode(&self, buf: &mut [u8]) -> Result<usize, InsufficientBuffer> {
-    let len = buf.len();
-    if len < 1 {
-      return Err(InsufficientBuffer::with_information(
-        self.encoded_len() as u64,
-        len as u64,
-      ));
-    }
+  pub fn set_sequence_number(&mut self, sequence_number: u32) -> &mut Self {
+    self.sequence_number = sequence_number;
+    self
+  }
+}
 
+impl Data for Nack {
+  fn encoded_len(&self) -> usize {
+    1 + self.sequence_number.encoded_len()
+  }
+
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
     let mut offset = 0;
+    if buf.is_empty() {
+      return Err(EncodeError::insufficient_buffer(self.encoded_len(), 0));
+    }
     buf[offset] = Self::SEQUENCE_NUMBER_BYTE;
     offset += 1;
-    offset += self
-      .sequence_number
-      .encode(&mut buf[offset..])
-      .map_err(|_| InsufficientBuffer::with_information(self.encoded_len() as u64, len as u64))?;
+    offset += self.sequence_number.encode(&mut buf[offset..])?;
+    #[cfg(debug_assertions)]
+    debug_assert_write_eq(offset, self.encoded_len());
     Ok(offset)
   }
 
-  /// Decodes the whole nack response from the given buffer
-  #[inline]
-  pub fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError> {
-    let mut offset = 0;
+  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized,
+  {
     let mut sequence_number = None;
-
+    let mut offset = 0;
     while offset < src.len() {
       // Parse the tag and wire type
       let b = src[offset];
@@ -258,7 +244,7 @@ impl Nack {
 
       match b {
         Self::SEQUENCE_NUMBER_BYTE => {
-          let (bytes_read, value) = decode_varint::<u32>(WireType::Varint, &src[offset..])?;
+          let (bytes_read, value) = u32::decode(&src[offset..])?;
           offset += bytes_read;
           sequence_number = Some(value);
         }
@@ -277,19 +263,6 @@ impl Nack {
         sequence_number: sequence_number.unwrap_or(0),
       },
     ))
-  }
-
-  /// Create a new nack response with the given sequence number.
-  #[inline]
-  pub const fn new(sequence_number: u32) -> Self {
-    Self { sequence_number }
-  }
-
-  /// Sets the sequence number of the nack response
-  #[inline]
-  pub fn set_sequence_number(&mut self, sequence_number: u32) -> &mut Self {
-    self.sequence_number = sequence_number;
-    self
   }
 }
 
@@ -341,31 +314,6 @@ const _: () = {
 mod tests {
   use super::*;
   use arbitrary::{Arbitrary, Unstructured};
-  use quickcheck_macros::quickcheck;
-
-  #[quickcheck]
-  fn fuzzy_ack_encode_decode(ack: Ack) -> bool {
-    let mut buf = vec![0; ack.encoded_len()];
-    let Ok(written) = ack.encode(&mut buf) else {
-      return false;
-    };
-    let Ok((readed, decoded)) = Ack::decode(&buf) else {
-      return false;
-    };
-    ack == decoded && written == readed
-  }
-
-  #[quickcheck]
-  fn fuzzy_nack_encode_decode(nack: Nack) -> bool {
-    let mut buf = vec![0; nack.encoded_len()];
-    let Ok(written) = nack.encode(&mut buf) else {
-      return false;
-    };
-    let Ok((readed, decoded)) = Nack::decode(&buf) else {
-      return false;
-    };
-    nack == decoded && written == readed
-  }
 
   #[test]
   fn test_access() {

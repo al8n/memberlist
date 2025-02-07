@@ -1,5 +1,4 @@
-pub use ipnet;
-use ipnet::*;
+pub use ipnet::*;
 use std::{collections::HashSet, net::IpAddr, str::FromStr};
 
 /// Classless Inter-Domain Routing (CIDR) policy.

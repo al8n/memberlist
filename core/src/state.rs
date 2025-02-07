@@ -24,9 +24,9 @@ use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 use rand::{seq::SliceRandom, Rng};
 
-// /// Exports the state unit test cases.
-// #[cfg(any(test, feature = "test"))]
-// pub mod tests;
+/// Exports the state unit test cases.
+#[cfg(any(test, feature = "test"))]
+pub mod tests;
 
 mod ack_manager;
 pub(crate) use ack_manager::*;
@@ -559,7 +559,11 @@ where
             self.local_id().cheap_clone(),
           )),
           State::Unknown(val) => {
-            tracing::warn!(local = %self.inner.id, remote = %r.id(), "memberlist.state: unknown state {}", val);
+            tracing::warn!(local = %self.inner.id, remote = %r.id(), state=%val, "memberlist.state: unknown state");
+            return None;
+          },
+          state => {
+            tracing::warn!(local = %self.inner.id, remote = %r.id(), state=%state, "memberlist.state: unknown state");
             return None;
           }
         };

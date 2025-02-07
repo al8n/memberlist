@@ -52,7 +52,7 @@ where
   #[cfg(feature = "encryption")]
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
   #[inline]
-  pub fn keyring(&self) -> Option<&super::types::SecretKeyring> {
+  pub fn keyring(&self) -> Option<&super::keyring::Keyring> {
     self.inner.transport.keyring()
   }
 

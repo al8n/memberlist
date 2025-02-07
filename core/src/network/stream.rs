@@ -172,11 +172,11 @@ where
     // Get the delegate state
     // Send our node state
     let msg: Message<_, _> = if let Some(delegate) = &self.delegate {
-      PushPull::new(join, local_nodes)
+      PushPull::new(join, local_nodes.into_iter())
         .with_user_data(delegate.local_state(join).await)
         .into()
     } else {
-      PushPull::new(join, local_nodes).into()
+      PushPull::new(join, local_nodes.into_iter()).into()
     };
 
     #[cfg(feature = "metrics")]
@@ -294,7 +294,7 @@ where
     msg.advance(1);
     match mt {
       MessageType::Ping => {
-        let ping = match Ping::<T::Id, T::ResolvedAddress>::decode(&mut msg) {
+        let ping = match Ping::<T::Id, T::ResolvedAddress>::decode(&msg) {
           Ok(p) => p.1,
           Err(e) => {
             tracing::error!(local=%self.inner.id, remote = %addr, err=%e, "memberlist.stream: failed to decode ping message");

@@ -99,7 +99,7 @@ where
   }
 
   #[cfg(feature = "encryption")]
-  fn keyring(&self) -> Option<&crate::types::SecretKeyring> {
+  fn keyring(&self) -> Option<&crate::types::Keyring> {
     unimplemented!()
   }
 

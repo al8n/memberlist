@@ -1,12 +1,8 @@
-use crate::types::encode_data;
-
 use super::{
-  decode_data, decode_length_delimited, decode_varint, encode_length_delimited, encoded_data_len,
-  encoded_length_delimited_len, merge, skip, split, DecodeError, DelegateVersion, EncodeError,
-  Meta, ProtocolVersion, WireType,
+  merge, skip, split, Data, DecodeError, DelegateVersion, EncodeError, Meta, ProtocolVersion,
+  WireType,
 };
 
-use length_delimited::{encoded_u32_varint_len, InsufficientBuffer, LengthDelimitedEncoder};
 use nodecraft::{CheapClone, Node};
 
 /// Alive message
@@ -96,39 +92,29 @@ impl<I, A> Alive<I, A> {
   {
     merge(A::WIRE_TYPE, ADDR_TAG)
   }
+}
 
-  /// Returns the encoded length of the alive message.
-  #[inline]
-  pub fn encoded_len(&self) -> usize
-  where
-    I: super::Data,
-    A: super::Data,
-  {
-    let mut len = 1 + encoded_u32_varint_len(self.incarnation);
-
-    if !self.meta.is_empty() {
-      len += 1 + encoded_length_delimited_len(self.meta.len());
-    }
-    len += 1 + encoded_data_len(self.node.id());
-    len += 1 + encoded_data_len(self.node.address());
+impl<I, A> Data for Alive<I, A>
+where
+  I: Data,
+  A: Data,
+{
+  fn encoded_len(&self) -> usize {
+    let mut len = 1 + self.incarnation.encoded_len();
+    len += 1 + self.meta.encoded_len_with_length_delimited();
+    len += 1 + self.node.id().encoded_len_with_length_delimited();
+    len += 1 + self.node.address().encoded_len_with_length_delimited();
     len += 1 + 1;
     len += 1 + 1;
     len
   }
 
-  /// Encodes the alive message into the buffer.
-  #[inline]
-  pub fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError>
-  where
-    I: super::Data,
-    A: super::Data,
-  {
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
     macro_rules! bail {
       ($this:ident($offset:expr, $len:ident)) => {
         if $offset >= $len {
-          return Err(
-            InsufficientBuffer::with_information($this.encoded_len() as u64, $len as u64).into(),
-          );
+          println!("{}", $offset);
+          return Err(EncodeError::insufficient_buffer($this.encoded_len(), $len).into());
         }
       };
     }
@@ -139,47 +125,60 @@ impl<I, A> Alive<I, A> {
     bail!(self(offset, len));
     buf[offset] = INCARNATION_BYTE;
     offset += 1;
-    offset += self
-      .incarnation
-      .encode(&mut buf[offset..])
-      .map_err(|_| InsufficientBuffer::with_information(self.encoded_len() as u64, len as u64))?;
+    offset += self.incarnation.encode(&mut buf[offset..])?;
 
-    if !self.meta.is_empty() {
-      bail!(self(offset, len));
-      buf[offset] = META_BYTE;
-      offset += 1;
-      offset += encode_length_delimited(self.meta.as_bytes(), &mut buf[offset..])
-        .map_err(|_| InsufficientBuffer::with_information(self.encoded_len() as u64, len as u64))?;
-    }
+    bail!(self(offset, len));
+    buf[offset] = META_BYTE;
+    offset += 1;
+    offset += self
+      .meta
+      .encode_length_delimited(&mut buf[offset..])
+      .map_err(|e| e.update(self.encoded_len(), len))?;
 
     bail!(self(offset, len));
     buf[offset] = Self::id_byte();
     offset += 1;
-    offset += encode_data(self.node.id(), &mut buf[offset..])
-      .map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
+    offset += self
+      .node
+      .id()
+      .encode_length_delimited(&mut buf[offset..])
+      .map_err(|e| e.update(self.encoded_len(), len))?;
 
     bail!(self(offset, len));
     buf[offset] = Self::addr_byte();
     offset += 1;
 
-    offset += encode_data(self.node.address(), &mut buf[offset..])
-      .map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
+    offset += self
+      .node
+      .address()
+      .encode_length_delimited(&mut buf[offset..])
+      .map_err(|e| e.update(self.encoded_len(), len))?;
 
-    bail!(self(offset + 4, len));
+    bail!(self(offset, len));
     buf[offset] = PROTOCOL_VERSION_BYTE;
+    offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = self.protocol_version.into();
+    offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = DELEGATE_VERSION_BYTE;
+    offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = self.delegate_version.into();
     offset += 1;
+
+    #[cfg(debug_assertions)]
+    super::debug_assert_write_eq(offset, self.encoded_len());
 
     Ok(offset)
   }
 
-  #[inline]
-  pub fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
   where
-    I: super::Data,
-    A: super::Data,
+    Self: Sized,
   {
     let mut offset = 0;
     let mut incarnation = None;
@@ -196,14 +195,14 @@ impl<I, A> Alive<I, A> {
 
       match b {
         INCARNATION_BYTE => {
-          let (bytes_read, value) = decode_varint::<u32>(WireType::Varint, &src[offset..])?;
+          let (bytes_read, value) = u32::decode(&src[offset..])?;
           offset += bytes_read;
           incarnation = Some(value);
         }
         META_BYTE => {
-          let (readed, data) = decode_length_delimited(WireType::LengthDelimited, &src[offset..])?;
+          let (readed, data) = Meta::decode_length_delimited(&src[offset..])?;
           offset += readed;
-          meta = Some(Meta::try_from(data).map_err(|e| DecodeError::new(e.to_string()))?);
+          meta = Some(data);
         }
         DELEGATE_VERSION_BYTE => {
           if offset >= src.len() {
@@ -220,12 +219,12 @@ impl<I, A> Alive<I, A> {
           offset += 1;
         }
         b if b == Self::id_byte() => {
-          let (readed, data) = decode_data::<I>(&src[offset..])?;
+          let (readed, data) = I::decode_length_delimited(&src[offset..])?;
           offset += readed;
           id = Some(data);
         }
         b if b == Self::addr_byte() => {
-          let (readed, data) = decode_data::<A>(&src[offset..])?;
+          let (readed, data) = A::decode_length_delimited(&src[offset..])?;
           offset += readed;
           addr = Some(data);
         }
@@ -368,19 +367,6 @@ mod tests {
   use arbitrary::{Arbitrary, Unstructured};
 
   use super::*;
-
-  // #[test]
-  // fn test_encode_decode() {
-  //   for i in 0..100 {
-  //     let alive = Alive::random(i);
-  //     let mut buf = vec![0; alive.encoded_len()];
-  //     let encoded_len = alive.encode(&mut buf).unwrap();
-  //     assert_eq!(encoded_len, alive.encoded_len());
-  //     let (decoded_len, decoded) = Alive::decode(&buf).unwrap();
-  //     assert_eq!(decoded_len, encoded_len);
-  //     assert_eq!(decoded, alive);
-  //   }
-  // }
 
   #[test]
   fn test_access() {

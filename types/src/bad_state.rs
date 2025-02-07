@@ -1,4 +1,4 @@
-use length_delimited::Varint;
+use super::{Data, DecodeError, EncodeError, WireType};
 
 macro_rules! bad_bail {
   (
@@ -38,84 +38,54 @@ macro_rules! bad_bail {
 
     paste::paste! {
       const [< $name:upper _INCARNATION_TAG >]: u8 = 1;
-      const [< $name:upper _INCARNATION_BYTE >]: u8 = super::merge(super::WireType::Varint, [< $name:upper _ INCARNATION_TAG >]);
+      const [< $name:upper _INCARNATION_BYTE >]: u8 = super::merge(WireType::Varint, [< $name:upper _ INCARNATION_TAG >]);
 
       const [< $name:upper _NODE_TAG >]: u8 = 2;
       const [< $name:upper _FROM_TAG >]: u8 = 3;
 
-      impl<I> $name<I> {
-        #[inline]
-        const fn node_byte() -> u8
-        where
-          I: super::Data,
-        {
-          super::merge(I::WIRE_TYPE, [< $name:upper _NODE_TAG >])
-        }
-
-        #[inline]
-        const fn from_byte() -> u8
-        where
-          I: super::Data,
-        {
-          super::merge(I::WIRE_TYPE, [< $name:upper _FROM_TAG >])
-        }
-
-        /// Returns the encoded length of the message
-        #[inline]
-        pub fn encoded_len(&self) -> usize
-        where
-          I: super::Data,
-        {
-          let mut len = 1 + super::encoded_u32_varint_len(self.incarnation);
-          len += 1 + super::encoded_data_len(&self.node);
-          len += 1 + super::encoded_data_len(&self.from);
+      impl<I: Data> Data for $name<I> {
+        fn encoded_len(&self) -> usize {
+          let mut len = 1 + self.incarnation.encoded_len();
+          len += 1 + self.node.encoded_len_with_length_delimited();
+          len += 1 + self.from.encoded_len_with_length_delimited();
           len
         }
 
-        /// Encodes the message into the buffer
-        ///
-        /// An error will be returned if the buffer does not have sufficient capacity.
-        pub fn encode(&self, buf: &mut [u8]) -> Result<usize, super::EncodeError>
-        where
-          I: super::Data,
-        {
+        fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
           macro_rules! bail {
-            ($this:ident($len:ident)) => {
-              return Err(super::EncodeError::InsufficientBuffer(super::InsufficientBuffer::with_information($this.encoded_len() as u64, $len as u64)));
+            ($this:ident($offset:expr, $len:ident)) => {
+              if $offset >= $len {
+                return Err(EncodeError::insufficient_buffer($this.encoded_len(), $len));
+              }
             };
           }
 
           let len = buf.len();
-          if len < 1 {
-            bail!(self(len));
-          }
+          bail!(self(0, len));
 
           let mut offset = 0;
           buf[offset] = [< $name:upper _INCARNATION_BYTE >];
           offset += 1;
-          offset += self.incarnation.encode(&mut buf[offset..])?;
+          offset += self.incarnation.encode(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
 
-          if offset + 1 >= len {
-            bail!(self(len));
-          }
+          bail!(self(offset, len));
           buf[offset] = Self::node_byte();
           offset += 1;
-          offset += super::encode_data(&self.node, &mut buf[offset..]).map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
+          offset += self.node.encode_length_delimited(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
 
-          if offset + 1 >= len {
-            bail!(self(len));
-          }
+          bail!(self(offset, len));
           buf[offset] = Self::from_byte();
           offset += 1;
-          offset += super::encode_data(&self.from, &mut buf[offset..]).map_err(|e| e.with_information(self.encoded_len() as u64, len as u64))?;
+          offset += self.from.encode_length_delimited(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
 
+          #[cfg(debug_assertions)]
+          super::debug_assert_write_eq(offset, self.encoded_len());
           Ok(offset)
         }
 
-        /// Decodes the message from the buffer
-        pub fn decode(src: &[u8]) -> Result<(usize, Self), super::DecodeError>
+        fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
         where
-          I: super::Data,
+          Self: Sized,
         {
           let mut node = None;
           let mut from = None;
@@ -128,38 +98,56 @@ macro_rules! bad_bail {
 
             match b {
               [< $name:upper _INCARNATION_BYTE >] => {
-                let (bytes_read, value) = super::decode_varint(super::WireType::Varint, &src[offset..])?;
+                let (bytes_read, value) = u32::decode(&src[offset..])?;
                 offset += bytes_read;
                 incarnation = Some(value);
               }
               b if b == Self::node_byte() => {
-                let (bytes_read, value) = super::decode_data::<I>(&src[offset..])?;
+                let (bytes_read, value) = I::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
                 node = Some(value);
               }
               b if b == Self::from_byte() => {
-                let (bytes_read, value) = super::decode_data::<I>(&src[offset..])?;
+                let (bytes_read, value) = I::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
                 from = Some(value);
               }
               b => {
                 let (wire_type, _) = super::split(b);
-                let wire_type = super::WireType::try_from(wire_type)
-                  .map_err(|_| super::DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+                let wire_type = WireType::try_from(wire_type)
+                  .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
                 offset += super::skip(wire_type, &src[offset..])?;
               }
             }
           }
 
-          let incarnation = incarnation.ok_or_else(|| super::DecodeError::new("missing incarnation"))?;
-          let node = node.ok_or_else(|| super::DecodeError::new("missing node"))?;
-          let from = from.ok_or_else(|| super::DecodeError::new("missing from"))?;
+          let incarnation = incarnation.ok_or_else(|| DecodeError::new("missing incarnation"))?;
+          let node = node.ok_or_else(|| DecodeError::new("missing node"))?;
+          let from = from.ok_or_else(|| DecodeError::new("missing from"))?;
 
           Ok((offset, Self {
             incarnation,
             node,
             from,
           }))
+        }
+      }
+
+      impl<I> $name<I> {
+        #[inline]
+        const fn node_byte() -> u8
+        where
+          I: Data,
+        {
+          super::merge(I::WIRE_TYPE, [< $name:upper _NODE_TAG >])
+        }
+
+        #[inline]
+        const fn from_byte() -> u8
+        where
+          I: Data,
+        {
+          super::merge(I::WIRE_TYPE, [< $name:upper _FROM_TAG >])
         }
       }
     }
@@ -243,40 +231,3 @@ bad_bail!(
   /// Dead message
   Dead
 );
-
-#[cfg(test)]
-mod tests {
-  // use super::*;
-
-  // #[test]
-  // fn test_suspect_encode_decode() {
-  //   for i in 0..100 {
-  //     // Generate and test 100 random instances
-  //     let suspect = Suspect::generate(i);
-  //     let mut buf = vec![0; suspect.encoded_len()];
-  //     let encoded = suspect.encode(&mut buf).unwrap();
-  //     assert_eq!(encoded, buf.len());
-  //     let (read, decoded) = Suspect::<::smol_str::SmolStr>::decode(&buf).unwrap();
-  //     assert_eq!(read, buf.len());
-  //     assert_eq!(suspect.incarnation, decoded.incarnation);
-  //     assert_eq!(suspect.node, decoded.node);
-  //     assert_eq!(suspect.from, decoded.from);
-  //   }
-  // }
-
-  // #[test]
-  // fn test_dead_encode_decode() {
-  //   for i in 0..100 {
-  //     // Generate and test 100 random instances
-  //     let dead = Dead::generate(i);
-  //     let mut buf = vec![0; dead.encoded_len()];
-  //     let encoded = dead.encode(&mut buf).unwrap();
-  //     assert_eq!(encoded, buf.len());
-  //     let (read, decoded) = Dead::<::smol_str::SmolStr>::decode(&buf).unwrap();
-  //     assert_eq!(read, buf.len());
-  //     assert_eq!(dead.incarnation, decoded.incarnation);
-  //     assert_eq!(dead.node, decoded.node);
-  //     assert_eq!(dead.from, decoded.from);
-  //   }
-  // }
-}

@@ -2,7 +2,6 @@ use core::future::Future;
 
 use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
-use futures::AsyncRead;
 pub use nodecraft::{resolver::AddressResolver, CheapClone, *};
 
 use crate::types::*;
@@ -308,7 +307,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns the keyring (only used for encryption) of the node
   #[cfg(feature = "encryption")]
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  fn keyring(&self) -> Option<&SecretKeyring>;
+  fn keyring(&self) -> Option<&keyring::Keyring>;
 
   /// Returns if this transport enables encryption
   #[cfg(feature = "encryption")]

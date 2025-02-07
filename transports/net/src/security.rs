@@ -5,7 +5,7 @@ use aes_gcm::{
 };
 use bytes::{Buf, BufMut, BytesMut};
 use memberlist_core::transport::Wire;
-pub use memberlist_core::types::{SecretKey, SecretKeyring, SecretKeyringError, SecretKeys};
+pub use memberlist_core::types::{SecretKey, Keyring, KeyringError, SecretKeys};
 use nodecraft::resolver::AddressResolver;
 use rand::Rng;
 
@@ -59,7 +59,7 @@ pub enum SecurityError {
   NoInstalledKeys,
   /// Secret key is not in the keyring
   #[error("security: {0}")]
-  Keyring(#[from] SecretKeyringError),
+  Keyring(#[from] KeyringError),
 }
 
 impl From<aead::Error> for SecurityError {
