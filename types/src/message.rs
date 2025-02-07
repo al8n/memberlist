@@ -296,10 +296,10 @@ macro_rules! impl_data_for_collections {
         where
           Self: Sized,
         {
-          let mut offset = 0;
-          let msgs = decode_messages(src, &mut offset)
-            .collect::<Result<Self, _>>()?;
-          Ok((offset, msgs))
+          let mut decoder = MessageDecoder::new(src);
+          (&mut decoder)
+            .collect::<Result<Self, _>>()
+            .map(|msgs| (decoder.offset, msgs))
         }
       }
     )*
@@ -317,6 +317,94 @@ impl_data_for_collections!(
   smallvec_wrapper::SmallVec<Message<I, A>>,
   smallvec_wrapper::MediumVec<Message<I, A>>,
 );
+
+/// A message decoder which can yield messages from a buffer.
+///
+/// This decoder will not modify the source buffer and will only read from it.
+#[derive(Debug)]
+pub struct MessageDecoder<I, A, B> {
+  src: B,
+  offset: usize,
+  _m: core::marker::PhantomData<(I, A)>,
+}
+
+impl<I, A, B: Clone> Clone for MessageDecoder<I, A, B> {
+  fn clone(&self) -> Self {
+    Self {
+      src: self.src.clone(),
+      offset: self.offset,
+      _m: core::marker::PhantomData,
+    }
+  }
+}
+
+impl<I, A, B: Copy> Copy for MessageDecoder<I, A, B> {}
+
+impl<I, A, B> MessageDecoder<I, A, B> {
+  /// Creates a new message decoder.
+  #[inline]
+  pub const fn new(buf: B) -> Self {
+    Self {
+      src: buf,
+      offset: 0,
+      _m: core::marker::PhantomData,
+    }
+  }
+
+  /// Returns the current offset of the decoder.
+  #[inline]
+  pub const fn offset(&self) -> usize {
+    self.offset
+  }
+
+  /// Consumes the decoder and returns the source buffer.
+  #[inline]
+  pub fn into_components(self) -> (usize, B) {
+    (self.offset, self.src)
+  }
+}
+
+impl<I, A, B> Iterator for MessageDecoder<I, A, B>
+where
+  I: Data,
+  A: Data,
+  B: AsRef<[u8]>,
+{
+  type Item = Result<Message<I, A>, DecodeError>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    let src = self.src.as_ref();
+    while self.offset < src.len() {
+      let b = src[self.offset];
+      self.offset += 1;
+      match b {
+        b if b == Message::<I, A>::COMPOUND_BYTE => {
+          let (bytes_read, msg) = match Message::decode_length_delimited(&src[self.offset..]) {
+            Ok((bytes_read, msg)) => (bytes_read, msg),
+            Err(e) => return Some(Err(e)),
+          };
+          self.offset += bytes_read;
+          return Some(Ok(msg));
+        }
+        _ => {
+          let (wire_type, _) = split(b);
+          let wt = match WireType::try_from(wire_type)
+            .map_err(|_| DecodeError::new(format!("unknown wire type: {}", wire_type)))
+          {
+            Ok(wt) => wt,
+            Err(e) => return Some(Err(e)),
+          };
+
+          self.offset += match skip(wt, &src[self.offset..]) {
+            Ok(bytes_read) => bytes_read,
+            Err(e) => return Some(Err(e)),
+          };
+        }
+      }
+    }
+    None
+  }
+}
 
 #[inline]
 fn encoded_messages_len<I, A>(msgs: &[Message<I, A>]) -> usize
@@ -360,47 +448,6 @@ where
   super::debug_assert_write_eq(offset, encoded_messages_len(msgs));
 
   Ok(offset)
-}
-
-fn decode_messages<'a, I, A>(
-  src: &'a [u8],
-  offset: &'a mut usize,
-) -> impl Iterator<Item = Result<Message<I, A>, DecodeError>> + 'a
-where
-  I: Data,
-  A: Data,
-{
-  core::iter::from_fn(move || {
-    while *offset < src.len() {
-      let b = src[*offset];
-      *offset += 1;
-      match b {
-        b if b == Message::<I, A>::COMPOUND_BYTE => {
-          let (bytes_read, msg) = match Message::decode_length_delimited(&src[*offset..]) {
-            Ok((bytes_read, msg)) => (bytes_read, msg),
-            Err(e) => return Some(Err(e)),
-          };
-          *offset += bytes_read;
-          return Some(Ok(msg));
-        }
-        _ => {
-          let (wire_type, _) = split(b);
-          let wt = match WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("unknown wire type: {}", wire_type)))
-          {
-            Ok(wt) => wt,
-            Err(e) => return Some(Err(e)),
-          };
-
-          *offset += match skip(wt, &src[*offset..]) {
-            Ok(bytes_read) => bytes_read,
-            Err(e) => return Some(Err(e)),
-          };
-        }
-      }
-    }
-    None
-  })
 }
 
 #[cfg(feature = "arbitrary")]
