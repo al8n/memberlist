@@ -1,9 +1,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use memberlist_types::{Data, Messages};
+use memberlist_types::{Data, Message};
 
-fuzz_target!(|data: Messages<'_, String, Vec<u8>>| {
+fuzz_target!(|data: Message<String, Vec<u8>>| {
   let encoded_len = data.encoded_len();
   let mut buf = vec![0; encoded_len * 2];
   let written = match data.encode(&mut buf) {
@@ -13,7 +13,7 @@ fuzz_target!(|data: Messages<'_, String, Vec<u8>>| {
     }
   };
 
-  match Messages::<'_, String, Vec<u8>>::decode(&buf[..written]) {
+  match Message::<String, Vec<u8>>::decode(&buf[..written]) {
     Ok((readed, decoded)) => {
       assert!(data == decoded && written == readed && encoded_len == written)
     }

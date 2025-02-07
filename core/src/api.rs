@@ -15,7 +15,7 @@ use super::{
   network::META_MAX_SIZE,
   state::AckMessage,
   transport::{AddressResolver, CheapClone, MaybeResolvedAddress, Node, Transport},
-  types::{Alive, Dead, Data, Message, Meta, NodeState, Ping, SmallVec},
+  types::{Alive, Data, Dead, Message, Meta, NodeState, Ping, SmallVec},
   Options,
 };
 

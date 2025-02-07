@@ -292,8 +292,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn resolve(
     &self,
     addr: &<Self::Resolver as AddressResolver>::Address,
-  ) -> impl Future<Output = Result<Self::ResolvedAddress, Self::Error>>
-       + Send;
+  ) -> impl Future<Output = Result<Self::ResolvedAddress, Self::Error>> + Send;
 
   /// Returns the local id of the node
   fn local_id(&self) -> &Self::Id;
@@ -328,10 +327,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn packet_overhead(&self) -> usize;
 
   /// Returns an error if the given address is blocked
-  fn blocked_address(
-    &self,
-    addr: &Self::ResolvedAddress,
-  ) -> Result<(), Self::Error>;
+  fn blocked_address(&self, addr: &Self::ResolvedAddress) -> Result<(), Self::Error>;
 
   /// Reads a message from the remote node by promised connection.
   ///
@@ -418,17 +414,12 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns a packet subscriber that can be used to receive incoming packets
   fn packet(
     &self,
-  ) -> PacketSubscriber<
-    Self::ResolvedAddress,
-    <Self::Runtime as RuntimeLite>::Instant,
-  >;
+  ) -> PacketSubscriber<Self::ResolvedAddress, <Self::Runtime as RuntimeLite>::Instant>;
 
   /// Returns a receiver that can be read to handle incoming stream
   /// connections from other peers. How this is set up for listening is
   /// left as an exercise for the concrete transport implementations.
-  fn stream(
-    &self,
-  ) -> StreamSubscriber<Self::ResolvedAddress, Self::Stream>;
+  fn stream(&self) -> StreamSubscriber<Self::ResolvedAddress, Self::Stream>;
 
   /// Shutdown the transport
   fn shutdown(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;

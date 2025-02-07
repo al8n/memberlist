@@ -52,7 +52,7 @@ pub struct Packet<A, T> {
 impl<A, T> Packet<A, T> {
   /// Create a new packet
   #[inline]
-  pub const fn new(from: A, timestamp: T, payload: Bytes,) -> Self {
+  pub const fn new(from: A, timestamp: T, payload: Bytes) -> Self {
     Self {
       payload,
       from,
@@ -106,14 +106,8 @@ pub struct PacketSubscriber<A, T> {
 
 /// Returns producer and subscriber for packet.
 pub fn packet_stream<T: Transport>() -> (
-  PacketProducer<
-    T::ResolvedAddress,
-    <T::Runtime as RuntimeLite>::Instant,
-  >,
-  PacketSubscriber<
-    T::ResolvedAddress,
-    <T::Runtime as RuntimeLite>::Instant,
-  >,
+  PacketProducer<T::ResolvedAddress, <T::Runtime as RuntimeLite>::Instant>,
+  PacketSubscriber<T::ResolvedAddress, <T::Runtime as RuntimeLite>::Instant>,
 ) {
   let (sender, receiver) = async_channel::unbounded();
   (PacketProducer { sender }, PacketSubscriber { receiver })
@@ -368,20 +362,24 @@ mod tests {
   async fn access<R: RuntimeLite>() {
     let messages = Message::<SmolStr, SocketAddr>::user_data(Bytes::new());
     let timestamp = R::now();
-    let mut packet = Packet::<SocketAddr, _>::new("127.0.0.1:8080".parse().unwrap(), timestamp, messages.encode_to_bytes().unwrap());
+    let mut packet = Packet::<SocketAddr, _>::new(
+      "127.0.0.1:8080".parse().unwrap(),
+      timestamp,
+      messages.encode_to_bytes().unwrap(),
+    );
     packet.set_from("127.0.0.1:8081".parse().unwrap());
 
     let start = R::now();
     packet.set_timestamp(start);
-    let messages = Message::<SmolStr, SocketAddr>::user_data(
-      Bytes::from_static(b"a"),
-    ).encode_to_bytes().unwrap();
+    let messages = Message::<SmolStr, SocketAddr>::user_data(Bytes::from_static(b"a"))
+      .encode_to_bytes()
+      .unwrap();
     packet.set_payload(messages);
     assert_eq!(
       packet.payload(),
-      &Message::<SmolStr, SocketAddr>::user_data(
-        Bytes::from_static(b"a")
-      ).encode_to_bytes().unwrap(),
+      &Message::<SmolStr, SocketAddr>::user_data(Bytes::from_static(b"a"))
+        .encode_to_bytes()
+        .unwrap(),
     );
     assert_eq!(
       *packet.from(),

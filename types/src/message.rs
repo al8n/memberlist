@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use either::Either;
+use triomphe::Arc;
 
 use super::*;
 
@@ -201,24 +201,6 @@ macro_rules! enum_wrapper {
 
       $(
         paste::paste! {
-          #[doc = concat!("Returns the contained [`", stringify!($variant_ty), "`] message, consuming the self value. Panics if the value is not [`", stringify!($variant_ty), "`].")]
-          $vis fn [< unwrap_ $variant:snake>] (self) -> $variant_ty $(< $($variant_generic),+ >)? {
-            if let Self::$variant(val) = self {
-              val
-            } else {
-              panic!(concat!("expect ", stringify!($variant), ", buf got {}"), self.kind())
-            }
-          }
-
-          #[doc = concat!("Returns the contained [`", stringify!($variant_ty), "`] message, consuming the self value. Returns `None` if the value is not [`", stringify!($variant_ty), "`].")]
-          $vis fn [< try_unwrap_ $variant:snake>] (self) -> ::std::option::Option<$variant_ty $(< $($variant_generic),+ >)?> {
-            if let Self::$variant(val) = self {
-              ::std::option::Option::Some(val)
-            } else {
-              ::std::option::Option::None
-            }
-          }
-
           #[doc = concat!("Construct a [`", stringify!($name), "`] from [`", stringify!($variant_ty), "`].")]
           pub const fn [< $variant:snake >](val: $variant_ty $(< $($variant_generic),+ >)?) -> Self {
             Self::$variant(val)
@@ -229,31 +211,45 @@ macro_rules! enum_wrapper {
   };
 }
 
+// type Cow<'a, I, A> = Either<&'a [Message<'a, I, A>], Vec<Message<'static, I, A>>>;
+
 enum_wrapper!(
   /// Request to be sent to the Raft node.
-  #[derive(Debug, Clone, derive_more::From, PartialEq, Eq, Hash)]
+  #[derive(
+    Debug,
+    Clone,
+    derive_more::From,
+    derive_more::IsVariant,
+    derive_more::Unwrap,
+    derive_more::TryUnwrap,
+    PartialEq,
+    Eq,
+    Hash,
+  )]
   #[non_exhaustive]
   pub enum Message<I, A> {
+    /// Compound message
+    Compound(Arc<[Self]>) = 1,
     /// Ping message
-    Ping(Ping<I, A>) = 1,
+    Ping(Ping<I, A>) = 2,
     /// Indirect ping message
-    IndirectPing(IndirectPing<I, A>) = 2,
+    IndirectPing(IndirectPing<I, A>) = 3,
     /// Ack response message
-    Ack(Ack) = 3,
+    Ack(Ack) = 4,
     /// Suspect message
-    Suspect(Suspect<I>) = 4,
+    Suspect(Suspect<I>) = 5,
     /// Alive message
-    Alive(Alive<I, A>) = 5,
+    Alive(Alive<I, A>) = 6,
     /// Dead message
-    Dead(Dead<I>) = 6,
+    Dead(Dead<I>) = 7,
     /// PushPull message
-    PushPull(PushPull<I, A>) = 7,
+    PushPull(PushPull<I, A>) = 8,
     /// User mesg, not handled by us
-    UserData(Bytes) = 8,
+    UserData(Bytes) = 9,
     /// Nack response message
-    Nack(Nack) = 9,
+    Nack(Nack) = 10,
     /// Error response message
-    ErrorResponse(ErrorResponse) = 10,
+    ErrorResponse(ErrorResponse) = 11,
   }
 );
 
@@ -280,118 +276,191 @@ impl<I, A> Message<I, A> {
   pub const RESERVED_TAG_RANGE: std::ops::RangeInclusive<u8> = (0..=128);
 }
 
-/// A collection of messages.
-#[allow(clippy::type_complexity)]
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct Messages<'a, I, A>(Either<&'a [Message<I, A>], Vec<Message<I, A>>>);
+macro_rules! impl_data_for_collections {
+  ($($ty:ty), +$(,)?) => {
+    $(
+      impl<I, A> Data for $ty
+      where
+        I: Data,
+        A: Data,
+      {
+        fn encoded_len(&self) -> usize {
+          encoded_messages_len(self.as_ref())
+        }
 
-impl<I, A> core::fmt::Debug for Messages<'_, I, A>
-where
-  I: core::fmt::Debug,
-  A: core::fmt::Debug,
-{
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_list().entries(self.0.iter()).finish()
-  }
+        fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+          encode_messages_slice(self.as_ref(), buf)
+        }
+
+        fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+        where
+          Self: Sized,
+        {
+          let mut offset = 0;
+          let msgs = decode_messages(src, &mut offset)
+            .collect::<Result<Self, _>>()?;
+          Ok((offset, msgs))
+        }
+      }
+    )*
+  };
 }
 
-impl<'a, I, A> From<&'a [Message<I, A>]> for Messages<'a, I, A> {
-  fn from(messages: &'a [Message<I, A>]) -> Self {
-    Self(Either::Left(messages))
-  }
-}
+impl_data_for_collections!(
+  Vec<Message<I, A>>,
+  triomphe::Arc<[Message<I, A>]>,
+  std::sync::Arc<[Message<I, A>]>,
+  std::boxed::Box<[Message<I, A>]>,
+  smallvec_wrapper::OneOrMore<Message<I, A>>,
+  smallvec_wrapper::TinyVec<Message<I, A>>,
+  smallvec_wrapper::TriVec<Message<I, A>>,
+  smallvec_wrapper::SmallVec<Message<I, A>>,
+  smallvec_wrapper::MediumVec<Message<I, A>>,
+);
 
-impl<I, A> From<Vec<Message<I, A>>> for Messages<'_, I, A> {
-  fn from(messages: Vec<Message<I, A>>) -> Self {
-    Self(Either::Right(messages))
-  }
-}
-impl<I, A> Messages<'_, I, A> {
-  const TAG: u8 = 1;
-  const fn byte() -> u8 {
-    merge(WireType::LengthDelimited, Self::TAG)
-  }
-}
-
-impl<I, A> Data for Messages<'_, I, A>
+#[inline]
+fn encoded_messages_len<I, A>(msgs: &[Message<I, A>]) -> usize
 where
   I: Data,
   A: Data,
 {
-  fn encoded_len(&self) -> usize {
-    self
-      .0
-      .iter()
-      .map(|msg| 1 + msg.encoded_len_with_length_delimited())
-      .sum::<usize>()
-  }
+  msgs
+    .iter()
+    .map(|msg| 1 + msg.encoded_len_with_length_delimited())
+    .sum::<usize>()
+}
 
-  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    let len = buf.len();
-    let mut offset = 0;
-    macro_rules! bail {
-      ($this:ident($offset:expr, $len:ident)) => {
-        if $offset >= $len {
-          return Err(EncodeError::insufficient_buffer($offset, $len).into());
-        }
-      };
-    }
-
-    let msgs = match &self.0 {
-      Either::Left(msgs) => msgs.iter(),
-      Either::Right(msgs) => msgs.iter(),
-    };
-
-    for msg in msgs {
-      bail!(self(offset, len));
-      buf[offset] = Self::byte();
-      offset += 1;
-      {
-        offset += msg
-          .encode_length_delimited(&mut buf[offset..])
-          .map_err(|e| e.update(self.encoded_len(), len))?
+fn encode_messages_slice<I, A>(msgs: &[Message<I, A>], buf: &mut [u8]) -> Result<usize, EncodeError>
+where
+  I: Data,
+  A: Data,
+{
+  let len = buf.len();
+  let mut offset = 0;
+  macro_rules! bail {
+    ($this:ident($offset:expr, $len:ident)) => {
+      if $offset >= $len {
+        return Err(EncodeError::insufficient_buffer($offset, $len).into());
       }
-    }
-
-    #[cfg(debug_assertions)]
-    super::debug_assert_write_eq(offset, self.encoded_len());
-
-    Ok(offset)
+    };
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
-  where
-    Self: Sized,
-  {
-    let mut offset = 0;
-    let mut msgs = Vec::new();
+  for msg in msgs.iter() {
+    bail!(self(offset, len));
+    buf[offset] = Message::<I, A>::COMPOUND_BYTE;
+    offset += 1;
+    {
+      offset += msg
+        .encode_length_delimited(&mut buf[offset..])
+        .map_err(|e| e.update(encoded_messages_len(msgs), len))?
+    }
+  }
 
-    while offset < src.len() {
-      let b = src[offset];
-      offset += 1;
+  #[cfg(debug_assertions)]
+  super::debug_assert_write_eq(offset, encoded_messages_len(msgs));
+
+  Ok(offset)
+}
+
+fn decode_messages<'a, I, A>(
+  src: &'a [u8],
+  offset: &'a mut usize,
+) -> impl Iterator<Item = Result<Message<I, A>, DecodeError>> + 'a
+where
+  I: Data,
+  A: Data,
+{
+  core::iter::from_fn(move || {
+    while *offset < src.len() {
+      let b = src[*offset];
+      *offset += 1;
       match b {
-        b if b == Self::byte() => {
-          let (bytes_read, msg) = Message::decode_length_delimited(&src[offset..])?;
-          offset += bytes_read;
-          msgs.push(msg);
+        b if b == Message::<I, A>::COMPOUND_BYTE => {
+          let (bytes_read, msg) = match Message::decode_length_delimited(&src[*offset..]) {
+            Ok((bytes_read, msg)) => (bytes_read, msg),
+            Err(e) => return Some(Err(e)),
+          };
+          *offset += bytes_read;
+          return Some(Ok(msg));
         }
         _ => {
           let (wire_type, _) = split(b);
-          let wt = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("unknown wire type: {}", wire_type)))?;
+          let wt = match WireType::try_from(wire_type)
+            .map_err(|_| DecodeError::new(format!("unknown wire type: {}", wire_type)))
+          {
+            Ok(wt) => wt,
+            Err(e) => return Some(Err(e)),
+          };
 
-          offset += skip(wt, &src[offset..])?;
+          *offset += match skip(wt, &src[*offset..]) {
+            Ok(bytes_read) => bytes_read,
+            Err(e) => return Some(Err(e)),
+          };
         }
       }
     }
-
-    Ok((offset, Self::from(msgs)))
-  }
+    None
+  })
 }
 
 #[cfg(feature = "arbitrary")]
 const _: () = {
   use arbitrary::{Arbitrary, Unstructured};
+
+  impl<'a, I, A> Message<I, A>
+  where
+    I: Arbitrary<'a>,
+    A: Arbitrary<'a>,
+  {
+    fn arbitrary_helper(
+      u: &mut Unstructured<'a>,
+      ty: MessageType,
+    ) -> arbitrary::Result<Option<Self>> {
+      Ok(Some(match ty {
+        MessageType::Compound => return Ok(None),
+        MessageType::Ping => {
+          let ping = u.arbitrary::<Ping<I, A>>()?;
+          Self::Ping(ping)
+        }
+        MessageType::IndirectPing => {
+          let indirect_ping = u.arbitrary::<IndirectPing<I, A>>()?;
+          Self::IndirectPing(indirect_ping)
+        }
+        MessageType::Ack => {
+          let ack = u.arbitrary::<Ack>()?;
+          Self::Ack(ack)
+        }
+        MessageType::Suspect => {
+          let suspect = u.arbitrary::<Suspect<I>>()?;
+          Self::Suspect(suspect)
+        }
+        MessageType::Alive => {
+          let alive = u.arbitrary::<Alive<I, A>>()?;
+          Self::Alive(alive)
+        }
+        MessageType::Dead => {
+          let dead = u.arbitrary::<Dead<I>>()?;
+          Self::Dead(dead)
+        }
+        MessageType::PushPull => {
+          let push_pull = u.arbitrary::<PushPull<I, A>>()?;
+          Self::PushPull(push_pull)
+        }
+        MessageType::UserData => {
+          let bytes = u.arbitrary::<Vec<u8>>()?.into();
+          Self::UserData(bytes)
+        }
+        MessageType::Nack => {
+          let nack = u.arbitrary::<Nack>()?;
+          Self::Nack(nack)
+        }
+        MessageType::ErrorResponse => {
+          let error_response = u.arbitrary::<ErrorResponse>()?;
+          Self::ErrorResponse(error_response)
+        }
+      }))
+    }
+  }
 
   impl<'a, I, A> Arbitrary<'a> for Message<I, A>
   where
@@ -401,57 +470,19 @@ const _: () = {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
       let ty = u.arbitrary::<MessageType>()?;
       match ty {
-        MessageType::Ping => {
-          let ping = u.arbitrary::<Ping<I, A>>()?;
-          Ok(Self::Ping(ping))
+        MessageType::Compound => {
+          let num = u8::arbitrary(u)? as usize;
+          let compound = (0..num)
+            .filter_map(|_| {
+              MessageType::arbitrary(u)
+                .and_then(|ty| Message::<I, A>::arbitrary_helper(u, ty))
+                .transpose()
+            })
+            .collect::<Result<Arc<[_]>, _>>()?;
+          Ok(Self::Compound(compound))
         }
-        MessageType::IndirectPing => {
-          let indirect_ping = u.arbitrary::<IndirectPing<I, A>>()?;
-          Ok(Self::IndirectPing(indirect_ping))
-        }
-        MessageType::Ack => {
-          let ack = u.arbitrary::<Ack>()?;
-          Ok(Self::Ack(ack))
-        }
-        MessageType::Suspect => {
-          let suspect = u.arbitrary::<Suspect<I>>()?;
-          Ok(Self::Suspect(suspect))
-        }
-        MessageType::Alive => {
-          let alive = u.arbitrary::<Alive<I, A>>()?;
-          Ok(Self::Alive(alive))
-        }
-        MessageType::Dead => {
-          let dead = u.arbitrary::<Dead<I>>()?;
-          Ok(Self::Dead(dead))
-        }
-        MessageType::PushPull => {
-          let push_pull = u.arbitrary::<PushPull<I, A>>()?;
-          Ok(Self::PushPull(push_pull))
-        }
-        MessageType::UserData => {
-          let bytes = u.arbitrary::<Vec<u8>>()?.into();
-          Ok(Self::UserData(bytes))
-        }
-        MessageType::Nack => {
-          let nack = u.arbitrary::<Nack>()?;
-          Ok(Self::Nack(nack))
-        }
-        MessageType::ErrorResponse => {
-          let error_response = u.arbitrary::<ErrorResponse>()?;
-          Ok(Self::ErrorResponse(error_response))
-        }
+        _ => Self::arbitrary_helper(u, ty)?.ok_or(arbitrary::Error::IncorrectFormat),
       }
-    }
-  }
-
-  impl<'a, I, A> Arbitrary<'a> for Messages<'a, I, A>
-  where
-    I: Arbitrary<'a>,
-    A: Arbitrary<'a>,
-  {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      Ok(Self::from(u.arbitrary::<Vec<_>>()?))
     }
   }
 };
@@ -460,14 +491,16 @@ const _: () = {
 const _: () = {
   use quickcheck::{Arbitrary, Gen};
 
-  impl<I, A> Arbitrary for Message<I, A>
+  impl<I, A> Message<I, A>
   where
     I: Arbitrary,
     A: Arbitrary,
   {
-    fn arbitrary(g: &mut Gen) -> Self {
-      let ty = MessageType::arbitrary(g);
-      match ty {
+    fn quickcheck_arbitrary_helper(g: &mut Gen, ty: MessageType) -> Option<Self> {
+      Some(match ty {
+        MessageType::Compound => {
+          return None;
+        }
         MessageType::Ping => {
           let ping = Ping::<I, A>::arbitrary(g);
           Self::Ping(ping)
@@ -508,17 +541,30 @@ const _: () = {
           let error_response = ErrorResponse::arbitrary(g);
           Self::ErrorResponse(error_response)
         }
-      }
+      })
     }
   }
 
-  impl<I, A> Arbitrary for Messages<'static, I, A>
+  impl<I, A> Arbitrary for Message<I, A>
   where
     I: Arbitrary,
     A: Arbitrary,
   {
     fn arbitrary(g: &mut Gen) -> Self {
-      Self::from(Vec::<_>::arbitrary(g))
+      let ty = MessageType::arbitrary(g);
+      match ty {
+        MessageType::Compound => {
+          let num = u8::arbitrary(g) as usize;
+          let compound = (0..num)
+            .filter_map(|_| {
+              let ty = MessageType::arbitrary(g);
+              Message::<I, A>::quickcheck_arbitrary_helper(g, ty)
+            })
+            .collect::<Arc<[_]>>();
+          Self::Compound(compound)
+        }
+        _ => Self::quickcheck_arbitrary_helper(g, ty).unwrap(),
+      }
     }
   }
 };

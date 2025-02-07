@@ -2,7 +2,10 @@ use agnostic_lite::AsyncSpawner;
 use either::Either;
 use nodecraft::CheapClone;
 
-use crate::{base::MessageHandoff, types::{Data, Messages}};
+use crate::{
+  base::MessageHandoff,
+  types::{Data, Messages},
+};
 
 use super::*;
 

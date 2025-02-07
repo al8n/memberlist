@@ -3,8 +3,8 @@ use core::{
   time::Duration,
 };
 use memberlist_types::{
-  Ack, Alive, Data, Dead, ErrorResponse, IndirectPing, Message, Messages, Nack, Ping,
-  PushNodeState, PushPull, Suspect,
+  Ack, Alive, Data, Dead, ErrorResponse, IndirectPing, Message, Nack, Ping, PushNodeState,
+  PushPull, Suspect,
 };
 use nodecraft::{Domain, HostAddr, Node, NodeId};
 
@@ -181,7 +181,7 @@ quickcheck!(
   ]
 );
 
-type StaticMessages<I, A> = Messages<'static, I, A>;
+type Messages<I, A> = Message<I, A>;
 
 quickcheck!(
   @<I, A>
@@ -199,7 +199,7 @@ quickcheck!(
   PushNodeState[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
   PushPull[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
   Message[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
-  StaticMessages[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
+  Messages[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
 );
 
 quickcheck!(
