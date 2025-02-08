@@ -1,0 +1,404 @@
+use bytes::Bytes;
+use nodecraft::CheapClone;
+use triomphe::Arc;
+
+use super::{merge, skip, split, Data, DecodeError, EncodeError, WireType};
+
+mod state;
+pub use state::*;
+
+/// Push pull message.
+#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct PushPull<I, A> {
+  /// Whether the push pull message is a join message.
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Returns whether the push pull message is a join message")
+    ),
+    setter(
+      const,
+      attrs(doc = "Sets whether the push pull message is a join message (Builder pattern)")
+    )
+  )]
+  join: bool,
+  /// The states of the push pull message.
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      attrs(doc = "Returns the states of the push pull message")
+    ),
+    setter(attrs(doc = "Sets the states of the push pull message (Builder pattern)"))
+  )]
+  states: Arc<[PushNodeState<I, A>]>,
+  /// The user data of the push pull message.
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      attrs(doc = "Returns the user data of the push pull message")
+    ),
+    setter(attrs(doc = "Sets the user data of the push pull message (Builder pattern)"))
+  )]
+  user_data: Bytes,
+}
+
+impl<I, A> Clone for PushPull<I, A> {
+  fn clone(&self) -> Self {
+    Self {
+      join: self.join,
+      states: self.states.clone(),
+      user_data: self.user_data.clone(),
+    }
+  }
+}
+
+impl<I, A> CheapClone for PushPull<I, A> {
+  fn cheap_clone(&self) -> Self {
+    Self {
+      join: self.join,
+      states: self.states.clone(),
+      user_data: self.user_data.clone(),
+    }
+  }
+}
+
+const JOIN_TAG: u8 = 1;
+const JOIN_BYTE: u8 = merge(WireType::Varint, JOIN_TAG);
+const STATES_TAG: u8 = 2;
+const STATES_BYTE: u8 = merge(WireType::LengthDelimited, STATES_TAG);
+const USER_DATA_TAG: u8 = 3;
+const USER_DATA_BYTE: u8 = merge(WireType::LengthDelimited, USER_DATA_TAG);
+
+impl<I, A> PushPull<I, A> {
+  /// Create a new [`PushPull`] message.
+  #[inline]
+  pub fn new(join: bool, states: impl Iterator<Item = PushNodeState<I, A>>) -> Self {
+    Self {
+      states: Arc::from_iter(states),
+      user_data: Bytes::new(),
+      join,
+    }
+  }
+
+  /// Consumes the [`PushPull`] and returns the states and user data.
+  #[inline]
+  pub fn into_components(self) -> (bool, Bytes, Arc<[PushNodeState<I, A>]>) {
+    (self.join, self.user_data, self.states)
+  }
+}
+
+impl<I, A> Data for PushPull<I, A>
+where
+  I: Data,
+  A: Data,
+{
+  type Ref<'a> = PushPullRef<'a, I, A>;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self
+  where
+    Self: Sized,
+  {
+    Self {
+      join: val.join,
+      states: val.states.map(PushNodeState::from_ref).collect(),
+      user_data: Bytes::copy_from_slice(val.user_data),
+    }
+  }
+
+  fn encoded_len(&self) -> usize {
+    let mut len = 1 + 1; // join
+    for i in self.states.iter() {
+      len += 1 + i.encoded_len_with_length_delimited();
+    }
+    len += 1 + self.user_data.encoded_len_with_length_delimited();
+    len
+  }
+
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+    let mut offset = 0;
+    macro_rules! bail {
+      ($this:ident($offset:expr, $len:ident)) => {
+        if $offset >= $len {
+          return Err(EncodeError::insufficient_buffer($offset, $len).into());
+        }
+      };
+    }
+
+    let len = buf.len();
+    bail!(self(1, len));
+    buf[offset] = JOIN_BYTE;
+    offset += 1;
+    buf[offset] = self.join as u8;
+    offset += 1;
+
+    for i in self.states.iter() {
+      bail!(self(offset, len));
+      buf[offset] = STATES_BYTE;
+      offset += 1;
+      {
+        offset += i
+          .encode_length_delimited(&mut buf[offset..])
+          .map_err(|e| e.update(self.encoded_len(), len))?
+      }
+    }
+
+    bail!(self(offset, len));
+    buf[offset] = USER_DATA_BYTE;
+    offset += 1;
+    offset += self.user_data.encode_length_delimited(&mut buf[offset..])?;
+
+    #[cfg(debug_assertions)]
+    super::debug_assert_write_eq(offset, self.encoded_len());
+    Ok(offset)
+  }
+
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
+  where
+    Self: Sized,
+  {
+    let mut offset = 0;
+    let mut join = None;
+    let mut node_state_offsets = None;
+    let mut num_states = 0;
+    let mut user_data = None;
+
+    while offset < src.len() {
+      // Parse the tag and wire type
+      let b = src[offset];
+      offset += 1;
+
+      match b {
+        JOIN_BYTE => {
+          if offset >= src.len() {
+            return Err(DecodeError::new("buffer underflow"));
+          }
+          let val = src[offset];
+          offset += 1;
+          join = Some(val);
+        }
+        STATES_BYTE => {
+          let (readed, _) = PushNodeState::<I, A>::decode_length_delimited_ref(&src[offset..])?;
+          if let Some((ref mut fnso, ref mut lnso)) = node_state_offsets {
+            if *fnso > offset {
+              *fnso = offset - 1;
+            }
+
+            if *lnso < offset + readed {
+              *lnso = offset + readed;
+            }
+          } else {
+            node_state_offsets = Some((offset - 1, offset + readed));
+          }
+          num_states += 1;
+          offset += readed;
+        }
+        USER_DATA_BYTE => {
+          let (readed, value) = Bytes::decode_length_delimited_ref(&src[offset..])?;
+          offset += readed;
+          user_data = Some(value);
+        }
+        _ => {
+          let (wire_type, _) = split(b);
+          let wire_type = WireType::try_from(wire_type)
+            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          offset += skip(wire_type, &src[offset..])?;
+        }
+      }
+    }
+
+    let join = join.ok_or(DecodeError::new("missing join"))? != 0;
+    let user_data = user_data.unwrap_or_default();
+    Ok((
+      offset,
+      Self::Ref {
+        join,
+        states: PushNodeStatesRef::new(src, num_states, node_state_offsets),
+        user_data,
+      },
+    ))
+  }
+}
+
+/// The reference type of Push pull message.
+#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct PushPullRef<'a, I, A> {
+  /// Whether the push pull message is a join message.
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Returns whether the push pull message is a join message")
+    ),
+    setter(
+      const,
+      attrs(doc = "Sets whether the push pull message is a join message (Builder pattern)")
+    )
+  )]
+  join: bool,
+  /// The states of the push pull message.
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      attrs(doc = "Returns the states of the push pull message")
+    ),
+    setter(attrs(doc = "Sets the states of the push pull message (Builder pattern)"))
+  )]
+  states: PushNodeStatesRef<'a, I, A>,
+  /// The user data of the push pull message.
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      attrs(doc = "Returns the user data of the push pull message")
+    ),
+    setter(attrs(doc = "Sets the user data of the push pull message (Builder pattern)"))
+  )]
+  user_data: &'a [u8],
+}
+
+impl<I, A> Clone for PushPullRef<'_, I, A> {
+  fn clone(&self) -> Self {
+    *self
+  }
+}
+
+impl<I, A> Copy for PushPullRef<'_, I, A> {}
+
+#[cfg(feature = "arbitrary")]
+const _: () = {
+  use super::*;
+  use arbitrary::{Arbitrary, Unstructured};
+
+  impl<'a, I, A> Arbitrary<'a> for PushNodeState<I, A>
+  where
+    I: Arbitrary<'a>,
+    A: Arbitrary<'a>,
+  {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+      Ok(Self {
+        id: I::arbitrary(u)?,
+        addr: A::arbitrary(u)?,
+        meta: Meta::arbitrary(u)?,
+        incarnation: u.arbitrary()?,
+        state: u.arbitrary()?,
+        protocol_version: u.arbitrary()?,
+        delegate_version: u.arbitrary()?,
+      })
+    }
+  }
+
+  impl<'a, I, A> Arbitrary<'a> for PushPull<I, A>
+  where
+    I: Arbitrary<'a>,
+    A: Arbitrary<'a>,
+  {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+      let join = u.arbitrary()?;
+      let states = u.arbitrary::<Vec<_>>()?;
+      let user_data = Vec::<u8>::arbitrary(u)?.into();
+      Ok(Self {
+        join,
+        states: Arc::from(states),
+        user_data,
+      })
+    }
+  }
+};
+
+#[cfg(feature = "quickcheck")]
+const _: () = {
+  use super::*;
+  use quickcheck::{Arbitrary, Gen};
+
+  impl<I, A> Arbitrary for PushNodeState<I, A>
+  where
+    I: Arbitrary,
+    A: Arbitrary,
+  {
+    fn arbitrary(g: &mut Gen) -> Self {
+      Self {
+        id: I::arbitrary(g),
+        addr: A::arbitrary(g),
+        meta: Meta::arbitrary(g),
+        incarnation: u32::arbitrary(g),
+        state: State::arbitrary(g),
+        protocol_version: ProtocolVersion::arbitrary(g),
+        delegate_version: DelegateVersion::arbitrary(g),
+      }
+    }
+  }
+
+  impl<I, A> Arbitrary for PushPull<I, A>
+  where
+    I: Arbitrary,
+    A: Arbitrary,
+  {
+    fn arbitrary(g: &mut Gen) -> Self {
+      let join = bool::arbitrary(g);
+      let states = Vec::<PushNodeState<I, A>>::arbitrary(g);
+      let user_data = Vec::<u8>::arbitrary(g).into();
+      Self {
+        join,
+        states: Arc::from(states),
+        user_data,
+      }
+    }
+  }
+};
+
+#[cfg(test)]
+mod tests {
+  use std::net::SocketAddr;
+
+  use arbitrary::{Arbitrary, Unstructured};
+
+  use crate::{DelegateVersion, Meta, ProtocolVersion, State};
+
+  use super::*;
+
+  #[test]
+  fn test_push_pull_clone_and_cheap_clone() {
+    let mut data = vec![0; 1024];
+    rand::fill(&mut data[..]);
+    let mut data = Unstructured::new(&data);
+
+    let push_pull = PushPull::<String, SocketAddr>::arbitrary(&mut data).unwrap();
+    let cloned = push_pull.clone();
+    let cheap_cloned = push_pull.cheap_clone();
+    assert_eq!(cloned, push_pull);
+    assert_eq!(cheap_cloned, push_pull);
+    let cloned1 = format!("{:?}", cloned);
+    let cheap_cloned1 = format!("{:?}", cheap_cloned);
+    assert_eq!(cloned1, cheap_cloned1);
+  }
+
+  #[test]
+  fn test_push_node_state() {
+    let mut data = vec![0; 1024];
+    rand::fill(&mut data[..]);
+    let mut data = Unstructured::new(&data);
+
+    let mut state = PushNodeState::<String, SocketAddr>::arbitrary(&mut data).unwrap();
+    state.set_id("test".into());
+    assert_eq!(state.id(), "test");
+    state.set_address(SocketAddr::from(([127, 0, 0, 1], 8080)));
+    assert_eq!(state.address(), &SocketAddr::from(([127, 0, 0, 1], 8080)));
+    state.set_meta(Meta::try_from("test").unwrap());
+    assert_eq!(state.meta(), &Meta::try_from("test").unwrap());
+    state.set_incarnation(100);
+    assert_eq!(state.incarnation(), 100);
+
+    state.set_state(State::Alive);
+    assert_eq!(state.state(), State::Alive);
+
+    state.set_protocol_version(ProtocolVersion::V1);
+    assert_eq!(state.protocol_version(), ProtocolVersion::V1);
+
+    state.set_delegate_version(DelegateVersion::V1);
+    assert_eq!(state.delegate_version(), DelegateVersion::V1);
+  }
+}

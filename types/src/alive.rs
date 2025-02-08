@@ -99,6 +99,22 @@ where
   I: Data,
   A: Data,
 {
+  type Ref<'a> = AliveRef<'a, I::Ref<'a>, A::Ref<'a>>;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self
+  where
+    Self: Sized,
+  {
+    let (id, addr) = val.node.into_components();
+    Self {
+      incarnation: val.incarnation,
+      meta: Meta::from_ref(val.meta),
+      node: Node::new(I::from_ref(id), A::from_ref(addr)),
+      protocol_version: val.protocol_version,
+      delegate_version: val.delegate_version,
+    }
+  }
+
   fn encoded_len(&self) -> usize {
     let mut len = 1 + self.incarnation.encoded_len();
     len += 1 + self.meta.encoded_len_with_length_delimited();
@@ -176,7 +192,7 @@ where
     Ok(offset)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
@@ -200,7 +216,7 @@ where
           incarnation = Some(value);
         }
         META_BYTE => {
-          let (readed, data) = Meta::decode_length_delimited(&src[offset..])?;
+          let (readed, data) = Meta::decode_length_delimited_ref(&src[offset..])?;
           offset += readed;
           meta = Some(data);
         }
@@ -219,12 +235,12 @@ where
           offset += 1;
         }
         b if b == Self::id_byte() => {
-          let (readed, data) = I::decode_length_delimited(&src[offset..])?;
+          let (readed, data) = I::decode_length_delimited_ref(&src[offset..])?;
           offset += readed;
           id = Some(data);
         }
         b if b == Self::addr_byte() => {
-          let (readed, data) = A::decode_length_delimited(&src[offset..])?;
+          let (readed, data) = A::decode_length_delimited_ref(&src[offset..])?;
           offset += readed;
           addr = Some(data);
         }
@@ -239,7 +255,7 @@ where
 
     Ok((
       offset,
-      Self {
+      Self::Ref {
         incarnation: incarnation.ok_or_else(|| DecodeError::new("missing incarnation"))?,
         meta: meta.unwrap_or_default(),
         node: Node::new(
@@ -311,6 +327,48 @@ impl<I: CheapClone, A: CheapClone> CheapClone for Alive<I, A> {
       protocol_version: self.protocol_version,
       delegate_version: self.delegate_version,
     }
+  }
+}
+
+/// The reference type of [`Alive`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct AliveRef<'a, I, A> {
+  incarnation: u32,
+  meta: &'a [u8],
+  node: Node<I, A>,
+  protocol_version: ProtocolVersion,
+  delegate_version: DelegateVersion,
+}
+
+impl<'a, I, A> AliveRef<'a, I, A> {
+  /// Returns the incarnation of the alive message.
+  #[inline]
+  pub const fn incarnation(&self) -> u32 {
+    self.incarnation
+  }
+
+  /// Returns the meta of the alive message.
+  #[inline]
+  pub const fn meta(&self) -> &'a [u8] {
+    self.meta
+  }
+
+  /// Returns the node of the alive message.
+  #[inline]
+  pub const fn node(&self) -> &Node<I, A> {
+    &self.node
+  }
+
+  /// Returns the protocol version of the alive message is speaking.
+  #[inline]
+  pub const fn protocol_version(&self) -> ProtocolVersion {
+    self.protocol_version
+  }
+
+  /// Returns the delegate version of the alive message is speaking.
+  #[inline]
+  pub const fn delegate_version(&self) -> DelegateVersion {
+    self.delegate_version
   }
 }
 

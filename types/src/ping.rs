@@ -12,7 +12,7 @@ macro_rules! bail_ping {
       getters(vis_all = "pub"),
       setters(vis_all = "pub", prefix = "with")
     )]
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
     pub struct $name<I, A> {
       /// The sequence number of the ack
@@ -89,6 +89,20 @@ macro_rules! bail_ping {
         I: Data,
         A: Data,
       {
+        type Ref<'a> = $name<I::Ref<'a>, A::Ref<'a>>;
+
+        fn from_ref(val: Self::Ref<'_>) -> Self
+        where
+          Self: Sized,
+        {
+          let Self::Ref { sequence_number, source, target } = val;
+          Self {
+            sequence_number,
+            source: Node::from_ref(source),
+            target: Node::from_ref(target),
+          }
+        }
+
         fn encoded_len(&self) -> usize {
           let mut len = 1 + self.sequence_number.encoded_len();
           len += 1 + self.source.id().encoded_len_with_length_delimited();
@@ -141,7 +155,7 @@ macro_rules! bail_ping {
           Ok(offset)
         }
 
-        fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
         where
           Self: Sized,
         {
@@ -163,22 +177,22 @@ macro_rules! bail_ping {
                 sequence_number = Some(value);
               }
               b if b == Self::source_id_byte() => {
-                let (bytes_read, value) = I::decode_length_delimited(&src[offset..])?;
+                let (bytes_read, value) = I::decode_length_delimited_ref(&src[offset..])?;
                 offset += bytes_read;
                 source_id = Some(value);
               }
               b if b == Self::source_addr_byte() => {
-                let (bytes_read, value) = A::decode_length_delimited(&src[offset..])?;
+                let (bytes_read, value) = A::decode_length_delimited_ref(&src[offset..])?;
                 offset += bytes_read;
                 source_addr = Some(value);
               }
               b if b == Self::target_id_byte() => {
-                let (bytes_read, value) = I::decode_length_delimited(&src[offset..])?;
+                let (bytes_read, value) = I::decode_length_delimited_ref(&src[offset..])?;
                 offset += bytes_read;
                 target_id = Some(value);
               }
               b if b == Self::target_addr_byte() => {
-                let (bytes_read, value) = A::decode_length_delimited(&src[offset..])?;
+                let (bytes_read, value) = A::decode_length_delimited_ref(&src[offset..])?;
                 offset += bytes_read;
                 target_addr = Some(value);
               }
@@ -197,7 +211,7 @@ macro_rules! bail_ping {
           let target_id = target_id.ok_or_else(|| DecodeError::new("missing target id"))?;
           let target_addr = target_addr.ok_or_else(|| DecodeError::new("missing target address"))?;
 
-          Ok((offset, Self {
+          Ok((offset, Self::Ref {
             sequence_number,
             source: Node::new(source_id, source_addr),
             target: Node::new(target_id, target_addr),

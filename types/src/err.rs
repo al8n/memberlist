@@ -41,6 +41,17 @@ impl ErrorResponse {
 }
 
 impl Data for ErrorResponse {
+  type Ref<'a> = ErrorResponseRef<'a>;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self
+  where
+    Self: Sized,
+  {
+    Self {
+      message: val.message.into(),
+    }
+  }
+
   fn encoded_len(&self) -> usize {
     1 + self.message.encoded_len_with_length_delimited()
   }
@@ -59,7 +70,7 @@ impl Data for ErrorResponse {
     Ok(offset)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
@@ -73,9 +84,9 @@ impl Data for ErrorResponse {
 
       match b {
         Self::MESSAGE_BYTE => {
-          let (bytes_read, value) = SmolStr::decode_length_delimited(&src[offset..])?;
+          let (bytes_read, value) = SmolStr::decode_length_delimited_ref(&src[offset..])?;
           offset += bytes_read;
-          msg = Some(SmolStr::new(value));
+          msg = Some(value);
         }
         _ => {
           let (wire_type, _) = split(src[offset]);
@@ -88,7 +99,7 @@ impl Data for ErrorResponse {
 
     Ok((
       offset,
-      Self {
+      Self::Ref {
         message: msg.unwrap_or_default(),
       },
     ))
@@ -112,6 +123,21 @@ impl From<ErrorResponse> for SmolStr {
 impl From<SmolStr> for ErrorResponse {
   fn from(msg: SmolStr) -> Self {
     Self { message: msg }
+  }
+}
+
+/// Reference type of error response from the remote peer
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct ErrorResponseRef<'a> {
+  message: &'a str,
+}
+
+impl<'a> ErrorResponseRef<'a> {
+  /// Returns message of the error response
+  #[inline]
+  pub const fn message(&self) -> &'a str {
+    self.message
   }
 }
 

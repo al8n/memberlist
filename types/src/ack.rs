@@ -90,6 +90,19 @@ impl Ack {
 }
 
 impl Data for Ack {
+  type Ref<'a> = AckRef<'a>;
+
+  #[inline]
+  fn from_ref(val: Self::Ref<'_>) -> Self
+  where
+    Self: Sized,
+  {
+    Self {
+      sequence_number: val.sequence_number,
+      payload: Bytes::copy_from_slice(val.payload),
+    }
+  }
+
   fn encoded_len(&self) -> usize {
     let sequence_number_len = 1 + self.sequence_number.encoded_len();
     let payload_len = 1 + self.payload.encoded_len_with_length_delimited();
@@ -131,7 +144,7 @@ impl Data for Ack {
     Ok(offset)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
@@ -151,7 +164,7 @@ impl Data for Ack {
           sequence_number = Some(value);
         }
         Self::PAYLOAD_BYTE => {
-          let (readed, data) = Bytes::decode_length_delimited(&src[offset..])?;
+          let (readed, data) = Bytes::decode_length_delimited_ref(&src[offset..])?;
           offset += readed;
           payload = Some(data);
         }
@@ -166,11 +179,41 @@ impl Data for Ack {
 
     Ok((
       offset,
-      Self {
+      AckRef {
         sequence_number: sequence_number.unwrap_or(0),
         payload: payload.unwrap_or_default(),
       },
     ))
+  }
+}
+
+/// The reference to an [`Ack`] message
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct AckRef<'a> {
+  sequence_number: u32,
+  payload: &'a [u8],
+}
+
+impl<'a> AckRef<'a> {
+  /// Create a new ack reference with the given sequence number and payload
+  #[inline]
+  pub const fn new(sequence_number: u32, payload: &'a [u8]) -> Self {
+    Self {
+      sequence_number,
+      payload,
+    }
+  }
+
+  /// Returns the sequence number of the ack
+  #[inline]
+  pub const fn sequence_number(&self) -> u32 {
+    self.sequence_number
+  }
+
+  /// Returns the payload of the ack
+  #[inline]
+  pub const fn payload(&self) -> &'a [u8] {
+    self.payload
   }
 }
 
@@ -214,6 +257,15 @@ impl Nack {
 }
 
 impl Data for Nack {
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self
+  where
+    Self: Sized,
+  {
+    val
+  }
+
   fn encoded_len(&self) -> usize {
     1 + self.sequence_number.encoded_len()
   }
@@ -231,7 +283,7 @@ impl Data for Nack {
     Ok(offset)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {

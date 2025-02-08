@@ -4,6 +4,12 @@ macro_rules! impl_str {
   ($($ty:ty => $from:ident),+$(,)?) => {
     $(
       impl Data for $ty {
+        type Ref<'a> = &'a str;
+
+        fn from_ref(val: Self::Ref<'_>) -> Self {
+          Self::$from(val)
+        }
+
         #[inline]
         fn encoded_len(&self) -> usize {
           let bytes = self.as_bytes();
@@ -34,12 +40,12 @@ macro_rules! impl_str {
           Ok(len)
         }
 
-        fn decode(src: &[u8]) -> Result<(usize, Self), super::DecodeError>
+        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), super::DecodeError>
         where
           Self: Sized
         {
           match core::str::from_utf8(src) {
-            Ok(value) => Ok((src.len(), Self::$from(value))),
+            Ok(value) => Ok((src.len(), value)),
             Err(e) => Err(super::DecodeError::new(e.to_string())),
           }
         }

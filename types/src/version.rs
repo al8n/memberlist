@@ -83,6 +83,12 @@ macro_rules! impl_data {
       impl super::Data for $ty {
         const WIRE_TYPE: super::WireType = super::WireType::Byte;
 
+        type Ref<'a> = Self;
+
+        fn from_ref(val: Self::Ref<'_>) -> Self {
+          val
+        }
+
         #[inline]
         fn encoded_len(&self) -> usize {
           1
@@ -99,7 +105,7 @@ macro_rules! impl_data {
         }
 
         #[inline]
-        fn decode(src: &[u8]) -> Result<(usize, Self), super::DecodeError>
+        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), super::DecodeError>
         where
           Self: Sized,
         {
@@ -107,7 +113,7 @@ macro_rules! impl_data {
             return Err(super::DecodeError::new("buffer underflow"));
           }
 
-          Ok((1, Self::from(src[0])))
+          Ok((1, Self::Ref::from(src[0])))
         }
       }
     )*

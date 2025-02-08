@@ -4,6 +4,12 @@ macro_rules! impl_bytes {
   ($($ty:ty => $from:ident),+$(,)?) => {
     $(
       impl Data for $ty {
+        type Ref<'a> = &'a [u8];
+
+        fn from_ref(val: Self::Ref<'_>) -> Self {
+          Self::$from(val)
+        }
+
         fn encoded_len(&self) -> usize {
           if self.is_empty() {
             return 0;
@@ -29,11 +35,11 @@ macro_rules! impl_bytes {
           Ok(len)
         }
 
-        fn decode(src: &[u8]) -> Result<(usize, Self), super::DecodeError>
+        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), super::DecodeError>
         where
           Self: Sized,
         {
-          Ok((src.len(), Self::$from(src)))
+          Ok((src.len(), src))
         }
       }
     )*
@@ -48,6 +54,12 @@ impl_bytes!(
 );
 
 impl<const N: usize> Data for [u8; N] {
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self {
+    val
+  }
+
   fn encoded_len(&self) -> usize {
     N
   }
@@ -63,7 +75,7 @@ impl<const N: usize> Data for [u8; N] {
     Ok(N)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), super::DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), super::DecodeError>
   where
     Self: Sized,
   {

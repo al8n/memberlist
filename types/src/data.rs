@@ -17,6 +17,14 @@ pub trait Data: core::fmt::Debug + Send + Sync {
   /// The wire type of the data.
   const WIRE_TYPE: WireType = WireType::LengthDelimited;
 
+  /// The reference type of the data.
+  type Ref<'a>: Copy;
+
+  /// Converts the reference type to the owned type.
+  fn from_ref(val: Self::Ref<'_>) -> Self
+  where
+    Self: Sized;
+
   /// Returns the encoded length of the data only considering the data itself, (e.g. no length prefix, no wire type).
   fn encoded_len(&self) -> usize;
 
@@ -90,32 +98,51 @@ pub trait Data: core::fmt::Debug + Send + Sync {
   /// The entire buffer will be consumed.
   fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
   where
+    Self: Sized,
+  {
+    Self::decode_ref(src).map(|(bytes_read, value)| (bytes_read, Self::from_ref(value)))
+  }
+
+  /// Decodes a reference instance of the message from a buffer.
+  ///
+  /// The entire buffer will be consumed.
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
+  where
     Self: Sized;
 
-  /// Decodes a length-delimited instance of the message from the buffer.
-  fn decode_length_delimited(buf: &[u8]) -> Result<(usize, Self), DecodeError>
+  /// Decodes a length-delimited reference instance of the message from the buffer.
+  fn decode_length_delimited_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
     if Self::WIRE_TYPE != WireType::LengthDelimited {
-      return Self::decode(buf);
+      return Self::decode_ref(src);
     }
 
     let (mut offset, len) =
-      decode_u32_varint(buf).map_err(|_| DecodeError::new("invalid varint"))?;
+      decode_u32_varint(src).map_err(|_| DecodeError::new("invalid varint"))?;
     let len = len as usize;
-    if len + offset > buf.len() {
+    if len + offset > src.len() {
       return Err(DecodeError::new("buffer underflow"));
     }
 
-    let buf = &buf[offset..offset + len];
-    let (bytes_read, value) = Self::decode(buf)?;
+    let src = &src[offset..offset + len];
+    let (bytes_read, value) = Self::decode_ref(src)?;
 
     #[cfg(debug_assertions)]
     super::debug_assert_read_eq(bytes_read, len);
 
     offset += bytes_read;
     Ok((offset, value))
+  }
+
+  /// Decodes a length-delimited instance of the message from the buffer.
+  fn decode_length_delimited(buf: &[u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized,
+  {
+    Self::decode_length_delimited_ref(buf)
+      .map(|(bytes_read, value)| (bytes_read, Self::from_ref(value)))
   }
 }
 

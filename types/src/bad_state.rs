@@ -10,7 +10,7 @@ macro_rules! bad_bail {
       getters(vis_all = "pub"),
       setters(vis_all = "pub", prefix = "with")
     )]
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
     pub struct $name<I> {
       /// The incarnation of the message.
@@ -44,6 +44,13 @@ macro_rules! bad_bail {
       const [< $name:upper _FROM_TAG >]: u8 = 3;
 
       impl<I: Data> Data for $name<I> {
+        type Ref<'a> = $name<I::Ref<'a>>;
+
+        fn from_ref(val: Self::Ref<'_>) -> Self {
+          let Self::Ref { incarnation, node, from } = val;
+          Self::new(incarnation, I::from_ref(node), I::from_ref(from))
+        }
+
         fn encoded_len(&self) -> usize {
           let mut len = 1 + self.incarnation.encoded_len();
           len += 1 + self.node.encoded_len_with_length_delimited();
@@ -83,7 +90,7 @@ macro_rules! bad_bail {
           Ok(offset)
         }
 
-        fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
         where
           Self: Sized,
         {
@@ -103,12 +110,12 @@ macro_rules! bad_bail {
                 incarnation = Some(value);
               }
               b if b == Self::node_byte() => {
-                let (bytes_read, value) = I::decode_length_delimited(&src[offset..])?;
+                let (bytes_read, value) = I::decode_length_delimited_ref(&src[offset..])?;
                 offset += bytes_read;
                 node = Some(value);
               }
               b if b == Self::from_byte() => {
-                let (bytes_read, value) = I::decode_length_delimited(&src[offset..])?;
+                let (bytes_read, value) = I::decode_length_delimited_ref(&src[offset..])?;
                 offset += bytes_read;
                 from = Some(value);
               }
@@ -125,7 +132,7 @@ macro_rules! bad_bail {
           let node = node.ok_or_else(|| DecodeError::new("missing node"))?;
           let from = from.ok_or_else(|| DecodeError::new("missing from"))?;
 
-          Ok((offset, Self {
+          Ok((offset, Self::Ref {
             incarnation,
             node,
             from,

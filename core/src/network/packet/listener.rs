@@ -4,7 +4,7 @@ use nodecraft::CheapClone;
 
 use crate::{
   base::MessageHandoff,
-  types::{Data, Messages},
+  types::{Data, Message},
 };
 
 use super::*;
@@ -125,13 +125,68 @@ where
     timestamp: <T::Runtime as RuntimeLite>::Instant,
     payload: Bytes,
   ) {
-    match msgs.into_either() {
-      Either::Left([msg]) => self.handle_message(msg, from, timestamp).await,
-      Either::Right(msgs) => {
-        for msg in msgs {
-          self
-            .handle_message(from.cheap_clone(), timestamp, msg)
-            .await
+    // match msgs.into_either() {
+    //   Either::Left([msg]) => self.handle_message(msg, from, timestamp).await,
+    //   Either::Right(msgs) => {
+    //     for msg in msgs {
+    //       self
+    //         .handle_message(from.cheap_clone(), timestamp, msg)
+    //         .await
+    //     }
+    //   }
+    // }
+    match MessageType::try_from(payload[0]) {
+      Err(e) => {
+        tracing::error!(addr = %from, err = "unexpected message type", message_type=e, "memberlist.packet");
+      }
+      Ok(mt) => {
+        match mt {
+          MessageType::Ping => {
+            self.handle_ping(ping, from).await
+          },
+          MessageType::IndirectPing => {
+            self.handle_indirect_ping(ind, from).await
+          },
+          MessageType::Ack => {
+            self.handle_ack(resp, timestamp).await
+          },
+          MessageType::Nack => {
+            self.handle_nack(resp).await
+          },
+          MessageType::Alive => {
+            // Determine the message queue, prioritize alive
+            {
+              let mut mq = self.inner.queue.lock().await;
+              let queue = &mut mq.high;
+
+              // Check for overflow and append if not full
+              if queue.len() >= self.inner.opts.handoff_queue_depth {
+                tracing::warn!(addr = %from, "memberlist.packet: handler queue full, dropping message (Alive)");
+              } else {
+                queue.push_back(MessageHandoff {
+                  msg: alive.into(),
+                  from: from.cheap_clone(),
+                });
+              }
+            }
+
+            // notify of pending message
+            if let Err(e) = self.inner.handoff_tx.send(()).await {
+              tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to notify of pending message");
+            }
+          }
+          MessageType::Suspect => {
+            queue!(self.msg.from)
+          },
+          MessageType::Dead => {
+            queue!(self.msg.from)
+          },
+          MessageType::UserData => {
+            queue!(self.msg.from)
+          },
+          mt => {
+            tracing::error!(addr = %from, err = "unexpected message type", message_type=mt.kind(), "memberlist.packet");
+          }
         }
       }
     }

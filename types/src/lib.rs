@@ -16,7 +16,7 @@ pub use nodecraft::{
   Domain, HostAddr, Node, NodeId, ParseDomainError, ParseHostAddrError, ParseNodeIdError,
 };
 pub use ping::*;
-pub use push_pull_state::*;
+pub use push_pull::*;
 #[cfg(feature = "encryption")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 pub use secret::*;
@@ -37,7 +37,7 @@ mod meta;
 #[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
 mod metrics_label;
 mod ping;
-mod push_pull_state;
+mod push_pull;
 #[cfg(feature = "encryption")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 mod secret;

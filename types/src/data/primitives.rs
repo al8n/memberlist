@@ -11,6 +11,12 @@ const IPV4_ADDR_LEN: usize = 4;
 const IPV6_ADDR_LEN: usize = 16;
 
 impl Data for Ipv4Addr {
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self {
+    val
+  }
+
   #[inline]
   fn encoded_len(&self) -> usize {
     IPV4_ADDR_LEN
@@ -25,7 +31,7 @@ impl Data for Ipv4Addr {
     Ok(IPV4_ADDR_LEN)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
@@ -39,6 +45,12 @@ impl Data for Ipv4Addr {
 }
 
 impl Data for Ipv6Addr {
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self {
+    val
+  }
+
   #[inline]
   fn encoded_len(&self) -> usize {
     IPV6_ADDR_LEN
@@ -53,7 +65,7 @@ impl Data for Ipv6Addr {
     Ok(IPV6_ADDR_LEN)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
@@ -67,6 +79,12 @@ impl Data for Ipv6Addr {
 }
 
 impl Data for IpAddr {
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self {
+    val
+  }
+
   #[inline]
   fn encoded_len(&self) -> usize {
     1 + match self {
@@ -103,7 +121,7 @@ impl Data for IpAddr {
     }
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
@@ -128,6 +146,12 @@ impl Data for IpAddr {
 }
 
 impl Data for SocketAddrV4 {
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self {
+    val
+  }
+
   #[inline]
   fn encoded_len(&self) -> usize {
     IPV4_ADDR_LEN + 2
@@ -146,7 +170,7 @@ impl Data for SocketAddrV4 {
     Ok(V4_REQUIRED)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
@@ -165,6 +189,12 @@ impl Data for SocketAddrV4 {
 }
 
 impl Data for SocketAddrV6 {
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self {
+    val
+  }
+
   #[inline]
   fn encoded_len(&self) -> usize {
     IPV6_ADDR_LEN + 2
@@ -183,7 +213,7 @@ impl Data for SocketAddrV6 {
     Ok(V6_REQUIRED)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
@@ -201,6 +231,12 @@ impl Data for SocketAddrV6 {
 }
 
 impl Data for SocketAddr {
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self {
+    val
+  }
+
   #[inline]
   fn encoded_len(&self) -> usize {
     1 + match self {
@@ -237,7 +273,7 @@ impl Data for SocketAddr {
     }
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
@@ -267,6 +303,12 @@ macro_rules! impl_primitives {
       impl Data for $ty {
         const WIRE_TYPE: WireType = WireType::Varint;
 
+        type Ref<'a> = Self;
+
+        fn from_ref(val: Self::Ref<'_>) -> Self {
+          val
+        }
+
         fn encoded_len(&self) -> usize {
           Varint::encoded_len(self)
         }
@@ -275,7 +317,7 @@ macro_rules! impl_primitives {
           Varint::encode(self, buf).map_err(Into::into)
         }
 
-        fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
         where
           Self: Sized,
         {
@@ -289,6 +331,12 @@ macro_rules! impl_primitives {
       $(
         impl Data for [< f $ty >] {
           const WIRE_TYPE: WireType = WireType:: [< Fixed $ty >];
+
+          type Ref<'a> = Self;
+
+          fn from_ref(val: Self::Ref<'_>) -> Self {
+            val
+          }
 
           fn encoded_len(&self) -> usize {
             core::mem::size_of::<[< f $ty >]>()
@@ -307,7 +355,7 @@ macro_rules! impl_primitives {
             Ok(SIZE)
           }
 
-          fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+          fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
           where
             Self: Sized,
           {
@@ -330,6 +378,12 @@ macro_rules! impl_primitives {
       impl Data for $ty {
         const WIRE_TYPE: WireType = WireType::Byte;
 
+        type Ref<'a> = Self;
+
+        fn from_ref(val: Self::Ref<'_>) -> Self {
+          val
+        }
+
         fn encoded_len(&self) -> usize {
           <u8 as Data>::encoded_len(&(*self as u8))
         }
@@ -338,7 +392,7 @@ macro_rules! impl_primitives {
           <u8 as Data>::encode(&(*self as u8), buf)
         }
 
-        fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
         where
           Self: Sized,
         {
@@ -355,6 +409,12 @@ macro_rules! impl_primitives {
       {
         const WIRE_TYPE: WireType = T::WIRE_TYPE;
 
+        type Ref<'a> = <T as Data>::Ref<'a>;
+
+        fn from_ref(val: Self::Ref<'_>) -> Self {
+          <$wrapper>::from(T::from_ref(val))
+        }
+
         fn encoded_len(&self) -> usize {
           T::encoded_len(&**self)
         }
@@ -363,12 +423,12 @@ macro_rules! impl_primitives {
           T::encode(&**self, buf)
         }
 
-        fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
         where
           Self: Sized,
         {
-          let (bytes_read, value) = T::decode(src)?;
-          Ok((bytes_read, <$wrapper>::from(value)))
+          let (bytes_read, value) = T::decode_ref(src)?;
+          Ok((bytes_read, value))
         }
       }
     )*
@@ -385,6 +445,12 @@ impl_primitives!(@wrapper std::sync::Arc<T>, std::boxed::Box<T>, triomphe::Arc<T
 impl Data for char {
   const WIRE_TYPE: WireType = WireType::Varint;
 
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self {
+    val
+  }
+
   fn encoded_len(&self) -> usize {
     Varint::encoded_len(&(*self as u32))
   }
@@ -393,7 +459,7 @@ impl Data for char {
     Varint::encode(&(*self as u32), buf).map_err(Into::into)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
@@ -409,6 +475,12 @@ impl Data for char {
 impl Data for u8 {
   const WIRE_TYPE: WireType = WireType::Byte;
 
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self {
+    val
+  }
+
   fn encoded_len(&self) -> usize {
     1
   }
@@ -422,7 +494,7 @@ impl Data for u8 {
     Ok(1)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
@@ -437,6 +509,12 @@ impl Data for u8 {
 impl Data for bool {
   const WIRE_TYPE: WireType = WireType::Byte;
 
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self {
+    val
+  }
+
   fn encoded_len(&self) -> usize {
     1
   }
@@ -445,7 +523,7 @@ impl Data for bool {
     <u8 as Data>::encode(&(*self as u8), buf)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
@@ -459,6 +537,12 @@ impl Data for bool {
 impl Data for Duration {
   const WIRE_TYPE: WireType = WireType::Varint;
 
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Self {
+    val
+  }
+
   fn encoded_len(&self) -> usize {
     encoded_duration_len(self)
   }
@@ -467,7 +551,7 @@ impl Data for Duration {
     encode_duration_to(self, buf).map_err(Into::into)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {

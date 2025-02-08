@@ -180,6 +180,15 @@ impl TryFrom<BytesMut> for Meta {
 }
 
 impl Data for Meta {
+  type Ref<'a> = &'a [u8];
+
+  fn from_ref(val: Self::Ref<'_>) -> Self
+  where
+    Self: Sized,
+  {
+    Self(Bytes::copy_from_slice(val))
+  }
+
   fn encoded_len(&self) -> usize {
     self.len()
   }
@@ -188,13 +197,16 @@ impl Data for Meta {
     <Bytes as Data>::encode(&self.0, buf)
   }
 
-  fn decode(src: &[u8]) -> Result<(usize, Self), DecodeError>
+  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
   where
     Self: Sized,
   {
-    Self::try_from(src)
-      .map(|meta| (meta.len(), meta))
-      .map_err(|e| DecodeError::new(e.to_string()))
+    let len = src.len();
+    if len > Self::MAX_SIZE {
+      return Err(DecodeError::new(LargeMeta(len).to_string()));
+    }
+
+    Ok((len, src))
   }
 }
 
