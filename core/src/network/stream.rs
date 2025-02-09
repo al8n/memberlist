@@ -58,10 +58,13 @@ where
     &self,
     pp: <PushPull<T::Id, T::ResolvedAddress> as Data>::Ref<'_>,
   ) -> Result<(), Error<T, D>> {
+    let states = pp
+      .states()
+      .iter::<T::Id, T::ResolvedAddress>()
+      .collect::<Result<SmallVec<_>, _>>()?;
+    self.verify_protocol(states.as_slice()).await?;
+
     let pp = <PushPull<T::Id, T::ResolvedAddress> as Data>::from_ref(pp)?;
-
-    self.verify_protocol(pp.states()).await?;
-
     // Invoke the merge delegate if any
     if pp.join() {
       if let Some(merge) = self.delegate.as_ref() {
