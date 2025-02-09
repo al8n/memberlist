@@ -18,7 +18,7 @@ use crate::{
   Member, Memberlist, Options,
 };
 
-use super::{Meta, NodeState, Ping, PushNodeState, PushPull, State, Transport};
+use super::{Meta, NodeState, Ping, NodeState, PushPull, State, Transport};
 
 mod unimplemented;
 pub use unimplemented::*;
@@ -741,9 +741,9 @@ where
   let push_pull = PushPull::new(
     false,
     [
-      PushNodeState::new(1, id0.cheap_clone(), bind_addr, State::Alive),
-      PushNodeState::new(1, "Test 1".into(), bind_addr, State::Alive),
-      PushNodeState::new(1, "Test 2".into(), bind_addr, State::Alive),
+      NodeState::new(1, id0.cheap_clone(), bind_addr, State::Alive),
+      NodeState::new(1, "Test 1".into(), bind_addr, State::Alive),
+      NodeState::new(1, "Test 2".into(), bind_addr, State::Alive),
     ]
     .into_iter(),
   );

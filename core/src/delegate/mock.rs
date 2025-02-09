@@ -1,6 +1,6 @@
-use futures::lock::Mutex;
-
 use super::*;
+use futures::lock::Mutex;
+use smallvec_wrapper::TinyVec;
 
 struct MockDelegateInner<I, A> {
   meta: Meta,
@@ -106,21 +106,21 @@ where
     _overhead: usize,
     _limit: usize,
     _encoded_len: F,
-  ) -> TinyVec<Bytes>
+  ) -> impl Iterator<Item = Bytes> + Send
   where
     F: Fn(Bytes) -> (usize, Bytes),
   {
     let mut mu = self.inner.lock().await;
     let mut out = TinyVec::new();
     core::mem::swap(&mut out, &mut mu.broadcasts);
-    out
+    out.into_iter()
   }
 
   async fn local_state(&self, _join: bool) -> Bytes {
     self.inner.lock().await.state.clone()
   }
 
-  async fn merge_remote_state(&self, buf: Bytes, _join: bool) {
-    self.inner.lock().await.remote_state = buf;
+  async fn merge_remote_state(&self, buf: &[u8], _join: bool) {
+    self.inner.lock().await.remote_state = Bytes::copy_from_slice(buf);
   }
 }

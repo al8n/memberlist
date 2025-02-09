@@ -270,24 +270,6 @@ const _: () = {
   use super::*;
   use arbitrary::{Arbitrary, Unstructured};
 
-  impl<'a, I, A> Arbitrary<'a> for PushNodeState<I, A>
-  where
-    I: Arbitrary<'a>,
-    A: Arbitrary<'a>,
-  {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      Ok(Self {
-        id: I::arbitrary(u)?,
-        addr: A::arbitrary(u)?,
-        meta: Meta::arbitrary(u)?,
-        incarnation: u.arbitrary()?,
-        state: u.arbitrary()?,
-        protocol_version: u.arbitrary()?,
-        delegate_version: u.arbitrary()?,
-      })
-    }
-  }
-
   impl<'a, I, A> Arbitrary<'a> for PushPull<I, A>
   where
     I: Arbitrary<'a>,
@@ -310,24 +292,6 @@ const _: () = {
 const _: () = {
   use super::*;
   use quickcheck::{Arbitrary, Gen};
-
-  impl<I, A> Arbitrary for PushNodeState<I, A>
-  where
-    I: Arbitrary,
-    A: Arbitrary,
-  {
-    fn arbitrary(g: &mut Gen) -> Self {
-      Self {
-        id: I::arbitrary(g),
-        addr: A::arbitrary(g),
-        meta: Meta::arbitrary(g),
-        incarnation: u32::arbitrary(g),
-        state: State::arbitrary(g),
-        protocol_version: ProtocolVersion::arbitrary(g),
-        delegate_version: DelegateVersion::arbitrary(g),
-      }
-    }
-  }
 
   impl<I, A> Arbitrary for PushPull<I, A>
   where

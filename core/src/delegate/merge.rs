@@ -2,7 +2,7 @@ use std::{future::Future, sync::Arc};
 
 use nodecraft::{CheapClone, Id};
 
-use crate::types::{NodeState, SmallVec};
+use crate::types::NodeState;
 
 /// Used to involve a client in
 /// a potential cluster merge operation. Namely, when
@@ -26,6 +26,6 @@ pub trait MergeDelegate: Send + Sync + 'static {
   /// the return value is `Err`, the merge is canceled.
   fn notify_merge(
     &self,
-    peers: SmallVec<Arc<NodeState<Self::Id, Self::Address>>>,
+    peers: Arc<[NodeState<Self::Id, Self::Address>]>,
   ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }

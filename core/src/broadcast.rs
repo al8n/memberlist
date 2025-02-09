@@ -118,25 +118,21 @@ where
 
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   #[inline]
   pub(crate) async fn broadcast_notify(
     &self,
     node: T::Id,
-    msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    msg: Message<T::Id, T::ResolvedAddress>,
     notify_tx: Option<Sender<()>>,
   ) {
     let _ = self.queue_broadcast(node, msg, notify_tx).await;
   }
 
   #[inline]
-  pub(crate) async fn broadcast(
-    &self,
-    node: T::Id,
-    msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-  ) {
+  pub(crate) async fn broadcast(&self, node: T::Id, msg: Message<T::Id, T::ResolvedAddress>) {
     let _ = self.queue_broadcast(node, msg, None).await;
   }
 
@@ -144,7 +140,7 @@ where
   async fn queue_broadcast(
     &self,
     node: T::Id,
-    msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    msg: Message<T::Id, T::ResolvedAddress>,
     notify_tx: Option<Sender<()>>,
   ) {
     self
@@ -164,11 +160,10 @@ where
   #[inline]
   pub(crate) async fn get_broadcast_with_prepend(
     &self,
-    to_send: TinyVec<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+    to_send: TinyVec<Message<T::Id, T::ResolvedAddress>>,
     overhead: usize,
     limit: usize,
-  ) -> Result<TinyVec<Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>, Error<T, D>>
-  {
+  ) -> Result<TinyVec<Message<T::Id, T::ResolvedAddress>>, Error<T, D>> {
     // Get memberlist messages first
     let mut to_send = self
       .inner
@@ -190,8 +185,7 @@ where
         to_send.extend(
           delegate
             .broadcast_messages(overhead, avail, |b| {
-              let msg =
-                Message::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::UserData(b);
+              let msg = Message::<T::Id, T::ResolvedAddress>::UserData(b);
               let len = msg.encoded_len();
               (len, msg.unwrap_user_data())
             })

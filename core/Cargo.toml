@@ -44,6 +44,7 @@ rustix = { version = "0.38", features = ["system"] }
 hostname = "0.4"
 
 [dependencies]
+auto_enums = "0.8"
 auto_impl.workspace = true
 atomic_refcell.workspace = true
 agnostic-lite.workspace = true

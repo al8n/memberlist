@@ -3,7 +3,7 @@ use std::{borrow::Cow, sync::Arc};
 use bytes::Bytes;
 use nodecraft::{CheapClone, Id};
 
-use crate::types::{Meta, NodeState, SmallVec, TinyVec};
+use crate::types::{Meta, NodeState};
 
 #[cfg(any(test, feature = "test"))]
 #[doc(hidden)]
@@ -148,7 +148,7 @@ where
 
   async fn notify_merge(
     &self,
-    _peers: SmallVec<Arc<NodeState<Self::Id, Self::Address>>>,
+    _peers: Arc<[NodeState<Self::Id, Self::Address>]>,
   ) -> Result<(), Self::Error> {
     Ok(())
   }
@@ -226,18 +226,18 @@ where
     _overhead: usize,
     _limit: usize,
     _encoded_len: F,
-  ) -> TinyVec<Bytes>
+  ) -> impl Iterator<Item = Bytes> + Send
   where
     F: Fn(Bytes) -> (usize, Bytes) + Send,
   {
-    TinyVec::new()
+    core::iter::empty()
   }
 
   async fn local_state(&self, _join: bool) -> Bytes {
     Bytes::new()
   }
 
-  async fn merge_remote_state(&self, _buf: Bytes, _join: bool) {}
+  async fn merge_remote_state(&self, _buf: &[u8], _join: bool) {}
 }
 
 impl<I, A> Delegate for VoidDelegate<I, A>

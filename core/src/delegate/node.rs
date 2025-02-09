@@ -1,6 +1,6 @@
 use std::{borrow::Cow, future::Future};
 
-use crate::types::{Meta, TinyVec};
+use crate::types::Meta;
 use bytes::Bytes;
 
 /// Used to manage node related events.
@@ -34,7 +34,7 @@ pub trait NodeDelegate: Send + Sync + 'static {
     overhead: usize,
     limit: usize,
     encoded_len: F,
-  ) -> impl Future<Output = TinyVec<Bytes>> + Send
+  ) -> impl Future<Output = impl Iterator<Item = Bytes> + Send> + Send
   where
     F: Fn(Bytes) -> (usize, Bytes) + Send;
 
@@ -48,5 +48,5 @@ pub trait NodeDelegate: Send + Sync + 'static {
   /// state received from the remote side and is the result of the
   /// remote side's `local_state` call. The 'join'
   /// boolean indicates this is for a join instead of a push/pull.
-  fn merge_remote_state(&self, buf: Bytes, join: bool) -> impl Future<Output = ()> + Send;
+  fn merge_remote_state(&self, buf: &[u8], join: bool) -> impl Future<Output = ()> + Send;
 }

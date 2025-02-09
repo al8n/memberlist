@@ -523,7 +523,7 @@ impl<'a> CompoundMessagesDecoder<'a> {
   }
 }
 
-/// An iterator over the [`PushNodeStateRef`] in the collection.
+/// An iterator over the [`NodeStateRef`] in the collection.
 pub struct CompoundMessagesDecoderIter<'a, I, A> {
   src: &'a [u8],
   offset: usize,

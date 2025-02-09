@@ -461,6 +461,18 @@ impl<'a> PushNodeStatesDecoder<'a> {
     }
   }
 
+  /// Returns the number of [`PushNodeState`] in the collection.
+  #[inline]
+  pub const fn len(&self) -> usize {
+    self.num_states
+  }
+
+  /// Returns `true` if the collection is empty.
+  #[inline]
+  pub const fn is_empty(&self) -> bool {
+    self.num_states == 0
+  }
+
   /// Returns an iterator over the [`PushNodeState`] in the collection.
   pub fn iter<I, A>(&self) -> PushNodeStatesDecodeIter<'a, I, A>
   where
@@ -538,3 +550,51 @@ impl<I: Data, A: Data> core::iter::ExactSizeIterator for PushNodeStatesDecodeIte
 }
 
 impl<I: Data, A: Data> core::iter::FusedIterator for PushNodeStatesDecodeIter<'_, I, A> {}
+
+#[cfg(feature = "arbitrary")]
+const _: () = {
+  use super::*;
+  use arbitrary::{Arbitrary, Unstructured};
+
+  impl<'a, I, A> Arbitrary<'a> for PushNodeState<I, A>
+  where
+    I: Arbitrary<'a>,
+    A: Arbitrary<'a>,
+  {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+      Ok(Self {
+        id: I::arbitrary(u)?,
+        addr: A::arbitrary(u)?,
+        meta: Meta::arbitrary(u)?,
+        incarnation: u.arbitrary()?,
+        state: u.arbitrary()?,
+        protocol_version: u.arbitrary()?,
+        delegate_version: u.arbitrary()?,
+      })
+    }
+  }
+};
+
+#[cfg(feature = "quickcheck")]
+const _: () = {
+  use super::*;
+  use quickcheck::{Arbitrary, Gen};
+
+  impl<I, A> Arbitrary for PushNodeState<I, A>
+  where
+    I: Arbitrary,
+    A: Arbitrary,
+  {
+    fn arbitrary(g: &mut Gen) -> Self {
+      Self {
+        id: I::arbitrary(g),
+        addr: A::arbitrary(g),
+        meta: Meta::arbitrary(g),
+        incarnation: u32::arbitrary(g),
+        state: State::arbitrary(g),
+        protocol_version: ProtocolVersion::arbitrary(g),
+        delegate_version: DelegateVersion::arbitrary(g),
+      }
+    }
+  }
+};

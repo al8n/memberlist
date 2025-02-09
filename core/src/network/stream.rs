@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use agnostic_lite::AsyncSpawner;
+use either::Either;
 use nodecraft::CheapClone;
 use smol_str::SmolStr;
 
@@ -58,28 +59,37 @@ where
     &self,
     pp: <PushPull<T::Id, T::ResolvedAddress> as Data>::Ref<'_>,
   ) -> Result<(), Error<T, D>> {
-    let states = pp
-      .states()
-      .iter::<T::Id, T::ResolvedAddress>()
-      .collect::<Result<SmallVec<_>, _>>()?;
-    self.verify_protocol(states.as_slice()).await?;
+    let states = pp.states();
+    let num_states = states.len();
+    let iter = states.iter::<T::Id, T::ResolvedAddress>();
+    let mut states = SmallVec::with_capacity(num_states);
 
-    let pp = <PushPull<T::Id, T::ResolvedAddress> as Data>::from_ref(pp)?;
+    for state in iter {
+      states.push(state.and_then(<PushNodeState<T::Id, T::ResolvedAddress> as Data>::from_ref)?);
+    }
+
+    let states = match states.into_inner() {
+      Either::Left(states) => Arc::from_iter(states),
+      Either::Right(e) => Arc::from(e),
+    };
+
+    self.verify_protocol(states.as_ref()).await?;
+
+    let join = pp.join();
+    let user_data = pp.user_data();
+
     // Invoke the merge delegate if any
-    if pp.join() {
+    if join {
       if let Some(merge) = self.delegate.as_ref() {
-        let peers = pp
-          .states()
+        let peers = states
           .iter()
           .map(|n| {
-            Arc::new(
-              NodeState::new(n.id().cheap_clone(), n.address().cheap_clone(), n.state())
-                .with_meta(n.meta().cheap_clone())
-                .with_protocol_version(n.protocol_version())
-                .with_delegate_version(n.delegate_version()),
-            )
+            NodeState::new(n.id().cheap_clone(), n.address().cheap_clone(), n.state())
+              .with_meta(n.meta().cheap_clone())
+              .with_protocol_version(n.protocol_version())
+              .with_delegate_version(n.delegate_version())
           })
-          .collect::<SmallVec<_>>();
+          .collect::<Arc<[_]>>();
         merge
           .notify_merge(peers)
           .await
@@ -88,8 +98,7 @@ where
     }
 
     // Merge the membership state
-    let (join, user_data, states) = pp.into_components();
-    self.merge_state(&states).await;
+    self.merge_state(states.as_ref()).await;
 
     // Invoke the delegate for user state
     if let Some(d) = &self.delegate {

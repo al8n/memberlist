@@ -36,7 +36,7 @@ macro_rules! queue {
 
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   pub(crate) fn packet_listener(
@@ -154,7 +154,7 @@ where
 
   async fn handle_messages(
     &self,
-    from: <T::Resolver as AddressResolver>::ResolvedAddress,
+    from: T::ResolvedAddress,
     timestamp: <T::Runtime as RuntimeLite>::Instant,
     payload: Bytes,
   ) {
@@ -224,7 +224,7 @@ where
   async fn handle_indirect_ping(
     &self,
     ind: <IndirectPing<T::Id, T::ResolvedAddress> as Data>::Ref<'_>,
-    from: <T::Resolver as AddressResolver>::ResolvedAddress,
+    from: T::ResolvedAddress,
   ) {
     // TODO: check protocol version and delegate version, currently we do not need to do this
     // because we only have one version
@@ -332,7 +332,7 @@ where
   pub(crate) async fn send_msg(
     &self,
     addr: &T::ResolvedAddress,
-    msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    msg: Message<T::Id, T::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
     // Check if we can piggy back any messages
     let bytes_avail = self.inner.transport.max_payload_size()

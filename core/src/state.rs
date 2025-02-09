@@ -24,7 +24,7 @@ use super::{
 use agnostic_lite::{time::Instant, AsyncSpawner, RuntimeLite};
 
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
-use nodecraft::{resolver::AddressResolver, CheapClone, Node};
+use nodecraft::{CheapClone, Node};
 use rand::{seq::SliceRandom, Rng};
 
 // /// Exports the state unit test cases.
@@ -74,7 +74,7 @@ impl<I, A> LocalNodeState<I, A> {
 impl<T, D> Memberlist<T, D>
 where
   T: Transport,
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
 {
   /// Returns a usable sequence number in a thread safe way
   #[inline]
@@ -137,13 +137,13 @@ where
 // ---------------------------------Crate methods-------------------------------
 impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   /// Does a complete state exchange with a specific node.
   pub(crate) async fn push_pull_node(
     &self,
-    id: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    id: Node<T::Id, T::ResolvedAddress>,
     join: bool,
   ) -> Result<(), Error<T, D>> {
     #[cfg(feature = "metrics")]
@@ -392,7 +392,7 @@ where
   /// live node.
   pub(crate) async fn alive_node(
     &self,
-    alive: Alive<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    alive: Alive<T::Id, T::ResolvedAddress>,
     notify_tx: Option<async_channel::Sender<()>>,
     bootstrap: bool,
   ) {
@@ -583,49 +583,45 @@ where
 
   pub(crate) async fn merge_state<'a>(
     &'a self,
-    remote: &'a [PushNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>],
+    remote: &'a [PushNodeState<T::Id, T::ResolvedAddress>],
   ) {
-    let mut futs = remote
-      .iter()
-      .filter_map(|r| {
-        let state = match r.state() {
-          State::Alive => StateMessage::Alive(
-            Alive::new(r.incarnation(), r.node())
-              .with_meta(r.meta().cheap_clone())
-              .with_protocol_version(r.protocol_version())
-              .with_delegate_version(r.delegate_version()),
-          ),
-          State::Left => StateMessage::Left(Dead::new(
-            r.incarnation(),
-            r.id().cheap_clone(),
-            self.local_id().cheap_clone(),
-          )),
-          // If the remote node believes a node is dead, we prefer to
-          // suspect that node instead of declaring it dead instantly
-          State::Dead | State::Suspect => StateMessage::Suspect(Suspect::new(
-            r.incarnation(),
-            r.id().cheap_clone(),
-            self.local_id().cheap_clone(),
-          )),
-          State::Unknown(val) => {
-            tracing::warn!(local = %self.inner.id, remote = %r.id(), state=%val, "memberlist.state: unknown state");
-            return None;
-          },
-          state => {
-            tracing::warn!(local = %self.inner.id, remote = %r.id(), state=%state, "memberlist.state: unknown state");
-            return None;
-          }
-        };
-        Some(state.run(self))
-      })
-      .collect::<FuturesUnordered<_>>();
+    for r in remote {
+      let state = match r.state() {
+        State::Alive => StateMessage::Alive(
+          Alive::new(r.incarnation(), r.node())
+            .with_meta(r.meta().cheap_clone())
+            .with_protocol_version(r.protocol_version())
+            .with_delegate_version(r.delegate_version()),
+        ),
+        State::Left => StateMessage::Left(Dead::new(
+          r.incarnation(),
+          r.id().cheap_clone(),
+          self.local_id().cheap_clone(),
+        )),
+        // If the remote node believes a node is dead, we prefer to
+        // suspect that node instead of declaring it dead instantly
+        State::Dead | State::Suspect => StateMessage::Suspect(Suspect::new(
+          r.incarnation(),
+          r.id().cheap_clone(),
+          self.local_id().cheap_clone(),
+        )),
+        State::Unknown(val) => {
+          tracing::warn!(local = %self.inner.id, remote = %r.id(), state=%val, "memberlist.state: unknown state");
+          continue;
+        }
+        state => {
+          tracing::warn!(local = %self.inner.id, remote = %r.id(), state=%state, "memberlist.state: unknown state");
+          continue;
+        }
+      };
 
-    while futs.next().await.is_some() {}
+      state.run(self).await;
+    }
   }
 }
 
 enum StateMessage<T: Transport> {
-  Alive(Alive<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
+  Alive(Alive<T::Id, T::ResolvedAddress>),
   Left(Dead<T::Id>),
   Suspect(Suspect<T::Id>),
 }
@@ -636,7 +632,7 @@ where
 {
   async fn run<D>(self, s: &Memberlist<T, D>)
   where
-    D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+    D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   {
     match self {
       StateMessage::Alive(alive) => s.alive_node(alive, None, false).await,
@@ -662,7 +658,7 @@ where
 #[inline]
 fn move_dead_nodes<T, D>(nodes: &mut [Member<T, D>], gossip_to_the_dead_time: Duration) -> usize
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   let mut num_dead = 0;
@@ -734,7 +730,7 @@ macro_rules! bail_trigger {
 
 impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   /// Used to ensure the Tick is performed periodically.
@@ -863,10 +859,7 @@ where
     }
   }
 
-  async fn probe_node(
-    &self,
-    target: &LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-  ) {
+  async fn probe_node(&self, target: &LocalNodeState<T::Id, T::ResolvedAddress>) {
     #[cfg(feature = "metrics")]
     let now = <T::Runtime as RuntimeLite>::now();
     #[cfg(feature = "metrics")]
@@ -1049,7 +1042,7 @@ where
 
   async fn handle_remote_failure(
     &self,
-    target: &LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    target: &LocalNodeState<T::Id, T::ResolvedAddress>,
     ping_sequence_number: u32,
     ack_rx: &async_channel::Receiver<AckMessage<<T::Runtime as RuntimeLite>::Instant>>,
     nack_rx: &async_channel::Receiver<()>,
@@ -1380,11 +1373,7 @@ where
   /// accusedInc value, or you can supply 0 to just get the next incarnation number.
   /// This alters the node state that's passed in so this MUST be called while the
   /// nodeLock is held.
-  async fn refute(
-    &self,
-    state: &LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    accused_inc: u32,
-  ) {
+  async fn refute(&self, state: &LocalNodeState<T::Id, T::ResolvedAddress>, accused_inc: u32) {
     // Make sure the incarnation number beats the accusation.
     let mut inc = self.next_incarnation();
     if accused_inc >= inc {

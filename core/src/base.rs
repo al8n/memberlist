@@ -453,7 +453,7 @@ where
 
   pub(crate) async fn verify_protocol(
     &self,
-    _remote: &[<PushNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> as crate::types::Data>::Ref<'_>],
+    _remote: &[PushNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>],
   ) -> Result<(), Error<T, D>> {
     // TODO: now we do not need to handle this situation, because there is no update
     // on protocol.

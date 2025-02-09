@@ -23,7 +23,7 @@ use crate::{
   state::{AckManager, LocalNodeState},
   tests::get_memberlist,
   transport::Transport,
-  types::{Ack, Alive, Dead, Epoch, Message, Nack, PushNodeState, State, Suspect},
+  types::{Ack, Alive, Dead, Epoch, Message, Nack, NodeState, State, Suspect},
   Memberlist, Options,
 };
 
@@ -2111,10 +2111,10 @@ pub async fn merge_state<A, T, R>(
   let node4: Node<_, SocketAddr> = Node::new(node_id4.clone(), "127.0.0.4:8000".parse().unwrap());
 
   let remote = vec![
-    PushNodeState::new(2, node1.id().clone(), *node1.address(), State::Alive),
-    PushNodeState::new(1, node2.id().clone(), *node2.address(), State::Suspect),
-    PushNodeState::new(1, node3.id().clone(), *node3.address(), State::Dead),
-    PushNodeState::new(2, node4.id().clone(), *node4.address(), State::Alive),
+    NodeState::new(2, node1.id().clone(), *node1.address(), State::Alive),
+    NodeState::new(1, node2.id().clone(), *node2.address(), State::Suspect),
+    NodeState::new(1, node3.id().clone(), *node3.address(), State::Dead),
+    NodeState::new(2, node4.id().clone(), *node4.address(), State::Alive),
   ];
 
   // Merge remote state

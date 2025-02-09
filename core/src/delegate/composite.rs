@@ -219,7 +219,7 @@ where
 
   async fn notify_merge(
     &self,
-    peers: SmallVec<Arc<NodeState<Self::Id, Self::Address>>>,
+    peers: Arc<[NodeState<Self::Id, Self::Address>]>,
   ) -> Result<(), Self::Error> {
     self.merge_delegate.notify_merge(peers).await
   }
@@ -339,7 +339,7 @@ where
     overhead: usize,
     limit: usize,
     encoded_len: F,
-  ) -> TinyVec<Bytes>
+  ) -> impl Iterator<Item = Bytes> + Send
   where
     F: Fn(Bytes) -> (usize, Bytes) + Send,
   {
@@ -353,7 +353,7 @@ where
     self.node_delegate.local_state(join).await
   }
 
-  async fn merge_remote_state(&self, buf: Bytes, join: bool) {
+  async fn merge_remote_state(&self, buf: &[u8], join: bool) {
     self.node_delegate.merge_remote_state(buf, join).await
   }
 }
