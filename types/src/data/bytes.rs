@@ -55,7 +55,7 @@ impl_bytes!(
 impl<'a, const N: usize> DataRef<'a, [u8; N]> for [u8; N] {
   fn decode(src: &'a [u8]) -> Result<(usize, [u8; N]), super::DecodeError> {
     if src.len() < N {
-      return Err(super::DecodeError::new("buffer underflow"));
+      return Err(super::DecodeError::buffer_underflow());
     }
 
     let mut bytes = [0; N];

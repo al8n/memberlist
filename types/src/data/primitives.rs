@@ -13,7 +13,7 @@ const IPV6_ADDR_LEN: usize = 16;
 impl<'a> DataRef<'a, Self> for Ipv4Addr {
   fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError> {
     if src.len() < IPV4_ADDR_LEN {
-      return Err(DecodeError::new("buffer underflow"));
+      return Err(DecodeError::buffer_underflow());
     }
 
     let octets: [u8; IPV4_ADDR_LEN] = src[..IPV4_ADDR_LEN].try_into().unwrap();
@@ -46,7 +46,7 @@ impl Data for Ipv4Addr {
 impl<'a> DataRef<'a, Self> for Ipv6Addr {
   fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError> {
     if src.len() < IPV6_ADDR_LEN {
-      return Err(DecodeError::new("buffer underflow"));
+      return Err(DecodeError::buffer_underflow());
     }
 
     let octets: [u8; IPV6_ADDR_LEN] = src[..IPV6_ADDR_LEN].try_into().unwrap();
@@ -81,7 +81,7 @@ impl<'a> DataRef<'a, Self> for IpAddr {
     let buf_len = src.len();
 
     if buf_len < 1 {
-      return Err(DecodeError::new("buffer underflow"));
+      return Err(DecodeError::buffer_underflow());
     }
 
     match src[0] {
@@ -93,7 +93,7 @@ impl<'a> DataRef<'a, Self> for IpAddr {
         let (len, addr) = <Ipv6Addr as DataRef<Ipv6Addr>>::decode(&src[1..])?;
         Ok((len + 1, IpAddr::V6(addr)))
       }
-      _ => Err(DecodeError::new("invalid ip address type")),
+      val => Err(DecodeError::unknown_tag("IpAddr", val)),
     }
   }
 }
@@ -152,7 +152,7 @@ impl<'a> DataRef<'a, Self> for SocketAddrV4 {
     let buf_len = src.len();
 
     if buf_len < V4_REQUIRED {
-      return Err(DecodeError::new("buffer underflow"));
+      return Err(DecodeError::buffer_underflow());
     }
 
     let (ip_len, ip) = <Ipv4Addr as DataRef<Ipv4Addr>>::decode(src)?;
@@ -196,7 +196,7 @@ impl<'a> DataRef<'a, Self> for SocketAddrV6 {
     let buf_len = src.len();
 
     if buf_len < V6_REQUIRED {
-      return Err(DecodeError::new("buffer underflow"));
+      return Err(DecodeError::buffer_underflow());
     }
 
     let (ip_len, ip) = <Ipv6Addr as DataRef<Ipv6Addr>>::decode(src)?;
@@ -239,7 +239,7 @@ impl<'a> DataRef<'a, Self> for SocketAddr {
     let buf_len = src.len();
 
     if buf_len < 1 {
-      return Err(DecodeError::new("buffer underflow"));
+      return Err(DecodeError::buffer_underflow());
     }
 
     match src[0] {
@@ -251,7 +251,7 @@ impl<'a> DataRef<'a, Self> for SocketAddr {
         let (len, addr) = <SocketAddrV6 as DataRef<SocketAddrV6>>::decode(&src[1..])?;
         Ok((len + 1, SocketAddr::V6(addr)))
       }
-      _ => Err(DecodeError::new("invalid socket address type")),
+      val => Err(DecodeError::unknown_tag("SocketAddr", val)),
     }
   }
 }
@@ -305,7 +305,7 @@ macro_rules! impl_primitives {
     $(
       impl<'a> DataRef<'a, Self> for $ty {
         fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError> {
-          Varint::decode(src).map_err(|_| DecodeError::new("invalid varint"))
+          Varint::decode(src).map_err(Into::into)
         }
       }
 
@@ -336,7 +336,7 @@ macro_rules! impl_primitives {
             const SIZE: usize = core::mem::size_of::<[< f $ty >]>();
 
             if src.len() < SIZE {
-              return Err(DecodeError::new("buffer underflow"));
+              return Err(DecodeError::buffer_underflow());
             }
 
             let mut bytes = [0; SIZE];
@@ -446,11 +446,10 @@ impl_primitives!(@wrapper std::sync::Arc<T>, std::boxed::Box<T>, triomphe::Arc<T
 
 impl<'a> DataRef<'a, Self> for char {
   fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError> {
-    let (bytes_read, value) =
-      Varint::decode(src).map_err(|_| DecodeError::new("invalid varint"))?;
+    let (bytes_read, value) = Varint::decode(src)?;
     Ok((
       bytes_read,
-      char::from_u32(value).ok_or_else(|| DecodeError::new("invalid character value"))?,
+      char::from_u32(value).ok_or_else(|| DecodeError::custom("invalid character value"))?,
     ))
   }
 }
@@ -476,7 +475,7 @@ impl Data for char {
 impl<'a> DataRef<'a, Self> for u8 {
   fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError> {
     if src.is_empty() {
-      return Err(DecodeError::new("buffer underflow"));
+      return Err(DecodeError::buffer_underflow());
     }
 
     Ok((1, src[0]))
@@ -509,7 +508,7 @@ impl Data for u8 {
 impl<'a> DataRef<'a, Self> for bool {
   fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError> {
     if src.is_empty() {
-      return Err(DecodeError::new("buffer underflow"));
+      return Err(DecodeError::buffer_underflow());
     }
     Ok((1, src[0] != 0))
   }
@@ -535,7 +534,7 @@ impl Data for bool {
 
 impl<'a> DataRef<'a, Self> for Duration {
   fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError> {
-    decode_duration(src).map_err(|_| DecodeError::new("invalid duration"))
+    decode_duration(src).map_err(|_| DecodeError::custom("invalid duration"))
   }
 }
 

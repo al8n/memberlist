@@ -130,8 +130,7 @@ impl<'a> DataRef<'a, ErrorResponse> for ErrorResponseRef<'a> {
         }
         _ => {
           let (wire_type, _) = split(src[offset]);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           offset += skip(wire_type, &src[offset..])?;
         }
       }

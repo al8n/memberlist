@@ -294,7 +294,7 @@ where
   {
     let len = src.len();
     if len < 1 {
-      return Err(DecodeError::new("buffer underflow"));
+      return Err(DecodeError::buffer_underflow());
     }
 
     let mut offset = 0;
@@ -374,8 +374,9 @@ where
         (offset, Self::ErrorResponse(decoded))
       }
       _ => {
-        let (_, tag) = super::split(b);
-        return Err(DecodeError::new(format!("unknown message tag: {tag}")));
+        let (wt, tag) = super::split(b);
+        WireType::try_from(wt).map_err(DecodeError::unknown_wire_type)?;
+        return Err(DecodeError::unknown_tag("Message", tag));
       }
     })
   }
@@ -509,9 +510,7 @@ where
         }
         _ => {
           let (wire_type, _) = split(b);
-          let wt = match WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("unknown wire type: {}", wire_type)))
-          {
+          let wt = match WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type) {
             Ok(wt) => wt,
             Err(e) => return Some(Err(e)),
           };

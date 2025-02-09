@@ -7,7 +7,7 @@ macro_rules! impl_str {
         fn decode(src: &'a [u8]) -> Result<(usize, Self), super::DecodeError> {
           match core::str::from_utf8(src) {
             Ok(value) => Ok((src.len(), value)),
-            Err(e) => Err(super::DecodeError::new(e.to_string())),
+            Err(e) => Err(super::DecodeError::custom(e.to_string())),
           }
         }
       }

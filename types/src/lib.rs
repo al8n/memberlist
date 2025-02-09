@@ -120,17 +120,17 @@ fn skip(wire_type: WireType, src: &[u8]) -> Result<usize, DecodeError> {
   match wire_type {
     WireType::Varint => match const_varint::decode_u64_varint(src) {
       Ok((bytes_read, _)) => Ok(bytes_read),
-      Err(_) => Err(DecodeError::new("invalid varint")),
+      Err(e) => Err(e.into()),
     },
     WireType::LengthDelimited => {
       // Skip length-delimited field by reading the length and skipping the payload
       if src.is_empty() {
-        return Err(DecodeError::new("buffer underflow"));
+        return Err(DecodeError::buffer_underflow());
       }
 
       match const_varint::decode_u32_varint(src) {
         Ok((bytes_read, length)) => Ok(bytes_read + length as usize),
-        Err(_) => Err(DecodeError::new("invalid varint")),
+        Err(e) => Err(e.into()),
       }
     }
     WireType::Byte => Ok(1),

@@ -185,7 +185,7 @@ impl<'a> DataRef<'a, Meta> for &'a [u8] {
   fn decode(src: &'a [u8]) -> Result<(usize, &'a [u8]), DecodeError> {
     let len = src.len();
     if len > Meta::MAX_SIZE {
-      return Err(DecodeError::new(LargeMeta(len).to_string()));
+      return Err(DecodeError::custom(LargeMeta(len).to_string()));
     }
 
     Ok((len, src))

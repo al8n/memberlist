@@ -49,8 +49,7 @@ impl Ack {
         }
         _ => {
           let (wire_type, _) = split(src[offset]);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           // Skip unknown fields
           offset += skip(wire_type, &src[offset..])?;
         }
@@ -204,8 +203,7 @@ impl<'a> DataRef<'a, Ack> for AckRef<'a> {
         }
         _ => {
           let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           offset += skip(wire_type, &src[offset..])?;
         }
       }
@@ -280,8 +278,7 @@ impl<'a> DataRef<'a, Self> for Nack {
         }
         _ => {
           let (wire_type, _) = split(src[offset]);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           offset += skip(wire_type, &src[offset..])?;
         }
       }

@@ -45,42 +45,26 @@ macro_rules! bail_ping {
     paste::paste! {
       const [< $name:upper _SEQUENCE_NUMBER_TAG >]: u8 = 1;
       const [< $name:upper _SEQUENCE_NUMBER_BYTE >]: u8 = super::merge(super::WireType::Varint, [< $name:upper _SEQUENCE_NUMBER_TAG >]);
-      const [< $name:upper _SOURCE_ID_TAG >]: u8 = 2;
-      const [< $name:upper _SOURCE_ADDR_TAG >]: u8 = 3;
-      const [< $name:upper _TARGET_ID_TAG >]: u8 = 4;
-      const [< $name:upper _TARGET_ADDR_TAG >]: u8 = 5;
+      const [< $name:upper _SOURCE_TAG >]: u8 = 2;
+      const [< $name:upper _TARGET_TAG >]: u8 = 3;
 
       impl<I, A> $name<I, A> {
         #[inline]
-        const fn source_id_byte() -> u8
-        where
-          I: super::Data,
-        {
-          super::merge(I::WIRE_TYPE, [< $name:upper _SOURCE_ID_TAG >])
-        }
-
-        #[inline]
-        const fn source_addr_byte() -> u8
-        where
-          A: Data,
-        {
-          super::merge(A::WIRE_TYPE, [< $name:upper _SOURCE_ADDR_TAG >])
-        }
-
-        #[inline]
-        const fn target_id_byte() -> u8
+        const fn source_byte() -> u8
         where
           I: Data,
+          A: Data,
         {
-          super::merge(I::WIRE_TYPE, [< $name:upper _TARGET_ID_TAG >])
+          super::merge(super::WireType::LengthDelimited, [< $name:upper _SOURCE_TAG >])
         }
 
         #[inline]
-        const fn target_addr_byte() -> u8
+        const fn target_byte() -> u8
         where
+          I: Data,
           A: Data,
         {
-          super::merge(A::WIRE_TYPE, [< $name:upper _TARGET_ADDR_TAG >])
+          super::merge(super::WireType::LengthDelimited, [< $name:upper _TARGET_TAG >])
         }
       }
 
@@ -94,10 +78,8 @@ macro_rules! bail_ping {
           Self: Sized,
         {
           let mut sequence_number = None;
-          let mut source_id = None;
-          let mut source_addr = None;
-          let mut target_id = None;
-          let mut target_addr = None;
+          let mut source = None;
+          let mut target = None;
 
           let mut offset = 0;
           while offset < src.len() {
@@ -110,45 +92,33 @@ macro_rules! bail_ping {
                 offset += bytes_read;
                 sequence_number = Some(value);
               }
-              b if b == $name::<I, A>::source_id_byte() => {
-                let (bytes_read, value) = I::Ref::decode_length_delimited(&src[offset..])?;
+              b if b == $name::<I, A>::source_byte() => {
+                let (bytes_read, value) = <Node<I::Ref<'_>, A::Ref<'_>> as DataRef<Node<I, A>>>::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
-                source_id = Some(value);
+                source = Some(value);
               }
-              b if b == $name::<I, A>::source_addr_byte() => {
-                let (bytes_read, value) = A::Ref::decode_length_delimited(&src[offset..])?;
+              b if b == $name::<I, A>::target_byte() => {
+                let (bytes_read, value) = <Node<I::Ref<'_>, A::Ref<'_>> as DataRef<Node<I, A>>>::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
-                source_addr = Some(value);
-              }
-              b if b == $name::<I, A>::target_id_byte() => {
-                let (bytes_read, value) = I::Ref::decode_length_delimited(&src[offset..])?;
-                offset += bytes_read;
-                target_id = Some(value);
-              }
-              b if b == $name::<I, A>::target_addr_byte() => {
-                let (bytes_read, value) = A::Ref::decode_length_delimited(&src[offset..])?;
-                offset += bytes_read;
-                target_addr = Some(value);
+                target = Some(value);
               }
               b => {
                 let (wire_type, _) = super::split(b);
                 let wire_type = super::WireType::try_from(wire_type)
-                  .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+                  .map_err(DecodeError::unknown_wire_type)?;
                 offset += super::skip(wire_type, &src[offset..])?;
               }
             }
           }
 
-          let sequence_number = sequence_number.ok_or_else(|| DecodeError::new("missing sequence number"))?;
-          let source_id = source_id.ok_or_else(|| DecodeError::new("missing source id"))?;
-          let source_addr = source_addr.ok_or_else(|| DecodeError::new("missing source address"))?;
-          let target_id = target_id.ok_or_else(|| DecodeError::new("missing target id"))?;
-          let target_addr = target_addr.ok_or_else(|| DecodeError::new("missing target address"))?;
+          let sequence_number = sequence_number.ok_or_else(|| DecodeError::missing_field(stringify!($name), "sequence number"))?;
+          let source = source.ok_or_else(|| DecodeError::missing_field(stringify!($name), "source"))?;
+          let target = target.ok_or_else(|| DecodeError::missing_field(stringify!($name), "target"))?;
 
           Ok((offset, Self {
             sequence_number,
-            source: Node::new(source_id, source_addr),
-            target: Node::new(target_id, target_addr),
+            source,
+            target,
           }))
         }
       }
@@ -172,10 +142,8 @@ macro_rules! bail_ping {
 
         fn encoded_len(&self) -> usize {
           let mut len = 1 + self.sequence_number.encoded_len();
-          len += 1 + self.source.id().encoded_len_with_length_delimited();
-          len += 1 + self.source.address().encoded_len_with_length_delimited();
-          len += 1 + self.target.id().encoded_len_with_length_delimited();
-          len += 1 + self.target.address().encoded_len_with_length_delimited();
+          len += 1 + self.source.encoded_len_with_length_delimited();
+          len += 1 + self.target.encoded_len_with_length_delimited();
           len
         }
 
@@ -198,24 +166,14 @@ macro_rules! bail_ping {
           offset += self.sequence_number.encode(&mut buf[offset..]).map_err(|e| EncodeError::from(e).update(self.encoded_len(), len))?;
 
           bail!(self(offset, len));
-          buf[offset] = Self::source_id_byte();
+          buf[offset] = Self::source_byte();
           offset += 1;
-          offset += self.source.id().encode_length_delimited(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
+          offset += self.source.encode_length_delimited(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
 
           bail!(self(offset, len));
-          buf[offset] = Self::source_addr_byte();
+          buf[offset] = Self::target_byte();
           offset += 1;
-          offset += self.source.address().encode_length_delimited(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
-
-          bail!(self(offset, len));
-          buf[offset] = Self::target_id_byte();
-          offset += 1;
-          offset += self.target.id().encode_length_delimited(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
-
-          bail!(self(offset, len));
-          buf[offset] = Self::target_addr_byte();
-          offset += 1;
-          offset += self.target.address().encode_length_delimited(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
+          offset += self.target.encode_length_delimited(&mut buf[offset..]).map_err(|e| e.update(self.encoded_len(), len))?;
 
           #[cfg(debug_assertions)]
           super::debug_assert_write_eq(offset, self.encoded_len());

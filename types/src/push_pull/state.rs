@@ -213,7 +213,7 @@ where
         }
         STATE_BYTE => {
           if offset >= src.len() {
-            return Err(DecodeError::new("buffer underflow"));
+            return Err(DecodeError::buffer_underflow());
           }
           let value = State::from(src[offset]);
           offset += 1;
@@ -221,7 +221,7 @@ where
         }
         PROTOCOL_VERSION_BYTE => {
           if offset >= src.len() {
-            return Err(DecodeError::new("buffer underflow"));
+            return Err(DecodeError::buffer_underflow());
           }
           let value = ProtocolVersion::from(src[offset]);
           offset += 1;
@@ -229,7 +229,7 @@ where
         }
         DELEGATE_VERSION_BYTE => {
           if offset >= src.len() {
-            return Err(DecodeError::new("buffer underflow"));
+            return Err(DecodeError::buffer_underflow());
           }
           let value = DelegateVersion::from(src[offset]);
           offset += 1;
@@ -237,8 +237,7 @@ where
         }
         _ => {
           let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           offset += skip(wire_type, &src[offset..])?;
         }
       }
@@ -247,11 +246,12 @@ where
     Ok((
       offset,
       Self {
-        id: id.ok_or_else(|| DecodeError::new("missing id"))?,
-        addr: addr.ok_or_else(|| DecodeError::new("missing addr"))?,
+        id: id.ok_or_else(|| DecodeError::missing_field("PushNodeState", "id"))?,
+        addr: addr.ok_or_else(|| DecodeError::missing_field("PushNodeState", "missing addr"))?,
         meta: meta.unwrap_or_default(),
-        incarnation: incarnation.ok_or_else(|| DecodeError::new("missing incarnation"))?,
-        state: state.ok_or_else(|| DecodeError::new("missing state"))?,
+        incarnation: incarnation
+          .ok_or_else(|| DecodeError::missing_field("PushNodeState", "incarnation"))?,
+        state: state.ok_or_else(|| DecodeError::missing_field("PushNodeState", "state"))?,
         protocol_version: protocol_version.unwrap_or_default(),
         delegate_version: delegate_version.unwrap_or_default(),
       },
@@ -518,11 +518,7 @@ where
           let (wire_type, _) = split(b);
           let wire_type = match WireType::try_from(wire_type) {
             Ok(wire_type) => wire_type,
-            Err(_) => {
-              return Some(Err(DecodeError::new(format!(
-                "invalid wire type value {wire_type}"
-              ))))
-            }
+            Err(wt) => return Some(Err(DecodeError::unknown_wire_type(wt))),
           };
           *current_offset += match skip(wire_type, &self.src[*current_offset..]) {
             Ok(offset) => offset,

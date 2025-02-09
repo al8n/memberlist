@@ -216,7 +216,7 @@ where
       match b {
         JOIN_BYTE => {
           if offset >= src.len() {
-            return Err(DecodeError::new("buffer underflow"));
+            return Err(DecodeError::buffer_underflow());
           }
           let val = src[offset];
           offset += 1;
@@ -245,14 +245,13 @@ where
         }
         _ => {
           let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           offset += skip(wire_type, &src[offset..])?;
         }
       }
     }
 
-    let join = join.ok_or(DecodeError::new("missing join"))? != 0;
+    let join = join.ok_or(DecodeError::missing_field("PushPull", "join"))? != 0;
     let user_data = user_data.unwrap_or_default();
     Ok((
       offset,

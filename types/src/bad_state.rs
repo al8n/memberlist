@@ -76,15 +76,15 @@ macro_rules! bad_bail {
               b => {
                 let (wire_type, _) = super::split(b);
                 let wire_type = WireType::try_from(wire_type)
-                  .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+                  .map_err(DecodeError::unknown_wire_type)?;
                 offset += super::skip(wire_type, &src[offset..])?;
               }
             }
           }
 
-          let incarnation = incarnation.ok_or_else(|| DecodeError::new("missing incarnation"))?;
-          let node = node.ok_or_else(|| DecodeError::new("missing node"))?;
-          let from = from.ok_or_else(|| DecodeError::new("missing from"))?;
+          let incarnation = incarnation.ok_or_else(|| DecodeError::missing_field(stringify!($name), "incarnation"))?;
+          let node = node.ok_or_else(|| DecodeError::missing_field(stringify!($name), "node"))?;
+          let from = from.ok_or_else(|| DecodeError::missing_field(stringify!($name), "from"))?;
 
           Ok((offset, Self {
             incarnation,

@@ -34,11 +34,10 @@ where
       return Self::decode(src);
     }
 
-    let (mut offset, len) =
-      decode_u32_varint(src).map_err(|_| DecodeError::new("invalid varint"))?;
+    let (mut offset, len) = decode_u32_varint(src)?;
     let len = len as usize;
     if len + offset > src.len() {
-      return Err(DecodeError::new("buffer underflow"));
+      return Err(DecodeError::buffer_underflow());
     }
 
     let src = &src[offset..offset + len];
@@ -230,64 +229,86 @@ impl From<Cow<'static, str>> for EncodeError {
 /// A message decoding error.
 ///
 /// `DecodeError` indicates that the input buffer does not contain a valid
-/// Protobuf message. The error details should be considered 'best effort': in
+/// message. The error details should be considered 'best effort': in
 /// general it is not possible to exactly pinpoint why data is malformed.
-#[derive(Clone, PartialEq, Eq)]
-pub struct DecodeError {
-  inner: Box<Inner>,
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DecodeError {
+  /// Returned when the buffer does not have enough data to decode the message.
+  #[error("buffer underflow")]
+  BufferUnderflow,
+
+  /// Returned when the buffer does not contain the required field.
+  #[error("missing {field} in {ty}")]
+  MissingField {
+    /// The type of the message.
+    ty: &'static str,
+    /// The name of the field.
+    field: &'static str,
+  },
+
+  /// Returned when there is a unknown wire type.
+  #[error("unknown wire type value {0}")]
+  UnknownWireType(u8),
+
+  /// Returned when finding a unknown tag.
+  #[error("unknown tag {tag} when decoding {ty}")]
+  UnknownTag {
+    /// The type of the message.
+    ty: &'static str,
+    /// The unknown tag value.
+    tag: u8,
+  },
+
+  /// Returned when fail to decode the length-delimited
+  #[error("length-delimited overflow the maximum value of u32")]
+  LengthDelimitedOverflow,
+
+  /// A custom decoding error.
+  #[error("{0}")]
+  Custom(Cow<'static, str>),
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct Inner {
-  /// A 'best effort' root cause description.
-  description: Cow<'static, str>,
-  /// A stack of (message, field) name pairs, which identify the specific
-  /// message type and field where decoding failed. The stack contains an
-  /// entry per level of nesting.
-  stack: Vec<(&'static str, &'static str)>,
+impl From<const_varint::DecodeError> for DecodeError {
+  #[inline]
+  fn from(e: const_varint::DecodeError) -> Self {
+    match e {
+      const_varint::DecodeError::Underflow => Self::BufferUnderflow,
+      const_varint::DecodeError::Overflow => Self::LengthDelimitedOverflow,
+    }
+  }
 }
 
 impl DecodeError {
-  /// Creates a new `DecodeError` with a 'best effort' root cause description.
-  ///
-  /// Meant to be used only by `Message` implementations.
-  #[doc(hidden)]
-  #[cold]
-  pub fn new(description: impl Into<Cow<'static, str>>) -> Self {
-    Self {
-      inner: Box::new(Inner {
-        description: description.into(),
-        stack: Vec::new(),
-      }),
-    }
+  /// Creates a new buffer underflow decoding error.
+  #[inline]
+  pub const fn buffer_underflow() -> Self {
+    Self::BufferUnderflow
   }
 
-  /// Pushes a (message, field) name location pair on to the location stack.
-  ///
-  /// Meant to be used only by `Message` implementations.
-  #[doc(hidden)]
-  pub fn push(&mut self, message: &'static str, field: &'static str) {
-    self.inner.stack.push((message, field));
+  /// Creates a new missing field decoding error.
+  #[inline]
+  pub const fn missing_field(ty: &'static str, field: &'static str) -> Self {
+    Self::MissingField { ty, field }
   }
-}
 
-impl core::fmt::Debug for DecodeError {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_struct("DecodeError")
-      .field("description", &self.inner.description)
-      .field("stack", &self.inner.stack)
-      .finish()
+  /// Creates a new unknown wire type decoding error.
+  #[inline]
+  pub const fn unknown_wire_type(value: u8) -> Self {
+    Self::UnknownWireType(value)
   }
-}
 
-impl core::fmt::Display for DecodeError {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.write_str("failed to decode memberlist message: ")?;
-    for &(message, field) in &self.inner.stack {
-      write!(f, "{}.{}: ", message, field)?;
-    }
-    f.write_str(&self.inner.description)
+  /// Creates a new unknown tag decoding error.
+  #[inline]
+  pub const fn unknown_tag(ty: &'static str, tag: u8) -> Self {
+    Self::UnknownTag { ty, tag }
+  }
+
+  /// Creates a custom decoding error.
+  #[inline]
+  pub fn custom<T>(value: T) -> Self
+  where
+    T: Into<Cow<'static, str>>,
+  {
+    Self::Custom(value.into())
   }
 }
-
-impl core::error::Error for DecodeError {}

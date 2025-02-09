@@ -66,10 +66,9 @@ pub struct Alive<I, A> {
 
 const INCARNATION_TAG: u8 = 1;
 const META_TAG: u8 = 2;
-const ID_TAG: u8 = 3;
-const ADDR_TAG: u8 = 4;
-const PROTOCOL_VERSION_TAG: u8 = 5;
-const DELEGATE_VERSION_TAG: u8 = 6;
+const NODE_TAG: u8 = 3;
+const PROTOCOL_VERSION_TAG: u8 = 4;
+const DELEGATE_VERSION_TAG: u8 = 5;
 
 const INCARNATION_BYTE: u8 = merge(WireType::Varint, INCARNATION_TAG);
 const META_BYTE: u8 = merge(WireType::LengthDelimited, META_TAG);
@@ -78,19 +77,12 @@ const DELEGATE_VERSION_BYTE: u8 = merge(WireType::Byte, DELEGATE_VERSION_TAG);
 
 impl<I, A> Alive<I, A> {
   #[inline]
-  const fn id_byte() -> u8
+  const fn node_byte() -> u8
   where
     I: super::Data,
-  {
-    merge(I::WIRE_TYPE, ID_TAG)
-  }
-
-  #[inline]
-  const fn addr_byte() -> u8
-  where
     A: super::Data,
   {
-    merge(A::WIRE_TYPE, ADDR_TAG)
+    merge(WireType::LengthDelimited, NODE_TAG)
   }
 }
 
@@ -105,14 +97,12 @@ where
   where
     Self: Sized,
   {
-    let (id, addr) = val.node.into_components();
     Meta::from_ref(val.meta)
-      .and_then(|meta| I::from_ref(id).map(|id| (meta, id)))
-      .and_then(|(meta, id)| A::from_ref(addr).map(|addr| (meta, id, addr)))
-      .map(|(meta, id, addr)| Self {
+      .and_then(|meta| Node::<I, A>::from_ref(val.node).map(|node| (meta, node)))
+      .map(|(meta, node)| Self {
         incarnation: val.incarnation,
         meta,
-        node: Node::new(id, addr),
+        node,
         protocol_version: val.protocol_version,
         delegate_version: val.delegate_version,
       })
@@ -121,8 +111,7 @@ where
   fn encoded_len(&self) -> usize {
     let mut len = 1 + self.incarnation.encoded_len();
     len += 1 + self.meta.encoded_len_with_length_delimited();
-    len += 1 + self.node.id().encoded_len_with_length_delimited();
-    len += 1 + self.node.address().encoded_len_with_length_delimited();
+    len += 1 + self.node.encoded_len_with_length_delimited();
     len += 1 + 1;
     len += 1 + 1;
     len
@@ -132,7 +121,6 @@ where
     macro_rules! bail {
       ($this:ident($offset:expr, $len:ident)) => {
         if $offset >= $len {
-          println!("{}", $offset);
           return Err(EncodeError::insufficient_buffer($this.encoded_len(), $len).into());
         }
       };
@@ -155,21 +143,10 @@ where
       .map_err(|e| e.update(self.encoded_len(), len))?;
 
     bail!(self(offset, len));
-    buf[offset] = Self::id_byte();
+    buf[offset] = Self::node_byte();
     offset += 1;
     offset += self
       .node
-      .id()
-      .encode_length_delimited(&mut buf[offset..])
-      .map_err(|e| e.update(self.encoded_len(), len))?;
-
-    bail!(self(offset, len));
-    buf[offset] = Self::addr_byte();
-    offset += 1;
-
-    offset += self
-      .node
-      .address()
       .encode_length_delimited(&mut buf[offset..])
       .map_err(|e| e.update(self.encoded_len(), len))?;
 
@@ -311,8 +288,7 @@ where
     let mut offset = 0;
     let mut incarnation = None;
     let mut meta = None;
-    let mut id = None;
-    let mut addr = None;
+    let mut node = None;
     let mut protocol_version = None;
     let mut delegate_version = None;
 
@@ -334,32 +310,30 @@ where
         }
         DELEGATE_VERSION_BYTE => {
           if offset >= src.len() {
-            return Err(DecodeError::new("buffer underflow"));
+            return Err(DecodeError::buffer_underflow());
           }
           delegate_version = Some(src[offset].into());
           offset += 1;
         }
         PROTOCOL_VERSION_BYTE => {
           if offset >= src.len() {
-            return Err(DecodeError::new("buffer underflow"));
+            return Err(DecodeError::buffer_underflow());
           }
           protocol_version = Some(src[offset].into());
           offset += 1;
         }
-        b if b == Alive::<I, A>::id_byte() => {
-          let (readed, data) = I::Ref::decode_length_delimited(&src[offset..])?;
+        b if b == Alive::<I, A>::node_byte() => {
+          let (readed, data) =
+            <Node<I::Ref<'_>, A::Ref<'_>> as DataRef<Node<I, A>>>::decode_length_delimited(
+              &src[offset..],
+            )?;
+
           offset += readed;
-          id = Some(data);
-        }
-        b if b == Alive::<I, A>::addr_byte() => {
-          let (readed, data) = A::Ref::decode_length_delimited(&src[offset..])?;
-          offset += readed;
-          addr = Some(data);
+          node = Some(data);
         }
         _ => {
           let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           offset += skip(wire_type, &src[offset..])?;
         }
       }
@@ -368,12 +342,10 @@ where
     Ok((
       offset,
       Self {
-        incarnation: incarnation.ok_or_else(|| DecodeError::new("missing incarnation"))?,
+        incarnation: incarnation
+          .ok_or_else(|| DecodeError::missing_field("Alive", "incarnation"))?,
         meta: meta.unwrap_or_default(),
-        node: Node::new(
-          id.ok_or_else(|| DecodeError::new("missing node id"))?,
-          addr.ok_or_else(|| DecodeError::new("missing node address"))?,
-        ),
+        node: node.ok_or_else(|| DecodeError::missing_field("Alive", "node"))?,
         protocol_version: protocol_version.unwrap_or_default(),
         delegate_version: delegate_version.unwrap_or_default(),
       },

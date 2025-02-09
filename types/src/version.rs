@@ -83,7 +83,7 @@ macro_rules! impl_data {
       impl<'a> super::DataRef<'a, Self> for $ty {
         fn decode(src: &'a [u8]) -> Result<(usize, Self), super::DecodeError> {
           if src.is_empty() {
-            return Err(super::DecodeError::new("buffer underflow"));
+            return Err(super::DecodeError::buffer_underflow());
           }
 
           Ok((1, Self::from(src[0])))

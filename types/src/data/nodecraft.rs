@@ -12,7 +12,7 @@ impl<'a> DataRef<'a, Domain> for DomainRef<'a> {
   fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError> {
     DomainRef::try_from(buf)
       .map(|domain| (buf.len(), domain))
-      .map_err(|e| DecodeError::new(e.to_string()))
+      .map_err(|e| DecodeError::custom(e.as_str()))
   }
 }
 
@@ -45,7 +45,7 @@ impl<'a, const N: usize> DataRef<'a, NodeId<N>> for NodeIdRef<'a, N> {
   fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError> {
     NodeIdRef::try_from(buf)
       .map(|node_id| (buf.len(), node_id))
-      .map_err(|e| DecodeError::new(e.to_string()))
+      .map_err(|e| DecodeError::custom(e.to_string()))
   }
 }
 
@@ -80,7 +80,7 @@ const _: () = {
   impl<'a> DataRef<'a, HostAddr> for HostAddrRef<'a> {
     fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError> {
       if buf.is_empty() {
-        return Err(DecodeError::new("buffer underflow"));
+        return Err(DecodeError::buffer_underflow());
       }
 
       let b = buf[0];
@@ -95,17 +95,16 @@ const _: () = {
             <DomainRef<'_> as DataRef<Domain>>::decode_length_delimited(&buf[1..])?;
           let required = 1 + bytes_read + 2;
           if required > buf.len() {
-            return Err(DecodeError::new("buffer underflow"));
+            return Err(DecodeError::buffer_underflow());
           }
           let port = u16::from_be_bytes(buf[1 + bytes_read..required].try_into().unwrap());
           Ok((required, Self::from((domain, port))))
         }
         b => {
           let (wire_type, tag) = split(b);
-          WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {}", wire_type)))?;
+          WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
 
-          Err(DecodeError::new(format!("unknown tag: {tag}",)))
+          Err(DecodeError::unknown_tag("HostAddr", tag))
         }
       }
     }
@@ -195,15 +194,15 @@ const _: () = {
           }
           _ => {
             let (wire_type, _) = split(b);
-            let wire_type = WireType::try_from(wire_type)
-              .map_err(|_| DecodeError::new(format!("invalid wire type value {}", wire_type)))?;
+            let wire_type =
+              WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
             offset += skip(wire_type, &src[offset..])?;
           }
         }
       }
 
-      let id = id.ok_or_else(|| DecodeError::new("missing node id"))?;
-      let address = address.ok_or_else(|| DecodeError::new("missing node address"))?;
+      let id = id.ok_or_else(|| DecodeError::missing_field("Node", "id"))?;
+      let address = address.ok_or_else(|| DecodeError::missing_field("Node", "address"))?;
       Ok((offset, Self::new(id, address)))
     }
   }
