@@ -7,7 +7,7 @@ use crate::{
 };
 use async_channel::Sender;
 
-use nodecraft::{resolver::AddressResolver, CheapClone};
+use nodecraft::CheapClone;
 
 /// Something that can be broadcasted via gossip to
 /// the memberlist cluster.
@@ -190,7 +190,6 @@ where
               (len, msg.unwrap_user_data())
             })
             .await
-            .into_iter()
             .map(Message::UserData),
         );
       }
