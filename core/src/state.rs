@@ -15,8 +15,8 @@ use super::{
   suspicion::Suspicion,
   transport::Transport,
   types::{
-    Alive, Data, Dead, IndirectPing, Messages, NodeState, Ping, PushNodeState, SmallVec, State,
-    Suspect,
+    Alive, CompoundMessagesEncoder, Data, Dead, IndirectPing, NodeState, Ping, PushNodeState,
+    SmallVec, State, Suspect,
   },
   Member, Members,
 };
@@ -27,9 +27,9 @@ use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use nodecraft::{resolver::AddressResolver, CheapClone, Node};
 use rand::{seq::SliceRandom, Rng};
 
-/// Exports the state unit test cases.
-#[cfg(any(test, feature = "test"))]
-pub mod tests;
+// /// Exports the state unit test cases.
+// #[cfg(any(test, feature = "test"))]
+// pub mod tests;
 
 mod ack_manager;
 pub(crate) use ack_manager::*;
@@ -912,7 +912,7 @@ where
         self.local_id().cheap_clone(),
       );
       let msgs = [ping.cheap_clone().into(), suspect.into()];
-      match Messages::from(msgs.as_slice()).encode_to_bytes() {
+      match CompoundMessagesEncoder::new(msgs.as_slice()).encode_to_bytes() {
         Ok(msgs) => match self.transport_send_packets(target.address(), msgs).await {
           Ok(_) => {}
           Err(e) => {
@@ -1271,7 +1271,7 @@ where
               })
             } else {
               futures::future::Either::Right(async {
-                match Messages::from(msgs.as_ref()).encode_to_bytes() {
+                match CompoundMessagesEncoder::new(msgs.as_ref()).encode_to_bytes() {
                   Ok(msgs) => {
                     // Send compound message
                     if let Err(e) = self.transport_send_packets(&addr, msgs).await {

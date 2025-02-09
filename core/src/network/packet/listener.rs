@@ -1,10 +1,9 @@
 use agnostic_lite::AsyncSpawner;
-use either::Either;
 use nodecraft::CheapClone;
 
 use crate::{
   base::MessageHandoff,
-  types::{Data, Message},
+  types::{CompoundMessagesEncoder, Data, Message},
 };
 
 use super::*;
@@ -77,18 +76,23 @@ where
 
   async fn handle_message(
     &self,
-    from: <T::Resolver as AddressResolver>::ResolvedAddress,
+    from: &T::ResolvedAddress,
     timestamp: <T::Runtime as RuntimeLite>::Instant,
-    payload: Bytes,
+    msg: <Message<T::Id, T::ResolvedAddress> as Data>::Ref<'_>,
   ) {
     tracing::trace!(local = %self.advertise_address(), from = %from, packet=?msg, "memberlist.packet: handle packet");
 
     match msg {
-      Message::Ping(ping) => self.handle_ping(ping, from).await,
-      Message::IndirectPing(ind) => self.handle_indirect_ping(ind, from).await,
-      Message::Ack(resp) => self.handle_ack(resp, timestamp).await,
-      Message::Nack(resp) => self.handle_nack(resp).await,
-      Message::Alive(alive) => {
+      MessageRef::Ping(ping) => self.handle_ping(ping, from).await,
+      MessageRef::IndirectPing(ind) => self.handle_indirect_ping(ind, from.cheap_clone()).await,
+      MessageRef::Ack(resp) => match Ack::from_ref(resp) {
+        Ok(ack) => self.handle_ack(ack, timestamp).await,
+        Err(e) => {
+          tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode ack");
+        }
+      },
+      MessageRef::Nack(resp) => self.handle_nack(resp).await,
+      MessageRef::Alive(alive) => {
         // Determine the message queue, prioritize alive
         {
           let mut mq = self.inner.queue.lock().await;
@@ -98,10 +102,18 @@ where
           if queue.len() >= self.inner.opts.handoff_queue_depth {
             tracing::warn!(addr = %from, "memberlist.packet: handler queue full, dropping message (Alive)");
           } else {
-            queue.push_back(MessageHandoff {
-              msg: alive.into(),
-              from: from.cheap_clone(),
-            });
+            match Alive::<T::Id, T::ResolvedAddress>::from_ref(alive) {
+              Ok(alive) => {
+                queue.push_back(MessageHandoff {
+                  msg: alive.into(),
+                  from: from.cheap_clone(),
+                });
+              }
+              Err(e) => {
+                tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode alive message");
+                return;
+              }
+            }
           }
         }
 
@@ -110,11 +122,32 @@ where
           tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to notify of pending message");
         }
       }
-      Message::Suspect(msg) => queue!(self.msg.from),
-      Message::Dead(msg) => queue!(self.msg.from),
-      Message::UserData(msg) => queue!(self.msg.from),
-      mt => {
-        tracing::error!(addr = %from, err = "unexpected message type", message_type=mt.kind(), "memberlist.packet");
+      MessageRef::Suspect(msg) => {
+        let msg = match Suspect::<T::Id>::from_ref(msg) {
+          Ok(msg) => msg,
+          Err(e) => {
+            tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode suspect message");
+            return;
+          }
+        };
+        queue!(self.msg.from)
+      }
+      MessageRef::Dead(msg) => {
+        let msg = match Dead::<T::Id>::from_ref(msg) {
+          Ok(msg) => msg,
+          Err(e) => {
+            tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode dead message");
+            return;
+          }
+        };
+        queue!(self.msg.from)
+      }
+      MessageRef::UserData(msg) => {
+        let msg = Bytes::copy_from_slice(msg);
+        queue!(self.msg.from)
+      }
+      msg => {
+        tracing::error!(addr = %from, err = "unexpected message type", message_type=msg.ty().kind(), "memberlist.packet");
       }
     }
   }
@@ -125,74 +158,48 @@ where
     timestamp: <T::Runtime as RuntimeLite>::Instant,
     payload: Bytes,
   ) {
-    // match msgs.into_either() {
-    //   Either::Left([msg]) => self.handle_message(msg, from, timestamp).await,
-    //   Either::Right(msgs) => {
-    //     for msg in msgs {
-    //       self
-    //         .handle_message(from.cheap_clone(), timestamp, msg)
-    //         .await
-    //     }
-    //   }
-    // }
-    match MessageType::try_from(payload[0]) {
+    let msg = match <MessageRef::<'_, <T::Id as Data>::Ref<'_>, <T::ResolvedAddress as Data>::Ref<'_>> as DataRef<Message<T::Id, T::ResolvedAddress>>>::decode(&payload) {
+      Ok((_, msg)) => msg,
       Err(e) => {
-        tracing::error!(addr = %from, err = "unexpected message type", message_type=e, "memberlist.packet");
+        tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode message");
+        return;
       }
-      Ok(mt) => {
-        match mt {
-          MessageType::Ping => self.handle_ping(ping, from).await,
-          MessageType::IndirectPing => self.handle_indirect_ping(ind, from).await,
-          MessageType::Ack => self.handle_ack(resp, timestamp).await,
-          MessageType::Nack => self.handle_nack(resp).await,
-          MessageType::Alive => {
-            // Determine the message queue, prioritize alive
-            {
-              let mut mq = self.inner.queue.lock().await;
-              let queue = &mut mq.high;
+    };
 
-              // Check for overflow and append if not full
-              if queue.len() >= self.inner.opts.handoff_queue_depth {
-                tracing::warn!(addr = %from, "memberlist.packet: handler queue full, dropping message (Alive)");
-              } else {
-                queue.push_back(MessageHandoff {
-                  msg: alive.into(),
-                  from: from.cheap_clone(),
-                });
-              }
+    match msg {
+      MessageRef::Compound(decoder) => {
+        for msg in decoder.iter::<T::Id, T::ResolvedAddress>() {
+          match msg {
+            Ok(msg) => {
+              self.handle_message(&from, timestamp, msg).await;
             }
-
-            // notify of pending message
-            if let Err(e) = self.inner.handoff_tx.send(()).await {
-              tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to notify of pending message");
+            Err(e) => {
+              tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode message");
             }
-          }
-          MessageType::Suspect => {
-            queue!(self.msg.from)
-          }
-          MessageType::Dead => {
-            queue!(self.msg.from)
-          }
-          MessageType::UserData => {
-            queue!(self.msg.from)
-          }
-          mt => {
-            tracing::error!(addr = %from, err = "unexpected message type", message_type=mt.kind(), "memberlist.packet");
           }
         }
       }
+      msg => self.handle_message(&from, timestamp, msg).await,
     }
   }
 
   async fn handle_ping(
     &self,
-    p: Ping<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    from: <T::Resolver as AddressResolver>::ResolvedAddress,
+    p: <Ping<T::Id, T::ResolvedAddress> as Data>::Ref<'_>,
+    from: &T::ResolvedAddress,
   ) {
-    // If node is provided, verify that it is for us
-    if p.target().id().ne(&self.inner.id) {
-      tracing::error!(local=%self.inner.id, remote = %from, "memberlist.packet: got ping for unexpected node '{}'", p.target());
-      return;
+    match <T::Id as Data>::from_ref(*p.target().id()) {
+      Ok(id) => {
+        // If node is provided, verify that it is for us
+        if id != self.inner.id {
+          tracing::error!(local=%self.inner.id, remote = %from, "memberlist.packet: got ping for unexpected node '{:?}'", p.target());
+          return;
+        }
+      }
+      Err(e) => {
+        tracing::error!(local=%self.inner.id, remote = %from, err = %e, "memberlist.packet: failed to decode target id");
+        return;
+      }
     }
 
     let msg = if let Some(delegate) = &self.delegate {
@@ -200,14 +207,23 @@ where
     } else {
       Ack::new(p.sequence_number())
     };
-    if let Err(e) = self.send_msg(p.source().address(), msg.into()).await {
+
+    let source_addr = match <T::ResolvedAddress as Data>::from_ref(*p.source().address()) {
+      Ok(addr) => addr,
+      Err(e) => {
+        tracing::error!(local=%self.inner.id, remote = %from, err = %e, "memberlist.packet: failed to decode source address");
+        return;
+      }
+    };
+
+    if let Err(e) = self.send_msg(&source_addr, msg.into()).await {
       tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to send ack response");
     }
   }
 
   async fn handle_indirect_ping(
     &self,
-    ind: IndirectPing<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    ind: <IndirectPing<T::Id, T::ResolvedAddress> as Data>::Ref<'_>,
     from: <T::Resolver as AddressResolver>::ResolvedAddress,
   ) {
     // TODO: check protocol version and delegate version, currently we do not need to do this
@@ -215,6 +231,14 @@ where
 
     // Send a ping to the correct host.
     let local_sequence_number = self.next_sequence_number();
+
+    let ind = match IndirectPing::<T::Id, T::ResolvedAddress>::from_ref(ind) {
+      Ok(target) => target,
+      Err(e) => {
+        tracing::error!(local=%self.inner.id, remote = %from, err = %e, "memberlist.packet: failed to decode indirect target");
+        return;
+      }
+    };
 
     let ping = Ping::new(
       local_sequence_number,
@@ -307,7 +331,7 @@ where
 
   pub(crate) async fn send_msg(
     &self,
-    addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    addr: &T::ResolvedAddress,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
     // Check if we can piggy back any messages
@@ -330,7 +354,7 @@ where
     }
 
     // Send the message
-    let msgs = Messages::from(msgs.as_ref()).encode_to_bytes()?;
+    let msgs = CompoundMessagesEncoder::new(msgs.as_ref()).encode_to_bytes()?;
     self.transport_send_packets(addr, msgs).await
   }
 }

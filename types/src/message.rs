@@ -451,6 +451,52 @@ impl<I, A> MessageRef<'_, I, A> {
   }
 }
 
+/// A compound message encoder which can encode multiple messages into a buffer.
+#[derive(Debug)]
+pub struct CompoundMessagesEncoder<'a, I, A> {
+  src: &'a [Message<I, A>],
+}
+
+impl<'a, I, A> CompoundMessagesEncoder<'a, I, A> {
+  /// Creates a new compound message encoder.
+  #[inline]
+  pub const fn new(src: &'a [Message<I, A>]) -> Self {
+    Self { src }
+  }
+
+  /// Encodes the messages into the buffer.
+  #[inline]
+  pub fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError>
+  where
+    I: Data,
+    A: Data,
+  {
+    encode_messages_slice(self.src, buf)
+  }
+
+  /// Encodes the messages into a [`Bytes`].
+  #[inline]
+  pub fn encode_to_bytes(&self) -> Result<Bytes, EncodeError>
+  where
+    I: Data,
+    A: Data,
+  {
+    let len = self.encoded_len();
+    let mut buf = vec![0; len];
+    self.encode(&mut buf).map(|_| Bytes::from(buf))
+  }
+
+  /// Returns the total length of the encoded messages.
+  #[inline]
+  pub fn encoded_len(&self) -> usize
+  where
+    I: Data,
+    A: Data,
+  {
+    encoded_messages_len(self.src)
+  }
+}
+
 /// A message decoder which can yield messages from a buffer.
 ///
 /// This decoder will not modify the source buffer and will only read from it.

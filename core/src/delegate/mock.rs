@@ -97,8 +97,8 @@ where
     self.inner.lock().await.meta.clone()
   }
 
-  async fn notify_message(&self, msg: Bytes) {
-    self.inner.lock().await.msgs.push(msg);
+  async fn notify_message(&self, msg: Cow<'_, [u8]>) {
+    self.inner.lock().await.msgs.push(Bytes::from(msg.to_vec()));
   }
 
   async fn broadcast_messages<F>(

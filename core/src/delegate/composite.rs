@@ -330,7 +330,7 @@ where
     self.node_delegate.node_meta(limit).await
   }
 
-  async fn notify_message(&self, msg: Bytes) {
+  async fn notify_message(&self, msg: Cow<'_, [u8]>) {
     self.node_delegate.notify_message(msg).await
   }
 

@@ -131,28 +131,16 @@ where
       <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
     ));
 
-    let (_, mut msg) = self.read_message(node.address(), &mut conn).await?;
+    let (_, payload) = self.read_message(node.address(), &mut conn).await?;
 
-    if msg.is_empty() {
-      return Err(Error::custom("receive empty message".into()));
-    }
-
-    let mt = match MessageType::try_from(msg[0]) {
-      Ok(mt) => mt,
-      // TODO: make error make more sense
-      Err(_e) => return Err(Error::unexpected_message("PushPull", "unknown")),
-    };
-    msg.advance(1);
-    match mt {
-      MessageType::ErrorResponse => {
-        // TODO: make error make more sense
-        let (_, err) = ErrorResponse::decode(&msg[1..])
-          .map_err(|e| Error::custom(format!("failed to decode error response: {}", e).into()))?;
-        Err(Error::remote(err))
+    let (_, msg) = <MessageRef::<'_, <T::Id as Data>::Ref<'_>, <T::ResolvedAddress as Data>::Ref<'_>> as DataRef<Message<T::Id, T::ResolvedAddress>>>::decode(&payload)?;
+    match msg {
+      MessageRef::ErrorResponse(resp) => {
+        let resp = <ErrorResponse as Data>::from_ref(resp)?;
+        tracing::error!(local_addr = %self.inner.id, peer_addr = %node, err = %resp, "memberlist: push/pull sync failed");
+        return Err(Error::remote(resp));
       }
-      MessageType::PushPull => {
-        let (_, pp) = PushPull::decode(&msg).map_err(|_| Error::custom("TODO".into()))?;
-
+      MessageRef::PushPull(pp) => {
         if let Err(e) = self
           .inner
           .transport
@@ -161,15 +149,15 @@ where
         {
           tracing::debug!(local_addr = %self.inner.id, peer_addr = %node, err = %e, "memberlist.transport: failed to cache stream");
         }
-        Ok(pp)
+        Ok(todo!())
       }
-      mt => Err(Error::unexpected_message("PushPull", mt.kind())),
+      msg => Err(Error::unexpected_message("PushPull", msg.ty().kind())),
     }
   }
 
   pub(crate) async fn transport_send_packet(
     &self,
-    addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    addr: &T::ResolvedAddress,
     packet: Bytes,
   ) -> Result<(), Error<T, D>> {
     self
@@ -192,7 +180,7 @@ where
 
   pub(crate) async fn transport_send_packets(
     &self,
-    addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    addr: &T::ResolvedAddress,
     packet: Bytes,
   ) -> Result<(), Error<T, D>> {
     self

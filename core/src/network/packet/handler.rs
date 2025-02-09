@@ -30,7 +30,7 @@ where
               Message::Suspect(m) => this.handle_suspect(msg.from, m).await,
               Message::Alive(m) => this.handle_alive(msg.from, m).await,
               Message::Dead(m) => this.handle_dead(msg.from, m).await,
-              Message::UserData(m) => this.handle_user(msg.from, m).await,
+              Message::UserData(m) => this.handle_user(msg.from, m.as_ref()).await,
               m => {
                 tracing::error!("memberlist: message type ({}) not supported {} (packet handler)", m.kind(), msg.from);
               }
@@ -91,11 +91,11 @@ where
   async fn handle_user(
     &self,
     from: <T::Resolver as AddressResolver>::ResolvedAddress,
-    data: Bytes,
+    data: &[u8],
   ) {
     if let Some(d) = self.delegate.as_ref() {
-      tracing::trace!(remote_addr = %from, data=?data.as_ref(), "memberlist.packet: handle user data");
-      d.notify_message(data).await
+      tracing::trace!(remote_addr = %from, data=?data, "memberlist.packet: handle user data");
+      d.notify_message(data.into()).await
     }
   }
 }

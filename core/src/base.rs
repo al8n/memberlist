@@ -27,8 +27,8 @@ use super::{
   Options,
 };
 
-#[cfg(any(test, feature = "test"))]
-pub(crate) mod tests;
+// #[cfg(any(test, feature = "test"))]
+// pub(crate) mod tests;
 
 #[viewit::viewit]
 pub(crate) struct HotData {

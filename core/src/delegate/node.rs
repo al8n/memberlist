@@ -1,4 +1,4 @@
-use std::future::Future;
+use std::{borrow::Cow, future::Future};
 
 use crate::types::{Meta, TinyVec};
 use bytes::Bytes;
@@ -15,7 +15,7 @@ pub trait NodeDelegate: Send + Sync + 'static {
   /// Care should be taken that this method does not block, since doing
   /// so would block the entire UDP packet receive loop. Additionally, the byte
   /// slice may be modified after the call returns, so it should be copied if needed
-  fn notify_message(&self, msg: Bytes) -> impl Future<Output = ()> + Send;
+  fn notify_message(&self, msg: Cow<'_, [u8]>) -> impl Future<Output = ()> + Send;
 
   /// Called when user data messages can be broadcast.
   /// It can return a list of buffers to send. Each buffer should assume an

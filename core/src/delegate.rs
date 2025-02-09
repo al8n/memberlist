@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use bytes::Bytes;
 use nodecraft::{CheapClone, Id};
@@ -219,7 +219,7 @@ where
     Meta::empty()
   }
 
-  async fn notify_message(&self, _msg: Bytes) {}
+  async fn notify_message(&self, _msg: Cow<'_, [u8]>) {}
 
   async fn broadcast_messages<F>(
     &self,

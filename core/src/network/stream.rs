@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use agnostic_lite::AsyncSpawner;
-use bytes::Buf;
 use nodecraft::CheapClone;
 use smol_str::SmolStr;
 
-use crate::delegate::DelegateError;
+use crate::{delegate::DelegateError, types::MessageRef};
 
 use super::*;
 
@@ -253,7 +252,7 @@ where
       <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
     ));
 
-    let mut msg = match self.read_message(&addr, &mut conn).await {
+    let payload = match self.read_message(&addr, &mut conn).await {
       Ok((_read, msg)) => {
         #[cfg(feature = "metrics")]
         {
@@ -278,31 +277,28 @@ where
       }
     };
 
-    if msg.is_empty() {
-      tracing::warn!(local=%self.inner.id, remote = %addr, "memberlist.stream: received empty message");
-      return;
-    }
-
-    let mt = match MessageType::try_from(msg[0]) {
-      Ok(mt) => mt,
+    let msg = match <MessageRef<'_, _, _> as DataRef<Message<T::Id, T::ResolvedAddress>>>::decode(
+      &payload,
+    ) {
+      Ok((_, msg)) => msg,
       Err(e) => {
-        tracing::error!(local=%self.inner.id, remote = %addr, "memberlist.stream: receive unknown message type value {e}");
+        tracing::error!(local=%self.inner.id, remote = %addr, err=%e, "memberlist.stream: failed to decode message");
         return;
       }
     };
 
-    msg.advance(1);
-    match mt {
-      MessageType::Ping => {
-        let ping = match Ping::<T::Id, T::ResolvedAddress>::decode(&msg) {
-          Ok(p) => p.1,
+    match msg {
+      MessageRef::Ping(ping) => {
+        let tid = match T::Id::from_ref(*ping.target().id()) {
+          Ok(tid) => tid,
           Err(e) => {
-            tracing::error!(local=%self.inner.id, remote = %addr, err=%e, "memberlist.stream: failed to decode ping message");
+            tracing::error!(local=%self.inner.id, remote = %addr, err=%e, "memberlist.stream: failed to decode target id");
             return;
           }
         };
-        if ping.target().id().ne(self.local_id()) {
-          tracing::error!(local=%self.inner.id, remote = %addr, "memberlist.stream: got ping for unexpected node {}", ping.target());
+
+        if tid.ne(self.local_id()) {
+          tracing::error!(local=%self.inner.id, remote = %addr, "memberlist.stream: got ping for unexpected node {:?}", ping.target());
           return;
         }
 
@@ -314,14 +310,7 @@ where
           tracing::warn!(err=%e, remote_node = %addr, "memberlist.stream: failed to cache stream");
         }
       }
-      MessageType::PushPull => {
-        let pp = match PushPull::<T::Id, T::ResolvedAddress>::decode(&msg) {
-          Ok(pp) => pp.1,
-          Err(e) => {
-            tracing::error!(local=%self.inner.id, remote = %addr, err=%e, "memberlist.stream: failed to decode push pull message");
-            return;
-          }
-        };
+      MessageRef::PushPull(pp) => {
         // Increment counter of pending push/pulls
         let num_concurrent = self.inner.hot.push_pull_req.fetch_add(1, Ordering::SeqCst);
         scopeguard::defer! {
@@ -339,7 +328,7 @@ where
           return;
         }
 
-        if let Err(e) = self.merge_remote_state(pp).await {
+        if let Err(e) = self.merge_remote_state(todo!()).await {
           tracing::error!(err=%e, remote_node = %addr, "memberlist.stream: failed to push/pull merge");
         }
 
@@ -347,14 +336,14 @@ where
           tracing::warn!(err=%e, remote_node = %addr, "memberlist.stream: failed to cache stream");
         }
       }
-      MessageType::UserData => {
+      MessageRef::UserData(data) => {
         if let Some(d) = &self.delegate {
-          tracing::trace!(remote_node = %addr, data=?msg.as_ref(), "memberlist.stream: notify user message");
-          d.notify_message(msg).await
+          tracing::trace!(remote_node = %addr, data=?data, "memberlist.stream: notify user message");
+          d.notify_message(data.into()).await
         }
       }
-      mt => {
-        tracing::error!(remote_node = %addr, type=%mt, "memberlist.stream: received invalid msg");
+      msg => {
+        tracing::error!(remote_node = %addr, type=%msg.ty(), "memberlist.stream: received invalid msg");
       }
     }
   }
