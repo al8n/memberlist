@@ -186,33 +186,6 @@ enum_wrapper!(
   }
 );
 
-/// The reference type of the [`Message`] enum.
-#[derive(Debug, Copy, Clone)]
-pub enum MessageRef<'a, I, A> {
-  /// Compound message
-  Compound(CompoundMessagesDecoder<'a>),
-  /// Ping message
-  Ping(Ping<I, A>),
-  /// Indirect ping message
-  IndirectPing(IndirectPing<I, A>),
-  /// Ack response message
-  Ack(AckRef<'a>),
-  /// Suspect message
-  Suspect(Suspect<I>),
-  /// Alive message
-  Alive(AliveRef<'a, I, A>),
-  /// Dead message
-  Dead(Dead<I>),
-  /// PushPull message
-  PushPull(PushPullRef<'a, I, A>),
-  /// User mesg, not handled by us
-  UserData(&'a [u8]),
-  /// Nack response message
-  Nack(Nack),
-  /// Error response message
-  ErrorResponse(ErrorResponseRef<'a>),
-}
-
 impl<I, A> Data for Message<I, A>
 where
   I: Data,
@@ -429,6 +402,52 @@ impl<I, A> Message<I, A> {
   /// [`Wire`]: https://docs.rs/memberlist/latest/memberlist/transport/trait.Wire.html
   /// [`Transport`]: https://docs.rs/memberlist/latest/memberlist/transport/trait.Transport.html
   pub const RESERVED_TAG_RANGE: std::ops::RangeInclusive<u8> = (0..=128);
+}
+
+/// The reference type of the [`Message`] enum.
+#[derive(Debug, Copy, Clone)]
+pub enum MessageRef<'a, I, A> {
+  /// Compound message
+  Compound(CompoundMessagesDecoder<'a>),
+  /// Ping message
+  Ping(Ping<I, A>),
+  /// Indirect ping message
+  IndirectPing(IndirectPing<I, A>),
+  /// Ack response message
+  Ack(AckRef<'a>),
+  /// Suspect message
+  Suspect(Suspect<I>),
+  /// Alive message
+  Alive(AliveRef<'a, I, A>),
+  /// Dead message
+  Dead(Dead<I>),
+  /// PushPull message
+  PushPull(PushPullRef<'a, I, A>),
+  /// User mesg, not handled by us
+  UserData(&'a [u8]),
+  /// Nack response message
+  Nack(Nack),
+  /// Error response message
+  ErrorResponse(ErrorResponseRef<'a>),
+}
+
+impl<I, A> MessageRef<'_, I, A> {
+  /// Returns the type of the message.
+  pub const fn ty(&self) -> MessageType {
+    match self {
+      Self::Compound(_) => MessageType::Compound,
+      Self::Ping(_) => MessageType::Ping,
+      Self::IndirectPing(_) => MessageType::IndirectPing,
+      Self::Ack(_) => MessageType::Ack,
+      Self::Suspect(_) => MessageType::Suspect,
+      Self::Alive(_) => MessageType::Alive,
+      Self::Dead(_) => MessageType::Dead,
+      Self::PushPull(_) => MessageType::PushPull,
+      Self::UserData(_) => MessageType::UserData,
+      Self::Nack(_) => MessageType::Nack,
+      Self::ErrorResponse(_) => MessageType::ErrorResponse,
+    }
+  }
 }
 
 /// A message decoder which can yield messages from a buffer.

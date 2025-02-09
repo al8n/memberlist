@@ -181,11 +181,7 @@ pub struct PushPullRef<'a, I, A> {
   ))]
   states: PushNodeStatesDecoder<'a>,
   /// The user data of the push pull message.
-  #[viewit(getter(
-    const,
-    style = "ref",
-    attrs(doc = "Returns the user data of the push pull message")
-  ))]
+  #[viewit(getter(const, attrs(doc = "Returns the user data of the push pull message")))]
   user_data: &'a [u8],
 
   #[viewit(getter(skip))]

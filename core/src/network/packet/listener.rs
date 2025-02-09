@@ -141,18 +141,10 @@ where
       }
       Ok(mt) => {
         match mt {
-          MessageType::Ping => {
-            self.handle_ping(ping, from).await
-          },
-          MessageType::IndirectPing => {
-            self.handle_indirect_ping(ind, from).await
-          },
-          MessageType::Ack => {
-            self.handle_ack(resp, timestamp).await
-          },
-          MessageType::Nack => {
-            self.handle_nack(resp).await
-          },
+          MessageType::Ping => self.handle_ping(ping, from).await,
+          MessageType::IndirectPing => self.handle_indirect_ping(ind, from).await,
+          MessageType::Ack => self.handle_ack(resp, timestamp).await,
+          MessageType::Nack => self.handle_nack(resp).await,
           MessageType::Alive => {
             // Determine the message queue, prioritize alive
             {
@@ -177,13 +169,13 @@ where
           }
           MessageType::Suspect => {
             queue!(self.msg.from)
-          },
+          }
           MessageType::Dead => {
             queue!(self.msg.from)
-          },
+          }
           MessageType::UserData => {
             queue!(self.msg.from)
-          },
+          }
           mt => {
             tracing::error!(addr = %from, err = "unexpected message type", message_type=mt.kind(), "memberlist.packet");
           }

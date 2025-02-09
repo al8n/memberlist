@@ -332,8 +332,8 @@ impl<I, A> CustomMergeDelegate<I, A> {
 
 impl<I, A> MergeDelegate for CustomMergeDelegate<I, A>
 where
-  I: Id + Send + Sync + 'static,
-  A: CheapClone + Send + Sync + 'static,
+  I: Id + Data + Send + Sync + 'static,
+  A: Data + CheapClone + Send + Sync + 'static,
 {
   type Id = I;
   type Address = A;

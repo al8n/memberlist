@@ -235,6 +235,61 @@ impl<I: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for NodeSt
   }
 }
 
+/// The reference type for [`NodeState`].
+#[viewit::viewit(getters(vis_all = "pub"), setters(skip))]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+pub struct NodeStateRef<'a, I, A> {
+  /// The id of the node.
+  #[viewit(getter(const, style = "ref", attrs(doc = "Returns the id of the node")))]
+  id: I,
+  /// The address of the node.
+  #[viewit(getter(
+    const,
+    rename = "address",
+    style = "ref",
+    attrs(doc = "Returns the address of the node")
+  ))]
+  addr: A,
+  /// Metadata from the delegate for this node.
+  #[viewit(getter(const, style = "ref", attrs(doc = "Returns the meta of the node")))]
+  meta: &'a [u8],
+  /// State of the node.
+  #[viewit(getter(const, attrs(doc = "Returns the state of the node")))]
+  state: State,
+  /// The protocol version of the node is speaking.
+  #[viewit(getter(
+    const,
+    style = "move",
+    attrs(doc = "Returns the protocol version of the node is speaking")
+  ))]
+  protocol_version: ProtocolVersion,
+  /// The delegate version of the node is speaking.
+  #[viewit(getter(
+    const,
+    style = "move",
+    attrs(doc = "Returns the delegate version of the node is speaking")
+  ))]
+  delegate_version: DelegateVersion,
+}
+
+impl<'a, I, A> From<super::PushNodeStateRef<'a, I, A>> for NodeStateRef<'a, I, A>
+where
+  I: Copy,
+  A: Copy,
+{
+  fn from(value: super::PushNodeStateRef<'a, I, A>) -> Self {
+    Self {
+      id: value.id,
+      addr: value.addr,
+      meta: value.meta,
+      state: value.state,
+      protocol_version: value.protocol_version,
+      delegate_version: value.delegate_version,
+    }
+  }
+}
+
 #[cfg(feature = "arbitrary")]
 const _: () = {
   use arbitrary::{Arbitrary, Unstructured};
