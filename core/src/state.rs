@@ -13,10 +13,10 @@ use super::{
   delegate::Delegate,
   error::Error,
   suspicion::Suspicion,
-  transport::Transport,
+  transport::{TimeoutableStream, Transport},
   types::{
-    Alive, CompoundMessagesEncoder, Data, Dead, IndirectPing, NodeState, Ping, PushNodeState,
-    SmallVec, State, Suspect,
+    Alive, CompoundMessagesEncoder, Data, DataRef, Dead, ErrorResponse, IndirectPing, Message,
+    MessageRef, NodeState, Ping, PushNodeState, SmallVec, State, Suspect,
   },
   Member, Members,
 };
@@ -152,9 +152,55 @@ where
     scopeguard::defer!(
       metrics::histogram!("memberlist.push_pull_node", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
     );
+
+    // Attempt to connect
+    let mut conn = self
+      .inner
+      .transport
+      .dial_with_deadline(
+        id.address(),
+        <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
+      )
+      .await
+      .map_err(Error::transport)?;
+    tracing::debug!(local_addr = %self.inner.id, peer_addr = %id, "memberlist: initiating push/pull sync");
+
+    #[cfg(feature = "metrics")]
+    {
+      metrics::counter!(
+        "memberlist.promised.connect",
+        self.inner.opts.metric_labels.iter()
+      )
+      .increment(1);
+    }
+
+    // Send our state
+    self.send_local_state(&mut conn, join).await?;
+
+    conn.set_deadline(Some(
+      <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
+    ));
+
     // Read remote state
-    let data = self.send_and_receive_state(&id, join).await?;
-    self.merge_remote_state(data).await
+    let (_, payload) = self.read_message(id.address(), &mut conn).await?;
+
+    let (_, msg) = <MessageRef::<'_, <T::Id as Data>::Ref<'_>, <T::ResolvedAddress as Data>::Ref<'_>> as DataRef<Message<T::Id, T::ResolvedAddress>>>::decode(&payload)?;
+    let pp = match msg {
+      MessageRef::ErrorResponse(resp) => {
+        let resp = <ErrorResponse as Data>::from_ref(resp)?;
+        tracing::error!(local_addr = %self.inner.id, peer_addr = %id, err = %resp, "memberlist: push/pull sync failed");
+        return Err(Error::remote(resp));
+      }
+      MessageRef::PushPull(pp) => {
+        if let Err(e) = self.inner.transport.cache_stream(id.address(), conn).await {
+          tracing::debug!(local_addr = %self.inner.id, peer_addr = %id, err = %e, "memberlist.transport: failed to cache stream");
+        }
+        pp
+      }
+      msg => return Err(Error::unexpected_message("PushPull", msg.ty().kind())),
+    };
+
+    self.merge_remote_state(pp).await
   }
 
   pub(crate) async fn dead_node(

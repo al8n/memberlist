@@ -95,66 +95,6 @@ where
     }
   }
 
-  /// Used to initiate a push/pull over a stream with a
-  /// remote host.
-  #[allow(clippy::blocks_in_conditions)]
-  pub(crate) async fn send_and_receive_state(
-    &self,
-    node: &Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-    join: bool,
-  ) -> Result<PushPull<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>, Error<T, D>> {
-    // Attempt to connect
-    let mut conn = self
-      .inner
-      .transport
-      .dial_with_deadline(
-        node.address(),
-        <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
-      )
-      .await
-      .map_err(Error::transport)?;
-    tracing::debug!(local_addr = %self.inner.id, peer_addr = %node, "memberlist: initiating push/pull sync");
-
-    #[cfg(feature = "metrics")]
-    {
-      metrics::counter!(
-        "memberlist.promised.connect",
-        self.inner.opts.metric_labels.iter()
-      )
-      .increment(1);
-    }
-
-    // Send our state
-    self.send_local_state(&mut conn, join).await?;
-
-    conn.set_deadline(Some(
-      <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
-    ));
-
-    let (_, payload) = self.read_message(node.address(), &mut conn).await?;
-
-    let (_, msg) = <MessageRef::<'_, <T::Id as Data>::Ref<'_>, <T::ResolvedAddress as Data>::Ref<'_>> as DataRef<Message<T::Id, T::ResolvedAddress>>>::decode(&payload)?;
-    match msg {
-      MessageRef::ErrorResponse(resp) => {
-        let resp = <ErrorResponse as Data>::from_ref(resp)?;
-        tracing::error!(local_addr = %self.inner.id, peer_addr = %node, err = %resp, "memberlist: push/pull sync failed");
-        return Err(Error::remote(resp));
-      }
-      MessageRef::PushPull(pp) => {
-        if let Err(e) = self
-          .inner
-          .transport
-          .cache_stream(node.address(), conn)
-          .await
-        {
-          tracing::debug!(local_addr = %self.inner.id, peer_addr = %node, err = %e, "memberlist.transport: failed to cache stream");
-        }
-        Ok(todo!())
-      }
-      msg => Err(Error::unexpected_message("PushPull", msg.ty().kind())),
-    }
-  }
-
   pub(crate) async fn transport_send_packet(
     &self,
     addr: &T::ResolvedAddress,

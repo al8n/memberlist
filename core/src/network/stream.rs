@@ -11,7 +11,7 @@ use super::*;
 // --------------------------------------------Crate Level Methods-------------------------------------------------
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   /// A long running thread that pulls incoming streams from the
@@ -56,14 +56,16 @@ where
   /// Used to merge the remote state with our local state
   pub(crate) async fn merge_remote_state(
     &self,
-    node_state: PushPull<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    pp: <PushPull<T::Id, T::ResolvedAddress> as Data>::Ref<'_>,
   ) -> Result<(), Error<T, D>> {
-    self.verify_protocol(node_state.states()).await?;
+    let pp = <PushPull<T::Id, T::ResolvedAddress> as Data>::from_ref(pp)?;
+
+    self.verify_protocol(pp.states()).await?;
 
     // Invoke the merge delegate if any
-    if node_state.join() {
+    if pp.join() {
       if let Some(merge) = self.delegate.as_ref() {
-        let peers = node_state
+        let peers = pp
           .states()
           .iter()
           .map(|n| {
@@ -83,7 +85,7 @@ where
     }
 
     // Merge the membership state
-    let (join, user_data, states) = node_state.into_components();
+    let (join, user_data, states) = pp.into_components();
     self.merge_state(&states).await;
 
     // Invoke the delegate for user state
@@ -97,7 +99,7 @@ where
 
   pub(crate) async fn send_user_msg(
     &self,
-    addr: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    addr: &T::ResolvedAddress,
     msg: Bytes,
   ) -> Result<(), Error<T, D>> {
     let mut conn = self
@@ -122,10 +124,10 @@ where
 // ----------------------------------------Module Level Methods------------------------------------
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
-  pub(super) async fn send_local_state(
+  pub(crate) async fn send_local_state(
     &self,
     conn: &mut T::Stream,
     join: bool,
@@ -228,15 +230,11 @@ where
 // -----------------------------------------Private Level Methods-----------------------------------
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   /// Handles a single incoming stream connection from the transport.
-  async fn handle_conn(
-    self,
-    addr: <T::Resolver as AddressResolver>::ResolvedAddress,
-    mut conn: T::Stream,
-  ) {
+  async fn handle_conn(self, addr: T::ResolvedAddress, mut conn: T::Stream) {
     tracing::debug!(local = %self.inner.id, peer = %addr, "memberlist.stream: handle stream connection");
 
     #[cfg(feature = "metrics")]
@@ -328,7 +326,7 @@ where
           return;
         }
 
-        if let Err(e) = self.merge_remote_state(todo!()).await {
+        if let Err(e) = self.merge_remote_state(pp).await {
           tracing::error!(err=%e, remote_node = %addr, "memberlist.stream: failed to push/pull merge");
         }
 
