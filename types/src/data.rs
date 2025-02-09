@@ -12,16 +12,56 @@ mod primitives;
 #[cfg(any(feature = "std", feature = "alloc"))]
 mod string;
 
+/// The reference type of the data.
+pub trait DataRef<'a, D>
+where
+  D: Data + ?Sized,
+  Self: Copy + core::fmt::Debug + Send + Sync,
+{
+  /// Decodes the reference type from a buffer.
+  ///
+  /// The entire buffer will be consumed.
+  fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized;
+
+  /// Decodes a length-delimited reference instance of the message from the buffer.
+  fn decode_length_delimited(src: &'a [u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized,
+  {
+    if D::WIRE_TYPE != WireType::LengthDelimited {
+      return Self::decode(src);
+    }
+
+    let (mut offset, len) =
+      decode_u32_varint(src).map_err(|_| DecodeError::new("invalid varint"))?;
+    let len = len as usize;
+    if len + offset > src.len() {
+      return Err(DecodeError::new("buffer underflow"));
+    }
+
+    let src = &src[offset..offset + len];
+    let (bytes_read, value) = Self::decode(src)?;
+
+    #[cfg(debug_assertions)]
+    super::debug_assert_read_eq(bytes_read, len);
+
+    offset += bytes_read;
+    Ok((offset, value))
+  }
+}
+
 /// The memberlist data can be transmitted through the network.
 pub trait Data: core::fmt::Debug + Send + Sync {
   /// The wire type of the data.
   const WIRE_TYPE: WireType = WireType::LengthDelimited;
 
   /// The reference type of the data.
-  type Ref<'a>: Copy;
+  type Ref<'a>: DataRef<'a, Self>;
 
   /// Converts the reference type to the owned type.
-  fn from_ref(val: Self::Ref<'_>) -> Self
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
   where
     Self: Sized;
 
@@ -100,40 +140,8 @@ pub trait Data: core::fmt::Debug + Send + Sync {
   where
     Self: Sized,
   {
-    Self::decode_ref(src).map(|(bytes_read, value)| (bytes_read, Self::from_ref(value)))
-  }
-
-  /// Decodes a reference instance of the message from a buffer.
-  ///
-  /// The entire buffer will be consumed.
-  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
-  where
-    Self: Sized;
-
-  /// Decodes a length-delimited reference instance of the message from the buffer.
-  fn decode_length_delimited_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
-  where
-    Self: Sized,
-  {
-    if Self::WIRE_TYPE != WireType::LengthDelimited {
-      return Self::decode_ref(src);
-    }
-
-    let (mut offset, len) =
-      decode_u32_varint(src).map_err(|_| DecodeError::new("invalid varint"))?;
-    let len = len as usize;
-    if len + offset > src.len() {
-      return Err(DecodeError::new("buffer underflow"));
-    }
-
-    let src = &src[offset..offset + len];
-    let (bytes_read, value) = Self::decode_ref(src)?;
-
-    #[cfg(debug_assertions)]
-    super::debug_assert_read_eq(bytes_read, len);
-
-    offset += bytes_read;
-    Ok((offset, value))
+    <Self::Ref<'_> as DataRef<Self>>::decode(src)
+      .and_then(|(bytes_read, value)| Self::from_ref(value).map(|val| (bytes_read, val)))
   }
 
   /// Decodes a length-delimited instance of the message from the buffer.
@@ -141,8 +149,8 @@ pub trait Data: core::fmt::Debug + Send + Sync {
   where
     Self: Sized,
   {
-    Self::decode_length_delimited_ref(buf)
-      .map(|(bytes_read, value)| (bytes_read, Self::from_ref(value)))
+    <Self::Ref<'_> as DataRef<Self>>::decode_length_delimited(buf)
+      .and_then(|(bytes_read, value)| Self::from_ref(value).map(|val| (bytes_read, val)))
   }
 }
 

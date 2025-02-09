@@ -1,6 +1,8 @@
 use bytes::Bytes;
 
-use super::{debug_assert_write_eq, merge, skip, split, Data, DecodeError, EncodeError, WireType};
+use super::{
+  debug_assert_write_eq, merge, skip, split, Data, DataRef, DecodeError, EncodeError, WireType,
+};
 
 /// Ack response is sent for a ping
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
@@ -41,7 +43,7 @@ impl Ack {
 
       match b {
         Self::SEQUENCE_NUMBER_BYTE => {
-          let (bytes_read, value) = u32::decode(&src[offset..])?;
+          let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
           offset += bytes_read;
           sequence_number = Some(value);
         }
@@ -93,14 +95,14 @@ impl Data for Ack {
   type Ref<'a> = AckRef<'a>;
 
   #[inline]
-  fn from_ref(val: Self::Ref<'_>) -> Self
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
   where
     Self: Sized,
   {
-    Self {
+    Ok(Self {
       sequence_number: val.sequence_number,
       payload: Bytes::copy_from_slice(val.payload),
-    }
+    })
   }
 
   fn encoded_len(&self) -> usize {
@@ -143,48 +145,6 @@ impl Data for Ack {
     debug_assert_write_eq(offset, self.encoded_len());
     Ok(offset)
   }
-
-  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
-  where
-    Self: Sized,
-  {
-    let mut offset = 0;
-    let mut sequence_number = None;
-    let mut payload = None;
-
-    while offset < src.len() {
-      // Parse the tag and wire type
-      let b = src[offset];
-      offset += 1;
-
-      match b {
-        Self::SEQUENCE_NUMBER_BYTE => {
-          let (bytes_read, value) = u32::decode(&src[offset..])?;
-          offset += bytes_read;
-          sequence_number = Some(value);
-        }
-        Self::PAYLOAD_BYTE => {
-          let (readed, data) = Bytes::decode_length_delimited_ref(&src[offset..])?;
-          offset += readed;
-          payload = Some(data);
-        }
-        _ => {
-          let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
-          offset += skip(wire_type, &src[offset..])?;
-        }
-      }
-    }
-
-    Ok((
-      offset,
-      AckRef {
-        sequence_number: sequence_number.unwrap_or(0),
-        payload: payload.unwrap_or_default(),
-      },
-    ))
-  }
 }
 
 /// The reference to an [`Ack`] message
@@ -214,6 +174,50 @@ impl<'a> AckRef<'a> {
   #[inline]
   pub const fn payload(&self) -> &'a [u8] {
     self.payload
+  }
+}
+
+impl<'a> DataRef<'a, Ack> for AckRef<'a> {
+  fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized,
+  {
+    let mut offset = 0;
+    let mut sequence_number = None;
+    let mut payload = None;
+
+    while offset < src.len() {
+      // Parse the tag and wire type
+      let b = src[offset];
+      offset += 1;
+
+      match b {
+        Ack::SEQUENCE_NUMBER_BYTE => {
+          let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
+          offset += bytes_read;
+          sequence_number = Some(value);
+        }
+        Ack::PAYLOAD_BYTE => {
+          let (readed, data) = <&[u8] as DataRef<Bytes>>::decode_length_delimited(&src[offset..])?;
+          offset += readed;
+          payload = Some(data);
+        }
+        _ => {
+          let (wire_type, _) = split(b);
+          let wire_type = WireType::try_from(wire_type)
+            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          offset += skip(wire_type, &src[offset..])?;
+        }
+      }
+    }
+
+    Ok((
+      offset,
+      AckRef {
+        sequence_number: sequence_number.unwrap_or(0),
+        payload: payload.unwrap_or_default(),
+      },
+    ))
   }
 }
 
@@ -256,34 +260,8 @@ impl Nack {
   }
 }
 
-impl Data for Nack {
-  type Ref<'a> = Self;
-
-  fn from_ref(val: Self::Ref<'_>) -> Self
-  where
-    Self: Sized,
-  {
-    val
-  }
-
-  fn encoded_len(&self) -> usize {
-    1 + self.sequence_number.encoded_len()
-  }
-
-  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    let mut offset = 0;
-    if buf.is_empty() {
-      return Err(EncodeError::insufficient_buffer(self.encoded_len(), 0));
-    }
-    buf[offset] = Self::SEQUENCE_NUMBER_BYTE;
-    offset += 1;
-    offset += self.sequence_number.encode(&mut buf[offset..])?;
-    #[cfg(debug_assertions)]
-    debug_assert_write_eq(offset, self.encoded_len());
-    Ok(offset)
-  }
-
-  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
+impl<'a> DataRef<'a, Self> for Nack {
+  fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError>
   where
     Self: Sized,
   {
@@ -296,7 +274,7 @@ impl Data for Nack {
 
       match b {
         Self::SEQUENCE_NUMBER_BYTE => {
-          let (bytes_read, value) = u32::decode(&src[offset..])?;
+          let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
           offset += bytes_read;
           sequence_number = Some(value);
         }
@@ -315,6 +293,34 @@ impl Data for Nack {
         sequence_number: sequence_number.unwrap_or(0),
       },
     ))
+  }
+}
+
+impl Data for Nack {
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
+  where
+    Self: Sized,
+  {
+    Ok(val)
+  }
+
+  fn encoded_len(&self) -> usize {
+    1 + self.sequence_number.encoded_len()
+  }
+
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+    let mut offset = 0;
+    if buf.is_empty() {
+      return Err(EncodeError::insufficient_buffer(self.encoded_len(), 0));
+    }
+    buf[offset] = Self::SEQUENCE_NUMBER_BYTE;
+    offset += 1;
+    offset += self.sequence_number.encode(&mut buf[offset..])?;
+    #[cfg(debug_assertions)]
+    debug_assert_write_eq(offset, self.encoded_len());
+    Ok(offset)
   }
 }
 

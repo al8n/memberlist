@@ -1,8 +1,10 @@
+use core::marker::PhantomData;
+
 use bytes::Bytes;
 use nodecraft::CheapClone;
 use triomphe::Arc;
 
-use super::{merge, skip, split, Data, DecodeError, EncodeError, WireType};
+use super::{merge, skip, split, Data, DataRef, DecodeError, EncodeError, WireType};
 
 mod state;
 pub use state::*;
@@ -95,17 +97,22 @@ where
   I: Data,
   A: Data,
 {
-  type Ref<'a> = PushPullRef<'a, I, A>;
+  type Ref<'a> = PushPullRef<'a, I::Ref<'a>, A::Ref<'a>>;
 
-  fn from_ref(val: Self::Ref<'_>) -> Self
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
   where
     Self: Sized,
   {
-    Self {
-      join: val.join,
-      states: val.states.map(PushNodeState::from_ref).collect(),
-      user_data: Bytes::copy_from_slice(val.user_data),
-    }
+    val
+      .states
+      .iter::<I, A>()
+      .map(|res| res.and_then(PushNodeState::from_ref))
+      .collect::<Result<Arc<[_]>, DecodeError>>()
+      .map(|states| Self {
+        join: val.join,
+        states,
+        user_data: Bytes::copy_from_slice(val.user_data),
+      })
   }
 
   fn encoded_len(&self) -> usize {
@@ -154,11 +161,51 @@ where
     super::debug_assert_write_eq(offset, self.encoded_len());
     Ok(offset)
   }
+}
 
-  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
-  where
-    Self: Sized,
-  {
+/// The reference type of Push pull message.
+#[viewit::viewit(getters(vis_all = "pub"), setters(skip))]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct PushPullRef<'a, I, A> {
+  /// Whether the push pull message is a join message.
+  #[viewit(getter(
+    const,
+    attrs(doc = "Returns whether the push pull message is a join message")
+  ))]
+  join: bool,
+  /// The states of the push pull message.
+  #[viewit(getter(
+    const,
+    style = "ref",
+    attrs(doc = "Returns the states of the push pull message")
+  ))]
+  states: PushNodeStatesDecoder<'a>,
+  /// The user data of the push pull message.
+  #[viewit(getter(
+    const,
+    style = "ref",
+    attrs(doc = "Returns the user data of the push pull message")
+  ))]
+  user_data: &'a [u8],
+
+  #[viewit(getter(skip))]
+  _m: PhantomData<(I, A)>,
+}
+
+impl<I, A> Clone for PushPullRef<'_, I, A> {
+  fn clone(&self) -> Self {
+    *self
+  }
+}
+
+impl<I, A> Copy for PushPullRef<'_, I, A> {}
+
+impl<'a, I, A> DataRef<'a, PushPull<I, A>> for PushPullRef<'a, I::Ref<'a>, A::Ref<'a>>
+where
+  I: Data,
+  A: Data,
+{
+  fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError> {
     let mut offset = 0;
     let mut join = None;
     let mut node_state_offsets = None;
@@ -180,7 +227,7 @@ where
           join = Some(val);
         }
         STATES_BYTE => {
-          let (readed, _) = PushNodeState::<I, A>::decode_length_delimited_ref(&src[offset..])?;
+          let readed = super::skip(WireType::LengthDelimited, &src[offset..])?;
           if let Some((ref mut fnso, ref mut lnso)) = node_state_offsets {
             if *fnso > offset {
               *fnso = offset - 1;
@@ -196,7 +243,7 @@ where
           offset += readed;
         }
         USER_DATA_BYTE => {
-          let (readed, value) = Bytes::decode_length_delimited_ref(&src[offset..])?;
+          let (readed, value) = <&[u8] as DataRef<Bytes>>::decode_length_delimited(&src[offset..])?;
           offset += readed;
           user_data = Some(value);
         }
@@ -213,60 +260,15 @@ where
     let user_data = user_data.unwrap_or_default();
     Ok((
       offset,
-      Self::Ref {
+      Self {
         join,
-        states: PushNodeStatesRef::new(src, num_states, node_state_offsets),
+        states: PushNodeStatesDecoder::new(src, num_states, node_state_offsets),
         user_data,
+        _m: PhantomData,
       },
     ))
   }
 }
-
-/// The reference type of Push pull message.
-#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub struct PushPullRef<'a, I, A> {
-  /// Whether the push pull message is a join message.
-  #[viewit(
-    getter(
-      const,
-      attrs(doc = "Returns whether the push pull message is a join message")
-    ),
-    setter(
-      const,
-      attrs(doc = "Sets whether the push pull message is a join message (Builder pattern)")
-    )
-  )]
-  join: bool,
-  /// The states of the push pull message.
-  #[viewit(
-    getter(
-      const,
-      style = "ref",
-      attrs(doc = "Returns the states of the push pull message")
-    ),
-    setter(attrs(doc = "Sets the states of the push pull message (Builder pattern)"))
-  )]
-  states: PushNodeStatesRef<'a, I, A>,
-  /// The user data of the push pull message.
-  #[viewit(
-    getter(
-      const,
-      style = "ref",
-      attrs(doc = "Returns the user data of the push pull message")
-    ),
-    setter(attrs(doc = "Sets the user data of the push pull message (Builder pattern)"))
-  )]
-  user_data: &'a [u8],
-}
-
-impl<I, A> Clone for PushPullRef<'_, I, A> {
-  fn clone(&self) -> Self {
-    *self
-  }
-}
-
-impl<I, A> Copy for PushPullRef<'_, I, A> {}
 
 #[cfg(feature = "arbitrary")]
 const _: () = {

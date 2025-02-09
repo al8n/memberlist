@@ -1,19 +1,29 @@
+use std::net::SocketAddr;
+
 use either::Either;
 use nodecraft::{Domain, DomainRef, HostAddr, HostAddrRef, Node, NodeId, NodeIdRef};
 
 use super::{
   super::{merge, skip, split, WireType},
-  Data, DecodeError, EncodeError,
+  Data, DataRef, DecodeError, EncodeError,
 };
+
+impl<'a> DataRef<'a, Domain> for DomainRef<'a> {
+  fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError> {
+    DomainRef::try_from(buf)
+      .map(|domain| (buf.len(), domain))
+      .map_err(|e| DecodeError::new(e.to_string()))
+  }
+}
 
 impl Data for Domain {
   type Ref<'a> = DomainRef<'a>;
 
-  fn from_ref(val: Self::Ref<'_>) -> Self
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
   where
     Self: Sized,
   {
-    val.to_owned()
+    Ok(val.to_owned())
   }
 
   fn encoded_len(&self) -> usize {
@@ -29,10 +39,12 @@ impl Data for Domain {
     buf[..len].copy_from_slice(val.as_bytes());
     Ok(len)
   }
+}
 
-  fn decode_ref(buf: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError> {
-    DomainRef::try_from(buf)
-      .map(|domain| (buf.len(), domain))
+impl<'a, const N: usize> DataRef<'a, NodeId<N>> for NodeIdRef<'a, N> {
+  fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError> {
+    NodeIdRef::try_from(buf)
+      .map(|node_id| (buf.len(), node_id))
       .map_err(|e| DecodeError::new(e.to_string()))
   }
 }
@@ -40,8 +52,8 @@ impl Data for Domain {
 impl<const N: usize> Data for NodeId<N> {
   type Ref<'a> = NodeIdRef<'a, N>;
 
-  fn from_ref(val: Self::Ref<'_>) -> Self {
-    Self::new(val).expect("reference must be a valid node id")
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError> {
+    Ok(Self::new(val).expect("reference must be a valid node id"))
   }
 
   fn encoded_len(&self) -> usize {
@@ -57,12 +69,6 @@ impl<const N: usize> Data for NodeId<N> {
     buf[..len].copy_from_slice(val);
     Ok(len)
   }
-
-  fn decode_ref(buf: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError> {
-    NodeIdRef::try_from(buf)
-      .map(|node_id| (buf.len(), node_id))
-      .map_err(|e| DecodeError::new(e.to_string()))
-  }
 }
 
 const _: () = {
@@ -71,17 +77,48 @@ const _: () = {
   const HOST_ADDR_DOMAIN_TAG: u8 = 2;
   const HOST_ADDR_DOMAIN_BYTE: u8 = merge(WireType::LengthDelimited, HOST_ADDR_DOMAIN_TAG);
 
+  impl<'a> DataRef<'a, HostAddr> for HostAddrRef<'a> {
+    fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError> {
+      if buf.is_empty() {
+        return Err(DecodeError::new("buffer underflow"));
+      }
+
+      let b = buf[0];
+      match b {
+        HOST_ADDR_SOCKET_BYTE => {
+          let (bytes_read, addr) =
+            <SocketAddr as DataRef<SocketAddr>>::decode_length_delimited(&buf[1..])?;
+          Ok((bytes_read + 1, Self::from(addr)))
+        }
+        HOST_ADDR_DOMAIN_BYTE => {
+          let (bytes_read, domain) =
+            <DomainRef<'_> as DataRef<Domain>>::decode_length_delimited(&buf[1..])?;
+          let required = 1 + bytes_read + 2;
+          if required > buf.len() {
+            return Err(DecodeError::new("buffer underflow"));
+          }
+          let port = u16::from_be_bytes(buf[1 + bytes_read..required].try_into().unwrap());
+          Ok((required, Self::from((domain, port))))
+        }
+        b => {
+          let (wire_type, tag) = split(b);
+          WireType::try_from(wire_type)
+            .map_err(|_| DecodeError::new(format!("invalid wire type value {}", wire_type)))?;
+
+          Err(DecodeError::new(format!("unknown tag: {tag}",)))
+        }
+      }
+    }
+  }
+
   impl Data for HostAddr {
     type Ref<'a> = HostAddrRef<'a>;
 
-    fn from_ref(val: Self::Ref<'_>) -> Self
+    fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
     where
       Self: Sized,
     {
-      match val.into_inner() {
-        Either::Left(addr) => Self::from(addr),
-        Either::Right((port, domain)) => Self::from((domain, port)),
-      }
+      Ok(val.to_owned())
     }
 
     fn encoded_len(&self) -> usize {
@@ -111,36 +148,6 @@ const _: () = {
         }
       }
     }
-
-    fn decode_ref(buf: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError> {
-      if buf.is_empty() {
-        return Err(DecodeError::new("buffer underflow"));
-      }
-
-      let b = buf[0];
-      match b {
-        HOST_ADDR_SOCKET_BYTE => {
-          let (bytes_read, addr) = core::net::SocketAddr::decode_length_delimited_ref(&buf[1..])?;
-          Ok((bytes_read + 1, Self::Ref::from(addr)))
-        }
-        HOST_ADDR_DOMAIN_BYTE => {
-          let (bytes_read, domain) = Domain::decode_length_delimited_ref(&buf[1..])?;
-          let required = 1 + bytes_read + 2;
-          if required > buf.len() {
-            return Err(DecodeError::new("buffer underflow"));
-          }
-          let port = u16::from_be_bytes(buf[1 + bytes_read..required].try_into().unwrap());
-          Ok((required, Self::Ref::from((domain, port))))
-        }
-        b => {
-          let (wire_type, tag) = split(b);
-          WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {}", wire_type)))?;
-
-          Err(DecodeError::new(format!("unknown tag: {tag}",)))
-        }
-      }
-    }
   }
 };
 
@@ -158,6 +165,49 @@ const _: () = {
     merge(A::WIRE_TYPE, NODE_ADDR_TAG)
   }
 
+  impl<'a, I, A> DataRef<'a, Node<I, A>> for Node<I::Ref<'a>, A::Ref<'a>>
+  where
+    I: Data,
+    A: Data,
+  {
+    fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError>
+    where
+      Self: Sized,
+    {
+      let mut offset = 0;
+      let mut id = None;
+      let mut address = None;
+
+      while offset < src.len() {
+        let b = src[offset];
+        offset += 1;
+
+        match b {
+          b if b == node_id_byte::<I>() => {
+            let (bytes_read, value) = I::Ref::decode_length_delimited(&src[offset..])?;
+            offset += bytes_read;
+            id = Some(value);
+          }
+          b if b == node_addr_byte::<A>() => {
+            let (bytes_read, value) = A::Ref::decode_length_delimited(&src[offset..])?;
+            offset += bytes_read;
+            address = Some(value);
+          }
+          _ => {
+            let (wire_type, _) = split(b);
+            let wire_type = WireType::try_from(wire_type)
+              .map_err(|_| DecodeError::new(format!("invalid wire type value {}", wire_type)))?;
+            offset += skip(wire_type, &src[offset..])?;
+          }
+        }
+      }
+
+      let id = id.ok_or_else(|| DecodeError::new("missing node id"))?;
+      let address = address.ok_or_else(|| DecodeError::new("missing node address"))?;
+      Ok((offset, Self::new(id, address)))
+    }
+  }
+
   impl<I, A> Data for Node<I, A>
   where
     I: Data,
@@ -165,9 +215,9 @@ const _: () = {
   {
     type Ref<'a> = Node<I::Ref<'a>, A::Ref<'a>>;
 
-    fn from_ref(val: Self::Ref<'_>) -> Self {
+    fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError> {
       let (id, address) = val.into_components();
-      Self::new(I::from_ref(id), A::from_ref(address))
+      I::from_ref(id).and_then(|id| A::from_ref(address).map(|address| Self::new(id, address)))
     }
 
     fn encoded_len(&self) -> usize {
@@ -209,43 +259,6 @@ const _: () = {
       #[cfg(debug_assertions)]
       super::super::debug_assert_write_eq(offset, self.encoded_len());
       Ok(offset)
-    }
-
-    fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
-    where
-      Self: Sized,
-    {
-      let mut offset = 0;
-      let mut id = None;
-      let mut address = None;
-
-      while offset < src.len() {
-        let b = src[offset];
-        offset += 1;
-
-        match b {
-          b if b == node_id_byte::<I>() => {
-            let (bytes_read, value) = I::decode_length_delimited_ref(&src[offset..])?;
-            offset += bytes_read;
-            id = Some(value);
-          }
-          b if b == node_addr_byte::<A>() => {
-            let (bytes_read, value) = A::decode_length_delimited_ref(&src[offset..])?;
-            offset += bytes_read;
-            address = Some(value);
-          }
-          _ => {
-            let (wire_type, _) = split(b);
-            let wire_type = WireType::try_from(wire_type)
-              .map_err(|_| DecodeError::new(format!("invalid wire type value {}", wire_type)))?;
-            offset += skip(wire_type, &src[offset..])?;
-          }
-        }
-      }
-
-      let id = id.ok_or_else(|| DecodeError::new("missing node id"))?;
-      let address = address.ok_or_else(|| DecodeError::new("missing node address"))?;
-      Ok((offset, Self::Ref::new(id, address)))
     }
   }
 };

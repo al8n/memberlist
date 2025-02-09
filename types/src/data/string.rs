@@ -1,13 +1,22 @@
-use super::Data;
+use super::{Data, DataRef};
 
 macro_rules! impl_str {
   ($($ty:ty => $from:ident),+$(,)?) => {
     $(
+      impl<'a> DataRef<'a, $ty> for &'a str {
+        fn decode(src: &'a [u8]) -> Result<(usize, Self), super::DecodeError> {
+          match core::str::from_utf8(src) {
+            Ok(value) => Ok((src.len(), value)),
+            Err(e) => Err(super::DecodeError::new(e.to_string())),
+          }
+        }
+      }
+
       impl Data for $ty {
         type Ref<'a> = &'a str;
 
-        fn from_ref(val: Self::Ref<'_>) -> Self {
-          Self::$from(val)
+        fn from_ref(val: Self::Ref<'_>) -> Result<Self, super::DecodeError> {
+          Ok(Self::$from(val))
         }
 
         #[inline]
@@ -38,16 +47,6 @@ macro_rules! impl_str {
 
           buf[..len].copy_from_slice(bytes);
           Ok(len)
-        }
-
-        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), super::DecodeError>
-        where
-          Self: Sized
-        {
-          match core::str::from_utf8(src) {
-            Ok(value) => Ok((src.len(), value)),
-            Err(e) => Err(super::DecodeError::new(e.to_string())),
-          }
         }
       }
     )*

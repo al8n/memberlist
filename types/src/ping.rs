@@ -1,6 +1,6 @@
 use nodecraft::{CheapClone, Node};
 
-use super::{Data, DecodeError, EncodeError};
+use super::{Data, DataRef, DecodeError, EncodeError};
 
 macro_rules! bail_ping {
   (
@@ -84,6 +84,75 @@ macro_rules! bail_ping {
         }
       }
 
+      impl<'a, I, A> DataRef<'a, $name<I, A>> for $name<I::Ref<'a>, A::Ref<'a>>
+      where
+        I: Data,
+        A: Data,
+      {
+        fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError>
+        where
+          Self: Sized,
+        {
+          let mut sequence_number = None;
+          let mut source_id = None;
+          let mut source_addr = None;
+          let mut target_id = None;
+          let mut target_addr = None;
+
+          let mut offset = 0;
+          while offset < src.len() {
+            let b = src[offset];
+            offset += 1;
+
+            match b {
+              [< $name:upper _SEQUENCE_NUMBER_BYTE >] => {
+                let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
+                offset += bytes_read;
+                sequence_number = Some(value);
+              }
+              b if b == $name::<I, A>::source_id_byte() => {
+                let (bytes_read, value) = I::Ref::decode_length_delimited(&src[offset..])?;
+                offset += bytes_read;
+                source_id = Some(value);
+              }
+              b if b == $name::<I, A>::source_addr_byte() => {
+                let (bytes_read, value) = A::Ref::decode_length_delimited(&src[offset..])?;
+                offset += bytes_read;
+                source_addr = Some(value);
+              }
+              b if b == $name::<I, A>::target_id_byte() => {
+                let (bytes_read, value) = I::Ref::decode_length_delimited(&src[offset..])?;
+                offset += bytes_read;
+                target_id = Some(value);
+              }
+              b if b == $name::<I, A>::target_addr_byte() => {
+                let (bytes_read, value) = A::Ref::decode_length_delimited(&src[offset..])?;
+                offset += bytes_read;
+                target_addr = Some(value);
+              }
+              b => {
+                let (wire_type, _) = super::split(b);
+                let wire_type = super::WireType::try_from(wire_type)
+                  .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+                offset += super::skip(wire_type, &src[offset..])?;
+              }
+            }
+          }
+
+          let sequence_number = sequence_number.ok_or_else(|| DecodeError::new("missing sequence number"))?;
+          let source_id = source_id.ok_or_else(|| DecodeError::new("missing source id"))?;
+          let source_addr = source_addr.ok_or_else(|| DecodeError::new("missing source address"))?;
+          let target_id = target_id.ok_or_else(|| DecodeError::new("missing target id"))?;
+          let target_addr = target_addr.ok_or_else(|| DecodeError::new("missing target address"))?;
+
+          Ok((offset, Self {
+            sequence_number,
+            source: Node::new(source_id, source_addr),
+            target: Node::new(target_id, target_addr),
+          }))
+        }
+      }
+
       impl<I, A> Data for $name<I, A>
       where
         I: Data,
@@ -91,16 +160,14 @@ macro_rules! bail_ping {
       {
         type Ref<'a> = $name<I::Ref<'a>, A::Ref<'a>>;
 
-        fn from_ref(val: Self::Ref<'_>) -> Self
+        fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
         where
           Self: Sized,
         {
           let Self::Ref { sequence_number, source, target } = val;
-          Self {
-            sequence_number,
-            source: Node::from_ref(source),
-            target: Node::from_ref(target),
-          }
+          Node::from_ref(source)
+            .and_then(|source| Node::from_ref(target).map(|target| (source, target)))
+            .map(|(source, target)| Self::new(sequence_number, source, target))
         }
 
         fn encoded_len(&self) -> usize {
@@ -153,69 +220,6 @@ macro_rules! bail_ping {
           #[cfg(debug_assertions)]
           super::debug_assert_write_eq(offset, self.encoded_len());
           Ok(offset)
-        }
-
-        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
-        where
-          Self: Sized,
-        {
-          let mut sequence_number = None;
-          let mut source_id = None;
-          let mut source_addr = None;
-          let mut target_id = None;
-          let mut target_addr = None;
-
-          let mut offset = 0;
-          while offset < src.len() {
-            let b = src[offset];
-            offset += 1;
-
-            match b {
-              [< $name:upper _SEQUENCE_NUMBER_BYTE >] => {
-                let (bytes_read, value) = u32::decode(&src[offset..])?;
-                offset += bytes_read;
-                sequence_number = Some(value);
-              }
-              b if b == Self::source_id_byte() => {
-                let (bytes_read, value) = I::decode_length_delimited_ref(&src[offset..])?;
-                offset += bytes_read;
-                source_id = Some(value);
-              }
-              b if b == Self::source_addr_byte() => {
-                let (bytes_read, value) = A::decode_length_delimited_ref(&src[offset..])?;
-                offset += bytes_read;
-                source_addr = Some(value);
-              }
-              b if b == Self::target_id_byte() => {
-                let (bytes_read, value) = I::decode_length_delimited_ref(&src[offset..])?;
-                offset += bytes_read;
-                target_id = Some(value);
-              }
-              b if b == Self::target_addr_byte() => {
-                let (bytes_read, value) = A::decode_length_delimited_ref(&src[offset..])?;
-                offset += bytes_read;
-                target_addr = Some(value);
-              }
-              b => {
-                let (wire_type, _) = super::split(b);
-                let wire_type = super::WireType::try_from(wire_type)
-                  .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
-                offset += super::skip(wire_type, &src[offset..])?;
-              }
-            }
-          }
-
-          let sequence_number = sequence_number.ok_or_else(|| DecodeError::new("missing sequence number"))?;
-          let source_id = source_id.ok_or_else(|| DecodeError::new("missing source id"))?;
-          let source_addr = source_addr.ok_or_else(|| DecodeError::new("missing source address"))?;
-          let target_id = target_id.ok_or_else(|| DecodeError::new("missing target id"))?;
-          let target_addr = target_addr.ok_or_else(|| DecodeError::new("missing target address"))?;
-
-          Ok((offset, Self::Ref {
-            sequence_number,
-            source: Node::new(source_id, source_addr),
-            target: Node::new(target_id, target_addr),
-          }))
         }
       }
     }

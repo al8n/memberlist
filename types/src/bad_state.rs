@@ -1,4 +1,4 @@
-use super::{Data, DecodeError, EncodeError, WireType};
+use super::{Data, DataRef, DecodeError, EncodeError, WireType};
 
 macro_rules! bad_bail {
   (
@@ -43,12 +43,64 @@ macro_rules! bad_bail {
       const [< $name:upper _NODE_TAG >]: u8 = 2;
       const [< $name:upper _FROM_TAG >]: u8 = 3;
 
+      impl<'a, I: Data> DataRef<'a, $name<I>> for $name<I::Ref<'a>> {
+        fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError>
+        where
+          Self: Sized,
+        {
+          let mut node = None;
+          let mut from = None;
+          let mut incarnation = None;
+
+          let mut offset = 0;
+          while offset < src.len() {
+            let b = src[offset];
+            offset += 1;
+
+            match b {
+              [< $name:upper _INCARNATION_BYTE >] => {
+                let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
+                offset += bytes_read;
+                incarnation = Some(value);
+              }
+              b if b == $name::<I>::node_byte() => {
+                let (bytes_read, value) = I::Ref::decode_length_delimited(&src[offset..])?;
+                offset += bytes_read;
+                node = Some(value);
+              }
+              b if b == $name::<I>::from_byte() => {
+                let (bytes_read, value) = I::Ref::decode_length_delimited(&src[offset..])?;
+                offset += bytes_read;
+                from = Some(value);
+              }
+              b => {
+                let (wire_type, _) = super::split(b);
+                let wire_type = WireType::try_from(wire_type)
+                  .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+                offset += super::skip(wire_type, &src[offset..])?;
+              }
+            }
+          }
+
+          let incarnation = incarnation.ok_or_else(|| DecodeError::new("missing incarnation"))?;
+          let node = node.ok_or_else(|| DecodeError::new("missing node"))?;
+          let from = from.ok_or_else(|| DecodeError::new("missing from"))?;
+
+          Ok((offset, Self {
+            incarnation,
+            node,
+            from,
+          }))
+        }
+      }
+
       impl<I: Data> Data for $name<I> {
         type Ref<'a> = $name<I::Ref<'a>>;
 
-        fn from_ref(val: Self::Ref<'_>) -> Self {
+        fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError> {
           let Self::Ref { incarnation, node, from } = val;
-          Self::new(incarnation, I::from_ref(node), I::from_ref(from))
+          I::from_ref(node)
+            .and_then(|node| I::from_ref(from).map(|from| Self::new(incarnation, node, from)))
         }
 
         fn encoded_len(&self) -> usize {
@@ -88,55 +140,6 @@ macro_rules! bad_bail {
           #[cfg(debug_assertions)]
           super::debug_assert_write_eq(offset, self.encoded_len());
           Ok(offset)
-        }
-
-        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
-        where
-          Self: Sized,
-        {
-          let mut node = None;
-          let mut from = None;
-          let mut incarnation = None;
-
-          let mut offset = 0;
-          while offset < src.len() {
-            let b = src[offset];
-            offset += 1;
-
-            match b {
-              [< $name:upper _INCARNATION_BYTE >] => {
-                let (bytes_read, value) = u32::decode(&src[offset..])?;
-                offset += bytes_read;
-                incarnation = Some(value);
-              }
-              b if b == Self::node_byte() => {
-                let (bytes_read, value) = I::decode_length_delimited_ref(&src[offset..])?;
-                offset += bytes_read;
-                node = Some(value);
-              }
-              b if b == Self::from_byte() => {
-                let (bytes_read, value) = I::decode_length_delimited_ref(&src[offset..])?;
-                offset += bytes_read;
-                from = Some(value);
-              }
-              b => {
-                let (wire_type, _) = super::split(b);
-                let wire_type = WireType::try_from(wire_type)
-                  .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
-                offset += super::skip(wire_type, &src[offset..])?;
-              }
-            }
-          }
-
-          let incarnation = incarnation.ok_or_else(|| DecodeError::new("missing incarnation"))?;
-          let node = node.ok_or_else(|| DecodeError::new("missing node"))?;
-          let from = from.ok_or_else(|| DecodeError::new("missing from"))?;
-
-          Ok((offset, Self::Ref {
-            incarnation,
-            node,
-            from,
-          }))
         }
       }
 

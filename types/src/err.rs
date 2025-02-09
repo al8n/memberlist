@@ -1,6 +1,8 @@
 use smol_str::SmolStr;
 
-use super::{debug_assert_write_eq, merge, skip, split, Data, DecodeError, EncodeError, WireType};
+use super::{
+  debug_assert_write_eq, merge, skip, split, Data, DataRef, DecodeError, EncodeError, WireType,
+};
 
 /// Error response from the remote peer
 #[viewit::viewit(
@@ -43,13 +45,13 @@ impl ErrorResponse {
 impl Data for ErrorResponse {
   type Ref<'a> = ErrorResponseRef<'a>;
 
-  fn from_ref(val: Self::Ref<'_>) -> Self
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
   where
     Self: Sized,
   {
-    Self {
+    Ok(Self {
       message: val.message.into(),
-    }
+    })
   }
 
   fn encoded_len(&self) -> usize {
@@ -68,41 +70,6 @@ impl Data for ErrorResponse {
     #[cfg(debug_assertions)]
     debug_assert_write_eq(offset, self.encoded_len());
     Ok(offset)
-  }
-
-  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
-  where
-    Self: Sized,
-  {
-    let mut offset = 0;
-    let mut msg = None;
-
-    while offset < src.len() {
-      // Parse the tag and wire type
-      let b = src[offset];
-      offset += 1;
-
-      match b {
-        Self::MESSAGE_BYTE => {
-          let (bytes_read, value) = SmolStr::decode_length_delimited_ref(&src[offset..])?;
-          offset += bytes_read;
-          msg = Some(value);
-        }
-        _ => {
-          let (wire_type, _) = split(src[offset]);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
-          offset += skip(wire_type, &src[offset..])?;
-        }
-      }
-    }
-
-    Ok((
-      offset,
-      Self::Ref {
-        message: msg.unwrap_or_default(),
-      },
-    ))
   }
 }
 
@@ -138,6 +105,44 @@ impl<'a> ErrorResponseRef<'a> {
   #[inline]
   pub const fn message(&self) -> &'a str {
     self.message
+  }
+}
+
+impl<'a> DataRef<'a, ErrorResponse> for ErrorResponseRef<'a> {
+  fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized,
+  {
+    let mut offset = 0;
+    let mut msg = None;
+
+    while offset < src.len() {
+      // Parse the tag and wire type
+      let b = src[offset];
+      offset += 1;
+
+      match b {
+        ErrorResponse::MESSAGE_BYTE => {
+          let (bytes_read, value) =
+            <&str as DataRef<SmolStr>>::decode_length_delimited(&src[offset..])?;
+          offset += bytes_read;
+          msg = Some(value);
+        }
+        _ => {
+          let (wire_type, _) = split(src[offset]);
+          let wire_type = WireType::try_from(wire_type)
+            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          offset += skip(wire_type, &src[offset..])?;
+        }
+      }
+    }
+
+    Ok((
+      offset,
+      Self {
+        message: msg.unwrap_or_default(),
+      },
+    ))
   }
 }
 

@@ -1,6 +1,8 @@
 use bytes::{Bytes, BytesMut};
 use nodecraft::CheapClone;
 
+use crate::DataRef;
+
 use super::{Data, DecodeError, EncodeError};
 
 /// Invalid meta error.
@@ -179,14 +181,25 @@ impl TryFrom<BytesMut> for Meta {
   }
 }
 
+impl<'a> DataRef<'a, Meta> for &'a [u8] {
+  fn decode(src: &'a [u8]) -> Result<(usize, &'a [u8]), DecodeError> {
+    let len = src.len();
+    if len > Meta::MAX_SIZE {
+      return Err(DecodeError::new(LargeMeta(len).to_string()));
+    }
+
+    Ok((len, src))
+  }
+}
+
 impl Data for Meta {
   type Ref<'a> = &'a [u8];
 
-  fn from_ref(val: Self::Ref<'_>) -> Self
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
   where
     Self: Sized,
   {
-    Self(Bytes::copy_from_slice(val))
+    Ok(Self(Bytes::copy_from_slice(val)))
   }
 
   fn encoded_len(&self) -> usize {
@@ -195,18 +208,6 @@ impl Data for Meta {
 
   fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
     <Bytes as Data>::encode(&self.0, buf)
-  }
-
-  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
-  where
-    Self: Sized,
-  {
-    let len = src.len();
-    if len > Self::MAX_SIZE {
-      return Err(DecodeError::new(LargeMeta(len).to_string()));
-    }
-
-    Ok((len, src))
   }
 }
 

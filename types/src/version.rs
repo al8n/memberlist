@@ -80,13 +80,23 @@ impl From<ProtocolVersion> for u8 {
 macro_rules! impl_data {
   ($($ty:ty),+$(,)?) => {
     $(
+      impl<'a> super::DataRef<'a, Self> for $ty {
+        fn decode(src: &'a [u8]) -> Result<(usize, Self), super::DecodeError> {
+          if src.is_empty() {
+            return Err(super::DecodeError::new("buffer underflow"));
+          }
+
+          Ok((1, Self::from(src[0])))
+        }
+      }
+
       impl super::Data for $ty {
         const WIRE_TYPE: super::WireType = super::WireType::Byte;
 
         type Ref<'a> = Self;
 
-        fn from_ref(val: Self::Ref<'_>) -> Self {
-          val
+        fn from_ref(val: Self::Ref<'_>) -> Result<Self, super::DecodeError> {
+          Ok(val)
         }
 
         #[inline]
@@ -102,18 +112,6 @@ macro_rules! impl_data {
 
           buf[0] = u8::from(*self);
           Ok(1)
-        }
-
-        #[inline]
-        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), super::DecodeError>
-        where
-          Self: Sized,
-        {
-          if src.is_empty() {
-            return Err(super::DecodeError::new("buffer underflow"));
-          }
-
-          Ok((1, Self::Ref::from(src[0])))
         }
       }
     )*

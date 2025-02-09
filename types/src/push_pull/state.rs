@@ -3,8 +3,8 @@ use core::marker::PhantomData;
 use nodecraft::{CheapClone, Node};
 
 use crate::{
-  merge, skip, split, Data, DecodeError, DelegateVersion, EncodeError, Meta, ProtocolVersion,
-  State, WireType,
+  merge, skip, split, Data, DataRef, DecodeError, DelegateVersion, EncodeError, Meta,
+  ProtocolVersion, State, WireType,
 };
 
 use super::STATES_BYTE;
@@ -168,6 +168,97 @@ pub struct PushNodeStateRef<'a, I, A> {
   delegate_version: DelegateVersion,
 }
 
+impl<'a, I, A> DataRef<'a, PushNodeState<I, A>> for PushNodeStateRef<'a, I::Ref<'a>, A::Ref<'a>>
+where
+  I: Data,
+  A: Data,
+{
+  fn decode(src: &'a [u8]) -> Result<(usize, Self), crate::DecodeError>
+  where
+    Self: Sized,
+  {
+    let mut offset = 0;
+    let mut id = None;
+    let mut addr = None;
+    let mut meta = None;
+    let mut incarnation = None;
+    let mut state = None;
+    let mut protocol_version = None;
+    let mut delegate_version = None;
+
+    while offset < src.len() {
+      let b = src[offset];
+      offset += 1;
+
+      match b {
+        b if b == PushNodeState::<I, A>::id_byte() => {
+          let (readed, value) = I::Ref::decode_length_delimited(&src[offset..])?;
+          offset += readed;
+          id = Some(value);
+        }
+        b if b == PushNodeState::<I, A>::addr_byte() => {
+          let (readed, value) = A::Ref::decode_length_delimited(&src[offset..])?;
+          offset += readed;
+          addr = Some(value);
+        }
+        META_BYTE => {
+          let (readed, value) = <&[u8] as DataRef<Meta>>::decode_length_delimited(&src[offset..])?;
+          offset += readed;
+          meta = Some(value);
+        }
+        INCARNATION_BYTE => {
+          let (readed, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
+          offset += readed;
+          incarnation = Some(value);
+        }
+        STATE_BYTE => {
+          if offset >= src.len() {
+            return Err(DecodeError::new("buffer underflow"));
+          }
+          let value = State::from(src[offset]);
+          offset += 1;
+          state = Some(value);
+        }
+        PROTOCOL_VERSION_BYTE => {
+          if offset >= src.len() {
+            return Err(DecodeError::new("buffer underflow"));
+          }
+          let value = ProtocolVersion::from(src[offset]);
+          offset += 1;
+          protocol_version = Some(value);
+        }
+        DELEGATE_VERSION_BYTE => {
+          if offset >= src.len() {
+            return Err(DecodeError::new("buffer underflow"));
+          }
+          let value = DelegateVersion::from(src[offset]);
+          offset += 1;
+          delegate_version = Some(value);
+        }
+        _ => {
+          let (wire_type, _) = split(b);
+          let wire_type = WireType::try_from(wire_type)
+            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          offset += skip(wire_type, &src[offset..])?;
+        }
+      }
+    }
+
+    Ok((
+      offset,
+      Self {
+        id: id.ok_or_else(|| DecodeError::new("missing id"))?,
+        addr: addr.ok_or_else(|| DecodeError::new("missing addr"))?,
+        meta: meta.unwrap_or_default(),
+        incarnation: incarnation.ok_or_else(|| DecodeError::new("missing incarnation"))?,
+        state: state.ok_or_else(|| DecodeError::new("missing state"))?,
+        protocol_version: protocol_version.unwrap_or_default(),
+        delegate_version: delegate_version.unwrap_or_default(),
+      },
+    ))
+  }
+}
+
 impl<I, A> Data for PushNodeState<I, A>
 where
   I: Data,
@@ -175,16 +266,19 @@ where
 {
   type Ref<'a> = PushNodeStateRef<'a, I::Ref<'a>, A::Ref<'a>>;
 
-  fn from_ref(val: Self::Ref<'_>) -> Self {
-    Self {
-      id: I::from_ref(val.id),
-      addr: A::from_ref(val.addr),
-      meta: Meta::from_ref(val.meta),
-      incarnation: val.incarnation,
-      state: val.state,
-      protocol_version: val.protocol_version,
-      delegate_version: val.delegate_version,
-    }
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError> {
+    I::from_ref(val.id)
+      .and_then(|id| A::from_ref(val.addr).map(|addr| (id, addr)))
+      .and_then(|(id, addr)| Meta::from_ref(val.meta).map(|meta| (meta, id, addr)))
+      .map(|(meta, id, addr)| Self {
+        id,
+        addr,
+        meta,
+        incarnation: val.incarnation,
+        state: val.state,
+        protocol_version: val.protocol_version,
+        delegate_version: val.delegate_version,
+      })
   }
 
   fn encoded_len(&self) -> usize {
@@ -258,91 +352,6 @@ where
     #[cfg(debug_assertions)]
     crate::debug_assert_write_eq(offset, self.encoded_len());
     Ok(offset)
-  }
-
-  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), crate::DecodeError>
-  where
-    Self: Sized,
-  {
-    let mut offset = 0;
-    let mut id = None;
-    let mut addr = None;
-    let mut meta = None;
-    let mut incarnation = None;
-    let mut state = None;
-    let mut protocol_version = None;
-    let mut delegate_version = None;
-
-    while offset < src.len() {
-      let b = src[offset];
-      offset += 1;
-
-      match b {
-        b if b == Self::id_byte() => {
-          let (readed, value) = I::decode_length_delimited_ref(&src[offset..])?;
-          offset += readed;
-          id = Some(value);
-        }
-        b if b == Self::addr_byte() => {
-          let (readed, value) = A::decode_length_delimited_ref(&src[offset..])?;
-          offset += readed;
-          addr = Some(value);
-        }
-        META_BYTE => {
-          let (readed, value) = Meta::decode_length_delimited_ref(&src[offset..])?;
-          offset += readed;
-          meta = Some(value);
-        }
-        INCARNATION_BYTE => {
-          let (readed, value) = u32::decode(&src[offset..])?;
-          offset += readed;
-          incarnation = Some(value);
-        }
-        STATE_BYTE => {
-          if offset >= src.len() {
-            return Err(DecodeError::new("buffer underflow"));
-          }
-          let value = State::from(src[offset]);
-          offset += 1;
-          state = Some(value);
-        }
-        PROTOCOL_VERSION_BYTE => {
-          if offset >= src.len() {
-            return Err(DecodeError::new("buffer underflow"));
-          }
-          let value = ProtocolVersion::from(src[offset]);
-          offset += 1;
-          protocol_version = Some(value);
-        }
-        DELEGATE_VERSION_BYTE => {
-          if offset >= src.len() {
-            return Err(DecodeError::new("buffer underflow"));
-          }
-          let value = DelegateVersion::from(src[offset]);
-          offset += 1;
-          delegate_version = Some(value);
-        }
-        _ => {
-          let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
-          offset += skip(wire_type, &src[offset..])?;
-        }
-      }
-    }
-
-    Ok((
-      offset,
-      Self::Ref {
-        id: id.ok_or_else(|| DecodeError::new("missing id"))?,
-        addr: addr.ok_or_else(|| DecodeError::new("missing addr"))?,
-        meta: meta.unwrap_or_default(),
-        incarnation: incarnation.ok_or_else(|| DecodeError::new("missing incarnation"))?,
-        state: state.ok_or_else(|| DecodeError::new("missing state"))?,
-        protocol_version: protocol_version.unwrap_or_default(),
-        delegate_version: delegate_version.unwrap_or_default(),
-      },
-    ))
   }
 }
 
@@ -433,44 +442,56 @@ impl<I: CheapClone, A: CheapClone> PushNodeState<I, A> {
 }
 
 /// A reference type to a collection of [`PushNodeState`]
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub struct PushNodeStatesRef<'a, I, A> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PushNodeStatesDecoder<'a> {
   src: &'a [u8],
-  current_offset: Option<usize>,
   start_offset: usize,
   end_offset: usize,
   num_states: usize,
-  _m: PhantomData<(I, A)>,
 }
 
-impl<'a, I, A> PushNodeStatesRef<'a, I, A> {
+impl<'a> PushNodeStatesDecoder<'a> {
   pub(super) fn new(src: &'a [u8], num_states: usize, offsets: Option<(usize, usize)>) -> Self {
-    let (start, curr, end) = offsets.map_or((0, None, 0), |(start, end)| (start, Some(start), end));
+    let (start, end) = offsets.map_or((0, 0), |(start, end)| (start, end));
     Self {
       src,
-      current_offset: curr,
       start_offset: start,
       end_offset: end,
       num_states,
-      _m: PhantomData,
+    }
+  }
+
+  /// Returns an iterator over the [`PushNodeState`] in the collection.
+  pub fn iter<I, A>(&self) -> PushNodeStatesDecodeIter<'a, I, A>
+  where
+    I: Data,
+    A: Data,
+  {
+    PushNodeStatesDecodeIter {
+      src: self.src,
+      current_offset: (self.num_states > 0).then_some(self.start_offset),
+      end_offset: self.end_offset,
+      num_states: self.num_states,
+      _phantom: PhantomData,
     }
   }
 }
 
-impl<I, A> Clone for PushNodeStatesRef<'_, I, A> {
-  fn clone(&self) -> Self {
-    *self
-  }
+/// An iterator over the [`PushNodeStateRef`] in the collection.
+pub struct PushNodeStatesDecodeIter<'a, I, A> {
+  src: &'a [u8],
+  current_offset: Option<usize>,
+  end_offset: usize,
+  num_states: usize,
+  _phantom: PhantomData<(I, A)>,
 }
 
-impl<I, A> Copy for PushNodeStatesRef<'_, I, A> {}
-
-impl<'a, I, A> Iterator for PushNodeStatesRef<'a, I, A>
+impl<'a, I, A> Iterator for PushNodeStatesDecodeIter<'a, I, A>
 where
   I: Data,
   A: Data,
 {
-  type Item = PushNodeStateRef<'a, I::Ref<'a>, A::Ref<'a>>;
+  type Item = Result<PushNodeStateRef<'a, I::Ref<'a>, A::Ref<'a>>, DecodeError>;
 
   fn next(&mut self) -> Option<Self::Item> {
     let current_offset = self.current_offset.as_mut()?;
@@ -480,21 +501,33 @@ where
       let b = self.src[*current_offset];
       *current_offset += 1;
 
-      // In the following, we directly expect on error because we know the data has already been checked before
-      // constructing this iterator.
       match b {
         STATES_BYTE => {
-          let (readed, value) =
-            PushNodeState::<I, A>::decode_length_delimited_ref(&self.src[*current_offset..])
-              .expect("decode push node state should always succeed");
+          let (readed, value) = match <PushNodeStateRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
+            PushNodeState<I, A>,
+          >>::decode_length_delimited(
+            &self.src[*current_offset..]
+          ) {
+            Ok((readed, value)) => (readed, value),
+            Err(e) => return Some(Err(e)),
+          };
           *current_offset += readed;
-          return Some(value);
+          return Some(Ok(value));
         }
         _ => {
           let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type).expect("wire type should always be valid");
-          *current_offset +=
-            skip(wire_type, &self.src[*current_offset..]).expect("skip should always succeed");
+          let wire_type = match WireType::try_from(wire_type) {
+            Ok(wire_type) => wire_type,
+            Err(_) => {
+              return Some(Err(DecodeError::new(format!(
+                "invalid wire type value {wire_type}"
+              ))))
+            }
+          };
+          *current_offset += match skip(wire_type, &self.src[*current_offset..]) {
+            Ok(offset) => offset,
+            Err(e) => return Some(Err(e)),
+          };
         }
       }
     }
@@ -502,10 +535,10 @@ where
   }
 }
 
-impl<I: Data, A: Data> core::iter::ExactSizeIterator for PushNodeStatesRef<'_, I, A> {
+impl<I: Data, A: Data> core::iter::ExactSizeIterator for PushNodeStatesDecodeIter<'_, I, A> {
   fn len(&self) -> usize {
     self.num_states
   }
 }
 
-impl<I: Data, A: Data> core::iter::FusedIterator for PushNodeStatesRef<'_, I, A> {}
+impl<I: Data, A: Data> core::iter::FusedIterator for PushNodeStatesDecodeIter<'_, I, A> {}

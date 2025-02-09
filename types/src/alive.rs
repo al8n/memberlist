@@ -1,6 +1,6 @@
 use super::{
-  merge, skip, split, Data, DecodeError, DelegateVersion, EncodeError, Meta, ProtocolVersion,
-  WireType,
+  merge, skip, split, Data, DataRef, DecodeError, DelegateVersion, EncodeError, Meta,
+  ProtocolVersion, WireType,
 };
 
 use nodecraft::{CheapClone, Node};
@@ -101,18 +101,21 @@ where
 {
   type Ref<'a> = AliveRef<'a, I::Ref<'a>, A::Ref<'a>>;
 
-  fn from_ref(val: Self::Ref<'_>) -> Self
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
   where
     Self: Sized,
   {
     let (id, addr) = val.node.into_components();
-    Self {
-      incarnation: val.incarnation,
-      meta: Meta::from_ref(val.meta),
-      node: Node::new(I::from_ref(id), A::from_ref(addr)),
-      protocol_version: val.protocol_version,
-      delegate_version: val.delegate_version,
-    }
+    Meta::from_ref(val.meta)
+      .and_then(|meta| I::from_ref(id).map(|id| (meta, id)))
+      .and_then(|(meta, id)| A::from_ref(addr).map(|addr| (meta, id, addr)))
+      .map(|(meta, id, addr)| Self {
+        incarnation: val.incarnation,
+        meta,
+        node: Node::new(id, addr),
+        protocol_version: val.protocol_version,
+        delegate_version: val.delegate_version,
+      })
   }
 
   fn encoded_len(&self) -> usize {
@@ -190,82 +193,6 @@ where
     super::debug_assert_write_eq(offset, self.encoded_len());
 
     Ok(offset)
-  }
-
-  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), DecodeError>
-  where
-    Self: Sized,
-  {
-    let mut offset = 0;
-    let mut incarnation = None;
-    let mut meta = None;
-    let mut id = None;
-    let mut addr = None;
-    let mut protocol_version = None;
-    let mut delegate_version = None;
-
-    while offset < src.len() {
-      // Parse the tag and wire type
-      let b = src[offset];
-      offset += 1;
-
-      match b {
-        INCARNATION_BYTE => {
-          let (bytes_read, value) = u32::decode(&src[offset..])?;
-          offset += bytes_read;
-          incarnation = Some(value);
-        }
-        META_BYTE => {
-          let (readed, data) = Meta::decode_length_delimited_ref(&src[offset..])?;
-          offset += readed;
-          meta = Some(data);
-        }
-        DELEGATE_VERSION_BYTE => {
-          if offset >= src.len() {
-            return Err(DecodeError::new("buffer underflow"));
-          }
-          delegate_version = Some(src[offset].into());
-          offset += 1;
-        }
-        PROTOCOL_VERSION_BYTE => {
-          if offset >= src.len() {
-            return Err(DecodeError::new("buffer underflow"));
-          }
-          protocol_version = Some(src[offset].into());
-          offset += 1;
-        }
-        b if b == Self::id_byte() => {
-          let (readed, data) = I::decode_length_delimited_ref(&src[offset..])?;
-          offset += readed;
-          id = Some(data);
-        }
-        b if b == Self::addr_byte() => {
-          let (readed, data) = A::decode_length_delimited_ref(&src[offset..])?;
-          offset += readed;
-          addr = Some(data);
-        }
-        _ => {
-          let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
-          offset += skip(wire_type, &src[offset..])?;
-        }
-      }
-    }
-
-    Ok((
-      offset,
-      Self::Ref {
-        incarnation: incarnation.ok_or_else(|| DecodeError::new("missing incarnation"))?,
-        meta: meta.unwrap_or_default(),
-        node: Node::new(
-          id.ok_or_else(|| DecodeError::new("missing node id"))?,
-          addr.ok_or_else(|| DecodeError::new("missing node address"))?,
-        ),
-        protocol_version: protocol_version.unwrap_or_default(),
-        delegate_version: delegate_version.unwrap_or_default(),
-      },
-    ))
   }
 }
 
@@ -369,6 +296,88 @@ impl<'a, I, A> AliveRef<'a, I, A> {
   #[inline]
   pub const fn delegate_version(&self) -> DelegateVersion {
     self.delegate_version
+  }
+}
+
+impl<'a, I, A> DataRef<'a, Alive<I, A>> for AliveRef<'a, I::Ref<'a>, A::Ref<'a>>
+where
+  I: Data,
+  A: Data,
+{
+  fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized,
+  {
+    let mut offset = 0;
+    let mut incarnation = None;
+    let mut meta = None;
+    let mut id = None;
+    let mut addr = None;
+    let mut protocol_version = None;
+    let mut delegate_version = None;
+
+    while offset < src.len() {
+      // Parse the tag and wire type
+      let b = src[offset];
+      offset += 1;
+
+      match b {
+        INCARNATION_BYTE => {
+          let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
+          offset += bytes_read;
+          incarnation = Some(value);
+        }
+        META_BYTE => {
+          let (readed, data) = <&[u8] as DataRef<Meta>>::decode_length_delimited(&src[offset..])?;
+          offset += readed;
+          meta = Some(data);
+        }
+        DELEGATE_VERSION_BYTE => {
+          if offset >= src.len() {
+            return Err(DecodeError::new("buffer underflow"));
+          }
+          delegate_version = Some(src[offset].into());
+          offset += 1;
+        }
+        PROTOCOL_VERSION_BYTE => {
+          if offset >= src.len() {
+            return Err(DecodeError::new("buffer underflow"));
+          }
+          protocol_version = Some(src[offset].into());
+          offset += 1;
+        }
+        b if b == Alive::<I, A>::id_byte() => {
+          let (readed, data) = I::Ref::decode_length_delimited(&src[offset..])?;
+          offset += readed;
+          id = Some(data);
+        }
+        b if b == Alive::<I, A>::addr_byte() => {
+          let (readed, data) = A::Ref::decode_length_delimited(&src[offset..])?;
+          offset += readed;
+          addr = Some(data);
+        }
+        _ => {
+          let (wire_type, _) = split(b);
+          let wire_type = WireType::try_from(wire_type)
+            .map_err(|_| DecodeError::new(format!("invalid wire type value {wire_type}")))?;
+          offset += skip(wire_type, &src[offset..])?;
+        }
+      }
+    }
+
+    Ok((
+      offset,
+      Self {
+        incarnation: incarnation.ok_or_else(|| DecodeError::new("missing incarnation"))?,
+        meta: meta.unwrap_or_default(),
+        node: Node::new(
+          id.ok_or_else(|| DecodeError::new("missing node id"))?,
+          addr.ok_or_else(|| DecodeError::new("missing node address"))?,
+        ),
+        protocol_version: protocol_version.unwrap_or_default(),
+        delegate_version: delegate_version.unwrap_or_default(),
+      },
+    ))
   }
 }
 

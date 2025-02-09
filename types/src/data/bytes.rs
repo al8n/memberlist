@@ -1,13 +1,19 @@
-use super::{super::check_encoded_message_size, Data};
+use super::{super::check_encoded_message_size, Data, DataRef};
 
 macro_rules! impl_bytes {
   ($($ty:ty => $from:ident),+$(,)?) => {
     $(
+      impl<'a> DataRef<'a, $ty> for &'a [u8] {
+        fn decode(buf: &'a [u8]) -> Result<(usize, Self), super::DecodeError> {
+          Ok((buf.len(), buf))
+        }
+      }
+
       impl Data for $ty {
         type Ref<'a> = &'a [u8];
 
-        fn from_ref(val: Self::Ref<'_>) -> Self {
-          Self::$from(val)
+        fn from_ref(val: Self::Ref<'_>) -> Result<Self, super::DecodeError> {
+          Ok(Self::$from(val))
         }
 
         fn encoded_len(&self) -> usize {
@@ -34,13 +40,6 @@ macro_rules! impl_bytes {
           buf[..len].copy_from_slice(self);
           Ok(len)
         }
-
-        fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), super::DecodeError>
-        where
-          Self: Sized,
-        {
-          Ok((src.len(), src))
-        }
       }
     )*
   };
@@ -53,11 +52,23 @@ impl_bytes!(
   std::sync::Arc<[u8]> => from,
 );
 
+impl<'a, const N: usize> DataRef<'a, [u8; N]> for [u8; N] {
+  fn decode(src: &'a [u8]) -> Result<(usize, [u8; N]), super::DecodeError> {
+    if src.len() < N {
+      return Err(super::DecodeError::new("buffer underflow"));
+    }
+
+    let mut bytes = [0; N];
+    bytes.copy_from_slice(&src[..N]);
+    Ok((N, bytes))
+  }
+}
+
 impl<const N: usize> Data for [u8; N] {
   type Ref<'a> = Self;
 
-  fn from_ref(val: Self::Ref<'_>) -> Self {
-    val
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, super::DecodeError> {
+    Ok(val)
   }
 
   fn encoded_len(&self) -> usize {
@@ -73,18 +84,5 @@ impl<const N: usize> Data for [u8; N] {
 
     buf[..N].copy_from_slice(self);
     Ok(N)
-  }
-
-  fn decode_ref(src: &[u8]) -> Result<(usize, Self::Ref<'_>), super::DecodeError>
-  where
-    Self: Sized,
-  {
-    if src.len() < N {
-      return Err(super::DecodeError::new("buffer underflow"));
-    }
-
-    let mut bytes = [0; N];
-    bytes.copy_from_slice(&src[..N]);
-    Ok((N, bytes))
   }
 }
