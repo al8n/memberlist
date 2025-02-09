@@ -175,7 +175,6 @@ where
   fn packet(
     &self,
   ) -> crate::transport::PacketSubscriber<
-    Self::Id,
     <Self::Resolver as AddressResolver>::ResolvedAddress,
     <Self::Runtime as RuntimeLite>::Instant,
   > {

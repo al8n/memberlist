@@ -5,7 +5,7 @@ use nodecraft::{CheapClone, Node};
 use super::{DelegateVersion, Meta, ProtocolVersion};
 
 /// State for the memberlist
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, derive_more::IsVariant)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[non_exhaustive]
 pub enum State {

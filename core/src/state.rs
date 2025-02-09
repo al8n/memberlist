@@ -27,9 +27,9 @@ use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use nodecraft::{CheapClone, Node};
 use rand::{seq::SliceRandom, Rng};
 
-// /// Exports the state unit test cases.
-// #[cfg(any(test, feature = "test"))]
-// pub mod tests;
+/// Exports the state unit test cases.
+#[cfg(any(test, feature = "test"))]
+pub mod tests;
 
 mod ack_manager;
 pub(crate) use ack_manager::*;

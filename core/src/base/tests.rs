@@ -10,7 +10,7 @@ use crate::{
     PingDelegate,
   },
   transport::MaybeResolvedAddress,
-  types::{Label, NodeState, SmallVec, State},
+  types::{Data, Label, NodeState, State},
 };
 
 use super::*;
@@ -341,7 +341,7 @@ where
 
   async fn notify_merge(
     &self,
-    _peers: SmallVec<Arc<NodeState<Self::Id, Self::Address>>>,
+    _peers: Arc<[NodeState<Self::Id, Self::Address>]>,
   ) -> Result<(), Self::Error> {
     tracing::info!("cancel merge");
     self.invoked.store(true, Ordering::SeqCst);

@@ -23,7 +23,7 @@ use crate::{
   state::{AckManager, LocalNodeState},
   tests::get_memberlist,
   transport::Transport,
-  types::{Ack, Alive, Dead, Epoch, Message, Nack, NodeState, State, Suspect},
+  types::{Ack, Alive, Dead, Epoch, Message, Nack, PushNodeState, State, Suspect},
   Memberlist, Options,
 };
 
@@ -1350,7 +1350,7 @@ where
 pub async fn alive_node_conflict<A, T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
-  T: Transport<Resolver = A, Runtime = R>,
+  T: Transport<Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   R: RuntimeLite,
 {
   let m: Memberlist<T> = get_memberlist(
@@ -1460,7 +1460,7 @@ where
 pub async fn suspect_node<A, T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
-  T: Transport<Resolver = A, Runtime = R>,
+  T: Transport<Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   R: RuntimeLite,
 {
   let m: Memberlist<T> = get_memberlist(
@@ -1544,7 +1544,7 @@ where
 pub async fn suspect_node_double_suspect<A, T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
-  T: Transport<Resolver = A, Runtime = R>,
+  T: Transport<Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   R: RuntimeLite,
 {
   let m: Memberlist<T> = get_memberlist(
@@ -1604,7 +1604,7 @@ where
 pub async fn suspect_node_old_suspect<A, T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
-  T: Transport<Resolver = A, Runtime = R>,
+  T: Transport<Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   R: RuntimeLite,
 {
   let now = Epoch::now();
@@ -1730,7 +1730,7 @@ where
 pub async fn dead_node_left<A, T, R>(t1: T, t1_opts: Options, test_node_id: T::Id)
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
-  T: Transport<Resolver = A, Runtime = R>,
+  T: Transport<Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   R: RuntimeLite,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
@@ -2077,7 +2077,7 @@ pub async fn merge_state<A, T, R>(
   node_id4: T::Id,
 ) where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
-  T: Transport<Resolver = A, Runtime = R>,
+  T: Transport<Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   R: RuntimeLite,
 {
   let (event_delegate, subscriber) = SubscribleEventDelegate::unbounded();
@@ -2111,10 +2111,10 @@ pub async fn merge_state<A, T, R>(
   let node4: Node<_, SocketAddr> = Node::new(node_id4.clone(), "127.0.0.4:8000".parse().unwrap());
 
   let remote = vec![
-    NodeState::new(2, node1.id().clone(), *node1.address(), State::Alive),
-    NodeState::new(1, node2.id().clone(), *node2.address(), State::Suspect),
-    NodeState::new(1, node3.id().clone(), *node3.address(), State::Dead),
-    NodeState::new(2, node4.id().clone(), *node4.address(), State::Alive),
+    PushNodeState::new(2, node1.id().clone(), *node1.address(), State::Alive),
+    PushNodeState::new(1, node2.id().clone(), *node2.address(), State::Suspect),
+    PushNodeState::new(1, node3.id().clone(), *node3.address(), State::Dead),
+    PushNodeState::new(2, node4.id().clone(), *node4.address(), State::Alive),
   ];
 
   // Merge remote state

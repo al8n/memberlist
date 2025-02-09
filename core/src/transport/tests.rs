@@ -18,7 +18,7 @@ use crate::{
   Member, Memberlist, Options,
 };
 
-use super::{Meta, NodeState, Ping, NodeState, PushPull, State, Transport};
+use super::{Meta, NodeState, Ping, PushNodeState, PushPull, State, Transport};
 
 mod unimplemented;
 pub use unimplemented::*;
@@ -407,7 +407,7 @@ pub async fn send_packet_piggyback<A, T, C, D, R>(
 ) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  T: Transport<Id = SmolStr, Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   C: TestPacketClient,
   D: FnOnce(Bytes) -> Result<[Message<SmolStr, SocketAddr>; 2], AnyError>,
   R: RuntimeLite,
@@ -509,7 +509,7 @@ pub async fn promised_ping<A, T, P, R>(
 ) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  T: Transport<Id = SmolStr, Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   P: TestPromisedClient,
   P::Stream: TestPromisedStream + AsMut<T::Stream>,
   R: RuntimeLite,
@@ -558,12 +558,12 @@ where
               assert_eq!(ping_in.sequence_number(), 23);
               assert_eq!(ping_in.target(), &node1);
 
-              let ack = Ack::new(23);
+              let ack: Message<SmolStr, SocketAddr> = Ack::new(23).into();
 
               unwrap_ok!(ping_err_tx1.send(
                 m1.inner
                   .transport
-                  .send_message(stream.as_mut(), ack.into())
+                  .send_message(stream.as_mut(), ack.encode_to_bytes().unwrap())
                   .await
                   .map_err(Into::into)
               ));
@@ -582,12 +582,12 @@ where
               ));
 
               let ping_in = Message::<SmolStr, SocketAddr>::decode(&p).unwrap().1.unwrap_ping();
-              let ack = Ack::new(ping_in.sequence_number() + 1);
+              let ack: Message<SmolStr, SocketAddr> = Ack::new(ping_in.sequence_number() + 1).into();
 
               unwrap_ok!(ping_err_tx1.send(
                 m1.inner
                   .transport
-                  .send_message(stream.as_mut(), ack.into())
+                  .send_message(stream.as_mut(), ack.encode_to_bytes().unwrap())
                   .await
                   .map_err(Into::into)
               ));
@@ -610,8 +610,9 @@ where
                   .transport
                   .send_message(
                     stream.as_mut(),
-                    IndirectPing::new(0, Node::new("unknown source".into(), kind.next(0)), Node::new("unknown target".into(), kind.next(0)))
-                    .into()
+                    Message::from(IndirectPing::new(0, Node::new(SmolStr::from("unknown source"), kind.next(0)), Node::new(SmolStr::from("unknown target"), kind.next(0))))
+                      .encode_to_bytes()
+                      .unwrap()
                   )
                   .await
                   .map_err(Into::into)
@@ -713,7 +714,7 @@ where
 pub async fn promised_push_pull<A, T, P, R>(trans: T, promised: P) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  T: Transport<Id = SmolStr, Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   P: TestPromisedClient,
   P::Stream: TestPromisedStream + AsMut<T::Stream>,
   R: RuntimeLite,
@@ -741,18 +742,19 @@ where
   let push_pull = PushPull::new(
     false,
     [
-      NodeState::new(1, id0.cheap_clone(), bind_addr, State::Alive),
-      NodeState::new(1, "Test 1".into(), bind_addr, State::Alive),
-      NodeState::new(1, "Test 2".into(), bind_addr, State::Alive),
+      PushNodeState::new(1, id0.cheap_clone(), bind_addr, State::Alive),
+      PushNodeState::new(1, "Test 1".into(), bind_addr, State::Alive),
+      PushNodeState::new(1, "Test 2".into(), bind_addr, State::Alive),
     ]
     .into_iter(),
   );
 
   // Send the push/pull indicator
   let mut conn = connector.connect().await?;
+  let push_pull: Message<_, _> = push_pull.into();
   m.inner
     .transport
-    .send_message(conn.as_mut(), push_pull.into())
+    .send_message(conn.as_mut(), push_pull.encode_to_bytes().unwrap())
     .await?;
   // Read the message type
   let (_, msg) = m
@@ -785,8 +787,8 @@ where
 pub async fn join<A, T1, T2, R>(trans1: T1::Options, trans2: T2::Options) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  T1: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
-  T2: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  T1: Transport<Id = SmolStr, Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
+  T2: Transport<Id = SmolStr, Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   R: RuntimeLite,
 {
   let m1 = Memberlist::<T1, _>::new(trans1, Options::default())
@@ -850,8 +852,8 @@ where
 pub async fn send<A, T1, T2, R>(trans1: T1::Options, trans2: T2::Options) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  T1: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
-  T2: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  T1: Transport<Id = SmolStr, Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
+  T2: Transport<Id = SmolStr, Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   R: RuntimeLite,
 {
   let m1 = Memberlist::<T1, _>::with_delegate(

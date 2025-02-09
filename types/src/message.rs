@@ -406,7 +406,15 @@ impl<I, A> Message<I, A> {
 }
 
 /// The reference type of the [`Message`] enum.
-#[derive(Debug, Copy, Clone)]
+#[derive(
+  Debug,
+  Copy,
+  Clone,
+  derive_more::From,
+  derive_more::IsVariant,
+  derive_more::Unwrap,
+  derive_more::TryUnwrap,
+)]
 pub enum MessageRef<'a, I, A> {
   /// Compound message
   Compound(CompoundMessagesDecoder<'a>),

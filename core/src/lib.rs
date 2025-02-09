@@ -64,12 +64,12 @@ pub mod tests {
 
   /// Re-export the all unit test cases for state
   pub mod state {
-    // pub use crate::state::tests::*;
+    pub use crate::state::tests::*;
   }
 
   /// Re-export the all unit test cases for memberlist
   pub mod memberlist {
-    // pub use crate::base::tests::*;
+    pub use crate::base::tests::*;
   }
 
   #[cfg(any(feature = "test", test))]
