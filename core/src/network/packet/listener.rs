@@ -3,7 +3,7 @@ use nodecraft::CheapClone;
 
 use crate::{
   base::MessageHandoff,
-  types::{CompoundMessagesEncoder, Data, Message},
+  types::{Data, Message},
 };
 
 use super::*;
@@ -349,12 +349,11 @@ where
 
     // Fast path if nothing to piggypack
     if msgs.len() == 1 {
-      let msg = msgs.pop().unwrap().encode_to_bytes()?;
+      let msg = msgs.pop().unwrap();
       return self.transport_send_packet(addr, msg).await;
     }
 
     // Send the message
-    let msgs = CompoundMessagesEncoder::new(msgs.as_ref()).encode_to_bytes()?;
     self.transport_send_packets(addr, msgs).await
   }
 }

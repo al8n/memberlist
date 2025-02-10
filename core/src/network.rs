@@ -98,7 +98,7 @@ where
   pub(crate) async fn transport_send_packet(
     &self,
     addr: &T::ResolvedAddress,
-    packet: Bytes,
+    packet: Message<T::Id, T::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
     self
       .inner
@@ -121,7 +121,7 @@ where
   pub(crate) async fn transport_send_packets(
     &self,
     addr: &T::ResolvedAddress,
-    packet: Bytes,
+    packets: TinyVec<Message<T::Id, T::ResolvedAddress>>,
   ) -> Result<(), Error<T, D>> {
     self
       .inner

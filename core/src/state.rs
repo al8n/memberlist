@@ -15,7 +15,7 @@ use super::{
   suspicion::Suspicion,
   transport::{TimeoutableStream, Transport},
   types::{
-    Alive, CompoundMessagesEncoder, Data, DataRef, Dead, ErrorResponse, IndirectPing, Message,
+    Alive, Data, DataRef, Dead, ErrorResponse, IndirectPing, Message,
     MessageRef, NodeState, Ping, PushNodeState, SmallVec, State, Suspect,
   },
   Member, Members,
@@ -951,29 +951,23 @@ where
         self.local_id().cheap_clone(),
       );
       let msgs = [ping.cheap_clone().into(), suspect.into()];
-      match CompoundMessagesEncoder::new(msgs.as_slice()).encode_to_bytes() {
-        Ok(msgs) => match self.transport_send_packets(target.address(), msgs).await {
-          Ok(_) => {}
-          Err(e) => {
-            tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to send compound ping and suspect message by unreliable connection");
-            if e.is_remote_failure() {
-              return self
-                .handle_remote_failure(
-                  target,
-                  ping.sequence_number(),
-                  &ack_rx,
-                  &nack_rx,
-                  deadline,
-                  &awareness_delta,
-                )
-                .await;
-            }
-
-            return;
-          }
-        },
+      match self.transport_send_packets(target.address(), msgs.into()).await {
+        Ok(_) => {}
         Err(e) => {
-          tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to encode messages");
+          tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to send compound ping and suspect message by unreliable connection");
+          if e.is_remote_failure() {
+            return self
+              .handle_remote_failure(
+                target,
+                ping.sequence_number(),
+                &ack_rx,
+                &nack_rx,
+                deadline,
+                &awareness_delta,
+              )
+              .await;
+          }
+
           return;
         }
       }
@@ -1296,30 +1290,16 @@ where
           .for_each_concurrent(None, |(addr, mut msgs)| async move {
             let fut = if msgs.len() == 1 {
               futures::future::Either::Left(async {
-                match msgs.pop().unwrap().encode_to_bytes() {
-                  Ok(msg) => {
-                    // Send single message as is
-                    if let Err(e) = self.transport_send_packet(&addr, msg).await {
-                      tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
-                    }
-                  }
-                  Err(e) => {
-                    tracing::error!(err = %e, "memberlist.state: failed to encode gossip message");
-                  }
+                // Send single message as is
+                if let Err(e) = self.transport_send_packet(&addr, msgs.pop().unwrap()).await {
+                  tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
                 }
               })
             } else {
               futures::future::Either::Right(async {
-                match CompoundMessagesEncoder::new(msgs.as_ref()).encode_to_bytes() {
-                  Ok(msgs) => {
-                    // Send compound message
-                    if let Err(e) = self.transport_send_packets(&addr, msgs).await {
-                      tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
-                    }
-                  }
-                  Err(e) => {
-                    tracing::error!(err = %e, "memberlist.state: failed to encode gossip messages");
-                  }
+                // Send compound message
+                if let Err(e) = self.transport_send_packets(&addr, msgs).await {
+                  tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
                 }
               })
             };

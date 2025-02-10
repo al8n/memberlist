@@ -280,6 +280,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
     + Send
     + Sync
     + 'static;
+
   /// The async runtime
   type Runtime: RuntimeLite;
   /// The options used to construct the transport
@@ -319,7 +320,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns the size of header overhead when trying to send messages through packet stream ([`Transport::send_packets`]).
   ///
   /// e.g. if every time invoking [`Transport::send_packets`],
-  /// the concrete implementation wants to  add a header of 10 bytes,
+  /// the concrete implementation wants to add a header of 10 bytes,
   /// then the packet overhead is 10 bytes.
   fn packets_header_overhead(&self) -> usize;
 
@@ -420,6 +421,42 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// connections from other peers. How this is set up for listening is
   /// left as an exercise for the concrete transport implementations.
   fn stream(&self) -> StreamSubscriber<Self::ResolvedAddress, Self::Stream>;
+
+  /// Returns `true` if the transport provides provides reliable packets delivery.
+  /// 
+  /// When `true`, the [`Memberlist`] will not include checksums in packets
+  /// even if a [`ChecksumAlgorithm`] is configured in [`Options`],
+  /// since the transport already guarantees data integrity.
+  ///
+  /// # Examples
+  /// 
+  /// - Reliable: TCP, QUIC
+  /// - Unreliable: UDP
+  fn packet_reliable(&self) -> bool;
+
+  /// Returns `true` if the transport provides packets security.
+  /// 
+  /// When `true`, the [`Memberlist`] will not perform additional payload
+  /// encryption even if a [`EncryptionAlgorithm`] is configured in [`Options`],
+  /// since the transport already provides packet security.
+  ///
+  /// # Examples
+  /// 
+  /// - Secure: QUIC, TLS
+  /// - Insecure: TCP, UDP
+  fn packet_secure(&self) -> bool;
+
+  /// Returns `true` if the transport provides stream security.
+  /// 
+  /// When `true`, the [`Memberlist`] will not perform additional payload
+  /// encryption even if a [`EncryptionAlgorithm`] is configured in [`Options`],
+  /// since the transport already provides stream security.
+  ///
+  /// # Examples
+  /// 
+  /// - Secure: QUIC, TLS 
+  /// - Insecure: TCP
+  fn stream_secure(&self) -> bool;
 
   /// Shutdown the transport
   fn shutdown(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
