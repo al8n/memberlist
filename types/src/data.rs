@@ -246,6 +246,17 @@ pub enum DecodeError {
     field: &'static str,
   },
 
+  /// Returned when the buffer contains duplicate fields for the same tag in a message.
+  #[error("duplicate field {field} with tag {tag} in {ty}")]
+  DuplicateField {
+    /// The type of the message.
+    ty: &'static str,
+    /// The name of the field.
+    field: &'static str,
+    /// The tag of the field.
+    tag: u8,
+  },
+
   /// Returned when there is a unknown wire type.
   #[error("unknown wire type value {0}")]
   UnknownWireType(u8),
@@ -289,6 +300,12 @@ impl DecodeError {
   #[inline]
   pub const fn missing_field(ty: &'static str, field: &'static str) -> Self {
     Self::MissingField { ty, field }
+  }
+
+  /// Creates a new duplicate field decoding error.
+  #[inline]
+  pub const fn duplicate_field(ty: &'static str, field: &'static str, tag: u8) -> Self {
+    Self::DuplicateField { ty, field, tag }
   }
 
   /// Creates a new unknown wire type decoding error.

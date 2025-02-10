@@ -137,7 +137,7 @@
 //   opts: Arc<Options<I, A>>,
 //   advertise_addr: A::ResolvedAddress,
 //   local_addr: A::Address,
-//   packet_rx: PacketSubscriber<I, A::ResolvedAddress, R::Instant>,
+//   packet_rx: PacketSubscriber<A::ResolvedAddress, R::Instant>,
 //   stream_rx: StreamSubscriber<A::ResolvedAddress, S::Stream>,
 //   num_v4_sockets: usize,
 //   v4_round_robin: AtomicUsize,
@@ -584,7 +584,7 @@
 //   async fn send_message(
 //     &self,
 //     conn: &mut Self::Stream,
-//     msg: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
+//     msg: Bytes,
 //   ) -> Result<usize, Self::Error> {
 //     let ddl = conn.write_deadline();
 //     self.send_by_promised(conn.with_deadline(ddl), msg).await
@@ -593,7 +593,7 @@
 //   async fn send_packet(
 //     &self,
 //     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-//     packet: Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>,
+//     packet: Bytes,
 //   ) -> Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error> {
 //     let start = <Self::Runtime as RuntimeLite>::now();
 //     let encoded_size = W::encoded_len(&packet);
@@ -613,12 +613,12 @@
 //   async fn send_packets(
 //     &self,
 //     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-//     packets: TinyVec<Message<Self::Id, <Self::Resolver as AddressResolver>::ResolvedAddress>>,
+//     packets: Bytes,
 //   ) -> Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error> {
 //     let start = <Self::Runtime as RuntimeLite>::now();
 
 //     let packets_overhead = self.packets_header_overhead();
-//     let batches = batch::<_, _, _, Self::Wire>(
+//     let batches = batch::<_, _, _>(
 //       packets_overhead - PACKET_HEADER_OVERHEAD,
 //       PACKET_HEADER_OVERHEAD,
 //       PACKET_OVERHEAD,
@@ -678,7 +678,6 @@
 //   fn packet(
 //     &self,
 //   ) -> PacketSubscriber<
-//     Self::Id,
 //     <Self::Resolver as AddressResolver>::ResolvedAddress,
 //     <Self::Runtime as RuntimeLite>::Instant,
 //   > {
@@ -717,12 +716,11 @@
 //   }
 // }
 
-// impl<I, A, S, W, R> Drop for NetTransport<I, A, S, W, R>
+// impl<I, A, S, R> Drop for NetTransport<I, A, S, R>
 // where
 //   I: Id,
 //   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
 //   S: StreamLayer<Runtime = R>,
-//   W: Wire<Id = I, Address = A::ResolvedAddress>,
 //   R: Runtime,
 // {
 //   fn drop(&mut self) {

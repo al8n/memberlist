@@ -3,6 +3,14 @@ use core::marker::PhantomData;
 use bytes::Bytes;
 use triomphe::Arc;
 
+mod checksumed;
+mod compressed;
+mod encrypted;
+
+pub use checksumed::*;
+pub use compressed::*;
+pub use encrypted::*;
+
 use super::*;
 
 macro_rules! enum_wrapper {
@@ -183,6 +191,12 @@ enum_wrapper!(
     Nack(Nack) = 10,
     /// Error response message
     ErrorResponse(ErrorResponse) = 11,
+    /// Checksumed message
+    Checksumed(ChecksumedMessage<I, A>) = 12,
+    /// Encrypted message
+    Encrypted(EncryptedMessage<I, A>) = 13,
+    /// Compressed message
+    Compressed(CompressedMessage<I, A>) = 14,
   }
 );
 
@@ -213,6 +227,9 @@ where
       MessageRef::UserData(val) => Self::UserData(Bytes::from_ref(val)?),
       MessageRef::Nack(val) => Self::Nack(Nack::from_ref(val)?),
       MessageRef::ErrorResponse(val) => Self::ErrorResponse(ErrorResponse::from_ref(val)?),
+      MessageRef::Checksumed(val) => Self::Checksumed(ChecksumedMessage::from_ref(val)?),
+      MessageRef::Encrypted(val) => Self::Encrypted(EncryptedMessage::from_ref(val)?),
+      MessageRef::Compressed(val) => Self::Compressed(CompressedMessage::from_ref(val)?),
     })
   }
 
@@ -229,6 +246,9 @@ where
       Self::UserData(val) => val.encoded_len_with_length_delimited(),
       Self::Nack(val) => val.encoded_len_with_length_delimited(),
       Self::ErrorResponse(val) => val.encoded_len_with_length_delimited(),
+      Self::Checksumed(val) => val.encoded_len_with_length_delimited(),
+      Self::Encrypted(val) => val.encoded_len_with_length_delimited(),
+      Self::Compressed(val) => val.encoded_len_with_length_delimited(),
     }
   }
 
@@ -275,6 +295,15 @@ where
         offset += val.encode_length_delimited(&mut buf[offset..])?;
       }
       Self::ErrorResponse(val) => {
+        offset += val.encode_length_delimited(&mut buf[offset..])?;
+      }
+      Self::Checksumed(val) => {
+        offset += val.encode_length_delimited(&mut buf[offset..])?;
+      }
+      Self::Encrypted(val) => {
+        offset += val.encode_length_delimited(&mut buf[offset..])?;
+      }
+      Self::Compressed(val) => {
         offset += val.encode_length_delimited(&mut buf[offset..])?;
       }
     }
@@ -373,6 +402,27 @@ where
         offset += bytes_read;
         (offset, Self::ErrorResponse(decoded))
       }
+      Message::<I, A>::CHECKSUMED_BYTE => {
+        let (bytes_read, decoded) = <ChecksumedMessageRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
+          ChecksumedMessage<I, A>,
+        >>::decode_length_delimited(&src[offset..])?;
+        offset += bytes_read;
+        (offset, Self::Checksumed(decoded))
+      }
+      Message::<I, A>::ENCRYPTED_BYTE => {
+        let (bytes_read, decoded) = <EncryptedMessageRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
+          EncryptedMessage<I, A>,
+        >>::decode_length_delimited(&src[offset..])?;
+        offset += bytes_read;
+        (offset, Self::Encrypted(decoded))
+      }
+      Message::<I, A>::COMPRESSED_BYTE => {
+        let (bytes_read, decoded) = <CompressedMessageRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
+          CompressedMessage<I, A>,
+        >>::decode_length_delimited(&src[offset..])?;
+        offset += bytes_read;
+        (offset, Self::Compressed(decoded))
+      }
       _ => {
         let (wt, tag) = super::split(b);
         WireType::try_from(wt).map_err(DecodeError::unknown_wire_type)?;
@@ -438,6 +488,12 @@ pub enum MessageRef<'a, I, A> {
   Nack(Nack),
   /// Error response message
   ErrorResponse(ErrorResponseRef<'a>),
+  /// Checksumed message
+  Checksumed(ChecksumedMessageRef<'a, I, A>),
+  /// Encrypted message
+  Encrypted(EncryptedMessageRef<'a, I, A>),
+  /// Compressed message
+  Compressed(CompressedMessageRef<'a, I, A>),
 }
 
 impl<I, A> MessageRef<'_, I, A> {
@@ -455,6 +511,9 @@ impl<I, A> MessageRef<'_, I, A> {
       Self::UserData(_) => MessageType::UserData,
       Self::Nack(_) => MessageType::Nack,
       Self::ErrorResponse(_) => MessageType::ErrorResponse,
+      Self::Checksumed(_) => MessageType::Checksumed,
+      Self::Encrypted(_) => MessageType::Encrypted,
+      Self::Compressed(_) => MessageType::Compressed,
     }
   }
 }
@@ -687,6 +746,18 @@ const _: () = {
           let error_response = u.arbitrary::<ErrorResponse>()?;
           Self::ErrorResponse(error_response)
         }
+        MessageType::Checksumed => {
+          let checksumed = u.arbitrary::<ChecksumedMessage<I, A>>()?;
+          Self::Checksumed(checksumed)
+        }
+        MessageType::Encrypted => {
+          let encrypted = u.arbitrary::<EncryptedMessage<I, A>>()?;
+          Self::Encrypted(encrypted)
+        }
+        MessageType::Compressed => {
+          let compressed = u.arbitrary::<CompressedMessage<I, A>>()?;
+          Self::Compressed(compressed)
+        }
       }))
     }
   }
@@ -769,6 +840,18 @@ const _: () = {
         MessageType::ErrorResponse => {
           let error_response = ErrorResponse::arbitrary(g);
           Self::ErrorResponse(error_response)
+        }
+        MessageType::Checksumed => {
+          let checksumed = ChecksumedMessage::<I, A>::arbitrary(g);
+          Self::Checksumed(checksumed)
+        }
+        MessageType::Encrypted => {
+          let encrypted = EncryptedMessage::<I, A>::arbitrary(g);
+          Self::Encrypted(encrypted)
+        }
+        MessageType::Compressed => {
+          let compressed = CompressedMessage::<I, A>::arbitrary(g);
+          Self::Compressed(compressed)
         }
       })
     }

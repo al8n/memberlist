@@ -255,7 +255,7 @@ where
 }
 
 /// Batch a collection of messages.
-pub fn batch<I, A, M, W>(
+pub fn batch<I, A, M>(
   fixed_payload_overhead: usize,
   batch_overhead: usize,
   msg_overhead: usize,

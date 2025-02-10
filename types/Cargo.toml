@@ -46,7 +46,7 @@ serde = ["dep:serde", "smol_str/serde", "bytes/serde", "nodecraft/serde", "small
 [dependencies]
 bytes.workspace = true
 const-varint.workspace = true
-derive_more = { workspace = true, features = ["from", "is_variant", "unwrap", "try_unwrap"] }
+derive_more = { workspace = true, features = ["from", "display", "is_variant", "unwrap", "try_unwrap"] }
 either = { version = "1", default-features = false }
 ipnet = { version = "2", default-features = false }
 nodecraft.workspace = true
