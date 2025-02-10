@@ -128,7 +128,7 @@ where
 
     if encrypted_message_len < encryption_algo.encrypted_length(0) {
       tracing::error!(remote = %from, "memberlist_net.promised: received encrypted message with small payload");
-      return Err(SecurityError::SmallPayload.into());
+      return Err(EncryptionError::SmallPayload.into());
     }
 
     // Decrypt message
@@ -136,7 +136,7 @@ where
       Some(enp) => enp,
       None => {
         tracing::error!(remote = %from, "memberlist_net.promised: received encrypted message, but encryption is disabled");
-        return Err(SecurityError::Disabled.into());
+        return Err(EncryptionError::Disabled.into());
       }
     };
 
@@ -206,7 +206,7 @@ where
       Some(enp) => enp,
       None => {
         tracing::error!(remote = %from, "memberlist_net.promised: received encrypted message, but encryption is disabled");
-        return Err(SecurityError::Disabled.into());
+        return Err(EncryptionError::Disabled.into());
       }
     };
 
@@ -221,7 +221,7 @@ where
 
     if encrypted_message_len < encryption_algo.encrypted_length(0) {
       tracing::error!(remote = %from, "memberlist_net.promised: received encrypted message with small payload");
-      return Err(SecurityError::SmallPayload.into());
+      return Err(EncryptionError::SmallPayload.into());
     }
 
     let mut readed = ENCRYPT_HEADER;
@@ -295,7 +295,7 @@ where
         }
       }
     }
-    Err(NetTransportError::Security(SecurityError::NoInstalledKeys))
+    Err(NetTransportError::Security(EncryptionError::NoInstalledKeys))
   }
 
   #[cfg(all(feature = "compression", feature = "encryption"))]

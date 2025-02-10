@@ -60,7 +60,7 @@
 // #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 // pub mod security;
 // #[cfg(feature = "encryption")]
-// use security::{EncryptionAlgo, SecretKey, Keyring, SecurityError};
+// use security::{EncryptionAlgo, SecretKey, Keyring, EncryptionError};
 
 // /// Errors for the net transport.
 // pub mod error;

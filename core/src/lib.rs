@@ -6,14 +6,51 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
+#[cfg(all(
+  feature = "compression",
+  not(any(
+    feature = "lzw",
+    feature = "zlib",
+    feature = "zstd",
+    feature = "lz4",
+    feature = "brotli",
+    feature = "deflate",
+    feature = "gzip",
+    feature = "snappy",
+  ))
+))]
+compile_error!("compression feature is enabled but no compress algorithm is selected");
+
+#[cfg(all(
+  feature = "checksum",
+  not(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3",
+  ))
+))]
+compile_error!("checksum feature is enabled but no checksum algorithm is selected");
+
 mod api;
 mod awareness;
 mod base;
 mod broadcast;
+#[cfg(feature = "checksum")]
+#[cfg_attr(docsrs, doc(cfg(feature = "checksum")))]
+mod checksum;
+#[cfg(feature = "compression")]
+#[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
+mod compress;
 mod network;
 mod options;
 mod state;
 mod suspicion;
+
+#[cfg(feature = "encryption")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+mod security;
 
 /// Trait can be implemented to hook into the memberlist lifecycle.
 pub mod delegate;
@@ -23,13 +60,8 @@ pub mod error;
 #[cfg(feature = "encryption")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 pub mod keyring;
-
-#[cfg(feature = "metrics")]
-#[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
-pub use metrics;
 /// The transimit queue implementation.
 pub mod queue;
-pub use tracing;
 /// The transport layer for memberlist
 pub mod transport;
 /// The types used in memberlist
@@ -42,9 +74,16 @@ pub use base::*;
 pub use broadcast::*;
 pub use bytes;
 pub use futures;
+#[cfg(feature = "metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
+pub use metrics;
 pub use network::META_MAX_SIZE;
 pub use nodecraft::CheapClone;
 pub use options::Options;
+pub use tracing;
+
+#[cfg(feature = "encryption")]
+pub(crate) use security::*;
 
 /// All unit test fns are exported in the `tests` module.
 /// This module is used for users want to use other async runtime,

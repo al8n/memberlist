@@ -4,133 +4,71 @@ use aes_gcm::{
   Aes128Gcm, Aes256Gcm, AesGcm,
 };
 use bytes::{Buf, BufMut, BytesMut};
-use memberlist_core::transport::Wire;
-pub use memberlist_core::types::{SecretKey, Keyring, KeyringError, SecretKeys};
-use nodecraft::resolver::AddressResolver;
 use rand::Rng;
 
-use crate::{NetTransportError, ENCRYPT_TAG};
+use super::{
+  keyring::{Keyring, KeyringError},
+  types::{EncryptionAlgorithm, SecretKey, SecretKeys},
+};
+
+const NONCE_SIZE: usize = 12;
+const TAG_SIZE: usize = 16;
+const BLOCK_SIZE: usize = 16;
 
 type Aes192Gcm = AesGcm<Aes192, U12>;
-
-impl<A: AddressResolver, W: Wire> From<UnknownEncryptionAlgo> for NetTransportError<A, W> {
-  fn from(value: UnknownEncryptionAlgo) -> Self {
-    Self::Security(EncryptionError::UnknownEncryptionAlgo(value))
-  }
-}
-
-impl<A: AddressResolver, W: Wire> From<aead::Error> for NetTransportError<A, W> {
-  fn from(value: aead::Error) -> Self {
-    Self::Security(value.into())
-  }
-}
-
-impl<A: AddressResolver, W: Wire> From<EncryptorError> for NetTransportError<A, W> {
-  fn from(value: EncryptorError) -> Self {
-    Self::Security(value.into())
-  }
-}
-
-/// Encrypt/Decrypt errors.
-#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
-pub enum EncryptorError {
-  /// AEAD ciphers error
-  #[error(transparent)]
-  Aead(#[from] aead::Error),
-}
 
 /// Security errors
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum EncryptionError {
   /// Unknown encryption algorithm
-  #[error("security: unknown encryption version: {0}")]
-  UnknownEncryptionAlgo(#[from] UnknownEncryptionAlgo),
+  #[error("unknown encryption algorithm: {0}")]
+  UnknownEncryptionAlgorithm(u8),
   /// Encryt/Decrypt errors
-  #[error("security: {0}")]
-  Encryptor(#[from] EncryptorError),
+  #[error("failed to encrypt/decrypt")]
+  Encryptor,
   /// Security feature is disabled
-  #[error("security: security related feature is disabled")]
+  #[error("security related feature is disabled")]
   Disabled,
   /// Payload is too small to decrypt
-  #[error("security: payload is too small to decrypt")]
+  #[error("payload is too small to decrypt")]
   SmallPayload,
   /// No installed keys could decrypt the message
-  #[error("security: no installed keys could decrypt the message")]
+  #[error("no installed keys could decrypt the message")]
   NoInstalledKeys,
   /// Secret key is not in the keyring
-  #[error("security: {0}")]
+  #[error(transparent)]
   Keyring(#[from] KeyringError),
 }
 
 impl From<aead::Error> for EncryptionError {
-  fn from(value: aead::Error) -> Self {
-    Self::Encryptor(EncryptorError::Aead(value))
+  fn from(_: aead::Error) -> Self {
+    Self::Encryptor
   }
 }
 
-/// Unknown encryption algorithm
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct UnknownEncryptionAlgo(u8);
-
-impl core::fmt::Display for UnknownEncryptionAlgo {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "unknown encryption algorithm {}", self.0)
+#[inline]
+const fn encrypt_overhead(algo: EncryptionAlgorithm) -> usize {
+  match algo {
+    EncryptionAlgorithm::Pkcs7 => 44, // IV: 12, Padding: 16, Tag: 16
+    EncryptionAlgorithm::NoPadding => 28, // IV: 12, Tag: 16
+    _ => 0,
   }
 }
 
-impl std::error::Error for UnknownEncryptionAlgo {}
+#[inline]
+const fn encrypted_length(algo: EncryptionAlgorithm, inp: usize) -> usize {
+  match algo {
+    EncryptionAlgorithm::Pkcs7 => {
+      // Determine the padding size
+      let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
 
-/// Encryption algorithm
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(u8)]
-#[non_exhaustive]
-#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
-pub enum EncryptionAlgo {
-  /// AES-GCM, using PKCS7 padding
-  #[default]
-  PKCS7 = { *ENCRYPT_TAG.start() },
-  /// AES-GCM, no padding. Padding not needed,
-  NoPadding = { *ENCRYPT_TAG.start() + 1 },
-}
-
-impl TryFrom<u8> for EncryptionAlgo {
-  type Error = UnknownEncryptionAlgo;
-
-  fn try_from(val: u8) -> Result<Self, Self::Error> {
-    match val {
-      val if val.eq(ENCRYPT_TAG.start()) => Ok(Self::PKCS7),
-      val if val == *ENCRYPT_TAG.start() + 1 => Ok(Self::NoPadding),
-      val => Err(UnknownEncryptionAlgo(val)),
+      // Sum the extra parts to get total size
+      NONCE_SIZE + inp + padding + TAG_SIZE
     }
+    EncryptionAlgorithm::NoPadding => NONCE_SIZE + inp + TAG_SIZE,
+    _ => inp,
   }
 }
-
-impl EncryptionAlgo {
-  pub(crate) fn encrypt_overhead(&self) -> usize {
-    match self {
-      Self::PKCS7 => 49,     // Algo: 1, Len: 4, IV: 12, Padding: 16, Tag: 16
-      Self::NoPadding => 33, // Algo: 1, Len: 4, IV: 12, Tag: 16
-    }
-  }
-
-  pub(crate) const fn encrypted_length(&self, inp: usize) -> usize {
-    match self {
-      Self::PKCS7 => {
-        // Determine the padding size
-        let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
-
-        // Sum the extra parts to get total size
-        NONCE_SIZE + inp + padding + TAG_SIZE
-      }
-      Self::NoPadding => NONCE_SIZE + inp + TAG_SIZE,
-    }
-  }
-}
-
-pub(crate) const NONCE_SIZE: usize = 12;
-const TAG_SIZE: usize = 16;
-pub(crate) const BLOCK_SIZE: usize = 16;
 
 /// pkcs7encode is used to pad a byte buffer to a specific block size using
 /// the PKCS7 algorithm. "Ignores" some bytes to compensate for IV
@@ -170,18 +108,19 @@ pub(super) fn read_nonce(src: &mut BytesMut) -> [u8; NONCE_SIZE] {
 }
 
 pub(super) fn encrypt(
-  algo: EncryptionAlgo,
+  algo: EncryptionAlgorithm,
   pk: SecretKey,
   nonce: [u8; NONCE_SIZE],
   auth_data: &[u8],
   dst: &mut BytesMut,
 ) -> Result<(), EncryptionError> {
   match algo {
-    EncryptionAlgo::NoPadding => {}
-    EncryptionAlgo::PKCS7 => {
+    EncryptionAlgorithm::NoPadding => {}
+    EncryptionAlgorithm::Pkcs7 => {
       let buf_len = dst.len();
       pkcs7encode(dst, buf_len, 0, BLOCK_SIZE);
     }
+    _ => return Err(EncryptionError::UnknownEncryptionAlgorithm(algo.as_u8())),
   }
 
   match pk {
@@ -208,11 +147,15 @@ pub(super) fn encrypt(
 
 pub(super) fn decrypt(
   key: SecretKey,
-  algo: EncryptionAlgo,
+  algo: EncryptionAlgorithm,
   nonce: [u8; NONCE_SIZE],
   auth_data: &[u8],
   dst: &mut BytesMut,
 ) -> Result<(), EncryptionError> {
+  if algo.is_unknown() {
+    return Err(EncryptionError::UnknownEncryptionAlgorithm(algo.as_u8()));
+  }
+
   // Get the AES block cipher
   match key {
     SecretKey::Aes128(pk) => {
@@ -234,9 +177,8 @@ pub(super) fn decrypt(
         .map_err(Into::into)
     }
   }
-  .map(|_| match algo {
-    EncryptionAlgo::NoPadding => {}
-    EncryptionAlgo::PKCS7 => {
+  .inspect(|_| {
+    if algo.is_pkcs_7() {
       pkcs7decode(dst);
     }
   })
@@ -246,14 +188,12 @@ pub(super) fn decrypt(
 mod tests {
   use super::*;
 
-  fn encrypt_decrypt_versioned(vsn: EncryptionAlgo) {
+  fn encrypt_decrypt_versioned(vsn: EncryptionAlgorithm) {
     let k1 = SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     let plain_text = b"this is a plain text message";
     let extra = b"random data";
 
     let mut encrypted = BytesMut::new();
-    encrypted.put_u8(vsn as u8);
-    encrypted.put_u32(0);
     let nonce = write_header(&mut encrypted);
     let data_offset = encrypted.len();
     encrypted.put_slice(plain_text);
@@ -261,23 +201,20 @@ mod tests {
     let mut dst = encrypted.split_off(data_offset);
     encrypt(vsn, k1, nonce, extra, &mut dst).unwrap();
     encrypted.unsplit(dst);
-    let exp_len = vsn.encrypted_length(plain_text.len()) + 5;
+    let exp_len = encrypted_length(vsn, plain_text.len());
     assert_eq!(encrypted.len(), exp_len);
 
-    encrypted.advance(5);
     read_nonce(&mut encrypted);
     decrypt(k1, vsn, nonce, extra, &mut encrypted).unwrap();
     assert_eq!(encrypted.as_ref(), plain_text);
   }
 
-  async fn decrypt_by_other_key(algo: EncryptionAlgo) {
+  async fn decrypt_by_other_key(algo: EncryptionAlgorithm) {
     let k1 = SecretKey::Aes128([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     let plain_text = b"this is a plain text message";
     let extra = b"random data";
 
     let mut encrypted = BytesMut::new();
-    encrypted.put_u8(algo as u8);
-    encrypted.put_u32(0);
     let nonce = write_header(&mut encrypted);
     let data_offset = encrypted.len();
     encrypted.put_slice(plain_text);
@@ -285,10 +222,8 @@ mod tests {
     let mut dst = encrypted.split_off(data_offset);
     encrypt(algo, k1, nonce, extra, &mut dst).unwrap();
     encrypted.unsplit(dst);
-    let exp_len = algo.encrypted_length(plain_text.len()) + 5;
+    let exp_len = encrypted_length(algo, plain_text.len());
     assert_eq!(encrypted.len(), exp_len);
-
-    encrypted.advance(5);
     read_nonce(&mut encrypted);
 
     for (idx, k) in TEST_KEYS.iter().rev().enumerate() {
@@ -298,29 +233,29 @@ mod tests {
         return;
       }
       let e = decrypt(*k, algo, nonce, extra, &mut encrypted).unwrap_err();
-      assert_eq!(e.to_string(), "security: aead::Error");
+      assert_eq!(e.to_string(), "aead::Error");
     }
   }
 
   #[test]
   fn test_encrypt_decrypt_v0() {
-    encrypt_decrypt_versioned(EncryptionAlgo::PKCS7);
+    encrypt_decrypt_versioned(EncryptionAlgorithm::Pkcs7);
   }
 
   #[test]
   fn test_encrypt_decrypt_v1() {
-    encrypt_decrypt_versioned(EncryptionAlgo::NoPadding);
+    encrypt_decrypt_versioned(EncryptionAlgorithm::NoPadding);
   }
 
   #[tokio::test]
   async fn test_decrypt_by_other_key_v0() {
-    let algo = EncryptionAlgo::PKCS7;
+    let algo = EncryptionAlgorithm::Pkcs7;
     decrypt_by_other_key(algo).await;
   }
 
   #[tokio::test]
   async fn test_decrypt_by_other_key_v1() {
-    let algo = EncryptionAlgo::NoPadding;
+    let algo = EncryptionAlgorithm::NoPadding;
     decrypt_by_other_key(algo).await;
   }
 

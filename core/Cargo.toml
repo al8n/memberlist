@@ -18,7 +18,27 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = ["metrics"]
 metrics = ["dep:metrics", "memberlist-types/metrics"]
-encryption = ["indexmap", "memberlist-types/encryption"]
+
+# checksum related feature
+checksum = []
+crc32 = ["crc32fast"]
+xxhash32 = ["xxhash-rust/xxh32"]
+xxhash64 = ["xxhash-rust/xxh64"]
+xxhash3 = ["xxhash-rust/xxh3"]
+murmur3 = ["dep:hash32"]
+
+# encryption related feature
+encryption = ["rayon", "aead", "aes-gcm", "cbc", "indexmap", "memberlist-types/encryption"]
+
+# compression related feature
+compression = ["rayon"]
+gzip = ["flate2"]
+zlib = ["flate2"]
+deflate = ["flate2"]
+lzw = ["weezl"]
+lz4 = ["lz4_flex"]
+brotli = ["dep:brotli"]
+snappy = ["dep:snap"]
 
 serde = [
   "dep:serde",
@@ -27,7 +47,6 @@ serde = [
   "humantime-serde",
   "memberlist-types/serde",
 ]
-rkyv = ["dep:rkyv", "nodecraft/rkyv"]
 
 # expose all tests fn for users who want to use other runtime
 # see memberlist-wasm for more examples about how to use those tests fn
@@ -52,16 +71,16 @@ async-channel.workspace = true
 async-lock.workspace = true
 bytes.workspace = true
 byteorder.workspace = true
+cfg-if = "1"
 const-varint.workspace = true
 derive_more.workspace = true
-either = "1"
+either.workspace = true
 futures.workspace = true
-ipnet = "2"
 nodecraft = { workspace = true, features = ["default", "async", "agnostic", "resolver"] }
 paste.workspace = true
 parking_lot = "0.12"
 pin-project.workspace = true
-rand = "0.9"
+rand.workspace = true
 scopeguard.workspace = true
 smol_str.workspace = true
 smallvec.workspace = true
@@ -71,9 +90,6 @@ triomphe.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 viewit.workspace = true
-
-base64 = { version = "0.22", optional = true }
-rkyv = { workspace = true, optional = true }
 
 # serde feature
 serde = { workspace = true, optional = true }
@@ -85,27 +101,44 @@ tracing-subscriber = { version = "0.3", optional = true, features = [
   "tracing-log",
 ] }
 
-# arbitrary feature
-arbitrary = { version = "1", optional = true }
-quickcheck = { version = "1", optional = true }
-quickcheck_macros = { version = "1", optional = true }
+# encryption
+aead = { version = "0.5", features = ["bytes", "std"], optional = true }
+aes-gcm = { version = "0.10", optional = true }
+cbc = { version = "0.1", optional = true }
+indexmap = { workspace = true, optional = true }
 
+# checksum
+crc32fast = { version = "1", optional = true }
+xxhash-rust = { version = "0.8", optional = true }
+hash32 = { version = "0.3", optional = true }
+
+# compression
+weezl = { version = "0.1", optional = true }
+brotli = { version = "7", optional = true }
+snap = { version = "1", optional = true }
+lz4_flex = { version = "0.11", optional = true }
+flate2 = { version = "1", optional = true }
+zstd = { version = "0.13", optional = true }
+
+rayon = { version = "1", optional = true }
+
+# arbitrary feature
+arbitrary = { workspace = true, optional = true }
+quickcheck = { workspace = true, optional = true }
 
 # metrics feature
 metrics = { workspace = true, optional = true }
 
-indexmap = { workspace = true, optional = true }
-
 [dev-dependencies]
-arbitrary = "1"
-quickcheck = "1"
+arbitrary = { workspace = true, features = ["derive"] }
+quickcheck = { workspace = true, features = ["default"] }
 quickcheck_macros = "1"
 tracing-subscriber = { version = "0.3", features = [
   "env-filter",
   "tracing-log",
 ] }
 agnostic = { workspace = true, features = ["net", "tokio"] }
-rand = "0.9"
+rand.workspace = true
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 parking_lot = "0.12"

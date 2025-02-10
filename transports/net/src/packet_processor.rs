@@ -219,7 +219,7 @@ where
         tracing::error!(
           "memberlist_net.packet: incoming packet is not encrypted, and verify incoming is forced"
         );
-        return Err(super::security::SecurityError::Disabled.into());
+        return Err(super::security::EncryptionError::Disabled.into());
       } else {
         if !skip_inbound_label_check && packet_label.ne(label) {
           tracing::error!(local_label=%label, remote_label=%packet_label, "memberlist_net.packet: discarding packet with unacceptable label");
@@ -252,7 +252,7 @@ where
     let encryptor = match encryptor {
       Some(encryptor) => encryptor,
       None => {
-        return Err(SecurityError::Disabled.into());
+        return Err(EncryptionError::Disabled.into());
       }
     };
     let keys = encryptor.keys().await;
@@ -324,7 +324,7 @@ where
         tracing::error!(
           "memberlist_net.packet: incoming packet is not encrypted, and verify incoming is forced"
         );
-        return Err(security::SecurityError::Disabled.into());
+        return Err(security::EncryptionError::Disabled.into());
       } else {
         if !skip_inbound_label_check && packet_label.ne(label) {
           tracing::error!(local_label=%label, remote_label=%packet_label, "memberlist_net.packet: discarding packet with unacceptable label");
@@ -357,7 +357,7 @@ where
     let encryptor = match encryptor {
       Some(encryptor) => encryptor,
       None => {
-        return Err(security::SecurityError::Disabled.into());
+        return Err(security::EncryptionError::Disabled.into());
       }
     };
     let keys = encryptor.keys().await;
@@ -479,7 +479,7 @@ where
         }
       }
     }
-    Err(SecurityError::NoInstalledKeys.into())
+    Err(EncryptionError::NoInstalledKeys.into())
   }
 
   #[cfg(feature = "compression")]

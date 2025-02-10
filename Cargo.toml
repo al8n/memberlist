@@ -39,6 +39,7 @@ bytes = { version = "1", default-features = false }
 byteorder = { version = "1", default-features = false }
 const-varint = { version = "0.2", default-features = false }
 derive_more = { version = "2", default-features = false }
+either = { version = "1", default-features = false }
 futures = "0.3"
 indexmap = "2"
 getifs = "0.2"
@@ -56,13 +57,16 @@ scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 triomphe = { version = "0.1", default-features = false }
 humantime-serde = "1"
-rkyv = { version = "0.8", features = ["smol_str-0_3", "bytes-1"] }
 smallvec = "1"
 smallvec-wrapper = { version = "0.3", default-features = false }
 smol_str = { version = "0.3", default-features = false }
+rand = "0.9"
 thiserror = { version = "2", default-features = false }
 tracing = "0.1"
 viewit = "0.1.5"
+
+arbitrary = { version = "1", default-features = false }
+quickcheck = { version = "1", default-features = false }
 
 memberlist-core = { version = "0.6", path = "core", default-features = false }
 memberlist-net = { version = "0.6", path = "transports/net", default-features = false }

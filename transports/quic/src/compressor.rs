@@ -37,7 +37,7 @@ where
 
 /// Compress/Decompress errors.
 #[derive(Debug, thiserror::Error)]
-pub enum CompressorError {
+pub enum CompressionError {
   /// Compress errors
   #[error(transparent)]
   Compress(#[from] CompressError),

@@ -9,6 +9,13 @@ use crate::{
   types::{DecodeError, EncodeError, ErrorResponse, SmallVec},
 };
 
+#[cfg(feature = "checksum")]
+pub use crate::checksum::ChecksumError;
+#[cfg(feature = "compression")]
+pub use crate::compress::{CompressError, CompressionError, DecompressError};
+#[cfg(feature = "encryption")]
+pub use crate::security::EncryptionError;
+
 pub use crate::transport::TransportError;
 
 /// Error returned by `Memberlist::join_many`.
@@ -155,6 +162,22 @@ pub enum Error<T: Transport, D: Delegate> {
   /// Returned when a custom error is created by users.
   #[error("{0}")]
   Other(Cow<'static, str>),
+
+  /// Encryption error
+  #[error(transparent)]
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  Encryption(#[from] EncryptionError),
+  /// Compressor error
+  #[error(transparent)]
+  #[cfg(feature = "compression")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
+  Compression(#[from] CompressionError),
+  /// Checksum error
+  #[error(transparent)]
+  #[cfg(feature = "checksum")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "checksum")))]
+  Checksum(#[from] ChecksumError),
 }
 
 impl<T: Transport, D: Delegate> core::fmt::Debug for Error<T, D> {

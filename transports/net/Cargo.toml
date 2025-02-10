@@ -35,7 +35,6 @@ serde = [
   "indexmap/serde",
   "humantime-serde",
 ]
-rkyv = ["memberlist-core/rkyv"]
 
 metrics = ["memberlist-core/metrics", "dep:metrics"]
 test = [
@@ -71,7 +70,7 @@ async-lock.workspace = true
 bytes.workspace = true
 byteorder.workspace = true
 crc32fast = "1"
-either = "1"
+either.workspace = true
 futures.workspace = true
 indexmap.workspace = true
 getifs.workspace = true

@@ -4,7 +4,7 @@ use crate::COMPRESS_TAG;
 
 /// Compress/Decompress errors.
 #[derive(Debug, thiserror::Error)]
-pub enum CompressorError {
+pub enum CompressionError {
   /// Compress errors
   #[error("compressor: {0}")]
   Compress(#[from] CompressError),

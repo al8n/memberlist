@@ -53,7 +53,7 @@ pub enum QuicTransportError<A: AddressResolver, S: StreamLayer<Runtime = A::Runt
   #[cfg(feature = "compression")]
   #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
   #[error("compressor: {0}")]
-  Compressor(#[from] compressor::CompressorError),
+  Compressor(#[from] compressor::CompressionError),
 
   /// Returns when the computation task panic
   #[error("computation task panic")]

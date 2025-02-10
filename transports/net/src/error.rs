@@ -63,12 +63,12 @@ pub enum NetTransportError<A: AddressResolver> {
   #[cfg(feature = "compression")]
   #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
   #[error(transparent)]
-  Compressor(#[from] super::compressor::CompressorError),
+  Compressor(#[from] super::compressor::CompressionError),
   /// Returns when there is a security error. e.g. encryption/decryption error.
   #[error(transparent)]
   #[cfg(feature = "encryption")]
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  Security(#[from] super::security::SecurityError),
+  Security(#[from] super::security::EncryptionError),
 
   /// Returns when the computation task panic
   #[error("computation task panic")]
@@ -102,7 +102,7 @@ const _: () = {
 impl<A: AddressResolver> NetTransportError<A> {
   #[cfg(feature = "compression")]
   pub(crate) fn not_enough_bytes_to_decompress() -> Self {
-    Self::Compressor(super::compressor::CompressorError::NotEnoughBytes)
+    Self::Compressor(super::compressor::CompressionError::NotEnoughBytes)
   }
 }
 

@@ -1,17 +1,194 @@
 use core::marker::PhantomData;
-use std::borrow::Cow;
 
 use bytes::Bytes;
 
 use super::{merge, skip, split, Data, DataRef, DecodeError, EncodeError, WireType};
 
-const ZSTD_RANGE: core::ops::RangeInclusive<i8> = -99..=22;
-const BROTLI_TAG: i8 = 23;
-const GZIP_TAG: i8 = 24;
-const LZW_TAG: i8 = 25;
-const LZ4_TAG: i8 = 26;
-const SNAPPY_TAG: i8 = 27;
-const ZLIB_TAG: i8 = 28;
+const LZW_TAG: u8 = 0;
+const ZSTD_TAG: u8 = 1;
+const BROTLI_TAG: u8 = 2;
+const DEFLATE_TAG: u8 = 3;
+const GZIP_TAG: u8 = 4;
+const LZ4_TAG: u8 = 5;
+const SNAPPY_TAG: u8 = 6;
+const ZLIB_TAG: u8 = 7;
+
+macro_rules! num_to_enum {
+  (
+    $(#[$meta:meta])*
+    $name:ident($inner:ident in [$min:expr, $max:literal]):$exp:literal:$short:literal {
+      $($value:literal), +$(,)?
+    }
+  ) => {
+    paste::paste! {
+      $(#[$meta])*
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::Display, derive_more::IsVariant)]
+      #[non_exhaustive]
+      pub enum $name {
+        $(
+          [< $short:camel $value >] = $value,
+        )*
+      }
+
+      impl $name {
+        #[allow(unused_comparisons)]
+        const fn from_u8(value: u8) -> Self {
+          match value {
+            $(
+              $value => Self::[< $short:camel $value >],
+            )*
+            val if val > $max => Self::[< $short:camel $max >],
+            val if val < $min => Self::[< $short:camel $min >],
+            _ => Self::[< $short:camel $max >],
+          }
+        }
+      }
+
+      impl From<$inner> for $name {
+        fn from(value: $inner) -> Self {
+          Self::from_u8(value as u8)
+        }
+      }
+    }
+  };
+}
+
+num_to_enum! {
+  /// The brotli quality
+  #[repr(u8)]
+  BrotliQuality(u8 in [0, 11]):"quality":"Q" {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+  }
+}
+
+num_to_enum! {
+  /// The brotli window
+  #[repr(u8)]
+  BrotliWindow(u8 in [10, 24]):"window":"W" {
+    10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+  }
+}
+
+/// The brotli algorithm
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BrotliAlgorithm {
+  quality: BrotliQuality,
+  window: BrotliWindow,
+}
+
+impl Default for BrotliAlgorithm {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+impl BrotliAlgorithm {
+  /// Creates a new `BrotliAlgorithm` with the default quality and window.
+  #[inline]
+  pub const fn new() -> Self {
+    Self {
+      quality: BrotliQuality::Q11,
+      window: BrotliWindow::W22,
+    }
+  }
+
+  /// Creates a new `BrotliAlgorithm` with the quality and window.
+  #[inline]
+  pub const fn with_quality_and_window(quality: BrotliQuality, window: BrotliWindow) -> Self {
+    Self { quality, window }
+  }
+
+  /// Returns the quality of the brotli algorithm.
+  #[inline]
+  pub const fn quality(&self) -> BrotliQuality {
+    self.quality
+  }
+
+  /// Returns the window of the brotli algorithm.
+  #[inline]
+  pub const fn window(&self) -> BrotliWindow {
+    self.window
+  }
+
+  /// Encodes the algorithm settings into a single byte.
+  /// Quality (0-11) is stored in the high 4 bits.
+  /// Window (10-24) is stored in the low 4 bits, mapped to 0-15.
+  #[inline]
+  const fn encode(&self) -> u8 {
+    // Quality goes in high 4 bits
+    let quality_bits = (self.quality as u8) << 4;
+    // Window needs to be mapped from 10-24 to 0-15
+    let window_bits = (self.window as u8).saturating_sub(10);
+    quality_bits | window_bits
+  }
+
+  /// Decodes a single byte into algorithm settings.
+  /// Quality is extracted from high 4 bits.
+  /// Window is extracted from low 4 bits and mapped back to 10-24 range.
+  #[inline]
+  const fn decode(byte: u8) -> Self {
+    // Extract quality from high 4 bits
+    let quality = BrotliQuality::from_u8(byte >> 4);
+    // Extract window from low 4 bits and map back to 10-24 range
+    let window = BrotliWindow::from_u8(10 + (byte & 0x0F));
+    Self { quality, window }
+  }
+}
+
+/// The zstd algorithm
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::Display)]
+#[display("{}", level)]
+pub struct ZstdAlgorithm {
+  level: i8,
+}
+
+impl Default for ZstdAlgorithm {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+impl ZstdAlgorithm {
+  /// Creates a new `ZstdAlgorithm` with the default level.
+  #[inline]
+  pub const fn new() -> Self {
+    Self { level: 3 }
+  }
+
+  /// Creates a new `ZstdAlgorithm` with the level.
+  #[inline]
+  pub const fn with_level(level: i8) -> Self {
+    Self { level }
+  }
+
+  /// Returns the level of the zstd algorithm.
+  #[inline]
+  pub const fn level(&self) -> i8 {
+    self.level
+  }
+}
+
+impl From<u8> for ZstdAlgorithm {
+  fn from(value: u8) -> Self {
+    if value > 22 {
+      Self::with_level(22)
+    } else {
+      Self::with_level(value as i8)
+    }
+  }
+}
+
+impl From<i8> for ZstdAlgorithm {
+  fn from(value: i8) -> Self {
+    if value > 22 {
+      Self::with_level(22)
+    } else if value < -99 {
+      Self::with_level(-99)
+    } else {
+      Self::with_level(value)
+    }
+  }
+}
 
 /// The compressioned algorithm used to compression the message.
 #[derive(
@@ -21,7 +198,10 @@ const ZLIB_TAG: i8 = 28;
 pub enum CompressAlgorithm {
   /// Brotli
   #[display("brotli")]
-  Brotli,
+  Brotli(BrotliAlgorithm),
+  /// Deflate
+  #[display("deflate")]
+  Deflate,
   /// Gzip
   #[display("gzip")]
   Gzip,
@@ -40,63 +220,87 @@ pub enum CompressAlgorithm {
   Zlib,
   /// Zstd
   #[display("zstd({_0})")]
-  Zstd(i8),
+  Zstd(ZstdAlgorithm),
   /// Unknwon compressioned algorithm
   #[display("unknown({_0})")]
   Unknown(i8),
 }
 
 impl CompressAlgorithm {
-  /// Returns the compressioned algorithm as a `u8`.
+  /// Encodes the algorithm into a u16.
+  /// First byte is the algorithm tag.
+  /// Second byte stores additional configuration if any.
   #[inline]
-  pub const fn as_i8(&self) -> i8 {
-    match self {
-      Self::Brotli => BROTLI_TAG,
-      Self::Gzip => GZIP_TAG,
-      Self::Lzw => LZW_TAG,
-      Self::Lz4 => LZ4_TAG,
-      Self::Snappy => SNAPPY_TAG,
-      Self::Zlib => ZLIB_TAG,
-      Self::Zstd(v) => *v,
-      Self::Unknown(v) => *v,
-    }
-  }
-
-  /// Returns the compressioned algorithm as a `&'static str`.
-  #[inline]
-  pub fn as_str(&self) -> Cow<'static, str> {
-    let val = match self {
-      Self::Brotli => "brotli",
-      Self::Gzip => "gzip",
-      Self::Lzw => "lzw",
-      Self::Lz4 => "lz4",
-      Self::Snappy => "snappy",
-      Self::Zlib => "zlib",
-      Self::Zstd(e) => return Cow::Owned(format!("zstd({})", e)),
-      Self::Unknown(e) => return Cow::Owned(format!("unknown({})", e)),
+  const fn encode_to_u16(&self) -> u16 {
+    let (tag, extra) = match self {
+      Self::Brotli(algo) => (BROTLI_TAG, algo.encode()),
+      Self::Deflate => (DEFLATE_TAG, 0),
+      Self::Gzip => (GZIP_TAG, 0),
+      Self::Lzw => (LZW_TAG, 0),
+      Self::Lz4 => (LZ4_TAG, 0),
+      Self::Snappy => (SNAPPY_TAG, 0),
+      Self::Zlib => (ZLIB_TAG, 0),
+      Self::Zstd(algo) => (ZSTD_TAG, algo.level() as u8),
+      Self::Unknown(v) => (*v as u8, 0),
     };
-    Cow::Borrowed(val)
+    ((tag as u16) << 8) | (extra as u16)
   }
-}
 
-impl From<i8> for CompressAlgorithm {
-  fn from(value: i8) -> Self {
-    match value {
-      BROTLI_TAG => Self::Brotli,
+  /// Creates a CompressAlgorithm from a u16.
+  /// First byte determines the algorithm type.
+  /// Second byte contains additional configuration if any.
+  #[inline]
+  const fn decode_from_u16(value: u16) -> Self {
+    let tag = (value >> 8) as u8;
+    let extra = value as u8;
+
+    match tag {
+      BROTLI_TAG => Self::Brotli(BrotliAlgorithm::decode(extra)),
+      DEFLATE_TAG => Self::Deflate,
       GZIP_TAG => Self::Gzip,
       LZW_TAG => Self::Lzw,
       LZ4_TAG => Self::Lz4,
       SNAPPY_TAG => Self::Snappy,
       ZLIB_TAG => Self::Zlib,
-      val if ZSTD_RANGE.contains(&val) => Self::Zstd(value),
-      _ => Self::Unknown(value),
+      ZSTD_TAG => Self::Zstd(ZstdAlgorithm { level: extra as i8 }),
+      v => Self::Unknown(v as i8),
     }
   }
 }
 
-impl From<CompressAlgorithm> for i8 {
-  fn from(value: CompressAlgorithm) -> Self {
-    value.as_i8()
+impl From<u16> for CompressAlgorithm {
+  fn from(value: u16) -> Self {
+    Self::decode_from_u16(value)
+  }
+}
+
+impl<'a> DataRef<'a, Self> for CompressAlgorithm {
+  fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized,
+  {
+    <u16 as DataRef<u16>>::decode(buf).map(|(bytes_read, value)| (bytes_read, Self::from(value)))
+  }
+}
+
+impl Data for CompressAlgorithm {
+  const WIRE_TYPE: WireType = WireType::Varint;
+
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
+  where
+    Self: Sized,
+  {
+    Ok(val)
+  }
+
+  fn encoded_len(&self) -> usize {
+    self.encode_to_u16().encoded_len()
+  }
+
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+    self.encode_to_u16().encode(buf)
   }
 }
 
@@ -224,7 +428,7 @@ where
   }
 
   fn encoded_len(&self) -> usize {
-    1 + 1 + 1 + self.payload.encoded_len_with_length_delimited()
+    1 + self.algo.encoded_len() + 1 + self.payload.encoded_len_with_length_delimited()
   }
 
   fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
@@ -242,9 +446,7 @@ where
     if offset >= buf_len {
       return Err(EncodeError::insufficient_buffer(self.encoded_len(), offset));
     }
-    buf[offset] = self.algo.as_i8() as u8;
-    offset += 1;
-
+    offset += self.algo.encode(&mut buf[offset..])?;
     if offset >= buf_len {
       return Err(EncodeError::insufficient_buffer(self.encoded_len(), offset));
     }
@@ -293,9 +495,10 @@ where
               COMPRESS_ALGORITHM_TAG,
             ));
           }
-          let (bytes_read, a) = <u8 as DataRef<u8>>::decode(&buf[offset..])?;
+          let (bytes_read, val) =
+            <CompressAlgorithm as DataRef<CompressAlgorithm>>::decode(&buf[offset..])?;
           offset += bytes_read;
-          algo = Some(CompressAlgorithm::from(a as i8));
+          algo = Some(val);
         }
         b if b == CompressedMessage::<I, A>::payload_byte() => {
           if message.is_some() {
@@ -331,7 +534,7 @@ const _: () = {
 
   impl<'a> Arbitrary<'a> for CompressAlgorithm {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-      Ok(Self::from(u.arbitrary::<i8>()?))
+      Ok(Self::from(u.arbitrary::<u16>()?))
     }
   }
 
@@ -352,7 +555,7 @@ const _: () = {
 
   impl Arbitrary for CompressAlgorithm {
     fn arbitrary(g: &mut Gen) -> Self {
-      Self::from(i8::arbitrary(g))
+      Self::from(u16::arbitrary(g))
     }
   }
 
