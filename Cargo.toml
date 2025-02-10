@@ -61,7 +61,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 humantime-serde = "1"
 rkyv = { version = "0.8", features = ["smol_str-0_3", "bytes-1"] }
 smallvec = "1"
-smallvec-wrapper = { version = "0.2", features = ["const_new", "either"] }
+smallvec-wrapper = { version = "0.3", features = ["const_new", "either"] }
 smol_str = "0.3"
 transformable = { version = "0.2", features = ["smol_str03", "bytes1"] }
 thiserror = "2"
