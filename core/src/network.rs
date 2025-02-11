@@ -100,10 +100,13 @@ where
     addr: &T::ResolvedAddress,
     packet: Message<T::Id, T::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
+    let reliable = self.inner.transport.packet_reliable();
+    let secure = self.inner.transport.packet_secure();
+
     self
       .inner
       .transport
-      .send_packet(addr, packet)
+      .send_packet(addr, todo!())
       .await
       .map(|(_sent, _)| {
         #[cfg(feature = "metrics")]
@@ -126,7 +129,7 @@ where
     self
       .inner
       .transport
-      .send_packets(addr, packet)
+      .send_packets(addr, todo!())
       .await
       .map(|(_sent, _)| {
         #[cfg(feature = "metrics")]

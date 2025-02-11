@@ -190,7 +190,7 @@ where
   ) {
   }
 
-  fn disable_promised_pings(&self, _target: &Self::Id) -> bool {
+  fn disable_reliable_pings(&self, _target: &Self::Id) -> bool {
     false
   }
 }

@@ -2,6 +2,15 @@ use std::time::Duration;
 
 use super::types::{DelegateVersion, ProtocolVersion};
 
+#[cfg(feature = "checksum")]
+use super::types::ChecksumAlgorithm;
+
+#[cfg(feature = "compression")]
+use super::types::CompressAlgorithm;
+
+#[cfg(feature = "encryption")]
+use super::types::EncryptionAlgorithm;
+
 #[cfg(feature = "metrics")]
 pub use super::types::MetricLabels;
 
@@ -151,7 +160,7 @@ pub struct Options {
       attrs(doc = "Sets whether disable promised pings or not (Builder pattern).")
     )
   )]
-  disable_promised_pings: bool,
+  disable_reliable_pings: bool,
 
   /// Increase the probe interval if the node
   /// becomes aware that it might be degraded and not meeting the soft real
@@ -260,6 +269,76 @@ pub struct Options {
   )]
   queue_check_interval: Duration,
 
+  /// Indicates that should the messages sent as packets through transport will be appended a checksum.
+  ///
+  /// Default is `None`.
+  ///
+  /// ## Note
+  /// If the [`Transport::packet_reliable`](crate::transport::Transport::packet_reliable) is return `true`,
+  /// then the checksum will not be appended to the packets, even if this field is set to `Some`.
+  #[cfg(feature = "checksum")]
+  #[cfg_attr(
+    feature = "serde",
+    serde(skip_serializing_if = "Option::is_none", default)
+  )]
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Returns the checksum algorithm for the packets sent through transport.")
+    ),
+    setter(
+      const,
+      attrs(doc = "Sets the checksum algorithm for the packets sent through transport.")
+    )
+  )]
+  checksum_algo: Option<ChecksumAlgorithm>,
+
+  /// Indicates that should the messages sent as packet or stream through transport will be encrypted or not.
+  ///
+  /// Default is `None`.
+  ///
+  /// ## Note
+  /// - If the [`Transport::packet_secure`](crate::transport::Transport::packet_secure) returns `true`,
+  ///   then the encryption will not be applied to the messages when sending as packet, even if this field is set to `Some`.
+  /// - If the [`Transport::stream_secure`](crate::transport::Transport::stream_secure) returns `true`,
+  ///   then the encryption will not be applied to the messages when sending as stream, even if this field is set to `Some`.
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(
+    feature = "serde",
+    serde(skip_serializing_if = "Option::is_none", default)
+  )]
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Returns the encryption algorithm for the messages sent through transport.")
+    ),
+    setter(
+      const,
+      attrs(doc = "Sets the encryption algorithm for the messages sent through transport.")
+    )
+  )]
+  encryption_algo: Option<EncryptionAlgorithm>,
+
+  /// Indicates that should the messages sent through transport will be compressed or not.
+  ///
+  /// Default is `None`.
+  #[cfg(feature = "compression")]
+  #[cfg_attr(
+    feature = "serde",
+    serde(skip_serializing_if = "Option::is_none", default)
+  )]
+  #[viewit(
+    getter(
+      const,
+      attrs(doc = "Returns the compress algorithm for the messages sent through transport.")
+    ),
+    setter(
+      const,
+      attrs(doc = "Sets the compress algorithm for the messages sent through transport.")
+    )
+  )]
+  compress_algo: Option<CompressAlgorithm>,
+
   /// The metric labels for the memberlist.
   #[viewit(
     getter(
@@ -306,7 +385,7 @@ impl Options {
       push_pull_interval: Duration::from_secs(30), // Low frequency
       probe_interval: Duration::from_millis(500), // Failure check every second
       probe_timeout: Duration::from_secs(1), // Reasonable RTT time for LAN
-      disable_promised_pings: false,    // TCP pings are safe, even with mixed versions
+      disable_reliable_pings: false,    // TCP pings are safe, even with mixed versions
       awareness_max_multiplier: 8,      // Probe interval backs off to 8 seconds
       gossip_interval: Duration::from_millis(200), // Gossip every 200ms
       gossip_nodes: 3,                  // Gossip to 3 nodes
@@ -316,6 +395,12 @@ impl Options {
       handoff_queue_depth: 1024,
       dead_node_reclaim_time: Duration::ZERO,
       queue_check_interval: Duration::from_secs(30),
+      #[cfg(feature = "checksum")]
+      checksum_algo: None,
+      #[cfg(feature = "encryption")]
+      encryption_algo: None,
+      #[cfg(feature = "compression")]
+      compress_algo: None,
       #[cfg(feature = "metrics")]
       metric_labels: std::sync::Arc::new(MetricLabels::new()),
     }

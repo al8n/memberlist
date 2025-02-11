@@ -7,9 +7,16 @@ mod checksumed;
 mod compressed;
 mod encrypted;
 
+#[cfg(feature = "serde")]
+mod serde_impl;
+
+/// This mod impls `core::str::FromStr`, which is used for using with `clap` crate.
+mod from_str;
+
 pub use checksumed::*;
 pub use compressed::*;
 pub use encrypted::*;
+pub use from_str::*;
 
 use super::*;
 

@@ -423,38 +423,38 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn stream(&self) -> StreamSubscriber<Self::ResolvedAddress, Self::Stream>;
 
   /// Returns `true` if the transport provides provides reliable packets delivery.
-  /// 
+  ///
   /// When `true`, the [`Memberlist`] will not include checksums in packets
   /// even if a [`ChecksumAlgorithm`] is configured in [`Options`],
   /// since the transport already guarantees data integrity.
   ///
   /// # Examples
-  /// 
+  ///
   /// - Reliable: TCP, QUIC
   /// - Unreliable: UDP
   fn packet_reliable(&self) -> bool;
 
   /// Returns `true` if the transport provides packets security.
-  /// 
+  ///
   /// When `true`, the [`Memberlist`] will not perform additional payload
   /// encryption even if a [`EncryptionAlgorithm`] is configured in [`Options`],
   /// since the transport already provides packet security.
   ///
   /// # Examples
-  /// 
+  ///
   /// - Secure: QUIC, TLS
   /// - Insecure: TCP, UDP
   fn packet_secure(&self) -> bool;
 
   /// Returns `true` if the transport provides stream security.
-  /// 
+  ///
   /// When `true`, the [`Memberlist`] will not perform additional payload
   /// encryption even if a [`EncryptionAlgorithm`] is configured in [`Options`],
   /// since the transport already provides stream security.
   ///
   /// # Examples
-  /// 
-  /// - Secure: QUIC, TLS 
+  ///
+  /// - Secure: QUIC, TLS
   /// - Insecure: TCP
   fn stream_secure(&self) -> bool;
 

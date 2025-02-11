@@ -283,6 +283,6 @@ mod tests {
     let meta = Meta::default();
     assert!(meta.is_empty());
 
-    assert_eq!(Meta::empty().as_ref(), &[]);
+    assert_eq!(Meta::empty(), [].as_slice());
   }
 }

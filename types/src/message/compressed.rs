@@ -1,6 +1,6 @@
-use core::marker::PhantomData;
-
 use bytes::Bytes;
+use core::marker::PhantomData;
+use std::borrow::Cow;
 
 use super::{merge, skip, split, Data, DataRef, DecodeError, EncodeError, WireType};
 
@@ -49,6 +49,28 @@ macro_rules! num_to_enum {
           Self::from_u8(value as u8)
         }
       }
+
+      #[cfg(feature = "serde")]
+      const _: () = {
+        use serde::{Deserialize, Serialize};
+
+        impl Serialize for $name {
+          fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+          where
+            S: serde::Serializer,
+          {
+            serializer.serialize_u8(*self as u8)
+          }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+          fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+          where
+            D: serde::Deserializer<'de> {
+            u8::deserialize(deserializer).map(Self::from_u8)
+          }
+        }
+      };
     }
   };
 }
@@ -70,7 +92,8 @@ num_to_enum! {
 }
 
 /// The brotli algorithm
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::Display)]
+#[display("({quality}, {window})")]
 pub struct BrotliAlgorithm {
   quality: BrotliQuality,
   window: BrotliWindow,
@@ -114,7 +137,7 @@ impl BrotliAlgorithm {
   /// Quality (0-11) is stored in the high 4 bits.
   /// Window (10-24) is stored in the low 4 bits, mapped to 0-15.
   #[inline]
-  const fn encode(&self) -> u8 {
+  pub(super) const fn encode(&self) -> u8 {
     // Quality goes in high 4 bits
     let quality_bits = (self.quality as u8) << 4;
     // Window needs to be mapped from 10-24 to 0-15
@@ -126,7 +149,7 @@ impl BrotliAlgorithm {
   /// Quality is extracted from high 4 bits.
   /// Window is extracted from low 4 bits and mapped back to 10-24 range.
   #[inline]
-  const fn decode(byte: u8) -> Self {
+  pub(super) const fn decode(byte: u8) -> Self {
     // Extract quality from high 4 bits
     let quality = BrotliQuality::from_u8(byte >> 4);
     // Extract window from low 4 bits and map back to 10-24 range
@@ -138,6 +161,7 @@ impl BrotliAlgorithm {
 /// The zstd algorithm
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::Display)]
 #[display("{}", level)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct ZstdAlgorithm {
   level: i8,
 }
@@ -197,7 +221,7 @@ impl From<i8> for ZstdAlgorithm {
 #[non_exhaustive]
 pub enum CompressAlgorithm {
   /// Brotli
-  #[display("brotli")]
+  #[display("brotli{_0}")]
   Brotli(BrotliAlgorithm),
   /// Deflate
   #[display("deflate")]
@@ -223,15 +247,32 @@ pub enum CompressAlgorithm {
   Zstd(ZstdAlgorithm),
   /// Unknwon compressioned algorithm
   #[display("unknown({_0})")]
-  Unknown(i8),
+  Unknown(u8),
 }
 
 impl CompressAlgorithm {
+  /// Returns the string representation of the algorithm.
+  #[inline]
+  pub fn as_str(&self) -> Cow<'_, str> {
+    match self {
+      Self::Brotli(algo) => return Cow::Owned(format!("brotli{algo}")),
+      Self::Deflate => "deflate",
+      Self::Gzip => "gzip",
+      Self::Lzw => "lzw",
+      Self::Lz4 => "lz4",
+      Self::Snappy => "snappy",
+      Self::Zlib => "zlib",
+      Self::Zstd(val) => return Cow::Owned(format!("zstd({})", val.level())),
+      Self::Unknown(val) => return Cow::Owned(format!("unknown({val})")),
+    }
+    .into()
+  }
+
   /// Encodes the algorithm into a u16.
   /// First byte is the algorithm tag.
   /// Second byte stores additional configuration if any.
   #[inline]
-  const fn encode_to_u16(&self) -> u16 {
+  pub(super) const fn encode_to_u16(&self) -> u16 {
     let (tag, extra) = match self {
       Self::Brotli(algo) => (BROTLI_TAG, algo.encode()),
       Self::Deflate => (DEFLATE_TAG, 0),
@@ -241,7 +282,7 @@ impl CompressAlgorithm {
       Self::Snappy => (SNAPPY_TAG, 0),
       Self::Zlib => (ZLIB_TAG, 0),
       Self::Zstd(algo) => (ZSTD_TAG, algo.level() as u8),
-      Self::Unknown(v) => (*v as u8, 0),
+      Self::Unknown(v) => (*v, 0),
     };
     ((tag as u16) << 8) | (extra as u16)
   }
@@ -250,7 +291,7 @@ impl CompressAlgorithm {
   /// First byte determines the algorithm type.
   /// Second byte contains additional configuration if any.
   #[inline]
-  const fn decode_from_u16(value: u16) -> Self {
+  pub(super) const fn decode_from_u16(value: u16) -> Self {
     let tag = (value >> 8) as u8;
     let extra = value as u8;
 
@@ -263,7 +304,7 @@ impl CompressAlgorithm {
       SNAPPY_TAG => Self::Snappy,
       ZLIB_TAG => Self::Zlib,
       ZSTD_TAG => Self::Zstd(ZstdAlgorithm { level: extra as i8 }),
-      v => Self::Unknown(v as i8),
+      v => Self::Unknown(v),
     }
   }
 }

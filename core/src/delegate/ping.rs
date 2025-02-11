@@ -30,7 +30,7 @@ pub trait PingDelegate: Send + Sync + 'static {
 
   /// Invoked when we want to send a ping message to target by promised connection.
   /// Return true if the target node does not expect ping message from promised connection.
-  fn disable_promised_pings(&self, _target: &Self::Id) -> bool {
+  fn disable_reliable_pings(&self, _target: &Self::Id) -> bool {
     false
   }
 }

@@ -15,8 +15,8 @@ use super::{
   suspicion::Suspicion,
   transport::{TimeoutableStream, Transport},
   types::{
-    Alive, Data, DataRef, Dead, ErrorResponse, IndirectPing, Message,
-    MessageRef, NodeState, Ping, PushNodeState, SmallVec, State, Suspect,
+    Alive, Data, DataRef, Dead, ErrorResponse, IndirectPing, Message, MessageRef, NodeState, Ping,
+    PushNodeState, SmallVec, State, Suspect,
   },
   Member, Members,
 };
@@ -951,7 +951,10 @@ where
         self.local_id().cheap_clone(),
       );
       let msgs = [ping.cheap_clone().into(), suspect.into()];
-      match self.transport_send_packets(target.address(), msgs.into()).await {
+      match self
+        .transport_send_packets(target.address(), msgs.into())
+        .await
+      {
         Ok(_) => {}
         Err(e) => {
           tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to send compound ping and suspect message by unreliable connection");
@@ -1095,9 +1098,9 @@ where
     // config option to turn this off if desired.
     let (fallback_tx, fallback_rx) = async_channel::bounded(1);
 
-    let mut disable_reliable_pings = self.inner.opts.disable_promised_pings;
+    let mut disable_reliable_pings = self.inner.opts.disable_reliable_pings;
     if let Some(delegate) = self.delegate.as_ref() {
-      disable_reliable_pings |= delegate.disable_promised_pings(target.id());
+      disable_reliable_pings |= delegate.disable_reliable_pings(target.id());
     }
     if !disable_reliable_pings {
       let target_addr = target.address().cheap_clone();

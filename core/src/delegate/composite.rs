@@ -282,8 +282,8 @@ where
       .await
   }
 
-  fn disable_promised_pings(&self, target: &Self::Id) -> bool {
-    self.ping_delegate.disable_promised_pings(target)
+  fn disable_reliable_pings(&self, target: &Self::Id) -> bool {
+    self.ping_delegate.disable_reliable_pings(target)
   }
 }
 

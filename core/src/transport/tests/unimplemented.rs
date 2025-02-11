@@ -191,17 +191,17 @@ where
   }
 
   fn packet_reliable(&self) -> bool {
-    unimplemented!()  
+    unimplemented!()
   }
-  
+
   fn packet_secure(&self) -> bool {
     unimplemented!()
   }
-  
+
   fn stream_secure(&self) -> bool {
     unimplemented!()
   }
-  
+
   async fn shutdown(&self) -> Result<(), Self::Error> {
     unimplemented!()
   }
