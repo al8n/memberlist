@@ -228,32 +228,6 @@ const _: () = {
   }
 };
 
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use quickcheck::{Arbitrary, Gen};
-
-  impl Arbitrary for SecretKey {
-    fn arbitrary(g: &mut Gen) -> Self {
-      macro_rules! gen {
-        ($lit:literal) => {{
-          let mut buf = [0; $lit];
-          for i in 0..$lit {
-            buf[i] = u8::arbitrary(g);
-          }
-          buf
-        }};
-      }
-
-      match u8::arbitrary(g) % 3 {
-        0 => SecretKey::Aes128(gen!(16)),
-        1 => SecretKey::Aes192(gen!(24)),
-        2 => SecretKey::Aes256(gen!(32)),
-        _ => unreachable!(),
-      }
-    }
-  }
-};
-
 #[cfg(test)]
 mod tests {
   use core::ops::{Deref, DerefMut};

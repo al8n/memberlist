@@ -352,28 +352,3 @@ where
     Ok((offset, ChecksumedMessageRef::new(algo, checksum, message)))
   }
 }
-
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use quickcheck::{Arbitrary, Gen};
-
-  impl Arbitrary for ChecksumAlgorithm {
-    fn arbitrary(g: &mut Gen) -> Self {
-      Self::from(u8::arbitrary(g))
-    }
-  }
-
-  impl<I, A> Arbitrary for ChecksumedMessage<I, A>
-  where
-    I: Arbitrary,
-    A: Arbitrary,
-  {
-    fn arbitrary(g: &mut Gen) -> Self {
-      Self::new(
-        Arbitrary::arbitrary(g),
-        Arbitrary::arbitrary(g),
-        <Vec<u8> as Arbitrary>::arbitrary(g).into(),
-      )
-    }
-  }
-};

@@ -67,6 +67,13 @@ macro_rules! enum_wrapper {
       }
 
       impl [< $name Type >] {
+        /// All possible values of this enum.
+        pub const POSSIBLE_VALUES: &'static [Self] = &[
+          $(
+            Self::$variant,
+          )*
+        ];
+
         /// Returns the tag of this message type for encoding/decoding.
         #[inline]
         pub const fn tag(&self) -> u8 {
@@ -87,26 +94,6 @@ macro_rules! enum_wrapper {
           }
         }
       }
-
-      #[cfg(feature = "quickcheck")]
-      const _: () = {
-        use quickcheck::{Arbitrary, Gen};
-
-        impl [< $name Type >] {
-          const POSSIBLE_VALUES: &'static [u8] = &[
-            $(
-              $variant_tag,
-            )*
-          ];
-        }
-
-        impl Arbitrary for [< $name Type >] {
-          fn arbitrary(g: &mut Gen) -> Self {
-            let val = g.choose(&Self::POSSIBLE_VALUES).unwrap();
-            Self::try_from(*val).unwrap()
-          }
-        }
-      };
     }
 
     $(#[$outer])*
@@ -704,101 +691,3 @@ where
 
   Ok(offset)
 }
-
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use quickcheck::{Arbitrary, Gen};
-
-  impl<I, A> Message<I, A>
-  where
-    I: Arbitrary,
-    A: Arbitrary,
-  {
-    fn quickcheck_arbitrary_helper(g: &mut Gen, ty: MessageType) -> Option<Self> {
-      Some(match ty {
-        MessageType::Compound => {
-          return None;
-        }
-        MessageType::Ping => {
-          let ping = Ping::<I, A>::arbitrary(g);
-          Self::Ping(ping)
-        }
-        MessageType::IndirectPing => {
-          let indirect_ping = IndirectPing::<I, A>::arbitrary(g);
-          Self::IndirectPing(indirect_ping)
-        }
-        MessageType::Ack => {
-          let ack = Ack::arbitrary(g);
-          Self::Ack(ack)
-        }
-        MessageType::Suspect => {
-          let suspect = Suspect::<I>::arbitrary(g);
-          Self::Suspect(suspect)
-        }
-        MessageType::Alive => {
-          let alive = Alive::<I, A>::arbitrary(g);
-          Self::Alive(alive)
-        }
-        MessageType::Dead => {
-          let dead = Dead::<I>::arbitrary(g);
-          Self::Dead(dead)
-        }
-        MessageType::PushPull => {
-          let push_pull = PushPull::<I, A>::arbitrary(g);
-          Self::PushPull(push_pull)
-        }
-        MessageType::UserData => {
-          let bytes = Vec::<u8>::arbitrary(g).into();
-          Self::UserData(bytes)
-        }
-        MessageType::Nack => {
-          let nack = Nack::arbitrary(g);
-          Self::Nack(nack)
-        }
-        MessageType::ErrorResponse => {
-          let error_response = ErrorResponse::arbitrary(g);
-          Self::ErrorResponse(error_response)
-        }
-        MessageType::Checksumed => {
-          let checksumed = ChecksumedMessage::<I, A>::arbitrary(g);
-          Self::Checksumed(checksumed)
-        }
-        MessageType::Encrypted => {
-          let encrypted = EncryptedMessage::<I, A>::arbitrary(g);
-          Self::Encrypted(encrypted)
-        }
-        MessageType::Compressed => {
-          let compressed = CompressedMessage::<I, A>::arbitrary(g);
-          Self::Compressed(compressed)
-        }
-        MessageType::Labeled => {
-          let labeled = LabeledMessage::<I, A>::arbitrary(g);
-          Self::Labeled(labeled)
-        }
-      })
-    }
-  }
-
-  impl<I, A> Arbitrary for Message<I, A>
-  where
-    I: Arbitrary,
-    A: Arbitrary,
-  {
-    fn arbitrary(g: &mut Gen) -> Self {
-      let ty = MessageType::arbitrary(g);
-      match ty {
-        MessageType::Compound => {
-          let num = u8::arbitrary(g) as usize;
-          let compound = (0..num)
-            .filter_map(|_| {
-              let ty = MessageType::arbitrary(g);
-              Message::<I, A>::quickcheck_arbitrary_helper(g, ty)
-            })
-            .collect::<Arc<[_]>>();
-          Self::Compound(compound)
-        }
-        _ => Self::quickcheck_arbitrary_helper(g, ty).unwrap(),
-      }
-    }
-  }
-};

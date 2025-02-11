@@ -2,8 +2,10 @@ use quickcheck::{Arbitrary, Gen};
 use triomphe::Arc;
 
 use super::{
-  Ack, Alive, Dead, DelegateVersion, ErrorResponse, IndirectPing, Label, LabeledMessage, Meta,
-  Nack, NodeState, Ping, ProtocolVersion, PushNodeState, PushPull, State, Suspect,
+  Ack, Alive, ChecksumAlgorithm, ChecksumedMessage, CompressAlgorithm, CompressedMessage, Dead,
+  DelegateVersion, EncryptedMessage, EncryptionAlgorithm, ErrorResponse, IndirectPing, Label,
+  LabeledMessage, Message, MessageType, Meta, Nack, NodeState, Ping, ProtocolVersion,
+  PushNodeState, PushPull, SecretKey, State, Suspect,
 };
 
 impl Arbitrary for Ack {
@@ -198,5 +200,183 @@ impl<I: Arbitrary, A: Arbitrary> Arbitrary for IndirectPing<I, A> {
       Arbitrary::arbitrary(g),
       Arbitrary::arbitrary(g),
     )
+  }
+}
+
+impl Arbitrary for SecretKey {
+  fn arbitrary(g: &mut Gen) -> Self {
+    macro_rules! gen {
+      ($lit:literal) => {{
+        let mut buf = [0; $lit];
+        for i in 0..$lit {
+          buf[i] = u8::arbitrary(g);
+        }
+        buf
+      }};
+    }
+
+    match u8::arbitrary(g) % 3 {
+      0 => SecretKey::Aes128(gen!(16)),
+      1 => SecretKey::Aes192(gen!(24)),
+      2 => SecretKey::Aes256(gen!(32)),
+      _ => unreachable!(),
+    }
+  }
+}
+
+impl Arbitrary for ChecksumAlgorithm {
+  fn arbitrary(g: &mut Gen) -> Self {
+    Self::from(u8::arbitrary(g))
+  }
+}
+
+impl<I, A> Arbitrary for ChecksumedMessage<I, A>
+where
+  I: Arbitrary,
+  A: Arbitrary,
+{
+  fn arbitrary(g: &mut Gen) -> Self {
+    Self::new(
+      Arbitrary::arbitrary(g),
+      Arbitrary::arbitrary(g),
+      <Vec<u8> as Arbitrary>::arbitrary(g).into(),
+    )
+  }
+}
+
+impl Arbitrary for CompressAlgorithm {
+  fn arbitrary(g: &mut Gen) -> Self {
+    Self::from(u16::arbitrary(g))
+  }
+}
+
+impl<I, A> Arbitrary for CompressedMessage<I, A>
+where
+  I: Arbitrary,
+  A: Arbitrary,
+{
+  fn arbitrary(g: &mut Gen) -> Self {
+    Self::new(
+      Arbitrary::arbitrary(g),
+      <Vec<u8> as Arbitrary>::arbitrary(g).into(),
+    )
+  }
+}
+
+impl Arbitrary for EncryptionAlgorithm {
+  fn arbitrary(g: &mut Gen) -> Self {
+    Self::from(u8::arbitrary(g))
+  }
+}
+
+impl<I, A> Arbitrary for EncryptedMessage<I, A>
+where
+  I: Arbitrary,
+  A: Arbitrary,
+{
+  fn arbitrary(g: &mut Gen) -> Self {
+    Self::new(
+      Arbitrary::arbitrary(g),
+      <Vec<u8> as Arbitrary>::arbitrary(g).into(),
+    )
+  }
+}
+
+impl<I, A> Message<I, A>
+where
+  I: Arbitrary,
+  A: Arbitrary,
+{
+  fn quickcheck_arbitrary_helper(g: &mut Gen, ty: MessageType) -> Option<Self> {
+    Some(match ty {
+      MessageType::Compound => {
+        return None;
+      }
+      MessageType::Ping => {
+        let ping = Ping::<I, A>::arbitrary(g);
+        Self::Ping(ping)
+      }
+      MessageType::IndirectPing => {
+        let indirect_ping = IndirectPing::<I, A>::arbitrary(g);
+        Self::IndirectPing(indirect_ping)
+      }
+      MessageType::Ack => {
+        let ack = Ack::arbitrary(g);
+        Self::Ack(ack)
+      }
+      MessageType::Suspect => {
+        let suspect = Suspect::<I>::arbitrary(g);
+        Self::Suspect(suspect)
+      }
+      MessageType::Alive => {
+        let alive = Alive::<I, A>::arbitrary(g);
+        Self::Alive(alive)
+      }
+      MessageType::Dead => {
+        let dead = Dead::<I>::arbitrary(g);
+        Self::Dead(dead)
+      }
+      MessageType::PushPull => {
+        let push_pull = PushPull::<I, A>::arbitrary(g);
+        Self::PushPull(push_pull)
+      }
+      MessageType::UserData => {
+        let bytes = Vec::<u8>::arbitrary(g).into();
+        Self::UserData(bytes)
+      }
+      MessageType::Nack => {
+        let nack = Nack::arbitrary(g);
+        Self::Nack(nack)
+      }
+      MessageType::ErrorResponse => {
+        let error_response = ErrorResponse::arbitrary(g);
+        Self::ErrorResponse(error_response)
+      }
+      MessageType::Checksumed => {
+        let checksumed = ChecksumedMessage::<I, A>::arbitrary(g);
+        Self::Checksumed(checksumed)
+      }
+      MessageType::Encrypted => {
+        let encrypted = EncryptedMessage::<I, A>::arbitrary(g);
+        Self::Encrypted(encrypted)
+      }
+      MessageType::Compressed => {
+        let compressed = CompressedMessage::<I, A>::arbitrary(g);
+        Self::Compressed(compressed)
+      }
+      MessageType::Labeled => {
+        let labeled = LabeledMessage::<I, A>::arbitrary(g);
+        Self::Labeled(labeled)
+      }
+    })
+  }
+}
+
+impl<I, A> Arbitrary for Message<I, A>
+where
+  I: Arbitrary,
+  A: Arbitrary,
+{
+  fn arbitrary(g: &mut Gen) -> Self {
+    let ty = MessageType::arbitrary(g);
+    match ty {
+      MessageType::Compound => {
+        let num = u8::arbitrary(g) as usize;
+        let compound = (0..num)
+          .filter_map(|_| {
+            let ty = MessageType::arbitrary(g);
+            Message::<I, A>::quickcheck_arbitrary_helper(g, ty)
+          })
+          .collect::<Arc<[_]>>();
+        Self::Compound(compound)
+      }
+      _ => Self::quickcheck_arbitrary_helper(g, ty).unwrap(),
+    }
+  }
+}
+
+impl Arbitrary for MessageType {
+  fn arbitrary(g: &mut Gen) -> Self {
+    *g.choose(Self::POSSIBLE_VALUES).unwrap()
   }
 }

@@ -286,27 +286,3 @@ where
     Ok((offset, EncryptedMessageRef::new(algo, message)))
   }
 }
-
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use quickcheck::{Arbitrary, Gen};
-
-  impl Arbitrary for EncryptionAlgorithm {
-    fn arbitrary(g: &mut Gen) -> Self {
-      Self::from(u8::arbitrary(g))
-    }
-  }
-
-  impl<I, A> Arbitrary for EncryptedMessage<I, A>
-  where
-    I: Arbitrary,
-    A: Arbitrary,
-  {
-    fn arbitrary(g: &mut Gen) -> Self {
-      Self::new(
-        Arbitrary::arbitrary(g),
-        <Vec<u8> as Arbitrary>::arbitrary(g).into(),
-      )
-    }
-  }
-};
