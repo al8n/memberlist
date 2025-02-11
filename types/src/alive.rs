@@ -8,6 +8,7 @@ use nodecraft::{CheapClone, Node};
 /// Alive message
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Alive<I, A> {
   /// The incarnation of the alive message
   #[viewit(
@@ -352,31 +353,6 @@ where
     ))
   }
 }
-
-#[cfg(feature = "arbitrary")]
-const _: () = {
-  use arbitrary::{Arbitrary, Unstructured};
-
-  impl<'a, I, A> Arbitrary<'a> for Alive<I, A>
-  where
-    I: Arbitrary<'a>,
-    A: Arbitrary<'a>,
-  {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      Ok(Self {
-        incarnation: u.arbitrary()?,
-        meta: u.arbitrary()?,
-        node: {
-          let id = u.arbitrary()?;
-          let addr = u.arbitrary()?;
-          Node::new(id, addr)
-        },
-        protocol_version: u.arbitrary()?,
-        delegate_version: u.arbitrary()?,
-      })
-    }
-  }
-};
 
 #[cfg(feature = "quickcheck")]
 const _: () = {

@@ -7,6 +7,7 @@ use super::{
 /// Ack response is sent for a ping
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Ack {
   /// The sequence number of the ack
   #[viewit(
@@ -22,6 +23,7 @@ pub struct Ack {
     getter(const, style = "ref", attrs(doc = "Returns the payload of the ack")),
     setter(attrs(doc = "Sets the payload of the ack (Builder pattern)"))
   )]
+  #[cfg_attr(feature = "arbitrary", arbitrary(with = super::arbitrary_bytes))]
   payload: Bytes,
 }
 
@@ -228,6 +230,7 @@ impl<'a> DataRef<'a, Ack> for AckRef<'a> {
   setters(vis_all = "pub", prefix = "with")
 )]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Nack {
   #[viewit(
@@ -320,28 +323,6 @@ impl Data for Nack {
     Ok(offset)
   }
 }
-
-#[cfg(feature = "arbitrary")]
-const _: () = {
-  use arbitrary::{Arbitrary, Unstructured};
-
-  impl<'a> Arbitrary<'a> for Ack {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      Ok(Self {
-        sequence_number: u.arbitrary()?,
-        payload: u.arbitrary::<Vec<u8>>()?.into(),
-      })
-    }
-  }
-
-  impl<'a> Arbitrary<'a> for Nack {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      Ok(Self {
-        sequence_number: u.arbitrary()?,
-      })
-    }
-  }
-};
 
 #[cfg(feature = "quickcheck")]
 const _: () = {

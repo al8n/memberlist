@@ -13,7 +13,6 @@ pub use bytes;
 pub use cidr_policy::*;
 pub use data::*;
 pub use err::*;
-pub use label::*;
 pub use message::*;
 pub use meta::*;
 #[cfg(feature = "metrics")]
@@ -38,7 +37,6 @@ mod bad_state;
 mod cidr_policy;
 mod data;
 mod err;
-mod label;
 mod message;
 mod meta;
 #[cfg(feature = "metrics")]
@@ -162,4 +160,16 @@ fn check_encoded_message_size(required: usize) -> Result<(), EncodeError> {
   }
 
   Ok(())
+}
+
+#[cfg(feature = "arbitrary")]
+fn arbitrary_bytes(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<bytes::Bytes> {
+  u.arbitrary::<Vec<u8>>().map(Into::into)
+}
+
+#[cfg(feature = "arbitrary")]
+fn arbitrary_triomphe_arc<'a, T: arbitrary::Arbitrary<'a>>(
+  u: &mut arbitrary::Unstructured<'a>,
+) -> arbitrary::Result<triomphe::Arc<[T]>> {
+  u.arbitrary::<Vec<T>>().map(Into::into)
 }

@@ -12,6 +12,7 @@ macro_rules! bad_bail {
     )]
     #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+    #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
     pub struct $name<I> {
       /// The incarnation of the message.
       #[viewit(
@@ -194,24 +195,6 @@ macro_rules! bad_bail {
         self
       }
     }
-
-    #[cfg(feature = "arbitrary")]
-    const _: () = {
-      use arbitrary::{Arbitrary, Unstructured};
-
-      impl<'a, I> Arbitrary<'a> for $name<I>
-      where
-        I: Arbitrary<'a>,
-      {
-        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-          Ok(Self {
-            incarnation: u.arbitrary()?,
-            node: u.arbitrary()?,
-            from: u.arbitrary()?,
-          })
-        }
-      }
-    };
 
     #[cfg(feature = "quickcheck")]
     const _: () = {

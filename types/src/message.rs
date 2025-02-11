@@ -6,6 +6,7 @@ use triomphe::Arc;
 mod checksumed;
 mod compressed;
 mod encrypted;
+mod label;
 
 #[cfg(feature = "serde")]
 mod serde_impl;
@@ -17,6 +18,7 @@ pub use checksumed::*;
 pub use compressed::*;
 pub use encrypted::*;
 pub use from_str::*;
+pub use label::*;
 
 use super::*;
 
@@ -26,7 +28,10 @@ macro_rules! enum_wrapper {
     $vis:vis enum $name:ident $(<$($generic:tt),+>)? {
       $(
         $(#[$variant_meta:meta])*
-        $variant:ident($variant_ty: ident $(<$($variant_generic:tt),+>)?) = $variant_tag:literal
+        $variant:ident(
+          $(#[$variant_ty_meta:meta])*
+          $variant_ty: ident $(<$($variant_generic:tt),+>)? $(,)?
+        ) = $variant_tag:expr
       ), +$(,)?
     }
   ) => {
@@ -108,7 +113,10 @@ macro_rules! enum_wrapper {
     $vis enum $name $(< $($generic),+ >)? {
       $(
         $(#[$variant_meta])*
-        $variant($variant_ty $(< $($variant_generic),+ >)?),
+        $variant(
+          $(#[$variant_ty_meta])*
+          $variant_ty $(< $($variant_generic),+ >)?
+        ),
       )*
     }
 
@@ -174,10 +182,14 @@ enum_wrapper!(
     Eq,
     Hash,
   )]
+  #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
   #[non_exhaustive]
   pub enum Message<I, A> {
     /// Compound message
-    Compound(Arc<[Self]>) = 1,
+    Compound(
+      #[cfg_attr(feature = "arbitrary", arbitrary(with = super::arbitrary_triomphe_arc))]
+      Arc<[Self]>,
+    ) = 1,
     /// Ping message
     Ping(Ping<I, A>) = 2,
     /// Indirect ping message
@@ -193,7 +205,8 @@ enum_wrapper!(
     /// PushPull message
     PushPull(PushPull<I, A>) = 8,
     /// User mesg, not handled by us
-    UserData(Bytes) = 9,
+    UserData(#[cfg_attr(feature = "arbitrary", arbitrary(with = super::arbitrary_bytes))] Bytes) =
+      9,
     /// Nack response message
     Nack(Nack) = 10,
     /// Error response message
@@ -204,6 +217,8 @@ enum_wrapper!(
     Encrypted(EncryptedMessage<I, A>) = 13,
     /// Compressed message
     Compressed(CompressedMessage<I, A>) = 14,
+    /// Labeled message
+    Labeled(LabeledMessage<I, A>) = Label::TAG,
   }
 );
 
@@ -237,6 +252,7 @@ where
       MessageRef::Checksumed(val) => Self::Checksumed(ChecksumedMessage::from_ref(val)?),
       MessageRef::Encrypted(val) => Self::Encrypted(EncryptedMessage::from_ref(val)?),
       MessageRef::Compressed(val) => Self::Compressed(CompressedMessage::from_ref(val)?),
+      MessageRef::Labeled(val) => Self::Labeled(LabeledMessage::from_ref(val)?),
     })
   }
 
@@ -256,6 +272,7 @@ where
       Self::Checksumed(val) => val.encoded_len_with_length_delimited(),
       Self::Encrypted(val) => val.encoded_len_with_length_delimited(),
       Self::Compressed(val) => val.encoded_len_with_length_delimited(),
+      Self::Labeled(val) => val.encoded_len_with_length_delimited(),
     }
   }
 
@@ -271,7 +288,6 @@ where
 
     match self {
       Self::Compound(val) => {
-        // offset += val.encode_length_delimited(&mut buf[offset..])?;
         offset += encode_messages_slice(val, &mut buf[offset..])?;
       }
       Self::Ping(val) => {
@@ -311,6 +327,9 @@ where
         offset += val.encode_length_delimited(&mut buf[offset..])?;
       }
       Self::Compressed(val) => {
+        offset += val.encode_length_delimited(&mut buf[offset..])?;
+      }
+      Self::Labeled(val) => {
         offset += val.encode_length_delimited(&mut buf[offset..])?;
       }
     }
@@ -430,6 +449,13 @@ where
         offset += bytes_read;
         (offset, Self::Compressed(decoded))
       }
+      Message::<I, A>::LABELED_BYTE => {
+        let (bytes_read, decoded) = <LabeledMessageRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
+          LabeledMessage<I, A>,
+        >>::decode_length_delimited(&src[offset..])?;
+        offset += bytes_read;
+        (offset, Self::Labeled(decoded))
+      }
       _ => {
         let (wt, tag) = super::split(b);
         WireType::try_from(wt).map_err(DecodeError::unknown_wire_type)?;
@@ -437,29 +463,6 @@ where
       }
     })
   }
-}
-
-impl<I, A> Message<I, A> {
-  /// Defines the range of reserved tags for message types.
-  ///
-  /// This constant specifies a range of tag values that are reserved for internal use
-  /// by the [`Message`] enum variants. When implementing custom
-  /// with [`Wire`] or [`Transport`],
-  /// it is important to ensure that any custom header added to the message bytes does not
-  /// start with a tag value within this reserved range.
-  ///
-  /// The reserved range is `0..=128`, meaning that the first byte of any custom message
-  /// must not fall within this range to avoid conflicts with predefined message types.
-  ///
-  /// # Note
-  ///
-  /// Adhering to this constraint is crucial for ensuring that custom messages
-  /// are correctly distinguishable from the standard messages defined by the `Message` enum.
-  /// Failing to do so may result in incorrect message parsing and handling.
-  ///
-  /// [`Wire`]: https://docs.rs/memberlist/latest/memberlist/transport/trait.Wire.html
-  /// [`Transport`]: https://docs.rs/memberlist/latest/memberlist/transport/trait.Transport.html
-  pub const RESERVED_TAG_RANGE: std::ops::RangeInclusive<u8> = (0..=128);
 }
 
 /// The reference type of the [`Message`] enum.
@@ -501,6 +504,8 @@ pub enum MessageRef<'a, I, A> {
   Encrypted(EncryptedMessageRef<'a, I, A>),
   /// Compressed message
   Compressed(CompressedMessageRef<'a, I, A>),
+  /// Labeled message
+  Labeled(LabeledMessageRef<'a, I, A>),
 }
 
 impl<I, A> MessageRef<'_, I, A> {
@@ -521,6 +526,7 @@ impl<I, A> MessageRef<'_, I, A> {
       Self::Checksumed(_) => MessageType::Checksumed,
       Self::Encrypted(_) => MessageType::Encrypted,
       Self::Compressed(_) => MessageType::Compressed,
+      Self::Labeled(_) => MessageType::Labeled,
     }
   }
 }
@@ -698,102 +704,6 @@ where
   Ok(offset)
 }
 
-#[cfg(feature = "arbitrary")]
-const _: () = {
-  use arbitrary::{Arbitrary, Unstructured};
-
-  impl<'a, I, A> Message<I, A>
-  where
-    I: Arbitrary<'a>,
-    A: Arbitrary<'a>,
-  {
-    fn arbitrary_helper(
-      u: &mut Unstructured<'a>,
-      ty: MessageType,
-    ) -> arbitrary::Result<Option<Self>> {
-      Ok(Some(match ty {
-        MessageType::Compound => return Ok(None),
-        MessageType::Ping => {
-          let ping = u.arbitrary::<Ping<I, A>>()?;
-          Self::Ping(ping)
-        }
-        MessageType::IndirectPing => {
-          let indirect_ping = u.arbitrary::<IndirectPing<I, A>>()?;
-          Self::IndirectPing(indirect_ping)
-        }
-        MessageType::Ack => {
-          let ack = u.arbitrary::<Ack>()?;
-          Self::Ack(ack)
-        }
-        MessageType::Suspect => {
-          let suspect = u.arbitrary::<Suspect<I>>()?;
-          Self::Suspect(suspect)
-        }
-        MessageType::Alive => {
-          let alive = u.arbitrary::<Alive<I, A>>()?;
-          Self::Alive(alive)
-        }
-        MessageType::Dead => {
-          let dead = u.arbitrary::<Dead<I>>()?;
-          Self::Dead(dead)
-        }
-        MessageType::PushPull => {
-          let push_pull = u.arbitrary::<PushPull<I, A>>()?;
-          Self::PushPull(push_pull)
-        }
-        MessageType::UserData => {
-          let bytes = u.arbitrary::<Vec<u8>>()?.into();
-          Self::UserData(bytes)
-        }
-        MessageType::Nack => {
-          let nack = u.arbitrary::<Nack>()?;
-          Self::Nack(nack)
-        }
-        MessageType::ErrorResponse => {
-          let error_response = u.arbitrary::<ErrorResponse>()?;
-          Self::ErrorResponse(error_response)
-        }
-        MessageType::Checksumed => {
-          let checksumed = u.arbitrary::<ChecksumedMessage<I, A>>()?;
-          Self::Checksumed(checksumed)
-        }
-        MessageType::Encrypted => {
-          let encrypted = u.arbitrary::<EncryptedMessage<I, A>>()?;
-          Self::Encrypted(encrypted)
-        }
-        MessageType::Compressed => {
-          let compressed = u.arbitrary::<CompressedMessage<I, A>>()?;
-          Self::Compressed(compressed)
-        }
-      }))
-    }
-  }
-
-  impl<'a, I, A> Arbitrary<'a> for Message<I, A>
-  where
-    I: Arbitrary<'a>,
-    A: Arbitrary<'a>,
-  {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      let ty = u.arbitrary::<MessageType>()?;
-      match ty {
-        MessageType::Compound => {
-          let num = u8::arbitrary(u)? as usize;
-          let compound = (0..num)
-            .filter_map(|_| {
-              MessageType::arbitrary(u)
-                .and_then(|ty| Message::<I, A>::arbitrary_helper(u, ty))
-                .transpose()
-            })
-            .collect::<Result<Arc<[_]>, _>>()?;
-          Ok(Self::Compound(compound))
-        }
-        _ => Self::arbitrary_helper(u, ty)?.ok_or(arbitrary::Error::IncorrectFormat),
-      }
-    }
-  }
-};
-
 #[cfg(feature = "quickcheck")]
 const _: () = {
   use quickcheck::{Arbitrary, Gen};
@@ -859,6 +769,10 @@ const _: () = {
         MessageType::Compressed => {
           let compressed = CompressedMessage::<I, A>::arbitrary(g);
           Self::Compressed(compressed)
+        }
+        MessageType::Labeled => {
+          let labeled = LabeledMessage::<I, A>::arbitrary(g);
+          Self::Labeled(labeled)
         }
       })
     }

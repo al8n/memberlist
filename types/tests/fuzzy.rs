@@ -4,7 +4,7 @@ use core::{
 };
 use memberlist_types::{
   Ack, Alive, ChecksumedMessage, CompressedMessage, Data, Dead, EncryptedMessage, ErrorResponse,
-  IndirectPing, Message, Nack, Ping, PushNodeState, PushPull, Suspect,
+  IndirectPing, Label, LabeledMessage, Message, Nack, Ping, PushNodeState, PushPull, Suspect,
 };
 use nodecraft::{Domain, HostAddr, Node, NodeId};
 
@@ -127,6 +127,7 @@ quickcheck!(
   HostAddr,
   String,
   VecBytes,
+  Label,
 );
 
 quickcheck!(
@@ -203,6 +204,7 @@ quickcheck!(
   ChecksumedMessage[(String, String)],
   CompressedMessage[(String, String)],
   EncryptedMessage[(String, String)],
+  LabeledMessage[(String, String)],
 );
 
 quickcheck!(

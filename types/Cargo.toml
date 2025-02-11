@@ -37,7 +37,7 @@ std = [
   "base64?/std",
 ]
 
-arbitrary = ["dep:arbitrary", "nodecraft/arbitrary"]
+arbitrary = ["dep:arbitrary", "nodecraft/arbitrary", "smol_str/arbitrary"]
 quickcheck = ["dep:quickcheck", "nodecraft/quickcheck"]
 
 encryption = ["base64"]

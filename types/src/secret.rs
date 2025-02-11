@@ -28,6 +28,7 @@ impl From<base64::DecodeError> for ParseSecretKeyError {
 
 /// The key used while attempting to encrypt/decrypt a message
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum SecretKey {
   /// secret key for AES128
   Aes128([u8; 16]),
@@ -222,22 +223,6 @@ const _: () = {
           .and_then(|val| Self::try_from(val).map_err(<D::Error as serde::de::Error>::custom))
       } else {
         <&[u8] as Deserialize<'de>>::deserialize(deserializer).and_then(|val| parse!(val))
-      }
-    }
-  }
-};
-
-#[cfg(feature = "arbitrary")]
-const _: () = {
-  use arbitrary::{Arbitrary, Unstructured};
-
-  impl<'a> Arbitrary<'a> for SecretKey {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      match u.int_in_range(0..=2)? {
-        0 => Ok(SecretKey::Aes128(u.arbitrary()?)),
-        1 => Ok(SecretKey::Aes192(u.arbitrary()?)),
-        2 => Ok(SecretKey::Aes256(u.arbitrary()?)),
-        _ => unreachable!(),
       }
     }
   }

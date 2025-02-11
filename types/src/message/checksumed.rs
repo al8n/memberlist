@@ -93,6 +93,8 @@ impl From<ChecksumAlgorithm> for u8 {
   getters(style = "move")
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct ChecksumedMessage<I, A> {
   /// The algorithm used to checksum the message.
   #[viewit(
@@ -114,6 +116,7 @@ pub struct ChecksumedMessage<I, A> {
     getter(skip),
     setter(attrs(doc = "Sets the payload of the message.", inline,))
   )]
+  #[cfg_attr(feature = "arbitrary", arbitrary(with = super::super::arbitrary_bytes))]
   payload: Bytes,
   #[viewit(getter(skip), setter(skip))]
   _m: PhantomData<(I, A)>,
@@ -325,7 +328,7 @@ where
           if message.is_some() {
             return Err(DecodeError::duplicate_field(
               "ChecksumedMessage",
-              "message",
+              "payload",
               MESSAGE_TAG,
             ));
           }
@@ -355,22 +358,8 @@ const _: () = {
   use arbitrary::{Arbitrary, Unstructured};
 
   impl<'a> Arbitrary<'a> for ChecksumAlgorithm {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
       Ok(Self::from(u.arbitrary::<u8>()?))
-    }
-  }
-
-  impl<'a, I, A> Arbitrary<'a> for ChecksumedMessage<I, A>
-  where
-    I: Arbitrary<'a>,
-    A: Arbitrary<'a>,
-  {
-    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-      Ok(Self::new(
-        u.arbitrary()?,
-        u.arbitrary()?,
-        u.arbitrary::<Vec<u8>>()?.into(),
-      ))
     }
   }
 };

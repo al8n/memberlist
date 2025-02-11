@@ -11,6 +11,7 @@ use super::{
   setters(vis_all = "pub", prefix = "with")
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct ErrorResponse {
   #[viewit(
@@ -144,18 +145,6 @@ impl<'a> DataRef<'a, ErrorResponse> for ErrorResponseRef<'a> {
     ))
   }
 }
-
-#[cfg(feature = "arbitrary")]
-const _: () = {
-  use arbitrary::{Arbitrary, Unstructured};
-
-  impl<'a> Arbitrary<'a> for ErrorResponse {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      let message = u.arbitrary::<String>()?;
-      Ok(Self::new(message))
-    }
-  }
-};
 
 #[cfg(feature = "quickcheck")]
 const _: () = {

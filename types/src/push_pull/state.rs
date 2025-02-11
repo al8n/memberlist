@@ -12,6 +12,8 @@ use super::STATES_BYTE;
 /// Push node state is the state push to the remote server.
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PushNodeState<I, A> {
   /// The id of the push node state.
   #[viewit(
@@ -550,30 +552,6 @@ impl<I: Data, A: Data> core::iter::ExactSizeIterator for PushNodeStatesDecodeIte
 }
 
 impl<I: Data, A: Data> core::iter::FusedIterator for PushNodeStatesDecodeIter<'_, I, A> {}
-
-#[cfg(feature = "arbitrary")]
-const _: () = {
-  use super::*;
-  use arbitrary::{Arbitrary, Unstructured};
-
-  impl<'a, I, A> Arbitrary<'a> for PushNodeState<I, A>
-  where
-    I: Arbitrary<'a>,
-    A: Arbitrary<'a>,
-  {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      Ok(Self {
-        id: I::arbitrary(u)?,
-        addr: A::arbitrary(u)?,
-        meta: Meta::arbitrary(u)?,
-        incarnation: u.arbitrary()?,
-        state: u.arbitrary()?,
-        protocol_version: u.arbitrary()?,
-        delegate_version: u.arbitrary()?,
-      })
-    }
-  }
-};
 
 #[cfg(feature = "quickcheck")]
 const _: () = {

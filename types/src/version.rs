@@ -6,7 +6,6 @@ pub enum DelegateVersion {
   /// Version 1
   #[default]
   V1,
-
   /// Unknown version (used for forwards and backwards compatibility)
   Unknown(u8),
 }

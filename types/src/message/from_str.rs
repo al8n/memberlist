@@ -105,7 +105,10 @@ impl FromStr for CompressAlgorithm {
       "deflate" | "Deflate" | "DEFLATE" => Ok(Self::Deflate),
       "lz4" | "Lz4" | "LZ4" => Ok(Self::Lz4),
       val if val.starts_with("unknown") => {
-        let val = val.trim_start_matches("unknown(").trim_end_matches(')').trim();
+        let val = val
+          .trim_start_matches("unknown(")
+          .trim_end_matches(')')
+          .trim();
         Ok(Self::Unknown(
           val
             .parse::<u8>()
@@ -128,10 +131,7 @@ impl FromStr for CompressAlgorithm {
             return Ok(Self::Zstd(ZstdAlgorithm::default()));
           }
 
-          let without = suffix
-            .trim_start_matches("(")
-            .trim_end_matches(")")
-            .trim();
+          let without = suffix.trim_start_matches("(").trim_end_matches(")").trim();
 
           if without.is_empty() {
             return Ok(Self::Zstd(ZstdAlgorithm::default()));
@@ -187,46 +187,126 @@ mod tests {
 
   #[test]
   fn test_compress_algorithm_from_str() {
-    assert_eq!("zlib".parse::<CompressAlgorithm>().unwrap(), CompressAlgorithm::Zlib);
-    assert_eq!("gzip".parse::<CompressAlgorithm>().unwrap(), CompressAlgorithm::Gzip);
-    assert_eq!("deflate".parse::<CompressAlgorithm>().unwrap(), CompressAlgorithm::Deflate);
-    assert_eq!("lz4".parse::<CompressAlgorithm>().unwrap(), CompressAlgorithm::Lz4);
-    assert_eq!("unknown(33)".parse::<CompressAlgorithm>().unwrap(), CompressAlgorithm::Unknown(33));
+    assert_eq!(
+      "zlib".parse::<CompressAlgorithm>().unwrap(),
+      CompressAlgorithm::Zlib
+    );
+    assert_eq!(
+      "gzip".parse::<CompressAlgorithm>().unwrap(),
+      CompressAlgorithm::Gzip
+    );
+    assert_eq!(
+      "deflate".parse::<CompressAlgorithm>().unwrap(),
+      CompressAlgorithm::Deflate
+    );
+    assert_eq!(
+      "lz4".parse::<CompressAlgorithm>().unwrap(),
+      CompressAlgorithm::Lz4
+    );
+    assert_eq!(
+      "unknown(33)".parse::<CompressAlgorithm>().unwrap(),
+      CompressAlgorithm::Unknown(33)
+    );
     assert!("unknown".parse::<CompressAlgorithm>().is_err());
-    assert_eq!("brotli(11, 22)".parse::<CompressAlgorithm>().unwrap(), CompressAlgorithm::Brotli(BrotliAlgorithm::with_quality_and_window(11.into(), 22.into())));
-    assert_eq!("brotli".parse::<CompressAlgorithm>().unwrap(), CompressAlgorithm::Brotli(BrotliAlgorithm::default()));
-    assert_eq!("brotli()".parse::<CompressAlgorithm>().unwrap(), CompressAlgorithm::Brotli(BrotliAlgorithm::default()));
+    assert_eq!(
+      "brotli(11, 22)".parse::<CompressAlgorithm>().unwrap(),
+      CompressAlgorithm::Brotli(BrotliAlgorithm::with_quality_and_window(
+        11.into(),
+        22.into()
+      ))
+    );
+    assert_eq!(
+      "brotli".parse::<CompressAlgorithm>().unwrap(),
+      CompressAlgorithm::Brotli(BrotliAlgorithm::default())
+    );
+    assert_eq!(
+      "brotli()".parse::<CompressAlgorithm>().unwrap(),
+      CompressAlgorithm::Brotli(BrotliAlgorithm::default())
+    );
     assert!("brotli(-)".parse::<CompressAlgorithm>().is_err());
 
-    assert_eq!("zstd(3)".parse::<CompressAlgorithm>().unwrap(), CompressAlgorithm::Zstd(ZstdAlgorithm::with_level(3)));
-    assert_eq!("zstd".parse::<CompressAlgorithm>().unwrap(), CompressAlgorithm::Zstd(ZstdAlgorithm::default()));
-    assert_eq!("zstd()".parse::<CompressAlgorithm>().unwrap(), CompressAlgorithm::Zstd(ZstdAlgorithm::default()));
+    assert_eq!(
+      "zstd(3)".parse::<CompressAlgorithm>().unwrap(),
+      CompressAlgorithm::Zstd(ZstdAlgorithm::with_level(3))
+    );
+    assert_eq!(
+      "zstd".parse::<CompressAlgorithm>().unwrap(),
+      CompressAlgorithm::Zstd(ZstdAlgorithm::default())
+    );
+    assert_eq!(
+      "zstd()".parse::<CompressAlgorithm>().unwrap(),
+      CompressAlgorithm::Zstd(ZstdAlgorithm::default())
+    );
     assert!("zstd(-)".parse::<CompressAlgorithm>().is_err());
-
   }
 
   #[test]
   fn test_encrypt_algorithm_from_str() {
-    assert_eq!("aes-gcm-no-padding".parse::<EncryptionAlgorithm>().unwrap(), EncryptionAlgorithm::NoPadding);
-    assert_eq!("aes-gcm-nopadding".parse::<EncryptionAlgorithm>().unwrap(), EncryptionAlgorithm::NoPadding);
-    assert_eq!("aes-gcm-pkcs7".parse::<EncryptionAlgorithm>().unwrap(), EncryptionAlgorithm::Pkcs7);
-    assert_eq!("NoPadding".parse::<EncryptionAlgorithm>().unwrap(), EncryptionAlgorithm::NoPadding);
-    assert_eq!("no-padding".parse::<EncryptionAlgorithm>().unwrap(), EncryptionAlgorithm::NoPadding);
-    assert_eq!("nopadding".parse::<EncryptionAlgorithm>().unwrap(), EncryptionAlgorithm::NoPadding);
-    assert_eq!("no_padding".parse::<EncryptionAlgorithm>().unwrap(), EncryptionAlgorithm::NoPadding);
-    assert_eq!("NOPADDING".parse::<EncryptionAlgorithm>().unwrap(), EncryptionAlgorithm::NoPadding);
-    assert_eq!("unknown(33)".parse::<EncryptionAlgorithm>().unwrap(), EncryptionAlgorithm::Unknown(33));
+    assert_eq!(
+      "aes-gcm-no-padding".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "aes-gcm-nopadding".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "aes-gcm-pkcs7".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::Pkcs7
+    );
+    assert_eq!(
+      "NoPadding".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "no-padding".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "nopadding".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "no_padding".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "NOPADDING".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "unknown(33)".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::Unknown(33)
+    );
     assert!("unknown".parse::<EncryptionAlgorithm>().is_err());
   }
 
   #[test]
   fn test_checksum_algorithm_from_str() {
-    assert_eq!("crc32".parse::<ChecksumAlgorithm>().unwrap(), ChecksumAlgorithm::Crc32);
-    assert_eq!("xxhash32".parse::<ChecksumAlgorithm>().unwrap(), ChecksumAlgorithm::XxHash32);
-    assert_eq!("xxhash64".parse::<ChecksumAlgorithm>().unwrap(), ChecksumAlgorithm::XxHash64);
-    assert_eq!("xxhash3".parse::<ChecksumAlgorithm>().unwrap(), ChecksumAlgorithm::XxHash3);
-    assert_eq!("murmur3".parse::<ChecksumAlgorithm>().unwrap(), ChecksumAlgorithm::Murmur3);
-    assert_eq!("unknown(33)".parse::<ChecksumAlgorithm>().unwrap(), ChecksumAlgorithm::Unknown(33));
+    assert_eq!(
+      "crc32".parse::<ChecksumAlgorithm>().unwrap(),
+      ChecksumAlgorithm::Crc32
+    );
+    assert_eq!(
+      "xxhash32".parse::<ChecksumAlgorithm>().unwrap(),
+      ChecksumAlgorithm::XxHash32
+    );
+    assert_eq!(
+      "xxhash64".parse::<ChecksumAlgorithm>().unwrap(),
+      ChecksumAlgorithm::XxHash64
+    );
+    assert_eq!(
+      "xxhash3".parse::<ChecksumAlgorithm>().unwrap(),
+      ChecksumAlgorithm::XxHash3
+    );
+    assert_eq!(
+      "murmur3".parse::<ChecksumAlgorithm>().unwrap(),
+      ChecksumAlgorithm::Murmur3
+    );
+    assert_eq!(
+      "unknown(33)".parse::<ChecksumAlgorithm>().unwrap(),
+      ChecksumAlgorithm::Unknown(33)
+    );
     assert!("unknown".parse::<ChecksumAlgorithm>().is_err());
   }
 }

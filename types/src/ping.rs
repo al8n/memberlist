@@ -14,6 +14,7 @@ macro_rules! bail_ping {
     )]
     #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+    #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
     pub struct $name<I, A> {
       /// The sequence number of the ack
       #[viewit(
@@ -224,26 +225,6 @@ macro_rules! bail_ping {
         }
       }
     }
-
-    #[cfg(feature = "arbitrary")]
-    const _: () = {
-      use arbitrary::{Arbitrary, Unstructured};
-
-      impl<'a, I, A> Arbitrary<'a> for $name<I, A>
-      where
-        I: Arbitrary<'a>,
-        A: Arbitrary<'a>,
-      {
-        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-          let sequence_number = u.arbitrary()?;
-          let source_id = I::arbitrary(u)?;
-          let source_addr = A::arbitrary(u)?;
-          let target_id = I::arbitrary(u)?;
-          let target_addr = A::arbitrary(u)?;
-          Ok(Self::new(sequence_number, Node::new(source_id, source_addr), Node::new(target_id, target_addr)))
-        }
-      }
-    };
 
     #[cfg(feature = "quickcheck")]
     const _: () = {

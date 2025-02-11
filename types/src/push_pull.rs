@@ -12,6 +12,7 @@ pub use state::*;
 /// Push pull message.
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct PushPull<I, A> {
   /// Whether the push pull message is a join message.
   #[viewit(
@@ -34,6 +35,7 @@ pub struct PushPull<I, A> {
     ),
     setter(attrs(doc = "Sets the states of the push pull message (Builder pattern)"))
   )]
+  #[cfg_attr(feature = "arbitrary", arbitrary(with = super::arbitrary_triomphe_arc))]
   states: Arc<[PushNodeState<I, A>]>,
   /// The user data of the push pull message.
   #[viewit(
@@ -44,6 +46,7 @@ pub struct PushPull<I, A> {
     ),
     setter(attrs(doc = "Sets the user data of the push pull message (Builder pattern)"))
   )]
+  #[cfg_attr(feature = "arbitrary", arbitrary(with = super::arbitrary_bytes))]
   user_data: Bytes,
 }
 
@@ -264,29 +267,6 @@ where
     ))
   }
 }
-
-#[cfg(feature = "arbitrary")]
-const _: () = {
-  use super::*;
-  use arbitrary::{Arbitrary, Unstructured};
-
-  impl<'a, I, A> Arbitrary<'a> for PushPull<I, A>
-  where
-    I: Arbitrary<'a>,
-    A: Arbitrary<'a>,
-  {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      let join = u.arbitrary()?;
-      let states = u.arbitrary::<Vec<_>>()?;
-      let user_data = Vec::<u8>::arbitrary(u)?.into();
-      Ok(Self {
-        join,
-        states: Arc::from(states),
-        user_data,
-      })
-    }
-  }
-};
 
 #[cfg(feature = "quickcheck")]
 const _: () = {

@@ -66,6 +66,8 @@ impl From<u8> for EncryptionAlgorithm {
   getters(style = "move")
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct EncryptedMessage<I, A> {
   /// The algorithm used to encryption the message.
   #[viewit(
@@ -81,6 +83,7 @@ pub struct EncryptedMessage<I, A> {
     getter(skip),
     setter(attrs(doc = "Sets the payload of the message.", inline,))
   )]
+  #[cfg_attr(feature = "arbitrary", arbitrary(with = super::super::arbitrary_bytes))]
   payload: Bytes,
   #[viewit(getter(skip), setter(skip))]
   _m: PhantomData<(I, A)>,
@@ -260,7 +263,7 @@ where
           if message.is_some() {
             return Err(DecodeError::duplicate_field(
               "EncryptedMessage",
-              "message",
+              "payload",
               MESSAGE_TAG,
             ));
           }
@@ -271,7 +274,6 @@ where
           message = Some(payload);
         }
         _ => {
-          println!("{algo:?} {message:?}");
           let (wire_type, _) = split(b);
           let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           offset += skip(wire_type, &buf[offset..])?;
@@ -290,18 +292,8 @@ const _: () = {
   use arbitrary::{Arbitrary, Unstructured};
 
   impl<'a> Arbitrary<'a> for EncryptionAlgorithm {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
       Ok(Self::from(u.arbitrary::<u8>()?))
-    }
-  }
-
-  impl<'a, I, A> Arbitrary<'a> for EncryptedMessage<I, A>
-  where
-    I: Arbitrary<'a>,
-    A: Arbitrary<'a>,
-  {
-    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-      Ok(Self::new(u.arbitrary()?, u.arbitrary::<Vec<u8>>()?.into()))
     }
   }
 };

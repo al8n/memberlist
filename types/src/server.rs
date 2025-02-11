@@ -77,6 +77,7 @@ impl core::fmt::Display for State {
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct NodeState<I, A> {
   /// The id of the node.
   #[viewit(
@@ -293,23 +294,6 @@ where
 #[cfg(feature = "arbitrary")]
 const _: () = {
   use arbitrary::{Arbitrary, Unstructured};
-
-  impl<'a, I, A> Arbitrary<'a> for NodeState<I, A>
-  where
-    I: Arbitrary<'a>,
-    A: Arbitrary<'a>,
-  {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      Ok(Self {
-        id: u.arbitrary()?,
-        addr: u.arbitrary()?,
-        meta: u.arbitrary()?,
-        state: u.arbitrary()?,
-        protocol_version: u.arbitrary()?,
-        delegate_version: u.arbitrary()?,
-      })
-    }
-  }
 
   impl<'a> Arbitrary<'a> for State {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {

@@ -189,13 +189,12 @@ impl<'de> Deserialize<'de> for CompressAlgorithm {
   }
 }
 
-
 #[cfg(test)]
 mod tests {
   use super::*;
 
   #[quickcheck_macros::quickcheck]
-  fn checksum_algorithm_serde(algo: ChecksumAlgorithm) -> bool{
+  fn checksum_algorithm_serde(algo: ChecksumAlgorithm) -> bool {
     let Ok(serialized) = serde_json::to_string(&algo) else {
       return false;
     };
