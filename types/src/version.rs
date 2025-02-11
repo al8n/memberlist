@@ -119,23 +119,6 @@ macro_rules! impl_data {
 
 impl_data!(DelegateVersion, ProtocolVersion);
 
-#[cfg(feature = "arbitrary")]
-const _: () = {
-  use arbitrary::{Arbitrary, Unstructured};
-
-  impl<'a> Arbitrary<'a> for DelegateVersion {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      Ok(u.arbitrary::<u8>()?.into())
-    }
-  }
-
-  impl<'a> Arbitrary<'a> for ProtocolVersion {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      Ok(u.arbitrary::<u8>()?.into())
-    }
-  }
-};
-
 #[cfg(feature = "quickcheck")]
 const _: () = {
   use quickcheck::Arbitrary;

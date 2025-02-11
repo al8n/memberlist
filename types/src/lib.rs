@@ -33,6 +33,8 @@ pub use version::*;
 
 mod ack;
 mod alive;
+#[cfg(feature = "arbitrary")]
+mod arbitrary_impl;
 mod bad_state;
 mod cidr_policy;
 mod data;
@@ -160,16 +162,4 @@ fn check_encoded_message_size(required: usize) -> Result<(), EncodeError> {
   }
 
   Ok(())
-}
-
-#[cfg(feature = "arbitrary")]
-fn arbitrary_bytes(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<bytes::Bytes> {
-  u.arbitrary::<Vec<u8>>().map(Into::into)
-}
-
-#[cfg(feature = "arbitrary")]
-fn arbitrary_triomphe_arc<'a, T: arbitrary::Arbitrary<'a>>(
-  u: &mut arbitrary::Unstructured<'a>,
-) -> arbitrary::Result<triomphe::Arc<[T]>> {
-  u.arbitrary::<Vec<T>>().map(Into::into)
 }

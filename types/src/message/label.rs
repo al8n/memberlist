@@ -28,7 +28,7 @@ pub enum ParseLabelError {
 #[derive(Clone, derive_more::Display)]
 #[display("{_0}")]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
-pub struct Label(SmolStr);
+pub struct Label(pub(crate) SmolStr);
 
 impl CheapClone for Label {}
 
@@ -386,7 +386,7 @@ pub struct LabeledMessage<I, A> {
     getter(skip),
     setter(attrs(doc = "Sets the payload of the message.", inline,))
   )]
-  #[cfg_attr(feature = "arbitrary", arbitrary(with = super::super::arbitrary_bytes))]
+  #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::bytes))]
   payload: Bytes,
   #[viewit(getter(skip), setter(skip))]
   _m: PhantomData<(I, A)>,
@@ -561,28 +561,6 @@ where
     Ok((offset, LabeledMessageRef::new(label, message)))
   }
 }
-
-#[cfg(feature = "arbitrary")]
-const _: () = {
-  use arbitrary::{Arbitrary, Unstructured};
-
-  impl<'a> Arbitrary<'a> for Label {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      let mut s = String::new();
-      while s.len() < 253 {
-        let c = u.arbitrary::<char>()?;
-        let char_len = c.len_utf8();
-
-        if s.len() + char_len > 253 {
-          break;
-        }
-        s.push(c);
-      }
-
-      Ok(Label(s.into()))
-    }
-  }
-};
 
 #[cfg(feature = "quickcheck")]
 const _: () = {

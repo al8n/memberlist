@@ -187,7 +187,7 @@ enum_wrapper!(
   pub enum Message<I, A> {
     /// Compound message
     Compound(
-      #[cfg_attr(feature = "arbitrary", arbitrary(with = super::arbitrary_triomphe_arc))]
+      #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::triomphe_arc))]
       Arc<[Self]>,
     ) = 1,
     /// Ping message
@@ -205,8 +205,9 @@ enum_wrapper!(
     /// PushPull message
     PushPull(PushPull<I, A>) = 8,
     /// User mesg, not handled by us
-    UserData(#[cfg_attr(feature = "arbitrary", arbitrary(with = super::arbitrary_bytes))] Bytes) =
-      9,
+    UserData(
+      #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::bytes))] Bytes,
+    ) = 9,
     /// Nack response message
     Nack(Nack) = 10,
     /// Error response message

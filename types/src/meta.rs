@@ -211,22 +211,6 @@ impl Data for Meta {
   }
 }
 
-#[cfg(feature = "arbitrary")]
-const _: () = {
-  use arbitrary::{Arbitrary, Unstructured};
-
-  impl<'a> Arbitrary<'a> for Meta {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      let len = u.int_in_range(0..=Self::MAX_SIZE)?;
-      let mut buf = Vec::with_capacity(len);
-      for _ in 0..len {
-        buf.push(u.arbitrary::<u8>()?);
-      }
-      Ok(Meta::try_from(buf).unwrap())
-    }
-  }
-};
-
 #[cfg(feature = "quickcheck")]
 const _: () = {
   use quickcheck::Arbitrary;

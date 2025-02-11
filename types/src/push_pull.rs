@@ -35,7 +35,7 @@ pub struct PushPull<I, A> {
     ),
     setter(attrs(doc = "Sets the states of the push pull message (Builder pattern)"))
   )]
-  #[cfg_attr(feature = "arbitrary", arbitrary(with = super::arbitrary_triomphe_arc))]
+  #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::triomphe_arc))]
   states: Arc<[PushNodeState<I, A>]>,
   /// The user data of the push pull message.
   #[viewit(
@@ -46,7 +46,7 @@ pub struct PushPull<I, A> {
     ),
     setter(attrs(doc = "Sets the user data of the push pull message (Builder pattern)"))
   )]
-  #[cfg_attr(feature = "arbitrary", arbitrary(with = super::arbitrary_bytes))]
+  #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::bytes))]
   user_data: Bytes,
 }
 

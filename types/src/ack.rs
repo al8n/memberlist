@@ -23,7 +23,7 @@ pub struct Ack {
     getter(const, style = "ref", attrs(doc = "Returns the payload of the ack")),
     setter(attrs(doc = "Sets the payload of the ack (Builder pattern)"))
   )]
-  #[cfg_attr(feature = "arbitrary", arbitrary(with = super::arbitrary_bytes))]
+  #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::bytes))]
   payload: Bytes,
 }
 

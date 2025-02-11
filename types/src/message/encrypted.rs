@@ -83,7 +83,7 @@ pub struct EncryptedMessage<I, A> {
     getter(skip),
     setter(attrs(doc = "Sets the payload of the message.", inline,))
   )]
-  #[cfg_attr(feature = "arbitrary", arbitrary(with = super::super::arbitrary_bytes))]
+  #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::bytes))]
   payload: Bytes,
   #[viewit(getter(skip), setter(skip))]
   _m: PhantomData<(I, A)>,
@@ -286,17 +286,6 @@ where
     Ok((offset, EncryptedMessageRef::new(algo, message)))
   }
 }
-
-#[cfg(feature = "arbitrary")]
-const _: () = {
-  use arbitrary::{Arbitrary, Unstructured};
-
-  impl<'a> Arbitrary<'a> for EncryptionAlgorithm {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-      Ok(Self::from(u.arbitrary::<u8>()?))
-    }
-  }
-};
 
 #[cfg(feature = "quickcheck")]
 const _: () = {
