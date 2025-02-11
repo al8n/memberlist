@@ -6,6 +6,26 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
+#[cfg(feature = "metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
+pub use metrics_label::MetricLabels;
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub use nodecraft::{
+  Domain, HostAddr, Node, NodeId, ParseDomainError, ParseHostAddrError, ParseNodeIdError,
+};
+#[cfg(feature = "encryption")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+pub use secret::*;
+
+#[cfg(feature = "arbitrary")]
+mod arbitrary_impl;
+#[cfg(feature = "metrics")]
+mod metrics_label;
+#[cfg(feature = "quickcheck")]
+mod quickcheck_impl;
+#[cfg(feature = "encryption")]
+mod secret;
+
 pub use ack::*;
 pub use alive::*;
 pub use bad_state::*;
@@ -15,44 +35,24 @@ pub use data::*;
 pub use err::*;
 pub use message::*;
 pub use meta::*;
-#[cfg(feature = "metrics")]
-#[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
-pub use metrics_label::MetricLabels;
-#[cfg(any(feature = "std", feature = "alloc"))]
-pub use nodecraft::{
-  Domain, HostAddr, Node, NodeId, ParseDomainError, ParseHostAddrError, ParseNodeIdError,
-};
 pub use ping::*;
 pub use push_pull::*;
-#[cfg(feature = "encryption")]
-#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-pub use secret::*;
 pub use server::*;
 pub use smallvec_wrapper::*;
 pub use version::*;
 
 mod ack;
 mod alive;
-#[cfg(feature = "arbitrary")]
-mod arbitrary_impl;
 mod bad_state;
 mod cidr_policy;
 mod data;
 mod err;
 mod message;
 mod meta;
-#[cfg(feature = "metrics")]
-#[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
-mod metrics_label;
 mod ping;
 mod push_pull;
-#[cfg(feature = "encryption")]
-#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-mod secret;
 mod server;
 mod version;
-
-// const MAX_ENCODED_LEN_SIZE: usize = core::mem::size_of::<u32>();
 
 /// A wire type used in Protobuf-like encoding/decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

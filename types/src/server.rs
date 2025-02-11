@@ -291,34 +291,6 @@ where
   }
 }
 
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use quickcheck::{Arbitrary, Gen};
-
-  impl<I, A> Arbitrary for NodeState<I, A>
-  where
-    I: Arbitrary,
-    A: Arbitrary,
-  {
-    fn arbitrary(g: &mut Gen) -> Self {
-      Self {
-        id: I::arbitrary(g),
-        addr: A::arbitrary(g),
-        meta: Meta::arbitrary(g),
-        state: State::arbitrary(g),
-        protocol_version: ProtocolVersion::arbitrary(g),
-        delegate_version: DelegateVersion::arbitrary(g),
-      }
-    }
-  }
-
-  impl Arbitrary for State {
-    fn arbitrary(g: &mut Gen) -> Self {
-      u8::arbitrary(g).into()
-    }
-  }
-};
-
 #[cfg(test)]
 mod tests {
   use std::net::SocketAddr;

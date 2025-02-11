@@ -324,28 +324,6 @@ impl Data for Nack {
   }
 }
 
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use quickcheck::{Arbitrary, Gen};
-
-  impl Arbitrary for Ack {
-    fn arbitrary(g: &mut Gen) -> Self {
-      Self {
-        sequence_number: u32::arbitrary(g),
-        payload: Vec::<u8>::arbitrary(g).into(),
-      }
-    }
-  }
-
-  impl Arbitrary for Nack {
-    fn arbitrary(g: &mut Gen) -> Self {
-      Self {
-        sequence_number: u32::arbitrary(g),
-      }
-    }
-  }
-};
-
 #[cfg(test)]
 mod tests {
   use super::*;

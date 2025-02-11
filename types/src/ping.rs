@@ -225,23 +225,6 @@ macro_rules! bail_ping {
         }
       }
     }
-
-    #[cfg(feature = "quickcheck")]
-    const _: () = {
-      use quickcheck::{Arbitrary, Gen};
-
-      impl<I: Arbitrary, A: Arbitrary> Arbitrary for $name<I, A> {
-        fn arbitrary(g: &mut Gen) -> Self {
-          let sequence_number = u32::arbitrary(g);
-          let source_id = I::arbitrary(g);
-          let source_addr = A::arbitrary(g);
-          let target_id = I::arbitrary(g);
-          let target_addr = A::arbitrary(g);
-
-          Self::new(sequence_number, Node::new(source_id, source_addr), Node::new(target_id, target_addr))
-        }
-      }
-    };
   };
 }
 

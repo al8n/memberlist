@@ -146,17 +146,6 @@ impl<'a> DataRef<'a, ErrorResponse> for ErrorResponseRef<'a> {
   }
 }
 
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use quickcheck::{Arbitrary, Gen};
-
-  impl Arbitrary for ErrorResponse {
-    fn arbitrary(g: &mut Gen) -> Self {
-      Self::new(String::arbitrary(g))
-    }
-  }
-};
-
 #[cfg(test)]
 mod tests {
   use arbitrary::{Arbitrary, Unstructured};

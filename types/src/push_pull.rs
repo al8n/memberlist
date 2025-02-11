@@ -268,29 +268,6 @@ where
   }
 }
 
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use super::*;
-  use quickcheck::{Arbitrary, Gen};
-
-  impl<I, A> Arbitrary for PushPull<I, A>
-  where
-    I: Arbitrary,
-    A: Arbitrary,
-  {
-    fn arbitrary(g: &mut Gen) -> Self {
-      let join = bool::arbitrary(g);
-      let states = Vec::<PushNodeState<I, A>>::arbitrary(g);
-      let user_data = Vec::<u8>::arbitrary(g).into();
-      Self {
-        join,
-        states: Arc::from(states),
-        user_data,
-      }
-    }
-  }
-};
-
 #[cfg(test)]
 mod tests {
   use std::net::SocketAddr;

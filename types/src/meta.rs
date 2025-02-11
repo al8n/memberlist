@@ -211,22 +211,6 @@ impl Data for Meta {
   }
 }
 
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use quickcheck::Arbitrary;
-
-  impl Arbitrary for Meta {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-      let len = usize::arbitrary(g) % Self::MAX_SIZE;
-      let mut buf = Vec::with_capacity(len);
-      for _ in 0..len {
-        buf.push(u8::arbitrary(g));
-      }
-      Meta::try_from(buf).unwrap()
-    }
-  }
-};
-
 #[cfg(test)]
 mod tests {
   use super::*;

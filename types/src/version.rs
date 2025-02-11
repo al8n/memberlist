@@ -119,23 +119,6 @@ macro_rules! impl_data {
 
 impl_data!(DelegateVersion, ProtocolVersion);
 
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use quickcheck::Arbitrary;
-
-  impl Arbitrary for DelegateVersion {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-      u8::arbitrary(g).into()
-    }
-  }
-
-  impl Arbitrary for ProtocolVersion {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-      u8::arbitrary(g).into()
-    }
-  }
-};
-
 #[cfg(test)]
 mod tests {
   use super::*;

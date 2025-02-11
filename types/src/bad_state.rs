@@ -195,24 +195,6 @@ macro_rules! bad_bail {
         self
       }
     }
-
-    #[cfg(feature = "quickcheck")]
-    const _: () = {
-      use quickcheck::{Arbitrary, Gen};
-
-      impl<I> Arbitrary for $name<I>
-      where
-        I: Arbitrary,
-      {
-        fn arbitrary(g: &mut Gen) -> Self {
-          Self {
-            incarnation: u32::arbitrary(g),
-            node: I::arbitrary(g),
-            from: I::arbitrary(g),
-          }
-        }
-      }
-    };
   };
 }
 

@@ -552,27 +552,3 @@ impl<I: Data, A: Data> core::iter::ExactSizeIterator for PushNodeStatesDecodeIte
 }
 
 impl<I: Data, A: Data> core::iter::FusedIterator for PushNodeStatesDecodeIter<'_, I, A> {}
-
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use super::*;
-  use quickcheck::{Arbitrary, Gen};
-
-  impl<I, A> Arbitrary for PushNodeState<I, A>
-  where
-    I: Arbitrary,
-    A: Arbitrary,
-  {
-    fn arbitrary(g: &mut Gen) -> Self {
-      Self {
-        id: I::arbitrary(g),
-        addr: A::arbitrary(g),
-        meta: Meta::arbitrary(g),
-        incarnation: u32::arbitrary(g),
-        state: State::arbitrary(g),
-        protocol_version: ProtocolVersion::arbitrary(g),
-        delegate_version: DelegateVersion::arbitrary(g),
-      }
-    }
-  }
-};

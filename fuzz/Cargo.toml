@@ -18,4 +18,3 @@ path = "fuzz_targets/messages.rs"
 test = false
 doc = false
 bench = false
-

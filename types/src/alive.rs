@@ -354,27 +354,6 @@ where
   }
 }
 
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use quickcheck::Arbitrary;
-
-  impl<I, A> Arbitrary for Alive<I, A>
-  where
-    I: Arbitrary,
-    A: Arbitrary,
-  {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-      Self {
-        incarnation: u32::arbitrary(g),
-        meta: Meta::arbitrary(g),
-        node: Node::new(I::arbitrary(g), A::arbitrary(g)),
-        protocol_version: ProtocolVersion::arbitrary(g),
-        delegate_version: DelegateVersion::arbitrary(g),
-      }
-    }
-  }
-};
-
 #[cfg(test)]
 mod tests {
   use std::net::SocketAddr;

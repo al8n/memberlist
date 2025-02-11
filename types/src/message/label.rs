@@ -562,41 +562,6 @@ where
   }
 }
 
-#[cfg(feature = "quickcheck")]
-const _: () = {
-  use quickcheck::{Arbitrary, Gen};
-
-  impl Arbitrary for Label {
-    fn arbitrary(g: &mut Gen) -> Self {
-      let mut s = String::new();
-      while s.len() < 253 {
-        let c = char::arbitrary(g);
-        let char_len = c.len_utf8();
-
-        if s.len() + char_len > 253 {
-          break;
-        }
-        s.push(c);
-      }
-
-      Label(s.into())
-    }
-  }
-
-  impl<I, A> Arbitrary for LabeledMessage<I, A>
-  where
-    I: Arbitrary,
-    A: Arbitrary,
-  {
-    fn arbitrary(g: &mut Gen) -> Self {
-      Self::new(
-        Arbitrary::arbitrary(g),
-        <Vec<u8> as Arbitrary>::arbitrary(g).into(),
-      )
-    }
-  }
-};
-
 #[cfg(test)]
 mod tests {
   use core::hash::{Hash, Hasher};
