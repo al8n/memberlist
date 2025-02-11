@@ -21,24 +21,10 @@
 ))]
 compile_error!("compression feature is enabled but no compress algorithm is selected");
 
-#[cfg(all(
-  feature = "checksum",
-  not(any(
-    feature = "crc32",
-    feature = "xxhash32",
-    feature = "xxhash64",
-    feature = "xxhash3",
-    feature = "murmur3",
-  ))
-))]
-compile_error!("checksum feature is enabled but no checksum algorithm is selected");
-
 mod api;
 mod awareness;
 mod base;
 mod broadcast;
-#[cfg(feature = "checksum")]
-#[cfg_attr(docsrs, doc(cfg(feature = "checksum")))]
 mod checksum;
 #[cfg(feature = "compression")]
 #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]

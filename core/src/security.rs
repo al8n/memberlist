@@ -49,8 +49,8 @@ impl From<aead::Error> for EncryptionError {
 #[inline]
 const fn encrypt_overhead(algo: EncryptionAlgorithm) -> usize {
   match algo {
-    EncryptionAlgorithm::Pkcs7 => 44, // IV: 12, Padding: 16, Tag: 16
-    EncryptionAlgorithm::NoPadding => 28, // IV: 12, Tag: 16
+    EncryptionAlgorithm::Pkcs7 => 45, // ALGO: 1, IV: 12, Padding: 16, Tag: 16
+    EncryptionAlgorithm::NoPadding => 29, // ALGO: 1, IV: 12, Tag: 16
     _ => 0,
   }
 }

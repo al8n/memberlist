@@ -13,18 +13,20 @@ pub use metrics_label::MetricLabels;
 pub use nodecraft::{
   Domain, HostAddr, Node, NodeId, ParseDomainError, ParseHostAddrError, ParseNodeIdError,
 };
-#[cfg(feature = "encryption")]
-#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-pub use secret::*;
 
 #[cfg(feature = "arbitrary")]
 mod arbitrary_impl;
+#[cfg(feature = "encryption")]
+mod encryption;
 #[cfg(feature = "metrics")]
 mod metrics_label;
 #[cfg(feature = "quickcheck")]
 mod quickcheck_impl;
+#[cfg(feature = "serde")]
+mod serde_impl;
 #[cfg(feature = "encryption")]
-mod secret;
+#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+pub use encryption::*;
 
 pub use ack::*;
 pub use alive::*;

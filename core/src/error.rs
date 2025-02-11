@@ -9,7 +9,6 @@ use crate::{
   types::{DecodeError, EncodeError, ErrorResponse, SmallVec},
 };
 
-#[cfg(feature = "checksum")]
 pub use crate::checksum::ChecksumError;
 #[cfg(feature = "compression")]
 pub use crate::compress::{CompressError, CompressionError, DecompressError};
@@ -175,8 +174,6 @@ pub enum Error<T: Transport, D: Delegate> {
   Compression(#[from] CompressionError),
   /// Checksum error
   #[error(transparent)]
-  #[cfg(feature = "checksum")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "checksum")))]
   Checksum(#[from] ChecksumError),
 }
 

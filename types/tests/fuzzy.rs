@@ -4,12 +4,10 @@ use core::{
 };
 use memberlist_types::{
   Ack, Alive, ChecksumedMessage, CompressedMessage, Data, Dead, EncryptedMessage, ErrorResponse,
-  IndirectPing, Label, LabeledMessage, Message, Nack, Ping, PushNodeState, PushPull, Suspect,
+  IndirectPing, Label, LabeledMessage, Message, Nack, Ping, PushNodeState, PushPull, SecretKey,
+  Suspect,
 };
 use nodecraft::{Domain, HostAddr, Node, NodeId};
-
-#[cfg(feature = "encryption")]
-use memberlist_types::SecretKey;
 
 fn fuzzy<D>(data: D) -> bool
 where
@@ -297,7 +295,6 @@ fn f64_fuzzy(value: f64) -> bool {
 }
 
 #[quickcheck_macros::quickcheck]
-#[cfg(feature = "encryption")]
 fn secret_key_fuzzy(_: SecretKey) -> bool {
   true
 }

@@ -21,7 +21,6 @@ default = [
   "smallvec-wrapper/default",
   "thiserror/default",
   "triomphe/default",
-
   "base64?/default",
 ]
 alloc = ["nodecraft/alloc"]
@@ -33,14 +32,13 @@ std = [
   "smallvec-wrapper/std",
   "thiserror/std",
   "triomphe/std",
-
   "base64?/std",
 ]
 
+encryption = ["aead", "aes-gcm", "base64", "cbc", "rand"]
+
 arbitrary = ["dep:arbitrary", "nodecraft/arbitrary", "smol_str/arbitrary"]
 quickcheck = ["dep:quickcheck", "nodecraft/quickcheck"]
-
-encryption = ["base64"]
 serde = ["dep:serde", "smol_str/serde", "bytes/serde", "nodecraft/serde", "smallvec-wrapper/serde"]
 
 [dependencies]
@@ -60,9 +58,30 @@ viewit.workspace = true
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 quickcheck = { workspace = true, optional = true }
 
-base64 = { version = "0.22", default-features = false, optional = true }
+
 serde = { workspace = true, optional = true }
 
+# encryption
+aead = { version = "0.5", features = ["bytes", "std"], optional = true }
+aes-gcm = { version = "0.10", optional = true }
+base64 = { version = "0.22", default-features = false, optional = true }
+cbc = { version = "0.1", optional = true }
+rand = { workspace = true, optional = true }
+
+# checksum
+crc32fast = { version = "1", optional = true }
+xxhash-rust = { version = "0.8", optional = true }
+hash32 = { version = "0.3", optional = true }
+
+# compression
+weezl = { version = "0.1", optional = true }
+brotli = { version = "7", optional = true }
+snap = { version = "1", optional = true }
+lz4_flex = { version = "0.11", optional = true }
+flate2 = { version = "1", optional = true }
+zstd = { version = "0.13", optional = true }
+
+# tracing & metrics
 metrics = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 

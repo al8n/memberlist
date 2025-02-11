@@ -1,63 +1,9 @@
-use core::marker::PhantomData;
-use std::borrow::Cow;
-
 use bytes::Bytes;
+use core::marker::PhantomData;
 
-use super::{merge, skip, split, Data, DataRef, DecodeError, EncodeError, WireType};
-
-const NOPADDING_TAG: u8 = 0;
-const PKCS7_TAG: u8 = 1;
-
-/// The encryption algorithm used to encrypt the message.
-#[derive(
-  Debug, Default, Clone, Copy, PartialEq, Eq, Hash, derive_more::IsVariant, derive_more::Display,
-)]
-#[non_exhaustive]
-pub enum EncryptionAlgorithm {
-  /// AES-GCM, using no padding
-  #[default]
-  #[display("aes-gcm-nopadding")]
-  NoPadding,
-  /// AES-GCM, using PKCS7 padding
-  #[display("aes-gcm-pkcs7")]
-  Pkcs7,
-  /// Unknwon encryption version
-  #[display("unknown({_0})")]
-  Unknown(u8),
-}
-
-impl EncryptionAlgorithm {
-  /// Returns the encryption version as a `u8`.
-  #[inline]
-  pub const fn as_u8(&self) -> u8 {
-    match self {
-      Self::NoPadding => NOPADDING_TAG,
-      Self::Pkcs7 => PKCS7_TAG,
-      Self::Unknown(v) => *v,
-    }
-  }
-
-  /// Returns the encryption version as a `&'static str`.
-  #[inline]
-  pub fn as_str(&self) -> Cow<'static, str> {
-    let val = match self {
-      Self::NoPadding => "aes-gcm-nopadding",
-      Self::Pkcs7 => "aes-gcm-pkcs7",
-      Self::Unknown(e) => return Cow::Owned(format!("unknown({})", e)),
-    };
-    Cow::Borrowed(val)
-  }
-}
-
-impl From<u8> for EncryptionAlgorithm {
-  fn from(value: u8) -> Self {
-    match value {
-      NOPADDING_TAG => Self::NoPadding,
-      PKCS7_TAG => Self::Pkcs7,
-      e => Self::Unknown(e),
-    }
-  }
-}
+use super::{
+  merge, skip, split, Data, DataRef, DecodeError, EncodeError, EncryptionAlgorithm, WireType,
+};
 
 /// A message with a encryption.
 #[viewit::viewit(

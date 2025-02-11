@@ -16,11 +16,10 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["metrics"]
+default = ["metrics", "compression", "lzw", "snappy", "encryption", "crc32"]
 metrics = ["dep:metrics", "memberlist-types/metrics"]
 
 # checksum related feature
-checksum = []
 crc32 = ["crc32fast"]
 xxhash32 = ["xxhash-rust/xxh32"]
 xxhash64 = ["xxhash-rust/xxh64"]
@@ -28,7 +27,7 @@ xxhash3 = ["xxhash-rust/xxh3"]
 murmur3 = ["dep:hash32"]
 
 # encryption related feature
-encryption = ["rayon", "aead", "aes-gcm", "cbc", "indexmap", "memberlist-types/encryption"]
+encryption = ["rayon", "aead", "aes-gcm", "cbc", "indexmap"]
 
 # compression related feature
 compression = ["rayon"]

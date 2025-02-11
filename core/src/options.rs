@@ -1,8 +1,9 @@
 use std::time::Duration;
 
+use memberlist_types::Label;
+
 use super::types::{DelegateVersion, ProtocolVersion};
 
-#[cfg(feature = "checksum")]
 use super::types::ChecksumAlgorithm;
 
 #[cfg(feature = "compression")]
@@ -19,6 +20,17 @@ pub use super::types::MetricLabels;
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Options {
+  /// Label is an optional set of bytes to include on the outside of each
+  /// packet and stream.
+  ///
+  /// If gossip encryption is enabled and this is set it is treated as GCM
+  /// authenticated data.
+  #[viewit(
+    getter(const, style = "ref", attrs(doc = "Get the label of the node."),),
+    setter(attrs(doc = "Set the label of the node. (Builder pattern)"),)
+  )]
+  label: Label,
+
   /// The timeout for establishing a stream connection with
   /// a remote node for a full state sync, and for stream read and write
   /// operations.
@@ -276,7 +288,6 @@ pub struct Options {
   /// ## Note
   /// If the [`Transport::packet_reliable`](crate::transport::Transport::packet_reliable) is return `true`,
   /// then the checksum will not be appended to the packets, even if this field is set to `Some`.
-  #[cfg(feature = "checksum")]
   #[cfg_attr(
     feature = "serde",
     serde(skip_serializing_if = "Option::is_none", default)
@@ -284,14 +295,38 @@ pub struct Options {
   #[viewit(
     getter(
       const,
-      attrs(doc = "Returns the checksum algorithm for the packets sent through transport.")
+      attrs(doc = "Returns the checksum algorithm for the packets sent through transport.",)
     ),
     setter(
       const,
-      attrs(doc = "Sets the checksum algorithm for the packets sent through transport.")
+      attrs(doc = "Sets the checksum algorithm for the packets sent through transport.",)
     )
   )]
   checksum_algo: Option<ChecksumAlgorithm>,
+
+  /// The size of a message that should be offload to [`rayon`] thread pool
+  /// for checksuming, encryption or compression.
+  ///
+  /// The default value is 1KB, which means that any message larger than 1KB
+  /// will be offloaded to [`rayon`] thread pool for encryption or compression.
+  #[cfg(any(feature = "compression", feature = "encryption"))]
+  #[cfg_attr(docsrs, doc(cfg(any(feature = "compression", feature = "encryption"))))]
+  #[viewit(
+    getter(
+      const,
+      attrs(
+        doc = "Get the size of a message that should be offload to [`rayon`] thread pool for encryption or compression.",
+        cfg(any(feature = "compression", feature = "encryption")),
+        cfg_attr(docsrs, doc(cfg(any(feature = "compression", feature = "encryption"))))
+      ),
+    ),
+    setter(attrs(
+      doc = "Set the size of a message that should be offload to [`rayon`] thread pool for encryption or compression. (Builder pattern)",
+      cfg(any(feature = "compression", feature = "encryption")),
+      cfg_attr(docsrs, doc(cfg(any(feature = "compression", feature = "encryption"))))
+    ),)
+  )]
+  offload_size: usize,
 
   /// Indicates that should the messages sent as packet or stream through transport will be encrypted or not.
   ///
@@ -310,14 +345,68 @@ pub struct Options {
   #[viewit(
     getter(
       const,
-      attrs(doc = "Returns the encryption algorithm for the messages sent through transport.")
+      attrs(
+        doc = "Returns the encryption algorithm for the messages sent through transport.",
+        cfg(feature = "encryption"),
+        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+      )
     ),
     setter(
       const,
-      attrs(doc = "Sets the encryption algorithm for the messages sent through transport.")
+      attrs(
+        doc = "Sets the encryption algorithm for the messages sent through transport.",
+        cfg(feature = "encryption"),
+        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+      )
     )
   )]
   encryption_algo: Option<EncryptionAlgorithm>,
+
+  /// Controls whether to enforce encryption for outgoing
+  /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
+  /// a running cluster.
+  #[cfg_attr(feature = "serde", serde(default))]
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  #[viewit(
+    getter(
+      const,
+      attrs(
+        doc = "Get whether to enforce encryption for outgoing gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster.",
+        cfg(feature = "encryption"),
+        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+      ),
+    ),
+    setter(attrs(
+      doc = "Set whether to enforce encryption for outgoing gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster. (Builder pattern)",
+      cfg(feature = "encryption"),
+      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+    ),)
+  )]
+  gossip_verify_outgoing: bool,
+
+  /// Controls whether to enforce encryption for incoming
+  /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
+  /// a running cluster.
+  #[cfg_attr(feature = "serde", serde(default))]
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  #[viewit(
+    getter(
+      const,
+      attrs(
+        doc = "Get whether to enforce encryption for incoming gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster.",
+        cfg(feature = "encryption"),
+        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+      ),
+    ),
+    setter(attrs(
+      doc = "Set whether to enforce encryption for incoming gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster. (Builder pattern)",
+      cfg(feature = "encryption"),
+      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+    ),)
+  )]
+  gossip_verify_incoming: bool,
 
   /// Indicates that should the messages sent through transport will be compressed or not.
   ///
@@ -330,11 +419,19 @@ pub struct Options {
   #[viewit(
     getter(
       const,
-      attrs(doc = "Returns the compress algorithm for the messages sent through transport.")
+      attrs(
+        doc = "Returns the compress algorithm for the messages sent through transport.",
+        cfg(feature = "compression"),
+        cfg_attr(docsrs, doc(cfg(feature = "compression")))
+      )
     ),
     setter(
       const,
-      attrs(doc = "Sets the compress algorithm for the messages sent through transport.")
+      attrs(
+        doc = "Sets the compress algorithm for the messages sent through transport.",
+        cfg(feature = "compression"),
+        cfg_attr(docsrs, doc(cfg(feature = "compression")))
+      )
     )
   )]
   compress_algo: Option<CompressAlgorithm>,
@@ -377,6 +474,7 @@ impl Options {
   #[inline]
   pub fn lan() -> Self {
     Self {
+      label: Label::empty(),
       timeout: Duration::from_secs(10), // Timeout after 10 seconds
       indirect_checks: 3,               // Use 3 nodes for the indirect ping
       retransmit_mult: 4,               // Retransmit a message 4 * log(N+1) nodes
@@ -395,10 +493,15 @@ impl Options {
       handoff_queue_depth: 1024,
       dead_node_reclaim_time: Duration::ZERO,
       queue_check_interval: Duration::from_secs(30),
-      #[cfg(feature = "checksum")]
       checksum_algo: None,
+      #[cfg(any(feature = "compression", feature = "encryption"))]
+      offload_size: 1024 * 1024,
       #[cfg(feature = "encryption")]
       encryption_algo: None,
+      #[cfg(feature = "encryption")]
+      gossip_verify_incoming: false,
+      #[cfg(feature = "encryption")]
+      gossip_verify_outgoing: false,
       #[cfg(feature = "compression")]
       compress_algo: None,
       #[cfg(feature = "metrics")]

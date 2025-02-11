@@ -2,6 +2,8 @@ use std::sync::atomic::Ordering;
 
 use super::{
   base::Memberlist,
+  checksum::checksum,
+  compress::compress_into_vec,
   delegate::Delegate,
   error::Error,
   transport::{TimeoutableStream, Transport},
@@ -102,11 +104,57 @@ where
   ) -> Result<(), Error<T, D>> {
     let reliable = self.inner.transport.packet_reliable();
     let secure = self.inner.transport.packet_secure();
+    let encoded_len = packet.encoded_len();
+    let offload_size = self.inner.opts.offload_size();
 
+    let cks_algo = self.inner.opts.checksum_algo();
+    let encryption_algo = self.inner.opts.encryption_algo();
+    let compress_algo = self.inner.opts.compress_algo();
+    let label = self.inner.opts.label().clone();
+
+    let need_cks = cks_algo.is_some() && !reliable;
+    let need_compress = compress_algo.is_some();
+    let need_encrypt = encryption_algo.is_some() && !secure;
+    let need_label = !label.is_empty();
+
+    if encoded_len > offload_size {
+      let data = Self::offload(packet).await?;
+      return self.raw_send_packet(addr, data).await;
+    }
+
+    let mut data = vec![0u8; encoded_len];
+    packet.encode(&mut data)?;
+
+    if let Some(compress_algo) = compress_algo {
+      data = compress_into_vec(compress_algo, &data)?;
+    }
+
+    if need_cks {
+      let cks = checksum(&cks_algo.unwrap(), &data)?;
+    }
+
+    // The send process is as follows:
+    //   1. compress if needed
+    //   2. checksum if needed
+    //   3. encrypt if needed
+    //   4. prepend label if needed
+
+    todo!()
+  }
+
+  async fn offload(payload: Message<T::Id, T::ResolvedAddress>) -> Result<Bytes, Error<T, D>> {
+    todo!()
+  }
+
+  async fn raw_send_packet(
+    &self,
+    addr: &T::ResolvedAddress,
+    data: Bytes,
+  ) -> Result<(), Error<T, D>> {
     self
       .inner
       .transport
-      .send_packet(addr, todo!())
+      .send_packet(addr, data)
       .await
       .map(|(_sent, _)| {
         #[cfg(feature = "metrics")]

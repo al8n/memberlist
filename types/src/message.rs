@@ -222,25 +222,25 @@ where
     Self: Sized,
   {
     Ok(match val {
-      MessageRef::Compound(val) => val
+      Self::Ref::Compound(val) => val
         .iter::<I, A>()
         .map(|res| res.and_then(Message::from_ref))
         .collect::<Result<Arc<[_]>, DecodeError>>()
         .map(|msgs| Self::Compound(msgs))?,
-      MessageRef::Ping(val) => Self::Ping(Ping::from_ref(val)?),
-      MessageRef::IndirectPing(val) => Self::IndirectPing(IndirectPing::from_ref(val)?),
-      MessageRef::Ack(val) => Self::Ack(Ack::from_ref(val)?),
-      MessageRef::Suspect(val) => Self::Suspect(Suspect::from_ref(val)?),
-      MessageRef::Alive(val) => Self::Alive(Alive::from_ref(val)?),
-      MessageRef::Dead(val) => Self::Dead(Dead::from_ref(val)?),
-      MessageRef::PushPull(val) => Self::PushPull(PushPull::from_ref(val)?),
-      MessageRef::UserData(val) => Self::UserData(Bytes::from_ref(val)?),
-      MessageRef::Nack(val) => Self::Nack(Nack::from_ref(val)?),
-      MessageRef::ErrorResponse(val) => Self::ErrorResponse(ErrorResponse::from_ref(val)?),
-      MessageRef::Checksumed(val) => Self::Checksumed(ChecksumedMessage::from_ref(val)?),
-      MessageRef::Encrypted(val) => Self::Encrypted(EncryptedMessage::from_ref(val)?),
-      MessageRef::Compressed(val) => Self::Compressed(CompressedMessage::from_ref(val)?),
-      MessageRef::Labeled(val) => Self::Labeled(LabeledMessage::from_ref(val)?),
+      Self::Ref::Ping(val) => Self::Ping(Ping::from_ref(val)?),
+      Self::Ref::IndirectPing(val) => Self::IndirectPing(IndirectPing::from_ref(val)?),
+      Self::Ref::Ack(val) => Self::Ack(Ack::from_ref(val)?),
+      Self::Ref::Suspect(val) => Self::Suspect(Suspect::from_ref(val)?),
+      Self::Ref::Alive(val) => Self::Alive(Alive::from_ref(val)?),
+      Self::Ref::Dead(val) => Self::Dead(Dead::from_ref(val)?),
+      Self::Ref::PushPull(val) => Self::PushPull(PushPull::from_ref(val)?),
+      Self::Ref::UserData(val) => Self::UserData(Bytes::from_ref(val)?),
+      Self::Ref::Nack(val) => Self::Nack(Nack::from_ref(val)?),
+      Self::Ref::ErrorResponse(val) => Self::ErrorResponse(ErrorResponse::from_ref(val)?),
+      Self::Ref::Checksumed(val) => Self::Checksumed(ChecksumedMessage::from_ref(val)?),
+      Self::Ref::Encrypted(val) => Self::Encrypted(EncryptedMessage::from_ref(val)?),
+      Self::Ref::Compressed(val) => Self::Compressed(CompressedMessage::from_ref(val)?),
+      Self::Ref::Labeled(val) => Self::Labeled(LabeledMessage::from_ref(val)?),
     })
   }
 

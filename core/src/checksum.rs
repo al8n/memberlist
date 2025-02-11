@@ -26,7 +26,7 @@ impl ChecksumError {
   }
 }
 
-pub(crate) fn checksum(algo: ChecksumAlgorithm, data: &[u8]) -> Result<u64, ChecksumError> {
+pub(crate) fn checksum(algo: &ChecksumAlgorithm, data: &[u8]) -> Result<u64, ChecksumError> {
   Ok(match algo {
     ChecksumAlgorithm::Crc32 => {
       cfg_if::cfg_if! {
@@ -77,6 +77,6 @@ pub(crate) fn checksum(algo: ChecksumAlgorithm, data: &[u8]) -> Result<u64, Chec
         }
       }
     }
-    algo => return Err(ChecksumError::UnknownChecksumAlgorithm(algo)),
+    algo => return Err(ChecksumError::UnknownChecksumAlgorithm(*algo)),
   })
 }
