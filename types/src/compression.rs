@@ -265,12 +265,12 @@ impl CompressAlgorithm {
   /// Returns the maximum compressed length of the given buffer.
   ///
   /// This is useful when you want to pre-allocate the buffer before compressing.
-  pub fn max_compress_len(&self, src: &[u8]) -> Result<usize, CompressionError> {
+  pub fn max_compress_len(&self, input_size: usize) -> Result<usize, CompressionError> {
     Ok(match self {
       Self::Brotli(_) => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "brotli")] {
-            brotli::enc::BrotliEncoderMaxCompressedSize(src.len())
+            brotli::enc::BrotliEncoderMaxCompressedSize(input_size)
           } else {
             return Err(CompressionError::disabled(*self, "brotli"));
           }
@@ -279,7 +279,7 @@ impl CompressAlgorithm {
       Self::Lz4 => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "lz4")] {
-            lz4_flex::block::get_maximum_output_size(src.len()) + LZ4_PREPEND_LEN_SIZE
+            lz4_flex::block::get_maximum_output_size(input_size) + LZ4_PREPEND_LEN_SIZE
           } else {
             return Err(CompressionError::disabled(*self, "lz4"));
           }
@@ -288,7 +288,7 @@ impl CompressAlgorithm {
       Self::Snappy => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "snappy")] {
-            snap::raw::max_compress_len(src.len())
+            snap::raw::max_compress_len(input_size)
           } else {
             return Err(CompressionError::disabled(*self, "snappy"));
           }
@@ -297,7 +297,7 @@ impl CompressAlgorithm {
       Self::Zstd(_) => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "zstd")] {
-            zstd::zstd_safe::compress_bound(src.len())
+            zstd::zstd_safe::compress_bound(input_size)
           } else {
             return Err(CompressionError::disabled(*self, "zstd"));
           }
@@ -572,7 +572,7 @@ mod tests {
   #[cfg(feature = "lz4")]
   fn lz4(data: Vec<u8>) -> bool {
     let algo = CompressAlgorithm::Lz4;
-    let max_compress_len = algo.max_compress_len(&data).unwrap();
+    let max_compress_len = algo.max_compress_len(data.len()).unwrap();
     let mut buffer = vec![0; max_compress_len];
     let written = algo.compress_to(&data, &mut buffer).unwrap();
     assert!(written <= max_compress_len);
@@ -584,7 +584,7 @@ mod tests {
   #[cfg(feature = "brotli")]
   fn brotli(data: Vec<u8>) -> bool {
     let algo = CompressAlgorithm::Brotli(Default::default());
-    let max_compress_len = algo.max_compress_len(&data).unwrap();
+    let max_compress_len = algo.max_compress_len(data.len()).unwrap();
     let mut buffer = vec![0; max_compress_len];
     let written = algo.compress_to(&data, &mut buffer).unwrap();
     assert!(written <= max_compress_len);
@@ -596,7 +596,7 @@ mod tests {
   #[cfg(feature = "zstd")]
   fn zstd(data: Vec<u8>) -> bool {
     let algo = CompressAlgorithm::Zstd(Default::default());
-    let max_compress_len = algo.max_compress_len(&data).unwrap();
+    let max_compress_len = algo.max_compress_len(data.len()).unwrap();
     let mut buffer = vec![0; max_compress_len];
     let written = algo.compress_to(&data, &mut buffer).unwrap();
     assert!(written <= max_compress_len);
@@ -608,7 +608,7 @@ mod tests {
   #[cfg(feature = "snappy")]
   fn snappy(data: Vec<u8>) -> bool {
     let algo = CompressAlgorithm::Snappy;
-    let max_compress_len = algo.max_compress_len(&data).unwrap();
+    let max_compress_len = algo.max_compress_len(data.len()).unwrap();
     let mut buffer = vec![0; max_compress_len];
     let written = algo.compress_to(&data, &mut buffer).unwrap();
     assert!(written <= max_compress_len);

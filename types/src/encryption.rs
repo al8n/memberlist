@@ -304,6 +304,13 @@ impl EncryptionAlgorithm {
     nonce
   }
 
+  /// Generates a random nonce
+  pub fn random_nonce() -> [u8; NONCE_SIZE] {
+    let mut nonce = [0u8; NONCE_SIZE];
+    rand::rng().fill(&mut nonce);
+    nonce
+  }
+
   /// Reads the nonce from the buffer
   pub fn read_nonce(src: &mut impl Buf) -> [u8; NONCE_SIZE] {
     let mut nonce = [0u8; NONCE_SIZE];

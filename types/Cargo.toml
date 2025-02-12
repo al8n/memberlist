@@ -55,6 +55,7 @@ quickcheck = ["dep:quickcheck", "nodecraft/quickcheck"]
 serde = ["dep:serde", "smol_str/serde", "bytes/serde", "nodecraft/serde", "smallvec-wrapper/serde"]
 
 [dependencies]
+among.workspace = true
 bytes.workspace = true
 const-varint.workspace = true
 cfg-if.workspace = true

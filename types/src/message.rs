@@ -13,6 +13,21 @@ mod label;
 #[cfg(feature = "serde")]
 mod serde_impl;
 
+const COMPOOUND_MESSAGE_TAG: u8 = 1;
+const PING_MESSAGE_TAG: u8 = 2;
+const INDIRECT_PING_MESSAGE_TAG: u8 = 3;
+const ACK_MESSAGE_TAG: u8 = 4;
+const SUSPECT_MESSAGE_TAG: u8 = 5;
+const ALIVE_MESSAGE_TAG: u8 = 6;
+const DEAD_MESSAGE_TAG: u8 = 7;
+const PUSH_PULL_MESSAGE_TAG: u8 = 8;
+const USER_DATA_MESSAGE_TAG: u8 = 9;
+const NACK_MESSAGE_TAG: u8 = 10;
+const ERROR_RESPONSE_MESSAGE_TAG: u8 = 11;
+const COMPRESSED_MESSAGE_TAG: u8 = 12;
+const ENCRYPTED_MESSAGE_TAG: u8 = 13;
+const LABELED_MESSAGE_TAG: u8 = 244;
+
 macro_rules! enum_wrapper {
   (
     $(#[$outer:meta])*
@@ -85,6 +100,12 @@ macro_rules! enum_wrapper {
           }
         }
       }
+    }
+
+    paste::paste! {
+      $(
+        const [< $variant:snake:upper _TAG>]: u8 = $variant_tag;
+      )*
     }
 
     $(#[$outer])*
@@ -167,29 +188,29 @@ enum_wrapper!(
     Compound(
       #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::triomphe_arc))]
       Arc<[Self]>,
-    ) = 1,
+    ) = COMPOOUND_MESSAGE_TAG,
     /// Ping message
-    Ping(Ping<I, A>) = 2,
+    Ping(Ping<I, A>) = PING_MESSAGE_TAG,
     /// Indirect ping message
-    IndirectPing(IndirectPing<I, A>) = 3,
+    IndirectPing(IndirectPing<I, A>) = INDIRECT_PING_MESSAGE_TAG,
     /// Ack response message
-    Ack(Ack) = 4,
+    Ack(Ack) = ACK_MESSAGE_TAG,
     /// Suspect message
-    Suspect(Suspect<I>) = 5,
+    Suspect(Suspect<I>) = SUSPECT_MESSAGE_TAG,
     /// Alive message
-    Alive(Alive<I, A>) = 6,
+    Alive(Alive<I, A>) = ALIVE_MESSAGE_TAG,
     /// Dead message
-    Dead(Dead<I>) = 7,
+    Dead(Dead<I>) = DEAD_MESSAGE_TAG,
     /// PushPull message
-    PushPull(PushPull<I, A>) = 8,
+    PushPull(PushPull<I, A>) = PUSH_PULL_MESSAGE_TAG,
     /// User mesg, not handled by us
     UserData(
       #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::bytes))] Bytes,
-    ) = 9,
+    ) = USER_DATA_MESSAGE_TAG,
     /// Nack response message
-    Nack(Nack) = 10,
+    Nack(Nack) = NACK_MESSAGE_TAG,
     /// Error response message
-    ErrorResponse(ErrorResponse) = 11,
+    ErrorResponse(ErrorResponse) = ERROR_RESPONSE_MESSAGE_TAG,
     // /// Checksumed message
     // Checksumed(ChecksumedMessage<I, A>) = 12,
     // /// Encrypted message
@@ -197,7 +218,7 @@ enum_wrapper!(
     // /// Compressed message
     // Compressed(CompressedMessage<I, A>) = 14,
     /// Labeled message
-    Labeled(LabeledMessage<I, A>) = Label::TAG,
+    Labeled(LabeledMessage<I, A>) = LABELED_MESSAGE_TAG,
   }
 );
 

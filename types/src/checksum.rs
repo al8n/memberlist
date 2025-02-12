@@ -121,6 +121,19 @@ impl ChecksumAlgorithm {
     };
     Cow::Borrowed(val)
   }
+
+  /// Returns the output size of the checksum algorithm.
+  #[inline]
+  pub const fn output_size(&self) -> usize {
+    match self {
+      Self::Crc32 => 4,
+      Self::XxHash32 => 4,
+      Self::XxHash64 => 8,
+      Self::XxHash3 => 8,
+      Self::Murmur3 => 4,
+      Self::Unknown(_) => 0,
+    }
+  }
 }
 
 impl From<u8> for ChecksumAlgorithm {
