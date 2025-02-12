@@ -534,17 +534,22 @@ impl CompressAlgorithm {
   }
 
   /// Compresses the given buffer.
-  pub fn compress_to_vec(&self, src: &[u8], dst: &mut Vec<u8>) -> Result<(), CompressionError> {
+  ///
+  /// The `dst` buffer should be pre-allocated with the [`max_compress_len`](Self::max_compress_len) method.
+  pub fn compress_to(&self, src: &[u8], dst: &mut [u8]) -> Result<usize, CompressionError> {
     match self {
-      CompressAlgorithm::Lzw(_algo) => {
+      CompressAlgorithm::Lzw(algo) => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "lzw")] {
-            // weezl::encode::Encoder::new(weezl::BitOrder::Lsb, LZW_LIT_WIDTH)
-            //   .into_vec(dst)
-            //   .encode_all(src)
-            //   .status
-            //   .map(|_| ());
-            todo!()
+            let res = weezl::encode::Encoder::new(algo.order().into(), algo.width() as u8)
+              .into_stream(std::io::Cursor::new(dst))
+              .encode_all(src);
+
+            let written = res.bytes_written;
+            res
+              .status
+              .map(|_| written)
+              .map_err(CompressionError::lzw_compress_error)
           } else {
             Err(CompressionError::disabled(algo, "lzw"))
           }
@@ -556,13 +561,17 @@ impl CompressAlgorithm {
             use std::io::Write;
 
             let mut compressor = brotli::CompressorWriter::new(
-              dst,
+              std::io::Cursor::new(dst),
               BROTLI_BUFFER_SIZE,
               algo.quality() as u8 as u32,
               algo.window() as u8 as u32,
             );
 
-            compressor.write_all(src).map_err(CompressionError::brotli_compress_error)
+            compressor.write_all(src)
+              .map(|_| {
+                compressor.into_inner().position() as usize
+              })
+              .map_err(CompressionError::brotli_compress_error)
           } else {
             Err(CompressionError::disabled(algo, "brotli"))
           }
@@ -574,9 +583,9 @@ impl CompressAlgorithm {
             use flate2::write::DeflateEncoder;
             use std::io::Write;
 
-            let mut encoder = DeflateEncoder::new(dst, (*level).into());
+            let mut encoder = DeflateEncoder::new(std::io::Cursor::new(dst), (*level).into());
             encoder.write_all(src)
-              .and_then(|_| encoder.finish().map(|_| ()))
+              .and_then(|_| encoder.finish().map(|cur| cur.position() as usize))
               .map_err(CompressionError::deflate_compress_error)
           } else {
             Err(CompressionError::disabled(algo, "deflate"))
@@ -589,9 +598,9 @@ impl CompressAlgorithm {
             use flate2::write::GzEncoder;
             use std::io::Write;
 
-            let mut encoder = GzEncoder::new(dst, (*level).into());
+            let mut encoder = GzEncoder::new(std::io::Cursor::new(dst), (*level).into());
             encoder.write_all(src)
-              .and_then(|_| encoder.finish().map(|_| ()))
+              .and_then(|_| encoder.finish().map(|cur| cur.position() as usize))
               .map_err(CompressionError::gzip_compress_error)
           } else {
             Err(CompressionError::disabled(algo, "gzip"))
@@ -601,13 +610,7 @@ impl CompressAlgorithm {
       CompressAlgorithm::Lz4 => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "lz4")] {
-            let required = lz4_flex::block::get_maximum_output_size(src.len());
-            let len = dst.len();
-            dst.resize(len + required, 0);
-            lz4_flex::compress_into(src, &mut dst[len..])
-              .map(|written| {
-                dst.truncate(len + written);
-              })
+            lz4_flex::compress_into(src, dst)
               .map_err(CompressionError::lz4_compress_error)
           } else {
             Err(CompressionError::disabled(algo, "lz4"))
@@ -618,13 +621,7 @@ impl CompressAlgorithm {
         cfg_if::cfg_if! {
           if #[cfg(feature = "snappy")] {
             let mut encoder = snap::raw::Encoder::new();
-            let cap = snap::raw::max_compress_len(src.len());
-            let len = dst.len();
-            dst.resize(len + cap, 0);
-            encoder.compress(src, &mut dst[len..])
-              .map(|written| {
-                dst.truncate(len + written);
-              })
+            encoder.compress(src, dst)
               .map_err(CompressionError::snappy_compress_error)
           } else {
             Err(CompressionError::disabled(algo, "snappy"))
@@ -637,10 +634,10 @@ impl CompressAlgorithm {
             use flate2::write::ZlibEncoder;
             use std::io::Write;
 
-            let mut encoder = ZlibEncoder::new(Vec::new(), (*level).into());
+            let mut encoder = ZlibEncoder::new(std::io::Cursor::new(dst), (*level).into());
             encoder
               .write_all(src)
-              .and_then(|_| encoder.flush_finish().map(|_| ()))
+              .and_then(|_| encoder.flush_finish().map(|cur| cur.position() as usize))
               .map_err(CompressionError::zlib_compress_error)
           } else {
             Err(CompressionError::disabled(algo, "zlib"))
@@ -650,7 +647,10 @@ impl CompressAlgorithm {
       CompressAlgorithm::Zstd(level) => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "zstd")] {
-            zstd::stream::copy_encode(src, dst, level.level() as i32).map_err(CompressionError::zstd_compress_error)
+            let mut cursor = std::io::Cursor::new(dst);
+            zstd::stream::copy_encode(src, &mut cursor, level.level() as i32)
+              .map(|_| cursor.position() as usize)
+              .map_err(CompressionError::zstd_compress_error)
           } else {
             Err(CompressionError::disabled(algo, "zstd"))
           }
@@ -902,5 +902,133 @@ mod tests {
     };
 
     algo == deserialized
+  }
+
+  // #[quickcheck_macros::quickcheck]
+  // #[cfg(feature = "lz4")]
+  // fn lz4(data: Vec<u8>) -> bool {
+  //   if data.is_empty() {
+  //     return true;
+  //   }
+
+  //   let algo = CompressAlgorithm::Lz4;
+  //   let max_compress_len = algo.max_compress_len(&data).unwrap();
+  //   let mut buffer = vec![0; max_compress_len];
+  //   let written = algo.compress_to(&data, &mut buffer).unwrap();
+  //   assert!(written <= max_compress_len);
+  //   let decompressed = algo.decompress(&buffer[..written]).unwrap();
+  //   data == decompressed
+  // }
+
+  #[quickcheck_macros::quickcheck]
+  #[cfg(feature = "lzw")]
+  fn lzw(data: Vec<u8>) -> bool {
+    if data.is_empty() {
+      return true;
+    }
+
+    let algo = CompressAlgorithm::Lzw(Default::default());
+    let max_compress_len = algo.max_compress_len(&data).unwrap();
+    let mut buffer = vec![0; max_compress_len];
+    let written = algo.compress_to(&data, &mut buffer).unwrap();
+    assert!(written <= max_compress_len);
+    let decompressed = algo.decompress(&buffer[..written]).unwrap();
+    data == decompressed
+  }
+
+  #[quickcheck_macros::quickcheck]
+  #[cfg(feature = "brotli")]
+  fn brotli(data: Vec<u8>) -> bool {
+    if data.is_empty() {
+      return true;
+    }
+
+    let algo = CompressAlgorithm::Brotli(Default::default());
+    let max_compress_len = algo.max_compress_len(&data).unwrap();
+    let mut buffer = vec![0; max_compress_len];
+    let written = algo.compress_to(&data, &mut buffer).unwrap();
+    assert!(written <= max_compress_len);
+    let decompressed = algo.decompress(&buffer[..written]).unwrap();
+    data == decompressed
+  }
+
+  #[quickcheck_macros::quickcheck]
+  #[cfg(feature = "zstd")]
+  fn zstd(data: Vec<u8>) -> bool {
+    if data.is_empty() {
+      return true;
+    }
+
+    let algo = CompressAlgorithm::Zstd(Default::default());
+    let max_compress_len = algo.max_compress_len(&data).unwrap();
+    let mut buffer = vec![0; max_compress_len];
+    let written = algo.compress_to(&data, &mut buffer).unwrap();
+    assert!(written <= max_compress_len);
+    let decompressed = algo.decompress(&buffer[..written]).unwrap();
+    data == decompressed
+  }
+
+  #[quickcheck_macros::quickcheck]
+  #[cfg(feature = "snappy")]
+  fn snappy(data: Vec<u8>) -> bool {
+    if data.is_empty() {
+      return true;
+    }
+
+    let algo = CompressAlgorithm::Snappy;
+    let max_compress_len = algo.max_compress_len(&data).unwrap();
+    let mut buffer = vec![0; max_compress_len];
+    let written = algo.compress_to(&data, &mut buffer).unwrap();
+    assert!(written <= max_compress_len);
+    let decompressed = algo.decompress(&buffer[..written]).unwrap();
+    data == decompressed
+  }
+
+  #[quickcheck_macros::quickcheck]
+  #[cfg(feature = "zlib")]
+  fn zlib(data: Vec<u8>) -> bool {
+    if data.is_empty() {
+      return true;
+    }
+
+    let algo = CompressAlgorithm::Zlib(Default::default());
+    let max_compress_len = algo.max_compress_len(&data).unwrap();
+    let mut buffer = vec![0; max_compress_len];
+    let written = algo.compress_to(&data, &mut buffer).unwrap();
+    assert!(written <= max_compress_len);
+    let decompressed = algo.decompress(&buffer[..written]).unwrap();
+    data == decompressed
+  }
+
+  #[quickcheck_macros::quickcheck]
+  #[cfg(feature = "gzip")]
+  fn gzip(data: Vec<u8>) -> bool {
+    if data.is_empty() {
+      return true;
+    }
+
+    let algo = CompressAlgorithm::Gzip(Default::default());
+    let max_compress_len = algo.max_compress_len(&data).unwrap();
+    let mut buffer = vec![0; max_compress_len];
+    let written = algo.compress_to(&data, &mut buffer).unwrap();
+    assert!(written <= max_compress_len);
+    let decompressed = algo.decompress(&buffer[..written]).unwrap();
+    data == decompressed
+  }
+
+  #[quickcheck_macros::quickcheck]
+  #[cfg(feature = "deflate")]
+  fn deflate(data: Vec<u8>) -> bool {
+    if data.is_empty() {
+      return true;
+    }
+
+    let algo = CompressAlgorithm::Deflate(Default::default());
+    let max_compress_len = algo.max_compress_len(&data).unwrap();
+    let mut buffer = vec![0; max_compress_len];
+    let written = algo.compress_to(&data, &mut buffer).unwrap();
+    assert!(written <= max_compress_len);
+    let decompressed = algo.decompress(&buffer[..written]).unwrap();
+    data == decompressed
   }
 }
