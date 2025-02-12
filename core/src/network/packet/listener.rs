@@ -335,23 +335,17 @@ where
     msg: Message<T::Id, T::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
     // Check if we can piggy back any messages
-    let bytes_avail = self.inner.transport.max_payload_size()
+    let bytes_avail = self.inner.transport.max_packet_size()
       - msg.encoded_len()
       - self.inner.transport.packets_header_overhead();
 
-    let mut msgs = self
+    let msgs = self
       .get_broadcast_with_prepend(
         msg.into(),
         self.inner.transport.packet_overhead(),
         bytes_avail,
       )
       .await?;
-
-    // Fast path if nothing to piggypack
-    if msgs.len() == 1 {
-      let msg = msgs.pop().unwrap();
-      return self.transport_send_packet(addr, msg).await;
-    }
 
     // Send the message
     self.transport_send_packets(addr, msgs).await

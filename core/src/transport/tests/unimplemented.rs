@@ -109,7 +109,7 @@ where
     unimplemented!()
   }
 
-  fn max_payload_size(&self) -> usize {
+  fn max_packet_size(&self) -> usize {
     unimplemented!()
   }
 
@@ -140,15 +140,7 @@ where
     unimplemented!()
   }
 
-  async fn send_packet(
-    &self,
-    _: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    _: Bytes,
-  ) -> Result<(usize, R::Instant), Self::Error> {
-    unimplemented!()
-  }
-
-  async fn send_packets(
+  async fn send_to(
     &self,
     _: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     _: Bytes,

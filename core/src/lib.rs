@@ -25,10 +25,6 @@ mod api;
 mod awareness;
 mod base;
 mod broadcast;
-mod checksum;
-#[cfg(feature = "compression")]
-#[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
-mod compress;
 mod network;
 mod options;
 mod state;

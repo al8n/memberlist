@@ -16,6 +16,27 @@ pub use nodecraft::{
 
 #[cfg(feature = "arbitrary")]
 mod arbitrary_impl;
+#[cfg(any(
+  feature = "zstd",
+  feature = "lz4",
+  feature = "brotli",
+  feature = "deflate",
+  feature = "gzip",
+  feature = "snappy",
+  feature = "lzw",
+  feature = "zlib"
+))]
+mod compression;
+
+#[cfg(any(
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3",
+))]
+mod checksum;
+
 #[cfg(feature = "encryption")]
 mod encryption;
 #[cfg(feature = "metrics")]
@@ -24,6 +45,26 @@ mod metrics_label;
 mod quickcheck_impl;
 #[cfg(feature = "serde")]
 mod serde_impl;
+
+#[cfg(any(
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3",
+))]
+pub use checksum::*;
+#[cfg(any(
+  feature = "zstd",
+  feature = "lz4",
+  feature = "brotli",
+  feature = "deflate",
+  feature = "gzip",
+  feature = "snappy",
+  feature = "lzw",
+  feature = "zlib"
+))]
+pub use compression::*;
 #[cfg(feature = "encryption")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 pub use encryption::*;

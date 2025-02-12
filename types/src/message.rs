@@ -3,24 +3,15 @@ use core::marker::PhantomData;
 use bytes::Bytes;
 use triomphe::Arc;
 
-mod checksumed;
-mod compressed;
-mod encrypted;
-mod label;
+use super::*;
 
-#[cfg(feature = "serde")]
-mod serde_impl;
-
-/// This mod impls `core::str::FromStr`, which is used for using with `clap` crate.
-mod from_str;
-
-pub use checksumed::*;
-pub use compressed::*;
-pub use encrypted::*;
-pub use from_str::*;
+pub use encoder::*;
 pub use label::*;
 
-use super::*;
+mod encoder;
+mod label;
+#[cfg(feature = "serde")]
+mod serde_impl;
 
 macro_rules! enum_wrapper {
   (
@@ -199,12 +190,12 @@ enum_wrapper!(
     Nack(Nack) = 10,
     /// Error response message
     ErrorResponse(ErrorResponse) = 11,
-    /// Checksumed message
-    Checksumed(ChecksumedMessage<I, A>) = 12,
-    /// Encrypted message
-    Encrypted(EncryptedMessage<I, A>) = 13,
-    /// Compressed message
-    Compressed(CompressedMessage<I, A>) = 14,
+    // /// Checksumed message
+    // Checksumed(ChecksumedMessage<I, A>) = 12,
+    // /// Encrypted message
+    // Encrypted(EncryptedMessage<I, A>) = 13,
+    // /// Compressed message
+    // Compressed(CompressedMessage<I, A>) = 14,
     /// Labeled message
     Labeled(LabeledMessage<I, A>) = Label::TAG,
   }
@@ -237,9 +228,9 @@ where
       Self::Ref::UserData(val) => Self::UserData(Bytes::from_ref(val)?),
       Self::Ref::Nack(val) => Self::Nack(Nack::from_ref(val)?),
       Self::Ref::ErrorResponse(val) => Self::ErrorResponse(ErrorResponse::from_ref(val)?),
-      Self::Ref::Checksumed(val) => Self::Checksumed(ChecksumedMessage::from_ref(val)?),
-      Self::Ref::Encrypted(val) => Self::Encrypted(EncryptedMessage::from_ref(val)?),
-      Self::Ref::Compressed(val) => Self::Compressed(CompressedMessage::from_ref(val)?),
+      // Self::Ref::Checksumed(val) => Self::Checksumed(ChecksumedMessage::from_ref(val)?),
+      // Self::Ref::Encrypted(val) => Self::Encrypted(EncryptedMessage::from_ref(val)?),
+      // Self::Ref::Compressed(val) => Self::Compressed(CompressedMessage::from_ref(val)?),
       Self::Ref::Labeled(val) => Self::Labeled(LabeledMessage::from_ref(val)?),
     })
   }
@@ -257,9 +248,6 @@ where
       Self::UserData(val) => val.encoded_len_with_length_delimited(),
       Self::Nack(val) => val.encoded_len_with_length_delimited(),
       Self::ErrorResponse(val) => val.encoded_len_with_length_delimited(),
-      Self::Checksumed(val) => val.encoded_len_with_length_delimited(),
-      Self::Encrypted(val) => val.encoded_len_with_length_delimited(),
-      Self::Compressed(val) => val.encoded_len_with_length_delimited(),
       Self::Labeled(val) => val.encoded_len_with_length_delimited(),
     }
   }
@@ -306,15 +294,6 @@ where
         offset += val.encode_length_delimited(&mut buf[offset..])?;
       }
       Self::ErrorResponse(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-      Self::Checksumed(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-      Self::Encrypted(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-      Self::Compressed(val) => {
         offset += val.encode_length_delimited(&mut buf[offset..])?;
       }
       Self::Labeled(val) => {
@@ -416,27 +395,6 @@ where
         offset += bytes_read;
         (offset, Self::ErrorResponse(decoded))
       }
-      Message::<I, A>::CHECKSUMED_BYTE => {
-        let (bytes_read, decoded) = <ChecksumedMessageRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
-          ChecksumedMessage<I, A>,
-        >>::decode_length_delimited(&src[offset..])?;
-        offset += bytes_read;
-        (offset, Self::Checksumed(decoded))
-      }
-      Message::<I, A>::ENCRYPTED_BYTE => {
-        let (bytes_read, decoded) = <EncryptedMessageRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
-          EncryptedMessage<I, A>,
-        >>::decode_length_delimited(&src[offset..])?;
-        offset += bytes_read;
-        (offset, Self::Encrypted(decoded))
-      }
-      Message::<I, A>::COMPRESSED_BYTE => {
-        let (bytes_read, decoded) = <CompressedMessageRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
-          CompressedMessage<I, A>,
-        >>::decode_length_delimited(&src[offset..])?;
-        offset += bytes_read;
-        (offset, Self::Compressed(decoded))
-      }
       Message::<I, A>::LABELED_BYTE => {
         let (bytes_read, decoded) = <LabeledMessageRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
           LabeledMessage<I, A>,
@@ -486,12 +444,6 @@ pub enum MessageRef<'a, I, A> {
   Nack(Nack),
   /// Error response message
   ErrorResponse(ErrorResponseRef<'a>),
-  /// Checksumed message
-  Checksumed(ChecksumedMessageRef<'a, I, A>),
-  /// Encrypted message
-  Encrypted(EncryptedMessageRef<'a, I, A>),
-  /// Compressed message
-  Compressed(CompressedMessageRef<'a, I, A>),
   /// Labeled message
   Labeled(LabeledMessageRef<'a, I, A>),
 }
@@ -511,9 +463,6 @@ impl<I, A> MessageRef<'_, I, A> {
       Self::UserData(_) => MessageType::UserData,
       Self::Nack(_) => MessageType::Nack,
       Self::ErrorResponse(_) => MessageType::ErrorResponse,
-      Self::Checksumed(_) => MessageType::Checksumed,
-      Self::Encrypted(_) => MessageType::Encrypted,
-      Self::Compressed(_) => MessageType::Compressed,
       Self::Labeled(_) => MessageType::Labeled,
     }
   }

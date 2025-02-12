@@ -315,7 +315,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn encryption_enabled(&self) -> bool;
 
   /// Returns the maximum size of a packet that can be sent
-  fn max_payload_size(&self) -> usize;
+  fn max_packet_size(&self) -> usize;
 
   /// Returns the size of header overhead when trying to send messages through packet stream ([`Transport::send_packets`]).
   ///
@@ -357,9 +357,6 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// A packet-oriented interface that fires off the given
   /// payload to the given address in a connectionless fashion.
   ///
-  /// The payload is encoded by [`Message::encode`] method,
-  /// and can be decoded back by [`Message::decode`] method.
-  ///
   /// The payload is not compressed or encrypted, the transport
   /// layer is expected to handle that by themselves.
   ///
@@ -368,27 +365,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// - number of bytes sent
   /// - a time stamp that's as close as possible to when the packet
   ///   was transmitted to help make accurate RTT measurements during probes.
-  fn send_packet(
-    &self,
-    addr: &Self::ResolvedAddress,
-    packet: Bytes,
-  ) -> impl Future<Output = Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error>> + Send;
-
-  /// A packet-oriented interface that fires off the given
-  /// payload to the given address in a connectionless fashion.
-  ///
-  /// The payload is encoded by [`Messages::encode`] method,
-  /// and can be decoded back by [`Messages::decode`] method.
-  ///
-  /// The payload is not compressed or encrypted, the transport
-  /// layer is expected to handle that by themselves.
-  ///
-  /// # Returns
-  ///
-  /// - number of bytes sent
-  /// - a time stamp that's as close as possible to when the packet
-  ///   was transmitted to help make accurate RTT measurements during probes.
-  fn send_packets(
+  fn send_to(
     &self,
     addr: &Self::ResolvedAddress,
     packet: Bytes,

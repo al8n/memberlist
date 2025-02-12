@@ -1264,7 +1264,7 @@ where
 
         // Compute the bytes available
         let bytes_avail =
-          self.inner.transport.max_payload_size() - self.inner.transport.packets_header_overhead();
+          self.inner.transport.max_packet_size() - self.inner.transport.packets_header_overhead();
         let futs = nodes.into_iter().map(|server| async move {
           // Get any pending broadcasts
           let msgs = match self
@@ -1290,24 +1290,10 @@ where
 
         futs
           .filter_map(|batch| async { batch })
-          .for_each_concurrent(None, |(addr, mut msgs)| async move {
-            let fut = if msgs.len() == 1 {
-              futures::future::Either::Left(async {
-                // Send single message as is
-                if let Err(e) = self.transport_send_packet(&addr, msgs.pop().unwrap()).await {
-                  tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
-                }
-              })
-            } else {
-              futures::future::Either::Right(async {
-                // Send compound message
-                if let Err(e) = self.transport_send_packets(&addr, msgs).await {
-                  tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
-                }
-              })
-            };
-
-            fut.await
+          .for_each_concurrent(None, |(addr, msgs)| async move {
+            if let Err(e) = self.transport_send_packets(&addr, msgs).await {
+              tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
+            }
           })
           .await;
         false

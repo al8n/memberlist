@@ -35,6 +35,22 @@ std = [
   "base64?/std",
 ]
 
+# checksum related feature
+crc32 = ["crc32fast"]
+xxhash32 = ["xxhash-rust/xxh32"]
+xxhash64 = ["xxhash-rust/xxh64"]
+xxhash3 = ["xxhash-rust/xxh3"]
+murmur3 = ["dep:hash32"]
+
+# compression related feature
+gzip = ["flate2"]
+zlib = ["flate2"]
+deflate = ["flate2"]
+lzw = ["weezl"]
+lz4 = ["lz4_flex"]
+brotli = ["dep:brotli"]
+snappy = ["dep:snap"]
+
 encryption = ["aead", "aes-gcm", "base64", "cbc", "rand"]
 
 arbitrary = ["dep:arbitrary", "nodecraft/arbitrary", "smol_str/arbitrary"]
@@ -44,6 +60,7 @@ serde = ["dep:serde", "smol_str/serde", "bytes/serde", "nodecraft/serde", "small
 [dependencies]
 bytes.workspace = true
 const-varint.workspace = true
+cfg-if.workspace = true
 derive_more = { workspace = true, features = ["from", "display", "is_variant", "unwrap", "try_unwrap"] }
 either.workspace = true
 ipnet = { version = "2", default-features = false }

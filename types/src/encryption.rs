@@ -21,6 +21,32 @@ use std::str::FromStr;
 
 use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
 
+/// An error type when parsing the encryption algorithm from str
+#[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
+#[error("unknown encryption algorithm: {0}")]
+pub struct ParseEncryptionAlgorithmError(String);
+
+impl FromStr for EncryptionAlgorithm {
+  type Err = ParseEncryptionAlgorithmError;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    Ok(match s {
+      "aes-gcm-no-padding" | "aes-gcm-nopadding" | "nopadding" | "NOPADDING" | "no-padding"
+      | "NoPadding" | "no_padding" => Self::NoPadding,
+      "aes-gcm-pkcs7" | "PKCS7" | "pkcs7" => Self::Pkcs7,
+      s if s.starts_with("unknown") => {
+        let v = s
+          .trim_start_matches("unknown(")
+          .trim_end_matches(')')
+          .parse()
+          .map_err(|_| ParseEncryptionAlgorithmError(s.to_string()))?;
+        Self::Unknown(v)
+      }
+      e => return Err(ParseEncryptionAlgorithmError(e.to_string())),
+    })
+  }
+}
+
 /// Parse error for [`SecretKey`] from bytes slice
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[error("invalid key length({0}) - must be 16, 24, or 32 bytes for AES-128/192/256")]
@@ -574,6 +600,47 @@ mod tests {
   fn test_decrypt_by_other_key_v1() {
     let algo = EncryptionAlgorithm::NoPadding;
     decrypt_by_other_key(algo);
+  }
+
+  #[test]
+  fn test_encrypt_algorithm_from_str() {
+    assert_eq!(
+      "aes-gcm-no-padding".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "aes-gcm-nopadding".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "aes-gcm-pkcs7".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::Pkcs7
+    );
+    assert_eq!(
+      "NoPadding".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "no-padding".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "nopadding".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "no_padding".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "NOPADDING".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::NoPadding
+    );
+    assert_eq!(
+      "unknown(33)".parse::<EncryptionAlgorithm>().unwrap(),
+      EncryptionAlgorithm::Unknown(33)
+    );
+    assert!("unknown".parse::<EncryptionAlgorithm>().is_err());
   }
 
   const TEST_KEYS: &[SecretKey] = &[

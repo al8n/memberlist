@@ -15,7 +15,7 @@ use super::{
   network::META_MAX_SIZE,
   state::AckMessage,
   transport::{AddressResolver, CheapClone, MaybeResolvedAddress, Node, Transport},
-  types::{Alive, Dead, Meta, NodeState, Ping, SmallVec},
+  types::{Alive, Dead, Message, Meta, NodeState, Ping, SmallVec},
   Options,
 };
 
@@ -503,7 +503,9 @@ where
       return Err(Error::NotRunning);
     }
 
-    self.transport_send_packet(to, msg.into()).await
+    self
+      .transport_send_packets(to, Message::UserData(msg).into())
+      .await
   }
 
   /// Uses the reliable stream-oriented interface of the transport to

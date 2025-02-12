@@ -2,8 +2,6 @@ use std::sync::atomic::Ordering;
 
 use super::{
   base::Memberlist,
-  checksum::checksum,
-  compress::compress_into_vec,
   delegate::Delegate,
   error::Error,
   transport::{TimeoutableStream, Transport},
@@ -97,87 +95,51 @@ where
     }
   }
 
-  pub(crate) async fn transport_send_packet(
-    &self,
-    addr: &T::ResolvedAddress,
-    packet: Message<T::Id, T::ResolvedAddress>,
-  ) -> Result<(), Error<T, D>> {
-    let reliable = self.inner.transport.packet_reliable();
-    let secure = self.inner.transport.packet_secure();
-    let encoded_len = packet.encoded_len();
-    let offload_size = self.inner.opts.offload_size();
-
-    let cks_algo = self.inner.opts.checksum_algo();
-    let encryption_algo = self.inner.opts.encryption_algo();
-    let compress_algo = self.inner.opts.compress_algo();
-    let label = self.inner.opts.label().clone();
-
-    let need_cks = cks_algo.is_some() && !reliable;
-    let need_compress = compress_algo.is_some();
-    let need_encrypt = encryption_algo.is_some() && !secure;
-    let need_label = !label.is_empty();
-
-    if encoded_len > offload_size {
-      let data = Self::offload(packet).await?;
-      return self.raw_send_packet(addr, data).await;
-    }
-
-    let mut data = vec![0u8; encoded_len];
-    packet.encode(&mut data)?;
-
-    if let Some(compress_algo) = compress_algo {
-      data = compress_into_vec(compress_algo, &data)?;
-    }
-
-    if need_cks {
-      let cks = checksum(&cks_algo.unwrap(), &data)?;
-    }
-
-    // The send process is as follows:
-    //   1. compress if needed
-    //   2. checksum if needed
-    //   3. encrypt if needed
-    //   4. prepend label if needed
-
-    todo!()
-  }
-
-  async fn offload(payload: Message<T::Id, T::ResolvedAddress>) -> Result<Bytes, Error<T, D>> {
-    todo!()
-  }
-
-  async fn raw_send_packet(
-    &self,
-    addr: &T::ResolvedAddress,
-    data: Bytes,
-  ) -> Result<(), Error<T, D>> {
-    self
-      .inner
-      .transport
-      .send_packet(addr, data)
-      .await
-      .map(|(_sent, _)| {
-        #[cfg(feature = "metrics")]
-        {
-          metrics::counter!(
-            "memberlist.packet.sent",
-            self.inner.opts.metric_labels.iter()
-          )
-          .increment(_sent as u64);
-        }
-      })
-      .map_err(Error::transport)
-  }
-
   pub(crate) async fn transport_send_packets(
     &self,
     addr: &T::ResolvedAddress,
     packets: TinyVec<Message<T::Id, T::ResolvedAddress>>,
   ) -> Result<(), Error<T, D>> {
+    let mut encoder =
+      MessageEncoder::<T::Id, T::ResolvedAddress>::new(self.inner.transport.max_packet_size());
+    encoder
+      .with_messages(&packets)
+      .with_label(self.inner.opts.label().as_str());
+
+    #[cfg(any(
+      feature = "crc32",
+      feature = "xxhash64",
+      feature = "xxhash32",
+      feature = "xxhash3",
+      feature = "murmur3",
+    ))]
+    if !self.inner.transport.packet_reliable() {
+      encoder.with_checksum(self.inner.opts.checksum_algo());
+    }
+
+    #[cfg(feature = "encryption")]
+    if !self.inner.transport.packet_secure() {
+      encoder.with_encryption(self.inner.opts.encryption_algo());
+    }
+
+    #[cfg(any(
+      feature = "zstd",
+      feature = "lz4",
+      feature = "brotli",
+      feature = "deflate",
+      feature = "gzip",
+      feature = "snappy",
+      feature = "lzw",
+      feature = "zlib",
+    ))]
+    encoder.with_compression(self.inner.opts.compress_algo());
+
+    let payload = encoder.encode()?;
+
     self
       .inner
       .transport
-      .send_packets(addr, todo!())
+      .send_to(addr, payload.into())
       .await
       .map(|(_sent, _)| {
         #[cfg(feature = "metrics")]
@@ -197,17 +159,42 @@ where
     conn: &mut T::Stream,
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
-    let msg = msg.encode_to_bytes()?;
+    let mut encoder =
+      MessageEncoder::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::new(usize::MAX);
+    let msgs = [msg];
+    encoder
+      .with_messages(&msgs)
+      .with_label(self.inner.opts.label().as_str());
+
+    #[cfg(any(
+      feature = "zstd",
+      feature = "lz4",
+      feature = "brotli",
+      feature = "deflate",
+      feature = "gzip",
+      feature = "snappy",
+      feature = "lzw",
+      feature = "zlib",
+    ))]
+    encoder.with_compression(self.inner.opts.compress_algo());
+
+    #[cfg(feature = "encryption")]
+    if !self.inner.transport.stream_secure() {
+      encoder.with_encryption(self.inner.opts.encryption_algo());
+    }
+
+    let payload = encoder.encode()?;
+
     self
       .inner
       .transport
-      .send_message(conn, msg)
+      .send_message(conn, payload.into())
       .await
       .map(|_sent| {
         #[cfg(feature = "metrics")]
         {
           metrics::counter!(
-            "memberlist.promised.sent",
+            "memberlist.stream.sent",
             self.inner.opts.metric_labels.iter()
           )
           .increment(_sent as u64);
