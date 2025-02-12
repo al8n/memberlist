@@ -3,11 +3,6 @@ use super::CompressAlgorithm;
 /// Compress errors.
 #[derive(Debug, thiserror::Error)]
 pub enum CompressError {
-  /// LZW compress errors
-  #[error(transparent)]
-  #[cfg(feature = "lzw")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "lzw")))]
-  Lzw(std::io::Error),
   /// Lz4 compress errors
   #[error(transparent)]
   #[cfg(feature = "lz4")]
@@ -18,21 +13,6 @@ pub enum CompressError {
   #[cfg(feature = "brotli")]
   #[cfg_attr(docsrs, doc(cfg(feature = "brotli")))]
   Brotli(std::io::Error),
-  /// Zlib compress errors
-  #[error(transparent)]
-  #[cfg(feature = "zlib")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "zlib")))]
-  Zlib(std::io::Error),
-  /// Gzip compress errors
-  #[error(transparent)]
-  #[cfg(feature = "gzip")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "gzip")))]
-  Gzip(std::io::Error),
-  /// Deflate compress errors
-  #[error(transparent)]
-  #[cfg(feature = "deflate")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "deflate")))]
-  Deflate(std::io::Error),
   /// Snappy compress errors
   #[error(transparent)]
   #[cfg(feature = "snappy")]
@@ -48,38 +28,16 @@ pub enum CompressError {
 /// Decompress errors.
 #[derive(Debug, thiserror::Error)]
 pub enum DecompressError {
-  /// LZW decompress errors
-  #[error(transparent)]
-  #[cfg(feature = "lzw")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "lzw")))]
-  Lzw(#[from] weezl::LzwError),
   /// Brotli decompress errors
   #[error(transparent)]
   #[cfg(feature = "brotli")]
   #[cfg_attr(docsrs, doc(cfg(feature = "brotli")))]
   Brotli(std::io::Error),
-  /// Zlib decompress errors
-  #[error(transparent)]
-  #[cfg(feature = "zlib")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "zlib")))]
-  Zlib(std::io::Error),
-  /// Gzip decompress errors
-  #[error(transparent)]
-  #[cfg(feature = "gzip")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "gzip")))]
-  Gzip(std::io::Error),
-  /// Deflate decompress errors
-  #[error(transparent)]
-  #[cfg(feature = "deflate")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "deflate")))]
-  Deflate(std::io::Error),
-
   /// LZ4 decompress errors
   #[error(transparent)]
   #[cfg(feature = "lz4")]
   #[cfg_attr(docsrs, doc(cfg(feature = "lz4")))]
   Lz4(#[from] lz4_flex::block::DecompressError),
-
   /// Snappy decompress errors
   #[error(transparent)]
   #[cfg(feature = "snappy")]
@@ -112,19 +70,12 @@ pub enum CompressionError {
   /// Unknown compressor
   #[error("unknown compress algorithm {0}")]
   UnknownCompressAlgorithm(CompressAlgorithm),
-  /// Not enough bytes to decompress
-  #[error("not enough bytes to decompress")]
-  NotEnoughBytes,
 }
 
 impl CompressionError {
   #[cfg(not(all(
-    feature = "lzw",
     feature = "brotli",
     feature = "lz4",
-    feature = "zlib",
-    feature = "gzip",
-    feature = "deflate",
     feature = "snappy",
     feature = "zstd"
   )))]

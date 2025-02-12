@@ -27,48 +27,6 @@ impl FromStr for CompressAlgorithm {
             .map_err(|_| ParseCompressAlgorithmError(val.to_string()))?,
         )
       }
-      val if contains(&["zlib", "Zlib", "ZLIB"], val) => {
-        let suffix = strip(&["zlib", "Zlib", "ZLIB"], val).unwrap();
-        let val = trim_parentheses(suffix).unwrap_or("");
-
-        if val.is_empty() {
-          Self::Zlib(Default::default())
-        } else {
-          Self::Zlib(
-            val
-              .parse()
-              .map_err(|_| ParseCompressAlgorithmError(val.to_string()))?,
-          )
-        }
-      }
-      val if contains(&["gzip", "Gzip", "GZIP"], val) => {
-        let suffix = strip(&["gzip", "Gzip", "GZIP"], val).unwrap();
-        let val = trim_parentheses(suffix).unwrap_or("");
-
-        if val.is_empty() {
-          Self::Gzip(Default::default())
-        } else {
-          Self::Gzip(
-            val
-              .parse()
-              .map_err(|_| ParseCompressAlgorithmError(val.to_string()))?,
-          )
-        }
-      }
-      val if contains(&["deflate", "Deflate", "DEFLATE"], val) => {
-        let suffix = strip(&["deflate", "Deflate", "DEFLATE"], val).unwrap();
-        let val = trim_parentheses(suffix).unwrap_or("");
-
-        if val.is_empty() {
-          Self::Deflate(Default::default())
-        } else {
-          Self::Deflate(
-            val
-              .parse()
-              .map_err(|_| ParseCompressAlgorithmError(val.to_string()))?,
-          )
-        }
-      }
       val if contains(&["brotli", "Brotli", "BROTLI"], val) => {
         let suffix = strip(&["brotli", "Brotli", "BROTLI"], val).unwrap();
         let val = trim_parentheses(suffix).unwrap_or("");
@@ -97,20 +55,6 @@ impl FromStr for CompressAlgorithm {
           )
         }
       }
-      val if contains(&["lzw", "Lzw", "LZW"], val) => {
-        let suffix = strip(&["lzw", "Lzw", "LZW"], val).unwrap();
-        let val = trim_parentheses(suffix).unwrap_or("");
-
-        if val.is_empty() {
-          Self::Lzw(Default::default())
-        } else {
-          Self::Lzw(
-            val
-              .parse()
-              .map_err(|_| ParseCompressAlgorithmError(val.to_string()))?,
-          )
-        }
-      }
       val => return Err(ParseCompressAlgorithmError(val.to_string())),
     })
   }
@@ -133,36 +77,12 @@ fn contains<'a>(possible_values: &'a [&'a str], s: &'a str) -> bool {
 
 #[cfg(test)]
 mod tests {
-  use crate::{BrotliAlgorithm, Flate2CompressionLevel, LzwAlgorithm, ZstdCompressionLevel};
+  use crate::{BrotliAlgorithm, ZstdCompressionLevel};
 
   use super::*;
 
   #[test]
   fn test_compress_algorithm_from_str() {
-    assert_eq!(
-      "zlib".parse::<CompressAlgorithm>().unwrap(),
-      CompressAlgorithm::Zlib(Flate2CompressionLevel::default())
-    );
-    assert_eq!(
-      "zlib()".parse::<CompressAlgorithm>().unwrap(),
-      CompressAlgorithm::Zlib(Flate2CompressionLevel::default())
-    );
-    assert_eq!(
-      "gzip".parse::<CompressAlgorithm>().unwrap(),
-      CompressAlgorithm::Gzip(Flate2CompressionLevel::default())
-    );
-    assert_eq!(
-      "gzip()".parse::<CompressAlgorithm>().unwrap(),
-      CompressAlgorithm::Gzip(Flate2CompressionLevel::default())
-    );
-    assert_eq!(
-      "deflate".parse::<CompressAlgorithm>().unwrap(),
-      CompressAlgorithm::Deflate(Flate2CompressionLevel::default())
-    );
-    assert_eq!(
-      "deflate()".parse::<CompressAlgorithm>().unwrap(),
-      CompressAlgorithm::Deflate(Flate2CompressionLevel::default())
-    );
     assert_eq!(
       "lz4".parse::<CompressAlgorithm>().unwrap(),
       CompressAlgorithm::Lz4
@@ -188,24 +108,6 @@ mod tests {
       CompressAlgorithm::Brotli(BrotliAlgorithm::default())
     );
     assert!("brotli(-)".parse::<CompressAlgorithm>().is_err());
-
-    assert_eq!(
-      "lzw".parse::<CompressAlgorithm>().unwrap(),
-      CompressAlgorithm::Lzw(LzwAlgorithm::default())
-    );
-    assert_eq!(
-      "lzw()".parse::<CompressAlgorithm>().unwrap(),
-      CompressAlgorithm::Lzw(LzwAlgorithm::default())
-    );
-    assert_eq!(
-      "lzw(msb, 4)".parse::<CompressAlgorithm>().unwrap(),
-      CompressAlgorithm::Lzw(LzwAlgorithm::with_order_and_width(
-        crate::LzwBitOrder::Msb,
-        4.into()
-      ))
-    );
-    assert!("lzw(-)".parse::<CompressAlgorithm>().is_err());
-
     assert_eq!(
       "zstd(3)".parse::<CompressAlgorithm>().unwrap(),
       CompressAlgorithm::Zstd(ZstdCompressionLevel::with_level(3))

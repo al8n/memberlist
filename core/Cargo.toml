@@ -16,7 +16,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["metrics", "compression", "lzw", "snappy", "encryption", "crc32"]
+default = ["metrics", "compression", "snappy", "encryption", "crc32"]
 metrics = ["dep:metrics", "memberlist-types/metrics"]
 
 # checksum related feature
@@ -31,13 +31,10 @@ encryption = ["rayon", "aead", "aes-gcm", "cbc", "indexmap"]
 
 # compression related feature
 compression = ["rayon"]
-gzip = ["flate2"]
-zlib = ["flate2"]
-deflate = ["flate2"]
-lzw = ["weezl"]
 lz4 = ["lz4_flex"]
 brotli = ["dep:brotli"]
 snappy = ["dep:snap"]
+zstd = ["dep:zstd"]
 
 serde = [
   "dep:serde",
@@ -112,11 +109,9 @@ xxhash-rust = { version = "0.8", optional = true }
 hash32 = { version = "0.3", optional = true }
 
 # compression
-weezl = { version = "0.1", optional = true }
 brotli = { version = "7", optional = true }
 snap = { version = "1", optional = true }
 lz4_flex = { version = "0.11", optional = true }
-flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
 
 rayon = { version = "1", optional = true }

@@ -43,13 +43,10 @@ xxhash3 = ["xxhash-rust/xxh3"]
 murmur3 = ["dep:hash32"]
 
 # compression related feature
-gzip = ["flate2"]
-zlib = ["flate2"]
-deflate = ["flate2"]
-lzw = ["weezl"]
 lz4 = ["lz4_flex"]
 brotli = ["dep:brotli"]
 snappy = ["dep:snap"]
+zstd = ["dep:zstd"]
 
 encryption = ["aead", "aes-gcm", "base64", "cbc", "rand"]
 
@@ -91,11 +88,9 @@ xxhash-rust = { version = "0.8", optional = true }
 hash32 = { version = "0.3", optional = true }
 
 # compression
-weezl = { version = "0.1", optional = true }
 brotli = { version = "7", optional = true }
 snap = { version = "1", optional = true }
 lz4_flex = { version = "0.11", optional = true }
-flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
 
 # tracing & metrics

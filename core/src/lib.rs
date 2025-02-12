@@ -9,13 +9,9 @@
 #[cfg(all(
   feature = "compression",
   not(any(
-    feature = "lzw",
-    feature = "zlib",
     feature = "zstd",
     feature = "lz4",
     feature = "brotli",
-    feature = "deflate",
-    feature = "gzip",
     feature = "snappy",
   ))
 ))]

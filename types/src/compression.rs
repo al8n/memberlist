@@ -91,46 +91,29 @@ macro_rules! num_to_enum {
   };
 }
 
-const LZW_TAG: u8 = 0;
 const ZSTD_TAG: u8 = 1;
 const BROTLI_TAG: u8 = 2;
-const DEFLATE_TAG: u8 = 3;
-const GZIP_TAG: u8 = 4;
-const LZ4_TAG: u8 = 5;
-const SNAPPY_TAG: u8 = 6;
-const ZLIB_TAG: u8 = 7;
+const LZ4_TAG: u8 = 3;
+const SNAPPY_TAG: u8 = 4;
 
 mod brotli_impl;
 mod error;
-mod flate2_impl;
 mod from_str;
-mod lzw_impl;
 mod zstd_impl;
 
 pub use brotli_impl::*;
 pub use error::*;
-pub use flate2_impl::*;
 pub use from_str::*;
-pub use lzw_impl::*;
 pub use zstd_impl::*;
+
+#[cfg(feature = "quickcheck")]
+mod quickcheck_impl;
 
 #[cfg(feature = "brotli")]
 const BROTLI_BUFFER_SIZE: usize = 4096;
 
-#[cfg(feature = "lzw")]
-const _: () = {
-  impl CompressionError {
-    #[inline]
-    const fn lzw_compress_error(err: std::io::Error) -> Self {
-      Self::Compress(CompressError::Lzw(err))
-    }
-
-    #[inline]
-    const fn lzw_decompress_error(err: weezl::LzwError) -> Self {
-      Self::Decompress(DecompressError::Lzw(err))
-    }
-  }
-};
+#[cfg(feature = "lz4")]
+const LZ4_PREPEND_LEN_SIZE: usize = 4;
 
 #[cfg(feature = "brotli")]
 const _: () = {
@@ -177,51 +160,6 @@ const _: () = {
   }
 };
 
-#[cfg(feature = "zlib")]
-const _: () = {
-  impl CompressionError {
-    #[inline]
-    const fn zlib_compress_error(err: std::io::Error) -> Self {
-      Self::Compress(CompressError::Zlib(err))
-    }
-
-    #[inline]
-    const fn zlib_decompress_error(err: std::io::Error) -> Self {
-      Self::Decompress(DecompressError::Zlib(err))
-    }
-  }
-};
-
-#[cfg(feature = "gzip")]
-const _: () = {
-  impl CompressionError {
-    #[inline]
-    const fn gzip_compress_error(err: std::io::Error) -> Self {
-      Self::Compress(CompressError::Gzip(err))
-    }
-
-    #[inline]
-    const fn gzip_decompress_error(err: std::io::Error) -> Self {
-      Self::Decompress(DecompressError::Gzip(err))
-    }
-  }
-};
-
-#[cfg(feature = "deflate")]
-const _: () = {
-  impl CompressionError {
-    #[inline]
-    const fn deflate_compress_error(err: std::io::Error) -> Self {
-      Self::Compress(CompressError::Deflate(err))
-    }
-
-    #[inline]
-    const fn deflate_decompress_error(err: std::io::Error) -> Self {
-      Self::Decompress(DecompressError::Deflate(err))
-    }
-  }
-};
-
 #[cfg(feature = "zstd")]
 const _: () = {
   impl CompressionError {
@@ -244,24 +182,12 @@ pub enum CompressAlgorithm {
   /// Brotli
   #[display("brotli{_0}")]
   Brotli(BrotliAlgorithm),
-  /// Deflate
-  #[display("deflate")]
-  Deflate(Flate2CompressionLevel),
-  /// Gzip
-  #[display("gzip")]
-  Gzip(Flate2CompressionLevel),
-  /// LAW
-  #[display("lzw{_0}")]
-  Lzw(LzwAlgorithm),
   /// LZ4
   #[display("lz4")]
   Lz4,
   /// Snappy
   #[display("snappy")]
   Snappy,
-  /// Zlib
-  #[display("zlib")]
-  Zlib(Flate2CompressionLevel),
   /// Zstd
   #[display("zstd({_0})")]
   Zstd(ZstdCompressionLevel),
@@ -272,24 +198,15 @@ pub enum CompressAlgorithm {
 
 impl Default for CompressAlgorithm {
   fn default() -> Self {
-    // Recommended by Claude Sonnet :)
     cfg_if::cfg_if! {
-      if #[cfg(feature = "lz4")] {
-        Self::Lz4
-      } else if #[cfg(feature = "snappy")] {
+      if #[cfg(feature = "snappy")] {
         Self::Snappy
-      } else if #[cfg(feature = "lzw")] {
-        Self::Lzw(LzwAlgorithm::default())
+      } else if #[cfg(feature = "lz4")] {
+        Self::Lz4
       } else if #[cfg(feature = "brotli")] {
         Self::Brotli(BrotliAlgorithm::default())
       } else if #[cfg(feature = "zstd")] {
         Self::Zstd(ZstdCompressionLevel::default())
-      } else if #[cfg(feature = "deflate")] {
-        Self::Deflate(Flate2CompressionLevel::default())
-      } else if #[cfg(feature = "gzip")] {
-        Self::Gzip(Flate2CompressionLevel::default())
-      } else if #[cfg(feature = "zlib")] {
-        Self::Zlib(Flate2CompressionLevel::default())
       } else {
         Self::Unknown(u8::MAX)
       }
@@ -301,17 +218,6 @@ impl CompressAlgorithm {
   /// Decompresses the given buffer.
   pub fn decompress(&self, src: &[u8]) -> Result<Vec<u8>, CompressionError> {
     match self {
-      Self::Lzw(algo) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "lzw")] {
-            weezl::decode::Decoder::new(algo.order().into(), algo.width() as u8)
-              .decode(src)
-              .map_err(CompressionError::lzw_decompress_error)
-          } else {
-            Err(CompressionError::disabled(algo, "lzw"))
-          }
-        }
-      }
       Self::Brotli(_) => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "brotli")] {
@@ -322,20 +228,6 @@ impl CompressAlgorithm {
             reader.read_to_end(&mut buf).map(|_| buf).map_err(CompressionError::brotli_decompress_error)
           } else {
             Err(CompressionError::disabled(algo, "brotli"))
-          }
-        }
-      }
-      Self::Gzip(_) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "gzip")] {
-            use flate2::read::GzDecoder;
-            use std::io::Read;
-
-            let mut decoder = GzDecoder::new(src);
-            let mut buf = Vec::new();
-            decoder.read_to_end(&mut buf).map(|_| buf).map_err(CompressionError::gzip_decompress_error)
-          } else {
-            Err(CompressionError::disabled(algo, "gzip"))
           }
         }
       }
@@ -357,34 +249,6 @@ impl CompressAlgorithm {
           }
         }
       }
-      Self::Zlib(_) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "zlib")] {
-            use flate2::read::ZlibDecoder;
-            use std::io::Read;
-
-            let mut decoder = ZlibDecoder::new(src);
-            let mut buf = Vec::new();
-            decoder.read_to_end(&mut buf).map(|_| buf).map_err(CompressionError::zlib_decompress_error)
-          } else {
-            Err(CompressionError::disabled(algo, "zlib"))
-          }
-        }
-      }
-      Self::Deflate(_) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "deflate")] {
-            use flate2::read::DeflateDecoder;
-            use std::io::Read;
-
-            let mut decoder = DeflateDecoder::new(src);
-            let mut buf = Vec::new();
-            decoder.read_to_end(&mut buf).map(|_| buf).map_err(CompressionError::deflate_decompress_error)
-          } else {
-            Err(CompressionError::disabled(algo, "deflate"))
-          }
-        }
-      }
       Self::Zstd(_) => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "zstd")] {
@@ -403,86 +267,19 @@ impl CompressAlgorithm {
   /// This is useful when you want to pre-allocate the buffer before compressing.
   pub fn max_compress_len(&self, src: &[u8]) -> Result<usize, CompressionError> {
     Ok(match self {
-      Self::Brotli(brotli_algorithm) => {
-        return {
-          cfg_if::cfg_if! {
-            if #[cfg(feature = "brotli")] {
-              use std::io::Write;
-
-              let mut enc = brotli::CompressorWriter::new(
-                NoopWriter::default(),
-                BROTLI_BUFFER_SIZE,
-                brotli_algorithm.quality() as u8 as u32,
-                brotli_algorithm.window() as u8 as u32,
-              );
-              enc
-                .write_all(src)
-                .and_then(|_| enc.flush())
-                .map(|_| enc.into_inner().into())
-                .map_err(CompressionError::brotli_compress_error)
-            } else {
-              Err(CompressionError::disabled(*self, "brotli"))
-            }
+      Self::Brotli(_) => {
+        cfg_if::cfg_if! {
+          if #[cfg(feature = "brotli")] {
+            brotli::enc::BrotliEncoderMaxCompressedSize(src.len())
+          } else {
+            return Err(CompressionError::disabled(*self, "brotli"));
           }
-        };
-      }
-      Self::Deflate(level) => {
-        return {
-          cfg_if::cfg_if! {
-            if #[cfg(feature = "deflate")] {
-              use std::io::Write;
-
-              let mut enc = flate2::write::DeflateEncoder::new(NoopWriter::default(), (*level).into());
-              enc
-                .write_all(src)
-                .and_then(|_| enc.finish())
-                .map(Into::into)
-                .map_err(CompressionError::deflate_compress_error)
-            } else {
-              Err(CompressionError::disabled(*self, "deflate"))
-            }
-          }
-        };
-      }
-      Self::Gzip(level) => {
-        return {
-          cfg_if::cfg_if! {
-            if #[cfg(feature = "gzip")] {
-              use std::io::Write;
-
-              let mut enc = flate2::write::GzEncoder::new(NoopWriter::default(), (*level).into());
-              enc
-                .write_all(src)
-                .and_then(|_| enc.finish())
-                .map(Into::into)
-                .map_err(CompressionError::gzip_compress_error)
-            } else {
-              Err(CompressionError::disabled(*self, "gzip"))
-            }
-          }
-        };
-      }
-      Self::Lzw(algo) => {
-        return {
-          cfg_if::cfg_if! {
-            if #[cfg(feature = "lzw")] {
-              let mut writter = NoopWriter::default();
-              weezl::encode::Encoder::new(algo.order().into(), algo.width() as u8)
-                .into_stream(&mut writter)
-                .encode_all(src)
-                .status
-                .map(|_| writter.into())
-                .map_err(CompressionError::lzw_compress_error)
-            } else {
-              Err(CompressionError::disabled(*self, "lzw"))
-            }
-          }
-        };
+        }
       }
       Self::Lz4 => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "lz4")] {
-            lz4_flex::block::get_maximum_output_size(src.len())
+            lz4_flex::block::get_maximum_output_size(src.len()) + LZ4_PREPEND_LEN_SIZE
           } else {
             return Err(CompressionError::disabled(*self, "lz4"));
           }
@@ -497,35 +294,12 @@ impl CompressAlgorithm {
           }
         }
       }
-      Self::Zlib(level) => {
-        return {
-          cfg_if::cfg_if! {
-            if #[cfg(feature = "zlib")] {
-              use std::io::Write;
-
-              let mut enc = flate2::write::ZlibEncoder::new(NoopWriter::default(), (*level).into());
-              enc
-                .write_all(src)
-                .and_then(|_| enc.finish())
-                .map(Into::into)
-                .map_err(CompressionError::zlib_compress_error)
-            } else {
-              Err(CompressionError::disabled(*self, "zlib"))
-            }
-          }
-        }
-      }
-      Self::Zstd(zstd_algorithm) => {
-        return {
-          cfg_if::cfg_if! {
-            if #[cfg(feature = "zstd")] {
-              let mut writter = NoopWriter::default();
-              zstd::stream::copy_encode(src, &mut writter, zstd_algorithm.level() as i32)
-                .map(|_| writter.into())
-                .map_err(CompressionError::zstd_compress_error)
-            } else {
-              Err(CompressionError::disabled(*self, "zstd"))
-            }
+      Self::Zstd(_) => {
+        cfg_if::cfg_if! {
+          if #[cfg(feature = "zstd")] {
+            zstd::zstd_safe::compress_bound(src.len())
+          } else {
+            return Err(CompressionError::disabled(*self, "zstd"));
           }
         }
       }
@@ -538,23 +312,6 @@ impl CompressAlgorithm {
   /// The `dst` buffer should be pre-allocated with the [`max_compress_len`](Self::max_compress_len) method.
   pub fn compress_to(&self, src: &[u8], dst: &mut [u8]) -> Result<usize, CompressionError> {
     match self {
-      CompressAlgorithm::Lzw(algo) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "lzw")] {
-            let res = weezl::encode::Encoder::new(algo.order().into(), algo.width() as u8)
-              .into_stream(std::io::Cursor::new(dst))
-              .encode_all(src);
-
-            let written = res.bytes_written;
-            res
-              .status
-              .map(|_| written)
-              .map_err(CompressionError::lzw_compress_error)
-          } else {
-            Err(CompressionError::disabled(algo, "lzw"))
-          }
-        }
-      }
       CompressAlgorithm::Brotli(algo) => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "brotli")] {
@@ -577,40 +334,16 @@ impl CompressAlgorithm {
           }
         }
       }
-      CompressAlgorithm::Deflate(level) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "deflate")] {
-            use flate2::write::DeflateEncoder;
-            use std::io::Write;
-
-            let mut encoder = DeflateEncoder::new(std::io::Cursor::new(dst), (*level).into());
-            encoder.write_all(src)
-              .and_then(|_| encoder.finish().map(|cur| cur.position() as usize))
-              .map_err(CompressionError::deflate_compress_error)
-          } else {
-            Err(CompressionError::disabled(algo, "deflate"))
-          }
-        }
-      }
-      CompressAlgorithm::Gzip(level) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "gzip")] {
-            use flate2::write::GzEncoder;
-            use std::io::Write;
-
-            let mut encoder = GzEncoder::new(std::io::Cursor::new(dst), (*level).into());
-            encoder.write_all(src)
-              .and_then(|_| encoder.finish().map(|cur| cur.position() as usize))
-              .map_err(CompressionError::gzip_compress_error)
-          } else {
-            Err(CompressionError::disabled(algo, "gzip"))
-          }
-        }
-      }
       CompressAlgorithm::Lz4 => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "lz4")] {
-            lz4_flex::compress_into(src, dst)
+            let input_len = src.len() as u32;
+            dst[..LZ4_PREPEND_LEN_SIZE].copy_from_slice(&input_len.to_le_bytes());
+
+            lz4_flex::compress_into(src, &mut dst[LZ4_PREPEND_LEN_SIZE..])
+              .map(|written| {
+                written + LZ4_PREPEND_LEN_SIZE
+              })
               .map_err(CompressionError::lz4_compress_error)
           } else {
             Err(CompressionError::disabled(algo, "lz4"))
@@ -625,22 +358,6 @@ impl CompressAlgorithm {
               .map_err(CompressionError::snappy_compress_error)
           } else {
             Err(CompressionError::disabled(algo, "snappy"))
-          }
-        }
-      }
-      CompressAlgorithm::Zlib(level) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "zlib")] {
-            use flate2::write::ZlibEncoder;
-            use std::io::Write;
-
-            let mut encoder = ZlibEncoder::new(std::io::Cursor::new(dst), (*level).into());
-            encoder
-              .write_all(src)
-              .and_then(|_| encoder.flush_finish().map(|cur| cur.position() as usize))
-              .map_err(CompressionError::zlib_compress_error)
-          } else {
-            Err(CompressionError::disabled(algo, "zlib"))
           }
         }
       }
@@ -665,12 +382,8 @@ impl CompressAlgorithm {
   pub fn as_str(&self) -> Cow<'_, str> {
     match self {
       Self::Brotli(algo) => return Cow::Owned(format!("brotli{algo}")),
-      Self::Deflate(algo) => return Cow::Owned(format!("deflate({algo})")),
-      Self::Gzip(algo) => return Cow::Owned(format!("gzip({algo})")),
-      Self::Lzw(algo) => return Cow::Owned(format!("lzw{algo}")),
       Self::Lz4 => "lz4",
       Self::Snappy => "snappy",
-      Self::Zlib(algo) => return Cow::Owned(format!("zlib({algo})")),
       Self::Zstd(val) => return Cow::Owned(format!("zstd({})", val.level())),
       Self::Unknown(val) => return Cow::Owned(format!("unknown({val})")),
     }
@@ -684,12 +397,8 @@ impl CompressAlgorithm {
   pub(super) const fn encode_to_u16(&self) -> u16 {
     let (tag, extra) = match self {
       Self::Brotli(algo) => (BROTLI_TAG, algo.encode()),
-      Self::Deflate(level) => (DEFLATE_TAG, *level as u8),
-      Self::Gzip(level) => (GZIP_TAG, *level as u8),
-      Self::Lzw(algo) => (LZW_TAG, algo.encode()),
       Self::Lz4 => (LZ4_TAG, 0),
       Self::Snappy => (SNAPPY_TAG, 0),
-      Self::Zlib(level) => (ZLIB_TAG, *level as u8),
       Self::Zstd(algo) => (ZSTD_TAG, algo.level() as u8),
       Self::Unknown(v) => (*v, 0),
     };
@@ -706,12 +415,8 @@ impl CompressAlgorithm {
 
     match tag {
       BROTLI_TAG => Self::Brotli(BrotliAlgorithm::decode(extra)),
-      DEFLATE_TAG => Self::Deflate(Flate2CompressionLevel::from_u8(extra)),
-      GZIP_TAG => Self::Gzip(Flate2CompressionLevel::from_u8(extra)),
-      LZW_TAG => Self::Lzw(LzwAlgorithm::decode(extra)),
       LZ4_TAG => Self::Lz4,
       SNAPPY_TAG => Self::Snappy,
-      ZLIB_TAG => Self::Zlib(Flate2CompressionLevel::from_u8(extra)),
       ZSTD_TAG => Self::Zstd(ZstdCompressionLevel::with_level(extra as i8)),
       v => Self::Unknown(v),
     }
@@ -754,31 +459,6 @@ impl Data for CompressAlgorithm {
   }
 }
 
-/// A no-op writer that does nothing, but keeps track of the length.
-/// This is used to calculate the length of the compressed data for
-/// some crates that does not support pre-calculating the length.
-#[derive(Default, Copy, Clone, Debug, PartialEq, Eq, Hash)]
-struct NoopWriter {
-  len: usize,
-}
-
-impl From<NoopWriter> for usize {
-  fn from(val: NoopWriter) -> usize {
-    val.len
-  }
-}
-
-impl std::io::Write for NoopWriter {
-  fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-    self.len += buf.len();
-    Ok(buf.len())
-  }
-
-  fn flush(&mut self) -> std::io::Result<()> {
-    Ok(())
-  }
-}
-
 #[inline]
 fn parse_or_default<I, O>(s: &str) -> Result<O, I::Err>
 where
@@ -800,18 +480,10 @@ const _: () = {
   enum CompressAlgorithmHelper {
     /// Brotli
     Brotli(BrotliAlgorithm),
-    /// Deflate
-    Deflate(Flate2CompressionLevel),
-    /// Gzip
-    Gzip(Flate2CompressionLevel),
-    /// LAW
-    Lzw(LzwAlgorithm),
     /// LZ4
     Lz4,
     /// Snappy
     Snappy,
-    /// Zlib
-    Zlib(Flate2CompressionLevel),
     /// Zstd
     Zstd(ZstdCompressionLevel),
     /// Unknwon compressioned algorithm
@@ -822,12 +494,8 @@ const _: () = {
     fn from(algo: CompressAlgorithm) -> Self {
       match algo {
         CompressAlgorithm::Brotli(algo) => Self::Brotli(algo),
-        CompressAlgorithm::Deflate(algo) => Self::Deflate(algo),
-        CompressAlgorithm::Gzip(algo) => Self::Gzip(algo),
-        CompressAlgorithm::Lzw(algo) => Self::Lzw(algo),
         CompressAlgorithm::Lz4 => Self::Lz4,
         CompressAlgorithm::Snappy => Self::Snappy,
-        CompressAlgorithm::Zlib(algo) => Self::Zlib(algo),
         CompressAlgorithm::Zstd(algo) => Self::Zstd(algo),
         CompressAlgorithm::Unknown(v) => Self::Unknown(v),
       }
@@ -838,12 +506,8 @@ const _: () = {
     fn from(helper: CompressAlgorithmHelper) -> Self {
       match helper {
         CompressAlgorithmHelper::Brotli(algo) => Self::Brotli(algo),
-        CompressAlgorithmHelper::Deflate(algo) => Self::Deflate(algo),
-        CompressAlgorithmHelper::Gzip(algo) => Self::Gzip(algo),
-        CompressAlgorithmHelper::Lzw(algo) => Self::Lzw(algo),
         CompressAlgorithmHelper::Lz4 => Self::Lz4,
         CompressAlgorithmHelper::Snappy => Self::Snappy,
-        CompressAlgorithmHelper::Zlib(algo) => Self::Zlib(algo),
         CompressAlgorithmHelper::Zstd(algo) => Self::Zstd(algo),
         CompressAlgorithmHelper::Unknown(v) => Self::Unknown(v),
       }
@@ -904,30 +568,10 @@ mod tests {
     algo == deserialized
   }
 
-  // #[quickcheck_macros::quickcheck]
-  // #[cfg(feature = "lz4")]
-  // fn lz4(data: Vec<u8>) -> bool {
-  //   if data.is_empty() {
-  //     return true;
-  //   }
-
-  //   let algo = CompressAlgorithm::Lz4;
-  //   let max_compress_len = algo.max_compress_len(&data).unwrap();
-  //   let mut buffer = vec![0; max_compress_len];
-  //   let written = algo.compress_to(&data, &mut buffer).unwrap();
-  //   assert!(written <= max_compress_len);
-  //   let decompressed = algo.decompress(&buffer[..written]).unwrap();
-  //   data == decompressed
-  // }
-
   #[quickcheck_macros::quickcheck]
-  #[cfg(feature = "lzw")]
-  fn lzw(data: Vec<u8>) -> bool {
-    if data.is_empty() {
-      return true;
-    }
-
-    let algo = CompressAlgorithm::Lzw(Default::default());
+  #[cfg(feature = "lz4")]
+  fn lz4(data: Vec<u8>) -> bool {
+    let algo = CompressAlgorithm::Lz4;
     let max_compress_len = algo.max_compress_len(&data).unwrap();
     let mut buffer = vec![0; max_compress_len];
     let written = algo.compress_to(&data, &mut buffer).unwrap();
@@ -939,10 +583,6 @@ mod tests {
   #[quickcheck_macros::quickcheck]
   #[cfg(feature = "brotli")]
   fn brotli(data: Vec<u8>) -> bool {
-    if data.is_empty() {
-      return true;
-    }
-
     let algo = CompressAlgorithm::Brotli(Default::default());
     let max_compress_len = algo.max_compress_len(&data).unwrap();
     let mut buffer = vec![0; max_compress_len];
@@ -955,10 +595,6 @@ mod tests {
   #[quickcheck_macros::quickcheck]
   #[cfg(feature = "zstd")]
   fn zstd(data: Vec<u8>) -> bool {
-    if data.is_empty() {
-      return true;
-    }
-
     let algo = CompressAlgorithm::Zstd(Default::default());
     let max_compress_len = algo.max_compress_len(&data).unwrap();
     let mut buffer = vec![0; max_compress_len];
@@ -971,59 +607,7 @@ mod tests {
   #[quickcheck_macros::quickcheck]
   #[cfg(feature = "snappy")]
   fn snappy(data: Vec<u8>) -> bool {
-    if data.is_empty() {
-      return true;
-    }
-
     let algo = CompressAlgorithm::Snappy;
-    let max_compress_len = algo.max_compress_len(&data).unwrap();
-    let mut buffer = vec![0; max_compress_len];
-    let written = algo.compress_to(&data, &mut buffer).unwrap();
-    assert!(written <= max_compress_len);
-    let decompressed = algo.decompress(&buffer[..written]).unwrap();
-    data == decompressed
-  }
-
-  #[quickcheck_macros::quickcheck]
-  #[cfg(feature = "zlib")]
-  fn zlib(data: Vec<u8>) -> bool {
-    if data.is_empty() {
-      return true;
-    }
-
-    let algo = CompressAlgorithm::Zlib(Default::default());
-    let max_compress_len = algo.max_compress_len(&data).unwrap();
-    let mut buffer = vec![0; max_compress_len];
-    let written = algo.compress_to(&data, &mut buffer).unwrap();
-    assert!(written <= max_compress_len);
-    let decompressed = algo.decompress(&buffer[..written]).unwrap();
-    data == decompressed
-  }
-
-  #[quickcheck_macros::quickcheck]
-  #[cfg(feature = "gzip")]
-  fn gzip(data: Vec<u8>) -> bool {
-    if data.is_empty() {
-      return true;
-    }
-
-    let algo = CompressAlgorithm::Gzip(Default::default());
-    let max_compress_len = algo.max_compress_len(&data).unwrap();
-    let mut buffer = vec![0; max_compress_len];
-    let written = algo.compress_to(&data, &mut buffer).unwrap();
-    assert!(written <= max_compress_len);
-    let decompressed = algo.decompress(&buffer[..written]).unwrap();
-    data == decompressed
-  }
-
-  #[quickcheck_macros::quickcheck]
-  #[cfg(feature = "deflate")]
-  fn deflate(data: Vec<u8>) -> bool {
-    if data.is_empty() {
-      return true;
-    }
-
-    let algo = CompressAlgorithm::Deflate(Default::default());
     let max_compress_len = algo.max_compress_len(&data).unwrap();
     let mut buffer = vec![0; max_compress_len];
     let written = algo.compress_to(&data, &mut buffer).unwrap();
