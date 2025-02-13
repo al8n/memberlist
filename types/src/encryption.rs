@@ -294,6 +294,13 @@ impl From<u8> for EncryptionAlgorithm {
 }
 
 impl EncryptionAlgorithm {
+  /// Returns the nonce size of the encryption algorithm
+  #[inline]
+  pub const fn nonce_size(&self) -> usize {
+    // only 12 bytes for nonce accepted currently
+    NONCE_SIZE
+  }
+
   /// Writes the nonce to the buffer, returning the random generated nonce
   pub fn write_nonce(dst: &mut impl BufMut) -> [u8; NONCE_SIZE] {
     // Add a random nonce
@@ -420,9 +427,9 @@ impl EncryptionAlgorithm {
         let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
 
         // Sum the extra parts to get total size
-        4 + NONCE_SIZE + inp + padding + TAG_SIZE
+        4 + 1 + NONCE_SIZE + inp + padding + TAG_SIZE
       }
-      EncryptionAlgorithm::NoPadding => 4 + NONCE_SIZE + inp + TAG_SIZE,
+      EncryptionAlgorithm::NoPadding => 4 + 1 + NONCE_SIZE + inp + TAG_SIZE,
       _ => unreachable!(),
     }
   }
