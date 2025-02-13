@@ -524,22 +524,13 @@ where
       return Ok(Vec::new());
     }
 
-    // 1. check if we need to compress the payload
-    // 2. check if we need to add a checksum
-    // 3. check if we need to encrypt the payload
-    // 4. check if we need to add a label
     let msg = &self.msgs[0];
     let encoded_len = msg.encoded_len();
     let hint = self.hint(encoded_len)?;
 
-    // Now the encoded length is large enough for encoding/encrypting/compressing/labling
     let mut buf = vec![0u8; hint.max_output_size];
     let mut offset = 0;
 
-    // Do the encoding/encrypting/compressing/labling
-    // 1. add the label
-    // 2. write the encryption overhead
-    // 3. encode the message after the encryption overhead
     let label_size = self.label.len();
     if label_size > 0 {
       buf[0] = super::LABELED_MESSAGE_TAG;
@@ -863,19 +854,13 @@ impl<I, A> Batch<'_, I, A> {
 fn batch<I, A>(
   fixed_payload_overhead: usize,
   max_encoded_batch_size: usize,
-  max_encoded_message_size: usize,
   msgs: &[Message<I, A>],
 ) -> impl Iterator<Item = Batch<'_, I, A>> + core::fmt::Debug + '_
 where
   I: Data + Send + Sync + 'static,
   A: Data + Send + Sync + 'static,
 {
-  let hints = batch_hints(
-    fixed_payload_overhead,
-    max_encoded_batch_size,
-    max_encoded_message_size,
-    msgs,
-  );
+  let hints = batch_hints(fixed_payload_overhead, max_encoded_batch_size, msgs);
 
   #[cfg(feature = "tracing")]
   tracing::trace!(hints=?hints, "memberslit: batch hints");
@@ -908,13 +893,12 @@ where
 }
 
 /// Calculate batch hints for a slice of messages.
-#[auto_enums::auto_enum(Iterator, ExactSizeIterator, Debug)]
+#[auto_enums::auto_enum(Iterator, Debug, Clone)]
 fn batch_hints<I, A>(
   payload_overhead: usize,
   max_encoded_batch_size: usize,
-  max_encoded_message_size: usize,
   msgs: &[Message<I, A>],
-) -> impl Iterator<Item = BatchHint> + core::fmt::Debug + '_
+) -> impl Iterator<Item = BatchHint> + core::fmt::Debug + Clone + '_
 where
   I: Data + Send + Sync + 'static,
   A: Data + Send + Sync + 'static,
@@ -929,62 +913,55 @@ where
       })
     }
     total_len => {
-      // let mut state = BatchingState::new(payload_overhead);
-
       msgs
         .iter()
         .enumerate()
         .scan(
-          (None, BatchingState::new(payload_overhead)),
-          move |(last_hint, state), (idx, msg)| {
-            // Handle any remaining hint from previous iteration
-            if let Some(hint) = last_hint.take() {
-              return Some(Some(hint));
-            }
-
+          BatchingState::new(payload_overhead),
+          move |state, (idx, msg)| {
             let msg_encoded_len = msg.encoded_len_with_length_delimited();
-
-            // Handle oversized messages
-            if msg_encoded_len > max_encoded_message_size {
-              return Some(Some(BatchHint::One {
-                idx,
-                encoded_size: payload_overhead + msg_encoded_len,
-              }));
-            }
-
             let is_last_message = idx + 1 == total_len;
+            let is_single_message = idx + 1 - state.batch_start_idx == 1;
 
-            if state.would_exceed_limits(msg_encoded_len, max_encoded_batch_size) {
-              // Finish current batch
-              let current_hint = BatchHint::More {
+            let hint = if state.would_exceed_limits(msg_encoded_len, max_encoded_batch_size) {
+              // Current message would exceed limits, finish current batch
+              let hint = BatchHint::More {
                 range: state.batch_start_idx..idx,
                 encoded_size: state.current_encoded_size,
               };
-
-              // Start new batch
               state.start_new_batch(payload_overhead, idx, msg_encoded_len);
-
-              if is_last_message {
-                // Store last message hint for next iteration
-                *last_hint = Some(BatchHint::One {
-                  idx,
-                  encoded_size: payload_overhead + msg_encoded_len,
-                });
-              }
-
-              Some(Some(current_hint))
+              Some(hint)
             } else {
               state.add_to_batch(msg_encoded_len);
-
               if is_last_message {
-                Some(Some(BatchHint::More {
-                  range: state.batch_start_idx..idx + 1,
-                  encoded_size: state.current_encoded_size,
-                }))
+                // Last message, emit appropriate batch type
+                Some(if is_single_message {
+                  BatchHint::One {
+                    idx,
+                    encoded_size: msg_encoded_len,
+                  }
+                } else {
+                  BatchHint::More {
+                    range: state.batch_start_idx..idx + 1,
+                    encoded_size: state.current_encoded_size,
+                  }
+                })
               } else {
-                Some(None)
+                None
               }
-            }
+            };
+
+            // If we started a new batch and it's the last message, add a final hint
+            let final_hint = if state.current_num_packets == 1 && is_last_message {
+              Some(BatchHint::One {
+                idx,
+                encoded_size: payload_overhead + msg_encoded_len,
+              })
+            } else {
+              None
+            };
+
+            Some(hint.into_iter().chain(final_hint))
           },
         )
         .flatten()
@@ -1049,7 +1026,7 @@ fn test_batch() {
   let single = Message::<SmolStr, SocketAddr>::UserData("ping".into());
   let encoded_len = single.encoded_len_with_length_delimited();
   let msgs = [single];
-  let batches = batch::<_, _>(0, 1400, 1400, &msgs).collect::<Vec<_>>();
+  let batches = batch::<_, _>(0, 1400, &msgs).collect::<Vec<_>>();
   assert_eq!(batches.len(), 1, "bad len {}", batches.len());
   assert_eq!(
     batches[0].estimate_encoded_size(),
@@ -1066,7 +1043,7 @@ fn test_batch() {
     })
     .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
 
-  let batches = batch::<_, _>(0, 1400, 1400, &bcasts).collect::<Vec<_>>();
+  let batches = batch::<_, _>(0, 1400, &bcasts).collect::<Vec<_>>();
   assert_eq!(batches.len(), 2, "bad len {}", batches.len());
   assert_eq!(batches[0].len() + batches[1].len(), 256, "missing packets");
   assert_eq!(
@@ -1076,43 +1053,38 @@ fn test_batch() {
   );
 }
 
-// #[test]
-// fn test_batch_large_max_encoded_batch_size() {
-//   use smol_str::SmolStr;
-//   use std::net::SocketAddr;
+#[test]
+fn test_batch_large_max_encoded_batch_size() {
+  use smol_str::SmolStr;
+  use std::net::SocketAddr;
 
-//   let mut total_encoded_len = 0;
-//   let mut last_one_encoded_len = 0;
-//   let bcasts = (0..256)
-//     .map(|i| {
-//       let msg = Message::UserData(i.to_string().as_bytes().to_vec().into());
-//       let encoded_len = Lpe::<_, _>::encoded_len(&msg);
-//       if i == 255 {
-//         last_one_encoded_len = encoded_len;
-//       } else {
-//         total_encoded_len += encoded_len;
-//       }
-//       msg
-//     })
-//     .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
+  let mut total_encoded_len = BATCH_OVERHEAD;
+  let mut last_one_encoded_len = 0;
+  let bcasts = (0..256)
+    .map(|i| {
+      let msg = Message::UserData(i.to_string().as_bytes().to_vec().into());
+      let encoded_len = msg.encoded_len_with_length_delimited();
+      if i == 255 {
+        last_one_encoded_len = encoded_len;
+      } else {
+        total_encoded_len += encoded_len;
+      }
+      msg
+    })
+    .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
 
-//   let batches =
-//     batch::<_, _>(0, 6, 4, u32::MAX as usize, u32::MAX as usize, 255, bcasts);
-//   assert_eq!(batches.len(), 2, "bad len {}", batches.len());
-//   assert_eq!(batches[0].len() + batches[1].len(), 256, "missing packets");
-//   assert_eq!(
-//     batches[0].estimate_encoded_size(),
-//     6 + batches[0].len() * 4 + total_encoded_len,
-//     "bad encoded len for batch 0"
-//   );
-//   assert_eq!(
-//     batches[1].estimate_encoded_size(),
-//     last_one_encoded_len,
-//     "bad encoded len for batch 1"
-//   );
-//   assert_eq!(
-//     batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(),
-//     6 + batches[0].len() * 4 + total_encoded_len + last_one_encoded_len,
-//     "bad estimate len"
-//   );
-// }
+  let batches = batch::<_, _>(0, u32::MAX as usize, &bcasts).collect::<Vec<_>>();
+  assert_eq!(batches.len(), 2, "bad len {}", batches.len());
+  assert_eq!(batches[0].len(), 255, "missing packets");
+  assert_eq!(batches[1].len(), 1, "missing packets");
+  assert_eq!(
+    batches[0].estimate_encoded_size(),
+    total_encoded_len,
+    "bad encoded len for batch 0"
+  );
+  assert_eq!(
+    batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(),
+    total_encoded_len + last_one_encoded_len,
+    "bad estimate len"
+  );
+}
