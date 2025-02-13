@@ -38,7 +38,7 @@ pub enum EncoderError {
 
 /// The hint of how encrypted payload.
 #[cfg(feature = "encryption")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncryptionHint {
   header_offset: usize,
   length_offset: usize,
@@ -109,7 +109,7 @@ impl EncryptionHint {
   feature = "xxhash3",
   feature = "murmur3",
 ))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChecksumHint {
   header_offset: usize,
   size: usize,
@@ -174,7 +174,7 @@ impl ChecksumHint {
   feature = "brotli",
   feature = "snappy",
 ))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressHint {
   header_offset: usize,
   max_output_size: usize,
@@ -235,7 +235,7 @@ impl CompressHint {
 
 /// The hint for [`MessageEncoder`] to encode the messages.
 #[viewit::viewit(vis_all = "", getters(style = "move"), setters(skip))]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EncodeHint {
   #[viewit(getter(attrs(doc = "The input size of the messages.",)))]
   input_size: usize,
@@ -511,22 +511,26 @@ where
   }
 
   /// Encodes the messages.
-  pub fn encode(&self) -> Result<Vec<u8>, EncoderError> {
-    if self.msgs.len() > 1 {
-      self.encode_batch()
-    } else {
-      self.encode_single()
+  #[auto_enums::auto_enum(Iterator, Debug)]
+  pub fn encode(
+    &self,
+  ) -> impl Iterator<Item = Result<Vec<u8>, EncoderError>> + core::fmt::Debug + '_ {
+    match self.msgs.len() {
+      0 => core::iter::empty(),
+      1 => {
+        let msg = &self.msgs[0];
+        let encoded_len = msg.encoded_len();
+        match self.hint(encoded_len) {
+          Ok(hint) => core::iter::once(self.encode_single(msg, hint)),
+          Err(err) => core::iter::once(Err(err)),
+        }
+      }
+      _ => self.encode_batch(),
     }
   }
 
-  fn encode_single(&self) -> Result<Vec<u8>, EncoderError> {
-    if self.msgs.is_empty() {
-      return Ok(Vec::new());
-    }
-
-    let msg = &self.msgs[0];
-    let encoded_len = msg.encoded_len();
-    let hint = self.hint(encoded_len)?;
+  fn encode_single(&self, msg: &Message<I, A>, hint: EncodeHint) -> Result<Vec<u8>, EncoderError> {
+    let (encoded_len, hint) = (hint.input_size, hint);
 
     let mut buf = vec![0u8; hint.max_output_size];
     let mut offset = 0;
@@ -664,59 +668,134 @@ where
     Ok(buf)
   }
 
-  fn encode_batch(&self) -> Result<Vec<u8>, EncoderError> {
-    todo!()
+  fn encode_batch(
+    &self,
+  ) -> impl Iterator<Item = Result<Vec<u8>, EncoderError>> + core::fmt::Debug + '_ {
+    self.batch().map(|batch| {
+      match batch {
+        Batch::One { msg, hint } => self.encode_single(msg, hint),
+        Batch::More {
+          msgs,
+          hint,
+          num_msgs,
+        } => {
+          // TODO: reuse encode_single code
+          todo!()
+        }
+      }
+    })
   }
 
-  fn batch_encode_hints(&self) {}
+  fn batch(&self) -> impl Iterator<Item = Batch<'_, I, A>> + core::fmt::Debug + '_
+  where
+    I: Data,
+    A: Data,
+  {
+    let hints = self.batch_hints();
+
+    #[cfg(feature = "tracing")]
+    tracing::trace!(hints=?hints, "memberslit: batch hints");
+
+    hints.scan(0usize, move |idx, hint| {
+      Some(match hint {
+        BatchHint::One { hint, .. } => {
+          let b = Batch::One {
+            msg: &self.msgs[*idx],
+            hint,
+          };
+          *idx += 1;
+          b
+        }
+        BatchHint::More { range, hint } => {
+          let num = range.end - range.start;
+          let b = Batch::More {
+            hint,
+            msgs: &self.msgs[*idx..*idx + num],
+            num_msgs: num,
+          };
+          *idx += num;
+          b
+        }
+      })
+    })
+  }
+
+  /// Calculate batch hints for a slice of messages.
+  #[auto_enums::auto_enum(Iterator, Debug, Clone)]
+  fn batch_hints(&self) -> impl Iterator<Item = BatchHint> + core::fmt::Debug + Clone + '_
+  where
+    I: Data,
+    A: Data,
+  {
+    match self.msgs.len() {
+      0 => core::iter::empty(),
+      1 => {
+        let msg_encoded_len = self.msgs[0].encoded_len_with_length_delimited();
+        core::iter::once(BatchHint::One {
+          idx: 0,
+          hint: self.hint(msg_encoded_len).unwrap(),
+        })
+      }
+      total_len => {
+        self
+          .msgs
+          .iter()
+          .enumerate()
+          .scan(BatchingState::new(), move |state, (idx, msg)| {
+            let msg_encoded_len = msg.encoded_len_with_length_delimited();
+            let is_last_message = idx + 1 == total_len;
+            let is_single_message = idx + 1 - state.batch_start_idx == 1;
+
+            let hint = if state.would_exceed_limits(msg_encoded_len, self.max_payload_size) {
+              // Current message would exceed limits, finish current batch
+              let hint = BatchHint::More {
+                range: state.batch_start_idx..idx,
+                hint: self.hint(state.current_encoded_size).unwrap(),
+              };
+              state.start_new_batch(idx, msg_encoded_len);
+              Some(hint)
+            } else {
+              state.add_to_batch(msg_encoded_len);
+              if is_last_message {
+                // Last message, emit appropriate batch type
+                Some(if is_single_message {
+                  BatchHint::One {
+                    idx,
+                    hint: self.hint(msg_encoded_len).unwrap(),
+                  }
+                } else {
+                  BatchHint::More {
+                    range: state.batch_start_idx..idx + 1,
+                    hint: self.hint(state.current_encoded_size).unwrap(),
+                  }
+                })
+              } else {
+                None
+              }
+            };
+
+            // If we started a new batch and it's the last message, add a final hint
+            let final_hint = if state.current_num_packets == 1 && is_last_message {
+              Some(BatchHint::One {
+                idx,
+                hint: self.hint(msg_encoded_len).unwrap(),
+              })
+            } else {
+              None
+            };
+
+            Some(hint.into_iter().chain(final_hint))
+          })
+          .flatten()
+      }
+    }
+  }
 }
 
 // 1500 bytes typically can hold the maximum size of a UDP packet
 smallvec_wrapper::smallvec_wrapper!(
   EncodeBuffer<T>([T; 1500]);
 );
-
-// // makeCompoundMessages takes a list of messages and packs
-// // them into one or multiple messages based on the limitations
-// // of compound messages (255 messages each).
-// func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
-// 	const maxMsgs = 255
-// 	bufs := make([]*bytes.Buffer, 0, (len(msgs)+(maxMsgs-1))/maxMsgs)
-
-// 	for ; len(msgs) > maxMsgs; msgs = msgs[maxMsgs:] {
-// 		bufs = append(bufs, makeCompoundMessage(msgs[:maxMsgs]))
-// 	}
-// 	if len(msgs) > 0 {
-// 		bufs = append(bufs, makeCompoundMessage(msgs))
-// 	}
-
-// 	return bufs
-// }
-
-// // makeCompoundMessage takes a list of messages and generates
-// // a single compound message containing all of them
-// func makeCompoundMessage(msgs [][]byte) *bytes.Buffer {
-// 	// Create a local buffer
-// 	buf := bytes.NewBuffer(nil)
-
-// 	// Write out the type
-// 	buf.WriteByte(uint8(compoundMsg))
-
-// 	// Write out the number of message
-// 	buf.WriteByte(uint8(len(msgs)))
-
-// 	// Add the message lengths
-// 	for _, m := range msgs {
-// 		binary.Write(buf, binary.BigEndian, uint16(len(m)))
-// 	}
-
-// 	// Append the messages
-// 	for _, m := range msgs {
-// 		buf.Write(m)
-// 	}
-
-// 	return buf
-// }
 
 /// A message batch processing state
 #[derive(Clone, Copy, Debug)]
@@ -729,9 +808,9 @@ struct BatchingState {
 
 impl BatchingState {
   #[inline]
-  fn new(payload_overhead: usize) -> Self {
+  fn new() -> Self {
     Self {
-      current_encoded_size: payload_overhead + BATCH_OVERHEAD,
+      current_encoded_size: BATCH_OVERHEAD,
       current_num_packets: 0,
       batch_start_idx: 0,
       total_batches: 0,
@@ -745,8 +824,8 @@ impl BatchingState {
   }
 
   #[inline]
-  fn start_new_batch(&mut self, payload_overhead: usize, idx: usize, need: usize) {
-    self.current_encoded_size = payload_overhead + BATCH_OVERHEAD + need;
+  fn start_new_batch(&mut self, idx: usize, need: usize) {
+    self.current_encoded_size = BATCH_OVERHEAD + need;
     self.current_num_packets = 1;
     self.batch_start_idx = idx;
     self.total_batches += 1;
@@ -761,20 +840,20 @@ impl BatchingState {
 
 /// Used to indicate how to batch a collection of messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BatchHint {
+enum BatchHint {
   /// Batch should contains only one [`Message`]
   One {
     /// The index of this message belongs to the original slice
     idx: usize,
     /// The encoded size of this message
-    encoded_size: usize,
+    hint: EncodeHint,
   },
   /// Batch should contains multiple  [`Message`]s
   More {
     /// The range of this batch belongs to the original slice
     range: core::ops::Range<usize>,
-    /// The encoded size of this batch
-    encoded_size: usize,
+    /// The encoded hint of this batch
+    hint: EncodeHint,
   },
 }
 
@@ -785,13 +864,13 @@ enum Batch<'a, I, A> {
   One {
     /// The message in this batch.
     msg: &'a Message<I, A>,
-    /// The estimated encoded size of this [`Message`].
-    estimate_encoded_size: usize,
+    /// The encoded hint of this [`Message`].
+    hint: EncodeHint,
   },
   /// Batch contains multiple [`Message`]s.
   More {
-    /// The estimated encoded size of this batch.
-    estimate_encoded_size: usize,
+    /// The encoded hint of this batch of [`Message`]s.
+    hint: EncodeHint,
     /// The messages in this batch.
     msgs: &'a [Message<I, A>],
     /// The num of msgs
@@ -817,21 +896,6 @@ impl<'a, I, A> Iterator for Batch<'a, I, A> {
 }
 
 impl<I, A> Batch<'_, I, A> {
-  /// Returns the estimated encoded size for this batch.
-  #[inline]
-  pub const fn estimate_encoded_size(&self) -> usize {
-    match self {
-      Self::One {
-        estimate_encoded_size,
-        ..
-      } => *estimate_encoded_size,
-      Self::More {
-        estimate_encoded_size,
-        ..
-      } => *estimate_encoded_size,
-    }
-  }
-
   /// Returns the number of messages in this batch.
   #[inline]
   pub fn len(&self) -> usize {
@@ -847,124 +911,6 @@ impl<I, A> Batch<'_, I, A> {
     match self {
       Self::One { .. } => false,
       Self::More { num_msgs, .. } => *num_msgs == 0,
-    }
-  }
-}
-
-fn batch<I, A>(
-  fixed_payload_overhead: usize,
-  max_encoded_batch_size: usize,
-  msgs: &[Message<I, A>],
-) -> impl Iterator<Item = Batch<'_, I, A>> + core::fmt::Debug + '_
-where
-  I: Data + Send + Sync + 'static,
-  A: Data + Send + Sync + 'static,
-{
-  let hints = batch_hints(fixed_payload_overhead, max_encoded_batch_size, msgs);
-
-  #[cfg(feature = "tracing")]
-  tracing::trace!(hints=?hints, "memberslit: batch hints");
-
-  hints.scan(0usize, move |idx, hint| {
-    Some(match hint {
-      BatchHint::One { encoded_size, .. } => {
-        let b = Batch::One {
-          msg: &msgs[*idx],
-          estimate_encoded_size: encoded_size,
-        };
-        *idx += 1;
-        b
-      }
-      BatchHint::More {
-        range,
-        encoded_size,
-      } => {
-        let num = range.end - range.start;
-        let b = Batch::More {
-          estimate_encoded_size: encoded_size,
-          msgs: &msgs[*idx..*idx + num],
-          num_msgs: num,
-        };
-        *idx += num;
-        b
-      }
-    })
-  })
-}
-
-/// Calculate batch hints for a slice of messages.
-#[auto_enums::auto_enum(Iterator, Debug, Clone)]
-fn batch_hints<I, A>(
-  payload_overhead: usize,
-  max_encoded_batch_size: usize,
-  msgs: &[Message<I, A>],
-) -> impl Iterator<Item = BatchHint> + core::fmt::Debug + Clone + '_
-where
-  I: Data + Send + Sync + 'static,
-  A: Data + Send + Sync + 'static,
-{
-  match msgs.len() {
-    0 => core::iter::empty(),
-    1 => {
-      let msg_encoded_len = msgs[0].encoded_len_with_length_delimited();
-      core::iter::once(BatchHint::One {
-        idx: 0,
-        encoded_size: msg_encoded_len,
-      })
-    }
-    total_len => {
-      msgs
-        .iter()
-        .enumerate()
-        .scan(
-          BatchingState::new(payload_overhead),
-          move |state, (idx, msg)| {
-            let msg_encoded_len = msg.encoded_len_with_length_delimited();
-            let is_last_message = idx + 1 == total_len;
-            let is_single_message = idx + 1 - state.batch_start_idx == 1;
-
-            let hint = if state.would_exceed_limits(msg_encoded_len, max_encoded_batch_size) {
-              // Current message would exceed limits, finish current batch
-              let hint = BatchHint::More {
-                range: state.batch_start_idx..idx,
-                encoded_size: state.current_encoded_size,
-              };
-              state.start_new_batch(payload_overhead, idx, msg_encoded_len);
-              Some(hint)
-            } else {
-              state.add_to_batch(msg_encoded_len);
-              if is_last_message {
-                // Last message, emit appropriate batch type
-                Some(if is_single_message {
-                  BatchHint::One {
-                    idx,
-                    encoded_size: msg_encoded_len,
-                  }
-                } else {
-                  BatchHint::More {
-                    range: state.batch_start_idx..idx + 1,
-                    encoded_size: state.current_encoded_size,
-                  }
-                })
-              } else {
-                None
-              }
-            };
-
-            // If we started a new batch and it's the last message, add a final hint
-            let final_hint = if state.current_num_packets == 1 && is_last_message {
-              Some(BatchHint::One {
-                idx,
-                encoded_size: payload_overhead + msg_encoded_len,
-              })
-            } else {
-              None
-            };
-
-            Some(hint.into_iter().chain(final_hint))
-          },
-        )
-        .flatten()
     }
   }
 }
@@ -1023,13 +969,16 @@ fn test_batch() {
   use smol_str::SmolStr;
   use std::net::SocketAddr;
 
+  let mut encoder = MessageEncoder::new(1400);
   let single = Message::<SmolStr, SocketAddr>::UserData("ping".into());
   let encoded_len = single.encoded_len_with_length_delimited();
   let msgs = [single];
-  let batches = batch::<_, _>(0, 1400, &msgs).collect::<Vec<_>>();
+  encoder.with_messages(&msgs);
+
+  let batches = encoder.batch().collect::<Vec<_>>();
   assert_eq!(batches.len(), 1, "bad len {}", batches.len());
   assert_eq!(
-    batches[0].estimate_encoded_size(),
+    batches[0].hint.estimate_encoded_size(),
     encoded_len,
     "bad estimate len"
   );
