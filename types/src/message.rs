@@ -1,7 +1,4 @@
-use core::marker::PhantomData;
-
 use bytes::Bytes;
-use triomphe::Arc;
 
 use super::*;
 
@@ -24,8 +21,9 @@ const PUSH_PULL_MESSAGE_TAG: u8 = 8;
 const USER_DATA_MESSAGE_TAG: u8 = 9;
 const NACK_MESSAGE_TAG: u8 = 10;
 const ERROR_RESPONSE_MESSAGE_TAG: u8 = 11;
-const COMPRESSED_MESSAGE_TAG: u8 = 12;
-const ENCRYPTED_MESSAGE_TAG: u8 = 13;
+const CHECKSUMED_MESSAGE_TAG: u8 = 12;
+const COMPRESSED_MESSAGE_TAG: u8 = 13;
+const ENCRYPTED_MESSAGE_TAG: u8 = 14;
 const LABELED_MESSAGE_TAG: u8 = 244;
 
 macro_rules! enum_wrapper {
@@ -184,11 +182,6 @@ enum_wrapper!(
   #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
   #[non_exhaustive]
   pub enum Message<I, A> {
-    /// Compound message
-    Compound(
-      #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::triomphe_arc))]
-      Arc<[Self]>,
-    ) = COMPOOUND_MESSAGE_TAG,
     /// Ping message
     Ping(Ping<I, A>) = PING_MESSAGE_TAG,
     /// Indirect ping message
@@ -211,14 +204,6 @@ enum_wrapper!(
     Nack(Nack) = NACK_MESSAGE_TAG,
     /// Error response message
     ErrorResponse(ErrorResponse) = ERROR_RESPONSE_MESSAGE_TAG,
-    // /// Checksumed message
-    // Checksumed(ChecksumedMessage<I, A>) = 12,
-    // /// Encrypted message
-    // Encrypted(EncryptedMessage<I, A>) = 13,
-    // /// Compressed message
-    // Compressed(CompressedMessage<I, A>) = 14,
-    /// Labeled message
-    Labeled(LabeledMessage<I, A>) = LABELED_MESSAGE_TAG,
   }
 );
 
@@ -234,11 +219,6 @@ where
     Self: Sized,
   {
     Ok(match val {
-      Self::Ref::Compound(val) => val
-        .iter::<I, A>()
-        .map(|res| res.and_then(Message::from_ref))
-        .collect::<Result<Arc<[_]>, DecodeError>>()
-        .map(|msgs| Self::Compound(msgs))?,
       Self::Ref::Ping(val) => Self::Ping(Ping::from_ref(val)?),
       Self::Ref::IndirectPing(val) => Self::IndirectPing(IndirectPing::from_ref(val)?),
       Self::Ref::Ack(val) => Self::Ack(Ack::from_ref(val)?),
@@ -249,16 +229,11 @@ where
       Self::Ref::UserData(val) => Self::UserData(Bytes::from_ref(val)?),
       Self::Ref::Nack(val) => Self::Nack(Nack::from_ref(val)?),
       Self::Ref::ErrorResponse(val) => Self::ErrorResponse(ErrorResponse::from_ref(val)?),
-      // Self::Ref::Checksumed(val) => Self::Checksumed(ChecksumedMessage::from_ref(val)?),
-      // Self::Ref::Encrypted(val) => Self::Encrypted(EncryptedMessage::from_ref(val)?),
-      // Self::Ref::Compressed(val) => Self::Compressed(CompressedMessage::from_ref(val)?),
-      Self::Ref::Labeled(val) => Self::Labeled(LabeledMessage::from_ref(val)?),
     })
   }
 
   fn encoded_len(&self) -> usize {
     1 + match self {
-      Self::Compound(val) => encoded_messages_len(val),
       Self::Ping(val) => val.encoded_len_with_length_delimited(),
       Self::IndirectPing(val) => val.encoded_len_with_length_delimited(),
       Self::Ack(val) => val.encoded_len_with_length_delimited(),
@@ -269,7 +244,6 @@ where
       Self::UserData(val) => val.encoded_len_with_length_delimited(),
       Self::Nack(val) => val.encoded_len_with_length_delimited(),
       Self::ErrorResponse(val) => val.encoded_len_with_length_delimited(),
-      Self::Labeled(val) => val.encoded_len_with_length_delimited(),
     }
   }
 
@@ -284,9 +258,6 @@ where
     offset += 1;
 
     match self {
-      Self::Compound(val) => {
-        offset += encode_messages_slice(val, &mut buf[offset..])?;
-      }
       Self::Ping(val) => {
         offset += val.encode_length_delimited(&mut buf[offset..])?;
       }
@@ -317,9 +288,6 @@ where
       Self::ErrorResponse(val) => {
         offset += val.encode_length_delimited(&mut buf[offset..])?;
       }
-      Self::Labeled(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
     }
 
     Ok(offset)
@@ -345,10 +313,6 @@ where
     offset += 1;
 
     Ok(match b {
-      Message::<I, A>::COMPOUND_BYTE => {
-        let decoder = CompoundMessagesDecoder::new(&src[offset..]);
-        (src.len(), Self::Compound(decoder))
-      }
       Message::<I, A>::PING_BYTE => {
         let (bytes_read, decoded) =
           <Ping<I::Ref<'_>, A::Ref<'_>> as DataRef<Ping<I, A>>>::decode_length_delimited(
@@ -416,13 +380,6 @@ where
         offset += bytes_read;
         (offset, Self::ErrorResponse(decoded))
       }
-      Message::<I, A>::LABELED_BYTE => {
-        let (bytes_read, decoded) = <LabeledMessageRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
-          LabeledMessage<I, A>,
-        >>::decode_length_delimited(&src[offset..])?;
-        offset += bytes_read;
-        (offset, Self::Labeled(decoded))
-      }
       _ => {
         let (wt, tag) = super::split(b);
         WireType::try_from(wt).map_err(DecodeError::unknown_wire_type)?;
@@ -443,8 +400,6 @@ where
   derive_more::TryUnwrap,
 )]
 pub enum MessageRef<'a, I, A> {
-  /// Compound message
-  Compound(CompoundMessagesDecoder<'a>),
   /// Ping message
   Ping(Ping<I, A>),
   /// Indirect ping message
@@ -465,15 +420,12 @@ pub enum MessageRef<'a, I, A> {
   Nack(Nack),
   /// Error response message
   ErrorResponse(ErrorResponseRef<'a>),
-  /// Labeled message
-  Labeled(LabeledMessageRef<'a, I, A>),
 }
 
 impl<I, A> MessageRef<'_, I, A> {
   /// Returns the type of the message.
   pub const fn ty(&self) -> MessageType {
     match self {
-      Self::Compound(_) => MessageType::Compound,
       Self::Ping(_) => MessageType::Ping,
       Self::IndirectPing(_) => MessageType::IndirectPing,
       Self::Ack(_) => MessageType::Ack,
@@ -484,180 +436,180 @@ impl<I, A> MessageRef<'_, I, A> {
       Self::UserData(_) => MessageType::UserData,
       Self::Nack(_) => MessageType::Nack,
       Self::ErrorResponse(_) => MessageType::ErrorResponse,
-      Self::Labeled(_) => MessageType::Labeled,
     }
   }
 }
 
-/// A compound message encoder which can encode multiple messages into a buffer.
-#[derive(Debug)]
-pub struct CompoundMessagesEncoder<'a, I, A> {
-  src: &'a [Message<I, A>],
-}
+// /// A compound message encoder which can encode multiple messages into a buffer.
+// #[derive(Debug)]
+// pub struct CompoundMessagesEncoder<'a, I, A> {
+//   src: &'a [Message<I, A>],
+// }
 
-impl<'a, I, A> CompoundMessagesEncoder<'a, I, A> {
-  /// Creates a new compound message encoder.
-  #[inline]
-  pub const fn new(src: &'a [Message<I, A>]) -> Self {
-    Self { src }
-  }
+// impl<'a, I, A> CompoundMessagesEncoder<'a, I, A> {
+//   /// Creates a new compound message encoder.
+//   #[inline]
+//   pub const fn new(src: &'a [Message<I, A>]) -> Self {
+//     Self { src }
+//   }
 
-  /// Encodes the messages into the buffer.
-  #[inline]
-  pub fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError>
-  where
-    I: Data,
-    A: Data,
-  {
-    encode_messages_slice(self.src, buf)
-  }
+//   /// Encodes the messages into the buffer.
+//   #[inline]
+//   pub fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError>
+//   where
+//     I: Data,
+//     A: Data,
+//   {
+//     encode_messages_slice(self.src, buf)
+//   }
 
-  /// Encodes the messages into a [`Bytes`].
-  #[inline]
-  pub fn encode_to_bytes(&self) -> Result<Bytes, EncodeError>
-  where
-    I: Data,
-    A: Data,
-  {
-    let len = self.encoded_len();
-    let mut buf = vec![0; len];
-    self.encode(&mut buf).map(|_| Bytes::from(buf))
-  }
+//   /// Encodes the messages into a [`Bytes`].
+//   #[inline]
+//   pub fn encode_to_bytes(&self) -> Result<Bytes, EncodeError>
+//   where
+//     I: Data,
+//     A: Data,
+//   {
+//     let len = self.encoded_len();
+//     let mut buf = vec![0; len];
+//     self.encode(&mut buf).map(|_| Bytes::from(buf))
+//   }
 
-  /// Returns the total length of the encoded messages.
-  #[inline]
-  pub fn encoded_len(&self) -> usize
-  where
-    I: Data,
-    A: Data,
-  {
-    encoded_messages_len(self.src)
-  }
-}
+//   /// Returns the total length of the encoded messages.
+//   #[inline]
+//   pub fn encoded_len(&self) -> usize
+//   where
+//     I: Data,
+//     A: Data,
+//   {
+//     encoded_messages_len(self.src)
+//   }
+// }
 
-/// A message decoder which can yield messages from a buffer.
-///
-/// This decoder will not modify the source buffer and will only read from it.
-#[derive(Debug, Clone, Copy)]
-pub struct CompoundMessagesDecoder<'a> {
-  src: &'a [u8],
-}
+// /// A message decoder which can yield messages from a buffer.
+// ///
+// /// This decoder will not modify the source buffer and will only read from it.
+// #[derive(Debug, Clone, Copy)]
+// pub struct CompoundMessagesDecoder<'a> {
+//   src: &'a [u8],
+// }
 
-impl<'a> CompoundMessagesDecoder<'a> {
-  /// Creates a new message decoder.
-  #[inline]
-  pub const fn new(buf: &'a [u8]) -> Self {
-    Self { src: buf }
-  }
+// impl<'a> CompoundMessagesDecoder<'a> {
+//   /// Creates a new message decoder.
+//   #[inline]
+//   pub const fn new(buf: &'a [u8]) -> Self {
+//     Self { src: buf }
+//   }
 
-  /// Returns an iterator which can yields the reference to the messages in the buffer.
-  #[inline]
-  pub const fn iter<I, A>(&self) -> CompoundMessagesDecoderIter<'a, I, A> {
-    CompoundMessagesDecoderIter {
-      src: self.src,
-      offset: 0,
-      _phantom: PhantomData,
-    }
-  }
-}
+//   /// Returns an iterator which can yields the reference to the messages in the buffer.
+//   #[inline]
+//   pub const fn iter<I, A>(&self) -> CompoundMessagesDecoderIter<'a, I, A> {
+//     CompoundMessagesDecoderIter {
+//       src: self.src,
+//       offset: 0,
+//       _phantom: PhantomData,
+//     }
+//   }
+// }
 
-/// An iterator over the [`NodeStateRef`] in the collection.
-pub struct CompoundMessagesDecoderIter<'a, I, A> {
-  src: &'a [u8],
-  offset: usize,
-  _phantom: PhantomData<(I, A)>,
-}
+// /// An iterator over the [`NodeStateRef`] in the collection.
+// pub struct CompoundMessagesDecoderIter<'a, I, A> {
+//   src: &'a [u8],
+//   offset: usize,
+//   _phantom: PhantomData<(I, A)>,
+// }
 
-impl<'a, I, A> Iterator for CompoundMessagesDecoderIter<'a, I, A>
-where
-  I: Data,
-  A: Data,
-{
-  type Item = Result<MessageRef<'a, I::Ref<'a>, A::Ref<'a>>, DecodeError>;
+// impl<'a, I, A> Iterator for CompoundMessagesDecoderIter<'a, I, A>
+// where
+//   I: Data,
+//   A: Data,
+// {
+//   type Item = Result<MessageRef<'a, I::Ref<'a>, A::Ref<'a>>, DecodeError>;
 
-  fn next(&mut self) -> Option<Self::Item> {
-    let src = self.src;
-    while self.offset < src.len() {
-      let b = src[self.offset];
-      self.offset += 1;
-      match b {
-        b if b == Message::<I, A>::COMPOUND_BYTE => {
-          let (bytes_read, msg) = match <<Message<I, A> as Data>::Ref<'a> as DataRef<
-            Message<I, A>,
-          >>::decode_length_delimited(&src[self.offset..])
-          {
-            Ok((bytes_read, msg)) => (bytes_read, msg),
-            Err(e) => return Some(Err(e)),
-          };
-          self.offset += bytes_read;
-          return Some(Ok(msg));
-        }
-        _ => {
-          let (wire_type, _) = split(b);
-          let wt = match WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type) {
-            Ok(wt) => wt,
-            Err(e) => return Some(Err(e)),
-          };
+//   fn next(&mut self) -> Option<Self::Item> {
+//     let src = self.src;
+//     while self.offset < src.len() {
+//       let b = src[self.offset];
+//       self.offset += 1;
+//       match b {
+//         b if b == Message::<I, A>::COMPOUND_BYTE => {
+//           let (bytes_read, msg) = match <<Message<I, A> as Data>::Ref<'a> as DataRef<
+//             Message<I, A>,
+//           >>::decode_length_delimited(&src[self.offset..])
+//           {
+//             Ok((bytes_read, msg)) => (bytes_read, msg),
+//             Err(e) => return Some(Err(e)),
+//           };
+//           self.offset += bytes_read;
+//           return Some(Ok(msg));
+//         }
+//         _ => {
+//           let (wire_type, _) = split(b);
+//           let wt = match WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type) {
+//             Ok(wt) => wt,
+//             Err(e) => return Some(Err(e)),
+//           };
 
-          self.offset += match skip(wt, &src[self.offset..]) {
-            Ok(bytes_read) => bytes_read,
-            Err(e) => return Some(Err(e)),
-          };
-        }
-      }
-    }
-    None
-  }
-}
+//           self.offset += match skip(wt, &src[self.offset..]) {
+//             Ok(bytes_read) => bytes_read,
+//             Err(e) => return Some(Err(e)),
+//           };
+//         }
+//       }
+//     }
+//     None
+//   }
+// }
 
-impl<I, A> CompoundMessagesDecoderIter<'_, I, A> {
-  /// Rewinds the decoder to the beginning of the source buffer.
-  #[inline]
-  pub fn rewind(&mut self) {
-    self.offset = 0;
-  }
-}
+// impl<I, A> CompoundMessagesDecoderIter<'_, I, A> {
+//   /// Rewinds the decoder to the beginning of the source buffer.
+//   #[inline]
+//   pub fn rewind(&mut self) {
+//     self.offset = 0;
+//   }
+// }
 
-#[inline]
-fn encoded_messages_len<I, A>(msgs: &[Message<I, A>]) -> usize
-where
-  I: Data,
-  A: Data,
-{
-  msgs
-    .iter()
-    .map(|msg| 1 + msg.encoded_len_with_length_delimited())
-    .sum::<usize>()
-}
+// #[inline]
+// fn encoded_messages_len<I, A>(msgs: &[Message<I, A>]) -> usize
+// where
+//   I: Data,
+//   A: Data,
+// {
+//   msgs
+//     .iter()
+//     .map(|msg| 1 + msg.encoded_len_with_length_delimited())
+//     .sum::<usize>()
+// }
 
-fn encode_messages_slice<I, A>(msgs: &[Message<I, A>], buf: &mut [u8]) -> Result<usize, EncodeError>
-where
-  I: Data,
-  A: Data,
-{
-  let len = buf.len();
-  let mut offset = 0;
-  macro_rules! bail {
-    ($this:ident($offset:expr, $len:ident)) => {
-      if $offset >= $len {
-        return Err(EncodeError::insufficient_buffer($offset, $len).into());
-      }
-    };
-  }
+// fn encode_messages_slice<I, A>(_: &[Message<I, A>], _: &mut [u8]) -> Result<usize, EncodeError>
+// where
+//   I: Data,
+//   A: Data,
+// {
+//   // let len = buf.len();
+//   // let mut offset = 0;
+//   // macro_rules! bail {
+//   //   ($this:ident($offset:expr, $len:ident)) => {
+//   //     if $offset >= $len {
+//   //       return Err(EncodeError::insufficient_buffer($offset, $len).into());
+//   //     }
+//   //   };
+//   // }
 
-  for msg in msgs.iter() {
-    bail!(self(offset, len));
-    buf[offset] = Message::<I, A>::COMPOUND_BYTE;
-    offset += 1;
-    {
-      offset += msg
-        .encode_length_delimited(&mut buf[offset..])
-        .map_err(|e| e.update(encoded_messages_len(msgs), len))?
-    }
-  }
+//   // for msg in msgs.iter() {
+//   //   bail!(self(offset, len));
+//   //   buf[offset] = Message::<I, A>::COMPOUND_BYTE;
+//   //   offset += 1;
+//   //   {
+//   //     offset += msg
+//   //       .encode_length_delimited(&mut buf[offset..])
+//   //       .map_err(|e| e.update(encoded_messages_len(msgs), len))?
+//   //   }
+//   // }
 
-  #[cfg(debug_assertions)]
-  super::debug_assert_write_eq(offset, encoded_messages_len(msgs));
+//   // #[cfg(debug_assertions)]
+//   // super::debug_assert_write_eq(offset, encoded_messages_len(msgs));
 
-  Ok(offset)
-}
+//   // Ok(offset)
+//   todo!()
+// }

@@ -3,8 +3,8 @@ use core::{
   time::Duration,
 };
 use memberlist_types::{
-  Ack, Alive, Data, Dead, ErrorResponse, IndirectPing, Label, LabeledMessage, Message, Nack, Ping,
-  PushNodeState, PushPull, SecretKey, Suspect,
+  Ack, Alive, Data, Dead, ErrorResponse, IndirectPing, Label, Message, Nack, Ping, PushNodeState,
+  PushPull, SecretKey, Suspect,
 };
 use nodecraft::{Domain, HostAddr, Node, NodeId};
 
@@ -198,7 +198,6 @@ quickcheck!(
   PushPull[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
   Message[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
   Messages[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
-  LabeledMessage[(String, String)],
 );
 
 quickcheck!(

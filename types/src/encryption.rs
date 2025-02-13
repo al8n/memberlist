@@ -325,7 +325,7 @@ impl EncryptionAlgorithm {
     pk: SecretKey,
     nonce: [u8; NONCE_SIZE],
     auth_data: &[u8],
-    dst: &mut B,
+    buf: &mut B,
   ) -> Result<(), EncryptionError>
   where
     B: aead::Buffer,
@@ -333,8 +333,8 @@ impl EncryptionAlgorithm {
     match self {
       EncryptionAlgorithm::NoPadding => {}
       EncryptionAlgorithm::Pkcs7 => {
-        let buf_len = dst.len();
-        pkcs7encode(dst, buf_len, 0)?;
+        let buf_len = buf.len();
+        pkcs7encode(buf, buf_len, 0)?;
       }
       _ => return Err(EncryptionError::UnknownEncryptionAlgorithm(*self)),
     }
@@ -343,19 +343,19 @@ impl EncryptionAlgorithm {
       SecretKey::Aes128(pk) => {
         let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk));
         gcm
-          .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
+          .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, buf)
           .map_err(Into::into)
       }
       SecretKey::Aes192(pk) => {
         let gcm = Aes192Gcm::new(GenericArray::from_slice(&pk));
         gcm
-          .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
+          .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, buf)
           .map_err(Into::into)
       }
       SecretKey::Aes256(pk) => {
         let gcm = Aes256Gcm::new(GenericArray::from_slice(&pk));
         gcm
-          .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
+          .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, buf)
           .map_err(Into::into)
       }
     }
@@ -405,13 +405,13 @@ impl EncryptionAlgorithm {
   #[inline]
   pub const fn encrypt_overhead(&self) -> usize {
     match self {
-      EncryptionAlgorithm::Pkcs7 => 45, // ALGO: 1, IV: 12, Padding: 16, Tag: 16
-      EncryptionAlgorithm::NoPadding => 29, // ALGO: 1, IV: 12, Tag: 16
-      _ => 0,
+      EncryptionAlgorithm::Pkcs7 => 49, // ALGO: 1, LEN: 4, IV: 12, Padding: 16, Tag: 16
+      EncryptionAlgorithm::NoPadding => 33, // ALGO: 1, LEN: 4, IV: 12, Tag: 16
+      _ => unreachable!(),
     }
   }
 
-  /// Returns the encrypted length of the input data
+  /// Returns the encrypted length of the input size
   #[inline]
   pub const fn encrypted_len(&self, inp: usize) -> usize {
     match self {
@@ -420,10 +420,26 @@ impl EncryptionAlgorithm {
         let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
 
         // Sum the extra parts to get total size
-        NONCE_SIZE + inp + padding + TAG_SIZE
+        4 + NONCE_SIZE + inp + padding + TAG_SIZE
       }
-      EncryptionAlgorithm::NoPadding => NONCE_SIZE + inp + TAG_SIZE,
-      _ => inp,
+      EncryptionAlgorithm::NoPadding => 4 + NONCE_SIZE + inp + TAG_SIZE,
+      _ => unreachable!(),
+    }
+  }
+
+  /// Returns the encrypted suffix length of the input size
+  #[inline]
+  pub const fn encrypted_suffix_len(&self, inp: usize) -> usize {
+    match self {
+      EncryptionAlgorithm::Pkcs7 => {
+        // Determine the padding size
+        let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
+
+        // Sum the extra parts to get total size
+        padding + TAG_SIZE
+      }
+      EncryptionAlgorithm::NoPadding => TAG_SIZE,
+      _ => unreachable!(),
     }
   }
 }

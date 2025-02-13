@@ -1,10 +1,8 @@
-use core::marker::PhantomData;
-
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut};
 use nodecraft::CheapClone;
 use smol_str::SmolStr;
 
-use super::{merge, skip, split, Data, DataRef, DecodeError, EncodeError, WireType};
+use super::{Data, DataRef, DecodeError, EncodeError};
 
 /// Parse label error.
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +36,9 @@ impl Label {
 
   /// The tag for a label when encoding/decoding.
   pub const TAG: u8 = 244;
+
+  /// An empty label.
+  pub const EMPTY: &Label = &Label(SmolStr::new_inline(""));
 
   /// Create an empty label.
   #[inline]
@@ -358,207 +359,6 @@ impl Data for Label {
     }
     buf[..len].copy_from_slice(self.as_bytes());
     Ok(len)
-  }
-}
-
-/// A [`Message`](super::Message) with a [`Label`].
-#[viewit::viewit(
-  vis_all = "",
-  setters(prefix = "with", style = "move"),
-  getters(style = "move")
-)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct LabeledMessage<I, A> {
-  /// The label of the message.
-  #[viewit(
-    getter(
-      style = "ref",
-      const,
-      attrs(doc = "Returns the label of the message.", inline,)
-    ),
-    setter(attrs(doc = "Sets the label of the message.", inline,))
-  )]
-  label: Label,
-  /// The message.
-  #[viewit(
-    getter(skip),
-    setter(attrs(doc = "Sets the payload of the message.", inline,))
-  )]
-  #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::bytes))]
-  payload: Bytes,
-  #[viewit(getter(skip), setter(skip))]
-  _m: PhantomData<(I, A)>,
-}
-
-const LABEL_TAG: u8 = 1;
-const MESSAGE_TAG: u8 = 2;
-
-impl<I, A> LabeledMessage<I, A> {
-  /// Creates a new `CompressedMessage`.
-  #[inline]
-  pub const fn new(label: Label, payload: Bytes) -> Self {
-    Self {
-      label,
-      payload,
-      _m: PhantomData,
-    }
-  }
-
-  #[inline]
-  const fn payload_byte() -> u8 {
-    merge(WireType::LengthDelimited, MESSAGE_TAG)
-  }
-
-  #[inline]
-  const fn label_byte() -> u8 {
-    merge(WireType::LengthDelimited, LABEL_TAG)
-  }
-}
-
-/// A reference type for `LabeledMessage`.
-#[viewit::viewit(vis_all = "", setters(skip), getters(style = "move"))]
-#[derive(Debug, Clone, Copy)]
-pub struct LabeledMessageRef<'a, I, A> {
-  /// The algorithm used to compression the message.
-  #[viewit(getter(const, attrs(doc = "Returns the label of the message.", inline,)))]
-  label: &'a str,
-  /// The message.
-  #[viewit(getter(const, attrs(doc = "Returns the payload of the message.", inline,)))]
-  payload: &'a [u8],
-  #[viewit(getter(skip))]
-  _m: PhantomData<(I, A)>,
-}
-
-impl<'a, I, A> LabeledMessageRef<'a, I, A> {
-  /// Creates a new `LabeledMessageRef`.
-  #[inline]
-  pub(crate) const fn new(label: &'a str, payload: &'a [u8]) -> Self {
-    Self {
-      label,
-      payload,
-      _m: PhantomData,
-    }
-  }
-}
-
-impl<I, A> Data for LabeledMessage<I, A>
-where
-  I: Data,
-  A: Data,
-{
-  type Ref<'a> = LabeledMessageRef<'a, I::Ref<'a>, A::Ref<'a>>;
-
-  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
-  where
-    Self: Sized,
-  {
-    Ok(LabeledMessage::new(
-      Label(SmolStr::new(val.label)),
-      Bytes::copy_from_slice(val.payload),
-    ))
-  }
-
-  fn encoded_len(&self) -> usize {
-    1 + self.label.encoded_len_with_length_delimited()
-      + 1
-      + self.payload.encoded_len_with_length_delimited()
-  }
-
-  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    let buf_len = buf.len();
-    let mut offset = 0;
-    if buf_len == 0 {
-      return Err(EncodeError::insufficient_buffer(
-        self.encoded_len(),
-        buf_len,
-      ));
-    }
-
-    buf[offset] = Self::label_byte();
-    offset += 1;
-    if offset >= buf_len {
-      return Err(EncodeError::insufficient_buffer(self.encoded_len(), offset));
-    }
-    offset += self.label.encode_length_delimited(&mut buf[offset..])?;
-    if offset >= buf_len {
-      return Err(EncodeError::insufficient_buffer(self.encoded_len(), offset));
-    }
-
-    buf[offset] = Self::payload_byte();
-    offset += 1;
-    offset += self
-      .payload
-      .encode_length_delimited(&mut buf[offset..])
-      .map_err(|e| e.update(self.encoded_len(), buf_len))?;
-
-    Ok(offset)
-  }
-}
-
-impl<'a, I, A> DataRef<'a, LabeledMessage<I, A>> for LabeledMessageRef<'a, I::Ref<'a>, A::Ref<'a>>
-where
-  I: Data,
-  A: Data,
-{
-  fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError>
-  where
-    Self: Sized,
-  {
-    let mut offset = 0;
-    let buf_len = buf.len();
-
-    if buf_len == 0 {
-      return Err(DecodeError::buffer_underflow());
-    }
-
-    let mut message = None;
-    let mut label = None;
-
-    while offset < buf_len {
-      let b = buf[offset];
-      offset += 1;
-
-      match b {
-        b if b == LabeledMessage::<I, A>::label_byte() => {
-          if label.is_some() {
-            return Err(DecodeError::duplicate_field(
-              "LabeledMessage",
-              "label",
-              LABEL_TAG,
-            ));
-          }
-          let (bytes_read, val) =
-            <&str as DataRef<Label>>::decode_length_delimited(&buf[offset..])?;
-          offset += bytes_read;
-          label = Some(val);
-        }
-        b if b == LabeledMessage::<I, A>::payload_byte() => {
-          if message.is_some() {
-            return Err(DecodeError::duplicate_field(
-              "LabeledMessage",
-              "payload",
-              MESSAGE_TAG,
-            ));
-          }
-
-          let (bytes_read, payload) =
-            <&[u8] as DataRef<Bytes>>::decode_length_delimited(&buf[offset..])?;
-          offset += bytes_read;
-          message = Some(payload);
-        }
-        _ => {
-          let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
-          offset += skip(wire_type, &buf[offset..])?;
-        }
-      }
-    }
-
-    let message = message.ok_or(DecodeError::missing_field("LabeledMessage", "payload"))?;
-    let label = label.ok_or(DecodeError::missing_field("LabeledMessage", "label"))?;
-    Ok((offset, LabeledMessageRef::new(label, message)))
   }
 }
 

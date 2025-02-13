@@ -1,7 +1,7 @@
 //! Types used by the [`memberlist`](https://crates.io/crates/memberlist) crate.
 #![doc(html_logo_url = "https://raw.githubusercontent.com/al8n/memberlist/main/art/logo_72x72.png")]
 #![forbid(unsafe_code)]
-#![deny(warnings)]
+// #![deny(warnings)]
 #![allow(clippy::type_complexity, unexpected_cfgs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
