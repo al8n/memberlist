@@ -35,6 +35,8 @@ std = [
   "base64?/std",
 ]
 
+rayon = ["dep:rayon", "auto_enums/rayon"]
+
 # checksum related feature
 crc32 = ["crc32fast"]
 xxhash32 = ["xxhash-rust/xxh32"]
@@ -76,6 +78,8 @@ quickcheck = { workspace = true, optional = true }
 
 
 serde = { workspace = true, optional = true }
+
+rayon = { version = "1", optional = true }
 
 # encryption
 aead = { version = "0.5", features = ["bytes", "std"], optional = true }

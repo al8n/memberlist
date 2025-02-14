@@ -33,6 +33,7 @@ pub mod tests;
 
 mod ack_manager;
 pub(crate) use ack_manager::*;
+use smallvec_wrapper::OneOrMore;
 
 #[viewit::viewit]
 #[derive(Debug)]
@@ -921,28 +922,32 @@ where
       .apply_delta(awareness_delta.load(Ordering::Acquire)));
 
     if target.state == State::Alive {
-      match self
+      let stream = self
         .send_msg(target.address(), ping.cheap_clone().into())
-        .await
-      {
-        Ok(_) => {}
-        Err(e) => {
-          tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to send ping by unreliable connection");
-          if e.is_remote_failure() {
-            return self
-              .handle_remote_failure(
-                target,
-                ping.sequence_number(),
-                &ack_rx,
-                &nack_rx,
-                deadline,
-                &awareness_delta,
-              )
-              .await;
-          }
+        .await;
+      futures::pin_mut!(stream);
+      let errs = stream.collect::<OneOrMore<_>>().await;
+      if !errs.is_empty() {
+        let e = match errs.into_either() {
+          either::Either::Left([e]) => e,
+          either::Either::Right(e) => Error::Multiple(e.into_vec().into()),
+        };
 
-          return;
+        tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to send ping by unreliable connection");
+        if e.is_remote_failure() {
+          return self
+            .handle_remote_failure(
+              target,
+              ping.sequence_number(),
+              &ack_rx,
+              &nack_rx,
+              deadline,
+              &awareness_delta,
+            )
+            .await;
         }
+
+        return;
       }
     } else {
       let suspect = Suspect::new(
@@ -951,12 +956,11 @@ where
         self.local_id().cheap_clone(),
       );
       let msgs = [ping.cheap_clone().into(), suspect.into()];
-      match self
-        .transport_send_packets(target.address(), msgs.into())
-        .await
-      {
-        Ok(_) => {}
-        Err(e) => {
+      let stream = self.transport_send_packets(target.address(), &msgs);
+      futures::pin_mut!(stream);
+
+      while let Some(res) = stream.next().await {
+        if let Err(e) = res {
           tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to send compound ping and suspect message by unreliable connection");
           if e.is_remote_failure() {
             return self
@@ -1073,13 +1077,12 @@ where
     let mut futs = nodes.into_iter().map(|peer| {
       let ind = ind.cheap_clone();
       async move {
-        match self
+        let stream = self
           .send_msg(peer.address(), ind.into())
-          .await {
-          Ok(_) => {},
-          Err(e) => {
-            tracing::error!(local = %self.inner.id, remote = %peer, err=%e, "memberlist.state: failed to send indirect unreliable ping");
-          }
+          .await;
+        futures::pin_mut!(stream);
+        while let Some(e) = stream.next().await {
+          tracing::error!(local = %self.inner.id, remote = %peer, err=%e, "memberlist.state: failed to send indirect unreliable ping");
         }
       }
     }).collect::<futures::stream::FuturesUnordered<_>>();
@@ -1265,7 +1268,7 @@ where
         // Compute the bytes available
         let bytes_avail =
           self.inner.transport.max_packet_size() - self.inner.transport.packets_header_overhead();
-        let futs = nodes.into_iter().map(|server| async move {
+        let mut futs = nodes.into_iter().map(|server| async move {
           // Get any pending broadcasts
           let msgs = match self
             .get_broadcast_with_prepend(
@@ -1278,24 +1281,25 @@ where
             Ok(msgs) => msgs,
             Err(e) => {
               tracing::error!(err = %e, "memberlist.state: failed to get broadcast messages from {}", server);
-              return None;
+              return;
             }
           };
           if msgs.is_empty() {
-            return None;
+            return;
           }
 
-          Some((server.address().cheap_clone(), msgs))
-        }).collect::<FuturesUnordered<_>>();
+          let addr = server.address();
+          let stream = self.transport_send_packets(addr, &msgs);
+          futures::pin_mut!(stream);
 
-        futs
-          .filter_map(|batch| async { batch })
-          .for_each_concurrent(None, |(addr, msgs)| async move {
-            if let Err(e) = self.transport_send_packets(&addr, msgs).await {
+          while let Some(res) = stream.next().await {
+            if let Err(e) = res {
               tracing::error!(err = %e, "memberlist.state: failed to send gossip to {}", addr);
             }
-          })
-          .await;
+          }
+        }).collect::<FuturesUnordered<_>>();
+
+        while futs.next().await.is_some() {}
         false
       },
     }

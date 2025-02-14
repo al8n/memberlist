@@ -1,6 +1,8 @@
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
+use memberlist_types::EncoderError;
 use nodecraft::{resolver::AddressResolver, Node};
+use smallvec_wrapper::OneOrMore;
 use smol_str::SmolStr;
 
 use crate::{
@@ -9,14 +11,25 @@ use crate::{
   types::{DecodeError, EncodeError, ErrorResponse, SmallVec},
 };
 
-#[cfg(feature = "checksum")]
+#[cfg(any(
+  feature = "crc32",
+  feature = "xxhash64",
+  feature = "xxhash32",
+  feature = "xxhash3",
+  feature = "murmur3",
+))]
 use crate::types::ChecksumError;
 
-#[cfg(feature = "compression")]
+#[cfg(any(
+  feature = "zstd",
+  feature = "lz4",
+  feature = "snappy",
+  feature = "brotli",
+))]
 use crate::types::CompressionError;
 
 #[cfg(feature = "encryption")]
-pub use crate::security::EncryptionError;
+pub use crate::types::EncryptionError;
 
 pub use crate::transport::TransportError;
 
@@ -161,10 +174,12 @@ pub enum Error<T: Transport, D: Delegate> {
   /// Returned when a remote error is received.
   #[error("remote error: {0}")]
   Remote(SmolStr),
+  /// Multiple errors
+  #[error("errors:\n{}", format_multiple_errors(.0))]
+  Multiple(Arc<[Self]>),
   /// Returned when a custom error is created by users.
   #[error("{0}")]
   Other(Cow<'static, str>),
-
   /// Encryption error
   #[error(transparent)]
   #[cfg(feature = "encryption")]
@@ -172,19 +187,86 @@ pub enum Error<T: Transport, D: Delegate> {
   Encryption(#[from] EncryptionError),
   /// Compressor error
   #[error(transparent)]
-  #[cfg(feature = "compression")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
+  #[cfg(any(
+    feature = "zstd",
+    feature = "lz4",
+    feature = "snappy",
+    feature = "brotli",
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "zstd",
+      feature = "lz4",
+      feature = "snappy",
+      feature = "brotli",
+    )))
+  )]
   Compression(#[from] CompressionError),
   /// Checksum error
   #[error(transparent)]
-  #[cfg(feature = "checksum")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "checksum")))]
+  #[cfg(any(
+    feature = "crc32",
+    feature = "xxhash64",
+    feature = "xxhash32",
+    feature = "xxhash3",
+    feature = "murmur3",
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash64",
+      feature = "xxhash32",
+      feature = "xxhash3",
+      feature = "murmur3",
+    )))
+  )]
   Checksum(#[from] ChecksumError),
 }
 
 impl<T: Transport, D: Delegate> core::fmt::Debug for Error<T, D> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{self}")
+  }
+}
+
+impl<T: Transport, D: Delegate> From<EncoderError> for Error<T, D> {
+  fn from(value: EncoderError) -> Self {
+    match value {
+      #[cfg(any(
+        feature = "zstd",
+        feature = "lz4",
+        feature = "snappy",
+        feature = "brotli",
+      ))]
+      EncoderError::Compress(e) => Self::Compression(e),
+      #[cfg(any(
+        feature = "crc32",
+        feature = "xxhash64",
+        feature = "xxhash32",
+        feature = "xxhash3",
+        feature = "murmur3",
+      ))]
+      EncoderError::Checksum(e) => Self::Checksum(e),
+      #[cfg(feature = "encryption")]
+      EncoderError::Encrypt(e) => Self::Encryption(e),
+      EncoderError::Encode(e) => Self::Encode(e),
+    }
+  }
+}
+
+impl<T: Transport, D: Delegate> FromIterator<Error<T, D>> for Option<Error<T, D>> {
+  fn from_iter<I: IntoIterator<Item = Error<T, D>>>(iter: I) -> Self {
+    let errors = iter.into_iter().collect::<OneOrMore<_>>();
+    let num_errs = errors.len();
+    match num_errs {
+      0 => None,
+      _ => Some(match errors.into_either() {
+        either::Either::Left([e]) => e,
+        either::Either::Right(e) => Error::Multiple(e.into_vec().into()),
+      }),
+    }
   }
 }
 
@@ -226,10 +308,39 @@ impl<T: Transport, D: Delegate> Error<T, D> {
   }
 
   #[inline]
+  pub(crate) async fn try_from_stream<S>(stream: S) -> Option<Self>
+  where
+    S: futures::stream::Stream<Item = Self>,
+  {
+    use futures::stream::StreamExt;
+
+    let errs = stream.collect::<OneOrMore<_>>().await;
+
+    let num = errs.len();
+    match num {
+      0 => None,
+      _ => Some(match errs.into_either() {
+        either::Either::Left([e]) => e,
+        either::Either::Right(e) => Self::Multiple(e.into_vec().into()),
+      }),
+    }
+  }
+
+  #[inline]
   pub(crate) fn is_remote_failure(&self) -> bool {
     match self {
       Self::Transport(e) => e.is_remote_failure(),
+      Self::Multiple(errors) => errors.iter().any(Self::is_remote_failure),
       _ => false,
     }
   }
+}
+
+fn format_multiple_errors<T: Transport, D: Delegate>(errors: &[Error<T, D>]) -> String {
+  errors
+    .iter()
+    .enumerate()
+    .map(|(i, err)| format!("  {}. {}", i + 1, err))
+    .collect::<Vec<_>>()
+    .join("\n")
 }

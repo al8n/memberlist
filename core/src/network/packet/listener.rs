@@ -1,4 +1,5 @@
 use agnostic_lite::AsyncSpawner;
+use futures::stream::{Stream, StreamExt};
 use nodecraft::CheapClone;
 
 use crate::{
@@ -166,21 +167,22 @@ where
       }
     };
 
-    match msg {
-      MessageRef::Compound(decoder) => {
-        for msg in decoder.iter::<T::Id, T::ResolvedAddress>() {
-          match msg {
-            Ok(msg) => {
-              self.handle_message(&from, timestamp, msg).await;
-            }
-            Err(e) => {
-              tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode message");
-            }
-          }
-        }
-      }
-      msg => self.handle_message(&from, timestamp, msg).await,
-    }
+    // match msg {
+    //   MessageRef::Compound(decoder) => {
+    //     for msg in decoder.iter::<T::Id, T::ResolvedAddress>() {
+    //       match msg {
+    //         Ok(msg) => {
+    //           self.handle_message(&from, timestamp, msg).await;
+    //         }
+    //         Err(e) => {
+    //           tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode message");
+    //         }
+    //       }
+    //     }
+    //   }
+    //   msg => self.handle_message(&from, timestamp, msg).await,
+    // }
+    todo!()
   }
 
   async fn handle_ping(
@@ -216,7 +218,7 @@ where
       }
     };
 
-    if let Err(e) = self.send_msg(&source_addr, msg.into()).await {
+    if let Some(e) = Error::try_from_stream(self.send_msg(&source_addr, msg.into()).await).await {
       tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to send ack response");
     }
   }
@@ -266,7 +268,9 @@ where
 
           // Try to prevent the nack if we've caught it in time.
           let ack = Ack::new(ind_sequence_number);
-          if let Err(e) = this.send_msg(ind_source.address(), ack.into()).await {
+          if let Some(e) =
+            Error::try_from_stream(this.send_msg(ind_source.address(), ack.into()).await).await
+          {
             tracing::error!(addr = %afrom, err = %e, "memberlist.packet: failed to forward ack");
           }
         }
@@ -274,11 +278,10 @@ where
       },
     );
 
-    match self.send_msg(ind.target().address(), ping.into()).await {
-      Ok(_) => {}
-      Err(e) => {
-        tracing::error!(local = %self.local_id(), source = %ind.source(), target=%ind.target(), err = %e, "memberlist.packet: failed to send indirect ping");
-      }
+    if let Some(e) =
+      Error::try_from_stream(self.send_msg(ind.target().address(), ping.into()).await).await
+    {
+      tracing::error!(local = %self.local_id(), source = %ind.source(), target=%ind.target(), err = %e, "memberlist.packet: failed to send indirect ping");
     }
 
     // Setup a timer to fire off a nack if no ack is seen in time.
@@ -290,7 +293,7 @@ where
           // We've not received an ack, so send a nack.
           let nack = Nack::new(ind.sequence_number());
 
-          if let Err(e) = this.send_msg(ind.source().address(), nack.into()).await {
+          if let Some(e) = Error::try_from_stream(this.send_msg(ind.source().address(), nack.into()).await).await {
             tracing::error!(local = %ind.source(), remote = %from, err = %e, "memberlist.packet: failed to send nack");
           } else {
             tracing::trace!(local = %this.local_id(), source = %ind.source(), "memberlist.packet: send nack");
@@ -305,7 +308,7 @@ where
               // We've not received an ack, so send a nack.
               let nack = Nack::new(ind.sequence_number());
 
-              if let Err(e) = this.send_msg(ind.source().address(), nack.into()).await {
+              if let Some(e) = Error::try_from_stream(this.send_msg(ind.source().address(), nack.into()).await).await {
                 tracing::error!(local = %ind.source(), remote = %from, err = %e, "memberlist.packet: failed to send nack");
               } else {
                 tracing::trace!(local = %this.local_id(), source = %ind.source(), "memberlist.packet: send nack");
@@ -329,11 +332,12 @@ where
     self.inner.ack_manager.invoke_nack_handler(nack).await
   }
 
-  pub(crate) async fn send_msg(
-    &self,
-    addr: &T::ResolvedAddress,
+  #[auto_enums::auto_enum(futures03::Stream)]
+  pub(crate) async fn send_msg<'a>(
+    &'a self,
+    addr: &'a T::ResolvedAddress,
     msg: Message<T::Id, T::ResolvedAddress>,
-  ) -> Result<(), Error<T, D>> {
+  ) -> impl Stream<Item = Error<T, D>> + Send + 'a {
     // Check if we can piggy back any messages
     let bytes_avail = self.inner.transport.max_packet_size()
       - msg.encoded_len()
@@ -345,9 +349,59 @@ where
         self.inner.transport.packet_overhead(),
         bytes_avail,
       )
-      .await?;
+      .await;
 
-    // Send the message
-    self.transport_send_packets(addr, msgs).await
+    match msgs {
+      Err(e) => futures::stream::once(async { e }),
+      Ok(msgs) => {
+        // Send the message
+        self
+          .transport_send_packets(addr, &msgs)
+          .filter_map(|res| async move {
+            match res {
+              Ok(_) => None,
+              Err(e) => Some(e),
+            }
+          })
+      }
+    }
   }
+
+  // pub(crate) async fn send_msg(
+  //   &self,
+  //   addr: &T::ResolvedAddress,
+  //   msg: Message<T::Id, T::ResolvedAddress>,
+  // ) -> Result<(), OneOrMore<Error<T, D>>> {
+  //   // Check if we can piggy back any messages
+  //   let bytes_avail = self.inner.transport.max_packet_size()
+  //     - msg.encoded_len()
+  //     - self.inner.transport.packets_header_overhead();
+
+  //   let msgs = self
+  //     .get_broadcast_with_prepend(
+  //       msg.into(),
+  //       self.inner.transport.packet_overhead(),
+  //       bytes_avail,
+  //     )
+  //     .await
+  //     .map_err(|e| OneOrMore::from(e))?;
+
+  //   // Send the message
+  //   let stream = self.transport_send_packets(addr, &msgs);
+  //   futures::pin_mut!(stream);
+  //   let errs = stream.filter_map(|res| async move {
+  //     match res {
+  //       Ok(_) => None,
+  //       Err(e) => Some(e),
+  //     }
+  //   })
+  //   .collect::<OneOrMore<_>>()
+  //   .await;
+
+  //   if errs.is_empty() {
+  //     Ok(())
+  //   } else {
+  //     Err(errs)
+  //   }
+  // }
 }

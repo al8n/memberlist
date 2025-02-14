@@ -26,10 +26,6 @@ mod options;
 mod state;
 mod suspicion;
 
-#[cfg(feature = "encryption")]
-#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-mod security;
-
 /// Trait can be implemented to hook into the memberlist lifecycle.
 pub mod delegate;
 /// Error related to memberlist
@@ -59,9 +55,6 @@ pub use network::META_MAX_SIZE;
 pub use nodecraft::CheapClone;
 pub use options::Options;
 pub use tracing;
-
-#[cfg(feature = "encryption")]
-pub(crate) use security::*;
 
 /// All unit test fns are exported in the `tests` module.
 /// This module is used for users want to use other async runtime,

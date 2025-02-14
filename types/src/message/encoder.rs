@@ -1,4 +1,16 @@
+use core::marker::PhantomData;
+use std::borrow::Cow;
+
+#[cfg(feature = "rayon")]
+use rayon::iter::{
+  IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
+};
+use smallvec_wrapper::SmallVec;
+
 use super::{Data, EncodeError, Label, Message};
+
+#[cfg(feature = "rayon")]
+mod rayon_impl;
 
 const PAYLOAD_LEN_SIZE: usize = 4;
 const MAX_MESSAGES_PER_BATCH: usize = 255;
@@ -229,7 +241,7 @@ impl CompressHint {
   }
 }
 
-/// The hint for [`MessageEncoder`] to encode the messages.
+/// The hint for [`MessagesEncoder`] to encode the messages.
 #[viewit::viewit(vis_all = "", getters(style = "move"), setters(skip))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EncodeHint {
@@ -296,12 +308,47 @@ impl EncodeHint {
       compress_hint: None,
     }
   }
+
+  /// Returns `true` if hints the encoder should offload the encoding to `rayon`.
+  pub fn should_offload(&self, offload_threshold: usize) -> bool {
+    cfg_if::cfg_if! {
+      if #[cfg(any(
+        feature = "zstd",
+        feature = "lz4",
+        feature = "brotli",
+        feature = "snappy",
+        feature = "encryption",
+      ))] {
+        #[cfg(any(
+          feature = "zstd",
+          feature = "lz4",
+          feature = "brotli",
+          feature = "snappy",
+        ))]
+        if self.compress_hint.is_some() && self.input_size > offload_threshold {
+          return true;
+        }
+
+        #[cfg(feature = "encryption")]
+        if self.encrypted_hint.is_some() && self.input_size > offload_threshold {
+          return true;
+        }
+
+        false
+      } else {
+        false
+      }
+    }
+  }
 }
 
-/// The encoder of a message
-pub struct MessageEncoder<'a, I, A> {
+/// The encoder of messages
+pub struct MessagesEncoder<'a, I, A> {
   msgs: &'a [Message<I, A>],
   label: &'a Label,
+  max_payload_size: usize,
+  encoded_msgs_len: usize,
+
   #[cfg(any(
     feature = "crc32",
     feature = "xxhash32",
@@ -323,20 +370,20 @@ pub struct MessageEncoder<'a, I, A> {
     feature = "brotli",
     feature = "snappy",
   ))]
-  min_compression_size: usize,
+  compression_threshold: usize,
   #[cfg(feature = "encryption")]
   encrypt: Option<(super::EncryptionAlgorithm, super::SecretKey)>,
-  #[allow(dead_code)]
-  max_payload_size: usize,
 }
 
-impl<'a, I, A> MessageEncoder<'a, I, A> {
-  /// Creates a new message encoder.
+impl<'a, I, A> MessagesEncoder<'a, I, A> {
+  /// Creates a new messages encoder.
   #[inline]
   pub const fn new(max_payload_size: usize) -> Self {
     Self {
       msgs: &[],
       label: Label::EMPTY,
+      max_payload_size,
+      encoded_msgs_len: 0,
       #[cfg(any(
         feature = "crc32",
         feature = "xxhash32",
@@ -358,22 +405,29 @@ impl<'a, I, A> MessageEncoder<'a, I, A> {
         feature = "brotli",
         feature = "snappy",
       ))]
-      min_compression_size: 512,
+      compression_threshold: 512,
       #[cfg(feature = "encryption")]
       encrypt: None,
-      max_payload_size,
     }
-  }
-
-  /// Feeds the encoder with messages.
-  pub const fn with_messages(&mut self, msgs: &'a [Message<I, A>]) -> &mut Self {
-    self.msgs = msgs;
-    self
   }
 
   /// Feeds the encoder with a label.
   pub const fn with_label(&mut self, label: &'a Label) -> &mut Self {
     self.label = label;
+    self
+  }
+
+  /// Feeds the encoder with messages.
+  pub fn with_messages(&mut self, msgs: &'a [Message<I, A>]) -> &mut Self
+  where
+    I: Data,
+    A: Data,
+  {
+    self.msgs = msgs;
+    self.encoded_msgs_len = msgs
+      .iter()
+      .map(|msg| msg.encoded_len_with_length_delimited())
+      .sum();
     self
   }
 
@@ -416,11 +470,11 @@ impl<'a, I, A> MessageEncoder<'a, I, A> {
     feature = "brotli",
     feature = "snappy",
   ))]
-  pub const fn with_min_compression_size(&mut self, min_compression_size: usize) -> &mut Self {
-    self.min_compression_size = if min_compression_size < 32 {
+  pub const fn with_compression_threshold(&mut self, compression_threshold: usize) -> &mut Self {
+    self.compression_threshold = if compression_threshold < 32 {
       32
     } else {
-      min_compression_size
+      compression_threshold
     };
     self
   }
@@ -436,13 +490,18 @@ impl<'a, I, A> MessageEncoder<'a, I, A> {
   }
 }
 
-impl<I, A> MessageEncoder<'_, I, A>
+impl<I, A> MessagesEncoder<'_, I, A>
 where
   I: Data,
   A: Data,
 {
-  /// Returns the hint of how to encoder handles the messages.
-  pub fn hint(&self, input_size: usize) -> Result<EncodeHint, EncoderError> {
+  /// Returns the hint of how the encoder should process the messages.
+  pub fn hint(&self) -> Result<EncodeHint, EncoderError> {
+    self.hint_with_size(self.encoded_msgs_len)
+  }
+
+  /// Returns the hint of how the encoder should process the input size data.
+  pub fn hint_with_size(&self, input_size: usize) -> Result<EncodeHint, EncoderError> {
     if input_size == 0 {
       return Ok(EncodeHint::default());
     }
@@ -492,7 +551,7 @@ where
       feature = "snappy",
     ))]
     if let Some(compress) = &self.compress {
-      if hint.max_output_size >= self.min_compression_size {
+      if hint.max_output_size >= self.compression_threshold {
         let max_compressed_output_size = compress.max_compress_len(hint.input_size)?;
         hint.max_output_size += CompressHint::HEADER_SIZE + max_compressed_output_size;
         hint.compress_hint = Some(
@@ -504,6 +563,88 @@ where
     }
 
     Ok(hint)
+  }
+
+  /// Encodes the messages.
+  #[auto_enums::auto_enum(rayon::ParallelIterator, Debug)]
+  pub fn encode_parallel(
+    &self,
+  ) -> impl ParallelIterator<Item = Result<Vec<u8>, EncoderError>> + core::fmt::Debug + '_ {
+    match self.msgs.len() {
+      0 => rayon::iter::empty(),
+      1 => {
+        let msg = &self.msgs[0];
+        let encoded_len = msg.encoded_len();
+        if let Err(err) = self.valid() {
+          return rayon::iter::once(Err(err));
+        }
+
+        match self.hint_with_size(encoded_len) {
+          Ok(hint) => rayon::iter::once(self.encode_single(msg, hint)),
+          Err(err) => rayon::iter::once(Err(err)),
+        }
+      }
+      _ => {
+        if let Err(err) = self.valid() {
+          return rayon::iter::once(Err(err));
+        }
+
+        self.encode_batch_parallel()
+      }
+    }
+  }
+
+  #[auto_enums::auto_enum(rayon::ParallelIterator, Debug)]
+  fn into_par_iter(
+    batches: SmallVec<Batch<'_, I, A>>,
+  ) -> impl ParallelIterator<Item = Batch<'_, I, A>> + core::fmt::Debug + '_ {
+    match batches.into_either() {
+      either::Either::Left(batch) => batch.into_par_iter(),
+      either::Either::Right(batches) => batches.into_vec().into_par_iter(),
+    }
+  }
+
+  fn encode_batch_parallel(
+    &self,
+  ) -> impl ParallelIterator<Item = Result<Vec<u8>, EncoderError>> + core::fmt::Debug + '_ {
+    Self::into_par_iter(self.batch().collect::<SmallVec<_>>()).map(|batch| match batch {
+      Batch::One { msg, hint } => self.encode_single(msg, hint),
+      Batch::More {
+        msgs,
+        hint,
+        num_msgs,
+      } => {
+        let mut buf = EncodeBuffer::with_capacity(hint.input_size);
+        buf.resize(hint.input_size, 0);
+        let res =
+          match msgs
+            .iter()
+            .take(num_msgs)
+            .try_fold((0, &mut buf), |(mut offset, buf), msg| {
+              match msg.encodable_encode(&mut buf[offset..]) {
+                Ok(written) => {
+                  offset += written;
+                  Ok((offset, buf))
+                }
+                Err(err) => Err(err),
+              }
+            }) {
+            Ok((final_size, buf)) => {
+              #[cfg(debug_assertions)]
+              assert_eq!(
+                final_size, hint.input_size,
+                "the actual encoded length {} does not match the encoded length {} in hint",
+                final_size, hint.input_size
+              );
+
+              self.encode_helper(&buf, hint)
+            }
+            Err(err) => Err(err.into()),
+          };
+
+        res
+      }
+    })
   }
 
   /// Encodes the messages.
@@ -520,7 +661,7 @@ where
           return core::iter::once(Err(err));
         }
 
-        match self.hint(encoded_len) {
+        match self.hint_with_size(encoded_len) {
           Ok(hint) => core::iter::once(self.encode_single(msg, hint)),
           Err(err) => core::iter::once(Err(err)),
         }
@@ -819,7 +960,7 @@ where
     Ok(buf)
   }
 
-  fn batch(&self) -> impl Iterator<Item = Batch<'_, I, A>> + core::fmt::Debug + '_ {
+  fn batch(&self) -> impl Iterator<Item = Batch<'_, I, A>> + Send + core::fmt::Debug + '_ {
     let hints = self.batch_hints();
 
     #[cfg(feature = "tracing")]
@@ -858,7 +999,7 @@ where
         let msg_encoded_len = self.msgs[0].encoded_len_with_length_delimited();
         core::iter::once(BatchHint::One {
           idx: 0,
-          hint: self.hint(msg_encoded_len).unwrap(),
+          hint: self.hint_with_size(msg_encoded_len).unwrap(),
         })
       }
       total_len => {
@@ -875,7 +1016,7 @@ where
               // Current message would exceed limits, finish current batch
               let hint = BatchHint::More {
                 range: state.batch_start_idx..idx,
-                hint: self.hint(state.current_encoded_size).unwrap(),
+                hint: self.hint_with_size(state.current_encoded_size).unwrap(),
               };
               state.start_new_batch(idx, msg_encoded_len);
               Some(hint)
@@ -886,12 +1027,12 @@ where
                 Some(if is_single_message {
                   BatchHint::One {
                     idx,
-                    hint: self.hint(msg_encoded_len).unwrap(),
+                    hint: self.hint_with_size(msg_encoded_len).unwrap(),
                   }
                 } else {
                   BatchHint::More {
                     range: state.batch_start_idx..idx + 1,
-                    hint: self.hint(state.current_encoded_size).unwrap(),
+                    hint: self.hint_with_size(state.current_encoded_size).unwrap(),
                   }
                 })
               } else {
@@ -903,7 +1044,7 @@ where
             let final_hint = if state.current_num_packets == 1 && is_last_message {
               Some(BatchHint::One {
                 idx,
-                hint: self.hint(msg_encoded_len).unwrap(),
+                hint: self.hint_with_size(msg_encoded_len).unwrap(),
               })
             } else {
               None
@@ -1107,7 +1248,7 @@ mod tests {
 
   #[test]
   fn test_batch() {
-    let mut encoder = MessageEncoder::new(1400);
+    let mut encoder = MessagesEncoder::new(1400);
     let single = Message::<SmolStr, SocketAddr>::UserData("ping".into());
     let encoded_len = single.encoded_len_with_length_delimited();
     let msgs = [single];
@@ -1162,7 +1303,7 @@ mod tests {
       })
       .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
 
-    let mut encoder = MessageEncoder::new(u32::MAX as usize);
+    let mut encoder = MessagesEncoder::new(u32::MAX as usize);
     encoder.with_messages(&bcasts);
 
     let batches = encoder.batch().collect::<Vec<_>>();

@@ -7,6 +7,7 @@ use std::{
 use agnostic_lite::{time::Instant, RuntimeLite};
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt};
+use smallvec_wrapper::OneOrMore;
 
 use super::{
   base::Memberlist,
@@ -503,9 +504,14 @@ where
       return Err(Error::NotRunning);
     }
 
-    self
-      .transport_send_packets(to, Message::UserData(msg).into())
-      .await
+    let msgs = [Message::UserData(msg)];
+    let stream = self.transport_send_packets(to, &msgs);
+    futures::pin_mut!(stream);
+    match stream.next().await {
+      None => Ok(()),
+      Some(Ok(_)) => Ok(()),
+      Some(Err(e)) => Err(e),
+    }
   }
 
   /// Uses the reliable stream-oriented interface of the transport to
@@ -548,10 +554,20 @@ where
 
     // Send a ping to the node.
     // Wait to send or timeout.
-    match <T::Runtime as RuntimeLite>::timeout(
-      self.inner.opts.probe_timeout,
-      self.send_msg(node.address(), ping.into()),
-    )
+    match <T::Runtime as RuntimeLite>::timeout(self.inner.opts.probe_timeout, async {
+      let stream = self.send_msg(node.address(), ping.into()).await;
+      futures::pin_mut!(stream);
+      let errs = stream.collect::<OneOrMore<_>>().await;
+      let num_errs = errs.len();
+
+      match num_errs {
+        0 => Ok(()),
+        _ => match errs.into_either() {
+          either::Either::Left([e]) => Err(e),
+          either::Either::Right(e) => Err(Error::Multiple(e.into_vec().into())),
+        },
+      }
+    })
     .await
     {
       Ok(Ok(())) => {}

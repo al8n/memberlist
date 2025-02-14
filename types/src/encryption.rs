@@ -230,7 +230,7 @@ smallvec_wrapper::smallvec_wrapper!(
 pub enum EncryptionError {
   /// Unknown encryption algorithm
   #[error("unknown encryption algorithm: {0}")]
-  UnknownEncryptionAlgorithm(EncryptionAlgorithm),
+  UnknownAlgorithm(EncryptionAlgorithm),
   /// Encryt/Decrypt errors
   #[error("failed to encrypt/decrypt")]
   Encryptor,
@@ -343,7 +343,7 @@ impl EncryptionAlgorithm {
         let buf_len = buf.len();
         pkcs7encode(buf, buf_len, 0)?;
       }
-      _ => return Err(EncryptionError::UnknownEncryptionAlgorithm(*self)),
+      _ => return Err(EncryptionError::UnknownAlgorithm(*self)),
     }
 
     match pk {
@@ -377,7 +377,7 @@ impl EncryptionAlgorithm {
     dst: &mut impl aead::Buffer,
   ) -> Result<(), EncryptionError> {
     if self.is_unknown() {
-      return Err(EncryptionError::UnknownEncryptionAlgorithm(*self));
+      return Err(EncryptionError::UnknownAlgorithm(*self));
     }
 
     // Get the AES block cipher

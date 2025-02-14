@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use core::{future::Future, sync::atomic::Ordering};
 
 use super::{
   base::Memberlist,
@@ -10,7 +10,10 @@ use super::{
 
 use agnostic_lite::RuntimeLite;
 use bytes::{Buf, Bytes};
-use futures::future::FutureExt;
+use futures::{
+  future::FutureExt,
+  stream::{FuturesUnordered, StreamExt},
+};
 use nodecraft::resolver::AddressResolver;
 
 mod packet;
@@ -95,16 +98,16 @@ where
     }
   }
 
-  pub(crate) async fn transport_send_packets(
-    &self,
-    addr: &T::ResolvedAddress,
-    packets: TinyVec<Message<T::Id, T::ResolvedAddress>>,
-  ) -> Result<(), Error<T, D>> {
+  /// Returns an messages processor to encode/compress/encrypt messages
+  pub(crate) fn encoder<'a>(
+    &'a self,
+    packets: &'a [Message<T::Id, T::ResolvedAddress>],
+  ) -> MessagesEncoder<'a, T::Id, T::ResolvedAddress> {
     let mut encoder =
-      MessageEncoder::<T::Id, T::ResolvedAddress>::new(self.inner.transport.max_packet_size());
+      MessagesEncoder::<T::Id, T::ResolvedAddress>::new(self.inner.transport.max_packet_size());
     encoder
       .with_messages(&packets)
-      .with_label(self.inner.opts.label().as_str());
+      .with_label(self.inner.opts.label());
 
     #[cfg(any(
       feature = "crc32",
@@ -119,7 +122,12 @@ where
 
     #[cfg(feature = "encryption")]
     if !self.inner.transport.packet_secure() {
-      encoder.with_encryption(self.inner.opts.encryption_algo());
+      encoder.with_encryption(self.inner.opts.encryption_algo().map(|algo| {
+        (
+          algo,
+          SecretKey::Aes128([0; 16]), // TODO: get the keyring from the memberlist
+        )
+      }));
     }
 
     #[cfg(any(
@@ -133,25 +141,86 @@ where
       feature = "zlib",
     ))]
     encoder.with_compression(self.inner.opts.compress_algo());
+    encoder.with_messages(&packets);
+    encoder
+  }
 
-    let payload = encoder.encode()?;
-
-    self
-      .inner
-      .transport
-      .send_to(addr, payload.into())
-      .await
-      .map(|(_sent, _)| {
-        #[cfg(feature = "metrics")]
-        {
-          metrics::counter!(
-            "memberlist.packet.sent",
-            self.inner.opts.metric_labels.iter()
-          )
-          .increment(_sent as u64);
+  #[auto_enums::auto_enum(Future)]
+  fn err_or_send_to<'a>(
+    &'a self,
+    addr: &'a T::ResolvedAddress,
+    input: either::Either<Error<T, D>, Result<Vec<u8>, EncoderError>>,
+  ) -> impl Future<Output = Result<(), Error<T, D>>> + Send + 'a {
+    match input {
+      either::Either::Left(e) => async { Err(e) },
+      either::Either::Right(payload) =>
+      {
+        #[nested]
+        match payload {
+          Err(e) => async { Err(e.into()) },
+          Ok(payload) => {
+            async {
+              self
+                .inner
+                .transport
+                .send_to(addr, payload.into())
+                .await
+                .map(|(_sent, _)| {
+                  #[cfg(feature = "metrics")]
+                  {
+                    metrics::counter!(
+                      "memberlist.packet.sent",
+                      self.inner.opts.metric_labels.iter()
+                    )
+                    .increment(_sent as u64);
+                  }
+                })
+                .map_err(Error::transport)
+            }
+          }
         }
-      })
-      .map_err(Error::transport)
+      }
+    }
+  }
+
+  #[auto_enums::auto_enum(futures03::Stream)]
+  pub(crate) fn transport_send_packets<'a>(
+    &'a self,
+    addr: &'a T::ResolvedAddress,
+    msgs: &[Message<T::Id, T::ResolvedAddress>],
+  ) -> impl futures::Stream<Item = Result<(), Error<T, D>>> + Send + 'a {
+    let encoder = self.encoder(msgs);
+    match encoder.hint() {
+      Err(e) => futures::stream::once(async { Err(e.into()) }),
+      Ok(hint) => match hint.should_offload(self.inner.opts.offload_size) {
+        false => FuturesUnordered::from_iter(encoder.encode().map(|res| match res {
+          Ok(payload) => futures::future::Either::Left(
+            self.err_or_send_to(addr, either::Either::Right(Ok(payload))),
+          ),
+          Err(e) => futures::future::Either::Right(async { Err(e.into()) }),
+        })),
+        true => {
+          use rayon::iter::ParallelIterator;
+
+          let payloads = encoder
+            .encode_parallel()
+            .filter_map(|res| match res {
+              Ok(payload) => Some(payload),
+              Err(e) => {
+                tracing::error!(err = %e, "memberlist.pakcet: failed to process packet");
+                None
+              }
+            })
+            .collect::<Vec<_>>();
+
+          FuturesUnordered::from_iter(payloads.into_iter().map(|payload| {
+            futures::future::Either::Left(
+              self.err_or_send_to(addr, either::Either::Right(Ok(payload))),
+            )
+          }))
+        }
+      },
+    }
   }
 
   pub(crate) async fn send_message(
@@ -160,11 +229,11 @@ where
     msg: Message<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
   ) -> Result<(), Error<T, D>> {
     let mut encoder =
-      MessageEncoder::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::new(usize::MAX);
+      MessagesEncoder::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::new(usize::MAX);
     let msgs = [msg];
     encoder
       .with_messages(&msgs)
-      .with_label(self.inner.opts.label().as_str());
+      .with_label(self.inner.opts.label());
 
     #[cfg(any(
       feature = "zstd",
@@ -180,28 +249,35 @@ where
 
     #[cfg(feature = "encryption")]
     if !self.inner.transport.stream_secure() {
-      encoder.with_encryption(self.inner.opts.encryption_algo());
+      encoder.with_encryption(
+        self
+          .inner
+          .opts
+          .encryption_algo()
+          .map(|algo| (algo, SecretKey::Aes128([0; 16]))),
+      );
     }
 
-    let payload = encoder.encode()?;
+    // let payload = encoder.encode()?;
 
-    self
-      .inner
-      .transport
-      .send_message(conn, payload.into())
-      .await
-      .map(|_sent| {
-        #[cfg(feature = "metrics")]
-        {
-          metrics::counter!(
-            "memberlist.stream.sent",
-            self.inner.opts.metric_labels.iter()
-          )
-          .increment(_sent as u64);
-        }
-      })
-      .map_err(Error::transport)?;
-    Ok(())
+    // self
+    //   .inner
+    //   .transport
+    //   .send_message(conn, payload.into())
+    //   .await
+    //   .map(|_sent| {
+    //     #[cfg(feature = "metrics")]
+    //     {
+    //       metrics::counter!(
+    //         "memberlist.stream.sent",
+    //         self.inner.opts.metric_labels.iter()
+    //       )
+    //       .increment(_sent as u64);
+    //     }
+    //   })
+    //   .map_err(Error::transport)?;
+    // Ok(())
+    todo!()
   }
 
   pub(crate) async fn read_message(
