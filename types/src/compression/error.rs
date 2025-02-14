@@ -69,7 +69,7 @@ pub enum CompressionError {
   },
   /// Unknown compressor
   #[error("unknown compress algorithm {0}")]
-  UnknownCompressAlgorithm(CompressAlgorithm),
+  UnknownAlgorithm(CompressAlgorithm),
 }
 
 impl CompressionError {

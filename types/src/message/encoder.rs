@@ -1,7 +1,3 @@
-use smallvec_wrapper::SmallVec;
-
-use crate::data;
-
 use super::{Data, EncodeError, Label, Message};
 
 const PAYLOAD_LEN_SIZE: usize = 4;
@@ -520,16 +516,171 @@ where
       1 => {
         let msg = &self.msgs[0];
         let encoded_len = msg.encoded_len();
+        if let Err(err) = self.valid() {
+          return core::iter::once(Err(err));
+        }
+
         match self.hint(encoded_len) {
           Ok(hint) => core::iter::once(self.encode_single(msg, hint)),
           Err(err) => core::iter::once(Err(err)),
         }
       }
-      _ => self.encode_batch(),
+      _ => {
+        if let Err(err) = self.valid() {
+          return core::iter::once(Err(err));
+        }
+
+        self.encode_batch()
+      }
     }
   }
 
+  fn valid(&self) -> Result<(), EncoderError> {
+    #[cfg(any(
+      feature = "zstd",
+      feature = "lz4",
+      feature = "brotli",
+      feature = "snappy",
+    ))]
+    if let Some(ref algo) = self.compress {
+      use super::{CompressAlgorithm, CompressionError};
+
+      match algo {
+        CompressAlgorithm::Zstd(_) => {
+          #[cfg(not(feature = "zstd"))]
+          return Err(EncoderError::Compress(
+            CompressionError::AlgorithmNotEnabled("zstd"),
+          ));
+        }
+        CompressAlgorithm::Lz4 { .. } => {
+          #[cfg(not(feature = "lz4"))]
+          return Err(EncoderError::Compress(
+            CompressionError::AlgorithmNotEnabled("lz4"),
+          ));
+        }
+        CompressAlgorithm::Brotli(_) => {
+          #[cfg(not(feature = "brotli"))]
+          return Err(EncoderError::Compress(
+            CompressionError::AlgorithmNotEnabled("brotli"),
+          ));
+        }
+        CompressAlgorithm::Snappy => {
+          #[cfg(not(feature = "snappy"))]
+          return Err(EncoderError::Compress(
+            CompressionError::AlgorithmNotEnabled("snappy"),
+          ));
+        }
+        CompressAlgorithm::Unknown(_) => {
+          return Err(EncoderError::Compress(CompressionError::UnknownAlgorithm(
+            *algo,
+          )));
+        }
+      }
+    }
+
+    #[cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3",
+    ))]
+    if let Some(ref algo) = self.checksum {
+      use super::{ChecksumAlgorithm, ChecksumError};
+
+      match algo {
+        ChecksumAlgorithm::Crc32 => {
+          #[cfg(not(feature = "crc32"))]
+          return Err(EncoderError::Checksum(ChecksumError::AlgorithmNotEnabled(
+            "crc32",
+          )));
+        }
+        ChecksumAlgorithm::XxHash32 => {
+          #[cfg(not(feature = "xxhash32"))]
+          return Err(EncoderError::Checksum(ChecksumError::AlgorithmNotEnabled(
+            "xxhash32",
+          )));
+        }
+        ChecksumAlgorithm::XxHash64 => {
+          #[cfg(not(feature = "xxhash64"))]
+          return Err(EncoderError::Checksum(ChecksumError::AlgorithmNotEnabled(
+            "xxhash64",
+          )));
+        }
+        ChecksumAlgorithm::XxHash3 => {
+          #[cfg(not(feature = "xxhash3"))]
+          return Err(EncoderError::Checksum(ChecksumError::AlgorithmNotEnabled(
+            "xxhash3",
+          )));
+        }
+        ChecksumAlgorithm::Murmur3 => {
+          #[cfg(not(feature = "murmur3"))]
+          return Err(EncoderError::Checksum(ChecksumError::AlgorithmNotEnabled(
+            "murmur3",
+          )));
+        }
+        ChecksumAlgorithm::Unknown(_) => {
+          return Err(EncoderError::Checksum(ChecksumError::UnknownAlgorithm(
+            *algo,
+          )));
+        }
+      }
+    }
+
+    Ok(())
+  }
+
   fn encode_single(&self, msg: &Message<I, A>, hint: EncodeHint) -> Result<Vec<u8>, EncoderError> {
+    self.encode_helper(msg, hint)
+  }
+
+  fn encode_batch(
+    &self,
+  ) -> impl Iterator<Item = Result<Vec<u8>, EncoderError>> + core::fmt::Debug + '_ {
+    self.batch().map(|batch| match batch {
+      Batch::One { msg, hint } => self.encode_single(msg, hint),
+      Batch::More {
+        msgs,
+        hint,
+        num_msgs,
+      } => {
+        let mut buf = EncodeBuffer::with_capacity(hint.input_size);
+        buf.resize(hint.input_size, 0);
+        let res =
+          match msgs
+            .iter()
+            .take(num_msgs)
+            .try_fold((0, &mut buf), |(mut offset, buf), msg| {
+              match msg.encodable_encode(&mut buf[offset..]) {
+                Ok(written) => {
+                  offset += written;
+                  Ok((offset, buf))
+                }
+                Err(err) => Err(err),
+              }
+            }) {
+            Ok((final_size, buf)) => {
+              #[cfg(debug_assertions)]
+              assert_eq!(
+                final_size, hint.input_size,
+                "the actual encoded length {} does not match the encoded length {} in hint",
+                final_size, hint.input_size
+              );
+
+              self.encode_helper(&buf, hint)
+            }
+            Err(err) => Err(err.into()),
+          };
+
+        res
+      }
+    })
+  }
+
+  fn encode_helper<E>(&self, msg: &E, hint: EncodeHint) -> Result<Vec<u8>, EncoderError>
+  where
+    E: Encodable,
+  {
     let (encoded_len, hint) = (hint.input_size, hint);
 
     let mut buf = vec![0u8; hint.max_output_size];
@@ -556,7 +707,7 @@ where
           let mut encoded_buf = EncodeBuffer::new();
           encoded_buf.resize(encoded_len, 0);
 
-          let written = msg.encode(&mut encoded_buf)?;
+          let written = msg.encodable_encode(&mut encoded_buf)?;
           #[cfg(debug_assertions)]
           {
             super::debug_assert_write_eq(written, encoded_len);
@@ -585,12 +736,12 @@ where
 
           bytes_written = ChecksumHint::HEADER_SIZE + compressed_len;
         } else {
-          bytes_written = msg.encode(&mut buf[offset..])?;
+          bytes_written = msg.encodable_encode(&mut buf[offset..])?;
           #[cfg(debug_assertions)]
           super::debug_assert_write_eq(bytes_written, encoded_len);
         }
       } else {
-        bytes_written = msg.encode(&mut buf[offset..])?;
+        bytes_written = msg.encodable_encode(&mut buf[offset..])?;
         #[cfg(debug_assertions)]
         super::debug_assert_write_eq(bytes_written, encoded_len);
       }
@@ -668,29 +819,7 @@ where
     Ok(buf)
   }
 
-  fn encode_batch(
-    &self,
-  ) -> impl Iterator<Item = Result<Vec<u8>, EncoderError>> + core::fmt::Debug + '_ {
-    self.batch().map(|batch| {
-      match batch {
-        Batch::One { msg, hint } => self.encode_single(msg, hint),
-        Batch::More {
-          msgs,
-          hint,
-          num_msgs,
-        } => {
-          // TODO: reuse encode_single code
-          todo!()
-        }
-      }
-    })
-  }
-
-  fn batch(&self) -> impl Iterator<Item = Batch<'_, I, A>> + core::fmt::Debug + '_
-  where
-    I: Data,
-    A: Data,
-  {
+  fn batch(&self) -> impl Iterator<Item = Batch<'_, I, A>> + core::fmt::Debug + '_ {
     let hints = self.batch_hints();
 
     #[cfg(feature = "tracing")]
@@ -722,11 +851,7 @@ where
 
   /// Calculate batch hints for a slice of messages.
   #[auto_enums::auto_enum(Iterator, Debug, Clone)]
-  fn batch_hints(&self) -> impl Iterator<Item = BatchHint> + core::fmt::Debug + Clone + '_
-  where
-    I: Data,
-    A: Data,
-  {
+  fn batch_hints(&self) -> impl Iterator<Item = BatchHint> + core::fmt::Debug + Clone + '_ {
     match self.msgs.len() {
       0 => core::iter::empty(),
       1 => {
@@ -878,43 +1003,6 @@ enum Batch<'a, I, A> {
   },
 }
 
-#[derive(Debug)]
-enum Either<'a, I, A> {
-  A(core::iter::Once<&'a Message<I, A>>),
-  B(<&'a [Message<I, A>] as IntoIterator>::IntoIter),
-}
-
-impl<'a, I, A> Iterator for Batch<'a, I, A> {
-  type Item = Either<'a, I, A>;
-
-  fn next(&mut self) -> Option<Self::Item> {
-    match self {
-      Self::One { msg, .. } => Some(Either::A(core::iter::once(msg))),
-      Self::More { msgs, .. } => Some(Either::B(msgs.iter())),
-    }
-  }
-}
-
-impl<I, A> Batch<'_, I, A> {
-  /// Returns the number of messages in this batch.
-  #[inline]
-  pub fn len(&self) -> usize {
-    match self {
-      Self::One { .. } => 1,
-      Self::More { num_msgs, .. } => *num_msgs,
-    }
-  }
-
-  /// Returns `true` if this batch is empty.
-  #[inline]
-  pub fn is_empty(&self) -> bool {
-    match self {
-      Self::One { .. } => false,
-      Self::More { num_msgs, .. } => *num_msgs == 0,
-    }
-  }
-}
-
 #[cfg(feature = "encryption")]
 struct EncryptionBuffer<'a> {
   buf: &'a mut [u8],
@@ -964,76 +1052,132 @@ const _: () = {
   }
 };
 
-#[test]
-fn test_batch() {
-  use smol_str::SmolStr;
-  use std::net::SocketAddr;
-
-  let mut encoder = MessageEncoder::new(1400);
-  let single = Message::<SmolStr, SocketAddr>::UserData("ping".into());
-  let encoded_len = single.encoded_len_with_length_delimited();
-  let msgs = [single];
-  encoder.with_messages(&msgs);
-
-  let batches = encoder.batch().collect::<Vec<_>>();
-  assert_eq!(batches.len(), 1, "bad len {}", batches.len());
-  assert_eq!(
-    batches[0].hint.estimate_encoded_size(),
-    encoded_len,
-    "bad estimate len"
-  );
-
-  let mut total_encoded_len = 0;
-  let bcasts = (0..256)
-    .map(|i| {
-      let msg = Message::UserData(i.to_string().as_bytes().to_vec().into());
-      total_encoded_len += msg.encoded_len_with_length_delimited();
-      msg
-    })
-    .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
-
-  let batches = batch::<_, _>(0, 1400, &bcasts).collect::<Vec<_>>();
-  assert_eq!(batches.len(), 2, "bad len {}", batches.len());
-  assert_eq!(batches[0].len() + batches[1].len(), 256, "missing packets");
-  assert_eq!(
-    batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(),
-    total_encoded_len + 2 + 2,
-    "bad estimate len"
-  );
+trait Encodable {
+  fn encodable_encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError>;
 }
 
-#[test]
-fn test_batch_large_max_encoded_batch_size() {
+impl<I, A> Encodable for Message<I, A>
+where
+  I: Data,
+  A: Data,
+{
+  fn encodable_encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+    self.encode_length_delimited(buf)
+  }
+}
+
+impl<T> Encodable for T
+where
+  T: AsRef<[u8]>,
+{
+  fn encodable_encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+    let len = self.as_ref().len();
+    if len > buf.len() {
+      return Err(EncodeError::insufficient_buffer(len, buf.len()));
+    }
+    buf[..len].copy_from_slice(self.as_ref());
+    Ok(len)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use smallvec_wrapper::SmallVec;
   use smol_str::SmolStr;
   use std::net::SocketAddr;
 
-  let mut total_encoded_len = BATCH_OVERHEAD;
-  let mut last_one_encoded_len = 0;
-  let bcasts = (0..256)
-    .map(|i| {
-      let msg = Message::UserData(i.to_string().as_bytes().to_vec().into());
-      let encoded_len = msg.encoded_len_with_length_delimited();
-      if i == 255 {
-        last_one_encoded_len = encoded_len;
-      } else {
-        total_encoded_len += encoded_len;
-      }
-      msg
-    })
-    .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
+  use super::*;
 
-  let batches = batch::<_, _>(0, u32::MAX as usize, &bcasts).collect::<Vec<_>>();
-  assert_eq!(batches.len(), 2, "bad len {}", batches.len());
-  assert_eq!(batches[0].len(), 255, "missing packets");
-  assert_eq!(batches[1].len(), 1, "missing packets");
-  assert_eq!(
-    batches[0].estimate_encoded_size(),
-    total_encoded_len,
-    "bad encoded len for batch 0"
-  );
-  assert_eq!(
-    batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(),
-    total_encoded_len + last_one_encoded_len,
-    "bad estimate len"
-  );
+  impl<I, A> Batch<'_, I, A> {
+    fn estimate_encoded_size(&self) -> usize {
+      match self {
+        Self::One { hint, .. } => hint.max_output_size,
+        Self::More { hint, .. } => hint.max_output_size,
+      }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+      match self {
+        Self::One { .. } => 1,
+        Self::More { num_msgs, .. } => *num_msgs,
+      }
+    }
+  }
+
+  #[test]
+  fn test_batch() {
+    let mut encoder = MessageEncoder::new(1400);
+    let single = Message::<SmolStr, SocketAddr>::UserData("ping".into());
+    let encoded_len = single.encoded_len_with_length_delimited();
+    let msgs = [single];
+    encoder.with_messages(&msgs);
+
+    let batches = encoder.batch().collect::<Vec<_>>();
+    assert_eq!(batches.len(), 1, "bad len {}", batches.len());
+    assert_eq!(
+      batches[0].estimate_encoded_size(),
+      encoded_len,
+      "bad estimate len"
+    );
+
+    let mut total_encoded_len = 0;
+    let bcasts = (0..256)
+      .map(|i| {
+        let msg = Message::UserData(i.to_string().as_bytes().to_vec().into());
+        total_encoded_len += msg.encoded_len_with_length_delimited();
+        msg
+      })
+      .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
+
+    encoder.with_messages(&bcasts);
+
+    let batches = encoder.batch().collect::<Vec<_>>();
+    assert_eq!(batches.len(), 2, "bad len {}", batches.len());
+    assert_eq!(batches[0].len() + batches[1].len(), 256, "missing packets");
+    assert_eq!(
+      batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(),
+      total_encoded_len + 2 + 2,
+      "bad estimate len"
+    );
+  }
+
+  #[test]
+  fn test_batch_large_max_encoded_batch_size() {
+    use smol_str::SmolStr;
+    use std::net::SocketAddr;
+
+    let mut total_encoded_len = BATCH_OVERHEAD;
+    let mut last_one_encoded_len = 0;
+    let bcasts = (0..256)
+      .map(|i| {
+        let msg = Message::UserData(i.to_string().as_bytes().to_vec().into());
+        let encoded_len = msg.encoded_len_with_length_delimited();
+        if i == 255 {
+          last_one_encoded_len = encoded_len;
+        } else {
+          total_encoded_len += encoded_len;
+        }
+        msg
+      })
+      .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
+
+    let mut encoder = MessageEncoder::new(u32::MAX as usize);
+    encoder.with_messages(&bcasts);
+
+    let batches = encoder.batch().collect::<Vec<_>>();
+    assert_eq!(batches.len(), 2, "bad len {}", batches.len());
+    assert_eq!(batches[0].len(), 255, "missing packets");
+    assert_eq!(batches[1].len(), 1, "missing packets");
+    assert_eq!(
+      batches[0].estimate_encoded_size(),
+      total_encoded_len,
+      "bad encoded len for batch 0"
+    );
+    assert_eq!(
+      batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(),
+      total_encoded_len + last_one_encoded_len,
+      "bad estimate len"
+    );
+  }
 }

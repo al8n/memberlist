@@ -258,7 +258,7 @@ impl CompressAlgorithm {
           }
         }
       }
-      algo => Err(CompressionError::UnknownCompressAlgorithm(*algo)),
+      algo => Err(CompressionError::UnknownAlgorithm(*algo)),
     }
   }
 
@@ -303,7 +303,7 @@ impl CompressAlgorithm {
           }
         }
       }
-      Self::Unknown(_) => return Err(CompressionError::UnknownCompressAlgorithm(*self)),
+      Self::Unknown(_) => return Err(CompressionError::UnknownAlgorithm(*self)),
     })
   }
 
@@ -373,7 +373,7 @@ impl CompressAlgorithm {
           }
         }
       }
-      algo => Err(CompressionError::UnknownCompressAlgorithm(*algo)),
+      algo => Err(CompressionError::UnknownAlgorithm(*algo)),
     }
   }
 

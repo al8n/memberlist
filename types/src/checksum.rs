@@ -47,7 +47,7 @@ pub enum ChecksumError {
   },
   /// Unknown checksum algorithm
   #[error("unknown checksum algorithm: {0}")]
-  UnknownChecksumAlgorithm(ChecksumAlgorithm),
+  UnknownAlgorithm(ChecksumAlgorithm),
   /// Checksum mismatch
   #[error("checksum mismatch")]
   Mismatch,
@@ -208,7 +208,7 @@ impl ChecksumAlgorithm {
           }
         }
       }
-      algo => return Err(ChecksumError::UnknownChecksumAlgorithm(*algo)),
+      algo => return Err(ChecksumError::UnknownAlgorithm(*algo)),
     })
   }
 }
