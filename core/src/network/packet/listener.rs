@@ -185,32 +185,35 @@ where
       }
     };
 
+    let decoder = match MessagesDecoder::<T::Id, T::ResolvedAddress, _>::new(plain)
+      .map_err(Error::<T, D>::from)
+    {
+      Ok(decoder) => decoder,
+      Err(e) => {
+        tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode message");
+        return;
+      }
+    };
 
-    // let msg = match <MessageRef::<'_, <T::Id as Data>::Ref<'_>, <T::ResolvedAddress as Data>::Ref<'_>> as DataRef<Message<T::Id, T::ResolvedAddress>>>::decode(&payload) {
-    //   Ok((_, msg)) => msg,
-    //   Err(e) => {
-    //     tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode message");
-    //     return;
-    //   }
-    // };
-
-
-    // match msg {
-    //   MessageRef::Compound(decoder) => {
-    //     for msg in decoder.iter::<T::Id, T::ResolvedAddress>() {
-    //       match msg {
-    //         Ok(msg) => {
-    //           self.handle_message(&from, timestamp, msg).await;
-    //         }
-    //         Err(e) => {
-    //           tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode message");
-    //         }
-    //       }
-    //     }
-    //   }
-    //   msg => self.handle_message(&from, timestamp, msg).await,
-    // }
-    todo!()
+    let num_msgs = decoder.num_msgs();
+    match num_msgs {
+      0 => {
+        tracing::warn!(addr = %from, "memberlist.packet: no messages in packet");
+      }
+      _ => {
+        // TODO(al8n): Could we parallelize this?
+        for msg in decoder.iter() {
+          match msg {
+            Ok(msg) => {
+              self.handle_message(&from, timestamp, msg).await;
+            }
+            Err(e) => {
+              tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode message");
+            }
+          }
+        }
+      }
+    }
   }
 
   async fn handle_ping(

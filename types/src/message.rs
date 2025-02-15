@@ -30,8 +30,7 @@ const LABELED_MESSAGE_TAG: u8 = Label::TAG;
 const fn is_plain_message_tag(tag: u8) -> bool {
   matches!(
     tag,
-    COMPOOUND_MESSAGE_TAG
-      | PING_MESSAGE_TAG
+    PING_MESSAGE_TAG
       | INDIRECT_PING_MESSAGE_TAG
       | ACK_MESSAGE_TAG
       | SUSPECT_MESSAGE_TAG

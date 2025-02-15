@@ -4,9 +4,7 @@ use triomphe::Arc;
 use crate::{message, DecodeError, Label, ParseLabelError};
 
 #[cfg(feature = "encryption")]
-use crate::{
-  EncryptionAlgorithm, EncryptionError, SecretKey,
-};
+use crate::{EncryptionAlgorithm, EncryptionError, SecretKey};
 
 #[cfg(any(
   feature = "zstd",
@@ -26,6 +24,10 @@ use crate::{CompressAlgorithm, CompressionError};
 use crate::{ChecksumAlgorithm, ChecksumError};
 
 use super::PAYLOAD_LEN_SIZE;
+
+mod messages_decoder;
+
+pub use messages_decoder::*;
 
 /// An error that can occur during encoding.
 #[derive(Debug, thiserror::Error)]
@@ -122,8 +124,10 @@ impl ProtoDecoderError {
 
 /// A protocol decoder.
 ///
-/// Unlike the [`ProtoEncoder`](super::ProtoEncoder), the decoder will only check label, decrypt, decompress, and verify the checksum of the message.
-/// It will not decode the message itself, use the [`MessageRef::decode`](crate::DataRef::decode) or [`Message::decode`](crate::Data::decode) for that.
+/// Unlike the [`ProtoEncoder`](super::ProtoEncoder), the decoder will only check label, decrypt, decompress,
+/// and verify the checksum of the message. It will not decode the message itself,
+/// if you want to decode messages, use the [`MessagesDecoder::new(payload)`],
+/// the `payload` is what the [`ProtoDecoder::decode`](ProtoDecoder::decode) returns.
 #[derive(Debug, Clone)]
 pub struct ProtoDecoder {
   label: Option<Label>,
