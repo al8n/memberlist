@@ -218,7 +218,7 @@ where
       }
     };
 
-    if let Some(e) = Error::try_from_stream(self.send_msg(&source_addr, msg.into()).await).await {
+    if let Err(e) = Error::try_from_stream(self.send_msg(&source_addr, msg.into()).await).await {
       tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to send ack response");
     }
   }
@@ -268,7 +268,7 @@ where
 
           // Try to prevent the nack if we've caught it in time.
           let ack = Ack::new(ind_sequence_number);
-          if let Some(e) =
+          if let Err(e) =
             Error::try_from_stream(this.send_msg(ind_source.address(), ack.into()).await).await
           {
             tracing::error!(addr = %afrom, err = %e, "memberlist.packet: failed to forward ack");
@@ -278,7 +278,7 @@ where
       },
     );
 
-    if let Some(e) =
+    if let Err(e) =
       Error::try_from_stream(self.send_msg(ind.target().address(), ping.into()).await).await
     {
       tracing::error!(local = %self.local_id(), source = %ind.source(), target=%ind.target(), err = %e, "memberlist.packet: failed to send indirect ping");
@@ -293,7 +293,7 @@ where
           // We've not received an ack, so send a nack.
           let nack = Nack::new(ind.sequence_number());
 
-          if let Some(e) = Error::try_from_stream(this.send_msg(ind.source().address(), nack.into()).await).await {
+          if let Err(e) = Error::try_from_stream(this.send_msg(ind.source().address(), nack.into()).await).await {
             tracing::error!(local = %ind.source(), remote = %from, err = %e, "memberlist.packet: failed to send nack");
           } else {
             tracing::trace!(local = %this.local_id(), source = %ind.source(), "memberlist.packet: send nack");
@@ -308,7 +308,7 @@ where
               // We've not received an ack, so send a nack.
               let nack = Nack::new(ind.sequence_number());
 
-              if let Some(e) = Error::try_from_stream(this.send_msg(ind.source().address(), nack.into()).await).await {
+              if let Err(e) = Error::try_from_stream(this.send_msg(ind.source().address(), nack.into()).await).await {
                 tracing::error!(local = %ind.source(), remote = %from, err = %e, "memberlist.packet: failed to send nack");
               } else {
                 tracing::trace!(local = %this.local_id(), source = %ind.source(), "memberlist.packet: send nack");
@@ -366,42 +366,4 @@ where
       }
     }
   }
-
-  // pub(crate) async fn send_msg(
-  //   &self,
-  //   addr: &T::ResolvedAddress,
-  //   msg: Message<T::Id, T::ResolvedAddress>,
-  // ) -> Result<(), OneOrMore<Error<T, D>>> {
-  //   // Check if we can piggy back any messages
-  //   let bytes_avail = self.inner.transport.max_packet_size()
-  //     - msg.encoded_len()
-  //     - self.inner.transport.packets_header_overhead();
-
-  //   let msgs = self
-  //     .get_broadcast_with_prepend(
-  //       msg.into(),
-  //       self.inner.transport.packet_overhead(),
-  //       bytes_avail,
-  //     )
-  //     .await
-  //     .map_err(|e| OneOrMore::from(e))?;
-
-  //   // Send the message
-  //   let stream = self.transport_send_packets(addr, &msgs);
-  //   futures::pin_mut!(stream);
-  //   let errs = stream.filter_map(|res| async move {
-  //     match res {
-  //       Ok(_) => None,
-  //       Err(e) => Some(e),
-  //     }
-  //   })
-  //   .collect::<OneOrMore<_>>()
-  //   .await;
-
-  //   if errs.is_empty() {
-  //     Ok(())
-  //   } else {
-  //     Err(errs)
-  //   }
-  // }
 }

@@ -123,7 +123,9 @@ where
       )
       .await
       .map_err(Error::transport)?;
-    self.send_message(&mut conn, Message::UserData(msg)).await?;
+    self
+      .send_message(&mut conn, &[Message::UserData(msg)])
+      .await?;
     self
       .inner
       .transport
@@ -235,7 +237,7 @@ where
       .set(msg.encoded_len() as f64);
     }
 
-    self.send_message(conn, msg).await
+    self.send_message(conn, &[msg]).await
   }
 }
 
@@ -278,7 +280,8 @@ where
         tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to receive");
 
         let err_resp = ErrorResponse::new(SmolStr::new(e.to_string()));
-        if let Err(e) = self.send_message(&mut conn, err_resp.into()).await {
+        let msgs = [err_resp.into()];
+        if let Err(e) = self.send_message(&mut conn, &msgs).await {
           tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to send error response");
           return;
         }
@@ -313,7 +316,8 @@ where
         }
 
         let ack = Ack::new(ping.sequence_number());
-        if let Err(e) = self.send_message(&mut conn, ack.into()).await {
+        let msgs = [ack.into()];
+        if let Err(e) = self.send_message(&mut conn, &msgs).await {
           tracing::error!(err=%e, remote_node = %addr, "memberlist.stream: failed to send ack response");
         }
         if let Err(e) = self.inner.transport.cache_stream(&addr, conn).await {

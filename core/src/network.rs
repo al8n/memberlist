@@ -1,4 +1,4 @@
-use core::{future::Future, sync::atomic::Ordering};
+use core::sync::atomic::Ordering;
 
 use super::{
   base::Memberlist,
@@ -12,7 +12,7 @@ use agnostic_lite::RuntimeLite;
 use bytes::{Buf, Bytes};
 use futures::{
   future::FutureExt,
-  stream::{Stream, FuturesUnordered, StreamExt},
+  stream::{FuturesUnordered, Stream},
 };
 use nodecraft::resolver::AddressResolver;
 
@@ -54,7 +54,8 @@ where
     conn.set_deadline(Some(deadline));
 
     let ping_sequence_number = ping.sequence_number();
-    self.send_message(&mut conn, ping.into()).await?;
+    let msgs = [Message::Ping(ping)];
+    self.send_message(&mut conn, &msgs).await?;
     let mut msg = self
       .read_message(target, &mut conn)
       .await
@@ -172,7 +173,7 @@ where
               })),
               true => {
                 use rayon::iter::ParallelIterator;
-      
+
                 let payloads = encoder
                   .encode_parallel()
                   .filter_map(|res| match res {
@@ -183,7 +184,7 @@ where
                     }
                   })
                   .collect::<Vec<_>>();
-      
+
                 FuturesUnordered::from_iter(payloads.into_iter().map(|payload| {
                   futures::future::Either::Left(
                     self.raw_send_packet(addr, payload),
@@ -200,20 +201,19 @@ where
             }))
           }
         }
-      },
+      }
     }
   }
 
-  #[auto_enums::auto_enum(futures03::Stream)]
   pub(crate) async fn send_message<'a>(
     &'a self,
     conn: &'a mut T::Stream,
     msgs: &[Message<T::Id, T::ResolvedAddress>],
-  ) -> impl Stream<Item = Result<(), Error<T, D>>> + Send + 'a {
+  ) -> Result<(), Error<T, D>> {
     let encoder = self.encoder(msgs);
 
     match encoder.hint() {
-      Err(e) => futures::stream::once(async { Err(e.into()) }),
+      Err(e) => Err(e.into()),
       Ok(hint) => {
         cfg_if::cfg_if! {
           if #[cfg(any(
@@ -224,15 +224,25 @@ where
             feature = "encryption",
           ))] {
             match hint.should_offload(self.inner.opts.offload_size) {
-              false => FuturesUnordered::from_iter(encoder.encode().map(|res| match res {
-                Ok(payload) => futures::future::Either::Left(
-                  self.raw_send_message(conn, payload),
-                ),
-                Err(e) => futures::future::Either::Right(async { Err(e.into()) }),
-              })),
+              false => {
+                let mut errs = OneOrMore::new();
+                for res in encoder.encode() {
+                  match res {
+                    Ok(payload) => {
+                      match self.raw_send_message(conn, payload).await {
+                        Ok(()) => {}
+                        Err(e) => errs.push(e),
+                      }
+                    }
+                    Err(e) => errs.push(e.into()),
+                  }
+                }
+
+                Error::try_from_one_or_more(errs)
+              },
               true => {
                 use rayon::iter::ParallelIterator;
-      
+
                 let payloads = encoder
                   .encode_parallel()
                   .filter_map(|res| match res {
@@ -243,25 +253,37 @@ where
                     }
                   })
                   .collect::<Vec<_>>();
-      
-                FuturesUnordered::from_iter(payloads.into_iter().map(|payload| {
-                  futures::future::Either::Left(
-                    self.raw_send_message(conn, payload),
-                  )
-                }))
+
+                let mut errs = OneOrMore::new();
+                for payload in payloads {
+                  match self.raw_send_message(conn, payload).await {
+                    Ok(()) => {}
+                    Err(e) => errs.push(e),
+                  }
+                }
+
+                Error::try_from_one_or_more(errs)
               }
             }
           } else {
-            FuturesUnordered::from_iter(encoder.encode().map(|res| match res {
-              Ok(payload) => futures::future::Either::Left(
-                self.raw_send_message(conn, Ok(payload)),
-              ),
-              Err(e) => futures::future::Either::Right(async { Err(e.into()) }),
-            }))
+            let mut errs = OneOrMore::new();
+            for res in encoder.encode() {
+              match res {
+                Ok(payload) => {
+                  match self.raw_send_message(conn, payload).await {
+                    Ok(()) => {}
+                    Err(e) => errs.push(e),
+                  }
+                }
+                Err(e) => errs.push(e.into()),
+              }
+            }
+
+            Error::try_from_one_or_more(errs)
           }
         }
-      },
-    } 
+      }
+    }
   }
 
   pub(crate) async fn read_message(
@@ -277,53 +299,49 @@ where
       .map_err(Error::transport)
   }
 
-  fn raw_send_packet<'a>(
+  async fn raw_send_packet<'a>(
     &'a self,
     addr: &'a T::ResolvedAddress,
     payload: Vec<u8>,
-  ) -> impl Future<Output = Result<(), Error<T, D>>> + Send + 'a {
-    async move {
-      self
-        .inner
-        .transport
-        .send_to(addr, payload.into())
-        .await
-        .map(|(_sent, _)| {
-          #[cfg(feature = "metrics")]
-          {
-            metrics::counter!(
-              "memberlist.packet.sent",
-              self.inner.opts.metric_labels.iter()
-            )
-            .increment(_sent as u64);
-          }
-        })
-        .map_err(Error::transport)
-    }
+  ) -> Result<(), Error<T, D>> {
+    self
+      .inner
+      .transport
+      .send_to(addr, payload.into())
+      .await
+      .map(|(_sent, _)| {
+        #[cfg(feature = "metrics")]
+        {
+          metrics::counter!(
+            "memberlist.packet.sent",
+            self.inner.opts.metric_labels.iter()
+          )
+          .increment(_sent as u64);
+        }
+      })
+      .map_err(Error::transport)
   }
 
-  fn raw_send_message<'a>(
+  async fn raw_send_message<'a>(
     &'a self,
     conn: &'a mut T::Stream,
     payload: Vec<u8>,
-  ) -> impl Future<Output = Result<(), Error<T, D>>> + Send + 'a {
-    async move {
-      self
-        .inner
-        .transport
-        .send_message(conn, payload.into())
-        .await
-        .map(|_sent| {
-          #[cfg(feature = "metrics")]
-          {
-            metrics::counter!(
-              "memberlist.stream.sent",
-              self.inner.opts.metric_labels.iter()
-            )
-            .increment(_sent as u64);
-          }
-        })
-        .map_err(Error::transport)
-    }
+  ) -> Result<(), Error<T, D>> {
+    self
+      .inner
+      .transport
+      .send_message(conn, payload.into())
+      .await
+      .map(|_sent| {
+        #[cfg(feature = "metrics")]
+        {
+          metrics::counter!(
+            "memberlist.stream.sent",
+            self.inner.opts.metric_labels.iter()
+          )
+          .increment(_sent as u64);
+        }
+      })
+      .map_err(Error::transport)
   }
 }

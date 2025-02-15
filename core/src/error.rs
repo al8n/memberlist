@@ -308,18 +308,21 @@ impl<T: Transport, D: Delegate> Error<T, D> {
   }
 
   #[inline]
-  pub(crate) async fn try_from_stream<S>(stream: S) -> Option<Self>
+  pub(crate) async fn try_from_stream<S>(stream: S) -> Result<(), Self>
   where
     S: futures::stream::Stream<Item = Self>,
   {
     use futures::stream::StreamExt;
 
-    let errs = stream.collect::<OneOrMore<_>>().await;
+    Self::try_from_one_or_more(stream.collect::<OneOrMore<_>>().await)
+  }
 
+  #[inline]
+  pub(crate) fn try_from_one_or_more(errs: OneOrMore<Self>) -> Result<(), Self> {
     let num = errs.len();
     match num {
-      0 => None,
-      _ => Some(match errs.into_either() {
+      0 => Ok(()),
+      _ => Err(match errs.into_either() {
         either::Either::Left([e]) => e,
         either::Either::Right(e) => Self::Multiple(e.into_vec().into()),
       }),
