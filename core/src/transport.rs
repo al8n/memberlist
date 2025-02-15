@@ -11,10 +11,10 @@ use super::*;
 mod stream;
 pub use stream::*;
 
-/// Predefined unit tests for the transport module
-#[cfg(any(test, feature = "test"))]
-#[cfg_attr(docsrs, doc(cfg(feature = "test")))]
-pub mod tests;
+// /// Predefined unit tests for the transport module
+// #[cfg(any(test, feature = "test"))]
+// #[cfg_attr(docsrs, doc(cfg(feature = "test")))]
+// pub mod tests;
 
 /// `MaybeResolvedAddress` is used to represent an address that may or may not be resolved.
 pub enum MaybeResolvedAddress<T: Transport> {
@@ -163,75 +163,8 @@ impl<T: Transport> MaybeResolvedAddress<T> {
   }
 }
 
-/// Ensures that the stream has timeout capabilities.
-#[auto_impl::auto_impl(Box)]
-pub trait TimeoutableReadStream: Unpin + Send + Sync + 'static {
-  /// The instant type used to represent the deadline.
-  type Instant: agnostic_lite::time::Instant + Send + Sync + 'static;
-
-  /// Set the read deadline.
-  fn set_read_deadline(&mut self, deadline: Option<Self::Instant>);
-
-  /// Returns the read deadline.
-  fn read_deadline(&self) -> Option<Self::Instant>;
-}
-
-/// Ensures that the stream has timeout capabilities.
-#[auto_impl::auto_impl(Box)]
-pub trait TimeoutableWriteStream: Unpin + Send + Sync + 'static {
-  /// The instant type used to represent the deadline.
-  type Instant: agnostic_lite::time::Instant + Send + Sync + 'static;
-
-  /// Set the write deadline.
-  fn set_write_deadline(&mut self, deadline: Option<Self::Instant>);
-
-  /// Returns the write deadline.
-  fn write_deadline(&self) -> Option<Self::Instant>;
-}
-
-/// Ensures that the stream has timeout capabilities.
-pub trait TimeoutableStream:
-  TimeoutableReadStream<Instant = <Self as TimeoutableStream>::Instant>
-  + TimeoutableWriteStream<Instant = <Self as TimeoutableStream>::Instant>
-  + Unpin
-  + Send
-  + Sync
-  + 'static
-{
-  /// The instant type used to represent the deadline.
-  type Instant: agnostic_lite::time::Instant + Send + Sync + 'static;
-
-  /// Set the deadline for both read and write.
-  fn set_deadline(&mut self, deadline: Option<<Self as TimeoutableStream>::Instant>) {
-    Self::set_read_deadline(self, deadline);
-    Self::set_write_deadline(self, deadline);
-  }
-
-  /// Returns the read deadline and the write deadline.
-  fn deadline(
-    &self,
-  ) -> (
-    Option<<Self as TimeoutableStream>::Instant>,
-    Option<<Self as TimeoutableStream>::Instant>,
-  ) {
-    (Self::read_deadline(self), Self::write_deadline(self))
-  }
-}
-
-impl<T> TimeoutableStream for T
-where
-  T: TimeoutableReadStream
-    + TimeoutableWriteStream<Instant = <T as TimeoutableReadStream>::Instant>
-    + Unpin
-    + Send
-    + Sync
-    + 'static,
-{
-  type Instant = <T as TimeoutableReadStream>::Instant;
-}
-
 /// An error for the transport layer.
-pub trait TransportError: std::error::Error + Send + Sync + 'static {
+pub trait TransportError: From<std::io::Error> + std::error::Error + Send + Sync + 'static {
   /// Returns `true` if the error is a remote failure.
   ///
   /// e.g. Errors happened when:
@@ -276,10 +209,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   >;
 
   /// The promised stream used to send and receive messages
-  type Stream: TimeoutableStream<Instant = <Self::Runtime as RuntimeLite>::Instant>
-    + Send
-    + Sync
-    + 'static;
+  type Stream: agnostic_io::AsyncRead + agnostic_io::AsyncWrite + Unpin + Send + Sync + 'static;
 
   /// The async runtime
   type Runtime: RuntimeLite;
@@ -330,29 +260,78 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns an error if the given address is blocked
   fn blocked_address(&self, addr: &Self::ResolvedAddress) -> Result<(), Self::Error>;
 
-  /// Reads a message from the remote node by promised connection.
+  /// This is a hook that allows the transport to perform any extra work
+  /// when the memberlist accepts a new connection from a remote node.
   ///
-  /// Returns the number of bytes read and the message.
-  fn read_message(
+  /// This method will be invoked before the [`Memberlist`] starts to process the data owned
+  /// by the memberlist protocol.
+  ///
+  /// Nomally, the implementation should do nothing, just return the given conn
+  /// back to the caller.
+  ///
+  /// If the transport sends extra data in [`Transport::write`], then in this method,
+  /// the implementor should consume the extra data sent by the remote node.
+  ///
+  /// e.g.
+  ///
+  /// If in [`Transport::write`], the implementor prepends a header to the payload,
+  /// then in this method, the implementor should consume the header.
+  fn read(
     &self,
     from: &Self::ResolvedAddress,
     conn: &mut Self::Stream,
-  ) -> impl Future<Output = Result<(usize, Bytes), Self::Error>> + Send;
+  ) -> impl Future<Output = Result<usize, Self::Error>> + Send {
+    async move {
+      let _from = from;
+      let _conn = conn;
+      Ok(0)
+    }
+  }
 
   /// Sends a message to the remote node by promised connection.
   ///
-  /// The payload is encoded by [`Message::encode`] method,
-  /// and can be decoded back by [`Message::decode`] method.
+  /// The `payload` has already been processed by [`ProtoEncoder`].
   ///
-  /// The payload is not compressed or encrypted, the transport
-  /// layer is expected to handle that by themselves.
+  /// The implementor can send more data to the remote node,
+  /// but it must before sending the `payload`.
   ///
   /// Returns the number of bytes sent.
-  fn send_message(
+  fn write(
     &self,
     conn: &mut Self::Stream,
-    msg: Bytes,
-  ) -> impl Future<Output = Result<usize, Self::Error>> + Send;
+    payload: Bytes,
+  ) -> impl Future<Output = Result<usize, Self::Error>> + Send {
+    async move {
+      use futures::io::AsyncWriteExt;
+      conn.write_all(&payload).await?;
+      Ok(payload.len())
+    }
+  }
+
+  /// Used to close a connection to a remote node.
+  ///
+  /// This method will be invoked when the data belongs to the memberlist protocol
+  /// has been processed by the [`Memberlist`], and the connection is no longer needed.
+  ///
+  /// The implementor can send more data to the remote node after sending the `payload` in
+  /// [`Transport::write`]. In this method, the implementor can read the extra data sent
+  /// by the remote node.
+  ///
+  /// e.g.
+  ///
+  /// If in [`Transport::write`], the implementor appends a suffix to the payload,
+  /// then in this method, the implementor can read the suffix sent by the remote node.
+  fn close(
+    &self,
+    addr: &Self::ResolvedAddress,
+    stream: Self::Stream,
+  ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+    async move {
+      let _addr = addr;
+      let _stream = stream;
+      Ok(())
+    }
+  }
 
   /// A packet-oriented interface that fires off the given
   /// payload to the given address in a connectionless fashion.
@@ -381,13 +360,6 @@ pub trait Transport: Sized + Send + Sync + 'static {
     addr: &Self::ResolvedAddress,
     deadline: <Self::Runtime as RuntimeLite>::Instant,
   ) -> impl Future<Output = Result<Self::Stream, Self::Error>> + Send;
-
-  /// Used to cache a connection for future use.
-  fn cache_stream(
-    &self,
-    addr: &Self::ResolvedAddress,
-    stream: Self::Stream,
-  ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
   /// Returns a packet subscriber that can be used to receive incoming packets
   fn packet(

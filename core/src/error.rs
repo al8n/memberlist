@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
-use memberlist_types::EncoderError;
+use memberlist_types::ProtoEncoderError;
 use nodecraft::{resolver::AddressResolver, Node};
 use smallvec_wrapper::OneOrMore;
 use smol_str::SmolStr;
@@ -231,8 +231,8 @@ impl<T: Transport, D: Delegate> core::fmt::Debug for Error<T, D> {
   }
 }
 
-impl<T: Transport, D: Delegate> From<EncoderError> for Error<T, D> {
-  fn from(value: EncoderError) -> Self {
+impl<T: Transport, D: Delegate> From<ProtoEncoderError> for Error<T, D> {
+  fn from(value: ProtoEncoderError) -> Self {
     match value {
       #[cfg(any(
         feature = "zstd",
@@ -240,7 +240,7 @@ impl<T: Transport, D: Delegate> From<EncoderError> for Error<T, D> {
         feature = "snappy",
         feature = "brotli",
       ))]
-      EncoderError::Compress(e) => Self::Compression(e),
+      ProtoEncoderError::Compress(e) => Self::Compression(e),
       #[cfg(any(
         feature = "crc32",
         feature = "xxhash64",
@@ -248,10 +248,10 @@ impl<T: Transport, D: Delegate> From<EncoderError> for Error<T, D> {
         feature = "xxhash3",
         feature = "murmur3",
       ))]
-      EncoderError::Checksum(e) => Self::Checksum(e),
+      ProtoEncoderError::Checksum(e) => Self::Checksum(e),
       #[cfg(feature = "encryption")]
-      EncoderError::Encrypt(e) => Self::Encryption(e),
-      EncoderError::Encode(e) => Self::Encode(e),
+      ProtoEncoderError::Encrypt(e) => Self::Encryption(e),
+      ProtoEncoderError::Encode(e) => Self::Encode(e),
     }
   }
 }

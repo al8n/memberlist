@@ -129,7 +129,7 @@ where
     self
       .inner
       .transport
-      .cache_stream(addr, conn)
+      .close(addr, conn)
       .await
       .map_err(Error::transport)
   }
@@ -146,10 +146,11 @@ where
     conn: &mut T::Stream,
     join: bool,
   ) -> Result<(), Error<T, D>> {
-    // Setup a deadline
-    conn.set_deadline(Some(
-      <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
-    ));
+    // // Setup a deadline
+    // conn.set_deadline(Some(
+    //   <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
+    // ));
+    let deadline = <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout;
 
     // Prepare the local node state
     #[cfg(feature = "metrics")]
@@ -237,7 +238,11 @@ where
       .set(msg.encoded_len() as f64);
     }
 
-    self.send_message(conn, &[msg]).await
+    match <T::Runtime as RuntimeLite>::timeout_at(deadline, self.send_message(conn, &[msg])).await {
+      Ok(Ok(_)) => Ok(()),
+      Ok(Err(e)) => Err(e),
+      Err(e) => Err(Error::transport(std::io::Error::from(e).into())),
+    }
   }
 }
 
@@ -260,34 +265,38 @@ where
       .increment(1);
     }
 
-    conn.set_deadline(Some(
-      <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
-    ));
+    let deadline = <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout;
 
-    let payload = match self.read_message(&addr, &mut conn).await {
-      Ok((_read, msg)) => {
-        #[cfg(feature = "metrics")]
-        {
-          metrics::histogram!(
-            "memberlist.size.remote",
-            self.inner.opts.metric_labels.iter()
-          )
-          .record(_read as f64);
-        }
-        msg
-      }
+    let res =
+      <T::Runtime as RuntimeLite>::timeout_at(deadline, self.read_message(&addr, &mut conn)).await;
+
+    let payload = match res {
       Err(e) => {
+        tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to receive and send error response");
+        return;
+      }
+      Ok(Err(e)) => {
         tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to receive");
 
         let err_resp = ErrorResponse::new(SmolStr::new(e.to_string()));
         let msgs = [err_resp.into()];
-        if let Err(e) = self.send_message(&mut conn, &msgs).await {
-          tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to send error response");
-          return;
-        }
+        let res =
+          <T::Runtime as RuntimeLite>::timeout_at(deadline, self.send_message(&mut conn, &msgs))
+            .await;
 
-        return;
+        match res {
+          Ok(Ok(_)) => return,
+          Ok(Err(e)) => {
+            tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to send error response");
+            return;
+          }
+          Err(e) => {
+            tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to send error response");
+            return;
+          }
+        }
       }
+      Ok(Ok((_, payload))) => payload,
     };
 
     let msg = match <MessageRef<'_, _, _> as DataRef<Message<T::Id, T::ResolvedAddress>>>::decode(
@@ -317,11 +326,22 @@ where
 
         let ack = Ack::new(ping.sequence_number());
         let msgs = [ack.into()];
-        if let Err(e) = self.send_message(&mut conn, &msgs).await {
-          tracing::error!(err=%e, remote_node = %addr, "memberlist.stream: failed to send ack response");
+
+        let res =
+          <T::Runtime as RuntimeLite>::timeout_at(deadline, self.send_message(&mut conn, &msgs))
+            .await;
+        match res {
+          Ok(Ok(_)) => {}
+          Ok(Err(e)) => {
+            tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to send ack response");
+          }
+          Err(e) => {
+            tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to send ack response");
+          }
         }
-        if let Err(e) = self.inner.transport.cache_stream(&addr, conn).await {
-          tracing::warn!(err=%e, remote_node = %addr, "memberlist.stream: failed to cache stream");
+
+        if let Err(e) = self.inner.transport.close(&addr, conn).await {
+          tracing::warn!(err=%e, remote_node = %addr, "memberlist.stream: failed to close stream");
         }
       }
       MessageRef::PushPull(pp) => {
@@ -346,8 +366,8 @@ where
           tracing::error!(err=%e, remote_node = %addr, "memberlist.stream: failed to push/pull merge");
         }
 
-        if let Err(e) = self.inner.transport.cache_stream(&addr, conn).await {
-          tracing::warn!(err=%e, remote_node = %addr, "memberlist.stream: failed to cache stream");
+        if let Err(e) = self.inner.transport.close(&addr, conn).await {
+          tracing::warn!(err=%e, remote_node = %addr, "memberlist.stream: failed to close stream");
         }
       }
       MessageRef::UserData(data) => {

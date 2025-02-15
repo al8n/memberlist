@@ -67,6 +67,7 @@ either.workspace = true
 ipnet = { version = "2", default-features = false }
 nodecraft.workspace = true
 paste.workspace = true
+peekable = { version = "0.2", features = ["future"] }
 smol_str.workspace = true
 smallvec-wrapper.workspace = true
 triomphe.workspace = true

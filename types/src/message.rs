@@ -2,11 +2,11 @@ use bytes::Bytes;
 
 use super::*;
 
-pub use encoder::*;
 pub use label::*;
+pub use proto::*;
 
-mod encoder;
 mod label;
+mod proto;
 #[cfg(feature = "serde")]
 mod serde_impl;
 
@@ -98,12 +98,6 @@ macro_rules! enum_wrapper {
           }
         }
       }
-    }
-
-    paste::paste! {
-      $(
-        const [< $variant:snake:upper _TAG>]: u8 = $variant_tag;
-      )*
     }
 
     $(#[$outer])*
@@ -442,11 +436,11 @@ impl<I, A> MessageRef<'_, I, A> {
 
 // /// A compound message encoder which can encode multiple messages into a buffer.
 // #[derive(Debug)]
-// pub struct CompoundMessagesEncoder<'a, I, A> {
+// pub struct CompoundProtoEncoder<'a, I, A> {
 //   src: &'a [Message<I, A>],
 // }
 
-// impl<'a, I, A> CompoundMessagesEncoder<'a, I, A> {
+// impl<'a, I, A> CompoundProtoEncoder<'a, I, A> {
 //   /// Creates a new compound message encoder.
 //   #[inline]
 //   pub const fn new(src: &'a [Message<I, A>]) -> Self {

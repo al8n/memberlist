@@ -1,30 +1,48 @@
-use core::marker::PhantomData;
-use std::borrow::Cow;
-
-#[cfg(feature = "rayon")]
-use rayon::iter::{
-  IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
-};
 use smallvec_wrapper::SmallVec;
 
-use super::{Data, EncodeError, Label, Message};
+use crate::{
+  message::{debug_assert_write_eq, LABELED_MESSAGE_TAG},
+  Data, EncodeError, Label, Message,
+};
+
+#[cfg(feature = "encryption")]
+use crate::{message::ENCRYPTED_MESSAGE_TAG, EncryptionAlgorithm, EncryptionError, SecretKey};
+
+#[cfg(any(
+  feature = "zstd",
+  feature = "lz4",
+  feature = "brotli",
+  feature = "snappy",
+))]
+use crate::{message::COMPRESSED_MESSAGE_TAG, CompressAlgorithm, CompressionError};
+
+#[cfg(any(
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3",
+))]
+use crate::{message::CHECKSUMED_MESSAGE_TAG, ChecksumAlgorithm, ChecksumError};
+
+use super::{BATCH_OVERHEAD, MAX_MESSAGES_PER_BATCH, PAYLOAD_LEN_SIZE};
 
 #[cfg(feature = "rayon")]
 mod rayon_impl;
 
-const PAYLOAD_LEN_SIZE: usize = 4;
-const MAX_MESSAGES_PER_BATCH: usize = 255;
-const BATCH_OVERHEAD: usize = 2; // 1 byte for the batch message tag, 1 byte for the number of messages
+// 1500 bytes typically can hold the maximum size of a UDP packet
+smallvec_wrapper::smallvec_wrapper!(
+  EncodeBuffer<T>([T; 1500]);
+);
 
 /// The errors may occur during encoding.
-
 #[derive(Debug, thiserror::Error)]
-pub enum EncoderError {
+pub enum ProtoEncoderError {
   #[error(transparent)]
   Encode(#[from] EncodeError),
   #[cfg(feature = "encryption")]
   #[error(transparent)]
-  Encrypt(#[from] crate::EncryptionError),
+  Encrypt(#[from] EncryptionError),
   #[cfg(any(
     feature = "zstd",
     feature = "lz4",
@@ -241,10 +259,10 @@ impl CompressHint {
   }
 }
 
-/// The hint for [`MessagesEncoder`] to encode the messages.
+/// The hint for [`ProtoEncoder`] to encode the messages.
 #[viewit::viewit(vis_all = "", getters(style = "move"), setters(skip))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct EncodeHint {
+pub struct ProtoHint {
   #[viewit(getter(attrs(doc = "The input size of the messages.",)))]
   input_size: usize,
   #[viewit(getter(attrs(
@@ -284,7 +302,7 @@ pub struct EncodeHint {
   compress_hint: Option<CompressHint>,
 }
 
-impl EncodeHint {
+impl ProtoHint {
   const fn new(input_size: usize) -> Self {
     Self {
       input_size,
@@ -343,7 +361,7 @@ impl EncodeHint {
 }
 
 /// The encoder of messages
-pub struct MessagesEncoder<'a, I, A> {
+pub struct ProtoEncoder<'a, I, A> {
   msgs: &'a [Message<I, A>],
   label: &'a Label,
   max_payload_size: usize,
@@ -356,14 +374,14 @@ pub struct MessagesEncoder<'a, I, A> {
     feature = "xxhash3",
     feature = "murmur3",
   ))]
-  checksum: Option<super::ChecksumAlgorithm>,
+  checksum: Option<crate::ChecksumAlgorithm>,
   #[cfg(any(
     feature = "zstd",
     feature = "lz4",
     feature = "brotli",
     feature = "snappy",
   ))]
-  compress: Option<super::CompressAlgorithm>,
+  compress: Option<crate::CompressAlgorithm>,
   #[cfg(any(
     feature = "zstd",
     feature = "lz4",
@@ -372,10 +390,10 @@ pub struct MessagesEncoder<'a, I, A> {
   ))]
   compression_threshold: usize,
   #[cfg(feature = "encryption")]
-  encrypt: Option<(super::EncryptionAlgorithm, super::SecretKey)>,
+  encrypt: Option<(EncryptionAlgorithm, SecretKey)>,
 }
 
-impl<'a, I, A> MessagesEncoder<'a, I, A> {
+impl<'a, I, A> ProtoEncoder<'a, I, A> {
   /// Creates a new messages encoder.
   #[inline]
   pub const fn new(max_payload_size: usize) -> Self {
@@ -439,7 +457,7 @@ impl<'a, I, A> MessagesEncoder<'a, I, A> {
     feature = "xxhash3",
     feature = "murmur3",
   ))]
-  pub const fn with_checksum(&mut self, checksum: Option<super::ChecksumAlgorithm>) -> &mut Self {
+  pub const fn with_checksum(&mut self, checksum: Option<crate::ChecksumAlgorithm>) -> &mut Self {
     self.checksum = checksum;
     self
   }
@@ -453,7 +471,7 @@ impl<'a, I, A> MessagesEncoder<'a, I, A> {
   ))]
   pub const fn with_compression(
     &mut self,
-    compress: Option<super::CompressAlgorithm>,
+    compress: Option<crate::CompressAlgorithm>,
   ) -> &mut Self {
     self.compress = compress;
     self
@@ -483,30 +501,30 @@ impl<'a, I, A> MessagesEncoder<'a, I, A> {
   #[cfg(feature = "encryption")]
   pub const fn with_encryption(
     &mut self,
-    encrypt: Option<(super::EncryptionAlgorithm, super::SecretKey)>,
+    encrypt: Option<(EncryptionAlgorithm, SecretKey)>,
   ) -> &mut Self {
     self.encrypt = encrypt;
     self
   }
 }
 
-impl<I, A> MessagesEncoder<'_, I, A>
+impl<I, A> ProtoEncoder<'_, I, A>
 where
   I: Data,
   A: Data,
 {
   /// Returns the hint of how the encoder should process the messages.
-  pub fn hint(&self) -> Result<EncodeHint, EncoderError> {
+  pub fn hint(&self) -> Result<ProtoHint, ProtoEncoderError> {
     self.hint_with_size(self.encoded_msgs_len)
   }
 
   /// Returns the hint of how the encoder should process the input size data.
-  pub fn hint_with_size(&self, input_size: usize) -> Result<EncodeHint, EncoderError> {
+  pub fn hint_with_size(&self, input_size: usize) -> Result<ProtoHint, ProtoEncoderError> {
     if input_size == 0 {
-      return Ok(EncodeHint::default());
+      return Ok(ProtoHint::default());
     }
 
-    let mut hint = EncodeHint::new(input_size);
+    let mut hint = ProtoHint::new(input_size);
 
     let mut offset = 0;
 
@@ -566,92 +584,10 @@ where
   }
 
   /// Encodes the messages.
-  #[auto_enums::auto_enum(rayon::ParallelIterator, Debug)]
-  pub fn encode_parallel(
-    &self,
-  ) -> impl ParallelIterator<Item = Result<Vec<u8>, EncoderError>> + core::fmt::Debug + '_ {
-    match self.msgs.len() {
-      0 => rayon::iter::empty(),
-      1 => {
-        let msg = &self.msgs[0];
-        let encoded_len = msg.encoded_len();
-        if let Err(err) = self.valid() {
-          return rayon::iter::once(Err(err));
-        }
-
-        match self.hint_with_size(encoded_len) {
-          Ok(hint) => rayon::iter::once(self.encode_single(msg, hint)),
-          Err(err) => rayon::iter::once(Err(err)),
-        }
-      }
-      _ => {
-        if let Err(err) = self.valid() {
-          return rayon::iter::once(Err(err));
-        }
-
-        self.encode_batch_parallel()
-      }
-    }
-  }
-
-  #[auto_enums::auto_enum(rayon::ParallelIterator, Debug)]
-  fn into_par_iter(
-    batches: SmallVec<Batch<'_, I, A>>,
-  ) -> impl ParallelIterator<Item = Batch<'_, I, A>> + core::fmt::Debug + '_ {
-    match batches.into_either() {
-      either::Either::Left(batch) => batch.into_par_iter(),
-      either::Either::Right(batches) => batches.into_vec().into_par_iter(),
-    }
-  }
-
-  fn encode_batch_parallel(
-    &self,
-  ) -> impl ParallelIterator<Item = Result<Vec<u8>, EncoderError>> + core::fmt::Debug + '_ {
-    Self::into_par_iter(self.batch().collect::<SmallVec<_>>()).map(|batch| match batch {
-      Batch::One { msg, hint } => self.encode_single(msg, hint),
-      Batch::More {
-        msgs,
-        hint,
-        num_msgs,
-      } => {
-        let mut buf = EncodeBuffer::with_capacity(hint.input_size);
-        buf.resize(hint.input_size, 0);
-        let res =
-          match msgs
-            .iter()
-            .take(num_msgs)
-            .try_fold((0, &mut buf), |(mut offset, buf), msg| {
-              match msg.encodable_encode(&mut buf[offset..]) {
-                Ok(written) => {
-                  offset += written;
-                  Ok((offset, buf))
-                }
-                Err(err) => Err(err),
-              }
-            }) {
-            Ok((final_size, buf)) => {
-              #[cfg(debug_assertions)]
-              assert_eq!(
-                final_size, hint.input_size,
-                "the actual encoded length {} does not match the encoded length {} in hint",
-                final_size, hint.input_size
-              );
-
-              self.encode_helper(&buf, hint)
-            }
-            Err(err) => Err(err.into()),
-          };
-
-        res
-      }
-    })
-  }
-
-  /// Encodes the messages.
   #[auto_enums::auto_enum(Iterator, Debug)]
   pub fn encode(
     &self,
-  ) -> impl Iterator<Item = Result<Vec<u8>, EncoderError>> + core::fmt::Debug + '_ {
+  ) -> impl Iterator<Item = Result<Vec<u8>, ProtoEncoderError>> + core::fmt::Debug + '_ {
     match self.msgs.len() {
       0 => core::iter::empty(),
       1 => {
@@ -676,7 +612,7 @@ where
     }
   }
 
-  fn valid(&self) -> Result<(), EncoderError> {
+  fn valid(&self) -> Result<(), ProtoEncoderError> {
     #[cfg(any(
       feature = "zstd",
       feature = "lz4",
@@ -684,37 +620,35 @@ where
       feature = "snappy",
     ))]
     if let Some(ref algo) = self.compress {
-      use super::{CompressAlgorithm, CompressionError};
-
       match algo {
         CompressAlgorithm::Zstd(_) => {
           #[cfg(not(feature = "zstd"))]
-          return Err(EncoderError::Compress(
+          return Err(ProtoEncoderError::Compress(
             CompressionError::AlgorithmNotEnabled("zstd"),
           ));
         }
         CompressAlgorithm::Lz4 { .. } => {
           #[cfg(not(feature = "lz4"))]
-          return Err(EncoderError::Compress(
+          return Err(ProtoEncoderError::Compress(
             CompressionError::AlgorithmNotEnabled("lz4"),
           ));
         }
         CompressAlgorithm::Brotli(_) => {
           #[cfg(not(feature = "brotli"))]
-          return Err(EncoderError::Compress(
+          return Err(ProtoEncoderError::Compress(
             CompressionError::AlgorithmNotEnabled("brotli"),
           ));
         }
         CompressAlgorithm::Snappy => {
           #[cfg(not(feature = "snappy"))]
-          return Err(EncoderError::Compress(
+          return Err(ProtoEncoderError::Compress(
             CompressionError::AlgorithmNotEnabled("snappy"),
           ));
         }
         CompressAlgorithm::Unknown(_) => {
-          return Err(EncoderError::Compress(CompressionError::UnknownAlgorithm(
-            *algo,
-          )));
+          return Err(ProtoEncoderError::Compress(
+            CompressionError::UnknownAlgorithm(*algo),
+          ));
         }
       }
     }
@@ -727,43 +661,41 @@ where
       feature = "murmur3",
     ))]
     if let Some(ref algo) = self.checksum {
-      use super::{ChecksumAlgorithm, ChecksumError};
-
       match algo {
         ChecksumAlgorithm::Crc32 => {
           #[cfg(not(feature = "crc32"))]
-          return Err(EncoderError::Checksum(ChecksumError::AlgorithmNotEnabled(
-            "crc32",
-          )));
+          return Err(ProtoEncoderError::Checksum(
+            ChecksumError::AlgorithmNotEnabled("crc32"),
+          ));
         }
         ChecksumAlgorithm::XxHash32 => {
           #[cfg(not(feature = "xxhash32"))]
-          return Err(EncoderError::Checksum(ChecksumError::AlgorithmNotEnabled(
-            "xxhash32",
-          )));
+          return Err(ProtoEncoderError::Checksum(
+            ChecksumError::AlgorithmNotEnabled("xxhash32"),
+          ));
         }
         ChecksumAlgorithm::XxHash64 => {
           #[cfg(not(feature = "xxhash64"))]
-          return Err(EncoderError::Checksum(ChecksumError::AlgorithmNotEnabled(
-            "xxhash64",
-          )));
+          return Err(ProtoEncoderError::Checksum(
+            ChecksumError::AlgorithmNotEnabled("xxhash64"),
+          ));
         }
         ChecksumAlgorithm::XxHash3 => {
           #[cfg(not(feature = "xxhash3"))]
-          return Err(EncoderError::Checksum(ChecksumError::AlgorithmNotEnabled(
-            "xxhash3",
-          )));
+          return Err(ProtoEncoderError::Checksum(
+            ChecksumError::AlgorithmNotEnabled("xxhash3"),
+          ));
         }
         ChecksumAlgorithm::Murmur3 => {
           #[cfg(not(feature = "murmur3"))]
-          return Err(EncoderError::Checksum(ChecksumError::AlgorithmNotEnabled(
-            "murmur3",
-          )));
+          return Err(ProtoEncoderError::Checksum(
+            ChecksumError::AlgorithmNotEnabled("murmur3"),
+          ));
         }
         ChecksumAlgorithm::Unknown(_) => {
-          return Err(EncoderError::Checksum(ChecksumError::UnknownAlgorithm(
-            *algo,
-          )));
+          return Err(ProtoEncoderError::Checksum(
+            ChecksumError::UnknownAlgorithm(*algo),
+          ));
         }
       }
     }
@@ -771,13 +703,17 @@ where
     Ok(())
   }
 
-  fn encode_single(&self, msg: &Message<I, A>, hint: EncodeHint) -> Result<Vec<u8>, EncoderError> {
+  fn encode_single(
+    &self,
+    msg: &Message<I, A>,
+    hint: ProtoHint,
+  ) -> Result<Vec<u8>, ProtoEncoderError> {
     self.encode_helper(msg, hint)
   }
 
   fn encode_batch(
     &self,
-  ) -> impl Iterator<Item = Result<Vec<u8>, EncoderError>> + core::fmt::Debug + '_ {
+  ) -> impl Iterator<Item = Result<Vec<u8>, ProtoEncoderError>> + core::fmt::Debug + '_ {
     self.batch().map(|batch| match batch {
       Batch::One { msg, hint } => self.encode_single(msg, hint),
       Batch::More {
@@ -818,7 +754,7 @@ where
     })
   }
 
-  fn encode_helper<E>(&self, msg: &E, hint: EncodeHint) -> Result<Vec<u8>, EncoderError>
+  fn encode_helper<E>(&self, msg: &E, hint: ProtoHint) -> Result<Vec<u8>, ProtoEncoderError>
   where
     E: Encodable,
   {
@@ -829,7 +765,7 @@ where
 
     let label_size = self.label.len();
     if label_size > 0 {
-      buf[0] = super::LABELED_MESSAGE_TAG;
+      buf[0] = LABELED_MESSAGE_TAG;
       buf[1] = label_size as u8; // label length can never be larger than 253
       buf[2..2 + label_size].copy_from_slice(self.label.as_bytes());
       offset += 2 + label_size;
@@ -851,12 +787,12 @@ where
           let written = msg.encodable_encode(&mut encoded_buf)?;
           #[cfg(debug_assertions)]
           {
-            super::debug_assert_write_eq(written, encoded_len);
+            debug_assert_write_eq(written, encoded_len);
             assert_eq!(encoded_len, hint.input_size(), "the actual encoded length {} does not match the encoded length {} in hint", encoded_len, hint.input_size());
           }
 
           let mut co = ch.header_offset();
-          buf[co] = super::COMPRESSED_MESSAGE_TAG; // Add the compression message tag
+          buf[co] = COMPRESSED_MESSAGE_TAG; // Add the compression message tag
           co += 1;
           buf[co..co + 2].copy_from_slice(&algo.encode_to_u16().to_be_bytes()); // Add the compression algorithm
           co += 2;
@@ -879,12 +815,12 @@ where
         } else {
           bytes_written = msg.encodable_encode(&mut buf[offset..])?;
           #[cfg(debug_assertions)]
-          super::debug_assert_write_eq(bytes_written, encoded_len);
+          debug_assert_write_eq(bytes_written, encoded_len);
         }
       } else {
         bytes_written = msg.encodable_encode(&mut buf[offset..])?;
         #[cfg(debug_assertions)]
-        super::debug_assert_write_eq(bytes_written, encoded_len);
+        debug_assert_write_eq(bytes_written, encoded_len);
       }
     }
 
@@ -902,7 +838,7 @@ where
           let compressed_payload_end = po + bytes_written;
           let checksumed = algo.checksum(&buf[po..compressed_payload_end])?;
           let mut co = ch.header_offset();
-          buf[co] = super::CHECKSUMED_MESSAGE_TAG; // Add the checksum message tag
+          buf[co] = CHECKSUMED_MESSAGE_TAG; // Add the checksum message tag
           co += 1;
           buf[co] = algo.as_u8(); // Add the checksum algorithm
           co += 1;
@@ -927,7 +863,7 @@ where
       let mut eo = eh.header_offset();
       #[cfg(debug_assertions)]
       assert_eq!(eo, offset, "the actual encryption header offset {} does not match the encryption header offset {} in hint", eo, offset);
-      buf[eo] = super::ENCRYPTED_MESSAGE_TAG; // Add the encryption message tag
+      buf[eo] = ENCRYPTED_MESSAGE_TAG; // Add the encryption message tag
       eo += 1;
       buf[eo] = algo.as_u8(); // Add the encryption algorithm
       eo += 1;
@@ -943,7 +879,7 @@ where
         eh.nonce_offset()
       );
 
-      let nonce = super::EncryptionAlgorithm::random_nonce();
+      let nonce = EncryptionAlgorithm::random_nonce();
       let nonce_size = eh.nonce_size();
       buf[eo..eo + nonce_size].copy_from_slice(&nonce);
       let suffix_len = algo.encrypted_suffix_len(bytes_written);
@@ -1058,11 +994,6 @@ where
   }
 }
 
-// 1500 bytes typically can hold the maximum size of a UDP packet
-smallvec_wrapper::smallvec_wrapper!(
-  EncodeBuffer<T>([T; 1500]);
-);
-
 /// A message batch processing state
 #[derive(Clone, Copy, Debug)]
 struct BatchingState {
@@ -1112,14 +1043,14 @@ enum BatchHint {
     /// The index of this message belongs to the original slice
     idx: usize,
     /// The encoded size of this message
-    hint: EncodeHint,
+    hint: ProtoHint,
   },
   /// Batch should contains multiple  [`Message`]s
   More {
     /// The range of this batch belongs to the original slice
     range: core::ops::Range<usize>,
     /// The encoded hint of this batch
-    hint: EncodeHint,
+    hint: ProtoHint,
   },
 }
 
@@ -1131,12 +1062,12 @@ enum Batch<'a, I, A> {
     /// The message in this batch.
     msg: &'a Message<I, A>,
     /// The encoded hint of this [`Message`].
-    hint: EncodeHint,
+    hint: ProtoHint,
   },
   /// Batch contains multiple [`Message`]s.
   More {
     /// The encoded hint of this batch of [`Message`]s.
-    hint: EncodeHint,
+    hint: ProtoHint,
     /// The messages in this batch.
     msgs: &'a [Message<I, A>],
     /// The num of msgs
@@ -1248,7 +1179,7 @@ mod tests {
 
   #[test]
   fn test_batch() {
-    let mut encoder = MessagesEncoder::new(1400);
+    let mut encoder = ProtoEncoder::new(1400);
     let single = Message::<SmolStr, SocketAddr>::UserData("ping".into());
     let encoded_len = single.encoded_len_with_length_delimited();
     let msgs = [single];
@@ -1303,7 +1234,7 @@ mod tests {
       })
       .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
 
-    let mut encoder = MessagesEncoder::new(u32::MAX as usize);
+    let mut encoder = ProtoEncoder::new(u32::MAX as usize);
     encoder.with_messages(&bcasts);
 
     let batches = encoder.batch().collect::<Vec<_>>();

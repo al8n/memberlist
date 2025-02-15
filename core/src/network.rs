@@ -1,12 +1,6 @@
 use core::sync::atomic::Ordering;
 
-use super::{
-  base::Memberlist,
-  delegate::Delegate,
-  error::Error,
-  transport::{TimeoutableStream, Transport},
-  types::*,
-};
+use super::{base::Memberlist, delegate::Delegate, error::Error, transport::Transport, types::*};
 
 use agnostic_lite::RuntimeLite;
 use bytes::{Buf, Bytes};
@@ -51,15 +45,24 @@ where
         return Ok(false);
       }
     };
-    conn.set_deadline(Some(deadline));
 
     let ping_sequence_number = ping.sequence_number();
     let msgs = [Message::Ping(ping)];
-    self.send_message(&mut conn, &msgs).await?;
-    let mut msg = self
-      .read_message(target, &mut conn)
-      .await
-      .map(|(_, msg)| msg)?;
+
+    let res = <T::Runtime as RuntimeLite>::timeout_at(deadline, async {
+      self.send_message(&mut conn, &msgs).await?;
+      self
+        .read_message(target, &mut conn)
+        .await
+        .map(|(_, msg)| msg)
+    })
+    .await;
+
+    let mut msg = match res {
+      Ok(Ok(msg)) => msg,
+      Ok(Err(e)) => return Err(e),
+      Err(e) => return Err(Error::transport(std::io::Error::from(e).into())),
+    };
 
     if msg.is_empty() {
       return Err(Error::custom("receive empty message".into()));
@@ -86,8 +89,8 @@ where
         return Err(Error::sequence_number_mismatch(ping_sequence_number, seqn));
       }
 
-      if let Err(e) = self.inner.transport.cache_stream(target, conn).await {
-        tracing::warn!(local_addr = %self.inner.id, peer_addr = %target, err = %e, "memberlist.transport: failed to cache stream");
+      if let Err(e) = self.inner.transport.close(target, conn).await {
+        tracing::warn!(local_addr = %self.inner.id, peer_addr = %target, err = %e, "memberlist.transport: failed to close stream");
       }
 
       Ok(true)
@@ -103,9 +106,9 @@ where
   pub(crate) fn encoder<'a>(
     &'a self,
     packets: &'a [Message<T::Id, T::ResolvedAddress>],
-  ) -> MessagesEncoder<'a, T::Id, T::ResolvedAddress> {
+  ) -> ProtoEncoder<'a, T::Id, T::ResolvedAddress> {
     let mut encoder =
-      MessagesEncoder::<T::Id, T::ResolvedAddress>::new(self.inner.transport.max_packet_size());
+      ProtoEncoder::<T::Id, T::ResolvedAddress>::new(self.inner.transport.max_packet_size());
     encoder
       .with_messages(packets)
       .with_label(self.inner.opts.label());
@@ -291,12 +294,16 @@ where
     from: &<T::Resolver as AddressResolver>::ResolvedAddress,
     conn: &mut T::Stream,
   ) -> Result<(usize, Bytes), Error<T, D>> {
-    self
+    let readed = self
       .inner
       .transport
-      .read_message(from, conn)
+      .read(from, conn)
       .await
-      .map_err(Error::transport)
+      .map_err(Error::transport)?;
+
+    // Decrypt/Decompress/Decode the message
+
+    todo!()
   }
 
   async fn raw_send_packet<'a>(
@@ -330,7 +337,7 @@ where
     self
       .inner
       .transport
-      .send_message(conn, payload.into())
+      .write(conn, payload.into())
       .await
       .map(|_sent| {
         #[cfg(feature = "metrics")]

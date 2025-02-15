@@ -550,7 +550,7 @@ where
               let (_, p) = unwrap_ok!(ping_err_tx1.send(
                 m1.inner
                   .transport
-                  .read_message(&addr, stream.as_mut())
+                  .read(&addr, stream.as_mut())
                   .await
                   .map_err(Into::into)
               ));
@@ -563,7 +563,7 @@ where
               unwrap_ok!(ping_err_tx1.send(
                 m1.inner
                   .transport
-                  .send_message(stream.as_mut(), ack.encode_to_bytes().unwrap())
+                  .write(stream.as_mut(), ack.encode_to_bytes().unwrap())
                   .await
                   .map_err(Into::into)
               ));
@@ -576,7 +576,7 @@ where
               let (_, p) = unwrap_ok!(ping_err_tx1.send(
                 m1.inner
                   .transport
-                  .read_message(&addr, stream.as_mut())
+                  .read(&addr, stream.as_mut())
                   .await
                   .map_err(Into::into)
               ));
@@ -587,7 +587,7 @@ where
               unwrap_ok!(ping_err_tx1.send(
                 m1.inner
                   .transport
-                  .send_message(stream.as_mut(), ack.encode_to_bytes().unwrap())
+                  .write(stream.as_mut(), ack.encode_to_bytes().unwrap())
                   .await
                   .map_err(Into::into)
               ));
@@ -600,7 +600,7 @@ where
               let _ = unwrap_ok!(ping_err_tx1.send(
                 m1.inner
                   .transport
-                  .read_message(&addr, stream.as_mut())
+                  .read(&addr, stream.as_mut())
                   .await
                   .map_err(Into::into)
               ));
@@ -608,7 +608,7 @@ where
               unwrap_ok!(ping_err_tx1.send(
                 m1.inner
                   .transport
-                  .send_message(
+                  .write(
                     stream.as_mut(),
                     Message::from(IndirectPing::new(0, Node::new(SmolStr::from("unknown source"), kind.next(0)), Node::new(SmolStr::from("unknown target"), kind.next(0))))
                       .encode_to_bytes()
@@ -754,13 +754,13 @@ where
   let push_pull: Message<_, _> = push_pull.into();
   m.inner
     .transport
-    .send_message(conn.as_mut(), push_pull.encode_to_bytes().unwrap())
+    .write(conn.as_mut(), push_pull.encode_to_bytes().unwrap())
     .await?;
   // Read the message type
   let (_, msg) = m
     .inner
     .transport
-    .read_message(&bind_addr, conn.as_mut())
+    .read(&bind_addr, conn.as_mut())
     .await?;
   let readed_push_pull = Message::<SmolStr, SocketAddr>::decode(&msg)
     .unwrap()

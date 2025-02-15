@@ -13,7 +13,7 @@ use super::{
   delegate::Delegate,
   error::Error,
   suspicion::Suspicion,
-  transport::{TimeoutableStream, Transport},
+  transport::Transport,
   types::{
     Alive, Data, DataRef, Dead, ErrorResponse, IndirectPing, Message, MessageRef, NodeState, Ping,
     PushNodeState, SmallVec, State, Suspect,
@@ -178,12 +178,20 @@ where
     // Send our state
     self.send_local_state(&mut conn, join).await?;
 
-    conn.set_deadline(Some(
-      <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
-    ));
+    // conn.set_deadline(Some(
+    //   <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
+    // ));
 
-    // Read remote state
-    let (_, payload) = self.read_message(id.address(), &mut conn).await?;
+    let res = <T::Runtime as RuntimeLite>::timeout_at(
+      <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
+      self.read_message(id.address(), &mut conn),
+    )
+    .await;
+
+    let (_, payload) = match res {
+      Ok(res) => res?,
+      Err(e) => return Err(Error::transport(std::io::Error::from(e).into())),
+    };
 
     let (_, msg) = <MessageRef::<'_, <T::Id as Data>::Ref<'_>, <T::ResolvedAddress as Data>::Ref<'_>> as DataRef<Message<T::Id, T::ResolvedAddress>>>::decode(&payload)?;
     let pp = match msg {
@@ -193,8 +201,8 @@ where
         return Err(Error::remote(resp));
       }
       MessageRef::PushPull(pp) => {
-        if let Err(e) = self.inner.transport.cache_stream(id.address(), conn).await {
-          tracing::debug!(local_addr = %self.inner.id, peer_addr = %id, err = %e, "memberlist.transport: failed to cache stream");
+        if let Err(e) = self.inner.transport.close(id.address(), conn).await {
+          tracing::debug!(local_addr = %self.inner.id, peer_addr = %id, err = %e, "memberlist.transport: failed to close stream");
         }
         pp
       }

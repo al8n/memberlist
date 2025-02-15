@@ -31,6 +31,7 @@ among = "0.1"
 auto_impl = "1"
 atomic_refcell = "0.1"
 agnostic-lite = { version = "0.5", features = ["time"] }
+agnostic-io = { version = "0.1", default-features = false }
 agnostic = "0.7"
 # agnostic-lite = { version = "0.4", features = ["time"], path = "../agnostic/agnostic-lite" }
 # agnostic = { version = "0.6", path = "../agnostic/agnostic" }
