@@ -231,7 +231,7 @@ impl From<Cow<'static, str>> for EncodeError {
 /// `DecodeError` indicates that the input buffer does not contain a valid
 /// message. The error details should be considered 'best effort': in
 /// general it is not possible to exactly pinpoint why data is malformed.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, derive_more::IsVariant)]
 pub enum DecodeError {
   /// Returned when the buffer does not have enough data to decode the message.
   #[error("buffer underflow")]

@@ -92,6 +92,7 @@ where
       decoder: self,
       buf: self.remaining(),
       offset: 0,
+      should_stop: false,
       msg_index: 0,
     }
   }
@@ -104,6 +105,7 @@ pub struct MessagesDecoderIter<'a, I, A, B> {
   buf: &'a [u8],
   offset: usize,
   msg_index: usize,
+  should_stop: bool,
 }
 
 impl<'a, I, A, B> Iterator for MessagesDecoderIter<'a, I, A, B>
@@ -115,22 +117,27 @@ where
   type Item = Result<MessageRef<'a, I::Ref<'a>, A::Ref<'a>>, DecodeError>;
 
   fn next(&mut self) -> Option<Self::Item> {
+    if self.should_stop {
+      return None;
+    }
+
     if self.msg_index >= self.decoder.num_msgs {
       return None;
     }
 
-    // let bytes = self.remaining();
-    // let msg = match I::decode_message(bytes) {
-    //   Ok((len, msg)) => {
-    //     self.offset += len;
-    //     msg
-    //   },
-    //   Err(err) => return Some(Err(err)),
-    // };
-
-    // self.msg_index += 1;
-    // Some(Ok(msg))
-    todo!()
+    Some(
+      <<Message<I, A> as Data>::Ref<'a> as DataRef<Message<I, A>>>::decode_length_delimited(
+        &self.buf[self.offset..],
+      )
+      .map(|(read, data)| {
+        self.offset += read;
+        self.msg_index += 1;
+        data
+      })
+      .inspect_err(|_| {
+        self.should_stop = true;
+      }),
+    )
   }
 
   fn size_hint(&self) -> (usize, Option<usize>) {
@@ -146,6 +153,10 @@ where
   B: AsRef<[u8]>,
 {
   fn len(&self) -> usize {
-    self.decoder.num_msgs
+    if self.should_stop {
+      return 0;
+    }
+
+    self.decoder.num_msgs - self.msg_index
   }
 }
