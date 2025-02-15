@@ -24,7 +24,25 @@ const ERROR_RESPONSE_MESSAGE_TAG: u8 = 11;
 const CHECKSUMED_MESSAGE_TAG: u8 = 12;
 const COMPRESSED_MESSAGE_TAG: u8 = 13;
 const ENCRYPTED_MESSAGE_TAG: u8 = 14;
-const LABELED_MESSAGE_TAG: u8 = 244;
+const LABELED_MESSAGE_TAG: u8 = Label::TAG;
+
+#[inline]
+const fn is_plain_message_tag(tag: u8) -> bool {
+  matches!(
+    tag,
+    COMPOOUND_MESSAGE_TAG
+      | PING_MESSAGE_TAG
+      | INDIRECT_PING_MESSAGE_TAG
+      | ACK_MESSAGE_TAG
+      | SUSPECT_MESSAGE_TAG
+      | ALIVE_MESSAGE_TAG
+      | DEAD_MESSAGE_TAG
+      | PUSH_PULL_MESSAGE_TAG
+      | USER_DATA_MESSAGE_TAG
+      | NACK_MESSAGE_TAG
+      | ERROR_RESPONSE_MESSAGE_TAG
+  )
+}
 
 macro_rules! enum_wrapper {
   (
@@ -113,26 +131,12 @@ macro_rules! enum_wrapper {
 
     impl $(< $($generic),+ >)? $name $(< $($generic),+ >)? {
       paste::paste! {
-        $(
-          #[doc = concat!("The tag of [`", stringify!($variant_ty), "`] message.")]
-          pub const [< $variant: snake:upper _TAG >]: u8 = $variant_tag;
-          const [< $variant:snake:upper _BYTE >]: u8 = super::merge(WireType::LengthDelimited, $variant_tag);
-        )*
-
         /// Returns the tag of this message type for encoding/decoding.
         #[inline]
         pub const fn tag(&self) -> u8 {
           match self {
             $(
-              Self::$variant(_) => Self::[< $variant: snake:upper _TAG >],
-            )*
-          }
-        }
-
-        const fn byte(&self) -> u8 {
-          match self {
-            $(
-              Self::$variant(_) => Self::[< $variant: snake:upper _BYTE >],
+              Self::$variant(_) => $variant_tag,
             )*
           }
         }
@@ -248,7 +252,7 @@ where
     }
 
     let mut offset = 0;
-    buf[offset] = self.byte();
+    buf[offset] = self.tag();
     offset += 1;
 
     match self {
@@ -307,7 +311,7 @@ where
     offset += 1;
 
     Ok(match b {
-      Message::<I, A>::PING_BYTE => {
+      PING_MESSAGE_TAG => {
         let (bytes_read, decoded) =
           <Ping<I::Ref<'_>, A::Ref<'_>> as DataRef<Ping<I, A>>>::decode_length_delimited(
             &src[offset..],
@@ -315,58 +319,58 @@ where
         offset += bytes_read;
         (offset, Self::Ping(decoded))
       }
-      Message::<I, A>::INDIRECT_PING_BYTE => {
+      INDIRECT_PING_MESSAGE_TAG => {
         let (bytes_read, decoded) = <IndirectPing<I::Ref<'_>, A::Ref<'_>> as DataRef<
           IndirectPing<I, A>,
         >>::decode_length_delimited(&src[offset..])?;
         offset += bytes_read;
         (offset, Self::IndirectPing(decoded))
       }
-      Message::<I, A>::ACK_BYTE => {
+      ACK_MESSAGE_TAG => {
         let (bytes_read, decoded) =
           <AckRef<'_> as DataRef<Ack>>::decode_length_delimited(&src[offset..])?;
         offset += bytes_read;
         (offset, Self::Ack(decoded))
       }
-      Message::<I, A>::SUSPECT_BYTE => {
+      SUSPECT_MESSAGE_TAG => {
         let (bytes_read, decoded) =
           <Suspect<I::Ref<'_>> as DataRef<Suspect<I>>>::decode_length_delimited(&src[offset..])?;
         offset += bytes_read;
         (offset, Self::Suspect(decoded))
       }
-      Message::<I, A>::ALIVE_BYTE => {
+      ALIVE_MESSAGE_TAG => {
         let (bytes_read, decoded) = <AliveRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
           Alive<I, A>,
         >>::decode_length_delimited(&src[offset..])?;
         offset += bytes_read;
         (offset, Self::Alive(decoded))
       }
-      Message::<I, A>::DEAD_BYTE => {
+      DEAD_MESSAGE_TAG => {
         let (bytes_read, decoded) =
           <Dead<I::Ref<'_>> as DataRef<Dead<I>>>::decode_length_delimited(&src[offset..])?;
         offset += bytes_read;
         (offset, Self::Dead(decoded))
       }
-      Message::<I, A>::PUSH_PULL_BYTE => {
+      PUSH_PULL_MESSAGE_TAG => {
         let (bytes_read, decoded) = <PushPullRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
           PushPull<I, A>,
         >>::decode_length_delimited(&src[offset..])?;
         offset += bytes_read;
         (offset, Self::PushPull(decoded))
       }
-      Message::<I, A>::USER_DATA_BYTE => {
+      USER_DATA_MESSAGE_TAG => {
         let (bytes_read, decoded) =
           <&[u8] as DataRef<Bytes>>::decode_length_delimited(&src[offset..])?;
         offset += bytes_read;
         (offset, Self::UserData(decoded))
       }
-      Message::<I, A>::NACK_BYTE => {
+      NACK_MESSAGE_TAG => {
         let (bytes_read, decoded) =
           <Nack as DataRef<Nack>>::decode_length_delimited(&src[offset..])?;
         offset += bytes_read;
         (offset, Self::Nack(decoded))
       }
-      Message::<I, A>::ERROR_RESPONSE_BYTE => {
+      ERROR_RESPONSE_MESSAGE_TAG => {
         let (bytes_read, decoded) =
           <ErrorResponseRef<'_> as DataRef<ErrorResponse>>::decode_length_delimited(
             &src[offset..],
@@ -374,9 +378,7 @@ where
         offset += bytes_read;
         (offset, Self::ErrorResponse(decoded))
       }
-      _ => {
-        let (wt, tag) = super::split(b);
-        WireType::try_from(wt).map_err(DecodeError::unknown_wire_type)?;
+      tag => {
         return Err(DecodeError::unknown_tag("Message", tag));
       }
     })

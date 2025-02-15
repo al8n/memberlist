@@ -6,7 +6,10 @@ use crate::{
 };
 
 #[cfg(feature = "encryption")]
-use crate::{message::ENCRYPTED_MESSAGE_TAG, EncryptionAlgorithm, EncryptionError, SecretKey};
+use crate::{
+  message::{proto::AeadBuffer, ENCRYPTED_MESSAGE_TAG},
+  EncryptionAlgorithm, EncryptionError, SecretKey,
+};
 
 #[cfg(any(
   feature = "zstd",
@@ -41,6 +44,7 @@ pub enum ProtoEncoderError {
   #[error(transparent)]
   Encode(#[from] EncodeError),
   #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
   #[error(transparent)]
   Encrypt(#[from] EncryptionError),
   #[cfg(any(
@@ -49,6 +53,15 @@ pub enum ProtoEncoderError {
     feature = "brotli",
     feature = "snappy",
   ))]
+  #[cfg_attr(
+    docsrs,
+    feature(any(
+      feature = "zstd",
+      feature = "lz4",
+      feature = "brotli",
+      feature = "snappy",
+    ))
+  )]
   #[error(transparent)]
   Compress(#[from] crate::CompressionError),
   #[cfg(any(
@@ -58,6 +71,16 @@ pub enum ProtoEncoderError {
     feature = "xxhash3",
     feature = "murmur3",
   ))]
+  #[cfg_attr(
+    docsrs,
+    feature(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3",
+    ))
+  )]
   #[error(transparent)]
   Checksum(#[from] crate::ChecksumError),
 }
@@ -74,10 +97,7 @@ pub struct EncryptionHint {
 
 #[cfg(feature = "encryption")]
 impl EncryptionHint {
-  /// - 1 byte for the encryption message tag
-  /// - 1 byte for the encryption algorithm
-  /// - 4 bytes for the length of the encrypted message
-  const HEADER_SIZE: usize = 1 + 1 + PAYLOAD_LEN_SIZE;
+  const HEADER_SIZE: usize = super::ENCRYPTED_MESSAGE_HEADER_SIZE;
 
   #[inline]
   const fn new() -> Self {
@@ -152,7 +172,7 @@ impl ChecksumHint {
   // - 1 byte for the checksum message tag
   // - 1 byte for the checksum algorithm
   // - 4 bytes for the length of the checksumed message
-  const HEADER_SIZE: usize = 1 + 1 + PAYLOAD_LEN_SIZE;
+  const HEADER_SIZE: usize = super::CHECKSUMED_MESSAGE_HEADER_SIZE;
 
   #[inline]
   const fn new() -> Self {
@@ -218,7 +238,7 @@ impl CompressHint {
   /// - 1 byte for the compression message tag
   /// - 2 bytes for the compression algorithm
   /// - 4 bytes for the length of the compressed message.
-  pub const HEADER_SIZE: usize = 1 + 2 + PAYLOAD_LEN_SIZE;
+  const HEADER_SIZE: usize = super::COMPRESSED_MESSAGE_HEADER_SIZE;
 
   #[inline]
   const fn new() -> Self {
@@ -887,7 +907,7 @@ where
         pk,
         nonce,
         self.label.as_bytes(),
-        &mut EncryptionBuffer::new(&mut buf[eh.payload_offset()..]),
+        &mut AeadBuffer::new(&mut buf[eh.payload_offset()..]),
       )?;
       bytes_written += suffix_len;
     }
@@ -1074,55 +1094,6 @@ enum Batch<'a, I, A> {
     num_msgs: usize,
   },
 }
-
-#[cfg(feature = "encryption")]
-struct EncryptionBuffer<'a> {
-  buf: &'a mut [u8],
-  len: usize,
-}
-
-#[cfg(feature = "encryption")]
-const _: () = {
-  impl<'a> EncryptionBuffer<'a> {
-    #[inline]
-    const fn new(buf: &'a mut [u8]) -> Self {
-      Self { buf, len: 0 }
-    }
-  }
-
-  impl AsRef<[u8]> for EncryptionBuffer<'_> {
-    fn as_ref(&self) -> &[u8] {
-      &self.buf[..self.len]
-    }
-  }
-
-  impl AsMut<[u8]> for EncryptionBuffer<'_> {
-    fn as_mut(&mut self) -> &mut [u8] {
-      &mut self.buf[..self.len]
-    }
-  }
-
-  impl aead::Buffer for EncryptionBuffer<'_> {
-    fn extend_from_slice(&mut self, other: &[u8]) -> aead::Result<()> {
-      if self.len >= self.buf.len() {
-        return Err(aead::Error);
-      }
-
-      self.buf[self.len..self.len + other.len()].copy_from_slice(other);
-      self.len += other.len();
-      Ok(())
-    }
-
-    fn truncate(&mut self, len: usize) {
-      if len >= self.len {
-        return;
-      }
-
-      self.buf[len..self.len].fill(0);
-      self.len = len;
-    }
-  }
-};
 
 trait Encodable {
   fn encodable_encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError>;

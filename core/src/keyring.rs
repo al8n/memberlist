@@ -142,7 +142,7 @@ impl Keyring {
 
   /// Returns the current set of keys on the ring.
   #[inline]
-  pub async fn keys(&self) -> impl Iterator<Item = SecretKey> + 'static {
+  pub async fn keys(&self) -> impl Iterator<Item = SecretKey> + Send + 'static {
     let inner = self.inner.read().await;
 
     // we must promise the first key is the primary key

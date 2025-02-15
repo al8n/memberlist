@@ -234,6 +234,12 @@ pub enum EncryptionError {
   /// Encryt/Decrypt errors
   #[error("failed to encrypt/decrypt")]
   Encryptor,
+  /// No installed key
+  #[error("key not found for decryption")]
+  SecretKeyNotFound,
+  /// No installed keys could decrypt the message
+  #[error("security: no installed keys could decrypt the message")]
+  NoInstalledKeys,
 }
 
 impl From<aead::Error> for EncryptionError {
@@ -371,8 +377,8 @@ impl EncryptionAlgorithm {
   /// Decrypts the data using the provided secret key, nonce, and the authentication data
   pub fn decrypt(
     &self,
-    key: SecretKey,
-    nonce: [u8; NONCE_SIZE],
+    key: &SecretKey,
+    nonce: &[u8],
     auth_data: &[u8],
     dst: &mut impl aead::Buffer,
   ) -> Result<(), EncryptionError> {
@@ -383,21 +389,21 @@ impl EncryptionAlgorithm {
     // Get the AES block cipher
     match key {
       SecretKey::Aes128(pk) => {
-        let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk));
+        let gcm = Aes128Gcm::new(GenericArray::from_slice(pk));
         gcm
-          .decrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
+          .decrypt_in_place(GenericArray::from_slice(nonce), auth_data, dst)
           .map_err(Into::into)
       }
       SecretKey::Aes192(pk) => {
-        let gcm = Aes192Gcm::new(GenericArray::from_slice(&pk));
+        let gcm = Aes192Gcm::new(GenericArray::from_slice(pk));
         gcm
-          .decrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
+          .decrypt_in_place(GenericArray::from_slice(nonce), auth_data, dst)
           .map_err(Into::into)
       }
       SecretKey::Aes256(pk) => {
-        let gcm = Aes256Gcm::new(GenericArray::from_slice(&pk));
+        let gcm = Aes256Gcm::new(GenericArray::from_slice(pk));
         gcm
-          .decrypt_in_place(GenericArray::from_slice(&nonce), auth_data, dst)
+          .decrypt_in_place(GenericArray::from_slice(nonce), auth_data, dst)
           .map_err(Into::into)
       }
     }
@@ -578,7 +584,7 @@ mod tests {
     assert_eq!(encrypted.len(), exp_len);
 
     EncryptionAlgorithm::read_nonce(&mut encrypted);
-    vsn.decrypt(k1, nonce, extra, &mut encrypted).unwrap();
+    vsn.decrypt(&k1, &nonce, extra, &mut encrypted).unwrap();
     assert_eq!(encrypted.as_ref(), plain_text);
   }
 
@@ -601,11 +607,11 @@ mod tests {
 
     for (idx, k) in TEST_KEYS.iter().rev().enumerate() {
       if idx == TEST_KEYS.len() - 1 {
-        algo.decrypt(*k, nonce, extra, &mut encrypted).unwrap();
+        algo.decrypt(k, &nonce, extra, &mut encrypted).unwrap();
         assert_eq!(encrypted.as_ref(), plain_text);
         return;
       }
-      let e = algo.decrypt(*k, nonce, extra, &mut encrypted).unwrap_err();
+      let e = algo.decrypt(k, &nonce, extra, &mut encrypted).unwrap_err();
       assert_eq!(e.to_string(), "failed to encrypt/decrypt");
     }
   }

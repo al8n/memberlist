@@ -21,7 +21,7 @@ pub struct Packet<A, T> {
     ),
     setter(attrs(doc = "Sets the messages of the packet (Builder pattern)"))
   )]
-  payload: Bytes,
+  payload: Vec<u8>,
 
   /// Address of the peer. This is an actual address so we
   /// can expose some concrete details about incoming packets.
@@ -52,7 +52,7 @@ pub struct Packet<A, T> {
 impl<A, T> Packet<A, T> {
   /// Create a new packet
   #[inline]
-  pub const fn new(from: A, timestamp: T, payload: Bytes) -> Self {
+  pub const fn new(from: A, timestamp: T, payload: Vec<u8>) -> Self {
     Self {
       payload,
       from,
@@ -62,7 +62,7 @@ impl<A, T> Packet<A, T> {
 
   /// Returns the raw contents of the packet.
   #[inline]
-  pub fn into_components(self) -> (A, T, Bytes) {
+  pub fn into_components(self) -> (A, T, Vec<u8>) {
     (self.from, self.timestamp, self.payload)
   }
 
@@ -82,7 +82,7 @@ impl<A, T> Packet<A, T> {
 
   /// Sets the payload of the packet
   #[inline]
-  pub fn set_payload(&mut self, payload: Bytes) -> &mut Self {
+  pub fn set_payload(&mut self, payload: Vec<u8>) -> &mut Self {
     self.payload = payload;
     self
   }
@@ -365,14 +365,14 @@ mod tests {
     let mut packet = Packet::<SocketAddr, _>::new(
       "127.0.0.1:8080".parse().unwrap(),
       timestamp,
-      messages.encode_to_bytes().unwrap(),
+      messages.encode_to_vec().unwrap(),
     );
     packet.set_from("127.0.0.1:8081".parse().unwrap());
 
     let start = R::now();
     packet.set_timestamp(start);
     let messages = Message::<SmolStr, SocketAddr>::user_data(Bytes::from_static(b"a"))
-      .encode_to_bytes()
+      .encode_to_vec()
       .unwrap();
     packet.set_payload(messages);
     assert_eq!(

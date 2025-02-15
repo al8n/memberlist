@@ -1,4 +1,5 @@
 use agnostic_lite::AsyncSpawner;
+use bytes::{Bytes, BytesMut};
 use futures::stream::{Stream, StreamExt};
 use nodecraft::CheapClone;
 
@@ -157,15 +158,42 @@ where
     &self,
     from: T::ResolvedAddress,
     timestamp: <T::Runtime as RuntimeLite>::Instant,
-    payload: Bytes,
+    payload: Vec<u8>,
   ) {
-    let msg = match <MessageRef::<'_, <T::Id as Data>::Ref<'_>, <T::ResolvedAddress as Data>::Ref<'_>> as DataRef<Message<T::Id, T::ResolvedAddress>>>::decode(&payload) {
-      Ok((_, msg)) => msg,
+    let payload = BytesMut::from(Bytes::from(payload));
+    let mut decoder = ProtoDecoder::new();
+    decoder.with_label(if self.inner.opts.label.is_empty() {
+      None
+    } else {
+      Some(self.inner.opts.label.clone())
+    });
+
+    #[cfg(any(
+      feature = "encryption",
+      feature = "zstd",
+      feature = "lz4",
+      feature = "snappy",
+      feature = "brotli",
+    ))]
+    decoder.with_offload_size(self.inner.opts.offload_size);
+
+    let plain = match decoder.decode(payload).await {
+      Ok(plain) => plain,
       Err(e) => {
         tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode message");
         return;
       }
     };
+
+
+    // let msg = match <MessageRef::<'_, <T::Id as Data>::Ref<'_>, <T::ResolvedAddress as Data>::Ref<'_>> as DataRef<Message<T::Id, T::ResolvedAddress>>>::decode(&payload) {
+    //   Ok((_, msg)) => msg,
+    //   Err(e) => {
+    //     tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode message");
+    //     return;
+    //   }
+    // };
+
 
     // match msg {
     //   MessageRef::Compound(decoder) => {

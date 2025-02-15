@@ -19,7 +19,7 @@ pub enum ParseLabelError {
 ///
 /// Encode:
 /// ```text
-///   magic type byte (244): u8
+///   magic type byte (127): u8
 ///   length of label name:  u8 (because labels can't be longer than 253 bytes)
 ///   label name:            bytes (max 253 bytes)
 /// ```
@@ -35,7 +35,7 @@ impl Label {
   pub const MAX_SIZE: usize = u8::MAX as usize - 2;
 
   /// The tag for a label when encoding/decoding.
-  pub const TAG: u8 = 244;
+  pub(crate) const TAG: u8 = 127;
 
   /// An empty label.
   pub const EMPTY: &Label = &Label(SmolStr::new_inline(""));
