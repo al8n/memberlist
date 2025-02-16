@@ -2,9 +2,8 @@ use quickcheck::{Arbitrary, Gen};
 use triomphe::Arc;
 
 use super::{
-  Ack, Alive, ChecksumAlgorithm, CompressAlgorithm, Dead, DelegateVersion, EncryptionAlgorithm,
-  ErrorResponse, IndirectPing, Label, Message, MessageType, Meta, Nack, NodeState, Ping,
-  ProtocolVersion, PushNodeState, PushPull, SecretKey, State, Suspect,
+  Ack, Alive, Dead, DelegateVersion, ErrorResponse, IndirectPing, Label, Message, MessageType,
+  Meta, Nack, NodeState, Ping, ProtocolVersion, PushNodeState, PushPull, SecretKey, State, Suspect,
 };
 
 impl Arbitrary for Ack {
@@ -207,24 +206,6 @@ impl Arbitrary for SecretKey {
       2 => SecretKey::Aes256(gen!(32)),
       _ => unreachable!(),
     }
-  }
-}
-
-impl Arbitrary for ChecksumAlgorithm {
-  fn arbitrary(g: &mut Gen) -> Self {
-    Self::from(u8::arbitrary(g))
-  }
-}
-
-impl Arbitrary for CompressAlgorithm {
-  fn arbitrary(g: &mut Gen) -> Self {
-    Self::from(u16::arbitrary(g))
-  }
-}
-
-impl Arbitrary for EncryptionAlgorithm {
-  fn arbitrary(g: &mut Gen) -> Self {
-    Self::from(u8::arbitrary(g))
   }
 }
 

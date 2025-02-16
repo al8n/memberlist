@@ -193,6 +193,29 @@ pub enum CompressAlgorithm {
   Unknown(u8),
 }
 
+#[cfg(feature = "quickcheck")]
+const _: () = {
+  impl CompressAlgorithm {
+    const MAX: u8 = SNAPPY_TAG;
+    const MIN: u8 = ZSTD_TAG;
+  }
+
+  impl quickcheck::Arbitrary for CompressAlgorithm {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+      let val = (u8::arbitrary(g) % Self::MAX) + Self::MIN;
+      match val {
+        ZSTD_TAG => Self::Zstd(ZstdCompressionLevel::arbitrary(g)),
+        // TODO(al8n): fix this when fixing brotli encoding/decoding
+        // BROTLI_TAG => Self::Brotli(BrotliAlgorithm::arbitrary(g)),
+        BROTLI_TAG => Self::Lz4,
+        LZ4_TAG => Self::Lz4,
+        SNAPPY_TAG => Self::Snappy,
+        _ => unreachable!(),
+      }
+    }
+  }
+};
+
 impl Default for CompressAlgorithm {
   fn default() -> Self {
     cfg_if::cfg_if! {

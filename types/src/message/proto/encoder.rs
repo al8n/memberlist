@@ -1042,7 +1042,7 @@ where
     match self.msgs.len() {
       0 => core::iter::empty(),
       1 => {
-        let msg_encoded_len = self.msgs[0].encoded_len_with_length_delimited();
+        let msg_encoded_len = self.msgs[0].encoded_len();
         core::iter::once(BatchHint::One {
           idx: 0,
           hint: self.hint_with_size(msg_encoded_len).unwrap(),
@@ -1054,7 +1054,7 @@ where
           .iter()
           .enumerate()
           .scan(BatchingState::new(), move |state, (idx, msg)| {
-            let msg_encoded_len = msg.encoded_len_with_length_delimited();
+            let msg_encoded_len = msg.encoded_len();
             let is_last_message = idx + 1 == total_len;
             let is_single_message = idx + 1 - state.batch_start_idx == 1;
 
@@ -1242,7 +1242,7 @@ mod tests {
   fn test_batch() {
     let mut encoder = ProtoEncoder::new(1400);
     let single = Message::<SmolStr, SocketAddr>::UserData("ping".into());
-    let encoded_len = single.encoded_len_with_length_delimited();
+    let encoded_len = single.encoded_len();
     let msgs = [single];
     encoder.with_messages(&msgs);
 
@@ -1258,7 +1258,7 @@ mod tests {
     let bcasts = (0..256)
       .map(|i| {
         let msg = Message::UserData(i.to_string().as_bytes().to_vec().into());
-        total_encoded_len += msg.encoded_len_with_length_delimited();
+        total_encoded_len += msg.encoded_len();
         msg
       })
       .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
@@ -1268,9 +1268,11 @@ mod tests {
     let batches = encoder.batch().collect::<Vec<_>>();
     assert_eq!(batches.len(), 2, "bad len {}", batches.len());
     assert_eq!(batches[0].len() + batches[1].len(), 256, "missing packets");
+    assert_eq!(batches[0].len(), 255);
+    assert_eq!(batches[1].len(), 1);
     assert_eq!(
       batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(),
-      total_encoded_len + 2 + 2,
+      total_encoded_len + 2, // 2 bytes for the compound message overhead, only the first batch has the overhead
       "bad estimate len"
     );
   }
@@ -1285,7 +1287,7 @@ mod tests {
     let bcasts = (0..256)
       .map(|i| {
         let msg = Message::UserData(i.to_string().as_bytes().to_vec().into());
-        let encoded_len = msg.encoded_len_with_length_delimited();
+        let encoded_len = msg.encoded_len();
         if i == 255 {
           last_one_encoded_len = encoded_len;
         } else {

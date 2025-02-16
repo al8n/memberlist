@@ -143,12 +143,12 @@ mod tests {
           Meta::from_static(b"hello world, hello world, hello world, hello world").unwrap(),
         ),
       );
-      let messages = [message];
+      let messages = [message.clone(), message];
       // let label = Label::try_from("test").unwrap();
       // let pk = SecretKey::random_aes128();
       encoder
         .with_messages(&messages)
-        .with_compression(crate::CompressAlgorithm::Snappy)
+        // .with_compression(crate::CompressAlgorithm::Snappy)
         .with_compression_threshold(32);
       // .with_encryption(EncryptionAlgorithm::NoPadding, pk)
       // .with_label(&label);
@@ -186,35 +186,42 @@ mod tests {
     }
   }
 
-  // #[quickcheck_macros::quickcheck]
-  // fn encode_decode_plain_messages(messages: Vec<Message<String, IpAddr>>) -> bool {
-  //   let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
-  //     let mut encoder = ProtoEncoder::new(1500);
-  //     encoder.with_messages(&messages);
-  //     let data = encoder.encode().collect::<Result<Vec<_>, ProtoEncoderError>>()?;
+  #[quickcheck_macros::quickcheck]
+  fn encode_decode_plain_messages(messages: Vec<Message<String, IpAddr>>) -> bool {
+    let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
+      let mut encoder = ProtoEncoder::new(1500);
+      let label = Label::try_from("test").unwrap();
+      encoder
+        .with_messages(&messages)
+        .with_compression(crate::CompressAlgorithm::Zstd(Default::default()))
+        .with_label(&label);
+      let data = encoder
+        .encode()
+        .collect::<Result<Vec<_>, ProtoEncoderError>>()?;
 
-  //     let mut msgs = Vec::new();
-  //     for payload in data {
-  //       let decoder = ProtoDecoder::default();
-  //       let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
-  //       let decoder = MessagesDecoder::<String, IpAddr, _>::new(data)?;
-  //       for decoded in decoder.iter() {
-  //         let decoded = decoded?;
-  //         msgs.push(Message::<String, IpAddr>::from_ref(decoded)?);
-  //       }
-  //     }
+      let mut msgs = Vec::new();
+      let mut decoder = ProtoDecoder::default();
+      decoder.with_label(label);
+      for payload in data {
+        let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+        let decoder = MessagesDecoder::<String, IpAddr, _>::new(data)?;
+        for decoded in decoder.iter() {
+          let decoded = decoded?;
+          msgs.push(Message::<String, IpAddr>::from_ref(decoded)?);
+        }
+      }
 
-  //     assert_eq!(msgs, messages);
+      assert_eq!(msgs, messages);
 
-  //     Ok(())
-  //   });
+      Ok(())
+    });
 
-  //   match res {
-  //     Ok(_) => true,
-  //     Err(e) => {
-  //       println!("error: {}", e);
-  //       false
-  //     }
-  //   }
-  // }
+    match res {
+      Ok(_) => true,
+      Err(e) => {
+        println!("error: {}", e);
+        false
+      }
+    }
+  }
 }

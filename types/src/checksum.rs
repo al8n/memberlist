@@ -1,10 +1,10 @@
 use std::{borrow::Cow, str::FromStr};
 
-const CRC32_TAG: u8 = 0;
-const XXHASH32_TAG: u8 = 1;
-const XXHASH64_TAG: u8 = 2;
-const XXHASH3_TAG: u8 = 3;
-const MURMUR3_TAG: u8 = 4;
+const CRC32_TAG: u8 = 1;
+const XXHASH32_TAG: u8 = 2;
+const XXHASH64_TAG: u8 = 3;
+const XXHASH3_TAG: u8 = 4;
+const MURMUR3_TAG: u8 = 5;
 
 /// An error type for parsing checksum algorithm from str.
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +93,28 @@ pub enum ChecksumAlgorithm {
   #[display("unknown({_0})")]
   Unknown(u8),
 }
+
+#[cfg(feature = "quickcheck")]
+const _: () = {
+  impl ChecksumAlgorithm {
+    const MAX: Self = Self::Murmur3;
+    const MIN: Self = Self::Crc32;
+  }
+
+  impl quickcheck::Arbitrary for ChecksumAlgorithm {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+      let val = (u8::arbitrary(g) % Self::MAX.as_u8()) + Self::MIN.as_u8();
+      match val {
+        CRC32_TAG => Self::Crc32,
+        XXHASH32_TAG => Self::XxHash32,
+        XXHASH64_TAG => Self::XxHash64,
+        XXHASH3_TAG => Self::XxHash3,
+        MURMUR3_TAG => Self::Murmur3,
+        _ => unreachable!(),
+      }
+    }
+  }
+};
 
 impl ChecksumAlgorithm {
   /// Returns the checksum algorithm as a `u8`.

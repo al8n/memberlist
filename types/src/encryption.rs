@@ -290,6 +290,25 @@ pub enum EncryptionAlgorithm {
   Unknown(u8),
 }
 
+#[cfg(feature = "quickcheck")]
+const _: () = {
+  impl EncryptionAlgorithm {
+    const MAX: Self = Self::NoPadding;
+    const MIN: Self = Self::Pkcs7;
+  }
+
+  impl quickcheck::Arbitrary for EncryptionAlgorithm {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+      let val = (u8::arbitrary(g) % Self::MAX.as_u8()) + Self::MIN.as_u8();
+      match val {
+        NOPADDING_TAG => Self::NoPadding,
+        PKCS7_TAG => Self::Pkcs7,
+        _ => unreachable!(),
+      }
+    }
+  }
+};
+
 impl EncryptionAlgorithm {
   /// Returns the encryption version as a `u8`.
   #[inline]

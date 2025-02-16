@@ -140,7 +140,7 @@ where
     }
 
     Some(
-      <<Message<I, A> as Data>::Ref<'a> as DataRef<Message<I, A>>>::decode_length_delimited(
+      <<Message<I, A> as Data>::Ref<'a> as DataRef<Message<I, A>>>::decode(
         &self.buf[self.offset..],
       )
       .map(|(read, data)| {

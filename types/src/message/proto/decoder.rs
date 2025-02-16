@@ -204,10 +204,24 @@ impl ProtoDecoder {
     self
   }
 
-  /// Feeds the encoder with an encryption algorithm.
+  /// Feeds the encoder with an encryption keys.
   #[cfg(feature = "encryption")]
-  pub fn with_encryption(&mut self, encrypt: Option<impl Into<Arc<[SecretKey]>>>) -> &mut Self {
+  pub fn with_encryption(&mut self, encrypt: impl Into<Arc<[SecretKey]>>) -> &mut Self {
+    self.encrypt = Some(encrypt.into());
+    self
+  }
+
+  /// Feeds or clears the encryption keys.
+  #[cfg(feature = "encryption")]
+  pub fn maybe_encryption(&mut self, encrypt: Option<impl Into<Arc<[SecretKey]>>>) -> &mut Self {
     self.encrypt = encrypt.map(Into::into);
+    self
+  }
+
+  /// Clears the encryption keys.
+  #[cfg(feature = "encryption")]
+  pub fn without_encryption(&mut self) -> &mut Self {
+    self.encrypt = None;
     self
   }
 
