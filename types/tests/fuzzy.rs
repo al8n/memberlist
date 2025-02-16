@@ -5,8 +5,8 @@ use core::{
 };
 use memberlist_types::{
   Ack, Alive, ChecksumAlgorithm, CompressAlgorithm, Data, Dead, EncryptionAlgorithm, ErrorResponse,
-  IndirectPing, Label, Message, MessagesDecoder, MessagesDecoderIter, Nack, Ping, ProtoDecoder,
-  ProtoDecoderError, ProtoEncoder, ProtoEncoderError, PushNodeState, PushPull, SecretKey, Suspect,
+  IndirectPing, Label, Message, MessagesDecoder, Nack, Ping, ProtoDecoder, ProtoEncoder,
+  ProtoEncoderError, PushNodeState, PushPull, SecretKey, Suspect,
 };
 use nodecraft::{Domain, HostAddr, Node, NodeId};
 
