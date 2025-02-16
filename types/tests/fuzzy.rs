@@ -313,8 +313,10 @@ macro_rules! proto_encoder_decoder_unit_test {
               let data = encoder.encode().collect::<Result<Vec<_>, ProtoEncoderError>>()?;
 
               let mut msgs = Vec::new();
+              let mut decoder = ProtoDecoder::default();
+              decoder.with_label(label);
+
               for payload in data {
-                let decoder = ProtoDecoder::default();
                 let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
 
                 let decoder = MessagesDecoder::<$id, $addr, _>::new(data)?;
@@ -339,16 +341,9 @@ macro_rules! proto_encoder_decoder_unit_test {
               }
             }
           }
-        )*
-      )+
-    }
-  };
-  (@single<I, A> $($name:ident($encoder:expr)[ $(($id:ident, $addr: ident)), +$(,)? ]),+$(,)?) => {
-    paste::paste! {
-      $(
-        $(
+
           #[quickcheck_macros::quickcheck]
-          fn [< proto_ $name:snake _ $id:snake _ $addr:snake _fuzzy >](message: Message<$id, $addr>) -> bool {
+          fn [< proto_ $name:snake _ $id:snake _ $addr:snake _fuzzy_without_label >](message: Message<$id, $addr>) -> bool {
             let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
               let mut encoder = $encoder;
               let messages = [message];
@@ -356,8 +351,47 @@ macro_rules! proto_encoder_decoder_unit_test {
               let data = encoder.encode().collect::<Result<Vec<_>, ProtoEncoderError>>()?;
 
               let mut msgs = Vec::new();
+              let decoder = ProtoDecoder::default();
               for payload in data {
-                let decoder = ProtoDecoder::default();
+                let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+
+                let decoder = MessagesDecoder::<$id, $addr, _>::new(data)?;
+                for decoded in decoder.iter() {
+                  let decoded = decoded?;
+                  msgs.push(Message::<$id, $addr>::from_ref(decoded)?);
+                }
+              }
+
+              if msgs != messages {
+                return Err("messages do not match".into());
+              }
+
+              Ok(())
+            });
+
+            match res {
+              Ok(_) => true,
+              Err(e) => {
+                println!("error: {}", e);
+                false
+              }
+            }
+          }
+
+          #[quickcheck_macros::quickcheck]
+          fn [< proto_ $name:snake _ $id:snake _ $addr:snake _fuzzy_ignore_label_on_decode >](message: Message<$id, $addr>) -> bool {
+            let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
+              let mut encoder = $encoder;
+              let label = $label;
+              encoder.with_label(&label);
+
+              let messages = [message];
+              encoder.with_messages(&messages);
+              let data = encoder.encode().collect::<Result<Vec<_>, ProtoEncoderError>>()?;
+
+              let mut msgs = Vec::new();
+              let decoder = ProtoDecoder::default();
+              for payload in data {
                 let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
 
                 let decoder = MessagesDecoder::<$id, $addr, _>::new(data)?;
@@ -483,13 +517,7 @@ macro_rules! proto_encoder_decoder_unit_test {
 }
 
 proto_encoder_decoder_unit_test!(
-  @single<I, A> single_plain_message(ProtoEncoder::new(1500)) [
-    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
-  ]
-);
-
-proto_encoder_decoder_unit_test!(
-  @single<I, A> single_message_with_label_on_encoder_without_label_on_decoder(ProtoEncoder::new(1500), Label::try_from("test").unwrap()) [
+  @single<I, A> single_message_with_label(ProtoEncoder::new(1500), Label::try_from("test").unwrap()) [
     (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
   ]
 );
@@ -500,7 +528,7 @@ proto_encoder_decoder_unit_test!(
     let mut encoder = ProtoEncoder::new(1500);
     encoder.with_checksum(ChecksumAlgorithm::Crc32);
     encoder
-  }) [
+  }, Label::try_from("test").unwrap()) [
     (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
   ]
 );
@@ -511,7 +539,7 @@ proto_encoder_decoder_unit_test!(
     let mut encoder = ProtoEncoder::new(1500);
     encoder.with_checksum(ChecksumAlgorithm::XxHash32);
     encoder
-  }) [
+  }, Label::try_from("test").unwrap()) [
     (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
   ]
 );
@@ -522,7 +550,7 @@ proto_encoder_decoder_unit_test!(
     let mut encoder = ProtoEncoder::new(1500);
     encoder.with_checksum(ChecksumAlgorithm::XxHash64);
     encoder
-  }) [
+  }, Label::try_from("test").unwrap()) [
     (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
   ]
 );
@@ -533,7 +561,7 @@ proto_encoder_decoder_unit_test!(
     let mut encoder = ProtoEncoder::new(1500);
     encoder.with_checksum(ChecksumAlgorithm::XxHash3);
     encoder
-  }) [
+  }, Label::try_from("test").unwrap()) [
     (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
   ]
 );
@@ -544,7 +572,7 @@ proto_encoder_decoder_unit_test!(
     let mut encoder = ProtoEncoder::new(1500);
     encoder.with_checksum(ChecksumAlgorithm::Murmur3);
     encoder
-  }) [
+  }, Label::try_from("test").unwrap()) [
     (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
   ]
 );
@@ -555,7 +583,7 @@ proto_encoder_decoder_unit_test!(
     let mut encoder = ProtoEncoder::new(1500);
     encoder.with_compression(CompressAlgorithm::Lz4);
     encoder
-  }) [
+  }, Label::try_from("test").unwrap()) [
     (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
   ]
 );
@@ -566,7 +594,7 @@ proto_encoder_decoder_unit_test!(
     let mut encoder = ProtoEncoder::new(1500);
     encoder.with_compression(CompressAlgorithm::Zstd(Default::default()));
     encoder
-  }) [
+  }, Label::try_from("test").unwrap()) [
     (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
   ]
 );
@@ -577,7 +605,7 @@ proto_encoder_decoder_unit_test!(
     let mut encoder = ProtoEncoder::new(1500);
     encoder.with_compression(CompressAlgorithm::Snappy);
     encoder
-  }) [
+  }, Label::try_from("test").unwrap()) [
     (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
   ]
 );
@@ -588,7 +616,7 @@ proto_encoder_decoder_unit_test!(
     let mut encoder = ProtoEncoder::new(1500);
     encoder.with_compression(CompressAlgorithm::Brotli(Default::default()));
     encoder
-  }) [
+  }, Label::try_from("test").unwrap()) [
     (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
   ]
 );

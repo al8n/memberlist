@@ -68,7 +68,7 @@ mod tests {
   use triomphe::Arc;
 
   use crate::{
-    message::proto::AeadBuffer, ChecksumAlgorithm, EncryptionAlgorithm, Nack, SecretKey,
+    message::proto::AeadBuffer, ChecksumAlgorithm, EncryptionAlgorithm, Label, Nack, SecretKey
   };
 
   use super::{
@@ -82,20 +82,23 @@ mod tests {
     let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
       let mut encoder = ProtoEncoder::new(1500);
       let messages = [message];
+      let label = Label::try_from("test").unwrap();
       let pk = SecretKey::random_aes128();
       encoder
         .with_messages(&messages)
-        .with_encryption(EncryptionAlgorithm::NoPadding, pk);
+        .with_encryption(EncryptionAlgorithm::NoPadding, pk)
+        .with_label(&label);
       // .with_checksum(Some(ChecksumAlgorithm::Crc32));
       let data = encoder
         .encode()
         .collect::<Result<Vec<_>, ProtoEncoderError>>()?;
 
       let mut msgs = Vec::new();
+      let mut decoder = ProtoDecoder::default();
+      decoder.with_encryption(Some(Arc::from_iter([pk])))
+      .with_label(label);
       for payload in data {
         // println!("payload: {:?}", payload);
-        let mut decoder = ProtoDecoder::default();
-        decoder.with_encryption(Some(Arc::from_iter([pk])));
         let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
 
         let decoder = MessagesDecoder::<String, IpAddr, _>::new(data)?;

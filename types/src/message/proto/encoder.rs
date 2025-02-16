@@ -611,7 +611,7 @@ where
 
     // Now let's check if we need to add a label
     if !self.label.is_empty() {
-      let written = self.label.encoded_overhead() + self.label.len();
+      let written = self.label.encoded_overhead();
       hint.max_output_size += written;
       offset += written;
     }
@@ -842,7 +842,6 @@ where
     E: Encodable,
   {
     let (encoded_len, hint) = (hint.input_size, hint);
-
     let mut buf = vec![0u8; hint.max_output_size];
     let mut offset = 0;
 
@@ -945,7 +944,7 @@ where
         .expect("when encrypted hint is set, the encryption algorithm must be set");
       let mut eo = eh.header_offset();
       #[cfg(debug_assertions)]
-      assert_eq!(eo, offset, "the actual encryption header offset {} does not match the encryption header offset {} in hint", eo, offset);
+      assert_eq!(offset, eo, "the actual encryption header offset {} does not match the encryption header offset {} in hint", offset, eo);
       buf[eo] = ENCRYPTED_MESSAGE_TAG; // Add the encryption message tag
       eo += 1;
       buf[eo] = algo.as_u8(); // Add the encryption algorithm
