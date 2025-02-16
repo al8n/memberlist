@@ -477,8 +477,34 @@ impl<'a, I, A> ProtoEncoder<'a, I, A> {
     feature = "xxhash3",
     feature = "murmur3",
   ))]
-  pub const fn with_checksum(&mut self, checksum: Option<crate::ChecksumAlgorithm>) -> &mut Self {
+  pub const fn with_checksum(&mut self, checksum: ChecksumAlgorithm) -> &mut Self {
+    self.checksum = Some(checksum);
+    self
+  }
+
+  /// Feeds or clear the checksum related settings for the encoder.
+  #[cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3",
+  ))]
+  pub const fn maybe_checksum(&mut self, checksum: Option<ChecksumAlgorithm>) -> &mut Self {
     self.checksum = checksum;
+    self
+  }
+
+  /// Clears the checksum related settings.
+  #[cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3",
+  ))]
+  pub const fn without_checksum(&mut self) -> &mut Self {
+    self.checksum = None;
     self
   }
 
@@ -489,11 +515,32 @@ impl<'a, I, A> ProtoEncoder<'a, I, A> {
     feature = "brotli",
     feature = "snappy",
   ))]
-  pub const fn with_compression(
-    &mut self,
-    compress: Option<crate::CompressAlgorithm>,
-  ) -> &mut Self {
+  pub const fn with_compression(&mut self, compress: CompressAlgorithm) -> &mut Self {
+    self.compress = Some(compress);
+    self
+  }
+
+  /// Feeds or clear the compression related settings for the encoder.
+  #[cfg(any(
+    feature = "zstd",
+    feature = "lz4",
+    feature = "brotli",
+    feature = "snappy",
+  ))]
+  pub const fn maybe_compression(&mut self, compress: Option<CompressAlgorithm>) -> &mut Self {
     self.compress = compress;
+    self
+  }
+
+  /// Clears the compression related settings.
+  #[cfg(any(
+    feature = "zstd",
+    feature = "lz4",
+    feature = "brotli",
+    feature = "snappy",
+  ))]
+  pub const fn without_compression(&mut self) -> &mut Self {
+    self.compress = None;
     self
   }
 
@@ -519,11 +566,25 @@ impl<'a, I, A> ProtoEncoder<'a, I, A> {
 
   /// Feeds the encoder with an encryption algorithm.
   #[cfg(feature = "encryption")]
-  pub const fn with_encryption(
+  pub const fn with_encryption(&mut self, algo: EncryptionAlgorithm, key: SecretKey) -> &mut Self {
+    self.encrypt = Some((algo, key));
+    self
+  }
+
+  /// Feeds or clear the encryption related settings for the encoder.
+  #[cfg(feature = "encryption")]
+  pub const fn maybe_encryption(
     &mut self,
     encrypt: Option<(EncryptionAlgorithm, SecretKey)>,
   ) -> &mut Self {
     self.encrypt = encrypt;
+    self
+  }
+
+  /// Clears the encryption related settings.
+  #[cfg(feature = "encryption")]
+  pub const fn without_encryption(&mut self) -> &mut Self {
+    self.encrypt = None;
     self
   }
 }
@@ -557,7 +618,7 @@ where
 
     #[cfg(feature = "encryption")]
     if let Some((algo, _)) = &self.encrypt {
-      hint.max_output_size += algo.encrypt_overhead();
+      hint.max_output_size += super::ENCRYPTED_MESSAGE_HEADER_SIZE + algo.encrypt_overhead(); // message tag + encryption overhead
       let eh = EncryptionHint::new()
         .with_header_offset(offset)
         .with_nonce(offset + EncryptionHint::HEADER_SIZE, algo.nonce_size());
@@ -743,11 +804,13 @@ where
       } => {
         let mut buf = EncodeBuffer::with_capacity(hint.input_size);
         buf.resize(hint.input_size, 0);
+        buf[0] = super::super::COMPOOUND_MESSAGE_TAG;
+        buf[1] = num_msgs as u8;
         let res =
           match msgs
             .iter()
             .take(num_msgs)
-            .try_fold((0, &mut buf), |(mut offset, buf), msg| {
+            .try_fold((2, &mut buf), |(mut offset, buf), msg| {
               match msg.encodable_encode(&mut buf[offset..]) {
                 Ok(written) => {
                   offset += written;
@@ -791,7 +854,7 @@ where
       offset += 2 + label_size;
     }
 
-    let mut bytes_written;
+    let mut bytes_written = None;
     cfg_if::cfg_if! {
       if #[cfg(any(
         feature = "zstd",
@@ -831,17 +894,9 @@ where
           #[cfg(debug_assertions)]
           debug_assert!(compressed_len <= ch.max_output_size(), "compress algo: {algo}, compressed_len: {}, max_compressed_output_size: {}", compressed_len, ch.max_output_size());
 
-          bytes_written = ChecksumHint::HEADER_SIZE + compressed_len;
-        } else {
-          bytes_written = msg.encodable_encode(&mut buf[offset..])?;
-          #[cfg(debug_assertions)]
-          debug_assert_write_eq(bytes_written, encoded_len);
+          bytes_written = Some(ChecksumHint::HEADER_SIZE + compressed_len);
         }
-      } else {
-        bytes_written = msg.encodable_encode(&mut buf[offset..])?;
-        #[cfg(debug_assertions)]
-        debug_assert_write_eq(bytes_written, encoded_len);
-      }
+      } else {}
     }
 
     cfg_if::cfg_if! {
@@ -855,24 +910,32 @@ where
         if let Some(ch) = hint.checksum_hint {
           let algo = self.checksum.expect("when checksum hint is set, the checksum algorithm must be set");
           let po = ch.payload_offset();
-          let compressed_payload_end = po + bytes_written;
-          let checksumed = algo.checksum(&buf[po..compressed_payload_end])?;
+          let payload_len = match &mut bytes_written {
+            Some(written) => *written,
+            // if bytes_written is None, we need to encode the message to the buffer first
+            None => {
+              let written = msg.encodable_encode(&mut buf[po..])?;
+              bytes_written = Some(written);
+              written
+            },
+          };
+          let checksum_payload_end = po + payload_len;
+          let checksumed = algo.checksum(&buf[po..checksum_payload_end])?;
           let mut co = ch.header_offset();
           buf[co] = CHECKSUMED_MESSAGE_TAG; // Add the checksum message tag
           co += 1;
           buf[co] = algo.as_u8(); // Add the checksum algorithm
           co += 1;
-          buf[co..co + PAYLOAD_LEN_SIZE].copy_from_slice(&(bytes_written as u32).to_be_bytes());
+          buf[co..co + PAYLOAD_LEN_SIZE].copy_from_slice(&(payload_len as u32).to_be_bytes());
           let checksumed_bytes = checksumed.to_be_bytes();
           let output_size = ch.size();
-          buf[compressed_payload_end..compressed_payload_end + output_size].copy_from_slice(&checksumed_bytes[..output_size]);
-          bytes_written += ChecksumHint::HEADER_SIZE + output_size;
-        } else {
-          // we do not need to add a checksum, do nothing
+          buf[checksum_payload_end..checksum_payload_end + output_size].copy_from_slice(&checksumed_bytes[..output_size]);
+
+          if let Some(written) = &mut bytes_written {
+            *written += ChecksumHint::HEADER_SIZE + output_size;
+          } else { unreachable!("bytes written cannot be `None`") }
         }
-      } else {
-        // we do not need to add a checksum, do nothing
-      }
+      } else {}
     }
 
     #[cfg(feature = "encryption")]
@@ -887,7 +950,18 @@ where
       eo += 1;
       buf[eo] = algo.as_u8(); // Add the encryption algorithm
       eo += 1;
-      buf[eo..eo + PAYLOAD_LEN_SIZE].copy_from_slice(&(bytes_written as u32).to_be_bytes());
+
+      let po = eh.payload_offset();
+      let payload_len = match &mut bytes_written {
+        Some(written) => *written,
+        None => {
+          let written = msg.encodable_encode(&mut buf[po..])?;
+          bytes_written = Some(written);
+          written
+        }
+      };
+
+      buf[eo..eo + PAYLOAD_LEN_SIZE].copy_from_slice(&(payload_len as u32).to_be_bytes());
       eo += PAYLOAD_LEN_SIZE; // 4 bytes to store the encrypted length
 
       #[cfg(debug_assertions)]
@@ -902,17 +976,33 @@ where
       let nonce = EncryptionAlgorithm::random_nonce();
       let nonce_size = eh.nonce_size();
       buf[eo..eo + nonce_size].copy_from_slice(&nonce);
-      let suffix_len = algo.encrypted_suffix_len(bytes_written);
+      let suffix_len = algo.encrypted_suffix_len(payload_len);
       algo.encrypt(
         pk,
         nonce,
         self.label.as_bytes(),
-        &mut AeadBuffer::new(&mut buf[eh.payload_offset()..]),
+        &mut AeadBuffer::new(&mut buf[po..], payload_len),
       )?;
-      bytes_written += suffix_len;
+
+      if let Some(written) = &mut bytes_written {
+        *written += super::ENCRYPTED_MESSAGE_HEADER_SIZE + nonce_size + suffix_len;
+      } else {
+        unreachable!("bytes written cannot be `None`")
+      }
     }
 
-    buf.truncate(offset + bytes_written);
+    match bytes_written {
+      Some(written) => {
+        buf.truncate(offset + written);
+      }
+      None => {
+        let written = msg.encodable_encode(&mut buf[offset..])?;
+        #[cfg(debug_assertions)]
+        debug_assert_write_eq(written, encoded_len);
+        buf.truncate(offset + written);
+      }
+    }
+
     Ok(buf)
   }
 
@@ -1105,7 +1195,7 @@ where
   A: Data,
 {
   fn encodable_encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    self.encode_length_delimited(buf)
+    self.encode(buf)
   }
 }
 

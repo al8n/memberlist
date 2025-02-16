@@ -171,8 +171,22 @@ impl ProtoDecoder {
 
   /// Feeds the encoder with a label.
   #[inline]
-  pub fn with_label(&mut self, label: Option<Label>) -> &mut Self {
+  pub fn with_label(&mut self, label: Label) -> &mut Self {
+    self.label = Some(label);
+    self
+  }
+
+  /// Feeds or clears the label.
+  #[inline]
+  pub fn maybe_label(&mut self, label: Option<Label>) -> &mut Self {
     self.label = label;
+    self
+  }
+
+  /// Clears the label.
+  #[inline]
+  pub fn without_label(&mut self) -> &mut Self {
+    self.label = None;
     self
   }
 
@@ -253,7 +267,7 @@ impl ProtoDecoder {
         let (algo, encrypted_payload_len) = {
           let mut offset = 1;
 
-          if buf.remaining() < offset + 1 + PAYLOAD_LEN_SIZE {
+          if buf.remaining() < super::ENCRYPTED_MESSAGE_HEADER_SIZE {
             return Err(DecodeError::buffer_underflow().into());
           }
           let algo = EncryptionAlgorithm::from(buf[offset]);
@@ -268,8 +282,7 @@ impl ProtoDecoder {
             .map(u32::from_be_bytes)
             .unwrap() as usize;
 
-          offset += PAYLOAD_LEN_SIZE;
-          buf.advance(offset);
+          buf.advance(super::ENCRYPTED_MESSAGE_HEADER_SIZE);
           (algo, encrypted_payload_len)
         };
 
@@ -629,6 +642,8 @@ impl ProtoDecoder {
           }
         }
       }
+
+      send_res_and_ret!(tx <- Ok(payload_without_checksum));
     });
 
     match rx.await {

@@ -8,8 +8,8 @@ use aes_gcm::{
 use bytes::{Buf, BufMut};
 use rand::Rng;
 
-const NOPADDING_TAG: u8 = 0;
-const PKCS7_TAG: u8 = 1;
+const NOPADDING_TAG: u8 = 1;
+const PKCS7_TAG: u8 = 2;
 
 const NONCE_SIZE: usize = 12;
 const TAG_SIZE: usize = 16;
@@ -87,6 +87,30 @@ impl SecretKey {
   /// Returns the base64 encoded secret key
   pub fn to_base64(&self) -> String {
     b64.encode(self)
+  }
+
+  /// Creates a random secret key
+  #[inline]
+  pub fn random_aes128() -> Self {
+    let mut key = [0u8; 16];
+    rand::rng().fill(&mut key);
+    Self::Aes128(key)
+  }
+
+  /// Creates a random secret key
+  #[inline]
+  pub fn random_aes192() -> Self {
+    let mut key = [0u8; 24];
+    rand::rng().fill(&mut key);
+    Self::Aes192(key)
+  }
+
+  /// Creates a random secret key
+  #[inline]
+  pub fn random_aes256() -> Self {
+    let mut key = [0u8; 32];
+    rand::rng().fill(&mut key);
+    Self::Aes256(key)
   }
 }
 
@@ -416,26 +440,10 @@ impl EncryptionAlgorithm {
 
   /// Returns the overhead of the encryption
   #[inline]
-  pub const fn encrypt_overhead(&self) -> usize {
+  pub(crate) const fn encrypt_overhead(&self) -> usize {
     match self {
-      EncryptionAlgorithm::Pkcs7 => 49, // ALGO: 1, LEN: 4, IV: 12, Padding: 16, Tag: 16
-      EncryptionAlgorithm::NoPadding => 33, // ALGO: 1, LEN: 4, IV: 12, Tag: 16
-      _ => unreachable!(),
-    }
-  }
-
-  /// Returns the encrypted length of the input size
-  #[inline]
-  pub const fn encrypted_len(&self, inp: usize) -> usize {
-    match self {
-      EncryptionAlgorithm::Pkcs7 => {
-        // Determine the padding size
-        let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
-
-        // Sum the extra parts to get total size
-        4 + 1 + NONCE_SIZE + inp + padding + TAG_SIZE
-      }
-      EncryptionAlgorithm::NoPadding => 4 + 1 + NONCE_SIZE + inp + TAG_SIZE,
+      EncryptionAlgorithm::Pkcs7 => 44, // IV: 12, Padding: 16, Tag: 16
+      EncryptionAlgorithm::NoPadding => 28, // IV: 12, Tag: 16
       _ => unreachable!(),
     }
   }
@@ -496,6 +504,24 @@ mod tests {
   use arbitrary::Arbitrary;
 
   use super::*;
+
+  impl super::EncryptionAlgorithm {
+    /// Returns the encrypted length of the input size
+    #[inline]
+    const fn encrypted_len(&self, inp: usize) -> usize {
+      match self {
+        EncryptionAlgorithm::Pkcs7 => {
+          // Determine the padding size
+          let padding = BLOCK_SIZE - (inp % BLOCK_SIZE);
+
+          // Sum the extra parts to get total size
+          4 + 1 + NONCE_SIZE + inp + padding + TAG_SIZE
+        }
+        EncryptionAlgorithm::NoPadding => 4 + 1 + NONCE_SIZE + inp + TAG_SIZE,
+        _ => unreachable!(),
+      }
+    }
+  }
 
   #[test]
   fn arbitrary_secret_key() {
@@ -578,10 +604,13 @@ mod tests {
     encrypted.put_slice(plain_text);
 
     let mut dst = encrypted.split_off(data_offset);
+    println!("before encrypted: {} {:?}", dst.len(), dst.as_ref());
     vsn.encrypt(k1, nonce, extra, &mut dst).unwrap();
+    println!("encrypted: {} {:?}", dst.len(), dst.as_ref());
     encrypted.unsplit(dst);
+
     let exp_len = vsn.encrypted_len(plain_text.len());
-    assert_eq!(encrypted.len(), exp_len);
+    assert_eq!(encrypted.len(), exp_len - 5); // minus 5 for header
 
     EncryptionAlgorithm::read_nonce(&mut encrypted);
     vsn.decrypt(&k1, &nonce, extra, &mut encrypted).unwrap();
@@ -602,7 +631,7 @@ mod tests {
     algo.encrypt(k1, nonce, extra, &mut dst).unwrap();
     encrypted.unsplit(dst);
     let exp_len = algo.encrypted_len(plain_text.len());
-    assert_eq!(encrypted.len(), exp_len);
+    assert_eq!(encrypted.len(), exp_len - 5); // minus 5 for header
     EncryptionAlgorithm::read_nonce(&mut encrypted);
 
     for (idx, k) in TEST_KEYS.iter().rev().enumerate() {

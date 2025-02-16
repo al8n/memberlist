@@ -162,11 +162,13 @@ where
   ) {
     let payload = BytesMut::from(Bytes::from(payload));
     let mut decoder = ProtoDecoder::new();
-    decoder.with_label(if self.inner.opts.label.is_empty() {
-      None
-    } else {
-      Some(self.inner.opts.label.clone())
-    });
+    decoder.maybe_label(
+      if self.inner.opts.label.is_empty() || self.inner.opts.skip_inbound_label_check {
+        None
+      } else {
+        Some(self.inner.opts.label.clone())
+      },
+    );
 
     #[cfg(any(
       feature = "encryption",

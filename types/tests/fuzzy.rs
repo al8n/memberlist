@@ -1,10 +1,12 @@
+use bytes::{Bytes, BytesMut};
 use core::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
   time::Duration,
 };
 use memberlist_types::{
-  Ack, Alive, Data, Dead, ErrorResponse, IndirectPing, Label, Message, Nack, Ping, PushNodeState,
-  PushPull, SecretKey, Suspect,
+  Ack, Alive, ChecksumAlgorithm, CompressAlgorithm, Data, Dead, EncryptionAlgorithm, ErrorResponse,
+  IndirectPing, Label, Message, MessagesDecoder, MessagesDecoderIter, Nack, Ping, ProtoDecoder,
+  ProtoDecoderError, ProtoEncoder, ProtoEncoderError, PushNodeState, PushPull, SecretKey, Suspect,
 };
 use nodecraft::{Domain, HostAddr, Node, NodeId};
 
@@ -293,3 +295,346 @@ fn f64_fuzzy(value: f64) -> bool {
 fn secret_key_fuzzy(_: SecretKey) -> bool {
   true
 }
+
+macro_rules! proto_encoder_decoder_unit_test {
+  (@single<I, A> $($name:ident($encoder:expr, $label:expr)[ $(($id:ident, $addr: ident)), +$(,)? ]),+$(,)?) => {
+    paste::paste! {
+      $(
+        $(
+          #[quickcheck_macros::quickcheck]
+          fn [< proto_ $name:snake _ $id:snake _ $addr:snake _fuzzy >](message: Message<$id, $addr>) -> bool {
+            let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
+              let mut encoder = $encoder;
+              let label = $label;
+              encoder.with_label(&label);
+
+              let messages = [message];
+              encoder.with_messages(&messages);
+              let data = encoder.encode().collect::<Result<Vec<_>, ProtoEncoderError>>()?;
+
+              let mut msgs = Vec::new();
+              for payload in data {
+                let decoder = ProtoDecoder::default();
+                let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+
+                let decoder = MessagesDecoder::<$id, $addr, _>::new(data)?;
+                for decoded in decoder.iter() {
+                  let decoded = decoded?;
+                  msgs.push(Message::<$id, $addr>::from_ref(decoded)?);
+                }
+              }
+
+              if msgs != messages {
+                return Err("messages do not match".into());
+              }
+
+              Ok(())
+            });
+
+            match res {
+              Ok(_) => true,
+              Err(e) => {
+                println!("error: {}", e);
+                false
+              }
+            }
+          }
+        )*
+      )+
+    }
+  };
+  (@single<I, A> $($name:ident($encoder:expr)[ $(($id:ident, $addr: ident)), +$(,)? ]),+$(,)?) => {
+    paste::paste! {
+      $(
+        $(
+          #[quickcheck_macros::quickcheck]
+          fn [< proto_ $name:snake _ $id:snake _ $addr:snake _fuzzy >](message: Message<$id, $addr>) -> bool {
+            let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
+              let mut encoder = $encoder;
+              let messages = [message];
+              encoder.with_messages(&messages);
+              let data = encoder.encode().collect::<Result<Vec<_>, ProtoEncoderError>>()?;
+
+              let mut msgs = Vec::new();
+              for payload in data {
+                let decoder = ProtoDecoder::default();
+                let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+
+                let decoder = MessagesDecoder::<$id, $addr, _>::new(data)?;
+                for decoded in decoder.iter() {
+                  let decoded = decoded?;
+                  msgs.push(Message::<$id, $addr>::from_ref(decoded)?);
+                }
+              }
+
+              if msgs != messages {
+                return Err("messages do not match".into());
+              }
+
+              Ok(())
+            });
+
+            match res {
+              Ok(_) => true,
+              Err(e) => {
+                println!("error: {}", e);
+                false
+              }
+            }
+          }
+        )*
+      )+
+    }
+  };
+  (@single<I, A> $($name:ident($encoder:expr, $pk:expr, $algo:expr)[ $(($id:ident, $addr: ident)), +$(,)? ]),+$(,)?) => {
+    paste::paste! {
+      $(
+        $(
+          #[quickcheck_macros::quickcheck]
+          fn [< proto_ $name:snake _ $id:snake _ $addr:snake _fuzzy >](message: Message<$id, $addr>) -> bool {
+            let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
+              let mut encoder = $encoder;
+              let pk = $pk;
+              encoder.with_encryption($algo, pk);
+              let messages = [message];
+              encoder.with_messages(&messages);
+              let data = encoder.encode().collect::<Result<Vec<_>, ProtoEncoderError>>()?;
+
+              let mut msgs = Vec::new();
+              for payload in data {
+                let mut decoder = ProtoDecoder::default();
+                decoder.with_encryption(Some(triomphe::Arc::from_iter([pk])));
+                let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+
+                let decoder = MessagesDecoder::<$id, $addr, _>::new(data)?;
+                for decoded in decoder.iter() {
+                  let decoded = decoded?;
+                  msgs.push(Message::<$id, $addr>::from_ref(decoded)?);
+                }
+              }
+
+              if msgs != messages {
+                return Err("messages do not match".into());
+              }
+
+              Ok(())
+            });
+
+            match res {
+              Ok(_) => true,
+              Err(e) => {
+                println!("error: {}", e);
+                false
+              }
+            }
+          }
+        )*
+      )+
+    }
+  };
+  (@single<I, A> $($name:ident($encoder:expr, $label:expr, $pk:expr, $algo:expr)[ $(($id:ident, $addr: ident)), +$(,)? ]),+$(,)?) => {
+    paste::paste! {
+      $(
+        $(
+          #[quickcheck_macros::quickcheck]
+          fn [< proto_ $name:snake _ $id:snake _ $addr:snake _fuzzy >](message: Message<$id, $addr>) -> bool {
+            let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
+              let mut encoder = $encoder;
+              let pk = $pk;
+              encoder.with_encryption($algo, pk);
+              let label = $label;
+              encoder.with_label(&label);
+              let messages = [message];
+              encoder.with_messages(&messages);
+              let data = encoder.encode().collect::<Result<Vec<_>, ProtoEncoderError>>()?;
+
+              let mut msgs = Vec::new();
+              let mut decoder = ProtoDecoder::default();
+              decoder.with_encryption(Some(triomphe::Arc::from_iter([pk]))).with_label(label);
+              for payload in data {
+                let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+
+                let decoder = MessagesDecoder::<$id, $addr, _>::new(data)?;
+                for decoded in decoder.iter() {
+                  let decoded = decoded?;
+                  msgs.push(Message::<$id, $addr>::from_ref(decoded)?);
+                }
+              }
+
+              if msgs != messages {
+                return Err("messages do not match".into());
+              }
+
+              Ok(())
+            });
+
+            match res {
+              Ok(_) => true,
+              Err(e) => {
+                println!("error: {}", e);
+                false
+              }
+            }
+          }
+        )*
+      )+
+    }
+  };
+}
+
+proto_encoder_decoder_unit_test!(
+  @single<I, A> single_plain_message(ProtoEncoder::new(1500)) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ]
+);
+
+proto_encoder_decoder_unit_test!(
+  @single<I, A> single_message_with_label_on_encoder_without_label_on_decoder(ProtoEncoder::new(1500), Label::try_from("test").unwrap()) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ]
+);
+
+#[cfg(feature = "crc32")]
+proto_encoder_decoder_unit_test!(
+  @single<I, A> single_message_with_crc32({
+    let mut encoder = ProtoEncoder::new(1500);
+    encoder.with_checksum(ChecksumAlgorithm::Crc32);
+    encoder
+  }) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ]
+);
+
+#[cfg(feature = "xxhash32")]
+proto_encoder_decoder_unit_test!(
+  @single<I, A> single_message_with_xxhash32({
+    let mut encoder = ProtoEncoder::new(1500);
+    encoder.with_checksum(ChecksumAlgorithm::XxHash32);
+    encoder
+  }) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ]
+);
+
+#[cfg(feature = "xxhash64")]
+proto_encoder_decoder_unit_test!(
+  @single<I, A> single_message_with_xxhash64({
+    let mut encoder = ProtoEncoder::new(1500);
+    encoder.with_checksum(ChecksumAlgorithm::XxHash64);
+    encoder
+  }) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ]
+);
+
+#[cfg(feature = "xxhash3")]
+proto_encoder_decoder_unit_test!(
+  @single<I, A> single_message_with_xxhash3({
+    let mut encoder = ProtoEncoder::new(1500);
+    encoder.with_checksum(ChecksumAlgorithm::XxHash3);
+    encoder
+  }) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ]
+);
+
+#[cfg(feature = "xxhash3")]
+proto_encoder_decoder_unit_test!(
+  @single<I, A> single_message_with_murmur3({
+    let mut encoder = ProtoEncoder::new(1500);
+    encoder.with_checksum(ChecksumAlgorithm::Murmur3);
+    encoder
+  }) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ]
+);
+
+#[cfg(feature = "lz4")]
+proto_encoder_decoder_unit_test!(
+  @single<I, A> single_message_with_lz4({
+    let mut encoder = ProtoEncoder::new(1500);
+    encoder.with_compression(CompressAlgorithm::Lz4);
+    encoder
+  }) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ]
+);
+
+#[cfg(feature = "zstd")]
+proto_encoder_decoder_unit_test!(
+  @single<I, A> single_message_with_zstd({
+    let mut encoder = ProtoEncoder::new(1500);
+    encoder.with_compression(CompressAlgorithm::Zstd(Default::default()));
+    encoder
+  }) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ]
+);
+
+#[cfg(feature = "snappy")]
+proto_encoder_decoder_unit_test!(
+  @single<I, A> single_message_with_snappy({
+    let mut encoder = ProtoEncoder::new(1500);
+    encoder.with_compression(CompressAlgorithm::Snappy);
+    encoder
+  }) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ]
+);
+
+#[cfg(feature = "brotli")]
+proto_encoder_decoder_unit_test!(
+  @single<I, A> single_message_with_brotli({
+    let mut encoder = ProtoEncoder::new(1500);
+    encoder.with_compression(CompressAlgorithm::Brotli(Default::default()));
+    encoder
+  }) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ]
+);
+
+#[cfg(feature = "encryption")]
+proto_encoder_decoder_unit_test!(
+  @single<I, A>
+  single_message_encrypted_by_nopadding_aes128(ProtoEncoder::new(1500), SecretKey::random_aes128(), EncryptionAlgorithm::NoPadding) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ],
+  single_message_encrypted_by_nopadding_aes192(ProtoEncoder::new(1500), SecretKey::random_aes192(), EncryptionAlgorithm::NoPadding) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ],
+  single_message_encrypted_by_nopadding_aes256(ProtoEncoder::new(1500), SecretKey::random_aes256(), EncryptionAlgorithm::NoPadding) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ],
+  single_message_encrypted_by_pkcs7_aes128(ProtoEncoder::new(1500), SecretKey::random_aes128(), EncryptionAlgorithm::Pkcs7) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ],
+  single_message_encrypted_by_pkcs7_aes192(ProtoEncoder::new(1500), SecretKey::random_aes192(), EncryptionAlgorithm::Pkcs7) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ],
+  single_message_encrypted_by_pkcs7_aes256(ProtoEncoder::new(1500), SecretKey::random_aes256(), EncryptionAlgorithm::Pkcs7) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ],
+);
+
+#[cfg(feature = "encryption")]
+proto_encoder_decoder_unit_test!(
+  @single<I, A>
+  single_message_encrypted_by_nopadding_aes128_with_label(ProtoEncoder::new(1500), Label::try_from("test").unwrap(), SecretKey::random_aes128(), EncryptionAlgorithm::NoPadding) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ],
+  single_message_encrypted_by_nopadding_aes192_with_label(ProtoEncoder::new(1500), Label::try_from("test").unwrap(), SecretKey::random_aes192(), EncryptionAlgorithm::NoPadding) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ],
+  single_message_encrypted_by_nopadding_aes256_with_label(ProtoEncoder::new(1500), Label::try_from("test").unwrap(), SecretKey::random_aes256(), EncryptionAlgorithm::NoPadding) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ],
+  single_message_encrypted_by_pkcs7_aes128_with_label(ProtoEncoder::new(1500), Label::try_from("test").unwrap(), SecretKey::random_aes128(), EncryptionAlgorithm::Pkcs7) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ],
+  single_message_encrypted_by_pkcs7_aes192_with_label(ProtoEncoder::new(1500), Label::try_from("test").unwrap(), SecretKey::random_aes192(), EncryptionAlgorithm::Pkcs7) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ],
+  single_message_encrypted_by_pkcs7_aes256_with_label(ProtoEncoder::new(1500), Label::try_from("test").unwrap(), SecretKey::random_aes256(), EncryptionAlgorithm::Pkcs7) [
+    (u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)
+  ],
+);

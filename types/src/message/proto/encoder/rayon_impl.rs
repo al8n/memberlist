@@ -58,11 +58,13 @@ where
       } => {
         let mut buf = EncodeBuffer::with_capacity(hint.input_size);
         buf.resize(hint.input_size, 0);
+        buf[0] = crate::message::COMPOOUND_MESSAGE_TAG;
+        buf[1] = num_msgs as u8;
         let res =
           match msgs
             .iter()
             .take(num_msgs)
-            .try_fold((0, &mut buf), |(mut offset, buf), msg| {
+            .try_fold((2, &mut buf), |(mut offset, buf), msg| {
               match msg.encodable_encode(&mut buf[offset..]) {
                 Ok(written) => {
                   offset += written;

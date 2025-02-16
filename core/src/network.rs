@@ -121,12 +121,12 @@ where
       feature = "murmur3",
     ))]
     if !self.inner.transport.packet_reliable() {
-      encoder.with_checksum(self.inner.opts.checksum_algo());
+      encoder.maybe_checksum(self.inner.opts.checksum_algo());
     }
 
     #[cfg(feature = "encryption")]
     if !self.inner.transport.packet_secure() {
-      encoder.with_encryption(self.inner.opts.encryption_algo().map(|algo| {
+      encoder.maybe_encryption(self.inner.opts.encryption_algo().map(|algo| {
         (
           algo,
           SecretKey::Aes128([0; 16]), // TODO: get the keyring from the memberlist
@@ -144,7 +144,7 @@ where
       feature = "lzw",
       feature = "zlib",
     ))]
-    encoder.with_compression(self.inner.opts.compress_algo());
+    encoder.maybe_compression(self.inner.opts.compress_algo());
 
     encoder
   }

@@ -238,5 +238,8 @@ fn parse_str() {
       BrotliWindow::max()
     ))
   );
-  assert!("(-, -)".parse::<BrotliAlgorithm>().is_err());
+  assert_eq!(
+    "(-, -)".parse::<BrotliAlgorithm>(),
+    Ok(BrotliAlgorithm::new())
+  );
 }

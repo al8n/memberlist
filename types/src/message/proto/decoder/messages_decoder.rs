@@ -125,6 +125,20 @@ where
       return None;
     }
 
+    if self.decoder.num_msgs == 1 {
+      return Some(
+        <<Message<I, A> as Data>::Ref<'a> as DataRef<Message<I, A>>>::decode(self.buf)
+          .map(|(read, data)| {
+            self.offset += read;
+            self.msg_index += 1;
+            data
+          })
+          .inspect_err(|_| {
+            self.should_stop = true;
+          }),
+      );
+    }
+
     Some(
       <<Message<I, A> as Data>::Ref<'a> as DataRef<Message<I, A>>>::decode_length_delimited(
         &self.buf[self.offset..],

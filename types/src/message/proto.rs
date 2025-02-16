@@ -22,8 +22,8 @@ struct AeadBuffer<'a> {
 const _: () = {
   impl<'a> AeadBuffer<'a> {
     #[inline]
-    const fn new(buf: &'a mut [u8]) -> Self {
-      Self { buf, len: 0 }
+    const fn new(buf: &'a mut [u8], len: usize) -> Self {
+      Self { buf, len }
     }
   }
 
@@ -54,9 +54,104 @@ const _: () = {
       if len >= self.len {
         return;
       }
-
       self.buf[len..self.len].fill(0);
       self.len = len;
     }
   }
 };
+
+#[cfg(test)]
+mod tests {
+  use std::net::IpAddr;
+
+  use bytes::{BufMut, Bytes, BytesMut};
+  use triomphe::Arc;
+
+  use crate::{
+    message::proto::AeadBuffer, ChecksumAlgorithm, EncryptionAlgorithm, Nack, SecretKey,
+  };
+
+  use super::{
+    super::{Data, DataRef, Message},
+    MessagesDecoder, MessagesDecoderIter, ProtoDecoder, ProtoDecoderError, ProtoEncoder,
+    ProtoEncoderError,
+  };
+
+  #[quickcheck_macros::quickcheck]
+  fn encode_decode_plain_message(message: Message<String, IpAddr>) -> bool {
+    let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
+      let mut encoder = ProtoEncoder::new(1500);
+      let messages = [message];
+      let pk = SecretKey::random_aes128();
+      encoder
+        .with_messages(&messages)
+        .with_encryption(EncryptionAlgorithm::NoPadding, pk);
+      // .with_checksum(Some(ChecksumAlgorithm::Crc32));
+      let data = encoder
+        .encode()
+        .collect::<Result<Vec<_>, ProtoEncoderError>>()?;
+
+      let mut msgs = Vec::new();
+      for payload in data {
+        // println!("payload: {:?}", payload);
+        let mut decoder = ProtoDecoder::default();
+        decoder.with_encryption(Some(Arc::from_iter([pk])));
+        let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+
+        let decoder = MessagesDecoder::<String, IpAddr, _>::new(data)?;
+        for decoded in decoder.iter() {
+          let decoded = decoded?;
+          msgs.push(Message::<String, IpAddr>::from_ref(decoded)?);
+        }
+      }
+
+      assert_eq!(msgs, messages);
+
+      if msgs != messages {
+        return Err("messages do not match".into());
+      }
+
+      Ok(())
+    });
+
+    match res {
+      Ok(_) => true,
+      Err(e) => {
+        println!("error: {}", e);
+        false
+      }
+    }
+  }
+
+  // #[quickcheck_macros::quickcheck]
+  // fn encode_decode_plain_messages(messages: Vec<Message<String, IpAddr>>) -> bool {
+  //   let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
+  //     let mut encoder = ProtoEncoder::new(1500);
+  //     encoder.with_messages(&messages);
+  //     let data = encoder.encode().collect::<Result<Vec<_>, ProtoEncoderError>>()?;
+
+  //     let mut msgs = Vec::new();
+  //     for payload in data {
+  //       let decoder = ProtoDecoder::default();
+  //       let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+  //       let decoder = MessagesDecoder::<String, IpAddr, _>::new(data)?;
+  //       for decoded in decoder.iter() {
+  //         let decoded = decoded?;
+  //         msgs.push(Message::<String, IpAddr>::from_ref(decoded)?);
+  //       }
+  //     }
+
+  //     assert_eq!(msgs, messages);
+
+  //     Ok(())
+  //   });
+
+  //   match res {
+  //     Ok(_) => true,
+  //     Err(e) => {
+  //       println!("error: {}", e);
+  //       false
+  //     }
+  //   }
+  // }
+}

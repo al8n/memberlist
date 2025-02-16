@@ -31,6 +31,21 @@ pub struct Options {
   )]
   label: Label,
 
+  /// Skips the check that inbound packets and gossip
+  /// streams need to be label prefixed.
+  #[viewit(
+    getter(
+      const,
+      attrs(
+        doc = "Get if the check that inbound packets and gossip streams need to be label prefixed."
+      ),
+    ),
+    setter(attrs(
+      doc = "Set if the check that inbound packets and gossip streams need to be label prefixed. (Builder pattern)"
+    ),)
+  )]
+  skip_inbound_label_check: bool,
+
   /// The timeout for establishing a stream connection with
   /// a remote node for a full state sync, and for stream read and write
   /// operations.
@@ -494,6 +509,7 @@ impl Options {
       dead_node_reclaim_time: Duration::ZERO,
       queue_check_interval: Duration::from_secs(30),
       checksum_algo: None,
+      skip_inbound_label_check: false,
       #[cfg(any(feature = "compression", feature = "encryption"))]
       offload_size: 1024 * 1024,
       #[cfg(feature = "encryption")]
