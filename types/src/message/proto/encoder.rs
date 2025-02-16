@@ -889,11 +889,10 @@ where
 
           // compress to the buffer
           let compressed_len = algo.compress_to(&encoded_buf, &mut buf[co..])?;
-
           #[cfg(debug_assertions)]
           debug_assert!(compressed_len <= ch.max_output_size(), "compress algo: {algo}, compressed_len: {}, max_compressed_output_size: {}", compressed_len, ch.max_output_size());
 
-          bytes_written = Some(ChecksumHint::HEADER_SIZE + compressed_len);
+          bytes_written = Some(CompressHint::HEADER_SIZE + compressed_len);
         }
       } else {}
     }

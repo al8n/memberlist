@@ -336,9 +336,6 @@ impl CompressAlgorithm {
       CompressAlgorithm::Lz4 => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "lz4")] {
-            // let input_len = src.len() as u32;
-            // dst[..LZ4_PREPEND_LEN_SIZE].copy_from_slice(&input_len.to_le_bytes());
-
             lz4_flex::compress_into(src, dst)
               .map_err(CompressionError::lz4_compress_error)
           } else {
