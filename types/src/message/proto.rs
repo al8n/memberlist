@@ -66,10 +66,11 @@ mod tests {
 
   use bytes::{BufMut, Bytes, BytesMut};
   use nodecraft::Node;
-use triomphe::Arc;
+  use triomphe::Arc;
 
   use crate::{
-    message::proto::AeadBuffer, Alive, ChecksumAlgorithm, EncryptionAlgorithm, Label, Meta, Nack, SecretKey
+    message::proto::AeadBuffer, Alive, ChecksumAlgorithm, EncryptionAlgorithm, Label, Meta, Nack,
+    SecretKey,
   };
 
   use super::{
@@ -88,8 +89,8 @@ use triomphe::Arc;
       encoder
         .with_messages(&messages)
         .with_compression(crate::CompressAlgorithm::Lz4);
-        // .with_encryption(EncryptionAlgorithm::NoPadding, pk)
-        // .with_label(&label);
+      // .with_encryption(EncryptionAlgorithm::NoPadding, pk)
+      // .with_label(&label);
       // .with_checksum(Some(ChecksumAlgorithm::Crc32));
       let data = encoder
         .encode()
@@ -134,20 +135,23 @@ use triomphe::Arc;
         Alive::new(
           3218360376,
           Node::new(
-            IpAddr::V4("117.49.90.72".parse().unwrap()), 
+            IpAddr::V4("117.49.90.72".parse().unwrap()),
             IpAddr::V4("94.244.218.196".parse().unwrap()),
-          )
+          ),
         )
-        .with_meta(Meta::from_static(b"hello world, hello world, hello world, hello world").unwrap())
+        .with_meta(
+          Meta::from_static(b"hello world, hello world, hello world, hello world").unwrap(),
+        ),
       );
       let messages = [message];
       // let label = Label::try_from("test").unwrap();
       // let pk = SecretKey::random_aes128();
       encoder
         .with_messages(&messages)
-        .with_compression(crate::CompressAlgorithm::Snappy);
-        // .with_encryption(EncryptionAlgorithm::NoPadding, pk)
-        // .with_label(&label);
+        .with_compression(crate::CompressAlgorithm::Snappy)
+        .with_compression_threshold(32);
+      // .with_encryption(EncryptionAlgorithm::NoPadding, pk)
+      // .with_label(&label);
       // .with_checksum(Some(ChecksumAlgorithm::Crc32));
       let data = encoder
         .encode()
@@ -157,13 +161,7 @@ use triomphe::Arc;
       let mut decoder = ProtoDecoder::default();
       decoder.with_offload_size(u16::MAX as usize);
       for payload in data {
-        println!("len {} payload: {:?}", payload.len(), payload);
         let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
-        println!("raw data: {}", messages[0].encoded_len());
-
-        let compressed = snap::raw::Encoder::new().compress_vec(data.as_ref()).unwrap();
-        println!("compressed: {}", compressed.len());
-
         let decoder = MessagesDecoder::<IpAddr, IpAddr, _>::new(data)?;
         for decoded in decoder.iter() {
           let decoded = decoded?;
@@ -181,7 +179,7 @@ use triomphe::Arc;
     });
 
     match res {
-      Ok(_) => {},
+      Ok(_) => {}
       Err(e) => {
         panic!("{e}");
       }

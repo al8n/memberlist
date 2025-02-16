@@ -326,6 +326,7 @@ impl ProtoHint {
   const fn new(input_size: usize) -> Self {
     Self {
       input_size,
+      // TODO(al8n): change this field to Option to make more sense
       max_output_size: input_size,
       #[cfg(any(
         feature = "crc32",
@@ -652,7 +653,8 @@ where
     if let Some(compress) = &self.compress {
       if hint.max_output_size >= self.compression_threshold {
         let max_compressed_output_size = compress.max_compress_len(hint.input_size)?;
-        hint.max_output_size += CompressHint::HEADER_SIZE + max_compressed_output_size;
+        hint.max_output_size +=
+          CompressHint::HEADER_SIZE + (max_compressed_output_size - hint.input_size);
         hint.compress_hint = Some(
           CompressHint::new()
             .with_header_offset(offset)

@@ -617,4 +617,40 @@ mod tests {
     let decompressed = algo.decompress_to(&buffer[..written], &mut orig).unwrap();
     data == orig && uncompressed_data_len == decompressed
   }
+
+  #[cfg(feature = "snappy")]
+  #[test]
+  fn max_snappy_output_size() {
+    let algo = CompressAlgorithm::Snappy;
+    let max_compress_len = algo.max_compress_len(4096).unwrap();
+    println!("max_compress_len: {}", max_compress_len);
+    assert!(max_compress_len >= 4096);
+  }
+
+  #[cfg(feature = "lz4")]
+  #[test]
+  fn max_lz4_output_size() {
+    let algo = CompressAlgorithm::Lz4;
+    let max_compress_len = algo.max_compress_len(4096).unwrap();
+    println!("max_compress_len: {}", max_compress_len);
+    assert!(max_compress_len >= 4096);
+  }
+
+  #[cfg(feature = "brotli")]
+  #[test]
+  fn max_brotli_output_size() {
+    let algo = CompressAlgorithm::Brotli(Default::default());
+    let max_compress_len = algo.max_compress_len(4096).unwrap();
+    println!("max_compress_len: {}", max_compress_len);
+    assert!(max_compress_len >= 4096);
+  }
+
+  #[cfg(feature = "zstd")]
+  #[test]
+  fn max_zstd_output_size() {
+    let algo = CompressAlgorithm::Zstd(Default::default());
+    let max_compress_len = algo.max_compress_len(4096).unwrap();
+    println!("max_compress_len: {}", max_compress_len);
+    assert!(max_compress_len >= 4096);
+  }
 }
