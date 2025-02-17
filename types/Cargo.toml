@@ -56,8 +56,12 @@ arbitrary = ["dep:arbitrary", "nodecraft/arbitrary", "smol_str/arbitrary"]
 quickcheck = ["dep:quickcheck", "nodecraft/quickcheck"]
 serde = ["dep:serde", "smol_str/serde", "bytes/serde", "nodecraft/serde", "smallvec-wrapper/serde"]
 
+tokio = ["agnostic-io/tokio"]
+
 [dependencies]
 among.workspace = true
+agnostic-lite.workspace = true
+agnostic-io.workspace = true
 auto_enums = "0.8"
 bytes.workspace = true
 const-varint.workspace = true
@@ -65,6 +69,7 @@ cfg-if.workspace = true
 derive_more = { workspace = true, features = ["from", "display", "is_variant", "unwrap", "try_unwrap"] }
 either.workspace = true
 futures-channel = "0.3"
+futures-util = "0.3"
 ipnet = { version = "2", default-features = false }
 nodecraft.workspace = true
 paste.workspace = true
@@ -113,7 +118,8 @@ rand.workspace = true
 serde_json = "1"
 bincode = "1"
 futures = { workspace = true, features = ["executor"] }
-
+agnostic-lite = { version = "0.5", features = ["tokio"] }
+tokio = { version = "1", features = ["full"] }
 
 [package.metadata.docs.rs]
 all-features = true

@@ -298,31 +298,6 @@ pub trait Transport: Sized + Send + Sync + 'static {
     }
   }
 
-  /// Used to close a connection to a remote node.
-  ///
-  /// This method will be invoked when the data belongs to the memberlist protocol
-  /// has been processed by the [`Memberlist`], and the connection is no longer needed.
-  ///
-  /// The implementor can send more data to the remote node after sending the `payload` in
-  /// [`Transport::write`]. In this method, the implementor can read the extra data sent
-  /// by the remote node.
-  ///
-  /// e.g.
-  ///
-  /// If in [`Transport::write`], the implementor appends a suffix to the payload,
-  /// then in this method, the implementor can read the suffix sent by the remote node.
-  fn close(
-    &self,
-    addr: &Self::ResolvedAddress,
-    stream: Self::Stream,
-  ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-    async move {
-      let _addr = addr;
-      let _stream = stream;
-      Ok(())
-    }
-  }
-
   /// A packet-oriented interface that fires off the given
   /// payload to the given address in a connectionless fashion.
   ///

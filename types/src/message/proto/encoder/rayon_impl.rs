@@ -64,7 +64,7 @@ where
           match msgs
             .iter()
             .take(num_msgs)
-            .try_fold((2, &mut buf), |(mut offset, buf), msg| {
+            .try_fold((super::super::BATCH_OVERHEAD, &mut buf), |(mut offset, buf), msg| {
               match msg.encodable_encode(&mut buf[offset..]) {
                 Ok(written) => {
                   offset += written;
@@ -80,7 +80,7 @@ where
                 "the actual encoded length {} does not match the encoded length {} in hint",
                 final_size, hint.input_size
               );
-
+              buf[2..super::super::BATCH_OVERHEAD].copy_from_slice(&(final_size as u32).to_be_bytes());
               self.encode_helper(&buf, hint)
             }
             Err(err) => Err(err.into()),

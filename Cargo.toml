@@ -55,6 +55,7 @@ nodecraft = { version = "0.7", default-features = false }
 #   "agnostic",
 # ] }
 paste = "1"
+peekable = "0.2"
 pin-project = "1"
 scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }

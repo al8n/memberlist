@@ -178,17 +178,13 @@ where
     // Send our state
     self.send_local_state(&mut conn, join).await?;
 
-    // conn.set_deadline(Some(
-    //   <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
-    // ));
-
     let res = <T::Runtime as RuntimeLite>::timeout_at(
       <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
       self.read_message(id.address(), &mut conn),
     )
     .await;
 
-    let (_, payload) = match res {
+    let payload = match res {
       Ok(res) => res?,
       Err(e) => return Err(Error::transport(std::io::Error::from(e).into())),
     };
@@ -200,12 +196,7 @@ where
         tracing::error!(local_addr = %self.inner.id, peer_addr = %id, err = %resp, "memberlist: push/pull sync failed");
         return Err(Error::remote(resp));
       }
-      MessageRef::PushPull(pp) => {
-        if let Err(e) = self.inner.transport.close(id.address(), conn).await {
-          tracing::debug!(local_addr = %self.inner.id, peer_addr = %id, err = %e, "memberlist.transport: failed to close stream");
-        }
-        pp
-      }
+      MessageRef::PushPull(pp) => pp,
       msg => return Err(Error::unexpected_message("PushPull", msg.ty().kind())),
     };
 

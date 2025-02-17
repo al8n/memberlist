@@ -51,10 +51,7 @@ where
 
     let res = <T::Runtime as RuntimeLite>::timeout_at(deadline, async {
       self.send_message(&mut conn, &msgs).await?;
-      self
-        .read_message(target, &mut conn)
-        .await
-        .map(|(_, msg)| msg)
+      self.read_message(target, &mut conn).await
     })
     .await;
 
@@ -87,10 +84,6 @@ where
 
       if seqn != ping_sequence_number {
         return Err(Error::sequence_number_mismatch(ping_sequence_number, seqn));
-      }
-
-      if let Err(e) = self.inner.transport.close(target, conn).await {
-        tracing::warn!(local_addr = %self.inner.id, peer_addr = %target, err = %e, "memberlist.transport: failed to close stream");
       }
 
       Ok(true)
@@ -291,17 +284,42 @@ where
     &self,
     from: &<T::Resolver as AddressResolver>::ResolvedAddress,
     conn: &mut T::Stream,
-  ) -> Result<(usize, Bytes), Error<T, D>> {
-    let readed = self
+  ) -> Result<Bytes, Error<T, D>> {
+    self
       .inner
       .transport
       .read(from, conn)
       .await
       .map_err(Error::transport)?;
 
-    // Decrypt/Decompress/Decode the message
+    let mut reader = futures::io::BufReader::new(conn);
 
-    todo!()
+    let mut decoder = ProtoDecoder::new();
+
+    #[cfg(any(
+      feature = "encryption",
+      feature = "zstd",
+      feature = "lz4",
+      feature = "brotli",
+      feature = "snappy",
+    ))]
+    decoder.with_offload_size(self.inner.opts.offload_size);
+
+    #[cfg(feature = "encryption")]
+    if self.encryption_enabled() && self.inner.opts.gossip_verify_incoming {
+      decoder.with_encryption(triomphe::Arc::from_iter(
+        self.inner.keyring.as_ref().unwrap().keys(),
+      ));
+    }
+
+    if !self.inner.opts.skip_inbound_label_check {
+      decoder.with_label(self.inner.opts.label().clone());
+    }
+
+    decoder
+      .decode_from_reader::<_, T::Runtime>(&mut reader)
+      .await
+      .map_err(|e| Error::transport(e.into()))
   }
 
   async fn raw_send_packet<'a>(

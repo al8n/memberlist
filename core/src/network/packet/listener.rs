@@ -179,7 +179,7 @@ where
     ))]
     decoder.with_offload_size(self.inner.opts.offload_size);
 
-    let plain = match decoder.decode(payload).await {
+    let plain = match decoder.decode::<T::Runtime>(payload).await {
       Ok(plain) => plain,
       Err(e) => {
         tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to decode message");

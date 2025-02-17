@@ -125,13 +125,8 @@ where
       .map_err(Error::transport)?;
     self
       .send_message(&mut conn, &[Message::UserData(msg)])
-      .await?;
-    self
-      .inner
-      .transport
-      .close(addr, conn)
       .await
-      .map_err(Error::transport)
+      .map_err(Into::into)
   }
 }
 
@@ -296,7 +291,7 @@ where
           }
         }
       }
-      Ok(Ok((_, payload))) => payload,
+      Ok(Ok(payload)) => payload,
     };
 
     let msg = match <MessageRef<'_, _, _> as DataRef<Message<T::Id, T::ResolvedAddress>>>::decode(
@@ -339,10 +334,6 @@ where
             tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to send ack response");
           }
         }
-
-        if let Err(e) = self.inner.transport.close(&addr, conn).await {
-          tracing::warn!(err=%e, remote_node = %addr, "memberlist.stream: failed to close stream");
-        }
       }
       MessageRef::PushPull(pp) => {
         // Increment counter of pending push/pulls
@@ -364,10 +355,6 @@ where
 
         if let Err(e) = self.merge_remote_state(pp).await {
           tracing::error!(err=%e, remote_node = %addr, "memberlist.stream: failed to push/pull merge");
-        }
-
-        if let Err(e) = self.inner.transport.close(&addr, conn).await {
-          tracing::warn!(err=%e, remote_node = %addr, "memberlist.stream: failed to close stream");
         }
       }
       MessageRef::UserData(data) => {

@@ -258,12 +258,6 @@ pub enum EncryptionError {
   /// Encryt/Decrypt errors
   #[error("failed to encrypt/decrypt")]
   Encryptor,
-  /// No installed key
-  #[error("key not found for decryption")]
-  SecretKeyNotFound,
-  /// No installed keys could decrypt the message
-  #[error("security: no installed keys could decrypt the message")]
-  NoInstalledKeys,
 }
 
 impl From<aead::Error> for EncryptionError {

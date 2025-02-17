@@ -234,10 +234,6 @@ pub struct CompressHint {
 ))]
 impl CompressHint {
   /// The header size of the compressed payload.
-  ///
-  /// - 1 byte for the compression message tag
-  /// - 2 bytes for the compression algorithm
-  /// - 4 bytes for the length of the compressed message.
   const HEADER_SIZE: usize = super::COMPRESSED_MESSAGE_HEADER_SIZE;
 
   #[inline]
@@ -812,7 +808,7 @@ where
           match msgs
             .iter()
             .take(num_msgs)
-            .try_fold((2, &mut buf), |(mut offset, buf), msg| {
+            .try_fold((super::BATCH_OVERHEAD, &mut buf), |(mut offset, buf), msg| {
               match msg.encodable_encode(&mut buf[offset..]) {
                 Ok(written) => {
                   offset += written;
@@ -828,7 +824,7 @@ where
                 "the actual encoded length {} does not match the encoded length {} in hint",
                 final_size, hint.input_size
               );
-
+              buf[2..super::BATCH_OVERHEAD].copy_from_slice(&(final_size as u32).to_be_bytes());
               self.encode_helper(&buf, hint)
             }
             Err(err) => Err(err.into()),
@@ -884,13 +880,19 @@ where
           // Add the original length of the compressed message, this is
           // useful for pre-allocating the buffer when decompressing
           buf[co..co + PAYLOAD_LEN_SIZE].copy_from_slice(&(written as u32).to_be_bytes());
-          co += PAYLOAD_LEN_SIZE; // Add the length of the total compressed message
+          co += PAYLOAD_LEN_SIZE;
+          // Reserve the space for the compressed payload length
+          co += PAYLOAD_LEN_SIZE;
 
+          let po = ch.payload_offset();
           #[cfg(debug_assertions)]
-          assert_eq!(co, ch.payload_offset(), "the actual compress payload offset {} does not match the compress payload offset {} in hint", co, ch.payload_offset());
+          assert_eq!(co, po, "the actual compress payload offset {} does not match the compress payload offset {} in hint", co, po);
 
           // compress to the buffer
-          let compressed_len = algo.compress_to(&encoded_buf, &mut buf[co..])?;
+          let compressed_len = algo.compress_to(&encoded_buf, &mut buf[po..])?;
+          // write the compressed length
+          buf[po - PAYLOAD_LEN_SIZE..po].copy_from_slice(&(compressed_len as u32).to_be_bytes());
+
           #[cfg(debug_assertions)]
           debug_assert!(compressed_len <= ch.max_output_size(), "compress algo: {algo}, compressed_len: {}, max_compressed_output_size: {}", compressed_len, ch.max_output_size());
 
