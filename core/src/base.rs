@@ -27,6 +27,9 @@ use super::{
   Options,
 };
 
+#[cfg(feature = "encryption")]
+use super::keyring::Keyring;
+
 #[cfg(any(test, feature = "test"))]
 pub(crate) mod tests;
 
@@ -254,6 +257,8 @@ where
   pub(crate) shutdown_tx: Sender<()>,
   pub(crate) advertise: <T::Resolver as AddressResolver>::ResolvedAddress,
   pub(crate) opts: Arc<Options>,
+  #[cfg(feature = "encryption")]
+  pub(crate) keyring: Option<Keyring>,
 }
 
 impl<T, D> MemberlistCore<T, D>
@@ -362,6 +367,21 @@ where
     let broadcast = TransmitLimitedQueue::new(opts.retransmit_mult, num_nodes);
 
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
+
+    #[cfg(feature = "encryption")]
+    let keyring = match (opts.primary_key, opts.secret_keys.is_empty()) {
+      (None, false) => {
+        tracing::warn!("memberlist: using first key in keyring as primary key");
+        let mut iter = opts.secret_keys.iter().copied();
+        let pk = iter.next().unwrap();
+        let keyring = Keyring::with_keys(pk, iter);
+        Some(keyring)
+      }
+      (Some(pk), true) => Some(Keyring::new(pk)),
+      (Some(pk), false) => Some(Keyring::with_keys(pk, opts.secret_keys.iter().copied())),
+      (None, true) => None,
+    };
+
     let this = Memberlist {
       inner: Arc::new(MemberlistCore {
         id: id.cheap_clone(),
@@ -382,6 +402,8 @@ where
         advertise: advertise.cheap_clone(),
         transport: Arc::new(transport),
         opts: Arc::new(opts),
+        #[cfg(feature = "encryption")]
+        keyring,
       }),
       delegate: delegate.map(Arc::new),
     };

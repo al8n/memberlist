@@ -1,8 +1,8 @@
 use std::iter::once;
 
-use async_lock::RwLock;
 use indexmap::IndexSet;
 use memberlist_types::SecretKey;
+use parking_lot::RwLock;
 use triomphe::Arc;
 
 /// Error for [`Keyring`]
@@ -92,15 +92,15 @@ impl Keyring {
   /// Returns the key on the ring at position 0. This is the key used
   /// for encrypting messages, and is the first key tried for decrypting messages.
   #[inline]
-  pub async fn primary_key(&self) -> SecretKey {
-    self.inner.read().await.primary_key
+  pub fn primary_key(&self) -> SecretKey {
+    self.inner.read().primary_key
   }
 
   /// Drops a key from the keyring. This will return an error if the key
   /// requested for removal is currently at position 0 (primary key).
   #[inline]
-  pub async fn remove(&self, key: &[u8]) -> Result<(), KeyringError> {
-    let mut inner = self.inner.write().await;
+  pub fn remove(&self, key: &[u8]) -> Result<(), KeyringError> {
+    let mut inner = self.inner.write();
     if &inner.primary_key == key {
       return Err(KeyringError::RemovePrimaryKey);
     }
@@ -115,15 +115,15 @@ impl Keyring {
   /// key should be either 16, 24, or 32 bytes to select AES-128,
   /// AES-192, or AES-256.
   #[inline]
-  pub async fn insert(&self, key: SecretKey) {
-    self.inner.write().await.keys.insert(key);
+  pub fn insert(&self, key: SecretKey) {
+    self.inner.write().keys.insert(key);
   }
 
   /// Changes the key used to encrypt messages. This is the only key used to
   /// encrypt messages, so peers should know this key before this method is called.
   #[inline]
-  pub async fn use_key(&self, key_data: &[u8]) -> Result<(), KeyringError> {
-    let mut inner = self.inner.write().await;
+  pub fn use_key(&self, key_data: &[u8]) -> Result<(), KeyringError> {
+    let mut inner = self.inner.write();
     if key_data == inner.primary_key.as_ref() {
       return Ok(());
     }
@@ -142,14 +142,46 @@ impl Keyring {
 
   /// Returns the current set of keys on the ring.
   #[inline]
-  pub async fn keys(&self) -> impl Iterator<Item = SecretKey> + Send + 'static {
-    let inner = self.inner.read().await;
+  pub fn keys(&self) -> impl Iterator<Item = SecretKey> + Send + 'static {
+    let inner = self.inner.read();
 
     // we must promise the first key is the primary key
     // so that when decrypt messages, we can try the primary key first
-    once(inner.primary_key).chain(inner.keys.clone().into_iter())
+    once(inner.primary_key).chain(inner.keys.clone())
   }
 }
+
+#[cfg(feature = "serde")]
+const _: () = {
+  use memberlist_types::SecretKeys;
+  use serde::{Deserialize, Serialize};
+
+  impl Serialize for Keyring {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+      S: serde::Serializer,
+    {
+      let keys = self.keys();
+      serializer.collect_seq(keys)
+    }
+  }
+
+  impl<'de> Deserialize<'de> for Keyring {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+      D: serde::Deserializer<'de>,
+    {
+      let keys = SecretKeys::deserialize(deserializer)?;
+      if keys.is_empty() {
+        return Err(serde::de::Error::custom(
+          "keyring must have at least one key",
+        ));
+      }
+
+      Ok(Keyring::with_keys(keys[0], keys.into_iter().skip(1)))
+    }
+  }
+};
 
 #[cfg(test)]
 mod tests {
@@ -161,42 +193,42 @@ mod tests {
     SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
   ];
 
-  #[tokio::test]
-  async fn test_primary_only() {
+  #[test]
+  fn test_primary_only() {
     let keyring = Keyring::new(TEST_KEYS[1]);
-    assert_eq!(keyring.keys().await.collect::<Vec<_>>().len(), 1);
+    assert_eq!(keyring.keys().collect::<Vec<_>>().len(), 1);
   }
 
-  #[tokio::test]
-  async fn test_get_primary_key() {
+  #[test]
+  fn test_get_primary_key() {
     let keyring = Keyring::with_keys(TEST_KEYS[1], TEST_KEYS.iter().copied());
-    assert_eq!(keyring.primary_key().await.as_ref(), TEST_KEYS[1].as_ref());
+    assert_eq!(keyring.primary_key().as_ref(), TEST_KEYS[1].as_ref());
   }
 
-  #[tokio::test]
-  async fn test_insert_remove_use() {
+  #[test]
+  fn test_insert_remove_use() {
     let keyring = Keyring::new(TEST_KEYS[1]);
 
     // Use non-existent key throws error
-    keyring.use_key(&TEST_KEYS[2]).await.unwrap_err();
+    keyring.use_key(&TEST_KEYS[2]).unwrap_err();
 
     // Add key to ring
-    keyring.insert(TEST_KEYS[2]).await;
-    assert_eq!(keyring.inner.read().await.keys.len() + 1, 2);
-    assert_eq!(keyring.keys().await.next().unwrap(), TEST_KEYS[1]);
+    keyring.insert(TEST_KEYS[2]);
+    assert_eq!(keyring.inner.read().keys.len() + 1, 2);
+    assert_eq!(keyring.keys().next().unwrap(), TEST_KEYS[1]);
 
     // Use key that exists should succeed
-    keyring.use_key(&TEST_KEYS[2]).await.unwrap();
-    assert_eq!(keyring.keys().await.next().unwrap(), TEST_KEYS[2]);
+    keyring.use_key(&TEST_KEYS[2]).unwrap();
+    assert_eq!(keyring.keys().next().unwrap(), TEST_KEYS[2]);
 
-    let primary_key = keyring.primary_key().await;
+    let primary_key = keyring.primary_key();
     assert_eq!(primary_key.as_ref(), TEST_KEYS[2].as_ref());
 
     // Removing primary key should fail
-    keyring.remove(&TEST_KEYS[2]).await.unwrap_err();
+    keyring.remove(&TEST_KEYS[2]).unwrap_err();
 
     // Removing non-primary key should succeed
-    keyring.remove(&TEST_KEYS[1]).await.unwrap();
-    assert_eq!(keyring.inner.read().await.keys.len() + 1, 1);
+    keyring.remove(&TEST_KEYS[1]).unwrap();
+    assert_eq!(keyring.inner.read().keys.len() + 1, 1);
   }
 }

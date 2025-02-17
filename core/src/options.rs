@@ -10,7 +10,7 @@ use super::types::ChecksumAlgorithm;
 use super::types::CompressAlgorithm;
 
 #[cfg(feature = "encryption")]
-use super::types::EncryptionAlgorithm;
+use super::types::{EncryptionAlgorithm, SecretKey, SecretKeys};
 
 #[cfg(feature = "metrics")]
 pub use super::types::MetricLabels;
@@ -247,8 +247,6 @@ pub struct Options {
   )]
   protocol_version: ProtocolVersion,
 
-  // #[viewit(getter(style = "ref", result(converter(fn = "Option::as_ref"), type = "Option<&Keyring>")))]
-  // secret_keyring: Option<Keyring>,
   /// Used to guarantee protocol-compatibility
   /// for any custom messages that the delegate might do (broadcasts,
   /// local/remote state, etc.). If you don't set these, then the protocol
@@ -423,6 +421,54 @@ pub struct Options {
   )]
   gossip_verify_incoming: bool,
 
+  /// Used to initialize the primary encryption key in a keyring.
+  ///
+  /// The primary encryption key is the only key used to encrypt messages and
+  /// the first key used while attempting to decrypt messages. Providing a
+  /// value for this primary key will enable message-level encryption and
+  /// verification, and automatically install the key onto the keyring.
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      result(converter(fn = "Option::as_ref"), type = "Option<&SecretKey>"),
+      attrs(
+        doc = "Get the primary encryption key in a keyring.",
+        cfg(feature = "encryption"),
+        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+      ),
+    ),
+    setter(attrs(
+      doc = "Set the primary encryption key in a keyring. (Builder pattern)",
+      cfg(feature = "encryption"),
+      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+    ),)
+  )]
+  primary_key: Option<SecretKey>,
+
+  /// Holds all of the encryption keys used internally.
+  #[viewit(
+    getter(
+      style = "ref",
+      result(converter(fn = "AsRef::as_ref"), type = "&[SecretKey]"),
+      attrs(
+        doc = "Get all of the encryption keys used internally.",
+        cfg(feature = "encryption"),
+        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+      ),
+    ),
+    setter(attrs(
+      doc = "Set all of the encryption keys used internally. (Builder pattern)",
+      cfg(feature = "encryption"),
+      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+    ))
+  )]
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  secret_keys: SecretKeys,
+
   /// Indicates that should the messages sent through transport will be compressed or not.
   ///
   /// Default is `None`.
@@ -518,6 +564,10 @@ impl Options {
       gossip_verify_incoming: false,
       #[cfg(feature = "encryption")]
       gossip_verify_outgoing: false,
+      #[cfg(feature = "encryption")]
+      primary_key: None,
+      #[cfg(feature = "encryption")]
+      secret_keys: SecretKeys::new(),
       #[cfg(feature = "compression")]
       compress_algo: None,
       #[cfg(feature = "metrics")]

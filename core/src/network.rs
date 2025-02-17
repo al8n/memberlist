@@ -125,13 +125,11 @@ where
     }
 
     #[cfg(feature = "encryption")]
-    if !self.inner.transport.packet_secure() {
-      encoder.maybe_encryption(self.inner.opts.encryption_algo().map(|algo| {
-        (
-          algo,
-          SecretKey::Aes128([0; 16]), // TODO: get the keyring from the memberlist
-        )
-      }));
+    if !self.inner.transport.packet_secure() && self.encryption_enabled() {
+      encoder.with_encryption(
+        self.inner.opts.encryption_algo().unwrap(),
+        self.inner.keyring.as_ref().unwrap().primary_key(),
+      );
     }
 
     #[cfg(any(

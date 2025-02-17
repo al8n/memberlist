@@ -77,7 +77,7 @@ either.workspace = true
 futures.workspace = true
 nodecraft = { workspace = true, features = ["default", "async", "agnostic", "resolver"] }
 paste.workspace = true
-parking_lot = "0.12"
+parking_lot = { version = "0.12", features = ["send_guard"] }
 pin-project.workspace = true
 rand.workspace = true
 scopeguard.workspace = true

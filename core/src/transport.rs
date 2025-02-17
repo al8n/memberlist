@@ -234,16 +234,6 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns the advertise address of the node
   fn advertise_address(&self) -> &Self::ResolvedAddress;
 
-  /// Returns the keyring (only used for encryption) of the node
-  #[cfg(feature = "encryption")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  fn keyring(&self) -> Option<&keyring::Keyring>;
-
-  /// Returns if this transport enables encryption
-  #[cfg(feature = "encryption")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  fn encryption_enabled(&self) -> bool;
-
   /// Returns the maximum size of a packet that can be sent
   fn max_packet_size(&self) -> usize;
 

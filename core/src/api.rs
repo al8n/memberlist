@@ -54,7 +54,7 @@ where
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
   #[inline]
   pub fn keyring(&self) -> Option<&super::keyring::Keyring> {
-    self.inner.transport.keyring()
+    self.inner.keyring.as_ref()
   }
 
   /// Returns `true` if the node enables encryption.
@@ -62,7 +62,9 @@ where
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
   #[inline]
   pub fn encryption_enabled(&self) -> bool {
-    self.inner.transport.encryption_enabled()
+    self.inner.keyring.is_some()
+      && self.inner.opts.encryption_algo.is_some()
+      && self.inner.opts.gossip_verify_outgoing
   }
 
   /// Returns the delegate, if any.
