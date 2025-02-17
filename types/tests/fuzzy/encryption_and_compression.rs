@@ -1,165 +1,70 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::{
-  CompressAlgorithm, Data, EncryptionAlgorithm, Label, Message, MessagesDecoder, ProtoDecoder,
-  ProtoEncoder, ProtoEncoderError, RandomSecretKeys,
+  CompressAlgorithm, Data, EncryptionAlgorithm, Label, Message, ProtoDecoder, ProtoEncoder,
+  RandomSecretKeys,
 };
 
-use bytes::{Bytes, BytesMut};
 use std::net::{IpAddr, SocketAddrV4};
 
 fn encode_decode_messages<I, A>(
   parallel: bool,
-
   compress_algo: CompressAlgorithm,
   encryption_algo: EncryptionAlgorithm,
   keys: RandomSecretKeys,
   messages: Vec<Message<I, A>>,
   label: Label,
   check_label: bool,
+  stream: bool,
 ) -> bool
 where
-  I: Data + PartialEq,
-  A: Data + PartialEq,
+  I: Data + PartialEq + Clone + 'static,
+  A: Data + PartialEq + Clone + 'static,
 {
-  let res = super::run(async move {
-    let encoder = ProtoEncoder::new(1500)
-      .with_messages(&messages)
-      .with_compression(compress_algo)
-      .with_encryption(encryption_algo, keys.pk)
-      .with_label(label.clone());
+  let encoder = ProtoEncoder::new(1500)
+    .with_messages(messages)
+    .with_compression(compress_algo)
+    .with_encryption(encryption_algo, keys.pk)
+    .with_label(label.clone());
 
-    let data = {
-      cfg_if::cfg_if! {
-        if #[cfg(feature = "rayon")] {
-          use rayon::iter::ParallelIterator;
-
-          if parallel {
-            encoder
-              .rayon_encode()
-              .map(|res| res)
-              .collect::<Result<Vec<_>, ProtoEncoderError>>()?
-          } else {
-            encoder
-              .encode()
-              .collect::<Result<Vec<_>, ProtoEncoderError>>()?
-          }
-        } else {
-          encoder
-            .encode()
-            .collect::<Result<Vec<_>, ProtoEncoderError>>()?
-        }
-      }
-    };
-
-    let mut msgs = Vec::new();
-    let mut decoder = ProtoDecoder::default();
-    decoder.with_encryption(keys.keys.clone());
-
-    if check_label {
-      decoder.with_label(label);
-    }
-
-    for payload in data {
-      let data = decoder
-        .decode::<agnostic_lite::tokio::TokioRuntime>(BytesMut::from(Bytes::from(payload)))
-        .await?;
-      let decoder = MessagesDecoder::<I, A, _>::new(data)?;
-      for decoded in decoder.iter() {
-        let decoded = decoded?;
-        msgs.push(Message::<I, A>::from_ref(decoded)?);
-      }
-    }
-
-    assert_eq!(msgs, messages);
-
-    Ok(())
-  });
-
-  match res {
-    Ok(_) => true,
-    Err(e) => {
-      println!("error: {}", e);
-      false
-    }
+  let mut decoder = ProtoDecoder::new();
+  decoder.with_encryption(keys.keys.clone());
+  if check_label {
+    decoder.with_label(label);
   }
+  super::encode_decode_roundtrip::<_, _, _, agnostic_lite::tokio::TokioRuntime>(
+    parallel, stream, encoder, decoder,
+  )
 }
 
 fn encode_decode_message<I, A>(
   parallel: bool,
-
   compress_algo: CompressAlgorithm,
   encryption_algo: EncryptionAlgorithm,
   keys: RandomSecretKeys,
   message: Message<I, A>,
   label: Label,
   check_label: bool,
+  stream: bool,
 ) -> bool
 where
-  I: Data + PartialEq,
-  A: Data + PartialEq,
+  I: Data + PartialEq + Clone + 'static,
+  A: Data + PartialEq + Clone + 'static,
 {
-  let res = super::run(async move {
-    let messages = [message];
-    let encoder = ProtoEncoder::new(1500)
-      .with_messages(&messages)
-      .with_compression(compress_algo)
-      .with_encryption(encryption_algo, keys.pk)
-      .with_label(label.clone());
+  let encoder = ProtoEncoder::new(1500)
+    .with_messages([message])
+    .with_compression(compress_algo)
+    .with_encryption(encryption_algo, keys.pk)
+    .with_label(label.clone());
 
-    let data = {
-      cfg_if::cfg_if! {
-        if #[cfg(feature = "rayon")] {
-          use rayon::iter::ParallelIterator;
-
-          if parallel {
-            encoder
-              .rayon_encode()
-              .map(|res| res)
-              .collect::<Result<Vec<_>, ProtoEncoderError>>()?
-          } else {
-            encoder
-              .encode()
-              .collect::<Result<Vec<_>, ProtoEncoderError>>()?
-          }
-        } else {
-          encoder
-            .encode()
-            .collect::<Result<Vec<_>, ProtoEncoderError>>()?
-        }
-      }
-    };
-
-    let mut msgs = Vec::new();
-    let mut decoder = ProtoDecoder::default();
-    decoder.with_encryption(keys.keys.clone());
-    if check_label {
-      decoder.with_label(label);
-    }
-
-    for payload in data {
-      let data = decoder
-        .decode::<agnostic_lite::tokio::TokioRuntime>(BytesMut::from(Bytes::from(payload)))
-        .await?;
-      let decoder = MessagesDecoder::<I, A, _>::new(data)?;
-      for decoded in decoder.iter() {
-        let decoded = decoded?;
-        msgs.push(Message::<I, A>::from_ref(decoded)?);
-      }
-    }
-
-    assert_eq!(msgs, messages);
-
-    Ok(())
-  });
-
-  match res {
-    Ok(_) => true,
-    Err(e) => {
-      println!("error: {}", e);
-      false
-    }
+  let mut decoder = ProtoDecoder::new();
+  decoder.with_encryption(keys.keys.clone());
+  if check_label {
+    decoder.with_label(label);
   }
+  super::encode_decode_roundtrip::<_, _, _, agnostic_lite::tokio::TokioRuntime>(
+    parallel, stream, encoder, decoder,
+  )
 }
 
 macro_rules! encryption_and_compression_unit_test {
@@ -168,94 +73,50 @@ macro_rules! encryption_and_compression_unit_test {
       $(
         #[quickcheck_macros::quickcheck]
         fn [< proto_encoder_decoder_multiple_packets_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
-
           compress_algo: CompressAlgorithm,
           encryption_algo: EncryptionAlgorithm,
           keys: RandomSecretKeys,
           messages: Vec<Message<$id, $addr>>,
+          stream: bool,
+          parallel: bool,
         ) -> bool {
-          encode_decode_messages(false, compress_algo, encryption_algo, keys,  messages, Label::try_from("test").unwrap(), true)
+          encode_decode_messages(parallel, compress_algo, encryption_algo, keys,  messages, Label::try_from("test").unwrap(), true, stream)
         }
 
         #[quickcheck_macros::quickcheck]
         fn [< proto_encoder_decoder_multiple_packets_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](
-
           compress_algo: CompressAlgorithm,
           encryption_algo: EncryptionAlgorithm,
           keys: RandomSecretKeys,
-          messages: Vec<Message<$id, $addr>>
+          messages: Vec<Message<$id, $addr>>,
+          stream: bool,
+          parallel: bool,
         ) -> bool {
-          encode_decode_messages(false, compress_algo, encryption_algo, keys,  messages, Label::EMPTY.clone(), false)
+          encode_decode_messages(parallel, compress_algo, encryption_algo, keys,  messages, Label::EMPTY.clone(), false, stream)
         }
 
         #[quickcheck_macros::quickcheck]
         fn [< proto_encoder_decoder_single_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
-
           compress_algo: CompressAlgorithm,
           encryption_algo: EncryptionAlgorithm,
           keys: RandomSecretKeys,
           message: Message<$id, $addr>,
+          stream: bool,
+          parallel: bool,
         ) -> bool {
-          encode_decode_message(false, compress_algo, encryption_algo, keys,  message, Label::try_from("test").unwrap(), true)
+          encode_decode_message(parallel, compress_algo, encryption_algo, keys,  message, Label::try_from("test").unwrap(), true, stream)
         }
 
         #[quickcheck_macros::quickcheck]
         fn [< proto_encoder_decoder_single_message_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](
-
           compress_algo: CompressAlgorithm,
           encryption_algo: EncryptionAlgorithm,
           keys: RandomSecretKeys,
           message: Message<$id, $addr>,
+          stream: bool,
+          parallel: bool,
         ) -> bool {
-          encode_decode_message(false, compress_algo, encryption_algo, keys,  message, Label::EMPTY.clone(), false)
-        }
-
-        #[cfg(feature = "rayon")]
-        #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_multiple_packets_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
-          messages: Vec<Message<$id, $addr>>,
-
-          compress_algo: CompressAlgorithm,
-          encryption_algo: EncryptionAlgorithm,
-          keys: RandomSecretKeys,
-        ) -> bool {
-          encode_decode_messages(true, compress_algo, encryption_algo, keys,  messages, Label::try_from("test").unwrap(), true)
-        }
-
-        #[cfg(feature = "rayon")]
-        #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_multiple_packets_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](
-
-          compress_algo: CompressAlgorithm,
-          encryption_algo: EncryptionAlgorithm,
-          keys: RandomSecretKeys,
-          messages: Vec<Message<$id, $addr>>,
-        ) -> bool {
-          encode_decode_messages(true, compress_algo, encryption_algo, keys,  messages, Label::EMPTY.clone(), false)
-        }
-
-        #[cfg(feature = "rayon")]
-        #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_single_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
-
-          compress_algo: CompressAlgorithm,
-          encryption_algo: EncryptionAlgorithm,
-          keys: RandomSecretKeys,
-          message: Message<$id, $addr>
-        ) -> bool {
-          encode_decode_message(true, compress_algo, encryption_algo, keys,  message, Label::try_from("test").unwrap(), true)
-        }
-
-        #[cfg(feature = "rayon")]
-        #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_single_message_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](
-
-          compress_algo: CompressAlgorithm,
-          encryption_algo: EncryptionAlgorithm,
-          keys: RandomSecretKeys,
-          message: Message<$id, $addr>,
-        ) -> bool {
-          encode_decode_message(true, compress_algo, encryption_algo, keys,  message, Label::EMPTY.clone(), false)
+          encode_decode_message(parallel, compress_algo, encryption_algo, keys,  message, Label::EMPTY.clone(), false, stream)
         }
       )*
     }

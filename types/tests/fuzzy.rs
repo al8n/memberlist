@@ -9,7 +9,6 @@ use memberlist_types::{
 };
 use nodecraft::{Domain, HostAddr, Node, NodeId};
 
-
 fn fuzzy<D>(data: D) -> bool
 where
   D: Data + Eq,
@@ -319,55 +318,54 @@ where
   M: AsRef<[Message<I, A>]> + Clone + Send + Sync + 'static,
   R: agnostic_lite::RuntimeLite,
 {
-  let res =
-    run(async move {
-      let messages = encoder.messages().clone();
-      let data = {
-        if parallel {
-          cfg_if::cfg_if! {
-            if #[cfg(feature = "rayon")] {
-              use rayon::iter::ParallelIterator;
+  let res = run(async move {
+    let messages = encoder.messages().clone();
+    let data = {
+      if parallel {
+        cfg_if::cfg_if! {
+          if #[cfg(feature = "rayon")] {
+            use rayon::iter::ParallelIterator;
 
-              encoder
-                .rayon_encode()
-                .map(|res| res)
-                .collect::<Result<Vec<_>, ProtoEncoderError>>()?
-            } else {
-              encoder.blocking_encode::<R>().await.collect::<Result<Vec<_>, ProtoEncoderError>>()?
-            }
+            encoder
+              .rayon_encode()
+              .map(|res| res)
+              .collect::<Result<Vec<_>, ProtoEncoderError>>()?
+          } else {
+            encoder.blocking_encode::<R>().await.collect::<Result<Vec<_>, ProtoEncoderError>>()?
           }
-        } else {
-          encoder
-            .encode()
-            .collect::<Result<Vec<_>, ProtoEncoderError>>()?
         }
+      } else {
+        encoder
+          .encode()
+          .collect::<Result<Vec<_>, ProtoEncoderError>>()?
+      }
+    };
+
+    let mut msgs = Vec::new();
+
+    for payload in data {
+      let data = if !stream {
+        decoder
+          .decode::<R>(bytes::BytesMut::from(bytes::Bytes::from(payload)))
+          .await?
+      } else {
+        decoder
+          .decode_from_reader::<_, R>(&mut futures::io::Cursor::new(payload))
+          .await?
       };
-
-      let mut msgs = Vec::new();
-
-      for payload in data {
-        let data = if !stream { 
-          decoder
-            .decode::<R>(bytes::BytesMut::from(bytes::Bytes::from(payload)))
-            .await?
-        } else {
-          decoder
-            .decode_from_reader::<_, R>(&mut futures::io::Cursor::new(payload))
-            .await?
-        };
-        let decoder = MessagesDecoder::<I, A, _>::new(data)?;
-        for decoded in decoder.iter() {
-          let decoded = decoded?;
-          msgs.push(Message::<I, A>::from_ref(decoded)?);
-        }
+      let decoder = MessagesDecoder::<I, A, _>::new(data)?;
+      for decoded in decoder.iter() {
+        let decoded = decoded?;
+        msgs.push(Message::<I, A>::from_ref(decoded)?);
       }
+    }
 
-      if msgs.as_slice().ne(messages.as_ref()) {
-        return Err("messages do not match".into());
-      }
+    if msgs.as_slice().ne(messages.as_ref()) {
+      return Err("messages do not match".into());
+    }
 
-      Ok(())
-    });
+    Ok(())
+  });
 
   match res {
     Ok(_) => true,

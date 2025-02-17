@@ -189,11 +189,14 @@ mod tests {
 
       let mut msgs = Vec::new();
       let mut decoder = ProtoDecoder::default();
-      decoder.with_offload_size(u16::MAX as usize)
+      decoder
+        .with_offload_size(u16::MAX as usize)
         .with_label(label);
       for payload in data {
         let data = decoder
-          .decode_from_reader::<_, agnostic_lite::tokio::TokioRuntime>(&mut futures::io::Cursor::new(payload))
+          .decode_from_reader::<_, agnostic_lite::tokio::TokioRuntime>(
+            &mut futures::io::Cursor::new(payload),
+          )
           .await?;
         let decoder = MessagesDecoder::<IpAddr, IpAddr, _>::new(data)?;
         for decoded in decoder.iter() {
