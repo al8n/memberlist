@@ -27,12 +27,21 @@ where
     let num_msgs = match tag {
       message::COMPOOUND_MESSAGE_TAG => {
         offset += 1;
-        if offset >= bytes.len() {
+        if bytes.len() < super::super::BATCH_OVERHEAD {
           return Err(DecodeError::buffer_underflow());
         }
 
         let num_msgs = bytes[offset] as usize;
         offset += 1;
+        let total_len = u32::from_be_bytes(
+          bytes[offset..offset + super::PAYLOAD_LEN_SIZE]
+            .try_into()
+            .unwrap(),
+        ) as usize;
+        if bytes.len() < total_len + super::super::BATCH_OVERHEAD {
+          return Err(DecodeError::buffer_underflow());
+        }
+        offset += super::PAYLOAD_LEN_SIZE;
         num_msgs
       }
       tag if message::is_plain_message_tag(tag) => 1,

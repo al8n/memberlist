@@ -506,8 +506,9 @@ where
       return Err(Error::NotRunning);
     }
 
-    let msgs = [Message::UserData(msg)];
-    let stream = self.transport_send_packets(to, &msgs);
+    let stream = self
+      .transport_send_packets(to, [Message::UserData(msg)])
+      .await;
     futures::pin_mut!(stream);
     match stream.next().await {
       None => Ok(()),
@@ -557,7 +558,7 @@ where
     // Send a ping to the node.
     // Wait to send or timeout.
     match <T::Runtime as RuntimeLite>::timeout(self.inner.opts.probe_timeout, async {
-      let stream = self.send_msg(node.address(), ping.into()).await;
+      let stream = self.send_packets(node.address(), ping.into()).await;
       futures::pin_mut!(stream);
       let errs = stream.collect::<OneOrMore<_>>().await;
       let num_errs = errs.len();

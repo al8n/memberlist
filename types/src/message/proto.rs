@@ -71,168 +71,185 @@ const _: () = {
   }
 };
 
-// #[cfg(test)]
-// mod tests {
-//   use std::net::IpAddr;
+#[cfg(test)]
+mod tests {
+  use std::net::IpAddr;
 
-//   use bytes::{BufMut, Bytes, BytesMut};
-//   use nodecraft::Node;
-//   use triomphe::Arc;
+  use bytes::{BufMut, Bytes, BytesMut};
+  use nodecraft::Node;
+  use triomphe::Arc;
 
-//   use crate::{
-//     message::proto::AeadBuffer, Alive, ChecksumAlgorithm, EncryptionAlgorithm, Label, Meta, Nack,
-//     SecretKey,
-//   };
+  use crate::{
+    message::proto::AeadBuffer, Alive, ChecksumAlgorithm, EncryptionAlgorithm, Label, Meta, Nack,
+    SecretKey,
+  };
 
-//   use super::{
-//     super::{Data, DataRef, Message},
-//     MessagesDecoder, MessagesDecoderIter, ProtoDecoder, ProtoDecoderError, ProtoEncoder,
-//     ProtoEncoderError,
-//   };
+  use super::{
+    super::{Data, DataRef, Message},
+    MessagesDecoder, MessagesDecoderIter, ProtoDecoder, ProtoDecoderError, ProtoEncoder,
+    ProtoEncoderError,
+  };
 
-//   #[quickcheck_macros::quickcheck]
-//   fn encode_decode_plain_message(message: Message<IpAddr, IpAddr>) -> bool {
-//     let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
-//       let mut encoder = ProtoEncoder::new(1500);
-//       let messages = [message];
-//       // let label = Label::try_from("test").unwrap();
-//       // let pk = SecretKey::random_aes128();
-//       encoder
-//         .with_messages(&messages)
-//         .with_compression(crate::CompressAlgorithm::Lz4);
-//       // .with_encryption(EncryptionAlgorithm::NoPadding, pk)
-//       // .with_label(&label);
-//       // .with_checksum(Some(ChecksumAlgorithm::Crc32));
-//       let data = encoder
-//         .encode()
-//         .collect::<Result<Vec<_>, ProtoEncoderError>>()?;
+  fn run<F>(fut: F) -> F::Output
+  where
+    F:
+      core::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>>,
+  {
+    tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap()
+      .block_on(fut)
+  }
 
-//       let mut msgs = Vec::new();
-//       let decoder = ProtoDecoder::default();
-//       for payload in data {
-//         // println!("payload: {:?}", payload);
-//         let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+  #[quickcheck_macros::quickcheck]
+  fn encode_decode_plain_message(message: Message<IpAddr, IpAddr>) -> bool {
+    let res = run(async move {
+      let messages = [message];
+      let label = Label::try_from("test").unwrap();
+      let pk = SecretKey::random_aes128();
+      let encoder = ProtoEncoder::new(1500)
+        .with_messages(&messages)
+        .with_compression(crate::CompressAlgorithm::Lz4)
+        .with_encryption(EncryptionAlgorithm::NoPadding, pk)
+        .with_label(label.clone())
+        .with_checksum(ChecksumAlgorithm::Crc32);
+      let data = encoder
+        .encode()
+        .collect::<Result<Vec<_>, ProtoEncoderError>>()?;
 
-//         let decoder = MessagesDecoder::<IpAddr, IpAddr, _>::new(data)?;
-//         for decoded in decoder.iter() {
-//           let decoded = decoded?;
-//           msgs.push(Message::<IpAddr, IpAddr>::from_ref(decoded)?);
-//         }
-//       }
+      let mut msgs = Vec::new();
+      let mut decoder = ProtoDecoder::default();
+      decoder
+        .with_label(label)
+        .with_encryption(triomphe::Arc::from_iter([pk]));
+      for payload in data {
+        // println!("payload: {:?}", payload);
+        let data = decoder
+          .decode::<agnostic_lite::tokio::TokioRuntime>(BytesMut::from(Bytes::from(payload)))
+          .await?;
 
-//       assert_eq!(msgs, messages);
+        let decoder = MessagesDecoder::<IpAddr, IpAddr, _>::new(data)?;
+        for decoded in decoder.iter() {
+          let decoded = decoded?;
+          msgs.push(Message::<IpAddr, IpAddr>::from_ref(decoded)?);
+        }
+      }
 
-//       if msgs != messages {
-//         return Err("messages do not match".into());
-//       }
+      assert_eq!(msgs, messages);
 
-//       Ok(())
-//     });
+      if msgs != messages {
+        return Err("messages do not match".into());
+      }
 
-//     match res {
-//       Ok(_) => true,
-//       Err(e) => {
-//         println!("error: {}", e);
-//         false
-//       }
-//     }
-//   }
+      Ok(())
+    });
 
-//   #[test]
-//   fn t() {
-//     let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
-//       let mut encoder = ProtoEncoder::new(1500);
-//       let message = Message::Alive(
-//         Alive::new(
-//           3218360376,
-//           Node::new(
-//             IpAddr::V4("117.49.90.72".parse().unwrap()),
-//             IpAddr::V4("94.244.218.196".parse().unwrap()),
-//           ),
-//         )
-//         .with_meta(
-//           Meta::from_static(b"hello world, hello world, hello world, hello world").unwrap(),
-//         ),
-//       );
-//       let messages = [message.clone(), message];
-//       // let label = Label::try_from("test").unwrap();
-//       // let pk = SecretKey::random_aes128();
-//       encoder
-//         .with_messages(&messages)
-//         // .with_compression(crate::CompressAlgorithm::Snappy)
-//         .with_compression_threshold(32);
-//       // .with_encryption(EncryptionAlgorithm::NoPadding, pk)
-//       // .with_label(&label);
-//       // .with_checksum(Some(ChecksumAlgorithm::Crc32));
-//       let data = encoder
-//         .encode()
-//         .collect::<Result<Vec<_>, ProtoEncoderError>>()?;
+    match res {
+      Ok(_) => true,
+      Err(e) => {
+        println!("error: {}", e);
+        false
+      }
+    }
+  }
 
-//       let mut msgs = Vec::new();
-//       let mut decoder = ProtoDecoder::default();
-//       decoder.with_offload_size(u16::MAX as usize);
-//       for payload in data {
-//         let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
-//         let decoder = MessagesDecoder::<IpAddr, IpAddr, _>::new(data)?;
-//         for decoded in decoder.iter() {
-//           let decoded = decoded?;
-//           msgs.push(Message::<IpAddr, IpAddr>::from_ref(decoded)?);
-//         }
-//       }
+  #[test]
+  fn t() {
+    let res = run(async move {
+      let message = Message::Alive(
+        Alive::new(
+          3218360376,
+          Node::new(
+            IpAddr::V4("117.49.90.72".parse().unwrap()),
+            IpAddr::V4("94.244.218.196".parse().unwrap()),
+          ),
+        )
+        .with_meta(
+          Meta::from_static(b"hello world, hello world, hello world, hello world").unwrap(),
+        ),
+      );
+      let messages = [message.clone(), message];
+      // let label = Label::try_from("test").unwrap();
+      // let pk = SecretKey::random_aes128();
+      let encoder = ProtoEncoder::new(1500)
+        .with_messages(&messages)
+        .with_compression(crate::CompressAlgorithm::Brotli(Default::default()))
+        .with_compression_threshold(32);
+      // .with_encryption(EncryptionAlgorithm::NoPadding, pk)
+      // .with_label(&label);
+      // .with_checksum(Some(ChecksumAlgorithm::Crc32));
+      let data = encoder
+        .encode()
+        .collect::<Result<Vec<_>, ProtoEncoderError>>()?;
 
-//       assert_eq!(msgs, messages);
+      let mut msgs = Vec::new();
+      let mut decoder = ProtoDecoder::default();
+      decoder.with_offload_size(u16::MAX as usize);
+      for payload in data {
+        let data = decoder
+          .decode::<agnostic_lite::tokio::TokioRuntime>(BytesMut::from(Bytes::from(payload)))
+          .await?;
+        let decoder = MessagesDecoder::<IpAddr, IpAddr, _>::new(data)?;
+        for decoded in decoder.iter() {
+          let decoded = decoded?;
+          msgs.push(Message::<IpAddr, IpAddr>::from_ref(decoded)?);
+        }
+      }
 
-//       if msgs != messages {
-//         return Err("messages do not match".into());
-//       }
+      assert_eq!(msgs, messages);
 
-//       Ok(())
-//     });
+      if msgs != messages {
+        return Err("messages do not match".into());
+      }
 
-//     match res {
-//       Ok(_) => {}
-//       Err(e) => {
-//         panic!("{e}");
-//       }
-//     }
-//   }
+      Ok(())
+    });
 
-//   #[quickcheck_macros::quickcheck]
-//   fn encode_decode_plain_messages(messages: Vec<Message<String, IpAddr>>) -> bool {
-//     let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
-//       let mut encoder = ProtoEncoder::new(1500);
-//       let label = Label::try_from("test").unwrap();
-//       encoder
-//         .with_messages(&messages)
-//         .with_compression(crate::CompressAlgorithm::Zstd(Default::default()))
-//         .with_label(&label);
-//       let data = encoder
-//         .encode()
-//         .collect::<Result<Vec<_>, ProtoEncoderError>>()?;
+    match res {
+      Ok(_) => {}
+      Err(e) => {
+        panic!("{e}");
+      }
+    }
+  }
 
-//       let mut msgs = Vec::new();
-//       let mut decoder = ProtoDecoder::default();
-//       decoder.with_label(label);
-//       for payload in data {
-//         let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
-//         let decoder = MessagesDecoder::<String, IpAddr, _>::new(data)?;
-//         for decoded in decoder.iter() {
-//           let decoded = decoded?;
-//           msgs.push(Message::<String, IpAddr>::from_ref(decoded)?);
-//         }
-//       }
+  #[quickcheck_macros::quickcheck]
+  fn encode_decode_plain_messages(messages: Vec<Message<String, IpAddr>>) -> bool {
+    let res = run(async move {
+      let label = Label::try_from("test").unwrap();
+      let encoder = ProtoEncoder::new(1500)
+        .with_messages(&messages)
+        .with_compression(crate::CompressAlgorithm::Brotli(Default::default()));
+      let data = encoder
+        .encode()
+        .collect::<Result<Vec<_>, ProtoEncoderError>>()?;
 
-//       assert_eq!(msgs, messages);
+      let mut msgs = Vec::new();
+      let mut decoder = ProtoDecoder::default();
+      // decoder.with_label(label);
+      for payload in data {
+        let data = decoder
+          .decode::<agnostic_lite::tokio::TokioRuntime>(BytesMut::from(Bytes::from(payload)))
+          .await?;
+        let decoder = MessagesDecoder::<String, IpAddr, _>::new(data)?;
+        for decoded in decoder.iter() {
+          let decoded = decoded?;
+          msgs.push(Message::<String, IpAddr>::from_ref(decoded)?);
+        }
+      }
 
-//       Ok(())
-//     });
+      assert_eq!(msgs, messages);
 
-//     match res {
-//       Ok(_) => true,
-//       Err(e) => {
-//         println!("error: {}", e);
-//         false
-//       }
-//     }
-//   }
-// }
+      Ok(())
+    });
+
+    match res {
+      Ok(_) => true,
+      Err(e) => {
+        println!("error: {}", e);
+        false
+      }
+    }
+  }
+}

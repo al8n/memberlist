@@ -5,7 +5,7 @@ use core::str::FromStr;
 #[display("{}", level)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
 pub struct ZstdCompressionLevel {
   level: i8,
 }

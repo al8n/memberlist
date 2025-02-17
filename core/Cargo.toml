@@ -19,6 +19,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["metrics", "compression", "snappy", "encryption", "crc32"]
 metrics = ["dep:metrics", "memberlist-types/metrics"]
 
+rayon = ["dep:rayon", "memberlist-types/rayon"]
+
 # checksum related feature
 crc32 = ["crc32fast"]
 xxhash32 = ["xxhash-rust/xxh32"]

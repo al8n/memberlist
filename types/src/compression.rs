@@ -15,7 +15,7 @@ macro_rules! num_to_enum {
     paste::paste! {
       $(#[$meta])*
       #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::Display, derive_more::IsVariant)]
-      #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+      #[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
       #[non_exhaustive]
       #[repr($inner)]
       pub enum $name {
@@ -106,7 +106,7 @@ pub use error::*;
 pub use from_str::*;
 pub use zstd_impl::*;
 
-#[cfg(feature = "quickcheck")]
+#[cfg(any(feature = "quickcheck", test))]
 mod quickcheck_impl;
 
 #[cfg(feature = "brotli")]
@@ -193,21 +193,21 @@ pub enum CompressAlgorithm {
   Unknown(u8),
 }
 
-#[cfg(feature = "quickcheck")]
+#[cfg(any(feature = "quickcheck", test))]
 const _: () = {
+  use quickcheck::Arbitrary;
+
   impl CompressAlgorithm {
     const MAX: u8 = SNAPPY_TAG;
     const MIN: u8 = ZSTD_TAG;
   }
 
-  impl quickcheck::Arbitrary for CompressAlgorithm {
+  impl Arbitrary for CompressAlgorithm {
     fn arbitrary(g: &mut quickcheck::Gen) -> Self {
       let val = (u8::arbitrary(g) % Self::MAX) + Self::MIN;
       match val {
         ZSTD_TAG => Self::Zstd(ZstdCompressionLevel::arbitrary(g)),
-        // TODO(al8n): fix this when fixing brotli encoding/decoding
-        // BROTLI_TAG => Self::Brotli(BrotliAlgorithm::arbitrary(g)),
-        BROTLI_TAG => Self::Lz4,
+        BROTLI_TAG => Self::Brotli(BrotliAlgorithm::arbitrary(g)),
         LZ4_TAG => Self::Lz4,
         SNAPPY_TAG => Self::Snappy,
         _ => unreachable!(),
@@ -292,7 +292,18 @@ impl CompressAlgorithm {
       Self::Brotli(_) => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "brotli")] {
-            brotli::enc::BrotliEncoderMaxCompressedSize(input_size)
+            // TODO(al8n): The brotli::enc::BrotliEncoderMaxCompressedSize is not working as expected.
+            // In fuzzy tests, it is returning a value less than the actual compressed size.
+            let num_large_blocks = (input_size >> 4) + 12;
+            let overhead = 2 + (4 * num_large_blocks) + 3 + 1;
+            let result = input_size + overhead;
+            if input_size == 0 {
+              2
+            } else if result < input_size {
+              input_size
+            } else {
+              result
+            }
           } else {
             return Err(CompressionError::disabled(*self, "brotli"));
           }
@@ -562,6 +573,7 @@ mod tests {
   use super::CompressAlgorithm;
 
   #[quickcheck_macros::quickcheck]
+  #[cfg(feature = "serde")]
   fn compress_algorithm_serde(algo: CompressAlgorithm) -> bool {
     let Ok(serialized) = serde_json::to_string(&algo) else {
       return false;

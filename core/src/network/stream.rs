@@ -124,7 +124,7 @@ where
       .await
       .map_err(Error::transport)?;
     self
-      .send_message(&mut conn, &[Message::UserData(msg)])
+      .send_message(&mut conn, [Message::UserData(msg)])
       .await
       .map_err(Into::into)
   }
@@ -233,7 +233,7 @@ where
       .set(msg.encoded_len() as f64);
     }
 
-    match <T::Runtime as RuntimeLite>::timeout_at(deadline, self.send_message(conn, &[msg])).await {
+    match <T::Runtime as RuntimeLite>::timeout_at(deadline, self.send_message(conn, [msg])).await {
       Ok(Ok(_)) => Ok(()),
       Ok(Err(e)) => Err(e),
       Err(e) => Err(Error::transport(std::io::Error::from(e).into())),
@@ -274,10 +274,11 @@ where
         tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to receive");
 
         let err_resp = ErrorResponse::new(SmolStr::new(e.to_string()));
-        let msgs = [err_resp.into()];
-        let res =
-          <T::Runtime as RuntimeLite>::timeout_at(deadline, self.send_message(&mut conn, &msgs))
-            .await;
+        let res = <T::Runtime as RuntimeLite>::timeout_at(
+          deadline,
+          self.send_message(&mut conn, [err_resp.into()]),
+        )
+        .await;
 
         match res {
           Ok(Ok(_)) => return,
@@ -320,11 +321,11 @@ where
         }
 
         let ack = Ack::new(ping.sequence_number());
-        let msgs = [ack.into()];
-
-        let res =
-          <T::Runtime as RuntimeLite>::timeout_at(deadline, self.send_message(&mut conn, &msgs))
-            .await;
+        let res = <T::Runtime as RuntimeLite>::timeout_at(
+          deadline,
+          self.send_message(&mut conn, [ack.into()]),
+        )
+        .await;
         match res {
           Ok(Ok(_)) => {}
           Ok(Err(e)) => {

@@ -1,3 +1,5 @@
+use core::marker::PhantomData;
+
 use smallvec_wrapper::SmallVec;
 
 use crate::{
@@ -30,6 +32,7 @@ use crate::{message::CHECKSUMED_MESSAGE_TAG, ChecksumAlgorithm, ChecksumError};
 
 use super::{BATCH_OVERHEAD, MAX_MESSAGES_PER_BATCH, PAYLOAD_LEN_SIZE};
 
+mod blocking_impl;
 #[cfg(feature = "rayon")]
 mod rayon_impl;
 
@@ -378,9 +381,9 @@ impl ProtoHint {
 }
 
 /// The encoder of messages
-pub struct ProtoEncoder<'a, I, A> {
-  msgs: &'a [Message<I, A>],
-  label: &'a Label,
+pub struct ProtoEncoder<I, A, B> {
+  msgs: B,
+  label: Label,
   max_payload_size: usize,
   encoded_msgs_len: usize,
 
@@ -408,15 +411,16 @@ pub struct ProtoEncoder<'a, I, A> {
   compression_threshold: usize,
   #[cfg(feature = "encryption")]
   encrypt: Option<(EncryptionAlgorithm, SecretKey)>,
+  _m: PhantomData<(I, A)>,
 }
 
-impl<'a, I, A> ProtoEncoder<'a, I, A> {
+impl<I, A> ProtoEncoder<I, A, &'static [u8]> {
   /// Creates a new messages encoder.
   #[inline]
   pub const fn new(max_payload_size: usize) -> Self {
     Self {
       msgs: &[],
-      label: Label::EMPTY,
+      label: Label::empty(),
       max_payload_size,
       encoded_msgs_len: 0,
       #[cfg(any(
@@ -443,26 +447,65 @@ impl<'a, I, A> ProtoEncoder<'a, I, A> {
       compression_threshold: 512,
       #[cfg(feature = "encryption")]
       encrypt: None,
+      _m: PhantomData,
     }
   }
+}
 
-  /// Feeds the encoder with a label.
-  pub const fn with_label(&mut self, label: &'a Label) -> &mut Self {
-    self.label = label;
-    self
-  }
-
+impl<I, A, B> ProtoEncoder<I, A, B> {
   /// Feeds the encoder with messages.
-  pub fn with_messages(&mut self, msgs: &'a [Message<I, A>]) -> &mut Self
+  pub fn with_messages<NB>(self, msgs: NB) -> ProtoEncoder<I, A, NB>
   where
     I: Data,
     A: Data,
+    NB: AsRef<[Message<I, A>]>,
   {
-    self.msgs = msgs;
-    self.encoded_msgs_len = msgs
+    let mut this = ProtoEncoder::<I, A, _> {
+      msgs,
+      label: self.label,
+      max_payload_size: self.max_payload_size,
+      encoded_msgs_len: 0,
+      #[cfg(any(
+        feature = "crc32",
+        feature = "xxhash32",
+        feature = "xxhash64",
+        feature = "xxhash3",
+        feature = "murmur3",
+      ))]
+      checksum: self.checksum,
+      #[cfg(any(
+        feature = "zstd",
+        feature = "lz4",
+        feature = "brotli",
+        feature = "snappy",
+      ))]
+      compress: self.compress,
+      #[cfg(any(
+        feature = "zstd",
+        feature = "lz4",
+        feature = "brotli",
+        feature = "snappy",
+      ))]
+      compression_threshold: self.compression_threshold,
+      #[cfg(feature = "encryption")]
+      encrypt: self.encrypt,
+      _m: PhantomData,
+    };
+
+    this.encoded_msgs_len = this
+      .msgs
+      .as_ref()
       .iter()
       .map(|msg| msg.encoded_len_with_length_delimited())
       .sum();
+    this
+  }
+}
+
+impl<I, A, B> ProtoEncoder<I, A, B> {
+  /// Feeds the encoder with a label.
+  pub fn with_label(mut self, label: Label) -> Self {
+    self.label = label;
     self
   }
 
@@ -474,7 +517,7 @@ impl<'a, I, A> ProtoEncoder<'a, I, A> {
     feature = "xxhash3",
     feature = "murmur3",
   ))]
-  pub const fn with_checksum(&mut self, checksum: ChecksumAlgorithm) -> &mut Self {
+  pub const fn with_checksum(mut self, checksum: ChecksumAlgorithm) -> Self {
     self.checksum = Some(checksum);
     self
   }
@@ -500,7 +543,7 @@ impl<'a, I, A> ProtoEncoder<'a, I, A> {
     feature = "xxhash3",
     feature = "murmur3",
   ))]
-  pub const fn without_checksum(&mut self) -> &mut Self {
+  pub const fn without_checksum(mut self) -> Self {
     self.checksum = None;
     self
   }
@@ -512,7 +555,7 @@ impl<'a, I, A> ProtoEncoder<'a, I, A> {
     feature = "brotli",
     feature = "snappy",
   ))]
-  pub const fn with_compression(&mut self, compress: CompressAlgorithm) -> &mut Self {
+  pub const fn with_compression(mut self, compress: CompressAlgorithm) -> Self {
     self.compress = Some(compress);
     self
   }
@@ -536,7 +579,7 @@ impl<'a, I, A> ProtoEncoder<'a, I, A> {
     feature = "brotli",
     feature = "snappy",
   ))]
-  pub const fn without_compression(&mut self) -> &mut Self {
+  pub const fn without_compression(mut self) -> Self {
     self.compress = None;
     self
   }
@@ -552,7 +595,7 @@ impl<'a, I, A> ProtoEncoder<'a, I, A> {
     feature = "brotli",
     feature = "snappy",
   ))]
-  pub const fn with_compression_threshold(&mut self, compression_threshold: usize) -> &mut Self {
+  pub const fn with_compression_threshold(mut self, compression_threshold: usize) -> Self {
     self.compression_threshold = if compression_threshold < 32 {
       32
     } else {
@@ -563,7 +606,14 @@ impl<'a, I, A> ProtoEncoder<'a, I, A> {
 
   /// Feeds the encoder with an encryption algorithm.
   #[cfg(feature = "encryption")]
-  pub const fn with_encryption(&mut self, algo: EncryptionAlgorithm, key: SecretKey) -> &mut Self {
+  pub const fn with_encryption(mut self, algo: EncryptionAlgorithm, key: SecretKey) -> Self {
+    self.encrypt = Some((algo, key));
+    self
+  }
+
+  /// Feeds the encoder with an encryption algorithm.
+  #[cfg(feature = "encryption")]
+  pub const fn set_encryption(&mut self, algo: EncryptionAlgorithm, key: SecretKey) -> &mut Self {
     self.encrypt = Some((algo, key));
     self
   }
@@ -571,25 +621,26 @@ impl<'a, I, A> ProtoEncoder<'a, I, A> {
   /// Feeds or clear the encryption related settings for the encoder.
   #[cfg(feature = "encryption")]
   pub const fn maybe_encryption(
-    &mut self,
+    mut self,
     encrypt: Option<(EncryptionAlgorithm, SecretKey)>,
-  ) -> &mut Self {
+  ) -> Self {
     self.encrypt = encrypt;
     self
   }
 
   /// Clears the encryption related settings.
   #[cfg(feature = "encryption")]
-  pub const fn without_encryption(&mut self) -> &mut Self {
+  pub const fn without_encryption(mut self) -> Self {
     self.encrypt = None;
     self
   }
 }
 
-impl<I, A> ProtoEncoder<'_, I, A>
+impl<I, A, B> ProtoEncoder<I, A, B>
 where
   I: Data,
   A: Data,
+  B: AsRef<[Message<I, A>]>,
 {
   /// Returns the hint of how the encoder should process the messages.
   pub fn hint(&self) -> Result<ProtoHint, ProtoEncoderError> {
@@ -667,10 +718,11 @@ where
   pub fn encode(
     &self,
   ) -> impl Iterator<Item = Result<Vec<u8>, ProtoEncoderError>> + core::fmt::Debug + '_ {
-    match self.msgs.len() {
+    let msgs = self.msgs.as_ref();
+    match msgs.len() {
       0 => core::iter::empty(),
       1 => {
-        let msg = &self.msgs[0];
+        let msg = &msgs[0];
         let encoded_len = msg.encoded_len();
         if let Err(err) = self.valid() {
           return core::iter::once(Err(err));
@@ -804,31 +856,29 @@ where
         buf.resize(hint.input_size, 0);
         buf[0] = super::super::COMPOOUND_MESSAGE_TAG;
         buf[1] = num_msgs as u8;
-        let res =
-          match msgs
-            .iter()
-            .take(num_msgs)
-            .try_fold((super::BATCH_OVERHEAD, &mut buf), |(mut offset, buf), msg| {
-              match msg.encodable_encode(&mut buf[offset..]) {
-                Ok(written) => {
-                  offset += written;
-                  Ok((offset, buf))
-                }
-                Err(err) => Err(err),
-              }
-            }) {
-            Ok((final_size, buf)) => {
-              #[cfg(debug_assertions)]
-              assert_eq!(
-                final_size, hint.input_size,
-                "the actual encoded length {} does not match the encoded length {} in hint",
-                final_size, hint.input_size
-              );
-              buf[2..super::BATCH_OVERHEAD].copy_from_slice(&(final_size as u32).to_be_bytes());
-              self.encode_helper(&buf, hint)
+        let res = match msgs.iter().take(num_msgs).try_fold(
+          (super::BATCH_OVERHEAD, &mut buf),
+          |(mut offset, buf), msg| match msg.encodable_encode(&mut buf[offset..]) {
+            Ok(written) => {
+              offset += written;
+              Ok((offset, buf))
             }
-            Err(err) => Err(err.into()),
-          };
+            Err(err) => Err(err),
+          },
+        ) {
+          Ok((final_size, buf)) => {
+            #[cfg(debug_assertions)]
+            assert_eq!(
+              final_size, hint.input_size,
+              "the actual encoded length {} does not match the encoded length {} in hint",
+              final_size, hint.input_size
+            );
+            buf[2..super::BATCH_OVERHEAD]
+              .copy_from_slice(&((final_size - super::BATCH_OVERHEAD) as u32).to_be_bytes());
+            self.encode_helper(&buf, hint)
+          }
+          Err(err) => Err(err.into()),
+        };
 
         res
       }
@@ -894,7 +944,7 @@ where
           buf[po - PAYLOAD_LEN_SIZE..po].copy_from_slice(&(compressed_len as u32).to_be_bytes());
 
           #[cfg(debug_assertions)]
-          debug_assert!(compressed_len <= ch.max_output_size(), "compress algo: {algo}, compressed_len: {}, max_compressed_output_size: {}", compressed_len, ch.max_output_size());
+          debug_assert!(compressed_len <= ch.max_output_size(), "compress algo: {algo}, compressed_len: {}, max_compressed_output_size: {}, input_size: {}", compressed_len, ch.max_output_size(), hint.input_size);
 
           bytes_written = Some(CompressHint::HEADER_SIZE + compressed_len);
         }
@@ -1008,17 +1058,18 @@ where
     Ok(buf)
   }
 
-  fn batch(&self) -> impl Iterator<Item = Batch<'_, I, A>> + Send + core::fmt::Debug + '_ {
+  fn batch(&self) -> impl Iterator<Item = Batch<'_, I, A>> + core::fmt::Debug + '_ {
     let hints = self.batch_hints();
 
     #[cfg(feature = "tracing")]
     tracing::trace!(hints=?hints, "memberslit: batch hints");
 
+    let msgs = self.msgs.as_ref();
     hints.scan(0usize, move |idx, hint| {
       Some(match hint {
         BatchHint::One { hint, .. } => {
           let b = Batch::One {
-            msg: &self.msgs[*idx],
+            msg: &msgs[*idx],
             hint,
           };
           *idx += 1;
@@ -1028,7 +1079,7 @@ where
           let num = range.end - range.start;
           let b = Batch::More {
             hint,
-            msgs: &self.msgs[*idx..*idx + num],
+            msgs: &msgs[*idx..*idx + num],
             num_msgs: num,
           };
           *idx += num;
@@ -1041,18 +1092,18 @@ where
   /// Calculate batch hints for a slice of messages.
   #[auto_enums::auto_enum(Iterator, Debug, Clone)]
   fn batch_hints(&self) -> impl Iterator<Item = BatchHint> + core::fmt::Debug + Clone + '_ {
-    match self.msgs.len() {
+    let msgs = self.msgs.as_ref();
+    match msgs.len() {
       0 => core::iter::empty(),
       1 => {
-        let msg_encoded_len = self.msgs[0].encoded_len();
+        let msg_encoded_len = msgs[0].encoded_len();
         core::iter::once(BatchHint::One {
           idx: 0,
           hint: self.hint_with_size(msg_encoded_len).unwrap(),
         })
       }
       total_len => {
-        self
-          .msgs
+        msgs
           .iter()
           .enumerate()
           .scan(BatchingState::new(), move |state, (idx, msg)| {
@@ -1242,11 +1293,11 @@ mod tests {
 
   #[test]
   fn test_batch() {
-    let mut encoder = ProtoEncoder::new(1400);
+    let encoder = ProtoEncoder::new(1400);
     let single = Message::<SmolStr, SocketAddr>::UserData("ping".into());
     let encoded_len = single.encoded_len();
     let msgs = [single];
-    encoder.with_messages(&msgs);
+    let encoder = encoder.with_messages(&msgs);
 
     let batches = encoder.batch().collect::<Vec<_>>();
     assert_eq!(batches.len(), 1, "bad len {}", batches.len());
@@ -1265,7 +1316,7 @@ mod tests {
       })
       .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
 
-    encoder.with_messages(&bcasts);
+    let encoder = encoder.with_messages(&bcasts);
 
     let batches = encoder.batch().collect::<Vec<_>>();
     assert_eq!(batches.len(), 2, "bad len {}", batches.len());
@@ -1274,7 +1325,7 @@ mod tests {
     assert_eq!(batches[1].len(), 1);
     assert_eq!(
       batches[0].estimate_encoded_size() + batches[1].estimate_encoded_size(),
-      total_encoded_len + 2, // 2 bytes for the compound message overhead, only the first batch has the overhead
+      total_encoded_len + BATCH_OVERHEAD, // 2 bytes for the compound message overhead, only the first batch has the overhead
       "bad estimate len"
     );
   }
@@ -1299,8 +1350,7 @@ mod tests {
       })
       .collect::<SmallVec<Message<SmolStr, SocketAddr>>>();
 
-    let mut encoder = ProtoEncoder::new(u32::MAX as usize);
-    encoder.with_messages(&bcasts);
+    let encoder = ProtoEncoder::new(u32::MAX as usize).with_messages(&bcasts);
 
     let batches = encoder.batch().collect::<Vec<_>>();
     assert_eq!(batches.len(), 2, "bad len {}", batches.len());

@@ -4,7 +4,7 @@ num_to_enum! {
   /// The brotli quality
   #[derive(Default)]
   BrotliQuality(u8 in [0, 11]):"quality":"Q" {
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, #[default] 11,
+    0, 1, 2, #[default] 3, 4, 5, 6, 7, 8, 9, 10, 11,
   }
 }
 
@@ -12,7 +12,7 @@ num_to_enum! {
   /// The brotli window
   #[derive(Default)]
   BrotliWindow(u8 in [10, 24]):"window":"W" {
-    10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, #[default] 22, 23, 24,
+    10, 11, 12, 13, 14, 15, #[default] 16, 17, 18, 19, 20, 21, 22, 23, 24,
   }
 }
 
@@ -35,8 +35,8 @@ impl BrotliAlgorithm {
   #[inline]
   pub const fn new() -> Self {
     Self {
-      quality: BrotliQuality::Q11,
-      window: BrotliWindow::W22,
+      quality: BrotliQuality::Q3,
+      window: BrotliWindow::W16,
     }
   }
 
@@ -176,10 +176,10 @@ fn parse_str() {
   assert_eq!("".parse::<BrotliAlgorithm>(), Ok(BrotliAlgorithm::new()));
   assert_eq!("()".parse::<BrotliAlgorithm>(), Ok(BrotliAlgorithm::new()));
   assert_eq!(
-    "(0, 10)".parse::<BrotliAlgorithm>(),
+    "(1, 11)".parse::<BrotliAlgorithm>(),
     Ok(BrotliAlgorithm::with_quality_and_window(
-      BrotliQuality::Q0,
-      BrotliWindow::W10
+      BrotliQuality::Q1,
+      BrotliWindow::W11
     ))
   );
   assert_eq!(

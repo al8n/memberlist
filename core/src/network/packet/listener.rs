@@ -251,7 +251,8 @@ where
       }
     };
 
-    if let Err(e) = Error::try_from_stream(self.send_msg(&source_addr, msg.into()).await).await {
+    if let Err(e) = Error::try_from_stream(self.send_packets(&source_addr, msg.into()).await).await
+    {
       tracing::error!(addr = %from, err = %e, "memberlist.packet: failed to send ack response");
     }
   }
@@ -302,7 +303,7 @@ where
           // Try to prevent the nack if we've caught it in time.
           let ack = Ack::new(ind_sequence_number);
           if let Err(e) =
-            Error::try_from_stream(this.send_msg(ind_source.address(), ack.into()).await).await
+            Error::try_from_stream(this.send_packets(ind_source.address(), ack.into()).await).await
           {
             tracing::error!(addr = %afrom, err = %e, "memberlist.packet: failed to forward ack");
           }
@@ -312,7 +313,7 @@ where
     );
 
     if let Err(e) =
-      Error::try_from_stream(self.send_msg(ind.target().address(), ping.into()).await).await
+      Error::try_from_stream(self.send_packets(ind.target().address(), ping.into()).await).await
     {
       tracing::error!(local = %self.local_id(), source = %ind.source(), target=%ind.target(), err = %e, "memberlist.packet: failed to send indirect ping");
     }
@@ -326,7 +327,7 @@ where
           // We've not received an ack, so send a nack.
           let nack = Nack::new(ind.sequence_number());
 
-          if let Err(e) = Error::try_from_stream(this.send_msg(ind.source().address(), nack.into()).await).await {
+          if let Err(e) = Error::try_from_stream(this.send_packets(ind.source().address(), nack.into()).await).await {
             tracing::error!(local = %ind.source(), remote = %from, err = %e, "memberlist.packet: failed to send nack");
           } else {
             tracing::trace!(local = %this.local_id(), source = %ind.source(), "memberlist.packet: send nack");
@@ -341,7 +342,7 @@ where
               // We've not received an ack, so send a nack.
               let nack = Nack::new(ind.sequence_number());
 
-              if let Err(e) = Error::try_from_stream(this.send_msg(ind.source().address(), nack.into()).await).await {
+              if let Err(e) = Error::try_from_stream(this.send_packets(ind.source().address(), nack.into()).await).await {
                 tracing::error!(local = %ind.source(), remote = %from, err = %e, "memberlist.packet: failed to send nack");
               } else {
                 tracing::trace!(local = %this.local_id(), source = %ind.source(), "memberlist.packet: send nack");
@@ -366,7 +367,7 @@ where
   }
 
   #[auto_enums::auto_enum(futures03::Stream)]
-  pub(crate) async fn send_msg<'a>(
+  pub(crate) async fn send_packets<'a>(
     &'a self,
     addr: &'a T::ResolvedAddress,
     msg: Message<T::Id, T::ResolvedAddress>,
@@ -389,7 +390,8 @@ where
       Ok(msgs) => {
         // Send the message
         self
-          .transport_send_packets(addr, &msgs)
+          .transport_send_packets(addr, msgs)
+          .await
           .filter_map(|res| async move {
             match res {
               Ok(_) => None,

@@ -60,7 +60,7 @@ macro_rules! enum_wrapper {
       #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::IsVariant)]
       #[repr(u8)]
       #[non_exhaustive]
-      #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+      #[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
       $vis enum [< $name Type >] {
         $(
           $(#[$variant_meta])*
@@ -176,7 +176,7 @@ enum_wrapper!(
     Eq,
     Hash,
   )]
-  #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+  #[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
   #[non_exhaustive]
   pub enum Message<I, A> {
     /// Ping message
@@ -195,7 +195,8 @@ enum_wrapper!(
     PushPull(PushPull<I, A>) = PUSH_PULL_MESSAGE_TAG,
     /// User mesg, not handled by us
     UserData(
-      #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::bytes))] Bytes,
+      #[cfg_attr(any(feature = "arbitrary", test), arbitrary(with = crate::arbitrary_impl::bytes))]
+      Bytes,
     ) = USER_DATA_MESSAGE_TAG,
     /// Nack response message
     Nack(Nack) = NACK_MESSAGE_TAG,

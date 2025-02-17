@@ -73,7 +73,7 @@ impl From<base64::DecodeError> for ParseSecretKeyError {
 
 /// The key used while attempting to encrypt/decrypt a message
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
 pub enum SecretKey {
   /// secret key for AES128
   Aes128([u8; 16]),
@@ -284,14 +284,16 @@ pub enum EncryptionAlgorithm {
   Unknown(u8),
 }
 
-#[cfg(feature = "quickcheck")]
+#[cfg(any(feature = "quickcheck", test))]
 const _: () = {
+  use quickcheck::Arbitrary;
+
   impl EncryptionAlgorithm {
     const MAX: Self = Self::NoPadding;
     const MIN: Self = Self::Pkcs7;
   }
 
-  impl quickcheck::Arbitrary for EncryptionAlgorithm {
+  impl Arbitrary for EncryptionAlgorithm {
     fn arbitrary(g: &mut quickcheck::Gen) -> Self {
       let val = (u8::arbitrary(g) % Self::MAX.as_u8()) + Self::MIN.as_u8();
       match val {

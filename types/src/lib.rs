@@ -14,7 +14,7 @@ pub use nodecraft::{
   Domain, HostAddr, Node, NodeId, ParseDomainError, ParseHostAddrError, ParseNodeIdError,
 };
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(feature = "arbitrary", test))]
 mod arbitrary_impl;
 #[cfg(any(
   feature = "zstd",
@@ -41,7 +41,7 @@ mod checksum;
 mod encryption;
 #[cfg(feature = "metrics")]
 mod metrics_label;
-#[cfg(feature = "quickcheck")]
+#[cfg(any(feature = "quickcheck", test))]
 mod quickcheck_impl;
 #[cfg(feature = "serde")]
 mod serde_impl;

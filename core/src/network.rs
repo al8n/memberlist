@@ -47,10 +47,8 @@ where
     };
 
     let ping_sequence_number = ping.sequence_number();
-    let msgs = [Message::Ping(ping)];
-
     let res = <T::Runtime as RuntimeLite>::timeout_at(deadline, async {
-      self.send_message(&mut conn, &msgs).await?;
+      self.send_message(&mut conn, [Message::Ping(ping)]).await?;
       self.read_message(target, &mut conn).await
     })
     .await;
@@ -96,15 +94,13 @@ where
   }
 
   /// Returns an messages processor to encode/compress/encrypt messages
-  pub(crate) fn encoder<'a>(
-    &'a self,
-    packets: &'a [Message<T::Id, T::ResolvedAddress>],
-  ) -> ProtoEncoder<'a, T::Id, T::ResolvedAddress> {
-    let mut encoder =
-      ProtoEncoder::<T::Id, T::ResolvedAddress>::new(self.inner.transport.max_packet_size());
-    encoder
+  pub(crate) fn encoder<'a, M>(&'a self, packets: M) -> ProtoEncoder<T::Id, T::ResolvedAddress, M>
+  where
+    M: AsRef<[Message<T::Id, T::ResolvedAddress>]> + Send + Sync + 'a,
+  {
+    let mut encoder = ProtoEncoder::new(self.inner.transport.max_packet_size())
       .with_messages(packets)
-      .with_label(self.inner.opts.label());
+      .with_label(self.inner.opts.label().clone());
 
     #[cfg(any(
       feature = "crc32",
@@ -119,7 +115,7 @@ where
 
     #[cfg(feature = "encryption")]
     if !self.inner.transport.packet_secure() && self.encryption_enabled() {
-      encoder.with_encryption(
+      encoder.set_encryption(
         self.inner.opts.encryption_algo().unwrap(),
         self.inner.keyring.as_ref().unwrap().primary_key(),
       );
@@ -141,11 +137,14 @@ where
   }
 
   #[auto_enums::auto_enum(futures03::Stream)]
-  pub(crate) fn transport_send_packets<'a>(
+  pub(crate) async fn transport_send_packets<'a, M>(
     &'a self,
     addr: &'a T::ResolvedAddress,
-    msgs: &[Message<T::Id, T::ResolvedAddress>],
-  ) -> impl Stream<Item = Result<(), Error<T, D>>> + Send + 'a {
+    msgs: M,
+  ) -> impl Stream<Item = Result<(), Error<T, D>>> + Send + 'a
+  where
+    M: AsRef<[Message<T::Id, T::ResolvedAddress>]> + Send + Sync + 'static,
+  {
     let encoder = self.encoder(msgs);
     match encoder.hint() {
       Err(e) => futures::stream::once(async { Err(e.into()) }),
@@ -163,28 +162,40 @@ where
                 Ok(payload) => futures::future::Either::Left(
                   self.raw_send_packet(addr, payload),
                 ),
-                Err(e) => futures::future::Either::Right(async { Err(e.into()) }),
+                Err(e) => futures::future::Either::Right(Self::to_async_err(e.into())),
               })),
               true => {
-                use rayon::iter::ParallelIterator;
+                cfg_if::cfg_if! {
+                  if #[cfg(feature = "rayon")] {
+                    use rayon::iter::ParallelIterator;
 
-                let payloads = encoder
-                  .encode_parallel()
-                  .filter_map(|res| match res {
-                    Ok(payload) => Some(payload),
-                    Err(e) => {
-                      tracing::error!(err = %e, "memberlist.pakcet: failed to process packet");
-                      None
-                    }
-                  })
-                  .collect::<Vec<_>>();
+                    let payloads = encoder
+                      .rayon_encode()
+                      .filter_map(|res| match res {
+                        Ok(payload) => Some(payload),
+                        Err(e) => {
+                          tracing::error!(err = %e, "memberlist.pakcet: failed to process packet");
+                          None
+                        }
+                      })
+                      .collect::<Vec<_>>();
 
-                FuturesUnordered::from_iter(payloads.into_iter().map(|payload| {
-                  futures::future::Either::Left(
-                    self.raw_send_packet(addr, payload),
-                  )
-                }))
-              }
+                    FuturesUnordered::from_iter(payloads.into_iter().map(|payload| {
+                      futures::future::Either::Left(
+                        self.raw_send_packet(addr, payload),
+                      )
+                    }))
+                  } else {
+                    let payloads = encoder.blocking_encode::<T::Runtime>().await;
+                    FuturesUnordered::from_iter(payloads.into_iter().map(|res| match res {
+                      Ok(payload) => futures::future::Either::Left(
+                        self.raw_send_packet(addr, payload),
+                      ),
+                      Err(e) => futures::future::Either::Right(Self::to_async_err(e.into())),
+                    }))
+                  }
+                }
+              },
             }
           } else {
             FuturesUnordered::from_iter(encoder.encode().map(|res| match res {
@@ -199,11 +210,14 @@ where
     }
   }
 
-  pub(crate) async fn send_message<'a>(
+  pub(crate) async fn send_message<'a, M>(
     &'a self,
     conn: &'a mut T::Stream,
-    msgs: &[Message<T::Id, T::ResolvedAddress>],
-  ) -> Result<(), Error<T, D>> {
+    msgs: M,
+  ) -> Result<(), Error<T, D>>
+  where
+    M: AsRef<[Message<T::Id, T::ResolvedAddress>]> + Send + Sync + 'static,
+  {
     let encoder = self.encoder(msgs);
 
     match encoder.hint() {
@@ -235,28 +249,52 @@ where
                 Error::try_from_one_or_more(errs)
               },
               true => {
-                use rayon::iter::ParallelIterator;
+                cfg_if::cfg_if! {
+                  if #[cfg(feature = "rayon")] {
+                    use rayon::iter::ParallelIterator;
 
-                let payloads = encoder
-                  .encode_parallel()
-                  .filter_map(|res| match res {
-                    Ok(payload) => Some(payload),
-                    Err(e) => {
-                      tracing::error!(err = %e, "memberlist.pakcet: failed to process packet");
-                      None
+                    let payloads = encoder
+                      .rayon_encode()
+                      .filter_map(|res| match res {
+                        Ok(payload) => Some(payload),
+                        Err(e) => {
+                          tracing::error!(err = %e, "memberlist.pakcet: failed to process packet");
+                          None
+                        }
+                      })
+                      .collect::<Vec<_>>();
+
+                    let mut errs = OneOrMore::new();
+                    for payload in payloads {
+                      match self.raw_send_message(conn, payload).await {
+                        Ok(()) => {}
+                        Err(e) => errs.push(e),
+                      }
                     }
-                  })
-                  .collect::<Vec<_>>();
 
-                let mut errs = OneOrMore::new();
-                for payload in payloads {
-                  match self.raw_send_message(conn, payload).await {
-                    Ok(()) => {}
-                    Err(e) => errs.push(e),
+                    Error::try_from_one_or_more(errs)
+                  } else {
+                    let mut errs = OneOrMore::new();
+                    let payloads = encoder.blocking_encode::<T::Runtime>().await.filter_map(|res| {
+                      match res {
+                        Ok(payload) => Some(payload),
+                        Err(e) => {
+                          tracing::error!(err = %e, "memberlist.pakcet: failed to process packet");
+                          None
+                        }
+                      }
+                    });
+
+                    for payload in payloads {
+                      match self.raw_send_message(conn, payload).await {
+                        Ok(()) => {}
+                        Err(e) => errs.push(e),
+                      }
+                    }
+
+                    Error::try_from_one_or_more(errs)
                   }
                 }
-
-                Error::try_from_one_or_more(errs)
               }
             }
           } else {
@@ -366,5 +404,13 @@ where
         }
       })
       .map_err(Error::transport)
+  }
+
+  async fn to_async_err(e: Error<T, D>) -> Result<(), Error<T, D>>
+  where
+    T: Transport,
+    D: Delegate,
+  {
+    Err(e)
   }
 }

@@ -1,21 +1,25 @@
+use crate::Message;
+
 use super::{Batch, Data, Encodable, EncodeBuffer, ProtoEncoder, ProtoEncoderError, SmallVec};
 
 use rayon::iter::{self, IntoParallelIterator, ParallelIterator};
 
-impl<I, A> ProtoEncoder<'_, I, A>
+impl<I, A, B> ProtoEncoder<I, A, B>
 where
   I: Data,
   A: Data,
+  B: AsRef<[Message<I, A>]> + Send + Sync,
 {
   /// Encodes the messages.
   #[auto_enums::auto_enum(rayon::ParallelIterator, Debug)]
-  pub fn encode_parallel(
+  pub fn rayon_encode(
     &self,
   ) -> impl ParallelIterator<Item = Result<Vec<u8>, ProtoEncoderError>> + core::fmt::Debug + '_ {
-    match self.msgs.len() {
+    let msgs = self.msgs.as_ref();
+    match msgs.len() {
       0 => iter::empty(),
       1 => {
-        let msg = &self.msgs[0];
+        let msg = &msgs[0];
         let encoded_len = msg.encoded_len();
         if let Err(err) = self.valid() {
           return rayon::iter::once(Err(err));
@@ -60,31 +64,29 @@ where
         buf.resize(hint.input_size, 0);
         buf[0] = crate::message::COMPOOUND_MESSAGE_TAG;
         buf[1] = num_msgs as u8;
-        let res =
-          match msgs
-            .iter()
-            .take(num_msgs)
-            .try_fold((super::super::BATCH_OVERHEAD, &mut buf), |(mut offset, buf), msg| {
-              match msg.encodable_encode(&mut buf[offset..]) {
-                Ok(written) => {
-                  offset += written;
-                  Ok((offset, buf))
-                }
-                Err(err) => Err(err),
-              }
-            }) {
-            Ok((final_size, buf)) => {
-              #[cfg(debug_assertions)]
-              assert_eq!(
-                final_size, hint.input_size,
-                "the actual encoded length {} does not match the encoded length {} in hint",
-                final_size, hint.input_size
-              );
-              buf[2..super::super::BATCH_OVERHEAD].copy_from_slice(&(final_size as u32).to_be_bytes());
-              self.encode_helper(&buf, hint)
+        let res = match msgs.iter().take(num_msgs).try_fold(
+          (super::super::BATCH_OVERHEAD, &mut buf),
+          |(mut offset, buf), msg| match msg.encodable_encode(&mut buf[offset..]) {
+            Ok(written) => {
+              offset += written;
+              Ok((offset, buf))
             }
-            Err(err) => Err(err.into()),
-          };
+            Err(err) => Err(err),
+          },
+        ) {
+          Ok((final_size, buf)) => {
+            #[cfg(debug_assertions)]
+            assert_eq!(
+              final_size, hint.input_size,
+              "the actual encoded length {} does not match the encoded length {} in hint",
+              final_size, hint.input_size
+            );
+            buf[2..super::super::BATCH_OVERHEAD]
+              .copy_from_slice(&((final_size - super::super::BATCH_OVERHEAD) as u32).to_be_bytes());
+            self.encode_helper(&buf, hint)
+          }
+          Err(err) => Err(err.into()),
+        };
 
         res
       }

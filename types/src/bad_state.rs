@@ -12,7 +12,7 @@ macro_rules! bad_bail {
     )]
     #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
-    #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+    #[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
     pub struct $name<I> {
       /// The incarnation of the message.
       #[viewit(

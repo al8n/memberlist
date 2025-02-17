@@ -450,7 +450,8 @@ impl ProtoDecoder {
       let payload_len = u32::from_be_bytes(header[2..].try_into().unwrap()) as usize;
       let checksum_size = algo.output_size();
 
-      let mut buf = BytesMut::zeroed(super::CHECKSUMED_MESSAGE_HEADER_SIZE + payload_len + checksum_size);
+      let mut buf =
+        BytesMut::zeroed(super::CHECKSUMED_MESSAGE_HEADER_SIZE + payload_len + checksum_size);
       reader.read_exact(&mut buf).await?;
 
       buf = Self::dechecksum(buf)?;
@@ -517,16 +518,18 @@ impl ProtoDecoder {
           return Err(ProtoDecoderError::from(CompressionError::UnknownAlgorithm(algo)).into());
         }
 
-        let compressed_size = u32::from_be_bytes(header[super::COMPRESSED_MESSAGE_HEADER_SIZE - super::PAYLOAD_LEN_SIZE..].try_into().unwrap()) as usize;
+        let compressed_size = u32::from_be_bytes(
+          header[super::COMPRESSED_MESSAGE_HEADER_SIZE - super::PAYLOAD_LEN_SIZE..]
+            .try_into()
+            .unwrap(),
+        ) as usize;
 
         let mut payload = BytesMut::zeroed(super::COMPRESSED_MESSAGE_HEADER_SIZE + compressed_size);
         reader.read_exact(&mut payload).await?;
 
         if payload.len() > self.offload_size {
           #[cfg(feature = "rayon")]
-          return Self::decompress_on_rayon(payload)
-            .await
-            .map_err(Into::into);
+          return Self::decompress_on_rayon(payload).await.map_err(Into::into);
 
           #[cfg(not(feature = "rayon"))]
           return Self::decompress_on_blocking::<RT>(payload)
@@ -539,7 +542,6 @@ impl ProtoDecoder {
           .map_err(Into::into);
       }
     }
-
 
     if tag_buf[0] == message::COMPOOUND_MESSAGE_TAG {
       let mut header = [0u8; super::BATCH_OVERHEAD];
@@ -554,7 +556,8 @@ impl ProtoDecoder {
 
     let mut header = [0u8; super::MAX_PLAIN_MESSAGE_HEADER_SIZE];
     reader.peek_exact(&mut header).await?;
-    let (length_delimited_size, total_len) = const_varint::decode_u32_varint(&header[1..]).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+    let (length_delimited_size, total_len) = const_varint::decode_u32_varint(&header[1..])
+      .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
     let mut buf = BytesMut::zeroed(1 + length_delimited_size + total_len as usize);
     reader.read_exact(&mut buf).await?;
     Ok(Bytes::from(buf))
@@ -826,6 +829,7 @@ impl ProtoDecoder {
     let (tx, rx) = oneshot::channel::<Result<BytesMut, ProtoDecoderError>>();
     rayon::spawn(move || {
       if tx.send(Self::decompress(buf)).is_err() {
+        #[cfg(feature = "tracing")]
         tracing::error!("memberlist.proto.decoder: failed to send offload result back");
       }
     });
@@ -875,7 +879,8 @@ impl ProtoDecoder {
       return Err(CompressionError::UnknownAlgorithm(algo).into());
     }
 
-    let uncompressed_size = u32::from_be_bytes(header[3..3 + PAYLOAD_LEN_SIZE].try_into().unwrap()) as usize;
+    let uncompressed_size =
+      u32::from_be_bytes(header[3..3 + PAYLOAD_LEN_SIZE].try_into().unwrap()) as usize;
     let mut uncompressed_buf = BytesMut::zeroed(uncompressed_size);
     match algo.decompress_to(&buf, &mut uncompressed_buf) {
       Ok(_) => Ok(uncompressed_buf),
@@ -908,6 +913,7 @@ impl ProtoDecoder {
         ))
         .is_err()
       {
+        #[cfg(feature = "tracing")]
         tracing::error!("memberlist.proto.decoder: failed to send offload result back");
       }
     });

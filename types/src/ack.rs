@@ -7,7 +7,7 @@ use super::{
 /// Ack response is sent for a ping
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
 pub struct Ack {
   /// The sequence number of the ack
   #[viewit(
@@ -23,7 +23,7 @@ pub struct Ack {
     getter(const, style = "ref", attrs(doc = "Returns the payload of the ack")),
     setter(attrs(doc = "Sets the payload of the ack (Builder pattern)"))
   )]
-  #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::bytes))]
+  #[cfg_attr(any(feature = "arbitrary", test), arbitrary(with = crate::arbitrary_impl::bytes))]
   payload: Bytes,
 }
 
@@ -230,7 +230,7 @@ impl<'a> DataRef<'a, Ack> for AckRef<'a> {
   setters(vis_all = "pub", prefix = "with")
 )]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Nack {
   #[viewit(

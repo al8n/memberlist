@@ -922,7 +922,7 @@ where
 
     if target.state == State::Alive {
       let stream = self
-        .send_msg(target.address(), ping.cheap_clone().into())
+        .send_packets(target.address(), ping.cheap_clone().into())
         .await;
       futures::pin_mut!(stream);
       let errs = stream.collect::<OneOrMore<_>>().await;
@@ -954,8 +954,12 @@ where
         target.id().cheap_clone(),
         self.local_id().cheap_clone(),
       );
-      let msgs = [ping.cheap_clone().into(), suspect.into()];
-      let stream = self.transport_send_packets(target.address(), &msgs);
+      let stream = self
+        .transport_send_packets(
+          target.address(),
+          [ping.cheap_clone().into(), suspect.into()],
+        )
+        .await;
       futures::pin_mut!(stream);
 
       while let Some(res) = stream.next().await {
@@ -1077,7 +1081,7 @@ where
       let ind = ind.cheap_clone();
       async move {
         let stream = self
-          .send_msg(peer.address(), ind.into())
+          .send_packets(peer.address(), ind.into())
           .await;
         futures::pin_mut!(stream);
         while let Some(e) = stream.next().await {
@@ -1288,7 +1292,7 @@ where
           }
 
           let addr = server.address();
-          let stream = self.transport_send_packets(addr, &msgs);
+          let stream = self.transport_send_packets(addr, msgs).await;
           futures::pin_mut!(stream);
 
           while let Some(res) = stream.next().await {

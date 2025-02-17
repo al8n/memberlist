@@ -11,7 +11,7 @@ use super::{
   setters(vis_all = "pub", prefix = "with")
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct ErrorResponse {
   #[viewit(

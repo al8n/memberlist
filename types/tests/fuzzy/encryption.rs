@@ -20,12 +20,11 @@ where
   I: Data + PartialEq,
   A: Data + PartialEq,
 {
-  let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
-    let mut encoder = ProtoEncoder::new(1500);
-    encoder
+  let res = super::run(async move {
+    let encoder = ProtoEncoder::new(1500)
       .with_messages(&messages)
       .with_encryption(algo, pk)
-      .with_label(&label);
+      .with_label(label.clone());
 
     let data = {
       cfg_if::cfg_if! {
@@ -34,7 +33,7 @@ where
 
           if parallel {
             encoder
-              .encode_parallel()
+              .rayon_encode()
               .map(|res| res)
               .collect::<Result<Vec<_>, ProtoEncoderError>>()?
           } else {
@@ -58,7 +57,9 @@ where
     }
 
     for payload in data {
-      let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+      let data = decoder
+        .decode::<agnostic_lite::tokio::TokioRuntime>(BytesMut::from(Bytes::from(payload)))
+        .await?;
       let decoder = MessagesDecoder::<I, A, _>::new(data)?;
       for decoded in decoder.iter() {
         let decoded = decoded?;
@@ -92,13 +93,12 @@ where
   I: Data + PartialEq,
   A: Data + PartialEq,
 {
-  let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
-    let mut encoder = ProtoEncoder::new(1500);
+  let res = super::run(async move {
     let messages = [message];
-    encoder
+    let encoder = ProtoEncoder::new(1500)
       .with_messages(&messages)
       .with_encryption(algo, pk)
-      .with_label(&label);
+      .with_label(label.clone());
 
     let data = {
       cfg_if::cfg_if! {
@@ -107,7 +107,7 @@ where
 
           if parallel {
             encoder
-              .encode_parallel()
+              .rayon_encode()
               .map(|res| res)
               .collect::<Result<Vec<_>, ProtoEncoderError>>()?
           } else {
@@ -131,7 +131,9 @@ where
     }
 
     for payload in data {
-      let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+      let data = decoder
+        .decode::<agnostic_lite::tokio::TokioRuntime>(BytesMut::from(Bytes::from(payload)))
+        .await?;
       let decoder = MessagesDecoder::<I, A, _>::new(data)?;
       for decoded in decoder.iter() {
         let decoded = decoded?;
@@ -165,12 +167,11 @@ where
   I: Data + PartialEq,
   A: Data + PartialEq,
 {
-  let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
-    let mut encoder = ProtoEncoder::new(1500);
-    encoder
+  let res = super::run(async move {
+    let encoder = ProtoEncoder::new(1500)
       .with_messages(&messages)
       .with_encryption(algo, keys.pk)
-      .with_label(&label);
+      .with_label(label.clone());
 
     let data = {
       cfg_if::cfg_if! {
@@ -179,7 +180,7 @@ where
 
           if parallel {
             encoder
-              .encode_parallel()
+              .rayon_encode()
               .map(|res| res)
               .collect::<Result<Vec<_>, ProtoEncoderError>>()?
           } else {
@@ -203,7 +204,9 @@ where
     }
 
     for payload in data {
-      let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+      let data = decoder
+        .decode::<agnostic_lite::tokio::TokioRuntime>(BytesMut::from(Bytes::from(payload)))
+        .await?;
       let decoder = MessagesDecoder::<I, A, _>::new(data)?;
       for decoded in decoder.iter() {
         let decoded = decoded?;
@@ -237,14 +240,12 @@ where
   I: Data + PartialEq,
   A: Data + PartialEq,
 {
-  let res: Result<(), Box<dyn std::error::Error>> = futures::executor::block_on(async move {
-    let mut encoder = ProtoEncoder::new(1500);
+  let res = super::run(async move {
     let messages = [message];
-    // let pk = rand::
-    encoder
+    let encoder = ProtoEncoder::new(1500)
       .with_messages(&messages)
       .with_encryption(algo, keys.pk)
-      .with_label(&label);
+      .with_label(label.clone());
 
     let data = {
       cfg_if::cfg_if! {
@@ -253,7 +254,7 @@ where
 
           if parallel {
             encoder
-              .encode_parallel()
+              .rayon_encode()
               .map(|res| res)
               .collect::<Result<Vec<_>, ProtoEncoderError>>()?
           } else {
@@ -277,7 +278,9 @@ where
     }
 
     for payload in data {
-      let data = decoder.decode(BytesMut::from(Bytes::from(payload))).await?;
+      let data = decoder
+        .decode::<agnostic_lite::tokio::TokioRuntime>(BytesMut::from(Bytes::from(payload)))
+        .await?;
       let decoder = MessagesDecoder::<I, A, _>::new(data)?;
       for decoded in decoder.iter() {
         let decoded = decoded?;
@@ -314,11 +317,6 @@ macro_rules! encryption_unit_test {
         }
 
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_decoder_multiple_message_with_ $name:snake _decoder_skip_label_check_on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
-          encode_decode_messages(false, $algo, $pk, messages, Label::try_from("test").unwrap(), false)
-        }
-
-        #[quickcheck_macros::quickcheck]
         fn [< proto_encoder_decoder_single_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](message: Message<$id, $addr>) -> bool {
           encode_decode_message(false, $algo, $pk, message, Label::try_from("test").unwrap(), true)
         }
@@ -326,11 +324,6 @@ macro_rules! encryption_unit_test {
         #[quickcheck_macros::quickcheck]
         fn [< proto_encoder_decoder_single_message_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](message: Message<$id, $addr>) -> bool {
           encode_decode_message(false, $algo, $pk, message, Label::EMPTY.clone(), false)
-        }
-
-        #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_decoder_single_message_with_ $name:snake _decoder_skip_label_check_on _ $id:snake _ $addr:snake _fuzzy >](message: Message<$id, $addr>) -> bool {
-          encode_decode_message(false, $algo, $pk, message, Label::try_from("test").unwrap(), false)
         }
 
         #[cfg(feature = "rayon")]
@@ -347,12 +340,6 @@ macro_rules! encryption_unit_test {
 
         #[cfg(feature = "rayon")]
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_multiple_message_with_ $name:snake _decoder_skip_label_check_on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
-          encode_decode_messages(true, $algo, $pk, messages, Label::try_from("test").unwrap(), false)
-        }
-
-        #[cfg(feature = "rayon")]
-        #[quickcheck_macros::quickcheck]
         fn [< proto_encoder_parallel_decoder_single_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](message: Message<$id, $addr>) -> bool {
           encode_decode_message(true, $algo, $pk, message, Label::try_from("test").unwrap(), true)
         }
@@ -361,12 +348,6 @@ macro_rules! encryption_unit_test {
         #[quickcheck_macros::quickcheck]
         fn [< proto_encoder_parallel_decoder_single_message_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](message: Message<$id, $addr>) -> bool {
           encode_decode_message(true, $algo, $pk, message, Label::EMPTY.clone(), false)
-        }
-
-        #[cfg(feature = "rayon")]
-        #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_single_message_with_ $name:snake _decoder_skip_label_check_on _ $id:snake _ $addr:snake _fuzzy >](message: Message<$id, $addr>) -> bool {
-          encode_decode_message(true, $algo, $pk, message, Label::try_from("test").unwrap(), false)
         }
       )*
     }
@@ -418,14 +399,6 @@ macro_rules! encryption_random_pk_unit_test {
         }
 
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_decoder_random_pk_multiple_message_with_ $name:snake _decoder_skip_label_check_on _ $id:snake _ $addr:snake _fuzzy >](
-          messages: Vec<Message<$id, $addr>>,
-          keys: RandomSecretKeys,
-        ) -> bool {
-          encode_decode_messages_random_pk(false, $algo, keys, messages, Label::try_from("test").unwrap(), false)
-        }
-
-        #[quickcheck_macros::quickcheck]
         fn [< proto_encoder_decoder_random_pk_single_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
           message: Message<$id, $addr>,
           keys: RandomSecretKeys,
@@ -439,14 +412,6 @@ macro_rules! encryption_random_pk_unit_test {
           keys: RandomSecretKeys,
         ) -> bool {
           encode_decode_message_random_pk(false, $algo, keys, message, Label::EMPTY.clone(), false)
-        }
-
-        #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_decoder_random_pk_single_message_with_ $name:snake _decoder_skip_label_check_on _ $id:snake _ $addr:snake _fuzzy >](
-          message: Message<$id, $addr>,
-          keys: RandomSecretKeys,
-        ) -> bool {
-          encode_decode_message_random_pk(false, $algo, keys, message, Label::try_from("test").unwrap(), false)
         }
 
         #[cfg(feature = "rayon")]
@@ -469,15 +434,6 @@ macro_rules! encryption_random_pk_unit_test {
 
         #[cfg(feature = "rayon")]
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_random_pk_multiple_message_with_ $name:snake _decoder_skip_label_check_on _ $id:snake _ $addr:snake _fuzzy >](
-          messages: Vec<Message<$id, $addr>>,
-          keys: RandomSecretKeys,
-        ) -> bool {
-          encode_decode_messages_random_pk(true, $algo, keys, messages, Label::try_from("test").unwrap(), false)
-        }
-
-        #[cfg(feature = "rayon")]
-        #[quickcheck_macros::quickcheck]
         fn [< proto_encoder_parallel_decoder_random_pk_single_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
           message: Message<$id, $addr>,
           keys: RandomSecretKeys,
@@ -492,15 +448,6 @@ macro_rules! encryption_random_pk_unit_test {
           keys: RandomSecretKeys,
         ) -> bool {
           encode_decode_message_random_pk(true, $algo, keys, message, Label::EMPTY.clone(), false)
-        }
-
-        #[cfg(feature = "rayon")]
-        #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_random_pk_single_message_with_ $name:snake _decoder_skip_label_check_on _ $id:snake _ $addr:snake _fuzzy >](
-          message: Message<$id, $addr>,
-          keys: RandomSecretKeys,
-        ) -> bool {
-          encode_decode_message_random_pk(true, $algo, keys, message, Label::try_from("test").unwrap(), false)
         }
       )*
     }

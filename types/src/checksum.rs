@@ -94,14 +94,16 @@ pub enum ChecksumAlgorithm {
   Unknown(u8),
 }
 
-#[cfg(feature = "quickcheck")]
+#[cfg(any(feature = "quickcheck", test))]
 const _: () = {
+  use quickcheck::Arbitrary;
+
   impl ChecksumAlgorithm {
     const MAX: Self = Self::Murmur3;
     const MIN: Self = Self::Crc32;
   }
 
-  impl quickcheck::Arbitrary for ChecksumAlgorithm {
+  impl Arbitrary for ChecksumAlgorithm {
     fn arbitrary(g: &mut quickcheck::Gen) -> Self {
       let val = (u8::arbitrary(g) % Self::MAX.as_u8()) + Self::MIN.as_u8();
       match val {

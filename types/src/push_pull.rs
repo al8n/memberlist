@@ -12,7 +12,7 @@ pub use state::*;
 /// Push pull message.
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
 pub struct PushPull<I, A> {
   /// Whether the push pull message is a join message.
   #[viewit(
@@ -35,7 +35,7 @@ pub struct PushPull<I, A> {
     ),
     setter(attrs(doc = "Sets the states of the push pull message (Builder pattern)"))
   )]
-  #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::triomphe_arc))]
+  #[cfg_attr(any(feature = "arbitrary", test), arbitrary(with = crate::arbitrary_impl::triomphe_arc))]
   states: Arc<[PushNodeState<I, A>]>,
   /// The user data of the push pull message.
   #[viewit(
@@ -46,7 +46,7 @@ pub struct PushPull<I, A> {
     ),
     setter(attrs(doc = "Sets the user data of the push pull message (Builder pattern)"))
   )]
-  #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_impl::bytes))]
+  #[cfg_attr(any(feature = "arbitrary", test), arbitrary(with = crate::arbitrary_impl::bytes))]
   user_data: Bytes,
 }
 
