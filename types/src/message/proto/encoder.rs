@@ -381,8 +381,8 @@ impl ProtoHint {
 }
 
 /// The encoder of messages
-pub struct ProtoEncoder<I, A, B> {
-  msgs: B,
+pub struct ProtoEncoder<I, A, M> {
+  msgs: M,
   label: Label,
   max_payload_size: usize,
   encoded_msgs_len: usize,
@@ -452,7 +452,17 @@ impl<I, A> ProtoEncoder<I, A, &'static [u8]> {
   }
 }
 
-impl<I, A, B> ProtoEncoder<I, A, B> {
+impl<I, A, M> ProtoEncoder<I, A, M> {
+  /// Consumes the encoder and returns the messages.
+  pub fn into_messages(self) -> M {
+    self.msgs
+  }
+
+  /// Returns the messages in the encoder.
+  pub fn messages(&self) -> &M {
+    &self.msgs
+  }
+
   /// Feeds the encoder with messages.
   pub fn with_messages<NB>(self, msgs: NB) -> ProtoEncoder<I, A, NB>
   where
@@ -502,7 +512,7 @@ impl<I, A, B> ProtoEncoder<I, A, B> {
   }
 }
 
-impl<I, A, B> ProtoEncoder<I, A, B> {
+impl<I, A, M> ProtoEncoder<I, A, M> {
   /// Feeds the encoder with a label.
   pub fn with_label(mut self, label: Label) -> Self {
     self.label = label;
@@ -636,11 +646,11 @@ impl<I, A, B> ProtoEncoder<I, A, B> {
   }
 }
 
-impl<I, A, B> ProtoEncoder<I, A, B>
+impl<I, A, M> ProtoEncoder<I, A, M>
 where
   I: Data,
   A: Data,
-  B: AsRef<[Message<I, A>]>,
+  M: AsRef<[Message<I, A>]>,
 {
   /// Returns the hint of how the encoder should process the messages.
   pub fn hint(&self) -> Result<ProtoHint, ProtoEncoderError> {
