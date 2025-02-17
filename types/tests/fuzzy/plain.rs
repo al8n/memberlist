@@ -147,12 +147,12 @@ macro_rules! unit_test {
     paste::paste! {
       $(
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_decoder_multiple_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
+        fn [< proto_encoder_decoder_multiple_packets_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
           encode_decode_messages(false, messages, Label::try_from("test").unwrap(), true)
         }
 
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_decoder_multiple_message_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
+        fn [< proto_encoder_decoder_multiple_packets_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
           encode_decode_messages(false, messages, Label::EMPTY.clone(), false)
         }
 
@@ -168,13 +168,13 @@ macro_rules! unit_test {
 
         #[cfg(feature = "rayon")]
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_multiple_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
+        fn [< proto_encoder_parallel_decoder_multiple_packets_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
           encode_decode_messages(true, messages, Label::try_from("test").unwrap(), true)
         }
 
         #[cfg(feature = "rayon")]
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_multiple_message_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
+        fn [< proto_encoder_parallel_decoder_multiple_packets_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
           encode_decode_messages(true, messages, Label::EMPTY.clone(), false)
         }
 

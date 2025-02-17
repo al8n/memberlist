@@ -10,6 +10,9 @@ const MAX_MESSAGES_PER_BATCH: usize = 255;
 /// - 1 byte for the number of messages
 /// - 4 bytes for the total length of the messages in bytes
 const BATCH_OVERHEAD: usize = 1 + 1 + PAYLOAD_LEN_SIZE;
+/// - 1 byte for the label message tag
+/// - 1 byte for the label length
+const LABEL_OVERHEAD: usize = 1 + 1;
 
 /// - 1 byte for the message tag
 /// - 5 bytes for the max u32 varint encoded size
@@ -170,12 +173,13 @@ mod tests {
         ),
       );
       let messages = [message.clone(), message];
-      // let label = Label::try_from("test").unwrap();
+      let label = Label::try_from("test").unwrap();
       // let pk = SecretKey::random_aes128();
       let encoder = ProtoEncoder::new(1500)
         .with_messages(&messages)
         .with_compression(crate::CompressAlgorithm::Brotli(Default::default()))
-        .with_compression_threshold(32);
+        .with_compression_threshold(32)
+        .with_label(label.clone());
       // .with_encryption(EncryptionAlgorithm::NoPadding, pk)
       // .with_label(&label);
       // .with_checksum(Some(ChecksumAlgorithm::Crc32));
@@ -185,10 +189,11 @@ mod tests {
 
       let mut msgs = Vec::new();
       let mut decoder = ProtoDecoder::default();
-      decoder.with_offload_size(u16::MAX as usize);
+      decoder.with_offload_size(u16::MAX as usize)
+        .with_label(label);
       for payload in data {
         let data = decoder
-          .decode::<agnostic_lite::tokio::TokioRuntime>(BytesMut::from(Bytes::from(payload)))
+          .decode_from_reader::<_, agnostic_lite::tokio::TokioRuntime>(&mut futures::io::Cursor::new(payload))
           .await?;
         let decoder = MessagesDecoder::<IpAddr, IpAddr, _>::new(data)?;
         for decoded in decoder.iter() {

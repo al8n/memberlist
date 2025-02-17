@@ -159,7 +159,7 @@ macro_rules! checksum_and_compression_unit_test {
     paste::paste! {
       $(
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_decoder_multiple_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
+        fn [< proto_encoder_decoder_multiple_packets_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
           checksum_algo: ChecksumAlgorithm,
           compress_algo: CompressAlgorithm,
 
@@ -169,7 +169,7 @@ macro_rules! checksum_and_compression_unit_test {
         }
 
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_decoder_multiple_message_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](
+        fn [< proto_encoder_decoder_multiple_packets_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](
           checksum_algo: ChecksumAlgorithm,
           compress_algo: CompressAlgorithm,
 
@@ -200,7 +200,7 @@ macro_rules! checksum_and_compression_unit_test {
 
         #[cfg(feature = "rayon")]
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parchecksum_and_compressionel_decoder_multiple_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
+        fn [< proto_encoder_parchecksum_and_compressionel_decoder_multiple_packets_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
           messages: Vec<Message<$id, $addr>>,
           checksum_algo: ChecksumAlgorithm,
           compress_algo: CompressAlgorithm,
@@ -211,7 +211,7 @@ macro_rules! checksum_and_compression_unit_test {
 
         #[cfg(feature = "rayon")]
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parchecksum_and_compressionel_decoder_multiple_message_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](
+        fn [< proto_encoder_parchecksum_and_compressionel_decoder_multiple_packets_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](
           checksum_algo: ChecksumAlgorithm,
           compress_algo: CompressAlgorithm,
 

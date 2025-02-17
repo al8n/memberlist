@@ -321,16 +321,16 @@ impl ProtoDecoder {
     // Try to read the label
     let auth_data = if tag_buf[0] == message::LABELED_MESSAGE_TAG {
       if let Some(expected_label) = &self.label {
-        let mut label_buf = [0; 1];
+        let mut label_buf = [0; super::LABEL_OVERHEAD];
         reader.peek_exact(&mut label_buf).await?;
-        let label_len = label_buf[0] as usize;
+        let label_len = super::LABEL_OVERHEAD + label_buf[1] as usize; // label message tag + label length + label data
+
         let mut label_buf = XXXLargeVec::with_capacity(label_len);
         label_buf.resize(label_len, 0);
         reader.read_exact(&mut label_buf).await?;
 
-        let label = Label::try_from(&label_buf.as_slice()[2..])
+        let label = Label::try_from(&label_buf[super::LABEL_OVERHEAD..])
           .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-
         if label.ne(expected_label) {
           return Err(Error::new(
             ErrorKind::InvalidData,

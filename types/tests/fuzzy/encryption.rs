@@ -307,12 +307,12 @@ macro_rules! encryption_unit_test {
     paste::paste! {
       $(
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_decoder_multiple_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
+        fn [< proto_encoder_decoder_multiple_packets_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
           encode_decode_messages(false, $algo, $pk, messages, Label::try_from("test").unwrap(), true)
         }
 
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_decoder_multiple_message_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
+        fn [< proto_encoder_decoder_multiple_packets_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
           encode_decode_messages(false, $algo, $pk, messages, Label::EMPTY.clone(), false)
         }
 
@@ -328,13 +328,13 @@ macro_rules! encryption_unit_test {
 
         #[cfg(feature = "rayon")]
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_multiple_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
+        fn [< proto_encoder_parallel_decoder_multiple_packets_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
           encode_decode_messages(true, $algo, $pk, messages, Label::try_from("test").unwrap(), true)
         }
 
         #[cfg(feature = "rayon")]
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_multiple_message_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
+        fn [< proto_encoder_parallel_decoder_multiple_packets_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](messages: Vec<Message<$id, $addr>>) -> bool {
           encode_decode_messages(true, $algo, $pk, messages, Label::EMPTY.clone(), false)
         }
 
@@ -383,7 +383,7 @@ macro_rules! encryption_random_pk_unit_test {
     paste::paste! {
       $(
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_decoder_random_pk_multiple_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
+        fn [< proto_encoder_decoder_random_pk_multiple_packets_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
           messages: Vec<Message<$id, $addr>>,
           keys: RandomSecretKeys,
         ) -> bool {
@@ -391,7 +391,7 @@ macro_rules! encryption_random_pk_unit_test {
         }
 
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_decoder_random_pk_multiple_message_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](
+        fn [< proto_encoder_decoder_random_pk_multiple_packets_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](
           messages: Vec<Message<$id, $addr>>,
           keys: RandomSecretKeys,
         ) -> bool {
@@ -416,7 +416,7 @@ macro_rules! encryption_random_pk_unit_test {
 
         #[cfg(feature = "rayon")]
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_random_pk_multiple_message_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
+        fn [< proto_encoder_parallel_decoder_random_pk_multiple_packets_with_ $name:snake _and_label_on _ $id:snake _ $addr:snake _fuzzy >](
           messages: Vec<Message<$id, $addr>>,
           keys: RandomSecretKeys,
         ) -> bool {
@@ -425,7 +425,7 @@ macro_rules! encryption_random_pk_unit_test {
 
         #[cfg(feature = "rayon")]
         #[quickcheck_macros::quickcheck]
-        fn [< proto_encoder_parallel_decoder_random_pk_multiple_message_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](
+        fn [< proto_encoder_parallel_decoder_random_pk_multiple_packets_with_ $name:snake _on _ $id:snake _ $addr:snake _fuzzy >](
           messages: Vec<Message<$id, $addr>>,
           keys: RandomSecretKeys,
         ) -> bool {
