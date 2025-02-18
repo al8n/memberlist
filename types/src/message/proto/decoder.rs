@@ -555,7 +555,7 @@ impl ProtoDecoder {
     }
 
     let mut header = [0u8; super::MAX_PLAIN_MESSAGE_HEADER_SIZE];
-    reader.peek_exact(&mut header).await?;
+    reader.peek(&mut header).await?;
     let (length_delimited_size, total_len) = const_varint::decode_u32_varint(&header[1..])
       .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
     let mut buf = BytesMut::zeroed(1 + length_delimited_size + total_len as usize);

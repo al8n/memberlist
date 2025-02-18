@@ -11,7 +11,6 @@ use agnostic::{
   Runtime,
 };
 use futures::{AsyncRead, AsyncWrite};
-use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 
 use super::{Listener, PromisedStream, StreamLayer};
 
@@ -62,8 +61,6 @@ impl<R: Runtime> StreamLayer for Tcp<R> {
           local_addr: stream.local_addr()?,
           peer_addr: addr,
           stream,
-          read_deadline: None,
-          write_deadline: None,
         })
       })
   }
@@ -75,10 +72,6 @@ impl<R: Runtime> StreamLayer for Tcp<R> {
         ln.local_addr()
           .map(|local_addr| TcpListener { ln, local_addr })
       })
-  }
-
-  async fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {
-    // Do nothing
   }
 
   fn is_secure() -> bool {
@@ -100,8 +93,6 @@ impl<R: Runtime> Listener for TcpListener<R> {
       (
         TcpStream {
           stream: conn,
-          read_deadline: None,
-          write_deadline: None,
           local_addr: self.local_addr,
           peer_addr: addr,
         },
@@ -124,8 +115,6 @@ impl<R: Runtime> Listener for TcpListener<R> {
 pub struct TcpStream<R: Runtime> {
   #[pin]
   stream: <R::Net as Net>::TcpStream,
-  read_deadline: Option<R::Instant>,
-  write_deadline: Option<R::Instant>,
   local_addr: SocketAddr,
   peer_addr: SocketAddr,
 }
@@ -151,30 +140,6 @@ impl<R: Runtime> AsyncWrite for TcpStream<R> {
 
   fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     self.project().stream.poll_close(cx)
-  }
-}
-
-impl<R: Runtime> TimeoutableReadStream for TcpStream<R> {
-  type Instant = R::Instant;
-
-  fn set_read_deadline(&mut self, deadline: Option<Self::Instant>) {
-    self.read_deadline = deadline;
-  }
-
-  fn read_deadline(&self) -> Option<Self::Instant> {
-    self.read_deadline
-  }
-}
-
-impl<R: Runtime> TimeoutableWriteStream for TcpStream<R> {
-  type Instant = R::Instant;
-
-  fn set_write_deadline(&mut self, deadline: Option<Self::Instant>) {
-    self.write_deadline = deadline;
-  }
-
-  fn write_deadline(&self) -> Option<Self::Instant> {
-    self.write_deadline
   }
 }
 

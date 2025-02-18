@@ -95,6 +95,19 @@ macro_rules! enum_wrapper {
           )*
         ];
 
+        /// Returns the wire type of this message.
+        #[inline]
+        pub const fn wire_type $(< $($generic),+ >)?(&self) -> WireType
+        where
+          $($($generic: Data),+)?
+        {
+          match self {
+            $(
+              Self::$variant => <$variant_ty $(< $($variant_generic),+ >)? as Data>::WIRE_TYPE,
+            )*
+          }
+        }
+
         /// Returns the tag of this message type for encoding/decoding.
         #[inline]
         pub const fn tag(&self) -> u8 {
@@ -129,15 +142,13 @@ macro_rules! enum_wrapper {
     }
 
     impl $(< $($generic),+ >)? $name $(< $($generic),+ >)? {
-      paste::paste! {
-        /// Returns the tag of this message type for encoding/decoding.
-        #[inline]
-        pub const fn tag(&self) -> u8 {
-          match self {
-            $(
-              Self::$variant(_) => $variant_tag,
-            )*
-          }
+      /// Returns the tag of this message type for encoding/decoding.
+      #[inline]
+      pub const fn tag(&self) -> u8 {
+        match self {
+          $(
+            Self::$variant(_) => $variant_tag,
+          )*
         }
       }
 

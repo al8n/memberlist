@@ -142,7 +142,7 @@ pub trait TestPromisedClient: Sized + Send + Sync + 'static {
 pub async fn handle_ping<A, T, C, R>(trans: T, mut client: C) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  T: Transport<Id = SmolStr, Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   C: TestPacketClient,
   R: RuntimeLite,
 {
@@ -156,7 +156,12 @@ where
     m.advertise_node(),
   );
 
-  let buf = Message::from(ping).encode_to_vec()?;
+  let buf = m
+    .encoder([Message::from(ping)])
+    .encode()
+    .next()
+    .unwrap()
+    .unwrap();
   // Send
   let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
@@ -288,7 +293,7 @@ where
 pub async fn handle_indirect_ping<A, T, C, R>(trans: T, mut client: C) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  T: Transport<Id = SmolStr, Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   C: TestPacketClient,
   R: RuntimeLite,
 {
@@ -303,8 +308,12 @@ where
     m.advertise_node(),
   );
 
-  let buf = Message::from(ping).encode_to_vec()?;
-
+  let buf = m
+    .encoder([Message::from(ping)])
+    .encode()
+    .next()
+    .unwrap()
+    .unwrap();
   // Send
   let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
@@ -355,7 +364,7 @@ where
 pub async fn handle_ping_wrong_node<A, T, C, R>(trans: T, mut client: C) -> Result<(), AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr, Runtime = R>,
-  T: Transport<Id = SmolStr, Resolver = A, Runtime = R>,
+  T: Transport<Id = SmolStr, Resolver = A, ResolvedAddress = SocketAddr, Runtime = R>,
   C: TestPacketClient,
   R: RuntimeLite,
 {
@@ -373,7 +382,7 @@ where
     }),
   );
 
-  let buf = Message::from(ping).encode_to_vec()?;
+  let buf = m.encoder([ping.into()]).encode().next().unwrap().unwrap();
   // Send
   let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
@@ -427,7 +436,7 @@ where
     m.advertise_node(),
   );
 
-  let buf = Message::from(ping).encode_to_vec()?;
+  let buf = m.encoder([ping.into()]).encode().next().unwrap().unwrap();
   // Send
   let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
@@ -547,10 +556,8 @@ where
           num_accepted += 1;
           match stream {
             Ok((mut stream, addr)) if num_accepted == 1 => {
-              let (_, p) = unwrap_ok!(ping_err_tx1.send(
-                m1.inner
-                  .transport
-                  .read(&addr, stream.as_mut())
+              let p = unwrap_ok!(ping_err_tx1.send(
+                m1.read_message(&addr, stream.as_mut())
                   .await
                   .map_err(Into::into)
               ));
@@ -561,9 +568,7 @@ where
               let ack: Message<SmolStr, SocketAddr> = Ack::new(23).into();
 
               unwrap_ok!(ping_err_tx1.send(
-                m1.inner
-                  .transport
-                  .write(stream.as_mut(), ack.encode_to_bytes().unwrap())
+                m1.send_message(stream.as_mut(), [ack])
                   .await
                   .map_err(Into::into)
               ));
@@ -573,10 +578,9 @@ where
               let _ = rx1.recv().await;
             },
             Ok((mut stream, addr)) if num_accepted == 2 => {
-              let (_, p) = unwrap_ok!(ping_err_tx1.send(
-                m1.inner
-                  .transport
-                  .read(&addr, stream.as_mut())
+              let p = unwrap_ok!(ping_err_tx1.send(
+                m1
+                  .read_message(&addr, stream.as_mut())
                   .await
                   .map_err(Into::into)
               ));
@@ -585,9 +589,7 @@ where
               let ack: Message<SmolStr, SocketAddr> = Ack::new(ping_in.sequence_number() + 1).into();
 
               unwrap_ok!(ping_err_tx1.send(
-                m1.inner
-                  .transport
-                  .write(stream.as_mut(), ack.encode_to_bytes().unwrap())
+                m1.send_message(stream.as_mut(), [ack])
                   .await
                   .map_err(Into::into)
               ));
@@ -606,13 +608,9 @@ where
               ));
 
               unwrap_ok!(ping_err_tx1.send(
-                m1.inner
-                  .transport
-                  .write(
+                m1.send_message(
                     stream.as_mut(),
-                    Message::from(IndirectPing::new(0, Node::new(SmolStr::from("unknown source"), kind.next(0)), Node::new(SmolStr::from("unknown target"), kind.next(0))))
-                      .encode_to_bytes()
-                      .unwrap()
+                    [Message::from(IndirectPing::new(0, Node::new(SmolStr::from("unknown source"), kind.next(0)), Node::new(SmolStr::from("unknown target"), kind.next(0))))]
                   )
                   .await
                   .map_err(Into::into)
@@ -752,16 +750,9 @@ where
   // Send the push/pull indicator
   let mut conn = connector.connect().await?;
   let push_pull: Message<_, _> = push_pull.into();
-  m.inner
-    .transport
-    .write(conn.as_mut(), push_pull.encode_to_bytes().unwrap())
-    .await?;
+  m.send_message(conn.as_mut(), [push_pull]).await?;
   // Read the message type
-  let (_, msg) = m
-    .inner
-    .transport
-    .read(&bind_addr, conn.as_mut())
-    .await?;
+  let msg = m.read_message(&bind_addr, conn.as_mut()).await?;
   let readed_push_pull = Message::<SmolStr, SocketAddr>::decode(&msg)
     .unwrap()
     .1

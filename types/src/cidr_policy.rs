@@ -3,8 +3,13 @@ use std::{collections::HashSet, net::IpAddr, str::FromStr};
 
 /// Classless Inter-Domain Routing (CIDR) policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(transparent)]
 pub struct CIDRsPolicy {
+  #[cfg_attr(
+    feature = "serde",
+    serde(default, skip_serializing_if = "Option::is_none")
+  )]
   allowed_cidrs: Option<HashSet<IpNet>>,
 }
 

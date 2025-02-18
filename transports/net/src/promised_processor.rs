@@ -10,6 +10,7 @@ use nodecraft::resolver::AddressResolver;
 
 use super::{Listener, StreamLayer};
 
+#[allow(dead_code)]
 #[cfg(any(test, feature = "test"))]
 static BACKOFFS_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
@@ -19,7 +20,8 @@ static BACKOFFS_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 pub(super) struct PromisedProcessor<A, T, S>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
-  T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
+  T:
+    Transport<Resolver = A, ResolvedAddress = SocketAddr, Stream = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer<Runtime = A::Runtime>,
 {
   pub(super) stream_tx:
@@ -32,7 +34,8 @@ where
 impl<A, T, S> PromisedProcessor<A, T, S>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
-  T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
+  T:
+    Transport<Resolver = A, ResolvedAddress = SocketAddr, Stream = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer<Runtime = A::Runtime>,
 {
   pub(super) async fn run(self) {
@@ -108,14 +111,15 @@ where
 /// Unit test for testing promised processor backoff
 #[cfg(any(feature = "test", test))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "test", test))))]
-#[allow(clippy::await_holding_lock)]
+#[allow(clippy::await_holding_lock, dead_code)]
 pub async fn listener_backoff<A, T, S>(
   s: S,
   kind: memberlist_core::transport::tests::AddressKind,
 ) -> Result<(), memberlist_core::tests::AnyError>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
-  T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
+  T:
+    Transport<Resolver = A, ResolvedAddress = SocketAddr, Stream = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer<Runtime = A::Runtime>,
 {
   struct TestStreamLayer<TS: StreamLayer> {
@@ -165,8 +169,6 @@ where
     async fn bind(&self, _addr: SocketAddr) -> std::io::Result<Self::Listener> {
       unreachable!()
     }
-
-    async fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {}
 
     fn is_secure() -> bool {
       unreachable!()

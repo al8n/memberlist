@@ -11,10 +11,10 @@ use super::*;
 mod stream;
 pub use stream::*;
 
-// /// Predefined unit tests for the transport module
-// #[cfg(any(test, feature = "test"))]
-// #[cfg_attr(docsrs, doc(cfg(feature = "test")))]
-// pub mod tests;
+/// Predefined unit tests for the transport module
+#[cfg(any(test, feature = "test"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "test")))]
+pub mod tests;
 
 /// `MaybeResolvedAddress` is used to represent an address that may or may not be resolved.
 pub enum MaybeResolvedAddress<T: Transport> {
@@ -209,7 +209,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   >;
 
   /// The promised stream used to send and receive messages
-  type Stream: agnostic_io::AsyncRead + agnostic_io::AsyncWrite + Unpin + Send + Sync + 'static;
+  type Stream: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + Send + Sync + 'static;
 
   /// The async runtime
   type Runtime: RuntimeLite;

@@ -14,7 +14,6 @@ use agnostic::{
 use async_native_tls::TlsStream as AsyncNativeTlsStream;
 pub use async_native_tls::{self, TlsAcceptor, TlsConnector};
 use futures::{AsyncRead, AsyncWrite};
-use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 
 use super::{Listener, PromisedStream, StreamLayer};
 
@@ -107,13 +106,7 @@ impl<R: Runtime> StreamLayer for NativeTls<R> {
       .connect(self.domain.clone(), conn)
       .await
       .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, e))?;
-    Ok(NativeTlsStream {
-      stream,
-      read_deadline: None,
-      write_deadline: None,
-      local_addr,
-      peer_addr,
-    })
+    Ok(NativeTlsStream::new(stream, peer_addr, local_addr))
   }
 
   async fn bind(&self, addr: SocketAddr) -> io::Result<Self::Listener> {
@@ -128,8 +121,6 @@ impl<R: Runtime> StreamLayer for NativeTls<R> {
         })
       })
   }
-
-  async fn cache_stream(&self, _addr: SocketAddr, _stream: Self::Stream) {}
 
   fn is_secure() -> bool {
     true
@@ -151,16 +142,7 @@ impl<R: Runtime> Listener for NativeTlsListener<R> {
     let stream = TlsAcceptor::accept(&self.acceptor, conn)
       .await
       .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, e))?;
-    Ok((
-      NativeTlsStream {
-        stream,
-        read_deadline: None,
-        write_deadline: None,
-        local_addr: self.local_addr,
-        peer_addr: addr,
-      },
-      addr,
-    ))
+    Ok((NativeTlsStream::new(stream, addr, self.local_addr), addr))
   }
 
   async fn shutdown(&self) -> io::Result<()> {
@@ -177,8 +159,6 @@ impl<R: Runtime> Listener for NativeTlsListener<R> {
 pub struct NativeTlsStream<R: Runtime> {
   #[pin]
   stream: AsyncNativeTlsStream<<R::Net as Net>::TcpStream>,
-  read_deadline: Option<R::Instant>,
-  write_deadline: Option<R::Instant>,
   local_addr: SocketAddr,
   peer_addr: SocketAddr,
 }
@@ -207,29 +187,6 @@ impl<R: Runtime> AsyncWrite for NativeTlsStream<R> {
   }
 }
 
-impl<R: Runtime> TimeoutableReadStream for NativeTlsStream<R> {
-  type Instant = R::Instant;
-  fn set_read_deadline(&mut self, deadline: Option<Self::Instant>) {
-    self.read_deadline = deadline;
-  }
-
-  fn read_deadline(&self) -> Option<Self::Instant> {
-    self.read_deadline
-  }
-}
-
-impl<R: Runtime> TimeoutableWriteStream for NativeTlsStream<R> {
-  type Instant = R::Instant;
-
-  fn set_write_deadline(&mut self, deadline: Option<Self::Instant>) {
-    self.write_deadline = deadline;
-  }
-
-  fn write_deadline(&self) -> Option<Self::Instant> {
-    self.write_deadline
-  }
-}
-
 impl<R: Runtime> PromisedStream for NativeTlsStream<R> {
   type Instant = R::Instant;
 
@@ -241,5 +198,20 @@ impl<R: Runtime> PromisedStream for NativeTlsStream<R> {
   #[inline]
   fn peer_addr(&self) -> SocketAddr {
     self.peer_addr
+  }
+}
+
+impl<R: Runtime> NativeTlsStream<R> {
+  #[inline]
+  const fn new(
+    stream: AsyncNativeTlsStream<<R::Net as Net>::TcpStream>,
+    peer_addr: SocketAddr,
+    local_addr: SocketAddr,
+  ) -> Self {
+    Self {
+      stream,
+      local_addr,
+      peer_addr,
+    }
   }
 }

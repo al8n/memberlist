@@ -22,13 +22,7 @@ use memberlist_core::{
 };
 use smol_str::SmolStr;
 
-use crate::{Checksumer, Listener, StreamLayer};
-
-#[cfg(feature = "encryption")]
-use crate::security::{EncryptionAlgo, SecretKey};
-
-#[cfg(feature = "compression")]
-use crate::compressor::Compressor;
+use crate::{Listener, StreamLayer};
 
 pub use super::promised_processor::listener_backoff;
 

@@ -1,16 +1,10 @@
 use std::net::SocketAddr;
 
 use indexmap::IndexSet;
-use memberlist_core::types::{CIDRsPolicy, Label};
+use memberlist_core::types::CIDRsPolicy;
 use nodecraft::resolver::AddressResolver;
 
-use crate::{Checksumer, StreamLayer};
-
-#[cfg(feature = "compression")]
-use super::compressor::Compressor;
-
-#[cfg(feature = "encryption")]
-use super::security::{SecretKey, SecretKeys};
+use crate::StreamLayer;
 
 /// Used to configure a net transport.
 #[viewit::viewit(
@@ -50,17 +44,6 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   )]
   bind_addresses: IndexSet<A::Address>,
 
-  /// Label is an optional set of bytes to include on the outside of each
-  /// packet and stream.
-  ///
-  /// If gossip encryption is enabled and this is set it is treated as GCM
-  /// authenticated data.
-  #[viewit(
-    getter(const, style = "ref", attrs(doc = "Get the label of the node."),),
-    setter(attrs(doc = "Set the label of the node. (Builder pattern)"),)
-  )]
-  label: Label,
-
   /// Resolver options, which used to construct the address resolver for this transport.
   #[viewit(
     getter(const, style = "ref", attrs(doc = "Get the address resolver options."),),
@@ -74,21 +57,6 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
     setter(attrs(doc = "Set the stream layer options. (Builder pattern)"),)
   )]
   stream_layer: S::Options,
-
-  /// Skips the check that inbound packets and gossip
-  /// streams need to be label prefixed.
-  #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Get if the check that inbound packets and gossip streams need to be label prefixed."
-      ),
-    ),
-    setter(attrs(
-      doc = "Set if the check that inbound packets and gossip streams need to be label prefixed. (Builder pattern)"
-    ),)
-  )]
-  skip_inbound_label_check: bool,
 
   /// Policy for Classless Inter-Domain Routing (CIDR).
   ///
@@ -106,200 +74,24 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   )]
   cidrs_policy: CIDRsPolicy,
 
-  /// Set the maximum payload size can be sent by UDP
-  #[viewit(
-    getter(const, attrs(doc = "Get the maximum payload size can be sent by UDP."),),
-    setter(attrs(doc = "Set the maximum payload size can be sent by UDP. (Builder pattern)"),)
-  )]
-  max_payload_size: usize,
-
-  /// The checksumer to use for checksumming packets.
-  #[cfg_attr(feature = "serde", serde(default))]
+  /// Set the maximum packet size can be sent by UDP
   #[viewit(
     getter(
       const,
-      attrs(doc = "Get the checksumer used to calculate checksum for UDP."),
+      attrs(doc = "Get the maximum payload size can be sent by UDP. Default is `1472` bytes."),
     ),
     setter(attrs(
-      doc = "Set the checksumer used to calculate checksum for UDP. (Builder pattern)"
+      doc = "Set the maximum payload size can be sent by UDP. Default is `1472` bytes. (Builder pattern)"
     ),)
   )]
-  checksumer: Checksumer,
+  max_packet_size: usize,
 
-  /// Used to control message compression. This can
-  /// be used to reduce bandwidth usage at the cost of slightly more CPU
-  /// utilization.
-  #[cfg(feature = "compression")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
+  /// Set the receive buffer size of UDP
   #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Get the compression algorithm used for outgoing.",
-        cfg(feature = "compression"),
-        cfg_attr(docsrs, doc(cfg(feature = "compression")))
-      ),
-    ),
-    setter(attrs(
-      doc = "Set the compression algorithm used for outgoing. (Builder pattern)",
-      cfg(feature = "compression"),
-      cfg_attr(docsrs, doc(cfg(feature = "compression")))
-    ),)
+    getter(const, attrs(doc = "Get the UDP receive window. Default is `2MB`."),),
+    setter(attrs(doc = "Set the UDP receive window. Default is `2MB`. (Builder pattern)"),)
   )]
-  compressor: Option<Compressor>,
-
-  /// Controls whether to enforce encryption for outgoing
-  /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
-  /// a running cluster.
-  #[cfg_attr(feature = "serde", serde(default))]
-  #[cfg(feature = "encryption")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Get whether to enforce encryption for outgoing gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster.",
-        cfg(feature = "encryption"),
-        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
-      ),
-    ),
-    setter(attrs(
-      doc = "Set whether to enforce encryption for outgoing gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster. (Builder pattern)",
-      cfg(feature = "encryption"),
-      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
-    ),)
-  )]
-  gossip_verify_outgoing: bool,
-
-  /// Controls whether to enforce encryption for incoming
-  /// gossip. It is used for upshifting from unencrypted to encrypted gossip on
-  /// a running cluster.
-  #[cfg_attr(feature = "serde", serde(default))]
-  #[cfg(feature = "encryption")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Get whether to enforce encryption for incoming gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster.",
-        cfg(feature = "encryption"),
-        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
-      ),
-    ),
-    setter(attrs(
-      doc = "Set whether to enforce encryption for incoming gossip. It is used for upshifting from unencrypted to encrypted gossip on a running cluster. (Builder pattern)",
-      cfg(feature = "encryption"),
-      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
-    ),)
-  )]
-  gossip_verify_incoming: bool,
-
-  /// The size of a message that should be offload to [`rayon`] thread pool
-  /// for encryption or compression.
-  ///
-  /// The default value is 1KB, which means that any message larger than 1KB
-  /// will be offloaded to [`rayon`] thread pool for encryption or compression.
-  #[cfg(any(feature = "compression", feature = "encryption"))]
-  #[cfg_attr(docsrs, doc(cfg(any(feature = "compression", feature = "encryption"))))]
-  #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Get the size of a message that should be offload to [`rayon`] thread pool for encryption or compression.",
-        cfg(any(feature = "compression", feature = "encryption")),
-        cfg_attr(docsrs, doc(cfg(any(feature = "compression", feature = "encryption"))))
-      ),
-    ),
-    setter(attrs(
-      doc = "Set the size of a message that should be offload to [`rayon`] thread pool for encryption or compression. (Builder pattern)",
-      cfg(any(feature = "compression", feature = "encryption")),
-      cfg_attr(docsrs, doc(cfg(any(feature = "compression", feature = "encryption"))))
-    ),)
-  )]
-  offload_size: usize,
-
-  /// Used to initialize the primary encryption key in a keyring.
-  ///
-  /// **Note: This field will not be used when network layer is secure**
-  ///
-  /// The primary encryption key is the only key used to encrypt messages and
-  /// the first key used while attempting to decrypt messages. Providing a
-  /// value for this primary key will enable message-level encryption and
-  /// verification, and automatically install the key onto the keyring.
-  #[cfg(feature = "encryption")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  #[viewit(
-    getter(
-      const,
-      style = "ref",
-      result(
-        converter(fn = "Option::as_ref"),
-        type = "Option<&super::security::SecretKey>"
-      ),
-      attrs(
-        doc = "Get the primary encryption key in a keyring.",
-        cfg(feature = "encryption"),
-        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
-      ),
-    ),
-    setter(attrs(
-      doc = "Set the primary encryption key in a keyring. (Builder pattern)",
-      cfg(feature = "encryption"),
-      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
-    ),)
-  )]
-  primary_key: Option<SecretKey>,
-
-  /// Holds all of the encryption keys used internally.
-  ///
-  /// **Note: This field will not be used if the network layer is secure.**
-  #[viewit(
-    getter(
-      style = "ref",
-      result(
-        converter(fn = "Option::as_ref"),
-        type = "Option<&super::security::SecretKeys>"
-      ),
-      attrs(
-        doc = "Get all of the encryption keys used internally.",
-        cfg(feature = "encryption"),
-        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
-      ),
-    ),
-    setter(attrs(
-      doc = "Set all of the encryption keys used internally. (Builder pattern)",
-      cfg(feature = "encryption"),
-      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
-    ))
-  )]
-  #[cfg(feature = "encryption")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  secret_keys: Option<SecretKeys>,
-
-  /// The configured encryption type that we
-  /// will _speak_.
-  #[cfg(feature = "encryption")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  #[viewit(
-    getter(
-      style = "ref",
-      result(
-        converter(fn = "Option::as_ref"),
-        type = "Option<&super::security::EncryptionAlgo>"
-      ),
-      attrs(
-        doc = "Get the encryption algorithm used to encrypt the outgoing gossip.",
-        cfg(feature = "encryption"),
-        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
-      ),
-    ),
-    setter(attrs(
-      doc = "Set the encryption algorithm used to encrypt the outgoing gossip. (Builder pattern)",
-      cfg(feature = "encryption"),
-      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
-    ))
-  )]
-  encryption_algo: Option<crate::security::EncryptionAlgo>,
+  recv_buffer_size: usize,
 
   /// The metrics labels.
   #[cfg(feature = "metrics")]
@@ -337,27 +129,11 @@ where
     Self {
       id: self.id.clone(),
       bind_addresses: self.bind_addresses.clone(),
-      label: self.label.clone(),
       stream_layer: self.stream_layer.clone(),
       resolver: self.resolver.clone(),
-      skip_inbound_label_check: self.skip_inbound_label_check,
       cidrs_policy: self.cidrs_policy.clone(),
-      max_payload_size: self.max_payload_size,
-      checksumer: self.checksumer,
-      #[cfg(feature = "compression")]
-      compressor: self.compressor,
-      #[cfg(any(feature = "compression", feature = "encryption"))]
-      offload_size: self.offload_size,
-      #[cfg(feature = "encryption")]
-      gossip_verify_outgoing: self.gossip_verify_outgoing,
-      #[cfg(feature = "encryption")]
-      gossip_verify_incoming: self.gossip_verify_incoming,
-      #[cfg(feature = "encryption")]
-      primary_key: self.primary_key,
-      #[cfg(feature = "encryption")]
-      secret_keys: self.secret_keys.clone(),
-      #[cfg(feature = "encryption")]
-      encryption_algo: self.encryption_algo,
+      max_packet_size: self.max_packet_size,
+      recv_buffer_size: self.recv_buffer_size,
       #[cfg(feature = "metrics")]
       metric_labels: self.metric_labels.clone(),
     }
@@ -417,27 +193,11 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
     Self {
       id,
       bind_addresses: IndexSet::new(),
-      label: Label::empty(),
       resolver: resolver_options,
       stream_layer: stream_layer_opts,
-      skip_inbound_label_check: false,
       cidrs_policy: CIDRsPolicy::allow_all(),
-      max_payload_size: 1400,
-      checksumer: Checksumer::Crc32,
-      #[cfg(feature = "encryption")]
-      gossip_verify_outgoing: false,
-      #[cfg(feature = "encryption")]
-      gossip_verify_incoming: false,
-      #[cfg(feature = "compression")]
-      compressor: None,
-      #[cfg(any(feature = "compression", feature = "encryption"))]
-      offload_size: 1024,
-      #[cfg(feature = "encryption")]
-      primary_key: None,
-      #[cfg(feature = "encryption")]
-      secret_keys: None,
-      #[cfg(feature = "encryption")]
-      encryption_algo: None,
+      max_packet_size: 1472,
+      recv_buffer_size: super::DEFAULT_UDP_RECV_BUF_SIZE,
       #[cfg(feature = "metrics")]
       metric_labels: None,
     }
@@ -460,25 +220,9 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
       Options {
         id: opts.id,
         bind_addresses: opts.bind_addresses,
-        label: opts.label,
-        skip_inbound_label_check: opts.skip_inbound_label_check,
         cidrs_policy: opts.cidrs_policy,
-        max_payload_size: opts.max_payload_size,
-        checksumer: opts.checksumer,
-        #[cfg(feature = "compression")]
-        compressor: opts.compressor,
-        #[cfg(feature = "encryption")]
-        gossip_verify_outgoing: opts.gossip_verify_outgoing,
-        #[cfg(feature = "encryption")]
-        gossip_verify_incoming: opts.gossip_verify_incoming,
-        #[cfg(any(feature = "compression", feature = "encryption"))]
-        offload_size: opts.offload_size,
-        #[cfg(feature = "encryption")]
-        primary_key: opts.primary_key,
-        #[cfg(feature = "encryption")]
-        secret_keys: opts.secret_keys,
-        #[cfg(feature = "encryption")]
-        encryption_algo: opts.encryption_algo,
+        max_packet_size: opts.max_packet_size,
+        recv_buffer_size: opts.recv_buffer_size,
         #[cfg(feature = "metrics")]
         metric_labels: opts.metric_labels,
       },
@@ -490,25 +234,9 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
 pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   id: I,
   bind_addresses: IndexSet<A::Address>,
-  label: Label,
-  skip_inbound_label_check: bool,
   cidrs_policy: CIDRsPolicy,
-  max_payload_size: usize,
-  checksumer: Checksumer,
-  #[cfg(feature = "compression")]
-  compressor: Option<Compressor>,
-  #[cfg(feature = "encryption")]
-  gossip_verify_outgoing: bool,
-  #[cfg(feature = "encryption")]
-  gossip_verify_incoming: bool,
-  #[cfg(any(feature = "compression", feature = "encryption"))]
-  offload_size: usize,
-  #[cfg(feature = "encryption")]
-  primary_key: Option<SecretKey>,
-  #[cfg(feature = "encryption")]
-  secret_keys: Option<SecretKeys>,
-  #[cfg(feature = "encryption")]
-  encryption_algo: Option<crate::security::EncryptionAlgo>,
+  max_packet_size: usize,
+  recv_buffer_size: usize,
   #[cfg(feature = "metrics")]
   metric_labels: Option<std::sync::Arc<memberlist_core::types::MetricLabels>>,
 }

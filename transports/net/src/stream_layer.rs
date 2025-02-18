@@ -1,8 +1,6 @@
 use std::{future::Future, io, net::SocketAddr};
 
 use agnostic::RuntimeLite;
-use futures::{AsyncRead, AsyncWrite};
-use memberlist_core::transport::TimeoutableStream;
 
 /// `StreamLayer` implementations based on TCP.
 pub mod tcp;
@@ -40,13 +38,7 @@ pub trait Listener: Send + Sync + 'static {
 /// This trait encapsulates functionality for a network connection that supports asynchronous
 /// read/write operations and can be split into separate read and write halves.
 pub trait PromisedStream:
-  TimeoutableStream<Instant = <Self as PromisedStream>::Instant>
-  + AsyncRead
-  + AsyncWrite
-  + Unpin
-  + Send
-  + Sync
-  + 'static
+  futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + Send + Sync + 'static
 {
   /// The instant type
   type Instant: agnostic::time::Instant + Send + Sync + 'static;
@@ -87,10 +79,6 @@ pub trait StreamLayer: Send + Sync + 'static {
 
   /// Binds the listener to a given socket address.
   fn bind(&self, addr: SocketAddr) -> impl Future<Output = io::Result<Self::Listener>> + Send;
-
-  /// Caches the stream for the given address.
-  fn cache_stream(&self, addr: SocketAddr, stream: Self::Stream)
-    -> impl Future<Output = ()> + Send;
 
   /// Indicates whether the connection is secure.
   ///

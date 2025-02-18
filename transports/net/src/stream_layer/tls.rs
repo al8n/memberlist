@@ -10,11 +10,10 @@ use agnostic::{
   net::{Net, TcpListener, TcpStream},
   Runtime,
 };
-use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::{AsyncRead, AsyncWrite};
 pub use futures_rustls::{
   client, pki_types::ServerName, rustls, server, TlsAcceptor, TlsConnector,
 };
-use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 use rustls::{client::danger::ServerCertVerifier, SignatureScheme};
 
 use super::{Listener, PromisedStream, StreamLayer};
@@ -159,15 +158,7 @@ impl<R: Runtime> StreamLayer for Tls<R> {
     let conn = <<R::Net as Net>::TcpStream as TcpStream>::connect(addr).await?;
     let local_addr = conn.local_addr()?;
     let stream = self.connector.connect(self.domain.clone(), conn).await?;
-    Ok(TlsStream {
-      stream: TlsStreamKind::Client {
-        stream,
-        read_deadline: None,
-        write_deadline: None,
-      },
-      peer_addr: addr,
-      local_addr,
-    })
+    Ok(TlsStream::client(stream, addr, local_addr))
   }
 
   async fn bind(&self, addr: SocketAddr) -> io::Result<Self::Listener> {
@@ -183,28 +174,28 @@ impl<R: Runtime> StreamLayer for Tls<R> {
       })
   }
 
-  async fn cache_stream(&self, _addr: SocketAddr, mut stream: Self::Stream) {
-    // TODO(al8n): It seems that futures-rustls has a bug
-    // client side dial remote successfully and finish send bytes successfully,
-    // and then drop the connection immediately.
-    // But, server side can't accept the connection, and reports `BrokenPipe` error.
-    //
-    // Therefore, if we remove the below code, the send unit tests in
-    // - transports/net/tests/main/tokio/send.rs
-    // - transports/net/tests/main/async_std/send.rs
-    // - transport/net/tests/main/smol/send.rs
-    //
-    // I am also not sure if this bug can happen in real environment,
-    // so just keep it here and not feature-gate it by `cfg(test)`.
-    //
-    // To reproduce the bug, you can comment out the below code and run the send unit tests
-    // on a docker container or a virtual machine with few CPU cores.
-    R::spawn_detach(async move {
-      let _ = stream.flush().await;
-      let _ = stream.close().await;
-      R::sleep(std::time::Duration::from_millis(100)).await;
-    });
-  }
+  // async fn cache_stream(&self, _addr: SocketAddr, mut stream: Self::Stream) {
+  //   // TODO(al8n): It seems that futures-rustls has a bug
+  //   // client side dial remote successfully and finish send bytes successfully,
+  //   // and then drop the connection immediately.
+  //   // But, server side can't accept the connection, and reports `BrokenPipe` error.
+  //   //
+  //   // Therefore, if we remove the below code, the send unit tests in
+  //   // - transports/net/tests/main/tokio/send.rs
+  //   // - transports/net/tests/main/async_std/send.rs
+  //   // - transport/net/tests/main/smol/send.rs
+  //   //
+  //   // I am also not sure if this bug can happen in real environment,
+  //   // so just keep it here and not feature-gate it by `cfg(test)`.
+  //   //
+  //   // To reproduce the bug, you can comment out the below code and run the send unit tests
+  //   // on a docker container or a virtual machine with few CPU cores.
+  //   R::spawn_detach(async move {
+  //     let _ = stream.flush().await;
+  //     let _ = stream.close().await;
+  //     R::sleep(std::time::Duration::from_millis(100)).await;
+  //   });
+  // }
 
   fn is_secure() -> bool {
     true
@@ -224,18 +215,7 @@ impl<R: Runtime> Listener for TlsListener<R> {
   async fn accept(&self) -> io::Result<(Self::Stream, std::net::SocketAddr)> {
     let (conn, addr) = self.ln.accept().await?;
     let stream = TlsAcceptor::accept(&self.acceptor, conn).await?;
-    Ok((
-      TlsStream {
-        stream: TlsStreamKind::Server {
-          stream,
-          read_deadline: None,
-          write_deadline: None,
-        },
-        peer_addr: addr,
-        local_addr: self.local_addr,
-      },
-      addr,
-    ))
+    Ok((TlsStream::server(stream, addr, self.local_addr), addr))
   }
 
   fn local_addr(&self) -> std::net::SocketAddr {
@@ -252,14 +232,10 @@ enum TlsStreamKind<R: Runtime> {
   Client {
     #[pin]
     stream: client::TlsStream<<R::Net as Net>::TcpStream>,
-    read_deadline: Option<R::Instant>,
-    write_deadline: Option<R::Instant>,
   },
   Server {
     #[pin]
     stream: server::TlsStream<<R::Net as Net>::TcpStream>,
-    read_deadline: Option<R::Instant>,
-    write_deadline: Option<R::Instant>,
   },
 }
 
@@ -270,8 +246,8 @@ impl<R: Runtime> AsyncRead for TlsStreamKind<R> {
     buf: &mut [u8],
   ) -> Poll<io::Result<usize>> {
     match self.get_mut() {
-      Self::Client { stream, .. } => Pin::new(stream).poll_read(cx, buf),
-      Self::Server { stream, .. } => Pin::new(stream).poll_read(cx, buf),
+      Self::Client { stream } => Pin::new(stream).poll_read(cx, buf),
+      Self::Server { stream } => Pin::new(stream).poll_read(cx, buf),
     }
   }
 }
@@ -279,22 +255,22 @@ impl<R: Runtime> AsyncRead for TlsStreamKind<R> {
 impl<R: Runtime> AsyncWrite for TlsStreamKind<R> {
   fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
     match self.get_mut() {
-      Self::Client { stream, .. } => Pin::new(stream).poll_write(cx, buf),
-      Self::Server { stream, .. } => Pin::new(stream).poll_write(cx, buf),
+      Self::Client { stream } => Pin::new(stream).poll_write(cx, buf),
+      Self::Server { stream } => Pin::new(stream).poll_write(cx, buf),
     }
   }
 
   fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     match self.get_mut() {
-      Self::Client { stream, .. } => Pin::new(stream).poll_flush(cx),
-      Self::Server { stream, .. } => Pin::new(stream).poll_flush(cx),
+      Self::Client { stream } => Pin::new(stream).poll_flush(cx),
+      Self::Server { stream } => Pin::new(stream).poll_flush(cx),
     }
   }
 
   fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     match self.get_mut() {
-      Self::Client { stream, .. } => Pin::new(stream).poll_close(cx),
-      Self::Server { stream, .. } => Pin::new(stream).poll_close(cx),
+      Self::Client { stream } => Pin::new(stream).poll_close(cx),
+      Self::Server { stream } => Pin::new(stream).poll_close(cx),
     }
   }
 }
@@ -332,65 +308,6 @@ impl<R: Runtime> AsyncWrite for TlsStream<R> {
   }
 }
 
-impl<R: Runtime> TimeoutableReadStream for TlsStream<R> {
-  type Instant = R::Instant;
-  fn set_read_deadline(&mut self, deadline: Option<Self::Instant>) {
-    match self {
-      Self {
-        stream: TlsStreamKind::Client { read_deadline, .. },
-        ..
-      } => *read_deadline = deadline,
-      Self {
-        stream: TlsStreamKind::Server { read_deadline, .. },
-        ..
-      } => *read_deadline = deadline,
-    }
-  }
-
-  fn read_deadline(&self) -> Option<Self::Instant> {
-    match self {
-      Self {
-        stream: TlsStreamKind::Client { read_deadline, .. },
-        ..
-      } => *read_deadline,
-      Self {
-        stream: TlsStreamKind::Server { read_deadline, .. },
-        ..
-      } => *read_deadline,
-    }
-  }
-}
-
-impl<R: Runtime> TimeoutableWriteStream for TlsStream<R> {
-  type Instant = R::Instant;
-
-  fn set_write_deadline(&mut self, deadline: Option<Self::Instant>) {
-    match self {
-      Self {
-        stream: TlsStreamKind::Client { write_deadline, .. },
-        ..
-      } => *write_deadline = deadline,
-      Self {
-        stream: TlsStreamKind::Server { write_deadline, .. },
-        ..
-      } => *write_deadline = deadline,
-    }
-  }
-
-  fn write_deadline(&self) -> Option<Self::Instant> {
-    match self {
-      Self {
-        stream: TlsStreamKind::Client { write_deadline, .. },
-        ..
-      } => *write_deadline,
-      Self {
-        stream: TlsStreamKind::Server { write_deadline, .. },
-        ..
-      } => *write_deadline,
-    }
-  }
-}
-
 impl<R: Runtime> PromisedStream for TlsStream<R> {
   type Instant = R::Instant;
 
@@ -402,5 +319,33 @@ impl<R: Runtime> PromisedStream for TlsStream<R> {
   #[inline]
   fn peer_addr(&self) -> SocketAddr {
     self.peer_addr
+  }
+}
+
+impl<R: Runtime> TlsStream<R> {
+  #[inline]
+  const fn client(
+    stream: client::TlsStream<<R::Net as Net>::TcpStream>,
+    peer_addr: SocketAddr,
+    local_addr: SocketAddr,
+  ) -> Self {
+    Self {
+      stream: TlsStreamKind::Client { stream },
+      local_addr,
+      peer_addr,
+    }
+  }
+
+  #[inline]
+  const fn server(
+    stream: server::TlsStream<<R::Net as Net>::TcpStream>,
+    peer_addr: SocketAddr,
+    local_addr: SocketAddr,
+  ) -> Self {
+    Self {
+      stream: TlsStreamKind::Server { stream },
+      local_addr,
+      peer_addr,
+    }
   }
 }

@@ -58,7 +58,7 @@ encryption = ["aead", "aes-gcm", "base64", "cbc", "rand"]
 
 arbitrary = ["dep:arbitrary", "nodecraft/arbitrary", "smol_str/arbitrary"]
 quickcheck = ["dep:quickcheck", "nodecraft/quickcheck"]
-serde = ["dep:serde", "smol_str/serde", "bytes/serde", "nodecraft/serde", "smallvec-wrapper/serde"]
+serde = ["dep:serde", "smol_str/serde", "bytes/serde", "nodecraft/serde", "smallvec-wrapper/serde", "ipnet/serde"]
 
 tokio = ["agnostic-io/tokio"]
 
