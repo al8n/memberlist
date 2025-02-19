@@ -581,37 +581,6 @@ mod quinn_stream_layer {
     ))
   }
 
-  // fn configure_server() -> Result<rustls::ServerConfig, Box<dyn Error>> {
-  //   let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-  //   let cert_der = cert.serialize_der().unwrap();
-  //   let priv_key = cert.serialize_private_key_der();
-  //   let priv_key = rustls::pki_types::pem::SectionKind::PrivateKey(priv_key);
-  //   let cert_chain = vec![rustls::pki_types::pem::SectionKind::Certificat(
-  //     cert_der.clone(),
-  //   )];
-
-  //   let mut cfg = rustls::ServerConfig::builder()
-  //     .with_safe_default_cipher_suites()
-  //     .with_safe_default_kx_groups()
-  //     .with_protocol_versions(&[&rustls::version::TLS13])
-  //     .unwrap()
-  //     .with_no_client_auth()
-  //     .with_single_cert(cert_chain, priv_key)?;
-  //   cfg.max_early_data_size = u32::MAX;
-  //   Ok(cfg)
-  // }
-
-  // fn configure_client(
-  //   server_certs: &[&[u8]],
-  // ) -> Result<ClientConfig, Box<dyn Error + Send + Sync + 'static>> {
-  //   let mut certs = rustls::RootCertStore::empty();
-  //   for cert in server_certs {
-  //     certs.add(CertificateDer::from(*cert))?;
-  //   }
-
-  //   Ok(ClientConfig::with_root_certificates(Arc::new(certs))?)
-  // }
-
   fn configure_server(
   ) -> Result<(ServerConfig, CertificateDer<'static>), Box<dyn Error + Send + Sync + 'static>> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();

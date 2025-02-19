@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use super::{
   Data, EncryptionAlgorithm, Label, Message, ProtoDecoder, ProtoEncoder, RandomSecretKeys,
 };
@@ -10,6 +12,7 @@ fn encode_decode_messages<I, A>(
   label: Label,
   check_label: bool,
   stream: bool,
+  overhead: u8,
 ) -> bool
 where
   I: Data + PartialEq + Clone + 'static,
@@ -26,7 +29,7 @@ where
     decoder.with_label(label);
   }
   super::encode_decode_roundtrip::<_, _, _, agnostic_lite::tokio::TokioRuntime>(
-    parallel, stream, encoder, decoder,
+    overhead, parallel, stream, encoder, decoder,
   )
 }
 
@@ -38,6 +41,7 @@ fn encode_decode_message<I, A>(
   label: Label,
   check_label: bool,
   stream: bool,
+  overhead: u8,
 ) -> bool
 where
   I: Data + PartialEq + Clone + 'static,
@@ -54,7 +58,7 @@ where
     decoder.with_label(label);
   }
   super::encode_decode_roundtrip::<_, _, _, agnostic_lite::tokio::TokioRuntime>(
-    parallel, stream, encoder, decoder,
+    overhead, parallel, stream, encoder, decoder,
   )
 }
 
@@ -68,8 +72,9 @@ macro_rules! encryption_random_pk_unit_test {
           keys: RandomSecretKeys,
           stream: bool,
           parallel: bool,
+          overhead: u8,
         ) -> bool {
-          encode_decode_messages(parallel, $algo, keys, messages, Label::try_from("test").unwrap(), true, stream)
+          encode_decode_messages(parallel, $algo, keys, messages, Label::try_from("test").unwrap(), true, stream, overhead)
         }
 
         #[quickcheck_macros::quickcheck]
@@ -78,8 +83,9 @@ macro_rules! encryption_random_pk_unit_test {
           keys: RandomSecretKeys,
           stream: bool,
           parallel: bool,
+          overhead: u8,
         ) -> bool {
-          encode_decode_messages(parallel, $algo, keys, messages, Label::EMPTY.clone(), false, stream)
+          encode_decode_messages(parallel, $algo, keys, messages, Label::EMPTY.clone(), false, stream, overhead)
         }
 
         #[quickcheck_macros::quickcheck]
@@ -88,8 +94,9 @@ macro_rules! encryption_random_pk_unit_test {
           keys: RandomSecretKeys,
           stream: bool,
           parallel: bool,
+          overhead: u8,
         ) -> bool {
-          encode_decode_message(parallel, $algo, keys, message, Label::try_from("test").unwrap(), true, stream)
+          encode_decode_message(parallel, $algo, keys, message, Label::try_from("test").unwrap(), true, stream, overhead)
         }
 
         #[quickcheck_macros::quickcheck]
@@ -98,8 +105,9 @@ macro_rules! encryption_random_pk_unit_test {
           keys: RandomSecretKeys,
           stream: bool,
           parallel: bool,
+          overhead: u8,
         ) -> bool {
-          encode_decode_message(parallel, $algo, keys, message, Label::EMPTY.clone(), false, stream)
+          encode_decode_message(parallel, $algo, keys, message, Label::EMPTY.clone(), false, stream, overhead)
         }
       )*
     }

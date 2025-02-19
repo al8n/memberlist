@@ -336,7 +336,6 @@ where
 
   async fn broadcast_messages<F>(
     &self,
-    overhead: usize,
     limit: usize,
     encoded_len: F,
   ) -> impl Iterator<Item = Bytes> + Send
@@ -345,7 +344,7 @@ where
   {
     self
       .node_delegate
-      .broadcast_messages(overhead, limit, encoded_len)
+      .broadcast_messages(limit, encoded_len)
       .await
   }
 

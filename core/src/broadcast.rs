@@ -161,14 +161,13 @@ where
   pub(crate) async fn get_broadcast_with_prepend(
     &self,
     to_send: TinyVec<Message<T::Id, T::ResolvedAddress>>,
-    overhead: usize,
     limit: usize,
   ) -> Result<TinyVec<Message<T::Id, T::ResolvedAddress>>, Error<T, D>> {
     // Get memberlist messages first
     let mut to_send = self
       .inner
       .broadcast
-      .get_broadcast_with_prepend(to_send, overhead, limit)
+      .get_broadcast_with_prepend(to_send, limit)
       .await;
 
     // Check if the user has anything to broadcast
@@ -176,23 +175,21 @@ where
       // Determine the bytes used already
       let mut bytes_used = 0;
       for msg in to_send.iter() {
-        bytes_used += msg.encoded_len() + overhead;
+        bytes_used += msg.encoded_len();
       }
 
       // Check space remaining for user messages
       let avail = limit.saturating_sub(bytes_used);
-      if avail > overhead {
-        to_send.extend(
-          delegate
-            .broadcast_messages(overhead, avail, |b| {
-              let msg = Message::<T::Id, T::ResolvedAddress>::UserData(b);
-              let len = msg.encoded_len();
-              (len, msg.unwrap_user_data())
-            })
-            .await
-            .map(Message::UserData),
-        );
-      }
+      to_send.extend(
+        delegate
+          .broadcast_messages(avail, |b| {
+            let msg = Message::<T::Id, T::ResolvedAddress>::UserData(b);
+            let len = msg.encoded_len();
+            (len, msg.unwrap_user_data())
+          })
+          .await
+          .map(Message::UserData),
+      );
     }
 
     Ok(to_send)

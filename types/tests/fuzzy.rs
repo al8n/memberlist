@@ -307,6 +307,7 @@ where
 }
 
 fn encode_decode_roundtrip<I, A, M, R>(
+  overhead: u8,
   parallel: bool,
   stream: bool,
   encoder: ProtoEncoder<I, A, M>,
@@ -319,6 +320,7 @@ where
   R: agnostic_lite::RuntimeLite,
 {
   let res = run(async move {
+    let encoder = encoder.with_overhead(overhead as usize);
     let messages = encoder.messages().clone();
     let data = {
       if parallel {
@@ -346,11 +348,11 @@ where
     for payload in data {
       let data = if !stream {
         decoder
-          .decode::<R>(bytes::BytesMut::from(bytes::Bytes::from(payload)))
+          .decode::<R>(payload.split().1)
           .await?
       } else {
         decoder
-          .decode_from_reader::<_, R>(&mut futures::io::Cursor::new(payload))
+          .decode_from_reader::<_, R>(&mut futures::io::Cursor::new(payload.split().1))
           .await?
       };
       let decoder = MessagesDecoder::<I, A, _>::new(data)?;

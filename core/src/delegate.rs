@@ -223,7 +223,6 @@ where
 
   async fn broadcast_messages<F>(
     &self,
-    _overhead: usize,
     _limit: usize,
     _encoded_len: F,
   ) -> impl Iterator<Item = Bytes> + Send

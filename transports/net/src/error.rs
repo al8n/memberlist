@@ -18,9 +18,6 @@ pub enum NetTransportError<A: AddressResolver> {
   /// Returns when the ip is blocked.
   #[error("the ip {0} is blocked")]
   BlockedIp(IpAddr),
-  /// Returns when the packet buffer size is too small.
-  #[error("failed to resize packet buffer {0}")]
-  ResizePacketBuffer(std::io::Error),
   /// Returns when the packet socket fails to bind.
   #[error("failed to start packet listener on {0}: {1}")]
   ListenPacket(SocketAddr, std::io::Error),
@@ -30,9 +27,6 @@ pub enum NetTransportError<A: AddressResolver> {
   /// Returns when the failed to create a resolver for the transport.
   #[error("failed to create resolver: {0}")]
   Resolver(A::Error),
-  /// Returns when the failed to create a stream layer for the transport.
-  #[error("failed to create stream layer: {0}")]
-  StreamLayer(std::io::Error),
   /// Returns when we fail to resolve an address.
   #[error("failed to resolve address {addr}: {err}")]
   Resolve {
@@ -48,7 +42,7 @@ pub enum NetTransportError<A: AddressResolver> {
   #[error(transparent)]
   Io(#[from] std::io::Error),
   /// Returns when there is a custom error.
-  #[error("custom error: {0}")]
+  #[error("{0}")]
   Custom(std::borrow::Cow<'static, str>),
 }
 
@@ -72,6 +66,7 @@ where
           | ErrorKind::ConnectionAborted
           | ErrorKind::BrokenPipe
           | ErrorKind::TimedOut
+          | ErrorKind::NotConnected
       ),
       _ => false,
     }

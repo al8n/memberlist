@@ -24,14 +24,10 @@ pub trait NodeDelegate: Send + Sync + 'static {
   /// the limit. Care should be taken that this method does not block,
   /// since doing so would block the entire UDP packet receive loop.
   ///
-  /// The `encoded_len` function accepts a user data message, and will return
-  /// the same message back and the encoded length of the message calculated by
-  /// [`Transport::Wire`].
-  ///
-  /// [`Transport::Wire`]: trait.Transport.html#associatedtype.Wire
+  /// The `encoded_len` function accepts a bytes, and will return
+  /// the same bytes back and the encoded length of the message.
   fn broadcast_messages<F>(
     &self,
-    overhead: usize,
     limit: usize,
     encoded_len: F,
   ) -> impl Future<Output = impl Iterator<Item = Bytes> + Send> + Send

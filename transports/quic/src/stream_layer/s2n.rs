@@ -15,7 +15,6 @@ use std::{
 use agnostic_lite::{time::Instant, RuntimeLite};
 use bytes::Bytes;
 use futures::{lock::Mutex, AsyncReadExt, AsyncWriteExt};
-use memberlist_core::transport::{TimeoutableReadStream, TimeoutableWriteStream};
 use peekable::future::{AsyncPeekExt, AsyncPeekable};
 use s2n_quic::{
   client::Connect,
@@ -29,8 +28,6 @@ use crate::QuicConnection;
 
 use super::{QuicAcceptor, QuicConnector, QuicStream, StreamLayer};
 
-mod error;
-pub use error::*;
 mod options;
 pub use options::*;
 
@@ -64,7 +61,6 @@ impl<R> S2n<R> {
 
 impl<R: RuntimeLite> StreamLayer for S2n<R> {
   type Runtime = R;
-  type Error = S2nError;
   type Acceptor = S2nBiAcceptor<R>;
   type Connector = S2nConnector<R>;
   type Connection = S2nConnection<R>;

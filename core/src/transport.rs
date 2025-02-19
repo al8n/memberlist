@@ -237,15 +237,8 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Returns the maximum size of a packet that can be sent
   fn max_packet_size(&self) -> usize;
 
-  /// Returns the size of header overhead when trying to send messages through packet stream ([`Transport::send_packets`]).
-  ///
-  /// e.g. if every time invoking [`Transport::send_packets`],
-  /// the concrete implementation wants to add a header of 10 bytes,
-  /// then the packet overhead is 10 bytes.
-  fn packets_header_overhead(&self) -> usize;
-
-  /// Returns the size of overhead for per [`Message`] when trying to send messages through packet stream ([`Transport::send_packets`]).
-  fn packet_overhead(&self) -> usize;
+  /// Returns the header overhead in bytes this transport.
+  fn header_overhead(&self) -> usize;
 
   /// Returns an error if the given address is blocked
   fn blocked_address(&self, addr: &Self::ResolvedAddress) -> Result<(), Self::Error>;
@@ -259,7 +252,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// Nomally, the implementation should do nothing, just return the given conn
   /// back to the caller.
   ///
-  /// If the transport sends extra data in [`Transport::write`], then in this method,
+  /// If the transport sends extra data (e.g. a header) in [`Transport::write`], then in this method,
   /// the implementor should consume the extra data sent by the remote node.
   ///
   /// e.g.
@@ -289,12 +282,14 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn write(
     &self,
     conn: &mut Self::Stream,
-    payload: Bytes,
+    payload: Payload,
   ) -> impl Future<Output = Result<usize, Self::Error>> + Send {
     async move {
       use futures::io::AsyncWriteExt;
-      conn.write_all(&payload).await?;
-      Ok(payload.len())
+      let src = payload.as_slice();
+      let len = src.len();
+      conn.write_all(src).await?;
+      Ok(len)
     }
   }
 
@@ -312,7 +307,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
   fn send_to(
     &self,
     addr: &Self::ResolvedAddress,
-    packet: Bytes,
+    packet: Payload,
   ) -> impl Future<Output = Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error>> + Send;
 
   /// Used to create a connection that allows us to perform

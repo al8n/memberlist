@@ -215,11 +215,11 @@ async fn test_transmit_limited_get_broadcasts() {
   .await;
 
   // 2 byte overhead per message, should get all 4 messages
-  let all = q.get_broadcasts(2, 100).await;
+  let all = q.get_broadcasts(100).await;
   assert_eq!(all.len(), 4);
 
   // 5 byte overhead, should only get 3 messages back
-  let partial = q.get_broadcasts(5, 100).await;
+  let partial = q.get_broadcasts(100).await;
   assert_eq!(partial.len(), 3);
 }
 
@@ -278,7 +278,7 @@ async fn test_transmit_limited_get_broadcasts_limit() {
   assert_eq!(4, q.inner.lock().await.id_gen);
 
   // 3 byte overhead, should only get 3 messages back
-  let partial = q.get_broadcasts(3, 80).await;
+  let partial = q.get_broadcasts(80).await;
   assert_eq!(partial.len(), 3);
 
   assert_eq!(
@@ -287,7 +287,7 @@ async fn test_transmit_limited_get_broadcasts_limit() {
     "id generator doesn't reset until empty"
   );
 
-  let partial = q.get_broadcasts(3, 80).await;
+  let partial = q.get_broadcasts(80).await;
   assert_eq!(partial.len(), 3);
   assert_eq!(
     4,
@@ -296,7 +296,7 @@ async fn test_transmit_limited_get_broadcasts_limit() {
   );
 
   // Only two not expired
-  let partial = q.get_broadcasts(3, 80).await;
+  let partial = q.get_broadcasts(80).await;
   assert_eq!(partial.len(), 2);
   assert_eq!(
     0,
@@ -305,7 +305,7 @@ async fn test_transmit_limited_get_broadcasts_limit() {
   );
 
   // Should get nothing
-  let partial = q.get_broadcasts(3, 80).await;
+  let partial = q.get_broadcasts(80).await;
   assert_eq!(partial.len(), 0);
   assert_eq!(
     0,

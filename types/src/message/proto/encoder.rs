@@ -4,7 +4,7 @@ use smallvec_wrapper::SmallVec;
 
 use crate::{
   message::{debug_assert_write_eq, LABELED_MESSAGE_TAG},
-  Data, EncodeError, Label, Message,
+  Data, EncodeError, Label, Message, Payload,
 };
 
 #[cfg(feature = "encryption")]
@@ -384,6 +384,7 @@ impl ProtoHint {
 pub struct ProtoEncoder<I, A, M> {
   msgs: M,
   label: Label,
+  overhead: usize,
   max_payload_size: usize,
   encoded_msgs_len: usize,
 
@@ -422,6 +423,7 @@ impl<I, A> ProtoEncoder<I, A, &'static [u8]> {
       msgs: &[],
       label: Label::empty(),
       max_payload_size,
+      overhead: 0,
       encoded_msgs_len: 0,
       #[cfg(any(
         feature = "crc32",
@@ -463,6 +465,17 @@ impl<I, A, M> ProtoEncoder<I, A, M> {
     &self.msgs
   }
 
+  /// Feeds the overhead for this encoder.
+  pub fn with_overhead(mut self, overhead: usize) -> Self {
+    self.overhead = overhead;
+    self
+  }
+
+  /// Returns the overhead of the encoder.
+  pub fn overhead(&self) -> usize {
+    self.overhead
+  }
+
   /// Feeds the encoder with messages.
   pub fn with_messages<NB>(self, msgs: NB) -> ProtoEncoder<I, A, NB>
   where
@@ -473,6 +486,7 @@ impl<I, A, M> ProtoEncoder<I, A, M> {
     let mut this = ProtoEncoder::<I, A, _> {
       msgs,
       label: self.label,
+      overhead: self.overhead,
       max_payload_size: self.max_payload_size,
       encoded_msgs_len: 0,
       #[cfg(any(
@@ -727,7 +741,7 @@ where
   #[auto_enums::auto_enum(Iterator, Debug)]
   pub fn encode(
     &self,
-  ) -> impl Iterator<Item = Result<Vec<u8>, ProtoEncoderError>> + core::fmt::Debug + '_ {
+  ) -> impl Iterator<Item = Result<Payload, ProtoEncoderError>> + core::fmt::Debug + '_ {
     let msgs = self.msgs.as_ref();
     match msgs.len() {
       0 => core::iter::empty(),
@@ -848,13 +862,13 @@ where
     &self,
     msg: &Message<I, A>,
     hint: ProtoHint,
-  ) -> Result<Vec<u8>, ProtoEncoderError> {
+  ) -> Result<Payload, ProtoEncoderError> {
     self.encode_helper(msg, hint)
   }
 
   fn encode_batch(
     &self,
-  ) -> impl Iterator<Item = Result<Vec<u8>, ProtoEncoderError>> + core::fmt::Debug + '_ {
+  ) -> impl Iterator<Item = Result<Payload, ProtoEncoderError>> + core::fmt::Debug + '_ {
     self.batch().map(|batch| match batch {
       Batch::One { msg, hint } => self.encode_single(msg, hint),
       Batch::More {
@@ -895,12 +909,13 @@ where
     })
   }
 
-  fn encode_helper<E>(&self, msg: &E, hint: ProtoHint) -> Result<Vec<u8>, ProtoEncoderError>
+  fn encode_helper<E>(&self, msg: &E, hint: ProtoHint) -> Result<Payload, ProtoEncoderError>
   where
     E: Encodable,
   {
     let (encoded_len, hint) = (hint.input_size, hint);
-    let mut buf = vec![0u8; hint.max_output_size];
+    let mut payload = Payload::new(self.overhead, hint.max_output_size);
+    let buf = payload.data_mut();
     let mut offset = 0;
 
     let label_size = self.label.len();
@@ -1055,17 +1070,17 @@ where
 
     match bytes_written {
       Some(written) => {
-        buf.truncate(offset + written);
+        payload.truncate(offset + written);
       }
       None => {
         let written = msg.encodable_encode(&mut buf[offset..])?;
         #[cfg(debug_assertions)]
         debug_assert_write_eq(written, encoded_len);
-        buf.truncate(offset + written);
+        payload.truncate(offset + written);
       }
     }
 
-    Ok(buf)
+    Ok(payload)
   }
 
   fn batch(&self) -> impl Iterator<Item = Batch<'_, I, A>> + core::fmt::Debug + '_ {

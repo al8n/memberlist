@@ -36,17 +36,6 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   bind_addresses: IndexSet<A::Address>,
 
-  /// Label is an optional set of bytes to include on the outside of each
-  /// packet and stream.
-  ///
-  /// If gossip encryption is enabled and this is set it is treated as GCM
-  /// authenticated data.
-  #[viewit(
-    getter(const, style = "ref", attrs(doc = "Get the label of the node."),),
-    setter(attrs(doc = "Set the label of the node. (Builder pattern)"),)
-  )]
-  label: Label,
-
   /// Resolver options, which used to construct the address resolver for this transport.
   #[viewit(
     getter(const, style = "ref", attrs(doc = "Get the address resolver options."),),
@@ -60,21 +49,6 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
     setter(attrs(doc = "Set the stream layer options. (Builder pattern)"),)
   )]
   stream_layer: S::Options,
-
-  /// Skips the check that inbound packets and gossip
-  /// streams need to be label prefixed.
-  #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Get if the check that inbound packets and gossip streams need to be label prefixed."
-      ),
-    ),
-    setter(attrs(
-      doc = "Set if the check that inbound packets and gossip streams need to be label prefixed. (Builder pattern)"
-    ),)
-  )]
-  skip_inbound_label_check: bool,
 
   /// The timeout used for I/O
   #[cfg_attr(feature = "serde", serde(with = "humantime_serde::option"))]
@@ -124,52 +98,6 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   cidrs_policy: CIDRsPolicy,
 
-  /// Used to control message compression. This can
-  /// be used to reduce bandwidth usage at the cost of slightly more CPU
-  /// utilization.
-  #[cfg(feature = "compression")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
-  #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Get the compression algorithm used for outgoing.",
-        cfg(feature = "compression"),
-        cfg_attr(docsrs, doc(cfg(feature = "compression")))
-      ),
-    ),
-    setter(attrs(
-      doc = "Set the compression algorithm used for outgoing. (Builder pattern)",
-      cfg(feature = "compression"),
-      cfg_attr(docsrs, doc(cfg(feature = "compression")))
-    ),)
-  )]
-  compressor: Option<Compressor>,
-
-  /// The size of a message that should be offload to [`rayon`] thread pool
-  /// for encryption or compression.
-  ///
-  /// The default value is 1KB, which means that any message larger than 1KB
-  /// will be offloaded to [`rayon`] thread pool for encryption or compression.
-  #[cfg(feature = "compression")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "compression")))]
-  #[viewit(
-    getter(
-      const,
-      attrs(
-        doc = "Get the size of a message that should be offload to [`rayon`] thread pool for encryption or compression.",
-        cfg(feature = "compression"),
-        cfg_attr(docsrs, doc(cfg(feature = "compression")))
-      ),
-    ),
-    setter(attrs(
-      doc = "Set the size of a message that should be offload to [`rayon`] thread pool for encryption or compression. (Builder pattern)",
-      cfg(feature = "compression"),
-      cfg_attr(docsrs, doc(cfg(feature = "compression")))
-    ),)
-  )]
-  offload_size: usize,
-
   /// The metrics labels.
   #[cfg(feature = "metrics")]
   #[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
@@ -207,17 +135,11 @@ where
       id: self.id.clone(),
       bind_addresses: self.bind_addresses.clone(),
       connection_ttl: self.connection_ttl,
-      label: self.label.clone(),
       resolver: self.resolver.clone(),
       stream_layer: self.stream_layer.clone(),
-      skip_inbound_label_check: self.skip_inbound_label_check,
       timeout: self.timeout,
       connection_pool_cleanup_period: self.connection_pool_cleanup_period,
       cidrs_policy: self.cidrs_policy.clone(),
-      #[cfg(feature = "compression")]
-      compressor: self.compressor,
-      #[cfg(feature = "compression")]
-      offload_size: self.offload_size,
       #[cfg(feature = "metrics")]
       metric_labels: self.metric_labels.clone(),
     }
@@ -279,16 +201,10 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
       timeout: None,
       bind_addresses: IndexSet::new(),
       connection_ttl: None,
-      label: Label::empty(),
       resolver: resolver_options,
       stream_layer: stream_layer_opts,
-      skip_inbound_label_check: false,
       cidrs_policy: CIDRsPolicy::allow_all(),
       connection_pool_cleanup_period: default_connection_pool_cleanup_period(),
-      #[cfg(feature = "compression")]
-      compressor: None,
-      #[cfg(feature = "compression")]
-      offload_size: 1024,
       #[cfg(feature = "metrics")]
       metric_labels: None,
     }
@@ -316,16 +232,10 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
       Options {
         id: opts.id,
         bind_addresses: opts.bind_addresses,
-        label: opts.label,
         connection_ttl: opts.connection_ttl,
-        skip_inbound_label_check: opts.skip_inbound_label_check,
         timeout: opts.timeout,
         connection_pool_cleanup_period: opts.connection_pool_cleanup_period,
         cidrs_policy: opts.cidrs_policy,
-        #[cfg(feature = "compression")]
-        compressor: opts.compressor,
-        #[cfg(feature = "compression")]
-        offload_size: opts.offload_size,
         #[cfg(feature = "metrics")]
         metric_labels: opts.metric_labels,
       },
@@ -337,16 +247,10 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
 pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   id: I,
   bind_addresses: IndexSet<A::Address>,
-  label: Label,
-  skip_inbound_label_check: bool,
   timeout: Option<Duration>,
   connection_pool_cleanup_period: Duration,
   connection_ttl: Option<Duration>,
   cidrs_policy: CIDRsPolicy,
-  #[cfg(feature = "compression")]
-  compressor: Option<Compressor>,
-  #[cfg(feature = "compression")]
-  offload_size: usize,
   #[cfg(feature = "metrics")]
   metric_labels: Option<Arc<memberlist_core::types::MetricLabels>>,
 }

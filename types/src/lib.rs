@@ -80,6 +80,7 @@ pub use message::*;
 pub use meta::*;
 pub use ping::*;
 pub use push_pull::*;
+pub use payload::*;
 pub use server::*;
 pub use smallvec_wrapper::*;
 pub use version::*;
@@ -94,6 +95,7 @@ mod message;
 mod meta;
 mod ping;
 mod push_pull;
+mod payload;
 mod server;
 mod version;
 

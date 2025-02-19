@@ -10,6 +10,7 @@ use agnostic::{
   net::{Net, UdpSocket as _},
   Runtime, RuntimeLite,
 };
+use bytes::Bytes;
 use futures::FutureExt;
 use memberlist_core::transport::{Packet, PacketProducer, Transport};
 use nodecraft::resolver::AddressResolver;
@@ -76,7 +77,7 @@ where
               //   metrics::counter!("memberlist.packet.bytes.processing", self.metric_labels.iter()).increment(start.elapsed().as_secs_f64().round() as u64);
               // }
 
-              if let Err(e) = packet_tx.send(Packet::new(addr, start, buf[..n].to_vec())).await {
+              if let Err(e) = packet_tx.send(Packet::new(addr, start, Bytes::copy_from_slice(&buf[..n]))).await {
                 tracing::error!(local=%local_addr, from=%addr, err = %e, "memberlist_net.packet: failed to send packet");
               }
 

@@ -1270,13 +1270,12 @@ where
 
         // Compute the bytes available
         let bytes_avail =
-          self.inner.transport.max_packet_size() - self.inner.transport.packets_header_overhead();
+          self.inner.transport.max_packet_size() - self.inner.transport.header_overhead();
         let mut futs = nodes.into_iter().map(|server| async move {
           // Get any pending broadcasts
           let msgs = match self
             .get_broadcast_with_prepend(
               Default::default(),
-              self.inner.transport.packet_overhead(),
               bytes_avail,
             )
             .await

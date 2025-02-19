@@ -1,77 +1,31 @@
-use std::{future::Future, net::SocketAddr};
+use std::{future::Future, io, net::SocketAddr};
 
 use agnostic::RuntimeLite;
-use agnostic_lite::time::Instant;
 use bytes::Bytes;
-use memberlist_core::transport::TimeoutableStream;
 
 /// QUIC stream layer based on [`quinn`](::quinn).
 #[cfg(feature = "quinn")]
 #[cfg_attr(docsrs, doc(cfg(feature = "quinn")))]
 pub mod quinn;
 
-/// QUIC stream layer based on [`s2n`](::s2n_quic).
-#[cfg(feature = "s2n")]
-#[cfg_attr(docsrs, doc(cfg(feature = "s2n")))]
-pub mod s2n;
-
-/// A error trait for quic stream layer.
-#[auto_impl::auto_impl(Box, Arc)]
-pub trait QuicError: std::error::Error + Send + Sync + 'static {
-  /// Returns `true` if the error is caused by the remote peer.
-  fn is_remote_failure(&self) -> bool;
-}
+// /// QUIC stream layer based on [`s2n`](::s2n_quic).
+// #[cfg(feature = "s2n")]
+// #[cfg_attr(docsrs, doc(cfg(feature = "s2n")))]
+// pub mod s2n;
 
 /// A trait for QUIC bidirectional streams.
 // #[auto_impl::auto_impl(Box)]
 pub trait QuicStream:
-  TimeoutableStream<Instant = <Self as QuicStream>::Instant>
-  + futures::AsyncRead
-  + Send
-  + Sync
-  + 'static
+  futures::AsyncWrite + futures::AsyncRead + Unpin + Send + Sync + 'static
 {
-  /// The instant type.
-  type Instant: Instant + Send + Sync + 'static;
-
-  /// The error type for the stream.
-  type Error: QuicError;
-
-  /// Sends data to the remote peer.
-  fn write_all(&mut self, src: Bytes) -> impl Future<Output = Result<usize, Self::Error>> + Send;
-
-  /// Flushes the stream.
-  fn flush(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Receives data from the remote peer.
-  fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, Self::Error>> + Send;
-
-  /// Receives exact data from the remote peer.
-  fn read_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Peek exact data from the remote peer.
-  fn peek_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Shut down the send stream gracefully.
-  ///
-  /// No new data may be written after calling this method. Completes when the peer has acknowledged all sent data, retransmitting data as needed.
-  fn finish(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-  /// Closes the stream.
-  fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+  /// Read a packet from the the stream.
+  fn read_packet(&mut self) -> impl Future<Output = std::io::Result<Bytes>> + Send;
 }
 
 /// A trait for QUIC stream layers.
 pub trait StreamLayer: Sized + Send + Sync + 'static {
-  /// The runtime used for this stream layer
+  /// The runtime for this stream layer.
   type Runtime: RuntimeLite;
-
-  /// The error type.
-  type Error: QuicError
-    + From<<Self::Stream as QuicStream>::Error>
-    + From<<Self::Connection as QuicConnection>::Error>
-    + From<<Self::Acceptor as QuicAcceptor>::Error>
-    + From<<Self::Connector as QuicConnector>::Error>;
 
   /// The acceptor type.
   type Acceptor: QuicAcceptor<Connection = Self::Connection>;
@@ -80,12 +34,11 @@ pub trait StreamLayer: Sized + Send + Sync + 'static {
   type Connector: QuicConnector<Connection = Self::Connection>;
 
   /// The bidirectional stream type.
-  type Stream: QuicStream<Instant = <Self::Runtime as RuntimeLite>::Instant>;
+  type Stream: QuicStream;
 
   /// The connection type.
   type Connection: QuicConnection<
     Stream = Self::Stream,
-    Instant = <Self::Runtime as RuntimeLite>::Instant,
   >;
 
   /// The options type used to construct the stream layer.
@@ -95,7 +48,7 @@ pub trait StreamLayer: Sized + Send + Sync + 'static {
   fn max_stream_data(&self) -> usize;
 
   /// Creates a new stream layer.
-  fn new(options: Self::Options) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+  fn new(options: Self::Options) -> impl Future<Output = std::io::Result<Self>> + Send;
 
   /// Binds to a local address. The `BiAcceptor` and `UniAcceptor` must bind to
   /// the same address.
@@ -109,19 +62,14 @@ pub trait StreamLayer: Sized + Send + Sync + 'static {
 /// accept a bi-directional connection from a remote peer.
 #[auto_impl::auto_impl(Box)]
 pub trait QuicAcceptor: Send + Sync + 'static {
-  /// The error type.
-  type Error: std::error::Error + Send + Sync + 'static;
-
   /// The connection type.
   type Connection: QuicConnection;
 
   /// Accepts a connection from a remote peer.
-  fn accept(
-    &mut self,
-  ) -> impl Future<Output = Result<(Self::Connection, SocketAddr), Self::Error>> + Send;
+  fn accept(&mut self) -> impl Future<Output = io::Result<(Self::Connection, SocketAddr)>> + Send;
 
   /// Close the acceptor.
-  fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+  fn close(&mut self) -> impl Future<Output = io::Result<()>> + Send;
 
   /// Returns the local address.
   fn local_addr(&self) -> SocketAddr;
@@ -131,20 +79,14 @@ pub trait QuicAcceptor: Send + Sync + 'static {
 /// establish a connection to a remote peer.
 #[auto_impl::auto_impl(Box, Arc)]
 pub trait QuicConnector: Send + Sync + 'static {
-  /// The error type.
-  type Error: std::error::Error + Send + Sync + 'static;
-
   /// The bidirectional stream type.
   type Connection: QuicConnection;
 
   /// Connects to a remote peer.
-  fn connect(
-    &self,
-    addr: SocketAddr,
-  ) -> impl Future<Output = Result<Self::Connection, Self::Error>> + Send;
+  fn connect(&self, addr: SocketAddr) -> impl Future<Output = io::Result<Self::Connection>> + Send;
 
   /// Closes the connector.
-  fn close(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+  fn close(&self) -> impl Future<Output = io::Result<()>> + Send;
 
   /// Wait for all connections on the endpoint to be cleanly shut down
   ///
@@ -154,7 +96,7 @@ pub trait QuicConnector: Send + Sync + 'static {
   ///
   /// Does not proactively close existing connections or cause incoming connections to be
   /// rejected. Consider calling `close()` if that is desired.
-  fn wait_idle(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+  fn wait_idle(&self) -> impl Future<Output = io::Result<()>> + Send;
 
   /// Returns the local address.
   fn local_addr(&self) -> SocketAddr;
@@ -163,32 +105,17 @@ pub trait QuicConnector: Send + Sync + 'static {
 /// A connection between local and remote peer.
 #[auto_impl::auto_impl(Box, Arc)]
 pub trait QuicConnection: Send + Sync + 'static {
-  /// The error type.
-  type Error: std::error::Error + Send + Sync + 'static;
-
-  /// The instant type
-  type Instant: agnostic_lite::time::Instant + Send + Sync + 'static;
-
   /// The bidirectional stream type.
-  type Stream: QuicStream<Instant = Self::Instant>;
+  type Stream: QuicStream;
 
   /// Accepts a bidirectional stream from a remote peer.
-  fn accept_bi(
-    &self,
-  ) -> impl Future<Output = Result<(Self::Stream, SocketAddr), Self::Error>> + Send;
+  fn accept_bi(&self) -> impl Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send;
 
   /// Opens a bidirectional stream to a remote peer.
-  fn open_bi(&self)
-    -> impl Future<Output = Result<(Self::Stream, SocketAddr), Self::Error>> + Send;
-
-  /// Opens a bidirectional stream to a remote peer.
-  fn open_bi_with_deadline(
-    &self,
-    deadline: Self::Instant,
-  ) -> impl Future<Output = Result<(Self::Stream, SocketAddr), Self::Error>> + Send;
+  fn open_bi(&self) -> impl Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send;
 
   /// Closes the connection.
-  fn close(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+  fn close(&self) -> impl Future<Output = io::Result<()>> + Send;
 
   /// Returns `true` if the connection is closed.
   fn is_closed(&self) -> impl Future<Output = bool> + Send;

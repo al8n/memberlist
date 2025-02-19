@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use super::{
   ChecksumAlgorithm, CompressAlgorithm, Data, Label, Message, ProtoDecoder, ProtoEncoder,
 };
@@ -12,6 +14,7 @@ fn encode_decode_messages<I, A>(
   label: Label,
   check_label: bool,
   stream: bool,
+  overhead: u8,
 ) -> bool
 where
   I: Data + PartialEq + Clone + 'static,
@@ -28,7 +31,7 @@ where
     decoder.with_label(label);
   }
   super::encode_decode_roundtrip::<_, _, _, agnostic_lite::tokio::TokioRuntime>(
-    parallel, stream, encoder, decoder,
+    overhead, parallel, stream, encoder, decoder,
   )
 }
 
@@ -40,6 +43,7 @@ fn encode_decode_message<I, A>(
   label: Label,
   check_label: bool,
   stream: bool,
+  overhead: u8,
 ) -> bool
 where
   I: Data + PartialEq + Clone + 'static,
@@ -56,7 +60,7 @@ where
     decoder.with_label(label);
   }
   super::encode_decode_roundtrip::<_, _, _, agnostic_lite::tokio::TokioRuntime>(
-    parallel, stream, encoder, decoder,
+    overhead, parallel, stream, encoder, decoder,
   )
 }
 
@@ -71,8 +75,9 @@ macro_rules! checksum_and_compression_unit_test {
           messages: Vec<Message<$id, $addr>>,
           stream: bool,
           parallel: bool,
+          overhead: u8,
         ) -> bool {
-          encode_decode_messages(parallel, checksum_algo, compress_algo,  messages, Label::try_from("test").unwrap(), true, stream)
+          encode_decode_messages(parallel, checksum_algo, compress_algo,  messages, Label::try_from("test").unwrap(), true, stream, overhead)
         }
 
         #[quickcheck_macros::quickcheck]
@@ -82,8 +87,9 @@ macro_rules! checksum_and_compression_unit_test {
           messages: Vec<Message<$id, $addr>>,
           stream: bool,
           parallel: bool,
+          overhead: u8,
         ) -> bool {
-          encode_decode_messages(parallel, checksum_algo, compress_algo, messages, Label::EMPTY.clone(), false, stream)
+          encode_decode_messages(parallel, checksum_algo, compress_algo, messages, Label::EMPTY.clone(), false, stream, overhead)
         }
 
         #[quickcheck_macros::quickcheck]
@@ -93,8 +99,9 @@ macro_rules! checksum_and_compression_unit_test {
           message: Message<$id, $addr>,
           stream: bool,
           parallel: bool,
+          overhead: u8,
         ) -> bool {
-          encode_decode_message(parallel, checksum_algo, compress_algo, message, Label::try_from("test").unwrap(), true, stream)
+          encode_decode_message(parallel, checksum_algo, compress_algo, message, Label::try_from("test").unwrap(), true, stream, overhead)
         }
 
         #[quickcheck_macros::quickcheck]
@@ -104,8 +111,9 @@ macro_rules! checksum_and_compression_unit_test {
           message: Message<$id, $addr>,
           stream: bool,
           parallel: bool,
+          overhead: u8,
         ) -> bool {
-          encode_decode_message(parallel, checksum_algo, compress_algo, message, Label::EMPTY.clone(), false, stream)
+          encode_decode_message(parallel, checksum_algo, compress_algo, message, Label::EMPTY.clone(), false, stream, overhead)
         }
       )*
     }

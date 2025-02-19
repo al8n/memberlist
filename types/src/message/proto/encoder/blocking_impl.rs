@@ -1,6 +1,6 @@
 use crate::{EncodeError, Message};
 
-use super::{Data, ProtoEncoder, ProtoEncoderError};
+use super::{Data, ProtoEncoder, ProtoEncoderError, Payload};
 
 impl<I, A, B> ProtoEncoder<I, A, B>
 where
@@ -12,7 +12,7 @@ where
   #[auto_enums::auto_enum(Iterator, Debug)]
   pub async fn blocking_encode<RT>(
     self,
-  ) -> impl Iterator<Item = Result<Vec<u8>, ProtoEncoderError>> + 'static
+  ) -> impl Iterator<Item = Result<Payload, ProtoEncoderError>> + 'static
   where
     RT: agnostic_lite::RuntimeLite,
   {

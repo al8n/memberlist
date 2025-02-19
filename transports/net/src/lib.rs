@@ -19,9 +19,8 @@ use agnostic::{
   AsyncSpawner, Runtime, RuntimeLite,
 };
 use atomic_refcell::AtomicRefCell;
-use bytes::Bytes;
 use futures::{stream::FuturesUnordered, StreamExt};
-use memberlist_core::types::{Data, SmallVec};
+use memberlist_core::types::{Data, SmallVec, Payload};
 pub use memberlist_core::{
   transport::*,
   types::{CIDRsPolicy, Label, LabelError},
@@ -193,11 +192,7 @@ where
         .map_err(NetTransportError::Resolver)?,
     );
 
-    let stream_layer = Arc::new(
-      <S as StreamLayer>::new(stream_layer_opts)
-        .await
-        .map_err(NetTransportError::StreamLayer)?,
-    );
+    let stream_layer = Arc::new(<S as StreamLayer>::new(stream_layer_opts).await?);
     let opts = Arc::new(opts);
 
     // If we reject the empty list outright we can assume that there's at
@@ -396,12 +391,7 @@ where
   }
 
   #[inline]
-  fn packets_header_overhead(&self) -> usize {
-    0
-  }
-
-  #[inline]
-  fn packet_overhead(&self) -> usize {
+  fn header_overhead(&self) -> usize {
     0
   }
 
@@ -420,16 +410,17 @@ where
   async fn send_to(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
-    packets: Bytes,
+    packets: Payload,
   ) -> Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error> {
     let start = <Self::Runtime as RuntimeLite>::now();
 
+    let src = packets.as_slice();
     match self.next_socket(addr) {
       Some(skt) => skt
-        .send_to(&packets, addr)
+        .send_to(src, addr)
         .await
         .map(|num| {
-          tracing::trace!(remote=%addr, total_bytes = %num, sent=?packets.as_ref(), "memberlist_net.packet");
+          tracing::trace!(remote=%addr, total_bytes = %num, sent=?src, "memberlist_net.packet");
           (num, start)
         })
         .map_err(Into::into),

@@ -1,6 +1,6 @@
 use crate::Message;
 
-use super::{Batch, Data, Encodable, EncodeBuffer, ProtoEncoder, ProtoEncoderError, SmallVec};
+use super::{Batch, Data, Encodable, EncodeBuffer, ProtoEncoder, ProtoEncoderError, SmallVec, Payload};
 
 use rayon::iter::{self, IntoParallelIterator, ParallelIterator};
 
@@ -14,7 +14,7 @@ where
   #[auto_enums::auto_enum(rayon::ParallelIterator, Debug)]
   pub fn rayon_encode(
     &self,
-  ) -> impl ParallelIterator<Item = Result<Vec<u8>, ProtoEncoderError>> + core::fmt::Debug + '_ {
+  ) -> impl ParallelIterator<Item = Result<Payload, ProtoEncoderError>> + core::fmt::Debug + '_ {
     let msgs = self.msgs.as_ref();
     match msgs.len() {
       0 => iter::empty(),
@@ -52,7 +52,7 @@ where
 
   fn encode_batch_parallel(
     &self,
-  ) -> impl ParallelIterator<Item = Result<Vec<u8>, ProtoEncoderError>> + core::fmt::Debug + '_ {
+  ) -> impl ParallelIterator<Item = Result<Payload, ProtoEncoderError>> + core::fmt::Debug + '_ {
     Self::into_par_iter(self.batch().collect::<SmallVec<_>>()).map(|batch| match batch {
       Batch::One { msg, hint } => self.encode_single(msg, hint),
       Batch::More {

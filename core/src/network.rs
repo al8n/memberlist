@@ -100,7 +100,8 @@ where
   {
     let mut encoder = ProtoEncoder::new(self.inner.transport.max_packet_size())
       .with_messages(packets)
-      .with_label(self.inner.opts.label().clone());
+      .with_label(self.inner.opts.label().clone())
+      .with_overhead(self.inner.transport.header_overhead());
 
     #[cfg(any(
       feature = "crc32",
@@ -363,12 +364,12 @@ where
   async fn raw_send_packet<'a>(
     &'a self,
     addr: &'a T::ResolvedAddress,
-    payload: Vec<u8>,
+    payload: Payload,
   ) -> Result<(), Error<T, D>> {
     self
       .inner
       .transport
-      .send_to(addr, payload.into())
+      .send_to(addr, payload)
       .await
       .map(|(_sent, _)| {
         #[cfg(feature = "metrics")]
@@ -386,12 +387,12 @@ where
   async fn raw_send_message<'a>(
     &'a self,
     conn: &'a mut T::Stream,
-    payload: Vec<u8>,
+    payload: Payload,
   ) -> Result<(), Error<T, D>> {
     self
       .inner
       .transport
-      .write(conn, payload.into())
+      .write(conn, payload)
       .await
       .map(|_sent| {
         #[cfg(feature = "metrics")]

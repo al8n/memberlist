@@ -165,7 +165,7 @@ where
   // Send
   let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
-  if let Err(e) = send_stream.send_to(&buf).await {
+  if let Err(e) = send_stream.send_to(buf.as_slice()).await {
     panic!("failed to send: {}", e);
   }
 
@@ -317,7 +317,7 @@ where
   // Send
   let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
-  send_stream.send_to(&buf).await?;
+  send_stream.send_to(buf.as_slice()).await?;
 
   // Wait for response
   let (tx, rx) = async_channel::bounded(1);
@@ -386,7 +386,7 @@ where
   // Send
   let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
-  send_stream.send_to(&buf).await?;
+  send_stream.send_to(buf.as_slice()).await?;
 
   // Wait for response
   let res = R::timeout(WAIT_DURATION, async {
@@ -440,7 +440,7 @@ where
   // Send
   let connection = client.connect(*m.advertise_address()).await?;
   let mut send_stream = connection.connect().await?;
-  send_stream.send_to(&buf).await?;
+  send_stream.send_to(buf.as_slice()).await?;
 
   // Wait for response
   let (tx, rx) = async_channel::bounded(1);

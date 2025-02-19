@@ -158,9 +158,9 @@ where
     &self,
     from: T::ResolvedAddress,
     timestamp: <T::Runtime as RuntimeLite>::Instant,
-    payload: Vec<u8>,
+    payload: Bytes,
   ) {
-    let payload = BytesMut::from(Bytes::from(payload));
+    let payload = BytesMut::from(payload);
     let mut decoder = ProtoDecoder::new();
     decoder.maybe_label(
       if self.inner.opts.label.is_empty() || self.inner.opts.skip_inbound_label_check {
@@ -375,12 +375,11 @@ where
     // Check if we can piggy back any messages
     let bytes_avail = self.inner.transport.max_packet_size()
       - msg.encoded_len()
-      - self.inner.transport.packets_header_overhead();
+      - self.inner.transport.header_overhead();
 
     let msgs = self
       .get_broadcast_with_prepend(
         msg.into(),
-        self.inner.transport.packet_overhead(),
         bytes_avail,
       )
       .await;

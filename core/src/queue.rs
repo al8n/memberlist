@@ -130,16 +130,15 @@ impl<B: Broadcast, N: NodeCalculator> TransmitLimitedQueue<B, N> {
   }
 
   /// Returns the messages can be broadcast.
-  pub async fn get_broadcasts(&self, overhead: usize, limit: usize) -> TinyVec<B::Message> {
+  pub async fn get_broadcasts(&self, limit: usize) -> TinyVec<B::Message> {
     self
-      .get_broadcast_with_prepend(TinyVec::new(), overhead, limit)
+      .get_broadcast_with_prepend(TinyVec::new(), limit)
       .await
   }
 
   pub(crate) async fn get_broadcast_with_prepend(
     &self,
     prepend: TinyVec<B::Message>,
-    overhead: usize,
     limit: usize,
   ) -> TinyVec<B::Message> {
     let mut to_send = prepend;
@@ -157,7 +156,7 @@ impl<B: Broadcast, N: NodeCalculator> TransmitLimitedQueue<B, N> {
     let mut transmits = min_tr;
     let mut reinsert = Vec::new();
     while transmits <= max_tr {
-      let free = limit.saturating_sub(bytes_used).saturating_sub(overhead);
+      let free = limit.saturating_sub(bytes_used);
       if free == 0 {
         break;
       }
@@ -184,7 +183,7 @@ impl<B: Broadcast, N: NodeCalculator> TransmitLimitedQueue<B, N> {
       match keep {
         Some(mut keep) => {
           let msg = keep.broadcast.message();
-          bytes_used += B::encoded_len(msg) + overhead;
+          bytes_used += B::encoded_len(msg);
           // Add to slice to send
           to_send.push(msg.clone());
 
