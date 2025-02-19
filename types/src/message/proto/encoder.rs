@@ -829,31 +829,31 @@ where
         ChecksumAlgorithm::Crc32 => {
           #[cfg(not(feature = "crc32"))]
           return Err(ProtoEncoderError::Checksum(
-            ChecksumError::AlgorithmNotEnabled("crc32"),
+            ChecksumError::disabled(*algo, "crc32"),
           ));
         }
         ChecksumAlgorithm::XxHash32 => {
           #[cfg(not(feature = "xxhash32"))]
           return Err(ProtoEncoderError::Checksum(
-            ChecksumError::AlgorithmNotEnabled("xxhash32"),
+            ChecksumError::disabled(*algo, "xxhash32"),
           ));
         }
         ChecksumAlgorithm::XxHash64 => {
           #[cfg(not(feature = "xxhash64"))]
           return Err(ProtoEncoderError::Checksum(
-            ChecksumError::AlgorithmNotEnabled("xxhash64"),
+            ChecksumError::disabled(*algo, "xxhash64"),
           ));
         }
         ChecksumAlgorithm::XxHash3 => {
           #[cfg(not(feature = "xxhash3"))]
           return Err(ProtoEncoderError::Checksum(
-            ChecksumError::AlgorithmNotEnabled("xxhash3"),
+            ChecksumError::disabled(*algo, "xxhash3"),
           ));
         }
         ChecksumAlgorithm::Murmur3 => {
           #[cfg(not(feature = "murmur3"))]
           return Err(ProtoEncoderError::Checksum(
-            ChecksumError::AlgorithmNotEnabled("murmur3"),
+            ChecksumError::disabled(*algo, "murmur3"),
           ));
         }
         ChecksumAlgorithm::Unknown(_) => {

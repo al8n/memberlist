@@ -62,19 +62,18 @@ impl ChecksumError {
     feature = "murmur3"
   )))]
   #[inline]
-  const fn disabled(algo: ChecksumAlgorithm, feature: &'static str) -> Self {
+  pub(crate) const fn disabled(algo: ChecksumAlgorithm, feature: &'static str) -> Self {
     Self::Disabled { algo, feature }
   }
 }
 
 /// The algorithm used to checksum the message.
 #[derive(
-  Debug, Default, Clone, Copy, PartialEq, Eq, Hash, derive_more::Display, derive_more::IsVariant,
+  Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::Display, derive_more::IsVariant,
 )]
 #[non_exhaustive]
 pub enum ChecksumAlgorithm {
   /// CRC32 IEEE
-  #[default]
   #[display("crc32")]
   Crc32,
   /// XXHash32
@@ -92,6 +91,26 @@ pub enum ChecksumAlgorithm {
   /// Unknwon checksum algorithm
   #[display("unknown({_0})")]
   Unknown(u8),
+}
+
+impl Default for ChecksumAlgorithm {
+  fn default() -> Self {
+    cfg_if::cfg_if! {
+      if #[cfg(feature = "crc32")] {
+        Self::Crc32
+      } else if #[cfg(feature = "xxhash32")] {
+        Self::XxHash32
+      } else if #[cfg(feature = "xxhash64")] {
+        Self::XxHash64
+      } else if #[cfg(feature = "xxhash3")] {
+        Self::XxHash3
+      } else if #[cfg(feature = "murmur3")] {
+        Self::Murmur3
+      } else {
+        Self::Unknown(255)
+      }
+    }
+  }
 }
 
 #[cfg(any(feature = "quickcheck", test))]

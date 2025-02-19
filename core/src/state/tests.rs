@@ -57,7 +57,7 @@ where
 }
 
 /// Unit test to test the probe functionality
-pub async fn probe<T, R>(t1: T, t1_opts: Options, t2: T)
+pub async fn probe<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -71,7 +71,7 @@ where
   .await
   .unwrap();
 
-  let m2: Memberlist<T> = host_memberlist(t2, Options::lan()).await.unwrap();
+  let m2: Memberlist<T> = host_memberlist(t2, t2_opts).await.unwrap();
 
   let a1 = Alive::new(1, m1.advertise_node());
 
@@ -103,7 +103,9 @@ pub async fn probe_node_suspect<T, R>(
   t1: T,
   t1_opts: Options,
   t2: T,
+  t2_opts: Options,
   t3: T,
+  t3_opts: Options,
   suspect_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
@@ -118,9 +120,9 @@ pub async fn probe_node_suspect<T, R>(
   .await
   .unwrap();
 
-  let m2: Memberlist<T> = host_memberlist(t2, Options::lan()).await.unwrap();
+  let m2: Memberlist<T> = host_memberlist(t2, t2_opts).await.unwrap();
 
-  let m3: Memberlist<T> = host_memberlist(t3, Options::lan()).await.unwrap();
+  let m3: Memberlist<T> = host_memberlist(t3, t3_opts).await.unwrap();
 
   let a1 = Alive::new(1, m1.advertise_node());
 
@@ -183,6 +185,7 @@ struct DogpileTestCase {
 pub async fn probe_node_dogpile<F, T, R>(
   mut get_transport: impl FnMut(usize) -> F,
   bad_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  opts: Options,
 ) where
   F: Future<Output = T>,
   T: Transport<Runtime = R>,
@@ -250,7 +253,7 @@ pub async fn probe_node_dogpile<F, T, R>(
 
     let m = host_memberlist(
       t,
-      Options::lan()
+      opts.clone()
         .with_probe_timeout(Duration::from_millis(1))
         .with_probe_interval(Duration::from_millis(100))
         .with_suspicion_mult(5)
@@ -335,7 +338,9 @@ pub async fn probe_node_awareness_degraded<T, R>(
   t1: T,
   t1_opts: Options,
   t2: T,
+  t2_opts: Options,
   t3: T,
+  t3_opts: Options,
   node4: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
@@ -354,7 +359,7 @@ pub async fn probe_node_awareness_degraded<T, R>(
 
   let m2: Memberlist<T> = host_memberlist(
     t2,
-    Options::lan()
+    t2_opts
       .with_probe_timeout(Duration::from_millis(10))
       .with_probe_interval(Duration::from_millis(200)),
   )
@@ -363,7 +368,7 @@ pub async fn probe_node_awareness_degraded<T, R>(
 
   let m3: Memberlist<T> = host_memberlist(
     t3,
-    Options::lan()
+    t3_opts
       .with_probe_timeout(Duration::from_millis(10))
       .with_probe_interval(Duration::from_millis(200)),
   )
@@ -437,7 +442,12 @@ pub async fn probe_node_awareness_degraded<T, R>(
 }
 
 /// Unit test to test the probe node awareness improved functionality
-pub async fn probe_node_awareness_improved<T, R>(t1: T, t1_opts: Options, t2: T)
+pub async fn probe_node_awareness_improved<T, R>(
+  t1: T,
+  t1_opts: Options,
+  t2: T,
+  t2_opts: Options,
+)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -453,7 +463,7 @@ where
 
   let m2: Memberlist<T> = host_memberlist(
     t2,
-    Options::lan()
+    t2_opts
       .with_probe_timeout(Duration::from_millis(10))
       .with_probe_interval(Duration::from_millis(200)),
   )
@@ -591,7 +601,12 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
 }
 
 /// Unit test to test the probe node buddy functionality
-pub async fn probe_node_buddy<T, R>(t1: T, t1_opts: Options, t2: T)
+pub async fn probe_node_buddy<T, R>(
+  t1: T,
+  t1_opts: Options,
+  t2: T,
+  t2_opts: Options,
+)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -605,7 +620,7 @@ where
   .await
   .unwrap();
 
-  let m2: Memberlist<T> = host_memberlist(t2, Options::lan()).await.unwrap();
+  let m2: Memberlist<T> = host_memberlist(t2, t2_opts).await.unwrap();
 
   let a1 = Alive::new(1, m1.advertise_node());
 
@@ -644,7 +659,12 @@ where
 }
 
 /// Unit test to test the probe functionality
-pub async fn probe_node<T, R>(t1: T, t1_opts: Options, t2: T)
+pub async fn probe_node<T, R>(
+  t1: T,
+  t1_opts: Options,
+  t2: T,
+  t2_opts: Options,
+)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -658,7 +678,7 @@ where
   .await
   .unwrap();
 
-  let m2: Memberlist<T> = host_memberlist(t2, Options::lan()).await.unwrap();
+  let m2: Memberlist<T> = host_memberlist(t2, t2_opts).await.unwrap();
 
   let a1 = Alive::new(1, m1.advertise_node());
 
@@ -700,6 +720,7 @@ pub async fn ping<T, R>(
   t1: T,
   t1_opts: Options,
   t2: T,
+  t2_opts: Options,
   bad_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
@@ -714,7 +735,7 @@ pub async fn ping<T, R>(
   .await
   .unwrap();
 
-  let m2: Memberlist<T> = host_memberlist(t2, Options::lan()).await.unwrap();
+  let m2: Memberlist<T> = host_memberlist(t2, t2_opts).await.unwrap();
 
   let a1 = Alive::new(1, m1.advertise_node());
 
@@ -2163,7 +2184,14 @@ pub async fn merge_state<A, T, R>(
 }
 
 /// Unit test to gossip functionality
-pub async fn gossip<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options, t3: T, t3_opts: Options)
+pub async fn gossip<T, R>(
+  t1: T,
+  t1_opts: Options,
+  t2: T,
+  t2_opts: Options,
+  t3: T,
+  t3_opts: Options,
+)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -2216,7 +2244,12 @@ where
 }
 
 /// Unit test to test the gossip to dead functionality
-pub async fn gossip_to_dead<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
+pub async fn gossip_to_dead<T, R>(
+  t1: T,
+  t1_opts: Options,
+  t2: T,
+  t2_opts: Options,
+)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -2297,7 +2330,12 @@ where
 }
 
 /// Unit test to test the push pull functionality
-pub async fn push_pull<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
+pub async fn push_pull<T, R>(
+  t1: T, 
+  t1_opts: Options,
+  t2: T,
+  t2_opts: Options,
+)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,

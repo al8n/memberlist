@@ -16,7 +16,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["tokio", "compression", "encryption", "dns", "tcp", "quic"]
+default = ["tokio", "crc32", "snappy", "rayon", "encryption", "dns", "tcp", "quic"]
 
 tokio = ["agnostic/tokio"]
 async-std = ["agnostic/async-std"]
@@ -34,9 +34,21 @@ metrics = [
   "memberlist-quic?/metrics",
 ]
 
-compression = ["memberlist-net?/compression", "memberlist-quic?/compression"]
+rayon = ["memberlist-core/rayon"]
 
-encryption = ["memberlist-net?/encryption", "memberlist-quic?/encryption", "memberlist-core/encryption"]
+encryption = ["memberlist-core/encryption"]
+
+lz4 = ["memberlist-core/lz4"]
+zstd = ["memberlist-core/zstd"]
+snappy = ["memberlist-core/snappy"]
+brotli = ["memberlist-core/brotli"]
+
+crc32 = ["memberlist-core/crc32"]
+xxhash32 = ["memberlist-core/xxhash32"]
+xxhash64 = ["memberlist-core/xxhash64"]
+xxhash3 = ["memberlist-core/xxhash3"]
+murmur3 = ["memberlist-core/murmur3"]
+
 
 quic = ["memberlist-quic", "agnostic/quinn"]
 quinn = ["memberlist-quic/quinn", "quic"]

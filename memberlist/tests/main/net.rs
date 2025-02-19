@@ -168,38 +168,38 @@ mod alive_node_change_meta;
 #[path = "net/alive_node_refute.rs"]
 mod alive_node_refute;
 
-// #[path = "net/suspect_node_no_node.rs"]
-// mod suspect_node_no_node;
+#[path = "net/suspect_node_no_node.rs"]
+mod suspect_node_no_node;
 
-// #[path = "net/suspect_node.rs"]
-// mod suspect_node;
+#[path = "net/suspect_node.rs"]
+mod suspect_node;
 
-// #[path = "net/suspect_node_double_suspect.rs"]
-// mod suspect_node_double_suspect;
+#[path = "net/suspect_node_double_suspect.rs"]
+mod suspect_node_double_suspect;
 
-// #[path = "net/suspect_node_refute.rs"]
-// mod suspect_node_refute;
+#[path = "net/suspect_node_refute.rs"]
+mod suspect_node_refute;
 
-// #[path = "net/dead_node_no_node.rs"]
-// mod dead_node_no_node;
+#[path = "net/dead_node_no_node.rs"]
+mod dead_node_no_node;
 
-// #[path = "net/dead_node_left.rs"]
-// mod dead_node_left;
+#[path = "net/dead_node_left.rs"]
+mod dead_node_left;
 
-// #[path = "net/dead_node.rs"]
-// mod dead_node;
+#[path = "net/dead_node.rs"]
+mod dead_node;
 
-// #[path = "net/dead_node_double.rs"]
-// mod dead_node_double;
+#[path = "net/dead_node_double.rs"]
+mod dead_node_double;
 
-// #[path = "net/dead_node_old_dead.rs"]
-// mod dead_node_old_dead;
+#[path = "net/dead_node_old_dead.rs"]
+mod dead_node_old_dead;
 
-// #[path = "net/dead_node_alive_replay.rs"]
-// mod dead_node_alive_replay;
+#[path = "net/dead_node_alive_replay.rs"]
+mod dead_node_alive_replay;
 
-// #[path = "net/dead_node_refute.rs"]
-// mod dead_node_refute;
+#[path = "net/dead_node_refute.rs"]
+mod dead_node_refute;
 
 // #[path = "net/merge_state.rs"]
 // mod merge_state;
@@ -257,26 +257,26 @@ mod alive_node_refute;
 // #[path = "net/leave.rs"]
 // mod leave;
 
-// #[path = "net/conflict_delegate.rs"]
-// mod conflict_delegate;
+#[path = "net/conflict_delegate.rs"]
+mod conflict_delegate;
 
-// #[path = "net/create_shutdown.rs"]
-// mod create_shutdown;
+#[path = "net/create_shutdown.rs"]
+mod create_shutdown;
 
-// #[path = "net/create.rs"]
-// mod create;
+#[path = "net/create.rs"]
+mod create;
 
-// #[path = "net/send.rs"]
-// mod send;
+#[path = "net/send.rs"]
+mod send;
 
-// #[path = "net/user_data.rs"]
-// mod user_data;
+#[path = "net/user_data.rs"]
+mod user_data;
 
-// #[path = "net/node_delegate_meta.rs"]
-// mod node_delegate_meta;
+#[path = "net/node_delegate_meta.rs"]
+mod node_delegate_meta;
 
-// #[path = "net/node_delegate_meta_update.rs"]
-// mod node_delegate_meta_update;
+#[path = "net/node_delegate_meta_update.rs"]
+mod node_delegate_meta_update;
 
-// #[path = "net/ping_delegate.rs"]
-// mod ping_delegate;
+#[path = "net/ping_delegate.rs"]
+mod ping_delegate;

@@ -216,17 +216,20 @@ pub async fn memberlist_join<T, R>(
 }
 
 /// Unit tests for join a `Memberlist` with labels.
-pub async fn memberlist_join_with_labels<F, T, R>(mut get_transport: impl FnMut(usize, Label) -> F)
+pub async fn memberlist_join_with_labels<F, T, R>(
+  mut get_transport: impl FnMut(usize, Label) -> F,
+  opts: Options,
+)
 where
   F: Future<Output = T::Options>,
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
   let label1 = Label::try_from("blah").unwrap();
-  let m1 = Memberlist::<T, _>::new(get_transport(1, label1.clone()).await, Options::lan())
+  let m1 = Memberlist::<T, _>::new(get_transport(1, label1.clone()).await, opts.clone())
     .await
     .unwrap();
-  let m2 = Memberlist::<T, _>::new(get_transport(2, label1.clone()).await, Options::lan())
+  let m2 = Memberlist::<T, _>::new(get_transport(2, label1.clone()).await, opts)
     .await
     .unwrap();
 
@@ -974,6 +977,7 @@ where
 pub async fn memberlist_conflict_delegate<F, T, R>(
   mut get_transport: impl FnMut(T::Id) -> F,
   id: T::Id,
+  opts: Options,
 ) where
   F: Future<Output = T::Options>,
   T: Transport<Runtime = R>,
@@ -982,12 +986,12 @@ pub async fn memberlist_conflict_delegate<F, T, R>(
   let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_conflict_delegate(CustomConflictDelegate::new()),
     get_transport(id.clone()).await,
-    Options::lan(),
+    opts.clone(),
   )
   .await
   .unwrap();
 
-  let m2 = Memberlist::<T, _>::new(get_transport(id).await, Options::lan())
+  let m2 = Memberlist::<T, _>::new(get_transport(id).await, opts.clone())
     .await
     .unwrap();
 
