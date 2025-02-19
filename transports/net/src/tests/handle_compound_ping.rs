@@ -30,7 +30,7 @@ where
     .with_label(label)
     .with_offload_size(20);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   handle_compound_ping(trans, client, super::compound_encoder).await?;
@@ -60,7 +60,7 @@ where
     .with_label(label)
     .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   handle_compound_ping(trans, client, super::compound_encoder).await?;
@@ -92,7 +92,7 @@ where
     .with_label(label)
     .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   handle_compound_ping(trans, client, super::compound_encoder).await?;
@@ -119,7 +119,7 @@ where
   let mut opts =
     NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s).with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   handle_compound_ping(trans, client, super::compound_encoder).await?;

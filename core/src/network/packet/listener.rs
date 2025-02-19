@@ -378,10 +378,7 @@ where
       - self.inner.transport.header_overhead();
 
     let msgs = self
-      .get_broadcast_with_prepend(
-        msg.into(),
-        bytes_avail,
-      )
+      .get_broadcast_with_prepend(msg.into(), bytes_avail)
       .await;
 
     match msgs {

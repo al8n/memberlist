@@ -1,6 +1,5 @@
 use bytes::BytesMut;
 
-
 /// A payload can be sent over the transport.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Payload {
@@ -45,7 +44,7 @@ impl Payload {
   }
 
   /// Truncate the payload to the given length.
-  /// 
+  ///
   /// This will truncate the data section of the payload,
   /// the header section will not be affected.
   pub fn truncate(&mut self, len: usize) {
@@ -53,7 +52,7 @@ impl Payload {
   }
 
   /// Split the payload into header and data.
-  /// 
+  ///
   /// The first element of the tuple is the header and the second element is the data.
   pub fn split_mut(&mut self) -> (&mut [u8], &mut [u8]) {
     self.buf.split_at_mut(self.header_size)

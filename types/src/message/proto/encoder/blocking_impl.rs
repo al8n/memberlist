@@ -1,6 +1,6 @@
 use crate::{EncodeError, Message};
 
-use super::{Data, ProtoEncoder, ProtoEncoderError, Payload};
+use super::{Data, Payload, ProtoEncoder, ProtoEncoderError};
 
 impl<I, A, B> ProtoEncoder<I, A, B>
 where

@@ -13,7 +13,7 @@ macro_rules! push_pull {
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t1 = NetTransport::new(t1_opts).await.unwrap();
           let t2 = NetTransport::new(t2_opts).await.unwrap();
-          push_pull::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(
+          push_pull::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(
             t1,
             Options::lan(),
             t2,
@@ -33,7 +33,7 @@ macro_rules! push_pull {
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t1 = NetTransport::new(t1_opts).await.unwrap();
           let t2 = NetTransport::new(t2_opts).await.unwrap();
-          push_pull::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(
+          push_pull::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(
             t1,
             Options::lan(),
             t2,
@@ -52,7 +52,7 @@ macro_rules! push_pull {
           let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_2".into(), $expr).with_primary_key(Some(TEST_KEYS[1]));
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
-          push_pull::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(
+          push_pull::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(
             t1,
             Options::lan(),
             t2,
@@ -73,7 +73,7 @@ macro_rules! push_pull {
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
 
-          push_pull::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(
+          push_pull::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(
             t1,
             Options::lan(),
             t2,

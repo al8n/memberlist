@@ -27,7 +27,7 @@ where
     .with_label(label)
     .with_offload_size(100);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -53,7 +53,7 @@ where
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -75,7 +75,7 @@ where
   let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -99,7 +99,7 @@ where
     .with_compressor(Some(Compressor::default()))
     .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -124,7 +124,7 @@ where
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(true);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -151,7 +151,7 @@ where
     .with_gossip_verify_outgoing(true)
     .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -171,7 +171,7 @@ where
 
   let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;
@@ -193,7 +193,7 @@ where
   let mut opts =
     NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s).with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   promised_push_pull_in(trans, client).await?;

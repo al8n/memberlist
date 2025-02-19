@@ -1,8 +1,14 @@
 use std::{
-  io, marker::PhantomData, net::SocketAddr, pin::Pin, task::{Context, Poll}, sync::{
+  io,
+  marker::PhantomData,
+  net::SocketAddr,
+  pin::Pin,
+  sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
-  }, time::Duration
+  },
+  task::{Context, Poll},
+  time::Duration,
 };
 
 use agnostic::Runtime;
@@ -223,12 +229,15 @@ impl Drop for QuinnStream {
 impl QuicStream for QuinnStream {
   async fn read_packet(&mut self) -> std::io::Result<bytes::Bytes> {
     // TODO(al8n): make size limit configurable?
-    self.recv.read_to_end(u32::MAX as usize).await
+    self
+      .recv
+      .read_to_end(u32::MAX as usize)
+      .await
       .map(Into::into)
-      .map_err(|e| {
-        match e {
-          quinn::ReadToEndError::Read(e) => std::io::Error::from(e),
-          quinn::ReadToEndError::TooLong => std::io::Error::new(std::io::ErrorKind::InvalidData, "packet too large"),
+      .map_err(|e| match e {
+        quinn::ReadToEndError::Read(e) => std::io::Error::from(e),
+        quinn::ReadToEndError::TooLong => {
+          std::io::Error::new(std::io::ErrorKind::InvalidData, "packet too large")
         }
       })
   }
@@ -255,18 +264,12 @@ impl AsyncWrite for QuinnStream {
     AsyncWrite::poll_write(send, cx, buf)
   }
 
-  fn poll_flush(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-  ) -> Poll<io::Result<()>> {
+  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     let send = Pin::new(&mut self.send);
     AsyncWrite::poll_flush(send, cx)
   }
 
-  fn poll_close(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-  ) -> Poll<io::Result<()>> {
+  fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     let send = Pin::new(&mut self.send);
     AsyncWrite::poll_close(send, cx)
   }

@@ -440,59 +440,80 @@ impl ProtoDecoder {
     }
 
     if tag_buf[0] == message::CHECKSUMED_MESSAGE_TAG {
-      let mut header = [0u8; super::CHECKSUMED_MESSAGE_HEADER_SIZE];
-      reader.peek_exact(&mut header).await?;
-      let algo = ChecksumAlgorithm::from(header[1]);
-      if algo.is_unknown() {
-        return Err(ProtoDecoderError::from(ChecksumError::UnknownAlgorithm(algo)).into());
-      }
+      #[cfg(not(any(
+        feature = "crc32",
+        feature = "xxhash32",
+        feature = "xxhash64",
+        feature = "xxhash3",
+        feature = "murmur3",
+      )))]
+      return Err(Error::new(
+        ErrorKind::Other,
+        ProtoDecoderError::ChecksumDisabled,
+      ));
 
-      let payload_len = u32::from_be_bytes(header[2..].try_into().unwrap()) as usize;
-      let checksum_size = algo.output_size();
+      #[cfg(any(
+        feature = "crc32",
+        feature = "xxhash32",
+        feature = "xxhash64",
+        feature = "xxhash3",
+        feature = "murmur3",
+      ))]
+      {
+        let mut header = [0u8; super::CHECKSUMED_MESSAGE_HEADER_SIZE];
+        reader.peek_exact(&mut header).await?;
+        let algo = ChecksumAlgorithm::from(header[1]);
+        if algo.is_unknown() {
+          return Err(ProtoDecoderError::from(ChecksumError::UnknownAlgorithm(algo)).into());
+        }
 
-      let mut buf =
-        BytesMut::zeroed(super::CHECKSUMED_MESSAGE_HEADER_SIZE + payload_len + checksum_size);
-      reader.read_exact(&mut buf).await?;
+        let payload_len = u32::from_be_bytes(header[2..].try_into().unwrap()) as usize;
+        let checksum_size = algo.output_size();
 
-      buf = Self::dechecksum(buf)?;
-      if buf.remaining() == 0 {
-        return Err(ProtoDecoderError::from(DecodeError::buffer_underflow()).into());
-      }
+        let mut buf =
+          BytesMut::zeroed(super::CHECKSUMED_MESSAGE_HEADER_SIZE + payload_len + checksum_size);
+        reader.read_exact(&mut buf).await?;
 
-      let tag = buf[0];
-      if tag == message::COMPRESSED_MESSAGE_TAG {
-        #[cfg(not(any(
-          feature = "zstd",
-          feature = "lz4",
-          feature = "snappy",
-          feature = "brotli",
-        )))]
-        return Err(ProtoDecoderError::CompressionDisabled.into());
+        buf = Self::dechecksum(buf)?;
+        if buf.remaining() == 0 {
+          return Err(ProtoDecoderError::from(DecodeError::buffer_underflow()).into());
+        }
 
-        #[cfg(any(
-          feature = "zstd",
-          feature = "lz4",
-          feature = "snappy",
-          feature = "brotli",
-        ))]
-        {
-          if buf.remaining() > self.offload_size {
-            #[cfg(feature = "rayon")]
-            return Self::decompress_on_rayon(buf).await.map_err(Into::into);
+        let tag = buf[0];
+        if tag == message::COMPRESSED_MESSAGE_TAG {
+          #[cfg(not(any(
+            feature = "zstd",
+            feature = "lz4",
+            feature = "snappy",
+            feature = "brotli",
+          )))]
+          return Err(ProtoDecoderError::CompressionDisabled.into());
 
-            #[cfg(not(feature = "rayon"))]
-            return Self::decompress_on_blocking::<RT>(buf)
-              .await
+          #[cfg(any(
+            feature = "zstd",
+            feature = "lz4",
+            feature = "snappy",
+            feature = "brotli",
+          ))]
+          {
+            if buf.remaining() > self.offload_size {
+              #[cfg(feature = "rayon")]
+              return Self::decompress_on_rayon(buf).await.map_err(Into::into);
+
+              #[cfg(not(feature = "rayon"))]
+              return Self::decompress_on_blocking::<RT>(buf)
+                .await
+                .map_err(Into::into);
+            }
+
+            return Self::decompress(buf)
+              .map(BytesMut::freeze)
               .map_err(Into::into);
           }
-
-          return Self::decompress(buf)
-            .map(BytesMut::freeze)
-            .map_err(Into::into);
         }
-      }
 
-      return Ok(buf.freeze());
+        return Ok(buf.freeze());
+      }
     }
 
     if tag_buf[0] == message::COMPRESSED_MESSAGE_TAG {

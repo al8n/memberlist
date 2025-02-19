@@ -16,27 +16,26 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["metrics", "compression", "snappy", "encryption", "crc32"]
+default = ["metrics", "snappy", "encryption", "crc32"]
 metrics = ["dep:metrics", "memberlist-types/metrics"]
 
 rayon = ["dep:rayon", "memberlist-types/rayon"]
 
 # checksum related feature
-crc32 = ["crc32fast"]
-xxhash32 = ["xxhash-rust/xxh32"]
-xxhash64 = ["xxhash-rust/xxh64"]
-xxhash3 = ["xxhash-rust/xxh3"]
-murmur3 = ["dep:hash32"]
+crc32 = ["crc32fast", "memberlist-types/crc32fast"]
+xxhash32 = ["xxhash-rust/xxh32", "memberlist-types/xxhash32"]
+xxhash64 = ["xxhash-rust/xxh64", "memberlist-types/xxhash64"]
+xxhash3 = ["xxhash-rust/xxh3", "memberlist-types/xxhash3"]
+murmur3 = ["dep:hash32", "memberlist-types/murmur3"]
 
 # encryption related feature
-encryption = ["rayon", "aead", "aes-gcm", "cbc", "indexmap"]
+encryption = ["aead", "aes-gcm", "cbc", "indexmap", "memberlist-types/encryption"]
 
 # compression related feature
-compression = ["rayon"]
-lz4 = ["lz4_flex"]
-brotli = ["dep:brotli"]
-snappy = ["dep:snap"]
-zstd = ["dep:zstd"]
+lz4 = ["lz4_flex", "memberlist-types/lz4"]
+brotli = ["dep:brotli", "memberlist-types/brotli"]
+snappy = ["dep:snap", "memberlist-types/snappy"]
+zstd = ["dep:zstd", "memberlist-types/zstd"]
 
 serde = [
   "dep:serde",

@@ -23,7 +23,7 @@ where
     .with_label(label)
     .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, _>::new(opts).await?;
   promised_ping_in(trans, client, kind).await?;
   Ok(())
 }
@@ -44,7 +44,7 @@ where
     .with_compressor(Some(Compressor::default()))
     .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, _>::new(opts).await?;
   promised_ping_in(trans, client, kind).await?;
   Ok(())
 }
@@ -64,7 +64,7 @@ where
   let mut opts = QuicTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next(0));
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -88,7 +88,7 @@ where
     .with_compressor(Some(Compressor::default()))
     .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;
@@ -108,7 +108,7 @@ where
 
   let mut opts = QuicTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s);
   opts.add_bind_address(kind.next(0));
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, _>::new(opts).await?;
   promised_ping_in(trans, client, kind).await?;
   Ok(())
 }
@@ -128,7 +128,7 @@ where
   let mut opts =
     QuicTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s).with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   promised_ping_in(trans, client, kind).await?;

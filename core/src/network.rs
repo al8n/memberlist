@@ -126,11 +126,7 @@ where
       feature = "zstd",
       feature = "lz4",
       feature = "brotli",
-      feature = "deflate",
-      feature = "gzip",
       feature = "snappy",
-      feature = "lzw",
-      feature = "zlib",
     ))]
     encoder.maybe_compression(self.inner.opts.compress_algo());
 

@@ -288,6 +288,7 @@ pub struct ProtoHint {
     doc = "The maximum output size of the messages, this value can be used to pre-allocate the buffer.",
   )))]
   max_output_size: usize,
+
   #[viewit(getter(attrs(
     doc = "The hint of how the encoder should encode the checksum, `None` if the encoder will not checksum the original payload.",
     cfg(any(
@@ -297,7 +298,15 @@ pub struct ProtoHint {
       feature = "snappy",
     ))
   )))]
+  #[cfg(any(
+    feature = "zstd",
+    feature = "lz4",
+    feature = "brotli",
+    feature = "snappy",
+  ))]
   checksum_hint: Option<ChecksumHint>,
+
+  #[cfg(feature = "encryption")]
   #[viewit(getter(attrs(
     doc = "The hint of how the encoder encrypts, `None` if the encoder will not encrypt the original payload.",
     cfg(feature = "encryption")
@@ -926,7 +935,7 @@ where
       offset += 2 + label_size;
     }
 
-    let mut bytes_written = None;
+    let mut bytes_written: Option<usize> = None;
     cfg_if::cfg_if! {
       if #[cfg(any(
         feature = "zstd",

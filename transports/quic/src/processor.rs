@@ -1,6 +1,6 @@
+use super::*;
 use futures::AsyncReadExt;
 use memberlist_core::transport::Packet;
-use super::*;
 
 pub(super) struct Processor<
   A: AddressResolver<ResolvedAddress = SocketAddr>,

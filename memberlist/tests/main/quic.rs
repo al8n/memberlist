@@ -1,11 +1,8 @@
-use memberlist::{
+use memberlist_core::{
   transport::{resolver::socket_addr::SocketAddrResolver, Node, Transport},
   Options,
 };
-use memberlist_core::{
-  tests::{memberlist::*, next_socket_addr_v4, state::*},
-  transport::Lpe,
-};
+use memberlist_core::tests::{memberlist::*, next_socket_addr_v4, state::*};
 use memberlist_quic::{QuicTransport, QuicTransportOptions};
 use smol_str::SmolStr;
 

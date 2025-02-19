@@ -20,7 +20,7 @@ use agnostic::{
 };
 use atomic_refcell::AtomicRefCell;
 use futures::{stream::FuturesUnordered, StreamExt};
-use memberlist_core::types::{Data, SmallVec, Payload};
+use memberlist_core::types::{Data, Payload, SmallVec};
 pub use memberlist_core::{
   transport::*,
   types::{CIDRsPolicy, Label, LabelError},
@@ -49,10 +49,10 @@ pub mod resolver {
   pub use nodecraft::resolver::{address, socket_addr};
 }
 
-// /// Exports unit tests.
-// #[cfg(any(test, feature = "test"))]
-// #[cfg_attr(docsrs, doc(cfg(feature = "test")))]
-// pub mod tests;
+/// Exports unit tests.
+#[cfg(any(test, feature = "test"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "test")))]
+pub mod tests;
 
 /// A large buffer size that we attempt to set UDP
 /// sockets to in order to handle a large volume of messages.

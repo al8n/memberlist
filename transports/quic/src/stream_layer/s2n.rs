@@ -5,16 +5,18 @@ use std::{
   marker::PhantomData,
   net::SocketAddr,
   path::PathBuf,
+  pin::Pin,
   sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
   },
+  task::{Context, Poll},
   time::Duration,
 };
 
 use agnostic_lite::{time::Instant, RuntimeLite};
 use bytes::Bytes;
-use futures::{lock::Mutex, AsyncReadExt, AsyncWriteExt};
+use futures::{lock::Mutex, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use peekable::future::{AsyncPeekExt, AsyncPeekable};
 use s2n_quic::{
   client::Connect,
@@ -43,11 +45,22 @@ pub struct S2n<R> {
   _marker: PhantomData<R>,
 }
 
-impl<R> S2n<R> {
-  /// Creates a new [`S2n`] stream layer with the given options.
-  fn new_in(opts: Options) -> Result<Self, ValidationError> {
+impl<R: RuntimeLite> StreamLayer for S2n<R> {
+  type Runtime = R;
+  type Acceptor = S2nBiAcceptor;
+  type Connector = S2nConnector;
+  type Connection = S2nConnection;
+  type Stream = S2nStream;
+  type Options = options::Options;
+
+  fn max_stream_data(&self) -> usize {
+    self.max_stream_data
+  }
+
+  async fn new(opts: Self::Options) -> io::Result<Self> {
     Ok(Self {
-      limits: Limits::try_from(&opts)?,
+      limits: Limits::try_from(&opts)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
       server_name: opts.server_name,
       max_stream_data: opts.data_window as usize,
       max_remote_open_streams: opts.max_open_remote_bidirectional_streams as usize,
@@ -56,23 +69,6 @@ impl<R> S2n<R> {
       key: opts.key_path,
       _marker: PhantomData,
     })
-  }
-}
-
-impl<R: RuntimeLite> StreamLayer for S2n<R> {
-  type Runtime = R;
-  type Acceptor = S2nBiAcceptor<R>;
-  type Connector = S2nConnector<R>;
-  type Connection = S2nConnection<R>;
-  type Stream = S2nStream<R>;
-  type Options = options::Options;
-
-  fn max_stream_data(&self) -> usize {
-    self.max_stream_data
-  }
-
-  async fn new(opts: Self::Options) -> Result<Self, Self::Error> {
-    Self::new_in(opts).map_err(Self::Error::Validation)
   }
 
   async fn bind(
@@ -126,7 +122,6 @@ impl<R: RuntimeLite> StreamLayer for S2n<R> {
       server: srv,
       local_addr: actual_local_addr,
       max_open_streams: self.max_local_open_streams,
-      _marker: PhantomData,
     };
 
     let connector = Self::Connector {
@@ -134,26 +129,27 @@ impl<R: RuntimeLite> StreamLayer for S2n<R> {
       server_name: self.server_name.clone(),
       local_addr: actual_client_addr,
       max_open_streams: self.max_remote_open_streams,
-      _marker: PhantomData,
     };
     Ok((actual_local_addr, acceptor, connector))
   }
 }
 
 /// [`S2nBiAcceptor`] is an implementation of [`QuicBiAcceptor`] based on [`s2n_quic`].
-pub struct S2nBiAcceptor<R> {
+pub struct S2nBiAcceptor {
   server: Server,
   local_addr: SocketAddr,
   max_open_streams: usize,
-  _marker: PhantomData<R>,
 }
 
-impl<R: RuntimeLite> QuicAcceptor for S2nBiAcceptor<R> {
-  type Error = S2nError;
-  type Connection = S2nConnection<R>;
+impl QuicAcceptor for S2nBiAcceptor {
+  type Connection = S2nConnection;
 
-  async fn accept(&mut self) -> Result<(Self::Connection, SocketAddr), Self::Error> {
-    let mut conn = self.server.accept().await.ok_or(Self::Error::Closed)?;
+  async fn accept(&mut self) -> io::Result<(Self::Connection, SocketAddr)> {
+    let mut conn = self
+      .server
+      .accept()
+      .await
+      .ok_or(io::Error::new(io::ErrorKind::Other, "server closed"))?;
     conn.keep_alive(true)?;
     let remote = conn.remote_addr()?;
     Ok((
@@ -162,7 +158,7 @@ impl<R: RuntimeLite> QuicAcceptor for S2nBiAcceptor<R> {
     ))
   }
 
-  async fn close(&mut self) -> Result<(), Self::Error> {
+  async fn close(&mut self) -> io::Result<()> {
     Ok(())
   }
 
@@ -172,19 +168,17 @@ impl<R: RuntimeLite> QuicAcceptor for S2nBiAcceptor<R> {
 }
 
 /// [`S2nConnector`] is an implementation of [`QuicConnector`] based on [`s2n_quic`].
-pub struct S2nConnector<R> {
+pub struct S2nConnector {
   client: Client,
   local_addr: SocketAddr,
   server_name: SmolStr,
   max_open_streams: usize,
-  _marker: PhantomData<R>,
 }
 
-impl<R: RuntimeLite> QuicConnector for S2nConnector<R> {
-  type Error = S2nError;
-  type Connection = S2nConnection<R>;
+impl QuicConnector for S2nConnector {
+  type Connection = S2nConnection;
 
-  async fn connect(&self, addr: SocketAddr) -> Result<Self::Connection, Self::Error> {
+  async fn connect(&self, addr: SocketAddr) -> io::Result<Self::Connection> {
     let connect = Connect::new(addr).with_server_name(self.server_name.as_str());
     let mut conn = self.client.connect(connect).await?;
     conn.keep_alive(true)?;
@@ -197,12 +191,12 @@ impl<R: RuntimeLite> QuicConnector for S2nConnector<R> {
     ))
   }
 
-  async fn close(&self) -> Result<(), Self::Error> {
+  async fn close(&self) -> io::Result<()> {
     // TODO: figure out how to close a client
     Ok(())
   }
 
-  async fn wait_idle(&self) -> Result<(), Self::Error> {
+  async fn wait_idle(&self) -> io::Result<()> {
     // self.client.wait_idle().await.map_err(Into::into)
     Ok(())
   }
@@ -213,16 +207,15 @@ impl<R: RuntimeLite> QuicConnector for S2nConnector<R> {
 }
 
 /// [`S2nConnection`] is an implementation of [`QuicConnection`] based on [`s2n_quic`].
-pub struct S2nConnection<R> {
+pub struct S2nConnection {
   connection: Arc<Mutex<Connection>>,
   current_open_streams: Arc<AtomicUsize>,
   max_open_streams: usize,
   local_addr: SocketAddr,
   remote_addr: SocketAddr,
-  _marker: PhantomData<R>,
 }
 
-impl<R> S2nConnection<R> {
+impl S2nConnection {
   #[inline]
   fn new(
     connection: Connection,
@@ -236,17 +229,14 @@ impl<R> S2nConnection<R> {
       max_open_streams,
       local_addr,
       remote_addr,
-      _marker: PhantomData,
     }
   }
 }
 
-impl<R: RuntimeLite> QuicConnection for S2nConnection<R> {
-  type Error = S2nError;
-  type Stream = S2nStream<R>;
-  type Instant = R::Instant;
+impl QuicConnection for S2nConnection {
+  type Stream = S2nStream;
 
-  async fn accept_bi(&self) -> Result<(Self::Stream, SocketAddr), Self::Error> {
+  async fn accept_bi(&self) -> io::Result<(Self::Stream, SocketAddr)> {
     self
       .connection
       .lock()
@@ -259,15 +249,18 @@ impl<R: RuntimeLite> QuicConnection for S2nConnection<R> {
         conn
           .map(|conn| {
             (
-              S2nStream::<R>::new(conn, self.current_open_streams.clone()),
+              S2nStream::new(conn, self.current_open_streams.clone()),
               self.remote_addr,
             )
           })
-          .ok_or(Self::Error::Closed)
+          .ok_or(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "connection closed",
+          ))
       })
   }
 
-  async fn open_bi(&self) -> Result<(Self::Stream, SocketAddr), Self::Error> {
+  async fn open_bi(&self) -> io::Result<(Self::Stream, SocketAddr)> {
     self
       .connection
       .lock()
@@ -277,23 +270,14 @@ impl<R: RuntimeLite> QuicConnection for S2nConnection<R> {
       .map(|conn| {
         self.current_open_streams.fetch_add(1, Ordering::AcqRel);
         (
-          S2nStream::<R>::new(conn, self.current_open_streams.clone()),
+          S2nStream::new(conn, self.current_open_streams.clone()),
           self.remote_addr,
         )
       })
       .map_err(Into::into)
   }
 
-  async fn open_bi_with_deadline(
-    &self,
-    deadline: R::Instant,
-  ) -> Result<(Self::Stream, SocketAddr), Self::Error> {
-    R::timeout_at(deadline, async { self.open_bi().await })
-      .await
-      .map_err(|_| Self::Error::Timeout)?
-  }
-
-  async fn close(&self) -> Result<(), Self::Error> {
+  async fn close(&self) -> io::Result<()> {
     self.connection.lock().await.close(0u32.into());
     Ok(())
   }
@@ -315,146 +299,64 @@ impl<R: RuntimeLite> QuicConnection for S2nConnection<R> {
 }
 
 /// [`S2nStream`] is an implementation of [`QuicBiStream`] based on [`s2n_quic`].
-pub struct S2nStream<R: RuntimeLite> {
+pub struct S2nStream {
   recv_stream: AsyncPeekable<ReceiveStream>,
   send_stream: SendStream,
-  read_deadline: Option<R::Instant>,
-  write_deadline: Option<R::Instant>,
   ctr: Arc<AtomicUsize>,
-  _marker: PhantomData<R>,
 }
 
-impl<R: RuntimeLite> S2nStream<R> {
+impl S2nStream {
   fn new(stream: BidirectionalStream, ctr: Arc<AtomicUsize>) -> Self {
     let (recv, send) = stream.split();
     Self {
       recv_stream: recv.peekable(),
       send_stream: send,
-      read_deadline: None,
-      write_deadline: None,
       ctr,
-      _marker: PhantomData,
     }
   }
 }
 
-impl<R: RuntimeLite> Drop for S2nStream<R> {
+impl Drop for S2nStream {
   fn drop(&mut self) {
     self.ctr.fetch_sub(1, Ordering::AcqRel);
   }
 }
 
-impl<R: RuntimeLite> TimeoutableReadStream for S2nStream<R> {
-  type Instant = R::Instant;
-
-  fn set_read_deadline(&mut self, deadline: Option<Self::Instant>) {
-    self.read_deadline = deadline;
-  }
-
-  fn read_deadline(&self) -> Option<Self::Instant> {
-    self.read_deadline
+impl QuicStream for S2nStream {
+  async fn read_packet(&mut self) -> std::io::Result<Bytes> {
+    todo!()
   }
 }
 
-impl<R: RuntimeLite> TimeoutableWriteStream for S2nStream<R> {
-  type Instant = R::Instant;
-
-  fn set_write_deadline(&mut self, deadline: Option<Self::Instant>) {
-    self.write_deadline = deadline;
-  }
-
-  fn write_deadline(&self) -> Option<Self::Instant> {
-    self.write_deadline
-  }
-}
-
-impl<R: RuntimeLite> QuicStream for S2nStream<R> {
-  type Error = S2nError;
-  type Instant = R::Instant;
-
-  async fn write_all(&mut self, src: Bytes) -> Result<usize, Self::Error> {
-    let len = src.len();
-    let fut = async {
-      self
-        .send_stream
-        .write_all(&src)
-        .await
-        .map(|_| len)
-        .map_err(Into::into)
-    };
-
-    match self.write_deadline {
-      Some(timeout) => R::timeout_at(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn flush(&mut self) -> Result<(), Self::Error> {
-    Ok(())
-  }
-
-  async fn finish(&mut self) -> Result<(), Self::Error> {
-    let fut = async { self.send_stream.flush().await.map_err(Into::into) };
-
-    match self.write_deadline {
-      Some(timeout) => R::timeout_at(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-    let fut = async { self.recv_stream.read(buf).await.map_err(Into::into) };
-
-    match self.read_deadline {
-      Some(timeout) => R::timeout_at(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
-    let fut = async { self.recv_stream.read_exact(buf).await.map_err(Into::into) };
-
-    match self.read_deadline {
-      Some(timeout) => R::timeout_at(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn peek_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
-    let fut = async { self.recv_stream.peek_exact(buf).await.map_err(Into::into) };
-
-    match self.read_deadline {
-      Some(timeout) => R::timeout_at(timeout, fut)
-        .await
-        .map_err(|_| Self::Error::IO(io::Error::new(io::ErrorKind::TimedOut, "timeout")))?,
-      None => fut.await.map_err(Into::into),
-    }
-  }
-
-  async fn close(&mut self) -> Result<(), Self::Error> {
-    self.send_stream.close().await.map_err(Into::into)
-  }
-}
-
-impl<R: RuntimeLite> futures::AsyncRead for S2nStream<R> {
+impl AsyncRead for S2nStream {
   fn poll_read(
-    mut self: std::pin::Pin<&mut Self>,
-    cx: &mut std::task::Context<'_>,
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
     buf: &mut [u8],
-  ) -> std::task::Poll<std::io::Result<usize>> {
-    use futures::Future;
+  ) -> Poll<std::io::Result<usize>> {
+    let recv = Pin::new(&mut self.recv_stream);
+    recv.poll_read(cx, buf)
+  }
+}
 
-    let fut = self.recv_stream.read(buf);
-    futures::pin_mut!(fut);
-    fut.poll(cx)
+impl AsyncWrite for S2nStream {
+  fn poll_write(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+  ) -> Poll<io::Result<usize>> {
+    let send = Pin::new(&mut self.send_stream);
+    send.poll_write(cx, buf)
+  }
+
+  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    let send = Pin::new(&mut self.send_stream);
+    send.poll_flush(cx)
+  }
+
+  fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    let send = Pin::new(&mut self.send_stream);
+    send.poll_close(cx)
   }
 }
 

@@ -19,7 +19,7 @@ use agnostic_lite::{time::Instant, AsyncSpawner, RuntimeLite};
 use atomic_refcell::AtomicRefCell;
 use crossbeam_skiplist::SkipMap;
 use futures::{stream::FuturesUnordered, AsyncWriteExt, FutureExt, StreamExt};
-use memberlist_core::types::{Data, SmallVec, Payload};
+use memberlist_core::types::{Data, Payload, SmallVec};
 pub use memberlist_core::{
   transport::*,
   types::{CIDRsPolicy, Label, LabelError},
@@ -28,10 +28,10 @@ pub use memberlist_core::{
 mod processor;
 use processor::*;
 
-// /// Exports unit tests.
-// #[cfg(any(test, feature = "test"))]
-// #[cfg_attr(docsrs, doc(cfg(feature = "test")))]
-// pub mod tests;
+/// Exports unit tests.
+#[cfg(any(test, feature = "test"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "test")))]
+pub mod tests;
 
 mod error;
 pub use error::*;
@@ -332,7 +332,7 @@ where
             .await
             .map_err(|e| QuicTransportError::Io(e.into()))?
             .map(|(stream, _)| stream)
-            .map_err(Into::into)
+            .map_err(Into::into);
         } else {
           return connection
             .open_bi()
@@ -447,20 +447,21 @@ where
   //   from: &Self::ResolvedAddress,
   //   conn: &mut Self::Stream,
   // ) -> Result<usize, Self::Error> {
-    
+
   // }
 
-  async fn write(
-    &self,
-    conn: &mut Self::Stream,
-    mut src: Payload,
-  ) -> Result<usize, Self::Error> {
+  async fn write(&self, conn: &mut Self::Stream, mut src: Payload) -> Result<usize, Self::Error> {
     let header = src.header_mut();
     if header.is_empty() {
-      return Err(QuicTransportError::custom("not enough space for header".into()));
+      return Err(QuicTransportError::custom(
+        "not enough space for header".into(),
+      ));
     }
     header[0] = StreamType::Stream as u8;
-    let ttl = self.opts.timeout.map(|ttl| <Self::Runtime as RuntimeLite>::now() + ttl);
+    let ttl = self
+      .opts
+      .timeout
+      .map(|ttl| <Self::Runtime as RuntimeLite>::now() + ttl);
 
     let src = src.as_slice();
     tracing::trace!(
@@ -496,7 +497,9 @@ where
     let mut stream = self.fetch_stream(*addr, ttl).await?;
     let header = src.header_mut();
     if header.is_empty() {
-      return Err(QuicTransportError::custom("not enough space for header".into()));
+      return Err(QuicTransportError::custom(
+        "not enough space for header".into(),
+      ));
     }
     header[0] = StreamType::Packet as u8;
 

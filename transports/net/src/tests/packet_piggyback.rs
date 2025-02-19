@@ -30,7 +30,7 @@ where
     .with_compressor(Some(Compressor::default()))
     .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   send_packet_piggyback(trans, client, |mut src| {

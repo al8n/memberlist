@@ -19,7 +19,7 @@ use memberlist_net::stream_layer::StreamLayer;
 use super::*;
 
 type NetTransport<S, R> =
-  memberlist_net::NetTransport<SmolStr, SocketAddrResolver<R>, S, Lpe<SmolStr, SocketAddr>, R>;
+  memberlist_net::NetTransport<SmolStr, SocketAddrResolver<R>, S, R>;
 type VoidDelegate = memberlist::delegate::VoidDelegate<SmolStr, SocketAddr>;
 type Delegate = CompositeDelegate<
   SmolStr,

@@ -131,9 +131,7 @@ impl<B: Broadcast, N: NodeCalculator> TransmitLimitedQueue<B, N> {
 
   /// Returns the messages can be broadcast.
   pub async fn get_broadcasts(&self, limit: usize) -> TinyVec<B::Message> {
-    self
-      .get_broadcast_with_prepend(TinyVec::new(), limit)
-      .await
+    self.get_broadcast_with_prepend(TinyVec::new(), limit).await
   }
 
   pub(crate) async fn get_broadcast_with_prepend(

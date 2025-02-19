@@ -40,8 +40,8 @@ where
 
   join_in::<
     _,
-    NetTransport<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>,
-    NetTransport<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>,
+    NetTransport<_, SocketAddrResolver<R>, _, _>,
+    NetTransport<_, SocketAddrResolver<R>, _, _>,
     _,
   >(opts1, opts2)
   .await?;

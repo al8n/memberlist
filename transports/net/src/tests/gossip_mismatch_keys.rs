@@ -26,7 +26,7 @@ where
       .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
       .with_gossip_verify_outgoing(true);
   opts.add_bind_address(kind.next(0));
-  let m1 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, S, Lpe<_, _>, _>, _>::new(
+  let m1 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, S, _>, _>::new(
     opts,
     Options::default(),
   )
@@ -41,7 +41,7 @@ where
       .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
       .with_gossip_verify_outgoing(true);
   opts.add_bind_address(kind.next(0));
-  let m2 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>, _>::new(
+  let m2 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, _, _>, _>::new(
     opts,
     Options::default(),
   )
@@ -81,7 +81,7 @@ where
       .with_gossip_verify_outgoing(true)
       .with_label(label.cheap_clone());
   opts.add_bind_address(kind.next(0));
-  let m1 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>, _>::new(
+  let m1 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, _, _>, _>::new(
     opts,
     Options::default(),
   )
@@ -97,7 +97,7 @@ where
       .with_gossip_verify_outgoing(true)
       .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let m2 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>, _>::new(
+  let m2 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, _, _>, _>::new(
     opts,
     Options::default(),
   )

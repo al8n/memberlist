@@ -1,6 +1,8 @@
 use crate::Message;
 
-use super::{Batch, Data, Encodable, EncodeBuffer, ProtoEncoder, ProtoEncoderError, SmallVec, Payload};
+use super::{
+  Batch, Data, Encodable, EncodeBuffer, Payload, ProtoEncoder, ProtoEncoderError, SmallVec,
+};
 
 use rayon::iter::{self, IntoParallelIterator, ParallelIterator};
 

@@ -26,7 +26,7 @@ where
     .with_label(label)
     .with_offload_size(10);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;
@@ -58,7 +58,7 @@ where
     .with_gossip_verify_outgoing(true)
     .with_label(label);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;
@@ -89,7 +89,7 @@ where
     .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
     .with_gossip_verify_outgoing(false);
   opts.add_bind_address(kind.next(0));
-  let trans = NetTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts)
+  let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
     .await
     .unwrap();
   handle_ping(trans, client).await?;

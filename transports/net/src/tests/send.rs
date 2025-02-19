@@ -39,8 +39,8 @@ where
   opts2.add_bind_address(kind.next(0));
   send_in::<
     _,
-    NetTransport<SmolStr, SocketAddrResolver<R>, _, Lpe<_, _>, _>,
-    NetTransport<SmolStr, SocketAddrResolver<R>, _, Lpe<_, _>, _>,
+    NetTransport<SmolStr, SocketAddrResolver<R>, _, _>,
+    NetTransport<SmolStr, SocketAddrResolver<R>, _, _>,
     _,
   >(opts1, opts2)
   .await?;

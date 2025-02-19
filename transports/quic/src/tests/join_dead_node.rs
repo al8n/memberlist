@@ -26,7 +26,7 @@ where
     );
   opts.add_bind_address(kind.next(0));
 
-  join_dead_node_in::<_, QuicTransport<SmolStr, SocketAddrResolver<R>, _, Lpe<_, _>, _>, _, _>(
+  join_dead_node_in::<_, QuicTransport<SmolStr, SocketAddrResolver<R>, _, _>, _, _>(
     opts,
     client,
     "fake".into(),

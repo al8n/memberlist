@@ -4,9 +4,21 @@ use memberlist_types::Label;
 
 use super::types::{DelegateVersion, ProtocolVersion};
 
+#[cfg(any(
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3"
+))]
 use super::types::ChecksumAlgorithm;
 
-#[cfg(feature = "compression")]
+#[cfg(any(
+  feature = "zstd",
+  feature = "snappy",
+  feature = "brotli",
+  feature = "lz4",
+))]
 use super::types::CompressAlgorithm;
 
 #[cfg(feature = "encryption")]
@@ -301,6 +313,13 @@ pub struct Options {
   /// ## Note
   /// If the [`Transport::packet_reliable`](crate::transport::Transport::packet_reliable) is return `true`,
   /// then the checksum will not be appended to the packets, even if this field is set to `Some`.
+  #[cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3",
+  ))]
   #[cfg_attr(
     feature = "serde",
     serde(skip_serializing_if = "Option::is_none", default)
@@ -308,11 +327,49 @@ pub struct Options {
   #[viewit(
     getter(
       const,
-      attrs(doc = "Returns the checksum algorithm for the packets sent through transport.",)
+      attrs(
+        doc = "Returns the checksum algorithm for the packets sent through transport.",
+        cfg(any(
+          feature = "crc32",
+          feature = "xxhash32",
+          feature = "xxhash64",
+          feature = "xxhash3",
+          feature = "murmur3",
+        )),
+        cfg_attr(
+          docsrs,
+          doc(cfg(any(
+            feature = "crc32",
+            feature = "xxhash32",
+            feature = "xxhash64",
+            feature = "xxhash3",
+            feature = "murmur3",
+          )))
+        )
+      )
     ),
     setter(
       const,
-      attrs(doc = "Sets the checksum algorithm for the packets sent through transport.",)
+      attrs(
+        doc = "Sets the checksum algorithm for the packets sent through transport.",
+        cfg(any(
+          feature = "crc32",
+          feature = "xxhash32",
+          feature = "xxhash64",
+          feature = "xxhash3",
+          feature = "murmur3",
+        )),
+        cfg_attr(
+          docsrs,
+          doc(cfg(any(
+            feature = "crc32",
+            feature = "xxhash32",
+            feature = "xxhash64",
+            feature = "xxhash3",
+            feature = "murmur3",
+          )))
+        )
+      )
     )
   )]
   checksum_algo: Option<ChecksumAlgorithm>,
@@ -322,21 +379,57 @@ pub struct Options {
   ///
   /// The default value is 1KB, which means that any message larger than 1KB
   /// will be offloaded to [`rayon`] thread pool for encryption or compression.
-  #[cfg(any(feature = "compression", feature = "encryption"))]
-  #[cfg_attr(docsrs, doc(cfg(any(feature = "compression", feature = "encryption"))))]
+  #[cfg(any(
+    feature = "encryption",
+    feature = "lz4",
+    feature = "zstd",
+    feature = "brotli",
+    feature = "snappy",
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "encryption",
+      feature = "lz4",
+      feature = "zstd",
+      feature = "brotli",
+      feature = "snappy",
+    )))
+  )]
   #[viewit(
     getter(
       const,
       attrs(
         doc = "Get the size of a message that should be offload to [`rayon`] thread pool for encryption or compression.",
-        cfg(any(feature = "compression", feature = "encryption")),
+        cfg(any(
+          feature = "encryption",
+          feature = "lz4",
+          feature = "zstd",
+          feature = "brotli",
+          feature = "snappy",
+        )),
         cfg_attr(docsrs, doc(cfg(any(feature = "compression", feature = "encryption"))))
       ),
     ),
     setter(attrs(
       doc = "Set the size of a message that should be offload to [`rayon`] thread pool for encryption or compression. (Builder pattern)",
-      cfg(any(feature = "compression", feature = "encryption")),
-      cfg_attr(docsrs, doc(cfg(any(feature = "compression", feature = "encryption"))))
+      cfg(any(
+        feature = "encryption",
+        feature = "lz4",
+        feature = "zstd",
+        feature = "brotli",
+        feature = "snappy",
+      )),
+      cfg_attr(
+        docsrs,
+        doc(cfg(any(
+          feature = "encryption",
+          feature = "lz4",
+          feature = "zstd",
+          feature = "brotli",
+          feature = "snappy",
+        )))
+      )
     ),)
   )]
   offload_size: usize,
@@ -472,7 +565,12 @@ pub struct Options {
   /// Indicates that should the messages sent through transport will be compressed or not.
   ///
   /// Default is `None`.
-  #[cfg(feature = "compression")]
+  #[cfg(any(
+    feature = "zstd",
+    feature = "lz4",
+    feature = "brotli",
+    feature = "snappy",
+  ))]
   #[cfg_attr(
     feature = "serde",
     serde(skip_serializing_if = "Option::is_none", default)
@@ -482,16 +580,42 @@ pub struct Options {
       const,
       attrs(
         doc = "Returns the compress algorithm for the messages sent through transport.",
-        cfg(feature = "compression"),
-        cfg_attr(docsrs, doc(cfg(feature = "compression")))
+        cfg(any(
+          feature = "zstd",
+          feature = "lz4",
+          feature = "brotli",
+          feature = "snappy",
+        )),
+        cfg_attr(
+          docsrs,
+          doc(cfg(any(
+            feature = "zstd",
+            feature = "lz4",
+            feature = "brotli",
+            feature = "snappy",
+          )))
+        )
       )
     ),
     setter(
       const,
       attrs(
         doc = "Sets the compress algorithm for the messages sent through transport.",
-        cfg(feature = "compression"),
-        cfg_attr(docsrs, doc(cfg(feature = "compression")))
+        cfg(any(
+          feature = "zstd",
+          feature = "lz4",
+          feature = "brotli",
+          feature = "snappy",
+        )),
+        cfg_attr(
+          docsrs,
+          doc(cfg(any(
+            feature = "zstd",
+            feature = "lz4",
+            feature = "brotli",
+            feature = "snappy",
+          )))
+        )
       )
     )
   )]
@@ -554,9 +678,22 @@ impl Options {
       handoff_queue_depth: 1024,
       dead_node_reclaim_time: Duration::ZERO,
       queue_check_interval: Duration::from_secs(30),
-      checksum_algo: None,
       skip_inbound_label_check: false,
-      #[cfg(any(feature = "compression", feature = "encryption"))]
+      #[cfg(any(
+        feature = "crc32",
+        feature = "xxhash32",
+        feature = "xxhash64",
+        feature = "xxhash3",
+        feature = "murmur3"
+      ))]
+      checksum_algo: None,
+      #[cfg(any(
+        feature = "encryption",
+        feature = "lz4",
+        feature = "zstd",
+        feature = "brotli",
+        feature = "snappy",
+      ))]
       offload_size: 1024 * 1024,
       #[cfg(feature = "encryption")]
       encryption_algo: None,
@@ -568,7 +705,12 @@ impl Options {
       primary_key: None,
       #[cfg(feature = "encryption")]
       secret_keys: SecretKeys::new(),
-      #[cfg(feature = "compression")]
+      #[cfg(any(
+        feature = "zstd",
+        feature = "lz4",
+        feature = "brotli",
+        feature = "snappy",
+      ))]
       compress_algo: None,
       #[cfg(feature = "metrics")]
       metric_labels: std::sync::Arc::new(MetricLabels::new()),

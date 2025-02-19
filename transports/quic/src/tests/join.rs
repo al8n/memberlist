@@ -30,8 +30,8 @@ where
 
   join_in::<
     _,
-    QuicTransport<SmolStr, SocketAddrResolver<R>, _, Lpe<_, _>, _>,
-    QuicTransport<SmolStr, SocketAddrResolver<R>, _, Lpe<_, _>, _>,
+    QuicTransport<SmolStr, SocketAddrResolver<R>, _, _>,
+    QuicTransport<SmolStr, SocketAddrResolver<R>, _, _>,
     _,
   >(opts1, opts2)
   .await?;

@@ -347,9 +347,7 @@ where
 
     for payload in data {
       let data = if !stream {
-        decoder
-          .decode::<R>(payload.split().1)
-          .await?
+        decoder.decode::<R>(payload.split().1).await?
       } else {
         decoder
           .decode_from_reader::<_, R>(&mut futures::io::Cursor::new(payload.split().1))

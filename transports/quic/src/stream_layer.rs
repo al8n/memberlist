@@ -8,10 +8,10 @@ use bytes::Bytes;
 #[cfg_attr(docsrs, doc(cfg(feature = "quinn")))]
 pub mod quinn;
 
-// /// QUIC stream layer based on [`s2n`](::s2n_quic).
-// #[cfg(feature = "s2n")]
-// #[cfg_attr(docsrs, doc(cfg(feature = "s2n")))]
-// pub mod s2n;
+/// QUIC stream layer based on [`s2n`](::s2n_quic).
+#[cfg(feature = "s2n")]
+#[cfg_attr(docsrs, doc(cfg(feature = "s2n")))]
+pub mod s2n;
 
 /// A trait for QUIC bidirectional streams.
 // #[auto_impl::auto_impl(Box)]
@@ -37,9 +37,7 @@ pub trait StreamLayer: Sized + Send + Sync + 'static {
   type Stream: QuicStream;
 
   /// The connection type.
-  type Connection: QuicConnection<
-    Stream = Self::Stream,
-  >;
+  type Connection: QuicConnection<Stream = Self::Stream>;
 
   /// The options type used to construct the stream layer.
   type Options: Send + Sync + 'static;

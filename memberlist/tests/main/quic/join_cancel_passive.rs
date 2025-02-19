@@ -14,7 +14,7 @@ macro_rules! join_cancel_passive {
           let mut t2_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(id2.clone(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
 
-          memberlist_join_cancel_passive::<QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(id1, t1_opts, Options::lan(), id2, t2_opts, Options::lan()).await;
+          memberlist_join_cancel_passive::<QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(id1, t1_opts, Options::lan(), id2, t2_opts, Options::lan()).await;
         });
       }
 
@@ -30,7 +30,7 @@ macro_rules! join_cancel_passive {
           let mut t2_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(id2.clone(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
 
-          memberlist_join_cancel_passive::<QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(id1, t1_opts, Options::lan(), id2, t2_opts, Options::lan()).await;
+          memberlist_join_cancel_passive::<QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(id1, t1_opts, Options::lan(), id2, t2_opts, Options::lan()).await;
         });
       }
     }

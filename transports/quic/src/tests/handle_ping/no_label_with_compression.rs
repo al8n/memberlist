@@ -15,7 +15,7 @@ where
     .with_compressor(Some(Default::default()));
   let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, _>::new(opts).await?;
   let remote_addr = trans.advertise_address();
   let c = S::new(c).await.unwrap();
   let tc = QuicTransportTestClient::<S, R>::new(local_addr, *remote_addr, c)
@@ -40,7 +40,7 @@ where
     .with_compressor(Some(Default::default()));
   let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, _>::new(opts).await?;
   let remote_addr = trans.advertise_address();
   let c = S::new(c).await.unwrap();
   let tc = QuicTransportTestClient::<S, R>::new(local_addr, *remote_addr, c)
@@ -63,7 +63,7 @@ where
   let mut opts = QuicTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s);
   let local_addr = kind.next(0);
   opts.add_bind_address(local_addr);
-  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, Lpe<_, _>, _>::new(opts).await?;
+  let trans = QuicTransport::<_, SocketAddrResolver<R>, _, _>::new(opts).await?;
   let remote_addr = trans.advertise_address();
   let c = S::new(c).await.unwrap();
   let tc = QuicTransportTestClient::<S, R>::new(local_addr, *remote_addr, c)
