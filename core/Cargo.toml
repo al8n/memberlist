@@ -85,7 +85,7 @@ rand.workspace = true
 scopeguard.workspace = true
 smol_str.workspace = true
 smallvec.workspace = true
-memberlist-types = { workspace = true, features = ["default"] }
+memberlist-types = { workspace = true, features = ["default", "tracing"] }
 smallvec-wrapper.workspace = true
 triomphe.workspace = true
 thiserror.workspace = true

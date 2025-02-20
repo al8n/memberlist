@@ -317,9 +317,13 @@ impl ProtoDecoder {
     let mut reader = AsyncPeekable::new(reader);
     let mut tag_buf = [0; 1];
     reader.peek_exact(&mut tag_buf).await?;
+    #[cfg(feature = "tracing")]
+    tracing::debug!("tag_buf: {:?}", tag_buf);
 
     // Try to read the label
     let auth_data = if tag_buf[0] == message::LABELED_MESSAGE_TAG {
+      #[cfg(feature = "tracing")]
+      tracing::debug!("1 tag_buf: {:?}", tag_buf);
       if let Some(expected_label) = &self.label {
         let mut label_buf = [0; super::LABEL_OVERHEAD];
         reader.peek_exact(&mut label_buf).await?;
@@ -348,7 +352,11 @@ impl ProtoDecoder {
       None
     };
 
+    #[cfg(feature = "tracing")]
+    tracing::debug!("2 tag_buf: {:?}", tag_buf);
     reader.peek_exact(&mut tag_buf).await?;
+    #[cfg(feature = "tracing")]
+    tracing::debug!("3 tag_buf: {:?}", tag_buf);
 
     if tag_buf[0] == message::ENCRYPTED_MESSAGE_TAG {
       #[cfg(not(feature = "encryption"))]
@@ -431,6 +439,9 @@ impl ProtoDecoder {
       }
     }
 
+    #[cfg(feature = "tracing")]
+    tracing::debug!("4 tag_buf: {:?}", tag_buf);
+
     #[cfg(feature = "encryption")]
     if self.verify_incoming {
       return Err(Error::new(
@@ -439,6 +450,8 @@ impl ProtoDecoder {
       ));
     }
 
+    #[cfg(feature = "tracing")]
+    tracing::debug!("5 tag_buf: {:?}", tag_buf);
     if tag_buf[0] == message::CHECKSUMED_MESSAGE_TAG {
       #[cfg(not(any(
         feature = "crc32",
@@ -516,6 +529,8 @@ impl ProtoDecoder {
       }
     }
 
+    #[cfg(feature = "tracing")]
+    tracing::debug!("6 tag_buf: {:?}", tag_buf);
     if tag_buf[0] == message::COMPRESSED_MESSAGE_TAG {
       #[cfg(not(any(
         feature = "zstd",
@@ -564,6 +579,8 @@ impl ProtoDecoder {
       }
     }
 
+    #[cfg(feature = "tracing")]
+    tracing::debug!("7 tag_buf: {:?}", tag_buf);
     if tag_buf[0] == message::COMPOOUND_MESSAGE_TAG {
       let mut header = [0u8; super::BATCH_OVERHEAD];
       reader.peek_exact(&mut header).await?;
@@ -575,12 +592,23 @@ impl ProtoDecoder {
       return Ok(buf.freeze());
     }
 
+    #[cfg(feature = "tracing")]
+    tracing::debug!("8 tag_buf: {:?}", tag_buf);
     let mut header = [0u8; super::MAX_PLAIN_MESSAGE_HEADER_SIZE];
-    reader.peek(&mut header).await?;
+    reader.peek(&mut header).await.inspect_err(|e| {
+      #[cfg(feature = "tracing")]
+      tracing::error!("peek error: {}", e);
+    })?;
+    #[cfg(feature = "tracing")]
+    tracing::debug!("4 tag_buf: {:?}", tag_buf);
     let (length_delimited_size, total_len) = const_varint::decode_u32_varint(&header[1..])
       .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+    #[cfg(feature = "tracing")]
+    tracing::debug!("header: {:?} {length_delimited_size} {total_len}", header);
     let mut buf = BytesMut::zeroed(1 + length_delimited_size + total_len as usize);
     reader.read_exact(&mut buf).await?;
+    #[cfg(feature = "tracing")]
+    tracing::debug!("buf: {:?}", buf.as_ref());
     Ok(Bytes::from(buf))
   }
 

@@ -6,17 +6,6 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
-#[cfg(all(
-  feature = "compression",
-  not(any(
-    feature = "zstd",
-    feature = "lz4",
-    feature = "brotli",
-    feature = "snappy",
-  ))
-))]
-compile_error!("compression feature is enabled but no compress algorithm is selected");
-
 mod api;
 mod awareness;
 mod base;
@@ -172,7 +161,7 @@ pub mod tests {
     B: FnOnce(F) -> F::Output,
     F: std::future::Future<Output = ()>,
   {
-    // initialize_tests_tracing();
+    initialize_tests_tracing();
     block_on(fut);
   }
 

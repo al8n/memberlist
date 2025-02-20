@@ -38,9 +38,6 @@ where
                 let this = this.clone();
                 <T::Runtime as RuntimeLite>::spawn_detach(async move {
                   this.handle_conn(remote_addr.cheap_clone(), &mut conn).await;
-                  if let Err(e) = conn.close().await {
-                    tracing::error!(err=%e, local = %this.inner.id, remote_addr = %remote_addr, "memberlist.stream: failed to close stream connection");
-                  }
                 });
               },
               Err(e) => {

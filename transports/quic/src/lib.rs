@@ -43,11 +43,14 @@ use stream_layer::*;
 
 const MAX_MESSAGE_SIZE: usize = u32::MAX as usize;
 
+const PACKET_TAG: u8 = 254;
+const STREAM_TAG: u8 = 255;
+
 #[derive(Copy, Clone)]
 #[repr(u8)]
 enum StreamType {
-  Stream = 0,
-  Packet = 1,
+  Stream = STREAM_TAG,
+  Packet = PACKET_TAG,
 }
 
 impl TryFrom<u8> for StreamType {
@@ -55,8 +58,8 @@ impl TryFrom<u8> for StreamType {
 
   fn try_from(value: u8) -> Result<Self, Self::Error> {
     Ok(match value {
-      0 => Self::Stream,
-      1 => Self::Packet,
+      STREAM_TAG => Self::Stream,
+      PACKET_TAG => Self::Packet,
       _ => return Err(value),
     })
   }
@@ -442,13 +445,23 @@ where
     }
   }
 
-  // async fn read(
-  //   &self,
-  //   from: &Self::ResolvedAddress,
-  //   conn: &mut Self::Stream,
-  // ) -> Result<usize, Self::Error> {
+  async fn read(
+    &self,
+    _from: &Self::ResolvedAddress,
+    conn: &mut Self::Stream,
+  ) -> Result<usize, Self::Error> {
+    use futures::io::AsyncReadExt;
 
-  // }
+    let mut buf = [0; 1];
+    conn.read_exact(&mut buf).await?;
+    match StreamType::try_from(buf[0]) {
+      Ok(StreamType::Stream) => Ok(1),
+      Ok(StreamType::Packet) => {
+        Err(QuicTransportError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid ")))
+      },
+      Err(tag) => Err(QuicTransportError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid stream type tag: {}", tag)))),
+    }
+  }
 
   async fn write(&self, conn: &mut Self::Stream, mut src: Payload) -> Result<usize, Self::Error> {
     let header = src.header_mut();

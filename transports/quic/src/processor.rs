@@ -166,8 +166,6 @@ where
                   }
                 }
                 Ok(StreamType::Packet) => {
-                  // consume peeked byte
-                  stream.read_exact(&mut stream_kind_buf).await.unwrap();
                   Self::handle_packet(
                     &mut stream,
                     local_addr,
@@ -230,6 +228,7 @@ where
         return;
       }
     };
+    tracing::trace!(local=%local_addr, from=%remote_addr, len = %msg.len(), data=?msg.as_ref(), "memberlist_quic.packet: received packet");
     let _read = msg.len();
 
     if let Err(e) = packet_tx.send(Packet::new(remote_addr, start, msg)).await {

@@ -56,8 +56,8 @@ s2n = ["memberlist-quic/s2n", "quic"]
 
 net = ["memberlist-net", "agnostic/net"]
 tcp = ["net"]
-tls = ["memberlist-net/tls", "tcp"]
-native-tls = ["memberlist-net/native-tls", "tcp"]
+tls = ["memberlist-net/tls", "net"]
+native-tls = ["memberlist-net/native-tls", "net"]
 
 # enable DNS node address resolver
 dns = ["memberlist-net?/dns", "memberlist-quic?/dns", "agnostic/dns"]
