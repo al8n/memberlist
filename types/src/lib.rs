@@ -58,11 +58,7 @@ pub use checksum::*;
   feature = "zstd",
   feature = "lz4",
   feature = "brotli",
-  feature = "deflate",
-  feature = "gzip",
   feature = "snappy",
-  feature = "lzw",
-  feature = "zlib"
 ))]
 pub use compression::*;
 #[cfg(feature = "encryption")]

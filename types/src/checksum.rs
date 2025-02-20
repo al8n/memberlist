@@ -68,9 +68,7 @@ impl ChecksumError {
 }
 
 /// The algorithm used to checksum the message.
-#[derive(
-  Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::Display, derive_more::IsVariant,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::Display, derive_more::IsVariant)]
 #[non_exhaustive]
 pub enum ChecksumAlgorithm {
   /// CRC32 IEEE

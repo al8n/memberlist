@@ -80,7 +80,7 @@ impl CompressionError {
     feature = "zstd"
   )))]
   #[inline]
-  const fn disabled(algo: CompressAlgorithm, feature: &'static str) -> Self {
+  pub(crate) const fn disabled(algo: CompressAlgorithm, feature: &'static str) -> Self {
     Self::Disabled { algo, feature }
   }
 }

@@ -22,22 +22,54 @@ macro_rules! push_pull {
         });
       }
 
-      #[cfg(feature = "compression")]
+      #[cfg(any(
+        feature = "crc32",
+        feature = "xxhash32",
+        feature = "xxhash64",
+        feature = "xxhash3",
+        feature = "murmur3",
+      ))]
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _push_pull_with_compression >]() {
+      fn [< test_ $rt:snake _ $kind:snake _push_pull_with_checksum >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_1".into(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_2".into(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t1 = NetTransport::new(t1_opts).await.unwrap();
           let t2 = NetTransport::new(t2_opts).await.unwrap();
           push_pull::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(
             t1,
-            Options::lan(),
+            Options::lan().with_checksum_algo(Some(Default::default())),
             t2,
-            Options::lan(),
+            Options::lan().with_checksum_algo(Some(Default::default())),
+          ).await;
+        });
+      }
+
+
+      #[cfg(any(
+        feature = "snappy",
+        feature = "lz4",
+        feature = "zstd",
+        feature = "brotli",
+      ))]
+      #[test]
+      fn [< test_ $rt:snake _ $kind:snake _push_pull_with_compression >]() {
+        [< $rt:snake _run >](async move {
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_1".into(), $expr);
+          t1_opts.add_bind_address(next_socket_addr_v4(0));
+
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_2".into(), $expr);
+          t2_opts.add_bind_address(next_socket_addr_v4(0));
+          let t1 = NetTransport::new(t1_opts).await.unwrap();
+          let t2 = NetTransport::new(t2_opts).await.unwrap();
+          push_pull::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(
+            t1,
+            Options::lan().with_compress_algo(Some(Default::default())),
+            t2,
+            Options::lan().with_compress_algo(Some(Default::default())),
           ).await;
         });
       }
@@ -46,38 +78,59 @@ macro_rules! push_pull {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _push_pull_with_encryption >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_1".into(), $expr).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10);
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
           let t1 = NetTransport::new(t1_opts).await.unwrap();
-          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_2".into(), $expr).with_primary_key(Some(TEST_KEYS[1]));
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
+
+          let opts1 = Options::lan().with_primary_key(Some(TEST_KEYS[0])).with_secret_keys(TEST_KEYS.into());
+          let opts2 = Options::lan().with_primary_key(Some(TEST_KEYS[1])).with_secret_keys(TEST_KEYS.into());
           push_pull::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(
             t1,
-            Options::lan(),
+            opts1,
             t2,
-            Options::lan(),
+            opts2,
           ).await;
         });
       }
 
-      #[cfg(all(feature = "encryption", feature = "compression"))]
+      #[cfg(all(
+        feature = "encryption",
+        any(
+          feature = "snappy",
+          feature = "lz4",
+          feature = "zstd",
+          feature = "brotli",
+        ),
+        any(
+          feature = "crc32",
+          feature = "xxhash32",
+          feature = "xxhash64",
+          feature = "xxhash3",
+          feature = "murmur3",
+        )
+      ))]
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _push_pull_with_encryption_and_compression >]() {
+      fn [< test_ $rt:snake _ $kind:snake _push_pull_with_all >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_1".into(), $expr).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10).with_compressor(Some(Default::default()));
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
           let t1 = NetTransport::new(t1_opts).await.unwrap();
 
-          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_2".into(), $expr).with_primary_key(Some(TEST_KEYS[1])).with_compressor(Some(Default::default()));
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("push_pull_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
 
+          let opts1 = Options::lan().with_compress_algo(Some(Default::default())).with_primary_key(Some(TEST_KEYS[0])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_primary_key(Some(TEST_KEYS[1])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+
           push_pull::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(
             t1,
-            Options::lan(),
+            opts1,
             t2,
-            Options::lan(),
+            opts2,
           ).await;
         });
       }

@@ -119,36 +119,36 @@ macro_rules! test_mods {
   };
 }
 
-// #[path = "net/probe.rs"]
-// mod probe;
+#[path = "net/probe.rs"]
+mod probe;
 
-// #[path = "net/probe_node.rs"]
-// mod probe_node;
+#[path = "net/probe_node.rs"]
+mod probe_node;
 
-// #[path = "net/probe_node_dogpile.rs"]
-// mod probe_node_dogpile;
+#[path = "net/probe_node_dogpile.rs"]
+mod probe_node_dogpile;
 
-// #[path = "net/probe_node_buddy.rs"]
-// mod probe_node_buddy;
+#[path = "net/probe_node_buddy.rs"]
+mod probe_node_buddy;
 
-// #[path = "net/probe_node_suspect.rs"]
-// mod probe_node_suspect;
+#[path = "net/probe_node_suspect.rs"]
+mod probe_node_suspect;
 
-// #[path = "net/probe_node_awareness_missed_nack.rs"]
-// #[cfg(not(windows))] // TODO: I do not have a windows machine to test and fix this, need helps
-// mod probe_node_awareness_missed_nack;
+#[path = "net/probe_node_awareness_missed_nack.rs"]
+#[cfg(not(windows))] // TODO: I do not have a windows machine to test and fix this, need helps
+mod probe_node_awareness_missed_nack;
 
-// #[path = "net/probe_node_awareness_improved.rs"]
-// mod probe_node_awareness_improved;
+#[path = "net/probe_node_awareness_improved.rs"]
+mod probe_node_awareness_improved;
 
-// #[path = "net/probe_node_awareness_degraded.rs"]
-// mod probe_node_awareness_degraded;
+#[path = "net/probe_node_awareness_degraded.rs"]
+mod probe_node_awareness_degraded;
 
-// #[path = "net/ping.rs"]
-// mod ping;
+#[path = "net/ping.rs"]
+mod ping;
 
-// #[path = "net/reset_nodes.rs"]
-// mod reset_nodes;
+#[path = "net/reset_nodes.rs"]
+mod reset_nodes;
 
 #[path = "net/alive_node_new_node.rs"]
 mod alive_node_new_node;
@@ -201,61 +201,46 @@ mod dead_node_alive_replay;
 #[path = "net/dead_node_refute.rs"]
 mod dead_node_refute;
 
-// #[path = "net/merge_state.rs"]
-// mod merge_state;
+#[path = "net/merge_state.rs"]
+mod merge_state;
 
-// #[path = "net/gossip.rs"]
-// mod gossip;
+#[path = "net/gossip.rs"]
+mod gossip;
 
-// #[path = "net/gossip_to_dead.rs"]
-// mod gossip_to_dead;
+#[path = "net/gossip_to_dead.rs"]
+mod gossip_to_dead;
 
-// #[path = "net/push_pull.rs"]
-// mod push_pull;
+#[path = "net/push_pull.rs"]
+mod push_pull;
 
-// // ------- memberlist tests ----------
+// ------- memberlist tests ----------
 
-// #[path = "net/encrypted_gossip_transition.rs"]
-// #[cfg(feature = "encryption")]
-// #[cfg(not(windows))] // TODO: I do not have a windows machine to test and fix this, need helps
-// mod encrypted_gossip_transition;
+#[path = "net/encrypted_gossip_transition.rs"]
+#[cfg(feature = "encryption")]
+#[cfg(not(windows))] // TODO: I do not have a windows machine to test and fix this, need helps
+mod encrypted_gossip_transition;
 
-// #[path = "net/join.rs"]
-// mod join;
+#[path = "net/join.rs"]
+mod join;
 
-// #[path = "net/join_with_labels.rs"]
-// mod join_with_labels;
+#[path = "net/join_different_networks_unique_mask.rs"]
+mod join_different_networks_unique_mask;
 
-// #[path = "net/join_with_labels_and_encryption.rs"]
-// #[cfg(feature = "encryption")]
-// mod join_with_labels_and_encryption;
+#[path = "net/join_different_networks_multi_masks.rs"]
+#[cfg(not(windows))] // TODO: I do not have a windows machine to test and fix this, need helps
+mod join_different_networks_multi_masks;
 
-// #[path = "net/join_with_labels_and_compression.rs"]
-// #[cfg(feature = "compression")]
-// mod join_with_labels_and_compression;
+#[path = "net/join_cancel.rs"]
+mod join_cancel;
 
-// #[path = "net/join_with_labels_and_compression_and_encryption.rs"]
-// #[cfg(all(feature = "compression", feature = "encryption"))]
-// mod join_with_labels_and_compression_and_encryption;
+#[path = "net/join_cancel_passive.rs"]
+mod join_cancel_passive;
 
-// #[path = "net/join_different_networks_unique_mask.rs"]
-// mod join_different_networks_unique_mask;
+#[path = "net/join_shutdown.rs"]
+mod join_shutdown;
 
-// #[path = "net/join_different_networks_multi_masks.rs"]
-// #[cfg(not(windows))] // TODO: I do not have a windows machine to test and fix this, need helps
-// mod join_different_networks_multi_masks;
-
-// #[path = "net/join_cancel.rs"]
-// mod join_cancel;
-
-// #[path = "net/join_cancel_passive.rs"]
-// mod join_cancel_passive;
-
-// #[path = "net/join_shutdown.rs"]
-// mod join_shutdown;
-
-// #[path = "net/leave.rs"]
-// mod leave;
+#[path = "net/leave.rs"]
+mod leave;
 
 #[path = "net/conflict_delegate.rs"]
 mod conflict_delegate;

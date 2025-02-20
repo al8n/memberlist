@@ -15,7 +15,7 @@ macro_rules! probe_node_dogpile {
 
               NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
             }
-          }, bad).await;
+          }, bad, Options::lan()).await;
         });
       }
     }

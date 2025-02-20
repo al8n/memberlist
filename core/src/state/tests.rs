@@ -253,7 +253,8 @@ pub async fn probe_node_dogpile<F, T, R>(
 
     let m = host_memberlist(
       t,
-      opts.clone()
+      opts
+        .clone()
         .with_probe_timeout(Duration::from_millis(1))
         .with_probe_interval(Duration::from_millis(100))
         .with_suspicion_mult(5)
@@ -442,12 +443,7 @@ pub async fn probe_node_awareness_degraded<T, R>(
 }
 
 /// Unit test to test the probe node awareness improved functionality
-pub async fn probe_node_awareness_improved<T, R>(
-  t1: T,
-  t1_opts: Options,
-  t2: T,
-  t2_opts: Options,
-)
+pub async fn probe_node_awareness_improved<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -601,12 +597,7 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
 }
 
 /// Unit test to test the probe node buddy functionality
-pub async fn probe_node_buddy<T, R>(
-  t1: T,
-  t1_opts: Options,
-  t2: T,
-  t2_opts: Options,
-)
+pub async fn probe_node_buddy<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -659,12 +650,7 @@ where
 }
 
 /// Unit test to test the probe functionality
-pub async fn probe_node<T, R>(
-  t1: T,
-  t1_opts: Options,
-  t2: T,
-  t2_opts: Options,
-)
+pub async fn probe_node<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -2184,14 +2170,7 @@ pub async fn merge_state<A, T, R>(
 }
 
 /// Unit test to gossip functionality
-pub async fn gossip<T, R>(
-  t1: T,
-  t1_opts: Options,
-  t2: T,
-  t2_opts: Options,
-  t3: T,
-  t3_opts: Options,
-)
+pub async fn gossip<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options, t3: T, t3_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -2244,12 +2223,7 @@ where
 }
 
 /// Unit test to test the gossip to dead functionality
-pub async fn gossip_to_dead<T, R>(
-  t1: T,
-  t1_opts: Options,
-  t2: T,
-  t2_opts: Options,
-)
+pub async fn gossip_to_dead<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -2330,12 +2304,7 @@ where
 }
 
 /// Unit test to test the push pull functionality
-pub async fn push_pull<T, R>(
-  t1: T, 
-  t1_opts: Options,
-  t2: T,
-  t2_opts: Options,
-)
+pub async fn push_pull<T, R>(t1: T, t1_opts: Options, t2: T, t2_opts: Options)
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,

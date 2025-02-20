@@ -246,7 +246,7 @@ impl CompressAlgorithm {
               .map(|bytes| bytes as usize)
               .map_err(CompressionError::brotli_decompress_error)
           } else {
-            Err(CompressionError::disabled(algo, "brotli"))
+            Err(CompressionError::disabled(*self, "brotli"))
           }
         }
       }
@@ -255,7 +255,7 @@ impl CompressAlgorithm {
           if #[cfg(feature = "lz4")] {
             lz4_flex::decompress_into(src, dst).map_err(CompressionError::lz4_decompress_error)
           } else {
-            Err(CompressionError::disabled(algo, "lz4"))
+            Err(CompressionError::disabled(*self, "lz4"))
           }
         }
       }
@@ -264,7 +264,7 @@ impl CompressAlgorithm {
           if #[cfg(feature = "snappy")] {
             snap::raw::Decoder::new().decompress(src, dst).map_err(CompressionError::snappy_decompress_error)
           } else {
-            Err(CompressionError::disabled(algo, "snappy"))
+            Err(CompressionError::disabled(*self, "snappy"))
           }
         }
       }
@@ -276,7 +276,7 @@ impl CompressAlgorithm {
               .map(|bytes| bytes as usize)
               .map_err(CompressionError::zstd_decompress_error)
           } else {
-            Err(CompressionError::disabled(algo, "zstd"))
+            Err(CompressionError::disabled(*self, "zstd"))
           }
         }
       }
@@ -363,7 +363,7 @@ impl CompressAlgorithm {
               })
               .map_err(CompressionError::brotli_compress_error)
           } else {
-            Err(CompressionError::disabled(algo, "brotli"))
+            Err(CompressionError::disabled(*self, "brotli"))
           }
         }
       }
@@ -373,7 +373,7 @@ impl CompressAlgorithm {
             lz4_flex::compress_into(src, dst)
               .map_err(CompressionError::lz4_compress_error)
           } else {
-            Err(CompressionError::disabled(algo, "lz4"))
+            Err(CompressionError::disabled(*self, "lz4"))
           }
         }
       }
@@ -384,7 +384,7 @@ impl CompressAlgorithm {
             encoder.compress(src, dst)
               .map_err(CompressionError::snappy_compress_error)
           } else {
-            Err(CompressionError::disabled(algo, "snappy"))
+            Err(CompressionError::disabled(*self, "snappy"))
           }
         }
       }
@@ -396,7 +396,7 @@ impl CompressAlgorithm {
               .map(|_| cursor.position() as usize)
               .map_err(CompressionError::zstd_compress_error)
           } else {
-            Err(CompressionError::disabled(algo, "zstd"))
+            Err(CompressionError::disabled(*self, "zstd"))
           }
         }
       }

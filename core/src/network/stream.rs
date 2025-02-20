@@ -141,10 +141,6 @@ where
     conn: &mut T::Stream,
     join: bool,
   ) -> Result<(), Error<T, D>> {
-    // // Setup a deadline
-    // conn.set_deadline(Some(
-    //   <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
-    // ));
     let deadline = <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout;
 
     // Prepare the local node state

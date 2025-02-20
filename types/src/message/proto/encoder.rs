@@ -289,20 +289,29 @@ pub struct ProtoHint {
   )))]
   max_output_size: usize,
 
+  #[cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3",
+  ))]
   #[viewit(getter(attrs(
     doc = "The hint of how the encoder should encode the checksum, `None` if the encoder will not checksum the original payload.",
     cfg(any(
-      feature = "zstd",
-      feature = "lz4",
-      feature = "brotli",
-      feature = "snappy",
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3",
     ))
   )))]
   #[cfg(any(
-    feature = "zstd",
-    feature = "lz4",
-    feature = "brotli",
-    feature = "snappy",
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3",
   ))]
   checksum_hint: Option<ChecksumHint>,
 
@@ -787,27 +796,27 @@ where
       match algo {
         CompressAlgorithm::Zstd(_) => {
           #[cfg(not(feature = "zstd"))]
-          return Err(ProtoEncoderError::Compress(
-            CompressionError::AlgorithmNotEnabled("zstd"),
-          ));
+          return Err(ProtoEncoderError::Compress(CompressionError::disabled(
+            *algo, "zstd",
+          )));
         }
         CompressAlgorithm::Lz4 { .. } => {
           #[cfg(not(feature = "lz4"))]
-          return Err(ProtoEncoderError::Compress(
-            CompressionError::AlgorithmNotEnabled("lz4"),
-          ));
+          return Err(ProtoEncoderError::Compress(CompressionError::disabled(
+            *algo, "lz4",
+          )));
         }
         CompressAlgorithm::Brotli(_) => {
           #[cfg(not(feature = "brotli"))]
-          return Err(ProtoEncoderError::Compress(
-            CompressionError::AlgorithmNotEnabled("brotli"),
-          ));
+          return Err(ProtoEncoderError::Compress(CompressionError::disabled(
+            *algo, "brotli",
+          )));
         }
         CompressAlgorithm::Snappy => {
           #[cfg(not(feature = "snappy"))]
-          return Err(ProtoEncoderError::Compress(
-            CompressionError::AlgorithmNotEnabled("snappy"),
-          ));
+          return Err(ProtoEncoderError::Compress(CompressionError::disabled(
+            *algo, "snappy",
+          )));
         }
         CompressAlgorithm::Unknown(_) => {
           return Err(ProtoEncoderError::Compress(
@@ -828,33 +837,33 @@ where
       match algo {
         ChecksumAlgorithm::Crc32 => {
           #[cfg(not(feature = "crc32"))]
-          return Err(ProtoEncoderError::Checksum(
-            ChecksumError::disabled(*algo, "crc32"),
-          ));
+          return Err(ProtoEncoderError::Checksum(ChecksumError::disabled(
+            *algo, "crc32",
+          )));
         }
         ChecksumAlgorithm::XxHash32 => {
           #[cfg(not(feature = "xxhash32"))]
-          return Err(ProtoEncoderError::Checksum(
-            ChecksumError::disabled(*algo, "xxhash32"),
-          ));
+          return Err(ProtoEncoderError::Checksum(ChecksumError::disabled(
+            *algo, "xxhash32",
+          )));
         }
         ChecksumAlgorithm::XxHash64 => {
           #[cfg(not(feature = "xxhash64"))]
-          return Err(ProtoEncoderError::Checksum(
-            ChecksumError::disabled(*algo, "xxhash64"),
-          ));
+          return Err(ProtoEncoderError::Checksum(ChecksumError::disabled(
+            *algo, "xxhash64",
+          )));
         }
         ChecksumAlgorithm::XxHash3 => {
           #[cfg(not(feature = "xxhash3"))]
-          return Err(ProtoEncoderError::Checksum(
-            ChecksumError::disabled(*algo, "xxhash3"),
-          ));
+          return Err(ProtoEncoderError::Checksum(ChecksumError::disabled(
+            *algo, "xxhash3",
+          )));
         }
         ChecksumAlgorithm::Murmur3 => {
           #[cfg(not(feature = "murmur3"))]
-          return Err(ProtoEncoderError::Checksum(
-            ChecksumError::disabled(*algo, "murmur3"),
-          ));
+          return Err(ProtoEncoderError::Checksum(ChecksumError::disabled(
+            *algo, "murmur3",
+          )));
         }
         ChecksumAlgorithm::Unknown(_) => {
           return Err(ProtoEncoderError::Checksum(

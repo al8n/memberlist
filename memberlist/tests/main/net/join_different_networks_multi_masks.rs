@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use agnostic::Runtime;
-use memberlist::{transport::MaybeResolvedAddress, types::CIDRsPolicy, Memberlist};
+use memberlist_core::{transport::MaybeResolvedAddress, types::CIDRsPolicy, Memberlist};
 
 use super::*;
 

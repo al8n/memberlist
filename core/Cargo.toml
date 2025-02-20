@@ -22,7 +22,7 @@ metrics = ["dep:metrics", "memberlist-types/metrics"]
 rayon = ["dep:rayon", "memberlist-types/rayon"]
 
 # checksum related feature
-crc32 = ["crc32fast", "memberlist-types/crc32fast"]
+crc32 = ["crc32fast", "memberlist-types/crc32"]
 xxhash32 = ["xxhash-rust/xxh32", "memberlist-types/xxhash32"]
 xxhash64 = ["xxhash-rust/xxh64", "memberlist-types/xxhash64"]
 xxhash3 = ["xxhash-rust/xxh3", "memberlist-types/xxhash3"]

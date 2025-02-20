@@ -219,8 +219,7 @@ pub async fn memberlist_join<T, R>(
 pub async fn memberlist_join_with_labels<F, T, R>(
   mut get_transport: impl FnMut(usize, Label) -> F,
   opts: Options,
-)
-where
+) where
   F: Future<Output = T::Options>,
   T: Transport<Runtime = R>,
   R: RuntimeLite,
