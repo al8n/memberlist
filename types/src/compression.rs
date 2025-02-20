@@ -345,7 +345,7 @@ impl CompressAlgorithm {
   /// The `dst` buffer should be pre-allocated with the [`max_compress_len`](Self::max_compress_len) method.
   pub fn compress_to(&self, src: &[u8], dst: &mut [u8]) -> Result<usize, CompressionError> {
     match self {
-      CompressAlgorithm::Brotli(algo) => {
+      CompressAlgorithm::Brotli(_algo) => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "brotli")] {
             use std::io::Write;
@@ -353,8 +353,8 @@ impl CompressAlgorithm {
             let mut compressor = brotli::CompressorWriter::new(
               std::io::Cursor::new(dst),
               BROTLI_BUFFER_SIZE,
-              algo.quality() as u8 as u32,
-              algo.window() as u8 as u32,
+              _algo.quality() as u8 as u32,
+              _algo.window() as u8 as u32,
             );
 
             compressor.write_all(src)
@@ -388,11 +388,11 @@ impl CompressAlgorithm {
           }
         }
       }
-      CompressAlgorithm::Zstd(level) => {
+      CompressAlgorithm::Zstd(_level) => {
         cfg_if::cfg_if! {
           if #[cfg(feature = "zstd")] {
             let mut cursor = std::io::Cursor::new(dst);
-            zstd::stream::copy_encode(src, &mut cursor, level.level() as i32)
+            zstd::stream::copy_encode(src, &mut cursor, _level.level() as i32)
               .map(|_| cursor.position() as usize)
               .map_err(CompressionError::zstd_compress_error)
           } else {

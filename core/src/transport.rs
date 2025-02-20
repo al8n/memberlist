@@ -289,6 +289,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
       let src = payload.as_slice();
       let len = src.len();
       conn.write_all(src).await?;
+      conn.flush().await?;
       Ok(len)
     }
   }

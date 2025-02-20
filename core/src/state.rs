@@ -23,7 +23,7 @@ use super::{
 
 use agnostic_lite::{time::Instant, AsyncSpawner, RuntimeLite};
 
-use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
+use futures::{stream::FuturesUnordered, AsyncWriteExt, FutureExt, StreamExt};
 use nodecraft::{CheapClone, Node};
 use rand::{seq::SliceRandom, Rng};
 
@@ -176,7 +176,12 @@ where
     }
 
     // Send our state
-    self.send_local_state(&mut conn, join).await?;
+    if let Err(e) = self.send_local_state(&mut conn, join).await {
+      if let Err(e) = conn.close().await {
+        tracing::error!(local_addr = %self.inner.id, peer_addr = %id, err = %e, "memberlist: failed to close connection");
+      }
+      return Err(e);
+    }
 
     let res = <T::Runtime as RuntimeLite>::timeout_at(
       <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
@@ -200,7 +205,12 @@ where
       msg => return Err(Error::unexpected_message("PushPull", msg.ty().kind())),
     };
 
-    self.merge_remote_state(pp).await
+    let res = self.merge_remote_state(pp).await;
+    if let Err(e) = conn.close().await {
+      tracing::error!(local_addr = %self.inner.id, peer_addr = %id, err = %e, "memberlist: failed to close connection");
+    }
+
+    res
   }
 
   pub(crate) async fn dead_node(

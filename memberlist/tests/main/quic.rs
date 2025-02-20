@@ -1,8 +1,8 @@
 use memberlist_core::{
+  tests::{memberlist::*, next_socket_addr_v4, state::*},
   transport::{resolver::socket_addr::SocketAddrResolver, Node, Transport},
   Options,
 };
-use memberlist_core::tests::{memberlist::*, next_socket_addr_v4, state::*};
 use memberlist_quic::{QuicTransport, QuicTransportOptions};
 use smol_str::SmolStr;
 
@@ -208,7 +208,12 @@ mod join;
 mod join_with_labels;
 
 #[path = "quic/join_with_labels_and_compression.rs"]
-#[cfg(feature = "compression")]
+#[cfg(any(
+  feature = "snappy",
+  feature = "brotli",
+  feature = "zstd",
+  feature = "lz4",
+))]
 mod join_with_labels_and_compression;
 
 #[path = "quic/join_different_networks_unique_mask.rs"]

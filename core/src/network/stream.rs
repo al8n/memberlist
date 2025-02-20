@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use agnostic_lite::AsyncSpawner;
 use either::Either;
+use futures::AsyncWriteExt;
 use nodecraft::CheapClone;
 use smol_str::SmolStr;
 
@@ -33,10 +34,13 @@ where
           }
           conn = transport_rx.recv().fuse() => {
             match conn {
-              Ok((remote_addr, conn)) => {
+              Ok((remote_addr, mut conn)) => {
                 let this = this.clone();
                 <T::Runtime as RuntimeLite>::spawn_detach(async move {
-                  this.handle_conn(remote_addr, conn).await;
+                  this.handle_conn(remote_addr.cheap_clone(), &mut conn).await;
+                  if let Err(e) = conn.close().await {
+                    tracing::error!(err=%e, local = %this.inner.id, remote_addr = %remote_addr, "memberlist.stream: failed to close stream connection");
+                  }
                 });
               },
               Err(e) => {
@@ -125,8 +129,8 @@ where
       .map_err(Error::transport)?;
     self
       .send_message(&mut conn, [Message::UserData(msg)])
-      .await
-      .map_err(Into::into)
+      .await?;
+    conn.close().await.map_err(|e| Error::transport(e.into()))
   }
 }
 
@@ -244,7 +248,7 @@ where
   T: Transport,
 {
   /// Handles a single incoming stream connection from the transport.
-  async fn handle_conn(self, addr: T::ResolvedAddress, mut conn: T::Stream) {
+  async fn handle_conn(&self, addr: T::ResolvedAddress, conn: &mut T::Stream) {
     tracing::debug!(local = %self.inner.id, peer = %addr, "memberlist.stream: handle stream connection");
 
     #[cfg(feature = "metrics")]
@@ -259,7 +263,7 @@ where
     let deadline = <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout;
 
     let res =
-      <T::Runtime as RuntimeLite>::timeout_at(deadline, self.read_message(&addr, &mut conn)).await;
+      <T::Runtime as RuntimeLite>::timeout_at(deadline, self.read_message(&addr, conn)).await;
 
     let payload = match res {
       Err(e) => {
@@ -272,7 +276,7 @@ where
         let err_resp = ErrorResponse::new(SmolStr::new(e.to_string()));
         let res = <T::Runtime as RuntimeLite>::timeout_at(
           deadline,
-          self.send_message(&mut conn, [err_resp.into()]),
+          self.send_message(conn, [err_resp.into()]),
         )
         .await;
 
@@ -317,11 +321,9 @@ where
         }
 
         let ack = Ack::new(ping.sequence_number());
-        let res = <T::Runtime as RuntimeLite>::timeout_at(
-          deadline,
-          self.send_message(&mut conn, [ack.into()]),
-        )
-        .await;
+        let res =
+          <T::Runtime as RuntimeLite>::timeout_at(deadline, self.send_message(conn, [ack.into()]))
+            .await;
         match res {
           Ok(Ok(_)) => {}
           Ok(Err(e)) => {
@@ -345,7 +347,7 @@ where
           return;
         }
 
-        if let Err(e) = self.send_local_state(&mut conn, pp.join()).await {
+        if let Err(e) = self.send_local_state(conn, pp.join()).await {
           tracing::error!(err=%e, remote_node = %addr, "memberlist.stream: failed to push local state");
           return;
         }

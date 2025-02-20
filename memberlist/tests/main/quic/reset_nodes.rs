@@ -39,17 +39,21 @@ macro_rules! reset_nodes {
         });
       }
 
-      #[cfg(feature = "compression")]
+      #[cfg(any(
+        feature = "snappy",
+        feature = "brotli",
+        feature = "zstd",
+        feature = "lz4",
+      ))]
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _reset_nodes_with_compression >]() {
         use std::net::SocketAddr;
 
         [< $rt:snake _run >](async move {
-          let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("reset_nodes_node_1".into(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
+          let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("reset_nodes_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan();
 
           let mut addr: SocketAddr = "127.0.0.1:7969".parse().unwrap();
           addr.set_port(t1.advertise_address().port());
@@ -72,7 +76,7 @@ macro_rules! reset_nodes {
             addr,
           );
 
-          reset_nodes(t1, t1_opts, n1, n2, n3).await;
+          reset_nodes(t1, Options::lan().with_compress_algo(Some(Default::default())), n1, n2, n3).await;
         });
       }
     }
