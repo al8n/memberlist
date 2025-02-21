@@ -20,10 +20,10 @@ use agnostic::{
 };
 use atomic_refcell::AtomicRefCell;
 use futures::{stream::FuturesUnordered, StreamExt};
-use memberlist_core::types::{Data, Payload, SmallVec};
+use memberlist_core::proto::{Data, Payload, SmallVec};
 pub use memberlist_core::{
+  proto::{CIDRsPolicy, Label, LabelError},
   transport::*,
-  types::{CIDRsPolicy, Label, LabelError},
 };
 
 mod options;
@@ -178,7 +178,7 @@ where
   type ResolvedAddress = SocketAddr;
   type Resolver = A;
 
-  type Stream = S::Stream;
+  type Connection = S::Stream;
 
   type Runtime = <Self::Resolver as AddressResolver>::Runtime;
 
@@ -437,11 +437,11 @@ where
     }
   }
 
-  async fn dial_with_deadline(
+  async fn open_bi(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     deadline: <Self::Runtime as RuntimeLite>::Instant,
-  ) -> Result<Self::Stream, Self::Error> {
+  ) -> Result<Self::Connection, Self::Error> {
     let connector =
       <Self::Runtime as RuntimeLite>::timeout_at(deadline, self.stream_layer.connect(*addr));
     match connector.await {
@@ -449,6 +449,19 @@ where
       Ok(Err(e)) => Err(e.into()),
       Err(e) => Err(Self::Error::Io(e.into())),
     }
+  }
+
+  async fn open_uni(
+    &self,
+    addr: &Self::ResolvedAddress,
+    deadline: <Self::Runtime as RuntimeLite>::Instant,
+  ) -> Result<<Self::Connection as Connection>::Writer, Self::Error> {
+    use memberlist_core::transport::Connection;
+
+    self.open_bi(addr, deadline).await.map(|conn| {
+      let (_, writer) = conn.split();
+      writer
+    })
   }
 
   fn packet(
@@ -462,7 +475,7 @@ where
 
   fn stream(
     &self,
-  ) -> StreamSubscriber<<Self::Resolver as AddressResolver>::ResolvedAddress, Self::Stream> {
+  ) -> StreamSubscriber<<Self::Resolver as AddressResolver>::ResolvedAddress, Self::Connection> {
     self.stream_rx.clone()
   }
 

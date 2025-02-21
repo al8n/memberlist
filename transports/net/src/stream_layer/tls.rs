@@ -10,10 +10,11 @@ use agnostic::{
   net::{Net, TcpListener, TcpStream},
   Runtime,
 };
-use futures::{AsyncRead, AsyncWrite};
+use futures::{lock::BiLock, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub use futures_rustls::{
   client, pki_types::ServerName, rustls, server, TlsAcceptor, TlsConnector,
 };
+use peekable::future::{AsyncPeekExt, AsyncPeekable};
 use rustls::{client::danger::ServerCertVerifier, SignatureScheme};
 
 use super::{Listener, PromisedStream, StreamLayer};
@@ -174,29 +175,6 @@ impl<R: Runtime> StreamLayer for Tls<R> {
       })
   }
 
-  // async fn cache_stream(&self, _addr: SocketAddr, mut stream: Self::Stream) {
-  //   // TODO(al8n): It seems that futures-rustls has a bug
-  //   // client side dial remote successfully and finish send bytes successfully,
-  //   // and then drop the connection immediately.
-  //   // But, server side can't accept the connection, and reports `BrokenPipe` error.
-  //   //
-  //   // Therefore, if we remove the below code, the send unit tests in
-  //   // - transports/net/tests/main/tokio/send.rs
-  //   // - transports/net/tests/main/async_std/send.rs
-  //   // - transport/net/tests/main/smol/send.rs
-  //   //
-  //   // I am also not sure if this bug can happen in real environment,
-  //   // so just keep it here and not feature-gate it by `cfg(test)`.
-  //   //
-  //   // To reproduce the bug, you can comment out the below code and run the send unit tests
-  //   // on a docker container or a virtual machine with few CPU cores.
-  //   R::spawn_detach(async move {
-  //     let _ = stream.flush().await;
-  //     let _ = stream.close().await;
-  //     R::sleep(std::time::Duration::from_millis(100)).await;
-  //   });
-  // }
-
   fn is_secure() -> bool {
     true
   }
@@ -231,11 +209,11 @@ impl<R: Runtime> Listener for TlsListener<R> {
 enum TlsStreamKind<R: Runtime> {
   Client {
     #[pin]
-    stream: client::TlsStream<<R::Net as Net>::TcpStream>,
+    stream: AsyncPeekable<client::TlsStream<<R::Net as Net>::TcpStream>>,
   },
   Server {
     #[pin]
-    stream: server::TlsStream<<R::Net as Net>::TcpStream>,
+    stream: AsyncPeekable<server::TlsStream<<R::Net as Net>::TcpStream>>,
   },
 }
 
@@ -308,6 +286,106 @@ impl<R: Runtime> AsyncWrite for TlsStream<R> {
   }
 }
 
+/// A [`ProtoReader`](memberlist_core::proto::ProtoReader) for the TLS stream layer.
+pub struct TlsProtoReader<R: Runtime> {
+  reader: BiLock<TlsStream<R>>,
+}
+
+impl<R: Runtime> memberlist_core::proto::ProtoReader for TlsProtoReader<R> {
+  async fn peek(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut reader = self.reader.lock().await;
+    match reader.stream {
+      TlsStreamKind::Client { ref mut stream } => stream.peek(buf).await,
+      TlsStreamKind::Server { ref mut stream } => stream.peek(buf).await,
+    }
+  }
+
+  async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut reader = self.reader.lock().await;
+    AsyncReadExt::read(&mut *reader, buf).await
+  }
+
+  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    let mut reader = self.reader.lock().await;
+    match reader.stream {
+      TlsStreamKind::Client { ref mut stream } => stream.peek_exact(buf).await,
+      TlsStreamKind::Server { ref mut stream } => stream.peek_exact(buf).await,
+    }
+  }
+
+  async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    let mut reader = self.reader.lock().await;
+    AsyncReadExt::read_exact(&mut *reader, buf).await
+  }
+}
+
+/// A [`ProtoWriter`](memberlist_core::proto::ProtoWriter) for the TLS stream layer.
+pub struct TlsProtoWriter<R: Runtime> {
+  writer: BiLock<TlsStream<R>>,
+}
+
+impl<R: Runtime> memberlist_core::proto::ProtoWriter for TlsProtoWriter<R> {
+  async fn close(&mut self) -> std::io::Result<()> {
+    let mut writer = self.writer.lock().await;
+    AsyncWriteExt::close(&mut *writer).await
+  }
+
+  async fn write_all(&mut self, payload: &[u8]) -> std::io::Result<()> {
+    let mut writer = self.writer.lock().await;
+    AsyncWriteExt::write_all(&mut *writer, payload).await
+  }
+
+  async fn flush(&mut self) -> std::io::Result<()> {
+    let mut writer = self.writer.lock().await;
+    AsyncWriteExt::flush(&mut *writer).await
+  }
+}
+
+impl<R: Runtime> memberlist_core::transport::Connection for TlsStream<R> {
+  type Reader = TlsProtoReader<R>;
+
+  type Writer = TlsProtoWriter<R>;
+
+  fn split(self) -> (Self::Reader, Self::Writer) {
+    let (reader, writer) = BiLock::new(self);
+    (Self::Reader { reader }, Self::Writer { writer })
+  }
+
+  async fn close(&mut self) -> std::io::Result<()> {
+    AsyncWriteExt::close(self).await
+  }
+
+  async fn write_all(&mut self, payload: &[u8]) -> std::io::Result<()> {
+    AsyncWriteExt::write_all(self, payload).await
+  }
+
+  async fn flush(&mut self) -> std::io::Result<()> {
+    AsyncWriteExt::flush(self).await
+  }
+
+  async fn peek(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    match &mut self.stream {
+      TlsStreamKind::Client { stream } => stream.peek(buf).await,
+      TlsStreamKind::Server { stream } => stream.peek(buf).await,
+    }
+  }
+
+  async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    AsyncReadExt::read_exact(self, buf).await
+  }
+
+  async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    AsyncReadExt::read(self, buf).await
+  }
+
+  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    match &mut self.stream {
+      TlsStreamKind::Client { stream } => stream.peek_exact(buf).await,
+      TlsStreamKind::Server { stream } => stream.peek_exact(buf).await,
+    }
+  }
+}
+
 impl<R: Runtime> PromisedStream for TlsStream<R> {
   type Instant = R::Instant;
 
@@ -324,26 +402,30 @@ impl<R: Runtime> PromisedStream for TlsStream<R> {
 
 impl<R: Runtime> TlsStream<R> {
   #[inline]
-  const fn client(
+  fn client(
     stream: client::TlsStream<<R::Net as Net>::TcpStream>,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
   ) -> Self {
     Self {
-      stream: TlsStreamKind::Client { stream },
+      stream: TlsStreamKind::Client {
+        stream: stream.peekable(),
+      },
       local_addr,
       peer_addr,
     }
   }
 
   #[inline]
-  const fn server(
+  fn server(
     stream: server::TlsStream<<R::Net as Net>::TcpStream>,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
   ) -> Self {
     Self {
-      stream: TlsStreamKind::Server { stream },
+      stream: TlsStreamKind::Server {
+        stream: stream.peekable(),
+      },
       local_addr,
       peer_addr,
     }

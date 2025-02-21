@@ -1,0 +1,138 @@
+[package]
+name = "memberlist-proto"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Proto types and traits for the memberlist crate."
+
+[features]
+default = [
+  "std",
+  "bytes/default",
+  "const-varint/default",
+  "nodecraft/default",
+  "smol_str/default",
+  "smallvec-wrapper/default",
+  "thiserror/default",
+  "triomphe/default",
+  "base64?/default",
+]
+alloc = ["nodecraft/alloc"]
+std = [
+  "bytes/std",
+  "const-varint/std",
+  "nodecraft/std",
+  "smol_str/std",
+  "smallvec-wrapper/std",
+  "thiserror/std",
+  "triomphe/std",
+  "base64?/std",
+]
+
+rayon = ["dep:rayon", "auto_enums/rayon"]
+
+# checksum related feature
+crc32 = ["crc32fast"]
+xxhash32 = ["xxhash-rust/xxh32"]
+xxhash64 = ["xxhash-rust/xxh64"]
+xxhash3 = ["xxhash-rust/xxh3"]
+murmur3 = ["dep:hash32"]
+# enable all checksum algorithms
+all-checksum = ["crc32", "xxhash32", "xxhash64", "xxhash3", "murmur3"]
+
+# compression related feature
+lz4 = ["lz4_flex"]
+brotli = ["dep:brotli"]
+snappy = ["dep:snap"]
+zstd = ["dep:zstd"]
+# enable all compression algorithms
+all-compression = ["lz4", "brotli", "snappy", "zstd"]
+
+encryption = ["aead", "aes-gcm", "base64", "cbc", "rand"]
+
+arbitrary = ["dep:arbitrary", "nodecraft/arbitrary", "smol_str/arbitrary"]
+quickcheck = ["dep:quickcheck", "nodecraft/quickcheck"]
+serde = ["dep:serde", "smol_str/serde", "bytes/serde", "nodecraft/serde", "smallvec-wrapper/serde", "ipnet/serde"]
+
+tokio = ["agnostic-io/tokio"]
+
+[dependencies]
+among.workspace = true
+agnostic-lite.workspace = true
+agnostic-io.workspace = true
+auto_enums = "0.8"
+bytes.workspace = true
+const-varint.workspace = true
+cfg-if.workspace = true
+derive_more = { workspace = true, features = ["from", "display", "is_variant", "unwrap", "try_unwrap"] }
+either.workspace = true
+futures-channel = "0.3"
+futures-util = "0.3"
+ipnet = { version = "2", default-features = false }
+nodecraft.workspace = true
+paste.workspace = true 
+smol_str.workspace = true
+smallvec-wrapper.workspace = true
+triomphe.workspace = true
+thiserror.workspace = true
+viewit.workspace = true
+
+arbitrary = { workspace = true, optional = true, features = ["derive"] }
+quickcheck = { workspace = true, optional = true }
+
+serde = { workspace = true, optional = true }
+
+rayon = { version = "1", optional = true }
+
+peekable = { workspace = true, features = ["future"] }
+
+# encryption
+aead = { version = "0.5", features = ["bytes", "std"], optional = true }
+aes-gcm = { version = "0.10", optional = true }
+base64 = { version = "0.22", default-features = false, optional = true }
+cbc = { version = "0.1", optional = true }
+rand = { workspace = true, optional = true }
+
+# checksum
+crc32fast = { version = "1", optional = true }
+xxhash-rust = { version = "0.8", optional = true }
+hash32 = { version = "0.3", optional = true }
+
+# compression
+brotli = { version = "7", optional = true }
+snap = { version = "1", optional = true }
+lz4_flex = { version = "0.11", optional = true }
+zstd = { version = "0.13", optional = true }
+
+# tracing & metrics
+metrics = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+quickcheck = { workspace = true, features = ["default"] }
+quickcheck_macros = "1"
+nodecraft = { workspace = true, features = ["arbitrary", "quickcheck"] }
+smol_str = { workspace = true, features = ["arbitrary"] }
+rand.workspace = true
+serde_json = "1"
+bincode = "1"
+agnostic-lite = { version = "0.5", features = ["tokio"] }
+tokio = { version = "1", features = ["full"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+rust_2018_idioms = "warn"
+single_use_lifetimes = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(all_tests)',
+] }

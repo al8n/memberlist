@@ -13,7 +13,8 @@ use agnostic::{
 };
 use async_native_tls::TlsStream as AsyncNativeTlsStream;
 pub use async_native_tls::{self, TlsAcceptor, TlsConnector};
-use futures::{AsyncRead, AsyncWrite};
+use futures::{lock::BiLock, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use peekable::future::AsyncPeekable;
 
 use super::{Listener, PromisedStream, StreamLayer};
 
@@ -158,7 +159,7 @@ impl<R: Runtime> Listener for NativeTlsListener<R> {
 #[pin_project::pin_project]
 pub struct NativeTlsStream<R: Runtime> {
   #[pin]
-  stream: AsyncNativeTlsStream<<R::Net as Net>::TcpStream>,
+  stream: AsyncPeekable<AsyncNativeTlsStream<<R::Net as Net>::TcpStream>>,
   local_addr: SocketAddr,
   peer_addr: SocketAddr,
 }
@@ -187,6 +188,93 @@ impl<R: Runtime> AsyncWrite for NativeTlsStream<R> {
   }
 }
 
+/// A [`ProtoReader`](memberlist_core::proto::ProtoReader) for the TLS stream layer.
+pub struct NativeTlsProtoReader<R: Runtime> {
+  reader: BiLock<AsyncPeekable<NativeTlsStream<R>>>,
+}
+
+impl<R: Runtime> memberlist_core::proto::ProtoReader for NativeTlsProtoReader<R> {
+  async fn peek(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    self.reader.lock().await.peek(buf).await
+  }
+
+  async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut reader = self.reader.lock().await;
+    AsyncReadExt::read(&mut *reader, buf).await
+  }
+
+  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    let mut reader = self.reader.lock().await;
+    AsyncReadExt::read_exact(&mut *reader, buf).await
+  }
+
+  async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    let mut reader = self.reader.lock().await;
+    AsyncReadExt::read_exact(&mut *reader, buf).await
+  }
+}
+
+/// A [`ProtoWriter`](memberlist_core::proto::ProtoWriter) for the TLS stream layer.
+pub struct NativeTlsProtoWriter<R: Runtime> {
+  writer: BiLock<AsyncPeekable<NativeTlsStream<R>>>,
+}
+
+impl<R: Runtime> memberlist_core::proto::ProtoWriter for NativeTlsProtoWriter<R> {
+  async fn close(&mut self) -> std::io::Result<()> {
+    let mut writer = self.writer.lock().await;
+    AsyncWriteExt::close(&mut *writer).await
+  }
+
+  async fn write_all(&mut self, payload: &[u8]) -> std::io::Result<()> {
+    let mut writer = self.writer.lock().await;
+    AsyncWriteExt::write_all(&mut *writer, payload).await
+  }
+
+  async fn flush(&mut self) -> std::io::Result<()> {
+    let mut writer = self.writer.lock().await;
+    AsyncWriteExt::flush(&mut *writer).await
+  }
+}
+
+impl<R: Runtime> memberlist_core::transport::Connection for NativeTlsStream<R> {
+  type Reader = NativeTlsProtoReader<R>;
+
+  type Writer = NativeTlsProtoWriter<R>;
+
+  fn split(self) -> (Self::Reader, Self::Writer) {
+    let (reader, writer) = BiLock::new(AsyncPeekable::new(self));
+    (Self::Reader { reader }, Self::Writer { writer })
+  }
+
+  async fn close(&mut self) -> std::io::Result<()> {
+    self.stream.close().await
+  }
+
+  async fn write_all(&mut self, payload: &[u8]) -> std::io::Result<()> {
+    self.stream.write_all(payload).await
+  }
+
+  async fn flush(&mut self) -> std::io::Result<()> {
+    self.stream.flush().await
+  }
+
+  async fn peek(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    self.stream.peek(buf).await
+  }
+
+  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    self.stream.peek_exact(buf).await
+  }
+
+  async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    self.stream.read_exact(buf).await
+  }
+
+  async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    self.stream.read(buf).await
+  }
+}
+
 impl<R: Runtime> PromisedStream for NativeTlsStream<R> {
   type Instant = R::Instant;
 
@@ -203,13 +291,13 @@ impl<R: Runtime> PromisedStream for NativeTlsStream<R> {
 
 impl<R: Runtime> NativeTlsStream<R> {
   #[inline]
-  const fn new(
+  fn new(
     stream: AsyncNativeTlsStream<<R::Net as Net>::TcpStream>,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
   ) -> Self {
     Self {
-      stream,
+      stream: AsyncPeekable::new(stream),
       local_addr,
       peer_addr,
     }

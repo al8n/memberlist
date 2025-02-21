@@ -38,7 +38,7 @@ pub trait Listener: Send + Sync + 'static {
 /// This trait encapsulates functionality for a network connection that supports asynchronous
 /// read/write operations and can be split into separate read and write halves.
 pub trait PromisedStream:
-  futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + Send + Sync + 'static
+  memberlist_core::transport::Connection + Unpin + Send + Sync + 'static
 {
   /// The instant type
   type Instant: agnostic::time::Instant + Send + Sync + 'static;

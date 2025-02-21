@@ -34,7 +34,7 @@ macro_rules! gossip {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _gossip_with_label >]() {
         [< $rt:snake _run >](async move {
-          let label: memberlist_core::types::Label = "gossip".try_into().unwrap();
+          let label: memberlist_core::proto::Label = "gossip".try_into().unwrap();
           let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("gossip_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
@@ -103,7 +103,7 @@ macro_rules! gossip {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _gossip_with_label_and_compression >]() {
         [< $rt:snake _run >](async move {
-          let label: memberlist_core::types::Label = "gossip".try_into().unwrap();
+          let label: memberlist_core::proto::Label = "gossip".try_into().unwrap();
           let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("gossip_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 

@@ -18,11 +18,11 @@ use std::{
 use agnostic_lite::{time::Instant, AsyncSpawner, RuntimeLite};
 use atomic_refcell::AtomicRefCell;
 use crossbeam_skiplist::SkipMap;
-use futures::{stream::FuturesUnordered, AsyncWriteExt, FutureExt, StreamExt};
-use memberlist_core::types::{Data, Payload, SmallVec};
+use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
+use memberlist_core::proto::{Data, Payload, SmallVec};
 pub use memberlist_core::{
+  proto::{CIDRsPolicy, Label, LabelError},
   transport::*,
-  types::{CIDRsPolicy, Label, LabelError},
 };
 
 mod processor;
@@ -329,7 +329,7 @@ where
   ) -> Result<S::Stream, QuicTransportError<A>> {
     if let Some(ent) = self.connection_pool.get(&addr) {
       let (_, connection) = ent.value();
-      if !connection.is_full() && !connection.is_closed().await {
+      if !connection.is_closed().await {
         if let Some(timeout) = timeout {
           return R::timeout_at(timeout, connection.open_bi())
             .await
@@ -359,6 +359,45 @@ where
       })
       .map_err(Into::into)
   }
+
+  async fn fetch_send_stream(
+    &self,
+    addr: SocketAddr,
+    timeout: Option<R::Instant>,
+  ) -> Result<<S::Stream as memberlist_core::transport::Connection>::Writer, QuicTransportError<A>>
+  {
+    if let Some(ent) = self.connection_pool.get(&addr) {
+      let (_, connection) = ent.value();
+      if !connection.is_closed().await {
+        if let Some(timeout) = timeout {
+          return R::timeout_at(timeout, connection.open_uni())
+            .await
+            .map_err(|e| QuicTransportError::Io(e.into()))?
+            .map(|(stream, _)| stream)
+            .map_err(Into::into);
+        } else {
+          return connection
+            .open_uni()
+            .await
+            .map(|(s, _)| s)
+            .map_err(Into::into);
+        }
+      }
+    }
+
+    let connector = self.next_connector(&addr);
+    let connection = connector.connect(addr).await?;
+    connection
+      .open_uni()
+      .await
+      .map(|(s, _)| {
+        self
+          .connection_pool
+          .insert(addr, (Instant::now(), connection));
+        s
+      })
+      .map_err(Into::into)
+  }
 }
 
 impl<I, A, S, R> Transport for QuicTransport<I, A, S, R>
@@ -378,7 +417,7 @@ where
   type ResolvedAddress = SocketAddr;
   type Resolver = A;
 
-  type Stream = S::Stream;
+  type Connection = S::Stream;
 
   type Runtime = A::Runtime;
 
@@ -445,25 +484,31 @@ where
     }
   }
 
-  async fn read(
+  // async fn read(
+  //   &self,
+  //   _from: &Self::ResolvedAddress,
+  //   conn: &mut <Self::Connection as Connection>::Reader,
+  // ) -> Result<usize, Self::Error> {
+  //   use futures::io::AsyncReadExt;
+
+  //   let mut buf = [0; 1];
+  //   conn.read_exact(&mut buf).await?;
+  //   match StreamType::try_from(buf[0]) {
+  //     Ok(StreamType::Stream) => Ok(1),
+  //     Ok(StreamType::Packet) => {
+  //       Err(QuicTransportError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid ")))
+  //     },
+  //     Err(tag) => Err(QuicTransportError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid stream type tag: {}", tag)))),
+  //   }
+  // }
+
+  async fn write(
     &self,
-    _from: &Self::ResolvedAddress,
-    conn: &mut Self::Stream,
+    conn: &mut <Self::Connection as Connection>::Writer,
+    mut src: Payload,
   ) -> Result<usize, Self::Error> {
-    use futures::io::AsyncReadExt;
+    use memberlist_core::proto::ProtoWriter;
 
-    let mut buf = [0; 1];
-    conn.read_exact(&mut buf).await?;
-    match StreamType::try_from(buf[0]) {
-      Ok(StreamType::Stream) => Ok(1),
-      Ok(StreamType::Packet) => {
-        Err(QuicTransportError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid ")))
-      },
-      Err(tag) => Err(QuicTransportError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid stream type tag: {}", tag)))),
-    }
-  }
-
-  async fn write(&self, conn: &mut Self::Stream, mut src: Payload) -> Result<usize, Self::Error> {
     let header = src.header_mut();
     if header.is_empty() {
       return Err(QuicTransportError::custom(
@@ -540,12 +585,20 @@ where
     }
   }
 
-  async fn dial_with_deadline(
+  async fn open_bi(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     deadline: R::Instant,
-  ) -> Result<Self::Stream, Self::Error> {
+  ) -> Result<Self::Connection, Self::Error> {
     self.fetch_stream(*addr, Some(deadline)).await
+  }
+
+  async fn open_uni(
+    &self,
+    addr: &Self::ResolvedAddress,
+    deadline: <Self::Runtime as RuntimeLite>::Instant,
+  ) -> Result<<Self::Connection as Connection>::Writer, Self::Error> {
+    self.fetch_send_stream(*addr, Some(deadline)).await
   }
 
   fn packet(
@@ -556,7 +609,7 @@ where
 
   fn stream(
     &self,
-  ) -> StreamSubscriber<<Self::Resolver as AddressResolver>::ResolvedAddress, Self::Stream> {
+  ) -> StreamSubscriber<<Self::Resolver as AddressResolver>::ResolvedAddress, Self::Connection> {
     self.stream_rx.clone()
   }
 

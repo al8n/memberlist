@@ -1,18 +1,8 @@
-use std::{
-  io,
-  marker::PhantomData,
-  net::SocketAddr,
-  pin::Pin,
-  sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-  },
-  task::{Context, Poll},
-  time::Duration,
-};
+use std::{cmp, io, marker::PhantomData, net::SocketAddr, sync::Arc, time::Duration};
 
 use agnostic::Runtime;
-use futures::io::{AsyncRead, AsyncWrite};
+use futures::AsyncWriteExt;
+use memberlist_core::proto::MediumVec;
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, VarInt};
 use smol_str::SmolStr;
 
@@ -81,7 +71,6 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
     let acceptor = Self::Acceptor {
       endpoint: endpoint.clone(),
       local_addr,
-      max_open_streams: self.opts.max_open_streams,
     };
 
     let connector = Self::Connector {
@@ -89,7 +78,6 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
       endpoint,
       local_addr,
       client_config,
-      max_open_streams: self.opts.max_open_streams,
       connect_timeout: self.opts.connect_timeout,
       _marker: PhantomData,
     };
@@ -101,7 +89,6 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
 pub struct QuinnAcceptor {
   endpoint: Arc<Endpoint>,
   local_addr: SocketAddr,
-  max_open_streams: usize,
 }
 
 impl Clone for QuinnAcceptor {
@@ -109,7 +96,6 @@ impl Clone for QuinnAcceptor {
     Self {
       endpoint: self.endpoint.clone(),
       local_addr: self.local_addr,
-      max_open_streams: self.max_open_streams,
     }
   }
 }
@@ -127,7 +113,7 @@ impl QuicAcceptor for QuinnAcceptor {
     let remote_addr = conn.remote_address();
 
     Ok((
-      QuinnConnection::new(conn, self.local_addr, remote_addr, self.max_open_streams),
+      QuinnConnection::new(conn, self.local_addr, remote_addr),
       remote_addr,
     ))
   }
@@ -155,7 +141,6 @@ pub struct QuinnConnector<R> {
   client_config: ClientConfig,
   connect_timeout: Duration,
   local_addr: SocketAddr,
-  max_open_streams: usize,
   _marker: PhantomData<R>,
 }
 
@@ -173,12 +158,7 @@ where
     let conn = R::timeout(self.connect_timeout, connecting)
       .await
       .map_err(io::Error::from)??;
-    Ok(QuinnConnection::new(
-      conn,
-      self.local_addr,
-      addr,
-      self.max_open_streams,
-    ))
+    Ok(QuinnConnection::new(conn, self.local_addr, addr))
   }
 
   async fn close(&self) -> io::Result<()> {
@@ -202,38 +182,217 @@ impl<R> Drop for QuinnConnector<R> {
   }
 }
 
-/// [`QuinnStream`] is an implementation of [`QuicStream`] based on [`quinn`].
-pub struct QuinnStream {
-  send: SendStream,
-  recv: RecvStream,
-  local_id: Arc<AtomicUsize>,
+/// A [`ProtoReader`](memberlist_core::proto::ProtoReader) implementation for Quinn stream layer
+pub struct QuinnProtoReader {
+  stream: RecvStream,
+  peek_buf: MediumVec<u8>,
 }
 
-impl QuinnStream {
-  #[inline]
-  fn new(send: SendStream, recv: RecvStream, local_id: Arc<AtomicUsize>) -> Self {
+impl From<RecvStream> for QuinnProtoReader {
+  fn from(stream: RecvStream) -> Self {
     Self {
-      send,
-      recv,
-      local_id,
+      stream,
+      peek_buf: MediumVec::new(),
     }
   }
 }
 
-impl Drop for QuinnStream {
-  fn drop(&mut self) {
-    self.local_id.fetch_sub(1, Ordering::AcqRel);
+impl memberlist_core::proto::ProtoReader for QuinnProtoReader {
+  async fn peek(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    let dst_len = buf.len();
+    let peek_len = self.peek_buf.len();
+
+    match dst_len.cmp(&peek_len) {
+      cmp::Ordering::Less => {
+        buf.copy_from_slice(&self.peek_buf[..dst_len]);
+        Ok(dst_len)
+      }
+      cmp::Ordering::Equal => {
+        buf.copy_from_slice(&self.peek_buf);
+        Ok(peek_len)
+      }
+      cmp::Ordering::Greater => {
+        let want = dst_len - peek_len;
+        self.peek_buf.resize(dst_len, 0);
+        match self
+          .stream
+          .read(&mut self.peek_buf[peek_len..peek_len + want])
+          .await
+        {
+          Ok(Some(n)) => {
+            let has = peek_len + n;
+            if n < want {
+              self.peek_buf.truncate(has);
+            }
+            buf[..has].copy_from_slice(&self.peek_buf);
+            Ok(peek_len + n)
+          }
+          Ok(None) | Err(_) => {
+            self.peek_buf.truncate(peek_len);
+            buf[..peek_len].copy_from_slice(&self.peek_buf);
+            Ok(peek_len)
+          }
+        }
+      }
+    }
+  }
+
+  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    let dst_len = buf.len();
+    let peek_len = self.peek_buf.len();
+
+    match dst_len.cmp(&peek_len) {
+      cmp::Ordering::Less => {
+        buf.copy_from_slice(&self.peek_buf[..dst_len]);
+        Ok(())
+      }
+      cmp::Ordering::Equal => {
+        buf.copy_from_slice(&self.peek_buf);
+        Ok(())
+      }
+      cmp::Ordering::Greater => {
+        let want = dst_len - peek_len;
+        self.peek_buf.resize(dst_len, 0);
+        let readed = self
+          .stream
+          .read(&mut self.peek_buf[peek_len..peek_len + want])
+          .await?;
+
+        if let Some(n) = readed {
+          let has = peek_len + n;
+          if n < want {
+            return Err(std::io::Error::new(
+              std::io::ErrorKind::UnexpectedEof,
+              "unexpected eof",
+            ));
+          }
+          buf[..has].copy_from_slice(&self.peek_buf);
+          Ok(())
+        } else {
+          Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "unexpected eof",
+          ))
+        }
+      }
+    }
+  }
+
+  async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    let dst_len = buf.len();
+    let peek_len = self.peek_buf.len();
+
+    if dst_len <= peek_len {
+      buf.copy_from_slice(&self.peek_buf[..dst_len]);
+      self.peek_buf.drain(..dst_len);
+      Ok(dst_len)
+    } else {
+      buf[..peek_len].copy_from_slice(&self.peek_buf);
+      self.peek_buf.clear();
+      self
+        .stream
+        .read(&mut buf[peek_len..])
+        .await
+        .map(|read| read.unwrap_or(0))
+        .map_err(Into::into)
+    }
+  }
+
+  async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    let dst_len = buf.len();
+    let peek_len = self.peek_buf.len();
+
+    if dst_len <= peek_len {
+      buf.copy_from_slice(&self.peek_buf[..dst_len]);
+      self.peek_buf.drain(..dst_len);
+      Ok(())
+    } else {
+      buf[..peek_len].copy_from_slice(&self.peek_buf);
+      self.peek_buf.clear();
+      self
+        .stream
+        .read(&mut buf[peek_len..])
+        .await
+        .map(|_| ())
+        .map_err(Into::into)
+    }
+  }
+}
+
+/// [`QuinnStream`] is an implementation of [`QuicStream`] based on [`quinn`].
+pub struct QuinnStream {
+  send: SendStream,
+  recv: QuinnProtoReader,
+}
+
+impl QuinnStream {
+  #[inline]
+  fn new(send: SendStream, recv: RecvStream) -> Self {
+    Self {
+      send,
+      recv: recv.into(),
+    }
+  }
+}
+
+impl memberlist_core::transport::Connection for QuinnStream {
+  type Reader = QuinnProtoReader;
+
+  type Writer = SendStream;
+
+  fn split(self) -> (Self::Reader, Self::Writer) {
+    (self.recv, self.send)
+  }
+
+  async fn close(&mut self) -> std::io::Result<()> {
+    self.send.close().await.map_err(Into::into)
+  }
+
+  async fn write_all(&mut self, payload: &[u8]) -> std::io::Result<()> {
+    self.send.write_all(payload).await.map_err(Into::into)
+  }
+
+  async fn flush(&mut self) -> std::io::Result<()> {
+    self.send.flush().await.map_err(Into::into)
+  }
+
+  async fn peek(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    memberlist_core::proto::ProtoReader::peek(&mut self.recv, buf).await
+  }
+
+  async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    memberlist_core::proto::ProtoReader::read_exact(&mut self.recv, buf).await
+  }
+
+  async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    memberlist_core::proto::ProtoReader::read(&mut self.recv, buf).await
+  }
+
+  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    memberlist_core::proto::ProtoReader::peek_exact(&mut self.recv, buf).await
   }
 }
 
 impl QuicStream for QuinnStream {
+  type SendStream = SendStream;
+
   async fn read_packet(&mut self) -> std::io::Result<bytes::Bytes> {
     // TODO(al8n): make size limit configurable?
     self
       .recv
+      .stream
       .read_to_end(u32::MAX as usize)
       .await
-      .map(Into::into)
+      .map(|data| {
+        if !self.recv.peek_buf.is_empty() {
+          let mut buf = bytes::BytesMut::with_capacity(self.recv.peek_buf.len() + data.len());
+          buf.extend_from_slice(&self.recv.peek_buf);
+          buf.extend_from_slice(&data);
+          buf.freeze()
+        } else {
+          data.into()
+        }
+      })
       .map_err(|e| match e {
         quinn::ReadToEndError::Read(e) => std::io::Error::from(e),
         quinn::ReadToEndError::TooLong => {
@@ -243,61 +402,20 @@ impl QuicStream for QuinnStream {
   }
 }
 
-impl AsyncRead for QuinnStream {
-  fn poll_read(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &mut [u8],
-  ) -> Poll<std::io::Result<usize>> {
-    let recv = Pin::new(&mut self.recv);
-    AsyncRead::poll_read(recv, cx, buf)
-  }
-}
-
-impl AsyncWrite for QuinnStream {
-  fn poll_write(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &[u8],
-  ) -> Poll<io::Result<usize>> {
-    let send = Pin::new(&mut self.send);
-    AsyncWrite::poll_write(send, cx, buf)
-  }
-
-  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-    let send = Pin::new(&mut self.send);
-    AsyncWrite::poll_flush(send, cx)
-  }
-
-  fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-    let send = Pin::new(&mut self.send);
-    AsyncWrite::poll_close(send, cx)
-  }
-}
-
 /// A connection based on [`quinn`].
 pub struct QuinnConnection {
   conn: Connection,
   local_addr: SocketAddr,
   remote_addr: SocketAddr,
-  current_opening_streams: Arc<AtomicUsize>,
-  max_open_streams: usize,
 }
 
 impl QuinnConnection {
   #[inline]
-  fn new(
-    conn: Connection,
-    local_addr: SocketAddr,
-    remote_addr: SocketAddr,
-    max_open_streams: usize,
-  ) -> Self {
+  fn new(conn: Connection, local_addr: SocketAddr, remote_addr: SocketAddr) -> Self {
     Self {
       conn,
       local_addr,
       remote_addr,
-      current_opening_streams: Arc::new(AtomicUsize::new(0)),
-      max_open_streams,
     }
   }
 }
@@ -307,20 +425,17 @@ impl QuicConnection for QuinnConnection {
 
   async fn accept_bi(&self) -> io::Result<(Self::Stream, SocketAddr)> {
     let (send, recv) = self.conn.accept_bi().await?;
-    self.current_opening_streams.fetch_add(1, Ordering::AcqRel);
-    Ok((
-      QuinnStream::new(send, recv, self.current_opening_streams.clone()),
-      self.remote_addr,
-    ))
+    Ok((QuinnStream::new(send, recv), self.remote_addr))
   }
 
   async fn open_bi(&self) -> io::Result<(Self::Stream, SocketAddr)> {
     let (send, recv) = self.conn.open_bi().await?;
-    self.current_opening_streams.fetch_add(1, Ordering::AcqRel);
-    Ok((
-      QuinnStream::new(send, recv, self.current_opening_streams.clone()),
-      self.remote_addr,
-    ))
+    Ok((QuinnStream::new(send, recv), self.remote_addr))
+  }
+
+  async fn open_uni(&self) -> io::Result<(<Self::Stream as QuicStream>::SendStream, SocketAddr)> {
+    let send = self.conn.open_uni().await?;
+    Ok((send, self.remote_addr))
   }
 
   async fn close(&self) -> io::Result<()> {
@@ -334,9 +449,5 @@ impl QuicConnection for QuinnConnection {
 
   fn local_addr(&self) -> SocketAddr {
     self.local_addr
-  }
-
-  fn is_full(&self) -> bool {
-    self.current_opening_streams.load(Ordering::Acquire) >= self.max_open_streams
   }
 }

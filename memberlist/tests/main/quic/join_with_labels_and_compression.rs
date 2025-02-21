@@ -3,7 +3,7 @@ use std::future::Future;
 use agnostic::Runtime;
 use memberlist_core::{
   transport::MaybeResolvedAddress,
-  types::{CompressAlgorithm, Label},
+  proto::{CompressAlgorithm, Label},
   Memberlist,
 };
 

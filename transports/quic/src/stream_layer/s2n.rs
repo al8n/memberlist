@@ -1,7 +1,7 @@
 #![allow(warnings)]
 
 use std::{
-  io,
+  cmp, io,
   marker::PhantomData,
   net::SocketAddr,
   path::PathBuf,
@@ -17,6 +17,7 @@ use std::{
 use agnostic_lite::{time::Instant, RuntimeLite};
 use bytes::Bytes;
 use futures::{lock::Mutex, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use memberlist_core::proto::{MediumVec, SmallVec};
 use peekable::future::{AsyncPeekExt, AsyncPeekable};
 use s2n_quic::{
   client::Connect,
@@ -128,7 +129,6 @@ impl<R: RuntimeLite> StreamLayer for S2n<R> {
       client,
       server_name: self.server_name.clone(),
       local_addr: actual_client_addr,
-      max_open_streams: self.max_remote_open_streams,
     };
     Ok((actual_local_addr, acceptor, connector))
   }
@@ -152,10 +152,7 @@ impl QuicAcceptor for S2nBiAcceptor {
       .ok_or(io::Error::new(io::ErrorKind::Other, "server closed"))?;
     conn.keep_alive(true)?;
     let remote = conn.remote_addr()?;
-    Ok((
-      S2nConnection::new(conn, self.max_open_streams, self.local_addr, remote),
-      remote,
-    ))
+    Ok((S2nConnection::new(conn, self.local_addr, remote), remote))
   }
 
   async fn close(&mut self) -> io::Result<()> {
@@ -172,7 +169,6 @@ pub struct S2nConnector {
   client: Client,
   local_addr: SocketAddr,
   server_name: SmolStr,
-  max_open_streams: usize,
 }
 
 impl QuicConnector for S2nConnector {
@@ -183,12 +179,7 @@ impl QuicConnector for S2nConnector {
     let mut conn = self.client.connect(connect).await?;
     conn.keep_alive(true)?;
     let remote = conn.remote_addr()?;
-    Ok(S2nConnection::new(
-      conn,
-      self.max_open_streams,
-      self.local_addr,
-      remote,
-    ))
+    Ok(S2nConnection::new(conn, self.local_addr, remote))
   }
 
   async fn close(&self) -> io::Result<()> {
@@ -209,24 +200,15 @@ impl QuicConnector for S2nConnector {
 /// [`S2nConnection`] is an implementation of [`QuicConnection`] based on [`s2n_quic`].
 pub struct S2nConnection {
   connection: Arc<Mutex<Connection>>,
-  current_open_streams: Arc<AtomicUsize>,
-  max_open_streams: usize,
   local_addr: SocketAddr,
   remote_addr: SocketAddr,
 }
 
 impl S2nConnection {
   #[inline]
-  fn new(
-    connection: Connection,
-    max_open_streams: usize,
-    local_addr: SocketAddr,
-    remote_addr: SocketAddr,
-  ) -> Self {
+  fn new(connection: Connection, local_addr: SocketAddr, remote_addr: SocketAddr) -> Self {
     Self {
       connection: Arc::new(Mutex::new(connection)),
-      current_open_streams: Arc::new(AtomicUsize::new(0)),
-      max_open_streams,
       local_addr,
       remote_addr,
     }
@@ -245,14 +227,8 @@ impl QuicConnection for S2nConnection {
       .await
       .map_err(Into::into)
       .and_then(|conn| {
-        self.current_open_streams.fetch_add(1, Ordering::AcqRel);
         conn
-          .map(|conn| {
-            (
-              S2nStream::new(conn, self.current_open_streams.clone()),
-              self.remote_addr,
-            )
-          })
+          .map(|conn| (S2nStream::new(conn), self.remote_addr))
           .ok_or(io::Error::new(
             io::ErrorKind::ConnectionRefused,
             "connection closed",
@@ -267,13 +243,18 @@ impl QuicConnection for S2nConnection {
       .await
       .open_bidirectional_stream()
       .await
-      .map(|conn| {
-        self.current_open_streams.fetch_add(1, Ordering::AcqRel);
-        (
-          S2nStream::new(conn, self.current_open_streams.clone()),
-          self.remote_addr,
-        )
-      })
+      .map(|conn| (S2nStream::new(conn), self.remote_addr))
+      .map_err(Into::into)
+  }
+
+  async fn open_uni(&self) -> io::Result<(<Self::Stream as QuicStream>::SendStream, SocketAddr)> {
+    self
+      .connection
+      .lock()
+      .await
+      .open_send_stream()
+      .await
+      .map(|conn| (conn, self.remote_addr))
       .map_err(Into::into)
   }
 
@@ -289,74 +270,121 @@ impl QuicConnection for S2nConnection {
     }
   }
 
-  fn is_full(&self) -> bool {
-    self.current_open_streams.load(Ordering::Acquire) >= self.max_open_streams
-  }
-
   fn local_addr(&self) -> SocketAddr {
     self.local_addr
   }
 }
 
-/// [`S2nStream`] is an implementation of [`QuicBiStream`] based on [`s2n_quic`].
-pub struct S2nStream {
-  recv_stream: AsyncPeekable<ReceiveStream>,
-  send_stream: SendStream,
-  ctr: Arc<AtomicUsize>,
+/// A [`ProtoReader`](memberlist_core::proto::ProtoReader) implementation for S2n stream layer
+pub struct S2nProtoReader {
+  stream: AsyncPeekable<ReceiveStream>,
 }
 
-impl S2nStream {
-  fn new(stream: BidirectionalStream, ctr: Arc<AtomicUsize>) -> Self {
-    let (recv, send) = stream.split();
+impl From<ReceiveStream> for S2nProtoReader {
+  fn from(stream: ReceiveStream) -> Self {
     Self {
-      recv_stream: recv.peekable(),
-      send_stream: send,
-      ctr,
+      stream: stream.peekable(),
     }
   }
 }
 
-impl Drop for S2nStream {
-  fn drop(&mut self) {
-    self.ctr.fetch_sub(1, Ordering::AcqRel);
+impl memberlist_core::proto::ProtoReader for S2nProtoReader {
+  async fn peek(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    self.stream.peek(buf).await
+  }
+
+  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    self.stream.peek_exact(buf).await
+  }
+
+  async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    self.stream.read(buf).await
+  }
+
+  async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    self.stream.read_exact(buf).await
+  }
+}
+
+/// [`S2nStream`] is an implementation of [`QuicBiStream`] based on [`s2n_quic`].
+pub struct S2nStream {
+  recv_stream: S2nProtoReader,
+  send_stream: SendStream,
+}
+
+impl S2nStream {
+  fn new(stream: BidirectionalStream) -> Self {
+    let (recv, send) = stream.split();
+    Self {
+      recv_stream: recv.into(),
+      send_stream: send,
+    }
+  }
+}
+
+impl memberlist_core::transport::Connection for S2nStream {
+  type Reader = S2nProtoReader;
+  type Writer = SendStream;
+
+  fn split(self) -> (Self::Reader, Self::Writer) {
+    (self.recv_stream, self.send_stream)
+  }
+
+  async fn close(&mut self) -> std::io::Result<()> {
+    self.send_stream.close().await.map_err(Into::into)
+  }
+
+  async fn write_all(&mut self, payload: &[u8]) -> std::io::Result<()> {
+    self.send_stream.write_all(payload).await
+  }
+
+  async fn flush(&mut self) -> std::io::Result<()> {
+    self.send_stream.flush().await.map_err(Into::into)
+  }
+
+  async fn peek(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    memberlist_core::proto::ProtoReader::peek(&mut self.recv_stream, buf).await
+  }
+
+  async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    memberlist_core::proto::ProtoReader::read_exact(&mut self.recv_stream, buf).await
+  }
+
+  async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    memberlist_core::proto::ProtoReader::read(&mut self.recv_stream, buf).await
+  }
+
+  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    memberlist_core::proto::ProtoReader::peek_exact(&mut self.recv_stream, buf).await
   }
 }
 
 impl QuicStream for S2nStream {
+  type SendStream = SendStream;
+
   async fn read_packet(&mut self) -> std::io::Result<Bytes> {
-    todo!()
-  }
-}
+    let (peeked, recv) = self.recv_stream.stream.get_mut();
+    let mut chunks = SmallVec::with_capacity(4);
+    chunks.fill_with(Bytes::new);
 
-impl AsyncRead for S2nStream {
-  fn poll_read(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &mut [u8],
-  ) -> Poll<std::io::Result<usize>> {
-    let recv = Pin::new(&mut self.recv_stream);
-    recv.poll_read(cx, buf)
-  }
-}
+    let mut data = peeked.to_vec();
+    loop {
+      match recv.receive_vectored(&mut chunks).await {
+        Ok((count, open)) => {
+          if !open {
+            for chunk in chunks.iter().take(count) {
+              data.extend_from_slice(chunk);
+            }
+            return Ok(Bytes::from(data));
+          }
 
-impl AsyncWrite for S2nStream {
-  fn poll_write(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &[u8],
-  ) -> Poll<io::Result<usize>> {
-    let send = Pin::new(&mut self.send_stream);
-    send.poll_write(cx, buf)
-  }
-
-  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-    let send = Pin::new(&mut self.send_stream);
-    send.poll_flush(cx)
-  }
-
-  fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-    let send = Pin::new(&mut self.send_stream);
-    send.poll_close(cx)
+          for chunk in chunks.iter().take(count) {
+            data.extend_from_slice(chunk);
+          }
+        }
+        Err(e) => return Err(e.into()),
+      }
+    }
   }
 }
 

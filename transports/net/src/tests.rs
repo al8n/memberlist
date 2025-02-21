@@ -10,21 +10,21 @@ use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use memberlist_core::{
+  proto::{Label, Message},
   tests::AnyError,
   transport::{
-    tests::{
-      AddressKind, TestPacketClient, TestPacketConnection, TestPacketStream, TestPromisedClient,
-      TestPromisedConnection, TestPromisedStream,
-    },
+    // tests::{
+    //   AddressKind, TestPacketClient, TestPacketConnection, TestPacketStream, TestPromisedClient,
+    //   TestPromisedConnection, TestPromisedStream,
+    // },
     Transport,
   },
-  types::{Label, LabelBufMutExt, Message},
 };
 use smol_str::SmolStr;
 
 use crate::{Listener, StreamLayer};
 
-pub use super::promised_processor::listener_backoff;
+// pub use super::promised_processor::listener_backoff;
 
 // /// Unit test for handling `Ping` message
 // pub mod handle_ping;

@@ -1,5 +1,5 @@
 [package]
-name = "memberlist-types-fuzz"
+name = "memberlist-proto-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
-memberlist-types = { path = "../types", features = ["arbitrary", "std"] }
+memberlist-proto = { workspace = true, features = ["arbitrary", "std"] }
 
 [[bin]]
 name = "messages"

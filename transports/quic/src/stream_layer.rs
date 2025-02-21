@@ -14,10 +14,12 @@ pub mod quinn;
 pub mod s2n;
 
 /// A trait for QUIC bidirectional streams.
-// #[auto_impl::auto_impl(Box)]
 pub trait QuicStream:
-  futures::AsyncWrite + futures::AsyncRead + Unpin + Send + Sync + 'static
+  memberlist_core::transport::Connection + Unpin + Send + Sync + 'static
 {
+  /// The send stream type.
+  type SendStream: memberlist_core::proto::ProtoWriter;
+
   /// Read a packet from the the stream.
   fn read_packet(&mut self) -> impl Future<Output = std::io::Result<Bytes>> + Send;
 }
@@ -112,6 +114,16 @@ pub trait QuicConnection: Send + Sync + 'static {
   /// Opens a bidirectional stream to a remote peer.
   fn open_bi(&self) -> impl Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send;
 
+  /// Opens a unidirectional stream to a remote peer.
+  fn open_uni(
+    &self,
+  ) -> impl Future<
+    Output = io::Result<(
+      <Self::Stream as memberlist_core::transport::Connection>::Writer,
+      SocketAddr,
+    )>,
+  > + Send;
+
   /// Closes the connection.
   fn close(&self) -> impl Future<Output = io::Result<()>> + Send;
 
@@ -120,7 +132,4 @@ pub trait QuicConnection: Send + Sync + 'static {
 
   /// Returns the local address.
   fn local_addr(&self) -> SocketAddr;
-
-  /// Returns if the connection reached the maximum number of opened streams.
-  fn is_full(&self) -> bool;
 }

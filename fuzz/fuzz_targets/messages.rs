@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use memberlist_types::{Data, Message};
+use memberlist_proto::{Data, Message};
 
 fuzz_target!(|data: Message<String, Vec<u8>>| {
   let encoded_len = data.encoded_len();

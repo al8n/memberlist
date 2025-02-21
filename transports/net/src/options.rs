@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use indexmap::IndexSet;
-use memberlist_core::types::CIDRsPolicy;
+use memberlist_core::proto::CIDRsPolicy;
 use nodecraft::resolver::AddressResolver;
 
 use crate::StreamLayer;
@@ -101,7 +101,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
       style = "ref",
       result(
         converter(fn = "Option::as_deref"),
-        type = "Option<&memberlist_core::types::MetricLabels>"
+        type = "Option<&memberlist_core::proto::MetricLabels>"
       ),
       attrs(
         doc = "Get the metrics labels.",
@@ -115,7 +115,7 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
       cfg_attr(docsrs, doc(cfg(feature = "metrics")))
     ))
   )]
-  metric_labels: Option<std::sync::Arc<memberlist_core::types::MetricLabels>>,
+  metric_labels: Option<std::sync::Arc<memberlist_core::proto::MetricLabels>>,
 }
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer> Clone
@@ -238,5 +238,5 @@ pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   max_packet_size: usize,
   recv_buffer_size: usize,
   #[cfg(feature = "metrics")]
-  metric_labels: Option<std::sync::Arc<memberlist_core::types::MetricLabels>>,
+  metric_labels: Option<std::sync::Arc<memberlist_core::proto::MetricLabels>>,
 }

@@ -1,5 +1,4 @@
 use super::*;
-use futures::AsyncReadExt;
 use memberlist_core::transport::Packet;
 
 pub(super) struct Processor<
@@ -14,18 +13,18 @@ pub(super) struct Processor<
     <T::Runtime as RuntimeLite>::Instant,
   >,
   pub(super) stream_tx:
-    StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
+    StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Connection>,
   pub(super) shutdown_rx: async_channel::Receiver<()>,
   pub(super) timeout: Option<Duration>,
   #[cfg(feature = "metrics")]
-  pub(super) metric_labels: Arc<memberlist_core::types::MetricLabels>,
+  pub(super) metric_labels: Arc<memberlist_core::proto::MetricLabels>,
 }
 
 impl<A, T, S> Processor<A, T, S>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   A::Address: Send + Sync + 'static,
-  T: Transport<Resolver = A, Stream = S::Stream, Runtime = A::Runtime>,
+  T: Transport<Resolver = A, Connection = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer<Runtime = A::Runtime>,
 {
   pub(super) async fn run(self) {
@@ -56,14 +55,14 @@ where
   async fn listen(
     local_addr: SocketAddr,
     mut acceptor: S::Acceptor,
-    stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
+    stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Connection>,
     packet_tx: PacketProducer<
       <T::Resolver as AddressResolver>::ResolvedAddress,
       <T::Runtime as RuntimeLite>::Instant,
     >,
     shutdown_rx: async_channel::Receiver<()>,
     timeout: Option<Duration>,
-    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::types::MetricLabels>,
+    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::proto::MetricLabels>,
   ) {
     tracing::info!("memberlist.transport.quic: listening stream on {local_addr}");
 
@@ -136,14 +135,14 @@ where
     conn: S::Connection,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
-    stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Stream>,
+    stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Connection>,
     packet_tx: PacketProducer<
       <T::Resolver as AddressResolver>::ResolvedAddress,
       <T::Runtime as RuntimeLite>::Instant,
     >,
     timeout: Option<Duration>,
     shutdown_rx: async_channel::Receiver<()>,
-    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::types::MetricLabels>,
+    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::proto::MetricLabels>,
   ) {
     loop {
       futures::select! {
@@ -207,7 +206,7 @@ where
       <T::Runtime as RuntimeLite>::Instant,
     >,
     timeout: Option<Duration>,
-    #[cfg(feature = "metrics")] metric_labels: &memberlist_core::types::MetricLabels,
+    #[cfg(feature = "metrics")] metric_labels: &memberlist_core::proto::MetricLabels,
   ) {
     let start = <T::Runtime as RuntimeLite>::now();
 

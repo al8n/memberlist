@@ -106,7 +106,7 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
       style = "ref",
       result(
         converter(fn = "Option::as_deref"),
-        type = "Option<&memberlist_core::types::MetricLabels>"
+        type = "Option<&memberlist_core::proto::MetricLabels>"
       ),
       attrs(
         doc = "Get the metrics labels.",
@@ -120,7 +120,7 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
       cfg_attr(docsrs, doc(cfg(feature = "metrics")))
     ))
   )]
-  metric_labels: Option<Arc<memberlist_core::types::MetricLabels>>,
+  metric_labels: Option<Arc<memberlist_core::proto::MetricLabels>>,
 }
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer> Clone
@@ -252,5 +252,5 @@ pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   connection_ttl: Option<Duration>,
   cidrs_policy: CIDRsPolicy,
   #[cfg(feature = "metrics")]
-  metric_labels: Option<Arc<memberlist_core::types::MetricLabels>>,
+  metric_labels: Option<Arc<memberlist_core::proto::MetricLabels>>,
 }

@@ -27,7 +27,7 @@ where
   pub(super) shutdown: Arc<AtomicBool>,
   pub(super) shutdown_rx: async_channel::Receiver<()>,
   #[cfg(feature = "metrics")]
-  pub(super) metric_labels: std::sync::Arc<memberlist_core::types::MetricLabels>,
+  pub(super) metric_labels: std::sync::Arc<memberlist_core::proto::MetricLabels>,
 }
 
 impl<A, T> PacketProcessor<A, T>

@@ -75,7 +75,7 @@ futures.workspace = true
 indexmap.workspace = true
 getifs.workspace = true
 nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
-peekable = { version = "0.2", features = ["future"] }
+peekable = { workspace = true, features = ["future"] }
 pin-project.workspace = true
 rand = "0.9"
 memberlist-core.workspace = true

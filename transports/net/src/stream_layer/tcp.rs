@@ -1,16 +1,11 @@
-use std::{
-  io,
-  marker::PhantomData,
-  net::SocketAddr,
-  pin::Pin,
-  task::{Context, Poll},
-};
+use std::{io, marker::PhantomData, net::SocketAddr};
 
 use agnostic::{
   net::{Net, TcpListener as _, TcpStream as _},
   Runtime,
 };
-use futures::{AsyncRead, AsyncWrite};
+use futures::{AsyncReadExt, AsyncWriteExt};
+use peekable::future::AsyncPeekable;
 
 use super::{Listener, PromisedStream, StreamLayer};
 
@@ -57,10 +52,14 @@ impl<R: Runtime> StreamLayer for Tcp<R> {
     <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::connect(addr)
       .await
       .and_then(|stream| {
+        let local_addr = stream.local_addr()?;
+        let (reader, writer) = stream.into_split();
+
         Ok(TcpStream {
-          local_addr: stream.local_addr()?,
+          local_addr,
           peer_addr: addr,
-          stream,
+          reader: AsyncPeekable::new(reader),
+          writer,
         })
       })
   }
@@ -90,9 +89,12 @@ impl<R: Runtime> Listener for TcpListener<R> {
 
   async fn accept(&self) -> io::Result<(Self::Stream, SocketAddr)> {
     self.ln.accept().await.map(|(conn, addr)| {
+      let (reader, writer) = conn.into_split();
+
       (
         TcpStream {
-          stream: conn,
+          writer,
+          reader: AsyncPeekable::new(reader),
           local_addr: self.local_addr,
           peer_addr: addr,
         },
@@ -114,32 +116,50 @@ impl<R: Runtime> Listener for TcpListener<R> {
 #[pin_project::pin_project]
 pub struct TcpStream<R: Runtime> {
   #[pin]
-  stream: <R::Net as Net>::TcpStream,
+  writer: <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::OwnedWriteHalf,
+  #[pin]
+  reader: AsyncPeekable<<<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::OwnedReadHalf>,
   local_addr: SocketAddr,
   peer_addr: SocketAddr,
 }
 
-impl<R: Runtime> AsyncRead for TcpStream<R> {
-  fn poll_read(
-    self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &mut [u8],
-  ) -> Poll<io::Result<usize>> {
-    self.project().stream.poll_read(cx, buf)
-  }
-}
+impl<R: Runtime> memberlist_core::transport::Connection for TcpStream<R> {
+  type Reader =
+    AsyncPeekable<<<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::OwnedReadHalf>;
 
-impl<R: Runtime> AsyncWrite for TcpStream<R> {
-  fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-    self.project().stream.poll_write(cx, buf)
+  type Writer = <<R::Net as Net>::TcpStream as agnostic::net::TcpStream>::OwnedWriteHalf;
+
+  #[inline]
+  fn split(self) -> (Self::Reader, Self::Writer) {
+    (self.reader, self.writer)
   }
 
-  fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-    self.project().stream.poll_flush(cx)
+  async fn close(&mut self) -> std::io::Result<()> {
+    AsyncWriteExt::close(&mut self.writer).await
   }
 
-  fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-    self.project().stream.poll_close(cx)
+  async fn write_all(&mut self, payload: &[u8]) -> std::io::Result<()> {
+    AsyncWriteExt::write_all(&mut self.writer, payload).await
+  }
+
+  async fn flush(&mut self) -> std::io::Result<()> {
+    AsyncWriteExt::flush(&mut self.writer).await
+  }
+
+  async fn peek(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    self.reader.peek(buf).await
+  }
+
+  async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    AsyncReadExt::read_exact(&mut self.reader, buf).await
+  }
+
+  async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    AsyncReadExt::read(&mut self.reader, buf).await
+  }
+
+  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    self.reader.peek_exact(buf).await
   }
 }
 

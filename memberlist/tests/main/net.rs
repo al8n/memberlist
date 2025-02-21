@@ -7,7 +7,7 @@ use memberlist_net::{NetTransport, NetTransportOptions};
 use smol_str::SmolStr;
 
 #[cfg(feature = "encryption")]
-use memberlist_core::types::SecretKey;
+use memberlist_core::proto::SecretKey;
 
 #[cfg(feature = "encryption")]
 pub const TEST_KEYS: &[SecretKey] = &[
