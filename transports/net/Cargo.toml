@@ -71,7 +71,7 @@ bytes.workspace = true
 byteorder.workspace = true
 crc32fast = "1"
 either.workspace = true
-futures.workspace = true
+futures = { workspace = true, features = ["bilock", "unstable"] }
 indexmap.workspace = true
 getifs.workspace = true
 nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }

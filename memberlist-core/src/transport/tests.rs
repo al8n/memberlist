@@ -13,8 +13,8 @@
 //   delegate::{mock::MockDelegate, CompositeDelegate, VoidDelegate},
 //   state::LocalNodeState,
 //   tests::{get_memberlist, next_socket_addr_v4, next_socket_addr_v6, AnyError},
-//   transport::{Ack, Alive, IndirectPing, MaybeResolvedAddress, Message},
-//   proto::Epoch,
+//   transport::{Ack, Alive, IndirectPing, MaybeResolvedAddress, Message, Connection},
+//   Epoch,
 //   Member, Memberlist, Options,
 // };
 
@@ -25,33 +25,6 @@
 
 // const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 // const WAIT_DURATION: Duration = Duration::from_secs(6);
-
-// /// The kind of address
-// pub enum AddressKind {
-//   /// V4
-//   V4,
-//   /// V6
-//   V6,
-// }
-
-// impl core::fmt::Display for AddressKind {
-//   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-//     match self {
-//       Self::V4 => write!(f, "v4"),
-//       Self::V6 => write!(f, "v6"),
-//     }
-//   }
-// }
-
-// impl AddressKind {
-//   /// Get the next address
-//   pub fn next(&self, network: u8) -> SocketAddr {
-//     match self {
-//       Self::V4 => next_socket_addr_v4(network),
-//       Self::V6 => next_socket_addr_v6(),
-//     }
-//   }
-// }
 
 // /// A trait for testing packet
 // pub trait TestPacketStream: Send + Sync + 'static {
@@ -556,8 +529,9 @@
 //           num_accepted += 1;
 //           match stream {
 //             Ok((mut stream, addr)) if num_accepted == 1 => {
+//               let (mut reader, mut writer) = stream.split();
 //               let p = unwrap_ok!(ping_err_tx1.send(
-//                 m1.read_message(&addr, stream.as_mut())
+//                 m1.read_message(&addr, &mut reader)
 //                   .await
 //                   .map_err(Into::into)
 //               ));
@@ -568,7 +542,7 @@
 //               let ack: Message<SmolStr, SocketAddr> = Ack::new(23).into();
 
 //               unwrap_ok!(ping_err_tx1.send(
-//                 m1.send_message(stream.as_mut(), [ack])
+//                 m1.send_message(&mut writer, [ack])
 //                   .await
 //                   .map_err(Into::into)
 //               ));
@@ -578,9 +552,10 @@
 //               let _ = rx1.recv().await;
 //             },
 //             Ok((mut stream, addr)) if num_accepted == 2 => {
+//               let (mut reader, mut writer) = stream.split();
 //               let p = unwrap_ok!(ping_err_tx1.send(
 //                 m1
-//                   .read_message(&addr, stream.as_mut())
+//                   .read_message(&addr, &mut reader)
 //                   .await
 //                   .map_err(Into::into)
 //               ));
@@ -589,7 +564,7 @@
 //               let ack: Message<SmolStr, SocketAddr> = Ack::new(ping_in.sequence_number() + 1).into();
 
 //               unwrap_ok!(ping_err_tx1.send(
-//                 m1.send_message(stream.as_mut(), [ack])
+//                 m1.send_message(&mut writer, [ack])
 //                   .await
 //                   .map_err(Into::into)
 //               ));
@@ -599,17 +574,18 @@
 //               let _ = rx2.recv().await;
 //             },
 //             Ok((mut stream, addr)) if num_accepted == 3 => {
+//               let (mut reader, mut writer) = stream.split();
 //               let _ = unwrap_ok!(ping_err_tx1.send(
 //                 m1.inner
 //                   .transport
-//                   .read(&addr, stream.as_mut())
+//                   .read(&addr, &mut reader)
 //                   .await
 //                   .map_err(Into::into)
 //               ));
 
 //               unwrap_ok!(ping_err_tx1.send(
 //                 m1.send_message(
-//                     stream.as_mut(),
+//                     &mut writer,
 //                     [Message::from(IndirectPing::new(0, Node::new(SmolStr::from("unknown source"), kind.next(0)), Node::new(SmolStr::from("unknown target"), kind.next(0))))]
 //                   )
 //                   .await
@@ -749,10 +725,11 @@
 
 //   // Send the push/pull indicator
 //   let mut conn = connector.connect().await?;
+//   let (mut reader, mut writer) = conn.split();
 //   let push_pull: Message<_, _> = push_pull.into();
-//   m.send_message(conn.as_mut(), [push_pull]).await?;
+//   m.send_message(&mut writer, [push_pull]).await?;
 //   // Read the message type
-//   let msg = m.read_message(&bind_addr, conn.as_mut()).await?;
+//   let msg = m.read_message(&bind_addr, &mut reader).await?;
 //   let readed_push_pull = Message::<SmolStr, SocketAddr>::decode(&msg)
 //     .unwrap()
 //     .1

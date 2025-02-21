@@ -11,8 +11,9 @@ use std::{
 use agnostic::Runtime;
 use memberlist_core::{
   delegate::{mock::MockDelegate, CompositeDelegate},
-  transport::{tests::AddressKind, MaybeResolvedAddress},
+  transport::MaybeResolvedAddress,
   Memberlist,
+  tests::AddressKind,
 };
 use memberlist_net::stream_layer::StreamLayer;
 

@@ -298,11 +298,11 @@ impl memberlist_core::proto::ProtoReader for S2nProtoReader {
   }
 
   async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-    self.stream.read(buf).await
+    AsyncReadExt::read(&mut self.stream, buf).await
   }
 
   async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
-    self.stream.read_exact(buf).await
+    AsyncReadExt::read_exact(&mut self.stream, buf).await
   }
 }
 
