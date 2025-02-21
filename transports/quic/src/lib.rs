@@ -21,7 +21,7 @@ use crossbeam_skiplist::SkipMap;
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use memberlist_core::proto::{Data, Payload, SmallVec};
 pub use memberlist_core::{
-  proto::{CIDRsPolicy, Label, LabelError},
+  proto::{CIDRsPolicy, Label, LabelError, ProtoReader},
   transport::*,
 };
 
@@ -484,23 +484,28 @@ where
     }
   }
 
-  // async fn read(
-  //   &self,
-  //   _from: &Self::ResolvedAddress,
-  //   conn: &mut <Self::Connection as Connection>::Reader,
-  // ) -> Result<usize, Self::Error> {
-  //   use futures::io::AsyncReadExt;
-
-  //   let mut buf = [0; 1];
-  //   conn.read_exact(&mut buf).await?;
-  //   match StreamType::try_from(buf[0]) {
-  //     Ok(StreamType::Stream) => Ok(1),
-  //     Ok(StreamType::Packet) => {
-  //       Err(QuicTransportError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid ")))
-  //     },
-  //     Err(tag) => Err(QuicTransportError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid stream type tag: {}", tag)))),
-  //   }
-  // }
+  async fn read(
+    &self,
+    from: &Self::ResolvedAddress,
+    conn: &mut <Self::Connection as Connection>::Reader,
+  ) -> Result<usize, Self::Error> {
+    let mut buf = [0; 1];
+    conn.read_exact(&mut buf).await?;
+    match StreamType::try_from(buf[0]) {
+      Ok(StreamType::Stream) => Ok(1),
+      Ok(StreamType::Packet) => Err(QuicTransportError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("receive an unexpected packet stream from {from}"),
+      ))),
+      Err(tag) => Err(QuicTransportError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+          "receive a stream from {from} with invalid type value: {}",
+          tag
+        ),
+      ))),
+    }
+  }
 
   async fn write(
     &self,

@@ -357,6 +357,10 @@ impl memberlist_core::transport::Connection for S2nStream {
   async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
     memberlist_core::proto::ProtoReader::peek_exact(&mut self.recv_stream, buf).await
   }
+
+  fn consume_peek(&mut self) {
+    self.recv_stream.stream.consume();
+  }
 }
 
 impl QuicStream for S2nStream {

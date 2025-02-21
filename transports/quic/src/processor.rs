@@ -150,7 +150,7 @@ where
           match incoming {
             Ok((mut stream, remote_addr)) => {
               let mut stream_kind_buf = [0; 1];
-              if let Err(e) = stream.read_exact(&mut stream_kind_buf).await {
+              if let Err(e) = stream.peek_exact(&mut stream_kind_buf).await {
                 tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist.transport.quic: failed to read stream kind");
                 continue;
               }
@@ -165,6 +165,8 @@ where
                   }
                 }
                 Ok(StreamType::Packet) => {
+                  stream.consume_peek();
+
                   Self::handle_packet(
                     &mut stream,
                     local_addr,

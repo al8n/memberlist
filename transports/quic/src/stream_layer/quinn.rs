@@ -371,6 +371,10 @@ impl memberlist_core::transport::Connection for QuinnStream {
   async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
     memberlist_core::proto::ProtoReader::peek_exact(&mut self.recv, buf).await
   }
+
+  fn consume_peek(&mut self) {
+    self.recv.peek_buf.clear();
+  }
 }
 
 impl QuicStream for QuinnStream {

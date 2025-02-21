@@ -189,6 +189,9 @@ pub trait Connection: Send + Sync {
   /// Peek exactly the payload from the proto reader to the buffer
   fn peek_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = std::io::Result<()>> + Send;
 
+  /// Consume the content in peek buffer
+  fn consume_peek(&mut self);
+
   /// Write the payload to the proto writer
   fn write_all(&mut self, payload: &[u8]) -> impl Future<Output = std::io::Result<()>> + Send;
 

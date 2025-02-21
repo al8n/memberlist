@@ -273,6 +273,10 @@ impl<R: Runtime> memberlist_core::transport::Connection for NativeTlsStream<R> {
   async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
     self.stream.read(buf).await
   }
+
+  fn consume_peek(&mut self) {
+    self.stream.consume();
+  }
 }
 
 impl<R: Runtime> PromisedStream for NativeTlsStream<R> {
