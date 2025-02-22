@@ -35,7 +35,7 @@ jobs:
             features: "test,metrics"
             name: "memberlist-core"
           - crate: memberlist-proto 
-            features: "metrics,encryption,all-compression,all-checksum"
+            features: "std,metrics,encryption,all-compression,all-checksum"
             name: "memberlist-proto"
           - crate: memberlist
             features: "test,tokio,tcp,tls,native-tls,snappy,crc32,encryption,metrics"
