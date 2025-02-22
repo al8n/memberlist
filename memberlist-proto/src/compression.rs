@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use super::{Data, DataRef, DecodeError, EncodeError, WireType};
 
+#[cfg(feature = "brotli")]
 macro_rules! num_to_enum {
   (
     $(#[$meta:meta])*
