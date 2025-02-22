@@ -318,59 +318,33 @@ impl ProtoHint {
       input_size,
       // TODO(al8n): change this field to Option to make more sense
       max_output_size: input_size,
-      #[cfg(any(
-        feature = "crc32",
-        feature = "xxhash32",
-        feature = "xxhash64",
-        feature = "xxhash3",
-        feature = "murmur3",
-      ))]
+      #[cfg(checksum)]
       checksum_hint: None,
       #[cfg(feature = "encryption")]
       encrypted_hint: None,
-      #[cfg(any(
-        feature = "zstd",
-        feature = "lz4",
-        feature = "brotli",
-        feature = "snappy",
-      ))]
+      #[cfg(compression)]
       compress_hint: None,
     }
   }
 
   /// Returns `true` if hints the encoder should offload the encoding to `rayon`.
-  pub fn should_offload(
-    &self,
-    #[cfg(any(
-      feature = "zstd",
-      feature = "lz4",
-      feature = "brotli",
-      feature = "snappy",
-      feature = "encryption",
-    ))]
-    offload_threshold: usize,
-  ) -> bool {
-    cfg_offload! {
-      @if {{
-        #[cfg(any(
-          feature = "zstd",
-          feature = "lz4",
-          feature = "brotli",
-          feature = "snappy",
-        ))]
-        if self.compress_hint.is_some() && self.input_size > offload_threshold {
-          return true;
-        }
+  pub fn should_offload(&self, #[cfg(offload)] offload_threshold: usize) -> bool {
+    #[cfg(not(offload))]
+    return false;
 
-        #[cfg(feature = "encryption")]
-        if self.encrypted_hint.is_some() && self.input_size > offload_threshold {
-          return true;
-        }
+    #[cfg(offload)]
+    {
+      #[cfg(compression)]
+      if self.compress_hint.is_some() && self.input_size > offload_threshold {
+        return true;
+      }
 
-        false
-      }} @else {{
-        false
-      }}
+      #[cfg(feature = "encryption")]
+      if self.encrypted_hint.is_some() && self.input_size > offload_threshold {
+        return true;
+      }
+
+      false
     }
   }
 }
@@ -765,12 +739,7 @@ where
   }
 
   fn valid(&self) -> Result<(), ProtoEncoderError> {
-    #[cfg(any(
-      feature = "zstd",
-      feature = "lz4",
-      feature = "brotli",
-      feature = "snappy",
-    ))]
+    #[cfg(compression)]
     if let Some(ref algo) = self.compress {
       match algo {
         CompressAlgorithm::Zstd(_) => {
@@ -805,13 +774,7 @@ where
       }
     }
 
-    #[cfg(any(
-      feature = "crc32",
-      feature = "xxhash32",
-      feature = "xxhash64",
-      feature = "xxhash3",
-      feature = "murmur3",
-    ))]
+    #[cfg(checksum)]
     if let Some(ref algo) = self.checksum {
       match algo {
         ChecksumAlgorithm::Crc32 => {
@@ -926,15 +889,12 @@ where
     #[allow(unused_mut)]
     let mut bytes_written: Option<usize> = None;
 
-    #[cfg(any(
-      feature = "zstd",
-      feature = "lz4",
-      feature = "brotli",
-      feature = "snappy",
-    ))]
+    #[cfg(compression)]
     {
       if let Some(ch) = &hint.compress_hint {
-        let algo = self.compress.expect("when compress hint is set, the compression algorithm must be set");
+        let algo = self
+          .compress
+          .expect("when compress hint is set, the compression algorithm must be set");
         let mut encoded_buf = EncodeBuffer::new();
         encoded_buf.resize(encoded_len, 0);
 
@@ -942,7 +902,13 @@ where
         #[cfg(debug_assertions)]
         {
           debug_assert_write_eq(written, encoded_len);
-          assert_eq!(encoded_len, hint.input_size(), "the actual encoded length {} does not match the encoded length {} in hint", encoded_len, hint.input_size());
+          assert_eq!(
+            encoded_len,
+            hint.input_size(),
+            "the actual encoded length {} does not match the encoded length {} in hint",
+            encoded_len,
+            hint.input_size()
+          );
         }
 
         let mut co = ch.header_offset();
@@ -974,16 +940,12 @@ where
       }
     }
 
-    #[cfg(any(
-      feature = "crc32",
-      feature = "xxhash32",
-      feature = "xxhash64",
-      feature = "xxhash3",
-      feature = "murmur3",
-    ))]
+    #[cfg(checksum)]
     {
       if let Some(ch) = hint.checksum_hint {
-        let algo = self.checksum.expect("when checksum hint is set, the checksum algorithm must be set");
+        let algo = self
+          .checksum
+          .expect("when checksum hint is set, the checksum algorithm must be set");
         let po = ch.payload_offset();
         let payload_len = match &mut bytes_written {
           Some(written) => *written,
@@ -992,7 +954,7 @@ where
             let written = msg.encodable_encode(&mut buf[po..])?;
             bytes_written = Some(written);
             written
-          },
+          }
         };
         let checksum_payload_end = po + payload_len;
         let checksumed = algo.checksum(&buf[po..checksum_payload_end])?;
@@ -1004,11 +966,14 @@ where
         buf[co..co + PAYLOAD_LEN_SIZE].copy_from_slice(&(payload_len as u32).to_be_bytes());
         let checksumed_bytes = checksumed.to_be_bytes();
         let output_size = ch.size();
-        buf[checksum_payload_end..checksum_payload_end + output_size].copy_from_slice(&checksumed_bytes[..output_size]);
+        buf[checksum_payload_end..checksum_payload_end + output_size]
+          .copy_from_slice(&checksumed_bytes[..output_size]);
 
         if let Some(written) = &mut bytes_written {
           *written += ChecksumHint::HEADER_SIZE + output_size;
-        } else { unreachable!("bytes written cannot be `None`") }
+        } else {
+          unreachable!("bytes written cannot be `None`")
+        }
       }
     }
 

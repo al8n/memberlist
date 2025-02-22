@@ -4,7 +4,6 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use std::sync::atomic::Ordering;
 
 use agnostic::RuntimeLite;
-use futures::FutureExt;
 use memberlist_core::transport::{StreamProducer, Transport};
 use nodecraft::resolver::AddressResolver;
 
@@ -64,47 +63,53 @@ where
 
     let mut loop_delay = Duration::ZERO;
     loop {
-      futures::select! {
-        _ = shutdown_rx.recv().fuse() => {
-          break;
-        }
-        rst = ln.accept().fuse() => {
-          match rst {
-            Ok((conn, remote_addr)) => {
-              // No error, reset loop delay
-              loop_delay = Duration::ZERO;
-              if let Err(e) = stream_tx
-                .send(remote_addr, conn)
-                .await
-              {
-                tracing::error!(local_addr=%local_addr, err = %e, "memberlist.transport.net: failed to send TCP connection");
-              }
+      let fut1 = shutdown_rx.recv();
+      let fut2 = async {
+        match ln.accept().await {
+          Ok((conn, remote_addr)) => {
+            // No error, reset loop delay
+            loop_delay = Duration::ZERO;
+            if let Err(e) = stream_tx.send(remote_addr, conn).await {
+              tracing::error!(local_addr=%local_addr, err = %e, "memberlist.transport.net: failed to send TCP connection");
             }
-            Err(e) => {
-              if shutdown_rx.is_closed() {
-                break;
-              }
-
-              #[cfg(any(test, feature = "test"))]
-              {
-                BACKOFFS_COUNT.fetch_add(1, Ordering::SeqCst);
-              }
-
-              if loop_delay == Duration::ZERO {
-                loop_delay = BASE_DELAY;
-              } else {
-                loop_delay *= 2;
-              }
-
-              if loop_delay > MAX_DELAY {
-                loop_delay = MAX_DELAY;
-              }
-
-              tracing::error!(local_addr=%local_addr, err = %e, "memberlist.transport.net: error accepting TCP connection");
-              <T::Runtime as RuntimeLite>::sleep(loop_delay).await;
-              continue;
-            }
+            true
           }
+          Err(e) => {
+            if shutdown_rx.is_closed() {
+              return false;
+            }
+
+            #[cfg(any(test, feature = "test"))]
+            {
+              BACKOFFS_COUNT.fetch_add(1, Ordering::SeqCst);
+            }
+
+            if loop_delay == Duration::ZERO {
+              loop_delay = BASE_DELAY;
+            } else {
+              loop_delay *= 2;
+            }
+
+            if loop_delay > MAX_DELAY {
+              loop_delay = MAX_DELAY;
+            }
+
+            tracing::error!(local_addr=%local_addr, err = %e, "memberlist.transport.net: error accepting TCP connection");
+            <T::Runtime as RuntimeLite>::sleep(loop_delay).await;
+            true
+          }
+        }
+      };
+
+      futures::pin_mut!(fut1, fut2);
+
+      match futures::future::select(fut1, fut2).await {
+        futures::future::Either::Left((_, _)) => break,
+        futures::future::Either::Right((r, _)) => {
+          if r {
+            continue;
+          }
+          break;
         }
       }
     }

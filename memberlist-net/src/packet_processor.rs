@@ -1,5 +1,6 @@
 use std::{
   net::SocketAddr,
+  ops::ControlFlow,
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -11,7 +12,6 @@ use agnostic::{
   Runtime, RuntimeLite,
 };
 use bytes::Bytes;
-use futures::FutureExt;
 use memberlist_core::transport::{Packet, PacketProducer, Transport};
 use nodecraft::resolver::AddressResolver;
 
@@ -50,50 +50,59 @@ where
 
     let mut buf = vec![0; 65536];
     loop {
-      // Do a blocking read into a fresh buffer. Grab a time stamp as
-      // close as possible to the I/O.
-      futures::select! {
-        _ = self.shutdown_rx.recv().fuse() => {
-          break;
-        }
-        rst = socket.recv_from(&mut buf).fuse() => {
-          match rst {
-            Ok((n, addr)) => {
-              // Check the length - it needs to have at least one byte to be a
-              // proper message.
-              if n < 1 {
-                tracing::error!(local=%local_addr, from=%addr, err = "memberlist_net.packet.processor: UDP packet too short (0 bytes)");
-                continue;
-              }
-
-              tracing::trace!(local=%local_addr, from=%addr, packet=?&buf[..n], "memberlist_net.packet.processor");
-
-              let start = <T::Runtime as RuntimeLite>::now();
-
-              // #[cfg(feature = "metrics")]
-              // {
-              //   use agnostic::time::Instant;
-
-              //   metrics::counter!("memberlist.packet.bytes.processing", self.metric_labels.iter()).increment(start.elapsed().as_secs_f64().round() as u64);
-              // }
-
-              if let Err(e) = packet_tx.send(Packet::new(addr, start, Bytes::copy_from_slice(&buf[..n]))).await {
-                tracing::error!(local=%local_addr, from=%addr, err = %e, "memberlist_net.packet: failed to send packet");
-              }
-
-              #[cfg(feature = "metrics")]
-              metrics::counter!("memberlist.packet.received", self.metric_labels.iter()).increment(n as u64);
+      let fut1 = self.shutdown_rx.recv();
+      let fut2 = async {
+        match socket.recv_from(&mut buf).await {
+          Ok((n, addr)) => {
+            // Check the length - it needs to have at least one byte to be a
+            // proper message.
+            if n < 1 {
+              tracing::error!(local=%local_addr, from=%addr, err = "memberlist_net.packet.processor: UDP packet too short (0 bytes)");
+              return ControlFlow::Continue(());
             }
-            Err(e) => {
-              if shutdown.load(Ordering::SeqCst) {
-                break;
-              }
 
-              tracing::error!(local=%local_addr, err = %e, "memberlist_net.packet: error reading UDP packet");
-              continue;
+            tracing::trace!(local=%local_addr, from=%addr, packet=?&buf[..n], "memberlist_net.packet.processor");
+
+            let start = <T::Runtime as RuntimeLite>::now();
+
+            // #[cfg(feature = "metrics")]
+            // {
+            //   use agnostic::time::Instant;
+
+            //   metrics::counter!("memberlist.packet.bytes.processing", self.metric_labels.iter()).increment(start.elapsed().as_secs_f64().round() as u64);
+            // }
+
+            if let Err(e) = packet_tx
+              .send(Packet::new(addr, start, Bytes::copy_from_slice(&buf[..n])))
+              .await
+            {
+              tracing::error!(local=%local_addr, from=%addr, err = %e, "memberlist_net.packet: failed to send packet");
             }
-          };
+
+            #[cfg(feature = "metrics")]
+            metrics::counter!("memberlist.packet.received", self.metric_labels.iter())
+              .increment(n as u64);
+            ControlFlow::Continue(())
+          }
+          Err(e) => {
+            if shutdown.load(Ordering::SeqCst) {
+              return ControlFlow::Break(());
+            }
+
+            tracing::error!(local=%local_addr, err = %e, "memberlist_net.packet: error reading UDP packet");
+            ControlFlow::Continue(())
+          }
         }
+      };
+
+      futures::pin_mut!(fut1, fut2);
+
+      match futures::future::select(fut1, fut2).await {
+        futures::future::Either::Left((_, _)) => break,
+        futures::future::Either::Right((flow, _)) => match flow {
+          ControlFlow::Continue(_) => continue,
+          ControlFlow::Break(_) => break,
+        },
       }
     }
     drop(socket);

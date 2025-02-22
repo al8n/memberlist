@@ -591,13 +591,13 @@ impl ProtoDecoder {
 
     let tag = unencrypted_buf[0];
     let payload_without_checksum = if tag == CHECKSUMED_MESSAGE_TAG {
-      cfg_checksum! {
-        @if {{
-          Self::dechecksum(unencrypted_buf)?
-        }} @else {{
-          return Err(ProtoDecoderError::ChecksumDisabled);
-        }}
+      #[cfg(checksum)]
+      {
+        Self::dechecksum(unencrypted_buf)?
       }
+
+      #[cfg(not(checksum))]
+      return Err(ProtoDecoderError::ChecksumDisabled);
     } else {
       unencrypted_buf
     };
@@ -608,27 +608,27 @@ impl ProtoDecoder {
 
     let tag = payload_without_checksum[0];
     if tag == COMPRESSED_MESSAGE_TAG {
-      cfg_compression! {
-        @if {{
-          if payload_without_checksum.len() > self.offload_size {
-            #[cfg(feature = "rayon")]
-            return Self::decompress_on_rayon(payload_without_checksum)
-              .await
-              .map_err(Into::into);
-
-            #[cfg(not(feature = "rayon"))]
-            return Self::decompress_on_blocking::<RT>(payload_without_checksum)
-              .await
-              .map_err(Into::into);
-          }
-
-          return Self::decompress(payload_without_checksum)
-            .map(BytesMut::freeze)
+      #[cfg(compression)]
+      {
+        if payload_without_checksum.len() > self.offload_size {
+          #[cfg(feature = "rayon")]
+          return Self::decompress_on_rayon(payload_without_checksum)
+            .await
             .map_err(Into::into);
-        }} @else {{
-          return Err(ProtoDecoderError::CompressionDisabled.into());
-        }}
+
+          #[cfg(not(feature = "rayon"))]
+          return Self::decompress_on_blocking::<RT>(payload_without_checksum)
+            .await
+            .map_err(Into::into);
+        }
+
+        return Self::decompress(payload_without_checksum)
+          .map(BytesMut::freeze)
+          .map_err(Into::into);
       }
+
+      #[cfg(not(compression))]
+      return Err(ProtoDecoderError::CompressionDisabled.into());
     }
 
     let _ = auth_data;
@@ -636,13 +636,7 @@ impl ProtoDecoder {
     Ok(payload_without_checksum.freeze())
   }
 
-  #[cfg(any(
-    feature = "crc32",
-    feature = "xxhash32",
-    feature = "xxhash64",
-    feature = "xxhash3",
-    feature = "murmur3",
-  ))]
+  #[cfg(checksum)]
   fn dechecksum(mut buf: BytesMut) -> Result<BytesMut, ProtoDecoderError> {
     if buf.remaining() < super::CHECKSUMED_MESSAGE_HEADER_SIZE {
       return Err(DecodeError::buffer_underflow().into());
@@ -675,15 +669,7 @@ impl ProtoDecoder {
     Ok(payload_with_checksum.split_to(payload_len))
   }
 
-  #[cfg(all(
-    any(
-      feature = "zstd",
-      feature = "lz4",
-      feature = "snappy",
-      feature = "brotli",
-    ),
-    feature = "rayon"
-  ))]
+  #[cfg(all(compression, feature = "rayon"))]
   async fn decompress_on_rayon(buf: BytesMut) -> Result<Bytes, ProtoDecoderError> {
     use futures_channel::oneshot;
 
@@ -701,15 +687,7 @@ impl ProtoDecoder {
     }
   }
 
-  #[cfg(all(
-    any(
-      feature = "zstd",
-      feature = "lz4",
-      feature = "snappy",
-      feature = "brotli",
-    ),
-    not(feature = "rayon")
-  ))]
+  #[cfg(all(compression, not(feature = "rayon")))]
   async fn decompress_on_blocking<RT>(buf: BytesMut) -> Result<Bytes, ProtoDecoderError>
   where
     RT: agnostic_lite::RuntimeLite,
@@ -869,13 +847,13 @@ impl ProtoDecoder {
 
     let tag = buf[0];
     let payload_without_checksum = if tag == CHECKSUMED_MESSAGE_TAG {
-      cfg_checksum! {
-        @if {{
-          Self::dechecksum(buf)?
-        }} @else {{
-          return Err(ProtoDecoderError::ChecksumDisabled);
-        }}
+      #[cfg(checksum)]
+      {
+        Self::dechecksum(buf)?
       }
+
+      #[cfg(not(checksum))]
+      return Err(ProtoDecoderError::ChecksumDisabled);
     } else {
       buf
     };
@@ -886,13 +864,11 @@ impl ProtoDecoder {
 
     let tag = payload_without_checksum[0];
     if tag == COMPRESSED_MESSAGE_TAG {
-      cfg_compression! {
-        @if {{
-          return Self::decompress(payload_without_checksum);
-        }} @else {{
-          return Err(ProtoDecoderError::CompressionDisabled);
-        }}
-      }
+      #[cfg(compression)]
+      return Self::decompress(payload_without_checksum);
+
+      #[cfg(not(compression))]
+      return Err(ProtoDecoderError::CompressionDisabled);
     }
 
     Ok(payload_without_checksum)

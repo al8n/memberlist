@@ -149,7 +149,7 @@ where
         queue!(self.msg.from)
       }
       msg => {
-        tracing::error!(addr = %from, err = "unexpected message type", message_type=msg.ty().kind(), "memberlist.packet");
+        tracing::error!(addr = %from, err = "unexpected message type", message_type=%msg.ty(), "memberlist.packet");
       }
     }
   }

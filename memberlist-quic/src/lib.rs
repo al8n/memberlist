@@ -18,7 +18,7 @@ use std::{
 use agnostic_lite::{time::Instant, AsyncSpawner, RuntimeLite};
 use atomic_refcell::AtomicRefCell;
 use crossbeam_skiplist::SkipMap;
-use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
+use futures::{stream::FuturesUnordered, StreamExt};
 use memberlist_core::proto::{Data, Payload, SmallVec};
 pub use memberlist_core::{
   proto::{CIDRsPolicy, Label, LabelError, ProtoReader},
@@ -266,30 +266,31 @@ where
     max_conn_idle: Duration,
   ) {
     loop {
-      futures::select! {
-        _ = interval.next().fuse() => {
-          for ent in pool.iter() {
-            let (deadline, conn) = ent.value();
-            if max_conn_idle == Duration::ZERO {
-              if conn.is_closed().await {
-                let _ = conn.close().await;
-                ent.remove();
-              }
-              continue;
-            }
+      let fut1 = shutdown_rx.recv();
+      let fut2 = async {
+        interval.next().await;
 
-            if deadline.elapsed() >= max_conn_idle || conn.is_closed().await {
+        for ent in pool.iter() {
+          let (deadline, conn) = ent.value();
+          if max_conn_idle == Duration::ZERO {
+            if conn.is_closed().await {
               let _ = conn.close().await;
               ent.remove();
             }
+            continue;
+          }
+
+          if deadline.elapsed() >= max_conn_idle || conn.is_closed().await {
+            let _ = conn.close().await;
+            ent.remove();
           }
         }
-        _ = shutdown_rx.recv().fuse() => {
-          for ent in pool.iter() {
-            let _ = ent.value().1.close().await;
-          }
-          return;
-        }
+      };
+
+      futures::pin_mut!(fut1, fut2);
+      match futures::future::select(fut1, fut2).await {
+        futures::future::Either::Left(_) => break,
+        futures::future::Either::Right(_) => {}
       }
     }
   }

@@ -1,4 +1,5 @@
 use std::{
+  ops::ControlFlow,
   sync::{
     atomic::{AtomicIsize, AtomicU32, Ordering},
     Arc,
@@ -1011,43 +1012,55 @@ where
     let delegate = self.delegate.as_ref();
 
     // Wait for response or round-trip-time.
-    futures::select! {
-      v = ack_rx.recv().fuse() => {
-        match v {
-          Ok(v) => {
-            if v.complete {
-              if let Some(delegate) = delegate {
-                let rtt = v.timestamp.elapsed();
-                tracing::trace!(local = %self.inner.id, remote = %target.id(), "memberlist.state: notify ping complete ack");
-                delegate.notify_ping_complete(target.server.cheap_clone(), rtt, v.payload).await;
-              }
-
-              return;
+    let fut1 = async {
+      match ack_rx.recv().await {
+        Ok(v) => {
+          if v.complete {
+            if let Some(delegate) = delegate {
+              let rtt = v.timestamp.elapsed();
+              tracing::trace!(local = %self.inner.id, remote = %target.id(), "memberlist.state: notify ping complete ack");
+              delegate
+                .notify_ping_complete(target.server.cheap_clone(), rtt, v.payload)
+                .await;
             }
 
-            // As an edge case, if we get a timeout, we need to re-enqueue it
-            // here to break out of the select below.
-            if !v.complete {
-              if let Err(e) = ack_tx.send(v).await {
-                tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to re-enqueue UDP ping ack");
-              }
+            return ControlFlow::Break(());
+          }
+
+          // As an edge case, if we get a timeout, we need to re-enqueue it
+          // here to break out of the select below.
+          if !v.complete {
+            if let Err(e) = ack_tx.send(v).await {
+              tracing::error!(local = %self.inner.id, remote = %target.id(), err=%e, "memberlist.state: failed to re-enqueue UDP ping ack");
             }
           }
-          Err(e) => {
-            // This branch should never be reached, if there's an error in your log, please report an issue.
-            tracing::debug!(local = %self.inner.id, remote = %target.id(), err = %e, "memberlist.state: failed unreliable connection ping (ack channel closed)");
-          }
+          ControlFlow::Continue(())
         }
-      },
-      _ = <T::Runtime as RuntimeLite>::sleep(self.inner.opts.probe_timeout).fuse() => {
-        // Note that we don't scale this timeout based on awareness and
-        // the health score. That's because we don't really expect waiting
-        // longer to help get UDP through. Since health does extend the
-        // probe interval it will give the TCP fallback more time, which
-        // is more active in dealing with lost packets, and it gives more
-        // time to wait for indirect acks/nacks.
-        tracing::debug!(local = %self.inner.id, remote = %target.id(), "memberlist.state: failed unreliable connection ping (timeout reached)");
+        Err(e) => {
+          // This branch should never be reached, if there's an error in your log, please report an issue.
+          tracing::debug!(local = %self.inner.id, remote = %target.id(), err = %e, "memberlist.state: failed unreliable connection ping (ack channel closed)");
+          ControlFlow::Continue(())
+        }
       }
+    };
+
+    let fut2 = async {
+      <T::Runtime as RuntimeLite>::sleep(self.inner.opts.probe_timeout).await;
+      // Note that we don't scale this timeout based on awareness and
+      // the health score. That's because we don't really expect waiting
+      // longer to help get UDP through. Since health does extend the
+      // probe interval it will give the TCP fallback more time, which
+      // is more active in dealing with lost packets, and it gives more
+      // time to wait for indirect acks/nacks.
+      tracing::debug!(local = %self.inner.id, remote = %target.id(), "memberlist.state: failed unreliable connection ping (timeout reached)");
+    };
+
+    futures::pin_mut!(fut1, fut2);
+
+    if let futures::future::Either::Left((ControlFlow::Break(_), _)) =
+      futures::future::select(fut1, fut2).await
+    {
+      return;
     }
 
     self
@@ -1246,50 +1259,49 @@ where
   /// Invoked every GossipInterval period to broadcast our gossip
   /// messages to a few random nodes.
   async fn gossip(&self, shutdown_rx: &async_channel::Receiver<()>) -> bool {
-    futures::select_biased! {
-      _ = shutdown_rx.recv().fuse() => true,
-      default => {
-        #[cfg(feature = "metrics")]
-        let now = <T::Runtime as RuntimeLite>::now();
-        #[cfg(feature = "metrics")]
-        scopeguard::defer!(
-          metrics::histogram!("memberlist.gossip", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
-        );
+    let fut1 = shutdown_rx.recv();
+    let fut2 = async {
+      #[cfg(feature = "metrics")]
+      let now = <T::Runtime as RuntimeLite>::now();
+      #[cfg(feature = "metrics")]
+      scopeguard::defer!(
+        metrics::histogram!("memberlist.gossip", self.inner.opts.metric_labels.iter()).record(now.elapsed().as_millis() as f64);
+      );
 
-        // Get some random live, suspect, or recently dead nodes
-        let nodes = {
-          let nodes = self
-            .inner
-            .nodes
-            .read()
-            .await
-            .nodes
-            .iter()
-            .filter_map(|m| {
-              if m.state.id() == &self.inner.id {
-                return None;
-              }
+      // Get some random live, suspect, or recently dead nodes
+      let nodes = {
+        let nodes = self
+          .inner
+          .nodes
+          .read()
+          .await
+          .nodes
+          .iter()
+          .filter_map(|m| {
+            if m.state.id() == &self.inner.id {
+              return None;
+            }
 
-              match m.state.state {
-                State::Alive | State::Suspect => Some(m.state.server.clone()),
-                State::Dead => {
-                  if m.state.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
-                    None
-                  } else {
-                    Some(m.state.server.clone())
-                  }
+            match m.state.state {
+              State::Alive | State::Suspect => Some(m.state.server.clone()),
+              State::Dead => {
+                if m.state.state_change.elapsed() > self.inner.opts.gossip_to_the_dead_time {
+                  None
+                } else {
+                  Some(m.state.server.clone())
                 }
-                _ => None,
               }
-            })
-            .collect::<SmallVec<_>>();
-          random_nodes(self.inner.opts.gossip_nodes, nodes)
-        };
+              _ => None,
+            }
+          })
+          .collect::<SmallVec<_>>();
+        random_nodes(self.inner.opts.gossip_nodes, nodes)
+      };
 
-        // Compute the bytes available
-        let bytes_avail =
-          self.inner.transport.max_packet_size() - self.inner.transport.header_overhead();
-        let mut futs = nodes.into_iter().map(|server| async move {
+      // Compute the bytes available
+      let bytes_avail =
+        self.inner.transport.max_packet_size() - self.inner.transport.header_overhead();
+      let mut futs = nodes.into_iter().map(|server| async move {
           // Get any pending broadcasts
           let msgs = match self
             .get_broadcast_with_prepend(
@@ -1319,9 +1331,15 @@ where
           }
         }).collect::<FuturesUnordered<_>>();
 
-        while futs.next().await.is_some() {}
-        false
-      },
+      while futs.next().await.is_some() {}
+      false
+    };
+
+    futures::pin_mut!(fut1, fut2);
+
+    match futures::future::select(fut1, fut2).await {
+      futures::future::Either::Left((_, _)) => true,
+      futures::future::Either::Right((v, _)) => v,
     }
   }
 
