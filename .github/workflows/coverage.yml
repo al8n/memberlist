@@ -41,11 +41,17 @@ jobs:
             features: "std,metrics,encryption,all-compression,all-checksum,rayon,quickcheck"
             name: "memberlist-proto-with-rayon"
           - crate: memberlist
-            features: "test,tokio,tcp,tls,snappy,crc32,encryption,metrics"
-            name: "memberlist-net-without-rayon"
+            features: "test,tokio,tls,snappy,crc32,encryption,metrics"
+            name: "memberlist-tls-without-rayon"
           - crate: memberlist
-            features: "test,tokio,tcp,tls,snappy,crc32,encryption,metrics,rayon"
-            name: "memberlist-net-with-rayon"
+            features: "test,tokio,tls,snappy,crc32,encryption,metrics,rayon"
+            name: "memberlist-tls-with-rayon"
+          - crate: memberlist
+            features: "test,tokio,tcp,snappy,crc32,encryption,metrics"
+            name: "memberlist-tcp-without-rayon"
+          - crate: memberlist
+            features: "test,tokio,tcp,snappy,crc32,encryption,metrics,rayon"
+            name: "memberlist-tcp-with-rayon"
           - crate: memberlist
             features: "test,tokio,quinn,snappy,metrics"
             name: "memberlist-quinn-without-rayon"
