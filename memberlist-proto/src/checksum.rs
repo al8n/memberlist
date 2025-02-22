@@ -40,6 +40,7 @@ impl FromStr for ChecksumAlgorithm {
           "feature `xxhash64` is disabled".to_string(),
         ));
 
+        #[cfg(feature = "xxhash64")]
         Self::XxHash64
       }
       "xxhash3" | "XxHash3" | "XXHASH3" | "xxh3" => {
@@ -48,6 +49,7 @@ impl FromStr for ChecksumAlgorithm {
           "feature `xxhash3` is disabled".to_string(),
         ));
 
+        #[cfg(feature = "xxhash3")]
         Self::XxHash3
       }
       "murmur3" | "Murmur3" | "MURMUR3" | "MurMur3" => {
@@ -56,6 +58,7 @@ impl FromStr for ChecksumAlgorithm {
           "feature `murmur3` is disabled".to_string(),
         ));
 
+        #[cfg(feature = "murmur3")]
         Self::Murmur3
       }
       val if val.starts_with("unknown") => {
@@ -141,7 +144,7 @@ pub enum ChecksumAlgorithm {
 impl ChecksumAlgorithm {
   #[inline]
   pub(crate) const fn unknown_or_disabled(&self) -> ChecksumError {
-    match self {
+    match *self {
       Self::Unknown(val) => {
         #[cfg(not(all(
           feature = "crc32",
@@ -151,12 +154,12 @@ impl ChecksumAlgorithm {
           feature = "murmur3"
         )))]
         match val {
-          CRC32_TAG => ChecksumError::disabled(Self::Crc32, "crc32"),
-          XXHASH32_TAG => ChecksumError::disabled(Self::XxHash32, "xxhash32"),
-          XXHASH64_TAG => ChecksumError::disabled(Self::XxHash64, "xxhash64"),
-          XXHASH3_TAG => ChecksumError::disabled(Self::XxHash3, "xxhash3"),
-          MURMUR3_TAG => ChecksumError::disabled(Self::Murmur3, "murmur3"),
-          _ => ChecksumError::UnknownAlgorithm(Self::Unknown(*val)),
+          CRC32_TAG => ChecksumError::disabled(Self::Unknown(val), "crc32"),
+          XXHASH32_TAG => ChecksumError::disabled(Self::Unknown(val), "xxhash32"),
+          XXHASH64_TAG => ChecksumError::disabled(Self::Unknown(val), "xxhash64"),
+          XXHASH3_TAG => ChecksumError::disabled(Self::Unknown(val), "xxhash3"),
+          MURMUR3_TAG => ChecksumError::disabled(Self::Unknown(val), "murmur3"),
+          _ => ChecksumError::UnknownAlgorithm(Self::Unknown(val)),
         }
 
         #[cfg(all(
@@ -166,7 +169,7 @@ impl ChecksumAlgorithm {
           feature = "xxhash3",
           feature = "murmur3"
         ))]
-        ChecksumError::UnknownAlgorithm(Self::Unknown(*val))
+        ChecksumError::UnknownAlgorithm(Self::Unknown(val))
       }
       _ => unreachable!(),
     }

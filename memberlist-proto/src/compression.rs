@@ -92,9 +92,13 @@ macro_rules! num_to_enum {
   };
 }
 
+#[allow(unused)]
 const ZSTD_TAG: u8 = 1;
+#[allow(unused)]
 const BROTLI_TAG: u8 = 2;
+#[allow(unused)]
 const LZ4_TAG: u8 = 3;
+#[allow(unused)]
 const SNAPPY_TAG: u8 = 4;
 
 #[cfg(feature = "brotli")]
@@ -398,6 +402,7 @@ impl CompressAlgorithm {
   #[inline]
   pub(super) const fn decode_from_u16(value: u16) -> Self {
     let tag = (value >> 8) as u8;
+    #[cfg(any(feature = "brotli", feature = "zstd"))]
     let extra = value as u8;
 
     match tag {
@@ -414,9 +419,8 @@ impl CompressAlgorithm {
   }
 
   pub(crate) const fn unknown_or_disabled(&self) -> CompressionError {
-    match self {
+    match *self {
       Self::Unknown(value) => {
-        let value = *value;
         #[cfg(not(all(
           feature = "brotli",
           feature = "lz4",
@@ -424,8 +428,7 @@ impl CompressAlgorithm {
           feature = "zstd"
         )))]
         {
-          let tag = (value >> 8) as u8;
-          return match tag {
+          return match value {
             #[cfg(feature = "brotli")]
             BROTLI_TAG => CompressionError::disabled(*self, "brotli"),
             #[cfg(feature = "lz4")]
@@ -488,6 +491,7 @@ impl Data for CompressAlgorithm {
 }
 
 #[inline]
+#[allow(unused)]
 fn parse_or_default<I, O>(s: &str) -> Result<O, I::Err>
 where
   I: core::str::FromStr,

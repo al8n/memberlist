@@ -97,6 +97,7 @@ fn strip<'a>(possible_values: &'a [&'a str], s: &'a str) -> Option<&'a str> {
   possible_values.iter().find_map(|&m| s.strip_prefix(m))
 }
 
+#[allow(unused)]
 #[inline]
 fn trim_parentheses(s: &str) -> Option<&str> {
   s.strip_prefix('(').and_then(|s| s.strip_suffix(')'))
