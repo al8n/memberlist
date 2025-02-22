@@ -1,10 +1,10 @@
 [workspace]
 members = [
-  "memberlist-core",
   "memberlist",
+  "memberlist-core",
   "memberlist-proto",
-  "transports/net",
-  "transports/quic",
+  "memberlist-net",
+  "memberlist-quic",
   "fuzz",
 ]
 resolver = "2"
@@ -70,6 +70,6 @@ arbitrary = { version = "1", default-features = false }
 quickcheck = { version = "1", default-features = false }
 
 memberlist-core = { version = "0.6", path = "memberlist-core", default-features = false }
-memberlist-net = { version = "0.6", path = "transports/net", default-features = false }
+memberlist-net = { version = "0.6", path = "memberlist-net", default-features = false }
 memberlist-proto = { version = "0.1", path = "memberlist-proto", default-features = false }
-memberlist-quic = { version = "0.6", path = "transports/quic", default-features = false }
+memberlist-quic = { version = "0.6", path = "memberlist-quic", default-features = false }
