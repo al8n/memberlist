@@ -116,7 +116,7 @@ where
   pub(crate) async fn send_user_msg(
     &self,
     addr: &T::ResolvedAddress,
-    msg: Bytes,
+    msgs: OneOrMore<Message<T::Id, T::ResolvedAddress>>,
   ) -> Result<(), Error<T, D>> {
     let mut conn = self
       .inner
@@ -128,7 +128,7 @@ where
       .await
       .map_err(Error::transport)?;
     self
-      .send_message(&mut conn, [Message::UserData(msg)])
+      .send_message(&mut conn, msgs)
       .await?;
     conn.close().await.map_err(|e| Error::transport(e.into()))
   }

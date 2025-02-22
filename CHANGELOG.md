@@ -4,6 +4,8 @@
 
 ### Features
 
+- Add `send_many` to let users send multiple packets through unreliable connection.
+- Add `send_many_reliable` to let users send multiple packets through reliable connection.
 - Redesign `Transport` trait, making it easier to implement for users.
 - Rewriting encoding/decoding to support forward and backward compitibility.
 - Support `zstd`, `brotli`, `lz4`, and `snappy` for compressing.
@@ -14,3 +16,7 @@
 - Remove `native-tls` supports
 - Remove `s2n-quic` supports
 - Remove `Wire` trait to simplify `Transport` trait
+
+### Testing
+
+- Add fuzzy testing for encoding/decoding

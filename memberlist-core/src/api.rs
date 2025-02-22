@@ -501,18 +501,33 @@ where
   /// to target a user message at the given node (this does not use the gossip
   /// mechanism). The maximum size of the message depends on the configured
   /// `packet_buffer_size` for this memberlist instance.
+  /// 
+  /// See also [`send_reliable`](Memberlist::send_reliable).
   #[inline]
   pub async fn send(
     &self,
     to: &<T::Resolver as AddressResolver>::ResolvedAddress,
     msg: Bytes,
   ) -> Result<(), Error<T, D>> {
+    self.send_many(to, std::iter::once(msg)).await
+  }
+
+  /// Uses the unreliable packet-oriented interface of the transport
+  /// to target a user message at the given node (this does not use the gossip
+  /// mechanism). The maximum size of the message depends on the configured
+  /// `packet_buffer_size` for this memberlist instance.
+  #[inline]
+  pub async fn send_many(
+    &self,
+    to: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    msgs: impl Iterator<Item = Bytes>,
+  ) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
 
     let stream = self
-      .transport_send_packets(to, [Message::UserData(msg)])
+      .transport_send_packets(to, msgs.map(Message::UserData).collect::<OneOrMore<_>>())
       .await;
     futures::pin_mut!(stream);
     match stream.next().await {
@@ -526,16 +541,31 @@ where
   /// target a user message at the given node (this does not use the gossip
   /// mechanism). Delivery is guaranteed if no error is returned, and there is no
   /// limit on the size of the message.
+  /// 
+  /// See also [`send_many_reliable`](Memberlist::send_many_reliable).
   #[inline]
   pub async fn send_reliable(
     &self,
     to: &<T::Resolver as AddressResolver>::ResolvedAddress,
     msg: Bytes,
   ) -> Result<(), Error<T, D>> {
+    self.send_many_reliable(to, std::iter::once(msg)).await
+  }
+
+  /// Uses the reliable stream-oriented interface of the transport to
+  /// target a user message at the given node (this does not use the gossip
+  /// mechanism). Delivery is guaranteed if no error is returned, and there is no
+  /// limit on the size of the message.
+  #[inline]
+  pub async fn send_many_reliable(
+    &self,
+    to: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    msgs: impl Iterator<Item = Bytes>,
+  ) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
-    self.send_user_msg(to, msg).await
+    self.send_user_msg(to, msgs.map(Message::UserData).collect()).await
   }
 
   /// Initiates a ping to the node with the specified node.
