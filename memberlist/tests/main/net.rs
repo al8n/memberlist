@@ -16,7 +16,7 @@ pub const TEST_KEYS: &[SecretKey] = &[
   SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
 ];
 
-#[allow(unused_imports)]
+#[cfg(feature = "tcp")]
 use memberlist_net::stream_layer::tcp::Tcp;
 
 #[cfg(feature = "tls")]
@@ -31,7 +31,7 @@ macro_rules! test_mods {
       use super::*;
       use crate::tokio_run;
 
-      #[cfg(not(feature = "tls"))]
+      #[cfg(feature = "tcp")]
       $fn!(Tcp<tokio>(
         "tcp",
         ()
@@ -51,7 +51,7 @@ macro_rules! test_mods {
       use super::*;
       use crate::async_std_run;
 
-      #[cfg(not(feature = "tls"))]
+      #[cfg(feature = "tcp")]
       $fn!(Tcp<async_std>(
         "tcp",
         ()
@@ -71,7 +71,7 @@ macro_rules! test_mods {
       use super::*;
       use crate::smol_run;
 
-      #[cfg(not(feature = "tls"))]
+      #[cfg(feature = "tcp")]
       $fn!(Tcp<smol>(
         "tcp",
         ()
