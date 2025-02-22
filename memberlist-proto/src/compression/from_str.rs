@@ -14,8 +14,24 @@ impl FromStr for CompressAlgorithm {
 
   fn from_str(s: &str) -> Result<Self, Self::Err> {
     Ok(match s.trim() {
-      "lz4" | "Lz4" | "LZ4" => Self::Lz4,
-      "snappy" | "Snappy" | "SNAPPY" | "snap" | "Snap" | "SNAP" => Self::Snappy,
+      "lz4" | "Lz4" | "LZ4" => {
+        #[cfg(not(feature = "lz4"))]
+        return Err(ParseCompressAlgorithmError(
+          "feature `lz4` is disabled".to_string(),
+        ));
+
+        #[cfg(feature = "lz4")]
+        Self::Lz4
+      }
+      "snappy" | "Snappy" | "SNAPPY" | "snap" | "Snap" | "SNAP" => {
+        #[cfg(not(feature = "snappy"))]
+        return Err(ParseCompressAlgorithmError(
+          "feature `snappy` is disabled".to_string(),
+        ));
+
+        #[cfg(feature = "snappy")]
+        Self::Snappy
+      }
       val if contains(&["unknown", "Unknown", "UNKNOWN"], val) => {
         let val = strip(&["unknown", "Unknown", "UNKNOWN"], val)
           .unwrap()
@@ -28,31 +44,47 @@ impl FromStr for CompressAlgorithm {
         )
       }
       val if contains(&["brotli", "Brotli", "BROTLI"], val) => {
-        let suffix = strip(&["brotli", "Brotli", "BROTLI"], val).unwrap();
-        let val = trim_parentheses(suffix).unwrap_or("");
+        #[cfg(not(feature = "brotli"))]
+        return Err(ParseCompressAlgorithmError(
+          "feature `brotli` is disabled".to_string(),
+        ));
 
-        if val.is_empty() {
-          Self::Brotli(Default::default())
-        } else {
-          Self::Brotli(
-            val
-              .parse()
-              .map_err(|_| ParseCompressAlgorithmError(val.to_string()))?,
-          )
+        #[cfg(feature = "brotli")]
+        {
+          let suffix = strip(&["brotli", "Brotli", "BROTLI"], val).unwrap();
+          let val = trim_parentheses(suffix).unwrap_or("");
+
+          if val.is_empty() {
+            Self::Brotli(Default::default())
+          } else {
+            Self::Brotli(
+              val
+                .parse()
+                .map_err(|_| ParseCompressAlgorithmError(val.to_string()))?,
+            )
+          }
         }
       }
       val if contains(&["zstd", "Zstd", "ZSTD"], val) => {
-        let suffix = strip(&["zstd", "Zstd", "ZSTD"], val).unwrap();
-        let val = trim_parentheses(suffix).unwrap_or("");
+        #[cfg(not(feature = "zstd"))]
+        return Err(ParseCompressAlgorithmError(
+          "feature `zstd` is disabled".to_string(),
+        ));
 
-        if val.is_empty() {
-          Self::Zstd(Default::default())
-        } else {
-          Self::Zstd(
-            val
-              .parse()
-              .map_err(|_| ParseCompressAlgorithmError(val.to_string()))?,
-          )
+        #[cfg(feature = "zstd")]
+        {
+          let suffix = strip(&["zstd", "Zstd", "ZSTD"], val).unwrap();
+          let val = trim_parentheses(suffix).unwrap_or("");
+
+          if val.is_empty() {
+            Self::Zstd(Default::default())
+          } else {
+            Self::Zstd(
+              val
+                .parse()
+                .map_err(|_| ParseCompressAlgorithmError(val.to_string()))?,
+            )
+          }
         }
       }
       val => return Err(ParseCompressAlgorithmError(val.to_string())),
@@ -83,6 +115,7 @@ mod tests {
 
   #[test]
   fn test_compress_algorithm_from_str() {
+    #[cfg(feature = "lz4")]
     assert_eq!(
       "lz4".parse::<CompressAlgorithm>().unwrap(),
       CompressAlgorithm::Lz4
@@ -92,6 +125,7 @@ mod tests {
       CompressAlgorithm::Unknown(33)
     );
     assert!("unknown".parse::<CompressAlgorithm>().is_err());
+    #[cfg(feature = "brotli")]
     assert_eq!(
       "brotli(11, 22)".parse::<CompressAlgorithm>().unwrap(),
       CompressAlgorithm::Brotli(BrotliAlgorithm::with_quality_and_window(
@@ -99,27 +133,34 @@ mod tests {
         22.into()
       ))
     );
+    #[cfg(feature = "brotli")]
     assert_eq!(
       "brotli".parse::<CompressAlgorithm>().unwrap(),
       CompressAlgorithm::Brotli(BrotliAlgorithm::default())
     );
+    #[cfg(feature = "brotli")]
     assert_eq!(
       "brotli()".parse::<CompressAlgorithm>().unwrap(),
       CompressAlgorithm::Brotli(BrotliAlgorithm::default())
     );
+    #[cfg(feature = "brotli")]
     assert!("brotli(-)".parse::<CompressAlgorithm>().is_err());
+    #[cfg(feature = "zstd")]
     assert_eq!(
       "zstd(3)".parse::<CompressAlgorithm>().unwrap(),
       CompressAlgorithm::Zstd(ZstdCompressionLevel::with_level(3))
     );
+    #[cfg(feature = "zstd")]
     assert_eq!(
       "zstd".parse::<CompressAlgorithm>().unwrap(),
       CompressAlgorithm::Zstd(ZstdCompressionLevel::default())
     );
+    #[cfg(feature = "zstd")]
     assert_eq!(
       "zstd()".parse::<CompressAlgorithm>().unwrap(),
       CompressAlgorithm::Zstd(ZstdCompressionLevel::default())
     );
+    #[cfg(feature = "zstd")]
     assert_eq!(
       "zstd(-)".parse::<CompressAlgorithm>().unwrap(),
       CompressAlgorithm::Zstd(ZstdCompressionLevel::new())

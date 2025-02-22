@@ -20,11 +20,7 @@ mod arbitrary_impl;
   feature = "zstd",
   feature = "lz4",
   feature = "brotli",
-  feature = "deflate",
-  feature = "gzip",
   feature = "snappy",
-  feature = "lzw",
-  feature = "zlib"
 ))]
 mod compression;
 

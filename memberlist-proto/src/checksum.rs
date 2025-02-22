@@ -16,11 +16,48 @@ impl FromStr for ChecksumAlgorithm {
 
   fn from_str(s: &str) -> Result<Self, Self::Err> {
     Ok(match s {
-      "crc32" | "Crc32" | "CRC32" => Self::Crc32,
-      "xxhash32" | "XxHash32" | "XXHASH32" | "xxh32" => Self::XxHash32,
-      "xxhash64" | "XxHash64" | "XXHASH64" | "xxh64" => Self::XxHash64,
-      "xxhash3" | "XxHash3" | "XXHASH3" | "xxh3" => Self::XxHash3,
-      "murmur3" | "Murmur3" | "MURMUR3" | "MurMur3" => Self::Murmur3,
+      "crc32" | "Crc32" | "CRC32" => {
+        #[cfg(not(feature = "crc32"))]
+        return Err(ParseChecksumAlgorithmError(
+          "feature `crc32` is disabled".to_string(),
+        ));
+
+        #[cfg(feature = "crc32")]
+        Self::Crc32
+      }
+      "xxhash32" | "XxHash32" | "XXHASH32" | "xxh32" => {
+        #[cfg(not(feature = "xxhash32"))]
+        return Err(ParseChecksumAlgorithmError(
+          "feature `xxhash32` is disabled".to_string(),
+        ));
+
+        #[cfg(feature = "xxhash32")]
+        Self::XxHash32
+      }
+      "xxhash64" | "XxHash64" | "XXHASH64" | "xxh64" => {
+        #[cfg(not(feature = "xxhash64"))]
+        return Err(ParseChecksumAlgorithmError(
+          "feature `xxhash64` is disabled".to_string(),
+        ));
+
+        Self::XxHash64
+      }
+      "xxhash3" | "XxHash3" | "XXHASH3" | "xxh3" => {
+        #[cfg(not(feature = "xxhash3"))]
+        return Err(ParseChecksumAlgorithmError(
+          "feature `xxhash3` is disabled".to_string(),
+        ));
+
+        Self::XxHash3
+      }
+      "murmur3" | "Murmur3" | "MURMUR3" | "MurMur3" => {
+        #[cfg(not(feature = "murmur3"))]
+        return Err(ParseChecksumAlgorithmError(
+          "feature `murmur3` is disabled".to_string(),
+        ));
+
+        Self::Murmur3
+      }
       val if val.starts_with("unknown") => {
         let val = val.trim_start_matches("unknown(").trim_end_matches(')');
         Self::Unknown(
@@ -73,22 +110,67 @@ impl ChecksumError {
 pub enum ChecksumAlgorithm {
   /// CRC32 IEEE
   #[display("crc32")]
+  #[cfg(feature = "crc32")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "crc32")))]
   Crc32,
   /// XXHash32
   #[display("xxhash32")]
+  #[cfg(feature = "xxhash32")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "xxhash32")))]
   XxHash32,
   /// XXHash64
   #[display("xxhash64")]
+  #[cfg(feature = "xxhash64")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "xxhash64")))]
   XxHash64,
   /// XXHash3
   #[display("xxhash3")]
+  #[cfg(feature = "xxhash3")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "xxhash3")))]
   XxHash3,
   /// Murmur3
   #[display("murmur3")]
+  #[cfg(feature = "murmur3")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "murmur3")))]
   Murmur3,
   /// Unknwon checksum algorithm
   #[display("unknown({_0})")]
   Unknown(u8),
+}
+
+impl ChecksumAlgorithm {
+  #[inline]
+  pub(crate) const fn unknown_or_disabled(&self) -> ChecksumError {
+    match self {
+      Self::Unknown(val) => {
+        #[cfg(not(all(
+          feature = "crc32",
+          feature = "xxhash32",
+          feature = "xxhash64",
+          feature = "xxhash3",
+          feature = "murmur3"
+        )))]
+        match val {
+          CRC32_TAG => ChecksumError::disabled(Self::Crc32, "crc32"),
+          XXHASH32_TAG => ChecksumError::disabled(Self::XxHash32, "xxhash32"),
+          XXHASH64_TAG => ChecksumError::disabled(Self::XxHash64, "xxhash64"),
+          XXHASH3_TAG => ChecksumError::disabled(Self::XxHash3, "xxhash3"),
+          MURMUR3_TAG => ChecksumError::disabled(Self::Murmur3, "murmur3"),
+          _ => ChecksumError::UnknownAlgorithm(Self::Unknown(*val)),
+        }
+
+        #[cfg(all(
+          feature = "crc32",
+          feature = "xxhash32",
+          feature = "xxhash64",
+          feature = "xxhash3",
+          feature = "murmur3"
+        ))]
+        ChecksumError::UnknownAlgorithm(Self::Unknown(*val))
+      }
+      _ => unreachable!(),
+    }
+  }
 }
 
 impl Default for ChecksumAlgorithm {
@@ -124,12 +206,17 @@ const _: () = {
     fn arbitrary(g: &mut quickcheck::Gen) -> Self {
       let val = (u8::arbitrary(g) % Self::MAX.as_u8()) + Self::MIN.as_u8();
       match val {
+        #[cfg(feature = "crc32")]
         CRC32_TAG => Self::Crc32,
+        #[cfg(feature = "xxhash32")]
         XXHASH32_TAG => Self::XxHash32,
+        #[cfg(feature = "xxhash64")]
         XXHASH64_TAG => Self::XxHash64,
+        #[cfg(feature = "xxhash3")]
         XXHASH3_TAG => Self::XxHash3,
+        #[cfg(feature = "murmur3")]
         MURMUR3_TAG => Self::Murmur3,
-        _ => unreachable!(),
+        _ => Self::Unknown(u8::MAX),
       }
     }
   }
@@ -140,10 +227,15 @@ impl ChecksumAlgorithm {
   #[inline]
   pub const fn as_u8(&self) -> u8 {
     match self {
+      #[cfg(feature = "crc32")]
       Self::Crc32 => CRC32_TAG,
+      #[cfg(feature = "xxhash32")]
       Self::XxHash32 => XXHASH32_TAG,
+      #[cfg(feature = "xxhash64")]
       Self::XxHash64 => XXHASH64_TAG,
+      #[cfg(feature = "xxhash3")]
       Self::XxHash3 => XXHASH3_TAG,
+      #[cfg(feature = "murmur3")]
       Self::Murmur3 => MURMUR3_TAG,
       Self::Unknown(v) => *v,
     }
@@ -153,10 +245,15 @@ impl ChecksumAlgorithm {
   #[inline]
   pub fn as_str(&self) -> Cow<'static, str> {
     let val = match self {
+      #[cfg(feature = "crc32")]
       Self::Crc32 => "crc32",
+      #[cfg(feature = "xxhash32")]
       Self::XxHash32 => "xxhash32",
+      #[cfg(feature = "xxhash64")]
       Self::XxHash64 => "xxhash64",
+      #[cfg(feature = "xxhash3")]
       Self::XxHash3 => "xxhash3",
+      #[cfg(feature = "murmur3")]
       Self::Murmur3 => "murmur3",
       Self::Unknown(e) => return Cow::Owned(format!("unknown({})", e)),
     };
@@ -167,10 +264,15 @@ impl ChecksumAlgorithm {
   #[inline]
   pub const fn output_size(&self) -> usize {
     match self {
+      #[cfg(feature = "crc32")]
       Self::Crc32 => 4,
+      #[cfg(feature = "xxhash32")]
       Self::XxHash32 => 4,
+      #[cfg(feature = "xxhash64")]
       Self::XxHash64 => 8,
+      #[cfg(feature = "xxhash3")]
       Self::XxHash3 => 8,
+      #[cfg(feature = "murmur3")]
       Self::Murmur3 => 4,
       Self::Unknown(_) => 0,
     }
@@ -180,10 +282,15 @@ impl ChecksumAlgorithm {
 impl From<u8> for ChecksumAlgorithm {
   fn from(value: u8) -> Self {
     match value {
+      #[cfg(feature = "crc32")]
       CRC32_TAG => Self::Crc32,
+      #[cfg(feature = "xxhash32")]
       XXHASH32_TAG => Self::XxHash32,
+      #[cfg(feature = "xxhash64")]
       XXHASH64_TAG => Self::XxHash64,
+      #[cfg(feature = "xxhash3")]
       XXHASH3_TAG => Self::XxHash3,
+      #[cfg(feature = "murmur3")]
       MURMUR3_TAG => Self::Murmur3,
       _ => Self::Unknown(value),
     }
@@ -200,54 +307,21 @@ impl ChecksumAlgorithm {
   /// Calculate the checksum of the data using the specified algorithm.
   pub fn checksum(&self, data: &[u8]) -> Result<u64, ChecksumError> {
     Ok(match self {
-      Self::Crc32 => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "crc32")] {
-            crc32fast::hash(data) as u64
-          } else {
-            return Err(ChecksumError::disabled(*self, "crc32"));
-          }
-        }
-      }
-      Self::XxHash32 => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "xxhash32")] {
-            xxhash_rust::xxh32::xxh32(data, 0) as u64
-          } else {
-            return Err(ChecksumError::disabled(*self, "xxhash32"));
-          }
-        }
-      }
-      Self::XxHash64 => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "xxhash64")] {
-            xxhash_rust::xxh64::xxh64(data, 0)
-          } else {
-            return Err(ChecksumError::disabled(*self, "xxhash64"));
-          }
-        }
-      }
-      Self::XxHash3 => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "xxhash3")] {
-            xxhash_rust::xxh3::xxh3_64(data)
-          } else {
-            return Err(ChecksumError::disabled(*self, "xxhash3"));
-          }
-        }
-      }
+      #[cfg(feature = "crc32")]
+      Self::Crc32 => crc32fast::hash(data) as u64,
+      #[cfg(feature = "xxhash32")]
+      Self::XxHash32 => xxhash_rust::xxh32::xxh32(data, 0) as u64,
+      #[cfg(feature = "xxhash64")]
+      Self::XxHash64 => xxhash_rust::xxh64::xxh64(data, 0),
+      #[cfg(feature = "xxhash3")]
+      Self::XxHash3 => xxhash_rust::xxh3::xxh3_64(data),
+      #[cfg(feature = "murmur3")]
       Self::Murmur3 => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "murmur3")] {
-            use core::hash::Hasher as _;
+        use core::hash::Hasher as _;
 
-            let mut hasher = hash32::Murmur3Hasher::default();
-            hasher.write(data);
-            hasher.finish()
-          } else {
-            return Err(ChecksumError::disabled(*self, "murmur3"));
-          }
-        }
+        let mut hasher = hash32::Murmur3Hasher::default();
+        hasher.write(data);
+        hasher.finish()
       }
       algo => return Err(ChecksumError::UnknownAlgorithm(*algo)),
     })
@@ -291,22 +365,27 @@ const _: () = {
 
 #[test]
 fn test_checksum_algorithm_from_str() {
+  #[cfg(feature = "crc32")]
   assert_eq!(
     "crc32".parse::<ChecksumAlgorithm>().unwrap(),
     ChecksumAlgorithm::Crc32
   );
+  #[cfg(feature = "xxhash32")]
   assert_eq!(
     "xxhash32".parse::<ChecksumAlgorithm>().unwrap(),
     ChecksumAlgorithm::XxHash32
   );
+  #[cfg(feature = "xxhash64")]
   assert_eq!(
     "xxhash64".parse::<ChecksumAlgorithm>().unwrap(),
     ChecksumAlgorithm::XxHash64
   );
+  #[cfg(feature = "xxhash3")]
   assert_eq!(
     "xxhash3".parse::<ChecksumAlgorithm>().unwrap(),
     ChecksumAlgorithm::XxHash3
   );
+  #[cfg(feature = "murmur3")]
   assert_eq!(
     "murmur3".parse::<ChecksumAlgorithm>().unwrap(),
     ChecksumAlgorithm::Murmur3

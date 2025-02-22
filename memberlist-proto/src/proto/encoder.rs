@@ -19,10 +19,7 @@ use super::{
   feature = "brotli",
   feature = "snappy",
 ))]
-use super::{
-  super::{CompressAlgorithm, CompressionError},
-  COMPRESSED_MESSAGE_TAG,
-};
+use super::{super::CompressAlgorithm, COMPRESSED_MESSAGE_TAG};
 
 #[cfg(any(
   feature = "crc32",
@@ -31,10 +28,7 @@ use super::{
   feature = "xxhash3",
   feature = "murmur3",
 ))]
-use super::{
-  super::{ChecksumAlgorithm, ChecksumError},
-  CHECKSUMED_MESSAGE_TAG,
-};
+use super::{super::ChecksumAlgorithm, CHECKSUMED_MESSAGE_TAG};
 
 use super::{BATCH_OVERHEAD, MAX_MESSAGES_PER_BATCH};
 
@@ -63,6 +57,7 @@ smallvec_wrapper::smallvec_wrapper!(
 
 /// The hint of how encrypted payload.
 #[cfg(feature = "encryption")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncryptionHint {
   header_offset: usize,
@@ -131,6 +126,16 @@ impl EncryptionHint {
   feature = "xxhash3",
   feature = "murmur3",
 ))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3",
+  )))
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChecksumHint {
   header_offset: usize,
@@ -196,6 +201,15 @@ impl ChecksumHint {
   feature = "brotli",
   feature = "snappy",
 ))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(any(
+    feature = "zstd",
+    feature = "lz4",
+    feature = "brotli",
+    feature = "snappy",
+  )))
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressHint {
   header_offset: usize,
@@ -667,13 +681,7 @@ where
       offset += EncryptionHint::HEADER_SIZE + algo.nonce_size();
     }
 
-    #[cfg(any(
-      feature = "crc32",
-      feature = "xxhash32",
-      feature = "xxhash64",
-      feature = "xxhash3",
-      feature = "murmur3",
-    ))]
+    #[cfg(checksum)]
     if let Some(checksum) = self.checksum {
       hint.max_output_size += ChecksumHint::HEADER_SIZE + checksum.output_size();
       hint.checksum_hint = Some(
@@ -684,12 +692,7 @@ where
       offset += ChecksumHint::HEADER_SIZE;
     }
 
-    #[cfg(any(
-      feature = "zstd",
-      feature = "lz4",
-      feature = "brotli",
-      feature = "snappy",
-    ))]
+    #[cfg(compression)]
     if let Some(compress) = &self.compress {
       if hint.max_output_size >= self.compression_threshold {
         let max_compressed_output_size = compress.max_compress_len(hint.input_size)?;
@@ -741,78 +744,12 @@ where
   fn valid(&self) -> Result<(), ProtoEncoderError> {
     #[cfg(compression)]
     if let Some(ref algo) = self.compress {
-      match algo {
-        CompressAlgorithm::Zstd(_) => {
-          #[cfg(not(feature = "zstd"))]
-          return Err(ProtoEncoderError::Compress(CompressionError::disabled(
-            *algo, "zstd",
-          )));
-        }
-        CompressAlgorithm::Lz4 { .. } => {
-          #[cfg(not(feature = "lz4"))]
-          return Err(ProtoEncoderError::Compress(CompressionError::disabled(
-            *algo, "lz4",
-          )));
-        }
-        CompressAlgorithm::Brotli(_) => {
-          #[cfg(not(feature = "brotli"))]
-          return Err(ProtoEncoderError::Compress(CompressionError::disabled(
-            *algo, "brotli",
-          )));
-        }
-        CompressAlgorithm::Snappy => {
-          #[cfg(not(feature = "snappy"))]
-          return Err(ProtoEncoderError::Compress(CompressionError::disabled(
-            *algo, "snappy",
-          )));
-        }
-        CompressAlgorithm::Unknown(_) => {
-          return Err(ProtoEncoderError::Compress(
-            CompressionError::UnknownAlgorithm(*algo),
-          ));
-        }
-      }
+      return Err(ProtoEncoderError::Compress(algo.unknown_or_disabled()));
     }
 
     #[cfg(checksum)]
     if let Some(ref algo) = self.checksum {
-      match algo {
-        ChecksumAlgorithm::Crc32 => {
-          #[cfg(not(feature = "crc32"))]
-          return Err(ProtoEncoderError::Checksum(ChecksumError::disabled(
-            *algo, "crc32",
-          )));
-        }
-        ChecksumAlgorithm::XxHash32 => {
-          #[cfg(not(feature = "xxhash32"))]
-          return Err(ProtoEncoderError::Checksum(ChecksumError::disabled(
-            *algo, "xxhash32",
-          )));
-        }
-        ChecksumAlgorithm::XxHash64 => {
-          #[cfg(not(feature = "xxhash64"))]
-          return Err(ProtoEncoderError::Checksum(ChecksumError::disabled(
-            *algo, "xxhash64",
-          )));
-        }
-        ChecksumAlgorithm::XxHash3 => {
-          #[cfg(not(feature = "xxhash3"))]
-          return Err(ProtoEncoderError::Checksum(ChecksumError::disabled(
-            *algo, "xxhash3",
-          )));
-        }
-        ChecksumAlgorithm::Murmur3 => {
-          #[cfg(not(feature = "murmur3"))]
-          return Err(ProtoEncoderError::Checksum(ChecksumError::disabled(
-            *algo, "murmur3",
-          )));
-        }
-        ChecksumAlgorithm::Unknown(_) => {
-          return Err(ProtoEncoderError::Checksum(
-            ChecksumError::UnknownAlgorithm(*algo),
-          ));
-        }
-      }
+      return Err(ProtoEncoderError::Checksum(algo.unknown_or_disabled()));
     }
 
     Ok(())

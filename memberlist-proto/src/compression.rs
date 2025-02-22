@@ -96,14 +96,19 @@ const BROTLI_TAG: u8 = 2;
 const LZ4_TAG: u8 = 3;
 const SNAPPY_TAG: u8 = 4;
 
+#[cfg(feature = "brotli")]
 mod brotli_impl;
 mod error;
 mod from_str;
+#[cfg(feature = "zstd")]
 mod zstd_impl;
 
+#[cfg(feature = "brotli")]
 pub use brotli_impl::*;
 pub use error::*;
 pub use from_str::*;
+
+#[cfg(feature = "zstd")]
 pub use zstd_impl::*;
 
 #[cfg(any(feature = "quickcheck", test))]
@@ -178,15 +183,23 @@ const _: () = {
 pub enum CompressAlgorithm {
   /// Brotli
   #[display("brotli{_0}")]
+  #[cfg(feature = "brotli")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "brotli")))]
   Brotli(BrotliAlgorithm),
   /// LZ4
   #[display("lz4")]
+  #[cfg(feature = "lz4")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "lz4")))]
   Lz4,
   /// Snappy
   #[display("snappy")]
+  #[cfg(feature = "snappy")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "snappy")))]
   Snappy,
   /// Zstd
   #[display("zstd({_0})")]
+  #[cfg(feature = "zstd")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "zstd")))]
   Zstd(ZstdCompressionLevel),
   /// Unknwon compressioned algorithm
   #[display("unknown({_0})")]
@@ -206,9 +219,13 @@ const _: () = {
     fn arbitrary(g: &mut quickcheck::Gen) -> Self {
       let val = (u8::arbitrary(g) % Self::MAX) + Self::MIN;
       match val {
+        #[cfg(feature = "zstd")]
         ZSTD_TAG => Self::Zstd(ZstdCompressionLevel::arbitrary(g)),
+        #[cfg(feature = "brotli")]
         BROTLI_TAG => Self::Brotli(BrotliAlgorithm::arbitrary(g)),
+        #[cfg(feature = "lz4")]
         LZ4_TAG => Self::Lz4,
+        #[cfg(feature = "snappy")]
         SNAPPY_TAG => Self::Snappy,
         _ => unreachable!(),
       }
@@ -238,47 +255,28 @@ impl CompressAlgorithm {
   /// Decompresses the given buffer.
   pub fn decompress_to(&self, src: &[u8], dst: &mut [u8]) -> Result<usize, CompressionError> {
     match self {
+      #[cfg(feature = "brotli")]
       Self::Brotli(_) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "brotli")] {
-            let mut reader = brotli::Decompressor::new(src, BROTLI_BUFFER_SIZE);
-            std::io::copy(&mut reader, &mut std::io::Cursor::new(dst))
-              .map(|bytes| bytes as usize)
-              .map_err(CompressionError::brotli_decompress_error)
-          } else {
-            Err(CompressionError::disabled(*self, "brotli"))
-          }
-        }
+        let mut reader = brotli::Decompressor::new(src, BROTLI_BUFFER_SIZE);
+        std::io::copy(&mut reader, &mut std::io::Cursor::new(dst))
+          .map(|bytes| bytes as usize)
+          .map_err(CompressionError::brotli_decompress_error)
       }
+      #[cfg(feature = "lz4")]
       Self::Lz4 => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "lz4")] {
-            lz4_flex::decompress_into(src, dst).map_err(CompressionError::lz4_decompress_error)
-          } else {
-            Err(CompressionError::disabled(*self, "lz4"))
-          }
-        }
+        lz4_flex::decompress_into(src, dst).map_err(CompressionError::lz4_decompress_error)
       }
-      Self::Snappy => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "snappy")] {
-            snap::raw::Decoder::new().decompress(src, dst).map_err(CompressionError::snappy_decompress_error)
-          } else {
-            Err(CompressionError::disabled(*self, "snappy"))
-          }
-        }
-      }
+      #[cfg(feature = "snappy")]
+      Self::Snappy => snap::raw::Decoder::new()
+        .decompress(src, dst)
+        .map_err(CompressionError::snappy_decompress_error),
+      #[cfg(feature = "zstd")]
       Self::Zstd(_) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "zstd")] {
-            let mut decoder = zstd::Decoder::new(std::io::Cursor::new(src)).map_err(CompressionError::zstd_decompress_error)?;
-            std::io::copy(&mut decoder, &mut std::io::Cursor::new(dst))
-              .map(|bytes| bytes as usize)
-              .map_err(CompressionError::zstd_decompress_error)
-          } else {
-            Err(CompressionError::disabled(*self, "zstd"))
-          }
-        }
+        let mut decoder = zstd::Decoder::new(std::io::Cursor::new(src))
+          .map_err(CompressionError::zstd_decompress_error)?;
+        std::io::copy(&mut decoder, &mut std::io::Cursor::new(dst))
+          .map(|bytes| bytes as usize)
+          .map_err(CompressionError::zstd_decompress_error)
       }
       algo => Err(CompressionError::UnknownAlgorithm(*algo)),
     }
@@ -289,53 +287,27 @@ impl CompressAlgorithm {
   /// This is useful when you want to pre-allocate the buffer before compressing.
   pub fn max_compress_len(&self, input_size: usize) -> Result<usize, CompressionError> {
     Ok(match self {
+      #[cfg(feature = "brotli")]
       Self::Brotli(_) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "brotli")] {
-            // TODO(al8n): The brotli::enc::BrotliEncoderMaxCompressedSize is not working as expected.
-            // In fuzzy tests, it is returning a value less than the actual compressed size.
-            let num_large_blocks = (input_size >> 4) + 12;
-            let overhead = 2 + (4 * num_large_blocks) + 3 + 1;
-            let result = input_size + overhead;
-            if input_size == 0 {
-              2
-            } else if result < input_size {
-              input_size
-            } else {
-              result
-            }
-          } else {
-            return Err(CompressionError::disabled(*self, "brotli"));
-          }
+        // TODO(al8n): The brotli::enc::BrotliEncoderMaxCompressedSize is not working as expected.
+        // In fuzzy tests, it is returning a value less than the actual compressed size.
+        let num_large_blocks = (input_size >> 4) + 12;
+        let overhead = 2 + (4 * num_large_blocks) + 3 + 1;
+        let result = input_size + overhead;
+        if input_size == 0 {
+          2
+        } else if result < input_size {
+          input_size
+        } else {
+          result
         }
       }
-      Self::Lz4 => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "lz4")] {
-            lz4_flex::block::get_maximum_output_size(input_size)
-          } else {
-            return Err(CompressionError::disabled(*self, "lz4"));
-          }
-        }
-      }
-      Self::Snappy => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "snappy")] {
-            snap::raw::max_compress_len(input_size)
-          } else {
-            return Err(CompressionError::disabled(*self, "snappy"));
-          }
-        }
-      }
-      Self::Zstd(_) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "zstd")] {
-            zstd::zstd_safe::compress_bound(input_size)
-          } else {
-            return Err(CompressionError::disabled(*self, "zstd"));
-          }
-        }
-      }
+      #[cfg(feature = "lz4")]
+      Self::Lz4 => lz4_flex::block::get_maximum_output_size(input_size),
+      #[cfg(feature = "snappy")]
+      Self::Snappy => snap::raw::max_compress_len(input_size),
+      #[cfg(feature = "zstd")]
+      Self::Zstd(_) => zstd::zstd_safe::compress_bound(input_size),
       Self::Unknown(_) => return Err(CompressionError::UnknownAlgorithm(*self)),
     })
   }
@@ -345,60 +317,39 @@ impl CompressAlgorithm {
   /// The `dst` buffer should be pre-allocated with the [`max_compress_len`](Self::max_compress_len) method.
   pub fn compress_to(&self, src: &[u8], dst: &mut [u8]) -> Result<usize, CompressionError> {
     match self {
+      #[cfg(feature = "brotli")]
       CompressAlgorithm::Brotli(_algo) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "brotli")] {
-            use std::io::Write;
+        use std::io::Write;
 
-            let mut compressor = brotli::CompressorWriter::new(
-              std::io::Cursor::new(dst),
-              BROTLI_BUFFER_SIZE,
-              _algo.quality() as u8 as u32,
-              _algo.window() as u8 as u32,
-            );
+        let mut compressor = brotli::CompressorWriter::new(
+          std::io::Cursor::new(dst),
+          BROTLI_BUFFER_SIZE,
+          _algo.quality() as u8 as u32,
+          _algo.window() as u8 as u32,
+        );
 
-            compressor.write_all(src)
-              .map(|_| {
-                compressor.into_inner().position() as usize
-              })
-              .map_err(CompressionError::brotli_compress_error)
-          } else {
-            Err(CompressionError::disabled(*self, "brotli"))
-          }
-        }
+        compressor
+          .write_all(src)
+          .map(|_| compressor.into_inner().position() as usize)
+          .map_err(CompressionError::brotli_compress_error)
       }
+      #[cfg(feature = "lz4")]
       CompressAlgorithm::Lz4 => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "lz4")] {
-            lz4_flex::compress_into(src, dst)
-              .map_err(CompressionError::lz4_compress_error)
-          } else {
-            Err(CompressionError::disabled(*self, "lz4"))
-          }
-        }
+        lz4_flex::compress_into(src, dst).map_err(CompressionError::lz4_compress_error)
       }
+      #[cfg(feature = "snappy")]
       CompressAlgorithm::Snappy => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "snappy")] {
-            let mut encoder = snap::raw::Encoder::new();
-            encoder.compress(src, dst)
-              .map_err(CompressionError::snappy_compress_error)
-          } else {
-            Err(CompressionError::disabled(*self, "snappy"))
-          }
-        }
+        let mut encoder = snap::raw::Encoder::new();
+        encoder
+          .compress(src, dst)
+          .map_err(CompressionError::snappy_compress_error)
       }
+      #[cfg(feature = "zstd")]
       CompressAlgorithm::Zstd(_level) => {
-        cfg_if::cfg_if! {
-          if #[cfg(feature = "zstd")] {
-            let mut cursor = std::io::Cursor::new(dst);
-            zstd::stream::copy_encode(src, &mut cursor, _level.level() as i32)
-              .map(|_| cursor.position() as usize)
-              .map_err(CompressionError::zstd_compress_error)
-          } else {
-            Err(CompressionError::disabled(*self, "zstd"))
-          }
-        }
+        let mut cursor = std::io::Cursor::new(dst);
+        zstd::stream::copy_encode(src, &mut cursor, _level.level() as i32)
+          .map(|_| cursor.position() as usize)
+          .map_err(CompressionError::zstd_compress_error)
       }
       algo => Err(CompressionError::UnknownAlgorithm(*algo)),
     }
@@ -408,9 +359,13 @@ impl CompressAlgorithm {
   #[inline]
   pub fn as_str(&self) -> Cow<'_, str> {
     match self {
+      #[cfg(feature = "brotli")]
       Self::Brotli(algo) => return Cow::Owned(format!("brotli{algo}")),
+      #[cfg(feature = "lz4")]
       Self::Lz4 => "lz4",
+      #[cfg(feature = "snappy")]
       Self::Snappy => "snappy",
+      #[cfg(feature = "zstd")]
       Self::Zstd(val) => return Cow::Owned(format!("zstd({})", val.level())),
       Self::Unknown(val) => return Cow::Owned(format!("unknown({val})")),
     }
@@ -423,9 +378,13 @@ impl CompressAlgorithm {
   #[inline]
   pub(super) const fn encode_to_u16(&self) -> u16 {
     let (tag, extra) = match self {
+      #[cfg(feature = "brotli")]
       Self::Brotli(algo) => (BROTLI_TAG, algo.encode()),
+      #[cfg(feature = "lz4")]
       Self::Lz4 => (LZ4_TAG, 0),
+      #[cfg(feature = "snappy")]
       Self::Snappy => (SNAPPY_TAG, 0),
+      #[cfg(feature = "zstd")]
       Self::Zstd(algo) => (ZSTD_TAG, algo.level() as u8),
       Self::Unknown(v) => (*v, 0),
     };
@@ -441,11 +400,52 @@ impl CompressAlgorithm {
     let extra = value as u8;
 
     match tag {
+      #[cfg(feature = "brotli")]
       BROTLI_TAG => Self::Brotli(BrotliAlgorithm::decode(extra)),
+      #[cfg(feature = "lz4")]
       LZ4_TAG => Self::Lz4,
+      #[cfg(feature = "snappy")]
       SNAPPY_TAG => Self::Snappy,
+      #[cfg(feature = "zstd")]
       ZSTD_TAG => Self::Zstd(ZstdCompressionLevel::with_level(extra as i8)),
       v => Self::Unknown(v),
+    }
+  }
+
+  pub(crate) const fn unknown_or_disabled(&self) -> CompressionError {
+    match self {
+      Self::Unknown(value) => {
+        let value = *value;
+        #[cfg(not(all(
+          feature = "brotli",
+          feature = "lz4",
+          feature = "snappy",
+          feature = "zstd"
+        )))]
+        {
+          let tag = (value >> 8) as u8;
+          return match tag {
+            #[cfg(feature = "brotli")]
+            BROTLI_TAG => CompressionError::disabled(*self, "brotli"),
+            #[cfg(feature = "lz4")]
+            LZ4_TAG => CompressionError::disabled(*self, "lz4"),
+            #[cfg(feature = "snappy")]
+            SNAPPY_TAG => CompressionError::disabled(*self, "snappy"),
+            #[cfg(feature = "zstd")]
+            ZSTD_TAG => CompressionError::disabled(*self, "zstd"),
+            _ => CompressionError::UnknownAlgorithm(*self),
+          };
+        }
+
+        #[cfg(all(
+          feature = "brotli",
+          feature = "lz4",
+          feature = "snappy",
+          feature = "zstd"
+        ))]
+        CompressionError::UnknownAlgorithm(Self::Unknown(value))
+      }
+      _ => unreachable!(),
     }
   }
 }
@@ -520,9 +520,13 @@ const _: () = {
   impl From<CompressAlgorithm> for CompressAlgorithmHelper {
     fn from(algo: CompressAlgorithm) -> Self {
       match algo {
+        #[cfg(feature = "brotli")]
         CompressAlgorithm::Brotli(algo) => Self::Brotli(algo),
+        #[cfg(feature = "lz4")]
         CompressAlgorithm::Lz4 => Self::Lz4,
+        #[cfg(feature = "snappy")]
         CompressAlgorithm::Snappy => Self::Snappy,
+        #[cfg(feature = "zstd")]
         CompressAlgorithm::Zstd(algo) => Self::Zstd(algo),
         CompressAlgorithm::Unknown(v) => Self::Unknown(v),
       }
@@ -532,9 +536,13 @@ const _: () = {
   impl From<CompressAlgorithmHelper> for CompressAlgorithm {
     fn from(helper: CompressAlgorithmHelper) -> Self {
       match helper {
+        #[cfg(feature = "brotli")]
         CompressAlgorithmHelper::Brotli(algo) => Self::Brotli(algo),
+        #[cfg(feature = "lz4")]
         CompressAlgorithmHelper::Lz4 => Self::Lz4,
+        #[cfg(feature = "snappy")]
         CompressAlgorithmHelper::Snappy => Self::Snappy,
+        #[cfg(feature = "zstd")]
         CompressAlgorithmHelper::Zstd(algo) => Self::Zstd(algo),
         CompressAlgorithmHelper::Unknown(v) => Self::Unknown(v),
       }
