@@ -123,10 +123,48 @@ For details on all of these extensions, please read Hashicorp's paper ["Lifeguar
 
 ## Installation
 
-```toml
-[dependencies]
-memberlist = "0.6"
-```
+- By using `TCP/UDP`, `TLS/UDP` transport
+
+  ```toml
+  memberlist = { version = "0.6", features = [
+    "tcp",
+    # Enable a checksum, as UDP is not reliable.
+    # Built in supports are: "crc32", "xxhash64", "xxhash32", "xxhash3", "murmur3"
+    "crc32",
+    # Enable a compression, this is optional,
+    # and possible values are `snappy`, `brotli`, `zstd` and `lz4`.
+    # You can enable all.
+    "snappy",
+    # Enable encryption, this is optional,
+    "encryption",
+    # Enable a async runtime
+    # Builtin supports are `tokio`, `smol`, `async-std`
+    "tokio",
+    # Enable one tls implementation. This is optional.
+    # Users can just use encryption feature with plain TCP.
+    #
+    # "tls",
+  ] }
+  ```
+
+- By using `QUIC/QUIC` transport
+
+  For `QUIC/QUIC` transport, as QUIC is secure and reliable, so enable checksum or encryption makes no sense.
+
+  ```toml
+  memberlist = { version = "0.6", features = [
+    # Enable a compression, this is optional,
+    # and possible values are `snappy`, `brotli`, `zstd` and `lz4`.
+    # You can enable all.
+    "snappy",
+    # Enable a async runtime
+    # Builtin supports are `tokio`, `smol`, `async-std`
+    "tokio",
+    # Enable one of the QUIC implementation
+    # Builtin support is `quinn`
+    "quinn",
+  ] }
+  ```
 
 ## Q & A
 
