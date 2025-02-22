@@ -925,83 +925,91 @@ where
 
     #[allow(unused_mut)]
     let mut bytes_written: Option<usize> = None;
-    cfg_compression! {
-      @if {{
-        if let Some(ch) = &hint.compress_hint {
-          let algo = self.compress.expect("when compress hint is set, the compression algorithm must be set");
-          let mut encoded_buf = EncodeBuffer::new();
-          encoded_buf.resize(encoded_len, 0);
 
-          let written = msg.encodable_encode(&mut encoded_buf)?;
-          #[cfg(debug_assertions)]
-          {
-            debug_assert_write_eq(written, encoded_len);
-            assert_eq!(encoded_len, hint.input_size(), "the actual encoded length {} does not match the encoded length {} in hint", encoded_len, hint.input_size());
-          }
+    #[cfg(any(
+      feature = "zstd",
+      feature = "lz4",
+      feature = "brotli",
+      feature = "snappy",
+    ))]
+    {
+      if let Some(ch) = &hint.compress_hint {
+        let algo = self.compress.expect("when compress hint is set, the compression algorithm must be set");
+        let mut encoded_buf = EncodeBuffer::new();
+        encoded_buf.resize(encoded_len, 0);
 
-          let mut co = ch.header_offset();
-          buf[co] = COMPRESSED_MESSAGE_TAG; // Add the compression message tag
-          co += 1;
-          buf[co..co + 2].copy_from_slice(&algo.encode_to_u16().to_be_bytes()); // Add the compression algorithm
-          co += 2;
-
-          // Add the original length of the compressed message, this is
-          // useful for pre-allocating the buffer when decompressing
-          buf[co..co + PAYLOAD_LEN_SIZE].copy_from_slice(&(written as u32).to_be_bytes());
-          co += PAYLOAD_LEN_SIZE;
-          // Reserve the space for the compressed payload length
-          co += PAYLOAD_LEN_SIZE;
-
-          let po = ch.payload_offset();
-          #[cfg(debug_assertions)]
-          assert_eq!(co, po, "the actual compress payload offset {} does not match the compress payload offset {} in hint", co, po);
-
-          // compress to the buffer
-          let compressed_len = algo.compress_to(&encoded_buf, &mut buf[po..])?;
-          // write the compressed length
-          buf[po - PAYLOAD_LEN_SIZE..po].copy_from_slice(&(compressed_len as u32).to_be_bytes());
-
-          #[cfg(debug_assertions)]
-          debug_assert!(compressed_len <= ch.max_output_size(), "compress algo: {algo}, compressed_len: {}, max_compressed_output_size: {}, input_size: {}", compressed_len, ch.max_output_size(), hint.input_size);
-
-          bytes_written = Some(CompressHint::HEADER_SIZE + compressed_len);
+        let written = msg.encodable_encode(&mut encoded_buf)?;
+        #[cfg(debug_assertions)]
+        {
+          debug_assert_write_eq(written, encoded_len);
+          assert_eq!(encoded_len, hint.input_size(), "the actual encoded length {} does not match the encoded length {} in hint", encoded_len, hint.input_size());
         }
-      }} @else {{}}
+
+        let mut co = ch.header_offset();
+        buf[co] = COMPRESSED_MESSAGE_TAG; // Add the compression message tag
+        co += 1;
+        buf[co..co + 2].copy_from_slice(&algo.encode_to_u16().to_be_bytes()); // Add the compression algorithm
+        co += 2;
+
+        // Add the original length of the compressed message, this is
+        // useful for pre-allocating the buffer when decompressing
+        buf[co..co + PAYLOAD_LEN_SIZE].copy_from_slice(&(written as u32).to_be_bytes());
+        co += PAYLOAD_LEN_SIZE;
+        // Reserve the space for the compressed payload length
+        co += PAYLOAD_LEN_SIZE;
+
+        let po = ch.payload_offset();
+        #[cfg(debug_assertions)]
+        assert_eq!(co, po, "the actual compress payload offset {} does not match the compress payload offset {} in hint", co, po);
+
+        // compress to the buffer
+        let compressed_len = algo.compress_to(&encoded_buf, &mut buf[po..])?;
+        // write the compressed length
+        buf[po - PAYLOAD_LEN_SIZE..po].copy_from_slice(&(compressed_len as u32).to_be_bytes());
+
+        #[cfg(debug_assertions)]
+        debug_assert!(compressed_len <= ch.max_output_size(), "compress algo: {algo}, compressed_len: {}, max_compressed_output_size: {}, input_size: {}", compressed_len, ch.max_output_size(), hint.input_size);
+
+        bytes_written = Some(CompressHint::HEADER_SIZE + compressed_len);
+      }
     }
 
-    cfg_checksum! {
-      @if {{
-        if let Some(ch) = hint.checksum_hint {
-          let algo = self.checksum.expect("when checksum hint is set, the checksum algorithm must be set");
-          let po = ch.payload_offset();
-          let payload_len = match &mut bytes_written {
-            Some(written) => *written,
-            // if bytes_written is None, we need to encode the message to the buffer first
-            None => {
-              let written = msg.encodable_encode(&mut buf[po..])?;
-              bytes_written = Some(written);
-              written
-            },
-          };
-          let checksum_payload_end = po + payload_len;
-          let checksumed = algo.checksum(&buf[po..checksum_payload_end])?;
-          let mut co = ch.header_offset();
-          buf[co] = CHECKSUMED_MESSAGE_TAG; // Add the checksum message tag
-          co += 1;
-          buf[co] = algo.as_u8(); // Add the checksum algorithm
-          co += 1;
-          buf[co..co + PAYLOAD_LEN_SIZE].copy_from_slice(&(payload_len as u32).to_be_bytes());
-          let checksumed_bytes = checksumed.to_be_bytes();
-          let output_size = ch.size();
-          buf[checksum_payload_end..checksum_payload_end + output_size].copy_from_slice(&checksumed_bytes[..output_size]);
+    #[cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3",
+    ))]
+    {
+      if let Some(ch) = hint.checksum_hint {
+        let algo = self.checksum.expect("when checksum hint is set, the checksum algorithm must be set");
+        let po = ch.payload_offset();
+        let payload_len = match &mut bytes_written {
+          Some(written) => *written,
+          // if bytes_written is None, we need to encode the message to the buffer first
+          None => {
+            let written = msg.encodable_encode(&mut buf[po..])?;
+            bytes_written = Some(written);
+            written
+          },
+        };
+        let checksum_payload_end = po + payload_len;
+        let checksumed = algo.checksum(&buf[po..checksum_payload_end])?;
+        let mut co = ch.header_offset();
+        buf[co] = CHECKSUMED_MESSAGE_TAG; // Add the checksum message tag
+        co += 1;
+        buf[co] = algo.as_u8(); // Add the checksum algorithm
+        co += 1;
+        buf[co..co + PAYLOAD_LEN_SIZE].copy_from_slice(&(payload_len as u32).to_be_bytes());
+        let checksumed_bytes = checksumed.to_be_bytes();
+        let output_size = ch.size();
+        buf[checksum_payload_end..checksum_payload_end + output_size].copy_from_slice(&checksumed_bytes[..output_size]);
 
-          if let Some(written) = &mut bytes_written {
-            *written += ChecksumHint::HEADER_SIZE + output_size;
-          } else { unreachable!("bytes written cannot be `None`") }
-        }
-      }} @else {{
-
-      }}
+        if let Some(written) = &mut bytes_written {
+          *written += ChecksumHint::HEADER_SIZE + output_size;
+        } else { unreachable!("bytes written cannot be `None`") }
+      }
     }
 
     #[cfg(feature = "encryption")]

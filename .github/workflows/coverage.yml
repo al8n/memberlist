@@ -41,23 +41,14 @@ jobs:
             features: "std,metrics,encryption,all-compression,all-checksum,rayon,quickcheck"
             name: "memberlist-proto-with-rayon"
           - crate: memberlist
-            features: "test,tokio,tls,snappy,crc32,encryption,metrics"
-            name: "memberlist-tls-without-rayon"
-          - crate: memberlist
             features: "test,tokio,tls,snappy,crc32,encryption,metrics,rayon"
-            name: "memberlist-tls-with-rayon"
-          - crate: memberlist
-            features: "test,tokio,tcp,snappy,crc32,encryption,metrics"
-            name: "memberlist-tcp-without-rayon"
+            name: "memberlist-tls"
           - crate: memberlist
             features: "test,tokio,tcp,snappy,crc32,encryption,metrics,rayon"
-            name: "memberlist-tcp-with-rayon"
+            name: "memberlist-tcp"
           - crate: memberlist
-            features: "test,tokio,quinn,snappy,metrics"
-            name: "memberlist-quinn-without-rayon"
-          - crate: memberlist
-            features: "test,tokio,quinn,snappy,metrics"
-            name: "memberlist-quinn-with-rayon"
+            features: "test,tokio,quinn,snappy,metrics,rayon"
+            name: "memberlist-quinn"
     steps:
       - uses: actions/checkout@v4
       - name: Install latest nightly
