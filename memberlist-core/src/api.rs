@@ -1,5 +1,4 @@
 use std::{
-  collections::HashMap,
   sync::{atomic::Ordering, Arc},
   time::Duration,
 };
@@ -12,7 +11,7 @@ use smallvec_wrapper::OneOrMore;
 use super::{
   base::Memberlist,
   delegate::{Delegate, VoidDelegate},
-  error::{Error, JoinError},
+  error::Error,
   network::META_MAX_SIZE,
   proto::{Alive, Dead, Message, Meta, NodeState, Ping, SmallVec},
   state::AckMessage,
@@ -352,25 +351,19 @@ where
   /// remote nodes to become aware of the existence of this node, effectively
   /// joining the cluster.
   ///
-  /// This returns the number of hosts successfully contacted and an error if
-  /// none could be reached. If an error is returned, the node did not successfully
-  /// join the cluster.
+  /// On success, returns a list of all nodes that were successfully joined with resolved addresses.
+  /// On error, returns a list of nodes are successfully joined with resolved addresses and the error.
   pub async fn join_many(
     &self,
     existing: impl Iterator<Item = Node<T::Id, MaybeResolvedAddress<T>>>,
   ) -> Result<
-    SmallVec<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
-    JoinError<T, D>,
+    SmallVec<Node<T::Id, T::ResolvedAddress>>,
+    (SmallVec<Node<T::Id, T::ResolvedAddress>>, Error<T, D>),
   > {
     if self.has_left() || self.has_shutdown() {
-      return Err(JoinError {
-        joined: SmallVec::new(),
-        errors: existing
-          .into_iter()
-          .map(|n| (n, Error::NotRunning))
-          .collect(),
-      });
+      return Err((Default::default(), Error::NotRunning));
     }
+
     let estimated_total = existing.size_hint().0;
 
     let futs = existing
@@ -389,7 +382,7 @@ where
                     "memberlist: failed to resolve address {}",
                     addr,
                   );
-                  return Err((Node::new(id, MaybeResolvedAddress::unresolved(addr)), Error::<T, D>::transport(e)))
+                  return Err((Node::new(id, MaybeResolvedAddress::<T>::unresolved(addr)), Error::<T, D>::transport(e)))
                 }
               }
             }
@@ -411,28 +404,24 @@ where
         }
       }).collect::<futures::stream::FuturesUnordered<_>>();
 
-    let num_success = std::cell::RefCell::new(SmallVec::with_capacity(estimated_total));
+    let successes = std::cell::RefCell::new(SmallVec::with_capacity(estimated_total));
     let errors = futs
       .filter_map(|rst| async {
         match rst {
           Ok(node) => {
-            num_success.borrow_mut().push(node);
+            successes.borrow_mut().push(node);
             None
           }
-          Err((node, e)) => Some((node, e)),
+          Err((_, e)) => Some(e),
         }
       })
-      .collect::<HashMap<_, _>>()
+      .collect::<OneOrMore<_>>()
       .await;
 
-    if errors.is_empty() {
-      return Ok(num_success.into_inner());
+    match Error::try_from_one_or_more(errors) {
+      Ok(()) => Ok(successes.into_inner()),
+      Err(e) => Err((successes.into_inner(), e)),
     }
-
-    Err(JoinError {
-      joined: num_success.into_inner(),
-      errors,
-    })
   }
 
   /// Gives this instance's idea of how well it is meeting the soft
@@ -501,7 +490,7 @@ where
   /// to target a user message at the given node (this does not use the gossip
   /// mechanism). The maximum size of the message depends on the configured
   /// `packet_buffer_size` for this memberlist instance.
-  /// 
+  ///
   /// See also [`send_reliable`](Memberlist::send_reliable).
   #[inline]
   pub async fn send(
@@ -541,7 +530,7 @@ where
   /// target a user message at the given node (this does not use the gossip
   /// mechanism). Delivery is guaranteed if no error is returned, and there is no
   /// limit on the size of the message.
-  /// 
+  ///
   /// See also [`send_many_reliable`](Memberlist::send_many_reliable).
   #[inline]
   pub async fn send_reliable(
@@ -565,7 +554,9 @@ where
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
-    self.send_user_msg(to, msgs.map(Message::UserData).collect()).await
+    self
+      .send_user_msg(to, msgs.map(Message::UserData).collect())
+      .await
   }
 
   /// Initiates a ping to the node with the specified node.

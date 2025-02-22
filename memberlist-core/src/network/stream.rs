@@ -127,9 +127,7 @@ where
       )
       .await
       .map_err(Error::transport)?;
-    self
-      .send_message(&mut conn, msgs)
-      .await?;
+    self.send_message(&mut conn, msgs).await?;
     conn.close().await.map_err(|e| Error::transport(e.into()))
   }
 }

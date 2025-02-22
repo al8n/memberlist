@@ -391,8 +391,8 @@ pub async fn memberlist_join_cancel<T, R>(
     m1.local_id().clone(),
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
-  let err = m2.join_many([target].into_iter()).await.unwrap_err();
-  let err = err.errors().values().next().unwrap();
+  let (_, err) = m2.join_many([target].into_iter()).await.unwrap_err();
+  let err = err.iter().next().unwrap();
   assert!(
     err.to_string().contains("Custom merge canceled"),
     "unexpected error: {}",
