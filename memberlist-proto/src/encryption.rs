@@ -56,20 +56,13 @@ pub struct InvalidKeyLength(pub(crate) usize);
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseSecretKeyError {
   /// Invalid base64 string
-  #[cfg_attr(feature = "std", error(transparent))]
-  #[cfg_attr(not(feature = "std"), error("{0}"))]
-  Base64(#[cfg_attr(feature = "std", from)] base64::DecodeError),
+  #[error(transparent)]
+  Base64(#[from] base64::DecodeError),
   /// Invalid key length
   #[error(transparent)]
   InvalidKeyLength(#[from] InvalidKeyLength),
 }
 
-#[cfg(not(feature = "std"))]
-impl From<base64::DecodeError> for ParseSecretKeyError {
-  fn from(e: base64::DecodeError) -> Self {
-    Self::InvalidBase64(e)
-  }
-}
 
 /// The key used while attempting to encrypt/decrypt a message
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
