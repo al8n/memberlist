@@ -71,7 +71,6 @@ async-channel.workspace = true
 async-lock.workspace = true
 bytes.workspace = true
 byteorder.workspace = true
-cfg-if = "1"
 const-varint.workspace = true
 derive_more.workspace = true
 either.workspace = true

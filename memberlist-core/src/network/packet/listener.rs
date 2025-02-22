@@ -20,7 +20,7 @@ macro_rules! queue {
       let msg: Message<_, _> = $msg.into();
       // Check for overflow and append if not full
       if queue.len() >= $this.inner.opts.handoff_queue_depth {
-        tracing::warn!(addr = %$from, "memberlist.packet: handler queue full, dropping message ({})", msg.kind());
+        tracing::warn!(addr = %$from, "memberlist.packet: handler queue full, dropping message ({})", msg.ty());
       } else {
         queue.push_back(MessageHandoff {
           msg,

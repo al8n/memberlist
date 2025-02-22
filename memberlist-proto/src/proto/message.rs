@@ -111,13 +111,15 @@ macro_rules! enum_wrapper {
         }
       }
 
-      /// Returns the kind of this message.
-      #[inline]
-      pub const fn kind(&self) -> &'static str {
-        match self {
-          $(
-            Self::$variant(_) => stringify!($variant),
-          )*
+      paste::paste! {
+        /// Returns the type of the message.
+        #[inline]
+        pub const fn ty(&self) -> [< $name Type >] {
+          match self {
+            $(
+              Self::$variant(_) => [< $name Type >]::$variant,
+            )*
+          }
         }
       }
 
@@ -129,6 +131,69 @@ macro_rules! enum_wrapper {
           }
         }
       )*
+    }
+
+    paste::paste! {
+      impl $(< $($generic),+ >)? [< $name Re f>]<'_, $( $($generic),+ )?> {
+        /// Returns the type of the message.
+        #[inline]
+        pub const fn ty(&self) -> [< $name Type >] {
+          match self {
+            $(
+              Self::$variant(_) => [< $name Type >]::$variant,
+            )*
+          }
+        }
+      }
+
+      impl$(< $($generic),+ >)? Data for $name $(< $($generic),+ >)?
+      $(
+        where
+          $($generic: Data),+
+      )?
+      {
+        type Ref<'a> = [< $name Ref >]<'a, $($($generic::Ref<'a>),+)?>;
+
+        fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
+        where
+          Self: Sized,
+        {
+          Ok(match val {
+            $(
+              Self::Ref::$variant(val) => Self::$variant($variant_ty::from_ref(val)?),
+            )*
+          })
+        }
+
+        fn encoded_len(&self) -> usize {
+          1 + match self {
+            $(
+              Self::$variant(val) => val.encoded_len_with_length_delimited(),
+            )*
+          }
+        }
+
+        fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+          let len = buf.len();
+          if len < 1 {
+            return Err(EncodeError::insufficient_buffer(self.encoded_len(), len));
+          }
+
+          let mut offset = 0;
+          buf[offset] = self.tag();
+          offset += 1;
+
+          match self {
+            $(
+              Self::$variant(val) => {
+                offset += val.encode_length_delimited(&mut buf[offset..])?;
+              }
+            )*
+          }
+
+          Ok(offset)
+        }
+      }
     }
   };
 }
@@ -174,93 +239,6 @@ enum_wrapper!(
     ErrorResponse(ErrorResponse) = ERROR_RESPONSE_MESSAGE_TAG,
   }
 );
-
-impl<I, A> Data for Message<I, A>
-where
-  I: Data,
-  A: Data,
-{
-  type Ref<'a> = MessageRef<'a, I::Ref<'a>, A::Ref<'a>>;
-
-  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
-  where
-    Self: Sized,
-  {
-    Ok(match val {
-      Self::Ref::Ping(val) => Self::Ping(Ping::from_ref(val)?),
-      Self::Ref::IndirectPing(val) => Self::IndirectPing(IndirectPing::from_ref(val)?),
-      Self::Ref::Ack(val) => Self::Ack(Ack::from_ref(val)?),
-      Self::Ref::Suspect(val) => Self::Suspect(Suspect::from_ref(val)?),
-      Self::Ref::Alive(val) => Self::Alive(Alive::from_ref(val)?),
-      Self::Ref::Dead(val) => Self::Dead(Dead::from_ref(val)?),
-      Self::Ref::PushPull(val) => Self::PushPull(PushPull::from_ref(val)?),
-      Self::Ref::UserData(val) => Self::UserData(Bytes::from_ref(val)?),
-      Self::Ref::Nack(val) => Self::Nack(Nack::from_ref(val)?),
-      Self::Ref::ErrorResponse(val) => Self::ErrorResponse(ErrorResponse::from_ref(val)?),
-    })
-  }
-
-  fn encoded_len(&self) -> usize {
-    1 + match self {
-      Self::Ping(val) => val.encoded_len_with_length_delimited(),
-      Self::IndirectPing(val) => val.encoded_len_with_length_delimited(),
-      Self::Ack(val) => val.encoded_len_with_length_delimited(),
-      Self::Suspect(val) => val.encoded_len_with_length_delimited(),
-      Self::Alive(val) => val.encoded_len_with_length_delimited(),
-      Self::Dead(val) => val.encoded_len_with_length_delimited(),
-      Self::PushPull(val) => val.encoded_len_with_length_delimited(),
-      Self::UserData(val) => val.encoded_len_with_length_delimited(),
-      Self::Nack(val) => val.encoded_len_with_length_delimited(),
-      Self::ErrorResponse(val) => val.encoded_len_with_length_delimited(),
-    }
-  }
-
-  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    let len = buf.len();
-    if len < 1 {
-      return Err(EncodeError::insufficient_buffer(self.encoded_len(), len));
-    }
-
-    let mut offset = 0;
-    buf[offset] = self.tag();
-    offset += 1;
-
-    match self {
-      Self::Ping(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-      Self::IndirectPing(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-      Self::Ack(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-      Self::Suspect(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-      Self::Alive(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-      Self::Dead(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-      Self::PushPull(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-      Self::UserData(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-      Self::Nack(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-      Self::ErrorResponse(val) => {
-        offset += val.encode_length_delimited(&mut buf[offset..])?;
-      }
-    }
-
-    Ok(offset)
-  }
-}
 
 impl<'a, I, A> DataRef<'a, Message<I, A>> for MessageRef<'a, I::Ref<'a>, A::Ref<'a>>
 where
@@ -386,22 +364,4 @@ pub enum MessageRef<'a, I, A> {
   Nack(Nack),
   /// Error response message
   ErrorResponse(ErrorResponseRef<'a>),
-}
-
-impl<I, A> MessageRef<'_, I, A> {
-  /// Returns the type of the message.
-  pub const fn ty(&self) -> MessageType {
-    match self {
-      Self::Ping(_) => MessageType::Ping,
-      Self::IndirectPing(_) => MessageType::IndirectPing,
-      Self::Ack(_) => MessageType::Ack,
-      Self::Suspect(_) => MessageType::Suspect,
-      Self::Alive(_) => MessageType::Alive,
-      Self::Dead(_) => MessageType::Dead,
-      Self::PushPull(_) => MessageType::PushPull,
-      Self::UserData(_) => MessageType::UserData,
-      Self::Nack(_) => MessageType::Nack,
-      Self::ErrorResponse(_) => MessageType::ErrorResponse,
-    }
-  }
 }

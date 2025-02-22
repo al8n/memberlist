@@ -1,10 +1,50 @@
 #![doc = include_str!("../../README.md")]
 #![doc(html_logo_url = "https://raw.githubusercontent.com/al8n/memberlist/main/art/logo_72x72.png")]
 #![forbid(unsafe_code)]
-// #![deny(warnings, missing_docs)]
+#![deny(warnings, missing_docs)]
 #![allow(clippy::type_complexity, unexpected_cfgs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
+
+macro_rules! cfg_offload {
+  (@if { $($item:expr)* } @else { $($else:expr)* } ) => {
+    $(
+      #[cfg(any(
+        feature = "zstd",
+        feature = "lz4",
+        feature = "brotli",
+        feature = "snappy",
+        feature = "encryption",
+      ))]
+      $item
+    )*
+
+    $(
+      #[cfg(not(any(
+        feature = "zstd",
+        feature = "lz4",
+        feature = "brotli",
+        feature = "snappy",
+        feature = "encryption",
+      )))]
+      $else
+    )*
+  };
+}
+
+macro_rules! cfg_rayon {
+  (@if { $($item:expr)* } @else { $($else:expr)* } ) => {
+    $(
+      #[cfg(feature = "rayon")]
+      $item
+    )*
+
+    $(
+      #[cfg(not(feature = "rayon"))]
+      $else
+    )*
+  };
+}
 
 mod api;
 mod awareness;

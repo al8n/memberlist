@@ -16,7 +16,7 @@ pub const TEST_KEYS: &[SecretKey] = &[
   SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
 ];
 
-#[cfg(any(not(feature = "tls"), feature = "tls"))]
+#[cfg(not(feature = "tcp"))]
 use memberlist_net::stream_layer::tcp::Tcp;
 
 #[cfg(feature = "tls")]
@@ -232,3 +232,6 @@ mod node_delegate_meta_update;
 
 #[path = "net/ping_delegate.rs"]
 mod ping_delegate;
+
+#[path = "net/send_reliable.rs"]
+mod send_reliable;

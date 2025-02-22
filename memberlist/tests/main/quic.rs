@@ -251,3 +251,6 @@ mod ping_delegate;
 
 #[path = "quic/shutdown_cleanup.rs"]
 mod shutdown_cleanup;
+
+#[path = "quic/send_reliable.rs"]
+mod send_reliable;

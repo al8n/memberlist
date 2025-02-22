@@ -3,7 +3,7 @@ use smallvec_wrapper::XXXLargeVec;
 #[cfg(feature = "encryption")]
 use triomphe::Arc;
 
-use crate::{DecodeError, Label, ParseLabelError};
+use crate::{DecodeError, Label};
 
 #[cfg(feature = "encryption")]
 use crate::{EncryptionAlgorithm, EncryptionError, SecretKey};
@@ -27,170 +27,9 @@ use crate::{ChecksumAlgorithm, ChecksumError};
 
 use super::*;
 
-mod messages_decoder;
-
 pub use messages_decoder::*;
 
-/// An error that can occur during encoding.
-#[derive(Debug, thiserror::Error)]
-pub enum ProtoDecoderError {
-  /// Decoding error
-  #[error(transparent)]
-  Decode(#[from] DecodeError),
-  /// Returned when failed to parse the label.
-  #[error(transparent)]
-  Label(#[from] ParseLabelError),
-  /// The label does not match the expected label
-  #[error("The label {actual} does not match the expected label {expected}")]
-  LabelMismatch {
-    /// The actual label
-    actual: Label,
-    /// The expected label
-    expected: Label,
-  },
-  /// Required label is missing
-  #[error("label not found")]
-  LabelNotFound,
-  /// unexpected double packet label header
-  #[error("unexpected double packet label header")]
-  UnexpectedLabel,
-
-  /// The offload task is canceled
-  #[error("The offload task is canceled")]
-  Offload,
-
-  /// Returned when the encryption feature is disabled.
-  #[error(
-    "Receive an encrypted message while the encryption feature is disabled on the running node"
-  )]
-  EncryptionDisabled,
-
-  /// Returned when the checksum feature is disabled.
-  #[error(
-    "Receive a checksumed message while the checksum feature is disabled on the running node"
-  )]
-  ChecksumDisabled,
-
-  /// Returned when the compression feature is disabled.
-  #[error(
-    "Receive a compressed message while the compression feature is disabled on the running node"
-  )]
-  CompressionDisabled,
-
-  /// Encryption error
-  #[cfg(feature = "encryption")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  #[error(transparent)]
-  Encryption(#[from] EncryptionError),
-  /// Not encrypted
-  #[cfg(feature = "encryption")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  #[error("The message is not encrypted")]
-  NotEncrypted,
-  /// No installed key
-  #[cfg(feature = "encryption")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  #[error("key not found for decryption")]
-  SecretKeyNotFound,
-  /// No installed keys could decrypt the message
-  #[cfg(feature = "encryption")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  #[error("no installed keys could decrypt the message")]
-  NoInstalledKeys,
-
-  /// Compression error
-  #[cfg(any(
-    feature = "zstd",
-    feature = "lz4",
-    feature = "snappy",
-    feature = "brotli",
-  ))]
-  #[cfg_attr(
-    docsrs,
-    doc(cfg(any(
-      feature = "zstd",
-      feature = "lz4",
-      feature = "snappy",
-      feature = "brotli",
-    )))
-  )]
-  #[error(transparent)]
-  Compression(#[from] CompressionError),
-
-  /// Checksum error
-  #[cfg(any(
-    feature = "crc32",
-    feature = "xxhash32",
-    feature = "xxhash64",
-    feature = "xxhash3",
-    feature = "murmur3",
-  ))]
-  #[cfg_attr(
-    docsrs,
-    doc(cfg(any(
-      feature = "crc32",
-      feature = "xxhash64",
-      feature = "xxhash32",
-      feature = "xxhash3",
-      feature = "murmur3",
-    )))
-  )]
-  #[error(transparent)]
-  Checksum(#[from] ChecksumError),
-}
-
-impl From<ProtoDecoderError> for std::io::Error {
-  fn from(value: ProtoDecoderError) -> Self {
-    use std::io::ErrorKind;
-
-    match value {
-      ProtoDecoderError::Decode(e) => Self::new(ErrorKind::InvalidData, e),
-      ProtoDecoderError::Label(e) => Self::new(ErrorKind::InvalidData, e),
-      ProtoDecoderError::LabelMismatch { .. } => Self::new(ErrorKind::InvalidData, value),
-      ProtoDecoderError::Offload => Self::new(ErrorKind::Other, value),
-      ProtoDecoderError::EncryptionDisabled => Self::new(ErrorKind::Other, value),
-      ProtoDecoderError::ChecksumDisabled => Self::new(ErrorKind::Other, value),
-      ProtoDecoderError::CompressionDisabled => Self::new(ErrorKind::Other, value),
-      ProtoDecoderError::UnexpectedLabel => Self::new(ErrorKind::InvalidInput, value),
-      ProtoDecoderError::LabelNotFound => Self::new(ErrorKind::InvalidInput, value),
-      #[cfg(feature = "encryption")]
-      ProtoDecoderError::Encryption(e) => Self::new(ErrorKind::InvalidData, e),
-      #[cfg(feature = "encryption")]
-      ProtoDecoderError::NotEncrypted => Self::new(ErrorKind::InvalidData, value),
-      #[cfg(feature = "encryption")]
-      ProtoDecoderError::SecretKeyNotFound => Self::new(ErrorKind::InvalidData, value),
-      #[cfg(feature = "encryption")]
-      ProtoDecoderError::NoInstalledKeys => Self::new(ErrorKind::InvalidData, value),
-      #[cfg(any(
-        feature = "zstd",
-        feature = "lz4",
-        feature = "snappy",
-        feature = "brotli",
-      ))]
-      ProtoDecoderError::Compression(e) => Self::new(ErrorKind::InvalidData, e),
-      #[cfg(any(
-        feature = "crc32",
-        feature = "xxhash32",
-        feature = "xxhash64",
-        feature = "xxhash3",
-        feature = "murmur3",
-      ))]
-      ProtoDecoderError::Checksum(e) => Self::new(ErrorKind::InvalidData, e),
-    }
-  }
-}
-
-impl ProtoDecoderError {
-  /// Creates a new label mismatch error.
-  #[inline]
-  pub const fn label_mismatch(expected: Label, actual: Label) -> Self {
-    Self::LabelMismatch { expected, actual }
-  }
-
-  const fn double_label() -> Self {
-    Self::UnexpectedLabel
-  }
-}
+mod messages_decoder;
 
 /// A protocol decoder.
 ///
@@ -752,18 +591,12 @@ impl ProtoDecoder {
 
     let tag = unencrypted_buf[0];
     let payload_without_checksum = if tag == CHECKSUMED_MESSAGE_TAG {
-      cfg_if::cfg_if! {
-        if #[cfg(any(
-          feature = "crc32",
-          feature = "xxhash32",
-          feature = "xxhash64",
-          feature = "xxhash3",
-          feature = "murmur3",
-        ))] {
+      cfg_checksum! {
+        @if {{
           Self::dechecksum(unencrypted_buf)?
-        } else {
-          return Err(ProtoDecoderError::ChecksumDisabled)
-        }
+        }} @else {{
+          return Err(ProtoDecoderError::ChecksumDisabled);
+        }}
       }
     } else {
       unencrypted_buf
@@ -775,36 +608,26 @@ impl ProtoDecoder {
 
     let tag = payload_without_checksum[0];
     if tag == COMPRESSED_MESSAGE_TAG {
-      #[cfg(not(any(
-        feature = "zstd",
-        feature = "lz4",
-        feature = "snappy",
-        feature = "brotli",
-      )))]
-      return Err(ProtoDecoderError::CompressionDisabled.into());
+      cfg_compression! {
+        @if {{
+          if payload_without_checksum.len() > self.offload_size {
+            #[cfg(feature = "rayon")]
+            return Self::decompress_on_rayon(payload_without_checksum)
+              .await
+              .map_err(Into::into);
 
-      #[cfg(any(
-        feature = "zstd",
-        feature = "lz4",
-        feature = "snappy",
-        feature = "brotli",
-      ))]
-      {
-        if payload_without_checksum.len() > self.offload_size {
-          #[cfg(feature = "rayon")]
-          return Self::decompress_on_rayon(payload_without_checksum)
-            .await
+            #[cfg(not(feature = "rayon"))]
+            return Self::decompress_on_blocking::<RT>(payload_without_checksum)
+              .await
+              .map_err(Into::into);
+          }
+
+          return Self::decompress(payload_without_checksum)
+            .map(BytesMut::freeze)
             .map_err(Into::into);
-
-          #[cfg(not(feature = "rayon"))]
-          return Self::decompress_on_blocking::<RT>(payload_without_checksum)
-            .await
-            .map_err(Into::into);
-        }
-
-        return Self::decompress(payload_without_checksum)
-          .map(BytesMut::freeze)
-          .map_err(Into::into);
+        }} @else {{
+          return Err(ProtoDecoderError::CompressionDisabled.into());
+        }}
       }
     }
 
@@ -1046,18 +869,12 @@ impl ProtoDecoder {
 
     let tag = buf[0];
     let payload_without_checksum = if tag == CHECKSUMED_MESSAGE_TAG {
-      cfg_if::cfg_if! {
-        if #[cfg(any(
-          feature = "crc32",
-          feature = "xxhash32",
-          feature = "xxhash64",
-          feature = "xxhash3",
-          feature = "murmur3",
-        ))] {
+      cfg_checksum! {
+        @if {{
           Self::dechecksum(buf)?
-        } else {
+        }} @else {{
           return Err(ProtoDecoderError::ChecksumDisabled);
-        }
+        }}
       }
     } else {
       buf
@@ -1069,17 +886,12 @@ impl ProtoDecoder {
 
     let tag = payload_without_checksum[0];
     if tag == COMPRESSED_MESSAGE_TAG {
-      cfg_if::cfg_if! {
-        if #[cfg(any(
-          feature = "zstd",
-          feature = "lz4",
-          feature = "snappy",
-          feature = "brotli",
-        ))] {
+      cfg_compression! {
+        @if {{
           return Self::decompress(payload_without_checksum);
-        } else {
+        }} @else {{
           return Err(ProtoDecoderError::CompressionDisabled);
-        }
+        }}
       }
     }
 

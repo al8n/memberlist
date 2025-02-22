@@ -1,7 +1,7 @@
 //! Types used by the [`memberlist`](https://crates.io/crates/memberlist) crate.
 #![doc(html_logo_url = "https://raw.githubusercontent.com/al8n/memberlist/main/art/logo_72x72.png")]
 #![forbid(unsafe_code)]
-// #![deny(warnings)]
+#![deny(warnings)]
 #![allow(clippy::type_complexity, unexpected_cfgs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
@@ -13,6 +13,85 @@ pub use metrics_label::MetricLabels;
 pub use nodecraft::{
   Domain, HostAddr, Node, NodeId, ParseDomainError, ParseHostAddrError, ParseNodeIdError,
 };
+
+macro_rules! cfg_compression {
+  (@if {
+    $($item:expr)*
+  } @else {
+    $($else:expr)*
+  }) => {
+    $(
+      #[cfg(any(
+        feature = "zstd",
+        feature = "lz4",
+        feature = "brotli",
+        feature = "snappy",
+      ))]
+      $item
+    )*
+    $(
+      #[cfg(not(any(
+        feature = "zstd",
+        feature = "lz4",
+        feature = "brotli",
+        feature = "snappy",
+      )))]
+      $else
+    )*
+  };
+}
+
+macro_rules! cfg_checksum {
+  (@if { $($item:expr)* } @else { $($else:expr)* } ) => {
+    $(
+      #[cfg(any(
+        feature = "crc32",
+        feature = "xxhash32",
+        feature = "xxhash64",
+        feature = "xxhash3",
+        feature = "murmur3",
+      ))]
+      $item
+    )*
+
+    $(
+      #[cfg(not(any(
+        feature = "crc32",
+        feature = "xxhash32",
+        feature = "xxhash64",
+        feature = "xxhash3",
+        feature = "murmur3",
+      )))]
+      $else
+    )*
+  };
+}
+
+macro_rules! cfg_offload {
+  (@if { $($item:expr)* } @else { $($else:expr)* } ) => {
+    $(
+      #[cfg(any(
+        feature = "zstd",
+        feature = "lz4",
+        feature = "brotli",
+        feature = "snappy",
+        feature = "encryption",
+      ))]
+      $item
+    )*
+
+    $(
+      #[cfg(not(any(
+        feature = "zstd",
+        feature = "lz4",
+        feature = "brotli",
+        feature = "snappy",
+        feature = "encryption",
+      )))]
+      $else
+    )*
+  };
+}
 
 #[cfg(any(feature = "arbitrary", test))]
 mod arbitrary_impl;

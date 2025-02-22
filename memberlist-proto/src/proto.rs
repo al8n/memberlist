@@ -1,9 +1,11 @@
 pub use decoder::*;
 pub use encoder::*;
+pub use error::*;
 pub use message::*;
 
 mod decoder;
 mod encoder;
+mod error;
 
 mod message;
 

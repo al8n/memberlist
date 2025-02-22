@@ -2,11 +2,14 @@ use core::marker::PhantomData;
 
 use crate::{Data, EncodeError, Label, Payload};
 
-use super::{super::debug_assert_write_eq, Message, COMPOOUND_MESSAGE_TAG, LABELED_MESSAGE_TAG};
+use super::{
+  super::debug_assert_write_eq, Message, ProtoEncoderError, COMPOOUND_MESSAGE_TAG,
+  LABELED_MESSAGE_TAG,
+};
 
 #[cfg(feature = "encryption")]
 use super::{
-  super::{EncryptionAlgorithm, EncryptionError, SecretKey},
+  super::{EncryptionAlgorithm, SecretKey},
   AeadBuffer, ENCRYPTED_MESSAGE_TAG,
 };
 
@@ -57,53 +60,6 @@ mod rayon_impl;
 smallvec_wrapper::smallvec_wrapper!(
   EncodeBuffer<T>([T; 1500]);
 );
-
-/// The errors may occur during encoding.
-#[derive(Debug, thiserror::Error)]
-pub enum ProtoEncoderError {
-  #[error(transparent)]
-  Encode(#[from] EncodeError),
-  #[cfg(feature = "encryption")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
-  #[error(transparent)]
-  Encrypt(#[from] EncryptionError),
-  #[cfg(any(
-    feature = "zstd",
-    feature = "lz4",
-    feature = "brotli",
-    feature = "snappy",
-  ))]
-  #[cfg_attr(
-    docsrs,
-    feature(any(
-      feature = "zstd",
-      feature = "lz4",
-      feature = "brotli",
-      feature = "snappy",
-    ))
-  )]
-  #[error(transparent)]
-  Compress(#[from] crate::CompressionError),
-  #[cfg(any(
-    feature = "crc32",
-    feature = "xxhash32",
-    feature = "xxhash64",
-    feature = "xxhash3",
-    feature = "murmur3",
-  ))]
-  #[cfg_attr(
-    docsrs,
-    feature(any(
-      feature = "crc32",
-      feature = "xxhash32",
-      feature = "xxhash64",
-      feature = "xxhash3",
-      feature = "murmur3",
-    ))
-  )]
-  #[error(transparent)]
-  Checksum(#[from] crate::ChecksumError),
-}
 
 /// The hint of how encrypted payload.
 #[cfg(feature = "encryption")]
@@ -394,14 +350,8 @@ impl ProtoHint {
     ))]
     offload_threshold: usize,
   ) -> bool {
-    cfg_if::cfg_if! {
-      if #[cfg(any(
-        feature = "zstd",
-        feature = "lz4",
-        feature = "brotli",
-        feature = "snappy",
-        feature = "encryption",
-      ))] {
+    cfg_offload! {
+      @if {{
         #[cfg(any(
           feature = "zstd",
           feature = "lz4",
@@ -418,9 +368,9 @@ impl ProtoHint {
         }
 
         false
-      } else {
+      }} @else {{
         false
-      }
+      }}
     }
   }
 }
@@ -975,13 +925,8 @@ where
 
     #[allow(unused_mut)]
     let mut bytes_written: Option<usize> = None;
-    cfg_if::cfg_if! {
-      if #[cfg(any(
-        feature = "zstd",
-        feature = "lz4",
-        feature = "brotli",
-        feature = "snappy",
-      ))] {
+    cfg_compression! {
+      @if {{
         if let Some(ch) = &hint.compress_hint {
           let algo = self.compress.expect("when compress hint is set, the compression algorithm must be set");
           let mut encoded_buf = EncodeBuffer::new();
@@ -1021,17 +966,11 @@ where
 
           bytes_written = Some(CompressHint::HEADER_SIZE + compressed_len);
         }
-      } else {}
+      }} @else {{}}
     }
 
-    cfg_if::cfg_if! {
-      if #[cfg(any(
-        feature = "crc32",
-        feature = "xxhash32",
-        feature = "xxhash64",
-        feature = "xxhash3",
-        feature = "murmur3",
-      ))] {
+    cfg_checksum! {
+      @if {{
         if let Some(ch) = hint.checksum_hint {
           let algo = self.checksum.expect("when checksum hint is set, the checksum algorithm must be set");
           let po = ch.payload_offset();
@@ -1060,7 +999,9 @@ where
             *written += ChecksumHint::HEADER_SIZE + output_size;
           } else { unreachable!("bytes written cannot be `None`") }
         }
-      } else {}
+      }} @else {{
+
+      }}
     }
 
     #[cfg(feature = "encryption")]

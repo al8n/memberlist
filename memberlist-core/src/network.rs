@@ -94,7 +94,10 @@ where
   }
 
   /// Returns an messages processor to encode/compress/encrypt messages
-  pub(crate) fn encoder<'a, M>(&'a self, packets: M) -> ProtoEncoder<T::Id, T::ResolvedAddress, M>
+  pub(crate) fn unreliable_encoder<'a, M>(
+    &'a self,
+    packets: M,
+  ) -> ProtoEncoder<T::Id, T::ResolvedAddress, M>
   where
     M: AsRef<[Message<T::Id, T::ResolvedAddress>]> + Send + Sync + 'a,
   {
@@ -134,6 +137,39 @@ where
     encoder
   }
 
+  /// Returns an messages processor to encode/compress/encrypt messages
+  pub(crate) fn reliable_encoder<'a, M>(
+    &'a self,
+    packets: M,
+  ) -> ProtoEncoder<T::Id, T::ResolvedAddress, M>
+  where
+    M: AsRef<[Message<T::Id, T::ResolvedAddress>]> + Send + Sync + 'a,
+  {
+    #[allow(unused_mut)]
+    let mut encoder = ProtoEncoder::new(self.inner.transport.max_packet_size())
+      .with_messages(packets)
+      .with_label(self.inner.opts.label().clone())
+      .with_overhead(self.inner.transport.header_overhead());
+
+    #[cfg(feature = "encryption")]
+    if !self.inner.transport.stream_secure() && self.encryption_enabled() {
+      encoder.set_encryption(
+        self.inner.opts.encryption_algo().unwrap(),
+        self.inner.keyring.as_ref().unwrap().primary_key(),
+      );
+    }
+
+    #[cfg(any(
+      feature = "zstd",
+      feature = "lz4",
+      feature = "brotli",
+      feature = "snappy",
+    ))]
+    encoder.maybe_compression(self.inner.opts.compress_algo());
+
+    encoder
+  }
+
   #[auto_enums::auto_enum(futures03::Stream)]
   pub(crate) async fn transport_send_packets<'a, M>(
     &'a self,
@@ -143,18 +179,12 @@ where
   where
     M: AsRef<[Message<T::Id, T::ResolvedAddress>]> + Send + Sync + 'static,
   {
-    let encoder = self.encoder(msgs);
+    let encoder = self.unreliable_encoder(msgs);
     match encoder.hint() {
       Err(e) => futures::stream::once(async { Err(e.into()) }),
       Ok(hint) => {
-        cfg_if::cfg_if! {
-          if #[cfg(any(
-            feature = "zstd",
-            feature = "lz4",
-            feature = "brotli",
-            feature = "snappy",
-            feature = "encryption",
-          ))] {
+        cfg_offload! {
+          @if {{
             match hint.should_offload(self.inner.opts.offload_size) {
               false => FuturesUnordered::from_iter(encoder.encode().map(|res| match res {
                 Ok(payload) => futures::future::Either::Left(
@@ -163,8 +193,8 @@ where
                 Err(e) => futures::future::Either::Right(Self::to_async_err(e.into())),
               })),
               true => {
-                cfg_if::cfg_if! {
-                  if #[cfg(feature = "rayon")] {
+                cfg_rayon! {
+                  @if {{
                     use rayon::iter::ParallelIterator;
 
                     let payloads = encoder
@@ -183,7 +213,7 @@ where
                         self.raw_send_packet(addr, payload),
                       )
                     }))
-                  } else {
+                  }} @else {{
                     let payloads = encoder.blocking_encode::<T::Runtime>().await;
                     FuturesUnordered::from_iter(payloads.into_iter().map(|res| match res {
                       Ok(payload) => futures::future::Either::Left(
@@ -191,11 +221,11 @@ where
                       ),
                       Err(e) => futures::future::Either::Right(Self::to_async_err(e.into())),
                     }))
-                  }
+                  }}
                 }
               },
             }
-          } else {
+          }} @else {{
             let _ = hint;
             FuturesUnordered::from_iter(encoder.encode().map(|res| match res {
               Ok(payload) => futures::future::Either::Left(
@@ -203,7 +233,7 @@ where
               ),
               Err(e) => futures::future::Either::Right(async { Err(e.into()) }),
             }))
-          }
+          }}
         }
       }
     }
@@ -217,19 +247,13 @@ where
   where
     M: AsRef<[Message<T::Id, T::ResolvedAddress>]> + Send + Sync + 'static,
   {
-    let encoder = self.encoder(msgs);
+    let encoder = self.reliable_encoder(msgs);
 
     match encoder.hint() {
       Err(e) => Err(e.into()),
       Ok(hint) => {
-        cfg_if::cfg_if! {
-          if #[cfg(any(
-            feature = "zstd",
-            feature = "lz4",
-            feature = "brotli",
-            feature = "snappy",
-            feature = "encryption",
-          ))] {
+        cfg_offload! {
+          @if {{
             match hint.should_offload(self.inner.opts.offload_size) {
               false => {
                 let mut errs = OneOrMore::new();
@@ -248,8 +272,8 @@ where
                 Error::try_from_one_or_more(errs)
               },
               true => {
-                cfg_if::cfg_if! {
-                  if #[cfg(feature = "rayon")] {
+                cfg_rayon! {
+                  @if {{
                     use rayon::iter::ParallelIterator;
 
                     let payloads = encoder
@@ -272,7 +296,7 @@ where
                     }
 
                     Error::try_from_one_or_more(errs)
-                  } else {
+                  }} @else {{
                     let mut errs = OneOrMore::new();
                     let payloads = encoder.blocking_encode::<T::Runtime>().await.filter_map(|res| {
                       match res {
@@ -292,11 +316,11 @@ where
                     }
 
                     Error::try_from_one_or_more(errs)
-                  }
+                  }}
                 }
               }
             }
-          } else {
+          }} @else {{
             let _ = hint;
             let mut errs = OneOrMore::new();
             for res in encoder.encode() {
@@ -312,7 +336,7 @@ where
             }
 
             Error::try_from_one_or_more(errs)
-          }
+          }}
         }
       }
     }

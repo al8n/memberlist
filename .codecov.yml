@@ -10,8 +10,11 @@ ignore:
   - memberlist-net/src/tests
   - memberlist-net/src/error.rs
   - memberlist-net/tests
+  - memberlist-proto/tests
+  - memberlist-proto/proto/error.rs
   - memberlist-quic/src/tests.rs
   - memberlist-quic/src/tests
+  - memberlist-quic/src/error.rs
   - memberlist-quic/tests
   - memberlist/tests
 

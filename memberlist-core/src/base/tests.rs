@@ -1,4 +1,6 @@
-use std::{future::Future, marker::PhantomData, sync::atomic::Ordering, time::Duration};
+use std::{
+  future::Future, marker::PhantomData, net::SocketAddr, sync::atomic::Ordering, time::Duration,
+};
 
 use agnostic_lite::time::Instant;
 use bytes::Bytes;
@@ -1130,6 +1132,60 @@ pub async fn memberlist_ping_delegate<T, R>(
     b"whatever",
     inner.payload.as_ref()
   );
+}
+
+/// Unit test for send functionality for the transport.
+pub async fn memberlist_send_reliable<T, R>(
+  t1: T::Options,
+  t1_opts: Options,
+  t2: T::Options,
+  t2_opts: Options,
+) where
+  T: Transport<Runtime = R, Id = smol_str::SmolStr, ResolvedAddress = SocketAddr>,
+  R: RuntimeLite,
+{
+  let m1 = Memberlist::<T, _>::with_delegate(
+    CompositeDelegate::new()
+      .with_node_delegate(MockDelegate::<smol_str::SmolStr, SocketAddr>::new()),
+    t1,
+    t1_opts,
+  )
+  .await
+  .unwrap();
+  let m2 = Memberlist::<T, _>::new(t2, t2_opts).await.unwrap();
+
+  m2.join(Node::new(
+    m1.local_id().cheap_clone(),
+    MaybeResolvedAddress::resolved(*m1.advertise_address()),
+  ))
+  .await
+  .unwrap();
+  assert_eq!(m2.num_members().await, 2);
+  assert_eq!(m2.estimate_num_nodes(), 2);
+
+  m2.send(m1.advertise_address(), Bytes::from_static(b"send"))
+    .await
+    .map_err(|e| {
+      tracing::error!("fail to send packet {e}");
+      e
+    })
+    .unwrap();
+
+  m2.send_reliable(m1.advertise_address(), Bytes::from_static(b"send_reliable"))
+    .await
+    .map_err(|e| {
+      tracing::error!("fail to send message {e}");
+      e
+    })
+    .unwrap();
+
+  R::sleep(Duration::from_secs(6)).await;
+
+  let mut msgs1 = m1.delegate().unwrap().node_delegate().get_messages().await;
+  msgs1.sort();
+  assert_eq!(msgs1, ["send".as_bytes(), "send_reliable".as_bytes()]);
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
 }
 
 /// Util function to wait until the memberlist has a certain size.
