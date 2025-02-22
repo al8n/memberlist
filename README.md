@@ -39,10 +39,50 @@ memberlist is WASM/WASI friendly, all crates can be compiled to `wasm-wasi` and 
 
 ## Installation
 
-```toml
-[dependencies]
-memberlist = "0.5"
-```
+- By using `TCP/UDP`, `TLS/UDP` transport
+
+  ```toml
+  memberlist = { version = "0.6", features = [
+    "tcp",
+    # Enable a checksum, as UDP is not reliable.
+    # Built in supports are: "crc32", "xxhash64", "xxhash32", "xxhash3", "murmur3"
+    "crc32",
+    # Enable a compression, this is optional,
+    # and possible values are `snappy`, `brotli`, `zstd` and `lz4`.
+    # You can enable all.
+    "snappy",
+    # Enable encryption, this is optional,
+    "encryption",
+    # Enable a async runtime
+    # Builtin supports are `tokio`, `smol`, `async-std`
+    "tokio",
+    # Enable one tls implementation. This is optional.
+    # Users can just use encryption feature with plain TCP.
+    #
+    # Builtin supports are `tls` and `native-tls`
+    # "tls",
+    # "native-tls",
+  ] }
+  ```
+
+- By using `QUIC/QUIC` transport
+
+  For `QUIC/QUIC` transport, as QUIC is secure and reliable, so enable checksum or encryption makes no sense.
+
+  ```toml
+  memberlist = { version = "0.6", features = [
+    # Enable a compression, this is optional,
+    # and possible values are `snappy`, `brotli`, `zstd` and `lz4`.
+    # You can enable all.
+    "snappy",
+    # Enable a async runtime
+    # Builtin supports are `tokio`, `smol`, `async-std`
+    "tokio",
+    # Enable one of the QUIC implementation
+    # Builtin supports are `quinn`
+    "quinn",
+  ] }
+  ```
 
 ## Protocol
 
@@ -69,13 +109,6 @@ Here are the layers:
   - **Address Resolver Layer**
 
     The address resolver layer is supported by [`nodecraft`'s AddressResolver](https://docs.rs/nodecraft/latest/nodecraft/resolver/trait.AddressResolver.html) trait.
-
-  - **Serialize/Deserilize Layer**
-
-    By default, Rust's memberlist is using [`length-prefix encoding (Lpe)`](https://docs.rs/memberlist-core/transport/struct.Lpe.html) to serialize/deserialize messages to bytes or visa-vise.
-    The implemention of `Lpe` tries the best to avoid reallocating when doing the serialize/deserialize.
-
-    But, users can use any other serialize/deserialize framework by implementing [`Wire`](https://docs.rs/memberlist-core/transport/trait.Wire.html) trait.
 
   - **[`NetTransport`](https://docs.rs/memberlist-net/struct.NetTransport.html)**
 
@@ -137,7 +170,9 @@ Here are the layers:
 
 - ***Does Rust's memberlist implemenetation compatible to Go's memberlist?***
 
-  No but yes! By default, it is not compatible. But the secret is the serialize/deserilize layer, Go's memberlist use the msgpack as the serialization/deserialization framework, so in theory, if you can implement a [`Wire`](https://docs.rs/memberlist-core/transport/trait.Wire.html) trait which compat to Go's memberlist, then it becomes compatible.
+  No but yes! Rust's memberlist impelementation use a protobuf-like forward and backward compatible encoding/decoding, Go's implementation
+  use message pack. It is possible in theory, users need to implement their own transport layer, but not recommand, you are facing
+  expensive overhead!
 
 - ***If Go's memberlist adds more functionalities, will this project also support?***
   
@@ -148,12 +183,11 @@ Here are the layers:
 - [`agnostic`](https://github.com/al8n/agnostic): helps you to develop runtime agnostic crates
 - [`getifs`](https://github.com/al8n/getifs): A bunch of cross platform network tools for fetching interfaces, multicast addresses, local ip addresses, private ip addresses, public ip addresses and etc.
 - [`nodecraft`](https://github.com/al8n/nodecraft): crafting seamless node operations for distributed systems, which provides foundational traits for node identification and address resolution.
-- [`transformable`](https://github.com/al8n/transformable): transform its representation between structured and byte form.
 - [`peekable`](https://github.com/al8n/peekable): peekable reader and async reader
 
-<!-- ### Which crates are using memberlist? -->
+### Which crates are using memberlist?
 
-<!-- - [`ruserf`](https://github.com/al8n/ruserf): A decentralized solution for service discovery and orchestration that is lightweight, highly available, and fault tolerant. -->
+- [`serf`](https://github.com/al8n/serf): A decentralized solution for service discovery and orchestration that is lightweight, highly available, and fault tolerant.
 
 #### License
 
@@ -161,7 +195,7 @@ Here are the layers:
 
 See [LICENSE](./LICENSE) for details.
 
-Copyright (c) 2024 Al Liu.
+Copyright (c) 2025 Al Liu.
 
 Copyright (c) 2013 HashiCorp, Inc.
 
