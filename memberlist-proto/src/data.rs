@@ -89,7 +89,7 @@ pub trait Data: core::fmt::Debug + Send + Sync {
     self.encode(&mut vec).map(|_| vec)
   }
 
-  /// Encodes the message into a [`Bytes`](bytes::Bytes).
+  /// Encodes the message into a [`Bytes`](::bytes::Bytes).
   #[cfg(any(feature = "std", feature = "alloc"))]
   fn encode_to_bytes(&self) -> Result<::bytes::Bytes, EncodeError> {
     self.encode_to_vec().map(Into::into)
@@ -126,7 +126,7 @@ pub trait Data: core::fmt::Debug + Send + Sync {
     self.encode_length_delimited(&mut vec).map(|_| vec)
   }
 
-  /// Encodes the message with a length-delimiter into a [`Bytes`](bytes::Bytes).
+  /// Encodes the message with a length-delimiter into a [`Bytes`](::bytes::Bytes).
   #[cfg(any(feature = "std", feature = "alloc"))]
   fn encode_length_delimited_to_bytes(&self) -> Result<::bytes::Bytes, EncodeError> {
     self.encode_length_delimited_to_vec().map(Into::into)

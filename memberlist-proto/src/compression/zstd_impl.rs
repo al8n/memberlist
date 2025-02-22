@@ -58,7 +58,7 @@ impl From<i8> for ZstdCompressionLevel {
   }
 }
 
-/// An error that occurs when parsing a [`Flate2CompressionLevel`].
+/// An error that occurs when parsing a [`ZstdCompressionLevel`].
 #[derive(Debug, PartialEq, Eq, Hash, Clone, thiserror::Error)]
 #[error("invalid compression level: {0}")]
 pub struct ParseZstdCompressionLevelError(String);
