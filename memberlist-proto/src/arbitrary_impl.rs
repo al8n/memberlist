@@ -1,7 +1,4 @@
-use super::{
-  ChecksumAlgorithm, CompressAlgorithm, DelegateVersion, EncryptionAlgorithm, Label, Meta,
-  ProtocolVersion, State,
-};
+use super::{DelegateVersion, Label, Meta, ProtocolVersion, State};
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 
@@ -34,19 +31,33 @@ impl<'a> Arbitrary<'a> for ProtocolVersion {
   }
 }
 
-impl<'a> Arbitrary<'a> for ChecksumAlgorithm {
+#[cfg(any(
+  feature = "crc32",
+  feature = "xxhash64",
+  feature = "xxhash32",
+  feature = "xxhash3",
+  feature = "murmur3",
+))]
+impl<'a> Arbitrary<'a> for super::ChecksumAlgorithm {
   fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
     Ok(Self::from(u.arbitrary::<u8>()?))
   }
 }
 
-impl<'a> Arbitrary<'a> for CompressAlgorithm {
+#[cfg(any(
+  feature = "zstd",
+  feature = "snappy",
+  feature = "lz4",
+  feature = "brotli",
+))]
+impl<'a> Arbitrary<'a> for super::CompressAlgorithm {
   fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
     Ok(Self::from(u.arbitrary::<u16>()?))
   }
 }
 
-impl<'a> Arbitrary<'a> for EncryptionAlgorithm {
+#[cfg(feature = "encryption")]
+impl<'a> Arbitrary<'a> for super::EncryptionAlgorithm {
   fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
     Ok(Self::from(u.arbitrary::<u8>()?))
   }
