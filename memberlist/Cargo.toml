@@ -51,12 +51,10 @@ murmur3 = ["memberlist-core/murmur3"]
 
 quic = ["memberlist-quic", "agnostic/quinn"]
 quinn = ["memberlist-quic/quinn", "quic"]
-s2n = ["memberlist-quic/s2n", "quic"]
 
 net = ["memberlist-net", "agnostic/net"]
 tcp = ["net"]
 tls = ["memberlist-net/tls", "net"]
-native-tls = ["memberlist-net/native-tls", "net"]
 
 # enable DNS node address resolver
 dns = ["memberlist-net?/dns", "memberlist-quic?/dns", "agnostic/dns"]

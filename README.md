@@ -59,9 +59,7 @@ memberlist is WASM/WASI friendly, all crates can be compiled to `wasm-wasi` and 
     # Enable one tls implementation. This is optional.
     # Users can just use encryption feature with plain TCP.
     #
-    # Builtin supports are `tls` and `native-tls`
     # "tls",
-    # "native-tls",
   ] }
   ```
 
@@ -79,7 +77,7 @@ memberlist is WASM/WASI friendly, all crates can be compiled to `wasm-wasi` and 
     # Builtin supports are `tokio`, `smol`, `async-std`
     "tokio",
     # Enable one of the QUIC implementation
-    # Builtin supports are `quinn`
+    # Builtin support is `quinn`
     "quinn",
   ] }
   ```
@@ -112,19 +110,17 @@ Here are the layers:
 
   - **[`NetTransport`](https://docs.rs/memberlist-net/struct.NetTransport.html)**
 
-    Three kinds of different builtin stream layers for `NetTransport`:
+    Builtin stream layers for `NetTransport`:
 
     - [`Tcp`](https://docs.rs/memberlist-net/stream_layer/tcp/struct.Tcp.html): based on TCP and UDP
     - [`Tls`](https://docs.rs/memberlist-net/stream_layer/tls/struct.Tls.html): based on [`rustls`](https://docs.rs/rustls) and UDP
-    - [`NativeTls`](https://docs.rs/memberlist-net/stream_layer/tls/struct.NativeTls.html): based on [`native-tls`](https://docs.rs/native-tls) and UDP
 
   - **[`QuicTransport`](https://docs.rs/memberlist-quic/struct.QuicTransport.html)**
 
     QUIC transport is an experimental transport implementation, it is well tested but still experimental.
 
-    Two kinds of different builtin stream layers for `QuicTransport`:
+    Builtin stream layers for `QuicTransport`:
     - [`Quinn`](https://docs.rs/memberlist-quic/stream_layer/quinn/struct.Quinn.html): based on [`quinn`](https://docs.rs/quinn)
-    - [`S2n`](https://docs.rs/memberlist-quic/stream_layer/s2n/struct.S2n.html): based on [`s2n-quic`](https://docs.rs/s2n-quic)
 
   Users can still implement their own stream layer for different kinds of transport implementations.
 

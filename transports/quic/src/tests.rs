@@ -157,18 +157,3 @@ mod quinn_stream_layer {
     .with_connect_timeout(timeout)
   }
 }
-
-#[cfg(feature = "s2n")]
-pub use s2n_stream_layer::s2n_stream_layer;
-
-#[cfg(feature = "s2n")]
-mod s2n_stream_layer {
-  use agnostic_lite::RuntimeLite;
-
-  use crate::stream_layer::s2n::*;
-
-  pub async fn s2n_stream_layer<R: RuntimeLite>() -> crate::s2n::Options {
-    let p = std::env::current_dir().unwrap().join("tests");
-    Options::new("localhost".into(), p.join("cert.pem"), p.join("key.pem"))
-  }
-}

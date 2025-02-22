@@ -8,11 +8,6 @@ use bytes::Bytes;
 #[cfg_attr(docsrs, doc(cfg(feature = "quinn")))]
 pub mod quinn;
 
-/// QUIC stream layer based on [`s2n`](::s2n_quic).
-#[cfg(feature = "s2n")]
-#[cfg_attr(docsrs, doc(cfg(feature = "s2n")))]
-pub mod s2n;
-
 /// A trait for QUIC bidirectional streams.
 pub trait QuicStream:
   memberlist_core::transport::Connection + Unpin + Send + Sync + 'static

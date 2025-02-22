@@ -21,7 +21,6 @@ compression = ["rayon", "weezl"]
 # encryption feature enables nothing, because of quic is secure by default, this feature only for adapt to other transport layer
 encryption = ["memberlist-core/encryption"]
 quinn = ["agnostic/quinn", "dep:quinn", "agnostic/net", "rustls"]
-s2n = ["s2n-quic", "s2n-quic-transport", "futures/bilock", "futures/unstable"]
 serde = ["memberlist-core/serde", "dep:serde", "humantime-serde", "indexmap/serde"]
 metrics = ["memberlist-core/metrics", "dep:metrics"]
 
@@ -81,10 +80,6 @@ rustls = { version = "0.23", default-features = false, optional = true }
 
 # test
 rcgen = { version = "0.13", optional = true }
-
-# s2n
-s2n-quic = { version = "1.53", optional = true }
-s2n-quic-transport = { version = "0.53", optional = true }
 
 # compression
 rayon = { version = "1.8", optional = true }
