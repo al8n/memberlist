@@ -16,7 +16,7 @@ pub const TEST_KEYS: &[SecretKey] = &[
   SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
 ];
 
-#[cfg(not(feature = "tcp"))]
+#[allow(unused_imports)]
 use memberlist_net::stream_layer::tcp::Tcp;
 
 #[cfg(feature = "tls")]
