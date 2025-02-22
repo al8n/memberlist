@@ -156,13 +156,13 @@ pub enum Error<T: Transport, D: Delegate> {
     /// The actual message type.
     got: &'static str,
   },
-  /// Returned when the sequence number of [`Ack`](crate::types::Ack) is not
-  /// match the sequence number of [`Ping`](crate::types::Ping).
+  /// Returned when the sequence number of [`Ack`](crate::proto::Ack) is not
+  /// match the sequence number of [`Ping`](crate::proto::Ping).
   #[error("sequence number mismatch: ping({ping}), ack({ack})")]
   SequenceNumberMismatch {
-    /// The sequence number of [`Ping`](crate::types::Ping).
+    /// The sequence number of [`Ping`](crate::proto::Ping).
     ping: u32,
-    /// The sequence number of [`Ack`](crate::types::Ack).
+    /// The sequence number of [`Ack`](crate::proto::Ack).
     ack: u32,
   },
   /// Failed to encode message
