@@ -1,5 +1,6 @@
 use bytes::{Buf, Bytes, BytesMut};
 use smallvec_wrapper::XXXLargeVec;
+#[cfg(feature = "encryption")]
 use triomphe::Arc;
 
 use crate::{DecodeError, Label, ParseLabelError};
@@ -47,6 +48,9 @@ pub enum ProtoDecoderError {
     /// The expected label
     expected: Label,
   },
+  /// Required label is missing
+  #[error("label not found")]
+  LabelNotFound,
   /// unexpected double packet label header
   #[error("unexpected double packet label header")]
   UnexpectedLabel,
@@ -148,6 +152,7 @@ impl From<ProtoDecoderError> for std::io::Error {
       ProtoDecoderError::ChecksumDisabled => Self::new(ErrorKind::Other, value),
       ProtoDecoderError::CompressionDisabled => Self::new(ErrorKind::Other, value),
       ProtoDecoderError::UnexpectedLabel => Self::new(ErrorKind::InvalidInput, value),
+      ProtoDecoderError::LabelNotFound => Self::new(ErrorKind::InvalidInput, value),
       #[cfg(feature = "encryption")]
       ProtoDecoderError::Encryption(e) => Self::new(ErrorKind::InvalidData, e),
       #[cfg(feature = "encryption")]
@@ -340,6 +345,12 @@ impl ProtoDecoder {
           ErrorKind::InvalidData,
           "unexpected double stream label header",
         ));
+      }
+    } else if let Some(label) = &self.label {
+      if !label.is_empty() {
+        return Err(ProtoDecoderError::LabelNotFound.into());
+      } else {
+        None
       }
     } else {
       None
@@ -578,6 +589,7 @@ impl ProtoDecoder {
       .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
     let mut buf = BytesMut::zeroed(1 + length_delimited_size + total_len as usize);
     reader.read_exact(&mut buf).await?;
+    let _ = auth_data;
     Ok(Bytes::from(buf))
   }
 
@@ -621,6 +633,12 @@ impl ProtoDecoder {
 
       buf.advance(offset);
       Some(label)
+    } else if let Some(label) = &self.label {
+      if !label.is_empty() {
+        return Err(ProtoDecoderError::LabelNotFound);
+      } else {
+        None
+      }
     } else {
       None
     };
@@ -789,6 +807,8 @@ impl ProtoDecoder {
           .map_err(Into::into);
       }
     }
+
+    let _ = auth_data;
 
     Ok(payload_without_checksum.freeze())
   }

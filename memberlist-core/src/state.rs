@@ -218,7 +218,6 @@ where
     memberlist: &mut Members<T, D>,
     d: Dead<T::Id>,
   ) -> Result<(), Error<T, D>> {
-    // let node = d.node.clone();
     let idx = match memberlist.node_map.get(d.node()) {
       Some(idx) => *idx,
       // If we've never heard about this node before, ignore it
@@ -727,6 +726,12 @@ macro_rules! bail_trigger {
                   break 'outer;
                 }
                 this.$fn(&stop_rx).await;
+
+                match stop_rx.try_recv() {
+                  Ok(_) => return,
+                  Err(async_channel::TryRecvError::Empty) => {}
+                  Err(async_channel::TryRecvError::Closed) => return,
+                }
               }
             }
           }
@@ -809,6 +814,11 @@ where
         futures::select! {
           _ = futures::StreamExt::next(&mut timer).fuse() => {
             this.push_pull().await;
+            match stop_rx.try_recv() {
+              Ok(_) => return,
+              Err(async_channel::TryRecvError::Empty) => {}
+              Err(async_channel::TryRecvError::Closed) => return,
+            }
           }
           _ = stop_rx.recv().fuse() => {
             tracing::debug!("memberlist.state: push pull trigger exits");
@@ -820,7 +830,6 @@ where
   }
 
   // Used to perform a single round of failure detection and gossip
-  // FIX(al8n): maybe an infinite loop happening here when graceful shutdown.
   async fn probe(&self, shutdown_rx: &async_channel::Receiver<()>) -> bool {
     // Track the number of indexes we've considered probing
     let mut num_check = 0;
@@ -934,7 +943,6 @@ where
       let stream = self
         .send_packets(target.address(), ping.cheap_clone().into())
         .await;
-      futures::pin_mut!(stream);
       let errs = stream.collect::<OneOrMore<_>>().await;
       if !errs.is_empty() {
         let e = match errs.into_either() {

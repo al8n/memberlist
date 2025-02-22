@@ -89,18 +89,17 @@ where
               let stream_tx = stream_tx.clone();
               #[cfg(feature = "metrics")]
               let metric_labels = metric_labels.clone();
-              <T::Runtime as RuntimeLite>::spawn_detach(async move {
-                Self::handle_connection(
-                  connection,
-                  local_addr,
-                  remote_addr,
-                  stream_tx,
-                  packet_tx,
-                  timeout,
-                  shutdown_rx,
-                  #[cfg(feature = "metrics")] metric_labels,
-                ).await;
-              });
+
+              Self::handle_connection(
+                connection,
+                local_addr,
+                remote_addr,
+                stream_tx,
+                packet_tx,
+                timeout,
+                shutdown_rx,
+                #[cfg(feature = "metrics")] metric_labels,
+              ).await;
             }
             Err(e) => {
               if shutdown_rx.is_closed() {

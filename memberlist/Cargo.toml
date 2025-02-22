@@ -49,7 +49,6 @@ xxhash64 = ["memberlist-core/xxhash64"]
 xxhash3 = ["memberlist-core/xxhash3"]
 murmur3 = ["memberlist-core/murmur3"]
 
-
 quic = ["memberlist-quic", "agnostic/quinn"]
 quinn = ["memberlist-quic/quinn", "quic"]
 s2n = ["memberlist-quic/s2n", "quic"]

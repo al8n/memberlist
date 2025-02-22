@@ -1,7 +1,9 @@
 use super::{
   super::{Message, BATCH_OVERHEAD, COMPOOUND_MESSAGE_TAG},
-  Batch, Data, Encodable, EncodeBuffer, Payload, ProtoEncoder, ProtoEncoderError, SmallVec,
+  Batch, Data, Encodable, EncodeBuffer, Payload, ProtoEncoder, ProtoEncoderError,
 };
+
+use smallvec_wrapper::SmallVec;
 
 use rayon::iter::{self, IntoParallelIterator, ParallelIterator};
 

@@ -241,7 +241,6 @@ where
     Arc<AtomicU32>,
   >,
   pub(crate) leave_broadcast_tx: Sender<()>,
-  pub(crate) leave_lock: Mutex<()>,
   pub(crate) leave_broadcast_rx: Receiver<()>,
   pub(crate) handles: AtomicRefCell<
     FuturesUnordered<<<T::Runtime as RuntimeLite>::Spawner as AsyncSpawner>::JoinHandle<()>>,
@@ -389,7 +388,6 @@ where
         awareness,
         broadcast,
         leave_broadcast_tx,
-        leave_lock: Mutex::new(()),
         leave_broadcast_rx,
         probe_index: AtomicUsize::new(0),
         handles: AtomicRefCell::new(FuturesUnordered::new()),

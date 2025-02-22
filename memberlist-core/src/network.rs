@@ -98,6 +98,7 @@ where
   where
     M: AsRef<[Message<T::Id, T::ResolvedAddress>]> + Send + Sync + 'a,
   {
+    #[allow(unused_mut)]
     let mut encoder = ProtoEncoder::new(self.inner.transport.max_packet_size())
       .with_messages(packets)
       .with_label(self.inner.opts.label().clone())
@@ -195,9 +196,10 @@ where
               },
             }
           } else {
+            let _ = hint;
             FuturesUnordered::from_iter(encoder.encode().map(|res| match res {
               Ok(payload) => futures::future::Either::Left(
-                self.raw_send_packet(addr, Ok(payload)),
+                self.raw_send_packet(addr, payload),
               ),
               Err(e) => futures::future::Either::Right(async { Err(e.into()) }),
             }))
@@ -295,6 +297,7 @@ where
               }
             }
           } else {
+            let _ = hint;
             let mut errs = OneOrMore::new();
             for res in encoder.encode() {
               match res {
@@ -401,6 +404,13 @@ where
       .map_err(Error::transport)
   }
 
+  #[cfg(any(
+    feature = "encryption",
+    feature = "zstd",
+    feature = "lz4",
+    feature = "brotli",
+    feature = "snappy",
+  ))]
   async fn to_async_err(e: Error<T, D>) -> Result<(), Error<T, D>>
   where
     T: Transport,

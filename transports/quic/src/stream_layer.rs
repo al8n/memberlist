@@ -1,6 +1,6 @@
 use std::{future::Future, io, net::SocketAddr};
 
-use agnostic::RuntimeLite;
+use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
 
 /// QUIC stream layer based on [`quinn`](::quinn).

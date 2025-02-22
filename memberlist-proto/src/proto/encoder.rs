@@ -1,7 +1,5 @@
 use core::marker::PhantomData;
 
-use smallvec_wrapper::SmallVec;
-
 use crate::{Data, EncodeError, Label, Payload};
 
 use super::{super::debug_assert_write_eq, Message, COMPOOUND_MESSAGE_TAG, LABELED_MESSAGE_TAG};
@@ -35,7 +33,21 @@ use super::{
   CHECKSUMED_MESSAGE_TAG,
 };
 
-use super::{BATCH_OVERHEAD, MAX_MESSAGES_PER_BATCH, PAYLOAD_LEN_SIZE};
+use super::{BATCH_OVERHEAD, MAX_MESSAGES_PER_BATCH};
+
+#[cfg(any(
+  feature = "encryption",
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3",
+  feature = "zstd",
+  feature = "lz4",
+  feature = "brotli",
+  feature = "snappy",
+))]
+use super::PAYLOAD_LEN_SIZE;
 
 mod blocking_impl;
 #[cfg(feature = "rayon")]
@@ -371,7 +383,17 @@ impl ProtoHint {
   }
 
   /// Returns `true` if hints the encoder should offload the encoding to `rayon`.
-  pub fn should_offload(&self, offload_threshold: usize) -> bool {
+  pub fn should_offload(
+    &self,
+    #[cfg(any(
+      feature = "zstd",
+      feature = "lz4",
+      feature = "brotli",
+      feature = "snappy",
+      feature = "encryption",
+    ))]
+    offload_threshold: usize,
+  ) -> bool {
     cfg_if::cfg_if! {
       if #[cfg(any(
         feature = "zstd",
@@ -757,6 +779,8 @@ where
       }
     }
 
+    // clippy happy on no extra features
+    let _ = offset;
     Ok(hint)
   }
 
@@ -949,6 +973,7 @@ where
       offset += 2 + label_size;
     }
 
+    #[allow(unused_mut)]
     let mut bytes_written: Option<usize> = None;
     cfg_if::cfg_if! {
       if #[cfg(any(
@@ -1103,6 +1128,7 @@ where
       }
     }
 
+    let _ = bytes_written; // clippy happy on no extra features
     Ok(payload)
   }
 

@@ -147,7 +147,7 @@ pub async fn memberlist_shutdown_cleanup<T, F, R>(
 {
   let m = Memberlist::<T, _>::new(t1, t1_opts.clone()).await.unwrap();
   m.shutdown().await.unwrap();
-  R::sleep(Duration::from_millis(250)).await;
+  R::sleep(Duration::from_millis(500)).await;
 
   let addr = m.advertise_address().clone();
   drop(m);
@@ -225,12 +225,18 @@ pub async fn memberlist_join_with_labels<F, T, R>(
   R: RuntimeLite,
 {
   let label1 = Label::try_from("blah").unwrap();
-  let m1 = Memberlist::<T, _>::new(get_transport(1, label1.clone()).await, opts.clone())
-    .await
-    .unwrap();
-  let m2 = Memberlist::<T, _>::new(get_transport(2, label1.clone()).await, opts)
-    .await
-    .unwrap();
+  let m1 = Memberlist::<T, _>::new(
+    get_transport(1, label1.clone()).await,
+    opts.clone().with_label(label1.clone()),
+  )
+  .await
+  .unwrap();
+  let m2 = Memberlist::<T, _>::new(
+    get_transport(2, label1.clone()).await,
+    opts.with_label(label1.clone()),
+  )
+  .await
+  .unwrap();
 
   let target = Node::<T::Id, MaybeResolvedAddress<T>>::new(
     m1.local_id().cheap_clone(),
@@ -271,9 +277,12 @@ pub async fn memberlist_join_with_labels<F, T, R>(
 
   // Create a fourth node that uses a mismatched label
   let label = Label::try_from("not-blah").unwrap();
-  let m4 = Memberlist::new(get_transport(4, label).await, Options::lan())
-    .await
-    .unwrap();
+  let m4 = Memberlist::new(
+    get_transport(4, label.clone()).await,
+    Options::lan().with_label(label),
+  )
+  .await
+  .unwrap();
   m4.join(target).await.unwrap_err();
 
   let m1m = m1.num_online_members().await;

@@ -23,12 +23,28 @@ const LABEL_OVERHEAD: usize = 1 + 1;
 /// - 5 bytes for the max u32 varint encoded size
 const MAX_PLAIN_MESSAGE_HEADER_SIZE: usize = 1 + 5;
 
+#[cfg(feature = "encryption")]
 const ENCRYPTED_MESSAGE_HEADER_SIZE: usize = 1 + 1 + PAYLOAD_LEN_SIZE; // 1 byte for the encryption tag, 1 byte algo, 4 bytes for the length
+
+#[cfg(any(
+  feature = "snappy",
+  feature = "zstd",
+  feature = "lz4",
+  feature = "brotli"
+))]
 /// - 1 byte for the compression tag
 /// - 2 byte for the algo
 /// - 4 bytes for the uncompressed data length
 /// - 4 bytes for the compressed data length
 const COMPRESSED_MESSAGE_HEADER_SIZE: usize = 1 + 2 + PAYLOAD_LEN_SIZE + PAYLOAD_LEN_SIZE;
+
+#[cfg(any(
+  feature = "crc32",
+  feature = "xxhash32",
+  feature = "xxhash64",
+  feature = "xxhash3",
+  feature = "murmur3",
+))]
 const CHECKSUMED_MESSAGE_HEADER_SIZE: usize = 1 + 1 + PAYLOAD_LEN_SIZE; // 1 byte for the checksum tag, 1 byte for the algo, 4 bytes for the checksum
 
 const COMPOOUND_MESSAGE_TAG: u8 = 1;

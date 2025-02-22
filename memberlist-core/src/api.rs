@@ -269,11 +269,15 @@ where
   ///
   /// This method is safe to call multiple times, but must not be called
   /// after the cluster is already shut down.
-  pub async fn leave(&self, timeout: Duration) -> Result<(), Error<T, D>> {
-    let _mu = self.inner.leave_lock.lock().await;
-
+  ///
+  /// Returns `true` if the node has successfully left the cluster by this call.
+  pub async fn leave(&self, timeout: Duration) -> Result<bool, Error<T, D>> {
     if self.has_shutdown() {
-      panic!("leave after shutdown");
+      return Ok(false);
+    }
+
+    if self.has_left() {
+      return Ok(false);
     }
 
     if !self.has_left() {
@@ -314,7 +318,8 @@ where
         tracing::warn!("memberlist: leave but we're not a member");
       }
     }
-    Ok(())
+
+    Ok(true)
   }
 
   /// Join directly by contacting the given node id,

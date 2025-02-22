@@ -655,7 +655,14 @@ where
 
     // Block until all the listener threads have died.
     let mut handles = core::mem::take(&mut *self.handles.borrow_mut());
-    while handles.next().await.is_some() {}
+    while let Some(res) = handles.next().await {
+      match res {
+        Ok(()) => {}
+        Err(e) => {
+          tracing::error!(err = %e, "memberlist.transport.quic: failed to wait listener task finish");
+        }
+      }
+    }
     Ok(())
   }
 }

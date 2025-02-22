@@ -117,8 +117,3 @@ tokio = { version = "1", features = ["full", "tracing"] }
 test-cert-gen = { version = "0.9" }
 paste.workspace = true
 parking_lot = "0.12"
-
-[[test]]
-name = "memberlist-net"
-path = "tests/main.rs"
-required-features = ["test"]
