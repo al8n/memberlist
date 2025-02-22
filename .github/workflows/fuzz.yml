@@ -1,30 +1,21 @@
-name: Fuzz
+name: Fuzz Testing
 on: [pull_request]
 
-permissions:
-  contents: read
-
 jobs:
-  Fuzzing:
+  fuzz:
     runs-on: ubuntu-latest
     steps:
-    - name: Build Fuzzers
-      id: build
-      uses: google/oss-fuzz/infra/cifuzz/actions/build_fuzzers@master
-      with:
-        oss-fuzz-project-name: 'memberlist'
-        dry-run: false
-        language: rust
-    - name: Run Fuzzers
-      uses: google/oss-fuzz/infra/cifuzz/actions/run_fuzzers@master
-      with:
-        oss-fuzz-project-name: 'memberlist'
-        fuzz-seconds: 300
-        dry-run: false
-        language: rust
-    - name: Upload Crash
-      uses: actions/upload-artifact@v4
-      if: failure() && steps.build.outcome == 'success'
-      with:
-        name: artifacts
-        path: ./out/artifacts
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Run fuzzing
+        run: |
+          cargo fuzz build
+          cargo fuzz run messages -- -max_total_time=300
