@@ -36,13 +36,22 @@ jobs:
             name: "memberlist-core"
           - crate: memberlist-proto 
             features: "std,metrics,encryption,all-compression,all-checksum"
-            name: "memberlist-proto"
+            name: "memberlist-proto-without-rayon"
+          - crate: memberlist-proto
+            features: "std,metrics,encryption,all-compression,all-checksum,rayon"
+            name: "memberlist-proto-with-rayon"
           - crate: memberlist
             features: "test,tokio,tcp,tls,snappy,crc32,encryption,metrics"
-            name: "memberlist-net"
+            name: "memberlist-net-without-rayon"
+          - crate: memberlist
+            features: "test,tokio,tcp,tls,snappy,crc32,encryption,metrics,rayon"
+            name: "memberlist-net-with-rayon"
           - crate: memberlist
             features: "test,tokio,quinn,snappy,metrics"
-            name: "memberlist-quinn-compression"
+            name: "memberlist-quinn-without-rayon"
+          - crate: memberlist
+            features: "test,tokio,quinn,snappy,metrics"
+            name: "memberlist-quinn-with-rayon"
     steps:
       - uses: actions/checkout@v4
       - name: Install latest nightly
