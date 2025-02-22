@@ -418,9 +418,17 @@ impl CompressAlgorithm {
     }
   }
 
-  pub(crate) const fn unknown_or_disabled(&self) -> CompressionError {
+  pub(crate) const fn unknown_or_disabled(&self) -> Option<CompressionError> {
     match *self {
-      Self::Unknown(value) => {
+      #[cfg(feature = "brotli")]
+      Self::Brotli(_) => None,
+      #[cfg(feature = "lz4")]
+      Self::Lz4 => None,
+      #[cfg(feature = "snappy")]
+      Self::Snappy => None,
+      #[cfg(feature = "zstd")]
+      Self::Zstd(_) => None,
+      Self::Unknown(value) => Some({
         #[cfg(not(all(
           feature = "brotli",
           feature = "lz4",
@@ -448,8 +456,7 @@ impl CompressAlgorithm {
           feature = "zstd"
         ))]
         CompressionError::UnknownAlgorithm(Self::Unknown(value))
-      }
-      _ => unreachable!(),
+      }),
     }
   }
 }

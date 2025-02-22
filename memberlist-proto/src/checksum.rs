@@ -143,9 +143,19 @@ pub enum ChecksumAlgorithm {
 
 impl ChecksumAlgorithm {
   #[inline]
-  pub(crate) const fn unknown_or_disabled(&self) -> ChecksumError {
+  pub(crate) const fn unknown_or_disabled(&self) -> Option<ChecksumError> {
     match *self {
-      Self::Unknown(val) => {
+      #[cfg(feature = "crc32")]
+      Self::Crc32 => None,
+      #[cfg(feature = "xxhash32")]
+      Self::XxHash32 => None,
+      #[cfg(feature = "xxhash64")]
+      Self::XxHash64 => None,
+      #[cfg(feature = "xxhash3")]
+      Self::XxHash3 => None,
+      #[cfg(feature = "murmur3")]
+      Self::Murmur3 => None,
+      Self::Unknown(val) => Some({
         #[cfg(not(all(
           feature = "crc32",
           feature = "xxhash32",
@@ -170,8 +180,7 @@ impl ChecksumAlgorithm {
           feature = "murmur3"
         ))]
         ChecksumError::UnknownAlgorithm(Self::Unknown(val))
-      }
-      _ => unreachable!(),
+      }),
     }
   }
 }

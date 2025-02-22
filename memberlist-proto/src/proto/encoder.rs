@@ -744,12 +744,16 @@ where
   fn valid(&self) -> Result<(), ProtoEncoderError> {
     #[cfg(compression)]
     if let Some(ref algo) = self.compress {
-      return Err(ProtoEncoderError::Compress(algo.unknown_or_disabled()));
+      if let Some(err) = algo.unknown_or_disabled() {
+        return Err(ProtoEncoderError::Compress(err));
+      }
     }
 
     #[cfg(checksum)]
     if let Some(ref algo) = self.checksum {
-      return Err(ProtoEncoderError::Checksum(algo.unknown_or_disabled()));
+      if let Some(err) = algo.unknown_or_disabled() {
+        return Err(ProtoEncoderError::Checksum(err));
+      }
     }
 
     Ok(())
