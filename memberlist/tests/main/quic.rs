@@ -101,6 +101,7 @@ mod probe;
 #[path = "quic/probe_node.rs"]
 mod probe_node;
 
+#[cfg(not(tarpaulin))]
 #[path = "quic/probe_node_dogpile.rs"]
 mod probe_node_dogpile;
 
@@ -222,6 +223,7 @@ mod join_cancel_passive;
 #[path = "quic/join_shutdown.rs"]
 mod join_shutdown;
 
+#[cfg(not(tarpaulin))]
 #[path = "quic/leave.rs"]
 mod leave;
 

@@ -1,6 +1,6 @@
 use std::{borrow::Cow, sync::Arc};
 
-use memberlist_proto::ProtoEncoderError;
+use memberlist_proto::{MessageType, ProtoEncoderError};
 use nodecraft::{Node, resolver::AddressResolver};
 use smallvec_wrapper::OneOrMore;
 use smol_str::SmolStr;
@@ -58,10 +58,13 @@ pub enum Error<T: Transport, D: Delegate> {
   #[error("unexpected message: expected {expected}, got {got}")]
   UnexpectedMessage {
     /// The expected message type.
-    expected: &'static str,
+    expected: MessageType,
     /// The actual message type.
-    got: &'static str,
+    got: MessageType,
   },
+  /// Returned when receive a unknown message type value
+  #[error("unknown message type value {0}")]
+  UnknownMessageType(u8),
   /// Returned when the sequence number of [`Ack`](crate::proto::Ack) is not
   /// match the sequence number of [`Ping`](crate::proto::Ping).
   #[error("sequence number mismatch: ping({ping}), ack({ack})")]
@@ -201,7 +204,7 @@ impl<T: Transport, D: Delegate> Error<T, D> {
 
   /// Creates a [`Error::UnexpectedMessage`] error.
   #[inline]
-  pub fn unexpected_message(expected: &'static str, got: &'static str) -> Self {
+  pub fn unexpected_message(expected: MessageType, got: MessageType) -> Self {
     Self::UnexpectedMessage { expected, got }
   }
 

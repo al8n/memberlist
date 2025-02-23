@@ -13,8 +13,8 @@ use super::{
   delegate::Delegate,
   error::Error,
   proto::{
-    Alive, Data, DataRef, Dead, ErrorResponse, IndirectPing, Message, MessageRef, NodeState, Ping,
-    ProtoWriter, PushNodeState, SmallVec, State, Suspect,
+    Alive, Data, DataRef, Dead, ErrorResponse, IndirectPing, Message, MessageRef, MessageType,
+    NodeState, Ping, ProtoWriter, PushNodeState, SmallVec, State, Suspect,
   },
   suspicion::{Suspicion, Suspicioner},
   transport::{Connection, Transport},
@@ -203,7 +203,7 @@ where
         return Err(Error::remote(resp));
       }
       MessageRef::PushPull(pp) => pp,
-      msg => return Err(Error::unexpected_message("PushPull", msg.ty().kind())),
+      msg => return Err(Error::unexpected_message(MessageType::PushPull, msg.ty())),
     };
 
     let res = self.merge_remote_state(pp).await;

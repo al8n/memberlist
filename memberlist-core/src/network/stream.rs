@@ -192,12 +192,7 @@ where
     #[cfg(feature = "metrics")]
     {
       std::thread_local! {
-        #[cfg(not(target_family = "wasm"))]
         static NODE_INSTANCES_GAUGE: std::cell::OnceCell<std::cell::RefCell<crate::proto::MetricLabels>> = const { std::cell::OnceCell::new() };
-
-        // TODO: remove this when cargo wasix toolchain update to rust 1.70
-        #[cfg(target_family = "wasm")]
-        static NODE_INSTANCES_GAUGE: once_cell::sync::OnceCell<std::cell::RefCell<crate::proto::MetricLabels>> = once_cell::sync::OnceCell::new();
       }
 
       NODE_INSTANCES_GAUGE.with(|g| {

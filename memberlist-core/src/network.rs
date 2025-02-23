@@ -64,20 +64,14 @@ where
     }
     let mt = match MessageType::try_from(msg[0]) {
       Ok(mt) => mt,
-      // TODO: handle error conversion
-      Err(_e) => return Err(Error::unexpected_message("Ack", "unknown")),
+      Err(val) => return Err(Error::UnknownMessageType(val)),
     };
     msg.advance(1);
 
     if let MessageType::Ack = mt {
       let seqn = match Ack::decode_sequence_number(&msg) {
         Ok(seqn) => seqn.1,
-        // TODO: handle error conversion
-        Err(e) => {
-          return Err(Error::custom(
-            format!("failed to decode ack sequence number: {}", e).into(),
-          ));
-        }
+        Err(e) => return Err(e.into()),
       };
 
       if seqn != ping_sequence_number {
@@ -86,10 +80,7 @@ where
 
       Ok(true)
     } else {
-      Err(Error::UnexpectedMessage {
-        expected: "Ack",
-        got: mt.kind(),
-      })
+      Err(Error::unexpected_message(MessageType::Ack, mt))
     }
   }
 
