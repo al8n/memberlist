@@ -436,7 +436,7 @@ impl CompressAlgorithm {
           feature = "zstd"
         )))]
         {
-          return Some(match value {
+          match value {
             #[cfg(feature = "brotli")]
             BROTLI_TAG => CompressionError::disabled(*self, "brotli"),
             #[cfg(feature = "lz4")]
@@ -446,7 +446,7 @@ impl CompressAlgorithm {
             #[cfg(feature = "zstd")]
             ZSTD_TAG => CompressionError::disabled(*self, "zstd"),
             _ => CompressionError::UnknownAlgorithm(*self),
-          });
+          }
         }
 
         #[cfg(all(
