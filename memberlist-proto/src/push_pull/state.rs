@@ -3,8 +3,8 @@ use core::marker::PhantomData;
 use nodecraft::{CheapClone, Node};
 
 use crate::{
-  merge, skip, split, Data, DataRef, DecodeError, DelegateVersion, EncodeError, Meta,
-  ProtocolVersion, State, WireType,
+  Data, DataRef, DecodeError, DelegateVersion, EncodeError, Meta, ProtocolVersion, State, WireType,
+  merge, skip, split,
 };
 
 use super::STATES_BYTE;

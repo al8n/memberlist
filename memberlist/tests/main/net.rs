@@ -1,7 +1,7 @@
 use memberlist_core::{
-  tests::{memberlist::*, next_socket_addr_v4, state::*},
-  transport::{resolver::socket_addr::SocketAddrResolver, Node, Transport},
   Options,
+  tests::{memberlist::*, next_socket_addr_v4, state::*},
+  transport::{Node, Transport, resolver::socket_addr::SocketAddrResolver},
 };
 use memberlist_net::{NetTransport, NetTransportOptions};
 use smol_str::SmolStr;

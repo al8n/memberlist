@@ -75,11 +75,7 @@ impl Keyring {
           keys: keys
             .filter_map(|k| {
               let k = k.into();
-              if k == primary_key {
-                None
-              } else {
-                Some(k)
-              }
+              if k == primary_key { None } else { Some(k) }
             })
             .collect(),
         })),

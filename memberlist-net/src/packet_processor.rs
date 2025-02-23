@@ -2,14 +2,14 @@ use std::{
   net::SocketAddr,
   ops::ControlFlow,
   sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
   },
 };
 
 use agnostic::{
-  net::{Net, UdpSocket as _},
   Runtime, RuntimeLite,
+  net::{Net, UdpSocket as _},
 };
 use bytes::Bytes;
 use memberlist_core::transport::{Packet, PacketProducer, Transport};

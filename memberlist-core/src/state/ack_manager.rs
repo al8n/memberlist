@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use agnostic_lite::{AfterHandle, AsyncAfterSpawner, RuntimeLite};
 use bytes::Bytes;
-use futures::{future::BoxFuture, FutureExt};
+use futures::{FutureExt, future::BoxFuture};
 use parking_lot::Mutex;
 
 use crate::proto::{Ack, Nack};

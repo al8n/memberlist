@@ -7,15 +7,15 @@ use std::{
 };
 
 use agnostic::{
-  net::{Net, TcpListener, TcpStream},
   Runtime,
+  net::{Net, TcpListener, TcpStream},
 };
-use futures::{lock::BiLock, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, lock::BiLock};
 pub use futures_rustls::{
-  client, pki_types::ServerName, rustls, server, TlsAcceptor, TlsConnector,
+  TlsAcceptor, TlsConnector, client, pki_types::ServerName, rustls, server,
 };
 use peekable::future::{AsyncPeekExt, AsyncPeekable};
-use rustls::{client::danger::ServerCertVerifier, SignatureScheme};
+use rustls::{SignatureScheme, client::danger::ServerCertVerifier};
 
 use super::{Listener, PromisedStream, StreamLayer};
 

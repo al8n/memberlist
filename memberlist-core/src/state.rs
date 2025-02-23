@@ -1,13 +1,14 @@
 use std::{
   ops::ControlFlow,
   sync::{
-    atomic::{AtomicIsize, AtomicU32, Ordering},
     Arc,
+    atomic::{AtomicIsize, AtomicU32, Ordering},
   },
   time::Duration,
 };
 
 use super::{
+  Epoch, Member, Members,
   base::Memberlist,
   delegate::Delegate,
   error::Error,
@@ -17,14 +18,13 @@ use super::{
   },
   suspicion::{Suspicion, Suspicioner},
   transport::{Connection, Transport},
-  Epoch, Member, Members,
 };
 
-use agnostic_lite::{time::Instant, AsyncSpawner, RuntimeLite};
+use agnostic_lite::{AsyncSpawner, RuntimeLite, time::Instant};
 
-use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
+use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use nodecraft::{CheapClone, Node};
-use rand::{seq::SliceRandom, Rng};
+use rand::{Rng, seq::SliceRandom};
 
 /// Exports the state unit test cases.
 #[cfg(any(test, feature = "test"))]
@@ -935,10 +935,12 @@ where
     );
 
     let awareness_delta = AtomicIsize::new(0);
-    scopeguard::defer!(self
-      .inner
-      .awareness
-      .apply_delta(awareness_delta.load(Ordering::Acquire)));
+    scopeguard::defer!(
+      self
+        .inner
+        .awareness
+        .apply_delta(awareness_delta.load(Ordering::Acquire))
+    );
 
     if target.state == State::Alive {
       let stream = self

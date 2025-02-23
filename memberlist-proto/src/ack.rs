@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
 use super::{
-  debug_assert_write_eq, merge, skip, split, Data, DataRef, DecodeError, EncodeError, WireType,
+  Data, DataRef, DecodeError, EncodeError, WireType, debug_assert_write_eq, merge, skip, split,
 };
 
 /// Ack response is sent for a ping

@@ -2,9 +2,9 @@ use std::future::Future;
 
 use agnostic::Runtime;
 use memberlist_core::{
+  Memberlist,
   proto::{CompressAlgorithm, Label},
   transport::MaybeResolvedAddress,
-  Memberlist,
 };
 
 use super::*;

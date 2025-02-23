@@ -179,6 +179,15 @@ where
     ))]
     decoder.with_offload_size(self.inner.opts.offload_size);
 
+    #[cfg(feature = "encryption")]
+    if self.encryption_enabled() {
+      decoder
+        .with_encryption(triomphe::Arc::from_iter(
+          self.inner.keyring.as_ref().unwrap().keys(),
+        ))
+        .with_verify_incoming(self.inner.opts.gossip_verify_incoming);
+    }
+
     let plain = match decoder.decode::<T::Runtime>(payload).await {
       Ok(plain) => plain,
       Err(e) => {
@@ -389,12 +398,7 @@ where
         self
           .transport_send_packets(addr, msgs)
           .await
-          .filter_map(|res| async move {
-            match res {
-              Ok(_) => None,
-              Err(e) => Some(e),
-            }
-          })
+          .filter_map(|res| async move { res.err() })
       }
     }
   }

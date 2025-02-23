@@ -76,7 +76,7 @@ where
         Err(e) => {
           return Err(Error::custom(
             format!("failed to decode ack sequence number: {}", e).into(),
-          ))
+          ));
         }
       };
 
@@ -341,10 +341,12 @@ where
     decoder.with_offload_size(self.inner.opts.offload_size);
 
     #[cfg(feature = "encryption")]
-    if self.encryption_enabled() && self.inner.opts.gossip_verify_incoming {
-      decoder.with_encryption(triomphe::Arc::from_iter(
-        self.inner.keyring.as_ref().unwrap().keys(),
-      ));
+    if self.encryption_enabled() {
+      decoder
+        .with_encryption(triomphe::Arc::from_iter(
+          self.inner.keyring.as_ref().unwrap().keys(),
+        ))
+        .with_verify_incoming(self.inner.opts.gossip_verify_incoming);
     }
 
     if !self.inner.opts.skip_inbound_label_check {

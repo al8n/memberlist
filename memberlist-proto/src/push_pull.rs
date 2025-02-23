@@ -4,7 +4,7 @@ use bytes::Bytes;
 use nodecraft::CheapClone;
 use triomphe::Arc;
 
-use super::{merge, skip, split, Data, DataRef, DecodeError, EncodeError, WireType};
+use super::{Data, DataRef, DecodeError, EncodeError, WireType, merge, skip, split};
 
 mod state;
 pub use state::*;

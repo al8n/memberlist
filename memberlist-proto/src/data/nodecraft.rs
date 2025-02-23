@@ -4,7 +4,7 @@ use either::Either;
 use nodecraft::{Domain, DomainRef, HostAddr, HostAddrRef, Node, NodeId, NodeIdRef};
 
 use super::{
-  super::{merge, skip, split, WireType},
+  super::{WireType, merge, skip, split},
   Data, DataRef, DecodeError, EncodeError,
 };
 

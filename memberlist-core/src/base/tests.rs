@@ -8,8 +8,8 @@ use nodecraft::Id;
 
 use crate::{
   delegate::{
-    mock::MockDelegate, AliveDelegate, CompositeDelegate, ConflictDelegate, MergeDelegate,
-    PingDelegate,
+    AliveDelegate, CompositeDelegate, ConflictDelegate, MergeDelegate, PingDelegate,
+    mock::MockDelegate,
   },
   proto::{Data, Label, NodeState, State},
   transport::MaybeResolvedAddress,
@@ -1234,7 +1234,6 @@ where
 async fn retry<'a, R, F, Fut>(n: usize, w: Duration, mut f: F)
 where
   R: RuntimeLite,
-
   F: FnMut() -> Fut + Clone,
   Fut: Future<Output = (bool, String)> + Send + Sync + 'a,
 {

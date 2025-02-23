@@ -3,8 +3,8 @@ use core::marker::PhantomData;
 use crate::{Data, EncodeError, Label, Payload};
 
 use super::{
-  super::debug_assert_write_eq, Message, ProtoEncoderError, COMPOOUND_MESSAGE_TAG,
-  LABELED_MESSAGE_TAG,
+  super::debug_assert_write_eq, COMPOOUND_MESSAGE_TAG, LABELED_MESSAGE_TAG, Message,
+  ProtoEncoderError,
 };
 
 #[cfg(feature = "encryption")]
@@ -867,7 +867,11 @@ where
 
         let po = ch.payload_offset();
         #[cfg(debug_assertions)]
-        assert_eq!(co, po, "the actual compress payload offset {} does not match the compress payload offset {} in hint", co, po);
+        assert_eq!(
+          co, po,
+          "the actual compress payload offset {} does not match the compress payload offset {} in hint",
+          co, po
+        );
 
         // compress to the buffer
         let compressed_len = algo.compress_to(&encoded_buf, &mut buf[po..])?;
@@ -875,7 +879,13 @@ where
         buf[po - PAYLOAD_LEN_SIZE..po].copy_from_slice(&(compressed_len as u32).to_be_bytes());
 
         #[cfg(debug_assertions)]
-        debug_assert!(compressed_len <= ch.max_output_size(), "compress algo: {algo}, compressed_len: {}, max_compressed_output_size: {}, input_size: {}", compressed_len, ch.max_output_size(), hint.input_size);
+        debug_assert!(
+          compressed_len <= ch.max_output_size(),
+          "compress algo: {algo}, compressed_len: {}, max_compressed_output_size: {}, input_size: {}",
+          compressed_len,
+          ch.max_output_size(),
+          hint.input_size
+        );
 
         bytes_written = Some(CompressHint::HEADER_SIZE + compressed_len);
       }
@@ -925,7 +935,11 @@ where
         .expect("when encrypted hint is set, the encryption algorithm must be set");
       let mut eo = eh.header_offset();
       #[cfg(debug_assertions)]
-      assert_eq!(offset, eo, "the actual encryption header offset {} does not match the encryption header offset {} in hint", offset, eo);
+      assert_eq!(
+        offset, eo,
+        "the actual encryption header offset {} does not match the encryption header offset {} in hint",
+        offset, eo
+      );
       buf[eo] = ENCRYPTED_MESSAGE_TAG; // Add the encryption message tag
       eo += 1;
       buf[eo] = algo.as_u8(); // Add the encryption algorithm

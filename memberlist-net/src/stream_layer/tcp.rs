@@ -1,8 +1,8 @@
 use std::{io, marker::PhantomData, net::SocketAddr};
 
 use agnostic::{
-  net::{Net, TcpListener as _, TcpStream as _},
   Runtime,
+  net::{Net, TcpListener as _, TcpStream as _},
 };
 use futures::{AsyncReadExt, AsyncWriteExt};
 use peekable::future::AsyncPeekable;

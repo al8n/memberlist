@@ -2,18 +2,19 @@ use std::{
   net::SocketAddr,
   ops::Sub,
   sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
   },
   time::Duration,
 };
 
-use agnostic_lite::{time::Instant, RuntimeLite};
+use agnostic_lite::{RuntimeLite, time::Instant};
 use bytes::Bytes;
-use futures::{lock::Mutex, Future, FutureExt};
-use nodecraft::{resolver::AddressResolver, CheapClone, Id, Node};
+use futures::{Future, FutureExt, lock::Mutex};
+use nodecraft::{CheapClone, Id, Node, resolver::AddressResolver};
 
 use crate::{
+  Epoch, Memberlist, Options,
   broadcast::Broadcast,
   delegate::{
     CompositeDelegate, Delegate, EventDelegate, EventKind, EventSubscriber,
@@ -24,7 +25,6 @@ use crate::{
   state::{AckManager, LocalNodeState},
   tests::get_memberlist,
   transport::Transport,
-  Epoch, Memberlist, Options,
 };
 
 async fn host_memberlist<T, R>(

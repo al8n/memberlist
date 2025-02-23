@@ -3,8 +3,8 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use agnostic::{
-  net::{Net, UdpSocket},
   Runtime,
+  net::{Net, UdpSocket},
 };
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -21,7 +21,7 @@ use crate::{Listener, StreamLayer};
 /// A helper function to create TLS stream layer for testing
 #[cfg(feature = "tls")]
 pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::TlsOptions {
-  use crate::tls::{rustls, NoopCertificateVerifier, TlsOptions};
+  use crate::tls::{NoopCertificateVerifier, TlsOptions, rustls};
   use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
   let certs = test_cert_gen::gen_keys();

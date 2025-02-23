@@ -1,7 +1,7 @@
 use std::{borrow::Cow, sync::Arc};
 
 use memberlist_proto::ProtoEncoderError;
-use nodecraft::{resolver::AddressResolver, Node};
+use nodecraft::{Node, resolver::AddressResolver};
 use smallvec_wrapper::OneOrMore;
 use smol_str::SmolStr;
 

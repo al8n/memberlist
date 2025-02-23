@@ -2,7 +2,7 @@ use core::future::Future;
 
 use agnostic_lite::RuntimeLite;
 use bytes::Bytes;
-pub use nodecraft::{resolver::AddressResolver, CheapClone, *};
+pub use nodecraft::{CheapClone, resolver::AddressResolver, *};
 
 use crate::proto::*;
 
@@ -237,10 +237,10 @@ pub trait Transport: Sized + Send + Sync + 'static {
 
   /// The address resolver used to resolve addresses
   type Resolver: AddressResolver<
-    Runtime = Self::Runtime,
-    Address = Self::Address,
-    ResolvedAddress = Self::ResolvedAddress,
-  >;
+      Runtime = Self::Runtime,
+      Address = Self::Address,
+      ResolvedAddress = Self::ResolvedAddress,
+    >;
 
   /// The promised connection used to send and receive messages
   type Connection: Connection + Send + Sync + 'static;

@@ -2,9 +2,9 @@ use quickcheck::{Arbitrary, Gen};
 use triomphe::Arc;
 
 use super::{
-  proto::{Message, MessageType},
   Ack, Alive, Dead, DelegateVersion, ErrorResponse, IndirectPing, Label, Meta, Nack, NodeState,
   Ping, ProtocolVersion, PushNodeState, PushPull, SecretKey, State, Suspect,
+  proto::{Message, MessageType},
 };
 
 impl Arbitrary for Ack {
@@ -191,7 +191,7 @@ impl<I: Arbitrary, A: Arbitrary> Arbitrary for IndirectPing<I, A> {
 
 impl Arbitrary for SecretKey {
   fn arbitrary(g: &mut Gen) -> Self {
-    macro_rules! gen {
+    macro_rules! random {
       ($lit:literal) => {{
         let mut buf = [0; $lit];
         for i in 0..$lit {
@@ -202,9 +202,9 @@ impl Arbitrary for SecretKey {
     }
 
     match u8::arbitrary(g) % 3 {
-      0 => SecretKey::Aes128(gen!(16)),
-      1 => SecretKey::Aes192(gen!(24)),
-      2 => SecretKey::Aes256(gen!(32)),
+      0 => SecretKey::Aes128(random!(16)),
+      1 => SecretKey::Aes192(random!(24)),
+      2 => SecretKey::Aes256(random!(32)),
       _ => unreachable!(),
     }
   }

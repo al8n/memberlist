@@ -1,8 +1,8 @@
 use std::{
   collections::{HashMap, VecDeque},
   sync::{
-    atomic::{AtomicBool, AtomicU32, AtomicUsize},
     Arc,
+    atomic::{AtomicBool, AtomicU32, AtomicUsize},
   },
 };
 
@@ -12,9 +12,10 @@ use async_lock::{Mutex, RwLock};
 
 use atomic_refcell::AtomicRefCell;
 use futures::stream::FuturesUnordered;
-use nodecraft::{resolver::AddressResolver, CheapClone, Node};
+use nodecraft::{CheapClone, Node, resolver::AddressResolver};
 
 use super::{
+  Options,
   awareness::Awareness,
   broadcast::MemberlistBroadcast,
   delegate::{Delegate, VoidDelegate},
@@ -24,7 +25,6 @@ use super::{
   state::{AckManager, LocalNodeState},
   suspicion::Suspicion,
   transport::Transport,
-  Options,
 };
 
 #[cfg(feature = "encryption")]

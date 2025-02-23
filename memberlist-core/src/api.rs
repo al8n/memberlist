@@ -1,14 +1,15 @@
 use std::{
-  sync::{atomic::Ordering, Arc},
+  sync::{Arc, atomic::Ordering},
   time::Duration,
 };
 
-use agnostic_lite::{time::Instant, RuntimeLite};
+use agnostic_lite::{RuntimeLite, time::Instant};
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt};
 use smallvec_wrapper::OneOrMore;
 
 use super::{
+  Options,
   base::Memberlist,
   delegate::{Delegate, VoidDelegate},
   error::Error,
@@ -16,7 +17,6 @@ use super::{
   proto::{Alive, Dead, Message, Meta, NodeState, Ping, SmallVec},
   state::AckMessage,
   transport::{AddressResolver, CheapClone, MaybeResolvedAddress, Node, Transport},
-  Options,
 };
 
 impl<T, D> Memberlist<T, D>

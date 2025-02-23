@@ -1,6 +1,6 @@
 use super::{
-  merge, skip, split, Data, DataRef, DecodeError, DelegateVersion, EncodeError, Meta,
-  ProtocolVersion, WireType,
+  Data, DataRef, DecodeError, DelegateVersion, EncodeError, Meta, ProtocolVersion, WireType, merge,
+  skip, split,
 };
 
 use nodecraft::{CheapClone, Node};

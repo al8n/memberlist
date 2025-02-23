@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 
-use aead::{generic_array::GenericArray, AeadInPlace, KeyInit};
+use aead::{AeadInPlace, KeyInit, generic_array::GenericArray};
 use aes_gcm::{
-  aes::{cipher::consts::U12, Aes192},
   Aes128Gcm, Aes256Gcm, AesGcm,
+  aes::{Aes192, cipher::consts::U12},
 };
 use bytes::{Buf, BufMut};
 use rand::Rng;
@@ -19,7 +19,7 @@ type Aes192Gcm = AesGcm<Aes192, U12>;
 
 use std::str::FromStr;
 
-use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
 
 /// An error type when parsing the encryption algorithm from str
 #[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]

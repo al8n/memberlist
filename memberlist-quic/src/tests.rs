@@ -6,7 +6,7 @@ use std::{future::Future, net::SocketAddr, sync::Arc};
 use agnostic_lite::RuntimeLite;
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::{lock::Mutex, FutureExt, Stream};
+use futures::{FutureExt, Stream, lock::Mutex};
 use memberlist_core::{
   proto::{Label, Message},
   tests::AnyError,
@@ -26,15 +26,15 @@ mod quinn_stream_layer {
   use crate::stream_layer::quinn::*;
   use ::quinn::{ClientConfig, Endpoint, ServerConfig};
   use futures::Future;
-  use quinn::{crypto::rustls::QuicClientConfig, EndpointConfig};
+  use quinn::{EndpointConfig, crypto::rustls::QuicClientConfig};
   use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
   use smol_str::SmolStr;
   use std::{
     error::Error,
     net::SocketAddr,
     sync::{
-      atomic::{AtomicU16, Ordering},
       Arc,
+      atomic::{AtomicU16, Ordering},
     },
     time::Duration,
   };
@@ -113,8 +113,8 @@ mod quinn_stream_layer {
     ))
   }
 
-  fn configure_server(
-  ) -> Result<(ServerConfig, CertificateDer<'static>), Box<dyn Error + Send + Sync + 'static>> {
+  fn configure_server()
+  -> Result<(ServerConfig, CertificateDer<'static>), Box<dyn Error + Send + Sync + 'static>> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let cert_der = CertificateDer::from(cert.cert);
     let priv_key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());

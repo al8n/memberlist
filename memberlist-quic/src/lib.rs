@@ -9,16 +9,16 @@
 use std::{
   net::{IpAddr, SocketAddr},
   sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
   },
   time::Duration,
 };
 
-use agnostic_lite::{time::Instant, AsyncSpawner, RuntimeLite};
+use agnostic_lite::{AsyncSpawner, RuntimeLite, time::Instant};
 use atomic_refcell::AtomicRefCell;
 use crossbeam_skiplist::SkipMap;
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, stream::FuturesUnordered};
 use memberlist_core::proto::{Data, Payload, SmallVec};
 pub use memberlist_core::{
   proto::{CIDRsPolicy, Label, LabelError, ProtoReader},

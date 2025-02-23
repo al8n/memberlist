@@ -7,15 +7,15 @@ members = [
   "memberlist-quic",
   "fuzz",
 ]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 license = "MPL-2.0"
 repository = "https://github.com/al8n/memberlist"
 homepage = "https://github.com/al8n/memberlist"
 readme = "README.md"
-rust-version = "1.81.0"
+rust-version = "1.85.0"
 keywords = ["swim", "gossip", "service-discovery"]
 categories = ["network-programming", "asynchronous"]
 

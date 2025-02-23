@@ -1,7 +1,7 @@
 use smol_str::SmolStr;
 
 use super::{
-  debug_assert_write_eq, merge, skip, split, Data, DataRef, DecodeError, EncodeError, WireType,
+  Data, DataRef, DecodeError, EncodeError, WireType, debug_assert_write_eq, merge, skip, split,
 };
 
 /// Error response from the remote peer

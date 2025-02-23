@@ -345,7 +345,7 @@ impl memberlist_core::transport::Connection for QuinnStream {
   }
 
   async fn close(&mut self) -> std::io::Result<()> {
-    self.send.close().await.map_err(Into::into)
+    self.send.close().await
   }
 
   async fn write_all(&mut self, payload: &[u8]) -> std::io::Result<()> {
@@ -353,7 +353,7 @@ impl memberlist_core::transport::Connection for QuinnStream {
   }
 
   async fn flush(&mut self) -> std::io::Result<()> {
-    self.send.flush().await.map_err(Into::into)
+    self.send.flush().await
   }
 
   async fn peek(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {

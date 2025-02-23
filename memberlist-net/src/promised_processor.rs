@@ -20,11 +20,11 @@ pub(super) struct PromisedProcessor<A, T, S>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<
-    Resolver = A,
-    ResolvedAddress = SocketAddr,
-    Connection = S::Stream,
-    Runtime = A::Runtime,
-  >,
+      Resolver = A,
+      ResolvedAddress = SocketAddr,
+      Connection = S::Stream,
+      Runtime = A::Runtime,
+    >,
   S: StreamLayer<Runtime = A::Runtime>,
 {
   pub(super) stream_tx:
@@ -38,11 +38,11 @@ impl<A, T, S> PromisedProcessor<A, T, S>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   T: Transport<
-    Resolver = A,
-    ResolvedAddress = SocketAddr,
-    Connection = S::Stream,
-    Runtime = A::Runtime,
-  >,
+      Resolver = A,
+      ResolvedAddress = SocketAddr,
+      Connection = S::Stream,
+      Runtime = A::Runtime,
+    >,
   S: StreamLayer<Runtime = A::Runtime>,
 {
   pub(super) async fn run(self) {

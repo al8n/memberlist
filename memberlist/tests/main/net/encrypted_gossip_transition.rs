@@ -10,10 +10,10 @@ use std::{
 
 use agnostic::Runtime;
 use memberlist_core::{
-  delegate::{mock::MockDelegate, CompositeDelegate},
+  Memberlist,
+  delegate::{CompositeDelegate, mock::MockDelegate},
   tests::AddressKind,
   transport::MaybeResolvedAddress,
-  Memberlist,
 };
 use memberlist_net::stream_layer::StreamLayer;
 

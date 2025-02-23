@@ -1,8 +1,8 @@
 use std::{
   collections::HashSet,
   sync::{
-    atomic::{AtomicU32, Ordering},
     Arc,
+    atomic::{AtomicU32, Ordering},
   },
   time::Duration,
 };
@@ -13,7 +13,7 @@ use super::{
   transport::Transport,
   *,
 };
-use agnostic_lite::{time::Instant, AfterHandle, AsyncAfterSpawner, RuntimeLite};
+use agnostic_lite::{AfterHandle, AsyncAfterSpawner, RuntimeLite, time::Instant};
 use nodecraft::resolver::AddressResolver;
 
 #[inline]

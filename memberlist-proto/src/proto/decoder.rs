@@ -612,9 +612,7 @@ impl ProtoDecoder {
       {
         if payload_without_checksum.len() > self.offload_size {
           #[cfg(feature = "rayon")]
-          return Self::decompress_on_rayon(payload_without_checksum)
-            .await
-            .map_err(Into::into);
+          return Self::decompress_on_rayon(payload_without_checksum).await;
 
           #[cfg(not(feature = "rayon"))]
           return Self::decompress_on_blocking::<RT>(payload_without_checksum)
@@ -622,9 +620,7 @@ impl ProtoDecoder {
             .map_err(Into::into);
         }
 
-        return Self::decompress(payload_without_checksum)
-          .map(BytesMut::freeze)
-          .map_err(Into::into);
+        return Self::decompress(payload_without_checksum).map(BytesMut::freeze);
       }
 
       #[cfg(not(compression))]

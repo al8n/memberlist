@@ -16,7 +16,7 @@ impl metrics::IntoLabels for MetricLabels {
 const _: () = {
   use std::collections::HashMap;
 
-  use serde::{ser::SerializeMap, Deserialize, Serialize};
+  use serde::{Deserialize, Serialize, ser::SerializeMap};
 
   impl Serialize for MetricLabels {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

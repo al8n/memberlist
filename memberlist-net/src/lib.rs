@@ -9,17 +9,17 @@
 use std::{
   net::SocketAddr,
   sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
   },
 };
 
 use agnostic::{
-  net::{Net, UdpSocket},
   AsyncSpawner, Runtime, RuntimeLite,
+  net::{Net, UdpSocket},
 };
 use atomic_refcell::AtomicRefCell;
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, stream::FuturesUnordered};
 use memberlist_core::proto::{Data, Payload, SmallVec};
 pub use memberlist_core::{
   proto::{CIDRsPolicy, Label, LabelError},

@@ -45,11 +45,7 @@ impl Label {
   /// The encoded overhead of a label.
   #[inline]
   pub fn encoded_overhead(&self) -> usize {
-    if self.is_empty() {
-      0
-    } else {
-      2 + self.len()
-    }
+    if self.is_empty() { 0 } else { 2 + self.len() }
   }
 
   /// Create a label from a static str.
@@ -232,7 +228,9 @@ pub enum LabelError {
   },
 
   /// Unexpected double label header
-  #[error("unexpected double label header, inbound label check is disabled, but got double label header: local={local}, remote={remote}")]
+  #[error(
+    "unexpected double label header, inbound label check is disabled, but got double label header: local={local}, remote={remote}"
+  )]
   Duplicate {
     /// The local label.
     local: Label,

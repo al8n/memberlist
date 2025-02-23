@@ -1,5 +1,5 @@
 use super::{
-  super::{Message, BATCH_OVERHEAD, COMPOOUND_MESSAGE_TAG},
+  super::{BATCH_OVERHEAD, COMPOOUND_MESSAGE_TAG, Message},
   Batch, Data, Encodable, EncodeBuffer, Payload, ProtoEncoder, ProtoEncoderError,
 };
 

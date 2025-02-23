@@ -81,7 +81,7 @@ impl CIDRsPolicy {
 
   /// Reports whether the network is allowed.
   pub fn is_allowed_net(&self, ip: &IpNet) -> bool {
-    self.allowed_cidrs.as_ref().map_or(true, |x| x.contains(ip))
+    self.allowed_cidrs.as_ref().is_none_or(|x| x.contains(ip))
   }
 
   /// Returns `true` if the [`IpNet`] is blocked.
@@ -94,7 +94,7 @@ impl CIDRsPolicy {
     self
       .allowed_cidrs
       .as_ref()
-      .map_or(true, |x| x.iter().any(|cidr| cidr.contains(ip)))
+      .is_none_or(|x| x.iter().any(|cidr| cidr.contains(ip)))
   }
 
   /// Returns `true` if the [`IpAddr`] is blocked.
