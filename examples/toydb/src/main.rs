@@ -4,7 +4,7 @@ use bincode::{deserialize, serialize};
 use clap::Parser;
 use crossbeam_skiplist::SkipMap;
 use memberlist::{
-  agnostic::tokio::TokioRuntime, bytes::Bytes, delegate::{CompositeDelegate, NodeDelegate, VoidDelegate}, net::{stream_layer::tcp::Tcp, AddressResolver, MaybeResolvedAddress, NetTransportOptions}, proto::{HostAddr, Meta, NodeId}, tokio::TokioTcpMemberlist, transport::resolver::dns::DnsResolver, Options
+  agnostic::tokio::TokioRuntime, bytes::Bytes, delegate::{CompositeDelegate, NodeDelegate, VoidDelegate}, net::{stream_layer::tcp::Tcp, NetTransportOptions}, proto::{HostAddr, Meta, NodeId}, tokio::TokioTcpMemberlist, transport::resolver::dns::DnsResolver, Options
 };
 
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::UnixListener, sync::{mpsc::Sender, oneshot}};
@@ -111,15 +111,19 @@ impl ToyDb {
           if let Some(ev) = ev {
             match ev {
               Event::Get { key, tx } => {
-                let value = memdb1.inner.store.get(&key).map(|v| v.clone());
+                let value = memdb1.inner.store.get(&key).map(|ent| ent.value().clone());
                 let _ = tx.send(value);
               }
               Event::Set { key, value, tx } => {
-                memdb1.inner.store.insert(key, value);
-                let _ = tx.send(Ok(()));
+                if memdb1.inner.store.get(&key).is_some() {
+                  let _ = tx.send(Err("key already exists".into()));
+                } else {
+                  memdb1.inner.store.insert(key, value);
+                  let _ = tx.send(Ok(()));
+                }
               }
               Event::Del { key, tx } => {
-                let value = memdb1.inner.store.remove(&key).map(|v| v.clone());
+                let value = memdb1.inner.store.remove(&key).map(|ent| ent.value().clone());
                 let _ = tx.send(value);
               }
             }
@@ -134,8 +138,8 @@ impl ToyDb {
   }
 }
 
-#[derive(clap::Parser)]
-struct Args {
+#[derive(clap::Args)]
+struct Command {
   /// The id of the db instance
   #[clap(short, long)]
   id: NodeId,
@@ -148,6 +152,21 @@ struct Args {
   /// The rpc address to listen on commands
   #[clap(short, long, default_value = "/tmp/toydb.sock")]
   rpc_addr: std::path::PathBuf,
+}
+
+#[derive(clap::Parser)]
+enum Args {
+  Start(Command),
+  Get {
+    key: Bytes,
+  },
+  Set {
+    key: Bytes,
+    value: Bytes,
+  },
+  Del {
+    key: Bytes,
+  },
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
