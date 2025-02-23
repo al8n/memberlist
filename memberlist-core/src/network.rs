@@ -405,7 +405,6 @@ where
       .map_err(Error::transport)
   }
 
-  #[cfg(offload)]
   async fn to_async_err(e: Error<T, D>) -> Result<(), Error<T, D>>
   where
     T: Transport,

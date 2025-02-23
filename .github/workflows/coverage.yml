@@ -47,7 +47,7 @@ jobs:
             features: "test,tokio,tcp,snappy,crc32,encryption,metrics,rayon"
             name: "memberlist-tcp"
           - crate: memberlist
-            features: "test,tokio,quinn,snappy,metrics,rayon"
+            features: "test,tokio,quinn,snappy,crc32,encryption,metrics,rayon"
             name: "memberlist-quinn"
     steps:
       - uses: actions/checkout@v4
