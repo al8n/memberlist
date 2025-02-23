@@ -49,6 +49,15 @@ jobs:
           - crate: memberlist
             features: "test,tokio,quinn,snappy,crc32,encryption,metrics,rayon"
             name: "memberlist-quinn"
+          - crate: memberlist
+            features: "test,tokio,tls,snappy,crc32,encryption,metrics"
+            name: "memberlist-tls-without-rayon"
+          - crate: memberlist
+            features: "test,tokio,tcp,snappy,crc32,encryption,metrics"
+            name: "memberlist-tcp-without-rayon"
+          - crate: memberlist
+            features: "test,tokio,quinn,snappy,crc32,encryption,metrics"
+            name: "memberlist-quinn-without-rayon"
     steps:
       - uses: actions/checkout@v4
       - name: Install latest nightly
