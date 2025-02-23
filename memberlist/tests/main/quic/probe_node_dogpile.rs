@@ -13,13 +13,18 @@ macro_rules! probe_node_dogpile {
               let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("probe_node_dogpile_{idx}").into(), $expr);
               t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-              QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
+              QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
             }
-          }, bad).await;
+          }, bad, Options::lan()).await;
         });
       }
 
-      #[cfg(feature = "compression")]
+      #[cfg(any(
+        feature = "snappy",
+        feature = "brotli",
+        feature = "zstd",
+        feature = "lz4",
+      ))]
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _probe_node_dogpile_with_compression >]() {
         [< $rt:snake _run >](async move {
@@ -27,12 +32,12 @@ macro_rules! probe_node_dogpile {
           let bad = Node::new("bad".into(), "127.0.0.1:8000".parse().unwrap());
           probe_node_dogpile(|idx| {
             async move {
-              let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("probe_node_dogpile_{idx}").into(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
+              let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("probe_node_dogpile_{idx}").into(), $expr);
               t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-              QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
+              QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
             }
-          }, bad).await;
+          }, bad, Options::lan()).await;
         });
       }
     }
