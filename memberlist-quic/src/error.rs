@@ -57,8 +57,9 @@ where
         ErrorKind::ConnectionRefused
           | ErrorKind::ConnectionReset
           | ErrorKind::ConnectionAborted
-          | ErrorKind::NotConnected
           | ErrorKind::BrokenPipe
+          | ErrorKind::TimedOut
+          | ErrorKind::NotConnected
       ),
       _ => false,
     }
