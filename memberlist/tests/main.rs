@@ -6,6 +6,7 @@ use agnostic::smol::SmolRuntime;
 use std::future::Future;
 
 use memberlist_core::tests::{run as run_unit_test, state::*};
+pub use memberlist_core::*;
 
 #[cfg(feature = "tokio")]
 fn tokio_run(fut: impl Future<Output = ()>) {

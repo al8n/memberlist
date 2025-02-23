@@ -1,14 +1,17 @@
 use std::future::Future;
 
 use agnostic::Runtime;
-use memberlist::{transport::MaybeResolvedAddress, Memberlist};
-use memberlist_quic::{compressor::Compressor, Label};
+use memberlist_core::{
+  Memberlist,
+  proto::{CompressAlgorithm, Label},
+  transport::MaybeResolvedAddress,
+};
 
 use super::*;
 
 /// Unit tests for join a `Memberlist` with labels.
 pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
-  mut get_transport: impl FnMut(usize, Label, Compressor) -> F,
+  mut get_transport: impl FnMut(usize, Label, CompressAlgorithm) -> F,
 ) where
   F: Future<Output = T::Options>,
   T: Transport<Runtime = R>,
@@ -16,14 +19,18 @@ pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
 {
   let label1 = Label::try_from("blah").unwrap();
   let m1 = Memberlist::<T, _>::new(
-    get_transport(1, label1.clone(), Compressor::default()).await,
-    Options::lan(),
+    get_transport(1, label1.clone(), CompressAlgorithm::default()).await,
+    Options::lan()
+      .with_label(label1.clone())
+      .with_compress_algo(Some(CompressAlgorithm::default())),
   )
   .await
   .unwrap();
   let m2 = Memberlist::<T, _>::new(
-    get_transport(2, label1.clone(), Compressor::default()).await,
-    Options::lan(),
+    get_transport(2, label1.clone(), CompressAlgorithm::default()).await,
+    Options::lan()
+      .with_label(label1.clone())
+      .with_compress_algo(Some(CompressAlgorithm::default())),
   )
   .await
   .unwrap();
@@ -42,7 +49,7 @@ pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
 
   // Create a third node that uses no label
   let m3 = Memberlist::<T, _>::new(
-    get_transport(3, Label::empty(), Compressor::default()).await,
+    get_transport(3, Label::empty(), CompressAlgorithm::default()).await,
     Options::lan(),
   )
   .await
@@ -61,7 +68,7 @@ pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
   // Create a fourth node that uses a mismatched label
   let label = Label::try_from("not-blah").unwrap();
   let m4 = Memberlist::<T, _>::new(
-    get_transport(4, label, Compressor::default()).await,
+    get_transport(4, label, CompressAlgorithm::default()).await,
     Options::lan(),
   )
   .await
@@ -92,10 +99,8 @@ macro_rules! join_with_labels_and_compression {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_with_labels >]() {
         [< $rt:snake _run >](async move {
-          memberlist_join_with_labels_and_compression::<_, QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(|idx, label, compressor| async move {
-            let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_with_labels_and_compression_node_{idx}").into(), $expr)
-              .with_label(label)
-              .with_compressor(Some(compressor));
+          memberlist_join_with_labels_and_compression::<_, QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(|idx, _, _| async move {
+            let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_with_labels_and_compression_node_{idx}").into(), $expr);
             t1_opts.add_bind_address(next_socket_addr_v4(0));
 
             t1_opts
