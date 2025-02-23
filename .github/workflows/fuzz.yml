@@ -1,0 +1,21 @@
+name: Fuzz Testing
+on: [pull_request]
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Run fuzzing
+        run: |
+          cargo fuzz build
+          cargo fuzz run messages -- -max_total_time=300

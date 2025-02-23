@@ -1,6 +1,6 @@
 [package]
 name = "memberlist"
-version = "0.5.0"
+version = "0.6.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -16,7 +16,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["tokio", "compression", "encryption", "dns", "tcp", "quic"]
+default = ["tokio", "crc32", "snappy", "rayon", "encryption", "dns", "tcp", "quic", "rayon"]
 
 tokio = ["agnostic/tokio"]
 async-std = ["agnostic/async-std"]
@@ -34,18 +34,27 @@ metrics = [
   "memberlist-quic?/metrics",
 ]
 
-compression = ["memberlist-net?/compression", "memberlist-quic?/compression"]
+rayon = ["memberlist-core/rayon"]
 
-encryption = ["memberlist-net?/encryption", "memberlist-quic?/encryption", "memberlist-core/encryption"]
+encryption = ["memberlist-core/encryption"]
+
+lz4 = ["memberlist-core/lz4"]
+zstd = ["memberlist-core/zstd"]
+snappy = ["memberlist-core/snappy"]
+brotli = ["memberlist-core/brotli"]
+
+crc32 = ["memberlist-core/crc32"]
+xxhash32 = ["memberlist-core/xxhash32"]
+xxhash64 = ["memberlist-core/xxhash64"]
+xxhash3 = ["memberlist-core/xxhash3"]
+murmur3 = ["memberlist-core/murmur3"]
 
 quic = ["memberlist-quic", "agnostic/quinn"]
 quinn = ["memberlist-quic/quinn", "quic"]
-s2n = ["memberlist-quic/s2n", "quic"]
 
 net = ["memberlist-net", "agnostic/net"]
 tcp = ["net"]
-tls = ["memberlist-net/tls", "tcp"]
-native-tls = ["memberlist-net/native-tls", "tcp"]
+tls = ["memberlist-net/tls", "net"]
 
 # enable DNS node address resolver
 dns = ["memberlist-net?/dns", "memberlist-quic?/dns", "agnostic/dns"]
@@ -105,3 +114,11 @@ paste.workspace = true
 name = "memberlist"
 path = "tests/main.rs"
 required-features = ["test"]
+
+[lints.rust]
+rust_2018_idioms = "warn"
+single_use_lifetimes = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(all_tests)',
+  'cfg(tarpaulin)',
+] }

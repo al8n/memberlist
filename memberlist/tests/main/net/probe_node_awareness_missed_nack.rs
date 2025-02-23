@@ -9,7 +9,7 @@ macro_rules! probe_node_awareness_missed_nack {
           let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
+          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
           let t1_opts = Options::lan();
 
           let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_2".into(), $expr);
@@ -43,20 +43,24 @@ macro_rules! probe_node_awareness_missed_nack {
         });
       }
 
-      #[cfg(feature = "compression")]
+      #[cfg(any(
+        feature = "crc32",
+        feature = "xxhash32",
+        feature = "xxhash64",
+        feature = "xxhash3",
+        feature = "murmur3",
+      ))]
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _probe_node_awareness_missed_nack_with_compression >]() {
+      fn [< test_ $rt:snake _ $kind:snake _probe_node_awareness_missed_nack_with_checksum >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_1".into(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan();
+          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
 
-          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_2".into(), $expr).with_compressor(Some(Default::default())).with_offload_size(10);
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
-          let t2_opts = Options::lan();
 
           let mut addr = next_socket_addr_v4(0);
           addr.set_port(t1.advertise_address().port());
@@ -75,9 +79,53 @@ macro_rules! probe_node_awareness_missed_nack {
 
           probe_node_awareness_missed_nack(
             t1,
-            t1_opts,
+            Options::lan().with_checksum_algo(Default::default()),
             t2,
-            t2_opts,
+            Options::lan().with_checksum_algo(Default::default()),
+            node3,
+            node4,
+          ).await;
+        });
+      }
+
+      #[cfg(any(
+        feature = "snappy",
+        feature = "lz4",
+        feature = "zstd",
+        feature = "brotli",
+      ))]
+      #[test]
+      fn [< test_ $rt:snake _ $kind:snake _probe_node_awareness_missed_nack_with_compression >]() {
+        [< $rt:snake _run >](async move {
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_1".into(), $expr);
+          t1_opts.add_bind_address(next_socket_addr_v4(0));
+
+          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
+
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_2".into(), $expr);
+          t2_opts.add_bind_address(next_socket_addr_v4(0));
+          let t2 = NetTransport::new(t2_opts).await.unwrap();
+
+          let mut addr = next_socket_addr_v4(0);
+          addr.set_port(t1.advertise_address().port());
+          let node3 = Node::new(
+            "probe_node_awareness_missed_nack_node_3".into(),
+            addr,
+          );
+
+
+          let mut addr = next_socket_addr_v4(0);
+          addr.set_port(t1.advertise_address().port());
+          let node4 = Node::new(
+            "probe_node_awareness_missed_nack_node_4".into(),
+            addr,
+          );
+
+          probe_node_awareness_missed_nack(
+            t1,
+            Options::lan().with_compress_algo(Default::default()),
+            t2,
+            Options::lan().with_compress_algo(Default::default()),
             node3,
             node4,
           ).await;
@@ -88,16 +136,14 @@ macro_rules! probe_node_awareness_missed_nack {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _probe_node_awareness_missed_nack_with_encryption >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_1".into(), $expr).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10);
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan();
+          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
 
-          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_2".into(), $expr).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10);
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
-          let t2_opts = Options::lan();
 
           let mut addr = next_socket_addr_v4(0);
           addr.set_port(t1.advertise_address().port());
@@ -114,31 +160,47 @@ macro_rules! probe_node_awareness_missed_nack {
             addr,
           );
 
+          let opts1 = Options::lan().with_primary_key(TEST_KEYS[0]).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+
           probe_node_awareness_missed_nack(
             t1,
-            t1_opts,
+            opts1,
             t2,
-            t2_opts,
+            opts2,
             node3,
             node4,
           ).await;
         });
       }
 
-      #[cfg(all(feature = "encryption", feature = "compression"))]
+      #[cfg(all(
+        feature = "encryption",
+        any(
+          feature = "snappy",
+          feature = "lz4",
+          feature = "zstd",
+          feature = "brotli",
+        ),
+        any(
+          feature = "crc32",
+          feature = "xxhash32",
+          feature = "xxhash64",
+          feature = "xxhash3",
+          feature = "murmur3",
+        )
+      ))]
       #[test]
-      fn [< test_ $rt:snake _ $kind:snake _probe_node_awareness_missed_nack_with_encryption_and_compression >]() {
+      fn [< test_ $rt:snake _ $kind:snake _probe_node_awareness_missed_nack_with_all >]() {
         [< $rt:snake _run >](async move {
-          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_1".into(), $expr).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10).with_compressor(Some(Default::default()));
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan();
+          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
 
-          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_2".into(), $expr).with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10).with_compressor(Some(Default::default()));
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_missed_nack_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
-          let t2_opts = Options::lan();
 
           let mut addr = next_socket_addr_v4(0);
           addr.set_port(t1.advertise_address().port());
@@ -155,11 +217,14 @@ macro_rules! probe_node_awareness_missed_nack {
             addr,
           );
 
+          let opts1 = Options::lan().with_compress_algo(Default::default()).with_primary_key(TEST_KEYS[0]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+
           probe_node_awareness_missed_nack(
             t1,
-            t1_opts,
+            opts1,
             t2,
-            t2_opts,
+            opts2,
             node3,
             node4,
           ).await;

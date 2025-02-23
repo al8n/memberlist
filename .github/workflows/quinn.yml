@@ -61,14 +61,9 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: ci/setup_subnet_ubuntu.sh
 
-      - name: Run Transport Tests
-        run: |
-          cargo test --no-default-features --features "test,compression,quinn,${{ matrix.runtime }},metrics"
-        working-directory: transports/quic
-
       - name: Run Memberlist Tests
         run: |
-          cargo test --no-default-features --features "test,compression,quinn,${{ matrix.runtime }},metrics" -- --test-threads=1
+          cargo test --no-default-features --features "test,snappy,quinn,${{ matrix.runtime }},metrics" -- --test-threads=1
         working-directory: memberlist
 
       - name: Cache Cargo registry

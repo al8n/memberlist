@@ -1,23 +1,22 @@
 [workspace]
 members = [
-  "core",
   "memberlist",
-  "types",
-  "transports/net",
-  "transports/quic",
-  # "bindings/js",
-  # "bindings/nodejs",
-  # "bindings/py",
+  "memberlist-core",
+  "memberlist-proto",
+  "memberlist-net",
+  "memberlist-quic",
+  "fuzz",
+  "examples/toydb",
 ]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 license = "MPL-2.0"
 repository = "https://github.com/al8n/memberlist"
 homepage = "https://github.com/al8n/memberlist"
 readme = "README.md"
-rust-version = "1.81.0"
+rust-version = "1.85.0"
 keywords = ["swim", "gossip", "service-discovery"]
 categories = ["network-programming", "asynchronous"]
 
@@ -26,49 +25,53 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [workspace.dependencies]
+among = "0.1"
 auto_impl = "1"
 atomic_refcell = "0.1"
 agnostic-lite = { version = "0.5", features = ["time"] }
+agnostic-io = { version = "0.1", default-features = false }
 agnostic = "0.7"
 # agnostic-lite = { version = "0.4", features = ["time"], path = "../agnostic/agnostic-lite" }
 # agnostic = { version = "0.6", path = "../agnostic/agnostic" }
 async-lock = "3"
 async-channel = "2"
-bytes = "1"
-byteorder = "1"
-derive_more = { version = "1", features = ["full"] }
+bytes = { version = "1", default-features = false }
+byteorder = { version = "1", default-features = false }
+const-varint = { version = "0.2", default-features = false }
+cfg-if = "1"
+derive_more = { version = "2", default-features = false }
+either = { version = "1", default-features = false }
 futures = "0.3"
 indexmap = "2"
 getifs = "0.2"
 getrandom = "0.3"
 metrics = "0.24"
-nodecraft = { version = "0.6", features = [
-  "transformable",
-  "async",
-  "resolver",
-  "agnostic",
-] }
-# nodecraft = { version = "0.5", path = "../nodecraft", features = [
-#   "transformable",
+nodecraft = { version = "0.7", default-features = false }
+# nodecraft = { version = "0.7", path = "../nodecraft", features = [
 #   "async",
 #   "resolver",
 #   "agnostic",
 # ] }
 paste = "1"
+peekable = "0.3"
 pin-project = "1"
 scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }
+triomphe = { version = "0.1", default-features = false }
 humantime-serde = "1"
-rkyv = { version = "0.8", features = ["smol_str-0_3", "bytes-1"] }
 smallvec = "1"
-smallvec-wrapper = { version = "0.2", features = ["const_new", "either"] }
-smol_str = "0.3"
-transformable = { version = "0.2", features = ["smol_str03", "bytes1"] }
-thiserror = "2"
+smallvec-wrapper = { version = "0.3", default-features = false }
+smol_str = { version = "0.3", default-features = false }
+rand = "0.9"
+thiserror = { version = "2", default-features = false }
 tracing = "0.1"
 viewit = "0.1.5"
 
-memberlist-core = { version = "0.5", path = "core", default-features = false }
-memberlist-net = { version = "0.5", path = "transports/net", default-features = false }
-memberlist-types = { version = "0.4", path = "types", default-features = false }
-memberlist-quic = { version = "0.5", path = "transports/quic", default-features = false }
+arbitrary = { version = "1", default-features = false }
+quickcheck = { version = "1", default-features = false }
+
+memberlist-core = { version = "0.6", path = "memberlist-core", default-features = false }
+memberlist-net = { version = "0.6", path = "memberlist-net", default-features = false }
+memberlist-proto = { version = "0.1", path = "memberlist-proto", default-features = false }
+memberlist-quic = { version = "0.6", path = "memberlist-quic", default-features = false }
+memberlist = { version = "0.6", path = "memberlist", default-features = false }

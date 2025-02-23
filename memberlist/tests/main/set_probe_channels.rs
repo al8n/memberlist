@@ -26,12 +26,6 @@ mod tokio {
     "tls",
     memberlist_net::tests::tls_stream_layer::<TokioRuntime>().await
   ));
-
-  #[cfg(feature = "native-tls")]
-  set_probe_channels!(tokio(
-    "native-tls",
-    memberlist_net::tests::native_tls_stream_layer::<TokioRuntime>().await
-  ));
 }
 
 #[cfg(feature = "async-std")]
@@ -46,12 +40,6 @@ mod async_std {
     "tls",
     memberlist_net::tests::tls_stream_layer::<AsyncStdRuntime>().await
   ));
-
-  #[cfg(feature = "native-tls")]
-  set_probe_channels!(async_std(
-    "native-tls",
-    memberlist_net::tests::native_tls_stream_layer::<AsyncStdRuntime>().await
-  ));
 }
 
 #[cfg(feature = "smol")]
@@ -65,11 +53,5 @@ mod smol {
   set_probe_channels!(smol(
     "tls",
     memberlist_net::tests::tls_stream_layer::<SmolRuntime>().await
-  ));
-
-  #[cfg(feature = "native-tls")]
-  set_probe_channels!(smol(
-    "native-tls",
-    memberlist_net::tests::native_tls_stream_layer::<SmolRuntime>().await
   ));
 }

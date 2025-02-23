@@ -92,7 +92,7 @@ macro_rules! join_with_labels_and_compression_and_encryption {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_with_labels >]() {
         [< $rt:snake _run >](async move {
-          memberlist_join_with_labels_and_compression_and_encryption::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(|idx, label, compressor, pk| async move {
+          memberlist_join_with_labels_and_compression_and_encryption::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(|idx, label, compressor, pk| async move {
             let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_with_labels_and_compression_and_encryption_node_{idx}").into(), $expr)
               .with_label(label)
               .with_compressor(Some(compressor))
