@@ -360,45 +360,6 @@ where
       })
       .map_err(Into::into)
   }
-
-  async fn fetch_send_stream(
-    &self,
-    addr: SocketAddr,
-    timeout: Option<R::Instant>,
-  ) -> Result<<S::Stream as memberlist_core::transport::Connection>::Writer, QuicTransportError<A>>
-  {
-    if let Some(ent) = self.connection_pool.get(&addr) {
-      let (_, connection) = ent.value();
-      if !connection.is_closed().await {
-        if let Some(timeout) = timeout {
-          return R::timeout_at(timeout, connection.open_uni())
-            .await
-            .map_err(|e| QuicTransportError::Io(e.into()))?
-            .map(|(stream, _)| stream)
-            .map_err(Into::into);
-        } else {
-          return connection
-            .open_uni()
-            .await
-            .map(|(s, _)| s)
-            .map_err(Into::into);
-        }
-      }
-    }
-
-    let connector = self.next_connector(&addr);
-    let connection = connector.connect(addr).await?;
-    connection
-      .open_uni()
-      .await
-      .map(|(s, _)| {
-        self
-          .connection_pool
-          .insert(addr, (Instant::now(), connection));
-        s
-      })
-      .map_err(Into::into)
-  }
 }
 
 impl<I, A, S, R> Transport for QuicTransport<I, A, S, R>
@@ -537,13 +498,11 @@ where
     match ttl {
       None => {
         conn.write_all(src).await?;
-        conn.close().await?;
-
-        Ok(src.len())
+        conn.flush().await.map_err(Into::into).map(|_| src.len())
       }
       Some(ttl) => R::timeout_at(ttl, async {
         conn.write_all(src).await?;
-        conn.close().await.map(|_| src.len())
+        conn.flush().await.map(|_| src.len())
       })
       .await
       .map_err(std::io::Error::from)?
@@ -577,13 +536,13 @@ where
     match ttl {
       None => {
         stream.write_all(src).await?;
-        stream.close().await?;
+        stream.flush().await?;
 
         Ok((src.len(), start))
       }
       Some(ttl) => R::timeout_at(ttl, async {
         stream.write_all(src).await?;
-        stream.close().await.map(|_| (src.len(), start))
+        stream.flush().await.map(|_| (src.len(), start))
       })
       .await
       .map_err(std::io::Error::from)?
@@ -591,20 +550,12 @@ where
     }
   }
 
-  async fn open_bi(
+  async fn open(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     deadline: R::Instant,
   ) -> Result<Self::Connection, Self::Error> {
     self.fetch_stream(*addr, Some(deadline)).await
-  }
-
-  async fn open_uni(
-    &self,
-    addr: &Self::ResolvedAddress,
-    deadline: <Self::Runtime as RuntimeLite>::Instant,
-  ) -> Result<<Self::Connection as Connection>::Writer, Self::Error> {
-    self.fetch_send_stream(*addr, Some(deadline)).await
   }
 
   fn packet(

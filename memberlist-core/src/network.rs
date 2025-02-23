@@ -32,7 +32,7 @@ where
     ping: Ping<T::Id, T::ResolvedAddress>,
     deadline: <T::Runtime as RuntimeLite>::Instant,
   ) -> Result<bool, Error<T, D>> {
-    let conn = match self.inner.transport.open_bi(target, deadline).await {
+    let conn = match self.inner.transport.open(target, deadline).await {
       Ok(conn) => conn,
       Err(_) => {
         // If the node is actually dead we expect this to fail, so we

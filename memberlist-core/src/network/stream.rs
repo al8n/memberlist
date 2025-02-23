@@ -118,17 +118,18 @@ where
     addr: &T::ResolvedAddress,
     msgs: OneOrMore<Message<T::Id, T::ResolvedAddress>>,
   ) -> Result<(), Error<T, D>> {
-    let mut conn = self
+    let conn = self
       .inner
       .transport
-      .open_uni(
+      .open(
         addr,
         <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
       )
       .await
       .map_err(Error::transport)?;
-    self.send_message(&mut conn, msgs).await?;
-    conn.close().await.map_err(|e| Error::transport(e.into()))
+    let (_reader, mut writer) = conn.split();
+    self.send_message(&mut writer, msgs).await?;
+    writer.close().await.map_err(|e| Error::transport(e.into()))
   }
 }
 
@@ -295,6 +296,8 @@ where
       }
       Ok(Ok(payload)) => payload,
     };
+
+    tracing::trace!(local = %self.inner.id, remote_node = %addr, payload=?payload.as_ref(), "memberlist.stream: received message");
 
     let msg = match <MessageRef<'_, _, _> as DataRef<Message<T::Id, T::ResolvedAddress>>>::decode(
       &payload,

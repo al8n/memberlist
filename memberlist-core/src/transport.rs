@@ -350,20 +350,11 @@ pub trait Transport: Sized + Send + Sync + 'static {
   /// than packet connections so is used for more infrequent operations
   /// such as anti-entropy or fallback probes if the packet-oriented probe
   /// failed.
-  fn open_bi(
+  fn open(
     &self,
     addr: &Self::ResolvedAddress,
     deadline: <Self::Runtime as RuntimeLite>::Instant,
   ) -> impl Future<Output = Result<Self::Connection, Self::Error>> + Send;
-
-  /// Used to create a unidirection connection that allows us to perform
-  /// one-way communication with a peer. This is used for sending data
-  /// to a peer without expecting a response.
-  fn open_uni(
-    &self,
-    addr: &Self::ResolvedAddress,
-    deadline: <Self::Runtime as RuntimeLite>::Instant,
-  ) -> impl Future<Output = Result<<Self::Connection as Connection>::Writer, Self::Error>> + Send;
 
   /// Returns a packet subscriber that can be used to receive incoming packets
   fn packet(

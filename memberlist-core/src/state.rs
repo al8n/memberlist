@@ -157,7 +157,7 @@ where
     let conn = self
       .inner
       .transport
-      .open_bi(
+      .open(
         id.address(),
         <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
       )

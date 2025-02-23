@@ -876,11 +876,11 @@ pub async fn memberlist_send<T, R>(
   // Try to do a direct send
   m1.send(m2.advertise_address(), "ping".into())
     .await
-    .unwrap();
+    .expect("m1 fail to do a direct send");
 
   m2.send(m1.advertise_address(), "pong".into())
     .await
-    .unwrap();
+    .expect("m2 fail to do a direct send");
 
   wait_for_condition::<_, _, R>(|| async {
     let msgs = m1.delegate().unwrap().node_delegate().get_messages().await;
@@ -1169,7 +1169,7 @@ pub async fn memberlist_send_reliable<T, R>(
       tracing::error!("fail to send packet {e}");
       e
     })
-    .unwrap();
+    .expect("m2 send unreliable failed");
 
   m2.send_reliable(m1.advertise_address(), Bytes::from_static(b"send_reliable"))
     .await
@@ -1177,7 +1177,7 @@ pub async fn memberlist_send_reliable<T, R>(
       tracing::error!("fail to send message {e}");
       e
     })
-    .unwrap();
+    .expect("m2 send reliable failed");
 
   R::sleep(Duration::from_secs(6)).await;
 

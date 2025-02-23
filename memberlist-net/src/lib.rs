@@ -437,7 +437,7 @@ where
     }
   }
 
-  async fn open_bi(
+  async fn open(
     &self,
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     deadline: <Self::Runtime as RuntimeLite>::Instant,
@@ -449,19 +449,6 @@ where
       Ok(Err(e)) => Err(e.into()),
       Err(e) => Err(Self::Error::Io(e.into())),
     }
-  }
-
-  async fn open_uni(
-    &self,
-    addr: &Self::ResolvedAddress,
-    deadline: <Self::Runtime as RuntimeLite>::Instant,
-  ) -> Result<<Self::Connection as Connection>::Writer, Self::Error> {
-    use memberlist_core::transport::Connection;
-
-    self.open_bi(addr, deadline).await.map(|conn| {
-      let (_, writer) = conn.split();
-      writer
-    })
   }
 
   fn packet(

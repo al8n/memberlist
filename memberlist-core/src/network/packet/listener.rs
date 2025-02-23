@@ -195,7 +195,7 @@ where
         return;
       }
     };
-    tracing::info!(addr = %from, payload = ?plain.as_ref(), "memberlist.packet: raw data");
+    tracing::trace!(addr = %from, payload = ?plain.as_ref(), "memberlist.packet: raw data");
 
     let decoder = match MessagesDecoder::<T::Id, T::ResolvedAddress, _>::new(plain)
       .map_err(Error::<T, D>::from)

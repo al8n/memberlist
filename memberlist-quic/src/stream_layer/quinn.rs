@@ -437,11 +437,6 @@ impl QuicConnection for QuinnConnection {
     Ok((QuinnStream::new(send, recv), self.remote_addr))
   }
 
-  async fn open_uni(&self) -> io::Result<(<Self::Stream as QuicStream>::SendStream, SocketAddr)> {
-    let send = self.conn.open_uni().await?;
-    Ok((send, self.remote_addr))
-  }
-
   async fn close(&self) -> io::Result<()> {
     self.conn.close(0u32.into(), b"close connection");
     Ok(())

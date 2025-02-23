@@ -109,16 +109,6 @@ pub trait QuicConnection: Send + Sync + 'static {
   /// Opens a bidirectional stream to a remote peer.
   fn open_bi(&self) -> impl Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send;
 
-  /// Opens a unidirectional stream to a remote peer.
-  fn open_uni(
-    &self,
-  ) -> impl Future<
-    Output = io::Result<(
-      <Self::Stream as memberlist_core::transport::Connection>::Writer,
-      SocketAddr,
-    )>,
-  > + Send;
-
   /// Closes the connection.
   fn close(&self) -> impl Future<Output = io::Result<()>> + Send;
 
