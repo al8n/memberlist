@@ -88,7 +88,7 @@ where
             #[cfg(feature = "metrics")]
             let metric_labels = metric_labels.clone();
 
-            Self::handle_connection(
+            <T::Runtime as RuntimeLite>::spawn_detach(Self::handle_connection(
               connection,
               local_addr,
               remote_addr,
@@ -98,8 +98,7 @@ where
               shutdown_rx,
               #[cfg(feature = "metrics")]
               metric_labels,
-            )
-            .await;
+            ));
             ControlFlow::Continue(())
           }
           Err(e) => {
