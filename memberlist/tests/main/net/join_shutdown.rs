@@ -12,7 +12,7 @@ macro_rules! join_shutdown {
           let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("join_shutdown_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
 
-          memberlist_join_shutdown::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan(), t2_opts, Options::lan()).await;
+          memberlist_join_shutdown::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan(), t2_opts, Options::lan()).await;
         });
       }
     }

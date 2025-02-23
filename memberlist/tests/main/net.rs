@@ -1,16 +1,13 @@
-use memberlist::{
-  transport::{resolver::socket_addr::SocketAddrResolver, Node, Transport},
-  Options,
-};
 use memberlist_core::{
+  Options,
   tests::{memberlist::*, next_socket_addr_v4, state::*},
-  transport::Lpe,
+  transport::{Node, Transport, resolver::socket_addr::SocketAddrResolver},
 };
 use memberlist_net::{NetTransport, NetTransportOptions};
 use smol_str::SmolStr;
 
 #[cfg(feature = "encryption")]
-use memberlist_net::security::SecretKey;
+use memberlist_core::proto::SecretKey;
 
 #[cfg(feature = "encryption")]
 pub const TEST_KEYS: &[SecretKey] = &[
@@ -19,17 +16,11 @@ pub const TEST_KEYS: &[SecretKey] = &[
   SecretKey::Aes128([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
 ];
 
-#[cfg(any(
-  not(any(feature = "tls", feature = "native-tls")),
-  all(feature = "tls", feature = "native-tls")
-))]
+#[cfg(feature = "tcp")]
 use memberlist_net::stream_layer::tcp::Tcp;
 
 #[cfg(feature = "tls")]
 use memberlist_net::stream_layer::tls::Tls;
-
-#[cfg(feature = "native-tls")]
-use memberlist_net::stream_layer::native_tls::NativeTls;
 
 macro_rules! test_mods {
   ($fn:ident) => {
@@ -40,10 +31,7 @@ macro_rules! test_mods {
       use super::*;
       use crate::tokio_run;
 
-      #[cfg(any(
-        not(any(feature = "tls", feature = "native-tls")),
-        all(feature = "tls", feature = "native-tls")
-      ))]
+      #[cfg(feature = "tcp")]
       $fn!(Tcp<tokio>(
         "tcp",
         ()
@@ -54,12 +42,6 @@ macro_rules! test_mods {
         "tls",
         memberlist_net::tests::tls_stream_layer::<TokioRuntime>().await
       ));
-
-      #[cfg(feature = "native-tls")]
-      $fn!(NativeTls<tokio>(
-        "native-tls",
-        memberlist_net::tests::native_tls_stream_layer::<TokioRuntime>().await
-      ));
     }
 
     #[cfg(feature = "async-std")]
@@ -69,10 +51,7 @@ macro_rules! test_mods {
       use super::*;
       use crate::async_std_run;
 
-      #[cfg(any(
-        not(any(feature = "tls", feature = "native-tls")),
-        all(feature = "tls", feature = "native-tls")
-      ))]
+      #[cfg(feature = "tcp")]
       $fn!(Tcp<async_std>(
         "tcp",
         ()
@@ -83,12 +62,6 @@ macro_rules! test_mods {
         "tls",
         memberlist_net::tests::tls_stream_layer::<AsyncStdRuntime>().await
       ));
-
-      #[cfg(feature = "native-tls")]
-      $fn!(NativeTls<async_std>(
-        "native-tls",
-        memberlist_net::tests::native_tls_stream_layer::<AsyncStdRuntime>().await
-      ));
     }
 
     #[cfg(feature = "smol")]
@@ -98,10 +71,7 @@ macro_rules! test_mods {
       use super::*;
       use crate::smol_run;
 
-      #[cfg(any(
-        not(any(feature = "tls", feature = "native-tls")),
-        all(feature = "tls", feature = "native-tls")
-      ))]
+      #[cfg(feature = "tcp")]
       $fn!(Tcp<smol>(
         "tcp",
         ()
@@ -111,12 +81,6 @@ macro_rules! test_mods {
       $fn!(Tls<smol>(
         "tls",
         memberlist_net::tests::tls_stream_layer::<SmolRuntime>().await
-      ));
-
-      #[cfg(feature = "native-tls")]
-      $fn!(NativeTls<smol>(
-        "native-tls",
-        memberlist_net::tests::native_tls_stream_layer::<SmolRuntime>().await
       ));
     }
   };
@@ -226,21 +190,6 @@ mod encrypted_gossip_transition;
 #[path = "net/join.rs"]
 mod join;
 
-#[path = "net/join_with_labels.rs"]
-mod join_with_labels;
-
-#[path = "net/join_with_labels_and_encryption.rs"]
-#[cfg(feature = "encryption")]
-mod join_with_labels_and_encryption;
-
-#[path = "net/join_with_labels_and_compression.rs"]
-#[cfg(feature = "compression")]
-mod join_with_labels_and_compression;
-
-#[path = "net/join_with_labels_and_compression_and_encryption.rs"]
-#[cfg(all(feature = "compression", feature = "encryption"))]
-mod join_with_labels_and_compression_and_encryption;
-
 #[path = "net/join_different_networks_unique_mask.rs"]
 mod join_different_networks_unique_mask;
 
@@ -283,3 +232,6 @@ mod node_delegate_meta_update;
 
 #[path = "net/ping_delegate.rs"]
 mod ping_delegate;
+
+#[path = "net/send_reliable.rs"]
+mod send_reliable;

@@ -31,78 +31,33 @@ jobs:
     strategy:
       matrix:
         include:
-          - crate: core
+          - crate: memberlist-core
             features: "test,metrics"
             name: "memberlist-core"
-          - crate: types 
-            features: "metrics,encryption"
-            name: "memberlist-types"
+          - crate: memberlist-proto 
+            features: "std,metrics,encryption,all-compression,all-checksum,quickcheck"
+            name: "memberlist-proto-without-rayon"
+          - crate: memberlist-proto
+            features: "std,metrics,encryption,all-compression,all-checksum,rayon,quickcheck"
+            name: "memberlist-proto-with-rayon"
           - crate: memberlist
-            features: "test,tokio,tcp,compression,encryption,metrics"
-            name: "memberlist-tcp-compression-encryption"
-          - crate: memberlist
-            features: "test,tokio,tls,compression,encryption,metrics"
-            name: "memberlist-tls-compression-encryption"
-          - crate: memberlist
-            features: "test,tokio,native-tls,compression,encryption,metrics"
-            name: "memberlist-native-tls-compression-encryption"
-          - crate: memberlist
-            features: "test,tokio,tcp,compression,metrics"
-            name: "memberlist-tcp-compression-only"
-          - crate: memberlist
-            features: "test,tokio,tls,compression,metrics"
-            name: "memberlist-tls-compression-only"
-          - crate: memberlist
-            features: "test,tokio,native-tls,compression,metrics"
-            name: "memberlist-native-tls-compression-only"
-          - crate: memberlist
-            features: "test,tokio,tcp,encryption,metrics"
-            name: "memberlist-tcp-encryption-only"
-          - crate: memberlist
-            features: "test,tokio,tls,compression,metrics"
-            name: "memberlist-tls-encryption-only"
-          - crate: memberlist
-            features: "test,tokio,native-tls,encryption,metrics"
-            name: "memberlist-native-tls-encryption-only"
-          - crate: memberlist
-            features: "test,tokio,tcp,metrics"
-            name: "memberlist-tcp"
-          - crate: memberlist
-            features: "test,tokio,tls,metrics"
+            features: "test,tokio,tls,snappy,crc32,encryption,metrics,rayon"
             name: "memberlist-tls"
           - crate: memberlist
-            features: "test,tokio,native-tls,metrics"
-            name: "memberlist-native-tls"
+            features: "test,tokio,tcp,snappy,crc32,encryption,metrics,rayon"
+            name: "memberlist-tcp"
           - crate: memberlist
-            features: "test,tokio,quinn,compression,metrics"
-            name: "memberlist-quinn-compression"
-          - crate: memberlist
-            features: "test,tokio,quinn,metrics"
+            features: "test,tokio,quinn,snappy,crc32,encryption,metrics,rayon"
             name: "memberlist-quinn"
-          - crate: transports/net
-            features: "test,tokio,tcp,compression,metrics"
-            name: "net-tcp-compression-only"
-          - crate: transports/net
-            features: "test,tokio,tcp,encryption,metrics"
-            name: "net-tcp-encryption-only"
-          - crate: transports/net
-            features: "test,tokio,tcp,metrics"
-            name: "net-tcp"
-          - crate: transports/net
-            features: "test,tokio,tcp,compression,encryption,metrics"
-            name: "net-tcp-compression-and-encryption"
-          - crate: transports/net
-            features: "test,tokio,tls,compression,encryption,metrics"
-            name: "net-tls"
-          - crate: transports/net
-            features: "test,tokio,native-tls,compression,encryption,metrics"
-            name: "net-native-tls"
-          - crate: transports/quic
-            features: "test,tokio,quinn,compression,metrics"
-            name: "quic-quinn"
-          - crate: transports/quic
-            features: "test,tokio,s2n,compression,metrics"
-            name: "quic-s2n"
+          - crate: memberlist
+            features: "test,tokio,tls,snappy,crc32,encryption,metrics"
+            name: "memberlist-tls-without-rayon"
+          - crate: memberlist
+            features: "test,tokio,tcp,snappy,crc32,encryption,metrics"
+            name: "memberlist-tcp-without-rayon"
+          - crate: memberlist
+            features: "test,tokio,quinn,snappy,crc32,encryption,metrics"
+            name: "memberlist-quinn-without-rayon"
     steps:
       - uses: actions/checkout@v4
       - name: Install latest nightly
