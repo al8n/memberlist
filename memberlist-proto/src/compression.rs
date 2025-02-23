@@ -518,12 +518,16 @@ const _: () = {
   #[serde(rename_all = "snake_case")]
   enum CompressAlgorithmHelper {
     /// Brotli
+    #[cfg(feature = "brotli")]
     Brotli(BrotliAlgorithm),
     /// LZ4
+    #[cfg(feature = "lz4")]
     Lz4,
     /// Snappy
+    #[cfg(feature = "snappy")]
     Snappy,
     /// Zstd
+    #[cfg(feature = "zstd")]
     Zstd(ZstdCompressionLevel),
     /// Unknwon compressioned algorithm
     Unknown(u8),

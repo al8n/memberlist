@@ -6,6 +6,7 @@ members = [
   "memberlist-net",
   "memberlist-quic",
   "fuzz",
+  "examples/toydb",
 ]
 resolver = "3"
 
@@ -73,3 +74,4 @@ memberlist-core = { version = "0.6", path = "memberlist-core", default-features 
 memberlist-net = { version = "0.6", path = "memberlist-net", default-features = false }
 memberlist-proto = { version = "0.1", path = "memberlist-proto", default-features = false }
 memberlist-quic = { version = "0.6", path = "memberlist-quic", default-features = false }
+memberlist = { version = "0.6", path = "memberlist", default-features = false }
