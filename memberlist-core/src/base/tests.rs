@@ -149,7 +149,7 @@ pub async fn memberlist_shutdown_cleanup<T, F, R>(
 {
   let m = Memberlist::<T, _>::new(t1, t1_opts.clone()).await.unwrap();
   m.shutdown().await.unwrap();
-  R::sleep(Duration::from_millis(500)).await;
+  R::sleep(Duration::from_millis(1000)).await;
 
   let addr = m.advertise_address().clone();
   drop(m);
@@ -173,7 +173,7 @@ pub async fn memberlist_shutdown_cleanup2<T, F, R>(
 {
   let m = Memberlist::<T, _>::new(t1, t1_opts.clone()).await.unwrap();
   let m2 = Memberlist::<T, _>::new(t2, t2_opts.clone()).await.unwrap();
-  R::sleep(Duration::from_millis(250)).await;
+  R::sleep(Duration::from_millis(1000)).await;
   m.join(
     m2.advertise_node()
       .map_address(MaybeResolvedAddress::resolved),
