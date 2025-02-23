@@ -11,7 +11,7 @@ macro_rules! reset_nodes {
           let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("reset_nodes_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
+          let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
           let t1_opts = Options::lan();
 
           let mut addr: SocketAddr = "127.0.0.1:7969".parse().unwrap();

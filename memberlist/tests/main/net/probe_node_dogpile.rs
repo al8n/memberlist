@@ -13,9 +13,9 @@ macro_rules! probe_node_dogpile {
               let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("probe_node_dogpile_{idx}").into(), $expr);
               t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-              NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
+              NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap()
             }
-          }, bad).await;
+          }, bad, Options::lan()).await;
         });
       }
     }

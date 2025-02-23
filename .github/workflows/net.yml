@@ -34,11 +34,7 @@ jobs:
           # - macos-latest,
           # - windows-latest
         runtime: [tokio, async-std, smol]
-        stream_layer: [tls, native-tls, tcp]
-        # TODO: remove this exlucde when figuring out why native-tls with smol leads to a user_data* unit tests failure
-        exclude:
-          - runtime: smol
-            stream_layer: native-tls
+        stream_layer: [tls, tcp]
     steps:
       - uses: actions/checkout@v4
 
@@ -66,14 +62,9 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: ci/setup_subnet_ubuntu.sh
 
-      - name: Run Transport Tests
-        run: |
-          cargo test --no-default-features --features "test,${{ matrix.stream_layer }},${{ matrix.runtime }}"
-        working-directory: transports/net
-
       - name: Run Memberlist Tests
         run: |
-          cargo test --no-default-features --features "test,compression,encryption,${{ matrix.stream_layer }},${{ matrix.runtime }},metrics" -- --test-threads=1
+          cargo test --no-default-features --features "test,snappy,crc32,encryption,${{ matrix.stream_layer }},${{ matrix.runtime }},metrics" -- --test-threads=1
         working-directory: memberlist
 
       - name: Cache Cargo registry

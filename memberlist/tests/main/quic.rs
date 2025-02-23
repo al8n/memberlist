@@ -1,23 +1,18 @@
-use memberlist::{
-  transport::{resolver::socket_addr::SocketAddrResolver, Node, Transport},
-  Options,
-};
 use memberlist_core::{
+  Options,
   tests::{memberlist::*, next_socket_addr_v4, state::*},
-  transport::Lpe,
+  transport::{Node, Transport, resolver::socket_addr::SocketAddrResolver},
 };
 use memberlist_quic::{QuicTransport, QuicTransportOptions};
 use smol_str::SmolStr;
 
 macro_rules! test_mods {
   ($fn:ident) => {
-    #[cfg(all(feature = "tokio", any(feature = "quinn", feature = "s2n")))]
+    #[cfg(all(feature = "tokio", feature = "quinn"))]
     mod tokio {
       use agnostic::tokio::TokioRuntime;
       #[cfg(feature = "quinn")]
       use memberlist_quic::{tests::quinn_stream_layer, stream_layer::quinn::Quinn};
-      #[cfg(feature = "s2n")]
-      use memberlist_quic::{tests::s2n_stream_layer, stream_layer::s2n::S2n};
 
       use super::*;
       use crate::tokio_run;
@@ -26,9 +21,6 @@ macro_rules! test_mods {
 
       #[cfg(feature = "quinn")]
       $fn!(Quinn<tokio>("quinn", quinn_stream_layer::<TokioRuntime>().await));
-
-      #[cfg(feature = "s2n")]
-      $fn!(S2n<tokio>("s2n", s2n_stream_layer::<TokioRuntime>().await));
     }
 
     #[cfg(all(feature = "async-std", feature = "quinn"))]
@@ -57,13 +49,11 @@ macro_rules! test_mods {
     }
   };
   ($fn:ident($expr:expr)) => {
-    #[cfg(all(feature = "tokio", any(feature = "quinn", feature = "s2n")))]
+    #[cfg(all(feature = "tokio", feature = "quinn"))]
     mod tokio {
       use agnostic::tokio::TokioRuntime;
       #[cfg(feature = "quinn")]
       use memberlist_quic::{tests::quinn_stream_layer_with_connect_timeout, stream_layer::quinn::Quinn};
-      #[cfg(feature = "s2n")]
-      use memberlist_quic::{tests::s2n_stream_layer, stream_layer::s2n::S2n};
 
       use super::*;
       use crate::tokio_run;
@@ -73,9 +63,6 @@ macro_rules! test_mods {
         "quinn",
         quinn_stream_layer_with_connect_timeout::<TokioRuntime>($expr).await
       ));
-
-      #[cfg(feature = "s2n")]
-      $fn!(S2n<tokio>("s2n", s2n_stream_layer::<TokioRuntime>().await));
     }
 
     #[cfg(all(feature = "async-std", feature = "quinn"))]
@@ -114,6 +101,7 @@ mod probe;
 #[path = "quic/probe_node.rs"]
 mod probe_node;
 
+#[cfg(not(tarpaulin))]
 #[path = "quic/probe_node_dogpile.rs"]
 mod probe_node_dogpile;
 
@@ -211,7 +199,12 @@ mod join;
 mod join_with_labels;
 
 #[path = "quic/join_with_labels_and_compression.rs"]
-#[cfg(feature = "compression")]
+#[cfg(any(
+  feature = "snappy",
+  feature = "brotli",
+  feature = "zstd",
+  feature = "lz4",
+))]
 mod join_with_labels_and_compression;
 
 #[path = "quic/join_different_networks_unique_mask.rs"]
@@ -230,6 +223,7 @@ mod join_cancel_passive;
 #[path = "quic/join_shutdown.rs"]
 mod join_shutdown;
 
+#[cfg(not(tarpaulin))]
 #[path = "quic/leave.rs"]
 mod leave;
 
@@ -259,3 +253,6 @@ mod ping_delegate;
 
 #[path = "quic/shutdown_cleanup.rs"]
 mod shutdown_cleanup;
+
+#[path = "quic/send_reliable.rs"]
+mod send_reliable;

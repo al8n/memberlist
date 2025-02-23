@@ -1,0 +1,16 @@
+[package]
+name = "toydb"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[dependencies]
+bincode = "1"
+clap = { version = "4", features = ["derive"] }
+crossbeam-skiplist = "0.1"
+memberlist = { workspace = true, features = ["default", "tokio", "tcp", "serde"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+scopeguard = "1"

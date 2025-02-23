@@ -1,7 +1,10 @@
 use std::future::Future;
 
 use agnostic::Runtime;
-use memberlist::{transport::MaybeResolvedAddress, types::CIDRsPolicy, Memberlist};
+use memberlist_core::{
+  Memberlist,
+  proto::{CIDRsPolicy, MaybeResolvedAddress},
+};
 
 use super::*;
 
@@ -40,7 +43,7 @@ macro_rules! join_different_networks_unique_mask {
       #[test]
       fn [< test_ $rt:snake _ $kind:snake _join_different_networks_unique_mask >]() {
         [< $rt:snake _run >](async move {
-          join_different_networks_unique_mask::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(|idx, cidrs| async move {
+          join_different_networks_unique_mask::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(|idx, cidrs| async move {
             let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(format!("join_different_networks_unique_mask_node_{idx}").into(), $expr)
               .with_cidrs_policy(cidrs);
             t1_opts.add_bind_address(next_socket_addr_v4(idx as u8));

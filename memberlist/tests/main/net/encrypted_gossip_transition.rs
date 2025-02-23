@@ -9,18 +9,18 @@ use std::{
 };
 
 use agnostic::Runtime;
-use memberlist::{
-  delegate::{mock::MockDelegate, CompositeDelegate},
-  transport::{tests::AddressKind, MaybeResolvedAddress},
+use memberlist_core::{
   Memberlist,
+  delegate::{CompositeDelegate, mock::MockDelegate},
+  proto::MaybeResolvedAddress,
+  tests::AddressKind,
 };
 use memberlist_net::stream_layer::StreamLayer;
 
 use super::*;
 
-type NetTransport<S, R> =
-  memberlist_net::NetTransport<SmolStr, SocketAddrResolver<R>, S, Lpe<SmolStr, SocketAddr>, R>;
-type VoidDelegate = memberlist::delegate::VoidDelegate<SmolStr, SocketAddr>;
+type NetTransport<S, R> = memberlist_net::NetTransport<SmolStr, SocketAddrResolver<R>, S, R>;
+type VoidDelegate = memberlist_core::delegate::VoidDelegate<SmolStr, SocketAddr>;
 type Delegate = CompositeDelegate<
   SmolStr,
   SocketAddr,
@@ -175,11 +175,14 @@ where
 
   // Resurrect the first node with the first stage of gossip transition settings.
   let (conf0, topts) = new_config(SmolStr::from("m0"), None).await;
-  let topts = topts
-    .with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")))
-    .with_gossip_verify_incoming(false)
-    .with_gossip_verify_outgoing(false);
-  let m0 = create_ok(conf0, topts).await;
+  let m0 = create_ok(
+    conf0
+      .with_primary_key(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg=="))
+      .with_gossip_verify_incoming(false)
+      .with_gossip_verify_outgoing(false),
+    topts,
+  )
+  .await;
 
   // Join the second node. m1 has no encryption while m0 has encryption configured and
   // can receive encrypted gossip, but will not encrypt outgoing gossip.
@@ -194,12 +197,15 @@ where
 
   // Resurrect the second node with the first stage of gossip transition settings.
   let (conf1, topts) = new_config(SmolStr::from("m1"), None).await;
-  let topts = topts
-    .with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")))
-    .with_gossip_verify_incoming(false)
-    .with_gossip_verify_outgoing(false);
 
-  let m1 = create_ok(conf1, topts).await;
+  let m1 = create_ok(
+    conf1
+      .with_primary_key(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg=="))
+      .with_gossip_verify_incoming(false)
+      .with_gossip_verify_outgoing(false),
+    topts,
+  )
+  .await;
 
   // Join the first node. Both have encryption configured and can receive
   // encrypted gossip, but will not encrypt outgoing gossip.
@@ -219,11 +225,14 @@ where
 
   // Resurrect the first node with the second stage of gossip transition settings.
   let (conf0, topts) = new_config(SmolStr::from("m0"), None).await;
-  let topts = topts
-    .with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")))
-    .with_gossip_verify_incoming(false);
 
-  let m0 = create_ok(conf0, topts).await;
+  let m0 = create_ok(
+    conf0
+      .with_primary_key(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg=="))
+      .with_gossip_verify_incoming(false),
+    topts,
+  )
+  .await;
 
   // Join the second node. At this step, both nodes have encryption
   // configured but only m0 is sending encrypted gossip.
@@ -238,10 +247,13 @@ where
 
   // Resurrect the second node with the second stage of gossip transition settings.
   let (conf1, topts) = new_config(SmolStr::from("m1"), None).await;
-  let topts = topts
-    .with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")))
-    .with_gossip_verify_incoming(false);
-  let m1 = create_ok(conf1, topts).await;
+  let m1 = create_ok(
+    conf1
+      .with_primary_key(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg=="))
+      .with_gossip_verify_incoming(false),
+    topts,
+  )
+  .await;
 
   // Join the first node. Both have encryption configured and can receive
   // encrypted gossip, and encrypt outgoing gossip, but aren't forcing
@@ -262,8 +274,11 @@ where
 
   // Resurrect the first node with the final stage of gossip transition settings.
   let (conf0, topts) = new_config(SmolStr::from("m0"), None).await;
-  let topts = topts.with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")));
-  let m0 = create_ok(conf0, topts).await;
+  let m0 = create_ok(
+    conf0.with_primary_key(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")),
+    topts,
+  )
+  .await;
 
   // Join the second node. At this step, both nodes have encryption
   // configured and are sending it, bu tonly m0 is verifying inbound gossip
@@ -279,8 +294,11 @@ where
 
   // Resurrect the second node with the final stage of gossip transition settings.
   let (conf1, topts) = new_config(SmolStr::from("m1"), None).await;
-  let topts = topts.with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")));
-  let m1 = create_ok(conf1, topts).await;
+  let m1 = create_ok(
+    conf1.with_primary_key(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")),
+    topts,
+  )
+  .await;
 
   // Join the first node. Both have encryption configured and fully in
   // enforcement.

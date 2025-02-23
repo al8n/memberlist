@@ -10,7 +10,7 @@ macro_rules! create_shutdown {
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
 
-          memberlist_create_shutdown::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, Lpe<_, _>, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan()).await;
+          memberlist_create_shutdown::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan()).await;
         });
       }
     }
