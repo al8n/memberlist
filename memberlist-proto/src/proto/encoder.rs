@@ -2,10 +2,7 @@ use core::marker::PhantomData;
 
 use crate::{Data, EncodeError, Label, Payload};
 
-use super::{
-  super::debug_assert_write_eq, COMPOOUND_MESSAGE_TAG, LABELED_MESSAGE_TAG, Message,
-  ProtoEncoderError,
-};
+use super::{COMPOOUND_MESSAGE_TAG, LABELED_MESSAGE_TAG, Message, ProtoEncoderError};
 
 #[cfg(feature = "encryption")]
 use super::{
@@ -842,7 +839,7 @@ where
         let written = msg.encodable_encode(&mut encoded_buf)?;
         #[cfg(debug_assertions)]
         {
-          debug_assert_write_eq(written, encoded_len);
+          super::super::debug_assert_write_eq(written, encoded_len);
           assert_eq!(
             encoded_len,
             hint.input_size(),
@@ -861,17 +858,18 @@ where
         // Add the original length of the compressed message, this is
         // useful for pre-allocating the buffer when decompressing
         buf[co..co + PAYLOAD_LEN_SIZE].copy_from_slice(&(written as u32).to_be_bytes());
-        co += PAYLOAD_LEN_SIZE;
-        // Reserve the space for the compressed payload length
-        co += PAYLOAD_LEN_SIZE;
-
         let po = ch.payload_offset();
         #[cfg(debug_assertions)]
-        assert_eq!(
-          co, po,
-          "the actual compress payload offset {} does not match the compress payload offset {} in hint",
-          co, po
-        );
+        {
+          co += PAYLOAD_LEN_SIZE;
+          // Reserve the space for the compressed payload length
+          co += PAYLOAD_LEN_SIZE;
+          assert_eq!(
+            co, po,
+            "the actual compress payload offset {} does not match the compress payload offset {} in hint",
+            co, po
+          );
+        }
 
         // compress to the buffer
         let compressed_len = algo.compress_to(&encoded_buf, &mut buf[po..])?;
@@ -992,7 +990,7 @@ where
       None => {
         let written = msg.encodable_encode(&mut buf[offset..])?;
         #[cfg(debug_assertions)]
-        debug_assert_write_eq(written, encoded_len);
+        super::super::debug_assert_write_eq(written, encoded_len);
         payload.truncate(offset + written);
       }
     }

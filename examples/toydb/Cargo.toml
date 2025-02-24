@@ -13,3 +13,4 @@ serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }
+scopeguard = "1"

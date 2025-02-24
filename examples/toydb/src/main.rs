@@ -4,20 +4,21 @@ use bincode::{deserialize, serialize};
 use clap::Parser;
 use crossbeam_skiplist::SkipMap;
 use memberlist::{
-  agnostic::tokio::TokioRuntime, bytes::Bytes, delegate::{CompositeDelegate, NodeDelegate, VoidDelegate}, net::{stream_layer::tcp::Tcp, NetTransportOptions}, proto::{HostAddr, Meta, NodeId}, tokio::TokioTcpMemberlist, transport::resolver::dns::DnsResolver, Options
+  Options,
+  agnostic::tokio::TokioRuntime,
+  bytes::Bytes,
+  delegate::{CompositeDelegate, NodeDelegate},
+  net::{MaybeResolvedAddress, NetTransportOptions, Node, stream_layer::tcp::Tcp},
+  proto::{HostAddr, Meta, NodeId},
+  tokio::TokioTcpMemberlist,
+  transport::resolver::dns::DnsResolver,
 };
 
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::UnixListener, sync::{mpsc::Sender, oneshot}};
-
-type ToyDbDelegate = CompositeDelegate<
-  NodeId,
-  SocketAddr,
-  VoidDelegate<NodeId, SocketAddr>,
-  VoidDelegate<NodeId, SocketAddr>,
-  VoidDelegate<NodeId, SocketAddr>,
-  VoidDelegate<NodeId, SocketAddr>,
-  MemDb,
->;
+use tokio::{
+  io::{AsyncReadExt, AsyncWriteExt},
+  net::{UnixListener, UnixStream},
+  sync::{mpsc::Sender, oneshot},
+};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync + 'static>>;
 
@@ -81,7 +82,6 @@ impl NodeDelegate for MemDb {
 }
 
 struct ToyDb {
-  memberlist: TokioTcpMemberlist<NodeId, DnsResolver<TokioRuntime>, ToyDbDelegate>,
   tx: Sender<Event>,
 }
 
@@ -102,29 +102,33 @@ impl ToyDb {
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 
     let memdb1 = memdb.clone();
+    let delegate = CompositeDelegate::<NodeId, SocketAddr>::default().with_node_delegate(memdb);
+    let memberlist = TokioTcpMemberlist::with_delegate(delegate, net_opts, opts).await?;
     tokio::spawn(async move {
-      tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-          tracing::info!("toydb: shutting down db event listener");
-        }
-        ev = rx.recv() => {
-          if let Some(ev) = ev {
-            match ev {
-              Event::Get { key, tx } => {
-                let value = memdb1.inner.store.get(&key).map(|ent| ent.value().clone());
-                let _ = tx.send(value);
-              }
-              Event::Set { key, value, tx } => {
-                if memdb1.inner.store.get(&key).is_some() {
-                  let _ = tx.send(Err("key already exists".into()));
-                } else {
-                  memdb1.inner.store.insert(key, value);
-                  let _ = tx.send(Ok(()));
+      loop {
+        tokio::select! {
+          _ = tokio::signal::ctrl_c() => {
+            tracing::info!("toydb: shutting down db event listener");
+          }
+          ev = rx.recv() => {
+            if let Some(ev) = ev {
+              match ev {
+                Event::Join { id, addr, tx } => {
+                  let res = memberlist.join(Node::new(id, MaybeResolvedAddress::Resolved(addr))).await;
+                  let _ = tx.send(res.map_err(Into::into).map(|_| ()));
                 }
-              }
-              Event::Del { key, tx } => {
-                let value = memdb1.inner.store.remove(&key).map(|ent| ent.value().clone());
-                let _ = tx.send(value);
+                Event::Get { key, tx } => {
+                  let value = memdb1.inner.store.get(&key).map(|ent| ent.value().clone());
+                  let _ = tx.send(value);
+                }
+                Event::Set { key, value, tx } => {
+                  if memdb1.inner.store.get(&key).is_some() {
+                    let _ = tx.send(Err("key already exists".into()));
+                  } else {
+                    memdb1.inner.store.insert(key, value);
+                    let _ = tx.send(Ok(()));
+                  }
+                }
               }
             }
           }
@@ -132,14 +136,139 @@ impl ToyDb {
       }
     });
 
-    let delegate = CompositeDelegate::<NodeId, SocketAddr>::default().with_node_delegate(memdb);
-    let memberlist = TokioTcpMemberlist::with_delegate(delegate, net_opts, opts).await?;
-    Ok(Self { memberlist, tx })
+    Ok(Self { tx })
+  }
+
+  async fn handle_get<W: tokio::io::AsyncWrite + Unpin>(
+    &self,
+    key: Bytes,
+    stream: &mut W,
+  ) -> Result<()> {
+    let (tx, rx) = oneshot::channel();
+    if let Err(e) = self.tx.send(Event::Get { key, tx }).await {
+      tracing::error!(err=%e, "toydb: fail to send get event");
+      return Ok(());
+    }
+
+    let resp = rx.await?;
+    tracing::info!(value=?resp, "toydb: fetch key");
+    match bincode::serialize(&resp) {
+      Ok(resp) => {
+        let mut prefixed_data = vec![0; resp.len() + 4];
+        prefixed_data[..4].copy_from_slice(&(resp.len() as u32).to_le_bytes());
+        prefixed_data[4..].copy_from_slice(&resp);
+        if let Err(e) = stream.write_all(&prefixed_data).await {
+          tracing::error!(err=%e, "toydb: fail to write rpc response");
+        } else {
+          tracing::info!(data=?prefixed_data, "toydb: send get response");
+        }
+      }
+      Err(e) => {
+        tracing::error!(err=%e, "toydb: fail to encode rpc response");
+      }
+    }
+    Ok(())
+  }
+
+  async fn handle_join<W: tokio::io::AsyncWrite + Unpin>(
+    &self,
+    id: NodeId,
+    addr: SocketAddr,
+    stream: &mut W,
+  ) -> Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .tx
+      .send(Event::Join {
+        id: id.clone(),
+        addr,
+        tx,
+      })
+      .await?;
+
+    let resp = rx.await?;
+    if let Err(e) = resp {
+      let res = std::result::Result::<(), String>::Err(e.to_string());
+      match bincode::serialize(&res) {
+        Ok(resp) => {
+          let mut prefixed_data = vec![0; resp.len() + 4];
+          prefixed_data[..4].copy_from_slice(&(resp.len() as u32).to_le_bytes());
+          prefixed_data[4..].copy_from_slice(&resp);
+          if let Err(e) = stream.write_all(&prefixed_data).await {
+            tracing::error!(err=%e, "toydb: fail to write rpc response");
+          }
+        }
+        Err(e) => {
+          tracing::error!(err=%e, "toydb: fail to encode rpc response");
+        }
+      }
+    } else {
+      let res = std::result::Result::<(), String>::Ok(());
+      match bincode::serialize(&res) {
+        Ok(resp) => {
+          let mut prefixed_data = vec![0; resp.len() + 4];
+          prefixed_data[..4].copy_from_slice(&(resp.len() as u32).to_le_bytes());
+          prefixed_data[4..].copy_from_slice(&resp);
+          if let Err(e) = stream.write_all(&prefixed_data).await {
+            tracing::error!(err=%e, "toydb: fail to write rpc response");
+          }
+        }
+        Err(e) => {
+          tracing::error!(err=%e, "toydb: fail to encode rpc response");
+        }
+      }
+    }
+
+    Ok(())
+  }
+
+  async fn handle_insert<W: tokio::io::AsyncWrite + Unpin>(
+    &self,
+    key: Bytes,
+    value: Bytes,
+    stream: &mut W,
+  ) -> Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self.tx.send(Event::Set { key, value, tx }).await?;
+
+    let resp = rx.await?;
+    if let Err(e) = resp {
+      let res = std::result::Result::<(), String>::Err(e.to_string());
+      match bincode::serialize(&res) {
+        Ok(resp) => {
+          let mut prefixed_data = vec![0; resp.len() + 4];
+          prefixed_data[..4].copy_from_slice(&(resp.len() as u32).to_le_bytes());
+          prefixed_data[4..].copy_from_slice(&resp);
+          if let Err(e) = stream.write_all(&prefixed_data).await {
+            tracing::error!(err=%e, "toydb: fail to write rpc response");
+          }
+        }
+        Err(e) => {
+          tracing::error!(err=%e, "toydb: fail to encode rpc response");
+        }
+      }
+    } else {
+      let res = std::result::Result::<(), String>::Ok(());
+      match bincode::serialize(&res) {
+        Ok(resp) => {
+          let mut prefixed_data = vec![0; resp.len() + 4];
+          prefixed_data[..4].copy_from_slice(&(resp.len() as u32).to_le_bytes());
+          prefixed_data[4..].copy_from_slice(&resp);
+          if let Err(e) = stream.write_all(&prefixed_data).await {
+            tracing::error!(err=%e, "toydb: fail to write rpc response");
+          }
+        }
+        Err(e) => {
+          tracing::error!(err=%e, "toydb: fail to encode rpc response");
+        }
+      }
+    }
+    Ok(())
   }
 }
 
 #[derive(clap::Args)]
-struct Command {
+struct StartArgs {
   /// The id of the db instance
   #[clap(short, long)]
   id: NodeId,
@@ -150,30 +279,54 @@ struct Command {
   #[clap(short, long)]
   meta: Meta,
   /// The rpc address to listen on commands
-  #[clap(short, long, default_value = "/tmp/toydb.sock")]
+  #[clap(short, long)]
   rpc_addr: std::path::PathBuf,
 }
 
-#[derive(clap::Parser)]
-enum Args {
-  Start(Command),
+#[derive(clap::Subcommand)]
+enum Commands {
+  /// Start the toydb instance
+  Start(StartArgs),
+  /// Join to an existing toydb cluster
+  Join {
+    #[clap(short, long)]
+    id: NodeId,
+    #[clap(short, long)]
+    addr: SocketAddr,
+    #[clap(short, long)]
+    rpc_addr: std::path::PathBuf,
+  },
+  /// Fetch a value by key from the toydb
   Get {
-    key: Bytes,
+    #[clap(short, long)]
+    key: String,
+    #[clap(short, long)]
+    rpc_addr: std::path::PathBuf,
   },
+  /// Set a key-value to the toydb if the key not exists
   Set {
-    key: Bytes,
-    value: Bytes,
+    #[clap(short, long)]
+    key: String,
+    #[clap(short, long)]
+    value: String,
+    #[clap(short, long)]
+    rpc_addr: std::path::PathBuf,
   },
-  Del {
-    key: Bytes,
-  },
+}
+
+#[derive(clap::Parser)]
+#[command(name = "toydb")]
+#[command(about = "CLI for toydb example", long_about = None)]
+struct Cli {
+  #[clap(subcommand)]
+  command: Commands,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 enum Op {
   Get(Bytes),
   Set(Bytes, Bytes),
-  Del(Bytes),
+  Join { addr: SocketAddr, id: NodeId },
 }
 
 enum Event {
@@ -186,32 +339,185 @@ enum Event {
     value: Bytes,
     tx: oneshot::Sender<Result<()>>,
   },
-  Del {
-    key: Bytes,
-    tx: oneshot::Sender<Option<Bytes>>,
+  Join {
+    addr: SocketAddr,
+    id: NodeId,
+    tx: oneshot::Sender<Result<()>>,
   },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-  tracing_subscriber::fmt::init();
+  let filter = std::env::var("TOYDB_LOG").unwrap_or_else(|_| "info".to_owned());
+  tracing::subscriber::set_global_default(
+    tracing_subscriber::fmt::fmt()
+      .without_time()
+      .with_line_number(true)
+      .with_env_filter(filter)
+      .with_file(false)
+      .with_target(true)
+      .with_ansi(true)
+      .finish(),
+  )
+  .unwrap();
 
-  let args = Args::parse();
-  let opts = Options::lan();
-  let net_opts = NetTransportOptions::new(
-    args.id,
-  ).with_bind_addresses([HostAddr::from(args.addr)].into_iter().collect());
+  let cli = Cli::parse();
+  match cli.command {
+    Commands::Join { addr, id, rpc_addr } => {
+      handle_join_cmd(id, addr, rpc_addr).await?;
+    }
+    Commands::Get { key, rpc_addr } => {
+      handle_get_cmd(key, rpc_addr).await?;
+    }
+    Commands::Set {
+      key,
+      value,
+      rpc_addr,
+    } => {
+      handle_set_cmd(key, value, rpc_addr).await?;
+    }
+    Commands::Start(args) => {
+      handle_start_cmd(args).await?;
+    }
+  }
+
+  Ok(())
+}
+
+async fn handle_join_cmd(id: NodeId, addr: SocketAddr, rpc_addr: std::path::PathBuf) -> Result<()> {
+  let conn = UnixStream::connect(rpc_addr).await?;
+  let data = serialize(&Op::Join { id, addr })?;
+
+  let (reader, mut writer) = conn.into_split();
+
+  let mut prefixed_data = vec![0; data.len() + 4];
+  prefixed_data[..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+  prefixed_data[4..].copy_from_slice(&data);
+
+  writer.write_all(&prefixed_data).await?;
+  writer.shutdown().await?;
+
+  let mut reader = tokio::io::BufReader::new(reader);
+  let mut len_buf = [0; 4];
+  reader.read_exact(&mut len_buf).await?;
+  let len = u32::from_le_bytes(len_buf) as usize;
+
+  let mut buf = vec![0; len];
+  reader.read_exact(&mut buf).await?;
+  let res = deserialize::<std::result::Result<(), String>>(&buf)?;
+  match res {
+    Ok(_) => {
+      println!("join successfully");
+    }
+    Err(e) => {
+      println!("fail to join {e}")
+    }
+  }
+  Ok(())
+}
+
+async fn handle_get_cmd(key: String, rpc_addr: std::path::PathBuf) -> Result<()> {
+  let conn = UnixStream::connect(rpc_addr).await?;
+  let data = serialize(&Op::Get(key.into_bytes().into()))?;
+
+  let (reader, mut writer) = conn.into_split();
+
+  let mut prefixed_data = vec![0; data.len() + 4];
+  prefixed_data[..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+  prefixed_data[4..].copy_from_slice(&data);
+
+  writer.write_all(&prefixed_data).await?;
+  writer.shutdown().await?;
+
+  let mut reader = tokio::io::BufReader::new(reader);
+  let mut len_buf = [0; 4];
+  reader.read_exact(&mut len_buf).await?;
+  let len = u32::from_le_bytes(len_buf) as usize;
+
+  let mut buf = vec![0; len];
+  reader.read_exact(&mut buf).await?;
+  let res = deserialize::<Option<Bytes>>(&buf)?;
+  match res {
+    Some(value) => {
+      println!("{}", String::from_utf8_lossy(&value));
+    }
+    None => {
+      println!("key not found");
+    }
+  }
+  Ok(())
+}
+
+async fn handle_set_cmd(key: String, value: String, rpc_addr: std::path::PathBuf) -> Result<()> {
+  let conn = UnixStream::connect(rpc_addr).await?;
+  let data = serialize(&Op::Set(key.into_bytes().into(), value.into_bytes().into()))?;
+
+  let (reader, mut writer) = conn.into_split();
+
+  let mut prefixed_data = vec![0; data.len() + 4];
+  prefixed_data[..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+  prefixed_data[4..].copy_from_slice(&data);
+
+  writer.write_all(&prefixed_data).await?;
+  writer.shutdown().await?;
+
+  let mut reader = tokio::io::BufReader::new(reader);
+  let mut len_buf = [0; 4];
+  reader.read_exact(&mut len_buf).await?;
+  let len = u32::from_le_bytes(len_buf) as usize;
+
+  let mut buf = vec![0; len];
+  reader.read_exact(&mut buf).await?;
+  let res = deserialize::<std::result::Result<(), String>>(&buf)?;
+  match res {
+    Ok(_) => {
+      println!("insert successfully");
+    }
+    Err(e) => {
+      println!("fail to insert {e}")
+    }
+  }
+  Ok(())
+}
+
+async fn handle_start_cmd(args: StartArgs) -> Result<()> {
+  let opts = Options::local();
+  let net_opts = NetTransportOptions::new(args.id)
+    .with_bind_addresses([HostAddr::from(args.addr)].into_iter().collect());
 
   let db = ToyDb::new(args.meta, opts, net_opts).await?;
 
+  struct Guard {
+    sock: std::path::PathBuf,
+  }
+
+  impl Drop for Guard {
+    fn drop(&mut self) {
+      if let Err(e) = std::fs::remove_file(&self.sock) {
+        tracing::error!(err=%e, "toydb: fail to remove rpc sock");
+      }
+    }
+  }
+
+  let _guard = Guard {
+    sock: args.rpc_addr.clone(),
+  };
+
   let listener = UnixListener::bind(&args.rpc_addr)?;
+
+  tracing::info!("toydb: start listening on {}", args.rpc_addr.display());
+
   loop {
     tokio::select! {
       conn = listener.accept() => {
         let (stream, _) = conn?;
         let mut stream = tokio::io::BufReader::new(stream);
-        let mut data = Vec::new();
-        if let Err(e) = stream.read_to_end(&mut data).await {
+        let mut len_buf = [0; 4];
+        stream.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+
+        let mut data = vec![0; len];
+        if let Err(e) = stream.read_exact(&mut data).await {
           tracing::error!(err=%e, "toydb: fail to read from rpc stream");
           continue;
         }
@@ -225,69 +531,19 @@ async fn main() -> Result<()> {
         };
 
         match op {
-          Op::Get(bytes) => {
-            let (tx, rx) = oneshot::channel();
-            db.tx.send(Event::Get { key: bytes, tx }).await?;
-
-            let resp = rx.await?;
-            match bincode::serialize(&resp) {
-              Ok(resp) => {
-                if let Err(e) = stream.write_all(&resp).await {
-                  tracing::error!(err=%e, "toydb: fail to write rpc response");
-                }
-              }
-              Err(e) => {
-                tracing::error!(err=%e, "toydb: fail to encode rpc response");
-              }
-            }
+          Op::Join { addr, id } => {
+            db.handle_join(id, addr, &mut stream).await?;
+          }
+          Op::Get(key) => {
+            db.handle_get(key, &mut stream).await?;
           },
           Op::Set(key, value) => {
-            let (tx, rx) = oneshot::channel();
-            db.tx.send(Event::Set { key, value, tx }).await?;
-
-            let resp = rx.await?;
-            if let Err(e) = resp {
-              let res = std::result::Result::<(), String>::Err(e.to_string());
-              match bincode::serialize(&res) {
-                Ok(resp) => {
-                  if let Err(e) = stream.write_all(&resp).await {
-                    tracing::error!(err=%e, "toydb: fail to write rpc response");
-                  }
-                }
-                Err(e) => {
-                  tracing::error!(err=%e, "toydb: fail to encode rpc response");
-                }
-              }
-            } else {
-              let res = std::result::Result::<(), String>::Ok(());
-              match bincode::serialize(&res) {
-                Ok(resp) => {
-                  if let Err(e) = stream.write_all(&resp).await {
-                    tracing::error!(err=%e, "toydb: fail to write rpc response");
-                  }
-                }
-                Err(e) => {
-                  tracing::error!(err=%e, "toydb: fail to encode rpc response");
-                }
-              }
-            }
+            db.handle_insert(key, value, &mut stream).await?;
           },
-          Op::Del(key) => {
-            let (tx, rx) = oneshot::channel();
-            db.tx.send(Event::Del { key, tx }).await?;
+        }
 
-            let resp = rx.await?;
-            match bincode::serialize(&resp) {
-              Ok(resp) => {
-                if let Err(e) = stream.write_all(&resp).await {
-                  tracing::error!(err=%e, "toydb: fail to write rpc response");
-                }
-              }
-              Err(e) => {
-                tracing::error!(err=%e, "toydb: fail to encode rpc response");
-              }
-            }
-          },
+        if let Err(e) = stream.into_inner().shutdown().await {
+          tracing::error!(err=%e, "toydb: fail to shutdown rpc stream");
         }
       }
       _ = tokio::signal::ctrl_c() => {
