@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use bytes::{Bytes, BytesMut};
 use nodecraft::CheapClone;
 
@@ -118,6 +120,14 @@ impl TryFrom<&str> for Meta {
       return Err(LargeMeta(s.len()));
     }
     Ok(Self(Bytes::copy_from_slice(s.as_bytes())))
+  }
+}
+
+impl FromStr for Meta {
+  type Err = LargeMeta;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    Meta::try_from(s)
   }
 }
 

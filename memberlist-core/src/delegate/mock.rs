@@ -107,7 +107,7 @@ where
     _encoded_len: F,
   ) -> impl Iterator<Item = Bytes> + Send
   where
-    F: Fn(Bytes) -> (usize, Bytes),
+    F: Fn(Bytes) -> (usize, Bytes) + Send + Sync + 'static,
   {
     let mut mu = self.inner.lock().await;
     let mut out = TinyVec::new();

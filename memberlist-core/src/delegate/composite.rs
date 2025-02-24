@@ -340,7 +340,7 @@ where
     encoded_len: F,
   ) -> impl Iterator<Item = Bytes> + Send
   where
-    F: Fn(Bytes) -> (usize, Bytes) + Send,
+    F: Fn(Bytes) -> (usize, Bytes) + Send + Sync + 'static,
   {
     self
       .node_delegate

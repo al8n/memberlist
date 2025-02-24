@@ -9,13 +9,20 @@ pub trait NodeDelegate: Send + Sync + 'static {
   /// Used to retrieve meta-data about the current node
   /// when broadcasting an alive message. It's length is limited to
   /// the given byte size. This metadata is available in the NodeState structure.
-  fn node_meta(&self, limit: usize) -> impl Future<Output = Meta> + Send;
+  fn node_meta(&self, limit: usize) -> impl Future<Output = Meta> + Send {
+    let _ = limit;
+    async move { Meta::empty() }
+  }
 
   /// Called when a user-data message is received.
   /// Care should be taken that this method does not block, since doing
   /// so would block the entire UDP packet receive loop. Additionally, the byte
   /// slice may be modified after the call returns, so it should be copied if needed
-  fn notify_message(&self, msg: Cow<'_, [u8]>) -> impl Future<Output = ()> + Send;
+  fn notify_message(&self, msg: Cow<'_, [u8]>) -> impl Future<Output = ()> + Send {
+    async move {
+      let _ = msg;
+    }
+  }
 
   /// Called when user data messages can be broadcast.
   /// It can return a list of buffers to send. Each buffer should assume an
@@ -32,17 +39,29 @@ pub trait NodeDelegate: Send + Sync + 'static {
     encoded_len: F,
   ) -> impl Future<Output = impl Iterator<Item = Bytes> + Send> + Send
   where
-    F: Fn(Bytes) -> (usize, Bytes) + Send;
+    F: Fn(Bytes) -> (usize, Bytes) + Send + Sync + 'static,
+  {
+    let _ = limit;
+    let _ = encoded_len;
+    async move { std::iter::empty() }
+  }
 
   /// Used for a TCP Push/Pull. This is sent to
   /// the remote side in addition to the membership information. Any
   /// data can be sent here. See `merge_remote_state` as well. The `join`
   /// boolean indicates this is for a join instead of a push/pull.
-  fn local_state(&self, join: bool) -> impl Future<Output = Bytes> + Send;
+  fn local_state(&self, join: bool) -> impl Future<Output = Bytes> + Send {
+    let _ = join;
+    async move { Bytes::new() }
+  }
 
   /// Invoked after a TCP Push/Pull. This is the
   /// state received from the remote side and is the result of the
   /// remote side's `local_state` call. The 'join'
   /// boolean indicates this is for a join instead of a push/pull.
-  fn merge_remote_state(&self, buf: &[u8], join: bool) -> impl Future<Output = ()> + Send;
+  fn merge_remote_state(&self, buf: &[u8], join: bool) -> impl Future<Output = ()> + Send {
+    let _ = buf;
+    let _ = join;
+    async move {}
+  }
 }

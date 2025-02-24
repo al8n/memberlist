@@ -178,6 +178,7 @@ fn skip(wire_type: WireType, src: &[u8]) -> Result<usize, DecodeError> {
   }
 }
 
+#[cfg(debug_assertions)]
 #[inline]
 fn debug_assert_write_eq(actual: usize, expected: usize) {
   debug_assert_eq!(
@@ -186,6 +187,7 @@ fn debug_assert_write_eq(actual: usize, expected: usize) {
   );
 }
 
+#[cfg(debug_assertions)]
 #[inline]
 fn debug_assert_read_eq(actual: usize, expected: usize) {
   debug_assert_eq!(

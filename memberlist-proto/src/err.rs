@@ -1,8 +1,6 @@
 use smol_str::SmolStr;
 
-use super::{
-  Data, DataRef, DecodeError, EncodeError, WireType, debug_assert_write_eq, merge, skip, split,
-};
+use super::{Data, DataRef, DecodeError, EncodeError, WireType, merge, skip, split};
 
 /// Error response from the remote peer
 #[viewit::viewit(
@@ -69,7 +67,7 @@ impl Data for ErrorResponse {
     offset += 1;
     offset += self.message.encode_length_delimited(&mut buf[offset..])?;
     #[cfg(debug_assertions)]
-    debug_assert_write_eq(offset, self.encoded_len());
+    super::debug_assert_write_eq(offset, self.encoded_len());
     Ok(offset)
   }
 }

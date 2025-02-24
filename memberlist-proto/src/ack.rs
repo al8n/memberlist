@@ -1,8 +1,6 @@
 use bytes::Bytes;
 
-use super::{
-  Data, DataRef, DecodeError, EncodeError, WireType, debug_assert_write_eq, merge, skip, split,
-};
+use super::{Data, DataRef, DecodeError, EncodeError, WireType, merge, skip, split};
 
 /// Ack response is sent for a ping
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
@@ -143,7 +141,7 @@ impl Data for Ack {
       .map_err(|e| e.update(self.encoded_len(), len))?;
 
     #[cfg(debug_assertions)]
-    debug_assert_write_eq(offset, self.encoded_len());
+    super::debug_assert_write_eq(offset, self.encoded_len());
     Ok(offset)
   }
 }
@@ -319,7 +317,7 @@ impl Data for Nack {
     offset += 1;
     offset += self.sequence_number.encode(&mut buf[offset..])?;
     #[cfg(debug_assertions)]
-    debug_assert_write_eq(offset, self.encoded_len());
+    super::debug_assert_write_eq(offset, self.encoded_len());
     Ok(offset)
   }
 }
