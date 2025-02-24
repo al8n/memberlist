@@ -17,7 +17,7 @@ ignore:
   - memberlist-quic/src/error.rs
   - memberlist-quic/tests
   - memberlist/tests
-
+  - examples
 coverage:
   status:
     project: # Overall project status
