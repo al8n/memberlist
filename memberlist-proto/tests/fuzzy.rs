@@ -197,8 +197,22 @@ quickcheck!(
   Ping[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
   IndirectPing[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
   PushNodeState[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
-  PushPull[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
-  Message[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
+  PushPull[
+    (u32, SocketAddrV4),
+    (u32, String),
+    (IpAddr, SocketAddrV4),
+    (IpAddr, String),
+    (String, String),
+    (String, SocketAddrV4),
+  ],
+  Message[
+    (u32, SocketAddrV4),
+    (u32, String),
+    (IpAddr, SocketAddrV4),
+    (IpAddr, String),
+    (String, String),
+    (String, SocketAddrV4),
+  ],
   Messages[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
 );
 

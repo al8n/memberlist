@@ -1,13 +1,9 @@
-use core::marker::PhantomData;
-
 use nodecraft::{CheapClone, Node};
 
 use crate::{
   Data, DataRef, DecodeError, DelegateVersion, EncodeError, Meta, ProtocolVersion, State, WireType,
   merge, skip, split,
 };
-
-use super::STATES_BYTE;
 
 /// Push node state is the state push to the remote server.
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
@@ -194,26 +190,62 @@ where
 
       match b {
         b if b == PushNodeState::<I, A>::id_byte() => {
+          if id.is_some() {
+            return Err(DecodeError::duplicate_field("PushNodeState", "id", ID_TAG));
+          }
+
           let (readed, value) = I::Ref::decode_length_delimited(&src[offset..])?;
           offset += readed;
           id = Some(value);
         }
         b if b == PushNodeState::<I, A>::addr_byte() => {
+          if addr.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushNodeState",
+              "addr",
+              ADDR_TAG,
+            ));
+          }
+
           let (readed, value) = A::Ref::decode_length_delimited(&src[offset..])?;
           offset += readed;
           addr = Some(value);
         }
         META_BYTE => {
+          if meta.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushNodeState",
+              "meta",
+              META_TAG,
+            ));
+          }
+
           let (readed, value) = <&[u8] as DataRef<Meta>>::decode_length_delimited(&src[offset..])?;
           offset += readed;
           meta = Some(value);
         }
         INCARNATION_BYTE => {
+          if incarnation.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushNodeState",
+              "incarnation",
+              INCARNATION_TAG,
+            ));
+          }
+
           let (readed, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
           offset += readed;
           incarnation = Some(value);
         }
         STATE_BYTE => {
+          if state.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushNodeState",
+              "state",
+              STATE_TAG,
+            ));
+          }
+
           if offset >= src.len() {
             return Err(DecodeError::buffer_underflow());
           }
@@ -222,6 +254,14 @@ where
           state = Some(value);
         }
         PROTOCOL_VERSION_BYTE => {
+          if protocol_version.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushNodeState",
+              "protocol_version",
+              PROTOCOL_VERSION_TAG,
+            ));
+          }
+
           if offset >= src.len() {
             return Err(DecodeError::buffer_underflow());
           }
@@ -230,6 +270,14 @@ where
           protocol_version = Some(value);
         }
         DELEGATE_VERSION_BYTE => {
+          if delegate_version.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushNodeState",
+              "delegate_version",
+              DELEGATE_VERSION_TAG,
+            ));
+          }
+
           if offset >= src.len() {
             return Err(DecodeError::buffer_underflow());
           }
@@ -286,7 +334,10 @@ where
   fn encoded_len(&self) -> usize {
     let mut len = 1 + self.id.encoded_len_with_length_delimited();
     len += 1 + self.addr.encoded_len_with_length_delimited();
-    len += 1 + self.meta.encoded_len_with_length_delimited();
+    let meta_len = self.meta.len();
+    if meta_len != 0 {
+      len += 1 + self.meta.encoded_len_with_length_delimited();
+    }
     len += 1 + self.incarnation.encoded_len();
     len += 1 + 1; // state
     len += 1 + 1; // protocol version
@@ -294,16 +345,16 @@ where
     len
   }
 
-  fn encode(&self, buf: &mut [u8]) -> Result<usize, crate::EncodeError> {
-    let mut offset = 0;
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
     macro_rules! bail {
       ($this:ident($offset:expr, $len:ident)) => {
         if $offset >= $len {
-          return Err(EncodeError::insufficient_buffer($offset, $len));
+          return Err(EncodeError::insufficient_buffer(self.encoded_len(), $len));
         }
       };
     }
 
+    let mut offset = 0;
     let len = buf.len();
     bail!(self(0, len));
     buf[offset] = Self::id_byte();
@@ -321,13 +372,16 @@ where
       .encode_length_delimited(&mut buf[offset..])
       .map_err(|e| e.update(self.encoded_len(), len))?;
 
-    bail!(self(offset, len));
-    buf[offset] = META_BYTE;
-    offset += 1;
-    offset += self
-      .meta
-      .encode_length_delimited(&mut buf[offset..])
-      .map_err(|e| e.update(self.encoded_len(), len))?;
+    let meta_len = self.meta.len();
+    if meta_len != 0 {
+      bail!(self(offset, len));
+      buf[offset] = META_BYTE;
+      offset += 1;
+      offset += self
+        .meta
+        .encode_length_delimited(&mut buf[offset..])
+        .map_err(|e| e.update(self.encoded_len(), len))?;
+    }
 
     bail!(self(offset, len));
     buf[offset] = INCARNATION_BYTE;
@@ -337,17 +391,27 @@ where
       .encode(&mut buf[offset..])
       .map_err(|e| e.update(self.encoded_len(), len))?;
 
-    bail!(self(offset + 6, len));
+    bail!(self(offset, len));
     buf[offset] = STATE_BYTE;
     offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = self.state.into();
     offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = PROTOCOL_VERSION_BYTE;
     offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = self.protocol_version.into();
     offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = DELEGATE_VERSION_BYTE;
     offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = self.delegate_version.into();
     offset += 1;
 
@@ -442,113 +506,3 @@ impl<I: CheapClone, A: CheapClone> PushNodeState<I, A> {
     Node::new(self.id.cheap_clone(), self.addr.cheap_clone())
   }
 }
-
-/// A reference type to a collection of [`PushNodeState`]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PushNodeStatesDecoder<'a> {
-  src: &'a [u8],
-  start_offset: usize,
-  end_offset: usize,
-  num_states: usize,
-}
-
-impl<'a> PushNodeStatesDecoder<'a> {
-  pub(super) fn new(src: &'a [u8], num_states: usize, offsets: Option<(usize, usize)>) -> Self {
-    let (start, end) = offsets.map_or((0, 0), |(start, end)| (start, end));
-    Self {
-      src,
-      start_offset: start,
-      end_offset: end,
-      num_states,
-    }
-  }
-
-  /// Returns the number of [`PushNodeState`] in the collection.
-  #[inline]
-  pub const fn len(&self) -> usize {
-    self.num_states
-  }
-
-  /// Returns `true` if the collection is empty.
-  #[inline]
-  pub const fn is_empty(&self) -> bool {
-    self.num_states == 0
-  }
-
-  /// Returns an iterator over the [`PushNodeState`] in the collection.
-  pub fn iter<I, A>(&self) -> PushNodeStatesDecodeIter<'a, I, A>
-  where
-    I: Data,
-    A: Data,
-  {
-    PushNodeStatesDecodeIter {
-      src: self.src,
-      current_offset: (self.num_states > 0).then_some(self.start_offset),
-      end_offset: self.end_offset,
-      num_states: self.num_states,
-      _phantom: PhantomData,
-    }
-  }
-}
-
-/// An iterator over the [`PushNodeStateRef`] in the collection.
-pub struct PushNodeStatesDecodeIter<'a, I, A> {
-  src: &'a [u8],
-  current_offset: Option<usize>,
-  end_offset: usize,
-  num_states: usize,
-  _phantom: PhantomData<(I, A)>,
-}
-
-impl<'a, I, A> Iterator for PushNodeStatesDecodeIter<'a, I, A>
-where
-  I: Data,
-  A: Data,
-{
-  type Item = Result<PushNodeStateRef<'a, I::Ref<'a>, A::Ref<'a>>, DecodeError>;
-
-  fn next(&mut self) -> Option<Self::Item> {
-    let current_offset = self.current_offset.as_mut()?;
-
-    while *current_offset < self.end_offset {
-      // Parse the tag and wire type
-      let b = self.src[*current_offset];
-      *current_offset += 1;
-
-      match b {
-        STATES_BYTE => {
-          let (readed, value) = match <PushNodeStateRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
-            PushNodeState<I, A>,
-          >>::decode_length_delimited(
-            &self.src[*current_offset..]
-          ) {
-            Ok((readed, value)) => (readed, value),
-            Err(e) => return Some(Err(e)),
-          };
-          *current_offset += readed;
-          return Some(Ok(value));
-        }
-        _ => {
-          let (wire_type, _) = split(b);
-          let wire_type = match WireType::try_from(wire_type) {
-            Ok(wire_type) => wire_type,
-            Err(wt) => return Some(Err(DecodeError::unknown_wire_type(wt))),
-          };
-          *current_offset += match skip(wire_type, &self.src[*current_offset..]) {
-            Ok(offset) => offset,
-            Err(e) => return Some(Err(e)),
-          };
-        }
-      }
-    }
-    None
-  }
-}
-
-impl<I: Data, A: Data> core::iter::ExactSizeIterator for PushNodeStatesDecodeIter<'_, I, A> {
-  fn len(&self) -> usize {
-    self.num_states
-  }
-}
-
-impl<I: Data, A: Data> core::iter::FusedIterator for PushNodeStatesDecodeIter<'_, I, A> {}
