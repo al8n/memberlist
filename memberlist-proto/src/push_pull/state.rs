@@ -1,13 +1,9 @@
-use core::marker::PhantomData;
-
 use nodecraft::{CheapClone, Node};
 
 use crate::{
   Data, DataRef, DecodeError, DelegateVersion, EncodeError, Meta, ProtocolVersion, State, WireType,
   merge, skip, split,
 };
-
-use super::STATES_BYTE;
 
 /// Push node state is the state push to the remote server.
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
@@ -349,16 +345,16 @@ where
     len
   }
 
-  fn encode(&self, buf: &mut [u8]) -> Result<usize, crate::EncodeError> {
-    let mut offset = 0;
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
     macro_rules! bail {
       ($this:ident($offset:expr, $len:ident)) => {
         if $offset >= $len {
-          return Err(EncodeError::insufficient_buffer($offset, $len));
+          return Err(EncodeError::insufficient_buffer(self.encoded_len(), $len));
         }
       };
     }
 
+    let mut offset = 0;
     let len = buf.len();
     bail!(self(0, len));
     buf[offset] = Self::id_byte();
@@ -510,113 +506,3 @@ impl<I: CheapClone, A: CheapClone> PushNodeState<I, A> {
     Node::new(self.id.cheap_clone(), self.addr.cheap_clone())
   }
 }
-
-/// A reference type to a collection of [`PushNodeState`]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PushNodeStatesDecoder<'a> {
-  src: &'a [u8],
-  start_offset: usize,
-  end_offset: usize,
-  num_states: usize,
-}
-
-impl<'a> PushNodeStatesDecoder<'a> {
-  pub(super) fn new(src: &'a [u8], num_states: usize, offsets: Option<(usize, usize)>) -> Self {
-    let (start, end) = offsets.map_or((0, 0), |(start, end)| (start, end));
-    Self {
-      src,
-      start_offset: start,
-      end_offset: end,
-      num_states,
-    }
-  }
-
-  /// Returns the number of [`PushNodeState`] in the collection.
-  #[inline]
-  pub const fn len(&self) -> usize {
-    self.num_states
-  }
-
-  /// Returns `true` if the collection is empty.
-  #[inline]
-  pub const fn is_empty(&self) -> bool {
-    self.num_states == 0
-  }
-
-  /// Returns an iterator over the [`PushNodeState`] in the collection.
-  pub fn iter<I, A>(&self) -> PushNodeStatesDecodeIter<'a, I, A>
-  where
-    I: Data,
-    A: Data,
-  {
-    PushNodeStatesDecodeIter {
-      src: self.src,
-      current_offset: (self.num_states > 0).then_some(self.start_offset),
-      end_offset: self.end_offset,
-      num_states: self.num_states,
-      _phantom: PhantomData,
-    }
-  }
-}
-
-/// An iterator over the [`PushNodeStateRef`] in the collection.
-pub struct PushNodeStatesDecodeIter<'a, I, A> {
-  src: &'a [u8],
-  current_offset: Option<usize>,
-  end_offset: usize,
-  num_states: usize,
-  _phantom: PhantomData<(I, A)>,
-}
-
-impl<'a, I, A> Iterator for PushNodeStatesDecodeIter<'a, I, A>
-where
-  I: Data,
-  A: Data,
-{
-  type Item = Result<PushNodeStateRef<'a, I::Ref<'a>, A::Ref<'a>>, DecodeError>;
-
-  fn next(&mut self) -> Option<Self::Item> {
-    let current_offset = self.current_offset.as_mut()?;
-
-    while *current_offset < self.end_offset {
-      // Parse the tag and wire type
-      let b = self.src[*current_offset];
-      *current_offset += 1;
-
-      match b {
-        STATES_BYTE => {
-          let (readed, value) = match <PushNodeStateRef<'_, I::Ref<'_>, A::Ref<'_>> as DataRef<
-            PushNodeState<I, A>,
-          >>::decode_length_delimited(
-            &self.src[*current_offset..]
-          ) {
-            Ok((readed, value)) => (readed, value),
-            Err(e) => return Some(Err(e)),
-          };
-          *current_offset += readed;
-          return Some(Ok(value));
-        }
-        _ => {
-          let (wire_type, _) = split(b);
-          let wire_type = match WireType::try_from(wire_type) {
-            Ok(wire_type) => wire_type,
-            Err(wt) => return Some(Err(DecodeError::unknown_wire_type(wt))),
-          };
-          *current_offset += match skip(wire_type, &self.src[*current_offset..]) {
-            Ok(offset) => offset,
-            Err(e) => return Some(Err(e)),
-          };
-        }
-      }
-    }
-    None
-  }
-}
-
-impl<I: Data, A: Data> core::iter::ExactSizeIterator for PushNodeStatesDecodeIter<'_, I, A> {
-  fn len(&self) -> usize {
-    self.num_states
-  }
-}
-
-impl<I: Data, A: Data> core::iter::FusedIterator for PushNodeStatesDecodeIter<'_, I, A> {}

@@ -4,6 +4,8 @@ use bytes::Bytes;
 use nodecraft::CheapClone;
 use triomphe::Arc;
 
+use crate::RepeatedDecoder;
+
 use super::{Data, DataRef, DecodeError, EncodeError, WireType, merge, skip, split};
 
 mod state;
@@ -108,7 +110,7 @@ where
   {
     val
       .states
-      .iter::<I, A>()
+      .iter::<PushNodeState<I, A>>()
       .map(|res| res.and_then(PushNodeState::from_ref))
       .collect::<Result<Arc<[_]>, DecodeError>>()
       .map(|states| Self {
@@ -199,7 +201,7 @@ pub struct PushPullRef<'a, I, A> {
     style = "ref",
     attrs(doc = "Returns the states of the push pull message")
   ))]
-  states: PushNodeStatesDecoder<'a>,
+  states: RepeatedDecoder<'a>,
   /// The user data of the push pull message.
   #[viewit(getter(const, attrs(doc = "Returns the user data of the push pull message")))]
   user_data: &'a [u8],
@@ -289,7 +291,15 @@ where
       offset,
       Self {
         join,
-        states: PushNodeStatesDecoder::new(src, num_states, node_state_offsets),
+        states: {
+          let val =
+            RepeatedDecoder::new(STATES_TAG, WireType::LengthDelimited, src).with_nums(num_states);
+          if let Some((first, last)) = node_state_offsets {
+            val.with_offsets(first, last)
+          } else {
+            val
+          }
+        },
         user_data,
         _m: PhantomData,
       },
