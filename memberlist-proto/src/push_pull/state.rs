@@ -194,26 +194,62 @@ where
 
       match b {
         b if b == PushNodeState::<I, A>::id_byte() => {
+          if id.is_some() {
+            return Err(DecodeError::duplicate_field("PushNodeState", "id", ID_TAG));
+          }
+
           let (readed, value) = I::Ref::decode_length_delimited(&src[offset..])?;
           offset += readed;
           id = Some(value);
         }
         b if b == PushNodeState::<I, A>::addr_byte() => {
+          if addr.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushNodeState",
+              "addr",
+              ADDR_TAG,
+            ));
+          }
+
           let (readed, value) = A::Ref::decode_length_delimited(&src[offset..])?;
           offset += readed;
           addr = Some(value);
         }
         META_BYTE => {
+          if meta.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushNodeState",
+              "meta",
+              META_TAG,
+            ));
+          }
+
           let (readed, value) = <&[u8] as DataRef<Meta>>::decode_length_delimited(&src[offset..])?;
           offset += readed;
           meta = Some(value);
         }
         INCARNATION_BYTE => {
+          if incarnation.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushNodeState",
+              "incarnation",
+              INCARNATION_TAG,
+            ));
+          }
+
           let (readed, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
           offset += readed;
           incarnation = Some(value);
         }
         STATE_BYTE => {
+          if state.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushNodeState",
+              "state",
+              STATE_TAG,
+            ));
+          }
+
           if offset >= src.len() {
             return Err(DecodeError::buffer_underflow());
           }
@@ -222,6 +258,14 @@ where
           state = Some(value);
         }
         PROTOCOL_VERSION_BYTE => {
+          if protocol_version.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushNodeState",
+              "protocol_version",
+              PROTOCOL_VERSION_TAG,
+            ));
+          }
+
           if offset >= src.len() {
             return Err(DecodeError::buffer_underflow());
           }
@@ -230,6 +274,14 @@ where
           protocol_version = Some(value);
         }
         DELEGATE_VERSION_BYTE => {
+          if delegate_version.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushNodeState",
+              "delegate_version",
+              DELEGATE_VERSION_TAG,
+            ));
+          }
+
           if offset >= src.len() {
             return Err(DecodeError::buffer_underflow());
           }
@@ -286,7 +338,10 @@ where
   fn encoded_len(&self) -> usize {
     let mut len = 1 + self.id.encoded_len_with_length_delimited();
     len += 1 + self.addr.encoded_len_with_length_delimited();
-    len += 1 + self.meta.encoded_len_with_length_delimited();
+    let meta_len = self.meta.len();
+    if meta_len != 0 {
+      len += 1 + self.meta.encoded_len_with_length_delimited();
+    }
     len += 1 + self.incarnation.encoded_len();
     len += 1 + 1; // state
     len += 1 + 1; // protocol version
@@ -321,13 +376,16 @@ where
       .encode_length_delimited(&mut buf[offset..])
       .map_err(|e| e.update(self.encoded_len(), len))?;
 
-    bail!(self(offset, len));
-    buf[offset] = META_BYTE;
-    offset += 1;
-    offset += self
-      .meta
-      .encode_length_delimited(&mut buf[offset..])
-      .map_err(|e| e.update(self.encoded_len(), len))?;
+    let meta_len = self.meta.len();
+    if meta_len != 0 {
+      bail!(self(offset, len));
+      buf[offset] = META_BYTE;
+      offset += 1;
+      offset += self
+        .meta
+        .encode_length_delimited(&mut buf[offset..])
+        .map_err(|e| e.update(self.encoded_len(), len))?;
+    }
 
     bail!(self(offset, len));
     buf[offset] = INCARNATION_BYTE;
@@ -337,17 +395,27 @@ where
       .encode(&mut buf[offset..])
       .map_err(|e| e.update(self.encoded_len(), len))?;
 
-    bail!(self(offset + 6, len));
+    bail!(self(offset, len));
     buf[offset] = STATE_BYTE;
     offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = self.state.into();
     offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = PROTOCOL_VERSION_BYTE;
     offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = self.protocol_version.into();
     offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = DELEGATE_VERSION_BYTE;
     offset += 1;
+
+    bail!(self(offset, len));
     buf[offset] = self.delegate_version.into();
     offset += 1;
 

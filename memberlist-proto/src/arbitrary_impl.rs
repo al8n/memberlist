@@ -1,4 +1,4 @@
-use super::{DelegateVersion, Label, Meta, ProtocolVersion, State};
+use super::{Label, Meta};
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 
@@ -10,24 +10,6 @@ impl<'a> Arbitrary<'a> for Meta {
       buf.push(u.arbitrary::<u8>()?);
     }
     Ok(Meta::try_from(buf).unwrap())
-  }
-}
-
-impl<'a> Arbitrary<'a> for State {
-  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
-    Ok(u.arbitrary::<u8>()?.into())
-  }
-}
-
-impl<'a> Arbitrary<'a> for DelegateVersion {
-  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
-    Ok(u.arbitrary::<u8>()?.into())
-  }
-}
-
-impl<'a> Arbitrary<'a> for ProtocolVersion {
-  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
-    Ok(u.arbitrary::<u8>()?.into())
   }
 }
 
@@ -60,6 +42,13 @@ impl<'a> Arbitrary<'a> for super::CompressAlgorithm {
 impl<'a> Arbitrary<'a> for super::EncryptionAlgorithm {
   fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
     Ok(Self::from(u.arbitrary::<u8>()?))
+  }
+}
+
+#[cfg(feature = "encryption")]
+impl<'a> Arbitrary<'a> for super::SecretKeys {
+  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+    Ok(u.arbitrary::<Vec<super::SecretKey>>()?.into())
   }
 }
 

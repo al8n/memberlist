@@ -89,16 +89,28 @@ macro_rules! bail_ping {
 
             match b {
               [< $name:upper _SEQUENCE_NUMBER_BYTE >] => {
+                if sequence_number.is_some() {
+                  return Err(DecodeError::duplicate_field(stringify!($name), "sequence number", [< $name:upper _SEQUENCE_NUMBER_TAG >]));
+                }
+
                 let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
                 offset += bytes_read;
                 sequence_number = Some(value);
               }
               b if b == $name::<I, A>::source_byte() => {
+                if source.is_some() {
+                  return Err(DecodeError::duplicate_field(stringify!($name), "source", $name::<I, A>::source_byte()));
+                }
+
                 let (bytes_read, value) = <Node<I::Ref<'_>, A::Ref<'_>> as DataRef<Node<I, A>>>::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
                 source = Some(value);
               }
               b if b == $name::<I, A>::target_byte() => {
+                if target.is_some() {
+                  return Err(DecodeError::duplicate_field(stringify!($name), "target", $name::<I, A>::target_byte()));
+                }
+
                 let (bytes_read, value) = <Node<I::Ref<'_>, A::Ref<'_>> as DataRef<Node<I, A>>>::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
                 target = Some(value);

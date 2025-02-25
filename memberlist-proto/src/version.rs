@@ -1,22 +1,18 @@
 /// Delegate version
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(
+  Debug, Default, Copy, Clone, PartialEq, Eq, Hash, derive_more::IsVariant, derive_more::Display,
+)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[non_exhaustive]
 pub enum DelegateVersion {
   /// Version 1
   #[default]
+  #[display("v1")]
   V1,
   /// Unknown version (used for forwards and backwards compatibility)
+  #[display("unknown({_0})")]
   Unknown(u8),
-}
-
-impl core::fmt::Display for DelegateVersion {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match self {
-      Self::V1 => write!(f, "V1"),
-      Self::Unknown(val) => write!(f, "Unknown({})", val),
-    }
-  }
 }
 
 impl From<u8> for DelegateVersion {
@@ -38,24 +34,20 @@ impl From<DelegateVersion> for u8 {
 }
 
 /// Protocol version
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(
+  Debug, Default, Copy, Clone, PartialEq, Eq, Hash, derive_more::IsVariant, derive_more::Display,
+)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[non_exhaustive]
 pub enum ProtocolVersion {
   /// Version 1
   #[default]
+  #[display("v1")]
   V1,
   /// Unknown version (used for forwards and backwards compatibility)
+  #[display("unknown({_0})")]
   Unknown(u8),
-}
-
-impl core::fmt::Display for ProtocolVersion {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match self {
-      Self::V1 => write!(f, "V1"),
-      Self::Unknown(val) => write!(f, "Unknown({})", val),
-    }
-  }
 }
 
 impl From<u8> for ProtocolVersion {
@@ -134,8 +126,8 @@ mod tests {
     let _ = DelegateVersion::arbitrary(&mut data).unwrap();
 
     assert_eq!(u8::from(DelegateVersion::V1), 1u8);
-    assert_eq!(DelegateVersion::V1.to_string(), "V1");
-    assert_eq!(DelegateVersion::Unknown(2).to_string(), "Unknown(2)");
+    assert_eq!(DelegateVersion::V1.to_string(), "v1");
+    assert_eq!(DelegateVersion::Unknown(2).to_string(), "unknown(2)");
     assert_eq!(DelegateVersion::from(1), DelegateVersion::V1);
     assert_eq!(DelegateVersion::from(2), DelegateVersion::Unknown(2));
   }
@@ -148,8 +140,8 @@ mod tests {
     let mut data = Unstructured::new(&buf);
     let _ = ProtocolVersion::arbitrary(&mut data).unwrap();
     assert_eq!(u8::from(ProtocolVersion::V1), 1);
-    assert_eq!(ProtocolVersion::V1.to_string(), "V1");
-    assert_eq!(ProtocolVersion::Unknown(2).to_string(), "Unknown(2)");
+    assert_eq!(ProtocolVersion::V1.to_string(), "v1");
+    assert_eq!(ProtocolVersion::Unknown(2).to_string(), "unknown(2)");
     assert_eq!(ProtocolVersion::from(1), ProtocolVersion::V1);
     assert_eq!(ProtocolVersion::from(2), ProtocolVersion::Unknown(2));
   }

@@ -101,5 +101,6 @@ macro_rules! unit_test {
 }
 
 unit_test!(plain [
-  (u32, u32), (u32, String), (String, SocketAddrV4), (String, u32)
+  (u32, u32),
+  (u32, String), (String, SocketAddrV4), (String, u32)
 ]);

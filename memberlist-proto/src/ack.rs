@@ -105,9 +105,12 @@ impl Data for Ack {
   }
 
   fn encoded_len(&self) -> usize {
-    let sequence_number_len = 1 + self.sequence_number.encoded_len();
-    let payload_len = 1 + self.payload.encoded_len_with_length_delimited();
-    sequence_number_len + payload_len
+    let mut len = 1 + self.sequence_number.encoded_len();
+    let payload_len = self.payload.len();
+    if payload_len != 0 {
+      len += 1 + self.payload.encoded_len_with_length_delimited();
+    }
+    len
   }
 
   fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
@@ -132,13 +135,16 @@ impl Data for Ack {
       .encode(&mut buf[offset..])
       .map_err(|e| e.update(self.encoded_len(), len))?;
 
-    bail!(offset, len);
-    buf[offset] = Self::PAYLOAD_BYTE;
-    offset += 1;
-    offset += self
-      .payload
-      .encode_length_delimited(&mut buf[offset..])
-      .map_err(|e| e.update(self.encoded_len(), len))?;
+    let payload_len = self.payload.len();
+    if payload_len != 0 {
+      bail!(offset, len);
+      buf[offset] = Self::PAYLOAD_BYTE;
+      offset += 1;
+      offset += self
+        .payload
+        .encode_length_delimited(&mut buf[offset..])
+        .map_err(|e| e.update(self.encoded_len(), len))?;
+    }
 
     #[cfg(debug_assertions)]
     super::debug_assert_write_eq(offset, self.encoded_len());
@@ -192,11 +198,26 @@ impl<'a> DataRef<'a, Ack> for AckRef<'a> {
 
       match b {
         Ack::SEQUENCE_NUMBER_BYTE => {
+          if sequence_number.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "Ack",
+              "sequence_number",
+              Ack::SEQUENCE_NUMBER_TAG,
+            ));
+          }
           let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
           offset += bytes_read;
           sequence_number = Some(value);
         }
         Ack::PAYLOAD_BYTE => {
+          if payload.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "Ack",
+              "payload",
+              Ack::PAYLOAD_TAG,
+            ));
+          }
+
           let (readed, data) = <&[u8] as DataRef<Bytes>>::decode_length_delimited(&src[offset..])?;
           offset += readed;
           payload = Some(data);
@@ -273,6 +294,14 @@ impl<'a> DataRef<'a, Self> for Nack {
 
       match b {
         Self::SEQUENCE_NUMBER_BYTE => {
+          if sequence_number.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "Nack",
+              "sequence_number",
+              Self::SEQUENCE_NUMBER_TAG,
+            ));
+          }
+
           let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
           offset += bytes_read;
           sequence_number = Some(value);

@@ -190,7 +190,8 @@ impl EncodeError {
     Self::Custom(value.into())
   }
 
-  pub(crate) fn update(mut self, required: usize, remaining: usize) -> Self {
+  /// Update the error with the required and remaining buffer capacity.
+  pub fn update(mut self, required: usize, remaining: usize) -> Self {
     match self {
       Self::InsufficientBuffer {
         required: ref mut r,

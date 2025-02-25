@@ -5,20 +5,28 @@ use nodecraft::{CheapClone, Node};
 use super::{DelegateVersion, Meta, ProtocolVersion};
 
 /// State for the memberlist
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, derive_more::IsVariant)]
+#[derive(
+  Debug, Default, Copy, Clone, PartialEq, Eq, Hash, derive_more::IsVariant, derive_more::Display,
+)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[non_exhaustive]
 pub enum State {
   /// Alive state
   #[default]
+  #[display("alive")]
   Alive,
   /// Suspect state
+  #[display("suspect")]
   Suspect,
   /// Dead state
+  #[display("dead")]
   Dead,
   /// Left state
+  #[display("left")]
   Left,
   /// Unknown state (used for forwards and backwards compatibility)
+  #[display("unknown({_0})")]
   Unknown(u8),
 }
 
@@ -47,7 +55,8 @@ impl From<State> for u8 {
 }
 
 impl State {
-  /// Returns the [`State`] as a `&'static str`.
+  /// Returns the [`State`] as a str representation.
+  #[inline]
   pub fn as_str(&self) -> Cow<'static, str> {
     match self {
       Self::Alive => Cow::Borrowed("alive"),
@@ -64,12 +73,6 @@ impl State {
   #[inline]
   pub const fn metrics_array() -> [(&'static str, usize); 4] {
     [("alive", 0), ("suspect", 0), ("dead", 0), ("left", 0)]
-  }
-}
-
-impl core::fmt::Display for State {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "{}", self.as_str())
   }
 }
 

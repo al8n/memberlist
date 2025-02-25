@@ -60,16 +60,28 @@ macro_rules! bad_bail {
 
             match b {
               [< $name:upper _INCARNATION_BYTE >] => {
+                if incarnation.is_some() {
+                  return Err(DecodeError::duplicate_field(stringify!($name), "incarnation", [< $name:upper _INCARNATION_TAG >]));
+                }
+
                 let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
                 offset += bytes_read;
                 incarnation = Some(value);
               }
               b if b == $name::<I>::node_byte() => {
+                if node.is_some() {
+                  return Err(DecodeError::duplicate_field(stringify!($name), "node", $name::<I>::node_byte()));
+                }
+
                 let (bytes_read, value) = I::Ref::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
                 node = Some(value);
               }
               b if b == $name::<I>::from_byte() => {
+                if from.is_some() {
+                  return Err(DecodeError::duplicate_field(stringify!($name), "from", $name::<I>::from_byte()));
+                }
+
                 let (bytes_read, value) = I::Ref::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
                 from = Some(value);
