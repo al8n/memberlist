@@ -40,7 +40,7 @@ impl<'a> RepeatedDecoder<'a> {
     self
   }
 
-  /// Returns the number of [`PushNodeState`] in the collection.
+  /// Returns the number of elements in the collection.
   #[inline]
   pub const fn len(&self) -> usize {
     self.nums
@@ -52,7 +52,7 @@ impl<'a> RepeatedDecoder<'a> {
     self.nums == 0
   }
 
-  /// Returns an iterator over the [`PushNodeState`] in the collection.
+  /// Returns an iterator over the `D`s in the collection.
   pub fn iter<D>(&self) -> RepeatedDecoderIter<'a, D> {
     RepeatedDecoderIter {
       id: self.id,
@@ -67,7 +67,7 @@ impl<'a> RepeatedDecoder<'a> {
   }
 }
 
-/// An iterator over the [`PushNodeStateRef`] in the collection.
+/// An iterator over the `RepeatedDecoder` in the collection.
 pub struct RepeatedDecoderIter<'a, D> {
   src: &'a [u8],
   id: u8,
