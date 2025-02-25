@@ -78,3 +78,25 @@ pub(super) fn triomphe_arc<'a, T: arbitrary::Arbitrary<'a>>(
 ) -> arbitrary::Result<triomphe::Arc<[T]>> {
   u.arbitrary::<Vec<T>>().map(Into::into)
 }
+
+pub(super) fn from_u8<T: From<u8>>(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<T> {
+  Ok(T::from(u.arbitrary::<u8>()?))
+}
+
+impl<'a> Arbitrary<'a> for super::State {
+  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+    from_u8(u)
+  }
+}
+
+impl<'a> Arbitrary<'a> for super::ProtocolVersion {
+  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+    from_u8(u)
+  }
+}
+
+impl<'a> Arbitrary<'a> for super::DelegateVersion {
+  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+    from_u8(u)
+  }
+}
