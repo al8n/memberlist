@@ -127,6 +127,7 @@ quickcheck!(
   String,
   VecBytes,
   Label,
+  SecretKey,
 );
 
 quickcheck!(
@@ -306,8 +307,20 @@ fn f64_fuzzy(value: f64) -> bool {
 }
 
 #[quickcheck_macros::quickcheck]
-fn secret_key_fuzzy(_: SecretKey) -> bool {
-  true
+fn tuple_fuzzy(value: (String, String)) -> bool {
+  let mut buf = vec![0; value.encoded_len()];
+  let len = Data::encoded_len(&value);
+  let Ok(encoded_len) = Data::encode(&value, &mut buf[..len]) else {
+    return false;
+  };
+  let (bytes_read, decoded) = match <(String, String)>::decode(&buf[..encoded_len]) {
+    Ok((bytes_read, decoded)) => (bytes_read, decoded),
+    Err(e) => {
+      println!("error: {}", e);
+      return false;
+    }
+  };
+  value == decoded && len == encoded_len && len == bytes_read
 }
 
 fn run<F>(fut: F) -> F::Output

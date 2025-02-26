@@ -6,7 +6,12 @@ use aes_gcm::{
   aes::{Aes192, cipher::consts::U12},
 };
 use bytes::{Buf, BufMut};
+use const_varint::decode_u32_varint;
 use rand::Rng;
+
+use crate::{WireType, utils::merge};
+
+use super::{Data, DataRef, DecodeError, EncodeError};
 
 const NOPADDING_TAG: u8 = 1;
 const PKCS7_TAG: u8 = 2;
@@ -237,6 +242,133 @@ impl AsMut<[u8]> for SecretKey {
       Self::Aes192(k) => k,
       Self::Aes256(k) => k,
     }
+  }
+}
+
+impl<'a> DataRef<'a, Self> for SecretKey {
+  fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError>
+  where
+    Self: Sized,
+  {
+    let mut offset = 0;
+    let buf_len = buf.len();
+    let mut key = None;
+
+    while offset < buf_len {
+      match buf[offset] {
+        AES128_BYTE => {
+          if key.is_some() {
+            return Err(DecodeError::duplicate_field("SecretKey", "key", 0));
+          }
+          offset += 1;
+
+          let (bytes_read, val) = decode_u32_varint(&buf[offset..])?;
+          offset += bytes_read;
+
+          let val: [u8; 16] = buf[offset..offset + val as usize]
+            .try_into()
+            .map_err(|_| DecodeError::buffer_underflow())?;
+          offset += 16;
+          key = Some(SecretKey::Aes128(val));
+        }
+        AES192_BYTE => {
+          if key.is_some() {
+            return Err(DecodeError::duplicate_field("SecretKey", "key", 0));
+          }
+          offset += 1;
+
+          let (bytes_read, val) = decode_u32_varint(&buf[offset..])?;
+          offset += bytes_read;
+
+          let val: [u8; 24] = buf[offset..offset + val as usize]
+            .try_into()
+            .map_err(|_| DecodeError::buffer_underflow())?;
+          offset += 24;
+
+          key = Some(SecretKey::Aes192(val));
+        }
+        AES256_BYTE => {
+          if key.is_some() {
+            return Err(DecodeError::duplicate_field("SecretKey", "key", 0));
+          }
+          offset += 1;
+
+          let (bytes_read, val) = decode_u32_varint(&buf[offset..])?;
+          offset += bytes_read;
+
+          let val: [u8; 32] = buf[offset..offset + val as usize]
+            .try_into()
+            .map_err(|_| DecodeError::buffer_underflow())?;
+          offset += 32;
+
+          key = Some(SecretKey::Aes256(val));
+        }
+        b => {
+          let (wire_type, _) = super::split(b);
+          let wire_type =
+            super::WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
+          offset += super::skip(wire_type, &buf[offset..])?;
+        }
+      }
+    }
+
+    let key = key.ok_or_else(|| DecodeError::missing_field("SecretKey", "key"))?;
+    Ok((offset, key))
+  }
+}
+
+const AES128_TAG: u8 = 1;
+const AES192_TAG: u8 = 2;
+const AES256_TAG: u8 = 3;
+
+const AES128_BYTE: u8 = merge(WireType::LengthDelimited, AES128_TAG);
+const AES192_BYTE: u8 = merge(WireType::LengthDelimited, AES192_TAG);
+const AES256_BYTE: u8 = merge(WireType::LengthDelimited, AES256_TAG);
+
+impl Data for SecretKey {
+  type Ref<'a> = Self;
+
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
+  where
+    Self: Sized,
+  {
+    Ok(val)
+  }
+
+  fn encoded_len(&self) -> usize {
+    1 + const_varint::encoded_u32_varint_len(self.len() as u32) + self.len()
+  }
+
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+    let buf_len = buf.len();
+    let mut offset = 0;
+
+    if buf_len < 1 {
+      return Err(EncodeError::insufficient_buffer(
+        self.encoded_len(),
+        buf_len,
+      ));
+    }
+
+    buf[offset] = match self {
+      Self::Aes128(_) => AES128_BYTE,
+      Self::Aes192(_) => AES192_BYTE,
+      Self::Aes256(_) => AES256_BYTE,
+    };
+    offset += 1;
+
+    let self_len = self.len();
+    let len = const_varint::encode_u32_varint_to(self_len as u32, &mut buf[offset..])
+      .map_err(|_| EncodeError::insufficient_buffer(self.encoded_len(), buf_len))?;
+    offset += len;
+
+    buf[offset..offset + self_len].copy_from_slice(self.as_ref());
+    offset += self_len;
+
+    #[cfg(debug_assertions)]
+    super::debug_assert_write_eq(offset, self.encoded_len());
+
+    Ok(offset)
   }
 }
 

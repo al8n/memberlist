@@ -4,6 +4,8 @@ use const_varint::{decode_u32_varint, encode_u32_varint_to, encoded_u32_varint_l
 
 use super::WireType;
 
+pub use tuple::TupleEncoder;
+
 #[cfg(any(feature = "std", feature = "alloc"))]
 mod bytes;
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -11,6 +13,8 @@ mod nodecraft;
 mod primitives;
 #[cfg(any(feature = "std", feature = "alloc"))]
 mod string;
+
+mod tuple;
 
 /// The reference type of the data.
 pub trait DataRef<'a, D>
