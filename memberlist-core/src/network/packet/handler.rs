@@ -42,28 +42,18 @@ where
   }
 
   /// Returns the next message to process in priority order, using LIFO
-  async fn get_next_message(
-    &self,
-  ) -> Option<MessageHandoff<T::Id, T::ResolvedAddress>> {
+  async fn get_next_message(&self) -> Option<MessageHandoff<T::Id, T::ResolvedAddress>> {
     let mut queue = self.inner.queue.lock().await;
     queue.high.pop_back().or_else(|| queue.low.pop_back())
   }
 
-  async fn handle_suspect(
-    &self,
-    from: T::ResolvedAddress,
-    suspect: Suspect<T::Id>,
-  ) {
+  async fn handle_suspect(&self, from: T::ResolvedAddress, suspect: Suspect<T::Id>) {
     if let Err(e) = self.suspect_node(suspect).await {
       tracing::error!(err=%e, remote_addr = %from, "memberlist.packet: failed to suspect node");
     }
   }
 
-  async fn handle_alive(
-    &self,
-    from: T::ResolvedAddress,
-    alive: Alive<T::Id, T::ResolvedAddress>,
-  ) {
+  async fn handle_alive(&self, from: T::ResolvedAddress, alive: Alive<T::Id, T::ResolvedAddress>) {
     if let Err(e) = self.inner.transport.blocked_address(&from) {
       tracing::error!(err=%e, remote_addr = %from, "memberlist.packet: blocked alive message");
       return;
@@ -77,22 +67,14 @@ where
     self.alive_node(alive, None, false).await
   }
 
-  async fn handle_dead(
-    &self,
-    from: T::ResolvedAddress,
-    dead: Dead<T::Id>,
-  ) {
+  async fn handle_dead(&self, from: T::ResolvedAddress, dead: Dead<T::Id>) {
     let mut memberlist = self.inner.nodes.write().await;
     if let Err(e) = self.dead_node(&mut memberlist, dead).await {
       tracing::error!(err=%e, remote_addr = %from, "memberlist.packet: failed to mark node as dead");
     }
   }
 
-  async fn handle_user(
-    &self,
-    from: T::ResolvedAddress,
-    data: &[u8],
-  ) {
+  async fn handle_user(&self, from: T::ResolvedAddress, data: &[u8]) {
     if let Some(d) = self.delegate.as_ref() {
       tracing::trace!(remote_addr = %from, data=?data, "memberlist.packet: handle user data");
       d.notify_message(data.into()).await

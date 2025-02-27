@@ -30,10 +30,7 @@ use crate::{
 async fn host_memberlist<T, R>(
   t: T,
   opts: Options,
-) -> Result<
-  Memberlist<T>,
-  Error<T, VoidDelegate<T::Id, T::ResolvedAddress>>,
->
+) -> Result<Memberlist<T>, Error<T, VoidDelegate<T::Id, T::ResolvedAddress>>>
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -1806,11 +1803,8 @@ where
 }
 
 /// Unit test to test the dead node functionality
-pub async fn dead_node<T, R>(
-  t1: T,
-  t1_opts: Options,
-  test_node: Node<T::Id, T::ResolvedAddress>,
-) where
+pub async fn dead_node<T, R>(t1: T, t1_opts: Options, test_node: Node<T::Id, T::ResolvedAddress>)
+where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {

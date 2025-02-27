@@ -12,23 +12,30 @@ mod stream;
 pub use stream::*;
 
 /// `MaybeResolvedAddress` is used to represent an address that may or may not be resolved.
-pub enum MaybeResolvedAddress<T: Transport> {
+#[derive(
+  Clone,
+  Copy,
+  Debug,
+  PartialEq,
+  Eq,
+  Hash,
+  derive_more::Display,
+  derive_more::TryUnwrap,
+  derive_more::Unwrap,
+  derive_more::IsVariant,
+)]
+#[unwrap(ref, ref_mut)]
+#[try_unwrap(ref, ref_mut)]
+pub enum MaybeResolvedAddress<A, R> {
   /// The resolved address, which means that can be directly used to communicate with the remote node.
-  Resolved(T::ResolvedAddress),
+  #[display("{_0}")]
+  Resolved(R),
   /// The unresolved address, which means that need to be resolved before using it to communicate with the remote node.
-  Unresolved(T::Address),
+  #[display("{_0}")]
+  Unresolved(A),
 }
 
-impl<T: Transport> Clone for MaybeResolvedAddress<T> {
-  fn clone(&self) -> Self {
-    match self {
-      Self::Resolved(addr) => Self::Resolved(addr.clone()),
-      Self::Unresolved(addr) => Self::Unresolved(addr.clone()),
-    }
-  }
-}
-
-impl<T: Transport> CheapClone for MaybeResolvedAddress<T> {
+impl<A: CheapClone, R: CheapClone> CheapClone for MaybeResolvedAddress<A, R> {
   fn cheap_clone(&self) -> Self {
     match self {
       Self::Resolved(addr) => Self::Resolved(addr.cheap_clone()),
@@ -37,123 +44,34 @@ impl<T: Transport> CheapClone for MaybeResolvedAddress<T> {
   }
 }
 
-impl<T: Transport> core::fmt::Debug for MaybeResolvedAddress<T> {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    match self {
-      Self::Resolved(addr) => write!(f, "{addr:?}"),
-      Self::Unresolved(addr) => write!(f, "{addr:?}"),
-    }
-  }
-}
-
-impl<T: Transport> core::fmt::Display for MaybeResolvedAddress<T> {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    match self {
-      Self::Resolved(addr) => write!(f, "{addr}"),
-      Self::Unresolved(addr) => write!(f, "{addr}"),
-    }
-  }
-}
-
-impl<T: Transport> PartialEq for MaybeResolvedAddress<T> {
-  fn eq(&self, other: &Self) -> bool {
-    match (self, other) {
-      (Self::Resolved(addr1), Self::Resolved(addr2)) => addr1 == addr2,
-      (Self::Unresolved(addr1), Self::Unresolved(addr2)) => addr1 == addr2,
-      _ => false,
-    }
-  }
-}
-
-impl<T: Transport> Eq for MaybeResolvedAddress<T> {}
-
-impl<T: Transport> core::hash::Hash for MaybeResolvedAddress<T> {
-  fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-    match self {
-      Self::Resolved(addr) => addr.hash(state),
-      Self::Unresolved(addr) => addr.hash(state),
-    }
-  }
-}
-
-impl<T: Transport> MaybeResolvedAddress<T> {
+impl<A, R> MaybeResolvedAddress<A, R> {
   /// Creates a resolved address.
   #[inline]
-  pub const fn resolved(addr: T::ResolvedAddress) -> Self {
+  pub const fn resolved(addr: R) -> Self {
     Self::Resolved(addr)
   }
 
   /// Creates an unresolved address.
   #[inline]
-  pub const fn unresolved(addr: <T::Resolver as AddressResolver>::Address) -> Self {
+  pub const fn unresolved(addr: A) -> Self {
     Self::Unresolved(addr)
   }
 
-  /// Returns `true` if the address is resolved.
+  /// Converts from `&MaybeResolvedAddress<A, R>` to `MaybeResolvedAddress<&A, &R>`.
   #[inline]
-  pub fn is_resolved(&self) -> bool {
-    matches!(self, Self::Resolved(_))
-  }
-
-  /// Returns `true` if the address is unresolved.
-  #[inline]
-  pub fn is_unresolved(&self) -> bool {
-    matches!(self, Self::Unresolved(_))
-  }
-
-  /// Returns the resolved address if it's resolved, otherwise returns `None`.
-  #[inline]
-  pub fn as_resolved(&self) -> Option<&T::ResolvedAddress> {
+  pub const fn as_ref(&self) -> MaybeResolvedAddress<&A, &R> {
     match self {
-      Self::Resolved(addr) => Some(addr),
-      Self::Unresolved(_) => None,
+      Self::Resolved(addr) => MaybeResolvedAddress::Resolved(addr),
+      Self::Unresolved(addr) => MaybeResolvedAddress::Unresolved(addr),
     }
   }
 
-  /// Returns the unresolved address if it's unresolved, otherwise returns `None`.
+  /// Converts from `&mut MaybeResolvedAddress<A, R>` to `MaybeResolvedAddress<&mut A, &mut R>`.
   #[inline]
-  pub fn as_unresolved(&self) -> Option<&<T::Resolver as AddressResolver>::Address> {
+  pub const fn as_mut(&mut self) -> MaybeResolvedAddress<&mut A, &mut R> {
     match self {
-      Self::Resolved(_) => None,
-      Self::Unresolved(addr) => Some(addr),
-    }
-  }
-
-  /// Returns the resolved address if it's resolved, otherwise returns `None`.
-  #[inline]
-  pub fn as_resolved_mut(
-    &mut self,
-  ) -> Option<&mut T::ResolvedAddress> {
-    match self {
-      Self::Resolved(addr) => Some(addr),
-      Self::Unresolved(_) => None,
-    }
-  }
-
-  /// Returns the unresolved address if it's unresolved, otherwise returns `None`.
-  #[inline]
-  pub fn as_unresolved_mut(&mut self) -> Option<&mut <T::Resolver as AddressResolver>::Address> {
-    match self {
-      Self::Resolved(_) => None,
-      Self::Unresolved(addr) => Some(addr),
-    }
-  }
-
-  /// Returns the resolved address if it's resolved, otherwise returns `None`.
-  #[inline]
-  pub fn into_resolved(self) -> Option<T::ResolvedAddress> {
-    match self {
-      Self::Resolved(addr) => Some(addr),
-      Self::Unresolved(_) => None,
-    }
-  }
-
-  /// Returns the unresolved address if it's unresolved, otherwise returns `None`.
-  #[inline]
-  pub fn into_unresolved(self) -> Option<<T::Resolver as AddressResolver>::Address> {
-    match self {
-      Self::Resolved(_) => None,
-      Self::Unresolved(addr) => Some(addr),
+      Self::Resolved(addr) => MaybeResolvedAddress::Resolved(addr),
+      Self::Unresolved(addr) => MaybeResolvedAddress::Unresolved(addr),
     }
   }
 }

@@ -236,10 +236,8 @@ where
   pub(crate) id: T::Id,
   pub(crate) hot: HotData,
   pub(crate) awareness: Awareness,
-  pub(crate) broadcast: TransmitLimitedQueue<
-    MemberlistBroadcast<T::Id, T::ResolvedAddress>,
-    Arc<AtomicU32>,
-  >,
+  pub(crate) broadcast:
+    TransmitLimitedQueue<MemberlistBroadcast<T::Id, T::ResolvedAddress>, Arc<AtomicU32>>,
   pub(crate) leave_broadcast_tx: Sender<()>,
   pub(crate) leave_broadcast_rx: Receiver<()>,
   pub(crate) handles: AtomicRefCell<
@@ -339,14 +337,7 @@ where
     transport: T,
     delegate: Option<D>,
     opts: Options,
-  ) -> Result<
-    (
-      Receiver<()>,
-      T::ResolvedAddress,
-      Self,
-    ),
-    Error<T, D>,
-  > {
+  ) -> Result<(Receiver<()>, T::ResolvedAddress, Self), Error<T, D>> {
     let (handoff_tx, handoff_rx) = async_channel::bounded(1);
     let (leave_broadcast_tx, leave_broadcast_rx) = async_channel::bounded(1);
 
