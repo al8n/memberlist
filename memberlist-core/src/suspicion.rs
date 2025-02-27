@@ -14,7 +14,6 @@ use super::{
   *,
 };
 use agnostic_lite::{AfterHandle, AsyncAfterSpawner, RuntimeLite, time::Instant};
-use nodecraft::resolver::AddressResolver;
 
 #[inline]
 fn remaining_suspicion_time(
@@ -37,7 +36,7 @@ fn remaining_suspicion_time(
 pub(crate) struct Suspicioner<T, D>
 where
   T: Transport,
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
 {
   memberlist: Memberlist<T, D>,
   node: T::Id,
@@ -50,7 +49,7 @@ where
 impl<T, D> Suspicioner<T, D>
 where
   T: Transport,
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
 {
   pub(crate) fn new(
     memberlist: Memberlist<T, D>,
@@ -126,7 +125,7 @@ where
 pub(crate) struct Suspicion<T, D>
 where
   T: Transport,
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
 {
   n: Arc<AtomicU32>,
   k: u32,
@@ -141,7 +140,7 @@ where
 impl<T, D> Suspicion<T, D>
 where
   T: Transport,
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
 {
   /// Returns a after_func started with the max time, and that will drive
   /// to the min time after seeing k or more confirmations. The from node will be
@@ -182,7 +181,7 @@ where
 impl<T, D> Suspicion<T, D>
 where
   T: Transport,
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
 {
   /// Confirm registers that a possibly new peer has also determined the given
   /// node is suspect. This returns true if this was new information, and false
@@ -237,7 +236,7 @@ where
 impl<T, D> Drop for Suspicion<T, D>
 where
   T: Transport,
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
 {
   fn drop(&mut self) {
     if let Some(h) = self.handle.take() {

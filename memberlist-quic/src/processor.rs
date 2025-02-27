@@ -11,11 +11,11 @@ pub(super) struct Processor<
   pub(super) local_addr: SocketAddr,
   pub(super) acceptor: S::Acceptor,
   pub(super) packet_tx: PacketProducer<
-    <T::Resolver as AddressResolver>::ResolvedAddress,
+    T::ResolvedAddress,
     <T::Runtime as RuntimeLite>::Instant,
   >,
   pub(super) stream_tx:
-    StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Connection>,
+    StreamProducer<T::ResolvedAddress, T::Connection>,
   pub(super) shutdown_rx: async_channel::Receiver<()>,
   pub(super) timeout: Option<Duration>,
   #[cfg(feature = "metrics")]
@@ -26,7 +26,7 @@ impl<A, T, S> Processor<A, T, S>
 where
   A: AddressResolver<ResolvedAddress = SocketAddr>,
   A::Address: Send + Sync + 'static,
-  T: Transport<Resolver = A, Connection = S::Stream, Runtime = A::Runtime>,
+  T: Transport<Resolver = A, ResolvedAddress = SocketAddr, Connection = S::Stream, Runtime = A::Runtime>,
   S: StreamLayer<Runtime = A::Runtime>,
 {
   pub(super) async fn run(self) {
@@ -57,9 +57,9 @@ where
   async fn listen(
     local_addr: SocketAddr,
     mut acceptor: S::Acceptor,
-    stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Connection>,
+    stream_tx: StreamProducer<T::ResolvedAddress, T::Connection>,
     packet_tx: PacketProducer<
-      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::ResolvedAddress,
       <T::Runtime as RuntimeLite>::Instant,
     >,
     shutdown_rx: async_channel::Receiver<()>,
@@ -143,9 +143,9 @@ where
     conn: S::Connection,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
-    stream_tx: StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Connection>,
+    stream_tx: StreamProducer<T::ResolvedAddress, T::Connection>,
     packet_tx: PacketProducer<
-      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::ResolvedAddress,
       <T::Runtime as RuntimeLite>::Instant,
     >,
     timeout: Option<Duration>,
@@ -219,7 +219,7 @@ where
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
     packet_tx: &PacketProducer<
-      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::ResolvedAddress,
       <T::Runtime as RuntimeLite>::Instant,
     >,
     timeout: Option<Duration>,

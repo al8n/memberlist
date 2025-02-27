@@ -28,7 +28,7 @@ where
   S: StreamLayer<Runtime = A::Runtime>,
 {
   pub(super) stream_tx:
-    StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, S::Stream>,
+    StreamProducer<T::ResolvedAddress, S::Stream>,
   pub(super) ln: Arc<S::Listener>,
   pub(super) local_addr: SocketAddr,
   pub(super) shutdown_rx: async_channel::Receiver<()>,

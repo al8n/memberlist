@@ -197,7 +197,6 @@ mod instant_epoch {
 pub mod tests {
   use std::net::SocketAddr;
 
-  use nodecraft::resolver::AddressResolver;
   #[cfg(not(windows))]
   use parking_lot::Mutex;
   pub use paste;
@@ -363,7 +362,7 @@ pub mod tests {
     opts: Options,
   ) -> Result<Memberlist<T, D>, Error<T, D>>
   where
-    D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+    D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
     T: Transport,
   {
     crate::Memberlist::new_in(t, Some(d), opts)

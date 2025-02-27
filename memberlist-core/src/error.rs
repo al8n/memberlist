@@ -1,7 +1,7 @@
 use std::{borrow::Cow, sync::Arc};
 
 use memberlist_proto::{MessageType, ProtoEncoderError};
-use nodecraft::{Node, resolver::AddressResolver};
+use nodecraft::Node;
 use smallvec_wrapper::OneOrMore;
 use smol_str::SmolStr;
 
@@ -47,7 +47,7 @@ pub enum Error<T: Transport, D: Delegate> {
   LeaveTimeout,
   /// Returns when lost connection with a peer.
   #[error("no response from node {0}")]
-  Lost(Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
+  Lost(Node<T::Id, T::ResolvedAddress>),
   /// Delegate error
   #[error(transparent)]
   Delegate(#[from] DelegateError<D>),

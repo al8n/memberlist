@@ -80,16 +80,16 @@ impl<I, A> MessageQueue<I, A> {
 // #[viewit::viewit]
 pub(crate) struct Member<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
-  pub(crate) state: LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  pub(crate) state: LocalNodeState<T::Id, T::ResolvedAddress>,
   pub(crate) suspicion: Option<Suspicion<T, D>>,
 }
 
 impl<T, D> core::fmt::Debug for Member<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -101,10 +101,10 @@ where
 
 impl<T, D> core::ops::Deref for Member<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
-  type Target = LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>;
+  type Target = LocalNodeState<T::Id, T::ResolvedAddress>;
 
   fn deref(&self) -> &Self::Target {
     &self.state
@@ -113,17 +113,17 @@ where
 
 pub(crate) struct Members<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
-  pub(crate) local: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  pub(crate) local: Node<T::Id, T::ResolvedAddress>,
   pub(crate) nodes: TinyVec<Member<T, D>>,
   pub(crate) node_map: HashMap<T::Id, usize>,
 }
 
 impl<T, D> core::ops::Index<usize> for Members<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   type Output = Member<T, D>;
@@ -135,7 +135,7 @@ where
 
 impl<T, D> core::ops::IndexMut<usize> for Members<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   fn index_mut(&mut self, index: usize) -> &mut Self::Output {
@@ -145,7 +145,7 @@ where
 
 impl<T, D> rand::seq::IndexedRandom for Members<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   fn len(&self) -> usize {
@@ -155,7 +155,7 @@ where
 
 impl<T, D> rand::seq::SliceRandom for Members<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   fn shuffle<R>(&mut self, rng: &mut R)
@@ -200,10 +200,10 @@ where
 
 impl<T, D> Members<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
-  fn new(local: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>) -> Self {
+  fn new(local: Node<T::Id, T::ResolvedAddress>) -> Self {
     Self {
       nodes: TinyVec::new(),
       node_map: HashMap::new(),
@@ -214,7 +214,7 @@ where
 
 impl<T, D> Members<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   pub(crate) fn any_alive(&self) -> bool {
@@ -230,14 +230,14 @@ where
 
 pub(crate) struct MemberlistCore<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   pub(crate) id: T::Id,
   pub(crate) hot: HotData,
   pub(crate) awareness: Awareness,
   pub(crate) broadcast: TransmitLimitedQueue<
-    MemberlistBroadcast<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    MemberlistBroadcast<T::Id, T::ResolvedAddress>,
     Arc<AtomicU32>,
   >,
   pub(crate) leave_broadcast_tx: Sender<()>,
@@ -248,13 +248,13 @@ where
   pub(crate) probe_index: AtomicUsize,
   pub(crate) handoff_tx: Sender<()>,
   pub(crate) handoff_rx: Receiver<()>,
-  pub(crate) queue: Mutex<MessageQueue<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
+  pub(crate) queue: Mutex<MessageQueue<T::Id, T::ResolvedAddress>>,
   pub(crate) nodes: Arc<RwLock<Members<T, D>>>,
   pub(crate) ack_manager: AckManager<T::Runtime>,
   pub(crate) transport: Arc<T>,
   /// We do not call send directly, just directly drop it.
   pub(crate) shutdown_tx: Sender<()>,
-  pub(crate) advertise: <T::Resolver as AddressResolver>::ResolvedAddress,
+  pub(crate) advertise: T::ResolvedAddress,
   pub(crate) opts: Arc<Options>,
   #[cfg(feature = "encryption")]
   pub(crate) keyring: Option<Keyring>,
@@ -262,7 +262,7 @@ where
 
 impl<T, D> MemberlistCore<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   pub(crate) async fn shutdown(&self) -> Result<(), T::Error> {
@@ -284,7 +284,7 @@ where
 
 impl<T, D> Drop for MemberlistCore<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   fn drop(&mut self) {
@@ -310,7 +310,7 @@ pub struct Memberlist<
     <<T as Transport>::Resolver as AddressResolver>::ResolvedAddress,
   >,
 > where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   pub(crate) inner: Arc<MemberlistCore<T, D>>,
@@ -320,7 +320,7 @@ pub struct Memberlist<
 impl<T, D> Clone for Memberlist<T, D>
 where
   T: Transport,
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
 {
   fn clone(&self) -> Self {
     Self {
@@ -332,7 +332,7 @@ where
 
 impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   pub(crate) async fn new_in(
@@ -342,7 +342,7 @@ where
   ) -> Result<
     (
       Receiver<()>,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::ResolvedAddress,
       Self,
     ),
     Error<T, D>,
@@ -422,11 +422,11 @@ where
 // private impelementation
 impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   #[inline]
-  pub(crate) fn get_advertise(&self) -> &<T::Resolver as AddressResolver>::ResolvedAddress {
+  pub(crate) fn get_advertise(&self) -> &T::ResolvedAddress {
     &self.inner.advertise
   }
 
@@ -473,7 +473,7 @@ where
 
   pub(crate) async fn verify_protocol(
     &self,
-    _remote: &[PushNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>],
+    _remote: &[PushNodeState<T::Id, T::ResolvedAddress>],
   ) -> Result<(), Error<T, D>> {
     // TODO: now we do not need to handle this situation, because there is no update
     // on protocol.

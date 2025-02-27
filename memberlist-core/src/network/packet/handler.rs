@@ -6,7 +6,7 @@ use super::*;
 
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   /// a long running thread that processes messages received
@@ -44,14 +44,14 @@ where
   /// Returns the next message to process in priority order, using LIFO
   async fn get_next_message(
     &self,
-  ) -> Option<MessageHandoff<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>> {
+  ) -> Option<MessageHandoff<T::Id, T::ResolvedAddress>> {
     let mut queue = self.inner.queue.lock().await;
     queue.high.pop_back().or_else(|| queue.low.pop_back())
   }
 
   async fn handle_suspect(
     &self,
-    from: <T::Resolver as AddressResolver>::ResolvedAddress,
+    from: T::ResolvedAddress,
     suspect: Suspect<T::Id>,
   ) {
     if let Err(e) = self.suspect_node(suspect).await {
@@ -61,8 +61,8 @@ where
 
   async fn handle_alive(
     &self,
-    from: <T::Resolver as AddressResolver>::ResolvedAddress,
-    alive: Alive<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+    from: T::ResolvedAddress,
+    alive: Alive<T::Id, T::ResolvedAddress>,
   ) {
     if let Err(e) = self.inner.transport.blocked_address(&from) {
       tracing::error!(err=%e, remote_addr = %from, "memberlist.packet: blocked alive message");
@@ -79,7 +79,7 @@ where
 
   async fn handle_dead(
     &self,
-    from: <T::Resolver as AddressResolver>::ResolvedAddress,
+    from: T::ResolvedAddress,
     dead: Dead<T::Id>,
   ) {
     let mut memberlist = self.inner.nodes.write().await;
@@ -90,7 +90,7 @@ where
 
   async fn handle_user(
     &self,
-    from: <T::Resolver as AddressResolver>::ResolvedAddress,
+    from: T::ResolvedAddress,
     data: &[u8],
   ) {
     if let Some(d) = self.delegate.as_ref() {

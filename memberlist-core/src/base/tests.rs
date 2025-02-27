@@ -19,13 +19,13 @@ use super::*;
 
 impl<T, D> Members<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   pub(crate) fn get_state<Q>(
     &self,
     id: &Q,
-  ) -> Option<LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>
+  ) -> Option<LocalNodeState<T::Id, T::ResolvedAddress>>
   where
     T::Id: core::borrow::Borrow<Q>,
     Q: core::hash::Hash + Eq,
@@ -50,13 +50,13 @@ where
 
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   #[cfg(any(test, feature = "test"))]
   pub(crate) async fn change_node<F>(&self, id: &T::Id, f: F)
   where
-    F: Fn(&mut LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
+    F: Fn(&mut LocalNodeState<T::Id, T::ResolvedAddress>),
   {
     let mut nodes = self.inner.nodes.write().await;
     if let Some(n) = nodes.node_map.get(id).copied() {
@@ -140,7 +140,7 @@ where
 /// Unit tests for create a `Memberlist` and shutdown cleanup.
 pub async fn memberlist_shutdown_cleanup<T, F, R>(
   t1: T::Options,
-  get_transport_opts: impl FnOnce(<T::Resolver as AddressResolver>::ResolvedAddress) -> F,
+  get_transport_opts: impl FnOnce(T::ResolvedAddress) -> F,
   t1_opts: Options,
 ) where
   T: Transport<Runtime = R>,
@@ -165,7 +165,7 @@ pub async fn memberlist_shutdown_cleanup2<T, F, R>(
   t1_opts: Options,
   t2: T::Options,
   t2_opts: Options,
-  get_transport_opts: impl FnOnce(<T::Resolver as AddressResolver>::ResolvedAddress) -> F,
+  get_transport_opts: impl FnOnce(T::ResolvedAddress) -> F,
 ) where
   T: Transport<Runtime = R>,
   F: Future<Output = T::Options>,
@@ -555,7 +555,7 @@ pub async fn memberlist_node_delegate_meta<T, R>(
   let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::ResolvedAddress,
     >::with_meta("web".try_into().unwrap())),
     t1,
     t1_opts,
@@ -566,7 +566,7 @@ pub async fn memberlist_node_delegate_meta<T, R>(
   let m2 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::ResolvedAddress,
     >::with_meta("lb".try_into().unwrap())),
     t2,
     t2_opts,
@@ -640,7 +640,7 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
   let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::ResolvedAddress,
     >::with_meta("web".try_into().unwrap())),
     t1,
     t1_opts,
@@ -651,7 +651,7 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
   let m2 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::ResolvedAddress,
     >::with_meta("lb".try_into().unwrap())),
     t2,
     t2_opts,
@@ -744,7 +744,7 @@ pub async fn memberlist_user_data<T, R>(
   let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::ResolvedAddress,
     >::with_state(Bytes::from_static(
       b"something",
     ))),
@@ -763,7 +763,7 @@ pub async fn memberlist_user_data<T, R>(
   let m2 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::ResolvedAddress,
     >::with_state_and_broadcasts(
       Bytes::from_static(b"my state"), bcasts.clone()
     )),
@@ -839,7 +839,7 @@ pub async fn memberlist_send<T, R>(
   let m1 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::ResolvedAddress,
     >::new()),
     t1,
     t1_opts
@@ -852,7 +852,7 @@ pub async fn memberlist_send<T, R>(
   let m2 = Memberlist::<T, _>::with_delegate(
     CompositeDelegate::new().with_node_delegate(MockDelegate::<
       T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
+      T::ResolvedAddress,
     >::new()),
     t2,
     t2_opts
@@ -1192,7 +1192,7 @@ pub async fn memberlist_send_reliable<T, R>(
 pub async fn wait_until_size<T, D, R>(m: &Memberlist<T, D>, expected: usize)
 where
   T: Transport<Runtime = R>,
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   R: RuntimeLite,
 {
   retry::<R, _, _>(30, Duration::from_millis(500), || async {

@@ -79,7 +79,7 @@ impl<T: Transport> core::hash::Hash for MaybeResolvedAddress<T> {
 impl<T: Transport> MaybeResolvedAddress<T> {
   /// Creates a resolved address.
   #[inline]
-  pub const fn resolved(addr: <T::Resolver as AddressResolver>::ResolvedAddress) -> Self {
+  pub const fn resolved(addr: T::ResolvedAddress) -> Self {
     Self::Resolved(addr)
   }
 
@@ -103,7 +103,7 @@ impl<T: Transport> MaybeResolvedAddress<T> {
 
   /// Returns the resolved address if it's resolved, otherwise returns `None`.
   #[inline]
-  pub fn as_resolved(&self) -> Option<&<T::Resolver as AddressResolver>::ResolvedAddress> {
+  pub fn as_resolved(&self) -> Option<&T::ResolvedAddress> {
     match self {
       Self::Resolved(addr) => Some(addr),
       Self::Unresolved(_) => None,
@@ -123,7 +123,7 @@ impl<T: Transport> MaybeResolvedAddress<T> {
   #[inline]
   pub fn as_resolved_mut(
     &mut self,
-  ) -> Option<&mut <T::Resolver as AddressResolver>::ResolvedAddress> {
+  ) -> Option<&mut T::ResolvedAddress> {
     match self {
       Self::Resolved(addr) => Some(addr),
       Self::Unresolved(_) => None,
@@ -141,7 +141,7 @@ impl<T: Transport> MaybeResolvedAddress<T> {
 
   /// Returns the resolved address if it's resolved, otherwise returns `None`.
   #[inline]
-  pub fn into_resolved(self) -> Option<<T::Resolver as AddressResolver>::ResolvedAddress> {
+  pub fn into_resolved(self) -> Option<T::ResolvedAddress> {
     match self {
       Self::Resolved(addr) => Some(addr),
       Self::Unresolved(_) => None,
