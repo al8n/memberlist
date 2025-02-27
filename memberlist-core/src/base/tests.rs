@@ -254,7 +254,7 @@ pub async fn memberlist_join_with_labels<F, T, R>(
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
 
   // Create a third node that uses no label
-  let m3 = Memberlist::new(get_transport(3, Label::empty()).await, Options::lan())
+  let m3 = Memberlist::<T, _>::new(get_transport(3, Label::empty()).await, Options::lan())
     .await
     .unwrap();
   m3.join(target.clone()).await.unwrap_err();
@@ -276,7 +276,7 @@ pub async fn memberlist_join_with_labels<F, T, R>(
 
   // Create a fourth node that uses a mismatched label
   let label = Label::try_from("not-blah").unwrap();
-  let m4 = Memberlist::new(
+  let m4 = Memberlist::<T, _>::new(
     get_transport(4, label.clone()).await,
     Options::lan().with_label(label),
   )
