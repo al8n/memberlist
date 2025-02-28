@@ -11,8 +11,7 @@ use crate::{
     AliveDelegate, CompositeDelegate, ConflictDelegate, MergeDelegate, PingDelegate,
     mock::MockDelegate,
   },
-  proto::{Data, Label, NodeState, State},
-  transport::MaybeResolvedAddress,
+  proto::{Data, Label, MaybeResolvedAddress, NodeState, State},
 };
 
 use super::*;

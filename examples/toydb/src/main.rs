@@ -8,8 +8,8 @@ use memberlist::{
   agnostic::tokio::TokioRuntime,
   bytes::Bytes,
   delegate::{CompositeDelegate, NodeDelegate},
-  net::{MaybeResolvedAddress, NetTransportOptions, Node, stream_layer::tcp::Tcp},
-  proto::{HostAddr, Meta, NodeId},
+  net::{NetTransportOptions, Node, stream_layer::tcp::Tcp},
+  proto::{HostAddr, MaybeResolvedAddress, Meta, NodeId},
   tokio::TokioTcpMemberlist,
   transport::resolver::dns::DnsResolver,
 };

@@ -63,6 +63,7 @@ pub use compression::*;
 pub use encryption::*;
 
 pub use ack::*;
+pub use address::*;
 pub use alive::*;
 pub use bad_state::*;
 pub use bytes;
@@ -80,6 +81,7 @@ pub use smallvec_wrapper::*;
 pub use version::*;
 
 mod ack;
+mod address;
 mod alive;
 mod bad_state;
 mod cidr_policy;

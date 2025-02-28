@@ -14,9 +14,9 @@ use super::{
   delegate::{Delegate, VoidDelegate},
   error::Error,
   network::META_MAX_SIZE,
-  proto::{Alive, Dead, Message, Meta, NodeState, Ping, SmallVec},
+  proto::{Alive, Dead, MaybeResolvedAddress, Message, Meta, NodeState, Ping, SmallVec},
   state::AckMessage,
-  transport::{AddressResolver, CheapClone, MaybeResolvedAddress, Node, Transport},
+  transport::{AddressResolver, CheapClone, Node, Transport},
 };
 
 impl<T, D> Memberlist<T, D>

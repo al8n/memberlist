@@ -4,8 +4,8 @@ use core::{
 };
 use memberlist_proto::{
   Ack, Alive, ChecksumAlgorithm, CompressAlgorithm, Data, Dead, EncryptionAlgorithm, ErrorResponse,
-  IndirectPing, Label, Message, MessagesDecoder, Nack, Ping, ProtoDecoder, ProtoEncoder,
-  ProtoEncoderError, PushNodeState, PushPull, SecretKey, Suspect,
+  IndirectPing, Label, MaybeResolvedAddress, Message, MessagesDecoder, Nack, Ping, ProtoDecoder,
+  ProtoEncoder, ProtoEncoderError, PushNodeState, PushPull, SecretKey, Suspect,
 };
 use nodecraft::{Domain, HostAddr, Node, NodeId};
 use peekable::future::AsyncPeekExt;
@@ -193,6 +193,12 @@ quickcheck!(
     (IpAddr, String),
     (String, String),
     (String, SocketAddrV4),
+  ],
+  MaybeResolvedAddress[
+    (String, String),
+    (String, SocketAddrV4),
+    (SocketAddrV4, SocketAddrV4),
+    (u32, SocketAddrV4),
   ],
   Alive[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
   Ping[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],

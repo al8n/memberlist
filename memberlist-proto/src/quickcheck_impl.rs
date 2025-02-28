@@ -2,8 +2,8 @@ use quickcheck::{Arbitrary, Gen};
 use triomphe::Arc;
 
 use super::{
-  Ack, Alive, Dead, DelegateVersion, ErrorResponse, IndirectPing, Label, Meta, Nack, NodeState,
-  Ping, ProtocolVersion, PushNodeState, PushPull, SecretKey, State, Suspect,
+  Ack, Alive, Dead, DelegateVersion, ErrorResponse, IndirectPing, Label, MaybeResolvedAddress,
+  Meta, Nack, NodeState, Ping, ProtocolVersion, PushNodeState, PushPull, SecretKey, State, Suspect,
   proto::{Message, MessageType},
 };
 
@@ -20,6 +20,20 @@ impl Arbitrary for Nack {
   fn arbitrary(g: &mut Gen) -> Self {
     Self {
       sequence_number: u32::arbitrary(g),
+    }
+  }
+}
+
+impl<A, R> Arbitrary for MaybeResolvedAddress<A, R>
+where
+  A: Arbitrary,
+  R: Arbitrary,
+{
+  fn arbitrary(g: &mut Gen) -> Self {
+    if bool::arbitrary(g) {
+      Self::Resolved(Arbitrary::arbitrary(g))
+    } else {
+      Self::Unresolved(Arbitrary::arbitrary(g))
     }
   }
 }
