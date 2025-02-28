@@ -4,8 +4,8 @@ use core::{
 };
 use memberlist_proto::{
   Ack, Alive, ChecksumAlgorithm, CompressAlgorithm, Data, Dead, EncryptionAlgorithm, ErrorResponse,
-  IndirectPing, Label, Message, MessagesDecoder, Nack, Ping, ProtoDecoder, ProtoEncoder,
-  ProtoEncoderError, PushNodeState, PushPull, SecretKey, Suspect,
+  IndirectPing, Label, MaybeResolvedAddress, Message, MessagesDecoder, Nack, Ping, ProtoDecoder,
+  ProtoEncoder, ProtoEncoderError, PushNodeState, PushPull, SecretKey, Suspect,
 };
 use nodecraft::{Domain, HostAddr, Node, NodeId};
 use peekable::future::AsyncPeekExt;
@@ -127,6 +127,7 @@ quickcheck!(
   String,
   VecBytes,
   Label,
+  SecretKey,
 );
 
 quickcheck!(
@@ -193,12 +194,32 @@ quickcheck!(
     (String, String),
     (String, SocketAddrV4),
   ],
+  MaybeResolvedAddress[
+    (String, String),
+    (String, SocketAddrV4),
+    (SocketAddrV4, SocketAddrV4),
+    (u32, SocketAddrV4),
+  ],
   Alive[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
   Ping[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
   IndirectPing[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
   PushNodeState[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
-  PushPull[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
-  Message[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
+  PushPull[
+    (u32, SocketAddrV4),
+    (u32, String),
+    (IpAddr, SocketAddrV4),
+    (IpAddr, String),
+    (String, String),
+    (String, SocketAddrV4),
+  ],
+  Message[
+    (u32, SocketAddrV4),
+    (u32, String),
+    (IpAddr, SocketAddrV4),
+    (IpAddr, String),
+    (String, String),
+    (String, SocketAddrV4),
+  ],
   Messages[(u32, SocketAddrV4), (u32, String), (IpAddr, SocketAddrV4), (IpAddr, String), (String, String), (String, SocketAddrV4)],
 );
 
@@ -292,8 +313,20 @@ fn f64_fuzzy(value: f64) -> bool {
 }
 
 #[quickcheck_macros::quickcheck]
-fn secret_key_fuzzy(_: SecretKey) -> bool {
-  true
+fn tuple_fuzzy(value: (String, String)) -> bool {
+  let mut buf = vec![0; value.encoded_len()];
+  let len = Data::encoded_len(&value);
+  let Ok(encoded_len) = Data::encode(&value, &mut buf[..len]) else {
+    return false;
+  };
+  let (bytes_read, decoded) = match <(String, String)>::decode(&buf[..encoded_len]) {
+    Ok((bytes_read, decoded)) => (bytes_read, decoded),
+    Err(e) => {
+      println!("error: {}", e);
+      return false;
+    }
+  };
+  value == decoded && len == encoded_len && len == bytes_read
 }
 
 fn run<F>(fut: F) -> F::Output

@@ -11,21 +11,17 @@ use crate::{
     AliveDelegate, CompositeDelegate, ConflictDelegate, MergeDelegate, PingDelegate,
     mock::MockDelegate,
   },
-  proto::{Data, Label, NodeState, State},
-  transport::MaybeResolvedAddress,
+  proto::{Data, Label, MaybeResolvedAddress, NodeState, State},
 };
 
 use super::*;
 
 impl<T, D> Members<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
-  pub(crate) fn get_state<Q>(
-    &self,
-    id: &Q,
-  ) -> Option<LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>
+  pub(crate) fn get_state<Q>(&self, id: &Q) -> Option<LocalNodeState<T::Id, T::ResolvedAddress>>
   where
     T::Id: core::borrow::Borrow<Q>,
     Q: core::hash::Hash + Eq,
@@ -50,13 +46,13 @@ where
 
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   #[cfg(any(test, feature = "test"))]
   pub(crate) async fn change_node<F>(&self, id: &T::Id, f: F)
   where
-    F: Fn(&mut LocalNodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>),
+    F: Fn(&mut LocalNodeState<T::Id, T::ResolvedAddress>),
   {
     let mut nodes = self.inner.nodes.write().await;
     if let Some(n) = nodes.node_map.get(id).copied() {
@@ -140,7 +136,7 @@ where
 /// Unit tests for create a `Memberlist` and shutdown cleanup.
 pub async fn memberlist_shutdown_cleanup<T, F, R>(
   t1: T::Options,
-  get_transport_opts: impl FnOnce(<T::Resolver as AddressResolver>::ResolvedAddress) -> F,
+  get_transport_opts: impl FnOnce(T::ResolvedAddress) -> F,
   t1_opts: Options,
 ) where
   T: Transport<Runtime = R>,
@@ -165,7 +161,7 @@ pub async fn memberlist_shutdown_cleanup2<T, F, R>(
   t1_opts: Options,
   t2: T::Options,
   t2_opts: Options,
-  get_transport_opts: impl FnOnce(<T::Resolver as AddressResolver>::ResolvedAddress) -> F,
+  get_transport_opts: impl FnOnce(T::ResolvedAddress) -> F,
 ) where
   T: Transport<Runtime = R>,
   F: Future<Output = T::Options>,
@@ -240,7 +236,7 @@ pub async fn memberlist_join_with_labels<F, T, R>(
   .await
   .unwrap();
 
-  let target = Node::<T::Id, MaybeResolvedAddress<T>>::new(
+  let target = Node::<T::Id, MaybeResolvedAddress<T::Address, T::ResolvedAddress>>::new(
     m1.local_id().cheap_clone(),
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
@@ -257,7 +253,7 @@ pub async fn memberlist_join_with_labels<F, T, R>(
   assert_eq!(m2m, 2, "expected 2 members, got {}", m2m);
 
   // Create a third node that uses no label
-  let m3 = Memberlist::new(get_transport(3, Label::empty()).await, Options::lan())
+  let m3 = Memberlist::<T, _>::new(get_transport(3, Label::empty()).await, Options::lan())
     .await
     .unwrap();
   m3.join(target.clone()).await.unwrap_err();
@@ -279,7 +275,7 @@ pub async fn memberlist_join_with_labels<F, T, R>(
 
   // Create a fourth node that uses a mismatched label
   let label = Label::try_from("not-blah").unwrap();
-  let m4 = Memberlist::new(
+  let m4 = Memberlist::<T, _>::new(
     get_transport(4, label.clone()).await,
     Options::lan().with_label(label),
   )
@@ -553,10 +549,9 @@ pub async fn memberlist_node_delegate_meta<T, R>(
   R: RuntimeLite,
 {
   let m1 = Memberlist::<T, _>::with_delegate(
-    CompositeDelegate::new().with_node_delegate(MockDelegate::<
-      T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
-    >::with_meta("web".try_into().unwrap())),
+    CompositeDelegate::new().with_node_delegate(
+      MockDelegate::<T::Id, T::ResolvedAddress>::with_meta("web".try_into().unwrap()),
+    ),
     t1,
     t1_opts,
   )
@@ -564,10 +559,9 @@ pub async fn memberlist_node_delegate_meta<T, R>(
   .unwrap();
 
   let m2 = Memberlist::<T, _>::with_delegate(
-    CompositeDelegate::new().with_node_delegate(MockDelegate::<
-      T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
-    >::with_meta("lb".try_into().unwrap())),
+    CompositeDelegate::new().with_node_delegate(
+      MockDelegate::<T::Id, T::ResolvedAddress>::with_meta("lb".try_into().unwrap()),
+    ),
     t2,
     t2_opts,
   )
@@ -638,10 +632,9 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
   R: RuntimeLite,
 {
   let m1 = Memberlist::<T, _>::with_delegate(
-    CompositeDelegate::new().with_node_delegate(MockDelegate::<
-      T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
-    >::with_meta("web".try_into().unwrap())),
+    CompositeDelegate::new().with_node_delegate(
+      MockDelegate::<T::Id, T::ResolvedAddress>::with_meta("web".try_into().unwrap()),
+    ),
     t1,
     t1_opts,
   )
@@ -649,10 +642,9 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
   .unwrap();
 
   let m2 = Memberlist::<T, _>::with_delegate(
-    CompositeDelegate::new().with_node_delegate(MockDelegate::<
-      T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
-    >::with_meta("lb".try_into().unwrap())),
+    CompositeDelegate::new().with_node_delegate(
+      MockDelegate::<T::Id, T::ResolvedAddress>::with_meta("lb".try_into().unwrap()),
+    ),
     t2,
     t2_opts,
   )
@@ -742,12 +734,9 @@ pub async fn memberlist_user_data<T, R>(
   R: RuntimeLite,
 {
   let m1 = Memberlist::<T, _>::with_delegate(
-    CompositeDelegate::new().with_node_delegate(MockDelegate::<
-      T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
-    >::with_state(Bytes::from_static(
-      b"something",
-    ))),
+    CompositeDelegate::new().with_node_delegate(
+      MockDelegate::<T::Id, T::ResolvedAddress>::with_state(Bytes::from_static(b"something")),
+    ),
     t1,
     t1_opts
       .with_gossip_interval(Duration::from_millis(100))
@@ -761,12 +750,12 @@ pub async fn memberlist_user_data<T, R>(
     .collect::<TinyVec<_>>();
 
   let m2 = Memberlist::<T, _>::with_delegate(
-    CompositeDelegate::new().with_node_delegate(MockDelegate::<
-      T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
-    >::with_state_and_broadcasts(
-      Bytes::from_static(b"my state"), bcasts.clone()
-    )),
+    CompositeDelegate::new().with_node_delegate(
+      MockDelegate::<T::Id, T::ResolvedAddress>::with_state_and_broadcasts(
+        Bytes::from_static(b"my state"),
+        bcasts.clone(),
+      ),
+    ),
     t2,
     t2_opts
       .with_gossip_interval(Duration::from_millis(100))
@@ -837,10 +826,7 @@ pub async fn memberlist_send<T, R>(
   R: RuntimeLite,
 {
   let m1 = Memberlist::<T, _>::with_delegate(
-    CompositeDelegate::new().with_node_delegate(MockDelegate::<
-      T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
-    >::new()),
+    CompositeDelegate::new().with_node_delegate(MockDelegate::<T::Id, T::ResolvedAddress>::new()),
     t1,
     t1_opts
       .with_gossip_interval(Duration::from_millis(1))
@@ -850,10 +836,7 @@ pub async fn memberlist_send<T, R>(
   .unwrap();
 
   let m2 = Memberlist::<T, _>::with_delegate(
-    CompositeDelegate::new().with_node_delegate(MockDelegate::<
-      T::Id,
-      <T::Resolver as AddressResolver>::ResolvedAddress,
-    >::new()),
+    CompositeDelegate::new().with_node_delegate(MockDelegate::<T::Id, T::ResolvedAddress>::new()),
     t2,
     t2_opts
       .with_gossip_interval(Duration::from_millis(1))
@@ -1192,7 +1175,7 @@ pub async fn memberlist_send_reliable<T, R>(
 pub async fn wait_until_size<T, D, R>(m: &Memberlist<T, D>, expected: usize)
 where
   T: Transport<Runtime = R>,
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   R: RuntimeLite,
 {
   retry::<R, _, _>(30, Duration::from_millis(500), || async {

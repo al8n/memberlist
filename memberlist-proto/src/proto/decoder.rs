@@ -28,8 +28,10 @@ use crate::{ChecksumAlgorithm, ChecksumError};
 use super::*;
 
 pub use messages_decoder::*;
+pub use repeated_decoder::*;
 
 mod messages_decoder;
+mod repeated_decoder;
 
 /// A protocol decoder.
 ///

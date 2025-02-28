@@ -10,8 +10,6 @@ use futures::{
   future::FutureExt,
   stream::{FuturesUnordered, Stream},
 };
-use nodecraft::resolver::AddressResolver;
-
 mod packet;
 mod stream;
 
@@ -23,12 +21,12 @@ const MAX_PUSH_PULL_REQUESTS: u32 = 128;
 
 impl<D, T> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   pub(crate) async fn send_ping_and_wait_for_ack(
     &self,
-    target: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    target: &T::ResolvedAddress,
     ping: Ping<T::Id, T::ResolvedAddress>,
     deadline: <T::Runtime as RuntimeLite>::Instant,
   ) -> Result<bool, Error<T, D>> {
@@ -316,7 +314,7 @@ where
 
   pub(crate) async fn read_message(
     &self,
-    from: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    from: &T::ResolvedAddress,
     reader: &mut <T::Connection as Connection>::Reader,
   ) -> Result<Bytes, Error<T, D>> {
     self

@@ -14,14 +14,14 @@ use super::{
   delegate::{Delegate, VoidDelegate},
   error::Error,
   network::META_MAX_SIZE,
-  proto::{Alive, Dead, Message, Meta, NodeState, Ping, SmallVec},
+  proto::{Alive, Dead, MaybeResolvedAddress, Message, Meta, NodeState, Ping, SmallVec},
   state::AckMessage,
-  transport::{AddressResolver, CheapClone, MaybeResolvedAddress, Node, Transport},
+  transport::{AddressResolver, CheapClone, Node, Transport},
 };
 
 impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   /// Returns the local node ID.
@@ -38,13 +38,13 @@ where
 
   /// Returns a [`Node`] with the local id and the advertise address of local node.
   #[inline]
-  pub fn advertise_node(&self) -> Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress> {
+  pub fn advertise_node(&self) -> Node<T::Id, T::ResolvedAddress> {
     Node::new(self.inner.id.clone(), self.inner.advertise.clone())
   }
 
   /// Returns the advertise address of local node.
   #[inline]
-  pub fn advertise_address(&self) -> &<T::Resolver as AddressResolver>::ResolvedAddress {
+  pub fn advertise_address(&self) -> &T::ResolvedAddress {
     &self.inner.advertise
   }
 
@@ -74,9 +74,7 @@ where
 
   /// Returns the local node instance state.
   #[inline]
-  pub async fn local_state(
-    &self,
-  ) -> Option<Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
+  pub async fn local_state(&self) -> Option<Arc<NodeState<T::Id, T::ResolvedAddress>>> {
     let nodes = self.inner.nodes.read().await;
     nodes
       .node_map
@@ -85,10 +83,7 @@ where
   }
 
   /// Returns the node state of the given id. (if any).
-  pub async fn by_id(
-    &self,
-    id: &T::Id,
-  ) -> Option<Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
+  pub async fn by_id(&self, id: &T::Id) -> Option<Arc<NodeState<T::Id, T::ResolvedAddress>>> {
     let members = self.inner.nodes.read().await;
 
     members
@@ -99,9 +94,7 @@ where
 
   /// Returns a list of all known nodes.
   #[inline]
-  pub async fn members(
-    &self,
-  ) -> SmallVec<Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
+  pub async fn members(&self) -> SmallVec<Arc<NodeState<T::Id, T::ResolvedAddress>>> {
     self
       .inner
       .nodes
@@ -120,9 +113,7 @@ where
   }
 
   /// Returns a list of all known nodes that are online.
-  pub async fn online_members(
-    &self,
-  ) -> SmallVec<Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
+  pub async fn online_members(&self) -> SmallVec<Arc<NodeState<T::Id, T::ResolvedAddress>>> {
     self
       .inner
       .nodes
@@ -151,8 +142,8 @@ where
   /// Returns a list of all known nodes that match the given predicate.
   pub async fn members_by(
     &self,
-    mut f: impl FnMut(&NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>) -> bool,
-  ) -> SmallVec<Arc<NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>> {
+    mut f: impl FnMut(&NodeState<T::Id, T::ResolvedAddress>) -> bool,
+  ) -> SmallVec<Arc<NodeState<T::Id, T::ResolvedAddress>>> {
     self
       .inner
       .nodes
@@ -168,7 +159,7 @@ where
   /// Returns the number of members match the given predicate.
   pub async fn num_members_by(
     &self,
-    mut f: impl FnMut(&NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>) -> bool,
+    mut f: impl FnMut(&NodeState<T::Id, T::ResolvedAddress>) -> bool,
   ) -> usize {
     self
       .inner
@@ -184,7 +175,7 @@ where
   /// Returns a list of map result on all known members that match the given predicate.
   pub async fn members_map_by<O>(
     &self,
-    mut f: impl FnMut(&NodeState<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>) -> Option<O>,
+    mut f: impl FnMut(&NodeState<T::Id, T::ResolvedAddress>) -> Option<O>,
   ) -> SmallVec<O> {
     self
       .inner
@@ -207,15 +198,14 @@ where
   pub async fn new(
     transport_options: T::Options,
     opts: Options,
-  ) -> Result<Self, Error<T, VoidDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>>
-  {
+  ) -> Result<Self, Error<T, VoidDelegate<T::Id, T::ResolvedAddress>>> {
     Self::create(None, transport_options, opts).await
   }
 }
 
 impl<T, D> Memberlist<T, D>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport,
 {
   /// Create a new memberlist with the given transport, delegate and options.
@@ -325,8 +315,8 @@ where
   /// Returns the node if successfully joined, or an error if the node could not be reached.
   pub async fn join(
     &self,
-    node: Node<T::Id, MaybeResolvedAddress<T>>,
-  ) -> Result<Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>, Error<T, D>> {
+    node: Node<T::Id, MaybeResolvedAddress<T::Address, T::ResolvedAddress>>,
+  ) -> Result<Node<T::Id, T::ResolvedAddress>, Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
@@ -355,7 +345,7 @@ where
   /// On error, returns a list of nodes are successfully joined with resolved addresses and the error.
   pub async fn join_many(
     &self,
-    existing: impl Iterator<Item = Node<T::Id, MaybeResolvedAddress<T>>>,
+    existing: impl Iterator<Item = Node<T::Id, MaybeResolvedAddress<T::Address, T::ResolvedAddress>>>,
   ) -> Result<
     SmallVec<Node<T::Id, T::ResolvedAddress>>,
     (SmallVec<Node<T::Id, T::ResolvedAddress>>, Error<T, D>),
@@ -382,7 +372,7 @@ where
                     "memberlist: failed to resolve address {}",
                     addr,
                   );
-                  return Err((Node::new(id, MaybeResolvedAddress::<T>::unresolved(addr)), Error::<T, D>::transport(e)))
+                  return Err((Node::new(id, MaybeResolvedAddress::<T::Address, T::ResolvedAddress>::unresolved(addr)), Error::<T, D>::transport(e)))
                 }
               }
             }
@@ -493,11 +483,7 @@ where
   ///
   /// See also [`send_reliable`](Memberlist::send_reliable).
   #[inline]
-  pub async fn send(
-    &self,
-    to: &<T::Resolver as AddressResolver>::ResolvedAddress,
-    msg: Bytes,
-  ) -> Result<(), Error<T, D>> {
+  pub async fn send(&self, to: &T::ResolvedAddress, msg: Bytes) -> Result<(), Error<T, D>> {
     self.send_many(to, std::iter::once(msg)).await
   }
 
@@ -508,7 +494,7 @@ where
   #[inline]
   pub async fn send_many(
     &self,
-    to: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    to: &T::ResolvedAddress,
     msgs: impl Iterator<Item = Bytes>,
   ) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
@@ -535,7 +521,7 @@ where
   #[inline]
   pub async fn send_reliable(
     &self,
-    to: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    to: &T::ResolvedAddress,
     msg: Bytes,
   ) -> Result<(), Error<T, D>> {
     self.send_many_reliable(to, std::iter::once(msg)).await
@@ -548,7 +534,7 @@ where
   #[inline]
   pub async fn send_many_reliable(
     &self,
-    to: &<T::Resolver as AddressResolver>::ResolvedAddress,
+    to: &T::ResolvedAddress,
     msgs: impl Iterator<Item = Bytes>,
   ) -> Result<(), Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
@@ -560,10 +546,7 @@ where
   }
 
   /// Initiates a ping to the node with the specified node.
-  pub async fn ping(
-    &self,
-    node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-  ) -> Result<Duration, Error<T, D>> {
+  pub async fn ping(&self, node: Node<T::Id, T::ResolvedAddress>) -> Result<Duration, Error<T, D>> {
     // Prepare a ping message and setup an ack handler.
     let self_addr = self.get_advertise();
     let ping = Ping::new(

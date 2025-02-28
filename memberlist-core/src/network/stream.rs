@@ -63,16 +63,14 @@ where
     &self,
     pp: <PushPull<T::Id, T::ResolvedAddress> as Data>::Ref<'_>,
   ) -> Result<(), Error<T, D>> {
-    let states = pp.states();
-    let num_states = states.len();
-    let iter = states.iter::<T::Id, T::ResolvedAddress>();
-    let mut states = SmallVec::with_capacity(num_states);
+    let states = pp
+      .states()
+      .iter::<PushNodeState<T::Id, T::ResolvedAddress>>()
+      .map(|res| res.and_then(Data::from_ref))
+      .collect::<Result<SmallVec<_>, DecodeError>>()?
+      .into_inner();
 
-    for state in iter {
-      states.push(state.and_then(<PushNodeState<T::Id, T::ResolvedAddress> as Data>::from_ref)?);
-    }
-
-    let states = match states.into_inner() {
+    let states = match states {
       Either::Left(states) => Arc::from_iter(states),
       Either::Right(e) => Arc::from(e),
     };

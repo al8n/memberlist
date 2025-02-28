@@ -1,4 +1,4 @@
-use super::{DelegateVersion, Label, Meta, ProtocolVersion, State};
+use super::{Label, Meta};
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 
@@ -10,24 +10,6 @@ impl<'a> Arbitrary<'a> for Meta {
       buf.push(u.arbitrary::<u8>()?);
     }
     Ok(Meta::try_from(buf).unwrap())
-  }
-}
-
-impl<'a> Arbitrary<'a> for State {
-  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
-    Ok(u.arbitrary::<u8>()?.into())
-  }
-}
-
-impl<'a> Arbitrary<'a> for DelegateVersion {
-  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
-    Ok(u.arbitrary::<u8>()?.into())
-  }
-}
-
-impl<'a> Arbitrary<'a> for ProtocolVersion {
-  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
-    Ok(u.arbitrary::<u8>()?.into())
   }
 }
 
@@ -63,6 +45,13 @@ impl<'a> Arbitrary<'a> for super::EncryptionAlgorithm {
   }
 }
 
+#[cfg(feature = "encryption")]
+impl<'a> Arbitrary<'a> for super::SecretKeys {
+  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+    Ok(u.arbitrary::<Vec<super::SecretKey>>()?.into())
+  }
+}
+
 impl<'a> Arbitrary<'a> for Label {
   fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
     let mut s = String::new();
@@ -88,4 +77,26 @@ pub(super) fn triomphe_arc<'a, T: arbitrary::Arbitrary<'a>>(
   u: &mut arbitrary::Unstructured<'a>,
 ) -> arbitrary::Result<triomphe::Arc<[T]>> {
   u.arbitrary::<Vec<T>>().map(Into::into)
+}
+
+pub(super) fn from_u8<T: From<u8>>(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<T> {
+  Ok(T::from(u.arbitrary::<u8>()?))
+}
+
+impl<'a> Arbitrary<'a> for super::State {
+  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+    from_u8(u)
+  }
+}
+
+impl<'a> Arbitrary<'a> for super::ProtocolVersion {
+  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+    from_u8(u)
+  }
+}
+
+impl<'a> Arbitrary<'a> for super::DelegateVersion {
+  fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+    from_u8(u)
+  }
 }
