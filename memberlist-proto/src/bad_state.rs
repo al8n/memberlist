@@ -89,7 +89,7 @@ macro_rules! bad_bail {
               b => {
                 let (wire_type, _) = super::split(b);
                 let wire_type = WireType::try_from(wire_type)
-                  .map_err(DecodeError::unknown_wire_type)?;
+                  .map_err(|v| DecodeError::unknown_wire_type(stringify!($name), v))?;
                 offset += super::skip(wire_type, &src[offset..])?;
               }
             }

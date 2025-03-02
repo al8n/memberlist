@@ -102,7 +102,8 @@ const _: () = {
         }
         b => {
           let (wire_type, tag) = split(b);
-          WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
+          WireType::try_from(wire_type)
+            .map_err(|v| DecodeError::unknown_wire_type("HostAddr", v))?;
 
           Err(DecodeError::unknown_tag("HostAddr", tag))
         }
@@ -205,8 +206,8 @@ const _: () = {
           }
           b => {
             let (wire_type, _) = split(b);
-            let wire_type =
-              WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
+            let wire_type = WireType::try_from(wire_type)
+              .map_err(|v| DecodeError::unknown_wire_type("Node", v))?;
             offset += skip(wire_type, &src[offset..])?;
           }
         }

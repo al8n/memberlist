@@ -110,7 +110,12 @@ where
         let (wire_type, _) = split(b);
         let wire_type = match WireType::try_from(wire_type) {
           Ok(wire_type) => wire_type,
-          Err(wt) => return Some(Err(DecodeError::unknown_wire_type(wt))),
+          Err(wt) => {
+            return Some(Err(DecodeError::unknown_wire_type(
+              core::any::type_name::<Self>(),
+              wt,
+            )));
+          }
         };
         *current_offset += match skip(wire_type, &self.src[*current_offset..]) {
           Ok(offset) => offset,
