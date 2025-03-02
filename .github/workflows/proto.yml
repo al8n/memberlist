@@ -1,0 +1,64 @@
+name: proto
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'COPYRIGHT'
+      - 'LICENSE*'
+      - '**.md'
+      - '**.txt'
+      - 'art'
+  pull_request:
+    paths-ignore:
+      - 'README.md'
+      - 'COPYRIGHT'
+      - 'LICENSE*'
+      - '**.md'
+      - '**.txt'
+      - 'art'
+  workflow_dispatch:
+  schedule: [cron: "0 1 */7 * *"]
+
+jobs:
+  test:
+    name: ${{ matrix.os }} - ${{ matrix.runtime }} - ${{ matrix.stream_layer }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: 
+          - ubuntu-latest
+          # - macos-latest,
+          # - windows-latest
+        runtime: [tokio, async-std, smol]
+        stream_layer: [tls, tcp]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update stable && rustup default stable
+          rustup component add clippy
+          rustup component add rustfmt
+
+      - name: Run Proto Tests (With Rayon)
+        run: |
+          cargo test --no-default-features --features "std,metrics,encryption,all-compression,all-checksum,quickcheck,rayon" -- --test-threads=1
+        working-directory: memberlist-proto
+
+      - name: Run Proto Tests (Without Rayon)
+        run: |
+          cargo test --no-default-features --features "std,metrics,encryption,all-compression,all-checksum,quickcheck" -- --test-threads=1
+        working-directory: memberlist-proto
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ matrix.runtime }}-${{ matrix.stream_layer }}

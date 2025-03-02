@@ -67,7 +67,7 @@ impl Data for ErrorResponse {
     offset += 1;
     offset += self.message.encode_length_delimited(&mut buf[offset..])?;
     #[cfg(debug_assertions)]
-    super::debug_assert_write_eq(offset, self.encoded_len());
+    super::debug_assert_write_eq::<Self>(offset, self.encoded_len());
     Ok(offset)
   }
 }
@@ -116,20 +116,26 @@ impl<'a> DataRef<'a, ErrorResponse> for ErrorResponseRef<'a> {
     let mut msg = None;
 
     while offset < src.len() {
-      // Parse the tag and wire type
-      let b = src[offset];
-      offset += 1;
-
-      match b {
+      match src[offset] {
         ErrorResponse::MESSAGE_BYTE => {
+          if msg.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "ErrorResponse",
+              "msg",
+              ErrorResponse::MESSAGE_TAG,
+            ));
+          }
+          offset += 1;
+
           let (bytes_read, value) =
             <&str as DataRef<SmolStr>>::decode_length_delimited(&src[offset..])?;
           offset += bytes_read;
           msg = Some(value);
         }
-        _ => {
-          let (wire_type, _) = split(src[offset]);
-          let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
+        b => {
+          let (wire_type, _) = split(b);
+          let wire_type = WireType::try_from(wire_type)
+            .map_err(|v| DecodeError::unknown_wire_type("ErrorResponse", v))?;
           offset += skip(wire_type, &src[offset..])?;
         }
       }

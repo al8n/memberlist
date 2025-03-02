@@ -4,6 +4,8 @@ use const_varint::{decode_u32_varint, encode_u32_varint_to, encoded_u32_varint_l
 
 use super::WireType;
 
+pub use tuple::TupleEncoder;
+
 #[cfg(any(feature = "std", feature = "alloc"))]
 mod bytes;
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -11,6 +13,8 @@ mod nodecraft;
 mod primitives;
 #[cfg(any(feature = "std", feature = "alloc"))]
 mod string;
+
+mod tuple;
 
 /// The reference type of the data.
 pub trait DataRef<'a, D>
@@ -44,7 +48,7 @@ where
     let (bytes_read, value) = Self::decode(src)?;
 
     #[cfg(debug_assertions)]
-    super::debug_assert_read_eq(bytes_read, len);
+    super::debug_assert_read_eq::<Self>(bytes_read, len);
 
     offset += bytes_read;
     Ok((offset, value))
@@ -113,7 +117,7 @@ pub trait Data: core::fmt::Debug + Send + Sync {
     offset += self.encode(&mut buf[offset..])?;
 
     #[cfg(debug_assertions)]
-    super::debug_assert_write_eq(offset, self.encoded_len_with_length_delimited());
+    super::debug_assert_write_eq::<Self>(offset, self.encoded_len_with_length_delimited());
 
     Ok(offset)
   }
@@ -190,7 +194,8 @@ impl EncodeError {
     Self::Custom(value.into())
   }
 
-  pub(crate) fn update(mut self, required: usize, remaining: usize) -> Self {
+  /// Update the error with the required and remaining buffer capacity.
+  pub fn update(mut self, required: usize, remaining: usize) -> Self {
     match self {
       Self::InsufficientBuffer {
         required: ref mut r,
@@ -258,8 +263,13 @@ pub enum DecodeError {
   },
 
   /// Returned when there is a unknown wire type.
-  #[error("unknown wire type value {0}")]
-  UnknownWireType(u8),
+  #[error("unknown wire type value {value} when decoding {ty}")]
+  UnknownWireType {
+    /// The type of the message.
+    ty: &'static str,
+    /// The unknown wire type value.
+    value: u8,
+  },
 
   /// Returned when finding a unknown tag.
   #[error("unknown tag {tag} when decoding {ty}")]
@@ -310,8 +320,8 @@ impl DecodeError {
 
   /// Creates a new unknown wire type decoding error.
   #[inline]
-  pub const fn unknown_wire_type(value: u8) -> Self {
-    Self::UnknownWireType(value)
+  pub const fn unknown_wire_type(ty: &'static str, value: u8) -> Self {
+    Self::UnknownWireType { ty, value }
   }
 
   /// Creates a new unknown tag decoding error.

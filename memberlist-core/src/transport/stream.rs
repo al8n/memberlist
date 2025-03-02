@@ -213,8 +213,8 @@ impl<A, T> Stream for PacketSubscriber<A, T> {
 
 /// Returns producer and subscriber for promised stream.
 pub fn promised_stream<T: Transport>() -> (
-  StreamProducer<<T::Resolver as AddressResolver>::ResolvedAddress, T::Connection>,
-  StreamSubscriber<<T::Resolver as AddressResolver>::ResolvedAddress, T::Connection>,
+  StreamProducer<T::ResolvedAddress, T::Connection>,
+  StreamSubscriber<T::ResolvedAddress, T::Connection>,
 ) {
   let (sender, receiver) = async_channel::bounded(1);
   (StreamProducer { sender }, StreamSubscriber { receiver })

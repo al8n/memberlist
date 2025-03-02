@@ -1,5 +1,3 @@
-use agnostic::tokio::TokioRuntime;
-
 /// Memberlist type alias for using [`NetTransport`](memberlist_net::NetTransport) and [`Tcp`](memberlist_net::stream_layer::tcp::Tcp) stream layer with `tokio` runtime.
 #[cfg(all(any(feature = "tcp", feature = "tls"), not(target_family = "wasm")))]
 #[cfg_attr(
@@ -11,8 +9,8 @@ pub type TokioTcpMemberlist<I, A, D = memberlist_core::delegate::CompositeDelega
     memberlist_net::NetTransport<
       I,
       A,
-      memberlist_net::stream_layer::tcp::Tcp<TokioRuntime>,
-      TokioRuntime,
+      memberlist_net::stream_layer::tcp::Tcp<agnostic::tokio::TokioRuntime>,
+      agnostic::tokio::TokioRuntime,
     >,
     D,
   >;
@@ -25,8 +23,8 @@ pub type TokioTlsMemberlist<I, A, D = memberlist_core::delegate::CompositeDelega
     memberlist_net::NetTransport<
       I,
       A,
-      memberlist_net::stream_layer::tls::Tls<TokioRuntime>,
-      TokioRuntime,
+      memberlist_net::stream_layer::tls::Tls<agnostic::tokio::TokioRuntime>,
+      agnostic::tokio::TokioRuntime,
     >,
     D,
   >;
@@ -39,8 +37,8 @@ pub type TokioQuicMemberlist<I, A, D = memberlist_core::delegate::CompositeDeleg
     memberlist_quic::QuicTransport<
       I,
       A,
-      memberlist_quic::stream_layer::quinn::Quinn<TokioRuntime>,
-      TokioRuntime,
+      memberlist_quic::stream_layer::quinn::Quinn<agnostic::tokio::TokioRuntime>,
+      agnostic::tokio::TokioRuntime,
     >,
     D,
   >;

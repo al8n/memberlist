@@ -12,8 +12,8 @@ use agnostic::Runtime;
 use memberlist_core::{
   Memberlist,
   delegate::{CompositeDelegate, mock::MockDelegate},
+  proto::MaybeResolvedAddress,
   tests::AddressKind,
-  transport::MaybeResolvedAddress,
 };
 use memberlist_net::stream_layer::StreamLayer;
 

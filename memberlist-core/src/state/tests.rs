@@ -30,10 +30,7 @@ use crate::{
 async fn host_memberlist<T, R>(
   t: T,
   opts: Options,
-) -> Result<
-  Memberlist<T>,
-  Error<T, VoidDelegate<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>>,
->
+) -> Result<Memberlist<T>, Error<T, VoidDelegate<T::Id, T::ResolvedAddress>>>
 where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -47,7 +44,7 @@ async fn host_memberlist_with_delegate<D, T, R>(
   opts: Options,
 ) -> Result<Memberlist<T, D>, Error<T, D>>
 where
-  D: Delegate<Id = T::Id, Address = <T::Resolver as AddressResolver>::ResolvedAddress>,
+  D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
@@ -106,7 +103,7 @@ pub async fn probe_node_suspect<T, R>(
   t2_opts: Options,
   t3: T,
   t3_opts: Options,
-  suspect_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  suspect_node: Node<T::Id, T::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -184,7 +181,7 @@ struct DogpileTestCase {
 /// Unit test to test the probe node dogpile functionality
 pub async fn probe_node_dogpile<F, T, R>(
   mut get_transport: impl FnMut(usize) -> F,
-  bad_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  bad_node: Node<T::Id, T::ResolvedAddress>,
   opts: Options,
 ) where
   F: Future<Output = T>,
@@ -342,7 +339,7 @@ pub async fn probe_node_awareness_degraded<T, R>(
   t2_opts: Options,
   t3: T,
   t3_opts: Options,
-  node4: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  node4: Node<T::Id, T::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -518,8 +515,8 @@ pub async fn probe_node_awareness_missed_nack<T, R>(
   t1_opts: Options,
   t2: T,
   t2_opts: Options,
-  node3: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-  node4: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  node3: Node<T::Id, T::ResolvedAddress>,
+  node4: Node<T::Id, T::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -707,7 +704,7 @@ pub async fn ping<T, R>(
   t1_opts: Options,
   t2: T,
   t2_opts: Options,
-  bad_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  bad_node: Node<T::Id, T::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -756,9 +753,9 @@ pub async fn ping<T, R>(
 pub async fn reset_nodes<T, R>(
   t1: T,
   t1_opts: Options,
-  n1: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-  n2: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-  n3: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  n1: Node<T::Id, T::ResolvedAddress>,
+  n2: Node<T::Id, T::ResolvedAddress>,
+  n3: Node<T::Id, T::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -997,7 +994,7 @@ where
 pub async fn alive_node_new_node<T, R>(
   t1: T,
   t1_opts: Options,
-  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  test_node: Node<T::Id, T::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -1116,7 +1113,7 @@ where
 pub async fn alive_node_suspect_node<T, R>(
   t1: T,
   t1_opts: Options,
-  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  test_node: Node<T::Id, T::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -1190,7 +1187,7 @@ pub async fn alive_node_suspect_node<T, R>(
 pub async fn alive_node_idempotent<T, R>(
   t1: T,
   t1_opts: Options,
-  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  test_node: Node<T::Id, T::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -1246,7 +1243,7 @@ pub async fn alive_node_idempotent<T, R>(
 pub async fn alive_node_change_meta<T, R>(
   t1: T,
   t1_opts: Options,
-  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  test_node: Node<T::Id, T::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -1316,7 +1313,7 @@ where
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
-    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    VoidDelegate::<T::Id, T::ResolvedAddress>::default(),
     t1_opts,
   )
   .await
@@ -1362,7 +1359,7 @@ where
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
-    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    VoidDelegate::<T::Id, T::ResolvedAddress>::default(),
     t1_opts.with_dead_node_reclaim_time(Duration::from_millis(10)),
   )
   .await
@@ -1445,7 +1442,7 @@ where
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
-    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    VoidDelegate::<T::Id, T::ResolvedAddress>::default(),
     t1_opts,
   )
   .await
@@ -1472,7 +1469,7 @@ where
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
-    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    VoidDelegate::<T::Id, T::ResolvedAddress>::default(),
     t1_opts
       .with_probe_interval(Duration::from_millis(1))
       .with_suspicion_mult(1),
@@ -1556,7 +1553,7 @@ where
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
-    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    VoidDelegate::<T::Id, T::ResolvedAddress>::default(),
     t1_opts,
   )
   .await
@@ -1617,7 +1614,7 @@ where
   let now = Epoch::now();
   let m: Memberlist<T> = get_memberlist(
     t1,
-    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    VoidDelegate::<T::Id, T::ResolvedAddress>::default(),
     t1_opts,
   )
   .await
@@ -1664,7 +1661,7 @@ where
 {
   let m = get_memberlist(
     t1,
-    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    VoidDelegate::<T::Id, T::ResolvedAddress>::default(),
     t1_opts,
   )
   .await
@@ -1712,7 +1709,7 @@ where
 {
   let m: Memberlist<T> = get_memberlist(
     t1,
-    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    VoidDelegate::<T::Id, T::ResolvedAddress>::default(),
     t1_opts,
   )
   .await
@@ -1806,11 +1803,8 @@ where
 }
 
 /// Unit test to test the dead node functionality
-pub async fn dead_node<T, R>(
-  t1: T,
-  t1_opts: Options,
-  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
-) where
+pub async fn dead_node<T, R>(t1: T, t1_opts: Options, test_node: Node<T::Id, T::ResolvedAddress>)
+where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
@@ -1879,7 +1873,7 @@ pub async fn dead_node<T, R>(
 pub async fn dead_node_double<T, R>(
   t1: T,
   t1_opts: Options,
-  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  test_node: Node<T::Id, T::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
@@ -1949,14 +1943,14 @@ pub async fn dead_node_double<T, R>(
 pub async fn dead_node_old_dead<T, R>(
   t1: T,
   t1_opts: Options,
-  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  test_node: Node<T::Id, T::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
   let m = get_memberlist(
     t1,
-    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    VoidDelegate::<T::Id, T::ResolvedAddress>::default(),
     t1_opts,
   )
   .await
@@ -1991,14 +1985,14 @@ pub async fn dead_node_old_dead<T, R>(
 pub async fn dead_node_alive_replay<T, R>(
   t1: T,
   t1_opts: Options,
-  test_node: Node<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>,
+  test_node: Node<T::Id, T::ResolvedAddress>,
 ) where
   T: Transport<Runtime = R>,
   R: RuntimeLite,
 {
   let m = get_memberlist(
     t1,
-    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    VoidDelegate::<T::Id, T::ResolvedAddress>::default(),
     t1_opts,
   )
   .await
@@ -2033,7 +2027,7 @@ where
 {
   let m = get_memberlist(
     t1,
-    VoidDelegate::<T::Id, <T::Resolver as AddressResolver>::ResolvedAddress>::default(),
+    VoidDelegate::<T::Id, T::ResolvedAddress>::default(),
     t1_opts,
   )
   .await

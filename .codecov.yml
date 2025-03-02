@@ -5,6 +5,7 @@ ignore:
   - memberlist-core/src/state/tests.rs
   - memberlist-core/src/base/tests.rs
   - memberlist-core/src/delegate/mock.rs
+  - memberlist-core/src/transport/unimplemented.rs
   - memberlist-core/src/error.rs
   - memberlist-net/src/tests.rs
   - memberlist-net/src/tests

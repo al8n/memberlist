@@ -102,7 +102,8 @@ const _: () = {
         }
         b => {
           let (wire_type, tag) = split(b);
-          WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
+          WireType::try_from(wire_type)
+            .map_err(|v| DecodeError::unknown_wire_type("HostAddr", v))?;
 
           Err(DecodeError::unknown_tag("HostAddr", tag))
         }
@@ -178,24 +179,35 @@ const _: () = {
       let mut address = None;
 
       while offset < src.len() {
-        let b = src[offset];
-        offset += 1;
-
-        match b {
+        match src[offset] {
           b if b == node_id_byte::<I>() => {
+            if id.is_some() {
+              return Err(DecodeError::duplicate_field("Node", "id", NODE_ID_TAG));
+            }
+
+            offset += 1;
             let (bytes_read, value) = I::Ref::decode_length_delimited(&src[offset..])?;
             offset += bytes_read;
             id = Some(value);
           }
           b if b == node_addr_byte::<A>() => {
+            if address.is_some() {
+              return Err(DecodeError::duplicate_field(
+                "Node",
+                "address",
+                NODE_ADDR_TAG,
+              ));
+            }
+
+            offset += 1;
             let (bytes_read, value) = A::Ref::decode_length_delimited(&src[offset..])?;
             offset += bytes_read;
             address = Some(value);
           }
-          _ => {
+          b => {
             let (wire_type, _) = split(b);
-            let wire_type =
-              WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
+            let wire_type = WireType::try_from(wire_type)
+              .map_err(|v| DecodeError::unknown_wire_type("Node", v))?;
             offset += skip(wire_type, &src[offset..])?;
           }
         }
@@ -256,7 +268,7 @@ const _: () = {
         .map_err(|e| e.update(self.encoded_len(), src_len))?;
 
       #[cfg(debug_assertions)]
-      super::super::debug_assert_write_eq(offset, self.encoded_len());
+      super::super::debug_assert_write_eq::<Self>(offset, self.encoded_len());
       Ok(offset)
     }
   }

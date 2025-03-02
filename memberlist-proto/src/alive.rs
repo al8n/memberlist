@@ -111,7 +111,10 @@ where
 
   fn encoded_len(&self) -> usize {
     let mut len = 1 + self.incarnation.encoded_len();
-    len += 1 + self.meta.encoded_len_with_length_delimited();
+    let meta_len = self.meta.len();
+    if meta_len != 0 {
+      len += 1 + self.meta.encoded_len_with_length_delimited();
+    }
     len += 1 + self.node.encoded_len_with_length_delimited();
     len += 1 + 1;
     len += 1 + 1;
@@ -135,13 +138,16 @@ where
     offset += 1;
     offset += self.incarnation.encode(&mut buf[offset..])?;
 
-    bail!(self(offset, len));
-    buf[offset] = META_BYTE;
-    offset += 1;
-    offset += self
-      .meta
-      .encode_length_delimited(&mut buf[offset..])
-      .map_err(|e| e.update(self.encoded_len(), len))?;
+    let meta_len = self.meta.len();
+    if meta_len != 0 {
+      bail!(self(offset, len));
+      buf[offset] = META_BYTE;
+      offset += 1;
+      offset += self
+        .meta
+        .encode_length_delimited(&mut buf[offset..])
+        .map_err(|e| e.update(self.encoded_len(), len))?;
+    }
 
     bail!(self(offset, len));
     buf[offset] = Self::node_byte();
@@ -168,7 +174,7 @@ where
     offset += 1;
 
     #[cfg(debug_assertions)]
-    super::debug_assert_write_eq(offset, self.encoded_len());
+    super::debug_assert_write_eq::<Self>(offset, self.encoded_len());
 
     Ok(offset)
   }
@@ -294,22 +300,40 @@ where
     let mut delegate_version = None;
 
     while offset < src.len() {
-      // Parse the tag and wire type
-      let b = src[offset];
-      offset += 1;
-
-      match b {
+      match src[offset] {
         INCARNATION_BYTE => {
+          if incarnation.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "Alive",
+              "incarnation",
+              INCARNATION_TAG,
+            ));
+          }
+          offset += 1;
           let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
           offset += bytes_read;
           incarnation = Some(value);
         }
         META_BYTE => {
+          if meta.is_some() {
+            return Err(DecodeError::duplicate_field("Alive", "meta", META_TAG));
+          }
+          offset += 1;
+
           let (readed, data) = <&[u8] as DataRef<Meta>>::decode_length_delimited(&src[offset..])?;
           offset += readed;
           meta = Some(data);
         }
         DELEGATE_VERSION_BYTE => {
+          if delegate_version.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "Alive",
+              "delegate_version",
+              DELEGATE_VERSION_TAG,
+            ));
+          }
+          offset += 1;
+
           if offset >= src.len() {
             return Err(DecodeError::buffer_underflow());
           }
@@ -317,6 +341,15 @@ where
           offset += 1;
         }
         PROTOCOL_VERSION_BYTE => {
+          if protocol_version.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "Alive",
+              "protocol_version",
+              PROTOCOL_VERSION_TAG,
+            ));
+          }
+          offset += 1;
+
           if offset >= src.len() {
             return Err(DecodeError::buffer_underflow());
           }
@@ -324,6 +357,11 @@ where
           offset += 1;
         }
         b if b == Alive::<I, A>::node_byte() => {
+          if node.is_some() {
+            return Err(DecodeError::duplicate_field("Alive", "node", NODE_TAG));
+          }
+          offset += 1;
+
           let (readed, data) =
             <Node<I::Ref<'_>, A::Ref<'_>> as DataRef<Node<I, A>>>::decode_length_delimited(
               &src[offset..],
@@ -332,9 +370,10 @@ where
           offset += readed;
           node = Some(data);
         }
-        _ => {
+        b => {
           let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
+          let wire_type = WireType::try_from(wire_type)
+            .map_err(|v| DecodeError::unknown_wire_type("Alive", v))?;
           offset += skip(wire_type, &src[offset..])?;
         }
       }

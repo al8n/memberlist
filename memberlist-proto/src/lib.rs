@@ -11,19 +11,23 @@
 pub use metrics_label::MetricLabels;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use nodecraft::{
-  Domain, HostAddr, Node, NodeId, ParseDomainError, ParseHostAddrError, ParseNodeIdError,
+  CheapClone, Domain, HostAddr, Node, NodeId, ParseDomainError, ParseHostAddrError,
+  ParseNodeIdError,
 };
 
 #[cfg(any(feature = "arbitrary", test))]
 mod arbitrary_impl;
+
+/// Compression related types.
 #[cfg(any(
   feature = "zstd",
   feature = "lz4",
   feature = "brotli",
   feature = "snappy",
 ))]
-mod compression;
+pub mod compression;
 
+/// Checksum related types.
 #[cfg(any(
   feature = "crc32",
   feature = "xxhash32",
@@ -31,10 +35,13 @@ mod compression;
   feature = "xxhash3",
   feature = "murmur3",
 ))]
-mod checksum;
+pub mod checksum;
 
+/// Encryption related types.
 #[cfg(feature = "encryption")]
-mod encryption;
+#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+pub mod encryption;
+
 #[cfg(feature = "metrics")]
 mod metrics_label;
 #[cfg(any(feature = "quickcheck", test))]
@@ -62,6 +69,7 @@ pub use compression::*;
 pub use encryption::*;
 
 pub use ack::*;
+pub use address::*;
 pub use alive::*;
 pub use bad_state::*;
 pub use bytes;
@@ -79,6 +87,7 @@ pub use smallvec_wrapper::*;
 pub use version::*;
 
 mod ack;
+mod address;
 mod alive;
 mod bad_state;
 mod cidr_policy;
@@ -143,56 +152,70 @@ impl TryFrom<u8> for WireType {
   }
 }
 
-#[inline]
-const fn merge(ty: WireType, tag: u8) -> u8 {
-  (ty as u8) << 3 | tag
-}
+use utils::*;
 
-#[inline]
-const fn split(val: u8) -> (u8, u8) {
-  let wire_type = val >> 3; // Shift right to get the wire type
-  let tag = val & 0b111; // Mask with 0b111 to get last 3 bits
-  (wire_type, tag)
-}
+/// Utils for protobuf-like encoding/decoding
+pub mod utils {
+  use super::{DecodeError, WireType};
 
-fn skip(wire_type: WireType, src: &[u8]) -> Result<usize, DecodeError> {
-  match wire_type {
-    WireType::Varint => match const_varint::decode_u64_varint(src) {
-      Ok((bytes_read, _)) => Ok(bytes_read),
-      Err(e) => Err(e.into()),
-    },
-    WireType::LengthDelimited => {
-      // Skip length-delimited field by reading the length and skipping the payload
-      if src.is_empty() {
-        return Err(DecodeError::buffer_underflow());
-      }
+  /// Merge wire type and tag into a byte.
+  #[inline]
+  pub const fn merge(ty: WireType, tag: u8) -> u8 {
+    (ty as u8) << 3 | tag
+  }
 
-      match const_varint::decode_u32_varint(src) {
-        Ok((bytes_read, length)) => Ok(bytes_read + length as usize),
+  /// Split a byte into wire type and tag.
+  #[inline]
+  pub const fn split(val: u8) -> (u8, u8) {
+    let wire_type = val >> 3; // Shift right to get the wire type
+    let tag = val & 0b111; // Mask with 0b111 to get last 3 bits
+    (wire_type, tag)
+  }
+
+  /// Skip a field in the buffer.
+  pub fn skip(wire_type: WireType, src: &[u8]) -> Result<usize, DecodeError> {
+    match wire_type {
+      WireType::Varint => match const_varint::decode_u64_varint(src) {
+        Ok((bytes_read, _)) => Ok(bytes_read),
         Err(e) => Err(e.into()),
+      },
+      WireType::LengthDelimited => {
+        // Skip length-delimited field by reading the length and skipping the payload
+        if src.is_empty() {
+          return Err(DecodeError::buffer_underflow());
+        }
+
+        match const_varint::decode_u32_varint(src) {
+          Ok((bytes_read, length)) => Ok(bytes_read + length as usize),
+          Err(e) => Err(e.into()),
+        }
       }
+      WireType::Byte => Ok(1),
+      WireType::Fixed32 => Ok(4),
+      WireType::Fixed64 => Ok(8),
     }
-    WireType::Byte => Ok(1),
-    WireType::Fixed32 => Ok(4),
-    WireType::Fixed64 => Ok(8),
   }
 }
 
 #[cfg(debug_assertions)]
 #[inline]
-fn debug_assert_write_eq(actual: usize, expected: usize) {
+fn debug_assert_write_eq<T: ?Sized>(actual: usize, expected: usize) {
   debug_assert_eq!(
-    actual, expected,
-    "expect writting {expected} bytes, but actual write {actual} bytes"
+    actual,
+    expected,
+    "{}: expect writting {expected} bytes, but actual write {actual} bytes",
+    core::any::type_name::<T>()
   );
 }
 
 #[cfg(debug_assertions)]
 #[inline]
-fn debug_assert_read_eq(actual: usize, expected: usize) {
+fn debug_assert_read_eq<T: ?Sized>(actual: usize, expected: usize) {
   debug_assert_eq!(
-    actual, expected,
-    "expect reading {expected} bytes, but actual read {actual} bytes"
+    actual,
+    expected,
+    "{}: expect reading {expected} bytes, but actual read {actual} bytes",
+    core::any::type_name::<T>()
   );
 }
 

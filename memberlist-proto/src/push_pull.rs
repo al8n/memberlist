@@ -4,6 +4,8 @@ use bytes::Bytes;
 use nodecraft::CheapClone;
 use triomphe::Arc;
 
+use crate::RepeatedDecoder;
+
 use super::{Data, DataRef, DecodeError, EncodeError, WireType, merge, skip, split};
 
 mod state;
@@ -108,7 +110,7 @@ where
   {
     val
       .states
-      .iter::<I, A>()
+      .iter::<PushNodeState<I, A>>()
       .map(|res| res.and_then(PushNodeState::from_ref))
       .collect::<Result<Arc<[_]>, DecodeError>>()
       .map(|states| Self {
@@ -119,30 +121,44 @@ where
   }
 
   fn encoded_len(&self) -> usize {
-    let mut len = 1 + 1; // join
+    let mut len = 0;
+    if self.join {
+      len += 1 + 1; // join
+    }
+
     for i in self.states.iter() {
       len += 1 + i.encoded_len_with_length_delimited();
     }
-    len += 1 + self.user_data.encoded_len_with_length_delimited();
+
+    let user_data_len = self.user_data.len();
+
+    if user_data_len != 0 {
+      len += 1 + self.user_data.encoded_len_with_length_delimited();
+    }
+
     len
   }
 
   fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    let mut offset = 0;
     macro_rules! bail {
       ($this:ident($offset:expr, $len:ident)) => {
         if $offset >= $len {
-          return Err(EncodeError::insufficient_buffer($offset, $len).into());
+          return Err(EncodeError::insufficient_buffer($offset, $len));
         }
       };
     }
 
+    let mut offset = 0;
     let len = buf.len();
-    bail!(self(1, len));
-    buf[offset] = JOIN_BYTE;
-    offset += 1;
-    buf[offset] = self.join as u8;
-    offset += 1;
+    if self.join {
+      if len < 2 {
+        return Err(EncodeError::insufficient_buffer(self.encoded_len(), len));
+      }
+      buf[offset] = JOIN_BYTE;
+      offset += 1;
+      buf[offset] = 1;
+      offset += 1;
+    }
 
     for i in self.states.iter() {
       bail!(self(offset, len));
@@ -155,13 +171,16 @@ where
       }
     }
 
-    bail!(self(offset, len));
-    buf[offset] = USER_DATA_BYTE;
-    offset += 1;
-    offset += self.user_data.encode_length_delimited(&mut buf[offset..])?;
+    let user_data_len = self.user_data.len();
+    if user_data_len != 0 {
+      bail!(self(offset, len));
+      buf[offset] = USER_DATA_BYTE;
+      offset += 1;
+      offset += self.user_data.encode_length_delimited(&mut buf[offset..])?;
+    }
 
     #[cfg(debug_assertions)]
-    super::debug_assert_write_eq(offset, self.encoded_len());
+    super::debug_assert_write_eq::<Self>(offset, self.encoded_len());
     Ok(offset)
   }
 }
@@ -182,7 +201,7 @@ pub struct PushPullRef<'a, I, A> {
     style = "ref",
     attrs(doc = "Returns the states of the push pull message")
   ))]
-  states: PushNodeStatesDecoder<'a>,
+  states: RepeatedDecoder<'a>,
   /// The user data of the push pull message.
   #[viewit(getter(const, attrs(doc = "Returns the user data of the push pull message")))]
   user_data: &'a [u8],
@@ -212,20 +231,22 @@ where
     let mut user_data = None;
 
     while offset < src.len() {
-      // Parse the tag and wire type
-      let b = src[offset];
-      offset += 1;
-
-      match b {
+      match src[offset] {
         JOIN_BYTE => {
+          if join.is_some() {
+            return Err(DecodeError::duplicate_field("PushPull", "join", JOIN_TAG));
+          }
+          offset += 1;
+
           if offset >= src.len() {
             return Err(DecodeError::buffer_underflow());
           }
-          let val = src[offset];
-          offset += 1;
+          let (read, val) = <bool as Data>::decode(&src[offset..])?;
+          offset += read;
           join = Some(val);
         }
         STATES_BYTE => {
+          offset += 1;
           let readed = super::skip(WireType::LengthDelimited, &src[offset..])?;
           if let Some((ref mut fnso, ref mut lnso)) = node_state_offsets {
             if *fnso > offset {
@@ -242,25 +263,43 @@ where
           offset += readed;
         }
         USER_DATA_BYTE => {
+          if user_data.is_some() {
+            return Err(DecodeError::duplicate_field(
+              "PushPull",
+              "user_data",
+              USER_DATA_TAG,
+            ));
+          }
+          offset += 1;
+
           let (readed, value) = <&[u8] as DataRef<Bytes>>::decode_length_delimited(&src[offset..])?;
           offset += readed;
           user_data = Some(value);
         }
-        _ => {
+        b => {
           let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
+          let wire_type = WireType::try_from(wire_type)
+            .map_err(|v| DecodeError::unknown_wire_type("PushPull", v))?;
           offset += skip(wire_type, &src[offset..])?;
         }
       }
     }
 
-    let join = join.ok_or(DecodeError::missing_field("PushPull", "join"))? != 0;
+    let join = join.unwrap_or_default();
     let user_data = user_data.unwrap_or_default();
     Ok((
       offset,
       Self {
         join,
-        states: PushNodeStatesDecoder::new(src, num_states, node_state_offsets),
+        states: {
+          let val =
+            RepeatedDecoder::new(STATES_TAG, WireType::LengthDelimited, src).with_nums(num_states);
+          if let Some((first, last)) = node_state_offsets {
+            val.with_offsets(first, last)
+          } else {
+            val
+          }
+        },
         user_data,
         _m: PhantomData,
       },

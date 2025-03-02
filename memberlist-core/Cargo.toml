@@ -51,6 +51,9 @@ tokio = ["agnostic-io/tokio"]
 # see memberlist-wasm for more examples about how to use those tests fn
 test = ["tracing-subscriber"]
 
+arbitrary = ["dep:arbitrary", "memberlist-proto/arbitrary"]
+quickcheck = ["dep:quickcheck", "memberlist-proto/quickcheck"]
+
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom.workspace = true
 once_cell = "1.17"
