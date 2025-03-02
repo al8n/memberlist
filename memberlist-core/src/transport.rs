@@ -11,6 +11,9 @@ use super::*;
 mod stream;
 pub use stream::*;
 
+/// An unimplemented transport for testing purposes only.
+pub mod unimplemented;
+
 /// The connection
 pub trait Connection: Send + Sync {
   /// The reader of the connection

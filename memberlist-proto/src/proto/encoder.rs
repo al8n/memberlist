@@ -839,7 +839,7 @@ where
         let written = msg.encodable_encode(&mut encoded_buf)?;
         #[cfg(debug_assertions)]
         {
-          super::super::debug_assert_write_eq(written, encoded_len);
+          super::super::debug_assert_write_eq::<Self>(written, encoded_len);
           assert_eq!(
             encoded_len,
             hint.input_size(),
@@ -990,7 +990,7 @@ where
       None => {
         let written = msg.encodable_encode(&mut buf[offset..])?;
         #[cfg(debug_assertions)]
-        super::super::debug_assert_write_eq(written, encoded_len);
+        super::super::debug_assert_write_eq::<Self>(written, encoded_len);
         payload.truncate(offset + written);
       }
     }

@@ -366,7 +366,7 @@ impl Data for SecretKey {
     offset += self_len;
 
     #[cfg(debug_assertions)]
-    super::debug_assert_write_eq(offset, self.encoded_len());
+    super::debug_assert_write_eq::<Self>(offset, self.encoded_len());
 
     Ok(offset)
   }

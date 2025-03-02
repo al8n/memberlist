@@ -1,7 +1,7 @@
 //! Types used by the [`memberlist`](https://crates.io/crates/memberlist) crate.
 #![doc(html_logo_url = "https://raw.githubusercontent.com/al8n/memberlist/main/art/logo_72x72.png")]
 #![forbid(unsafe_code)]
-// #![deny(warnings)]
+#![deny(warnings)]
 #![allow(clippy::type_complexity, unexpected_cfgs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
@@ -17,14 +17,17 @@ pub use nodecraft::{
 
 #[cfg(any(feature = "arbitrary", test))]
 mod arbitrary_impl;
+
+/// Compression related types.
 #[cfg(any(
   feature = "zstd",
   feature = "lz4",
   feature = "brotli",
   feature = "snappy",
 ))]
-mod compression;
+pub mod compression;
 
+/// Checksum related types.
 #[cfg(any(
   feature = "crc32",
   feature = "xxhash32",
@@ -32,10 +35,13 @@ mod compression;
   feature = "xxhash3",
   feature = "murmur3",
 ))]
-mod checksum;
+pub mod checksum;
 
+/// Encryption related types.
 #[cfg(feature = "encryption")]
-mod encryption;
+#[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+pub mod encryption;
+
 #[cfg(feature = "metrics")]
 mod metrics_label;
 #[cfg(any(feature = "quickcheck", test))]
@@ -193,19 +199,23 @@ pub mod utils {
 
 #[cfg(debug_assertions)]
 #[inline]
-fn debug_assert_write_eq(actual: usize, expected: usize) {
+fn debug_assert_write_eq<T: ?Sized>(actual: usize, expected: usize) {
   debug_assert_eq!(
-    actual, expected,
-    "expect writting {expected} bytes, but actual write {actual} bytes"
+    actual,
+    expected,
+    "{}: expect writting {expected} bytes, but actual write {actual} bytes",
+    core::any::type_name::<T>()
   );
 }
 
 #[cfg(debug_assertions)]
 #[inline]
-fn debug_assert_read_eq(actual: usize, expected: usize) {
+fn debug_assert_read_eq<T: ?Sized>(actual: usize, expected: usize) {
   debug_assert_eq!(
-    actual, expected,
-    "expect reading {expected} bytes, but actual read {actual} bytes"
+    actual,
+    expected,
+    "{}: expect reading {expected} bytes, but actual read {actual} bytes",
+    core::any::type_name::<T>()
   );
 }
 

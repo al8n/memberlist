@@ -48,7 +48,7 @@ where
     let (bytes_read, value) = Self::decode(src)?;
 
     #[cfg(debug_assertions)]
-    super::debug_assert_read_eq(bytes_read, len);
+    super::debug_assert_read_eq::<Self>(bytes_read, len);
 
     offset += bytes_read;
     Ok((offset, value))
@@ -117,7 +117,7 @@ pub trait Data: core::fmt::Debug + Send + Sync {
     offset += self.encode(&mut buf[offset..])?;
 
     #[cfg(debug_assertions)]
-    super::debug_assert_write_eq(offset, self.encoded_len_with_length_delimited());
+    super::debug_assert_write_eq::<Self>(offset, self.encoded_len_with_length_delimited());
 
     Ok(offset)
   }

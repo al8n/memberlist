@@ -256,7 +256,7 @@ const _: () = {
         .map_err(|e| e.update(self.encoded_len(), src_len))?;
 
       #[cfg(debug_assertions)]
-      super::super::debug_assert_write_eq(offset, self.encoded_len());
+      super::super::debug_assert_write_eq::<Self>(offset, self.encoded_len());
       Ok(offset)
     }
   }

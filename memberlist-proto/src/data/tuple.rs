@@ -170,7 +170,7 @@ where
     offset += self.encode(&mut buf[offset..])?;
 
     #[cfg(debug_assertions)]
-    super::super::debug_assert_write_eq(offset, self.encoded_len_with_length_delimited());
+    super::super::debug_assert_write_eq::<Self>(offset, self.encoded_len_with_length_delimited());
 
     Ok(offset)
   }

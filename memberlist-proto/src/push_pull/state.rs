@@ -416,7 +416,7 @@ where
     offset += 1;
 
     #[cfg(debug_assertions)]
-    crate::debug_assert_write_eq(offset, self.encoded_len());
+    crate::debug_assert_write_eq::<Self>(offset, self.encoded_len());
     Ok(offset)
   }
 }
