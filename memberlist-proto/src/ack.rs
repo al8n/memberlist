@@ -284,11 +284,7 @@ impl<'a> DataRef<'a, Self> for Nack {
     let mut sequence_number = None;
     let mut offset = 0;
     while offset < src.len() {
-      // Parse the tag and wire type
-      let b = src[offset];
-      offset += 1;
-
-      match b {
+      match src[offset] {
         Self::SEQUENCE_NUMBER_BYTE => {
           if sequence_number.is_some() {
             return Err(DecodeError::duplicate_field(
@@ -297,13 +293,14 @@ impl<'a> DataRef<'a, Self> for Nack {
               Self::SEQUENCE_NUMBER_TAG,
             ));
           }
+          offset += 1;
 
           let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
           offset += bytes_read;
           sequence_number = Some(value);
         }
-        _ => {
-          let (wire_type, _) = split(src[offset]);
+        b => {
+          let (wire_type, _) = split(b);
           let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           offset += skip(wire_type, &src[offset..])?;
         }

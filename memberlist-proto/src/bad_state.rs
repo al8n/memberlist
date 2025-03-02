@@ -55,14 +55,12 @@ macro_rules! bad_bail {
 
           let mut offset = 0;
           while offset < src.len() {
-            let b = src[offset];
-            offset += 1;
-
-            match b {
+            match src[offset] {
               [< $name:upper _INCARNATION_BYTE >] => {
                 if incarnation.is_some() {
                   return Err(DecodeError::duplicate_field(stringify!($name), "incarnation", [< $name:upper _INCARNATION_TAG >]));
                 }
+                offset += 1;
 
                 let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
                 offset += bytes_read;
@@ -72,6 +70,7 @@ macro_rules! bad_bail {
                 if node.is_some() {
                   return Err(DecodeError::duplicate_field(stringify!($name), "node", $name::<I>::node_byte()));
                 }
+                offset += 1;
 
                 let (bytes_read, value) = I::Ref::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;
@@ -81,6 +80,7 @@ macro_rules! bad_bail {
                 if from.is_some() {
                   return Err(DecodeError::duplicate_field(stringify!($name), "from", $name::<I>::from_byte()));
                 }
+                offset += 1;
 
                 let (bytes_read, value) = I::Ref::decode_length_delimited(&src[offset..])?;
                 offset += bytes_read;

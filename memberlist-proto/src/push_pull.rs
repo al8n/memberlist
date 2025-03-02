@@ -231,15 +231,12 @@ where
     let mut user_data = None;
 
     while offset < src.len() {
-      // Parse the tag and wire type
-      let b = src[offset];
-      offset += 1;
-
-      match b {
+      match src[offset] {
         JOIN_BYTE => {
           if join.is_some() {
             return Err(DecodeError::duplicate_field("PushPull", "join", JOIN_TAG));
           }
+          offset += 1;
 
           if offset >= src.len() {
             return Err(DecodeError::buffer_underflow());
@@ -249,6 +246,7 @@ where
           join = Some(val);
         }
         STATES_BYTE => {
+          offset += 1;
           let readed = super::skip(WireType::LengthDelimited, &src[offset..])?;
           if let Some((ref mut fnso, ref mut lnso)) = node_state_offsets {
             if *fnso > offset {
@@ -272,12 +270,13 @@ where
               USER_DATA_TAG,
             ));
           }
+          offset += 1;
 
           let (readed, value) = <&[u8] as DataRef<Bytes>>::decode_length_delimited(&src[offset..])?;
           offset += readed;
           user_data = Some(value);
         }
-        _ => {
+        b => {
           let (wire_type, _) = split(b);
           let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           offset += skip(wire_type, &src[offset..])?;

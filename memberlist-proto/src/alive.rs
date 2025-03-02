@@ -300,11 +300,7 @@ where
     let mut delegate_version = None;
 
     while offset < src.len() {
-      // Parse the tag and wire type
-      let b = src[offset];
-      offset += 1;
-
-      match b {
+      match src[offset] {
         INCARNATION_BYTE => {
           if incarnation.is_some() {
             return Err(DecodeError::duplicate_field(
@@ -313,6 +309,7 @@ where
               INCARNATION_TAG,
             ));
           }
+          offset += 1;
           let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
           offset += bytes_read;
           incarnation = Some(value);
@@ -321,6 +318,7 @@ where
           if meta.is_some() {
             return Err(DecodeError::duplicate_field("Alive", "meta", META_TAG));
           }
+          offset += 1;
 
           let (readed, data) = <&[u8] as DataRef<Meta>>::decode_length_delimited(&src[offset..])?;
           offset += readed;
@@ -334,6 +332,7 @@ where
               DELEGATE_VERSION_TAG,
             ));
           }
+          offset += 1;
 
           if offset >= src.len() {
             return Err(DecodeError::buffer_underflow());
@@ -349,6 +348,7 @@ where
               PROTOCOL_VERSION_TAG,
             ));
           }
+          offset += 1;
 
           if offset >= src.len() {
             return Err(DecodeError::buffer_underflow());
@@ -360,6 +360,7 @@ where
           if node.is_some() {
             return Err(DecodeError::duplicate_field("Alive", "node", NODE_TAG));
           }
+          offset += 1;
 
           let (readed, data) =
             <Node<I::Ref<'_>, A::Ref<'_>> as DataRef<Node<I, A>>>::decode_length_delimited(
@@ -369,7 +370,7 @@ where
           offset += readed;
           node = Some(data);
         }
-        _ => {
+        b => {
           let (wire_type, _) = split(b);
           let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           offset += skip(wire_type, &src[offset..])?;
