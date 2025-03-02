@@ -191,7 +191,11 @@ const _: () = {
           }
           b if b == node_addr_byte::<A>() => {
             if address.is_some() {
-              return Err(DecodeError::duplicate_field("Node", "address", NODE_ADDR_TAG));
+              return Err(DecodeError::duplicate_field(
+                "Node",
+                "address",
+                NODE_ADDR_TAG,
+              ));
             }
 
             offset += 1;
