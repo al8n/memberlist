@@ -36,19 +36,17 @@ impl Ack {
   pub fn decode_sequence_number(src: &[u8]) -> Result<(usize, u32), DecodeError> {
     let mut offset = 0;
     let mut sequence_number = None;
-    while offset < src.len() {
-      // Parse the tag and wire type
-      let b = src[offset];
-      offset += 1;
 
-      match b {
+    while offset < src.len() {
+      match src[offset] {
         Self::SEQUENCE_NUMBER_BYTE => {
+          offset += 1;
           let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
           offset += bytes_read;
           sequence_number = Some(value);
         }
-        _ => {
-          let (wire_type, _) = split(src[offset]);
+        b => {
+          let (wire_type, _) = split(b);
           let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           // Skip unknown fields
           offset += skip(wire_type, &src[offset..])?;
@@ -193,10 +191,7 @@ impl<'a> DataRef<'a, Ack> for AckRef<'a> {
 
     while offset < src.len() {
       // Parse the tag and wire type
-      let b = src[offset];
-      offset += 1;
-
-      match b {
+      match src[offset] {
         Ack::SEQUENCE_NUMBER_BYTE => {
           if sequence_number.is_some() {
             return Err(DecodeError::duplicate_field(
@@ -205,6 +200,7 @@ impl<'a> DataRef<'a, Ack> for AckRef<'a> {
               Ack::SEQUENCE_NUMBER_TAG,
             ));
           }
+          offset += 1;
           let (bytes_read, value) = <u32 as DataRef<u32>>::decode(&src[offset..])?;
           offset += bytes_read;
           sequence_number = Some(value);
@@ -217,12 +213,12 @@ impl<'a> DataRef<'a, Ack> for AckRef<'a> {
               Ack::PAYLOAD_TAG,
             ));
           }
-
+          offset += 1;
           let (readed, data) = <&[u8] as DataRef<Bytes>>::decode_length_delimited(&src[offset..])?;
           offset += readed;
           payload = Some(data);
         }
-        _ => {
+        b => {
           let (wire_type, _) = split(b);
           let wire_type = WireType::try_from(wire_type).map_err(DecodeError::unknown_wire_type)?;
           offset += skip(wire_type, &src[offset..])?;
