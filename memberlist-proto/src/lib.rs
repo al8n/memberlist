@@ -173,10 +173,21 @@ pub mod utils {
   }
 
   /// Skip a field in the buffer.
-  pub fn skip(wire_type: WireType, src: &[u8]) -> Result<usize, DecodeError> {
+  pub fn skip(ty: &'static str, src: &[u8]) -> Result<usize, DecodeError> {
+    let buf_len = src.len();
+    if buf_len == 0 {
+      return Ok(0);
+    }
+
+    let mut offset = 0;
+    let (wire_type, _) = split(src[offset]);
+    let wire_type =
+      WireType::try_from(wire_type).map_err(|v| DecodeError::unknown_wire_type(ty, v))?;
+    offset += 1;
+    let src = &src[offset..];
     match wire_type {
       WireType::Varint => match const_varint::decode_u64_varint(src) {
-        Ok((bytes_read, _)) => Ok(bytes_read),
+        Ok((bytes_read, _)) => Ok((offset + bytes_read).min(buf_len)),
         Err(e) => Err(e.into()),
       },
       WireType::LengthDelimited => {
@@ -186,13 +197,13 @@ pub mod utils {
         }
 
         match const_varint::decode_u32_varint(src) {
-          Ok((bytes_read, length)) => Ok(bytes_read + length as usize),
+          Ok((bytes_read, length)) => Ok((offset + bytes_read + length as usize).min(buf_len)),
           Err(e) => Err(e.into()),
         }
       }
-      WireType::Byte => Ok(1),
-      WireType::Fixed32 => Ok(4),
-      WireType::Fixed64 => Ok(8),
+      WireType::Byte => Ok((offset + 1).min(buf_len)),
+      WireType::Fixed32 => Ok((offset + 4).min(buf_len)),
+      WireType::Fixed64 => Ok((offset + 8).min(buf_len)),
     }
   }
 }

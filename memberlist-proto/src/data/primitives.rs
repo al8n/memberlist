@@ -367,7 +367,7 @@ macro_rules! impl_primitives {
               ));
             }
 
-            buf.copy_from_slice(&self.to_le_bytes());
+            buf[..SIZE].copy_from_slice(&self.to_le_bytes());
             Ok(SIZE)
           }
         }

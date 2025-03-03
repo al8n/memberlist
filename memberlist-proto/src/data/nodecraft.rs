@@ -204,11 +204,12 @@ const _: () = {
             offset += bytes_read;
             address = Some(value);
           }
-          b => {
-            let (wire_type, _) = split(b);
-            let wire_type = WireType::try_from(wire_type)
-              .map_err(|v| DecodeError::unknown_wire_type("Node", v))?;
-            offset += skip(wire_type, &src[offset..])?;
+          _ => {
+            offset += skip("Node", &src[offset..])?;
+            // let (wire_type, _) = split(b);
+            // let wire_type = WireType::try_from(wire_type)
+            //   .map_err(|v| DecodeError::unknown_wire_type("Node", v))?;
+            // offset += skip(wire_type, &src[offset..])?;
           }
         }
       }

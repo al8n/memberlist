@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use super::{Data, DataRef, DecodeError, EncodeError, WireType, merge, skip, split};
+use super::{Data, DataRef, DecodeError, EncodeError, WireType, merge, skip};
 
 /// Ack response is sent for a ping
 #[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
@@ -36,8 +36,9 @@ impl Ack {
   pub fn decode_sequence_number(src: &[u8]) -> Result<(usize, u32), DecodeError> {
     let mut offset = 0;
     let mut sequence_number = None;
+    let buf_len = src.len();
 
-    while offset < src.len() {
+    while offset < buf_len {
       match src[offset] {
         Self::SEQUENCE_NUMBER_BYTE => {
           offset += 1;
@@ -45,13 +46,7 @@ impl Ack {
           offset += bytes_read;
           sequence_number = Some(value);
         }
-        b => {
-          let (wire_type, _) = split(b);
-          let wire_type =
-            WireType::try_from(wire_type).map_err(|v| DecodeError::unknown_wire_type("Ack", v))?;
-          // Skip unknown fields
-          offset += skip(wire_type, &src[offset..])?;
-        }
+        _ => offset += skip("Ack", &src[offset..])?,
       }
     }
 
@@ -219,12 +214,7 @@ impl<'a> DataRef<'a, Ack> for AckRef<'a> {
           offset += readed;
           payload = Some(data);
         }
-        b => {
-          let (wire_type, _) = split(b);
-          let wire_type =
-            WireType::try_from(wire_type).map_err(|v| DecodeError::unknown_wire_type("Ack", v))?;
-          offset += skip(wire_type, &src[offset..])?;
-        }
+        _ => offset += skip("Ack", &src[offset..])?,
       }
     }
 
@@ -301,12 +291,7 @@ impl<'a> DataRef<'a, Self> for Nack {
           offset += bytes_read;
           sequence_number = Some(value);
         }
-        b => {
-          let (wire_type, _) = split(b);
-          let wire_type =
-            WireType::try_from(wire_type).map_err(|v| DecodeError::unknown_wire_type("Nack", v))?;
-          offset += skip(wire_type, &src[offset..])?;
-        }
+        _ => offset += skip("Nack", &src[offset..])?,
       }
     }
 

@@ -6,7 +6,7 @@ use triomphe::Arc;
 
 use crate::RepeatedDecoder;
 
-use super::{Data, DataRef, DecodeError, EncodeError, WireType, merge, skip, split};
+use super::{Data, DataRef, DecodeError, EncodeError, WireType, merge, skip};
 
 mod state;
 pub use state::*;
@@ -246,18 +246,17 @@ where
           join = Some(val);
         }
         STATES_BYTE => {
-          offset += 1;
-          let readed = super::skip(WireType::LengthDelimited, &src[offset..])?;
+          let readed = super::skip("PushPull", &src[offset..])?;
           if let Some((ref mut fnso, ref mut lnso)) = node_state_offsets {
             if *fnso > offset {
-              *fnso = offset - 1;
+              *fnso = offset;
             }
 
             if *lnso < offset + readed {
               *lnso = offset + readed;
             }
           } else {
-            node_state_offsets = Some((offset - 1, offset + readed));
+            node_state_offsets = Some((offset, offset + readed));
           }
           num_states += 1;
           offset += readed;
@@ -276,12 +275,7 @@ where
           offset += readed;
           user_data = Some(value);
         }
-        b => {
-          let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|v| DecodeError::unknown_wire_type("PushPull", v))?;
-          offset += skip(wire_type, &src[offset..])?;
-        }
+        _ => offset += skip("PushPull", &src[offset..])?,
       }
     }
 

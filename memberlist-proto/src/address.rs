@@ -1,10 +1,8 @@
 use nodecraft::CheapClone;
 
-use crate::WireType;
-
 use super::{
   Data, DataRef, DecodeError, EncodeError,
-  utils::{merge, skip, split},
+  utils::{merge, skip},
 };
 
 /// `MaybeResolvedAddress` is used to represent an address that may or may not be resolved.
@@ -139,12 +137,7 @@ where
           offset += len;
           addr = Some(Self::Unresolved(val));
         }
-        other => {
-          let (wire_type, _) = split(other);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|v| DecodeError::unknown_wire_type("MaybeResolvedAddress", v))?;
-          offset += skip(wire_type, &buf[offset..])?;
-        }
+        _ => offset += skip("MaybeResolvedAddress", &buf[offset..])?,
       }
     }
 

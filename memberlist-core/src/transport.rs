@@ -179,6 +179,7 @@ pub trait Transport: Sized + Send + Sync + 'static {
       let len = src.len();
       conn.write_all(src).await?;
       conn.flush().await?;
+      tracing::trace!(data=?src, "memberlist.transport: promised connection");
 
       Ok(len)
     }

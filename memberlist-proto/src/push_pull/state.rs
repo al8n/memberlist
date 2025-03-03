@@ -2,7 +2,7 @@ use nodecraft::{CheapClone, Node};
 
 use crate::{
   Data, DataRef, DecodeError, DelegateVersion, EncodeError, Meta, ProtocolVersion, State, WireType,
-  merge, skip, split,
+  merge, skip,
 };
 
 /// Push node state is the state push to the remote server.
@@ -289,12 +289,7 @@ where
           offset += 1;
           delegate_version = Some(value);
         }
-        b => {
-          let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|v| DecodeError::unknown_wire_type("PushNodeState", v))?;
-          offset += skip(wire_type, &src[offset..])?;
-        }
+        _ => offset += skip("PushNodeState", &src[offset..])?,
       }
     }
 

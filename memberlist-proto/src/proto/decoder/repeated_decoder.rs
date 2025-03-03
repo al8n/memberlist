@@ -2,7 +2,7 @@ use core::marker::PhantomData;
 
 use crate::{
   Data, DataRef, DecodeError, WireType,
-  utils::{merge, skip, split},
+  utils::{merge, skip},
 };
 
 /// An iterator with can yields the reference type of `D`
@@ -93,11 +93,8 @@ where
     let current_offset = self.current_offset.as_mut()?;
 
     while *current_offset < self.end_offset {
-      // Parse the tag and wire type
-      let b = self.src[*current_offset];
-      *current_offset += 1;
-
-      if b == self.id {
+      if self.src[*current_offset] == self.id {
+        *current_offset += 1;
         let (readed, value) =
           match <D::Ref<'_> as DataRef<D>>::decode_length_delimited(&self.src[*current_offset..]) {
             Ok((readed, value)) => (readed, value),
@@ -107,17 +104,8 @@ where
         self.yields += 1;
         return Some(Ok(value));
       } else {
-        let (wire_type, _) = split(b);
-        let wire_type = match WireType::try_from(wire_type) {
-          Ok(wire_type) => wire_type,
-          Err(wt) => {
-            return Some(Err(DecodeError::unknown_wire_type(
-              core::any::type_name::<Self>(),
-              wt,
-            )));
-          }
-        };
-        *current_offset += match skip(wire_type, &self.src[*current_offset..]) {
+        *current_offset += match skip(core::any::type_name::<Self>(), &self.src[*current_offset..])
+        {
           Ok(offset) => offset,
           Err(e) => return Some(Err(e)),
         };

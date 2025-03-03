@@ -1,6 +1,6 @@
 use smol_str::SmolStr;
 
-use super::{Data, DataRef, DecodeError, EncodeError, WireType, merge, skip, split};
+use super::{Data, DataRef, DecodeError, EncodeError, WireType, merge, skip};
 
 /// Error response from the remote peer
 #[viewit::viewit(
@@ -132,12 +132,7 @@ impl<'a> DataRef<'a, ErrorResponse> for ErrorResponseRef<'a> {
           offset += bytes_read;
           msg = Some(value);
         }
-        b => {
-          let (wire_type, _) = split(b);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|v| DecodeError::unknown_wire_type("ErrorResponse", v))?;
-          offset += skip(wire_type, &src[offset..])?;
-        }
+        _ => offset += skip("ErrorResponse", &src[offset..])?,
       }
     }
 

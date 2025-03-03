@@ -1,9 +1,6 @@
 use const_varint::{encode_u32_varint_to, encoded_u32_varint_len};
 
-use crate::{
-  WireType,
-  utils::{merge, skip, split},
-};
+use crate::utils::{merge, skip};
 
 use super::{Data, DataRef, DecodeError, EncodeError};
 
@@ -46,12 +43,7 @@ where
           offset += bytes_read;
           b = Some(value);
         }
-        other => {
-          let (wire_type, _) = split(other);
-          let wire_type = WireType::try_from(wire_type)
-            .map_err(|v| DecodeError::unknown_wire_type("tuple(2)", v))?;
-          offset += skip(wire_type, &buf[offset..])?;
-        }
+        _ => offset += skip("tuple(2)", &buf[offset..])?,
       }
     }
 

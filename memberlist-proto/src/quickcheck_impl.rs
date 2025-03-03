@@ -3,7 +3,7 @@ use triomphe::Arc;
 
 use super::{
   Ack, Alive, Dead, DelegateVersion, ErrorResponse, IndirectPing, Label, MaybeResolvedAddress,
-  Meta, Nack, NodeState, Ping, ProtocolVersion, PushNodeState, PushPull, SecretKey, State, Suspect,
+  Meta, Nack, NodeState, Ping, ProtocolVersion, PushNodeState, PushPull, State, Suspect,
   proto::{Message, MessageType},
 };
 
@@ -203,7 +203,8 @@ impl<I: Arbitrary, A: Arbitrary> Arbitrary for IndirectPing<I, A> {
   }
 }
 
-impl Arbitrary for SecretKey {
+#[cfg(feature = "encryption")]
+impl Arbitrary for super::SecretKey {
   fn arbitrary(g: &mut Gen) -> Self {
     macro_rules! random {
       ($lit:literal) => {{
@@ -216,9 +217,9 @@ impl Arbitrary for SecretKey {
     }
 
     match u8::arbitrary(g) % 3 {
-      0 => SecretKey::Aes128(random!(16)),
-      1 => SecretKey::Aes192(random!(24)),
-      2 => SecretKey::Aes256(random!(32)),
+      0 => Self::Aes128(random!(16)),
+      1 => Self::Aes192(random!(24)),
+      2 => Self::Aes256(random!(32)),
       _ => unreachable!(),
     }
   }
