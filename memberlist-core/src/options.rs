@@ -41,6 +41,10 @@ pub struct Options {
     getter(const, style = "ref", attrs(doc = "Get the label of the node."),),
     setter(attrs(doc = "Set the label of the node. (Builder pattern)"),)
   )]
+  #[cfg_attr(
+    feature = "serde",
+    serde(default, skip_serializing_if = "Label::is_empty")
+  )]
   label: Label,
 
   /// Skips the check that inbound packets and gossip
@@ -350,6 +354,7 @@ pub struct Options {
     ),
     setter(
       const,
+      rename = "maybe_checksum_algo",
       attrs(
         doc = "Sets the checksum algorithm for the packets sent through transport.",
         cfg(any(
@@ -459,6 +464,7 @@ pub struct Options {
     ),
     setter(
       const,
+      rename = "maybe_encryption_algo",
       attrs(
         doc = "Sets the encryption algorithm for the messages sent through transport.",
         cfg(feature = "encryption"),
@@ -533,11 +539,18 @@ pub struct Options {
         cfg_attr(docsrs, doc(cfg(feature = "encryption")))
       ),
     ),
-    setter(attrs(
-      doc = "Set the primary encryption key in a keyring. (Builder pattern)",
-      cfg(feature = "encryption"),
-      cfg_attr(docsrs, doc(cfg(feature = "encryption")))
-    ),)
+    setter(
+      rename = "maybe_primary_key",
+      attrs(
+        doc = "Set the primary encryption key in a keyring. (Builder pattern)",
+        cfg(feature = "encryption"),
+        cfg_attr(docsrs, doc(cfg(feature = "encryption")))
+      ),
+    )
+  )]
+  #[cfg_attr(
+    feature = "serde",
+    serde(skip_serializing_if = "Option::is_none", default)
   )]
   primary_key: Option<SecretKey>,
 
@@ -560,6 +573,10 @@ pub struct Options {
   )]
   #[cfg(feature = "encryption")]
   #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  #[cfg_attr(
+    feature = "serde",
+    serde(skip_serializing_if = "SecretKeys::is_empty", default)
+  )]
   secret_keys: SecretKeys,
 
   /// Indicates that should the messages sent through transport will be compressed or not.
@@ -599,6 +616,7 @@ pub struct Options {
     ),
     setter(
       const,
+      rename = "maybe_compress_algo",
       attrs(
         doc = "Sets the compress algorithm for the messages sent through transport.",
         cfg(any(
@@ -748,6 +766,73 @@ impl Options {
       .with_probe_interval(Duration::from_secs(1))
       .with_gossip_interval(Duration::from_millis(100))
       .with_gossip_to_the_dead_time(Duration::from_secs(15))
+  }
+
+  /// Set the compression algorithm for the messages
+  /// sent through transport.
+  #[cfg(any(
+    feature = "zstd",
+    feature = "lz4",
+    feature = "brotli",
+    feature = "snappy",
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "zstd",
+      feature = "lz4",
+      feature = "brotli",
+      feature = "snappy",
+    )))
+  )]
+  #[inline]
+  pub fn with_compress_algo(mut self, compress_algo: CompressAlgorithm) -> Self {
+    self.compress_algo = Some(compress_algo);
+    self
+  }
+
+  /// Set the checksum algorithm for the packets
+  /// sent through transport.
+  #[cfg(any(
+    feature = "crc32",
+    feature = "xxhash32",
+    feature = "xxhash64",
+    feature = "xxhash3",
+    feature = "murmur3",
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      feature = "crc32",
+      feature = "xxhash32",
+      feature = "xxhash64",
+      feature = "xxhash3",
+      feature = "murmur3",
+    )))
+  )]
+  #[inline]
+  pub fn with_checksum_algo(mut self, checksum_algo: ChecksumAlgorithm) -> Self {
+    self.checksum_algo = Some(checksum_algo);
+    self
+  }
+
+  /// Set the encryption algorithm for the messages
+  /// sent through transport.
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  #[inline]
+  pub fn with_encryption_algo(mut self, encryption_algo: EncryptionAlgorithm) -> Self {
+    self.encryption_algo = Some(encryption_algo);
+    self
+  }
+
+  /// Set the primary encryption key in a keyring.
+  #[cfg(feature = "encryption")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "encryption")))]
+  #[inline]
+  pub fn with_primary_key(mut self, primary_key: SecretKey) -> Self {
+    self.primary_key = Some(primary_key);
+    self
   }
 }
 

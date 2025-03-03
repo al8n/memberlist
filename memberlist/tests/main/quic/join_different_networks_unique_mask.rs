@@ -68,7 +68,7 @@ macro_rules! join_different_networks_unique_mask {
             t1_opts.add_bind_address(next_socket_addr_v4(idx as u8));
 
             t1_opts
-          }, Options::lan().with_compress_algo(Some(Default::default()))).await;
+          }, Options::lan().with_compress_algo(Default::default())).await;
         });
       }
     }

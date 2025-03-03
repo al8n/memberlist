@@ -23,7 +23,7 @@ where
   let mut opts =
     NetTransportOptions::<_, _, S>::with_stream_layer_options(SmolStr::from(name1), s1)
       .with_primary_key(Some(pk1))
-      .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+      .with_encryption_algo(EncryptionAlgo::PKCS7)
       .with_gossip_verify_outgoing(true);
   opts.add_bind_address(kind.next(0));
   let m1 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, S, _>, _>::new(
@@ -38,7 +38,7 @@ where
   let mut opts =
     NetTransportOptions::<_, _, S>::with_stream_layer_options(SmolStr::from(name2), s2)
       .with_primary_key(Some(pk2))
-      .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+      .with_encryption_algo(EncryptionAlgo::PKCS7)
       .with_gossip_verify_outgoing(true);
   opts.add_bind_address(kind.next(0));
   let m2 = Memberlist::<NetTransport<_, SocketAddrResolver<R>, _, _>, _>::new(
@@ -77,7 +77,7 @@ where
   let mut opts =
     NetTransportOptions::<_, _, S>::with_stream_layer_options(SmolStr::from(name1), s1)
       .with_primary_key(Some(pk1))
-      .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+      .with_encryption_algo(EncryptionAlgo::PKCS7)
       .with_gossip_verify_outgoing(true)
       .with_label(label.cheap_clone());
   opts.add_bind_address(kind.next(0));
@@ -93,7 +93,7 @@ where
   let mut opts =
     NetTransportOptions::<_, _, S>::with_stream_layer_options(SmolStr::from(name2), s2)
       .with_primary_key(Some(pk2))
-      .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+      .with_encryption_algo(EncryptionAlgo::PKCS7)
       .with_gossip_verify_outgoing(true)
       .with_label(label);
   opts.add_bind_address(kind.next(0));

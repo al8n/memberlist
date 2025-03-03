@@ -24,7 +24,7 @@ where
 
   let mut opts1 = NetTransportOptions::<_, _, S1>::with_stream_layer_options("node 1".into(), s1)
     .with_primary_key(Some(pk))
-    .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+    .with_encryption_algo(EncryptionAlgo::PKCS7)
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()))
     .with_label(label.cheap_clone());
@@ -32,7 +32,7 @@ where
 
   let mut opts2 = NetTransportOptions::<_, _, S2>::with_stream_layer_options("node 2".into(), s2)
     .with_primary_key(Some(pk))
-    .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+    .with_encryption_algo(EncryptionAlgo::PKCS7)
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()))
     .with_label(label);

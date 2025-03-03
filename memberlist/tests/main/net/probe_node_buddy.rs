@@ -35,7 +35,7 @@ macro_rules! probe_node_buddy {
           let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_buddy_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
-          probe_node_buddy(t1, Options::lan().with_compress_algo(Some(Default::default())), t2, Options::lan().with_compress_algo(Some(Default::default()))).await;
+          probe_node_buddy(t1, Options::lan().with_compress_algo(Default::default()), t2, Options::lan().with_compress_algo(Default::default())).await;
         });
       }
 
@@ -52,8 +52,8 @@ macro_rules! probe_node_buddy {
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
 
-          let opts1 = Options::lan().with_primary_key(Some(TEST_KEYS[0])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
-          let opts2 = Options::lan().with_offload_size(10).with_primary_key(Some(TEST_KEYS[1])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts1 = Options::lan().with_primary_key(TEST_KEYS[0]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
           probe_node_buddy(t1, opts1, t2, opts2).await;
         });
       }
@@ -86,8 +86,8 @@ macro_rules! probe_node_buddy {
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
 
-          let opts1 = Options::lan().with_compress_algo(Some(Default::default())).with_primary_key(Some(TEST_KEYS[0])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
-          let opts2 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_primary_key(Some(TEST_KEYS[1])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts1 = Options::lan().with_compress_algo(Default::default()).with_primary_key(TEST_KEYS[0]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
           probe_node_buddy(t1, opts1, t2, opts2).await;
         });
       }

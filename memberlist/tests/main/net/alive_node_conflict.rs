@@ -24,7 +24,7 @@ macro_rules! alive_node_conflict {
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan().with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10);
+          let t1_opts = Options::lan().with_primary_key(TEST_KEYS[0]).with_offload_size(10);
 
           alive_node_conflict(t1, t1_opts, "test".into()).await;
         });
@@ -44,7 +44,7 @@ macro_rules! alive_node_conflict {
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan().with_checksum_algo(Some(Default::default()));
+          let t1_opts = Options::lan().with_checksum_algo(Default::default());
 
           alive_node_conflict(t1, t1_opts, "test".into()).await;
         });
@@ -63,7 +63,7 @@ macro_rules! alive_node_conflict {
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10);
+          let t1_opts = Options::lan().with_compress_algo(Default::default()).with_offload_size(10);
 
           alive_node_conflict(t1, t1_opts, "test".into()).await;
         });
@@ -93,10 +93,10 @@ macro_rules! alive_node_conflict {
 
           let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
           let t1_opts = Options::lan()
-            .with_primary_key(Some(TEST_KEYS[0]))
-            .with_encryption_algo(Some(Default::default()))
-            .with_checksum_algo(Some(Default::default()))
-            .with_compress_algo(Some(Default::default()));
+            .with_primary_key(TEST_KEYS[0])
+            .with_encryption_algo(Default::default())
+            .with_checksum_algo(Default::default())
+            .with_compress_algo(Default::default());
 
           alive_node_conflict(t1, t1_opts, "test".into()).await;
         });

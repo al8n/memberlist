@@ -29,7 +29,7 @@ macro_rules! merge_state {
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan().with_compress_algo(Some(Default::default()));
+          let t1_opts = Options::lan().with_compress_algo(Default::default());
 
           merge_state::<_, QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1, t1_opts, "node1".into(), "node2".into(), "node3".into(), "node4".into()).await;
         });

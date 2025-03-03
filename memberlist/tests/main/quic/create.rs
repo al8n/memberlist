@@ -25,7 +25,7 @@ macro_rules! create {
           let mut t1_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("create_node_1".into(), $expr);
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
-          memberlist_create::<QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan().with_compress_algo(Some(Default::default()))).await;
+          memberlist_create::<QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan().with_compress_algo(Default::default())).await;
         });
       }
     }

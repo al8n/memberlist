@@ -70,11 +70,11 @@ macro_rules! probe_node_awareness_degraded {
 
           probe_node_awareness_degraded(
             t1,
-            Options::lan().with_compress_algo(Some(Default::default())),
+            Options::lan().with_compress_algo(Default::default()),
             t2,
-            Options::lan().with_compress_algo(Some(Default::default())),
+            Options::lan().with_compress_algo(Default::default()),
             t3,
-            Options::lan().with_compress_algo(Some(Default::default())),
+            Options::lan().with_compress_algo(Default::default()),
             suspect_node,
           ).await;
         });

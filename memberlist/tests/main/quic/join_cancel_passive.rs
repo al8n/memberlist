@@ -35,7 +35,7 @@ macro_rules! join_cancel_passive {
           let mut t2_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options(id2.clone(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
 
-          memberlist_join_cancel_passive::<QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(id1, t1_opts, Options::lan().with_compress_algo(Some(Default::default())), id2, t2_opts, Options::lan().with_compress_algo(Some(Default::default()))).await;
+          memberlist_join_cancel_passive::<QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(id1, t1_opts, Options::lan().with_compress_algo(Default::default()), id2, t2_opts, Options::lan().with_compress_algo(Default::default())).await;
         });
       }
     }

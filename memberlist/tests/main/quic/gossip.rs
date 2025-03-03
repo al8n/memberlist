@@ -87,9 +87,9 @@ macro_rules! gossip {
             t1,
             t1_opts,
             t2,
-            Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10),
+            Options::lan().with_compress_algo(Default::default()).with_offload_size(10),
             t3,
-            Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10),
+            Options::lan().with_compress_algo(Default::default()).with_offload_size(10),
           ).await;
         });
       }
@@ -108,7 +108,7 @@ macro_rules! gossip {
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = QuicTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_label(label.clone());
+          let t1_opts = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_label(label.clone());
 
           let mut t2_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("gossip_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
@@ -122,9 +122,9 @@ macro_rules! gossip {
             t1,
             t1_opts,
             t2,
-            Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_label(label.clone()),
+            Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_label(label.clone()),
             t3,
-            Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_label(label.clone()),
+            Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_label(label.clone()),
           ).await;
         });
       }

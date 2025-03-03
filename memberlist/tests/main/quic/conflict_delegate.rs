@@ -28,7 +28,7 @@ macro_rules! conflict_delegate {
             t1_opts.add_bind_address(next_socket_addr_v4(0));
 
             t1_opts
-          }, "conflict".into(), Options::lan().with_compress_algo(Some(Default::default()))).await;
+          }, "conflict".into(), Options::lan().with_compress_algo(Default::default())).await;
         });
       }
     }

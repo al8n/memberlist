@@ -33,7 +33,7 @@ macro_rules! join_cancel {
           let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("join_cancel_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
 
-          memberlist_join_cancel::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan().with_compress_algo(Some(Default::default())), t2_opts, Options::lan().with_compress_algo(Some(Default::default()))).await;
+          memberlist_join_cancel::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan().with_compress_algo(Default::default()), t2_opts, Options::lan().with_compress_algo(Default::default())).await;
         });
       }
 
@@ -52,7 +52,7 @@ macro_rules! join_cancel {
           let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("join_cancel_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
 
-          memberlist_join_cancel::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan().with_compress_algo(Some(Default::default())), t2_opts, Options::lan().with_compress_algo(Some(Default::default()))).await;
+          memberlist_join_cancel::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan().with_compress_algo(Default::default()), t2_opts, Options::lan().with_compress_algo(Default::default())).await;
         });
       }
 
@@ -66,8 +66,8 @@ macro_rules! join_cancel {
           let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("join_cancel_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let opts1 = Options::lan().with_primary_key(Some(TEST_KEYS[0])).with_secret_keys(TEST_KEYS.into());
-          let opts2 = Options::lan().with_offload_size(10).with_primary_key(Some(TEST_KEYS[1])).with_secret_keys(TEST_KEYS.into());
+          let opts1 = Options::lan().with_primary_key(TEST_KEYS[0]).with_secret_keys(TEST_KEYS.into());
+          let opts2 = Options::lan().with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_secret_keys(TEST_KEYS.into());
 
           memberlist_join_cancel::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, opts1, t2_opts, opts2).await;
         });
@@ -98,8 +98,8 @@ macro_rules! join_cancel {
           let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("join_cancel_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
 
-          let opts1 = Options::lan().with_compress_algo(Some(Default::default())).with_primary_key(Some(TEST_KEYS[0])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into());
-          let opts2 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_primary_key(Some(TEST_KEYS[1])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into());
+          let opts1 = Options::lan().with_compress_algo(Default::default()).with_primary_key(TEST_KEYS[0]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into());
+          let opts2 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into());
 
           memberlist_join_cancel::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, opts1, t2_opts, opts2).await;
         });

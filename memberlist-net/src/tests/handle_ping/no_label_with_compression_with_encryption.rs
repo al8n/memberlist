@@ -20,7 +20,7 @@ where
   let name = format!("{kind}_ping_server_no_label_with_compression_with_encryption_client_no_label_no_compression_no_encryption");
   let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
-    .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+    .with_encryption_algo(EncryptionAlgo::PKCS7)
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next(0));
@@ -51,7 +51,7 @@ where
   let name = format!("{kind}_ping_server_no_label_no_compression_no_encryption_client_no_label_no_compression_with_encryption");
   let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
-    .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+    .with_encryption_algo(EncryptionAlgo::PKCS7)
     .with_gossip_verify_outgoing(false);
   opts.add_bind_address(kind.next(0));
   let trans = NetTransport::<_, SocketAddrResolver<R>, _, _>::new(opts)
@@ -83,7 +83,7 @@ where
   let name = format!("{kind}_ping_server_no_label_with_compression_with_encryption_client_no_label_with_compression_with_encryption");
   let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
-    .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+    .with_encryption_algo(EncryptionAlgo::PKCS7)
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()));
   opts.add_bind_address(kind.next(0));

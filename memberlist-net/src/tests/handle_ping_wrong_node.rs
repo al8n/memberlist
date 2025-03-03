@@ -51,7 +51,7 @@ where
 
   let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
-    .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+    .with_encryption_algo(EncryptionAlgo::PKCS7)
     .with_gossip_verify_outgoing(true)
     .with_compressor(Some(Compressor::default()))
     .with_offload_size(10)
@@ -115,7 +115,7 @@ where
 
   let mut opts = NetTransportOptions::<_, _, S>::with_stream_layer_options(name.into(), s)
     .with_primary_key(Some(pk))
-    .with_encryption_algo(Some(EncryptionAlgo::PKCS7))
+    .with_encryption_algo(EncryptionAlgo::PKCS7)
     .with_gossip_verify_outgoing(true)
     .with_offload_size(10)
     .with_label(label);

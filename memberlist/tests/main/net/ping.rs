@@ -48,7 +48,7 @@ macro_rules! ping {
             "bad".into(),
             addr,
           );
-          ping(t1, Options::lan().with_checksum_algo(Some(Default::default())).with_offload_size(10), t2, Options::lan().with_checksum_algo(Some(Default::default())), bad).await;
+          ping(t1, Options::lan().with_checksum_algo(Default::default()).with_offload_size(10), t2, Options::lan().with_checksum_algo(Default::default()), bad).await;
         });
       }
 
@@ -75,7 +75,7 @@ macro_rules! ping {
             "bad".into(),
             addr,
           );
-          ping(t1, Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10), t2, Options::lan().with_compress_algo(Some(Default::default())), bad).await;
+          ping(t1, Options::lan().with_compress_algo(Default::default()).with_offload_size(10), t2, Options::lan().with_compress_algo(Default::default()), bad).await;
         });
       }
 
@@ -91,8 +91,8 @@ macro_rules! ping {
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
 
-          let opts1 = Options::lan().with_primary_key(Some(TEST_KEYS[0])).with_secret_keys(TEST_KEYS.into());
-          let opts2 = Options::lan().with_offload_size(10).with_primary_key(Some(TEST_KEYS[1])).with_secret_keys(TEST_KEYS.into());
+          let opts1 = Options::lan().with_primary_key(TEST_KEYS[0]).with_secret_keys(TEST_KEYS.into());
+          let opts2 = Options::lan().with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_secret_keys(TEST_KEYS.into());
 
           let mut addr = next_socket_addr_v4(0);
           addr.set_port(t1.advertise_address().port());
@@ -131,8 +131,8 @@ macro_rules! ping {
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
 
-          let opts1 = Options::lan().with_compress_algo(Some(Default::default())).with_primary_key(Some(TEST_KEYS[0])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into());
-          let opts2 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_primary_key(Some(TEST_KEYS[1])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into());
+          let opts1 = Options::lan().with_compress_algo(Default::default()).with_primary_key(TEST_KEYS[0]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into());
+          let opts2 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into());
 
           let mut addr = next_socket_addr_v4(0);
           addr.set_port(t1.advertise_address().port());

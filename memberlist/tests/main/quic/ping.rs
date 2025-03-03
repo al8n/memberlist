@@ -50,7 +50,7 @@ macro_rules! ping {
             "bad".into(),
             addr,
           );
-          ping(t1, Options::lan().with_compress_algo(Some(Default::default())), t2, Options::lan().with_compress_algo(Some(Default::default())), bad).await;
+          ping(t1, Options::lan().with_compress_algo(Default::default()), t2, Options::lan().with_compress_algo(Default::default()), bad).await;
         });
       }
     }

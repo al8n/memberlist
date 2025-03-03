@@ -78,9 +78,9 @@ macro_rules! probe_node_awareness_missed_nack {
 
           probe_node_awareness_missed_nack(
             t1,
-            Options::lan().with_compress_algo(Some(Default::default())),
+            Options::lan().with_compress_algo(Default::default()),
             t2,
-            Options::lan().with_compress_algo(Some(Default::default())),
+            Options::lan().with_compress_algo(Default::default()),
             node3,
             node4,
           ).await;

@@ -45,9 +45,9 @@ macro_rules! push_pull {
 
           push_pull(
             t1,
-            Options::lan().with_compress_algo(Some(Default::default())),
+            Options::lan().with_compress_algo(Default::default()),
             t2,
-            Options::lan().with_compress_algo(Some(Default::default())),
+            Options::lan().with_compress_algo(Default::default()),
           ).await;
         });
       }

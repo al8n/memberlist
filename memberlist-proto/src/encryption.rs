@@ -376,6 +376,38 @@ smallvec_wrapper::smallvec_wrapper!(
   pub SecretKeys([SecretKey; 3]);
 );
 
+impl SecretKeys {
+  /// Returns `true` if the collection is empty
+  ///
+  /// # Example
+  ///
+  /// ```
+  /// use memberlist_proto::encryption::SecretKeys;
+  ///
+  /// let keys = SecretKeys::default();
+  /// assert!(keys.is_empty());
+  /// ```
+  #[inline]
+  pub fn is_empty(&self) -> bool {
+    self.0.is_empty()
+  }
+
+  /// Returns the length of the collection
+  ///
+  /// # Example
+  ///
+  /// ```
+  /// use memberlist_proto::encryption::SecretKeys;
+  ///
+  /// let keys = SecretKeys::default();
+  /// assert_eq!(keys.len(), 0);
+  /// ```
+  #[inline]
+  pub fn len(&self) -> usize {
+    self.0.len()
+  }
+}
+
 /// Security errors
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum EncryptionError {

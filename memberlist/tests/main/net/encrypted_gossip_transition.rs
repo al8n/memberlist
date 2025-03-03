@@ -177,7 +177,7 @@ where
   let (conf0, topts) = new_config(SmolStr::from("m0"), None).await;
   let m0 = create_ok(
     conf0
-      .with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")))
+      .with_primary_key(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg=="))
       .with_gossip_verify_incoming(false)
       .with_gossip_verify_outgoing(false),
     topts,
@@ -200,7 +200,7 @@ where
 
   let m1 = create_ok(
     conf1
-      .with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")))
+      .with_primary_key(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg=="))
       .with_gossip_verify_incoming(false)
       .with_gossip_verify_outgoing(false),
     topts,
@@ -228,7 +228,7 @@ where
 
   let m0 = create_ok(
     conf0
-      .with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")))
+      .with_primary_key(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg=="))
       .with_gossip_verify_incoming(false),
     topts,
   )
@@ -249,7 +249,7 @@ where
   let (conf1, topts) = new_config(SmolStr::from("m1"), None).await;
   let m1 = create_ok(
     conf1
-      .with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")))
+      .with_primary_key(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg=="))
       .with_gossip_verify_incoming(false),
     topts,
   )
@@ -275,7 +275,7 @@ where
   // Resurrect the first node with the final stage of gossip transition settings.
   let (conf0, topts) = new_config(SmolStr::from("m0"), None).await;
   let m0 = create_ok(
-    conf0.with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg=="))),
+    conf0.with_primary_key(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")),
     topts,
   )
   .await;
@@ -295,7 +295,7 @@ where
   // Resurrect the second node with the final stage of gossip transition settings.
   let (conf1, topts) = new_config(SmolStr::from("m1"), None).await;
   let m1 = create_ok(
-    conf1.with_primary_key(Some(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg=="))),
+    conf1.with_primary_key(SecretKey::Aes192(*b"Hi16ZXu2lNCRVwtr20khAg==")),
     topts,
   )
   .await;

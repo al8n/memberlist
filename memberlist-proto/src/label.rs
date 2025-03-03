@@ -22,7 +22,7 @@ pub enum ParseLabelError {
 ///   length of label name:  u8 (because labels can't be longer than 253 bytes)
 ///   label name:            bytes (max 253 bytes)
 /// ```
-#[derive(Clone, derive_more::Display)]
+#[derive(Clone, Default, derive_more::Display)]
 #[display("{_0}")]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct Label(pub(crate) SmolStr);

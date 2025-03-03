@@ -36,7 +36,7 @@ macro_rules! probe_node_awareness_improved {
           let mut t2_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("probe_node_awareness_improved_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = QuicTransport::new(t2_opts).await.unwrap();
-          probe_node_awareness_improved(t1, Options::lan().with_compress_algo(Some(Default::default())), t2, Options::lan().with_compress_algo(Some(Default::default()))).await;
+          probe_node_awareness_improved(t1, Options::lan().with_compress_algo(Default::default()), t2, Options::lan().with_compress_algo(Default::default())).await;
         });
       }
     }

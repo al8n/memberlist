@@ -45,9 +45,9 @@ macro_rules! gossip_to_dead {
 
           gossip_to_dead(
             t1,
-            Options::lan().with_checksum_algo(Some(Default::default())),
+            Options::lan().with_checksum_algo(Default::default()),
             t2,
-            Options::lan().with_checksum_algo(Some(Default::default())),
+            Options::lan().with_checksum_algo(Default::default()),
           ).await;
         });
       }
@@ -72,9 +72,9 @@ macro_rules! gossip_to_dead {
 
           gossip_to_dead(
             t1,
-            Options::lan().with_compress_algo(Some(Default::default())),
+            Options::lan().with_compress_algo(Default::default()),
             t2,
-            Options::lan().with_compress_algo(Some(Default::default())),
+            Options::lan().with_compress_algo(Default::default()),
           ).await;
         });
       }
@@ -92,8 +92,8 @@ macro_rules! gossip_to_dead {
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
 
-          let opts1 = Options::lan().with_primary_key(Some(TEST_KEYS[0])).with_secret_keys(TEST_KEYS.into());
-          let opts2 = Options::lan().with_primary_key(Some(TEST_KEYS[1])).with_secret_keys(TEST_KEYS.into());
+          let opts1 = Options::lan().with_primary_key(TEST_KEYS[0]).with_secret_keys(TEST_KEYS.into());
+          let opts2 = Options::lan().with_primary_key(TEST_KEYS[1]).with_secret_keys(TEST_KEYS.into());
 
           gossip_to_dead(
             t1,
@@ -132,8 +132,8 @@ macro_rules! gossip_to_dead {
           t2_opts.add_bind_address(next_socket_addr_v4(0));
           let t2 = NetTransport::new(t2_opts).await.unwrap();
 
-          let opts1 = Options::lan().with_compress_algo(Some(Default::default())).with_primary_key(Some(TEST_KEYS[0])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
-          let opts2 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_primary_key(Some(TEST_KEYS[1])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts1 = Options::lan().with_compress_algo(Default::default()).with_primary_key(TEST_KEYS[0]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
 
           gossip_to_dead(
             t1,

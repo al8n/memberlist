@@ -24,7 +24,7 @@ macro_rules! conflict_delegate {
             t1_opts.add_bind_address(next_socket_addr_v4(0));
 
             t1_opts
-          }, "conflict".into(), Options::lan().with_primary_key(Some(TEST_KEYS[0]))).await;
+          }, "conflict".into(), Options::lan().with_primary_key(TEST_KEYS[0])).await;
         });
       }
 
@@ -42,7 +42,7 @@ macro_rules! conflict_delegate {
             t1_opts.add_bind_address(next_socket_addr_v4(0));
 
             t1_opts
-          }, "conflict".into(), Options::lan().with_compress_algo(Some(Default::default()))).await;
+          }, "conflict".into(), Options::lan().with_compress_algo(Default::default())).await;
         });
       }
 
@@ -61,7 +61,7 @@ macro_rules! conflict_delegate {
             t1_opts.add_bind_address(next_socket_addr_v4(0));
 
             t1_opts
-          }, "conflict".into(), Options::lan().with_checksum_algo(Some(Default::default()))).await;
+          }, "conflict".into(), Options::lan().with_checksum_algo(Default::default())).await;
         });
       }
 
@@ -90,9 +90,9 @@ macro_rules! conflict_delegate {
 
             t1_opts
           }, "conflict".into(), Options::lan()
-            .with_primary_key(Some(TEST_KEYS[0]))
-            .with_checksum_algo(Some(Default::default()))
-            .with_compress_algo(Some(Default::default()))).await;
+            .with_primary_key(TEST_KEYS[0])
+            .with_checksum_algo(Default::default())
+            .with_compress_algo(Default::default())).await;
         });
       }
     }

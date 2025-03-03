@@ -68,9 +68,9 @@ macro_rules! probe_node_awareness_degraded {
             addr,
           );
 
-          let opts1 = Options::lan().with_checksum_algo(Some(Default::default())).with_label("test".try_into().unwrap());
-          let opts2 = Options::lan().with_checksum_algo(Some(Default::default())).with_offload_size(10).with_label("test".try_into().unwrap());
-          let opts3 = Options::lan().with_checksum_algo(Some(Default::default())).with_offload_size(10).with_label("test".try_into().unwrap());
+          let opts1 = Options::lan().with_checksum_algo(Default::default()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_checksum_algo(Default::default()).with_offload_size(10).with_label("test".try_into().unwrap());
+          let opts3 = Options::lan().with_checksum_algo(Default::default()).with_offload_size(10).with_label("test".try_into().unwrap());
 
           probe_node_awareness_degraded(
             t1,
@@ -113,9 +113,9 @@ macro_rules! probe_node_awareness_degraded {
             addr,
           );
 
-          let opts1 = Options::lan().with_compress_algo(Some(Default::default())).with_label("test".try_into().unwrap());
-          let opts2 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_label("test".try_into().unwrap());
-          let opts3 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_label("test".try_into().unwrap());
+          let opts1 = Options::lan().with_compress_algo(Default::default()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_label("test".try_into().unwrap());
+          let opts3 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_label("test".try_into().unwrap());
 
           probe_node_awareness_degraded(
             t1,
@@ -153,9 +153,9 @@ macro_rules! probe_node_awareness_degraded {
             addr,
           );
 
-          let opts1 = Options::lan().with_primary_key(Some(TEST_KEYS[0])).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
-          let opts2 = Options::lan().with_offload_size(10).with_primary_key(Some(TEST_KEYS[1])).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
-          let opts3 = Options::lan().with_offload_size(10).with_primary_key(Some(TEST_KEYS[2])).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts1 = Options::lan().with_primary_key(TEST_KEYS[0]).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts3 = Options::lan().with_offload_size(10).with_primary_key(TEST_KEYS[2]).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
 
           probe_node_awareness_degraded(
             t1,
@@ -208,9 +208,9 @@ macro_rules! probe_node_awareness_degraded {
             addr,
           );
 
-          let opts1 = Options::lan().with_compress_algo(Some(Default::default())).with_primary_key(Some(TEST_KEYS[0])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
-          let opts2 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_primary_key(Some(TEST_KEYS[1])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
-          let opts3 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_primary_key(Some(TEST_KEYS[2])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts1 = Options::lan().with_compress_algo(Default::default()).with_primary_key(TEST_KEYS[0]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts3 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_primary_key(TEST_KEYS[2]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
 
           probe_node_awareness_degraded(
             t1,

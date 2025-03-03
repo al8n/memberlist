@@ -76,7 +76,7 @@ macro_rules! reset_nodes {
             addr,
           );
 
-          reset_nodes(t1, Options::lan().with_compress_algo(Some(Default::default())), n1, n2, n3).await;
+          reset_nodes(t1, Options::lan().with_compress_algo(Default::default()), n1, n2, n3).await;
         });
       }
     }

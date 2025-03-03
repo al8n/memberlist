@@ -29,7 +29,7 @@ macro_rules! suspect_node {
 
           let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
 
-          suspect_node::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1, Options::lan().with_checksum_algo(Some(Default::default())).with_offload_size(10), "test".into()).await;
+          suspect_node::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1, Options::lan().with_checksum_algo(Default::default()).with_offload_size(10), "test".into()).await;
         });
       }
 
@@ -47,7 +47,7 @@ macro_rules! suspect_node {
 
           let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
 
-          suspect_node::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1, Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10), "test".into()).await;
+          suspect_node::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1, Options::lan().with_compress_algo(Default::default()).with_offload_size(10), "test".into()).await;
         });
       }
 
@@ -60,7 +60,7 @@ macro_rules! suspect_node {
 
           let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
 
-          suspect_node::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1, Options::lan().with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10), "test".into()).await;
+          suspect_node::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1, Options::lan().with_primary_key(TEST_KEYS[0]).with_offload_size(10), "test".into()).await;
         });
       }
 
@@ -88,7 +88,7 @@ macro_rules! suspect_node {
 
           let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
 
-          let opts = Options::lan().with_primary_key(Some(TEST_KEYS[0])).with_offload_size(10).with_compress_algo(Some(Default::default())).with_checksum_algo(Some(Default::default()));
+          let opts = Options::lan().with_primary_key(TEST_KEYS[0]).with_offload_size(10).with_compress_algo(Default::default()).with_checksum_algo(Default::default());
           suspect_node::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1, opts, "test".into()).await;
         });
       }

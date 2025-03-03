@@ -21,7 +21,7 @@ pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
     get_transport(1, label1.clone(), CompressAlgorithm::default()).await,
     Options::lan()
       .with_label(label1.clone())
-      .with_compress_algo(Some(CompressAlgorithm::default())),
+      .with_compress_algo(CompressAlgorithm::default()),
   )
   .await
   .unwrap();
@@ -29,7 +29,7 @@ pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
     get_transport(2, label1.clone(), CompressAlgorithm::default()).await,
     Options::lan()
       .with_label(label1.clone())
-      .with_compress_algo(Some(CompressAlgorithm::default())),
+      .with_compress_algo(CompressAlgorithm::default()),
   )
   .await
   .unwrap();

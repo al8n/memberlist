@@ -29,7 +29,7 @@ macro_rules! join_with_labels {
             t1_opts.add_bind_address(next_socket_addr_v4(0));
 
             t1_opts
-          }, Options::lan().with_compress_algo(Some(Default::default()))).await;
+          }, Options::lan().with_compress_algo(Default::default())).await;
         });
       }
     }

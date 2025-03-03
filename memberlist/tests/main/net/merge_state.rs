@@ -30,7 +30,7 @@ macro_rules! merge_state {
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan().with_checksum_algo(Some(Default::default())).with_label("test".try_into().unwrap());
+          let t1_opts = Options::lan().with_checksum_algo(Default::default()).with_label("test".try_into().unwrap());
 
           merge_state::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1, t1_opts, "node1".into(), "node2".into(), "node3".into(), "node4".into()).await;
         });
@@ -49,7 +49,7 @@ macro_rules! merge_state {
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan().with_compress_algo(Some(Default::default())).with_label("test".try_into().unwrap());
+          let t1_opts = Options::lan().with_compress_algo(Default::default()).with_label("test".try_into().unwrap());
 
           merge_state::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1, t1_opts, "node1".into(), "node2".into(), "node3".into(), "node4".into()).await;
         });
@@ -63,7 +63,7 @@ macro_rules! merge_state {
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let t1_opts = Options::lan().with_primary_key(Some(TEST_KEYS[0])).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let t1_opts = Options::lan().with_primary_key(TEST_KEYS[0]).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
 
           merge_state::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1, t1_opts, "node1".into(), "node2".into(), "node3".into(), "node4".into()).await;
         });
@@ -92,7 +92,7 @@ macro_rules! merge_state {
           t1_opts.add_bind_address(next_socket_addr_v4(0));
 
           let t1 = NetTransport::<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>::new(t1_opts).await.unwrap();
-          let opts1 = Options::lan().with_compress_algo(Some(Default::default())).with_primary_key(Some(TEST_KEYS[0])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts1 = Options::lan().with_compress_algo(Default::default()).with_primary_key(TEST_KEYS[0]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
 
           merge_state::<_, NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1, opts1, "node1".into(), "node2".into(), "node3".into(), "node4".into()).await;
         });

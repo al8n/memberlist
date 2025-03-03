@@ -54,9 +54,9 @@ macro_rules! gossip {
           t3_opts.add_bind_address(next_socket_addr_v4(0));
           let t3 = NetTransport::new(t3_opts).await.unwrap();
 
-          let opts1 = Options::lan().with_checksum_algo(Some(Default::default())).with_label("test".try_into().unwrap());
-          let opts2 = Options::lan().with_checksum_algo(Some(Default::default())).with_offload_size(10).with_label("test".try_into().unwrap());
-          let opts3 = Options::lan().with_checksum_algo(Some(Default::default())).with_offload_size(10).with_label("test".try_into().unwrap());
+          let opts1 = Options::lan().with_checksum_algo(Default::default()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_checksum_algo(Default::default()).with_offload_size(10).with_label("test".try_into().unwrap());
+          let opts3 = Options::lan().with_checksum_algo(Default::default()).with_offload_size(10).with_label("test".try_into().unwrap());
 
           gossip(
             t1,
@@ -91,9 +91,9 @@ macro_rules! gossip {
           t3_opts.add_bind_address(next_socket_addr_v4(0));
           let t3 = NetTransport::new(t3_opts).await.unwrap();
 
-          let opts1 = Options::lan().with_compress_algo(Some(Default::default())).with_label("test".try_into().unwrap());
-          let opts2 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_label("test".try_into().unwrap());
-          let opts3 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_label("test".try_into().unwrap());
+          let opts1 = Options::lan().with_compress_algo(Default::default()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_label("test".try_into().unwrap());
+          let opts3 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_label("test".try_into().unwrap());
 
           gossip(
             t1,
@@ -123,9 +123,9 @@ macro_rules! gossip {
           t3_opts.add_bind_address(next_socket_addr_v4(0));
           let t3 = NetTransport::new(t3_opts).await.unwrap();
 
-          let opts1 = Options::lan().with_primary_key(Some(TEST_KEYS[0])).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
-          let opts2 = Options::lan().with_offload_size(10).with_primary_key(Some(TEST_KEYS[1])).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
-          let opts3 = Options::lan().with_offload_size(10).with_primary_key(Some(TEST_KEYS[2])).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts1 = Options::lan().with_primary_key(TEST_KEYS[0]).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts3 = Options::lan().with_offload_size(10).with_primary_key(TEST_KEYS[2]).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
 
           gossip(
             t1,
@@ -170,9 +170,9 @@ macro_rules! gossip {
           t3_opts.add_bind_address(next_socket_addr_v4(0));
           let t3 = NetTransport::new(t3_opts).await.unwrap();
 
-          let opts1 = Options::lan().with_compress_algo(Some(Default::default())).with_primary_key(Some(TEST_KEYS[0])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
-          let opts2 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_primary_key(Some(TEST_KEYS[1])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
-          let opts3 = Options::lan().with_compress_algo(Some(Default::default())).with_offload_size(10).with_primary_key(Some(TEST_KEYS[2])).with_checksum_algo(Some(Default::default())).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts1 = Options::lan().with_compress_algo(Default::default()).with_primary_key(TEST_KEYS[0]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts2 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_primary_key(TEST_KEYS[1]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
+          let opts3 = Options::lan().with_compress_algo(Default::default()).with_offload_size(10).with_primary_key(TEST_KEYS[2]).with_checksum_algo(Default::default()).with_secret_keys(TEST_KEYS.into()).with_label("test".try_into().unwrap());
 
           gossip(
             t1,

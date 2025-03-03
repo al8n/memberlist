@@ -34,7 +34,7 @@ macro_rules! user_data {
           let mut t2_opts = QuicTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("user_data_node_2".into(), $expr);
           t2_opts.add_bind_address(next_socket_addr_v4(0));
 
-          memberlist_user_data::<QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan().with_compress_algo(Some(Default::default())), t2_opts, Options::lan().with_compress_algo(Some(Default::default()))).await;
+          memberlist_user_data::<QuicTransport<SmolStr, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan().with_compress_algo(Default::default()), t2_opts, Options::lan().with_compress_algo(Default::default())).await;
         });
       }
     }
