@@ -147,6 +147,8 @@ impl TryFrom<u8> for WireType {
       0 => Self::Byte,
       1 => Self::Varint,
       2 => Self::LengthDelimited,
+      3 => Self::Fixed32,
+      4 => Self::Fixed64,
       _ => return Err(value),
     })
   }
@@ -181,6 +183,7 @@ pub mod utils {
 
     let mut offset = 0;
     let (wire_type, _) = split(src[offset]);
+
     let wire_type =
       WireType::try_from(wire_type).map_err(|v| DecodeError::unknown_wire_type(ty, v))?;
     offset += 1;
