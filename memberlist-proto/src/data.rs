@@ -263,12 +263,14 @@ pub enum DecodeError {
   },
 
   /// Returned when there is a unknown wire type.
-  #[error("unknown wire type value {value} when decoding {ty}")]
+  #[error("unknown wire type value {value} with tag {tag} when decoding {ty}")]
   UnknownWireType {
     /// The type of the message.
     ty: &'static str,
     /// The unknown wire type value.
     value: u8,
+    /// The tag of the field.
+    tag: u8,
   },
 
   /// Returned when finding a unknown tag.
@@ -320,8 +322,8 @@ impl DecodeError {
 
   /// Creates a new unknown wire type decoding error.
   #[inline]
-  pub const fn unknown_wire_type(ty: &'static str, value: u8) -> Self {
-    Self::UnknownWireType { ty, value }
+  pub const fn unknown_wire_type(ty: &'static str, value: u8, tag: u8) -> Self {
+    Self::UnknownWireType { ty, value, tag }
   }
 
   /// Creates a new unknown tag decoding error.

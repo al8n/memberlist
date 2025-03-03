@@ -182,10 +182,10 @@ pub mod utils {
     }
 
     let mut offset = 0;
-    let (wire_type, _) = split(src[offset]);
+    let (wire_type, tag) = split(src[offset]);
 
     let wire_type =
-      WireType::try_from(wire_type).map_err(|v| DecodeError::unknown_wire_type(ty, v))?;
+      WireType::try_from(wire_type).map_err(|v| DecodeError::unknown_wire_type(ty, v, tag))?;
     offset += 1;
     let src = &src[offset..];
     match wire_type {

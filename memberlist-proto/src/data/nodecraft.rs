@@ -4,7 +4,7 @@ use either::Either;
 use nodecraft::{Domain, DomainRef, HostAddr, HostAddrRef, Node, NodeId, NodeIdRef};
 
 use super::{
-  super::{WireType, merge, skip, split},
+  super::{WireType, merge, skip},
   Data, DataRef, DecodeError, EncodeError,
 };
 
@@ -79,35 +79,52 @@ const _: () = {
 
   impl<'a> DataRef<'a, HostAddr> for HostAddrRef<'a> {
     fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError> {
-      if buf.is_empty() {
-        return Err(DecodeError::buffer_underflow());
-      }
+      let mut offset = 0;
+      let buf_len = buf.len();
+      let mut value = None;
 
-      let b = buf[0];
-      match b {
-        HOST_ADDR_SOCKET_BYTE => {
-          let (bytes_read, addr) =
-            <SocketAddr as DataRef<SocketAddr>>::decode_length_delimited(&buf[1..])?;
-          Ok((bytes_read + 1, Self::from(addr)))
-        }
-        HOST_ADDR_DOMAIN_BYTE => {
-          let (bytes_read, domain) =
-            <DomainRef<'_> as DataRef<Domain>>::decode_length_delimited(&buf[1..])?;
-          let required = 1 + bytes_read + 2;
-          if required > buf.len() {
-            return Err(DecodeError::buffer_underflow());
+      while offset < buf_len {
+        match buf[offset] {
+          HOST_ADDR_SOCKET_BYTE => {
+            if value.is_some() {
+              return Err(DecodeError::duplicate_field(
+                "HostAddr",
+                "addr",
+                HOST_ADDR_SOCKET_TAG,
+              ));
+            }
+            offset += 1;
+            let (bytes_read, addr) =
+              <SocketAddr as DataRef<SocketAddr>>::decode_length_delimited(&buf[offset..])?;
+            offset += bytes_read;
+            value = Some(Self::from(addr));
           }
-          let port = u16::from_be_bytes(buf[1 + bytes_read..required].try_into().unwrap());
-          Ok((required, Self::from((domain, port))))
-        }
-        b => {
-          let (wire_type, tag) = split(b);
-          WireType::try_from(wire_type)
-            .map_err(|v| DecodeError::unknown_wire_type("HostAddr", v))?;
+          HOST_ADDR_DOMAIN_BYTE => {
+            if value.is_some() {
+              return Err(DecodeError::duplicate_field(
+                "HostAddr",
+                "domain",
+                HOST_ADDR_DOMAIN_TAG,
+              ));
+            }
 
-          Err(DecodeError::unknown_tag("HostAddr", tag))
+            offset += 1;
+            let (bytes_read, domain) =
+              <DomainRef<'_> as DataRef<Domain>>::decode_length_delimited(&buf[offset..])?;
+            let required = offset + bytes_read + 2;
+            if required > buf_len {
+              return Err(DecodeError::buffer_underflow());
+            }
+            let port = u16::from_be_bytes(buf[offset + bytes_read..required].try_into().unwrap());
+            offset += bytes_read + 2;
+            value = Some(Self::from((domain, port)));
+          }
+          _ => offset += skip("HostAddr", &buf[offset..])?,
         }
       }
+
+      let value = value.ok_or_else(|| DecodeError::missing_field("HostAddr", "value"))?;
+      Ok((offset, value))
     }
   }
 
@@ -204,13 +221,7 @@ const _: () = {
             offset += bytes_read;
             address = Some(value);
           }
-          _ => {
-            offset += skip("Node", &src[offset..])?;
-            // let (wire_type, _) = split(b);
-            // let wire_type = WireType::try_from(wire_type)
-            //   .map_err(|v| DecodeError::unknown_wire_type("Node", v))?;
-            // offset += skip(wire_type, &src[offset..])?;
-          }
+          _ => offset += skip("Node", &src[offset..])?,
         }
       }
 
