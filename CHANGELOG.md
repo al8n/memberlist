@@ -12,6 +12,10 @@
 - Support `crc32`, `xxhash64`, `xxhash32`, `xxhash3`, `murmur3` for checksuming.
 - Unify returned error, all exported APIs return `Error` on `Result::Err`.
 
+### Example
+
+- Add [`toydb`](./examples/toydb/) Example
+
 ### Breakage
 
 - Remove `native-tls` supports
