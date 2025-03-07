@@ -90,8 +90,63 @@ pub enum SecretKey {
 
 impl SecretKey {
   /// Returns the base64 encoded secret key
+  ///
+  /// It is recommended to use [`SecretKey::encode_base64`] if you want to encode the key to a buffer
+  /// without allocating a new string.
   pub fn to_base64(&self) -> String {
     b64.encode(self)
+  }
+
+  /// Returns the base64 encoded length of the secret key
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use memberlist_proto::encryption::SecretKey;
+  ///
+  /// let key = SecretKey::random_aes128();
+  /// assert_eq!(key.base64_len(), 24);
+  ///
+  /// let key = SecretKey::random_aes192();
+  /// assert_eq!(key.base64_len(), 32);
+  ///
+  /// let key = SecretKey::random_aes256();
+  /// assert_eq!(key.base64_len(), 44);
+  /// ```
+  #[inline]
+  pub const fn base64_len(&self) -> usize {
+    match self {
+      Self::Aes128(_) => 24,
+      Self::Aes192(_) => 32,
+      Self::Aes256(_) => 44,
+    }
+  }
+
+  /// Encodes the secret key to the buffer in base64 format
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use memberlist_proto::encryption::SecretKey;
+  ///
+  /// let key = SecretKey::random_aes128();
+  /// let mut buf = [0u8; 24];
+  /// key.encode_base64(&mut buf).unwrap();
+  /// assert_eq!(&buf, key.to_base64().as_bytes());
+  ///
+  /// let key = SecretKey::random_aes192();
+  /// let mut buf = [0u8; 32];
+  /// key.encode_base64(&mut buf).unwrap();
+  /// assert_eq!(&buf, key.to_base64().as_bytes());
+  ///
+  /// let key = SecretKey::random_aes256();
+  /// let mut buf = [0u8; 44];
+  /// key.encode_base64(&mut buf).unwrap();
+  /// assert_eq!(&buf, key.to_base64().as_bytes());
+  /// ```
+  #[inline]
+  pub fn encode_base64(&self, buf: &mut [u8]) -> Result<usize, base64::EncodeSliceError> {
+    b64.encode_slice(self.as_ref(), buf)
   }
 
   /// Creates a random secret key
