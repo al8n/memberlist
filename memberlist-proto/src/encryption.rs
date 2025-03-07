@@ -1015,7 +1015,11 @@ mod tests {
 
   #[test]
   fn test_try_from_str() {
-    for k in TEST_KEYS {
+    for k in &[
+      SecretKey::random_aes128(),
+      SecretKey::random_aes192(),
+      SecretKey::random_aes256(),
+    ] {
       let s = k.to_base64();
       let key = SecretKey::try_from(s.as_str()).unwrap();
       assert_eq!(k, key.as_ref());
