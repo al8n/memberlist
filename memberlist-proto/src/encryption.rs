@@ -77,7 +77,20 @@ impl From<base64::DecodeError> for ParseSecretKeyError {
 }
 
 /// The key used while attempting to encrypt/decrypt a message
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+  Debug,
+  Copy,
+  Clone,
+  PartialEq,
+  Eq,
+  PartialOrd,
+  Ord,
+  derive_more::IsVariant,
+  derive_more::TryUnwrap,
+  derive_more::Unwrap,
+)]
+#[unwrap(ref, ref_mut)]
+#[try_unwrap(ref, ref_mut)]
 #[cfg_attr(any(feature = "arbitrary", test), derive(arbitrary::Arbitrary))]
 pub enum SecretKey {
   /// secret key for AES128
