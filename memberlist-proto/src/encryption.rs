@@ -212,26 +212,21 @@ impl FromStr for SecretKey {
   type Err = ParseSecretKeyError;
 
   fn from_str(s: &str) -> Result<Self, Self::Err> {
-    let bytes = b64.decode(s)?;
+    let mut buf = [0u8; 44];
+    let readed = b64.decode_slice(s, &mut buf).map_err(|e| match e {
+      base64::DecodeSliceError::DecodeError(decode_error) => decode_error.into(),
+      base64::DecodeSliceError::OutputSliceTooSmall => {
+        ParseSecretKeyError::InvalidKeyLength(InvalidKeyLength(s.len()))
+      }
+    })?;
 
-    match bytes.len() {
-      16 => {
-        let mut key = [0u8; 16];
-        key.copy_from_slice(&bytes);
-        Ok(SecretKey::Aes128(key))
-      }
-      24 => {
-        let mut key = [0u8; 24];
-        key.copy_from_slice(&bytes);
-        Ok(SecretKey::Aes192(key))
-      }
-      32 => {
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&bytes);
-        Ok(SecretKey::Aes256(key))
-      }
-      v => Err(ParseSecretKeyError::InvalidKeyLength(InvalidKeyLength(v))),
-    }
+    let bytes = &buf[..readed];
+    Ok(match readed {
+      16 => SecretKey::Aes128(bytes[..readed].try_into().unwrap()),
+      24 => SecretKey::Aes192(bytes[..readed].try_into().unwrap()),
+      32 => SecretKey::Aes256(bytes[..readed].try_into().unwrap()),
+      v => return Err(ParseSecretKeyError::InvalidKeyLength(InvalidKeyLength(v))),
+    })
   }
 }
 
@@ -1003,6 +998,37 @@ mod tests {
     };
 
     algo == deserialized
+  }
+
+  #[test]
+  fn test_encode_base64() {
+    for k in [
+      SecretKey::random_aes128(),
+      SecretKey::random_aes192(),
+      SecretKey::random_aes256(),
+    ] {
+      let mut buf = vec![0; k.base64_len()];
+      k.encode_base64(&mut buf).unwrap();
+      assert_eq!(&buf, k.to_base64().as_bytes());
+    }
+  }
+
+  #[test]
+  fn test_try_from_str() {
+    for k in TEST_KEYS {
+      let s = k.to_base64();
+      let key = SecretKey::try_from(s.as_str()).unwrap();
+      assert_eq!(k, key.as_ref());
+    }
+
+    let buf = "invalid base64 string";
+    let key = SecretKey::try_from(buf);
+    assert!(key.is_err());
+
+    let mut buf = SecretKey::random_aes256().to_base64();
+    buf.push_str(SecretKey::random_aes128().to_base64().as_str());
+    let key = SecretKey::try_from(buf.as_str());
+    assert!(key.is_err());
   }
 
   const TEST_KEYS: &[SecretKey] = &[
