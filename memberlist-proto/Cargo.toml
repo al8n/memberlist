@@ -122,7 +122,7 @@ nodecraft = { workspace = true, features = ["arbitrary", "quickcheck"] }
 smol_str = { workspace = true, features = ["arbitrary"] }
 rand.workspace = true
 serde_json = "1"
-bincode = "1"
+bincode = "2"
 agnostic-lite = { version = "0.5", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
 
