@@ -599,6 +599,8 @@ mod tests {
   #[quickcheck_macros::quickcheck]
   #[cfg(feature = "serde")]
   fn compress_algorithm_serde(algo: CompressAlgorithm) -> bool {
+    use bincode::config::standard;
+
     let Ok(serialized) = serde_json::to_string(&algo) else {
       return false;
     };
@@ -609,11 +611,11 @@ mod tests {
       return false;
     }
 
-    let Ok(serialized) = bincode::serialize(&algo) else {
+    let Ok(serialized) = bincode::serde::encode_to_vec(algo, standard()) else {
       return false;
     };
 
-    let Ok(deserialized) = bincode::deserialize(&serialized) else {
+    let Ok((deserialized, _)) = bincode::serde::decode_from_slice(&serialized, standard()) else {
       return false;
     };
 
