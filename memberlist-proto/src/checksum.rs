@@ -412,6 +412,8 @@ fn test_checksum_algorithm_from_str() {
 #[cfg(all(test, feature = "serde"))]
 #[quickcheck_macros::quickcheck]
 fn checksum_algorithm_serde(algo: ChecksumAlgorithm) -> bool {
+  use bincode::config::standard;
+
   let Ok(serialized) = serde_json::to_string(&algo) else {
     return false;
   };
@@ -422,11 +424,11 @@ fn checksum_algorithm_serde(algo: ChecksumAlgorithm) -> bool {
     return false;
   }
 
-  let Ok(serialized) = bincode::serialize(&algo) else {
+  let Ok(serialized) = bincode::serde::encode_to_vec(algo, standard()) else {
     return false;
   };
 
-  let Ok(deserialized) = bincode::deserialize(&serialized) else {
+  let Ok((deserialized, _)) = bincode::serde::decode_from_slice(&serialized, standard()) else {
     return false;
   };
 
