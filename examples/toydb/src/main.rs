@@ -1,6 +1,9 @@
 use std::{borrow::Cow, net::SocketAddr, sync::Arc};
 
-use bincode::{deserialize, serialize};
+use bincode::{
+  config::standard,
+  serde::{decode_from_slice, encode_to_vec},
+};
 use clap::Parser;
 use crossbeam_skiplist::SkipMap;
 use memberlist::{
@@ -45,7 +48,7 @@ impl NodeDelegate for MemDb {
       .map(|ent| (ent.key().clone(), ent.value().clone()))
       .collect::<Vec<_>>();
 
-    match serialize(&all_data) {
+    match encode_to_vec(&all_data, standard()) {
       Ok(data) => Bytes::from(data),
       Err(e) => {
         tracing::error!(err=%e, "toydb: fail to encode local state");
@@ -55,8 +58,8 @@ impl NodeDelegate for MemDb {
   }
 
   async fn merge_remote_state(&self, buf: &[u8], _: bool) {
-    match deserialize::<Vec<(Bytes, Bytes)>>(buf) {
-      Ok(pairs) => {
+    match decode_from_slice::<Vec<(Bytes, Bytes)>, _>(buf, standard()) {
+      Ok((pairs, _)) => {
         for (key, value) in pairs {
           self.inner.store.get_or_insert(key, value);
         }
@@ -68,8 +71,8 @@ impl NodeDelegate for MemDb {
   }
 
   async fn notify_message(&self, msg: Cow<'_, [u8]>) {
-    match deserialize::<Vec<(Bytes, Bytes)>>(msg.as_ref()) {
-      Ok(pairs) => {
+    match decode_from_slice::<Vec<(Bytes, Bytes)>, _>(msg.as_ref(), standard()) {
+      Ok((pairs, _)) => {
         for (key, value) in pairs {
           self.inner.store.get_or_insert(key, value);
         }
@@ -152,7 +155,7 @@ impl ToyDb {
 
     let resp = rx.await?;
     tracing::info!(value=?resp, "toydb: fetch key");
-    match bincode::serialize(&resp) {
+    match bincode::serde::encode_to_vec(&resp, bincode::config::standard()) {
       Ok(resp) => {
         let mut prefixed_data = vec![0; resp.len() + 4];
         prefixed_data[..4].copy_from_slice(&(resp.len() as u32).to_le_bytes());
@@ -189,7 +192,7 @@ impl ToyDb {
     let resp = rx.await?;
     if let Err(e) = resp {
       let res = std::result::Result::<(), String>::Err(e.to_string());
-      match bincode::serialize(&res) {
+      match bincode::serde::encode_to_vec(&res, bincode::config::standard()) {
         Ok(resp) => {
           let mut prefixed_data = vec![0; resp.len() + 4];
           prefixed_data[..4].copy_from_slice(&(resp.len() as u32).to_le_bytes());
@@ -204,7 +207,7 @@ impl ToyDb {
       }
     } else {
       let res = std::result::Result::<(), String>::Ok(());
-      match bincode::serialize(&res) {
+      match bincode::serde::encode_to_vec(&res, bincode::config::standard()) {
         Ok(resp) => {
           let mut prefixed_data = vec![0; resp.len() + 4];
           prefixed_data[..4].copy_from_slice(&(resp.len() as u32).to_le_bytes());
@@ -234,7 +237,7 @@ impl ToyDb {
     let resp = rx.await?;
     if let Err(e) = resp {
       let res = std::result::Result::<(), String>::Err(e.to_string());
-      match bincode::serialize(&res) {
+      match bincode::serde::encode_to_vec(&res, bincode::config::standard()) {
         Ok(resp) => {
           let mut prefixed_data = vec![0; resp.len() + 4];
           prefixed_data[..4].copy_from_slice(&(resp.len() as u32).to_le_bytes());
@@ -249,7 +252,7 @@ impl ToyDb {
       }
     } else {
       let res = std::result::Result::<(), String>::Ok(());
-      match bincode::serialize(&res) {
+      match bincode::serde::encode_to_vec(&res, bincode::config::standard()) {
         Ok(resp) => {
           let mut prefixed_data = vec![0; resp.len() + 4];
           prefixed_data[..4].copy_from_slice(&(resp.len() as u32).to_le_bytes());
@@ -386,7 +389,7 @@ async fn main() -> Result<()> {
 
 async fn handle_join_cmd(id: NodeId, addr: SocketAddr, rpc_addr: std::path::PathBuf) -> Result<()> {
   let conn = UnixStream::connect(rpc_addr).await?;
-  let data = serialize(&Op::Join { id, addr })?;
+  let data = encode_to_vec(&Op::Join { id, addr }, standard())?;
 
   let (reader, mut writer) = conn.into_split();
 
@@ -404,7 +407,7 @@ async fn handle_join_cmd(id: NodeId, addr: SocketAddr, rpc_addr: std::path::Path
 
   let mut buf = vec![0; len];
   reader.read_exact(&mut buf).await?;
-  let res = deserialize::<std::result::Result<(), String>>(&buf)?;
+  let (res, _) = decode_from_slice::<std::result::Result<(), String>, _>(&buf, standard())?;
   match res {
     Ok(_) => {
       println!("join successfully");
@@ -418,7 +421,7 @@ async fn handle_join_cmd(id: NodeId, addr: SocketAddr, rpc_addr: std::path::Path
 
 async fn handle_get_cmd(key: String, rpc_addr: std::path::PathBuf) -> Result<()> {
   let conn = UnixStream::connect(rpc_addr).await?;
-  let data = serialize(&Op::Get(key.into_bytes().into()))?;
+  let data = encode_to_vec(Op::Get(key.into_bytes().into()), standard())?;
 
   let (reader, mut writer) = conn.into_split();
 
@@ -436,7 +439,7 @@ async fn handle_get_cmd(key: String, rpc_addr: std::path::PathBuf) -> Result<()>
 
   let mut buf = vec![0; len];
   reader.read_exact(&mut buf).await?;
-  let res = deserialize::<Option<Bytes>>(&buf)?;
+  let (res, _) = decode_from_slice::<Option<Bytes>, _>(&buf, standard())?;
   match res {
     Some(value) => {
       println!("{}", String::from_utf8_lossy(&value));
@@ -450,7 +453,10 @@ async fn handle_get_cmd(key: String, rpc_addr: std::path::PathBuf) -> Result<()>
 
 async fn handle_set_cmd(key: String, value: String, rpc_addr: std::path::PathBuf) -> Result<()> {
   let conn = UnixStream::connect(rpc_addr).await?;
-  let data = serialize(&Op::Set(key.into_bytes().into(), value.into_bytes().into()))?;
+  let data = encode_to_vec(
+    Op::Set(key.into_bytes().into(), value.into_bytes().into()),
+    standard(),
+  )?;
 
   let (reader, mut writer) = conn.into_split();
 
@@ -468,7 +474,7 @@ async fn handle_set_cmd(key: String, value: String, rpc_addr: std::path::PathBuf
 
   let mut buf = vec![0; len];
   reader.read_exact(&mut buf).await?;
-  let res = deserialize::<std::result::Result<(), String>>(&buf)?;
+  let (res, _) = decode_from_slice::<std::result::Result<(), String>, _>(&buf, standard())?;
   match res {
     Ok(_) => {
       println!("insert successfully");
@@ -522,7 +528,7 @@ async fn handle_start_cmd(args: StartArgs) -> Result<()> {
           continue;
         }
 
-        let op: Op = match bincode::deserialize(&data) {
+        let (op, _): (Op, usize) = match decode_from_slice(&data, standard()) {
           Ok(op) => op,
           Err(e) => {
             tracing::error!(err=%e, "toydb: fail to decode rpc message");

@@ -3,7 +3,7 @@ use core::{
   time::Duration,
 };
 
-use const_varint::{Varint, decode_duration, encode_duration_to, encoded_duration_len};
+use varing::{Varint, decode_duration, encode_duration_to, encoded_duration_len};
 
 use crate::{Data, DataRef, DecodeError, EncodeError, WireType};
 

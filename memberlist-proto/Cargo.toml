@@ -15,7 +15,7 @@ description = "Proto types and traits for the memberlist crate."
 default = [
   "std",
   "bytes/default",
-  "const-varint/default",
+  "varing/default",
   "nodecraft/default",
   "smol_str/default",
   "smallvec-wrapper/default",
@@ -26,7 +26,7 @@ default = [
 alloc = ["nodecraft/alloc"]
 std = [
   "bytes/std",
-  "const-varint/std",
+  "varing/std",
   "nodecraft/std",
   "smol_str/std",
   "smallvec-wrapper/std",
@@ -68,7 +68,7 @@ agnostic-lite.workspace = true
 agnostic-io.workspace = true
 auto_enums = "0.8"
 bytes.workspace = true
-const-varint.workspace = true
+varing.workspace = true
 cfg-if.workspace = true
 derive_more = { workspace = true, features = ["from", "display", "is_variant", "unwrap", "try_unwrap"] }
 either.workspace = true
@@ -102,10 +102,10 @@ rand = { workspace = true, optional = true }
 # checksum
 crc32fast = { version = "1", optional = true }
 xxhash-rust = { version = "0.8", optional = true }
-hash32 = { version = "0.3", optional = true }
+hash32 = { version = "1", optional = true }
 
 # compression
-brotli = { version = "7", optional = true }
+brotli = { version = "8", optional = true }
 snap = { version = "1", optional = true }
 lz4_flex = { version = "0.11", optional = true }
 zstd = { version = "0.13", optional = true }

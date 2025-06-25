@@ -6,8 +6,8 @@ use aes_gcm::{
   aes::{Aes192, cipher::consts::U12},
 };
 use bytes::{Buf, BufMut};
-use const_varint::decode_u32_varint;
 use rand::Rng;
+use varing::decode_u32_varint;
 
 use crate::{WireType, utils::merge};
 
@@ -394,7 +394,7 @@ impl Data for SecretKey {
   }
 
   fn encoded_len(&self) -> usize {
-    1 + const_varint::encoded_u32_varint_len(self.len() as u32) + self.len()
+    1 + varing::encoded_u32_varint_len(self.len() as u32) + self.len()
   }
 
   fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
@@ -416,7 +416,7 @@ impl Data for SecretKey {
     offset += 1;
 
     let self_len = self.len();
-    let len = const_varint::encode_u32_varint_to(self_len as u32, &mut buf[offset..])
+    let len = varing::encode_u32_varint_to(self_len as u32, &mut buf[offset..])
       .map_err(|_| EncodeError::insufficient_buffer(self.encoded_len(), buf_len))?;
     offset += len;
 

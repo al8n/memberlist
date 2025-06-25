@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use const_varint::{decode_u32_varint, encode_u32_varint_to, encoded_u32_varint_len};
+use varing::{decode_u32_varint, encode_u32_varint_to, encoded_u32_varint_len};
 
 use super::WireType;
 
@@ -210,17 +210,19 @@ impl EncodeError {
   }
 }
 
-impl From<const_varint::EncodeError> for EncodeError {
+impl From<varing::EncodeError> for EncodeError {
   #[inline]
-  fn from(value: const_varint::EncodeError) -> Self {
+  fn from(value: varing::EncodeError) -> Self {
     match value {
-      const_varint::EncodeError::Underflow {
+      varing::EncodeError::Underflow {
         required,
         remaining,
       } => Self::InsufficientBuffer {
         required,
         remaining,
       },
+      varing::EncodeError::Custom(e) => EncodeError::custom(e),
+      _ => EncodeError::custom("unknown encoding error"),
     }
   }
 }
@@ -291,12 +293,17 @@ pub enum DecodeError {
   Custom(Cow<'static, str>),
 }
 
-impl From<const_varint::DecodeError> for DecodeError {
+impl From<varing::DecodeError> for DecodeError {
   #[inline]
-  fn from(e: const_varint::DecodeError) -> Self {
+  fn from(e: varing::DecodeError) -> Self {
     match e {
-      const_varint::DecodeError::Underflow => Self::BufferUnderflow,
-      const_varint::DecodeError::Overflow => Self::LengthDelimitedOverflow,
+      varing::DecodeError::Underflow => Self::BufferUnderflow,
+      varing::DecodeError::Overflow => Self::LengthDelimitedOverflow,
+      varing::DecodeError::Custom(e) => Self::custom(e),
+      _ => {
+        // Convert other decode errors to custom error
+        Self::custom("unknown decoding error")
+      }
     }
   }
 }

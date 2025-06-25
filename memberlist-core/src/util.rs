@@ -1,5 +1,5 @@
-pub use const_varint::*;
 pub use is_global_ip::IsGlobalIp;
+pub use varing::*;
 
 pub(crate) fn retransmit_limit(retransmit_mult: usize, n: usize) -> usize {
   let node_scale = ((n + 1) as f64).log10().ceil() as usize;
