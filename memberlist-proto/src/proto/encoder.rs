@@ -778,7 +778,7 @@ where
         buf.resize(hint.input_size, 0);
         buf[0] = COMPOOUND_MESSAGE_TAG;
         buf[1] = num_msgs as u8;
-        let res = match msgs.iter().take(num_msgs).try_fold(
+        match msgs.iter().take(num_msgs).try_fold(
           (super::BATCH_OVERHEAD, &mut buf),
           |(mut offset, buf), msg| match msg.encodable_encode(&mut buf[offset..]) {
             Ok(written) => {
@@ -800,9 +800,7 @@ where
             self.encode_helper(&buf, hint)
           }
           Err(err) => Err(err.into()),
-        };
-
-        res
+        }
       }
     })
   }

@@ -1,4 +1,4 @@
-use const_varint::{encode_u32_varint_to, encoded_u32_varint_len};
+use varing::{encode_u32_varint_to, encoded_u32_varint_len};
 
 use crate::utils::{merge, skip};
 

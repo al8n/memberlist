@@ -532,10 +532,7 @@ where
     size /= 2;
   }
 
-  Err(err.unwrap_or_else(|| {
-    std::io::Error::new(
-      std::io::ErrorKind::Other,
-      "fail to set receive buffer size for UDP socket",
-    )
-  }))
+  Err(
+    err.unwrap_or_else(|| std::io::Error::other("fail to set receive buffer size for UDP socket")),
+  )
 }

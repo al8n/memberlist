@@ -108,7 +108,7 @@ impl QuicAcceptor for QuinnAcceptor {
       .endpoint
       .accept()
       .await
-      .ok_or(io::Error::new(io::ErrorKind::Other, "endpoint closed"))?
+      .ok_or(io::Error::other("endpoint closed"))?
       .await?;
     let remote_addr = conn.remote_address();
 
