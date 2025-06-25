@@ -189,7 +189,7 @@ pub mod utils {
     offset += 1;
     let src = &src[offset..];
     match wire_type {
-      WireType::Varint => match const_varint::decode_u64_varint(src) {
+      WireType::Varint => match varing::decode_u64_varint(src) {
         Ok((bytes_read, _)) => Ok((offset + bytes_read).min(buf_len)),
         Err(e) => Err(e.into()),
       },
@@ -199,7 +199,7 @@ pub mod utils {
           return Err(DecodeError::buffer_underflow());
         }
 
-        match const_varint::decode_u32_varint(src) {
+        match varing::decode_u32_varint(src) {
           Ok((bytes_read, length)) => Ok((offset + bytes_read + length as usize).min(buf_len)),
           Err(e) => Err(e.into()),
         }

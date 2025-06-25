@@ -1,6 +1,6 @@
 [package]
 name = "memberlist-core"
-version = "0.6.0"
+version = "0.6.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -74,7 +74,7 @@ async-channel.workspace = true
 async-lock.workspace = true
 bytes.workspace = true
 byteorder.workspace = true
-const-varint.workspace = true
+varing.workspace = true
 derive_more.workspace = true
 either.workspace = true
 futures.workspace = true
@@ -113,10 +113,10 @@ indexmap = { workspace = true, optional = true }
 # checksum
 crc32fast = { version = "1", optional = true }
 xxhash-rust = { version = "0.8", optional = true }
-hash32 = { version = "0.3", optional = true }
+hash32 = { version = "1", optional = true }
 
 # compression
-brotli = { version = "7", optional = true }
+brotli = { version = "8", optional = true }
 snap = { version = "1", optional = true }
 lz4_flex = { version = "0.11", optional = true }
 zstd = { version = "0.13", optional = true }
