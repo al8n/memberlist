@@ -79,7 +79,7 @@ quinn = { version = "0.11", default-features = false, optional = true, features 
 rustls = { version = "0.23", default-features = false, optional = true }
 
 # test
-rcgen = { version = "0.13", optional = true }
+rcgen = { version = "0.14", optional = true }
 
 # compression
 rayon = { version = "1.8", optional = true }
