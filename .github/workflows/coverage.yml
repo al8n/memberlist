@@ -75,7 +75,7 @@ jobs:
         working-directory: ${{ matrix.crate }}
         continue-on-error: true
       - name: Upload Coverage Report as Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.crate }}/cobertura.xml
