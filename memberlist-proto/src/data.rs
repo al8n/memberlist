@@ -38,7 +38,8 @@ where
       return Self::decode(src);
     }
 
-    let (mut offset, len) = decode_u32_varint(src)?;
+    let (offset, len) = decode_u32_varint(src)?;
+    let mut offset = offset.get();
     let len = len as usize;
     if len + offset > src.len() {
       return Err(DecodeError::buffer_underflow());
@@ -75,7 +76,7 @@ pub trait Data: core::fmt::Debug + Send + Sync {
   fn encoded_len_with_length_delimited(&self) -> usize {
     let len = self.encoded_len();
     match Self::WIRE_TYPE {
-      WireType::LengthDelimited => encoded_u32_varint_len(len as u32) + len,
+      WireType::LengthDelimited => encoded_u32_varint_len(len as u32).get() + len,
       _ => len,
     }
   }
@@ -113,7 +114,7 @@ pub trait Data: core::fmt::Debug + Send + Sync {
     }
 
     let mut offset = 0;
-    offset += encode_u32_varint_to(len as u32, buf)?;
+    offset += encode_u32_varint_to(len as u32, buf)?.get();
     offset += self.encode(&mut buf[offset..])?;
 
     #[cfg(debug_assertions)]
@@ -214,14 +215,25 @@ impl From<varing::EncodeError> for EncodeError {
   #[inline]
   fn from(value: varing::EncodeError) -> Self {
     match value {
-      varing::EncodeError::Underflow {
-        required,
-        remaining,
-      } => Self::InsufficientBuffer {
-        required,
-        remaining,
+      varing::EncodeError::InsufficientSpace(err) => Self::InsufficientBuffer {
+        required: err.requested().get(),
+        remaining: err.available(),
       },
-      varing::EncodeError::Custom(e) => EncodeError::custom(e),
+      varing::EncodeError::Other(e) => EncodeError::custom(e),
+      _ => EncodeError::custom("unknown encoding error"),
+    }
+  }
+}
+
+impl From<varing::ConstEncodeError> for EncodeError {
+  #[inline]
+  fn from(value: varing::ConstEncodeError) -> Self {
+    match value {
+      varing::ConstEncodeError::InsufficientSpace(err) => Self::InsufficientBuffer {
+        required: err.requested().get(),
+        remaining: err.available(),
+      },
+      varing::ConstEncodeError::Other(e) => EncodeError::custom(e),
       _ => EncodeError::custom("unknown encoding error"),
     }
   }
@@ -297,9 +309,24 @@ impl From<varing::DecodeError> for DecodeError {
   #[inline]
   fn from(e: varing::DecodeError) -> Self {
     match e {
-      varing::DecodeError::Underflow => Self::BufferUnderflow,
       varing::DecodeError::Overflow => Self::LengthDelimitedOverflow,
-      varing::DecodeError::Custom(e) => Self::custom(e),
+      varing::DecodeError::InsufficientData { .. } => Self::buffer_underflow(),
+      varing::DecodeError::Other(cow) => Self::Custom(cow),
+      _ => {
+        // Convert other decode errors to custom error
+        Self::custom("unknown decoding error")
+      }
+    }
+  }
+}
+
+impl From<varing::ConstDecodeError> for DecodeError {
+  #[inline]
+  fn from(e: varing::ConstDecodeError) -> Self {
+    match e {
+      varing::ConstDecodeError::Overflow => Self::LengthDelimitedOverflow,
+      varing::ConstDecodeError::InsufficientData { .. } => Self::buffer_underflow(),
+      varing::ConstDecodeError::Other(cow) => Self::custom(cow),
       _ => {
         // Convert other decode errors to custom error
         Self::custom("unknown decoding error")

@@ -326,7 +326,7 @@ impl<'a> DataRef<'a, Self> for SecretKey {
           offset += 1;
 
           let (bytes_read, val) = decode_u32_varint(&buf[offset..])?;
-          offset += bytes_read;
+          offset += bytes_read.get();
 
           let val: [u8; 16] = buf[offset..offset + val as usize]
             .try_into()
@@ -341,7 +341,7 @@ impl<'a> DataRef<'a, Self> for SecretKey {
           offset += 1;
 
           let (bytes_read, val) = decode_u32_varint(&buf[offset..])?;
-          offset += bytes_read;
+          offset += bytes_read.get();
 
           let val: [u8; 24] = buf[offset..offset + val as usize]
             .try_into()
@@ -357,7 +357,7 @@ impl<'a> DataRef<'a, Self> for SecretKey {
           offset += 1;
 
           let (bytes_read, val) = decode_u32_varint(&buf[offset..])?;
-          offset += bytes_read;
+          offset += bytes_read.get();
 
           let val: [u8; 32] = buf[offset..offset + val as usize]
             .try_into()
@@ -394,7 +394,7 @@ impl Data for SecretKey {
   }
 
   fn encoded_len(&self) -> usize {
-    1 + varing::encoded_u32_varint_len(self.len() as u32) + self.len()
+    1 + varing::encoded_u32_varint_len(self.len() as u32).get() + self.len()
   }
 
   fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
@@ -418,7 +418,7 @@ impl Data for SecretKey {
     let self_len = self.len();
     let len = varing::encode_u32_varint_to(self_len as u32, &mut buf[offset..])
       .map_err(|_| EncodeError::insufficient_buffer(self.encoded_len(), buf_len))?;
-    offset += len;
+    offset += len.get();
 
     buf[offset..offset + self_len].copy_from_slice(self.as_ref());
     offset += self_len;

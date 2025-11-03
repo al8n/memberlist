@@ -278,17 +278,21 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
   From<QuicTransportOptions<I, A, S>> for (A::Options, S::Options, Options<I, A>)
 {
   fn from(opts: QuicTransportOptions<I, A, S>) -> Self {
-    (opts.resolver, opts.stream_layer, Options {
-      id: opts.id,
-      bind_addresses: opts.bind_addresses,
-      advertise_address: opts.advertise_address,
-      connection_ttl: opts.connection_ttl,
-      timeout: opts.timeout,
-      connection_pool_cleanup_period: opts.connection_pool_cleanup_period,
-      cidrs_policy: opts.cidrs_policy,
-      #[cfg(feature = "metrics")]
-      metric_labels: opts.metric_labels,
-    })
+    (
+      opts.resolver,
+      opts.stream_layer,
+      Options {
+        id: opts.id,
+        bind_addresses: opts.bind_addresses,
+        advertise_address: opts.advertise_address,
+        connection_ttl: opts.connection_ttl,
+        timeout: opts.timeout,
+        connection_pool_cleanup_period: opts.connection_pool_cleanup_period,
+        cidrs_policy: opts.cidrs_policy,
+        #[cfg(feature = "metrics")]
+        metric_labels: opts.metric_labels,
+      },
+    )
   }
 }
 
