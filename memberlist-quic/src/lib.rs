@@ -204,7 +204,9 @@ where
     }
 
     // find final advertise address
-    let final_advertise_addr = if advertise_addr.ip().is_unspecified() {
+    let final_advertise_addr = if let Some(addr) = opts.advertise_address {
+      addr
+    } else if advertise_addr.ip().is_unspecified() {
       let ip = getifs::private_addrs()
         .map_err(|_| QuicTransportError::NoPrivateIP)
         .and_then(|ips| {
