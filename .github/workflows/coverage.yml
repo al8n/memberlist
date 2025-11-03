@@ -59,7 +59,7 @@ jobs:
             features: "test,tokio,quinn,snappy,crc32,encryption,metrics"
             name: "memberlist-quinn-without-rayon"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install latest nightly
         uses: actions-rs/toolchain@v1
         with:
@@ -84,7 +84,7 @@ jobs:
     needs: coverage-report
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Download all coverage reports
         uses: actions/download-artifact@v4
         with:
