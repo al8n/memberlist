@@ -44,6 +44,29 @@ pub struct NetTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAdd
   )]
   bind_addresses: IndexSet<A::Address>,
 
+  /// The address to advertise to other nodes. This address is not bound or listened on,
+  /// only advertised. If not set, the transport will auto-detect an appropriate address
+  /// from the bind addresses.
+  #[viewit(
+    getter(
+      const,
+      style = "ref",
+      result(converter(fn = "Option::as_ref"), type = "Option<&A::ResolvedAddress>"),
+      attrs(doc = "Get the address to advertise to other nodes."),
+    ),
+    setter(
+      rename = "maybe_advertise_address",
+      attrs(
+        doc = "Set the address to advertise to other nodes. This address is not bound or listened on. (Builder pattern)"
+      ),
+    )
+  )]
+  #[cfg_attr(
+    feature = "serde",
+    serde(default, skip_serializing_if = "Option::is_none")
+  )]
+  advertise_address: Option<A::ResolvedAddress>,
+
   /// Resolver options, which used to construct the address resolver for this transport.
   #[viewit(
     getter(const, style = "ref", attrs(doc = "Get the address resolver options."),),
@@ -127,12 +150,14 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer> Clone
 where
   I: Clone,
   A::Options: Clone,
+  A::ResolvedAddress: Clone,
   S::Options: Clone,
 {
   fn clone(&self) -> Self {
     Self {
       id: self.id.clone(),
       bind_addresses: self.bind_addresses.clone(),
+      advertise_address: self.advertise_address.clone(),
       stream_layer: self.stream_layer.clone(),
       resolver: self.resolver.clone(),
       cidrs_policy: self.cidrs_policy.clone(),
@@ -197,6 +222,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
     Self {
       id,
       bind_addresses: IndexSet::new(),
+      advertise_address: None,
       resolver: resolver_options,
       stream_layer: stream_layer_opts,
       cidrs_policy: CIDRsPolicy::allow_all(),
@@ -212,25 +238,29 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
     self.bind_addresses.insert(addr);
     self
   }
+
+  /// Set the advertise address (builder pattern).
+  /// This address is not bound or listened on, only advertised to other nodes.
+  pub fn with_advertise_address(mut self, addr: A::ResolvedAddress) -> Self {
+    self.advertise_address = Some(addr);
+    self
+  }
 }
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
   From<NetTransportOptions<I, A, S>> for (A::Options, S::Options, Options<I, A>)
 {
   fn from(opts: NetTransportOptions<I, A, S>) -> (A::Options, S::Options, Options<I, A>) {
-    (
-      opts.resolver,
-      opts.stream_layer,
-      Options {
-        id: opts.id,
-        bind_addresses: opts.bind_addresses,
-        cidrs_policy: opts.cidrs_policy,
-        max_packet_size: opts.max_packet_size,
-        recv_buffer_size: opts.recv_buffer_size,
-        #[cfg(feature = "metrics")]
-        metric_labels: opts.metric_labels,
-      },
-    )
+    (opts.resolver, opts.stream_layer, Options {
+      id: opts.id,
+      bind_addresses: opts.bind_addresses,
+      advertise_address: opts.advertise_address,
+      cidrs_policy: opts.cidrs_policy,
+      max_packet_size: opts.max_packet_size,
+      recv_buffer_size: opts.recv_buffer_size,
+      #[cfg(feature = "metrics")]
+      metric_labels: opts.metric_labels,
+    })
   }
 }
 
@@ -238,6 +268,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
 pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   id: I,
   bind_addresses: IndexSet<A::Address>,
+  advertise_address: Option<A::ResolvedAddress>,
   cidrs_policy: CIDRsPolicy,
   max_packet_size: usize,
   recv_buffer_size: usize,
