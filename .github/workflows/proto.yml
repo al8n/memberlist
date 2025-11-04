@@ -33,7 +33,7 @@ jobs:
           - ubuntu-latest
           # - macos-latest,
           # - windows-latest
-        runtime: [tokio, async-std, smol]
+        runtime: [tokio, smol]
         stream_layer: [tls, tcp]
     steps:
       - uses: actions/checkout@v5
