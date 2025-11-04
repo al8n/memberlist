@@ -126,7 +126,7 @@ For details on all of these extensions, please read Hashicorp's paper ["Lifeguar
 - By using `TCP/UDP`, `TLS/UDP` transport
 
   ```toml
-  memberlist = { version = "0.6", features = [
+  memberlist = { version = "0.7", features = [
     "tcp",
     # Enable a checksum, as UDP is not reliable.
     # Built in supports are: "crc32", "xxhash64", "xxhash32", "xxhash3", "murmur3"
@@ -152,7 +152,7 @@ For details on all of these extensions, please read Hashicorp's paper ["Lifeguar
   For `QUIC/QUIC` transport, as QUIC is secure and reliable, so enable checksum or encryption makes no sense.
 
   ```toml
-  memberlist = { version = "0.6", features = [
+  memberlist = { version = "0.7", features = [
     # Enable a compression, this is optional,
     # and possible values are `snappy`, `brotli`, `zstd` and `lz4`.
     # You can enable all.
