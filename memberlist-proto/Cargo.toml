@@ -14,9 +14,11 @@ description = "Proto types and traits for the memberlist crate."
 [features]
 default = [
   "std",
+  "hostaddr",
   "bytes/default",
   "varing/default",
   "nodecraft/default",
+  "nodecraft/hostaddr",
   "smol_str/default",
   "smallvec-wrapper/default",
   "thiserror/default",
@@ -36,6 +38,9 @@ std = [
 ]
 
 rayon = ["dep:rayon", "auto_enums/rayon"]
+
+# enable hostaddr support in nodecraft types
+hostaddr = ["nodecraft/hostaddr"]
 
 # checksum related feature
 crc32 = ["crc32fast"]

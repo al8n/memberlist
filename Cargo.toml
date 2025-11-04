@@ -46,7 +46,7 @@ indexmap = "2"
 getifs = "0.4"
 getrandom = "0.3"
 metrics = "0.24"
-nodecraft = { version = "0.8", default-features = false, features = ["hostaddr"] }
+nodecraft = { version = "0.8", default-features = false }
 # nodecraft = { version = "0.8", path = "../nodecraft", features = [
 #   "async",
 #   "resolver",
