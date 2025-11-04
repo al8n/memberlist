@@ -69,11 +69,6 @@ impl TryFrom<u8> for StreamType {
 /// [`QuicTransport`] based on [`tokio`](https://crates.io/crates/tokio).
 pub type TokioQuicTransport<I, A, S> = QuicTransport<I, A, S, agnostic_lite::tokio::TokioRuntime>;
 
-#[cfg(feature = "async-std")]
-/// [`QuicTransport`] based on [`async-std`](https://crates.io/crates/async-std).
-pub type AsyncStdQuicTransport<I, A, S> =
-  QuicTransport<I, A, S, agnostic_lite::async_std::AsyncStdRuntime>;
-
 #[cfg(feature = "smol")]
 /// [`QuicTransport`] based on [`smol`](https://crates.io/crates/smol).
 pub type SmolQuicTransport<I, A, S> = QuicTransport<I, A, S, agnostic_lite::smol::SmolRuntime>;

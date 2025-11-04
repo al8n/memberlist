@@ -55,7 +55,7 @@ memberlist is WASM/WASI friendly, all crates can be compiled to `wasm-wasi` and 
     # Enable encryption, this is optional,
     "encryption",
     # Enable a async runtime
-    # Builtin supports are `tokio`, `smol`, `async-std`
+    # Builtin supports are `tokio`, `smol`
     "tokio",
     # Enable one tls implementation. This is optional.
     # Users can just use encryption feature with plain TCP.
@@ -75,7 +75,7 @@ memberlist is WASM/WASI friendly, all crates can be compiled to `wasm-wasi` and 
     # You can enable all.
     "snappy",
     # Enable a async runtime
-    # Builtin supports are `tokio`, `smol`, `async-std`
+    # Builtin supports are `tokio`, `smol`
     "tokio",
     # Enable one of the QUIC implementation
     # Builtin support is `quinn`
@@ -108,7 +108,7 @@ Here are the layers:
 
   - **Runtime Layer**
 
-    Async runtime agnostic are provided by [`agnostic`'s Runtime](https://docs.rs/agnostic/trait.Runtime.html) trait, `tokio`, `async-std` and `smol` are supported by default. Users can implement their own [`Runtime`](https://docs.rs/agnostic/trait.Runtime.html) and plug it into the memberlist.
+    Async runtime agnostic are provided by [`agnostic`'s Runtime](https://docs.rs/agnostic/trait.Runtime.html) trait, `tokio`, and `smol` are supported by default. Users can implement their own [`Runtime`](https://docs.rs/agnostic/trait.Runtime.html) and plug it into the memberlist.
 
   - **Address Resolver Layer**
 

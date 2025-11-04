@@ -1,6 +1,6 @@
 [package]
 name = "memberlist"
-version = "0.6.6"
+version = "0.7.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -19,7 +19,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["tokio", "crc32", "snappy", "rayon", "encryption", "dns", "tcp", "quic", "rayon"]
 
 tokio = ["agnostic/tokio", "memberlist-net?/tokio", "memberlist-quic?/tokio"]
-async-std = ["agnostic/async-std", "memberlist-net?/async-std", "memberlist-quic?/async-std"]
 smol = ["agnostic/smol", "memberlist-net?/smol", "memberlist-quic?/smol"]
 
 serde = [

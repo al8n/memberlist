@@ -36,11 +36,6 @@ pub mod quic {
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub mod tokio;
 
-/// [`Memberlist`] for `async-std` runtime.
-#[cfg(feature = "async-std")]
-#[cfg_attr(docsrs, doc(cfg(feature = "async-std")))]
-pub mod async_std;
-
 /// [`Memberlist`] for `smol` runtime.
 #[cfg(feature = "smol")]
 #[cfg_attr(docsrs, doc(cfg(feature = "smol")))]

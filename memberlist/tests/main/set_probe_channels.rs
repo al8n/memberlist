@@ -28,20 +28,6 @@ mod tokio {
   ));
 }
 
-#[cfg(feature = "async-std")]
-mod async_std {
-
-  use super::*;
-
-  set_probe_channels!(async_std("tcp", Tcp::<AsyncStdRuntime>::new()));
-
-  #[cfg(feature = "tls")]
-  set_probe_channels!(async_std(
-    "tls",
-    memberlist_net::tests::tls_stream_layer::<AsyncStdRuntime>().await
-  ));
-}
-
 #[cfg(feature = "smol")]
 mod smol {
 

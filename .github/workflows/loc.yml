@@ -1,42 +1,42 @@
-name: loc 
+name: loc
 
 on:
   push:
     branches:
       - main
     paths-ignore:
-      - 'README.md'
-      - 'COPYRIGHT'
-      - 'LICENSE*'
-      - '**.md'
-      - '**.txt'
-      - 'art'
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
   pull_request:
     paths-ignore:
-      - 'README.md'
-      - 'COPYRIGHT'
-      - 'LICENSE*'
-      - '**.md'
-      - '**.txt'
-      - 'art'
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
   workflow_dispatch:
 
 jobs:
   loc:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         run: |
           rustup update stable && rustup default stable
           rustup component add clippy
           rustup component add rustfmt
-      
+
       - name: Install tokeit
         run: |
           cargo install tokeit --force
-      
+
       - name: Count lines of code
         run: |
           tokeit
@@ -57,4 +57,4 @@ jobs:
                 }
               }
             });
-            console.log("Gist updated"); 
+            console.log("Gist updated");

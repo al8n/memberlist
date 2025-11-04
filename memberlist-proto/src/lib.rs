@@ -11,7 +11,7 @@
 pub use metrics_label::MetricLabels;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use nodecraft::{
-  CheapClone, Domain, HostAddr, Node, NodeId, ParseDomainError, ParseHostAddrError,
+  CheapClone, Domain, HostAddr, Node, NodeId, hostaddr::{ParseDomainError, ParseHostAddrError},
   ParseNodeIdError,
 };
 

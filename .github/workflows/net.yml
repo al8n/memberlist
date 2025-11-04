@@ -1,24 +1,24 @@
-name: net 
+name: net
 
 on:
   push:
     branches:
       - main
     paths-ignore:
-      - 'README.md'
-      - 'COPYRIGHT'
-      - 'LICENSE*'
-      - '**.md'
-      - '**.txt'
-      - 'art'
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
   pull_request:
     paths-ignore:
-      - 'README.md'
-      - 'COPYRIGHT'
-      - 'LICENSE*'
-      - '**.md'
-      - '**.txt'
-      - 'art'
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
   workflow_dispatch:
   schedule: [cron: "0 1 */7 * *"]
 
@@ -29,14 +29,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: 
+        os:
           - ubuntu-latest
           # - macos-latest,
           # - windows-latest
         runtime: [tokio, async-std, smol]
         stream_layer: [tls, tcp]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         run: |

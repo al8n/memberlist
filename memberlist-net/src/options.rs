@@ -157,7 +157,7 @@ where
     Self {
       id: self.id.clone(),
       bind_addresses: self.bind_addresses.clone(),
-      advertise_address: self.advertise_address.clone(),
+      advertise_address: self.advertise_address,
       stream_layer: self.stream_layer.clone(),
       resolver: self.resolver.clone(),
       cidrs_policy: self.cidrs_policy.clone(),

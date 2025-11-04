@@ -1,11 +1,12 @@
 use std::borrow::Cow;
 
-use aead::{AeadInPlace, KeyInit, generic_array::GenericArray};
+use aead::{AeadInPlace, KeyInit};
 use aes_gcm::{
   Aes128Gcm, Aes256Gcm, AesGcm,
   aes::{Aes192, cipher::consts::U12},
 };
 use bytes::{Buf, BufMut};
+use generic_array::GenericArray;
 use rand::Rng;
 use varing::decode_u32_varint;
 
@@ -615,21 +616,21 @@ impl EncryptionAlgorithm {
 
     match pk {
       SecretKey::Aes128(pk) => {
-        let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk));
+        let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk).as_ref());
         gcm
-          .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, buf)
+          .encrypt_in_place(GenericArray::from_slice(&nonce).as_ref(), auth_data, buf)
           .map_err(Into::into)
       }
       SecretKey::Aes192(pk) => {
-        let gcm = Aes192Gcm::new(GenericArray::from_slice(&pk));
+        let gcm = Aes192Gcm::new(GenericArray::from_slice(&pk).as_ref());
         gcm
-          .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, buf)
+          .encrypt_in_place(GenericArray::from_slice(&nonce).as_ref(), auth_data, buf)
           .map_err(Into::into)
       }
       SecretKey::Aes256(pk) => {
-        let gcm = Aes256Gcm::new(GenericArray::from_slice(&pk));
+        let gcm = Aes256Gcm::new(GenericArray::from_slice(&pk).as_ref());
         gcm
-          .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, buf)
+          .encrypt_in_place(GenericArray::from_slice(&nonce).as_ref(), auth_data, buf)
           .map_err(Into::into)
       }
     }
@@ -650,21 +651,21 @@ impl EncryptionAlgorithm {
     // Get the AES block cipher
     match key {
       SecretKey::Aes128(pk) => {
-        let gcm = Aes128Gcm::new(GenericArray::from_slice(pk));
+        let gcm = Aes128Gcm::new(GenericArray::from_slice(pk).as_ref());
         gcm
-          .decrypt_in_place(GenericArray::from_slice(nonce), auth_data, dst)
+          .decrypt_in_place(GenericArray::from_slice(nonce).as_ref(), auth_data, dst)
           .map_err(Into::into)
       }
       SecretKey::Aes192(pk) => {
-        let gcm = Aes192Gcm::new(GenericArray::from_slice(pk));
+        let gcm = Aes192Gcm::new(GenericArray::from_slice(pk).as_ref());
         gcm
-          .decrypt_in_place(GenericArray::from_slice(nonce), auth_data, dst)
+          .decrypt_in_place(GenericArray::from_slice(nonce).as_ref(), auth_data, dst)
           .map_err(Into::into)
       }
       SecretKey::Aes256(pk) => {
-        let gcm = Aes256Gcm::new(GenericArray::from_slice(pk));
+        let gcm = Aes256Gcm::new(GenericArray::from_slice(pk).as_ref());
         gcm
-          .decrypt_in_place(GenericArray::from_slice(nonce), auth_data, dst)
+          .decrypt_in_place(GenericArray::from_slice(nonce).as_ref(), auth_data, dst)
           .map_err(Into::into)
       }
     }
