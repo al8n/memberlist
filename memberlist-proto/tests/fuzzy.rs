@@ -7,7 +7,10 @@ use memberlist_proto::{
   IndirectPing, Label, MaybeResolvedAddress, Message, MessagesDecoder, Nack, Ping, ProtoDecoder,
   ProtoEncoder, ProtoEncoderError, PushNodeState, PushPull, SecretKey, Suspect,
 };
-use nodecraft::{Domain, HostAddr, Node, NodeId};
+#[cfg(feature = "hostaddr")]
+use nodecraft::{Domain, HostAddr};
+use nodecraft::{Node, NodeId};
+
 use peekable::future::AsyncPeekExt;
 
 fn fuzzy<D>(data: D) -> bool
@@ -122,13 +125,14 @@ quickcheck!(
   SocketAddrV4,
   Duration,
   NodeId,
-  Domain,
-  HostAddr,
   String,
   VecBytes,
   Label,
   SecretKey,
 );
+
+#[cfg(feature = "hostaddr")]
+quickcheck!(Domain, HostAddr,);
 
 quickcheck!(
   @<T>
@@ -151,8 +155,6 @@ quickcheck!(
     SocketAddrV4,
     Duration,
     NodeId,
-    Domain,
-    HostAddr,
     String,
     VecBytes,
   ],
@@ -175,11 +177,22 @@ quickcheck!(
     SocketAddrV4,
     Duration,
     NodeId,
-    Domain,
-    HostAddr,
     String,
     VecBytes,
   ]
+);
+
+#[cfg(feature = "hostaddr")]
+quickcheck!(
+  @<T>
+  Suspect[
+    Domain,
+    HostAddr,
+  ],
+  Dead[
+    Domain,
+    HostAddr,
+  ],
 );
 
 type Messages<I, A> = Message<I, A>;
