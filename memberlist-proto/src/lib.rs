@@ -10,8 +10,16 @@
 #[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
 pub use metrics_label::MetricLabels;
 #[cfg(any(feature = "std", feature = "alloc"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
+pub use nodecraft::{CheapClone, Node, NodeId, ParseNodeIdError};
+
+#[cfg(all(any(feature = "std", feature = "alloc"), feature = "hostaddr"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(all(any(feature = "std", feature = "alloc"), feature = "hostaddr")))
+)]
 pub use nodecraft::{
-  CheapClone, Domain, HostAddr, Node, NodeId, ParseNodeIdError,
+  Domain, DomainBuffer, HostAddr, HostAddrBuffer,
   hostaddr::{ParseDomainError, ParseHostAddrError},
 };
 
