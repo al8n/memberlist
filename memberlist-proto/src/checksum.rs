@@ -185,6 +185,7 @@ impl ChecksumAlgorithm {
   }
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for ChecksumAlgorithm {
   fn default() -> Self {
     cfg_if::cfg_if! {

@@ -1,6 +1,6 @@
 [package]
 name = "memberlist-quic"
-version = "0.6.1"
+version = "0.7.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -25,7 +25,6 @@ serde = ["memberlist-core/serde", "dep:serde", "humantime-serde", "indexmap/serd
 metrics = ["memberlist-core/metrics", "dep:metrics"]
 
 tokio = ["agnostic/tokio"]
-async-std = ["agnostic/async-std"]
 smol = ["agnostic/smol"]
 
 # enable DNS node address resolver
@@ -58,7 +57,7 @@ futures.workspace = true
 indexmap = "2"
 getifs.workspace = true
 memberlist-core.workspace = true
-nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
+nodecraft = { workspace = true, features = ["async", "resolver", "agnostic", "hostaddr"] }
 pin-project.workspace = true
 peekable = { workspace = true, features = ["future"] }
 tracing.workspace = true

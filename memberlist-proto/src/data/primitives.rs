@@ -2,6 +2,7 @@ use core::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
   time::Duration,
 };
+use std::num::NonZeroUsize;
 
 use varing::{Varint, decode_duration, encode_duration_to, encoded_duration_len};
 
@@ -305,7 +306,7 @@ macro_rules! impl_primitives {
     $(
       impl<'a> DataRef<'a, Self> for $ty {
         fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError> {
-          Varint::decode(src).map_err(Into::into)
+          Varint::decode(src).map(|(read, val)| (read.get(), val)).map_err(Into::into)
         }
       }
 
@@ -319,11 +320,11 @@ macro_rules! impl_primitives {
         }
 
         fn encoded_len(&self) -> usize {
-          Varint::encoded_len(self)
+          Varint::encoded_len(self).get()
         }
 
         fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-          Varint::encode(self, buf).map_err(Into::into)
+          Varint::encode(self, buf).map(::core::num::NonZeroUsize::get).map_err(Into::into)
         }
       }
     )*
@@ -448,7 +449,7 @@ impl<'a> DataRef<'a, Self> for char {
   fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError> {
     let (bytes_read, value) = Varint::decode(src)?;
     Ok((
-      bytes_read,
+      bytes_read.get(),
       char::from_u32(value).ok_or_else(|| DecodeError::custom("invalid character value"))?,
     ))
   }
@@ -464,11 +465,13 @@ impl Data for char {
   }
 
   fn encoded_len(&self) -> usize {
-    Varint::encoded_len(&(*self as u32))
+    Varint::encoded_len(&(*self as u32)).get()
   }
 
   fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    Varint::encode(&(*self as u32), buf).map_err(Into::into)
+    Varint::encode(&(*self as u32), buf)
+      .map(NonZeroUsize::get)
+      .map_err(Into::into)
   }
 }
 
@@ -534,7 +537,9 @@ impl Data for bool {
 
 impl<'a> DataRef<'a, Self> for Duration {
   fn decode(src: &'a [u8]) -> Result<(usize, Self), DecodeError> {
-    decode_duration(src).map_err(|_| DecodeError::custom("invalid duration"))
+    decode_duration(src)
+      .map(|(read, val)| (read.get(), val))
+      .map_err(|_| DecodeError::custom("invalid duration"))
   }
 }
 
@@ -548,10 +553,12 @@ impl Data for Duration {
   }
 
   fn encoded_len(&self) -> usize {
-    encoded_duration_len(self)
+    encoded_duration_len(self).get()
   }
 
   fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    encode_duration_to(self, buf).map_err(Into::into)
+    encode_duration_to(self, buf)
+      .map(NonZeroUsize::get)
+      .map_err(Into::into)
   }
 }

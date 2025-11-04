@@ -1,11 +1,12 @@
 use std::borrow::Cow;
 
-use aead::{AeadInPlace, KeyInit, generic_array::GenericArray};
+use aead::{AeadInPlace, KeyInit};
 use aes_gcm::{
   Aes128Gcm, Aes256Gcm, AesGcm,
   aes::{Aes192, cipher::consts::U12},
 };
 use bytes::{Buf, BufMut};
+use generic_array::GenericArray;
 use rand::Rng;
 use varing::decode_u32_varint;
 
@@ -326,7 +327,7 @@ impl<'a> DataRef<'a, Self> for SecretKey {
           offset += 1;
 
           let (bytes_read, val) = decode_u32_varint(&buf[offset..])?;
-          offset += bytes_read;
+          offset += bytes_read.get();
 
           let val: [u8; 16] = buf[offset..offset + val as usize]
             .try_into()
@@ -341,7 +342,7 @@ impl<'a> DataRef<'a, Self> for SecretKey {
           offset += 1;
 
           let (bytes_read, val) = decode_u32_varint(&buf[offset..])?;
-          offset += bytes_read;
+          offset += bytes_read.get();
 
           let val: [u8; 24] = buf[offset..offset + val as usize]
             .try_into()
@@ -357,7 +358,7 @@ impl<'a> DataRef<'a, Self> for SecretKey {
           offset += 1;
 
           let (bytes_read, val) = decode_u32_varint(&buf[offset..])?;
-          offset += bytes_read;
+          offset += bytes_read.get();
 
           let val: [u8; 32] = buf[offset..offset + val as usize]
             .try_into()
@@ -394,7 +395,7 @@ impl Data for SecretKey {
   }
 
   fn encoded_len(&self) -> usize {
-    1 + varing::encoded_u32_varint_len(self.len() as u32) + self.len()
+    1 + varing::encoded_u32_varint_len(self.len() as u32).get() + self.len()
   }
 
   fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
@@ -418,7 +419,7 @@ impl Data for SecretKey {
     let self_len = self.len();
     let len = varing::encode_u32_varint_to(self_len as u32, &mut buf[offset..])
       .map_err(|_| EncodeError::insufficient_buffer(self.encoded_len(), buf_len))?;
-    offset += len;
+    offset += len.get();
 
     buf[offset..offset + self_len].copy_from_slice(self.as_ref());
     offset += self_len;
@@ -615,21 +616,21 @@ impl EncryptionAlgorithm {
 
     match pk {
       SecretKey::Aes128(pk) => {
-        let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk));
+        let gcm = Aes128Gcm::new(GenericArray::from_slice(&pk).as_ref());
         gcm
-          .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, buf)
+          .encrypt_in_place(GenericArray::from_slice(&nonce).as_ref(), auth_data, buf)
           .map_err(Into::into)
       }
       SecretKey::Aes192(pk) => {
-        let gcm = Aes192Gcm::new(GenericArray::from_slice(&pk));
+        let gcm = Aes192Gcm::new(GenericArray::from_slice(&pk).as_ref());
         gcm
-          .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, buf)
+          .encrypt_in_place(GenericArray::from_slice(&nonce).as_ref(), auth_data, buf)
           .map_err(Into::into)
       }
       SecretKey::Aes256(pk) => {
-        let gcm = Aes256Gcm::new(GenericArray::from_slice(&pk));
+        let gcm = Aes256Gcm::new(GenericArray::from_slice(&pk).as_ref());
         gcm
-          .encrypt_in_place(GenericArray::from_slice(&nonce), auth_data, buf)
+          .encrypt_in_place(GenericArray::from_slice(&nonce).as_ref(), auth_data, buf)
           .map_err(Into::into)
       }
     }
@@ -650,21 +651,21 @@ impl EncryptionAlgorithm {
     // Get the AES block cipher
     match key {
       SecretKey::Aes128(pk) => {
-        let gcm = Aes128Gcm::new(GenericArray::from_slice(pk));
+        let gcm = Aes128Gcm::new(GenericArray::from_slice(pk).as_ref());
         gcm
-          .decrypt_in_place(GenericArray::from_slice(nonce), auth_data, dst)
+          .decrypt_in_place(GenericArray::from_slice(nonce).as_ref(), auth_data, dst)
           .map_err(Into::into)
       }
       SecretKey::Aes192(pk) => {
-        let gcm = Aes192Gcm::new(GenericArray::from_slice(pk));
+        let gcm = Aes192Gcm::new(GenericArray::from_slice(pk).as_ref());
         gcm
-          .decrypt_in_place(GenericArray::from_slice(nonce), auth_data, dst)
+          .decrypt_in_place(GenericArray::from_slice(nonce).as_ref(), auth_data, dst)
           .map_err(Into::into)
       }
       SecretKey::Aes256(pk) => {
-        let gcm = Aes256Gcm::new(GenericArray::from_slice(pk));
+        let gcm = Aes256Gcm::new(GenericArray::from_slice(pk).as_ref());
         gcm
-          .decrypt_in_place(GenericArray::from_slice(nonce), auth_data, dst)
+          .decrypt_in_place(GenericArray::from_slice(nonce).as_ref(), auth_data, dst)
           .map_err(Into::into)
       }
     }

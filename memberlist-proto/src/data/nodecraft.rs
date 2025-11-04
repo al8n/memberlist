@@ -1,83 +1,74 @@
-use std::net::SocketAddr;
-
-use either::Either;
-use nodecraft::{Domain, DomainRef, HostAddr, HostAddrRef, Node, NodeId, NodeIdRef};
+use nodecraft::{Node, NodeId, NodeIdRef};
 
 use super::{
-  super::{WireType, merge, skip},
+  super::{merge, skip},
   Data, DataRef, DecodeError, EncodeError,
 };
 
-impl<'a> DataRef<'a, Domain> for DomainRef<'a> {
-  fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError> {
-    DomainRef::try_from(buf)
-      .map(|domain| (buf.len(), domain))
-      .map_err(|e| DecodeError::custom(e.as_str()))
-  }
-}
-
-impl Data for Domain {
-  type Ref<'a> = DomainRef<'a>;
-
-  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
-  where
-    Self: Sized,
-  {
-    Ok(val.to_owned())
-  }
-
-  fn encoded_len(&self) -> usize {
-    self.fqdn_str().len()
-  }
-
-  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    let val = self.fqdn_str();
-    let len = val.len();
-    if buf.len() < len {
-      return Err(EncodeError::insufficient_buffer(len, buf.len()));
-    }
-    buf[..len].copy_from_slice(val.as_bytes());
-    Ok(len)
-  }
-}
-
-impl<'a, const N: usize> DataRef<'a, NodeId<N>> for NodeIdRef<'a, N> {
-  fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError> {
-    NodeIdRef::try_from(buf)
-      .map(|node_id| (buf.len(), node_id))
-      .map_err(|e| DecodeError::custom(e.to_string()))
-  }
-}
-
-impl<const N: usize> Data for NodeId<N> {
-  type Ref<'a> = NodeIdRef<'a, N>;
-
-  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError> {
-    Ok(Self::new(val).expect("reference must be a valid node id"))
-  }
-
-  fn encoded_len(&self) -> usize {
-    self.as_bytes().len()
-  }
-
-  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-    let val = self.as_bytes();
-    let len = val.len();
-    if buf.len() < len {
-      return Err(EncodeError::insufficient_buffer(len, buf.len()));
-    }
-    buf[..len].copy_from_slice(val);
-    Ok(len)
-  }
-}
-
+#[cfg(feature = "hostaddr")]
 const _: () = {
+  use super::super::WireType;
+  use nodecraft::{
+    Domain, DomainBuffer, HostAddr, HostAddrBuffer,
+    hostaddr::{self, Host},
+  };
+  use std::net::SocketAddr;
+
+  impl<'a> DataRef<'a, Domain> for DomainBuffer {
+    fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError> {
+      Self::try_from(buf)
+        .map(|domain| (buf.len(), domain))
+        .map_err(|e| DecodeError::custom(e.as_str()))
+    }
+  }
+
+  impl Data for Domain {
+    type Ref<'a> = DomainBuffer;
+
+    fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
+    where
+      Self: Sized,
+    {
+      Ok(val.into())
+    }
+
+    fn encoded_len(&self) -> usize {
+      let s = self.as_inner();
+      if s.ends_with('.') {
+        s.len()
+      } else {
+        s.len() + 1
+      }
+    }
+
+    fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+      let s = self.as_inner();
+      if s.ends_with('.') {
+        let len = s.len();
+        if buf.len() < len {
+          return Err(EncodeError::insufficient_buffer(len, buf.len()));
+        }
+        buf[..len].copy_from_slice(s.as_bytes());
+        return Ok(len);
+      }
+
+      let len = s.len();
+      let encoded_len = len + 1;
+      if buf.len() < encoded_len {
+        return Err(EncodeError::insufficient_buffer(encoded_len, buf.len()));
+      }
+      buf[..len].copy_from_slice(s.as_bytes());
+      buf[len] = b'.';
+      Ok(encoded_len)
+    }
+  }
+
   const HOST_ADDR_SOCKET_TAG: u8 = 1;
   const HOST_ADDR_SOCKET_BYTE: u8 = merge(WireType::LengthDelimited, HOST_ADDR_SOCKET_TAG);
   const HOST_ADDR_DOMAIN_TAG: u8 = 2;
   const HOST_ADDR_DOMAIN_BYTE: u8 = merge(WireType::LengthDelimited, HOST_ADDR_DOMAIN_TAG);
 
-  impl<'a> DataRef<'a, HostAddr> for HostAddrRef<'a> {
+  impl<'a> DataRef<'a, HostAddr> for HostAddrBuffer {
     fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError> {
       let mut offset = 0;
       let buf_len = buf.len();
@@ -110,14 +101,14 @@ const _: () = {
 
             offset += 1;
             let (bytes_read, domain) =
-              <DomainRef<'_> as DataRef<Domain>>::decode_length_delimited(&buf[offset..])?;
+              <DomainBuffer as DataRef<Domain>>::decode_length_delimited(&buf[offset..])?;
             let required = offset + bytes_read + 2;
             if required > buf_len {
               return Err(DecodeError::buffer_underflow());
             }
             let port = u16::from_be_bytes(buf[offset + bytes_read..required].try_into().unwrap());
             offset += bytes_read + 2;
-            value = Some(Self::from((domain, port)));
+            value = Some(Self::from_domain(domain).with_port(port));
           }
           _ => offset += skip("HostAddr", &buf[offset..])?,
         }
@@ -129,35 +120,47 @@ const _: () = {
   }
 
   impl Data for HostAddr {
-    type Ref<'a> = HostAddrRef<'a>;
+    type Ref<'a> = HostAddrBuffer;
 
     fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError>
     where
       Self: Sized,
     {
-      Ok(val.to_owned())
+      let val: hostaddr::HostAddr<hostaddr::Domain<hostaddr::Buffer>> = val.into();
+      let (val, port) = val.into_components();
+
+      Ok(match val {
+        Host::Domain(domain) => Self::from_domain(domain.into()).maybe_with_port(port),
+        Host::Ip(addr) => Self::from_ip_addr(addr).maybe_with_port(port),
+      })
     }
 
     fn encoded_len(&self) -> usize {
-      match self.as_inner() {
-        Either::Left(addr) => 1 + addr.encoded_len_with_length_delimited(),
-        Either::Right((_, domain)) => 1 + 2 + domain.encoded_len_with_length_delimited(),
+      let val: hostaddr::HostAddr<&hostaddr::Domain<smol_str::SmolStr>> = self.into();
+      match val.host() {
+        Host::Ip(addr) => {
+          1 + SocketAddr::new(*addr, val.port().unwrap_or(0)).encoded_len_with_length_delimited()
+        }
+        Host::Domain(domain) => 1 + 2 + domain.encoded_len_with_length_delimited(),
       }
     }
 
     fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
       let src_len = buf.len();
-
-      match self.as_inner() {
-        Either::Left(addr) => {
+      let val: hostaddr::HostAddr<&hostaddr::Domain<smol_str::SmolStr>> = self.into();
+      let Some(port) = val.port() else {
+        return Err(EncodeError::custom("missing port number in HostAddr"));
+      };
+      match val.host() {
+        Host::Ip(addr) => {
           if src_len < 1 {
             return Err(EncodeError::insufficient_buffer(1, src_len));
           }
           buf[0] = HOST_ADDR_SOCKET_BYTE;
-          let offset = addr.encode_length_delimited(&mut buf[1..])?;
+          let offset = SocketAddr::new(*addr, port).encode_length_delimited(&mut buf[1..])?;
           Ok(1 + offset)
         }
-        Either::Right((port, domain)) => {
+        Host::Domain(domain) => {
           buf[0] = HOST_ADDR_DOMAIN_BYTE;
           let offset = domain.encode_length_delimited(&mut buf[1..])?;
           buf[1 + offset..1 + offset + 2].copy_from_slice(&port.to_be_bytes());
@@ -167,6 +170,36 @@ const _: () = {
     }
   }
 };
+
+impl<'a, const N: usize> DataRef<'a, NodeId<N>> for NodeIdRef<'a, N> {
+  fn decode(buf: &'a [u8]) -> Result<(usize, Self), DecodeError> {
+    NodeIdRef::try_from(buf)
+      .map(|node_id| (buf.len(), node_id))
+      .map_err(|e| DecodeError::custom(e.to_string()))
+  }
+}
+
+impl<const N: usize> Data for NodeId<N> {
+  type Ref<'a> = NodeIdRef<'a, N>;
+
+  fn from_ref(val: Self::Ref<'_>) -> Result<Self, DecodeError> {
+    Ok(Self::new(val).expect("reference must be a valid node id"))
+  }
+
+  fn encoded_len(&self) -> usize {
+    self.as_bytes().len()
+  }
+
+  fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
+    let val = self.as_bytes();
+    let len = val.len();
+    if buf.len() < len {
+      return Err(EncodeError::insufficient_buffer(len, buf.len()));
+    }
+    buf[..len].copy_from_slice(val);
+    Ok(len)
+  }
+}
 
 const _: () = {
   const NODE_ID_TAG: u8 = 1;

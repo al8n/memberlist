@@ -23,20 +23,6 @@ macro_rules! test_mods {
       $fn!(Quinn<tokio>("quinn", quinn_stream_layer::<TokioRuntime>().await));
     }
 
-    #[cfg(all(feature = "async-std", feature = "quinn"))]
-    mod async_std {
-      use agnostic::async_std::AsyncStdRuntime;
-      use memberlist_quic::{tests::quinn_stream_layer, stream_layer::quinn::Quinn};
-
-      use super::*;
-      use crate::async_std_run;
-
-      $fn!(Quinn<async_std>(
-        "quinn",
-        quinn_stream_layer::<AsyncStdRuntime>().await
-      ));
-    }
-
     #[cfg(all(feature = "smol", feature = "quinn"))]
     mod smol {
       use agnostic::smol::SmolRuntime;
@@ -62,20 +48,6 @@ macro_rules! test_mods {
       $fn!(Quinn<tokio>(
         "quinn",
         quinn_stream_layer_with_connect_timeout::<TokioRuntime>($expr).await
-      ));
-    }
-
-    #[cfg(all(feature = "async-std", feature = "quinn"))]
-    mod async_std {
-      use agnostic::async_std::AsyncStdRuntime;
-      use memberlist_quic::{tests::quinn_stream_layer_with_connect_timeout, stream_layer::quinn::Quinn};
-
-      use super::*;
-      use crate::async_std_run;
-
-      $fn!(Quinn<async_std>(
-        "quinn",
-        quinn_stream_layer_with_connect_timeout::<AsyncStdRuntime>($expr).await
       ));
     }
 

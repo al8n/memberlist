@@ -157,7 +157,7 @@ where
     Self {
       id: self.id.clone(),
       bind_addresses: self.bind_addresses.clone(),
-      advertise_address: self.advertise_address.clone(),
+      advertise_address: self.advertise_address,
       stream_layer: self.stream_layer.clone(),
       resolver: self.resolver.clone(),
       cidrs_policy: self.cidrs_policy.clone(),
@@ -251,16 +251,20 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
   From<NetTransportOptions<I, A, S>> for (A::Options, S::Options, Options<I, A>)
 {
   fn from(opts: NetTransportOptions<I, A, S>) -> (A::Options, S::Options, Options<I, A>) {
-    (opts.resolver, opts.stream_layer, Options {
-      id: opts.id,
-      bind_addresses: opts.bind_addresses,
-      advertise_address: opts.advertise_address,
-      cidrs_policy: opts.cidrs_policy,
-      max_packet_size: opts.max_packet_size,
-      recv_buffer_size: opts.recv_buffer_size,
-      #[cfg(feature = "metrics")]
-      metric_labels: opts.metric_labels,
-    })
+    (
+      opts.resolver,
+      opts.stream_layer,
+      Options {
+        id: opts.id,
+        bind_addresses: opts.bind_addresses,
+        advertise_address: opts.advertise_address,
+        cidrs_policy: opts.cidrs_policy,
+        max_packet_size: opts.max_packet_size,
+        recv_buffer_size: opts.recv_buffer_size,
+        #[cfg(feature = "metrics")]
+        metric_labels: opts.metric_labels,
+      },
+    )
   }
 }
 

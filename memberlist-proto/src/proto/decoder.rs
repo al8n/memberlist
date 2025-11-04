@@ -428,7 +428,7 @@ impl ProtoDecoder {
     reader.peek(&mut header).await?;
     let (length_delimited_size, total_len) =
       varing::decode_u32_varint(&header[1..]).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-    let mut buf = BytesMut::zeroed(1 + length_delimited_size + total_len as usize);
+    let mut buf = BytesMut::zeroed(1 + length_delimited_size.get() + total_len as usize);
     reader.read_exact(&mut buf).await?;
     let _ = auth_data;
     Ok(Bytes::from(buf))

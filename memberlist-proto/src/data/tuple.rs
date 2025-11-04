@@ -112,7 +112,7 @@ where
   /// Returns the encoded length of the data including the length delimited.
   pub fn encoded_len_with_length_delimited(&self) -> usize {
     let len = self.encoded_len();
-    encoded_u32_varint_len(len as u32) + len
+    encoded_u32_varint_len(len as u32).get() + len
   }
 
   /// Encodes the message to a buffer.
@@ -159,7 +159,7 @@ where
     }
 
     let mut offset = 0;
-    offset += encode_u32_varint_to(len as u32, buf)?;
+    offset += encode_u32_varint_to(len as u32, buf)?.get();
     offset += self.encode(&mut buf[offset..])?;
 
     #[cfg(debug_assertions)]

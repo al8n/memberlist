@@ -62,11 +62,6 @@ const DEFAULT_UDP_RECV_BUF_SIZE: usize = 2 * 1024 * 1024;
 /// [`NetTransport`] based on [`tokio`](https://crates.io/crates/tokio).
 pub type TokioNetTransport<I, A, S> = NetTransport<I, A, S, agnostic::tokio::TokioRuntime>;
 
-#[cfg(feature = "async-std")]
-/// [`NetTransport`] based on [`async-std`](https://crates.io/crates/async-std).
-pub type AsyncStdNetTransport<I, A, S> =
-  NetTransport<I, A, S, agnostic::async_std::AsyncStdRuntime>;
-
 #[cfg(feature = "smol")]
 /// [`NetTransport`] based on [`smol`](https://crates.io/crates/smol).
 pub type SmolNetTransport<I, A, S> = NetTransport<I, A, S, agnostic::smol::SmolRuntime>;

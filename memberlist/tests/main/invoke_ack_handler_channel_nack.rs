@@ -22,14 +22,6 @@ mod tokio {
   invoke_ack_handler_channel_nack!(tokio);
 }
 
-#[cfg(feature = "async-std")]
-mod async_std {
-
-  use super::*;
-
-  invoke_ack_handler_channel_nack!(async_std);
-}
-
 #[cfg(feature = "smol")]
 mod smol {
 
