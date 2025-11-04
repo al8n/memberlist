@@ -22,14 +22,6 @@ mod tokio {
   set_ack_handler!(tokio);
 }
 
-#[cfg(feature = "async-std")]
-mod async_std {
-
-  use super::*;
-
-  set_ack_handler!(async_std);
-}
-
 #[cfg(feature = "smol")]
 mod smol {
 

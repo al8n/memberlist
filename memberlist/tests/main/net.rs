@@ -44,26 +44,6 @@ macro_rules! test_mods {
       ));
     }
 
-    #[cfg(feature = "async-std")]
-    mod async_std {
-      use agnostic::async_std::AsyncStdRuntime;
-
-      use super::*;
-      use crate::async_std_run;
-
-      #[cfg(feature = "tcp")]
-      $fn!(Tcp<async_std>(
-        "tcp",
-        ()
-      ));
-
-      #[cfg(feature = "tls")]
-      $fn!(Tls<async_std>(
-        "tls",
-        memberlist_net::tests::tls_stream_layer::<AsyncStdRuntime>().await
-      ));
-    }
-
     #[cfg(feature = "smol")]
     mod smol {
       use agnostic::smol::SmolRuntime;

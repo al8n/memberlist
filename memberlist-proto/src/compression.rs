@@ -238,6 +238,7 @@ const _: () = {
   }
 };
 
+#[allow(clippy::derivable_impls)]
 impl Default for CompressAlgorithm {
   fn default() -> Self {
     cfg_if::cfg_if! {

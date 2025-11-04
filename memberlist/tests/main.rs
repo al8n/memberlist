@@ -1,5 +1,3 @@
-#[cfg(feature = "async-std")]
-use agnostic::async_std::AsyncStdRuntime;
 #[cfg(feature = "smol")]
 use agnostic::smol::SmolRuntime;
 
@@ -23,13 +21,6 @@ fn smol_run(fut: impl Future<Output = ()>) {
   use agnostic::RuntimeLite;
   run_unit_test(SmolRuntime::block_on, fut);
 }
-
-#[cfg(feature = "async-std")]
-fn async_std_run(fut: impl Future<Output = ()>) {
-  use agnostic::RuntimeLite;
-  run_unit_test(AsyncStdRuntime::block_on, fut);
-}
-
 #[path = "main/net.rs"]
 #[cfg(feature = "memberlist-net")]
 mod net;

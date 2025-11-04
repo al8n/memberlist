@@ -28,26 +28,26 @@ rustdoc-args = ["--cfg", "docsrs"]
 among = "0.1"
 auto_impl = "1"
 atomic_refcell = "0.1"
-agnostic-lite = { version = "0.5", features = ["time"] }
-agnostic-io = { version = "0.1", default-features = false }
-agnostic = "0.7"
+agnostic-lite = { version = "0.6", features = ["time"] }
+agnostic-io = { version = "0.2", default-features = false }
+agnostic = "0.8"
 # agnostic-lite = { version = "0.4", features = ["time"], path = "../agnostic/agnostic-lite" }
 # agnostic = { version = "0.6", path = "../agnostic/agnostic" }
 async-lock = "3"
 async-channel = "2"
 bytes = { version = "1", default-features = false }
 byteorder = { version = "1", default-features = false }
-varing = { version = "0.5", default-features = false }
+varing = { version = "0.10", default-features = false }
 cfg-if = "1"
 derive_more = { version = "2", default-features = false }
 either = { version = "1", default-features = false }
 futures = "0.3"
 indexmap = "2"
-getifs = "0.3"
+getifs = "0.4"
 getrandom = "0.3"
 metrics = "0.24"
-nodecraft = { version = "0.7", default-features = false }
-# nodecraft = { version = "0.7", path = "../nodecraft", features = [
+nodecraft = { version = "0.8", default-features = false }
+# nodecraft = { version = "0.8", path = "../nodecraft", features = [
 #   "async",
 #   "resolver",
 #   "agnostic",
@@ -70,8 +70,8 @@ viewit = "0.1.5"
 arbitrary = { version = "1", default-features = false }
 quickcheck = { version = "1", default-features = false }
 
-memberlist-core = { version = "0.6", path = "memberlist-core", default-features = false }
-memberlist-net = { version = "0.6", path = "memberlist-net", default-features = false }
-memberlist-proto = { version = "0.1", path = "memberlist-proto", default-features = false }
-memberlist-quic = { version = "0.6", path = "memberlist-quic", default-features = false }
-memberlist = { version = "0.6", path = "memberlist", default-features = false }
+memberlist-core = { version = "0.7", path = "memberlist-core", default-features = false }
+memberlist-net = { version = "0.7", path = "memberlist-net", default-features = false }
+memberlist-proto = { version = "0.2", path = "memberlist-proto", default-features = false }
+memberlist-quic = { version = "0.7", path = "memberlist-quic", default-features = false }
+memberlist = { version = "0.7", path = "memberlist", default-features = false }

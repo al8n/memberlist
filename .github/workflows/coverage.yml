@@ -5,20 +5,20 @@ on:
     branches:
       - main
     paths-ignore:
-      - 'README.md'
-      - 'COPYRIGHT'
-      - 'LICENSE*'
-      - '**.md'
-      - '**.txt'
-      - 'art'
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
   pull_request:
     paths-ignore:
-      - 'README.md'
-      - 'COPYRIGHT'
-      - 'LICENSE*'
-      - '**.md'
-      - '**.txt'
-      - 'art'
+      - "README.md"
+      - "COPYRIGHT"
+      - "LICENSE*"
+      - "**.md"
+      - "**.txt"
+      - "art"
   workflow_dispatch:
 
 env:
@@ -34,7 +34,7 @@ jobs:
           - crate: memberlist-core
             features: "test,metrics"
             name: "memberlist-core"
-          - crate: memberlist-proto 
+          - crate: memberlist-proto
             features: "std,metrics,encryption,all-compression,all-checksum,quickcheck"
             name: "memberlist-proto-without-rayon"
           - crate: memberlist-proto
@@ -59,7 +59,7 @@ jobs:
             features: "test,tokio,quinn,snappy,crc32,encryption,metrics"
             name: "memberlist-quinn-without-rayon"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install latest nightly
         uses: actions-rs/toolchain@v1
         with:
@@ -75,7 +75,7 @@ jobs:
         working-directory: ${{ matrix.crate }}
         continue-on-error: true
       - name: Upload Coverage Report as Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.crate }}/cobertura.xml
@@ -84,9 +84,9 @@ jobs:
     needs: coverage-report
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Download all coverage reports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: reports/
       - name: List contents of the reports directory

@@ -46,7 +46,7 @@ Here are the layers:
 
   - **Runtime Layer**
 
-    Async runtime agnostic are provided by [`agnostic`'s Runtime](https://docs.rs/agnostic/trait.Runtime.html) trait, `tokio`, `async-std` and `smol` are supported by default. Users can implement their own [`Runtime`](https://docs.rs/agnostic/trait.Runtime.html) and plug it into the memberlist.
+    Async runtime agnostic are provided by [`agnostic`'s Runtime](https://docs.rs/agnostic/trait.Runtime.html) trait, `tokio`, and `smol` are supported by default. Users can implement their own [`Runtime`](https://docs.rs/agnostic/trait.Runtime.html) and plug it into the memberlist.
 
   - **Address Resolver Layer**
 
@@ -126,7 +126,7 @@ For details on all of these extensions, please read Hashicorp's paper ["Lifeguar
 - By using `TCP/UDP`, `TLS/UDP` transport
 
   ```toml
-  memberlist = { version = "0.6", features = [
+  memberlist = { version = "0.7", features = [
     "tcp",
     # Enable a checksum, as UDP is not reliable.
     # Built in supports are: "crc32", "xxhash64", "xxhash32", "xxhash3", "murmur3"
@@ -138,7 +138,7 @@ For details on all of these extensions, please read Hashicorp's paper ["Lifeguar
     # Enable encryption, this is optional,
     "encryption",
     # Enable a async runtime
-    # Builtin supports are `tokio`, `smol`, `async-std`
+    # Builtin supports are `tokio`, `smol`
     "tokio",
     # Enable one tls implementation. This is optional.
     # Users can just use encryption feature with plain TCP.
@@ -152,13 +152,13 @@ For details on all of these extensions, please read Hashicorp's paper ["Lifeguar
   For `QUIC/QUIC` transport, as QUIC is secure and reliable, so enable checksum or encryption makes no sense.
 
   ```toml
-  memberlist = { version = "0.6", features = [
+  memberlist = { version = "0.7", features = [
     # Enable a compression, this is optional,
     # and possible values are `snappy`, `brotli`, `zstd` and `lz4`.
     # You can enable all.
     "snappy",
     # Enable a async runtime
-    # Builtin supports are `tokio`, `smol`, `async-std`
+    # Builtin supports are `tokio`, `smol`
     "tokio",
     # Enable one of the QUIC implementation
     # Builtin support is `quinn`

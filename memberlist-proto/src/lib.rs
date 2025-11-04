@@ -2,7 +2,7 @@
 #![doc(html_logo_url = "https://raw.githubusercontent.com/al8n/memberlist/main/art/logo_72x72.png")]
 #![forbid(unsafe_code)]
 #![deny(warnings)]
-#![allow(clippy::type_complexity, unexpected_cfgs)]
+#![allow(clippy::type_complexity, clippy::double_parens, unexpected_cfgs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
@@ -10,9 +10,17 @@
 #[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
 pub use metrics_label::MetricLabels;
 #[cfg(any(feature = "std", feature = "alloc"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
+pub use nodecraft::{CheapClone, Node, NodeId, ParseNodeIdError};
+
+#[cfg(all(any(feature = "std", feature = "alloc"), feature = "hostaddr"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(all(any(feature = "std", feature = "alloc"), feature = "hostaddr")))
+)]
 pub use nodecraft::{
-  CheapClone, Domain, HostAddr, Node, NodeId, ParseDomainError, ParseHostAddrError,
-  ParseNodeIdError,
+  Domain, DomainBuffer, HostAddr, HostAddrBuffer,
+  hostaddr::{ParseDomainError, ParseHostAddrError},
 };
 
 #[cfg(any(feature = "arbitrary", test))]
@@ -190,7 +198,7 @@ pub mod utils {
     let src = &src[offset..];
     match wire_type {
       WireType::Varint => match varing::decode_u64_varint(src) {
-        Ok((bytes_read, _)) => Ok((offset + bytes_read).min(buf_len)),
+        Ok((bytes_read, _)) => Ok((offset + bytes_read.get()).min(buf_len)),
         Err(e) => Err(e.into()),
       },
       WireType::LengthDelimited => {
@@ -200,7 +208,9 @@ pub mod utils {
         }
 
         match varing::decode_u32_varint(src) {
-          Ok((bytes_read, length)) => Ok((offset + bytes_read + length as usize).min(buf_len)),
+          Ok((bytes_read, length)) => {
+            Ok((offset + bytes_read.get() + length as usize).min(buf_len))
+          }
           Err(e) => Err(e.into()),
         }
       }
