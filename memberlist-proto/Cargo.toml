@@ -113,7 +113,7 @@ hash32 = { version = "1", optional = true }
 # compression
 brotli = { version = "8", optional = true }
 snap = { version = "1", optional = true }
-lz4_flex = { version = "0.11", optional = true }
+lz4_flex = { version = "0.12", optional = true }
 zstd = { version = "0.13", optional = true }
 
 # tracing & metrics
