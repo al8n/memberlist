@@ -86,7 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Download all coverage reports
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           path: reports/
       - name: List contents of the reports directory
