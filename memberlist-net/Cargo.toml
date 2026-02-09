@@ -75,7 +75,7 @@ getifs.workspace = true
 nodecraft = { workspace = true, features = ["async", "resolver", "agnostic"] }
 peekable = { workspace = true, features = ["future"] }
 pin-project.workspace = true
-rand = "0.9"
+rand = "0.10"
 memberlist-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
