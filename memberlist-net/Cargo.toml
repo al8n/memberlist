@@ -1,6 +1,6 @@
 [package]
 name = "memberlist-net"
-version = "0.8.0"
+version = "0.8.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -45,17 +45,18 @@ test = [
 
 # enable DNS node address resolver
 dns = ["nodecraft/dns"]
-dns-over-quic = ["dns", "nodecraft/dns-over-quic"]
-dns-over-h3 = ["dns", "nodecraft/dns-over-h3"]
-dns-over-https-rustls = ["dns", "nodecraft/dns-over-https-rustls"]
-dns-over-rustls = ["dns", "nodecraft/dns-over-rustls"]
-dns-over-openssl = ["dns", "nodecraft/dns-over-openssl"]
-dns-over-native-tls = ["dns", "nodecraft/dns-over-native-tls"]
-dns-webpki-roots = ["dns", "nodecraft/dns-webpki-roots"]
-dns-native-certs = ["dns", "nodecraft/dns-native-certs"]
-dnssec-openssl = ["dns", "nodecraft/dnssec-openssl"]
+quic-ring = ["dns", "nodecraft/quic-ring"]
+quic-aws-lc-rs = ["dns", "nodecraft/quic-aws-lc-rs"]
+h3-ring = ["dns", "nodecraft/h3-ring"]
+h3-aws-lc-rs = ["dns", "nodecraft/h3-aws-lc-rs"]
+https-ring = ["dns", "nodecraft/https-ring"]
+https-aws-lc-rs = ["dns", "nodecraft/https-aws-lc-rs"]
+tls-ring = ["dns", "nodecraft/tls-ring"]
+tls-aws-lc-rs = ["dns", "nodecraft/tls-aws-lc-rs"]
+webpki-roots = ["dns", "nodecraft/webpki-roots"]
+rustls-platform-verifier = ["dns", "nodecraft/rustls-platform-verifier"]
 dnssec-ring = ["dns", "nodecraft/dnssec-ring"]
-dnssec = ["dns", "nodecraft/dnssec"]
+dnssec-aws-lc-rs = ["dns", "nodecraft/dnssec-aws-lc-rs"]
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom.workspace = true

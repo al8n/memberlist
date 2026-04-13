@@ -1,6 +1,6 @@
 [package]
 name = "memberlist-core"
-version = "0.8.0"
+version = "0.8.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -144,12 +144,3 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 parking_lot = "0.12"
 memberlist-proto = { workspace = true, features = ["arbitrary", "quickcheck"] }
-
-[lints.rust]
-rust_2018_idioms = "warn"
-unexpected_cfgs = { level = "warn", check-cfg = [
-  'cfg(all_tests)',
-  'cfg(compression)',
-  'cfg(checksum)',
-  'cfg(offload)',
-] }

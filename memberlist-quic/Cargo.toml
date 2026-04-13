@@ -1,6 +1,6 @@
 [package]
 name = "memberlist-quic"
-version = "0.8.0"
+version = "0.8.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -29,17 +29,18 @@ smol = ["agnostic/smol"]
 
 # enable DNS node address resolver
 dns = ["nodecraft/dns", "agnostic/dns"]
-dns-over-quic = ["dns", "nodecraft/dns-over-quic", "agnostic/dns-over-quic"]
-dns-over-h3 = ["dns", "nodecraft/dns-over-h3", "agnostic/dns-over-h3"]
-dns-over-https-rustls = ["dns", "nodecraft/dns-over-https-rustls", "agnostic/dns-over-https-rustls"]
-dns-over-rustls = ["dns", "nodecraft/dns-over-rustls", "agnostic/dns-over-rustls"]
-dns-over-openssl = ["dns", "nodecraft/dns-over-openssl", "agnostic/dns-over-openssl"]
-dns-over-native-tls = ["dns", "nodecraft/dns-over-native-tls", "agnostic/dns-over-native-tls"]
-dns-webpki-roots = ["dns", "nodecraft/dns-webpki-roots", "agnostic/dns-webpki-roots"]
-dns-native-certs = ["dns", "nodecraft/dns-native-certs", "agnostic/dns-native-certs"]
-dnssec-openssl = ["dns", "nodecraft/dnssec-openssl", "agnostic/dnssec-openssl"]
+quic-ring = ["dns", "nodecraft/quic-ring", "agnostic/quic-ring"]
+quic-aws-lc-rs = ["dns", "nodecraft/quic-aws-lc-rs", "agnostic/quic-aws-lc-rs"]
+h3-ring = ["dns", "nodecraft/h3-ring", "agnostic/h3-ring"]
+h3-aws-lc-rs = ["dns", "nodecraft/h3-aws-lc-rs", "agnostic/h3-aws-lc-rs"]
+https-ring = ["dns", "nodecraft/https-ring", "agnostic/https-ring"]
+https-aws-lc-rs = ["dns", "nodecraft/https-aws-lc-rs", "agnostic/https-aws-lc-rs"]
+tls-ring = ["dns", "nodecraft/tls-ring", "agnostic/tls-ring"]
+tls-aws-lc-rs = ["dns", "nodecraft/tls-aws-lc-rs", "agnostic/tls-aws-lc-rs"]
+webpki-roots = ["dns", "nodecraft/webpki-roots", "agnostic/webpki-roots"]
+rustls-platform-verifier = ["dns", "nodecraft/rustls-platform-verifier", "agnostic/rustls-platform-verifier"]
 dnssec-ring = ["dns", "nodecraft/dnssec-ring", "agnostic/dnssec-ring"]
-dnssec = ["dns", "nodecraft/dnssec", "agnostic/dnssec"]
+dnssec-aws-lc-rs = ["dns", "nodecraft/dnssec-aws-lc-rs", "agnostic/dnssec-aws-lc-rs"]
 
 # enable test feature
 test = ["memberlist-core/test", "rcgen"]
@@ -78,7 +79,7 @@ quinn = { version = "0.11", default-features = false, optional = true, features 
 rustls = { version = "0.23", default-features = false, optional = true }
 
 # test
-rcgen = { version = "0.13", optional = true }
+rcgen = { version = "0.14", optional = true }
 
 # compression
 rayon = { version = "1.8", optional = true }
