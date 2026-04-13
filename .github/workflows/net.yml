@@ -20,7 +20,7 @@ on:
       - "**.txt"
       - "art"
   workflow_dispatch:
-  schedule: [cron: "0 1 */7 * *"]
+  schedule: [cron: "0 1 */30 * *"]
 
 jobs:
   test:
@@ -36,7 +36,7 @@ jobs:
         runtime: [tokio, smol]
         stream_layer: [tls, tcp]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         run: |
@@ -68,7 +68,7 @@ jobs:
         working-directory: memberlist
 
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry

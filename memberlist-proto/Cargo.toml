@@ -1,6 +1,6 @@
 [package]
 name = "memberlist-proto"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -102,7 +102,7 @@ generic-array = { version = "1", optional = true, features = ["compat-0_14"] }
 aead = { version = "0.5", features = ["bytes", "std"], optional = true }
 aes-gcm = { version = "0.10", optional = true }
 base64 = { version = "0.22", default-features = false, optional = true }
-cbc = { version = "0.1", optional = true }
+cbc = { version = "0.2", optional = true }
 rand = { workspace = true, optional = true }
 
 # checksum
@@ -113,7 +113,7 @@ hash32 = { version = "1", optional = true }
 # compression
 brotli = { version = "8", optional = true }
 snap = { version = "1", optional = true }
-lz4_flex = { version = "0.11", optional = true }
+lz4_flex = { version = "0.13", optional = true }
 zstd = { version = "0.13", optional = true }
 
 # tracing & metrics
@@ -135,13 +135,3 @@ tokio = { version = "1", features = ["full"] }
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
-
-[lints.rust]
-rust_2018_idioms = "warn"
-single_use_lifetimes = "warn"
-unexpected_cfgs = { level = "warn", check-cfg = [
-  'cfg(all_tests)',
-  'cfg(compression)',
-  'cfg(checksum)',
-  'cfg(offload)',
-] }
