@@ -311,8 +311,8 @@ where
     Ok(true)
   }
 
-  /// Join directly by contacting the given node id,
-  /// Returns the node if successfully joined, or an error if the node could not be reached.
+  /// Join directly by contacting the given node address,
+  /// Returns the resolved address if successfully joined, or an error if the address could not be reached.
   pub async fn join(
     &self,
     addr: MaybeResolvedAddress<T::Address, T::ResolvedAddress>,
@@ -340,8 +340,8 @@ where
   /// remote nodes to become aware of the existence of this node, effectively
   /// joining the cluster.
   ///
-  /// On success, returns a list of all nodes that were successfully joined with resolved addresses.
-  /// On error, returns a list of nodes are successfully joined with resolved addresses and the error.
+  /// On success, returns a list of all addresses that were successfully joined with resolved addresses.
+  /// On error, returns a list of addresses that were successfully joined with resolved addresses and the error.
   pub async fn join_many(
     &self,
     existing: impl Iterator<Item = MaybeResolvedAddress<T::Address, T::ResolvedAddress>>,
