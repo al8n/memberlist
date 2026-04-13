@@ -11,7 +11,7 @@ use memberlist::{
   agnostic::tokio::TokioRuntime,
   bytes::Bytes,
   delegate::{CompositeDelegate, NodeDelegate},
-  net::{NetTransportOptions, Node, stream_layer::tcp::Tcp},
+  net::{NetTransportOptions, stream_layer::tcp::Tcp},
   proto::{HostAddr, MaybeResolvedAddress, Meta, NodeId},
   tokio::TokioTcpMemberlist,
   transport::resolver::dns::DnsResolver,
@@ -116,8 +116,8 @@ impl ToyDb {
           ev = rx.recv() => {
             if let Some(ev) = ev {
               match ev {
-                Event::Join { id, addr, tx } => {
-                  let res = memberlist.join(Node::new(id, MaybeResolvedAddress::Resolved(addr))).await;
+                Event::Join { addr, tx } => {
+                  let res = memberlist.join(MaybeResolvedAddress::Resolved(addr)).await;
                   let _ = tx.send(res.map_err(Into::into).map(|_| ()));
                 }
                 Event::Get { key, tx } => {
@@ -175,19 +175,11 @@ impl ToyDb {
 
   async fn handle_join<W: tokio::io::AsyncWrite + Unpin>(
     &self,
-    id: NodeId,
     addr: SocketAddr,
     stream: &mut W,
   ) -> Result<()> {
     let (tx, rx) = oneshot::channel();
-    self
-      .tx
-      .send(Event::Join {
-        id: id.clone(),
-        addr,
-        tx,
-      })
-      .await?;
+    self.tx.send(Event::Join { addr, tx }).await?;
 
     let resp = rx.await?;
     if let Err(e) = resp {
@@ -293,8 +285,6 @@ enum Commands {
   /// Join to an existing toydb cluster
   Join {
     #[clap(short, long)]
-    id: NodeId,
-    #[clap(short, long)]
     addr: SocketAddr,
     #[clap(short, long)]
     rpc_addr: std::path::PathBuf,
@@ -329,7 +319,7 @@ struct Cli {
 enum Op {
   Get(Bytes),
   Set(Bytes, Bytes),
-  Join { addr: SocketAddr, id: NodeId },
+  Join { addr: SocketAddr },
 }
 
 enum Event {
@@ -344,7 +334,6 @@ enum Event {
   },
   Join {
     addr: SocketAddr,
-    id: NodeId,
     tx: oneshot::Sender<Result<()>>,
   },
 }
@@ -366,8 +355,8 @@ async fn main() -> Result<()> {
 
   let cli = Cli::parse();
   match cli.command {
-    Commands::Join { addr, id, rpc_addr } => {
-      handle_join_cmd(id, addr, rpc_addr).await?;
+    Commands::Join { addr, rpc_addr } => {
+      handle_join_cmd(addr, rpc_addr).await?;
     }
     Commands::Get { key, rpc_addr } => {
       handle_get_cmd(key, rpc_addr).await?;
@@ -387,9 +376,9 @@ async fn main() -> Result<()> {
   Ok(())
 }
 
-async fn handle_join_cmd(id: NodeId, addr: SocketAddr, rpc_addr: std::path::PathBuf) -> Result<()> {
+async fn handle_join_cmd(addr: SocketAddr, rpc_addr: std::path::PathBuf) -> Result<()> {
   let conn = UnixStream::connect(rpc_addr).await?;
-  let data = encode_to_vec(&Op::Join { id, addr }, standard())?;
+  let data = encode_to_vec(&Op::Join { addr }, standard())?;
 
   let (reader, mut writer) = conn.into_split();
 
@@ -537,8 +526,8 @@ async fn handle_start_cmd(args: StartArgs) -> Result<()> {
         };
 
         match op {
-          Op::Join { addr, id } => {
-            db.handle_join(id, addr, &mut stream).await?;
+          Op::Join { addr } => {
+            db.handle_join(addr, &mut stream).await?;
           }
           Op::Get(key) => {
             db.handle_get(key, &mut stream).await?;

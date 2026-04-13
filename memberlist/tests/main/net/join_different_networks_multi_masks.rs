@@ -29,7 +29,7 @@ async fn join_different_networks_multi_masks<F, T, R>(
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
 
-  m2.join(target.clone()).await.unwrap();
+  m2.join(target.address().clone()).await.unwrap();
 
   // Check the hosts
   assert_eq!(m2.online_members().await.len(), 2);
@@ -41,7 +41,7 @@ async fn join_different_networks_multi_masks<F, T, R>(
     .await
     .unwrap();
   // The rogue can see others, but others cannot see it
-  m3.join(target.clone()).await.unwrap();
+  m3.join(target.address().clone()).await.unwrap();
 
   // m1 and m2 should not see newcomer however
   assert_eq!(m1.num_online_members().await, 2);
@@ -59,7 +59,9 @@ async fn join_different_networks_multi_masks<F, T, R>(
     m2.local_id().clone(),
     MaybeResolvedAddress::resolved(m2.advertise_address().clone()),
   );
-  m4.join_many([target, target2].into_iter()).await.unwrap();
+  m4.join_many([target.address().clone(), target2.address().clone()].into_iter())
+    .await
+    .unwrap();
 
   // m1 and m2 should not see newcomer however
   assert_eq!(m1.online_members().await.len(), 2);

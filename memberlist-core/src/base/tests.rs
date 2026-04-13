@@ -172,7 +172,9 @@ pub async fn memberlist_shutdown_cleanup2<T, F, R>(
   R::sleep(Duration::from_millis(1000)).await;
   m.join(
     m2.advertise_node()
-      .map_address(MaybeResolvedAddress::resolved),
+      .map_address(MaybeResolvedAddress::resolved)
+      .into_components()
+      .1,
   )
   .await
   .unwrap();
@@ -198,12 +200,11 @@ pub async fn memberlist_join<T, R>(
 {
   let m1 = Memberlist::<T, _>::new(t1, t1_opts).await.unwrap();
   let m2 = Memberlist::<T, _>::new(t2, t2_opts).await.unwrap();
-
-  let target = Node::new(
-    m1.local_id().clone(),
-    MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
-  );
-  m2.join(target).await.unwrap();
+  m2.join(MaybeResolvedAddress::resolved(
+    m1.advertise_address().clone(),
+  ))
+  .await
+  .unwrap();
 
   R::sleep(Duration::from_millis(250)).await;
 
@@ -240,7 +241,7 @@ pub async fn memberlist_join_with_labels<F, T, R>(
     m1.local_id().cheap_clone(),
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
-  m2.join(target.clone()).await.unwrap();
+  m2.join(target.address().clone()).await.unwrap();
 
   let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
@@ -256,7 +257,7 @@ pub async fn memberlist_join_with_labels<F, T, R>(
   let m3 = Memberlist::<T, _>::new(get_transport(3, Label::empty()).await, Options::lan())
     .await
     .unwrap();
-  m3.join(target.clone()).await.unwrap_err();
+  m3.join(target.address().clone()).await.unwrap_err();
 
   let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
@@ -281,7 +282,7 @@ pub async fn memberlist_join_with_labels<F, T, R>(
   )
   .await
   .unwrap();
-  m4.join(target).await.unwrap_err();
+  m4.join(target.address().clone()).await.unwrap_err();
 
   let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
@@ -387,7 +388,10 @@ pub async fn memberlist_join_cancel<T, R>(
     m1.local_id().clone(),
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
-  let (_, err) = m2.join_many([target].into_iter()).await.unwrap_err();
+  let (_, err) = m2
+    .join_many([target.address().clone()].into_iter())
+    .await
+    .unwrap_err();
   let err = err.iter().next().unwrap();
   assert!(
     err.to_string().contains("Custom merge canceled"),
@@ -480,7 +484,10 @@ pub async fn memberlist_join_cancel_passive<T, R>(
     m1.local_id().clone(),
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
-  let res = m2.join_many([target].into_iter()).await.unwrap();
+  let res = m2
+    .join_many([target.address().clone()].into_iter())
+    .await
+    .unwrap();
   assert_eq!(res.len(), 1, "unexpected num {}", res.len());
 
   let num = m2.num_members().await;
@@ -522,7 +529,7 @@ pub async fn memberlist_join_shutdown<T, R>(
     m1.local_id().clone(),
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
-  m2.join(target).await.unwrap();
+  m2.join(target.address().clone()).await.unwrap();
 
   let num = m2.num_members().await;
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
@@ -573,7 +580,7 @@ pub async fn memberlist_node_delegate_meta<T, R>(
     MaybeResolvedAddress::resolved(m2.advertise_address().clone()),
   );
 
-  m1.join(target).await.unwrap();
+  m1.join(target.address().clone()).await.unwrap();
 
   R::sleep(Duration::from_millis(250)).await;
 
@@ -656,7 +663,7 @@ pub async fn memberlist_node_delegate_meta_update<T, R>(
     MaybeResolvedAddress::resolved(m2.advertise_address().clone()),
   );
 
-  m1.join(target).await.unwrap();
+  m1.join(target.address().clone()).await.unwrap();
 
   R::sleep(Duration::from_millis(250)).await;
 
@@ -769,7 +776,7 @@ pub async fn memberlist_user_data<T, R>(
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
 
-  m2.join(target).await.unwrap();
+  m2.join(target.address().clone()).await.unwrap();
 
   // Check the hosts
   let num = m2.num_online_members().await;
@@ -850,7 +857,7 @@ pub async fn memberlist_send<T, R>(
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
 
-  m2.join(target).await.unwrap();
+  m2.join(target.address().clone()).await.unwrap();
 
   // Check the hots
   let num = m2.num_online_members().await;
@@ -907,7 +914,7 @@ pub async fn memberlist_leave<T, R>(
     m1.local_id().clone(),
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
-  m2.join(target).await.unwrap();
+  m2.join(target.address().clone()).await.unwrap();
 
   let num = m2.num_online_members().await;
   assert_eq!(num, 2, "should have 2 nodes! got {}", num);
@@ -993,7 +1000,7 @@ pub async fn memberlist_conflict_delegate<F, T, R>(
     MaybeResolvedAddress::resolved(m2.advertise_address().clone()),
   );
 
-  m1.join(target).await.unwrap();
+  m1.join(target.address().clone()).await.unwrap();
 
   R::sleep(Duration::from_millis(250)).await;
 
@@ -1086,7 +1093,7 @@ pub async fn memberlist_ping_delegate<T, R>(
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
 
-  m2.join(target).await.unwrap();
+  m2.join(target.address().clone()).await.unwrap();
 
   wait_until_size::<_, _, R>(&m1, 2).await;
   wait_until_size::<_, _, R>(&m2, 2).await;
@@ -1137,12 +1144,9 @@ pub async fn memberlist_send_reliable<T, R>(
   .unwrap();
   let m2 = Memberlist::<T, _>::new(t2, t2_opts).await.unwrap();
 
-  m2.join(Node::new(
-    m1.local_id().cheap_clone(),
-    MaybeResolvedAddress::resolved(*m1.advertise_address()),
-  ))
-  .await
-  .unwrap();
+  m2.join(MaybeResolvedAddress::resolved(*m1.advertise_address()))
+    .await
+    .unwrap();
   assert_eq!(m2.num_members().await, 2);
   assert_eq!(m2.estimate_num_nodes(), 2);
 

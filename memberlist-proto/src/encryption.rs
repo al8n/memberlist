@@ -7,7 +7,7 @@ use aes_gcm::{
 };
 use bytes::{Buf, BufMut};
 use generic_array::GenericArray;
-use rand::Rng;
+use rand::RngExt;
 use varing::decode_u32_varint;
 
 use crate::{WireType, utils::merge};

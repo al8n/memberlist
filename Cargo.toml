@@ -17,8 +17,8 @@ repository = "https://github.com/al8n/memberlist"
 homepage = "https://github.com/al8n/memberlist"
 readme = "README.md"
 rust-version = "1.85.0"
-keywords = ["swim", "gossip", "service-discovery"]
-categories = ["network-programming", "asynchronous"]
+keywords = ["gossip", "membership", "failure-detection", "cluster", "distributed"]
+categories = ["network-programming", "asynchronous", "algorithms"]
 
 [workspace.package.metadata.docs.rs]
 all-features = true
@@ -30,23 +30,23 @@ auto_impl = "1"
 atomic_refcell = "0.1"
 agnostic-lite = { version = "0.6", features = ["time"] }
 agnostic-io = { version = "0.2", default-features = false }
-agnostic = "0.8"
+agnostic = "0.9"
 # agnostic-lite = { version = "0.4", features = ["time"], path = "../agnostic/agnostic-lite" }
 # agnostic = { version = "0.6", path = "../agnostic/agnostic" }
 async-lock = "3"
 async-channel = "2"
 bytes = { version = "1", default-features = false }
 byteorder = { version = "1", default-features = false }
-varing = { version = "0.10", default-features = false }
+varing = { version = "0.13", default-features = false }
 cfg-if = "1"
 derive_more = { version = "2", default-features = false }
 either = { version = "1", default-features = false }
 futures = "0.3"
 indexmap = "2"
 getifs = "0.4"
-getrandom = "0.3"
+getrandom = "0.4"
 metrics = "0.24"
-nodecraft = { version = "0.8", default-features = false }
+nodecraft = { version = "0.9", default-features = false }
 # nodecraft = { version = "0.8", path = "../nodecraft", features = [
 #   "async",
 #   "resolver",
@@ -60,9 +60,9 @@ serde = { version = "1", features = ["derive", "rc"] }
 triomphe = { version = "0.1", default-features = false }
 humantime-serde = "1"
 smallvec = "1"
-smallvec-wrapper = { version = "0.3", default-features = false }
-smol_str = { version = "0.3", default-features = false }
-rand = "0.9"
+smallvec-wrapper = { version = "0.4", default-features = false }
+smol_str = { version = "^0.3.6", default-features = false }
+rand = "0.10"
 thiserror = { version = "2", default-features = false }
 tracing = "0.1"
 viewit = "0.1.5"
@@ -70,8 +70,18 @@ viewit = "0.1.5"
 arbitrary = { version = "1", default-features = false }
 quickcheck = { version = "1", default-features = false }
 
-memberlist-core = { version = "0.7", path = "memberlist-core", default-features = false }
-memberlist-net = { version = "0.7", path = "memberlist-net", default-features = false }
-memberlist-proto = { version = "0.2", path = "memberlist-proto", default-features = false }
-memberlist-quic = { version = "0.7", path = "memberlist-quic", default-features = false }
-memberlist = { version = "0.7", path = "memberlist", default-features = false }
+memberlist-core = { version = "0.8", path = "memberlist-core", default-features = false }
+memberlist-net = { version = "0.8", path = "memberlist-net", default-features = false }
+memberlist-proto = { version = "0.3", path = "memberlist-proto", default-features = false }
+memberlist-quic = { version = "0.8", path = "memberlist-quic", default-features = false }
+memberlist = { version = "0.8", path = "memberlist", default-features = false }
+
+[workspace.lints.rust]
+rust_2018_idioms = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(all_tests)',
+  'cfg(compression)',
+  'cfg(checksum)',
+  'cfg(offload)',
+  'cfg(tarpaulin)',
+] }

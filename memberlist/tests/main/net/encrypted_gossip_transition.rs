@@ -108,7 +108,7 @@ where
         MaybeResolvedAddress::resolved(*dst.advertise_address()),
       );
 
-      src.join(t1).await.unwrap();
+      src.join(*t1.address()).await.unwrap();
 
       wait_until_size(&src, num_nodes).await;
       wait_until_size(&dst, num_nodes).await;

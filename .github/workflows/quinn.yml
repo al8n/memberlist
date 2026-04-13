@@ -20,7 +20,7 @@ on:
       - "**.txt"
       - "art"
   workflow_dispatch:
-  schedule: [cron: "0 1 */7 * *"]
+  schedule: [cron: "0 1 */30 * *"]
 
 jobs:
   test:
@@ -35,20 +35,13 @@ jobs:
           # - windows-latest
         runtime: [tokio, smol]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         run: |
           rustup update stable && rustup default stable
           rustup component add clippy
           rustup component add rustfmt
-
-      - name: Install OpenSSL (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: powershell
-        run: |
-          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
-          vcpkg install openssl:x64-windows-static-md
 
       - name: Setup loopback interface (Windows)
         if: matrix.os == 'windows-latest'
@@ -67,7 +60,7 @@ jobs:
         working-directory: memberlist
 
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
