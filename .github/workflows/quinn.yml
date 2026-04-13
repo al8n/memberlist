@@ -43,13 +43,6 @@ jobs:
           rustup component add clippy
           rustup component add rustfmt
 
-      - name: Install OpenSSL (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: powershell
-        run: |
-          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
-          vcpkg install openssl:x64-windows-static-md
-
       - name: Setup loopback interface (Windows)
         if: matrix.os == 'windows-latest'
         shell: powershell
