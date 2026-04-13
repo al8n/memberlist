@@ -315,13 +315,12 @@ where
   /// Returns the node if successfully joined, or an error if the node could not be reached.
   pub async fn join(
     &self,
-    node: Node<T::Id, MaybeResolvedAddress<T::Address, T::ResolvedAddress>>,
-  ) -> Result<Node<T::Id, T::ResolvedAddress>, Error<T, D>> {
+    addr: MaybeResolvedAddress<T::Address, T::ResolvedAddress>,
+  ) -> Result<T::ResolvedAddress, Error<T, D>> {
     if self.has_left() || self.has_shutdown() {
       return Err(Error::NotRunning);
     }
 
-    let (id, addr) = node.into_components();
     let addr = match addr {
       MaybeResolvedAddress::Resolved(addr) => addr,
       MaybeResolvedAddress::Unresolved(addr) => self
@@ -331,8 +330,8 @@ where
         .await
         .map_err(Error::Transport)?,
     };
-    let n = Node::new(id, addr);
-    self.push_pull_node(n.cheap_clone(), true).await.map(|_| n)
+
+    self.push_pull_node(&addr, true).await.map(|_| addr)
   }
 
   /// Used to take an existing Memberlist and attempt to join a cluster
@@ -345,11 +344,8 @@ where
   /// On error, returns a list of nodes are successfully joined with resolved addresses and the error.
   pub async fn join_many(
     &self,
-    existing: impl Iterator<Item = Node<T::Id, MaybeResolvedAddress<T::Address, T::ResolvedAddress>>>,
-  ) -> Result<
-    SmallVec<Node<T::Id, T::ResolvedAddress>>,
-    (SmallVec<Node<T::Id, T::ResolvedAddress>>, Error<T, D>),
-  > {
+    existing: impl Iterator<Item = MaybeResolvedAddress<T::Address, T::ResolvedAddress>>,
+  ) -> Result<SmallVec<T::ResolvedAddress>, (SmallVec<T::ResolvedAddress>, Error<T, D>)> {
     if self.has_left() || self.has_shutdown() {
       return Err((Default::default(), Error::NotRunning));
     }
@@ -358,9 +354,8 @@ where
 
     let futs = existing
       .into_iter()
-      .map(|node| {
+      .map(|addr| {
         async move {
-          let (id, addr) = node.into_components();
           let resolved_addr = match addr {
             MaybeResolvedAddress::Resolved(addr) => addr,
             MaybeResolvedAddress::Unresolved(addr) => {
@@ -372,24 +367,22 @@ where
                     "memberlist: failed to resolve address {}",
                     addr,
                   );
-                  return Err((Node::new(id, MaybeResolvedAddress::<T::Address, T::ResolvedAddress>::unresolved(addr)), Error::<T, D>::transport(e)))
+                  return Err((MaybeResolvedAddress::<T::Address, T::ResolvedAddress>::unresolved(addr), Error::<T, D>::transport(e)))
                 }
               }
             }
           };
-          let node = Node::new(id, resolved_addr);
-          tracing::info!(local = %self.inner.transport.local_id(), peer = %node, "memberlist: start join...");
-          if let Err(e) = self.push_pull_node(node.cheap_clone(), true).await {
+          tracing::info!(local = %self.inner.transport.local_id(), peer = %resolved_addr, "memberlist: start join...");
+          if let Err(e) = self.push_pull_node(&resolved_addr, true).await {
             tracing::debug!(
               local = %self.inner.id,
               err = %e,
               "memberlist: failed to join {}",
-              node,
+              resolved_addr,
             );
-            let (id, addr) = node.into_components();
-            Err((Node::new(id, MaybeResolvedAddress::Resolved(addr)), e))
+            Err((MaybeResolvedAddress::Resolved(resolved_addr), e))
           } else {
-            Ok(node)
+            Ok(resolved_addr)
           }
         }
       }).collect::<futures::stream::FuturesUnordered<_>>();
@@ -398,8 +391,8 @@ where
     let errors = futs
       .filter_map(|rst| async {
         match rst {
-          Ok(node) => {
-            successes.borrow_mut().push(node);
+          Ok(addr) => {
+            successes.borrow_mut().push(addr);
             None
           }
           Err((_, e)) => Some(e),

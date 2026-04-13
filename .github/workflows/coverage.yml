@@ -59,7 +59,7 @@ jobs:
             features: "test,tokio,quinn,snappy,crc32,encryption,metrics"
             name: "memberlist-quinn-without-rayon"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Install latest nightly
         uses: actions-rs/toolchain@v1
         with:
@@ -84,7 +84,7 @@ jobs:
     needs: coverage-report
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Download all coverage reports
         uses: actions/download-artifact@v6
         with:
@@ -92,7 +92,7 @@ jobs:
       - name: List contents of the reports directory
         run: ls -a reports
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           directory: reports
           fail_ci_if_error: false

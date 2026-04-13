@@ -31,7 +31,7 @@ async fn join_different_networks_unique_mask<F, T, R>(
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
 
-  m2.join(target).await.unwrap();
+  m2.join(target.address().clone()).await.unwrap();
 
   // Check the hosts
   assert_eq!(m2.online_members().await.len(), 2);
