@@ -24,7 +24,7 @@ use agnostic_lite::{AsyncSpawner, RuntimeLite, time::Instant};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use nodecraft::{CheapClone, Node};
-use rand::{Rng, seq::SliceRandom};
+use rand::{RngExt, seq::SliceRandom};
 
 /// Exports the state unit test cases.
 #[cfg(any(test, feature = "test"))]
@@ -143,7 +143,7 @@ where
   /// Does a complete state exchange with a specific node.
   pub(crate) async fn push_pull_node(
     &self,
-    id: Node<T::Id, T::ResolvedAddress>,
+    addr: &T::ResolvedAddress,
     join: bool,
   ) -> Result<(), Error<T, D>> {
     #[cfg(feature = "metrics")]
@@ -158,12 +158,12 @@ where
       .inner
       .transport
       .open(
-        id.address(),
+        addr,
         <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
       )
       .await
       .map_err(Error::transport)?;
-    tracing::debug!(local_addr = %self.inner.id, peer_addr = %id, "memberlist: initiating push/pull sync");
+    tracing::debug!(local_addr = %self.inner.id, peer_addr = %addr, "memberlist: initiating push/pull sync");
 
     #[cfg(feature = "metrics")]
     {
@@ -179,14 +179,14 @@ where
     // Send our state
     if let Err(e) = self.send_local_state(&mut writer, join).await {
       if let Err(e) = writer.close().await {
-        tracing::error!(local_addr = %self.inner.id, peer_addr = %id, err = %e, "memberlist: failed to close connection");
+        tracing::error!(local_addr = %self.inner.id, peer_addr = %addr, err = %e, "memberlist: failed to close connection");
       }
       return Err(e);
     }
 
     let res = <T::Runtime as RuntimeLite>::timeout_at(
       <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout,
-      self.read_message(id.address(), &mut reader),
+      self.read_message(addr, &mut reader),
     )
     .await;
 
@@ -199,7 +199,7 @@ where
     let pp = match msg {
       MessageRef::ErrorResponse(resp) => {
         let resp = <ErrorResponse as Data>::from_ref(resp)?;
-        tracing::error!(local_addr = %self.inner.id, peer_addr = %id, err = %resp, "memberlist: push/pull sync failed");
+        tracing::error!(local_addr = %self.inner.id, peer_addr = %addr, err = %resp, "memberlist: push/pull sync failed");
         return Err(Error::remote(resp));
       }
       MessageRef::PushPull(pp) => pp,
@@ -208,7 +208,7 @@ where
 
     let res = self.merge_remote_state(pp).await;
     if let Err(e) = writer.close().await {
-      tracing::error!(local_addr = %self.inner.id, peer_addr = %id, err = %e, "memberlist: failed to close connection");
+      tracing::error!(local_addr = %self.inner.id, peer_addr = %addr, err = %e, "memberlist: failed to close connection");
     }
 
     res
@@ -1376,7 +1376,7 @@ where
 
     let server = &nodes[0];
     // Attempt a push pull
-    if let Err(e) = self.push_pull_node(server.node(), false).await {
+    if let Err(e) = self.push_pull_node(server.node().address(), false).await {
       tracing::error!(err = %e, "memberlist.state: push/pull with {} failed", server.id());
     }
   }

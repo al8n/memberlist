@@ -13,6 +13,7 @@ use async_lock::{Mutex, RwLock};
 use atomic_refcell::AtomicRefCell;
 use futures::stream::FuturesUnordered;
 use nodecraft::{CheapClone, Node, resolver::AddressResolver};
+use rand::RngExt;
 
 use super::{
   Options,

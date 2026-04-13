@@ -38,7 +38,7 @@ pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
     m1.local_id().clone(),
     MaybeResolvedAddress::resolved(m1.advertise_address().clone()),
   );
-  m2.join(target.clone()).await.unwrap();
+  m2.join(target.address().clone()).await.unwrap();
 
   let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
@@ -53,7 +53,7 @@ pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
   )
   .await
   .unwrap();
-  m3.join(target.clone()).await.unwrap_err();
+  m3.join(target.address().clone()).await.unwrap_err();
 
   let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);
@@ -72,7 +72,7 @@ pub async fn memberlist_join_with_labels_and_compression<F, T, R>(
   )
   .await
   .unwrap();
-  m4.join(target).await.unwrap_err();
+  m4.join(target.address().clone()).await.unwrap_err();
 
   let m1m = m1.num_online_members().await;
   assert_eq!(m1m, 2, "expected 2 members, got {}", m1m);

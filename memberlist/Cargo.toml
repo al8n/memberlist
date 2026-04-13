@@ -1,6 +1,6 @@
 [package]
 name = "memberlist"
-version = "0.7.0"
+version = "0.8.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -57,41 +57,18 @@ tls = ["memberlist-net/tls", "net"]
 
 # enable DNS node address resolver
 dns = ["memberlist-net?/dns", "memberlist-quic?/dns", "agnostic/dns"]
-dns-over-quic = [
-  "memberlist-net?/dns-over-quic",
-  "memberlist-quic?/dns-over-quic",
-]
-dns-over-h3 = ["memberlist-net?/dns-over-h3", "memberlist-quic?/dns-over-h3"]
-dns-over-https-rustls = [
-  "memberlist-net?/dns-over-https-rustls",
-  "memberlist-quic?/dns-over-https-rustls",
-]
-dns-over-rustls = [
-  "memberlist-net?/dns-over-rustls",
-  "memberlist-quic?/dns-over-rustls",
-]
-dns-over-openssl = [
-  "memberlist-net?/dns-over-openssl",
-  "memberlist-quic?/dns-over-openssl",
-]
-dns-over-native-tls = [
-  "memberlist-net?/dns-over-native-tls",
-  "memberlist-quic?/dns-over-native-tls",
-]
-dns-webpki-roots = [
-  "memberlist-net?/dns-webpki-roots",
-  "memberlist-quic?/dns-webpki-roots",
-]
-dns-native-certs = [
-  "memberlist-net?/dns-native-certs",
-  "memberlist-quic?/dns-native-certs",
-]
-dnssec-openssl = [
-  "memberlist-net?/dnssec-openssl",
-  "memberlist-quic?/dnssec-openssl",
-]
+quic-ring = ["memberlist-net?/quic-ring", "memberlist-quic?/quic-ring"]
+quic-aws-lc-rs = ["memberlist-net?/quic-aws-lc-rs", "memberlist-quic?/quic-aws-lc-rs"]
+h3-ring = ["memberlist-net?/h3-ring", "memberlist-quic?/h3-ring"]
+h3-aws-lc-rs = ["memberlist-net?/h3-aws-lc-rs", "memberlist-quic?/h3-aws-lc-rs"]
+https-ring = ["memberlist-net?/https-ring", "memberlist-quic?/https-ring"]
+https-aws-lc-rs = ["memberlist-net?/https-aws-lc-rs", "memberlist-quic?/https-aws-lc-rs"]
+tls-ring = ["memberlist-net?/tls-ring", "memberlist-quic?/tls-ring"]
+tls-aws-lc-rs = ["memberlist-net?/tls-aws-lc-rs", "memberlist-quic?/tls-aws-lc-rs"]
+webpki-roots = ["memberlist-net?/webpki-roots", "memberlist-quic?/webpki-roots"]
+rustls-platform-verifier = ["memberlist-net?/rustls-platform-verifier", "memberlist-quic?/rustls-platform-verifier"]
 dnssec-ring = ["memberlist-net?/dnssec-ring", "memberlist-quic?/dnssec-ring"]
-dnssec = ["memberlist-net?/dnssec", "memberlist-quic?/dnssec"]
+dnssec-aws-lc-rs = ["memberlist-net?/dnssec-aws-lc-rs", "memberlist-quic?/dnssec-aws-lc-rs"]
 
 test = ["memberlist-core/test", "memberlist-net?/test", "memberlist-quic?/test"]
 
@@ -114,10 +91,3 @@ name = "memberlist"
 path = "tests/main.rs"
 required-features = ["test"]
 
-[lints.rust]
-rust_2018_idioms = "warn"
-single_use_lifetimes = "warn"
-unexpected_cfgs = { level = "warn", check-cfg = [
-  'cfg(all_tests)',
-  'cfg(tarpaulin)',
-] }

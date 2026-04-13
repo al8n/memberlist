@@ -183,7 +183,7 @@ where
     // Fire them up start that we've been able to create them all.
     // keep the first tcp and udp listener, gossip protocol, we made sure there's at least one
     // udp and tcp listener can
-    for (local_addr, acceptor) in v4_acceptors.into_iter().chain(v6_acceptors.into_iter()) {
+    for (local_addr, acceptor) in v4_acceptors.into_iter().chain(v6_acceptors) {
       let processor = Processor::<A, Self, S> {
         acceptor,
         packet_tx: packet_tx.clone(),
