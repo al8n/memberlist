@@ -25,7 +25,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [workspace.dependencies]
-among = "0.1"
+among = "0.2"
 auto_impl = "1"
 atomic_refcell = "0.1"
 agnostic-lite = { version = "0.6", features = ["time"] }
