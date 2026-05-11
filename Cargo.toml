@@ -43,7 +43,7 @@ derive_more = { version = "2", default-features = false }
 either = { version = "1", default-features = false }
 futures = "0.3"
 indexmap = "2"
-getifs = "0.5"
+getifs = "0.6"
 getrandom = "0.4"
 metrics = "0.24"
 nodecraft = { version = "0.9", default-features = false }
