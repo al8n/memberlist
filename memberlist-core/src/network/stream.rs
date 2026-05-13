@@ -269,6 +269,7 @@ where
         tracing::error!(err=%e, local = %self.inner.id, remote_node = %addr, "memberlist.stream: failed to receive");
 
         let err_resp = ErrorResponse::new(SmolStr::new(e.to_string()));
+        let deadline = <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout;
         let res = <T::Runtime as RuntimeLite>::timeout_at(
           deadline,
           self.send_message(&mut writter, [err_resp.into()]),
@@ -318,6 +319,7 @@ where
         }
 
         let ack = Ack::new(ping.sequence_number());
+        let deadline = <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout;
         let res = <T::Runtime as RuntimeLite>::timeout_at(
           deadline,
           self.send_message(&mut writter, [ack.into()]),
