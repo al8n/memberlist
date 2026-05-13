@@ -809,6 +809,7 @@ where
   where
     E: Encodable,
   {
+    #[allow(unused_variables)]
     let (encoded_len, hint) = (hint.input_size, hint);
     let mut payload = Payload::new(self.overhead, hint.max_output_size);
     let buf = payload.data_mut();

@@ -67,7 +67,22 @@ where
     msg.advance(1);
 
     if let MessageType::Ack = mt {
-      let seqn = match Ack::decode_sequence_number(&msg) {
+      // The Ack is length-delimited in the message protocol. After advancing
+      // past the message type tag, the buffer starts with a varint length
+      // prefix. Decode and skip it so decode_sequence_number reads the raw
+      // Ack fields.
+      let (len_bytes, ack_len) =
+        varing::decode_u32_varint(&msg).map_err(|e| Error::custom(format!("decode ack length: {}", e).into()))?;
+      let ack_len =
+        usize::try_from(ack_len).map_err(|_| Error::custom("decode ack length: length does not fit in usize".into()))?;
+      let start = len_bytes.get();
+      let end = start
+        .checked_add(ack_len)
+        .ok_or_else(|| Error::custom("decode ack length: overflow computing ack payload range".into()))?;
+      let ack_data = msg
+        .get(start..end)
+        .ok_or_else(|| Error::custom("decode ack length: ack payload exceeds message buffer".into()))?;
+      let seqn = match Ack::decode_sequence_number(ack_data) {
         Ok(seqn) => seqn.1,
         Err(e) => return Err(e.into()),
       };
