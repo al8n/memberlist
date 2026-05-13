@@ -289,12 +289,15 @@ impl memberlist_core::proto::ProtoReader for QuinnProtoReader {
     } else {
       buf[..peek_len].copy_from_slice(&self.peek_buf);
       self.peek_buf.clear();
-      self
-        .stream
-        .read(&mut buf[peek_len..])
-        .await
-        .map(|read| read.unwrap_or(0))
-        .map_err(Into::into)
+      let mut total = peek_len;
+      while total < dst_len {
+        let n = self.stream.read(&mut buf[total..]).await?.unwrap_or(0);
+        if n == 0 {
+          break;
+        }
+        total += n;
+      }
+      Ok(total)
     }
   }
 
@@ -309,12 +312,18 @@ impl memberlist_core::proto::ProtoReader for QuinnProtoReader {
     } else {
       buf[..peek_len].copy_from_slice(&self.peek_buf);
       self.peek_buf.clear();
-      self
-        .stream
-        .read(&mut buf[peek_len..])
-        .await
-        .map(|_| ())
-        .map_err(Into::into)
+      let mut total = peek_len;
+      while total < dst_len {
+        let n = self.stream.read(&mut buf[total..]).await?.unwrap_or(0);
+        if n == 0 {
+          return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "unexpected eof",
+          ));
+        }
+        total += n;
+      }
+      Ok(())
     }
   }
 }
