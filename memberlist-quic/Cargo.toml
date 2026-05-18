@@ -83,7 +83,7 @@ rcgen = { version = "0.14", optional = true }
 
 # compression
 rayon = { version = "1.8", optional = true }
-weezl = { version = "0.1", optional = true }
+weezl = { version = "0.2", optional = true }
 
 [dev-dependencies]
 agnostic = { workspace = true, features = ["net"] }
