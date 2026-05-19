@@ -1,0 +1,35 @@
+[package]
+name = "memberlist-machine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Sans-I/O state machine for the memberlist gossip protocol."
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+tracing = ["dep:tracing"]
+
+[dependencies]
+bytes.workspace = true
+indexmap.workspace = true
+memberlist-wire = { workspace = true, features = ["default"] }
+nodecraft = { workspace = true, features = ["default"] }
+rand.workspace = true
+rustc-hash = "2"
+smallvec.workspace = true
+smol_str.workspace = true
+thiserror.workspace = true
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+rand = { workspace = true, features = ["std"] }

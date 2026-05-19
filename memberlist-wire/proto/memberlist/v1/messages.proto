@@ -1,0 +1,157 @@
+// Wire message schemas for the memberlist gossip protocol.
+//
+// These types are the canonical schema for the 10 inner messages exchanged
+// between memberlist nodes, plus the supporting structures they reference.
+// The outer framing (label, encryption, checksum, compression, compound)
+// is hand-rolled in `memberlist-wire::framing` because it wraps arbitrary
+// bytes and is not protobuf-shaped.
+//
+// Field numbers are chosen to match the field/tag numbering of the legacy
+// `memberlist-proto` hand-rolled codec for SEMANTIC alignment only (1:1
+// structural mapping that keeps the typed<->buffa bridge and reasoning
+// simple). The INNER body bytes are deliberately NOT byte-compatible with
+// `memberlist-proto`: buffa emits standard protobuf wire keys
+// (`(field<<3)|wire_type`) while `memberlist-proto` uses a custom
+// high-3-bits scheme, so a frozen `memberlist-proto` decoder cannot read
+// these bodies and vice versa. This is intentional — Phase 9 is a clean
+// cut-over, mixed-version (proto<->wire) clusters are unsupported, and the
+// interop contract is new<->new only (verified by the memberlist-simulation
+// conformance suite + the tcp/quic two-node join tests). There are no
+// cross-decode-vs-memberlist-proto tests; only the OUTER plain frame
+// (`[tag][varint len]`) is byte-identical to legacy. See the wire-format
+// note in `memberlist-wire/src/framing.rs`.
+
+syntax = "proto3";
+
+package memberlist.v1;
+
+// ── Supporting types ────────────────────────────────────────────────────────
+
+// Node is the minimal identity of a cluster member: a node identifier (opaque
+// bytes, typically a string) plus a network address (opaque bytes, typically a
+// serialised `SocketAddr`).
+// `optional` is used on every field the frozen `memberlist-proto`
+// hand-rolled decoder treats as REQUIRED (it presence-tracks and rejects
+// omissions via `DecodeError::missing_field`). proto3 implicit-presence
+// scalars/bytes/enums would otherwise silently decode an omitted required
+// field as a default (incarnation=0, empty id, …) and be accepted, which
+// diverges from frozen and accepts malformed input (S-WIRE P1). proto3
+// `optional` is wire-identical for present values — only omissions become
+// detectable. Message-typed fields already have proto3 presence.
+message Node {
+  optional bytes id   = 1;
+  optional bytes addr = 2;
+}
+
+// State enumerates the health states a node can be in.
+enum State {
+  STATE_ALIVE   = 0;
+  STATE_SUSPECT = 1;
+  STATE_DEAD    = 2;
+  STATE_LEFT    = 3;
+}
+
+// PushNodeState is one element of the repeated `states` field inside
+// `PushPull`.  It carries the full snapshot of a single node's view of itself
+// as known by the sender.  Field numbers match the tag constants in
+// `memberlist-proto::push_pull::state`.
+message PushNodeState {
+  optional bytes  id               = 1;
+  optional bytes  addr             = 2;
+  bytes           meta             = 3;
+  optional uint32 incarnation      = 4;
+  optional State  state            = 5;
+  // `optional` so an OMITTED version decodes as the default (V1), not
+  // Unknown(0); frozen `memberlist-proto` uses `unwrap_or_default()` and
+  // the version enums default to V1. An explicit 0 still round-trips as
+  // Unknown(0) — implicit presence could not distinguish the two
+  // (S-WIRE P2).
+  optional uint32 protocol_version = 6;
+  optional uint32 delegate_version = 7;
+}
+
+// ── Inner wire messages ──────────────────────────────────────────────────────
+
+// Alive is broadcast when a node considers itself (or another node) alive.
+// Field numbers match the tag constants in `memberlist-proto::alive`.
+//
+//   incarnation = 1  (Varint / field 1)
+//   meta        = 2  (LengthDelimited / field 2)
+//   node        = 3  (LengthDelimited / field 3)
+//   protocol_version = 4  (single byte / field 4)
+//   delegate_version = 5  (single byte / field 5)
+message Alive {
+  optional uint32 incarnation      = 1;
+  bytes           meta             = 2;
+  Node            node             = 3;
+  // `optional` — omitted ⇒ default V1 (frozen `unwrap_or_default`),
+  // explicit 0 ⇒ Unknown(0). See PushNodeState above (S-WIRE P2).
+  optional uint32 protocol_version = 4;
+  optional uint32 delegate_version = 5;
+}
+
+// Suspect is sent when a node suspects another is down.
+// Field numbers match `memberlist-proto::bad_state` (Suspect variant).
+message Suspect {
+  optional uint32 incarnation = 1;
+  optional bytes  node        = 2;
+  optional bytes  from        = 3;
+}
+
+// Dead is sent when a node declares another dead (or itself on leave).
+// Field numbers match `memberlist-proto::bad_state` (Dead variant).
+message Dead {
+  optional uint32 incarnation = 1;
+  optional bytes  node        = 2;
+  optional bytes  from        = 3;
+}
+
+// Ping is sent to probe whether a target node is alive.
+// Field numbers match `memberlist-proto::ping` (Ping variant).
+message Ping {
+  optional uint32 sequence_number = 1;
+  Node            source          = 2;
+  Node            target          = 3;
+}
+
+// IndirectPing is sent to a third party asking it to probe a target.
+// Field numbers match `memberlist-proto::ping` (IndirectPing variant).
+message IndirectPing {
+  optional uint32 sequence_number = 1;
+  Node            source          = 2;
+  Node            target          = 3;
+}
+
+// Ack is sent in response to a Ping to confirm liveness.
+// Field numbers match `memberlist-proto::ack` (Ack).
+message Ack {
+  uint32 sequence_number = 1;
+  bytes  payload         = 2;
+}
+
+// Nack is sent by an indirect-ping relay when the target did not respond
+// within the configured timeout.  Field numbers match `memberlist-proto::ack`
+// (Nack).
+message Nack {
+  uint32 sequence_number = 1;
+}
+
+// PushPull carries a full or partial cluster state snapshot.
+// Field numbers match `memberlist-proto::push_pull`.
+message PushPull {
+  bool                    join      = 1;
+  repeated PushNodeState  states    = 2;
+  bytes                   user_data = 3;
+}
+
+// UserData is an application-level message forwarded through the gossip layer.
+message UserData {
+  bytes data = 1;
+}
+
+// ErrorResponse is returned by a node to signal a protocol-level error.
+// The `error` field carries a UTF-8 string matching `memberlist-proto::err`
+// which uses `SmolStr` (always valid UTF-8).
+message ErrorResponse {
+  string error = 1;
+}

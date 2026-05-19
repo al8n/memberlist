@@ -18,23 +18,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = ["tokio", "crc32", "snappy", "encryption", "dns", "tcp", "quic", "rayon"]
 
-tokio = ["agnostic/tokio", "memberlist-net?/tokio", "memberlist-quic?/tokio"]
-smol = ["agnostic/smol", "memberlist-net?/smol", "memberlist-quic?/smol"]
+tokio = ["agnostic/tokio"]
+smol = ["agnostic/smol"]
 
-serde = [
-  "memberlist-core/serde",
-  "memberlist-net?/serde",
-  "memberlist-quic?/serde",
-]
-
-metrics = [
-  "memberlist-core/metrics",
-  "memberlist-net?/metrics",
-  "memberlist-quic?/metrics",
-]
-
+serde = ["memberlist-core/serde"]
+metrics = ["memberlist-core/metrics"]
 rayon = ["memberlist-core/rayon"]
-
 encryption = ["memberlist-core/encryption"]
 
 lz4 = ["memberlist-core/lz4"]
@@ -48,43 +37,63 @@ xxhash64 = ["memberlist-core/xxhash64"]
 xxhash3 = ["memberlist-core/xxhash3"]
 murmur3 = ["memberlist-core/murmur3"]
 
-quic = ["memberlist-quic", "agnostic/quinn"]
-quinn = ["memberlist-quic/quinn", "quic"]
+# Phase 8: `quic`/`net`/`tcp`/`tls` drive the umbrella's own machine-based
+# drivers (driver_quic / driver_net / tls module), built directly on
+# memberlist-machine + memberlist-wire. The frozen Phase-7 memberlist-net /
+# memberlist-quic crates are NOT a dependency of this crate at all — they
+# remain on disk as backup reference only (workspace-excluded, do not
+# compile against the post-Phase-9 machine). Crypto-provider selection
+# features for the new rustls/quinn-proto paths are introduced by Tasks
+# 8.2 / 8.5, not here.
+quic = ["agnostic/quinn", "dep:quinn-proto", "quinn-proto/rustls", "tls"]
+quinn = ["quic"]
 
-net = ["memberlist-net", "agnostic/net"]
+net = ["agnostic/net"]
 tcp = ["net"]
-tls = ["memberlist-net/tls", "net"]
+tls = ["net", "dep:rustls", "dep:rustls-pki-types"]
 
 # enable DNS node address resolver
-dns = ["memberlist-net?/dns", "memberlist-quic?/dns", "agnostic/dns"]
-quic-ring = ["memberlist-net?/quic-ring", "memberlist-quic?/quic-ring"]
-quic-aws-lc-rs = ["memberlist-net?/quic-aws-lc-rs", "memberlist-quic?/quic-aws-lc-rs"]
-h3-ring = ["memberlist-net?/h3-ring", "memberlist-quic?/h3-ring"]
-h3-aws-lc-rs = ["memberlist-net?/h3-aws-lc-rs", "memberlist-quic?/h3-aws-lc-rs"]
-https-ring = ["memberlist-net?/https-ring", "memberlist-quic?/https-ring"]
-https-aws-lc-rs = ["memberlist-net?/https-aws-lc-rs", "memberlist-quic?/https-aws-lc-rs"]
-tls-ring = ["memberlist-net?/tls-ring", "memberlist-quic?/tls-ring"]
-tls-aws-lc-rs = ["memberlist-net?/tls-aws-lc-rs", "memberlist-quic?/tls-aws-lc-rs"]
-webpki-roots = ["memberlist-net?/webpki-roots", "memberlist-quic?/webpki-roots"]
-rustls-platform-verifier = ["memberlist-net?/rustls-platform-verifier", "memberlist-quic?/rustls-platform-verifier"]
-dnssec-ring = ["memberlist-net?/dnssec-ring", "memberlist-quic?/dnssec-ring"]
-dnssec-aws-lc-rs = ["memberlist-net?/dnssec-aws-lc-rs", "memberlist-quic?/dnssec-aws-lc-rs"]
+dns = ["agnostic/dns", "nodecraft/dns"]
 
-test = ["memberlist-core/test", "memberlist-net?/test", "memberlist-quic?/test"]
+test = ["memberlist-core/test"]
 
 [dependencies]
 agnostic-lite.workspace = true
+agnostic-io = { workspace = true, features = ["std"] }
 agnostic = { workspace = true, optional = true }
 memberlist-core.workspace = true
-memberlist-net = { workspace = true, optional = true, default-features = false }
-memberlist-quic = { workspace = true, optional = true, default-features = false }
+memberlist-machine = { path = "../memberlist-machine" }
+memberlist-wire = { workspace = true, features = ["default"] }
+thiserror = { workspace = true }
 nodecraft.workspace = true
 smol_str.workspace = true
 tracing.workspace = true
 
+# Phase 8 new direct deps for the umbrella driver code.
+async-lock.workspace = true
+async-channel.workspace = true
+bytes.workspace = true
+futures.workspace = true
+quinn-proto = { version = "0.11", default-features = false, optional = true }
+# `std` (provider-free: webpki/std + pki-types/std + once_cell/std) is
+# required for the buffered `ServerConnection`/`ClientConnection` types and
+# the `std::error::Error` impl on `rustls::Error` that `tls.rs` composes. A
+# crypto provider (ring / aws-lc-rs) is a separate feature, not pulled here.
+rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
+rustls-pki-types = { version = "1", default-features = false, optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 paste.workspace = true
+# Phase 8 Task 8.7 integration tests only. `rcgen` mints the QUIC
+# self-signed cert. `rustls` is re-listed here with the `ring` feature so
+# the integration-test crate can name `rustls::crypto::ring` directly: the
+# library's own `rustls` dep is `default-features = false, features =
+# ["std"]` (provider-free on purpose), so the `ring` *module* would not be
+# reachable from the test crate without this dev-dep. Dev-deps do not
+# affect the published library.
+rcgen = "0.13"
+rustls = { version = "0.23", features = ["ring"] }
 
 [[test]]
 name = "memberlist"

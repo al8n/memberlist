@@ -1,0 +1,36 @@
+[package]
+name = "memberlist-wire"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Buffa-generated wire types + hand-rolled outer framing for the memberlist gossip protocol."
+
+[dependencies]
+buffa = { version = "0.5", default-features = false, features = ["std"] }
+bytes = { workspace = true, features = ["std"] }
+derive_more = { workspace = true, features = ["display", "from", "is_variant", "unwrap", "try_unwrap"] }
+nodecraft = { workspace = true, features = ["std"] }
+paste = { workspace = true }
+smol_str = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+triomphe = { workspace = true, features = ["std"] }
+varing = { workspace = true, features = ["std"] }
+viewit = { workspace = true }
+
+[build-dependencies]
+buffa-build = "0.5"
+
+[features]
+default = ["std"]
+# memberlist-wire is std-only; `alloc` is provided as an alias for `std` so
+# the copied data-module cfg-gates compile without modification.
+alloc = ["std"]
+std = ["buffa/std"]
+# Enable nodecraft's hostaddr types (Domain, HostAddr, …) in the Data impls.
+hostaddr = ["nodecraft/hostaddr"]

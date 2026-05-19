@@ -1,0 +1,110 @@
+//! Virtual clock anchored on a single real [`std::time::Instant`].
+//!
+//! `Clock::new()` captures `Instant::now()` once. All time advancement
+//! is done by accumulating a `Duration` offset from that anchor.
+//! `Endpoint` only ever does `now + Duration` arithmetic internally,
+//! so feeding computed `base + elapsed` is semantically identical to
+//! feeding a real clock — but tests never sleep.
+
+use std::time::{Duration, Instant};
+
+/// A deterministic virtual clock.
+///
+/// (Illustrative; `doctest = false` for this harness crate — the
+/// behavior is verified by the `clock_advance_is_monotonic` unit test.)
+///
+/// ```ignore
+/// use memberlist_simulation::Clock;
+/// use std::time::Duration;
+///
+/// let mut clk = Clock::new();
+/// let t0 = clk.now();
+/// clk.advance(Duration::from_secs(1));
+/// assert!(clk.now() > t0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Clock {
+  base: Instant,
+  elapsed: Duration,
+}
+
+impl Clock {
+  /// Capture the current wall-clock instant as the simulation origin.
+  pub fn new() -> Self {
+    Self {
+      base: Instant::now(),
+      elapsed: Duration::ZERO,
+    }
+  }
+
+  /// Current simulated time.
+  pub fn now(&self) -> Instant {
+    self.base + self.elapsed
+  }
+
+  /// Advance simulated time by `by`. Panics if `by` would overflow.
+  pub fn advance(&mut self, by: Duration) {
+    self.elapsed = self
+      .elapsed
+      .checked_add(by)
+      .expect("Clock::advance: duration overflow");
+  }
+
+  /// Return the simulated `Instant` that is `secs` seconds after the anchor.
+  ///
+  /// Useful for constructing absolute deadlines in tests without arithmetic.
+  pub fn at(&self, secs: u64) -> Instant {
+    self.base + Duration::from_secs(secs)
+  }
+
+  /// Raw elapsed duration since clock origin.
+  pub fn elapsed(&self) -> Duration {
+    self.elapsed
+  }
+}
+
+impl Default for Clock {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn clock_starts_at_base() {
+    let clk = Clock::new();
+    assert_eq!(clk.elapsed(), Duration::ZERO);
+  }
+
+  #[test]
+  fn clock_advance_is_monotonic() {
+    let mut clk = Clock::new();
+    let t0 = clk.now();
+    clk.advance(Duration::from_millis(100));
+    let t1 = clk.now();
+    clk.advance(Duration::from_millis(50));
+    let t2 = clk.now();
+    assert!(t1 > t0, "t1 must be after t0");
+    assert!(t2 > t1, "t2 must be after t1");
+  }
+
+  #[test]
+  fn clock_at_returns_correct_instant() {
+    let clk = Clock::new();
+    let t10 = clk.at(10);
+    let t20 = clk.at(20);
+    assert_eq!(t20 - t10, Duration::from_secs(10));
+  }
+
+  #[test]
+  fn clock_multiple_advances_accumulate() {
+    let mut clk = Clock::new();
+    for _ in 0..10 {
+      clk.advance(Duration::from_millis(100));
+    }
+    assert_eq!(clk.elapsed(), Duration::from_millis(1000));
+  }
+}
