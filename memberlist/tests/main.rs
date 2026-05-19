@@ -21,13 +21,11 @@ fn smol_run(fut: impl Future<Output = ()>) {
   use agnostic::RuntimeLite;
   run_unit_test(SmolRuntime::block_on, fut);
 }
-#[path = "main/net.rs"]
-#[cfg(feature = "memberlist-net")]
-mod net;
-
-#[path = "main/quic.rs"]
-#[cfg(feature = "memberlist-quic")]
-mod quic;
+// `main/net.rs` and `main/quic.rs` exercised the frozen Phase-7
+// memberlist-net / memberlist-quic drivers. Those crates are
+// workspace-excluded post-Phase-9; the files remain on disk as frozen
+// reference but are no longer compiled (the gating features were removed
+// in Task 8.0a). Phase 8 integration tests live in Task 8.7.
 
 #[path = "main/set_probe_channels.rs"]
 mod set_probe_channels;

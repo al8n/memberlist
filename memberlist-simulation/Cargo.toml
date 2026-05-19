@@ -1,0 +1,39 @@
+[package]
+name = "memberlist-simulation"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Deterministic single-threaded simulation harness for memberlist-machine."
+
+[lib]
+# Internal deterministic test-harness crate: doc comments are
+# cross-reference prose (e.g. "Corresponds to legacy ... in
+# memberlist-core/src/state/tests.rs:NNNN"), not API examples, and the
+# only executable example (clock::Clock) is independently covered by the
+# `clock_advance_is_monotonic` unit test. Compiling the rustdoc doc pass
+# adds zero coverage and is the sole surface that flakes `E0463: can't
+# find crate` when the conformance-authority command
+# `cargo test -p memberlist-simulation` runs concurrently with other
+# cargo invocations over the shared target dir. Disabling it keeps that
+# authority gate deterministic without losing verification.
+doctest = false
+
+[dependencies]
+bytes.workspace = true
+memberlist-machine = { path = "../memberlist-machine" }
+memberlist-wire = { workspace = true, features = ["default"] }
+nodecraft = { workspace = true, features = ["default"] }
+rand.workspace = true
+smol_str.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true

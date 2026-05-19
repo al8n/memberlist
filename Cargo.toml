@@ -2,10 +2,20 @@
 members = [
   "memberlist",
   "memberlist-core",
+  "memberlist-machine",
   "memberlist-proto",
+  "memberlist-simulation",
+  "memberlist-wire",
+  "fuzz",
+]
+# memberlist-net, memberlist-quic and examples/toydb are frozen Phase-7
+# backups: their driver code targets the pre-Phase-9 machine API and no
+# longer compiles against memberlist-wire. They stay on disk as reference
+# only (no re-export path from the umbrella) and are excluded from the
+# active workspace build.
+exclude = [
   "memberlist-net",
   "memberlist-quic",
-  "fuzz",
   "examples/toydb",
 ]
 resolver = "3"
@@ -71,8 +81,10 @@ arbitrary = { version = "1", default-features = false }
 quickcheck = { version = "1", default-features = false }
 
 memberlist-core = { version = "0.8", path = "memberlist-core", default-features = false }
+memberlist-machine = { version = "0.1", path = "memberlist-machine", default-features = false }
 memberlist-net = { version = "0.8", path = "memberlist-net", default-features = false }
 memberlist-proto = { version = "0.3", path = "memberlist-proto", default-features = false }
+memberlist-wire = { version = "0.1", path = "memberlist-wire", default-features = false }
 memberlist-quic = { version = "0.8", path = "memberlist-quic", default-features = false }
 memberlist = { version = "0.8", path = "memberlist", default-features = false }
 

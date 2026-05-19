@@ -1,0 +1,59 @@
+//! Wire types and framing for the memberlist gossip protocol.
+//!
+//! This crate is the buffa-generated successor to `memberlist-proto`.
+//! `memberlist-proto` itself stays frozen as a backup; new code should
+//! depend on `memberlist-wire` instead. The structure mirrors how
+//! `memberlist-core` was preserved while `memberlist-machine` took over.
+//!
+//! # Modules
+//!
+//! - [`messages`] — buffa-generated owned + view types for the 10 inner
+//!   wire messages (Alive, Suspect, Dead, Ping, IndirectPing, Ack, Nack,
+//!   PushPull, UserData, ErrorResponse) plus supporting structures
+//!   (Server, PushNodeState, Meta, State enum, version enums).
+//! - [`framing`] — hand-rolled outer framing (label, encryption,
+//!   checksum, compression, compound). Not protobuf-shaped. Ported from
+//!   `memberlist-proto::proto::{encoder, decoder}`.
+//! - [`convert`] — boundary helpers translating between buffa-generated
+//!   types (raw `bytes` fields) and application types (`SmolStr`,
+//!   `SocketAddr`, etc.).
+//!
+//! # Why a new crate
+//!
+//! The existing `memberlist-proto` codec was hand-written. Migrating to
+//! buffa-generated code gives:
+//!
+//! - A `.proto` schema that end users can target with `protoc` / `buf`
+//!   for cross-language interop.
+//! - Codegen consistency — no more chance of off-by-one mistakes in
+//!   manual varint or length-prefix logic.
+//! - buffa's two-tier owned/view types with `OwnedView<V>` for parking
+//!   decoded messages across `await` points without field-by-field clones.
+//!
+//! `memberlist-proto` is preserved unchanged for backwards compatibility
+//! and as a reference implementation that the framing port cross-decodes
+//! against to guarantee bit-identical wire output.
+
+#![forbid(unsafe_code)]
+#![deny(missing_docs, warnings)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(docsrs, allow(unused_attributes))]
+
+pub mod bridge;
+pub mod convert;
+pub mod data;
+pub mod framing;
+pub mod messages;
+pub mod typed;
+pub mod wire_type;
+
+pub use bridge::{BridgeError, message_from_any, message_to_any};
+pub use convert::{
+  ConvertError, id_from_bytes, id_to_bytes, socket_addr_from_bytes, socket_addr_to_bytes,
+};
+pub use data::{Data, DataRef, DecodeError, EncodeError};
+pub use framing::{
+  AnyMessage, COMPOUND_MAX_COUNT_PREFIX_LEN, COMPOUND_MAX_PART_PREFIX_LEN, COMPOUND_TAG_LEN,
+  FrameError, MessageTag, decode_compound, decode_message, decode_plain_frame, encode_compound,
+  encode_message, encode_plain_frame,
+};
