@@ -1,4 +1,4 @@
-use std::{cmp, io, marker::PhantomData, net::SocketAddr, sync::Arc, time::Duration};
+use std::{cmp, io, marker::PhantomData, net::SocketAddr, ops::Deref, sync::Arc, time::Duration};
 
 use agnostic::Runtime;
 use futures::AsyncWriteExt;
@@ -10,6 +10,32 @@ mod options;
 pub use options::*;
 
 use super::{QuicAcceptor, QuicConnection, QuicConnector, QuicStream, StreamLayer};
+
+/// Shared endpoint wrapper that closes the underlying `Endpoint` only
+/// when the last holder drops it, preventing an acceptor from killing
+/// a connector (or vice versa) when they share a single `Endpoint`.
+struct SharedEndpoint(Arc<Endpoint>);
+
+impl Clone for SharedEndpoint {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl Deref for SharedEndpoint {
+    type Target = Endpoint;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for SharedEndpoint {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.0) == 1 {
+            Endpoint::close(&self.0, VarInt::from(0u32), b"endpoint shutdown");
+        }
+    }
+}
 
 /// [`Quinn`] is an implementation of [`StreamLayer`] based on [`quinn`].
 pub struct Quinn<R> {
@@ -53,14 +79,14 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
     let sock = std::net::UdpSocket::bind(addr)?;
     let auto_port = addr.port() == 0;
 
-    let endpoint = Arc::new(Endpoint::new(
+    let shared_ep = SharedEndpoint(Arc::new(Endpoint::new(
       self.opts.endpoint_config.clone(),
       Some(self.opts.server_config.clone()),
       sock,
       Arc::new(R::quinn()),
-    )?);
+    )?));
 
-    let local_addr = endpoint.local_addr()?;
+    let local_addr = shared_ep.local_addr()?;
     if auto_port {
       tracing::info!(
         "memberlist_quic.endpoint: binding to dynamic addr {}",
@@ -69,13 +95,13 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
     }
 
     let acceptor = Self::Acceptor {
-      endpoint: endpoint.clone(),
+      endpoint: shared_ep.clone(),
       local_addr,
     };
 
     let connector = Self::Connector {
       server_name,
-      endpoint,
+      endpoint: shared_ep,
       local_addr,
       client_config,
       connect_timeout: self.opts.connect_timeout,
@@ -87,7 +113,7 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
 
 /// [`QuinnAcceptor`] is an implementation of [`QuicAcceptor`] based on [`quinn`].
 pub struct QuinnAcceptor {
-  endpoint: Arc<Endpoint>,
+  endpoint: SharedEndpoint,
   local_addr: SocketAddr,
 }
 
@@ -119,7 +145,7 @@ impl QuicAcceptor for QuinnAcceptor {
   }
 
   async fn close(&mut self) -> io::Result<()> {
-    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close acceptor");
+    self.endpoint.close(VarInt::from(0u32), b"close acceptor");
     Ok(())
   }
 
@@ -128,16 +154,10 @@ impl QuicAcceptor for QuinnAcceptor {
   }
 }
 
-impl Drop for QuinnAcceptor {
-  fn drop(&mut self) {
-    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close acceptor");
-  }
-}
-
 /// [`QuinnConnector`] is an implementation of [`QuicConnector`] based on [`quinn`].
 pub struct QuinnConnector<R> {
   server_name: SmolStr,
-  endpoint: Arc<Endpoint>,
+  endpoint: SharedEndpoint,
   client_config: ClientConfig,
   connect_timeout: Duration,
   local_addr: SocketAddr,
@@ -162,7 +182,7 @@ where
   }
 
   async fn close(&self) -> io::Result<()> {
-    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close connector");
+    self.endpoint.close(VarInt::from(0u32), b"close connector");
     Ok(())
   }
 
@@ -173,12 +193,6 @@ where
 
   fn local_addr(&self) -> SocketAddr {
     self.local_addr
-  }
-}
-
-impl<R> Drop for QuinnConnector<R> {
-  fn drop(&mut self) {
-    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close connector");
   }
 }
 
