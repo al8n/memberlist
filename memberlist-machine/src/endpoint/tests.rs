@@ -4202,7 +4202,9 @@ fn split_delivery_done_then_trailing_bytes_fails_decode() {
   // surfaces, no Closed.
   let events: Vec<_> = std::iter::from_fn(|| s.poll_event()).collect();
   assert!(
-    !events.iter().any(|ev| matches!(ev, crate::event::StreamEvent::Closed)),
+    !events
+      .iter()
+      .any(|ev| matches!(ev, crate::event::StreamEvent::Closed)),
     "no Closed lifecycle event after split-delivery failure — got {events:?}"
   );
 }
@@ -4356,7 +4358,10 @@ fn second_frame_in_inbound_sending_response_fails_unexpected() {
      got {r:?}"
   );
   assert!(
-    matches!(s.phase, StreamPhase::Failed(StreamError::UnexpectedMessage(_))),
+    matches!(
+      s.phase,
+      StreamPhase::Failed(StreamError::UnexpectedMessage(_))
+    ),
     "FSM phase ⇒ Failed(UnexpectedMessage), got {:?}",
     s.phase
   );

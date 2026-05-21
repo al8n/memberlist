@@ -15,19 +15,19 @@ mod demux;
 
 pub use crypto::QuicConfig;
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::time::Instant;
+use std::{collections::HashMap, net::SocketAddr, time::Instant};
 
 use bytes::{Bytes, BytesMut};
 use quinn_proto::{DatagramEvent, Dir, Endpoint as QuinnEndpoint};
 
-use crate::addr_bridge::AddrBridge;
-use crate::endpoint::Endpoint;
-use crate::event::{Event, PushPullKind, StreamId, Transmit};
+use crate::{
+  addr_bridge::AddrBridge,
+  endpoint::Endpoint,
+  event::{Event, PushPullKind, StreamId, Transmit},
+};
 use bridge::Bridge;
 use conn::ConnTable;
-use demux::{classify, Class};
+use demux::{Class, classify};
 
 /// One pending dial intent the coordinator owes a `service_dials` attempt to.
 ///
@@ -233,7 +233,11 @@ where
   /// transport — and therefore the composed membership behaviour and timing
   /// — is bit-for-bit reproducible across runs. Behaviour is otherwise
   /// identical to [`new`](Self::new).
-  pub fn with_quinn_rng_seed(ep: Endpoint<I, A>, cfg: QuicConfig, rng_seed: Option<[u8; 32]>) -> Self {
+  pub fn with_quinn_rng_seed(
+    ep: Endpoint<I, A>,
+    cfg: QuicConfig,
+    rng_seed: Option<[u8; 32]>,
+  ) -> Self {
     let quinn = QuinnEndpoint::new(
       cfg.endpoint().clone(),
       Some(cfg.server().clone()),
@@ -306,12 +310,7 @@ where
   /// peer without going through a join push/pull).
   ///
   /// Pass-through to [`Endpoint::handle_alive`]. Sets `last_now`.
-  pub fn handle_alive(
-    &mut self,
-    from: A,
-    alive: memberlist_wire::typed::Alive<I, A>,
-    at: Instant,
-  ) {
+  pub fn handle_alive(&mut self, from: A, alive: memberlist_wire::typed::Alive<I, A>, at: Instant) {
     self.last_now = Some(at);
     self.ep.handle_alive(from, alive, at);
   }
@@ -627,11 +626,8 @@ where
     };
     let opened = e.conn_mut().streams().open(Dir::Uni).is_some();
     if opened {
-      e.conn_mut().close(
-        now,
-        quinn_proto::VarInt::from_u32(0),
-        bytes::Bytes::new(),
-      );
+      e.conn_mut()
+        .close(now, quinn_proto::VarInt::from_u32(0), bytes::Bytes::new());
     }
     opened
   }
@@ -858,8 +854,7 @@ where
     // (1) inbound feed already done in `handle_udp` before `run_tick`.
     // (2) pump bridges + drain stream endpoint-events into the Endpoint.
     #[cfg(test)]
-    let pre_step2_ids: std::collections::HashSet<StreamId> =
-      self.bridges.keys().copied().collect();
+    let pre_step2_ids: std::collections::HashSet<StreamId> = self.bridges.keys().copied().collect();
     self.pump_bridges(now);
     // (3) THEN memberlist timers (probe cumulative-deadline, suspicion).
     self.ep.handle_timeout(now);
@@ -950,9 +945,8 @@ where
     for id in &ids {
       if let Some(mut br) = self.bridges.remove(id) {
         if !pre_snapshot_ids.contains(id) {
-          self.bridges_pumped_after_acceptance = self
-            .bridges_pumped_after_acceptance
-            .saturating_add(1);
+          self.bridges_pumped_after_acceptance =
+            self.bridges_pumped_after_acceptance.saturating_add(1);
         }
         let _ = br.pump_in(&mut self.conns, now);
         let _ = br.pump_out(&mut self.conns, now);
@@ -1138,8 +1132,14 @@ where
             //
             // Ignoring Err: idempotent retirement — `Err(ClosedStream)`
             // means the half is already gone.
-            let _ = e.conn_mut().send_stream(sid).reset(quinn_proto::VarInt::from_u32(0));
-            let _ = e.conn_mut().recv_stream(sid).stop(quinn_proto::VarInt::from_u32(0));
+            let _ = e
+              .conn_mut()
+              .send_stream(sid)
+              .reset(quinn_proto::VarInt::from_u32(0));
+            let _ = e
+              .conn_mut()
+              .recv_stream(sid)
+              .stop(quinn_proto::VarInt::from_u32(0));
             for br in self.bridges.values_mut() {
               if br.ch() == ch && br.sid() == sid {
                 br.fail_stopped_already_retired(error_code);
@@ -1336,7 +1336,9 @@ where
             match e.conn_mut().streams().open(Dir::Bi) {
               Some(sid) => match self.ep.dial_succeeded(id, now) {
                 Some(stream) => {
-                  self.bridges.insert(stream.id(), Bridge::new(stream, ch, sid));
+                  self
+                    .bridges
+                    .insert(stream.id(), Bridge::new(stream, ch, sid));
                 }
                 None => {
                   // Defense-in-depth: the deadline pre-check above
@@ -1355,7 +1357,9 @@ where
                   // guard.
                   if let Some(e) = self.conns.get_mut(ch) {
                     let conn = e.conn_mut();
-                    let _ = conn.send_stream(sid).reset(quinn_proto::VarInt::from_u32(0));
+                    let _ = conn
+                      .send_stream(sid)
+                      .reset(quinn_proto::VarInt::from_u32(0));
                     let _ = conn.recv_stream(sid).stop(quinn_proto::VarInt::from_u32(0));
                   }
                 }
@@ -1484,16 +1488,16 @@ where
 
 #[cfg(test)]
 mod tests {
-  use std::net::SocketAddr;
-  use std::time::{Duration, Instant};
+  use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
+  };
 
   use bytes::Bytes;
   use smol_str::SmolStr;
 
   use super::{AddrBridge, QuicEndpoint};
-  use crate::config::EndpointConfig;
-  use crate::endpoint::Endpoint;
-  use crate::quic::QuicConfig;
+  use crate::{config::EndpointConfig, endpoint::Endpoint, quic::QuicConfig};
 
   struct IdBridge;
   impl AddrBridge<SocketAddr> for IdBridge {
@@ -1599,11 +1603,9 @@ mod tests {
     let now = Instant::now();
     let mut a = make_endpoint("a", a_addr, now);
     let mut b = make_endpoint("b", b_addr, now);
-    let _ = a.endpoint_mut().start_push_pull(
-      b_addr,
-      crate::event::PushPullKind::Join,
-      now,
-    );
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
     // Drive the handshake by ferrying datagrams in both directions.
     // Bounded: ~50 round-trips is plenty for a handshake on a virtual
     // network with no loss.
@@ -1687,11 +1689,9 @@ mod tests {
     // very first `poll_transmit`. Post-handshake the push/pull bidi
     // stream's payload produces short-header STREAM frames + ACKs — the
     // packet space the per-packet greasing decision applies to.
-    let _ = a.endpoint_mut().start_push_pull(
-      b_addr,
-      crate::event::PushPullKind::Join,
-      now,
-    );
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
     // Bounded ferry of every emitted datagram, asserting the demux
     // invariant on each. ~200 rounds is well past handshake completion
     // and enough push/pull traffic to give quinn-proto's per-packet
@@ -1784,11 +1784,9 @@ mod tests {
     // loop stops AFTER one entry is staged on `ch_a` and BEFORE the
     // next `service_quinn` drains it (drained at the start of the next
     // iteration per the documented one-tick latency).
-    let _ = a.endpoint_mut().start_push_pull(
-      b_addr,
-      crate::event::PushPullKind::Join,
-      now,
-    );
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
     // Capture A's single connection handle (the dial to B) once it
     // exists in A's slab.
     let mut harvested: Option<quinn_proto::ConnectionEvent> = None;
@@ -1839,8 +1837,7 @@ mod tests {
         break 'ferry;
       }
     }
-    let harvested =
-      harvested.expect("handshake must produce at least one real ConnectionEvent");
+    let harvested = harvested.expect("handshake must produce at least one real ConnectionEvent");
     let ch_a = ch_a.expect("test precondition: A holds the dial-to-B handle");
     // A holds exactly one connection (to B) at this point.
     assert_eq!(
@@ -1887,12 +1884,7 @@ mod tests {
         .and_then(|e| e.conn_mut().poll_timeout());
       match next {
         Some(d) => {
-          a
-            .conns
-            .get_mut(ch_a)
-            .unwrap()
-            .conn_mut()
-            .handle_timeout(d);
+          a.conns.get_mut(ch_a).unwrap().conn_mut().handle_timeout(d);
         }
         None => break,
       }
@@ -1987,11 +1979,9 @@ mod tests {
     let mut a = make_endpoint("a", a_addr, now);
     let mut b = make_endpoint("b", b_addr, now);
 
-    let _ = a.endpoint_mut().start_push_pull(
-      b_addr,
-      crate::event::PushPullKind::Join,
-      now,
-    );
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
 
     // Drive the handshake until A's ConnEntry has a deferred event
     // (NewIdentifiers from NeedIdentifiers at handshake completion).
@@ -2060,8 +2050,7 @@ mod tests {
     // queue (verifies the wake is actionable, not a busy-loop).
     a.handle_timeout(now);
     assert!(
-      !a
-        .conns
+      !a.conns
         .get(ch_a)
         .expect("connection still present after one tick")
         .has_pending_events(),
@@ -2106,8 +2095,8 @@ mod tests {
     // (1) Build a bare Endpoint. Call start_push_pull on it BEFORE
     // wrapping — this is the legitimate Endpoint usage that produces a
     // DialRequested in the inner queue before `QuicEndpoint` wraps it.
-    let cfg = EndpointConfig::new(SmolStr::new("a"), a_addr)
-      .with_rng_seed(Some(a_addr.port() as u64));
+    let cfg =
+      EndpointConfig::new(SmolStr::new("a"), a_addr).with_rng_seed(Some(a_addr.port() as u64));
     let mut bare_ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     bare_ep.start_scheduling(t0);
     let _ = bare_ep.start_push_pull(b_addr, PushPullKind::Join, t0);
@@ -2218,11 +2207,9 @@ mod tests {
     // confirms the handshake-completion NEW_CONNECTION_ID feedback ran;
     // the test_config's 20s `max_idle_timeout` is then mutually
     // negotiated and armed on both ends).
-    let _ = a.endpoint_mut().start_push_pull(
-      b_addr,
-      crate::event::PushPullKind::Join,
-      now,
-    );
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
     for _ in 0..200 {
       let mut moved = false;
       while let Some((to, bytes)) = a.poll_transmit() {
@@ -2378,11 +2365,9 @@ mod tests {
     // Established connection. Once the bridge on A has reaped its own
     // join exchange (or the loop bounds out), the pooled connection is
     // available for the expired-intent injection below to re-use.
-    let _ = a.endpoint_mut().start_push_pull(
-      b_addr,
-      crate::event::PushPullKind::Join,
-      now,
-    );
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
     for _ in 0..200 {
       let mut moved = false;
       while let Some((to, bytes)) = a.poll_transmit() {
@@ -2440,11 +2425,9 @@ mod tests {
     // override the deadline on the `dial_pending` entry to be BEFORE
     // `now` — the expired-dial pre-check then routes this intent
     // through `dial_failed` BEFORE `Streams::open(Dir::Bi)` is called.
-    let id = a.endpoint_mut().start_push_pull(
-      b_addr,
-      crate::event::PushPullKind::Refresh,
-      now,
-    );
+    let id = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Refresh, now);
     a.sieve_dial_events();
     assert_eq!(
       a.dial_pending.len(),
@@ -2456,7 +2439,10 @@ mod tests {
       .dial_pending
       .front_mut()
       .expect("dial_pending non-empty per the preceding assertion");
-    assert_eq!(entry.id, id, "the sieved entry MUST carry the registered intent's id");
+    assert_eq!(
+      entry.id, id,
+      "the sieved entry MUST carry the registered intent's id"
+    );
     entry.deadline = now - Duration::from_millis(1);
 
     let bridges_before = a.live_bridge_count();
@@ -2651,11 +2637,9 @@ mod tests {
     // outside the module), so a future CID-exhaustion / malformed-
     // Initial test that DOES drive the `Err`-with-response path can
     // assert the counter advances.
-    let _ = a.endpoint_mut().start_push_pull(
-      b_addr,
-      crate::event::PushPullKind::Join,
-      now,
-    );
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
     for _ in 0..200 {
       let mut moved = false;
       while let Some((to, bytes)) = a.poll_transmit() {
@@ -2742,11 +2726,9 @@ mod tests {
     // `StreamCommand::Close` is routed to B's bridge.
     b.endpoint_mut().set_merge_delegate(RejectAllMerges);
 
-    let _ = a.endpoint_mut().start_push_pull(
-      b_addr,
-      crate::event::PushPullKind::Join,
-      now,
-    );
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
 
     // Bounded ferry — handshake completes, A sends Join state, B's
     // delegate rejects, B emits the Close. The loop terminates on
@@ -2845,11 +2827,9 @@ mod tests {
     let mut a = make_endpoint("a", a_addr, now);
     let mut b = make_endpoint("b", b_addr, now);
 
-    let _id = a.endpoint_mut().start_push_pull(
-      b_addr,
-      crate::event::PushPullKind::Join,
-      now,
-    );
+    let _id = a
+      .endpoint_mut()
+      .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
 
     // Drive the clean exchange to completion: handshake, A sends Join
     // state, B replies, both sides decode, both bridges become Done +
@@ -2985,11 +2965,9 @@ mod tests {
     // bridge intent's deadline = now + stream_timeout (~5s); the
     // handshake won't complete; eventually the deadline elapses.
     let unreachable: SocketAddr = "127.0.0.1:7994".parse().unwrap();
-    let _ = a.endpoint_mut().start_push_pull(
-      unreachable,
-      crate::event::PushPullKind::Refresh,
-      now,
-    );
+    let _ = a
+      .endpoint_mut()
+      .start_push_pull(unreachable, crate::event::PushPullKind::Refresh, now);
 
     // Drive A's tick: dial fires, Initial queued. Then jump time
     // past the bridge's exchange deadline (~5s by default; using 30s

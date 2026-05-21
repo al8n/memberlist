@@ -22,10 +22,12 @@ use std::time::Instant;
 use quinn_proto::{ConnectionHandle, StreamId as QuicSid, VarInt};
 
 use super::conn::ConnTable;
-use crate::bridge_phase::{BridgeFailure, BridgePhase};
-use crate::endpoint::Endpoint;
-use crate::event::{EndpointEvent, StreamCommand, StreamId};
-use crate::stream::Stream;
+use crate::{
+  bridge_phase::{BridgeFailure, BridgePhase},
+  endpoint::Endpoint,
+  event::{EndpointEvent, StreamCommand, StreamId},
+  stream::Stream,
+};
 
 /// Couples one memberlist reliable-exchange [`Stream`] to one quinn bidi
 /// stream on a pooled connection, pumping bytes both ways and enforcing the
@@ -241,7 +243,10 @@ where
     if matches!(self.phase, BridgePhase::Failed(_)) {
       return;
     }
-    if !matches!(self.phase, BridgePhase::RecvClosed | BridgePhase::BothClosed) {
+    if !matches!(
+      self.phase,
+      BridgePhase::RecvClosed | BridgePhase::BothClosed
+    ) {
       self.stream.discard_pending_events();
     }
     self.phase = BridgePhase::Failed(reason);
@@ -890,11 +895,7 @@ where
             let response_deadline = now + core::time::Duration::from_secs(5);
             let encoded =
               Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
-            Endpoint::<I, A>::stream_load_response(
-              &mut self.stream,
-              encoded,
-              response_deadline,
-            );
+            Endpoint::<I, A>::stream_load_response(&mut self.stream, encoded, response_deadline);
             self.deadline = response_deadline;
             let _ = self.pump_out(conns, now);
           }
@@ -941,7 +942,7 @@ where
         id,
         err: e.to_string(),
       },
-      _ => EndpointEvent::StreamClosed { id }
+      _ => EndpointEvent::StreamClosed { id },
     };
     // Ignoring Err: `handle_stream_event` returning a `StreamCommand` on
     // the post-payload lifecycle notice (`StreamClosed`/`StreamErrored`)
@@ -1021,11 +1022,7 @@ where
             let response_deadline = now + core::time::Duration::from_secs(5);
             let encoded =
               Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
-            Endpoint::<I, A>::stream_load_response(
-              &mut self.stream,
-              encoded,
-              response_deadline,
-            );
+            Endpoint::<I, A>::stream_load_response(&mut self.stream, encoded, response_deadline);
             self.deadline = response_deadline;
             let _ = self.pump_out(conns, now);
           }
@@ -1058,8 +1055,7 @@ mod tests {
   use quinn_proto::{Dir, Side};
   use smol_str::SmolStr;
 
-  use crate::config::EndpointConfig;
-  use crate::event::Event;
+  use crate::{config::EndpointConfig, event::Event};
 
   /// `drain_payload_only` must not commit a dispatched frame's side
   /// effects until the recv half has observed peer FIN. Without this
@@ -1074,11 +1070,10 @@ mod tests {
   /// the bridge to `RecvClosed`, the drain runs and the event surfaces.
   #[test]
   fn drain_payload_only_defers_until_recv_fin_observed() {
-    let mut ep: Endpoint<SmolStr, SocketAddr> =
-      Endpoint::new(EndpointConfig::new(SmolStr::new("self"), SocketAddr::new(
-        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        7000,
-      )));
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+      SmolStr::new("self"),
+      SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+    ));
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
     let t0 = Instant::now();
 
@@ -1108,7 +1103,9 @@ mod tests {
     // this stream.
     let mut conns = ConnTable::new();
     assert!(
-      !ep.poll_event().is_some_and(|ev| matches!(ev, Event::UserPacket { .. })),
+      !ep
+        .poll_event()
+        .is_some_and(|ev| matches!(ev, Event::UserPacket { .. })),
       "no UserPacket may be queued before any drain"
     );
 

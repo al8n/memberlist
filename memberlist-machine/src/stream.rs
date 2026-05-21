@@ -411,8 +411,9 @@ where
     if data.is_empty() {
       let buf_truncated = !self.input_buf.is_empty();
       return match &self.phase {
-        StreamPhase::OutboundAwaitingResponse { .. }
-        | StreamPhase::InboundAwaitingFirstMessage => Err(StreamError::PeerClosed),
+        StreamPhase::OutboundAwaitingResponse { .. } | StreamPhase::InboundAwaitingFirstMessage => {
+          Err(StreamError::PeerClosed)
+        }
         StreamPhase::OutboundSendingRequest { kind } => match kind {
           OutboundKind::UserMessage => Ok(()),
           OutboundKind::PushPull { .. } | OutboundKind::ReliablePing { .. } => {

@@ -171,8 +171,7 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicConfig {
     .with_no_client_auth()
     .with_single_cert(chain, key)
     .unwrap();
-  let qsc =
-    quinn_proto::crypto::rustls::QuicServerConfig::try_from(Arc::new(server_tls)).unwrap();
+  let qsc = quinn_proto::crypto::rustls::QuicServerConfig::try_from(Arc::new(server_tls)).unwrap();
   let server = quinn_proto::ServerConfig::with_crypto(Arc::new(qsc));
 
   let client_tls = rustls::ClientConfig::builder_with_provider(provider)
@@ -181,8 +180,7 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicConfig {
     .dangerous()
     .with_custom_certificate_verifier(Arc::new(AnyServer))
     .with_no_client_auth();
-  let qcc =
-    quinn_proto::crypto::rustls::QuicClientConfig::try_from(Arc::new(client_tls)).unwrap();
+  let qcc = quinn_proto::crypto::rustls::QuicClientConfig::try_from(Arc::new(client_tls)).unwrap();
   let client = quinn_proto::ClientConfig::new(Arc::new(qcc));
 
   // `QuicConfig::new` installs the supplied `TransportConfig` on BOTH the
@@ -210,7 +208,12 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicConfig {
     ));
   }
 
-  QuicConfig::new(sim_endpoint_config(&[0x5au8; 32]), server, client, transport)
+  QuicConfig::new(
+    sim_endpoint_config(&[0x5au8; 32]),
+    server,
+    client,
+    transport,
+  )
 }
 
 /// `quic`-gated deterministic conformance harness. Accessor-only; no `pub`
@@ -394,7 +397,6 @@ impl QuicCluster {
     c
   }
 
-
   /// Like [`two_node_join`](Self::two_node_join) but with a SHORT direct
   /// `probe_timeout` (500 ms) and a LONG `probe_interval` (10 s). The
   /// probe's single cumulative deadline is `sent + probe_interval`, while
@@ -482,11 +484,7 @@ impl QuicCluster {
   /// the extras are injected BEFORE `start_push_pull`, so the very first
   /// push/pull is already large and back-pressured (no live-coordinator
   /// rebuild — that would discard the in-flight dial).
-  pub fn two_node_join_small_window(
-    a: SocketAddr,
-    b: SocketAddr,
-    extra_peers: usize,
-  ) -> Self {
+  pub fn two_node_join_small_window(a: SocketAddr, b: SocketAddr, extra_peers: usize) -> Self {
     let mut c = Self::empty();
     c.shrink_window = true;
     c.add_node("a", a);
@@ -494,8 +492,9 @@ impl QuicCluster {
     let now = c.clock.now();
     if let Some(n) = c.nodes.get_mut(&a) {
       for i in 0..extra_peers {
-        let paddr: SocketAddr =
-          format!("203.0.113.{}:9{:03}", (i % 250) + 1, i).parse().unwrap();
+        let paddr: SocketAddr = format!("203.0.113.{}:9{:03}", (i % 250) + 1, i)
+          .parse()
+          .unwrap();
         n.handle_alive(
           a,
           Alive::new(1, Node::new(SmolStr::new(format!("extra-{i}")), paddr)),
@@ -533,8 +532,9 @@ impl QuicCluster {
     let now = c.clock.now();
     if let Some(n) = c.nodes.get_mut(&b) {
       for i in 0..extra_peers {
-        let paddr: SocketAddr =
-          format!("198.51.100.{}:9{:03}", (i % 250) + 1, i).parse().unwrap();
+        let paddr: SocketAddr = format!("198.51.100.{}:9{:03}", (i % 250) + 1, i)
+          .parse()
+          .unwrap();
         n.handle_alive(
           b,
           Alive::new(1, Node::new(SmolStr::new(format!("bextra-{i}")), paddr)),
@@ -546,8 +546,9 @@ impl QuicCluster {
       // A small, non-trivial push from the initiator (a few ghosts) so the
       // request side is exercised too; the responder still carries the bulk.
       for i in 0..4 {
-        let paddr: SocketAddr =
-          format!("203.0.113.{}:9{:03}", (i % 250) + 1, i).parse().unwrap();
+        let paddr: SocketAddr = format!("203.0.113.{}:9{:03}", (i % 250) + 1, i)
+          .parse()
+          .unwrap();
         n.handle_alive(
           a,
           Alive::new(1, Node::new(SmolStr::new(format!("aextra-{i}")), paddr)),
@@ -597,8 +598,9 @@ impl QuicCluster {
     let now = c.clock.now();
     if let Some(n) = c.nodes.get_mut(&b) {
       for i in 0..b_extras {
-        let paddr: SocketAddr =
-          format!("198.51.100.{}:9{:03}", (i % 250) + 1, i).parse().unwrap();
+        let paddr: SocketAddr = format!("198.51.100.{}:9{:03}", (i % 250) + 1, i)
+          .parse()
+          .unwrap();
         n.handle_alive(
           b,
           Alive::new(1, Node::new(SmolStr::new(format!("bextra-{i}")), paddr)),
@@ -608,8 +610,9 @@ impl QuicCluster {
     }
     if let Some(n) = c.nodes.get_mut(&a) {
       for i in 0..a_extras {
-        let paddr: SocketAddr =
-          format!("203.0.113.{}:9{:03}", (i % 250) + 1, i).parse().unwrap();
+        let paddr: SocketAddr = format!("203.0.113.{}:9{:03}", (i % 250) + 1, i)
+          .parse()
+          .unwrap();
         n.handle_alive(
           a,
           Alive::new(1, Node::new(SmolStr::new(format!("aextra-{i}")), paddr)),
@@ -856,30 +859,21 @@ impl QuicCluster {
   /// `true` if `host` has EVER observed `peer` in `Suspect` (scanned every
   /// tick, so a later-refuted transient Suspect is still caught).
   pub fn ever_suspected(&self, host: SocketAddr, peer: &SmolStr) -> bool {
-    self
-      .suspected
-      .get(&host)
-      .is_some_and(|s| s.contains(peer))
+    self.suspected.get(&host).is_some_and(|s| s.contains(peer))
   }
 
   /// `true` if `host` has EVER observed `peer` `Alive` (scanned every tick).
   /// Used to assert a D1 merge reached the `Endpoint` even if normal SWIM
   /// later transitioned the peer away after the connection was torn down.
   pub fn ever_saw_alive(&self, host: SocketAddr, peer: &SmolStr) -> bool {
-    self
-      .ever_alive
-      .get(&host)
-      .is_some_and(|s| s.contains(peer))
+    self.ever_alive.get(&host).is_some_and(|s| s.contains(peer))
   }
 
   /// `true` if `host` has EVER observed `peer` `Dead` or `Left` (scanned
   /// every tick). Used to assert a leave/death transition was observed even
   /// after the dead/left entry is later garbage-collected to absent.
   pub fn ever_saw_gone(&self, host: SocketAddr, peer: &SmolStr) -> bool {
-    self
-      .ever_gone
-      .get(&host)
-      .is_some_and(|s| s.contains(peer))
+    self.ever_gone.get(&host).is_some_and(|s| s.contains(peer))
   }
 
   /// `true` once `host` has emitted `Event::LeftCluster`.
@@ -1296,9 +1290,10 @@ impl QuicCluster {
     // models "direct + indirect UDP probes dropped" while leaving the QUIC
     // (`>= 0x40`) reliable path intact (so the reliable-ping fallback runs).
     if is_memberlist
-      && self.probe_block.iter().any(|&(x, y)| {
-        (x == from && y == to) || (x == to && y == from)
-      })
+      && self
+        .probe_block
+        .iter()
+        .any(|&(x, y)| (x == from && y == to) || (x == to && y == from))
     {
       return false;
     }
@@ -1335,10 +1330,7 @@ impl QuicCluster {
 
   /// Deliver every datagram whose `deliver_at <= now`. Returns the count.
   fn deliver_ready(&mut self, now: Instant) -> usize {
-    self
-      .queue
-      .make_contiguous()
-      .sort_by_key(|d| d.deliver_at);
+    self.queue.make_contiguous().sort_by_key(|d| d.deliver_at);
     let mut delivered = 0;
     let mut remaining = VecDeque::new();
     while let Some(d) = self.queue.pop_front() {
@@ -1550,20 +1542,13 @@ impl QuicCluster {
       .members()
       .filter(|ns| ns.id() != &me)
       .any(|ns| {
-        node.endpoint().member_liveness(ns.id())
-          == Some(memberlist_wire::typed::State::Alive)
+        node.endpoint().member_liveness(ns.id()) == Some(memberlist_wire::typed::State::Alive)
       })
   }
 
   fn peers_of(&self, host: SocketAddr) -> Vec<SocketAddr> {
-    self
-      .nodes
-      .keys()
-      .copied()
-      .filter(|&a| a != host)
-      .collect()
+    self.nodes.keys().copied().filter(|&a| a != host).collect()
   }
-
 }
 
 /// Encode one typed message into a plain frame (`[TAG][VARINT len][BODY]`) —
@@ -1608,5 +1593,4 @@ mod tests {
     assert_eq!(IdentityBridge::to_socket(&a), a);
     assert_eq!(IdentityBridge::from_socket(a), a);
   }
-
 }
