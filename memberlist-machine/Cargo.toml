@@ -50,6 +50,14 @@ quic-platform-verifier = ["quic", "quinn-proto/platform-verifier"]
 # `tls-rustls-ring`) to pull a provider into the dependency graph.
 tls = ["dep:rustls", "dep:rustls-pki-types"]
 
+# Composed plain-TCP + memberlist Sans-I/O coordinator. The label is a
+# one-time wire prefix at stream start (identical byte format to the frozen
+# memberlist-proto label frame); there is no transport-level encryption.
+# The driver moves raw TCP bytes; the coordinator owns the label prefix
+# and the memberlist framing. Mirrors TlsEndpoint with the rustls record
+# layer replaced by the raw-passthrough RawRecords codec.
+tcp = []
+
 # rustls crypto-backend pass-throughs.
 tls-rustls-ring = ["tls", "rustls/ring"]
 tls-rustls-aws-lc-rs = ["tls", "rustls/aws_lc_rs"]

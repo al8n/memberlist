@@ -1,56 +1,61 @@
-//! [`TlsCluster`]: the `tls`-gated conformance harness.
+//! [`TcpCluster`]: the `tcp`-gated conformance harness.
 //!
-//! Mirrors [`Cluster`](crate::cluster::Cluster) / [`QuicCluster`](crate::quic_net::QuicCluster)
-//! exactly, substituting [`TlsEndpoint`] for the bare `Endpoint`: reliable
-//! exchanges (join/anti-entropy push-pull, reliable-ping fallback) ride a real
-//! rustls-over-TCP connection, while unreliable gossip rides a plain UDP
-//! socket. TLS and UDP are SEPARATE transports here (no first-byte demux —
-//! that was QUIC-specific, since quinn runs over UDP), so the harness carries
-//! two queues:
+//! Mirrors [`TlsCluster`](crate::tls_net::TlsCluster) method-for-method,
+//! substituting [`TcpEndpoint`] for the rustls-over-TCP `TlsEndpoint`:
+//! reliable exchanges (join/anti-entropy push-pull, reliable-ping fallback)
+//! ride a per-exchange plain TCP connection with a wire-label prefix, while
+//! unreliable gossip rides a plain UDP socket. The cluster-isolation gate is
+//! the [`TcpConfig`] label (matched at the inbound stream's first read), not a
+//! TLS handshake; there is no crypto layer at all. Two queues mirror the TLS
+//! harness:
 //!
 //! - **UDP gossip** — a datagram queue ([`PendingDatagram`]) byte-identical to
-//!   the QUIC harness's memberlist path: outbound is drained through
-//!   [`TlsEndpoint::poll_memberlist_transmit`], plain-frame encoded with the
+//!   the TLS harness's memberlist path: outbound is drained through
+//!   [`TcpEndpoint::poll_memberlist_transmit`], plain-frame encoded with the
 //!   machine's own `memberlist-wire` codec, enqueued (faults applied once per
-//!   datagram), and on delivery fed through [`TlsEndpoint::handle_gossip`] →
-//!   [`TlsEndpoint::poll_memberlist_ingress`] → decode → [`TlsEndpoint::handle_packet`].
-//! - **A deterministic virtual TCP** ([`TcpPipe`]) — per-connection ordered
-//!   byte pipes (FIFO, no reordering, no loss within a connection: TCP is
-//!   reliable + ordered) with clock-driven delivery latency, connect / accept /
-//!   write / read(==0 on peer half-close) / reset, plus fault injection
-//!   (connect-refused, mid-stream reset, half-close). Ciphertext is drained
-//!   through [`TlsEndpoint::poll_transport_transmit`], delivered with latency,
-//!   and fed back through [`TlsEndpoint::handle_transport_data`]; transport
-//!   directives are drained through [`TlsEndpoint::poll_action`].
+//!   datagram), and on delivery fed through [`TcpEndpoint::handle_gossip`] →
+//!   [`TcpEndpoint::poll_memberlist_ingress`] → decode → [`TcpEndpoint::handle_packet`].
+//! - **A deterministic virtual TCP** (the shared
+//!   [`TcpPipe`](crate::virtual_tcp::TcpPipe)) — per-connection ordered byte
+//!   pipes (FIFO, no reordering, no loss within a connection; TCP is reliable +
+//!   ordered) with clock-driven delivery latency, connect / accept / write /
+//!   read(==0 on peer half-close) / reset, plus fault injection (connect-
+//!   refused, mid-stream reset, half-close). Plain bytes are drained through
+//!   [`TcpEndpoint::poll_transport_transmit`], delivered with latency, and fed
+//!   back through [`TcpEndpoint::handle_transport_data`] with an explicit
+//!   `eof: bool` (the out-of-band FIN signal that replaces TLS's in-band
+//!   `close_notify` alert); transport directives are drained through
+//!   [`TcpEndpoint::poll_action`].
 //!
 //! Virtual time (the shared [`Clock`]) is injected as `now` into both
 //! machines, and the existing [`FaultConfig`] drop/delay/partition model is
 //! reused unchanged — so the SWIM timing observed here is directly comparable
-//! to the plain harness (the conformance-parity capstone).
+//! to the plain harness and to the sibling TLS harness (the conformance-parity
+//! capstone).
 
 use std::{
   collections::{HashMap, HashSet, VecDeque},
   net::SocketAddr,
-  sync::Arc,
   time::{Duration, Instant},
 };
 
 use memberlist_machine::{
-  AddrBridge, Endpoint, EndpointConfig, Event, ExchangeId, PushPullKind, TlsAction, TlsConfig,
-  TlsEndpoint, Transmit,
+  AddrBridge, Endpoint, EndpointConfig, Event, PushPullKind, TcpAction, TcpConfig, TcpEndpoint,
+  TcpExchangeId, Transmit,
 };
 use memberlist_wire::{
   framing, message_from_any, message_to_any,
   typed::{Alive, Message, Node, Suspect},
 };
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use smol_str::SmolStr;
 
 use crate::{clock::Clock, faults::FaultConfig, virtual_tcp::TcpPipe};
 
 /// Identity [`AddrBridge`] for `A = SocketAddr`: the membership address *is*
 /// the wire `SocketAddr`, so both directions are the identity (a production
-/// driver would map its resolved/advertised address here instead).
+/// driver would map its resolved/advertised address here instead). The
+/// `server_name` accessor is unused on plain TCP (no certificate verification)
+/// but must be supplied for the trait.
 struct IdentityBridge;
 
 impl AddrBridge<SocketAddr> for IdentityBridge {
@@ -61,131 +66,18 @@ impl AddrBridge<SocketAddr> for IdentityBridge {
     socket
   }
   fn server_name(_addr: &SocketAddr) -> std::borrow::Cow<'_, str> {
-    // The sim's test certs are generated with `"localhost"` as the SAN
-    // (see [`sim_tls_config`]); the identity bridge returns that for every
-    // peer so the rustls verifier sees a name matching the cert.
     std::borrow::Cow::Borrowed("localhost")
   }
 }
 
 /// The concrete coordinator the harness drives.
-type Node1 = TlsEndpoint<SmolStr, SocketAddr, IdentityBridge>;
+type Node1 = TcpEndpoint<SmolStr, SocketAddr, IdentityBridge>;
 
-/// The rustls crypto provider the harness uses, selected by the active backend
-/// feature. The entire conformance suite runs under whichever is chosen
-/// (`tls` → ring, `tls-rustls-aws-lc-rs` → aws-lc-rs).
-#[cfg(not(feature = "tls-rustls-aws-lc-rs"))]
-pub fn sim_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
-  Arc::new(rustls::crypto::ring::default_provider())
-}
-
-/// See [`sim_crypto_provider`]. aws-lc-rs variant.
-#[cfg(feature = "tls-rustls-aws-lc-rs")]
-pub fn sim_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
-  Arc::new(rustls::crypto::aws_lc_rs::default_provider())
-}
-
-/// Accept-any server-cert verifier — sim/test only. The deployment-grade
-/// cluster-CA verification policy is the operator's; behavioural determinism
-/// in the sim is the virtual clock + the deterministic virtual TCP, not crypto.
-#[derive(Debug)]
-struct AnyServer(Arc<rustls::crypto::CryptoProvider>);
-
-impl rustls::client::danger::ServerCertVerifier for AnyServer {
-  fn verify_server_cert(
-    &self,
-    _e: &CertificateDer<'_>,
-    _i: &[CertificateDer<'_>],
-    _n: &rustls_pki_types::ServerName<'_>,
-    _o: &[u8],
-    _t: rustls_pki_types::UnixTime,
-  ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-    Ok(rustls::client::danger::ServerCertVerified::assertion())
-  }
-  fn verify_tls12_signature(
-    &self,
-    _m: &[u8],
-    _c: &CertificateDer<'_>,
-    _d: &rustls::DigitallySignedStruct,
-  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-  }
-  fn verify_tls13_signature(
-    &self,
-    _m: &[u8],
-    _c: &CertificateDer<'_>,
-    _d: &rustls::DigitallySignedStruct,
-  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-  }
-  fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-    self.0.signature_verification_algorithms.supported_schemes()
-  }
-}
-
-/// A fresh self-signed leaf + PKCS#8 key with `"localhost"` as the SAN (the
-/// same construction the memberlist-machine tls crypto tests use).
-fn self_signed() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
-  let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-  let chain = vec![CertificateDer::from(ck.cert.der().to_vec())];
-  let key = PrivateKeyDer::Pkcs8(ck.signing_key.serialize_der().into());
-  (chain, key)
-}
-
-/// A self-signed [`TlsConfig`] bundle: server with `with_no_client_auth`,
-/// client with the accept-any verifier (sim/test only). Trusted-network model.
-fn sim_tls_config() -> TlsConfig {
-  let (chain, key) = self_signed();
-  let provider = sim_crypto_provider();
-  let server = rustls::ServerConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(chain, key)
-    .unwrap();
-  let client = rustls::ClientConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .unwrap()
-    .dangerous()
-    .with_custom_certificate_verifier(Arc::new(AnyServer(provider)))
-    .with_no_client_auth();
-  TlsConfig::new(server, client)
-}
-
-/// `b`'s mTLS-required [`TlsConfig`]: its server installs a `ClientCertVerifier`
-/// rooted at a throwaway cluster CA that `a` is NOT signed by, so `a`'s
-/// `with_no_client_auth` dial fails the MUTUAL handshake before any `Stream`
-/// exists. Returns the responder's bundle (a's bundle is the plain
-/// [`sim_tls_config`]).
-fn sim_tls_config_mtls_required() -> TlsConfig {
-  // A throwaway cluster CA whose roots `a`'s self-signed leaf does not chain
-  // to. `b` requires a client cert verified against it; `a` presents none.
-  let ca = rcgen::generate_simple_self_signed(vec!["cluster-ca".into()]).unwrap();
-  let mut roots = rustls::RootCertStore::empty();
-  roots
-    .add(CertificateDer::from(ca.cert.der().to_vec()))
-    .unwrap();
-  let provider = sim_crypto_provider();
-  let verifier =
-    rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
-      .build()
-      .unwrap();
-
-  let (chain, key) = self_signed();
-  let server = rustls::ServerConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .unwrap()
-    .with_client_cert_verifier(verifier)
-    .with_single_cert(chain, key)
-    .unwrap();
-  let client = rustls::ClientConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .unwrap()
-    .dangerous()
-    .with_custom_certificate_verifier(Arc::new(AnyServer(provider)))
-    .with_no_client_auth();
-  TlsConfig::new(server, client)
-}
+/// The default cluster label every node is built with unless the harness has
+/// overridden it (the label-mismatch scenario installs a different label on the
+/// responder). Both the dialer and the legitimate responder write this same
+/// prefix at stream start, so a healthy join passes the inbound check.
+const DEFAULT_LABEL: &[u8] = b"sim-cluster";
 
 /// One in-flight UDP gossip datagram. Carries an encoded plain frame (or a
 /// concatenation of frames for a compound). Fault/latency is applied ONCE per
@@ -197,21 +89,22 @@ struct PendingDatagram {
   bytes: bytes::Bytes,
 }
 
-/// `tls`-gated deterministic conformance harness. Accessor-only; no `pub`
-/// fields. Mirrors [`Cluster`](crate::cluster::Cluster)'s step contract.
-pub struct TlsCluster {
+/// `tcp`-gated deterministic conformance harness. Accessor-only; no `pub`
+/// fields. Mirrors [`Cluster`](crate::cluster::Cluster)'s step contract and the
+/// sibling [`TlsCluster`](crate::tls_net::TlsCluster) method-for-method.
+pub struct TcpCluster {
   nodes: HashMap<SocketAddr, Node1>,
   clock: Clock,
   faults: FaultConfig,
   /// UDP gossip queue.
   queue: VecDeque<PendingDatagram>,
   /// Per-side virtual-TCP pipes, keyed by the READER's `(addr, exchange)`.
-  pipes: HashMap<(SocketAddr, ExchangeId), TcpPipe>,
+  pipes: HashMap<(SocketAddr, TcpExchangeId), TcpPipe>,
   /// Dialer ↔ acceptor exchange-handle mapping, established when the dialer's
   /// `Connect` action is delivered (the harness calls `acceptor.accept_connection`
-  /// and records the returned acceptor `ExchangeId`). Both orientations are
+  /// and records the returned acceptor `TcpExchangeId`). Both orientations are
   /// stored so a write on either side resolves the peer's pipe key.
-  peer_of: HashMap<(SocketAddr, ExchangeId), (SocketAddr, ExchangeId)>,
+  peer_of: HashMap<(SocketAddr, TcpExchangeId), (SocketAddr, TcpExchangeId)>,
   /// Per-host record of every peer EVER observed in `Suspect` (scanned every
   /// tick — a transient Suspect later refuted would otherwise be invisible to
   /// an end-state assertion).
@@ -227,7 +120,7 @@ pub struct TlsCluster {
   /// Per-host record of whether `Event::LeftCluster` has fired.
   left: HashSet<SocketAddr>,
   /// Hosts whose direct + indirect probe UDP datagrams are dropped (forces the
-  /// reliable-ping fallback over TLS), as an unordered pair set.
+  /// reliable-ping fallback over TCP), as an unordered pair set.
   probe_block: Vec<(SocketAddr, SocketAddr)>,
   /// Pairs whose TCP connect is refused (the dialer's pipe is `reset` the
   /// instant its `Connect` action is delivered). Unordered.
@@ -236,10 +129,11 @@ pub struct TlsCluster {
   /// delivered record (truncation mid-frame). `false` once armed onto a pipe.
   half_close_host: Option<SocketAddr>,
   /// When `Some`, every inbound TCP pipe created for this host withholds its
-  /// read==0 FIN anchor: the peer's `close_notify` rides in-band as application
-  /// ciphertext but the TCP FIN is deferred indefinitely, so this host must
-  /// drain a coalesced first request on the SAME tick it is delivered (the
-  /// small-coalesced post-promotion drain regression).
+  /// read==0 FIN anchor: the dialer's request is delivered in one coalesced
+  /// read with no later FIN, so the responder must drain it on the same tick
+  /// it is delivered (the small-coalesced post-promotion drain regression —
+  /// structurally analogous to the TLS sibling's `close_notify`-then-no-FIN
+  /// case, even though plain TCP carries no in-band close signal).
   withhold_fin_host: Option<SocketAddr>,
   /// Optional `(probe_interval, probe_timeout)` override applied to every node
   /// built via [`add_node`](Self::add_node). `None` uses the standard LAN knobs
@@ -248,12 +142,23 @@ pub struct TlsCluster {
   /// Per-connection virtual-TCP receive window in bytes applied to every pipe
   /// (the `large_state` backpressure knob). `None` = unbounded.
   tcp_window: Option<usize>,
-  /// `b`'s config override: when `Some`, the node at this address is built with
-  /// the mTLS-required responder bundle instead of the trusted-network bundle.
-  mtls_responder: Option<SocketAddr>,
+  /// Per-host label override: when an entry maps `addr` to a label, the node
+  /// at that address is built with that label instead of [`DEFAULT_LABEL`].
+  /// Used by the label-mismatch scenario to install a different label on the
+  /// responder so the inbound check rejects the dialer's stream.
+  label_overrides: HashMap<SocketAddr, Vec<u8>>,
+  /// Hosts built unlabeled (`TcpConfig::new(None)`): no outbound label
+  /// prefix is queued; only required for the dialer-side
+  /// response-label-rejection scenario.
+  unlabeled_hosts: HashSet<SocketAddr>,
+  /// Hosts built with `skip_inbound_label_check=true`: the inbound check
+  /// suppresses the missing-but-expected mismatch (an unlabeled inbound is
+  /// accepted as plaintext). Faithful to memberlist-core's option of the
+  /// same name.
+  skip_inbound_label_check_hosts: HashSet<SocketAddr>,
 }
 
-impl TlsCluster {
+impl TcpCluster {
   /// Empty cluster.
   fn empty() -> Self {
     Self {
@@ -273,12 +178,15 @@ impl TlsCluster {
       withhold_fin_host: None,
       probe_window: None,
       tcp_window: None,
-      mtls_responder: None,
+      label_overrides: HashMap::new(),
+      unlabeled_hosts: HashSet::new(),
+      skip_inbound_label_check_hosts: HashSet::new(),
     }
   }
 
   /// Build one coordinator with the SAME membership knobs the plain
-  /// [`Cluster::add_node_with`](crate::cluster::Cluster) uses, so SWIM timing
+  /// [`Cluster::add_node_with`](crate::cluster::Cluster) and the sibling
+  /// [`TlsCluster::add_node`](crate::tls_net::TlsCluster) use, so SWIM timing
   /// is directly comparable (the conformance-parity invariant).
   fn add_node(&mut self, id: &str, addr: SocketAddr) {
     let (probe_interval, probe_timeout) = self
@@ -294,19 +202,29 @@ impl TlsCluster {
       .with_rng_seed(Some(addr.port() as u64));
     let mut ep = Endpoint::new(cfg);
     ep.start_scheduling(self.clock.now());
-    let tls = if self.mtls_responder == Some(addr) {
-      sim_tls_config_mtls_required()
+    let configured_label = if self.unlabeled_hosts.contains(&addr) {
+      None
     } else {
-      sim_tls_config()
+      Some(
+        self
+          .label_overrides
+          .get(&addr)
+          .cloned()
+          .unwrap_or_else(|| DEFAULT_LABEL.to_vec()),
+      )
     };
-    self.nodes.insert(addr, TlsEndpoint::new(ep, tls));
+    let mut tcp_cfg = TcpConfig::new(configured_label);
+    if self.skip_inbound_label_check_hosts.contains(&addr) {
+      tcp_cfg = tcp_cfg.with_skip_inbound_label_check(true);
+    }
+    self.nodes.insert(addr, TcpEndpoint::new(ep, tcp_cfg));
   }
 
-  /// Two nodes; `a` joins `b` via a TLS push/pull. `a` starts knowing NOTHING
-  /// about `b` (no bootstrap alive — `start_push_pull` dials the address
-  /// directly), so `a` learns `b` ONLY by merging the join reply and `b` learns
-  /// `a` ONLY by merging `a`'s push: both sides converge Alive purely through
-  /// the reliable TLS exchange.
+  /// Two nodes; `a` joins `b` via a plain-TCP push/pull. `a` starts knowing
+  /// NOTHING about `b` (no bootstrap alive — `start_push_pull` dials the
+  /// address directly), so `a` learns `b` ONLY by merging the join reply and
+  /// `b` learns `a` ONLY by merging `a`'s push: both sides converge Alive
+  /// purely through the reliable TCP exchange.
   pub fn two_node_join(a: SocketAddr, b: SocketAddr) -> Self {
     let mut c = Self::empty();
     c.add_node("a", a);
@@ -338,7 +256,7 @@ impl TlsCluster {
   /// `probe_timeout` (500 ms) and a LONG `probe_interval` (10 s). The probe's
   /// single cumulative deadline is `sent + probe_interval`, while the
   /// reliable-ping fallback is opened only AFTER the direct `probe_timeout`
-  /// elapses — so the fallback has ample time to complete a real TLS
+  /// elapses — so the fallback has ample time to complete a real TCP
   /// reliable-ping round-trip. The SUBJECT of the reliable-fallback scenario is
   /// the fixed per-tick step order (a fallback-ping ack drained into the
   /// `Endpoint` in step (2) BEFORE the probe `handle_timeout` in step (3)), NOT
@@ -355,15 +273,15 @@ impl TlsCluster {
     c
   }
 
-  /// `a` joins `b` over TLS, but every virtual-TCP pipe is built with a TINY
-  /// receive window AND `a`'s push snapshot is pre-loaded with `extra_peers`
-  /// extra Alive members. The join push/pull ciphertext is therefore far larger
-  /// than one window's worth, so the writer cannot drain in one tick: the
-  /// harness defers the over-window chunks to later ticks (zero byte loss, TCP
-  /// never drops in-connection) and the join must still complete with every
-  /// pushed peer crossing intact. The small window is set BEFORE the nodes are
-  /// built and the extras are injected BEFORE `start_push_pull`, so the very
-  /// first push/pull is already large and back-pressured.
+  /// `a` joins `b` over plain TCP, but every virtual-TCP pipe is built with a
+  /// TINY receive window AND `a`'s push snapshot is pre-loaded with
+  /// `extra_peers` extra Alive members. The join push/pull bytes are therefore
+  /// far larger than one window's worth, so the writer cannot drain in one
+  /// tick: the harness defers the over-window chunks to later ticks (zero byte
+  /// loss, TCP never drops in-connection) and the join must still complete
+  /// with every pushed peer crossing intact. The small window is set BEFORE
+  /// the nodes are built and the extras are injected BEFORE `start_push_pull`,
+  /// so the very first push/pull is already large and back-pressured.
   pub fn two_node_join_small_window(a: SocketAddr, b: SocketAddr, extra_peers: usize) -> Self {
     let mut c = Self::empty();
     c.tcp_window = Some(1200);
@@ -386,18 +304,12 @@ impl TlsCluster {
     c
   }
 
-  /// `a` joins `b` over TLS with an UNCAPPED receive window (the default —
-  /// every ciphertext buffer is delivered as ONE coalesced TCP read, NOT
-  /// fragmented), but `b` (the RESPONDER) is pre-loaded with `extra_peers` extra
-  /// Alive members. `b`'s push/pull RESPONSE therefore carries `b`'s whole
-  /// member list and, once it exceeds rustls's 16 KiB received-plaintext limit,
-  /// arrives at `a` as a single coalesced read larger than that limit. This is
-  /// the path the small-window `large_state` test MASKS (its fragmentation
-  /// drains the received buffer between sub-window chunks): the coordinator must
-  /// interleave bounded record intake with plaintext draining so the response
-  /// decodes intact and the join converges. `a` starts knowing nothing about
-  /// `b`, so `a`'s push is small; the large coalesced read is `a` decrypting
-  /// `b`'s response.
+  /// `a` joins `b` over plain TCP with an UNCAPPED receive window, but `b`
+  /// (the RESPONDER) is pre-loaded with `extra_peers` extra Alive members.
+  /// `b`'s push/pull RESPONSE therefore carries `b`'s whole member list and
+  /// arrives at `a` as a single coalesced TCP read, exercising the
+  /// large-buffer reassembly path of the plain-TCP record layer without the
+  /// small-window fragmentation that the `large_state` scenario uses.
   pub fn two_node_join_large_response_coalesced(
     a: SocketAddr,
     b: SocketAddr,
@@ -429,21 +341,16 @@ impl TlsCluster {
     c
   }
 
-  /// `a` joins `b` over TLS with an UNCAPPED receive window, and `a` (the
-  /// DIALER) is pre-loaded with `extra_peers` extra Alive members so its join
-  /// push REQUEST exceeds rustls's 16 KiB received-plaintext limit. Because `a`
-  /// mints + pumps its outbound `Stream` the SAME tick its TLS handshake
-  /// completes, `a`'s final handshake flight (TLS 1.3 client `Finished`) and the
-  /// whole >16 KiB request are drained into ONE coalesced ciphertext buffer and
-  /// delivered to `b` as ONE transport read while `b` is STILL `Handshaking` (it
-  /// has not yet consumed `a`'s `Finished`). `b`'s record layer completes the
-  /// handshake AND buffers the trailing app records in the SAME
-  /// `process_new_packets`, and the >16 KiB request trips `read_tls`
-  /// backpressure before a `Stream` exists — the pre-promotion coalescing path.
-  /// `b` must retain the unconsumed ciphertext tail and replay it after minting
-  /// its inbound `Stream` so the full request reassembles and the join
-  /// converges. This is the path the large-RESPONSE-coalesced test does NOT
-  /// cover (that one reads the large buffer Established, post-promotion).
+  /// `a` joins `b` over plain TCP with an UNCAPPED receive window, and `a`
+  /// (the DIALER) is pre-loaded with `extra_peers` extra Alive members so its
+  /// join push REQUEST exceeds typical read-buffer thresholds. `a` writes the
+  /// label prefix and the whole request as ONE coalesced byte buffer
+  /// delivered to `b` in one transport read; the bridge must strip the label,
+  /// buffer the trailing plaintext while still `Handshaking`, and replay it
+  /// the same tick it mints + promotes its inbound `Stream`. This is the
+  /// plain-TCP analogue of the TLS `large_request_coalesced_with_handshake_flight`
+  /// case — TCP has no separate handshake, but the label prefix plays the same
+  /// "pre-promotion buffered prefix" role.
   pub fn two_node_join_large_request_coalesced(
     a: SocketAddr,
     b: SocketAddr,
@@ -472,26 +379,16 @@ impl TlsCluster {
     c
   }
 
-  /// `a` joins `b` over TLS with an UNCAPPED receive window and a SMALL join
-  /// request (no preloaded extras), but `b`'s inbound TCP pipe WITHHOLDS its
-  /// read==0 FIN anchor. Because `a` mints + pumps its outbound `Stream` the
-  /// SAME tick its TLS handshake completes, `a`'s final TLS flight (client
-  /// `Finished`), its small join request, AND its `close_notify` (a push/pull
-  /// half-closes its send side after the request so the peer can reply) drain
-  /// into ONE coalesced ciphertext buffer delivered to `b` in ONE transport read
-  /// WHILE `b` IS STILL `Handshaking`. The whole small read is consumed by
-  /// rustls in ONE pass — NO backpressure, so NO ciphertext tail is retained —
-  /// yet the decrypted request sits in `b`'s record-layer received-plaintext
-  /// buffer and `peer_has_closed()` is latched.
-  ///
-  /// With the FIN anchor withheld, `b` gets NO later transport read to lean on:
-  /// it MUST drain the buffered request on the SAME tick it mints + promotes its
-  /// inbound `Stream` (the post-promotion drain) to merge `a`'s push and produce
-  /// its reply. The post-promotion drain must run even on an empty tail:
-  /// otherwise `b` never sees the request, never merges `a`, and never replies —
-  /// so `a` never learns `b` either (the join is the only path) and the exchange
-  /// stalls. This is the SMALL sibling of the large-request-coalesced case
-  /// (which is forced through backpressure and therefore retains a tail).
+  /// `a` joins `b` over plain TCP with an UNCAPPED receive window and a SMALL
+  /// join request (no preloaded extras), but `b`'s inbound TCP pipe WITHHOLDS
+  /// its read==0 FIN anchor. `a` writes the label prefix and the small request
+  /// as ONE coalesced byte buffer delivered to `b` in one transport read; with
+  /// the FIN withheld `b` has no later read to lean on and must drain the
+  /// buffered request on the SAME tick it mints + promotes its inbound
+  /// `Stream` (the post-promotion drain). The small (no-retained-tail) sibling
+  /// of the large-request-coalesced case, structurally analogous to the TLS
+  /// `small_request_coalesced_with_handshake_flight_no_fin` scenario — TCP's
+  /// FIN is the out-of-band analogue of TLS's in-band `close_notify` alert.
   pub fn two_node_join_small_coalesced_no_fin(a: SocketAddr, b: SocketAddr) -> Self {
     let mut c = Self::empty();
     // tcp_window stays None: the small request crosses as one coalesced read.
@@ -505,13 +402,69 @@ impl TlsCluster {
     c
   }
 
-  /// `a` joins `b`, but `b` (the RESPONDER) requires a cluster-CA-signed client
-  /// cert and `a` presents none → the MUTUAL TLS handshake fails server-side
-  /// before any `Stream` exists. No merge, no `UserDataReceived`, no ack on
-  /// either side; both failed-handshake bridges are torn down.
-  pub fn two_node_join_mtls_required_responder(a: SocketAddr, b: SocketAddr) -> Self {
+  /// `a` joins `b`, but `b` (the RESPONDER) is configured with a label that
+  /// differs from `a`'s. The inbound label-check on `b` rejects `a`'s stream
+  /// before any memberlist message is decoded; no merge runs on either side
+  /// and the bridge is torn down. The structural analogue of the TLS
+  /// `mtls_required_responder` case — both reject an inbound stream before any
+  /// payload is decoded, the only difference being the cluster-isolation gate
+  /// (TLS mutual-auth vs wire label).
+  pub fn two_node_join_label_mismatch_responder(a: SocketAddr, b: SocketAddr) -> Self {
     let mut c = Self::empty();
-    c.mtls_responder = Some(b);
+    c.label_overrides.insert(b, b"other-cluster".to_vec());
+    c.add_node("a", a);
+    c.add_node("b", b);
+    let now = c.clock.now();
+    if let Some(n) = c.nodes.get_mut(&a) {
+      n.start_push_pull(b, PushPullKind::Join, now);
+    }
+    c
+  }
+
+  /// `a` joins `b`. `a` is built UNLABELED so its outbound request carries
+  /// no `[12][len][label]` prefix; `b` is labeled `cluster-b` with
+  /// `skip_inbound_label_check = true` so it suppresses the
+  /// missing-but-expected mismatch and accepts `a`'s unlabeled request as
+  /// plaintext (faithful to memberlist-core's option). `b` then responds
+  /// with `[12][len][cluster-b][response]` — its own outbound label, queued
+  /// at construction symmetric with the dialer. `a` is unlabeled with the
+  /// default `skip = false`, so per the inbound truth table a labeled `[12]`
+  /// header on an unlabeled receiver is rejected as a double label
+  /// (`memberlist::codec`'s rule): `a` never merges `b`'s response. With
+  /// bidirectional wire labels (each side queues an outbound prefix and
+  /// validates the inbound), neither side ever applies a cross-cluster
+  /// merge. The dialer-side analogue of
+  /// [`two_node_join_label_mismatch_responder`](Self::two_node_join_label_mismatch_responder).
+  pub fn two_node_join_label_mismatch_responder_reply(a: SocketAddr, b: SocketAddr) -> Self {
+    let mut c = Self::empty();
+    c.unlabeled_hosts.insert(a);
+    c.label_overrides.insert(b, b"cluster-b".to_vec());
+    c.skip_inbound_label_check_hosts.insert(b);
+    c.add_node("a", a);
+    c.add_node("b", b);
+    let now = c.clock.now();
+    if let Some(n) = c.nodes.get_mut(&a) {
+      n.start_push_pull(b, PushPullKind::Join, now);
+    }
+    c
+  }
+
+  /// `a` joins `b` over plain TCP with a TINY receive window, so the dialer's
+  /// coalesced `[label||request]` buffer is fragmented across multiple TCP
+  /// reads. The companion [`half_close_tcp_after_first_record`](Self::half_close_tcp_after_first_record)
+  /// hook arms b's pipe to read==0 after the FIRST fragment; the rest of the
+  /// request never reaches b → b's frame decode never reaches `Done` → no
+  /// merge runs. The structural analogue of the TLS `truncation_mid_frame`
+  /// case (TLS naturally splits the handshake from the application records,
+  /// so a small window is unnecessary there; plain TCP has no application-
+  /// level framing on the wire so the window is the only way to guarantee
+  /// fragmentation).
+  pub fn two_node_join_truncated_mid_frame(a: SocketAddr, b: SocketAddr) -> Self {
+    let mut c = Self::empty();
+    // 8 bytes guarantees the label header (`[12][len][label]`, 13+ bytes for
+    // the default label) is itself split into multiple fragments, so the
+    // truncation cuts the wire BEFORE the request body has been delivered.
+    c.tcp_window = Some(8);
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -541,14 +494,14 @@ impl TlsCluster {
   }
 
   /// Drop every direct + indirect UDP probe datagram between `a` and `b`,
-  /// forcing the reliable-ping fallback over TLS.
+  /// forcing the reliable-ping fallback over TCP.
   pub fn drop_all_udp_probes_between(&mut self, a: SocketAddr, b: SocketAddr) {
     self.probe_block.push((a, b));
   }
 
   /// Refuse the TCP connect for the (unordered) pair `a`/`b`: the dialer's pipe
   /// is `reset` the instant its `Connect` action is delivered, so its next
-  /// `handle_transport_data(id, &[], now)` surfaces the connect failure.
+  /// `handle_transport_data(id, &[], eof=true, now)` surfaces the connect failure.
   pub fn refuse_connect_between(&mut self, a: SocketAddr, b: SocketAddr) {
     self.connect_refuse.push((a, b));
   }
@@ -588,7 +541,7 @@ impl TlsCluster {
     }
   }
 
-  /// Begin a graceful leave on `host` (delegates to [`TlsEndpoint::leave`]).
+  /// Begin a graceful leave on `host` (delegates to [`TcpEndpoint::leave`]).
   pub fn leave(&mut self, host: SocketAddr) -> Result<(), memberlist_machine::Error> {
     let now = self.clock.now();
     match self.nodes.get_mut(&host) {
@@ -653,20 +606,20 @@ impl TlsCluster {
     self.nodes.get(&host).map_or(0, |n| n.live_bridge_count())
   }
 
-  // ── Step loop (mirrors QuicCluster::step) ────────────────────────────────────
+  // ── Step loop (mirrors TlsCluster::step) ────────────────────────────────────
 
   /// One simulation tick. Returns `true` if anything happened.
   ///
   /// 0. Pre-pump every coordinator with `handle_timeout(now)` so a freshly-
   ///    queued dial/accept, every bridge byte-pump, and `collect_transmits` run
-  ///    BEFORE the outbound directives/ciphertext/datagrams are drained.
+  ///    BEFORE the outbound directives/bytes/datagrams are drained.
   /// 1. Drain every node's gossip [`Transmit`] (plain-frame encoded → UDP
-  ///    queue), transport directives ([`TlsAction`]), and outbound ciphertext
-  ///    ([`TlsEndpoint::poll_transport_transmit`] → peer pipe) → enqueue/route.
+  ///    queue), transport directives ([`TcpAction`]), and outbound bytes
+  ///    ([`TcpEndpoint::poll_transport_transmit`] → peer pipe) → enqueue/route.
   /// 2. Advance to the next deadline = `min`(earliest queued UDP datagram,
-  ///    earliest queued TCP chunk, every node's [`TlsEndpoint::poll_timeout`]).
+  ///    earliest queued TCP chunk, every node's [`TcpEndpoint::poll_timeout`]).
   /// 3. Deliver matured UDP datagrams (gossip ingress + decode + handle_packet)
-  ///    and matured TCP chunks ([`TlsEndpoint::handle_transport_data`]).
+  ///    and matured TCP chunks ([`TcpEndpoint::handle_transport_data`]).
   /// 4. Tick every node, scan events, drain again so THIS tick captures the
   ///    directives/bytes its own final tick produced.
   pub fn step(&mut self) -> bool {
@@ -679,7 +632,7 @@ impl TlsCluster {
       self.nodes.get_mut(a).unwrap().handle_timeout(now);
     }
 
-    // 1. Drain every coordinator's outbound directives + ciphertext + gossip.
+    // 1. Drain every coordinator's outbound directives + bytes + gossip.
     if self.drain_and_route(&addrs, now) {
       progressed = true;
     }
@@ -724,28 +677,31 @@ impl TlsCluster {
     progressed
   }
 
-  /// Drain every coordinator's transport directives, outbound ciphertext, and
+  /// Drain every coordinator's transport directives, outbound bytes, and
   /// gossip transmits → route them (mappings/pipes, peer pipes, UDP queue).
   ///
-  /// Ordering is load-bearing: `Connect` directives are applied BEFORE
-  /// ciphertext (so a fresh dial's pipe mapping exists before its ClientHello is
-  /// routed), but `Shutdown`/`Close` directives are applied AFTER ciphertext
-  /// (the FIN segment is the LAST thing on the wire — it must be armed after the
+  /// Ordering is load-bearing: `Connect` directives are applied BEFORE bytes
+  /// (so a fresh dial's pipe mapping exists before its label prefix is
+  /// routed), but `Shutdown`/`Close` directives are applied AFTER bytes (the
+  /// FIN segment is the LAST thing on the wire — it must be armed after the
   /// tick's data fragments are queued, else the read==0 anchor could be timed
   /// before data the bridge already wrote, denying the peer a tick to generate
   /// its push/pull response). Returns `true` if anything was routed.
   fn drain_and_route(&mut self, addrs: &[SocketAddr], now: Instant) -> bool {
     let mut any = false;
-    // Drain every node's actions once, partitioning Connect (pre-ciphertext)
-    // from Shutdown/Close (post-ciphertext).
-    let mut connects: Vec<(SocketAddr, TlsAction)> = Vec::new();
-    let mut teardowns: Vec<(SocketAddr, TlsAction)> = Vec::new();
+    // Drain every node's currently-available actions, partitioning Connect
+    // (pre-bytes) from Shutdown/Close (post-bytes). Teardowns are withheld by
+    // the coordinator while their exchange still has bytes in
+    // `poll_transport_transmit`; we re-poll after the byte drain below to
+    // surface those released teardowns and apply them in the same step.
+    let mut connects: Vec<(SocketAddr, TcpAction)> = Vec::new();
+    let mut teardowns: Vec<(SocketAddr, TcpAction)> = Vec::new();
     for src in addrs {
       let node = self.nodes.get_mut(src).unwrap();
       while let Some(action) = node.poll_action() {
         match &action {
-          TlsAction::Connect(_) => connects.push((*src, action)),
-          TlsAction::Shutdown(_) | TlsAction::Close(_) => teardowns.push((*src, action)),
+          TcpAction::Connect(_) => connects.push((*src, action)),
+          TcpAction::Shutdown(_) | TcpAction::Close(_) => teardowns.push((*src, action)),
         }
       }
     }
@@ -755,17 +711,41 @@ impl TlsCluster {
         any = true;
       }
     }
-    // (b) Outbound ciphertext → peer pipe.
+    // (b) Outbound bytes → peer pipe.
     for src in addrs {
-      let mut chunks: Vec<(ExchangeId, SocketAddr, bytes::Bytes)> = Vec::new();
+      let mut chunks: Vec<(TcpExchangeId, SocketAddr, bytes::Bytes)> = Vec::new();
       let node = self.nodes.get_mut(src).unwrap();
       while let Some((id, peer, bytes)) = node.poll_transport_transmit() {
         chunks.push((id, peer, bytes));
       }
       for (id, peer, bytes) in chunks {
-        if self.route_ciphertext(*src, id, peer, bytes, now) {
+        if self.route_bytes(*src, id, peer, bytes, now) {
           any = true;
         }
+      }
+    }
+    // (b.5) Re-poll actions: the coordinator gates per-exchange teardowns
+    // behind the exchange's bytes, so a `Shutdown`/`Close` enqueued the same
+    // tick as its trailing bytes surfaces only AFTER the bytes are drained.
+    // Appending the released teardowns here keeps the "FIN after data" wire
+    // order (arm_fin runs in step (c) below, after route_bytes has already
+    // queued every chunk).
+    let mut late_connects: Vec<(SocketAddr, TcpAction)> = Vec::new();
+    for src in addrs {
+      let node = self.nodes.get_mut(src).unwrap();
+      while let Some(action) = node.poll_action() {
+        match &action {
+          TcpAction::Connect(_) => late_connects.push((*src, action)),
+          TcpAction::Shutdown(_) | TcpAction::Close(_) => teardowns.push((*src, action)),
+        }
+      }
+    }
+    // No new Connect should be emitted by a byte drain alone; if one appears
+    // (e.g. from a same-tick reliable-fallback) apply it before its bytes are
+    // produced. Drained in producer order.
+    for (src, action) in late_connects {
+      if self.apply_action(src, action, now) {
+        any = true;
       }
     }
     // (c) Shutdown/Close directives → arm the FIN AFTER this tick's data.
@@ -774,7 +754,7 @@ impl TlsCluster {
         any = true;
       }
     }
-    // (c) Gossip transmits → UDP queue.
+    // (d) Gossip transmits → UDP queue.
     for src in addrs {
       let mut pending: Vec<(SocketAddr, bytes::Bytes)> = Vec::new();
       let node = self.nodes.get_mut(src).unwrap();
@@ -824,17 +804,16 @@ impl TlsCluster {
 
   /// Apply one transport directive from `src`. Returns `true` if it changed
   /// connection state.
-  fn apply_action(&mut self, src: SocketAddr, action: TlsAction, now: Instant) -> bool {
+  fn apply_action(&mut self, src: SocketAddr, action: TcpAction, now: Instant) -> bool {
     match action {
-      TlsAction::Connect(info) => {
+      TcpAction::Connect(info) => {
         let dialer_exch = info.id();
         let peer = info.peer();
         // Refuse if the peer node is unknown or the pair is connect-refused:
-        // mark the dialer's own pipe `reset` so no ciphertext ever flows. The
-        // dialer's bridge stays `Handshaking` (the empty-slice anchor is a
-        // no-op before a `Stream` exists), so it is reaped when its dial
-        // deadline elapses — the bridge's handshake-deadline guard
-        // terminalizes it, which drives `dial_failed` through the coordinator.
+        // mark the dialer's own pipe `reset` so no bytes ever flow. The
+        // dialer's bridge stays awaiting the FIN-anchor (the empty-slice
+        // anchor surfaces the connect failure on its next delivery pass), so
+        // it is reaped when the dial deadline elapses.
         let refused = !self.nodes.contains_key(&peer)
           || self
             .connect_refuse
@@ -865,27 +844,28 @@ impl TlsCluster {
         let mut acceptor_pipe = TcpPipe::new(self.tcp_window);
         // Arm the one-shot half-close on the acceptor's INBOUND pipe (`peer`
         // reads the dialer's exchange here): after the acceptor receives its
-        // first record, the connection is half-closed (read==0 mid-frame), so the
-        // dialer's request frame never completes on the acceptor side. The
-        // acceptor therefore never merges the dialer (no `PushPullRequestReceived`
-        // is decoded), and — with no membership entry to gossip — the dialer
-        // never learns the acceptor through ANY path. (`half_close_host` names the
-        // ACCEPTOR, the side whose read is truncated.)
+        // first record, the connection is half-closed (read==0 mid-frame), so
+        // the dialer's request frame never completes on the acceptor side.
+        // The acceptor therefore never merges the dialer (no
+        // `PushPullRequestReceived` is decoded), and — with no membership
+        // entry to gossip — the dialer never learns the acceptor through ANY
+        // path. (`half_close_host` names the ACCEPTOR, the side whose read is
+        // truncated.)
         if self.half_close_host == Some(peer) {
           acceptor_pipe.half_close_after_first = true;
           self.half_close_host = None;
         }
-        // Withhold the acceptor's read==0 FIN anchor: the dialer's `close_notify`
-        // still rides in-band (application ciphertext), but no later TCP read==0
-        // ever arrives, so the acceptor must drain the coalesced first request on
-        // the same tick it is delivered (post-promotion), not on a later read.
+        // Withhold the acceptor's read==0 FIN anchor: the dialer's bytes still
+        // arrive (the coalesced first request rides one TCP read), but no
+        // later read==0 ever surfaces, so the acceptor must drain the buffered
+        // request on the same tick it is delivered (post-promotion).
         if self.withhold_fin_host == Some(peer) {
           acceptor_pipe.withhold_fin = true;
         }
         self.pipes.insert((peer, acceptor_exch), acceptor_pipe);
         true
       }
-      TlsAction::Shutdown(r) => {
+      TcpAction::Shutdown(r) => {
         // Half-close `src`'s write side (TCP FIN): the PEER reads read==0 after
         // draining its buffered inbound. The FIN is a separate segment arriving
         // after the last queued data byte (`arm_fin`), so the peer keeps a tick
@@ -900,7 +880,7 @@ impl TlsCluster {
         }
         false
       }
-      TlsAction::Close(r) => {
+      TcpAction::Close(r) => {
         // Tear the connection down: forget the mapping and arm the FIN on BOTH
         // sides so any already-queued inbound bytes still drain (TCP delivers
         // bytes sent before a clean close), then each reader observes read==0.
@@ -921,20 +901,19 @@ impl TlsCluster {
     }
   }
 
-  /// Route one outbound ciphertext buffer from `src`'s exchange into the peer's
-  /// reader pipe. With no receive window the whole buffer is one chunk delivered
-  /// after `latency`. With a window the buffer is fragmented into `window`-sized
-  /// pieces released one round-trip apart — modeling a tiny TCP receive window
-  /// that lets the reader pull ~`window` bytes per round-trip, so a large
-  /// transfer drains across many ticks (NOT dropped — TCP never drops
-  /// in-connection; rustls reassembles fragments split at arbitrary byte
-  /// boundaries, so there is zero byte loss). A buffer whose connection has no
-  /// mapping (the peer tore it down) is dropped on the floor — the bridge that
-  /// produced it is already being reaped. Returns `true` if anything was queued.
-  fn route_ciphertext(
+  /// Route one outbound buffer from `src`'s exchange into the peer's reader
+  /// pipe. With no receive window the whole buffer is one chunk delivered
+  /// after `latency`. With a window the buffer is fragmented into
+  /// `window`-sized pieces released one round-trip apart — modeling a tiny TCP
+  /// receive window that lets the reader pull ~`window` bytes per round-trip,
+  /// so a large transfer drains across many ticks (NOT dropped — TCP never
+  /// drops in-connection). A buffer whose connection has no mapping (the peer
+  /// tore it down) is dropped on the floor — the bridge that produced it is
+  /// already being reaped. Returns `true` if anything was queued.
+  fn route_bytes(
     &mut self,
     src: SocketAddr,
-    exch: ExchangeId,
+    exch: TcpExchangeId,
     _peer_socket: SocketAddr,
     bytes: bytes::Bytes,
     now: Instant,
@@ -1000,7 +979,7 @@ impl TlsCluster {
     now: Instant,
   ) -> bool {
     // A gossip datagram between a probe-blocked pair is dropped — models
-    // "direct + indirect UDP probes dropped" while leaving the TLS reliable
+    // "direct + indirect UDP probes dropped" while leaving the TCP reliable
     // path intact (so the reliable-ping fallback runs).
     if self
       .probe_block
@@ -1105,52 +1084,84 @@ impl TlsCluster {
 
   /// Deliver every matured TCP chunk and any owed read==0 / reset anchor.
   /// Returns the number of `handle_transport_data` calls made.
+  ///
+  /// The plain-TCP coordinator's `handle_transport_data` carries an explicit
+  /// `eof: bool` argument (TLS's in-band `close_notify` is absent on plain
+  /// TCP, so the FIN signal must ride the same call as the bytes). Each
+  /// delivery is a tuple `(payload, eof)`: a matured data chunk is
+  /// `(Some(bytes), false)` (FIN follows on a later pass), a matured
+  /// separate FIN/reset anchor is `(None, true)`, and — for a pipe whose
+  /// `withhold_fin` flag is set — the FIN piggybacks with the LAST queued
+  /// data chunk as `(Some(bytes), true)`, modeling a TCP read that returns
+  /// both buffered bytes and `read==0` on the same wake. That is the
+  /// structural analog of the TLS sibling's `close_notify` riding in-band
+  /// with the trailing ciphertext: the receiver must drain the bytes and
+  /// honor the EOF on the SAME tick the bridge mints + promotes its
+  /// `Stream`, with no later transport read available to lean on.
   fn deliver_tcp_ready(&mut self, now: Instant) -> usize {
-    // Collect the deliveries first (key, ciphertext-or-anchor) so the
-    // `handle_transport_data` calls — which mutate the nodes — do not alias the
-    // pipe borrow. One chunk per pipe per pass keeps FIFO/anchor ordering tight
-    // across repeated passes within the same `now`.
+    // Collect the deliveries first (key, payload, eof) so the
+    // `handle_transport_data` calls — which mutate the nodes — do not alias
+    // the pipe borrow. One chunk per pipe per pass keeps FIFO/anchor ordering
+    // tight across repeated passes within the same `now`.
     let stride = self.tcp_stride();
     let mut count = 0;
-    // Pipes that delivered a data chunk during THIS invocation: their FIN is
-    // held until a LATER invocation (a later clock instant), so the reader never
-    // sees read==0 in the same `deliver_tcp_ready` pass as its last data byte —
-    // it keeps a tick to act on that data (e.g. generate a push/pull response)
-    // before honoring the EOF.
-    let mut data_this_call: HashSet<(SocketAddr, ExchangeId)> = HashSet::new();
+    // Pipes that delivered a data chunk during THIS invocation WITHOUT
+    // piggybacking the FIN: their separate FIN anchor (if any) is held until
+    // a LATER invocation (a later clock instant), so the reader keeps a tick
+    // to act on the data (e.g. generate a push/pull response) before
+    // honoring the EOF. A piggybacked FIN bypasses this gate because the
+    // EOF rode with the data in one TCP read.
+    let mut data_this_call: HashSet<(SocketAddr, TcpExchangeId)> = HashSet::new();
     loop {
-      let mut deliveries: Vec<((SocketAddr, ExchangeId), Option<bytes::Bytes>)> = Vec::new();
+      let mut deliveries: Vec<((SocketAddr, TcpExchangeId), Option<bytes::Bytes>, bool)> =
+        Vec::new();
       for (&key, pipe) in self.pipes.iter_mut() {
         // A reset connection surfaces its anchor exactly once, immediately.
         if pipe.reset {
           if !pipe.reset_anchor_sent {
             pipe.reset_anchor_sent = true;
-            deliveries.push((key, None));
+            deliveries.push((key, None, true));
           }
           continue;
         }
-        // A matured ciphertext chunk.
+        // A matured data chunk.
         if let Some((t, _)) = pipe.inbound.front() {
           if *t <= now {
             let (_, b) = pipe.inbound.pop_front().unwrap();
-            // One-shot truncation: after the first delivered record, ARM the FIN
-            // (one stride later) so the next read is read==0 mid-frame — the FIN
-            // lands strictly after this partial record, never in the same pass.
+            // One-shot truncation: after the first delivered record, drop the
+            // remaining queued data (the reader's recv half has just been
+            // closed — the FIN that follows is the read==0 anchor and any
+            // further buffered bytes are lost; the harness models the
+            // half-close as terminating the read stream immediately) and ARM
+            // the FIN one stride later so the read==0 lands strictly after
+            // this partial record.
             if pipe.half_close_after_first {
               pipe.half_close_after_first = false;
+              pipe.inbound.clear();
               pipe.arm_fin(now, stride);
             }
-            data_this_call.insert(key);
-            deliveries.push((key, Some(b)));
+            // FIN-piggyback: when `withhold_fin` is set AND the writer's FIN
+            // is armed AND this drain emptied the inbound queue, the EOF
+            // signal rides WITH this chunk — modeling a TCP read that
+            // returns both data and read==0 on the same wake, the plain-TCP
+            // structural analog of the TLS sibling's in-band `close_notify`
+            // arriving with the trailing ciphertext.
+            let piggyback_eof =
+              pipe.withhold_fin && pipe.fin_at.is_some() && pipe.inbound.is_empty();
+            if piggyback_eof {
+              pipe.eof_anchor_sent = true;
+            } else {
+              data_this_call.insert(key);
+            }
+            deliveries.push((key, Some(b), piggyback_eof));
             continue;
           }
         }
         // The FIN segment: deliver read==0 once, only after every queued data
         // byte has drained, the FIN's own arrival instant has matured, AND no
-        // data was delivered to this pipe in this same invocation. A pipe that
-        // withholds its FIN never surfaces the read==0 anchor (the peer's TCP
-        // write-side FIN is deferred indefinitely; only its in-band
-        // `close_notify` is delivered, with the data chunk above).
+        // data was delivered to this pipe in this same invocation. A pipe
+        // that withholds its FIN never surfaces a separate read==0 anchor
+        // (its EOF rode piggybacked with the last data chunk above).
         if let Some(fin_at) = pipe.fin_at {
           if !pipe.eof_anchor_sent
             && !pipe.withhold_fin
@@ -1159,18 +1170,18 @@ impl TlsCluster {
             && !data_this_call.contains(&key)
           {
             pipe.eof_anchor_sent = true;
-            deliveries.push((key, None));
+            deliveries.push((key, None, true));
           }
         }
       }
       if deliveries.is_empty() {
         break;
       }
-      for ((addr, exch), payload) in deliveries {
+      for ((addr, exch), payload, eof) in deliveries {
         if let Some(node) = self.nodes.get_mut(&addr) {
           match payload {
-            Some(b) => node.handle_transport_data(exch, &b, now),
-            None => node.handle_transport_data(exch, &[], now),
+            Some(b) => node.handle_transport_data(exch, &b, eof, now),
+            None => node.handle_transport_data(exch, &[], eof, now),
           }
           count += 1;
         }
@@ -1283,12 +1294,5 @@ mod tests {
     let a: SocketAddr = "127.0.0.1:1234".parse().unwrap();
     assert_eq!(IdentityBridge::to_socket(&a), a);
     assert_eq!(IdentityBridge::from_socket(a), a);
-  }
-
-  #[test]
-  fn tls_configs_construct() {
-    // Both bundles build a usable rustls connection pair.
-    let _trusted = sim_tls_config();
-    let _mtls = sim_tls_config_mtls_required();
   }
 }
