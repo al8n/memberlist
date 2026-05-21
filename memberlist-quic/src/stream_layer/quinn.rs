@@ -431,6 +431,16 @@ pub struct QuinnConnection {
   remote_addr: SocketAddr,
 }
 
+impl Clone for QuinnConnection {
+  fn clone(&self) -> Self {
+    Self {
+      conn: self.conn.clone(),
+      local_addr: self.local_addr,
+      remote_addr: self.remote_addr,
+    }
+  }
+}
+
 impl QuinnConnection {
   #[inline]
   fn new(conn: Connection, local_addr: SocketAddr, remote_addr: SocketAddr) -> Self {
