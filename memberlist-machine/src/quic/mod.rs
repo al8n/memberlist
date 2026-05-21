@@ -22,6 +22,7 @@ use std::time::Instant;
 use bytes::{Bytes, BytesMut};
 use quinn_proto::{DatagramEvent, Dir, Endpoint as QuinnEndpoint};
 
+use crate::addr_bridge::AddrBridge;
 use crate::endpoint::Endpoint;
 use crate::event::{Event, PushPullKind, StreamId, Transmit};
 use bridge::Bridge;
@@ -50,48 +51,6 @@ struct PendingDial<A> {
   peer: A,
   deadline: Instant,
   attempted: bool,
-}
-
-/// Maps the memberlist address type `A` to the concrete UDP `SocketAddr` the
-/// QUIC endpoint dials/accepts on, and back; also supplies the rustls/QUIC
-/// `server_name` used to verify the peer's certificate at dial time.
-///
-/// The coordinator is generic over the implementor instead of hard-coding a
-/// helper, so the only place that needs to know how `A` relates to a wire
-/// `SocketAddr` — and what verification identity to assert against the peer's
-/// cert — is the driver that owns the socket. The sim harness implements
-/// this as the identity for `A = SocketAddr` (with `"localhost"` as the
-/// `server_name`, matching the sim's localhost-SAN test cert); a production
-/// driver maps its resolved/advertised address and returns the peer's real
-/// SAN/CN. Carried as a zero-sized type parameter so the translation is a
-/// static call with no per-coordinator state.
-pub trait AddrBridge<A> {
-  /// The peer `SocketAddr` to dial / the wire address of an inbound peer.
-  fn to_socket(addr: &A) -> SocketAddr;
-  /// The memberlist address for a peer observed at `socket`.
-  fn from_socket(socket: SocketAddr) -> A;
-  /// The rustls/QUIC `server_name` used to verify the peer's certificate at
-  /// dial time.
-  ///
-  /// Plumbed verbatim into `quinn_proto::Endpoint::connect`'s `server_name`
-  /// parameter, which invokes `config.crypto.start_session(version,
-  /// server_name, &params)`; the rustls-backed `start_session` parses it via
-  /// `ServerName::try_from(server_name)` and feeds the resulting `ServerName`
-  /// to the configured `ServerCertVerifier::verify_server_cert`.
-  ///
-  /// The value returned by the bridge MUST match the SAN/CN of the cert
-  /// chain installed on the peer's `ServerConfig` — otherwise the rustls
-  /// `WebPkiServerVerifier` (or any strict custom verifier) returns
-  /// `CertificateError::NotValidForName` and the handshake fails. A
-  /// production deployment that keys `A` on a name carrying the peer's SAN
-  /// returns `Cow::Borrowed(&name)`; the sim's identity bridge (where
-  /// `A = SocketAddr`) returns `Cow::Borrowed("localhost")` to match the
-  /// localhost-SAN test certs.
-  ///
-  /// The seam lives on the bridge — not on each `start_*` call — so the
-  /// verification identity is sourced uniformly from the same place the
-  /// driver supplies the wire address.
-  fn server_name(addr: &A) -> std::borrow::Cow<'_, str>;
 }
 
 /// Coordinator: `memberlist::Endpoint` (unreliable + membership) composed with

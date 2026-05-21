@@ -36,6 +36,19 @@ quic-rustls-aws-lc-rs = ["__quic-harness", "memberlist-machine/quic-rustls-aws-l
 # directly — pick `quic` (ring) or `quic-rustls-aws-lc-rs`.
 __quic-harness = ["dep:quinn-proto", "dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-machine/quic"]
 
+# Drives the composed `TlsEndpoint` (memberlist + real rustls over a
+# deterministic virtual TCP) through the same virtual clock / fault model as
+# the plain harness. Backend-selectable: the SAME conformance suite runs under
+# either crypto backend.
+#   `--features tls`                   → ring (default)
+#   `--features tls-rustls-aws-lc-rs`  → aws-lc-rs
+tls = ["tls-rustls-ring"]
+tls-rustls-ring = ["__tls-harness", "memberlist-machine/tls-rustls-ring", "rustls/ring"]
+tls-rustls-aws-lc-rs = ["__tls-harness", "memberlist-machine/tls-rustls-aws-lc-rs", "rustls/aws_lc_rs"]
+# Internal: shared non-crypto harness deps + the cfg gate. Do not enable
+# directly — pick `tls` (ring) or `tls-rustls-aws-lc-rs`.
+__tls-harness = ["dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-machine/tls"]
+
 [dependencies]
 bytes.workspace = true
 memberlist-machine = { path = "../memberlist-machine" }
