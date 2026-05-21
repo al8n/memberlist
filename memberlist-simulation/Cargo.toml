@@ -13,16 +13,28 @@ description = "Deterministic single-threaded simulation harness for memberlist-m
 
 [lib]
 # Internal deterministic test-harness crate: doc comments are
-# cross-reference prose (e.g. "Corresponds to legacy ... in
-# memberlist-core/src/state/tests.rs:NNNN"), not API examples, and the
-# only executable example (clock::Clock) is independently covered by the
-# `clock_advance_is_monotonic` unit test. Compiling the rustdoc doc pass
-# adds zero coverage and is the sole surface that flakes `E0463: can't
-# find crate` when the conformance-authority command
-# `cargo test -p memberlist-simulation` runs concurrently with other
-# cargo invocations over the shared target dir. Disabling it keeps that
-# authority gate deterministic without losing verification.
+# cross-reference prose, not API examples, and the only executable
+# example (clock::Clock) is independently covered by the
+# `clock_advance_is_monotonic` unit test. Compiling the rustdoc doc
+# pass adds zero coverage and is the sole surface that flakes
+# `E0463: can't find crate` when `cargo test -p memberlist-simulation`
+# runs concurrently with other cargo invocations over the shared
+# target dir. Disabling it keeps that authority gate deterministic
+# without losing verification.
 doctest = false
+
+[features]
+# Drives the composed `QuicEndpoint` (memberlist + real quinn-proto) through
+# the same virtual clock / fault model as the plain harness. Backend-
+# selectable: the SAME conformance suite runs under either crypto backend.
+#   `--features quic`                   → ring (default)
+#   `--features quic-rustls-aws-lc-rs`  → aws-lc-rs
+quic = ["quic-rustls-ring"]
+quic-rustls-ring = ["__quic-harness", "memberlist-machine/quic-rustls-ring", "quinn-proto/rustls-ring", "dep:ring"]
+quic-rustls-aws-lc-rs = ["__quic-harness", "memberlist-machine/quic-rustls-aws-lc-rs", "quinn-proto/rustls-aws-lc-rs", "dep:aws-lc-rs"]
+# Internal: shared non-crypto harness deps + the cfg gate. Do not enable
+# directly — pick `quic` (ring) or `quic-rustls-aws-lc-rs`.
+__quic-harness = ["dep:quinn-proto", "dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-machine/quic"]
 
 [dependencies]
 bytes.workspace = true
@@ -31,6 +43,16 @@ memberlist-wire = { workspace = true, features = ["default"] }
 nodecraft = { workspace = true, features = ["default"] }
 rand.workspace = true
 smol_str.workspace = true
+# quic-harness-only. The crypto-provider feature on rustls/quinn-proto is
+# pulled by whichever backend feature is selected, via quinn-proto.
+quinn-proto = { version = "0.11", default-features = false, optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
+rustls-pki-types = { version = "1", default-features = false, optional = true }
+ring = { version = "0.17", optional = true }
+aws-lc-rs = { version = "1", optional = true }
+# Self-signed certs for the quic conformance harness (mirrors the
+# memberlist-machine quic crypto tests; sim/test only).
+rcgen = { version = "0.14", optional = true }
 
 [dev-dependencies]
 proptest = "1"

@@ -23,6 +23,8 @@ pub mod clock;
 pub mod cluster;
 pub mod faults;
 pub mod network;
+#[cfg(feature = "__quic-harness")]
+pub mod quic_net;
 pub mod scenarios;
 
 pub use clock::Clock;
