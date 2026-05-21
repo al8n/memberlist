@@ -161,7 +161,10 @@ fn reliable_fallback_rescues_udp_blocked_probe_no_false_suspect() {
       break;
     }
   }
-  assert!(c.sees_alive(a, &id("b")), "precondition: A sees B Alive over QUIC");
+  assert!(
+    c.sees_alive(a, &id("b")),
+    "precondition: A sees B Alive over QUIC"
+  );
   assert_eq!(
     c.live_bridge_count(a),
     0,
@@ -1030,9 +1033,8 @@ fn inbound_push_pull_response_backpressured_past_old_deadline_still_completes() 
   let timeout = Duration::from_secs(3);
   const A_EXTRAS: usize = 6;
   const B_EXTRAS: usize = 240;
-  let mut c = QuicCluster::two_node_join_short_stream_timeout_both_heavy(
-    a, b, A_EXTRAS, B_EXTRAS, timeout,
-  );
+  let mut c =
+    QuicCluster::two_node_join_short_stream_timeout_both_heavy(a, b, A_EXTRAS, B_EXTRAS, timeout);
   // Bound the observation window by VIRTUAL TIME: long enough for the
   // post-refresh response window (`T1 + 5s`) to elapse, short enough
   // that SWIM gossip / periodic push-pulls (30s interval) cannot deliver
@@ -1343,7 +1345,10 @@ fn parity_suspect_transitions_to_dead_after_timeout() {
       break;
     }
   }
-  assert!(c.sees_alive(a, &id("b")), "precondition: A sees B Alive over QUIC");
+  assert!(
+    c.sees_alive(a, &id("b")),
+    "precondition: A sees B Alive over QUIC"
+  );
 
   // A ghost A learns about but that has no endpoint (cannot refute).
   c.inject_alive(a, id("ghost"), ghost_addr, 1);
@@ -1780,7 +1785,6 @@ fn drained_reap_then_subsequent_dial_redials_and_converges() {
   );
 }
 
-
 /// A peer that opens a remote-initiated unidirectional stream toward
 /// the composed endpoint must be refused at the QUIC protocol layer:
 /// `QuicConfig::new` forces `TransportConfig::max_concurrent_uni_streams = 0`
@@ -2148,8 +2152,8 @@ mod per_peer_server_name {
       .with_no_client_auth()
       .with_single_cert(chain, key)
       .unwrap();
-    let qsc = quinn_proto::crypto::rustls::QuicServerConfig::try_from(Arc::new(server_tls))
-      .unwrap();
+    let qsc =
+      quinn_proto::crypto::rustls::QuicServerConfig::try_from(Arc::new(server_tls)).unwrap();
     let server = quinn_proto::ServerConfig::with_crypto(Arc::new(qsc));
     let client_tls = rustls::ClientConfig::builder_with_provider(provider)
       .with_protocol_versions(&[&rustls::version::TLS13])
@@ -2157,8 +2161,8 @@ mod per_peer_server_name {
       .dangerous()
       .with_custom_certificate_verifier(verifier)
       .with_no_client_auth();
-    let qcc = quinn_proto::crypto::rustls::QuicClientConfig::try_from(Arc::new(client_tls))
-      .unwrap();
+    let qcc =
+      quinn_proto::crypto::rustls::QuicClientConfig::try_from(Arc::new(client_tls)).unwrap();
     let client = quinn_proto::ClientConfig::new(Arc::new(qcc));
     let mut transport = quinn_proto::TransportConfig::default();
     transport.max_idle_timeout(Some(
