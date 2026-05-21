@@ -251,29 +251,24 @@ impl memberlist_core::proto::ProtoReader for QuinnProtoReader {
         Ok(())
       }
       cmp::Ordering::Greater => {
-        let want = dst_len - peek_len;
         self.peek_buf.resize(dst_len, 0);
-        let readed = self
-          .stream
-          .read(&mut self.peek_buf[peek_len..peek_len + want])
-          .await?;
-
-        if let Some(n) = readed {
-          let has = peek_len + n;
-          if n < want {
+        let mut total = peek_len;
+        while total < dst_len {
+          let n = self
+            .stream
+            .read(&mut self.peek_buf[total..])
+            .await?
+            .unwrap_or(0);
+          if n == 0 {
             return Err(std::io::Error::new(
               std::io::ErrorKind::UnexpectedEof,
               "unexpected eof",
             ));
           }
-          buf[..has].copy_from_slice(&self.peek_buf);
-          Ok(())
-        } else {
-          Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "unexpected eof",
-          ))
+          total += n;
         }
+        buf.copy_from_slice(&self.peek_buf);
+        Ok(())
       }
     }
   }
