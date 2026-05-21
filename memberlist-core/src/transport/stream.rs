@@ -109,7 +109,7 @@ pub fn packet_stream<T: Transport>() -> (
   PacketProducer<T::ResolvedAddress, <T::Runtime as RuntimeLite>::Instant>,
   PacketSubscriber<T::ResolvedAddress, <T::Runtime as RuntimeLite>::Instant>,
 ) {
-  let (sender, receiver) = async_channel::unbounded();
+  let (sender, receiver) = async_channel::bounded(1000);
   (PacketProducer { sender }, PacketSubscriber { receiver })
 }
 
