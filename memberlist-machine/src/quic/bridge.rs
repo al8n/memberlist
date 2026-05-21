@@ -22,81 +22,10 @@ use std::time::Instant;
 use quinn_proto::{ConnectionHandle, StreamId as QuicSid, VarInt};
 
 use super::conn::ConnTable;
+use crate::bridge_phase::{BridgeFailure, BridgePhase};
 use crate::endpoint::Endpoint;
 use crate::event::{EndpointEvent, StreamCommand, StreamId};
 use crate::stream::Stream;
-
-/// Transport lifecycle of one composed `(memberlist Stream, quinn bidi)`
-/// exchange. Phases are monotonic — once `BothClosed` or `Failed` the
-/// bridge is terminal and `pump_bridges` reaps via `drain_then_reap` on
-/// its next iteration. Transport invariants live in the phase, not in
-/// scattered booleans: a clean reap is `BothClosed` BY CONSTRUCTION
-/// (both halves transport-retired) and a failed reap is `Failed(reason)`
-/// BY CONSTRUCTION (the failure transition retires both halves
-/// explicitly).
-///
-/// Phase transitions are anchored to quinn-proto's PUBLIC observables:
-/// quinn's per-stream `SendState`/`RecvState` enums are `pub(crate)` and
-/// not directly queryable, so the bridge derives its phase from
-/// `Connection::poll() -> Event::Stream(StreamEvent::Finished{id})`
-/// (send half ack'd FIN — quinn's `SendState::DataRecvd`) and from
-/// `Chunks::next() -> Ok(None)` (recv half FIN observed — quinn's
-/// `RecvState::DataRecvd`).
-///
-/// Each future reliable transport (TCP, TLS) will mirror this phase
-/// shape with its own observable anchors (TCP uses `shutdown(Write)` and
-/// `read() == 0`; TLS uses `close_notify` exchange). The conceptual
-/// lifecycle is transport-agnostic; the anchors are transport-specific.
-#[derive(Debug)]
-pub(crate) enum BridgePhase {
-  /// Both halves active; bridge is pumping bytes both directions.
-  Active,
-  /// Send half retired — local FIN ack'd by peer (quinn emitted
-  /// `StreamEvent::Finished` for our `sid`). Recv half still active OR
-  /// idle awaiting peer's FIN.
-  SendClosed,
-  /// Recv half retired — `Chunks::next()` returned `Ok(None)`, the peer
-  /// sent FIN and we consumed it. Send half still flushing OR not yet
-  /// `finish_called`.
-  RecvClosed,
-  /// Both halves transport-retired by their natural FIN paths. Bridge
-  /// reaps on the next `pump_bridges` iteration; `drain_then_reap`
-  /// delivers `EndpointEvent::StreamClosed` to the FSM.
-  BothClosed,
-  /// Transport or admission failure — the failure transition retires
-  /// both halves explicitly (`SendStream::reset` + `RecvStream::stop`)
-  /// AND clears `pending_out`. Bridge reaps on the next `pump_bridges`;
-  /// `drain_then_reap` delivers `EndpointEvent::StreamErrored{err}`.
-  Failed(BridgeFailure),
-}
-
-/// Reason the bridge transitioned to [`BridgePhase::Failed`]. Carries
-/// through to the `EndpointEvent::StreamErrored` notice delivered to the
-/// FSM by `drain_then_reap`, so the FSM's failure attribution is
-/// preserved end-to-end.
-#[derive(Debug, Clone)]
-pub(crate) enum BridgeFailure {
-  /// `Bridge::deadline` elapsed while the bridge was non-terminal — the
-  /// flush deadline path (post-deadline stale-write prevention).
-  Timeout,
-  /// quinn-proto returned a transport error from `SendStream::write` /
-  /// `RecvStream::read` / `Chunks::next` (peer reset, `ClosedStream`,
-  /// illegal ordered read, blocked-without-credit-recovery, etc.) OR
-  /// `quinn_proto::Event::Stream(StreamEvent::Stopped{...})` arrived.
-  Transport(String),
-  /// `Stream::handle_data` rejected the inbound bytes — memberlist
-  /// codec / decode failure on the decoded frame.
-  Decode,
-  /// `quinn_proto::Event::ConnectionLost{reason}` observed in
-  /// `service_quinn` for this bridge's connection handle. The
-  /// inline-D1-reap path in `service_quinn` calls `bridge.fail(...)`
-  /// with this variant.
-  ConnectionLost,
-  /// `Endpoint::handle_stream_event` returned `StreamCommand::Close` —
-  /// `MergeDelegate`/`AliveDelegate` admission rejection on an inbound
-  /// push/pull exchange. A rejected merge aborts the exchange.
-  AdmissionClosed,
-}
 
 /// Couples one memberlist reliable-exchange [`Stream`] to one quinn bidi
 /// stream on a pooled connection, pumping bytes both ways and enforcing the

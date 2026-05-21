@@ -26,6 +26,8 @@ pub mod network;
 #[cfg(feature = "__quic-harness")]
 pub mod quic_net;
 pub mod scenarios;
+#[cfg(feature = "__tls-harness")]
+pub mod tls_net;
 
 pub use clock::Clock;
 pub use cluster::{Cluster, DecisionPolicy};

@@ -42,6 +42,19 @@ quic-rustls-log = ["quic", "quinn-proto/rustls-log"]
 quic-qlog = ["quic", "quinn-proto/qlog"]
 quic-platform-verifier = ["quic", "quinn-proto/platform-verifier"]
 
+# Composed TLS-over-TCP + memberlist Sans-I/O coordinator. rustls is itself
+# Sans-I/O, so the TLS record layer lives inside the coordinator; the driver
+# moves only raw TCP/UDP bytes. Crypto-backend-agnostic: the caller supplies
+# the rustls `ServerConfig` / `ClientConfig`, built with whatever crypto
+# backend they choose. Enable a backend pass-through below (e.g.
+# `tls-rustls-ring`) to pull a provider into the dependency graph.
+tls = ["dep:rustls", "dep:rustls-pki-types"]
+
+# rustls crypto-backend pass-throughs.
+tls-rustls-ring = ["tls", "rustls/ring"]
+tls-rustls-aws-lc-rs = ["tls", "rustls/aws_lc_rs"]
+tls-rustls-aws-lc-rs-fips = ["tls", "rustls/fips"]
+
 [dependencies]
 bytes.workspace = true
 indexmap.workspace = true
@@ -55,6 +68,8 @@ thiserror.workspace = true
 tracing = { workspace = true, optional = true }
 quinn-proto = { version = "0.11", default-features = false, optional = true }
 slab = { version = "0.4", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
+rustls-pki-types = { version = "1", default-features = false, optional = true }
 
 [dev-dependencies]
 rand = { workspace = true, features = ["std"] }
