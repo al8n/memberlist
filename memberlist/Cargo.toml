@@ -65,7 +65,7 @@ quic-qlog = ["quic", "memberlist-machine/quic-qlog"]
 quic-platform-verifier = ["quic", "memberlist-machine/quic-platform-verifier"]
 
 net = ["agnostic/net"]
-tcp = ["net"]
+tcp = ["memberlist-machine/tcp", "agnostic/net"]
 tls = ["net", "memberlist-machine/tls", "dep:rustls", "dep:rustls-pki-types"]
 tls-rustls-ring = ["tls", "memberlist-machine/tls-rustls-ring"]
 tls-rustls-aws-lc-rs = ["tls", "memberlist-machine/tls-rustls-aws-lc-rs"]

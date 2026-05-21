@@ -103,11 +103,11 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
-#[cfg(any(feature = "quic", feature = "tls"))]
-mod bridge_phase;
-#[cfg(any(feature = "quic", feature = "tls"))]
+#[cfg(any(feature = "quic", feature = "tls", feature = "tcp"))]
 mod addr_bridge;
-#[cfg(any(feature = "quic", feature = "tls"))]
+#[cfg(any(feature = "quic", feature = "tls", feature = "tcp"))]
+mod bridge_phase;
+#[cfg(any(feature = "quic", feature = "tls", feature = "tcp"))]
 pub use addr_bridge::AddrBridge;
 
 #[cfg(feature = "quic")]
@@ -119,6 +119,14 @@ pub use quic::{QuicConfig, QuicEndpoint};
 mod tls;
 #[cfg(feature = "tls")]
 pub use tls::{ConnectInfo, ExchangeId, ExchangeRef, TlsAction, TlsConfig, TlsEndpoint};
+
+#[cfg(feature = "tcp")]
+mod tcp;
+#[cfg(feature = "tcp")]
+pub use tcp::{
+  ConnectInfo as TcpConnectInfo, ExchangeId as TcpExchangeId, ExchangeRef as TcpExchangeRef,
+  TcpAction, TcpConfig, TcpEndpoint,
+};
 
 pub mod ack;
 pub mod awareness;

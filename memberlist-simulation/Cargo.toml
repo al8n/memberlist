@@ -49,6 +49,12 @@ tls-rustls-aws-lc-rs = ["__tls-harness", "memberlist-machine/tls-rustls-aws-lc-r
 # directly — pick `tls` (ring) or `tls-rustls-aws-lc-rs`.
 __tls-harness = ["dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-machine/tls"]
 
+# Drives the composed `TcpEndpoint` (memberlist + per-exchange plain TCP)
+# through the same virtual clock / fault model as the TLS harness, without any
+# crypto layer. The reliable path is wire-label-gated plain TCP; the
+# unreliable path is the same UDP gossip queue.
+tcp = ["memberlist-machine/tcp"]
+
 [dependencies]
 bytes.workspace = true
 memberlist-machine = { path = "../memberlist-machine" }

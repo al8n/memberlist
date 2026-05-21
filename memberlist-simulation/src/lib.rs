@@ -26,8 +26,12 @@ pub mod network;
 #[cfg(feature = "__quic-harness")]
 pub mod quic_net;
 pub mod scenarios;
+#[cfg(feature = "tcp")]
+pub mod tcp_net;
 #[cfg(feature = "__tls-harness")]
 pub mod tls_net;
+#[cfg(any(feature = "__tls-harness", feature = "tcp"))]
+mod virtual_tcp;
 
 pub use clock::Clock;
 pub use cluster::{Cluster, DecisionPolicy};
