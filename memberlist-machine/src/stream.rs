@@ -214,8 +214,8 @@ where
   /// write-completion call the driver must remember (and could not make
   /// anyway, since it lives in another crate). The existing
   /// `deadline` (the overall exchange deadline set at dial/accept or by
-  /// `stream_load_response`) carries over as the read deadline, matching
-  /// memberlist-core's single per-exchange stream deadline.
+  /// `stream_load_response`) carries over as the read deadline — a single
+  /// per-exchange deadline covers the whole request/response.
   pub fn poll_transmit(&mut self, now: Instant, buf: &mut Vec<u8>) -> Option<usize> {
     // A terminal stream emits nothing — ever. Without this guard a stream
     // that `handle_timeout`/`handle_data` already moved to `Failed` (its
@@ -256,9 +256,9 @@ where
     // The output buffer is fully drained (poll_transmit always empties it):
     // advance the write phase.
     match std::mem::replace(&mut self.phase, StreamPhase::Done) {
-      // A reliable user message is one-way (mirrors memberlist-core
-      // `send_user_msg`: write then done — no reply is read). It must
-      // terminate on send, NOT wait for a response that never comes.
+      // A reliable user message is one-way (`send_user_msg`: write then
+      // done — no reply is read). It must terminate on send, NOT wait
+      // for a response that never comes.
       StreamPhase::OutboundSendingRequest {
         kind: OutboundKind::UserMessage,
       } => {
@@ -291,6 +291,22 @@ where
     self.stream_events.pop_front()
   }
 
+  /// Discard the FSM's queued endpoint events and lifecycle events
+  /// without changing the FSM phase. Reserved for transport-bridge
+  /// layers that need to suppress a dispatched frame's side effects
+  /// when the transport demonstrates the exchange was NOT authorized
+  /// (peer reset / connection lost before the cooperative close
+  /// signal — recv FIN for QUIC, `read() == 0` for TCP,
+  /// `close_notify` for TLS). Mirrors `enter_failed`'s queue-clearing
+  /// semantics on the FSM-failure path, but leaves the FSM phase
+  /// intact (the dispatch itself was decode-clean; the transport
+  /// authorization was what failed).
+  #[cfg_attr(not(feature = "quic"), allow(dead_code))]
+  pub(crate) fn discard_pending_events(&mut self) {
+    self.endpoint_events.clear();
+    self.stream_events.clear();
+  }
+
   /// The next deadline this stream wants the driver to fire `handle_timeout` at.
   /// Returns `None` if the stream is terminal.
   pub fn poll_timeout(&self) -> Option<Instant> {
@@ -305,10 +321,33 @@ where
   ///
   /// Returns `Err` if the stream should be torn down.
   pub fn handle_data(&mut self, data: &[u8], now: Instant) -> Result<(), StreamError> {
-    // Terminal states: ignore data (do NOT re-`enter_failed` / re-emit a
-    // second `Failed` event for a stream that already failed/finished).
-    if matches!(self.phase, StreamPhase::Done | StreamPhase::Failed(_)) {
+    // Terminal-Failed: ignore data unconditionally (a stream that
+    // already failed cannot re-fail or re-emit a second `Failed`
+    // event).
+    if matches!(self.phase, StreamPhase::Failed(_)) {
       return Ok(());
+    }
+    // Terminal-Done: an empty-buffer call is the EOF marker post-
+    // completion (clean transport close — peer FIN'd / TCP read==0 /
+    // TLS close_notify). NON-empty data after `Done` is adversarial:
+    // peer sent extra bytes after the exchange-completing frame, and
+    // the QUIC bridge's per-chunk feed (quinn-proto's `Chunks::next`
+    // yields chunks one at a time) can deliver
+    // `[valid frame][trailing junk]` across two `handle_data` calls.
+    // Failing here surfaces the protocol violation through
+    // `StreamError::Decode`; `enter_failed` is invoked below so the
+    // FSM ends in `Failed(Decode)` rather than silently keeping the
+    // `Done` lifecycle.
+    if matches!(self.phase, StreamPhase::Done) {
+      if data.is_empty() {
+        return Ok(());
+      }
+      let err = StreamError::Decode(format!(
+        "{} byte(s) of data after exchange completed (terminal Done phase)",
+        data.len()
+      ));
+      self.enter_failed(err.clone());
+      return Err(err);
     }
     // Every fatal inbound error — deadline elapsed, frame-cap exceeded,
     // an undecodable / oversize / length-desynced frame, or an unexpected
@@ -319,10 +358,9 @@ where
     // (and keep pulling a deadline) until some unrelated timeout. Funnel
     // every error path through `enter_failed` exactly once, then surface
     // the same error to the driver. The deadline case keeps the identical
-    // observable outcome as `handle_timeout`: memberlist-core wraps the
-    // stream read in `timeout_at(deadline, read_message(..))`, so a frame
-    // whose bytes arrive at/after the deadline is NOT delivered even if
-    // the driver processes socket-readability before the timer callback.
+    // observable outcome as `handle_timeout`: a frame whose bytes arrive
+    // at/after the deadline is NOT delivered even if the driver processes
+    // socket-readability before the timer callback.
     match self.handle_data_inner(data, now) {
       Ok(()) => Ok(()),
       Err(err) => {
@@ -344,17 +382,53 @@ where
     }
     // Driver contract: a zero-length slice is the peer-closed / EOF marker
     // (driver_net `Some(Ok(0))` — clean TCP EOF or TLS `close_notify`;
-    // driver_quic stream-finished / connection-gone). Reaching here in a
-    // non-terminal phase means the peer hung up before the awaited frame
-    // completed — a truncated or absent response. Fail the exchange now
-    // rather than appending nothing and waiting out the full deadline;
-    // this wires up `StreamError::PeerClosed`. `handle_data`'s terminal
-    // guard already short-circuits an EOF on an already-finished/failed
-    // stream, and the deadline check above keeps deadline authority over a
-    // racing close, so this only fires when a response was genuinely still
-    // expected.
+    // driver_quic stream-finished / connection-gone). The phase + kind
+    // determines whether EOF is premature:
+    //
+    //   * `OutboundAwaitingResponse`: peer hung up before sending the
+    //     response — premature → `PeerClosed`.
+    //   * `InboundAwaitingFirstMessage`: peer hung up before sending the
+    //     first message (with a partial frame possibly buffered) —
+    //     premature → `PeerClosed`. A non-empty `input_buf` confirms
+    //     truncation, but the empty-buffer case also fails (we awaited
+    //     a frame and got nothing).
+    //   * `OutboundSendingRequest`: gated on the exchange kind. A
+    //     response-bearing kind (`PushPull`, `ReliablePing`) requires
+    //     the peer to send a response/ack after our request — even if
+    //     EOF arrives before our `poll_transmit` advances the FSM to
+    //     `OutboundAwaitingResponse`, the response would never arrive,
+    //     so this is premature → `PeerClosed`. One-way `UserMessage`
+    //     never expects inbound bytes; an EOF here is benign → `Ok`.
+    //   * `InboundSendingResponse`: the peer already sent the full
+    //     request (we transitioned out of `InboundAwaitingFirstMessage`).
+    //     Their FIN is the natural close of their send half AFTER all
+    //     input has been consumed → `Ok`. BUT if `input_buf` still
+    //     holds bytes (partial-trailing-frame after the first), that
+    //     is a truncated extra frame → `PeerClosed`.
+    //
+    // Terminal phases (`Done`, `Failed`) are short-circuited at the
+    // `handle_data` entry guard (post-failure EOF is a silent no-op).
     if data.is_empty() {
-      return Err(StreamError::PeerClosed);
+      let buf_truncated = !self.input_buf.is_empty();
+      return match &self.phase {
+        StreamPhase::OutboundAwaitingResponse { .. }
+        | StreamPhase::InboundAwaitingFirstMessage => Err(StreamError::PeerClosed),
+        StreamPhase::OutboundSendingRequest { kind } => match kind {
+          OutboundKind::UserMessage => Ok(()),
+          OutboundKind::PushPull { .. } | OutboundKind::ReliablePing { .. } => {
+            Err(StreamError::PeerClosed)
+          }
+        },
+        StreamPhase::InboundSendingResponse { .. } => {
+          if buf_truncated {
+            Err(StreamError::PeerClosed)
+          } else {
+            Ok(())
+          }
+        }
+        // Terminal phases unreachable here — caught by the entry guard.
+        StreamPhase::Done | StreamPhase::Failed(_) => Ok(()),
+      };
     }
     // Hard memory bound BEFORE the append. `probe_frame` already rejects a
     // declared frame whose total exceeds `max_frame_size`, but it runs
@@ -400,10 +474,32 @@ where
     // a timed-out/failed exchange un-drainable by a later `poll_transmit`
     // (paired with that method's terminal guard); clearing `input_buf`
     // drops any half-buffered inbound frame nothing will ever consume
-    // (frees memory). Idempotent — `handle_data` early-returns on a
-    // terminal phase so this runs at most once per stream.
+    // (frees memory). Clearing `endpoint_events` is load-bearing: a
+    // late post-dispatch validation failure (e.g. trailing-bytes after
+    // a legitimate frame) MUST NOT let the FSM-event side effects of
+    // the rejected frame survive — `dispatch_message` enqueues
+    // `PushPullRequestReceived` / `PushPullReplyReceived` /
+    // `ReliablePingAcked` / `UserDataReceived` BEFORE the post-dispatch
+    // guard fires, and the driver's bridge would drain them and call
+    // back into `Endpoint::handle_stream_event` (merging state /
+    // encoding a response) for a stream that has just been declared
+    // invalid. Discarding the queue at failure-entry makes the entire
+    // exchange's side effects atomic with the success/failure decision.
+    // Idempotent — `handle_data` early-returns on a terminal phase so
+    // this runs at most once per stream.
     self.input_buf.clear();
     self.output_buf.clear();
+    self.endpoint_events.clear();
+    // Clear queued lifecycle events too. `dispatch_message` queues
+    // `StreamEvent::Closed` when a frame completes the exchange, but
+    // a subsequent post-dispatch validation (trailing-bytes guard,
+    // for example) can still reject the same delivery — without
+    // clearing the queue here, a `poll_event` drain would observe
+    // `Closed` then `Failed`, contradicting the dispatch/validation
+    // atomicity. After this function returns the only lifecycle
+    // event the driver sees for this stream is the `Failed` we push
+    // below.
+    self.stream_events.clear();
     self
       .stream_events
       .push_back(StreamEvent::Failed(err.to_string()));
@@ -515,7 +611,62 @@ where
       )));
     }
 
-    self.dispatch_message(msg, now)
+    self.dispatch_message(msg, now)?;
+
+    // After dispatch, reject any trailing bytes in `input_buf` for
+    // phases that FORBID further inbound bytes. Memberlist's reliable
+    // exchanges are single-frame-per-direction, so any bytes beyond the
+    // legitimate frame consumed above are adversarial.
+    //
+    // Per-phase rule:
+    //   * `Done` — exchange completed. Trailing bytes are post-exchange
+    //     junk; the next `handle_data(&[])` FIN call would short-circuit
+    //     at the terminal entry guard and clean-reap the bridge if we
+    //     don't fail here.
+    //   * `InboundSendingResponse` — we already consumed the peer's
+    //     full request; the peer's protocol obligation is to FIN, not
+    //     send a second frame. Without this check, the bridge would
+    //     drain the legitimate first frame's endpoint events into the
+    //     `Endpoint` (merging state, encoding a response) BEFORE the
+    //     `PhaseKind::Ignore` arm catches the second frame on the next
+    //     `handle_data` call — the protocol violation is reported too
+    //     late.
+    //   * `OutboundSendingRequest` — would not normally be reached
+    //     post-dispatch (the `OutboundAwaiting...` phase is what
+    //     consumes a peer response). Including it is defensive: if a
+    //     future dispatch arm transitions back to or stays in
+    //     `OutboundSendingRequest`, trailing input bytes are still
+    //     unexpected.
+    //   * `OutboundAwaitingResponse` / `InboundAwaitingFirstMessage` —
+    //     these phases legitimately accept partial-frame buffering
+    //     between calls; allow trailing bytes (they may complete a
+    //     future frame). The next `try_decode_frame` will attempt to
+    //     decode them.
+    //   * `Failed(_)` — unreachable here (`handle_data` entry guard
+    //     short-circuits terminal phases).
+    let forbids_further_input = match &self.phase {
+      StreamPhase::Done
+      | StreamPhase::InboundSendingResponse { .. }
+      | StreamPhase::OutboundSendingRequest { .. } => true,
+      StreamPhase::OutboundAwaitingResponse { .. }
+      | StreamPhase::InboundAwaitingFirstMessage
+      | StreamPhase::Failed(_) => false,
+    };
+    if forbids_further_input && !self.input_buf.is_empty() {
+      return Err(StreamError::Decode(format!(
+        "{} trailing byte(s) after frame in {} phase",
+        self.input_buf.len(),
+        match &self.phase {
+          StreamPhase::Done => "Done",
+          StreamPhase::InboundSendingResponse { .. } => "InboundSendingResponse",
+          StreamPhase::OutboundSendingRequest { .. } => "OutboundSendingRequest",
+          // Unreachable — `forbids_further_input` gated above.
+          _ => "non-input",
+        }
+      )));
+    }
+
+    Ok(())
   }
 
   #[allow(dead_code)]
@@ -583,8 +734,8 @@ where
         Message::Ack(ack) => {
           // Reject a mismatched sequence number — accepting any Ack would
           // let a stale/relayed/spoofed Ack falsely complete this probe and
-          // report a dead target healthy (memberlist-core's reliable ping
-          // checks the ack seq, `network/stream.rs send_ping_and_wait_for_ack`).
+          // report a dead target healthy. The reliable ping's correctness
+          // depends on matching the ack sequence to the probe sequence.
           if ack.sequence_number() != probe_seq {
             return Err(StreamError::UnexpectedMessage(format!(
               "in outbound ReliablePing(seq={}) got Ack for seq {}",
@@ -686,9 +837,24 @@ where
         }
       }
 
-      // ── Terminal / sending states: no new messages expected ─────────────
+      // ── Sending phases: NO new messages expected ─────────────
+      //
+      // `OutboundSendingRequest` — we are still writing our request;
+      // the peer should not be sending anything until they read it.
+      // `InboundSendingResponse` — we already consumed the peer's full
+      // request and are now sending the response; the peer should not
+      // be sending more bytes in their single-frame-per-direction
+      // protocol obligation.
+      //
+      // Terminal phases `Done` / `Failed` are short-circuited at the
+      // `handle_data` entry guard (line ~310) and never reach this
+      // arm. Reaching `Ignore` therefore means the peer sent a frame
+      // when none was expected — adversarial behaviour; fail rather
+      // than silently consume.
       PhaseKind::Ignore => {
-        // Ignore; driver should not be feeding data in these phases.
+        return Err(StreamError::UnexpectedMessage(format!(
+          "unexpected frame in sending phase: {msg:?}"
+        )));
       }
     }
     Ok(())

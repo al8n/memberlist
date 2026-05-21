@@ -48,7 +48,6 @@ pub enum Lifecycle {
 }
 
 /// Maximum size of node-meta payload that can be carried in an `Alive` message.
-/// Matches `memberlist-core::network::META_MAX_SIZE`.
 pub const META_MAX_SIZE: usize = 512;
 
 /// A pending outbound stream dial that has not yet connected.
@@ -156,10 +155,9 @@ where
   probe_index: usize,
   /// Probe ticks since the last `reset_nodes` sweep. Once it reaches the
   /// member count (one full round-robin pass), `reset_nodes` is invoked to
-  /// prune long-dead members — mirroring memberlist-core's `probe()`, which
-  /// calls `reset_nodes()` when `probe_index` wraps past `num_nodes`.
-  /// Production drivers only call `handle_timeout`, so this is the sole GC
-  /// trigger; without it Dead/Left entries persist forever.
+  /// prune long-dead members. Production drivers only call `handle_timeout`,
+  /// so this is the sole GC trigger; without it Dead/Left entries persist
+  /// forever.
   probes_since_reset: usize,
 
   // Bookkeeping.
@@ -174,22 +172,19 @@ where
   // Explicit leave-completion boundary. `leave()` sets `Some(n)` = the
   // number of `poll_transmit` pops after which the last dead-self notice
   // it queued has been handed to the I/O layer; `poll_transmit` counts
-  // down and emits `Event::LeftCluster` (the Sans-I/O analog of
-  // memberlist-core `leave()` blocking on `leave_broadcast_rx`) when it
-  // reaches zero. `None` once signaled / not leaving. When there are no
-  // live peers `leave()` emits `LeftCluster` immediately and never sets
-  // this (legacy `if any_alive` gate) — so a zero-live-peer leave is NOT
-  // delayed by unrelated traffic already in `pending_transmits`. The
-  // count is the queue length captured right after the dead-self fan-out:
-  // FIFO guarantees those packets occupy the tail, so later (post-leave)
-  // transmits sit behind the boundary and cannot delay completion.
+  // down and emits `Event::LeftCluster` when it reaches zero. `None` once
+  // signaled / not leaving. When there are no live peers `leave()` emits
+  // `LeftCluster` immediately and never sets this — so a zero-live-peer
+  // leave is NOT delayed by unrelated traffic already in
+  // `pending_transmits`. The count is the queue length captured right
+  // after the dead-self fan-out: FIFO guarantees those packets occupy the
+  // tail, so later (post-leave) transmits sit behind the boundary and
+  // cannot delay completion.
   leave_flush_remaining: Option<usize>,
 
-  // Synchronous admission delegates (Sans-I/O port of memberlist-core's
-  // AliveDelegate/MergeDelegate). Called INLINE while processing an inbound
-  // Alive / join push-pull — no deferral, so there is no decision-boundary
-  // gap for ordering/timing races. `None` = accept all (mirrors Go's
-  // optional `config.Alive`/`config.Merge`).
+  // Synchronous admission delegates. Called INLINE while processing an
+  // inbound Alive / join push-pull — no deferral, so there is no
+  // decision-boundary gap for ordering/timing races. `None` = accept all.
   alive_delegate: Option<Box<dyn crate::delegate::AliveDelegate<I, A>>>,
   merge_delegate: Option<Box<dyn crate::delegate::MergeDelegate<I, A>>>,
 
@@ -414,19 +409,17 @@ where
 
   /// increment + return the next incarnation.
   ///
-  /// Wraps at `u32::MAX` to exactly match memberlist-core
-  /// (`incarnation.fetch_add(1)` — `AtomicU32` wraps) and Go
-  /// (`atomic.AddUint32`). The u32 incarnation space is the wire protocol;
-  /// a u32::MAX accusation is unrefutable in upstream too (it wraps to 0,
-  /// rejected by peers as `0 < MAX`), so this matches upstream behavior
-  /// rather than diverging with a saturating clamp or a widened type.
+  /// Wraps at `u32::MAX`. The u32 incarnation space is the wire protocol;
+  /// a `u32::MAX` accusation is unrefutable on wrap (it becomes 0, rejected
+  /// by peers as `0 < MAX`). Diverging with a saturating clamp or a widened
+  /// type would break wire compatibility.
   pub(crate) fn next_incarnation(&mut self) -> u32 {
     self.incarnation = self.incarnation.wrapping_add(1);
     self.incarnation
   }
 
-  /// advance the incarnation past `accused_inc` and return it. Wraps to
-  /// match memberlist-core `skip_incarnation` / Go `skipIncarnation`.
+  /// advance the incarnation past `accused_inc` and return it. Wraps at
+  /// `u32::MAX` (same wire-format reasoning as [`next_incarnation`]).
   pub(crate) fn skip_incarnation_past(&mut self, accused_inc: u32) -> u32 {
     if self.incarnation <= accused_inc {
       self.incarnation = accused_inc.wrapping_add(1);
@@ -449,32 +442,27 @@ where
 
   /// Process an incoming Alive announcement.
   ///
-  /// Synchronous port of `memberlist-core` `alive_node` (Go
-  /// `state.go:943-1009`): the optional [`AliveDelegate`] admission filter
-  /// is invoked **inline** here, exactly where Go calls
-  /// `config.Alive.NotifyAlive` (`state.go:988`); a `false` result drops
-  /// the alive (Go logs the error and `return`s). On admit, the transition
-  /// is applied immediately via [`process_alive_decided`](Self::process_alive_decided).
+  /// The optional [`AliveDelegate`] admission filter is invoked **inline**;
+  /// a `false` result drops the alive. On admit, the transition is applied
+  /// immediately via [`process_alive_decided`](Self::process_alive_decided).
   ///
   /// There is deliberately NO deferral / pending-decision event: the
   /// filter is a pure synchronous predicate, so an inbound Alive is fully
-  /// applied-or-dropped before the next message is processed — the same
-  /// atomicity Go gets from holding the membership write lock through the
-  /// delegate call. This is what makes Alive→Suspect/Dead ordering and
-  /// timer stamping correct by construction.
+  /// applied-or-dropped before the next message is processed. This
+  /// in-order, atomic application is what makes Alive→Suspect/Dead
+  /// ordering and timer stamping correct by construction.
   pub(crate) fn process_alive(&mut self, alive: Alive<I, A>, bootstrap: bool, now: Instant) {
     let alive_id = alive.node().id().cheap_clone();
 
     // If we're no longer Running (Leaving or Left) and this Alive is about
     // us, ignore it — otherwise a self-Alive (e.g. a peer echoing our
-    // pre-leave state) would resurrect the just-left local node. Go
-    // suppresses self-handling once `has_left()` (`state.go:415`); we
-    // suppress for both Leaving and Left.
+    // pre-leave state) would resurrect the just-left local node. We
+    // suppress self-handling for both Leaving and Left.
     if self.lifecycle != Lifecycle::Running && &alive_id == self.cfg.local_id() {
       return;
     }
 
-    // Admission filter, inline (Go `state.go:988`). `None` ⇒ admit all.
+    // Admission filter, inline. `None` ⇒ admit all.
     if let Some(d) = &self.alive_delegate {
       let server_view = NodeState::new(
         alive_id.cheap_clone(),
@@ -485,7 +473,7 @@ where
       .with_protocol_version(alive.protocol_version())
       .with_delegate_version(alive.delegate_version());
       if !d.notify_alive(&server_view) {
-        // Rejected — node is not considered a peer (Go logs + return).
+        // Rejected — node is not considered a peer.
         return;
       }
     }
@@ -494,9 +482,9 @@ where
     self.process_alive_decided(alive, bootstrap, now);
   }
 
-  /// Apply an admitted Alive message — the core transition logic (the part
-  /// of Go `alive_node` after the `NotifyAlive` filter). Called directly
-  /// and synchronously by [`process_alive`](Self::process_alive).
+  /// Apply an admitted Alive message — the core transition logic that runs
+  /// after the `NotifyAlive` filter. Called directly and synchronously by
+  /// [`process_alive`](Self::process_alive).
   pub(crate) fn process_alive_decided(
     &mut self,
     alive: Alive<I, A>,
@@ -650,9 +638,8 @@ where
   /// Self-refute path: bump our incarnation past `accused_inc`, decrement
   /// our health score, and broadcast a fresh Alive about ourselves.
   ///
-  /// Always bumps the local incarnation (matches legacy `refute` at
-  /// `memberlist-core/src/state.rs:1389-1407`): first call `next_incarnation`,
-  /// then if accused_inc >= the result, additionally skip past it.
+  /// Always bumps the local incarnation: first call `next_incarnation`,
+  /// then if `accused_inc >=` the result, additionally skip past it.
   pub(crate) fn refute(&mut self, accused_inc: u32) {
     // No-op once leaving/left: refuting bumps our incarnation and
     // broadcasts a higher-incarnation Alive, which would resurrect a
@@ -681,7 +668,6 @@ where
   }
 
   /// Compute the (min, max) suspicion timeouts for the current cluster size.
-  /// Matches `memberlist-core/src/state.rs:1411-1416 (suspicion_timeout)`.
   fn suspicion_timeouts(&self) -> (Duration, Duration) {
     let n = self.num_members().max(1) as f64;
     let node_scale = n.log10().max(1.0);
@@ -693,9 +679,7 @@ where
     (min, max)
   }
 
-  /// Apply an incoming Suspect to local state.
-  ///
-  /// Port of `memberlist-core/src/state.rs:298-399`. Branches:
+  /// Apply an incoming Suspect to local state. Branches:
   /// 1. Unknown id: ignore.
   /// 2. Older incarnation: ignore.
   /// 3. Existing suspicion timer: forward to `confirm`. Re-broadcast on new info.
@@ -708,10 +692,10 @@ where
     let from = suspect.from().cheap_clone();
     let inc = suspect.incarnation();
 
-    // 1. Unknown id → ignore (Go `state.go` suspectNode: no node, return).
-    // No pending-decision buffering is needed: an inbound Alive is now
-    // applied or dropped synchronously before the next message, so a
-    // Suspect can never race ahead of an in-flight Alive decision.
+    // 1. Unknown id → ignore. No pending-decision buffering is needed: an
+    // inbound Alive is now applied or dropped synchronously before the
+    // next message, so a Suspect can never race ahead of an in-flight
+    // Alive decision.
     if !self.members.contains(&target) {
       return;
     }
@@ -783,9 +767,7 @@ where
     );
   }
 
-  /// Apply an incoming Dead to local state.
-  ///
-  /// Port of `memberlist-core/src/state.rs:217-296`. Branches:
+  /// Apply an incoming Dead to local state. Branches:
   /// 1. Unknown id: ignore.
   /// 2. Older incarnation: ignore.
   /// 3. Already Dead/Left: ignore.
@@ -798,9 +780,9 @@ where
     let from = dead.from().cheap_clone();
     let inc = dead.incarnation();
 
-    // 1. Unknown id → ignore (Go `dead_node`: no node, return). No
-    // pending-decision buffering: Alive is applied/dropped synchronously
-    // before the next message, so a Dead cannot race an in-flight Alive.
+    // 1. Unknown id → ignore. No pending-decision buffering: Alive is
+    // applied/dropped synchronously before the next message, so a Dead
+    // cannot race an in-flight Alive.
     if !self.members.contains(&target) {
       return;
     }
@@ -851,10 +833,9 @@ where
         .cheap_clone();
       self.emit_event(Event::NodeLeft(server));
       self.lifecycle = Lifecycle::Left;
-      // `LeftCluster` is the leave-*completion* signal (analog of
-      // memberlist-core `leave()` returning only after `leave_broadcast`)
-      // and must NOT fire here at the state transition while the dead-self
-      // is still only queued. `leave()` owns that boundary: it computes
+      // `LeftCluster` is the leave-*completion* signal and must NOT fire
+      // here at the state transition while the dead-self is still only
+      // queued. `leave()` owns that boundary: it computes
       // `leave_flush_remaining` after the dead-self fan-out (or emits
       // `LeftCluster` immediately when there are no live peers).
       return;
@@ -890,10 +871,10 @@ where
 
   /// Merge a list of remote `PushNodeState` entries into local state.
   ///
-  /// Port of `memberlist-core/src/state.rs:594-630 (merge_state)`. For each
-  /// remote entry: if Alive, treat as `process_alive`; if Left, treat as
-  /// `process_dead`; if Dead or Suspect, treat as `process_suspect`
-  /// (we prefer to suspect-then-confirm over jumping straight to Dead).
+  /// For each remote entry: if Alive, treat as `process_alive`; if Left,
+  /// treat as `process_dead`; if Dead or Suspect, treat as
+  /// `process_suspect` (we prefer to suspect-then-confirm over jumping
+  /// straight to Dead).
   ///
   /// Called from the inbound push/pull handler after the merge decision
   /// has been approved via `decide_merge`.
@@ -914,17 +895,13 @@ where
           self.process_alive(alive, false, now);
         }
         State::Left => {
-          // `from` MUST be the local id, NOT `id`. memberlist-core's
-          // merge_state builds `Dead::new(inc, r.id, local_id)`; its
-          // `dead_node` sets `State::Left` only when `node == from`
-          // (`is_dead_self`, the genuine self-leave sentinel), otherwise
-          // `State::Dead`. So a remote node learned as Left via anti-entropy
-          // becomes `State::Dead` upstream, which is reclaim-protected
-          // (`dead_node_reclaim_time`). Forging `node == from` here would
-          // make `process_dead` record `State::Left`, which is *immediately*
-          // address-reclaimable (state.rs:456) — letting a stale or forged
-          // push/pull hijack a node id at a new address with no reclaim
-          // wait. Match the original exactly: from = local id ⇒ Dead.
+          // `from` MUST be the local id, NOT `id`. `process_dead` records
+          // `State::Left` only when `node == from` (the genuine self-leave
+          // sentinel), otherwise `State::Dead`. `State::Left` is
+          // *immediately* address-reclaimable, so forging `node == from`
+          // here would let a stale or forged push/pull hijack a node id at
+          // a new address with no reclaim wait. Use `from = local id ⇒ Dead`
+          // (reclaim-protected by `dead_node_reclaim_time`).
           let dead = Dead::new(inc, id.cheap_clone(), self.cfg.local_id().cheap_clone());
           self.process_dead(dead, now);
         }
@@ -956,11 +933,11 @@ where
       .collect()
   }
 
-  /// Whether a push/pull merge of `states` is admitted. Mirrors Go
-  /// `net.go:1280`: the [`MergeDelegate`](crate::delegate::MergeDelegate)
-  /// is consulted **only for a join push/pull**, never for periodic
-  /// anti-entropy refresh; with no delegate, all merges are admitted.
-  /// Called inline (synchronous) — no deferral.
+  /// Whether a push/pull merge of `states` is admitted. The
+  /// [`MergeDelegate`](crate::delegate::MergeDelegate) is consulted
+  /// **only for a join push/pull**, never for periodic anti-entropy
+  /// refresh; with no delegate, all merges are admitted. Called inline
+  /// (synchronous) — no deferral.
   fn merge_admitted(&self, states: &[PushNodeState<I, A>], kind: PushPullKind) -> bool {
     if !kind.is_join() {
       return true;
@@ -1007,8 +984,6 @@ where
   /// Driver feeds an incoming Ping. Replies with an Ack via
   /// `pending_transmits`. Misrouted Pings (not addressed to the local node)
   /// are silently dropped.
-  ///
-  /// Port of `memberlist-core/src/network/packet/listener.rs:231` (handle_ping).
   pub fn handle_ping(&mut self, from: A, ping: Ping<I, A>, _now: Instant) {
     // Verify the Ping is addressed to us.
     if ping.target().id() != self.cfg.local_id() {
@@ -1029,20 +1004,16 @@ where
   /// Driver feeds an incoming Ack. Resolves the matching probe or
   /// relays the Ack to the original requester if we were forwarding an
   /// indirect ping. Untracked sequence numbers are silently dropped.
-  ///
-  /// Port of `memberlist-core/src/state/ack_manager.rs:33 (invoke_ack_handler)`
-  /// + `state.rs:1019-1029 (probe_node ack-receive)`.
   pub fn handle_ack(&mut self, from: A, ack: Ack, now: Instant) {
     let seq = ack.sequence_number();
 
-    // Peek the entry kind WITHOUT consuming the slot. memberlist-core keys
-    // ack handlers purely by the monotonic (guessable) u32 seq and accepts
-    // an Ack from ANY source — a latent forgery footgun: an off-path node
-    // that observes/guesses the seq could complete a probe (forging
-    // success / `PingCompleted`) or relay-forge a forward, and crucially
-    // EVICT the registry slot so the genuine Ack is then dropped. This
-    // port validates the responder before consuming the slot, symmetric to
-    // the Nack allowlist.
+    // Peek the entry kind WITHOUT consuming the slot. Keying ack handlers
+    // purely by the monotonic (guessable) u32 seq and accepting an Ack
+    // from ANY source is a forgery footgun: an off-path node that
+    // observes/guesses the seq could complete a probe (forging success /
+    // `PingCompleted`) or relay-forge a forward, and crucially EVICT the
+    // registry slot so the genuine Ack is then dropped. Validate the
+    // responder before consuming the slot, symmetric to the Nack allowlist.
     let kind = match self.ack_registry.get(seq) {
       Some(e) => e.kind().clone(),
       None => return, // untracked seq
@@ -1153,9 +1124,8 @@ where
     // kind-aware, sent_at-anchored, phase-INDEPENDENT value defined by
     // `Probe::failure_deadline` (Detection: sent_at+2*pt — direct +
     // indirect/fallback window, also the AwaitingIndirect phase deadline;
-    // Ping: sent_at+pt — direct-only, mirrors memberlist-core `ping`).
-    // Routing through the one source eliminates per-phase packet-vs-timer
-    // cutoff races.
+    // Ping: sent_at+pt — direct-only). Routing through the one source
+    // eliminates per-phase packet-vs-timer cutoff races.
     let cutoff = match self.probes.get(&seq) {
       None => return,
       Some(p) => p.failure_deadline(),
@@ -1179,9 +1149,8 @@ where
     match probe.kind {
       ProbeKind::Detection => {
         // Any successful probe — direct or indirect-relayed — improves our
-        // self-awareness. Matches legacy state.rs:1012 (awareness_delta = -1
-        // stored AFTER successful Ping send; persists through indirect-relayed
-        // Ack arrivals).
+        // self-awareness (`awareness_delta = -1`, persisting through
+        // indirect-relayed Ack arrivals).
         self.awareness.record_success();
       }
       ProbeKind::Ping => {
@@ -1239,11 +1208,10 @@ where
   /// Advance the probe FSM. `AwaitingDirectAck` probes whose deadline
   /// elapsed transition to `AwaitingIndirect` — fanning out IndirectPings
   /// to k peers AND, concurrently, opening the reliable-ping fallback when
-  /// enabled for the target (both race the single cumulative deadline,
-  /// mirroring memberlist-core `handle_remote_failure`). `AwaitingIndirect`
-  /// probes whose deadline elapsed terminate as failure (no extra
-  /// per-stream timeout is added). Detection → process_suspect for the
-  /// target; Ping → silent drop.
+  /// enabled for the target (both race the single cumulative deadline).
+  /// `AwaitingIndirect` probes whose deadline elapsed terminate as failure
+  /// (no extra per-stream timeout is added). Detection → process_suspect
+  /// for the target; Ping → silent drop.
   fn advance_probe_fsm(&mut self, now: Instant) {
     let pt = self.cfg.probe_timeout();
     let mut to_fan_out: Vec<u32> = Vec::new();
@@ -1256,22 +1224,20 @@ where
           // escalate into — terminate now (suspect / silent for Ping),
           // do NOT spend a full direct sub-window first. When
           // `scale_timeout(probe_interval) < probe_timeout` the
-          // authoritative deadline precedes the direct deadline;
-          // memberlist-core's unconditional `sleep(probe_timeout)` ignores
-          // that (a latent upstream wart) — this port does the correct
-          // thing instead of faithfully reproducing it.
+          // authoritative deadline precedes the direct deadline; an
+          // unconditional `sleep(probe_timeout)` here would ignore that
+          // and let the probe outlive its own deadline.
           if probe.failure_deadline() <= now {
             to_terminate_failure.push(*seq);
           } else if probe.direct_deadline(pt) <= now {
             // Direct sub-window over (but budget remains). Only
             // failure-detection probes escalate to indirect + reliable
             // fallback. An application `ping` (ProbeKind::Ping) is
-            // direct-only in memberlist-core (`Memberlist::ping` →
-            // `Error::Lost` on timeout, no indirect/TCP fallback); it
-            // must NOT leak indirect traffic or emit a late
-            // `PingCompleted` after the caller already saw the timeout.
-            // probe_terminate_failure is silent for ProbeKind::Ping
-            // (Detection-only suspect) and drops the ack entry.
+            // direct-only — it must NOT leak indirect traffic or emit a
+            // late `PingCompleted` after the caller already saw the
+            // timeout. `probe_terminate_failure` is silent for
+            // `ProbeKind::Ping` (Detection-only suspect) and drops the
+            // ack entry.
             match probe.kind {
               ProbeKind::Detection => to_fan_out.push(*seq),
               ProbeKind::Ping => to_terminate_failure.push(*seq),
@@ -1342,13 +1308,12 @@ where
 
     // The single cumulative deadline for the whole indirect+fallback
     // race is the probe's stored `failure_deadline` — snapshotted at
-    // probe start as `sent + awareness.scale_timeout(probe_interval)`
-    // (memberlist-core `deadline = sent + probe_interval`, scaled). It is
-    // absolute (anchored at `sent`, not the possibly-late `now`), so a
-    // very-late `handle_timeout` lands a `deadline <= now` AwaitingIndirect
-    // that the next tick expires immediately rather than getting a fresh
-    // window when suspicion should be MORE timely. The reliable fallback is
-    // threaded this same absolute deadline.
+    // probe start as `sent + awareness.scale_timeout(probe_interval)`.
+    // It is absolute (anchored at `sent`, not the possibly-late `now`),
+    // so a very-late `handle_timeout` lands a `deadline <= now`
+    // AwaitingIndirect that the next tick expires immediately rather
+    // than getting a fresh window when suspicion should be MORE timely.
+    // The reliable fallback is threaded this same absolute deadline.
     let (target_arc, cumulative_deadline) = self
       .probes
       .get(&seq)
@@ -1366,10 +1331,9 @@ where
       return;
     }
     // Open the reliable-ping fallback CONCURRENTLY with the indirect
-    // fan-out (mirrors memberlist-core spawning the TCP ping alongside the
-    // indirect pings — done UNCONDITIONALLY when enabled, even with zero
-    // indirect peers: `handle_remote_failure` still attempts the TCP ping
-    // with `expected_nacks = 0`). The fallback is bounded by the same
+    // fan-out (done UNCONDITIONALLY when enabled, even with zero
+    // indirect peers — the fallback is still attempted with
+    // `expected_nacks = 0`). The fallback is bounded by the same
     // cumulative deadline. `start_reliable_ping` borrows &mut self, so
     // call it before re-borrowing the probe entry.
     let reliable_stream_id = if self.is_reliable_ping_enabled(&target_id) {
@@ -1502,10 +1466,10 @@ where
       let _ = self.ack_registry.remove(seq);
       // Nack the original requester at its VALIDATED address — the same
       // value the relay-Ack path uses, NOT an id→members lookup. A lossy
-      // lookup silently dropped the Nack when the requester id was absent
-      // from local membership (asymmetric membership) or misrouted it when
-      // stale, corrupting the requester's `expected_nacks - seen` Lifeguard
-      // accounting. memberlist-core likewise Nacks `ind.source().address()`.
+      // lookup would silently drop the Nack when the requester id is
+      // absent from local membership (asymmetric membership) or misroute
+      // it when stale, corrupting the requester's
+      // `expected_nacks - seen` Lifeguard accounting.
       let nack = Nack::new(forward.requester_seq);
       self
         .pending_transmits
@@ -1525,11 +1489,10 @@ where
     if now < deadline {
       return;
     }
-    // Once per full round-robin pass, prune long-dead members
-    // (memberlist-core `probe()` calls `reset_nodes()` when `probe_index`
-    // wraps past `num_nodes`). Without this, with the default
-    // `dead_node_reclaim_time == 0`, Dead/Left entries are never collected
-    // and a returning id at a new address keeps hitting the conflict path.
+    // Once per full round-robin pass, prune long-dead members. Without
+    // this, with the default `dead_node_reclaim_time == 0`, Dead/Left
+    // entries are never collected and a returning id at a new address
+    // keeps hitting the conflict path.
     self.probes_since_reset = self.probes_since_reset.saturating_add(1);
     let n = self.num_members();
     if n > 0 && self.probes_since_reset >= n {
@@ -1547,10 +1510,10 @@ where
   /// `gossip_nodes` random Alive/Suspect peers (excluding the local node), and
   /// emits one [`Transmit::Packet`] per (target, message) pair. The scheduler
   /// deadline is always advanced by `gossip_interval`, even when no broadcasts
-  /// are queued (matching the legacy `memberlist.go` behaviour).
+  /// are queued.
   ///
   /// Packet-size limit is `1400` bytes — just under a typical 1500-byte Ethernet
-  /// MTU, matching the legacy default and keeping gossip packets UDP-safe.
+  /// MTU, keeping gossip packets UDP-safe.
   fn fire_gossip_scheduler(&mut self, now: Instant) {
     let Some(deadline) = self.next_gossip else {
       return;
@@ -1564,14 +1527,13 @@ where
     let num_nodes = self.num_members() as u32;
     let dead_window = self.cfg.gossip_to_the_dead_time();
 
-    // Select targets BEFORE draining any queue (mirrors memberlist-core
-    // `gossip()`, which fetches broadcasts per selected target). Candidates
-    // are Alive/Suspect peers AND recently-Dead peers still within
+    // Select targets BEFORE draining any queue. Candidates are
+    // Alive/Suspect peers AND recently-Dead peers still within
     // `gossip_to_the_dead_time` — the latter is the SWIM "gossip to the
     // dead" path that lets a falsely-dead node hear the accusation and
-    // refute before it is garbage-collected. Excluding it (and draining the
-    // broadcast queue regardless of whether a target exists) would let
-    // false failures stick and silently age out membership broadcasts.
+    // refute before it is garbage-collected. Excluding it (and draining
+    // the broadcast queue regardless of whether a target exists) would
+    // let false failures stick and silently age out membership broadcasts.
     let local_id = self.cfg.local_id().cheap_clone();
     let candidates: Vec<A> = self
       .members
@@ -1606,8 +1568,8 @@ where
     // reserve the compound header (tag + count varint) from the 1400
     // sub-MTU ceiling and charge each message the per-part inner-length
     // varint (conservative u32 upper bounds — never an over-MTU datagram).
-    // Faithful to legacy memberlist gossip(): bytesAvail = UDPBufferSize -
-    // compoundHeader; getBroadcasts(compoundOverhead, bytesAvail).
+    // `bytesAvail = GOSSIP_MTU - compoundHeader` is passed to
+    // `take_broadcasts` together with the per-part overhead.
     let compound_budget = Self::GOSSIP_MTU
       .saturating_sub(crate::wire::COMPOUND_TAG_LEN + crate::wire::COMPOUND_MAX_COUNT_PREFIX_LEN);
     let membership_broadcasts = self.broadcast.take_broadcasts(
@@ -1620,9 +1582,9 @@ where
     //
     // (a) the compound-budget membership drain selected >= 1 message:
     //     fill the residual of the SAME compound_budget with user data
-    //     (memberlist-core broadcast.rs:161-196 shares one bytes_avail),
-    //     so the assembled compound stays within ONE MTU. membership_used
-    //     is recomputed exactly as take_broadcasts charged it (encoded
+    //     (membership and user broadcasts share one bytes_avail), so the
+    //     assembled compound stays within ONE MTU. membership_used is
+    //     recomputed exactly as take_broadcasts charged it (encoded
     //     plain-frame length + the per-part inner_len varint).
     //
     // (b) the compound drain selected nothing, but a near-MTU membership
@@ -1639,9 +1601,8 @@ where
     //     user payload is rescued as a Packet and an un-gossipable head
     //     (> any single datagram) is dropped so it cannot head-of-line-
     //     block the FIFO forever (best-effort gossip; the pure machine
-    //     does not log). Faithful to memberlist-core, whose queue skips
-    //     (never permanently strands a fitting message) and whose
-    //     transport sends a lone message as its own datagram.
+    //     does not log). A fitting message is never permanently stranded,
+    //     and a lone message ships as its own datagram.
     let all_broadcasts: Vec<Message<I, A>> = if !membership_broadcasts.is_empty() {
       let membership_used: usize = membership_broadcasts
         .iter()
@@ -1703,8 +1664,8 @@ where
     };
 
     // One datagram per target by the >= 2 rule: a single message stays a
-    // byte-identical plain frame (legacy makeCompoundMessage), >= 2 ride
-    // ONE compound datagram (the budget above guarantees it fits the MTU).
+    // byte-identical plain frame, >= 2 ride ONE compound datagram (the
+    // budget above guarantees it fits the MTU).
     for to in targets {
       match all_broadcasts.len() {
         0 => {}
@@ -1780,14 +1741,10 @@ where
   /// IndirectPing, and duplicate Nacks from the same responder are all
   /// silently dropped.
   ///
-  /// Port of `memberlist-core/src/state/ack_manager.rs:43 (invoke_nack_handler)`
-  /// + `state.rs:1209-1213 (nack accumulation)`, hardened: upstream counts
-  /// `nack_rx.len()` off a bounded channel read once after the
-  /// deadline-bounded wait, which structurally bounds it. This port is
-  /// edge-triggered, so it must enforce the same invariants explicitly —
-  /// deadline-bound, allowlisted, deduped — or a duplicate/late/forged
-  /// Nack would inflate the count and suppress the Lifeguard health
-  /// penalty in `probe_terminate_failure`.
+  /// This handler is edge-triggered, so it MUST enforce the invariants
+  /// explicitly — deadline-bound, allowlisted, deduped — or a
+  /// duplicate/late/forged Nack would inflate the count and suppress the
+  /// Lifeguard health penalty in `probe_terminate_failure`.
   pub fn handle_nack(&mut self, from: A, nack: Nack, now: Instant) {
     let seq = nack.sequence_number();
     let Some(probe) = self.probes.get_mut(&seq) else {
@@ -1867,13 +1824,12 @@ where
     let tx = self.pending_transmits.pop_front();
     // Leave-completion signal: count down the explicit boundary set by
     // `leave()`. When the last dead-self notice has been returned (handed
-    // to the I/O layer), emit `Event::LeftCluster` — the Sans-I/O analog
-    // of memberlist-core `leave()` returning only after `leave_broadcast_rx`
-    // fires. Drivers wait for `LeftCluster` (with their own timeout →
-    // `LeaveTimeout`) before reporting the leave done / tearing down the
-    // socket. Only decrement on an actual pop; the boundary counts the
-    // dead-self tail plus any stale prefix, never trailing post-leave
-    // traffic, so unrelated packets cannot trigger or delay it.
+    // to the I/O layer), emit `Event::LeftCluster`. Drivers wait for
+    // `LeftCluster` (with their own timeout → `LeaveTimeout`) before
+    // reporting the leave done / tearing down the socket. Only decrement
+    // on an actual pop; the boundary counts the dead-self tail plus any
+    // stale prefix, never trailing post-leave traffic, so unrelated
+    // packets cannot trigger or delay it.
     if tx.is_some() {
       if let Some(rem) = self.leave_flush_remaining {
         let rem = rem - 1;
@@ -2129,9 +2085,7 @@ where
   pub fn update_meta(&mut self, meta: Meta) -> Result<(), crate::error::Error> {
     // Reject once leaving/left/shutdown: a post-leave meta update would bump
     // the incarnation and broadcast a higher-incarnation Alive that peers
-    // accept over the dead-self leave, resurrecting the node. Mirrors
-    // memberlist-core `update_node` returning NotRunning when
-    // `has_left() || has_shutdown()` (api.rs).
+    // accept over the dead-self leave, resurrecting the node.
     if self.lifecycle != Lifecycle::Running {
       return Err(crate::error::Error::NotRunning);
     }
@@ -2168,8 +2122,6 @@ where
   /// initiated, `false` if no eligible target exists (cluster has only the
   /// local node, all peers are dead/leaving, etc.). The periodic scheduler
   /// calls this every `probe_interval` (scaled by Awareness).
-  ///
-  /// Port of `memberlist-core/src/state.rs:834-880 (probe / probe_node init)`.
   pub fn start_probe(&mut self, now: Instant) -> bool {
     let Some(target_id) = self.next_probe_target() else {
       return false;
@@ -2183,10 +2135,10 @@ where
     let seq = self.allocate_seq();
     let pt = self.cfg.probe_timeout();
     // Detection failure deadline = `sent + awareness.scale_timeout(
-    // probe_interval)`, snapshotted at probe start (mirrors
-    // memberlist-core `probe_node`: the Lifeguard-scaled SWIM period, NOT
-    // 2*probe_timeout). A degraded local node (high health score) waits
-    // proportionally longer before suspecting peers.
+    // probe_interval)`, snapshotted at probe start. This is the
+    // Lifeguard-scaled SWIM period, NOT `2*probe_timeout`: a degraded
+    // local node (high health score) waits proportionally longer before
+    // suspecting peers.
     let failure_deadline = now + self.awareness.scale_timeout(self.cfg.probe_interval());
     let probe = Probe::new_direct(
       target_arc.cheap_clone(),
@@ -2215,24 +2167,20 @@ where
       Node::new(local_id, local_addr),
       Node::new(target_id.cheap_clone(), target_addr.cheap_clone()),
     );
-    // Build the Ping (+ buddy Suspect when the target is Suspect, so it can
-    // refute on receipt — legacy state.rs:945-1005). Co-sent as ONE
-    // compound datagram WHEN IT FITS the MTU (the piggyback optimization).
+    // Build the Ping (+ buddy Suspect when the target is Suspect, so it
+    // can refute on receipt). Co-sent as ONE compound datagram WHEN IT
+    // FITS the MTU (the piggyback optimization).
     //
     // Node id `I` is unbounded, so although a Ping+Suspect pair is
     // ~100-300 B for any bounded id, a large id can make each message a
     // valid lone datagram (<= MTU) while their compound exceeds MTU. An
     // over-MTU compound has no split point and would be fragmented/dropped,
     // breaking the buddy-Suspect refutation for an id range that worked
-    // BEFORE the compound change (pre-compound the probe emitted Ping and
-    // Suspect as two separate <=MTU datagrams). memberlist-core is split-
-    // faithful here: it passes [ping, suspect] to transport_send_packets
-    // whose proto batcher emits SEPARATE <= max_packet_size datagrams
-    // rather than one oversize datagram. So emit a Compound only when its
-    // conservative assembled size (same u32-varint upper bounds as the
-    // gossip budget) fits GOSSIP_MTU; otherwise split into two Packets in
-    // Ping-then-Suspect order — exactly the pre-compound / legacy
-    // behavior. Never emit an unsendable over-MTU compound.
+    // when the probe emitted Ping and Suspect as two separate <=MTU
+    // datagrams. So emit a Compound only when its conservative assembled
+    // size (same u32-varint upper bounds as the gossip budget) fits
+    // `GOSSIP_MTU`; otherwise split into two Packets in Ping-then-Suspect
+    // order. Never emit an unsendable over-MTU compound.
     let mut probe_msgs: Vec<Message<I, A>> = Vec::with_capacity(2);
     probe_msgs.push(Message::Ping(ping));
 
@@ -2280,9 +2228,9 @@ where
             messages: probe_msgs,
           }));
       } else {
-        // Over-MTU compound ⇒ split into two Packets, Ping then Suspect
-        // (legacy transport_send_packets / proto-batcher faithful — both
-        // datagrams delivered, the refutation path preserved).
+        // Over-MTU compound ⇒ split into two Packets, Ping then Suspect.
+        // Both datagrams are delivered as separate <= MTU sends, so the
+        // refutation path is preserved.
         let mut it = probe_msgs.into_iter();
         let ping_msg = it.next().expect("probe_msgs[0] is the Ping");
         let suspect_msg = it.next().expect("probe_msgs[1] is the buddy Suspect");
@@ -2305,8 +2253,7 @@ where
   }
 
   /// Round-robin pick the next probe target. Returns `None` if no eligible
-  /// peer exists. Mirrors `memberlist-core/src/state.rs:836-880` round-robin
-  /// state via `probe_index`.
+  /// peer exists. Round-robin state is maintained via `probe_index`.
   fn next_probe_target(&mut self) -> Option<I> {
     let n = self.members.len();
     if n == 0 {
@@ -2354,8 +2301,6 @@ where
   /// on the requester's behalf. If the target acks within `cfg.probe_timeout`,
   /// we relay an Ack to the requester (see `handle_ack` Forward branch). If
   /// the deadline elapses without an ack, we send a Nack.
-  ///
-  /// Port of `memberlist-core/src/network/packet/listener.rs:270 (handle_indirect_ping)`.
   pub fn handle_indirect_ping(&mut self, from: A, ind: IndirectPing<I, A>, now: Instant) {
     let target_id = ind.target().id().cheap_clone();
     let target_addr = ind.target().address().cheap_clone();
@@ -2453,9 +2398,9 @@ where
 
     let seq = self.allocate_seq();
     let pt = self.cfg.probe_timeout();
-    // An application ping is direct-only (memberlist-core `Memberlist::ping`
-    // waits just `probe_timeout`, no indirect/fallback escalation, no
-    // awareness scaling) — failure deadline == the direct deadline.
+    // An application ping is direct-only — it waits just `probe_timeout`,
+    // with no indirect/fallback escalation and no awareness scaling.
+    // Failure deadline == the direct deadline.
     let probe = Probe::new_direct(target_arc, now, ProbeKind::Ping, pt, now + pt);
     let deadline = probe.direct_deadline(pt);
     self.probes.insert(seq, probe);
@@ -2487,8 +2432,6 @@ where
   ///
   /// `kind` should be `PushPullKind::Join` for initial join, `PushPullKind::Refresh`
   /// for periodic anti-entropy.
-  ///
-  /// Port of `memberlist-core/src/state.rs:144 push_pull_node` (dial + encode side).
   pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
     let id = self.allocate_stream_id();
     let deadline = now + self.cfg.stream_timeout();
@@ -2553,9 +2496,7 @@ where
   ///
   /// `deadline` is the owning probe's single cumulative deadline, NOT an
   /// independent stream timeout — the reliable fallback must race exactly
-  /// the same deadline as the indirect pings (mirrors memberlist-core
-  /// passing `deadline = sent + probe_interval` into
-  /// `send_ping_and_wait_for_ack`). This keeps a slow/skewed
+  /// the same deadline as the indirect pings. This keeps a slow/skewed
   /// `stream_timeout` from either killing the fallback before, or letting
   /// it outlive, the probe.
   pub fn start_reliable_ping(
@@ -2605,9 +2546,6 @@ where
   /// the stream transitions to Done after bytes are drained.
   ///
   /// Wire format: `[USER_DATA_MESSAGE_TAG=9][VARINT_LEN][PAYLOAD]`.
-  ///
-  /// Port of `memberlist-core/src/api.rs:528 send_many_reliable` and
-  /// `network/stream.rs:114 send_user_msg`.
   pub fn start_user_message(&mut self, peer: A, payload: bytes::Bytes, now: Instant) -> StreamId {
     let id = self.allocate_stream_id();
     let deadline = now + self.cfg.stream_timeout();
@@ -2642,14 +2580,13 @@ where
   pub fn dial_succeeded(&mut self, id: StreamId, now: Instant) -> Option<Stream<I, A>> {
     let intent = self.pending_stream_intents.remove(&id)?;
     // Write-side deadline authority (symmetric to the read-side check in
-    // `Stream::handle_data`): memberlist-core wraps the WHOLE reliable
-    // exchange in `timeout_at(deadline, ..)`, so a dial that only completes
-    // at/after the exchange deadline must NOT emit a stale request
-    // (push/pull or reliable-ping bytes) onto the wire. Drop it exactly
-    // like a dial failure. The inbound-response write side is already
-    // bounded transitively: `handle_data` fails the stream past the
-    // deadline, so no `PushPullRequestReceived` is emitted and no response
-    // is ever loaded.
+    // `Stream::handle_data`): the WHOLE reliable exchange is bounded by
+    // `deadline`, so a dial that only completes at/after the exchange
+    // deadline must NOT emit a stale request (push/pull or reliable-ping
+    // bytes) onto the wire. Drop it exactly like a dial failure. The
+    // inbound-response write side is already bounded transitively:
+    // `handle_data` fails the stream past the deadline, so no
+    // `PushPullRequestReceived` is emitted and no response is ever loaded.
     if now >= intent.deadline {
       if let OutboundKind::ReliablePing { probe_seq } = intent.kind {
         self.retire_reliable_fallback(probe_seq);
@@ -2683,9 +2620,9 @@ where
     };
     if let OutboundKind::ReliablePing { probe_seq } = intent.kind {
       // Reliable-fallback dial failed. This does NOT fail the probe: the
-      // fallback runs concurrently with the indirect pings and a fallback
-      // failure is only `did_contact = false` upstream — the indirect path
-      // keeps racing the single cumulative deadline. Just retire the
+      // fallback runs concurrently with the indirect pings, and a
+      // fallback failure is just a "did not make contact" — the indirect
+      // path keeps racing the single cumulative deadline. Just retire the
       // fallback stream so a late event can't match it.
       let _ = now;
       self.retire_reliable_fallback(probe_seq);
@@ -2744,8 +2681,8 @@ where
         kind,
       } => {
         // Outbound: we initiated; peer replied. Apply the merge inline
-        // (synchronous MergeDelegate filter, join-only — Go net.go:1280).
-        // No StreamCommand: we already sent our state before they replied.
+        // (synchronous MergeDelegate filter, join-only). No StreamCommand:
+        // we already sent our state before they replied.
         let _ = (peer, user_data);
         if self.merge_admitted(&states, kind) {
           self.merge_state(&states, now);
@@ -2759,10 +2696,9 @@ where
         kind,
       } => {
         // Inbound: peer initiated. Consult the MergeDelegate inline (join
-        // only). A rejected join merge closes the stream — the Sans-I/O
-        // analog of Go `NotifyMerge` returning err, which aborts the
-        // push/pull connection (net.go:1297-1299). Otherwise apply the
-        // merge and reply with our state.
+        // only). A rejected join merge closes the stream — a rejected
+        // `NotifyMerge` aborts the push/pull connection. Otherwise apply
+        // the merge and reply with our state.
         let _ = (peer, user_data);
         if !self.merge_admitted(&states, kind) {
           return Some(StreamCommand::Close);
@@ -2819,9 +2755,10 @@ where
   /// `PingCompleted` for Ping probes): the fallback won the race, so the
   /// probe succeeds regardless of the still-pending indirect path.
   /// `ReliablePingFailed` does NOT fail the probe — the fallback is only
-  /// one of two concurrent attempts; a failure is `did_contact = false`
-  /// upstream. We just retire the fallback stream; the indirect path keeps
-  /// racing the single cumulative deadline, which alone decides suspicion.
+  /// one of two concurrent attempts; a failure is just a "did not make
+  /// contact" signal. We retire the fallback stream; the indirect path
+  /// keeps racing the single cumulative deadline, which alone decides
+  /// suspicion.
   fn handle_reliable_ping_response(&mut self, ev: EndpointEvent<I, A>, now: Instant) {
     use EndpointEvent;
     let _ = now;
@@ -2839,9 +2776,7 @@ where
   /// Clear the concurrent reliable-ping fallback from probe `seq` (if it is
   /// in `AwaitingIndirect` with that fallback armed). The probe is left
   /// running so the indirect path can still succeed or time out — a
-  /// fallback failure must never short-circuit the probe to failure
-  /// (mirrors memberlist-core, where a failed reliable ping is just
-  /// `did_contact = false`).
+  /// fallback failure must never short-circuit the probe to failure.
   fn retire_reliable_fallback(&mut self, seq: u32) {
     if let Some(probe) = self.probes.get_mut(&seq) {
       if let ProbePhase::AwaitingIndirect(AwaitingIndirect {
@@ -2890,12 +2825,10 @@ where
   }
 
   /// Initiate a graceful leave. Marks the local node `Left` synchronously
-  /// (so `is_left()` is true on return, matching memberlist-core setting
-  /// `has_left()` before it blocks) and queues the dead-self notice to
+  /// (so `is_left()` is true on return) and queues the dead-self notice to
   /// every currently-live peer via the public `poll_transmit` path.
   /// Idempotent: a repeat once already Leaving/Left is `Ok(())`, never an
-  /// error (mirrors memberlist-core returning `Ok(false)` when
-  /// `has_left()`).
+  /// error.
   ///
   /// `process_dead` only enqueues the dead-self into the gossip broadcast
   /// queue, but that queue stops being drained once `lifecycle == Left`
@@ -2909,26 +2842,24 @@ where
   ///
   /// **Completion contract (Sans-I/O):** the machine cannot block, so
   /// `leave()` returns immediately. `Event::LeftCluster` is the
-  /// leave-*completion* signal — the Sans-I/O analog of memberlist-core
-  /// `leave(timeout)` returning only after `leave_broadcast_rx` fires. It
-  /// is emitted **after** the dead-self packets `leave()` queued have been
-  /// drained via `poll_transmit` (handed to the I/O layer) — tracked by an
-  /// explicit count, NOT by `pending_transmits` becoming empty, so neither
-  /// stale traffic queued before `leave()` nor unrelated traffic queued
-  /// after it can delay or spuriously trigger completion. When there are
-  /// no live peers it is emitted immediately (legacy `if any_alive` gate),
-  /// regardless of any unrelated packets already queued. A driver's
-  /// high-level `leave(timeout)` MUST wait for `LeftCluster` (racing its
-  /// own timeout → `LeaveTimeout`) before reporting success or tearing
-  /// down the socket; treating `leave()`'s `Ok(())` return or the
-  /// `NodeLeft`/state transition as completion would drop the leave notice
-  /// and peers would observe a failure instead of an intentional leave.
+  /// leave-*completion* signal. It is emitted **after** the dead-self
+  /// packets `leave()` queued have been drained via `poll_transmit`
+  /// (handed to the I/O layer) — tracked by an explicit count, NOT by
+  /// `pending_transmits` becoming empty, so neither stale traffic queued
+  /// before `leave()` nor unrelated traffic queued after it can delay or
+  /// spuriously trigger completion. When there are no live peers it is
+  /// emitted immediately, regardless of any unrelated packets already
+  /// queued. A driver's high-level `leave(timeout)` MUST wait for
+  /// `LeftCluster` (racing its own timeout → `LeaveTimeout`) before
+  /// reporting success or tearing down the socket; treating `leave()`'s
+  /// `Ok(())` return or the `NodeLeft`/state transition as completion
+  /// would drop the leave notice and peers would observe a failure
+  /// instead of an intentional leave.
   pub fn leave(&mut self, now: Instant) -> Result<(), crate::error::Error> {
     // Idempotent: a repeated leave once already Leaving/Left is a harmless
-    // no-op, NOT an error (mirrors memberlist-core `leave()`, which returns
-    // Ok(false) when `has_left()`/`has_shutdown()`). Turning shutdown
-    // retries / partially-failed orchestration into an error would be a
-    // behavior regression. Do not re-enqueue or re-fan-out the dead-self.
+    // no-op, NOT an error. Turning shutdown retries / partially-failed
+    // orchestration into an error would be a behavior regression. Do not
+    // re-enqueue or re-fan-out the dead-self.
     if self.lifecycle != Lifecycle::Running {
       return Ok(());
     }
@@ -2940,9 +2871,8 @@ where
     self.next_pushpull = None;
     let local_id = self.cfg.local_id().cheap_clone();
     // The applied local incarnation is authoritative: an inbound self-Alive
-    // is now applied synchronously (no pending-decision gap), so there is
-    // no un-applied higher-incarnation self-Alive to account for — the
-    // round-5 pending-self-Alive fold is structurally unnecessary now.
+    // is applied synchronously (no pending-decision gap), so there is no
+    // un-applied higher-incarnation self-Alive to fold in here.
     let inc = self
       .members
       .get(&local_id)
@@ -2950,7 +2880,7 @@ where
       .unwrap_or(self.incarnation)
       .max(self.incarnation);
     // Self-marked-itself sentinel (target == from): peers treat node == from
-    // as a definitive intentional leave (mirrors memberlist-core's leave()).
+    // as a definitive intentional leave.
     let dead = Dead::new(inc, local_id.cheap_clone(), local_id.cheap_clone());
     self.process_dead(dead, now);
 
@@ -2979,7 +2909,6 @@ where
         }));
     }
     if dead_self_count == 0 {
-      // Legacy `leave()` only blocks on the leave broadcast `if any_alive`.
       // No live peers ⇒ nothing to flush ⇒ the leave is complete now.
       // Emit `LeftCluster` immediately, regardless of any unrelated
       // packets already sitting in `pending_transmits` (a stale ping Ack,

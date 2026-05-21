@@ -8,9 +8,6 @@
 //! injected directly into node1's view of a ghost node. After the suspicion
 //! timer (suspicion_mult * probe_interval = 4s) elapses, node1 marks the
 //! ghost Dead.
-//!
-//! Corresponds to legacy `suspect_node` in
-//! `memberlist-core/src/state/tests.rs:1464`.
 
 use memberlist_simulation::Cluster;
 use memberlist_wire::typed::State;
@@ -22,14 +19,14 @@ fn addr(port: u16) -> std::net::SocketAddr {
 }
 
 /// Partition the network so the probe Ping never reaches target and the
-/// target's refute can never return. With S2R2-F2 a 2-node / zero-indirect
-/// probe still arms the reliable fallback concurrently and races the
-/// single cumulative deadline (direct probe_timeout, then another
-/// probe_timeout for the indirect+fallback window) before suspecting —
-/// it no longer short-circuits to Suspect on the direct timeout alone.
-/// `advance()` does not process streams, so the partitioned fallback never
-/// completes; the probe terminates → Suspect once the cumulative deadline
-/// elapses (two FSM ticks: Direct→Indirect, then Indirect→terminate).
+/// target's refute can never return. A 2-node / zero-indirect probe still
+/// arms the reliable fallback concurrently and races the single cumulative
+/// deadline (direct probe_timeout, then another probe_timeout for the
+/// indirect+fallback window) before suspecting — it does NOT short-circuit
+/// to Suspect on the direct timeout alone. `advance()` does not process
+/// streams, so the partitioned fallback never completes; the probe
+/// terminates → Suspect once the cumulative deadline elapses (two FSM
+/// ticks: Direct→Indirect, then Indirect→terminate).
 #[test]
 fn dropped_probe_leads_to_suspect() {
   let mut c = Cluster::new();
@@ -60,7 +57,8 @@ fn dropped_probe_leads_to_suspect() {
       c.member_liveness(a1, &SmolStr::new("target")),
       Some(State::Alive)
     ),
-    "S2R2-F2: target must NOT be suspected on the direct timeout alone"
+    "target must NOT be suspected on the direct timeout alone — the \
+     reliable fallback must race the cumulative deadline first"
   );
 
   // Tick 2 — past the cumulative deadline: the partitioned reliable

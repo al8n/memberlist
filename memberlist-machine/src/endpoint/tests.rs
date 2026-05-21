@@ -135,17 +135,15 @@ fn alive_self_with_higher_incarnation_refutes() {
   assert_eq!(e.health_score(), 1);
 }
 
-/// Incarnation arithmetic must WRAP at u32::MAX, exactly matching
-/// memberlist-core (`AtomicU32::fetch_add`) and Go (`atomic.AddUint32`).
-/// A u32::MAX self-accusation is unrefutable in upstream too (it wraps to
-/// 0, which peers reject as `0 < MAX`); this port reproduces that
-/// identical degenerate behavior rather than diverging with a saturating
-/// clamp or a widened incarnation type (the u32 incarnation is the wire
-/// protocol). This test pins the wrap so a future change does not
-/// silently re-introduce a saturating clamp or an upstream-divergent
+/// Incarnation arithmetic must WRAP at u32::MAX. A u32::MAX
+/// self-accusation is unrefutable (it wraps to 0, which peers reject as
+/// `0 < MAX`); since the u32 incarnation is part of the wire protocol,
+/// this degenerate behavior is faithfully preserved rather than diverging
+/// with a saturating clamp or a widened type. This test pins the wrap so
+/// a future change does not silently re-introduce a saturating clamp or a
 /// u32::MAX guard.
 #[test]
-fn incarnation_wraps_at_u32_max_matching_upstream() {
+fn incarnation_wraps_at_u32_max() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   while e.poll_event().is_some() {}
   // A peer accuses us at u32::MAX. refute(): next_incarnation 1→2, then
@@ -161,7 +159,7 @@ fn incarnation_wraps_at_u32_max_matching_upstream() {
   assert_eq!(
     local.state().incarnation(),
     0,
-    "incarnation must wrap to 0 at u32::MAX (upstream parity), not saturate"
+    "incarnation must wrap to 0 at u32::MAX, not saturate"
   );
 }
 
@@ -314,13 +312,10 @@ fn merge_dead_treats_as_suspect() {
 
 #[test]
 fn merge_remote_left_marks_dead_not_left() {
-  // memberlist-core's merge_state builds Dead::new(inc, r.id, local_id);
-  // dead_node sets State::Left only for the genuine self-leave sentinel
-  // (node == from). A remote node learned as Left via anti-entropy must
-  // therefore become State::Dead (reclaim-protected), NOT State::Left
-  // (immediately address-reclaimable). The earlier `merge_left_marks_left`
-  // asserted the porting bug; this is the corrected, original-matching
-  // expectation.
+  // A remote node learned as Left via anti-entropy must become State::Dead
+  // (reclaim-protected), NOT State::Left (immediately address-reclaimable).
+  // State::Left is reserved for the genuine self-leave sentinel where the
+  // accuser == the node itself.
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   e.merge_state(&[pns("bob", 7001, 2, State::Left)], Instant::now());
@@ -439,13 +434,12 @@ fn leave_with_no_live_peers_emits_left_cluster_immediately() {
   assert!(events.iter().any(|ev| matches!(ev, Event::LeftCluster)));
 }
 
-/// With a live peer, `LeftCluster` is the *completion* signal (analog of
-/// memberlist-core `leave()` returning only after `leave_broadcast`). It
-/// must NOT fire at the state transition while the dead-self notice is
-/// still queued — a driver that shut down on the `leave()` return /
-/// NodeLeft would drop the leave notice and peers would see a failure
-/// instead of an intentional leave. It fires only once `poll_transmit`
-/// has drained the queued dead-self.
+/// With a live peer, `LeftCluster` is the *completion* signal — it must
+/// NOT fire at the state transition while the dead-self notice is still
+/// queued. A driver that shut down on the `leave()` return / NodeLeft
+/// would drop the leave notice and peers would see a failure instead of
+/// an intentional leave. It fires only once `poll_transmit` has drained
+/// the queued dead-self.
 #[test]
 fn leave_defers_left_cluster_until_dead_self_drained() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
@@ -490,9 +484,9 @@ fn leave_defers_left_cluster_until_dead_self_drained() {
   );
 }
 
-/// R8 regression: a zero-live-peer leave must complete immediately even
-/// when unrelated traffic (a stale ping Ack here) is already queued. The
-/// old `pending_transmits.is_empty()` boundary wrongly deferred this.
+/// A zero-live-peer leave must complete immediately even when unrelated
+/// traffic (a stale ping Ack here) is already queued. A `pending_transmits.
+/// is_empty()` boundary would wrongly defer this.
 #[test]
 fn leave_no_live_peers_not_delayed_by_stale_transmit() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
@@ -525,10 +519,10 @@ fn leave_no_live_peers_not_delayed_by_stale_transmit() {
   ));
 }
 
-/// R8 regression: with a live peer, the completion boundary is exactly the
-/// queued dead-self (plus any stale prefix), never trailing post-leave
-/// traffic. LeftCluster fires when the dead-self is drained and is neither
-/// delayed by, nor spuriously emitted for, unrelated packets.
+/// With a live peer, the completion boundary is exactly the queued
+/// dead-self (plus any stale prefix), never trailing post-leave traffic.
+/// LeftCluster fires when the dead-self is drained and is neither delayed
+/// by, nor spuriously emitted for, unrelated packets.
 #[test]
 fn leave_left_cluster_boundary_is_the_dead_self_not_other_traffic() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
@@ -595,10 +589,8 @@ fn leave_left_cluster_boundary_is_the_dead_self_not_other_traffic() {
 
 #[test]
 fn leave_is_idempotent() {
-  // memberlist-core `leave()` returns Ok(false) when already left/shutdown;
-  // a repeated leave is a harmless no-op, not an error. (The earlier
-  // `leave_after_left_returns_not_running` asserted the divergent
-  // non-idempotent behavior.)
+  // A repeated leave is a harmless no-op, not an error: once already
+  // left/shutdown, `leave()` is idempotent and must not re-broadcast.
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   e.leave(Instant::now()).expect("first leave ok");
   assert!(e.is_left());
@@ -677,7 +669,7 @@ fn alive_no_delegate_applies_the_message() {
 
 /// A [`MergeDelegate`] that cancels every join merge. Records the peer view
 /// it was handed so we can assert the application sees the remote states
-/// (the NEW-4 boundary-enforcement contract).
+/// (the boundary-enforcement contract).
 struct RejectAllMerge {
   seen: std::sync::Mutex<Vec<SmolStr>>,
 }
@@ -688,9 +680,9 @@ impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for RejectAllMerge {
   }
 }
 
-/// NEW-4 (architectural form): a join push/pull merge is gated by the
-/// `MergeDelegate`, which is handed the full remote peer view; returning
-/// `false` cancels the merge and closes the stream.
+/// A join push/pull merge is gated by the `MergeDelegate`, which is
+/// handed the full remote peer view; returning `false` cancels the merge
+/// and closes the stream.
 #[test]
 fn merge_delegate_vetoes_join_push_pull() {
   use EndpointEvent;
@@ -1101,10 +1093,10 @@ fn handle_ack_completes_direct_probe_and_ticks_awareness() {
 
 /// A direct Ack that arrives AFTER the direct sub-timeout but BEFORE the
 /// cumulative deadline (and before the late handle_timeout fires) must
-/// SUCCEED the probe — memberlist-core delivers a direct Ack via ack_rx
-/// any time before the overall deadline. It must NOT be suspected based
-/// on packet-vs-timer ordering. The cumulative-deadline authority is still
-/// enforced: an Ack past the cumulative deadline does terminate as failure.
+/// SUCCEED the probe — a direct Ack is delivered any time before the
+/// overall deadline. It must NOT be suspected based on packet-vs-timer
+/// ordering. The cumulative-deadline authority is still enforced: an Ack
+/// past the cumulative deadline does terminate as failure.
 #[test]
 fn direct_ack_after_direct_timeout_within_cumulative_succeeds() {
   let pt = Duration::from_millis(50);
@@ -1193,8 +1185,8 @@ fn handle_ack_for_unknown_seq_is_noop() {
   assert!(e.poll_transmit().is_none());
 }
 
-/// ProbeKind::Ping is direct-only (memberlist-core `ping` waits just
-/// `probe_timeout`). Its success cutoff in complete_probe_success must be
+/// ProbeKind::Ping is direct-only and its sole timeout is `probe_timeout`.
+/// Its success cutoff in complete_probe_success must be
 /// `sent_at + probe_timeout`, NOT the Detection cumulative
 /// `sent_at + 2*probe_timeout`. A Ping Ack arriving after probe_timeout
 /// but before handle_timeout must NOT emit PingCompleted (the caller
@@ -1975,7 +1967,7 @@ fn forward_ack_after_deadline_is_not_relayed_and_nack_still_fires() {
 }
 
 /// Sibling sanity: a Forward Ack strictly BEFORE the deadline still
-/// relays (the fix is a cutoff, not a regression of the happy path).
+/// relays (the deadline is a cutoff, not a clamp on the happy path).
 #[test]
 fn forward_ack_before_deadline_still_relays() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
@@ -2092,11 +2084,11 @@ fn ping_completes_on_ack_with_pingcompleted_event() {
   }
 }
 
-/// An application `ping` is direct-only (memberlist-core
-/// `Memberlist::ping` → `Error::Lost` on timeout, no indirect/TCP
-/// fallback). A `ProbeKind::Ping` that times out must terminate silently —
-/// NO indirect fan-out, NO reliable-fallback DialRequested, and NO late
-/// `PingCompleted` after the caller already treated it as lost.
+/// An application `ping` is direct-only: on timeout the caller sees
+/// `Error::Lost`, with no indirect/TCP fallback. A `ProbeKind::Ping` that
+/// times out must terminate silently — NO indirect fan-out, NO
+/// reliable-fallback DialRequested, and NO late `PingCompleted` after the
+/// caller already treated it as lost.
 #[test]
 fn app_ping_timeout_does_not_escalate_to_indirect_or_fallback() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
@@ -2161,11 +2153,10 @@ fn app_ping_timeout_does_not_escalate_to_indirect_or_fallback() {
 
 /// A two-node / zero-indirect-peer probe must STILL attempt the reliable
 /// (TCP) fallback before suspecting — it must not short-circuit to failure
-/// on the direct timeout (memberlist-core `handle_remote_failure` spawns
-/// the TCP ping even with `expected_nacks == 0`). The +1 Lifeguard
-/// awareness penalty for a no-indirect failure still applies, but only
-/// once the single cumulative deadline elapses without the fallback making
-/// contact.
+/// on the direct timeout. The reliable-fallback ping is spawned even when
+/// `expected_nacks == 0`. The +1 Lifeguard awareness penalty for a
+/// no-indirect failure still applies, but only once the single cumulative
+/// deadline elapses without the fallback making contact.
 #[test]
 fn probe_failure_with_no_indirect_peers_bumps_awareness_by_one() {
   // Cumulative deadline = sent + scaled probe_interval (80ms, decoupled
@@ -2718,9 +2709,7 @@ fn dial_succeeded_after_deadline_emits_no_stream() {
 }
 
 /// With `probe_interval < probe_timeout` the scaled `failure_deadline`
-/// precedes the direct deadline. memberlist-core's unconditional
-/// `sleep(probe_timeout)` ignores that — a latent upstream wart. This
-/// port does the correct thing instead of reproducing it:
+/// precedes the direct deadline. The correct semantic is that
 /// `failure_deadline` is the authoritative end of the probe in EVERY
 /// phase, so the probe is suspected at `failure_deadline` (t0+20ms) —
 /// NOT after the longer, pointless direct sub-window (t0+50ms) — and
@@ -2779,7 +2768,7 @@ fn tiny_probe_interval_suspects_at_failure_deadline_not_direct() {
       e.member_liveness(&SmolStr::new("bob")),
       Some(State::Suspect | State::Dead)
     ),
-    "suspected at the authoritative deadline (t0+20ms), improving on upstream"
+    "suspected at the authoritative deadline (t0+20ms)"
   );
 }
 
@@ -3525,9 +3514,9 @@ fn fatal_frame_error_terminalizes_stream_fsm() {
 
 /// A reliable-ping dial failure must NOT fail the probe. The fallback runs
 /// concurrently with the indirect pings; a fallback failure is only
-/// `did_contact = false` upstream. `dial_failed` retires the fallback
-/// (clears `reliable_stream_id`) but the probe stays alive in
-/// `AwaitingIndirect`, still racing its single cumulative deadline.
+/// `did_contact = false`. `dial_failed` retires the fallback (clears
+/// `reliable_stream_id`) but the probe stays alive in `AwaitingIndirect`,
+/// still racing its single cumulative deadline.
 #[test]
 fn dial_failed_for_reliable_ping_retires_fallback_not_probe() {
   use crate::error::StreamError;
@@ -3586,12 +3575,12 @@ fn dial_failed_for_reliable_ping_retires_fallback_not_probe() {
 
 // ─────────── Ack responder validation ────────────────────────────────────
 //
-// memberlist-core keys ack handlers purely by the monotonic u32 seq and
-// accepts an Ack from ANY source. A peer that observes/guesses the seq
-// could forge probe success / PingCompleted, relay-forge a forward, and —
-// worst — evict the registry slot so the genuine Ack is then lost. The
-// port validates the source against the expected responder BEFORE
-// consuming the slot.
+// Naïvely keying ack handlers purely by the monotonic u32 seq and
+// accepting an Ack from ANY source means a peer that observes/guesses
+// the seq could forge probe success / PingCompleted, relay-forge a
+// forward, and — worst — evict the in-flight slot so the genuine Ack is
+// then lost. The endpoint validates the source against the expected
+// responder BEFORE consuming the slot.
 
 #[test]
 fn forged_probe_ack_from_wrong_source_is_rejected() {
@@ -3911,6 +3900,501 @@ fn eof_on_terminal_stream_is_a_noop() {
     s.poll_event().is_none(),
     "no second Failed event from a post-terminal EOF"
   );
+}
+
+#[test]
+fn eof_in_outbound_sending_request_push_pull_is_premature() {
+  use crate::{error::StreamError, stream::StreamPhase};
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  let id = e.start_push_pull(peer, PushPullKind::Refresh, t0);
+  while e.poll_event().is_some() {}
+  let mut s = e.dial_succeeded(id, t0).expect("stream");
+
+  // The freshly-dialed stream starts in `OutboundSendingRequest` —
+  // bytes are buffered in `output_buf` waiting for `poll_transmit` to
+  // drain them. Phase has NOT yet advanced to
+  // `OutboundAwaitingResponse`.
+  assert!(matches!(
+    s.phase,
+    StreamPhase::OutboundSendingRequest { .. }
+  ));
+
+  // Peer FINs before we even finish writing. For a response-bearing
+  // exchange (PushPull) this is premature — the response will never
+  // arrive — so EOF here MUST fail.
+  let r = s.handle_data(&[], t0);
+  assert!(
+    matches!(r, Err(StreamError::PeerClosed)),
+    "PushPull EOF in OutboundSendingRequest ⇒ PeerClosed, got {r:?}"
+  );
+  assert!(matches!(
+    s.phase,
+    StreamPhase::Failed(StreamError::PeerClosed)
+  ));
+}
+
+#[test]
+fn eof_in_outbound_sending_request_reliable_ping_is_premature() {
+  use crate::{error::StreamError, stream::StreamPhase};
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  // Need a probe sequence first — start_reliable_ping is keyed on the
+  // probe_seq from an originating UDP probe. Use a synthetic seq.
+  let id = e.start_reliable_ping(
+    SmolStr::from("peer"),
+    peer,
+    42,
+    t0 + core::time::Duration::from_secs(1),
+  );
+  while e.poll_event().is_some() {}
+  let mut s = e.dial_succeeded(id, t0).expect("stream");
+
+  assert!(matches!(
+    s.phase,
+    StreamPhase::OutboundSendingRequest { .. }
+  ));
+
+  // ReliablePing also expects a response (the ack). EOF in
+  // OutboundSendingRequest is premature.
+  let r = s.handle_data(&[], t0);
+  assert!(
+    matches!(r, Err(StreamError::PeerClosed)),
+    "ReliablePing EOF in OutboundSendingRequest ⇒ PeerClosed, got {r:?}"
+  );
+  assert!(matches!(
+    s.phase,
+    StreamPhase::Failed(StreamError::PeerClosed)
+  ));
+}
+
+#[test]
+fn eof_in_outbound_sending_request_user_message_is_ok() {
+  use crate::stream::StreamPhase;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  let id = e.start_user_message(peer, bytes::Bytes::from_static(b"payload"), t0);
+  while e.poll_event().is_some() {}
+  let mut s = e.dial_succeeded(id, t0).expect("stream");
+
+  assert!(matches!(
+    s.phase,
+    StreamPhase::OutboundSendingRequest { .. }
+  ));
+
+  // UserMessage is one-way — we don't expect any inbound bytes from
+  // the peer. Peer FIN'ing their (empty) send side before we finish
+  // writing is benign; the FSM must accept it without failing.
+  assert!(
+    s.handle_data(&[], t0).is_ok(),
+    "UserMessage EOF in OutboundSendingRequest ⇒ Ok (one-way exchange \
+     doesn't expect inbound bytes)"
+  );
+  assert!(
+    !matches!(s.phase, StreamPhase::Failed(_)),
+    "phase MUST NOT be Failed after a benign one-way EOF (got {:?})",
+    s.phase
+  );
+}
+
+/// Build a push/pull request frame the FSM can decode in
+/// `InboundAwaitingFirstMessage`. Mirrors the encoding used by the
+/// existing `inbound_push_pull_decode_and_response_bytes` test.
+fn build_push_pull_request_bytes() -> Vec<u8> {
+  use memberlist_wire::typed::{Message, PushNodeState, PushPull, State};
+  let dave_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7004);
+  let dave_state =
+    PushNodeState::<SmolStr, SocketAddr>::new(1, SmolStr::new("dave"), dave_addr, State::Alive);
+  let inbound_pp = PushPull::<SmolStr, SocketAddr>::new(true, std::iter::once(dave_state))
+    .with_user_data(bytes::Bytes::new());
+  let inbound_msg = Message::<SmolStr, SocketAddr>::PushPull(inbound_pp);
+  crate::wire::encode_message::<SmolStr, SocketAddr>(&inbound_msg).expect("encode")
+}
+
+#[test]
+fn eof_in_inbound_sending_response_empty_buf_is_ok() {
+  use crate::stream::StreamPhase;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  let mut s = e.accept_stream(peer, t0);
+
+  // Feed a complete push/pull request frame so the FSM transitions
+  // from `InboundAwaitingFirstMessage` → `InboundSendingResponse`.
+  let request_bytes = build_push_pull_request_bytes();
+  s.handle_data(&request_bytes, t0)
+    .expect("complete request frame is decoded");
+  assert!(
+    matches!(s.phase, StreamPhase::InboundSendingResponse { .. }),
+    "FSM did not reach InboundSendingResponse — phase = {:?}",
+    s.phase
+  );
+
+  // Peer FINs after sending the full request — natural close of
+  // their send half. EOF here MUST be Ok.
+  assert!(
+    s.handle_data(&[], t0).is_ok(),
+    "EOF in InboundSendingResponse with empty input_buf ⇒ Ok"
+  );
+  assert!(
+    !matches!(s.phase, StreamPhase::Failed(_)),
+    "phase MUST NOT be Failed after natural FIN"
+  );
+}
+
+#[test]
+fn trailing_bytes_after_outbound_done_fails_decode() {
+  use crate::{error::StreamError, event::PushPullKind, stream::StreamPhase};
+  use bytes::Bytes;
+  use memberlist_wire::typed::{Message, PushNodeState, PushPull, State};
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  process_alive_auto(&mut e, alive("alice", 7000, 1), false, Instant::now());
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  let id = e.start_push_pull(peer, PushPullKind::Refresh, t0);
+  while e.poll_event().is_some() {}
+  let mut s = e.dial_succeeded(id, t0).expect("stream");
+  let mut _req_buf = Vec::new();
+  s.poll_transmit(t0, &mut _req_buf); // advance to OutboundAwaitingResponse
+  assert!(matches!(
+    s.phase,
+    StreamPhase::OutboundAwaitingResponse { .. }
+  ));
+
+  // Build a legitimate reply followed by junk bytes in a SINGLE
+  // handle_data delivery — what an adversarial peer could send before
+  // FIN'ing.
+  let carol_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7003);
+  let carol_state =
+    PushNodeState::<SmolStr, SocketAddr>::new(1, SmolStr::new("carol"), carol_addr, State::Alive);
+  let reply_pp = PushPull::<SmolStr, SocketAddr>::new(false, std::iter::once(carol_state))
+    .with_user_data(Bytes::new());
+  let reply_msg = Message::<SmolStr, SocketAddr>::PushPull(reply_pp);
+  let mut bytes_with_trailing =
+    crate::wire::encode_message::<SmolStr, SocketAddr>(&reply_msg).expect("encode");
+  bytes_with_trailing.extend_from_slice(&[0x99u8, 0xAAu8, 0xBBu8]);
+
+  let r = s.handle_data(&bytes_with_trailing, t0);
+  assert!(
+    matches!(r, Err(StreamError::Decode(_))),
+    "trailing bytes after a Done-completing frame ⇒ Decode error, \
+     got {r:?}"
+  );
+  assert!(
+    matches!(s.phase, StreamPhase::Failed(StreamError::Decode(_))),
+    "FSM phase ⇒ Failed(Decode), got {:?}",
+    s.phase
+  );
+}
+
+#[test]
+fn late_failure_emits_only_failed_lifecycle_not_closed() {
+  // `dispatch_message` queues `StreamEvent::Closed` to `stream_events`
+  // BEFORE the post-dispatch trailing-bytes guard runs. `enter_failed`
+  // must clear `stream_events` (alongside `endpoint_events`) before
+  // pushing `Failed`; otherwise a `poll_event` drain would deliver
+  // `Closed` BEFORE `Failed`, contradicting the dispatch/validation
+  // atomicity at the Sans-I/O boundary. This test asserts the public
+  // observable: after a single-delivery [request][second_frame] failure,
+  // the FSM emits ONLY `Failed`, never `Closed`.
+  use crate::{error::StreamError, event::StreamEvent, stream::StreamPhase};
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  let mut s = e.accept_stream(peer, t0);
+
+  let req = build_push_pull_request_bytes();
+  let second = build_push_pull_request_bytes();
+  let mut combined = req.clone();
+  combined.extend_from_slice(&second);
+
+  let r = s.handle_data(&combined, t0);
+  assert!(
+    matches!(r, Err(StreamError::Decode(_))),
+    "single-delivery [request][second_frame] ⇒ Decode, got {r:?}"
+  );
+  assert!(matches!(
+    s.phase,
+    StreamPhase::Failed(StreamError::Decode(_))
+  ));
+
+  // Public observable: poll_event only yields Failed; no spurious
+  // Closed from the dispatched-but-rejected frame.
+  let events: Vec<StreamEvent> = std::iter::from_fn(|| s.poll_event()).collect();
+  assert!(
+    !events.iter().any(|ev| matches!(ev, StreamEvent::Closed)),
+    "no `Closed` lifecycle event must survive a late-failure dispatch \
+     — got {events:?}"
+  );
+  assert!(
+    events.iter().any(|ev| matches!(ev, StreamEvent::Failed(_))),
+    "the `Failed` lifecycle event MUST be present — got {events:?}"
+  );
+}
+
+#[test]
+fn split_delivery_done_then_trailing_bytes_fails_decode() {
+  // `handle_data`'s terminal-Done guard must distinguish trailing data
+  // from EOF: a follow-up `handle_data(non-empty)` call after the FSM
+  // reached Done (e.g. the QUIC bridge's per-chunk feed delivering
+  // chunk1=valid frame moving FSM to Done, chunk2=trailing bytes in the
+  // next `Chunks::next` iteration) MUST fail Decode rather than silently
+  // ignore the trailing bytes. Failed remains a no-op. Done + empty
+  // data (EOF) remains a no-op (clean close).
+  use crate::{error::StreamError, event::PushPullKind, stream::StreamPhase};
+  use bytes::Bytes;
+  use memberlist_wire::typed::{Message, PushNodeState, PushPull, State};
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  process_alive_auto(&mut e, alive("alice", 7000, 1), false, Instant::now());
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  let id = e.start_push_pull(peer, PushPullKind::Refresh, t0);
+  while e.poll_event().is_some() {}
+  let mut s = e.dial_succeeded(id, t0).expect("stream");
+  let mut _req_buf = Vec::new();
+  s.poll_transmit(t0, &mut _req_buf);
+  assert!(matches!(
+    s.phase,
+    StreamPhase::OutboundAwaitingResponse { .. }
+  ));
+
+  // Chunk 1: the legitimate reply (FSM → Done).
+  let carol_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7003);
+  let carol_state =
+    PushNodeState::<SmolStr, SocketAddr>::new(1, SmolStr::new("carol"), carol_addr, State::Alive);
+  let reply_pp = PushPull::<SmolStr, SocketAddr>::new(false, std::iter::once(carol_state))
+    .with_user_data(Bytes::new());
+  let reply_msg = Message::<SmolStr, SocketAddr>::PushPull(reply_pp);
+  let reply = crate::wire::encode_message::<SmolStr, SocketAddr>(&reply_msg).expect("encode");
+  s.handle_data(&reply, t0).expect("decode reply");
+  assert!(matches!(s.phase, StreamPhase::Done));
+
+  // Chunk 2: trailing junk arrives after the FSM is already Done.
+  // The terminal-Done-with-data guard MUST fail Decode here; a permissive
+  // guard would silently return Ok and the bridge would clean-reap.
+  let r = s.handle_data(&[0x99u8, 0xAAu8], t0);
+  assert!(
+    matches!(r, Err(StreamError::Decode(_))),
+    "Done + non-empty data ⇒ Decode (split-delivery), got {r:?}"
+  );
+  assert!(matches!(
+    s.phase,
+    StreamPhase::Failed(StreamError::Decode(_))
+  ));
+
+  // Combined trailing-bytes + lifecycle-clear invariant: only Failed
+  // surfaces, no Closed.
+  let events: Vec<_> = std::iter::from_fn(|| s.poll_event()).collect();
+  assert!(
+    !events.iter().any(|ev| matches!(ev, crate::event::StreamEvent::Closed)),
+    "no Closed lifecycle event after split-delivery failure — got {events:?}"
+  );
+}
+
+#[test]
+fn done_phase_empty_eof_is_still_a_noop() {
+  // Done + EMPTY data (the EOF marker) MUST remain a no-op — this is
+  // the clean-close path the QUIC bridge uses to signal peer FIN after
+  // a successful exchange (companion to the Done+data fail-Decode case).
+  use crate::stream::StreamPhase;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  let mut s = e.accept_stream(peer, t0);
+
+  // Drive the FSM to Done by feeding a one-way UserData frame.
+  use memberlist_wire::typed::Message;
+  let msg = Message::<SmolStr, SocketAddr>::UserData(bytes::Bytes::from_static(b"hello"));
+  let bytes = crate::wire::encode_message::<SmolStr, SocketAddr>(&msg).expect("encode");
+  s.handle_data(&bytes, t0).expect("decode user data");
+  assert!(matches!(s.phase, StreamPhase::Done));
+
+  // EOF (empty data) on Done is the clean-close marker — Ok.
+  assert!(
+    s.handle_data(&[], t0).is_ok(),
+    "Done + empty data (EOF) MUST remain a no-op clean-close path"
+  );
+  assert!(
+    matches!(s.phase, StreamPhase::Done),
+    "phase MUST stay Done after EOF (not flipped to Failed)"
+  );
+}
+
+#[test]
+fn dispatched_frame_endpoint_events_discarded_on_late_failure() {
+  // When `dispatch_message` queues an endpoint event (e.g.
+  // `PushPullRequestReceived`) and a subsequent guard fails the stream
+  // — like the trailing-bytes rejection — the queued event MUST NOT
+  // survive the failure. Otherwise the bridge's `drain_then_reap`
+  // (or `drain_payload_only`) would route the event into `Endpoint::
+  // handle_stream_event`, merging state / encoding a response / etc.
+  // for a stream that was just declared invalid.
+  //
+  // This test asserts the FSM-level invariant: after a single-delivery
+  // [request][second_frame] failure, `poll_endpoint_event` returns
+  // `None` — `enter_failed` clears the queue alongside the input/
+  // output buffers.
+  use crate::{error::StreamError, stream::StreamPhase};
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  let mut s = e.accept_stream(peer, t0);
+
+  // Single delivery: legitimate request + a second complete frame.
+  let req = build_push_pull_request_bytes();
+  let second = build_push_pull_request_bytes();
+  let mut combined = req.clone();
+  combined.extend_from_slice(&second);
+
+  let r = s.handle_data(&combined, t0);
+  assert!(
+    matches!(r, Err(StreamError::Decode(_))),
+    "single-delivery [request][second_frame] ⇒ Decode error, got {r:?}"
+  );
+  assert!(matches!(
+    s.phase,
+    StreamPhase::Failed(StreamError::Decode(_))
+  ));
+
+  // Public observable: NO endpoint event survived the failure. Without
+  // the `endpoint_events.clear()` line in `enter_failed`, the
+  // `PushPullRequestReceived` queued by `dispatch_message` would
+  // still be drainable here.
+  assert!(
+    s.poll_endpoint_event().is_none(),
+    "FSM endpoint_events MUST be empty after a post-dispatch \
+     failure — the bridge would otherwise route the queued event \
+     into Endpoint::handle_stream_event for a failed stream"
+  );
+}
+
+#[test]
+fn single_delivery_request_plus_second_frame_fails_decode() {
+  // Catches the SINGLE-DELIVERY case where the bridge's `pump_in` hands
+  // `[request_bytes][second_frame_bytes]` to `handle_data` in one call.
+  // `try_decode_frame` consumes the legitimate first frame, transitions
+  // the FSM to `InboundSendingResponse`, and the trailing second frame
+  // would otherwise sit in `input_buf` until the NEXT `handle_data` call
+  // dispatched it through `PhaseKind::Ignore` (the SPLIT-delivery case).
+  // But before that next call fires, the bridge's `drain_payload_only`
+  // would route the first frame's endpoint events into `Endpoint` —
+  // merging state, encoding a response, etc. — i.e. the protocol
+  // violation is observed too late.
+  //
+  // The `try_decode_frame` post-dispatch trailing-bytes guard catches
+  // the violation BEFORE the endpoint side-effects fire.
+  use crate::{error::StreamError, stream::StreamPhase};
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  let mut s = e.accept_stream(peer, t0);
+
+  // Single delivery: request bytes + a second complete frame.
+  let req = build_push_pull_request_bytes();
+  let second = build_push_pull_request_bytes();
+  let mut combined = req.clone();
+  combined.extend_from_slice(&second);
+
+  let r = s.handle_data(&combined, t0);
+  assert!(
+    matches!(r, Err(StreamError::Decode(_))),
+    "single-delivery [request][second_frame] ⇒ Decode error on \
+     trailing bytes, got {r:?}"
+  );
+  assert!(
+    matches!(s.phase, StreamPhase::Failed(StreamError::Decode(_))),
+    "FSM phase ⇒ Failed(Decode), got {:?}",
+    s.phase
+  );
+}
+
+#[test]
+fn second_frame_in_inbound_sending_response_fails_unexpected() {
+  use crate::{error::StreamError, stream::StreamPhase};
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  let mut s = e.accept_stream(peer, t0);
+
+  // Feed a complete request frame so the FSM moves to
+  // InboundSendingResponse.
+  let req = build_push_pull_request_bytes();
+  s.handle_data(&req, t0).expect("decode request");
+  assert!(matches!(
+    s.phase,
+    StreamPhase::InboundSendingResponse { .. }
+  ));
+
+  // Adversarial peer sends a SECOND complete frame while we're still
+  // sending the response. The FSM's `PhaseKind::Ignore` arm MUST fail
+  // with UnexpectedMessage rather than silently consume the frame.
+  let second = build_push_pull_request_bytes();
+  let r = s.handle_data(&second, t0);
+  assert!(
+    matches!(r, Err(StreamError::UnexpectedMessage(_))),
+    "second frame in InboundSendingResponse ⇒ UnexpectedMessage, \
+     got {r:?}"
+  );
+  assert!(
+    matches!(s.phase, StreamPhase::Failed(StreamError::UnexpectedMessage(_))),
+    "FSM phase ⇒ Failed(UnexpectedMessage), got {:?}",
+    s.phase
+  );
+}
+
+#[test]
+fn eof_in_inbound_sending_response_partial_trailing_fails() {
+  use crate::{error::StreamError, stream::StreamPhase};
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let t0 = Instant::now();
+  let mut s = e.accept_stream(peer, t0);
+
+  // Feed a complete request frame (advances to InboundSendingResponse).
+  let request_bytes = build_push_pull_request_bytes();
+  s.handle_data(&request_bytes, t0).expect("decode request");
+  assert!(matches!(
+    s.phase,
+    StreamPhase::InboundSendingResponse { .. }
+  ));
+
+  // Feed a single byte of a SECOND frame (partial trailing).
+  s.handle_data(&[7u8], t0)
+    .expect("partial trailing byte buffered");
+
+  // EOF with non-empty input_buf — the trailing byte will never be
+  // decoded into a complete frame. PeerClosed.
+  let r = s.handle_data(&[], t0);
+  assert!(
+    matches!(r, Err(StreamError::PeerClosed)),
+    "EOF in InboundSendingResponse with non-empty input_buf ⇒ \
+     PeerClosed (truncated trailing frame), got {r:?}"
+  );
+  assert!(matches!(
+    s.phase,
+    StreamPhase::Failed(StreamError::PeerClosed)
+  ));
 }
 
 // ─────────── End-to-end push/pull integration test ───────────────────────
@@ -4541,10 +5025,10 @@ fn handle_packet_ignores_push_pull() {
   assert!(e.poll_transmit().is_none());
 }
 
-// ── Adversarial-review Session 1 regression tests ────────────────────────────
+// ── Push/pull liveness + graceful-leave observability ───────────────────────
 
-/// Finding 1: push/pull must advertise the live `LocalNodeState` liveness,
-/// not the embedded `NodeState` snapshot (frozen at the last Alive, since
+/// Push/pull must advertise the live `LocalNodeState` liveness, not the
+/// embedded `NodeState` snapshot (frozen at the last Alive, since
 /// `set_server` only runs on Alive). A Suspect member must not be serialized
 /// as Alive — doing so resurrects it on the peer via `merge_state`.
 #[test]
@@ -4583,9 +5067,9 @@ fn push_pull_serializes_live_liveness_not_frozen_alive() {
   );
 }
 
-/// Finding 2: graceful leave must be observable through `poll_transmit`
-/// (the path real drivers drain). The gossip broadcast queue alone is
-/// insufficient: it stops being drained once `lifecycle == Left`.
+/// Graceful leave must be observable through `poll_transmit` (the path
+/// real drivers drain). The gossip broadcast queue alone is insufficient:
+/// it stops being drained once `lifecycle == Left`.
 #[test]
 fn leave_emits_dead_self_via_poll_transmit() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
@@ -4614,14 +5098,11 @@ fn leave_emits_dead_self_via_poll_transmit() {
   );
 }
 
-/// NEW-2 (round-2, corrects the round-1 push-back which was wrong): a
-/// remote `State::Left` learned via push/pull must become `State::Dead`
-/// (memberlist-core builds `Dead::new(inc, r.id, local_id)`; `dead_node`
-/// only marks Left for the genuine `node == from` self-leave). Because the
-/// resulting state is Dead — not Left — a different-address Alive with the
-/// default `dead_node_reclaim_time == 0` must NOT hijack the node id (it
-/// conflicts), exactly as in memberlist-core. The earlier
-/// `..._stays_left_and_is_reclaimable` test asserted the porting bug.
+/// A remote `State::Left` learned via push/pull must become `State::Dead`:
+/// `State::Left` is reserved for the genuine `node == from` self-leave
+/// sentinel. Because the resulting state is Dead — not Left — a
+/// different-address Alive with the default `dead_node_reclaim_time == 0`
+/// must NOT hijack the node id (it conflicts).
 #[test]
 fn merge_remote_left_marks_dead_and_blocks_reclaim() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
@@ -4635,9 +5116,9 @@ fn merge_remote_left_marks_dead_and_blocks_reclaim() {
   );
 
   // Dead + default dead_node_reclaim_time (ZERO) ⇒ a different-address
-  // Alive must NOT reclaim the id; the old address is kept (conflict),
-  // matching memberlist-core state.rs:456. (State::Left would have allowed
-  // an immediate hijack — the reclaim-bypass this fix closes.)
+  // Alive must NOT reclaim the id; the old address is kept (conflict).
+  // State::Left would have allowed an immediate hijack — the
+  // reclaim-bypass this fix closes.
   process_alive_auto(&mut e, alive("bob", 7777, 3), false, Instant::now());
   assert_eq!(
     e.member(&SmolStr::new("bob")).unwrap().address().port(),
@@ -4646,11 +5127,11 @@ fn merge_remote_left_marks_dead_and_blocks_reclaim() {
   );
 }
 
-// ── Adversarial-review round-2 regression tests ──────────────────────────────
+// ── Post-leave self-resurrection guards ──────────────────────────────────────
 
-/// NEW-1: `update_meta` after leave must return `NotRunning` (mirrors
-/// memberlist-core `update_node`). Otherwise it bumps the incarnation and
-/// broadcasts a higher-incarnation Alive that resurrects the left node.
+/// `update_meta` after leave must return `NotRunning`. Otherwise it bumps
+/// the incarnation and broadcasts a higher-incarnation Alive that
+/// resurrects the left node.
 #[test]
 fn update_meta_after_leave_returns_not_running() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
@@ -4672,8 +5153,8 @@ fn update_meta_after_leave_returns_not_running() {
   assert_eq!(e.member_liveness(&SmolStr::new("local")), Some(State::Left));
 }
 
-/// NEW-1: a self-Alive received after the local node has Left (e.g. a peer
-/// echoing our pre-leave state) must be ignored — `process_alive` now
+/// A self-Alive received after the local node has Left (e.g. a peer
+/// echoing our pre-leave state) must be ignored — `process_alive`
 /// suppresses self-handling for both Leaving and Left, not just Leaving.
 #[test]
 fn self_alive_after_left_is_ignored() {
@@ -4696,7 +5177,7 @@ fn self_alive_after_left_is_ignored() {
   );
 }
 
-/// NEW-1: a Suspect about the local node after Left must not resurrect it
+/// A Suspect about the local node after Left must not resurrect it
 /// (refute is a no-op once not Running).
 #[test]
 fn suspect_about_self_after_left_does_not_resurrect() {
@@ -4714,9 +5195,9 @@ fn suspect_about_self_after_left_does_not_resurrect() {
   assert_eq!(e.member_liveness(&SmolStr::new("local")), Some(State::Left));
 }
 
-/// NEW-3: long-dead members must be pruned by the probe-cycle `reset_nodes`
-/// sweep (production drivers only call `handle_timeout`). Mirrors
-/// memberlist-core `probe()` calling `reset_nodes()` on probe-index wrap.
+/// Long-dead members must be pruned by the probe-cycle `reset_nodes`
+/// sweep (production drivers only call `handle_timeout`). The sweep is
+/// triggered when the probe index wraps a full round-robin pass.
 #[test]
 fn probe_cycle_prunes_long_dead_nodes() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(
@@ -4741,12 +5222,11 @@ fn probe_cycle_prunes_long_dead_nodes() {
   );
 }
 
-// ── Adversarial-review round-3 regression tests (GOSSIP-1) ───────────────────
+// ── "Gossip to the dead" window + queue preservation ─────────────────────────
 
-/// GOSSIP-1: a recently-Dead peer (within `gossip_to_the_dead_time`) must
-/// still be a gossip target — the SWIM "gossip to the dead" path that lets
-/// a falsely-dead node hear the accusation and refute before GC
-/// (memberlist-core `gossip()` state.rs:1287-1298).
+/// A recently-Dead peer (within `gossip_to_the_dead_time`) must still be a
+/// gossip target — the SWIM "gossip to the dead" path that lets a falsely-
+/// dead node hear the accusation and refute before GC.
 #[test]
 fn gossip_targets_recently_dead_peer_within_window() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
@@ -4780,10 +5260,10 @@ fn gossip_targets_recently_dead_peer_within_window() {
   );
 }
 
-/// GOSSIP-1: an aged-Dead peer (beyond `gossip_to_the_dead_time`) is NOT a
-/// gossip target; and when no eligible target exists the broadcast queue
-/// must be left intact (retransmit counters not advanced with zero packets
-/// emitted) — memberlist-core fetches broadcasts per selected target.
+/// An aged-Dead peer (beyond `gossip_to_the_dead_time`) is NOT a gossip
+/// target; and when no eligible target exists the broadcast queue must
+/// be left intact (retransmit counters not advanced with zero packets
+/// emitted) — broadcasts are fetched per selected target.
 #[test]
 fn gossip_skips_aged_dead_and_preserves_queue_when_no_targets() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
@@ -4820,18 +5300,13 @@ fn gossip_skips_aged_dead_and_preserves_queue_when_no_targets() {
 
 // ── Synchronous-admission ordering invariants ────────────────────────────────
 //
-// These descend from the round-4 "ORD-1" adversarial findings. The original
-// bug only existed because admission was *deferred*: an Alive sat in a
-// pending-decision buffer, a Dead/Suspect raced in while the id was not yet
-// in `members`, and the failure signal was dropped — then accepting the
-// Alive resurrected the node. The architectural fix makes admission
-// synchronous and inline, so the race window does not exist. We keep these
-// as forward regressions proving a Dead/Suspect following an admitted Alive
-// is never lost (no resurrection). The buffer-replay / multi-pending-FIFO /
-// leave-folds-pending-self-Alive tests are deleted: they exercised the
-// deleted deferred-decision machinery and have no synchronous analog
-// (rejection is now an `AliveDelegate` veto — see
-// `alive_delegate_reject_drops_the_message`).
+// A deferred-admission design (Alive sitting in a pending-decision buffer
+// while a Dead/Suspect races in before the id is in `members`) would drop
+// the failure signal and then resurrect the node on Alive acceptance. The
+// architectural choice here is synchronous, inline admission — the race
+// window does not exist. These tests prove that a Dead/Suspect following
+// an admitted Alive is never lost (no resurrection). Rejection is an
+// `AliveDelegate` veto — see `alive_delegate_reject_drops_the_message`.
 
 /// A Dead arriving right after an (admitted) Alive must win — no resurrection.
 #[test]
@@ -5086,9 +5561,8 @@ fn probe_with_buddy_suspect_emits_one_compound_ping_then_suspect() {
 /// lone datagram (<= 1400) while their compound exceeds 1400. Without the
 /// gate the producer emits one unsplittable over-MTU `Compound`
 /// (fragmented / dropped ⇒ buddy refutation lost). With it: two
-/// `Packet`s, Ping then Suspect — faithful to memberlist-core's transport
-/// batcher, which emits separate <= max_packet_size datagrams rather than
-/// one oversize.
+/// `Packet`s, Ping then Suspect — separate <= max_packet_size datagrams
+/// rather than one oversize.
 #[test]
 fn probe_buddy_compound_over_mtu_splits_into_two_packets() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
@@ -5212,14 +5686,13 @@ fn gossip_compound_datagram_never_exceeds_mtu() {
 }
 
 /// (g) CRITICAL regression: the combined membership + user-broadcast path.
-///     Pre-fix, `drain_user_broadcasts` used a fresh 1400-byte budget that
-///     ignored the membership bytes already consumed AND charged only raw
-///     payload bytes, so the single emitted `Transmit::Compound`
-///     (membership ++ user, never MTU-split) blew to ~2600-2800 B (≈ 2x
-///     MTU). With the fix the user drain takes only the residual of the
-///     SAME compound_budget and is charged its assembled part size, so the
-///     whole assembled datagram is provably <= 1400. This is the path the
-///     suite previously left entirely untested.
+///     `drain_user_broadcasts` MUST share the SAME compound_budget the
+///     membership drain consumed and be charged its assembled part size;
+///     a fresh 1400-byte budget that ignored already-consumed membership
+///     bytes AND charged only raw payload bytes would let the single
+///     emitted `Transmit::Compound` (membership ++ user, never MTU-split)
+///     blow to ~2600-2800 B (~2x MTU). The whole assembled datagram is
+///     provably <= 1400.
 #[test]
 fn gossip_membership_plus_user_compound_within_mtu() {
   let (mut e, t0) = gossip_harness_one_target();
@@ -5241,10 +5714,10 @@ fn gossip_membership_plus_user_compound_within_mtu() {
     .with_delegate_version(DelegateVersion::V1);
     e.broadcast_message(SmolStr::new(id), Message::Alive(av));
   }
-  // AND several large user broadcasts. Pre-fix these rode a SEPARATE fresh
-  // 1400-byte budget (raw-byte charged) and were concatenated onto the
-  // already-near-1394 membership compound, the combination that blew the
-  // single datagram to ~2600-2800 B.
+  // AND several large user broadcasts. A separate fresh 1400-byte budget
+  // (raw-byte charged) concatenated onto the already-near-1394 membership
+  // compound would blow the single datagram to ~2600-2800 B — exactly
+  // what sharing one compound_budget prevents.
   for i in 0..6usize {
     let payload = vec![0xa5_u8; 400 + i * 100]; // ~400..900 B each
     e.queue_user_broadcast(bytes::Bytes::from(payload));
@@ -5259,7 +5732,7 @@ fn gossip_membership_plus_user_compound_within_mtu() {
     "single gossip target ⇒ exactly one transmit (membership ++ user), got {}",
     transmits.len()
   );
-  // Assemble via the SAME real wire path the other Task-5 MTU tests use.
+  // Assemble via the SAME real wire path the other MTU tests use.
   let assembled_len = assembled_datagram_len(&transmits[0]);
   assert!(
     assembled_len <= 1400,

@@ -19,6 +19,29 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 tracing = ["dep:tracing"]
 
+# Composed QUIC + memberlist Sans-I/O coordinator. Crypto-backend-agnostic:
+# the caller supplies the `quinn_proto` `EndpointConfig` / `ServerConfig` /
+# `ClientConfig`, built with whatever crypto backend they choose. Enable a
+# crypto-backend pass-through below (e.g. `quic-rustls-ring`) to pull a
+# backend into the dependency graph so those configs can be constructed.
+quic = ["dep:quinn-proto", "dep:slab"]
+
+# quinn-proto crypto-backend pass-throughs.
+quic-ring = ["quic", "quinn-proto/ring"]
+quic-rustls = ["quic", "quinn-proto/rustls"]
+quic-rustls-ring = ["quic", "quinn-proto/rustls-ring"]
+quic-aws-lc-rs = ["quic", "quinn-proto/aws-lc-rs"]
+quic-aws-lc-rs-fips = ["quic", "quinn-proto/aws-lc-rs-fips"]
+quic-rustls-aws-lc-rs = ["quic", "quinn-proto/rustls-aws-lc-rs"]
+quic-rustls-aws-lc-rs-fips = ["quic", "quinn-proto/rustls-aws-lc-rs-fips"]
+
+# quinn-proto auxiliary pass-throughs.
+quic-bloom = ["quic", "quinn-proto/bloom"]
+quic-log = ["quic", "quinn-proto/log"]
+quic-rustls-log = ["quic", "quinn-proto/rustls-log"]
+quic-qlog = ["quic", "quinn-proto/qlog"]
+quic-platform-verifier = ["quic", "quinn-proto/platform-verifier"]
+
 [dependencies]
 bytes.workspace = true
 indexmap.workspace = true
@@ -30,6 +53,14 @@ smallvec.workspace = true
 smol_str.workspace = true
 thiserror.workspace = true
 tracing = { workspace = true, optional = true }
+quinn-proto = { version = "0.11", default-features = false, optional = true }
+slab = { version = "0.4", optional = true }
 
 [dev-dependencies]
 rand = { workspace = true, features = ["std"] }
+rcgen = "0.14"
+# The quic test suite builds quinn-proto configs with the ring backend.
+# Run it with a backend feature, e.g. `--features quic-rustls-ring`.
+ring = "0.17"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pki-types = "1"

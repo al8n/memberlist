@@ -16,7 +16,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["tokio", "crc32", "snappy", "encryption", "dns", "tcp", "quic", "rayon"]
+default = ["tokio", "crc32", "snappy", "encryption", "dns", "tcp", "quic-rustls-ring", "rayon"]
 
 tokio = ["agnostic/tokio"]
 smol = ["agnostic/smol"]
@@ -37,16 +37,32 @@ xxhash64 = ["memberlist-core/xxhash64"]
 xxhash3 = ["memberlist-core/xxhash3"]
 murmur3 = ["memberlist-core/murmur3"]
 
-# Phase 8: `quic`/`net`/`tcp`/`tls` drive the umbrella's own machine-based
-# drivers (driver_quic / driver_net / tls module), built directly on
-# memberlist-machine + memberlist-wire. The frozen Phase-7 memberlist-net /
-# memberlist-quic crates are NOT a dependency of this crate at all — they
-# remain on disk as backup reference only (workspace-excluded, do not
-# compile against the post-Phase-9 machine). Crypto-provider selection
-# features for the new rustls/quinn-proto paths are introduced by Tasks
-# 8.2 / 8.5, not here.
-quic = ["agnostic/quinn", "dep:quinn-proto", "quinn-proto/rustls", "tls"]
+# `quic` activates the composed QUIC + memberlist Sans-I/O coordinator in
+# memberlist-machine (one UDP socket: reliable exchanges ride QUIC bidi
+# streams, unreliable gossip rides plain UDP), re-exported as
+# `memberlist::machine::QuicEndpoint`. Crypto-backend-agnostic: pick a
+# backend pass-through (e.g. `quic-rustls-ring`). The frozen memberlist-net
+# / memberlist-quic crates are not a dependency of this crate; they remain
+# on disk as read-only reference only.
+quic = ["memberlist-machine/quic", "agnostic/quinn"]
 quinn = ["quic"]
+
+# quinn-proto crypto-backend pass-throughs (forwarded through
+# memberlist-machine).
+quic-ring = ["quic", "memberlist-machine/quic-ring"]
+quic-rustls = ["quic", "memberlist-machine/quic-rustls"]
+quic-rustls-ring = ["quic", "memberlist-machine/quic-rustls-ring"]
+quic-aws-lc-rs = ["quic", "memberlist-machine/quic-aws-lc-rs"]
+quic-aws-lc-rs-fips = ["quic", "memberlist-machine/quic-aws-lc-rs-fips"]
+quic-rustls-aws-lc-rs = ["quic", "memberlist-machine/quic-rustls-aws-lc-rs"]
+quic-rustls-aws-lc-rs-fips = ["quic", "memberlist-machine/quic-rustls-aws-lc-rs-fips"]
+
+# quinn-proto auxiliary pass-throughs.
+quic-bloom = ["quic", "memberlist-machine/quic-bloom"]
+quic-log = ["quic", "memberlist-machine/quic-log"]
+quic-rustls-log = ["quic", "memberlist-machine/quic-rustls-log"]
+quic-qlog = ["quic", "memberlist-machine/quic-qlog"]
+quic-platform-verifier = ["quic", "memberlist-machine/quic-platform-verifier"]
 
 net = ["agnostic/net"]
 tcp = ["net"]
@@ -69,12 +85,11 @@ nodecraft.workspace = true
 smol_str.workspace = true
 tracing.workspace = true
 
-# Phase 8 new direct deps for the umbrella driver code.
+# Direct deps for the umbrella driver code.
 async-lock.workspace = true
 async-channel.workspace = true
 bytes.workspace = true
 futures.workspace = true
-quinn-proto = { version = "0.11", default-features = false, optional = true }
 # `std` (provider-free: webpki/std + pki-types/std + once_cell/std) is
 # required for the buffered `ServerConnection`/`ClientConnection` types and
 # the `std::error::Error` impl on `rustls::Error` that `tls.rs` composes. A
@@ -85,7 +100,7 @@ rustls-pki-types = { version = "1", default-features = false, optional = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 paste.workspace = true
-# Phase 8 Task 8.7 integration tests only. `rcgen` mints the QUIC
+# Integration tests only. `rcgen` mints the QUIC
 # self-signed cert. `rustls` is re-listed here with the `ring` feature so
 # the integration-test crate can name `rustls::crypto::ring` directly: the
 # library's own `rustls` dep is `default-features = false, features =

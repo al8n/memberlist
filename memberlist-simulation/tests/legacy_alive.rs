@@ -1,14 +1,11 @@
-//! Alive-family legacy unit tests ported from
-//! `memberlist-core/src/state/tests.rs` into deterministic simulation.
+//! Alive-family state-machine unit tests over the deterministic simulation.
 //!
-//! Each test mirrors its legacy counterpart's state-machine assertions;
-//! async ceremony, mutex locks, and delegate subscribers are replaced by
-//! the `Cluster` API.
+//! Each test exercises a specific Alive-transition invariant via the
+//! `Cluster` API.
 //!
 //! **Broadcast-count note**: The simulation `Endpoint` pre-queues one Alive
-//! broadcast for the local node at creation time (legacy does not do this at
-//! the equivalent stage). All `broadcast_queue_len` assertions therefore use
-//! `>= 1` rather than `== 1` where the legacy asserts exactly 1.
+//! broadcast for the local node at creation time. All `broadcast_queue_len`
+//! assertions therefore use `>= 1` rather than `== 1`.
 
 use memberlist_simulation::{Alive, Cluster, Dead, Event, Meta, Node, State};
 use memberlist_wire::typed::Message;
@@ -29,8 +26,6 @@ fn addr(port: u16) -> SocketAddr {
 /// - `get_node_incarnation(test_node) == 1`
 /// - A `NodeJoined` event is emitted
 /// - `broadcast_queue_len >= 1` (Alive broadcast enqueued for test_node)
-///
-/// Ported from `memberlist-core/src/state/tests.rs:994 alive_node_new_node`.
 #[test]
 fn alive_node_new_node() {
   let mut c = Cluster::new();
@@ -93,8 +88,6 @@ fn alive_node_new_node() {
 ///   already known; the event system fires NodeUpdated only on meta change,
 ///   and NodeJoined only on Dead→Alive; Suspect→Alive is not a join event)
 /// - `broadcast_queue_len >= 1` after resurrection
-///
-/// Ported from `memberlist-core/src/state/tests.rs:1113 alive_node_suspect_node`.
 #[test]
 fn alive_node_suspect_node() {
   let mut c = Cluster::new();
@@ -171,8 +164,6 @@ fn alive_node_suspect_node() {
 /// Inject Alive for a peer, then inject a second Alive with higher incarnation
 /// while the peer is already Alive. The state and state_change timestamp
 /// should be unchanged; no new join event emitted.
-///
-/// Ported from `memberlist-core/src/state/tests.rs:1187 alive_node_idempotent`.
 #[test]
 fn alive_node_idempotent() {
   let mut c = Cluster::new();
@@ -236,8 +227,6 @@ fn alive_node_idempotent() {
 /// - State remains Alive
 /// - Meta updated to "val2"
 /// - A `NodeUpdated` event emitted (not NodeJoined)
-///
-/// Ported from `memberlist-core/src/state/tests.rs:1243 alive_node_change_meta`.
 #[test]
 fn alive_node_change_meta() {
   let mut c = Cluster::new();
@@ -312,8 +301,6 @@ fn alive_node_change_meta() {
 /// construction and `alive_node(self, inc=2)` queues the refute, so
 /// `broadcast_queue_len >= 1`. We cannot reset the queue mid-test, so we
 /// assert `>= 1` and verify via the drain that at least one is `Message::Alive`.
-///
-/// Ported from `memberlist-core/src/state/tests.rs:1309 alive_node_refute`.
 #[test]
 fn alive_node_refute() {
   let mut c = Cluster::new();
@@ -353,15 +340,13 @@ fn alive_node_refute() {
 
 /// Two Alive messages for the SAME id but DIFFERENT addresses.
 ///
-/// **Phase 1 — live conflict**: second Alive is rejected, NodeConflict emitted.
+/// **Live conflict**: second Alive is rejected, NodeConflict emitted.
 ///   - state unchanged (addr1, meta empty)
 ///   - no broadcast for the conflicting Alive
 ///
-/// **Phase 2 — dead reclaim**: after marking the node Dead and waiting
+/// **Dead reclaim**: after marking the node Dead and waiting
 /// `dead_node_reclaim_time`, injecting Alive with the new address IS accepted.
 ///   - addr updates to addr2, meta updates to "foo"
-///
-/// Ported from `memberlist-core/src/state/tests.rs:1354 alive_node_conflict`.
 #[test]
 fn alive_node_conflict() {
   use memberlist_simulation::EndpointConfig;

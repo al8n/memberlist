@@ -71,20 +71,19 @@
 //! at the point of action (an ack/transmit/read whose `now >= deadline`
 //! is rejected, not retroactively undone), and any residual disagreement
 //! converges through the protocol's own self-healing (e.g. a node briefly
-//! suspected by a lost race refutes with a higher incarnation — exactly
-//! as upstream memberlist behaves). The driver therefore does **not** need
-//! to pre-filter stale input for correctness.
+//! suspected by a lost race refutes with a higher incarnation). The driver
+//! therefore does **not** need to pre-filter stale input for correctness.
 //!
 //! What *does* depend on the driver is **quality**: failure-detection
 //! latency and how often a healthy node is transiently suspected. These
 //! improve the more promptly and in-causal-order the driver delivers
 //! input. In particular, routing a reliable `Stream`'s endpoint events
 //! into the `Endpoint` *before* firing the `Endpoint`'s cumulative-probe
-//! `handle_timeout` narrows the transient-suspect window to upstream
-//! parity. That is a driver-side optimization, **not** a correctness
-//! requirement the machine relies on — the machine never compensates for
-//! a driver that delivers late; it just self-heals, and the driver owns
-//! making delivery prompt.
+//! `handle_timeout` narrows the transient-suspect window. That is a
+//! driver-side optimization, **not** a correctness requirement the
+//! machine relies on — the machine never compensates for a driver that
+//! delivers late; it just self-heals, and the driver owns making delivery
+//! prompt.
 //!
 //! ## Stream specifics
 //!
@@ -103,6 +102,11 @@
 #![allow(clippy::type_complexity, unexpected_cfgs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
+
+#[cfg(feature = "quic")]
+mod quic;
+#[cfg(feature = "quic")]
+pub use quic::{AddrBridge, QuicConfig, QuicEndpoint};
 
 pub mod ack;
 pub mod awareness;
