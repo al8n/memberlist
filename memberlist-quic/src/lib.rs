@@ -41,8 +41,6 @@ pub use options::*;
 pub mod stream_layer;
 use stream_layer::*;
 
-const MAX_MESSAGE_SIZE: usize = u32::MAX as usize;
-
 const PACKET_TAG: u8 = 254;
 const STREAM_TAG: u8 = 255;
 
@@ -231,7 +229,7 @@ where
       advertise_addr: final_advertise_addr,
       connection_pool,
       local_addr: self_addr,
-      max_packet_size: MAX_MESSAGE_SIZE.min(stream_layer.max_stream_data()),
+      max_packet_size: opts.max_packet_size.min(stream_layer.max_stream_data()),
       opts,
       packet_rx,
       stream_rx,

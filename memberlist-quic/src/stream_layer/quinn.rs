@@ -97,6 +97,7 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
     let acceptor = Self::Acceptor {
       endpoint: shared_ep.clone(),
       local_addr,
+      max_packet_size: self.opts.max_packet_size,
     };
 
     let connector = Self::Connector {
@@ -105,6 +106,7 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
       local_addr,
       client_config,
       connect_timeout: self.opts.connect_timeout,
+      max_packet_size: self.opts.max_packet_size,
       _marker: PhantomData,
     };
     Ok((local_addr, acceptor, connector))
@@ -115,6 +117,7 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
 pub struct QuinnAcceptor {
   endpoint: SharedEndpoint,
   local_addr: SocketAddr,
+  max_packet_size: usize,
 }
 
 impl Clone for QuinnAcceptor {
@@ -122,6 +125,7 @@ impl Clone for QuinnAcceptor {
     Self {
       endpoint: self.endpoint.clone(),
       local_addr: self.local_addr,
+      max_packet_size: self.max_packet_size,
     }
   }
 }
@@ -139,7 +143,7 @@ impl QuicAcceptor for QuinnAcceptor {
     let remote_addr = conn.remote_address();
 
     Ok((
-      QuinnConnection::new(conn, self.local_addr, remote_addr),
+      QuinnConnection::new(conn, self.local_addr, remote_addr, self.max_packet_size),
       remote_addr,
     ))
   }
@@ -162,6 +166,7 @@ pub struct QuinnConnector<R> {
   connect_timeout: Duration,
   local_addr: SocketAddr,
   _marker: PhantomData<R>,
+  max_packet_size: usize,
 }
 
 impl<R> QuicConnector for QuinnConnector<R>
@@ -178,7 +183,7 @@ where
     let conn = R::timeout(self.connect_timeout, connecting)
       .await
       .map_err(io::Error::from)??;
-    Ok(QuinnConnection::new(conn, self.local_addr, addr))
+    Ok(QuinnConnection::new(conn, self.local_addr, addr, self.max_packet_size))
   }
 
   async fn close(&self) -> io::Result<()> {
@@ -200,13 +205,15 @@ where
 pub struct QuinnProtoReader {
   stream: RecvStream,
   peek_buf: MediumVec<u8>,
+  max_packet_size: usize,
 }
 
-impl From<RecvStream> for QuinnProtoReader {
-  fn from(stream: RecvStream) -> Self {
+impl QuinnProtoReader {
+  fn new(stream: RecvStream, max_packet_size: usize) -> Self {
     Self {
       stream,
       peek_buf: MediumVec::new(),
+      max_packet_size,
     }
   }
 }
@@ -345,10 +352,10 @@ pub struct QuinnStream {
 
 impl QuinnStream {
   #[inline]
-  fn new(send: SendStream, recv: RecvStream) -> Self {
+  fn new(send: SendStream, recv: RecvStream, max_packet_size: usize) -> Self {
     Self {
       send,
-      recv: recv.into(),
+      recv: QuinnProtoReader::new(recv, max_packet_size),
     }
   }
 }
@@ -399,11 +406,10 @@ impl QuicStream for QuinnStream {
   type SendStream = SendStream;
 
   async fn read_packet(&mut self) -> std::io::Result<bytes::Bytes> {
-    // TODO(al8n): make size limit configurable?
     self
       .recv
       .stream
-      .read_to_end(u32::MAX as usize)
+      .read_to_end(self.recv.max_packet_size)
       .await
       .map(|data| {
         if !self.recv.peek_buf.is_empty() {
@@ -429,6 +435,7 @@ pub struct QuinnConnection {
   conn: Connection,
   local_addr: SocketAddr,
   remote_addr: SocketAddr,
+  max_packet_size: usize,
 }
 
 impl Clone for QuinnConnection {
@@ -437,17 +444,19 @@ impl Clone for QuinnConnection {
       conn: self.conn.clone(),
       local_addr: self.local_addr,
       remote_addr: self.remote_addr,
+      max_packet_size: self.max_packet_size,
     }
   }
 }
 
 impl QuinnConnection {
   #[inline]
-  fn new(conn: Connection, local_addr: SocketAddr, remote_addr: SocketAddr) -> Self {
+  fn new(conn: Connection, local_addr: SocketAddr, remote_addr: SocketAddr, max_packet_size: usize) -> Self {
     Self {
       conn,
       local_addr,
       remote_addr,
+      max_packet_size,
     }
   }
 }
@@ -457,12 +466,12 @@ impl QuicConnection for QuinnConnection {
 
   async fn accept_bi(&self) -> io::Result<(Self::Stream, SocketAddr)> {
     let (send, recv) = self.conn.accept_bi().await?;
-    Ok((QuinnStream::new(send, recv), self.remote_addr))
+    Ok((QuinnStream::new(send, recv, self.max_packet_size), self.remote_addr))
   }
 
   async fn open_bi(&self) -> io::Result<(Self::Stream, SocketAddr)> {
     let (send, recv) = self.conn.open_bi().await?;
-    Ok((QuinnStream::new(send, recv), self.remote_addr))
+    Ok((QuinnStream::new(send, recv, self.max_packet_size), self.remote_addr))
   }
 
   async fn close(&self) -> io::Result<()> {

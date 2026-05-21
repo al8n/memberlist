@@ -88,6 +88,16 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   timeout: Option<Duration>,
 
+  /// Maximum packet size in bytes. Used as an upper bound when computing
+  /// the effective `max_packet_size` for the transport.
+  ///
+  /// Default is `u32::MAX`.
+  #[viewit(
+    getter(const, attrs(doc = "Get the maximum packet size in bytes.")),
+    setter(attrs(doc = "Set the maximum packet size in bytes. (Builder pattern)"))
+  )]
+  max_packet_size: usize,
+
   /// The period of time to cleanup the connection pool.
   #[cfg_attr(
     feature = "serde",
@@ -183,6 +193,7 @@ where
       stream_layer: self.stream_layer.clone(),
       timeout: self.timeout,
       connection_pool_cleanup_period: self.connection_pool_cleanup_period,
+      max_packet_size: self.max_packet_size,
       cidrs_policy: self.cidrs_policy.clone(),
       #[cfg(feature = "metrics")]
       metric_labels: self.metric_labels.clone(),
@@ -250,6 +261,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
       stream_layer: stream_layer_opts,
       cidrs_policy: CIDRsPolicy::allow_all(),
       connection_pool_cleanup_period: default_connection_pool_cleanup_period(),
+      max_packet_size: usize::MAX,
       #[cfg(feature = "metrics")]
       metric_labels: None,
     }
@@ -289,6 +301,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
         timeout: opts.timeout,
         connection_pool_cleanup_period: opts.connection_pool_cleanup_period,
         cidrs_policy: opts.cidrs_policy,
+        max_packet_size: opts.max_packet_size,
         #[cfg(feature = "metrics")]
         metric_labels: opts.metric_labels,
       },
@@ -305,6 +318,7 @@ pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   connection_pool_cleanup_period: Duration,
   connection_ttl: Option<Duration>,
   cidrs_policy: CIDRsPolicy,
+  max_packet_size: usize,
   #[cfg(feature = "metrics")]
   metric_labels: Option<Arc<memberlist_core::proto::MetricLabels>>,
 }
