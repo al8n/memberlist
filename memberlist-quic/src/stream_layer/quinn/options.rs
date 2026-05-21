@@ -44,7 +44,7 @@ pub struct Options {
   /// To handle such scenarios more gracefully and detect errors like attempting
   /// to connect to a unreachable address more promptly, you need to set this config properly.
   ///
-  /// Default value is 100ms.
+  /// Default value is 10 seconds.
   #[viewit(
     getter(const, attrs(doc = "Gets the timeout of the connect phase.")),
     setter(attrs(doc = "Sets the timeout for connecting to an address."))

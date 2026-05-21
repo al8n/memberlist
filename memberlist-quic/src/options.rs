@@ -102,7 +102,7 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   connection_pool_cleanup_period: Duration,
 
-  /// The time to live for each connection in the connection pool. Default is `None`.
+  /// The time to live for each connection in the connection pool. Default is 30 seconds.
   #[viewit(
     getter(
       const,
@@ -245,7 +245,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
       timeout: None,
       bind_addresses: IndexSet::new(),
       advertise_address: None,
-      connection_ttl: None,
+      connection_ttl: Some(Duration::from_secs(30)),
       resolver: resolver_options,
       stream_layer: stream_layer_opts,
       cidrs_policy: CIDRsPolicy::allow_all(),
