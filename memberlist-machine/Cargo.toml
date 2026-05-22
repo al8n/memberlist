@@ -58,6 +58,15 @@ tls = ["dep:rustls", "dep:rustls-pki-types"]
 # layer replaced by the raw-passthrough RawRecords codec.
 tcp = []
 
+# Compression backend pass-throughs — enable the matching memberlist-wire
+# backend so callers can build CompressionOptions without a separate
+# memberlist-wire dependency. Also used by the tcp unit tests that exercise
+# the StreamEndpoint compress/decompress round-trip.
+compression-lz4 = ["memberlist-wire/lz4"]
+compression-snappy = ["memberlist-wire/snappy"]
+compression-zstd = ["memberlist-wire/zstd"]
+compression-brotli = ["memberlist-wire/brotli"]
+
 # rustls crypto-backend pass-throughs.
 tls-rustls-ring = ["tls", "rustls/ring"]
 tls-rustls-aws-lc-rs = ["tls", "rustls/aws_lc_rs"]

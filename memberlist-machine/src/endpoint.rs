@@ -380,6 +380,15 @@ where
     matches!(self.lifecycle, Lifecycle::Leaving)
   }
 
+  /// The configured maximum reliable stream frame size. The composed
+  /// stream-transport coordinators read this as the reliable-unit /
+  /// decompressed-payload ceiling so the limit always tracks
+  /// `EndpointConfig::max_stream_frame_size` rather than a separate constant.
+  #[cfg(any(feature = "tls", feature = "tcp", feature = "quic"))]
+  pub(crate) const fn max_stream_frame_size(&self) -> usize {
+    self.cfg.max_stream_frame_size()
+  }
+
   /// access to the broadcast queue (used by transitions).
   pub(crate) fn broadcast_alive(&mut self, state: &LocalNodeState<I, A>) {
     let alive = Alive::new(
@@ -2061,7 +2070,7 @@ where
   /// MTU, matching the legacy memberlist default and keeping UDP gossip
   /// un-fragmented. The compound budget reserves its framing from this; a
   /// lone user `Packet` is bounded directly by it.
-  const GOSSIP_MTU: usize = 1400;
+  pub(crate) const GOSSIP_MTU: usize = 1400;
 
   /// Drain user-data payloads up to `limit` total bytes,
   /// in FIFO order. Used by the gossip scheduler. Returns the drained

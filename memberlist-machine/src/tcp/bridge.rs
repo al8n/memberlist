@@ -37,6 +37,11 @@ mod tests {
     Some(s.as_bytes().to_vec())
   }
 
+  /// Reliable-unit ceiling for the bridge test pairs — the `EndpointConfig`
+  /// default `max_stream_frame_size`, generous above every frame these tests
+  /// exchange.
+  const TEST_RELIABLE_MAX: usize = 64 * 1024 * 1024;
+
   /// Build a `Handshaking` dialer/acceptor bridge pair over a shared label.
   /// The dialer queues its outbound `[12][len][label]` prefix eagerly at
   /// construction; the acceptor's prefix is queued lazily once its inbound
@@ -54,8 +59,18 @@ mod tests {
     let dialer = RawRecords::dialer(label(cluster), false);
     let acceptor = RawRecords::acceptor(label(cluster), false);
     (
-      StreamBridge::new(dialer, deadline),
-      StreamBridge::new(acceptor, deadline),
+      StreamBridge::new(
+        dialer,
+        deadline,
+        memberlist_wire::CompressionOptions::disabled(),
+        TEST_RELIABLE_MAX,
+      ),
+      StreamBridge::new(
+        acceptor,
+        deadline,
+        memberlist_wire::CompressionOptions::disabled(),
+        TEST_RELIABLE_MAX,
+      ),
     )
   }
 
@@ -235,11 +250,19 @@ mod tests {
     let now = Instant::now();
     // Acceptor expects `cluster-x`; the dialer presents `cluster-other`.
     let acceptor = RawRecords::acceptor(label("cluster-x"), false);
-    let mut server =
-      StreamBridge::<SmolStr, SocketAddr, RawRecords>::new(acceptor, now + Duration::from_secs(10));
+    let mut server = StreamBridge::<SmolStr, SocketAddr, RawRecords>::new(
+      acceptor,
+      now + Duration::from_secs(10),
+      memberlist_wire::CompressionOptions::disabled(),
+      TEST_RELIABLE_MAX,
+    );
     let dialer = RawRecords::dialer(label("cluster-other"), false);
-    let mut client =
-      StreamBridge::<SmolStr, SocketAddr, RawRecords>::new(dialer, now + Duration::from_secs(10));
+    let mut client = StreamBridge::<SmolStr, SocketAddr, RawRecords>::new(
+      dialer,
+      now + Duration::from_secs(10),
+      memberlist_wire::CompressionOptions::disabled(),
+      TEST_RELIABLE_MAX,
+    );
 
     let mut prefix = Vec::new();
     client.poll_transport_transmit(&mut prefix);
@@ -294,7 +317,12 @@ mod tests {
     // the established intake validates the inbound response label (rather
     // than the pre-promote handshaking intake).
     let dialer = RawRecords::dialer(label("cluster-x"), false);
-    let mut client = StreamBridge::<SmolStr, SocketAddr, RawRecords>::new(dialer, deadline);
+    let mut client = StreamBridge::<SmolStr, SocketAddr, RawRecords>::new(
+      dialer,
+      deadline,
+      memberlist_wire::CompressionOptions::disabled(),
+      TEST_RELIABLE_MAX,
+    );
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
       Endpoint::new(EndpointConfig::new(SmolStr::new("cli"), addr(7300)));
     let sid = ep_c.start_reliable_ping(
@@ -364,7 +392,12 @@ mod tests {
     let deadline = now + Duration::from_secs(10);
     // An acceptor that never receives its inbound label stays `Handshaking`.
     let acceptor = RawRecords::acceptor(label("cluster-x"), false);
-    let mut server = StreamBridge::<SmolStr, SocketAddr, RawRecords>::new(acceptor, deadline);
+    let mut server = StreamBridge::<SmolStr, SocketAddr, RawRecords>::new(
+      acceptor,
+      deadline,
+      memberlist_wire::CompressionOptions::disabled(),
+      TEST_RELIABLE_MAX,
+    );
 
     // Before the deadline a `pump_out` is a clean no-op (still Handshaking,
     // still surfacing the deadline as its only timer).
@@ -700,6 +733,81 @@ mod tests {
 
     // The unused `server` still proves the label settled.
     assert!(!server.is_handshaking());
+  }
+
+  #[cfg(feature = "compression-lz4")]
+  #[test]
+  fn stream_reliable_unit_accumulation_roundtrips() {
+    use memberlist_wire::{
+      encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
+    };
+    let opts = CompressionOptions::disabled()
+      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_threshold(8);
+    let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);
+    let unit = encode_reliable_unit(&opts, &framed);
+    // The receiver accumulates the unit and drains one complete frame.
+    let mut accum = unit.clone();
+    let (back, consumed) = take_reliable_unit(&accum, 16 * 1024 * 1024)
+      .expect("decode ok")
+      .expect("a complete unit is present");
+    accum.drain(..consumed);
+    assert_eq!(back, framed);
+    assert!(accum.is_empty(), "the whole unit was consumed");
+  }
+
+  #[cfg(feature = "compression-lz4")]
+  #[test]
+  fn stream_reliable_unit_split_across_two_reads_buffers_then_completes() {
+    // REGRESSION TEST for the split-wrapper bug: a byte stream does not
+    // preserve write/read boundaries, so a single compressed unit may arrive
+    // in two reads. The accumulation buffer must hold the first partial read
+    // (no frame yet) and complete on the second, decompressing to the
+    // original. Feeding the unit whole would have decoded fine; the bug was
+    // that a SPLIT unit tore the exchange down.
+    use memberlist_wire::{
+      encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
+    };
+    let opts = CompressionOptions::disabled()
+      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_threshold(8);
+    let framed = b"the quick brown fox jumps over the lazy dog".repeat(32);
+    let unit = encode_reliable_unit(&opts, &framed);
+    assert!(unit.len() > 4, "unit is large enough to split");
+    let split = unit.len() / 2;
+
+    let mut accum: Vec<u8> = Vec::new();
+    // First read: the front half. No complete unit yet — buffer it.
+    accum.extend_from_slice(&unit[..split]);
+    assert!(
+      take_reliable_unit(&accum, 16 * 1024 * 1024)
+        .expect("a partial unit is not an error")
+        .is_none(),
+      "the first partial read must buffer, not decode"
+    );
+    // Second read: the remainder. Now a complete unit drains.
+    accum.extend_from_slice(&unit[split..]);
+    let (back, consumed) = take_reliable_unit(&accum, 16 * 1024 * 1024)
+      .expect("decode ok")
+      .expect("the unit is complete after the second read");
+    accum.drain(..consumed);
+    assert_eq!(back, framed, "the split unit decompresses to the original");
+    assert!(accum.is_empty());
+  }
+
+  #[test]
+  fn stream_reliable_unit_disabled_is_byte_identical() {
+    // Disabled compression: the unit payload is the framed bytes verbatim,
+    // and the round-trip is byte-identical end to end (no wrapper).
+    use memberlist_wire::{encode_reliable_unit, take_reliable_unit, CompressionOptions};
+    let opts = CompressionOptions::disabled();
+    let framed = b"plain reliable frame bytes that are not compressed".to_vec();
+    let unit = encode_reliable_unit(&opts, &framed);
+    let (back, consumed) = take_reliable_unit(&unit, 16 * 1024 * 1024)
+      .expect("decode ok")
+      .expect("a complete unit");
+    assert_eq!(back, framed);
+    assert_eq!(consumed, unit.len());
   }
 
   /// Render a `StreamPhase` for assert messages without requiring `Debug` on the

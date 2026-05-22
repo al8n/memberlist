@@ -193,6 +193,10 @@ where
 {
   ep: Endpoint<I, A>,
   cfg: R::Options,
+  /// Cross-transport compression configuration. The coordinator is the single
+  /// compress/decompress point on both the gossip and reliable paths; a
+  /// disabled `CompressionOptions` makes both paths identity.
+  compression: memberlist_wire::CompressionOptions,
   /// In-flight reliable exchanges (one bridge each), keyed by [`ExchangeId`].
   /// Connection-per-exchange — no pool, slab, or drained-reap.
   conns: StreamConns<I, A, R>,
@@ -279,6 +283,7 @@ where
     Self {
       ep,
       cfg,
+      compression: memberlist_wire::CompressionOptions::disabled(),
       conns: StreamConns::new(),
       exchanges: HashMap::new(),
       out_transmit: std::collections::VecDeque::new(),
@@ -302,6 +307,72 @@ where
   /// leaked after an exchange completed or its connection dropped.
   pub fn live_bridge_count(&self) -> usize {
     self.conns.len()
+  }
+
+  /// Build the coordinator with an explicit cross-transport compression
+  /// configuration. [`Self::new`] is `with_compression` with compression
+  /// disabled.
+  pub fn with_compression(
+    ep: Endpoint<I, A>,
+    cfg: R::Options,
+    compression: memberlist_wire::CompressionOptions,
+  ) -> Self {
+    let mut this = Self::new(ep, cfg);
+    this.compression = compression;
+    this
+  }
+
+  /// The configured cross-transport compression options.
+  pub fn compression(&self) -> memberlist_wire::CompressionOptions {
+    self.compression
+  }
+
+  /// Compress one outbound gossip datagram for the wire. The codec-owning
+  /// driver calls this on the bytes it produced from a [`Transmit`] before
+  /// handing them to the UDP socket. When compression is disabled, or the
+  /// datagram does not benefit, the original bytes are returned.
+  pub fn compress_gossip(&self, datagram: &[u8]) -> Vec<u8> {
+    match self.compression.apply(datagram) {
+      Ok(memberlist_wire::CompressionOutcome::Compressed(packed)) => {
+        let wrapped = memberlist_wire::encode_compressed_frame(
+          self
+            .compression
+            .algorithm()
+            .expect("a Compressed outcome implies an algorithm is set"),
+          datagram.len(),
+          &packed,
+        );
+        // The wrapper header (tag + algorithm + `orig_len` varint) is overhead
+        // on top of the raw compressed bytes; if it pushes the wrapped
+        // datagram to `datagram`'s size or larger, send `datagram` plain so
+        // compressed gossip can never inflate past the uncompressed datagram
+        // (and never cross a gossip MTU the plain datagram already fit
+        // within). The receiver's `unwrap_transforms` passes a non-wrapper
+        // buffer through unchanged.
+        if wrapped.len() < datagram.len() {
+          wrapped
+        } else {
+          datagram.to_vec()
+        }
+      }
+      // Plain outcome, or a backend error: emit the datagram uncompressed. A
+      // backend compress error is non-fatal — the uncompressed datagram is
+      // always valid and the decoder's leading tag tells it which form it got.
+      _ => datagram.to_vec(),
+    }
+  }
+
+  /// Decompress one inbound gossip datagram. The codec-owning driver calls
+  /// this on the raw bytes from [`Self::poll_memberlist_ingress`] before
+  /// decoding frames. A datagram with no compression wrapper is returned
+  /// unchanged. A corrupt or unknown-algorithm wrapper is an `Err` — the driver
+  /// drops the datagram (gossip is lossy and self-healing).
+  pub fn decompress_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, memberlist_wire::FrameError> {
+    // Ceiling is the gossip MTU — the maximum size any compliant gossip
+    // datagram decompresses to. A wrapper claiming more is not a compliant
+    // datagram and is rejected; the driver then drops it.
+    memberlist_wire::unwrap_transforms(datagram, Endpoint::<I, A>::GOSSIP_MTU)
+      .map(|cow| cow.into_owned())
   }
 
   /// Initiate one SWIM probe tick on the inner membership endpoint.
@@ -643,7 +714,12 @@ where
     let peer_socket = B::to_socket(&from);
     match R::acceptor(&self.cfg) {
       Ok(records) => {
-        let bridge = StreamBridge::new(records, now + ACCEPT_HANDSHAKE_DEADLINE);
+        let bridge = StreamBridge::new(
+          records,
+          now + ACCEPT_HANDSHAKE_DEADLINE,
+          self.compression,
+          self.ep.max_stream_frame_size(),
+        );
         self.conns.insert(id, bridge);
         self.exchanges.insert(
           id,
@@ -745,6 +821,14 @@ where
   #[cfg(all(test, feature = "tcp"))]
   pub(crate) fn exchange_ids(&self) -> Vec<ExchangeId> {
     self.conns.ids()
+  }
+
+  /// The reliable-unit ceiling a given exchange's bridge was built with, for a
+  /// test asserting the ceiling tracks `EndpointConfig::max_stream_frame_size`
+  /// rather than a hard-coded constant.
+  #[cfg(all(test, feature = "tcp"))]
+  pub(crate) fn bridge_reliable_max(&mut self, id: ExchangeId) -> Option<usize> {
+    self.conns.get_mut(id).map(|b| b.reliable_max())
   }
 
   /// Append one [`StreamAction::Shutdown`] / [`StreamAction::Close`] to the
@@ -1199,7 +1283,12 @@ where
         }
       };
       let exchange = self.conns.allocate();
-      let bridge = StreamBridge::new(records, deadline);
+      let bridge = StreamBridge::new(
+        records,
+        deadline,
+        self.compression,
+        self.ep.max_stream_frame_size(),
+      );
       self.conns.insert(exchange, bridge);
       self.exchanges.insert(
         exchange,

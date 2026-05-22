@@ -111,7 +111,7 @@ mod tests {
   use bytes::Bytes;
   use smol_str::SmolStr;
 
-  use super::{TcpOptions, records::RawRecords};
+  use super::{records::RawRecords, TcpOptions};
   use crate::{
     addr_bridge::AddrBridge,
     config::EndpointConfig,
@@ -1591,6 +1591,92 @@ mod tests {
       0,
       "the bridge was reaped on the dial-failure path",
     );
+  }
+
+  #[cfg(feature = "compression-lz4")]
+  #[test]
+  fn stream_endpoint_gossip_compression_roundtrips() {
+    use memberlist_wire::{CompressAlgorithm, CompressionOptions};
+    let ep = endpoint(7100);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let opts = CompressionOptions::disabled()
+      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_threshold(64);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::with_compression(ep, cfg, opts);
+    let datagram = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".repeat(8);
+    let on_wire = coord.compress_gossip(&datagram);
+    assert!(
+      on_wire.len() < datagram.len(),
+      "compressible datagram must shrink on the wire"
+    );
+    let back = coord.decompress_gossip(&on_wire).expect("decompress");
+    assert_eq!(back, datagram);
+  }
+
+  #[cfg(feature = "compression-lz4")]
+  #[test]
+  fn stream_endpoint_over_mtu_compressed_gossip_is_rejected() {
+    use memberlist_wire::{CompressAlgorithm, CompressionOptions};
+    let ep = endpoint(7102);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let opts = CompressionOptions::disabled()
+      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_threshold(64);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::with_compression(ep, cfg, opts);
+    // A wrapper whose orig_len exceeds the gossip MTU cannot be produced by
+    // any compliant coordinator. Build one synthetically and assert it is
+    // rejected without touching the body (the bomb guard checks orig_len
+    // before allocation).
+    let over_mtu = Endpoint::<SmolStr, SocketAddr>::GOSSIP_MTU + 1;
+    let frame = memberlist_wire::encode_compressed_frame(CompressAlgorithm::Lz4, over_mtu, b"x");
+    assert!(
+      coord.decompress_gossip(&frame).is_err(),
+      "a compressed gossip frame claiming orig_len > GOSSIP_MTU must be rejected"
+    );
+  }
+
+  #[cfg(feature = "compression-lz4")]
+  #[test]
+  fn stream_endpoint_compressed_gossip_never_inflates() {
+    use memberlist_wire::{CompressAlgorithm, CompressionOptions};
+    let ep = endpoint(7101);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    // Low threshold so the compressor attempts compression for all sizes in
+    // the sweep, exercising the don't-expand else branch for sizes where the
+    // wrapper header overhead erases the raw saving.
+    let opts = CompressionOptions::disabled()
+      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_threshold(1);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::with_compression(ep, cfg, opts);
+    for len in 1..=1500 {
+      // Mostly-varying pattern with a short repeated motif: the backend's
+      // saving is small and varies with `len`, ensuring the don't-expand
+      // else branch is exercised for some sizes while still round-tripping
+      // for all.
+      let input: Vec<u8> = (0..len)
+        .map(|i| {
+          let base = (i % 7) as u8;
+          base ^ ((i / 7) as u8).wrapping_mul(3)
+        })
+        .collect();
+      let compressed = coord.compress_gossip(&input);
+      assert!(
+        compressed.len() <= input.len(),
+        "compress_gossip inflated datagram at len={len}: {} > {}",
+        compressed.len(),
+        input.len(),
+      );
+      let back = coord
+        .decompress_gossip(&compressed)
+        .expect("decompress failed");
+      assert_eq!(
+        back, input,
+        "compress_gossip round-trip failed at len={len}",
+      );
+    }
   }
 
   // ---- helpers ----------------------------------------------------------

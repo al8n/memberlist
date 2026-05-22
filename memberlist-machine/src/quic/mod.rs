@@ -27,7 +27,7 @@ use crate::{
 };
 use bridge::Bridge;
 use conn::ConnTable;
-use demux::{Class, classify};
+use demux::{classify, Class};
 
 /// One pending dial intent the coordinator owes a `service_dials` attempt to.
 ///
@@ -82,6 +82,9 @@ where
   ep: Endpoint<I, A>,
   quinn: QuinnEndpoint,
   cfg: QuicConfig,
+  /// Cross-transport compression configuration. A disabled `CompressionOptions`
+  /// makes the gossip compress/decompress methods identity.
+  compression: memberlist_wire::CompressionOptions,
   conns: ConnTable,
   bridges: HashMap<StreamId, Bridge<I, A>>,
   /// Outbound UDP datagrams produced this tick (quinn datagrams + stateless
@@ -248,6 +251,7 @@ where
       ep,
       quinn,
       cfg,
+      compression: memberlist_wire::CompressionOptions::disabled(),
       conns: ConnTable::new(),
       bridges: HashMap::new(),
       out: std::collections::VecDeque::new(),
@@ -266,6 +270,65 @@ where
       bridges_terminalized_via_close_command: 0,
       _addr: core::marker::PhantomData,
     }
+  }
+
+  /// Build the coordinator with an explicit cross-transport compression
+  /// configuration. [`Self::new`] is `with_compression` with compression
+  /// disabled.
+  pub fn with_compression(
+    ep: Endpoint<I, A>,
+    cfg: QuicConfig,
+    compression: memberlist_wire::CompressionOptions,
+  ) -> Self {
+    let mut this = Self::new(ep, cfg);
+    this.compression = compression;
+    this
+  }
+
+  /// The configured cross-transport compression options.
+  pub fn compression(&self) -> memberlist_wire::CompressionOptions {
+    self.compression
+  }
+
+  /// Compress one outbound gossip datagram for the wire. When compression is
+  /// disabled, or the datagram does not benefit, the original bytes are
+  /// returned.
+  pub fn compress_gossip(&self, datagram: &[u8]) -> Vec<u8> {
+    match self.compression.apply(datagram) {
+      Ok(memberlist_wire::CompressionOutcome::Compressed(packed)) => {
+        let wrapped = memberlist_wire::encode_compressed_frame(
+          self
+            .compression
+            .algorithm()
+            .expect("a Compressed outcome implies an algorithm is set"),
+          datagram.len(),
+          &packed,
+        );
+        // The wrapper header (tag + algorithm + `orig_len` varint) is overhead
+        // on top of the raw compressed bytes; if it pushes the wrapped
+        // datagram to `datagram`'s size or larger, send `datagram` plain so
+        // compressed gossip can never inflate. The receiver's
+        // `unwrap_transforms` passes a non-wrapper buffer through unchanged.
+        if wrapped.len() < datagram.len() {
+          wrapped
+        } else {
+          datagram.to_vec()
+        }
+      }
+      // Plain outcome, or a backend error: emit the datagram uncompressed.
+      _ => datagram.to_vec(),
+    }
+  }
+
+  /// Decompress one inbound gossip datagram. A datagram with no compression
+  /// wrapper is returned unchanged; a corrupt or unknown-algorithm wrapper is
+  /// an `Err` and the driver drops the datagram (gossip is self-healing).
+  pub fn decompress_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, memberlist_wire::FrameError> {
+    // Ceiling is the gossip MTU — the maximum size any compliant gossip
+    // datagram decompresses to. A wrapper claiming more is not a compliant
+    // datagram and is rejected; the driver then drops it.
+    memberlist_wire::unwrap_transforms(datagram, Endpoint::<I, A>::GOSSIP_MTU)
+      .map(|cow| cow.into_owned())
   }
 
   /// Borrow the inner membership endpoint (members / queue_user_broadcast / …).
@@ -1088,7 +1151,10 @@ where
               let peer = e.peer();
               let stream = self.ep.accept_stream(B::from_socket(peer), now);
               let id = stream.id();
-              self.bridges.insert(id, Bridge::new(stream, ch, sid));
+              let reliable_max = self.ep.max_stream_frame_size();
+              self
+                .bridges
+                .insert(id, Bridge::new(stream, ch, sid, self.compression, reliable_max));
             }
           }
           quinn_proto::Event::Stream(quinn_proto::StreamEvent::Finished { id: sid }) => {
@@ -1355,9 +1421,11 @@ where
             match e.conn_mut().streams().open(Dir::Bi) {
               Some(sid) => match self.ep.dial_succeeded(id, now) {
                 Some(stream) => {
-                  self
-                    .bridges
-                    .insert(stream.id(), Bridge::new(stream, ch, sid));
+                  let reliable_max = self.ep.max_stream_frame_size();
+                  self.bridges.insert(
+                    stream.id(),
+                    Bridge::new(stream, ch, sid, self.compression, reliable_max),
+                  );
                 }
                 None => {
                   // Defense-in-depth: the deadline pre-check above
@@ -3026,6 +3094,100 @@ mod tests {
          its send half by the atomic failure transition. conn {ch:?} \
          has {send_streams_open} send_streams open — indicating a send \
          half was orphaned in StreamsState::send."
+      );
+    }
+  }
+
+  #[cfg(feature = "compression-lz4")]
+  fn build_test_quic_endpoint_with_compression(
+    compression: memberlist_wire::CompressionOptions,
+  ) -> QuicEndpoint<SmolStr, SocketAddr, IdBridge> {
+    let addr: SocketAddr = "127.0.0.1:7999".parse().unwrap();
+    let now = Instant::now();
+    let cfg =
+      EndpointConfig::new(SmolStr::new("test"), addr).with_rng_seed(Some(addr.port() as u64));
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+    ep.start_scheduling(now);
+    let qc = test_config();
+    QuicEndpoint::<SmolStr, SocketAddr, IdBridge>::with_compression(ep, qc, compression)
+  }
+
+  #[cfg(all(test, feature = "quic", feature = "compression-lz4"))]
+  #[test]
+  fn quic_endpoint_gossip_compression_roundtrips() {
+    use memberlist_wire::{CompressAlgorithm, CompressionOptions};
+    let coord = build_test_quic_endpoint_with_compression(
+      CompressionOptions::disabled()
+        .with_algorithm(Some(CompressAlgorithm::Lz4))
+        .with_threshold(64),
+    );
+    let datagram = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".repeat(8);
+    let on_wire = coord.compress_gossip(&datagram);
+    assert!(
+      on_wire.len() < datagram.len(),
+      "compressible datagram must shrink"
+    );
+    let back = coord.decompress_gossip(&on_wire).expect("decompress");
+    assert_eq!(back, datagram);
+  }
+
+  #[cfg(all(test, feature = "quic", feature = "compression-lz4"))]
+  #[test]
+  fn quic_endpoint_over_mtu_compressed_gossip_is_rejected() {
+    // A wrapper whose orig_len exceeds the gossip MTU cannot be produced by
+    // any compliant coordinator. Build one synthetically and assert it is
+    // rejected without touching the body (the bomb guard checks orig_len
+    // before allocation).
+    use memberlist_wire::CompressAlgorithm;
+    let coord = build_test_quic_endpoint_with_compression(
+      memberlist_wire::CompressionOptions::disabled()
+        .with_algorithm(Some(CompressAlgorithm::Lz4))
+        .with_threshold(64),
+    );
+    let over_mtu = Endpoint::<SmolStr, SocketAddr>::GOSSIP_MTU + 1;
+    let frame = memberlist_wire::encode_compressed_frame(CompressAlgorithm::Lz4, over_mtu, b"x");
+    assert!(
+      coord.decompress_gossip(&frame).is_err(),
+      "a compressed gossip frame claiming orig_len > GOSSIP_MTU must be rejected"
+    );
+  }
+
+  #[cfg(all(test, feature = "quic", feature = "compression-lz4"))]
+  #[test]
+  fn quic_endpoint_compressed_gossip_never_inflates() {
+    use memberlist_wire::{CompressAlgorithm, CompressionOptions};
+    // Low threshold so the compressor attempts compression for all sizes in
+    // the sweep, exercising the don't-expand else branch for sizes where the
+    // wrapper header overhead erases the raw saving.
+    let coord = build_test_quic_endpoint_with_compression(
+      CompressionOptions::disabled()
+        .with_algorithm(Some(CompressAlgorithm::Lz4))
+        .with_threshold(1),
+    );
+    for len in 1..=1500 {
+      // Mostly-varying pattern with a short repeated motif: the backend's
+      // saving is small and varies with `len`, ensuring the don't-expand
+      // else branch is exercised for some sizes while still round-tripping
+      // for all.
+      let input: Vec<u8> = (0..len)
+        .map(|i| {
+          let base = (i % 7) as u8;
+          base ^ ((i / 7) as u8).wrapping_mul(3)
+        })
+        .collect();
+      let compressed = coord.compress_gossip(&input);
+      assert!(
+        compressed.len() <= input.len(),
+        "compress_gossip inflated datagram at len={len}: {} > {}",
+        compressed.len(),
+        input.len(),
+      );
+      let back = coord
+        .decompress_gossip(&compressed)
+        .expect("decompress failed");
+      assert_eq!(
+        back, input,
+        "compress_gossip round-trip failed at len={len}",
       );
     }
   }

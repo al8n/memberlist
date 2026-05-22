@@ -140,6 +140,24 @@ pub(crate) struct StreamBridge<I, A, R: StreamTransport> {
   /// by the coordinator, and is the only timer the bridge contributes (no
   /// `Stream` exists yet to fold in via `min`).
   deadline: Instant,
+  /// Cross-transport compression configuration. The bridge is the single
+  /// compress/decompress point on the reliable path; a disabled
+  /// `CompressionOptions` makes the path identity (a plain `[unit_len][bytes]`
+  /// frame with the framed bytes verbatim).
+  compression: memberlist_wire::CompressionOptions,
+  /// Inbound reliable-unit accumulation buffer. A byte stream does not
+  /// preserve `write_plaintext`/`read_plaintext` boundaries, so each
+  /// `read_plaintext` chunk is appended here and every complete
+  /// `[unit_len][payload]` unit is drained off the front; a trailing partial
+  /// unit stays buffered until the rest arrives.
+  recv_accum: Vec<u8>,
+  /// Hard ceiling on a reliable unit's on-wire size and its decompressed
+  /// payload — the decompression-bomb guard bound, and the cap on the inbound
+  /// accumulation buffer (a forged `unit_len` over this is rejected before any
+  /// wait). Derived from `EndpointConfig::max_stream_frame_size` so it tracks
+  /// the Stream FSM's own configured frame limit rather than a separate
+  /// constant.
+  reliable_max: usize,
 }
 
 impl<I, A, R: StreamTransport> StreamBridge<I, A, R>
@@ -166,7 +184,16 @@ where
   /// accept deadline bounds the handshake / label exchange; the `Stream` (and
   /// its own exchange deadline) is installed by [`Self::promote`] once the
   /// handshake / label step settles.
-  pub(crate) fn new(records: R, deadline: Instant) -> Self {
+  ///
+  /// `reliable_max` is the reliable-unit / decompressed-payload ceiling — the
+  /// coordinator passes `EndpointConfig::max_stream_frame_size` so the bound
+  /// always matches the Stream FSM's configured frame limit.
+  pub(crate) fn new(
+    records: R,
+    deadline: Instant,
+    compression: memberlist_wire::CompressionOptions,
+    reliable_max: usize,
+  ) -> Self {
     Self {
       stream: None,
       records,
@@ -176,6 +203,9 @@ where
       pending_eof: false,
       phase: StreamPhase::Handshaking,
       deadline,
+      compression,
+      recv_accum: Vec::new(),
+      reliable_max,
     }
   }
 
@@ -360,22 +390,36 @@ where
         }
       };
 
-      // Drain surfaced plaintext and feed it to the FSM. The borrow on `records`
-      // ends before the borrow on `stream` begins (separate statements over
-      // disjoint fields). Feeding plaintext in chunks is equivalent to one feed:
-      // `Stream::handle_data` accumulates into its own `input_buf` and decodes a
-      // complete frame as soon as it is buffered.
-      let mut payload = Vec::new();
-      let drained = self.records.read_plaintext(&mut payload);
-      if !payload.is_empty()
-        && self
-          .stream
-          .as_mut()
-          .expect("stream is Some in the established intake")
-          .handle_data(&payload, now)
-          .is_err()
-      {
-        decode_failed = true;
+      // Append the record layer's surfaced plaintext to the reliable-unit
+      // accumulator, then drain every COMPLETE `[unit_len][payload]` unit into
+      // the FSM. A trailing partial unit stays buffered for the next read.
+      let mut surfaced = Vec::new();
+      let drained = self.records.read_plaintext(&mut surfaced);
+      self.recv_accum.extend_from_slice(&surfaced);
+      loop {
+        match memberlist_wire::take_reliable_unit(&self.recv_accum, self.reliable_max) {
+          Ok(Some((plaintext, consumed))) => {
+            self.recv_accum.drain(..consumed);
+            if self
+              .stream
+              .as_mut()
+              .expect("stream is Some in the established intake")
+              .handle_data(&plaintext, now)
+              .is_err()
+            {
+              decode_failed = true;
+              break;
+            }
+          }
+          // Need more bytes — keep the partial and wait for the next read.
+          Ok(None) => break,
+          // A corrupt unit (bad inner wrapper, or an over-ceiling `unit_len`):
+          // terminalize the exchange.
+          Err(_) => {
+            self.fail_with_retire(BridgeFailure::Decode);
+            return Err(());
+          }
+        }
       }
 
       // Terminate once all input is consumed; a decode failure also stops the
@@ -397,6 +441,13 @@ where
     // (`StreamError::PeerClosed`) is the truncation path → decode failure; a
     // clean EOF (`Ok`) retires the recv half below via `observe_recv_fin`.
     let fin_seen = eof || self.records.peer_has_closed();
+    if fin_seen && !decode_failed && !self.recv_accum.is_empty() {
+      // A trailing partial reliable unit at EOF is a truncated transmission —
+      // the peer closed mid-unit. Treat it as a decode failure (the same
+      // outcome the FSM's premature-EOF path produces for a half frame).
+      self.fail_with_retire(BridgeFailure::Decode);
+      return Err(());
+    }
     if fin_seen
       && !decode_failed
       && self
@@ -780,27 +831,33 @@ where
       return Err(());
     }
 
-    // Drain plaintext from the FSM into the record layer. A raw-passthrough
-    // record layer appends verbatim to an unbounded outbound buffer, so there
-    // is no back-pressure and no retained-tail loop: each yield is queued in
-    // one call. The `poll_transmit` borrow on `stream` ends before the
-    // `write_plaintext` borrow on `records` begins.
-    let mut buf = Vec::new();
+    // Gather every `poll_transmit` yield from this drain into one buffer,
+    // then write it as ONE self-delimiting reliable unit. A byte stream does
+    // not preserve write/read boundaries, so framing each drain as one
+    // `[unit_len][payload]` unit lets the peer re-delimit it regardless of
+    // how the transport chunks the bytes. The `poll_transmit` borrow on
+    // `stream` ends before the `write_plaintext` borrow on `records` begins.
+    let mut gathered = Vec::new();
+    let mut chunk = Vec::new();
     loop {
-      buf.clear();
+      chunk.clear();
       let yielded = self
         .stream
         .as_mut()
         .expect("stream is Some")
-        .poll_transmit(now, &mut buf)
+        .poll_transmit(now, &mut chunk)
         .is_some();
       if !yielded {
         break;
       }
-      // `poll_transmit` yielded this exchange's output: the send half now owes
-      // its close.
+      // `poll_transmit` yielded this exchange's output: the send half now
+      // owes its close.
       self.sent_any = true;
-      self.records.write_plaintext(&buf);
+      gathered.extend_from_slice(&chunk);
+    }
+    if !gathered.is_empty() {
+      let unit = memberlist_wire::encode_reliable_unit(&self.compression, &gathered);
+      self.records.write_plaintext(&unit);
     }
 
     // FSM-failure detection AFTER `poll_transmit`: the FSM checks its own
@@ -1061,5 +1118,13 @@ where
   #[cfg(test)]
   pub(crate) fn stream_is_failed(&self) -> Option<&crate::error::StreamError> {
     self.stream.as_ref().and_then(|s| s.is_failed())
+  }
+
+  /// Test-only: expose the reliable-unit / decompressed-payload ceiling so a
+  /// test can assert it tracks the configured `max_stream_frame_size` rather
+  /// than a hard-coded constant.
+  #[cfg(all(test, feature = "tcp"))]
+  pub(crate) fn reliable_max(&self) -> usize {
+    self.reliable_max
   }
 }

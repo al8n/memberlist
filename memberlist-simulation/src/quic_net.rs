@@ -292,6 +292,13 @@ pub struct QuicCluster {
   /// response delivery strictly crosses the original deadline while
   /// staying within the refreshed one.
   stream_timeout: Option<Duration>,
+  /// Cross-transport compression applied to every coordinator built via
+  /// [`add_node`](Self::add_node). [`disabled`](memberlist_wire::CompressionOptions::disabled)
+  /// by default — the standard conformance suite drives gossip through
+  /// `compress_gossip` / `decompress_gossip` regardless, and a disabled
+  /// configuration makes both identity, so the suite stays byte-unchanged.
+  /// The `*_compressed` constructors install an enabled configuration.
+  compression: memberlist_wire::CompressionOptions,
 }
 
 impl QuicCluster {
@@ -315,6 +322,7 @@ impl QuicCluster {
       probe_window: None,
       shrink_window: false,
       stream_timeout: None,
+      compression: memberlist_wire::CompressionOptions::disabled(),
     }
   }
 
@@ -347,9 +355,19 @@ impl QuicCluster {
     // entropy. Production uses `QuicEndpoint::new` → `None`.)
     let mut seed = [0u8; 32];
     seed[..2].copy_from_slice(&addr.port().to_le_bytes());
-    self
-      .nodes
-      .insert(addr, QuicEndpoint::with_quinn_rng_seed(ep, qc, Some(seed)));
+    // `QuicEndpoint` exposes the deterministic `rng_seed` seam and the
+    // compression seam on two separate constructors. The standard conformance
+    // suite (compression disabled) takes the seeded constructor so the QUIC
+    // transport stays bit-for-bit reproducible. A `*_compressed` constructor
+    // takes `with_compression`, whose membership behaviour is identical — the
+    // virtual clock is the temporal-determinism anchor; the connection-ID /
+    // path-challenge RNG does not affect SWIM convergence.
+    let node = if self.compression.algorithm().is_some() {
+      QuicEndpoint::with_compression(ep, qc, self.compression)
+    } else {
+      QuicEndpoint::with_quinn_rng_seed(ep, qc, Some(seed))
+    };
+    self.nodes.insert(addr, node);
   }
 
   /// Two nodes; `a` joins `b` via a QUIC push/pull. `a` starts knowing
@@ -361,6 +379,33 @@ impl QuicCluster {
   /// the address is passed straight to `start_push_pull`.)
   pub fn two_node_join(a: SocketAddr, b: SocketAddr) -> Self {
     let mut c = Self::empty();
+    c.add_node("a", a);
+    c.add_node("b", b);
+    let now = c.clock.now();
+    if let Some(n) = c.nodes.get_mut(&a) {
+      n.start_push_pull(b, PushPullKind::Join, now);
+    }
+    c
+  }
+
+  /// Like [`two_node_join`](Self::two_node_join) but every node is built with
+  /// `algorithm` compression enabled. Used by the compression-enabled
+  /// conformance tests, which assert membership behavior is identical to the
+  /// uncompressed run.
+  ///
+  /// `with_threshold(0)` forces every gossip datagram through the compressor so
+  /// the conformance test exercises the compressed path even for small
+  /// datagrams; the don't-expand fallback still emits a `Plain` outcome for
+  /// incompressible tiny packets, so correctness is unchanged.
+  pub fn two_node_join_compressed(
+    a: SocketAddr,
+    b: SocketAddr,
+    algorithm: memberlist_wire::CompressAlgorithm,
+  ) -> Self {
+    let mut c = Self::empty();
+    c.compression = memberlist_wire::CompressionOptions::disabled()
+      .with_algorithm(Some(algorithm))
+      .with_threshold(0);
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -489,6 +534,44 @@ impl QuicCluster {
   pub fn two_node_join_small_window(a: SocketAddr, b: SocketAddr, extra_peers: usize) -> Self {
     let mut c = Self::empty();
     c.shrink_window = true;
+    c.add_node("a", a);
+    c.add_node("b", b);
+    let now = c.clock.now();
+    if let Some(n) = c.nodes.get_mut(&a) {
+      for i in 0..extra_peers {
+        let paddr: SocketAddr = format!("203.0.113.{}:9{:03}", (i % 250) + 1, i)
+          .parse()
+          .unwrap();
+        n.handle_alive(
+          a,
+          Alive::new(1, Node::new(SmolStr::new(format!("extra-{i}")), paddr)),
+          now,
+        );
+      }
+      n.start_push_pull(b, PushPullKind::Join, now);
+    }
+    c
+  }
+
+  /// Like [`two_node_join_small_window`](Self::two_node_join_small_window) but
+  /// every node is built with `algorithm` compression enabled. The
+  /// many-member, back-pressured variant of
+  /// [`two_node_join_compressed`](Self::two_node_join_compressed): the join
+  /// push/pull is large and fragmented across QUIC stream-window credits, so
+  /// the compression-enabled conformance run exercises the compressed reliable
+  /// path under backpressure. `with_threshold(0)` forces every gossip datagram
+  /// through the compressor.
+  pub fn two_node_join_small_window_compressed(
+    a: SocketAddr,
+    b: SocketAddr,
+    extra_peers: usize,
+    algorithm: memberlist_wire::CompressAlgorithm,
+  ) -> Self {
+    let mut c = Self::empty();
+    c.shrink_window = true;
+    c.compression = memberlist_wire::CompressionOptions::disabled()
+      .with_algorithm(Some(algorithm))
+      .with_threshold(0);
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -788,6 +871,15 @@ impl QuicCluster {
       Some(n) => n.leave(now),
       None => Ok(()),
     }
+  }
+
+  /// Deliver a raw gossip datagram directly into `host`'s UDP demux,
+  /// bypassing the datagram queue and fault injection. Used by tests that need
+  /// to inject a crafted datagram (e.g. a compressed datagram with trailing
+  /// junk) without going through the normal outbound path.
+  pub fn inject_raw_gossip(&mut self, from: SocketAddr, host: SocketAddr, bytes: &[u8]) {
+    let now = self.clock.now();
+    self.deliver_one(from, host, bytes, now);
   }
 
   /// Advance virtual time by `by`, then deliver matured datagrams and tick
@@ -1230,11 +1322,17 @@ impl QuicCluster {
   fn drain_and_enqueue(&mut self, addrs: &[SocketAddr], now: Instant) -> bool {
     let mut any = false;
     for src in addrs {
-      let mut pending: Vec<(SocketAddr, bytes::Bytes)> = Vec::new();
+      // Quinn transport datagrams (handshake / stream data / ACK / close) —
+      // opaque quinn-proto bytes. The memberlist gossip compressor must not
+      // touch these: they are not memberlist frames and their first byte does
+      // not follow the memberlist tag space.
+      let mut quic_pending: Vec<(SocketAddr, bytes::Bytes)> = Vec::new();
+      // Memberlist gossip datagrams — plain-frame encoded, eligible for
+      // compression through the source coordinator's configured codec.
+      let mut gossip_pending: Vec<(SocketAddr, bytes::Bytes)> = Vec::new();
       let node = self.nodes.get_mut(src).unwrap();
-      // Quinn datagrams (handshake / stream data / ACK / close) — bytes.
       while let Some((to, bytes)) = node.poll_transmit() {
-        pending.push((to, bytes));
+        quic_pending.push((to, bytes));
       }
       // Unreliable memberlist Transmit — drained one-at-a-time through the
       // coordinator's accessor (which calls `Endpoint::poll_transmit`
@@ -1246,7 +1344,7 @@ impl QuicCluster {
         match tx {
           Transmit::Packet(p) => {
             if let Some(b) = encode_frame(&p.message) {
-              pending.push((p.to, b));
+              gossip_pending.push((p.to, b));
             }
           }
           Transmit::Compound(cmp) => {
@@ -1260,13 +1358,23 @@ impl QuicCluster {
               }
             }
             if !buf.is_empty() {
-              pending.push((cmp.to, bytes::Bytes::from(buf)));
+              gossip_pending.push((cmp.to, bytes::Bytes::from(buf)));
             }
           }
         }
       }
-      for (to, bytes) in pending {
+      for (to, bytes) in quic_pending {
         if self.enqueue(*src, to, bytes, now) {
+          any = true;
+        }
+      }
+      for (to, bytes) in gossip_pending {
+        // Compress the outbound gossip datagram through the source
+        // coordinator's configured compression (identity when disabled). The
+        // compressed-frame tag (`COMPRESSED_TAG`, in `1..=15`) keeps the
+        // datagram on the `Class::Memberlist` side of the first-byte demux.
+        let on_wire = self.nodes.get(src).unwrap().compress_gossip(&bytes);
+        if self.enqueue(*src, to, bytes::Bytes::from(on_wire), now) {
           any = true;
         }
       }
@@ -1375,15 +1483,38 @@ impl QuicCluster {
     // endpoint processes the fed messages and produces its outputs.
     let mut fed = false;
     while let Some((src, raw)) = node.poll_memberlist_ingress() {
+      // Decompress the inbound datagram (identity when it carries no
+      // compression wrapper). A corrupt wrapper drops the datagram — gossip is
+      // lossy and self-healing.
+      let raw = match node.decompress_gossip(&raw) {
+        Ok(plain) => plain,
+        Err(_) => continue,
+      };
+      // Decode the whole datagram before applying anything: a gossip datagram
+      // that does not decode cleanly and completely is dropped wholesale (lossy
+      // and self-healing), matching the real wire's atomic compound decode.
+      // Partial application of a corrupt datagram is not a drop.
+      let mut decoded = Vec::new();
       let mut off = 0;
+      let mut clean = true;
       while off < raw.len() {
         match decode_frame(&raw[off..]) {
           Some((consumed, msg)) if consumed > 0 => {
-            node.handle_packet(src, msg, now);
+            decoded.push(msg);
             off += consumed;
-            fed = true;
           }
-          _ => break,
+          // A decode error, or a zero-length decode (which would spin) — the
+          // datagram is malformed; drop it whole.
+          _ => {
+            clean = false;
+            break;
+          }
+        }
+      }
+      if clean && off == raw.len() {
+        for msg in decoded {
+          node.handle_packet(src, msg, now);
+          fed = true;
         }
       }
     }
