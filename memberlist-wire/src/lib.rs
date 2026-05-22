@@ -11,6 +11,9 @@
 //!   wire messages (Alive, Suspect, Dead, Ping, IndirectPing, Ack, Nack,
 //!   PushPull, UserData, ErrorResponse) plus supporting structures
 //!   (Server, PushNodeState, Meta, State enum, version enums).
+//! - [`compression`] — the tagged, feature-gated compression transform
+//!   (`CompressAlgorithm`, `CompressionOptions`, the compressed-frame
+//!   codec). Wraps the [`framing`] codec; opt-in per backend.
 //! - [`framing`] — hand-rolled outer framing (label, encryption,
 //!   checksum, compression, compound). Not protobuf-shaped. Ported from
 //!   `memberlist-proto::proto::{encoder, decoder}`.
@@ -40,6 +43,7 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
 pub mod bridge;
+pub mod compression;
 pub mod convert;
 pub mod data;
 pub mod framing;
@@ -47,13 +51,18 @@ pub mod messages;
 pub mod typed;
 pub mod wire_type;
 
-pub use bridge::{BridgeError, message_from_any, message_to_any};
+pub use bridge::{message_from_any, message_to_any, BridgeError};
+pub use compression::{
+  compress, decode_compressed_frame, decompress, encode_compressed_frame, encode_reliable_unit,
+  take_reliable_unit, CompressAlgorithm, CompressionError, CompressionOptions, CompressionOutcome,
+  OversizeOriginal,
+};
 pub use convert::{
-  ConvertError, id_from_bytes, id_to_bytes, socket_addr_from_bytes, socket_addr_to_bytes,
+  id_from_bytes, id_to_bytes, socket_addr_from_bytes, socket_addr_to_bytes, ConvertError,
 };
 pub use data::{Data, DataRef, DecodeError, EncodeError};
 pub use framing::{
-  AnyMessage, COMPOUND_MAX_COUNT_PREFIX_LEN, COMPOUND_MAX_PART_PREFIX_LEN, COMPOUND_TAG_LEN,
-  FrameError, MessageTag, decode_compound, decode_message, decode_plain_frame, encode_compound,
-  encode_message, encode_plain_frame,
+  decode_compound, decode_message, decode_plain_frame, encode_compound, encode_message,
+  encode_plain_frame, unwrap_transforms, AnyMessage, FrameError, MessageTag,
+  COMPOUND_MAX_COUNT_PREFIX_LEN, COMPOUND_MAX_PART_PREFIX_LEN, COMPOUND_TAG_LEN,
 };

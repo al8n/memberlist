@@ -34,7 +34,7 @@ quic-rustls-ring = ["__quic-harness", "memberlist-machine/quic-rustls-ring", "qu
 quic-rustls-aws-lc-rs = ["__quic-harness", "memberlist-machine/quic-rustls-aws-lc-rs", "quinn-proto/rustls-aws-lc-rs", "dep:aws-lc-rs"]
 # Internal: shared non-crypto harness deps + the cfg gate. Do not enable
 # directly — pick `quic` (ring) or `quic-rustls-aws-lc-rs`.
-__quic-harness = ["dep:quinn-proto", "dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-machine/quic"]
+__quic-harness = ["dep:quinn-proto", "dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-machine/quic", "memberlist-machine/compression-lz4"]
 
 # Drives the composed `TlsEndpoint` (memberlist + real rustls over a
 # deterministic virtual TCP) through the same virtual clock / fault model as
@@ -47,13 +47,13 @@ tls-rustls-ring = ["__tls-harness", "memberlist-machine/tls-rustls-ring", "rustl
 tls-rustls-aws-lc-rs = ["__tls-harness", "memberlist-machine/tls-rustls-aws-lc-rs", "rustls/aws_lc_rs"]
 # Internal: shared non-crypto harness deps + the cfg gate. Do not enable
 # directly — pick `tls` (ring) or `tls-rustls-aws-lc-rs`.
-__tls-harness = ["dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-machine/tls"]
+__tls-harness = ["dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-machine/tls", "memberlist-machine/compression-lz4"]
 
 # Drives the composed `TcpEndpoint` (memberlist + per-exchange plain TCP)
 # through the same virtual clock / fault model as the TLS harness, without any
 # crypto layer. The reliable path is wire-label-gated plain TCP; the
 # unreliable path is the same UDP gossip queue.
-tcp = ["memberlist-machine/tcp"]
+tcp = ["memberlist-machine/tcp", "memberlist-machine/compression-lz4"]
 
 [dependencies]
 bytes.workspace = true

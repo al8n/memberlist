@@ -23,6 +23,12 @@ triomphe = { workspace = true, features = ["std"] }
 varing = { workspace = true, features = ["std"] }
 viewit = { workspace = true }
 
+# Compression backends — opt-in; the default build pulls none of them.
+brotli = { version = "8", optional = true }
+snap = { version = "1", optional = true }
+lz4_flex = { version = "0.13", optional = true }
+zstd = { version = "0.13", optional = true }
+
 [build-dependencies]
 buffa-build = "0.5"
 
@@ -34,3 +40,9 @@ alloc = ["std"]
 std = ["buffa/std"]
 # Enable nodecraft's hostaddr types (Domain, HostAddr, …) in the Data impls.
 hostaddr = ["nodecraft/hostaddr"]
+
+# Compression backends — opt-in; the default build pulls none of them.
+lz4 = ["dep:lz4_flex"]
+snappy = ["dep:snap"]
+zstd = ["dep:zstd"]
+brotli = ["dep:brotli"]

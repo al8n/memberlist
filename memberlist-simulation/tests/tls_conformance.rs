@@ -468,3 +468,145 @@ fn parity_suspect_transitions_to_dead_after_timeout() {
     "ghost must be Dead after the suspicion timeout (parity)"
   );
 }
+
+// ── Compression: the membership conformance must hold UNCHANGED when reliable
+//    exchanges and gossip datagrams ride lz4-compressed frames. Compression is
+//    a wire-codec transform: it must be transparent to SWIM membership.
+
+#[test]
+fn compressed_two_node_join_over_tls_reaches_alive_both_sides() {
+  use memberlist_wire::CompressAlgorithm;
+  let a = "127.0.0.1:9701".parse().unwrap();
+  let b = "127.0.0.1:9702".parse().unwrap();
+  let mut c = TlsCluster::two_node_join_compressed(a, b, CompressAlgorithm::Lz4);
+  for _ in 0..20_000 {
+    if !c.step() {
+      break;
+    }
+  }
+  assert!(
+    c.sees_alive(a, &id("b")),
+    "A must see B Alive after a compressed TLS push/pull join"
+  );
+  assert!(
+    c.sees_alive(b, &id("a")),
+    "B must see A Alive after a compressed TLS push/pull join — \
+     compression must be transparent to membership"
+  );
+}
+
+#[test]
+fn compressed_join_over_tls_matches_uncompressed_membership_outcome() {
+  use memberlist_wire::CompressAlgorithm;
+  let a = "127.0.0.1:9711".parse().unwrap();
+  let b = "127.0.0.1:9712".parse().unwrap();
+  let mut plain = TlsCluster::two_node_join(a, b);
+  for _ in 0..20_000 {
+    if !plain.step() {
+      break;
+    }
+  }
+  let mut compressed = TlsCluster::two_node_join_compressed(a, b, CompressAlgorithm::Lz4);
+  for _ in 0..20_000 {
+    if !compressed.step() {
+      break;
+    }
+  }
+  assert_eq!(
+    plain.sees_alive(a, &id("b")),
+    compressed.sees_alive(a, &id("b")),
+    "A's view of B must match the uncompressed TLS run"
+  );
+  assert_eq!(
+    plain.sees_alive(b, &id("a")),
+    compressed.sees_alive(b, &id("a")),
+    "B's view of A must match the uncompressed TLS run"
+  );
+}
+
+#[test]
+fn compressed_large_state_push_pull_completes_under_tcp_backpressure() {
+  use memberlist_wire::CompressAlgorithm;
+  let a = "127.0.0.1:9721".parse().unwrap();
+  let b = "127.0.0.1:9722".parse().unwrap();
+  // a's push snapshot is pre-loaded with 200 extra members and the virtual TCP
+  // receive window is tiny: the LARGE compressed push/pull snapshot is
+  // fragmented across many reads, end-to-end exercising the compressed
+  // reliable path's split-delivery reassembly through the TLS record layer.
+  // The join must still complete with zero byte loss — every compressed
+  // reliable unit reassembles intact.
+  let mut c = TlsCluster::two_node_join_small_window_compressed(a, b, 200, CompressAlgorithm::Lz4);
+  for _ in 0..50_000 {
+    if !c.step() {
+      break;
+    }
+  }
+  assert!(
+    c.sees_alive(a, &id("b")),
+    "compressed join completes despite TCP backpressure (zero byte loss)"
+  );
+  assert!(
+    c.sees_alive(b, &id("extra-0")),
+    "every pushed peer crossed intact through the compressed reliable path"
+  );
+  assert!(c.sees_alive(b, &id("extra-199")));
+}
+
+#[test]
+fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
+  // A compressed gossip datagram that decompresses to [valid frame][trailing
+  // junk] must be dropped wholesale — the receiver's membership is unchanged.
+  // This guards the all-or-nothing decode contract: a datagram whose frame
+  // sequence does not consume the full decompressed payload is treated the same
+  // as a datagram with a corrupt compression wrapper (i.e. dropped with no
+  // partial application of the prefix frames that did decode cleanly).
+  use memberlist_simulation::{Alive, Message, Node};
+  use memberlist_wire::{
+    compress, encode_compressed_frame, framing, message_to_any, CompressAlgorithm,
+  };
+
+  let a: std::net::SocketAddr = "127.0.0.1:9731".parse().unwrap();
+  let b: std::net::SocketAddr = "127.0.0.1:9732".parse().unwrap();
+  let ghost_addr: std::net::SocketAddr = "127.0.0.1:9733".parse().unwrap();
+  let mut c = TlsCluster::two_node_join(a, b);
+  // Let the join complete so both nodes are live before we inject.
+  for _ in 0..20_000 {
+    if c.sees_alive(a, &id("b")) && c.sees_alive(b, &id("a")) {
+      break;
+    }
+    c.step();
+  }
+  assert!(
+    !c.sees_alive(b, &id("ghost")),
+    "precondition: b has not observed ghost"
+  );
+
+  // Build a valid Alive frame for "ghost".
+  let ghost_alive: Message<SmolStr, std::net::SocketAddr> =
+    Message::Alive(Alive::new(1, Node::new(id("ghost"), ghost_addr)));
+  let any =
+    message_to_any::<SmolStr, std::net::SocketAddr>(&ghost_alive).expect("alive to AnyMessage");
+  let valid_frame = framing::encode_message(&any).expect("encode alive frame");
+
+  // Concatenate trailing junk bytes that are not a valid frame.
+  let mut payload = valid_frame;
+  payload.extend_from_slice(b"\xff\xff\xff");
+
+  // Compress the combined payload and wrap it in the compressed-frame format.
+  let packed = compress(CompressAlgorithm::Lz4, &payload).expect("lz4 compress");
+  let on_wire = encode_compressed_frame(CompressAlgorithm::Lz4, payload.len(), &packed);
+
+  // Inject the crafted datagram as an inbound gossip datagram from a to b.
+  c.inject_raw_gossip(a, b, &on_wire);
+
+  // b must NOT have gained "ghost" in its live membership — the datagram was
+  // dropped wholesale. `sees_alive` reads the live member table directly (via
+  // `member_liveness`), so a partial-apply that installed the valid prefix
+  // frame would surface here immediately, without requiring a `step()` to
+  // refresh an event cache.
+  assert!(
+    !c.sees_alive(b, &id("ghost")),
+    "compressed gossip datagram with trailing junk must be dropped wholesale; \
+     the valid prefix frame must not be applied"
+  );
+}

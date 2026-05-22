@@ -36,6 +36,11 @@ mod tests {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
   }
 
+  /// Reliable-unit ceiling for the bridge test pairs — the `EndpointConfig`
+  /// default `max_stream_frame_size`, generous above every frame these tests
+  /// exchange (including the 48 KiB coalesced-large-frame case).
+  const TEST_RELIABLE_MAX: usize = 64 * 1024 * 1024;
+
   /// Build a `Handshaking` client/server bridge pair sharing the accept-any
   /// test configs (real rustls handshake, deterministic — no test-only crypto
   /// hook; the determinism is the virtual clock).
@@ -52,8 +57,18 @@ mod tests {
     .unwrap();
     let server = TlsRecords::server(Arc::new(test_server())).unwrap();
     (
-      StreamBridge::new(client, deadline),
-      StreamBridge::new(server, deadline),
+      StreamBridge::new(
+        client,
+        deadline,
+        memberlist_wire::CompressionOptions::disabled(),
+        TEST_RELIABLE_MAX,
+      ),
+      StreamBridge::new(
+        server,
+        deadline,
+        memberlist_wire::CompressionOptions::disabled(),
+        TEST_RELIABLE_MAX,
+      ),
     )
   }
 

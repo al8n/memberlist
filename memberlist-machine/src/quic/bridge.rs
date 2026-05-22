@@ -93,6 +93,23 @@ pub(crate) struct Bridge<I, A> {
   /// `enter_failed(Timeout)`) authoritatively governs the timeout, so the
   /// bridge's enforcement defers to the FSM in that case.
   deadline: Instant,
+  /// Cross-transport compression configuration. The bridge is the single
+  /// compress/decompress point on the QUIC reliable path; a disabled
+  /// `CompressionOptions` makes the path identity (a plain `[unit_len][bytes]`
+  /// frame with the framed bytes verbatim).
+  compression: memberlist_wire::CompressionOptions,
+  /// Inbound reliable-unit accumulation buffer. A QUIC stream chunks bytes
+  /// arbitrarily, so each `chunk.bytes` is appended here and every complete
+  /// `[unit_len][payload]` unit is drained off the front; a trailing partial
+  /// unit stays buffered until a later chunk completes it.
+  recv_accum: Vec<u8>,
+  /// Hard ceiling on a reliable unit's on-wire size and its decompressed
+  /// payload — the decompression-bomb guard bound, and the cap on the inbound
+  /// accumulation buffer (a forged `unit_len` over this is rejected before any
+  /// wait). Derived from `EndpointConfig::max_stream_frame_size` so it tracks
+  /// the Stream FSM's own configured frame limit rather than a separate
+  /// constant.
+  reliable_max: usize,
 }
 
 impl<I, A> Bridge<I, A>
@@ -115,7 +132,18 @@ where
     + Sync
     + 'static,
 {
-  pub(crate) fn new(stream: Stream<I, A>, ch: ConnectionHandle, sid: QuicSid) -> Self {
+  /// Build a `Bridge` over a freshly opened/accepted quinn bidi stream.
+  ///
+  /// `reliable_max` is the reliable-unit / decompressed-payload ceiling — the
+  /// coordinator passes `EndpointConfig::max_stream_frame_size` so the bound
+  /// always matches the Stream FSM's configured frame limit.
+  pub(crate) fn new(
+    stream: Stream<I, A>,
+    ch: ConnectionHandle,
+    sid: QuicSid,
+    compression: memberlist_wire::CompressionOptions,
+    reliable_max: usize,
+  ) -> Self {
     // Snapshot the exchange deadline now, while the stream is still pre-`Done`.
     // Both stream constructors (`Endpoint::dial_succeeded` —
     // `deadline: Some(intent.deadline)`; `Endpoint::accept_stream` —
@@ -138,6 +166,9 @@ where
       finish_called: false,
       phase: BridgePhase::Active,
       deadline,
+      compression,
+      recv_accum: Vec::new(),
+      reliable_max,
     }
   }
 
@@ -570,23 +601,35 @@ where
       }
     }
 
-    let mut buf = Vec::new();
-    while self.stream.poll_transmit(now, &mut buf).is_some() {
-      // `poll_transmit` yielded this exchange's full output: the send half
-      // now owes a `finish()` even if the write below only partial-accepts
-      // and then `Blocked`s (the remainder is retained in `pending_out` and
-      // the owed finish is performed once it drains on a later tick).
+    // Gather every `poll_transmit` yield into one buffer, then write it as
+    // ONE self-delimiting reliable unit. A QUIC stream chunks bytes
+    // arbitrarily (and flow-control credit may split the write), so framing
+    // each drain as one `[unit_len][payload]` unit lets the peer re-delimit
+    // it regardless of how the stream chunks the bytes.
+    let mut gathered = Vec::new();
+    let mut chunk = Vec::new();
+    while self.stream.poll_transmit(now, &mut chunk).is_some() {
+      // `poll_transmit` yielded this exchange's output: the send half now
+      // owes a `finish()` (armed here, before any write, so a partial-accept-
+      // then-Blocked still owes it — unchanged from today).
       self.sent_any = true;
+      gathered.extend_from_slice(&chunk);
+      chunk.clear();
+    }
+    if !gathered.is_empty() {
+      let unit = memberlist_wire::encode_reliable_unit(&self.compression, &gathered);
       let mut off = 0;
-      while off < buf.len() {
-        match conn.send_stream(self.sid).write(&buf[off..]) {
+      while off < unit.len() {
+        match conn.send_stream(self.sid).write(&unit[off..]) {
           Ok(w) => off += w,
           Err(quinn_proto::WriteError::Blocked) => {
-            self.pending_out.extend_from_slice(&buf[off..]);
+            // Retain the COMPRESSED-unit remainder; replayed head-first next
+            // tick by the existing `pending_out` flush at the top of pump_out.
+            self.pending_out.extend_from_slice(&unit[off..]);
             return Ok(());
           }
           Err(e) => {
-            // Atomic failure — see the prior write-error arm.
+            // Atomic failure — same retire-then-fail as the existing arm.
             // Ignoring Err: idempotent retirement.
             let _ = conn.send_stream(self.sid).reset(VarInt::from_u32(0));
             let _ = conn.recv_stream(self.sid).stop(VarInt::from_u32(0));
@@ -596,7 +639,6 @@ where
           }
         }
       }
-      buf.clear();
     }
 
     // FSM-failure detection AFTER `poll_transmit`: the FSM checks its
@@ -713,7 +755,32 @@ where
           loop {
             match chunks.next(usize::MAX) {
               Ok(Some(chunk)) => {
-                if self.stream.handle_data(&chunk.bytes, now).is_err() {
+                self.recv_accum.extend_from_slice(&chunk.bytes);
+                // Drain every COMPLETE `[unit_len][payload]` unit; a trailing
+                // partial unit stays buffered for a later chunk. `stream` is a
+                // plain `Stream` here (no Option), so feed it directly.
+                let mut unit_err = false;
+                loop {
+                  match memberlist_wire::take_reliable_unit(&self.recv_accum, self.reliable_max) {
+                    Ok(Some((plaintext, consumed))) => {
+                      self.recv_accum.drain(..consumed);
+                      if self.stream.handle_data(&plaintext, now).is_err() {
+                        decode_failed = true;
+                        break;
+                      }
+                    }
+                    // Need more bytes — keep the partial, read more next chunk.
+                    Ok(None) => break,
+                    // A corrupt unit (bad inner wrapper, or over-ceiling
+                    // `unit_len`): terminalize via the post-borrow decode-fail
+                    // block (the same path a `handle_data` decode failure takes).
+                    Err(_) => {
+                      unit_err = true;
+                      break;
+                    }
+                  }
+                }
+                if decode_failed || unit_err {
                   decode_failed = true;
                   break;
                 }
@@ -754,6 +821,14 @@ where
       self.pending_out.clear();
       self.fail(BridgeFailure::Transport("illegal ordered read".to_string()));
       return Err(());
+    }
+
+    // A trailing partial reliable unit at EOF is a truncated transmission —
+    // the peer FINned mid-unit. Treat it as a decode failure (the FIN's own
+    // `handle_data(&[])` premature-EOF path produces the same outcome for a
+    // half frame, and the existing decode_failed block retires the halves).
+    if fin_seen && !decode_failed && !self.recv_accum.is_empty() {
+      decode_failed = true;
     }
 
     // FIN-with-EOF-signal: `Stream::handle_data(&[], now)` is the FSM's
@@ -1086,7 +1161,13 @@ mod tests {
     let stream = ep.accept_stream(peer, t0);
     let ch = ConnectionHandle(0);
     let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
-    let mut bridge = Bridge::new(stream, ch, sid);
+    let mut bridge = Bridge::new(
+      stream,
+      ch,
+      sid,
+      memberlist_wire::CompressionOptions::disabled(),
+      ep.max_stream_frame_size(),
+    );
     assert!(matches!(bridge.phase, BridgePhase::Active));
 
     // Dispatch the UserData frame through the bridge's inner FSM. The
@@ -1161,7 +1242,13 @@ mod tests {
     let stream = ep.accept_stream(peer, t0);
     let ch = ConnectionHandle(0);
     let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
-    let mut bridge = Bridge::new(stream, ch, sid);
+    let mut bridge = Bridge::new(
+      stream,
+      ch,
+      sid,
+      memberlist_wire::CompressionOptions::disabled(),
+      ep.max_stream_frame_size(),
+    );
     assert!(matches!(bridge.phase, BridgePhase::Active));
 
     // Dispatch a UserData frame — FSM → Done, queues
@@ -1234,7 +1321,80 @@ mod tests {
         + Sync
         + 'static,
     {
-      let _: fn(Stream<I, A>, ConnectionHandle, QuicSid) -> Bridge<I, A> = Bridge::<I, A>::new;
+      let _: fn(
+        Stream<I, A>,
+        ConnectionHandle,
+        QuicSid,
+        memberlist_wire::CompressionOptions,
+        usize,
+      ) -> Bridge<I, A> = Bridge::<I, A>::new;
     }
+  }
+
+  #[cfg(feature = "compression-lz4")]
+  #[test]
+  fn quic_reliable_unit_accumulation_roundtrips() {
+    use memberlist_wire::{
+      encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
+    };
+    let opts = CompressionOptions::disabled()
+      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_threshold(8);
+    let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);
+    let unit = encode_reliable_unit(&opts, &framed);
+    let mut accum = unit.clone();
+    let (back, consumed) = take_reliable_unit(&accum, 16 * 1024 * 1024)
+      .expect("decode ok")
+      .expect("a complete unit is present");
+    accum.drain(..consumed);
+    assert_eq!(back, framed);
+    assert!(accum.is_empty());
+  }
+
+  #[cfg(feature = "compression-lz4")]
+  #[test]
+  fn quic_reliable_unit_split_across_two_chunks_buffers_then_completes() {
+    // REGRESSION TEST for the split-wrapper bug on a QUIC stream: a unit may
+    // arrive over two `chunks.next` yields. The accumulator must hold the
+    // first partial chunk (no frame yet) and complete on the second.
+    use memberlist_wire::{
+      encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
+    };
+    let opts = CompressionOptions::disabled()
+      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_threshold(8);
+    let framed = b"the quick brown fox jumps over the lazy dog".repeat(32);
+    let unit = encode_reliable_unit(&opts, &framed);
+    assert!(unit.len() > 4, "unit is large enough to split");
+    let split = unit.len() / 2;
+
+    let mut accum: Vec<u8> = Vec::new();
+    accum.extend_from_slice(&unit[..split]);
+    assert!(
+      take_reliable_unit(&accum, 16 * 1024 * 1024)
+        .expect("a partial unit is not an error")
+        .is_none(),
+      "the first partial chunk must buffer, not decode"
+    );
+    accum.extend_from_slice(&unit[split..]);
+    let (back, consumed) = take_reliable_unit(&accum, 16 * 1024 * 1024)
+      .expect("decode ok")
+      .expect("the unit is complete after the second chunk");
+    accum.drain(..consumed);
+    assert_eq!(back, framed, "the split unit decompresses to the original");
+    assert!(accum.is_empty());
+  }
+
+  #[test]
+  fn quic_reliable_unit_disabled_is_byte_identical() {
+    use memberlist_wire::{encode_reliable_unit, take_reliable_unit, CompressionOptions};
+    let opts = CompressionOptions::disabled();
+    let framed = b"plain reliable frame bytes that are not compressed".to_vec();
+    let unit = encode_reliable_unit(&opts, &framed);
+    let (back, consumed) = take_reliable_unit(&unit, 16 * 1024 * 1024)
+      .expect("decode ok")
+      .expect("a complete unit");
+    assert_eq!(back, framed);
+    assert_eq!(consumed, unit.len());
   }
 }

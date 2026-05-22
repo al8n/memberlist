@@ -13,6 +13,8 @@
 //! while `memberlist-proto` uses a custom high-3-bits-wire-type scheme.
 //! Mixed-version clusters are not supported — this is a clean cut-over.
 
+use std::borrow::Cow;
+
 use buffa::Message as _;
 
 use crate::messages::memberlist::v1::{
@@ -46,8 +48,13 @@ pub enum MessageTag {
   Nack = 10,
   /// ErrorResponse — protocol error from remote.
   ErrorResponse = 11,
-  // Tags 12 (Labeled), 13 (Checksumed), 14 (Compressed), 15 (Encrypted)
-  // are outer wrappers; handled at the driver layer, not here.
+  /// Compressed wrapper (outer transform; nests outside a message or compound
+  /// frame). Decoded by the tag-driven unwrap loop, not by `decode_message`.
+  Compressed = 14,
+  // Tags 12 (Labeled), 13 (Checksumed), 15 (Encrypted) are reserved transform
+  // wrappers; 14 (Compressed) is live above. Transform wrappers are
+  // codec-level — stripped by the tag-driven unwrap loop in this module — not
+  // driver-level.
 }
 
 impl MessageTag {
@@ -84,6 +91,7 @@ impl TryFrom<u8> for MessageTag {
       9 => Ok(Self::UserData),
       10 => Ok(Self::Nack),
       11 => Ok(Self::ErrorResponse),
+      14 => Ok(Self::Compressed),
       _ => Err(FrameError::UnknownTag(b)),
     }
   }
@@ -154,6 +162,10 @@ pub enum FrameError {
   /// the receiver, so it is rejected instead.
   #[error("frame body too large: {0} bytes exceeds u32::MAX")]
   FrameTooLarge(usize),
+  /// A compressed wrapper frame failed to decode (corrupt bytes, an unknown
+  /// algorithm, or a declared length over the bomb-guard ceiling).
+  #[error("compressed frame decode failed: {0}")]
+  Compression(String),
 }
 
 /// Convenience: encode any [`AnyMessage`] variant into a plain frame.
@@ -218,6 +230,11 @@ pub fn decode_message(buf: &[u8]) -> Result<(usize, AnyMessage), FrameError> {
     MessageTag::Compound => {
       // Compound is an outer wrapper; not decoded at the plain-frame layer.
       return Err(FrameError::UnknownTag(MessageTag::Compound as u8));
+    }
+    MessageTag::Compressed => {
+      // Compressed is an outer transform wrapper; not decoded at the
+      // plain-frame layer.
+      return Err(FrameError::UnknownTag(MessageTag::Compressed as u8));
     }
   };
   Ok((consumed, msg))
@@ -319,6 +336,39 @@ pub fn decode_compound(buf: &[u8]) -> Result<Vec<&[u8]>, FrameError> {
   Ok(parts)
 }
 
+/// Strip every leading transform wrapper off `buf`, returning the innermost
+/// plain-message-or-compound bytes.
+///
+/// This is the codec-level transform-stack unwrap loop: peek the leading tag —
+/// if it is a transform wrapper ([`MessageTag::Compressed`]), strip that
+/// transform and repeat; once the tag is a plain-message or compound tag,
+/// return the buffer for the existing [`decode_message`] / [`decode_compound`]
+/// path. The loop handles a stack of arbitrary depth, so it is
+/// forward-compatible with an outer encryption wrapper.
+///
+/// `max_orig_len` bounds every wrapper's decompressed length (the
+/// decompression-bomb guard); it is the UDP max-packet-size on the gossip path
+/// and the reliable max-frame-size on the reliable path.
+///
+/// A buffer with no transform wrapper is returned unchanged (borrowed) — the
+/// steady state when compression is disabled cluster-wide.
+pub fn unwrap_transforms(buf: &[u8], max_orig_len: usize) -> Result<Cow<'_, [u8]>, FrameError> {
+  let mut current: Cow<'_, [u8]> = Cow::Borrowed(buf);
+  loop {
+    let lead = match current.first() {
+      Some(b) => *b,
+      None => return Err(FrameError::Empty),
+    };
+    if lead != MessageTag::Compressed as u8 {
+      // Plain-message or compound tag — the transform stack is fully stripped.
+      return Ok(current);
+    }
+    let decoded = crate::compression::decode_compressed_frame(&current, max_orig_len)
+      .map_err(|e| FrameError::Compression(e.to_string()))?;
+    current = Cow::Owned(decoded);
+  }
+}
+
 /// Build a `[TAG][VARINT_LEN][BODY]` plain frame around the supplied body bytes.
 ///
 /// The outer tag byte and varint length are byte-identical to the legacy
@@ -367,7 +417,7 @@ pub fn decode_plain_frame(buf: &[u8]) -> Result<(MessageTag, &[u8], usize), Fram
 
 // ── Private varint helpers ───────────────────────────────────────────────────
 
-fn encode_varint_u32(mut value: u32, out: &mut Vec<u8>) {
+pub(crate) fn encode_varint_u32(mut value: u32, out: &mut Vec<u8>) {
   while value >= 0x80 {
     out.push(((value & 0x7f) as u8) | 0x80);
     value >>= 7;
@@ -375,7 +425,7 @@ fn encode_varint_u32(mut value: u32, out: &mut Vec<u8>) {
   out.push(value as u8);
 }
 
-fn decode_varint_u32(buf: &[u8]) -> Result<(u32, usize), FrameError> {
+pub(crate) fn decode_varint_u32(buf: &[u8]) -> Result<(u32, usize), FrameError> {
   let mut value: u32 = 0;
   let mut shift: u32 = 0;
   for (i, &byte) in buf.iter().enumerate().take(5) {
@@ -663,6 +713,50 @@ mod tests {
     assert_eq!(COMPOUND_TAG_LEN, 1);
     assert_eq!(COMPOUND_MAX_COUNT_PREFIX_LEN, 5);
     assert_eq!(COMPOUND_MAX_PART_PREFIX_LEN, 5);
+  }
+
+  #[cfg(feature = "lz4")]
+  #[test]
+  fn unwrap_loop_strips_compression_off_a_plain_frame() {
+    use crate::compression::{compress, encode_compressed_frame, CompressAlgorithm};
+    let inner = encode_message(&sample_ping()).expect("encode ping");
+    let packed = compress(CompressAlgorithm::Lz4, &inner).expect("compress");
+    let wrapped = encode_compressed_frame(CompressAlgorithm::Lz4, inner.len(), &packed);
+    let unwrapped = unwrap_transforms(&wrapped, 1 << 20).expect("unwrap");
+    assert_eq!(unwrapped, inner);
+    let (_consumed, msg) = decode_message(&unwrapped).expect("decode inner");
+    assert_eq!(msg, sample_ping());
+  }
+
+  #[cfg(feature = "lz4")]
+  #[test]
+  fn unwrap_loop_strips_compression_off_a_compound_frame() {
+    use crate::compression::{compress, encode_compressed_frame, CompressAlgorithm};
+    let inner = encode_compound(&[sample_ping(), sample_ack()]).expect("encode compound");
+    let packed = compress(CompressAlgorithm::Lz4, &inner).expect("compress");
+    let wrapped = encode_compressed_frame(CompressAlgorithm::Lz4, inner.len(), &packed);
+    let unwrapped = unwrap_transforms(&wrapped, 1 << 20).expect("unwrap");
+    assert_eq!(unwrapped, inner);
+    let parts = decode_compound(&unwrapped).expect("decode compound");
+    assert_eq!(parts.len(), 2);
+  }
+
+  #[test]
+  fn unwrap_loop_passes_a_non_wrapper_frame_through() {
+    let inner = encode_message(&sample_ping()).expect("encode ping");
+    let out = unwrap_transforms(&inner, 1 << 20).expect("unwrap");
+    assert_eq!(out, inner);
+  }
+
+  #[test]
+  fn unwrap_loop_rejects_an_unknown_algorithm_wrapper() {
+    let mut frame = vec![MessageTag::Compressed as u8, 222u8];
+    encode_varint_u32(4, &mut frame);
+    frame.extend_from_slice(b"data");
+    assert!(matches!(
+      unwrap_transforms(&frame, 1 << 20),
+      Err(FrameError::Compression(_))
+    ));
   }
 
   #[test]

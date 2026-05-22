@@ -42,8 +42,8 @@ use std::{
 };
 
 use memberlist_machine::{
-  AddrBridge, Endpoint, EndpointConfig, Event, PushPullKind, RawRecords, TcpOptions, Transmit,
   streams::{ExchangeId, StreamAction, StreamEndpoint},
+  AddrBridge, Endpoint, EndpointConfig, Event, PushPullKind, RawRecords, TcpOptions, Transmit,
 };
 use memberlist_wire::{
   framing, message_from_any, message_to_any,
@@ -160,6 +160,13 @@ pub struct TcpCluster {
   /// accepted as plaintext). Faithful to memberlist-core's option of the
   /// same name.
   skip_inbound_label_check_hosts: HashSet<SocketAddr>,
+  /// Cross-transport compression applied to every coordinator built via
+  /// [`add_node`](Self::add_node). [`disabled`](memberlist_wire::CompressionOptions::disabled)
+  /// by default — the standard conformance suite drives gossip through
+  /// `compress_gossip` / `decompress_gossip` regardless, and a disabled
+  /// configuration makes both identity, so the suite stays byte-unchanged.
+  /// The `*_compressed` constructors install an enabled configuration.
+  compression: memberlist_wire::CompressionOptions,
 }
 
 impl TcpCluster {
@@ -185,6 +192,7 @@ impl TcpCluster {
       label_overrides: HashMap::new(),
       unlabeled_hosts: HashSet::new(),
       skip_inbound_label_check_hosts: HashSet::new(),
+      compression: memberlist_wire::CompressionOptions::disabled(),
     }
   }
 
@@ -221,7 +229,10 @@ impl TcpCluster {
     if self.skip_inbound_label_check_hosts.contains(&addr) {
       tcp_cfg = tcp_cfg.with_skip_inbound_label_check(true);
     }
-    self.nodes.insert(addr, StreamEndpoint::new(ep, tcp_cfg));
+    self.nodes.insert(
+      addr,
+      StreamEndpoint::with_compression(ep, tcp_cfg, self.compression),
+    );
   }
 
   /// Two nodes; `a` joins `b` via a plain-TCP push/pull. `a` starts knowing
@@ -231,6 +242,33 @@ impl TcpCluster {
   /// purely through the reliable TCP exchange.
   pub fn two_node_join(a: SocketAddr, b: SocketAddr) -> Self {
     let mut c = Self::empty();
+    c.add_node("a", a);
+    c.add_node("b", b);
+    let now = c.clock.now();
+    if let Some(n) = c.nodes.get_mut(&a) {
+      n.start_push_pull(b, PushPullKind::Join, now);
+    }
+    c
+  }
+
+  /// Like [`two_node_join`](Self::two_node_join) but every node is built with
+  /// `algorithm` compression enabled. Used by the compression-enabled
+  /// conformance tests, which assert membership behavior is identical to the
+  /// uncompressed run.
+  ///
+  /// `with_threshold(0)` forces every gossip datagram through the compressor so
+  /// the conformance test exercises the compressed path even for small
+  /// datagrams; the don't-expand fallback still emits a `Plain` outcome for
+  /// incompressible tiny packets, so correctness is unchanged.
+  pub fn two_node_join_compressed(
+    a: SocketAddr,
+    b: SocketAddr,
+    algorithm: memberlist_wire::CompressAlgorithm,
+  ) -> Self {
+    let mut c = Self::empty();
+    c.compression = memberlist_wire::CompressionOptions::disabled()
+      .with_algorithm(Some(algorithm))
+      .with_threshold(0);
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -289,6 +327,44 @@ impl TcpCluster {
   pub fn two_node_join_small_window(a: SocketAddr, b: SocketAddr, extra_peers: usize) -> Self {
     let mut c = Self::empty();
     c.tcp_window = Some(1200);
+    c.add_node("a", a);
+    c.add_node("b", b);
+    let now = c.clock.now();
+    if let Some(n) = c.nodes.get_mut(&a) {
+      for i in 0..extra_peers {
+        let paddr: SocketAddr = format!("203.0.113.{}:9{:03}", (i % 250) + 1, i)
+          .parse()
+          .unwrap();
+        n.handle_alive(
+          a,
+          Alive::new(1, Node::new(SmolStr::new(format!("extra-{i}")), paddr)),
+          now,
+        );
+      }
+      n.start_push_pull(b, PushPullKind::Join, now);
+    }
+    c
+  }
+
+  /// Like [`two_node_join_small_window`](Self::two_node_join_small_window) but
+  /// every node is built with `algorithm` compression enabled. The
+  /// many-member, back-pressured variant of
+  /// [`two_node_join_compressed`](Self::two_node_join_compressed): the join
+  /// push/pull is large and fragmented across reads, so the compression-enabled
+  /// conformance run exercises the compressed reliable path under a small
+  /// virtual-TCP window. `with_threshold(0)` forces every gossip datagram
+  /// through the compressor.
+  pub fn two_node_join_small_window_compressed(
+    a: SocketAddr,
+    b: SocketAddr,
+    extra_peers: usize,
+    algorithm: memberlist_wire::CompressAlgorithm,
+  ) -> Self {
+    let mut c = Self::empty();
+    c.tcp_window = Some(1200);
+    c.compression = memberlist_wire::CompressionOptions::disabled()
+      .with_algorithm(Some(algorithm))
+      .with_threshold(0);
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -554,6 +630,15 @@ impl TcpCluster {
     }
   }
 
+  /// Deliver a raw gossip datagram directly into `host`'s gossip ingress,
+  /// bypassing the UDP queue and fault injection. Used by tests that need to
+  /// inject a crafted datagram (e.g. a compressed datagram with trailing junk)
+  /// without going through the normal outbound path.
+  pub fn inject_raw_gossip(&mut self, from: SocketAddr, host: SocketAddr, bytes: &[u8]) {
+    let now = self.clock.now();
+    self.deliver_gossip(from, host, bytes, now);
+  }
+
   /// Advance virtual time by `by`, then deliver matured UDP datagrams + matured
   /// TCP chunks and tick every node (mirrors
   /// [`Cluster::advance`](crate::cluster::Cluster)).
@@ -608,6 +693,13 @@ impl TcpCluster {
   /// `0` after every exchange completes / its connection is torn down.
   pub fn live_bridge_count(&self, host: SocketAddr) -> usize {
     self.nodes.get(&host).map_or(0, |n| n.live_bridge_count())
+  }
+
+  /// Iterate every node's coordinator — test-only, for asserting the
+  /// compression configuration the `*_compressed` constructors threaded.
+  #[cfg(test)]
+  fn nodes_for_test(&self) -> impl Iterator<Item = &Node1> {
+    self.nodes.values()
   }
 
   // ── Step loop (mirrors TlsCluster::step) ────────────────────────────────────
@@ -786,7 +878,10 @@ impl TcpCluster {
         }
       }
       for (to, bytes) in pending {
-        if self.enqueue_udp(*src, to, bytes, now) {
+        // Compress the outbound datagram through the source coordinator's
+        // configured compression (identity when disabled).
+        let on_wire = self.nodes.get(src).unwrap().compress_gossip(&bytes);
+        if self.enqueue_udp(*src, to, bytes::Bytes::from(on_wire), now) {
           any = true;
         }
       }
@@ -1070,15 +1165,38 @@ impl TcpCluster {
     node.handle_gossip(from, bytes, now);
     let mut fed = false;
     while let Some((src, raw)) = node.poll_memberlist_ingress() {
+      // Decompress the inbound datagram (identity when it carries no
+      // compression wrapper). A corrupt wrapper drops the datagram — gossip is
+      // lossy and self-healing.
+      let raw = match node.decompress_gossip(&raw) {
+        Ok(plain) => plain,
+        Err(_) => continue,
+      };
+      // Decode the whole datagram before applying anything: a gossip datagram
+      // that does not decode cleanly and completely is dropped wholesale (lossy
+      // and self-healing), matching the real wire's atomic compound decode.
+      // Partial application of a corrupt datagram is not a drop.
+      let mut decoded = Vec::new();
       let mut off = 0;
+      let mut clean = true;
       while off < raw.len() {
         match decode_frame(&raw[off..]) {
           Some((consumed, msg)) if consumed > 0 => {
-            node.handle_packet(src, msg, now);
+            decoded.push(msg);
             off += consumed;
-            fed = true;
           }
-          _ => break,
+          // A decode error, or a zero-length decode (which would spin) — the
+          // datagram is malformed; drop it whole.
+          _ => {
+            clean = false;
+            break;
+          }
+        }
+      }
+      if clean && off == raw.len() {
+        for msg in decoded {
+          node.handle_packet(src, msg, now);
+          fed = true;
         }
       }
     }
@@ -1298,5 +1416,17 @@ mod tests {
     let a: SocketAddr = "127.0.0.1:1234".parse().unwrap();
     assert_eq!(IdentityBridge::to_socket(&a), a);
     assert_eq!(IdentityBridge::from_socket(a), a);
+  }
+
+  #[test]
+  fn tcp_cluster_compression_mode_configures_nodes() {
+    use memberlist_wire::CompressAlgorithm;
+    let a = "127.0.0.1:9301".parse().unwrap();
+    let b = "127.0.0.1:9302".parse().unwrap();
+    let c = TcpCluster::two_node_join_compressed(a, b, CompressAlgorithm::Lz4);
+    // Every node carries the configured algorithm.
+    for node in c.nodes_for_test() {
+      assert_eq!(node.compression().algorithm(), Some(CompressAlgorithm::Lz4));
+    }
   }
 }
