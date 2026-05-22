@@ -6,7 +6,7 @@
 //! BOTH sides, then subsequent bytes are passed through verbatim.
 //!
 //! [`RawRecords`] mirrors the bridge-facing surface of
-//! [`crate::tls::records::TlsRecords`] byte-for-byte — same constructors,
+//! [`crate::TlsRecords`] byte-for-byte — same constructors,
 //! `handle_transport_data` / `poll_transport_transmit` /
 //! `read_plaintext` / `write_plaintext` / `is_handshaking` /
 //! `send_close_notify` / `peer_has_closed` — so the [`crate::tcp`] bridge and
@@ -84,8 +84,8 @@ enum Role {
 }
 
 /// One side of a plain-TCP exchange, behind the same byte-only Sans-I/O
-/// interface as [`crate::tls::records::TlsRecords`]. Accessor-only; no `pub`
-/// fields. Built via [`RawRecords::dialer`] / [`RawRecords::acceptor`].
+/// interface as [`crate::TlsRecords`]. Accessor-only; no `pub` fields. Built
+/// via the crate-internal `dialer` / `acceptor` constructors.
 ///
 /// There is no transport-level encryption: the outbound buffer carries the
 /// one-time label prefix followed by raw application bytes, and the inbound
@@ -100,7 +100,7 @@ enum Role {
 /// `memberlist-core/src/network.rs::handle_conn`, where `read_message`
 /// validates the inbound label before `send_message` runs its
 /// `reliable_encoder().with_label(...)` on the reply).
-pub(crate) struct RawRecords {
+pub struct RawRecords {
   /// The configured cluster label, normalized so an empty label is `None`
   /// ("no label"), exactly as `memberlist::codec::effective_label` treats it.
   label: Option<Vec<u8>>,

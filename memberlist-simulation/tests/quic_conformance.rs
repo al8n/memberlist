@@ -2042,7 +2042,6 @@ fn start_push_pull_self_sufficient_under_strict_poll_driving() {
 // handshake errors, and the push/pull never converges.
 mod per_peer_server_name {
   use std::{
-    borrow::Cow,
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -2182,29 +2181,33 @@ mod per_peer_server_name {
   // A's view: B's wire SocketAddr maps to B's name.
   struct BridgeForA;
   impl AddrBridge<SocketAddr> for BridgeForA {
+    type ServerName = str;
+
     fn to_socket(addr: &SocketAddr) -> SocketAddr {
       *addr
     }
     fn from_socket(socket: SocketAddr) -> SocketAddr {
       socket
     }
-    fn server_name(_addr: &SocketAddr) -> Cow<'_, str> {
+    fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
       // A only dials B in this test; map every peer to B's name.
-      Cow::Borrowed("node-b.example.com")
+      Some("node-b.example.com")
     }
   }
 
   // B's view: A's wire SocketAddr maps to A's name.
   struct BridgeForB;
   impl AddrBridge<SocketAddr> for BridgeForB {
+    type ServerName = str;
+
     fn to_socket(addr: &SocketAddr) -> SocketAddr {
       *addr
     }
     fn from_socket(socket: SocketAddr) -> SocketAddr {
       socket
     }
-    fn server_name(_addr: &SocketAddr) -> Cow<'_, str> {
-      Cow::Borrowed("node-a.example.com")
+    fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
+      Some("node-a.example.com")
     }
   }
 
@@ -2526,14 +2529,16 @@ mod mtls_cluster_auth {
 
   struct IdBridge;
   impl AddrBridge<SocketAddr> for IdBridge {
+    type ServerName = str;
+
     fn to_socket(addr: &SocketAddr) -> SocketAddr {
       *addr
     }
     fn from_socket(socket: SocketAddr) -> SocketAddr {
       socket
     }
-    fn server_name(_addr: &SocketAddr) -> std::borrow::Cow<'_, str> {
-      std::borrow::Cow::Borrowed("localhost")
+    fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
+      Some("localhost")
     }
   }
 

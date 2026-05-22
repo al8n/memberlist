@@ -935,6 +935,7 @@ where
           BridgeFailure::Decode => "decode failed".to_string(),
           BridgeFailure::ConnectionLost => "connection lost".to_string(),
           BridgeFailure::AdmissionClosed => "merge rejected by delegate".to_string(),
+          BridgeFailure::DialRetired => "dial intent retired before stream".to_string(),
         };
         EndpointEvent::StreamErrored { id, err }
       }

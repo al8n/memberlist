@@ -1,108 +1,10 @@
-//! Per-exchange connection tracking for the TLS coordinator.
-//!
-//! Connection-per-exchange: each reliable exchange dials its own TCP+TLS
-//! connection, runs exactly one `Stream`, sends `close_notify`, and tears
-//! down. Connection ↔ bridge ↔ `Stream` are 1:1, so this is a plain map of
-//! in-flight bridges keyed by an exchange handle — none of the pool / slab /
-//! drained-reap / `peers` machinery a multiplexed transport needs.
-//!
-//! A bridge is keyed by a coordinator-allocated [`ExchangeId`] for its whole
-//! lifetime — allocated during the `Handshaking` window (before the `Stream`,
-//! and therefore its `StreamId`, exists) and kept unchanged once the handshake
-//! completes and the `Stream` is minted. The entry is never re-keyed and there
-//! is no `StreamId -> ExchangeId` reverse index: the coordinator drives each
-//! bridge by iterating the map, and the originating `StreamId` needed for the
-//! `dial_succeeded` mint travels in the coordinator's per-exchange metadata.
-
-use std::collections::HashMap;
-
-use super::bridge::TlsBridge;
-
-/// A coordinator-allocated handle for one in-flight reliable exchange, stable
-/// across the `Handshaking → Established` promotion (unlike `StreamId`, which
-/// does not exist until the handshake completes). Newtype over `u64`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ExchangeId(u64);
-
-impl ExchangeId {
-  pub(crate) const fn new(raw: u64) -> Self {
-    Self(raw)
-  }
-  /// The raw monotonic handle. The driver keys its per-exchange TCP
-  /// connection on this value.
-  pub const fn get(self) -> u64 {
-    self.0
-  }
-}
-
-/// The in-flight bridge map. Accessor-only.
-pub(crate) struct TlsConns<I, A> {
-  bridges: HashMap<ExchangeId, TlsBridge<I, A>>,
-  next: u64,
-}
-
-impl<I, A> TlsConns<I, A>
-where
-  I: nodecraft::Id
-    + memberlist_wire::Data
-    + nodecraft::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_wire::Data
-    + nodecraft::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-{
-  pub(crate) fn new() -> Self {
-    Self {
-      bridges: HashMap::new(),
-      next: 0,
-    }
-  }
-
-  /// Allocate the next exchange handle (monotonic; never reused).
-  pub(crate) fn allocate(&mut self) -> ExchangeId {
-    let id = ExchangeId::new(self.next);
-    self.next += 1;
-    id
-  }
-
-  /// Register a bridge for `id` (dial-time or accept-time).
-  pub(crate) fn insert(&mut self, id: ExchangeId, bridge: TlsBridge<I, A>) {
-    self.bridges.insert(id, bridge);
-  }
-
-  pub(crate) fn get_mut(&mut self, id: ExchangeId) -> Option<&mut TlsBridge<I, A>> {
-    self.bridges.get_mut(&id)
-  }
-
-  /// Take a bridge out for the split-borrow pump (put back via `insert`, or
-  /// drop on terminal teardown).
-  pub(crate) fn remove(&mut self, id: ExchangeId) -> Option<TlsBridge<I, A>> {
-    self.bridges.remove(&id)
-  }
-
-  pub(crate) fn ids(&self) -> Vec<ExchangeId> {
-    self.bridges.keys().copied().collect()
-  }
-
-  pub(crate) fn len(&self) -> usize {
-    self.bridges.len()
-  }
-}
+//! Tests for the generic per-exchange connection map
+//! ([`crate::streams::conn::StreamConns`]) driving the TLS record layer
+//! ([`TlsRecords`](records::TlsRecords)).
 
 #[cfg(test)]
 mod tests {
-  use super::*;
-  use crate::tls::crypto::tests::test_server;
+  use crate::{streams::conn::StreamConns, tls::options::tests::test_server};
   use smol_str::SmolStr;
   use std::{
     net::SocketAddr,
@@ -110,14 +12,16 @@ mod tests {
     time::{Duration, Instant},
   };
 
-  fn a_bridge() -> TlsBridge<SmolStr, SocketAddr> {
-    let records = crate::tls::records::TlsRecords::server(Arc::new(test_server())).unwrap();
-    TlsBridge::new(records, Instant::now() + Duration::from_secs(10))
+  use crate::{streams::bridge::StreamBridge, tls::records::TlsRecords};
+
+  fn a_bridge() -> StreamBridge<SmolStr, SocketAddr, TlsRecords> {
+    let records = TlsRecords::server(Arc::new(test_server())).unwrap();
+    StreamBridge::new(records, Instant::now() + Duration::from_secs(10))
   }
 
   #[test]
   fn allocate_is_monotonic_and_distinct() {
-    let mut c: TlsConns<SmolStr, SocketAddr> = TlsConns::new();
+    let mut c: StreamConns<SmolStr, SocketAddr, TlsRecords> = StreamConns::new();
     let a = c.allocate();
     let b = c.allocate();
     assert_ne!(a, b);
@@ -126,7 +30,7 @@ mod tests {
 
   #[test]
   fn insert_then_remove_clears_the_entry() {
-    let mut c: TlsConns<SmolStr, SocketAddr> = TlsConns::new();
+    let mut c: StreamConns<SmolStr, SocketAddr, TlsRecords> = StreamConns::new();
     let id = c.allocate();
     c.insert(id, a_bridge());
     assert_eq!(c.len(), 1);
