@@ -1083,7 +1083,7 @@ where
     ping_sequence_number: u32,
     ack_rx: &async_channel::Receiver<AckMessage<<T::Runtime as RuntimeLite>::Instant>>,
     nack_rx: &async_channel::Receiver<()>,
-    deadline: <T::Runtime as RuntimeLite>::Instant,
+    _deadline: <T::Runtime as RuntimeLite>::Instant,
     awareness_delta: &AtomicIsize,
   ) {
     // Get some random live nodes.
@@ -1144,10 +1144,12 @@ where
     if !disable_reliable_pings {
       let target_addr = target.address().cheap_clone();
       let this = self.clone();
+      let reliable_deadline =
+        <T::Runtime as RuntimeLite>::now() + self.inner.opts.timeout;
       <T::Runtime as RuntimeLite>::spawn_detach(async move {
         scopeguard::defer!(fallback_tx.close(););
         match this
-          .send_ping_and_wait_for_ack(&target_addr, ind.into(), deadline)
+          .send_ping_and_wait_for_ack(&target_addr, ind.into(), reliable_deadline)
           .await
         {
           Ok(did_contact) => {
