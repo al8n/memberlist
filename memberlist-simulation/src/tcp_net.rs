@@ -1,31 +1,33 @@
 //! [`TcpCluster`]: the `tcp`-gated conformance harness.
 //!
 //! Mirrors [`TlsCluster`](crate::tls_net::TlsCluster) method-for-method,
-//! substituting [`TcpEndpoint`] for the rustls-over-TCP `TlsEndpoint`:
+//! driving a [`StreamEndpoint`] over the plain-TCP record layer (`RawRecords`)
+//! instead of the rustls-over-TCP record layer (`TlsRecords`):
 //! reliable exchanges (join/anti-entropy push-pull, reliable-ping fallback)
 //! ride a per-exchange plain TCP connection with a wire-label prefix, while
 //! unreliable gossip rides a plain UDP socket. The cluster-isolation gate is
-//! the [`TcpConfig`] label (matched at the inbound stream's first read), not a
+//! the [`TcpOptions`] label (matched at the inbound stream's first read), not a
 //! TLS handshake; there is no crypto layer at all. Two queues mirror the TLS
 //! harness:
 //!
 //! - **UDP gossip** — a datagram queue ([`PendingDatagram`]) byte-identical to
 //!   the TLS harness's memberlist path: outbound is drained through
-//!   [`TcpEndpoint::poll_memberlist_transmit`], plain-frame encoded with the
+//!   [`StreamEndpoint::poll_memberlist_transmit`], plain-frame encoded with the
 //!   machine's own `memberlist-wire` codec, enqueued (faults applied once per
-//!   datagram), and on delivery fed through [`TcpEndpoint::handle_gossip`] →
-//!   [`TcpEndpoint::poll_memberlist_ingress`] → decode → [`TcpEndpoint::handle_packet`].
+//!   datagram), and on delivery fed through [`StreamEndpoint::handle_gossip`] →
+//!   [`StreamEndpoint::poll_memberlist_ingress`] → decode →
+//!   [`StreamEndpoint::handle_packet`].
 //! - **A deterministic virtual TCP** (the shared
 //!   [`TcpPipe`](crate::virtual_tcp::TcpPipe)) — per-connection ordered byte
 //!   pipes (FIFO, no reordering, no loss within a connection; TCP is reliable +
 //!   ordered) with clock-driven delivery latency, connect / accept / write /
 //!   read(==0 on peer half-close) / reset, plus fault injection (connect-
 //!   refused, mid-stream reset, half-close). Plain bytes are drained through
-//!   [`TcpEndpoint::poll_transport_transmit`], delivered with latency, and fed
-//!   back through [`TcpEndpoint::handle_transport_data`] with an explicit
+//!   [`StreamEndpoint::poll_transport_transmit`], delivered with latency, and
+//!   fed back through [`StreamEndpoint::handle_transport_data`] with an explicit
 //!   `eof: bool` (the out-of-band FIN signal that replaces TLS's in-band
 //!   `close_notify` alert); transport directives are drained through
-//!   [`TcpEndpoint::poll_action`].
+//!   [`StreamEndpoint::poll_action`].
 //!
 //! Virtual time (the shared [`Clock`]) is injected as `now` into both
 //! machines, and the existing [`FaultConfig`] drop/delay/partition model is
@@ -40,8 +42,8 @@ use std::{
 };
 
 use memberlist_machine::{
-  AddrBridge, Endpoint, EndpointConfig, Event, PushPullKind, TcpAction, TcpConfig, TcpEndpoint,
-  TcpExchangeId, Transmit,
+  AddrBridge, Endpoint, EndpointConfig, Event, PushPullKind, RawRecords, TcpOptions, Transmit,
+  streams::{ExchangeId, StreamAction, StreamEndpoint},
 };
 use memberlist_wire::{
   framing, message_from_any, message_to_any,
@@ -59,19 +61,21 @@ use crate::{clock::Clock, faults::FaultConfig, virtual_tcp::TcpPipe};
 struct IdentityBridge;
 
 impl AddrBridge<SocketAddr> for IdentityBridge {
+  type ServerName = str;
+
   fn to_socket(addr: &SocketAddr) -> SocketAddr {
     *addr
   }
   fn from_socket(socket: SocketAddr) -> SocketAddr {
     socket
   }
-  fn server_name(_addr: &SocketAddr) -> std::borrow::Cow<'_, str> {
-    std::borrow::Cow::Borrowed("localhost")
+  fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
+    None
   }
 }
 
 /// The concrete coordinator the harness drives.
-type Node1 = TcpEndpoint<SmolStr, SocketAddr, IdentityBridge>;
+type Node1 = StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords>;
 
 /// The default cluster label every node is built with unless the harness has
 /// overridden it (the label-mismatch scenario installs a different label on the
@@ -99,12 +103,12 @@ pub struct TcpCluster {
   /// UDP gossip queue.
   queue: VecDeque<PendingDatagram>,
   /// Per-side virtual-TCP pipes, keyed by the READER's `(addr, exchange)`.
-  pipes: HashMap<(SocketAddr, TcpExchangeId), TcpPipe>,
+  pipes: HashMap<(SocketAddr, ExchangeId), TcpPipe>,
   /// Dialer ↔ acceptor exchange-handle mapping, established when the dialer's
   /// `Connect` action is delivered (the harness calls `acceptor.accept_connection`
-  /// and records the returned acceptor `TcpExchangeId`). Both orientations are
+  /// and records the returned acceptor `ExchangeId`). Both orientations are
   /// stored so a write on either side resolves the peer's pipe key.
-  peer_of: HashMap<(SocketAddr, TcpExchangeId), (SocketAddr, TcpExchangeId)>,
+  peer_of: HashMap<(SocketAddr, ExchangeId), (SocketAddr, ExchangeId)>,
   /// Per-host record of every peer EVER observed in `Suspect` (scanned every
   /// tick — a transient Suspect later refuted would otherwise be invisible to
   /// an end-state assertion).
@@ -147,7 +151,7 @@ pub struct TcpCluster {
   /// Used by the label-mismatch scenario to install a different label on the
   /// responder so the inbound check rejects the dialer's stream.
   label_overrides: HashMap<SocketAddr, Vec<u8>>,
-  /// Hosts built unlabeled (`TcpConfig::new(None)`): no outbound label
+  /// Hosts built unlabeled (`TcpOptions::new(None)`): no outbound label
   /// prefix is queued; only required for the dialer-side
   /// response-label-rejection scenario.
   unlabeled_hosts: HashSet<SocketAddr>,
@@ -213,11 +217,11 @@ impl TcpCluster {
           .unwrap_or_else(|| DEFAULT_LABEL.to_vec()),
       )
     };
-    let mut tcp_cfg = TcpConfig::new(configured_label);
+    let mut tcp_cfg = TcpOptions::new(configured_label);
     if self.skip_inbound_label_check_hosts.contains(&addr) {
       tcp_cfg = tcp_cfg.with_skip_inbound_label_check(true);
     }
-    self.nodes.insert(addr, TcpEndpoint::new(ep, tcp_cfg));
+    self.nodes.insert(addr, StreamEndpoint::new(ep, tcp_cfg));
   }
 
   /// Two nodes; `a` joins `b` via a plain-TCP push/pull. `a` starts knowing
@@ -541,7 +545,7 @@ impl TcpCluster {
     }
   }
 
-  /// Begin a graceful leave on `host` (delegates to [`TcpEndpoint::leave`]).
+  /// Begin a graceful leave on `host` (delegates to [`StreamEndpoint::leave`]).
   pub fn leave(&mut self, host: SocketAddr) -> Result<(), memberlist_machine::Error> {
     let now = self.clock.now();
     match self.nodes.get_mut(&host) {
@@ -614,12 +618,13 @@ impl TcpCluster {
   ///    queued dial/accept, every bridge byte-pump, and `collect_transmits` run
   ///    BEFORE the outbound directives/bytes/datagrams are drained.
   /// 1. Drain every node's gossip [`Transmit`] (plain-frame encoded → UDP
-  ///    queue), transport directives ([`TcpAction`]), and outbound bytes
-  ///    ([`TcpEndpoint::poll_transport_transmit`] → peer pipe) → enqueue/route.
+  ///    queue), transport directives ([`StreamAction`]), and outbound bytes
+  ///    ([`StreamEndpoint::poll_transport_transmit`] → peer pipe) →
+  ///    enqueue/route.
   /// 2. Advance to the next deadline = `min`(earliest queued UDP datagram,
-  ///    earliest queued TCP chunk, every node's [`TcpEndpoint::poll_timeout`]).
+  ///    earliest queued TCP chunk, every node's [`StreamEndpoint::poll_timeout`]).
   /// 3. Deliver matured UDP datagrams (gossip ingress + decode + handle_packet)
-  ///    and matured TCP chunks ([`TcpEndpoint::handle_transport_data`]).
+  ///    and matured TCP chunks ([`StreamEndpoint::handle_transport_data`]).
   /// 4. Tick every node, scan events, drain again so THIS tick captures the
   ///    directives/bytes its own final tick produced.
   pub fn step(&mut self) -> bool {
@@ -694,14 +699,14 @@ impl TcpCluster {
     // the coordinator while their exchange still has bytes in
     // `poll_transport_transmit`; we re-poll after the byte drain below to
     // surface those released teardowns and apply them in the same step.
-    let mut connects: Vec<(SocketAddr, TcpAction)> = Vec::new();
-    let mut teardowns: Vec<(SocketAddr, TcpAction)> = Vec::new();
+    let mut connects: Vec<(SocketAddr, StreamAction)> = Vec::new();
+    let mut teardowns: Vec<(SocketAddr, StreamAction)> = Vec::new();
     for src in addrs {
       let node = self.nodes.get_mut(src).unwrap();
       while let Some(action) = node.poll_action() {
         match &action {
-          TcpAction::Connect(_) => connects.push((*src, action)),
-          TcpAction::Shutdown(_) | TcpAction::Close(_) => teardowns.push((*src, action)),
+          StreamAction::Connect(_) => connects.push((*src, action)),
+          StreamAction::Shutdown(_) | StreamAction::Close(_) => teardowns.push((*src, action)),
         }
       }
     }
@@ -713,7 +718,7 @@ impl TcpCluster {
     }
     // (b) Outbound bytes → peer pipe.
     for src in addrs {
-      let mut chunks: Vec<(TcpExchangeId, SocketAddr, bytes::Bytes)> = Vec::new();
+      let mut chunks: Vec<(ExchangeId, SocketAddr, bytes::Bytes)> = Vec::new();
       let node = self.nodes.get_mut(src).unwrap();
       while let Some((id, peer, bytes)) = node.poll_transport_transmit() {
         chunks.push((id, peer, bytes));
@@ -730,13 +735,13 @@ impl TcpCluster {
     // Appending the released teardowns here keeps the "FIN after data" wire
     // order (arm_fin runs in step (c) below, after route_bytes has already
     // queued every chunk).
-    let mut late_connects: Vec<(SocketAddr, TcpAction)> = Vec::new();
+    let mut late_connects: Vec<(SocketAddr, StreamAction)> = Vec::new();
     for src in addrs {
       let node = self.nodes.get_mut(src).unwrap();
       while let Some(action) = node.poll_action() {
         match &action {
-          TcpAction::Connect(_) => late_connects.push((*src, action)),
-          TcpAction::Shutdown(_) | TcpAction::Close(_) => teardowns.push((*src, action)),
+          StreamAction::Connect(_) => late_connects.push((*src, action)),
+          StreamAction::Shutdown(_) | StreamAction::Close(_) => teardowns.push((*src, action)),
         }
       }
     }
@@ -804,9 +809,9 @@ impl TcpCluster {
 
   /// Apply one transport directive from `src`. Returns `true` if it changed
   /// connection state.
-  fn apply_action(&mut self, src: SocketAddr, action: TcpAction, now: Instant) -> bool {
+  fn apply_action(&mut self, src: SocketAddr, action: StreamAction, now: Instant) -> bool {
     match action {
-      TcpAction::Connect(info) => {
+      StreamAction::Connect(info) => {
         let dialer_exch = info.id();
         let peer = info.peer();
         // Refuse if the peer node is unknown or the pair is connect-refused:
@@ -865,7 +870,7 @@ impl TcpCluster {
         self.pipes.insert((peer, acceptor_exch), acceptor_pipe);
         true
       }
-      TcpAction::Shutdown(r) => {
+      StreamAction::Shutdown(r) => {
         // Half-close `src`'s write side (TCP FIN): the PEER reads read==0 after
         // draining its buffered inbound. The FIN is a separate segment arriving
         // after the last queued data byte (`arm_fin`), so the peer keeps a tick
@@ -880,7 +885,7 @@ impl TcpCluster {
         }
         false
       }
-      TcpAction::Close(r) => {
+      StreamAction::Close(r) => {
         // Tear the connection down: forget the mapping and arm the FIN on BOTH
         // sides so any already-queued inbound bytes still drain (TCP delivers
         // bytes sent before a clean close), then each reader observes read==0.
@@ -913,7 +918,7 @@ impl TcpCluster {
   fn route_bytes(
     &mut self,
     src: SocketAddr,
-    exch: TcpExchangeId,
+    exch: ExchangeId,
     _peer_socket: SocketAddr,
     bytes: bytes::Bytes,
     now: Instant,
@@ -1111,10 +1116,9 @@ impl TcpCluster {
     // to act on the data (e.g. generate a push/pull response) before
     // honoring the EOF. A piggybacked FIN bypasses this gate because the
     // EOF rode with the data in one TCP read.
-    let mut data_this_call: HashSet<(SocketAddr, TcpExchangeId)> = HashSet::new();
+    let mut data_this_call: HashSet<(SocketAddr, ExchangeId)> = HashSet::new();
     loop {
-      let mut deliveries: Vec<((SocketAddr, TcpExchangeId), Option<bytes::Bytes>, bool)> =
-        Vec::new();
+      let mut deliveries: Vec<((SocketAddr, ExchangeId), Option<bytes::Bytes>, bool)> = Vec::new();
       for (&key, pipe) in self.pipes.iter_mut() {
         // A reset connection surfaces its anchor exactly once, immediately.
         if pipe.reset {

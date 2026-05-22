@@ -69,4 +69,12 @@ pub(crate) enum BridgeFailure {
   /// `MergeDelegate`/`AliveDelegate` admission rejection on an inbound
   /// push/pull exchange. A rejected merge aborts the exchange.
   AdmissionClosed,
+  /// The dial intent was retired by the inner endpoint (deadline elapsed
+  /// in `Endpoint::dial_succeeded`, or an external `dial_failed` cleared
+  /// the intent) before a `Stream` could be minted. Triggered by the
+  /// unified `StreamEndpoint::service_handshake_completions`
+  /// `dial_succeeded(None)` reap path; runs `clear_outbound` +
+  /// `purge_transmit_for` + `purge_pending_connect_for` before dropping
+  /// the bridge without `collect_bridge_transmits`.
+  DialRetired,
 }

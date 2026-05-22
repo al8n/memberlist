@@ -118,15 +118,15 @@ pub use quic::{QuicConfig, QuicEndpoint};
 #[cfg(feature = "tls")]
 mod tls;
 #[cfg(feature = "tls")]
-pub use tls::{ConnectInfo, ExchangeId, ExchangeRef, TlsAction, TlsConfig, TlsEndpoint};
+pub use tls::{TlsOptions, TlsRecords};
 
 #[cfg(feature = "tcp")]
 mod tcp;
 #[cfg(feature = "tcp")]
-pub use tcp::{
-  ConnectInfo as TcpConnectInfo, ExchangeId as TcpExchangeId, ExchangeRef as TcpExchangeRef,
-  TcpAction, TcpConfig, TcpEndpoint,
-};
+pub use tcp::{RawRecords, TcpOptions};
+
+#[cfg(any(feature = "tls", feature = "tcp"))]
+pub mod streams;
 
 pub mod ack;
 pub mod awareness;

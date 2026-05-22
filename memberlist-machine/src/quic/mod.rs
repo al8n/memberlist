@@ -1323,13 +1323,32 @@ where
         continue;
       }
       let addr = B::to_socket(&peer);
-      let sni = B::server_name(&peer);
+      let sni = match B::server_name(&peer) {
+        Some(s) => s,
+        None => {
+          // Soft-fail-via-dial_failed — the user's `AddrBridge` returned
+          // `None`, but QUIC requires a verification identity. Mirrors
+          // the TLS coordinator's parse-failure path: the bridge author's
+          // contract for QUIC use is "return `Some(_)`"; `None` is treated
+          // as a per-peer misconfiguration that fails just that one dial —
+          // other peers/exchanges continue unaffected.
+          self.ep.dial_failed(
+            id,
+            crate::error::StreamError::DialFailed(
+              "quic bridge returned None for server_name".into(),
+            ),
+            now,
+          );
+          continue;
+        }
+      };
+      let sni_str: &str = sni.as_ref();
       match self.conns.get_or_dial(
         &mut self.quinn,
         now,
         self.cfg.client().clone(),
         addr,
-        sni.as_ref(),
+        sni_str,
       ) {
         Ok(ch) => {
           if let Some(e) = self.conns.get_mut(ch) {
@@ -1501,16 +1520,18 @@ mod tests {
 
   struct IdBridge;
   impl AddrBridge<SocketAddr> for IdBridge {
+    type ServerName = str;
+
     fn to_socket(addr: &SocketAddr) -> SocketAddr {
       *addr
     }
     fn from_socket(socket: SocketAddr) -> SocketAddr {
       socket
     }
-    fn server_name(_addr: &SocketAddr) -> std::borrow::Cow<'_, str> {
+    fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
       // Sim/test cert SAN is "localhost"; the identity bridge for
       // `A = SocketAddr` returns it for every peer.
-      std::borrow::Cow::Borrowed("localhost")
+      Some("localhost")
     }
   }
 

@@ -50,17 +50,19 @@ use crate::{clock::Clock, faults::FaultConfig};
 struct IdentityBridge;
 
 impl AddrBridge<SocketAddr> for IdentityBridge {
+  type ServerName = str;
+
   fn to_socket(addr: &SocketAddr) -> SocketAddr {
     *addr
   }
   fn from_socket(socket: SocketAddr) -> SocketAddr {
     socket
   }
-  fn server_name(_addr: &SocketAddr) -> std::borrow::Cow<'_, str> {
+  fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
     // The sim's test certs are generated with `"localhost"` as the SAN
     // (see [`sim_quic_config`]); the identity bridge returns that for
     // every peer so the rustls verifier sees a name matching the cert.
-    std::borrow::Cow::Borrowed("localhost")
+    Some("localhost")
   }
 }
 

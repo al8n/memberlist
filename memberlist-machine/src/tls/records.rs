@@ -23,9 +23,9 @@ use rustls::{
 };
 
 /// One side of a TLS connection, behind a byte-only Sans-I/O interface.
-/// Accessor-only; no `pub` fields. Built via [`TlsRecords::client`] /
-/// [`TlsRecords::server`].
-pub(crate) struct TlsRecords {
+/// Accessor-only; no `pub` fields. Built via the crate-internal `client` /
+/// `server` constructors.
+pub struct TlsRecords {
   conn: Conn,
   /// `peer_has_closed` latched once observed (`process_new_packets` reports it
   /// per-call; rustls only surfaces the close once, so we sticky it).

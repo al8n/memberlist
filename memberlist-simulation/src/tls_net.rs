@@ -1,8 +1,9 @@
 //! [`TlsCluster`]: the `tls`-gated conformance harness.
 //!
 //! Mirrors [`Cluster`](crate::cluster::Cluster) / [`QuicCluster`](crate::quic_net::QuicCluster)
-//! exactly, substituting [`TlsEndpoint`] for the bare `Endpoint`: reliable
-//! exchanges (join/anti-entropy push-pull, reliable-ping fallback) ride a real
+//! exactly, driving a [`StreamEndpoint`] over the rustls-over-TCP record layer
+//! (`TlsRecords`) instead of the bare `Endpoint`: reliable exchanges
+//! (join/anti-entropy push-pull, reliable-ping fallback) ride a real
 //! rustls-over-TCP connection, while unreliable gossip rides a plain UDP
 //! socket. TLS and UDP are SEPARATE transports here (no first-byte demux —
 //! that was QUIC-specific, since quinn runs over UDP), so the harness carries
@@ -10,18 +11,21 @@
 //!
 //! - **UDP gossip** — a datagram queue ([`PendingDatagram`]) byte-identical to
 //!   the QUIC harness's memberlist path: outbound is drained through
-//!   [`TlsEndpoint::poll_memberlist_transmit`], plain-frame encoded with the
+//!   [`StreamEndpoint::poll_memberlist_transmit`], plain-frame encoded with the
 //!   machine's own `memberlist-wire` codec, enqueued (faults applied once per
-//!   datagram), and on delivery fed through [`TlsEndpoint::handle_gossip`] →
-//!   [`TlsEndpoint::poll_memberlist_ingress`] → decode → [`TlsEndpoint::handle_packet`].
+//!   datagram), and on delivery fed through [`StreamEndpoint::handle_gossip`] →
+//!   [`StreamEndpoint::poll_memberlist_ingress`] → decode →
+//!   [`StreamEndpoint::handle_packet`].
 //! - **A deterministic virtual TCP** ([`TcpPipe`]) — per-connection ordered
 //!   byte pipes (FIFO, no reordering, no loss within a connection: TCP is
 //!   reliable + ordered) with clock-driven delivery latency, connect / accept /
 //!   write / read(==0 on peer half-close) / reset, plus fault injection
 //!   (connect-refused, mid-stream reset, half-close). Ciphertext is drained
-//!   through [`TlsEndpoint::poll_transport_transmit`], delivered with latency,
-//!   and fed back through [`TlsEndpoint::handle_transport_data`]; transport
-//!   directives are drained through [`TlsEndpoint::poll_action`].
+//!   through [`StreamEndpoint::poll_transport_transmit`], delivered with
+//!   latency, and fed back through [`StreamEndpoint::handle_transport_data`]
+//!   with an explicit `eof: bool` (the out-of-band TCP FIN, distinct from the
+//!   in-band `close_notify` alert rustls carries); transport directives are
+//!   drained through [`StreamEndpoint::poll_action`].
 //!
 //! Virtual time (the shared [`Clock`]) is injected as `now` into both
 //! machines, and the existing [`FaultConfig`] drop/delay/partition model is
@@ -36,8 +40,8 @@ use std::{
 };
 
 use memberlist_machine::{
-  AddrBridge, Endpoint, EndpointConfig, Event, ExchangeId, PushPullKind, TlsAction, TlsConfig,
-  TlsEndpoint, Transmit,
+  AddrBridge, Endpoint, EndpointConfig, Event, PushPullKind, TlsOptions, TlsRecords, Transmit,
+  streams::{ExchangeId, StreamAction, StreamEndpoint},
 };
 use memberlist_wire::{
   framing, message_from_any, message_to_any,
@@ -54,22 +58,24 @@ use crate::{clock::Clock, faults::FaultConfig, virtual_tcp::TcpPipe};
 struct IdentityBridge;
 
 impl AddrBridge<SocketAddr> for IdentityBridge {
+  type ServerName = str;
+
   fn to_socket(addr: &SocketAddr) -> SocketAddr {
     *addr
   }
   fn from_socket(socket: SocketAddr) -> SocketAddr {
     socket
   }
-  fn server_name(_addr: &SocketAddr) -> std::borrow::Cow<'_, str> {
+  fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
     // The sim's test certs are generated with `"localhost"` as the SAN
     // (see [`sim_tls_config`]); the identity bridge returns that for every
     // peer so the rustls verifier sees a name matching the cert.
-    std::borrow::Cow::Borrowed("localhost")
+    Some("localhost")
   }
 }
 
 /// The concrete coordinator the harness drives.
-type Node1 = TlsEndpoint<SmolStr, SocketAddr, IdentityBridge>;
+type Node1 = StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, TlsRecords>;
 
 /// The rustls crypto provider the harness uses, selected by the active backend
 /// feature. The entire conformance suite runs under whichever is chosen
@@ -132,9 +138,9 @@ fn self_signed() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
   (chain, key)
 }
 
-/// A self-signed [`TlsConfig`] bundle: server with `with_no_client_auth`,
+/// A self-signed [`TlsOptions`] bundle: server with `with_no_client_auth`,
 /// client with the accept-any verifier (sim/test only). Trusted-network model.
-fn sim_tls_config() -> TlsConfig {
+fn sim_tls_config() -> TlsOptions {
   let (chain, key) = self_signed();
   let provider = sim_crypto_provider();
   let server = rustls::ServerConfig::builder_with_provider(provider.clone())
@@ -149,15 +155,15 @@ fn sim_tls_config() -> TlsConfig {
     .dangerous()
     .with_custom_certificate_verifier(Arc::new(AnyServer(provider)))
     .with_no_client_auth();
-  TlsConfig::new(server, client)
+  TlsOptions::new(server, client)
 }
 
-/// `b`'s mTLS-required [`TlsConfig`]: its server installs a `ClientCertVerifier`
+/// `b`'s mTLS-required [`TlsOptions`]: its server installs a `ClientCertVerifier`
 /// rooted at a throwaway cluster CA that `a` is NOT signed by, so `a`'s
 /// `with_no_client_auth` dial fails the MUTUAL handshake before any `Stream`
 /// exists. Returns the responder's bundle (a's bundle is the plain
 /// [`sim_tls_config`]).
-fn sim_tls_config_mtls_required() -> TlsConfig {
+fn sim_tls_config_mtls_required() -> TlsOptions {
   // A throwaway cluster CA whose roots `a`'s self-signed leaf does not chain
   // to. `b` requires a client cert verified against it; `a` presents none.
   let ca = rcgen::generate_simple_self_signed(vec!["cluster-ca".into()]).unwrap();
@@ -184,7 +190,7 @@ fn sim_tls_config_mtls_required() -> TlsConfig {
     .dangerous()
     .with_custom_certificate_verifier(Arc::new(AnyServer(provider)))
     .with_no_client_auth();
-  TlsConfig::new(server, client)
+  TlsOptions::new(server, client)
 }
 
 /// One in-flight UDP gossip datagram. Carries an encoded plain frame (or a
@@ -299,7 +305,7 @@ impl TlsCluster {
     } else {
       sim_tls_config()
     };
-    self.nodes.insert(addr, TlsEndpoint::new(ep, tls));
+    self.nodes.insert(addr, StreamEndpoint::new(ep, tls));
   }
 
   /// Two nodes; `a` joins `b` via a TLS push/pull. `a` starts knowing NOTHING
@@ -548,7 +554,8 @@ impl TlsCluster {
 
   /// Refuse the TCP connect for the (unordered) pair `a`/`b`: the dialer's pipe
   /// is `reset` the instant its `Connect` action is delivered, so its next
-  /// `handle_transport_data(id, &[], now)` surfaces the connect failure.
+  /// `handle_transport_data(id, &[], eof=true, now)` surfaces the connect
+  /// failure.
   pub fn refuse_connect_between(&mut self, a: SocketAddr, b: SocketAddr) {
     self.connect_refuse.push((a, b));
   }
@@ -588,7 +595,7 @@ impl TlsCluster {
     }
   }
 
-  /// Begin a graceful leave on `host` (delegates to [`TlsEndpoint::leave`]).
+  /// Begin a graceful leave on `host` (delegates to [`StreamEndpoint::leave`]).
   pub fn leave(&mut self, host: SocketAddr) -> Result<(), memberlist_machine::Error> {
     let now = self.clock.now();
     match self.nodes.get_mut(&host) {
@@ -661,12 +668,13 @@ impl TlsCluster {
   ///    queued dial/accept, every bridge byte-pump, and `collect_transmits` run
   ///    BEFORE the outbound directives/ciphertext/datagrams are drained.
   /// 1. Drain every node's gossip [`Transmit`] (plain-frame encoded → UDP
-  ///    queue), transport directives ([`TlsAction`]), and outbound ciphertext
-  ///    ([`TlsEndpoint::poll_transport_transmit`] → peer pipe) → enqueue/route.
+  ///    queue), transport directives ([`StreamAction`]), and outbound ciphertext
+  ///    ([`StreamEndpoint::poll_transport_transmit`] → peer pipe) →
+  ///    enqueue/route.
   /// 2. Advance to the next deadline = `min`(earliest queued UDP datagram,
-  ///    earliest queued TCP chunk, every node's [`TlsEndpoint::poll_timeout`]).
+  ///    earliest queued TCP chunk, every node's [`StreamEndpoint::poll_timeout`]).
   /// 3. Deliver matured UDP datagrams (gossip ingress + decode + handle_packet)
-  ///    and matured TCP chunks ([`TlsEndpoint::handle_transport_data`]).
+  ///    and matured TCP chunks ([`StreamEndpoint::handle_transport_data`]).
   /// 4. Tick every node, scan events, drain again so THIS tick captures the
   ///    directives/bytes its own final tick produced.
   pub fn step(&mut self) -> bool {
@@ -733,19 +741,22 @@ impl TlsCluster {
   /// (the FIN segment is the LAST thing on the wire — it must be armed after the
   /// tick's data fragments are queued, else the read==0 anchor could be timed
   /// before data the bridge already wrote, denying the peer a tick to generate
-  /// its push/pull response). Returns `true` if anything was routed.
+  /// its push/pull response). Teardowns are withheld by the coordinator while
+  /// their exchange still has bytes in `poll_transport_transmit`; we re-poll
+  /// after the ciphertext drain below to surface those released teardowns and
+  /// apply them in the same step. Returns `true` if anything was routed.
   fn drain_and_route(&mut self, addrs: &[SocketAddr], now: Instant) -> bool {
     let mut any = false;
-    // Drain every node's actions once, partitioning Connect (pre-ciphertext)
-    // from Shutdown/Close (post-ciphertext).
-    let mut connects: Vec<(SocketAddr, TlsAction)> = Vec::new();
-    let mut teardowns: Vec<(SocketAddr, TlsAction)> = Vec::new();
+    // Drain every node's currently-available actions, partitioning Connect
+    // (pre-ciphertext) from Shutdown/Close (post-ciphertext).
+    let mut connects: Vec<(SocketAddr, StreamAction)> = Vec::new();
+    let mut teardowns: Vec<(SocketAddr, StreamAction)> = Vec::new();
     for src in addrs {
       let node = self.nodes.get_mut(src).unwrap();
       while let Some(action) = node.poll_action() {
         match &action {
-          TlsAction::Connect(_) => connects.push((*src, action)),
-          TlsAction::Shutdown(_) | TlsAction::Close(_) => teardowns.push((*src, action)),
+          StreamAction::Connect(_) => connects.push((*src, action)),
+          StreamAction::Shutdown(_) | StreamAction::Close(_) => teardowns.push((*src, action)),
         }
       }
     }
@@ -768,13 +779,37 @@ impl TlsCluster {
         }
       }
     }
+    // (b.5) Re-poll actions: the coordinator gates per-exchange teardowns
+    // behind the exchange's bytes, so a `Shutdown`/`Close` enqueued the same
+    // tick as its trailing ciphertext surfaces only AFTER the ciphertext is
+    // drained. Appending the released teardowns here keeps the "FIN after
+    // data" wire order (arm_fin runs in step (c) below, after route_ciphertext
+    // has already queued every chunk).
+    let mut late_connects: Vec<(SocketAddr, StreamAction)> = Vec::new();
+    for src in addrs {
+      let node = self.nodes.get_mut(src).unwrap();
+      while let Some(action) = node.poll_action() {
+        match &action {
+          StreamAction::Connect(_) => late_connects.push((*src, action)),
+          StreamAction::Shutdown(_) | StreamAction::Close(_) => teardowns.push((*src, action)),
+        }
+      }
+    }
+    // No new Connect should be emitted by a ciphertext drain alone; if one
+    // appears (e.g. from a same-tick reliable-fallback) apply it before its
+    // ciphertext is produced. Drained in producer order.
+    for (src, action) in late_connects {
+      if self.apply_action(src, action, now) {
+        any = true;
+      }
+    }
     // (c) Shutdown/Close directives → arm the FIN AFTER this tick's data.
     for (src, action) in teardowns {
       if self.apply_action(src, action, now) {
         any = true;
       }
     }
-    // (c) Gossip transmits → UDP queue.
+    // (d) Gossip transmits → UDP queue.
     for src in addrs {
       let mut pending: Vec<(SocketAddr, bytes::Bytes)> = Vec::new();
       let node = self.nodes.get_mut(src).unwrap();
@@ -824,9 +859,9 @@ impl TlsCluster {
 
   /// Apply one transport directive from `src`. Returns `true` if it changed
   /// connection state.
-  fn apply_action(&mut self, src: SocketAddr, action: TlsAction, now: Instant) -> bool {
+  fn apply_action(&mut self, src: SocketAddr, action: StreamAction, now: Instant) -> bool {
     match action {
-      TlsAction::Connect(info) => {
+      StreamAction::Connect(info) => {
         let dialer_exch = info.id();
         let peer = info.peer();
         // Refuse if the peer node is unknown or the pair is connect-refused:
@@ -885,7 +920,7 @@ impl TlsCluster {
         self.pipes.insert((peer, acceptor_exch), acceptor_pipe);
         true
       }
-      TlsAction::Shutdown(r) => {
+      StreamAction::Shutdown(r) => {
         // Half-close `src`'s write side (TCP FIN): the PEER reads read==0 after
         // draining its buffered inbound. The FIN is a separate segment arriving
         // after the last queued data byte (`arm_fin`), so the peer keeps a tick
@@ -900,7 +935,7 @@ impl TlsCluster {
         }
         false
       }
-      TlsAction::Close(r) => {
+      StreamAction::Close(r) => {
         // Tear the connection down: forget the mapping and arm the FIN on BOTH
         // sides so any already-queued inbound bytes still drain (TCP delivers
         // bytes sent before a clean close), then each reader observes read==0.
@@ -1105,8 +1140,17 @@ impl TlsCluster {
 
   /// Deliver every matured TCP chunk and any owed read==0 / reset anchor.
   /// Returns the number of `handle_transport_data` calls made.
+  ///
+  /// The unified `handle_transport_data` carries an explicit `eof: bool`. On
+  /// TLS the peer's in-band `close_notify` alert (carried as application
+  /// ciphertext) is the close anchor the record layer latches, so the harness
+  /// never piggybacks the transport FIN onto a data chunk: each delivery is a
+  /// tuple `(payload, eof)` where a matured ciphertext chunk is
+  /// `(Some(bytes), false)` (a normal byte delivery — its EOF, if any, rides
+  /// in-band) and a separate FIN/reset anchor is `(None, true)` (the
+  /// out-of-band virtual-TCP read==0).
   fn deliver_tcp_ready(&mut self, now: Instant) -> usize {
-    // Collect the deliveries first (key, ciphertext-or-anchor) so the
+    // Collect the deliveries first (key, payload, eof) so the
     // `handle_transport_data` calls — which mutate the nodes — do not alias the
     // pipe borrow. One chunk per pipe per pass keeps FIFO/anchor ordering tight
     // across repeated passes within the same `now`.
@@ -1119,13 +1163,13 @@ impl TlsCluster {
     // before honoring the EOF.
     let mut data_this_call: HashSet<(SocketAddr, ExchangeId)> = HashSet::new();
     loop {
-      let mut deliveries: Vec<((SocketAddr, ExchangeId), Option<bytes::Bytes>)> = Vec::new();
+      let mut deliveries: Vec<((SocketAddr, ExchangeId), Option<bytes::Bytes>, bool)> = Vec::new();
       for (&key, pipe) in self.pipes.iter_mut() {
         // A reset connection surfaces its anchor exactly once, immediately.
         if pipe.reset {
           if !pipe.reset_anchor_sent {
             pipe.reset_anchor_sent = true;
-            deliveries.push((key, None));
+            deliveries.push((key, None, true));
           }
           continue;
         }
@@ -1141,7 +1185,10 @@ impl TlsCluster {
               pipe.arm_fin(now, stride);
             }
             data_this_call.insert(key);
-            deliveries.push((key, Some(b)));
+            // A ciphertext chunk is a pure byte delivery: `eof = false`. TLS
+            // closure rides the in-band `close_notify` the chunk may contain,
+            // not the out-of-band transport FIN.
+            deliveries.push((key, Some(b), false));
             continue;
           }
         }
@@ -1159,18 +1206,18 @@ impl TlsCluster {
             && !data_this_call.contains(&key)
           {
             pipe.eof_anchor_sent = true;
-            deliveries.push((key, None));
+            deliveries.push((key, None, true));
           }
         }
       }
       if deliveries.is_empty() {
         break;
       }
-      for ((addr, exch), payload) in deliveries {
+      for ((addr, exch), payload, eof) in deliveries {
         if let Some(node) = self.nodes.get_mut(&addr) {
           match payload {
-            Some(b) => node.handle_transport_data(exch, &b, now),
-            None => node.handle_transport_data(exch, &[], now),
+            Some(b) => node.handle_transport_data(exch, &b, eof, now),
+            None => node.handle_transport_data(exch, &[], eof, now),
           }
           count += 1;
         }

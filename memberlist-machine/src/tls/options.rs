@@ -1,4 +1,4 @@
-//! TLS crypto/config bundling for the coordinator.
+//! TLS options bundle for the coordinator.
 //!
 //! # Cluster authentication on the TLS reliable path
 //!
@@ -25,7 +25,7 @@
 //!   any `Stream` exists — so no merge, no `UserDataReceived`, no reliable-ping
 //!   ack.
 //!
-//! `TlsConfig::new` does NOT make this choice for the operator. It accepts a
+//! `TlsOptions::new` does NOT make this choice for the operator. It accepts a
 //! fully caller-built `rustls::ServerConfig` / `ClientConfig` and only
 //! Arc-wraps them. The crypto backend is the caller's choice (ring / aws-lc-rs
 //! / FIPS via the matching `tls-rustls-*` feature); the coordinator names no
@@ -33,13 +33,13 @@
 
 use std::sync::Arc;
 
-/// Immutable TLS config bundle handed to the coordinator. Accessor-only.
-pub struct TlsConfig {
+/// Immutable TLS options bundle handed to the coordinator. Accessor-only.
+pub struct TlsOptions {
   server: Arc<rustls::ServerConfig>,
   client: Arc<rustls::ClientConfig>,
 }
 
-impl TlsConfig {
+impl TlsOptions {
   /// Bundle a caller-built server config (carrying its `ClientCertVerifier`)
   /// and client config. Arc-wraps them and mutates nothing security-relevant —
   /// the operator owns the mTLS policy. See the module docs for the two
@@ -135,8 +135,8 @@ pub(crate) mod tests {
   }
 
   #[test]
-  fn builds_a_usable_config_bundle() {
-    let cfg = TlsConfig::new(test_server(), test_client());
+  fn builds_a_usable_options_bundle() {
+    let cfg = TlsOptions::new(test_server(), test_client());
     // Prove the bundle is usable: both rustls connections construct.
     let _server = rustls::ServerConnection::new(cfg.server().clone()).unwrap();
     let _client = rustls::ClientConnection::new(
