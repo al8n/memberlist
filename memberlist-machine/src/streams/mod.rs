@@ -197,6 +197,12 @@ where
   /// compress/decompress point on both the gossip and reliable paths; a
   /// disabled `CompressionOptions` makes both paths identity.
   compression: memberlist_wire::CompressionOptions,
+  /// Cross-transport encryption configuration. Applied across the unsecure
+  /// paths (UDP gossip on every coordinator; the plain-TCP reliable path).
+  /// On TLS the reliable path skips encryption (`R::is_secure() == true`);
+  /// gossip is still encrypted (gossip is always plain UDP). A disabled
+  /// configuration reduces all codec paths to identity.
+  encryption: memberlist_wire::EncryptionOptions,
   /// In-flight reliable exchanges (one bridge each), keyed by [`ExchangeId`].
   /// Connection-per-exchange — no pool, slab, or drained-reap.
   conns: StreamConns<I, A, R>,
@@ -252,6 +258,22 @@ where
   /// (Sans-I/O forbids `Instant::now()`). Stays `None` only before the very
   /// first `handle_*` / `start_*` call.
   last_now: Option<Instant>,
+  /// Latch set by [`Self::set_encryption_options`] when it failed at least
+  /// one bridge as part of a runtime policy change. A terminal bridge
+  /// returns no per-bridge timeout, and an idle endpoint may have no
+  /// scheduler timeout at all — without this latch the failed bridges
+  /// would sit in [`Self::conns`] indefinitely (the `Close` already
+  /// surfaces from [`Self::poll_action`], but the bridge state lingers
+  /// until the next external tick reaps it).
+  ///
+  /// While the latch is set, [`Self::poll_timeout`] folds [`Self::last_now`]
+  /// into the returned `min` so the driver wakes immediately and calls
+  /// [`Self::handle_timeout`], whose `pump_bridges` reaps every terminal
+  /// bridge in the same tick that clears the latch. The latch can only
+  /// be set after a bridge exists in `conns`, and a bridge only exists
+  /// after a `start_*` / `handle_*` call has anchored `last_now`, so the
+  /// wake is always reachable.
+  policy_reap_pending: bool,
   _addr: core::marker::PhantomData<fn(B)>,
 }
 
@@ -283,7 +305,8 @@ where
     Self {
       ep,
       cfg,
-      compression: memberlist_wire::CompressionOptions::disabled(),
+      compression: memberlist_wire::CompressionOptions::new(),
+      encryption: memberlist_wire::EncryptionOptions::new(),
       conns: StreamConns::new(),
       exchanges: HashMap::new(),
       out_transmit: std::collections::VecDeque::new(),
@@ -292,6 +315,7 @@ where
       mem_ingress: std::collections::VecDeque::new(),
       dial_pending: std::collections::VecDeque::new(),
       last_now: None,
+      policy_reap_pending: false,
       _addr: core::marker::PhantomData,
     }
   }
@@ -307,6 +331,15 @@ where
   /// leaked after an exchange completed or its connection dropped.
   pub fn live_bridge_count(&self) -> usize {
     self.conns.len()
+  }
+
+  /// The configured plaintext-byte ceiling for an outbound gossip datagram.
+  /// Sourced from [`crate::config::EndpointConfig::gossip_mtu`] (default
+  /// [`crate::config::DEFAULT_GOSSIP_MTU`]). The on-wire datagram may
+  /// exceed this by [`memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD`] when
+  /// encryption is enabled.
+  pub fn gossip_mtu(&self) -> usize {
+    self.ep.gossip_mtu()
   }
 
   /// Build the coordinator with an explicit cross-transport compression
@@ -362,17 +395,261 @@ where
     }
   }
 
-  /// Decompress one inbound gossip datagram. The codec-owning driver calls
-  /// this on the raw bytes from [`Self::poll_memberlist_ingress`] before
-  /// decoding frames. A datagram with no compression wrapper is returned
-  /// unchanged. A corrupt or unknown-algorithm wrapper is an `Err` — the driver
-  /// drops the datagram (gossip is lossy and self-healing).
-  pub fn decompress_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, memberlist_wire::FrameError> {
+  /// Build the coordinator with an explicit cross-transport encryption
+  /// configuration. [`Self::new`] is `with_encryption` with encryption
+  /// disabled.
+  ///
+  /// Routes through [`Self::set_encryption_options`] so the bridge-fan-out
+  /// runs in both the builder and the in-place setter — if a caller opens an
+  /// exchange under a default-disabled coordinator and then rebuilds via
+  /// `coord = coord.with_encryption(opts)`, the live bridges receive the new
+  /// policy too.
+  pub fn with_encryption(mut self, encryption: memberlist_wire::EncryptionOptions) -> Self {
+    self.set_encryption_options(encryption);
+    self
+  }
+
+  /// Replace the encryption options in place. The driver calls this on a key
+  /// rotation: build a new `EncryptionOptions` with the rotated `Keyring`,
+  /// then publish it via the setter. Single-threaded `&mut self` — no lock.
+  ///
+  /// Propagates the new options to every live bridge so an exchange opened
+  /// under the prior policy cannot keep feeding traffic under the old
+  /// encryption rules — without this fan-out, a peer holding a pre-update
+  /// reliable exchange would still see plaintext accepted on that bridge
+  /// because the bridge holds a clone of the prior `EncryptionOptions`.
+  ///
+  /// For an INSECURE transport (`R::is_secure() == false`, e.g. plain TCP)
+  /// the per-bridge [`StreamBridge::set_encryption`] fails the bridge.
+  /// Four coordinator-side cleanups close the resulting plaintext-leak
+  /// and stale-action gaps:
+  ///
+  /// (1) Purge every [`Self::out_transmit`] chunk tagged with each
+  ///     newly-failed bridge's exchange. A live bridge may already have
+  ///     encoded bytes under the prior policy in the record layer's
+  ///     outbound buffer (cleared by the failure transition) AND drained
+  ///     those bytes into [`Self::out_transmit`] (NOT cleared by the
+  ///     failure transition — `out_transmit` is coordinator state, not
+  ///     bridge state). Emitting those chunks on the wire after publishing
+  ///     the new policy would leak plaintext post-enablement.
+  ///
+  /// (2) Purge any pending [`StreamAction::Connect`] for each
+  ///     newly-failed bridge's exchange. A `start_push_pull` queues a
+  ///     `Connect` that the driver may not yet have drained; letting it
+  ///     surface from a subsequent [`Self::poll_action`] would have the
+  ///     driver open a transport socket for a bridge the coordinator has
+  ///     already failed.
+  ///
+  /// (3) Synchronously enqueue a [`StreamAction::Close`] for each
+  ///     newly-failed bridge so the driver's next [`Self::poll_action`]
+  ///     returns the teardown directly. A terminal bridge returns no
+  ///     per-bridge timeout and an idle endpoint may have no scheduler
+  ///     timeout at all, so a `Close` that only fires from the natural
+  ///     `pump_bridges` reap on the next [`Self::handle_timeout`] is not
+  ///     reachable from the documented driver interface without an
+  ///     external scheduler kick.
+  ///
+  /// (4) Drop the entire [`Self::out_transmit`] queue. The per-exchange
+  ///     purge in (1) only reaches chunks belonging to bridges still in
+  ///     [`Self::conns`]; a bridge that completed its exchange cleanly
+  ///     and was already reaped can have left bytes here that step (1)
+  ///     cannot iterate. On an insecure transport those orphans are
+  ///     plaintext encoded under the prior policy, so a driver doing the
+  ///     natural drain loop would emit them on the wire after the new
+  ///     policy publishes. The unconditional drop covers the orphan
+  ///     case without needing an exchange-id-keyed metadata trail
+  ///     surviving past reap.
+  ///
+  /// The bridge remains in [`Self::conns`] until the next
+  /// `pump_bridges` reaps it via the existing `reap_bridge` flow,
+  /// which drains the bridge's stream events into the inner endpoint
+  /// (the `StreamErrored` lifecycle notice the SWIM FSM consumes to
+  /// retry the affected exchange under a fresh bridge constructed
+  /// under the new policy) and emits its OWN `Close`. The driver may
+  /// therefore observe two `Close` actions for the same exchange
+  /// across the policy-change and the subsequent reap — the second
+  /// is a no-op for the documented driver contract (the socket was
+  /// torn down on the first `Close` and the driver-side mapping no
+  /// longer recognises the exchange).
+  ///
+  /// For a SECURE transport (`R::is_secure() == true`, e.g. TLS) the
+  /// per-bridge setter's `is_secure()` branch force-disables the bridge's
+  /// `EncryptionOptions` regardless of the new options (the reliable path
+  /// is already protected by the transport) and does NOT fail the bridge —
+  /// the on-wire bytes are TLS records, so there is no plaintext-leak
+  /// path to close. Step (4)'s `out_transmit` drop is therefore skipped on
+  /// `R::is_secure() == true` so legitimate TLS records-layer bytes for
+  /// live exchanges survive the policy change unchanged.
+  ///
+  /// **Gossip ingress purge** — [`Self::mem_ingress`] is drained
+  /// unconditionally on every effective policy change (both insecure and
+  /// secure transports). [`Self::handle_gossip`] buffers raw datagrams; the
+  /// codec-owning driver decrypts them at drain time via
+  /// [`Self::decrypt_gossip`], which reads the coordinator's CURRENT
+  /// `self.encryption`. Without this drain a datagram queued under one
+  /// policy would be decrypted under the policy in effect at drain time —
+  /// a plaintext datagram queued while strict-mode was ON would be
+  /// accepted after the operator switched to disabled, and a ciphertext
+  /// datagram queued while disabled would be rejected after enabling.
+  /// Gossip is lossy and self-healing, so the dropped datagrams recover
+  /// on the next gossip round. The drain runs even on TLS coordinators
+  /// because gossip rides plain UDP regardless of the reliable
+  /// transport's `is_secure()` rating.
+  ///
+  /// **No-op reapply** — a config reconciler republishing the same effective
+  /// policy short-circuits at entry and skips the bridge-fan-out entirely.
+  /// Without that guard, every live insecure-transport reapply would tear
+  /// down every reliable exchange for no security gain: the bridge clone is
+  /// already running under these exact options, so re-failing it is pure
+  /// availability loss. The check relies on the `PartialEq` derive added
+  /// alongside this guard to `EncryptionOptions` (and transitively to
+  /// `Keyring`).
+  ///
+  /// **Immediate-reap wake** — a real policy change that fails any bridge
+  /// sets the [`Self::policy_reap_pending`] latch so the next
+  /// [`Self::poll_timeout`] returns `last_now` as an immediate wake. The
+  /// driver then runs [`Self::handle_timeout`] → `pump_bridges`, which
+  /// reaps every terminal bridge in the same tick and clears the latch.
+  /// A terminal bridge contributes no per-bridge timeout, so without this
+  /// wake an idle endpoint with no other scheduled timer would leave the
+  /// failed bridges sitting in [`Self::conns`] until some unrelated event
+  /// next triggered a tick.
+  pub fn set_encryption_options(&mut self, encryption: memberlist_wire::EncryptionOptions) {
+    if self.encryption == encryption {
+      // Defensive reassignment: the equality check is structural, so a
+      // reapply of the same logical policy with a distinct allocation
+      // ends up holding the new clone (cheaper on subsequent comparisons
+      // if the operator hands the coordinator a long-lived value).
+      self.encryption = encryption;
+      return;
+    }
+    let mut newly_failed: Vec<ExchangeId> = Vec::new();
+    for id in self.conns.ids() {
+      let Some(bridge) = self.conns.get_mut(id) else {
+        continue;
+      };
+      let was_failed = bridge.is_failed();
+      bridge.set_encryption(encryption.clone());
+      if !was_failed && bridge.is_failed() {
+        newly_failed.push(id);
+      }
+    }
+    let any_failed = !newly_failed.is_empty();
+    for id in newly_failed {
+      self.purge_transmit_for(id);
+      self.purge_pending_connect_for(id);
+      let action = StreamAction::Close(ExchangeRef::new(id));
+      debug_assert!(
+        matches!(action, StreamAction::Shutdown(_) | StreamAction::Close(_)),
+        "pending_teardowns holds only Shutdown / Close actions",
+      );
+      self.pending_teardowns.push_back(action);
+    }
+    if any_failed {
+      self.policy_reap_pending = true;
+    }
+    if !R::is_secure() {
+      // Drop every remaining [`Self::out_transmit`] chunk after the
+      // per-bridge purges above. The per-bridge purge keyed by `ExchangeId`
+      // only reaches chunks belonging to bridges still in [`Self::conns`];
+      // a bridge that completed its exchange cleanly and was already reaped
+      // (removed from `conns`) can have left bytes here that the per-bridge
+      // loop above cannot iterate. On an insecure transport
+      // (`R::is_secure() == false`) those orphaned chunks are plaintext
+      // encoded under the prior policy; emitting them through
+      // [`Self::poll_transport_transmit`] after the new policy publishes
+      // would leak plaintext post-enablement. The clear runs on every
+      // effective policy change on `!R::is_secure()`, not just `any_failed`:
+      // a clean-reaped-bridge orphan can sit in `out_transmit` even when no
+      // currently-live bridge fails (the reaped bridge is gone from
+      // `conns`, so the per-bridge loop produces an empty `newly_failed`).
+      // Scoping the clear to `!R::is_secure()` leaves TLS records-layer
+      // bytes intact — a secure-transport coordinator's `out_transmit`
+      // carries TLS records that are confidential by construction, so the
+      // post-policy-change drain on TLS has no plaintext-leak path to
+      // close. The dropped bytes are safe to discard: every live bridge
+      // has just been failed (its retry rebuilds the exchange under the
+      // new policy), and a clean-reaped bridge has no follow-up exchange
+      // tied to those bytes.
+      self.out_transmit.clear();
+    }
+    // Drop every buffered raw gossip datagram regardless of `any_failed`.
+    // `handle_gossip` enqueues `(src, raw_bytes)` into [`Self::mem_ingress`];
+    // [`Self::decrypt_gossip`] reads the coordinator's CURRENT
+    // `self.encryption` at drain time. Without this clear, a datagram queued
+    // before the policy change is decrypted under the NEW policy — a
+    // plaintext datagram queued while strict-mode was ON would be accepted
+    // after the operator switches to disabled, and a ciphertext datagram
+    // queued while disabled would be rejected after enabling. Gossip is
+    // lossy and self-healing, so the dropped bytes recover on the next
+    // gossip round. The clear runs on every effective policy change, not
+    // just `any_failed`: a secure-transport (TLS) coordinator still uses
+    // `self.encryption` for the plain-UDP gossip path even though its
+    // reliable bridges do not fail.
+    self.mem_ingress.clear();
+    self.encryption = encryption;
+  }
+
+  /// The configured cross-transport encryption options.
+  pub fn encryption_options(&self) -> &memberlist_wire::EncryptionOptions {
+    &self.encryption
+  }
+
+  /// Encrypt one outbound gossip datagram for the wire. The codec-owning
+  /// driver calls this on the already-compressed gossip bytes (from
+  /// [`Self::compress_gossip`]) before handing them to the UDP socket. When
+  /// encryption is disabled the bytes are returned unchanged.
+  ///
+  /// The on-wire byte order is therefore `[Encrypted[Compressed[frame]]]`
+  /// when both transforms are enabled and compression won, or
+  /// `[Encrypted[frame]]` when compression is disabled or did not shrink.
+  ///
+  /// Returns `Err` when encryption is configured but the backend rejects the
+  /// request — typically [`memberlist_wire::EncryptionError::UnsupportedAlgorithm`]
+  /// for a primary key whose backend was not built into this binary. The
+  /// driver MUST drop the gossip in that case; emitting unencrypted bytes
+  /// on an encrypted-cluster path would bypass authentication silently.
+  pub fn encrypt_gossip(
+    &self,
+    datagram: &[u8],
+  ) -> Result<Vec<u8>, memberlist_wire::EncryptionError> {
+    let keyring = match self.encryption.keyring() {
+      Some(kr) => kr,
+      None => return Ok(datagram.to_vec()),
+    };
+    let key = keyring.primary();
+    memberlist_wire::encode_encrypted_frame(key.algorithm(), key, datagram)
+  }
+
+  /// Unwrap one inbound gossip datagram. The codec-owning driver calls this
+  /// on the raw bytes from [`Self::poll_memberlist_ingress`] BEFORE decoding
+  /// frames — it strips the Encrypted-then-Compressed wrapper stack in one
+  /// pass (each layer identity when its wrapper is absent). A datagram with
+  /// no Encrypted wrapper is returned unchanged when no keyring is
+  /// configured; when a keyring IS configured the strict-mode entry check
+  /// rejects any non-Encrypted leading tag. A corrupt or unknown-algorithm
+  /// wrapper, or a frame the keyring cannot decrypt, is an `Err` — the
+  /// driver drops the datagram (gossip is lossy and self-healing).
+  ///
+  /// This is the SINGLE canonical ingress unwrap on the coordinator. The
+  /// outbound side uses [`Self::compress_gossip`] → [`Self::encrypt_gossip`]
+  /// (compress, then encrypt) so the on-wire order is
+  /// `[Encrypted[Compressed[frame]]]`; this helper reverses both layers, so
+  /// authentication never depends on integration discipline.
+  pub fn decrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, memberlist_wire::FrameError> {
     // Ceiling is the gossip MTU — the maximum size any compliant gossip
     // datagram decompresses to. A wrapper claiming more is not a compliant
-    // datagram and is rejected; the driver then drops it.
-    memberlist_wire::unwrap_transforms(datagram, Endpoint::<I, A>::GOSSIP_MTU)
-      .map(|cow| cow.into_owned())
+    // datagram and is rejected. The encryption-aware unwrap consumes an
+    // Encrypted wrapper through the keyring, then strips a Compressed
+    // wrapper if present; a non-Encrypted-led datagram is returned unchanged
+    // when no keyring is configured (the strict-mode entry check is gated
+    // on `encryption.is_enabled()`).
+    memberlist_wire::unwrap_transforms_with_encryption(
+      datagram,
+      self.ep.gossip_mtu(),
+      &self.encryption,
+    )
+    .map(|cow| cow.into_owned())
   }
 
   /// Initiate one SWIM probe tick on the inner membership endpoint.
@@ -475,6 +752,16 @@ where
   /// `last_now` is `None` only before the very first `handle_*` / `start_*`
   /// call: in that window the immediate-due wake degrades to the intent's
   /// `deadline` term.
+  ///
+  /// A pending [`Self::set_encryption_options`] policy reap (one or more
+  /// bridges failed by a runtime policy change) folds `last_now` into the
+  /// returned `min` so the driver wakes immediately and reaps the failed
+  /// bridges in the next [`Self::handle_timeout`] tick — a terminal bridge
+  /// contributes no per-bridge timeout of its own, and an idle endpoint
+  /// may have no scheduler timeout at all. The latch can only be set
+  /// after a bridge exists in `conns`, which requires a `start_*` /
+  /// `handle_*` call to have already anchored `last_now`, so the wake is
+  /// always reachable.
   pub fn poll_timeout(&mut self) -> Option<Instant> {
     let mut best = self.ep.poll_timeout();
     for id in self.conns.ids() {
@@ -493,6 +780,11 @@ where
       }
     }
     if has_unattempted {
+      if let Some(anchor) = self.last_now {
+        best = Some(best.map_or(anchor, |b| b.min(anchor)));
+      }
+    }
+    if self.policy_reap_pending {
       if let Some(anchor) = self.last_now {
         best = Some(best.map_or(anchor, |b| b.min(anchor)));
       }
@@ -710,6 +1002,7 @@ where
   /// never produces bytes (and may close it on its own accept-side deadline);
   /// the membership layer is untouched because no `Stream` ever existed.
   pub fn accept_connection(&mut self, from: A, now: Instant) -> ExchangeId {
+    self.last_now = Some(now);
     let id = self.conns.allocate();
     let peer_socket = B::to_socket(&from);
     match R::acceptor(&self.cfg) {
@@ -718,6 +1011,7 @@ where
           records,
           now + ACCEPT_HANDSHAKE_DEADLINE,
           self.compression,
+          self.encryption.clone(),
           self.ep.max_stream_frame_size(),
         );
         self.conns.insert(id, bridge);
@@ -831,6 +1125,32 @@ where
     self.conns.get_mut(id).map(|b| b.reliable_max())
   }
 
+  /// Whether the given exchange's live bridge currently considers encryption
+  /// enabled. Used by the runtime-propagation regression test to assert that
+  /// [`Self::set_encryption_options`] fanned the new options out to every
+  /// in-flight bridge (rather than just `self.encryption`, which would leave
+  /// a peer's pre-update reliable exchange accepting plaintext on the bridge).
+  #[cfg(all(test, feature = "tcp", feature = "encryption-aes-gcm"))]
+  pub(crate) fn bridge_encryption_enabled(&mut self, id: ExchangeId) -> Option<bool> {
+    self
+      .conns
+      .get_mut(id)
+      .map(|b| b.encryption_for_test().is_enabled())
+  }
+
+  /// Whether the given exchange's live bridge is currently in
+  /// [`bridge_phase::BridgePhase::Failed`]. Used by the
+  /// encryption-policy-change regression test to assert that an insecure-transport
+  /// bridge fails on a runtime [`Self::set_encryption_options`] update so the
+  /// SWIM FSM retries the affected exchange under a fresh bridge constructed
+  /// under the new policy.
+  ///
+  /// [`bridge_phase::BridgePhase::Failed`]: crate::bridge_phase::BridgePhase::Failed
+  #[cfg(all(test, feature = "tcp", feature = "encryption-aes-gcm"))]
+  pub(crate) fn bridge_is_failed(&mut self, id: ExchangeId) -> Option<bool> {
+    self.conns.get_mut(id).map(|b| b.is_failed())
+  }
+
   /// Append one [`StreamAction::Shutdown`] / [`StreamAction::Close`] to the
   /// teardown queue, for tests that exercise [`Self::poll_action`]'s
   /// Connect-before-teardown ordering by injecting a teardown at the same
@@ -895,6 +1215,13 @@ where
     // tick.
     self.pump_bridges(now);
     self.finalize_tick(now);
+    // Clear the policy-change reap latch: both `pump_bridges` calls above
+    // have reaped every terminal bridge in `conns` (a bridge failed by
+    // `set_encryption_options` is in `BridgePhase::Failed` and therefore
+    // `is_terminal()`), so any wake the latch was asking for has been
+    // serviced this tick. Leaving the latch set would have `poll_timeout`
+    // keep returning immediate-due wakes forever once the reap is done.
+    self.policy_reap_pending = false;
   }
 
   /// Step (2) of the per-tick order: pump every bridge's outbound half, drain
@@ -1287,6 +1614,7 @@ where
         records,
         deadline,
         self.compression,
+        self.encryption.clone(),
         self.ep.max_stream_frame_size(),
       );
       self.conns.insert(exchange, bridge);

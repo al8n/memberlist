@@ -98,6 +98,16 @@ pub(crate) struct Bridge<I, A> {
   /// `CompressionOptions` makes the path identity (a plain `[unit_len][bytes]`
   /// frame with the framed bytes verbatim).
   compression: memberlist_wire::CompressionOptions,
+  /// Cross-transport encryption configuration. The QUIC reliable path
+  /// always skips the inner Encrypted wrapper — quinn-encrypted streams
+  /// already provide confidentiality, and double-encrypting costs CPU
+  /// and bandwidth without adding security. [`Self::new`] force-disables
+  /// this field regardless of the caller's intent; the field is retained
+  /// so [`Self::pump_out`] / [`Self::pump_in`] can call the
+  /// encryption-aware codec helpers uniformly (a disabled
+  /// `EncryptionOptions` makes those helpers byte-identical to the
+  /// non-encryption variants).
+  encryption: memberlist_wire::EncryptionOptions,
   /// Inbound reliable-unit accumulation buffer. A QUIC stream chunks bytes
   /// arbitrarily, so each `chunk.bytes` is appended here and every complete
   /// `[unit_len][payload]` unit is drained off the front; a trailing partial
@@ -137,11 +147,19 @@ where
   /// `reliable_max` is the reliable-unit / decompressed-payload ceiling — the
   /// coordinator passes `EndpointConfig::max_stream_frame_size` so the bound
   /// always matches the Stream FSM's configured frame limit.
+  ///
+  /// `_encryption` is accepted to keep the per-transport bridge constructors
+  /// signature-aligned, but the QUIC reliable path always skips encryption:
+  /// quinn-encrypted streams already provide confidentiality, and
+  /// double-encrypting on top costs CPU and bandwidth without adding
+  /// security. The field is force-disabled in the body regardless of the
+  /// caller's intent (see [`Self::encryption`] field docs).
   pub(crate) fn new(
     stream: Stream<I, A>,
     ch: ConnectionHandle,
     sid: QuicSid,
     compression: memberlist_wire::CompressionOptions,
+    _encryption: memberlist_wire::EncryptionOptions,
     reliable_max: usize,
   ) -> Self {
     // Snapshot the exchange deadline now, while the stream is still pre-`Done`.
@@ -157,6 +175,14 @@ where
     let deadline = stream
       .poll_timeout()
       .expect("a freshly dialed/accepted Stream is pre-`Done` with a Some exchange deadline");
+    // QUIC streams are quinn-encrypted by construction. The reliable path
+    // never carries an inner `Encrypted` wrapper, so the bridge stores a
+    // disabled `EncryptionOptions` regardless of the caller's input. The
+    // codec helpers below (`encode_reliable_unit_with_encryption` /
+    // `take_reliable_unit_with_encryption`) collapse to the non-encryption
+    // variants when handed a disabled `EncryptionOptions`, keeping the
+    // on-wire bytes byte-identical to the pre-encryption-port shape.
+    let encryption = memberlist_wire::EncryptionOptions::new();
     Self {
       stream,
       ch,
@@ -167,9 +193,26 @@ where
       phase: BridgePhase::Active,
       deadline,
       compression,
+      encryption,
       recv_accum: Vec::new(),
       reliable_max,
     }
+  }
+
+  /// Replace the bridge's effective encryption options. Called by
+  /// [`super::QuicEndpoint::set_encryption_options`] when the operator updates
+  /// the encryption policy at runtime — the setter is invoked uniformly on
+  /// every live bridge so the propagation is symmetric with the plain-TCP
+  /// `StreamBridge` setter.
+  ///
+  /// QUIC reliable streams are quinn-encrypted by construction, so the
+  /// stored encryption is force-disabled regardless of the caller's intent,
+  /// matching [`Self::new`]'s body. The propagation is therefore a no-op on
+  /// the QUIC reliable path (gossip strictness propagates immediately via
+  /// the coordinator's `self.encryption` since `decrypt_gossip` reads that
+  /// field directly).
+  pub(crate) fn set_encryption(&mut self, _encryption: memberlist_wire::EncryptionOptions) {
+    self.encryption = memberlist_wire::EncryptionOptions::new();
   }
 
   /// Drive the SEND-half transition: `Active → SendClosed`, or
@@ -617,7 +660,25 @@ where
       chunk.clear();
     }
     if !gathered.is_empty() {
-      let unit = memberlist_wire::encode_reliable_unit(&self.compression, &gathered);
+      // The QUIC bridge force-disables encryption in its constructor (quinn
+      // already encrypts the stream), so this call cannot fail in normal
+      // operation. The error branch is wired uniformly with the StreamBridge
+      // path so a future change to that policy stays sound.
+      let unit = match memberlist_wire::encode_reliable_unit_with_encryption(
+        &self.compression,
+        &self.encryption,
+        &gathered,
+      ) {
+        Ok(u) => u,
+        Err(e) => {
+          // Ignoring Err: idempotent retirement.
+          let _ = conn.send_stream(self.sid).reset(VarInt::from_u32(0));
+          let _ = conn.recv_stream(self.sid).stop(VarInt::from_u32(0));
+          self.pending_out.clear();
+          self.fail(BridgeFailure::Transport(format!("encrypt: {e}")));
+          return Err(());
+        }
+      };
       let mut off = 0;
       while off < unit.len() {
         match conn.send_stream(self.sid).write(&unit[off..]) {
@@ -761,7 +822,11 @@ where
                 // plain `Stream` here (no Option), so feed it directly.
                 let mut unit_err = false;
                 loop {
-                  match memberlist_wire::take_reliable_unit(&self.recv_accum, self.reliable_max) {
+                  match memberlist_wire::take_reliable_unit_with_encryption(
+                    &self.recv_accum,
+                    &self.encryption,
+                    self.reliable_max,
+                  ) {
                     Ok(Some((plaintext, consumed))) => {
                       self.recv_accum.drain(..consumed);
                       if self.stream.handle_data(&plaintext, now).is_err() {
@@ -1011,6 +1076,9 @@ where
           BridgeFailure::ConnectionLost => "connection lost".to_string(),
           BridgeFailure::AdmissionClosed => "merge rejected by delegate".to_string(),
           BridgeFailure::DialRetired => "dial intent retired before stream".to_string(),
+          BridgeFailure::EncryptionPolicyChanged => {
+            "encryption policy changed mid-exchange".to_string()
+          }
         };
         EndpointEvent::StreamErrored { id, err }
       }
@@ -1119,6 +1187,20 @@ where
       }
     }
   }
+
+  /// Test-only: expose the effective [`EncryptionOptions`] the bridge
+  /// stored after the force-disable in [`Self::new`]. Lets a QUIC test
+  /// assert that a bridge handed an ENABLED keyring still ends up with a
+  /// disabled `EncryptionOptions` — quinn already provides
+  /// confidentiality, so the reliable path skips its inner Encrypted
+  /// wrapper. Gated on `encryption-aes-gcm` (the asserting test builds a
+  /// `Keyring`/`SecretKey` from `memberlist-wire`).
+  ///
+  /// [`EncryptionOptions`]: memberlist_wire::EncryptionOptions
+  #[cfg(all(test, feature = "encryption-aes-gcm"))]
+  pub(crate) fn encryption_for_test(&self) -> &memberlist_wire::EncryptionOptions {
+    &self.encryption
+  }
 }
 
 #[cfg(test)]
@@ -1165,7 +1247,8 @@ mod tests {
       stream,
       ch,
       sid,
-      memberlist_wire::CompressionOptions::disabled(),
+      memberlist_wire::CompressionOptions::new(),
+      memberlist_wire::EncryptionOptions::new(),
       ep.max_stream_frame_size(),
     );
     assert!(matches!(bridge.phase, BridgePhase::Active));
@@ -1246,7 +1329,8 @@ mod tests {
       stream,
       ch,
       sid,
-      memberlist_wire::CompressionOptions::disabled(),
+      memberlist_wire::CompressionOptions::new(),
+      memberlist_wire::EncryptionOptions::new(),
       ep.max_stream_frame_size(),
     );
     assert!(matches!(bridge.phase, BridgePhase::Active));
@@ -1326,6 +1410,7 @@ mod tests {
         ConnectionHandle,
         QuicSid,
         memberlist_wire::CompressionOptions,
+        memberlist_wire::EncryptionOptions,
         usize,
       ) -> Bridge<I, A> = Bridge::<I, A>::new;
     }
@@ -1337,7 +1422,7 @@ mod tests {
     use memberlist_wire::{
       encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
     };
-    let opts = CompressionOptions::disabled()
+    let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
       .with_threshold(8);
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);
@@ -1360,7 +1445,7 @@ mod tests {
     use memberlist_wire::{
       encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
     };
-    let opts = CompressionOptions::disabled()
+    let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
       .with_threshold(8);
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(32);
@@ -1388,7 +1473,7 @@ mod tests {
   #[test]
   fn quic_reliable_unit_disabled_is_byte_identical() {
     use memberlist_wire::{encode_reliable_unit, take_reliable_unit, CompressionOptions};
-    let opts = CompressionOptions::disabled();
+    let opts = CompressionOptions::new();
     let framed = b"plain reliable frame bytes that are not compressed".to_vec();
     let unit = encode_reliable_unit(&opts, &framed);
     let (back, consumed) = take_reliable_unit(&unit, 16 * 1024 * 1024)
@@ -1396,5 +1481,46 @@ mod tests {
       .expect("a complete unit");
     assert_eq!(back, framed);
     assert_eq!(consumed, unit.len());
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  fn build_test_quic_bridge_with_encryption(
+    encryption: memberlist_wire::EncryptionOptions,
+  ) -> Bridge<SmolStr, SocketAddr> {
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(EndpointConfig::new(
+      SmolStr::new("self"),
+      SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+    ));
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+    let t0 = Instant::now();
+    let stream = ep.accept_stream(peer, t0);
+    let ch = ConnectionHandle(0);
+    let sid = QuicSid::new(Side::Client, Dir::Bi, 0);
+    Bridge::new(
+      stream,
+      ch,
+      sid,
+      memberlist_wire::CompressionOptions::new(),
+      encryption,
+      ep.max_stream_frame_size(),
+    )
+  }
+
+  /// A QUIC `Bridge` built with an ENABLED `EncryptionOptions` ends up with
+  /// a DISABLED effective `EncryptionOptions`: the 6-arg `Bridge::new` zeroes
+  /// the encryption field unconditionally. The on-wire reliable bytes
+  /// therefore carry no `Encrypted` wrapper — quinn already provides
+  /// confidentiality, and double-encrypting on the reliable path costs CPU
+  /// and bandwidth without adding security.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn quic_bridge_reliable_skips_encryption_unconditionally() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0; 32])));
+    let bridge = build_test_quic_bridge_with_encryption(opts);
+    assert!(
+      !bridge.encryption_for_test().is_enabled(),
+      "QUIC bridge zeroes encryption — quinn already encrypts the stream"
+    );
   }
 }

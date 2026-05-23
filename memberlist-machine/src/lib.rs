@@ -145,7 +145,7 @@ pub(crate) mod wire;
 pub use ack::{AckEntry, AckKind, AckRegistry, AckResolution, ForwardAck};
 pub use awareness::Awareness;
 pub use broadcast::{Broadcast, BroadcastQueue, MemberlistBroadcast};
-pub use config::EndpointConfig;
+pub use config::{DEFAULT_GOSSIP_MTU, EndpointConfig};
 pub use delegate::{AliveDelegate, MergeDelegate};
 pub use endpoint::{Endpoint, Lifecycle, META_MAX_SIZE};
 pub use error::{Error, StreamError};

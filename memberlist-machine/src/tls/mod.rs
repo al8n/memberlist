@@ -104,10 +104,24 @@ impl StreamTransport for TlsRecords {
     // plaintext-side `outbound` buffer (the label prefix + raw bytes), is the
     // record layer this trait method exists to serve.
   }
+
+  fn is_secure() -> bool {
+    true
+  }
 }
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn tls_records_is_secure_returns_true() {
+    use super::TlsRecords;
+    use crate::streams::StreamTransport;
+    assert!(
+      TlsRecords::is_secure(),
+      "TLS provides transport confidentiality"
+    );
+  }
+
   #[test]
   fn tls_endpoint_type_is_constructible_signature() {
     // Behavioural coverage is tls_conformance (needs the sim clock + a peer +
@@ -139,5 +153,67 @@ mod tests {
       ) -> crate::streams::StreamEndpoint<I, A, B, crate::tls::records::TlsRecords> =
         crate::streams::StreamEndpoint::<I, A, B, crate::tls::records::TlsRecords>::new;
     }
+  }
+
+  /// The TLS coordinator's GOSSIP path still encrypts when configured — gossip
+  /// is plain UDP regardless of the reliable transport, so only the reliable
+  /// path skips its inner Encrypted wrapper (TLS already wraps it). The gossip
+  /// datagram is exchanged on a separate socket and needs its own
+  /// confidentiality envelope.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn tls_endpoint_gossip_encryption_roundtrip() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+    use smol_str::SmolStr;
+
+    use super::{TlsOptions, TlsRecords};
+    use crate::{
+      addr_bridge::AddrBridge,
+      config::EndpointConfig,
+      endpoint::Endpoint,
+      streams::StreamEndpoint,
+      tls::options::tests::{test_client, test_server},
+    };
+
+    /// Identity `AddrBridge` for `A = SocketAddr`, parallel to the TCP test
+    /// harness. The `server_name` accessor reports `"localhost"` so the
+    /// coordinator construction matches the gossip-only smoke shape (no
+    /// per-exchange reliable dial is performed here).
+    struct IdentityBridge;
+    impl AddrBridge<SocketAddr> for IdentityBridge {
+      type ServerName = str;
+      fn to_socket(addr: &SocketAddr) -> SocketAddr {
+        *addr
+      }
+      fn from_socket(socket: SocketAddr) -> SocketAddr {
+        socket
+      }
+      fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
+        Some("localhost")
+      }
+    }
+
+    let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7300);
+    let ep: Endpoint<SmolStr, SocketAddr> =
+      Endpoint::new(EndpointConfig::new(SmolStr::new("n-7300"), local));
+    let cfg = TlsOptions::new(test_server(), test_client());
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0xAB; 32])));
+    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, TlsRecords> =
+      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    let datagram = b"tls gossip body".to_vec();
+    let on_wire = coord.encrypt_gossip(&datagram).expect("encrypt");
+    assert_ne!(
+      on_wire, datagram,
+      "encrypted gossip differs from the plaintext datagram"
+    );
+    assert_eq!(
+      on_wire[0],
+      memberlist_wire::ENCRYPTED_TAG,
+      "TLS gossip path still encrypts (gossip is plain UDP)"
+    );
+    let back = coord.decrypt_gossip(&on_wire).expect("decrypt");
+    assert_eq!(back, datagram);
   }
 }

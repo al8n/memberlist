@@ -5998,3 +5998,48 @@ fn alive_then_suspect_marks_suspect() {
     "a Suspect following an admitted Alive must not be lost"
   );
 }
+
+/// `EndpointConfig::new` seeds `gossip_mtu` to [`DEFAULT_GOSSIP_MTU`] (1400),
+/// matching the legacy memberlist sub-MTU ceiling. Operators that bypass the
+/// builder still get the safe LAN default.
+#[test]
+fn endpoint_config_gossip_mtu_defaults_to_1400() {
+  use crate::config::DEFAULT_GOSSIP_MTU;
+  let c: EndpointConfig<SmolStr, SocketAddr> = EndpointConfig::new(
+    SmolStr::new("local"),
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+  );
+  assert_eq!(
+    c.gossip_mtu(),
+    DEFAULT_GOSSIP_MTU,
+    "EndpointConfig::new must seed gossip_mtu to DEFAULT_GOSSIP_MTU so a \
+     bypassed builder still gets the safe LAN default",
+  );
+  assert_eq!(
+    DEFAULT_GOSSIP_MTU, 1400,
+    "DEFAULT_GOSSIP_MTU must remain 1400 — operators tune from this anchor",
+  );
+}
+
+/// `with_gossip_mtu` propagates through to `Endpoint::gossip_mtu()`, which is
+/// what the composed stream-transport coordinators read for the FSM's
+/// plaintext gossip budget. A non-default configured value must reach the
+/// inner endpoint without being clamped or overridden by the legacy
+/// constant.
+#[test]
+fn endpoint_config_gossip_mtu_is_propagated_to_endpoint() {
+  let c: EndpointConfig<SmolStr, SocketAddr> = EndpointConfig::new(
+    SmolStr::new("local"),
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
+  )
+  .with_gossip_mtu(1200);
+  assert_eq!(c.gossip_mtu(), 1200);
+  let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(c);
+  assert_eq!(
+    e.gossip_mtu(),
+    1200,
+    "Endpoint::gossip_mtu() must return the configured value (not the \
+     hard-coded legacy 1400) so composed coordinators read the operator's \
+     budget",
+  );
+}

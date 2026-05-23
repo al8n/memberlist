@@ -739,3 +739,127 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
      the valid prefix frame must not be applied"
   );
 }
+
+// ── Encryption: the membership conformance must hold UNCHANGED when reliable
+//    exchanges and gossip datagrams ride AEAD-encrypted frames. Encryption is
+//    a wire-codec transform: it must be transparent to SWIM membership.
+
+#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[test]
+fn encrypted_two_node_join_over_tcp_reaches_alive_both_sides() {
+  use memberlist_wire::SecretKey;
+  let a = "127.0.0.1:9901".parse().unwrap();
+  let b = "127.0.0.1:9902".parse().unwrap();
+  let key = SecretKey::Aes256([0x42; 32]);
+  let mut c = TcpCluster::two_node_join_encrypted(a, b, key);
+  for _ in 0..20_000 {
+    if !c.step() {
+      break;
+    }
+  }
+  assert!(
+    c.sees_alive(a, &id("b")),
+    "A must see B Alive after an encrypted TCP push/pull join"
+  );
+  assert!(
+    c.sees_alive(b, &id("a")),
+    "B must see A Alive after an encrypted TCP push/pull join — \
+     encryption must be transparent to membership"
+  );
+}
+
+#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[test]
+fn encrypted_join_over_tcp_matches_unencrypted_membership_outcome() {
+  use memberlist_wire::SecretKey;
+  let a = "127.0.0.1:9911".parse().unwrap();
+  let b = "127.0.0.1:9912".parse().unwrap();
+
+  let mut plain = TcpCluster::two_node_join(a, b);
+  for _ in 0..20_000 {
+    if !plain.step() {
+      break;
+    }
+  }
+  let key = SecretKey::Aes256([0x99; 32]);
+  let mut encrypted = TcpCluster::two_node_join_encrypted(a, b, key);
+  for _ in 0..20_000 {
+    if !encrypted.step() {
+      break;
+    }
+  }
+  // The membership end state is identical with and without encryption.
+  assert_eq!(
+    plain.sees_alive(a, &id("b")),
+    encrypted.sees_alive(a, &id("b")),
+    "A's view of B must match the unencrypted run"
+  );
+  assert_eq!(
+    plain.sees_alive(b, &id("a")),
+    encrypted.sees_alive(b, &id("a")),
+    "B's view of A must match the unencrypted run"
+  );
+}
+
+// ── Compound stack: compression + encryption together must not disturb SWIM.
+//    The wire layout must be [Encrypted[[Compressed][frame]]] — encryption is
+//    the outer wrapper, compression is the inner wrapper.
+
+#[cfg(all(feature = "__sim-encryption-aes-gcm", feature = "compression-lz4"))]
+#[test]
+fn compressed_and_encrypted_join_over_tcp_matches_unencrypted_uncompressed_membership_outcome() {
+  use memberlist_wire::{CompressAlgorithm, SecretKey};
+  let a = "127.0.0.1:9981".parse().unwrap();
+  let b = "127.0.0.1:9982".parse().unwrap();
+  let mut plain = TcpCluster::two_node_join(a, b);
+  for _ in 0..20_000 {
+    if !plain.step() {
+      break;
+    }
+  }
+  let key = SecretKey::Aes256([0xBB; 32]);
+  let mut both =
+    TcpCluster::two_node_join_compressed_and_encrypted(a, b, CompressAlgorithm::Lz4, key);
+  for _ in 0..20_000 {
+    if !both.step() {
+      break;
+    }
+  }
+  assert_eq!(plain.sees_alive(a, &id("b")), both.sees_alive(a, &id("b")));
+  assert_eq!(plain.sees_alive(b, &id("a")), both.sees_alive(b, &id("a")));
+}
+
+#[cfg(all(feature = "__sim-encryption-aes-gcm", feature = "compression-lz4"))]
+#[test]
+fn compressed_and_encrypted_wire_layout_is_outer_encrypted_inner_compressed() {
+  // Direct codec assertion: with both transforms enabled the unit's payload
+  // begins with ENCRYPTED_TAG (outer) and the round-trip recovers the
+  // original bytes, verifying that encrypt(compress(frame)) ordering holds.
+  // For a small payload the leading varint fits in one byte, so unit[1] is
+  // the first byte of the payload.
+  use memberlist_wire::{
+    encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption, CompressAlgorithm,
+    CompressionOptions, EncryptionOptions, Keyring, SecretKey,
+  };
+  let comp = CompressionOptions::new()
+    .with_algorithm(Some(CompressAlgorithm::Lz4))
+    .with_threshold(8);
+  let enc = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0xCC; 32])));
+  let framed = b"a payload large enough to compress and to encrypt".repeat(8);
+  let unit = encode_reliable_unit_with_encryption(&comp, &enc, &framed).expect("encode");
+  // The leading varint is a single byte for payloads < 128 B after the varint;
+  // the byte at index 1 is the first byte of the encoded payload.
+  assert_eq!(
+    unit[1],
+    memberlist_wire::ENCRYPTED_TAG,
+    "outer wrapper is Encrypted (ENCRYPTED_TAG comes before the Compressed wrapper)"
+  );
+  // Round-trip: decrypt + decompress recovers the original frame sequence.
+  let (back, _) = take_reliable_unit_with_encryption(&unit, &enc, 16 * 1024 * 1024)
+    .expect("decode ok")
+    .expect("complete unit");
+  assert_eq!(
+    back, framed,
+    "round-trip recovers the original frame sequence"
+  );
+}

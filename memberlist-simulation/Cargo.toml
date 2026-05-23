@@ -55,6 +55,19 @@ __tls-harness = ["dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "memberlist-
 # unreliable path is the same UDP gossip queue.
 tcp = ["memberlist-machine/tcp", "memberlist-machine/compression-lz4"]
 
+# Passthrough: expose the machine-level lz4 compression feature at the sim
+# boundary so that `--features __sim-encryption-aes-gcm,compression-lz4` gates
+# the compound compressed+encrypted conformance tests.
+compression-lz4 = ["memberlist-machine/compression-lz4"]
+
+# Internal: encryption backend for the encrypted conformance tests across every
+# transport. Not part of the public API. The default-feature sim build still
+# pulls no encryption backend, so the standard conformance suite stays
+# byte-unchanged. Selecting this feature pulls every transport harness in so a
+# single `--features __sim-encryption-aes-gcm` build covers tcp / tls / quic
+# encrypted-conformance runs.
+__sim-encryption-aes-gcm = ["tcp", "tls", "quic", "memberlist-machine/encryption-aes-gcm"]
+
 [dependencies]
 bytes.workspace = true
 memberlist-machine = { path = "../memberlist-machine" }

@@ -99,6 +99,10 @@ impl StreamTransport for RawRecords {
   fn clear_outbound(&mut self) {
     RawRecords::clear_outbound(self)
   }
+
+  fn is_secure() -> bool {
+    false
+  }
 }
 
 #[cfg(test)]
@@ -1599,7 +1603,7 @@ mod tests {
     use memberlist_wire::{CompressAlgorithm, CompressionOptions};
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let opts = CompressionOptions::disabled()
+    let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
       .with_threshold(64);
     let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
@@ -1610,7 +1614,7 @@ mod tests {
       on_wire.len() < datagram.len(),
       "compressible datagram must shrink on the wire"
     );
-    let back = coord.decompress_gossip(&on_wire).expect("decompress");
+    let back = coord.decrypt_gossip(&on_wire).expect("decrypt");
     assert_eq!(back, datagram);
   }
 
@@ -1620,7 +1624,7 @@ mod tests {
     use memberlist_wire::{CompressAlgorithm, CompressionOptions};
     let ep = endpoint(7102);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let opts = CompressionOptions::disabled()
+    let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
       .with_threshold(64);
     let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
@@ -1629,11 +1633,11 @@ mod tests {
     // any compliant coordinator. Build one synthetically and assert it is
     // rejected without touching the body (the bomb guard checks orig_len
     // before allocation).
-    let over_mtu = Endpoint::<SmolStr, SocketAddr>::GOSSIP_MTU + 1;
+    let over_mtu = coord.gossip_mtu() + 1;
     let frame = memberlist_wire::encode_compressed_frame(CompressAlgorithm::Lz4, over_mtu, b"x");
     assert!(
-      coord.decompress_gossip(&frame).is_err(),
-      "a compressed gossip frame claiming orig_len > GOSSIP_MTU must be rejected"
+      coord.decrypt_gossip(&frame).is_err(),
+      "a compressed gossip frame claiming orig_len > gossip_mtu must be rejected"
     );
   }
 
@@ -1646,7 +1650,7 @@ mod tests {
     // Low threshold so the compressor attempts compression for all sizes in
     // the sweep, exercising the don't-expand else branch for sizes where the
     // wrapper header overhead erases the raw saving.
-    let opts = CompressionOptions::disabled()
+    let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
       .with_threshold(1);
     let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
@@ -1669,12 +1673,1230 @@ mod tests {
         compressed.len(),
         input.len(),
       );
-      let back = coord
-        .decompress_gossip(&compressed)
-        .expect("decompress failed");
+      let back = coord.decrypt_gossip(&compressed).expect("decrypt failed");
       assert_eq!(
         back, input,
         "compress_gossip round-trip failed at len={len}",
+      );
+    }
+  }
+
+  /// `EndpointConfig::with_gossip_mtu` propagates all the way through to the
+  /// composed `StreamEndpoint` coordinator: `coord.gossip_mtu()` returns the
+  /// configured value, NOT the legacy 1400 constant.
+  #[test]
+  fn stream_endpoint_gossip_mtu_is_propagated_from_config() {
+    let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7240)).with_gossip_mtu(1200);
+    let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg);
+    assert_eq!(
+      coord.gossip_mtu(),
+      1200,
+      "StreamEndpoint::gossip_mtu must read the configured value (not the \
+       legacy 1400 constant) so the FSM's plaintext-budget bound tracks \
+       EndpointConfig",
+    );
+  }
+
+  /// Wire-byte guarantee for encrypted gossip under a configured `gossip_mtu`:
+  /// a near-budget plaintext frame's on-wire ciphertext stays within
+  /// `gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD`. This documents the explicit
+  /// semantic that the configured `gossip_mtu` bounds the FSM's plaintext
+  /// budget; the on-wire datagram MAY exceed it by exactly the AEAD wrapper
+  /// overhead (30 bytes = 14-byte header + 16-byte auth tag) when
+  /// encryption is enabled. Operators on tight path-MTU networks size
+  /// `gossip_mtu` accordingly.
+  ///
+  /// Mutation gate: if a future change forgets to size buffers for the
+  /// wrapper-overhead slack (or, conversely, lets the configured budget be
+  /// silently overshot by more than the wrapper), this test catches it.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey, ENCRYPTED_WRAPPER_OVERHEAD};
+    let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7241)).with_gossip_mtu(1200);
+    let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    // A plaintext datagram at the configured gossip-MTU ceiling.
+    let plaintext = vec![0xab; 1200];
+    let on_wire = coord
+      .encrypt_gossip(&plaintext)
+      .expect("aes-gcm primary -> encrypt succeeds");
+    assert!(
+      on_wire.len() <= 1200 + ENCRYPTED_WRAPPER_OVERHEAD,
+      "encrypted on-wire datagram MUST stay within \
+       gossip_mtu + ENCRYPTED_WRAPPER_OVERHEAD; \
+       got on_wire={} > 1200 + {} = {}",
+      on_wire.len(),
+      ENCRYPTED_WRAPPER_OVERHEAD,
+      1200 + ENCRYPTED_WRAPPER_OVERHEAD,
+    );
+    assert_eq!(
+      on_wire.len(),
+      1200 + ENCRYPTED_WRAPPER_OVERHEAD,
+      "AES-GCM is a streaming AEAD: a 1200-byte plaintext inflates by \
+       EXACTLY ENCRYPTED_WRAPPER_OVERHEAD (30 bytes) — header + 12-byte \
+       nonce + 16-byte auth tag",
+    );
+    let back = coord.decrypt_gossip(&on_wire).expect("roundtrip decrypt");
+    assert_eq!(back, plaintext, "roundtrip preserves the plaintext bytes");
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn stream_endpoint_gossip_encryption_roundtrip() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+    let ep = endpoint(7200);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let kr = Keyring::new(SecretKey::Aes256([0x42; 32]));
+    let opts = EncryptionOptions::new().with_keyring(kr);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    let datagram = b"a gossip body".to_vec();
+    let on_wire = coord.encrypt_gossip(&datagram).expect("encrypt");
+    assert_ne!(on_wire, datagram, "encrypted bytes differ from plaintext");
+    assert_eq!(
+      on_wire[0],
+      memberlist_wire::ENCRYPTED_TAG,
+      "outbound starts with the Encrypted wrapper tag"
+    );
+    let back = coord.decrypt_gossip(&on_wire).expect("decrypt");
+    assert_eq!(back, datagram);
+  }
+
+  #[test]
+  fn stream_endpoint_gossip_encryption_disabled_is_byte_identical() {
+    let ep = endpoint(7201);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg);
+    let datagram = b"a gossip body".to_vec();
+    let on_wire = coord.encrypt_gossip(&datagram).expect("identity");
+    assert_eq!(on_wire, datagram, "no keyring -> identity transform");
+    let back = coord.decrypt_gossip(&on_wire).expect("identity");
+    assert_eq!(back, datagram);
+  }
+
+  /// Strict-mode rejection MUST fire at the coordinator's public ingress
+  /// API. A configured keyring + a leading tag that is not `Encrypted` is
+  /// an unauthenticated plaintext Ping/Ack/Alive frame; passing it through
+  /// to `handle_gossip` would bypass strict-mode entirely. The
+  /// coordinator's single canonical ingress helper `decrypt_gossip` routes
+  /// through `unwrap_transforms_with_encryption`, which applies the
+  /// strict-mode entry check before any wrapper decoding, so cluster
+  /// authentication holds without depending on driver discipline.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
+    use memberlist_wire::{
+      encode_plain_frame, EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey,
+    };
+    let ep = endpoint(7205);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    // A plain Ping frame — its leading byte is `MessageTag::Ping`, not
+    // `Encrypted`, so the strict-mode entry check inside
+    // `unwrap_transforms_with_encryption` MUST reject before any decoding.
+    // Body shape does not matter for the leading-byte check.
+    let plain_ping = encode_plain_frame(MessageTag::Ping, b"opaque-body").expect("encode");
+    let result = coord.decrypt_gossip(&plain_ping);
+    assert!(
+      matches!(result, Err(FrameError::Encryption(_))),
+      "decrypt_gossip MUST reject a plaintext datagram while encryption \
+       is enabled — got {result:?}",
+    );
+  }
+
+  #[cfg(all(
+    feature = "encryption-aes-gcm",
+    not(feature = "encryption-chacha20-poly1305")
+  ))]
+  #[test]
+  fn stream_endpoint_encrypt_gossip_returns_err_on_unsupported_backend() {
+    // A keyring whose primary requires a backend the binary was not built
+    // with (here: ChaCha20-Poly1305 under an aes-gcm-only build) must
+    // surface as Err, NOT silently emit plaintext.
+    use memberlist_wire::{EncryptionError, EncryptionOptions, Keyring, SecretKey};
+    let ep = endpoint(7202);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let kr = Keyring::new(SecretKey::ChaCha20Poly1305([0x42; 32]));
+    let opts = EncryptionOptions::new().with_keyring(kr);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    let datagram = b"this gossip must not go out plaintext".to_vec();
+    let err = coord
+      .encrypt_gossip(&datagram)
+      .expect_err("missing backend must surface as Err, not silent plaintext");
+    assert!(
+      matches!(err, EncryptionError::UnsupportedAlgorithm(_)),
+      "got {err:?}"
+    );
+  }
+
+  #[test]
+  fn raw_records_is_secure_returns_false() {
+    use crate::streams::StreamTransport;
+    assert!(
+      !RawRecords::is_secure(),
+      "plain TCP is not transport-encrypted"
+    );
+  }
+
+  /// A runtime [`StreamEndpoint::set_encryption_options`] update MUST propagate
+  /// to every live reliable bridge, not just `self.encryption`. Without the
+  /// fan-out, a peer holding a pre-update reliable exchange continues to send
+  /// plaintext units on that bridge — the bridge holds a clone of the prior
+  /// (disabled) `EncryptionOptions`, so its strict-mode entry check in
+  /// `unwrap_transforms_with_encryption` never fires and the
+  /// unauthenticated-plaintext-ingress gap reopens.
+  ///
+  /// The test opens an outbound exchange with encryption DISABLED (so the
+  /// bridge is constructed under the disabled policy), then calls
+  /// `set_encryption_options(enabled)` and asserts the live bridge's
+  /// effective encryption is now ENABLED.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn set_encryption_options_propagates_to_live_bridges() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+
+    let now = Instant::now();
+    let ep = endpoint(7203);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg);
+
+    // Drive an outbound dial so the coordinator builds a bridge UNDER the
+    // disabled-encryption policy (the default constructor leaves
+    // `self.encryption` disabled, so `start_push_pull` → `service_dials` clones
+    // a disabled options into the new bridge).
+    coord.start_push_pull(addr(7000), PushPullKind::Refresh, now);
+    let connect = coord
+      .poll_action()
+      .expect("the dial surfaces a Connect action");
+    let exchange = match connect {
+      StreamAction::Connect(c) => c.id(),
+      other => panic!("expected Connect, got {:?}", action_kind(&other)),
+    };
+
+    assert_eq!(
+      coord.bridge_encryption_enabled(exchange),
+      Some(false),
+      "before set_encryption_options the bridge clone is disabled",
+    );
+
+    // Publish an enabled policy at runtime — every live bridge MUST observe it.
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    coord.set_encryption_options(opts);
+
+    assert_eq!(
+      coord.bridge_encryption_enabled(exchange),
+      Some(true),
+      "set_encryption_options must fan out to every live bridge — without \
+       propagation a peer's pre-update reliable exchange would keep accepting \
+       plaintext on the bridge's stale (disabled) EncryptionOptions clone",
+    );
+    // And the endpoint's own field is also updated, so any subsequent bridge
+    // built from the coordinator sees the new policy.
+    assert!(
+      coord.encryption_options().is_enabled(),
+      "the endpoint's stored EncryptionOptions reflects the runtime update",
+    );
+  }
+
+  /// The builder variant [`StreamEndpoint::with_encryption`] MUST route
+  /// through [`StreamEndpoint::set_encryption_options`] so the bridge-fan-out
+  /// is shared. A naive `self.encryption = encryption; self` would leave every
+  /// live bridge holding its prior (disabled) `EncryptionOptions` clone — the
+  /// same unauthenticated-plaintext-ingress gap the in-place setter closes.
+  ///
+  /// Mirror of `set_encryption_options_propagates_to_live_bridges` but uses
+  /// `coord = coord.with_encryption(opts)` to exercise the builder path.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn with_encryption_builder_propagates_to_live_bridges() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+
+    let now = Instant::now();
+    let ep = endpoint(7204);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg);
+
+    coord.start_push_pull(addr(7001), PushPullKind::Refresh, now);
+    let connect = coord
+      .poll_action()
+      .expect("the dial surfaces a Connect action");
+    let exchange = match connect {
+      StreamAction::Connect(c) => c.id(),
+      other => panic!("expected Connect, got {:?}", action_kind(&other)),
+    };
+
+    assert_eq!(
+      coord.bridge_encryption_enabled(exchange),
+      Some(false),
+      "before with_encryption the bridge clone is disabled",
+    );
+
+    // Builder variant: rebuild the coordinator value with the enabled policy.
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    coord = coord.with_encryption(opts);
+
+    assert_eq!(
+      coord.bridge_encryption_enabled(exchange),
+      Some(true),
+      "with_encryption must fan out to every live bridge — the builder \
+       variant must share set_encryption_options' propagation, otherwise a \
+       pre-update reliable exchange would keep accepting plaintext on a \
+       stale (disabled) EncryptionOptions clone",
+    );
+    assert!(
+      coord.encryption_options().is_enabled(),
+      "the endpoint's stored EncryptionOptions reflects the builder update",
+    );
+  }
+
+  /// On an INSECURE transport (`RawRecords::is_secure() == false`) a runtime
+  /// [`StreamEndpoint::set_encryption_options`] update MUST drop any queued
+  /// bytes the bridge encoded under the prior policy: those bytes are
+  /// plaintext, and emitting them on the wire after the operator publishes
+  /// a new policy would leak plaintext post-enablement (the SWIM push/pull
+  /// request may carry user-defined node metadata). The fix fails the
+  /// bridge, which clears the records-layer outbound buffer; the
+  /// coordinator's post-iteration purge drops the already-drained chunks
+  /// from [`StreamEndpoint::out_transmit`]; the FSM retries the exchange
+  /// under a fresh bridge built under the new policy.
+  ///
+  /// Drives the queued-plaintext leak scenario:
+  /// (1) bridge built under disabled encryption;
+  /// (2) `start_push_pull` encodes the request as `[unit_len][plaintext]`
+  ///     and queues it via `records.write_plaintext`, which `pump_bridges`
+  ///     drains into `out_transmit`;
+  /// (3) operator publishes an enabled policy;
+  /// (4) natural drain loop MUST observe NO bytes for the affected
+  ///     exchange, AND the bridge MUST be in `BridgePhase::Failed`.
+  ///
+  /// Mutation gate: if `StreamBridge::set_encryption` does NOT `fail` the
+  /// bridge on insecure transport, the bridge keeps running and lets the
+  /// pre-update plaintext surface from `poll_transport_transmit` after
+  /// `set_encryption_options` — the failure transition + outbound purge is
+  /// load-bearing for the policy-change contract.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn set_encryption_options_drops_queued_plaintext_when_enabling_on_raw_records() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+
+    let now = Instant::now();
+    let ep = endpoint(7205);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg);
+
+    // (1) Open a push/pull exchange under disabled encryption. The in-band
+    // `service_dials` + `flush_outbound` builds the dialer bridge, promotes
+    // it (the dialer's `RawRecords::is_handshaking()` is `false` from
+    // construction), runs `pump_out` which encodes the request as a reliable
+    // unit and `write_plaintext`s it into the records layer, then
+    // `collect_transmits` drains it into `out_transmit`.
+    coord.start_push_pull(addr(7002), PushPullKind::Refresh, now);
+
+    // (2) Drain the `Connect` so the natural loop below sees only the
+    // post-update ordering of transmit vs. teardown. The exchange is still
+    // alive at this point — the pre-update plaintext chunk for the same
+    // exchange is in `out_transmit`.
+    let connect = coord
+      .poll_action()
+      .expect("the dial surfaces a Connect action");
+    let exchange = match connect {
+      StreamAction::Connect(c) => c.id(),
+      other => panic!("expected Connect, got {:?}", action_kind(&other)),
+    };
+    assert!(
+      coord.exchange_has_pending_bytes(exchange),
+      "pre-update invariant: the dialer queued plaintext bytes for the \
+       exchange (these are the bytes that would leak post-enablement)",
+    );
+    assert_eq!(
+      coord.bridge_is_failed(exchange),
+      Some(false),
+      "pre-update invariant: the bridge is still running",
+    );
+
+    // (3) Publish an enabled policy. On an insecure transport this must
+    // fail the bridge AND purge `out_transmit`.
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    coord.set_encryption_options(opts);
+
+    assert_eq!(
+      coord.bridge_is_failed(exchange),
+      Some(true),
+      "an insecure-transport bridge MUST fail on a runtime encryption-policy \
+       change so the SWIM FSM retries the exchange under a fresh bridge \
+       constructed under the new policy",
+    );
+    assert!(
+      !coord.exchange_has_pending_bytes(exchange),
+      "the coordinator MUST purge any already-drained plaintext chunks tagged \
+       with the failed bridge — without the purge, a driver polling \
+       `poll_transport_transmit` before the next pump would emit pre-update \
+       plaintext on the wire post-enablement",
+    );
+
+    // (4) Natural drain loop. With the bridge failed, `out_transmit` purged,
+    // and a `Close` synchronously enqueued by `set_encryption_options`, no
+    // bytes for the exchange surface and the `Close` is reachable from
+    // `poll_action` WITHOUT an external `handle_timeout` kick. A terminal
+    // bridge returns no per-bridge timeout, and an idle endpoint may have
+    // no scheduler timeout at all — relying on the natural `pump_bridges`
+    // reap to surface the `Close` would leave it unreachable through the
+    // documented driver interface.
+    let mut bytes_observed: Vec<(ExchangeId, Bytes)> = Vec::new();
+    let mut actions_observed: Vec<StreamAction> = Vec::new();
+    while let Some(action) = coord.poll_action() {
+      actions_observed.push(action);
+    }
+    while let Some((id, _peer, bytes)) = coord.poll_transport_transmit() {
+      bytes_observed.push((id, bytes));
+    }
+    let stale: Vec<&Bytes> = bytes_observed
+      .iter()
+      .filter_map(|(eid, b)| (*eid == exchange).then_some(b))
+      .collect();
+    assert!(
+      stale.is_empty(),
+      "no bytes for the failed exchange {:?} may reach the wire after \
+       set_encryption_options publishes the new policy; got {:?}",
+      exchange,
+      stale,
+    );
+    let close_for_exchange = actions_observed
+      .iter()
+      .filter_map(|a| a.as_close())
+      .any(|r| r.id() == exchange);
+    assert!(
+      close_for_exchange,
+      "the failed bridge MUST surface a Close action so the driver tears down \
+       the affected transport connection; got {:?}",
+      actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
+    );
+  }
+
+  /// The builder variant [`StreamEndpoint::with_encryption`] routes through
+  /// [`StreamEndpoint::set_encryption_options`], so the queued-plaintext-drop
+  /// behavior MUST apply to the builder path as well. Mirrors
+  /// [`set_encryption_options_drops_queued_plaintext_when_enabling_on_raw_records`]
+  /// but uses `coord = coord.with_encryption(opts)`.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn with_encryption_drops_queued_plaintext_when_enabling_on_raw_records() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+
+    let now = Instant::now();
+    let ep = endpoint(7206);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg);
+
+    coord.start_push_pull(addr(7003), PushPullKind::Refresh, now);
+    let connect = coord
+      .poll_action()
+      .expect("the dial surfaces a Connect action");
+    let exchange = match connect {
+      StreamAction::Connect(c) => c.id(),
+      other => panic!("expected Connect, got {:?}", action_kind(&other)),
+    };
+    assert!(
+      coord.exchange_has_pending_bytes(exchange),
+      "pre-update invariant: the dialer queued plaintext bytes for the exchange",
+    );
+
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    coord = coord.with_encryption(opts);
+
+    assert_eq!(
+      coord.bridge_is_failed(exchange),
+      Some(true),
+      "with_encryption (builder) must share set_encryption_options' \
+       insecure-transport failure path — otherwise the same plaintext-leak \
+       gap reopens on the builder",
+    );
+    assert!(
+      !coord.exchange_has_pending_bytes(exchange),
+      "with_encryption (builder) must share set_encryption_options' \
+       transmit-queue purge",
+    );
+
+    // The builder must also share `set_encryption_options`' synchronous
+    // `Close` enqueue: the teardown surfaces from `poll_action` WITHOUT an
+    // external `handle_timeout` kick. A terminal bridge returns no
+    // per-bridge timeout, so a `Close` that only fires on the next reap is
+    // unreachable from the documented driver interface.
+    let mut actions_observed: Vec<StreamAction> = Vec::new();
+    while let Some(action) = coord.poll_action() {
+      actions_observed.push(action);
+    }
+    let close_for_exchange = actions_observed
+      .iter()
+      .filter_map(|a| a.as_close())
+      .any(|r| r.id() == exchange);
+    assert!(
+      close_for_exchange,
+      "with_encryption (builder) must surface a Close action for the failed \
+       bridge directly from poll_action; got {:?}",
+      actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
+    );
+  }
+
+  /// A `start_push_pull` enqueues a `Connect` action. If the driver has not
+  /// yet drained that `Connect` when the operator publishes a new encryption
+  /// policy on an insecure transport, the bridge fails and its queued
+  /// `Connect` MUST be purged — otherwise a driver doing the natural
+  /// "drain actions, drain transmits, repeat" loop would open a transport
+  /// socket for a bridge the coordinator has already failed, then drain
+  /// the same exchange's `Close` and tear it back down (wasted work, and
+  /// the eager-queued local label sitting in the bridge's record-layer
+  /// outbound buffer was already cleared by the failure transition — but a
+  /// driver should not even attempt the dial).
+  ///
+  /// Mirror invariant of [`set_encryption_options_drops_queued_plaintext_when_enabling_on_raw_records`]
+  /// in the action-queue dimension: that test asserts no plaintext BYTES
+  /// surface after the policy change; this one asserts no stale `Connect`
+  /// ACTION surfaces.
+  ///
+  /// Mutation gate: removing `purge_pending_connect_for(id)` from
+  /// `set_encryption_options` makes the natural drain loop observe the
+  /// stale `Connect` before the `Close`.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn set_encryption_options_purges_pending_connect_for_failed_bridge() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+
+    let now = Instant::now();
+    let ep = endpoint(7207);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg);
+
+    // (1) `start_push_pull` enqueues a `Connect` for the dial. Do NOT drain
+    // it — the regression scenario is precisely that the driver had not yet
+    // observed `Connect` when the operator published the new policy.
+    coord.start_push_pull(addr(7004), PushPullKind::Refresh, now);
+    assert_eq!(
+      coord.live_bridge_count(),
+      1,
+      "the dial inserts exactly one bridge whose `Connect` is queued and \
+       MUST be purged by step (2)",
+    );
+
+    // (2) Publish the enabling policy. The bridge fails and its queued
+    // `Connect` MUST be purged.
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    coord.set_encryption_options(opts);
+
+    // (3) Drain `poll_action` and assert: NO `Connect` is observed (the
+    // purge worked), and a `Close` IS observed (the synchronous enqueue
+    // worked, so the driver can tear down any state it accrued for the
+    // exchange).
+    let mut actions_observed: Vec<StreamAction> = Vec::new();
+    while let Some(action) = coord.poll_action() {
+      actions_observed.push(action);
+    }
+    let stale_connect = actions_observed
+      .iter()
+      .any(|a| matches!(a, StreamAction::Connect(_)));
+    assert!(
+      !stale_connect,
+      "a `Connect` for the now-failed bridge MUST be purged from the action \
+       queue so a driver doing the natural drain loop does not open a \
+       transport socket for an exchange the coordinator has already failed; \
+       got {:?}",
+      actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
+    );
+    let close_observed = actions_observed
+      .iter()
+      .any(|a| matches!(a, StreamAction::Close(_)));
+    assert!(
+      close_observed,
+      "the failed bridge MUST surface a `Close` so the driver can clean up \
+       any state it accrued for the exchange (a driver that had already \
+       drained `Connect` from a prior tick would otherwise leak the open \
+       socket); got {:?}",
+      actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
+    );
+  }
+
+  /// A reapply of the SAME effective `EncryptionOptions` must be a no-op:
+  /// no live bridge should be failed, no queued bytes should be purged, no
+  /// `Close` should be enqueued. A config reconciler that republishes the
+  /// current configuration on a timer is a normal operational pattern; the
+  /// pre-guard implementation would tear down every reliable exchange on
+  /// every reapply for no security gain (the bridge clone already runs
+  /// under these exact options).
+  ///
+  /// The test opens an exchange under an enabled policy, then republishes
+  /// the same options. The bridge MUST remain alive AND its queued bytes
+  /// MUST stay in `out_transmit`.
+  ///
+  /// Mutation gate: removing the entry-equality short-circuit from
+  /// `set_encryption_options` makes the insecure-transport fail-cascade run
+  /// on the reapply — the bridge transitions to `Failed`, the queued
+  /// plaintext is purged, and a `Close` is enqueued (the same outputs the
+  /// real policy-change tests assert when transitioning DISABLED → ENABLED).
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn set_encryption_options_is_noop_when_reapplying_same_policy() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+
+    let now = Instant::now();
+    let ep = endpoint(7208);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let key = SecretKey::Aes256([0x42; 32]);
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg).with_encryption(opts.clone());
+
+    // Open a push/pull exchange under the enabled policy; the bridge holds a
+    // clone of `opts`. The dial encodes the request as an encrypted unit and
+    // drains it into `out_transmit`.
+    coord.start_push_pull(addr(7005), PushPullKind::Refresh, now);
+    let connect = coord
+      .poll_action()
+      .expect("the dial surfaces a Connect action");
+    let exchange = match connect {
+      StreamAction::Connect(c) => c.id(),
+      other => panic!("expected Connect, got {:?}", action_kind(&other)),
+    };
+    assert_eq!(
+      coord.bridge_is_failed(exchange),
+      Some(false),
+      "pre-reapply invariant: the bridge is running under the enabled policy",
+    );
+    let bytes_pre = coord.exchange_has_pending_bytes(exchange);
+    assert!(
+      bytes_pre,
+      "pre-reapply invariant: the dialer queued bytes for the exchange",
+    );
+
+    // Reapply the IDENTICAL options. The no-op guard MUST skip the
+    // fail-cascade: bridge stays alive, queued bytes stay queued, no `Close`
+    // is enqueued.
+    coord.set_encryption_options(opts.clone());
+
+    assert_eq!(
+      coord.bridge_is_failed(exchange),
+      Some(false),
+      "a no-op reapply of the same EncryptionOptions MUST NOT fail the live \
+       bridge — the bridge clone already runs under these exact options, so \
+       re-failing it is pure availability loss",
+    );
+    assert!(
+      coord.exchange_has_pending_bytes(exchange),
+      "a no-op reapply MUST NOT purge the bridge's queued bytes (the \
+       purge runs only after a real policy-change failure)",
+    );
+
+    // Drain the action queue and assert NO `Close` for the exchange surfaced —
+    // the only action that survives is the original `Connect` (already
+    // drained above) and possibly its companions; specifically no `Close`
+    // for this exchange should be present.
+    let mut actions_observed: Vec<StreamAction> = Vec::new();
+    while let Some(action) = coord.poll_action() {
+      actions_observed.push(action);
+    }
+    let close_for_exchange = actions_observed
+      .iter()
+      .filter_map(|a| a.as_close())
+      .any(|r| r.id() == exchange);
+    assert!(
+      !close_for_exchange,
+      "a no-op reapply MUST NOT enqueue a Close — the bridge is still alive; \
+       got {:?}",
+      actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
+    );
+    // And the endpoint's stored options are still the same enabled policy.
+    assert_eq!(
+      coord.encryption_options(),
+      &opts,
+      "the no-op reapply still publishes the (identical) options as the \
+       endpoint's current configuration",
+    );
+  }
+
+  /// A runtime policy change that fails one or more bridges MUST make the
+  /// failed bridges reachable to the next reap WITHOUT requiring an
+  /// unrelated external event to advance time. A terminal bridge contributes
+  /// no per-bridge timeout of its own, and an idle endpoint may have no
+  /// scheduler timeout at all — without an immediate wake the bridge would
+  /// sit in `conns` until some unrelated event triggered a tick.
+  ///
+  /// `set_encryption_options` sets the `policy_reap_pending` latch on a
+  /// real failure; `poll_timeout` folds `last_now` into the returned `min`
+  /// so the driver wakes immediately. The driver's `handle_timeout`
+  /// reaches the natural `pump_bridges` reap, removes the failed bridge
+  /// from `conns`, and clears the latch.
+  ///
+  /// The test opens an exchange under disabled encryption, enables
+  /// encryption (which fails the insecure-transport bridge), and asserts:
+  /// (a) `poll_timeout` returns an immediate-due wake even though no other
+  ///     timer is scheduled;
+  /// (b) one `handle_timeout(now)` later, the bridge is gone from `conns`.
+  ///
+  /// Mutation gate: removing the `policy_reap_pending` fold from
+  /// `poll_timeout` makes the wake unreachable (`poll_timeout` returns
+  /// `None` between the policy change and the bridge's exchange deadline),
+  /// so the bridge would linger until the deadline elapses — a user-visible
+  /// stall on the driver-observable timer.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn set_encryption_options_wakes_immediately_to_reap_failed_bridge() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+
+    let now = Instant::now();
+    let ep = endpoint(7209);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg);
+
+    // (1) Open an exchange under disabled encryption. The in-band
+    // `start_push_pull` calls `service_dials` + `flush_outbound`, sets
+    // `last_now`, and creates the bridge.
+    coord.start_push_pull(addr(7006), PushPullKind::Refresh, now);
+    let connect = coord
+      .poll_action()
+      .expect("the dial surfaces a Connect action");
+    let exchange = match connect {
+      StreamAction::Connect(c) => c.id(),
+      other => panic!("expected Connect, got {:?}", action_kind(&other)),
+    };
+    assert_eq!(
+      coord.live_bridge_count(),
+      1,
+      "pre-update invariant: exactly one bridge is live",
+    );
+
+    // (2) Publish an enabling policy. The insecure-transport bridge fails;
+    // `set_encryption_options` purges its transmit + connect queues and
+    // enqueues a `Close`. It also sets the `policy_reap_pending` latch so
+    // `poll_timeout` returns an immediate-due wake.
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    coord.set_encryption_options(opts);
+
+    // Drain the synchronous `Close` (already reachable from `poll_action`).
+    let mut actions: Vec<StreamAction> = Vec::new();
+    while let Some(a) = coord.poll_action() {
+      actions.push(a);
+    }
+    let close_observed = actions
+      .iter()
+      .filter_map(|a| a.as_close())
+      .any(|r| r.id() == exchange);
+    assert!(
+      close_observed,
+      "the failed bridge surfaces a Close directly from poll_action \
+       (synchronous enqueue); got {:?}",
+      actions.iter().map(action_kind).collect::<Vec<_>>(),
+    );
+
+    // (3) The failed bridge is still in `conns` — the reap runs in the next
+    // `pump_bridges`. Assert that `poll_timeout` returns an immediate-due
+    // wake (`<= now`) so a driver doing the natural "wait until
+    // poll_timeout" loop sees the wake at once.
+    let wake = coord
+      .poll_timeout()
+      .expect("the policy-change latch makes poll_timeout return Some");
+    assert!(
+      wake <= now,
+      "set_encryption_options sets policy_reap_pending so the wake is \
+       immediate-due (<= last_now); got wake={:?} vs last_now={:?}",
+      wake,
+      now,
+    );
+
+    // (4) Advance the clock with `handle_timeout(now)`. The pump_bridges
+    // call inside `run_tick` reaps the terminal (Failed) bridge, removes it
+    // from `conns`, and the run_tick epilogue clears the latch.
+    coord.handle_timeout(now);
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "handle_timeout's pump_bridges MUST reap the policy-failed bridge; \
+       leaving it in conns would defeat the immediate-reap contract",
+    );
+    // The latch must clear so subsequent `poll_timeout` calls do not loop
+    // forever returning an immediate wake.
+    let post_wake = coord.poll_timeout();
+    if let Some(t) = post_wake {
+      assert!(
+        t > now,
+        "after the reap, the policy_reap_pending latch is cleared and \
+         poll_timeout no longer returns an immediate wake; got {:?} <= now",
+        t,
+      );
+    }
+  }
+
+  /// Mirror of `set_encryption_options_wakes_immediately_to_reap_failed_bridge`
+  /// for the inbound-accept-first ordering: a brand-new endpoint whose VERY
+  /// FIRST operation is [`StreamEndpoint::accept_connection`] (e.g. a server
+  /// that accepts an inbound TCP connection before it has ever started its own
+  /// probe / push-pull / gossip cycle) must still surface the policy-reap
+  /// wake when [`StreamEndpoint::set_encryption_options`] subsequently fails
+  /// the freshly-inserted server bridge.
+  ///
+  /// The `policy_reap_pending` latch's wake is folded into `poll_timeout` ONLY
+  /// when `last_now` is `Some(_)` (the known-past anchor). If
+  /// `accept_connection` does NOT anchor `last_now`, the latch is set but the
+  /// fold finds `last_now == None` and the wake never reaches the driver — the
+  /// failed bridge would linger in `conns` until its accept-handshake deadline
+  /// elapsed.
+  ///
+  /// Mutation gate: removing `self.last_now = Some(now)` from
+  /// `accept_connection` makes `poll_timeout` return `None` here (the failed
+  /// bridge is in `Failed`, so its own `poll_timeout` returns `None`; the
+  /// inner endpoint has no timers; `last_now == None` voids the policy latch
+  /// fold). The driver would never wake to reap the bridge.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn set_encryption_options_immediate_reap_works_after_inbound_accept_as_first_op() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+
+    let now = Instant::now();
+    let ep = endpoint(7900);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg);
+
+    // (1) FIRST operation on a brand-new endpoint: accept an inbound
+    // connection. This inserts a server-side bridge into `conns` and anchors
+    // `last_now = Some(now)` (the known-past anchor the policy-reap fold in
+    // `poll_timeout` requires).
+    let exchange = coord.accept_connection(addr(7800), now);
+    assert_eq!(
+      coord.live_bridge_count(),
+      1,
+      "accept_connection installs a server-side bridge",
+    );
+
+    // (2) Publish an enabling policy. The insecure-transport bridge fails;
+    // `set_encryption_options` purges its transmit + connect queues and
+    // enqueues a `Close`. It also sets the `policy_reap_pending` latch so
+    // `poll_timeout` returns an immediate-due wake.
+    coord.set_encryption_options(
+      EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32]))),
+    );
+    assert_eq!(
+      coord.bridge_is_failed(exchange),
+      Some(true),
+      "the inbound bridge fails on the enabling policy update",
+    );
+
+    // (3) The failed bridge is still in `conns` — the reap runs in the next
+    // `pump_bridges`. Assert that `poll_timeout` returns an immediate-due
+    // wake (`<= now`) so a driver doing the natural "wait until
+    // poll_timeout" loop sees the wake at once.
+    //
+    // Without the `accept_connection` anchor, `last_now == None` and the
+    // policy-latch fold is a no-op; the only remaining `poll_timeout`
+    // candidate is the bridge's own timer — but the bridge is `Failed`, so
+    // its `poll_timeout` returns `None`. `poll_timeout` would return `None`.
+    let wake = coord
+      .poll_timeout()
+      .expect("policy_reap_pending must surface as an immediate-due timeout");
+    assert!(
+      wake <= now,
+      "the wake must be immediate-due (<= last_now); got wake={:?} vs now={:?}",
+      wake,
+      now,
+    );
+
+    // (4) `handle_timeout(now)` reaches `pump_bridges`, reaps the terminal
+    // bridge, removes it from `conns`, and clears the latch.
+    coord.handle_timeout(now);
+    assert_eq!(
+      coord.bridge_is_failed(exchange),
+      None,
+      "the failed bridge must be reaped out of conns after handle_timeout",
+    );
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "no bridges remain after the policy-reap",
+    );
+  }
+
+  /// A bridge that cleanly reaped (left `conns`) can leave its final response
+  /// chunk sitting in [`StreamEndpoint::out_transmit`] tagged with the now-gone
+  /// exchange — the clean-reap path deliberately does NOT
+  /// [`StreamEndpoint::purge_transmit_for`] (see
+  /// `clean_acceptor_split_inbound_label_then_request_preserves_full_response_on_wire`)
+  /// because the label + response chunks split across two queue entries are
+  /// both legitimate wire bytes the driver still owes the peer. If the
+  /// operator then publishes an enabling encryption policy BEFORE the driver
+  /// drains those bytes, the per-bridge fail-and-purge loop in
+  /// [`StreamEndpoint::set_encryption_options`] cannot reach the orphaned
+  /// chunks (the bridge is not in `conns` to be iterated) and the driver's
+  /// next [`StreamEndpoint::poll_transport_transmit`] emits PLAINTEXT bytes
+  /// on the wire under the new policy.
+  ///
+  /// The fix drops the entire `out_transmit` queue when the policy change
+  /// fails at least one bridge — `any_failed` is only true on an insecure
+  /// transport (`R::is_secure() == false`), so the heavy-handed clear is
+  /// bounded to the path where the orphan can leak.
+  ///
+  /// Setup mirrors `clean_acceptor_split_inbound_label_then_request_preserves_full_response_on_wire`:
+  /// drive a real dialer/acceptor exchange to clean reap on the SERVER, then
+  /// observe that both the acceptor's label chunk (queued in an earlier tick)
+  /// and the response chunk (queued by the reap) are sitting in the server's
+  /// `out_transmit` AFTER the bridge has left `conns`. A subsequent
+  /// `set_encryption_options(enabled)` MUST purge those orphaned chunks.
+  ///
+  /// Mutation gate: removing `self.out_transmit.clear()` from the
+  /// `set_encryption_options` policy-change branch fails the final assertion
+  /// — the orphaned bytes survive and a driver doing the natural drain loop
+  /// would emit pre-update plaintext after the new policy publishes.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn set_encryption_options_purges_orphaned_transmit_from_reaped_bridges() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+
+    let now = Instant::now();
+    let server_addr = addr(7600);
+    let dialer_addr = addr(7601);
+
+    // (1) Build the dialer coordinator and produce a real `[label||request]`
+    // blob with `start_push_pull`.
+    let dialer_ep = endpoint(dialer_addr.port());
+    let cfg_d = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let mut dialer: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(dialer_ep, cfg_d);
+    let _sid = dialer.start_push_pull(server_addr, PushPullKind::Join, now);
+    let _ = dialer
+      .poll_action()
+      .expect("dialer's first poll_action is the Connect");
+    let mut dialer_bytes = Vec::new();
+    while let Some((_id, _peer, bytes)) = dialer.poll_transport_transmit() {
+      dialer_bytes.extend_from_slice(&bytes);
+    }
+    assert!(
+      dialer_bytes.len() > 11,
+      "dialer produced label + request, got {} bytes",
+      dialer_bytes.len(),
+    );
+    let label_only = &dialer_bytes[..11];
+    let request_tail = &dialer_bytes[11..];
+
+    // (2) Build the server coordinator under DISABLED encryption (the policy
+    // we will later flip to enabled) and accept the connection.
+    let server_ep = endpoint(server_addr.port());
+    let cfg_s = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let mut server: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(server_ep, cfg_s);
+    let server_exchange = server.accept_connection(dialer_addr, now);
+
+    // (3) Split-read the dialer's label, tick to drain the acceptor's lazy
+    // label into `out_transmit`, then feed the request tail with FIN. After
+    // the next tick the bridge cleanly reaps (`BothClosed`) and the response
+    // is added by the reap path — the server's `out_transmit` now holds the
+    // acceptor's label chunk (queued in tick (4) below) AND the response
+    // chunk (queued by the reap), tagged with `server_exchange` even though
+    // the bridge itself is gone from `conns`.
+    server.handle_transport_data(server_exchange, label_only, false, now);
+    server.handle_timeout(now);
+    server.handle_transport_data(server_exchange, request_tail, true, now);
+    server.handle_timeout(now);
+
+    assert_eq!(
+      server.bridge_is_failed(server_exchange),
+      None,
+      "the bridge cleanly reaped — it is no longer in `conns` (the \
+       precondition for the orphaned-out_transmit gap this test exercises)",
+    );
+    assert!(
+      server.exchange_has_pending_bytes(server_exchange),
+      "the orphan precondition: the reaped bridge's response chunk is \
+       sitting in `out_transmit` tagged with the gone exchange. Without this \
+       the test exercises nothing.",
+    );
+
+    // (4) Publish an enabling encryption policy. The per-bridge fail-and-purge
+    // loop iterates `self.conns`, which the reaped bridge is no longer in;
+    // without the orphan-clear branch the chunks remain queued.
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    server.set_encryption_options(opts);
+
+    // (5) The orphaned bytes MUST be gone. The natural drain loop must NOT
+    // surface any bytes for `server_exchange`.
+    assert!(
+      !server.exchange_has_pending_bytes(server_exchange),
+      "set_encryption_options on an insecure transport MUST purge orphaned \
+       `out_transmit` chunks from reaped bridges — without the clear, a \
+       driver polling `poll_transport_transmit` after the operator publishes \
+       the new policy would emit pre-update plaintext bytes belonging to \
+       an exchange whose bridge is already gone from `conns`",
+    );
+    let mut bytes_observed: Vec<(ExchangeId, Bytes)> = Vec::new();
+    while let Some((id, _peer, bytes)) = server.poll_transport_transmit() {
+      bytes_observed.push((id, bytes));
+    }
+    let stale: Vec<&Bytes> = bytes_observed
+      .iter()
+      .filter_map(|(eid, b)| (*eid == server_exchange).then_some(b))
+      .collect();
+    assert!(
+      stale.is_empty(),
+      "no bytes for the reaped exchange {:?} may reach the wire after the \
+       new policy publishes; got {:?}",
+      server_exchange,
+      stale,
+    );
+  }
+
+  /// Inbound gossip is buffered raw into [`StreamEndpoint::mem_ingress`] by
+  /// [`StreamEndpoint::handle_gossip`] and decrypted at drain time by
+  /// [`StreamEndpoint::decrypt_gossip`], which reads the coordinator's CURRENT
+  /// `self.encryption`. A datagram queued under one policy is therefore
+  /// decrypted under whatever policy is in effect when the driver calls
+  /// [`StreamEndpoint::poll_memberlist_ingress`] + `decrypt_gossip`. Without
+  /// the policy-change purge, the asymmetry breaks both directions:
+  ///
+  /// * A plaintext datagram queued while strict-mode was ON (the keyring
+  ///   would reject it at drain) is ACCEPTED if the operator disables
+  ///   encryption before drain.
+  /// * A ciphertext datagram queued while disabled is REJECTED if the operator
+  ///   enables strict-mode before drain.
+  ///
+  /// Gossip is lossy and self-healing, so dropping the buffered datagrams on
+  /// every effective policy change is correct — the next gossip round delivers
+  /// fresh datagrams under the new policy.
+  ///
+  /// Test angle: queue a plaintext datagram under disabled encryption, flip
+  /// to enabled, and assert that [`StreamEndpoint::poll_memberlist_ingress`]
+  /// returns `None`. Without the `mem_ingress.clear()` the queued plaintext
+  /// would survive into the strict-mode regime and `decrypt_gossip` on the
+  /// drained bytes would reject them — already a defect because the codec
+  /// layer would surface a spurious decrypt error for a datagram that was
+  /// validly accepted on its arrival policy.
+  ///
+  /// Mutation gate: removing `self.mem_ingress.clear()` from
+  /// `set_encryption_options` makes `poll_memberlist_ingress` return the
+  /// pre-policy-change buffered datagram.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn set_encryption_options_purges_buffered_gossip_on_policy_change() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+
+    let now = Instant::now();
+    let ep = endpoint(7700);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg);
+
+    // (1) Queue a plaintext gossip datagram under disabled encryption. The
+    // bytes are buffered raw in `mem_ingress`; the coordinator does NOT
+    // decode them in-crate.
+    let peer = addr(7701);
+    let datagram = [1u8, 2, 3, 4, 5];
+    coord.handle_gossip(peer, &datagram, now);
+    assert!(
+      coord.poll_memberlist_ingress().is_some(),
+      "pre-condition: a queued gossip datagram is observable through \
+       poll_memberlist_ingress before the policy change",
+    );
+    // Re-queue (the assertion above drained the queue).
+    coord.handle_gossip(peer, &datagram, now);
+
+    // (2) Publish an enabling encryption policy. The `mem_ingress` queue must
+    // be cleared — the queued datagram was accepted on a disabled-encryption
+    // policy and `decrypt_gossip` reading `self.encryption` after the flip
+    // would surface it under the new strict-mode regime (either accepting
+    // an unauthenticated datagram in the disabled→enabled direction the test
+    // exercises, or rejecting an authenticated datagram in the
+    // enabled→disabled mirror direction).
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    coord.set_encryption_options(opts);
+
+    assert!(
+      coord.poll_memberlist_ingress().is_none(),
+      "set_encryption_options MUST purge the `mem_ingress` queue on a real \
+       policy change — without the clear, the queued datagram would survive \
+       across the policy flip and be decrypted/rejected under the new policy \
+       it was never validated against",
+    );
+  }
+
+  /// A bridge failed by a runtime encryption-policy change
+  /// ([`crate::bridge_phase::BridgeFailure::EncryptionPolicyChanged`]) stays
+  /// in [`StreamEndpoint::conns`] until the next [`pump_bridges`] iteration
+  /// reaps it. Inbound transport bytes for that exchange may be delivered by
+  /// the driver in the window between
+  /// [`StreamEndpoint::set_encryption_options`] and the wake-latch reap —
+  /// a network read the driver had already issued, or an in-flight TCP
+  /// segment that arrives between the policy publication and the reap call.
+  ///
+  /// [`StreamBridge::handle_transport_data`] MUST short-circuit any such
+  /// post-failure ingress: feeding the bytes through
+  /// [`StreamBridge::pump_in_established`] would route them through the
+  /// records layer, decode them as a reliable unit, and pass the surfaced
+  /// plaintext to [`Stream::handle_data`]. A valid response frame applied
+  /// after the bridge is failed would queue an
+  /// [`crate::EndpointEvent::PushPullReplyReceived`] (or analog) that
+  /// [`StreamBridge::drain_then_reap`] then routes through
+  /// [`Endpoint::handle_stream_event`], committing membership state from an
+  /// exchange the local node has already declared dead.
+  ///
+  /// Test angle: build a dialer push/pull, drain its `Connect` and request
+  /// bytes, publish an enabling encryption policy (fails the bridge),
+  /// craft a reliable unit encoded under the NEW policy carrying a synthetic
+  /// peer ("carol"), and deliver those bytes through
+  /// [`StreamEndpoint::handle_transport_data`] BEFORE any
+  /// [`StreamEndpoint::handle_timeout`] reap. Without the guard, the
+  /// post-failure ingress would surface as an [`Event::NodeJoined`] for carol
+  /// and [`Endpoint::num_members`] would grow to 2. With the guard, the
+  /// bridge's `handle_transport_data` no-ops on its terminal phase, the
+  /// reliable unit is never decoded, no stream events are queued, and the
+  /// only effect is the queued [`crate::StreamAction::Close`] the
+  /// policy-change path already enqueued synchronously.
+  ///
+  /// Mutation gate: removing the terminal-phase guard from
+  /// [`StreamBridge::handle_transport_data`] makes [`Endpoint::num_members`]
+  /// grow to 2 here AND surfaces an [`Event::NodeJoined`] for the synthetic
+  /// peer — the [`memberlist_wire::typed::PushNodeState`] reaches
+  /// `merge_state` via the drain-then-reap path and is committed.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn policy_failed_bridge_rejects_ingress_before_reap() {
+    use bytes::Bytes;
+    use memberlist_wire::{
+      encode_reliable_unit_with_encryption,
+      typed::{PushNodeState, State},
+      CompressionOptions, EncryptionOptions, Keyring, SecretKey,
+    };
+
+    use crate::endpoint::Endpoint;
+
+    let now = Instant::now();
+    let ep = endpoint(7800);
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
+      StreamEndpoint::new(ep, cfg);
+
+    // (1) Open a dialer push/pull under disabled encryption. `start_push_pull`
+    // runs `service_dials` + `flush_outbound`, which builds the bridge,
+    // promotes it (RawRecords dialer is non-handshaking from construction),
+    // and pumps the request bytes out into `out_transmit`. The dialer's
+    // stream FSM advances to `OutboundAwaitingResponse` once `poll_transmit`
+    // drains the output buffer inside that flush.
+    coord.start_push_pull(addr(7801), PushPullKind::Refresh, now);
+    let connect = coord
+      .poll_action()
+      .expect("the dial surfaces a Connect action");
+    let exchange = match connect {
+      StreamAction::Connect(c) => c.id(),
+      other => panic!("expected Connect, got {:?}", action_kind(&other)),
+    };
+    // Drain the dialer's queued request bytes so they do not interfere with
+    // the post-policy-change observations below. The bytes are the dialer's
+    // own push/pull request — the regression scenario is about INBOUND
+    // bytes arriving for the same exchange, not the outbound queue.
+    while coord.poll_transport_transmit().is_some() {}
+
+    // Pre-condition invariants: the bridge is alive, the local endpoint has
+    // exactly one tracked member (itself), and no Event::NodeJoined is queued.
+    assert_eq!(
+      coord.bridge_is_failed(exchange),
+      Some(false),
+      "pre-update invariant: the bridge is still running",
+    );
+    let pre_members = coord.endpoint_mut().num_members();
+    assert_eq!(
+      pre_members, 1,
+      "pre-update invariant: only the local node is tracked (got {})",
+      pre_members,
+    );
+
+    // (2) Build the NEW encryption policy and craft a reliable unit encoded
+    // under that policy carrying a synthetic peer ("carol"). The unit
+    // decodes successfully on a bridge that holds the NEW policy — the
+    // exact shape an adversary (or a peer that already received the new
+    // policy) would put on the wire between policy publication and the
+    // wake-latch reap, when in-flight bytes can race the reap.
+    let new_opts =
+      EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    let carol_addr = addr(7802);
+    let carol = PushNodeState::new(1, SmolStr::new("carol"), carol_addr, State::Alive);
+    let response = Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(
+      core::slice::from_ref(&carol),
+      Bytes::new(),
+      false,
+    );
+    let unit =
+      encode_reliable_unit_with_encryption(&CompressionOptions::new(), &new_opts, &response)
+        .expect("aes-gcm primary -> encrypt succeeds for a well-formed PushPull response");
+    // The dialer's records layer still validates its INBOUND label before
+    // surfacing plaintext (the dialer is non-handshaking from construction,
+    // but `inbound_label_validated` starts false — see the `RawRecords` docs
+    // on the dialer's in-line inbound label check). Prepend the label frame
+    // so the records layer accepts the unit on the first call rather than
+    // rejecting on a wrong-cluster label-mismatch — without the prefix the
+    // records layer would `Intake::Failed` the bytes and the bridge's
+    // `pump_in_established` would short-circuit BEFORE reaching
+    // `Stream::handle_data`, masking the regression this test asserts.
+    let label = b"cluster-x";
+    let mut framed = Vec::with_capacity(2 + label.len() + unit.len());
+    framed.push(12u8); // LABELED_TAG
+    framed.push(label.len() as u8);
+    framed.extend_from_slice(label);
+    framed.extend_from_slice(&unit);
+
+    // (3) Publish the enabling policy. The insecure-transport bridge fails
+    // with `BridgeFailure::EncryptionPolicyChanged`; the bridge stays in
+    // `conns` until the next `pump_bridges` iteration. From this point the
+    // bridge is terminal but reachable.
+    coord.set_encryption_options(new_opts);
+    assert_eq!(
+      coord.bridge_is_failed(exchange),
+      Some(true),
+      "an insecure-transport bridge MUST fail on a runtime encryption-policy \
+       change so the post-failure ingress guard has a Failed phase to gate on",
+    );
+
+    // (4) Deliver the inbound reliable unit BEFORE any reap. Without the
+    // terminal-phase guard at `StreamBridge::handle_transport_data`, this
+    // bytes feed would reach `pump_in_established`, decode under the
+    // bridge's NEW encryption (which it now holds post-`set_encryption`),
+    // queue a `PushPullReplyReceived` event on the still-`OutboundAwaitingResponse`
+    // FSM, and `drain_then_reap` (run by `run_tick` at the end of
+    // `handle_transport_data`) would route that event through
+    // `Endpoint::handle_stream_event` -> `merge_state` -> `process_alive`,
+    // committing "carol" to the membership table.
+    coord.handle_transport_data(exchange, &framed, false, now);
+
+    // (5) The post-failure ingress was rejected: `num_members` is unchanged
+    // and no `Event::NodeJoined` for carol surfaces from `poll_event`. The
+    // bridge was reaped by the same-call `run_tick`, so the `Close` action
+    // is reachable from `poll_action`.
+    let post_members = coord.endpoint_mut().num_members();
+    assert_eq!(
+      post_members, pre_members,
+      "post-failure ingress MUST NOT mutate membership state — `num_members` \
+       grew from {} to {}, which means the reliable unit reached \
+       `Stream::handle_data` and the `PushPullReplyReceived` event applied \
+       via `drain_then_reap`. The terminal-phase guard at \
+       `StreamBridge::handle_transport_data` is missing or ineffective.",
+      pre_members, post_members,
+    );
+    while let Some(ev) = coord.endpoint_mut().poll_event() {
+      assert!(
+        !matches!(ev, Event::NodeJoined(_)),
+        "no `Event::NodeJoined` may surface from the post-failure ingress; \
+         got {:?}",
+        ev,
       );
     }
   }

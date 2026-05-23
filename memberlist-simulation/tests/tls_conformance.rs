@@ -610,3 +610,123 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
      the valid prefix frame must not be applied"
   );
 }
+
+// ── Encryption: the membership conformance must hold UNCHANGED when reliable
+//    exchanges ride TLS (already-encrypted) and gossip datagrams ride AEAD-
+//    encrypted frames. The TLS bridge skips reliable-path encryption
+//    (`TlsRecords::is_secure() == true`) — the reliable-wire wrapper-skip
+//    test below pins that no `[Encrypted[..]]` wrapper appears on the
+//    reliable wire.
+
+#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[test]
+fn encrypted_two_node_join_over_tls_reaches_alive_both_sides() {
+  use memberlist_wire::SecretKey;
+  let a = "127.0.0.1:9921".parse().unwrap();
+  let b = "127.0.0.1:9922".parse().unwrap();
+  let mut c = TlsCluster::two_node_join_encrypted(a, b, SecretKey::Aes256([0x55; 32]));
+  for _ in 0..20_000 {
+    if !c.step() {
+      break;
+    }
+  }
+  assert!(
+    c.sees_alive(a, &id("b")),
+    "A must see B Alive after an encrypted TLS push/pull join"
+  );
+  assert!(
+    c.sees_alive(b, &id("a")),
+    "B must see A Alive after an encrypted TLS push/pull join — \
+     encryption must be transparent to membership"
+  );
+}
+
+#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[test]
+fn encrypted_join_over_tls_matches_unencrypted_membership_outcome() {
+  use memberlist_wire::SecretKey;
+  let a = "127.0.0.1:9931".parse().unwrap();
+  let b = "127.0.0.1:9932".parse().unwrap();
+
+  let mut plain = TlsCluster::two_node_join(a, b);
+  for _ in 0..20_000 {
+    if !plain.step() {
+      break;
+    }
+  }
+  let mut encrypted = TlsCluster::two_node_join_encrypted(a, b, SecretKey::Aes256([0x66; 32]));
+  for _ in 0..20_000 {
+    if !encrypted.step() {
+      break;
+    }
+  }
+  // The membership end state is identical with and without encryption.
+  assert_eq!(
+    plain.sees_alive(a, &id("b")),
+    encrypted.sees_alive(a, &id("b")),
+    "A's view of B must match the unencrypted run"
+  );
+  assert_eq!(
+    plain.sees_alive(b, &id("a")),
+    encrypted.sees_alive(b, &id("a")),
+    "B's view of A must match the unencrypted run"
+  );
+}
+
+#[cfg(feature = "__sim-encryption-aes-gcm")]
+#[test]
+fn encrypted_tls_reliable_wire_carries_no_encrypted_wrapper() {
+  // The TLS reliable wire bytes (the bytes the harness routes through the
+  // virtual reliable pipe) must NOT begin with `ENCRYPTED_TAG` — the bridge's
+  // `TlsRecords::is_secure() == true` selector forces reliable-path
+  // encryption off, so the plaintext units the bridge writes never carry an
+  // `Encrypted` wrapper. On the wire those units become TLS records (record
+  // types `0x14..=0x17`), also never `ENCRYPTED_TAG`.
+  use memberlist_wire::SecretKey;
+  let a = "127.0.0.1:9941".parse().unwrap();
+  let b = "127.0.0.1:9942".parse().unwrap();
+  let mut c = TlsCluster::two_node_join_encrypted(a, b, SecretKey::Aes256([0x77; 32]));
+  for _ in 0..20_000 {
+    if !c.step() {
+      break;
+    }
+  }
+  let observed = c.observed_reliable_wire_bytes();
+  assert!(
+    !observed.is_empty(),
+    "the harness must have observed at least one reliable wire payload"
+  );
+  for chunk in observed {
+    assert_ne!(
+      chunk.first().copied(),
+      Some(memberlist_wire::ENCRYPTED_TAG),
+      "TLS reliable wire bytes must NOT carry an Encrypted wrapper"
+    );
+  }
+}
+
+// ── Compound stack: compression + encryption together must not disturb SWIM.
+
+#[cfg(all(feature = "__sim-encryption-aes-gcm", feature = "compression-lz4"))]
+#[test]
+fn compressed_and_encrypted_join_over_tls_matches_unencrypted_uncompressed_membership_outcome() {
+  use memberlist_wire::{CompressAlgorithm, SecretKey};
+  let a = "127.0.0.1:9991".parse().unwrap();
+  let b = "127.0.0.1:9992".parse().unwrap();
+  let mut plain = TlsCluster::two_node_join(a, b);
+  for _ in 0..20_000 {
+    if !plain.step() {
+      break;
+    }
+  }
+  let key = SecretKey::Aes256([0xDD; 32]);
+  let mut both =
+    TlsCluster::two_node_join_compressed_and_encrypted(a, b, CompressAlgorithm::Lz4, key);
+  for _ in 0..20_000 {
+    if !both.step() {
+      break;
+    }
+  }
+  assert_eq!(plain.sees_alive(a, &id("b")), both.sees_alive(a, &id("b")));
+  assert_eq!(plain.sees_alive(b, &id("a")), both.sees_alive(b, &id("a")));
+}

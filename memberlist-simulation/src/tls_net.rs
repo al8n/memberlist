@@ -258,12 +258,35 @@ pub struct TlsCluster {
   /// the mTLS-required responder bundle instead of the trusted-network bundle.
   mtls_responder: Option<SocketAddr>,
   /// Cross-transport compression applied to every coordinator built via
-  /// [`add_node`](Self::add_node). [`disabled`](memberlist_wire::CompressionOptions::disabled)
+  /// [`add_node`](Self::add_node). [`new`](memberlist_wire::CompressionOptions::new)
   /// by default — the standard conformance suite drives gossip through
-  /// `compress_gossip` / `decompress_gossip` regardless, and a disabled
-  /// configuration makes both identity, so the suite stays byte-unchanged.
-  /// The `*_compressed` constructors install an enabled configuration.
+  /// `compress_gossip` on egress and the single canonical `decrypt_gossip`
+  /// unwrap on ingress regardless (which strips both the Encrypted and the
+  /// Compressed wrapper in one pass, each identity when absent), and a
+  /// disabled configuration makes the egress compression an identity, so
+  /// the suite stays byte-unchanged. The `*_compressed` constructors
+  /// install an enabled configuration.
   compression: memberlist_wire::CompressionOptions,
+  /// Cross-transport encryption applied to every coordinator built via
+  /// [`add_node`](Self::add_node). [`new`](memberlist_wire::EncryptionOptions::new)
+  /// by default — the standard conformance suite drives gossip through
+  /// `encrypt_gossip` / `decrypt_gossip` regardless, and a disabled
+  /// configuration makes both identity, so the suite stays byte-unchanged.
+  /// The `*_encrypted` constructors install an enabled configuration. The
+  /// reliable path always installs this through `with_encryption` — the
+  /// `TlsRecords` bridge's `is_secure() == true` guarantee forces the
+  /// reliable-side `EncryptionOptions` back to disabled inside the bridge,
+  /// so this knob influences only the gossip codec on the harness side.
+  encryption: memberlist_wire::EncryptionOptions,
+  /// Reliable-wire observation tap. Every payload routed through the virtual
+  /// reliable pipe is appended here so the encrypted conformance suite can
+  /// assert the wire never carries an `Encrypted` wrapper (a TLS reliable
+  /// record must NOT begin with [`memberlist_wire::ENCRYPTED_TAG`]: the bridge
+  /// skips reliable-path encryption when `R::is_secure() == true`). Only
+  /// compiled under the encryption-conformance feature — the standard suite
+  /// stays byte-unchanged.
+  #[cfg(feature = "__sim-encryption-aes-gcm")]
+  observed_reliable_wire_bytes: Vec<Vec<u8>>,
 }
 
 impl TlsCluster {
@@ -287,7 +310,10 @@ impl TlsCluster {
       probe_window: None,
       tcp_window: None,
       mtls_responder: None,
-      compression: memberlist_wire::CompressionOptions::disabled(),
+      compression: memberlist_wire::CompressionOptions::new(),
+      encryption: memberlist_wire::EncryptionOptions::new(),
+      #[cfg(feature = "__sim-encryption-aes-gcm")]
+      observed_reliable_wire_bytes: Vec::new(),
     }
   }
 
@@ -315,7 +341,8 @@ impl TlsCluster {
     };
     self.nodes.insert(
       addr,
-      StreamEndpoint::with_compression(ep, tls, self.compression),
+      StreamEndpoint::with_compression(ep, tls, self.compression)
+        .with_encryption(self.encryption.clone()),
     );
   }
 
@@ -350,9 +377,58 @@ impl TlsCluster {
     algorithm: memberlist_wire::CompressAlgorithm,
   ) -> Self {
     let mut c = Self::empty();
-    c.compression = memberlist_wire::CompressionOptions::disabled()
+    c.compression = memberlist_wire::CompressionOptions::new()
       .with_algorithm(Some(algorithm))
       .with_threshold(0);
+    c.add_node("a", a);
+    c.add_node("b", b);
+    let now = c.clock.now();
+    if let Some(n) = c.nodes.get_mut(&a) {
+      n.start_push_pull(b, PushPullKind::Join, now);
+    }
+    c
+  }
+
+  /// Like [`two_node_join`](Self::two_node_join) but every node is built with
+  /// `primary_key` as the encryption primary. Used by the encryption-enabled
+  /// conformance tests, which assert membership behavior is identical to the
+  /// unencrypted run (encryption is transparent to SWIM). The bridge's
+  /// `TlsRecords::is_secure() == true` selector also forces the reliable path
+  /// to drop the `EncryptionOptions` to disabled inside the bridge — the
+  /// reliable-wire conformance test pins that invariant.
+  pub fn two_node_join_encrypted(
+    a: SocketAddr,
+    b: SocketAddr,
+    primary_key: memberlist_wire::SecretKey,
+  ) -> Self {
+    let mut c = Self::empty();
+    c.encryption = memberlist_wire::EncryptionOptions::new()
+      .with_keyring(memberlist_wire::Keyring::new(primary_key));
+    c.add_node("a", a);
+    c.add_node("b", b);
+    let now = c.clock.now();
+    if let Some(n) = c.nodes.get_mut(&a) {
+      n.start_push_pull(b, PushPullKind::Join, now);
+    }
+    c
+  }
+
+  /// Like [`two_node_join_compressed`](Self::two_node_join_compressed) but
+  /// every node is built with BOTH `algorithm` compression and `primary_key`
+  /// encryption enabled. Used by the compound-stack conformance test, which
+  /// asserts membership behavior is identical to the disabled-both run.
+  pub fn two_node_join_compressed_and_encrypted(
+    a: SocketAddr,
+    b: SocketAddr,
+    algorithm: memberlist_wire::CompressAlgorithm,
+    primary_key: memberlist_wire::SecretKey,
+  ) -> Self {
+    let mut c = Self::empty();
+    c.compression = memberlist_wire::CompressionOptions::new()
+      .with_algorithm(Some(algorithm))
+      .with_threshold(0);
+    c.encryption = memberlist_wire::EncryptionOptions::new()
+      .with_keyring(memberlist_wire::Keyring::new(primary_key));
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -446,7 +522,7 @@ impl TlsCluster {
   ) -> Self {
     let mut c = Self::empty();
     c.tcp_window = Some(1200);
-    c.compression = memberlist_wire::CompressionOptions::disabled()
+    c.compression = memberlist_wire::CompressionOptions::new()
       .with_algorithm(Some(algorithm))
       .with_threshold(0);
     c.add_node("a", a);
@@ -745,6 +821,17 @@ impl TlsCluster {
     self.nodes.get(&host).map_or(0, |n| n.live_bridge_count())
   }
 
+  /// Every payload the harness routed through the virtual reliable pipe so
+  /// far. The encryption-conformance suite asserts that no entry begins with
+  /// [`memberlist_wire::ENCRYPTED_TAG`] — the TLS bridge skips reliable-path
+  /// encryption (`TlsRecords::is_secure() == true`), so the wire never carries
+  /// an `[Encrypted[..]]` wrapper. Only compiled under the
+  /// `__sim-encryption-aes-gcm` feature.
+  #[cfg(feature = "__sim-encryption-aes-gcm")]
+  pub fn observed_reliable_wire_bytes(&self) -> &[Vec<u8>] {
+    &self.observed_reliable_wire_bytes
+  }
+
   // ── Step loop (mirrors QuicCluster::step) ────────────────────────────────────
 
   /// One simulation tick. Returns `true` if anything happened.
@@ -921,9 +1008,19 @@ impl TlsCluster {
         }
       }
       for (to, bytes) in pending {
-        // Compress the outbound datagram through the source coordinator's
-        // configured compression (identity when disabled).
-        let on_wire = self.nodes.get(src).unwrap().compress_gossip(&bytes);
+        // Compress THEN encrypt the outbound datagram through the source
+        // coordinator's configured transforms (each identity when disabled).
+        // The on-wire byte order is `[Encrypted[Compressed[frame]]]` when both
+        // are enabled; the receiver reverses the order on ingress. An
+        // encrypt failure (e.g. backend not built in) drops the gossip —
+        // emitting plaintext on the configured-encrypted egress would bypass
+        // authentication. SWIM gossip is lossy and self-healing.
+        let node = self.nodes.get(src).unwrap();
+        let compressed = node.compress_gossip(&bytes);
+        let on_wire = match node.encrypt_gossip(&compressed) {
+          Ok(b) => b,
+          Err(_) => continue,
+        };
         if self.enqueue_udp(*src, to, bytes::Bytes::from(on_wire), now) {
           any = true;
         }
@@ -1067,16 +1164,33 @@ impl TlsCluster {
     let Some(&(peer, peer_exch)) = self.peer_of.get(&(src, exch)) else {
       return false;
     };
-    let Some(pipe) = self.pipes.get_mut(&(peer, peer_exch)) else {
-      return false;
-    };
-    // No delivery into a reset pipe, an empty write, or a pipe whose reader
-    // side has half-closed (FIN armed): once the read half is closed the writer
-    // can send no more bytes that the reader will ever observe (the harness's
-    // forced-truncation hooks arm the FIN to drop the remainder of the frame).
-    if pipe.reset || pipe.fin_at.is_some() || bytes.is_empty() {
+    // Pipe gating: a reset pipe, a pipe whose reader side has half-closed
+    // (FIN armed), or an empty write is silently dropped. Once the read half
+    // is closed the writer can send no more bytes that the reader will ever
+    // observe (the harness's forced-truncation hooks arm the FIN to drop the
+    // remainder of the frame). Inspected via `.get` so the observation tap
+    // below can take its own `&mut self` borrow before the `get_mut`.
+    let droppable = self
+      .pipes
+      .get(&(peer, peer_exch))
+      .map(|p| p.reset || p.fin_at.is_some())
+      .unwrap_or(true);
+    if droppable || bytes.is_empty() {
       return false;
     }
+    // Reliable-wire observation tap: append every non-empty chunk routed
+    // through the virtual reliable pipe verbatim, so the encrypted conformance
+    // suite can pin that no `[Encrypted[..]]` wrapper ever surfaces here. On
+    // TLS these bytes are TLS records (`0x14..=0x17` record-type leading
+    // byte), never `ENCRYPTED_TAG` — the bridge's `R::is_secure() == true`
+    // selector forces reliable-path encryption off, so the plaintext units
+    // the bridge writes never carry an `Encrypted` wrapper either.
+    #[cfg(feature = "__sim-encryption-aes-gcm")]
+    self.observed_reliable_wire_bytes.push(bytes.to_vec());
+    let pipe = self
+      .pipes
+      .get_mut(&(peer, peer_exch))
+      .expect("pipe presence already gated above");
     // The release cadence: a fragment matures one `stride` after the previous
     // queued fragment so the reader pulls one window's worth per round-trip.
     let base = now + latency;
@@ -1209,10 +1323,14 @@ impl TlsCluster {
     node.handle_gossip(from, bytes, now);
     let mut fed = false;
     while let Some((src, raw)) = node.poll_memberlist_ingress() {
-      // Decompress the inbound datagram (identity when it carries no
-      // compression wrapper). A corrupt wrapper drops the datagram — gossip is
+      // Single-call unwrap: `decrypt_gossip` is the encryption-aware
+      // unwrap that consumes the Encrypted-then-Compressed wrapper stack
+      // (each identity when the wrapper is absent) and applies strict-mode
+      // rejection at the entry boundary when a keyring is configured. It is
+      // the coordinator's single canonical ingress helper — one call covers
+      // both transforms. A corrupt wrapper drops the datagram — gossip is
       // lossy and self-healing.
-      let raw = match node.decompress_gossip(&raw) {
+      let raw = match node.decrypt_gossip(&raw) {
         Ok(plain) => plain,
         Err(_) => continue,
       };

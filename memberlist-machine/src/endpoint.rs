@@ -389,6 +389,18 @@ where
     self.cfg.max_stream_frame_size()
   }
 
+  /// The configured plaintext-byte ceiling for an outbound gossip datagram.
+  /// The composed stream-transport coordinators read this as the
+  /// decompressed / decrypted-payload ceiling so the limit always tracks
+  /// [`EndpointConfig::gossip_mtu`] rather than a separate constant. The
+  /// on-wire datagram may exceed this by
+  /// [`memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD`] when encryption is
+  /// enabled — the ceiling bounds the FSM's plaintext budget, not the
+  /// post-encryption wire size.
+  pub(crate) const fn gossip_mtu(&self) -> usize {
+    self.cfg.gossip_mtu()
+  }
+
   /// access to the broadcast queue (used by transitions).
   pub(crate) fn broadcast_alive(&mut self, state: &LocalNodeState<I, A>) {
     let alive = Alive::new(
@@ -1571,15 +1583,16 @@ where
     }
 
     // Drain pending membership broadcasts (respects per-broadcast retransmit
-    // limit and the 1400-byte sub-MTU cap).
+    // limit and the configured gossip-MTU sub-budget).
     //
     // The selected set is emitted as ONE compound datagram when >= 2, so
-    // reserve the compound header (tag + count varint) from the 1400
+    // reserve the compound header (tag + count varint) from the
     // sub-MTU ceiling and charge each message the per-part inner-length
     // varint (conservative u32 upper bounds — never an over-MTU datagram).
-    // `bytesAvail = GOSSIP_MTU - compoundHeader` is passed to
+    // `bytesAvail = gossip_mtu - compoundHeader` is passed to
     // `take_broadcasts` together with the per-part overhead.
-    let compound_budget = Self::GOSSIP_MTU
+    let compound_budget = self
+      .gossip_mtu()
       .saturating_sub(crate::wire::COMPOUND_TAG_LEN + crate::wire::COMPOUND_MAX_COUNT_PREFIX_LEN);
     let membership_broadcasts = self.broadcast.take_broadcasts(
       num_nodes,
@@ -1636,7 +1649,7 @@ where
       v
     } else if let Some(m) = self
       .broadcast
-      .take_one_broadcast(num_nodes, Self::GOSSIP_MTU)
+      .take_one_broadcast(num_nodes, self.gossip_mtu())
     {
       // Exactly ONE membership message ⇒ lone byte-identical Packet; user
       // broadcasts are intentionally NOT drained this tick (SWIM priority
@@ -1663,7 +1676,7 @@ where
             .map(|b| b.len())
             .unwrap_or(usize::MAX);
           self.user_broadcasts.pop_front();
-          if frame_len <= Self::GOSSIP_MTU {
+          if frame_len <= self.gossip_mtu() {
             v.push(Message::UserData(payload));
             break; // exactly one ⇒ emitted as a byte-identical Packet
           }
@@ -2065,13 +2078,6 @@ where
   /// constant correct without depending on that derivation at the call site.
   const USER_PART_OVERHEAD: usize = crate::wire::COMPOUND_MAX_PART_PREFIX_LEN + 1 + 5;
 
-  /// Sub-MTU ceiling for a single gossip datagram (a lone `Packet` or an
-  /// assembled `Compound`). 1400 B — just under a typical 1500-B Ethernet
-  /// MTU, matching the legacy memberlist default and keeping UDP gossip
-  /// un-fragmented. The compound budget reserves its framing from this; a
-  /// lone user `Packet` is bounded directly by it.
-  pub(crate) const GOSSIP_MTU: usize = 1400;
-
   /// Drain user-data payloads up to `limit` total bytes,
   /// in FIFO order. Used by the gossip scheduler. Returns the drained
   /// payloads. Bytes that don't fit remain in the queue.
@@ -2187,9 +2193,9 @@ where
     // breaking the buddy-Suspect refutation for an id range that worked
     // when the probe emitted Ping and Suspect as two separate <=MTU
     // datagrams. So emit a Compound only when its conservative assembled
-    // size (same u32-varint upper bounds as the gossip budget) fits
-    // `GOSSIP_MTU`; otherwise split into two Packets in Ping-then-Suspect
-    // order. Never emit an unsendable over-MTU compound.
+    // size (same u32-varint upper bounds as the gossip budget) fits the
+    // configured `gossip_mtu`; otherwise split into two Packets in
+    // Ping-then-Suspect order. Never emit an unsendable over-MTU compound.
     let mut probe_msgs: Vec<Message<I, A>> = Vec::with_capacity(2);
     probe_msgs.push(Message::Ping(ping));
 
@@ -2229,7 +2235,7 @@ where
                 .len()
           })
           .sum::<usize>();
-      if assembled_upper <= Self::GOSSIP_MTU {
+      if assembled_upper <= self.gossip_mtu() {
         self
           .pending_transmits
           .push_back(Transmit::Compound(CompoundTransmit {

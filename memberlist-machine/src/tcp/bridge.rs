@@ -62,13 +62,15 @@ mod tests {
       StreamBridge::new(
         dialer,
         deadline,
-        memberlist_wire::CompressionOptions::disabled(),
+        memberlist_wire::CompressionOptions::new(),
+        memberlist_wire::EncryptionOptions::new(),
         TEST_RELIABLE_MAX,
       ),
       StreamBridge::new(
         acceptor,
         deadline,
-        memberlist_wire::CompressionOptions::disabled(),
+        memberlist_wire::CompressionOptions::new(),
+        memberlist_wire::EncryptionOptions::new(),
         TEST_RELIABLE_MAX,
       ),
     )
@@ -253,14 +255,16 @@ mod tests {
     let mut server = StreamBridge::<SmolStr, SocketAddr, RawRecords>::new(
       acceptor,
       now + Duration::from_secs(10),
-      memberlist_wire::CompressionOptions::disabled(),
+      memberlist_wire::CompressionOptions::new(),
+      memberlist_wire::EncryptionOptions::new(),
       TEST_RELIABLE_MAX,
     );
     let dialer = RawRecords::dialer(label("cluster-other"), false);
     let mut client = StreamBridge::<SmolStr, SocketAddr, RawRecords>::new(
       dialer,
       now + Duration::from_secs(10),
-      memberlist_wire::CompressionOptions::disabled(),
+      memberlist_wire::CompressionOptions::new(),
+      memberlist_wire::EncryptionOptions::new(),
       TEST_RELIABLE_MAX,
     );
 
@@ -320,7 +324,8 @@ mod tests {
     let mut client = StreamBridge::<SmolStr, SocketAddr, RawRecords>::new(
       dialer,
       deadline,
-      memberlist_wire::CompressionOptions::disabled(),
+      memberlist_wire::CompressionOptions::new(),
+      memberlist_wire::EncryptionOptions::new(),
       TEST_RELIABLE_MAX,
     );
     let mut ep_c: Endpoint<SmolStr, SocketAddr> =
@@ -395,7 +400,8 @@ mod tests {
     let mut server = StreamBridge::<SmolStr, SocketAddr, RawRecords>::new(
       acceptor,
       deadline,
-      memberlist_wire::CompressionOptions::disabled(),
+      memberlist_wire::CompressionOptions::new(),
+      memberlist_wire::EncryptionOptions::new(),
       TEST_RELIABLE_MAX,
     );
 
@@ -741,7 +747,7 @@ mod tests {
     use memberlist_wire::{
       encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
     };
-    let opts = CompressionOptions::disabled()
+    let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
       .with_threshold(8);
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);
@@ -768,7 +774,7 @@ mod tests {
     use memberlist_wire::{
       encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
     };
-    let opts = CompressionOptions::disabled()
+    let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
       .with_threshold(8);
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(32);
@@ -800,7 +806,7 @@ mod tests {
     // Disabled compression: the unit payload is the framed bytes verbatim,
     // and the round-trip is byte-identical end to end (no wrapper).
     use memberlist_wire::{encode_reliable_unit, take_reliable_unit, CompressionOptions};
-    let opts = CompressionOptions::disabled();
+    let opts = CompressionOptions::new();
     let framed = b"plain reliable frame bytes that are not compressed".to_vec();
     let unit = encode_reliable_unit(&opts, &framed);
     let (back, consumed) = take_reliable_unit(&unit, 16 * 1024 * 1024)
@@ -808,6 +814,53 @@ mod tests {
       .expect("a complete unit");
     assert_eq!(back, framed);
     assert_eq!(consumed, unit.len());
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn stream_reliable_unit_encrypted_roundtrip() {
+    use memberlist_wire::{
+      encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption, EncryptionOptions,
+      Keyring, SecretKey,
+    };
+    let comp = memberlist_wire::CompressionOptions::new();
+    let enc = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    let framed = b"reliable encrypted payload".to_vec();
+    let unit = encode_reliable_unit_with_encryption(&comp, &enc, &framed).expect("encode");
+    let (back, _consumed) = take_reliable_unit_with_encryption(&unit, &enc, 16 * 1024 * 1024)
+      .expect("decode ok")
+      .expect("complete unit");
+    assert_eq!(back, framed);
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn stream_bridge_reliable_skips_encryption_when_is_secure() {
+    // RawRecords is plain TCP — it never claims confidentiality, so the
+    // bridge MUST apply the configured encryption on the reliable path. The
+    // TLS-side mirror lives in tls/bridge.rs (the bridge force-disables the
+    // EncryptionOptions on a TLS record layer, because TLS already encrypts).
+    use crate::streams::transport::StreamTransport;
+    assert!(!RawRecords::is_secure(), "RawRecords is plain TCP");
+  }
+
+  #[cfg(all(feature = "compression-lz4", feature = "encryption-aes-gcm"))]
+  #[test]
+  fn stream_reliable_unit_encrypted_then_compressed_roundtrip() {
+    use memberlist_wire::{
+      encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption, CompressAlgorithm,
+      CompressionOptions, EncryptionOptions, Keyring, SecretKey,
+    };
+    let comp = CompressionOptions::new()
+      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_threshold(8);
+    let enc = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x99; 32])));
+    let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);
+    let unit = encode_reliable_unit_with_encryption(&comp, &enc, &framed).expect("encode");
+    let (back, _consumed) = take_reliable_unit_with_encryption(&unit, &enc, 16 * 1024 * 1024)
+      .expect("decode ok")
+      .expect("complete unit");
+    assert_eq!(back, framed);
   }
 
   /// Render a `StreamPhase` for assert messages without requiring `Debug` on the
