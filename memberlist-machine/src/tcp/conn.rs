@@ -16,8 +16,8 @@ mod tests {
     config::EndpointConfig,
     endpoint::Endpoint,
     event::PushPullKind,
-    streams::{bridge::StreamBridge, StreamAction, StreamEndpoint},
-    tcp::{records::RawRecords, TcpOptions},
+    streams::{StreamAction, StreamEndpoint, bridge::StreamBridge},
+    tcp::{TcpOptions, records::RawRecords},
   };
 
   /// A reliable-unit ceiling distinct from every other constant in play so a

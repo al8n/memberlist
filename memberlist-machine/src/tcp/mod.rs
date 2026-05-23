@@ -115,7 +115,7 @@ mod tests {
   use bytes::Bytes;
   use smol_str::SmolStr;
 
-  use super::{records::RawRecords, TcpOptions};
+  use super::{TcpOptions, records::RawRecords};
   use crate::{
     addr_bridge::AddrBridge,
     config::EndpointConfig,
@@ -1715,7 +1715,7 @@ mod tests {
   #[cfg(feature = "encryption-aes-gcm")]
   #[test]
   fn encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead() {
-    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey, ENCRYPTED_WRAPPER_OVERHEAD};
+    use memberlist_wire::{ENCRYPTED_WRAPPER_OVERHEAD, EncryptionOptions, Keyring, SecretKey};
     let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7241)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
@@ -1794,7 +1794,7 @@ mod tests {
   #[test]
   fn decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
     use memberlist_wire::{
-      encode_plain_frame, EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey,
+      EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey, encode_plain_frame,
     };
     let ep = endpoint(7205);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
@@ -2773,9 +2773,9 @@ mod tests {
   fn policy_failed_bridge_rejects_ingress_before_reap() {
     use bytes::Bytes;
     use memberlist_wire::{
+      CompressionOptions, EncryptionOptions, Keyring, SecretKey,
       encode_reliable_unit_with_encryption,
       typed::{PushNodeState, State},
-      CompressionOptions, EncryptionOptions, Keyring, SecretKey,
     };
 
     use crate::endpoint::Endpoint;
