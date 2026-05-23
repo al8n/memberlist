@@ -313,11 +313,11 @@ fn aes_gcm_encrypt(
 ) -> Result<Vec<u8>, EncryptionError> {
   use aead::{AeadInPlace, KeyInit};
   use aes_gcm::{
-    aes::{
-      cipher::{consts::U12, generic_array::GenericArray},
-      Aes192,
-    },
     Aes128Gcm, Aes256Gcm, AesGcm,
+    aes::{
+      Aes192,
+      cipher::{consts::U12, generic_array::GenericArray},
+    },
   };
 
   type Aes192Gcm = AesGcm<Aes192, U12>;
@@ -360,11 +360,11 @@ fn aes_gcm_decrypt(
 ) -> Result<Vec<u8>, EncryptionError> {
   use aead::{AeadInPlace, KeyInit};
   use aes_gcm::{
-    aes::{
-      cipher::{consts::U12, generic_array::GenericArray},
-      Aes192,
-    },
     Aes128Gcm, Aes256Gcm, AesGcm,
+    aes::{
+      Aes192,
+      cipher::{consts::U12, generic_array::GenericArray},
+    },
   };
 
   type Aes192Gcm = AesGcm<Aes192, U12>;

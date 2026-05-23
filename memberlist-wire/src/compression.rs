@@ -356,7 +356,7 @@ impl CompressionOptions {
 }
 
 use crate::framing::{
-  decode_varint_u32, encode_varint_u32, unwrap_transforms, FrameError, MessageTag,
+  FrameError, MessageTag, decode_varint_u32, encode_varint_u32, unwrap_transforms,
 };
 
 /// The one-byte wrapper tag that prefixes every compressed frame
@@ -858,12 +858,16 @@ mod tests {
     let framed = b"the quick brown fox".repeat(4);
     let unit = encode_reliable_unit(&opts, &framed);
     let partial = &unit[..unit.len() - 1];
-    assert!(take_reliable_unit(partial, 1 << 20)
-      .expect("not an error")
-      .is_none());
-    assert!(take_reliable_unit(&[], 1 << 20)
-      .expect("not an error")
-      .is_none());
+    assert!(
+      take_reliable_unit(partial, 1 << 20)
+        .expect("not an error")
+        .is_none()
+    );
+    assert!(
+      take_reliable_unit(&[], 1 << 20)
+        .expect("not an error")
+        .is_none()
+    );
   }
 
   #[test]

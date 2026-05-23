@@ -562,7 +562,7 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
   // partial application of the prefix frames that did decode cleanly).
   use memberlist_simulation::{Alive, Message, Node};
   use memberlist_wire::{
-    compress, encode_compressed_frame, framing, message_to_any, CompressAlgorithm,
+    CompressAlgorithm, compress, encode_compressed_frame, framing, message_to_any,
   };
 
   let a: std::net::SocketAddr = "127.0.0.1:9731".parse().unwrap();

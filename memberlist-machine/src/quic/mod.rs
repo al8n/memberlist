@@ -27,7 +27,7 @@ use crate::{
 };
 use bridge::Bridge;
 use conn::ConnTable;
-use demux::{classify, Class};
+use demux::{Class, classify};
 
 /// One pending dial intent the coordinator owes a `service_dials` attempt to.
 ///
@@ -3369,7 +3369,7 @@ mod tests {
   #[test]
   fn quic_decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
     use memberlist_wire::{
-      encode_plain_frame, EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey,
+      EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey, encode_plain_frame,
     };
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
     let coord = build_test_quic_endpoint_with_encryption(opts);

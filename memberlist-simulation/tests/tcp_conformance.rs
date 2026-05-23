@@ -686,7 +686,7 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
   // partial application of the prefix frames that did decode cleanly).
   use memberlist_simulation::{Alive, Message, Node};
   use memberlist_wire::{
-    compress, encode_compressed_frame, framing, message_to_any, CompressAlgorithm,
+    CompressAlgorithm, compress, encode_compressed_frame, framing, message_to_any,
   };
 
   let a: std::net::SocketAddr = "127.0.0.1:9651".parse().unwrap();
@@ -838,8 +838,8 @@ fn compressed_and_encrypted_wire_layout_is_outer_encrypted_inner_compressed() {
   // For a small payload the leading varint fits in one byte, so unit[1] is
   // the first byte of the payload.
   use memberlist_wire::{
-    encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption, CompressAlgorithm,
-    CompressionOptions, EncryptionOptions, Keyring, SecretKey,
+    CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, SecretKey,
+    encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption,
   };
   let comp = CompressionOptions::new()
     .with_algorithm(Some(CompressAlgorithm::Lz4))
