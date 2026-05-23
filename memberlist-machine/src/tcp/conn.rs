@@ -16,10 +16,8 @@ mod tests {
     config::EndpointConfig,
     endpoint::Endpoint,
     event::PushPullKind,
-    streams::bridge::StreamBridge,
-    streams::{StreamAction, StreamEndpoint},
-    tcp::records::RawRecords,
-    tcp::TcpOptions,
+    streams::{bridge::StreamBridge, StreamAction, StreamEndpoint},
+    tcp::{records::RawRecords, TcpOptions},
   };
 
   /// A reliable-unit ceiling distinct from every other constant in play so a
@@ -31,7 +29,8 @@ mod tests {
     StreamBridge::new(
       records,
       Instant::now() + Duration::from_secs(10),
-      memberlist_wire::CompressionOptions::disabled(),
+      memberlist_wire::CompressionOptions::new(),
+      memberlist_wire::EncryptionOptions::new(),
       TEST_RELIABLE_MAX,
     )
   }

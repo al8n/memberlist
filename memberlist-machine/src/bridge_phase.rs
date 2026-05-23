@@ -77,4 +77,16 @@ pub(crate) enum BridgeFailure {
   /// `purge_transmit_for` + `purge_pending_connect_for` before dropping
   /// the bridge without `collect_bridge_transmits`.
   DialRetired,
+  /// The operator changed the cross-transport encryption policy on the
+  /// coordinator (`StreamEndpoint::set_encryption_options`) while this
+  /// bridge held bytes that had already been encoded under the prior
+  /// policy. Only fires on an insecure transport (`R::is_secure() ==
+  /// false`, e.g. plain TCP), where a bridge's queued bytes are plaintext
+  /// under the old policy: emitting them after the operator published
+  /// the new policy would leak plaintext post-enablement. The bridge is
+  /// failed so the SWIM FSM retries the exchange under a fresh bridge
+  /// that uses the new policy from construction. TLS bridges
+  /// (`R::is_secure() == true`) are unaffected — their queued bytes are
+  /// already wire-encrypted by the transport.
+  EncryptionPolicyChanged,
 }

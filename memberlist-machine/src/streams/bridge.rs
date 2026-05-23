@@ -145,6 +145,12 @@ pub(crate) struct StreamBridge<I, A, R: StreamTransport> {
   /// `CompressionOptions` makes the path identity (a plain `[unit_len][bytes]`
   /// frame with the framed bytes verbatim).
   compression: memberlist_wire::CompressionOptions,
+  /// Cross-transport encryption configuration. The bridge is the single
+  /// encrypt/decrypt point on the reliable path when `R::is_secure() ==
+  /// false`. For a secure transport (TLS), the constructor receives a
+  /// disabled `EncryptionOptions` regardless of the endpoint configuration —
+  /// the per-impl const `is_secure()` branch is optimized away.
+  encryption: memberlist_wire::EncryptionOptions,
   /// Inbound reliable-unit accumulation buffer. A byte stream does not
   /// preserve `write_plaintext`/`read_plaintext` boundaries, so each
   /// `read_plaintext` chunk is appended here and every complete
@@ -192,8 +198,19 @@ where
     records: R,
     deadline: Instant,
     compression: memberlist_wire::CompressionOptions,
+    encryption: memberlist_wire::EncryptionOptions,
     reliable_max: usize,
   ) -> Self {
+    // A transport that already provides confidentiality (TLS) forces a
+    // disabled `EncryptionOptions` here: double-encrypting on the reliable
+    // path costs CPU and bandwidth without adding security, and the peer's
+    // bridge will mirror the same skip. The branch is optimized away —
+    // `R::is_secure()` is a per-impl const fn.
+    let effective_encryption = if R::is_secure() {
+      memberlist_wire::EncryptionOptions::new()
+    } else {
+      encryption
+    };
     Self {
       stream: None,
       records,
@@ -204,9 +221,48 @@ where
       phase: StreamPhase::Handshaking,
       deadline,
       compression,
+      encryption: effective_encryption,
       recv_accum: Vec::new(),
       reliable_max,
     }
+  }
+
+  /// Replace the bridge's effective encryption options. Called by
+  /// [`super::StreamEndpoint::set_encryption_options`] when the operator updates
+  /// the encryption policy at runtime — the new options propagate to every
+  /// live bridge so an attacker cannot keep an exchange opened under the
+  /// prior (disabled / different-keyring) policy sending plaintext on the
+  /// reliable path.
+  ///
+  /// Mirrors [`Self::new`]'s `is_secure()`-gated branch: for a secure
+  /// transport (`R::is_secure() == true`, e.g. TLS) the stored encryption is
+  /// force-disabled regardless of the caller's intent — the reliable path
+  /// is already protected by the transport — and the bridge is left running
+  /// because its on-wire bytes are TLS records (no plaintext-leak path).
+  ///
+  /// For an INSECURE transport (`R::is_secure() == false`, e.g. plain TCP)
+  /// the bridge MAY hold bytes the FSM already encoded under the prior
+  /// policy — queued in the record layer's outbound buffer, or already
+  /// drained into the coordinator's [`super::StreamEndpoint`] transmit queue.
+  /// Those bytes are plaintext under the old policy; emitting them on the
+  /// wire after the operator publishes a new policy would leak plaintext
+  /// post-enablement. The bridge therefore stores the new encryption (so the
+  /// failure transition's telemetry reflects the policy change) AND fails to
+  /// [`BridgePhase::Failed(BridgeFailure::EncryptionPolicyChanged)`]; `fail`
+  /// clears the record layer's outbound buffer, and the coordinator's
+  /// post-iteration step in [`super::StreamEndpoint::set_encryption_options`]
+  /// purges the already-drained chunks from the transmit queue. The SWIM
+  /// FSM retries the affected exchange under a fresh bridge that uses the
+  /// new policy from construction.
+  ///
+  /// [`BridgePhase::Failed(BridgeFailure::EncryptionPolicyChanged)`]: BridgePhase::Failed
+  pub(crate) fn set_encryption(&mut self, encryption: memberlist_wire::EncryptionOptions) {
+    if R::is_secure() {
+      self.encryption = memberlist_wire::EncryptionOptions::new();
+      return;
+    }
+    self.encryption = encryption;
+    self.fail(BridgeFailure::EncryptionPolicyChanged);
   }
 
   /// `true` while the bridge is still gating the `Stream` mint on its record
@@ -252,6 +308,20 @@ where
   /// observe the recv-half FIN (`R::peer_has_closed()` is permanently `false`
   /// for a transport whose close is out of band — see [`Self::pending_eof`]).
   pub(crate) fn handle_transport_data(&mut self, data: &[u8], now: Instant) -> Result<(), ()> {
+    // Terminal-ingress stop. A bridge that has reached a terminal
+    // [`BridgePhase`] — `BothClosed` (clean reap pending) or `Failed(_)`
+    // (any failure transition, e.g. an [`BridgeFailure::EncryptionPolicyChanged`]
+    // on a runtime [`super::StreamEndpoint::set_encryption_options`] update) —
+    // refuses further inbound bytes. Without this guard, network reads
+    // delivered between the failure transition and the wake-latch reap can
+    // still feed [`Self::pump_in_established`], decode + commit stream events
+    // from an exchange already declared dead, and have those events applied
+    // to the FSM by [`Self::drain_then_reap`]. The symmetric inbound
+    // complement to the outbound queue-purge that the failure transition
+    // already runs via `clear_outbound`.
+    if self.is_terminal() {
+      return Ok(());
+    }
     // Pre-`Stream` (handshake / label) window: shuttle bytes until the
     // handshake settles, retaining any tail for post-promotion replay (always
     // empty for a raw-passthrough record layer — see `pending_inbound`). Once
@@ -364,6 +434,15 @@ where
   /// loop shape (each iteration makes progress or breaks) holds for a
   /// backpressured record layer too.
   fn pump_in_established(&mut self, input: &[u8], eof: bool, now: Instant) -> Result<(), ()> {
+    // Defense-in-depth terminal guard. The outermost
+    // [`Self::handle_transport_data`] entry already short-circuits a terminal
+    // bridge, and [`Self::replay_pending`] only runs at promote time. Guard
+    // here too so any future caller cannot feed bytes through this path
+    // post-failure (e.g. a same-tick decode failure during a multi-step
+    // intake loop must not re-enter and commit further stream events).
+    if self.is_terminal() {
+      return Ok(());
+    }
     let mut offset = 0usize;
     let mut decode_failed = false;
     loop {
@@ -397,7 +476,11 @@ where
       let drained = self.records.read_plaintext(&mut surfaced);
       self.recv_accum.extend_from_slice(&surfaced);
       loop {
-        match memberlist_wire::take_reliable_unit(&self.recv_accum, self.reliable_max) {
+        match memberlist_wire::take_reliable_unit_with_encryption(
+          &self.recv_accum,
+          &self.encryption,
+          self.reliable_max,
+        ) {
           Ok(Some((plaintext, consumed))) => {
             self.recv_accum.drain(..consumed);
             if self
@@ -512,6 +595,14 @@ where
   /// (decode / record failure), mirroring [`Self::handle_transport_data`].
   pub(crate) fn replay_pending(&mut self, now: Instant) -> Result<(), ()> {
     if self.stream.is_none() {
+      return Ok(());
+    }
+    // A terminal bridge — e.g. one failed at promote time by a policy change
+    // delivered between the handshake-settling tick and the post-mint replay
+    // — must not surface its retained pre-promote plaintext into the
+    // just-minted `Stream`. The retained tail (if any) is dropped along
+    // with the bridge by the next `pump_bridges` reap.
+    if self.is_terminal() {
       return Ok(());
     }
     // Feed the retained tail (if any) FIRST, then drain. `std::mem::take`
@@ -856,7 +947,21 @@ where
       gathered.extend_from_slice(&chunk);
     }
     if !gathered.is_empty() {
-      let unit = memberlist_wire::encode_reliable_unit(&self.compression, &gathered);
+      // An encryption backend error here (e.g. a primary key whose backend
+      // feature was not built into this binary) is fatal — emitting plaintext
+      // on the wire would silently bypass authentication on an
+      // encrypted-cluster reliable exchange. Atomically retire-then-fail.
+      let unit = match memberlist_wire::encode_reliable_unit_with_encryption(
+        &self.compression,
+        &self.encryption,
+        &gathered,
+      ) {
+        Ok(u) => u,
+        Err(e) => {
+          self.fail_with_retire(BridgeFailure::Transport(format!("encrypt: {e}")));
+          return Err(());
+        }
+      };
       self.records.write_plaintext(&unit);
     }
 
@@ -998,6 +1103,9 @@ where
           BridgeFailure::ConnectionLost => "connection lost".to_string(),
           BridgeFailure::AdmissionClosed => "merge rejected by delegate".to_string(),
           BridgeFailure::DialRetired => "dial intent retired before stream".to_string(),
+          BridgeFailure::EncryptionPolicyChanged => {
+            "encryption policy changed mid-exchange".to_string()
+          }
         };
         EndpointEvent::StreamErrored { id, err }
       }
@@ -1126,5 +1234,27 @@ where
   #[cfg(all(test, feature = "tcp"))]
   pub(crate) fn reliable_max(&self) -> usize {
     self.reliable_max
+  }
+
+  /// Test-only: expose the effective [`EncryptionOptions`] the bridge stored
+  /// after the `R::is_secure()` selection in [`Self::new`] (or its later
+  /// [`Self::set_encryption`] update). Lets a TLS-flavor test assert that a
+  /// bridge handed an ENABLED keyring still ends up with a disabled
+  /// `EncryptionOptions` (TLS already provides confidentiality, so the
+  /// reliable path skips its inner Encrypted wrapper), and a TCP-flavor test
+  /// assert that a runtime
+  /// [`super::StreamEndpoint::set_encryption_options`] update reached every
+  /// live bridge. Gated on the transport features (`tls` / `tcp`) and on
+  /// `encryption-aes-gcm` (the asserting tests build a `Keyring`/`SecretKey`
+  /// from `memberlist-wire`).
+  ///
+  /// [`EncryptionOptions`]: memberlist_wire::EncryptionOptions
+  #[cfg(all(
+    test,
+    any(feature = "tls", feature = "tcp"),
+    feature = "encryption-aes-gcm"
+  ))]
+  pub(crate) fn encryption_for_test(&self) -> &memberlist_wire::EncryptionOptions {
+    &self.encryption
   }
 }

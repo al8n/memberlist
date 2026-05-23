@@ -286,7 +286,7 @@ const DEFAULT_COMPRESSION_THRESHOLD: usize = 512;
 /// Transport-agnostic compression configuration handed to each coordinator at
 /// construction. Zero `pub` fields — accessor-only.
 ///
-/// A `CompressionOptions` with no algorithm ([`CompressionOptions::disabled`])
+/// A `CompressionOptions` with no algorithm ([`CompressionOptions::new`])
 /// is the default: every payload is left uncompressed and the codec paths
 /// reduce to identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,14 +297,15 @@ pub struct CompressionOptions {
 
 impl Default for CompressionOptions {
   fn default() -> Self {
-    Self::disabled()
+    Self::new()
   }
 }
 
 impl CompressionOptions {
-  /// A disabled configuration — no algorithm, the default threshold. Every
-  /// payload is left [`CompressionOutcome::Plain`].
-  pub const fn disabled() -> Self {
+  /// A new, disabled configuration — no algorithm, the default threshold.
+  /// Every payload is left [`CompressionOutcome::Plain`]. The operator opts in
+  /// by chaining `.with_algorithm(Some(...))`.
+  pub const fn new() -> Self {
     Self {
       algorithm: None,
       threshold: DEFAULT_COMPRESSION_THRESHOLD,
@@ -495,6 +496,119 @@ pub fn take_reliable_unit(
     return Ok(None);
   }
   let plaintext = unwrap_transforms(&buf[vbytes..total], max_orig_len)?.into_owned();
+  Ok(Some((plaintext, total)))
+}
+
+/// Encryption-aware reliable-unit encode. Outbound the codec stack is:
+/// (1) compress (if `compression` is enabled and the result shrank);
+/// (2) encrypt (if `encryption` is enabled);
+/// (3) prepend `[unit_len: varint]`.
+///
+/// The on-wire byte order is `[unit_len][Encrypted[[Compressed][frame]]]`
+/// when both transforms win, `[unit_len][Encrypted[frame]]` when compression
+/// is disabled or did not shrink, `[unit_len][Compressed[frame]]` when only
+/// compression is enabled, and `[unit_len][frame]` when both are disabled
+/// (byte-identical to the encryption-unaware [`encode_reliable_unit`]).
+///
+/// An encryption backend error (typically
+/// [`crate::encryption::EncryptionError::UnsupportedAlgorithm`] for a key
+/// whose backend was not built into this binary) is surfaced as `Err` so
+/// callers fail the exchange — emitting plaintext on an encrypted-cluster
+/// path would silently bypass authentication.
+pub fn encode_reliable_unit_with_encryption(
+  compression: &CompressionOptions,
+  encryption: &crate::encryption::EncryptionOptions,
+  framed: &[u8],
+) -> Result<Vec<u8>, crate::encryption::EncryptionError> {
+  // Step 1: compression — yields a `[Compressed]` wrapper or the plain bytes.
+  let compressed_or_plain: Vec<u8> = match compression.apply(framed) {
+    Ok(CompressionOutcome::Compressed(packed)) => {
+      let wrapped = encode_compressed_frame(
+        compression
+          .algorithm()
+          .expect("a Compressed outcome implies an algorithm is set"),
+        framed.len(),
+        &packed,
+      );
+      // Don't-expand fallback: if the `[Compressed]` wrapper is not smaller
+      // than the raw `framed`, drop back to plain. The wrapper header is
+      // overhead — same rule the encryption-unaware path applies.
+      if wrapped.len() < framed.len() {
+        wrapped
+      } else {
+        framed.to_vec()
+      }
+    }
+    // Plain outcome, or a backend compress error: emit the framed bytes
+    // uncompressed. A non-wrapper buffer passes through the receiver's
+    // `unwrap_transforms_with_encryption` unchanged.
+    _ => framed.to_vec(),
+  };
+
+  // Step 2: encryption (if enabled). Encrypt the result of step 1, producing
+  // an `[Encrypted]` wrapper. A backend error here (e.g. a primary key whose
+  // backend feature was not built in) is fatal: silently emitting plaintext
+  // would let an encrypted-cluster exchange go out unauthenticated.
+  let payload: Vec<u8> = match encryption.keyring() {
+    Some(kr) => {
+      let key = kr.primary();
+      let algo = key.algorithm();
+      crate::encryption::encode_encrypted_frame(algo, key, &compressed_or_plain)?
+    }
+    None => compressed_or_plain,
+  };
+
+  // Step 3: length-delimit.
+  let mut out = Vec::with_capacity(5 + payload.len());
+  encode_varint_u32(payload.len() as u32, &mut out);
+  out.extend_from_slice(&payload);
+  Ok(out)
+}
+
+/// Encryption-aware reliable-unit decode. Inbound the codec stack is:
+/// (1) strip `[unit_len: varint]`; (2) [`unwrap_transforms_with_encryption`],
+/// which strips `Encrypted` first (if present), then `Compressed` (if
+/// present), then returns the inner bytes. Bomb-guarded by `max_orig_len`
+/// on every wrapper.
+pub fn take_reliable_unit_with_encryption(
+  buf: &[u8],
+  encryption: &crate::encryption::EncryptionOptions,
+  max_orig_len: usize,
+) -> Result<Option<(Vec<u8>, usize)>, FrameError> {
+  use crate::framing::unwrap_transforms_with_encryption;
+  let (unit_len, vbytes) = match decode_varint_u32(buf) {
+    Ok(v) => v,
+    // A truncated/empty leading varint just means "need more bytes".
+    Err(FrameError::Incomplete(..)) | Err(FrameError::Empty) => return Ok(None),
+    Err(e) => return Err(e),
+  };
+  let unit_len = unit_len as usize;
+  // The on-wire envelope ceiling. `max_orig_len` is the plaintext bound;
+  // when encryption is enabled the wrapper inflates the payload by a fixed
+  // `ENCRYPTED_WRAPPER_OVERHEAD` (header + nonce + AEAD tag), so a
+  // legitimate near-`max_orig_len` plaintext frame's wrapped `unit_len`
+  // exceeds `max_orig_len` by that much. Allow the slack so near-bound
+  // plaintext frames round-trip. The post-decrypt plaintext is still
+  // bounded by `unwrap_transforms_with_encryption` (which calls
+  // `decode_encrypted_frame` with `max_orig_len` as the plaintext ceiling).
+  let effective_unit_max = if encryption.is_enabled() {
+    max_orig_len.saturating_add(crate::encryption::ENCRYPTED_WRAPPER_OVERHEAD)
+  } else {
+    max_orig_len
+  };
+  // Bound the on-wire unit size BEFORE waiting for it — caps accumulation
+  // growth so a malicious huge `unit_len` cannot pin unbounded memory.
+  if unit_len > effective_unit_max {
+    return Err(FrameError::Compression(format!(
+      "reliable unit_len {unit_len} exceeds maximum {effective_unit_max}"
+    )));
+  }
+  let total = vbytes + unit_len;
+  if buf.len() < total {
+    return Ok(None);
+  }
+  let plaintext =
+    unwrap_transforms_with_encryption(&buf[vbytes..total], max_orig_len, encryption)?.into_owned();
   Ok(Some((plaintext, total)))
 }
 
@@ -706,7 +820,7 @@ mod tests {
 
   #[test]
   fn compression_options_default_is_disabled() {
-    let opts = CompressionOptions::disabled();
+    let opts = CompressionOptions::new();
     assert!(opts.algorithm().is_none());
     let outcome = opts.apply(&[0u8; 4096]).expect("disabled never errors");
     assert!(matches!(outcome, CompressionOutcome::Plain));
@@ -715,7 +829,7 @@ mod tests {
   #[cfg(feature = "lz4")]
   #[test]
   fn compression_options_builders_select_algorithm_and_threshold() {
-    let opts = CompressionOptions::disabled()
+    let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
       .with_threshold(16);
     assert_eq!(opts.algorithm(), Some(CompressAlgorithm::Lz4));
@@ -728,7 +842,7 @@ mod tests {
 
   #[test]
   fn reliable_unit_plain_roundtrips_when_disabled() {
-    let opts = CompressionOptions::disabled();
+    let opts = CompressionOptions::new();
     let framed = b"the quick brown fox".repeat(4);
     let unit = encode_reliable_unit(&opts, &framed);
     let (back, consumed) = take_reliable_unit(&unit, 1 << 20)
@@ -740,7 +854,7 @@ mod tests {
 
   #[test]
   fn reliable_unit_partial_buffer_returns_none() {
-    let opts = CompressionOptions::disabled();
+    let opts = CompressionOptions::new();
     let framed = b"the quick brown fox".repeat(4);
     let unit = encode_reliable_unit(&opts, &framed);
     let partial = &unit[..unit.len() - 1];
@@ -754,7 +868,7 @@ mod tests {
 
   #[test]
   fn reliable_unit_two_back_to_back_each_extract_with_consumed() {
-    let opts = CompressionOptions::disabled();
+    let opts = CompressionOptions::new();
     let first = b"first-frame-bytes".to_vec();
     let second = b"second-frame".to_vec();
     let mut buf = encode_reliable_unit(&opts, &first);
@@ -777,7 +891,7 @@ mod tests {
   #[cfg(feature = "lz4")]
   #[test]
   fn reliable_unit_compressed_roundtrips() {
-    let opts = CompressionOptions::disabled()
+    let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
       .with_threshold(8);
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);
@@ -849,7 +963,7 @@ mod tests {
   #[cfg(feature = "lz4")]
   #[test]
   fn reliable_unit_corrupt_inner_wrapper_is_rejected() {
-    let opts = CompressionOptions::disabled()
+    let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
       .with_threshold(8);
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);
@@ -866,5 +980,143 @@ mod tests {
     // vbytes points to COMPRESSED_TAG; vbytes+1 is the algorithm tag.
     unit[vbytes + 1] ^= 0xff;
     assert!(take_reliable_unit(&unit, 1 << 20).is_err());
+  }
+
+  #[test]
+  fn reliable_unit_disabled_encryption_is_byte_identical() {
+    use crate::encryption::EncryptionOptions;
+    let comp = CompressionOptions::new();
+    let enc = EncryptionOptions::new();
+    let framed = b"plain reliable frame bytes that are not compressed or encrypted".to_vec();
+    let unit = encode_reliable_unit_with_encryption(&comp, &enc, &framed).expect("encode");
+    let (back, consumed) = take_reliable_unit_with_encryption(&unit, &enc, 16 * 1024 * 1024)
+      .expect("decode ok")
+      .expect("complete unit");
+    assert_eq!(back, framed);
+    assert_eq!(consumed, unit.len());
+  }
+
+  #[test]
+  fn reliable_unit_encryption_disabled_compression_disabled_is_unchanged() {
+    use crate::encryption::EncryptionOptions;
+    let comp = CompressionOptions::new();
+    let enc = EncryptionOptions::new();
+    let framed = b"some bytes".to_vec();
+    let legacy = encode_reliable_unit(&comp, &framed);
+    let new = encode_reliable_unit_with_encryption(&comp, &enc, &framed).expect("encode");
+    assert_eq!(legacy, new, "disabled-encryption path is byte-identical");
+  }
+
+  #[cfg(feature = "aes-gcm")]
+  #[test]
+  fn reliable_unit_encrypted_then_compressed_roundtrip() {
+    use crate::encryption::{EncryptionOptions, Keyring, SecretKey};
+    let comp = CompressionOptions::new();
+    let key = SecretKey::Aes256([0x42; 32]);
+    let enc = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    let framed = b"some reliable frame bytes that must be encrypted".to_vec();
+    let unit = encode_reliable_unit_with_encryption(&comp, &enc, &framed).expect("encode");
+    let (back, consumed) = take_reliable_unit_with_encryption(&unit, &enc, 16 * 1024 * 1024)
+      .expect("decode ok")
+      .expect("complete unit");
+    assert_eq!(back, framed);
+    assert_eq!(consumed, unit.len());
+  }
+
+  #[cfg(all(feature = "aes-gcm", not(feature = "chacha20-poly1305")))]
+  #[test]
+  fn encode_reliable_unit_with_encryption_returns_err_on_unsupported_backend() {
+    // A primary key whose backend was NOT built into this binary (here:
+    // ChaCha20-Poly1305 key under an aes-gcm-only build) must yield
+    // `Err(UnsupportedAlgorithm)`. Silent fallback to plaintext would let
+    // a configured-encrypted reliable exchange go out unauthenticated.
+    use crate::encryption::{EncryptionError, EncryptionOptions, Keyring, SecretKey};
+    let comp = CompressionOptions::new();
+    let enc =
+      EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::ChaCha20Poly1305([0x42; 32])));
+    let framed = b"this exchange must NOT go out as plaintext".to_vec();
+    let err = encode_reliable_unit_with_encryption(&comp, &enc, &framed)
+      .expect_err("missing backend must surface as Err, not silent plaintext");
+    assert!(
+      matches!(err, EncryptionError::UnsupportedAlgorithm(_)),
+      "got {err:?}"
+    );
+  }
+
+  #[cfg(all(feature = "lz4", feature = "aes-gcm"))]
+  #[test]
+  fn reliable_unit_compressed_then_encrypted_byte_order_is_outer_encrypted() {
+    use crate::encryption::{EncryptionOptions, Keyring, SecretKey};
+    let comp = CompressionOptions::new()
+      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_threshold(8);
+    let key = SecretKey::Aes256([0x99; 32]);
+    let enc = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);
+    let unit = encode_reliable_unit_with_encryption(&comp, &enc, &framed).expect("encode");
+    let (varint, vbytes) = crate::framing::decode_varint_u32(&unit).expect("unit_len varint");
+    let payload = &unit[vbytes..vbytes + varint as usize];
+    assert_eq!(
+      payload[0],
+      crate::encryption::ENCRYPTED_TAG,
+      "the unit's payload leading tag is Encrypted (the outer wrapper)"
+    );
+    let (back, _consumed) = take_reliable_unit_with_encryption(&unit, &enc, 16 * 1024 * 1024)
+      .expect("decode ok")
+      .expect("complete unit");
+    assert_eq!(back, framed);
+  }
+
+  #[cfg(feature = "aes-gcm")]
+  #[test]
+  fn encrypted_reliable_unit_at_max_orig_len_roundtrips() {
+    // Reliable-path bomb-guard slack. A plaintext at exactly `max_orig_len`
+    // (and one near it) must encode + decode through
+    // `take_reliable_unit_with_encryption` with the SAME `max_orig_len` —
+    // the wrapper inflates `unit_len` past the plaintext bound by exactly
+    // `ENCRYPTED_WRAPPER_OVERHEAD`, so the bomb-guard must allow that slack.
+    use crate::encryption::{EncryptionOptions, Keyring, SecretKey};
+    let comp = CompressionOptions::new();
+    let key = SecretKey::Aes256([0x88; 32]);
+    let enc = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    for max_orig_len in [1400usize, 4096, 64 * 1024] {
+      for plaintext_len in [
+        max_orig_len - crate::encryption::ENCRYPTED_WRAPPER_OVERHEAD,
+        max_orig_len - 1,
+        max_orig_len,
+      ] {
+        let framed = vec![0xA5; plaintext_len];
+        let unit = encode_reliable_unit_with_encryption(&comp, &enc, &framed).expect("encode");
+        let (back, consumed) = take_reliable_unit_with_encryption(&unit, &enc, max_orig_len)
+          .unwrap_or_else(|e| {
+            panic!("plaintext_len={plaintext_len} max_orig_len={max_orig_len} must accept, got {e}")
+          })
+          .expect("complete unit");
+        assert_eq!(back, framed, "plaintext_len={plaintext_len}");
+        assert_eq!(consumed, unit.len());
+      }
+    }
+  }
+
+  #[cfg(feature = "aes-gcm")]
+  #[test]
+  fn encrypted_reliable_unit_one_byte_past_envelope_max_is_rejected() {
+    // Symmetric guard: a `unit_len` exceeding `max_orig_len +
+    // ENCRYPTED_WRAPPER_OVERHEAD` must still fail the bomb-guard. We
+    // hand-build a varint declaring such a `unit_len` and expect a
+    // `Compression` error from the bomb-guard BEFORE any wait.
+    use crate::encryption::{EncryptionOptions, Keyring, SecretKey};
+    let key = SecretKey::Aes256([0x99; 32]);
+    let enc = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    let max_orig_len = 1024usize;
+    let bad_unit_len = max_orig_len + crate::encryption::ENCRYPTED_WRAPPER_OVERHEAD + 1;
+    let mut buf = Vec::new();
+    encode_varint_u32(bad_unit_len as u32, &mut buf);
+    // A few junk body bytes — irrelevant; the bomb-guard fires before any
+    // wait or unwrap.
+    buf.extend_from_slice(&[0u8; 8]);
+    let err = take_reliable_unit_with_encryption(&buf, &enc, max_orig_len)
+      .expect_err("over-envelope unit_len must err");
+    assert!(matches!(err, FrameError::Compression(_)));
   }
 }

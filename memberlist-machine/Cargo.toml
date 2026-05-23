@@ -67,6 +67,12 @@ compression-snappy = ["memberlist-wire/snappy"]
 compression-zstd = ["memberlist-wire/zstd"]
 compression-brotli = ["memberlist-wire/brotli"]
 
+# Encryption backend pass-throughs — enable the matching memberlist-wire
+# AEAD backend so callers can build EncryptionOptions without a separate
+# memberlist-wire dependency.
+encryption-aes-gcm = ["memberlist-wire/aes-gcm"]
+encryption-chacha20-poly1305 = ["memberlist-wire/chacha20-poly1305"]
+
 # rustls crypto-backend pass-throughs.
 tls-rustls-ring = ["tls", "rustls/ring"]
 tls-rustls-aws-lc-rs = ["tls", "rustls/aws_lc_rs"]

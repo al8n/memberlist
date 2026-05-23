@@ -14,6 +14,9 @@
 //! - [`compression`] — the tagged, feature-gated compression transform
 //!   (`CompressAlgorithm`, `CompressionOptions`, the compressed-frame
 //!   codec). Wraps the [`framing`] codec; opt-in per backend.
+//! - [`encryption`] — the tagged, feature-gated AEAD encryption transform
+//!   (AES-GCM / ChaCha20-Poly1305). Nests outside compression in the codec
+//!   stack; opt-in per backend via `aes-gcm` / `chacha20-poly1305` features.
 //! - [`framing`] — hand-rolled outer framing (label, encryption,
 //!   checksum, compression, compound). Not protobuf-shaped. Ported from
 //!   `memberlist-proto::proto::{encoder, decoder}`.
@@ -46,6 +49,7 @@ pub mod bridge;
 pub mod compression;
 pub mod convert;
 pub mod data;
+pub mod encryption;
 pub mod framing;
 pub mod messages;
 pub mod typed;
@@ -54,15 +58,20 @@ pub mod wire_type;
 pub use bridge::{message_from_any, message_to_any, BridgeError};
 pub use compression::{
   compress, decode_compressed_frame, decompress, encode_compressed_frame, encode_reliable_unit,
-  take_reliable_unit, CompressAlgorithm, CompressionError, CompressionOptions, CompressionOutcome,
-  OversizeOriginal,
+  encode_reliable_unit_with_encryption, take_reliable_unit, take_reliable_unit_with_encryption,
+  CompressAlgorithm, CompressionError, CompressionOptions, CompressionOutcome, OversizeOriginal,
 };
 pub use convert::{
   id_from_bytes, id_to_bytes, socket_addr_from_bytes, socket_addr_to_bytes, ConvertError,
 };
 pub use data::{Data, DataRef, DecodeError, EncodeError};
+pub use encryption::{
+  decode_encrypted_frame, decrypt, encode_encrypted_frame, encrypt, EncryptAlgorithm,
+  EncryptionError, EncryptionOptions, Keyring, KeyringError, OversizeCiphertext, SecretKey,
+  ENCRYPTED_TAG, ENCRYPTED_WRAPPER_OVERHEAD,
+};
 pub use framing::{
   decode_compound, decode_message, decode_plain_frame, encode_compound, encode_message,
-  encode_plain_frame, unwrap_transforms, AnyMessage, FrameError, MessageTag,
-  COMPOUND_MAX_COUNT_PREFIX_LEN, COMPOUND_MAX_PART_PREFIX_LEN, COMPOUND_TAG_LEN,
+  encode_plain_frame, unwrap_transforms, unwrap_transforms_with_encryption, AnyMessage, FrameError,
+  MessageTag, COMPOUND_MAX_COUNT_PREFIX_LEN, COMPOUND_MAX_PART_PREFIX_LEN, COMPOUND_TAG_LEN,
 };

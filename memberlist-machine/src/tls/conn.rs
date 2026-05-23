@@ -24,7 +24,8 @@ mod tests {
     StreamBridge::new(
       records,
       Instant::now() + Duration::from_secs(10),
-      memberlist_wire::CompressionOptions::disabled(),
+      memberlist_wire::CompressionOptions::new(),
+      memberlist_wire::EncryptionOptions::new(),
       TEST_RELIABLE_MAX,
     )
   }

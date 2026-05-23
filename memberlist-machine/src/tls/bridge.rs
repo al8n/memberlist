@@ -60,13 +60,15 @@ mod tests {
       StreamBridge::new(
         client,
         deadline,
-        memberlist_wire::CompressionOptions::disabled(),
+        memberlist_wire::CompressionOptions::new(),
+        memberlist_wire::EncryptionOptions::new(),
         TEST_RELIABLE_MAX,
       ),
       StreamBridge::new(
         server,
         deadline,
-        memberlist_wire::CompressionOptions::disabled(),
+        memberlist_wire::CompressionOptions::new(),
+        memberlist_wire::EncryptionOptions::new(),
         TEST_RELIABLE_MAX,
       ),
     )
@@ -802,6 +804,37 @@ mod tests {
     assert!(
       ep.poll_event().is_none(),
       "no endpoint events on the handshake-timeout path"
+    );
+  }
+
+  /// A `StreamBridge<TlsRecords>` built with an ENABLED `EncryptionOptions`
+  /// ends up with a DISABLED effective `EncryptionOptions`: `TlsRecords
+  /// ::is_secure() == true`, so the 5-arg `StreamBridge::new` zeroes the
+  /// encryption field. The on-wire reliable bytes therefore carry no
+  /// `Encrypted` wrapper — TLS already provides confidentiality, and
+  /// double-encrypting on the reliable path costs CPU and bandwidth without
+  /// adding security.
+  #[cfg(feature = "encryption-aes-gcm")]
+  #[test]
+  fn tls_bridge_reliable_skips_encryption_when_is_secure() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let client = TlsRecords::client(
+      Arc::new(test_client()),
+      ServerName::try_from("localhost").unwrap(),
+    )
+    .unwrap();
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    let bridge: StreamBridge<SmolStr, SocketAddr, TlsRecords> = StreamBridge::new(
+      client,
+      deadline,
+      memberlist_wire::CompressionOptions::new(),
+      opts,
+      TEST_RELIABLE_MAX,
+    );
+    assert!(
+      !bridge.encryption_for_test().is_enabled(),
+      "a TLS bridge zeroes the EncryptionOptions regardless of caller intent"
     );
   }
 

@@ -85,6 +85,11 @@ where
   /// Cross-transport compression configuration. A disabled `CompressionOptions`
   /// makes the gossip compress/decompress methods identity.
   compression: memberlist_wire::CompressionOptions,
+  /// Cross-transport encryption configuration. Applied to the QUIC gossip
+  /// path (plain UDP on the same socket as the QUIC packets); the QUIC
+  /// reliable path always skips — quinn-encrypted streams already provide
+  /// confidentiality.
+  encryption: memberlist_wire::EncryptionOptions,
   conns: ConnTable,
   bridges: HashMap<StreamId, Bridge<I, A>>,
   /// Outbound UDP datagrams produced this tick (quinn datagrams + stateless
@@ -251,7 +256,8 @@ where
       ep,
       quinn,
       cfg,
-      compression: memberlist_wire::CompressionOptions::disabled(),
+      compression: memberlist_wire::CompressionOptions::new(),
+      encryption: memberlist_wire::EncryptionOptions::new(),
       conns: ConnTable::new(),
       bridges: HashMap::new(),
       out: std::collections::VecDeque::new(),
@@ -320,15 +326,125 @@ where
     }
   }
 
-  /// Decompress one inbound gossip datagram. A datagram with no compression
-  /// wrapper is returned unchanged; a corrupt or unknown-algorithm wrapper is
-  /// an `Err` and the driver drops the datagram (gossip is self-healing).
-  pub fn decompress_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, memberlist_wire::FrameError> {
+  /// Build the coordinator with an explicit cross-transport encryption
+  /// configuration. [`Self::new`] is `with_encryption` with encryption
+  /// disabled. The configuration applies to the QUIC gossip (plain UDP)
+  /// path only; the QUIC reliable path always skips encryption because
+  /// quinn-encrypted streams already provide confidentiality.
+  ///
+  /// Routes through [`Self::set_encryption_options`] so the bridge-fan-out
+  /// runs in both the builder and the in-place setter, matching
+  /// [`crate::streams::StreamEndpoint::with_encryption`].
+  pub fn with_encryption(mut self, encryption: memberlist_wire::EncryptionOptions) -> Self {
+    self.set_encryption_options(encryption);
+    self
+  }
+
+  /// Replace the encryption options in place. The driver calls this on a key
+  /// rotation: build a new `EncryptionOptions` with the rotated `Keyring`,
+  /// then publish it via the setter. Single-threaded `&mut self` — no lock.
+  ///
+  /// Propagates the new options to every live reliable bridge for symmetry
+  /// with the plain-stream coordinator (see
+  /// [`crate::streams::StreamEndpoint::set_encryption_options`]). On QUIC the
+  /// reliable bridge always force-disables encryption (quinn already
+  /// encrypts the stream), so the bridge-level propagation is a no-op — the
+  /// gossip path's strictness propagates immediately via the coordinator's
+  /// own `self.encryption` field (`decrypt_gossip` reads it directly each
+  /// call).
+  ///
+  /// **No-op reapply** — short-circuits at entry if the new options equal
+  /// the current ones, mirroring [`crate::streams::StreamEndpoint::set_encryption_options`]'s
+  /// own guard. The bridge-fan-out is a no-op on QUIC, but the
+  /// `bridge.set_encryption(encryption.clone())` clone-and-call still
+  /// runs once per live bridge — pure waste on a config reconciler that
+  /// republishes the same effective policy.
+  pub fn set_encryption_options(&mut self, encryption: memberlist_wire::EncryptionOptions) {
+    if self.encryption == encryption {
+      self.encryption = encryption;
+      return;
+    }
+    for bridge in self.bridges.values_mut() {
+      bridge.set_encryption(encryption.clone());
+    }
+    // Drop every buffered raw gossip datagram. `handle_memberlist_udp`
+    // enqueues `(src, raw_bytes)` into [`Self::mem_ingress`];
+    // [`Self::decrypt_gossip`] reads the coordinator's CURRENT
+    // `self.encryption` at drain time. Without this clear, a datagram queued
+    // before the policy change is decrypted under the NEW policy — a
+    // plaintext datagram queued while strict-mode was ON would be accepted
+    // after the operator switches to disabled, and a ciphertext datagram
+    // queued while disabled would be rejected after enabling. Gossip is
+    // lossy and self-healing, so the dropped bytes recover on the next
+    // gossip round. The QUIC reliable bridges force-disable encryption
+    // regardless of the new options (quinn already encrypts the stream), so
+    // there is no per-bridge failure path here — the gossip ingress buffer
+    // is the only at-risk queue on policy change.
+    self.mem_ingress.clear();
+    self.encryption = encryption;
+  }
+
+  /// The configured cross-transport encryption options. Applies to the
+  /// gossip path only; the QUIC reliable path always skips.
+  pub fn encryption_options(&self) -> &memberlist_wire::EncryptionOptions {
+    &self.encryption
+  }
+
+  /// Encrypt one outbound gossip datagram for the wire. The codec-owning
+  /// driver calls this on the already-compressed gossip bytes (from
+  /// [`Self::compress_gossip`]) before handing them to the UDP socket. When
+  /// encryption is disabled the bytes are returned unchanged.
+  ///
+  /// The on-wire byte order is `[Encrypted[Compressed[frame]]]` when both
+  /// transforms are enabled and compression won, or `[Encrypted[frame]]`
+  /// when compression is disabled or did not shrink.
+  ///
+  /// Returns `Err` when encryption is configured but the backend rejects the
+  /// request — typically [`memberlist_wire::EncryptionError::UnsupportedAlgorithm`]
+  /// for a primary key whose backend was not built into this binary. The
+  /// driver MUST drop the gossip in that case; emitting unencrypted bytes
+  /// on an encrypted-cluster path would bypass authentication silently.
+  pub fn encrypt_gossip(
+    &self,
+    datagram: &[u8],
+  ) -> Result<Vec<u8>, memberlist_wire::EncryptionError> {
+    let keyring = match self.encryption.keyring() {
+      Some(kr) => kr,
+      None => return Ok(datagram.to_vec()),
+    };
+    let key = keyring.primary();
+    memberlist_wire::encode_encrypted_frame(key.algorithm(), key, datagram)
+  }
+
+  /// Unwrap one inbound gossip datagram. The codec-owning driver calls this
+  /// on the raw bytes from [`Self::poll_memberlist_ingress`] BEFORE decoding
+  /// frames — it strips the Encrypted-then-Compressed wrapper stack in one
+  /// pass (each layer identity when its wrapper is absent). A datagram with
+  /// no Encrypted wrapper is returned unchanged when no keyring is
+  /// configured; when a keyring IS configured the strict-mode entry check
+  /// rejects any non-Encrypted leading tag. A corrupt or unknown-algorithm
+  /// wrapper, or a frame the keyring cannot decrypt, is an `Err` — the
+  /// driver drops the datagram (gossip is lossy and self-healing).
+  ///
+  /// This is the SINGLE canonical ingress unwrap on the coordinator. The
+  /// outbound side uses [`Self::compress_gossip`] → [`Self::encrypt_gossip`]
+  /// (compress, then encrypt) so the on-wire order is
+  /// `[Encrypted[Compressed[frame]]]`; this helper reverses both layers, so
+  /// authentication never depends on integration discipline.
+  pub fn decrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, memberlist_wire::FrameError> {
     // Ceiling is the gossip MTU — the maximum size any compliant gossip
     // datagram decompresses to. A wrapper claiming more is not a compliant
-    // datagram and is rejected; the driver then drops it.
-    memberlist_wire::unwrap_transforms(datagram, Endpoint::<I, A>::GOSSIP_MTU)
-      .map(|cow| cow.into_owned())
+    // datagram and is rejected. The encryption-aware unwrap consumes an
+    // Encrypted wrapper through the keyring, then strips a Compressed
+    // wrapper if present; a non-Encrypted-led datagram is returned unchanged
+    // when no keyring is configured (the strict-mode entry check is gated
+    // on `encryption.is_enabled()`).
+    memberlist_wire::unwrap_transforms_with_encryption(
+      datagram,
+      self.ep.gossip_mtu(),
+      &self.encryption,
+    )
+    .map(|cow| cow.into_owned())
   }
 
   /// Borrow the inner membership endpoint (members / queue_user_broadcast / …).
@@ -643,6 +759,15 @@ where
   /// no bridge leaked after an exchange completed or its connection dropped.
   pub fn live_bridge_count(&self) -> usize {
     self.bridges.len()
+  }
+
+  /// The configured plaintext-byte ceiling for an outbound gossip datagram.
+  /// Sourced from [`crate::config::EndpointConfig::gossip_mtu`] (default
+  /// [`crate::config::DEFAULT_GOSSIP_MTU`]). The on-wire datagram may
+  /// exceed this by [`memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD`] when
+  /// encryption is enabled.
+  pub fn gossip_mtu(&self) -> usize {
+    self.ep.gossip_mtu()
   }
 
   /// Probe the protocol-layer credit for opening a remote-initiated
@@ -1152,9 +1277,17 @@ where
               let stream = self.ep.accept_stream(B::from_socket(peer), now);
               let id = stream.id();
               let reliable_max = self.ep.max_stream_frame_size();
-              self
-                .bridges
-                .insert(id, Bridge::new(stream, ch, sid, self.compression, reliable_max));
+              self.bridges.insert(
+                id,
+                Bridge::new(
+                  stream,
+                  ch,
+                  sid,
+                  self.compression,
+                  self.encryption.clone(),
+                  reliable_max,
+                ),
+              );
             }
           }
           quinn_proto::Event::Stream(quinn_proto::StreamEvent::Finished { id: sid }) => {
@@ -1424,7 +1557,14 @@ where
                   let reliable_max = self.ep.max_stream_frame_size();
                   self.bridges.insert(
                     stream.id(),
-                    Bridge::new(stream, ch, sid, self.compression, reliable_max),
+                    Bridge::new(
+                      stream,
+                      ch,
+                      sid,
+                      self.compression,
+                      self.encryption.clone(),
+                      reliable_max,
+                    ),
                   );
                 }
                 None => {
@@ -3117,7 +3257,7 @@ mod tests {
   fn quic_endpoint_gossip_compression_roundtrips() {
     use memberlist_wire::{CompressAlgorithm, CompressionOptions};
     let coord = build_test_quic_endpoint_with_compression(
-      CompressionOptions::disabled()
+      CompressionOptions::new()
         .with_algorithm(Some(CompressAlgorithm::Lz4))
         .with_threshold(64),
     );
@@ -3127,7 +3267,7 @@ mod tests {
       on_wire.len() < datagram.len(),
       "compressible datagram must shrink"
     );
-    let back = coord.decompress_gossip(&on_wire).expect("decompress");
+    let back = coord.decrypt_gossip(&on_wire).expect("decrypt");
     assert_eq!(back, datagram);
   }
 
@@ -3140,15 +3280,15 @@ mod tests {
     // before allocation).
     use memberlist_wire::CompressAlgorithm;
     let coord = build_test_quic_endpoint_with_compression(
-      memberlist_wire::CompressionOptions::disabled()
+      memberlist_wire::CompressionOptions::new()
         .with_algorithm(Some(CompressAlgorithm::Lz4))
         .with_threshold(64),
     );
-    let over_mtu = Endpoint::<SmolStr, SocketAddr>::GOSSIP_MTU + 1;
+    let over_mtu = coord.gossip_mtu() + 1;
     let frame = memberlist_wire::encode_compressed_frame(CompressAlgorithm::Lz4, over_mtu, b"x");
     assert!(
-      coord.decompress_gossip(&frame).is_err(),
-      "a compressed gossip frame claiming orig_len > GOSSIP_MTU must be rejected"
+      coord.decrypt_gossip(&frame).is_err(),
+      "a compressed gossip frame claiming orig_len > gossip_mtu must be rejected"
     );
   }
 
@@ -3160,7 +3300,7 @@ mod tests {
     // the sweep, exercising the don't-expand else branch for sizes where the
     // wrapper header overhead erases the raw saving.
     let coord = build_test_quic_endpoint_with_compression(
-      CompressionOptions::disabled()
+      CompressionOptions::new()
         .with_algorithm(Some(CompressAlgorithm::Lz4))
         .with_threshold(1),
     );
@@ -3182,13 +3322,67 @@ mod tests {
         compressed.len(),
         input.len(),
       );
-      let back = coord
-        .decompress_gossip(&compressed)
-        .expect("decompress failed");
+      let back = coord.decrypt_gossip(&compressed).expect("decrypt failed");
       assert_eq!(
         back, input,
         "compress_gossip round-trip failed at len={len}",
       );
     }
+  }
+
+  #[cfg(feature = "encryption-aes-gcm")]
+  fn build_test_quic_endpoint_with_encryption(
+    encryption: memberlist_wire::EncryptionOptions,
+  ) -> QuicEndpoint<SmolStr, SocketAddr, IdBridge> {
+    let addr: SocketAddr = "127.0.0.1:7999".parse().unwrap();
+    let now = Instant::now();
+    let cfg =
+      EndpointConfig::new(SmolStr::new("test"), addr).with_rng_seed(Some(addr.port() as u64));
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
+    ep.start_scheduling(now);
+    let qc = test_config();
+    QuicEndpoint::<SmolStr, SocketAddr, IdBridge>::new(ep, qc).with_encryption(encryption)
+  }
+
+  #[cfg(all(test, feature = "quic", feature = "encryption-aes-gcm"))]
+  #[test]
+  fn quic_endpoint_gossip_encryption_roundtrip() {
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
+    let kr = Keyring::new(SecretKey::Aes256([0x42; 32]));
+    let coord = build_test_quic_endpoint_with_encryption(EncryptionOptions::new().with_keyring(kr));
+    let datagram = b"a quic-coordinated gossip body".to_vec();
+    let on_wire = coord.encrypt_gossip(&datagram).expect("encrypt");
+    assert_eq!(on_wire[0], memberlist_wire::ENCRYPTED_TAG);
+    let back = coord.decrypt_gossip(&on_wire).expect("decrypt");
+    assert_eq!(back, datagram);
+  }
+
+  /// Strict-mode rejection MUST fire at the coordinator's public ingress
+  /// API. A configured keyring + a leading tag that is not `Encrypted` is
+  /// an unauthenticated plaintext Ping/Ack/Alive frame; passing it through
+  /// to `handle_memberlist_udp` would bypass strict-mode entirely. The
+  /// coordinator's single canonical ingress helper `decrypt_gossip` routes
+  /// through `unwrap_transforms_with_encryption`, which applies the
+  /// strict-mode entry check before any wrapper decoding, so cluster
+  /// authentication holds without depending on driver discipline.
+  #[cfg(all(test, feature = "quic", feature = "encryption-aes-gcm"))]
+  #[test]
+  fn quic_decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
+    use memberlist_wire::{
+      encode_plain_frame, EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey,
+    };
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
+    let coord = build_test_quic_endpoint_with_encryption(opts);
+    // A plain Ping frame — its leading byte is `MessageTag::Ping`, not
+    // `Encrypted`, so the strict-mode entry check inside
+    // `unwrap_transforms_with_encryption` MUST reject before any decoding.
+    // Body shape does not matter for the leading-byte check.
+    let plain_ping = encode_plain_frame(MessageTag::Ping, b"opaque-body").expect("encode");
+    let result = coord.decrypt_gossip(&plain_ping);
+    assert!(
+      matches!(result, Err(FrameError::Encryption(_))),
+      "decrypt_gossip MUST reject a plaintext datagram while encryption \
+       is enabled — got {result:?}",
+    );
   }
 }

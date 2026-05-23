@@ -48,13 +48,17 @@ pub enum MessageTag {
   Nack = 10,
   /// ErrorResponse — protocol error from remote.
   ErrorResponse = 11,
+  /// Encrypted wrapper (outer transform; nests outside a Compressed wrapper
+  /// or, when compression is disabled, outside the plain-message / compound
+  /// frame). Decoded by the tag-driven unwrap loop, not by `decode_message`.
+  Encrypted = 13,
   /// Compressed wrapper (outer transform; nests outside a message or compound
   /// frame). Decoded by the tag-driven unwrap loop, not by `decode_message`.
   Compressed = 14,
-  // Tags 12 (Labeled), 13 (Checksumed), 15 (Encrypted) are reserved transform
-  // wrappers; 14 (Compressed) is live above. Transform wrappers are
-  // codec-level — stripped by the tag-driven unwrap loop in this module — not
-  // driver-level.
+  // Tag 12 (Labeled) is a reserved transform wrapper; 13 (Encrypted) and 14
+  // (Compressed) are live above; 15 is reserved. Transform wrappers are
+  // codec-level — stripped by the tag-driven unwrap loop in this module —
+  // not driver-level.
 }
 
 impl MessageTag {
@@ -91,6 +95,7 @@ impl TryFrom<u8> for MessageTag {
       9 => Ok(Self::UserData),
       10 => Ok(Self::Nack),
       11 => Ok(Self::ErrorResponse),
+      13 => Ok(Self::Encrypted),
       14 => Ok(Self::Compressed),
       _ => Err(FrameError::UnknownTag(b)),
     }
@@ -166,6 +171,11 @@ pub enum FrameError {
   /// algorithm, or a declared length over the bomb-guard ceiling).
   #[error("compressed frame decode failed: {0}")]
   Compression(String),
+  /// An encrypted wrapper frame failed to decode (corrupt bytes, an unknown
+  /// algorithm, a declared length over the bomb-guard ceiling, or every
+  /// variant-filtered key in the keyring failed AEAD auth).
+  #[error("encrypted frame decode failed: {0}")]
+  Encryption(String),
 }
 
 /// Convenience: encode any [`AnyMessage`] variant into a plain frame.
@@ -230,6 +240,11 @@ pub fn decode_message(buf: &[u8]) -> Result<(usize, AnyMessage), FrameError> {
     MessageTag::Compound => {
       // Compound is an outer wrapper; not decoded at the plain-frame layer.
       return Err(FrameError::UnknownTag(MessageTag::Compound as u8));
+    }
+    MessageTag::Encrypted => {
+      // Encrypted is an outer transform wrapper; not decoded at the
+      // plain-frame layer.
+      return Err(FrameError::UnknownTag(MessageTag::Encrypted as u8));
     }
     MessageTag::Compressed => {
       // Compressed is an outer transform wrapper; not decoded at the
@@ -337,36 +352,75 @@ pub fn decode_compound(buf: &[u8]) -> Result<Vec<&[u8]>, FrameError> {
 }
 
 /// Strip every leading transform wrapper off `buf`, returning the innermost
-/// plain-message-or-compound bytes.
+/// plain-message-or-compound bytes. Encryption-aware — accepts an
+/// `&EncryptionOptions` so an [`MessageTag::Encrypted`] wrapper can be
+/// decrypted via the configured keyring.
 ///
-/// This is the codec-level transform-stack unwrap loop: peek the leading tag —
-/// if it is a transform wrapper ([`MessageTag::Compressed`]), strip that
-/// transform and repeat; once the tag is a plain-message or compound tag,
-/// return the buffer for the existing [`decode_message`] / [`decode_compound`]
-/// path. The loop handles a stack of arbitrary depth, so it is
-/// forward-compatible with an outer encryption wrapper.
+/// The loop strips `Encrypted` first (when present), then `Compressed` (when
+/// present), then returns the inner buffer for the existing
+/// [`decode_message`] / [`decode_compound`] path. The loop handles a stack
+/// of arbitrary depth; the §3 wire framing reserves the order as
+/// `[Encrypted][[Compressed][frame]]`, so a well-formed peer never produces
+/// an inverted stack.
 ///
-/// `max_orig_len` bounds every wrapper's decompressed length (the
-/// decompression-bomb guard); it is the UDP max-packet-size on the gossip path
-/// and the reliable max-frame-size on the reliable path.
-///
-/// A buffer with no transform wrapper is returned unchanged (borrowed) — the
-/// steady state when compression is disabled cluster-wide.
-pub fn unwrap_transforms(buf: &[u8], max_orig_len: usize) -> Result<Cow<'_, [u8]>, FrameError> {
-  let mut current: Cow<'_, [u8]> = Cow::Borrowed(buf);
+/// `max_orig_len` bounds every wrapper's payload (the decompression-bomb
+/// guard for `Compressed` and the ciphertext-bomb guard for `Encrypted`); it
+/// is the UDP max-packet-size on the gossip path and the reliable
+/// max-frame-size on the reliable path.
+pub fn unwrap_transforms_with_encryption<'a>(
+  buf: &'a [u8],
+  max_orig_len: usize,
+  encryption: &crate::encryption::EncryptionOptions,
+) -> Result<std::borrow::Cow<'a, [u8]>, FrameError> {
+  use std::borrow::Cow;
+  // Strict mode: when encryption is configured, the OUTERMOST inbound frame
+  // MUST be wrapped in `Encrypted`. A plain-message / compound /
+  // compression-only datagram arriving on an encrypted path is
+  // unauthenticated — a network attacker injecting SWIM membership traffic,
+  // or a misconfigured peer running without encryption — and is rejected
+  // before any decoding. Inner (post-strip) bytes can be anything; this
+  // check fires once at the entry boundary, not inside the unwrap loop.
+  if encryption.is_enabled() {
+    let lead = buf.first().copied().ok_or(FrameError::Empty)?;
+    if lead != MessageTag::Encrypted as u8 {
+      return Err(FrameError::Encryption(
+        "encryption enabled but inbound frame is not wrapped in Encrypted".to_string(),
+      ));
+    }
+  }
+  let mut current: Cow<'a, [u8]> = Cow::Borrowed(buf);
   loop {
     let lead = match current.first() {
       Some(b) => *b,
       None => return Err(FrameError::Empty),
     };
-    if lead != MessageTag::Compressed as u8 {
-      // Plain-message or compound tag — the transform stack is fully stripped.
-      return Ok(current);
+    if lead == MessageTag::Encrypted as u8 {
+      let decoded = crate::encryption::decode_encrypted_frame(encryption, &current, max_orig_len)
+        .map_err(|e| FrameError::Encryption(e.to_string()))?;
+      current = Cow::Owned(decoded);
+      continue;
     }
-    let decoded = crate::compression::decode_compressed_frame(&current, max_orig_len)
-      .map_err(|e| FrameError::Compression(e.to_string()))?;
-    current = Cow::Owned(decoded);
+    if lead == MessageTag::Compressed as u8 {
+      let decoded = crate::compression::decode_compressed_frame(&current, max_orig_len)
+        .map_err(|e| FrameError::Compression(e.to_string()))?;
+      current = Cow::Owned(decoded);
+      continue;
+    }
+    // Plain-message or compound tag — transform stack fully stripped.
+    return Ok(current);
   }
+}
+
+/// Encryption-unaware version of [`unwrap_transforms_with_encryption`]. A
+/// caller that did not opt into encryption never silently consumes an
+/// encrypted frame; an `Encrypted` wrapper surfaces as
+/// [`FrameError::Encryption`].
+pub fn unwrap_transforms(buf: &[u8], max_orig_len: usize) -> Result<Cow<'_, [u8]>, FrameError> {
+  unwrap_transforms_with_encryption(
+    buf,
+    max_orig_len,
+    &crate::encryption::EncryptionOptions::new(),
+  )
 }
 
 /// Build a `[TAG][VARINT_LEN][BODY]` plain frame around the supplied body bytes.
@@ -777,5 +831,83 @@ mod tests {
     // The error variant is wired for the overflow path.
     let e = FrameError::FrameTooLarge(u32::MAX as usize + 1);
     assert!(e.to_string().contains("too large"));
+  }
+
+  #[test]
+  fn framing_encrypted_tag_value_is_pinned() {
+    // Pinned numeric value — a change is a wire-protocol break.
+    assert_eq!(MessageTag::Encrypted as u8, 13);
+    // The encryption module's mirror constant must agree.
+    assert_eq!(
+      MessageTag::Encrypted as u8,
+      crate::encryption::ENCRYPTED_TAG
+    );
+  }
+
+  #[test]
+  fn unwrap_loop_rejects_unknown_encrypted_algorithm() {
+    // A buffer led by ENCRYPTED_TAG with an unknown algorithm tag fails the
+    // unwrap with FrameError::Encryption.
+    let mut frame = vec![MessageTag::Encrypted as u8, 222u8];
+    frame.extend_from_slice(&[0u8; 12]); // nonce
+    frame.extend_from_slice(&[0u8; 32]); // body large enough to look plausible
+    let opts = crate::encryption::EncryptionOptions::new();
+    let err =
+      unwrap_transforms_with_encryption(&frame, 1 << 20, &opts).expect_err("unknown algo must err");
+    assert!(matches!(err, FrameError::Encryption(_)));
+  }
+
+  #[test]
+  fn encrypted_mode_rejects_unencrypted_plaintext_frame_at_outer_layer() {
+    // Strict-mode entry check. A coordinator with a configured keyring must
+    // NOT accept an outer frame whose leading byte is a plain-message tag —
+    // a network attacker could otherwise inject unauthenticated SWIM
+    // membership traffic into a cluster the operator believes is
+    // integrity-protected. The check fires before any decoding and is
+    // feature-independent (no AEAD backend is exercised here).
+    use crate::encryption::{EncryptionOptions, Keyring, SecretKey};
+    // Any keyring enables encryption; the check fires on the leading byte
+    // alone, so the AES backend is not required for this regression.
+    let key = SecretKey::Aes128([0u8; 16]);
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
+    let plain = encode_message(&sample_ping()).expect("encode ping");
+    let err = unwrap_transforms_with_encryption(&plain, 1 << 20, &opts)
+      .expect_err("plain frame on encrypted path must be rejected");
+    assert!(matches!(err, FrameError::Encryption(_)));
+    // A compound-led plain frame is also rejected (the same outermost-tag check).
+    let compound = encode_compound(&[sample_ping(), sample_ack()]).expect("encode compound");
+    let err = unwrap_transforms_with_encryption(&compound, 1 << 20, &opts)
+      .expect_err("plain compound on encrypted path must be rejected");
+    assert!(matches!(err, FrameError::Encryption(_)));
+    // An empty buffer on the encrypted path is `Empty`, not silently accepted.
+    let err = unwrap_transforms_with_encryption(&[], 1 << 20, &opts)
+      .expect_err("empty buffer on encrypted path must error");
+    assert!(matches!(err, FrameError::Empty));
+  }
+
+  #[cfg(all(feature = "lz4", feature = "aes-gcm"))]
+  #[test]
+  fn unwrap_loop_strips_encrypted_then_compressed() {
+    use crate::{
+      compression::{compress, encode_compressed_frame, CompressAlgorithm},
+      encryption::{
+        encode_encrypted_frame, EncryptAlgorithm, EncryptionOptions, Keyring, SecretKey,
+      },
+    };
+    let inner = encode_message(&sample_ping()).expect("encode ping");
+    // Inner Compressed wrapper.
+    let packed = compress(CompressAlgorithm::Lz4, &inner).expect("compress");
+    let compressed = encode_compressed_frame(CompressAlgorithm::Lz4, inner.len(), &packed);
+    // Outer Encrypted wrapper.
+    let key = SecretKey::Aes256([0x42; 32]);
+    let opts = EncryptionOptions::new().with_keyring(Keyring::new(key.clone()));
+    let wrapped =
+      encode_encrypted_frame(EncryptAlgorithm::AesGcm, &key, &compressed).expect("encode");
+    assert_eq!(wrapped[0], MessageTag::Encrypted as u8);
+
+    let unwrapped = unwrap_transforms_with_encryption(&wrapped, 1 << 20, &opts).expect("unwrap");
+    assert_eq!(unwrapped.as_ref(), inner.as_slice());
+    let (_consumed, msg) = decode_message(unwrapped.as_ref()).expect("decode inner");
+    assert_eq!(msg, sample_ping());
   }
 }

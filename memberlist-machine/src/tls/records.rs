@@ -19,7 +19,7 @@ use std::{
 };
 
 use rustls::{
-  ClientConfig, ClientConnection, ServerConfig, ServerConnection, pki_types::ServerName,
+  pki_types::ServerName, ClientConfig, ClientConnection, ServerConfig, ServerConnection,
 };
 
 /// One side of a TLS connection, behind a byte-only Sans-I/O interface.

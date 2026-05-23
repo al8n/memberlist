@@ -12,6 +12,13 @@ use core::time::Duration;
 use bytes::Bytes;
 use memberlist_wire::typed::{DelegateVersion, Meta, ProtocolVersion};
 
+/// Default value for [`EndpointConfig::gossip_mtu`]: 1400 bytes — just under
+/// a typical 1500-byte Ethernet MTU, matching the legacy memberlist default
+/// and keeping UDP gossip un-fragmented on IPv4/IPv6 + UDP-header headroom.
+/// The compound-frame budget reserves its own framing from this; a lone
+/// `Packet` is bounded directly by it.
+pub const DEFAULT_GOSSIP_MTU: usize = 1400;
+
 /// Construction-time settings for [`Endpoint`](crate::endpoint::Endpoint).
 #[derive(Debug, Clone)]
 pub struct EndpointConfig<I, A> {
@@ -37,6 +44,20 @@ pub struct EndpointConfig<I, A> {
   /// huge length and dribbling bytes. Default: 64 MiB (generous enough for
   /// a very large push/pull snapshot; tune up for huge clusters).
   max_stream_frame_size: usize,
+  /// Maximum plaintext byte size for an outbound gossip datagram, before
+  /// any codec-layer transform (compression and/or encryption) is applied.
+  /// The default (1400) leaves headroom for IPv4/IPv6 + UDP headers plus
+  /// the encryption wrapper overhead on typical 1500-byte-MTU networks.
+  ///
+  /// When encryption is enabled, the on-wire datagram size can exceed
+  /// `gossip_mtu` by [`memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD`] (30
+  /// bytes — wrapper header + 12-byte nonce + 16-byte AEAD auth tag).
+  /// Operators on tight path-MTU networks should size this accordingly:
+  /// `gossip_mtu = path_mtu - ip_udp_headers - 30` to stay under the
+  /// path's UDP-safe ceiling.
+  ///
+  /// Parallel to [`Self::max_stream_frame_size`] (the reliable-path bound).
+  gossip_mtu: usize,
   /// How often to gossip broadcasts to `gossip_nodes` random peers.
   /// `Duration::ZERO` disables gossip. Default: 200 ms (LAN).
   gossip_interval: Duration,
@@ -69,6 +90,7 @@ impl<I, A> EndpointConfig<I, A> {
       probe_timeout: Duration::from_millis(500),
       stream_timeout: Duration::from_secs(10),
       max_stream_frame_size: 64 * 1024 * 1024,
+      gossip_mtu: DEFAULT_GOSSIP_MTU,
       gossip_interval: Duration::from_millis(200),
       gossip_nodes: 3,
       push_pull_interval: Duration::from_secs(30),
@@ -148,6 +170,15 @@ impl<I, A> EndpointConfig<I, A> {
   /// Builder: set the hard cap on a single inbound reliable-stream frame.
   pub fn with_max_stream_frame_size(mut self, n: usize) -> Self {
     self.max_stream_frame_size = n;
+    self
+  }
+
+  /// Builder: set the plaintext-byte ceiling for an outbound gossip
+  /// datagram. The on-wire datagram may exceed this by
+  /// [`memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD`] when encryption is
+  /// enabled — see the field doc on `gossip_mtu`.
+  pub fn with_gossip_mtu(mut self, n: usize) -> Self {
+    self.gossip_mtu = n;
     self
   }
 
@@ -263,6 +294,14 @@ impl<I, A> EndpointConfig<I, A> {
   /// Returns the hard cap on a single inbound reliable-stream frame.
   pub const fn max_stream_frame_size(&self) -> usize {
     self.max_stream_frame_size
+  }
+
+  /// Returns the plaintext-byte ceiling for an outbound gossip datagram.
+  /// On-wire datagrams may exceed this by
+  /// [`memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD`] when encryption is
+  /// enabled — see the field doc on `gossip_mtu`.
+  pub const fn gossip_mtu(&self) -> usize {
+    self.gossip_mtu
   }
 
   /// How often gossip rounds fire. `Duration::ZERO` means disabled.

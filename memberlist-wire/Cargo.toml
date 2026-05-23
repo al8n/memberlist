@@ -29,6 +29,12 @@ snap = { version = "1", optional = true }
 lz4_flex = { version = "0.13", optional = true }
 zstd = { version = "0.13", optional = true }
 
+# AEAD backends — opt-in; the default build pulls neither.
+aead = { version = "0.5", features = ["std"], optional = true }
+aes-gcm = { version = "0.10", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+rand = { workspace = true, optional = true }
+
 [build-dependencies]
 buffa-build = "0.5"
 
@@ -46,3 +52,8 @@ lz4 = ["dep:lz4_flex"]
 snappy = ["dep:snap"]
 zstd = ["dep:zstd"]
 brotli = ["dep:brotli"]
+
+# AEAD encryption backends — opt-in; the default build pulls neither.
+# The `aead` trait surface and `rand` (random nonces) are pulled in by either.
+aes-gcm = ["dep:aead", "dep:aes-gcm", "dep:rand"]
+chacha20-poly1305 = ["dep:aead", "dep:chacha20poly1305", "dep:rand"]

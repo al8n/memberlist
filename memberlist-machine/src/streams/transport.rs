@@ -127,4 +127,15 @@ pub trait StreamTransport: Sized {
   /// bridge cannot leak its local label / partial response on the
   /// subsequent reap path.
   fn clear_outbound(&mut self);
+
+  /// `true` when the underlying transport already provides confidentiality
+  /// (e.g. TLS); `false` when it does not (e.g. plain TCP).
+  ///
+  /// Type-level capability — no `&self`. `R::is_secure()` is a compile-time
+  /// constant per impl. The bridge uses this to skip wrapping the reliable
+  /// unit in an `Encrypted` wrapper when the transport already encrypts:
+  /// double-encryption costs CPU and bandwidth without adding security.
+  ///
+  /// Mirrors the legacy `memberlist-net::StreamLayer::is_secure`.
+  fn is_secure() -> bool;
 }

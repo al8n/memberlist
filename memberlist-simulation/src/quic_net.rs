@@ -293,12 +293,37 @@ pub struct QuicCluster {
   /// staying within the refreshed one.
   stream_timeout: Option<Duration>,
   /// Cross-transport compression applied to every coordinator built via
-  /// [`add_node`](Self::add_node). [`disabled`](memberlist_wire::CompressionOptions::disabled)
+  /// [`add_node`](Self::add_node). [`new`](memberlist_wire::CompressionOptions::new)
   /// by default — the standard conformance suite drives gossip through
-  /// `compress_gossip` / `decompress_gossip` regardless, and a disabled
-  /// configuration makes both identity, so the suite stays byte-unchanged.
-  /// The `*_compressed` constructors install an enabled configuration.
+  /// `compress_gossip` on egress and the single canonical `decrypt_gossip`
+  /// unwrap on ingress regardless (which strips both the Encrypted and the
+  /// Compressed wrapper in one pass, each identity when absent), and a
+  /// disabled configuration makes the egress compression an identity, so
+  /// the suite stays byte-unchanged. The `*_compressed` constructors
+  /// install an enabled configuration.
   compression: memberlist_wire::CompressionOptions,
+  /// Cross-transport encryption applied to every coordinator built via
+  /// [`add_node`](Self::add_node). [`new`](memberlist_wire::EncryptionOptions::new)
+  /// by default — the standard conformance suite drives gossip through
+  /// `encrypt_gossip` / `decrypt_gossip` regardless, and a disabled
+  /// configuration makes both identity, so the suite stays byte-unchanged.
+  /// The `*_encrypted` constructors install an enabled configuration. The
+  /// reliable path always installs this through `with_encryption` — the QUIC
+  /// bridge force-disables reliable-path encryption (quinn-encrypted streams
+  /// already provide confidentiality), so this knob influences only the
+  /// gossip codec on the harness side.
+  encryption: memberlist_wire::EncryptionOptions,
+  /// Reliable-wire observation tap. Every QUIC datagram routed through the
+  /// virtual reliable pipe (quinn-encrypted UDP carrying the reliable streams)
+  /// is appended here so the encrypted conformance suite can assert the wire
+  /// never carries an `Encrypted` wrapper: a quinn datagram's first byte has
+  /// `b & 0xC0 != 0` (>= `0x40`), never [`memberlist_wire::ENCRYPTED_TAG`]
+  /// (which is in `1..=15`) — the QUIC bridge skips reliable-path encryption,
+  /// so no inner `[Encrypted[..]]` ever appears on the reliable path. Only
+  /// compiled under the encryption-conformance feature — the standard suite
+  /// stays byte-unchanged.
+  #[cfg(feature = "__sim-encryption-aes-gcm")]
+  observed_reliable_wire_bytes: Vec<Vec<u8>>,
 }
 
 impl QuicCluster {
@@ -322,7 +347,10 @@ impl QuicCluster {
       probe_window: None,
       shrink_window: false,
       stream_timeout: None,
-      compression: memberlist_wire::CompressionOptions::disabled(),
+      compression: memberlist_wire::CompressionOptions::new(),
+      encryption: memberlist_wire::EncryptionOptions::new(),
+      #[cfg(feature = "__sim-encryption-aes-gcm")]
+      observed_reliable_wire_bytes: Vec::new(),
     }
   }
 
@@ -361,13 +389,19 @@ impl QuicCluster {
     // transport stays bit-for-bit reproducible. A `*_compressed` constructor
     // takes `with_compression`, whose membership behaviour is identical — the
     // virtual clock is the temporal-determinism anchor; the connection-ID /
-    // path-challenge RNG does not affect SWIM convergence.
+    // path-challenge RNG does not affect SWIM convergence. Encryption is then
+    // threaded fluently regardless of the base constructor; the QUIC bridge
+    // always force-disables reliable-path encryption inside, so the field is
+    // wired here to match the `TcpCluster`/`TlsCluster` shape but only
+    // influences the gossip codec.
     let node = if self.compression.algorithm().is_some() {
       QuicEndpoint::with_compression(ep, qc, self.compression)
     } else {
       QuicEndpoint::with_quinn_rng_seed(ep, qc, Some(seed))
     };
-    self.nodes.insert(addr, node);
+    self
+      .nodes
+      .insert(addr, node.with_encryption(self.encryption.clone()));
   }
 
   /// Two nodes; `a` joins `b` via a QUIC push/pull. `a` starts knowing
@@ -403,9 +437,58 @@ impl QuicCluster {
     algorithm: memberlist_wire::CompressAlgorithm,
   ) -> Self {
     let mut c = Self::empty();
-    c.compression = memberlist_wire::CompressionOptions::disabled()
+    c.compression = memberlist_wire::CompressionOptions::new()
       .with_algorithm(Some(algorithm))
       .with_threshold(0);
+    c.add_node("a", a);
+    c.add_node("b", b);
+    let now = c.clock.now();
+    if let Some(n) = c.nodes.get_mut(&a) {
+      n.start_push_pull(b, PushPullKind::Join, now);
+    }
+    c
+  }
+
+  /// Like [`two_node_join`](Self::two_node_join) but every node is built with
+  /// `primary_key` as the encryption primary. Used by the encryption-enabled
+  /// conformance tests, which assert membership behavior is identical to the
+  /// unencrypted run (encryption is transparent to SWIM). The QUIC bridge
+  /// force-disables reliable-path encryption inside (quinn-encrypted streams
+  /// already provide confidentiality), so the reliable-wire conformance test
+  /// pins that no `[Encrypted[..]]` wrapper ever appears on the reliable path.
+  pub fn two_node_join_encrypted(
+    a: SocketAddr,
+    b: SocketAddr,
+    primary_key: memberlist_wire::SecretKey,
+  ) -> Self {
+    let mut c = Self::empty();
+    c.encryption = memberlist_wire::EncryptionOptions::new()
+      .with_keyring(memberlist_wire::Keyring::new(primary_key));
+    c.add_node("a", a);
+    c.add_node("b", b);
+    let now = c.clock.now();
+    if let Some(n) = c.nodes.get_mut(&a) {
+      n.start_push_pull(b, PushPullKind::Join, now);
+    }
+    c
+  }
+
+  /// Like [`two_node_join_compressed`](Self::two_node_join_compressed) but
+  /// every node is built with BOTH `algorithm` compression and `primary_key`
+  /// encryption enabled. Used by the compound-stack conformance test, which
+  /// asserts membership behavior is identical to the disabled-both run.
+  pub fn two_node_join_compressed_and_encrypted(
+    a: SocketAddr,
+    b: SocketAddr,
+    algorithm: memberlist_wire::CompressAlgorithm,
+    primary_key: memberlist_wire::SecretKey,
+  ) -> Self {
+    let mut c = Self::empty();
+    c.compression = memberlist_wire::CompressionOptions::new()
+      .with_algorithm(Some(algorithm))
+      .with_threshold(0);
+    c.encryption = memberlist_wire::EncryptionOptions::new()
+      .with_keyring(memberlist_wire::Keyring::new(primary_key));
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -569,7 +652,7 @@ impl QuicCluster {
   ) -> Self {
     let mut c = Self::empty();
     c.shrink_window = true;
-    c.compression = memberlist_wire::CompressionOptions::disabled()
+    c.compression = memberlist_wire::CompressionOptions::new()
       .with_algorithm(Some(algorithm))
       .with_threshold(0);
     c.add_node("a", a);
@@ -1008,6 +1091,20 @@ impl QuicCluster {
     self.nodes.get(&host).map_or(0, |n| n.live_bridge_count())
   }
 
+  /// Every QUIC datagram the harness routed through the virtual reliable pipe
+  /// so far. The encryption-conformance suite asserts that no entry begins
+  /// with [`memberlist_wire::ENCRYPTED_TAG`] — the QUIC bridge skips
+  /// reliable-path encryption (quinn-encrypted streams already provide
+  /// confidentiality), and a quinn UDP datagram's first byte has
+  /// `b & 0xC0 != 0` (>= `0x40`) by the QUIC long/short-header bit pattern,
+  /// disjoint from the memberlist tag space (`1..=15`) that contains
+  /// `ENCRYPTED_TAG`. Only compiled under the `__sim-encryption-aes-gcm`
+  /// feature.
+  #[cfg(feature = "__sim-encryption-aes-gcm")]
+  pub fn observed_reliable_wire_bytes(&self) -> &[Vec<u8>] {
+    &self.observed_reliable_wire_bytes
+  }
+
   /// Simulate an external driver draining `host`'s [`QuicEndpoint::poll_event`]
   /// queue: every event popped is silently discarded (no re-queue). Returns
   /// the number of events drained.
@@ -1162,7 +1259,19 @@ impl QuicCluster {
       }
     }
     for (to, bytes) in pending {
-      self.enqueue(host, to, bytes, now);
+      // Compress THEN encrypt to match the main `drain_and_enqueue` egress
+      // shape (each identity when the corresponding option is disabled), so a
+      // single-pop drain produces the same on-wire bytes as the normal path.
+      // An encrypt failure (e.g. backend not built in) drops the gossip —
+      // emitting plaintext on the configured-encrypted egress would bypass
+      // authentication. SWIM gossip is lossy and self-healing.
+      let node = self.nodes.get(&host).unwrap();
+      let compressed = node.compress_gossip(&bytes);
+      let on_wire = match node.encrypt_gossip(&compressed) {
+        Ok(b) => b,
+        Err(_) => continue,
+      };
+      self.enqueue(host, to, bytes::Bytes::from(on_wire), now);
     }
     self.deliver_ready(now);
     true
@@ -1364,16 +1473,38 @@ impl QuicCluster {
         }
       }
       for (to, bytes) in quic_pending {
+        // Reliable-wire observation tap: every quinn UDP datagram is the
+        // wire form of the QUIC reliable path (quinn streams ride atop these
+        // datagrams). Append the bytes verbatim so the encrypted conformance
+        // suite can pin that no inner `[Encrypted[..]]` wrapper ever surfaces
+        // here — the QUIC bridge skips reliable-path encryption, so the
+        // plaintext units handed to quinn never carry an `Encrypted` wrapper
+        // either; quinn then encrypts them into datagrams whose first byte
+        // has `b & 0xC0 != 0` (>= `0x40`), disjoint from the memberlist tag
+        // space that contains `ENCRYPTED_TAG`.
+        #[cfg(feature = "__sim-encryption-aes-gcm")]
+        self.observed_reliable_wire_bytes.push(bytes.to_vec());
         if self.enqueue(*src, to, bytes, now) {
           any = true;
         }
       }
       for (to, bytes) in gossip_pending {
-        // Compress the outbound gossip datagram through the source
-        // coordinator's configured compression (identity when disabled). The
-        // compressed-frame tag (`COMPRESSED_TAG`, in `1..=15`) keeps the
-        // datagram on the `Class::Memberlist` side of the first-byte demux.
-        let on_wire = self.nodes.get(src).unwrap().compress_gossip(&bytes);
+        // Compress THEN encrypt the outbound gossip datagram through the
+        // source coordinator's configured transforms (each identity when
+        // disabled). The on-wire byte order is
+        // `[Encrypted[Compressed[frame]]]` when both are enabled; the
+        // receiver reverses the order on ingress. The outermost wrapper tag
+        // stays in the memberlist tag space (`1..=15`), so the first-byte
+        // demux still classifies the datagram `Memberlist`. An encrypt
+        // failure (e.g. backend not built in) drops the gossip — emitting
+        // plaintext on the configured-encrypted egress would bypass
+        // authentication. SWIM gossip is lossy and self-healing.
+        let node = self.nodes.get(src).unwrap();
+        let compressed = node.compress_gossip(&bytes);
+        let on_wire = match node.encrypt_gossip(&compressed) {
+          Ok(b) => b,
+          Err(_) => continue,
+        };
         if self.enqueue(*src, to, bytes::Bytes::from(on_wire), now) {
           any = true;
         }
@@ -1483,10 +1614,14 @@ impl QuicCluster {
     // endpoint processes the fed messages and produces its outputs.
     let mut fed = false;
     while let Some((src, raw)) = node.poll_memberlist_ingress() {
-      // Decompress the inbound datagram (identity when it carries no
-      // compression wrapper). A corrupt wrapper drops the datagram — gossip is
+      // Single-call unwrap: `decrypt_gossip` is the encryption-aware
+      // unwrap that consumes the Encrypted-then-Compressed wrapper stack
+      // (each identity when the wrapper is absent) and applies strict-mode
+      // rejection at the entry boundary when a keyring is configured. It is
+      // the coordinator's single canonical ingress helper — one call covers
+      // both transforms. A corrupt wrapper drops the datagram — gossip is
       // lossy and self-healing.
-      let raw = match node.decompress_gossip(&raw) {
+      let raw = match node.decrypt_gossip(&raw) {
         Ok(plain) => plain,
         Err(_) => continue,
       };

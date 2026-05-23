@@ -161,12 +161,22 @@ pub struct TcpCluster {
   /// same name.
   skip_inbound_label_check_hosts: HashSet<SocketAddr>,
   /// Cross-transport compression applied to every coordinator built via
-  /// [`add_node`](Self::add_node). [`disabled`](memberlist_wire::CompressionOptions::disabled)
+  /// [`add_node`](Self::add_node). [`new`](memberlist_wire::CompressionOptions::new)
   /// by default — the standard conformance suite drives gossip through
-  /// `compress_gossip` / `decompress_gossip` regardless, and a disabled
-  /// configuration makes both identity, so the suite stays byte-unchanged.
-  /// The `*_compressed` constructors install an enabled configuration.
+  /// `compress_gossip` on egress and the single canonical `decrypt_gossip`
+  /// unwrap on ingress regardless (which strips both the Encrypted and the
+  /// Compressed wrapper in one pass, each identity when absent), and a
+  /// disabled configuration makes the egress compression an identity, so
+  /// the suite stays byte-unchanged. The `*_compressed` constructors
+  /// install an enabled configuration.
   compression: memberlist_wire::CompressionOptions,
+  /// Cross-transport encryption applied to every coordinator built via
+  /// [`add_node`](Self::add_node). [`new`](memberlist_wire::EncryptionOptions::new)
+  /// by default — the standard conformance suite drives gossip through
+  /// `encrypt_gossip` / `decrypt_gossip` regardless, and a disabled
+  /// configuration makes both identity, so the suite stays byte-unchanged.
+  /// The `*_encrypted` constructors install an enabled configuration.
+  encryption: memberlist_wire::EncryptionOptions,
 }
 
 impl TcpCluster {
@@ -192,7 +202,8 @@ impl TcpCluster {
       label_overrides: HashMap::new(),
       unlabeled_hosts: HashSet::new(),
       skip_inbound_label_check_hosts: HashSet::new(),
-      compression: memberlist_wire::CompressionOptions::disabled(),
+      compression: memberlist_wire::CompressionOptions::new(),
+      encryption: memberlist_wire::EncryptionOptions::new(),
     }
   }
 
@@ -231,7 +242,8 @@ impl TcpCluster {
     }
     self.nodes.insert(
       addr,
-      StreamEndpoint::with_compression(ep, tcp_cfg, self.compression),
+      StreamEndpoint::with_compression(ep, tcp_cfg, self.compression)
+        .with_encryption(self.encryption.clone()),
     );
   }
 
@@ -266,9 +278,55 @@ impl TcpCluster {
     algorithm: memberlist_wire::CompressAlgorithm,
   ) -> Self {
     let mut c = Self::empty();
-    c.compression = memberlist_wire::CompressionOptions::disabled()
+    c.compression = memberlist_wire::CompressionOptions::new()
       .with_algorithm(Some(algorithm))
       .with_threshold(0);
+    c.add_node("a", a);
+    c.add_node("b", b);
+    let now = c.clock.now();
+    if let Some(n) = c.nodes.get_mut(&a) {
+      n.start_push_pull(b, PushPullKind::Join, now);
+    }
+    c
+  }
+
+  /// Like [`two_node_join`](Self::two_node_join) but every node is built with
+  /// `primary_key` as the encryption primary. Used by the encryption-enabled
+  /// conformance tests, which assert membership behavior is identical to the
+  /// unencrypted run (encryption is transparent to SWIM).
+  pub fn two_node_join_encrypted(
+    a: SocketAddr,
+    b: SocketAddr,
+    primary_key: memberlist_wire::SecretKey,
+  ) -> Self {
+    let mut c = Self::empty();
+    c.encryption = memberlist_wire::EncryptionOptions::new()
+      .with_keyring(memberlist_wire::Keyring::new(primary_key));
+    c.add_node("a", a);
+    c.add_node("b", b);
+    let now = c.clock.now();
+    if let Some(n) = c.nodes.get_mut(&a) {
+      n.start_push_pull(b, PushPullKind::Join, now);
+    }
+    c
+  }
+
+  /// Like [`two_node_join_compressed`](Self::two_node_join_compressed) but
+  /// every node is built with BOTH `algorithm` compression and `primary_key`
+  /// encryption enabled. Used by the compound-stack conformance test, which
+  /// asserts membership behavior is identical to the disabled-both run.
+  pub fn two_node_join_compressed_and_encrypted(
+    a: SocketAddr,
+    b: SocketAddr,
+    algorithm: memberlist_wire::CompressAlgorithm,
+    primary_key: memberlist_wire::SecretKey,
+  ) -> Self {
+    let mut c = Self::empty();
+    c.compression = memberlist_wire::CompressionOptions::new()
+      .with_algorithm(Some(algorithm))
+      .with_threshold(0);
+    c.encryption = memberlist_wire::EncryptionOptions::new()
+      .with_keyring(memberlist_wire::Keyring::new(primary_key));
     c.add_node("a", a);
     c.add_node("b", b);
     let now = c.clock.now();
@@ -362,7 +420,7 @@ impl TcpCluster {
   ) -> Self {
     let mut c = Self::empty();
     c.tcp_window = Some(1200);
-    c.compression = memberlist_wire::CompressionOptions::disabled()
+    c.compression = memberlist_wire::CompressionOptions::new()
       .with_algorithm(Some(algorithm))
       .with_threshold(0);
     c.add_node("a", a);
@@ -878,9 +936,19 @@ impl TcpCluster {
         }
       }
       for (to, bytes) in pending {
-        // Compress the outbound datagram through the source coordinator's
-        // configured compression (identity when disabled).
-        let on_wire = self.nodes.get(src).unwrap().compress_gossip(&bytes);
+        // Compress THEN encrypt the outbound datagram through the source
+        // coordinator's configured transforms (each identity when disabled).
+        // The on-wire byte order is `[Encrypted[Compressed[frame]]]` when both
+        // are enabled; the receiver reverses the order on ingress. An
+        // encrypt failure (e.g. backend not built in) drops the gossip —
+        // emitting plaintext on the configured-encrypted egress would bypass
+        // authentication. SWIM gossip is lossy and self-healing.
+        let node = self.nodes.get(src).unwrap();
+        let compressed = node.compress_gossip(&bytes);
+        let on_wire = match node.encrypt_gossip(&compressed) {
+          Ok(b) => b,
+          Err(_) => continue,
+        };
         if self.enqueue_udp(*src, to, bytes::Bytes::from(on_wire), now) {
           any = true;
         }
@@ -1165,10 +1233,14 @@ impl TcpCluster {
     node.handle_gossip(from, bytes, now);
     let mut fed = false;
     while let Some((src, raw)) = node.poll_memberlist_ingress() {
-      // Decompress the inbound datagram (identity when it carries no
-      // compression wrapper). A corrupt wrapper drops the datagram — gossip is
+      // Single-call unwrap: `decrypt_gossip` is the encryption-aware
+      // unwrap that consumes the Encrypted-then-Compressed wrapper stack
+      // (each identity when the wrapper is absent) and applies strict-mode
+      // rejection at the entry boundary when a keyring is configured. It is
+      // the coordinator's single canonical ingress helper — one call covers
+      // both transforms. A corrupt wrapper drops the datagram — gossip is
       // lossy and self-healing.
-      let raw = match node.decompress_gossip(&raw) {
+      let raw = match node.decrypt_gossip(&raw) {
         Ok(plain) => plain,
         Err(_) => continue,
       };
