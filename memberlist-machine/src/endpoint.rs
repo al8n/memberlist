@@ -9,17 +9,18 @@ use std::{
 
 use bytes::Bytes;
 use memberlist_wire::{
+  Data,
   typed::{
     Ack, Alive, Dead, IndirectPing, Message, Meta, Nack, NodeState, Ping, PushNodeState, PushPull,
     State, Suspect,
   },
-  Data,
 };
 use nodecraft::{CheapClone, Id, Node};
-use rand::{rngs::SmallRng, seq::IteratorRandom, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng, rngs::SmallRng, seq::IteratorRandom};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
+  AckEntry, AckKind, EndpointEvent, ForwardAck, PushPullKind, StreamCommand, StreamId,
   ack::AckRegistry,
   awareness::Awareness,
   broadcast::{BroadcastQueue, MemberlistBroadcast},
@@ -28,7 +29,6 @@ use crate::{
   members::{LocalNodeState, Member, Members},
   probe::{AwaitingIndirect, Probe, ProbeKind, ProbePhase},
   stream::{OutboundKind, Stream, StreamPhase},
-  AckEntry, AckKind, EndpointEvent, ForwardAck, PushPullKind, StreamCommand, StreamId,
 };
 
 #[cfg(test)]

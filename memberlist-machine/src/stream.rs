@@ -24,7 +24,7 @@
 use std::{collections::VecDeque, time::Instant};
 
 use bytes::{Bytes, BytesMut};
-use memberlist_wire::{typed::PushNodeState, Data};
+use memberlist_wire::{Data, typed::PushNodeState};
 
 use crate::{
   error::StreamError,

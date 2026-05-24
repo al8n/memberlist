@@ -40,8 +40,8 @@ use std::{
 };
 
 use memberlist_machine::{
-  streams::{ExchangeId, StreamAction, StreamEndpoint},
   AddrBridge, Endpoint, EndpointConfig, Event, PushPullKind, TlsOptions, TlsRecords, Transmit,
+  streams::{ExchangeId, StreamAction, StreamEndpoint},
 };
 use memberlist_wire::{
   framing, message_from_any, message_to_any,
