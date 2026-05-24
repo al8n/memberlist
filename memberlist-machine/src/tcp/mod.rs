@@ -108,20 +108,23 @@ impl StreamTransport for RawRecords {
 #[cfg(test)]
 mod tests {
   use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::SocketAddr,
     time::{Duration, Instant},
   };
 
   use bytes::Bytes;
   use smol_str::SmolStr;
 
-  use super::{TcpOptions, records::RawRecords};
+  use super::{records::RawRecords, TcpOptions};
   use crate::{
     addr_bridge::AddrBridge,
     config::EndpointConfig,
     endpoint::Endpoint,
     event::{Event, PushPullKind},
-    streams::{ConnectInfo, ExchangeId, ExchangeRef, StreamAction, StreamEndpoint},
+    streams::{
+      test_support::{addr, endpoint},
+      ConnectInfo, ExchangeId, ExchangeRef, StreamAction, StreamEndpoint,
+    },
   };
 
   /// Identity `AddrBridge` for `A = SocketAddr`, matching the sim harness's
@@ -141,17 +144,6 @@ mod tests {
     fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
       None
     }
-  }
-
-  fn addr(port: u16) -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
-  }
-
-  fn endpoint(local_port: u16) -> Endpoint<SmolStr, SocketAddr> {
-    Endpoint::new(EndpointConfig::new(
-      SmolStr::new(format!("n-{local_port}")),
-      addr(local_port),
-    ))
   }
 
   /// Public-constructor signature check. Mirrors
@@ -1715,7 +1707,7 @@ mod tests {
   #[cfg(feature = "encryption-aes-gcm")]
   #[test]
   fn encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead() {
-    use memberlist_wire::{ENCRYPTED_WRAPPER_OVERHEAD, EncryptionOptions, Keyring, SecretKey};
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey, ENCRYPTED_WRAPPER_OVERHEAD};
     let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7241)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
@@ -1794,7 +1786,7 @@ mod tests {
   #[test]
   fn decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
     use memberlist_wire::{
-      EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey, encode_plain_frame,
+      encode_plain_frame, EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey,
     };
     let ep = endpoint(7205);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
@@ -2773,9 +2765,9 @@ mod tests {
   fn policy_failed_bridge_rejects_ingress_before_reap() {
     use bytes::Bytes;
     use memberlist_wire::{
-      CompressionOptions, EncryptionOptions, Keyring, SecretKey,
       encode_reliable_unit_with_encryption,
       typed::{PushNodeState, State},
+      CompressionOptions, EncryptionOptions, Keyring, SecretKey,
     };
 
     use crate::endpoint::Endpoint;
