@@ -12,12 +12,10 @@ mod tests {
     time::{Duration, Instant},
   };
 
-  use crate::{streams::bridge::StreamBridge, tls::records::TlsRecords};
-
-  /// Reliable-unit ceiling for the bridge under test — the `EndpointConfig`
-  /// default `max_stream_frame_size`; these connection-map tests never feed a
-  /// frame, so any generous value serves.
-  const TEST_RELIABLE_MAX: usize = 64 * 1024 * 1024;
+  use crate::{
+    streams::{bridge::StreamBridge, test_support::TEST_RELIABLE_MAX},
+    tls::records::TlsRecords,
+  };
 
   fn a_bridge() -> StreamBridge<SmolStr, SocketAddr, TlsRecords> {
     let records = TlsRecords::server(Arc::new(test_server())).unwrap();

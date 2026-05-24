@@ -14,7 +14,7 @@ use crate::{
 mod tests {
   use super::*;
   use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::SocketAddr,
     time::{Duration, Instant},
   };
 
@@ -26,29 +26,18 @@ mod tests {
     config::EndpointConfig,
     error::StreamError,
     event::Event,
-    streams::{bridge::StreamBridge, phase::StreamPhase},
+    streams::{
+      bridge::StreamBridge,
+      phase::StreamPhase,
+      test_support::{
+        addr, handshaking_pair as shared_handshaking_pair, label, phase_label, TEST_RELIABLE_MAX,
+      },
+    },
   };
 
-  fn addr(port: u16) -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
-  }
-
-  fn label(s: &str) -> Option<Vec<u8>> {
-    Some(s.as_bytes().to_vec())
-  }
-
-  /// Reliable-unit ceiling for the bridge test pairs — the `EndpointConfig`
-  /// default `max_stream_frame_size`, generous above every frame these tests
-  /// exchange.
-  const TEST_RELIABLE_MAX: usize = 64 * 1024 * 1024;
-
-  /// Build a `Handshaking` dialer/acceptor bridge pair over a shared label.
-  /// The dialer queues its outbound `[12][len][label]` prefix eagerly at
-  /// construction; the acceptor's prefix is queued lazily once its inbound
-  /// label is validated (see `RawRecords` module docs). The dialer is never
-  /// `is_handshaking()` (so it promotes immediately); the acceptor stays
-  /// handshaking until it reads and validates the inbound label. Analog of
-  /// the TLS test's `handshaking_pair`.
+  /// Build a `Handshaking` dialer/acceptor `RawRecords` bridge pair over a
+  /// shared cluster label. Delegates to the shared `handshaking_pair` with
+  /// the TCP-specific dialer/acceptor constructors.
   fn handshaking_pair(
     cluster: &str,
     deadline: Instant,
@@ -56,23 +45,10 @@ mod tests {
     StreamBridge<SmolStr, SocketAddr, RawRecords>,
     StreamBridge<SmolStr, SocketAddr, RawRecords>,
   ) {
-    let dialer = RawRecords::dialer(label(cluster), false);
-    let acceptor = RawRecords::acceptor(label(cluster), false);
-    (
-      StreamBridge::new(
-        dialer,
-        deadline,
-        memberlist_wire::CompressionOptions::new(),
-        memberlist_wire::EncryptionOptions::new(),
-        TEST_RELIABLE_MAX,
-      ),
-      StreamBridge::new(
-        acceptor,
-        deadline,
-        memberlist_wire::CompressionOptions::new(),
-        memberlist_wire::EncryptionOptions::new(),
-        TEST_RELIABLE_MAX,
-      ),
+    shared_handshaking_pair(
+      deadline,
+      || RawRecords::dialer(label(cluster), false),
+      || RawRecords::acceptor(label(cluster), false),
     )
   }
 
@@ -216,7 +192,7 @@ mod tests {
         StreamPhase::Established(BridgePhase::BothClosed)
       ),
       "client reached BothClosed (sent request + FIN, saw peer FIN), got {:?}",
-      debug_phase(client.phase())
+      phase_label(client.phase())
     );
     assert!(
       matches!(
@@ -224,7 +200,7 @@ mod tests {
         StreamPhase::Established(BridgePhase::BothClosed)
       ),
       "server reached BothClosed, got {:?}",
-      debug_phase(server.phase())
+      phase_label(server.phase())
     );
 
     // Terminal D1 reap on the server: the decoded UserData surfaces as
@@ -292,7 +268,7 @@ mod tests {
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Transport(_)))
       ),
       "the reject is a Transport failure, got {:?}",
-      debug_phase(server.phase())
+      phase_label(server.phase())
     );
 
     // `drain_then_reap` on a no-Stream bridge is a clean no-op (the coordinator
@@ -360,7 +336,7 @@ mod tests {
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Transport(_)))
       ),
       "the reject is a Transport failure, got {:?}",
-      debug_phase(client.phase())
+      phase_label(client.phase())
     );
     assert!(client.is_terminal());
 
@@ -440,7 +416,7 @@ mod tests {
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Timeout))
       ),
       "the timeout maps to Failed(Timeout), got {:?}",
-      debug_phase(server.phase())
+      phase_label(server.phase())
     );
     assert!(
       !server.is_handshaking(),
@@ -554,7 +530,7 @@ mod tests {
     assert!(
       server.is_terminal(),
       "the recv-half FIN fired and the one-way exchange reaped, got {:?}",
-      debug_phase(server.phase())
+      phase_label(server.phase())
     );
 
     server.drain_then_reap(&mut ep_s, now);
@@ -663,7 +639,7 @@ mod tests {
       ),
       "the latched pre-promote FIN drove RecvClosed → BothClosed this tick, \
        got {:?}",
-      debug_phase(server.phase())
+      phase_label(server.phase())
     );
     assert!(server.is_terminal());
 
@@ -729,7 +705,7 @@ mod tests {
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
       ),
       "truncation maps to Failed(Decode), got {:?}",
-      debug_phase(client.phase())
+      phase_label(client.phase())
     );
     assert!(client.is_terminal(), "a truncated exchange is terminal");
     assert!(
@@ -745,7 +721,7 @@ mod tests {
   #[test]
   fn stream_reliable_unit_accumulation_roundtrips() {
     use memberlist_wire::{
-      CompressAlgorithm, CompressionOptions, encode_reliable_unit, take_reliable_unit,
+      encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
     };
     let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
@@ -772,7 +748,7 @@ mod tests {
     // original. Feeding the unit whole would have decoded fine; the bug was
     // that a SPLIT unit tore the exchange down.
     use memberlist_wire::{
-      CompressAlgorithm, CompressionOptions, encode_reliable_unit, take_reliable_unit,
+      encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
     };
     let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
@@ -805,7 +781,7 @@ mod tests {
   fn stream_reliable_unit_disabled_is_byte_identical() {
     // Disabled compression: the unit payload is the framed bytes verbatim,
     // and the round-trip is byte-identical end to end (no wrapper).
-    use memberlist_wire::{CompressionOptions, encode_reliable_unit, take_reliable_unit};
+    use memberlist_wire::{encode_reliable_unit, take_reliable_unit, CompressionOptions};
     let opts = CompressionOptions::new();
     let framed = b"plain reliable frame bytes that are not compressed".to_vec();
     let unit = encode_reliable_unit(&opts, &framed);
@@ -820,8 +796,8 @@ mod tests {
   #[test]
   fn stream_reliable_unit_encrypted_roundtrip() {
     use memberlist_wire::{
-      EncryptionOptions, Keyring, SecretKey, encode_reliable_unit_with_encryption,
-      take_reliable_unit_with_encryption,
+      encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption, EncryptionOptions,
+      Keyring, SecretKey,
     };
     let comp = memberlist_wire::CompressionOptions::new();
     let enc = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
@@ -848,8 +824,8 @@ mod tests {
   #[test]
   fn stream_reliable_unit_encrypted_then_compressed_roundtrip() {
     use memberlist_wire::{
-      CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, SecretKey,
-      encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption,
+      encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption, CompressAlgorithm,
+      CompressionOptions, EncryptionOptions, Keyring, SecretKey,
     };
     let comp = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
@@ -861,18 +837,5 @@ mod tests {
       .expect("decode ok")
       .expect("complete unit");
     assert_eq!(back, framed);
-  }
-
-  /// Render a `StreamPhase` for assert messages without requiring `Debug` on the
-  /// (private, accessor-only) enum.
-  fn debug_phase(p: &StreamPhase) -> &'static str {
-    match p {
-      StreamPhase::Handshaking => "Handshaking",
-      StreamPhase::Established(BridgePhase::Active) => "Established(Active)",
-      StreamPhase::Established(BridgePhase::SendClosed) => "Established(SendClosed)",
-      StreamPhase::Established(BridgePhase::RecvClosed) => "Established(RecvClosed)",
-      StreamPhase::Established(BridgePhase::BothClosed) => "Established(BothClosed)",
-      StreamPhase::Established(BridgePhase::Failed(_)) => "Established(Failed)",
-    }
   }
 }

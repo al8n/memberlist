@@ -14,7 +14,7 @@ use crate::{
 mod tests {
   use super::*;
   use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
   };
@@ -28,18 +28,13 @@ mod tests {
     config::EndpointConfig,
     error::StreamError,
     event::Event,
-    streams::{bridge::StreamBridge, phase::StreamPhase},
+    streams::{
+      bridge::StreamBridge,
+      phase::StreamPhase,
+      test_support::{addr, handshaking_pair as shared_handshaking_pair, phase_label},
+    },
     tls::options::tests::{test_client, test_server},
   };
-
-  fn addr(port: u16) -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
-  }
-
-  /// Reliable-unit ceiling for the bridge test pairs — the `EndpointConfig`
-  /// default `max_stream_frame_size`, generous above every frame these tests
-  /// exchange (including the 48 KiB coalesced-large-frame case).
-  const TEST_RELIABLE_MAX: usize = 64 * 1024 * 1024;
 
   /// Build a `Handshaking` client/server bridge pair sharing the accept-any
   /// test configs (real rustls handshake, deterministic — no test-only crypto
@@ -50,27 +45,16 @@ mod tests {
     StreamBridge<SmolStr, SocketAddr, TlsRecords>,
     StreamBridge<SmolStr, SocketAddr, TlsRecords>,
   ) {
-    let client = TlsRecords::client(
-      Arc::new(test_client()),
-      ServerName::try_from("localhost").unwrap(),
-    )
-    .unwrap();
-    let server = TlsRecords::server(Arc::new(test_server())).unwrap();
-    (
-      StreamBridge::new(
-        client,
-        deadline,
-        memberlist_wire::CompressionOptions::new(),
-        memberlist_wire::EncryptionOptions::new(),
-        TEST_RELIABLE_MAX,
-      ),
-      StreamBridge::new(
-        server,
-        deadline,
-        memberlist_wire::CompressionOptions::new(),
-        memberlist_wire::EncryptionOptions::new(),
-        TEST_RELIABLE_MAX,
-      ),
+    shared_handshaking_pair(
+      deadline,
+      || {
+        TlsRecords::client(
+          Arc::new(test_client()),
+          ServerName::try_from("localhost").unwrap(),
+        )
+        .unwrap()
+      },
+      || TlsRecords::server(Arc::new(test_server())).unwrap(),
     )
   }
 
@@ -223,7 +207,7 @@ mod tests {
         StreamPhase::Established(BridgePhase::BothClosed)
       ),
       "client reached BothClosed (sent request + close_notify, saw peer close_notify), got {:?}",
-      debug_phase(client.phase())
+      phase_label(client.phase())
     );
     assert!(
       matches!(
@@ -231,7 +215,7 @@ mod tests {
         StreamPhase::Established(BridgePhase::BothClosed)
       ),
       "server reached BothClosed, got {:?}",
-      debug_phase(server.phase())
+      phase_label(server.phase())
     );
 
     // Terminal D1 reap on the server: the decoded UserData surfaces as
@@ -615,7 +599,7 @@ mod tests {
     assert!(
       server.is_terminal(),
       "the recv-half close anchor fired and the one-way exchange reaped, got {:?}",
-      debug_phase(server.phase())
+      phase_label(server.phase())
     );
 
     server.drain_then_reap(&mut ep_s, now);
@@ -673,7 +657,7 @@ mod tests {
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Transport(_)))
       ),
       "the reject is a Transport failure, got {:?}",
-      debug_phase(server.phase())
+      phase_label(server.phase())
     );
 
     // `drain_then_reap` on a no-Stream bridge is a clean no-op (the coordinator
@@ -730,7 +714,7 @@ mod tests {
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
       ),
       "truncation maps to Failed(Decode), got {:?}",
-      debug_phase(client.phase())
+      phase_label(client.phase())
     );
     assert!(client.is_terminal(), "a truncated exchange is terminal");
     assert!(
@@ -787,7 +771,7 @@ mod tests {
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Timeout))
       ),
       "the handshake timeout maps to Failed(Timeout), got {:?}",
-      debug_phase(client.phase())
+      phase_label(client.phase())
     );
     assert!(
       !client.is_handshaking(),
@@ -817,6 +801,7 @@ mod tests {
   #[cfg(feature = "encryption-aes-gcm")]
   #[test]
   fn tls_bridge_reliable_skips_encryption_when_is_secure() {
+    use crate::streams::test_support::TEST_RELIABLE_MAX;
     use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
     let deadline = Instant::now() + Duration::from_secs(30);
     let client = TlsRecords::client(
@@ -836,18 +821,5 @@ mod tests {
       !bridge.encryption_for_test().is_enabled(),
       "a TLS bridge zeroes the EncryptionOptions regardless of caller intent"
     );
-  }
-
-  /// Render a `StreamPhase` for assert messages without requiring `Debug` on the
-  /// (private, accessor-only) enum.
-  fn debug_phase(p: &StreamPhase) -> &'static str {
-    match p {
-      StreamPhase::Handshaking => "Handshaking",
-      StreamPhase::Established(BridgePhase::Active) => "Established(Active)",
-      StreamPhase::Established(BridgePhase::SendClosed) => "Established(SendClosed)",
-      StreamPhase::Established(BridgePhase::RecvClosed) => "Established(RecvClosed)",
-      StreamPhase::Established(BridgePhase::BothClosed) => "Established(BothClosed)",
-      StreamPhase::Established(BridgePhase::Failed(_)) => "Established(Failed)",
-    }
   }
 }
