@@ -51,7 +51,7 @@ pub trait Broadcast: core::fmt::Debug + Send + Sync + 'static {
 }
 
 #[derive(Debug)]
-struct LimitedBroadcast<B: Broadcast> {
+struct LimitedBroadcast<B> {
   /// btree-key[0]: number of transmissions attempted so far.
   transmits: usize,
   /// btree-key[1]: encoded length (newer/smaller items prioritized within tier).
@@ -128,6 +128,10 @@ impl<B: Broadcast> PartialOrd<&LimitedBroadcast<B>> for Cmp {
 /// Sync version of `memberlist-core::queue::BroadcastQueue`. The number
 /// of nodes is supplied per-call rather than via a `NodeCalculator` trait.
 #[derive(Debug)]
+// Rule §8 storage-shape exception: `B::Id` (an associated type) appears as the
+// `HashMap` key and `LimitedBroadcast<B>` participates in `BTreeSet` ordering
+// via `Ord`, which itself requires `B: Broadcast`. Both field types cannot be
+// resolved without the bound, so it is retained on the struct and inherent impl.
 pub struct BroadcastQueue<B: Broadcast> {
   retransmit_mult: u32,
   q: BTreeSet<LimitedBroadcast<B>>,
@@ -147,11 +151,13 @@ impl<B: Broadcast> BroadcastQueue<B> {
   }
 
   /// Number of currently queued broadcasts.
+  #[inline(always)]
   pub fn num_queued(&self) -> usize {
     self.q.len()
   }
 
   /// True iff the queue is empty.
+  #[inline(always)]
   pub fn is_empty(&self) -> bool {
     self.q.is_empty()
   }
@@ -459,11 +465,13 @@ impl<I, A> MemberlistBroadcast<I, A> {
   }
 
   /// The peer id this broadcast is about.
-  pub const fn node(&self) -> &I {
+  #[inline(always)]
+  pub const fn node_ref(&self) -> &I {
     &self.node
   }
 
   /// The wire-format message to gossip.
+  #[inline(always)]
   pub const fn message_ref(&self) -> &memberlist_wire::typed::Message<I, A> {
     &self.msg
   }

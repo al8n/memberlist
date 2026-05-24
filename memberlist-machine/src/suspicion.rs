@@ -110,23 +110,27 @@ impl<I: Eq + std::hash::Hash + CheapClone> Suspicion<I> {
   }
 
   /// The current absolute deadline at which this suspicion times out.
-  pub fn deadline(&self) -> Instant {
+  #[inline(always)]
+  pub const fn deadline(&self) -> Instant {
     self.deadline
   }
 
   /// The number of distinct confirmations received (not counting the original
   /// suspector).
-  pub fn confirmations(&self) -> u32 {
+  #[inline(always)]
+  pub const fn confirmations(&self) -> u32 {
     self.n
   }
 
   /// The threshold at which the deadline reaches `min`.
-  pub fn k(&self) -> u32 {
+  #[inline(always)]
+  pub const fn k(&self) -> u32 {
     self.k
   }
 
   /// When suspicion started (used by tests and metrics).
-  pub fn started_at(&self) -> Instant {
+  #[inline(always)]
+  pub const fn started_at(&self) -> Instant {
     self.start
   }
 }

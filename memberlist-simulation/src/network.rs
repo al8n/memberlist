@@ -11,8 +11,7 @@ use std::{
 };
 
 use memberlist_machine::{
-  CompoundTransmit, Endpoint, EndpointConfig, Event, PacketTransmit, Stream, StreamCommand,
-  StreamError, Transmit,
+  Endpoint, EndpointConfig, Event, Stream, StreamCommand, StreamError, Transmit,
 };
 use smol_str::SmolStr;
 
@@ -79,7 +78,7 @@ impl Network {
     cfg: EndpointConfig<SmolStr, SocketAddr>,
     now: Instant,
   ) -> SocketAddr {
-    let addr = *cfg.advertise_addr();
+    let addr = *cfg.advertise_addr_ref();
     let mut ep = Endpoint::new(cfg);
     ep.start_scheduling(now);
     self.endpoints.insert(addr, ep);
@@ -214,14 +213,20 @@ impl Network {
       while let Some(tx) = ep.poll_transmit() {
         match tx {
           // A plain Packet is one single-message datagram.
-          Transmit::Packet(PacketTransmit { to, message }) => pending.push((to, vec![message])),
+          Transmit::Packet(p) => {
+            let (to, message) = p.into_parts();
+            pending.push((to, vec![message]));
+          }
           // INTERIM (compound workstream): the sim has no wire codec, but a
           // compound is still ONE datagram — its inner messages are
           // delivered (or dropped) together, in order, as a real driver's
           // single encode_outgoing_compound `send_to` would. Per-message
           // enqueue would mis-model the datagram boundary for fault
           // injection.
-          Transmit::Compound(CompoundTransmit { to, messages }) => pending.push((to, messages)),
+          Transmit::Compound(cmp) => {
+            let (to, messages) = cmp.into_parts();
+            pending.push((to, messages));
+          }
         }
       }
       for (to, messages) in pending {

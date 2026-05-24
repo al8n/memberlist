@@ -172,16 +172,23 @@ fn teardown_exchange(action: &StreamAction) -> ExchangeId {
 /// address and, via `R::dial_context`, [`AddrBridge::server_name`] for the
 /// per-dial verification identity (the latter is unused on transports — plain
 /// TCP — that need no record-layer certificate verification).
+// Storage-shape bound: the struct bag is the MINIMUM required for the named
+// field types to be well-formed (rule §8 exception).
+//   `ep: Endpoint<I, A>` — `Endpoint`'s own storage-shape bound demands
+//     `I: Id + Data + CheapClone` and the full `A` bag, so naming the field
+//     forces both into this struct's `where` clause.
+//   `cfg: R::Options` and `conns: StreamConns<I, A, R>` — the `R::Options`
+//     associated type and the `StreamConns` type both demand
+//     `R: StreamTransport`.
+// `B` carries no struct-level bound (only `_addr: PhantomData<fn(B)>` holds
+// it; the `AddrBridge<A>` bound is added at the impl level only on the block
+// whose methods call `B::to_socket` / `R::dial_context::<A, B>`). The
+// heavier `I: Debug + Display + Send + Sync + 'static` bounds the SWIM-ops
+// methods need are likewise carried on the impl blocks below that need
+// them, not on the struct.
 pub struct StreamEndpoint<I, A, B, R>
 where
-  I: nodecraft::Id
-    + memberlist_wire::Data
-    + nodecraft::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: nodecraft::Id + memberlist_wire::Data + nodecraft::CheapClone,
   A: memberlist_wire::Data
     + nodecraft::CheapClone
     + Eq
@@ -279,16 +286,17 @@ where
   _addr: core::marker::PhantomData<fn(B)>,
 }
 
+// Accessors whose bodies touch only non-generic fields (`compression`,
+// `encryption`, `out_transmit`, `pending_connects`, `pending_teardowns`,
+// `mem_ingress`) or delegate to `Endpoint`'s own accessor surface
+// (`endpoint()`, `gossip_mtu()`). Re-states only the struct's
+// well-formedness bag — no method-side additions, so the heavier
+// `I: Debug + Display + Send + Sync + 'static` and `B: AddrBridge<A>`
+// constraints carried by the impl blocks below are NOT required to call
+// any of these.
 impl<I, A, B, R> StreamEndpoint<I, A, B, R>
 where
-  I: nodecraft::Id
-    + memberlist_wire::Data
-    + nodecraft::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: nodecraft::Id + memberlist_wire::Data + nodecraft::CheapClone,
   A: memberlist_wire::Data
     + nodecraft::CheapClone
     + Eq
@@ -298,41 +306,12 @@ where
     + Send
     + Sync
     + 'static,
-  B: AddrBridge<A>,
   R: StreamTransport,
 {
-  /// Build the coordinator from a membership [`Endpoint`] and the record
-  /// layer's options bundle (`R::Options`).
-  pub fn new(ep: Endpoint<I, A>, cfg: R::Options) -> Self {
-    Self {
-      ep,
-      cfg,
-      compression: memberlist_wire::CompressionOptions::new(),
-      encryption: memberlist_wire::EncryptionOptions::new(),
-      conns: StreamConns::new(),
-      exchanges: HashMap::new(),
-      out_transmit: std::collections::VecDeque::new(),
-      pending_connects: std::collections::VecDeque::new(),
-      pending_teardowns: std::collections::VecDeque::new(),
-      mem_ingress: std::collections::VecDeque::new(),
-      dial_pending: std::collections::VecDeque::new(),
-      last_now: None,
-      policy_reap_pending: false,
-      _addr: core::marker::PhantomData,
-    }
-  }
-
   /// Borrow the inner membership endpoint (members / queue_user_broadcast / …).
-  pub fn endpoint(&self) -> &Endpoint<I, A> {
+  #[inline(always)]
+  pub fn endpoint_ref(&self) -> &Endpoint<I, A> {
     &self.ep
-  }
-
-  /// Number of active reliable-exchange bridges (one per in-flight push/pull,
-  /// reliable-ping, or user-message exchange, plus any still-handshaking
-  /// dial/accept). Observation-only, for a driver/test to assert no bridge
-  /// leaked after an exchange completed or its connection dropped.
-  pub fn live_bridge_count(&self) -> usize {
-    self.conns.len()
   }
 
   /// The configured plaintext-byte ceiling for an outbound gossip datagram.
@@ -342,19 +321,6 @@ where
   /// encryption is enabled.
   pub fn gossip_mtu(&self) -> usize {
     self.ep.gossip_mtu()
-  }
-
-  /// Build the coordinator with an explicit cross-transport compression
-  /// configuration. [`Self::new`] is `with_compression` with compression
-  /// disabled.
-  pub fn with_compression(
-    ep: Endpoint<I, A>,
-    cfg: R::Options,
-    compression: memberlist_wire::CompressionOptions,
-  ) -> Self {
-    let mut this = Self::new(ep, cfg);
-    this.compression = compression;
-    this
   }
 
   /// The configured cross-transport compression options.
@@ -397,6 +363,245 @@ where
     }
   }
 
+  /// The configured cross-transport encryption options.
+  pub fn encryption_options(&self) -> &memberlist_wire::EncryptionOptions {
+    &self.encryption
+  }
+
+  /// Encrypt one outbound gossip datagram for the wire. The codec-owning
+  /// driver calls this on the already-compressed gossip bytes (from
+  /// [`Self::compress_gossip`]) before handing them to the UDP socket. When
+  /// encryption is disabled the bytes are returned unchanged.
+  ///
+  /// The on-wire byte order is therefore `[Encrypted[Compressed[frame]]]`
+  /// when both transforms are enabled and compression won, or
+  /// `[Encrypted[frame]]` when compression is disabled or did not shrink.
+  ///
+  /// Returns `Err` when encryption is configured but the backend rejects the
+  /// request — typically [`memberlist_wire::EncryptionError::UnsupportedAlgorithm`]
+  /// for a primary key whose backend was not built into this binary. The
+  /// driver MUST drop the gossip in that case; emitting unencrypted bytes
+  /// on an encrypted-cluster path would bypass authentication silently.
+  pub fn encrypt_gossip(
+    &self,
+    datagram: &[u8],
+  ) -> Result<Vec<u8>, memberlist_wire::EncryptionError> {
+    let keyring = match self.encryption.keyring() {
+      Some(kr) => kr,
+      None => return Ok(datagram.to_vec()),
+    };
+    let key = keyring.primary_ref();
+    memberlist_wire::encode_encrypted_frame(key.algorithm(), key, datagram)
+  }
+
+  /// Unwrap one inbound gossip datagram. The codec-owning driver calls this
+  /// on the raw bytes from [`Self::poll_memberlist_ingress`] BEFORE decoding
+  /// frames — it strips the Encrypted-then-Compressed wrapper stack in one
+  /// pass (each layer identity when its wrapper is absent). A datagram with
+  /// no Encrypted wrapper is returned unchanged when no keyring is
+  /// configured; when a keyring IS configured the strict-mode entry check
+  /// rejects any non-Encrypted leading tag. A corrupt or unknown-algorithm
+  /// wrapper, or a frame the keyring cannot decrypt, is an `Err` — the
+  /// driver drops the datagram (gossip is lossy and self-healing).
+  ///
+  /// This is the SINGLE canonical ingress unwrap on the coordinator. The
+  /// outbound side uses [`Self::compress_gossip`] → [`Self::encrypt_gossip`]
+  /// (compress, then encrypt) so the on-wire order is
+  /// `[Encrypted[Compressed[frame]]]`; this helper reverses both layers, so
+  /// authentication never depends on integration discipline.
+  pub fn decrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, memberlist_wire::FrameError> {
+    // Ceiling is the gossip MTU — the maximum size any compliant gossip
+    // datagram decompresses to. A wrapper claiming more is not a compliant
+    // datagram and is rejected. The encryption-aware unwrap consumes an
+    // Encrypted wrapper through the keyring, then strips a Compressed
+    // wrapper if present; a non-Encrypted-led datagram is returned unchanged
+    // when no keyring is configured (the strict-mode entry check is gated
+    // on `encryption.is_enabled()`).
+    memberlist_wire::unwrap_transforms_with_encryption(
+      datagram,
+      self.ep.gossip_mtu(),
+      &self.encryption,
+    )
+    .map(|cow| cow.into_owned())
+  }
+
+  /// Next outbound per-exchange bytes `(exchange, peer, bytes)`, if any.
+  /// The driver writes `bytes` on the transport connection for `exchange` (to
+  /// `peer`).
+  pub fn poll_transport_transmit(&mut self) -> Option<(ExchangeId, SocketAddr, Bytes)> {
+    self.out_transmit.pop_front()
+  }
+
+  /// Next outbound transport directive ([`StreamAction`]), if any.
+  ///
+  /// The coordinator self-orders its outputs so a driver doing the natural
+  /// "drain actions, drain transmits, repeat until idle" loop is correct:
+  ///
+  /// - Every queued [`StreamAction::Connect`] surfaces before any queued
+  ///   [`StreamAction::Shutdown`] / [`StreamAction::Close`], so a fresh dial's
+  ///   connection opens before a same-tick `Shutdown` / `Close` targets an
+  ///   existing bridge's connection.
+  /// - A `Shutdown` / `Close` for an exchange is withheld while
+  ///   [`Self::poll_transport_transmit`] still holds bytes tagged with that
+  ///   exchange's [`ExchangeId`]. Applying the teardown before its last bytes
+  ///   are written would orphan them — a transport `shutdown(write)` closes the
+  ///   send half and subsequent writes fail — so the driver MUST drain the
+  ///   transmit queue first. The gate makes the natural drain loop correct
+  ///   without burdening the driver with an explicit phase contract.
+  pub fn poll_action(&mut self) -> Option<StreamAction> {
+    if let Some(connect) = self.pending_connects.pop_front() {
+      return Some(connect);
+    }
+    // Find the first teardown whose exchange has no pending transmit bytes;
+    // skip past (but retain in producer order) any whose bytes are still
+    // queued. The retained teardowns will surface once the driver drains the
+    // matching bytes via `poll_transport_transmit`.
+    let idx = self
+      .pending_teardowns
+      .iter()
+      .position(|action| !self.exchange_has_pending_bytes(teardown_exchange(action)))?;
+    self.pending_teardowns.remove(idx)
+  }
+
+  /// `true` iff [`Self::out_transmit`] holds at least one chunk tagged with
+  /// the given exchange handle. Used by [`Self::poll_action`] to withhold a
+  /// teardown for an exchange whose last bytes have not yet been drained.
+  pub(crate) fn exchange_has_pending_bytes(&self, id: ExchangeId) -> bool {
+    self.out_transmit.iter().any(|(eid, _, _)| *eid == id)
+  }
+
+  /// Drop any [`Self::out_transmit`] chunks tagged with `exchange`. Called
+  /// from the reap path BEFORE [`Self::collect_bridge_transmits`] so a
+  /// Failed bridge does not leak stale bytes through
+  /// [`Self::poll_transport_transmit`] after the per-exchange teardown gate
+  /// releases its `Close`. A bridge can sit on queued `out_transmit` bytes
+  /// (its label prefix, a request, …) from an earlier tick when its
+  /// deadline elapses; without the purge a driver doing the natural
+  /// "drain actions, drain transmits, repeat until idle" loop would write
+  /// those stale bytes to the peer's socket between the gate's release and
+  /// the `Close` — delivering membership state from an exchange the local
+  /// node has already failed. The dropped bytes are safe to discard because
+  /// the bridge is being torn down: any further send-half progress is
+  /// forbidden by the `Failed` phase, and the bridge's remaining outbound
+  /// buffer is dropped with the bridge itself.
+  ///
+  /// Clean (`BothClosed`) reaps have an empty pre-reap queue for the
+  /// exchange — a server's response is encoded inside
+  /// [`StreamBridge::drain_then_reap`]'s `SendPushPullResponse` branch and
+  /// collected by [`Self::collect_bridge_transmits`] AFTER this purge runs,
+  /// so the response chunk is preserved while pre-failure stragglers are
+  /// dropped.
+  fn purge_transmit_for(&mut self, exchange: ExchangeId) {
+    self.out_transmit.retain(|(eid, _, _)| *eid != exchange);
+  }
+
+  /// Drop any pending [`StreamAction::Connect`] still queued for `exchange`.
+  /// Symmetric to [`Self::purge_transmit_for`], but for the action queue
+  /// instead of the transmit queue.
+  ///
+  /// Called from the dial-failure reap path
+  /// ([`Self::service_handshake_completions`]'s `dial_succeeded(None)` branch)
+  /// so a driver does not observe a `Connect` for an exchange the coordinator
+  /// has already failed. Without this purge, a driver doing the natural
+  /// "drain actions, drain transmits, repeat" loop would dequeue the queued
+  /// `Connect` (Connects always surface before teardowns —
+  /// see [`Self::poll_action`]'s ordering contract), open the transport socket,
+  /// then drain the same exchange's `Close` and tear it down — wasted work
+  /// at best, and a vector for label disclosure (the bridge's
+  /// record-layer outbound buffer still holds the eager-queued local label
+  /// until `bridge.fail_dial_retired()` clears it) if any path bypassed the
+  /// clear.
+  ///
+  /// `pending_connects` only ever holds `StreamAction::Connect` (its discipline
+  /// is enforced by the `debug_assert!` at each `push_back` site); the
+  /// catch-all arm is defensive — variants other than `Connect` retain.
+  fn purge_pending_connect_for(&mut self, exchange: ExchangeId) {
+    self.pending_connects.retain(|action| match action {
+      StreamAction::Connect(info) => info.id() != exchange,
+      _ => true,
+    });
+  }
+
+  /// Next raw inbound gossip datagram, if any. The codec-owning layer drains
+  /// this, decodes each `Message`, and feeds it back through
+  /// [`Self::handle_packet`].
+  pub fn poll_memberlist_ingress(&mut self) -> Option<(SocketAddr, Bytes)> {
+    self.mem_ingress.pop_front()
+  }
+}
+
+// The full SWIM bag on `I`, but no `B`. Methods that delegate to
+// `Endpoint`'s full-bag surface (`poll_event`, `poll_transmit`,
+// `poll_timeout`, `handle_packet`, `handle_alive`, `handle_suspect`,
+// `requeue_event`, `start_probe`, `leave`), drive `StreamConns` /
+// `StreamBridge` ops (whose impls require the full bag), or run the
+// internal bridge-pump / mint / reap helpers. The address-bridge plug
+// `B` is consulted only by the impl block below — every method here
+// is callable on a `StreamEndpoint` whose `B` carries no extra bound.
+impl<I, A, B, R> StreamEndpoint<I, A, B, R>
+where
+  I: nodecraft::Id
+    + memberlist_wire::Data
+    + nodecraft::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  A: memberlist_wire::Data
+    + nodecraft::CheapClone
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  R: StreamTransport,
+{
+  /// Build the coordinator from a membership [`Endpoint`] and the record
+  /// layer's options bundle (`R::Options`).
+  pub fn new(ep: Endpoint<I, A>, cfg: R::Options) -> Self {
+    Self {
+      ep,
+      cfg,
+      compression: memberlist_wire::CompressionOptions::new(),
+      encryption: memberlist_wire::EncryptionOptions::new(),
+      conns: StreamConns::new(),
+      exchanges: HashMap::new(),
+      out_transmit: std::collections::VecDeque::new(),
+      pending_connects: std::collections::VecDeque::new(),
+      pending_teardowns: std::collections::VecDeque::new(),
+      mem_ingress: std::collections::VecDeque::new(),
+      dial_pending: std::collections::VecDeque::new(),
+      last_now: None,
+      policy_reap_pending: false,
+      _addr: core::marker::PhantomData,
+    }
+  }
+
+  /// Number of active reliable-exchange bridges (one per in-flight push/pull,
+  /// reliable-ping, or user-message exchange, plus any still-handshaking
+  /// dial/accept). Observation-only, for a driver/test to assert no bridge
+  /// leaked after an exchange completed or its connection dropped.
+  pub fn live_bridge_count(&self) -> usize {
+    self.conns.len()
+  }
+
+  /// Build the coordinator with an explicit cross-transport compression
+  /// configuration. [`Self::new`] is `with_compression` with compression
+  /// disabled.
+  #[must_use]
+  pub fn with_compression(
+    ep: Endpoint<I, A>,
+    cfg: R::Options,
+    compression: memberlist_wire::CompressionOptions,
+  ) -> Self {
+    let mut this = Self::new(ep, cfg);
+    this.compression = compression;
+    this
+  }
+
   /// Build the coordinator with an explicit cross-transport encryption
   /// configuration. [`Self::new`] is `with_encryption` with encryption
   /// disabled.
@@ -406,6 +611,7 @@ where
   /// exchange under a default-disabled coordinator and then rebuilds via
   /// `coord = coord.with_encryption(opts)`, the live bridges receive the new
   /// policy too.
+  #[must_use]
   pub fn with_encryption(mut self, encryption: memberlist_wire::EncryptionOptions) -> Self {
     self.set_encryption_options(encryption);
     self
@@ -592,68 +798,6 @@ where
     self.encryption = encryption;
   }
 
-  /// The configured cross-transport encryption options.
-  pub fn encryption_options(&self) -> &memberlist_wire::EncryptionOptions {
-    &self.encryption
-  }
-
-  /// Encrypt one outbound gossip datagram for the wire. The codec-owning
-  /// driver calls this on the already-compressed gossip bytes (from
-  /// [`Self::compress_gossip`]) before handing them to the UDP socket. When
-  /// encryption is disabled the bytes are returned unchanged.
-  ///
-  /// The on-wire byte order is therefore `[Encrypted[Compressed[frame]]]`
-  /// when both transforms are enabled and compression won, or
-  /// `[Encrypted[frame]]` when compression is disabled or did not shrink.
-  ///
-  /// Returns `Err` when encryption is configured but the backend rejects the
-  /// request — typically [`memberlist_wire::EncryptionError::UnsupportedAlgorithm`]
-  /// for a primary key whose backend was not built into this binary. The
-  /// driver MUST drop the gossip in that case; emitting unencrypted bytes
-  /// on an encrypted-cluster path would bypass authentication silently.
-  pub fn encrypt_gossip(
-    &self,
-    datagram: &[u8],
-  ) -> Result<Vec<u8>, memberlist_wire::EncryptionError> {
-    let keyring = match self.encryption.keyring() {
-      Some(kr) => kr,
-      None => return Ok(datagram.to_vec()),
-    };
-    let key = keyring.primary();
-    memberlist_wire::encode_encrypted_frame(key.algorithm(), key, datagram)
-  }
-
-  /// Unwrap one inbound gossip datagram. The codec-owning driver calls this
-  /// on the raw bytes from [`Self::poll_memberlist_ingress`] BEFORE decoding
-  /// frames — it strips the Encrypted-then-Compressed wrapper stack in one
-  /// pass (each layer identity when its wrapper is absent). A datagram with
-  /// no Encrypted wrapper is returned unchanged when no keyring is
-  /// configured; when a keyring IS configured the strict-mode entry check
-  /// rejects any non-Encrypted leading tag. A corrupt or unknown-algorithm
-  /// wrapper, or a frame the keyring cannot decrypt, is an `Err` — the
-  /// driver drops the datagram (gossip is lossy and self-healing).
-  ///
-  /// This is the SINGLE canonical ingress unwrap on the coordinator. The
-  /// outbound side uses [`Self::compress_gossip`] → [`Self::encrypt_gossip`]
-  /// (compress, then encrypt) so the on-wire order is
-  /// `[Encrypted[Compressed[frame]]]`; this helper reverses both layers, so
-  /// authentication never depends on integration discipline.
-  pub fn decrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, memberlist_wire::FrameError> {
-    // Ceiling is the gossip MTU — the maximum size any compliant gossip
-    // datagram decompresses to. A wrapper claiming more is not a compliant
-    // datagram and is rejected. The encryption-aware unwrap consumes an
-    // Encrypted wrapper through the keyring, then strips a Compressed
-    // wrapper if present; a non-Encrypted-led datagram is returned unchanged
-    // when no keyring is configured (the strict-mode entry check is gated
-    // on `encryption.is_enabled()`).
-    memberlist_wire::unwrap_transforms_with_encryption(
-      datagram,
-      self.ep.gossip_mtu(),
-      &self.encryption,
-    )
-    .map(|cow| cow.into_owned())
-  }
-
   /// Initiate one SWIM probe tick on the inner membership endpoint.
   ///
   /// Pass-through to [`Endpoint::start_probe`]; sets `last_now`. The probe
@@ -794,103 +938,6 @@ where
     best
   }
 
-  /// Next outbound per-exchange bytes `(exchange, peer, bytes)`, if any.
-  /// The driver writes `bytes` on the transport connection for `exchange` (to
-  /// `peer`).
-  pub fn poll_transport_transmit(&mut self) -> Option<(ExchangeId, SocketAddr, Bytes)> {
-    self.out_transmit.pop_front()
-  }
-
-  /// Next outbound transport directive ([`StreamAction`]), if any.
-  ///
-  /// The coordinator self-orders its outputs so a driver doing the natural
-  /// "drain actions, drain transmits, repeat until idle" loop is correct:
-  ///
-  /// - Every queued [`StreamAction::Connect`] surfaces before any queued
-  ///   [`StreamAction::Shutdown`] / [`StreamAction::Close`], so a fresh dial's
-  ///   connection opens before a same-tick `Shutdown` / `Close` targets an
-  ///   existing bridge's connection.
-  /// - A `Shutdown` / `Close` for an exchange is withheld while
-  ///   [`Self::poll_transport_transmit`] still holds bytes tagged with that
-  ///   exchange's [`ExchangeId`]. Applying the teardown before its last bytes
-  ///   are written would orphan them — a transport `shutdown(write)` closes the
-  ///   send half and subsequent writes fail — so the driver MUST drain the
-  ///   transmit queue first. The gate makes the natural drain loop correct
-  ///   without burdening the driver with an explicit phase contract.
-  pub fn poll_action(&mut self) -> Option<StreamAction> {
-    if let Some(connect) = self.pending_connects.pop_front() {
-      return Some(connect);
-    }
-    // Find the first teardown whose exchange has no pending transmit bytes;
-    // skip past (but retain in producer order) any whose bytes are still
-    // queued. The retained teardowns will surface once the driver drains the
-    // matching bytes via `poll_transport_transmit`.
-    let idx = self
-      .pending_teardowns
-      .iter()
-      .position(|action| !self.exchange_has_pending_bytes(teardown_exchange(action)))?;
-    self.pending_teardowns.remove(idx)
-  }
-
-  /// `true` iff [`Self::out_transmit`] holds at least one chunk tagged with
-  /// the given exchange handle. Used by [`Self::poll_action`] to withhold a
-  /// teardown for an exchange whose last bytes have not yet been drained.
-  pub(crate) fn exchange_has_pending_bytes(&self, id: ExchangeId) -> bool {
-    self.out_transmit.iter().any(|(eid, _, _)| *eid == id)
-  }
-
-  /// Drop any [`Self::out_transmit`] chunks tagged with `exchange`. Called
-  /// from the reap path BEFORE [`Self::collect_bridge_transmits`] so a
-  /// Failed bridge does not leak stale bytes through
-  /// [`Self::poll_transport_transmit`] after the per-exchange teardown gate
-  /// releases its `Close`. A bridge can sit on queued `out_transmit` bytes
-  /// (its label prefix, a request, …) from an earlier tick when its
-  /// deadline elapses; without the purge a driver doing the natural
-  /// "drain actions, drain transmits, repeat until idle" loop would write
-  /// those stale bytes to the peer's socket between the gate's release and
-  /// the `Close` — delivering membership state from an exchange the local
-  /// node has already failed. The dropped bytes are safe to discard because
-  /// the bridge is being torn down: any further send-half progress is
-  /// forbidden by the `Failed` phase, and the bridge's remaining outbound
-  /// buffer is dropped with the bridge itself.
-  ///
-  /// Clean (`BothClosed`) reaps have an empty pre-reap queue for the
-  /// exchange — a server's response is encoded inside
-  /// [`StreamBridge::drain_then_reap`]'s `SendPushPullResponse` branch and
-  /// collected by [`Self::collect_bridge_transmits`] AFTER this purge runs,
-  /// so the response chunk is preserved while pre-failure stragglers are
-  /// dropped.
-  fn purge_transmit_for(&mut self, exchange: ExchangeId) {
-    self.out_transmit.retain(|(eid, _, _)| *eid != exchange);
-  }
-
-  /// Drop any pending [`StreamAction::Connect`] still queued for `exchange`.
-  /// Symmetric to [`Self::purge_transmit_for`], but for the action queue
-  /// instead of the transmit queue.
-  ///
-  /// Called from the dial-failure reap path
-  /// ([`Self::service_handshake_completions`]'s `dial_succeeded(None)` branch)
-  /// so a driver does not observe a `Connect` for an exchange the coordinator
-  /// has already failed. Without this purge, a driver doing the natural
-  /// "drain actions, drain transmits, repeat" loop would dequeue the queued
-  /// `Connect` (Connects always surface before teardowns —
-  /// see [`Self::poll_action`]'s ordering contract), open the transport socket,
-  /// then drain the same exchange's `Close` and tear it down — wasted work
-  /// at best, and a vector for label disclosure (the bridge's
-  /// record-layer outbound buffer still holds the eager-queued local label
-  /// until `bridge.fail_dial_retired()` clears it) if any path bypassed the
-  /// clear.
-  ///
-  /// `pending_connects` only ever holds `StreamAction::Connect` (its discipline
-  /// is enforced by the `debug_assert!` at each `push_back` site); the
-  /// catch-all arm is defensive — variants other than `Connect` retain.
-  fn purge_pending_connect_for(&mut self, exchange: ExchangeId) {
-    self.pending_connects.retain(|action| match action {
-      StreamAction::Connect(info) => info.id() != exchange,
-      _ => true,
-    });
-  }
-
   /// Next typed unreliable memberlist [`Transmit`] for the driver to encode
   /// onto the unreliable (UDP) path, if any.
   ///
@@ -908,13 +955,6 @@ where
     self.ep.poll_transmit()
   }
 
-  /// Next raw inbound gossip datagram, if any. The codec-owning layer drains
-  /// this, decodes each `Message`, and feeds it back through
-  /// [`Self::handle_packet`].
-  pub fn poll_memberlist_ingress(&mut self) -> Option<(SocketAddr, Bytes)> {
-    self.mem_ingress.pop_front()
-  }
-
   /// Feed one decoded unreliable memberlist
   /// [`Message`](memberlist_wire::typed::Message) into the inner membership
   /// endpoint. Pass-through to [`Endpoint::handle_packet`]; the composed unit's
@@ -928,179 +968,6 @@ where
   ) {
     self.ep.handle_packet(from, msg, now);
   }
-
-  /// Inbound gossip datagram from the UDP socket.
-  ///
-  /// **Buffered only** — the codec-owning driver MUST drain via
-  /// [`Self::poll_memberlist_ingress`], decode each frame, feed every typed
-  /// message via [`Self::handle_packet`], and then call
-  /// [`Self::handle_timeout`] to advance time. Running [`Self::handle_timeout`]
-  /// before the buffered gossip is decoded and fed would risk same-instant
-  /// probe / suspect timers firing before a just-arrived `Ack` / `Alive` is
-  /// applied — a spurious fallback ping or false `Suspect` could fire even
-  /// though the resolving message is already sitting in
-  /// [`Self::poll_memberlist_ingress`]'s queue locally. Every UDP datagram is
-  /// carried as gossip (reliable exchanges ride separate transport connections).
-  pub fn handle_gossip(&mut self, from: A, datagram: &[u8], now: Instant) {
-    self.last_now = Some(now);
-    let socket = B::to_socket(&from);
-    self
-      .mem_ingress
-      .push_back((socket, Bytes::copy_from_slice(datagram)));
-  }
-
-  /// Inbound bytes for one exchange's transport connection.
-  ///
-  /// Routes `bytes` into the owning bridge's
-  /// [`StreamBridge::handle_transport_data`], then runs a coordinator tick.
-  ///
-  /// `eof = true` signals the transport `read == 0` half-close anchor — the
-  /// out-of-band peer-FIN a transport with no in-band close (plain TCP)
-  /// delivers in place of an in-band `close_notify` alert. A record layer with
-  /// an in-band close infers its close anchor from `peer_has_closed()` (latched
-  /// on the in-band alert), but a record layer with no in-band close keeps
-  /// `peer_has_closed()` permanently `false` — there is no in-band close
-  /// signal — so the driver MUST surface the FIN via this parameter. The
-  /// bridge's byte pump derives the close-anchor truth value
-  /// (`eof || records.peer_has_closed()`) uniformly across every record layer;
-  /// the explicit flag carries the missing transport signal.
-  ///
-  /// A `(bytes.len() > 0, eof = true)` delivery — bytes followed by an
-  /// observed `read == 0` on the same wake — is fed in two steps: the bytes
-  /// first (one full pump), then an empty-slice EOF (the recv-half retirement
-  /// anchor). The single coordinator tick at the end advances time once.
-  pub fn handle_transport_data(&mut self, id: ExchangeId, bytes: &[u8], eof: bool, now: Instant) {
-    self.last_now = Some(now);
-    if let Some(bridge) = self.conns.get_mut(id) {
-      if !bytes.is_empty() {
-        // Ignoring Err: an `Err` means the bridge terminalized (label /
-        // decode / transport failure); `run_tick`'s `pump_bridges` reaps it
-        // and emits the `Close` action. There is no separate action here.
-        let _ = bridge.handle_transport_data(bytes, now);
-      }
-      if eof {
-        // Empty-slice feed = transport `read == 0` EOF anchor. Drives the
-        // recv-half retirement (`observe_recv_fin`) or the truncation-decode-
-        // fail path depending on the bridge's current state. Run even when the
-        // bytes step terminalized the bridge — the bridge ignores subsequent
-        // feeds in a terminal phase.
-        // Ignoring Err: same as the bytes feed above — terminality is the
-        // reap signal, not the return value.
-        let _ = bridge.handle_transport_data(&[], now);
-      }
-    }
-    self.run_tick(now);
-  }
-
-  /// The driver accepted an inbound transport connection from `from`.
-  /// Allocates an [`ExchangeId`], builds a server-side `Handshaking` bridge
-  /// bounded by [`ACCEPT_HANDSHAKE_DEADLINE`], and returns the handle the
-  /// driver tags this connection's inbound bytes with. The `Stream` is minted
-  /// later (at label / handshake step settled, via `Endpoint::accept_stream`).
-  ///
-  /// An `R::acceptor` construction error (a misconfigured record layer) is
-  /// unrecoverable for this connection: no bridge is inserted and the returned
-  /// handle has no exchange. The driver observes this as a connection that
-  /// never produces bytes (and may close it on its own accept-side deadline);
-  /// the membership layer is untouched because no `Stream` ever existed.
-  pub fn accept_connection(&mut self, from: A, now: Instant) -> ExchangeId {
-    self.last_now = Some(now);
-    let id = self.conns.allocate();
-    let peer_socket = B::to_socket(&from);
-    match R::acceptor(&self.cfg) {
-      Ok(records) => {
-        let bridge = StreamBridge::new(
-          records,
-          now + ACCEPT_HANDSHAKE_DEADLINE,
-          self.compression,
-          self.encryption.clone(),
-          self.ep.max_stream_frame_size(),
-        );
-        self.conns.insert(id, bridge);
-        self.exchanges.insert(
-          id,
-          ExchangeMeta {
-            peer_socket,
-            mint: Some(PendingMint::Inbound(from)),
-            fin_emitted: false,
-          },
-        );
-      }
-      Err(_) => {
-        // No bridge for a config-rejected server connection. The handle is
-        // still returned (monotonic; never reused) so the driver has a stable
-        // key, but it maps to no exchange.
-      }
-    }
-    id
-  }
-
-  /// Initiate an outbound push/pull state exchange with `peer` and attempt the
-  /// dial in-band.
-  ///
-  /// Wrapper around [`Endpoint::start_push_pull`] that ALSO drives
-  /// `service_dials(now)` + `flush_outbound(now)` before returning, so the
-  /// `DialRequested` the inner endpoint queues is sieved, attempted (the
-  /// `Connect` action surfaced and the `Handshaking` bridge built), and the
-  /// dial's first label prefix / handshake flight emerges on the very next
-  /// [`Self::poll_transport_transmit`] — a driver that uses only the public
-  /// poll surface sees the exchange progress without a same-instant
-  /// `handle_timeout` pre-pump.
-  pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
-    self.last_now = Some(now);
-    let id = self.ep.start_push_pull(peer, kind, now);
-    self.service_dials(now);
-    self.flush_outbound(now);
-    id
-  }
-
-  /// Initiate a reliable-stream fallback ping for probe `probe_seq` and attempt
-  /// the dial in-band.
-  ///
-  /// Wrapper around [`Endpoint::start_reliable_ping`]; see
-  /// [`Self::start_push_pull`] for the dial-attempt and zero-time outbound-flush
-  /// semantics. The `deadline` is the owning probe's single cumulative
-  /// deadline (NOT an independent stream-timeout), forwarded unchanged; `now`
-  /// is taken separately because `service_dials` needs the real wall-clock
-  /// instant and `last_now` must remain a known-past anchor.
-  pub fn start_reliable_ping(
-    &mut self,
-    peer_id: I,
-    peer_addr: A,
-    probe_seq: u32,
-    deadline: Instant,
-    now: Instant,
-  ) -> StreamId {
-    self.last_now = Some(now);
-    let id = self
-      .ep
-      .start_reliable_ping(peer_id, peer_addr, probe_seq, deadline);
-    self.service_dials(now);
-    self.flush_outbound(now);
-    id
-  }
-
-  /// Initiate a one-way reliable user-message delivery to `peer` and attempt
-  /// the dial in-band.
-  ///
-  /// Wrapper around [`Endpoint::start_user_message`]; see
-  /// [`Self::start_push_pull`] for the dial-attempt and zero-time
-  /// outbound-flush semantics.
-  pub fn start_user_message(&mut self, peer: A, payload: Bytes, now: Instant) -> StreamId {
-    self.last_now = Some(now);
-    let id = self.ep.start_user_message(peer, payload, now);
-    self.service_dials(now);
-    self.flush_outbound(now);
-    id
-  }
-
-  /// Timer tick from the driver.
-  pub fn handle_timeout(&mut self, now: Instant) {
-    self.last_now = Some(now);
-    self.run_tick(now);
-  }
-
-  // ---- test seams -------------------------------------------------------
 
   /// Mutable borrow of the inner membership endpoint, for tests that must
   /// drive a scenario the public `start_*` wrappers cannot reach — e.g.
@@ -1164,66 +1031,6 @@ where
       "pending_teardowns holds only Shutdown / Close actions",
     );
     self.pending_teardowns.push_back(action);
-  }
-
-  // ---- internals --------------------------------------------------------
-
-  /// The fixed per-tick step order (load-bearing — see module docs).
-  ///
-  /// Step (2) (pump every bridge + drain each non-terminal stream's
-  /// endpoint-events into the `Endpoint`) MUST strictly precede step (3)
-  /// (`ep.handle_timeout`): a reliable-fallback ping ack delivered on the same
-  /// tick the probe cumulative deadline expires is carried by the stream's
-  /// last `poll_endpoint_event`; draining it after the probe timeout would
-  /// lose it and wrongly Suspect a live peer. Do not reorder.
-  ///
-  /// Step (4) (label / handshake-settled mint) mints the `Stream` for any
-  /// bridge whose label / handshake step settled since the last tick and
-  /// promotes it; a freshly-promoted OUTBOUND bridge carries its request bytes
-  /// in the minted `Stream`'s output buffer. Step (5) (`service_dials`) inserts
-  /// new `Handshaking` outbound bridges. A dialer record layer with no
-  /// handshake (its inbound label is validated in-line on the established
-  /// intake) is never handshaking, so step (5.5) — a second
-  /// `service_handshake_completions` — promotes those freshly-inserted dial
-  /// bridges in the SAME tick, before step (5.6)'s `pump_bridges` pumps their
-  /// request bytes out. Without the step (5.5) extra promote, a
-  /// reliable-fallback ping bridge created by step (3) would have its `Stream`
-  /// minted only on the NEXT coordinator wake — under a strict-poll driver
-  /// that wakes only at [`Self::poll_timeout`], that next wake is the bridge's
-  /// exchange deadline itself, at which point
-  /// [`crate::stream::Stream::handle_data`] would reject the buffered request
-  /// as timed out. `pump_bridges` and `service_handshake_completions` are both
-  /// idempotent on already-handled bridges, so the duplicated calls are no-ops
-  /// on bridges already serviced upstream. There is NO connection drained-reap
-  /// step (connection-per-exchange — a reaped bridge frees its own connection
-  /// via the `Close` action).
-  fn run_tick(&mut self, now: Instant) {
-    // (1) inbound feed already done by the caller (`handle_transport_data`).
-    // (2) pump bridges + drain stream endpoint-events into the Endpoint.
-    self.pump_bridges(now);
-    // (3) THEN membership timers (probe cumulative-deadline, suspicion).
-    self.ep.handle_timeout(now);
-    // (4) mint the Stream for any bridge whose label / handshake step just
-    // settled.
-    self.service_handshake_completions(now);
-    // (5) dial requests emitted by (3).
-    self.service_dials(now);
-    // (5.5) promote any dial bridge whose records are not handshaking from
-    // the moment of construction (the dialer's role) so step (5.6)'s pump
-    // can transmit the request bytes this same tick. Idempotent on bridges
-    // already promoted by step (4).
-    self.service_handshake_completions(now);
-    // (5.6) pump bridges promoted/inserted by (4), (5), and (5.5) this same
-    // tick.
-    self.pump_bridges(now);
-    self.finalize_tick(now);
-    // Clear the policy-change reap latch: both `pump_bridges` calls above
-    // have reaped every terminal bridge in `conns` (a bridge failed by
-    // `set_encryption_options` is in `BridgePhase::Failed` and therefore
-    // `is_terminal()`), so any wake the latch was asking for has been
-    // serviced this tick. Leaving the latch set would have `poll_timeout`
-    // keep returning immediate-due wakes forever once the reap is done.
-    self.policy_reap_pending = false;
   }
 
   /// Step (2) of the per-tick order: pump every bridge's outbound half, drain
@@ -1553,6 +1360,275 @@ where
     }
   }
 
+  /// Collect outbound bytes from every live bridge into the outbound queue,
+  /// tagged with the exchange handle + peer.
+  fn collect_transmits(&mut self) {
+    for id in self.conns.ids() {
+      if let Some(mut br) = self.conns.remove(id) {
+        self.collect_bridge_transmits(id, &mut br);
+        self.conns.insert(id, br);
+      }
+    }
+  }
+}
+
+// The full SWIM bag plus `B: AddrBridge<A>`. Methods that resolve a peer
+// address to a transport `SocketAddr` via `B::to_socket`, derive a per-dial
+// record-layer context via `R::dial_context::<A, B>`, or transitively reach
+// either through the coordinator tick (`run_tick` → `service_dials`).
+// `B` is consulted only here; the impl blocks above never resolve a wire
+// address.
+impl<I, A, B, R> StreamEndpoint<I, A, B, R>
+where
+  I: nodecraft::Id
+    + memberlist_wire::Data
+    + nodecraft::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  A: memberlist_wire::Data
+    + nodecraft::CheapClone
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  B: AddrBridge<A>,
+  R: StreamTransport,
+{
+  /// Inbound gossip datagram from the UDP socket.
+  ///
+  /// **Buffered only** — the codec-owning driver MUST drain via
+  /// [`Self::poll_memberlist_ingress`], decode each frame, feed every typed
+  /// message via [`Self::handle_packet`], and then call
+  /// [`Self::handle_timeout`] to advance time. Running [`Self::handle_timeout`]
+  /// before the buffered gossip is decoded and fed would risk same-instant
+  /// probe / suspect timers firing before a just-arrived `Ack` / `Alive` is
+  /// applied — a spurious fallback ping or false `Suspect` could fire even
+  /// though the resolving message is already sitting in
+  /// [`Self::poll_memberlist_ingress`]'s queue locally. Every UDP datagram is
+  /// carried as gossip (reliable exchanges ride separate transport connections).
+  pub fn handle_gossip(&mut self, from: A, datagram: &[u8], now: Instant) {
+    self.last_now = Some(now);
+    let socket = B::to_socket(&from);
+    self
+      .mem_ingress
+      .push_back((socket, Bytes::copy_from_slice(datagram)));
+  }
+
+  /// Inbound bytes for one exchange's transport connection.
+  ///
+  /// Routes `bytes` into the owning bridge's
+  /// [`StreamBridge::handle_transport_data`], then runs a coordinator tick.
+  ///
+  /// `eof = true` signals the transport `read == 0` half-close anchor — the
+  /// out-of-band peer-FIN a transport with no in-band close (plain TCP)
+  /// delivers in place of an in-band `close_notify` alert. A record layer with
+  /// an in-band close infers its close anchor from `peer_has_closed()` (latched
+  /// on the in-band alert), but a record layer with no in-band close keeps
+  /// `peer_has_closed()` permanently `false` — there is no in-band close
+  /// signal — so the driver MUST surface the FIN via this parameter. The
+  /// bridge's byte pump derives the close-anchor truth value
+  /// (`eof || records.peer_has_closed()`) uniformly across every record layer;
+  /// the explicit flag carries the missing transport signal.
+  ///
+  /// A `(bytes.len() > 0, eof = true)` delivery — bytes followed by an
+  /// observed `read == 0` on the same wake — is fed in two steps: the bytes
+  /// first (one full pump), then an empty-slice EOF (the recv-half retirement
+  /// anchor). The single coordinator tick at the end advances time once.
+  pub fn handle_transport_data(&mut self, id: ExchangeId, bytes: &[u8], eof: bool, now: Instant) {
+    self.last_now = Some(now);
+    if let Some(bridge) = self.conns.get_mut(id) {
+      if !bytes.is_empty() {
+        // Ignoring Err: an `Err` means the bridge terminalized (label /
+        // decode / transport failure); `run_tick`'s `pump_bridges` reaps it
+        // and emits the `Close` action. There is no separate action here.
+        let _ = bridge.handle_transport_data(bytes, now);
+      }
+      if eof {
+        // Empty-slice feed = transport `read == 0` EOF anchor. Drives the
+        // recv-half retirement (`observe_recv_fin`) or the truncation-decode-
+        // fail path depending on the bridge's current state. Run even when the
+        // bytes step terminalized the bridge — the bridge ignores subsequent
+        // feeds in a terminal phase.
+        // Ignoring Err: same as the bytes feed above — terminality is the
+        // reap signal, not the return value.
+        let _ = bridge.handle_transport_data(&[], now);
+      }
+    }
+    self.run_tick(now);
+  }
+
+  /// The driver accepted an inbound transport connection from `from`.
+  /// Allocates an [`ExchangeId`], builds a server-side `Handshaking` bridge
+  /// bounded by [`ACCEPT_HANDSHAKE_DEADLINE`], and returns the handle the
+  /// driver tags this connection's inbound bytes with. The `Stream` is minted
+  /// later (at label / handshake step settled, via `Endpoint::accept_stream`).
+  ///
+  /// An `R::acceptor` construction error (a misconfigured record layer) is
+  /// unrecoverable for this connection: no bridge is inserted and the returned
+  /// handle has no exchange. The driver observes this as a connection that
+  /// never produces bytes (and may close it on its own accept-side deadline);
+  /// the membership layer is untouched because no `Stream` ever existed.
+  pub fn accept_connection(&mut self, from: A, now: Instant) -> ExchangeId {
+    self.last_now = Some(now);
+    let id = self.conns.allocate();
+    let peer_socket = B::to_socket(&from);
+    match R::acceptor(&self.cfg) {
+      Ok(records) => {
+        let bridge = StreamBridge::new(
+          records,
+          now + ACCEPT_HANDSHAKE_DEADLINE,
+          self.compression,
+          self.encryption.clone(),
+          self.ep.max_stream_frame_size(),
+        );
+        self.conns.insert(id, bridge);
+        self.exchanges.insert(
+          id,
+          ExchangeMeta {
+            peer_socket,
+            mint: Some(PendingMint::Inbound(from)),
+            fin_emitted: false,
+          },
+        );
+      }
+      Err(_) => {
+        // No bridge for a config-rejected server connection. The handle is
+        // still returned (monotonic; never reused) so the driver has a stable
+        // key, but it maps to no exchange.
+      }
+    }
+    id
+  }
+
+  /// Initiate an outbound push/pull state exchange with `peer` and attempt the
+  /// dial in-band.
+  ///
+  /// Wrapper around [`Endpoint::start_push_pull`] that ALSO drives
+  /// `service_dials(now)` + `flush_outbound(now)` before returning, so the
+  /// `DialRequested` the inner endpoint queues is sieved, attempted (the
+  /// `Connect` action surfaced and the `Handshaking` bridge built), and the
+  /// dial's first label prefix / handshake flight emerges on the very next
+  /// [`Self::poll_transport_transmit`] — a driver that uses only the public
+  /// poll surface sees the exchange progress without a same-instant
+  /// `handle_timeout` pre-pump.
+  pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
+    self.last_now = Some(now);
+    let id = self.ep.start_push_pull(peer, kind, now);
+    self.service_dials(now);
+    self.flush_outbound(now);
+    id
+  }
+
+  /// Initiate a reliable-stream fallback ping for probe `probe_seq` and attempt
+  /// the dial in-band.
+  ///
+  /// Wrapper around [`Endpoint::start_reliable_ping`]; see
+  /// [`Self::start_push_pull`] for the dial-attempt and zero-time outbound-flush
+  /// semantics. The `deadline` is the owning probe's single cumulative
+  /// deadline (NOT an independent stream-timeout), forwarded unchanged; `now`
+  /// is taken separately because `service_dials` needs the real wall-clock
+  /// instant and `last_now` must remain a known-past anchor.
+  pub fn start_reliable_ping(
+    &mut self,
+    peer_id: I,
+    peer_addr: A,
+    probe_seq: u32,
+    deadline: Instant,
+    now: Instant,
+  ) -> StreamId {
+    self.last_now = Some(now);
+    let id = self
+      .ep
+      .start_reliable_ping(peer_id, peer_addr, probe_seq, deadline);
+    self.service_dials(now);
+    self.flush_outbound(now);
+    id
+  }
+
+  /// Initiate a one-way reliable user-message delivery to `peer` and attempt
+  /// the dial in-band.
+  ///
+  /// Wrapper around [`Endpoint::start_user_message`]; see
+  /// [`Self::start_push_pull`] for the dial-attempt and zero-time
+  /// outbound-flush semantics.
+  pub fn start_user_message(&mut self, peer: A, payload: Bytes, now: Instant) -> StreamId {
+    self.last_now = Some(now);
+    let id = self.ep.start_user_message(peer, payload, now);
+    self.service_dials(now);
+    self.flush_outbound(now);
+    id
+  }
+
+  /// Timer tick from the driver.
+  pub fn handle_timeout(&mut self, now: Instant) {
+    self.last_now = Some(now);
+    self.run_tick(now);
+  }
+
+  /// The fixed per-tick step order (load-bearing — see module docs).
+  ///
+  /// Step (2) (pump every bridge + drain each non-terminal stream's
+  /// endpoint-events into the `Endpoint`) MUST strictly precede step (3)
+  /// (`ep.handle_timeout`): a reliable-fallback ping ack delivered on the same
+  /// tick the probe cumulative deadline expires is carried by the stream's
+  /// last `poll_endpoint_event`; draining it after the probe timeout would
+  /// lose it and wrongly Suspect a live peer. Do not reorder.
+  ///
+  /// Step (4) (label / handshake-settled mint) mints the `Stream` for any
+  /// bridge whose label / handshake step settled since the last tick and
+  /// promotes it; a freshly-promoted OUTBOUND bridge carries its request bytes
+  /// in the minted `Stream`'s output buffer. Step (5) (`service_dials`) inserts
+  /// new `Handshaking` outbound bridges. A dialer record layer with no
+  /// handshake (its inbound label is validated in-line on the established
+  /// intake) is never handshaking, so step (5.5) — a second
+  /// `service_handshake_completions` — promotes those freshly-inserted dial
+  /// bridges in the SAME tick, before step (5.6)'s `pump_bridges` pumps their
+  /// request bytes out. Without the step (5.5) extra promote, a
+  /// reliable-fallback ping bridge created by step (3) would have its `Stream`
+  /// minted only on the NEXT coordinator wake — under a strict-poll driver
+  /// that wakes only at [`Self::poll_timeout`], that next wake is the bridge's
+  /// exchange deadline itself, at which point
+  /// [`crate::stream::Stream::handle_data`] would reject the buffered request
+  /// as timed out. `pump_bridges` and `service_handshake_completions` are both
+  /// idempotent on already-handled bridges, so the duplicated calls are no-ops
+  /// on bridges already serviced upstream. There is NO connection drained-reap
+  /// step (connection-per-exchange — a reaped bridge frees its own connection
+  /// via the `Close` action).
+  fn run_tick(&mut self, now: Instant) {
+    // (1) inbound feed already done by the caller (`handle_transport_data`).
+    // (2) pump bridges + drain stream endpoint-events into the Endpoint.
+    self.pump_bridges(now);
+    // (3) THEN membership timers (probe cumulative-deadline, suspicion).
+    self.ep.handle_timeout(now);
+    // (4) mint the Stream for any bridge whose label / handshake step just
+    // settled.
+    self.service_handshake_completions(now);
+    // (5) dial requests emitted by (3).
+    self.service_dials(now);
+    // (5.5) promote any dial bridge whose records are not handshaking from
+    // the moment of construction (the dialer's role) so step (5.6)'s pump
+    // can transmit the request bytes this same tick. Idempotent on bridges
+    // already promoted by step (4).
+    self.service_handshake_completions(now);
+    // (5.6) pump bridges promoted/inserted by (4), (5), and (5.5) this same
+    // tick.
+    self.pump_bridges(now);
+    self.finalize_tick(now);
+    // Clear the policy-change reap latch: both `pump_bridges` calls above
+    // have reaped every terminal bridge in `conns` (a bridge failed by
+    // `set_encryption_options` is in `BridgePhase::Failed` and therefore
+    // `is_terminal()`), so any wake the latch was asking for has been
+    // serviced this tick. Leaving the latch set would have `poll_timeout`
+    // keep returning immediate-due wakes forever once the reap is done.
+    self.policy_reap_pending = false;
+  }
+
   /// Step (5): drain the private `dial_pending` deque, surfacing one
   /// [`StreamAction::Connect`] and building one `Handshaking` client bridge per
   /// intent. Does NOT call `dial_succeeded` — the `Stream` is minted at the
@@ -1605,7 +1681,9 @@ where
         Err(e) => {
           self.ep.dial_failed(
             id,
-            crate::error::StreamError::DialFailed(format!("record-layer construction failed: {e}")),
+            crate::error::StreamError::DialFailed(
+              format!("record-layer construction failed: {e}").into(),
+            ),
             now,
           );
           continue;
@@ -1634,17 +1712,6 @@ where
         "pending_connects holds only Connect actions",
       );
       self.pending_connects.push_back(action);
-    }
-  }
-
-  /// Collect outbound bytes from every live bridge into the outbound queue,
-  /// tagged with the exchange handle + peer.
-  fn collect_transmits(&mut self) {
-    for id in self.conns.ids() {
-      if let Some(mut br) = self.conns.remove(id) {
-        self.collect_bridge_transmits(id, &mut br);
-        self.conns.insert(id, br);
-      }
     }
   }
 }

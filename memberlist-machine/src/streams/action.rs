@@ -26,11 +26,13 @@ impl ConnectInfo {
   /// The exchange handle the coordinator keys this connection on. Every
   /// subsequent `handle_transport_data` / `poll_transport_transmit` for the
   /// connection carries this same handle.
+  #[inline(always)]
   pub const fn id(&self) -> ExchangeId {
     self.id
   }
 
   /// The peer `SocketAddr` to connect to.
+  #[inline(always)]
   pub const fn peer(&self) -> SocketAddr {
     self.peer
   }
@@ -49,6 +51,7 @@ impl ExchangeRef {
   }
 
   /// The exchange handle whose transport connection the action refers to.
+  #[inline(always)]
   pub const fn id(&self) -> ExchangeId {
     self.id
   }
@@ -74,6 +77,7 @@ pub enum StreamAction {
 
 impl StreamAction {
   /// Borrow the [`ConnectInfo`] iff this is a [`StreamAction::Connect`].
+  #[inline(always)]
   pub const fn as_connect(&self) -> Option<&ConnectInfo> {
     match self {
       StreamAction::Connect(c) => Some(c),
@@ -82,6 +86,7 @@ impl StreamAction {
   }
 
   /// Borrow the [`ExchangeRef`] iff this is a [`StreamAction::Shutdown`].
+  #[inline(always)]
   pub const fn as_shutdown(&self) -> Option<&ExchangeRef> {
     match self {
       StreamAction::Shutdown(r) => Some(r),
@@ -90,6 +95,7 @@ impl StreamAction {
   }
 
   /// Borrow the [`ExchangeRef`] iff this is a [`StreamAction::Close`].
+  #[inline(always)]
   pub const fn as_close(&self) -> Option<&ExchangeRef> {
     match self {
       StreamAction::Close(r) => Some(r),

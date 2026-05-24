@@ -44,7 +44,8 @@ impl ConnEntry {
     &mut self.conn
   }
 
-  pub(crate) fn conn(&self) -> &Connection {
+  #[inline(always)]
+  pub(crate) fn conn_ref(&self) -> &Connection {
     &self.conn
   }
 
@@ -347,10 +348,10 @@ mod tests {
       test_client(),
       quinn_proto::TransportConfig::default(),
     );
-    let client = QuinnEndpoint::new(cfg.endpoint().clone(), None, true, Some([0x5a; 32]));
+    let client = QuinnEndpoint::new(cfg.endpoint_arc(), None, true, Some([0x5a; 32]));
     let server = QuinnEndpoint::new(
-      cfg.endpoint().clone(),
-      Some(cfg.server().clone()),
+      cfg.endpoint_arc(),
+      Some(cfg.server_arc()),
       true,
       Some([0x5a; 32]),
     );
@@ -396,7 +397,7 @@ mod tests {
       .close(now, 0u32.into(), bytes::Bytes::new());
 
     for _ in 0..5000 {
-      if t.get_mut(ch).unwrap().conn().is_drained() {
+      if t.get_mut(ch).unwrap().conn_ref().is_drained() {
         break;
       }
       match t.get_mut(ch).unwrap().conn_mut().poll_timeout() {
@@ -484,7 +485,7 @@ mod tests {
     // Drive the OLD connection to `Drained` and confirm its slab slot is
     // cleared while the new mapping is preserved (Part B equality guard).
     for _ in 0..5000 {
-      if t.get(ch1).map_or(true, |e| e.conn().is_drained()) {
+      if t.get(ch1).map_or(true, |e| e.conn_ref().is_drained()) {
         break;
       }
       match t.get_mut(ch1).unwrap().conn_mut().poll_timeout() {
@@ -679,7 +680,7 @@ mod tests {
     // to Drained and confirm the equality-guarded `reap_if_drained`
     // clears the OLD slab slot without clobbering the NEW canonical.
     for _ in 0..5000 {
-      if t.get(ch1).map_or(true, |e| e.conn().is_drained()) {
+      if t.get(ch1).map_or(true, |e| e.conn_ref().is_drained()) {
         break;
       }
       match t.get_mut(ch1).unwrap().conn_mut().poll_timeout() {
@@ -724,7 +725,7 @@ mod tests {
       .conn_mut()
       .close(now, 0u32.into(), bytes::Bytes::new());
     for _ in 0..5000 {
-      if t.get(ch).unwrap().conn().is_drained() {
+      if t.get(ch).unwrap().conn_ref().is_drained() {
         break;
       }
       match t.get_mut(ch).unwrap().conn_mut().poll_timeout() {
@@ -732,7 +733,7 @@ mod tests {
         None => break,
       }
     }
-    assert!(t.get(ch).unwrap().conn().is_drained());
+    assert!(t.get(ch).unwrap().conn_ref().is_drained());
     // Synthesize "peers entry already removed" (the redial case at the
     // limit: peers cleared but the old slab still holds the drained
     // entry awaiting this reap).

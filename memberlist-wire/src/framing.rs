@@ -17,8 +17,12 @@ use std::borrow::Cow;
 
 use buffa::Message as _;
 
-use crate::messages::memberlist::v1::{
-  Ack, Alive, Dead, ErrorResponse, IndirectPing, Nack, Ping, PushPull, Suspect, UserData,
+use crate::{
+  compression::CompressionError,
+  encryption::EncryptionError,
+  messages::memberlist::v1::{
+    Ack, Alive, Dead, ErrorResponse, IndirectPing, Nack, Ping, PushPull, Suspect, UserData,
+  },
 };
 
 /// One-byte tag identifying which message variant follows. Matches the
@@ -144,15 +148,47 @@ pub enum AnyMessage {
   ErrorResponse(ErrorResponse),
 }
 
+/// The `(available, required)` byte-count pair carried by
+/// [`FrameError::Incomplete`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncompleteFrame {
+  /// Bytes available in the buffer.
+  pub available: usize,
+  /// Bytes required to complete the frame.
+  pub required: usize,
+}
+
+impl IncompleteFrame {
+  /// Construct an incomplete-frame payload.
+  #[inline(always)]
+  pub const fn new(available: usize, required: usize) -> Self {
+    Self {
+      available,
+      required,
+    }
+  }
+}
+
+impl std::fmt::Display for IncompleteFrame {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "{} bytes available, {} required",
+      self.available, self.required
+    )
+  }
+}
+
 /// Errors returned by [`decode_plain_frame`] and [`decode_message`].
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
   /// The input buffer is empty; no frame to decode.
   #[error("frame buffer is empty")]
   Empty,
-  /// The buffer holds a partial frame: `available` bytes present, `required` needed.
-  #[error("incomplete frame: {0} bytes available, {1} required")]
-  Incomplete(usize, usize),
+  /// The buffer holds a partial frame.
+  #[error("incomplete frame: {0}")]
+  Incomplete(IncompleteFrame),
   /// The tag byte does not correspond to a known message type.
   #[error("unknown message tag: {0}")]
   UnknownTag(u8),
@@ -170,12 +206,12 @@ pub enum FrameError {
   /// A compressed wrapper frame failed to decode (corrupt bytes, an unknown
   /// algorithm, or a declared length over the bomb-guard ceiling).
   #[error("compressed frame decode failed: {0}")]
-  Compression(String),
+  Compression(#[from] CompressionError),
   /// An encrypted wrapper frame failed to decode (corrupt bytes, an unknown
   /// algorithm, a declared length over the bomb-guard ceiling, or every
   /// variant-filtered key in the keyring failed AEAD auth).
   #[error("encrypted frame decode failed: {0}")]
-  Encryption(String),
+  Encryption(#[from] EncryptionError),
 }
 
 /// Convenience: encode any [`AnyMessage`] variant into a plain frame.
@@ -302,8 +338,11 @@ pub fn decode_compound(buf: &[u8]) -> Result<Vec<&[u8]>, FrameError> {
   }
   let (count, count_bytes) = match decode_varint_u32(&buf[1..]) {
     Ok(v) => v,
-    Err(FrameError::Incomplete(..)) => {
-      return Err(FrameError::Incomplete(buf.len(), buf.len() + 1));
+    Err(FrameError::Incomplete(_)) => {
+      return Err(FrameError::Incomplete(IncompleteFrame::new(
+        buf.len(),
+        buf.len() + 1,
+      )));
     }
     Err(e) => return Err(e),
   };
@@ -325,8 +364,11 @@ pub fn decode_compound(buf: &[u8]) -> Result<Vec<&[u8]>, FrameError> {
   for _ in 0..count {
     let (inner_len, len_bytes) = match decode_varint_u32(&buf[cursor..]) {
       Ok(v) => v,
-      Err(FrameError::Incomplete(..)) => {
-        return Err(FrameError::Incomplete(buf.len(), buf.len() + 1));
+      Err(FrameError::Incomplete(_)) => {
+        return Err(FrameError::Incomplete(IncompleteFrame::new(
+          buf.len(),
+          buf.len() + 1,
+        )));
       }
       Err(e) => return Err(e),
     };
@@ -340,7 +382,10 @@ pub fn decode_compound(buf: &[u8]) -> Result<Vec<&[u8]>, FrameError> {
       .checked_add(inner_len as usize)
       .ok_or(FrameError::Decode)?;
     if buf.len() < body_end {
-      return Err(FrameError::Incomplete(buf.len(), body_end));
+      return Err(FrameError::Incomplete(IncompleteFrame::new(
+        buf.len(),
+        body_end,
+      )));
     }
     parts.push(&buf[body_start..body_end]);
     cursor = body_end;
@@ -383,9 +428,7 @@ pub fn unwrap_transforms_with_encryption<'a>(
   if encryption.is_enabled() {
     let lead = buf.first().copied().ok_or(FrameError::Empty)?;
     if lead != MessageTag::Encrypted as u8 {
-      return Err(FrameError::Encryption(
-        "encryption enabled but inbound frame is not wrapped in Encrypted".to_string(),
-      ));
+      return Err(FrameError::Encryption(EncryptionError::EncryptionRequired));
     }
   }
   let mut current: Cow<'a, [u8]> = Cow::Borrowed(buf);
@@ -395,14 +438,12 @@ pub fn unwrap_transforms_with_encryption<'a>(
       None => return Err(FrameError::Empty),
     };
     if lead == MessageTag::Encrypted as u8 {
-      let decoded = crate::encryption::decode_encrypted_frame(encryption, &current, max_orig_len)
-        .map_err(|e| FrameError::Encryption(e.to_string()))?;
+      let decoded = crate::encryption::decode_encrypted_frame(encryption, &current, max_orig_len)?;
       current = Cow::Owned(decoded);
       continue;
     }
     if lead == MessageTag::Compressed as u8 {
-      let decoded = crate::compression::decode_compressed_frame(&current, max_orig_len)
-        .map_err(|e| FrameError::Compression(e.to_string()))?;
+      let decoded = crate::compression::decode_compressed_frame(&current, max_orig_len)?;
       current = Cow::Owned(decoded);
       continue;
     }
@@ -456,15 +497,21 @@ pub fn decode_plain_frame(buf: &[u8]) -> Result<(MessageTag, &[u8], usize), Fram
     // A truncated length prefix is reported by the varint decoder relative
     // to `buf[1..]`; re-express it against the whole frame so streaming
     // callers see consistent absolute "need more bytes" numbers.
-    Err(FrameError::Incomplete(..)) => {
-      return Err(FrameError::Incomplete(buf.len(), buf.len() + 1));
+    Err(FrameError::Incomplete(_)) => {
+      return Err(FrameError::Incomplete(IncompleteFrame::new(
+        buf.len(),
+        buf.len() + 1,
+      )));
     }
     Err(e) => return Err(e),
   };
   let header_len = 1 + varint_bytes;
   let body_end = header_len + body_len as usize;
   if buf.len() < body_end {
-    return Err(FrameError::Incomplete(buf.len(), body_end));
+    return Err(FrameError::Incomplete(IncompleteFrame::new(
+      buf.len(),
+      body_end,
+    )));
   }
   Ok((tag, &buf[header_len..body_end], body_end))
 }
@@ -503,7 +550,10 @@ pub(crate) fn decode_varint_u32(buf: &[u8]) -> Result<(u32, usize), FrameError> 
   // above as `> 0x0f`). That is a truncated length prefix — an INCOMPLETE
   // frame that needs more bytes — not a corrupt/overflowing varint. The
   // caller (`decode_plain_frame`) normalizes this to absolute terms.
-  Err(FrameError::Incomplete(buf.len(), buf.len() + 1))
+  Err(FrameError::Incomplete(IncompleteFrame::new(
+    buf.len(),
+    buf.len() + 1,
+  )))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -565,19 +615,16 @@ mod tests {
     // VarintOverflow corruption error.
     for prefix in [vec![0x80], vec![0x80, 0x80], vec![0x80, 0x80, 0x80, 0x80]] {
       assert!(
-        matches!(
-          decode_varint_u32(&prefix),
-          Err(FrameError::Incomplete(_, _))
-        ),
+        matches!(decode_varint_u32(&prefix), Err(FrameError::Incomplete(_))),
         "truncated varint {prefix:?} must be Incomplete"
       );
     }
     // Through the frame decoder: tag present, length prefix truncated.
     let frame = [MessageTag::Ping as u8, 0x80, 0x80];
     match decode_plain_frame(&frame) {
-      Err(FrameError::Incomplete(have, need)) => {
-        assert_eq!(have, frame.len());
-        assert!(need > have);
+      Err(FrameError::Incomplete(f)) => {
+        assert_eq!(f.available, frame.len());
+        assert!(f.required > f.available);
       }
       other => panic!("expected Incomplete, got {other:?}"),
     }
@@ -632,7 +679,7 @@ mod tests {
     let mut frame = encode_plain_frame(MessageTag::Nack, b"x").expect("encode");
     frame.pop(); // truncate body by one byte
     let err = decode_plain_frame(&frame).unwrap_err();
-    assert!(matches!(err, FrameError::Incomplete(_, _)));
+    assert!(matches!(err, FrameError::Incomplete(_)));
   }
 
   fn sample_ping() -> AnyMessage {
@@ -772,7 +819,7 @@ mod tests {
   #[cfg(feature = "lz4")]
   #[test]
   fn unwrap_loop_strips_compression_off_a_plain_frame() {
-    use crate::compression::{CompressAlgorithm, compress, encode_compressed_frame};
+    use crate::compression::{compress, encode_compressed_frame, CompressAlgorithm};
     let inner = encode_message(&sample_ping()).expect("encode ping");
     let packed = compress(CompressAlgorithm::Lz4, &inner).expect("compress");
     let wrapped = encode_compressed_frame(CompressAlgorithm::Lz4, inner.len(), &packed);
@@ -785,7 +832,7 @@ mod tests {
   #[cfg(feature = "lz4")]
   #[test]
   fn unwrap_loop_strips_compression_off_a_compound_frame() {
-    use crate::compression::{CompressAlgorithm, compress, encode_compressed_frame};
+    use crate::compression::{compress, encode_compressed_frame, CompressAlgorithm};
     let inner = encode_compound(&[sample_ping(), sample_ack()]).expect("encode compound");
     let packed = compress(CompressAlgorithm::Lz4, &inner).expect("compress");
     let wrapped = encode_compressed_frame(CompressAlgorithm::Lz4, inner.len(), &packed);
@@ -889,9 +936,9 @@ mod tests {
   #[test]
   fn unwrap_loop_strips_encrypted_then_compressed() {
     use crate::{
-      compression::{CompressAlgorithm, compress, encode_compressed_frame},
+      compression::{compress, encode_compressed_frame, CompressAlgorithm},
       encryption::{
-        EncryptAlgorithm, EncryptionOptions, Keyring, SecretKey, encode_encrypted_frame,
+        encode_encrypted_frame, EncryptAlgorithm, EncryptionOptions, Keyring, SecretKey,
       },
     };
     let inner = encode_message(&sample_ping()).expect("encode ping");

@@ -132,7 +132,7 @@ impl QuicConfig {
     // sends us — and stops our encoder from greasing outbound. A single
     // setter call covers both directions: the same `Arc<EndpointConfig>`
     // is installed on every `quinn_proto::Endpoint` the coordinator
-    // builds (`mod.rs::new` calls `Endpoint::new(cfg.endpoint().clone(),
+    // builds (`mod.rs::new` calls `Endpoint::new(cfg.endpoint_arc(),
     // ...)`), so server and client share this policy. Tradeoff: a
     // non-compliant peer that greases anyway would be rejected at packet
     // decode (quinn-proto rejects FIXED_BIT-cleared packets when this
@@ -162,13 +162,27 @@ impl QuicConfig {
   }
 
   /// Returns the endpoint config (carries the stateless-reset HMAC key).
-  pub fn endpoint(&self) -> &Arc<quinn_proto::EndpointConfig> {
+  #[inline(always)]
+  pub fn endpoint_ref(&self) -> &quinn_proto::EndpointConfig {
     &self.endpoint
   }
 
+  /// Returns a cheap clone of the endpoint config arc.
+  #[inline(always)]
+  pub fn endpoint_arc(&self) -> Arc<quinn_proto::EndpointConfig> {
+    self.endpoint.clone()
+  }
+
   /// Returns the server config (TLS cert + key, QUIC transport parameters).
-  pub fn server(&self) -> &Arc<quinn_proto::ServerConfig> {
+  #[inline(always)]
+  pub fn server_ref(&self) -> &quinn_proto::ServerConfig {
     &self.server
+  }
+
+  /// Returns a cheap clone of the server config arc.
+  #[inline(always)]
+  pub fn server_arc(&self) -> Arc<quinn_proto::ServerConfig> {
+    self.server.clone()
   }
 
   /// Returns the client config used for outbound dials.
@@ -281,14 +295,10 @@ pub(crate) mod tests {
     );
     // Prove the bundle is usable: quinn_proto::Endpoint::new must not panic.
     // Signature: Endpoint::new(Arc<EndpointConfig>, Option<Arc<ServerConfig>>, allow_mtud: bool, rng_seed: Option<[u8; 32]>)
-    let _server_ep = quinn_proto::Endpoint::new(
-      cfg.endpoint().clone(),
-      Some(cfg.server().clone()),
-      true,
-      None,
-    );
-    let _client_ep = quinn_proto::Endpoint::new(cfg.endpoint().clone(), None, true, None);
-    let _ = cfg.endpoint();
+    let _server_ep =
+      quinn_proto::Endpoint::new(cfg.endpoint_arc(), Some(cfg.server_arc()), true, None);
+    let _client_ep = quinn_proto::Endpoint::new(cfg.endpoint_arc(), None, true, None);
+    let _ = cfg.endpoint_ref();
     let _ = cfg.client();
   }
 

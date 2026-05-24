@@ -30,7 +30,7 @@ mod tests {
       bridge::StreamBridge,
       phase::StreamPhase,
       test_support::{
-        TEST_RELIABLE_MAX, addr, handshaking_pair as shared_handshaking_pair, label, phase_label,
+        addr, handshaking_pair as shared_handshaking_pair, label, phase_label, TEST_RELIABLE_MAX,
       },
     },
   };
@@ -188,19 +188,19 @@ mod tests {
 
     assert!(
       matches!(
-        client.phase(),
+        client.phase_ref(),
         StreamPhase::Established(BridgePhase::BothClosed)
       ),
       "client reached BothClosed (sent request + FIN, saw peer FIN), got {:?}",
-      phase_label(client.phase())
+      phase_label(client.phase_ref())
     );
     assert!(
       matches!(
-        server.phase(),
+        server.phase_ref(),
         StreamPhase::Established(BridgePhase::BothClosed)
       ),
       "server reached BothClosed, got {:?}",
-      phase_label(server.phase())
+      phase_label(server.phase_ref())
     );
 
     // Terminal D1 reap on the server: the decoded UserData surfaces as
@@ -264,11 +264,11 @@ mod tests {
     );
     assert!(
       matches!(
-        server.phase(),
+        server.phase_ref(),
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Transport(_)))
       ),
       "the reject is a Transport failure, got {:?}",
-      phase_label(server.phase())
+      phase_label(server.phase_ref())
     );
 
     // `drain_then_reap` on a no-Stream bridge is a clean no-op (the coordinator
@@ -332,11 +332,11 @@ mod tests {
     assert!(res.is_err(), "the dialer rejects the wrong-label response");
     assert!(
       matches!(
-        client.phase(),
+        client.phase_ref(),
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Transport(_)))
       ),
       "the reject is a Transport failure, got {:?}",
-      phase_label(client.phase())
+      phase_label(client.phase_ref())
     );
     assert!(client.is_terminal());
 
@@ -412,11 +412,11 @@ mod tests {
     );
     assert!(
       matches!(
-        server.phase(),
+        server.phase_ref(),
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Timeout))
       ),
       "the timeout maps to Failed(Timeout), got {:?}",
-      phase_label(server.phase())
+      phase_label(server.phase_ref())
     );
     assert!(
       !server.is_handshaking(),
@@ -530,7 +530,7 @@ mod tests {
     assert!(
       server.is_terminal(),
       "the recv-half FIN fired and the one-way exchange reaped, got {:?}",
-      phase_label(server.phase())
+      phase_label(server.phase_ref())
     );
 
     server.drain_then_reap(&mut ep_s, now);
@@ -634,12 +634,12 @@ mod tests {
       .expect("server pump retires its send half");
     assert!(
       matches!(
-        server.phase(),
+        server.phase_ref(),
         StreamPhase::Established(BridgePhase::BothClosed)
       ),
       "the latched pre-promote FIN drove RecvClosed → BothClosed this tick, \
        got {:?}",
-      phase_label(server.phase())
+      phase_label(server.phase_ref())
     );
     assert!(server.is_terminal());
 
@@ -701,11 +701,11 @@ mod tests {
     assert!(res.is_err(), "a mid-frame read==0 fails the bridge");
     assert!(
       matches!(
-        client.phase(),
+        client.phase_ref(),
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
       ),
       "truncation maps to Failed(Decode), got {:?}",
-      phase_label(client.phase())
+      phase_label(client.phase_ref())
     );
     assert!(client.is_terminal(), "a truncated exchange is terminal");
     assert!(
@@ -721,10 +721,10 @@ mod tests {
   #[test]
   fn stream_reliable_unit_accumulation_roundtrips() {
     use memberlist_wire::{
-      CompressAlgorithm, CompressionOptions, encode_reliable_unit, take_reliable_unit,
+      encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
     };
     let opts = CompressionOptions::new()
-      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(8);
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);
     let unit = encode_reliable_unit(&opts, &framed);
@@ -748,10 +748,10 @@ mod tests {
     // original. Feeding the unit whole would have decoded fine; the bug was
     // that a SPLIT unit tore the exchange down.
     use memberlist_wire::{
-      CompressAlgorithm, CompressionOptions, encode_reliable_unit, take_reliable_unit,
+      encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
     };
     let opts = CompressionOptions::new()
-      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(8);
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(32);
     let unit = encode_reliable_unit(&opts, &framed);
@@ -781,7 +781,7 @@ mod tests {
   fn stream_reliable_unit_disabled_is_byte_identical() {
     // Disabled compression: the unit payload is the framed bytes verbatim,
     // and the round-trip is byte-identical end to end (no wrapper).
-    use memberlist_wire::{CompressionOptions, encode_reliable_unit, take_reliable_unit};
+    use memberlist_wire::{encode_reliable_unit, take_reliable_unit, CompressionOptions};
     let opts = CompressionOptions::new();
     let framed = b"plain reliable frame bytes that are not compressed".to_vec();
     let unit = encode_reliable_unit(&opts, &framed);
@@ -796,8 +796,8 @@ mod tests {
   #[test]
   fn stream_reliable_unit_encrypted_roundtrip() {
     use memberlist_wire::{
-      EncryptionOptions, Keyring, SecretKey, encode_reliable_unit_with_encryption,
-      take_reliable_unit_with_encryption,
+      encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption, EncryptionOptions,
+      Keyring, SecretKey,
     };
     let comp = memberlist_wire::CompressionOptions::new();
     let enc = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
@@ -824,11 +824,11 @@ mod tests {
   #[test]
   fn stream_reliable_unit_encrypted_then_compressed_roundtrip() {
     use memberlist_wire::{
-      CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, SecretKey,
-      encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption,
+      encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption, CompressAlgorithm,
+      CompressionOptions, EncryptionOptions, Keyring, SecretKey,
     };
     let comp = CompressionOptions::new()
-      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(8);
     let enc = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x99; 32])));
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);

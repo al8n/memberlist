@@ -8,7 +8,7 @@
 //! intentionally unimplemented.
 
 use bytes::Bytes;
-use memberlist_wire::{Data, framing, message_from_any, message_to_any, typed::Message};
+use memberlist_wire::{framing, message_from_any, message_to_any, typed::Message, Data};
 
 /// Outer label tag byte (byte-compatible with legacy memberlist-proto).
 const LABELED_TAG: u8 = 12;
@@ -247,7 +247,7 @@ where
   A: Data,
 {
   let (consumed, any) = framing::decode_message(&plain).map_err(|e| match e {
-    framing::FrameError::Incomplete(have, need) => CodecError::Incomplete(have, need),
+    framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available, f.required),
     other => CodecError::Frame(other.to_string()),
   })?;
   if consumed != plain.len() {
@@ -280,13 +280,13 @@ where
 {
   if plain.first() == Some(&(framing::MessageTag::Compound as u8)) {
     let parts = framing::decode_compound(&plain).map_err(|e| match e {
-      framing::FrameError::Incomplete(have, need) => CodecError::Incomplete(have, need),
+      framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available, f.required),
       other => CodecError::Frame(other.to_string()),
     })?;
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
       let (consumed, any) = framing::decode_message(part).map_err(|e| match e {
-        framing::FrameError::Incomplete(have, need) => CodecError::Incomplete(have, need),
+        framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available, f.required),
         other => CodecError::Frame(other.to_string()),
       })?;
       if consumed != part.len() {

@@ -7,7 +7,7 @@ fn cfg() -> EndpointConfig<SmolStr, SocketAddr> {
     SmolStr::new("local"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000),
   )
-  .with_rng_seed(Some(0xdeadbeef))
+  .with_rng_seed(0xdeadbeef)
 }
 
 /// Test helper: process an Alive. Admission is now synchronous (no decision
@@ -46,10 +46,10 @@ fn process_alive_auto<I, A>(
 #[test]
 fn new_endpoint_inserts_local_at_incarnation_1() {
   let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
-  assert_eq!(e.local_id(), &SmolStr::new("local"));
+  assert_eq!(e.local_id_ref(), &SmolStr::new("local"));
   assert_eq!(e.num_members(), 1);
   let local = e.member(&SmolStr::new("local")).expect("local present");
-  assert_eq!(local.id(), &SmolStr::new("local"));
+  assert_eq!(local.id_ref(), &SmolStr::new("local"));
   assert_eq!(local.state(), State::Alive);
 }
 
@@ -102,7 +102,7 @@ fn alive_inserts_new_node_with_join_event() {
   // First event drained should be NodeJoined for bob.
   let ev = e.poll_event().expect("expected NodeJoined");
   match ev {
-    Event::NodeJoined(node) => assert_eq!(node.id(), &SmolStr::new("bob")),
+    Event::NodeJoined(node) => assert_eq!(node.id_ref(), &SmolStr::new("bob")),
     other => panic!("expected NodeJoined, got {other:?}"),
   }
 }
@@ -116,7 +116,7 @@ fn alive_existing_with_old_incarnation_is_ignored() {
   process_alive_auto(&mut e, alive("bob", 7001, 3), false, Instant::now());
   // Incarnation should still be 5.
   let bob_member = e.members.get(&SmolStr::new("bob")).unwrap();
-  assert_eq!(bob_member.state().incarnation(), 5);
+  assert_eq!(bob_member.state_ref().incarnation(), 5);
   assert!(
     e.poll_event().is_none(),
     "no event expected on ignored alive"
@@ -130,7 +130,10 @@ fn alive_self_with_higher_incarnation_refutes() {
   // Someone is claiming to be us at incarnation 5; refute by bumping past.
   process_alive_auto(&mut e, alive("local", 7000, 5), false, Instant::now());
   let local_member = e.members.get(&SmolStr::new("local")).unwrap();
-  assert!(local_member.state().incarnation() > 5, "should bump past 5");
+  assert!(
+    local_member.state_ref().incarnation() > 5,
+    "should bump past 5"
+  );
   // Health score should have ticked up.
   assert_eq!(e.health_score(), 1);
 }
@@ -157,7 +160,7 @@ fn incarnation_wraps_at_u32_max() {
   );
   let local = e.members.get(&SmolStr::new("local")).unwrap();
   assert_eq!(
-    local.state().incarnation(),
+    local.state_ref().incarnation(),
     0,
     "incarnation must wrap to 0 at u32::MAX, not saturate"
   );
@@ -173,14 +176,14 @@ fn alive_address_change_alive_node_emits_conflict() {
   let ev = e.poll_event().expect("expected NodeConflict");
   match ev {
     Event::NodeConflict { existing, other } => {
-      assert_eq!(existing.address().port(), 7001);
-      assert_eq!(other.address().port(), 7777);
+      assert_eq!(existing.address_ref().port(), 7001);
+      assert_eq!(other.address_ref().port(), 7777);
     }
     other => panic!("expected NodeConflict, got {other:?}"),
   }
   // Bob's tracked address should still be 7001.
   assert_eq!(
-    e.member(&SmolStr::new("bob")).unwrap().address().port(),
+    e.member(&SmolStr::new("bob")).unwrap().address_ref().port(),
     7001
   );
 }
@@ -200,7 +203,7 @@ fn suspect_alive_node_starts_timer() {
   while e.poll_event().is_some() {}
   e.process_suspect(suspect("bob", "carol", 1), Instant::now());
   let bob = e.members.get(&SmolStr::new("bob")).unwrap();
-  assert_eq!(bob.state().state(), State::Suspect);
+  assert_eq!(bob.state_ref().state(), State::Suspect);
   assert!(bob.suspicion().is_some());
 }
 
@@ -211,12 +214,12 @@ fn suspect_self_refutes() {
     .members
     .get(&SmolStr::new("local"))
     .unwrap()
-    .state()
+    .state_ref()
     .incarnation();
   e.process_suspect(suspect("local", "carol", starting_inc + 5), Instant::now());
   let local = e.members.get(&SmolStr::new("local")).unwrap();
-  assert!(local.state().incarnation() > starting_inc + 5);
-  assert_eq!(local.state().state(), State::Alive);
+  assert!(local.state_ref().incarnation() > starting_inc + 5);
+  assert_eq!(local.state_ref().state(), State::Alive);
 }
 
 #[test]
@@ -225,7 +228,7 @@ fn suspect_old_incarnation_ignored() {
   process_alive_auto(&mut e, alive("bob", 7001, 5), false, Instant::now());
   e.process_suspect(suspect("bob", "carol", 1), Instant::now());
   let bob = e.members.get(&SmolStr::new("bob")).unwrap();
-  assert_eq!(bob.state().state(), State::Alive);
+  assert_eq!(bob.state_ref().state(), State::Alive);
   assert!(bob.suspicion().is_none());
 }
 
@@ -236,10 +239,10 @@ fn dead_alive_node_marks_dead_and_emits_left() {
   while e.poll_event().is_some() {}
   e.process_dead(dead("bob", "carol", 1), Instant::now());
   let bob = e.members.get(&SmolStr::new("bob")).unwrap();
-  assert_eq!(bob.state().state(), State::Dead);
+  assert_eq!(bob.state_ref().state(), State::Dead);
   let ev = e.poll_event().expect("expected NodeLeft");
   match ev {
-    Event::NodeLeft(node) => assert_eq!(node.id(), &SmolStr::new("bob")),
+    Event::NodeLeft(node) => assert_eq!(node.id_ref(), &SmolStr::new("bob")),
     other => panic!("expected NodeLeft, got {other:?}"),
   }
 }
@@ -251,12 +254,12 @@ fn dead_self_when_not_leaving_refutes() {
     .members
     .get(&SmolStr::new("local"))
     .unwrap()
-    .state()
+    .state_ref()
     .incarnation();
   e.process_dead(dead("local", "carol", starting_inc + 5), Instant::now());
   let local = e.members.get(&SmolStr::new("local")).unwrap();
-  assert!(local.state().incarnation() > starting_inc + 5);
-  assert_eq!(local.state().state(), State::Alive);
+  assert!(local.state_ref().incarnation() > starting_inc + 5);
+  assert_eq!(local.state_ref().state(), State::Alive);
 }
 
 #[test]
@@ -267,7 +270,7 @@ fn dead_self_marked_message_treats_as_left() {
   // node==from convention: bob is announcing his own departure.
   e.process_dead(dead("bob", "bob", 1), Instant::now());
   let bob = e.members.get(&SmolStr::new("bob")).unwrap();
-  assert_eq!(bob.state().state(), State::Left);
+  assert_eq!(bob.state_ref().state(), State::Left);
 }
 
 use PushNodeState;
@@ -307,7 +310,7 @@ fn merge_dead_treats_as_suspect() {
   // Remote thinks bob is dead — we suspect rather than mark dead.
   e.merge_state(&[pns("bob", 7001, 2, State::Dead)], Instant::now());
   let bob = e.members.get(&SmolStr::new("bob")).unwrap();
-  assert_eq!(bob.state().state(), State::Suspect);
+  assert_eq!(bob.state_ref().state(), State::Suspect);
 }
 
 #[test]
@@ -320,7 +323,7 @@ fn merge_remote_left_marks_dead_not_left() {
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   e.merge_state(&[pns("bob", 7001, 2, State::Left)], Instant::now());
   let bob = e.members.get(&SmolStr::new("bob")).unwrap();
-  assert_eq!(bob.state().state(), State::Dead);
+  assert_eq!(bob.state_ref().state(), State::Dead);
 }
 
 #[test]
@@ -341,7 +344,7 @@ fn handle_timeout_fires_expired_suspicion() {
   let later = deadline + Duration::from_millis(10);
   e.handle_timeout(later);
   let bob = e.members.get(&SmolStr::new("bob")).unwrap();
-  assert_eq!(bob.state().state(), State::Dead);
+  assert_eq!(bob.state_ref().state(), State::Dead);
 }
 
 #[test]
@@ -395,7 +398,7 @@ fn update_meta_emits_node_updated_and_increments_incarnation() {
     .members
     .get(&SmolStr::new("local"))
     .unwrap()
-    .state()
+    .state_ref()
     .incarnation();
   let new_meta = Meta::try_from(Bytes::from_static(b"v2")).unwrap();
   e.update_meta(new_meta).expect("ok");
@@ -403,7 +406,7 @@ fn update_meta_emits_node_updated_and_increments_incarnation() {
     .members
     .get(&SmolStr::new("local"))
     .unwrap()
-    .state()
+    .state_ref()
     .incarnation();
   assert!(inc_after > inc_before);
   let ev = e.poll_event().expect("expected NodeUpdated");
@@ -467,9 +470,10 @@ fn leave_defers_left_cluster_until_dead_self_drained() {
   let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let mut saw_dead_self = false;
   while let Some(tx) = e.poll_transmit() {
-    let Transmit::Packet(PacketTransmit { to, message }) = tx else {
+    let Transmit::Packet(p) = tx else {
       panic!("unexpected Compound transmit");
     };
+    let (to, message) = p.into_parts();
     if to == peer_addr && matches!(message, Message::Dead(_)) {
       saw_dead_self = true;
     }
@@ -510,13 +514,12 @@ fn leave_no_live_peers_not_delayed_by_stale_transmit() {
     "zero-live-peer leave must complete immediately despite stale transmit"
   );
   // The stale Ack is still queued (it is not the leave notice).
-  assert!(matches!(
-    e.poll_transmit(),
-    Some(Transmit::Packet(PacketTransmit {
-      message: Message::Ack(_),
-      ..
-    }))
-  ));
+  {
+    let tx = e.poll_transmit();
+    let is_ack_packet =
+      matches!(&tx, Some(Transmit::Packet(p)) if matches!(p.message_ref(), Message::Ack(_)));
+    assert!(is_ack_packet, "stale Ack packet expected");
+  }
 }
 
 /// With a live peer, the completion boundary is exactly the queued
@@ -545,13 +548,13 @@ fn leave_left_cluster_boundary_is_the_dead_self_not_other_traffic() {
   );
 
   // Pop #1: the stale prefix Ack — boundary not reached yet.
-  assert!(matches!(
-    e.poll_transmit(),
-    Some(Transmit::Packet(PacketTransmit {
-      message: Message::Ack(_),
-      ..
-    }))
-  ));
+  {
+    let tx = e.poll_transmit();
+    assert!(
+      matches!(&tx, Some(Transmit::Packet(p)) if matches!(p.message_ref(), Message::Ack(_))),
+      "expected stale Ack packet"
+    );
+  }
   assert!(
     !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
     "stale prefix packet must not trigger LeftCluster"
@@ -561,26 +564,26 @@ fn leave_left_cluster_boundary_is_the_dead_self_not_other_traffic() {
   e.handle_ping(from, ping_to("local", 7000, "alice", 8001, 2), t0);
 
   // Pop #2: the dead-self ⇒ boundary reached ⇒ LeftCluster now.
-  assert!(matches!(
-    e.poll_transmit(),
-    Some(Transmit::Packet(PacketTransmit {
-      message: Message::Dead(_),
-      ..
-    }))
-  ));
+  {
+    let tx = e.poll_transmit();
+    assert!(
+      matches!(&tx, Some(Transmit::Packet(p)) if matches!(p.message_ref(), Message::Dead(_))),
+      "expected dead-self packet"
+    );
+  }
   assert!(
     std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
     "LeftCluster fires exactly when the dead-self is handed off"
   );
 
   // Pop #3: the trailing Ack — must NOT emit a second LeftCluster.
-  assert!(matches!(
-    e.poll_transmit(),
-    Some(Transmit::Packet(PacketTransmit {
-      message: Message::Ack(_),
-      ..
-    }))
-  ));
+  {
+    let tx = e.poll_transmit();
+    assert!(
+      matches!(&tx, Some(Transmit::Packet(p)) if matches!(p.message_ref(), Message::Ack(_))),
+      "expected trailing Ack packet"
+    );
+  }
   assert!(
     !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
     "trailing post-leave traffic must not re-trigger LeftCluster"
@@ -675,7 +678,7 @@ struct RejectAllMerge {
 }
 impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for RejectAllMerge {
   fn notify_merge(&self, peers: &[memberlist_wire::typed::NodeState<SmolStr, SocketAddr>]) -> bool {
-    *self.seen.lock().unwrap() = peers.iter().map(|p| p.id().clone()).collect();
+    *self.seen.lock().unwrap() = peers.iter().map(|p| p.id_ref().clone()).collect();
     false
   }
 }
@@ -685,11 +688,11 @@ impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for RejectAllMerge {
 /// and closes the stream.
 #[test]
 fn merge_delegate_vetoes_join_push_pull() {
+  use bytes::Bytes;
+  use std::sync::{Arc, Mutex};
   use EndpointEvent;
   use PushPullKind;
   use StreamCommand;
-  use bytes::Bytes;
-  use std::sync::{Arc, Mutex};
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   while e.poll_event().is_some() {}
   let d = Arc::new(RejectAllMerge {
@@ -725,11 +728,11 @@ fn merge_delegate_vetoes_join_push_pull() {
 /// gated, so it merges even with a reject-all delegate installed.
 #[test]
 fn merge_delegate_not_consulted_for_refresh() {
+  use bytes::Bytes;
+  use std::sync::{Arc, Mutex};
   use EndpointEvent;
   use PushPullKind;
   use StreamCommand;
-  use bytes::Bytes;
-  use std::sync::{Arc, Mutex};
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   while e.poll_event().is_some() {}
   let d = Arc::new(RejectAllMerge {
@@ -774,7 +777,7 @@ fn set_ack_payload_round_trips() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   assert!(e.ack_payload().is_empty());
   e.set_ack_payload(Bytes::from_static(b"hello"));
-  assert_eq!(e.ack_payload().as_ref(), b"hello");
+  assert_eq!(e.ack_payload(), b"hello");
 }
 
 #[test]
@@ -827,7 +830,7 @@ fn alive_address_change_dead_node_reclaim_adopts_new_address() {
   let later = t0 + Duration::from_millis(100);
   e.process_alive_decided(alive("bob", 7777, 2), false, later);
   assert_eq!(
-    e.member(&SmolStr::new("bob")).unwrap().address().port(),
+    e.member(&SmolStr::new("bob")).unwrap().address_ref().port(),
     7777
   );
 }
@@ -842,7 +845,7 @@ fn dead_double_message_is_idempotent() {
     .members
     .get(&SmolStr::new("bob"))
     .unwrap()
-    .state()
+    .state_ref()
     .incarnation();
   // Second dead — same incarnation, already-dead node — must be ignored.
   e.process_dead(dead("bob", "evan", 1), t0);
@@ -850,12 +853,16 @@ fn dead_double_message_is_idempotent() {
     .members
     .get(&SmolStr::new("bob"))
     .unwrap()
-    .state()
+    .state_ref()
     .incarnation();
   assert_eq!(inc1, inc2);
   // Use members.get() to inspect the local liveness state (not the server Arc's state).
   assert_eq!(
-    e.members.get(&SmolStr::new("bob")).unwrap().state().state(),
+    e.members
+      .get(&SmolStr::new("bob"))
+      .unwrap()
+      .state_ref()
+      .state(),
     State::Dead
   );
 }
@@ -870,7 +877,7 @@ fn process_alive_stamps_state_change_with_supplied_now() {
   e.process_alive(alive("bob", 7001, 1), false, receive_time);
   let bob = e.members.get(&SmolStr::new("bob")).unwrap();
   assert_eq!(
-    bob.state().state_change(),
+    bob.state_ref().state_change(),
     receive_time,
     "process_alive must stamp state_change with the supplied receive-time"
   );
@@ -881,9 +888,9 @@ fn set_local_state_snapshot_round_trips() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   assert!(e.local_state_snapshot().is_empty());
   e.set_local_state_snapshot(Bytes::from_static(b"snapshot-v1"));
-  assert_eq!(e.local_state_snapshot().as_ref(), b"snapshot-v1");
+  assert_eq!(e.local_state_snapshot(), b"snapshot-v1");
   e.set_local_state_snapshot(Bytes::from_static(b"snapshot-v2"));
-  assert_eq!(e.local_state_snapshot().as_ref(), b"snapshot-v2");
+  assert_eq!(e.local_state_snapshot(), b"snapshot-v2");
 }
 
 #[test]
@@ -954,7 +961,8 @@ fn handle_ping_for_local_replies_with_ack() {
   e.handle_ping(from, p, Instant::now());
   let t = e.poll_transmit().expect("Ack expected");
   match t {
-    Transmit::Packet(PacketTransmit { to, message }) => {
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
       assert_eq!(to, from);
       match message {
         Message::Ack(ack) => assert_eq!(ack.sequence_number(), 42),
@@ -985,12 +993,12 @@ fn handle_ping_uses_current_ack_payload() {
   let p = ping_to("local", 7000, "alice", 8001, 1);
   e.handle_ping(from, p, Instant::now());
   let t = e.poll_transmit().expect("Ack expected");
-  if let Transmit::Packet(PacketTransmit {
-    message: Message::Ack(ack),
-    ..
-  }) = t
-  {
-    assert_eq!(ack.payload().as_ref(), b"app-data");
+  if let Transmit::Packet(p) = t {
+    if let Message::Ack(ack) = p.into_parts().1 {
+      assert_eq!(ack.payload(), b"app-data");
+    } else {
+      panic!("expected Ack message");
+    }
   } else {
     panic!("expected Ack");
   }
@@ -1015,11 +1023,12 @@ fn start_probe_emits_ping_to_alive_peer() {
   assert!(e.start_probe(Instant::now()));
   let t = e.poll_transmit().expect("Ping expected");
   match t {
-    Transmit::Packet(PacketTransmit { to, message }) => {
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
       assert_eq!(to.port(), 7001);
       match message {
         Message::Ping(p) => {
-          assert_eq!(p.target().id(), &SmolStr::new("bob"));
+          assert_eq!(p.target_ref().id(), &SmolStr::new("bob"));
           assert!(p.sequence_number() > 0);
         }
         other => panic!("expected Ping, got {other:?}"),
@@ -1051,8 +1060,8 @@ fn start_probe_round_robins_across_alive_peers() {
   let mut targets = std::collections::HashSet::new();
   for _ in 0..4 {
     assert!(e.start_probe(Instant::now()));
-    if let Some(Transmit::Packet(PacketTransmit { to, .. })) = e.poll_transmit() {
-      targets.insert(to.port());
+    if let Some(Transmit::Packet(p)) = e.poll_transmit() {
+      targets.insert(p.to_ref().port());
     }
   }
   assert!(targets.contains(&7001));
@@ -1074,12 +1083,13 @@ fn handle_ack_completes_direct_probe_and_ticks_awareness() {
 
   let t0 = Instant::now();
   e.start_probe(t0);
-  let seq = if let Some(Transmit::Packet(PacketTransmit {
-    message: Message::Ping(p),
-    ..
-  })) = e.poll_transmit()
-  {
-    p.sequence_number()
+  let seq = if let Some(Transmit::Packet(p)) = e.poll_transmit() {
+    let (_, message) = p.into_parts();
+    if let Message::Ping(ping) = message {
+      ping.sequence_number()
+    } else {
+      panic!("expected Ping message");
+    }
   } else {
     panic!("expected Ping");
   };
@@ -1112,10 +1122,18 @@ fn direct_ack_after_direct_timeout_within_cumulative_succeeds() {
   let t0 = Instant::now();
   e.start_probe(t0);
   let (seq, target_addr, target_id) = match e.poll_transmit().expect("direct Ping") {
-    Transmit::Packet(PacketTransmit {
-      to,
-      message: Message::Ping(p),
-    }) => (p.sequence_number(), to, p.target().id().cheap_clone()),
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        (
+          ping.sequence_number(),
+          to,
+          ping.target_ref().id().cheap_clone(),
+        )
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
   while e.poll_transmit().is_some() {}
@@ -1143,11 +1161,8 @@ fn direct_ack_after_direct_timeout_within_cumulative_succeeds() {
   );
   assert!(
     !std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
-      tx,
-      Transmit::Packet(PacketTransmit {
-        message: Message::IndirectPing(_),
-        ..
-      })
+      &tx,
+      Transmit::Packet(p) if matches!(p.message_ref(), Message::IndirectPing(_))
     )),
     "an Ack proves liveness — no indirect fan-out"
   );
@@ -1161,10 +1176,14 @@ fn direct_ack_after_direct_timeout_within_cumulative_succeeds() {
   // must come from seq2's actual target or responder validation (correctly)
   // drops it before the cutoff is even consulted.
   let (seq2, target2_addr) = match e.poll_transmit().expect("direct Ping 2") {
-    Transmit::Packet(PacketTransmit {
-      to,
-      message: Message::Ping(p),
-    }) => (p.sequence_number(), to),
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        (ping.sequence_number(), to)
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
   while e.poll_transmit().is_some() {}
@@ -1204,10 +1223,14 @@ fn app_ping_ack_after_probe_timeout_does_not_complete() {
   let bob_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   e.ping(Node::new(SmolStr::new("bob"), bob_addr), t0);
   let seq = match e.poll_transmit().expect("Ping") {
-    Transmit::Packet(PacketTransmit {
-      message: Message::Ping(p),
-      ..
-    }) => p.sequence_number(),
+    Transmit::Packet(p) => {
+      let (_, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
   while e.poll_transmit().is_some() {}
@@ -1230,10 +1253,14 @@ fn app_ping_ack_after_probe_timeout_does_not_complete() {
   let t1 = t0 + Duration::from_secs(10);
   e.start_probe(t1);
   let dseq = match e.poll_transmit().expect("Detection Ping") {
-    Transmit::Packet(PacketTransmit {
-      message: Message::Ping(p),
-      ..
-    }) => p.sequence_number(),
+    Transmit::Packet(p) => {
+      let (_, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
   while e.poll_transmit().is_some() {}
@@ -1284,9 +1311,8 @@ fn indirect_probe_at(
     .members
     .get(&SmolStr::new("bob"))
     .unwrap()
-    .state()
-    .server()
-    .cheap_clone();
+    .state_ref()
+    .server_arc();
   let expected_nacks = indirect_peers.len();
   e.probes.insert(
     seq,
@@ -1475,10 +1501,11 @@ fn handle_indirect_ping_forwards_to_target() {
   e.handle_indirect_ping(from, ind, Instant::now());
   let t = e.poll_transmit().expect("forwarded Ping expected");
   match t {
-    Transmit::Packet(PacketTransmit { to, message }) => {
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
       assert_eq!(to.port(), 7001);
-      if let Message::Ping(p) = message {
-        assert_eq!(p.target().id(), &SmolStr::new("bob"));
+      if let Message::Ping(ping) = message {
+        assert_eq!(ping.target_ref().id(), &SmolStr::new("bob"));
       } else {
         panic!("expected Ping");
       }
@@ -1495,12 +1522,13 @@ fn handle_indirect_ping_followed_by_target_ack_relays_ack() {
   let ind = ind_ping("bob", 7001, "carol", 7002, 42);
   e.handle_indirect_ping(from, ind, Instant::now());
   // Capture the forwarded Ping's seq.
-  let our_seq = if let Some(Transmit::Packet(PacketTransmit {
-    message: Message::Ping(p),
-    ..
-  })) = e.poll_transmit()
-  {
-    p.sequence_number()
+  let our_seq = if let Some(Transmit::Packet(p)) = e.poll_transmit() {
+    let (_, message) = p.into_parts();
+    if let Message::Ping(ping) = message {
+      ping.sequence_number()
+    } else {
+      panic!("expected Ping message");
+    }
   } else {
     panic!("expected forwarded Ping");
   };
@@ -1512,7 +1540,8 @@ fn handle_indirect_ping_followed_by_target_ack_relays_ack() {
   // We should now have emitted an Ack-relay to carol (the original requester).
   let t = e.poll_transmit().expect("Ack-relay expected");
   match t {
-    Transmit::Packet(PacketTransmit { to, message }) => {
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
       assert_eq!(to.port(), 7002);
       if let Message::Ack(ack) = message {
         assert_eq!(ack.sequence_number(), 42);
@@ -1548,11 +1577,8 @@ fn forged_indirect_ping_source_is_rejected() {
   e.handle_timeout(t0 + Duration::from_millis(60));
   assert!(
     !std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
-      tx,
-      Transmit::Packet(PacketTransmit {
-        message: Message::Nack(_),
-        ..
-      })
+      &tx,
+      Transmit::Packet(p) if matches!(p.message_ref(), Message::Nack(_))
     )),
     "a forged IndirectPing must not register a forward (no Nack on expiry)"
   );
@@ -1563,11 +1589,8 @@ fn forged_indirect_ping_source_is_rejected() {
   e.handle_indirect_ping(honest_from, ind_ping("bob", 7001, "carol", 7002, 43), t0);
   assert!(
     std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
-      tx,
-      Transmit::Packet(PacketTransmit {
-        message: Message::Ping(_),
-        ..
-      })
+      &tx,
+      Transmit::Packet(p) if matches!(p.message_ref(), Message::Ping(_))
     )),
     "an honest IndirectPing (from == source) still forwards"
   );
@@ -1588,12 +1611,13 @@ fn probe_direct_timeout_fans_out_to_indirect() {
   let t0 = Instant::now();
   e.start_probe(t0);
   let direct = e.poll_transmit().expect("direct Ping expected");
-  let _seq = if let Transmit::Packet(PacketTransmit {
-    message: Message::Ping(p),
-    ..
-  }) = direct
-  {
-    p.sequence_number()
+  let _seq = if let Transmit::Packet(p) = direct {
+    let (_, message) = p.into_parts();
+    if let Message::Ping(ping) = message {
+      ping.sequence_number()
+    } else {
+      panic!("Ping message expected")
+    }
   } else {
     panic!("Ping expected")
   };
@@ -1604,9 +1628,11 @@ fn probe_direct_timeout_fans_out_to_indirect() {
 
   // We should now see IndirectPings to up to 3 indirect peers.
   let mut indirect_count = 0;
-  while let Some(Transmit::Packet(PacketTransmit { message, .. })) = e.poll_transmit() {
-    if matches!(message, Message::IndirectPing(_)) {
-      indirect_count += 1;
+  while let Some(tx) = e.poll_transmit() {
+    if let Transmit::Packet(p) = tx {
+      if matches!(p.message_ref(), Message::IndirectPing(_)) {
+        indirect_count += 1;
+      }
     }
   }
   assert!(indirect_count > 0, "expected IndirectPings on timeout");
@@ -1635,10 +1661,14 @@ fn probe_arms_reliable_fallback_concurrently_with_indirect() {
   let t0 = Instant::now();
   e.start_probe(t0);
   let seq = match e.poll_transmit().expect("direct Ping") {
-    Transmit::Packet(PacketTransmit {
-      message: Message::Ping(p),
-      ..
-    }) => p.sequence_number(),
+    Transmit::Packet(p) => {
+      let (_, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
   while e.poll_transmit().is_some() {}
@@ -1699,10 +1729,14 @@ fn late_handle_timeout_does_not_extend_probe_window() {
   let t0 = Instant::now();
   e.start_probe(t0);
   let seq = match e.poll_transmit().expect("direct Ping") {
-    Transmit::Packet(PacketTransmit {
-      message: Message::Ping(p),
-      ..
-    }) => p.sequence_number(),
+    Transmit::Packet(p) => {
+      let (_, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
   while e.poll_transmit().is_some() {}
@@ -1727,11 +1761,8 @@ fn late_handle_timeout_does_not_extend_probe_window() {
   );
   assert!(
     !std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
-      tx,
-      Transmit::Packet(PacketTransmit {
-        message: Message::IndirectPing(_),
-        ..
-      })
+      &tx,
+      Transmit::Packet(p) if matches!(p.message_ref(), Message::IndirectPing(_))
     )),
     "an already-expired probe must NOT fan out indirect pings"
   );
@@ -1772,12 +1803,13 @@ fn probe_indirect_timeout_marks_target_suspect() {
   e.start_probe(t0);
 
   // Capture the actual probe target from the emitted Ping.
-  let target_id = if let Some(Transmit::Packet(PacketTransmit {
-    message: Message::Ping(p),
-    ..
-  })) = e.poll_transmit()
-  {
-    p.target().id().cheap_clone()
+  let target_id = if let Some(Transmit::Packet(p)) = e.poll_transmit() {
+    let (_, message) = p.into_parts();
+    if let Message::Ping(ping) = message {
+      ping.target_ref().id().cheap_clone()
+    } else {
+      panic!("expected Ping message");
+    }
   } else {
     panic!("expected Ping");
   };
@@ -1789,8 +1821,8 @@ fn probe_indirect_timeout_marks_target_suspect() {
   e.handle_timeout(t0 + Duration::from_millis(60));
   while e.poll_event().is_some() {} // drain DialRequested (concurrent reliable ping)
   while e.poll_transmit().is_some() {} // drain IndirectPings
-  // The single cumulative AwaitingIndirect deadline (t0+80ms) elapses →
-  // probe_terminate_failure → target Suspect. No further phase.
+                                       // The single cumulative AwaitingIndirect deadline (t0+80ms) elapses →
+                                       // probe_terminate_failure → target Suspect. No further phase.
   e.handle_timeout(t0 + Duration::from_millis(185));
 
   // The captured target — and ONLY that target — should now be Suspect (or Dead
@@ -1798,10 +1830,13 @@ fn probe_indirect_timeout_marks_target_suspect() {
   // mult * probe_interval * log(N+1) is comfortably more than 60ms).
   let target_member = e.members.get(&target_id).expect("target present");
   assert!(
-    matches!(target_member.state().state(), State::Suspect | State::Dead),
+    matches!(
+      target_member.state_ref().state(),
+      State::Suspect | State::Dead
+    ),
     "expected target {:?} to be Suspect or Dead, got {:?}",
     target_id,
-    target_member.state().state()
+    target_member.state_ref().state()
   );
 }
 
@@ -1822,13 +1857,14 @@ fn indirect_forward_timeout_emits_nack() {
   e.handle_timeout(t0 + Duration::from_millis(60));
 
   let t = e.poll_transmit().expect("Nack expected");
-  if let Transmit::Packet(PacketTransmit {
-    to,
-    message: Message::Nack(n),
-  }) = t
-  {
-    assert_eq!(to.port(), 7002);
-    assert_eq!(n.sequence_number(), 42);
+  if let Transmit::Packet(p) = t {
+    let (to, message) = p.into_parts();
+    if let Message::Nack(n) = message {
+      assert_eq!(to.port(), 7002);
+      assert_eq!(n.sequence_number(), 42);
+    } else {
+      panic!("expected Nack message");
+    }
   } else {
     panic!("expected Nack to carol with seq=42");
   }
@@ -1859,12 +1895,14 @@ fn forward_timeout_nack_reaches_requester_absent_from_membership() {
     .poll_transmit()
     .expect("Nack must be emitted even though the requester is unknown");
   match t {
-    Transmit::Packet(PacketTransmit {
-      to,
-      message: Message::Nack(n),
-    }) => {
-      assert_eq!(to, from, "Nack goes to the validated transport source");
-      assert_eq!(n.sequence_number(), 42);
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      if let Message::Nack(n) = message {
+        assert_eq!(to, from, "Nack goes to the validated transport source");
+        assert_eq!(n.sequence_number(), 42);
+      } else {
+        panic!("expected Nack message");
+      }
     }
     _ => panic!("expected Nack to the validated source seq=42"),
   }
@@ -1892,10 +1930,9 @@ fn forward_timeout_nack_ignores_stale_membership_address() {
   e.handle_timeout(t0 + Duration::from_millis(60));
   let t = e.poll_transmit().expect("Nack expected");
   match t {
-    Transmit::Packet(PacketTransmit {
-      to,
-      message: Message::Nack(_),
-    }) => {
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      assert!(matches!(message, Message::Nack(_)), "expected Nack message");
       assert_eq!(
         to, validated,
         "Nack goes to the validated source, not the stale members addr"
@@ -1925,12 +1962,13 @@ fn forward_ack_after_deadline_is_not_relayed_and_nack_still_fires() {
   let t0 = Instant::now();
   // Forward deadline = t0 + probe_timeout = t0 + 50ms.
   e.handle_indirect_ping(carol, ind_ping("bob", 7001, "carol", 7002, 42), t0);
-  let our_seq = if let Some(Transmit::Packet(PacketTransmit {
-    message: Message::Ping(p),
-    ..
-  })) = e.poll_transmit()
-  {
-    p.sequence_number()
+  let our_seq = if let Some(Transmit::Packet(p)) = e.poll_transmit() {
+    let (_, message) = p.into_parts();
+    if let Message::Ping(ping) = message {
+      ping.sequence_number()
+    } else {
+      panic!("expected Ping message");
+    }
   } else {
     panic!("expected forwarded Ping");
   };
@@ -1942,11 +1980,8 @@ fn forward_ack_after_deadline_is_not_relayed_and_nack_still_fires() {
   e.handle_ack(bob, Ack::new(our_seq), deadline);
   assert!(
     !std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
-      tx,
-      Transmit::Packet(PacketTransmit {
-        message: Message::Ack(_),
-        ..
-      })
+      &tx,
+      Transmit::Packet(p) if matches!(p.message_ref(), Message::Ack(_))
     )),
     "a Forward Ack at/after the forward deadline must NOT be relayed"
   );
@@ -1955,12 +1990,14 @@ fn forward_ack_after_deadline_is_not_relayed_and_nack_still_fires() {
   e.handle_timeout(deadline);
   let t = e.poll_transmit().expect("Nack expected after the deadline");
   match t {
-    Transmit::Packet(PacketTransmit {
-      to,
-      message: Message::Nack(n),
-    }) => {
-      assert_eq!(to.port(), 7002, "Nack goes to the original requester");
-      assert_eq!(n.sequence_number(), 42, "Nack carries the requester seq");
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      if let Message::Nack(n) = message {
+        assert_eq!(to.port(), 7002, "Nack goes to the original requester");
+        assert_eq!(n.sequence_number(), 42, "Nack carries the requester seq");
+      } else {
+        panic!("expected Nack message");
+      }
     }
     _ => panic!("expected Nack to carol seq=42"),
   }
@@ -1976,12 +2013,13 @@ fn forward_ack_before_deadline_still_relays() {
   let bob = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
   let t0 = Instant::now();
   e.handle_indirect_ping(carol, ind_ping("bob", 7001, "carol", 7002, 42), t0);
-  let our_seq = if let Some(Transmit::Packet(PacketTransmit {
-    message: Message::Ping(p),
-    ..
-  })) = e.poll_transmit()
-  {
-    p.sequence_number()
+  let our_seq = if let Some(Transmit::Packet(p)) = e.poll_transmit() {
+    let (_, message) = p.into_parts();
+    if let Message::Ping(ping) = message {
+      ping.sequence_number()
+    } else {
+      panic!("expected Ping message");
+    }
   } else {
     panic!("expected forwarded Ping");
   };
@@ -1990,23 +2028,17 @@ fn forward_ack_before_deadline_still_relays() {
   // 1ms before the 50ms forward deadline.
   e.handle_ack(bob, Ack::new(our_seq), t0 + Duration::from_millis(49));
   let relayed = std::iter::from_fn(|| e.poll_transmit())
-    .find(|tx| {
-      matches!(
-        tx,
-        Transmit::Packet(PacketTransmit {
-          message: Message::Ack(_),
-          ..
-        })
-      )
-    })
+    .find(|tx| matches!(tx, Transmit::Packet(p) if matches!(p.message_ref(), Message::Ack(_))))
     .expect("a within-deadline Forward Ack must still relay");
   match relayed {
-    Transmit::Packet(PacketTransmit {
-      to,
-      message: Message::Ack(a),
-    }) => {
-      assert_eq!(to.port(), 7002);
-      assert_eq!(a.sequence_number(), 42);
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      if let Message::Ack(a) = message {
+        assert_eq!(to.port(), 7002);
+        assert_eq!(a.sequence_number(), 42);
+      } else {
+        panic!("expected Ack message");
+      }
     }
     _ => unreachable!(),
   }
@@ -2028,12 +2060,13 @@ fn ping_emits_ping_and_records_app_ping_state() {
   );
   e.ping(bob_node, t0);
   let t = e.poll_transmit().expect("Ping expected");
-  let seq = if let Transmit::Packet(PacketTransmit {
-    message: Message::Ping(p),
-    ..
-  }) = t
-  {
-    p.sequence_number()
+  let seq = if let Transmit::Packet(p) = t {
+    let (_, message) = p.into_parts();
+    if let Message::Ping(ping) = message {
+      ping.sequence_number()
+    } else {
+      panic!("Ping message expected")
+    }
   } else {
     panic!("Ping expected");
   };
@@ -2056,12 +2089,13 @@ fn ping_completes_on_ack_with_pingcompleted_event() {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001),
   );
   e.ping(bob_node, t0);
-  let seq = if let Some(Transmit::Packet(PacketTransmit {
-    message: Message::Ping(p),
-    ..
-  })) = e.poll_transmit()
-  {
-    p.sequence_number()
+  let seq = if let Some(Transmit::Packet(p)) = e.poll_transmit() {
+    let (_, message) = p.into_parts();
+    if let Message::Ping(ping) = message {
+      ping.sequence_number()
+    } else {
+      panic!("Ping message expected")
+    }
   } else {
     panic!("Ping expected");
   };
@@ -2076,7 +2110,7 @@ fn ping_completes_on_ack_with_pingcompleted_event() {
   let ev = e.poll_event().expect("PingCompleted expected");
   match ev {
     Event::PingCompleted { node, rtt, payload } => {
-      assert_eq!(node.id(), &SmolStr::new("bob"));
+      assert_eq!(node.id_ref(), &SmolStr::new("bob"));
       assert!(rtt >= Duration::from_millis(15));
       assert_eq!(payload.as_ref(), b"pong");
     }
@@ -2109,10 +2143,14 @@ fn app_ping_timeout_does_not_escalate_to_indirect_or_fallback() {
   e.ping(bob_node, t0);
   // Drain the single direct Ping.
   let seq = match e.poll_transmit().expect("direct Ping") {
-    Transmit::Packet(PacketTransmit {
-      message: Message::Ping(p),
-      ..
-    }) => p.sequence_number(),
+    Transmit::Packet(p) => {
+      let (_, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
   while e.poll_transmit().is_some() {}
@@ -2135,11 +2173,8 @@ fn app_ping_timeout_does_not_escalate_to_indirect_or_fallback() {
   );
   assert!(
     !std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
-      tx,
-      Transmit::Packet(PacketTransmit {
-        message: Message::IndirectPing(_),
-        ..
-      })
+      &tx,
+      Transmit::Packet(p) if matches!(p.message_ref(), Message::IndirectPing(_))
     )),
     "an app ping must NOT leak IndirectPing traffic into failure detection"
   );
@@ -2176,10 +2211,14 @@ fn probe_failure_with_no_indirect_peers_bumps_awareness_by_one() {
   let t0 = Instant::now();
   e.start_probe(t0);
   let seq = match e.poll_transmit().expect("direct Ping") {
-    Transmit::Packet(PacketTransmit {
-      message: Message::Ping(p),
-      ..
-    }) => p.sequence_number(),
+    Transmit::Packet(p) => {
+      let (_, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
   while e.poll_transmit().is_some() {}
@@ -2247,10 +2286,14 @@ fn reliable_fallback_bounded_by_probe_deadline_and_cleaned_on_failure() {
   let t0 = Instant::now();
   e.start_probe(t0);
   let seq = match e.poll_transmit().expect("direct Ping") {
-    Transmit::Packet(PacketTransmit {
-      message: Message::Ping(p),
-      ..
-    }) => p.sequence_number(),
+    Transmit::Packet(p) => {
+      let (_, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
   while e.poll_transmit().is_some() {}
@@ -2346,16 +2389,19 @@ fn probe_with_suspect_target_piggybacks_suspect_message() {
     let mut saw_suspect_about_bob = false;
     while let Some(tx) = e.poll_transmit() {
       let (to, msgs): (SocketAddr, Vec<Message<SmolStr, SocketAddr>>) = match tx {
-        Transmit::Packet(PacketTransmit { to, message }) => (to, vec![message]),
-        Transmit::Compound(crate::event::CompoundTransmit { to, messages }) => (to, messages),
+        Transmit::Packet(p) => {
+          let (to, message) = p.into_parts();
+          (to, vec![message])
+        }
+        Transmit::Compound(cmp) => cmp.into_parts(),
       };
       if to.port() == 7001 {
         for message in &msgs {
           match message {
-            Message::Ping(p) if p.target().id() == &SmolStr::new("bob") => {
+            Message::Ping(p) if p.target_ref().id() == &SmolStr::new("bob") => {
               saw_ping_to_bob = true;
             }
-            Message::Suspect(s) if s.node() == &SmolStr::new("bob") => {
+            Message::Suspect(s) if s.node_ref() == &SmolStr::new("bob") => {
               saw_suspect_about_bob = true;
             }
             _ => {}
@@ -2492,10 +2538,10 @@ fn accept_stream_returns_inbound_stream() {
 #[test]
 fn outbound_push_pull_decode_and_merge() {
   use crate::event::PushPullKind;
+  use bytes::Bytes;
   use PushNodeState;
   use PushPull;
   use State;
-  use bytes::Bytes;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   process_alive_auto(&mut e, alive("alice", 7000, 1), false, Instant::now());
@@ -2532,7 +2578,7 @@ fn outbound_push_pull_decode_and_merge() {
   match ep_ev {
     EndpointEvent::PushPullReplyReceived { ref states, .. } => {
       assert_eq!(states.len(), 1);
-      assert_eq!(states[0].id(), &SmolStr::new("carol"));
+      assert_eq!(states[0].id_ref(), &SmolStr::new("carol"));
     }
     ref other => panic!("expected PushPullReplyReceived, got {other:?}"),
   }
@@ -2553,13 +2599,13 @@ fn outbound_push_pull_decode_and_merge() {
 
 #[test]
 fn inbound_push_pull_decode_and_response_bytes() {
+  use bytes::Bytes;
   use EndpointEvent;
   use PushNodeState;
   use PushPull;
   use PushPullKind;
   use State;
   use StreamCommand;
-  use bytes::Bytes;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   process_alive_auto(&mut e, alive("local-node", 7000, 1), false, Instant::now());
@@ -2589,7 +2635,7 @@ fn inbound_push_pull_decode_and_response_bytes() {
   match &ep_ev {
     EndpointEvent::PushPullRequestReceived { states, kind, .. } => {
       assert_eq!(states.len(), 1);
-      assert_eq!(states[0].id(), &SmolStr::new("dave"));
+      assert_eq!(states[0].id_ref(), &SmolStr::new("dave"));
       assert_eq!(*kind, PushPullKind::Join);
     }
     other => panic!("expected PushPullRequestReceived, got {other:?}"),
@@ -2730,10 +2776,14 @@ fn tiny_probe_interval_suspects_at_failure_deadline_not_direct() {
   let t0 = Instant::now();
   e.start_probe(t0);
   let seq = match e.poll_transmit().expect("direct Ping") {
-    Transmit::Packet(PacketTransmit {
-      message: Message::Ping(p),
-      ..
-    }) => p.sequence_number(),
+    Transmit::Packet(p) => {
+      let (_, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
   while e.poll_transmit().is_some() {}
@@ -3133,11 +3183,11 @@ fn handle_data_bounds_input_buf_before_append() {
 /// stream — NOT decode and emit PushPullRequestReceived past stream_timeout.
 #[test]
 fn handle_data_after_stream_deadline_fails_without_decoding() {
+  use bytes::Bytes;
   use EndpointEvent;
   use PushNodeState;
   use PushPull;
   use State;
-  use bytes::Bytes;
 
   let mut e: Endpoint<SmolStr, SocketAddr> =
     Endpoint::new(cfg().with_stream_timeout(Duration::from_millis(100)));
@@ -3214,10 +3264,14 @@ fn detection_failure_deadline_is_scaled_probe_interval() {
   let t0 = Instant::now();
   e.start_probe(t0);
   let seq = match e.poll_transmit().expect("direct Ping") {
-    Transmit::Packet(PacketTransmit {
-      message: Message::Ping(p),
-      ..
-    }) => p.sequence_number(),
+    Transmit::Packet(p) => {
+      let (_, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
 
@@ -3295,8 +3349,8 @@ fn reliable_ping_ack_drives_probe_success() {
 
 #[test]
 fn start_user_message_encodes_user_data() {
-  use Event;
   use bytes::Bytes;
+  use Event;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
@@ -3332,10 +3386,10 @@ fn start_user_message_encodes_user_data() {
 
 #[test]
 fn inbound_user_data_emits_user_packet_event() {
+  use bytes::Bytes;
   use EndpointEvent;
   use Event;
   use Reliability;
-  use bytes::Bytes;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
@@ -3593,10 +3647,14 @@ fn forged_probe_ack_from_wrong_source_is_rejected() {
   let t0 = Instant::now();
   e.start_probe(t0);
   let (seq, target_addr) = match e.poll_transmit().expect("direct Ping") {
-    Transmit::Packet(PacketTransmit {
-      to,
-      message: Message::Ping(p),
-    }) => (p.sequence_number(), to),
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        (ping.sequence_number(), to)
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
   while e.poll_transmit().is_some() {}
@@ -3630,10 +3688,14 @@ fn indirect_relayed_ack_is_accepted_only_from_a_chosen_peer() {
   let t0 = Instant::now();
   e.start_probe(t0);
   let seq = match e.poll_transmit().expect("direct Ping") {
-    Transmit::Packet(PacketTransmit {
-      message: Message::Ping(p),
-      ..
-    }) => p.sequence_number(),
+    Transmit::Packet(p) => {
+      let (_, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("Ping expected"),
   };
   while e.poll_transmit().is_some() {}
@@ -3643,12 +3705,11 @@ fn indirect_relayed_ack_is_accepted_only_from_a_chosen_peer() {
   e.handle_timeout(t0 + Duration::from_millis(60));
   let mut relay_from = None;
   while let Some(tx) = e.poll_transmit() {
-    if let Transmit::Packet(PacketTransmit {
-      to,
-      message: Message::IndirectPing(_),
-    }) = tx
-    {
-      relay_from = Some(to);
+    if let Transmit::Packet(p) = tx {
+      let (to, message) = p.into_parts();
+      if matches!(message, Message::IndirectPing(_)) {
+        relay_from = Some(to);
+      }
     }
   }
   let chosen = relay_from.expect("an IndirectPing was fanned out to a chosen peer");
@@ -3681,10 +3742,14 @@ fn forged_forward_ack_does_not_relay() {
 
   // We forwarded a Ping to `target` under our own allocated seq.
   let (our_seq, fwd_to) = match e.poll_transmit().expect("forwarded Ping") {
-    Transmit::Packet(PacketTransmit {
-      to,
-      message: Message::Ping(p),
-    }) => (p.sequence_number(), to),
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        (ping.sequence_number(), to)
+      } else {
+        panic!("Ping message expected")
+      }
+    }
     _ => panic!("forwarded Ping expected"),
   };
   assert_eq!(fwd_to, target, "the forwarded Ping goes to the target");
@@ -3695,11 +3760,8 @@ fn forged_forward_ack_does_not_relay() {
   e.handle_ack(evil, Ack::new(our_seq), t0 + Duration::from_millis(5));
   assert!(
     !std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
-      tx,
-      Transmit::Packet(PacketTransmit {
-        message: Message::Ack(_),
-        ..
-      })
+      &tx,
+      Transmit::Packet(p) if matches!(p.message_ref(), Message::Ack(_))
     )),
     "a forged forward Ack must not be relayed to the requester"
   );
@@ -3707,23 +3769,17 @@ fn forged_forward_ack_does_not_relay() {
   // The genuine target Ack relays an Ack back to the original requester.
   e.handle_ack(target, Ack::new(our_seq), t0 + Duration::from_millis(10));
   let relayed = std::iter::from_fn(|| e.poll_transmit())
-    .find(|tx| {
-      matches!(
-        tx,
-        Transmit::Packet(PacketTransmit {
-          message: Message::Ack(_),
-          ..
-        })
-      )
-    })
+    .find(|tx| matches!(tx, Transmit::Packet(p) if matches!(p.message_ref(), Message::Ack(_))))
     .expect("the genuine target Ack is relayed");
   match relayed {
-    Transmit::Packet(PacketTransmit {
-      to,
-      message: Message::Ack(a),
-    }) => {
-      assert_eq!(to, requester, "relay goes to the original requester");
-      assert_eq!(a.sequence_number(), 42, "relay carries the requester's seq");
+    Transmit::Packet(p) => {
+      let (to, message) = p.into_parts();
+      if let Message::Ack(a) = message {
+        assert_eq!(to, requester, "relay goes to the original requester");
+        assert_eq!(a.sequence_number(), 42, "relay carries the requester's seq");
+      } else {
+        panic!("expected Ack message");
+      }
     }
     _ => unreachable!(),
   }
@@ -3779,10 +3835,9 @@ fn dial_before_deadline_then_transmit_after_deadline_emits_nothing() {
     "the queued request is dropped, not merely withheld"
   );
   // Idempotent.
-  assert!(
-    s.poll_transmit(t0 + Duration::from_millis(200), &mut buf)
-      .is_none()
-  );
+  assert!(s
+    .poll_transmit(t0 + Duration::from_millis(200), &mut buf)
+    .is_none());
 }
 
 // ─────────── peer EOF terminalizes (PeerClosed) ──────────────────────────
@@ -4569,7 +4624,7 @@ fn start_scheduling_sets_finite_deadlines() {
     SmolStr::new("local"),
     "127.0.0.1:7946".parse().unwrap(),
   )
-  .with_rng_seed(Some(42));
+  .with_rng_seed(42);
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
   let t0 = Instant::now();
   // Before start_scheduling: no scheduler deadlines → poll_timeout None.
@@ -4613,7 +4668,7 @@ fn probe_scheduler_fires_when_deadline_elapses() {
   .with_probe_interval(Duration::from_millis(100))
   .with_gossip_interval(Duration::ZERO)
   .with_push_pull_interval(Duration::ZERO)
-  .with_rng_seed(Some(0));
+  .with_rng_seed(0);
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
 
   // Add a live peer so start_probe has a target.
@@ -4638,9 +4693,10 @@ fn probe_scheduler_fires_when_deadline_elapses() {
   let tx = e
     .poll_transmit()
     .expect("probe scheduler should emit a Ping");
-  let Transmit::Packet(PacketTransmit { message, .. }) = tx else {
+  let Transmit::Packet(p) = tx else {
     panic!("unexpected Compound transmit");
   };
+  let (_, message) = p.into_parts();
   assert!(
     matches!(message, Message::Ping(_)),
     "expected Ping, got {message:?}"
@@ -4716,7 +4772,7 @@ fn gossip_scheduler_emits_transmits_to_peers() {
   .with_gossip_interval(Duration::from_millis(50))
   .with_gossip_nodes(2)
   .with_push_pull_interval(Duration::ZERO)
-  .with_rng_seed(Some(1));
+  .with_rng_seed(1);
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
 
   let t0 = Instant::now();
@@ -4749,8 +4805,8 @@ fn gossip_scheduler_emits_transmits_to_peers() {
   // exactly ONE Transmit::Compound carrying the whole gossip payload.
   let messages_of = |tx: &Transmit<SmolStr, SocketAddr>| -> Vec<Message<SmolStr, SocketAddr>> {
     match tx {
-      Transmit::Packet(PacketTransmit { message, .. }) => vec![message.clone()],
-      Transmit::Compound(crate::event::CompoundTransmit { messages, .. }) => messages.clone(),
+      Transmit::Packet(p) => vec![p.message_ref().clone()],
+      Transmit::Compound(cmp) => cmp.messages_slice().to_vec(),
     }
   };
 
@@ -4834,7 +4890,7 @@ fn pushpull_scheduler_emits_dial_requested() {
   .with_probe_interval(Duration::ZERO)
   .with_gossip_interval(Duration::ZERO)
   .with_push_pull_interval(Duration::from_secs(30))
-  .with_rng_seed(Some(7));
+  .with_rng_seed(7);
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
 
   let t0 = Instant::now();
@@ -5010,9 +5066,10 @@ fn handle_packet_dispatches_ping_to_ack() {
   e.handle_packet(from, Message::Ping(ping), Instant::now());
 
   let tx = e.poll_transmit().expect("Ack transmit expected");
-  let Transmit::Packet(PacketTransmit { to, message }) = tx else {
+  let Transmit::Packet(p) = tx else {
     panic!("unexpected Compound transmit");
   };
+  let (to, message) = p.into_parts();
   assert_eq!(to, from);
   assert!(matches!(message, Message::Ack(_)));
 }
@@ -5063,7 +5120,7 @@ fn push_pull_serializes_live_liveness_not_frozen_alive() {
   let (_, _, states) = pp.into_components();
   let bob = states
     .iter()
-    .find(|s| s.id() == &SmolStr::new("bob"))
+    .find(|s| s.id_ref() == &SmolStr::new("bob"))
     .expect("bob present in push/pull states");
   assert_eq!(
     bob.state(),
@@ -5087,13 +5144,16 @@ fn leave_emits_dead_self_via_poll_transmit() {
   let bob_addr: SocketAddr = "127.0.0.1:7001".parse().unwrap();
   let local_id = SmolStr::new("local");
   let mut saw_dead_self_to_bob = false;
-  while let Some(Transmit::Packet(PacketTransmit { to, message })) = e.poll_transmit() {
-    if to == bob_addr {
-      if let Message::Dead(d) = message {
-        // Intentional-leave sentinel: node == from == local id.
-        assert_eq!(d.node(), &local_id);
-        assert_eq!(d.from(), &local_id);
-        saw_dead_self_to_bob = true;
+  while let Some(tx) = e.poll_transmit() {
+    if let Transmit::Packet(p) = tx {
+      let (to, message) = p.into_parts();
+      if to == bob_addr {
+        if let Message::Dead(d) = message {
+          // Intentional-leave sentinel: node == from == local id.
+          assert_eq!(d.node_ref(), &local_id);
+          assert_eq!(d.from_ref(), &local_id);
+          saw_dead_self_to_bob = true;
+        }
       }
     }
   }
@@ -5126,7 +5186,7 @@ fn merge_remote_left_marks_dead_and_blocks_reclaim() {
   // reclaim-bypass this fix closes.
   process_alive_auto(&mut e, alive("bob", 7777, 3), false, Instant::now());
   assert_eq!(
-    e.member(&SmolStr::new("bob")).unwrap().address().port(),
+    e.member(&SmolStr::new("bob")).unwrap().address_ref().port(),
     7001,
     "Dead node id must not be reclaimable at a new address with reclaim_time=0"
   );
@@ -5252,8 +5312,8 @@ fn gossip_targets_recently_dead_peer_within_window() {
   let mut gossiped_to_bob = false;
   while let Some(tx) = e.poll_transmit() {
     let to = match &tx {
-      Transmit::Packet(PacketTransmit { to, .. }) => to,
-      Transmit::Compound(crate::event::CompoundTransmit { to, .. }) => to,
+      Transmit::Packet(p) => p.to_ref(),
+      Transmit::Compound(cmp) => cmp.to_ref(),
     };
     if *to == bob_addr {
       gossiped_to_bob = true;
@@ -5291,8 +5351,8 @@ fn gossip_skips_aged_dead_and_preserves_queue_when_no_targets() {
   let bob_addr: SocketAddr = "127.0.0.1:7001".parse().unwrap();
   while let Some(tx) = e.poll_transmit() {
     let to = match &tx {
-      Transmit::Packet(PacketTransmit { to, .. }) => to,
-      Transmit::Compound(crate::event::CompoundTransmit { to, .. }) => to,
+      Transmit::Packet(p) => p.to_ref(),
+      Transmit::Compound(cmp) => cmp.to_ref(),
     };
     assert_ne!(*to, bob_addr, "aged-dead peer must not receive gossip");
   }
@@ -5351,7 +5411,7 @@ fn gossip_harness_one_target() -> (Endpoint<SmolStr, SocketAddr>, Instant) {
   .with_gossip_interval(Duration::from_millis(50))
   .with_gossip_nodes(1)
   .with_push_pull_interval(Duration::ZERO)
-  .with_rng_seed(Some(1));
+  .with_rng_seed(1);
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
   let t0 = Instant::now();
   // One Alive peer so a gossip target exists.
@@ -5383,8 +5443,9 @@ fn collect_transmits(e: &mut Endpoint<SmolStr, SocketAddr>) -> Vec<Transmit<Smol
 /// real `memberlist-wire` path (the same hops `crate::wire` composes).
 fn assembled_datagram_len(tx: &Transmit<SmolStr, SocketAddr>) -> usize {
   match tx {
-    Transmit::Compound(crate::event::CompoundTransmit { messages, .. }) => {
-      let anys: Vec<_> = messages
+    Transmit::Compound(cmp) => {
+      let anys: Vec<_> = cmp
+        .messages_slice()
         .iter()
         .map(|m| memberlist_wire::message_to_any(m).expect("bridge"))
         .collect();
@@ -5392,8 +5453,8 @@ fn assembled_datagram_len(tx: &Transmit<SmolStr, SocketAddr>) -> usize {
         .expect("encode compound")
         .len()
     }
-    Transmit::Packet(PacketTransmit { message, .. }) => {
-      let any = memberlist_wire::message_to_any(message).expect("bridge");
+    Transmit::Packet(p) => {
+      let any = memberlist_wire::message_to_any(p.message_ref()).expect("bridge");
       memberlist_wire::framing::encode_message(&any)
         .expect("encode message")
         .len()
@@ -5434,7 +5495,8 @@ fn gossip_single_broadcast_emits_packet_not_compound() {
     "exactly one transmit to the single gossip target, got {transmits:?}"
   );
   match &transmits[0] {
-    Transmit::Packet(PacketTransmit { message, .. }) => {
+    Transmit::Packet(p) => {
+      let message = p.message_ref();
       assert!(
         matches!(message, Message::Alive(_)),
         "single broadcast must be a plain Packet(Alive), got {message:?}"
@@ -5469,7 +5531,8 @@ fn gossip_two_plus_broadcasts_emit_one_compound_per_target() {
     "exactly ONE transmit (compound) for the single target, got {transmits:?}"
   );
   match &transmits[0] {
-    Transmit::Compound(crate::event::CompoundTransmit { messages, .. }) => {
+    Transmit::Compound(cmp) => {
+      let messages = cmp.messages_slice();
       assert_eq!(
         messages.len(),
         n,
@@ -5497,8 +5560,9 @@ fn probe_without_buddy_emits_packet() {
   assert!(e.start_probe(Instant::now()));
   let tx = e.poll_transmit().expect("probe transmit expected");
   match tx {
-    Transmit::Packet(PacketTransmit { to, message }) => {
-      assert_eq!(to.port(), 7001);
+    Transmit::Packet(p) => {
+      assert_eq!(p.to_ref().port(), 7001);
+      let message = p.message_ref();
       assert!(
         matches!(message, Message::Ping(_)),
         "probe of an Alive peer is a plain Packet(Ping), got {message:?}"
@@ -5536,8 +5600,13 @@ fn probe_with_buddy_suspect_emits_one_compound_ping_then_suspect() {
     "Ping + buddy Suspect must be co-sent as ONE compound datagram, got {transmits:?}"
   );
   match &transmits[0] {
-    Transmit::Compound(crate::event::CompoundTransmit { to, messages }) => {
-      assert_eq!(to.port(), 7001, "compound addressed to the Suspect target");
+    Transmit::Compound(cmp) => {
+      assert_eq!(
+        cmp.to_ref().port(),
+        7001,
+        "compound addressed to the Suspect target"
+      );
+      let messages = cmp.messages_slice();
       assert_eq!(messages.len(), 2, "exactly [Ping, Suspect]");
       assert!(
         matches!(messages[0], Message::Ping(_)),
@@ -5547,7 +5616,7 @@ fn probe_with_buddy_suspect_emits_one_compound_ping_then_suspect() {
       match &messages[1] {
         Message::Suspect(s) => {
           assert_eq!(
-            s.node(),
+            s.node_ref(),
             &SmolStr::new("bob"),
             "buddy Suspect must be about the probe target"
           );
@@ -5592,20 +5661,21 @@ fn probe_buddy_compound_over_mtu_splits_into_two_packets() {
     "over-MTU Ping+Suspect must split into TWO Packets, got {txs:?}"
   );
   match (&txs[0], &txs[1]) {
-    (
-      Transmit::Packet(PacketTransmit {
-        to: to0,
-        message: Message::Ping(_),
-      }),
-      Transmit::Packet(PacketTransmit {
-        to: to1,
-        message: Message::Suspect(s),
-      }),
-    ) => {
+    (Transmit::Packet(p0), Transmit::Packet(p1)) => {
+      let (to0, message0) = (p0.to_ref(), p0.message_ref());
+      let (to1, message1) = (p1.to_ref(), p1.message_ref());
+      assert!(
+        matches!(message0, Message::Ping(_)),
+        "first packet must be Ping, got {message0:?}"
+      );
+      let s = match message1 {
+        Message::Suspect(s) => s,
+        other => panic!("second packet must be Suspect, got {other:?}"),
+      };
       assert_eq!(to0.port(), 7001, "Ping to the probe target");
       assert_eq!(to1.port(), 7001, "Suspect to the probe target");
       assert_eq!(
-        s.node(),
+        s.node_ref(),
         &SmolStr::new(big.as_str()),
         "buddy Suspect must be about the probe target"
       );
@@ -5676,11 +5746,12 @@ fn gossip_compound_datagram_never_exceeds_mtu() {
   // exercises a real multi-part compound. A degraded 1-part Packet would
   // silently pass `assembled_len <= 1400` while no longer testing anything.
   match &transmits[0] {
-    Transmit::Compound(crate::event::CompoundTransmit { messages, .. }) => {
+    Transmit::Compound(cmp) => {
+      let n = cmp.messages_slice().len();
       assert!(
-        messages.len() >= 2,
+        n >= 2,
         "MTU regression must exercise a real multi-part compound; got {} parts",
-        messages.len()
+        n
       );
     }
     Transmit::Packet(_) => panic!(
@@ -5747,12 +5818,13 @@ fn gossip_membership_plus_user_compound_within_mtu() {
   // Non-vacuous: the combined path must actually produce a real multi-part
   // compound, not a 1-part Packet that would pass the bound trivially.
   match &transmits[0] {
-    Transmit::Compound(crate::event::CompoundTransmit { messages, .. }) => {
+    Transmit::Compound(cmp) => {
+      let n = cmp.messages_slice().len();
       assert!(
-        messages.len() >= 2,
+        n >= 2,
         "combined membership+user path must exercise a real multi-part \
          compound; got {} parts",
-        messages.len()
+        n
       );
     }
     Transmit::Packet(_) => panic!(
@@ -5784,14 +5856,14 @@ fn gossip_lone_near_mtu_user_broadcast_emits_packet() {
     txs.len()
   );
   match &txs[0] {
-    Transmit::Packet(PacketTransmit {
-      message: Message::UserData(b),
-      ..
-    }) => assert_eq!(
-      b.len(),
-      1384,
-      "the near-MTU user payload must ride a lone Packet"
-    ),
+    Transmit::Packet(p) => match p.message_ref() {
+      Message::UserData(b) => assert_eq!(
+        b.len(),
+        1384,
+        "the near-MTU user payload must ride a lone Packet"
+      ),
+      other => panic!("expected Packet(UserData(1384)), got Packet({other:?})"),
+    },
     other => panic!("expected Packet(UserData(1384)), got {other:?}"),
   }
   assert_eq!(
@@ -5820,14 +5892,14 @@ fn gossip_oversized_user_broadcast_does_not_wedge_fifo() {
     "the small payload behind the un-gossipable one must still be sent"
   );
   match &txs[0] {
-    Transmit::Packet(PacketTransmit {
-      message: Message::UserData(b),
-      ..
-    }) => assert_eq!(
-      b.len(),
-      64,
-      "the un-gossipable head must be dropped and the small payload emitted"
-    ),
+    Transmit::Packet(p) => match p.message_ref() {
+      Message::UserData(b) => assert_eq!(
+        b.len(),
+        64,
+        "the un-gossipable head must be dropped and the small payload emitted"
+      ),
+      other => panic!("expected Packet(UserData(64)), got Packet({other:?})"),
+    },
     other => panic!("expected Packet(UserData(64)), got {other:?}"),
   }
   assert_eq!(
@@ -5898,10 +5970,11 @@ fn gossip_lone_near_mtu_membership_broadcast_emits_packet() {
     txs.len()
   );
   match &txs[0] {
-    Transmit::Packet(PacketTransmit {
-      message: Message::Alive(_),
-      ..
-    }) => {}
+    Transmit::Packet(p) => assert!(
+      matches!(p.message_ref(), Message::Alive(_)),
+      "expected lone Packet(Alive), got Packet({:?})",
+      p.message_ref()
+    ),
     other => panic!("expected lone Packet(Alive), got {other:?}"),
   }
   let assembled = assembled_datagram_len(&txs[0]);
@@ -5972,10 +6045,11 @@ fn gossip_near_mtu_membership_outranks_user_broadcast() {
     txs.len()
   );
   match &txs[0] {
-    Transmit::Packet(PacketTransmit {
-      message: Message::Alive(_),
-      ..
-    }) => {}
+    Transmit::Packet(p) => assert!(
+      matches!(p.message_ref(), Message::Alive(_)),
+      "SWIM priority: membership must outrank best-effort user data; got Packet({:?})",
+      p.message_ref()
+    ),
     other => panic!("SWIM priority: membership must outrank best-effort user data; got {other:?}"),
   }
   assert_eq!(

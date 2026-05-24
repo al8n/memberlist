@@ -38,37 +38,50 @@ impl<I, A> LocalNodeState<I, A> {
   }
 
   /// The shared NodeState (id, address, meta, versions, etc.).
-  pub const fn server(&self) -> &Arc<NodeState<I, A>> {
+  #[inline(always)]
+  pub fn server_ref(&self) -> &NodeState<I, A> {
     &self.server
   }
 
+  /// Return a cheap clone of the shared NodeState arc.
+  #[inline(always)]
+  pub fn server_arc(&self) -> Arc<NodeState<I, A>> {
+    self.server.clone()
+  }
+
   /// Replace the underlying NodeState (e.g. on metadata update).
+  #[inline(always)]
   pub fn set_server(&mut self, server: Arc<NodeState<I, A>>) {
     self.server = server;
   }
 
   /// Current monotonic incarnation number.
+  #[inline(always)]
   pub const fn incarnation(&self) -> u32 {
     self.incarnation
   }
 
   /// Set the incarnation. Caller is responsible for ensuring the new value
   /// is monotonically greater than or equal to the old.
+  #[inline(always)]
   pub const fn set_incarnation(&mut self, inc: u32) {
     self.incarnation = inc;
   }
 
   /// Current liveness state.
+  #[inline(always)]
   pub const fn state(&self) -> State {
     self.state
   }
 
   /// When the liveness state last changed.
+  #[inline(always)]
   pub const fn state_change(&self) -> Instant {
     self.state_change
   }
 
   /// Transition to a new liveness state. The state-change timestamp is updated.
+  #[inline(always)]
   pub const fn set_state(&mut self, state: State, now: Instant) {
     self.state = state;
     self.state_change = now;
@@ -78,25 +91,29 @@ impl<I, A> LocalNodeState<I, A> {
   ///
   /// Only intended for test helpers that age a node's state without sleeping
   /// (e.g. `Cluster::age_node`). Normal gossip code should use [`set_state`].
-  pub fn set_state_change(&mut self, t: Instant) {
+  #[inline(always)]
+  pub const fn set_state_change(&mut self, t: Instant) {
     self.state_change = t;
   }
 
   /// True iff the node is `Dead` or `Left`.
+  #[inline(always)]
   pub const fn dead_or_left(&self) -> bool {
     matches!(self.state, State::Dead | State::Left)
   }
 
   /// Convenience: peer id (forwarded from the underlying `NodeState`).
   /// Not `const fn` because it goes through `Arc::deref`, which is not const.
-  pub fn id(&self) -> &I {
-    self.server.id()
+  #[inline(always)]
+  pub fn id_ref(&self) -> &I {
+    self.server.id_ref()
   }
 
   /// Convenience: peer address (forwarded from the underlying `NodeState`).
   /// Not `const fn` because it goes through `Arc::deref`, which is not const.
-  pub fn address(&self) -> &A {
-    self.server.address()
+  #[inline(always)]
+  pub fn address_ref(&self) -> &A {
+    self.server.address_ref()
   }
 }
 
@@ -118,37 +135,45 @@ impl<I, A> Member<I, A> {
   }
 
   /// Local view of the peer (id, address, incarnation, liveness, …).
-  pub const fn state(&self) -> &LocalNodeState<I, A> {
+  #[inline(always)]
+  pub const fn state_ref(&self) -> &LocalNodeState<I, A> {
     &self.state
   }
 
   /// Mutable view of the local peer state — used by the gossip state machine
   /// to apply incarnation bumps and liveness transitions.
+  #[inline(always)]
   pub const fn state_mut(&mut self) -> &mut LocalNodeState<I, A> {
     &mut self.state
   }
 
   /// Active suspicion timer, if any.
+  #[inline(always)]
   pub const fn suspicion(&self) -> Option<&Suspicion<I>> {
     self.suspicion.as_ref()
   }
 
   /// Mutable view of the active suspicion timer, if any.
+  #[inline(always)]
   pub const fn suspicion_mut(&mut self) -> Option<&mut Suspicion<I>> {
     self.suspicion.as_mut()
   }
 
   /// Replace the suspicion timer (`Some` to start one, `None` to clear).
+  #[inline(always)]
   pub fn set_suspicion(&mut self, s: Option<Suspicion<I>>) {
     self.suspicion = s;
   }
 
   /// Take ownership of the active suspicion timer, leaving `None`.
+  #[inline(always)]
   pub fn take_suspicion(&mut self) -> Option<Suspicion<I>> {
     self.suspicion.take()
   }
 
   /// Builder: attach a suspicion timer at construction time.
+  #[must_use]
+  #[inline(always)]
   pub fn with_suspicion(mut self, s: Suspicion<I>) -> Self {
     self.suspicion = Some(s);
     self
@@ -186,43 +211,51 @@ where
   }
 
   /// The local node's identity, as supplied at construction.
-  pub fn local(&self) -> &Node<I, A> {
+  #[inline(always)]
+  pub const fn local_ref(&self) -> &Node<I, A> {
     &self.local
   }
 
   /// Number of tracked members.
+  #[inline(always)]
   pub fn len(&self) -> usize {
     self.nodes.len()
   }
 
   /// True iff there are no tracked members.
+  #[inline(always)]
   pub fn is_empty(&self) -> bool {
     self.nodes.is_empty()
   }
 
   /// Whether the given id is tracked.
+  #[inline(always)]
   pub fn contains(&self, id: &I) -> bool {
     self.node_map.contains_key(id)
   }
 
   /// Lookup by id.
+  #[inline(always)]
   pub fn get(&self, id: &I) -> Option<&Member<I, A>> {
     let idx = *self.node_map.get(id)?;
     self.nodes.get(idx)
   }
 
   /// Mutable lookup by id.
+  #[inline(always)]
   pub fn get_mut(&mut self, id: &I) -> Option<&mut Member<I, A>> {
     let idx = *self.node_map.get(id)?;
     self.nodes.get_mut(idx)
   }
 
   /// Iterate over all members in vector order.
+  #[inline(always)]
   pub fn iter(&self) -> impl Iterator<Item = &Member<I, A>> {
     self.nodes.iter()
   }
 
   /// Mutable iterate over all members in vector order.
+  #[inline(always)]
   pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Member<I, A>> {
     self.nodes.iter_mut()
   }
@@ -231,7 +264,7 @@ where
   /// exists, replaces it and returns the old one (so the caller can decide
   /// whether to ignore or merge).
   pub fn insert(&mut self, m: Member<I, A>) -> Option<Member<I, A>> {
-    let id = m.state().id().cheap_clone();
+    let id = m.state_ref().id_ref().cheap_clone();
     if let Some(&existing_idx) = self.node_map.get(&id) {
       let old = std::mem::replace(&mut self.nodes[existing_idx], m);
       return Some(old);
@@ -259,7 +292,7 @@ where
   /// Panics if a member with the same id already exists, or if `target`
   /// exceeds `self.len()`.
   pub fn insert_at_random_at(&mut self, m: Member<I, A>, target: usize) {
-    let id = m.state().id().cheap_clone();
+    let id = m.state_ref().id_ref().cheap_clone();
     assert!(
       !self.node_map.contains_key(&id),
       "Members::insert_at_random_at: id already present",
@@ -273,7 +306,7 @@ where
     self.node_map.insert(id.cheap_clone(), n);
     if target != n {
       self.nodes.swap(n, target);
-      let displaced_id = self.nodes[n].state().id().cheap_clone();
+      let displaced_id = self.nodes[n].state_ref().id_ref().cheap_clone();
       *self.node_map.get_mut(&id).unwrap() = target;
       *self.node_map.get_mut(&displaced_id).unwrap() = n;
     }
@@ -299,8 +332,8 @@ where
     for i in (1..n).rev() {
       let j = rng.random_range(0..=i);
       if i != j {
-        let id_i = self.nodes[i].state().id().cheap_clone();
-        let id_j = self.nodes[j].state().id().cheap_clone();
+        let id_i = self.nodes[i].state_ref().id_ref().cheap_clone();
+        let id_j = self.nodes[j].state_ref().id_ref().cheap_clone();
         self.nodes.swap(i, j);
         *self.node_map.get_mut(&id_i).unwrap() = j;
         *self.node_map.get_mut(&id_j).unwrap() = i;
@@ -313,7 +346,7 @@ where
     self
       .nodes
       .iter()
-      .any(|m| !m.state().dead_or_left() && m.state().id() != self.local.id())
+      .any(|m| !m.state_ref().dead_or_left() && m.state_ref().id_ref() != self.local.id())
   }
 }
 
@@ -321,7 +354,7 @@ where
 mod tests {
   use super::*;
   use memberlist_wire::typed::{Meta, NodeState, State};
-  use rand::{SeedableRng, rngs::SmallRng};
+  use rand::{rngs::SmallRng, SeedableRng};
   use smol_str::SmolStr;
   use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -405,10 +438,10 @@ mod tests {
     let suspect = member("alice", 7000, State::Suspect);
     assert!(m.insert(alive).is_none());
     let old = m.insert(suspect).expect("expected old member returned");
-    assert_eq!(old.state().state(), State::Alive);
+    assert_eq!(old.state_ref().state(), State::Alive);
     assert_eq!(m.len(), 1);
     assert_eq!(
-      m.get(&SmolStr::new("alice")).unwrap().state().state(),
+      m.get(&SmolStr::new("alice")).unwrap().state_ref().state(),
       State::Suspect,
     );
   }
@@ -422,7 +455,7 @@ mod tests {
       m.insert_at_random(member(&id, 7000 + i, State::Alive), &mut rng);
     }
     for (id, idx) in m.node_map.iter() {
-      assert_eq!(m.nodes[*idx].state().id(), id, "invariant violated");
+      assert_eq!(m.nodes[*idx].state_ref().id_ref(), id, "invariant violated");
     }
     assert_eq!(m.len(), 20);
   }
@@ -438,7 +471,7 @@ mod tests {
     assert_eq!(m.len(), 4);
     // Verify the invariant.
     for (id, idx) in m.node_map.iter() {
-      assert_eq!(m.nodes[*idx].state().id(), id, "invariant violated");
+      assert_eq!(m.nodes[*idx].state_ref().id_ref(), id, "invariant violated");
     }
     // dan should be at slot 1.
     assert_eq!(*m.node_map.get(&SmolStr::new("dan")).unwrap(), 1);
@@ -451,11 +484,11 @@ mod tests {
     m.insert(member("b", 7001, State::Alive));
     m.insert(member("c", 7002, State::Alive));
     let removed = m.remove(&SmolStr::new("b")).expect("b present");
-    assert_eq!(removed.state().id(), &SmolStr::new("b"));
+    assert_eq!(removed.state_ref().id_ref(), &SmolStr::new("b"));
     assert_eq!(m.len(), 2);
     let c_idx = *m.node_map.get(&SmolStr::new("c")).unwrap();
     assert_eq!(c_idx, 1);
-    assert_eq!(m.nodes[c_idx].state().id(), &SmolStr::new("c"));
+    assert_eq!(m.nodes[c_idx].state_ref().id_ref(), &SmolStr::new("c"));
   }
 
   #[test]
@@ -468,7 +501,7 @@ mod tests {
     }
     m.shuffle(&mut rng);
     for (id, idx) in m.node_map.iter() {
-      assert_eq!(m.nodes[*idx].state().id(), id);
+      assert_eq!(m.nodes[*idx].state_ref().id_ref(), id);
     }
     assert_eq!(m.len(), 50);
   }
@@ -481,7 +514,7 @@ mod tests {
     m.insert_at_random_at(member("zach", 7777, State::Alive), 0);
     assert_eq!(*m.node_map.get(&SmolStr::new("zach")).unwrap(), 0);
     for (id, idx) in m.node_map.iter() {
-      assert_eq!(m.nodes[*idx].state().id(), id);
+      assert_eq!(m.nodes[*idx].state_ref().id_ref(), id);
     }
   }
 
@@ -494,7 +527,7 @@ mod tests {
     m.insert_at_random_at(member("zach", 7777, State::Alive), 2);
     assert_eq!(*m.node_map.get(&SmolStr::new("zach")).unwrap(), 2);
     for (id, idx) in m.node_map.iter() {
-      assert_eq!(m.nodes[*idx].state().id(), id);
+      assert_eq!(m.nodes[*idx].state_ref().id_ref(), id);
     }
   }
 

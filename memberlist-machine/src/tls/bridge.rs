@@ -139,7 +139,7 @@ mod tests {
     assert!(server.stream_is_some(), "promote installed the Stream");
     assert!(
       matches!(
-        server.phase(),
+        server.phase_ref(),
         StreamPhase::Established(BridgePhase::Active)
       ),
       "promote entered Established(Active)"
@@ -203,19 +203,19 @@ mod tests {
 
     assert!(
       matches!(
-        client.phase(),
+        client.phase_ref(),
         StreamPhase::Established(BridgePhase::BothClosed)
       ),
       "client reached BothClosed (sent request + close_notify, saw peer close_notify), got {:?}",
-      phase_label(client.phase())
+      phase_label(client.phase_ref())
     );
     assert!(
       matches!(
-        server.phase(),
+        server.phase_ref(),
         StreamPhase::Established(BridgePhase::BothClosed)
       ),
       "server reached BothClosed, got {:?}",
-      phase_label(server.phase())
+      phase_label(server.phase_ref())
     );
 
     // Terminal D1 reap on the server: the decoded UserData surfaces as
@@ -599,7 +599,7 @@ mod tests {
     assert!(
       server.is_terminal(),
       "the recv-half close anchor fired and the one-way exchange reaped, got {:?}",
-      phase_label(server.phase())
+      phase_label(server.phase_ref())
     );
 
     server.drain_then_reap(&mut ep_s, now);
@@ -653,11 +653,11 @@ mod tests {
     );
     assert!(
       matches!(
-        server.phase(),
+        server.phase_ref(),
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Transport(_)))
       ),
       "the reject is a Transport failure, got {:?}",
-      phase_label(server.phase())
+      phase_label(server.phase_ref())
     );
 
     // `drain_then_reap` on a no-Stream bridge is a clean no-op (the coordinator
@@ -710,11 +710,11 @@ mod tests {
     assert!(res.is_err(), "a mid-frame read==0 fails the bridge");
     assert!(
       matches!(
-        client.phase(),
+        client.phase_ref(),
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Decode))
       ),
       "truncation maps to Failed(Decode), got {:?}",
-      phase_label(client.phase())
+      phase_label(client.phase_ref())
     );
     assert!(client.is_terminal(), "a truncated exchange is terminal");
     assert!(
@@ -767,11 +767,11 @@ mod tests {
     );
     assert!(
       matches!(
-        client.phase(),
+        client.phase_ref(),
         StreamPhase::Established(BridgePhase::Failed(BridgeFailure::Timeout))
       ),
       "the handshake timeout maps to Failed(Timeout), got {:?}",
-      phase_label(client.phase())
+      phase_label(client.phase_ref())
     );
     assert!(
       !client.is_handshaking(),

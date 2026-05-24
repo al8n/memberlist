@@ -50,11 +50,11 @@ impl StreamTransport for TlsRecords {
   }
 
   fn dialer(opts: &Self::Options, ctx: Self::DialContext) -> Result<Self, Self::ConstructError> {
-    TlsRecords::client(opts.client().clone(), ctx)
+    TlsRecords::client(opts.client_arc(), ctx)
   }
 
   fn acceptor(opts: &Self::Options) -> Result<Self, Self::ConstructError> {
-    TlsRecords::server(opts.server().clone())
+    TlsRecords::server(opts.server_arc())
   }
 
   fn handle_transport_data(&mut self, input: &[u8], _now: Instant) -> Intake {
@@ -171,8 +171,8 @@ mod tests {
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
+        test_support::{endpoint, IdentityBridge},
         StreamEndpoint,
-        test_support::{IdentityBridge, endpoint},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -210,8 +210,8 @@ mod tests {
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
+        test_support::{endpoint, IdentityBridge},
         StreamEndpoint,
-        test_support::{IdentityBridge, endpoint},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -245,8 +245,8 @@ mod tests {
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
+        test_support::{endpoint, IdentityBridge},
         StreamEndpoint,
-        test_support::{IdentityBridge, endpoint},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -279,15 +279,15 @@ mod tests {
     use std::net::SocketAddr;
 
     use memberlist_wire::{
-      EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey, encode_plain_frame,
+      encode_plain_frame, EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey,
     };
     use smol_str::SmolStr;
 
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
+        test_support::{endpoint, IdentityBridge},
         StreamEndpoint,
-        test_support::{IdentityBridge, endpoint},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -316,7 +316,7 @@ mod tests {
   fn tls_endpoint_encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead() {
     use std::net::SocketAddr;
 
-    use memberlist_wire::{ENCRYPTED_WRAPPER_OVERHEAD, EncryptionOptions, Keyring, SecretKey};
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey, ENCRYPTED_WRAPPER_OVERHEAD};
     use smol_str::SmolStr;
 
     use super::{TlsOptions, TlsRecords};
@@ -324,8 +324,8 @@ mod tests {
       config::EndpointConfig,
       endpoint::Endpoint,
       streams::{
+        test_support::{addr, IdentityBridge},
         StreamEndpoint,
-        test_support::{IdentityBridge, addr},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -374,8 +374,8 @@ mod tests {
       config::EndpointConfig,
       endpoint::Endpoint,
       streams::{
+        test_support::{addr, IdentityBridge},
         StreamEndpoint,
-        test_support::{IdentityBridge, addr},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -409,8 +409,8 @@ mod tests {
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
+        test_support::{addr, endpoint, IdentityBridge},
         StreamEndpoint,
-        test_support::{IdentityBridge, addr, endpoint},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -461,8 +461,8 @@ mod tests {
     use super::{TlsOptions, TlsRecords};
     use crate::{
       streams::{
+        test_support::{addr, endpoint, IdentityBridge},
         StreamEndpoint,
-        test_support::{IdentityBridge, addr, endpoint},
       },
       tls::options::tests::{test_client, test_server},
     };

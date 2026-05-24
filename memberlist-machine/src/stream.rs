@@ -24,7 +24,7 @@
 use std::{collections::VecDeque, time::Instant};
 
 use bytes::{Bytes, BytesMut};
-use memberlist_wire::{Data, typed::PushNodeState};
+use memberlist_wire::{typed::PushNodeState, Data};
 
 use crate::{
   error::StreamError,
@@ -42,12 +42,51 @@ pub use crate::event::StreamId;
 /// so the application/Endpoint can merge it.
 #[derive(Debug)]
 pub struct PushPullSnapshot<I, A> {
+  join: bool,
+  states: Vec<PushNodeState<I, A>>,
+  user_data: Bytes,
+}
+
+impl<I, A> PushPullSnapshot<I, A> {
+  /// Construct a new push/pull snapshot.
+  #[inline(always)]
+  pub const fn new(join: bool, states: Vec<PushNodeState<I, A>>, user_data: Bytes) -> Self {
+    Self {
+      join,
+      states,
+      user_data,
+    }
+  }
+
   /// Whether the peer considers this exchange a join (vs. periodic refresh).
-  pub join: bool,
-  /// The peer's membership view (wire-level, includes incarnation/state/versions).
-  pub states: Vec<PushNodeState<I, A>>,
-  /// Application-level payload the peer attached to its push/pull message.
-  pub user_data: Bytes,
+  #[inline(always)]
+  pub const fn is_join(&self) -> bool {
+    self.join
+  }
+
+  /// Borrow the membership-view slice.
+  #[inline(always)]
+  pub const fn states_slice(&self) -> &[PushNodeState<I, A>] {
+    self.states.as_slice()
+  }
+
+  /// Borrow the application user-data as bytes.
+  #[inline(always)]
+  pub fn user_data(&self) -> &[u8] {
+    self.user_data.as_ref()
+  }
+
+  /// Cheap-clone the user-data as a `Bytes` handle.
+  #[inline(always)]
+  pub fn user_data_bytes(&self) -> Bytes {
+    self.user_data.clone()
+  }
+
+  /// Consume and return the (is_join, states, user_data) triple.
+  #[inline(always)]
+  pub fn into_parts(self) -> (bool, Vec<PushNodeState<I, A>>, Bytes) {
+    (self.join, self.states, self.user_data)
+  }
 }
 
 // ─────────────────────────────────────── internal enums ──────────────────────
@@ -186,7 +225,8 @@ where
   }
 
   /// The peer address this stream is connected to.
-  pub fn peer(&self) -> &A {
+  #[inline(always)]
+  pub fn peer_ref(&self) -> &A {
     &self.peer
   }
 
@@ -342,10 +382,13 @@ where
       if data.is_empty() {
         return Ok(());
       }
-      let err = StreamError::Decode(format!(
-        "{} byte(s) of data after exchange completed (terminal Done phase)",
-        data.len()
-      ));
+      let err = StreamError::Decode(
+        format!(
+          "{} byte(s) of data after exchange completed (terminal Done phase)",
+          data.len()
+        )
+        .into(),
+      );
       self.enter_failed(err.clone());
       return Err(err);
     }
@@ -442,10 +485,13 @@ where
     // as it completes, so `input_buf` never legitimately needs to hold
     // more than the cap. Reject before allocating.
     if self.input_buf.len().saturating_add(data.len()) > self.max_frame_size {
-      return Err(StreamError::Decode(format!(
-        "inbound stream buffer would exceed max {} bytes",
-        self.max_frame_size
-      )));
+      return Err(StreamError::Decode(
+        format!(
+          "inbound stream buffer would exceed max {} bytes",
+          self.max_frame_size
+        )
+        .into(),
+      ));
     }
     self.input_buf.extend_from_slice(data);
     self.try_decode_frame(now)
@@ -550,18 +596,21 @@ where
         // overflowing varint pass here and then mis-decode downstream
         // (the u32 wire decoder wraps it), reopening the boundary/DoS path.
         if value > u32::MAX as u64 {
-          return Err(StreamError::Decode(format!(
-            "inbound stream frame length {value} exceeds the u32 wire limit"
-          )));
+          return Err(StreamError::Decode(
+            format!("inbound stream frame length {value} exceeds the u32 wire limit").into(),
+          ));
         }
         // Compare the full frame total in u64 against the cap BEFORE
         // buffering the body.
         let total_u64 = 1u64 + varint_bytes as u64 + value;
         if total_u64 > self.max_frame_size as u64 {
-          return Err(StreamError::Decode(format!(
-            "inbound stream frame declares {total_u64} bytes, exceeds max {}",
-            self.max_frame_size
-          )));
+          return Err(StreamError::Decode(
+            format!(
+              "inbound stream frame declares {total_u64} bytes, exceeds max {}",
+              self.max_frame_size
+            )
+            .into(),
+          ));
         }
         let total = total_u64 as usize; // <= max_frame_size, fits usize
         if buf.len() >= total {
@@ -598,8 +647,8 @@ where
     // path (`framing::decode_message` → `message_from_any`), yielding an
     // owned `typed::Message<I, A>`. `typed::Message` carries no codec, so
     // the zero-copy `MessageRef`/`DataRef` decode is no longer available.
-    let (consumed, msg) =
-      crate::wire::decode_message::<I, A>(&frame_bytes).map_err(StreamError::Decode)?;
+    let (consumed, msg) = crate::wire::decode_message::<I, A>(&frame_bytes)
+      .map_err(|e| StreamError::Decode(e.into()))?;
     // A well-formed frame must consume exactly the bytes `probe_frame`
     // measured. A mismatch means the pre-scan and the real decoder
     // disagree on framing (a malformed/adversarial frame, or a framing
@@ -607,9 +656,9 @@ where
     // since silently `split_to(total)` after a short decode desyncs every
     // subsequent frame in release builds.
     if consumed != total {
-      return Err(StreamError::Decode(format!(
-        "frame length mismatch: pre-scan {total}, decoder consumed {consumed}"
-      )));
+      return Err(StreamError::Decode(
+        format!("frame length mismatch: pre-scan {total}, decoder consumed {consumed}").into(),
+      ));
     }
 
     self.dispatch_message(msg, now)?;
@@ -654,17 +703,20 @@ where
       | StreamPhase::Failed(_) => false,
     };
     if forbids_further_input && !self.input_buf.is_empty() {
-      return Err(StreamError::Decode(format!(
-        "{} trailing byte(s) after frame in {} phase",
-        self.input_buf.len(),
-        match &self.phase {
-          StreamPhase::Done => "Done",
-          StreamPhase::InboundSendingResponse { .. } => "InboundSendingResponse",
-          StreamPhase::OutboundSendingRequest { .. } => "OutboundSendingRequest",
-          // Unreachable — `forbids_further_input` gated above.
-          _ => "non-input",
-        }
-      )));
+      return Err(StreamError::Decode(
+        format!(
+          "{} trailing byte(s) after frame in {} phase",
+          self.input_buf.len(),
+          match &self.phase {
+            StreamPhase::Done => "Done",
+            StreamPhase::InboundSendingResponse { .. } => "InboundSendingResponse",
+            StreamPhase::OutboundSendingRequest { .. } => "OutboundSendingRequest",
+            // Unreachable — `forbids_further_input` gated above.
+            _ => "non-input",
+          }
+        )
+        .into(),
+      ));
     }
 
     Ok(())
@@ -713,22 +765,26 @@ where
           let peer = self.peer.cheap_clone();
           // Outbound stream: we initiated, peer replied. Emit PushPullReplyReceived
           // so handle_stream_event knows no response is needed.
+          let (_, states, user_data) = snapshot.into_parts();
           self
             .endpoint_events
             .push_back(EndpointEvent::PushPullReplyReceived {
               peer,
-              states: snapshot.states,
-              user_data: snapshot.user_data,
+              states,
+              user_data,
               kind: pp_kind,
             });
           self.phase = StreamPhase::Done;
           self.stream_events.push_back(StreamEvent::Closed);
         }
         other => {
-          return Err(StreamError::UnexpectedMessage(format!(
-            "in outbound PushPull({:?}) got unexpected {:?}",
-            pp_kind, other
-          )));
+          return Err(StreamError::UnexpectedMessage(
+            format!(
+              "in outbound PushPull({:?}) got unexpected {:?}",
+              pp_kind, other
+            )
+            .into(),
+          ));
         }
       },
       PhaseKind::OutboundReliablePing(probe_seq) => match msg {
@@ -738,11 +794,14 @@ where
           // report a dead target healthy. The reliable ping's correctness
           // depends on matching the ack sequence to the probe sequence.
           if ack.sequence_number() != probe_seq {
-            return Err(StreamError::UnexpectedMessage(format!(
-              "in outbound ReliablePing(seq={}) got Ack for seq {}",
-              probe_seq,
-              ack.sequence_number()
-            )));
+            return Err(StreamError::UnexpectedMessage(
+              format!(
+                "in outbound ReliablePing(seq={}) got Ack for seq {}",
+                probe_seq,
+                ack.sequence_number()
+              )
+              .into(),
+            ));
           }
           self
             .endpoint_events
@@ -754,10 +813,9 @@ where
           self.stream_events.push_back(StreamEvent::Closed);
         }
         other => {
-          return Err(StreamError::UnexpectedMessage(format!(
-            "in outbound ReliablePing got unexpected {:?}",
-            other
-          )));
+          return Err(StreamError::UnexpectedMessage(
+            format!("in outbound ReliablePing got unexpected {:?}", other).into(),
+          ));
         }
       },
       PhaseKind::OutboundUserMessage => {
@@ -780,12 +838,13 @@ where
             // Inbound stream: peer initiated, we must respond. Emit
             // PushPullRequestReceived so handle_stream_event returns
             // StreamCommand::SendPushPullResponse.
+            let (_, states, user_data) = snapshot.into_parts();
             self
               .endpoint_events
               .push_back(EndpointEvent::PushPullRequestReceived {
                 peer,
-                states: snapshot.states,
-                user_data: snapshot.user_data,
+                states,
+                user_data,
                 kind,
               });
             self.phase = StreamPhase::InboundSendingResponse {
@@ -797,12 +856,15 @@ where
             // ping for another node must not be answered (mirrors
             // `Endpoint::handle_ping`); answering it could report an
             // unreachable target healthy and suppress suspicion.
-            if ping.target().id() != &self.local_id {
-              return Err(StreamError::UnexpectedMessage(format!(
-                "inbound reliable Ping target {} is not local {}",
-                ping.target().id(),
-                self.local_id
-              )));
+            if ping.target_ref().id() != &self.local_id {
+              return Err(StreamError::UnexpectedMessage(
+                format!(
+                  "inbound reliable Ping target {} is not local {}",
+                  ping.target_ref().id(),
+                  self.local_id
+                )
+                .into(),
+              ));
             }
             let ping_seq = ping.sequence_number();
             // Encode the Ack reply immediately into output_buf.
@@ -830,10 +892,9 @@ where
             self.stream_events.push_back(StreamEvent::Closed);
           }
           other => {
-            return Err(StreamError::UnexpectedMessage(format!(
-              "inbound first message: unexpected {:?}",
-              other
-            )));
+            return Err(StreamError::UnexpectedMessage(
+              format!("inbound first message: unexpected {:?}", other).into(),
+            ));
           }
         }
       }
@@ -853,9 +914,9 @@ where
       // when none was expected — adversarial behaviour; fail rather
       // than silently consume.
       PhaseKind::Ignore => {
-        return Err(StreamError::UnexpectedMessage(format!(
-          "unexpected frame in sending phase: {msg:?}"
-        )));
+        return Err(StreamError::UnexpectedMessage(
+          format!("unexpected frame in sending phase: {msg:?}").into(),
+        ));
       }
     }
     Ok(())
@@ -882,9 +943,5 @@ where
 {
   let (join, user_data, states) = pp.into_components();
   let states: Vec<PushNodeState<I, A>> = states.iter().cloned().collect();
-  Ok(PushPullSnapshot {
-    join,
-    states,
-    user_data,
-  })
+  Ok(PushPullSnapshot::new(join, states, user_data))
 }

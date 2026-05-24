@@ -7,8 +7,8 @@ use crate::wire_type::{merge, skip};
 const _: () = {
   use crate::wire_type::WireType;
   use nodecraft::{
-    Domain, DomainBuffer, HostAddr, HostAddrBuffer,
     hostaddr::{self, Host},
+    Domain, DomainBuffer, HostAddr, HostAddrBuffer,
   };
   use std::net::SocketAddr;
 

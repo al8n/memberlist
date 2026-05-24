@@ -111,7 +111,7 @@ fn merge_state() {
   let mut extra_joins = 0usize;
   while let Some(ev) = c.poll_event(m1) {
     if let Event::NodeJoined(ns) = ev {
-      if ns.id() == &id4 {
+      if ns.id_ref() == &id4 {
         found_join_for_node4 = true;
       } else {
         extra_joins += 1;

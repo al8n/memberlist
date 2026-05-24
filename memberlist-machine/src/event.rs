@@ -17,6 +17,7 @@ pub enum Reliability {
 
 impl Reliability {
   /// Returns `true` if this is `Reliable`.
+  #[inline(always)]
   pub const fn is_reliable(self) -> bool {
     matches!(self, Reliability::Reliable)
   }
@@ -33,6 +34,7 @@ pub enum PushPullKind {
 
 impl PushPullKind {
   /// Returns `true` if this is `Join`.
+  #[inline(always)]
   pub const fn is_join(self) -> bool {
     matches!(self, PushPullKind::Join)
   }
@@ -53,6 +55,7 @@ impl StreamId {
 
   /// The raw u64 representation. Drivers may use this to map `StreamId`s
   /// to their own connection handles.
+  #[inline(always)]
   pub const fn as_u64(self) -> u64 {
     self.0
   }
@@ -61,10 +64,34 @@ impl StreamId {
 /// A single message destined for one peer (one plain-frame datagram).
 #[derive(Debug)]
 pub struct PacketTransmit<I, A> {
-  /// Destination address.
-  pub to: A,
-  /// The fully-typed message to encode and transmit.
-  pub message: Message<I, A>,
+  to: A,
+  message: Message<I, A>,
+}
+
+impl<I, A> PacketTransmit<I, A> {
+  /// Construct a new packet-transmit directive.
+  #[inline(always)]
+  pub const fn new(to: A, message: Message<I, A>) -> Self {
+    Self { to, message }
+  }
+
+  /// Borrow the destination address.
+  #[inline(always)]
+  pub const fn to_ref(&self) -> &A {
+    &self.to
+  }
+
+  /// Borrow the message.
+  #[inline(always)]
+  pub const fn message_ref(&self) -> &Message<I, A> {
+    &self.message
+  }
+
+  /// Consume and return the (destination, message) pair.
+  #[inline(always)]
+  pub fn into_parts(self) -> (A, Message<I, A>) {
+    (self.to, self.message)
+  }
 }
 
 /// Two or more messages destined for one peer, sent as ONE datagram
@@ -74,10 +101,39 @@ pub struct PacketTransmit<I, A> {
 /// `makeCompoundMessage`, which only compounds when parts > 1).
 #[derive(Debug)]
 pub struct CompoundTransmit<I, A> {
-  /// Destination address, shared by every message in the batch.
-  pub to: A,
-  /// The messages to co-send, in transmit order. Length is always `>= 2`.
-  pub messages: Vec<Message<I, A>>,
+  to: A,
+  messages: Vec<Message<I, A>>,
+}
+
+impl<I, A> CompoundTransmit<I, A> {
+  /// Construct a new compound-transmit directive. Panics if `messages.len() < 2`
+  /// (single-message sends use [`PacketTransmit`]).
+  #[inline(always)]
+  pub fn new(to: A, messages: Vec<Message<I, A>>) -> Self {
+    assert!(
+      messages.len() >= 2,
+      "CompoundTransmit requires >= 2 messages"
+    );
+    Self { to, messages }
+  }
+
+  /// Borrow the destination address.
+  #[inline(always)]
+  pub const fn to_ref(&self) -> &A {
+    &self.to
+  }
+
+  /// Borrow the messages as a slice.
+  #[inline(always)]
+  pub const fn messages_slice(&self) -> &[Message<I, A>] {
+    self.messages.as_slice()
+  }
+
+  /// Consume and return the (destination, messages) pair.
+  #[inline(always)]
+  pub fn into_parts(self) -> (A, Vec<Message<I, A>>) {
+    (self.to, self.messages)
+  }
 }
 
 /// Outgoing I/O directive emitted by [`Endpoint::poll_transmit`].

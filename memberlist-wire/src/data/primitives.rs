@@ -4,7 +4,7 @@ use core::{
 };
 use std::num::NonZeroUsize;
 
-use varing::{Varint, decode_duration, encode_duration_to, encoded_duration_len};
+use varing::{decode_duration, encode_duration_to, encoded_duration_len, Varint};
 
 use super::{Data, DataRef, DecodeError, EncodeError};
 use crate::wire_type::WireType;

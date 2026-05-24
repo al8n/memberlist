@@ -16,7 +16,7 @@ use crate::{
   config::EndpointConfig,
   endpoint::Endpoint,
   event::Event,
-  streams::{StreamEndpoint, bridge::StreamBridge, phase::StreamPhase, transport::StreamTransport},
+  streams::{bridge::StreamBridge, phase::StreamPhase, transport::StreamTransport, StreamEndpoint},
 };
 
 /// Reliable-unit ceiling for bridge test pairs — `EndpointConfig` default
@@ -177,7 +177,7 @@ pub(crate) fn assert_phase<R: StreamTransport>(
   bridge: &StreamBridge<SmolStr, SocketAddr, R>,
   expected: &StreamPhase,
 ) {
-  let actual = bridge.phase();
+  let actual = bridge.phase_ref();
   assert!(
     phase_label(actual) == phase_label(expected),
     "bridge phase mismatch: expected {}, got {}",

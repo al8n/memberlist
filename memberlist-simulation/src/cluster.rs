@@ -3,6 +3,7 @@
 use std::{
   collections::HashMap,
   net::SocketAddr,
+  sync::Arc,
   time::{Duration, Instant},
 };
 
@@ -210,7 +211,7 @@ impl Cluster {
       .with_probe_timeout(Duration::from_millis(500))
       .with_suspicion_mult(4)
       .with_retransmit_mult(4)
-      .with_rng_seed(Some(addr.port() as u64));
+      .with_rng_seed(addr.port() as u64);
     let cfg = config_fn(cfg);
     self.net.add_endpoint(cfg, self.clock.now());
     addr
@@ -300,13 +301,8 @@ impl Cluster {
     &self,
     host: SocketAddr,
     peer: &SmolStr,
-  ) -> Option<&NodeState<SmolStr, SocketAddr>> {
-    self
-      .net
-      .endpoints
-      .get(&host)?
-      .member(peer)
-      .map(|arc| arc.as_ref())
+  ) -> Option<Arc<NodeState<SmolStr, SocketAddr>>> {
+    self.net.endpoints.get(&host)?.member(peer)
   }
 
   /// Simulated time right now.
@@ -532,7 +528,7 @@ impl Cluster {
       .net
       .endpoints
       .get(&host)
-      .map(|ep| ep.local_id().clone())
+      .map(|ep| ep.local_id_ref().clone())
   }
 
   /// Local node's advertise [`Node`] at `host`, or `None` if unknown.
@@ -541,7 +537,7 @@ impl Cluster {
       .net
       .endpoints
       .get(&host)
-      .map(|ep| Node::new(ep.local_id().clone(), *ep.advertise()))
+      .map(|ep| Node::new(ep.local_id_ref().clone(), *ep.advertise_ref()))
   }
 
   /// Incarnation number of the local node at `host`.
@@ -678,11 +674,11 @@ impl Cluster {
       return Ok(());
     };
     // Collect peer addresses before calling leave (which takes &mut self).
-    let local_id = ep.local_id().clone();
+    let local_id = ep.local_id_ref().clone();
     let peer_addrs: Vec<SocketAddr> = ep
       .members()
-      .filter(|ns| ns.id() != &local_id)
-      .map(|ns| *ns.address())
+      .filter(|ns| ns.id_ref() != &local_id)
+      .map(|ns| *ns.address_ref())
       .collect();
     let result = ep.leave(now);
     if result.is_ok() {

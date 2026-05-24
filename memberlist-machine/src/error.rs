@@ -1,5 +1,7 @@
 //! Error types surfaced by the [`Endpoint`].
 
+use std::borrow::Cow;
+
 use thiserror::Error;
 
 /// Errors returned by [`Endpoint`](crate::endpoint::Endpoint) operations.
@@ -16,8 +18,9 @@ pub enum Error {
   UnexpectedMessage(&'static str),
 
   /// An incoming message had a state value the local node doesn't recognise.
+  /// The payload is the raw state identifier received from the wire.
   #[error("unknown peer state: {0}")]
-  UnknownPeerState(String),
+  UnknownPeerState(Cow<'static, str>),
 }
 
 /// Error from a per-stream reliable-exchange state machine.
@@ -26,19 +29,23 @@ pub enum Error {
 /// `StreamPhase::Failed` and returned to the driver from the same
 /// `handle_data` call. All variants are value types.
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum StreamError {
   /// The stream deadline elapsed before the exchange completed.
   #[error("stream timed out")]
   Timeout,
   /// The driver reported that the dial failed.
+  /// The payload is the free-form OS/network error description.
   #[error("dial failed: {0}")]
-  DialFailed(String),
+  DialFailed(Cow<'static, str>),
   /// The remote peer sent an unexpected or malformed message.
+  /// The payload is a free-form description of what was unexpected.
   #[error("unexpected message from peer: {0}")]
-  UnexpectedMessage(String),
+  UnexpectedMessage(Cow<'static, str>),
   /// The peer sent bytes that could not be decoded.
+  /// The payload is the free-form wire-decode error reason.
   #[error("decode error: {0}")]
-  Decode(String),
+  Decode(Cow<'static, str>),
   /// The peer closed the stream before sending a response.
   #[error("peer closed stream unexpectedly")]
   PeerClosed,

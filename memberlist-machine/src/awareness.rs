@@ -18,6 +18,7 @@ pub struct Awareness {
 impl Awareness {
   /// Construct an awareness tracker with the given upper threshold.
   /// The score will be clamped to `[0, max - 1]`. Panics if `max == 0`.
+  #[inline(always)]
   pub const fn new(max: u32) -> Self {
     assert!(max >= 1, "Awareness::new: max must be >= 1");
     Self { max, score: 0 }
@@ -25,22 +26,26 @@ impl Awareness {
 
   /// Record a positive health signal (e.g. successful probe response).
   /// Decreases the score by 1, saturating at 0 (lower = healthier).
+  #[inline(always)]
   pub fn record_success(&mut self) {
     self.score = self.score.saturating_sub(1);
   }
 
   /// Record a negative health signal (e.g. failed probe, forced refute).
   /// Increases the score by `severity`, clamping to `max - 1`.
+  #[inline(always)]
   pub fn record_failure(&mut self, severity: u32) {
     self.score = self.score.saturating_add(severity).min(self.max - 1);
   }
 
   /// Returns the current health score (`0` = fully healthy, `max - 1` = worst).
+  #[inline(always)]
   pub const fn health_score(&self) -> u32 {
     self.score
   }
 
   /// Returns the upper threshold passed to `new`.
+  #[inline(always)]
   pub const fn max(&self) -> u32 {
     self.max
   }
