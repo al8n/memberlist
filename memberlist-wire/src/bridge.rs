@@ -19,6 +19,7 @@ use crate::{
 // ─── BridgeError ─────────────────────────────────────────────────────────────
 
 /// Errors that can occur when converting between typed shapes and buffa types.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
   /// An encode error occurred while serialising an `I` or `A` field.
@@ -142,9 +143,9 @@ pub fn node_state_to_buffa<I: Data, A: Data>(
   ns: &typed::NodeState<I, A>,
 ) -> Result<pb::PushNodeState, BridgeError> {
   Ok(pb::PushNodeState {
-    id: Some(data_to_bytes(ns.id())?),
-    addr: Some(data_to_bytes(ns.address())?),
-    meta: Bytes::copy_from_slice(ns.meta().as_bytes()),
+    id: Some(data_to_bytes(ns.id_ref())?),
+    addr: Some(data_to_bytes(ns.address_ref())?),
+    meta: Bytes::copy_from_slice(ns.meta_ref().as_bytes()),
     incarnation: Some(0),
     state: Some(state_to_buffa(ns.state())),
     protocol_version: Some(u8::from(ns.protocol_version()) as u32),
@@ -187,9 +188,9 @@ pub fn push_node_state_to_buffa<I: Data, A: Data>(
   pns: &typed::PushNodeState<I, A>,
 ) -> Result<pb::PushNodeState, BridgeError> {
   Ok(pb::PushNodeState {
-    id: Some(data_to_bytes(pns.id())?),
-    addr: Some(data_to_bytes(pns.address())?),
-    meta: Bytes::copy_from_slice(pns.meta().as_bytes()),
+    id: Some(data_to_bytes(pns.id_ref())?),
+    addr: Some(data_to_bytes(pns.address_ref())?),
+    meta: Bytes::copy_from_slice(pns.meta_ref().as_bytes()),
     incarnation: Some(pns.incarnation()),
     state: Some(state_to_buffa(pns.state())),
     protocol_version: Some(u8::from(pns.protocol_version()) as u32),
@@ -227,10 +228,10 @@ pub fn push_node_state_from_buffa<I: Data, A: Data>(
 
 /// Convert `typed::Alive<I,A>` → `pb::Alive`.
 pub fn alive_to_buffa<I: Data, A: Data>(t: &typed::Alive<I, A>) -> Result<pb::Alive, BridgeError> {
-  let pb_node = node_to_buffa(t.node())?;
+  let pb_node = node_to_buffa(t.node_ref())?;
   Ok(pb::Alive {
     incarnation: Some(t.incarnation()),
-    meta: Bytes::copy_from_slice(t.meta().as_bytes()),
+    meta: Bytes::copy_from_slice(t.meta_ref().as_bytes()),
     node: BuffaMessageField::some(pb_node),
     protocol_version: Some(u8::from(t.protocol_version()) as u32),
     delegate_version: Some(u8::from(t.delegate_version()) as u32),
@@ -267,8 +268,8 @@ pub fn alive_from_buffa<I: Data, A: Data>(
 pub fn suspect_to_buffa<I: Data>(t: &typed::Suspect<I>) -> Result<pb::Suspect, BridgeError> {
   Ok(pb::Suspect {
     incarnation: Some(t.incarnation()),
-    node: Some(data_to_bytes(t.node())?),
-    from: Some(data_to_bytes(t.from())?),
+    node: Some(data_to_bytes(t.node_ref())?),
+    from: Some(data_to_bytes(t.from_ref())?),
     ..Default::default()
   })
 }
@@ -289,8 +290,8 @@ pub fn suspect_from_buffa<I: Data>(b: &pb::Suspect) -> Result<typed::Suspect<I>,
 pub fn dead_to_buffa<I: Data>(t: &typed::Dead<I>) -> Result<pb::Dead, BridgeError> {
   Ok(pb::Dead {
     incarnation: Some(t.incarnation()),
-    node: Some(data_to_bytes(t.node())?),
-    from: Some(data_to_bytes(t.from())?),
+    node: Some(data_to_bytes(t.node_ref())?),
+    from: Some(data_to_bytes(t.from_ref())?),
     ..Default::default()
   })
 }
@@ -311,8 +312,8 @@ pub fn dead_from_buffa<I: Data>(b: &pb::Dead) -> Result<typed::Dead<I>, BridgeEr
 pub fn ping_to_buffa<I: Data, A: Data>(t: &typed::Ping<I, A>) -> Result<pb::Ping, BridgeError> {
   Ok(pb::Ping {
     sequence_number: Some(t.sequence_number()),
-    source: BuffaMessageField::some(node_to_buffa(t.source())?),
-    target: BuffaMessageField::some(node_to_buffa(t.target())?),
+    source: BuffaMessageField::some(node_to_buffa(t.source_ref())?),
+    target: BuffaMessageField::some(node_to_buffa(t.target_ref())?),
     ..Default::default()
   })
 }
@@ -345,8 +346,8 @@ pub fn indirect_ping_to_buffa<I: Data, A: Data>(
 ) -> Result<pb::IndirectPing, BridgeError> {
   Ok(pb::IndirectPing {
     sequence_number: Some(t.sequence_number()),
-    source: BuffaMessageField::some(node_to_buffa(t.source())?),
-    target: BuffaMessageField::some(node_to_buffa(t.target())?),
+    source: BuffaMessageField::some(node_to_buffa(t.source_ref())?),
+    target: BuffaMessageField::some(node_to_buffa(t.target_ref())?),
     ..Default::default()
   })
 }
@@ -379,7 +380,7 @@ pub fn indirect_ping_from_buffa<I: Data, A: Data>(
 pub fn ack_to_buffa(t: &typed::Ack) -> pb::Ack {
   pb::Ack {
     sequence_number: t.sequence_number(),
-    payload: t.payload().clone(),
+    payload: t.payload_bytes(),
     ..Default::default()
   }
 }
@@ -411,14 +412,14 @@ pub fn push_pull_to_buffa<I: Data, A: Data>(
   t: &typed::PushPull<I, A>,
 ) -> Result<pb::PushPull, BridgeError> {
   let states = t
-    .states()
+    .states_slice()
     .iter()
     .map(push_node_state_to_buffa)
     .collect::<Result<Vec<_>, _>>()?;
   Ok(pb::PushPull {
     join: t.join(),
     states,
-    user_data: t.user_data().clone(),
+    user_data: t.user_data_bytes(),
     ..Default::default()
   })
 }
@@ -547,8 +548,8 @@ mod tests {
 
     let back = alive_from_buffa::<I, A>(&pb).unwrap();
     assert_eq!(back.incarnation(), alive.incarnation());
-    assert_eq!(back.node().id(), alive.node().id());
-    assert_eq!(back.node().address(), alive.node().address());
+    assert_eq!(back.node_ref().id(), alive.node_ref().id());
+    assert_eq!(back.node_ref().address(), alive.node_ref().address());
     assert_eq!(back.protocol_version(), alive.protocol_version());
     assert_eq!(back.delegate_version(), alive.delegate_version());
   }
@@ -564,8 +565,8 @@ mod tests {
 
     let back = suspect_from_buffa::<I>(&pb).unwrap();
     assert_eq!(back.incarnation(), suspect.incarnation());
-    assert_eq!(back.node(), suspect.node());
-    assert_eq!(back.from(), suspect.from());
+    assert_eq!(back.node_ref(), suspect.node_ref());
+    assert_eq!(back.from_ref(), suspect.from_ref());
   }
 
   // ── Dead ───────────────────────────────────────────────────────────────────
@@ -577,8 +578,8 @@ mod tests {
     let pb = dead_to_buffa::<I>(&dead).unwrap();
     let back = dead_from_buffa::<I>(&pb).unwrap();
     assert_eq!(back.incarnation(), dead.incarnation());
-    assert_eq!(back.node(), dead.node());
-    assert_eq!(back.from(), dead.from());
+    assert_eq!(back.node_ref(), dead.node_ref());
+    assert_eq!(back.from_ref(), dead.from_ref());
   }
 
   // ── Ping ───────────────────────────────────────────────────────────────────
@@ -597,8 +598,8 @@ mod tests {
 
     let back = ping_from_buffa::<I, A>(&pb).unwrap();
     assert_eq!(back.sequence_number(), ping.sequence_number());
-    assert_eq!(back.source().id(), ping.source().id());
-    assert_eq!(back.target().id(), ping.target().id());
+    assert_eq!(back.source_ref().id(), ping.source_ref().id());
+    assert_eq!(back.target_ref().id(), ping.target_ref().id());
   }
 
   // ── IndirectPing ───────────────────────────────────────────────────────────
@@ -615,8 +616,8 @@ mod tests {
     let pb = indirect_ping_to_buffa::<I, A>(&iping).unwrap();
     let back = indirect_ping_from_buffa::<I, A>(&pb).unwrap();
     assert_eq!(back.sequence_number(), iping.sequence_number());
-    assert_eq!(back.source().id(), iping.source().id());
-    assert_eq!(back.target().id(), iping.target().id());
+    assert_eq!(back.source_ref().id(), iping.source_ref().id());
+    assert_eq!(back.target_ref().id(), iping.target_ref().id());
   }
 
   // ── Ack / Nack ─────────────────────────────────────────────────────────────
@@ -667,10 +668,13 @@ mod tests {
 
     let back = push_pull_from_buffa::<I, A>(&pb).unwrap();
     assert_eq!(back.join(), pp.join());
-    assert_eq!(back.states().len(), pp.states().len());
+    assert_eq!(back.states_slice().len(), pp.states_slice().len());
     assert_eq!(back.user_data(), pp.user_data());
-    assert_eq!(back.states()[0].id(), pp.states()[0].id());
-    assert_eq!(back.states()[1].state(), pp.states()[1].state());
+    assert_eq!(
+      back.states_slice()[0].id_ref(),
+      pp.states_slice()[0].id_ref()
+    );
+    assert_eq!(back.states_slice()[1].state(), pp.states_slice()[1].state());
   }
 
   // ── UserData ───────────────────────────────────────────────────────────────
@@ -707,7 +711,7 @@ mod tests {
     match back {
       typed::Message::Alive(a) => {
         assert_eq!(a.incarnation(), alive.incarnation());
-        assert_eq!(a.node().id(), alive.node().id());
+        assert_eq!(a.node_ref().id(), alive.node_ref().id());
       }
       _ => panic!("expected Alive variant"),
     }
@@ -734,7 +738,7 @@ mod tests {
     match back {
       typed::Message::PushPull(p) => {
         assert_eq!(p.join(), pp.join());
-        assert_eq!(p.states().len(), pp.states().len());
+        assert_eq!(p.states_slice().len(), pp.states_slice().len());
         assert_eq!(p.user_data(), pp.user_data());
       }
       _ => panic!("expected PushPull variant"),

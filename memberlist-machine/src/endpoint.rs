@@ -9,18 +9,17 @@ use std::{
 
 use bytes::Bytes;
 use memberlist_wire::{
-  Data,
   typed::{
     Ack, Alive, Dead, IndirectPing, Message, Meta, Nack, NodeState, Ping, PushNodeState, PushPull,
     State, Suspect,
   },
+  Data,
 };
 use nodecraft::{CheapClone, Id, Node};
-use rand::{RngExt, SeedableRng, rngs::SmallRng, seq::IteratorRandom};
+use rand::{rngs::SmallRng, seq::IteratorRandom, RngExt, SeedableRng};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-  AckEntry, AckKind, EndpointEvent, ForwardAck, PushPullKind, StreamCommand, StreamId,
   ack::AckRegistry,
   awareness::Awareness,
   broadcast::{BroadcastQueue, MemberlistBroadcast},
@@ -29,6 +28,7 @@ use crate::{
   members::{LocalNodeState, Member, Members},
   probe::{AwaitingIndirect, Probe, ProbeKind, ProbePhase},
   stream::{OutboundKind, Stream, StreamPhase},
+  AckEntry, AckKind, EndpointEvent, ForwardAck, PushPullKind, StreamCommand, StreamId,
 };
 
 #[cfg(test)]
@@ -117,6 +117,13 @@ struct IndirectForward<A> {
 /// never corrupts); delivery promptness/ordering is the driver's lever on
 /// *quality* (failure-detection latency, transient-suspect window), not a
 /// correctness dependency. The machine never compensates for the driver.
+// Storage-shape bound: the `broadcast` field is typed as
+// `BroadcastQueue<MemberlistBroadcast<I, A>>`. `BroadcastQueue<B>` declares
+// `B: Broadcast`, and `MemberlistBroadcast<I, A>: Broadcast` only when both
+// `I` and `A` carry the full SWIM bag below — so naming this struct without
+// the bound is ill-formed (E0277). The bag therefore stays at the struct
+// level only for well-formedness; method-level bounds on the impl blocks
+// below carry every operation that actually uses any of these traits.
 pub struct Endpoint<I, A>
 where
   I: Id + Data + CheapClone,
@@ -211,9 +218,14 @@ where
   next_pushpull: Option<Instant>,
 }
 
+// Accessors whose bodies only touch non-generic fields (`Awareness`,
+// `Lifecycle`, primitive config getters). Re-states only the struct's
+// well-formedness bag — no method-side additions, so the heavier
+// `Debug + Display + Send + Sync + 'static` constraints `I` carries on the
+// methods below are NOT required to call any of these.
 impl<I, A> Endpoint<I, A>
 where
-  I: Id + Data + CheapClone + core::fmt::Debug + core::fmt::Display + Send + Sync + 'static,
+  I: Id + Data + CheapClone,
   A: CheapClone
     + Data
     + Eq
@@ -224,124 +236,6 @@ where
     + Sync
     + 'static,
 {
-  /// Construct a new endpoint. Inserts the local node as Alive at incarnation 1
-  /// and enqueues the initial Alive broadcast.
-  pub fn new(cfg: EndpointConfig<I, A>) -> Self {
-    let rng = match cfg.rng_seed() {
-      Some(seed) => SmallRng::seed_from_u64(seed),
-      None => rand::make_rng(),
-    };
-    let local_node = Node::new(
-      cfg.local_id().cheap_clone(),
-      cfg.advertise_addr().cheap_clone(),
-    );
-    let mut members = Members::new(local_node);
-    let awareness = Awareness::new(cfg.awareness_max_multiplier());
-    let broadcast = BroadcastQueue::<MemberlistBroadcast<I, A>>::new(cfg.retransmit_mult());
-
-    // Insert the local node as Alive.
-    let local_node_state = NodeState::new(
-      cfg.local_id().cheap_clone(),
-      cfg.advertise_addr().cheap_clone(),
-      State::Alive,
-    )
-    .with_meta(cfg.initial_meta().cheap_clone())
-    .with_protocol_version(cfg.protocol_version())
-    .with_delegate_version(cfg.delegate_version());
-    let now = Instant::now();
-    let mut local_state = LocalNodeState::new(local_node_state, now);
-    local_state.set_incarnation(1);
-    let _ = members.insert(Member::new(local_state.clone()));
-
-    let local_state_snapshot = cfg.initial_local_state().clone();
-
-    let mut endpoint = Self {
-      cfg,
-      rng,
-      members,
-      awareness,
-      broadcast,
-      ack_registry: AckRegistry::new(),
-      probes: FxHashMap::default(),
-      indirect_forwards: FxHashMap::default(),
-      next_seq: 0,
-      probe_index: 0,
-      probes_since_reset: 0,
-      incarnation: 1,
-      local_state_snapshot,
-      lifecycle: Lifecycle::Running,
-      pending_events: VecDeque::new(),
-      pending_transmits: VecDeque::new(),
-      leave_flush_remaining: None,
-      alive_delegate: None,
-      merge_delegate: None,
-      next_stream_id: 1,
-      pending_stream_intents: FxHashMap::default(),
-      ack_payload: Bytes::new(),
-      reliable_pings_disabled: FxHashSet::default(),
-      user_broadcasts: VecDeque::new(),
-      next_probe: None,
-      next_gossip: None,
-      next_pushpull: None,
-    };
-
-    // Enqueue the initial Alive broadcast so peers learn about us.
-    endpoint.broadcast_alive(&local_state);
-    endpoint
-  }
-
-  /// Install the synchronous [`AliveDelegate`](crate::delegate::AliveDelegate)
-  /// admission filter. Called inline for every inbound alive; `None` (the
-  /// default) admits all. The delegate must be pure/non-blocking — see the
-  /// [`delegate`](crate::delegate) module contract.
-  pub fn set_alive_delegate(&mut self, d: impl crate::delegate::AliveDelegate<I, A>) {
-    self.alive_delegate = Some(Box::new(d));
-  }
-
-  /// Install the synchronous [`MergeDelegate`](crate::delegate::MergeDelegate)
-  /// filter, consulted only for a join push/pull (never anti-entropy
-  /// refresh). `None` (the default) admits all.
-  pub fn set_merge_delegate(&mut self, d: impl crate::delegate::MergeDelegate<I, A>) {
-    self.merge_delegate = Some(Box::new(d));
-  }
-
-  /// The local node's id.
-  pub fn local_id(&self) -> &I {
-    self.cfg.local_id()
-  }
-
-  /// The local node's advertise address.
-  pub fn advertise(&self) -> &A {
-    self.cfg.advertise_addr()
-  }
-
-  /// Iterate over all known members' wire-format `NodeState`.
-  pub fn members(&self) -> impl Iterator<Item = &Arc<NodeState<I, A>>> {
-    self.members.iter().map(|m| m.state().server())
-  }
-
-  /// Look up a member by id.
-  pub fn member(&self, id: &I) -> Option<&Arc<NodeState<I, A>>> {
-    self.members.get(id).map(|m| m.state().server())
-  }
-
-  /// Return the gossip-tracked liveness state for a member.
-  ///
-  /// Unlike [`member`](Self::member), which returns the wire-protocol
-  /// `NodeState` (whose `state` field is fixed at insertion), this method
-  /// returns the value maintained by the gossip state machine and reflects
-  /// Suspect / Dead transitions.
-  ///
-  /// Returns `None` if `id` is not known to this endpoint.
-  pub fn member_liveness(&self, id: &I) -> Option<State> {
-    self.members.get(id).map(|m| m.state().state())
-  }
-
-  /// Number of tracked members.
-  pub fn num_members(&self) -> usize {
-    self.members.len()
-  }
-
   /// Current Lifeguard health score (0 = healthy).
   pub const fn health_score(&self) -> u32 {
     self.awareness.health_score()
@@ -400,18 +294,158 @@ where
   pub(crate) const fn gossip_mtu(&self) -> usize {
     self.cfg.gossip_mtu()
   }
+}
+
+// The full SWIM bag — every method that constructs/encodes wire types,
+// mutates membership, or routes broadcasts. Bounds match what the downstream
+// wrapper types (`Members`, `MemberlistBroadcast`, `wire::encode`) demand.
+impl<I, A> Endpoint<I, A>
+where
+  I: Id + Data + CheapClone + core::fmt::Debug + core::fmt::Display + Send + Sync + 'static,
+  A: CheapClone
+    + Data
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+{
+  /// Construct a new endpoint. Inserts the local node as Alive at incarnation 1
+  /// and enqueues the initial Alive broadcast.
+  pub fn new(cfg: EndpointConfig<I, A>) -> Self {
+    let rng = match cfg.rng_seed() {
+      Some(seed) => SmallRng::seed_from_u64(seed),
+      None => rand::make_rng(),
+    };
+    let local_node = Node::new(
+      cfg.local_id_ref().cheap_clone(),
+      cfg.advertise_addr_ref().cheap_clone(),
+    );
+    let mut members = Members::new(local_node);
+    let awareness = Awareness::new(cfg.awareness_max_multiplier());
+    let broadcast = BroadcastQueue::<MemberlistBroadcast<I, A>>::new(cfg.retransmit_mult());
+
+    // Insert the local node as Alive.
+    let local_node_state = NodeState::new(
+      cfg.local_id_ref().cheap_clone(),
+      cfg.advertise_addr_ref().cheap_clone(),
+      State::Alive,
+    )
+    .with_meta(cfg.initial_meta_ref().cheap_clone())
+    .with_protocol_version(cfg.protocol_version())
+    .with_delegate_version(cfg.delegate_version());
+    let now = Instant::now();
+    let mut local_state = LocalNodeState::new(local_node_state, now);
+    local_state.set_incarnation(1);
+    let _ = members.insert(Member::new(local_state.clone()));
+
+    let local_state_snapshot = cfg.initial_local_state_bytes();
+
+    let mut endpoint = Self {
+      cfg,
+      rng,
+      members,
+      awareness,
+      broadcast,
+      ack_registry: AckRegistry::new(),
+      probes: FxHashMap::default(),
+      indirect_forwards: FxHashMap::default(),
+      next_seq: 0,
+      probe_index: 0,
+      probes_since_reset: 0,
+      incarnation: 1,
+      local_state_snapshot,
+      lifecycle: Lifecycle::Running,
+      pending_events: VecDeque::new(),
+      pending_transmits: VecDeque::new(),
+      leave_flush_remaining: None,
+      alive_delegate: None,
+      merge_delegate: None,
+      next_stream_id: 1,
+      pending_stream_intents: FxHashMap::default(),
+      ack_payload: Bytes::new(),
+      reliable_pings_disabled: FxHashSet::default(),
+      user_broadcasts: VecDeque::new(),
+      next_probe: None,
+      next_gossip: None,
+      next_pushpull: None,
+    };
+
+    // Enqueue the initial Alive broadcast so peers learn about us.
+    endpoint.broadcast_alive(&local_state);
+    endpoint
+  }
+
+  /// Install the synchronous [`AliveDelegate`](crate::delegate::AliveDelegate)
+  /// admission filter. Called inline for every inbound alive; `None` (the
+  /// default) admits all. The delegate must be pure/non-blocking — see the
+  /// [`delegate`](crate::delegate) module contract.
+  pub fn set_alive_delegate(&mut self, d: impl crate::delegate::AliveDelegate<I, A>) {
+    self.alive_delegate = Some(Box::new(d));
+  }
+
+  /// Install the synchronous [`MergeDelegate`](crate::delegate::MergeDelegate)
+  /// filter, consulted only for a join push/pull (never anti-entropy
+  /// refresh). `None` (the default) admits all.
+  pub fn set_merge_delegate(&mut self, d: impl crate::delegate::MergeDelegate<I, A>) {
+    self.merge_delegate = Some(Box::new(d));
+  }
+
+  /// The local node's id.
+  #[inline(always)]
+  pub fn local_id_ref(&self) -> &I {
+    self.cfg.local_id_ref()
+  }
+
+  /// The local node's advertise address.
+  #[inline(always)]
+  pub fn advertise_ref(&self) -> &A {
+    self.cfg.advertise_addr_ref()
+  }
+
+  /// Iterate over all known members' wire-format `NodeState`.
+  pub fn members(&self) -> impl Iterator<Item = Arc<NodeState<I, A>>> + '_ {
+    self.members.iter().map(|m| m.state_ref().server_arc())
+  }
+
+  /// Look up a member by id.
+  pub fn member(&self, id: &I) -> Option<Arc<NodeState<I, A>>> {
+    self.members.get(id).map(|m| m.state_ref().server_arc())
+  }
+
+  /// Return the gossip-tracked liveness state for a member.
+  ///
+  /// Unlike [`member`](Self::member), which returns the wire-protocol
+  /// `NodeState` (whose `state` field is fixed at insertion), this method
+  /// returns the value maintained by the gossip state machine and reflects
+  /// Suspect / Dead transitions.
+  ///
+  /// Returns `None` if `id` is not known to this endpoint.
+  pub fn member_liveness(&self, id: &I) -> Option<State> {
+    self.members.get(id).map(|m| m.state_ref().state())
+  }
+
+  /// Number of tracked members.
+  pub fn num_members(&self) -> usize {
+    self.members.len()
+  }
 
   /// access to the broadcast queue (used by transitions).
   pub(crate) fn broadcast_alive(&mut self, state: &LocalNodeState<I, A>) {
     let alive = Alive::new(
       state.incarnation(),
-      Node::new(state.id().cheap_clone(), state.address().cheap_clone()),
+      Node::new(
+        state.id_ref().cheap_clone(),
+        state.address_ref().cheap_clone(),
+      ),
     )
-    .with_meta(state.server().meta().cheap_clone())
-    .with_protocol_version(state.server().protocol_version())
-    .with_delegate_version(state.server().delegate_version());
+    .with_meta(state.server_ref().meta_ref().cheap_clone())
+    .with_protocol_version(state.server_ref().protocol_version())
+    .with_delegate_version(state.server_ref().delegate_version());
     self.broadcast.queue_broadcast(MemberlistBroadcast::new(
-      state.id().cheap_clone(),
+      state.id_ref().cheap_clone(),
       Message::Alive(alive),
     ));
   }
@@ -473,13 +507,13 @@ where
   /// in-order, atomic application is what makes Alive→Suspect/Dead
   /// ordering and timer stamping correct by construction.
   pub(crate) fn process_alive(&mut self, alive: Alive<I, A>, bootstrap: bool, now: Instant) {
-    let alive_id = alive.node().id().cheap_clone();
+    let alive_id = alive.node_ref().id().cheap_clone();
 
     // If we're no longer Running (Leaving or Left) and this Alive is about
     // us, ignore it — otherwise a self-Alive (e.g. a peer echoing our
     // pre-leave state) would resurrect the just-left local node. We
     // suppress self-handling for both Leaving and Left.
-    if self.lifecycle != Lifecycle::Running && &alive_id == self.cfg.local_id() {
+    if self.lifecycle != Lifecycle::Running && &alive_id == self.cfg.local_id_ref() {
       return;
     }
 
@@ -487,10 +521,10 @@ where
     if let Some(d) = &self.alive_delegate {
       let server_view = NodeState::new(
         alive_id.cheap_clone(),
-        alive.node().address().cheap_clone(),
+        alive.node_ref().address().cheap_clone(),
         State::Alive,
       )
-      .with_meta(alive.meta().cheap_clone())
+      .with_meta(alive.meta_ref().cheap_clone())
       .with_protocol_version(alive.protocol_version())
       .with_delegate_version(alive.delegate_version());
       if !d.notify_alive(&server_view) {
@@ -512,10 +546,10 @@ where
     bootstrap: bool,
     now: Instant,
   ) {
-    let alive_id = alive.node().id().cheap_clone();
-    let alive_addr = alive.node().address().cheap_clone();
+    let alive_id = alive.node_ref().id().cheap_clone();
+    let alive_addr = alive.node_ref().address().cheap_clone();
     let alive_incarnation = alive.incarnation();
-    let alive_meta = alive.meta().cheap_clone();
+    let alive_meta = alive.meta_ref().cheap_clone();
     let alive_protocol = alive.protocol_version();
     let alive_delegate = alive.delegate_version();
 
@@ -528,17 +562,17 @@ where
     .with_protocol_version(alive_protocol)
     .with_delegate_version(alive_delegate);
 
-    let is_local = &alive_id == self.cfg.local_id();
+    let is_local = &alive_id == self.cfg.local_id_ref();
 
     // existing or new.
     let mut updates_address = false;
     if let Some(existing) = self.members.get(&alive_id) {
-      let existing_addr = existing.state().address().cheap_clone();
+      let existing_addr = existing.state_ref().address_ref().cheap_clone();
       if existing_addr != alive_addr {
         let can_reclaim = self.cfg.dead_node_reclaim_time() > Duration::ZERO
-          && now.saturating_duration_since(existing.state().state_change())
+          && now.saturating_duration_since(existing.state_ref().state_change())
             > self.cfg.dead_node_reclaim_time();
-        let st = existing.state().state();
+        let st = existing.state_ref().state();
         if st == State::Left || (st == State::Dead && can_reclaim) {
           // Adopt the new address.
           updates_address = true;
@@ -546,7 +580,7 @@ where
           // Conflict.
           let other = Arc::new(server_for_conflict);
           self.emit_event(Event::NodeConflict {
-            existing: existing.state().server().cheap_clone(),
+            existing: existing.state_ref().server_arc(),
             other,
           });
           return;
@@ -580,9 +614,9 @@ where
       .members
       .get_mut(&alive_id)
       .expect("inserted above or pre-existing");
-    let local_incarnation = member.state().incarnation();
-    let old_state = member.state().state();
-    let old_meta = member.state().server().meta().cheap_clone();
+    let local_incarnation = member.state_ref().incarnation();
+    let old_state = member.state_ref().state();
+    let old_meta = member.state_ref().server_ref().meta_ref().cheap_clone();
 
     // Bail if older and not about us.
     if !updates_address && !is_local && alive_incarnation <= local_incarnation {
@@ -599,8 +633,8 @@ where
     if !bootstrap && is_local {
       // Same incarnation + same server → idempotent, no-op.
       let same_meta = old_meta == alive_meta;
-      let same_pv = member.state().server().protocol_version() == alive_protocol;
-      let same_dv = member.state().server().delegate_version() == alive_delegate;
+      let same_pv = member.state_ref().server_ref().protocol_version() == alive_protocol;
+      let same_dv = member.state_ref().server_ref().delegate_version() == alive_delegate;
       if alive_incarnation == local_incarnation && same_meta && same_pv && same_dv {
         return;
       }
@@ -622,12 +656,12 @@ where
     );
     // Re-fetch the member (we relinquished it for the refute path above).
     // Apply the update, then drop the borrow before calling broadcast_message.
-    let new_meta = new_server.meta().cheap_clone();
+    let new_meta = new_server.meta_ref().cheap_clone();
     {
       let member = self.members.get_mut(&alive_id).expect("present");
       member.state_mut().set_incarnation(alive_incarnation);
       member.state_mut().set_server(new_server.clone());
-      if member.state().state() != State::Alive {
+      if member.state_ref().state() != State::Alive {
         member.state_mut().set_state(State::Alive, now);
       }
     }
@@ -673,13 +707,13 @@ where
       new_inc = self.skip_incarnation_past(accused_inc);
     }
     self.awareness.record_failure(1);
-    if let Some(local) = self.members.get_mut(self.cfg.local_id()) {
+    if let Some(local) = self.members.get_mut(self.cfg.local_id_ref()) {
       local.state_mut().set_incarnation(new_inc);
-      let id = local.state().id().cheap_clone();
-      let addr = local.state().address().cheap_clone();
-      let meta = local.state().server().meta().cheap_clone();
-      let pv = local.state().server().protocol_version();
-      let dv = local.state().server().delegate_version();
+      let id = local.state_ref().id_ref().cheap_clone();
+      let addr = local.state_ref().address_ref().cheap_clone();
+      let meta = local.state_ref().server_ref().meta_ref().cheap_clone();
+      let pv = local.state_ref().server_ref().protocol_version();
+      let dv = local.state_ref().server_ref().delegate_version();
       let alive = Alive::new(new_inc, Node::new(id.cheap_clone(), addr))
         .with_meta(meta)
         .with_protocol_version(pv)
@@ -709,8 +743,8 @@ where
   /// 6. Otherwise: install a fresh Suspicion, transition to Suspect,
   ///    enqueue broadcast.
   pub(crate) fn process_suspect(&mut self, suspect: Suspect<I>, now: Instant) {
-    let target = suspect.node().cheap_clone();
-    let from = suspect.from().cheap_clone();
+    let target = suspect.node_ref().cheap_clone();
+    let from = suspect.from_ref().cheap_clone();
     let inc = suspect.incarnation();
 
     // 1. Unknown id → ignore. No pending-decision buffering is needed: an
@@ -721,15 +755,15 @@ where
       return;
     }
 
-    let local_id = self.cfg.local_id().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
     let is_self = target == local_id;
 
     // 2 + 3: existing suspicion + incarnation comparison.
     let (local_inc, current_state, has_suspicion) = {
       let m = self.members.get(&target).unwrap();
       (
-        m.state().incarnation(),
-        m.state().state(),
+        m.state_ref().incarnation(),
+        m.state_ref().state(),
         m.suspicion().is_some(),
       )
     };
@@ -797,8 +831,8 @@ where
   /// 6. Otherwise: mark Dead.
   /// 7. Clear suspicion, broadcast, emit NodeLeft.
   pub(crate) fn process_dead(&mut self, dead: Dead<I>, now: Instant) {
-    let target = dead.node().cheap_clone();
-    let from = dead.from().cheap_clone();
+    let target = dead.node_ref().cheap_clone();
+    let from = dead.from_ref().cheap_clone();
     let inc = dead.incarnation();
 
     // 1. Unknown id → ignore. No pending-decision buffering: Alive is
@@ -808,14 +842,14 @@ where
       return;
     }
 
-    let local_id = self.cfg.local_id().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
     let is_self = target == local_id;
     // "self-marked-itself-dead" sentinel: target == from.
     let self_marked = target == from;
 
     let (local_inc, current_state) = {
       let m = self.members.get(&target).unwrap();
-      (m.state().incarnation(), m.state().state())
+      (m.state_ref().incarnation(), m.state_ref().state())
     };
     // 2.
     if inc < local_inc {
@@ -845,13 +879,7 @@ where
         Message::Dead(Dead::new(inc, target.cheap_clone(), from)),
       );
       // Emit event.
-      let server = self
-        .members
-        .get(&target)
-        .unwrap()
-        .state()
-        .server()
-        .cheap_clone();
+      let server = self.members.get(&target).unwrap().state_ref().server_arc();
       self.emit_event(Event::NodeLeft(server));
       self.lifecycle = Lifecycle::Left;
       // `LeftCluster` is the leave-*completion* signal and must NOT fire
@@ -880,13 +908,7 @@ where
       target.cheap_clone(),
       Message::Dead(Dead::new(inc, target.cheap_clone(), from)),
     );
-    let server = self
-      .members
-      .get(&target)
-      .unwrap()
-      .state()
-      .server()
-      .cheap_clone();
+    let server = self.members.get(&target).unwrap().state_ref().server_arc();
     self.emit_event(Event::NodeLeft(server));
   }
 
@@ -901,10 +923,10 @@ where
   /// has been approved via `decide_merge`.
   pub fn merge_state(&mut self, remote: &[PushNodeState<I, A>], now: Instant) {
     for r in remote {
-      let id = r.id().cheap_clone();
-      let addr = r.address().cheap_clone();
+      let id = r.id_ref().cheap_clone();
+      let addr = r.address_ref().cheap_clone();
       let inc = r.incarnation();
-      let meta = r.meta().cheap_clone();
+      let meta = r.meta_ref().cheap_clone();
       let pv = r.protocol_version();
       let dv = r.delegate_version();
       match r.state() {
@@ -923,11 +945,11 @@ where
           // here would let a stale or forged push/pull hijack a node id at
           // a new address with no reclaim wait. Use `from = local id ⇒ Dead`
           // (reclaim-protected by `dead_node_reclaim_time`).
-          let dead = Dead::new(inc, id.cheap_clone(), self.cfg.local_id().cheap_clone());
+          let dead = Dead::new(inc, id.cheap_clone(), self.cfg.local_id_ref().cheap_clone());
           self.process_dead(dead, now);
         }
         State::Dead | State::Suspect => {
-          let from = self.cfg.local_id().cheap_clone();
+          let from = self.cfg.local_id_ref().cheap_clone();
           let s = Suspect::new(inc, id, from);
           self.process_suspect(s, now);
         }
@@ -946,10 +968,14 @@ where
     states
       .iter()
       .map(|p| {
-        NodeState::new(p.id().cheap_clone(), p.address().cheap_clone(), p.state())
-          .with_meta(p.meta().cheap_clone())
-          .with_protocol_version(p.protocol_version())
-          .with_delegate_version(p.delegate_version())
+        NodeState::new(
+          p.id_ref().cheap_clone(),
+          p.address_ref().cheap_clone(),
+          p.state(),
+        )
+        .with_meta(p.meta_ref().cheap_clone())
+        .with_protocol_version(p.protocol_version())
+        .with_delegate_version(p.delegate_version())
       })
       .collect()
   }
@@ -1007,7 +1033,7 @@ where
   /// are silently dropped.
   pub fn handle_ping(&mut self, from: A, ping: Ping<I, A>, _now: Instant) {
     // Verify the Ping is addressed to us.
-    if ping.target().id() != self.cfg.local_id() {
+    if ping.target_ref().id() != self.cfg.local_id_ref() {
       return;
     }
 
@@ -1016,10 +1042,10 @@ where
 
     self
       .pending_transmits
-      .push_back(Transmit::Packet(PacketTransmit {
-        to: from,
-        message: Message::Ack(ack),
-      }));
+      .push_back(Transmit::Packet(PacketTransmit::new(
+        from,
+        Message::Ack(ack),
+      )));
   }
 
   /// Driver feeds an incoming Ack. Resolves the matching probe or
@@ -1036,7 +1062,7 @@ where
     // registry slot so the genuine Ack is then dropped. Validate the
     // responder before consuming the slot, symmetric to the Nack allowlist.
     let kind = match self.ack_registry.get(seq) {
-      Some(e) => e.kind().clone(),
+      Some(e) => e.kind_ref().clone(),
       None => return, // untracked seq
     };
     if !self.ack_source_is_valid(seq, &kind, &from) {
@@ -1067,26 +1093,27 @@ where
       }
     }
 
-    let payload = ack.payload().clone();
+    let payload = ack.payload_bytes();
     let resolution = match self.ack_registry.handle_ack(seq, payload, now) {
       Some(r) => r,
       None => return, // Untracked seq (race — already resolved).
     };
-    let resolution_payload = resolution.payload().cloned().unwrap_or_default();
+    let resolution_payload = resolution.payload_bytes().unwrap_or_default();
     match kind {
       AckKind::Probe => {
         self.complete_probe_success(seq, resolution_payload, now);
       }
-      AckKind::Forward(ForwardAck { reply_to }) => {
+      AckKind::Forward(fa) => {
+        let reply_to = fa.into_reply_to();
         // Relay an Ack to the original requester.
         if let Some(forward) = self.indirect_forwards.remove(&seq) {
           let relay = Ack::new(forward.requester_seq).with_payload(resolution_payload);
           self
             .pending_transmits
-            .push_back(Transmit::Packet(PacketTransmit {
-              to: reply_to,
-              message: Message::Ack(relay),
-            }));
+            .push_back(Transmit::Packet(PacketTransmit::new(
+              reply_to,
+              Message::Ack(relay),
+            )));
         }
       }
       AckKind::Ping => {
@@ -1120,7 +1147,7 @@ where
         let Some(probe) = self.probes.get(&seq) else {
           return false;
         };
-        if probe.target.address() == from {
+        if probe.target.address_ref() == from {
           return true;
         }
         matches!(
@@ -1209,7 +1236,7 @@ where
       .filter_map(|m| {
         m.suspicion()
           .filter(|s| s.deadline() <= now)
-          .map(|_| m.state().id().cheap_clone())
+          .map(|_| m.state_ref().id_ref().cheap_clone())
       })
       .collect();
     for id in expired_ids {
@@ -1219,9 +1246,9 @@ where
       let inc = self
         .members
         .get(&id)
-        .map(|m| m.state().incarnation())
+        .map(|m| m.state_ref().incarnation())
         .unwrap_or(0);
-      let dead = Dead::new(inc, id, self.cfg.local_id().cheap_clone());
+      let dead = Dead::new(inc, id, self.cfg.local_id_ref().cheap_clone());
       self.process_dead(dead, now);
     }
   }
@@ -1286,18 +1313,18 @@ where
   /// (excluding local and the target), send IndirectPings, update FSM phase.
   fn probe_fan_out_indirect(&mut self, seq: u32, now: Instant) {
     let target_id = match self.probes.get(&seq) {
-      Some(p) => p.target.id().cheap_clone(),
+      Some(p) => p.target.id_ref().cheap_clone(),
       None => return,
     };
-    let local_id = self.cfg.local_id().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
     let candidates: Vec<I> = self
       .members
       .iter()
       .filter(|m| {
-        let id = m.state().id();
-        id != &local_id && id != &target_id && m.state().state() == State::Alive
+        let id = m.state_ref().id_ref();
+        id != &local_id && id != &target_id && m.state_ref().state() == State::Alive
       })
-      .map(|m| m.state().id().cheap_clone())
+      .map(|m| m.state_ref().id_ref().cheap_clone())
       .collect();
 
     let k = self.cfg.indirect_checks() as usize;
@@ -1318,7 +1345,7 @@ where
         self
           .members
           .get(id)
-          .map(|m| (id.cheap_clone(), m.state().address().cheap_clone()))
+          .map(|m| (id.cheap_clone(), m.state_ref().address_ref().cheap_clone()))
       })
       .collect();
     let indirect_peers: smallvec::SmallVec<[A; 4]> = chosen_resolved
@@ -1360,7 +1387,7 @@ where
     let reliable_stream_id = if self.is_reliable_ping_enabled(&target_id) {
       Some(self.start_reliable_ping(
         target_id.cheap_clone(),
-        target_arc.address().cheap_clone(),
+        target_arc.address_ref().cheap_clone(),
         seq,
         cumulative_deadline,
       ))
@@ -1388,8 +1415,8 @@ where
 
     // Fan out IndirectPing to each chosen peer (addresses already resolved
     // above — the exact set recorded in `indirect_peers`).
-    let local_addr = self.cfg.advertise_addr().cheap_clone();
-    let target_addr = target_arc.address().cheap_clone();
+    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
+    let target_addr = target_arc.address_ref().cheap_clone();
     for (_peer_id, peer_addr) in &chosen_resolved {
       let ind = IndirectPing::new(
         seq,
@@ -1398,10 +1425,10 @@ where
       );
       self
         .pending_transmits
-        .push_back(Transmit::Packet(PacketTransmit {
-          to: peer_addr.cheap_clone(),
-          message: Message::IndirectPing(ind),
-        }));
+        .push_back(Transmit::Packet(PacketTransmit::new(
+          peer_addr.cheap_clone(),
+          Message::IndirectPing(ind),
+        )));
     }
   }
 
@@ -1454,12 +1481,12 @@ where
       self.awareness.record_failure(severity);
 
       // Mark the target as suspect.
-      let target_id = probe.target.id().cheap_clone();
-      let local_id = self.cfg.local_id().cheap_clone();
+      let target_id = probe.target.id_ref().cheap_clone();
+      let local_id = self.cfg.local_id_ref().cheap_clone();
       let target_inc = self
         .members
         .get(&target_id)
-        .map(|m| m.state().incarnation())
+        .map(|m| m.state_ref().incarnation())
         .unwrap_or(0);
       let suspect = Suspect::new(target_inc, target_id, local_id);
       self.process_suspect(suspect, now);
@@ -1494,10 +1521,10 @@ where
       let nack = Nack::new(forward.requester_seq);
       self
         .pending_transmits
-        .push_back(Transmit::Packet(PacketTransmit {
-          to: forward.reply_to_addr,
-          message: Message::Nack(nack),
-        }));
+        .push_back(Transmit::Packet(PacketTransmit::new(
+          forward.reply_to_addr,
+          Message::Nack(nack),
+        )));
     }
   }
 
@@ -1555,21 +1582,21 @@ where
     // refute before it is garbage-collected. Excluding it (and draining
     // the broadcast queue regardless of whether a target exists) would
     // let false failures stick and silently age out membership broadcasts.
-    let local_id = self.cfg.local_id().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
     let candidates: Vec<A> = self
       .members
       .iter()
       .filter(|m| {
-        if m.state().id() == &local_id {
+        if m.state_ref().id_ref() == &local_id {
           return false;
         }
-        match m.state().state() {
+        match m.state_ref().state() {
           State::Alive | State::Suspect => true,
-          State::Dead => now.saturating_duration_since(m.state().state_change()) <= dead_window,
+          State::Dead => now.saturating_duration_since(m.state_ref().state_change()) <= dead_window,
           _ => false,
         }
       })
-      .map(|m| m.state().address().cheap_clone())
+      .map(|m| m.state_ref().address_ref().cheap_clone())
       .collect();
 
     let targets = pick_random(&candidates, gossip_nodes, &mut self.rng);
@@ -1693,16 +1720,16 @@ where
         0 => {}
         1 => self
           .pending_transmits
-          .push_back(Transmit::Packet(PacketTransmit {
-            to: to.cheap_clone(),
-            message: all_broadcasts[0].clone(),
-          })),
+          .push_back(Transmit::Packet(PacketTransmit::new(
+            to.cheap_clone(),
+            all_broadcasts[0].clone(),
+          ))),
         _ => self
           .pending_transmits
-          .push_back(Transmit::Compound(CompoundTransmit {
-            to: to.cheap_clone(),
-            messages: all_broadcasts.clone(),
-          })),
+          .push_back(Transmit::Compound(CompoundTransmit::new(
+            to.cheap_clone(),
+            all_broadcasts.clone(),
+          ))),
       }
     }
 
@@ -1727,17 +1754,17 @@ where
     let pp_interval = self.cfg.push_pull_interval();
 
     // Count live members (excluding self) for scale factor.
-    let local_id = self.cfg.local_id().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
     let candidates: Vec<A> = self
       .members
       .iter()
       .filter(|m| {
-        let state = m.state().state();
+        let state = m.state_ref().state();
         let is_live = state == State::Alive || state == State::Suspect;
-        let is_remote = m.state().id() != &local_id;
+        let is_remote = m.state_ref().id_ref() != &local_id;
         is_live && is_remote
       })
-      .map(|m| m.state().address().cheap_clone())
+      .map(|m| m.state_ref().address_ref().cheap_clone())
       .collect();
 
     let num_live = candidates.len();
@@ -1918,20 +1945,20 @@ where
 
   /// Last state-change [`Instant`] for `peer`, or `None` if unknown.
   pub fn node_state_change(&self, peer: &I) -> Option<Instant> {
-    self.members.get(peer).map(|m| m.state().state_change())
+    self.members.get(peer).map(|m| m.state_ref().state_change())
   }
 
   /// Current incarnation number for `peer`, or `None` if unknown.
   pub fn node_incarnation(&self, peer: &I) -> Option<u32> {
-    self.members.get(peer).map(|m| m.state().incarnation())
+    self.members.get(peer).map(|m| m.state_ref().incarnation())
   }
 
-  /// Incarnation number for the local node (i.e. `self.local_id()`).
+  /// Incarnation number for the local node (i.e. `self.local_id_ref()`).
   pub fn local_incarnation(&self) -> u32 {
     self
       .members
-      .get(self.cfg.local_id())
-      .map(|m| m.state().incarnation())
+      .get(self.cfg.local_id_ref())
+      .map(|m| m.state_ref().incarnation())
       .unwrap_or(0)
   }
 
@@ -1942,7 +1969,7 @@ where
   /// No-op if `peer` is not a known member.
   pub fn age_member(&mut self, peer: &I, delta: std::time::Duration) {
     if let Some(m) = self.members.get_mut(peer) {
-      let old = m.state().state_change();
+      let old = m.state_ref().state_change();
       // Saturating subtraction: Instant cannot go below its origin.
       m.state_mut().set_state_change(old - delta);
     }
@@ -1959,23 +1986,23 @@ where
   ///
   /// The local node itself is never removed.
   pub fn reset_nodes(&mut self, now: Instant) {
-    let local_id = self.cfg.local_id().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
     let window = self.cfg.gossip_to_the_dead_time();
     let ids_to_remove: Vec<I> = self
       .members
       .iter()
       .filter(|m| {
-        let id = m.state().id();
+        let id = m.state_ref().id_ref();
         if id == &local_id {
           return false;
         }
-        let state = m.state().state();
+        let state = m.state_ref().state();
         if state != State::Dead && state != State::Left {
           return false;
         }
-        now.duration_since(m.state().state_change()) > window
+        now.duration_since(m.state_ref().state_change()) > window
       })
-      .map(|m| m.state().id().cheap_clone())
+      .map(|m| m.state_ref().id_ref().cheap_clone())
       .collect();
     for id in ids_to_remove {
       self.members.remove(&id);
@@ -1990,9 +2017,16 @@ where
     self.ack_payload = payload;
   }
 
-  /// Read the current ack payload.
-  pub fn ack_payload(&self) -> &Bytes {
-    &self.ack_payload
+  /// Read the current ack payload as a byte slice.
+  #[inline(always)]
+  pub fn ack_payload(&self) -> &[u8] {
+    self.ack_payload.as_ref()
+  }
+
+  /// Return a cheap clone of the current ack payload buffer.
+  #[inline(always)]
+  pub fn ack_payload_bytes(&self) -> Bytes {
+    self.ack_payload.clone()
   }
 
   /// Disable reliable-stream pings to this target. Future probes will use
@@ -2029,9 +2063,16 @@ where
     self.local_state_snapshot = bytes;
   }
 
-  /// Read the current local-state snapshot.
-  pub fn local_state_snapshot(&self) -> &Bytes {
-    &self.local_state_snapshot
+  /// Read the current local-state snapshot as a byte slice.
+  #[inline(always)]
+  pub fn local_state_snapshot(&self) -> &[u8] {
+    self.local_state_snapshot.as_ref()
+  }
+
+  /// Return a cheap clone of the current local-state snapshot buffer.
+  #[inline(always)]
+  pub fn local_state_snapshot_bytes(&self) -> Bytes {
+    self.local_state_snapshot.clone()
   }
 
   /// Queue an opaque user-data payload to ride along with outgoing gossip
@@ -2104,8 +2145,8 @@ where
     if self.lifecycle != Lifecycle::Running {
       return Err(crate::error::Error::NotRunning);
     }
-    let local_id = self.cfg.local_id().cheap_clone();
-    let local_addr = self.cfg.advertise_addr().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
+    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
     let inc = self.next_incarnation();
     // Update local server.
     let new_server = Arc::new(
@@ -2145,7 +2186,7 @@ where
       .members
       .get(&target_id)
       .expect("target id came from members iteration");
-    let target_arc = target_member.state().server().cheap_clone();
+    let target_arc = target_member.state_ref().server_arc();
 
     let seq = self.allocate_seq();
     let pt = self.cfg.probe_timeout();
@@ -2174,9 +2215,9 @@ where
       .register(seq, AckEntry::new(now, direct_deadline, AckKind::Probe));
 
     // Build the Ping.
-    let local_id = self.cfg.local_id().cheap_clone();
-    let local_addr = self.cfg.advertise_addr().cheap_clone();
-    let target_addr = target_arc.address().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
+    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
+    let target_addr = target_arc.address_ref().cheap_clone();
     let ping = Ping::new(
       seq,
       Node::new(local_id, local_addr),
@@ -2199,14 +2240,14 @@ where
     let mut probe_msgs: Vec<Message<I, A>> = Vec::with_capacity(2);
     probe_msgs.push(Message::Ping(ping));
 
-    let target_state = self.members.get(&target_id).map(|m| m.state().state());
+    let target_state = self.members.get(&target_id).map(|m| m.state_ref().state());
     if matches!(target_state, Some(State::Suspect)) {
       let target_inc = self
         .members
         .get(&target_id)
-        .map(|m| m.state().incarnation())
+        .map(|m| m.state_ref().incarnation())
         .unwrap_or(0);
-      let local_id = self.cfg.local_id().cheap_clone();
+      let local_id = self.cfg.local_id_ref().cheap_clone();
       let suspect = Suspect::new(target_inc, target_id, local_id);
       probe_msgs.push(Message::Suspect(suspect));
     }
@@ -2215,10 +2256,10 @@ where
     if probe_msgs.len() == 1 {
       self
         .pending_transmits
-        .push_back(Transmit::Packet(PacketTransmit {
+        .push_back(Transmit::Packet(PacketTransmit::new(
           to,
-          message: probe_msgs.pop().expect("len checked == 1"),
-        }));
+          probe_msgs.pop().expect("len checked == 1"),
+        )));
     } else {
       // Conservative assembled-compound upper bound — identical idiom to
       // the gossip budget (COMPOUND_TAG_LEN + count varint + per-part
@@ -2238,10 +2279,7 @@ where
       if assembled_upper <= self.gossip_mtu() {
         self
           .pending_transmits
-          .push_back(Transmit::Compound(CompoundTransmit {
-            to,
-            messages: probe_msgs,
-          }));
+          .push_back(Transmit::Compound(CompoundTransmit::new(to, probe_msgs)));
       } else {
         // Over-MTU compound ⇒ split into two Packets, Ping then Suspect.
         // Both datagrams are delivered as separate <= MTU sends, so the
@@ -2251,16 +2289,13 @@ where
         let suspect_msg = it.next().expect("probe_msgs[1] is the buddy Suspect");
         self
           .pending_transmits
-          .push_back(Transmit::Packet(PacketTransmit {
-            to: to.cheap_clone(),
-            message: ping_msg,
-          }));
+          .push_back(Transmit::Packet(PacketTransmit::new(
+            to.cheap_clone(),
+            ping_msg,
+          )));
         self
           .pending_transmits
-          .push_back(Transmit::Packet(PacketTransmit {
-            to,
-            message: suspect_msg,
-          }));
+          .push_back(Transmit::Packet(PacketTransmit::new(to, suspect_msg)));
       }
     }
 
@@ -2274,7 +2309,7 @@ where
     if n == 0 {
       return None;
     }
-    let local_id = self.cfg.local_id().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
     for offset in 0..n {
       let idx = (self.probe_index + offset) % n;
       let candidate_id = match self.member_at(idx) {
@@ -2285,7 +2320,7 @@ where
         continue;
       }
       if let Some(m) = self.members.get(&candidate_id) {
-        if m.state().dead_or_left() {
+        if m.state_ref().dead_or_left() {
           continue;
         }
         self.probe_index = (idx + 1) % n;
@@ -2301,7 +2336,7 @@ where
       .members
       .iter()
       .nth(idx)
-      .map(|m| m.state().id().cheap_clone())
+      .map(|m| m.state_ref().id_ref().cheap_clone())
   }
 
   fn allocate_seq(&mut self) -> u32 {
@@ -2317,9 +2352,9 @@ where
   /// we relay an Ack to the requester (see `handle_ack` Forward branch). If
   /// the deadline elapses without an ack, we send a Nack.
   pub fn handle_indirect_ping(&mut self, from: A, ind: IndirectPing<I, A>, now: Instant) {
-    let target_id = ind.target().id().cheap_clone();
-    let target_addr = ind.target().address().cheap_clone();
-    let requester_addr = ind.source().address().cheap_clone();
+    let target_id = ind.target_ref().id().cheap_clone();
+    let target_addr = ind.target_ref().address().cheap_clone();
+    let requester_addr = ind.source_ref().address().cheap_clone();
     let requester_seq = ind.sequence_number();
 
     // The requester address/seq are taken from the packet *body*
@@ -2351,9 +2386,7 @@ where
       AckEntry::new(
         now,
         deadline,
-        AckKind::Forward(ForwardAck {
-          reply_to: requester_addr.cheap_clone(),
-        }),
+        AckKind::Forward(ForwardAck::new(requester_addr.cheap_clone())),
       ),
     );
 
@@ -2371,8 +2404,8 @@ where
     );
 
     // Build and emit the forwarded Ping.
-    let local_id = self.cfg.local_id().cheap_clone();
-    let local_addr = self.cfg.advertise_addr().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
+    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
     let forwarded = Ping::new(
       our_seq,
       Node::new(local_id, local_addr),
@@ -2380,10 +2413,10 @@ where
     );
     self
       .pending_transmits
-      .push_back(Transmit::Packet(PacketTransmit {
-        to: target_addr,
-        message: Message::Ping(forwarded),
-      }));
+      .push_back(Transmit::Packet(PacketTransmit::new(
+        target_addr,
+        Message::Ping(forwarded),
+      )));
   }
 
   /// Initiate an application-level ping to the given peer. The result is
@@ -2399,7 +2432,7 @@ where
     let target_id = node.id().cheap_clone();
     let target_addr = node.address().cheap_clone();
     let target_arc = match self.members.get(&target_id) {
-      Some(m) => m.state().server().cheap_clone(),
+      Some(m) => m.state_ref().server_arc(),
       None => {
         // Caller is pinging a node we don't track. Synthesize a minimal
         // NodeState so PingCompleted can carry it.
@@ -2423,8 +2456,8 @@ where
       .ack_registry
       .register(seq, AckEntry::new(now, deadline, AckKind::Ping));
 
-    let local_id = self.cfg.local_id().cheap_clone();
-    let local_addr = self.cfg.advertise_addr().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
+    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
     let ping = Ping::new(
       seq,
       Node::new(local_id, local_addr),
@@ -2432,10 +2465,10 @@ where
     );
     self
       .pending_transmits
-      .push_back(Transmit::Packet(PacketTransmit {
-        to: target_addr,
-        message: Message::Ping(ping),
-      }));
+      .push_back(Transmit::Packet(PacketTransmit::new(
+        target_addr,
+        Message::Ping(ping),
+      )));
   }
 
   /// Initiate an outbound push/pull state exchange with `peer`.
@@ -2459,8 +2492,8 @@ where
       .members
       .iter()
       .map(|m| {
-        let ls = m.state();
-        let ns = ls.server();
+        let ls = m.state_ref();
+        let ns = ls.server_ref();
         // State must be the live liveness (`ls.state()`), NOT the embedded
         // server snapshot (`ns.state()`): `set_server` only runs on Alive,
         // so `ns.state()` is frozen at the last Alive while Suspect/Dead/Left
@@ -2468,11 +2501,11 @@ where
         // serialize failed members as Alive and resurrect them on the peer.
         PushNodeState::new(
           ls.incarnation(),
-          ns.id().cheap_clone(),
-          ns.address().cheap_clone(),
+          ns.id_ref().cheap_clone(),
+          ns.address_ref().cheap_clone(),
           ls.state(),
         )
-        .with_meta(ns.meta().cheap_clone())
+        .with_meta(ns.meta_ref().cheap_clone())
         .with_protocol_version(ns.protocol_version())
         .with_delegate_version(ns.delegate_version())
       })
@@ -2523,8 +2556,8 @@ where
   ) -> StreamId {
     let id = self.allocate_stream_id();
 
-    let local_id = self.cfg.local_id().cheap_clone();
-    let local_addr = self.cfg.advertise_addr().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
+    let local_addr = self.cfg.advertise_addr_ref().cheap_clone();
 
     let ping = Ping::new(
       probe_seq,
@@ -2613,7 +2646,7 @@ where
     Some(Stream {
       id,
       peer: intent.peer,
-      local_id: self.cfg.local_id().cheap_clone(),
+      local_id: self.cfg.local_id_ref().cheap_clone(),
       max_frame_size: self.cfg.max_stream_frame_size(),
       phase,
       input_buf: bytes::BytesMut::new(),
@@ -2655,7 +2688,7 @@ where
     Stream {
       id,
       peer: from,
-      local_id: self.cfg.local_id().cheap_clone(),
+      local_id: self.cfg.local_id_ref().cheap_clone(),
       max_frame_size: self.cfg.max_stream_frame_size(),
       phase: StreamPhase::InboundAwaitingFirstMessage,
       input_buf: bytes::BytesMut::new(),
@@ -2723,17 +2756,17 @@ where
           .members
           .iter()
           .map(|m| {
-            let ls = m.state();
-            let ns = ls.server();
+            let ls = m.state_ref();
+            let ns = ls.server_ref();
             // Live liveness (`ls.state()`), not the frozen server snapshot
             // (`ns.state()`) — see start_push_pull for the rationale.
             PushNodeState::new(
               ls.incarnation(),
-              ns.id().cheap_clone(),
-              ns.address().cheap_clone(),
+              ns.id_ref().cheap_clone(),
+              ns.address_ref().cheap_clone(),
               ls.state(),
             )
-            .with_meta(ns.meta().cheap_clone())
+            .with_meta(ns.meta_ref().cheap_clone())
             .with_protocol_version(ns.protocol_version())
             .with_delegate_version(ns.delegate_version())
           })
@@ -2884,14 +2917,14 @@ where
     self.next_probe = None;
     self.next_gossip = None;
     self.next_pushpull = None;
-    let local_id = self.cfg.local_id().cheap_clone();
+    let local_id = self.cfg.local_id_ref().cheap_clone();
     // The applied local incarnation is authoritative: an inbound self-Alive
     // is applied synchronously (no pending-decision gap), so there is no
     // un-applied higher-incarnation self-Alive to fold in here.
     let inc = self
       .members
       .get(&local_id)
-      .map(|m| m.state().incarnation())
+      .map(|m| m.state_ref().incarnation())
       .unwrap_or(self.incarnation)
       .max(self.incarnation);
     // Self-marked-itself sentinel (target == from): peers treat node == from
@@ -2906,22 +2939,23 @@ where
       .members
       .iter()
       .filter(|m| {
-        m.state().id() != &local_id && matches!(m.state().state(), State::Alive | State::Suspect)
+        m.state_ref().id_ref() != &local_id
+          && matches!(m.state_ref().state(), State::Alive | State::Suspect)
       })
-      .map(|m| m.state().address().cheap_clone())
+      .map(|m| m.state_ref().address_ref().cheap_clone())
       .collect();
     let dead_self_count = live_peers.len();
     for to in live_peers {
       self
         .pending_transmits
-        .push_back(Transmit::Packet(PacketTransmit {
+        .push_back(Transmit::Packet(PacketTransmit::new(
           to,
-          message: Message::Dead(Dead::new(
+          Message::Dead(Dead::new(
             inc,
             local_id.cheap_clone(),
             local_id.cheap_clone(),
           )),
-        }));
+        )));
     }
     if dead_self_count == 0 {
       // No live peers ⇒ nothing to flush ⇒ the leave is complete now.

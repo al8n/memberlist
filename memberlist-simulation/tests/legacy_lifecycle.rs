@@ -207,10 +207,10 @@ fn memberlist_node_delegate_meta() {
   // m1's view: m1 has meta "web", m2 has meta "lb".
   let m1_meta_at_a1 = c
     .member(a1, &SmolStr::new("m1"))
-    .map(|ns| ns.meta().clone());
+    .map(|ns| ns.meta_ref().clone());
   let m2_meta_at_a1 = c
     .member(a1, &SmolStr::new("m2"))
-    .map(|ns| ns.meta().clone());
+    .map(|ns| ns.meta_ref().clone());
   assert_eq!(
     m1_meta_at_a1.as_ref().map(|m| m.as_bytes()),
     Some(b"web".as_ref()),
@@ -225,10 +225,10 @@ fn memberlist_node_delegate_meta() {
   // m2's view: same expectations.
   let m1_meta_at_a2 = c
     .member(a2, &SmolStr::new("m1"))
-    .map(|ns| ns.meta().clone());
+    .map(|ns| ns.meta_ref().clone());
   let m2_meta_at_a2 = c
     .member(a2, &SmolStr::new("m2"))
-    .map(|ns| ns.meta().clone());
+    .map(|ns| ns.meta_ref().clone());
   assert_eq!(
     m1_meta_at_a2.as_ref().map(|m| m.as_bytes()),
     Some(b"web".as_ref()),
@@ -295,10 +295,10 @@ fn memberlist_node_delegate_meta_update() {
   // m1's view: m1 → "api", m2 → "db".
   let m1_meta_at_a1 = c
     .member(a1, &SmolStr::new("m1"))
-    .map(|ns| ns.meta().clone());
+    .map(|ns| ns.meta_ref().clone());
   let m2_meta_at_a1 = c
     .member(a1, &SmolStr::new("m2"))
-    .map(|ns| ns.meta().clone());
+    .map(|ns| ns.meta_ref().clone());
   assert_eq!(
     m1_meta_at_a1.as_ref().map(|m| m.as_bytes()),
     Some(b"api".as_ref()),
@@ -313,10 +313,10 @@ fn memberlist_node_delegate_meta_update() {
   // m2's view: same.
   let m1_meta_at_a2 = c
     .member(a2, &SmolStr::new("m1"))
-    .map(|ns| ns.meta().clone());
+    .map(|ns| ns.meta_ref().clone());
   let m2_meta_at_a2 = c
     .member(a2, &SmolStr::new("m2"))
-    .map(|ns| ns.meta().clone());
+    .map(|ns| ns.meta_ref().clone());
   assert_eq!(
     m1_meta_at_a2.as_ref().map(|m| m.as_bytes()),
     Some(b"api".as_ref()),

@@ -19,6 +19,7 @@ use std::str::FromStr;
 use bytes::{Bytes, BytesMut};
 
 /// Invalid meta error.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 #[error("the size of meta must between [0-512] bytes, got {0}")]
 pub struct LargeMeta(usize);
@@ -28,7 +29,7 @@ pub struct LargeMeta(usize);
 pub struct Meta(Bytes);
 
 impl Default for Meta {
-  #[inline]
+  #[inline(always)]
   fn default() -> Self {
     Self::empty()
   }
@@ -41,13 +42,13 @@ impl Meta {
   pub const MAX_SIZE: usize = 512;
 
   /// Create an empty meta.
-  #[inline]
+  #[inline(always)]
   pub const fn empty() -> Meta {
     Meta(Bytes::new())
   }
 
   /// Create a meta from a static str.
-  #[inline]
+  #[inline(always)]
   pub const fn from_static_str(s: &'static str) -> Result<Self, LargeMeta> {
     if s.len() > Self::MAX_SIZE {
       return Err(LargeMeta(s.len()));
@@ -56,7 +57,7 @@ impl Meta {
   }
 
   /// Create a meta from a static bytes.
-  #[inline]
+  #[inline(always)]
   pub const fn from_static(s: &'static [u8]) -> Result<Self, LargeMeta> {
     if s.len() > Self::MAX_SIZE {
       return Err(LargeMeta(s.len()));
@@ -65,19 +66,19 @@ impl Meta {
   }
 
   /// Returns the meta as a byte slice.
-  #[inline]
+  #[inline(always)]
   pub fn as_bytes(&self) -> &[u8] {
     &self.0
   }
 
   /// Returns true if the meta is empty.
-  #[inline]
+  #[inline(always)]
   pub fn is_empty(&self) -> bool {
     self.0.is_empty()
   }
 
   /// Returns the length of the meta in bytes.
-  #[inline]
+  #[inline(always)]
   pub fn len(&self) -> usize {
     self.0.len()
   }
@@ -322,7 +323,7 @@ impl From<State> for u8 {
 
 impl State {
   /// Returns the [`State`] as a str representation.
-  #[inline]
+  #[inline(always)]
   pub fn as_str(&self) -> Cow<'static, str> {
     match self {
       Self::Alive => Cow::Borrowed("alive"),
@@ -335,66 +336,19 @@ impl State {
 }
 
 /// Represents a node in the cluster
-#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NodeState<I, A> {
   /// The id of the node.
-  #[viewit(
-    getter(const, style = "ref", attrs(doc = "Returns the id of the node")),
-    setter(attrs(doc = "Sets the id of the node (Builder pattern)"))
-  )]
   id: I,
   /// The address of the node.
-  #[viewit(
-    getter(
-      const,
-      rename = "address",
-      style = "ref",
-      attrs(doc = "Returns the address of the node")
-    ),
-    setter(
-      rename = "with_address",
-      attrs(doc = "Sets the address of the node (Builder pattern)")
-    )
-  )]
   addr: A,
   /// Metadata from the delegate for this node.
-  #[viewit(
-    getter(const, style = "ref", attrs(doc = "Returns the meta of the node")),
-    setter(attrs(doc = "Sets the meta of the node (Builder pattern)"))
-  )]
   meta: Meta,
   /// State of the node.
-  #[viewit(
-    getter(const, attrs(doc = "Returns the state of the node")),
-    setter(const, attrs(doc = "Sets the state of the node (Builder pattern)"))
-  )]
   state: State,
   /// The protocol version of the node is speaking.
-  #[viewit(
-    getter(
-      const,
-      style = "move",
-      attrs(doc = "Returns the protocol version of the node is speaking")
-    ),
-    setter(
-      const,
-      attrs(doc = "Sets the protocol version of the node is speaking (Builder pattern)")
-    )
-  )]
   protocol_version: ProtocolVersion,
   /// The delegate version of the node is speaking.
-  #[viewit(
-    getter(
-      const,
-      style = "move",
-      attrs(doc = "Returns the delegate version of the node is speaking")
-    ),
-    setter(
-      const,
-      attrs(doc = "Sets the delegate version of the node is speaking (Builder pattern)")
-    )
-  )]
   delegate_version: DelegateVersion,
 }
 
@@ -414,7 +368,7 @@ impl<I: CheapClone, A: CheapClone> From<Alive<I, A>> for NodeState<I, A> {
 
 impl<I, A> NodeState<I, A> {
   /// Construct a new node with the given name, address and state.
-  #[inline]
+  #[inline(always)]
   pub const fn new(id: I, addr: A, state: State) -> Self {
     Self {
       id,
@@ -426,44 +380,128 @@ impl<I, A> NodeState<I, A> {
     }
   }
 
+  /// Returns the id of the node.
+  #[inline(always)]
+  pub const fn id_ref(&self) -> &I {
+    &self.id
+  }
+
+  /// Returns the address of the node.
+  #[inline(always)]
+  pub const fn address_ref(&self) -> &A {
+    &self.addr
+  }
+
+  /// Returns the meta of the node.
+  #[inline(always)]
+  pub const fn meta_ref(&self) -> &Meta {
+    &self.meta
+  }
+
+  /// Returns the state of the node.
+  #[inline(always)]
+  pub const fn state(&self) -> State {
+    self.state
+  }
+
+  /// Returns the protocol version of the node is speaking.
+  #[inline(always)]
+  pub const fn protocol_version(&self) -> ProtocolVersion {
+    self.protocol_version
+  }
+
+  /// Returns the delegate version of the node is speaking.
+  #[inline(always)]
+  pub const fn delegate_version(&self) -> DelegateVersion {
+    self.delegate_version
+  }
+
   /// Sets the id of the node state
-  #[inline]
+  #[inline(always)]
   pub fn set_id(&mut self, id: I) -> &mut Self {
     self.id = id;
     self
   }
 
+  /// Sets the id of the node state (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub fn with_id(mut self, id: I) -> Self {
+    self.id = id;
+    self
+  }
+
   /// Sets the address of the node state
-  #[inline]
+  #[inline(always)]
   pub fn set_address(&mut self, addr: A) -> &mut Self {
     self.addr = addr;
     self
   }
 
+  /// Sets the address of the node state (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub fn with_address(mut self, addr: A) -> Self {
+    self.addr = addr;
+    self
+  }
+
   /// Sets the metadata for the node.
-  #[inline]
+  #[inline(always)]
   pub fn set_meta(&mut self, meta: Meta) -> &mut Self {
     self.meta = meta;
     self
   }
 
+  /// Sets the meta of the node (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub fn with_meta(mut self, meta: Meta) -> Self {
+    self.meta = meta;
+    self
+  }
+
   /// Sets the state for the node.
-  #[inline]
-  pub fn set_state(&mut self, state: State) -> &mut Self {
+  #[inline(always)]
+  pub const fn set_state(&mut self, state: State) -> &mut Self {
+    self.state = state;
+    self
+  }
+
+  /// Sets the state of the node (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_state(mut self, state: State) -> Self {
     self.state = state;
     self
   }
 
   /// Set the protocol version of the alive message is speaking.
-  #[inline]
-  pub fn set_protocol_version(&mut self, protocol_version: ProtocolVersion) -> &mut Self {
+  #[inline(always)]
+  pub const fn set_protocol_version(&mut self, protocol_version: ProtocolVersion) -> &mut Self {
+    self.protocol_version = protocol_version;
+    self
+  }
+
+  /// Sets the protocol version of the node is speaking (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_protocol_version(mut self, protocol_version: ProtocolVersion) -> Self {
     self.protocol_version = protocol_version;
     self
   }
 
   /// Set the delegate version of the alive message is speaking.
-  #[inline]
-  pub fn set_delegate_version(&mut self, delegate_version: DelegateVersion) -> &mut Self {
+  #[inline(always)]
+  pub const fn set_delegate_version(&mut self, delegate_version: DelegateVersion) -> &mut Self {
+    self.delegate_version = delegate_version;
+    self
+  }
+
+  /// Sets the delegate version of the node is speaking (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_delegate_version(mut self, delegate_version: DelegateVersion) -> Self {
     self.delegate_version = delegate_version;
     self
   }
@@ -498,67 +536,23 @@ impl<I: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for NodeSt
 // ─── Alive<I,A> ──────────────────────────────────────────────────────────────
 
 /// Alive message
-#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Alive<I, A> {
   /// The incarnation of the alive message
-  #[viewit(
-    getter(const, attrs(doc = "Returns the incarnation of the alive message")),
-    setter(
-      const,
-      attrs(doc = "Sets the incarnation of the alive message (Builder pattern)")
-    )
-  )]
   incarnation: u32,
   /// The meta of the alive message
-  #[viewit(
-    getter(
-      const,
-      style = "ref",
-      attrs(doc = "Returns the meta of the alive message")
-    ),
-    setter(attrs(doc = "Sets the meta of the alive message (Builder pattern)"))
-  )]
   meta: Meta,
   /// The node of the alive message
-  #[viewit(
-    getter(
-      const,
-      style = "ref",
-      attrs(doc = "Returns the node of the alive message")
-    ),
-    setter(attrs(doc = "Sets the node of the alive message (Builder pattern)"))
-  )]
   node: Node<I, A>,
   /// The protocol version of the alive message is speaking
-  #[viewit(
-    getter(
-      const,
-      attrs(doc = "Returns the protocol version of the alive message is speaking")
-    ),
-    setter(
-      const,
-      attrs(doc = "Sets the protocol version of the alive message is speaking (Builder pattern)")
-    )
-  )]
   protocol_version: ProtocolVersion,
   /// The delegate version of the alive message is speaking
-  #[viewit(
-    getter(
-      const,
-      attrs(doc = "Returns the delegate version of the alive message is speaking")
-    ),
-    setter(
-      const,
-      attrs(doc = "Sets the delegate version of the alive message is speaking (Builder pattern)")
-    )
-  )]
   delegate_version: DelegateVersion,
 }
 
 impl<I, A> Alive<I, A> {
   /// Construct a new alive message with the given incarnation, meta, node, protocol version and delegate version.
-  #[inline]
+  #[inline(always)]
   pub const fn new(incarnation: u32, node: Node<I, A>) -> Self {
     Self {
       incarnation,
@@ -569,37 +563,107 @@ impl<I, A> Alive<I, A> {
     }
   }
 
+  /// Returns the incarnation of the alive message.
+  #[inline(always)]
+  pub const fn incarnation(&self) -> u32 {
+    self.incarnation
+  }
+
+  /// Returns the meta of the alive message.
+  #[inline(always)]
+  pub const fn meta_ref(&self) -> &Meta {
+    &self.meta
+  }
+
+  /// Returns the node of the alive message.
+  #[inline(always)]
+  pub const fn node_ref(&self) -> &Node<I, A> {
+    &self.node
+  }
+
+  /// Returns the protocol version of the alive message is speaking.
+  #[inline(always)]
+  pub const fn protocol_version(&self) -> ProtocolVersion {
+    self.protocol_version
+  }
+
+  /// Returns the delegate version of the alive message is speaking.
+  #[inline(always)]
+  pub const fn delegate_version(&self) -> DelegateVersion {
+    self.delegate_version
+  }
+
   /// Sets the incarnation of the alive message.
-  #[inline]
-  pub fn set_incarnation(&mut self, incarnation: u32) -> &mut Self {
+  #[inline(always)]
+  pub const fn set_incarnation(&mut self, incarnation: u32) -> &mut Self {
+    self.incarnation = incarnation;
+    self
+  }
+
+  /// Sets the incarnation of the alive message (Builder pattern).
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_incarnation(mut self, incarnation: u32) -> Self {
     self.incarnation = incarnation;
     self
   }
 
   /// Sets the meta of the alive message.
-  #[inline]
+  #[inline(always)]
   pub fn set_meta(&mut self, meta: Meta) -> &mut Self {
     self.meta = meta;
     self
   }
 
+  /// Sets the meta of the alive message (Builder pattern).
+  #[must_use]
+  #[inline(always)]
+  pub fn with_meta(mut self, meta: Meta) -> Self {
+    self.meta = meta;
+    self
+  }
+
   /// Sets the node of the alive message.
-  #[inline]
+  #[inline(always)]
   pub fn set_node(&mut self, node: Node<I, A>) -> &mut Self {
     self.node = node;
     self
   }
 
+  /// Sets the node of the alive message (Builder pattern).
+  #[must_use]
+  #[inline(always)]
+  pub fn with_node(mut self, node: Node<I, A>) -> Self {
+    self.node = node;
+    self
+  }
+
   /// Set the protocol version of the alive message is speaking.
-  #[inline]
-  pub fn set_protocol_version(&mut self, protocol_version: ProtocolVersion) -> &mut Self {
+  #[inline(always)]
+  pub const fn set_protocol_version(&mut self, protocol_version: ProtocolVersion) -> &mut Self {
+    self.protocol_version = protocol_version;
+    self
+  }
+
+  /// Sets the protocol version of the alive message is speaking (Builder pattern).
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_protocol_version(mut self, protocol_version: ProtocolVersion) -> Self {
     self.protocol_version = protocol_version;
     self
   }
 
   /// Set the delegate version of the alive message is speaking.
-  #[inline]
-  pub fn set_delegate_version(&mut self, delegate_version: DelegateVersion) -> &mut Self {
+  #[inline(always)]
+  pub const fn set_delegate_version(&mut self, delegate_version: DelegateVersion) -> &mut Self {
+    self.delegate_version = delegate_version;
+    self
+  }
+
+  /// Sets the delegate version of the alive message is speaking (Builder pattern).
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_delegate_version(mut self, delegate_version: DelegateVersion) -> Self {
     self.delegate_version = delegate_version;
     self
   }
@@ -625,38 +689,19 @@ macro_rules! bad_bail_typed {
     $name: ident
   ) => {
     $(#[$meta])*
-    #[viewit::viewit(
-      getters(vis_all = "pub"),
-      setters(vis_all = "pub", prefix = "with")
-    )]
     #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
     pub struct $name<I> {
       /// The incarnation of the message.
-      #[viewit(
-        getter(const, attrs(doc = "Returns the incarnation of the message")),
-        setter(
-          const,
-          attrs(doc = "Sets the incarnation of the message (Builder pattern)")
-        )
-      )]
       incarnation: u32,
       /// The node of the message.
-      #[viewit(
-        getter(const, style = "ref", attrs(doc = "Returns the node of the message")),
-        setter(attrs(doc = "Sets the node of the message (Builder pattern)"))
-      )]
       node: I,
       /// The source node of the message.
-      #[viewit(
-        getter(const, style = "ref", attrs(doc = "Returns the source node of the message")),
-        setter(attrs(doc = "Sets the source node of the message (Builder pattern)"))
-      )]
       from: I,
     }
 
     impl<I> $name<I> {
       /// Create a new message
-      #[inline]
+      #[inline(always)]
       pub const fn new(incarnation: u32, node: I, from: I) -> Self {
         Self {
           incarnation,
@@ -665,23 +710,65 @@ macro_rules! bad_bail_typed {
         }
       }
 
+      /// Returns the incarnation of the message.
+      #[inline(always)]
+      pub const fn incarnation(&self) -> u32 {
+        self.incarnation
+      }
+
+      /// Returns the node of the message.
+      #[inline(always)]
+      pub const fn node_ref(&self) -> &I {
+        &self.node
+      }
+
+      /// Returns the source node of the message.
+      #[inline(always)]
+      pub const fn from_ref(&self) -> &I {
+        &self.from
+      }
+
       /// Sets the incarnation of the message
-      #[inline]
-      pub fn set_incarnation(&mut self, incarnation: u32) -> &mut Self {
+      #[inline(always)]
+      pub const fn set_incarnation(&mut self, incarnation: u32) -> &mut Self {
+        self.incarnation = incarnation;
+        self
+      }
+
+      /// Sets the incarnation of the message (Builder pattern)
+      #[must_use]
+      #[inline(always)]
+      pub const fn with_incarnation(mut self, incarnation: u32) -> Self {
         self.incarnation = incarnation;
         self
       }
 
       /// Sets the source node of the message
-      #[inline]
+      #[inline(always)]
       pub fn set_from(&mut self, source: I) -> &mut Self {
         self.from = source;
         self
       }
 
+      /// Sets the source node of the message (Builder pattern)
+      #[must_use]
+      #[inline(always)]
+      pub fn with_from(mut self, source: I) -> Self {
+        self.from = source;
+        self
+      }
+
       /// Sets the node which in this state
-      #[inline]
+      #[inline(always)]
       pub fn set_node(&mut self, target: I) -> &mut Self {
+        self.node = target;
+        self
+      }
+
+      /// Sets the node of the message (Builder pattern)
+      #[must_use]
+      #[inline(always)]
+      pub fn with_node(mut self, target: I) -> Self {
         self.node = target;
         self
       }
@@ -701,29 +788,17 @@ bad_bail_typed!(
 // ─── Ack / Nack ──────────────────────────────────────────────────────────────
 
 /// Ack response is sent for a ping
-#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Ack {
   /// The sequence number of the ack
-  #[viewit(
-    getter(const, attrs(doc = "Returns the sequence number of the ack")),
-    setter(
-      const,
-      attrs(doc = "Sets the sequence number of the ack (Builder pattern)")
-    )
-  )]
   sequence_number: u32,
   /// The payload of the ack
-  #[viewit(
-    getter(const, style = "ref", attrs(doc = "Returns the payload of the ack")),
-    setter(attrs(doc = "Sets the payload of the ack (Builder pattern)"))
-  )]
   payload: Bytes,
 }
 
 impl Ack {
   /// Create a new ack response with the given sequence number and empty payload.
-  #[inline]
+  #[inline(always)]
   pub const fn new(sequence_number: u32) -> Self {
     Self {
       sequence_number,
@@ -731,22 +806,56 @@ impl Ack {
     }
   }
 
+  /// Returns the sequence number of the ack
+  #[inline(always)]
+  pub const fn sequence_number(&self) -> u32 {
+    self.sequence_number
+  }
+
+  /// Returns the payload of the ack as a byte slice.
+  #[inline(always)]
+  pub fn payload(&self) -> &[u8] {
+    self.payload.as_ref()
+  }
+
+  /// Cheap-clones the payload of the ack as a `Bytes` handle.
+  #[inline(always)]
+  pub fn payload_bytes(&self) -> Bytes {
+    self.payload.clone()
+  }
+
   /// Sets the sequence number of the ack
-  #[inline]
-  pub fn set_sequence_number(&mut self, sequence_number: u32) -> &mut Self {
+  #[inline(always)]
+  pub const fn set_sequence_number(&mut self, sequence_number: u32) -> &mut Self {
+    self.sequence_number = sequence_number;
+    self
+  }
+
+  /// Sets the sequence number of the ack (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_sequence_number(mut self, sequence_number: u32) -> Self {
     self.sequence_number = sequence_number;
     self
   }
 
   /// Sets the payload of the ack
-  #[inline]
+  #[inline(always)]
   pub fn set_payload(&mut self, payload: Bytes) -> &mut Self {
     self.payload = payload;
     self
   }
 
+  /// Sets the payload of the ack (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub fn with_payload(mut self, payload: Bytes) -> Self {
+    self.payload = payload;
+    self
+  }
+
   /// Consumes the [`Ack`] and returns the sequence number and payload
-  #[inline]
+  #[inline(always)]
   pub fn into_components(self) -> (u32, Bytes) {
     (self.sequence_number, self.payload)
   }
@@ -755,34 +864,36 @@ impl Ack {
 /// Nack response is sent for an indirect ping when the pinger doesn't hear from
 /// the ping-ee within the configured timeout. This lets the original node know
 /// that the indirect ping attempt happened but didn't succeed.
-#[viewit::viewit(
-  vis_all = "pub(crate)",
-  getters(vis_all = "pub"),
-  setters(vis_all = "pub", prefix = "with")
-)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Nack {
-  #[viewit(
-    getter(const, attrs(doc = "Returns the sequence number of the nack")),
-    setter(
-      const,
-      attrs(doc = "Sets the sequence number of the nack (Builder pattern)")
-    )
-  )]
   sequence_number: u32,
 }
 
 impl Nack {
   /// Create a new nack response with the given sequence number.
-  #[inline]
+  #[inline(always)]
   pub const fn new(sequence_number: u32) -> Self {
     Self { sequence_number }
   }
 
+  /// Returns the sequence number of the nack
+  #[inline(always)]
+  pub const fn sequence_number(&self) -> u32 {
+    self.sequence_number
+  }
+
   /// Sets the sequence number of the nack response
-  #[inline]
-  pub fn set_sequence_number(&mut self, sequence_number: u32) -> &mut Self {
+  #[inline(always)]
+  pub const fn set_sequence_number(&mut self, sequence_number: u32) -> &mut Self {
+    self.sequence_number = sequence_number;
+    self
+  }
+
+  /// Sets the sequence number of the nack response (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_sequence_number(mut self, sequence_number: u32) -> Self {
     self.sequence_number = sequence_number;
     self
   }
@@ -796,42 +907,23 @@ macro_rules! bail_ping_typed {
     $name: ident
   ) => {
     $(#[$meta])*
-    #[viewit::viewit(
-      getters(vis_all = "pub"),
-      setters(vis_all = "pub", prefix = "with")
-    )]
     #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
     pub struct $name<I, A> {
       /// The sequence number of the ack
-      #[viewit(
-        getter(const, attrs(doc = "Returns the sequence number of the ack")),
-        setter(
-          const,
-          attrs(doc = "Sets the sequence number of the ack (Builder pattern)")
-        )
-      )]
       sequence_number: u32,
 
       /// Source target, used for a direct reply
-      #[viewit(
-        getter(const, style = "ref", attrs(doc = "Returns the source node of the ping message")),
-        setter(attrs(doc = "Sets the source node of the ping message (Builder pattern)"))
-      )]
       source: Node<I, A>,
 
       /// [`Node`] is sent so the target can verify they are
       /// the intended recipient. This is to protect again an agent
       /// restart with a new name.
-      #[viewit(
-        getter(const, style = "ref", attrs(doc = "Returns the target node of the ping message")),
-        setter(attrs(doc = "Sets the target node of the ping message (Builder pattern)"))
-      )]
       target: Node<I, A>,
     }
 
     impl<I, A> $name<I, A> {
       /// Create a new message
-      #[inline]
+      #[inline(always)]
       pub const fn new(sequence_number: u32, source: Node<I, A>, target: Node<I, A>) -> Self {
         Self {
           sequence_number,
@@ -840,23 +932,65 @@ macro_rules! bail_ping_typed {
         }
       }
 
+      /// Returns the sequence number of the message
+      #[inline(always)]
+      pub const fn sequence_number(&self) -> u32 {
+        self.sequence_number
+      }
+
+      /// Returns the source node of the message
+      #[inline(always)]
+      pub const fn source_ref(&self) -> &Node<I, A> {
+        &self.source
+      }
+
+      /// Returns the target node of the message
+      #[inline(always)]
+      pub const fn target_ref(&self) -> &Node<I, A> {
+        &self.target
+      }
+
       /// Sets the sequence number of the message
-      #[inline]
-      pub fn set_sequence_number(&mut self, sequence_number: u32) -> &mut Self {
+      #[inline(always)]
+      pub const fn set_sequence_number(&mut self, sequence_number: u32) -> &mut Self {
+        self.sequence_number = sequence_number;
+        self
+      }
+
+      /// Sets the sequence number of the message (Builder pattern)
+      #[must_use]
+      #[inline(always)]
+      pub const fn with_sequence_number(mut self, sequence_number: u32) -> Self {
         self.sequence_number = sequence_number;
         self
       }
 
       /// Sets the source node of the message
-      #[inline]
+      #[inline(always)]
       pub fn set_source(&mut self, source: Node<I, A>) -> &mut Self {
         self.source = source;
         self
       }
 
+      /// Sets the source node of the message (Builder pattern)
+      #[must_use]
+      #[inline(always)]
+      pub fn with_source(mut self, source: Node<I, A>) -> Self {
+        self.source = source;
+        self
+      }
+
       /// Sets the target node of the message
-      #[inline]
+      #[inline(always)]
       pub fn set_target(&mut self, target: Node<I, A>) -> &mut Self {
+        self.target = target;
+        self
+      }
+
+      /// Sets the target node of the message (Builder pattern)
+      #[must_use]
+      #[inline(always)]
+      pub fn with_target(mut self, target: Node<I, A>) -> Self {
         self.target = target;
         self
       }
@@ -898,35 +1032,38 @@ impl<I, A> From<IndirectPing<I, A>> for Ping<I, A> {
 use smol_str::SmolStr;
 
 /// Error response from the remote peer
-#[viewit::viewit(
-  vis_all = "pub(crate)",
-  getters(vis_all = "pub"),
-  setters(vis_all = "pub", prefix = "with")
-)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct ErrorResponse {
-  #[viewit(
-    getter(
-      const,
-      style = "ref",
-      attrs(doc = "Returns the msg of the error response")
-    ),
-    setter(attrs(doc = "Sets the msg of the error response (Builder pattern)"))
-  )]
   message: SmolStr,
 }
 
 impl ErrorResponse {
   /// Create a new error response
+  #[inline(always)]
   pub fn new(message: impl Into<SmolStr>) -> Self {
     Self {
       message: message.into(),
     }
   }
 
-  /// Returns the msg of the error response
+  /// Returns the message of the error response as a string slice.
+  #[inline(always)]
+  pub fn message(&self) -> &str {
+    self.message.as_str()
+  }
+
+  /// Sets the msg of the error response
+  #[inline(always)]
   pub fn set_message(&mut self, msg: impl Into<SmolStr>) -> &mut Self {
+    self.message = msg.into();
+    self
+  }
+
+  /// Sets the msg of the error response (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub fn with_message(mut self, msg: impl Into<SmolStr>) -> Self {
     self.message = msg.into();
     self
   }
@@ -955,94 +1092,27 @@ impl From<SmolStr> for ErrorResponse {
 // ─── PushNodeState<I,A> ──────────────────────────────────────────────────────
 
 /// Push node state is the state push to the remote server.
-#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PushNodeState<I, A> {
   /// The id of the push node state.
-  #[viewit(
-    getter(
-      const,
-      style = "ref",
-      attrs(doc = "Returns the id of the push node state")
-    ),
-    setter(attrs(doc = "Sets the id of the push node state (Builder pattern)"))
-  )]
   id: I,
   /// The address of the push node state.
-  #[viewit(
-    getter(
-      const,
-      rename = "address",
-      style = "ref",
-      attrs(doc = "Returns the address of the push node state")
-    ),
-    setter(
-      rename = "with_address",
-      attrs(doc = "Sets the address of the push node state (Builder pattern)")
-    )
-  )]
   addr: A,
   /// Metadata from the delegate for this push node state.
-  #[viewit(
-    getter(
-      const,
-      style = "ref",
-      attrs(doc = "Returns the meta of the push node state")
-    ),
-    setter(attrs(doc = "Sets the meta of the push node state (Builder pattern)"))
-  )]
   meta: Meta,
   /// The incarnation of the push node state.
-  #[viewit(
-    getter(const, attrs(doc = "Returns the incarnation of the push node state")),
-    setter(
-      const,
-      attrs(doc = "Sets the incarnation of the push node state (Builder pattern)")
-    )
-  )]
   incarnation: u32,
   /// The state of the push node state.
-  #[viewit(
-    getter(const, attrs(doc = "Returns the state of the push node state")),
-    setter(
-      const,
-      attrs(doc = "Sets the state of the push node state (Builder pattern)")
-    )
-  )]
   state: State,
   /// The protocol version of the push node state is speaking.
-  #[viewit(
-    getter(
-      const,
-      attrs(doc = "Returns the protocol version of the push node state is speaking")
-    ),
-    setter(
-      const,
-      attrs(
-        doc = "Sets the protocol version of the push node state is speaking (Builder pattern)"
-      )
-    )
-  )]
   protocol_version: ProtocolVersion,
   /// The delegate version of the push node state is speaking.
-  #[viewit(
-    getter(
-      const,
-      attrs(doc = "Returns the delegate version of the push node state is speaking")
-    ),
-    setter(
-      const,
-      attrs(
-        doc = "Sets the delegate version of the push node state is speaking (Builder pattern)"
-      )
-    )
-  )]
   delegate_version: DelegateVersion,
 }
 
 impl<I, A> PushNodeState<I, A> {
   /// Construct a new push node state with the given id, address and state.
-  #[inline]
+  #[inline(always)]
   pub const fn new(incarnation: u32, id: I, addr: A, state: State) -> Self {
     Self {
       id,
@@ -1055,51 +1125,149 @@ impl<I, A> PushNodeState<I, A> {
     }
   }
 
+  /// Returns the id of the push node state.
+  #[inline(always)]
+  pub const fn id_ref(&self) -> &I {
+    &self.id
+  }
+
+  /// Returns the address of the push node state.
+  #[inline(always)]
+  pub const fn address_ref(&self) -> &A {
+    &self.addr
+  }
+
+  /// Returns the meta of the push node state.
+  #[inline(always)]
+  pub const fn meta_ref(&self) -> &Meta {
+    &self.meta
+  }
+
+  /// Returns the incarnation of the push node state.
+  #[inline(always)]
+  pub const fn incarnation(&self) -> u32 {
+    self.incarnation
+  }
+
+  /// Returns the state of the push node state.
+  #[inline(always)]
+  pub const fn state(&self) -> State {
+    self.state
+  }
+
+  /// Returns the protocol version of the push node state is speaking.
+  #[inline(always)]
+  pub const fn protocol_version(&self) -> ProtocolVersion {
+    self.protocol_version
+  }
+
+  /// Returns the delegate version of the push node state is speaking.
+  #[inline(always)]
+  pub const fn delegate_version(&self) -> DelegateVersion {
+    self.delegate_version
+  }
+
   /// Sets the id of the push node state
-  #[inline]
+  #[inline(always)]
   pub fn set_id(&mut self, id: I) -> &mut Self {
     self.id = id;
     self
   }
 
+  /// Sets the id of the push node state (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub fn with_id(mut self, id: I) -> Self {
+    self.id = id;
+    self
+  }
+
   /// Sets the address of the push node state
-  #[inline]
+  #[inline(always)]
   pub fn set_address(&mut self, addr: A) -> &mut Self {
     self.addr = addr;
     self
   }
 
+  /// Sets the address of the push node state (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub fn with_address(mut self, addr: A) -> Self {
+    self.addr = addr;
+    self
+  }
+
   /// Sets the meta of the push node state
-  #[inline]
+  #[inline(always)]
   pub fn set_meta(&mut self, meta: Meta) -> &mut Self {
     self.meta = meta;
     self
   }
 
+  /// Sets the meta of the push node state (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub fn with_meta(mut self, meta: Meta) -> Self {
+    self.meta = meta;
+    self
+  }
+
   /// Sets the incarnation of the push node state
-  #[inline]
-  pub fn set_incarnation(&mut self, incarnation: u32) -> &mut Self {
+  #[inline(always)]
+  pub const fn set_incarnation(&mut self, incarnation: u32) -> &mut Self {
+    self.incarnation = incarnation;
+    self
+  }
+
+  /// Sets the incarnation of the push node state (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_incarnation(mut self, incarnation: u32) -> Self {
     self.incarnation = incarnation;
     self
   }
 
   /// Sets the state of the push node state
-  #[inline]
-  pub fn set_state(&mut self, state: State) -> &mut Self {
+  #[inline(always)]
+  pub const fn set_state(&mut self, state: State) -> &mut Self {
+    self.state = state;
+    self
+  }
+
+  /// Sets the state of the push node state (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_state(mut self, state: State) -> Self {
     self.state = state;
     self
   }
 
   /// Sets the protocol version of the push node state
-  #[inline]
-  pub fn set_protocol_version(&mut self, protocol_version: ProtocolVersion) -> &mut Self {
+  #[inline(always)]
+  pub const fn set_protocol_version(&mut self, protocol_version: ProtocolVersion) -> &mut Self {
+    self.protocol_version = protocol_version;
+    self
+  }
+
+  /// Sets the protocol version of the push node state is speaking (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_protocol_version(mut self, protocol_version: ProtocolVersion) -> Self {
     self.protocol_version = protocol_version;
     self
   }
 
   /// Sets the delegate version of the push node state
-  #[inline]
-  pub fn set_delegate_version(&mut self, delegate_version: DelegateVersion) -> &mut Self {
+  #[inline(always)]
+  pub const fn set_delegate_version(&mut self, delegate_version: DelegateVersion) -> &mut Self {
+    self.delegate_version = delegate_version;
+    self
+  }
+
+  /// Sets the delegate version of the push node state is speaking (Builder pattern)
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_delegate_version(mut self, delegate_version: DelegateVersion) -> Self {
     self.delegate_version = delegate_version;
     self
   }
@@ -1131,40 +1299,13 @@ impl<I: CheapClone, A: CheapClone> PushNodeState<I, A> {
 use triomphe::Arc;
 
 /// Push pull message.
-#[viewit::viewit(getters(vis_all = "pub"), setters(vis_all = "pub", prefix = "with"))]
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct PushPull<I, A> {
   /// Whether the push pull message is a join message.
-  #[viewit(
-    getter(
-      const,
-      attrs(doc = "Returns whether the push pull message is a join message")
-    ),
-    setter(
-      const,
-      attrs(doc = "Sets whether the push pull message is a join message (Builder pattern)")
-    )
-  )]
   join: bool,
   /// The states of the push pull message.
-  #[viewit(
-    getter(
-      const,
-      style = "ref",
-      attrs(doc = "Returns the states of the push pull message")
-    ),
-    setter(attrs(doc = "Sets the states of the push pull message (Builder pattern)"))
-  )]
   states: Arc<[PushNodeState<I, A>]>,
   /// The user data of the push pull message.
-  #[viewit(
-    getter(
-      const,
-      style = "ref",
-      attrs(doc = "Returns the user data of the push pull message")
-    ),
-    setter(attrs(doc = "Sets the user data of the push pull message (Builder pattern)"))
-  )]
   user_data: Bytes,
 }
 
@@ -1190,7 +1331,7 @@ impl<I, A> CheapClone for PushPull<I, A> {
 
 impl<I, A> PushPull<I, A> {
   /// Create a new [`PushPull`] message.
-  #[inline]
+  #[inline(always)]
   pub fn new(join: bool, states: impl Iterator<Item = PushNodeState<I, A>>) -> Self {
     Self {
       states: Arc::from_iter(states),
@@ -1199,8 +1340,99 @@ impl<I, A> PushPull<I, A> {
     }
   }
 
+  /// Returns whether the push pull message is a join message.
+  #[inline(always)]
+  pub const fn join(&self) -> bool {
+    self.join
+  }
+
+  /// Returns the states of the push pull message.
+  #[inline(always)]
+  pub fn states_slice(&self) -> &[PushNodeState<I, A>] {
+    &self.states
+  }
+
+  /// Returns the user data of the push pull message as a byte slice.
+  #[inline(always)]
+  pub fn user_data(&self) -> &[u8] {
+    self.user_data.as_ref()
+  }
+
+  /// Cheap-clones the user data of the push pull message as a `Bytes` handle.
+  #[inline(always)]
+  pub fn user_data_bytes(&self) -> Bytes {
+    self.user_data.clone()
+  }
+
+  /// Sets whether the push pull message is a join message.
+  #[inline(always)]
+  pub const fn set_join(&mut self) -> &mut Self {
+    self.join = true;
+    self
+  }
+
+  /// Sets whether the push pull message is a join message (Builder pattern).
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_join(mut self) -> Self {
+    self.join = true;
+    self
+  }
+
+  /// Assigns the raw join flag.
+  #[inline(always)]
+  pub const fn update_join(&mut self, val: bool) -> &mut Self {
+    self.join = val;
+    self
+  }
+
+  /// Assigns the raw join flag (Builder pattern).
+  #[must_use]
+  #[inline(always)]
+  pub const fn maybe_join(mut self, val: bool) -> Self {
+    self.join = val;
+    self
+  }
+
+  /// Clears the join flag.
+  #[inline(always)]
+  pub const fn clear_join(&mut self) -> &mut Self {
+    self.join = false;
+    self
+  }
+
+  /// Sets the states of the push pull message.
+  #[inline(always)]
+  pub fn set_states(&mut self, states: Arc<[PushNodeState<I, A>]>) -> &mut Self {
+    self.states = states;
+    self
+  }
+
+  /// Sets the states of the push pull message (Builder pattern).
+  #[must_use]
+  #[inline(always)]
+  pub fn with_states(mut self, states: Arc<[PushNodeState<I, A>]>) -> Self {
+    self.states = states;
+    self
+  }
+
+  /// Sets the user data of the push pull message.
+  #[inline(always)]
+  pub fn set_user_data(&mut self, user_data: Bytes) -> &mut Self {
+    self.user_data = user_data;
+    self
+  }
+
+  /// Sets the user data of the push pull message (Builder pattern).
+  #[must_use]
+  #[inline(always)]
+  pub fn with_user_data(mut self, user_data: Bytes) -> Self {
+    self.user_data = user_data;
+    self
+  }
+
   /// Consumes the [`PushPull`] and returns the states and user data.
-  #[inline]
+  #[inline(always)]
   pub fn into_components(self) -> (bool, Bytes, Arc<[PushNodeState<I, A>]>) {
     (self.join, self.user_data, self.states)
   }
@@ -1272,7 +1504,7 @@ pub enum Message<I, A> {
 
 impl<I, A> Message<I, A> {
   /// Returns the wire tag byte for this message variant.
-  #[inline]
+  #[inline(always)]
   pub const fn tag(&self) -> u8 {
     match self {
       Self::Ping(_) => message_tags::PING,
@@ -1289,51 +1521,61 @@ impl<I, A> Message<I, A> {
   }
 
   /// Construct a [`Message`] from a [`Ping`].
+  #[inline(always)]
   pub const fn ping(val: Ping<I, A>) -> Self {
     Self::Ping(val)
   }
 
   /// Construct a [`Message`] from an [`IndirectPing`].
+  #[inline(always)]
   pub const fn indirect_ping(val: IndirectPing<I, A>) -> Self {
     Self::IndirectPing(val)
   }
 
   /// Construct a [`Message`] from an [`Ack`].
+  #[inline(always)]
   pub const fn ack(val: Ack) -> Self {
     Self::Ack(val)
   }
 
   /// Construct a [`Message`] from a [`Suspect`].
+  #[inline(always)]
   pub const fn suspect(val: Suspect<I>) -> Self {
     Self::Suspect(val)
   }
 
   /// Construct a [`Message`] from an [`Alive`].
+  #[inline(always)]
   pub const fn alive(val: Alive<I, A>) -> Self {
     Self::Alive(val)
   }
 
   /// Construct a [`Message`] from a [`Dead`].
+  #[inline(always)]
   pub const fn dead(val: Dead<I>) -> Self {
     Self::Dead(val)
   }
 
   /// Construct a [`Message`] from a [`PushPull`].
+  #[inline(always)]
   pub const fn push_pull(val: PushPull<I, A>) -> Self {
     Self::PushPull(val)
   }
 
   /// Construct a [`Message`] from user data bytes.
+  #[inline(always)]
   pub const fn user_data(val: Bytes) -> Self {
     Self::UserData(val)
   }
 
   /// Construct a [`Message`] from a [`Nack`].
+  #[inline(always)]
   pub const fn nack(val: Nack) -> Self {
     Self::Nack(val)
   }
 
   /// Construct a [`Message`] from an [`ErrorResponse`].
+  #[inline(always)]
   pub const fn error_response(val: ErrorResponse) -> Self {
     Self::ErrorResponse(val)
   }

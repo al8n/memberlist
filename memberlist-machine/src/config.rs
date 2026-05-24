@@ -102,73 +102,97 @@ impl<I, A> EndpointConfig<I, A> {
   }
 
   /// Builder: set initial node metadata.
+  #[must_use]
+  #[inline(always)]
   pub fn with_initial_meta(mut self, meta: Meta) -> Self {
     self.initial_meta = meta;
     self
   }
 
   /// Builder: set initial local-state snapshot (for push/pull).
+  #[must_use]
+  #[inline(always)]
   pub fn with_initial_local_state(mut self, state: Bytes) -> Self {
     self.initial_local_state = state;
     self
   }
 
   /// Builder: set suspicion multiplier (timeout = mult * log(N+1) * probe_interval).
-  pub fn with_suspicion_mult(mut self, mult: u32) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_suspicion_mult(mut self, mult: u32) -> Self {
     self.suspicion_mult = mult;
     self
   }
 
   /// Builder: set suspicion max-timeout multiplier.
-  pub fn with_suspicion_max_timeout_mult(mut self, mult: u32) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_suspicion_max_timeout_mult(mut self, mult: u32) -> Self {
     self.suspicion_max_timeout_mult = mult;
     self
   }
 
   /// Builder: set probe interval.
-  pub fn with_probe_interval(mut self, d: Duration) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_probe_interval(mut self, d: Duration) -> Self {
     self.probe_interval = d;
     self
   }
 
   /// Builder: set gossip-to-the-dead time.
-  pub fn with_gossip_to_the_dead_time(mut self, d: Duration) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_gossip_to_the_dead_time(mut self, d: Duration) -> Self {
     self.gossip_to_the_dead_time = d;
     self
   }
 
   /// Builder: set dead-node-reclaim time. `0` disables reclaim.
-  pub fn with_dead_node_reclaim_time(mut self, d: Duration) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_dead_node_reclaim_time(mut self, d: Duration) -> Self {
     self.dead_node_reclaim_time = d;
     self
   }
 
   /// Builder: set awareness max multiplier.
-  pub fn with_awareness_max_multiplier(mut self, m: u32) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_awareness_max_multiplier(mut self, m: u32) -> Self {
     self.awareness_max_multiplier = m;
     self
   }
 
   /// Builder: set the number of indirect peers used as fallback.
-  pub fn with_indirect_checks(mut self, n: u32) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_indirect_checks(mut self, n: u32) -> Self {
     self.indirect_checks = n;
     self
   }
 
   /// Builder: set the direct-ping timeout.
-  pub fn with_probe_timeout(mut self, d: Duration) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_probe_timeout(mut self, d: Duration) -> Self {
     self.probe_timeout = d;
     self
   }
 
   /// Sets the per-stream exchange timeout (builder pattern).
-  pub fn with_stream_timeout(mut self, d: Duration) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_stream_timeout(mut self, d: Duration) -> Self {
     self.stream_timeout = d;
     self
   }
 
   /// Builder: set the hard cap on a single inbound reliable-stream frame.
-  pub fn with_max_stream_frame_size(mut self, n: usize) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_max_stream_frame_size(mut self, n: usize) -> Self {
     self.max_stream_frame_size = n;
     self
   }
@@ -177,121 +201,190 @@ impl<I, A> EndpointConfig<I, A> {
   /// datagram. The on-wire datagram may exceed this by
   /// [`memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD`] when encryption is
   /// enabled — see the field doc on `gossip_mtu`.
-  pub fn with_gossip_mtu(mut self, n: usize) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_gossip_mtu(mut self, n: usize) -> Self {
     self.gossip_mtu = n;
     self
   }
 
   /// Builder: set gossip interval (`Duration::ZERO` disables gossip).
-  pub fn with_gossip_interval(mut self, d: Duration) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_gossip_interval(mut self, d: Duration) -> Self {
     self.gossip_interval = d;
     self
   }
 
   /// Builder: set the number of peers to gossip to per round.
-  pub fn with_gossip_nodes(mut self, n: usize) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_gossip_nodes(mut self, n: usize) -> Self {
     self.gossip_nodes = n;
     self
   }
 
   /// Builder: set push/pull interval (`Duration::ZERO` disables push/pull).
-  pub fn with_push_pull_interval(mut self, d: Duration) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_push_pull_interval(mut self, d: Duration) -> Self {
     self.push_pull_interval = d;
     self
   }
 
   /// Builder: set broadcast retransmit multiplier.
-  pub fn with_retransmit_mult(mut self, m: u32) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_retransmit_mult(mut self, m: u32) -> Self {
     self.retransmit_mult = m;
     self
   }
 
   /// Builder: set protocol version.
-  pub fn with_protocol_version(mut self, v: ProtocolVersion) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_protocol_version(mut self, v: ProtocolVersion) -> Self {
     self.protocol_version = v;
     self
   }
 
   /// Builder: set delegate version.
-  pub fn with_delegate_version(mut self, v: DelegateVersion) -> Self {
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_delegate_version(mut self, v: DelegateVersion) -> Self {
     self.delegate_version = v;
     self
   }
 
-  /// Builder: set the deterministic RNG seed (`None` ⇒ OS entropy).
-  pub const fn with_rng_seed(mut self, seed: Option<u64>) -> Self {
+  /// Setter: enable the deterministic RNG seed in place.
+  #[inline(always)]
+  pub const fn set_rng_seed(&mut self, seed: u64) -> &mut Self {
+    self.rng_seed = Some(seed);
+    self
+  }
+
+  /// Builder: set the RNG seed (consuming). Fixes the seed for deterministic
+  /// replay. Use [`maybe_rng_seed`](Self::maybe_rng_seed) to assign the raw
+  /// `Option<u64>` (including `None` for OS entropy).
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_rng_seed(mut self, seed: u64) -> Self {
+    self.rng_seed = Some(seed);
+    self
+  }
+
+  /// Setter: assign the raw `Option<u64>` RNG seed in place.
+  /// `None` reverts to OS entropy; `Some(seed)` fixes the seed.
+  #[inline(always)]
+  pub const fn update_rng_seed(&mut self, seed: Option<u64>) -> &mut Self {
     self.rng_seed = seed;
+    self
+  }
+
+  /// Builder: assign the raw `Option<u64>` RNG seed (consuming, alias for
+  /// when the raw-wrapper intent is clearest).
+  #[must_use]
+  #[inline(always)]
+  pub const fn maybe_rng_seed(mut self, seed: Option<u64>) -> Self {
+    self.rng_seed = seed;
+    self
+  }
+
+  /// Setter: clear the RNG seed (revert to OS entropy) in place.
+  #[inline(always)]
+  pub const fn clear_rng_seed(&mut self) -> &mut Self {
+    self.rng_seed = None;
     self
   }
 
   // Getters.
 
   /// The local node's id.
-  pub const fn local_id(&self) -> &I {
+  #[inline(always)]
+  pub const fn local_id_ref(&self) -> &I {
     &self.local_id
   }
 
   /// The local node's advertise address.
-  pub const fn advertise_addr(&self) -> &A {
+  #[inline(always)]
+  pub const fn advertise_addr_ref(&self) -> &A {
     &self.advertise_addr
   }
 
   /// The initial metadata for the local node.
-  pub const fn initial_meta(&self) -> &Meta {
+  #[inline(always)]
+  pub const fn initial_meta_ref(&self) -> &Meta {
     &self.initial_meta
   }
 
-  /// The initial local-state snapshot (for push/pull).
-  pub const fn initial_local_state(&self) -> &Bytes {
-    &self.initial_local_state
+  /// The initial local-state snapshot (for push/pull) as a byte slice.
+  #[inline(always)]
+  pub fn initial_local_state(&self) -> &[u8] {
+    self.initial_local_state.as_ref()
+  }
+
+  /// Return a cheap clone of the initial local-state snapshot buffer.
+  #[inline(always)]
+  pub fn initial_local_state_bytes(&self) -> Bytes {
+    self.initial_local_state.clone()
   }
 
   /// Suspicion multiplier.
+  #[inline(always)]
   pub const fn suspicion_mult(&self) -> u32 {
     self.suspicion_mult
   }
 
   /// Suspicion max-timeout multiplier.
+  #[inline(always)]
   pub const fn suspicion_max_timeout_mult(&self) -> u32 {
     self.suspicion_max_timeout_mult
   }
 
   /// Probe interval.
+  #[inline(always)]
   pub const fn probe_interval(&self) -> Duration {
     self.probe_interval
   }
 
   /// Gossip-to-the-dead time.
+  #[inline(always)]
   pub const fn gossip_to_the_dead_time(&self) -> Duration {
     self.gossip_to_the_dead_time
   }
 
   /// Dead-node-reclaim time.
+  #[inline(always)]
   pub const fn dead_node_reclaim_time(&self) -> Duration {
     self.dead_node_reclaim_time
   }
 
   /// Awareness max multiplier.
+  #[inline(always)]
   pub const fn awareness_max_multiplier(&self) -> u32 {
     self.awareness_max_multiplier
   }
 
   /// Number of indirect peers used as fallback for failed direct pings.
+  #[inline(always)]
   pub const fn indirect_checks(&self) -> u32 {
     self.indirect_checks
   }
 
   /// Direct-ping timeout before fallback to indirect.
+  #[inline(always)]
   pub const fn probe_timeout(&self) -> Duration {
     self.probe_timeout
   }
 
   /// Returns the per-stream exchange timeout.
+  #[inline(always)]
   pub const fn stream_timeout(&self) -> Duration {
     self.stream_timeout
   }
 
   /// Returns the hard cap on a single inbound reliable-stream frame.
+  #[inline(always)]
   pub const fn max_stream_frame_size(&self) -> usize {
     self.max_stream_frame_size
   }
@@ -300,41 +393,49 @@ impl<I, A> EndpointConfig<I, A> {
   /// On-wire datagrams may exceed this by
   /// [`memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD`] when encryption is
   /// enabled — see the field doc on `gossip_mtu`.
+  #[inline(always)]
   pub const fn gossip_mtu(&self) -> usize {
     self.gossip_mtu
   }
 
   /// How often gossip rounds fire. `Duration::ZERO` means disabled.
+  #[inline(always)]
   pub const fn gossip_interval(&self) -> Duration {
     self.gossip_interval
   }
 
   /// Number of random peers selected per gossip round.
+  #[inline(always)]
   pub const fn gossip_nodes(&self) -> usize {
     self.gossip_nodes
   }
 
   /// How often push/pull anti-entropy fires. `Duration::ZERO` means disabled.
+  #[inline(always)]
   pub const fn push_pull_interval(&self) -> Duration {
     self.push_pull_interval
   }
 
   /// Broadcast retransmit multiplier.
+  #[inline(always)]
   pub const fn retransmit_mult(&self) -> u32 {
     self.retransmit_mult
   }
 
   /// Protocol version.
+  #[inline(always)]
   pub const fn protocol_version(&self) -> ProtocolVersion {
     self.protocol_version
   }
 
   /// Delegate version.
+  #[inline(always)]
   pub const fn delegate_version(&self) -> DelegateVersion {
     self.delegate_version
   }
 
   /// Optional deterministic RNG seed.
+  #[inline(always)]
   pub const fn rng_seed(&self) -> Option<u64> {
     self.rng_seed
   }

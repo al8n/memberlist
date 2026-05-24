@@ -42,6 +42,7 @@ const BROTLI_TAG: u8 = 4;
 
 impl CompressAlgorithm {
   /// The one-byte wire tag for this algorithm.
+  #[inline(always)]
   pub const fn tag(&self) -> u8 {
     match self {
       Self::Lz4 => LZ4_TAG,
@@ -55,6 +56,7 @@ impl CompressAlgorithm {
   /// Decode an algorithm from its one-byte wire tag. An unrecognized tag
   /// becomes [`CompressAlgorithm::Unknown`] — the decode fails cleanly
   /// downstream rather than panicking.
+  #[inline(always)]
   pub const fn from_tag(tag: u8) -> Self {
     match tag {
       LZ4_TAG => Self::Lz4,
@@ -83,7 +85,35 @@ const BROTLI_WINDOW_BITS: u32 = 22;
 #[cfg(feature = "brotli")]
 const BROTLI_BUFFER_SIZE: usize = 4096;
 
+/// Payload for [`CompressionError::UnitLenExceedsMax`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnitLenExceedsMaxInfo {
+  /// The on-wire unit length that was declared.
+  pub unit_len: usize,
+  /// The caller's hard ceiling.
+  pub max: usize,
+}
+
+impl UnitLenExceedsMaxInfo {
+  /// Construct a unit-len-exceeds-max payload.
+  #[inline(always)]
+  pub const fn new(unit_len: usize, max: usize) -> Self {
+    Self { unit_len, max }
+  }
+}
+
+impl std::fmt::Display for UnitLenExceedsMaxInfo {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "on-wire unit length {} exceeds the maximum {}",
+      self.unit_len, self.max
+    )
+  }
+}
+
 /// A compression or decompression failure.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum CompressionError {
   /// The algorithm tag is unknown or its backend feature is not built in.
@@ -91,12 +121,20 @@ pub enum CompressionError {
   UnsupportedAlgorithm(u8),
   /// A backend rejected the bytes (corrupt frame, or compress failure).
   #[error("compression backend failure: {0}")]
-  Backend(String),
+  Backend(std::borrow::Cow<'static, str>),
   /// A compressed frame's declared original length exceeds the caller's
   /// hard maximum — rejected before any buffer is allocated. Carries
   /// `(claimed, max)`.
   #[error("declared decompressed length {} exceeds maximum {}", _0.0, _0.1)]
   OversizeOriginal(OversizeOriginal),
+  /// The byte slice does not carry the expected compressed-frame header
+  /// (wrong leading tag or shorter than the minimum wrapper size).
+  #[error("byte slice is not a valid compressed frame")]
+  MalformedFrame,
+  /// An on-wire unit length exceeds the caller's hard ceiling. Carries
+  /// `(unit_len, max)`.
+  #[error("on-wire unit length {} exceeds the maximum {}", _0.unit_len, _0.max)]
+  UnitLenExceedsMax(UnitLenExceedsMaxInfo),
 }
 
 /// The `(claimed, max)` length pair carried by
@@ -106,11 +144,13 @@ pub struct OversizeOriginal(usize, usize);
 
 impl OversizeOriginal {
   /// The `orig_len` the compressed frame claimed.
+  #[inline(always)]
   pub const fn claimed(&self) -> usize {
     self.0
   }
 
   /// The caller's hard maximum.
+  #[inline(always)]
   pub const fn max(&self) -> usize {
     self.1
   }
@@ -128,10 +168,10 @@ pub fn compress(algo: CompressAlgorithm, _input: &[u8]) -> Result<Vec<u8>, Compr
     #[cfg(feature = "snappy")]
     CompressAlgorithm::Snappy => snap::raw::Encoder::new()
       .compress_vec(_input)
-      .map_err(|e| CompressionError::Backend(e.to_string())),
+      .map_err(|e| CompressionError::Backend(e.to_string().into())),
     #[cfg(feature = "zstd")]
     CompressAlgorithm::Zstd => zstd::stream::encode_all(_input, ZSTD_DEFAULT_LEVEL)
-      .map_err(|e| CompressionError::Backend(e.to_string())),
+      .map_err(|e| CompressionError::Backend(e.to_string().into())),
     #[cfg(feature = "brotli")]
     CompressAlgorithm::Brotli => {
       use std::io::Write;
@@ -144,7 +184,7 @@ pub fn compress(algo: CompressAlgorithm, _input: &[u8]) -> Result<Vec<u8>, Compr
           BROTLI_WINDOW_BITS,
         );
         w.write_all(_input)
-          .map_err(|e| CompressionError::Backend(e.to_string()))?;
+          .map_err(|e| CompressionError::Backend(e.to_string().into()))?;
       }
       Ok(out)
     }
@@ -171,7 +211,7 @@ pub fn decompress(
     CompressAlgorithm::Lz4 => {
       let mut out = vec![0u8; _orig_len];
       let n = lz4_flex::decompress_into(_input, &mut out)
-        .map_err(|e| CompressionError::Backend(e.to_string()))?;
+        .map_err(|e| CompressionError::Backend(e.to_string().into()))?;
       if n != _orig_len {
         return Err(CompressionError::Backend(
           "lz4: decompressed length does not match the declared original length".into(),
@@ -184,7 +224,7 @@ pub fn decompress(
       let mut out = vec![0u8; _orig_len];
       let n = snap::raw::Decoder::new()
         .decompress(_input, &mut out)
-        .map_err(|e| CompressionError::Backend(e.to_string()))?;
+        .map_err(|e| CompressionError::Backend(e.to_string().into()))?;
       if n != _orig_len {
         return Err(CompressionError::Backend(
           "snappy: decompressed length does not match the declared original length".into(),
@@ -199,7 +239,7 @@ pub fn decompress(
       // fails (the underlying `ZSTD_decompressDCtx` rejects a too-small
       // destination) rather than growing the buffer.
       let out = zstd::bulk::decompress(_input, _orig_len)
-        .map_err(|e| CompressionError::Backend(e.to_string()))?;
+        .map_err(|e| CompressionError::Backend(e.to_string().into()))?;
       if out.len() != _orig_len {
         return Err(CompressionError::Backend(
           "zstd: decompressed length does not match the declared original length".into(),
@@ -219,7 +259,7 @@ pub fn decompress(
         .by_ref()
         .take(_orig_len as u64 + 1)
         .read_to_end(&mut out)
-        .map_err(|e| CompressionError::Backend(e.to_string()))?;
+        .map_err(|e| CompressionError::Backend(e.to_string().into()))?;
       if out.len() != _orig_len {
         return Err(CompressionError::Backend(
           "brotli: decompressed length does not match the declared original length".into(),
@@ -304,7 +344,8 @@ impl Default for CompressionOptions {
 impl CompressionOptions {
   /// A new, disabled configuration — no algorithm, the default threshold.
   /// Every payload is left [`CompressionOutcome::Plain`]. The operator opts in
-  /// by chaining `.with_algorithm(Some(...))`.
+  /// by chaining `.with_algorithm(algo)` or `.maybe_algorithm(Some(algo))`.
+  #[inline(always)]
   pub const fn new() -> Self {
     Self {
       algorithm: None,
@@ -313,35 +354,69 @@ impl CompressionOptions {
   }
 
   /// The selected algorithm, or `None` when compression is disabled.
+  #[inline(always)]
   pub const fn algorithm(&self) -> Option<CompressAlgorithm> {
     self.algorithm
   }
 
   /// The size threshold below which a payload is left uncompressed.
+  #[inline(always)]
   pub const fn threshold(&self) -> usize {
     self.threshold
   }
 
-  /// Builder: set (or clear) the algorithm.
-  pub const fn with_algorithm(mut self, algorithm: Option<CompressAlgorithm>) -> Self {
-    self.algorithm = algorithm;
+  /// Setter: enable compression with the given algorithm (present state).
+  #[inline(always)]
+  pub const fn set_algorithm(&mut self, val: CompressAlgorithm) -> &mut Self {
+    self.algorithm = Some(val);
+    self
+  }
+
+  /// Builder: enable compression with the given algorithm (present state).
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_algorithm(mut self, val: CompressAlgorithm) -> Self {
+    self.algorithm = Some(val);
+    self
+  }
+
+  /// Setter: assign the raw `Option<CompressAlgorithm>` wrapper in place.
+  /// `None` disables compression; `Some(algo)` enables it.
+  #[inline(always)]
+  pub const fn update_algorithm(&mut self, val: Option<CompressAlgorithm>) -> &mut Self {
+    self.algorithm = val;
+    self
+  }
+
+  /// Builder: assign the raw `Option<CompressAlgorithm>` wrapper (consuming).
+  /// `None` disables compression; `Some(algo)` enables it.
+  #[must_use]
+  #[inline(always)]
+  pub const fn maybe_algorithm(mut self, val: Option<CompressAlgorithm>) -> Self {
+    self.algorithm = val;
+    self
+  }
+
+  /// Setter: disable compression (clear the algorithm).
+  #[inline(always)]
+  pub const fn clear_algorithm(&mut self) -> &mut Self {
+    self.algorithm = None;
     self
   }
 
   /// Builder: set the size threshold.
+  #[must_use]
+  #[inline(always)]
   pub const fn with_threshold(mut self, threshold: usize) -> Self {
     self.threshold = threshold;
     self
   }
 
-  /// Setter: select (or clear) the algorithm in place.
-  pub const fn set_algorithm(&mut self, algorithm: Option<CompressAlgorithm>) {
-    self.algorithm = algorithm;
-  }
-
   /// Setter: set the size threshold in place.
-  pub const fn set_threshold(&mut self, threshold: usize) {
+  #[inline(always)]
+  pub const fn set_threshold(&mut self, threshold: usize) -> &mut Self {
     self.threshold = threshold;
+    self
   }
 
   /// Run the configured compression over `payload`. When no algorithm is set
@@ -356,7 +431,7 @@ impl CompressionOptions {
 }
 
 use crate::framing::{
-  FrameError, MessageTag, decode_varint_u32, encode_varint_u32, unwrap_transforms,
+  decode_varint_u32, encode_varint_u32, unwrap_transforms, FrameError, MessageTag,
 };
 
 /// The one-byte wrapper tag that prefixes every compressed frame
@@ -396,16 +471,14 @@ pub fn decode_compressed_frame(
 ) -> Result<Vec<u8>, CompressionError> {
   // [tag][algo] — two header bytes minimum.
   if frame.len() < 2 || frame[0] != COMPRESSED_TAG {
-    return Err(CompressionError::Backend(
-      "not a compressed frame".to_string(),
-    ));
+    return Err(CompressionError::MalformedFrame);
   }
   let algo = CompressAlgorithm::from_tag(frame[1]);
   if let CompressAlgorithm::Unknown(tag) = algo {
     return Err(CompressionError::UnsupportedAlgorithm(tag));
   }
   let (orig_len, varint_bytes) = decode_varint_u32(&frame[2..])
-    .map_err(|e| CompressionError::Backend(format!("orig_len varint: {e}")))?;
+    .map_err(|e| CompressionError::Backend(format!("orig_len varint: {e}").into()))?;
   let orig_len = orig_len as usize;
   // Decompression-bomb guard — bound `orig_len` BEFORE allocating.
   if orig_len > max_orig_len {
@@ -487,9 +560,9 @@ pub fn take_reliable_unit(
   // Bound the on-wire unit size BEFORE waiting for it — caps accumulation
   // growth so a malicious huge `unit_len` cannot pin unbounded memory.
   if unit_len > max_orig_len {
-    return Err(FrameError::Compression(format!(
-      "reliable unit_len {unit_len} exceeds maximum {max_orig_len}"
-    )));
+    return Err(FrameError::Compression(
+      CompressionError::UnitLenExceedsMax(UnitLenExceedsMaxInfo::new(unit_len, max_orig_len)),
+    ));
   }
   let total = vbytes + unit_len;
   if buf.len() < total {
@@ -551,7 +624,7 @@ pub fn encode_reliable_unit_with_encryption(
   // would let an encrypted-cluster exchange go out unauthenticated.
   let payload: Vec<u8> = match encryption.keyring() {
     Some(kr) => {
-      let key = kr.primary();
+      let key = kr.primary_ref();
       let algo = key.algorithm();
       crate::encryption::encode_encrypted_frame(algo, key, &compressed_or_plain)?
     }
@@ -599,9 +672,9 @@ pub fn take_reliable_unit_with_encryption(
   // Bound the on-wire unit size BEFORE waiting for it — caps accumulation
   // growth so a malicious huge `unit_len` cannot pin unbounded memory.
   if unit_len > effective_unit_max {
-    return Err(FrameError::Compression(format!(
-      "reliable unit_len {unit_len} exceeds maximum {effective_unit_max}"
-    )));
+    return Err(FrameError::Compression(
+      CompressionError::UnitLenExceedsMax(UnitLenExceedsMaxInfo::new(unit_len, effective_unit_max)),
+    ));
   }
   let total = vbytes + unit_len;
   if buf.len() < total {
@@ -830,7 +903,7 @@ mod tests {
   #[test]
   fn compression_options_builders_select_algorithm_and_threshold() {
     let opts = CompressionOptions::new()
-      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(16);
     assert_eq!(opts.algorithm(), Some(CompressAlgorithm::Lz4));
     assert_eq!(opts.threshold(), 16);
@@ -858,16 +931,12 @@ mod tests {
     let framed = b"the quick brown fox".repeat(4);
     let unit = encode_reliable_unit(&opts, &framed);
     let partial = &unit[..unit.len() - 1];
-    assert!(
-      take_reliable_unit(partial, 1 << 20)
-        .expect("not an error")
-        .is_none()
-    );
-    assert!(
-      take_reliable_unit(&[], 1 << 20)
-        .expect("not an error")
-        .is_none()
-    );
+    assert!(take_reliable_unit(partial, 1 << 20)
+      .expect("not an error")
+      .is_none());
+    assert!(take_reliable_unit(&[], 1 << 20)
+      .expect("not an error")
+      .is_none());
   }
 
   #[test]
@@ -896,7 +965,7 @@ mod tests {
   #[test]
   fn reliable_unit_compressed_roundtrips() {
     let opts = CompressionOptions::new()
-      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(8);
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);
     let unit = encode_reliable_unit(&opts, &framed);
@@ -968,7 +1037,7 @@ mod tests {
   #[test]
   fn reliable_unit_corrupt_inner_wrapper_is_rejected() {
     let opts = CompressionOptions::new()
-      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(8);
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);
     let mut unit = encode_reliable_unit(&opts, &framed);
@@ -1052,7 +1121,7 @@ mod tests {
   fn reliable_unit_compressed_then_encrypted_byte_order_is_outer_encrypted() {
     use crate::encryption::{EncryptionOptions, Keyring, SecretKey};
     let comp = CompressionOptions::new()
-      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(8);
     let key = SecretKey::Aes256([0x99; 32]);
     let enc = EncryptionOptions::new().with_keyring(Keyring::new(key));

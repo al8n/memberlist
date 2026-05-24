@@ -205,17 +205,44 @@ pub trait Data: core::fmt::Debug + Send + Sync {
 
 // ─── EncodeError ─────────────────────────────────────────────────────────────
 
+/// The `(required, remaining)` capacity pair carried by
+/// [`EncodeError::InsufficientBuffer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InsufficientBufferCapacity {
+  /// The buffer capacity required to encode the value.
+  pub required: usize,
+  /// The buffer capacity remaining at the time of the error.
+  pub remaining: usize,
+}
+
+impl InsufficientBufferCapacity {
+  /// Construct an insufficient-buffer-capacity payload.
+  #[inline(always)]
+  pub const fn new(required: usize, remaining: usize) -> Self {
+    Self {
+      required,
+      remaining,
+    }
+  }
+}
+
+impl std::fmt::Display for InsufficientBufferCapacity {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "required: {}, remaining: {}",
+      self.required, self.remaining
+    )
+  }
+}
+
 /// A data encoding error
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
   /// Returned when the encoded buffer is too small to hold the bytes format of the types.
-  #[error("insufficient buffer capacity, required: {required}, remaining: {remaining}")]
-  InsufficientBuffer {
-    /// The required buffer capacity.
-    required: usize,
-    /// The remaining buffer capacity.
-    remaining: usize,
-  },
+  #[error("insufficient buffer capacity, {0}")]
+  InsufficientBuffer(InsufficientBufferCapacity),
   /// Returned when the data in encoded format is larger than the maximum allowed size.
   #[error("encoded data is too large, the maximum allowed size is {MAX} bytes", MAX = u32::MAX)]
   TooLarge,
@@ -228,10 +255,7 @@ impl EncodeError {
   /// Creates an insufficient buffer error.
   #[inline]
   pub const fn insufficient_buffer(required: usize, remaining: usize) -> Self {
-    Self::InsufficientBuffer {
-      required,
-      remaining,
-    }
+    Self::InsufficientBuffer(InsufficientBufferCapacity::new(required, remaining))
   }
 
   /// Creates a custom encoding error.
@@ -245,12 +269,9 @@ impl EncodeError {
   /// Update the error with the required and remaining buffer capacity.
   pub fn update(mut self, required: usize, remaining: usize) -> Self {
     match self {
-      Self::InsufficientBuffer {
-        required: ref mut r,
-        remaining: ref mut rem,
-      } => {
-        *r = required;
-        *rem = remaining;
+      Self::InsufficientBuffer(ref mut cap) => {
+        cap.required = required;
+        cap.remaining = remaining;
         self
       }
       _ => self,
@@ -262,10 +283,9 @@ impl From<varing::EncodeError> for EncodeError {
   #[inline]
   fn from(value: varing::EncodeError) -> Self {
     match value {
-      varing::EncodeError::InsufficientSpace(err) => Self::InsufficientBuffer {
-        required: err.requested().get(),
-        remaining: err.available(),
-      },
+      varing::EncodeError::InsufficientSpace(err) => Self::InsufficientBuffer(
+        InsufficientBufferCapacity::new(err.requested().get(), err.available()),
+      ),
       varing::EncodeError::Other(e) => EncodeError::custom(e),
       _ => EncodeError::custom("unknown encoding error"),
     }
@@ -276,10 +296,9 @@ impl From<varing::ConstEncodeError> for EncodeError {
   #[inline]
   fn from(value: varing::ConstEncodeError) -> Self {
     match value {
-      varing::ConstEncodeError::InsufficientSpace(err) => Self::InsufficientBuffer {
-        required: err.requested().get(),
-        remaining: err.available(),
-      },
+      varing::ConstEncodeError::InsufficientSpace(err) => Self::InsufficientBuffer(
+        InsufficientBufferCapacity::new(err.requested().get(), err.available()),
+      ),
       varing::ConstEncodeError::Other(e) => EncodeError::custom(e),
       _ => EncodeError::custom("unknown encoding error"),
     }
@@ -294,11 +313,116 @@ impl From<Cow<'static, str>> for EncodeError {
 
 // ─── DecodeError ─────────────────────────────────────────────────────────────
 
+/// Payload for [`DecodeError::MissingField`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingFieldInfo {
+  /// The type of the message.
+  pub ty: &'static str,
+  /// The name of the missing field.
+  pub field: &'static str,
+}
+
+impl MissingFieldInfo {
+  /// Construct a missing-field payload.
+  #[inline(always)]
+  pub const fn new(ty: &'static str, field: &'static str) -> Self {
+    Self { ty, field }
+  }
+}
+
+impl std::fmt::Display for MissingFieldInfo {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "missing {} in {}", self.field, self.ty)
+  }
+}
+
+/// Payload for [`DecodeError::DuplicateField`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DuplicateFieldInfo {
+  /// The type of the message.
+  pub ty: &'static str,
+  /// The name of the duplicate field.
+  pub field: &'static str,
+  /// The wire tag of the field.
+  pub tag: u8,
+}
+
+impl DuplicateFieldInfo {
+  /// Construct a duplicate-field payload.
+  #[inline(always)]
+  pub const fn new(ty: &'static str, field: &'static str, tag: u8) -> Self {
+    Self { ty, field, tag }
+  }
+}
+
+impl std::fmt::Display for DuplicateFieldInfo {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "duplicate field {} with tag {} in {}",
+      self.field, self.tag, self.ty
+    )
+  }
+}
+
+/// Payload for [`DecodeError::UnknownWireType`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownWireTypeInfo {
+  /// The type of the message being decoded.
+  pub ty: &'static str,
+  /// The unknown wire-type value encountered.
+  pub value: u8,
+  /// The field tag associated with the unknown wire type.
+  pub tag: u8,
+}
+
+impl UnknownWireTypeInfo {
+  /// Construct an unknown-wire-type payload.
+  #[inline(always)]
+  pub const fn new(ty: &'static str, value: u8, tag: u8) -> Self {
+    Self { ty, value, tag }
+  }
+}
+
+impl std::fmt::Display for UnknownWireTypeInfo {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "unknown wire type value {} with tag {} when decoding {}",
+      self.value, self.tag, self.ty
+    )
+  }
+}
+
+/// Payload for [`DecodeError::UnknownTag`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownTagInfo {
+  /// The type of the message being decoded.
+  pub ty: &'static str,
+  /// The unknown tag value encountered.
+  pub tag: u8,
+}
+
+impl UnknownTagInfo {
+  /// Construct an unknown-tag payload.
+  #[inline(always)]
+  pub const fn new(ty: &'static str, tag: u8) -> Self {
+    Self { ty, tag }
+  }
+}
+
+impl std::fmt::Display for UnknownTagInfo {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "unknown tag {} when decoding {}", self.tag, self.ty)
+  }
+}
+
 /// A message decoding error.
 ///
 /// `DecodeError` indicates that the input buffer does not contain a valid
 /// message. The error details should be considered 'best effort': in
 /// general it is not possible to exactly pinpoint why data is malformed.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, derive_more::IsVariant)]
 pub enum DecodeError {
   /// Returned when the buffer does not have enough data to decode the message.
@@ -306,44 +430,20 @@ pub enum DecodeError {
   BufferUnderflow,
 
   /// Returned when the buffer does not contain the required field.
-  #[error("missing {field} in {ty}")]
-  MissingField {
-    /// The type of the message.
-    ty: &'static str,
-    /// The name of the field.
-    field: &'static str,
-  },
+  #[error("{0}")]
+  MissingField(MissingFieldInfo),
 
   /// Returned when the buffer contains duplicate fields for the same tag in a message.
-  #[error("duplicate field {field} with tag {tag} in {ty}")]
-  DuplicateField {
-    /// The type of the message.
-    ty: &'static str,
-    /// The name of the field.
-    field: &'static str,
-    /// The tag of the field.
-    tag: u8,
-  },
+  #[error("{0}")]
+  DuplicateField(DuplicateFieldInfo),
 
   /// Returned when there is a unknown wire type.
-  #[error("unknown wire type value {value} with tag {tag} when decoding {ty}")]
-  UnknownWireType {
-    /// The type of the message.
-    ty: &'static str,
-    /// The unknown wire type value.
-    value: u8,
-    /// The tag of the field.
-    tag: u8,
-  },
+  #[error("{0}")]
+  UnknownWireType(UnknownWireTypeInfo),
 
   /// Returned when finding a unknown tag.
-  #[error("unknown tag {tag} when decoding {ty}")]
-  UnknownTag {
-    /// The type of the message.
-    ty: &'static str,
-    /// The unknown tag value.
-    tag: u8,
-  },
+  #[error("{0}")]
+  UnknownTag(UnknownTagInfo),
 
   /// Returned when fail to decode the length-delimited
   #[error("length-delimited overflow the maximum value of u32")]
@@ -394,25 +494,25 @@ impl DecodeError {
   /// Creates a new missing field decoding error.
   #[inline]
   pub const fn missing_field(ty: &'static str, field: &'static str) -> Self {
-    Self::MissingField { ty, field }
+    Self::MissingField(MissingFieldInfo::new(ty, field))
   }
 
   /// Creates a new duplicate field decoding error.
   #[inline]
   pub const fn duplicate_field(ty: &'static str, field: &'static str, tag: u8) -> Self {
-    Self::DuplicateField { ty, field, tag }
+    Self::DuplicateField(DuplicateFieldInfo::new(ty, field, tag))
   }
 
   /// Creates a new unknown wire type decoding error.
   #[inline]
   pub const fn unknown_wire_type(ty: &'static str, value: u8, tag: u8) -> Self {
-    Self::UnknownWireType { ty, value, tag }
+    Self::UnknownWireType(UnknownWireTypeInfo::new(ty, value, tag))
   }
 
   /// Creates a new unknown tag decoding error.
   #[inline]
   pub const fn unknown_tag(ty: &'static str, tag: u8) -> Self {
-    Self::UnknownTag { ty, tag }
+    Self::UnknownTag(UnknownTagInfo::new(ty, tag))
   }
 
   /// Creates a custom decoding error.

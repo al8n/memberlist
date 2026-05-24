@@ -1,4 +1,4 @@
-use super::{Data, DataRef, check_encoded_message_size};
+use super::{check_encoded_message_size, Data, DataRef};
 
 macro_rules! impl_bytes {
   ($($ty:ty => $from:ident),+$(,)?) => {

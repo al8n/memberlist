@@ -28,6 +28,7 @@
 
 /// Errors returned by [`TcpOptions::try_new`].
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TcpOptionsError {
   /// The label exceeds the 253-byte wire maximum (`u8::MAX - 2`), imposed
   /// by `memberlist-proto::Label::MAX_SIZE` / `memberlist/src/codec.rs`
@@ -98,16 +99,92 @@ impl TcpOptions {
     Self::try_new(label).expect("invalid TcpOptions label")
   }
 
-  /// Set whether to skip the inbound label check.
+  /// Setter: clear the cluster label in place (disables the label check).
+  #[inline(always)]
+  pub fn clear_label(&mut self) -> &mut Self {
+    self.label = None;
+    self
+  }
+
+  /// Setter: replace the cluster label in place, validating the bytes.
+  ///
+  /// An empty slice normalizes to `None` (no label).  Returns
+  /// [`TcpOptionsError`] if the label exceeds 253 bytes or is not valid
+  /// UTF-8.
+  #[inline(always)]
+  pub fn try_set_label(&mut self, val: Vec<u8>) -> Result<&mut Self, TcpOptionsError> {
+    let normalized = if val.is_empty() {
+      None
+    } else {
+      if val.len() > MAX_LABEL_LEN {
+        return Err(TcpOptionsError::LabelTooLong(val.len()));
+      }
+      if core::str::from_utf8(&val).is_err() {
+        return Err(TcpOptionsError::InvalidLabel);
+      }
+      Some(val)
+    };
+    self.label = normalized;
+    Ok(self)
+  }
+
+  /// Builder: replace the cluster label (consuming), validating the bytes.
+  ///
+  /// An empty slice normalizes to `None` (no label). Returns
+  /// [`TcpOptionsError`] if the label exceeds 253 bytes or is not valid
+  /// UTF-8.
+  #[inline(always)]
+  pub fn try_with_label(mut self, val: Vec<u8>) -> Result<Self, TcpOptionsError> {
+    self.try_set_label(val)?;
+    Ok(self)
+  }
+
+  /// Setter: skip the inbound label check (set to `true`) in place.
+  #[inline(always)]
+  pub const fn set_skip_inbound_label_check(&mut self) -> &mut Self {
+    self.skip_inbound_label_check = true;
+    self
+  }
+
+  /// Setter: assign the raw `bool` value in place.
+  #[inline(always)]
+  pub const fn update_skip_inbound_label_check(&mut self, val: bool) -> &mut Self {
+    self.skip_inbound_label_check = val;
+    self
+  }
+
+  /// Builder: assign the raw `bool` value (consuming).
   ///
   /// When `true`, the coordinator accepts streams whose label header does not
   /// match the local label. Defaults to `false`.
-  pub fn with_skip_inbound_label_check(mut self, skip: bool) -> Self {
-    self.skip_inbound_label_check = skip;
+  #[must_use]
+  #[inline(always)]
+  pub const fn maybe_skip_inbound_label_check(mut self, val: bool) -> Self {
+    self.skip_inbound_label_check = val;
+    self
+  }
+
+  /// Setter: enforce the inbound label check (set to `false`) in place.
+  #[inline(always)]
+  pub const fn clear_skip_inbound_label_check(&mut self) -> &mut Self {
+    self.skip_inbound_label_check = false;
+    self
+  }
+
+  /// Builder: skip the inbound label check.
+  ///
+  /// Sets the policy to `true`. Use
+  /// [`maybe_skip_inbound_label_check`](Self::maybe_skip_inbound_label_check)
+  /// to assign a raw `bool` instead.
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_skip_inbound_label_check(mut self) -> Self {
+    self.skip_inbound_label_check = true;
     self
   }
 
   /// The cluster label, or `None` if none was configured.
+  #[inline(always)]
   pub fn label(&self) -> Option<&[u8]> {
     self.label.as_deref()
   }
@@ -115,7 +192,8 @@ impl TcpOptions {
   /// Whether the inbound label check is skipped.
   ///
   /// Defaults to `false`.
-  pub fn skip_inbound_label_check(&self) -> bool {
+  #[inline(always)]
+  pub const fn is_skip_inbound_label_check(&self) -> bool {
     self.skip_inbound_label_check
   }
 }
@@ -128,10 +206,10 @@ mod tests {
   fn carries_label_and_check_policy() {
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
     assert_eq!(cfg.label(), Some(b"cluster-x".as_slice()));
-    assert!(!cfg.skip_inbound_label_check());
-    let cfg = TcpOptions::new(None).with_skip_inbound_label_check(true);
+    assert!(!cfg.is_skip_inbound_label_check());
+    let cfg = TcpOptions::new(None).with_skip_inbound_label_check();
     assert_eq!(cfg.label(), None);
-    assert!(cfg.skip_inbound_label_check());
+    assert!(cfg.is_skip_inbound_label_check());
   }
 
   #[test]

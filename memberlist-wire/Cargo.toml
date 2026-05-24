@@ -21,7 +21,6 @@ smol_str = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 triomphe = { workspace = true, features = ["std"] }
 varing = { workspace = true, features = ["std"] }
-viewit = { workspace = true }
 
 # Compression backends — opt-in; the default build pulls none of them.
 brotli = { version = "8", optional = true }

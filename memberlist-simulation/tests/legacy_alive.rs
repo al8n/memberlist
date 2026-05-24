@@ -61,7 +61,7 @@ fn alive_node_new_node() {
   let mut found_join = false;
   while let Some(ev) = c.poll_event(m1) {
     if let Event::NodeJoined(ns) = ev {
-      if ns.id() == &peer_id {
+      if ns.id_ref() == &peer_id {
         found_join = true;
       }
     }
@@ -146,7 +146,7 @@ fn alive_node_suspect_node() {
   let mut found_join = false;
   while let Some(ev) = c.poll_event(m1) {
     if let Event::NodeJoined(ns) = &ev {
-      if ns.id() == &peer_id {
+      if ns.id_ref() == &peer_id {
         found_join = true;
       }
     }
@@ -204,7 +204,7 @@ fn alive_node_idempotent() {
   let mut found_join = false;
   while let Some(ev) = c.poll_event(m1) {
     if let Event::NodeJoined(ns) = &ev {
-      if ns.id() == &peer_id {
+      if ns.id_ref() == &peer_id {
         found_join = true;
       }
     }
@@ -268,9 +268,9 @@ fn alive_node_change_meta() {
   let mut found_update = false;
   while let Some(ev) = c.poll_event(m1) {
     if let Event::NodeUpdated(ns) = ev {
-      if ns.id() == &peer_id {
+      if ns.id_ref() == &peer_id {
         assert_eq!(
-          ns.meta().as_bytes(),
+          ns.meta_ref().as_bytes(),
           meta2.as_bytes(),
           "meta should be val2"
         );
@@ -407,8 +407,8 @@ fn alive_node_conflict() {
   let mut found_conflict = false;
   while let Some(ev) = c.poll_event(m1) {
     if let Event::NodeConflict { existing, other } = ev {
-      assert_eq!(existing.id(), &peer_id);
-      assert_eq!(other.id(), &peer_id);
+      assert_eq!(existing.id_ref(), &peer_id);
+      assert_eq!(other.id_ref(), &peer_id);
       found_conflict = true;
     }
   }
@@ -450,8 +450,8 @@ fn alive_node_conflict() {
   let mut found_accepted = false;
   while let Some(ev) = c.poll_event(m1) {
     match ev {
-      Event::NodeJoined(ns) | Event::NodeUpdated(ns) if ns.id() == &peer_id => {
-        assert_eq!(ns.meta().as_bytes(), b"foo", "meta should be 'foo'");
+      Event::NodeJoined(ns) | Event::NodeUpdated(ns) if ns.id_ref() == &peer_id => {
+        assert_eq!(ns.meta_ref().as_bytes(), b"foo", "meta should be 'foo'");
         found_accepted = true;
       }
       _ => {}

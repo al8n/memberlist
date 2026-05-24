@@ -134,7 +134,7 @@ fn ping_emits_ping_completed_with_rtt() {
   let mut rtt_nonzero = false;
   while let Some(ev) = c.poll_event(m1) {
     if let Event::PingCompleted { node, rtt, .. } = ev {
-      if node.id() == &SmolStr::new("m2") {
+      if node.id_ref() == &SmolStr::new("m2") {
         ping_completed = true;
         rtt_nonzero = rtt > Duration::ZERO;
       }

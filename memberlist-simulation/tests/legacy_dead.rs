@@ -177,7 +177,7 @@ fn dead_node_alive_to_dead() {
   let mut found_leave = false;
   while let Some(ev) = c.poll_event(m1) {
     if let Event::NodeLeft(node) = ev {
-      if node.id() == &peer_id {
+      if node.id_ref() == &peer_id {
         found_leave = true;
       }
     }
@@ -238,7 +238,7 @@ fn dead_node_double_noop() {
   let mut found_leave = false;
   while let Some(ev) = c.poll_event(m1) {
     if let Event::NodeLeft(node) = ev {
-      if node.id() == &peer_id {
+      if node.id_ref() == &peer_id {
         found_leave = true;
       }
     }

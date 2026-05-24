@@ -1420,10 +1420,10 @@ mod tests {
   #[test]
   fn quic_reliable_unit_accumulation_roundtrips() {
     use memberlist_wire::{
-      CompressAlgorithm, CompressionOptions, encode_reliable_unit, take_reliable_unit,
+      encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
     };
     let opts = CompressionOptions::new()
-      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(8);
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(16);
     let unit = encode_reliable_unit(&opts, &framed);
@@ -1443,10 +1443,10 @@ mod tests {
     // arrive over two `chunks.next` yields. The accumulator must hold the
     // first partial chunk (no frame yet) and complete on the second.
     use memberlist_wire::{
-      CompressAlgorithm, CompressionOptions, encode_reliable_unit, take_reliable_unit,
+      encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
     };
     let opts = CompressionOptions::new()
-      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(8);
     let framed = b"the quick brown fox jumps over the lazy dog".repeat(32);
     let unit = encode_reliable_unit(&opts, &framed);
@@ -1472,7 +1472,7 @@ mod tests {
 
   #[test]
   fn quic_reliable_unit_disabled_is_byte_identical() {
-    use memberlist_wire::{CompressionOptions, encode_reliable_unit, take_reliable_unit};
+    use memberlist_wire::{encode_reliable_unit, take_reliable_unit, CompressionOptions};
     let opts = CompressionOptions::new();
     let framed = b"plain reliable frame bytes that are not compressed".to_vec();
     let unit = encode_reliable_unit(&opts, &framed);

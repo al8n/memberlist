@@ -27,7 +27,7 @@ use crate::{
 };
 use bridge::Bridge;
 use conn::ConnTable;
-use demux::{Class, classify};
+use demux::{classify, Class};
 
 /// One pending dial intent the coordinator owes a `service_dials` attempt to.
 ///
@@ -59,16 +59,24 @@ struct PendingDial<A> {
 /// `B` translates the membership address `A` to the QUIC `SocketAddr`
 /// (see [`AddrBridge`]); it is a marker type parameter only — no value of
 /// `B` is stored.
+// Storage-shape bound: the struct bag is the MINIMUM required for the named
+// field types to be well-formed (rule §8 exception).
+//   `ep: Endpoint<I, A>` — `Endpoint`'s own storage-shape bound demands
+//     `I: Id + Data + CheapClone` and the full `A` bag, so naming the field
+//     forces both into this struct's `where` clause.
+//   `bridges: HashMap<StreamId, Bridge<I, A>>` and `dial_pending:
+//     VecDeque<PendingDial<A>>` — the `Bridge<I, A>` and `PendingDial<A>`
+//     struct decls themselves carry no `where` clauses, so they impose no
+//     extra storage-shape constraints beyond `Endpoint`'s.
+// `B` carries no struct-level bound (only `_addr: PhantomData<fn(B)>` holds
+// it; the `AddrBridge<A>` bound is added at the impl level only on the block
+// whose methods call `B::to_socket` / `B::from_socket` / `B::server_name`).
+// The heavier `I: Debug + Display + Send + Sync + 'static` bounds the
+// SWIM-ops methods need are likewise carried on the impl blocks below that
+// need them, not on the struct.
 pub struct QuicEndpoint<I, A, B>
 where
-  I: nodecraft::Id
-    + memberlist_wire::Data
-    + nodecraft::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: nodecraft::Id + memberlist_wire::Data + nodecraft::CheapClone,
   A: memberlist_wire::Data
     + nodecraft::CheapClone
     + Eq
@@ -200,16 +208,17 @@ where
   _addr: core::marker::PhantomData<fn(B)>,
 }
 
+// Accessors / builders whose bodies touch only non-generic fields
+// (`compression`, `encryption`, `quinn`, `cfg`, `conns`, `out`,
+// `mem_ingress`) or delegate to `Endpoint`'s own accessor surface
+// (`endpoint()`, `gossip_mtu()`). Re-states only the struct's
+// well-formedness bag — no method-side additions, so the heavier
+// `I: Debug + Display + Send + Sync + 'static` and `B: AddrBridge<A>`
+// constraints carried by the impl blocks below are NOT required to call
+// any of these.
 impl<I, A, B> QuicEndpoint<I, A, B>
 where
-  I: nodecraft::Id
-    + memberlist_wire::Data
-    + nodecraft::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
+  I: nodecraft::Id + memberlist_wire::Data + nodecraft::CheapClone,
   A: memberlist_wire::Data
     + nodecraft::CheapClone
     + Eq
@@ -219,7 +228,6 @@ where
     + Send
     + Sync
     + 'static,
-  B: AddrBridge<A>,
 {
   /// Build the coordinator. The quinn endpoint is created with the bundled
   /// config; `allow_mtud = true`, and `rng_seed = None` so quinn seeds its
@@ -241,17 +249,13 @@ where
   /// transport — and therefore the composed membership behaviour and timing
   /// — is bit-for-bit reproducible across runs. Behaviour is otherwise
   /// identical to [`new`](Self::new).
+  #[must_use]
   pub fn with_quinn_rng_seed(
     ep: Endpoint<I, A>,
     cfg: QuicConfig,
     rng_seed: Option<[u8; 32]>,
   ) -> Self {
-    let quinn = QuinnEndpoint::new(
-      cfg.endpoint().clone(),
-      Some(cfg.server().clone()),
-      true,
-      rng_seed,
-    );
+    let quinn = QuinnEndpoint::new(cfg.endpoint_arc(), Some(cfg.server_arc()), true, rng_seed);
     Self {
       ep,
       quinn,
@@ -281,6 +285,7 @@ where
   /// Build the coordinator with an explicit cross-transport compression
   /// configuration. [`Self::new`] is `with_compression` with compression
   /// disabled.
+  #[must_use]
   pub fn with_compression(
     ep: Endpoint<I, A>,
     cfg: QuicConfig,
@@ -326,6 +331,230 @@ where
     }
   }
 
+  /// The configured cross-transport encryption options. Applies to the
+  /// gossip path only; the QUIC reliable path always skips.
+  pub fn encryption_options(&self) -> &memberlist_wire::EncryptionOptions {
+    &self.encryption
+  }
+
+  /// Encrypt one outbound gossip datagram for the wire. The codec-owning
+  /// driver calls this on the already-compressed gossip bytes (from
+  /// [`Self::compress_gossip`]) before handing them to the UDP socket. When
+  /// encryption is disabled the bytes are returned unchanged.
+  ///
+  /// The on-wire byte order is `[Encrypted[Compressed[frame]]]` when both
+  /// transforms are enabled and compression won, or `[Encrypted[frame]]`
+  /// when compression is disabled or did not shrink.
+  ///
+  /// Returns `Err` when encryption is configured but the backend rejects the
+  /// request — typically [`memberlist_wire::EncryptionError::UnsupportedAlgorithm`]
+  /// for a primary key whose backend was not built into this binary. The
+  /// driver MUST drop the gossip in that case; emitting unencrypted bytes
+  /// on an encrypted-cluster path would bypass authentication silently.
+  pub fn encrypt_gossip(
+    &self,
+    datagram: &[u8],
+  ) -> Result<Vec<u8>, memberlist_wire::EncryptionError> {
+    let keyring = match self.encryption.keyring() {
+      Some(kr) => kr,
+      None => return Ok(datagram.to_vec()),
+    };
+    let key = keyring.primary_ref();
+    memberlist_wire::encode_encrypted_frame(key.algorithm(), key, datagram)
+  }
+
+  /// Unwrap one inbound gossip datagram. The codec-owning driver calls this
+  /// on the raw bytes from [`Self::poll_memberlist_ingress`] BEFORE decoding
+  /// frames — it strips the Encrypted-then-Compressed wrapper stack in one
+  /// pass (each layer identity when its wrapper is absent). A datagram with
+  /// no Encrypted wrapper is returned unchanged when no keyring is
+  /// configured; when a keyring IS configured the strict-mode entry check
+  /// rejects any non-Encrypted leading tag. A corrupt or unknown-algorithm
+  /// wrapper, or a frame the keyring cannot decrypt, is an `Err` — the
+  /// driver drops the datagram (gossip is lossy and self-healing).
+  ///
+  /// This is the SINGLE canonical ingress unwrap on the coordinator. The
+  /// outbound side uses [`Self::compress_gossip`] → [`Self::encrypt_gossip`]
+  /// (compress, then encrypt) so the on-wire order is
+  /// `[Encrypted[Compressed[frame]]]`; this helper reverses both layers, so
+  /// authentication never depends on integration discipline.
+  pub fn decrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, memberlist_wire::FrameError> {
+    // Ceiling is the gossip MTU — the maximum size any compliant gossip
+    // datagram decompresses to. A wrapper claiming more is not a compliant
+    // datagram and is rejected. The encryption-aware unwrap consumes an
+    // Encrypted wrapper through the keyring, then strips a Compressed
+    // wrapper if present; a non-Encrypted-led datagram is returned unchanged
+    // when no keyring is configured (the strict-mode entry check is gated
+    // on `encryption.is_enabled()`).
+    memberlist_wire::unwrap_transforms_with_encryption(
+      datagram,
+      self.ep.gossip_mtu(),
+      &self.encryption,
+    )
+    .map(|cow| cow.into_owned())
+  }
+
+  /// Borrow the inner membership endpoint (members / queue_user_broadcast / …).
+  #[inline(always)]
+  pub fn endpoint_ref(&self) -> &Endpoint<I, A> {
+    &self.ep
+  }
+
+  /// Mutably borrow the inner membership endpoint — test-only. Production
+  /// code accesses `self.ep` directly inside `QuicEndpoint`'s own methods.
+  /// A public raw `&mut Endpoint` would let external callers drain
+  /// `Event::DialRequested` directly out of the inner queue (via
+  /// `endpoint_mut().poll_event()`) and orphan the `PendingStreamIntent` —
+  /// the QUIC bridge would never open, the immediate-due `poll_timeout`
+  /// term would never fire, and the exchange (push/pull, reliable-ping
+  /// fallback, user-message) would silently strand. External callers go
+  /// through scoped pass-through methods ([`Self::start_push_pull`],
+  /// [`Self::start_reliable_ping`], [`Self::start_user_message`],
+  /// [`Self::start_probe`], [`Self::handle_alive`], [`Self::requeue_event`])
+  /// AND the sieving public [`Self::poll_event`], preserving the sealed
+  /// inner endpoint invariant that no caller can drain `DialRequested`
+  /// out from under `service_dials`.
+  #[cfg(test)]
+  pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, A> {
+    &mut self.ep
+  }
+
+  /// Next outbound UDP datagram (quinn or encoded memberlist), if any.
+  pub fn poll_transmit(&mut self) -> Option<(SocketAddr, Bytes)> {
+    self.out.pop_front()
+  }
+
+  /// Next raw inbound memberlist datagram (the first-byte demux classified it
+  /// `Class::Memberlist`), if any.
+  ///
+  /// `memberlist-machine` has no umbrella `codec` dependency, so the
+  /// coordinator cannot perform the structured unwrap
+  /// (label → decrypt → decompress → split-compound) in-crate; it surfaces
+  /// the raw `(from, bytes)` as an explicit action instead of silently
+  /// dropping it (a silent drop would lose every UDP ping/ack/alive/suspect
+  /// on the composed unit's public ingress). The codec-owning layer drains
+  /// this, decodes each `Message`, and feeds it back through
+  /// [`handle_packet`](Self::handle_packet).
+  pub fn poll_memberlist_ingress(&mut self) -> Option<(SocketAddr, Bytes)> {
+    self.mem_ingress.pop_front()
+  }
+
+  /// Number of live (non-reaped) QUIC connections to `peer` — `0` or `1`,
+  /// since the connection table pools one connection per peer.
+  ///
+  /// Observation-only, for a driver/test to assert the drained-reap
+  /// lifecycle (a connection that idled past `max_idle_timeout` is reaped:
+  /// its slab + peers entry is removed, so this drops back to `0`). A
+  /// connection still in its closing/draining wind-down is reported live
+  /// until [`ConnTable::reap_if_drained`] removes it.
+  pub fn live_connections_to(&self, peer: SocketAddr) -> usize {
+    match self.conns.handle_for(&peer) {
+      Some(ch) => usize::from(
+        self
+          .conns
+          .get(ch)
+          .map(|e| !e.conn_ref().is_drained())
+          .unwrap_or(false),
+      ),
+      None => 0,
+    }
+  }
+
+  /// Number of active reliable-exchange bridges (one per in-flight push/pull
+  /// or reliable-ping stream). Observation-only, for a driver/test to assert
+  /// no bridge leaked after an exchange completed or its connection dropped.
+  pub fn live_bridge_count(&self) -> usize {
+    self.bridges.len()
+  }
+
+  /// The configured plaintext-byte ceiling for an outbound gossip datagram.
+  /// Sourced from [`crate::config::EndpointConfig::gossip_mtu`] (default
+  /// [`crate::config::DEFAULT_GOSSIP_MTU`]). The on-wire datagram may
+  /// exceed this by [`memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD`] when
+  /// encryption is enabled.
+  pub fn gossip_mtu(&self) -> usize {
+    self.ep.gossip_mtu()
+  }
+
+  /// Probe the protocol-layer credit for opening a remote-initiated
+  /// unidirectional stream to `peer`. Returns `true` iff the open
+  /// would have succeeded; on the (rare) success branch the probe
+  /// CLOSES THE ENTIRE CONNECTION before returning so no hidden
+  /// stream state can persist on a reusable connection.
+  ///
+  /// Diagnostic only: the composed unit disables remotely-initiated
+  /// unidirectional streams by construction — the transport config
+  /// installed by [`QuicConfig::new`] advertises
+  /// `max_concurrent_uni_streams = 0`, so on a peer that observed
+  /// our transport parameters this method MUST return `false` once
+  /// the handshake completes. A test can use this to assert that
+  /// the protocol-layer refusal is in effect; it is not a path the
+  /// coordinator itself uses (all coordinator-initiated streams
+  /// are bidirectional).
+  ///
+  /// Why the close-on-success — `quinn_proto::Streams::open(Dir::Uni)`
+  /// inserts send state and increments `StreamsState::send_streams`.
+  /// `SendStream::reset(0)` only marks the stream `ResetSent` and
+  /// queues a `RESET_STREAM` frame; the entry is freed on the peer's
+  /// reset ACK, NOT synchronously. A `true` branch therefore means
+  /// (a) the transport-config invariant was violated (an unsafe state
+  /// to keep using the connection), AND (b) any reset-only retirement
+  /// would leave hidden state on the pooled connection until the peer
+  /// ACKs the reset. `Connection::close(now, 0, empty)` tears down the
+  /// connection-level state immediately (transitions to `State::Closed`,
+  /// queues `CONNECTION_CLOSE` once, marks `is_drained()` after the next
+  /// `poll_transmit`/`poll_timeout` cycle); the coordinator's
+  /// `finalize_tick` then drained-reaps the slab + peers entry.
+  /// `last_now` is also anchored so any wake the close requires
+  /// surfaces immediately.
+  ///
+  /// Returns `false` if no connection to `peer` exists, or if the
+  /// open is refused.
+  pub fn try_open_uni_stream_to(&mut self, peer: SocketAddr, now: Instant) -> bool {
+    self.last_now = Some(now);
+    let Some(ch) = self.conns.handle_for(&peer) else {
+      return false;
+    };
+    let Some(e) = self.conns.get_mut(ch) else {
+      return false;
+    };
+    let opened = e.conn_mut().streams().open(Dir::Uni).is_some();
+    if opened {
+      e.conn_mut()
+        .close(now, quinn_proto::VarInt::from_u32(0), bytes::Bytes::new());
+    }
+    opened
+  }
+}
+
+// The full SWIM bag on `I`, but no `B`. Methods that delegate to
+// `Endpoint`'s full-bag surface (`poll_event`, `poll_transmit`,
+// `poll_timeout`, `handle_packet`, `handle_alive`, `handle_suspect`,
+// `requeue_event`, `start_probe`, `leave`), drive `Bridge` ops (whose
+// impls require the full bag), or run the internal bridge-pump / reap
+// helpers. The address-bridge plug `B` is consulted only by the impl
+// block below — every method here is callable on a `QuicEndpoint` whose
+// `B` carries no extra bound.
+impl<I, A, B> QuicEndpoint<I, A, B>
+where
+  I: nodecraft::Id
+    + memberlist_wire::Data
+    + nodecraft::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  A: memberlist_wire::Data
+    + nodecraft::CheapClone
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+{
   /// Build the coordinator with an explicit cross-transport encryption
   /// configuration. [`Self::new`] is `with_encryption` with encryption
   /// disabled. The configuration applies to the QUIC gossip (plain UDP)
@@ -335,6 +564,7 @@ where
   /// Routes through [`Self::set_encryption_options`] so the bridge-fan-out
   /// runs in both the builder and the in-place setter, matching
   /// [`crate::streams::StreamEndpoint::with_encryption`].
+  #[must_use]
   pub fn with_encryption(mut self, encryption: memberlist_wire::EncryptionOptions) -> Self {
     self.set_encryption_options(encryption);
     self
@@ -382,93 +612,6 @@ where
     // is the only at-risk queue on policy change.
     self.mem_ingress.clear();
     self.encryption = encryption;
-  }
-
-  /// The configured cross-transport encryption options. Applies to the
-  /// gossip path only; the QUIC reliable path always skips.
-  pub fn encryption_options(&self) -> &memberlist_wire::EncryptionOptions {
-    &self.encryption
-  }
-
-  /// Encrypt one outbound gossip datagram for the wire. The codec-owning
-  /// driver calls this on the already-compressed gossip bytes (from
-  /// [`Self::compress_gossip`]) before handing them to the UDP socket. When
-  /// encryption is disabled the bytes are returned unchanged.
-  ///
-  /// The on-wire byte order is `[Encrypted[Compressed[frame]]]` when both
-  /// transforms are enabled and compression won, or `[Encrypted[frame]]`
-  /// when compression is disabled or did not shrink.
-  ///
-  /// Returns `Err` when encryption is configured but the backend rejects the
-  /// request — typically [`memberlist_wire::EncryptionError::UnsupportedAlgorithm`]
-  /// for a primary key whose backend was not built into this binary. The
-  /// driver MUST drop the gossip in that case; emitting unencrypted bytes
-  /// on an encrypted-cluster path would bypass authentication silently.
-  pub fn encrypt_gossip(
-    &self,
-    datagram: &[u8],
-  ) -> Result<Vec<u8>, memberlist_wire::EncryptionError> {
-    let keyring = match self.encryption.keyring() {
-      Some(kr) => kr,
-      None => return Ok(datagram.to_vec()),
-    };
-    let key = keyring.primary();
-    memberlist_wire::encode_encrypted_frame(key.algorithm(), key, datagram)
-  }
-
-  /// Unwrap one inbound gossip datagram. The codec-owning driver calls this
-  /// on the raw bytes from [`Self::poll_memberlist_ingress`] BEFORE decoding
-  /// frames — it strips the Encrypted-then-Compressed wrapper stack in one
-  /// pass (each layer identity when its wrapper is absent). A datagram with
-  /// no Encrypted wrapper is returned unchanged when no keyring is
-  /// configured; when a keyring IS configured the strict-mode entry check
-  /// rejects any non-Encrypted leading tag. A corrupt or unknown-algorithm
-  /// wrapper, or a frame the keyring cannot decrypt, is an `Err` — the
-  /// driver drops the datagram (gossip is lossy and self-healing).
-  ///
-  /// This is the SINGLE canonical ingress unwrap on the coordinator. The
-  /// outbound side uses [`Self::compress_gossip`] → [`Self::encrypt_gossip`]
-  /// (compress, then encrypt) so the on-wire order is
-  /// `[Encrypted[Compressed[frame]]]`; this helper reverses both layers, so
-  /// authentication never depends on integration discipline.
-  pub fn decrypt_gossip(&self, datagram: &[u8]) -> Result<Vec<u8>, memberlist_wire::FrameError> {
-    // Ceiling is the gossip MTU — the maximum size any compliant gossip
-    // datagram decompresses to. A wrapper claiming more is not a compliant
-    // datagram and is rejected. The encryption-aware unwrap consumes an
-    // Encrypted wrapper through the keyring, then strips a Compressed
-    // wrapper if present; a non-Encrypted-led datagram is returned unchanged
-    // when no keyring is configured (the strict-mode entry check is gated
-    // on `encryption.is_enabled()`).
-    memberlist_wire::unwrap_transforms_with_encryption(
-      datagram,
-      self.ep.gossip_mtu(),
-      &self.encryption,
-    )
-    .map(|cow| cow.into_owned())
-  }
-
-  /// Borrow the inner membership endpoint (members / queue_user_broadcast / …).
-  pub fn endpoint(&self) -> &Endpoint<I, A> {
-    &self.ep
-  }
-
-  /// Mutably borrow the inner membership endpoint — test-only. Production
-  /// code accesses `self.ep` directly inside `QuicEndpoint`'s own methods.
-  /// A public raw `&mut Endpoint` would let external callers drain
-  /// `Event::DialRequested` directly out of the inner queue (via
-  /// `endpoint_mut().poll_event()`) and orphan the `PendingStreamIntent` —
-  /// the QUIC bridge would never open, the immediate-due `poll_timeout`
-  /// term would never fire, and the exchange (push/pull, reliable-ping
-  /// fallback, user-message) would silently strand. External callers go
-  /// through scoped pass-through methods ([`Self::start_push_pull`],
-  /// [`Self::start_reliable_ping`], [`Self::start_user_message`],
-  /// [`Self::start_probe`], [`Self::handle_alive`], [`Self::requeue_event`])
-  /// AND the sieving public [`Self::poll_event`], preserving the sealed
-  /// inner endpoint invariant that no caller can drain `DialRequested`
-  /// out from under `service_dials`.
-  #[cfg(test)]
-  pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, A> {
-    &mut self.ep
   }
 
   /// Initiate one SWIM probe tick on the inner membership endpoint.
@@ -674,11 +817,6 @@ where
     best
   }
 
-  /// Next outbound UDP datagram (quinn or encoded memberlist), if any.
-  pub fn poll_transmit(&mut self) -> Option<(SocketAddr, Bytes)> {
-    self.out.pop_front()
-  }
-
   /// Next typed unreliable memberlist [`Transmit`] for the driver to encode
   /// onto the unreliable (UDP) path, if any.
   ///
@@ -700,21 +838,6 @@ where
     self.ep.poll_transmit()
   }
 
-  /// Next raw inbound memberlist datagram (the first-byte demux classified it
-  /// `Class::Memberlist`), if any.
-  ///
-  /// `memberlist-machine` has no umbrella `codec` dependency, so the
-  /// coordinator cannot perform the structured unwrap
-  /// (label → decrypt → decompress → split-compound) in-crate; it surfaces
-  /// the raw `(from, bytes)` as an explicit action instead of silently
-  /// dropping it (a silent drop would lose every UDP ping/ack/alive/suspect
-  /// on the composed unit's public ingress). The codec-owning layer drains
-  /// this, decodes each `Message`, and feeds it back through
-  /// [`handle_packet`](Self::handle_packet).
-  pub fn poll_memberlist_ingress(&mut self) -> Option<(SocketAddr, Bytes)> {
-    self.mem_ingress.pop_front()
-  }
-
   /// Feed one decoded unreliable memberlist [`Message`](memberlist_wire::typed::Message)
   /// (a frame the codec-owning layer unwrapped from a datagram surfaced by
   /// [`poll_memberlist_ingress`](Self::poll_memberlist_ingress)) into the
@@ -733,93 +856,285 @@ where
     self.ep.handle_packet(from, msg, now);
   }
 
-  /// Number of live (non-reaped) QUIC connections to `peer` — `0` or `1`,
-  /// since the connection table pools one connection per peer.
+  fn route_datagram_event(
+    &mut self,
+    ev: DatagramEvent,
+    from: SocketAddr,
+    now: Instant,
+    scratch: &[u8],
+  ) {
+    match ev {
+      DatagramEvent::ConnectionEvent(ch, cev) => {
+        if let Some(e) = self.conns.get_mut(ch) {
+          e.conn_mut().handle_event(cev);
+        }
+      }
+      DatagramEvent::NewConnection(incoming) => {
+        let mut buf = Vec::new();
+        match self
+          .quinn
+          .accept(incoming, now, &mut buf, Some(self.cfg.server_arc()))
+        {
+          Ok((ch, conn)) => self.conns.insert_accepted(ch, conn, from),
+          Err(e) => {
+            // quinn-proto attaches an `Option<Transmit>` to its `AcceptError`
+            // whenever `accept` owes a refusal/close to the peer (CID
+            // exhaustion + initial-handshake transport failure produce an
+            // `initial_close` response). The close bytes are already in our
+            // local `buf`; surface them via the driver-facing `out` queue,
+            // mirroring the `DatagramEvent::Response` arm below. Without
+            // this the peer waits its full handshake retransmit budget
+            // instead of seeing the immediate close.
+            if let Some(t) = e.response {
+              if t.size <= buf.len() {
+                self
+                  .out
+                  .push_back((t.destination, Bytes::copy_from_slice(&buf[..t.size])));
+                #[cfg(test)]
+                {
+                  self.accept_error_responses_emitted =
+                    self.accept_error_responses_emitted.saturating_add(1);
+                }
+              }
+            }
+          }
+        }
+      }
+      DatagramEvent::Response(t) => {
+        // `Endpoint::handle` wrote `t.size` bytes of a stateless response
+        // (Retry / version negotiation / stateless reset) into the `scratch`
+        // buffer passed in `handle_udp`; surface it as an outbound datagram.
+        if t.size <= scratch.len() {
+          self
+            .out
+            .push_back((t.destination, Bytes::copy_from_slice(&scratch[..t.size])));
+        }
+      }
+    }
+  }
+
+  fn handle_memberlist_udp(&mut self, from: SocketAddr, datagram: &[u8]) {
+    // The umbrella `codec` is not a dependency of memberlist-machine, so the
+    // byte-level decode (decode_incoming -> parse_messages -> handle_packet)
+    // cannot run in-crate. Surfacing the raw datagram as an explicit ingress
+    // action — never a silent no-op — is required for the composed unit's
+    // ingress to remain correct: a no-op here would lose every UDP
+    // ping/ack/alive/suspect on the composed unit's public ingress. The
+    // codec-owning layer drains it via `poll_memberlist_ingress`, decodes
+    // each `Message`, and feeds it back through `handle_packet`.
+    self
+      .mem_ingress
+      .push_back((from, Bytes::copy_from_slice(datagram)));
+  }
+
+  /// Step (2) of the per-tick order: pump every bridge's inbound + outbound
+  /// halves, drain each non-terminal stream's endpoint-events into the
+  /// `Endpoint`, and D1-drain-then-reap any bridge that turned terminal.
   ///
-  /// Observation-only, for a driver/test to assert the drained-reap
-  /// lifecycle (a connection that idled past `max_idle_timeout` is reaped:
-  /// its slab + peers entry is removed, so this drops back to `0`). A
-  /// connection still in its closing/draining wind-down is reported live
-  /// until [`ConnTable::reap_if_drained`] removes it.
-  pub fn live_connections_to(&self, peer: SocketAddr) -> usize {
-    match self.conns.handle_for(&peer) {
-      Some(ch) => usize::from(
+  /// Extracted so [`Self::flush_outbound`] can re-use the same bridge step
+  /// after `service_dials` — a freshly-opened outbound bridge carries its
+  /// request bytes in its FSM `Stream` output buffer, and a single pump is
+  /// what moves those bytes into the quinn send stream so they emerge on
+  /// the next [`Self::collect_transmits`].
+  fn pump_bridges(&mut self, now: Instant) {
+    let ids: Vec<StreamId> = self.bridges.keys().copied().collect();
+    for id in &ids {
+      // Split borrow: take the bridge out, operate, put back (or reap).
+      if let Some(mut br) = self.bridges.remove(id) {
+        // `pump_in`/`pump_out` set the bridge `fatal` flag on a transport
+        // error, so `is_terminal()` below drives the prompt reap; the
+        // `#[must_use]` Results are consumed — terminality is the signal.
+        let _ = br.pump_in(&mut self.conns, now);
+        let _ = br.pump_out(&mut self.conns, now);
+        // Drain endpoint-events EVERY tick (not only when terminal).
+        // `drain_then_reap` also delivers the slot-gone notice (terminal
+        // only); a non-terminal stream drains its payload events with the
+        // SAME encode+load+flush but WITHOUT that notice.
+        if br.is_terminal() {
+          br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+          // (5) reap AFTER drain: dropping the bridge frees its slot.
+          drop(br);
+        } else {
+          br.drain_payload_only(&mut self.ep, &mut self.conns, now);
+          // `drain_payload_only` may flip the bridge to terminal (e.g.
+          // a `StreamCommand::Close` from an admission-rejected join sets
+          // `fatal`); re-check terminality so the bridge D1-drains and
+          // reaps in this SAME tick rather than holding the quinn bidi
+          // stream until its exchange deadline.
+          if br.is_terminal() {
+            #[cfg(test)]
+            {
+              self.bridges_terminalized_via_close_command = self
+                .bridges_terminalized_via_close_command
+                .saturating_add(1);
+            }
+            br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+            drop(br);
+          } else {
+            self.bridges.insert(*id, br);
+          }
+        }
+      }
+    }
+  }
+
+  /// Test-only variant of [`Self::pump_bridges`] that increments
+  /// [`Self::bridges_pumped_after_acceptance`] once for each bridge whose
+  /// id is NOT in `pre_snapshot_ids` (i.e. inserted into `self.bridges`
+  /// AFTER the snapshot was taken). Used by step (5.5) of [`Self::run_tick`]
+  /// and the post-`service_quinn` second pump in [`Self::flush_outbound`] to
+  /// prove the post-acceptance pump actually runs on every newly-inserted
+  /// bridge — the negative-control regression test reverts the step (5.5)
+  /// call site and the counter stays at zero.
+  ///
+  /// The body is otherwise byte-identical to `pump_bridges`: the counter
+  /// increment is the ONLY observable difference, so production behaviour
+  /// (the second pump's effect on `self.bridges` and the inner `Endpoint`)
+  /// is unchanged.
+  #[cfg(test)]
+  fn pump_bridges_tracking_post_acceptance(
+    &mut self,
+    now: Instant,
+    pre_snapshot_ids: &std::collections::HashSet<StreamId>,
+  ) {
+    let ids: Vec<StreamId> = self.bridges.keys().copied().collect();
+    for id in &ids {
+      if let Some(mut br) = self.bridges.remove(id) {
+        if !pre_snapshot_ids.contains(id) {
+          self.bridges_pumped_after_acceptance =
+            self.bridges_pumped_after_acceptance.saturating_add(1);
+        }
+        let _ = br.pump_in(&mut self.conns, now);
+        let _ = br.pump_out(&mut self.conns, now);
+        if br.is_terminal() {
+          br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+          drop(br);
+        } else {
+          br.drain_payload_only(&mut self.ep, &mut self.conns, now);
+          // Mirror `pump_bridges`'s post-`drain_payload_only` terminality
+          // re-check so this test-only variant matches production reap
+          // semantics under an admission-rejected `Close`.
+          if br.is_terminal() {
+            self.bridges_terminalized_via_close_command = self
+              .bridges_terminalized_via_close_command
+              .saturating_add(1);
+            br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+            drop(br);
+          } else {
+            self.bridges.insert(*id, br);
+          }
+        }
+      }
+    }
+  }
+
+  /// Shared tail of [`Self::run_tick`] and [`Self::flush_outbound`]:
+  /// step (5) connection drained-reap, then [`Self::collect_transmits`].
+  ///
+  /// The reap simply walks every live `ConnectionHandle` and calls
+  /// [`ConnTable::reap_if_drained`]; per-connection deferred
+  /// `ConnectionEvent`s queued by `service_quinn` live in each
+  /// [`super::conn::ConnEntry`]'s own `pending_events` deque (see
+  /// [`super::conn::ConnEntry::queue_pending_event`]) so a reap that drops
+  /// the slab entry also drops its deferred queue by construction — no
+  /// global FIFO can survive past the reap to be re-keyed onto a fresh
+  /// connection occupying the freed slab slot.
+  fn finalize_tick(&mut self, now: Instant) {
+    for ch in self.conns.iter_handles() {
+      self.conns.reap_if_drained(&mut self.quinn, ch);
+    }
+    self.collect_transmits(now);
+  }
+
+  /// Move any `Event::DialRequested` currently in the inner endpoint's
+  /// queue into the private [`dial_pending`](Self::dial_pending) deque,
+  /// preserving FIFO order of every other event. The inner queue is
+  /// fully drained into a local buffer; `DialRequested` is routed to
+  /// `dial_pending`; every other event is re-queued at the back via
+  /// [`Endpoint::requeue_event`] in original order. Bounded — each event
+  /// is visited at most once because the drain stops when the inner
+  /// queue is empty and re-queueing into the now-empty queue cannot
+  /// re-surface anything we have already taken out.
+  fn sieve_dial_events(&mut self) {
+    let mut others: Vec<Event<I, A>> = Vec::new();
+    while let Some(ev) = self.ep.poll_event() {
+      match ev {
+        Event::DialRequested { id, peer, deadline } => {
+          self.dial_pending.push_back(PendingDial {
+            id,
+            peer,
+            deadline,
+            attempted: false,
+          });
+        }
+        other => others.push(other),
+      }
+    }
+    for ev in others {
+      self.ep.requeue_event(ev);
+    }
+  }
+
+  fn collect_transmits(&mut self, now: Instant) {
+    // Memberlist unreliable Transmit is NOT pre-drained here. Each call to
+    // `poll_memberlist_transmit` drains one `Transmit` out of
+    // `Endpoint::poll_transmit` on demand, so the inner pop — which counts
+    // down the leave-completion boundary and emits `Event::LeftCluster` after
+    // the last dead-self notice — happens exactly when the datagram crosses
+    // to the external driver. Pre-draining coordinator-internally would tick
+    // the boundary on the inner-queue→buffer hop and let a caller observe
+    // `LeftCluster` while the dead-self bytes still sat in the buffer,
+    // leaving peers to wrongly Suspect after teardown.
+    //
+    // quinn datagrams (handshake, stream data, ACKs, close) HAVE no such
+    // dead-self accounting on their inner pop, so pre-draining them into
+    // `out` is fine and keeps `poll_transmit` a constant-time `pop_front`.
+    for ch in self.conns.iter_handles() {
+      let Some(e) = self.conns.get_mut(ch) else {
+        continue;
+      };
+      let mut buf = Vec::new();
+      while let Some(tr) = e.conn_mut().poll_transmit(now, 1, &mut buf) {
+        // Use the transmit's own destination (not the cached peer) so a
+        // datagram is sent to the address quinn selected — correct under
+        // path migration and consistent with the stateless `Response` arm.
         self
-          .conns
-          .get(ch)
-          .map(|e| !e.conn().is_drained())
-          .unwrap_or(false),
-      ),
-      None => 0,
+          .out
+          .push_back((tr.destination, Bytes::copy_from_slice(&buf[..tr.size])));
+        buf.clear();
+      }
     }
   }
+}
 
-  /// Number of active reliable-exchange bridges (one per in-flight push/pull
-  /// or reliable-ping stream). Observation-only, for a driver/test to assert
-  /// no bridge leaked after an exchange completed or its connection dropped.
-  pub fn live_bridge_count(&self) -> usize {
-    self.bridges.len()
-  }
-
-  /// The configured plaintext-byte ceiling for an outbound gossip datagram.
-  /// Sourced from [`crate::config::EndpointConfig::gossip_mtu`] (default
-  /// [`crate::config::DEFAULT_GOSSIP_MTU`]). The on-wire datagram may
-  /// exceed this by [`memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD`] when
-  /// encryption is enabled.
-  pub fn gossip_mtu(&self) -> usize {
-    self.ep.gossip_mtu()
-  }
-
-  /// Probe the protocol-layer credit for opening a remote-initiated
-  /// unidirectional stream to `peer`. Returns `true` iff the open
-  /// would have succeeded; on the (rare) success branch the probe
-  /// CLOSES THE ENTIRE CONNECTION before returning so no hidden
-  /// stream state can persist on a reusable connection.
-  ///
-  /// Diagnostic only: the composed unit disables remotely-initiated
-  /// unidirectional streams by construction — the transport config
-  /// installed by [`QuicConfig::new`] advertises
-  /// `max_concurrent_uni_streams = 0`, so on a peer that observed
-  /// our transport parameters this method MUST return `false` once
-  /// the handshake completes. A test can use this to assert that
-  /// the protocol-layer refusal is in effect; it is not a path the
-  /// coordinator itself uses (all coordinator-initiated streams
-  /// are bidirectional).
-  ///
-  /// Why the close-on-success — `quinn_proto::Streams::open(Dir::Uni)`
-  /// inserts send state and increments `StreamsState::send_streams`.
-  /// `SendStream::reset(0)` only marks the stream `ResetSent` and
-  /// queues a `RESET_STREAM` frame; the entry is freed on the peer's
-  /// reset ACK, NOT synchronously. A `true` branch therefore means
-  /// (a) the transport-config invariant was violated (an unsafe state
-  /// to keep using the connection), AND (b) any reset-only retirement
-  /// would leave hidden state on the pooled connection until the peer
-  /// ACKs the reset. `Connection::close(now, 0, empty)` tears down the
-  /// connection-level state immediately (transitions to `State::Closed`,
-  /// queues `CONNECTION_CLOSE` once, marks `is_drained()` after the next
-  /// `poll_transmit`/`poll_timeout` cycle); the coordinator's
-  /// `finalize_tick` then drained-reaps the slab + peers entry.
-  /// `last_now` is also anchored so any wake the close requires
-  /// surfaces immediately.
-  ///
-  /// Returns `false` if no connection to `peer` exists, or if the
-  /// open is refused.
-  pub fn try_open_uni_stream_to(&mut self, peer: SocketAddr, now: Instant) -> bool {
-    self.last_now = Some(now);
-    let Some(ch) = self.conns.handle_for(&peer) else {
-      return false;
-    };
-    let Some(e) = self.conns.get_mut(ch) else {
-      return false;
-    };
-    let opened = e.conn_mut().streams().open(Dir::Uni).is_some();
-    if opened {
-      e.conn_mut()
-        .close(now, quinn_proto::VarInt::from_u32(0), bytes::Bytes::new());
-    }
-    opened
-  }
-
+// The full SWIM bag plus `B: AddrBridge<A>`. Methods that resolve a peer
+// address to a transport `SocketAddr` via `B::to_socket` /
+// `B::from_socket`, derive a per-dial verification identity via
+// `B::server_name`, or transitively reach any of those through the
+// coordinator tick (`run_tick` -> `service_dials` / `service_quinn`,
+// `flush_outbound` -> `service_quinn`, the `start_*` wrappers and the
+// `handle_udp` / `handle_timeout` driver entrypoints).
+impl<I, A, B> QuicEndpoint<I, A, B>
+where
+  I: nodecraft::Id
+    + memberlist_wire::Data
+    + nodecraft::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  A: memberlist_wire::Data
+    + nodecraft::CheapClone
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  B: AddrBridge<A>,
+{
   /// Inbound datagram from the one UDP socket.
   ///
   /// The `Quic` class is fully processed: the datagram is fed into quinn-proto's
@@ -928,79 +1243,6 @@ where
     id
   }
 
-  // ---- internals --------------------------------------------------------
-
-  fn route_datagram_event(
-    &mut self,
-    ev: DatagramEvent,
-    from: SocketAddr,
-    now: Instant,
-    scratch: &[u8],
-  ) {
-    match ev {
-      DatagramEvent::ConnectionEvent(ch, cev) => {
-        if let Some(e) = self.conns.get_mut(ch) {
-          e.conn_mut().handle_event(cev);
-        }
-      }
-      DatagramEvent::NewConnection(incoming) => {
-        let mut buf = Vec::new();
-        match self
-          .quinn
-          .accept(incoming, now, &mut buf, Some(self.cfg.server().clone()))
-        {
-          Ok((ch, conn)) => self.conns.insert_accepted(ch, conn, from),
-          Err(e) => {
-            // quinn-proto attaches an `Option<Transmit>` to its `AcceptError`
-            // whenever `accept` owes a refusal/close to the peer (CID
-            // exhaustion + initial-handshake transport failure produce an
-            // `initial_close` response). The close bytes are already in our
-            // local `buf`; surface them via the driver-facing `out` queue,
-            // mirroring the `DatagramEvent::Response` arm below. Without
-            // this the peer waits its full handshake retransmit budget
-            // instead of seeing the immediate close.
-            if let Some(t) = e.response {
-              if t.size <= buf.len() {
-                self
-                  .out
-                  .push_back((t.destination, Bytes::copy_from_slice(&buf[..t.size])));
-                #[cfg(test)]
-                {
-                  self.accept_error_responses_emitted =
-                    self.accept_error_responses_emitted.saturating_add(1);
-                }
-              }
-            }
-          }
-        }
-      }
-      DatagramEvent::Response(t) => {
-        // `Endpoint::handle` wrote `t.size` bytes of a stateless response
-        // (Retry / version negotiation / stateless reset) into the `scratch`
-        // buffer passed in `handle_udp`; surface it as an outbound datagram.
-        if t.size <= scratch.len() {
-          self
-            .out
-            .push_back((t.destination, Bytes::copy_from_slice(&scratch[..t.size])));
-        }
-      }
-    }
-  }
-
-  fn handle_memberlist_udp(&mut self, from: SocketAddr, datagram: &[u8]) {
-    // The umbrella `codec` is not a dependency of memberlist-machine, so the
-    // byte-level decode (decode_incoming -> parse_messages -> handle_packet)
-    // cannot run in-crate. Surfacing the raw datagram as an explicit ingress
-    // action — never a silent no-op — is required for the composed unit's
-    // ingress to remain correct: a no-op here would lose every UDP
-    // ping/ack/alive/suspect on the composed unit's public ingress. The
-    // codec-owning layer drains it via `poll_memberlist_ingress`, decodes
-    // each `Message`, and feeds it back through `handle_packet`.
-    self
-      .mem_ingress
-      .push_back((from, Bytes::copy_from_slice(datagram)));
-  }
-
   /// The fixed per-tick step order (load-bearing — see module docs).
   ///
   /// Step (2) (drain each non-terminal stream's endpoint-events into the
@@ -1057,107 +1299,6 @@ where
     #[cfg(not(test))]
     self.pump_bridges(now);
     self.finalize_tick(now);
-  }
-
-  /// Step (2) of the per-tick order: pump every bridge's inbound + outbound
-  /// halves, drain each non-terminal stream's endpoint-events into the
-  /// `Endpoint`, and D1-drain-then-reap any bridge that turned terminal.
-  ///
-  /// Extracted so [`Self::flush_outbound`] can re-use the same bridge step
-  /// after `service_dials` — a freshly-opened outbound bridge carries its
-  /// request bytes in its FSM `Stream` output buffer, and a single pump is
-  /// what moves those bytes into the quinn send stream so they emerge on
-  /// the next [`Self::collect_transmits`].
-  fn pump_bridges(&mut self, now: Instant) {
-    let ids: Vec<StreamId> = self.bridges.keys().copied().collect();
-    for id in &ids {
-      // Split borrow: take the bridge out, operate, put back (or reap).
-      if let Some(mut br) = self.bridges.remove(id) {
-        // `pump_in`/`pump_out` set the bridge `fatal` flag on a transport
-        // error, so `is_terminal()` below drives the prompt reap; the
-        // `#[must_use]` Results are consumed — terminality is the signal.
-        let _ = br.pump_in(&mut self.conns, now);
-        let _ = br.pump_out(&mut self.conns, now);
-        // Drain endpoint-events EVERY tick (not only when terminal).
-        // `drain_then_reap` also delivers the slot-gone notice (terminal
-        // only); a non-terminal stream drains its payload events with the
-        // SAME encode+load+flush but WITHOUT that notice.
-        if br.is_terminal() {
-          br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-          // (5) reap AFTER drain: dropping the bridge frees its slot.
-          drop(br);
-        } else {
-          br.drain_payload_only(&mut self.ep, &mut self.conns, now);
-          // `drain_payload_only` may flip the bridge to terminal (e.g.
-          // a `StreamCommand::Close` from an admission-rejected join sets
-          // `fatal`); re-check terminality so the bridge D1-drains and
-          // reaps in this SAME tick rather than holding the quinn bidi
-          // stream until its exchange deadline.
-          if br.is_terminal() {
-            #[cfg(test)]
-            {
-              self.bridges_terminalized_via_close_command = self
-                .bridges_terminalized_via_close_command
-                .saturating_add(1);
-            }
-            br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-            drop(br);
-          } else {
-            self.bridges.insert(*id, br);
-          }
-        }
-      }
-    }
-  }
-
-  /// Test-only variant of [`Self::pump_bridges`] that increments
-  /// [`Self::bridges_pumped_after_acceptance`] once for each bridge whose
-  /// id is NOT in `pre_snapshot_ids` (i.e. inserted into `self.bridges`
-  /// AFTER the snapshot was taken). Used by step (5.5) of [`Self::run_tick`]
-  /// and the post-`service_quinn` second pump in [`Self::flush_outbound`] to
-  /// prove the post-acceptance pump actually runs on every newly-inserted
-  /// bridge — the negative-control regression test reverts the step (5.5)
-  /// call site and the counter stays at zero.
-  ///
-  /// The body is otherwise byte-identical to `pump_bridges`: the counter
-  /// increment is the ONLY observable difference, so production behaviour
-  /// (the second pump's effect on `self.bridges` and the inner `Endpoint`)
-  /// is unchanged.
-  #[cfg(test)]
-  fn pump_bridges_tracking_post_acceptance(
-    &mut self,
-    now: Instant,
-    pre_snapshot_ids: &std::collections::HashSet<StreamId>,
-  ) {
-    let ids: Vec<StreamId> = self.bridges.keys().copied().collect();
-    for id in &ids {
-      if let Some(mut br) = self.bridges.remove(id) {
-        if !pre_snapshot_ids.contains(id) {
-          self.bridges_pumped_after_acceptance =
-            self.bridges_pumped_after_acceptance.saturating_add(1);
-        }
-        let _ = br.pump_in(&mut self.conns, now);
-        let _ = br.pump_out(&mut self.conns, now);
-        if br.is_terminal() {
-          br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-          drop(br);
-        } else {
-          br.drain_payload_only(&mut self.ep, &mut self.conns, now);
-          // Mirror `pump_bridges`'s post-`drain_payload_only` terminality
-          // re-check so this test-only variant matches production reap
-          // semantics under an admission-rejected `Close`.
-          if br.is_terminal() {
-            self.bridges_terminalized_via_close_command = self
-              .bridges_terminalized_via_close_command
-              .saturating_add(1);
-            br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-            drop(br);
-          } else {
-            self.bridges.insert(*id, br);
-          }
-        }
-      }
-    }
   }
 
   /// Zero-time outbound flush invoked from the high-level `start_*` APIs
@@ -1219,24 +1360,6 @@ where
     #[cfg(not(test))]
     self.pump_bridges(now);
     self.finalize_tick(now);
-  }
-
-  /// Shared tail of [`Self::run_tick`] and [`Self::flush_outbound`]:
-  /// step (5) connection drained-reap, then [`Self::collect_transmits`].
-  ///
-  /// The reap simply walks every live `ConnectionHandle` and calls
-  /// [`ConnTable::reap_if_drained`]; per-connection deferred
-  /// `ConnectionEvent`s queued by `service_quinn` live in each
-  /// [`super::conn::ConnEntry`]'s own `pending_events` deque (see
-  /// [`super::conn::ConnEntry::queue_pending_event`]) so a reap that drops
-  /// the slab entry also drops its deferred queue by construction — no
-  /// global FIFO can survive past the reap to be re-keyed onto a fresh
-  /// connection occupying the freed slab slot.
-  fn finalize_tick(&mut self, now: Instant) {
-    for ch in self.conns.iter_handles() {
-      self.conns.reap_if_drained(&mut self.quinn, ch);
-    }
-    self.collect_transmits(now);
   }
 
   fn service_quinn(&mut self, now: Instant) {
@@ -1403,7 +1526,7 @@ where
       // internal `events` FIFO ordering. The combined `lost || is_drained()`
       // gate catches both shapes so the strict-poll bridge-leak is closed
       // regardless of which signal arrived first.
-      let drained = e.conn().is_drained();
+      let drained = e.conn_ref().is_drained();
       // `e` borrows `self.conns`; release it before touching `self.bridges`.
       let _ = e;
       if lost || drained {
@@ -1447,35 +1570,6 @@ where
           }
         }
       }
-    }
-  }
-
-  /// Move any `Event::DialRequested` currently in the inner endpoint's
-  /// queue into the private [`dial_pending`](Self::dial_pending) deque,
-  /// preserving FIFO order of every other event. The inner queue is
-  /// fully drained into a local buffer; `DialRequested` is routed to
-  /// `dial_pending`; every other event is re-queued at the back via
-  /// [`Endpoint::requeue_event`] in original order. Bounded — each event
-  /// is visited at most once because the drain stops when the inner
-  /// queue is empty and re-queueing into the now-empty queue cannot
-  /// re-surface anything we have already taken out.
-  fn sieve_dial_events(&mut self) {
-    let mut others: Vec<Event<I, A>> = Vec::new();
-    while let Some(ev) = self.ep.poll_event() {
-      match ev {
-        Event::DialRequested { id, peer, deadline } => {
-          self.dial_pending.push_back(PendingDial {
-            id,
-            peer,
-            deadline,
-            attempted: false,
-          });
-        }
-        other => others.push(other),
-      }
-    }
-    for ev in others {
-      self.ep.requeue_event(ev);
     }
   }
 
@@ -1642,7 +1736,7 @@ where
                 let is_closed_now = self
                   .conns
                   .get(ch)
-                  .map(|c| c.conn().is_closed())
+                  .map(|c| c.conn_ref().is_closed())
                   .unwrap_or(true);
                 if is_closed_now {
                   self.ep.dial_failed(
@@ -1674,40 +1768,9 @@ where
         }
         Err(e) => self.ep.dial_failed(
           id,
-          crate::error::StreamError::DialFailed(e.to_string()),
+          crate::error::StreamError::DialFailed(e.to_string().into()),
           now,
         ),
-      }
-    }
-  }
-
-  fn collect_transmits(&mut self, now: Instant) {
-    // Memberlist unreliable Transmit is NOT pre-drained here. Each call to
-    // `poll_memberlist_transmit` drains one `Transmit` out of
-    // `Endpoint::poll_transmit` on demand, so the inner pop — which counts
-    // down the leave-completion boundary and emits `Event::LeftCluster` after
-    // the last dead-self notice — happens exactly when the datagram crosses
-    // to the external driver. Pre-draining coordinator-internally would tick
-    // the boundary on the inner-queue→buffer hop and let a caller observe
-    // `LeftCluster` while the dead-self bytes still sat in the buffer,
-    // leaving peers to wrongly Suspect after teardown.
-    //
-    // quinn datagrams (handshake, stream data, ACKs, close) HAVE no such
-    // dead-self accounting on their inner pop, so pre-draining them into
-    // `out` is fine and keeps `poll_transmit` a constant-time `pop_front`.
-    for ch in self.conns.iter_handles() {
-      let Some(e) = self.conns.get_mut(ch) else {
-        continue;
-      };
-      let mut buf = Vec::new();
-      while let Some(tr) = e.conn_mut().poll_transmit(now, 1, &mut buf) {
-        // Use the transmit's own destination (not the cached peer) so a
-        // datagram is sent to the address quinn selected — correct under
-        // path migration and consistent with the stateless `Response` arm.
-        self
-          .out
-          .push_back((tr.destination, Bytes::copy_from_slice(&buf[..tr.size])));
-        buf.clear();
       }
     }
   }
@@ -1761,7 +1824,7 @@ mod tests {
     addr: SocketAddr,
     now: Instant,
   ) -> QuicEndpoint<SmolStr, SocketAddr, IdBridge> {
-    let cfg = EndpointConfig::new(SmolStr::new(id), addr).with_rng_seed(Some(addr.port() as u64));
+    let cfg = EndpointConfig::new(SmolStr::new(id), addr).with_rng_seed(addr.port() as u64);
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     ep.start_scheduling(now);
     let qc = test_config();
@@ -2102,7 +2165,7 @@ mod tests {
       if a
         .conns
         .get(ch_a)
-        .map(|e| e.conn().is_drained())
+        .map(|e| e.conn_ref().is_drained())
         .unwrap_or(true)
       {
         break;
@@ -2121,7 +2184,7 @@ mod tests {
     assert!(
       a.conns
         .get(ch_a)
-        .map(|e| e.conn().is_drained())
+        .map(|e| e.conn_ref().is_drained())
         .unwrap_or(false),
       "test precondition: A's connection must be drained before reap"
     );
@@ -2324,8 +2387,7 @@ mod tests {
     // (1) Build a bare Endpoint. Call start_push_pull on it BEFORE
     // wrapping — this is the legitimate Endpoint usage that produces a
     // DialRequested in the inner queue before `QuicEndpoint` wraps it.
-    let cfg =
-      EndpointConfig::new(SmolStr::new("a"), a_addr).with_rng_seed(Some(a_addr.port() as u64));
+    let cfg = EndpointConfig::new(SmolStr::new("a"), a_addr).with_rng_seed(a_addr.port() as u64);
     let mut bare_ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     bare_ep.start_scheduling(t0);
     let _ = bare_ep.start_push_pull(b_addr, PushPullKind::Join, t0);
@@ -2487,7 +2549,7 @@ mod tests {
     assert!(
       a.conns
         .get(ch_a)
-        .map(|e| !e.conn().is_handshaking() && !e.conn().is_closed())
+        .map(|e| !e.conn_ref().is_handshaking() && !e.conn_ref().is_closed())
         .unwrap_or(false),
       "test precondition: A's connection to B must be Established \
        before the idle-timeout is advanced"
@@ -2630,7 +2692,7 @@ mod tests {
     assert!(
       a.conns
         .get(ch_a)
-        .map(|e| !e.conn().is_handshaking() && !e.conn().is_closed())
+        .map(|e| !e.conn_ref().is_handshaking() && !e.conn_ref().is_closed())
         .unwrap_or(false),
       "test precondition: A's pooled connection must be Established"
     );
@@ -3244,8 +3306,7 @@ mod tests {
   ) -> QuicEndpoint<SmolStr, SocketAddr, IdBridge> {
     let addr: SocketAddr = "127.0.0.1:7999".parse().unwrap();
     let now = Instant::now();
-    let cfg =
-      EndpointConfig::new(SmolStr::new("test"), addr).with_rng_seed(Some(addr.port() as u64));
+    let cfg = EndpointConfig::new(SmolStr::new("test"), addr).with_rng_seed(addr.port() as u64);
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     ep.start_scheduling(now);
     let qc = test_config();
@@ -3258,7 +3319,7 @@ mod tests {
     use memberlist_wire::{CompressAlgorithm, CompressionOptions};
     let coord = build_test_quic_endpoint_with_compression(
       CompressionOptions::new()
-        .with_algorithm(Some(CompressAlgorithm::Lz4))
+        .with_algorithm(CompressAlgorithm::Lz4)
         .with_threshold(64),
     );
     let datagram = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".repeat(8);
@@ -3281,7 +3342,7 @@ mod tests {
     use memberlist_wire::CompressAlgorithm;
     let coord = build_test_quic_endpoint_with_compression(
       memberlist_wire::CompressionOptions::new()
-        .with_algorithm(Some(CompressAlgorithm::Lz4))
+        .with_algorithm(CompressAlgorithm::Lz4)
         .with_threshold(64),
     );
     let over_mtu = coord.gossip_mtu() + 1;
@@ -3301,7 +3362,7 @@ mod tests {
     // wrapper header overhead erases the raw saving.
     let coord = build_test_quic_endpoint_with_compression(
       CompressionOptions::new()
-        .with_algorithm(Some(CompressAlgorithm::Lz4))
+        .with_algorithm(CompressAlgorithm::Lz4)
         .with_threshold(1),
     );
     for len in 1..=1500 {
@@ -3336,8 +3397,7 @@ mod tests {
   ) -> QuicEndpoint<SmolStr, SocketAddr, IdBridge> {
     let addr: SocketAddr = "127.0.0.1:7999".parse().unwrap();
     let now = Instant::now();
-    let cfg =
-      EndpointConfig::new(SmolStr::new("test"), addr).with_rng_seed(Some(addr.port() as u64));
+    let cfg = EndpointConfig::new(SmolStr::new("test"), addr).with_rng_seed(addr.port() as u64);
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     ep.start_scheduling(now);
     let qc = test_config();
@@ -3369,7 +3429,7 @@ mod tests {
   #[test]
   fn quic_decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
     use memberlist_wire::{
-      EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey, encode_plain_frame,
+      encode_plain_frame, EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey,
     };
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
     let coord = build_test_quic_endpoint_with_encryption(opts);

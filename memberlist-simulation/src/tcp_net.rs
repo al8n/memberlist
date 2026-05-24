@@ -42,8 +42,8 @@ use std::{
 };
 
 use memberlist_machine::{
-  AddrBridge, Endpoint, EndpointConfig, Event, PushPullKind, RawRecords, TcpOptions, Transmit,
   streams::{ExchangeId, StreamAction, StreamEndpoint},
+  AddrBridge, Endpoint, EndpointConfig, Event, PushPullKind, RawRecords, TcpOptions, Transmit,
 };
 use memberlist_wire::{
   framing, message_from_any, message_to_any,
@@ -222,7 +222,7 @@ impl TcpCluster {
       .with_probe_timeout(probe_timeout)
       .with_suspicion_mult(4)
       .with_retransmit_mult(4)
-      .with_rng_seed(Some(addr.port() as u64));
+      .with_rng_seed(addr.port() as u64);
     let mut ep = Endpoint::new(cfg);
     ep.start_scheduling(self.clock.now());
     let configured_label = if self.unlabeled_hosts.contains(&addr) {
@@ -238,7 +238,7 @@ impl TcpCluster {
     };
     let mut tcp_cfg = TcpOptions::new(configured_label);
     if self.skip_inbound_label_check_hosts.contains(&addr) {
-      tcp_cfg = tcp_cfg.with_skip_inbound_label_check(true);
+      tcp_cfg = tcp_cfg.with_skip_inbound_label_check();
     }
     self.nodes.insert(
       addr,
@@ -279,7 +279,7 @@ impl TcpCluster {
   ) -> Self {
     let mut c = Self::empty();
     c.compression = memberlist_wire::CompressionOptions::new()
-      .with_algorithm(Some(algorithm))
+      .with_algorithm(algorithm)
       .with_threshold(0);
     c.add_node("a", a);
     c.add_node("b", b);
@@ -323,7 +323,7 @@ impl TcpCluster {
   ) -> Self {
     let mut c = Self::empty();
     c.compression = memberlist_wire::CompressionOptions::new()
-      .with_algorithm(Some(algorithm))
+      .with_algorithm(algorithm)
       .with_threshold(0);
     c.encryption = memberlist_wire::EncryptionOptions::new()
       .with_keyring(memberlist_wire::Keyring::new(primary_key));
@@ -421,7 +421,7 @@ impl TcpCluster {
     let mut c = Self::empty();
     c.tcp_window = Some(1200);
     c.compression = memberlist_wire::CompressionOptions::new()
-      .with_algorithm(Some(algorithm))
+      .with_algorithm(algorithm)
       .with_threshold(0);
     c.add_node("a", a);
     c.add_node("b", b);
@@ -721,7 +721,7 @@ impl TcpCluster {
     host: SocketAddr,
     peer: &SmolStr,
   ) -> Option<memberlist_wire::typed::State> {
-    self.nodes.get(&host)?.endpoint().member_liveness(peer)
+    self.nodes.get(&host)?.endpoint_ref().member_liveness(peer)
   }
 
   /// `true` if `host` has EVER observed `peer` in `Suspect` (scanned every
@@ -916,21 +916,23 @@ impl TcpCluster {
       while let Some(tx) = node.poll_memberlist_transmit() {
         match tx {
           Transmit::Packet(p) => {
-            if let Some(b) = encode_frame(&p.message) {
-              pending.push((p.to, b));
+            let (to, message) = p.into_parts();
+            if let Some(b) = encode_frame(&message) {
+              pending.push((to, b));
             }
           }
           Transmit::Compound(cmp) => {
             // A compound is ONE datagram: concatenate the plain frames so a
             // single fault/latency decision covers the whole bundle.
+            let (to, messages) = cmp.into_parts();
             let mut buf = Vec::new();
-            for m in &cmp.messages {
+            for m in &messages {
               if let Some(b) = encode_frame(m) {
                 buf.extend_from_slice(&b);
               }
             }
             if !buf.is_empty() {
-              pending.push((cmp.to, bytes::Bytes::from(buf)));
+              pending.push((to, bytes::Bytes::from(buf)));
             }
           }
         }
@@ -1402,16 +1404,20 @@ impl TcpCluster {
       #[allow(clippy::type_complexity)]
       let (suspects, alives, gone): (Vec<SmolStr>, Vec<SmolStr>, Vec<SmolStr>) = {
         let node = self.nodes.get(&host).unwrap();
-        let me = node.endpoint().local_id().clone();
+        let me = node.endpoint_ref().local_id_ref().clone();
         let mut sus = Vec::new();
         let mut alv = Vec::new();
         let mut gn = Vec::new();
-        for ns in node.endpoint().members().filter(|ns| ns.id() != &me) {
-          match node.endpoint().member_liveness(ns.id()) {
-            Some(memberlist_wire::typed::State::Suspect) => sus.push(ns.id().clone()),
-            Some(memberlist_wire::typed::State::Alive) => alv.push(ns.id().clone()),
+        for ns in node
+          .endpoint_ref()
+          .members()
+          .filter(|ns| ns.id_ref() != &me)
+        {
+          match node.endpoint_ref().member_liveness(ns.id_ref()) {
+            Some(memberlist_wire::typed::State::Suspect) => sus.push(ns.id_ref().clone()),
+            Some(memberlist_wire::typed::State::Alive) => alv.push(ns.id_ref().clone()),
             Some(memberlist_wire::typed::State::Dead)
-            | Some(memberlist_wire::typed::State::Left) => gn.push(ns.id().clone()),
+            | Some(memberlist_wire::typed::State::Left) => gn.push(ns.id_ref().clone()),
             _ => {}
           }
         }

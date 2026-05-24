@@ -53,14 +53,14 @@ impl StreamTransport for RawRecords {
   fn dialer(opts: &Self::Options, _ctx: Self::DialContext) -> Result<Self, Self::ConstructError> {
     Ok(RawRecords::dialer(
       opts.label().map(<[u8]>::to_vec),
-      opts.skip_inbound_label_check(),
+      opts.is_skip_inbound_label_check(),
     ))
   }
 
   fn acceptor(opts: &Self::Options) -> Result<Self, Self::ConstructError> {
     Ok(RawRecords::acceptor(
       opts.label().map(<[u8]>::to_vec),
-      opts.skip_inbound_label_check(),
+      opts.is_skip_inbound_label_check(),
     ))
   }
 
@@ -115,15 +115,15 @@ mod tests {
   use bytes::Bytes;
   use smol_str::SmolStr;
 
-  use super::{TcpOptions, records::RawRecords};
+  use super::{records::RawRecords, TcpOptions};
   use crate::{
     addr_bridge::AddrBridge,
     config::EndpointConfig,
     endpoint::Endpoint,
     event::{Event, PushPullKind},
     streams::{
-      ConnectInfo, ExchangeId, ExchangeRef, StreamAction, StreamEndpoint,
       test_support::{addr, endpoint},
+      ConnectInfo, ExchangeId, ExchangeRef, StreamAction, StreamEndpoint,
     },
   };
 
@@ -1596,7 +1596,7 @@ mod tests {
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
     let opts = CompressionOptions::new()
-      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(64);
     let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
       StreamEndpoint::with_compression(ep, cfg, opts);
@@ -1617,7 +1617,7 @@ mod tests {
     let ep = endpoint(7102);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
     let opts = CompressionOptions::new()
-      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(64);
     let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
       StreamEndpoint::with_compression(ep, cfg, opts);
@@ -1643,7 +1643,7 @@ mod tests {
     // the sweep, exercising the don't-expand else branch for sizes where the
     // wrapper header overhead erases the raw saving.
     let opts = CompressionOptions::new()
-      .with_algorithm(Some(CompressAlgorithm::Lz4))
+      .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(1);
     let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
       StreamEndpoint::with_compression(ep, cfg, opts);
@@ -1707,7 +1707,7 @@ mod tests {
   #[cfg(feature = "encryption-aes-gcm")]
   #[test]
   fn encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead() {
-    use memberlist_wire::{ENCRYPTED_WRAPPER_OVERHEAD, EncryptionOptions, Keyring, SecretKey};
+    use memberlist_wire::{EncryptionOptions, Keyring, SecretKey, ENCRYPTED_WRAPPER_OVERHEAD};
     let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7241)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
@@ -1786,7 +1786,7 @@ mod tests {
   #[test]
   fn decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
     use memberlist_wire::{
-      EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey, encode_plain_frame,
+      encode_plain_frame, EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey,
     };
     let ep = endpoint(7205);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
@@ -2765,9 +2765,9 @@ mod tests {
   fn policy_failed_bridge_rejects_ingress_before_reap() {
     use bytes::Bytes;
     use memberlist_wire::{
-      CompressionOptions, EncryptionOptions, Keyring, SecretKey,
       encode_reliable_unit_with_encryption,
       typed::{PushNodeState, State},
+      CompressionOptions, EncryptionOptions, Keyring, SecretKey,
     };
 
     use crate::endpoint::Endpoint;

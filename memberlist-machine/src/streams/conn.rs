@@ -37,6 +37,7 @@ impl ExchangeId {
   }
   /// The raw monotonic handle. The driver keys its per-exchange stream-transport
   /// connection on this value.
+  #[inline(always)]
   pub const fn get(self) -> u64 {
     self.0
   }

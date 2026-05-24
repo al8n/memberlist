@@ -1182,7 +1182,8 @@ where
 
   /// Test-only: expose the bridge phase.
   #[cfg(test)]
-  pub(crate) fn phase(&self) -> &StreamPhase {
+  #[inline(always)]
+  pub(crate) fn phase_ref(&self) -> &StreamPhase {
     &self.phase
   }
 

@@ -45,6 +45,7 @@ const CHACHA20_POLY1305_TAG: u8 = 2;
 
 impl EncryptAlgorithm {
   /// The one-byte wire tag for this algorithm.
+  #[inline(always)]
   pub const fn tag(&self) -> u8 {
     match self {
       Self::AesGcm => AES_GCM_TAG,
@@ -56,6 +57,7 @@ impl EncryptAlgorithm {
   /// Decode an algorithm from its one-byte wire tag. An unrecognized tag
   /// becomes [`EncryptAlgorithm::Unknown`] — the decode fails cleanly
   /// downstream rather than panicking.
+  #[inline(always)]
   pub const fn from_tag(tag: u8) -> Self {
     match tag {
       AES_GCM_TAG => Self::AesGcm,
@@ -115,6 +117,7 @@ impl core::fmt::Debug for SecretKey {
 
 impl SecretKey {
   /// The AEAD algorithm this key drives.
+  #[inline(always)]
   pub const fn algorithm(&self) -> EncryptAlgorithm {
     match self {
       Self::Aes128(_) | Self::Aes192(_) | Self::Aes256(_) => EncryptAlgorithm::AesGcm,
@@ -123,6 +126,7 @@ impl SecretKey {
   }
 
   /// The raw key bytes (length 16 / 24 / 32 depending on the variant).
+  #[inline(always)]
   pub fn as_bytes(&self) -> &[u8] {
     match self {
       Self::Aes128(k) => k.as_slice(),
@@ -184,22 +188,26 @@ pub struct OversizeCiphertext(usize, usize);
 impl OversizeCiphertext {
   /// Build the payload from `(claimed, max)`. Fields are private; external
   /// callers see read-only `claimed()` / `max()` accessors only.
+  #[inline(always)]
   pub const fn new(claimed: usize, max: usize) -> Self {
     Self(claimed, max)
   }
 
   /// The post-decrypt plaintext byte length the frame's ciphertext implies.
+  #[inline(always)]
   pub const fn claimed(&self) -> usize {
     self.0
   }
 
   /// The caller's hard ceiling on the plaintext length.
+  #[inline(always)]
   pub const fn max(&self) -> usize {
     self.1
   }
 }
 
 /// An encryption or decryption failure. Variants are unit or newtype only.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum EncryptionError {
   /// AEAD authentication failed — corrupt ciphertext, mismatched AAD, or a
@@ -222,10 +230,20 @@ pub enum EncryptionError {
   /// instead. Coordinators treat all of these identically — drop the frame.
   #[error("no matching key in the keyring")]
   NoMatchingKey,
-  /// The backend rejected the bytes (rare — surfaced for unexpected backend
-  /// failures that are not auth-tag or length problems).
-  #[error("encryption backend failure: {0}")]
-  Backend(String),
+  /// The supplied key's cipher variant does not match the requested algorithm
+  /// (e.g. an AES key passed to the ChaCha20-Poly1305 dispatch path). This
+  /// is a caller programming error, never a wire-level condition.
+  #[error("key cipher variant does not match the requested algorithm")]
+  KeyMismatch,
+  /// The byte slice does not carry the expected encrypted-frame header
+  /// (wrong leading tag or shorter than the minimum wrapper size).
+  #[error("byte slice is not a valid encrypted frame")]
+  MalformedFrame,
+  /// Encryption is enforced on this path but the outermost frame is not
+  /// wrapped in [`MessageTag::Encrypted`]. Rejected before any decoding so
+  /// an unauthenticated datagram cannot inject SWIM membership traffic.
+  #[error("encryption is enabled but the inbound frame is not wrapped in Encrypted")]
+  EncryptionRequired,
 }
 
 /// Returns `true` when `key`'s cipher variant matches `algo`. `Unknown`
@@ -250,8 +268,8 @@ const fn key_matches_algorithm(algo: EncryptAlgorithm, key: &SecretKey) -> bool 
 ///
 /// Returns [`EncryptionError::UnsupportedAlgorithm`] for an algorithm whose
 /// backend feature is not built in (including `EncryptAlgorithm::Unknown`).
-/// Returns [`EncryptionError::Backend`] if `key`'s variant does not match
-/// `algo` (e.g. an AES key passed to the ChaCha20-Poly1305 path).
+/// Returns [`EncryptionError::KeyMismatch`] if `key`'s cipher variant does not
+/// match `algo` (e.g. an AES key passed to the ChaCha20-Poly1305 path).
 #[allow(unused_variables)]
 pub fn encrypt(
   algo: EncryptAlgorithm,
@@ -261,9 +279,7 @@ pub fn encrypt(
   aad: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
   if !key_matches_algorithm(algo, key) {
-    return Err(EncryptionError::Backend(
-      "key variant does not match algorithm".to_string(),
-    ));
+    return Err(EncryptionError::KeyMismatch);
   }
   match algo {
     #[cfg(feature = "aes-gcm")]
@@ -289,9 +305,7 @@ pub fn decrypt(
   aad: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
   if !key_matches_algorithm(algo, key) {
-    return Err(EncryptionError::Backend(
-      "key variant does not match algorithm".to_string(),
-    ));
+    return Err(EncryptionError::KeyMismatch);
   }
   match algo {
     #[cfg(feature = "aes-gcm")]
@@ -313,11 +327,11 @@ fn aes_gcm_encrypt(
 ) -> Result<Vec<u8>, EncryptionError> {
   use aead::{AeadInPlace, KeyInit};
   use aes_gcm::{
-    Aes128Gcm, Aes256Gcm, AesGcm,
     aes::{
-      Aes192,
       cipher::{consts::U12, generic_array::GenericArray},
+      Aes192,
     },
+    Aes128Gcm, Aes256Gcm, AesGcm,
   };
 
   type Aes192Gcm = AesGcm<Aes192, U12>;
@@ -360,11 +374,11 @@ fn aes_gcm_decrypt(
 ) -> Result<Vec<u8>, EncryptionError> {
   use aead::{AeadInPlace, KeyInit};
   use aes_gcm::{
-    Aes128Gcm, Aes256Gcm, AesGcm,
     aes::{
-      Aes192,
       cipher::{consts::U12, generic_array::GenericArray},
+      Aes192,
     },
+    Aes128Gcm, Aes256Gcm, AesGcm,
   };
 
   type Aes192Gcm = AesGcm<Aes192, U12>;
@@ -445,6 +459,7 @@ fn chacha20poly1305_decrypt(
 }
 
 /// A `Keyring` operation rejection. Variants are unit-only.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum KeyringError {
   /// The named key matched the primary — it cannot be removed (operators
@@ -489,6 +504,7 @@ impl Keyring {
 
   /// Build a ring with a primary and an iterator of seed secondaries.
   /// Duplicates of the primary or of an earlier secondary are dropped.
+  #[must_use]
   pub fn with_secondaries<I>(primary: SecretKey, secondaries: I) -> Self
   where
     I: IntoIterator<Item = SecretKey>,
@@ -501,12 +517,14 @@ impl Keyring {
   }
 
   /// The primary key (used for every outbound encryption).
-  pub const fn primary(&self) -> &SecretKey {
+  #[inline(always)]
+  pub const fn primary_ref(&self) -> &SecretKey {
     &self.primary
   }
 
   /// The secondary keys in decrypt-trial order. After `promote`, the former
   /// primary appears at index 0; otherwise the order is insertion order.
+  #[inline(always)]
   pub fn secondaries(&self) -> &[SecretKey] {
     &self.secondaries
   }
@@ -590,33 +608,59 @@ impl Default for EncryptionOptions {
 impl EncryptionOptions {
   /// A new, disabled configuration — no keyring. Every payload is left
   /// unencrypted.
+  #[inline(always)]
   pub const fn new() -> Self {
     Self { keyring: None }
   }
 
+  /// Setter: attach a keyring in place (enables encryption). Replaces any
+  /// previously installed keyring; use `clear_keyring` to disable.
+  #[inline(always)]
+  pub fn set_keyring(&mut self, keyring: Keyring) -> &mut Self {
+    self.keyring = Some(keyring);
+    self
+  }
+
   /// Builder: attach a keyring (enables encryption).
+  #[must_use]
+  #[inline(always)]
   pub fn with_keyring(mut self, keyring: Keyring) -> Self {
     self.keyring = Some(keyring);
     self
   }
 
-  /// Setter: attach a keyring in place (enables encryption). Replaces any
-  /// previously installed keyring; use `clear_keyring` to disable.
-  pub fn set_keyring(&mut self, keyring: Keyring) {
-    self.keyring = Some(keyring);
+  /// Setter: assign the raw `Option<Keyring>` wrapper in place.
+  /// `None` disables encryption; `Some(keyring)` enables it.
+  #[inline(always)]
+  pub fn update_keyring(&mut self, val: Option<Keyring>) -> &mut Self {
+    self.keyring = val;
+    self
+  }
+
+  /// Builder: assign the raw `Option<Keyring>` wrapper (consuming).
+  /// `None` disables encryption; `Some(keyring)` enables it.
+  #[must_use]
+  #[inline(always)]
+  pub fn maybe_keyring(mut self, val: Option<Keyring>) -> Self {
+    self.keyring = val;
+    self
   }
 
   /// Setter: drop the keyring (disable encryption) in place.
-  pub fn clear_keyring(&mut self) {
+  #[inline(always)]
+  pub fn clear_keyring(&mut self) -> &mut Self {
     self.keyring = None;
+    self
   }
 
   /// The attached keyring, or `None` when encryption is disabled.
+  #[inline(always)]
   pub const fn keyring(&self) -> Option<&Keyring> {
     self.keyring.as_ref()
   }
 
   /// `true` when a keyring is attached — encryption is enabled.
+  #[inline(always)]
   pub const fn is_enabled(&self) -> bool {
     self.keyring.is_some()
   }
@@ -727,18 +771,14 @@ pub fn decode_encrypted_frame(
   // so an unknown-algorithm frame surfaces as `UnsupportedAlgorithm`
   // regardless of how short the payload is.
   if frame.len() < 2 || frame[0] != ENCRYPTED_TAG {
-    return Err(EncryptionError::Backend(
-      "not an encrypted frame".to_string(),
-    ));
+    return Err(EncryptionError::MalformedFrame);
   }
   let algo = EncryptAlgorithm::from_tag(frame[1]);
   if let EncryptAlgorithm::Unknown(t) = algo {
     return Err(EncryptionError::UnsupportedAlgorithm(t));
   }
   if frame.len() < WRAPPER_HEADER_LEN + AUTH_TAG_LEN {
-    return Err(EncryptionError::Backend(
-      "not an encrypted frame".to_string(),
-    ));
+    return Err(EncryptionError::MalformedFrame);
   }
 
   let mut nonce = [0u8; NONCE_LEN];
@@ -767,9 +807,9 @@ pub fn decode_encrypted_frame(
   };
 
   let mut tried = 0usize;
-  if keyring.primary().algorithm() == algo {
+  if keyring.primary_ref().algorithm() == algo {
     tried += 1;
-    match decrypt(algo, keyring.primary(), &nonce, ciphertext, &aad) {
+    match decrypt(algo, keyring.primary_ref(), &nonce, ciphertext, &aad) {
       Ok(pt) => return Ok(pt),
       // The primary failed auth; fall through and try the secondaries.
       Err(EncryptionError::AuthFailed) => {}
@@ -942,8 +982,14 @@ mod tests {
     let e = EncryptionError::NoMatchingKey;
     assert!(!e.to_string().is_empty());
 
-    let e = EncryptionError::Backend("rejected".into());
-    assert!(e.to_string().contains("rejected"));
+    let e = EncryptionError::KeyMismatch;
+    assert!(!e.to_string().is_empty());
+
+    let e = EncryptionError::MalformedFrame;
+    assert!(!e.to_string().is_empty());
+
+    let e = EncryptionError::EncryptionRequired;
+    assert!(!e.to_string().is_empty());
   }
 
   #[test]
@@ -1072,8 +1118,7 @@ mod tests {
   #[test]
   fn key_variant_must_match_algorithm() {
     // An AES key passed to the ChaCha algorithm path is a misuse caught by
-    // the variant-mismatch branch — surfaced as a backend error, never a
-    // panic.
+    // the key-mismatch branch — surfaced as KeyMismatch, never a panic.
     let key = SecretKey::Aes128([0u8; 16]);
     let err = encrypt(
       EncryptAlgorithm::ChaCha20Poly1305,
@@ -1083,7 +1128,7 @@ mod tests {
       b"\x0d\x02",
     )
     .expect_err("variant/algo mismatch must err");
-    assert!(matches!(err, EncryptionError::Backend(_)));
+    assert!(matches!(err, EncryptionError::KeyMismatch));
   }
 
   #[test]
@@ -1113,14 +1158,14 @@ mod tests {
   #[test]
   fn keyring_new_has_only_primary() {
     let kr = Keyring::new(k_a());
-    assert_eq!(kr.primary().as_bytes(), k_a().as_bytes());
+    assert_eq!(kr.primary_ref().as_bytes(), k_a().as_bytes());
     assert!(kr.secondaries().is_empty());
   }
 
   #[test]
   fn keyring_with_secondaries_seeds_them() {
     let kr = Keyring::with_secondaries(k_a(), vec![k_b(), k_c()]);
-    assert_eq!(kr.primary().as_bytes(), k_a().as_bytes());
+    assert_eq!(kr.primary_ref().as_bytes(), k_a().as_bytes());
     assert_eq!(kr.secondaries().len(), 2);
   }
 
@@ -1173,7 +1218,7 @@ mod tests {
   fn keyring_promote_swaps_primary_and_secondary() {
     let mut kr = Keyring::with_secondaries(k_a(), vec![k_b(), k_c()]);
     kr.promote(k_b().as_bytes()).expect("promote ok");
-    assert_eq!(kr.primary().as_bytes(), k_b().as_bytes());
+    assert_eq!(kr.primary_ref().as_bytes(), k_b().as_bytes());
     assert_eq!(kr.secondaries().len(), 2);
     // Old primary lands at index 0 (prepend, not append).
     assert_eq!(
@@ -1193,7 +1238,7 @@ mod tests {
     let mut kr = Keyring::with_secondaries(k_a(), vec![k_b()]);
     kr.promote(k_a().as_bytes())
       .expect("promote primary is a no-op");
-    assert_eq!(kr.primary().as_bytes(), k_a().as_bytes());
+    assert_eq!(kr.primary_ref().as_bytes(), k_a().as_bytes());
     assert_eq!(kr.secondaries().len(), 1);
   }
 
@@ -1207,7 +1252,7 @@ mod tests {
   #[test]
   fn keyring_allows_mixed_ciphers() {
     let kr = Keyring::with_secondaries(k_a(), vec![k_c()]);
-    assert_eq!(kr.primary().algorithm(), EncryptAlgorithm::AesGcm);
+    assert_eq!(kr.primary_ref().algorithm(), EncryptAlgorithm::AesGcm);
     assert_eq!(
       kr.secondaries()[0].algorithm(),
       EncryptAlgorithm::ChaCha20Poly1305
@@ -1253,8 +1298,8 @@ mod tests {
     assert!(opts.is_enabled());
     assert!(opts.keyring().is_some());
     assert_eq!(
-      opts.keyring().unwrap().primary().as_bytes(),
-      kr.primary().as_bytes()
+      opts.keyring().unwrap().primary_ref().as_bytes(),
+      kr.primary_ref().as_bytes()
     );
   }
 

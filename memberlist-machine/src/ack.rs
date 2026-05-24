@@ -26,8 +26,27 @@ pub enum AckKind<A> {
 /// the codebase forbids struct enum variants — newtype variants only.
 #[derive(Debug, Clone)]
 pub struct ForwardAck<A> {
-  /// Address to forward the resulting Ack to.
-  pub reply_to: A,
+  reply_to: A,
+}
+
+impl<A> ForwardAck<A> {
+  /// Construct a new forward-ack payload.
+  #[inline(always)]
+  pub const fn new(reply_to: A) -> Self {
+    Self { reply_to }
+  }
+
+  /// Borrow the reply-to address.
+  #[inline(always)]
+  pub const fn reply_to_ref(&self) -> &A {
+    &self.reply_to
+  }
+
+  /// Consume and return the reply-to address.
+  #[inline(always)]
+  pub fn into_reply_to(self) -> A {
+    self.reply_to
+  }
 }
 
 /// One pending ack-awaiting entry.
@@ -40,6 +59,7 @@ pub struct AckEntry<A> {
 
 impl<A> AckEntry<A> {
   /// Construct a new pending entry.
+  #[inline(always)]
   pub const fn new(sent_at: Instant, deadline: Instant, kind: AckKind<A>) -> Self {
     Self {
       sent_at,
@@ -49,21 +69,25 @@ impl<A> AckEntry<A> {
   }
 
   /// When this entry was registered (used to compute RTT on ack).
+  #[inline(always)]
   pub const fn sent_at(&self) -> Instant {
     self.sent_at
   }
 
   /// Wall-clock deadline after which this entry is considered timed-out.
+  #[inline(always)]
   pub const fn deadline(&self) -> Instant {
     self.deadline
   }
 
   /// Discriminator for downstream dispatch.
-  pub const fn kind(&self) -> &AckKind<A> {
+  #[inline(always)]
+  pub const fn kind_ref(&self) -> &AckKind<A> {
     &self.kind
   }
 
   /// Consume the entry and return its `kind`.
+  #[inline(always)]
   pub fn into_kind(self) -> AckKind<A> {
     self.kind
   }
@@ -82,32 +106,44 @@ pub struct AckResolution<A> {
 
 impl<A> AckResolution<A> {
   /// The sequence number this resolution relates to.
+  #[inline(always)]
   pub const fn seq(&self) -> u32 {
     self.seq
   }
 
   /// The registered entry.
-  pub const fn entry(&self) -> &AckEntry<A> {
+  #[inline(always)]
+  pub const fn entry_ref(&self) -> &AckEntry<A> {
     &self.entry
   }
 
   /// Consume the resolution and return its inner [`AckEntry`].
+  #[inline(always)]
   pub fn into_entry(self) -> AckEntry<A> {
     self.entry
   }
 
   /// `Some(payload)` for acks (may be empty); `None` for timeouts.
-  pub const fn payload(&self) -> Option<&Bytes> {
-    self.payload.as_ref()
+  #[inline(always)]
+  pub fn payload(&self) -> Option<&[u8]> {
+    self.payload.as_deref()
+  }
+
+  /// Return a cheap clone of the payload buffer if present.
+  #[inline(always)]
+  pub fn payload_bytes(&self) -> Option<Bytes> {
+    self.payload.clone()
   }
 
   /// Take ownership of the payload, leaving `None` behind.
+  #[inline(always)]
   pub fn take_payload(&mut self) -> Option<Bytes> {
     self.payload.take()
   }
 
   /// `Some(now)` if this came from an ack with a recv timestamp;
   /// `None` for timeouts.
+  #[inline(always)]
   pub const fn received_at(&self) -> Option<Instant> {
     self.received_at
   }
@@ -131,6 +167,7 @@ impl<A> Default for AckRegistry<A> {
 
 impl<A> AckRegistry<A> {
   /// Construct an empty registry.
+  #[inline(always)]
   pub fn new() -> Self {
     Self {
       pending: FxHashMap::default(),
@@ -138,17 +175,20 @@ impl<A> AckRegistry<A> {
   }
 
   /// Number of outstanding entries.
+  #[inline(always)]
   pub fn len(&self) -> usize {
     self.pending.len()
   }
 
   /// True iff no entries are outstanding.
+  #[inline(always)]
   pub fn is_empty(&self) -> bool {
     self.pending.is_empty()
   }
 
   /// Register a new pending entry. If `seq` was already present, the old
   /// entry is replaced and returned.
+  #[inline(always)]
   pub fn register(&mut self, seq: u32, entry: AckEntry<A>) -> Option<AckEntry<A>> {
     self.pending.insert(seq, entry)
   }
@@ -260,8 +300,8 @@ mod tests {
     let payload = Bytes::from_static(b"pong");
     let resolution = r.handle_ack(7, payload.clone(), now).expect("ack found");
     assert_eq!(resolution.seq(), 7);
-    assert_eq!(resolution.payload(), Some(&payload));
-    assert!(matches!(resolution.entry().kind(), AckKind::Probe));
+    assert_eq!(resolution.payload(), Some(payload.as_ref()));
+    assert!(matches!(resolution.entry_ref().kind_ref(), AckKind::Probe));
     assert_eq!(r.len(), 0);
   }
 
@@ -329,7 +369,7 @@ mod tests {
     // Targeted removal of the forward must NOT evict the older probe
     // (poll_expired would have popped seq 1, the global oldest).
     let removed = r.remove(2).expect("forward entry removed");
-    assert!(matches!(removed.kind(), AckKind::Forward(_)));
+    assert!(matches!(removed.kind_ref(), AckKind::Forward(_)));
     assert_eq!(r.len(), 1);
     assert!(r.handle_nack(1).is_some(), "probe entry must survive");
     assert!(r.remove(999).is_none(), "removing an absent seq is a no-op");

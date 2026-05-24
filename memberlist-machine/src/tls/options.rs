@@ -52,13 +52,27 @@ impl TlsOptions {
   }
 
   /// The server config used to accept inbound reliable connections.
-  pub fn server(&self) -> &Arc<rustls::ServerConfig> {
+  #[inline(always)]
+  pub fn server_ref(&self) -> &rustls::ServerConfig {
     &self.server
   }
 
+  /// Return a cheap clone of the server config arc.
+  #[inline(always)]
+  pub fn server_arc(&self) -> Arc<rustls::ServerConfig> {
+    self.server.clone()
+  }
+
   /// The client config used for outbound dials.
-  pub fn client(&self) -> &Arc<rustls::ClientConfig> {
+  #[inline(always)]
+  pub fn client_ref(&self) -> &rustls::ClientConfig {
     &self.client
+  }
+
+  /// Return a cheap clone of the client config arc.
+  #[inline(always)]
+  pub fn client_arc(&self) -> Arc<rustls::ClientConfig> {
+    self.client.clone()
   }
 }
 
@@ -138,9 +152,9 @@ pub(crate) mod tests {
   fn builds_a_usable_options_bundle() {
     let cfg = TlsOptions::new(test_server(), test_client());
     // Prove the bundle is usable: both rustls connections construct.
-    let _server = rustls::ServerConnection::new(cfg.server().clone()).unwrap();
+    let _server = rustls::ServerConnection::new(cfg.server_arc()).unwrap();
     let _client = rustls::ClientConnection::new(
-      cfg.client().clone(),
+      cfg.client_arc(),
       rustls::pki_types::ServerName::try_from("localhost").unwrap(),
     )
     .unwrap();

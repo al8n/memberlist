@@ -2224,7 +2224,7 @@ mod per_peer_server_name {
       .with_probe_timeout(Duration::from_millis(500))
       .with_suspicion_mult(4)
       .with_retransmit_mult(4)
-      .with_rng_seed(Some(addr.port() as u64));
+      .with_rng_seed(addr.port() as u64);
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(ep_cfg);
     ep.start_scheduling(now);
     let mut seed = [0u8; 32];
@@ -2304,32 +2304,42 @@ mod per_peer_server_name {
       // assertions below).
       while let Some(tx) = a.poll_memberlist_transmit() {
         match tx {
-          memberlist_machine::Transmit::Packet(p) if p.to == b_addr => {
-            b.handle_packet(a_addr, p.message, t);
-            moved = true;
-          }
-          memberlist_machine::Transmit::Compound(cmp) if cmp.to == b_addr => {
-            for m in cmp.messages {
-              b.handle_packet(a_addr, m, t);
+          memberlist_machine::Transmit::Packet(p) => {
+            let (to, message) = p.into_parts();
+            if to == b_addr {
+              b.handle_packet(a_addr, message, t);
+              moved = true;
             }
-            moved = true;
           }
-          _ => {}
+          memberlist_machine::Transmit::Compound(cmp) => {
+            let (to, messages) = cmp.into_parts();
+            if to == b_addr {
+              for m in messages {
+                b.handle_packet(a_addr, m, t);
+              }
+              moved = true;
+            }
+          }
         }
       }
       while let Some(tx) = b.poll_memberlist_transmit() {
         match tx {
-          memberlist_machine::Transmit::Packet(p) if p.to == a_addr => {
-            a.handle_packet(b_addr, p.message, t);
-            moved = true;
-          }
-          memberlist_machine::Transmit::Compound(cmp) if cmp.to == a_addr => {
-            for m in cmp.messages {
-              a.handle_packet(b_addr, m, t);
+          memberlist_machine::Transmit::Packet(p) => {
+            let (to, message) = p.into_parts();
+            if to == a_addr {
+              a.handle_packet(b_addr, message, t);
+              moved = true;
             }
-            moved = true;
           }
-          _ => {}
+          memberlist_machine::Transmit::Compound(cmp) => {
+            let (to, messages) = cmp.into_parts();
+            if to == a_addr {
+              for m in messages {
+                a.handle_packet(b_addr, m, t);
+              }
+              moved = true;
+            }
+          }
         }
       }
       a.handle_timeout(t);
@@ -2339,11 +2349,11 @@ mod per_peer_server_name {
       // complete and there is no point continuing to drive time.
       if seen_by_a.lock().unwrap().is_some()
         && a
-          .endpoint()
+          .endpoint_ref()
           .member_liveness(&SmolStr::new("b"))
           .is_some_and(|s| s == State::Alive)
         && b
-          .endpoint()
+          .endpoint_ref()
           .member_liveness(&SmolStr::new("a"))
           .is_some_and(|s| s == State::Alive)
       {
@@ -2394,11 +2404,11 @@ mod per_peer_server_name {
     // completed, so the membership exchange built on top of it
     // actually delivered.
     let a_alive_b = a
-      .endpoint()
+      .endpoint_ref()
       .member_liveness(&SmolStr::new("b"))
       .is_some_and(|s| s == State::Alive);
     let b_alive_a = b
-      .endpoint()
+      .endpoint_ref()
       .member_liveness(&SmolStr::new("a"))
       .is_some_and(|s| s == State::Alive);
     assert!(
@@ -2626,7 +2636,7 @@ mod mtls_cluster_auth {
       .with_probe_interval(Duration::from_millis(1000))
       .with_probe_timeout(Duration::from_millis(500))
       .with_suspicion_mult(4)
-      .with_rng_seed(Some(addr.port() as u64));
+      .with_rng_seed(addr.port() as u64);
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(ep_cfg);
     ep.start_scheduling(now);
     let mut seed = [0u8; 32];
@@ -2680,22 +2690,24 @@ mod mtls_cluster_auth {
     // added B (Alive). With the rejected handshake, no
     // EndpointEvent::PushPullRequestReceived ever surfaced on A.
     assert!(
-      a.endpoint().member_liveness(&SmolStr::new("b")).is_none(),
+      a.endpoint_ref()
+        .member_liveness(&SmolStr::new("b"))
+        .is_none(),
       "A's strict-server REJECTED B's unauthenticated handshake — \
        A's membership MUST NOT contain B. Got liveness: {:?}",
-      a.endpoint().member_liveness(&SmolStr::new("b"))
+      a.endpoint_ref().member_liveness(&SmolStr::new("b"))
     );
 
     // B's join cannot complete either — A's PushPullReply never
     // arrives because there's no bidi stream. B's view should not
     // see A as Alive.
     assert!(
-      !b.endpoint()
+      !b.endpoint_ref()
         .member_liveness(&SmolStr::new("a"))
         .is_some_and(|s| s == State::Alive),
       "B's handshake was REJECTED at A's side — B MUST NOT see A as \
        Alive. Got liveness: {:?}",
-      b.endpoint().member_liveness(&SmolStr::new("a"))
+      b.endpoint_ref().member_liveness(&SmolStr::new("a"))
     );
   }
 }
@@ -2798,7 +2810,7 @@ fn compressed_gossip_with_trailing_junk_dropped_wholesale() {
   // partial application of the prefix frames that did decode cleanly).
   use memberlist_simulation::{Alive, Message, Node};
   use memberlist_wire::{
-    CompressAlgorithm, compress, encode_compressed_frame, framing, message_to_any,
+    compress, encode_compressed_frame, framing, message_to_any, CompressAlgorithm,
   };
 
   let a: std::net::SocketAddr = "127.0.0.1:9831".parse().unwrap();

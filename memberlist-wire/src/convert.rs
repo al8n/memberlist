@@ -35,8 +35,42 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use bytes::Bytes;
 use smol_str::SmolStr;
 
+/// Payload for [`ConvertError::AddrLengthMismatch`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddrLengthMismatchInfo {
+  /// The version tag found in the buffer.
+  pub version: u8,
+  /// Bytes required for that version (7 for v4, 19 for v6).
+  pub expected: usize,
+  /// Bytes the caller supplied.
+  pub actual: usize,
+}
+
+impl AddrLengthMismatchInfo {
+  /// Construct an addr-length-mismatch payload.
+  #[inline(always)]
+  pub const fn new(version: u8, expected: usize, actual: usize) -> Self {
+    Self {
+      version,
+      expected,
+      actual,
+    }
+  }
+}
+
+impl std::fmt::Display for AddrLengthMismatchInfo {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "expected {} bytes for version {}, got {}",
+      self.expected, self.version, self.actual
+    )
+  }
+}
+
 /// Errors surfaced when translating between [`Bytes`] wire fields and
 /// the corresponding application types.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ConvertError {
   /// An `id` field contained bytes that were not valid UTF-8.
@@ -55,15 +89,8 @@ pub enum ConvertError {
   #[error("SocketAddrV6 flowinfo/scope_id cannot be represented on the wire")]
   AddrScopedV6,
   /// An `addr` field's length didn't match its declared version.
-  #[error("addr length mismatch: expected {expected} bytes for version {version}, got {actual}")]
-  AddrLengthMismatch {
-    /// The version tag found.
-    version: u8,
-    /// Bytes required for that version (6 for v4, 18 for v6).
-    expected: usize,
-    /// Bytes the caller supplied.
-    actual: usize,
-  },
+  #[error("addr length mismatch: {0}")]
+  AddrLengthMismatch(AddrLengthMismatchInfo),
 }
 
 /// `1 (version) + 4 (ipv4) + 2 (port)`.
@@ -97,11 +124,9 @@ pub fn socket_addr_from_bytes(b: &Bytes) -> Result<SocketAddr, ConvertError> {
   match buf[0] {
     VERSION_TAG_V4 => {
       if buf.len() != ADDR_V4_LEN {
-        return Err(ConvertError::AddrLengthMismatch {
-          version: VERSION_TAG_V4,
-          expected: ADDR_V4_LEN,
-          actual: buf.len(),
-        });
+        return Err(ConvertError::AddrLengthMismatch(
+          AddrLengthMismatchInfo::new(VERSION_TAG_V4, ADDR_V4_LEN, buf.len()),
+        ));
       }
       let mut octets = [0u8; 4];
       octets.copy_from_slice(&buf[1..5]);
@@ -113,11 +138,9 @@ pub fn socket_addr_from_bytes(b: &Bytes) -> Result<SocketAddr, ConvertError> {
     }
     VERSION_TAG_V6 => {
       if buf.len() != ADDR_V6_LEN {
-        return Err(ConvertError::AddrLengthMismatch {
-          version: VERSION_TAG_V6,
-          expected: ADDR_V6_LEN,
-          actual: buf.len(),
-        });
+        return Err(ConvertError::AddrLengthMismatch(
+          AddrLengthMismatchInfo::new(VERSION_TAG_V6, ADDR_V6_LEN, buf.len()),
+        ));
       }
       let mut octets = [0u8; 16];
       octets.copy_from_slice(&buf[1..17]);
@@ -226,7 +249,7 @@ mod tests {
     let invalid = Bytes::from_static(&[VERSION_TAG_V4, 1, 2, 3]);
     assert!(matches!(
       socket_addr_from_bytes(&invalid),
-      Err(ConvertError::AddrLengthMismatch { .. })
+      Err(ConvertError::AddrLengthMismatch(_))
     ));
   }
 
