@@ -22,15 +22,15 @@ fn process_alive_auto<I, A>(
   bootstrap: bool,
   now: Instant,
 ) where
-  I: nodecraft::Id
+  I: memberlist_wire::Id
     + Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
-  A: nodecraft::CheapClone
+  A: memberlist_wire::CheapClone
     + Data
     + Eq
     + core::hash::Hash
@@ -1028,7 +1028,7 @@ fn start_probe_emits_ping_to_alive_peer() {
       assert_eq!(to.port(), 7001);
       match message {
         Message::Ping(p) => {
-          assert_eq!(p.target_ref().id(), &SmolStr::new("bob"));
+          assert_eq!(p.target_ref().id_ref(), &SmolStr::new("bob"));
           assert!(p.sequence_number() > 0);
         }
         other => panic!("expected Ping, got {other:?}"),
@@ -1128,7 +1128,7 @@ fn direct_ack_after_direct_timeout_within_cumulative_succeeds() {
         (
           ping.sequence_number(),
           to,
-          ping.target_ref().id().cheap_clone(),
+          ping.target_ref().id_ref().cheap_clone(),
         )
       } else {
         panic!("Ping message expected")
@@ -1505,7 +1505,7 @@ fn handle_indirect_ping_forwards_to_target() {
       let (to, message) = p.into_parts();
       assert_eq!(to.port(), 7001);
       if let Message::Ping(ping) = message {
-        assert_eq!(ping.target_ref().id(), &SmolStr::new("bob"));
+        assert_eq!(ping.target_ref().id_ref(), &SmolStr::new("bob"));
       } else {
         panic!("expected Ping");
       }
@@ -1806,7 +1806,7 @@ fn probe_indirect_timeout_marks_target_suspect() {
   let target_id = if let Some(Transmit::Packet(p)) = e.poll_transmit() {
     let (_, message) = p.into_parts();
     if let Message::Ping(ping) = message {
-      ping.target_ref().id().cheap_clone()
+      ping.target_ref().id_ref().cheap_clone()
     } else {
       panic!("expected Ping message");
     }
@@ -2398,7 +2398,7 @@ fn probe_with_suspect_target_piggybacks_suspect_message() {
       if to.port() == 7001 {
         for message in &msgs {
           match message {
-            Message::Ping(p) if p.target_ref().id() == &SmolStr::new("bob") => {
+            Message::Ping(p) if p.target_ref().id_ref() == &SmolStr::new("bob") => {
               saw_ping_to_bob = true;
             }
             Message::Suspect(s) if s.node_ref() == &SmolStr::new("bob") => {

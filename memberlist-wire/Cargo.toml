@@ -14,8 +14,8 @@ description = "Buffa-generated wire types + hand-rolled outer framing for the me
 [dependencies]
 buffa = { version = "0.5", default-features = false, features = ["std"] }
 bytes = { workspace = true, features = ["std"] }
+cheap-clone = { workspace = true, features = ["std", "smol_str_0_3", "bytes_1", "triomphe_0_1"] }
 derive_more = { workspace = true, features = ["display", "from", "is_variant", "unwrap", "try_unwrap"] }
-nodecraft = { workspace = true, features = ["std"] }
 paste = { workspace = true }
 smol_str = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
@@ -43,8 +43,6 @@ default = ["std"]
 # the copied data-module cfg-gates compile without modification.
 alloc = ["std"]
 std = ["buffa/std"]
-# Enable nodecraft's hostaddr types (Domain, HostAddr, …) in the Data impls.
-hostaddr = ["nodecraft/hostaddr"]
 
 # Compression backends — opt-in; the default build pulls none of them.
 lz4 = ["dep:lz4_flex"]

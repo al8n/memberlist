@@ -59,34 +59,7 @@ struct PendingDial<A> {
 /// `B` translates the membership address `A` to the QUIC `SocketAddr`
 /// (see [`AddrBridge`]); it is a marker type parameter only — no value of
 /// `B` is stored.
-// Storage-shape bound: the struct bag is the MINIMUM required for the named
-// field types to be well-formed (rule §8 exception).
-//   `ep: Endpoint<I, A>` — `Endpoint`'s own storage-shape bound demands
-//     `I: Id + Data + CheapClone` and the full `A` bag, so naming the field
-//     forces both into this struct's `where` clause.
-//   `bridges: HashMap<StreamId, Bridge<I, A>>` and `dial_pending:
-//     VecDeque<PendingDial<A>>` — the `Bridge<I, A>` and `PendingDial<A>`
-//     struct decls themselves carry no `where` clauses, so they impose no
-//     extra storage-shape constraints beyond `Endpoint`'s.
-// `B` carries no struct-level bound (only `_addr: PhantomData<fn(B)>` holds
-// it; the `AddrBridge<A>` bound is added at the impl level only on the block
-// whose methods call `B::to_socket` / `B::from_socket` / `B::server_name`).
-// The heavier `I: Debug + Display + Send + Sync + 'static` bounds the
-// SWIM-ops methods need are likewise carried on the impl blocks below that
-// need them, not on the struct.
-pub struct QuicEndpoint<I, A, B>
-where
-  I: nodecraft::Id + memberlist_wire::Data + nodecraft::CheapClone,
-  A: memberlist_wire::Data
-    + nodecraft::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-{
+pub struct QuicEndpoint<I, A, B> {
   ep: Endpoint<I, A>,
   quinn: QuinnEndpoint,
   cfg: QuicConfig,
@@ -218,9 +191,9 @@ where
 // any of these.
 impl<I, A, B> QuicEndpoint<I, A, B>
 where
-  I: nodecraft::Id + memberlist_wire::Data + nodecraft::CheapClone,
+  I: memberlist_wire::Id + memberlist_wire::Data + memberlist_wire::CheapClone,
   A: memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -537,16 +510,16 @@ where
 // `B` carries no extra bound.
 impl<I, A, B> QuicEndpoint<I, A, B>
 where
-  I: nodecraft::Id
+  I: memberlist_wire::Id
     + memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -1116,16 +1089,16 @@ where
 // `handle_udp` / `handle_timeout` driver entrypoints).
 impl<I, A, B> QuicEndpoint<I, A, B>
 where
-  I: nodecraft::Id
+  I: memberlist_wire::Id
     + memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -1841,16 +1814,16 @@ mod tests {
     // and `new` takes the membership `Endpoint` plus the `QuicConfig` bundle.
     fn _sig<I, A, B>()
     where
-      I: nodecraft::Id
+      I: memberlist_wire::Id
         + memberlist_wire::Data
-        + nodecraft::CheapClone
+        + memberlist_wire::CheapClone
         + core::fmt::Debug
         + core::fmt::Display
         + Send
         + Sync
         + 'static,
       A: memberlist_wire::Data
-        + nodecraft::CheapClone
+        + memberlist_wire::CheapClone
         + Eq
         + core::hash::Hash
         + core::fmt::Debug

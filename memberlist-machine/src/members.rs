@@ -3,8 +3,10 @@
 use std::{sync::Arc, time::Instant};
 
 use indexmap::IndexMap;
-use memberlist_wire::typed::{NodeState, State};
-use nodecraft::{Id, Node};
+use memberlist_wire::{
+  Id, Node,
+  typed::{NodeState, State},
+};
 use rand::{Rng, RngExt};
 use smallvec::SmallVec;
 
@@ -346,7 +348,7 @@ where
     self
       .nodes
       .iter()
-      .any(|m| !m.state_ref().dead_or_left() && m.state_ref().id_ref() != self.local.id())
+      .any(|m| !m.state_ref().dead_or_left() && m.state_ref().id_ref() != self.local.id_ref())
   }
 }
 

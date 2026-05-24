@@ -9,8 +9,7 @@
 
 // ─── re-exports ──────────────────────────────────────────────────────────────
 
-/// Re-export `Node` from `nodecraft`; NOT redefined here.
-pub use nodecraft::{CheapClone, Node};
+pub use crate::{CheapClone, Node};
 
 // ─── Meta ────────────────────────────────────────────────────────────────────
 
@@ -354,7 +353,7 @@ pub struct NodeState<I, A> {
 
 impl<I: CheapClone, A: CheapClone> From<Alive<I, A>> for NodeState<I, A> {
   fn from(value: Alive<I, A>) -> Self {
-    let (id, addr) = value.node.into_components();
+    let (id, addr) = value.node.into_parts();
     Self {
       id,
       addr,

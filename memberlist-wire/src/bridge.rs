@@ -119,16 +119,16 @@ fn versioned<T: From<u8> + Default>(v: Option<u32>, field: &'static str) -> Resu
 
 // ─── Node ────────────────────────────────────────────────────────────────────
 
-/// Convert `nodecraft::Node<I,A>` → `pb::Node`.
+/// Convert `typed::Node<I,A>` → `pb::Node`.
 pub fn node_to_buffa<I: Data, A: Data>(n: &typed::Node<I, A>) -> Result<pb::Node, BridgeError> {
   Ok(pb::Node {
-    id: Some(data_to_bytes(n.id())?),
-    addr: Some(data_to_bytes(n.address())?),
+    id: Some(data_to_bytes(n.id_ref())?),
+    addr: Some(data_to_bytes(n.addr_ref())?),
     ..Default::default()
   })
 }
 
-/// Convert `pb::Node` → `nodecraft::Node<I,A>`.
+/// Convert `pb::Node` → `typed::Node<I,A>`.
 pub fn node_from_buffa<I: Data, A: Data>(b: &pb::Node) -> Result<typed::Node<I, A>, BridgeError> {
   let id: I = data_from_bytes(require_bytes(&b.id, "Node.id")?)?;
   let addr: A = data_from_bytes(require_bytes(&b.addr, "Node.addr")?)?;
@@ -548,8 +548,8 @@ mod tests {
 
     let back = alive_from_buffa::<I, A>(&pb).unwrap();
     assert_eq!(back.incarnation(), alive.incarnation());
-    assert_eq!(back.node_ref().id(), alive.node_ref().id());
-    assert_eq!(back.node_ref().address(), alive.node_ref().address());
+    assert_eq!(back.node_ref().id_ref(), alive.node_ref().id_ref());
+    assert_eq!(back.node_ref().addr_ref(), alive.node_ref().addr_ref());
     assert_eq!(back.protocol_version(), alive.protocol_version());
     assert_eq!(back.delegate_version(), alive.delegate_version());
   }
@@ -598,8 +598,8 @@ mod tests {
 
     let back = ping_from_buffa::<I, A>(&pb).unwrap();
     assert_eq!(back.sequence_number(), ping.sequence_number());
-    assert_eq!(back.source_ref().id(), ping.source_ref().id());
-    assert_eq!(back.target_ref().id(), ping.target_ref().id());
+    assert_eq!(back.source_ref().id_ref(), ping.source_ref().id_ref());
+    assert_eq!(back.target_ref().id_ref(), ping.target_ref().id_ref());
   }
 
   // ── IndirectPing ───────────────────────────────────────────────────────────
@@ -616,8 +616,8 @@ mod tests {
     let pb = indirect_ping_to_buffa::<I, A>(&iping).unwrap();
     let back = indirect_ping_from_buffa::<I, A>(&pb).unwrap();
     assert_eq!(back.sequence_number(), iping.sequence_number());
-    assert_eq!(back.source_ref().id(), iping.source_ref().id());
-    assert_eq!(back.target_ref().id(), iping.target_ref().id());
+    assert_eq!(back.source_ref().id_ref(), iping.source_ref().id_ref());
+    assert_eq!(back.target_ref().id_ref(), iping.target_ref().id_ref());
   }
 
   // ── Ack / Nack ─────────────────────────────────────────────────────────────
@@ -711,7 +711,7 @@ mod tests {
     match back {
       typed::Message::Alive(a) => {
         assert_eq!(a.incarnation(), alive.incarnation());
-        assert_eq!(a.node_ref().id(), alive.node_ref().id());
+        assert_eq!(a.node_ref().id_ref(), alive.node_ref().id_ref());
       }
       _ => panic!("expected Alive variant"),
     }
@@ -803,8 +803,8 @@ mod tests {
     // round-trip; an inbound uint32 > 255 must be REJECTED, not truncated
     // (`257 as u8 == 1` would forge V1).
     let ns = typed::NodeState::new(
-      sample_node().id().clone(),
-      *sample_node().address(),
+      sample_node().id_ref().clone(),
+      *sample_node().addr_ref(),
       State::Alive,
     )
     .with_protocol_version(ProtocolVersion::Unknown(7))
@@ -932,7 +932,7 @@ mod tests {
     let n2: Node<I, A> = Node::new(SmolStr::new("g"), unscoped);
     let pb = node_to_buffa::<I, A>(&n2).expect("unscoped IPv6 must encode");
     let back = node_from_buffa::<I, A>(&pb).expect("unscoped IPv6 must decode");
-    assert_eq!(*back.address(), unscoped);
+    assert_eq!(*back.addr_ref(), unscoped);
   }
 
   // ── Omitted legacy-required fields must be rejected ──────────────────────

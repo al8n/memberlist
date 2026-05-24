@@ -17,7 +17,7 @@ pub use tuple::TupleEncoder;
 #[cfg(any(feature = "std", feature = "alloc"))]
 mod bytes;
 #[cfg(any(feature = "std", feature = "alloc"))]
-mod nodecraft;
+mod node;
 mod primitives;
 #[cfg(any(feature = "std", feature = "alloc"))]
 mod string;

@@ -3,7 +3,7 @@
 use core::time::Duration;
 use std::{collections::HashSet, time::Instant};
 
-use nodecraft::CheapClone;
+use memberlist_wire::CheapClone;
 
 /// Computes the remaining time before the suspect-timeout fires, given the
 /// number of confirmations received (`n`), the required threshold (`k`),

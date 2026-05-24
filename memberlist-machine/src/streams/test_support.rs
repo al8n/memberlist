@@ -139,16 +139,16 @@ pub(crate) fn shuttle<R: StreamTransport>(
 #[allow(dead_code)]
 pub(crate) fn drain_events<I, A, B, R>(coord: &mut StreamEndpoint<I, A, B, R>) -> Vec<Event<I, A>>
 where
-  I: nodecraft::Id
+  I: memberlist_wire::Id
     + memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
