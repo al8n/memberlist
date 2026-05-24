@@ -354,7 +354,7 @@ where
 mod tests {
   use super::*;
   use memberlist_wire::typed::{Meta, NodeState, State};
-  use rand::{rngs::SmallRng, SeedableRng};
+  use rand::{SeedableRng, rngs::SmallRng};
   use smol_str::SmolStr;
   use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 

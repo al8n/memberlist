@@ -819,7 +819,7 @@ mod tests {
   #[cfg(feature = "lz4")]
   #[test]
   fn unwrap_loop_strips_compression_off_a_plain_frame() {
-    use crate::compression::{compress, encode_compressed_frame, CompressAlgorithm};
+    use crate::compression::{CompressAlgorithm, compress, encode_compressed_frame};
     let inner = encode_message(&sample_ping()).expect("encode ping");
     let packed = compress(CompressAlgorithm::Lz4, &inner).expect("compress");
     let wrapped = encode_compressed_frame(CompressAlgorithm::Lz4, inner.len(), &packed);
@@ -832,7 +832,7 @@ mod tests {
   #[cfg(feature = "lz4")]
   #[test]
   fn unwrap_loop_strips_compression_off_a_compound_frame() {
-    use crate::compression::{compress, encode_compressed_frame, CompressAlgorithm};
+    use crate::compression::{CompressAlgorithm, compress, encode_compressed_frame};
     let inner = encode_compound(&[sample_ping(), sample_ack()]).expect("encode compound");
     let packed = compress(CompressAlgorithm::Lz4, &inner).expect("compress");
     let wrapped = encode_compressed_frame(CompressAlgorithm::Lz4, inner.len(), &packed);
@@ -936,9 +936,9 @@ mod tests {
   #[test]
   fn unwrap_loop_strips_encrypted_then_compressed() {
     use crate::{
-      compression::{compress, encode_compressed_frame, CompressAlgorithm},
+      compression::{CompressAlgorithm, compress, encode_compressed_frame},
       encryption::{
-        encode_encrypted_frame, EncryptAlgorithm, EncryptionOptions, Keyring, SecretKey,
+        EncryptAlgorithm, EncryptionOptions, Keyring, SecretKey, encode_encrypted_frame,
       },
     };
     let inner = encode_message(&sample_ping()).expect("encode ping");

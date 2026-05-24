@@ -688,11 +688,11 @@ impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for RejectAllMerge {
 /// and closes the stream.
 #[test]
 fn merge_delegate_vetoes_join_push_pull() {
-  use bytes::Bytes;
-  use std::sync::{Arc, Mutex};
   use EndpointEvent;
   use PushPullKind;
   use StreamCommand;
+  use bytes::Bytes;
+  use std::sync::{Arc, Mutex};
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   while e.poll_event().is_some() {}
   let d = Arc::new(RejectAllMerge {
@@ -728,11 +728,11 @@ fn merge_delegate_vetoes_join_push_pull() {
 /// gated, so it merges even with a reject-all delegate installed.
 #[test]
 fn merge_delegate_not_consulted_for_refresh() {
-  use bytes::Bytes;
-  use std::sync::{Arc, Mutex};
   use EndpointEvent;
   use PushPullKind;
   use StreamCommand;
+  use bytes::Bytes;
+  use std::sync::{Arc, Mutex};
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   while e.poll_event().is_some() {}
   let d = Arc::new(RejectAllMerge {
@@ -1821,8 +1821,8 @@ fn probe_indirect_timeout_marks_target_suspect() {
   e.handle_timeout(t0 + Duration::from_millis(60));
   while e.poll_event().is_some() {} // drain DialRequested (concurrent reliable ping)
   while e.poll_transmit().is_some() {} // drain IndirectPings
-                                       // The single cumulative AwaitingIndirect deadline (t0+80ms) elapses →
-                                       // probe_terminate_failure → target Suspect. No further phase.
+  // The single cumulative AwaitingIndirect deadline (t0+80ms) elapses →
+  // probe_terminate_failure → target Suspect. No further phase.
   e.handle_timeout(t0 + Duration::from_millis(185));
 
   // The captured target — and ONLY that target — should now be Suspect (or Dead
@@ -2538,10 +2538,10 @@ fn accept_stream_returns_inbound_stream() {
 #[test]
 fn outbound_push_pull_decode_and_merge() {
   use crate::event::PushPullKind;
-  use bytes::Bytes;
   use PushNodeState;
   use PushPull;
   use State;
+  use bytes::Bytes;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   process_alive_auto(&mut e, alive("alice", 7000, 1), false, Instant::now());
@@ -2599,13 +2599,13 @@ fn outbound_push_pull_decode_and_merge() {
 
 #[test]
 fn inbound_push_pull_decode_and_response_bytes() {
-  use bytes::Bytes;
   use EndpointEvent;
   use PushNodeState;
   use PushPull;
   use PushPullKind;
   use State;
   use StreamCommand;
+  use bytes::Bytes;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   process_alive_auto(&mut e, alive("local-node", 7000, 1), false, Instant::now());
@@ -3183,11 +3183,11 @@ fn handle_data_bounds_input_buf_before_append() {
 /// stream — NOT decode and emit PushPullRequestReceived past stream_timeout.
 #[test]
 fn handle_data_after_stream_deadline_fails_without_decoding() {
-  use bytes::Bytes;
   use EndpointEvent;
   use PushNodeState;
   use PushPull;
   use State;
+  use bytes::Bytes;
 
   let mut e: Endpoint<SmolStr, SocketAddr> =
     Endpoint::new(cfg().with_stream_timeout(Duration::from_millis(100)));
@@ -3349,8 +3349,8 @@ fn reliable_ping_ack_drives_probe_success() {
 
 #[test]
 fn start_user_message_encodes_user_data() {
-  use bytes::Bytes;
   use Event;
+  use bytes::Bytes;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
@@ -3386,10 +3386,10 @@ fn start_user_message_encodes_user_data() {
 
 #[test]
 fn inbound_user_data_emits_user_packet_event() {
-  use bytes::Bytes;
   use EndpointEvent;
   use Event;
   use Reliability;
+  use bytes::Bytes;
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
@@ -3835,9 +3835,10 @@ fn dial_before_deadline_then_transmit_after_deadline_emits_nothing() {
     "the queued request is dropped, not merely withheld"
   );
   // Idempotent.
-  assert!(s
-    .poll_transmit(t0 + Duration::from_millis(200), &mut buf)
-    .is_none());
+  assert!(
+    s.poll_transmit(t0 + Duration::from_millis(200), &mut buf)
+      .is_none()
+  );
 }
 
 // ─────────── peer EOF terminalizes (PeerClosed) ──────────────────────────

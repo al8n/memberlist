@@ -55,29 +55,29 @@ pub mod messages;
 pub mod typed;
 pub mod wire_type;
 
-pub use bridge::{message_from_any, message_to_any, BridgeError};
+pub use bridge::{BridgeError, message_from_any, message_to_any};
 pub use compression::{
-  compress, decode_compressed_frame, decompress, encode_compressed_frame, encode_reliable_unit,
-  encode_reliable_unit_with_encryption, take_reliable_unit, take_reliable_unit_with_encryption,
   CompressAlgorithm, CompressionError, CompressionOptions, CompressionOutcome, OversizeOriginal,
-  UnitLenExceedsMaxInfo,
+  UnitLenExceedsMaxInfo, compress, decode_compressed_frame, decompress, encode_compressed_frame,
+  encode_reliable_unit, encode_reliable_unit_with_encryption, take_reliable_unit,
+  take_reliable_unit_with_encryption,
 };
 pub use convert::{
-  id_from_bytes, id_to_bytes, socket_addr_from_bytes, socket_addr_to_bytes, AddrLengthMismatchInfo,
-  ConvertError,
+  AddrLengthMismatchInfo, ConvertError, id_from_bytes, id_to_bytes, socket_addr_from_bytes,
+  socket_addr_to_bytes,
 };
 pub use data::{
   Data, DataRef, DecodeError, DuplicateFieldInfo, EncodeError, InsufficientBufferCapacity,
   MissingFieldInfo, UnknownTagInfo, UnknownWireTypeInfo,
 };
 pub use encryption::{
-  decode_encrypted_frame, decrypt, encode_encrypted_frame, encrypt, EncryptAlgorithm,
-  EncryptionError, EncryptionOptions, Keyring, KeyringError, OversizeCiphertext, SecretKey,
-  ENCRYPTED_TAG, ENCRYPTED_WRAPPER_OVERHEAD,
+  ENCRYPTED_TAG, ENCRYPTED_WRAPPER_OVERHEAD, EncryptAlgorithm, EncryptionError, EncryptionOptions,
+  Keyring, KeyringError, OversizeCiphertext, SecretKey, decode_encrypted_frame, decrypt,
+  encode_encrypted_frame, encrypt,
 };
 pub use framing::{
-  decode_compound, decode_message, decode_plain_frame, encode_compound, encode_message,
-  encode_plain_frame, unwrap_transforms, unwrap_transforms_with_encryption, AnyMessage, FrameError,
-  IncompleteFrame, MessageTag, COMPOUND_MAX_COUNT_PREFIX_LEN, COMPOUND_MAX_PART_PREFIX_LEN,
-  COMPOUND_TAG_LEN,
+  AnyMessage, COMPOUND_MAX_COUNT_PREFIX_LEN, COMPOUND_MAX_PART_PREFIX_LEN, COMPOUND_TAG_LEN,
+  FrameError, IncompleteFrame, MessageTag, decode_compound, decode_message, decode_plain_frame,
+  encode_compound, encode_message, encode_plain_frame, unwrap_transforms,
+  unwrap_transforms_with_encryption,
 };

@@ -8,7 +8,7 @@
 //! intentionally unimplemented.
 
 use bytes::Bytes;
-use memberlist_wire::{framing, message_from_any, message_to_any, typed::Message, Data};
+use memberlist_wire::{Data, framing, message_from_any, message_to_any, typed::Message};
 
 /// Outer label tag byte (byte-compatible with legacy memberlist-proto).
 const LABELED_TAG: u8 = 12;
