@@ -30,7 +30,7 @@ mod tests {
       bridge::StreamBridge,
       phase::StreamPhase,
       test_support::{
-        addr, handshaking_pair as shared_handshaking_pair, label, phase_label, TEST_RELIABLE_MAX,
+        TEST_RELIABLE_MAX, addr, handshaking_pair as shared_handshaking_pair, label, phase_label,
       },
     },
   };
@@ -721,7 +721,7 @@ mod tests {
   #[test]
   fn stream_reliable_unit_accumulation_roundtrips() {
     use memberlist_wire::{
-      encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
+      CompressAlgorithm, CompressionOptions, encode_reliable_unit, take_reliable_unit,
     };
     let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
@@ -748,7 +748,7 @@ mod tests {
     // original. Feeding the unit whole would have decoded fine; the bug was
     // that a SPLIT unit tore the exchange down.
     use memberlist_wire::{
-      encode_reliable_unit, take_reliable_unit, CompressAlgorithm, CompressionOptions,
+      CompressAlgorithm, CompressionOptions, encode_reliable_unit, take_reliable_unit,
     };
     let opts = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))
@@ -781,7 +781,7 @@ mod tests {
   fn stream_reliable_unit_disabled_is_byte_identical() {
     // Disabled compression: the unit payload is the framed bytes verbatim,
     // and the round-trip is byte-identical end to end (no wrapper).
-    use memberlist_wire::{encode_reliable_unit, take_reliable_unit, CompressionOptions};
+    use memberlist_wire::{CompressionOptions, encode_reliable_unit, take_reliable_unit};
     let opts = CompressionOptions::new();
     let framed = b"plain reliable frame bytes that are not compressed".to_vec();
     let unit = encode_reliable_unit(&opts, &framed);
@@ -796,8 +796,8 @@ mod tests {
   #[test]
   fn stream_reliable_unit_encrypted_roundtrip() {
     use memberlist_wire::{
-      encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption, EncryptionOptions,
-      Keyring, SecretKey,
+      EncryptionOptions, Keyring, SecretKey, encode_reliable_unit_with_encryption,
+      take_reliable_unit_with_encryption,
     };
     let comp = memberlist_wire::CompressionOptions::new();
     let enc = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
@@ -824,8 +824,8 @@ mod tests {
   #[test]
   fn stream_reliable_unit_encrypted_then_compressed_roundtrip() {
     use memberlist_wire::{
-      encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption, CompressAlgorithm,
-      CompressionOptions, EncryptionOptions, Keyring, SecretKey,
+      CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, SecretKey,
+      encode_reliable_unit_with_encryption, take_reliable_unit_with_encryption,
     };
     let comp = CompressionOptions::new()
       .with_algorithm(Some(CompressAlgorithm::Lz4))

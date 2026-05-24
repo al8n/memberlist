@@ -16,7 +16,7 @@ use crate::{
   config::EndpointConfig,
   endpoint::Endpoint,
   event::Event,
-  streams::{bridge::StreamBridge, phase::StreamPhase, transport::StreamTransport, StreamEndpoint},
+  streams::{StreamEndpoint, bridge::StreamBridge, phase::StreamPhase, transport::StreamTransport},
 };
 
 /// Reliable-unit ceiling for bridge test pairs — `EndpointConfig` default
