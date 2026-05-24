@@ -72,7 +72,6 @@ __sim-encryption-aes-gcm = ["tcp", "tls", "quic", "memberlist-machine/encryption
 bytes.workspace = true
 memberlist-machine = { path = "../memberlist-machine" }
 memberlist-wire = { workspace = true, features = ["default"] }
-nodecraft = { workspace = true, features = ["default"] }
 rand.workspace = true
 smol_str.workspace = true
 # quic-harness-only. The crypto-provider feature on rustls/quinn-proto is

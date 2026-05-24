@@ -67,6 +67,7 @@ peekable = "0.5"
 pin-project = "1"
 scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }
+cheap-clone = { version = "0.3", default-features = false }
 triomphe = { version = "0.1", default-features = false }
 humantime-serde = "1"
 smallvec = "1"

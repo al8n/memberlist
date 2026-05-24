@@ -75,7 +75,7 @@ use crate::{
 /// (pre-`Stream`); the coordinator promotes it to `Established` once the
 /// record-layer handshake / label step settles and the `Stream` is minted.
 /// Accessor-only.
-pub(crate) struct StreamBridge<I, A, R: StreamTransport> {
+pub(crate) struct StreamBridge<I, A, R> {
   /// `None` until the handshake / label step settles and the coordinator mints
   /// the `Stream`. The `Handshaking` phase is exactly the `stream.is_none()`
   /// window.
@@ -166,18 +166,19 @@ pub(crate) struct StreamBridge<I, A, R: StreamTransport> {
   reliable_max: usize,
 }
 
-impl<I, A, R: StreamTransport> StreamBridge<I, A, R>
+impl<I, A, R> StreamBridge<I, A, R>
 where
-  I: nodecraft::Id
+  R: StreamTransport,
+  I: memberlist_wire::Id
     + memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug

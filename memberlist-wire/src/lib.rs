@@ -51,11 +51,14 @@ pub mod convert;
 pub mod data;
 pub mod encryption;
 pub mod framing;
+pub mod id;
 pub mod messages;
+pub mod node;
 pub mod typed;
 pub mod wire_type;
 
 pub use bridge::{BridgeError, message_from_any, message_to_any};
+pub use cheap_clone::CheapClone;
 pub use compression::{
   CompressAlgorithm, CompressionError, CompressionOptions, CompressionOutcome, OversizeOriginal,
   UnitLenExceedsMaxInfo, compress, decode_compressed_frame, decompress, encode_compressed_frame,
@@ -81,3 +84,5 @@ pub use framing::{
   encode_compound, encode_message, encode_plain_frame, unwrap_transforms,
   unwrap_transforms_with_encryption,
 };
+pub use id::Id;
+pub use node::Node;

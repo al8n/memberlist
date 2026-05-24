@@ -82,7 +82,6 @@ tls-rustls-aws-lc-rs-fips = ["tls", "rustls/fips"]
 bytes.workspace = true
 indexmap.workspace = true
 memberlist-wire = { workspace = true, features = ["default"] }
-nodecraft = { workspace = true, features = ["default"] }
 rand.workspace = true
 rustc-hash = "2"
 smallvec.workspace = true

@@ -124,16 +124,16 @@ pub(crate) struct Bridge<I, A> {
 
 impl<I, A> Bridge<I, A>
 where
-  I: nodecraft::Id
+  I: memberlist_wire::Id
     + memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -1387,16 +1387,16 @@ mod tests {
   fn bridge_module_compiles() {
     fn _assert<I, A>()
     where
-      I: nodecraft::Id
+      I: memberlist_wire::Id
         + memberlist_wire::Data
-        + nodecraft::CheapClone
+        + memberlist_wire::CheapClone
         + core::fmt::Debug
         + core::fmt::Display
         + Send
         + Sync
         + 'static,
       A: memberlist_wire::Data
-        + nodecraft::CheapClone
+        + memberlist_wire::CheapClone
         + Eq
         + core::hash::Hash
         + core::fmt::Debug

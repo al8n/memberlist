@@ -201,16 +201,16 @@ pub struct Stream<I, A> {
 
 impl<I, A> Stream<I, A>
 where
-  I: nodecraft::Id
+  I: memberlist_wire::Id
     + Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
   A: Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -856,11 +856,11 @@ where
             // ping for another node must not be answered (mirrors
             // `Endpoint::handle_ping`); answering it could report an
             // unreachable target healthy and suppress suspicion.
-            if ping.target_ref().id() != &self.local_id {
+            if ping.target_ref().id_ref() != &self.local_id {
               return Err(StreamError::UnexpectedMessage(
                 format!(
                   "inbound reliable Ping target {} is not local {}",
-                  ping.target_ref().id(),
+                  ping.target_ref().id_ref(),
                   self.local_id
                 )
                 .into(),

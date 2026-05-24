@@ -61,7 +61,7 @@ struct LimitedBroadcast<B> {
   broadcast: Arc<B>,
 }
 
-impl<B: Broadcast> Clone for LimitedBroadcast<B> {
+impl<B> Clone for LimitedBroadcast<B> {
   fn clone(&self) -> Self {
     Self {
       transmits: self.transmits,
@@ -72,21 +72,21 @@ impl<B: Broadcast> Clone for LimitedBroadcast<B> {
   }
 }
 
-impl<B: Broadcast> PartialEq for LimitedBroadcast<B> {
+impl<B> PartialEq for LimitedBroadcast<B> {
   fn eq(&self, other: &Self) -> bool {
     self.transmits == other.transmits && self.msg_len == other.msg_len && self.id == other.id
   }
 }
 
-impl<B: Broadcast> Eq for LimitedBroadcast<B> {}
+impl<B> Eq for LimitedBroadcast<B> {}
 
-impl<B: Broadcast> PartialOrd for LimitedBroadcast<B> {
+impl<B> PartialOrd for LimitedBroadcast<B> {
   fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
     Some(self.cmp(other))
   }
 }
 
-impl<B: Broadcast> Ord for LimitedBroadcast<B> {
+impl<B> Ord for LimitedBroadcast<B> {
   fn cmp(&self, other: &Self) -> std::cmp::Ordering {
     self
       .transmits
@@ -103,13 +103,13 @@ struct Cmp {
   id: u64,
 }
 
-impl<B: Broadcast> PartialEq<&LimitedBroadcast<B>> for Cmp {
+impl<B> PartialEq<&LimitedBroadcast<B>> for Cmp {
   fn eq(&self, other: &&LimitedBroadcast<B>) -> bool {
     self.transmits == other.transmits && self.msg_len == other.msg_len && self.id == other.id
   }
 }
 
-impl<B: Broadcast> PartialOrd<&LimitedBroadcast<B>> for Cmp {
+impl<B> PartialOrd<&LimitedBroadcast<B>> for Cmp {
   fn partial_cmp(&self, other: &&LimitedBroadcast<B>) -> Option<std::cmp::Ordering> {
     Some(
       self
@@ -128,18 +128,14 @@ impl<B: Broadcast> PartialOrd<&LimitedBroadcast<B>> for Cmp {
 /// Sync version of `memberlist-core::queue::BroadcastQueue`. The number
 /// of nodes is supplied per-call rather than via a `NodeCalculator` trait.
 #[derive(Debug)]
-// Rule §8 storage-shape exception: `B::Id` (an associated type) appears as the
-// `HashMap` key and `LimitedBroadcast<B>` participates in `BTreeSet` ordering
-// via `Ord`, which itself requires `B: Broadcast`. Both field types cannot be
-// resolved without the bound, so it is retained on the struct and inherent impl.
-pub struct BroadcastQueue<B: Broadcast> {
+pub struct BroadcastQueue<Id, B> {
   retransmit_mult: u32,
   q: BTreeSet<LimitedBroadcast<B>>,
-  m: HashMap<B::Id, LimitedBroadcast<B>>,
+  m: HashMap<Id, LimitedBroadcast<B>>,
   id_gen: u64,
 }
 
-impl<B: Broadcast> BroadcastQueue<B> {
+impl<Id, B> BroadcastQueue<Id, B> {
   /// Construct a new queue with the given retransmit multiplier.
   pub fn new(retransmit_mult: u32) -> Self {
     Self {
@@ -171,6 +167,19 @@ impl<B: Broadcast> BroadcastQueue<B> {
     self.id_gen
   }
 
+  fn transmit_range(&self) -> (usize, usize) {
+    match (self.q.first(), self.q.last()) {
+      (Some(min), Some(max)) => (min.transmits, max.transmits),
+      _ => (0, 0),
+    }
+  }
+}
+
+impl<Id, B> BroadcastQueue<Id, B>
+where
+  Id: core::hash::Hash + core::cmp::Eq + core::clone::Clone,
+  B: Broadcast<Id = Id>,
+{
   fn insert_into(&mut self, item: LimitedBroadcast<B>) {
     let id = item.broadcast.id().cloned();
     // `q` is the source of truth; only mirror into `m` after `q` actually
@@ -191,13 +200,6 @@ impl<B: Broadcast> BroadcastQueue<B> {
       if let Some(id) = id {
         self.m.insert(id, item);
       }
-    }
-  }
-
-  fn transmit_range(&self) -> (usize, usize) {
-    match (self.q.first(), self.q.last()) {
-      (Some(min), Some(max)) => (min.transmits, max.transmits),
-      _ => (0, 0),
     }
   }
 
@@ -479,7 +481,7 @@ impl<I, A> MemberlistBroadcast<I, A> {
 
 impl<I, A> Broadcast for MemberlistBroadcast<I, A>
 where
-  I: nodecraft::CheapClone
+  I: memberlist_wire::CheapClone
     + memberlist_wire::Data
     + Eq
     + core::hash::Hash
@@ -488,7 +490,7 @@ where
     + Send
     + Sync
     + 'static,
-  A: nodecraft::CheapClone
+  A: memberlist_wire::CheapClone
     + memberlist_wire::Data
     + Eq
     + core::hash::Hash
@@ -589,7 +591,7 @@ mod tests {
 
   #[test]
   fn empty_queue_returns_empty() {
-    let mut q: BroadcastQueue<TestBroadcast> = BroadcastQueue::new(3);
+    let mut q: BroadcastQueue<&'static str, TestBroadcast> = BroadcastQueue::new(3);
     assert_eq!(q.num_queued(), 0);
     assert!(q.is_empty());
     assert!(q.take_broadcasts(10, 0, 1024).is_empty());
@@ -652,7 +654,7 @@ mod tests {
   /// `m` and `q` never desync, nothing is silently dropped.
   #[test]
   fn queue_broadcast_id_allocated_after_reset_no_desync() {
-    let mut q: BroadcastQueue<TestBroadcast> = BroadcastQueue::new(3);
+    let mut q: BroadcastQueue<&'static str, TestBroadcast> = BroadcastQueue::new(3);
     let f = Arc::new(AtomicUsize::new(0));
 
     // A single replace empties the queue (sole entry) and resets id_gen.

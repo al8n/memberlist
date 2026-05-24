@@ -44,23 +44,24 @@ impl ExchangeId {
 }
 
 /// The in-flight bridge map. Accessor-only.
-pub(crate) struct StreamConns<I, A, R: StreamTransport> {
+pub(crate) struct StreamConns<I, A, R> {
   bridges: HashMap<ExchangeId, StreamBridge<I, A, R>>,
   next: u64,
 }
 
-impl<I, A, R: StreamTransport> StreamConns<I, A, R>
+impl<I, A, R> StreamConns<I, A, R>
 where
-  I: nodecraft::Id
+  R: StreamTransport,
+  I: memberlist_wire::Id
     + memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug

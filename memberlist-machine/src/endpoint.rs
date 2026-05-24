@@ -9,13 +9,12 @@ use std::{
 
 use bytes::Bytes;
 use memberlist_wire::{
-  Data,
+  CheapClone, Data, Id, Node,
   typed::{
     Ack, Alive, Dead, IndirectPing, Message, Meta, Nack, NodeState, Ping, PushNodeState, PushPull,
     State, Suspect,
   },
 };
-use nodecraft::{CheapClone, Id, Node};
 use rand::{RngExt, SeedableRng, rngs::SmallRng, seq::IteratorRandom};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -117,26 +116,7 @@ struct IndirectForward<A> {
 /// never corrupts); delivery promptness/ordering is the driver's lever on
 /// *quality* (failure-detection latency, transient-suspect window), not a
 /// correctness dependency. The machine never compensates for the driver.
-// Storage-shape bound: the `broadcast` field is typed as
-// `BroadcastQueue<MemberlistBroadcast<I, A>>`. `BroadcastQueue<B>` declares
-// `B: Broadcast`, and `MemberlistBroadcast<I, A>: Broadcast` only when both
-// `I` and `A` carry the full SWIM bag below — so naming this struct without
-// the bound is ill-formed (E0277). The bag therefore stays at the struct
-// level only for well-formedness; method-level bounds on the impl blocks
-// below carry every operation that actually uses any of these traits.
-pub struct Endpoint<I, A>
-where
-  I: Id + Data + CheapClone,
-  A: CheapClone
-    + Data
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-{
+pub struct Endpoint<I, A> {
   cfg: EndpointConfig<I, A>,
   rng: SmallRng,
 
@@ -147,7 +127,7 @@ where
   awareness: Awareness,
 
   // Gossip queue (uses MemberlistBroadcast as the concrete Broadcast impl).
-  broadcast: BroadcastQueue<MemberlistBroadcast<I, A>>,
+  broadcast: BroadcastQueue<I, MemberlistBroadcast<I, A>>,
 
   // Probe FSM.
   ack_registry: AckRegistry<A>,
@@ -325,7 +305,7 @@ where
     );
     let mut members = Members::new(local_node);
     let awareness = Awareness::new(cfg.awareness_max_multiplier());
-    let broadcast = BroadcastQueue::<MemberlistBroadcast<I, A>>::new(cfg.retransmit_mult());
+    let broadcast = BroadcastQueue::<I, MemberlistBroadcast<I, A>>::new(cfg.retransmit_mult());
 
     // Insert the local node as Alive.
     let local_node_state = NodeState::new(
@@ -507,7 +487,7 @@ where
   /// in-order, atomic application is what makes Alive→Suspect/Dead
   /// ordering and timer stamping correct by construction.
   pub(crate) fn process_alive(&mut self, alive: Alive<I, A>, bootstrap: bool, now: Instant) {
-    let alive_id = alive.node_ref().id().cheap_clone();
+    let alive_id = alive.node_ref().id_ref().cheap_clone();
 
     // If we're no longer Running (Leaving or Left) and this Alive is about
     // us, ignore it — otherwise a self-Alive (e.g. a peer echoing our
@@ -521,7 +501,7 @@ where
     if let Some(d) = &self.alive_delegate {
       let server_view = NodeState::new(
         alive_id.cheap_clone(),
-        alive.node_ref().address().cheap_clone(),
+        alive.node_ref().addr_ref().cheap_clone(),
         State::Alive,
       )
       .with_meta(alive.meta_ref().cheap_clone())
@@ -546,8 +526,8 @@ where
     bootstrap: bool,
     now: Instant,
   ) {
-    let alive_id = alive.node_ref().id().cheap_clone();
-    let alive_addr = alive.node_ref().address().cheap_clone();
+    let alive_id = alive.node_ref().id_ref().cheap_clone();
+    let alive_addr = alive.node_ref().addr_ref().cheap_clone();
     let alive_incarnation = alive.incarnation();
     let alive_meta = alive.meta_ref().cheap_clone();
     let alive_protocol = alive.protocol_version();
@@ -1033,7 +1013,7 @@ where
   /// are silently dropped.
   pub fn handle_ping(&mut self, from: A, ping: Ping<I, A>, _now: Instant) {
     // Verify the Ping is addressed to us.
-    if ping.target_ref().id() != self.cfg.local_id_ref() {
+    if ping.target_ref().id_ref() != self.cfg.local_id_ref() {
       return;
     }
 
@@ -2352,9 +2332,9 @@ where
   /// we relay an Ack to the requester (see `handle_ack` Forward branch). If
   /// the deadline elapses without an ack, we send a Nack.
   pub fn handle_indirect_ping(&mut self, from: A, ind: IndirectPing<I, A>, now: Instant) {
-    let target_id = ind.target_ref().id().cheap_clone();
-    let target_addr = ind.target_ref().address().cheap_clone();
-    let requester_addr = ind.source_ref().address().cheap_clone();
+    let target_id = ind.target_ref().id_ref().cheap_clone();
+    let target_addr = ind.target_ref().addr_ref().cheap_clone();
+    let requester_addr = ind.source_ref().addr_ref().cheap_clone();
     let requester_seq = ind.sequence_number();
 
     // The requester address/seq are taken from the packet *body*
@@ -2429,8 +2409,8 @@ where
   /// design here means the caller doesn't await — the result flows back
   /// through `poll_event`.
   pub fn ping(&mut self, node: Node<I, A>, now: Instant) {
-    let target_id = node.id().cheap_clone();
-    let target_addr = node.address().cheap_clone();
+    let target_id = node.id_ref().cheap_clone();
+    let target_addr = node.addr_ref().cheap_clone();
     let target_arc = match self.members.get(&target_id) {
       Some(m) => m.state_ref().server_arc(),
       None => {

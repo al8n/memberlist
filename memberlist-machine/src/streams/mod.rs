@@ -172,32 +172,14 @@ fn teardown_exchange(action: &StreamAction) -> ExchangeId {
 /// address and, via `R::dial_context`, [`AddrBridge::server_name`] for the
 /// per-dial verification identity (the latter is unused on transports — plain
 /// TCP — that need no record-layer certificate verification).
-// Storage-shape bound: the struct bag is the MINIMUM required for the named
-// field types to be well-formed (rule §8 exception).
-//   `ep: Endpoint<I, A>` — `Endpoint`'s own storage-shape bound demands
-//     `I: Id + Data + CheapClone` and the full `A` bag, so naming the field
-//     forces both into this struct's `where` clause.
-//   `cfg: R::Options` and `conns: StreamConns<I, A, R>` — the `R::Options`
-//     associated type and the `StreamConns` type both demand
-//     `R: StreamTransport`.
-// `B` carries no struct-level bound (only `_addr: PhantomData<fn(B)>` holds
-// it; the `AddrBridge<A>` bound is added at the impl level only on the block
-// whose methods call `B::to_socket` / `R::dial_context::<A, B>`). The
-// heavier `I: Debug + Display + Send + Sync + 'static` bounds the SWIM-ops
-// methods need are likewise carried on the impl blocks below that need
-// them, not on the struct.
+// Storage-shape bound: `cfg: R::Options` requires `R: StreamTransport` for the
+// field type to be well-formed (rule §8 intrinsic exception). `ep: Endpoint<I, A>`
+// is bound-free after Task 3, so no I/A bounds remain at the struct level.
+// `B` is marker-only (`_addr: PhantomData<fn(B)>`); its `AddrBridge<A>` bound
+// lives on the impl blocks whose methods call `B::to_socket` /
+// `R::dial_context::<A, B>`.
 pub struct StreamEndpoint<I, A, B, R>
 where
-  I: nodecraft::Id + memberlist_wire::Data + nodecraft::CheapClone,
-  A: memberlist_wire::Data
-    + nodecraft::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
   R: StreamTransport,
 {
   ep: Endpoint<I, A>,
@@ -296,9 +278,9 @@ where
 // any of these.
 impl<I, A, B, R> StreamEndpoint<I, A, B, R>
 where
-  I: nodecraft::Id + memberlist_wire::Data + nodecraft::CheapClone,
+  I: memberlist_wire::Id + memberlist_wire::Data + memberlist_wire::CheapClone,
   A: memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -540,16 +522,16 @@ where
 // is callable on a `StreamEndpoint` whose `B` carries no extra bound.
 impl<I, A, B, R> StreamEndpoint<I, A, B, R>
 where
-  I: nodecraft::Id
+  I: memberlist_wire::Id
     + memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
@@ -1380,16 +1362,16 @@ where
 // address.
 impl<I, A, B, R> StreamEndpoint<I, A, B, R>
 where
-  I: nodecraft::Id
+  I: memberlist_wire::Id
     + memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + core::fmt::Debug
     + core::fmt::Display
     + Send
     + Sync
     + 'static,
   A: memberlist_wire::Data
-    + nodecraft::CheapClone
+    + memberlist_wire::CheapClone
     + Eq
     + core::hash::Hash
     + core::fmt::Debug
