@@ -20,7 +20,7 @@ use bytes::{Bytes, BytesMut};
 /// Invalid meta error.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
-#[error("the size of meta must between [0-512] bytes, got {0}")]
+#[error("meta size {0} exceeds the wire ceiling Meta::MAX_SIZE")]
 pub struct LargeMeta(usize);
 
 /// The metadata of a node in the cluster.
@@ -37,8 +37,21 @@ impl Default for Meta {
 impl CheapClone for Meta {}
 
 impl Meta {
-  /// The maximum size of a name in bytes.
-  pub const MAX_SIZE: usize = 512;
+  /// Absolute upper bound on a `Meta` byte length, enforced at
+  /// construction (`TryFrom` impls and `from_static*`). This is the
+  /// wire-layer ceiling — a `Meta` larger than this cannot be
+  /// represented on the wire and the constructors refuse to build
+  /// one.
+  ///
+  /// Coordinators ([`memberlist-machine`]) can apply a TIGHTER
+  /// per-endpoint cap via `EndpointConfig::with_meta_max_size` (the
+  /// historical default mirrors Go memberlist at 512 bytes); this
+  /// constant is the absolute hard ceiling above which no
+  /// machine-level config can rise.
+  ///
+  /// The value is `u16::MAX` so a future length-prefixed wire
+  /// encoding can fit any valid `Meta` in two bytes.
+  pub const MAX_SIZE: usize = u16::MAX as usize;
 
   /// Create an empty meta.
   #[inline(always)]

@@ -274,6 +274,17 @@ where
   pub(crate) const fn gossip_mtu(&self) -> usize {
     self.cfg.gossip_mtu()
   }
+
+  /// The configured server-side accept handshake deadline. Used by the
+  /// streams coordinator when bounding a freshly-accepted bridge's
+  /// label / TLS-handshake step. See
+  /// [`EndpointConfig::with_accept_handshake_deadline`]. Gated on a
+  /// feature config that compiles the `streams` module — under
+  /// QUIC-only or default builds the accessor has no callers.
+  #[cfg_attr(not(any(feature = "tcp", feature = "tls")), allow(dead_code))]
+  pub(crate) const fn accept_handshake_deadline(&self) -> Duration {
+    self.cfg.accept_handshake_deadline()
+  }
 }
 
 // The full SWIM bag — every method that constructs/encodes wire types,
@@ -295,6 +306,16 @@ where
   /// Construct a new endpoint. Inserts the local node as Alive at incarnation 1
   /// and enqueues the initial Alive broadcast.
   pub fn new(cfg: EndpointConfig<I, A>) -> Self {
+    // Operator-time misconfiguration guard: `initial_meta` was set
+    // via the builder, but its size exceeds the per-endpoint cap
+    // set via `with_meta_max_size`. The configs disagree — the
+    // local Alive broadcast would carry a meta peers will reject.
+    debug_assert!(
+      cfg.initial_meta_ref().len() <= cfg.meta_max_size(),
+      "EndpointConfig::initial_meta ({} bytes) exceeds meta_max_size ({} bytes)",
+      cfg.initial_meta_ref().len(),
+      cfg.meta_max_size(),
+    );
     let rng = match cfg.rng_seed() {
       Some(seed) => SmallRng::seed_from_u64(seed),
       None => rand::make_rng(),
@@ -2124,6 +2145,16 @@ where
     // accept over the dead-self leave, resurrecting the node.
     if self.lifecycle != Lifecycle::Running {
       return Err(crate::error::Error::NotRunning);
+    }
+    // Enforce the per-endpoint Meta cap. Wire's `Meta::MAX_SIZE` is the
+    // absolute ceiling at construction; here we apply the tighter
+    // configured `meta_max_size` so the local broadcast stays within
+    // the cluster's agreed limit. `update_meta` is the public
+    // boundary the operator drives, so a hard error is the right
+    // signal — silent truncation would hide config drift.
+    let cap = self.cfg.meta_max_size();
+    if meta.len() > cap {
+      return Err(crate::error::Error::MetaExceedsCap(meta.len(), cap));
     }
     let local_id = self.cfg.local_id_ref().cheap_clone();
     let local_addr = self.cfg.advertise_addr_ref().cheap_clone();

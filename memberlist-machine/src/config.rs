@@ -19,6 +19,24 @@ use memberlist_wire::typed::{DelegateVersion, Meta, ProtocolVersion};
 /// `Packet` is bounded directly by it.
 pub const DEFAULT_GOSSIP_MTU: usize = 1400;
 
+/// Default value for [`EndpointConfig::meta_max_size`]: 512 bytes —
+/// the legacy memberlist limit, retained as the default to ease
+/// migration from Go memberlist clusters. The absolute upper bound
+/// (the wire-construction ceiling on `Meta`) is
+/// [`memberlist_wire::typed::Meta::MAX_SIZE`] (`u16::MAX`); operators
+/// who want larger node metadata can raise this via
+/// [`EndpointConfig::with_meta_max_size`] up to that wire ceiling.
+pub const DEFAULT_META_MAX_SIZE: usize = 512;
+
+/// Default value for [`EndpointConfig::accept_handshake_deadline`]:
+/// 10 seconds. Bounds the time a server-side bridge spends in
+/// `Handshaking` (label or TLS handshake step) before the
+/// coordinator reaps it as failed. Long enough to ride out typical
+/// TLS handshake latency over a busy WAN; short enough to prevent
+/// half-open server sockets from accumulating under a
+/// connect-but-never-send attacker.
+pub const DEFAULT_ACCEPT_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
+
 /// Construction-time settings for [`Endpoint`](crate::endpoint::Endpoint).
 #[derive(Debug, Clone)]
 pub struct EndpointConfig<I, A> {
@@ -63,6 +81,28 @@ pub struct EndpointConfig<I, A> {
   gossip_interval: Duration,
   /// Number of random peers selected per gossip round. Default: 3.
   gossip_nodes: usize,
+  /// Per-endpoint cap on the LOCAL node's `Meta` byte length.
+  /// Enforced at [`Self::with_initial_meta`] construction-time (via
+  /// `Endpoint::new` debug_assert) and on every outgoing
+  /// `Endpoint::update_meta` call (returns
+  /// `Error::MetaExceedsCap`). Bounded above by
+  /// [`memberlist_wire::typed::Meta::MAX_SIZE`] (the absolute wire
+  /// ceiling). Default [`DEFAULT_META_MAX_SIZE`] (512, matching Go
+  /// memberlist).
+  ///
+  /// This cap is LOCAL-ONLY — incoming Alives from peers carry
+  /// whatever Meta size their own configuration allows (bounded
+  /// above by `Meta::MAX_SIZE`). A node sets this knob to limit
+  /// its OWN meta-broadcast size, not to refuse peers with larger
+  /// metas; refusing peers would cause silent cluster
+  /// fragmentation that hides bootstrap / config-skew failures.
+  meta_max_size: usize,
+  /// Deadline for a server-side bridge's `Handshaking` step (label
+  /// validation for plain TCP; TLS handshake for TLS records). A
+  /// peer that connects but never sends the label / completes the
+  /// handshake within this window is reaped as failed. Default
+  /// [`DEFAULT_ACCEPT_HANDSHAKE_DEADLINE`] (10 s).
+  accept_handshake_deadline: Duration,
   /// How often to run a full push/pull anti-entropy exchange with one
   /// random peer. `Duration::ZERO` disables push/pull. Default: 30 s (LAN).
   push_pull_interval: Duration,
@@ -93,6 +133,8 @@ impl<I, A> EndpointConfig<I, A> {
       gossip_mtu: DEFAULT_GOSSIP_MTU,
       gossip_interval: Duration::from_millis(200),
       gossip_nodes: 3,
+      meta_max_size: DEFAULT_META_MAX_SIZE,
+      accept_handshake_deadline: DEFAULT_ACCEPT_HANDSHAKE_DEADLINE,
       push_pull_interval: Duration::from_secs(30),
       retransmit_mult: 4,
       protocol_version: ProtocolVersion::V1,
@@ -221,6 +263,38 @@ impl<I, A> EndpointConfig<I, A> {
   #[inline(always)]
   pub const fn with_gossip_nodes(mut self, n: usize) -> Self {
     self.gossip_nodes = n;
+    self
+  }
+
+  /// Builder: set the per-endpoint LOCAL `Meta` size cap. Capped
+  /// above by [`memberlist_wire::typed::Meta::MAX_SIZE`] (the
+  /// absolute wire ceiling); operators wanting to broadcast larger
+  /// node metadata than the default 512 (Go memberlist parity) can
+  /// raise this up to that ceiling.
+  ///
+  /// This cap limits the LOCAL node's broadcasts only — incoming
+  /// peer Alives are accepted regardless of their Meta size (up to
+  /// the wire ceiling). Refusing peers with larger metas would
+  /// cause silent cluster fragmentation that hides bootstrap and
+  /// config-skew failures, so the FSM does not gate inbound Alives
+  /// on this cap. Operators should still keep the cap consistent
+  /// cluster-wide if they raise it, so every peer can broadcast
+  /// the same maximum size.
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_meta_max_size(mut self, n: usize) -> Self {
+    self.meta_max_size = n;
+    self
+  }
+
+  /// Builder: set the server-side accept handshake deadline.
+  /// Bounds the time a bridge spends in `Handshaking` (label step
+  /// for plain TCP / TLS handshake for TLS records) before the
+  /// coordinator reaps it as failed.
+  #[must_use]
+  #[inline(always)]
+  pub const fn with_accept_handshake_deadline(mut self, d: Duration) -> Self {
+    self.accept_handshake_deadline = d;
     self
   }
 
@@ -408,6 +482,20 @@ impl<I, A> EndpointConfig<I, A> {
   #[inline(always)]
   pub const fn gossip_nodes(&self) -> usize {
     self.gossip_nodes
+  }
+
+  /// Per-endpoint `Meta` byte-length cap. See
+  /// [`Self::with_meta_max_size`].
+  #[inline(always)]
+  pub const fn meta_max_size(&self) -> usize {
+    self.meta_max_size
+  }
+
+  /// Server-side accept handshake deadline. See
+  /// [`Self::with_accept_handshake_deadline`].
+  #[inline(always)]
+  pub const fn accept_handshake_deadline(&self) -> Duration {
+    self.accept_handshake_deadline
   }
 
   /// How often push/pull anti-entropy fires. `Duration::ZERO` means disabled.

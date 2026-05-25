@@ -80,21 +80,26 @@ use bytes::Bytes;
 use crate::{
   addr_bridge::AddrBridge,
   endpoint::Endpoint,
-  event::{Event, PushPullKind, StreamId, Transmit},
+  event::{Event, PushPullCompleted, PushPullKind, PushPullOutcome, StreamId, Transmit},
 };
 use bridge::StreamBridge;
 use conn::StreamConns;
 
 /// Handshake completion budget for an inbound (accepted) exchange.
 ///
-/// The outbound dial deadline is the membership exchange deadline carried on
-/// `Event::DialRequested`; an accepted connection has no such intent, so the
-/// coordinator bounds its label / handshake step with this fixed budget
-/// (matching the default `EndpointConfig::stream_timeout`, which the membership
-/// `Endpoint` applies to the accepted `Stream`'s exchange once it is minted). A
-/// label / handshake step that has not settled by `now +
-/// ACCEPT_HANDSHAKE_DEADLINE` is reaped by the bridge's `poll_timeout` /
-/// `pump_out` deadline path with no `Stream` minted.
+/// Historical default for the server-side accept handshake deadline,
+/// retained as documentation. The runtime value is read from
+/// [`crate::config::EndpointConfig::accept_handshake_deadline`] —
+/// operators tune via `EndpointConfig::with_accept_handshake_deadline`;
+/// see [`crate::config::DEFAULT_ACCEPT_HANDSHAKE_DEADLINE`].
+///
+/// An accepted connection has no `Event::DialRequested` exchange
+/// deadline (only outbound dials carry that); the coordinator bounds
+/// its label / handshake step with this per-endpoint budget. A label /
+/// handshake step that has not settled by `now +
+/// accept_handshake_deadline` is reaped by the bridge's
+/// `poll_timeout` / `pump_out` deadline path with no `Stream` minted.
+#[allow(dead_code)]
 const ACCEPT_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// One pending dial intent the coordinator owes a `service_dials` attempt to.
@@ -150,6 +155,17 @@ struct ExchangeMeta<A> {
   /// plain TCP the half-close is the out-of-band `shutdown(write)` and the
   /// latch records that the FIN signal itself is owed to the driver.
   fin_emitted: bool,
+  /// Which `start_*` produced this exchange — populated only for outbound
+  /// exchanges by the `start_push_pull` / `start_reliable_ping` /
+  /// `start_user_message` wrappers via `pending_outbound_kinds`. `None`
+  /// for inbound (server-side) exchanges accepted via
+  /// [`Self::accept_connection`]; the bridge label-decode step settles
+  /// the inbound kind but the coordinator does not currently re-emit
+  /// kind-specific terminal events for the inbound side (drivers that
+  /// initiate join_with against a peer rely only on their own outbound
+  /// exchange's terminal event). Gates the
+  /// [`Event::PushPullCompleted`] emission in `reap_bridge`.
+  kind: Option<crate::event::ExchangeKind>,
 }
 
 /// The [`ExchangeId`] a teardown directive ([`StreamAction::Shutdown`] /
@@ -240,6 +256,18 @@ where
   /// an `attempted` bit so a freshly-sieved intent surfaces in
   /// [`Self::poll_timeout`] as an immediate-due wake — see [`PendingDial`].
   dial_pending: std::collections::VecDeque<PendingDial<A>>,
+  /// Tags each outbound `StreamId` with the originating
+  /// [`ExchangeKind`] so `service_dials` can stamp the resulting
+  /// `ExchangeMeta` with the right kind, and `reap_bridge` can fire
+  /// kind-specific terminal events ([`Event::PushPullCompleted`] for
+  /// `ExchangeKind::PushPull` only — reliable ping and reliable
+  /// user-message terminations are observed through `Endpoint`'s own
+  /// per-kind events). Populated by the `start_*` wrappers above the
+  /// call to `service_dials`; drained at the matching `ExchangeMeta`
+  /// allocation inside `service_dials`. Strictly outbound-only —
+  /// inbound (server-side) exchanges are not assigned a kind by the
+  /// initiator and never appear in this table.
+  pending_outbound_kinds: HashMap<StreamId, crate::event::ExchangeKind>,
   /// Most recent `now: Instant` injected by any `handle_*` / `start_*` wrapper.
   /// Used by [`Self::poll_timeout`] as the known-past anchor for the
   /// immediate-due wake of an unattempted `dial_pending` entry: the only way
@@ -556,6 +584,7 @@ where
       pending_teardowns: std::collections::VecDeque::new(),
       mem_ingress: std::collections::VecDeque::new(),
       dial_pending: std::collections::VecDeque::new(),
+      pending_outbound_kinds: HashMap::new(),
       last_now: None,
       policy_reap_pending: false,
       _addr: core::marker::PhantomData,
@@ -778,6 +807,51 @@ where
     // reliable bridges do not fail.
     self.mem_ingress.clear();
     self.encryption = encryption;
+  }
+
+  /// Replace the compression options in place. The driver calls this
+  /// when the operator updates the gossip compression policy at
+  /// runtime. Single-threaded `&mut self` — no lock.
+  ///
+  /// Fans out to every live bridge so an in-flight exchange that
+  /// started under the prior policy adopts the new policy on its next
+  /// outbound encode (each [`StreamBridge`] carries a per-bridge
+  /// `compression` clone captured at construction; without the
+  /// fan-out, a long-lived reliable exchange would emit the old
+  /// policy's bytes until it reaped).
+  ///
+  /// Unlike [`Self::set_encryption_options`], compression is
+  /// non-security: the wire frame self-describes its algorithm via
+  /// the compression-tag prefix, so a peer always decompresses under
+  /// whatever policy was active at the producer's encode time. No
+  /// bridge-failure cascade, no `out_transmit` / `mem_ingress` purge,
+  /// no `policy_reap_pending` wake.
+  pub fn set_compression_options(&mut self, compression: memberlist_wire::CompressionOptions) {
+    self.compression = compression.clone();
+    for id in self.conns.ids() {
+      let Some(bridge) = self.conns.get_mut(id) else {
+        continue;
+      };
+      bridge.set_compression(compression.clone());
+    }
+  }
+
+  /// Re-broadcast the local node's metadata. Pass-through to
+  /// [`Endpoint::update_meta`]; the inner endpoint bumps the local
+  /// incarnation and queues an `Alive` broadcast carrying the new bytes
+  /// so peers converge to the updated metadata via the normal SWIM path.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::Error::NotRunning`] if the local lifecycle has
+  /// already transitioned to `Leaving` / `Left` / `Shutdown` — a post-leave
+  /// metadata update would bump the incarnation and resurrect the local
+  /// node on peers that had observed its `Leave`.
+  pub fn update_meta(
+    &mut self,
+    meta: memberlist_wire::typed::Meta,
+  ) -> Result<(), crate::error::Error> {
+    self.ep.update_meta(meta)
   }
 
   /// Initiate one SWIM probe tick on the inner membership endpoint.
@@ -1120,7 +1194,34 @@ where
       self.purge_transmit_for(id);
     }
     self.collect_bridge_transmits(id, br);
-    if let Some(PendingMint::Outbound(sid)) = self.exchanges.remove(&id).and_then(|m| m.mint) {
+    // Snapshot the terminal outcome BEFORE the exchange-meta is removed
+    // — drivers correlate the outcome with their own ExchangeId-keyed
+    // waiters via the public PushPullCompleted event below. Emission
+    // is gated on `kind == PushPull` so reliable-ping fallback
+    // exchanges and one-way user-message exchanges do NOT surface
+    // through this variant; the inner Endpoint emits its own
+    // kind-specific events for those (`PingCompleted` for probes,
+    // user-packet events for messages). Inbound exchanges (kind =
+    // None) also do not emit — synchronous-join drivers observe ONLY
+    // their own outbound push/pull's terminal outcome.
+    let outcome = if br.is_failed() {
+      PushPullOutcome::Failed
+    } else {
+      PushPullOutcome::Succeeded
+    };
+    let removed = self.exchanges.remove(&id);
+    if let Some(meta) = &removed
+      && meta.kind == Some(crate::event::ExchangeKind::PushPull)
+    {
+      self
+        .ep
+        .emit_event(Event::PushPullCompleted(PushPullCompleted::new(
+          id,
+          meta.peer_socket,
+          outcome,
+        )));
+    }
+    if let Some(PendingMint::Outbound(sid)) = removed.and_then(|m| m.mint) {
       // The bridge reaped before its label / handshake step settled (e.g. a
       // label mismatch on a dial): the `StreamId` was never minted into a
       // `Stream`, but the inner endpoint still holds the pending intent.
@@ -1464,7 +1565,7 @@ where
       Ok(records) => {
         let bridge = StreamBridge::new(
           records,
-          now + ACCEPT_HANDSHAKE_DEADLINE,
+          now + self.ep.accept_handshake_deadline(),
           self.compression,
           self.encryption.clone(),
           self.ep.max_stream_frame_size(),
@@ -1476,6 +1577,10 @@ where
             peer_socket,
             mint: Some(PendingMint::Inbound(from)),
             fin_emitted: false,
+            // Inbound exchange — the initiator-side wrapper that picks
+            // the kind never ran locally. Leave unset; the reap path
+            // does not emit kind-specific events for inbound.
+            kind: None,
           },
         );
       }
@@ -1502,6 +1607,9 @@ where
   pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
     self.last_now = Some(now);
     let id = self.ep.start_push_pull(peer, kind, now);
+    self
+      .pending_outbound_kinds
+      .insert(id, crate::event::ExchangeKind::PushPull);
     self.service_dials(now);
     self.flush_outbound(now);
     id
@@ -1528,6 +1636,9 @@ where
     let id = self
       .ep
       .start_reliable_ping(peer_id, peer_addr, probe_seq, deadline);
+    self
+      .pending_outbound_kinds
+      .insert(id, crate::event::ExchangeKind::ReliablePing);
     self.service_dials(now);
     self.flush_outbound(now);
     id
@@ -1542,6 +1653,9 @@ where
   pub fn start_user_message(&mut self, peer: A, payload: Bytes, now: Instant) -> StreamId {
     self.last_now = Some(now);
     let id = self.ep.start_user_message(peer, payload, now);
+    self
+      .pending_outbound_kinds
+      .insert(id, crate::event::ExchangeKind::UserMessage);
     self.service_dials(now);
     self.flush_outbound(now);
     id
@@ -1680,12 +1794,19 @@ where
         self.ep.max_stream_frame_size(),
       );
       self.conns.insert(exchange, bridge);
+      // Drain the kind the originating `start_*` wrapper stashed.
+      // `None` here would indicate a `DialRequested` emitted by the
+      // inner endpoint outside the streams coordinator's start path —
+      // not currently reachable but kept defensive (`reap_bridge` then
+      // does not emit a kind-specific event for this exchange).
+      let exchange_kind = self.pending_outbound_kinds.remove(&id);
       self.exchanges.insert(
         exchange,
         ExchangeMeta {
           peer_socket,
           mint: Some(PendingMint::Outbound(id)),
           fin_emitted: false,
+          kind: exchange_kind,
         },
       );
       let action = StreamAction::Connect(ConnectInfo::new(exchange, peer_socket));

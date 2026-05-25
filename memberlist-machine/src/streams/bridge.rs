@@ -266,6 +266,21 @@ where
     self.fail(BridgeFailure::EncryptionPolicyChanged);
   }
 
+  /// Replace the per-bridge compression options. Takes effect on the
+  /// next outbound encode through this bridge's
+  /// [`encode_reliable_unit_with_encryption`] call site; in-flight
+  /// chunks already in [`Self::poll_transport_transmit`]'s queue are
+  /// not re-encoded.
+  ///
+  /// Unlike [`Self::set_encryption`], no bridge-failure cascade fires
+  /// — compression is a non-security codec layer and the wire frame
+  /// self-describes its algorithm via the compression-tag prefix, so
+  /// a peer always decompresses the bytes it received under whatever
+  /// policy was active at the producer's encode time.
+  pub(crate) fn set_compression(&mut self, compression: memberlist_wire::CompressionOptions) {
+    self.compression = compression;
+  }
+
   /// `true` while the bridge is still gating the `Stream` mint on its record
   /// layer. The acceptor stays handshaking until the inbound label / handshake
   /// is validated; the dialer with no record-layer handshake never does (its
