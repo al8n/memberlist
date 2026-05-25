@@ -1,9 +1,42 @@
 //! Application-facing event and transmit types emitted by [`Endpoint`].
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use memberlist_wire::typed::{Message, NodeState, PushNodeState};
+
+/// A coordinator-allocated handle for one in-flight reliable exchange,
+/// stable across the `Handshaking → Established` promotion (unlike
+/// [`StreamId`], which does not exist until the record-layer step
+/// settles). Newtype over `u64`.
+///
+/// Defined here so the [`Event::PushPullCompleted`] variant is
+/// uniformly available across feature configurations; the streams
+/// coordinator (`crate::streams`) re-exports this type from its
+/// own module path for back-compat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExchangeId(u64);
+
+impl ExchangeId {
+  /// Construct from a raw u64. Crate-internal: the streams
+  /// coordinator's allocator is the only legitimate producer.
+  /// `dead_code` allow guards builds without the streams module
+  /// (no `tcp` / `tls` feature) — the type itself stays compiled so
+  /// [`PushPullCompleted`] is feature-uniform, but the constructor
+  /// has no caller in those builds.
+  #[allow(dead_code)]
+  #[inline(always)]
+  pub(crate) const fn new(raw: u64) -> Self {
+    Self(raw)
+  }
+
+  /// The raw monotonic handle. The driver keys its per-exchange
+  /// stream-transport connection on this value.
+  #[inline(always)]
+  pub const fn get(self) -> u64 {
+    self.0
+  }
+}
 
 /// Transport reliability hint. Tagged so call sites self-document at the
 /// API boundary without bool flags.
@@ -37,6 +70,98 @@ impl PushPullKind {
   #[inline(always)]
   pub const fn is_join(self) -> bool {
     matches!(self, PushPullKind::Join)
+  }
+}
+
+/// Which reliable-stream initiator produced an outbound exchange. The
+/// streams coordinator tags each [`ExchangeId`] with this so the bridge
+/// reap path can route a per-kind terminal event (currently only
+/// [`Event::PushPullCompleted`] is exposed publicly — the other kinds
+/// fire `Endpoint`'s existing kind-specific events).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExchangeKind {
+  /// `start_push_pull` — Join or Refresh state exchange.
+  PushPull,
+  /// `start_reliable_ping` — TCP/TLS-fallback probe ping.
+  ReliablePing,
+  /// `start_user_message` — one-way reliable user-message delivery.
+  UserMessage,
+}
+
+impl ExchangeKind {
+  /// Returns `true` if this exchange originated from `start_push_pull`.
+  #[inline(always)]
+  pub const fn is_push_pull(self) -> bool {
+    matches!(self, ExchangeKind::PushPull)
+  }
+}
+
+/// Terminal outcome of one per-exchange reliable push/pull, observed by
+/// the driver via [`Event::PushPullCompleted`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PushPullOutcome {
+  /// The exchange validated end-to-end (frame decoder, record layer,
+  /// payload merge) and the peer's state was applied to membership.
+  /// For an outbound (we-initiated) exchange this implies the peer's
+  /// push/pull response was processed; for an inbound (peer-initiated)
+  /// exchange it implies our response was sent and the peer's request
+  /// was applied.
+  Succeeded,
+  /// The exchange terminated without a validated push/pull (dial
+  /// failure, label / handshake rejection, frame decode error, record
+  /// layer fault, deadline elapsed mid-flight, transport I/O error).
+  Failed,
+}
+
+impl PushPullOutcome {
+  /// Returns `true` if this is `Succeeded`.
+  #[inline(always)]
+  pub const fn is_succeeded(self) -> bool {
+    matches!(self, PushPullOutcome::Succeeded)
+  }
+}
+
+/// Payload for [`Event::PushPullCompleted`]: the terminal outcome of
+/// one per-exchange reliable push/pull, emitted from the coordinator's
+/// bridge reap path. Drivers correlate `eid` with their own
+/// `ExchangeId`-keyed waiter table to drive synchronous completion
+/// semantics (e.g. a `join_with` "actually-contacted" count) without
+/// having to infer success from membership-state side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PushPullCompleted {
+  eid: ExchangeId,
+  peer: SocketAddr,
+  outcome: PushPullOutcome,
+}
+
+impl PushPullCompleted {
+  /// Construct a new payload. Crate-internal: the coordinator's bridge
+  /// reap path is the only legitimate producer. `dead_code` allow
+  /// guards builds without the streams module — the type itself stays
+  /// compiled (so the [`Event::PushPullCompleted`] variant is
+  /// feature-uniform) but the constructor has no caller.
+  #[allow(dead_code)]
+  #[inline(always)]
+  pub(crate) const fn new(eid: ExchangeId, peer: SocketAddr, outcome: PushPullOutcome) -> Self {
+    Self { eid, peer, outcome }
+  }
+
+  /// The opaque exchange handle the event refers to.
+  #[inline(always)]
+  pub const fn eid(&self) -> ExchangeId {
+    self.eid
+  }
+
+  /// The peer the exchange targeted.
+  #[inline(always)]
+  pub const fn peer(&self) -> SocketAddr {
+    self.peer
+  }
+
+  /// The terminal outcome.
+  #[inline(always)]
+  pub const fn outcome(&self) -> PushPullOutcome {
+    self.outcome
   }
 }
 
@@ -208,6 +333,15 @@ pub enum Event<I, A> {
     /// Deadline by which the dial (and full exchange) must complete.
     deadline: std::time::Instant,
   },
+  /// A per-exchange reliable push/pull terminated, with the validated
+  /// outcome (see [`PushPullOutcome`]). Fired from the coordinator's
+  /// bridge reap path for BOTH outbound (we-initiated) and inbound
+  /// (peer-initiated) exchanges regardless of which direction reached
+  /// the terminal phase first. Drivers correlate `eid` with their own
+  /// `ExchangeId`-keyed waiter tables to drive synchronous completion
+  /// semantics directly (no need to infer success from
+  /// `NodeJoined` / `NodeUpdated` / membership snapshots).
+  PushPullCompleted(PushPullCompleted),
 }
 
 /// Event from a [`Stream`](super::endpoint) back to the [`Endpoint`].

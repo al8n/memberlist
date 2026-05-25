@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "memberlist",
+  "memberlist-compio",
   "memberlist-core",
   "memberlist-machine",
   "memberlist-proto",
@@ -36,6 +37,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [workspace.dependencies]
 among = "0.1"
+arc-swap = "1"
 auto_impl = "1"
 atomic_refcell = "0.1"
 agnostic-lite = { version = "0.6", features = ["time"] }
@@ -49,6 +51,12 @@ bytes = { version = "1", default-features = false }
 byteorder = { version = "1", default-features = false }
 varing = { version = "0.13", default-features = false }
 cfg-if = "1"
+compio = { version = "0.19.0-rc.2", default-features = false }
+flume = { version = "0.12", default-features = false }
+futures-util = { version = "0.3", default-features = false }
+hickory-proto = { version = "0.26", default-features = false }
+hostaddr = { version = "0.2", default-features = false }
+resolv-conf = { version = "0.7", default-features = false }
 derive_more = { version = "2", default-features = false }
 either = { version = "1", default-features = false }
 futures = "0.3"

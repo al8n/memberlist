@@ -23,25 +23,8 @@
 
 use std::collections::HashMap;
 
+pub use crate::event::ExchangeId;
 use crate::streams::{bridge::StreamBridge, transport::StreamTransport};
-
-/// A coordinator-allocated handle for one in-flight reliable exchange, stable
-/// across the `Handshaking → Established` promotion (unlike `StreamId`, which
-/// does not exist until the record-layer step settles). Newtype over `u64`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ExchangeId(u64);
-
-impl ExchangeId {
-  pub(crate) const fn new(raw: u64) -> Self {
-    Self(raw)
-  }
-  /// The raw monotonic handle. The driver keys its per-exchange stream-transport
-  /// connection on this value.
-  #[inline(always)]
-  pub const fn get(self) -> u64 {
-    self.0
-  }
-}
 
 /// The in-flight bridge map. Accessor-only.
 pub(crate) struct StreamConns<I, A, R> {

@@ -21,6 +21,12 @@ pub enum Error {
   /// The payload is the raw state identifier received from the wire.
   #[error("unknown peer state: {0}")]
   UnknownPeerState(Cow<'static, str>),
+
+  /// A caller-supplied `Meta` exceeded the per-endpoint
+  /// [`EndpointConfig::meta_max_size`](crate::config::EndpointConfig::meta_max_size)
+  /// cap. Payload: `(supplied_len, cap)`.
+  #[error("meta size {0} exceeds per-endpoint cap {1}")]
+  MetaExceedsCap(usize, usize),
 }
 
 /// Error from a per-stream reliable-exchange state machine.

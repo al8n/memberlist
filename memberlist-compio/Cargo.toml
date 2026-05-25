@@ -1,0 +1,53 @@
+[package]
+name = "memberlist-compio"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "compio-based async driver for the Sans-I/O memberlist machine"
+
+[features]
+default = ["tcp"]
+tcp = ["memberlist-machine/tcp"]
+tls-rustls-ring = ["memberlist-machine/tls-rustls-ring", "compio/rustls"]
+tls-rustls-aws-lc-rs = ["memberlist-machine/tls-rustls-aws-lc-rs"]
+compression-lz4 = ["memberlist-machine/compression-lz4"]
+compression-snappy = ["memberlist-machine/compression-snappy"]
+compression-zstd = ["memberlist-machine/compression-zstd"]
+compression-brotli = ["memberlist-machine/compression-brotli"]
+encryption-aes-gcm = ["memberlist-machine/encryption-aes-gcm"]
+encryption-chacha20-poly1305 = ["memberlist-machine/encryption-chacha20-poly1305"]
+dns = ["dep:hickory-proto", "dep:resolv-conf"]
+
+[dependencies]
+memberlist-machine = { workspace = true }
+memberlist-wire = { workspace = true }
+hostaddr = { workspace = true }
+smol_str = { workspace = true }
+compio = { workspace = true, features = ["net", "runtime", "macros", "time"] }
+arc-swap = { workspace = true }
+flume = { workspace = true, default-features = false, features = ["async"] }
+futures-util = { workspace = true, default-features = false, features = ["std", "async-await-macro"] }
+thiserror = { workspace = true }
+hickory-proto = { workspace = true, optional = true, default-features = false, features = ["std"] }
+resolv-conf = { workspace = true, optional = true }
+
+[dev-dependencies]
+rcgen = "0.14"
+rustls = { version = "0.23", features = ["ring"] }
+smol_str = { workspace = true }
+
+[[test]]
+name = "tcp_smoke"
+required-features = ["tcp"]
+
+[[test]]
+name = "tcp_join"
+required-features = ["tcp"]
+
+[[test]]
+name = "tcp_lifecycle"
+required-features = ["tcp"]
+
+[[test]]
+name = "tls_smoke"
+required-features = ["tls-rustls-ring"]
