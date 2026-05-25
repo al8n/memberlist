@@ -16,6 +16,19 @@ macro_rules! send {
         });
       }
 
+      #[test]
+      fn [< test_ $rt:snake _ $kind:snake _send_many_batches_all_packets >]() {
+        [< $rt:snake _run >](async move {
+          let mut t1_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("send_many_node_1".into(), $expr).with_max_packet_size(512);
+          t1_opts.add_bind_address(next_socket_addr_v4(0));
+
+          let mut t2_opts = NetTransportOptions::<SmolStr, _, $layer<[< $rt:camel Runtime >]>>::with_stream_layer_options("send_many_node_2".into(), $expr).with_max_packet_size(512);
+          t2_opts.add_bind_address(next_socket_addr_v4(0));
+
+          memberlist_send_many::<NetTransport<_, SocketAddrResolver<[< $rt:camel Runtime >]>, _, [< $rt:camel Runtime >]>, _>(t1_opts, Options::lan(), t2_opts, Options::lan()).await;
+        });
+      }
+
       #[cfg(any(
         feature = "crc32",
         feature = "xxhash32",
