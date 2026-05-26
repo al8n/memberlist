@@ -18,12 +18,15 @@ pub use crypto::QuicConfig;
 use std::{collections::HashMap, net::SocketAddr, time::Instant};
 
 use bytes::{Bytes, BytesMut};
-use quinn_proto::{DatagramEvent, Dir, Endpoint as QuinnEndpoint};
+use quinn_proto::{ConnectionHandle, DatagramEvent, Dir, Endpoint as QuinnEndpoint};
 
 use crate::{
   addr_bridge::AddrBridge,
   endpoint::Endpoint,
-  event::{Event, PushPullKind, StreamId, Transmit},
+  event::{
+    Event, ExchangeCompleted, ExchangeId, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId,
+    Transmit,
+  },
 };
 use bridge::Bridge;
 use conn::ConnTable;
@@ -73,6 +76,19 @@ pub struct QuicEndpoint<I, A, B> {
   encryption: memberlist_wire::EncryptionOptions,
   conns: ConnTable,
   bridges: HashMap<StreamId, Bridge<I, A>>,
+  /// Tags each outbound bridge's [`StreamId`] with the originating
+  /// [`ExchangeKind`] so the bridge-reap path can carry that kind on
+  /// the uniform [`Event::ExchangeCompleted`] terminal event. Mirrors
+  /// `StreamEndpoint::pending_outbound_kinds`. The reap fires for ALL
+  /// outbound kinds (push/pull, reliable ping, reliable user message);
+  /// consumers filter on the payload's `kind()` to focus on the
+  /// bridges they care about. Populated at `start_push_pull` /
+  /// `start_reliable_ping` / `start_user_message` time; drained at
+  /// bridge-reap time inside [`Self::emit_exchange_completed`].
+  /// Strictly outbound-only — inbound (server-side) bridges accepted
+  /// from `streams().accept(Dir::Bi)` are not assigned a kind by the
+  /// initiator and never appear in this table.
+  pending_outbound_kinds: HashMap<StreamId, ExchangeKind>,
   /// Outbound UDP datagrams produced this tick (quinn datagrams + stateless
   /// `Response`s; the memberlist unreliable path is NOT prebuffered — see
   /// [`poll_memberlist_transmit`](Self::poll_memberlist_transmit)).
@@ -237,6 +253,7 @@ where
       encryption: memberlist_wire::EncryptionOptions::new(),
       conns: ConnTable::new(),
       bridges: HashMap::new(),
+      pending_outbound_kinds: HashMap::new(),
       out: std::collections::VecDeque::new(),
       mem_ingress: std::collections::VecDeque::new(),
       dial_pending: std::collections::VecDeque::new(),
@@ -272,6 +289,17 @@ where
   /// The configured cross-transport compression options.
   pub fn compression(&self) -> memberlist_wire::CompressionOptions {
     self.compression
+  }
+
+  /// Reconfigure the gossip compression policy in place. Applies to
+  /// the next outbound datagram.
+  ///
+  /// QUIC's reliable path is skipped — quinn streams provide
+  /// confidentiality and integrity intrinsically, so compression is
+  /// applied only to the gossip path (plain UDP datagrams sharing
+  /// the same socket as the QUIC packets).
+  pub fn set_compression_options(&mut self, compression: memberlist_wire::CompressionOptions) {
+    self.compression = compression;
   }
 
   /// Compress one outbound gossip datagram for the wire. When compression is
@@ -390,6 +418,27 @@ where
   #[cfg(test)]
   pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, A> {
     &mut self.ep
+  }
+
+  /// Update the local node's metadata. The new value is gossiped
+  /// through the standard alive-broadcast path.
+  ///
+  /// Pass-through to [`Endpoint::update_meta`]; the inner endpoint bumps
+  /// the local incarnation and queues an `Alive` broadcast carrying the
+  /// new bytes so peers converge to the updated metadata via the normal
+  /// SWIM path.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::Error::NotRunning`] if the local lifecycle has
+  /// already transitioned to `Leaving` / `Left` / `Shutdown`. Returns
+  /// [`crate::error::Error::MetaExceedsCap`] if `meta` exceeds the
+  /// per-endpoint cap configured at construction.
+  pub fn update_meta(
+    &mut self,
+    meta: memberlist_wire::typed::Meta,
+  ) -> Result<(), crate::error::Error> {
+    self.ep.update_meta(meta)
   }
 
   /// Next outbound UDP datagram (quinn or encoded memberlist), if any.
@@ -900,6 +949,65 @@ where
       .push_back((from, Bytes::copy_from_slice(datagram)));
   }
 
+  /// Emit [`Event::ExchangeCompleted`] for an outbound bridge that has
+  /// reached its terminal state. `id` MUST be the bridge's
+  /// machine-level [`StreamId`] (the key the bridge was inserted into
+  /// `self.bridges` under); `ch` is its [`ConnectionHandle`] (the
+  /// caller pulls this from `br.ch()` before dropping the bridge so
+  /// the helper has no borrow on `self.bridges`). The helper looks up
+  /// the originating kind via [`Self::pending_outbound_kinds`]
+  /// (`None` ⇒ inbound or unknown — no emission) and the peer socket
+  /// via [`Self::conns`].
+  ///
+  /// Called from every bridge-reap site (the `pump_bridges` D1 reap,
+  /// the `service_quinn` ConnectionLost / `is_drained()` inline drain,
+  /// and the test-only acceptance-tracking pump). Outbound only —
+  /// inbound (server-accepted) bridges have no entry in
+  /// `pending_outbound_kinds` and silently no-op here.
+  fn emit_exchange_completed(
+    &mut self,
+    id: StreamId,
+    ch: ConnectionHandle,
+    outcome: ExchangeOutcome,
+  ) {
+    let Some(kind) = self.pending_outbound_kinds.remove(&id) else {
+      return;
+    };
+    let Some(peer) = self.conns.get(ch).map(|e| e.peer()) else {
+      // Peer connection already reaped from `self.conns` — the bridge's
+      // SocketAddr is no longer reachable. Skip the emission rather
+      // than synthesise; the conn-table reaps only after every bridge
+      // on that connection has been drained-then-reaped, so this is
+      // unreachable in practice. Defensive no-op.
+      return;
+    };
+    self
+      .ep
+      .emit_event(Event::ExchangeCompleted(ExchangeCompleted::new(
+        ExchangeId::from(id),
+        peer,
+        outcome,
+        kind,
+      )));
+  }
+
+  /// Determine the [`ExchangeOutcome`] of a bridge at the moment it is
+  /// being reaped. Mirrors [`super::streams::StreamEndpoint::reap_bridge`]'s
+  /// rule: any failure phase (`BridgeFailure::Timeout`, `Transport`,
+  /// `Decode`, `ConnectionLost`, `AdmissionClosed`, `DialRetired`,
+  /// `EncryptionPolicyChanged`) maps to `Failed`; the cooperative
+  /// `BothClosed` clean terminus maps to `Succeeded`. The bridge MUST
+  /// be terminal before this is called — terminal-after-D1 is the only
+  /// site that knows the final outcome.
+  #[inline]
+  fn outcome_for_terminal(br: &Bridge<I, A>) -> ExchangeOutcome {
+    if br.is_phase_failed() {
+      ExchangeOutcome::Failed
+    } else {
+      ExchangeOutcome::Succeeded
+    }
+  }
+
   /// Step (2) of the per-tick order: pump every bridge's inbound + outbound
   /// halves, drain each non-terminal stream's endpoint-events into the
   /// `Endpoint`, and D1-drain-then-reap any bridge that turned terminal.
@@ -925,8 +1033,11 @@ where
         // SAME encode+load+flush but WITHOUT that notice.
         if br.is_terminal() {
           br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+          let ch = br.ch();
+          let outcome = Self::outcome_for_terminal(&br);
           // (5) reap AFTER drain: dropping the bridge frees its slot.
           drop(br);
+          self.emit_exchange_completed(*id, ch, outcome);
         } else {
           br.drain_payload_only(&mut self.ep, &mut self.conns, now);
           // `drain_payload_only` may flip the bridge to terminal (e.g.
@@ -942,7 +1053,10 @@ where
                 .saturating_add(1);
             }
             br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+            let ch = br.ch();
+            let outcome = Self::outcome_for_terminal(&br);
             drop(br);
+            self.emit_exchange_completed(*id, ch, outcome);
           } else {
             self.bridges.insert(*id, br);
           }
@@ -981,7 +1095,10 @@ where
         let _ = br.pump_out(&mut self.conns, now);
         if br.is_terminal() {
           br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+          let ch = br.ch();
+          let outcome = Self::outcome_for_terminal(&br);
           drop(br);
+          self.emit_exchange_completed(*id, ch, outcome);
         } else {
           br.drain_payload_only(&mut self.ep, &mut self.conns, now);
           // Mirror `pump_bridges`'s post-`drain_payload_only` terminality
@@ -992,7 +1109,10 @@ where
               .bridges_terminalized_via_close_command
               .saturating_add(1);
             br.drain_then_reap(&mut self.ep, &mut self.conns, now);
+            let ch = br.ch();
+            let outcome = Self::outcome_for_terminal(&br);
             drop(br);
+            self.emit_exchange_completed(*id, ch, outcome);
           } else {
             self.bridges.insert(*id, br);
           }
@@ -1168,6 +1288,9 @@ where
   pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
     self.last_now = Some(now);
     let id = self.ep.start_push_pull(peer, kind, now);
+    self
+      .pending_outbound_kinds
+      .insert(id, ExchangeKind::PushPull);
     self.service_dials(now);
     self.flush_outbound(now);
     id
@@ -1197,6 +1320,9 @@ where
     let id = self
       .ep
       .start_reliable_ping(peer_id, peer_addr, probe_seq, deadline);
+    self
+      .pending_outbound_kinds
+      .insert(id, ExchangeKind::ReliablePing);
     self.service_dials(now);
     self.flush_outbound(now);
     id
@@ -1211,6 +1337,9 @@ where
   pub fn start_user_message(&mut self, peer: A, payload: Bytes, now: Instant) -> StreamId {
     self.last_now = Some(now);
     let id = self.ep.start_user_message(peer, payload, now);
+    self
+      .pending_outbound_kinds
+      .insert(id, ExchangeKind::UserMessage);
     self.service_dials(now);
     self.flush_outbound(now);
     id
@@ -1539,7 +1668,15 @@ where
               self.bridges_reaped_on_connection_lost =
                 self.bridges_reaped_on_connection_lost.saturating_add(1);
             }
+            // ConnectionLost ⇒ `fail_connection_lost` set the phase to
+            // `Failed(ConnectionLost)`; outcome is unconditionally
+            // `Failed` here, but route through the shared helper so
+            // the kind lookup + emission path matches the
+            // `pump_bridges` reap.
+            let ch = br.ch();
+            let outcome = Self::outcome_for_terminal(&br);
             drop(br);
+            self.emit_exchange_completed(id, ch, outcome);
           }
         }
       }
@@ -1581,6 +1718,12 @@ where
       // intent through the FSM's `dial_failed` path BEFORE either half
       // is created, so no orphan state can exist.
       if now >= deadline {
+        // Discard the staged kind: the bridge was never created, so the
+        // ExchangeCompleted reap path will never observe this id.
+        // Leaving the entry stranded would leak memory across every
+        // pre-deadline-expired dial. Matches the pre-bridge-creation
+        // failure paths below.
+        self.pending_outbound_kinds.remove(&id);
         self.ep.dial_failed(
           id,
           crate::error::StreamError::DialFailed("quic dial deadline elapsed".into()),
@@ -1598,6 +1741,7 @@ where
           // contract for QUIC use is "return `Some(_)`"; `None` is treated
           // as a per-peer misconfiguration that fails just that one dial —
           // other peers/exchanges continue unaffected.
+          self.pending_outbound_kinds.remove(&id);
           self.ep.dial_failed(
             id,
             crate::error::StreamError::DialFailed(
@@ -1649,11 +1793,17 @@ where
                   // already gone; `RecvStream::stop` discards unread data
                   // and queues STOP_SENDING with the same `Err(ClosedStream)`
                   // guard.
+                  self.pending_outbound_kinds.remove(&id);
                   if let Some(e) = self.conns.get_mut(ch) {
                     let conn = e.conn_mut();
+                    // Ignoring Err: idempotent retirement —
+                    // `Err(ClosedStream)` means the half is already
+                    // gone.
                     let _ = conn
                       .send_stream(sid)
                       .reset(quinn_proto::VarInt::from_u32(0));
+                    // Ignoring Err: same idempotent-retirement
+                    // semantics as the send-half reset above.
                     let _ = conn.recv_stream(sid).stop(quinn_proto::VarInt::from_u32(0));
                   }
                 }
@@ -1681,9 +1831,9 @@ where
                 //       the current intent. `get_or_dial` redials on the
                 //       next push/pull/reliable-ping/user-message intent
                 //       the application schedules (the cached closed
-                //       handle for a previously-Established peer
-                //       triggers an explicit redial; a never-Established
-                //       cache prevents a fresh-handshake storm against a
+                //       handle for a once-Established peer triggers an
+                //       explicit redial; a never-Established cache
+                //       prevents a fresh-handshake storm against a
                 //       genuinely-unreachable peer). The coordinator
                 //       never repeatedly opens new
                 //       handshakes against an unreachable peer inside a
@@ -1712,6 +1862,7 @@ where
                   .map(|c| c.conn_ref().is_closed())
                   .unwrap_or(true);
                 if is_closed_now {
+                  self.pending_outbound_kinds.remove(&id);
                   self.ep.dial_failed(
                     id,
                     crate::error::StreamError::DialFailed(
@@ -1727,6 +1878,7 @@ where
                     attempted: true,
                   });
                 } else {
+                  self.pending_outbound_kinds.remove(&id);
                   self.ep.dial_failed(
                     id,
                     crate::error::StreamError::DialFailed(
@@ -1739,11 +1891,14 @@ where
             }
           }
         }
-        Err(e) => self.ep.dial_failed(
-          id,
-          crate::error::StreamError::DialFailed(e.to_string().into()),
-          now,
-        ),
+        Err(e) => {
+          self.pending_outbound_kinds.remove(&id);
+          self.ep.dial_failed(
+            id,
+            crate::error::StreamError::DialFailed(e.to_string().into()),
+            now,
+          );
+        }
       }
     }
   }

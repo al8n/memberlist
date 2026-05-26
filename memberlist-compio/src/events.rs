@@ -3,15 +3,18 @@
 use flume::r#async::RecvStream;
 use futures_util::Stream;
 use memberlist_machine::event::Event;
-use smol_str::SmolStr;
 use std::{
-  net::SocketAddr,
   pin::Pin,
   task::{Context, Poll},
 };
 
 /// Stream of memberlist events. Constructed via
 /// [`Memberlist::events`](crate::Memberlist::events).
+///
+/// Generic over the wire id / address types `<I, A>`; pinned aliases
+/// like [`TcpMemberlist`](crate::TcpMemberlist) instantiate this as
+/// `EventStream<SmolStr, SocketAddr>` through the [`Memberlist::events`]
+/// signature.
 ///
 /// **Concurrency model:** flume MPMC — multiple `events()` calls each
 /// return an independent `EventStream`, but events ROUND-ROBIN between
@@ -31,24 +34,24 @@ use std::{
 /// [`Memberlist::member_count`](crate::Memberlist::member_count) read
 /// path is unaffected by event loss and remains the authoritative
 /// source of current cluster state.
-pub struct EventStream {
-  inner: RecvStream<'static, Event<SmolStr, SocketAddr>>,
+pub struct EventStream<I: 'static, A: 'static> {
+  inner: RecvStream<'static, Event<I, A>>,
 }
 
-impl EventStream {
+impl<I: 'static, A: 'static> EventStream<I, A> {
   /// Wrap a flume receiver into an `EventStream`.
   ///
   /// Consumes the receiver: the resulting stream lives `'static` and
   /// owns the queue handle.
-  pub(crate) fn new(rx: flume::Receiver<Event<SmolStr, SocketAddr>>) -> Self {
+  pub(crate) fn new(rx: flume::Receiver<Event<I, A>>) -> Self {
     Self {
       inner: rx.into_stream(),
     }
   }
 }
 
-impl Stream for EventStream {
-  type Item = Event<SmolStr, SocketAddr>;
+impl<I: 'static, A: 'static> Stream for EventStream<I, A> {
+  type Item = Event<I, A>;
 
   fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
     Pin::new(&mut self.inner).poll_next(cx)

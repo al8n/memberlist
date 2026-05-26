@@ -31,7 +31,7 @@ use flume::{Receiver, Sender};
 use futures_util::{FutureExt, pin_mut, select_biased};
 use memberlist_machine::{
   AddrBridge,
-  event::{Event, PushPullKind, Transmit},
+  event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
   streams::{StreamAction, StreamEndpoint, StreamTransport},
 };
 use memberlist_wire::{
@@ -40,10 +40,9 @@ use memberlist_wire::{
   message_from_any, message_to_any,
   typed::Message,
 };
-use smol_str::SmolStr;
 
 use crate::{
-  DriverOptions,
+  StreamDriverOptions,
   command::{
     Command, JoinCmd, JoinKind, LeaveCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
     ShutdownCmd, UpdateNodeMetadataCmd,
@@ -68,22 +67,25 @@ pub(crate) type ExchangeId = memberlist_machine::streams::ExchangeId;
 /// parks the per-call state here.
 ///
 /// Contact accounting is strictly **per-OUTBOUND-EXCHANGE**, observed
-/// via the machine's `Event::PushPullCompleted`. Each `start_push_pull`
-/// allocates a fresh `ExchangeId`; the driver tracks every outbound
-/// `ExchangeId` it dispatched and counts each one that terminates with
-/// `PushPullOutcome::Succeeded`. Tracking by `ExchangeId` (rather than
+/// via the machine's `Event::ExchangeCompleted` filtered to
+/// `ExchangeKind::PushPull` (the broadened event fires for every
+/// outbound bridge kind; sync-join consumes only push/pull
+/// completions). Each `start_push_pull` allocates a fresh
+/// `ExchangeId`; the driver tracks every outbound `ExchangeId` it
+/// dispatched and counts each one that terminates with
+/// `ExchangeOutcome::Succeeded`. Tracking by `ExchangeId` (rather than
 /// by `SocketAddr`) preserves duplicate-seed semantics: passing the
 /// same address twice produces two exchanges and two independent
 /// counts.
 struct PendingJoin {
   /// Set of outbound exchange IDs this waiter dispatched and is still
-  /// waiting on a terminal `PushPullCompleted` for. An `ExchangeId`
-  /// is removed when its `PushPullCompleted` arrives (success or
+  /// waiting on a terminal `ExchangeCompleted` for. An `ExchangeId`
+  /// is removed when its `ExchangeCompleted` arrives (success or
   /// failure); when this set is empty (and `pending_eids` accounts
   /// for every dispatched exchange) the call has fully resolved.
   pending: HashSet<ExchangeId>,
   /// Number of dispatched outbound exchanges that terminated with
-  /// `PushPullOutcome::Succeeded`. Duplicate seeds produce duplicate
+  /// `ExchangeOutcome::Succeeded`. Duplicate seeds produce duplicate
   /// exchanges and each successful one counts independently.
   contacted: usize,
   /// Total outbound-exchange count this call dispatched, used to
@@ -388,13 +390,13 @@ pub(crate) async fn driver_loop<I, A, B, R>(
   gossip_socket: UdpSocket,
   listener: TcpListener,
   commands: Receiver<Command>,
-  events_tx: Sender<Event<SmolStr, SocketAddr>>,
+  events_tx: Sender<Event<I, A>>,
   events_dropped: Arc<std::sync::atomic::AtomicU64>,
-  snapshot: Arc<ArcSwap<MemberlistSnapshot>>,
+  snapshot: Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
   bridge_ready_rx: Receiver<BridgeReady>,
   bridge_ready_tx: Sender<BridgeReady>,
   shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
-  driver_opts: DriverOptions,
+  driver_opts: StreamDriverOptions,
   _addr_bridge: PhantomData<fn(B)>,
 ) where
   I: memberlist_wire::Id
@@ -419,7 +421,7 @@ pub(crate) async fn driver_loop<I, A, B, R>(
 {
   let mut bridges: HashMap<ExchangeId, BridgeHandle> = HashMap::new();
   let (bridge_inbound_tx, bridge_inbound_rx) =
-    flume::bounded::<BridgeInbound>(driver_opts.bridge_inbound_cap());
+    flume::bounded::<BridgeInbound>(driver_opts.transport_options().bridge_inbound_cap());
   // Stash for the [`Command::Shutdown`] reply sender — see
   // [`dispatch_command`]. Ack lands AFTER the post-loop cleanup drops
   // the listener and the gossip socket so the bound ports are free
@@ -529,7 +531,7 @@ pub(crate) async fn driver_loop<I, A, B, R>(
             &mut bridges,
             &bridge_inbound_tx,
             ready,
-            driver_opts.bridge_recv_buf_len(),
+            driver_opts.transport_options().bridge_recv_buf_len(),
           );
           drained += 1;
           dirty = true;
@@ -782,7 +784,7 @@ pub(crate) async fn driver_loop<I, A, B, R>(
         // became ready BEFORE the deadline (its `received_at`
         // already pre-deadline) but raced the timer-fire would
         // otherwise lose to `handle_timeout` and surface as
-        // `PushPullCompleted(Failed)` despite the success being
+        // `ExchangeCompleted(Failed)` despite the success being
         // queued. The shared `fire_timeout_with_drain` helper drains
         // every already-arrived completion (no cap), re-polls the
         // deadline, and fires `handle_timeout` only if still past.
@@ -816,7 +818,7 @@ pub(crate) async fn driver_loop<I, A, B, R>(
               eid,
               out_rx,
               &bridge_inbound_tx,
-              driver_opts.bridge_recv_buf_len(),
+              driver_opts.transport_options().bridge_recv_buf_len(),
             );
             dirty = true;
           }
@@ -864,7 +866,7 @@ pub(crate) async fn driver_loop<I, A, B, R>(
             &mut bridges,
             &bridge_inbound_tx,
             ready,
-            driver_opts.bridge_recv_buf_len(),
+            driver_opts.transport_options().bridge_recv_buf_len(),
           );
           dirty = true;
         }
@@ -1038,7 +1040,7 @@ async fn dispatch_command<I, A, B, R>(
   endpoint: &mut StreamEndpoint<I, A, B, R>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
-  driver_opts: DriverOptions,
+  driver_opts: StreamDriverOptions,
   shutdown_reply: &mut Option<flume::Sender<Result<()>>>,
   pending_joins: &mut Vec<PendingJoin>,
   cmd: Command,
@@ -1103,7 +1105,7 @@ async fn dispatch_command<I, A, B, R>(
           // future was cancelled).
           let _ = reply.send_async(Ok(count)).await;
         }
-        JoinKind::WaitForCompletion { deadline } => {
+        JoinKind::WaitForCompletion(crate::command::WaitForCompletionArgs { deadline }) => {
           let mut pending: HashSet<ExchangeId> = HashSet::with_capacity(addrs.len());
           for addr in addrs {
             let peer: A = B::from_socket(addr);
@@ -1386,7 +1388,7 @@ fn process_one_action(
   action: StreamAction,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
-  driver_opts: DriverOptions,
+  driver_opts: StreamDriverOptions,
   capture: Option<(SocketAddr, &mut HashSet<ExchangeId>)>,
 ) {
   match action {
@@ -1401,9 +1403,9 @@ fn process_one_action(
       let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
       bridges.insert(eid, BridgeHandle { out_tx });
       let ready_tx = bridge_ready_tx.clone();
-      let dial_timeout = driver_opts.dial_timeout();
+      let dial_timeout = driver_opts.transport_options().dial_timeout();
       compio::runtime::spawn(async move {
-        // Bound the dial with `driver_opts.dial_timeout()` (default
+        // Bound the dial with the configured dial timeout (default
         // 5s) so a connect to an unreachable peer reports failure to
         // the driver promptly instead of hanging on the kernel's
         // ~3-minute default. Without the bound the dial task lives
@@ -1483,7 +1485,7 @@ fn drain_actions<I, A, B, R>(
   endpoint: &mut StreamEndpoint<I, A, B, R>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
-  driver_opts: DriverOptions,
+  driver_opts: StreamDriverOptions,
 ) -> bool
 where
   I: memberlist_wire::Id
@@ -1662,19 +1664,15 @@ where
   }
 }
 
-/// Drain every queued [`Event`] into the subscriber channel, projecting
-/// each one from `Event<I, A>` to `Event<SmolStr, SocketAddr>` so the
-/// public events stream carries a fixed wire shape regardless of the
-/// abstract `I` / `A` instantiation.
+/// Drain every queued [`Event`] into the subscriber channel.
 ///
-/// Projection is per-event: each `Arc<NodeState<I, A>>` payload allocates
-/// a fresh `Arc<NodeState<SmolStr, SocketAddr>>` with `id` rendered via
-/// `Display` and `addr` translated via `B::to_socket`. The allocation is
-/// paid per emitted event (low rate at SWIM gossip cadence). Returns
-/// `true` iff any event was processed.
+/// Events forward directly with no per-event allocation — the
+/// `Memberlist<I, A, R>` handle propagates `<I, A>` end-to-end so
+/// `EventStream<I, A>` carries the same shape the membership FSM
+/// emitted. Returns `true` iff any event was processed.
 fn drain_events<I, A, B, R>(
   endpoint: &mut StreamEndpoint<I, A, B, R>,
-  events_tx: &Sender<Event<SmolStr, SocketAddr>>,
+  events_tx: &Sender<Event<I, A>>,
   events_dropped: &std::sync::atomic::AtomicU64,
   pending_joins: &mut [PendingJoin],
 ) -> bool
@@ -1702,20 +1700,26 @@ where
   let mut progress = false;
   while let Some(ev) = endpoint.poll_event() {
     progress = true;
-    let projected = project_event::<I, A, B>(ev);
     // Per-exchange contact accounting. The machine's
-    // `PushPullCompleted` event carries the terminal outcome of each
-    // outbound push/pull. For every synchronous-join waiter that
-    // dispatched this exact `ExchangeId`, remove the eid from its
-    // `pending` set (always, regardless of outcome — the exchange
-    // has terminated) and increment `contacted` iff the outcome is
-    // `Succeeded`. Tracking by `ExchangeId` (not by `SocketAddr`)
-    // gives correct duplicate-seed semantics: passing the same
-    // address twice produces two exchanges and each is counted
-    // independently.
-    if let Event::PushPullCompleted(ref payload) = projected {
+    // `ExchangeCompleted` event carries the terminal outcome of every
+    // outbound bridge — push/pull, reliable ping, and reliable
+    // user-message. Sync-join consumes only `ExchangeKind::PushPull`
+    // completions: a reliable-ping bridge resolving has no bearing on
+    // a `join_with` waiter's contact count, and a user-message bridge
+    // is one-way fire-and-forget. Filter on the payload's `kind()`
+    // before reducing `pending_joins`. For every synchronous-join
+    // waiter that dispatched this exact `ExchangeId`, remove the eid
+    // from its `pending` set (always, regardless of outcome — the
+    // exchange has terminated) and increment `contacted` iff the
+    // outcome is `Succeeded`. Tracking by `ExchangeId` (not by
+    // `SocketAddr`) gives correct duplicate-seed semantics: passing
+    // the same address twice produces two exchanges and each is
+    // counted independently.
+    if let Event::ExchangeCompleted(ref payload) = ev
+      && payload.kind() == ExchangeKind::PushPull
+    {
       let eid = payload.eid();
-      let succeeded = payload.outcome().is_succeeded();
+      let succeeded = matches!(payload.outcome(), ExchangeOutcome::Succeeded);
       for pj in pending_joins.iter_mut() {
         if pj.pending.remove(&eid) && succeeded {
           pj.contacted += 1;
@@ -1729,7 +1733,7 @@ where
     // receiver has been dropped (no one is subscribing) — silently
     // dropping is correct there.
     if events_tx
-      .try_send(projected)
+      .try_send(ev)
       .is_err_and(|e| matches!(e, flume::TrySendError::Full(_)))
     {
       events_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1827,7 +1831,7 @@ fn fire_timeout_with_drain<I, A, B, R>(
   bridge_inbound_tx: &Sender<BridgeInbound>,
   bridge_inbound_rx: &Receiver<BridgeInbound>,
   bridge_ready_rx: &Receiver<BridgeReady>,
-  driver_opts: DriverOptions,
+  driver_opts: StreamDriverOptions,
 ) -> bool
 where
   I: memberlist_wire::Id
@@ -1861,7 +1865,7 @@ where
       bridges,
       bridge_inbound_tx,
       ready,
-      driver_opts.bridge_recv_buf_len(),
+      driver_opts.transport_options().bridge_recv_buf_len(),
     );
     dirty = true;
   }
@@ -1876,81 +1880,17 @@ where
   dirty
 }
 
-/// Project one abstract [`Event<I, A>`] into the concrete
-/// [`Event<SmolStr, SocketAddr>`] shape the public events stream carries.
-/// One allocation per `Arc<NodeState>` payload.
-fn project_event<I, A, B>(ev: Event<I, A>) -> Event<SmolStr, SocketAddr>
-where
-  I: core::fmt::Display,
-  A: memberlist_wire::CheapClone,
-  B: AddrBridge<A>,
-{
-  use memberlist_machine::event::Event as E;
-  match ev {
-    E::NodeJoined(ns) => E::NodeJoined(project_node_state::<I, A, B>(&ns)),
-    E::NodeLeft(ns) => E::NodeLeft(project_node_state::<I, A, B>(&ns)),
-    E::NodeUpdated(ns) => E::NodeUpdated(project_node_state::<I, A, B>(&ns)),
-    E::NodeConflict { existing, other } => E::NodeConflict {
-      existing: project_node_state::<I, A, B>(&existing),
-      other: project_node_state::<I, A, B>(&other),
-    },
-    E::UserPacket {
-      from,
-      data,
-      reliability,
-    } => E::UserPacket {
-      from: B::to_socket(&from),
-      data,
-      reliability,
-    },
-    E::LeftCluster => E::LeftCluster,
-    E::PingCompleted { node, rtt, payload } => E::PingCompleted {
-      node: project_node_state::<I, A, B>(&node),
-      rtt,
-      payload,
-    },
-    E::DecodeError { from, err } => E::DecodeError {
-      from: B::to_socket(&from),
-      err,
-    },
-    E::DialRequested { id, peer, deadline } => E::DialRequested {
-      id,
-      peer: B::to_socket(&peer),
-      deadline,
-    },
-    E::PushPullCompleted(payload) => E::PushPullCompleted(payload),
-  }
-}
-
-/// Allocate a fresh `Arc<NodeState<SmolStr, SocketAddr>>` from an
-/// abstract `Arc<NodeState<I, A>>` payload by projecting id via
-/// `Display` and addr via `B::to_socket`.
-fn project_node_state<I, A, B>(
-  ns: &memberlist_wire::typed::NodeState<I, A>,
-) -> std::sync::Arc<memberlist_wire::typed::NodeState<SmolStr, SocketAddr>>
-where
-  I: core::fmt::Display,
-  B: AddrBridge<A>,
-{
-  let id = SmolStr::new(ns.id_ref().to_string());
-  let addr = B::to_socket(ns.address_ref());
-  let projected = memberlist_wire::typed::NodeState::new(id, addr, ns.state())
-    .with_meta(ns.meta_ref().clone())
-    .with_protocol_version(ns.protocol_version())
-    .with_delegate_version(ns.delegate_version());
-  std::sync::Arc::new(projected)
-}
-
 /// Publish a fresh snapshot of the coordinator's observable state to
 /// `arc-swap`. Readers see the new snapshot on their next
 /// `MemberlistSnapshot::load` with no lock contention.
 ///
-/// The snapshot's I/A types are fixed to `SmolStr`/`SocketAddr`:
-/// - `I → SmolStr` via `Display` (every `wire::Id` implements `Display`).
-/// - `A → SocketAddr` via `B::to_socket`.
+/// The snapshot's `<I, A>` parameters propagate straight through from
+/// the [`StreamEndpoint`] — every `Node` is built by `cheap_clone`ing
+/// the membership FSM's own id / address (an `Arc` bump for `SmolStr`,
+/// scalar copy for `SocketAddr`).
 fn refresh_snapshot<I, A, B, R>(
   endpoint: &StreamEndpoint<I, A, B, R>,
-  snapshot: &Arc<ArcSwap<MemberlistSnapshot>>,
+  snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
 ) where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -1973,19 +1913,20 @@ fn refresh_snapshot<I, A, B, R>(
   R: StreamTransport,
 {
   let ep = endpoint.endpoint_ref();
-  let mut members_vec: Vec<Node<SmolStr, SocketAddr>> = Vec::new();
+  let mut members_vec: Vec<Node<I, A>> = Vec::new();
   let mut alive_count: usize = 0;
   for ns in ep.members() {
-    let id_str = SmolStr::new(ns.id_ref().to_string());
-    let addr_socket = B::to_socket(ns.address_ref());
-    members_vec.push(Node::new(id_str, addr_socket));
+    members_vec.push(Node::new(
+      ns.id_ref().cheap_clone(),
+      ns.address_ref().cheap_clone(),
+    ));
     if let Some(memberlist_wire::typed::State::Alive) = ep.member_liveness(ns.id_ref()) {
       alive_count += 1;
     }
   }
   let local = Node::new(
-    SmolStr::new(ep.local_id_ref().to_string()),
-    B::to_socket(ep.advertise_ref()),
+    ep.local_id_ref().cheap_clone(),
+    ep.advertise_ref().cheap_clone(),
   );
   let member_count = ep.num_members();
   let snap = MemberlistSnapshot::new(members_vec, local, alive_count, member_count);

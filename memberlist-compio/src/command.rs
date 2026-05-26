@@ -5,6 +5,13 @@ use crate::error::Result;
 use memberlist_wire::{CompressionOptions, EncryptionOptions};
 use std::{net::SocketAddr, time::Instant};
 
+/// Payload for [`JoinKind::WaitForCompletion`].
+pub(crate) struct WaitForCompletionArgs {
+  /// Wall-clock instant past which the driver replies with whatever success
+  /// count it has accumulated (zero successes surface as `JoinAllFailed`).
+  pub(crate) deadline: Instant,
+}
+
 /// Semantic of a [`Command::Join`] dispatch.
 ///
 /// The driver routes both kinds through the same start_push_pull
@@ -14,22 +21,17 @@ use std::{net::SocketAddr, time::Instant};
 ///   exchanges queued (fire-and-forget; the caller does not wait
 ///   for any exchange to terminate).
 /// - `WaitForCompletion`: reply once every dispatched exchange has
-///   terminated (`PushPullCompleted` observed for its `ExchangeId`)
-///   OR the deadline elapses, whichever comes first. The reply
-///   carries the count of exchanges whose outcome was
-///   `PushPullOutcome::Succeeded`; zero successes surface as
-///   `JoinAllFailed`.
+///   terminated (`ExchangeCompleted` observed for its `ExchangeId`
+///   with `kind == ExchangeKind::PushPull`) OR the deadline elapses,
+///   whichever comes first. The reply carries the count of exchanges
+///   whose outcome was `ExchangeOutcome::Succeeded`; zero successes
+///   surface as `JoinAllFailed`.
 pub(crate) enum JoinKind {
   /// Reply immediately with the dispatched-exchange count.
   Dispatch,
   /// Reply once every dispatched exchange has terminated OR the
   /// deadline expires.
-  WaitForCompletion {
-    /// Wall-clock instant past which the driver replies with
-    /// whatever success count it has accumulated (zero successes
-    /// surface as `JoinAllFailed`).
-    deadline: Instant,
-  },
+  WaitForCompletion(WaitForCompletionArgs),
 }
 
 /// Payload for [`Command::Join`].

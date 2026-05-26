@@ -10,20 +10,30 @@ use memberlist_wire::typed::{Message, NodeState, PushNodeState};
 /// [`StreamId`], which does not exist until the record-layer step
 /// settles). Newtype over `u64`.
 ///
-/// Defined here so the [`Event::PushPullCompleted`] variant is
+/// Defined here so the [`Event::ExchangeCompleted`] variant is
 /// uniformly available across feature configurations; the streams
 /// coordinator (`crate::streams`) re-exports this type from its
 /// own module path for back-compat.
+///
+/// Each backend sources its `ExchangeId` from its natural identifier
+/// domain. The [`StreamEndpoint`](crate::streams::StreamEndpoint)
+/// backend allocates `ExchangeId`s explicitly because the bridge
+/// predates the wire stream (`Handshaking → Established` two-phase
+/// lifecycle). The [`QuicEndpoint`](crate::quic::QuicEndpoint) backend
+/// coerces from the machine-level [`StreamId`] (`From<StreamId> for
+/// ExchangeId` below) because the bridge and the stream are born
+/// together. Within a single endpoint's lifetime, the token is unique
+/// per bridge — both producers preserve that uniqueness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExchangeId(u64);
 
 impl ExchangeId {
   /// Construct from a raw u64. Crate-internal: the streams
-  /// coordinator's allocator is the only legitimate producer.
-  /// `dead_code` allow guards builds without the streams module
-  /// (no `tcp` / `tls` feature) — the type itself stays compiled so
-  /// [`PushPullCompleted`] is feature-uniform, but the constructor
-  /// has no caller in those builds.
+  /// coordinator's allocator and the [`From<StreamId>`] coercion are
+  /// the only legitimate producers. `dead_code` allow guards builds
+  /// without the streams module (no `tcp` / `tls` feature) — the type
+  /// itself stays compiled so [`ExchangeCompleted`] is feature-uniform,
+  /// but the constructor has no caller in those builds.
   #[allow(dead_code)]
   #[inline(always)]
   pub(crate) const fn new(raw: u64) -> Self {
@@ -35,6 +45,25 @@ impl ExchangeId {
   #[inline(always)]
   pub const fn get(self) -> u64 {
     self.0
+  }
+}
+
+impl From<StreamId> for ExchangeId {
+  /// Coerce a machine [`StreamId`] into an [`ExchangeId`].
+  ///
+  /// The [`QuicEndpoint`](crate::quic::QuicEndpoint) backend uses this
+  /// to surface its bridge-reap event through the uniform
+  /// [`Event::ExchangeCompleted`] payload. In the QUIC backend the
+  /// bridge is keyed by the machine `StreamId` (allocated by the
+  /// inner `Endpoint` at `start_push_pull` / `start_reliable_ping` /
+  /// `start_user_message` time) and the stream is born with the
+  /// bridge — so there is no separate `ExchangeId` allocator and the
+  /// `StreamId` itself is the natural correlation token. Both
+  /// identifiers are monotonic per-endpoint u64s, so the coercion
+  /// preserves uniqueness within a single endpoint's lifetime.
+  #[inline(always)]
+  fn from(id: StreamId) -> Self {
+    Self(id.as_u64())
   }
 }
 
@@ -74,10 +103,13 @@ impl PushPullKind {
 }
 
 /// Which reliable-stream initiator produced an outbound exchange. The
-/// streams coordinator tags each [`ExchangeId`] with this so the bridge
-/// reap path can route a per-kind terminal event (currently only
-/// [`Event::PushPullCompleted`] is exposed publicly — the other kinds
-/// fire `Endpoint`'s existing kind-specific events).
+/// coordinator tags each [`ExchangeId`] with this so the bridge-reap
+/// path can carry the originating kind on the uniform
+/// [`Event::ExchangeCompleted`] terminal event. Consumers filter by
+/// [`ExchangeCompleted::kind`] to focus on the bridges they care about
+/// (e.g. synchronous join consumes only `ExchangeKind::PushPull`
+/// completions; the other kinds remain observable for future
+/// monitoring uses).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExchangeKind {
   /// `start_push_pull` — Join or Refresh state exchange.
@@ -96,54 +128,69 @@ impl ExchangeKind {
   }
 }
 
-/// Terminal outcome of one per-exchange reliable push/pull, observed by
-/// the driver via [`Event::PushPullCompleted`].
+/// Terminal outcome of one reliable exchange, observed by the driver
+/// via [`Event::ExchangeCompleted`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PushPullOutcome {
+pub enum ExchangeOutcome {
   /// The exchange validated end-to-end (frame decoder, record layer,
-  /// payload merge) and the peer's state was applied to membership.
-  /// For an outbound (we-initiated) exchange this implies the peer's
-  /// push/pull response was processed; for an inbound (peer-initiated)
-  /// exchange it implies our response was sent and the peer's request
-  /// was applied.
+  /// payload merge for push/pull, ack-decode for reliable ping, etc.)
+  /// and any membership/probe side effects were applied. For an
+  /// outbound (we-initiated) push/pull this implies the peer's
+  /// response was processed; for an inbound (peer-initiated) one it
+  /// implies our response was sent and the peer's request was applied.
   Succeeded,
-  /// The exchange terminated without a validated push/pull (dial
-  /// failure, label / handshake rejection, frame decode error, record
-  /// layer fault, deadline elapsed mid-flight, transport I/O error).
+  /// The exchange terminated without success (dial failure,
+  /// label / handshake rejection, frame decode error, record-layer
+  /// fault, deadline elapsed mid-flight, transport I/O error).
   Failed,
 }
 
-impl PushPullOutcome {
+impl ExchangeOutcome {
   /// Returns `true` if this is `Succeeded`.
   #[inline(always)]
   pub const fn is_succeeded(self) -> bool {
-    matches!(self, PushPullOutcome::Succeeded)
+    matches!(self, ExchangeOutcome::Succeeded)
   }
 }
 
-/// Payload for [`Event::PushPullCompleted`]: the terminal outcome of
-/// one per-exchange reliable push/pull, emitted from the coordinator's
-/// bridge reap path. Drivers correlate `eid` with their own
-/// `ExchangeId`-keyed waiter table to drive synchronous completion
-/// semantics (e.g. a `join_with` "actually-contacted" count) without
-/// having to infer success from membership-state side effects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PushPullCompleted {
+/// Payload for [`Event::ExchangeCompleted`]: the terminal outcome of
+/// one reliable exchange, emitted from the coordinator's bridge-reap
+/// path for ALL outbound bridge kinds (push/pull, reliable ping,
+/// reliable user message). Consumers filter by [`Self::kind`] to focus
+/// on the bridges they care about — synchronous `join` consumes only
+/// `ExchangeKind::PushPull` completions; the other kinds are
+/// observable for future monitoring use.
+///
+/// Drivers correlate `eid` with their own `ExchangeId`-keyed waiter
+/// table to drive synchronous completion semantics directly (e.g. a
+/// `join_with` "actually-contacted" count) without having to infer
+/// success from membership-state side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExchangeCompleted {
   eid: ExchangeId,
   peer: SocketAddr,
-  outcome: PushPullOutcome,
+  outcome: ExchangeOutcome,
+  kind: ExchangeKind,
 }
 
-impl PushPullCompleted {
-  /// Construct a new payload. Crate-internal: the coordinator's bridge
-  /// reap path is the only legitimate producer. `dead_code` allow
-  /// guards builds without the streams module — the type itself stays
-  /// compiled (so the [`Event::PushPullCompleted`] variant is
-  /// feature-uniform) but the constructor has no caller.
+impl ExchangeCompleted {
+  /// Construct a new payload. Crate-internal: the coordinator's
+  /// bridge-reap path is the only legitimate producer. `dead_code`
+  /// allow guards builds without any bridge-reaping backend.
   #[allow(dead_code)]
   #[inline(always)]
-  pub(crate) const fn new(eid: ExchangeId, peer: SocketAddr, outcome: PushPullOutcome) -> Self {
-    Self { eid, peer, outcome }
+  pub(crate) const fn new(
+    eid: ExchangeId,
+    peer: SocketAddr,
+    outcome: ExchangeOutcome,
+    kind: ExchangeKind,
+  ) -> Self {
+    Self {
+      eid,
+      peer,
+      outcome,
+      kind,
+    }
   }
 
   /// The opaque exchange handle the event refers to.
@@ -160,8 +207,14 @@ impl PushPullCompleted {
 
   /// The terminal outcome.
   #[inline(always)]
-  pub const fn outcome(&self) -> PushPullOutcome {
+  pub const fn outcome(&self) -> ExchangeOutcome {
     self.outcome
+  }
+
+  /// The originating exchange kind.
+  #[inline(always)]
+  pub const fn kind(&self) -> ExchangeKind {
+    self.kind
   }
 }
 
@@ -333,15 +386,18 @@ pub enum Event<I, A> {
     /// Deadline by which the dial (and full exchange) must complete.
     deadline: std::time::Instant,
   },
-  /// A per-exchange reliable push/pull terminated, with the validated
-  /// outcome (see [`PushPullOutcome`]). Fired from the coordinator's
-  /// bridge reap path for BOTH outbound (we-initiated) and inbound
-  /// (peer-initiated) exchanges regardless of which direction reached
-  /// the terminal phase first. Drivers correlate `eid` with their own
-  /// `ExchangeId`-keyed waiter tables to drive synchronous completion
-  /// semantics directly (no need to infer success from
-  /// `NodeJoined` / `NodeUpdated` / membership snapshots).
-  PushPullCompleted(PushPullCompleted),
+  /// A reliable exchange terminated, with the validated outcome (see
+  /// [`ExchangeOutcome`]). Fired from the coordinator's bridge-reap
+  /// path for ALL outbound bridge kinds (push/pull, reliable ping,
+  /// reliable user message); consumers filter by
+  /// [`ExchangeCompleted::kind`] to focus on the bridges they care
+  /// about. Drivers correlate `eid` with their own `ExchangeId`-keyed
+  /// waiter tables to drive synchronous completion semantics directly
+  /// (no need to infer success from `NodeJoined` / `NodeUpdated` /
+  /// membership snapshots). Inbound (peer-initiated) bridges do NOT
+  /// emit this event — synchronous-join drivers observe only their
+  /// own outbound exchange's terminal outcome.
+  ExchangeCompleted(ExchangeCompleted),
 }
 
 /// Event from a [`Stream`](super::endpoint) back to the [`Endpoint`].
