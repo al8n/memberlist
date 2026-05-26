@@ -80,7 +80,7 @@ use bytes::Bytes;
 use crate::{
   addr_bridge::AddrBridge,
   endpoint::Endpoint,
-  event::{Event, PushPullCompleted, PushPullKind, PushPullOutcome, StreamId, Transmit},
+  event::{Event, ExchangeCompleted, ExchangeOutcome, PushPullKind, StreamId, Transmit},
 };
 use bridge::StreamBridge;
 use conn::StreamConns;
@@ -160,11 +160,13 @@ struct ExchangeMeta<A> {
   /// `start_user_message` wrappers via `pending_outbound_kinds`. `None`
   /// for inbound (server-side) exchanges accepted via
   /// [`Self::accept_connection`]; the bridge label-decode step settles
-  /// the inbound kind but the coordinator does not currently re-emit
+  /// the inbound kind but the coordinator does not re-emit
   /// kind-specific terminal events for the inbound side (drivers that
   /// initiate join_with against a peer rely only on their own outbound
   /// exchange's terminal event). Gates the
-  /// [`Event::PushPullCompleted`] emission in `reap_bridge`.
+  /// [`Event::ExchangeCompleted`] emission in `reap_bridge` — when
+  /// `Some`, the kind carried on the emitted payload lets consumers
+  /// filter (e.g. sync-join consumes only `ExchangeKind::PushPull`).
   kind: Option<crate::event::ExchangeKind>,
 }
 
@@ -190,10 +192,9 @@ fn teardown_exchange(action: &StreamAction) -> ExchangeId {
 /// TCP — that need no record-layer certificate verification).
 // Storage-shape bound: `cfg: R::Options` requires `R: StreamTransport` for the
 // field type to be well-formed (rule §8 intrinsic exception). `ep: Endpoint<I, A>`
-// is bound-free after Task 3, so no I/A bounds remain at the struct level.
-// `B` is marker-only (`_addr: PhantomData<fn(B)>`); its `AddrBridge<A>` bound
-// lives on the impl blocks whose methods call `B::to_socket` /
-// `R::dial_context::<A, B>`.
+// carries no I/A bounds at the struct level — those bounds appear only on the impl
+// blocks whose methods call `B::to_socket` / `R::dial_context::<A, B>`.
+// `B` is marker-only (`_addr: PhantomData<fn(B)>`).
 pub struct StreamEndpoint<I, A, B, R>
 where
   R: StreamTransport,
@@ -258,12 +259,13 @@ where
   dial_pending: std::collections::VecDeque<PendingDial<A>>,
   /// Tags each outbound `StreamId` with the originating
   /// [`ExchangeKind`] so `service_dials` can stamp the resulting
-  /// `ExchangeMeta` with the right kind, and `reap_bridge` can fire
-  /// kind-specific terminal events ([`Event::PushPullCompleted`] for
-  /// `ExchangeKind::PushPull` only — reliable ping and reliable
-  /// user-message terminations are observed through `Endpoint`'s own
-  /// per-kind events). Populated by the `start_*` wrappers above the
-  /// call to `service_dials`; drained at the matching `ExchangeMeta`
+  /// `ExchangeMeta` with the right kind, and `reap_bridge` can carry
+  /// that kind on the uniform [`Event::ExchangeCompleted`] terminal
+  /// event. The reap fires for ALL outbound kinds (push/pull,
+  /// reliable ping, reliable user message); consumers filter on the
+  /// payload's `kind()` to focus on the bridges they care about.
+  /// Populated by the `start_*` wrappers above the call to
+  /// `service_dials`; drained at the matching `ExchangeMeta`
   /// allocation inside `service_dials`. Strictly outbound-only —
   /// inbound (server-side) exchanges are not assigned a kind by the
   /// initiator and never appear in this table.
@@ -1196,29 +1198,29 @@ where
     self.collect_bridge_transmits(id, br);
     // Snapshot the terminal outcome BEFORE the exchange-meta is removed
     // — drivers correlate the outcome with their own ExchangeId-keyed
-    // waiters via the public PushPullCompleted event below. Emission
-    // is gated on `kind == PushPull` so reliable-ping fallback
-    // exchanges and one-way user-message exchanges do NOT surface
-    // through this variant; the inner Endpoint emits its own
-    // kind-specific events for those (`PingCompleted` for probes,
-    // user-packet events for messages). Inbound exchanges (kind =
-    // None) also do not emit — synchronous-join drivers observe ONLY
-    // their own outbound push/pull's terminal outcome.
+    // waiters via the public ExchangeCompleted event below. Emission
+    // fires for ALL outbound kinds; the kind is carried on the payload
+    // so consumers can filter (sync-join consumes only PushPull
+    // completions; reliable-ping and user-message completions are
+    // observable for future monitoring). Inbound exchanges (kind =
+    // None) do NOT emit — synchronous-join drivers observe ONLY their
+    // own outbound exchange's terminal outcome.
     let outcome = if br.is_failed() {
-      PushPullOutcome::Failed
+      ExchangeOutcome::Failed
     } else {
-      PushPullOutcome::Succeeded
+      ExchangeOutcome::Succeeded
     };
     let removed = self.exchanges.remove(&id);
     if let Some(meta) = &removed
-      && meta.kind == Some(crate::event::ExchangeKind::PushPull)
+      && let Some(kind) = meta.kind
     {
       self
         .ep
-        .emit_event(Event::PushPullCompleted(PushPullCompleted::new(
+        .emit_event(Event::ExchangeCompleted(ExchangeCompleted::new(
           id,
           meta.peer_socket,
           outcome,
+          kind,
         )));
     }
     if let Some(PendingMint::Outbound(sid)) = removed.and_then(|m| m.mint) {

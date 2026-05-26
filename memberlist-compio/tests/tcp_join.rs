@@ -292,7 +292,7 @@ async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
 /// accept the seed's larger Meta — the cap is local-broadcast-only, NOT
 /// a peer-rejection filter. Refusing larger metas would silently
 /// fragment the cluster (the bridge still reaps cleanly, so
-/// `PushPullCompleted` would fire `Succeeded` and `join_with` would
+/// `ExchangeCompleted` would fire `Succeeded` and `join_with` would
 /// report `Ok(1)` even though the seed never landed in membership).
 /// The test pins the local-only semantic by having the seed broadcast
 /// a 4 KiB meta while the joiner keeps the default 512-byte cap.

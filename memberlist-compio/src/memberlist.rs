@@ -3,7 +3,7 @@
 //!
 //! The handle exposes a CQRS API:
 //! - **Reads** (`snapshot`, `local_node`, `alive_count`, `member_count`) are
-//!   served lock-free from an `ArcSwap<MemberlistSnapshot>` the driver
+//!   served lock-free from an `ArcSwap<MemberlistSnapshot<I, A>>` the driver
 //!   republishes after every state-affecting tick.
 //! - **Writes** (`join`, `leave`, `update_node_metadata`,
 //!   `set_compression_options`, `set_encryption_options`, `shutdown`)
@@ -14,15 +14,17 @@
 //!   fresh [`EventStream`] for every call (flume MPMC — see
 //!   [`crate::events`] for the round-robin caveat).
 //!
-//! `Memberlist<I, A, R>` is generic over the wire id/address types and the
-//! `R: StreamTransport` record layer, but the snapshot and events channels
-//! are pinned to `Node<SmolStr, SocketAddr>` / `Event<SmolStr, SocketAddr>`
-//! for v1. The expected instantiation is
-//! [`TcpMemberlist`](crate::TcpMemberlist) /
-//! [`TlsMemberlist`](crate::TlsMemberlist), both of which fix
-//! `I = SmolStr`, `A = SocketAddr`; the generic `I`/`A` parameters exist so
-//! a future power-user constructor can wire a custom `StreamEndpoint` while
-//! reusing this handle's machinery.
+//! `Memberlist<I, A, R>` is honestly generic: the snapshot
+//! ([`MemberlistSnapshot<I, A>`]) and events channel
+//! ([`EventStream<I, A>`]) propagate `I`/`A` straight through. The
+//! transport-discriminator parameter `R` is a phantom on the handle —
+//! the trait bound lives in the per-transport spawn adapter
+//! ([`TcpMemberlist`](crate::TcpMemberlist) /
+//! [`TlsMemberlist`](crate::TlsMemberlist) /
+//! [`QuicMemberlist`](crate::QuicMemberlist)), each of which fixes
+//! `I = SmolStr, A = SocketAddr` at the alias level. Power users that
+//! wire a custom [`StreamEndpoint`] / [`QuicEndpoint`] keep the full
+//! `<I, A>` shape end-to-end without any driver-side projection.
 
 use std::{
   marker::PhantomData,
@@ -31,21 +33,20 @@ use std::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
   },
-  time::Instant,
+  time::{Duration, Instant},
 };
 
 use arc_swap::ArcSwap;
 use compio::runtime::JoinHandle;
 use flume::{Receiver, Sender};
-use memberlist_machine::{event::Event, streams::StreamTransport};
-use memberlist_wire::{CompressionOptions, EncryptionOptions, Node};
-use smol_str::SmolStr;
+use memberlist_machine::event::Event;
+use memberlist_wire::{CheapClone, CompressionOptions, EncryptionOptions, Node};
 
 use crate::{
-  Address, DriverOptions, EventStream, JoinAllFailed, MemberlistError, MemberlistSnapshot, Result,
+  Address, EventStream, JoinAllFailed, MemberlistError, MemberlistSnapshot, Result,
   command::{
     Command, JoinCmd, JoinKind, LeaveCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
-    ShutdownCmd, UpdateNodeMetadataCmd,
+    ShutdownCmd, UpdateNodeMetadataCmd, WaitForCompletionArgs,
   },
   resolver::{OsResolver, Resolver},
 };
@@ -62,20 +63,24 @@ use crate::{
 /// `Arc` cancels the task on drop, which is a no-op if the loop already
 /// exited cleanly).
 ///
-/// `Memberlist<I, A, R>` is generic for power-user instantiation; the
-/// snapshot and events channel are pinned to `SmolStr` / `SocketAddr`.
-/// Most users want [`TcpMemberlist`](crate::TcpMemberlist) or
-/// [`TlsMemberlist`](crate::TlsMemberlist), the locked aliases.
+/// `Memberlist<I, A, R>` is honestly generic over the wire id /
+/// address types — the snapshot and events channel both propagate
+/// `<I, A>` through to their public types
+/// ([`MemberlistSnapshot<I, A>`] and [`EventStream<I, A>`]). Most users
+/// want [`TcpMemberlist`](crate::TcpMemberlist) /
+/// [`TlsMemberlist`](crate::TlsMemberlist) /
+/// [`QuicMemberlist`](crate::QuicMemberlist), the pinned aliases that
+/// fix `I = SmolStr, A = SocketAddr`.
 pub struct Memberlist<I, A, R> {
   /// Command channel into the driver task — every write API sends one
   /// command and awaits the one-shot reply.
   commands: Sender<Command>,
   /// Lock-free observable state, republished by the driver after every
   /// state-affecting tick.
-  snapshot: Arc<ArcSwap<MemberlistSnapshot>>,
+  snapshot: Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
   /// Shared events receiver — `events()` clones this into a fresh
   /// [`EventStream`].
-  events_rx: Receiver<Event<SmolStr, SocketAddr>>,
+  events_rx: Receiver<Event<I, A>>,
   /// Driver-task handle. Wrapped in `Arc` so clones share ownership;
   /// dropping the last `Arc` drops the inner [`JoinHandle`], which
   /// cancels the task. After [`Memberlist::shutdown`] the task has
@@ -96,10 +101,11 @@ pub struct Memberlist<I, A, R> {
   /// "no one is subscribing" terminal state and is not a gap. See
   /// [`Self::events_dropped`].
   events_dropped: Arc<AtomicU64>,
-  /// Per-driver tuning knobs, the same values plumbed into the spawned
-  /// driver task. Cached here so `Memberlist::join_with` can read
-  /// `join_deadline` without an extra channel round-trip.
-  driver_opts: DriverOptions,
+  /// Cached join deadline — the only `DriverOptions` field
+  /// [`Self::join_with`] reads on the handle hot-path. Caching one
+  /// scalar instead of the full options struct keeps `Memberlist<I, A,
+  /// R>` free of a transport-options generic.
+  cached_join_deadline: Duration,
   /// Phantom over the wire id type.
   _i: PhantomData<fn(I)>,
   /// Phantom over the wire address type.
@@ -117,7 +123,7 @@ impl<I, A, R> Clone for Memberlist<I, A, R> {
       driver_handle: self.driver_handle.clone(),
       shutdown_flag: self.shutdown_flag.clone(),
       events_dropped: self.events_dropped.clone(),
-      driver_opts: self.driver_opts,
+      cached_join_deadline: self.cached_join_deadline,
       _i: PhantomData,
       _a: PhantomData,
       _r: PhantomData,
@@ -125,25 +131,23 @@ impl<I, A, R> Clone for Memberlist<I, A, R> {
   }
 }
 
-impl<I, A, R> Memberlist<I, A, R>
-where
-  R: StreamTransport,
-{
+impl<I, A, R> Memberlist<I, A, R> {
   /// Internal constructor used by the per-transport adapters
-  /// (`TcpMemberlist::new`, `TlsMemberlist::new`). Not exposed publicly:
-  /// the abstract `Memberlist<I, A, R>` has no way to spawn a driver task
-  /// of its own — the spawn site lives in the transport adapter that
-  /// knows how to wire the `R: StreamTransport` record layer and the
-  /// transport-specific dial closure.
+  /// (`TcpMemberlist::new`, `TlsMemberlist::new`, future `QuicMemberlist::new`).
+  /// Not exposed publicly: the abstract `Memberlist<I, A, R>` has no way to
+  /// spawn a driver task of its own — the spawn site lives in the transport
+  /// adapter that knows the concrete `R` type and how to wire the
+  /// transport-specific machinery (record layer, dial closure, or QUIC
+  /// endpoint).
   #[allow(dead_code)]
   pub(crate) fn from_parts(
     commands: Sender<Command>,
-    snapshot: Arc<ArcSwap<MemberlistSnapshot>>,
-    events_rx: Receiver<Event<SmolStr, SocketAddr>>,
+    snapshot: Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
+    events_rx: Receiver<Event<I, A>>,
     events_dropped: Arc<AtomicU64>,
     driver_handle: JoinHandle<()>,
     shutdown_flag: Arc<AtomicBool>,
-    driver_opts: DriverOptions,
+    cached_join_deadline: Duration,
   ) -> Self {
     Self {
       commands,
@@ -152,7 +156,7 @@ where
       driver_handle: Arc::new(driver_handle),
       shutdown_flag,
       events_dropped,
-      driver_opts,
+      cached_join_deadline,
       _i: PhantomData,
       _a: PhantomData,
       _r: PhantomData,
@@ -165,17 +169,22 @@ where
   /// driver last published. Subsequent driver mutations do not affect the
   /// returned `Arc` — call again to observe a fresh snapshot.
   #[inline]
-  pub fn snapshot(&self) -> Arc<MemberlistSnapshot> {
+  pub fn snapshot(&self) -> Arc<MemberlistSnapshot<I, A>> {
     self.snapshot.load_full()
   }
 
   /// The local node, taken from the latest published snapshot.
   ///
-  /// Cheap clone via `Node`'s field-wise clone (`SmolStr` + `SocketAddr`,
-  /// both `Copy`/cheap-clone).
+  /// Cheap clone via [`CheapClone`] on both `I` and `A` — for the
+  /// pinned aliases (`SmolStr` + `SocketAddr`) this is `Arc`-bump and
+  /// scalar copy respectively.
   #[inline]
-  pub fn local_node(&self) -> Node<SmolStr, SocketAddr> {
-    self.snapshot.load().local_ref().clone()
+  pub fn local_node(&self) -> Node<I, A>
+  where
+    I: CheapClone,
+    A: CheapClone,
+  {
+    self.snapshot.load().local_ref().cheap_clone()
   }
 
   /// Number of alive members in the latest published snapshot.
@@ -211,7 +220,7 @@ where
   ///
   /// The returned count is the number of dispatched exchanges that
   /// terminated with
-  /// [`PushPullOutcome::Succeeded`](memberlist_machine::event::PushPullOutcome::Succeeded)
+  /// [`ExchangeOutcome::Succeeded`](memberlist_machine::event::ExchangeOutcome::Succeeded)
   /// — i.e. the peer's response decoded cleanly, the record layer +
   /// frame + payload all accepted, and the peer's state was merged
   /// into membership. Each exchange counts independently, so passing
@@ -282,13 +291,13 @@ where
         0,
       )));
     }
-    let deadline = Instant::now() + self.driver_opts.join_deadline();
+    let deadline = Instant::now() + self.cached_join_deadline;
     let (tx, rx) = flume::bounded(1);
     self
       .commands
       .send_async(Command::Join(JoinCmd {
         addrs,
-        kind: JoinKind::WaitForCompletion { deadline },
+        kind: JoinKind::WaitForCompletion(WaitForCompletionArgs { deadline }),
         reply: tx,
       }))
       .await
@@ -491,7 +500,7 @@ where
   /// the lock-free snapshot ([`Self::snapshot`] /
   /// [`Self::alive_count`] / [`Self::member_count`]).
   #[inline]
-  pub fn events(&self) -> EventStream {
+  pub fn events(&self) -> EventStream<I, A> {
     EventStream::new(self.events_rx.clone())
   }
 

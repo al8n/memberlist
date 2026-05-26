@@ -335,12 +335,14 @@ where
   }
 
   /// `true` iff the bridge is in [`BridgePhase::Failed`] — observable
-  /// shorthand for the pump_in/pump_out leading-fatal guards and for
-  /// `drain_then_reap`'s lifecycle-notice selection. Distinct from
-  /// `Stream::is_failed()` which reports FSM-level failure; this
-  /// reports BRIDGE-level failure (FSM failure cascades into the bridge
-  /// via the failure transitions).
-  fn is_phase_failed(&self) -> bool {
+  /// shorthand for the pump_in/pump_out leading-fatal guards, for
+  /// `drain_then_reap`'s lifecycle-notice selection, and for the
+  /// coordinator's `Event::ExchangeCompleted` outcome decision at
+  /// bridge-reap time. Distinct from `Stream::is_failed()` which
+  /// reports FSM-level failure; this reports BRIDGE-level failure
+  /// (FSM failure cascades into the bridge via the failure
+  /// transitions).
+  pub(crate) fn is_phase_failed(&self) -> bool {
     matches!(self.phase, BridgePhase::Failed(_))
   }
 

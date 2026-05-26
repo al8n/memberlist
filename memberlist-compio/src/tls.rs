@@ -38,7 +38,7 @@ use memberlist_wire::Node;
 use smol_str::SmolStr;
 
 use crate::{
-  DriverOptions, Memberlist, MemberlistError, MemberlistSnapshot, Result, driver::driver_loop,
+  Memberlist, MemberlistError, MemberlistSnapshot, Result, StreamDriverOptions, driver::driver_loop,
 };
 
 /// Identity [`AddrBridge`] for `A = SocketAddr` with TLS server-name routing.
@@ -102,20 +102,20 @@ impl TlsMemberlist {
     config: EndpointConfig<SmolStr, SocketAddr>,
     tls_opts: TlsOptions,
   ) -> Result<Self> {
-    Self::new_with_options(config, tls_opts, DriverOptions::default()).await
+    Self::new_with_options(config, tls_opts, StreamDriverOptions::default()).await
   }
 
   /// Construct a TLS-backed memberlist with explicit per-driver tuning
   /// knobs. Most callers want [`Self::new`] (defaults); reach for this
   /// when a specific knob — `join_deadline`, `iter_drain_cap`,
   /// `event_queue_cap`, etc. — must deviate from
-  /// [`DriverOptions::default()`].
+  /// [`StreamDriverOptions::default()`].
   ///
   /// See [`Self::new`] for the full error surface.
   pub async fn new_with_options(
     config: EndpointConfig<SmolStr, SocketAddr>,
     tls_opts: TlsOptions,
-    driver_opts: DriverOptions,
+    driver_opts: StreamDriverOptions,
   ) -> Result<Self> {
     // 1. Bind UDP gossip socket + TCP reliable listener on the configured
     //    advertise address. Both share the same socket-address tuple.
@@ -200,7 +200,7 @@ impl TlsMemberlist {
       events_dropped,
       driver_handle,
       shutdown_flag,
-      driver_opts,
+      driver_opts.join_deadline(),
     ))
   }
 }

@@ -5,7 +5,7 @@ use std::io;
 /// Payload for [`MemberlistError::JoinAllFailed`]: every dispatched
 /// outbound push/pull exchange from a synchronous
 /// [`join_with`](crate::Memberlist::join_with) terminated without
-/// `PushPullOutcome::Succeeded`, OR the per-call deadline elapsed
+/// `ExchangeOutcome::Succeeded`, OR the per-call deadline elapsed
 /// before any exchange could succeed.
 #[derive(Debug)]
 pub struct JoinAllFailed {
@@ -71,7 +71,7 @@ pub enum MemberlistError {
 
   /// The synchronous [`join_with`](crate::Memberlist::join_with) attempt
   /// resolved without any dispatched outbound push/pull exchange
-  /// terminating with `PushPullOutcome::Succeeded` — either every
+  /// terminating with `ExchangeOutcome::Succeeded` — either every
   /// exchange terminated `Failed` (dial failure, frame/record-layer
   /// rejection, peer hung up before the response was decoded), or
   /// the per-call deadline elapsed before any could succeed.

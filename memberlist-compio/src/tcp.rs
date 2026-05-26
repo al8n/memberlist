@@ -41,7 +41,7 @@ use memberlist_wire::Node;
 use smol_str::SmolStr;
 
 use crate::{
-  DriverOptions, Memberlist, MemberlistError, MemberlistSnapshot, Result, driver::driver_loop,
+  Memberlist, MemberlistError, MemberlistSnapshot, Result, StreamDriverOptions, driver::driver_loop,
 };
 
 /// Identity [`AddrBridge`] for `A = SocketAddr`.
@@ -103,20 +103,20 @@ impl TcpMemberlist {
     config: EndpointConfig<SmolStr, SocketAddr>,
     tcp_opts: TcpOptions,
   ) -> Result<Self> {
-    Self::new_with_options(config, tcp_opts, DriverOptions::default()).await
+    Self::new_with_options(config, tcp_opts, StreamDriverOptions::default()).await
   }
 
   /// Construct a TCP-backed memberlist with explicit per-driver tuning
   /// knobs. Most callers want [`Self::new`] (defaults); reach for this
   /// when a specific knob — `join_deadline`, `iter_drain_cap`,
   /// `event_queue_cap`, etc. — must deviate from
-  /// [`DriverOptions::default()`].
+  /// [`StreamDriverOptions::default()`].
   ///
   /// See [`Self::new`] for the full error surface.
   pub async fn new_with_options(
     config: EndpointConfig<SmolStr, SocketAddr>,
     tcp_opts: TcpOptions,
-    driver_opts: DriverOptions,
+    driver_opts: StreamDriverOptions,
   ) -> Result<Self> {
     // 1. Bind UDP gossip socket + TCP reliable listener on the configured
     //    advertise address. Both share the same socket-address tuple — UDP
@@ -208,7 +208,7 @@ impl TcpMemberlist {
       events_dropped,
       driver_handle,
       shutdown_flag,
-      driver_opts,
+      driver_opts.join_deadline(),
     ))
   }
 }
