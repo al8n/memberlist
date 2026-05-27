@@ -7,23 +7,10 @@
 //! channels, publishes an initial snapshot, and spawns the driver task on
 //! the compio runtime. The returned handle is cheaply clonable and shares
 //! the same driver task with every clone.
-//!
-//! ## Address bridge
-//!
-//! Plain TCP needs no per-dial verification identity (no certificate
-//! chain to verify against a hostname), so [`IdentityBridge`] passes
-//! `SocketAddr` through verbatim and returns `None` from `server_name`.
-//! This is symmetric with `streams::test_support::IdentityBridge` (the
-//! sim harness identity bridge for `A = SocketAddr`) modulo the
-//! `server_name`: the sim bridge returns `Some("localhost")` to match
-//! the TLS localhost-SAN test certs; here we return `None` because the
-//! plain-TCP `RawRecords::dial_context` does not consult it
-//! (`memberlist-machine/src/tcp/mod.rs`).
 
 #![cfg(feature = "tcp")]
 
 use std::{
-  marker::PhantomData,
   net::SocketAddr,
   sync::{
     Arc,
@@ -34,8 +21,7 @@ use std::{
 use arc_swap::ArcSwap;
 use compio::net::{TcpListener, UdpSocket};
 use memberlist_machine::{
-  AddrBridge, RawRecords, TcpOptions, config::EndpointConfig, endpoint::Endpoint,
-  streams::StreamEndpoint,
+  RawRecords, TcpOptions, config::EndpointConfig, endpoint::Endpoint, streams::StreamEndpoint,
 };
 use memberlist_wire::Node;
 use smol_str::SmolStr;
@@ -43,36 +29,6 @@ use smol_str::SmolStr;
 use crate::{
   Memberlist, MemberlistError, MemberlistSnapshot, Result, StreamDriverOptions, driver::driver_loop,
 };
-
-/// Identity [`AddrBridge`] for `A = SocketAddr`.
-///
-/// Translation is the identity (`to_socket` returns the address verbatim,
-/// `from_socket` returns the socket verbatim) and there is no verification
-/// identity to supply (`server_name` returns `None`): the plain-TCP record
-/// layer never consults `server_name` (see
-/// `memberlist-machine::tcp::RawRecords::dial_context`, which returns
-/// `Ok(())` unconditionally), so a `None` is correct rather than a
-/// hostname placeholder.
-///
-/// Unit struct (no fields) — every method on [`AddrBridge`] is static, so
-/// the bridge is a zero-sized type parameter on [`StreamEndpoint`].
-pub struct IdentityBridge;
-
-impl AddrBridge<SocketAddr> for IdentityBridge {
-  type ServerName = str;
-
-  fn to_socket(addr: &SocketAddr) -> SocketAddr {
-    *addr
-  }
-
-  fn from_socket(socket: SocketAddr) -> SocketAddr {
-    socket
-  }
-
-  fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
-    None
-  }
-}
 
 /// TCP-backed [`Memberlist`] alias — pins `I = SmolStr`, `A = SocketAddr`,
 /// `R = RawRecords`.
@@ -136,8 +92,12 @@ impl TcpMemberlist {
     //    (`local_id_ref().cheap_clone()`) and inserts the local node as
     //    Alive at incarnation 1; the `StreamEndpoint` wraps that with the
     //    `RawRecords` record layer plug and the supplied `TcpOptions`.
-    let endpoint: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(Endpoint::new(config), tcp_opts);
+    let endpoint: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      Endpoint::new(config),
+      tcp_opts,
+      Box::new(|_addr: &SocketAddr| None),
+      Box::new(|addr: &SocketAddr| *addr),
+    );
 
     // 3. Channels:
     //    - commands  (handle → driver): unbounded; a slow driver still
@@ -176,29 +136,26 @@ impl TcpMemberlist {
     //    and the TCP listener directly so they both drop the instant the
     //    driver loop exits — the listener's port is released before
     //    `Memberlist::shutdown` returns and an immediate rebind on the
-    //    same address succeeds. The `PhantomData<fn(B)>` argument fixes
-    //    the address-bridge type parameter at the spawn site, since
-    //    the driver_loop's generic `B` is otherwise unconstrained by
-    //    its other arguments. The driver keeps its own
+    //    same address succeeds. The driver keeps its own
     //    `bridge_ready_tx` clone so it can spawn outbound dial tasks
-    //    that report back.
-    let driver_handle =
-      compio::runtime::spawn(
-        driver_loop::<SmolStr, SocketAddr, IdentityBridge, RawRecords>(
-          endpoint,
-          gossip_socket,
-          listener,
-          commands_rx,
-          events_tx,
-          events_dropped.clone(),
-          snapshot.clone(),
-          bridge_ready_rx,
-          bridge_ready_tx,
-          shutdown_flag.clone(),
-          driver_opts,
-          PhantomData,
-        ),
-      );
+    //    that report back. `socket_to_peer` is the identity for this
+    //    transport (membership address IS the `SocketAddr`).
+    let socket_to_peer: Arc<dyn Fn(SocketAddr) -> SocketAddr + Send + Sync> =
+      Arc::new(|addr: SocketAddr| addr);
+    let driver_handle = compio::runtime::spawn(driver_loop::<SmolStr, SocketAddr, RawRecords>(
+      endpoint,
+      gossip_socket,
+      listener,
+      commands_rx,
+      events_tx,
+      events_dropped.clone(),
+      snapshot.clone(),
+      bridge_ready_rx,
+      bridge_ready_tx,
+      shutdown_flag.clone(),
+      driver_opts,
+      socket_to_peer,
+    ));
 
     // 6. Build the handle from the wired parts.
     Ok(Self::from_parts(

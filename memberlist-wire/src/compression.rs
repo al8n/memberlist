@@ -88,10 +88,8 @@ const BROTLI_BUFFER_SIZE: usize = 4096;
 /// Payload for [`CompressionError::UnitLenExceedsMax`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnitLenExceedsMaxInfo {
-  /// The on-wire unit length that was declared.
-  pub unit_len: usize,
-  /// The caller's hard ceiling.
-  pub max: usize,
+  unit_len: usize,
+  max: usize,
 }
 
 impl UnitLenExceedsMaxInfo {
@@ -99,6 +97,18 @@ impl UnitLenExceedsMaxInfo {
   #[inline(always)]
   pub const fn new(unit_len: usize, max: usize) -> Self {
     Self { unit_len, max }
+  }
+
+  /// The on-wire unit length that was declared.
+  #[inline(always)]
+  pub const fn unit_len(&self) -> usize {
+    self.unit_len
+  }
+
+  /// The caller's hard ceiling.
+  #[inline(always)]
+  pub const fn max(&self) -> usize {
+    self.max
   }
 }
 

@@ -175,9 +175,9 @@ fn alive_address_change_alive_node_emits_conflict() {
   process_alive_auto(&mut e, alive("bob", 7777, 2), false, Instant::now());
   let ev = e.poll_event().expect("expected NodeConflict");
   match ev {
-    Event::NodeConflict { existing, other } => {
-      assert_eq!(existing.address_ref().port(), 7001);
-      assert_eq!(other.address_ref().port(), 7777);
+    Event::NodeConflict(p) => {
+      assert_eq!(p.existing_ref().address_ref().port(), 7001);
+      assert_eq!(p.other_ref().address_ref().port(), 7777);
     }
     other => panic!("expected NodeConflict, got {other:?}"),
   }
@@ -615,14 +615,10 @@ fn user_data_emits_user_packet_event() {
   e.handle_user_data(from, Bytes::from_static(b"hello"), Reliability::Unreliable);
   let ev = e.poll_event().expect("UserPacket expected");
   match ev {
-    Event::UserPacket {
-      from: f,
-      data,
-      reliability,
-    } => {
-      assert_eq!(f, from);
-      assert_eq!(data.as_ref(), b"hello");
-      assert!(!reliability.is_reliable());
+    Event::UserPacket(p) => {
+      assert_eq!(*p.from_ref(), from);
+      assert_eq!(p.data_ref().as_ref(), b"hello");
+      assert!(!p.reliability().is_reliable());
     }
     other => panic!("expected UserPacket, got {other:?}"),
   }
@@ -693,6 +689,9 @@ fn merge_delegate_vetoes_join_push_pull() {
   use StreamCommand;
   use bytes::Bytes;
   use std::sync::{Arc, Mutex};
+
+  use crate::event::PushPullRequestReceived;
+
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   while e.poll_event().is_some() {}
   let d = Arc::new(RejectAllMerge {
@@ -701,12 +700,12 @@ fn merge_delegate_vetoes_join_push_pull() {
   e.set_merge_delegate(ArcMerge(d.clone()));
 
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
-  let ev = EndpointEvent::PushPullRequestReceived {
+  let ev = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new(
     peer,
-    states: vec![pns("carol", 7003, 1, State::Alive)],
-    user_data: Bytes::new(),
-    kind: PushPullKind::Join,
-  };
+    vec![pns("carol", 7003, 1, State::Alive)],
+    Bytes::new(),
+    PushPullKind::Join,
+  ));
   let cmd = e.handle_stream_event(ev, Instant::now());
 
   assert!(
@@ -733,6 +732,9 @@ fn merge_delegate_not_consulted_for_refresh() {
   use StreamCommand;
   use bytes::Bytes;
   use std::sync::{Arc, Mutex};
+
+  use crate::event::PushPullRequestReceived;
+
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   while e.poll_event().is_some() {}
   let d = Arc::new(RejectAllMerge {
@@ -741,16 +743,16 @@ fn merge_delegate_not_consulted_for_refresh() {
   e.set_merge_delegate(ArcMerge(d.clone()));
 
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
-  let ev = EndpointEvent::PushPullRequestReceived {
+  let ev = EndpointEvent::PushPullRequestReceived(PushPullRequestReceived::new(
     peer,
-    states: vec![pns("carol", 7003, 1, State::Alive)],
-    user_data: Bytes::new(),
-    kind: PushPullKind::Refresh,
-  };
+    vec![pns("carol", 7003, 1, State::Alive)],
+    Bytes::new(),
+    PushPullKind::Refresh,
+  ));
   let cmd = e.handle_stream_event(ev, Instant::now());
 
   assert!(
-    matches!(cmd, Some(StreamCommand::SendPushPullResponse { .. })),
+    matches!(cmd, Some(StreamCommand::SendPushPullResponse(_))),
     "refresh must respond, not close, got {cmd:?}"
   );
   assert!(
@@ -1156,7 +1158,7 @@ fn direct_ack_after_direct_timeout_within_cumulative_succeeds() {
     "a direct Ack within the cumulative window must NOT suspect the target"
   );
   assert!(
-    !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested { .. })),
+    !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
     "an Ack proves liveness — no reliable-fallback escalation"
   );
   assert!(
@@ -1242,7 +1244,7 @@ fn app_ping_ack_after_probe_timeout_does_not_complete() {
   e.handle_ack(bob_addr, Ack::new(seq), t0 + pt + Duration::from_millis(10));
   assert!(!e.probes.contains_key(&seq), "ping probe must be gone");
   assert!(
-    !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::PingCompleted { .. })),
+    !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::PingCompleted(..))),
     "an app ping Ack after probe_timeout must NOT emit a late PingCompleted"
   );
 
@@ -1704,7 +1706,7 @@ fn probe_arms_reliable_fallback_concurrently_with_indirect() {
   }
   // A DialRequested for that reliable-ping stream was emitted in the same step.
   assert!(
-    std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested { .. })),
+    std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
     "concurrent reliable ping must emit DialRequested at fan-out time"
   );
 }
@@ -1756,7 +1758,7 @@ fn late_handle_timeout_does_not_extend_probe_window() {
   );
   // No reliable-fallback DialRequested and no IndirectPing were emitted.
   assert!(
-    !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested { .. })),
+    !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
     "an already-expired probe must NOT open the reliable fallback"
   );
   assert!(
@@ -2109,10 +2111,10 @@ fn ping_completes_on_ack_with_pingcompleted_event() {
 
   let ev = e.poll_event().expect("PingCompleted expected");
   match ev {
-    Event::PingCompleted { node, rtt, payload } => {
-      assert_eq!(node.id_ref(), &SmolStr::new("bob"));
-      assert!(rtt >= Duration::from_millis(15));
-      assert_eq!(payload.as_ref(), b"pong");
+    Event::PingCompleted(p) => {
+      assert_eq!(p.node_ref().id_ref(), &SmolStr::new("bob"));
+      assert!(p.rtt() >= Duration::from_millis(15));
+      assert_eq!(p.payload_ref().as_ref(), b"pong");
     }
     other => panic!("expected PingCompleted, got {other:?}"),
   }
@@ -2165,10 +2167,8 @@ fn app_ping_timeout_does_not_escalate_to_indirect_or_fallback() {
     "an app ping must terminate on direct timeout, not enter AwaitingIndirect"
   );
   assert!(
-    !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(
-      ev,
-      Event::DialRequested { .. } | Event::PingCompleted { .. }
-    )),
+    !std::iter::from_fn(|| e.poll_event())
+      .any(|ev| matches!(ev, Event::DialRequested(..) | Event::PingCompleted(..))),
     "no reliable-fallback DialRequested and no late PingCompleted"
   );
   assert!(
@@ -2228,7 +2228,7 @@ fn probe_failure_with_no_indirect_peers_bumps_awareness_by_one() {
   // concurrently and races the single cumulative deadline.
   e.handle_timeout(t0 + Duration::from_millis(60));
   assert!(
-    std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested { .. })),
+    std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
     "a 2-node probe must still attempt the reliable fallback"
   );
   assert_eq!(
@@ -2307,7 +2307,7 @@ fn reliable_fallback_bounded_by_probe_deadline_and_cleaned_on_failure() {
   let cumulative = t0 + e.cfg.probe_interval();
   let (rid, dl) = std::iter::from_fn(|| e.poll_event())
     .find_map(|ev| match ev {
-      Event::DialRequested { id, deadline, .. } => Some((id, deadline)),
+      Event::DialRequested(p) => Some((p.id(), p.deadline())),
       _ => None,
     })
     .expect("reliable-fallback DialRequested");
@@ -2452,10 +2452,8 @@ fn stream_scaffolding_construction_smoke() {
   assert!(!s.is_done());
   assert!(s.is_failed().is_none());
   assert!(s.poll_timeout().is_none());
-  // suppress unused-import warning on PushPullKind
-  let _ = OutboundKind::PushPull {
-    kind: PushPullKind::Join,
-  };
+  // Suppresses the unused-import warning on PushPullKind.
+  let _ = OutboundKind::PushPull(PushPullKind::Join);
 }
 
 #[test]
@@ -2483,13 +2481,9 @@ fn start_push_pull_emits_dial_requested_and_dial_succeeded_returns_stream() {
   // poll_event should yield DialRequested.
   let ev = e.poll_event().expect("DialRequested expected");
   match ev {
-    Event::DialRequested {
-      id: ev_id,
-      peer: ev_peer,
-      ..
-    } => {
-      assert_eq!(ev_id, id);
-      assert_eq!(ev_peer, peer);
+    Event::DialRequested(p) => {
+      assert_eq!(p.id(), id);
+      assert_eq!(*p.peer_ref(), peer);
     }
     other => panic!("expected DialRequested, got {other:?}"),
   }
@@ -2576,9 +2570,9 @@ fn outbound_push_pull_decode_and_merge() {
   // EndpointEvent::PushPullReplyReceived should be queued.
   let ep_ev = stream.poll_endpoint_event().expect("endpoint event");
   match ep_ev {
-    EndpointEvent::PushPullReplyReceived { ref states, .. } => {
-      assert_eq!(states.len(), 1);
-      assert_eq!(states[0].id_ref(), &SmolStr::new("carol"));
+    EndpointEvent::PushPullReplyReceived(ref p) => {
+      assert_eq!(p.states_slice().len(), 1);
+      assert_eq!(p.states_slice()[0].id_ref(), &SmolStr::new("carol"));
     }
     ref other => panic!("expected PushPullReplyReceived, got {other:?}"),
   }
@@ -2633,10 +2627,10 @@ fn inbound_push_pull_decode_and_response_bytes() {
   // EndpointEvent::PushPullRequestReceived from peer.
   let ep_ev = stream.poll_endpoint_event().expect("endpoint event");
   match &ep_ev {
-    EndpointEvent::PushPullRequestReceived { states, kind, .. } => {
-      assert_eq!(states.len(), 1);
-      assert_eq!(states[0].id_ref(), &SmolStr::new("dave"));
-      assert_eq!(*kind, PushPullKind::Join);
+    EndpointEvent::PushPullRequestReceived(p) => {
+      assert_eq!(p.states_slice().len(), 1);
+      assert_eq!(p.states_slice()[0].id_ref(), &SmolStr::new("dave"));
+      assert_eq!(p.kind(), PushPullKind::Join);
     }
     other => panic!("expected PushPullRequestReceived, got {other:?}"),
   }
@@ -2647,10 +2641,8 @@ fn inbound_push_pull_decode_and_response_bytes() {
     .expect("expected StreamCommand for inbound stream");
 
   match cmd {
-    StreamCommand::SendPushPullResponse {
-      local_states,
-      user_data,
-    } => {
+    StreamCommand::SendPushPullResponse(resp) => {
+      let (local_states, user_data) = resp.into_parts();
       // local_states is already in wire-format PushNodeState (with the
       // local node's tracked incarnation), so we hand it straight to the
       // encoder.
@@ -2686,13 +2678,9 @@ fn start_reliable_ping_emits_dial_requested() {
 
   let ev = e.poll_event().expect("DialRequested event expected");
   match ev {
-    Event::DialRequested {
-      id: ev_id,
-      peer: ev_peer,
-      ..
-    } => {
-      assert_eq!(ev_id, id);
-      assert_eq!(ev_peer, peer_addr);
+    Event::DialRequested(p) => {
+      assert_eq!(p.id(), id);
+      assert_eq!(*p.peer_ref(), peer_addr);
     }
     other => panic!("expected DialRequested, got {other:?}"),
   }
@@ -2879,7 +2867,7 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
   assert!(
     matches!(
       s_out.phase,
-      crate::stream::StreamPhase::OutboundAwaitingResponse { .. }
+      crate::stream::StreamPhase::OutboundAwaitingResponse(_)
     ),
     "drain must advance OutboundSendingRequest → OutboundAwaitingResponse"
   );
@@ -2904,10 +2892,8 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
   let ep_ev = s_in.poll_endpoint_event().expect("PushPullRequestReceived");
   let cmd = e.handle_stream_event(ep_ev, t0).expect("StreamCommand");
   match cmd {
-    StreamCommand::SendPushPullResponse {
-      local_states,
-      user_data,
-    } => {
+    StreamCommand::SendPushPullResponse(resp) => {
+      let (local_states, user_data) = resp.into_parts();
       let enc =
         Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(&local_states, user_data, false);
       Endpoint::<SmolStr, SocketAddr>::stream_load_response(
@@ -3234,7 +3220,7 @@ fn handle_data_after_stream_deadline_fails_without_decoding() {
   assert!(
     matches!(
       s3.poll_endpoint_event(),
-      Some(EndpointEvent::PushPullRequestReceived { .. })
+      Some(EndpointEvent::PushPullRequestReceived(..))
     ),
     "within the deadline the request decodes"
   );
@@ -3295,6 +3281,8 @@ fn detection_failure_deadline_is_scaled_probe_interval() {
 fn reliable_ping_ack_drives_probe_success() {
   use EndpointEvent;
 
+  use crate::event::ReliablePingAcked;
+
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
   while e.poll_event().is_some() {}
@@ -3328,10 +3316,7 @@ fn reliable_ping_ack_drives_probe_success() {
   let initial_score = e.health_score();
   // Route the ReliablePingAcked event through handle_stream_event.
   e.handle_stream_event(
-    EndpointEvent::ReliablePingAcked {
-      seq: probe_seq,
-      at: now,
-    },
+    EndpointEvent::ReliablePingAcked(ReliablePingAcked::new(probe_seq, now)),
     now,
   );
   // Probe must be removed and awareness score must not increase (success ticks down).
@@ -3359,7 +3344,7 @@ fn start_user_message_encodes_user_data() {
 
   let ev = e.poll_event().expect("DialRequested");
   match ev {
-    Event::DialRequested { id: ev_id, .. } => assert_eq!(ev_id, id),
+    Event::DialRequested(p) => assert_eq!(p.id(), id),
     other => panic!("expected DialRequested, got {other:?}"),
   }
 
@@ -3403,8 +3388,8 @@ fn inbound_user_data_emits_user_packet_event() {
 
   let ep_ev = stream.poll_endpoint_event().expect("endpoint event");
   match &ep_ev {
-    EndpointEvent::UserDataReceived { data, .. } => {
-      assert_eq!(data.as_ref(), b"world");
+    EndpointEvent::UserDataReceived(p) => {
+      assert_eq!(p.data_ref().as_ref(), b"world");
     }
     other => panic!("expected UserDataReceived, got {other:?}"),
   }
@@ -3413,11 +3398,9 @@ fn inbound_user_data_emits_user_packet_event() {
 
   let app_ev = e.poll_event().expect("UserPacket");
   match app_ev {
-    Event::UserPacket {
-      data, reliability, ..
-    } => {
-      assert_eq!(data.as_ref(), b"world");
-      assert_eq!(reliability, Reliability::Reliable);
+    Event::UserPacket(p) => {
+      assert_eq!(p.data_ref().as_ref(), b"world");
+      assert_eq!(p.reliability(), Reliability::Reliable);
     }
     other => panic!("expected UserPacket, got {other:?}"),
   }
@@ -3973,10 +3956,7 @@ fn eof_in_outbound_sending_request_push_pull_is_premature() {
   // bytes are buffered in `output_buf` waiting for `poll_transmit` to
   // drain them. Phase has NOT yet advanced to
   // `OutboundAwaitingResponse`.
-  assert!(matches!(
-    s.phase,
-    StreamPhase::OutboundSendingRequest { .. }
-  ));
+  assert!(matches!(s.phase, StreamPhase::OutboundSendingRequest(_)));
 
   // Peer FINs before we even finish writing. For a response-bearing
   // exchange (PushPull) this is premature — the response will never
@@ -4010,10 +3990,7 @@ fn eof_in_outbound_sending_request_reliable_ping_is_premature() {
   while e.poll_event().is_some() {}
   let mut s = e.dial_succeeded(id, t0).expect("stream");
 
-  assert!(matches!(
-    s.phase,
-    StreamPhase::OutboundSendingRequest { .. }
-  ));
+  assert!(matches!(s.phase, StreamPhase::OutboundSendingRequest(_)));
 
   // ReliablePing also expects a response (the ack). EOF in
   // OutboundSendingRequest is premature.
@@ -4039,10 +4016,7 @@ fn eof_in_outbound_sending_request_user_message_is_ok() {
   while e.poll_event().is_some() {}
   let mut s = e.dial_succeeded(id, t0).expect("stream");
 
-  assert!(matches!(
-    s.phase,
-    StreamPhase::OutboundSendingRequest { .. }
-  ));
+  assert!(matches!(s.phase, StreamPhase::OutboundSendingRequest(_)));
 
   // UserMessage is one-way — we don't expect any inbound bytes from
   // the peer. Peer FIN'ing their (empty) send side before we finish
@@ -4088,7 +4062,7 @@ fn eof_in_inbound_sending_response_empty_buf_is_ok() {
   s.handle_data(&request_bytes, t0)
     .expect("complete request frame is decoded");
   assert!(
-    matches!(s.phase, StreamPhase::InboundSendingResponse { .. }),
+    matches!(s.phase, StreamPhase::InboundSendingResponse(_)),
     "FSM did not reach InboundSendingResponse — phase = {:?}",
     s.phase
   );
@@ -4123,10 +4097,7 @@ fn trailing_bytes_after_outbound_done_fails_decode() {
   let mut s = e.dial_succeeded(id, t0).expect("stream");
   let mut _req_buf = Vec::new();
   s.poll_transmit(t0, &mut _req_buf); // advance to OutboundAwaitingResponse
-  assert!(matches!(
-    s.phase,
-    StreamPhase::OutboundAwaitingResponse { .. }
-  ));
+  assert!(matches!(s.phase, StreamPhase::OutboundAwaitingResponse(_)));
 
   // Build a legitimate reply followed by junk bytes in a SINGLE
   // handle_data delivery — what an adversarial peer could send before
@@ -4225,10 +4196,7 @@ fn split_delivery_done_then_trailing_bytes_fails_decode() {
   let mut s = e.dial_succeeded(id, t0).expect("stream");
   let mut _req_buf = Vec::new();
   s.poll_transmit(t0, &mut _req_buf);
-  assert!(matches!(
-    s.phase,
-    StreamPhase::OutboundAwaitingResponse { .. }
-  ));
+  assert!(matches!(s.phase, StreamPhase::OutboundAwaitingResponse(_)));
 
   // Chunk 1: the legitimate reply (FSM → Done).
   let carol_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7003);
@@ -4398,10 +4366,7 @@ fn second_frame_in_inbound_sending_response_fails_unexpected() {
   // InboundSendingResponse.
   let req = build_push_pull_request_bytes();
   s.handle_data(&req, t0).expect("decode request");
-  assert!(matches!(
-    s.phase,
-    StreamPhase::InboundSendingResponse { .. }
-  ));
+  assert!(matches!(s.phase, StreamPhase::InboundSendingResponse(_)));
 
   // Adversarial peer sends a SECOND complete frame while we're still
   // sending the response. The FSM's `PhaseKind::Ignore` arm MUST fail
@@ -4435,10 +4400,7 @@ fn eof_in_inbound_sending_response_partial_trailing_fails() {
   // Feed a complete request frame (advances to InboundSendingResponse).
   let request_bytes = build_push_pull_request_bytes();
   s.handle_data(&request_bytes, t0).expect("decode request");
-  assert!(matches!(
-    s.phase,
-    StreamPhase::InboundSendingResponse { .. }
-  ));
+  assert!(matches!(s.phase, StreamPhase::InboundSendingResponse(_)));
 
   // Feed a single byte of a SECOND frame (partial trailing).
   s.handle_data(&[7u8], t0)
@@ -4502,7 +4464,7 @@ fn end_to_end_push_pull_membership_convergence() {
 
   // Consume the DialRequested event.
   match a.poll_event().expect("DialRequested") {
-    Event::DialRequested { id: ev_id, .. } => assert_eq!(ev_id, id_a),
+    Event::DialRequested(p) => assert_eq!(p.id(), id_a),
     other => panic!("expected DialRequested, got {other:?}"),
   }
 
@@ -4520,7 +4482,7 @@ fn end_to_end_push_pull_membership_convergence() {
   assert!(
     matches!(
       stream_a.phase,
-      crate::stream::StreamPhase::OutboundAwaitingResponse { .. }
+      crate::stream::StreamPhase::OutboundAwaitingResponse(_)
     ),
     "poll_transmit must advance the outbound phase"
   );
@@ -4547,10 +4509,10 @@ fn end_to_end_push_pull_membership_convergence() {
 
   // ── Step 3: B encodes its response and loads it into stream_b ─────────
   let encoded_b = match cmd_b {
-    StreamCommand::SendPushPullResponse {
-      local_states,
-      user_data,
-    } => Endpoint::encode_push_pull_response(&local_states, user_data, false),
+    StreamCommand::SendPushPullResponse(resp) => {
+      let (local_states, user_data) = resp.into_parts();
+      Endpoint::encode_push_pull_response(&local_states, user_data, false)
+    }
     StreamCommand::Close => panic!("expected SendPushPullResponse, got Close"),
   };
   assert!(!encoded_b.is_empty(), "B response must be non-empty");
@@ -4909,7 +4871,7 @@ fn pushpull_scheduler_emits_dial_requested() {
   // Expect a DialRequested event (emitted by start_push_pull).
   let mut found_dial = false;
   while let Some(ev) = e.poll_event() {
-    if matches!(ev, Event::DialRequested { .. }) {
+    if matches!(ev, Event::DialRequested(..)) {
       found_dial = true;
     }
   }
@@ -4948,7 +4910,7 @@ fn pushpull_scheduler_no_op_with_no_peers() {
   // No peers → no DialRequested.
   while let Some(ev) = e.poll_event() {
     assert!(
-      !matches!(ev, Event::DialRequested { .. }),
+      !matches!(ev, Event::DialRequested(..)),
       "should not dial when no peers available"
     );
   }
@@ -5040,7 +5002,7 @@ fn handle_timeout_no_op_scheduler_after_leave() {
   );
   let mut found_dial = false;
   while let Some(ev) = e.poll_event() {
-    if matches!(ev, Event::DialRequested { .. }) {
+    if matches!(ev, Event::DialRequested(..)) {
       found_dial = true;
     }
   }

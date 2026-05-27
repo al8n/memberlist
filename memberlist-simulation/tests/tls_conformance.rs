@@ -28,7 +28,7 @@
 //!   backpressure) and the join converges. The masked path the small-window
 //!   test does not cover.
 //! - `large_request_coalesced_with_handshake_flight_completes` — the DIALER's
-//!   >16 KiB join request is delivered to the responder COALESCED with the
+//!   over-16-KiB join request is delivered to the responder COALESCED with the
 //!   dialer's final TLS flight in one transport read, while the responder is
 //!   still completing the handshake (no `Stream` yet). The responder must retain
 //!   the unconsumed ciphertext tail across the handshake-completion mint and

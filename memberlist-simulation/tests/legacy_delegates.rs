@@ -84,8 +84,8 @@ fn ping_delegate_payload_roundtrip() {
   // m2 should have received a PingCompleted with the configured payload.
   let mut got_payload: Option<Bytes> = None;
   while let Some(ev) = c.poll_event(a2) {
-    if let Event::PingCompleted { payload, .. } = ev {
-      got_payload = Some(payload);
+    if let Event::PingCompleted(p) = ev {
+      got_payload = Some(p.payload_ref().clone());
       break;
     }
   }

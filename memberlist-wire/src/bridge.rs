@@ -161,7 +161,9 @@ pub fn node_state_from_buffa<I: Data, A: Data>(
   let id: I = data_from_bytes(require_bytes(&b.id, "PushNodeState.id")?)?;
   let addr: A = data_from_bytes(require_bytes(&b.addr, "PushNodeState.addr")?)?;
   // NodeState carries no incarnation, but the wire field is required
-  // (frozen rejects a PushNodeState missing it); enforce presence.
+  // (frozen rejects a PushNodeState missing it); enforce presence. The
+  // value itself is discarded — only the `ok_or(...).? ` early-return
+  // matters for missing-field validation.
   let _ = b
     .incarnation
     .ok_or(BridgeError::MissingField("PushNodeState.incarnation"))?;

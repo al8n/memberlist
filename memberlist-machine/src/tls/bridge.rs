@@ -223,7 +223,8 @@ mod tests {
     server.drain_then_reap(&mut ep_s, now);
     let mut got = None;
     while let Some(ev) = ep_s.poll_event() {
-      if let Event::UserPacket { data, .. } = ev {
+      if let Event::UserPacket(p) = ev {
+        let (_, data, _) = p.into_parts();
         got = Some(data);
       }
     }
@@ -311,7 +312,8 @@ mod tests {
     server.drain_then_reap(&mut ep_s, now);
     let mut got = None;
     while let Some(ev) = ep_s.poll_event() {
-      if let Event::UserPacket { data, .. } = ev {
+      if let Event::UserPacket(p) = ev {
+        let (_, data, _) = p.into_parts();
         got = Some(data);
       }
     }
@@ -448,7 +450,8 @@ mod tests {
     server.drain_then_reap(&mut ep_s, now);
     let mut got = None;
     while let Some(ev) = ep_s.poll_event() {
-      if let Event::UserPacket { data, .. } = ev {
+      if let Event::UserPacket(p) = ev {
+        let (_, data, _) = p.into_parts();
         got = Some(data);
       }
     }
@@ -605,7 +608,8 @@ mod tests {
     server.drain_then_reap(&mut ep_s, now);
     let mut got = None;
     while let Some(ev) = ep_s.poll_event() {
-      if let Event::UserPacket { data, .. } = ev {
+      if let Event::UserPacket(p) = ev {
+        let (_, data, _) = p.into_parts();
         got = Some(data);
       }
     }

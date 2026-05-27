@@ -6,21 +6,19 @@
 //! [`StreamEndpoint`] super-state-machine with the rustls record layer, and
 //! spawns the driver task on the compio runtime.
 //!
-//! ## Address bridge
+//! ## Server name
 //!
 //! TLS requires a server name to verify the peer's certificate against. The
-//! built-in [`IdentityBridge`] returns `Some("localhost")` so the default
-//! rustls `WebPkiServerVerifier` accepts the self-signed localhost-SAN cert
-//! used in test setups. For production deployments where `A = SocketAddr`
-//! maps to a real hostname, implement a custom [`memberlist_machine::AddrBridge`]
-//! that returns the peer's actual SAN/CN. The `server_name` value MUST match
-//! the cert's SAN/CN — a mismatch causes `CertificateError::NotValidForName`
-//! and the TLS handshake fails before any membership exchange.
+//! driver's SNI provider closure is called per dial with the peer's membership
+//! address; it must return `Some(name)` matching the peer cert's SAN/CN.
+//! Returning `None` causes the dial to fail with `"tls bridge returned None
+//! for server_name"`. The bundled smoke tests use `"localhost"` to match the
+//! self-signed localhost-SAN certs; production operators return the peer's
+//! actual DNS name or SAN.
 
 #![cfg(any(feature = "tls-rustls-ring", feature = "tls-rustls-aws-lc-rs"))]
 
 use std::{
-  marker::PhantomData,
   net::SocketAddr,
   sync::{
     Arc,
@@ -31,8 +29,7 @@ use std::{
 use arc_swap::ArcSwap;
 use compio::net::{TcpListener, UdpSocket};
 use memberlist_machine::{
-  AddrBridge, TlsOptions, TlsRecords, config::EndpointConfig, endpoint::Endpoint,
-  streams::StreamEndpoint,
+  TlsOptions, TlsRecords, config::EndpointConfig, endpoint::Endpoint, streams::StreamEndpoint,
 };
 use memberlist_wire::Node;
 use smol_str::SmolStr;
@@ -40,40 +37,6 @@ use smol_str::SmolStr;
 use crate::{
   Memberlist, MemberlistError, MemberlistSnapshot, Result, StreamDriverOptions, driver::driver_loop,
 };
-
-/// Identity [`AddrBridge`] for `A = SocketAddr` with TLS server-name routing.
-///
-/// `to_socket` and `from_socket` pass `SocketAddr` through verbatim.
-/// `server_name` returns `Some("localhost")` so the `TlsRecords::dial_context`
-/// can construct a valid `rustls::pki_types::ServerName` — TLS verification
-/// REQUIRES a server name; returning `None` would cause dial to fail with
-/// `"tls bridge returned None for server_name"`. The `"localhost"` literal
-/// matches the self-signed localhost-SAN certs used in tests and local
-/// deployments; production operators who resolve peers by DNS name should
-/// implement a custom bridge that returns the peer's actual SAN/CN.
-///
-/// Unit struct (no fields) — every method on [`AddrBridge`] is static, so
-/// the bridge is a zero-sized type parameter on [`StreamEndpoint`].
-pub struct IdentityBridge;
-
-impl AddrBridge<SocketAddr> for IdentityBridge {
-  type ServerName = str;
-
-  fn to_socket(addr: &SocketAddr) -> SocketAddr {
-    *addr
-  }
-
-  fn from_socket(socket: SocketAddr) -> SocketAddr {
-    socket
-  }
-
-  fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
-    // Return a non-None server name so `TlsRecords::dial_context` can
-    // construct `ServerName::try_from("localhost")`. Matches the SAN of
-    // the self-signed test certs in `memberlist-machine/src/tls/options.rs`.
-    Some("localhost")
-  }
-}
 
 /// TLS-backed [`Memberlist`] alias — pins `I = SmolStr`, `A = SocketAddr`,
 /// `R = TlsRecords`.
@@ -134,12 +97,15 @@ impl TlsMemberlist {
 
     // 2. Build the composed super-state-machine. `Endpoint::new` inserts the
     //    local node as Alive at incarnation 1; `StreamEndpoint` wraps that with
-    //    the `TlsRecords` record layer plug and the supplied `TlsOptions`.
-    //    The `IdentityBridge` type parameter is fixed here so the
-    //    `TlsRecords::dial_context` call knows which bridge to ask for the
-    //    server name.
-    let endpoint: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, TlsRecords> =
-      StreamEndpoint::new(Endpoint::new(config), tls_opts);
+    //    the `TlsRecords` record layer plug and the supplied `TlsOptions`. The
+    //    `sni_provider` closure resolves the per-peer SNI hint `TlsRecords::
+    //    dial_context` consumes.
+    let endpoint: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> = StreamEndpoint::new(
+      Endpoint::new(config),
+      tls_opts,
+      Box::new(|_addr: &SocketAddr| Some("localhost".to_string())),
+      Box::new(|addr: &SocketAddr| *addr),
+    );
 
     // 3. Channels (see TcpMemberlist::new for the per-channel
     //    bounding rationale):
@@ -174,23 +140,24 @@ impl TlsMemberlist {
     //    `Memberlist::shutdown` returns. TLS handshake bytes flow on the
     //    same byte path as application data; `TlsRecords` inside
     //    `StreamEndpoint::handle_transport_data` decodes them.
-    let driver_handle =
-      compio::runtime::spawn(
-        driver_loop::<SmolStr, SocketAddr, IdentityBridge, TlsRecords>(
-          endpoint,
-          gossip_socket,
-          listener,
-          commands_rx,
-          events_tx,
-          events_dropped.clone(),
-          snapshot.clone(),
-          bridge_ready_rx,
-          bridge_ready_tx,
-          shutdown_flag.clone(),
-          driver_opts,
-          PhantomData,
-        ),
-      );
+    //    `socket_to_peer` is the identity for this transport (membership
+    //    address IS the `SocketAddr`).
+    let socket_to_peer: Arc<dyn Fn(SocketAddr) -> SocketAddr + Send + Sync> =
+      Arc::new(|addr: SocketAddr| addr);
+    let driver_handle = compio::runtime::spawn(driver_loop::<SmolStr, SocketAddr, TlsRecords>(
+      endpoint,
+      gossip_socket,
+      listener,
+      commands_rx,
+      events_tx,
+      events_dropped.clone(),
+      snapshot.clone(),
+      bridge_ready_rx,
+      bridge_ready_tx,
+      shutdown_flag.clone(),
+      driver_opts,
+      socket_to_peer,
+    ));
 
     // 6. Build the handle from the wired parts.
     Ok(Self::from_parts(

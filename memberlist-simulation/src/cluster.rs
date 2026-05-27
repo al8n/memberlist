@@ -27,17 +27,13 @@ use crate::{
 /// (`None`) machine default, so existing tests are unaffected.
 #[derive(Debug, Clone, Copy)]
 pub struct DecisionPolicy {
-  /// Admit inbound Alive messages (default `true`). `false` installs an
-  /// `AliveDelegate` that rejects every alive.
-  pub accept_alive: bool,
-  /// Admit join push-pull merges (default `true`). `false` installs a
-  /// `MergeDelegate` that cancels every join merge.
-  pub accept_merge: bool,
+  accept_alive: bool,
+  accept_merge: bool,
 }
 
 impl DecisionPolicy {
   /// Admit everything (default behaviour).
-  pub fn auto_accept() -> Self {
+  pub const fn auto_accept() -> Self {
     Self {
       accept_alive: true,
       accept_merge: true,
@@ -45,11 +41,37 @@ impl DecisionPolicy {
   }
 
   /// Reject every alive and every join merge.
-  pub fn reject_all() -> Self {
+  pub const fn reject_all() -> Self {
     Self {
       accept_alive: false,
       accept_merge: false,
     }
+  }
+
+  /// Replace the admit-inbound-alive flag (default `true`). `false`
+  /// installs an `AliveDelegate` that rejects every alive.
+  pub const fn with_accept_alive(mut self, accept_alive: bool) -> Self {
+    self.accept_alive = accept_alive;
+    self
+  }
+
+  /// Replace the admit-join-merge flag (default `true`). `false` installs
+  /// a `MergeDelegate` that cancels every join merge.
+  pub const fn with_accept_merge(mut self, accept_merge: bool) -> Self {
+    self.accept_merge = accept_merge;
+    self
+  }
+
+  /// Whether inbound Alive messages are admitted.
+  #[inline(always)]
+  pub const fn accept_alive(&self) -> bool {
+    self.accept_alive
+  }
+
+  /// Whether join push-pull merges are admitted.
+  #[inline(always)]
+  pub const fn accept_merge(&self) -> bool {
+    self.accept_merge
   }
 }
 
@@ -136,22 +158,22 @@ impl Cluster {
   /// Convenience: cause `host` to reject every join push-pull merge.
   /// Simulates a `MergeDelegate` that always cancels.
   pub fn reject_merges(&mut self, host: SocketAddr) {
-    self
+    let entry = self
       .policies
       .entry(host)
-      .or_insert_with(DecisionPolicy::auto_accept)
-      .accept_merge = false;
+      .or_insert_with(DecisionPolicy::auto_accept);
+    *entry = entry.with_accept_merge(false);
     self.apply_policy(host);
   }
 
   /// Convenience: cause `host` to reject every inbound Alive. Simulates an
   /// `AliveDelegate` that always vetoes.
   pub fn reject_alives(&mut self, host: SocketAddr) {
-    self
+    let entry = self
       .policies
       .entry(host)
-      .or_insert_with(DecisionPolicy::auto_accept)
-      .accept_alive = false;
+      .or_insert_with(DecisionPolicy::auto_accept);
+    *entry = entry.with_accept_alive(false);
     self.apply_policy(host);
   }
 
@@ -163,10 +185,10 @@ impl Cluster {
     let policy = self.policies.get(&host).copied().unwrap_or_default();
     if let Some(ep) = self.net.endpoints.get_mut(&host) {
       ep.set_alive_delegate(PolicyAliveDelegate {
-        accept: policy.accept_alive,
+        accept: policy.accept_alive(),
       });
       ep.set_merge_delegate(PolicyMergeDelegate {
-        accept: policy.accept_merge,
+        accept: policy.accept_merge(),
       });
     }
   }
@@ -426,7 +448,9 @@ impl Cluster {
     let Some(ep) = self.net.endpoints.get_mut(&host) else {
       return;
     };
-    let _ = bootstrap; // distinction is documentation-only in the sim
+    // The bootstrap distinction is documentation-only in the sim — both
+    // paths route through `handle_alive` identically.
+    let _ = bootstrap;
     ep.handle_alive(host, alive, now);
   }
 

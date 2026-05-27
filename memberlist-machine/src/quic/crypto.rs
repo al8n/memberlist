@@ -53,13 +53,35 @@
 //! ring backend. Behavioral determinism comes from the injected virtual
 //! clock, not from any test-only crypto hook.
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
+
+/// Per-peer SNI lookup. The coordinator calls this once per outbound dial,
+/// passing the dialed `SocketAddr`; the returned string is forwarded to
+/// `quinn_proto::Endpoint::connect(client, addr, server_name)` and reaches the
+/// operator's `ServerCertVerifier::verify_server_cert(_, _, server_name, _, _)`
+/// at handshake time.
+pub type SniProvider = Arc<dyn Fn(&SocketAddr) -> Arc<str> + Send + Sync>;
 
 /// Immutable QUIC config bundle handed to the coordinator. Accessor-only.
 pub struct QuicConfig {
   endpoint: Arc<quinn_proto::EndpointConfig>,
   server: Arc<quinn_proto::ServerConfig>,
   client: quinn_proto::ClientConfig,
+  /// Per-peer TLS verification identity. The coordinator invokes this closure
+  /// once per outbound dial with the dialed `SocketAddr`; the returned string
+  /// is forwarded to `quinn_proto::Endpoint::connect(client, addr,
+  /// server_name)` and surfaces at the operator's
+  /// `ServerCertVerifier::verify_server_cert(_, _, server_name, _, _)` call.
+  ///
+  /// Default mode (built by [`Self::new`]) is cluster-uniform: a closure that
+  /// returns the same string for every peer. Per-peer SAN deployments — where
+  /// each peer's cert names its own hostname/IP and the verifier matches the
+  /// supplied `server_name` against the SAN — supply a closure via
+  /// [`Self::new_with_sni_provider`] that maps each peer `SocketAddr` to the
+  /// expected identity (rustls's `ServerCertVerifier` receives only the
+  /// supplied `server_name`, not the dialed `SocketAddr`, so a custom verifier
+  /// cannot re-derive per-peer SAN identity from the address alone).
+  sni_provider: SniProvider,
 }
 
 impl QuicConfig {
@@ -107,11 +129,39 @@ impl QuicConfig {
   /// - `TransportConfig::max_concurrent_uni_streams(VarInt) -> &mut Self`.
   /// - `ServerConfig::transport_config(Arc<TransportConfig>) -> &mut Self`.
   /// - `ClientConfig::transport_config(Arc<TransportConfig>) -> &mut Self`.
+  ///
+  /// `server_name` installs the cluster-uniform TLS verification identity:
+  /// every outbound dial reaches the operator's `ServerCertVerifier` with the
+  /// same string. Per-peer SAN deployments must use
+  /// [`Self::new_with_sni_provider`] instead — rustls's
+  /// `ServerCertVerifier::verify_server_cert(_, _, server_name, _, _)` does not
+  /// receive the dialed `SocketAddr`, so a verifier cannot re-derive per-peer
+  /// SAN identity from the supplied address.
   pub fn new(
+    endpoint: quinn_proto::EndpointConfig,
+    server: quinn_proto::ServerConfig,
+    client: quinn_proto::ClientConfig,
+    transport: quinn_proto::TransportConfig,
+    server_name: impl Into<Arc<str>>,
+  ) -> Self {
+    let name: Arc<str> = server_name.into();
+    let provider: SniProvider = Arc::new(move |_addr: &SocketAddr| name.clone());
+    Self::new_with_sni_provider(endpoint, server, client, transport, provider)
+  }
+
+  /// Like [`Self::new`] but takes a per-peer SNI provider. The closure is
+  /// invoked once per outbound dial with the dialed `SocketAddr`; the
+  /// returned string is forwarded to
+  /// `quinn_proto::Endpoint::connect(client, addr, server_name)` and reaches
+  /// the operator's `ServerCertVerifier` at handshake time. Use this for
+  /// per-peer SAN deployments where the verifier must see a different
+  /// `server_name` for each peer.
+  pub fn new_with_sni_provider(
     mut endpoint: quinn_proto::EndpointConfig,
     mut server: quinn_proto::ServerConfig,
     mut client: quinn_proto::ClientConfig,
     mut transport: quinn_proto::TransportConfig,
+    sni_provider: SniProvider,
   ) -> Self {
     // Disable QUIC-bit greasing (RFC 9287). `EndpointConfig::new`
     // defaults `grease_quic_bit` to `true`, which advertises the
@@ -158,7 +208,16 @@ impl QuicConfig {
       endpoint,
       server,
       client,
+      sni_provider,
     }
+  }
+
+  /// Resolve the TLS verification identity for an outbound dial to `peer`.
+  /// Invokes the stored per-peer SNI closure (see the field docs on [`Self`]
+  /// for the verifier-side semantics).
+  #[inline(always)]
+  pub fn sni_for(&self, peer: &SocketAddr) -> Arc<str> {
+    (self.sni_provider)(peer)
   }
 
   /// Returns the endpoint config (carries the stateless-reset HMAC key).
@@ -292,12 +351,15 @@ pub(crate) mod tests {
       test_server(),
       test_client(),
       quinn_proto::TransportConfig::default(),
+      "localhost",
     );
     // Prove the bundle is usable: quinn_proto::Endpoint::new must not panic.
     // Signature: Endpoint::new(Arc<EndpointConfig>, Option<Arc<ServerConfig>>, allow_mtud: bool, rng_seed: Option<[u8; 32]>)
     let _server_ep =
       quinn_proto::Endpoint::new(cfg.endpoint_arc(), Some(cfg.server_arc()), true, None);
     let _client_ep = quinn_proto::Endpoint::new(cfg.endpoint_arc(), None, true, None);
+    // Exercise the accessors for their side effect of compiling against
+    // the public bundle shape; the borrowed references are discarded.
     let _ = cfg.endpoint_ref();
     let _ = cfg.client();
   }
@@ -325,6 +387,45 @@ pub(crate) mod tests {
       test_server(),
       test_client(),
       tc,
+      "localhost",
     );
+  }
+
+  /// `new` installs a cluster-uniform SNI: every peer resolves to the same
+  /// string regardless of the dialed `SocketAddr`.
+  #[test]
+  fn sni_for_default_constructor_is_cluster_uniform() {
+    let cfg = QuicConfig::new(
+      test_endpoint_config(&[7u8; 32]),
+      test_server(),
+      test_client(),
+      quinn_proto::TransportConfig::default(),
+      "cluster.example",
+    );
+    let a: SocketAddr = "10.0.0.1:7946".parse().unwrap();
+    let b: SocketAddr = "10.0.0.2:7946".parse().unwrap();
+    assert_eq!(&*cfg.sni_for(&a), "cluster.example");
+    assert_eq!(&*cfg.sni_for(&b), "cluster.example");
+  }
+
+  /// `new_with_sni_provider` lets the operator return a different identity
+  /// for each peer — proving the closure is invoked with the dialed
+  /// `SocketAddr` so per-peer SAN deployments are reachable.
+  #[test]
+  fn sni_for_provider_is_per_peer() {
+    let provider: SniProvider = Arc::new(|peer: &SocketAddr| -> Arc<str> {
+      Arc::from(format!("peer-{}.example", peer.port()))
+    });
+    let cfg = QuicConfig::new_with_sni_provider(
+      test_endpoint_config(&[7u8; 32]),
+      test_server(),
+      test_client(),
+      quinn_proto::TransportConfig::default(),
+      provider,
+    );
+    let a: SocketAddr = "10.0.0.1:7100".parse().unwrap();
+    let b: SocketAddr = "10.0.0.2:7200".parse().unwrap();
+    assert_eq!(&*cfg.sni_for(&a), "peer-7100.example");
+    assert_eq!(&*cfg.sni_for(&b), "peer-7200.example");
   }
 }

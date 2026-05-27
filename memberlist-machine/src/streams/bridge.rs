@@ -62,7 +62,7 @@ use std::time::Instant;
 use crate::{
   bridge_phase::{BridgeFailure, BridgePhase},
   endpoint::Endpoint,
-  event::{EndpointEvent, StreamCommand},
+  event::{EndpointEvent, StreamClosed, StreamCommand, StreamErrored},
   stream::Stream,
   streams::{
     phase::StreamPhase,
@@ -1063,10 +1063,8 @@ where
     {
       if let Some(cmd) = ep.handle_stream_event(ev, now) {
         match cmd {
-          StreamCommand::SendPushPullResponse {
-            local_states,
-            user_data,
-          } => {
+          StreamCommand::SendPushPullResponse(resp) => {
+            let (local_states, user_data) = resp.into_parts();
             // `handle_stream_event` returns the response state UNENCODED with
             // the inbound stream's `output_buf` still empty: encode the snapshot
             // and load it before any of it can be transmitted, or the peer is
@@ -1123,13 +1121,10 @@ where
             "encryption policy changed mid-exchange".to_string()
           }
         };
-        EndpointEvent::StreamErrored { id, err }
+        EndpointEvent::StreamErrored(StreamErrored::new(id, err))
       }
-      (_, Some(e)) => EndpointEvent::StreamErrored {
-        id,
-        err: e.to_string(),
-      },
-      _ => EndpointEvent::StreamClosed { id },
+      (_, Some(e)) => EndpointEvent::StreamErrored(StreamErrored::new(id, e.to_string())),
+      _ => EndpointEvent::StreamClosed(StreamClosed::new(id)),
     };
     // Ignoring Err: the post-payload lifecycle notice
     // (`StreamClosed`/`StreamErrored`) returns no actionable `StreamCommand` —
@@ -1168,10 +1163,8 @@ where
     {
       if let Some(cmd) = ep.handle_stream_event(ev, now) {
         match cmd {
-          StreamCommand::SendPushPullResponse {
-            local_states,
-            user_data,
-          } => {
+          StreamCommand::SendPushPullResponse(resp) => {
+            let (local_states, user_data) = resp.into_parts();
             let response_deadline = now + core::time::Duration::from_secs(5);
             let encoded =
               Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
@@ -1181,8 +1174,8 @@ where
               response_deadline,
             );
             self.deadline = response_deadline;
-            // Ignoring Err: see `drain_then_reap` — a `pump_out` failure
-            // terminalizes the bridge, which the next-tick reap reflects.
+            // Ignoring Err: a `pump_out` failure terminalizes the bridge,
+            // which the next-tick reap reflects.
             let _ = self.pump_out(now);
           }
           StreamCommand::Close => {

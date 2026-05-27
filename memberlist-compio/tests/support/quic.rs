@@ -25,10 +25,10 @@ pub fn generate_localhost_cert() -> (CertificateDer<'static>, PrivateKeyDer<'sta
 /// Generate a fresh self-signed cert with caller-supplied SANs.
 ///
 /// Returns the DER-encoded certificate and its PKCS#8 private key. Used by
-/// negative tests that need a cert whose subject-alt-names do NOT match
-/// the SNI value supplied by [`memberlist_compio::quic::IdentityBridge`]
-/// (which always returns `"localhost"`), forcing rustls to reject the
-/// peer's certificate during the TLS handshake.
+/// negative tests that need a cert whose subject-alt-names do NOT match the
+/// SNI value the [`memberlist_machine::QuicConfig`] SNI closure returns
+/// (which the compio test setup always wires to `"localhost"`), forcing
+/// rustls to reject the peer's certificate during the TLS handshake.
 pub fn generate_cert_with_sans(
   sans: Vec<String>,
 ) -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
@@ -92,7 +92,7 @@ pub fn build_quic_config(
     ))
     .keep_alive_interval(Some(Duration::from_secs(1)));
 
-  QuicConfig::new(endpoint_cfg, server_cfg, client_cfg, transport)
+  QuicConfig::new(endpoint_cfg, server_cfg, client_cfg, transport, "localhost")
 }
 
 /// Convenience: generate a self-signed cert and build a `QuicConfig` that

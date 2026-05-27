@@ -10,7 +10,7 @@
 
 mod bridge;
 mod conn;
-mod crypto;
+pub mod crypto;
 mod demux;
 
 pub use crypto::QuicConfig;
@@ -18,10 +18,9 @@ pub use crypto::QuicConfig;
 use std::{collections::HashMap, net::SocketAddr, time::Instant};
 
 use bytes::{Bytes, BytesMut};
-use quinn_proto::{ConnectionHandle, DatagramEvent, Dir, Endpoint as QuinnEndpoint};
+use quinn_proto::{DatagramEvent, Dir, Endpoint as QuinnEndpoint};
 
 use crate::{
-  addr_bridge::AddrBridge,
   endpoint::Endpoint,
   event::{
     Event, ExchangeCompleted, ExchangeId, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId,
@@ -49,9 +48,9 @@ use demux::{Class, classify};
 /// connection's own `poll_timeout` (handshake completion / credit recovery)
 /// and the intent's `deadline`. Immediately re-firing an attempted entry
 /// would busy-loop a still-handshaking connection.
-struct PendingDial<A> {
+struct PendingDial {
   id: StreamId,
-  peer: A,
+  peer: SocketAddr,
   deadline: Instant,
   attempted: bool,
 }
@@ -59,11 +58,14 @@ struct PendingDial<A> {
 /// Coordinator: `memberlist::Endpoint` (unreliable + membership) composed with
 /// `quinn_proto::Endpoint` (reliable). Pure Sans-I/O — inject `now`.
 ///
-/// `B` translates the membership address `A` to the QUIC `SocketAddr`
-/// (see [`AddrBridge`]); it is a marker type parameter only — no value of
-/// `B` is stored.
-pub struct QuicEndpoint<I, A, B> {
-  ep: Endpoint<I, A>,
+/// The membership address is pinned to `SocketAddr` inside this coordinator —
+/// `quinn_proto::Endpoint` is structurally `SocketAddr`-typed (it dials and
+/// accepts wire addresses), so the composed unit pins `A = SocketAddr` rather
+/// than carrying a per-coordinator conversion layer over a generic `A`. A
+/// driver whose user-facing membership address differs from the wire socket
+/// translates at the driver boundary (e.g. in `Memberlist<I, A, R>::join`).
+pub struct QuicEndpoint<I> {
+  ep: Endpoint<I, SocketAddr>,
   quinn: QuinnEndpoint,
   cfg: QuicConfig,
   /// Cross-transport compression configuration. A disabled `CompressionOptions`
@@ -75,7 +77,7 @@ pub struct QuicEndpoint<I, A, B> {
   /// confidentiality.
   encryption: memberlist_wire::EncryptionOptions,
   conns: ConnTable,
-  bridges: HashMap<StreamId, Bridge<I, A>>,
+  bridges: HashMap<StreamId, Bridge<I, SocketAddr>>,
   /// Tags each outbound bridge's [`StreamId`] with the originating
   /// [`ExchangeKind`] so the bridge-reap path can carry that kind on
   /// the uniform [`Event::ExchangeCompleted`] terminal event. Mirrors
@@ -89,6 +91,13 @@ pub struct QuicEndpoint<I, A, B> {
   /// from `streams().accept(Dir::Bi)` are not assigned a kind by the
   /// initiator and never appear in this table.
   pending_outbound_kinds: HashMap<StreamId, ExchangeKind>,
+  /// Tags each outbound bridge's [`StreamId`] with the [`SocketAddr`]
+  /// of the peer so the bridge-reap path can carry it on the
+  /// [`Event::ExchangeCompleted`] payload. Populated alongside
+  /// `pending_outbound_kinds`; drained at bridge-reap time inside
+  /// [`Self::emit_exchange_completed`]. Inbound (server-side) bridges
+  /// do not appear here.
+  pending_outbound_peers: HashMap<StreamId, SocketAddr>,
   /// Outbound UDP datagrams produced this tick (quinn datagrams + stateless
   /// `Response`s; the memberlist unreliable path is NOT prebuffered — see
   /// [`poll_memberlist_transmit`](Self::poll_memberlist_transmit)).
@@ -119,7 +128,7 @@ pub struct QuicEndpoint<I, A, B> {
   /// entry carries an `attempted` bit so a freshly-sieved intent surfaces
   /// in [`Self::poll_timeout`] as an immediate-due wake — see
   /// [`PendingDial`].
-  dial_pending: std::collections::VecDeque<PendingDial<A>>,
+  dial_pending: std::collections::VecDeque<PendingDial>,
   /// Most recent `now: Instant` injected by `handle_udp` / `handle_timeout` /
   /// any high-level `start_*` wrapper. Used by [`Self::poll_timeout`] as the
   /// known-past anchor for the immediate-due wake of an unattempted
@@ -194,7 +203,6 @@ pub struct QuicEndpoint<I, A, B> {
   /// production builds.
   #[cfg(test)]
   bridges_terminalized_via_close_command: u64,
-  _addr: core::marker::PhantomData<fn(B)>,
 }
 
 // Accessors / builders whose bodies touch only non-generic fields
@@ -202,21 +210,11 @@ pub struct QuicEndpoint<I, A, B> {
 // `mem_ingress`) or delegate to `Endpoint`'s own accessor surface
 // (`endpoint()`, `gossip_mtu()`). Re-states only the struct's
 // well-formedness bag — no method-side additions, so the heavier
-// `I: Debug + Display + Send + Sync + 'static` and `B: AddrBridge<A>`
-// constraints carried by the impl blocks below are NOT required to call
-// any of these.
-impl<I, A, B> QuicEndpoint<I, A, B>
+// `I: Debug + Display + Send + Sync + 'static` constraints carried by
+// the impl blocks below are NOT required to call any of these.
+impl<I> QuicEndpoint<I>
 where
   I: memberlist_wire::Id + memberlist_wire::Data + memberlist_wire::CheapClone,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
 {
   /// Build the coordinator. The quinn endpoint is created with the bundled
   /// config; `allow_mtud = true`, and `rng_seed = None` so quinn seeds its
@@ -224,7 +222,7 @@ where
   ///
   /// Signature (quinn-proto 0.11.14): `Endpoint::new(Arc<EndpointConfig>,
   /// Option<Arc<ServerConfig>>, allow_mtud: bool, rng_seed: Option<[u8; 32]>)`.
-  pub fn new(ep: Endpoint<I, A>, cfg: QuicConfig) -> Self {
+  pub fn new(ep: Endpoint<I, SocketAddr>, cfg: QuicConfig) -> Self {
     Self::with_quinn_rng_seed(ep, cfg, None)
   }
 
@@ -240,7 +238,7 @@ where
   /// identical to [`new`](Self::new).
   #[must_use]
   pub fn with_quinn_rng_seed(
-    ep: Endpoint<I, A>,
+    ep: Endpoint<I, SocketAddr>,
     cfg: QuicConfig,
     rng_seed: Option<[u8; 32]>,
   ) -> Self {
@@ -254,6 +252,7 @@ where
       conns: ConnTable::new(),
       bridges: HashMap::new(),
       pending_outbound_kinds: HashMap::new(),
+      pending_outbound_peers: HashMap::new(),
       out: std::collections::VecDeque::new(),
       mem_ingress: std::collections::VecDeque::new(),
       dial_pending: std::collections::VecDeque::new(),
@@ -268,7 +267,6 @@ where
       accept_error_responses_emitted: 0,
       #[cfg(test)]
       bridges_terminalized_via_close_command: 0,
-      _addr: core::marker::PhantomData,
     }
   }
 
@@ -277,7 +275,7 @@ where
   /// disabled.
   #[must_use]
   pub fn with_compression(
-    ep: Endpoint<I, A>,
+    ep: Endpoint<I, SocketAddr>,
     cfg: QuicConfig,
     compression: memberlist_wire::CompressionOptions,
   ) -> Self {
@@ -397,7 +395,7 @@ where
 
   /// Borrow the inner membership endpoint (members / queue_user_broadcast / …).
   #[inline(always)]
-  pub fn endpoint_ref(&self) -> &Endpoint<I, A> {
+  pub fn endpoint_ref(&self) -> &Endpoint<I, SocketAddr> {
     &self.ep
   }
 
@@ -416,7 +414,7 @@ where
   /// inner endpoint invariant that no caller can drain `DialRequested`
   /// out from under `service_dials`.
   #[cfg(test)]
-  pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, A> {
+  pub(crate) fn endpoint_mut(&mut self) -> &mut Endpoint<I, SocketAddr> {
     &mut self.ep
   }
 
@@ -549,28 +547,16 @@ where
   }
 }
 
-// The full SWIM bag on `I`, but no `B`. Methods that delegate to
-// `Endpoint`'s full-bag surface (`poll_event`, `poll_transmit`,
-// `poll_timeout`, `handle_packet`, `handle_alive`, `handle_suspect`,
-// `requeue_event`, `start_probe`, `leave`), drive `Bridge` ops (whose
-// impls require the full bag), or run the internal bridge-pump / reap
-// helpers. The address-bridge plug `B` is consulted only by the impl
-// block below — every method here is callable on a `QuicEndpoint` whose
-// `B` carries no extra bound.
-impl<I, A, B> QuicEndpoint<I, A, B>
+// Methods that delegate to `Endpoint`'s full-bag surface (`poll_event`,
+// `poll_transmit`, `poll_timeout`, `handle_packet`, `handle_alive`,
+// `handle_suspect`, `requeue_event`, `start_probe`, `leave`), drive
+// `Bridge` ops (whose impls require the full bag), or run the internal
+// bridge-pump / reap helpers.
+impl<I> QuicEndpoint<I>
 where
   I: memberlist_wire::Id
     + memberlist_wire::Data
     + memberlist_wire::CheapClone
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
-    + Eq
-    + core::hash::Hash
     + core::fmt::Debug
     + core::fmt::Display
     + Send
@@ -654,7 +640,12 @@ where
   /// peer without going through a join push/pull).
   ///
   /// Pass-through to [`Endpoint::handle_alive`]. Sets `last_now`.
-  pub fn handle_alive(&mut self, from: A, alive: memberlist_wire::typed::Alive<I, A>, at: Instant) {
+  pub fn handle_alive(
+    &mut self,
+    from: SocketAddr,
+    alive: memberlist_wire::typed::Alive<I, SocketAddr>,
+    at: Instant,
+  ) {
     self.last_now = Some(at);
     self.ep.handle_alive(from, alive, at);
   }
@@ -666,7 +657,7 @@ where
   /// Pass-through to [`Endpoint::handle_suspect`]. Sets `last_now`.
   pub fn handle_suspect(
     &mut self,
-    from: A,
+    from: SocketAddr,
     suspect: memberlist_wire::typed::Suspect<I>,
     at: Instant,
   ) {
@@ -700,10 +691,11 @@ where
   ///   for observation via the next [`Self::poll_event`] — the standard
   ///   forwarded-event reordering pattern a harness uses to put an event
   ///   back at the tail of the queue after peeking.
-  pub fn requeue_event(&mut self, ev: Event<I, A>, now: Instant) {
+  pub fn requeue_event(&mut self, ev: Event<I, SocketAddr>, now: Instant) {
     self.last_now = Some(now);
     match ev {
-      Event::DialRequested { id, peer, deadline } => {
+      Event::DialRequested(dial) => {
+        let (id, peer, deadline) = dial.into_parts();
         self.dial_pending.push_back(PendingDial {
           id,
           peer,
@@ -731,10 +723,11 @@ where
   /// mid-handshake silently drop it, orphaning the pending stream intent
   /// (the push/pull or reliable-ping would never open). External callers
   /// only observe application-visible events.
-  pub fn poll_event(&mut self) -> Option<Event<I, A>> {
+  pub fn poll_event(&mut self) -> Option<Event<I, SocketAddr>> {
     loop {
       match self.ep.poll_event()? {
-        Event::DialRequested { id, peer, deadline } => {
+        Event::DialRequested(dial) => {
+          let (id, peer, deadline) = dial.into_parts();
           self.dial_pending.push_back(PendingDial {
             id,
             peer,
@@ -856,7 +849,7 @@ where
   /// The driver MUST take the unreliable path through this accessor and never
   /// call `endpoint_mut().poll_transmit()` directly (that would double-drive
   /// the `LeftCluster` boundary).
-  pub fn poll_memberlist_transmit(&mut self) -> Option<Transmit<I, A>> {
+  pub fn poll_memberlist_transmit(&mut self) -> Option<Transmit<I, SocketAddr>> {
     self.ep.poll_transmit()
   }
 
@@ -871,8 +864,8 @@ where
   /// `Endpoint`.
   pub fn handle_packet(
     &mut self,
-    from: A,
-    msg: memberlist_wire::typed::Message<I, A>,
+    from: SocketAddr,
+    msg: memberlist_wire::typed::Message<I, SocketAddr>,
     now: Instant,
   ) {
     self.ep.handle_packet(from, msg, now);
@@ -952,35 +945,26 @@ where
   /// Emit [`Event::ExchangeCompleted`] for an outbound bridge that has
   /// reached its terminal state. `id` MUST be the bridge's
   /// machine-level [`StreamId`] (the key the bridge was inserted into
-  /// `self.bridges` under); `ch` is its [`ConnectionHandle`] (the
-  /// caller pulls this from `br.ch()` before dropping the bridge so
-  /// the helper has no borrow on `self.bridges`). The helper looks up
-  /// the originating kind via [`Self::pending_outbound_kinds`]
-  /// (`None` ⇒ inbound or unknown — no emission) and the peer socket
-  /// via [`Self::conns`].
+  /// `self.bridges` under). The helper drains the originating kind from
+  /// [`Self::pending_outbound_kinds`] (`None` ⇒ inbound or unknown —
+  /// no emission) and the peer address from
+  /// [`Self::pending_outbound_peers`].
   ///
   /// Called from every bridge-reap site (the `pump_bridges` D1 reap,
   /// the `service_quinn` ConnectionLost / `is_drained()` inline drain,
   /// and the test-only acceptance-tracking pump). Outbound only —
   /// inbound (server-accepted) bridges have no entry in
   /// `pending_outbound_kinds` and silently no-op here.
-  fn emit_exchange_completed(
-    &mut self,
-    id: StreamId,
-    ch: ConnectionHandle,
-    outcome: ExchangeOutcome,
-  ) {
+  fn emit_exchange_completed(&mut self, id: StreamId, outcome: ExchangeOutcome) {
     let Some(kind) = self.pending_outbound_kinds.remove(&id) else {
       return;
     };
-    let Some(peer) = self.conns.get(ch).map(|e| e.peer()) else {
-      // Peer connection already reaped from `self.conns` — the bridge's
-      // SocketAddr is no longer reachable. Skip the emission rather
-      // than synthesise; the conn-table reaps only after every bridge
-      // on that connection has been drained-then-reaped, so this is
-      // unreachable in practice. Defensive no-op.
-      return;
-    };
+    // `pending_outbound_peers` is always populated alongside
+    // `pending_outbound_kinds`; if `kind` was present, peer must be too.
+    let peer = self
+      .pending_outbound_peers
+      .remove(&id)
+      .expect("pending_outbound_peers entry must exist when kind entry exists");
     self
       .ep
       .emit_event(Event::ExchangeCompleted(ExchangeCompleted::new(
@@ -1000,7 +984,7 @@ where
   /// be terminal before this is called — terminal-after-D1 is the only
   /// site that knows the final outcome.
   #[inline]
-  fn outcome_for_terminal(br: &Bridge<I, A>) -> ExchangeOutcome {
+  fn outcome_for_terminal(br: &Bridge<I, SocketAddr>) -> ExchangeOutcome {
     if br.is_phase_failed() {
       ExchangeOutcome::Failed
     } else {
@@ -1033,11 +1017,10 @@ where
         // SAME encode+load+flush but WITHOUT that notice.
         if br.is_terminal() {
           br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-          let ch = br.ch();
           let outcome = Self::outcome_for_terminal(&br);
           // (5) reap AFTER drain: dropping the bridge frees its slot.
           drop(br);
-          self.emit_exchange_completed(*id, ch, outcome);
+          self.emit_exchange_completed(*id, outcome);
         } else {
           br.drain_payload_only(&mut self.ep, &mut self.conns, now);
           // `drain_payload_only` may flip the bridge to terminal (e.g.
@@ -1053,10 +1036,9 @@ where
                 .saturating_add(1);
             }
             br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-            let ch = br.ch();
             let outcome = Self::outcome_for_terminal(&br);
             drop(br);
-            self.emit_exchange_completed(*id, ch, outcome);
+            self.emit_exchange_completed(*id, outcome);
           } else {
             self.bridges.insert(*id, br);
           }
@@ -1095,10 +1077,9 @@ where
         let _ = br.pump_out(&mut self.conns, now);
         if br.is_terminal() {
           br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-          let ch = br.ch();
           let outcome = Self::outcome_for_terminal(&br);
           drop(br);
-          self.emit_exchange_completed(*id, ch, outcome);
+          self.emit_exchange_completed(*id, outcome);
         } else {
           br.drain_payload_only(&mut self.ep, &mut self.conns, now);
           // Mirror `pump_bridges`'s post-`drain_payload_only` terminality
@@ -1109,10 +1090,9 @@ where
               .bridges_terminalized_via_close_command
               .saturating_add(1);
             br.drain_then_reap(&mut self.ep, &mut self.conns, now);
-            let ch = br.ch();
             let outcome = Self::outcome_for_terminal(&br);
             drop(br);
-            self.emit_exchange_completed(*id, ch, outcome);
+            self.emit_exchange_completed(*id, outcome);
           } else {
             self.bridges.insert(*id, br);
           }
@@ -1149,10 +1129,11 @@ where
   /// queue is empty and re-queueing into the now-empty queue cannot
   /// re-surface anything we have already taken out.
   fn sieve_dial_events(&mut self) {
-    let mut others: Vec<Event<I, A>> = Vec::new();
+    let mut others: Vec<Event<I, SocketAddr>> = Vec::new();
     while let Some(ev) = self.ep.poll_event() {
       match ev {
-        Event::DialRequested { id, peer, deadline } => {
+        Event::DialRequested(dial) => {
+          let (id, peer, deadline) = dial.into_parts();
           self.dial_pending.push_back(PendingDial {
             id,
             peer,
@@ -1200,14 +1181,11 @@ where
   }
 }
 
-// The full SWIM bag plus `B: AddrBridge<A>`. Methods that resolve a peer
-// address to a transport `SocketAddr` via `B::to_socket` /
-// `B::from_socket`, derive a per-dial verification identity via
-// `B::server_name`, or transitively reach any of those through the
-// coordinator tick (`run_tick` -> `service_dials` / `service_quinn`,
-// `flush_outbound` -> `service_quinn`, the `start_*` wrappers and the
-// `handle_udp` / `handle_timeout` driver entrypoints).
-impl<I, A, B> QuicEndpoint<I, A, B>
+// Methods that drive the coordinator tick (`run_tick` ->
+// `service_dials` / `service_quinn`, `flush_outbound` ->
+// `service_quinn`, the `start_*` wrappers and the `handle_udp` /
+// `handle_timeout` driver entrypoints).
+impl<I> QuicEndpoint<I>
 where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -1217,16 +1195,6 @@ where
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  B: AddrBridge<A>,
 {
   /// Inbound datagram from the one UDP socket.
   ///
@@ -1285,12 +1253,18 @@ where
   /// poll surface (`poll_transmit` / `poll_timeout` / `handle_udp` /
   /// `handle_timeout`) sees the exchange progress without a same-instant
   /// `handle_timeout` pre-pump.
-  pub fn start_push_pull(&mut self, peer: A, kind: PushPullKind, now: Instant) -> StreamId {
+  pub fn start_push_pull(
+    &mut self,
+    peer: SocketAddr,
+    kind: PushPullKind,
+    now: Instant,
+  ) -> StreamId {
     self.last_now = Some(now);
     let id = self.ep.start_push_pull(peer, kind, now);
     self
       .pending_outbound_kinds
       .insert(id, ExchangeKind::PushPull);
+    self.pending_outbound_peers.insert(id, peer);
     self.service_dials(now);
     self.flush_outbound(now);
     id
@@ -1311,7 +1285,7 @@ where
   pub fn start_reliable_ping(
     &mut self,
     peer_id: I,
-    peer_addr: A,
+    peer_addr: SocketAddr,
     probe_seq: u32,
     deadline: Instant,
     now: Instant,
@@ -1323,6 +1297,7 @@ where
     self
       .pending_outbound_kinds
       .insert(id, ExchangeKind::ReliablePing);
+    self.pending_outbound_peers.insert(id, peer_addr);
     self.service_dials(now);
     self.flush_outbound(now);
     id
@@ -1334,12 +1309,13 @@ where
   /// Wrapper around [`Endpoint::start_user_message`]; see
   /// [`Self::start_push_pull`] for the dial-attempt and zero-time outbound-
   /// flush semantics.
-  pub fn start_user_message(&mut self, peer: A, payload: Bytes, now: Instant) -> StreamId {
+  pub fn start_user_message(&mut self, peer: SocketAddr, payload: Bytes, now: Instant) -> StreamId {
     self.last_now = Some(now);
     let id = self.ep.start_user_message(peer, payload, now);
     self
       .pending_outbound_kinds
       .insert(id, ExchangeKind::UserMessage);
+    self.pending_outbound_peers.insert(id, peer);
     self.service_dials(now);
     self.flush_outbound(now);
     id
@@ -1499,7 +1475,7 @@ where
             // inbound exchanges are stranded with no further wake-up.
             while let Some(sid) = e.conn_mut().streams().accept(Dir::Bi) {
               let peer = e.peer();
-              let stream = self.ep.accept_stream(B::from_socket(peer), now);
+              let stream = self.ep.accept_stream(peer, now);
               let id = stream.id();
               let reliable_max = self.ep.max_stream_frame_size();
               self.bridges.insert(
@@ -1673,10 +1649,9 @@ where
             // `Failed` here, but route through the shared helper so
             // the kind lookup + emission path matches the
             // `pump_bridges` reap.
-            let ch = br.ch();
             let outcome = Self::outcome_for_terminal(&br);
             drop(br);
-            self.emit_exchange_completed(id, ch, outcome);
+            self.emit_exchange_completed(id, outcome);
           }
         }
       }
@@ -1718,12 +1693,13 @@ where
       // intent through the FSM's `dial_failed` path BEFORE either half
       // is created, so no orphan state can exist.
       if now >= deadline {
-        // Discard the staged kind: the bridge was never created, so the
-        // ExchangeCompleted reap path will never observe this id.
-        // Leaving the entry stranded would leak memory across every
-        // pre-deadline-expired dial. Matches the pre-bridge-creation
-        // failure paths below.
+        // Discard the staged kind and peer: the bridge was never
+        // created, so the ExchangeCompleted reap path will never
+        // observe this id. Leaving entries stranded would leak memory
+        // across every pre-deadline-expired dial. Matches the
+        // pre-bridge-creation failure paths below.
         self.pending_outbound_kinds.remove(&id);
+        self.pending_outbound_peers.remove(&id);
         self.ep.dial_failed(
           id,
           crate::error::StreamError::DialFailed("quic dial deadline elapsed".into()),
@@ -1731,34 +1707,20 @@ where
         );
         continue;
       }
-      let addr = B::to_socket(&peer);
-      let sni = match B::server_name(&peer) {
-        Some(s) => s,
-        None => {
-          // Soft-fail-via-dial_failed — the user's `AddrBridge` returned
-          // `None`, but QUIC requires a verification identity. Mirrors
-          // the TLS coordinator's parse-failure path: the bridge author's
-          // contract for QUIC use is "return `Some(_)`"; `None` is treated
-          // as a per-peer misconfiguration that fails just that one dial —
-          // other peers/exchanges continue unaffected.
-          self.pending_outbound_kinds.remove(&id);
-          self.ep.dial_failed(
-            id,
-            crate::error::StreamError::DialFailed(
-              "quic bridge returned None for server_name".into(),
-            ),
-            now,
-          );
-          continue;
-        }
-      };
-      let sni_str: &str = sni.as_ref();
+      // The membership address `peer` IS the wire `SocketAddr` (the
+      // coordinator pins `A = SocketAddr` internally); the TLS verification
+      // identity for this dial is resolved per-peer via the closure on
+      // `QuicConfig` (default mode is cluster-uniform — the same string
+      // for every peer — but operators with per-peer SAN certs supply a
+      // closure that maps each `SocketAddr` to its expected identity).
+      let addr = peer;
+      let sni_arc = self.cfg.sni_for(&addr);
       match self.conns.get_or_dial(
         &mut self.quinn,
         now,
         self.cfg.client().clone(),
         addr,
-        sni_str,
+        &sni_arc,
       ) {
         Ok(ch) => {
           if let Some(e) = self.conns.get_mut(ch) {
@@ -1794,6 +1756,7 @@ where
                   // and queues STOP_SENDING with the same `Err(ClosedStream)`
                   // guard.
                   self.pending_outbound_kinds.remove(&id);
+                  self.pending_outbound_peers.remove(&id);
                   if let Some(e) = self.conns.get_mut(ch) {
                     let conn = e.conn_mut();
                     // Ignoring Err: idempotent retirement —
@@ -1863,6 +1826,7 @@ where
                   .unwrap_or(true);
                 if is_closed_now {
                   self.pending_outbound_kinds.remove(&id);
+                  self.pending_outbound_peers.remove(&id);
                   self.ep.dial_failed(
                     id,
                     crate::error::StreamError::DialFailed(
@@ -1879,6 +1843,7 @@ where
                   });
                 } else {
                   self.pending_outbound_kinds.remove(&id);
+                  self.pending_outbound_peers.remove(&id);
                   self.ep.dial_failed(
                     id,
                     crate::error::StreamError::DialFailed(
@@ -1893,6 +1858,7 @@ where
         }
         Err(e) => {
           self.pending_outbound_kinds.remove(&id);
+          self.pending_outbound_peers.remove(&id);
           self.ep.dial_failed(
             id,
             crate::error::StreamError::DialFailed(e.to_string().into()),
@@ -1914,25 +1880,8 @@ mod tests {
   use bytes::Bytes;
   use smol_str::SmolStr;
 
-  use super::{AddrBridge, QuicEndpoint};
+  use super::QuicEndpoint;
   use crate::{config::EndpointConfig, endpoint::Endpoint, quic::QuicConfig};
-
-  struct IdBridge;
-  impl AddrBridge<SocketAddr> for IdBridge {
-    type ServerName = str;
-
-    fn to_socket(addr: &SocketAddr) -> SocketAddr {
-      *addr
-    }
-    fn from_socket(socket: SocketAddr) -> SocketAddr {
-      socket
-    }
-    fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
-      // Sim/test cert SAN is "localhost"; the identity bridge for
-      // `A = SocketAddr` returns it for every peer.
-      Some("localhost")
-    }
-  }
 
   fn test_config() -> QuicConfig {
     let mut transport = quinn_proto::TransportConfig::default();
@@ -1944,30 +1893,28 @@ mod tests {
       crate::quic::crypto::tests::test_server(),
       crate::quic::crypto::tests::test_client(),
       transport,
+      "localhost",
     )
   }
 
-  fn make_endpoint(
-    id: &str,
-    addr: SocketAddr,
-    now: Instant,
-  ) -> QuicEndpoint<SmolStr, SocketAddr, IdBridge> {
+  fn make_endpoint(id: &str, addr: SocketAddr, now: Instant) -> QuicEndpoint<SmolStr> {
     let cfg = EndpointConfig::new(SmolStr::new(id), addr).with_rng_seed(addr.port() as u64);
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     ep.start_scheduling(now);
     let qc = test_config();
     let mut seed = [0u8; 32];
     seed[..2].copy_from_slice(&addr.port().to_le_bytes());
-    QuicEndpoint::<SmolStr, SocketAddr, IdBridge>::with_quinn_rng_seed(ep, qc, Some(seed))
+    QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, qc, Some(seed))
   }
 
   #[test]
   fn quic_endpoint_type_is_constructible_signature() {
     // Behavioural coverage is the sim harness (needs a virtual clock + a
     // peer). This guards the public constructor signature only: the
-    // coordinator is generic over `I`, `A`, and the `AddrBridge` marker `B`,
-    // and `new` takes the membership `Endpoint` plus the `QuicConfig` bundle.
-    fn _sig<I, A, B>()
+    // coordinator is generic over `I` with `A = SocketAddr` pinned
+    // internally, and `new` takes the membership `Endpoint` plus the
+    // `QuicConfig` bundle.
+    fn _sig<I>()
     where
       I: memberlist_wire::Id
         + memberlist_wire::Data
@@ -1977,21 +1924,11 @@ mod tests {
         + Send
         + Sync
         + 'static,
-      A: memberlist_wire::Data
-        + memberlist_wire::CheapClone
-        + Eq
-        + core::hash::Hash
-        + core::fmt::Debug
-        + core::fmt::Display
-        + Send
-        + Sync
-        + 'static,
-      B: super::AddrBridge<A>,
     {
       let _: fn(
-        crate::endpoint::Endpoint<I, A>,
+        crate::endpoint::Endpoint<I, SocketAddr>,
         super::QuicConfig,
-      ) -> super::QuicEndpoint<I, A, B> = super::QuicEndpoint::<I, A, B>::new;
+      ) -> super::QuicEndpoint<I> = super::QuicEndpoint::<I>::new;
     }
   }
 
@@ -2023,6 +1960,8 @@ mod tests {
     let now = Instant::now();
     let mut a = make_endpoint("a", a_addr, now);
     let mut b = make_endpoint("b", b_addr, now);
+    // Ignoring StreamId return: tests assert on observable side
+    // effects (poll_transmit/poll_event), not the handle itself.
     let _ = a
       .endpoint_mut()
       .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
@@ -2109,6 +2048,8 @@ mod tests {
     // very first `poll_transmit`. Post-handshake the push/pull bidi
     // stream's payload produces short-header STREAM frames + ACKs — the
     // packet space the per-packet greasing decision applies to.
+    // Ignoring StreamId return: tests assert on observable side
+    // effects (poll_transmit/poll_event), not the handle itself.
     let _ = a
       .endpoint_mut()
       .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
@@ -2204,6 +2145,8 @@ mod tests {
     // loop stops AFTER one entry is staged on `ch_a` and BEFORE the
     // next `service_quinn` drains it (drained at the start of the next
     // iteration per the documented one-tick latency).
+    // Ignoring StreamId return: tests assert on observable side
+    // effects (poll_transmit/poll_event), not the handle itself.
     let _ = a
       .endpoint_mut()
       .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
@@ -2399,6 +2342,8 @@ mod tests {
     let mut a = make_endpoint("a", a_addr, now);
     let mut b = make_endpoint("b", b_addr, now);
 
+    // Ignoring StreamId return: tests assert on observable side
+    // effects (poll_transmit/poll_event), not the handle itself.
     let _ = a
       .endpoint_mut()
       .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
@@ -2518,13 +2463,15 @@ mod tests {
     let cfg = EndpointConfig::new(SmolStr::new("a"), a_addr).with_rng_seed(a_addr.port() as u64);
     let mut bare_ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     bare_ep.start_scheduling(t0);
+    // Ignoring StreamId return: tests assert on observable side
+    // effects (poll_transmit/poll_event), not the handle itself.
     let _ = bare_ep.start_push_pull(b_addr, PushPullKind::Join, t0);
 
     // Drain the DialRequested. The caller now holds it.
     let dial_requested = loop {
       match bare_ep.poll_event() {
-        Some(crate::event::Event::DialRequested { id, peer, deadline }) => {
-          break crate::event::Event::DialRequested { id, peer, deadline };
+        Some(crate::event::Event::DialRequested(p)) => {
+          break crate::event::Event::DialRequested(p);
         }
         Some(_) => continue,
         None => panic!("the bare Endpoint must have queued a DialRequested"),
@@ -2538,8 +2485,7 @@ mod tests {
     let qc = test_config();
     let mut seed = [0u8; 32];
     seed[..2].copy_from_slice(&a_addr.port().to_le_bytes());
-    let mut a: QuicEndpoint<SmolStr, SocketAddr, IdBridge> =
-      QuicEndpoint::with_quinn_rng_seed(bare_ep, qc, Some(seed));
+    let mut a: QuicEndpoint<SmolStr> = QuicEndpoint::with_quinn_rng_seed(bare_ep, qc, Some(seed));
 
     // (3) Requeue the DialRequested onto the wrapped QuicEndpoint.
     // `requeue_event` anchors `last_now` AND routes a `DialRequested`
@@ -2626,6 +2572,8 @@ mod tests {
     // confirms the handshake-completion NEW_CONNECTION_ID feedback ran;
     // the test_config's 20s `max_idle_timeout` is then mutually
     // negotiated and armed on both ends).
+    // Ignoring StreamId return: tests assert on observable side
+    // effects (poll_transmit/poll_event), not the handle itself.
     let _ = a
       .endpoint_mut()
       .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
@@ -2784,6 +2732,8 @@ mod tests {
     // Established connection. Once the bridge on A has reaped its own
     // join exchange (or the loop bounds out), the pooled connection is
     // available for the expired-intent injection below to re-use.
+    // Ignoring StreamId return: tests assert on observable side
+    // effects (poll_transmit/poll_event), not the handle itself.
     let _ = a
       .endpoint_mut()
       .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
@@ -2957,6 +2907,8 @@ mod tests {
     // zero-time outbound flush). Then ferry datagrams in both directions
     // and call `handle_timeout(now)` per iteration to drive the handshake
     // to Established and exchange the push/pull bidi.
+    // Ignoring StreamId return: tests assert on observable side
+    // effects (poll_transmit/poll_event), not the handle itself.
     let _ = a.start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
 
     // The push/pull exchange opens a bidi from A to B. Once `service_quinn`
@@ -3056,6 +3008,8 @@ mod tests {
     // outside the module), so a future CID-exhaustion / malformed-
     // Initial test that DOES drive the `Err`-with-response path can
     // assert the counter advances.
+    // Ignoring StreamId return: tests assert on observable side
+    // effects (poll_transmit/poll_event), not the handle itself.
     let _ = a
       .endpoint_mut()
       .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
@@ -3145,6 +3099,8 @@ mod tests {
     // `StreamCommand::Close` is routed to B's bridge.
     b.endpoint_mut().set_merge_delegate(RejectAllMerges);
 
+    // Ignoring StreamId return: tests assert on observable side
+    // effects (poll_transmit/poll_event), not the handle itself.
     let _ = a
       .endpoint_mut()
       .start_push_pull(b_addr, crate::event::PushPullKind::Join, now);
@@ -3384,6 +3340,8 @@ mod tests {
     // bridge intent's deadline = now + stream_timeout (~5s); the
     // handshake won't complete; eventually the deadline elapses.
     let unreachable: SocketAddr = "127.0.0.1:7994".parse().unwrap();
+    // Ignoring StreamId return: tests assert on observable side
+    // effects (poll_transmit/poll_event), not the handle itself.
     let _ = a
       .endpoint_mut()
       .start_push_pull(unreachable, crate::event::PushPullKind::Refresh, now);
@@ -3431,14 +3389,14 @@ mod tests {
   #[cfg(feature = "compression-lz4")]
   fn build_test_quic_endpoint_with_compression(
     compression: memberlist_wire::CompressionOptions,
-  ) -> QuicEndpoint<SmolStr, SocketAddr, IdBridge> {
+  ) -> QuicEndpoint<SmolStr> {
     let addr: SocketAddr = "127.0.0.1:7999".parse().unwrap();
     let now = Instant::now();
     let cfg = EndpointConfig::new(SmolStr::new("test"), addr).with_rng_seed(addr.port() as u64);
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     ep.start_scheduling(now);
     let qc = test_config();
-    QuicEndpoint::<SmolStr, SocketAddr, IdBridge>::with_compression(ep, qc, compression)
+    QuicEndpoint::<SmolStr>::with_compression(ep, qc, compression)
   }
 
   #[cfg(all(test, feature = "quic", feature = "compression-lz4"))]
@@ -3522,14 +3480,14 @@ mod tests {
   #[cfg(feature = "encryption-aes-gcm")]
   fn build_test_quic_endpoint_with_encryption(
     encryption: memberlist_wire::EncryptionOptions,
-  ) -> QuicEndpoint<SmolStr, SocketAddr, IdBridge> {
+  ) -> QuicEndpoint<SmolStr> {
     let addr: SocketAddr = "127.0.0.1:7999".parse().unwrap();
     let now = Instant::now();
     let cfg = EndpointConfig::new(SmolStr::new("test"), addr).with_rng_seed(addr.port() as u64);
     let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
     ep.start_scheduling(now);
     let qc = test_config();
-    QuicEndpoint::<SmolStr, SocketAddr, IdBridge>::new(ep, qc).with_encryption(encryption)
+    QuicEndpoint::<SmolStr>::new(ep, qc).with_encryption(encryption)
   }
 
   #[cfg(all(test, feature = "quic", feature = "encryption-aes-gcm"))]

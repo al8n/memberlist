@@ -104,11 +104,7 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 
 #[cfg(any(feature = "quic", feature = "tls", feature = "tcp"))]
-mod addr_bridge;
-#[cfg(any(feature = "quic", feature = "tls", feature = "tcp"))]
 mod bridge_phase;
-#[cfg(any(feature = "quic", feature = "tls", feature = "tcp"))]
-pub use addr_bridge::AddrBridge;
 
 #[cfg(feature = "quic")]
 mod quic;
@@ -150,8 +146,10 @@ pub use delegate::{AliveDelegate, MergeDelegate};
 pub use endpoint::{Endpoint, Lifecycle, META_MAX_SIZE};
 pub use error::{Error, StreamError};
 pub use event::{
-  CompoundTransmit, EndpointEvent, Event, PacketTransmit, PushPullKind, Reliability, StreamCommand,
-  StreamEvent, StreamId, Transmit,
+  CompoundTransmit, DecodeError, DialRequested, EndpointEvent, Event, NodeConflict,
+  PacketTransmit, PingCompleted, PushPullKind, PushPullReplyReceived, PushPullRequestReceived,
+  Reliability, ReliablePingAcked, ReliablePingFailed, SendPushPullResponse, StreamClosed,
+  StreamCommand, StreamErrored, StreamEvent, StreamId, Transmit, UserDataReceived, UserPacket,
 };
 pub use members::{LocalNodeState, Member, Members};
 pub use stream::{PushPullSnapshot, Stream};

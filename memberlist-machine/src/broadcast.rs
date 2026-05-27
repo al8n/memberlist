@@ -638,6 +638,8 @@ mod tests {
     let mut q = BroadcastQueue::new(3);
     let f = Arc::new(AtomicUsize::new(0));
     q.queue_broadcast(bcast("alice", "hi", f.clone()));
+    // Drained bytes are not the assertion subject — we only need the side
+    // effect of finishing the broadcast under `retransmit_limit = 0`.
     let _ = q.take_broadcasts(0, 0, 1024);
     assert_eq!(q.num_queued(), 0);
     assert_eq!(f.load(Ordering::SeqCst), 1);

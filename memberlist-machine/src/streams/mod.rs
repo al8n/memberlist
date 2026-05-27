@@ -1,6 +1,6 @@
 //! Composed stream-transport ⊕ memberlist Sans-I/O super-state-machine.
 //!
-//! `StreamEndpoint<I, A, B, R>` runs memberlist over a record-layer-shaped
+//! `StreamEndpoint<I, A, R>` runs memberlist over a record-layer-shaped
 //! reliable transport (`R: StreamTransport`) for reliable exchanges and
 //! plain UDP for gossip. `R` is the per-transport plug: `tls::TlsRecords`
 //! for TLS-over-TCP; `tcp::RawRecords` for plain TCP; a future
@@ -78,7 +78,6 @@ use std::{
 use bytes::Bytes;
 
 use crate::{
-  addr_bridge::AddrBridge,
   endpoint::Endpoint,
   event::{Event, ExchangeCompleted, ExchangeOutcome, PushPullKind, StreamId, Transmit},
 };
@@ -143,6 +142,11 @@ struct ExchangeMeta<A> {
   /// tagged with so the driver writes the bytes on the right transport
   /// connection.
   peer_socket: SocketAddr,
+  /// The membership address (`A`) of the peer. Carried alongside
+  /// `peer_socket` so the bridge-reap path can emit the generic
+  /// [`Event::ExchangeCompleted`] payload without a back-conversion from
+  /// `SocketAddr` to `A`.
+  peer: A,
   /// `Some` until the label / handshake step settles and the coordinator mints
   /// + promotes the `Stream`; `None` afterwards (an `Established` bridge needs
   ///   no further minting decision).
@@ -184,23 +188,36 @@ fn teardown_exchange(action: &StreamAction) -> ExchangeId {
 /// composed with a per-exchange record-layer-shaped reliable transport
 /// (`R: StreamTransport`). Pure Sans-I/O — inject `now`.
 ///
-/// `B` translates the membership address `A` to the transport `SocketAddr`
-/// (see [`AddrBridge`]); it is a marker type parameter only — no value of `B`
-/// is stored. The coordinator consults [`AddrBridge::to_socket`] for the wire
-/// address and, via `R::dial_context`, [`AddrBridge::server_name`] for the
-/// per-dial verification identity (the latter is unused on transports — plain
-/// TCP — that need no record-layer certificate verification).
+/// The coordinator consults the stored [`Self::sni_provider`] closure for the
+/// per-dial verification identity (unused on transports — plain TCP — that
+/// need no record-layer certificate verification) and the stored
+/// [`Self::peer_to_socket`] closure to derive a transport `SocketAddr` for a
+/// membership `A`.
 // Storage-shape bound: `cfg: R::Options` requires `R: StreamTransport` for the
 // field type to be well-formed (rule §8 intrinsic exception). `ep: Endpoint<I, A>`
 // carries no I/A bounds at the struct level — those bounds appear only on the impl
-// blocks whose methods call `B::to_socket` / `R::dial_context::<A, B>`.
-// `B` is marker-only (`_addr: PhantomData<fn(B)>`).
-pub struct StreamEndpoint<I, A, B, R>
-where
-  R: StreamTransport,
-{
+// blocks whose methods call `R::dial_context::<A>` and read the closures.
+pub struct StreamEndpoint<I, A, R: StreamTransport> {
   ep: Endpoint<I, A>,
   cfg: R::Options,
+  /// Per-peer SNI provider for the TLS reliable path. Returns `None` for
+  /// transports that do not require SNI (plain TCP) or for peers whose
+  /// verification identity is unknown.
+  ///
+  /// Stored as a boxed closure so the provider can be supplied at construction
+  /// without an extra generic parameter on [`StreamEndpoint`]. Production
+  /// drivers wire a deployment-aware lookup; the sim harness and test fixtures
+  /// hard-code `Some("localhost".to_string())` to match the localhost-SAN test
+  /// certs.
+  sni_provider: Box<dyn Fn(&A) -> Option<String> + Send + Sync>,
+  /// Maps a membership address `A` to the transport `SocketAddr` the driver
+  /// uses to write outbound bytes (and that tags entries on
+  /// [`Self::out_transmit`] + the [`StreamAction::Connect`] payload). Drivers
+  /// where `A = SocketAddr` pass `Box::new(|addr: &SocketAddr| *addr)`;
+  /// drivers with a non-`SocketAddr` membership address supply a deployment-
+  /// aware resolver. Stored as a boxed closure for the same reason as
+  /// [`Self::sni_provider`] (no extra generic on the struct).
+  peer_to_socket: Box<dyn Fn(&A) -> SocketAddr + Send + Sync>,
   /// Cross-transport compression configuration. The coordinator is the single
   /// compress/decompress point on both the gossip and reliable paths; a
   /// disabled `CompressionOptions` makes both paths identity.
@@ -243,7 +260,7 @@ where
   /// ping/ack/alive/suspect on the composed unit's public ingress). They are
   /// buffered here and surfaced via [`Self::poll_memberlist_ingress`] for the
   /// codec-owning layer to unwrap and feed back through [`Self::handle_packet`].
-  mem_ingress: std::collections::VecDeque<(SocketAddr, Bytes)>,
+  mem_ingress: std::collections::VecDeque<(A, Bytes)>,
   /// Private queue of pending dial intents. `memberlist::Endpoint::poll_event`
   /// emits `Event::DialRequested { id, peer, deadline }` for an external
   /// driver to dial — but in the composed design `StreamEndpoint` IS the
@@ -295,7 +312,6 @@ where
   /// after a `start_*` / `handle_*` call has anchored `last_now`, so the
   /// wake is always reachable.
   policy_reap_pending: bool,
-  _addr: core::marker::PhantomData<fn(B)>,
 }
 
 // Accessors whose bodies touch only non-generic fields (`compression`,
@@ -303,10 +319,9 @@ where
 // `mem_ingress`) or delegate to `Endpoint`'s own accessor surface
 // (`endpoint()`, `gossip_mtu()`). Re-states only the struct's
 // well-formedness bag — no method-side additions, so the heavier
-// `I: Debug + Display + Send + Sync + 'static` and `B: AddrBridge<A>`
-// constraints carried by the impl blocks below are NOT required to call
-// any of these.
-impl<I, A, B, R> StreamEndpoint<I, A, B, R>
+// `I: Debug + Display + Send + Sync + 'static` constraint carried by the
+// impl blocks below is NOT required to call any of these.
+impl<I, A, R> StreamEndpoint<I, A, R>
 where
   I: memberlist_wire::Id + memberlist_wire::Data + memberlist_wire::CheapClone,
   A: memberlist_wire::Data
@@ -324,6 +339,15 @@ where
   #[inline(always)]
   pub fn endpoint_ref(&self) -> &Endpoint<I, A> {
     &self.ep
+  }
+
+  /// Resolve a peer's membership address to its transport `SocketAddr`,
+  /// using the coordinator's per-peer `peer_to_socket` closure supplied at
+  /// construction. The driver consults this when it holds a peer `A` (e.g.
+  /// the peer carried on an outbound `Transmit`) and needs the
+  /// `SocketAddr` to drive the underlying socket.
+  pub fn resolve_peer_socket(&self, peer: &A) -> SocketAddr {
+    (self.peer_to_socket)(peer)
   }
 
   /// The configured plaintext-byte ceiling for an outbound gossip datagram.
@@ -537,20 +561,17 @@ where
   /// Next raw inbound gossip datagram, if any. The codec-owning layer drains
   /// this, decodes each `Message`, and feeds it back through
   /// [`Self::handle_packet`].
-  pub fn poll_memberlist_ingress(&mut self) -> Option<(SocketAddr, Bytes)> {
+  pub fn poll_memberlist_ingress(&mut self) -> Option<(A, Bytes)> {
     self.mem_ingress.pop_front()
   }
 }
 
-// The full SWIM bag on `I`, but no `B`. Methods that delegate to
-// `Endpoint`'s full-bag surface (`poll_event`, `poll_transmit`,
-// `poll_timeout`, `handle_packet`, `handle_alive`, `handle_suspect`,
-// `requeue_event`, `start_probe`, `leave`), drive `StreamConns` /
-// `StreamBridge` ops (whose impls require the full bag), or run the
-// internal bridge-pump / mint / reap helpers. The address-bridge plug
-// `B` is consulted only by the impl block below — every method here
-// is callable on a `StreamEndpoint` whose `B` carries no extra bound.
-impl<I, A, B, R> StreamEndpoint<I, A, B, R>
+// The full SWIM bag on `I`. Methods that delegate to `Endpoint`'s full-bag
+// surface (`poll_event`, `poll_transmit`, `poll_timeout`, `handle_packet`,
+// `handle_alive`, `handle_suspect`, `requeue_event`, `start_probe`,
+// `leave`), drive `StreamConns` / `StreamBridge` ops (whose impls require
+// the full bag), or run the internal bridge-pump / mint / reap helpers.
+impl<I, A, R> StreamEndpoint<I, A, R>
 where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -571,12 +592,32 @@ where
     + 'static,
   R: StreamTransport,
 {
-  /// Build the coordinator from a membership [`Endpoint`] and the record
-  /// layer's options bundle (`R::Options`).
-  pub fn new(ep: Endpoint<I, A>, cfg: R::Options) -> Self {
+  /// Build the coordinator from a membership [`Endpoint`], the record
+  /// layer's options bundle (`R::Options`), a per-peer SNI provider, and a
+  /// per-peer `SocketAddr` resolver.
+  ///
+  /// The `sni_provider` closure maps a peer membership address to the TLS
+  /// server-name the record layer should verify against. Plain-TCP drivers
+  /// supply `Box::new(|_| None)`; TLS drivers supply a closure that returns
+  /// the expected server name (e.g. `Box::new(|_| Some("localhost".to_string()))`
+  /// for localhost-SAN test certs).
+  ///
+  /// The `peer_to_socket` closure resolves a peer membership address to the
+  /// transport `SocketAddr` the driver writes bytes on. Drivers where
+  /// `A = SocketAddr` pass `Box::new(|addr: &SocketAddr| *addr)`; drivers
+  /// with a non-`SocketAddr` membership address supply a deployment-aware
+  /// resolver.
+  pub fn new(
+    ep: Endpoint<I, A>,
+    cfg: R::Options,
+    sni_provider: Box<dyn Fn(&A) -> Option<String> + Send + Sync>,
+    peer_to_socket: Box<dyn Fn(&A) -> SocketAddr + Send + Sync>,
+  ) -> Self {
     Self {
       ep,
       cfg,
+      sni_provider,
+      peer_to_socket,
       compression: memberlist_wire::CompressionOptions::new(),
       encryption: memberlist_wire::EncryptionOptions::new(),
       conns: StreamConns::new(),
@@ -589,7 +630,6 @@ where
       pending_outbound_kinds: HashMap::new(),
       last_now: None,
       policy_reap_pending: false,
-      _addr: core::marker::PhantomData,
     }
   }
 
@@ -601,6 +641,16 @@ where
     self.conns.len()
   }
 
+  /// Number of entries currently staged in `pending_outbound_kinds` (the
+  /// `StreamId → ExchangeKind` map populated by the `start_*` wrappers and
+  /// drained either at `ExchangeMeta` allocation or on the pre-`ExchangeMeta`
+  /// failure paths inside `service_dials`). Test-only, used to prove the
+  /// failure paths do not leak entries.
+  #[cfg(all(test, feature = "tls"))]
+  pub(crate) fn pending_outbound_kinds_len(&self) -> usize {
+    self.pending_outbound_kinds.len()
+  }
+
   /// Build the coordinator with an explicit cross-transport compression
   /// configuration. [`Self::new`] is `with_compression` with compression
   /// disabled.
@@ -608,9 +658,11 @@ where
   pub fn with_compression(
     ep: Endpoint<I, A>,
     cfg: R::Options,
+    sni_provider: Box<dyn Fn(&A) -> Option<String> + Send + Sync>,
+    peer_to_socket: Box<dyn Fn(&A) -> SocketAddr + Send + Sync>,
     compression: memberlist_wire::CompressionOptions,
   ) -> Self {
-    let mut this = Self::new(ep, cfg);
+    let mut this = Self::new(ep, cfg, sni_provider, peer_to_socket);
     this.compression = compression;
     this
   }
@@ -829,12 +881,12 @@ where
   /// bridge-failure cascade, no `out_transmit` / `mem_ingress` purge,
   /// no `policy_reap_pending` wake.
   pub fn set_compression_options(&mut self, compression: memberlist_wire::CompressionOptions) {
-    self.compression = compression.clone();
+    self.compression = compression;
     for id in self.conns.ids() {
       let Some(bridge) = self.conns.get_mut(id) else {
         continue;
       };
-      bridge.set_compression(compression.clone());
+      bridge.set_compression(compression);
     }
   }
 
@@ -896,7 +948,8 @@ where
   pub fn requeue_event(&mut self, ev: Event<I, A>, now: Instant) {
     self.last_now = Some(now);
     match ev {
-      Event::DialRequested { id, peer, deadline } => {
+      Event::DialRequested(dial) => {
+        let (id, peer, deadline) = dial.into_parts();
         self.dial_pending.push_back(PendingDial {
           id,
           peer,
@@ -924,7 +977,8 @@ where
   pub fn poll_event(&mut self) -> Option<Event<I, A>> {
     loop {
       match self.ep.poll_event()? {
-        Event::DialRequested { id, peer, deadline } => {
+        Event::DialRequested(dial) => {
+          let (id, peer, deadline) = dial.into_parts();
           self.dial_pending.push_back(PendingDial {
             id,
             peer,
@@ -1218,7 +1272,7 @@ where
         .ep
         .emit_event(Event::ExchangeCompleted(ExchangeCompleted::new(
           id,
-          meta.peer_socket,
+          memberlist_wire::CheapClone::cheap_clone(&meta.peer),
           outcome,
           kind,
         )));
@@ -1429,7 +1483,8 @@ where
     let mut others: Vec<Event<I, A>> = Vec::new();
     while let Some(ev) = self.ep.poll_event() {
       match ev {
-        Event::DialRequested { id, peer, deadline } => {
+        Event::DialRequested(dial) => {
+          let (id, peer, deadline) = dial.into_parts();
           self.dial_pending.push_back(PendingDial {
             id,
             peer,
@@ -1457,13 +1512,11 @@ where
   }
 }
 
-// The full SWIM bag plus `B: AddrBridge<A>`. Methods that resolve a peer
-// address to a transport `SocketAddr` via `B::to_socket`, derive a per-dial
-// record-layer context via `R::dial_context::<A, B>`, or transitively reach
+// The full SWIM bag. Methods that resolve a peer address to a transport
+// `SocketAddr` via the stored `peer_to_socket` closure, derive a per-dial
+// record-layer context via `R::dial_context::<A>`, or transitively reach
 // either through the coordinator tick (`run_tick` → `service_dials`).
-// `B` is consulted only here; the impl blocks above never resolve a wire
-// address.
-impl<I, A, B, R> StreamEndpoint<I, A, B, R>
+impl<I, A, R> StreamEndpoint<I, A, R>
 where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -1482,7 +1535,6 @@ where
     + Send
     + Sync
     + 'static,
-  B: AddrBridge<A>,
   R: StreamTransport,
 {
   /// Inbound gossip datagram from the UDP socket.
@@ -1499,10 +1551,9 @@ where
   /// carried as gossip (reliable exchanges ride separate transport connections).
   pub fn handle_gossip(&mut self, from: A, datagram: &[u8], now: Instant) {
     self.last_now = Some(now);
-    let socket = B::to_socket(&from);
     self
       .mem_ingress
-      .push_back((socket, Bytes::copy_from_slice(datagram)));
+      .push_back((from, Bytes::copy_from_slice(datagram)));
   }
 
   /// Inbound bytes for one exchange's transport connection.
@@ -1562,7 +1613,11 @@ where
   pub fn accept_connection(&mut self, from: A, now: Instant) -> ExchangeId {
     self.last_now = Some(now);
     let id = self.conns.allocate();
-    let peer_socket = B::to_socket(&from);
+    // SocketAddr conversion needed: `peer_socket` tags entries on
+    // `out_transmit` (driver-facing SocketAddr-typed queue) so the driver
+    // writes bytes on the right transport connection.
+    let peer_socket = (self.peer_to_socket)(&from);
+    let peer = memberlist_wire::CheapClone::cheap_clone(&from);
     match R::acceptor(&self.cfg) {
       Ok(records) => {
         let bridge = StreamBridge::new(
@@ -1577,6 +1632,7 @@ where
           id,
           ExchangeMeta {
             peer_socket,
+            peer,
             mint: Some(PendingMint::Inbound(from)),
             fin_emitted: false,
             // Inbound exchange — the initiator-side wrapper that picks
@@ -1746,6 +1802,17 @@ where
         deadline,
         attempted: _,
       } = entry;
+      // Take the kind stashed by the originating `start_*` wrapper up front.
+      // Every pre-`ExchangeMeta` failure path below — expired deadline, TLS
+      // SNI rejection at `R::dial_context`, dialer construction error —
+      // calls `dial_failed` and `continue`s without re-inserting, so the
+      // map is implicitly cleaned up on every failure exit. Only the
+      // success path past `ExchangeMeta` allocation re-inserts (so a later
+      // `reap_bridge` can carry the exchange's kind on
+      // `Event::ExchangeCompleted`). `None` here indicates a `DialRequested`
+      // emitted outside this coordinator's start path — kept defensive
+      // (reap then does not emit a kind-specific event for this exchange).
+      let exchange_kind = self.pending_outbound_kinds.remove(&id);
       // Retire the intent without opening a connection if its own deadline
       // has already elapsed (mirrors the sibling coordinators'
       // expired-intent gate).
@@ -1757,12 +1824,16 @@ where
         );
         continue;
       }
-      let peer_socket = B::to_socket(&peer);
+      // SocketAddr conversion needed: `peer_socket` tags entries on
+      // `out_transmit` and the `StreamAction::Connect(ConnectInfo)` payload
+      // (both driver-facing SocketAddr-typed surfaces).
+      let peer_socket = (self.peer_to_socket)(&peer);
+      let peer_a = memberlist_wire::CheapClone::cheap_clone(&peer);
       // Resolve the per-dial record-layer context (e.g. the TLS verification
-      // identity). The record layer derives it from `B::server_name` via
-      // `R::dial_context`; an `Err` is the soft-fail-via-dial_failed path —
+      // identity). An `Err` is the soft-fail-via-dial_failed path —
       // retire the intent for this one peer and move on.
-      let ctx = match R::dial_context::<A, B>(&peer) {
+      let sni_owned = (self.sni_provider)(&peer);
+      let ctx = match R::dial_context::<A>(&peer, sni_owned.as_deref()) {
         Ok(c) => c,
         Err(msg) => {
           self
@@ -1796,16 +1867,11 @@ where
         self.ep.max_stream_frame_size(),
       );
       self.conns.insert(exchange, bridge);
-      // Drain the kind the originating `start_*` wrapper stashed.
-      // `None` here would indicate a `DialRequested` emitted by the
-      // inner endpoint outside the streams coordinator's start path —
-      // not currently reachable but kept defensive (`reap_bridge` then
-      // does not emit a kind-specific event for this exchange).
-      let exchange_kind = self.pending_outbound_kinds.remove(&id);
       self.exchanges.insert(
         exchange,
         ExchangeMeta {
           peer_socket,
+          peer: peer_a,
           mint: Some(PendingMint::Outbound(id)),
           fin_emitted: false,
           kind: exchange_kind,

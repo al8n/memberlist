@@ -28,7 +28,7 @@ pub const MAX_LABEL_LEN: usize = u8::MAX as usize - 2;
 /// it (the encoder writes a header only when `label_size > 0`; the decoder
 /// accepts unlabeled input when the expected label is empty). Returns the
 /// non-empty label bytes, or `None` for no/empty label.
-fn effective_label(label: &Option<Bytes>) -> Option<&[u8]> {
+fn effective_label(label: Option<&Bytes>) -> Option<&[u8]> {
   match label {
     Some(l) if !l.is_empty() => Some(l.as_ref()),
     _ => None,
@@ -85,23 +85,66 @@ pub enum CodecError {
 /// Outbound encoding options. Zero value = plain frame, no label.
 #[derive(Clone, Default)]
 pub struct EncodeOptions {
-  /// Optional label to prepend (empty/None = no label frame).
-  pub label: Option<Bytes>,
-  /// Max total encoded size; 0 = default (65507, the practical UDP max).
-  ///
-  /// This field is an advisory hint for callers. Oversized datagrams are
-  /// not fragmented or rejected here; the driver layer is responsible for
-  /// transport-level limits. Single membership messages are well under
-  /// 64 KiB in practice.
-  pub max_payload_size: usize,
+  label: Option<Bytes>,
+  max_payload_size: usize,
+}
+
+impl EncodeOptions {
+  /// Construct encoding options with the given optional label and the
+  /// default `max_payload_size = 0` (= 65507).
+  pub fn new(label: Option<Bytes>) -> Self {
+    Self {
+      label,
+      max_payload_size: 0,
+    }
+  }
+
+  /// Replace the label (empty/None = no label frame).
+  pub fn with_label(mut self, label: Option<Bytes>) -> Self {
+    self.label = label;
+    self
+  }
+
+  /// Replace the `max_payload_size` advisory cap (0 = default 65507).
+  pub fn with_max_payload_size(mut self, max_payload_size: usize) -> Self {
+    self.max_payload_size = max_payload_size;
+    self
+  }
+
+  /// The optional label to prepend (empty/None = no label frame).
+  #[inline(always)]
+  pub fn label_ref(&self) -> Option<&Bytes> {
+    self.label.as_ref()
+  }
+
+  /// Advisory max total encoded size; 0 = default (65507, the practical
+  /// UDP max). Oversized datagrams are not fragmented or rejected here;
+  /// the driver layer is responsible for transport-level limits.
+  #[inline(always)]
+  pub const fn max_payload_size(&self) -> usize {
+    self.max_payload_size
+  }
 }
 
 /// Inbound decoding options.
 #[derive(Clone, Default)]
 pub struct DecodeOptions {
-  /// Expected label. If `Some`, a mismatching or missing label is an error;
-  /// if `None`, any present label is stripped and ignored.
-  pub label: Option<Bytes>,
+  label: Option<Bytes>,
+}
+
+impl DecodeOptions {
+  /// Construct decoding options with the given expected label. If `Some`,
+  /// a mismatching or missing label is an error; if `None`, any present
+  /// label is stripped and ignored.
+  pub fn new(label: Option<Bytes>) -> Self {
+    Self { label }
+  }
+
+  /// The expected label.
+  #[inline(always)]
+  pub fn label_ref(&self) -> Option<&Bytes> {
+    self.label.as_ref()
+  }
 }
 
 /// Apply the optional outer label wrapper to an already-encoded inner
@@ -114,7 +157,7 @@ pub struct DecodeOptions {
 /// Frozen `memberlist-proto::Label` is a validated UTF-8 type; never
 /// emit a non-UTF-8 label a faithful decoder would reject.
 fn wrap_label(inner: Vec<u8>, opts: &EncodeOptions) -> Result<Bytes, CodecError> {
-  let out = if let Some(label) = effective_label(&opts.label) {
+  let out = if let Some(label) = effective_label(opts.label_ref()) {
     let label_len = label.len();
     if label_len > MAX_LABEL_LEN {
       return Err(CodecError::LabelTooLong(label_len));
@@ -204,7 +247,7 @@ pub fn decode_incoming(raw: Bytes, opts: &DecodeOptions) -> Result<Bytes, CodecE
     if core::str::from_utf8(label).is_err() {
       return Err(CodecError::InvalidLabel("inbound label is not valid UTF-8"));
     }
-    match effective_label(&opts.label) {
+    match effective_label(opts.label_ref()) {
       Some(expected) => {
         if expected != label {
           return Err(CodecError::LabelMismatch);
@@ -222,7 +265,7 @@ pub fn decode_incoming(raw: Bytes, opts: &DecodeOptions) -> Result<Bytes, CodecE
     }
     Ok(inner)
   } else {
-    if effective_label(&opts.label).is_some() {
+    if effective_label(opts.label_ref()).is_some() {
       return Err(CodecError::LabelMismatch);
     }
     if raw.is_empty() {
@@ -247,7 +290,7 @@ where
   A: Data,
 {
   let (consumed, any) = framing::decode_message(&plain).map_err(|e| match e {
-    framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available, f.required),
+    framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available(), f.required()),
     other => CodecError::Frame(other.to_string()),
   })?;
   if consumed != plain.len() {
@@ -280,13 +323,13 @@ where
 {
   if plain.first() == Some(&(framing::MessageTag::Compound as u8)) {
     let parts = framing::decode_compound(&plain).map_err(|e| match e {
-      framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available, f.required),
+      framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available(), f.required()),
       other => CodecError::Frame(other.to_string()),
     })?;
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
       let (consumed, any) = framing::decode_message(part).map_err(|e| match e {
-        framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available, f.required),
+        framing::FrameError::Incomplete(f) => CodecError::Incomplete(f.available(), f.required()),
         other => CodecError::Frame(other.to_string()),
       })?;
       if consumed != part.len() {
@@ -352,17 +395,14 @@ mod tests {
   #[test]
   fn compound_roundtrip_with_label() {
     let label = Bytes::from_static(b"cluster-x");
-    let opts = EncodeOptions {
-      label: Some(label.clone()),
-      ..Default::default()
-    };
+    let opts = EncodeOptions::new(Some(label.clone()));
     let batch = vec![ping_msg(), ack_msg()];
     let encoded = encode_outgoing_compound(&batch, &opts).unwrap();
     assert_eq!(
       encoded[0], 12,
       "compound datagram is label-wrapped as a whole"
     );
-    let dec_opts = DecodeOptions { label: Some(label) };
+    let dec_opts = DecodeOptions::new(Some(label));
     let inner = decode_incoming(encoded, &dec_opts).unwrap();
     let msgs: Vec<Message<I, A>> = parse_messages(inner).unwrap();
     assert_eq!(msgs.len(), 2);
@@ -408,10 +448,7 @@ mod tests {
   #[test]
   fn roundtrip_with_label() {
     let label = Bytes::from_static(b"cluster-x");
-    let opts = EncodeOptions {
-      label: Some(label.clone()),
-      ..Default::default()
-    };
+    let opts = EncodeOptions::new(Some(label.clone()));
     let msg = ack_msg();
     let encoded = encode_outgoing(&msg, &opts).unwrap();
 
@@ -420,7 +457,7 @@ mod tests {
     assert_eq!(encoded[1], 9, "label length byte");
     assert_eq!(&encoded[2..11], b"cluster-x");
 
-    let dec_opts = DecodeOptions { label: Some(label) };
+    let dec_opts = DecodeOptions::new(Some(label));
     let inner = decode_incoming(encoded, &dec_opts).unwrap();
     let decoded: Message<I, A> = parse_message(inner).unwrap();
     match decoded {
@@ -432,14 +469,9 @@ mod tests {
   #[test]
   fn label_mismatch_errors() {
     let msg = ack_msg();
-    let opts = EncodeOptions {
-      label: Some(Bytes::from_static(b"a")),
-      ..Default::default()
-    };
+    let opts = EncodeOptions::new(Some(Bytes::from_static(b"a")));
     let encoded = encode_outgoing(&msg, &opts).unwrap();
-    let dec_opts = DecodeOptions {
-      label: Some(Bytes::from_static(b"b")),
-    };
+    let dec_opts = DecodeOptions::new(Some(Bytes::from_static(b"b")));
     let result = decode_incoming(encoded, &dec_opts);
     assert!(matches!(result, Err(CodecError::LabelMismatch)));
   }
@@ -448,9 +480,7 @@ mod tests {
   fn missing_expected_label_errors() {
     let msg = ack_msg();
     let encoded = encode_outgoing(&msg, &EncodeOptions::default()).unwrap();
-    let dec_opts = DecodeOptions {
-      label: Some(Bytes::from_static(b"x")),
-    };
+    let dec_opts = DecodeOptions::new(Some(Bytes::from_static(b"x")));
     let result = decode_incoming(encoded, &dec_opts);
     assert!(matches!(result, Err(CodecError::LabelMismatch)));
   }
@@ -462,14 +492,11 @@ mod tests {
     // REJECTED (frozen memberlist-proto `double_label()`), not silently
     // unwrapped — otherwise the node accepts another cluster's traffic.
     let msg = ack_msg();
-    let opts = EncodeOptions {
-      label: Some(Bytes::from_static(b"other-cluster")),
-      ..Default::default()
-    };
+    let opts = EncodeOptions::new(Some(Bytes::from_static(b"other-cluster")));
     let encoded = encode_outgoing(&msg, &opts).unwrap();
     assert_eq!(encoded[0], 12, "precondition: frame is labeled");
 
-    let result = decode_incoming(encoded, &DecodeOptions { label: None });
+    let result = decode_incoming(encoded, &DecodeOptions::new(None));
     assert!(
       matches!(result, Err(CodecError::DoubleLabel)),
       "labeled frame + no expected label must be DoubleLabel, got {result:?}"
@@ -479,10 +506,7 @@ mod tests {
   #[test]
   fn label_too_long_errors() {
     let long_label = Bytes::from(vec![b'x'; 256]);
-    let opts = EncodeOptions {
-      label: Some(long_label),
-      ..Default::default()
-    };
+    let opts = EncodeOptions::new(Some(long_label));
     let msg = ack_msg();
     let result = encode_outgoing(&msg, &opts);
     assert!(matches!(result, Err(CodecError::LabelTooLong(256))));
@@ -495,18 +519,12 @@ mod tests {
     let msg = ack_msg();
     let ok = encode_outgoing(
       &msg,
-      &EncodeOptions {
-        label: Some(Bytes::from(vec![b'x'; 253])),
-        ..Default::default()
-      },
+      &EncodeOptions::new(Some(Bytes::from(vec![b'x'; 253]))),
     );
     assert!(ok.is_ok(), "253-byte label must be accepted");
     let too_long = encode_outgoing(
       &msg,
-      &EncodeOptions {
-        label: Some(Bytes::from(vec![b'x'; 254])),
-        ..Default::default()
-      },
+      &EncodeOptions::new(Some(Bytes::from(vec![b'x'; 254]))),
     );
     assert!(
       matches!(too_long, Err(CodecError::LabelTooLong(254))),
@@ -521,10 +539,7 @@ mod tests {
     // an ordinary unlabeled frame on decode (frozen memberlist-proto
     // semantics: header only when label_size > 0).
     let msg = ack_msg();
-    let empty = EncodeOptions {
-      label: Some(Bytes::new()),
-      ..Default::default()
-    };
+    let empty = EncodeOptions::new(Some(Bytes::new()));
     let enc_empty = encode_outgoing(&msg, &empty).unwrap();
     let enc_none = encode_outgoing(&msg, &EncodeOptions::default()).unwrap();
     assert_eq!(
@@ -534,13 +549,8 @@ mod tests {
     assert_ne!(enc_empty[0], LABELED_TAG, "no [12] header for empty label");
 
     // An empty expected label accepts an unlabeled frame.
-    let inner = decode_incoming(
-      enc_empty.clone(),
-      &DecodeOptions {
-        label: Some(Bytes::new()),
-      },
-    )
-    .expect("empty expected label must accept unlabeled input");
+    let inner = decode_incoming(enc_empty.clone(), &DecodeOptions::new(Some(Bytes::new())))
+      .expect("empty expected label must accept unlabeled input");
     let decoded: Message<I, A> = parse_message(inner).unwrap();
     assert!(matches!(decoded, Message::Ack(_)));
   }
@@ -562,10 +572,7 @@ mod tests {
   fn non_utf8_label_is_rejected_on_encode() {
     // frozen memberlist-proto::Label is validated UTF-8; never
     // emit `[12][len][0xff..]` a faithful decoder would reject.
-    let opts = EncodeOptions {
-      label: Some(Bytes::from_static(&[0xff, 0xfe, 0x00])),
-      ..Default::default()
-    };
+    let opts = EncodeOptions::new(Some(Bytes::from_static(&[0xff, 0xfe, 0x00])));
     let result = encode_outgoing(&ack_msg(), &opts);
     assert!(
       matches!(result, Err(CodecError::InvalidLabel(_))),
@@ -581,9 +588,8 @@ mod tests {
     let mut framed = vec![LABELED_TAG, 254u8];
     framed.extend_from_slice(&vec![b'x'; 254]);
     framed.extend_from_slice(&encode_outgoing(&ack_msg(), &EncodeOptions::default()).unwrap());
-    let dec = DecodeOptions {
-      label: Some(Bytes::from(vec![b'x'; 254])), // would byte-match
-    };
+    // Would byte-match the inbound label.
+    let dec = DecodeOptions::new(Some(Bytes::from(vec![b'x'; 254])));
     let result = decode_incoming(Bytes::from(framed), &dec);
     assert!(
       matches!(result, Err(CodecError::LabelTooLong(254))),
@@ -597,9 +603,8 @@ mod tests {
     // closing the "accepted if DecodeOptions.label matches" footgun.
     let mut framed = vec![LABELED_TAG, 2u8, 0xff, 0xfe];
     framed.extend_from_slice(&encode_outgoing(&ack_msg(), &EncodeOptions::default()).unwrap());
-    let dec = DecodeOptions {
-      label: Some(Bytes::from_static(&[0xff, 0xfe])), // byte-matches the inbound
-    };
+    // Byte-matches the inbound label.
+    let dec = DecodeOptions::new(Some(Bytes::from_static(&[0xff, 0xfe])));
     let result = decode_incoming(Bytes::from(framed), &dec);
     assert!(
       matches!(result, Err(CodecError::InvalidLabel(_))),
@@ -651,9 +656,7 @@ mod tests {
     // and the empty-inner-frame path is exercised (the point of this test).
     let result = decode_incoming(
       Bytes::from_static(&[12, 1, b'x']),
-      &DecodeOptions {
-        label: Some(Bytes::from_static(b"x")),
-      },
+      &DecodeOptions::new(Some(Bytes::from_static(b"x"))),
     );
     assert!(matches!(result, Err(CodecError::Truncated(_))));
   }

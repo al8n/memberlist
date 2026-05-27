@@ -55,11 +55,9 @@ pub struct Suspicion<I> {
 /// Result of `Suspicion::confirm`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confirmation {
-  /// The confirmation was new; the deadline was advanced to `new_deadline`.
-  Accepted {
-    /// The freshly-pulled-in deadline.
-    new_deadline: Instant,
-  },
+  /// The confirmation was new; the deadline was advanced. Carries the
+  /// freshly-pulled-in deadline.
+  Accepted(Instant),
   /// The confirmation was a duplicate, the `k` threshold was already
   /// reached, or the source was the original suspector. Deadline unchanged.
   Ignored,
@@ -104,9 +102,7 @@ impl<I: Eq + std::hash::Hash + CheapClone> Suspicion<I> {
     let elapsed = now.saturating_duration_since(self.start);
     let remaining = remaining_suspicion_time(self.n, self.k, elapsed, self.min, self.max);
     self.deadline = now + remaining;
-    Confirmation::Accepted {
-      new_deadline: self.deadline,
-    }
+    Confirmation::Accepted(self.deadline)
   }
 
   /// The current absolute deadline at which this suspicion times out.
@@ -258,7 +254,7 @@ mod tests {
       now,
     );
     let r1 = s.confirm(&id("bob"), now);
-    assert!(matches!(r1, Confirmation::Accepted { .. }));
+    assert!(matches!(r1, Confirmation::Accepted(_)));
     assert_eq!(s.confirmations(), 1);
 
     let r2 = s.confirm(&id("bob"), now);
@@ -278,10 +274,7 @@ mod tests {
     );
     for peer in &["bob", "carol", "dave"] {
       let r = s.confirm(&id(peer), now);
-      assert!(
-        matches!(r, Confirmation::Accepted { .. }),
-        "{peer} rejected"
-      );
+      assert!(matches!(r, Confirmation::Accepted(_)), "{peer} rejected");
     }
     assert_eq!(s.confirmations(), 3);
 
@@ -303,7 +296,7 @@ mod tests {
     );
     let original = s.deadline();
     let r = s.confirm(&id("bob"), now);
-    let Confirmation::Accepted { new_deadline } = r else {
+    let Confirmation::Accepted(new_deadline) = r else {
       panic!("expected Accepted, got {r:?}");
     };
     assert!(new_deadline < original, "deadline should move earlier");

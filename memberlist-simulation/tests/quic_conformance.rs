@@ -702,8 +702,8 @@ fn one_way_user_message_over_quic_delivered_and_no_bridge_leak() {
 /// on the terminal guard — the FSM cannot self-enforce its deadline. The
 /// ONLY remaining deadline is the bridge's snapshotted flush deadline (=
 /// accept-time + `stream_timeout` = 10s), strictly earlier than quinn's 20s
-/// `max_idle_timeout`, so the idle path cannot be what reaps it. On `now
-/// >= bridge.deadline` the bridge RESETs its send half + STOPs its recv
+/// `max_idle_timeout`, so the idle path cannot be what reaps it. Once
+/// `now >= bridge.deadline` the bridge RESETs its send half + STOPs its recv
 /// half + goes `fatal`, D1 reaps it, and `live_bridge_count(b)` returns to
 /// 0 — bounded, self-healing.
 ///
@@ -2023,17 +2023,16 @@ fn start_push_pull_self_sufficient_under_strict_poll_driving() {
   );
 }
 
-// ── Per-peer rustls `server_name` plumbing via `AddrBridge` ──────────────────
+// ── Cluster-uniform rustls `server_name` plumbing via `QuicConfig` ──────────
 //
 // `QuicEndpoint` MUST source the rustls/QUIC verification identity for a
-// peer from `AddrBridge::server_name(&peer)`, NOT a hardcoded string. The
+// peer from `QuicConfig::server_name()`, NOT a hardcoded string. The
 // test below proves the plumbing end-to-end: each side's client cert
 // verifier is a strict `ServerCertVerifier` that asserts the
-// `ServerName` it receives matches the peer's per-peer name; the
-// per-peer `AddrBridge` impls map the wire `SocketAddr` to those names;
-// each side's server cert SAN is its own per-peer name. A successful
-// push/pull exchange between A and B is then proof that the bridge's
-// name reached rustls.
+// `ServerName` it receives matches the configured peer name; each side's
+// `QuicConfig` carries that name; each side's server cert SAN matches
+// what the peer's verifier expects. A successful push/pull exchange
+// between A and B is then proof that the configured name reached rustls.
 //
 // Reverting `conn.rs:get_or_dial` to call `quinn.connect(..., peer,
 // "localhost")` is the negative control: the CapturingVerifier on A
@@ -2047,9 +2046,7 @@ mod per_peer_server_name {
     time::{Duration, Instant},
   };
 
-  use memberlist_machine::{
-    AddrBridge, Endpoint, EndpointConfig, PushPullKind, QuicConfig, QuicEndpoint,
-  };
+  use memberlist_machine::{Endpoint, EndpointConfig, PushPullKind, QuicConfig, QuicEndpoint};
   use memberlist_wire::typed::State;
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
   use smol_str::SmolStr;
@@ -2063,7 +2060,7 @@ mod per_peer_server_name {
   ///
   /// The certificate bytes themselves are NOT checked — this is a
   /// plumbing test, not a TLS conformance test; the assertion is that
-  /// the rustls verifier saw the name `AddrBridge::server_name` returned.
+  /// the rustls verifier saw the name `QuicConfig::server_name()` returned.
   #[derive(Debug)]
   struct CapturingVerifier {
     expected: ServerName<'static>,
@@ -2168,55 +2165,16 @@ mod per_peer_server_name {
       quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
     ));
     let endpoint = memberlist_simulation::quic_net::sim_endpoint_config(&[0x5au8; 32]);
-    let cfg = QuicConfig::new(endpoint, server, client, transport);
+    let cfg = QuicConfig::new(endpoint, server, client, transport, expected_peer_name);
     (cfg, last_seen)
   }
 
-  // Per-peer bridges — one type per node so each can hardcode the
-  // expected peer name as a `&'static str`. The bridge marker is a
-  // `PhantomData<fn(B)>` on `QuicEndpoint`, so `B::server_name` is a
-  // static fn — keying on the marker type is the natural way to thread
-  // per-node policy through the trait.
-
-  // A's view: B's wire SocketAddr maps to B's name.
-  struct BridgeForA;
-  impl AddrBridge<SocketAddr> for BridgeForA {
-    type ServerName = str;
-
-    fn to_socket(addr: &SocketAddr) -> SocketAddr {
-      *addr
-    }
-    fn from_socket(socket: SocketAddr) -> SocketAddr {
-      socket
-    }
-    fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
-      // A only dials B in this test; map every peer to B's name.
-      Some("node-b.example.com")
-    }
-  }
-
-  // B's view: A's wire SocketAddr maps to A's name.
-  struct BridgeForB;
-  impl AddrBridge<SocketAddr> for BridgeForB {
-    type ServerName = str;
-
-    fn to_socket(addr: &SocketAddr) -> SocketAddr {
-      *addr
-    }
-    fn from_socket(socket: SocketAddr) -> SocketAddr {
-      socket
-    }
-    fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
-      Some("node-a.example.com")
-    }
-  }
-
-  fn build_endpoint<B: AddrBridge<SocketAddr>>(
+  fn build_endpoint(
     id: &str,
     addr: SocketAddr,
     cfg: QuicConfig,
     now: Instant,
-  ) -> QuicEndpoint<SmolStr, SocketAddr, B> {
+  ) -> QuicEndpoint<SmolStr> {
     let ep_cfg = EndpointConfig::new(SmolStr::new(id), addr)
       .with_gossip_interval(Duration::from_millis(200))
       .with_push_pull_interval(Duration::from_secs(30))
@@ -2229,19 +2187,19 @@ mod per_peer_server_name {
     ep.start_scheduling(now);
     let mut seed = [0u8; 32];
     seed[..2].copy_from_slice(&addr.port().to_le_bytes());
-    QuicEndpoint::<SmolStr, SocketAddr, B>::with_quinn_rng_seed(ep, cfg, Some(seed))
+    QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, cfg, Some(seed))
   }
 
-  /// Per-peer rustls `server_name` plumbing via `AddrBridge`.
+  /// Cluster-uniform rustls `server_name` plumbing via `QuicConfig`.
   ///
   /// Two nodes A and B, each with a server cert whose SAN is its own
   /// per-peer DNS name. Each client side uses a strict
   /// `ServerCertVerifier` that requires the `ServerName` it receives to
-  /// match the peer's per-peer name (a non-match returns
-  /// `CertificateError::NotValidForName`). The per-peer `AddrBridge`
-  /// impls return the expected peer name from `server_name(&peer)`.
-  /// A successful push/pull join (A and B converge Alive) proves the
-  /// bridge's per-peer name travelled from `service_dials` through
+  /// match the configured peer name (a non-match returns
+  /// `CertificateError::NotValidForName`). Each side's `QuicConfig`
+  /// carries the expected peer name via the `server_name` constructor
+  /// argument. A successful push/pull join (A and B converge Alive)
+  /// proves the configured name travelled from `service_dials` through
   /// `ConnTable::get_or_dial` into `quinn_proto::Endpoint::connect` and
   /// out the other side as the `ServerName` the rustls verifier
   /// observed.
@@ -2254,7 +2212,7 @@ mod per_peer_server_name {
   /// `c.sees_alive(...)` / `last_seen == expected` assertions below
   /// fail.
   #[test]
-  fn dial_uses_per_peer_server_name_from_addr_bridge() {
+  fn dial_uses_configured_server_name_from_quic_config() {
     let a_addr: SocketAddr = "127.0.0.1:7301".parse().unwrap();
     let b_addr: SocketAddr = "127.0.0.1:7302".parse().unwrap();
     let now = Instant::now();
@@ -2262,8 +2220,8 @@ mod per_peer_server_name {
       config_with_strict_verifier("node-a.example.com", "node-b.example.com");
     let (cfg_b, _seen_by_b) =
       config_with_strict_verifier("node-b.example.com", "node-a.example.com");
-    let mut a = build_endpoint::<BridgeForA>("a", a_addr, cfg_a, now);
-    let mut b = build_endpoint::<BridgeForB>("b", b_addr, cfg_b, now);
+    let mut a = build_endpoint("a", a_addr, cfg_a, now);
+    let mut b = build_endpoint("b", b_addr, cfg_b, now);
 
     // A initiates a join push/pull to B via the high-level wrapper so
     // `service_dials` fires in-band — that is the path under test.
@@ -2389,7 +2347,7 @@ mod per_peer_server_name {
     let expected = ServerName::try_from("node-b.example.com").unwrap();
     assert_eq!(
       observed, expected,
-      "AddrBridge::server_name MUST plumb through to rustls — A's \
+      "QuicConfig::server_name MUST plumb through to rustls — A's \
        client verifier observed `{observed:?}`, expected `{expected:?}`. \
        Reverting `get_or_dial` to hardcode `\"localhost\"` would have \
        this asserting `localhost` against `node-b.example.com`."
@@ -2414,15 +2372,13 @@ mod per_peer_server_name {
     assert!(
       a_alive_b,
       "A must see B Alive — the rustls verifier on A's side accepted \
-       the per-peer SAN `node-b.example.com` returned by \
-       `BridgeForA::server_name`, so the handshake completed and the \
-       join push/pull converged"
+       the SAN `node-b.example.com` configured on A's QuicConfig, so \
+       the handshake completed and the join push/pull converged"
     );
     assert!(
       b_alive_a,
       "B must see A Alive — symmetric: B's verifier accepted the \
-       per-peer SAN `node-a.example.com` returned by \
-       `BridgeForB::server_name`"
+       SAN `node-a.example.com` configured on B's QuicConfig"
     );
   }
 }
@@ -2449,9 +2405,7 @@ mod mtls_cluster_auth {
     time::{Duration, Instant},
   };
 
-  use memberlist_machine::{
-    AddrBridge, Endpoint, EndpointConfig, PushPullKind, QuicConfig, QuicEndpoint,
-  };
+  use memberlist_machine::{Endpoint, EndpointConfig, PushPullKind, QuicConfig, QuicEndpoint};
   use memberlist_wire::typed::State;
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
   use smol_str::SmolStr;
@@ -2537,21 +2491,6 @@ mod mtls_cluster_auth {
     }
   }
 
-  struct IdBridge;
-  impl AddrBridge<SocketAddr> for IdBridge {
-    type ServerName = str;
-
-    fn to_socket(addr: &SocketAddr) -> SocketAddr {
-      *addr
-    }
-    fn from_socket(socket: SocketAddr) -> SocketAddr {
-      socket
-    }
-    fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
-      Some("localhost")
-    }
-  }
-
   fn cert() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
     let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let chain = vec![CertificateDer::from(ck.cert.der().to_vec())];
@@ -2590,7 +2529,7 @@ mod mtls_cluster_auth {
       quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
     ));
     let endpoint = memberlist_simulation::quic_net::sim_endpoint_config(&[0x5au8; 32]);
-    QuicConfig::new(endpoint, server, client, transport)
+    QuicConfig::new(endpoint, server, client, transport, "localhost")
   }
 
   /// Build B's config: server accepts any client; client has no cert
@@ -2623,7 +2562,7 @@ mod mtls_cluster_auth {
       quinn_proto::IdleTimeout::try_from(Duration::from_secs(20)).unwrap(),
     ));
     let endpoint = memberlist_simulation::quic_net::sim_endpoint_config(&[0xa5u8; 32]);
-    QuicConfig::new(endpoint, server, client, transport)
+    QuicConfig::new(endpoint, server, client, transport, "localhost")
   }
 
   fn build_endpoint(
@@ -2631,7 +2570,7 @@ mod mtls_cluster_auth {
     addr: SocketAddr,
     cfg: QuicConfig,
     now: Instant,
-  ) -> QuicEndpoint<SmolStr, SocketAddr, IdBridge> {
+  ) -> QuicEndpoint<SmolStr> {
     let ep_cfg = EndpointConfig::new(SmolStr::new(id), addr)
       .with_probe_interval(Duration::from_millis(1000))
       .with_probe_timeout(Duration::from_millis(500))
@@ -2641,7 +2580,7 @@ mod mtls_cluster_auth {
     ep.start_scheduling(now);
     let mut seed = [0u8; 32];
     seed[..2].copy_from_slice(&addr.port().to_le_bytes());
-    QuicEndpoint::<SmolStr, SocketAddr, IdBridge>::with_quinn_rng_seed(ep, cfg, Some(seed))
+    QuicEndpoint::<SmolStr>::with_quinn_rng_seed(ep, cfg, Some(seed))
   }
 
   #[test]

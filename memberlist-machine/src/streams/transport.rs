@@ -13,8 +13,6 @@
 
 use std::time::Instant;
 
-use crate::addr_bridge::AddrBridge;
-
 /// Outcome of a single [`StreamTransport::handle_transport_data`] call.
 ///
 /// * `Done` — input fully consumed; the record layer made progress
@@ -56,7 +54,7 @@ pub trait StreamTransport: Sized {
 
   /// Per-dial extra information the record layer needs at the moment
   /// of constructing a dialer (e.g. the rustls `ServerName` for cert
-  /// verification). Derived from the user's `AddrBridge<A>` at dial
+  /// verification). Derived from the supplied `server_name` hint at dial
   /// time via [`Self::dial_context`].
   /// `tls::TlsRecords::DialContext = rustls::pki_types::ServerName<'static>`;
   /// `tcp::RawRecords::DialContext = ()`.
@@ -67,25 +65,22 @@ pub trait StreamTransport: Sized {
   /// `tcp::RawRecords::ConstructError = core::convert::Infallible`.
   type ConstructError: core::fmt::Display;
 
-  /// Derive the per-dial context from the address and the user's
-  /// `AddrBridge`. Returns `Err(reason)` for the soft-fail-via-dial_failed
-  /// path: the coordinator calls `Endpoint::dial_failed(stream_id,
+  /// Derive the per-dial context from the address and an explicit
+  /// `server_name` hint. Returns `Err(reason)` for the
+  /// soft-fail-via-dial_failed path: the coordinator calls
+  /// `Endpoint::dial_failed(stream_id,
   /// StreamError::DialFailed(reason))` and drops the dial intent for
   /// that one peer.
   ///
-  /// `tls::TlsRecords` extracts `&str` via
-  /// `B::server_name(addr).map(AsRef::as_ref)` then runs
-  /// `ServerName::try_from`; returns `Err` for the None case OR for
-  /// `try_from` parse failure (the existing TLS soft-fail behavior).
-  /// `tcp::RawRecords` returns `Ok(())` unconditionally without
-  /// touching `B::server_name`.
-  ///
-  /// `B` is a marker type parameter only: [`AddrBridge`]'s methods are all
-  /// static (`B::to_socket`, `B::server_name`), so no `B` value exists to
-  /// thread in — the implementation calls `B::server_name(addr)` statically.
-  fn dial_context<A, B>(addr: &A) -> Result<Self::DialContext, &'static str>
-  where
-    B: AddrBridge<A>;
+  /// `server_name` carries the SNI string the coordinator's per-peer
+  /// `sni_provider` closure produced for this dial. Transports that
+  /// require SNI for peer authentication (e.g. `tls::TlsRecords`) use it
+  /// directly; transports without an SNI requirement (e.g.
+  /// `tcp::RawRecords`) ignore it.
+  fn dial_context<A>(
+    addr: &A,
+    server_name: Option<&str>,
+  ) -> Result<Self::DialContext, &'static str>;
 
   /// Construct the dialer (client) side of the record layer from the
   /// options bundle and the per-dial context produced by
