@@ -9,21 +9,22 @@
 //! The returned handle is cheaply clonable and shares the same driver
 //! task with every clone.
 //!
-//! ## Address bridge
+//! ## TLS server name
 //!
 //! QUIC's TLS 1.3 handshake requires a server name to verify the
-//! peer's certificate against. The supplied [`IdentityBridge`]
-//! returns `Some("localhost")` so the default rustls verifier
-//! accepts the self-signed localhost-SAN cert used in test setups.
-//! For production deployments where `A = SocketAddr` maps to a real
-//! hostname, implement a custom
-//! [`memberlist_machine::AddrBridge`] that returns the peer's actual
-//! SAN/CN. A mismatch causes the TLS handshake to fail and the join
-//! reaps with `MemberlistError::JoinAllFailed`.
+//! peer's certificate against. [`QuicConfig::new`] installs a
+//! cluster-uniform string used for every peer (see the `quic-rustls`
+//! test setups in `memberlist-simulation` for the `"localhost"` SAN
+//! convention); deployments whose certs name each peer's hostname/IP
+//! supply a per-peer SNI closure via
+//! [`QuicConfig::new_with_sni_provider`] that maps each dialed
+//! `SocketAddr` to its expected verification identity. The string
+//! reaches the operator's
+//! `ServerCertVerifier::verify_server_cert(_, _, server_name, _, _)`
+//! at handshake time.
 
 #![cfg(feature = "quic")]
 
-use core::marker::PhantomData;
 use std::{
   net::SocketAddr,
   sync::{
@@ -34,7 +35,7 @@ use std::{
 
 use arc_swap::ArcSwap;
 use compio::net::UdpSocket;
-use memberlist_machine::{AddrBridge, QuicEndpoint, config::EndpointConfig, endpoint::Endpoint};
+use memberlist_machine::{QuicEndpoint, config::EndpointConfig, endpoint::Endpoint};
 use memberlist_wire::Node;
 use smol_str::SmolStr;
 
@@ -53,35 +54,6 @@ use crate::{
 /// type distinct from `TcpMemberlist` and `TlsMemberlist`, permitting
 /// `impl QuicMemberlist { … }` without conflicting impls.
 pub struct Quic;
-
-/// Identity [`AddrBridge`] for `A = SocketAddr` with TLS server-name
-/// routing for the QUIC handshake.
-///
-/// `to_socket` / `from_socket` pass `SocketAddr` through verbatim.
-/// `server_name` returns `Some("localhost")` to match the self-signed
-/// localhost-SAN certs used in test setups; production callers
-/// implement a custom bridge that returns the peer's actual SAN/CN.
-///
-/// Unit struct (no fields) — every method on [`AddrBridge`] is
-/// static, so the bridge is a zero-sized type parameter on
-/// `QuicEndpoint`.
-pub struct IdentityBridge;
-
-impl AddrBridge<SocketAddr> for IdentityBridge {
-  type ServerName = str;
-
-  fn to_socket(addr: &SocketAddr) -> SocketAddr {
-    *addr
-  }
-
-  fn from_socket(socket: SocketAddr) -> SocketAddr {
-    socket
-  }
-
-  fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
-    Some("localhost")
-  }
-}
 
 /// QUIC config bundle handed to [`QuicMemberlist::new`]. Re-exported
 /// from `memberlist-machine` so callers don't need a direct dep.
@@ -141,9 +113,10 @@ impl QuicMemberlist {
     // 2. Build the composed super-state-machine. `Endpoint::new`
     //    inserts the local node as Alive at incarnation 1;
     //    `QuicEndpoint` wraps that with the caller-supplied
-    //    `QuicConfig`.
-    let endpoint: QuicEndpoint<SmolStr, SocketAddr, IdentityBridge> =
-      QuicEndpoint::new(Endpoint::new(config), quic_config);
+    //    `QuicConfig` (whose SNI provider returns the TLS
+    //    verification identity for each dialed peer — cluster-uniform
+    //    or per-peer SAN, depending on which constructor was used).
+    let endpoint: QuicEndpoint<SmolStr> = QuicEndpoint::new(Endpoint::new(config), quic_config);
 
     // 3. Channels (mirroring the stream-transport adapter's
     //    bounding rationale):
@@ -173,9 +146,8 @@ impl QuicMemberlist {
     // 5. Spawn the driver task. The driver owns the UDP socket
     //    directly so it drops the instant the driver loop exits and
     //    the bound port is released before `Memberlist::shutdown`
-    //    returns. `PhantomData<fn(IdentityBridge)>` fixes the
-    //    address-bridge type parameter at the spawn site.
-    let driver_handle = compio::runtime::spawn(driver_loop::<SmolStr, SocketAddr, IdentityBridge>(
+    //    returns.
+    let driver_handle = compio::runtime::spawn(driver_loop::<SmolStr>(
       endpoint,
       udp_socket,
       commands_rx,
@@ -184,7 +156,6 @@ impl QuicMemberlist {
       snapshot.clone(),
       shutdown_flag.clone(),
       driver_opts,
-      PhantomData,
     ));
 
     // 6. Build the handle from the wired parts. The handle caches

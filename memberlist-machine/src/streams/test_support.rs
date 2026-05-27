@@ -12,12 +12,20 @@ use std::{
 use smol_str::SmolStr;
 
 use crate::{
-  addr_bridge::AddrBridge,
   config::EndpointConfig,
   endpoint::Endpoint,
   event::Event,
   streams::{StreamEndpoint, bridge::StreamBridge, phase::StreamPhase, transport::StreamTransport},
 };
+
+/// Default peer-to-socket resolver for test fixtures where `A = SocketAddr` —
+/// the identity. Mirrors `test_sni_provider`'s shape (boxed closure) so test
+/// `StreamEndpoint::new` / `with_compression` call sites compose the two
+/// closures uniformly.
+#[allow(dead_code)]
+pub(crate) fn test_peer_to_socket() -> Box<dyn Fn(&SocketAddr) -> SocketAddr + Send + Sync> {
+  Box::new(|addr: &SocketAddr| *addr)
+}
 
 /// Reliable-unit ceiling for bridge test pairs — `EndpointConfig` default
 /// `max_stream_frame_size`, generous above every frame these tests exchange.
@@ -35,27 +43,12 @@ pub(crate) fn label(s: &str) -> Option<Vec<u8>> {
   Some(s.as_bytes().to_vec())
 }
 
-/// Identity `AddrBridge` for `A = SocketAddr` test scenarios.
-///
-/// `server_name` reports `"localhost"` so TLS coordinator construction
-/// matches the gossip-only smoke shape.
+/// Default SNI provider for test fixtures — returns `Some("localhost")` to
+/// match the localhost-SAN test certs used by TLS tests, and is also
+/// harmlessly supplied for plain-TCP tests (the TCP record layer ignores SNI).
 #[allow(dead_code)]
-pub(crate) struct IdentityBridge;
-
-impl AddrBridge<SocketAddr> for IdentityBridge {
-  type ServerName = str;
-
-  fn to_socket(addr: &SocketAddr) -> SocketAddr {
-    *addr
-  }
-
-  fn from_socket(socket: SocketAddr) -> SocketAddr {
-    socket
-  }
-
-  fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
-    Some("localhost")
-  }
+pub(crate) fn test_sni_provider<A: 'static>() -> Box<dyn Fn(&A) -> Option<String> + Send + Sync> {
+  Box::new(|_addr: &A| Some("localhost".to_string()))
 }
 
 /// `Endpoint<SmolStr, SocketAddr>` rooted at the loopback `port`, named
@@ -137,7 +130,7 @@ pub(crate) fn shuttle<R: StreamTransport>(
 /// Drain every endpoint event currently queued on the coordinator into a
 /// `Vec`, in queue order.
 #[allow(dead_code)]
-pub(crate) fn drain_events<I, A, B, R>(coord: &mut StreamEndpoint<I, A, B, R>) -> Vec<Event<I, A>>
+pub(crate) fn drain_events<I, A, R>(coord: &mut StreamEndpoint<I, A, R>) -> Vec<Event<I, A>>
 where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -156,7 +149,6 @@ where
     + Send
     + Sync
     + 'static,
-  B: AddrBridge<A>,
   R: StreamTransport,
 {
   let mut out = Vec::new();

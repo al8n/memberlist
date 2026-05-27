@@ -42,7 +42,7 @@ use std::{
 };
 
 use memberlist_machine::{
-  AddrBridge, Endpoint, EndpointConfig, Event, PushPullKind, RawRecords, TcpOptions, Transmit,
+  Endpoint, EndpointConfig, Event, PushPullKind, RawRecords, TcpOptions, Transmit,
   streams::{ExchangeId, StreamAction, StreamEndpoint},
 };
 use memberlist_wire::{
@@ -53,29 +53,8 @@ use smol_str::SmolStr;
 
 use crate::{clock::Clock, faults::FaultConfig, virtual_tcp::TcpPipe};
 
-/// Identity [`AddrBridge`] for `A = SocketAddr`: the membership address *is*
-/// the wire `SocketAddr`, so both directions are the identity (a production
-/// driver would map its resolved/advertised address here instead). The
-/// `server_name` accessor is unused on plain TCP (no certificate verification)
-/// but must be supplied for the trait.
-struct IdentityBridge;
-
-impl AddrBridge<SocketAddr> for IdentityBridge {
-  type ServerName = str;
-
-  fn to_socket(addr: &SocketAddr) -> SocketAddr {
-    *addr
-  }
-  fn from_socket(socket: SocketAddr) -> SocketAddr {
-    socket
-  }
-  fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
-    None
-  }
-}
-
 /// The concrete coordinator the harness drives.
-type Node1 = StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords>;
+type Node1 = StreamEndpoint<SmolStr, SocketAddr, RawRecords>;
 
 /// The default cluster label every node is built with unless the harness has
 /// overridden it (the label-mismatch scenario installs a different label on the
@@ -242,8 +221,14 @@ impl TcpCluster {
     }
     self.nodes.insert(
       addr,
-      StreamEndpoint::with_compression(ep, tcp_cfg, self.compression)
-        .with_encryption(self.encryption.clone()),
+      StreamEndpoint::with_compression(
+        ep,
+        tcp_cfg,
+        Box::new(|_addr: &SocketAddr| None),
+        Box::new(|addr: &SocketAddr| *addr),
+        self.compression,
+      )
+      .with_encryption(self.encryption.clone()),
     );
   }
 
@@ -1487,13 +1472,6 @@ mod tests {
     let (n, back) = decode_frame(&b).expect("decodes");
     assert_eq!(n, b.len());
     assert!(matches!(back, Message::Alive(_)));
-  }
-
-  #[test]
-  fn identity_bridge_is_identity() {
-    let a: SocketAddr = "127.0.0.1:1234".parse().unwrap();
-    assert_eq!(IdentityBridge::to_socket(&a), a);
-    assert_eq!(IdentityBridge::from_socket(a), a);
   }
 
   #[test]

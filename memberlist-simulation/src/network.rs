@@ -25,11 +25,11 @@ use crate::faults::FaultConfig;
 #[derive(Debug)]
 pub(crate) struct PendingDatagram {
   /// The simulated time at which this datagram may be delivered.
-  pub deliver_at: Instant,
+  pub(crate) deliver_at: Instant,
   /// Source address.
-  pub from: SocketAddr,
+  pub(crate) from: SocketAddr,
   /// Destination address.
-  pub to: SocketAddr,
+  pub(crate) to: SocketAddr,
   /// The fully-typed messages this datagram carries, dispatched IN ORDER on
   /// delivery. A plain `Packet` is one message; a `Compound` is its inner
   /// messages. Modeling the bundle (not per-message rows) keeps the
@@ -37,19 +37,19 @@ pub(crate) struct PendingDatagram {
   /// datagram, so a one-shot drop drops the whole compound atomically —
   /// exactly what a real UDP/QUIC compound datagram does (a real driver
   /// `encode_outgoing_compound`s into ONE `send_to`).
-  pub messages: Vec<memberlist_wire::typed::Message<SmolStr, SocketAddr>>,
+  pub(crate) messages: Vec<memberlist_wire::typed::Message<SmolStr, SocketAddr>>,
 }
 
 /// A virtual in-progress stream exchange between two endpoints.
 pub(crate) struct VirtualStream {
   /// Address of the initiating endpoint.
-  pub initiator_addr: SocketAddr,
+  pub(crate) initiator_addr: SocketAddr,
   /// Stream object on the initiating side.
-  pub initiator: Stream<SmolStr, SocketAddr>,
+  pub(crate) initiator: Stream<SmolStr, SocketAddr>,
   /// Address of the accepting endpoint.
-  pub acceptor_addr: SocketAddr,
+  pub(crate) acceptor_addr: SocketAddr,
   /// Stream object on the accepting side.
-  pub acceptor: Stream<SmolStr, SocketAddr>,
+  pub(crate) acceptor: Stream<SmolStr, SocketAddr>,
 }
 
 /// Virtual network owning a set of endpoints and a datagram queue.
@@ -242,7 +242,9 @@ impl Network {
   /// can still observe `NodeJoined` / `NodeLeft` / … . Returns `true` if any
   /// event fired.
   pub(crate) fn drain_events(&mut self, now: Instant) -> bool {
-    let _ = now; // reserved for future event handlers that need timestamps
+    // `now` is reserved for future event handlers that need timestamps;
+    // today's drain path is time-agnostic.
+    let _ = now;
     let addrs: Vec<SocketAddr> = self.endpoints.keys().copied().collect();
     let mut any = false;
     for addr in addrs {
@@ -294,11 +296,8 @@ impl Network {
         let mut deferred = Vec::new();
         while let Some(ev) = ep.poll_event() {
           match ev {
-            Event::DialRequested {
-              id,
-              peer,
-              deadline: _,
-            } => {
+            Event::DialRequested(dial) => {
+              let (id, peer, _) = dial.into_parts();
               v.push((id, peer));
             }
             other => {
@@ -364,11 +363,15 @@ impl Network {
       // ── Initiator → Acceptor ────────────────────────────────────────────
       buf.clear();
       if vs.initiator.poll_transmit(now, &mut buf).is_some() && !buf.is_empty() {
+        // Ignoring Err: a decode failure terminalizes the stream, which the
+        // step loop's stream-drain pass reaps; nothing actionable here.
         let _ = vs.acceptor.handle_data(&buf, now);
       }
       // ── Acceptor → Initiator ────────────────────────────────────────────
       buf.clear();
       if vs.acceptor.poll_transmit(now, &mut buf).is_some() && !buf.is_empty() {
+        // Ignoring Err: same terminality-as-reap reasoning as the
+        // initiator → acceptor direction above.
         let _ = vs.initiator.handle_data(&buf, now);
       }
       // ── Route EndpointEvents (initiator) ────────────────────────────────
@@ -420,10 +423,8 @@ fn apply_stream_command(
   now: Instant,
 ) {
   match cmd {
-    StreamCommand::SendPushPullResponse {
-      local_states,
-      user_data,
-    } => {
+    StreamCommand::SendPushPullResponse(resp) => {
+      let (local_states, user_data) = resp.into_parts();
       let encoded =
         Endpoint::<SmolStr, SocketAddr>::encode_push_pull_response(&local_states, user_data, false);
       let deadline = now + Duration::from_secs(5);

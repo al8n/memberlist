@@ -28,7 +28,10 @@ use memberlist_wire::{Data, typed::PushNodeState};
 
 use crate::{
   error::StreamError,
-  event::{EndpointEvent, PushPullKind, StreamEvent},
+  event::{
+    EndpointEvent, PushPullKind, PushPullReplyReceived, PushPullRequestReceived, ReliablePingAcked,
+    StreamEvent, UserDataReceived,
+  },
 };
 
 /// Unique handle for a stream-oriented exchange.
@@ -66,7 +69,7 @@ impl<I, A> PushPullSnapshot<I, A> {
 
   /// Borrow the membership-view slice.
   #[inline(always)]
-  pub const fn states_slice(&self) -> &[PushNodeState<I, A>] {
+  pub fn states_slice(&self) -> &[PushNodeState<I, A>] {
     self.states.as_slice()
   }
 
@@ -95,16 +98,12 @@ impl<I, A> PushPullSnapshot<I, A> {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) enum OutboundKind {
-  /// Full membership sync (push/pull).
-  PushPull {
-    /// Whether this is a join-triggered exchange (vs. periodic anti-entropy).
-    kind: PushPullKind,
-  },
-  /// TCP/QUIC fallback ping for a timed-out UDP probe.
-  ReliablePing {
-    /// Sequence number of the original probe (links back to Probe).
-    probe_seq: u32,
-  },
+  /// Full membership sync (push/pull). Carries whether this is a
+  /// join-triggered exchange (vs. periodic anti-entropy).
+  PushPull(PushPullKind),
+  /// TCP/QUIC fallback ping for a timed-out UDP probe. Carries the
+  /// sequence number of the original probe (links back to Probe).
+  ReliablePing(u32),
   /// One-way delivery of application-supplied bytes via reliable transport.
   UserMessage,
 }
@@ -122,10 +121,8 @@ pub(crate) enum InboundKind {
   /// the Endpoint to write back via `SendPushPullResponse`.
   PushPull,
   /// Peer sent a Ping; we have the seq number; awaiting our Ack write.
-  ReliablePing {
-    /// Sequence number from the peer's Ping.
-    ping_seq: u32,
-  },
+  /// Carries the sequence number from the peer's Ping.
+  ReliablePing(u32),
   /// Peer sent user data; we emitted the event; stream is done.
   UserMessage,
 }
@@ -136,25 +133,19 @@ pub(crate) enum InboundKind {
 pub(crate) enum StreamPhase {
   // ── Outbound (we dialed) ──────────────────────────────────────────────────
   /// We have bytes in `output_buf`; driver is draining them via `poll_transmit`.
-  OutboundSendingRequest {
-    /// The kind of outbound exchange being performed.
-    kind: OutboundKind,
-  },
+  /// Carries the kind of outbound exchange being performed.
+  OutboundSendingRequest(OutboundKind),
   /// Request fully sent (the last byte was drained via `poll_transmit`).
-  /// Waiting for the peer's response bytes.
-  OutboundAwaitingResponse {
-    /// The kind of outbound exchange being performed.
-    kind: OutboundKind,
-  },
+  /// Waiting for the peer's response bytes. Carries the kind of outbound
+  /// exchange being performed.
+  OutboundAwaitingResponse(OutboundKind),
   // ── Inbound (peer dialed us) ──────────────────────────────────────────────
   /// Connected; waiting for the peer to send the first message.
   InboundAwaitingFirstMessage,
   /// First message decoded. For PushPull: our response is in `output_buf`.
-  /// For ReliablePing: our Ack is in `output_buf`.
-  InboundSendingResponse {
-    /// The kind of inbound exchange being processed.
-    kind: InboundKind,
-  },
+  /// For ReliablePing: our Ack is in `output_buf`. Carries the kind of
+  /// inbound exchange being processed.
+  InboundSendingResponse(InboundKind),
   // ── Terminal ─────────────────────────────────────────────────────────────
   /// Exchange completed successfully.
   Done,
@@ -299,16 +290,14 @@ where
       // A reliable user message is one-way (`send_user_msg`: write then
       // done — no reply is read). It must terminate on send, NOT wait
       // for a response that never comes.
-      StreamPhase::OutboundSendingRequest {
-        kind: OutboundKind::UserMessage,
-      } => {
+      StreamPhase::OutboundSendingRequest(OutboundKind::UserMessage) => {
         // Left as Done by the mem::replace.
         self.stream_events.push_back(StreamEvent::Closed);
       }
-      StreamPhase::OutboundSendingRequest { kind } => {
-        self.phase = StreamPhase::OutboundAwaitingResponse { kind };
+      StreamPhase::OutboundSendingRequest(kind) => {
+        self.phase = StreamPhase::OutboundAwaitingResponse(kind);
       }
-      StreamPhase::InboundSendingResponse { .. } => {
+      StreamPhase::InboundSendingResponse(_) => {
         // Left as Done by the mem::replace; the exchange is complete.
         self.stream_events.push_back(StreamEvent::Closed);
       }
@@ -454,16 +443,14 @@ where
     if data.is_empty() {
       let buf_truncated = !self.input_buf.is_empty();
       return match &self.phase {
-        StreamPhase::OutboundAwaitingResponse { .. } | StreamPhase::InboundAwaitingFirstMessage => {
+        StreamPhase::OutboundAwaitingResponse(_) | StreamPhase::InboundAwaitingFirstMessage => {
           Err(StreamError::PeerClosed)
         }
-        StreamPhase::OutboundSendingRequest { kind } => match kind {
+        StreamPhase::OutboundSendingRequest(kind) => match kind {
           OutboundKind::UserMessage => Ok(()),
-          OutboundKind::PushPull { .. } | OutboundKind::ReliablePing { .. } => {
-            Err(StreamError::PeerClosed)
-          }
+          OutboundKind::PushPull(_) | OutboundKind::ReliablePing(_) => Err(StreamError::PeerClosed),
         },
-        StreamPhase::InboundSendingResponse { .. } => {
+        StreamPhase::InboundSendingResponse(_) => {
           if buf_truncated {
             Err(StreamError::PeerClosed)
           } else {
@@ -640,7 +627,9 @@ where
     // calling dispatch_message (which needs &mut self).
     let frame_bytes: Vec<u8> = self.input_buf[..total].to_vec();
 
-    // Advance input buffer past the consumed frame before decoding.
+    // Advance input buffer past the consumed frame before decoding. The
+    // returned `BytesMut` is the consumed prefix; we already copied it into
+    // `frame_bytes` above.
     let _ = self.input_buf.split_to(total);
 
     // Decode the full frame from our owned copy via the wire framing+bridge
@@ -696,9 +685,9 @@ where
     //     short-circuits terminal phases).
     let forbids_further_input = match &self.phase {
       StreamPhase::Done
-      | StreamPhase::InboundSendingResponse { .. }
-      | StreamPhase::OutboundSendingRequest { .. } => true,
-      StreamPhase::OutboundAwaitingResponse { .. }
+      | StreamPhase::InboundSendingResponse(_)
+      | StreamPhase::OutboundSendingRequest(_) => true,
+      StreamPhase::OutboundAwaitingResponse(_)
       | StreamPhase::InboundAwaitingFirstMessage
       | StreamPhase::Failed(_) => false,
     };
@@ -709,8 +698,8 @@ where
           self.input_buf.len(),
           match &self.phase {
             StreamPhase::Done => "Done",
-            StreamPhase::InboundSendingResponse { .. } => "InboundSendingResponse",
-            StreamPhase::OutboundSendingRequest { .. } => "OutboundSendingRequest",
+            StreamPhase::InboundSendingResponse(_) => "InboundSendingResponse",
+            StreamPhase::OutboundSendingRequest(_) => "OutboundSendingRequest",
             // Unreachable — `forbids_further_input` gated above.
             _ => "non-input",
           }
@@ -745,14 +734,14 @@ where
     }
 
     let phase_kind = match &self.phase {
-      StreamPhase::OutboundAwaitingResponse { kind } => match kind {
-        OutboundKind::PushPull { kind } => PhaseKind::OutboundPushPull(*kind),
-        OutboundKind::ReliablePing { probe_seq } => PhaseKind::OutboundReliablePing(*probe_seq),
+      StreamPhase::OutboundAwaitingResponse(kind) => match kind {
+        OutboundKind::PushPull(k) => PhaseKind::OutboundPushPull(*k),
+        OutboundKind::ReliablePing(probe_seq) => PhaseKind::OutboundReliablePing(*probe_seq),
         OutboundKind::UserMessage => PhaseKind::OutboundUserMessage,
       },
       StreamPhase::InboundAwaitingFirstMessage => PhaseKind::InboundFirst,
-      StreamPhase::OutboundSendingRequest { .. }
-      | StreamPhase::InboundSendingResponse { .. }
+      StreamPhase::OutboundSendingRequest(_)
+      | StreamPhase::InboundSendingResponse(_)
       | StreamPhase::Done
       | StreamPhase::Failed(_) => PhaseKind::Ignore,
     };
@@ -768,12 +757,9 @@ where
           let (_, states, user_data) = snapshot.into_parts();
           self
             .endpoint_events
-            .push_back(EndpointEvent::PushPullReplyReceived {
-              peer,
-              states,
-              user_data,
-              kind: pp_kind,
-            });
+            .push_back(EndpointEvent::PushPullReplyReceived(
+              PushPullReplyReceived::new(peer, states, user_data, pp_kind),
+            ));
           self.phase = StreamPhase::Done;
           self.stream_events.push_back(StreamEvent::Closed);
         }
@@ -805,10 +791,9 @@ where
           }
           self
             .endpoint_events
-            .push_back(EndpointEvent::ReliablePingAcked {
-              seq: probe_seq,
-              at: now,
-            });
+            .push_back(EndpointEvent::ReliablePingAcked(ReliablePingAcked::new(
+              probe_seq, now,
+            )));
           self.phase = StreamPhase::Done;
           self.stream_events.push_back(StreamEvent::Closed);
         }
@@ -841,15 +826,10 @@ where
             let (_, states, user_data) = snapshot.into_parts();
             self
               .endpoint_events
-              .push_back(EndpointEvent::PushPullRequestReceived {
-                peer,
-                states,
-                user_data,
-                kind,
-              });
-            self.phase = StreamPhase::InboundSendingResponse {
-              kind: InboundKind::PushPull,
-            };
+              .push_back(EndpointEvent::PushPullRequestReceived(
+                PushPullRequestReceived::new(peer, states, user_data, kind),
+              ));
+            self.phase = StreamPhase::InboundSendingResponse(InboundKind::PushPull);
           }
           Message::Ping(ping) => {
             // Only Ack a Ping addressed to us. A misrouted or spoofed
@@ -876,9 +856,7 @@ where
             let encoded = crate::wire::encode_message::<I, A>(&ack_msg)
               .expect("Ack encode cannot fail for well-formed data");
             self.output_buf.extend(encoded);
-            self.phase = StreamPhase::InboundSendingResponse {
-              kind: InboundKind::ReliablePing { ping_seq },
-            };
+            self.phase = StreamPhase::InboundSendingResponse(InboundKind::ReliablePing(ping_seq));
           }
           Message::UserData(data) => {
             // `typed::Message::UserData` already carries `Bytes`; move it
@@ -887,7 +865,9 @@ where
             let peer = self.peer.cheap_clone();
             self
               .endpoint_events
-              .push_back(EndpointEvent::UserDataReceived { peer, data });
+              .push_back(EndpointEvent::UserDataReceived(UserDataReceived::new(
+                peer, data,
+              )));
             self.phase = StreamPhase::Done;
             self.stream_events.push_back(StreamEvent::Closed);
           }

@@ -16,10 +16,10 @@
 
 #![cfg(feature = "quic")]
 
-use core::marker::PhantomData;
 use std::{
   collections::{HashMap, HashSet},
   io,
+  net::SocketAddr,
   sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -37,11 +37,11 @@ use memberlist::codec::{
   parse_messages,
 };
 use memberlist_machine::{
-  AddrBridge, QuicEndpoint,
+  QuicEndpoint,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
   streams::ExchangeId,
 };
-use memberlist_wire::Node;
+use memberlist_wire::{CheapClone, Node};
 
 use crate::{
   QuicDriverOptions,
@@ -92,13 +92,13 @@ struct PendingJoin {
 /// All driver-owned state, packed so the loop body can borrow
 /// individual fields without fighting Rust's borrow checker
 /// against a sprawling let-binding cluster.
-struct QuicDriverState<I, A, B> {
-  endpoint: QuicEndpoint<I, A, B>,
+struct QuicDriverState<I> {
+  endpoint: QuicEndpoint<I>,
   udp_socket: UdpSocket,
   commands: Receiver<Command>,
-  events_tx: Sender<Event<I, A>>,
+  events_tx: Sender<Event<I, SocketAddr>>,
   events_dropped: Arc<AtomicU64>,
-  snapshot: Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
+  snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
   shutdown_flag: Arc<AtomicBool>,
   driver_opts: QuicDriverOptions,
   /// Outstanding synchronous-join waiters. Populated when a
@@ -126,7 +126,7 @@ struct QuicDriverState<I, A, B> {
 /// configured `with_gossip_mtu` above the historical 16 KiB default is
 /// not silently truncated by the kernel. Mirrors the stream driver's
 /// `gossip_recv_buf_len`.
-fn gossip_recv_buf_len<I, A, B>(endpoint: &QuicEndpoint<I, A, B>) -> usize
+fn gossip_recv_buf_len<I>(endpoint: &QuicEndpoint<I>) -> usize
 where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -136,16 +136,6 @@ where
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  B: AddrBridge<A>,
 {
   endpoint
     .gossip_mtu()
@@ -159,21 +149,16 @@ where
 /// `Memberlist` handles dropped) or a `Command::Shutdown` is received.
 /// All mutations on the endpoint happen here; reads happen lock-free
 /// via the published [`MemberlistSnapshot`].
-///
-/// `_addr_bridge: PhantomData<fn(B)>` fixes the address-bridge type
-/// parameter at the spawn site; the inner loop does not store a `B`
-/// value (all `AddrBridge` methods are static).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn driver_loop<I, A, B>(
-  endpoint: QuicEndpoint<I, A, B>,
+pub(crate) async fn driver_loop<I>(
+  endpoint: QuicEndpoint<I>,
   udp_socket: UdpSocket,
   commands: Receiver<Command>,
-  events_tx: Sender<Event<I, A>>,
+  events_tx: Sender<Event<I, SocketAddr>>,
   events_dropped: Arc<AtomicU64>,
-  snapshot: Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
+  snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
   shutdown_flag: Arc<AtomicBool>,
   driver_opts: QuicDriverOptions,
-  _addr_bridge: PhantomData<fn(B)>,
 ) where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -183,16 +168,6 @@ pub(crate) async fn driver_loop<I, A, B>(
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  B: AddrBridge<A>,
 {
   let mut state = QuicDriverState {
     endpoint,
@@ -213,7 +188,7 @@ pub(crate) async fn driver_loop<I, A, B>(
   // IP-layer UDP maximum. The coordinator's `gossip_mtu` is set at
   // construction time and never reconfigured at runtime, so a single
   // value computed up-front is correct.
-  let recv_buf_len = gossip_recv_buf_len::<I, A, B>(&state.endpoint);
+  let recv_buf_len = gossip_recv_buf_len::<I>(&state.endpoint);
 
   let mut exit = false;
   // Tracks whether the previous iteration's inputs (cmd-fairness
@@ -238,7 +213,7 @@ pub(crate) async fn driver_loop<I, A, B>(
         Ok(c) => {
           let now = Instant::now();
           let is_shutdown = matches!(c, Command::Shutdown(_));
-          dispatch_command::<I, A, B>(
+          dispatch_command::<I>(
             &mut state.endpoint,
             &mut state.shutdown_reply,
             &mut state.pending_joins,
@@ -278,8 +253,8 @@ pub(crate) async fn driver_loop<I, A, B>(
     // the select. Mirrors the stream driver's pre-select dirty drain
     // (`memberlist-compio/src/driver.rs:688`).
     if dirty {
-      if drain_actions::<I, A, B>(&mut state).await {
-        refresh_snapshot::<I, A, B>(&state.endpoint, &state.snapshot);
+      if drain_actions::<I>(&mut state).await {
+        refresh_snapshot::<I>(&state.endpoint, &state.snapshot);
       }
       // Reap any pending-join waiter whose `pending` set was emptied
       // by the drain (a push/pull ExchangeCompleted reduction) or
@@ -323,8 +298,8 @@ pub(crate) async fn driver_loop<I, A, B>(
     if let Some(t) = past_due_t
       && setup_now >= t
     {
-      if fire_timeout_with_drain::<I, A, B>(&mut state, recv_buf_len).await {
-        refresh_snapshot::<I, A, B>(&state.endpoint, &state.snapshot);
+      if fire_timeout_with_drain::<I>(&mut state, recv_buf_len).await {
+        refresh_snapshot::<I>(&state.endpoint, &state.snapshot);
       }
       reap_pending_joins(&mut state.pending_joins, Instant::now()).await;
       dirty = false;
@@ -438,7 +413,7 @@ pub(crate) async fn driver_loop<I, A, B>(
             // `select!`.
             let now = Instant::now();
             let is_shutdown = matches!(c, Command::Shutdown(_));
-            dispatch_command::<I, A, B>(
+            dispatch_command::<I>(
               &mut state.endpoint,
               &mut state.shutdown_reply,
               &mut state.pending_joins,
@@ -570,8 +545,8 @@ pub(crate) async fn driver_loop<I, A, B>(
 /// and the per-iteration `reap_pending_joins` replies on completion or
 /// deadline expiry.
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_command<I, A, B>(
-  endpoint: &mut QuicEndpoint<I, A, B>,
+async fn dispatch_command<I>(
+  endpoint: &mut QuicEndpoint<I>,
   shutdown_reply: &mut Option<flume::Sender<Result<()>>>,
   pending_joins: &mut HashMap<u64, PendingJoin>,
   next_pending_join_id: &mut u64,
@@ -586,16 +561,6 @@ async fn dispatch_command<I, A, B>(
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  B: AddrBridge<A>,
 {
   match cmd {
     Command::Join(JoinCmd { addrs, kind, reply }) => {
@@ -603,13 +568,12 @@ async fn dispatch_command<I, A, B>(
         JoinKind::Dispatch => {
           let mut count: usize = 0;
           for addr in &addrs {
-            let peer: A = B::from_socket(*addr);
             // Ignoring StreamId return: per-seed completion / failure
             // surfaces through `poll_event` (the `NodeJoined` /
             // `DialFailed` events that the events_tx forwards to
             // subscribers). The dispatch arm tracks no per-exchange
             // waiter state.
-            let _ = endpoint.start_push_pull(peer, PushPullKind::Join, now);
+            let _ = endpoint.start_push_pull(*addr, PushPullKind::Join, now);
             count += 1;
           }
           // Ignoring Err: the caller may have dropped the reply
@@ -635,8 +599,7 @@ async fn dispatch_command<I, A, B>(
           // discipline).
           let mut pending: HashSet<ExchangeId> = HashSet::with_capacity(addrs.len());
           for addr in &addrs {
-            let peer: A = B::from_socket(*addr);
-            let stream_id = endpoint.start_push_pull(peer, PushPullKind::Join, now);
+            let stream_id = endpoint.start_push_pull(*addr, PushPullKind::Join, now);
             pending.insert(ExchangeId::from(stream_id));
           }
           // `requested` is the number of outbound exchanges this call
@@ -742,10 +705,7 @@ async fn dispatch_command<I, A, B>(
 /// Returns `true` iff any work was applied (the peek consumed a
 /// datagram, `handle_timeout` fired, OR `drain_actions` made
 /// progress), so the caller knows to republish the snapshot.
-async fn fire_timeout_with_drain<I, A, B>(
-  state: &mut QuicDriverState<I, A, B>,
-  recv_buf_len: usize,
-) -> bool
+async fn fire_timeout_with_drain<I>(state: &mut QuicDriverState<I>, recv_buf_len: usize) -> bool
 where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -755,16 +715,6 @@ where
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  B: AddrBridge<A>,
 {
   let mut dirty = false;
 
@@ -817,7 +767,7 @@ where
     dirty = true;
   }
 
-  if drain_actions::<I, A, B>(state).await {
+  if drain_actions::<I>(state).await {
     dirty = true;
   }
   dirty
@@ -850,14 +800,14 @@ where
 /// compound transparently.
 ///
 /// Outbound: `poll_memberlist_transmit` surfaces typed
-/// `Transmit<I, A>` values. The driver encodes via `encode_outgoing`
+/// `Transmit<I, SocketAddr>` values. The driver encodes via `encode_outgoing`
 /// (single message → plain frame) or `encode_outgoing_compound` (a
 /// SWIM piggyback batch of `>= 2` messages → one compound datagram),
 /// then runs `compress_gossip` → `encrypt_gossip` and sends on the
 /// shared UDP socket. `poll_transmit` carries raw QUIC datagrams
 /// (handshake, acks, application stream data); those are sent on the
 /// same socket without codec wrap.
-async fn drain_actions<I, A, B>(state: &mut QuicDriverState<I, A, B>) -> bool
+async fn drain_actions<I>(state: &mut QuicDriverState<I>) -> bool
 where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -867,16 +817,6 @@ where
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  B: AddrBridge<A>,
 {
   let mut any_progress = false;
   let decode_opts = DecodeOptions::default();
@@ -949,15 +889,14 @@ where
         Ok(b) => b,
         Err(_) => continue,
       };
-      let msgs = match parse_messages::<I, A>(inner) {
+      let msgs = match parse_messages::<I, SocketAddr>(inner) {
         Ok(m) => m,
         // Drop the datagram on a decode error. Gossip is lossy and
         // self-healing — the peer retransmits on the next gossip round.
         Err(_) => continue,
       };
-      let peer = B::from_socket(from);
       for msg in msgs {
-        state.endpoint.handle_packet(peer.cheap_clone(), msg, now);
+        state.endpoint.handle_packet(from, msg, now);
       }
     }
 
@@ -995,8 +934,7 @@ where
         Ok(b) => b,
         Err(_) => continue,
       };
-      let peer_socket = B::to_socket(&peer);
-      let BufResult(res, _buf) = state.udp_socket.send_to(on_wire, peer_socket).await;
+      let BufResult(res, _buf) = state.udp_socket.send_to(on_wire, peer).await;
       // Ignoring Err: a transient UDP send error (ENOBUFS, network
       // down on an interface, ICMP unreachable surfacing as a
       // syscall error) is non-fatal — gossip is lossy and the next
@@ -1071,10 +1009,10 @@ fn min_pending_join_deadline(pending_joins: &HashMap<u64, PendingJoin>) -> Optio
 /// stream driver's `refresh_snapshot`
 /// (`memberlist-compio/src/driver.rs`); the only structural
 /// difference is that the QUIC version goes through `endpoint_ref()`
-/// to reach the inner membership `Endpoint<I, A>`.
-fn refresh_snapshot<I, A, B>(
-  endpoint: &QuicEndpoint<I, A, B>,
-  snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
+/// to reach the inner membership `Endpoint<I, SocketAddr>`.
+fn refresh_snapshot<I>(
+  endpoint: &QuicEndpoint<I>,
+  snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
 ) where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -1084,19 +1022,9 @@ fn refresh_snapshot<I, A, B>(
     + Send
     + Sync
     + 'static,
-  A: memberlist_wire::Data
-    + memberlist_wire::CheapClone
-    + Eq
-    + core::hash::Hash
-    + core::fmt::Debug
-    + core::fmt::Display
-    + Send
-    + Sync
-    + 'static,
-  B: AddrBridge<A>,
 {
   let ep = endpoint.endpoint_ref();
-  let mut members_vec: Vec<Node<I, A>> = Vec::new();
+  let mut members_vec: Vec<Node<I, SocketAddr>> = Vec::new();
   let mut alive_count: usize = 0;
   for ns in ep.members() {
     members_vec.push(Node::new(

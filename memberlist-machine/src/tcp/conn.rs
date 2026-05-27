@@ -12,11 +12,14 @@ mod tests {
   };
 
   use crate::{
-    addr_bridge::AddrBridge,
     config::EndpointConfig,
     endpoint::Endpoint,
     event::PushPullKind,
-    streams::{StreamAction, StreamEndpoint, bridge::StreamBridge, test_support::addr},
+    streams::{
+      StreamAction, StreamEndpoint,
+      bridge::StreamBridge,
+      test_support::{addr, test_peer_to_socket, test_sni_provider},
+    },
     tcp::{TcpOptions, records::RawRecords},
   };
 
@@ -35,24 +38,6 @@ mod tests {
     )
   }
 
-  /// Identity `AddrBridge` for `A = SocketAddr` — no certificate verification
-  /// on the plain-TCP path, so `server_name` is unused.
-  struct IdentityBridge;
-
-  impl AddrBridge<SocketAddr> for IdentityBridge {
-    type ServerName = str;
-
-    fn to_socket(addr: &SocketAddr) -> SocketAddr {
-      *addr
-    }
-    fn from_socket(socket: SocketAddr) -> SocketAddr {
-      socket
-    }
-    fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
-      None
-    }
-  }
-
   /// A bridge built by the coordinator must carry the configured
   /// `max_stream_frame_size` as its reliable-unit ceiling — the ceiling tracks
   /// the user-tunable config value, not a hard-coded constant. A custom 17 MiB
@@ -65,8 +50,12 @@ mod tests {
     let cfg =
       EndpointConfig::new(SmolStr::new("n"), addr(7300)).with_max_stream_frame_size(custom_max);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg);
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, TcpOptions::new(Some(b"cluster-x".to_vec())));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      ep,
+      TcpOptions::new(Some(b"cluster-x".to_vec())),
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
 
     // Drive an outbound dial so the coordinator builds a bridge.
     coord.start_push_pull(addr(7301), PushPullKind::Refresh, now);

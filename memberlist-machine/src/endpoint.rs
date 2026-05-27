@@ -24,7 +24,10 @@ use crate::{
   awareness::Awareness,
   broadcast::{BroadcastQueue, MemberlistBroadcast},
   config::EndpointConfig,
-  event::{CompoundTransmit, Event, PacketTransmit, Reliability, Transmit},
+  event::{
+    CompoundTransmit, DialRequested, Event, NodeConflict, PacketTransmit, PingCompleted,
+    Reliability, SendPushPullResponse, Transmit, UserPacket,
+  },
   members::{LocalNodeState, Member, Members},
   probe::{AwaitingIndirect, Probe, ProbeKind, ProbePhase},
   stream::{OutboundKind, Stream, StreamPhase},
@@ -340,6 +343,8 @@ where
     let now = Instant::now();
     let mut local_state = LocalNodeState::new(local_node_state, now);
     local_state.set_incarnation(1);
+    // Ignoring Err: a fresh `Members` is empty, so the insert returns
+    // `None`. Asserting it is the caller-owned invariant we just upheld.
     let _ = members.insert(Member::new(local_state.clone()));
 
     let local_state_snapshot = cfg.initial_local_state_bytes();
@@ -580,10 +585,10 @@ where
         } else {
           // Conflict.
           let other = Arc::new(server_for_conflict);
-          self.emit_event(Event::NodeConflict {
-            existing: existing.state_ref().server_arc(),
+          self.emit_event(Event::NodeConflict(NodeConflict::new(
+            existing.state_ref().server_arc(),
             other,
-          });
+          )));
           return;
         }
       }
@@ -780,7 +785,7 @@ where
         Some(s) => s.confirm(&from, now),
         None => crate::suspicion::Confirmation::Ignored,
       };
-      if matches!(confirmed, crate::suspicion::Confirmation::Accepted { .. }) {
+      if matches!(confirmed, crate::suspicion::Confirmation::Accepted(_)) {
         self.broadcast_message(
           target.cheap_clone(),
           Message::Suspect(Suspect::new(inc, target, from)),
@@ -1022,11 +1027,7 @@ where
   /// drain `EndpointEvent::UserDataReceived` → call `handle_stream_event`.
   /// This method is retained for the UDP path only.
   pub fn handle_user_data(&mut self, from: A, data: Bytes, reliability: Reliability) {
-    self.emit_event(Event::UserPacket {
-      from,
-      data,
-      reliability,
-    });
+    self.emit_event(Event::UserPacket(UserPacket::new(from, data, reliability)));
   }
 
   /// Driver feeds an incoming Ping. Replies with an Ack via
@@ -1193,6 +1194,8 @@ where
     // this a UDP-degraded / TCP-working cluster leaks one entry per
     // fallback success and keeps a stale seq live for late-Ack dispatch.
     // Targeted by seq + idempotent, symmetric with `probe_terminate_failure`.
+    // Ignoring Err: idempotent removal; the entry may already be gone via
+    // `handle_ack` on the direct path.
     let _ = self.ack_registry.remove(seq);
     let rtt = now.saturating_duration_since(probe.sent_at);
     match probe.kind {
@@ -1203,11 +1206,11 @@ where
         self.awareness.record_success();
       }
       ProbeKind::Ping => {
-        self.emit_event(Event::PingCompleted {
-          node: probe.target,
+        self.emit_event(Event::PingCompleted(PingCompleted::new(
+          probe.target,
           rtt,
           payload,
-        });
+        )));
       }
     }
   }
@@ -1445,6 +1448,7 @@ where
     // Remove the AckRegistry entry for this seq (probe is being
     // terminated, not awaiting an Ack anymore). Targeted by seq so we
     // don't disturb other still-registered probe/forward entries.
+    // Ignoring Err: idempotent removal; the entry may already be gone.
     let _ = self.ack_registry.remove(seq);
     // Drop the concurrent reliable-fallback's pending dial intent (if it
     // never dialed) so a late `dial_succeeded` cannot promote it into an
@@ -1512,6 +1516,7 @@ where
       // deadline so relayed/indirect Acks can still match. Evicting one of
       // those here would drop a later Ack as untracked and cause a false
       // probe failure / spurious Suspect.
+      // Ignoring Err: idempotent removal — the entry may already be gone.
       let _ = self.ack_registry.remove(seq);
       // Nack the original requester at its VALIDATED address — the same
       // value the relay-Ack path uses, NOT an id→members lookup. A lossy
@@ -2107,7 +2112,7 @@ where
   /// + plain-frame body-len varint (u32 LEB128 ≤ 5)
   /// + protobuf field-1 tag (1)
   /// + protobuf `data` length varint (u32 LEB128 ≤ 5)
-  /// = 17 in the unbounded worst case.
+  ///   = 17 in the unbounded worst case.
   ///
   /// 11 is still a SOUND conservative charge for every *admissible* payload:
   /// a payload is only drained when `L + USER_PART_OVERHEAD <= user_budget`,
@@ -2532,7 +2537,7 @@ where
       id,
       PendingStreamIntent {
         peer: peer.cheap_clone(),
-        kind: OutboundKind::PushPull { kind },
+        kind: OutboundKind::PushPull(kind),
         deadline,
         encoded,
         _marker: PhantomData,
@@ -2542,7 +2547,7 @@ where
     // Signal the driver to dial.
     self
       .pending_events
-      .push_back(Event::DialRequested { id, peer, deadline });
+      .push_back(Event::DialRequested(DialRequested::new(id, peer, deadline)));
 
     id
   }
@@ -2583,18 +2588,18 @@ where
       id,
       PendingStreamIntent {
         peer: peer_addr.cheap_clone(),
-        kind: OutboundKind::ReliablePing { probe_seq },
+        kind: OutboundKind::ReliablePing(probe_seq),
         deadline,
         encoded,
         _marker: PhantomData,
       },
     );
 
-    self.pending_events.push_back(Event::DialRequested {
-      id,
-      peer: peer_addr,
-      deadline,
-    });
+    self
+      .pending_events
+      .push_back(Event::DialRequested(DialRequested::new(
+        id, peer_addr, deadline,
+      )));
 
     id
   }
@@ -2625,7 +2630,7 @@ where
 
     self
       .pending_events
-      .push_back(Event::DialRequested { id, peer, deadline });
+      .push_back(Event::DialRequested(DialRequested::new(id, peer, deadline)));
 
     id
   }
@@ -2647,13 +2652,13 @@ where
     // `handle_data` fails the stream past the deadline, so no
     // `PushPullRequestReceived` is emitted and no response is ever loaded.
     if now >= intent.deadline {
-      if let OutboundKind::ReliablePing { probe_seq } = intent.kind {
+      if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
         self.retire_reliable_fallback(probe_seq);
       }
       return None;
     }
     let output_buf: std::collections::VecDeque<u8> = VecDeque::from(intent.encoded);
-    let phase = StreamPhase::OutboundSendingRequest { kind: intent.kind };
+    let phase = StreamPhase::OutboundSendingRequest(intent.kind);
     Some(Stream {
       id,
       peer: intent.peer,
@@ -2677,12 +2682,14 @@ where
     let Some(intent) = self.pending_stream_intents.remove(&id) else {
       return;
     };
-    if let OutboundKind::ReliablePing { probe_seq } = intent.kind {
+    if let OutboundKind::ReliablePing(probe_seq) = intent.kind {
       // Reliable-fallback dial failed. This does NOT fail the probe: the
       // fallback runs concurrently with the indirect pings, and a
       // fallback failure is just a "did not make contact" — the indirect
       // path keeps racing the single cumulative deadline. Just retire the
       // fallback stream so a late event can't match it.
+      // `now` is part of the public signature for symmetry with `dial_succeeded`;
+      // discard it explicitly to keep the unused-parameter lint quiet.
       let _ = now;
       self.retire_reliable_fallback(probe_seq);
     }
@@ -2733,32 +2740,25 @@ where
     now: Instant,
   ) -> Option<StreamCommand<I, A>> {
     match ev {
-      EndpointEvent::PushPullReplyReceived {
-        peer,
-        states,
-        user_data,
-        kind,
-      } => {
+      EndpointEvent::PushPullReplyReceived(p) => {
         // Outbound: we initiated; peer replied. Apply the merge inline
         // (synchronous MergeDelegate filter, join-only). No StreamCommand:
-        // we already sent our state before they replied.
-        let _ = (peer, user_data);
+        // we already sent our state before they replied. `peer` and
+        // `user_data` are unused on the outbound path; the merge only
+        // needs `states` and `kind`.
+        let (_peer, states, _user_data, kind) = p.into_parts();
         if self.merge_admitted(&states, kind) {
           self.merge_state(&states, now);
         }
         None
       }
-      EndpointEvent::PushPullRequestReceived {
-        peer,
-        states,
-        user_data,
-        kind,
-      } => {
+      EndpointEvent::PushPullRequestReceived(p) => {
         // Inbound: peer initiated. Consult the MergeDelegate inline (join
         // only). A rejected join merge closes the stream — a rejected
         // `NotifyMerge` aborts the push/pull connection. Otherwise apply
-        // the merge and reply with our state.
-        let _ = (peer, user_data);
+        // the merge and reply with our state. `peer` and the inbound
+        // `user_data` are not consulted at the FSM layer.
+        let (_peer, states, _user_data, kind) = p.into_parts();
         if !self.merge_admitted(&states, kind) {
           return Some(StreamCommand::Close);
         }
@@ -2782,28 +2782,28 @@ where
             .with_delegate_version(ns.delegate_version())
           })
           .collect();
-        Some(StreamCommand::SendPushPullResponse {
-          local_states,
-          user_data: self.local_state_snapshot.clone(),
-        })
+        Some(StreamCommand::SendPushPullResponse(
+          SendPushPullResponse::new(local_states, self.local_state_snapshot.clone()),
+        ))
       }
-      EndpointEvent::ReliablePingAcked { seq, at } => {
-        self.handle_reliable_ping_response(EndpointEvent::ReliablePingAcked { seq, at }, now);
+      EndpointEvent::ReliablePingAcked(p) => {
+        self.handle_reliable_ping_response(EndpointEvent::ReliablePingAcked(p), now);
         None
       }
-      EndpointEvent::ReliablePingFailed { seq } => {
-        self.handle_reliable_ping_response(EndpointEvent::ReliablePingFailed { seq }, now);
+      EndpointEvent::ReliablePingFailed(p) => {
+        self.handle_reliable_ping_response(EndpointEvent::ReliablePingFailed(p), now);
         None
       }
-      EndpointEvent::UserDataReceived { peer, data } => {
-        self.emit_event(Event::UserPacket {
-          from: peer,
+      EndpointEvent::UserDataReceived(p) => {
+        let (peer, data) = p.into_parts();
+        self.emit_event(Event::UserPacket(UserPacket::new(
+          peer,
           data,
-          reliability: Reliability::Reliable,
-        });
+          Reliability::Reliable,
+        )));
         None
       }
-      EndpointEvent::StreamClosed { .. } | EndpointEvent::StreamErrored { .. } => None,
+      EndpointEvent::StreamClosed(_) | EndpointEvent::StreamErrored(_) => None,
     }
   }
 
@@ -2820,13 +2820,17 @@ where
   /// suspicion.
   fn handle_reliable_ping_response(&mut self, ev: EndpointEvent<I, A>, now: Instant) {
     use EndpointEvent;
+    // `now` is unused: the Acked path passes the event's `at` timestamp,
+    // and the Failed path doesn't need a wall-clock anchor (it just
+    // retires the fallback stream). Keep the parameter for symmetry with
+    // the other `handle_*` dispatchers.
     let _ = now;
     match ev {
-      EndpointEvent::ReliablePingAcked { seq, at } => {
-        self.complete_probe_success(seq, bytes::Bytes::new(), at);
+      EndpointEvent::ReliablePingAcked(p) => {
+        self.complete_probe_success(p.seq(), bytes::Bytes::new(), p.at());
       }
-      EndpointEvent::ReliablePingFailed { seq } => {
-        self.retire_reliable_fallback(seq);
+      EndpointEvent::ReliablePingFailed(p) => {
+        self.retire_reliable_fallback(p.seq());
       }
       _ => {}
     }

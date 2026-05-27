@@ -1,6 +1,6 @@
 //! Application-facing event and transmit types emitted by [`Endpoint`].
 
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use memberlist_wire::typed::{Message, NodeState, PushNodeState};
@@ -166,22 +166,21 @@ impl ExchangeOutcome {
 /// `join_with` "actually-contacted" count) without having to infer
 /// success from membership-state side effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ExchangeCompleted {
+pub struct ExchangeCompleted<A> {
   eid: ExchangeId,
-  peer: SocketAddr,
+  peer: A,
   outcome: ExchangeOutcome,
   kind: ExchangeKind,
 }
 
-impl ExchangeCompleted {
+impl<A> ExchangeCompleted<A> {
   /// Construct a new payload. Crate-internal: the coordinator's
-  /// bridge-reap path is the only legitimate producer. `dead_code`
-  /// allow guards builds without any bridge-reaping backend.
+  /// bridge-reap path is the only legitimate producer.
   #[allow(dead_code)]
   #[inline(always)]
   pub(crate) const fn new(
     eid: ExchangeId,
-    peer: SocketAddr,
+    peer: A,
     outcome: ExchangeOutcome,
     kind: ExchangeKind,
   ) -> Self {
@@ -201,8 +200,8 @@ impl ExchangeCompleted {
 
   /// The peer the exchange targeted.
   #[inline(always)]
-  pub const fn peer(&self) -> SocketAddr {
-    self.peer
+  pub const fn peer(&self) -> &A {
+    &self.peer
   }
 
   /// The terminal outcome.
@@ -303,7 +302,7 @@ impl<I, A> CompoundTransmit<I, A> {
 
   /// Borrow the messages as a slice.
   #[inline(always)]
-  pub const fn messages_slice(&self) -> &[Message<I, A>] {
+  pub fn messages_slice(&self) -> &[Message<I, A>] {
     self.messages.as_slice()
   }
 
@@ -328,6 +327,182 @@ pub enum Transmit<I, A> {
   Compound(CompoundTransmit<I, A>),
 }
 
+/// Payload for [`Event::NodeConflict`]: two peers claiming the same id but
+/// advertising different addresses.
+#[derive(Debug)]
+pub struct NodeConflict<I, A> {
+  existing: Arc<NodeState<I, A>>,
+  other: Arc<NodeState<I, A>>,
+}
+
+impl<I, A> NodeConflict<I, A> {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(existing: Arc<NodeState<I, A>>, other: Arc<NodeState<I, A>>) -> Self {
+    Self { existing, other }
+  }
+
+  /// The locally-tracked peer.
+  #[inline(always)]
+  pub fn existing_ref(&self) -> &Arc<NodeState<I, A>> {
+    &self.existing
+  }
+
+  /// The conflicting peer reported via incoming Alive.
+  #[inline(always)]
+  pub fn other_ref(&self) -> &Arc<NodeState<I, A>> {
+    &self.other
+  }
+}
+
+/// Payload for [`Event::UserPacket`]: an application-level user-data packet.
+#[derive(Debug)]
+pub struct UserPacket<A> {
+  from: A,
+  data: Bytes,
+  reliability: Reliability,
+}
+
+impl<A> UserPacket<A> {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(from: A, data: Bytes, reliability: Reliability) -> Self {
+    Self {
+      from,
+      data,
+      reliability,
+    }
+  }
+
+  /// Source address.
+  #[inline(always)]
+  pub const fn from_ref(&self) -> &A {
+    &self.from
+  }
+
+  /// Payload bytes.
+  #[inline(always)]
+  pub const fn data_ref(&self) -> &Bytes {
+    &self.data
+  }
+
+  /// Transport reliability of the delivery path.
+  #[inline(always)]
+  pub const fn reliability(&self) -> Reliability {
+    self.reliability
+  }
+
+  /// Consume the payload into its (from, data, reliability) parts.
+  #[inline(always)]
+  pub fn into_parts(self) -> (A, Bytes, Reliability) {
+    (self.from, self.data, self.reliability)
+  }
+}
+
+/// Payload for [`Event::PingCompleted`]: a probe ping completed with RTT.
+#[derive(Debug)]
+pub struct PingCompleted<I, A> {
+  node: Arc<NodeState<I, A>>,
+  rtt: core::time::Duration,
+  payload: Bytes,
+}
+
+impl<I, A> PingCompleted<I, A> {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(node: Arc<NodeState<I, A>>, rtt: core::time::Duration, payload: Bytes) -> Self {
+    Self { node, rtt, payload }
+  }
+
+  /// The peer that responded.
+  #[inline(always)]
+  pub fn node_ref(&self) -> &Arc<NodeState<I, A>> {
+    &self.node
+  }
+
+  /// Measured round-trip-time.
+  #[inline(always)]
+  pub const fn rtt(&self) -> core::time::Duration {
+    self.rtt
+  }
+
+  /// Bytes the peer attached to its Ack via `set_ack_payload`.
+  #[inline(always)]
+  pub const fn payload_ref(&self) -> &Bytes {
+    &self.payload
+  }
+}
+
+/// Payload for [`Event::DecodeError`]: a decode error from an upstream component.
+#[derive(Debug)]
+pub struct DecodeError<A> {
+  from: A,
+  err: String,
+}
+
+impl<A> DecodeError<A> {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(from: A, err: String) -> Self {
+    Self { from, err }
+  }
+
+  /// Source address.
+  #[inline(always)]
+  pub const fn from_ref(&self) -> &A {
+    &self.from
+  }
+
+  /// Human-readable error message.
+  #[inline(always)]
+  pub fn err(&self) -> &str {
+    &self.err
+  }
+}
+
+/// Payload for [`Event::DialRequested`]: the Endpoint requests that the driver
+/// dial `peer` on a fresh stream. The driver should call
+/// `Endpoint::dial_succeeded(id, now)` on success or
+/// `Endpoint::dial_failed(id, err, now)` on failure.
+#[derive(Debug)]
+pub struct DialRequested<A> {
+  id: StreamId,
+  peer: A,
+  deadline: std::time::Instant,
+}
+
+impl<A> DialRequested<A> {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(id: StreamId, peer: A, deadline: std::time::Instant) -> Self {
+    Self { id, peer, deadline }
+  }
+
+  /// The stream ID to report back in `dial_succeeded` / `dial_failed`.
+  #[inline(always)]
+  pub const fn id(&self) -> StreamId {
+    self.id
+  }
+
+  /// The peer to dial.
+  #[inline(always)]
+  pub const fn peer_ref(&self) -> &A {
+    &self.peer
+  }
+
+  /// Deadline by which the dial (and full exchange) must complete.
+  #[inline(always)]
+  pub const fn deadline(&self) -> std::time::Instant {
+    self.deadline
+  }
+
+  /// Consume the payload into its (id, peer, deadline) parts.
+  #[inline(always)]
+  pub fn into_parts(self) -> (StreamId, A, std::time::Instant) {
+    (self.id, self.peer, self.deadline)
+  }
+}
+
 /// Application-facing event drained from [`Endpoint::poll_event`].
 #[derive(Debug)]
 pub enum Event<I, A> {
@@ -340,52 +515,21 @@ pub enum Event<I, A> {
   /// Two peers claim the same id but advertise different addresses. The local
   /// node will not adopt the new address (unless the existing state is `Dead`/`Left`
   /// and `dead_node_reclaim_time` has elapsed — that path emits `NodeUpdated`).
-  NodeConflict {
-    /// The locally-tracked peer.
-    existing: Arc<NodeState<I, A>>,
-    /// The conflicting peer reported via incoming Alive.
-    other: Arc<NodeState<I, A>>,
-  },
+  NodeConflict(NodeConflict<I, A>),
   /// An application-level user-data packet arrived.
-  UserPacket {
-    /// Source address.
-    from: A,
-    /// Payload bytes.
-    data: Bytes,
-    /// Transport reliability of the delivery path.
-    reliability: Reliability,
-  },
+  UserPacket(UserPacket<A>),
   /// The local node has finished its own leave broadcast.
   LeftCluster,
   /// A ping (issued by the local probe FSM) completed with a
   /// measured round-trip-time and the peer's optional ack payload.
   /// Replaces legacy `PingDelegate::notify_ping_complete`.
-  PingCompleted {
-    /// The peer that responded.
-    node: Arc<NodeState<I, A>>,
-    /// Measured round-trip-time.
-    rtt: core::time::Duration,
-    /// Bytes the peer attached to its Ack via `set_ack_payload`.
-    payload: Bytes,
-  },
+  PingCompleted(PingCompleted<I, A>),
   /// A decode error was reported by an upstream component.
-  DecodeError {
-    /// Source address.
-    from: A,
-    /// Human-readable error message.
-    err: String,
-  },
+  DecodeError(DecodeError<A>),
   /// The Endpoint requests that the driver dial `peer` on a fresh stream.
   /// The driver should call `Endpoint::dial_succeeded(id, now)` on success
   /// or `Endpoint::dial_failed(id, err, now)` on failure.
-  DialRequested {
-    /// The stream ID to report back in `dial_succeeded` / `dial_failed`.
-    id: StreamId,
-    /// The peer to dial.
-    peer: A,
-    /// Deadline by which the dial (and full exchange) must complete.
-    deadline: std::time::Instant,
-  },
+  DialRequested(DialRequested<A>),
   /// A reliable exchange terminated, with the validated outcome (see
   /// [`ExchangeOutcome`]). Fired from the coordinator's bridge-reap
   /// path for ALL outbound bridge kinds (push/pull, reliable ping,
@@ -397,7 +541,253 @@ pub enum Event<I, A> {
   /// membership snapshots). Inbound (peer-initiated) bridges do NOT
   /// emit this event — synchronous-join drivers observe only their
   /// own outbound exchange's terminal outcome.
-  ExchangeCompleted(ExchangeCompleted),
+  ExchangeCompleted(ExchangeCompleted<A>),
+}
+
+/// Payload for [`EndpointEvent::PushPullRequestReceived`]: an inbound
+/// (peer-initiated) push/pull stream decoded the peer's request.
+#[derive(Debug)]
+pub struct PushPullRequestReceived<I, A> {
+  peer: A,
+  states: Vec<PushNodeState<I, A>>,
+  user_data: Bytes,
+  kind: PushPullKind,
+}
+
+impl<I, A> PushPullRequestReceived<I, A> {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(
+    peer: A,
+    states: Vec<PushNodeState<I, A>>,
+    user_data: Bytes,
+    kind: PushPullKind,
+  ) -> Self {
+    Self {
+      peer,
+      states,
+      user_data,
+      kind,
+    }
+  }
+
+  /// Peer that initiated the exchange.
+  #[inline(always)]
+  pub const fn peer_ref(&self) -> &A {
+    &self.peer
+  }
+
+  /// Their snapshot of cluster state.
+  #[inline(always)]
+  pub fn states_slice(&self) -> &[PushNodeState<I, A>] {
+    self.states.as_slice()
+  }
+
+  /// Application-level payload they attached.
+  #[inline(always)]
+  pub const fn user_data_ref(&self) -> &Bytes {
+    &self.user_data
+  }
+
+  /// Whether they consider this a join or periodic anti-entropy.
+  #[inline(always)]
+  pub const fn kind(&self) -> PushPullKind {
+    self.kind
+  }
+
+  /// Consume the payload into its (peer, states, user_data, kind) parts.
+  #[inline(always)]
+  pub fn into_parts(self) -> (A, Vec<PushNodeState<I, A>>, Bytes, PushPullKind) {
+    (self.peer, self.states, self.user_data, self.kind)
+  }
+}
+
+/// Payload for [`EndpointEvent::PushPullReplyReceived`]: an outbound
+/// (we-initiated) push/pull stream decoded the peer's reply.
+#[derive(Debug)]
+pub struct PushPullReplyReceived<I, A> {
+  peer: A,
+  states: Vec<PushNodeState<I, A>>,
+  user_data: Bytes,
+  kind: PushPullKind,
+}
+
+impl<I, A> PushPullReplyReceived<I, A> {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(
+    peer: A,
+    states: Vec<PushNodeState<I, A>>,
+    user_data: Bytes,
+    kind: PushPullKind,
+  ) -> Self {
+    Self {
+      peer,
+      states,
+      user_data,
+      kind,
+    }
+  }
+
+  /// Peer that replied.
+  #[inline(always)]
+  pub const fn peer_ref(&self) -> &A {
+    &self.peer
+  }
+
+  /// Their snapshot of cluster state.
+  #[inline(always)]
+  pub fn states_slice(&self) -> &[PushNodeState<I, A>] {
+    self.states.as_slice()
+  }
+
+  /// Application-level payload they attached.
+  #[inline(always)]
+  pub const fn user_data_ref(&self) -> &Bytes {
+    &self.user_data
+  }
+
+  /// Whether the original outbound exchange was a join or refresh.
+  #[inline(always)]
+  pub const fn kind(&self) -> PushPullKind {
+    self.kind
+  }
+
+  /// Consume the payload into its (peer, states, user_data, kind) parts.
+  #[inline(always)]
+  pub fn into_parts(self) -> (A, Vec<PushNodeState<I, A>>, Bytes, PushPullKind) {
+    (self.peer, self.states, self.user_data, self.kind)
+  }
+}
+
+/// Payload for [`EndpointEvent::ReliablePingAcked`]: a reliable-fallback ping
+/// was acknowledged.
+#[derive(Debug)]
+pub struct ReliablePingAcked {
+  seq: u32,
+  at: std::time::Instant,
+}
+
+impl ReliablePingAcked {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(seq: u32, at: std::time::Instant) -> Self {
+    Self { seq, at }
+  }
+
+  /// The sequence number of the original ping.
+  #[inline(always)]
+  pub const fn seq(&self) -> u32 {
+    self.seq
+  }
+
+  /// When the ack was observed.
+  #[inline(always)]
+  pub const fn at(&self) -> std::time::Instant {
+    self.at
+  }
+}
+
+/// Payload for [`EndpointEvent::ReliablePingFailed`]: a reliable-fallback ping
+/// failed (timeout, dial error, peer reset, …).
+#[derive(Debug)]
+pub struct ReliablePingFailed {
+  seq: u32,
+}
+
+impl ReliablePingFailed {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(seq: u32) -> Self {
+    Self { seq }
+  }
+
+  /// The sequence number of the original ping.
+  #[inline(always)]
+  pub const fn seq(&self) -> u32 {
+    self.seq
+  }
+}
+
+/// Payload for [`EndpointEvent::StreamClosed`]: a stream completed cleanly.
+#[derive(Debug)]
+pub struct StreamClosed {
+  id: StreamId,
+}
+
+impl StreamClosed {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(id: StreamId) -> Self {
+    Self { id }
+  }
+
+  /// The stream that closed.
+  #[inline(always)]
+  pub const fn id(&self) -> StreamId {
+    self.id
+  }
+}
+
+/// Payload for [`EndpointEvent::StreamErrored`]: a stream errored.
+#[derive(Debug)]
+pub struct StreamErrored {
+  id: StreamId,
+  err: String,
+}
+
+impl StreamErrored {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(id: StreamId, err: String) -> Self {
+    Self { id, err }
+  }
+
+  /// The stream that errored.
+  #[inline(always)]
+  pub const fn id(&self) -> StreamId {
+    self.id
+  }
+
+  /// A human-readable error description.
+  #[inline(always)]
+  pub fn err(&self) -> &str {
+    &self.err
+  }
+}
+
+/// Payload for [`EndpointEvent::UserDataReceived`]: a reliable stream carried
+/// a user-data payload addressed to the application.
+#[derive(Debug)]
+pub struct UserDataReceived<A> {
+  peer: A,
+  data: Bytes,
+}
+
+impl<A> UserDataReceived<A> {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(peer: A, data: Bytes) -> Self {
+    Self { peer, data }
+  }
+
+  /// Peer that sent the data.
+  #[inline(always)]
+  pub const fn peer_ref(&self) -> &A {
+    &self.peer
+  }
+
+  /// The payload bytes.
+  #[inline(always)]
+  pub const fn data_ref(&self) -> &Bytes {
+    &self.data
+  }
+
+  /// Consume the payload into its (peer, data) parts.
+  #[inline(always)]
+  pub fn into_parts(self) -> (A, Bytes) {
+    (self.peer, self.data)
+  }
 }
 
 /// Event from a [`Stream`](super::endpoint) back to the [`Endpoint`].
@@ -406,60 +796,62 @@ pub enum EndpointEvent<I, A> {
   /// An inbound (peer-initiated) push/pull stream decoded the peer's request.
   /// The Endpoint should buffer a merge AND respond with our own state via
   /// `StreamCommand::SendPushPullResponse`.
-  PushPullRequestReceived {
-    /// Peer that initiated the exchange.
-    peer: A,
-    /// Their snapshot of cluster state.
-    states: Vec<PushNodeState<I, A>>,
-    /// Application-level payload they attached.
-    user_data: Bytes,
-    /// Whether they consider this a join or periodic anti-entropy.
-    kind: PushPullKind,
-  },
+  PushPullRequestReceived(PushPullRequestReceived<I, A>),
   /// An outbound (we-initiated) push/pull stream decoded the peer's reply.
   /// The Endpoint should buffer a merge. No response is needed — we wrote ours
   /// before they replied.
-  PushPullReplyReceived {
-    /// Peer that replied.
-    peer: A,
-    /// Their snapshot of cluster state.
-    states: Vec<PushNodeState<I, A>>,
-    /// Application-level payload they attached.
-    user_data: Bytes,
-    /// Whether the original outbound exchange was a join or refresh.
-    kind: PushPullKind,
-  },
+  PushPullReplyReceived(PushPullReplyReceived<I, A>),
   /// A reliable-fallback ping was acknowledged.
-  ReliablePingAcked {
-    /// The sequence number of the original ping.
-    seq: u32,
-    /// When the ack was observed.
-    at: std::time::Instant,
-  },
+  ReliablePingAcked(ReliablePingAcked),
   /// A reliable-fallback ping failed (timeout, dial error, peer reset, …).
-  ReliablePingFailed {
-    /// The sequence number of the original ping.
-    seq: u32,
-  },
+  ReliablePingFailed(ReliablePingFailed),
   /// The driver is informing the Endpoint that a stream completed cleanly.
-  StreamClosed {
-    /// The stream that closed.
-    id: StreamId,
-  },
+  StreamClosed(StreamClosed),
   /// The driver is informing the Endpoint that a stream errored.
-  StreamErrored {
-    /// The stream that errored.
-    id: StreamId,
-    /// A human-readable error description.
-    err: String,
-  },
+  StreamErrored(StreamErrored),
   /// A reliable-stream carried a user-data payload addressed to the application.
-  UserDataReceived {
-    /// Peer that sent the data.
-    peer: A,
-    /// The payload bytes.
-    data: Bytes,
-  },
+  UserDataReceived(UserDataReceived<A>),
+}
+
+/// Payload for [`StreamCommand::SendPushPullResponse`]: the local node's state
+/// snapshot to ship back as the response to an inbound push/pull.
+#[derive(Debug)]
+pub struct SendPushPullResponse<I, A> {
+  local_states: Vec<PushNodeState<I, A>>,
+  user_data: Bytes,
+}
+
+impl<I, A> SendPushPullResponse<I, A> {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(local_states: Vec<PushNodeState<I, A>>, user_data: Bytes) -> Self {
+    Self {
+      local_states,
+      user_data,
+    }
+  }
+
+  /// The local node's view of cluster state to ship back, in wire-format
+  /// `PushNodeState` (carries incarnation, state, protocol/delegate
+  /// versions). The Endpoint builds this from each `LocalNodeState`
+  /// before handing it off; the driver passes it directly to
+  /// `Endpoint::encode_push_pull_response`.
+  #[inline(always)]
+  pub fn local_states_slice(&self) -> &[PushNodeState<I, A>] {
+    self.local_states.as_slice()
+  }
+
+  /// Application-level payload to ship alongside.
+  #[inline(always)]
+  pub const fn user_data_ref(&self) -> &Bytes {
+    &self.user_data
+  }
+
+  /// Consume the payload into its (local_states, user_data) parts.
+  #[inline(always)]
+  pub fn into_parts(self) -> (Vec<PushNodeState<I, A>>, Bytes) {
+    (self.local_states, self.user_data)
+  }
 }
 
 /// Command [`Endpoint::handle_stream_event`] hands back to the driver to route
@@ -467,16 +859,7 @@ pub enum EndpointEvent<I, A> {
 #[derive(Debug)]
 pub enum StreamCommand<I, A> {
   /// Send this snapshot back to the peer (response to inbound push/pull).
-  SendPushPullResponse {
-    /// The local node's view of cluster state to ship back, in wire-format
-    /// `PushNodeState` (carries incarnation, state, protocol/delegate
-    /// versions). The Endpoint builds this from each `LocalNodeState`
-    /// before handing it off; the driver passes it directly to
-    /// `Endpoint::encode_push_pull_response`.
-    local_states: Vec<PushNodeState<I, A>>,
-    /// Application-level payload to ship alongside.
-    user_data: Bytes,
-  },
+  SendPushPullResponse(SendPushPullResponse<I, A>),
   /// Force-close the stream (e.g. `allow_merge` returned false).
   Close,
 }

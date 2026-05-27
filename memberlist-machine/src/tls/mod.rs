@@ -19,10 +19,7 @@ use std::time::Instant;
 
 use rustls::pki_types::ServerName;
 
-use crate::{
-  addr_bridge::AddrBridge,
-  streams::transport::{Intake, StreamTransport},
-};
+use crate::streams::transport::{Intake, StreamTransport};
 
 pub use options::TlsOptions;
 pub use records::TlsRecords;
@@ -41,12 +38,12 @@ impl StreamTransport for TlsRecords {
   type DialContext = ServerName<'static>;
   type ConstructError = rustls::Error;
 
-  fn dial_context<A, B>(addr: &A) -> Result<ServerName<'static>, &'static str>
-  where
-    B: AddrBridge<A>,
-  {
-    let sn = B::server_name(addr).ok_or("tls bridge returned None for server_name")?;
-    ServerName::try_from(sn.as_ref().to_owned()).map_err(|_| "tls server_name failed to parse")
+  fn dial_context<A>(
+    _addr: &A,
+    server_name: Option<&str>,
+  ) -> Result<ServerName<'static>, &'static str> {
+    let sn = server_name.ok_or("tls dial_context called without server_name")?;
+    ServerName::try_from(sn.to_owned()).map_err(|_| "tls server_name failed to parse")
   }
 
   fn dialer(opts: &Self::Options, ctx: Self::DialContext) -> Result<Self, Self::ConstructError> {
@@ -126,7 +123,7 @@ mod tests {
   fn tls_endpoint_type_is_constructible_signature() {
     // Behavioural coverage is tls_conformance (needs the sim clock + a peer +
     // the virtual TCP). This guards the public constructor signature only.
-    fn _sig<I, A, B>()
+    fn _sig<I, A>()
     where
       I: memberlist_wire::Id
         + memberlist_wire::Data
@@ -145,13 +142,14 @@ mod tests {
         + Send
         + Sync
         + 'static,
-      B: super::AddrBridge<A>,
     {
       let _: fn(
         crate::endpoint::Endpoint<I, A>,
         super::TlsOptions,
-      ) -> crate::streams::StreamEndpoint<I, A, B, crate::tls::records::TlsRecords> =
-        crate::streams::StreamEndpoint::<I, A, B, crate::tls::records::TlsRecords>::new;
+        Box<dyn Fn(&A) -> Option<String> + Send + Sync>,
+        Box<dyn Fn(&A) -> std::net::SocketAddr + Send + Sync>,
+      ) -> crate::streams::StreamEndpoint<I, A, crate::tls::records::TlsRecords> =
+        crate::streams::StreamEndpoint::<I, A, crate::tls::records::TlsRecords>::new;
     }
   }
 
@@ -172,7 +170,7 @@ mod tests {
     use crate::{
       streams::{
         StreamEndpoint,
-        test_support::{IdentityBridge, endpoint},
+        test_support::{endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -180,8 +178,9 @@ mod tests {
     let ep = endpoint(7300);
     let cfg = TlsOptions::new(test_server(), test_client());
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0xAB; 32])));
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, TlsRecords> =
-      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
+        .with_encryption(opts);
     let datagram = b"tls gossip body".to_vec();
     let on_wire = coord.encrypt_gossip(&datagram).expect("encrypt");
     assert_ne!(
@@ -211,15 +210,15 @@ mod tests {
     use crate::{
       streams::{
         StreamEndpoint,
-        test_support::{IdentityBridge, endpoint},
+        test_support::{endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
     };
 
     let ep = endpoint(7301);
     let cfg = TlsOptions::new(test_server(), test_client());
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, TlsRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
     let datagram = b"a gossip body".to_vec();
     let on_wire = coord.encrypt_gossip(&datagram).expect("identity");
     assert_eq!(on_wire, datagram, "no keyring -> identity transform");
@@ -246,7 +245,7 @@ mod tests {
     use crate::{
       streams::{
         StreamEndpoint,
-        test_support::{IdentityBridge, endpoint},
+        test_support::{endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -255,8 +254,9 @@ mod tests {
     let cfg = TlsOptions::new(test_server(), test_client());
     let kr = Keyring::new(SecretKey::ChaCha20Poly1305([0x42; 32]));
     let opts = EncryptionOptions::new().with_keyring(kr);
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, TlsRecords> =
-      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
+        .with_encryption(opts);
     let datagram = b"this gossip must not go out plaintext".to_vec();
     let err = coord
       .encrypt_gossip(&datagram)
@@ -287,7 +287,7 @@ mod tests {
     use crate::{
       streams::{
         StreamEndpoint,
-        test_support::{IdentityBridge, endpoint},
+        test_support::{endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -295,8 +295,9 @@ mod tests {
     let ep = endpoint(7303);
     let cfg = TlsOptions::new(test_server(), test_client());
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, TlsRecords> =
-      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
+        .with_encryption(opts);
     let plain_ping = encode_plain_frame(MessageTag::Ping, b"opaque-body").expect("encode");
     let result = coord.decrypt_gossip(&plain_ping);
     assert!(
@@ -325,7 +326,7 @@ mod tests {
       endpoint::Endpoint,
       streams::{
         StreamEndpoint,
-        test_support::{IdentityBridge, addr},
+        test_support::{addr, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -334,8 +335,9 @@ mod tests {
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
     let cfg = TlsOptions::new(test_server(), test_client());
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, TlsRecords> =
-      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
+        .with_encryption(opts);
     let plaintext = vec![0xab; 1200];
     let on_wire = coord
       .encrypt_gossip(&plaintext)
@@ -375,7 +377,7 @@ mod tests {
       endpoint::Endpoint,
       streams::{
         StreamEndpoint,
-        test_support::{IdentityBridge, addr},
+        test_support::{addr, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -383,8 +385,8 @@ mod tests {
     let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7305)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
     let cfg = TlsOptions::new(test_server(), test_client());
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, TlsRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
     assert_eq!(
       coord.gossip_mtu(),
       1200,
@@ -410,7 +412,7 @@ mod tests {
     use crate::{
       streams::{
         StreamEndpoint,
-        test_support::{IdentityBridge, addr, endpoint},
+        test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -418,8 +420,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7306);
     let cfg = TlsOptions::new(test_server(), test_client());
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, TlsRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // Queue a plaintext gossip datagram under disabled encryption.
     let peer = addr(7307);
@@ -462,7 +464,7 @@ mod tests {
     use crate::{
       streams::{
         StreamEndpoint,
-        test_support::{IdentityBridge, addr, endpoint},
+        test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
       },
       tls::options::tests::{test_client, test_server},
     };
@@ -472,8 +474,9 @@ mod tests {
     let cfg = TlsOptions::new(test_server(), test_client());
     let key = SecretKey::Aes256([0x42; 32]);
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, TlsRecords> =
-      StreamEndpoint::new(ep, cfg).with_encryption(opts.clone());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
+        .with_encryption(opts.clone());
 
     // Queue a gossip datagram under the enabled policy. (The strict-mode
     // entry check fires on `decrypt_gossip`, not `handle_gossip` — gossip
@@ -497,6 +500,52 @@ mod tests {
       &opts,
       "the no-op reapply still publishes the (identical) options as the \
        endpoint's current configuration",
+    );
+  }
+
+  /// Regression: an outbound dial whose `R::dial_context` rejects the per-peer
+  /// SNI must drop its `pending_outbound_kinds` entry on the failure path.
+  /// `TlsRecords::dial_context` requires a non-`None` `server_name` and
+  /// returns `Err` otherwise; sustained TLS SNI failures (e.g. a
+  /// misconfigured per-peer SAN deployment) would otherwise accumulate
+  /// entries in `pending_outbound_kinds` unbounded.
+  #[test]
+  fn dial_context_failure_does_not_leak_pending_outbound_kinds() {
+    use std::{net::SocketAddr, time::Instant};
+
+    use smol_str::SmolStr;
+
+    use super::{TlsOptions, TlsRecords};
+    use crate::{
+      event::PushPullKind,
+      streams::{
+        StreamEndpoint,
+        test_support::{addr, endpoint, test_peer_to_socket},
+      },
+      tls::options::tests::{test_client, test_server},
+    };
+
+    let now = Instant::now();
+    let ep = endpoint(7310);
+    let cfg = TlsOptions::new(test_server(), test_client());
+    // SNI provider returns `None`. `TlsRecords::dial_context` rejects with
+    // "tls dial_context called without server_name", which routes through the
+    // pre-`ExchangeMeta` `dial_failed` path inside `service_dials`.
+    let sni: Box<dyn Fn(&SocketAddr) -> Option<String> + Send + Sync> = Box::new(|_| None);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+      StreamEndpoint::new(ep, cfg, sni, test_peer_to_socket());
+
+    let _sid = coord.start_push_pull(addr(7000), PushPullKind::Refresh, now);
+
+    assert_eq!(
+      coord.pending_outbound_kinds_len(),
+      0,
+      "pending_outbound_kinds must drain on dial_context failure",
+    );
+    assert_eq!(
+      coord.live_bridge_count(),
+      0,
+      "no bridge is allocated when dial_context rejects the per-peer SNI",
     );
   }
 }

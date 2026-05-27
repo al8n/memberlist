@@ -209,10 +209,8 @@ pub trait Data: core::fmt::Debug + Send + Sync {
 /// [`EncodeError::InsufficientBuffer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InsufficientBufferCapacity {
-  /// The buffer capacity required to encode the value.
-  pub required: usize,
-  /// The buffer capacity remaining at the time of the error.
-  pub remaining: usize,
+  required: usize,
+  remaining: usize,
 }
 
 impl InsufficientBufferCapacity {
@@ -223,6 +221,34 @@ impl InsufficientBufferCapacity {
       required,
       remaining,
     }
+  }
+
+  /// The buffer capacity required to encode the value.
+  #[inline(always)]
+  pub const fn required(&self) -> usize {
+    self.required
+  }
+
+  /// The buffer capacity remaining at the time of the error.
+  #[inline(always)]
+  pub const fn remaining(&self) -> usize {
+    self.remaining
+  }
+
+  /// Replace the `required` capacity in place (kept for
+  /// [`EncodeError::update`]; not part of the accessor-only surface
+  /// callers should drive directly).
+  #[inline(always)]
+  pub(crate) fn set_required(&mut self, required: usize) {
+    self.required = required;
+  }
+
+  /// Replace the `remaining` capacity in place (kept for
+  /// [`EncodeError::update`]; not part of the accessor-only surface
+  /// callers should drive directly).
+  #[inline(always)]
+  pub(crate) fn set_remaining(&mut self, remaining: usize) {
+    self.remaining = remaining;
   }
 }
 
@@ -270,8 +296,8 @@ impl EncodeError {
   pub fn update(mut self, required: usize, remaining: usize) -> Self {
     match self {
       Self::InsufficientBuffer(ref mut cap) => {
-        cap.required = required;
-        cap.remaining = remaining;
+        cap.set_required(required);
+        cap.set_remaining(remaining);
         self
       }
       _ => self,
@@ -316,10 +342,8 @@ impl From<Cow<'static, str>> for EncodeError {
 /// Payload for [`DecodeError::MissingField`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MissingFieldInfo {
-  /// The type of the message.
-  pub ty: &'static str,
-  /// The name of the missing field.
-  pub field: &'static str,
+  ty: &'static str,
+  field: &'static str,
 }
 
 impl MissingFieldInfo {
@@ -327,6 +351,18 @@ impl MissingFieldInfo {
   #[inline(always)]
   pub const fn new(ty: &'static str, field: &'static str) -> Self {
     Self { ty, field }
+  }
+
+  /// The type of the message.
+  #[inline(always)]
+  pub const fn ty(&self) -> &'static str {
+    self.ty
+  }
+
+  /// The name of the missing field.
+  #[inline(always)]
+  pub const fn field(&self) -> &'static str {
+    self.field
   }
 }
 
@@ -339,12 +375,9 @@ impl std::fmt::Display for MissingFieldInfo {
 /// Payload for [`DecodeError::DuplicateField`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DuplicateFieldInfo {
-  /// The type of the message.
-  pub ty: &'static str,
-  /// The name of the duplicate field.
-  pub field: &'static str,
-  /// The wire tag of the field.
-  pub tag: u8,
+  ty: &'static str,
+  field: &'static str,
+  tag: u8,
 }
 
 impl DuplicateFieldInfo {
@@ -352,6 +385,24 @@ impl DuplicateFieldInfo {
   #[inline(always)]
   pub const fn new(ty: &'static str, field: &'static str, tag: u8) -> Self {
     Self { ty, field, tag }
+  }
+
+  /// The type of the message.
+  #[inline(always)]
+  pub const fn ty(&self) -> &'static str {
+    self.ty
+  }
+
+  /// The name of the duplicate field.
+  #[inline(always)]
+  pub const fn field(&self) -> &'static str {
+    self.field
+  }
+
+  /// The wire tag of the field.
+  #[inline(always)]
+  pub const fn tag(&self) -> u8 {
+    self.tag
   }
 }
 
@@ -368,12 +419,9 @@ impl std::fmt::Display for DuplicateFieldInfo {
 /// Payload for [`DecodeError::UnknownWireType`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownWireTypeInfo {
-  /// The type of the message being decoded.
-  pub ty: &'static str,
-  /// The unknown wire-type value encountered.
-  pub value: u8,
-  /// The field tag associated with the unknown wire type.
-  pub tag: u8,
+  ty: &'static str,
+  value: u8,
+  tag: u8,
 }
 
 impl UnknownWireTypeInfo {
@@ -381,6 +429,24 @@ impl UnknownWireTypeInfo {
   #[inline(always)]
   pub const fn new(ty: &'static str, value: u8, tag: u8) -> Self {
     Self { ty, value, tag }
+  }
+
+  /// The type of the message being decoded.
+  #[inline(always)]
+  pub const fn ty(&self) -> &'static str {
+    self.ty
+  }
+
+  /// The unknown wire-type value encountered.
+  #[inline(always)]
+  pub const fn value(&self) -> u8 {
+    self.value
+  }
+
+  /// The field tag associated with the unknown wire type.
+  #[inline(always)]
+  pub const fn tag(&self) -> u8 {
+    self.tag
   }
 }
 
@@ -397,10 +463,8 @@ impl std::fmt::Display for UnknownWireTypeInfo {
 /// Payload for [`DecodeError::UnknownTag`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownTagInfo {
-  /// The type of the message being decoded.
-  pub ty: &'static str,
-  /// The unknown tag value encountered.
-  pub tag: u8,
+  ty: &'static str,
+  tag: u8,
 }
 
 impl UnknownTagInfo {
@@ -408,6 +472,18 @@ impl UnknownTagInfo {
   #[inline(always)]
   pub const fn new(ty: &'static str, tag: u8) -> Self {
     Self { ty, tag }
+  }
+
+  /// The type of the message being decoded.
+  #[inline(always)]
+  pub const fn ty(&self) -> &'static str {
+    self.ty
+  }
+
+  /// The unknown tag value encountered.
+  #[inline(always)]
+  pub const fn tag(&self) -> u8 {
+    self.tag
   }
 }
 

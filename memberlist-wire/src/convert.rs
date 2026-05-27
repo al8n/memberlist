@@ -38,12 +38,9 @@ use smol_str::SmolStr;
 /// Payload for [`ConvertError::AddrLengthMismatch`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddrLengthMismatchInfo {
-  /// The version tag found in the buffer.
-  pub version: u8,
-  /// Bytes required for that version (7 for v4, 19 for v6).
-  pub expected: usize,
-  /// Bytes the caller supplied.
-  pub actual: usize,
+  version: u8,
+  expected: usize,
+  actual: usize,
 }
 
 impl AddrLengthMismatchInfo {
@@ -55,6 +52,24 @@ impl AddrLengthMismatchInfo {
       expected,
       actual,
     }
+  }
+
+  /// The version tag found in the buffer.
+  #[inline(always)]
+  pub const fn version(&self) -> u8 {
+    self.version
+  }
+
+  /// Bytes required for that version (7 for v4, 19 for v6).
+  #[inline(always)]
+  pub const fn expected(&self) -> usize {
+    self.expected
+  }
+
+  /// Bytes the caller supplied.
+  #[inline(always)]
+  pub const fn actual(&self) -> usize {
+    self.actual
   }
 }
 

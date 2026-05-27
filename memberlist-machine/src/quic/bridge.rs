@@ -25,7 +25,7 @@ use super::conn::ConnTable;
 use crate::{
   bridge_phase::{BridgeFailure, BridgePhase},
   endpoint::Endpoint,
-  event::{EndpointEvent, StreamCommand, StreamId},
+  event::{EndpointEvent, StreamClosed, StreamCommand, StreamErrored, StreamId},
   stream::Stream,
 };
 
@@ -1005,10 +1005,8 @@ where
     while let Some(ev) = self.stream.poll_endpoint_event() {
       if let Some(cmd) = ep.handle_stream_event(ev, now) {
         match cmd {
-          StreamCommand::SendPushPullResponse {
-            local_states,
-            user_data,
-          } => {
+          StreamCommand::SendPushPullResponse(resp) => {
+            let (local_states, user_data) = resp.into_parts();
             // `handle_stream_event` returns the response state UNENCODED and
             // the inbound stream's `output_buf` is still empty: the driver
             // must encode the snapshot and load it into the stream before
@@ -1039,6 +1037,9 @@ where
               Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
             Endpoint::<I, A>::stream_load_response(&mut self.stream, encoded, response_deadline);
             self.deadline = response_deadline;
+            // Ignoring Err: `pump_out` failing here terminalizes the bridge,
+            // which the next-tick `pump_bridges` reap reflects as
+            // `StreamErrored` — no separate action to take.
             let _ = self.pump_out(conns, now);
           }
           StreamCommand::Close => {
@@ -1082,13 +1083,10 @@ where
             "encryption policy changed mid-exchange".to_string()
           }
         };
-        EndpointEvent::StreamErrored { id, err }
+        EndpointEvent::StreamErrored(StreamErrored::new(id, err))
       }
-      (_, Some(e)) => EndpointEvent::StreamErrored {
-        id,
-        err: e.to_string(),
-      },
-      _ => EndpointEvent::StreamClosed { id },
+      (_, Some(e)) => EndpointEvent::StreamErrored(StreamErrored::new(id, e.to_string())),
+      _ => EndpointEvent::StreamClosed(StreamClosed::new(id)),
     };
     // Ignoring Err: `handle_stream_event` returning a `StreamCommand` on
     // the post-payload lifecycle notice (`StreamClosed`/`StreamErrored`)
@@ -1154,10 +1152,8 @@ where
     while let Some(ev) = self.stream.poll_endpoint_event() {
       if let Some(cmd) = ep.handle_stream_event(ev, now) {
         match cmd {
-          StreamCommand::SendPushPullResponse {
-            local_states,
-            user_data,
-          } => {
+          StreamCommand::SendPushPullResponse(resp) => {
+            let (local_states, user_data) = resp.into_parts();
             // Mirror `drain_then_reap`'s response-deadline refresh: the
             // bridge-level `self.deadline` is advanced to the SAME `now + 5s`
             // value `stream_load_response` writes into the inner stream's
@@ -1170,6 +1166,8 @@ where
               Endpoint::<I, A>::encode_push_pull_response(&local_states, user_data, false);
             Endpoint::<I, A>::stream_load_response(&mut self.stream, encoded, response_deadline);
             self.deadline = response_deadline;
+            // Ignoring Err: a `pump_out` failure terminalizes the bridge,
+            // which the next-tick `pump_bridges` reap reflects.
             let _ = self.pump_out(conns, now);
           }
           StreamCommand::Close => {
@@ -1272,7 +1270,7 @@ mod tests {
     assert!(
       !ep
         .poll_event()
-        .is_some_and(|ev| matches!(ev, Event::UserPacket { .. })),
+        .is_some_and(|ev| matches!(ev, Event::UserPacket(..))),
       "no UserPacket may be queued before any drain"
     );
 
@@ -1296,7 +1294,7 @@ mod tests {
     bridge.drain_payload_only(&mut ep, &mut conns, t0);
     let ev = ep.poll_event();
     assert!(
-      matches!(&ev, Some(Event::UserPacket { data, .. }) if data.as_ref() == b"hello"),
+      matches!(&ev, Some(Event::UserPacket(p)) if p.data_ref().as_ref() == b"hello"),
       "drain_payload_only on a RecvClosed bridge MUST commit the \
        queued UserData event — got {ev:?}"
     );
@@ -1372,7 +1370,7 @@ mod tests {
     // either.
     let mut saw_user_packet = false;
     while let Some(ev) = ep.poll_event() {
-      if matches!(ev, Event::UserPacket { .. }) {
+      if matches!(ev, Event::UserPacket(..)) {
         saw_user_packet = true;
       }
     }

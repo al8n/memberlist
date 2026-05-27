@@ -200,9 +200,9 @@ impl ConnTable {
     //                   remote: SocketAddr, server_name: &str)
     //                   -> Result<(ConnectionHandle, Connection), ConnectError>
     // `server_name` is the rustls verification identity for the peer's
-    // cert — sourced from `AddrBridge::server_name(peer_a)` so the
-    // verification name is keyed on the membership address (not a
-    // hardcoded constant). quinn-proto forwards it verbatim to
+    // cert — supplied by the driver's SNI provider so the verification
+    // name is keyed on the membership address (not a hardcoded constant).
+    // quinn-proto forwards it verbatim to
     // `config.crypto.start_session(version, server_name, ...)`; the
     // rustls-backed `start_session` parses it via `ServerName::try_from`
     // and feeds the result to the configured `ServerCertVerifier`.
@@ -313,6 +313,10 @@ impl ConnTable {
     // Signature:
     // Endpoint::handle_event(&mut self, ch: ConnectionHandle, event: EndpointEvent)
     //                        -> Option<ConnectionEvent>
+    //
+    // Ignoring the returned `Option<ConnectionEvent>`: a `drained()` event is
+    // a terminal endpoint-level retire — quinn returns `None` here in
+    // practice and no further connection-level work is owed.
     let _ = quinn.handle_event(ch, quinn_proto::EndpointEvent::drained());
     if let Some(e) = self.conns.try_remove(ch.0) {
       if self.peers.get(&e.peer).copied() == Some(ch) {
@@ -347,6 +351,7 @@ mod tests {
       test_server(),
       test_client(),
       quinn_proto::TransportConfig::default(),
+      "localhost",
     );
     let client = QuinnEndpoint::new(cfg.endpoint_arc(), None, true, Some([0x5a; 32]));
     let server = QuinnEndpoint::new(
@@ -485,7 +490,7 @@ mod tests {
     // Drive the OLD connection to `Drained` and confirm its slab slot is
     // cleared while the new mapping is preserved (Part B equality guard).
     for _ in 0..5000 {
-      if t.get(ch1).map_or(true, |e| e.conn_ref().is_drained()) {
+      if t.get(ch1).is_none_or(|e| e.conn_ref().is_drained()) {
         break;
       }
       match t.get_mut(ch1).unwrap().conn_mut().poll_timeout() {
@@ -565,7 +570,9 @@ mod tests {
       .get_or_dial(&mut client, now, cfg.client().clone(), peer, "localhost")
       .unwrap();
     assert!(!t.conns.get(ch.0).unwrap().established_at_least_once);
-    // `conn_mut` on a handshaking conn: flag stays `false`.
+    // `conn_mut` on a handshaking conn: flag stays `false`. The returned
+    // `&mut Connection` is the side effect we want to exercise; the binding
+    // itself is discarded.
     let _ = t.get_mut(ch).unwrap().conn_mut();
     assert!(!t.conns.get(ch.0).unwrap().established_at_least_once);
     // Synthesize the Established observation by stepping the conn into
@@ -581,7 +588,9 @@ mod tests {
       .unwrap()
       .conn_mut()
       .close(now, 0u32.into(), bytes::Bytes::new());
-    // Closed state — `conn_mut` must NOT clear the sticky flag.
+    // Closed state — `conn_mut` must NOT clear the sticky flag. The
+    // returned `&mut Connection` is exercised for its side effect; the
+    // binding itself is discarded.
     let _ = t.get_mut(ch).unwrap().conn_mut();
     assert!(
       t.conns.get(ch.0).unwrap().established_at_least_once,
@@ -680,7 +689,7 @@ mod tests {
     // to Drained and confirm the equality-guarded `reap_if_drained`
     // clears the OLD slab slot without clobbering the NEW canonical.
     for _ in 0..5000 {
-      if t.get(ch1).map_or(true, |e| e.conn_ref().is_drained()) {
+      if t.get(ch1).is_none_or(|e| e.conn_ref().is_drained()) {
         break;
       }
       match t.get_mut(ch1).unwrap().conn_mut().poll_timeout() {

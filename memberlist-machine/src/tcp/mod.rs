@@ -20,10 +20,7 @@ mod records;
 
 use std::time::Instant;
 
-use crate::{
-  addr_bridge::AddrBridge,
-  streams::transport::{Intake, StreamTransport},
-};
+use crate::streams::transport::{Intake, StreamTransport};
 
 pub use options::TcpOptions;
 pub use records::RawRecords;
@@ -43,10 +40,7 @@ impl StreamTransport for RawRecords {
   type DialContext = ();
   type ConstructError = core::convert::Infallible;
 
-  fn dial_context<A, B>(_addr: &A) -> Result<(), &'static str>
-  where
-    B: AddrBridge<A>,
-  {
+  fn dial_context<A>(_addr: &A, _server_name: Option<&str>) -> Result<(), &'static str> {
     Ok(())
   }
 
@@ -117,34 +111,14 @@ mod tests {
 
   use super::{TcpOptions, records::RawRecords};
   use crate::{
-    addr_bridge::AddrBridge,
     config::EndpointConfig,
     endpoint::Endpoint,
     event::{Event, PushPullKind},
     streams::{
       ConnectInfo, ExchangeId, ExchangeRef, StreamAction, StreamEndpoint,
-      test_support::{addr, endpoint},
+      test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
     },
   };
-
-  /// Identity `AddrBridge` for `A = SocketAddr`, matching the sim harness's
-  /// shape. The `server_name` accessor is unused on the plain-TCP path (no
-  /// certificate verification) but must be supplied for the trait.
-  struct IdentityBridge;
-
-  impl AddrBridge<SocketAddr> for IdentityBridge {
-    type ServerName = str;
-
-    fn to_socket(addr: &SocketAddr) -> SocketAddr {
-      *addr
-    }
-    fn from_socket(socket: SocketAddr) -> SocketAddr {
-      socket
-    }
-    fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
-      None
-    }
-  }
 
   /// Public-constructor signature check. Mirrors
   /// `tls::tests::tls_endpoint_type_is_constructible_signature`; behavioural
@@ -153,8 +127,8 @@ mod tests {
   fn tcp_endpoint_type_is_constructible_signature() {
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
     assert_eq!(coord.live_bridge_count(), 0);
   }
 
@@ -183,7 +157,7 @@ mod tests {
   /// `start_push_pull` sieves the `Event::DialRequested` it emits into the
   /// private dial queue (it must NEVER leak through `poll_event`) and the
   /// in-band `service_dials` + `flush_outbound` surfaces the `Connect` action
-  /// + the dialer's label prefix in the SAME call. The strict-poll
+  /// and the dialer's label prefix in the SAME call. The strict-poll
   /// self-sufficiency seam: a driver using only the public poll surface sees
   /// the dial proceed without a separate `handle_timeout` pre-pump.
   #[test]
@@ -191,8 +165,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     let _sid = coord.start_push_pull(addr(7000), PushPullKind::Refresh, now);
 
@@ -210,7 +184,7 @@ mod tests {
     // No DialRequested leaks through poll_event.
     while let Some(ev) = coord.poll_event() {
       assert!(
-        !matches!(ev, Event::DialRequested { .. }),
+        !matches!(ev, Event::DialRequested(..)),
         "DialRequested must NEVER leak through poll_event",
       );
     }
@@ -245,8 +219,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // Start an outbound user-message exchange. The dialer label step settles
     // at construction (no inbound to read), the Stream is minted in the
@@ -320,8 +294,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // Repeatedly ticking with no bridges is safe and a no-op on the bridge
     // pump — the ordering invariant means the inner endpoint advances cleanly.
@@ -339,12 +313,14 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     let id = coord.accept_connection(addr(7000), now);
     assert_eq!(coord.live_bridge_count(), 1);
-    let _ = id; // monotonic, exercised in StreamConns tests
+    // The handle's monotonic-id property is exercised in StreamConns tests;
+    // this assertion only proves the bridge was inserted.
+    let _ = id;
 
     assert!(
       coord.poll_action().is_none(),
@@ -382,8 +358,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // Inject a DialRequested directly into the private dial queue — the
     // shape `Endpoint::handle_timeout` would produce when SWIM arms the
@@ -397,6 +373,8 @@ mod tests {
       7,
       now + Duration::from_secs(5),
     );
+    // The returned StreamId is not consulted; the test asserts on the
+    // coordinator's pumped state below.
     let _ = sid;
 
     // ONE handle_timeout(now): step (3) sieves the DialRequested → dial_pending,
@@ -458,8 +436,8 @@ mod tests {
     // `handle_transport_data` and the same-tick EOF rides the same call.
     let server_ep = endpoint(server_addr.port());
     let cfg_s = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut server: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(server_ep, cfg_s);
+    let mut server: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(server_ep, cfg_s, test_sni_provider(), test_peer_to_socket());
     let server_exchange = server.accept_connection(dialer_addr, now);
     assert_eq!(server.live_bridge_count(), 1);
 
@@ -469,8 +447,8 @@ mod tests {
     // flushes outbound in-band).
     let dialer_ep = endpoint(dialer_addr.port());
     let cfg_d = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut dialer: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(dialer_ep, cfg_d);
+    let mut dialer: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(dialer_ep, cfg_d, test_sni_provider(), test_peer_to_socket());
     let payload = Bytes::from_static(b"coalesced-with-eof");
     let _sid = dialer.start_user_message(server_addr, payload.clone(), now);
     // The user message reaches Done on the dialer this tick, so a second
@@ -503,8 +481,8 @@ mod tests {
     // event would still surface, but only after the 10 s accept deadline).
     let mut got = None;
     while let Some(ev) = server.poll_event() {
-      if let Event::UserPacket { data, .. } = ev {
-        got = Some(data);
+      if let Event::UserPacket(p) = ev {
+        got = Some(p.into_parts().1);
       }
     }
     assert_eq!(
@@ -568,8 +546,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // Simulate step (2) `pump_bridges` enqueuing a `Shutdown` for an
     // existing bridge by pushing one directly to the teardown queue (the
@@ -644,8 +622,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     let reaped = ExchangeId::new(99);
     coord.push_teardown(StreamAction::Close(ExchangeRef::new(reaped)));
@@ -714,8 +692,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // One-way user-message: the dialer's request and its half-close anchor
     // both land in the in-band `flush_outbound` tick.
@@ -820,8 +798,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) Dial an outbound push/pull. The in-band `service_dials` +
     // `flush_outbound` builds and promotes the bridge in the SAME tick and
@@ -935,8 +913,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) Driver accepts an inbound TCP connection from a wrong-cluster
     // peer. The acceptor's `RawRecords::outbound` is populated with the
@@ -1028,8 +1006,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) Driver accepts an inbound connection; the acceptor queues
     // `[12][9]["cluster-x"]` in `RawRecords::outbound` at construction.
@@ -1112,8 +1090,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) Driver accepts an inbound TCP connection; the acceptor is
     // Handshaking with an EMPTY `records.outbound` (lazy queue not yet
@@ -1187,8 +1165,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) Accept the connection; nothing on the wire yet.
     let exchange = coord.accept_connection(addr(7000), now);
@@ -1276,10 +1254,12 @@ mod tests {
     // into `out_transmit`.
     let dialer_ep = endpoint(dialer_addr.port());
     let cfg_d = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut dialer: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(dialer_ep, cfg_d);
+    let mut dialer: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(dialer_ep, cfg_d, test_sni_provider(), test_peer_to_socket());
     let _sid = dialer.start_push_pull(server_addr, PushPullKind::Join, now);
     // Drain the `Connect` so the natural drain loop below sees only bytes.
+    // The action's payload is asserted on by `.expect(...)`; only the
+    // binding is discarded.
     let _ = dialer
       .poll_action()
       .expect("dialer's first poll_action is the Connect");
@@ -1304,8 +1284,8 @@ mod tests {
     // bridge is Handshaking; the lazy outbound label has NOT fired yet.
     let server_ep = endpoint(server_addr.port());
     let cfg_s = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut server: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(server_ep, cfg_s);
+    let mut server: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(server_ep, cfg_s, test_sni_provider(), test_peer_to_socket());
     let server_exchange = server.accept_connection(dialer_addr, now);
 
     // (3) First transport read: ONLY the dialer's label prefix, no FIN.
@@ -1471,8 +1451,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7100);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) Create the dial intent in the inner endpoint. This queues a
     // `DialRequested` event in `coord.ep.pending_events` and inserts the
@@ -1598,8 +1578,8 @@ mod tests {
     let opts = CompressionOptions::new()
       .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(64);
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::with_compression(ep, cfg, opts);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::with_compression(ep, cfg, test_sni_provider(), test_peer_to_socket(), opts);
     let datagram = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".repeat(8);
     let on_wire = coord.compress_gossip(&datagram);
     assert!(
@@ -1619,8 +1599,8 @@ mod tests {
     let opts = CompressionOptions::new()
       .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(64);
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::with_compression(ep, cfg, opts);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::with_compression(ep, cfg, test_sni_provider(), test_peer_to_socket(), opts);
     // A wrapper whose orig_len exceeds the gossip MTU cannot be produced by
     // any compliant coordinator. Build one synthetically and assert it is
     // rejected without touching the body (the bomb guard checks orig_len
@@ -1645,8 +1625,8 @@ mod tests {
     let opts = CompressionOptions::new()
       .with_algorithm(CompressAlgorithm::Lz4)
       .with_threshold(1);
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::with_compression(ep, cfg, opts);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::with_compression(ep, cfg, test_sni_provider(), test_peer_to_socket(), opts);
     for len in 1..=1500 {
       // Mostly-varying pattern with a short repeated motif: the backend's
       // saving is small and varies with `len`, ensuring the don't-expand
@@ -1681,8 +1661,8 @@ mod tests {
     let cfg_ep = EndpointConfig::new(SmolStr::new("local"), addr(7240)).with_gossip_mtu(1200);
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
     assert_eq!(
       coord.gossip_mtu(),
       1200,
@@ -1712,8 +1692,9 @@ mod tests {
     let ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg_ep);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
+        .with_encryption(opts);
     // A plaintext datagram at the configured gossip-MTU ceiling.
     let plaintext = vec![0xab; 1200];
     let on_wire = coord
@@ -1747,8 +1728,9 @@ mod tests {
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
     let kr = Keyring::new(SecretKey::Aes256([0x42; 32]));
     let opts = EncryptionOptions::new().with_keyring(kr);
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
+        .with_encryption(opts);
     let datagram = b"a gossip body".to_vec();
     let on_wire = coord.encrypt_gossip(&datagram).expect("encrypt");
     assert_ne!(on_wire, datagram, "encrypted bytes differ from plaintext");
@@ -1765,8 +1747,8 @@ mod tests {
   fn stream_endpoint_gossip_encryption_disabled_is_byte_identical() {
     let ep = endpoint(7201);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
     let datagram = b"a gossip body".to_vec();
     let on_wire = coord.encrypt_gossip(&datagram).expect("identity");
     assert_eq!(on_wire, datagram, "no keyring -> identity transform");
@@ -1791,8 +1773,9 @@ mod tests {
     let ep = endpoint(7205);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(SecretKey::Aes256([0x42; 32])));
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
+        .with_encryption(opts);
     // A plain Ping frame — its leading byte is `MessageTag::Ping`, not
     // `Encrypted`, so the strict-mode entry check inside
     // `unwrap_transforms_with_encryption` MUST reject before any decoding.
@@ -1820,8 +1803,9 @@ mod tests {
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
     let kr = Keyring::new(SecretKey::ChaCha20Poly1305([0x42; 32]));
     let opts = EncryptionOptions::new().with_keyring(kr);
-    let coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg).with_encryption(opts);
+    let coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
+        .with_encryption(opts);
     let datagram = b"this gossip must not go out plaintext".to_vec();
     let err = coord
       .encrypt_gossip(&datagram)
@@ -1861,8 +1845,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7203);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // Drive an outbound dial so the coordinator builds a bridge UNDER the
     // disabled-encryption policy (the default constructor leaves
@@ -1918,8 +1902,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7204);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     coord.start_push_pull(addr(7001), PushPullKind::Refresh, now);
     let connect = coord
@@ -1987,8 +1971,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7205);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) Open a push/pull exchange under disabled encryption. The in-band
     // `service_dials` + `flush_outbound` builds the dialer bridge, promotes
@@ -2092,8 +2076,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7206);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     coord.start_push_pull(addr(7003), PushPullKind::Refresh, now);
     let connect = coord
@@ -2172,8 +2156,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7207);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) `start_push_pull` enqueues a `Connect` for the dial. Do NOT drain
     // it — the regression scenario is precisely that the driver had not yet
@@ -2250,8 +2234,9 @@ mod tests {
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
     let key = SecretKey::Aes256([0x42; 32]);
     let opts = EncryptionOptions::new().with_keyring(Keyring::new(key));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg).with_encryption(opts.clone());
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket())
+        .with_encryption(opts.clone());
 
     // Open a push/pull exchange under the enabled policy; the bridge holds a
     // clone of `opts`. The dial encodes the request as an encrypted unit and
@@ -2352,8 +2337,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7209);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) Open an exchange under disabled encryption. The in-band
     // `start_push_pull` calls `service_dials` + `flush_outbound`, sets
@@ -2461,8 +2446,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7900);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) FIRST operation on a brand-new endpoint: accept an inbound
     // connection. This inserts a server-side bridge into `conns` and anchors
@@ -2565,9 +2550,12 @@ mod tests {
     // blob with `start_push_pull`.
     let dialer_ep = endpoint(dialer_addr.port());
     let cfg_d = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut dialer: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(dialer_ep, cfg_d);
+    let mut dialer: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(dialer_ep, cfg_d, test_sni_provider(), test_peer_to_socket());
     let _sid = dialer.start_push_pull(server_addr, PushPullKind::Join, now);
+    // Drain the `Connect` so the byte-collection loop below sees only the
+    // wire payload. The `expect(...)` asserts the action's existence; the
+    // binding is discarded.
     let _ = dialer
       .poll_action()
       .expect("dialer's first poll_action is the Connect");
@@ -2587,8 +2575,8 @@ mod tests {
     // we will later flip to enabled) and accept the connection.
     let server_ep = endpoint(server_addr.port());
     let cfg_s = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut server: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(server_ep, cfg_s);
+    let mut server: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(server_ep, cfg_s, test_sni_provider(), test_peer_to_socket());
     let server_exchange = server.accept_connection(dialer_addr, now);
 
     // (3) Split-read the dialer's label, tick to drain the acceptor's lazy
@@ -2686,8 +2674,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7700);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) Queue a plaintext gossip datagram under disabled encryption. The
     // bytes are buffered raw in `mem_ingress`; the coordinator does NOT
@@ -2775,8 +2763,8 @@ mod tests {
     let now = Instant::now();
     let ep = endpoint(7800);
     let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
-    let mut coord: StreamEndpoint<SmolStr, SocketAddr, IdentityBridge, RawRecords> =
-      StreamEndpoint::new(ep, cfg);
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> =
+      StreamEndpoint::new(ep, cfg, test_sni_provider(), test_peer_to_socket());
 
     // (1) Open a dialer push/pull under disabled encryption. `start_push_pull`
     // runs `service_dials` + `flush_outbound`, which builds the bridge,

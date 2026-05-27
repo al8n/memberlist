@@ -152,10 +152,8 @@ pub enum AnyMessage {
 /// [`FrameError::Incomplete`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IncompleteFrame {
-  /// Bytes available in the buffer.
-  pub available: usize,
-  /// Bytes required to complete the frame.
-  pub required: usize,
+  available: usize,
+  required: usize,
 }
 
 impl IncompleteFrame {
@@ -166,6 +164,18 @@ impl IncompleteFrame {
       available,
       required,
     }
+  }
+
+  /// Bytes available in the buffer.
+  #[inline(always)]
+  pub const fn available(&self) -> usize {
+    self.available
+  }
+
+  /// Bytes required to complete the frame.
+  #[inline(always)]
+  pub const fn required(&self) -> usize {
+    self.required
   }
 }
 

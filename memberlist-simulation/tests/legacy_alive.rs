@@ -406,9 +406,9 @@ fn alive_node_conflict() {
   // NodeConflict event must be present.
   let mut found_conflict = false;
   while let Some(ev) = c.poll_event(m1) {
-    if let Event::NodeConflict { existing, other } = ev {
-      assert_eq!(existing.id_ref(), &peer_id);
-      assert_eq!(other.id_ref(), &peer_id);
+    if let Event::NodeConflict(p) = ev {
+      assert_eq!(p.existing_ref().id_ref(), &peer_id);
+      assert_eq!(p.other_ref().id_ref(), &peer_id);
       found_conflict = true;
     }
   }

@@ -18,8 +18,7 @@
 //!   (Task E).
 
 use bytes::Bytes;
-use memberlist_machine::Reliability;
-use memberlist_simulation::{Cluster, EndpointConfig, Event, Meta, State};
+use memberlist_simulation::{Cluster, EndpointConfig, Event, Meta, Reliability, State};
 use smol_str::SmolStr;
 use std::{net::SocketAddr, time::Duration};
 
@@ -363,26 +362,22 @@ fn memberlist_send() {
   // Collect UserPacket events from m2 — should contain "ping".
   let mut m2_got_ping = false;
   while let Some(ev) = c.poll_event(a2) {
-    if let Event::UserPacket {
-      data, reliability, ..
-    } = ev
+    if let Event::UserPacket(p) = ev
+      && p.data_ref().as_ref() == b"ping"
+      && p.reliability() == Reliability::Unreliable
     {
-      if data.as_ref() == b"ping" && reliability == Reliability::Unreliable {
-        m2_got_ping = true;
-      }
+      m2_got_ping = true;
     }
   }
 
   // Collect UserPacket events from m1 — should contain "pong".
   let mut m1_got_pong = false;
   while let Some(ev) = c.poll_event(a1) {
-    if let Event::UserPacket {
-      data, reliability, ..
-    } = ev
+    if let Event::UserPacket(p) = ev
+      && p.data_ref().as_ref() == b"pong"
+      && p.reliability() == Reliability::Unreliable
     {
-      if data.as_ref() == b"pong" && reliability == Reliability::Unreliable {
-        m1_got_pong = true;
-      }
+      m1_got_pong = true;
     }
   }
 
@@ -423,10 +418,11 @@ fn memberlist_user_data() {
   // m2 should observe the UserPacket with `from == a1`.
   let mut received = false;
   while let Some(ev) = c.poll_event(a2) {
-    if let Event::UserPacket { from, data, .. } = ev {
-      if from == a1 && data == payload {
-        received = true;
-      }
+    if let Event::UserPacket(p) = ev
+      && *p.from_ref() == a1
+      && *p.data_ref() == payload
+    {
+      received = true;
     }
   }
   assert!(received, "m2 should receive the user-data payload from m1");
@@ -462,13 +458,11 @@ fn memberlist_send_reliable() {
   // m1 should see a Reliable UserPacket.
   let mut received = false;
   while let Some(ev) = c.poll_event(a1) {
-    if let Event::UserPacket {
-      data, reliability, ..
-    } = ev
+    if let Event::UserPacket(p) = ev
+      && p.data_ref().as_ref() == b"send_reliable"
+      && p.reliability() == Reliability::Reliable
     {
-      if data.as_ref() == b"send_reliable" && reliability == Reliability::Reliable {
-        received = true;
-      }
+      received = true;
     }
   }
   assert!(

@@ -601,7 +601,7 @@ async fn join_with_failing_tls_handshake_surfaces_join_all_failed() {
 }
 
 /// Mismatched server name: B's cert SANs only `"otherhost"`; A's
-/// `IdentityBridge::server_name` returns `Some("localhost")`. The dial
+/// `QuicConfig::server_name` is configured to `"localhost"`. The dial
 /// path threads that name into rustls's `ClientConfig`, which then
 /// performs server-name verification against the presented cert's SANs.
 /// No SAN matches `"localhost"`, so rustls rejects the cert before any

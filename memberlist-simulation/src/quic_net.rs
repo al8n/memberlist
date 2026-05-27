@@ -34,7 +34,7 @@ use std::{
 };
 
 use memberlist_machine::{
-  AddrBridge, Endpoint, EndpointConfig, Event, PushPullKind, QuicConfig, QuicEndpoint, Transmit,
+  Endpoint, EndpointConfig, Event, PushPullKind, QuicConfig, QuicEndpoint, Transmit,
 };
 use memberlist_wire::{
   framing, message_from_any, message_to_any,
@@ -44,30 +44,14 @@ use smol_str::SmolStr;
 
 use crate::{clock::Clock, faults::FaultConfig};
 
-/// Identity [`AddrBridge`] for `A = SocketAddr`: the membership address *is*
-/// the wire `SocketAddr`, so both directions are the identity (a production
-/// driver would map its resolved/advertised address here instead).
-struct IdentityBridge;
-
-impl AddrBridge<SocketAddr> for IdentityBridge {
-  type ServerName = str;
-
-  fn to_socket(addr: &SocketAddr) -> SocketAddr {
-    *addr
-  }
-  fn from_socket(socket: SocketAddr) -> SocketAddr {
-    socket
-  }
-  fn server_name(_addr: &SocketAddr) -> Option<&'static str> {
-    // The sim's test certs are generated with `"localhost"` as the SAN
-    // (see [`sim_quic_config`]); the identity bridge returns that for
-    // every peer so the rustls verifier sees a name matching the cert.
-    Some("localhost")
-  }
-}
-
 /// The concrete coordinator the harness drives.
-type Node1 = QuicEndpoint<SmolStr, SocketAddr, IdentityBridge>;
+///
+/// The QUIC coordinator pins `A = SocketAddr` internally (`quinn_proto`'s
+/// endpoint is structurally `SocketAddr`-typed). The cluster-uniform TLS
+/// verification identity is sourced from `QuicConfig::server_name`
+/// (`"localhost"`, matching the sim's self-signed certs — see
+/// [`sim_quic_config`]).
+type Node1 = QuicEndpoint<SmolStr>;
 
 /// One in-flight datagram on the single shared socket. Carries raw bytes
 /// (QUIC `>= 0x40` OR an encoded memberlist plain frame `1..=15`) so the
@@ -215,6 +199,7 @@ fn sim_quic_config(shrink_flow_window: bool) -> QuicConfig {
     server,
     client,
     transport,
+    "localhost",
   )
 }
 
@@ -286,11 +271,11 @@ pub struct QuicCluster {
   /// [`add_node`](Self::add_node). `None` uses the standard 10s LAN default
   /// the conformance-parity tests share with the plain harness. A short
   /// stream-timeout is used ONLY to exercise the response-deadline refresh
-  /// invariant: the bridge's original accept-time deadline (`accept_time
-  /// + stream_timeout`) must be tight enough relative to the post-refresh
-  /// response window (`request_arrival + 5s`) that a backpressured
-  /// response delivery strictly crosses the original deadline while
-  /// staying within the refreshed one.
+  /// invariant: the bridge's original accept-time deadline
+  /// (`accept_time + stream_timeout`) must be tight enough relative to the
+  /// post-refresh response window (`request_arrival + 5s`) that a backpressured
+  /// response delivery strictly crosses the original deadline while staying
+  /// within the refreshed one.
   stream_timeout: Option<Duration>,
   /// Cross-transport compression applied to every coordinator built via
   /// [`add_node`](Self::add_node). [`new`](memberlist_wire::CompressionOptions::new)
@@ -1729,14 +1714,12 @@ impl QuicCluster {
           Event::LeftCluster => {
             self.left.insert(host);
           }
-          Event::UserPacket {
-            data, reliability, ..
-          } if reliability.is_reliable() => {
+          Event::UserPacket(p) if p.reliability().is_reliable() => {
             self
               .user_packets
               .entry(host)
               .or_default()
-              .insert(data.clone());
+              .insert(p.data_ref().clone());
           }
           _ => {}
         }
@@ -1862,12 +1845,5 @@ mod tests {
     let (n, back) = decode_frame(&b).expect("decodes");
     assert_eq!(n, b.len());
     assert!(matches!(back, Message::Alive(_)));
-  }
-
-  #[test]
-  fn identity_bridge_is_identity() {
-    let a: SocketAddr = "127.0.0.1:1234".parse().unwrap();
-    assert_eq!(IdentityBridge::to_socket(&a), a);
-    assert_eq!(IdentityBridge::from_socket(a), a);
   }
 }
