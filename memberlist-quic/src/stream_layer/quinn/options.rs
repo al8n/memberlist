@@ -133,9 +133,7 @@ pub struct Options {
       const,
       attrs(doc = "Gets the maximum packet size in bytes for `read_packet()`.")
     ),
-    setter(attrs(
-      doc = "Sets the maximum packet size in bytes for `read_packet()`."
-    ))
+    setter(attrs(doc = "Sets the maximum packet size in bytes for `read_packet()`."))
   )]
   max_packet_size: u32,
 
@@ -233,8 +231,10 @@ impl From<Options> for QuinnOptions {
     let mut transport = quinn::TransportConfig::default();
     transport.max_concurrent_uni_streams(max_concurrent_stream_limit.into());
     transport.max_concurrent_bidi_streams(max_concurrent_stream_limit.into());
-    // Disable datagrams.
-    transport.datagram_receive_buffer_size(None);
+    // Enable datagrams for packet transport. 65536 bytes is the maximum
+    // allowed by the QUIC datagram protocol (RFC 9221, 16-bit length field),
+    // so hardcoding this value is correct.
+    transport.datagram_receive_buffer_size(Some(65536));
     transport.keep_alive_interval(Some(keep_alive_interval));
     transport.max_idle_timeout(Some(VarInt::from_u32(max_idle_timeout).into()));
     transport.allow_spin(false);

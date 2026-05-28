@@ -18,24 +18,24 @@ use super::{QuicAcceptor, QuicConnection, QuicConnector, QuicStream, StreamLayer
 struct SharedEndpoint(Arc<Endpoint>);
 
 impl Clone for SharedEndpoint {
-    fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
-    }
+  fn clone(&self) -> Self {
+    Self(Arc::clone(&self.0))
+  }
 }
 
 impl Deref for SharedEndpoint {
-    type Target = Endpoint;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+  type Target = Endpoint;
+  fn deref(&self) -> &Self::Target {
+    &self.0
+  }
 }
 
 impl Drop for SharedEndpoint {
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.0) == 1 {
-            Endpoint::close(&self.0, VarInt::from(0u32), b"endpoint shutdown");
-        }
+  fn drop(&mut self) {
+    if Arc::strong_count(&self.0) == 1 {
+      Endpoint::close(&self.0, VarInt::from(0u32), b"endpoint shutdown");
     }
+  }
 }
 
 /// [`Quinn`] is an implementation of [`StreamLayer`] based on [`quinn`].
@@ -183,7 +183,12 @@ where
     let conn = R::timeout(self.connect_timeout, connecting)
       .await
       .map_err(io::Error::from)??;
-    Ok(QuinnConnection::new(conn, self.local_addr, addr, self.max_packet_size))
+    Ok(QuinnConnection::new(
+      conn,
+      self.local_addr,
+      addr,
+      self.max_packet_size,
+    ))
   }
 
   async fn close(&self) -> io::Result<()> {
@@ -306,7 +311,12 @@ impl Clone for QuinnConnection {
 
 impl QuinnConnection {
   #[inline]
-  fn new(conn: Connection, local_addr: SocketAddr, remote_addr: SocketAddr, max_packet_size: usize) -> Self {
+  fn new(
+    conn: Connection,
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    max_packet_size: usize,
+  ) -> Self {
     Self {
       conn,
       local_addr,
@@ -321,12 +331,35 @@ impl QuicConnection for QuinnConnection {
 
   async fn accept_bi(&self) -> io::Result<(Self::Stream, SocketAddr)> {
     let (send, recv) = self.conn.accept_bi().await?;
-    Ok((QuinnStream::new(send, recv, self.max_packet_size), self.remote_addr))
+    Ok((
+      QuinnStream::new(send, recv, self.max_packet_size),
+      self.remote_addr,
+    ))
   }
 
   async fn open_bi(&self) -> io::Result<(Self::Stream, SocketAddr)> {
     let (send, recv) = self.conn.open_bi().await?;
-    Ok((QuinnStream::new(send, recv, self.max_packet_size), self.remote_addr))
+    Ok((
+      QuinnStream::new(send, recv, self.max_packet_size),
+      self.remote_addr,
+    ))
+  }
+
+  async fn send_datagram(&self, data: bytes::Bytes) -> io::Result<()> {
+    self.conn.send_datagram_wait(data).await.map_err(|e| {
+      io::Error::new(
+        io::ErrorKind::Other,
+        format!("failed to send datagram: {e}"),
+      )
+    })
+  }
+
+  async fn recv_datagram(&self) -> io::Result<bytes::Bytes> {
+    self
+      .conn
+      .read_datagram()
+      .await
+      .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("datagram read error: {e}")))
   }
 
   async fn close(&self) -> io::Result<()> {
