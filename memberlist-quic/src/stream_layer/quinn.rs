@@ -1,8 +1,9 @@
-use std::{cmp, io, marker::PhantomData, net::SocketAddr, ops::Deref, sync::Arc, time::Duration};
+use std::{io, marker::PhantomData, net::SocketAddr, ops::Deref, sync::Arc, time::Duration};
 
 use agnostic::Runtime;
 use futures::AsyncWriteExt;
-use memberlist_core::proto::MediumVec;
+use futures::io::AsyncReadExt;
+use peekable::future::AsyncPeekable;
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, VarInt};
 use smol_str::SmolStr;
 
@@ -74,7 +75,6 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
     addr: SocketAddr,
   ) -> io::Result<(SocketAddr, Self::Acceptor, Self::Connector)> {
     let server_name = self.opts.server_name.clone();
-
     let client_config = self.opts.client_config.clone();
     let sock = std::net::UdpSocket::bind(addr)?;
     let auto_port = addr.port() == 0;
@@ -106,8 +106,8 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
       local_addr,
       client_config,
       connect_timeout: self.opts.connect_timeout,
-      max_packet_size: self.opts.max_packet_size,
       _marker: PhantomData,
+      max_packet_size: self.opts.max_packet_size,
     };
     Ok((local_addr, acceptor, connector))
   }
@@ -201,153 +201,13 @@ where
   }
 }
 
-/// A [`ProtoReader`](memberlist_core::proto::ProtoReader) implementation for Quinn stream layer
-pub struct QuinnProtoReader {
-  stream: RecvStream,
-  peek_buf: MediumVec<u8>,
-  max_packet_size: usize,
-}
-
-impl QuinnProtoReader {
-  fn new(stream: RecvStream, max_packet_size: usize) -> Self {
-    Self {
-      stream,
-      peek_buf: MediumVec::new(),
-      max_packet_size,
-    }
-  }
-}
-
-impl memberlist_core::proto::ProtoReader for QuinnProtoReader {
-  async fn peek(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-    let dst_len = buf.len();
-    let peek_len = self.peek_buf.len();
-
-    match dst_len.cmp(&peek_len) {
-      cmp::Ordering::Less => {
-        buf.copy_from_slice(&self.peek_buf[..dst_len]);
-        Ok(dst_len)
-      }
-      cmp::Ordering::Equal => {
-        buf.copy_from_slice(&self.peek_buf);
-        Ok(peek_len)
-      }
-      cmp::Ordering::Greater => {
-        let want = dst_len - peek_len;
-        self.peek_buf.resize(dst_len, 0);
-        match self
-          .stream
-          .read(&mut self.peek_buf[peek_len..peek_len + want])
-          .await
-        {
-          Ok(Some(n)) => {
-            let has = peek_len + n;
-            if n < want {
-              self.peek_buf.truncate(has);
-            }
-            buf[..has].copy_from_slice(&self.peek_buf);
-            Ok(peek_len + n)
-          }
-          Ok(None) | Err(_) => {
-            self.peek_buf.truncate(peek_len);
-            buf[..peek_len].copy_from_slice(&self.peek_buf);
-            Ok(peek_len)
-          }
-        }
-      }
-    }
-  }
-
-  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
-    let dst_len = buf.len();
-    let peek_len = self.peek_buf.len();
-
-    match dst_len.cmp(&peek_len) {
-      cmp::Ordering::Less => {
-        buf.copy_from_slice(&self.peek_buf[..dst_len]);
-        Ok(())
-      }
-      cmp::Ordering::Equal => {
-        buf.copy_from_slice(&self.peek_buf);
-        Ok(())
-      }
-      cmp::Ordering::Greater => {
-        self.peek_buf.resize(dst_len, 0);
-        let mut total = peek_len;
-        while total < dst_len {
-          let n = self
-            .stream
-            .read(&mut self.peek_buf[total..])
-            .await?
-            .unwrap_or(0);
-          if n == 0 {
-            return Err(std::io::Error::new(
-              std::io::ErrorKind::UnexpectedEof,
-              "unexpected eof",
-            ));
-          }
-          total += n;
-        }
-        buf.copy_from_slice(&self.peek_buf);
-        Ok(())
-      }
-    }
-  }
-
-  async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-    let dst_len = buf.len();
-    let peek_len = self.peek_buf.len();
-
-    if dst_len <= peek_len {
-      buf.copy_from_slice(&self.peek_buf[..dst_len]);
-      self.peek_buf.drain(..dst_len);
-      Ok(dst_len)
-    } else {
-      buf[..peek_len].copy_from_slice(&self.peek_buf);
-      self.peek_buf.clear();
-      let mut total = peek_len;
-      while total < dst_len {
-        let n = self.stream.read(&mut buf[total..]).await?.unwrap_or(0);
-        if n == 0 {
-          break;
-        }
-        total += n;
-      }
-      Ok(total)
-    }
-  }
-
-  async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
-    let dst_len = buf.len();
-    let peek_len = self.peek_buf.len();
-
-    if dst_len <= peek_len {
-      buf.copy_from_slice(&self.peek_buf[..dst_len]);
-      self.peek_buf.drain(..dst_len);
-      Ok(())
-    } else {
-      buf[..peek_len].copy_from_slice(&self.peek_buf);
-      self.peek_buf.clear();
-      let mut total = peek_len;
-      while total < dst_len {
-        let n = self.stream.read(&mut buf[total..]).await?.unwrap_or(0);
-        if n == 0 {
-          return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "unexpected eof",
-          ));
-        }
-        total += n;
-      }
-      Ok(())
-    }
-  }
-}
-
 /// [`QuinnStream`] is an implementation of [`QuicStream`] based on [`quinn`].
+/// Uses `AsyncPeekable` from the `peekable` crate for peek/read operations
+/// instead of a hand-rolled `QuinnProtoReader`.
 pub struct QuinnStream {
   send: SendStream,
-  recv: QuinnProtoReader,
+  recv: AsyncPeekable<RecvStream>,
+  max_packet_size: usize,
 }
 
 impl QuinnStream {
@@ -355,14 +215,14 @@ impl QuinnStream {
   fn new(send: SendStream, recv: RecvStream, max_packet_size: usize) -> Self {
     Self {
       send,
-      recv: QuinnProtoReader::new(recv, max_packet_size),
+      recv: AsyncPeekable::from(recv),
+      max_packet_size,
     }
   }
 }
 
 impl memberlist_core::transport::Connection for QuinnStream {
-  type Reader = QuinnProtoReader;
-
+  type Reader = AsyncPeekable<RecvStream>;
   type Writer = SendStream;
 
   fn split(self) -> (Self::Reader, Self::Writer) {
@@ -396,37 +256,32 @@ impl memberlist_core::transport::Connection for QuinnStream {
   async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
     memberlist_core::proto::ProtoReader::peek_exact(&mut self.recv, buf).await
   }
-
-  fn consume_peek(&mut self) {
-    self.recv.peek_buf.clear();
-  }
 }
 
 impl QuicStream for QuinnStream {
   type SendStream = SendStream;
 
   async fn read_packet(&mut self) -> std::io::Result<bytes::Bytes> {
-    self
-      .recv
-      .stream
-      .read_to_end(self.recv.max_packet_size)
-      .await
-      .map(|data| {
-        if !self.recv.peek_buf.is_empty() {
-          let mut buf = bytes::BytesMut::with_capacity(self.recv.peek_buf.len() + data.len());
-          buf.extend_from_slice(&self.recv.peek_buf);
-          buf.extend_from_slice(&data);
-          buf.freeze()
-        } else {
-          data.into()
-        }
-      })
-      .map_err(|e| match e {
-        quinn::ReadToEndError::Read(e) => std::io::Error::from(e),
-        quinn::ReadToEndError::TooLong => {
-          std::io::Error::new(std::io::ErrorKind::InvalidData, "packet too large")
-        }
-      })
+    // AsyncPeekable implements AsyncRead. Read in a loop until EOF,
+    // enforcing the max_packet_size limit.
+    let mut buf = bytes::BytesMut::with_capacity(4096);
+    loop {
+      let len = buf.len();
+      buf.resize(len + 4096, 0);
+      let n = self.recv.read(&mut buf[len..]).await?;
+      if n == 0 {
+        buf.truncate(len);
+        break;
+      }
+      buf.truncate(len + n);
+      if buf.len() > self.max_packet_size {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::InvalidData,
+          "packet too large",
+        ));
+      }
+    }
+    Ok(buf.freeze())
   }
 }
 

@@ -446,6 +446,10 @@ where
     from: &Self::ResolvedAddress,
     conn: &mut <Self::Connection as Connection>::Reader,
   ) -> Result<usize, Self::Error> {
+    // Consume the stream type tag byte that was peeked by the processor
+    // in handle_stream(). The processor peeked exactly 1 byte to determine
+    // whether this is a Stream or Packet stream, so we must consume it here
+    // before the decoder reads the proto message payload.
     let mut buf = [0; 1];
     conn.read_exact(&mut buf).await?;
     match StreamType::try_from(buf[0]) {

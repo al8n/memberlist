@@ -84,20 +84,36 @@ const fn is_plain_message_tag(tag: u8) -> bool {
 
 /// The reader used in the memberlist proto
 pub trait ProtoReader: Send + Sync {
-  /// Read the payload from the proto reader to the buffer
+  /// Reads up to `buf.len()` bytes from the stream into `buf`.
   ///
-  /// Returns the number of bytes read
+  /// This is a best-effort read: it performs a single `read()` call and
+  /// returns the actual number of bytes read, which may be less than
+  /// `buf.len()`. On EOF with no data read, returns `Ok(0)`. On EOF after
+  /// some data, returns `Ok(partial_bytes)`. IO errors are propagated.
+  ///
+  /// Callers that need exactly `buf.len()` bytes should use `read_exact()`.
   fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = std::io::Result<usize>> + Send;
 
-  /// Read exactly the payload from the proto reader to the buffer
+  /// Reads exactly `buf.len()` bytes from the stream into `buf`.
+  ///
+  /// Loops until the buffer is full. Returns `UnexpectedEof` if the stream
+  /// closes before the buffer is full — partial data is discarded.
   fn read_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = std::io::Result<()>> + Send;
 
-  /// Peek the payload from the proto reader to the buffer
+  /// Peeks up to `buf.len()` bytes from the stream into `buf` without
+  /// consuming the data.
   ///
-  /// Returns the number of bytes peeked
+  /// This is a best-effort peek: it performs a single `read()` call and
+  /// returns the actual number of bytes peeked. On EOF, returns
+  /// `Ok(partial_bytes)` with whatever data was available in the peek buffer.
+  /// IO errors are propagated.
   fn peek(&mut self, buf: &mut [u8]) -> impl Future<Output = std::io::Result<usize>> + Send;
 
-  /// Peek exactly the payload from the proto reader to the buffer
+  /// Peeks exactly `buf.len()` bytes from the stream into `buf` without
+  /// consuming the data.
+  ///
+  /// Loops until the buffer is full. Returns `UnexpectedEof` if the stream
+  /// closes before the buffer is full.
   fn peek_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = std::io::Result<()>> + Send;
 }
 
