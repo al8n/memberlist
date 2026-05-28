@@ -142,14 +142,14 @@ where
     match kind {
       Kind::V4(idx) => {
         if let Ok(sockets) = self.v4_sockets.try_borrow() {
-          Some(sockets[idx].clone())
+          sockets.get(idx).cloned()
         } else {
           None
         }
       }
       Kind::V6(idx) => {
         if let Ok(sockets) = self.v6_sockets.try_borrow() {
-          Some(sockets[idx].clone())
+          sockets.get(idx).cloned()
         } else {
           None
         }
