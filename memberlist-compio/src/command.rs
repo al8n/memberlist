@@ -2,6 +2,7 @@
 //! driver task receives and dispatches.
 
 use crate::error::Result;
+use bytes::Bytes;
 use memberlist_wire::{CompressionOptions, EncryptionOptions};
 use std::{net::SocketAddr, time::Instant};
 
@@ -80,6 +81,81 @@ pub(crate) struct ShutdownCmd {
   pub(crate) reply: flume::Sender<Result<()>>,
 }
 
+/// Payload for [`Command::QueueUserBroadcast`].
+pub(crate) struct QueueUserBroadcastCmd {
+  /// Application bytes to disseminate cluster-wide via gossip.
+  data: Bytes,
+  /// One-shot reply channel for the enqueue acknowledgement.
+  reply: flume::Sender<Result<()>>,
+}
+
+impl QueueUserBroadcastCmd {
+  /// Construct from the broadcast bytes and a reply channel.
+  pub(crate) const fn new(data: Bytes, reply: flume::Sender<Result<()>>) -> Self {
+    Self { data, reply }
+  }
+
+  /// The application bytes to broadcast.
+  pub(crate) const fn data(&self) -> &Bytes {
+    &self.data
+  }
+
+  /// The reply channel for the enqueue acknowledgement.
+  pub(crate) const fn reply(&self) -> &flume::Sender<Result<()>> {
+    &self.reply
+  }
+}
+
+/// Payload for [`Command::SetLocalState`].
+pub(crate) struct SetLocalStateCmd {
+  /// Application push/pull local-state snapshot bytes.
+  state: Bytes,
+  /// One-shot reply channel for the set acknowledgement.
+  reply: flume::Sender<Result<()>>,
+}
+
+impl SetLocalStateCmd {
+  /// Construct from the snapshot bytes and a reply channel.
+  pub(crate) const fn new(state: Bytes, reply: flume::Sender<Result<()>>) -> Self {
+    Self { state, reply }
+  }
+
+  /// The local-state snapshot bytes.
+  pub(crate) const fn state(&self) -> &Bytes {
+    &self.state
+  }
+
+  /// The reply channel for the set acknowledgement.
+  pub(crate) const fn reply(&self) -> &flume::Sender<Result<()>> {
+    &self.reply
+  }
+}
+
+/// Payload for [`Command::SetAckPayload`].
+pub(crate) struct SetAckPayloadCmd {
+  /// Application payload bytes attached to outbound probe acks.
+  payload: Bytes,
+  /// One-shot reply channel for the set acknowledgement.
+  reply: flume::Sender<Result<()>>,
+}
+
+impl SetAckPayloadCmd {
+  /// Construct from the ack-payload bytes and a reply channel.
+  pub(crate) const fn new(payload: Bytes, reply: flume::Sender<Result<()>>) -> Self {
+    Self { payload, reply }
+  }
+
+  /// The ack-payload bytes.
+  pub(crate) const fn payload(&self) -> &Bytes {
+    &self.payload
+  }
+
+  /// The reply channel for the set acknowledgement.
+  pub(crate) const fn reply(&self) -> &flume::Sender<Result<()>> {
+    &self.reply
+  }
+}
+
 /// Commands sent from the public Memberlist handle to the driver task.
 pub(crate) enum Command {
   /// Join a set of peers (addresses already resolved).
@@ -92,6 +168,12 @@ pub(crate) enum Command {
   SetCompressionOptions(SetCompressionOptionsCmd),
   /// Update the encryption options (in-place reconfiguration).
   SetEncryptionOptions(SetEncryptionOptionsCmd),
+  /// Queue an application user-broadcast for cluster-wide gossip.
+  QueueUserBroadcast(QueueUserBroadcastCmd),
+  /// Set the application push/pull local-state snapshot.
+  SetLocalState(SetLocalStateCmd),
+  /// Set the application payload attached to outbound probe acks.
+  SetAckPayload(SetAckPayloadCmd),
   /// Cleanly shut down the driver task.
   Shutdown(ShutdownCmd),
 }

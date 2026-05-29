@@ -17,12 +17,38 @@ use std::{
 
 use std::time::{Duration, Instant};
 
-use memberlist_compio::{MemberlistError, SocketAddrResolver, TlsMemberlist};
-use memberlist_machine::{TlsOptions, config::EndpointConfig};
+use memberlist_compio::{
+  FirstAddrResolver, MaybeResolved, MemberlistError, Options, SocketAddrResolver, TlsMemberlist,
+  TlsTransportOptions, VoidDelegate,
+};
+use memberlist_machine::TlsOptions;
 use smol_str::SmolStr;
 
 fn loopback_addr(port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
+}
+
+/// Build a `TlsMemberlist` advertising `addr` with a fresh self-signed
+/// `TlsOptions`. The membership-input address type is `SocketAddr`, so the
+/// construction resolver is the identity `SocketAddrResolver` (never invoked
+/// for a resolved advertise).
+async fn make_tls(
+  id: &str,
+  addr: SocketAddr,
+) -> Result<TlsMemberlist<SmolStr, SocketAddr>, MemberlistError> {
+  let opts = Options::new(
+    TlsTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new(id))
+      .with_advertise_addr(MaybeResolved::Resolved(addr))
+      .with_tls_options(smoke_tls_options()),
+  );
+  TlsMemberlist::<SmolStr, SocketAddr>::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
 }
 
 /// Accept-any server-cert verifier for smoke tests.
@@ -106,8 +132,7 @@ fn smoke_tls_options() -> TlsOptions {
 
 #[compio::test]
 async fn construct_returns_handle_with_initial_snapshot() {
-  let config = EndpointConfig::new(SmolStr::new("n-7200"), loopback_addr(7200));
-  let m = TlsMemberlist::new(config, smoke_tls_options())
+  let m = make_tls("n-7200", loopback_addr(7200))
     .await
     .expect("construct");
 
@@ -125,8 +150,7 @@ async fn construct_returns_handle_with_initial_snapshot() {
 
 #[compio::test]
 async fn clone_handle_works() {
-  let config = EndpointConfig::new(SmolStr::new("n-7201"), loopback_addr(7201));
-  let m = TlsMemberlist::new(config, smoke_tls_options())
+  let m = make_tls("n-7201", loopback_addr(7201))
     .await
     .expect("construct");
 
@@ -143,15 +167,11 @@ async fn clone_handle_works() {
 #[compio::test]
 async fn double_bind_returns_io_error() {
   let addr = loopback_addr(7202);
-  let config1 = EndpointConfig::new(SmolStr::new("n-7202a"), addr);
-  let config2 = EndpointConfig::new(SmolStr::new("n-7202b"), addr);
 
-  let m1 = TlsMemberlist::new(config1, smoke_tls_options())
-    .await
-    .expect("first bind");
+  let m1 = make_tls("n-7202a", addr).await.expect("first bind");
   // Use map_err + unwrap instead of expect_err — Memberlist<..> does not
   // implement Debug, so expect_err's T: Debug bound would fail to compile.
-  let err = TlsMemberlist::new(config2, smoke_tls_options())
+  let err = make_tls("n-7202b", addr)
     .await
     .map(|_| ())
     .expect_err("second bind on same port must fail");
@@ -185,24 +205,17 @@ async fn two_node_join_converges_member_counts_tls() {
   let seed_addr = loopback_addr(7300);
   let joiner_addr = loopback_addr(7301);
 
-  let seed = TlsMemberlist::new(
-    EndpointConfig::new(SmolStr::new("tls-seed"), seed_addr),
-    smoke_tls_options(),
-  )
-  .await
-  .expect("seed construct");
-
-  let joiner = TlsMemberlist::new(
-    EndpointConfig::new(SmolStr::new("tls-joiner"), joiner_addr),
-    smoke_tls_options(),
-  )
-  .await
-  .expect("joiner construct");
+  let seed = make_tls("tls-seed", seed_addr)
+    .await
+    .expect("seed construct");
+  let joiner = make_tls("tls-joiner", joiner_addr)
+    .await
+    .expect("joiner construct");
 
   let count = joiner
-    .dispatch_join_with(&SocketAddrResolver, &[seed_addr])
+    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
-    .expect("join_with");
+    .expect("dispatch_join");
   assert_eq!(count, 1, "exactly one seed handed to the driver");
 
   let converged = wait_until(

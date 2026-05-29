@@ -5,16 +5,48 @@
 
 use std::{
   net::{IpAddr, Ipv4Addr, SocketAddr},
+  sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+  },
   time::Duration,
 };
 
+use bytes::Bytes;
 use compio::{buf::BufResult, net::UdpSocket};
-use memberlist_compio::{SocketAddrResolver, TcpMemberlist};
-use memberlist_machine::{TcpOptions, config::EndpointConfig};
+use futures_util::StreamExt;
+use memberlist_compio::{
+  ConflictDelegate, Delegate, DriverOptions, EventDelegate, FirstAddrResolver, MaybeResolved,
+  Memberlist, NodeDelegate, Options, PingDelegate, SocketAddrResolver, StreamTransportOptions,
+  TcpMemberlist, TcpTransport, TcpTransportOptions, VoidDelegate,
+};
+use memberlist_machine::{TcpOptions, event::Event};
+use memberlist_wire::typed::NodeState;
 use smol_str::SmolStr;
 
 fn loopback_addr(port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
+}
+
+/// Build an unlabeled `TcpMemberlist` advertising `addr`. The driver-layer
+/// membership address is `SocketAddr`, so every seed handed to `join`
+/// arrives as a `MaybeResolved::Resolved` and the construction resolver is
+/// the identity `SocketAddrResolver` (never invoked for a resolved advertise).
+async fn make_tcp(id: &str, addr: SocketAddr) -> TcpMemberlist<SmolStr, SocketAddr> {
+  let opts = Options::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new(id))
+      .with_advertise_addr(MaybeResolved::Resolved(addr))
+      .with_tcp_options(TcpOptions::new(None)),
+  );
+  TcpMemberlist::<SmolStr, SocketAddr>::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("construct tcp memberlist")
 }
 
 /// After `shutdown()` returns, the gossip UDP socket AND the TCP
@@ -31,21 +63,11 @@ fn loopback_addr(port: u16) -> SocketAddr {
 async fn rebind_after_shutdown_releases_listener_port() {
   let addr = loopback_addr(7400);
 
-  let first = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("first"), addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("first bind");
+  let first = make_tcp("first", addr).await;
   first.shutdown().await.expect("first shutdown");
 
   // Same port, same address — must succeed.
-  let second = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("second"), addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("rebind after shutdown");
+  let second = make_tcp("second", addr).await;
   second.shutdown().await.expect("second shutdown");
 }
 
@@ -63,23 +85,13 @@ async fn rebind_after_shutdown_releases_listener_port() {
 async fn rebind_after_shutdown_with_live_clone_works() {
   let addr = loopback_addr(7402);
 
-  let first = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("first-cloned"), addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("first bind");
+  let first = make_tcp("first-cloned", addr).await;
   // Hold a clone past the shutdown — the inner Arc<JoinHandle> stays
   // alive but the driver task itself has exited.
   let _live_clone = first.clone();
   first.shutdown().await.expect("first shutdown");
 
-  let second = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("second-cloned"), addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("rebind after shutdown with live clone");
+  let second = make_tcp("second-cloned", addr).await;
   second.shutdown().await.expect("second shutdown");
 }
 
@@ -99,18 +111,8 @@ async fn saturated_accept_does_not_starve_join_convergence() {
   let seed_addr = loopback_addr(7410);
   let joiner_addr = loopback_addr(7411);
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("sat-seed"), seed_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("seed construct");
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("sat-joiner"), joiner_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("joiner construct");
+  let seed = make_tcp("sat-seed", seed_addr).await;
+  let joiner = make_tcp("sat-joiner", joiner_addr).await;
 
   // Saturate seed's accept arm: open 100 TCP connections that never
   // send anything. Each opens a server-side bridge on seed whose
@@ -132,9 +134,9 @@ async fn saturated_accept_does_not_starve_join_convergence() {
 
   // Legitimate join: must complete despite the accept saturation.
   let count = joiner
-    .dispatch_join_with(&memberlist_compio::SocketAddrResolver, &[seed_addr])
+    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
-    .expect("join_with under saturation");
+    .expect("dispatch_join under saturation");
   assert_eq!(count, 1);
 
   // Bounded convergence — the iteration-top deadline check guarantees
@@ -187,18 +189,8 @@ async fn udp_flood_does_not_starve_timer_under_join() {
   let seed_addr = loopback_addr(7420);
   let joiner_addr = loopback_addr(7421);
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("udp-seed"), seed_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("seed construct");
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("udp-joiner"), joiner_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("joiner construct");
+  let seed = make_tcp("udp-seed", seed_addr).await;
+  let joiner = make_tcp("udp-joiner", joiner_addr).await;
 
   // Continuously pump junk UDP datagrams at the seed's gossip socket
   // at ~200 pps. Slow enough that the seed's recv arm still hits
@@ -231,9 +223,9 @@ async fn udp_flood_does_not_starve_timer_under_join() {
 
   // Legitimate join: must complete despite the UDP flood.
   let count = joiner
-    .dispatch_join_with(&SocketAddrResolver, &[seed_addr])
+    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
-    .expect("join_with under UDP flood");
+    .expect("dispatch_join under UDP flood");
   assert_eq!(count, 1);
 
   let converged = tokio_like_wait(
@@ -272,21 +264,16 @@ async fn shutdown_during_dial_does_not_leak_bridge() {
   // OutboundOk/OutboundFail arrives.
   let unreachable = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 1);
 
-  let m = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("dial-then-shutdown"), local),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("construct");
+  let m = make_tcp("dial-then-shutdown", local).await;
 
   // Fire the join; the resolver is a SocketAddr pass-through. The dial
   // task is spawned by drain_actions; whether it has completed yet is
   // a race with the subsequent shutdown.
   // Ignoring Err: connect-to-port-1 may fail fast on some OSes; the
-  // join_with future then returns the count before the dial races with
-  // shutdown.
+  // dispatch_join future then returns the count before the dial races
+  // with shutdown.
   let _ = m
-    .dispatch_join_with(&SocketAddrResolver, &[unreachable])
+    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(unreachable)])
     .await;
 
   // Give the dial a small window to either complete or stay in flight.
@@ -315,12 +302,7 @@ async fn shutdown_during_dial_does_not_leak_bridge() {
 async fn bridge_inbound_backlog_does_not_stall_driver() {
   let seed_addr = loopback_addr(7450);
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("backlog-seed"), seed_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("seed construct");
+  let seed = make_tcp("backlog-seed", seed_addr).await;
 
   // Open 200 inbound TCP connections in parallel; each writes 2 KiB
   // of junk bytes that the seed's record layer rejects (no valid
@@ -389,18 +371,8 @@ async fn bridge_in_pressure_does_not_starve_accept_under_join() {
   let seed_addr = loopback_addr(7460);
   let joiner_addr = loopback_addr(7461);
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("starve-seed"), seed_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("seed construct");
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("starve-joiner"), joiner_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("joiner construct");
+  let seed = make_tcp("starve-seed", seed_addr).await;
+  let joiner = make_tcp("starve-joiner", joiner_addr).await;
 
   // Saturate bridge_in: 100 long-lived bridges each writing junk
   // bytes in a tight loop. Each push generates a `BridgeInbound::Bytes`
@@ -427,9 +399,9 @@ async fn bridge_in_pressure_does_not_starve_accept_under_join() {
   // Legitimate join through the seed's accept arm. Must complete
   // despite the bridge_in flood.
   let count = joiner
-    .dispatch_join_with(&SocketAddrResolver, &[seed_addr])
+    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
-    .expect("join_with under bridge_in pressure");
+    .expect("dispatch_join under bridge_in pressure");
   assert_eq!(count, 1);
 
   let converged = tokio_like_wait(
@@ -472,26 +444,21 @@ async fn join_with_slow_resolver_does_not_hang_during_shutdown() {
   // Run a seed memberlist so the SocketAddrResolver target is real,
   // even though the join will be aborted by shutdown before it
   // converges.
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("slowres-seed"), seed_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("seed construct");
+  let seed = make_tcp("slowres-seed", seed_addr).await;
 
-  let m = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("slowres"), addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("construct");
+  let m = make_tcp("slowres", addr).await;
   let m_for_join = m.clone();
 
-  // Spawn the slow join on the same runtime.
+  // Spawn the slow join on the same runtime. The seed is handed in
+  // UNRESOLVED so the slow resolver (200ms sleep) is actually invoked —
+  // a Resolved seed would skip resolution entirely and defeat the
+  // slow-resolver-races-shutdown scenario this test pins.
   let join_task = compio::runtime::spawn(async move {
     let slow = SlowResolver;
     let start = std::time::Instant::now();
-    let res = m_for_join.dispatch_join_with(&slow, &[seed_addr]).await;
+    let res = m_for_join
+      .dispatch_join(&slow, &[MaybeResolved::Unresolved(seed_addr)])
+      .await;
     (res, start.elapsed())
   });
 
@@ -554,12 +521,7 @@ impl memberlist_compio::Resolver for SlowResolver {
 #[compio::test]
 async fn command_after_shutdown_returns_error_promptly() {
   let addr = loopback_addr(7510);
-  let m = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("post-shutdown"), addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("construct");
+  let m = make_tcp("post-shutdown", addr).await;
   let m_clone = m.clone();
 
   // Shut down via the original. After shutdown returns, the
@@ -626,18 +588,8 @@ async fn cmd_flood_does_not_starve_accept_or_timer_under_join() {
   let seed_addr = loopback_addr(7470);
   let joiner_addr = loopback_addr(7471);
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("cmdflood-seed"), seed_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("seed construct");
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("cmdflood-joiner"), joiner_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("joiner construct");
+  let seed = make_tcp("cmdflood-seed", seed_addr).await;
+  let joiner = make_tcp("cmdflood-joiner", joiner_addr).await;
 
   // Spawn 200 concurrent cmd-pumping tasks, each holding a clone of
   // the seed handle and looping update_node_metadata calls. Each call
@@ -659,9 +611,9 @@ async fn cmd_flood_does_not_starve_accept_or_timer_under_join() {
   // Legitimate join through the seed's accept arm. Must complete
   // despite the command flood.
   let count = joiner
-    .dispatch_join_with(&SocketAddrResolver, &[seed_addr])
+    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
-    .expect("join_with under cmd flood");
+    .expect("dispatch_join under cmd flood");
   assert_eq!(count, 1);
 
   let converged = tokio_like_wait(
@@ -692,12 +644,7 @@ async fn cmd_flood_does_not_starve_accept_or_timer_under_join() {
 #[compio::test]
 async fn quiet_shutdown_lands_without_waiting_for_select_wake() {
   let addr = loopback_addr(7490);
-  let m = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("quiet"), addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("construct");
+  let m = make_tcp("quiet", addr).await;
 
   // Let the driver settle into its main select wait.
   compio::time::sleep(Duration::from_millis(50)).await;
@@ -732,12 +679,7 @@ async fn quiet_shutdown_lands_without_waiting_for_select_wake() {
 #[compio::test]
 async fn concurrent_shutdown_from_cloned_handles() {
   let addr = loopback_addr(7500);
-  let m = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("concurrent-shutdown"), addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("construct");
+  let m = make_tcp("concurrent-shutdown", addr).await;
   let m2 = m.clone();
 
   // Let the driver settle into its main select wait.
@@ -774,12 +716,7 @@ async fn concurrent_shutdown_from_cloned_handles() {
 async fn shutdown_lands_under_continuous_network_flood() {
   let seed_addr = loopback_addr(7480);
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("flood-seed"), seed_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("seed construct");
+  let seed = make_tcp("flood-seed", seed_addr).await;
 
   // UDP flood at the gossip socket.
   let udp_flood = compio::runtime::spawn(async move {
@@ -852,22 +789,17 @@ async fn dial_to_blackhole_bounded_by_dial_timeout() {
   // retry loop until the bound elapses.
   let blackhole: SocketAddr = "192.0.2.1:9".parse().unwrap();
 
-  let m = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("blackhole-dialer"), local),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("construct");
+  let m = make_tcp("blackhole-dialer", local).await;
 
-  // `join_with` is fire-and-forget at the driver boundary: it
+  // `dispatch_join` is fire-and-forget at the driver boundary: it
   // returns the dispatched count immediately. The dial task runs in
   // the background bounded by DIAL_TIMEOUT (5s). The test's primary
   // assertion is the SUBSEQUENT shutdown — the in-flight dial task
   // must not block shutdown's command-channel arm.
   let count = m
-    .dispatch_join_with(&SocketAddrResolver, &[blackhole])
+    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(blackhole)])
     .await
-    .expect("join_with");
+    .expect("dispatch_join");
   assert_eq!(count, 1, "one address dispatched");
 
   let shutdown_start = std::time::Instant::now();
@@ -909,23 +841,13 @@ async fn post_join_stays_alive_through_probe_cycles() {
   let seed_addr = loopback_addr(7430);
   let joiner_addr = loopback_addr(7431);
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("stable-seed"), seed_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("seed construct");
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("stable-joiner"), joiner_addr),
-    TcpOptions::new(None),
-  )
-  .await
-  .expect("joiner construct");
+  let seed = make_tcp("stable-seed", seed_addr).await;
+  let joiner = make_tcp("stable-joiner", joiner_addr).await;
 
   joiner
-    .dispatch_join_with(&SocketAddrResolver, &[seed_addr])
+    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
-    .expect("join_with");
+    .expect("dispatch_join");
 
   let converged = tokio_like_wait(
     || joiner.member_count() == 2 && seed.member_count() == 2,
@@ -958,4 +880,789 @@ async fn post_join_stays_alive_through_probe_cycles() {
 
   seed.shutdown().await.expect("seed shutdown");
   joiner.shutdown().await.expect("joiner shutdown");
+}
+
+/// `leave()` honors the leave-completion contract: it returns `Ok(())`
+/// only once the machine's `Event::LeftCluster` has fired, which the
+/// machine withholds until the direct `Dead`-self notices `leave()`
+/// queued for every live peer have been handed to the wire. So once
+/// `a.leave().await` returns, the `Dead`-self has been SENT and B
+/// observes `NodeLeft(A)` within a SHORT window — far below probe-based
+/// failure detection (~3 s for a 2-node cluster), so the window passing
+/// reflects the intentional leave reaching B, not A being reaped as
+/// failed.
+///
+/// Non-vacuity caveat: on fast loopback this timing window alone does
+/// NOT distinguish the parked-leave wiring from a hypothetical
+/// return-when-queued `leave()` — the driver flushes the queued
+/// `Dead`-self in its very next drain (sub-millisecond) regardless of
+/// when the reply is sent, so B observes the leave promptly either way
+/// (verified: this test still passes against an immediate-reply
+/// `leave()`). What it pins is the contract itself (leave-return implies
+/// the notice is on the wire) as a regression guard against a change
+/// that lets `leave()` resolve before the `Dead`-self is queued/handed
+/// off; the `LeftCluster`-withholding boundary is unit-tested in
+/// `memberlist-machine`.
+#[compio::test]
+async fn leave_completes_only_after_peer_is_notified() {
+  let a_addr = loopback_addr(7520);
+  let b_addr = loopback_addr(7521);
+
+  let a = make_tcp("leave-notify-a", a_addr).await;
+  let b = make_tcp("leave-notify-b", b_addr).await;
+
+  // Converge: B joins A; both observe two alive members.
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+  let converged = tokio_like_wait(
+    || a.alive_count() == 2 && b.alive_count() == 2,
+    Duration::from_secs(5),
+  )
+  .await;
+  assert!(
+    converged,
+    "cluster did not converge: a={}, b={}",
+    a.alive_count(),
+    b.alive_count()
+  );
+
+  // Subscribe to B's events BEFORE A leaves so the NodeLeft is observable.
+  let mut b_events = b.events();
+
+  // `leave().await` returning Ok now means the `Dead`-self flush
+  // completed (the machine's `LeftCluster`).
+  a.leave().await.expect("leave");
+
+  // Therefore B must already have — or imminently receive — the leave.
+  // A SHORT window proves the notice was on the wire by the time leave()
+  // returned, not that probe-based detection eventually reaped A.
+  let saw_leave = compio::time::timeout(Duration::from_millis(500), async {
+    while let Some(ev) = b_events.next().await {
+      if let Event::NodeLeft(node) = ev
+        && node.id_ref() == &SmolStr::new("leave-notify-a")
+      {
+        return true;
+      }
+    }
+    false
+  })
+  .await
+  .unwrap_or(false);
+
+  assert!(
+    saw_leave,
+    "B did not observe A's leave within 500ms of leave() returning — leave() resolved before the Dead-self was flushed"
+  );
+
+  // Ignoring Err: best-effort teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), a.shutdown()).await;
+  let _ = compio::time::timeout(Duration::from_secs(5), b.shutdown()).await;
+}
+
+/// Observation delegate whose `notify_join` sleeps ~3s; every other hook is a
+/// no-op (mirroring `VoidDelegate`). Used to prove join completion is decoupled
+/// from the observation-delegate dispatch.
+struct SlowJoinDelegate;
+
+impl NodeDelegate for SlowJoinDelegate {}
+
+impl EventDelegate for SlowJoinDelegate {
+  type Id = SmolStr;
+  type Address = SocketAddr;
+
+  async fn notify_join(&self, _node: Arc<NodeState<SmolStr, SocketAddr>>) {
+    // A deliberately slow observation hook. If join completion were dispatched
+    // behind the observation delegate, this sleep would stall `join().await`
+    // for its full duration even though the join exchange already succeeded.
+    compio::time::sleep(Duration::from_secs(3)).await;
+  }
+}
+
+impl PingDelegate for SlowJoinDelegate {
+  type Id = SmolStr;
+  type Address = SocketAddr;
+}
+
+impl ConflictDelegate for SlowJoinDelegate {
+  type Id = SmolStr;
+  type Address = SocketAddr;
+}
+
+impl Delegate for SlowJoinDelegate {
+  type Id = SmolStr;
+  type Address = SocketAddr;
+}
+
+/// Regression: a slow observation `notify_join` must NOT delay `join()`'s
+/// completion. The driver dispatches observation hooks on a dedicated task,
+/// never inline on the loop, and fires the synchronous-join reply on the
+/// driver task the moment the join's push/pull `ExchangeCompleted` lands. So
+/// `join().await` returns promptly even while the joiner's own `notify_join`
+/// sleeps ~3s.
+///
+/// Non-vacuity caveat: on fast loopback the stream backend delivers the
+/// push/pull response and its stream EOF together, so the `ExchangeCompleted`
+/// is available in the same drain that surfaces `NodeJoined` — the timing alone
+/// does not strongly distinguish off-loop dispatch from inline dispatch here.
+/// The strongly-discriminating variant is on the QUIC backend
+/// (`quic_slow_observation_delegate_does_not_delay_join_completion`), where the
+/// completion arrives on a SEPARATE datagram and inline dispatch provably
+/// stalls the join ~3s. This test pins the contract (and the ≤1.5s window) on
+/// the stream backend as a parity guard.
+#[compio::test]
+async fn slow_observation_delegate_does_not_delay_join_completion() {
+  let seed_addr = loopback_addr(7610);
+  let joiner_addr = loopback_addr(7611);
+
+  // Node J carries the slow-join observation delegate; built inline like
+  // `make_tcp` but with `SlowJoinDelegate` in place of `VoidDelegate`.
+  let joiner: Memberlist<TcpTransport<SmolStr, SocketAddr>, SlowJoinDelegate> = {
+    let opts = Options::new(
+      TcpTransportOptions::<SmolStr, SocketAddr>::new()
+        .with_local_id(SmolStr::new("slowjoin-j"))
+        .with_advertise_addr(MaybeResolved::Resolved(joiner_addr))
+        .with_tcp_options(TcpOptions::new(None)),
+    );
+    Memberlist::<TcpTransport<SmolStr, SocketAddr>, SlowJoinDelegate>::new(
+      opts,
+      SlowJoinDelegate,
+      &SocketAddrResolver,
+      &FirstAddrResolver,
+    )
+    .await
+    .expect("construct slow-join joiner")
+  };
+
+  // The seed is a normal VoidDelegate node.
+  let seed = make_tcp("slowjoin-seed", seed_addr).await;
+
+  // `join().await` must return Ok well within 1.5s even though the joiner's
+  // own `notify_join` sleeps ~3s: the exchange completion resolves the waiter
+  // on the driver task, ahead of the off-loop observation dispatch.
+  let start = std::time::Instant::now();
+  let joined = compio::time::timeout(
+    Duration::from_millis(1500),
+    joiner.join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)]),
+  )
+  .await;
+  let elapsed = start.elapsed();
+
+  let contacted = joined
+    .expect("join() did not return within 1.5s — a slow notify_join stalled join completion")
+    .expect("join failed");
+  assert_eq!(contacted, 1, "exactly one seed contacted");
+  assert!(
+    elapsed < Duration::from_millis(1500),
+    "join completion was delayed by the slow notify_join: {elapsed:?}",
+  );
+
+  // Ignoring Err: best-effort teardown. The joiner's shutdown may take up to
+  // ~3s while its notify_join sleeps, so both are timeout-wrapped.
+  let _ = compio::time::timeout(Duration::from_secs(5), seed.shutdown()).await;
+  let _ = compio::time::timeout(Duration::from_secs(5), joiner.shutdown()).await;
+}
+
+/// Regression: two cloned `Memberlist` handles calling `leave()` concurrently
+/// must BOTH return `Ok(())`. The driver treats leave as a single shared
+/// in-flight operation — the first `Command::Leave` initiates the machine's
+/// `leave()` and parks a `PendingLeave`; the second joins it by pushing its
+/// reply onto the shared `repliers` list rather than re-invoking
+/// `endpoint.leave()` (a terminal no-op once already `Leaving`). When the
+/// machine's `Event::LeftCluster` fires, every joined replier is resolved
+/// together, so neither caller hangs and neither sees a premature `Ok`.
+///
+/// The hazard this guards against: a second caller that snapshots
+/// `was_running == false` (the first leave already moved the machine to
+/// `Leaving`) and falls into the immediate-`Ok` branch returns before the
+/// first leave's `Dead`-self is flushed. On fast loopback that premature-`Ok`
+/// timing is not strongly discriminable (the flush completes sub-millisecond
+/// either way), so this test guards the in-flight-sharing logic against
+/// hang/regression and confirms a peer still observes the leave: B must see
+/// `NodeLeft(A)` after both `leave()` futures resolve.
+#[compio::test]
+async fn concurrent_leave_from_cloned_handles_both_succeed() {
+  let a_addr = loopback_addr(7612);
+  let b_addr = loopback_addr(7613);
+
+  let a = make_tcp("concurrent-leave-a", a_addr).await;
+  let b = make_tcp("concurrent-leave-b", b_addr).await;
+
+  // Converge: B joins A; both observe two alive members.
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+  let converged = tokio_like_wait(
+    || a.alive_count() == 2 && b.alive_count() == 2,
+    Duration::from_secs(5),
+  )
+  .await;
+  assert!(
+    converged,
+    "cluster did not converge: a={}, b={}",
+    a.alive_count(),
+    b.alive_count()
+  );
+
+  // Subscribe to B's events BEFORE A leaves so the NodeLeft is observable.
+  let mut b_events = b.events();
+
+  // Two clones of A both call leave() concurrently. Both must return Ok — one
+  // initiates the in-flight leave, the other joins it; the single LeftCluster
+  // resolves both.
+  let a2 = a.clone();
+  let (r1, r2) = futures_util::future::join(a.leave(), a2.leave()).await;
+  r1.expect("first concurrent leave returned Err");
+  r2.expect("second concurrent leave returned Err (premature-Ok regression or hang)");
+
+  // The peer must observe A's intentional leave — proof the leave actually
+  // reached the wire rather than both callers returning a premature Ok.
+  let saw_leave = compio::time::timeout(Duration::from_millis(500), async {
+    while let Some(ev) = b_events.next().await {
+      if let Event::NodeLeft(node) = ev
+        && node.id_ref() == &SmolStr::new("concurrent-leave-a")
+      {
+        return true;
+      }
+    }
+    false
+  })
+  .await
+  .unwrap_or(false);
+  assert!(
+    saw_leave,
+    "B did not observe A's leave within 500ms of both leave() calls returning"
+  );
+
+  // Ignoring Err: best-effort teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), a.shutdown()).await;
+  let _ = compio::time::timeout(Duration::from_secs(5), b.shutdown()).await;
+}
+
+/// Observation delegate whose FIRST `notify_user_msg` sleeps ~2s, then records
+/// every delivered payload into a shared vector. Every other hook is a no-op
+/// (mirroring `VoidDelegate`). Used to prove the observation channel never
+/// drops application data when the handler is slow.
+struct SlowUserMsgDelegate {
+  slept: Arc<AtomicBool>,
+  user_msgs: Arc<Mutex<Vec<Bytes>>>,
+}
+
+impl NodeDelegate for SlowUserMsgDelegate {
+  async fn notify_user_msg(&self, msg: std::borrow::Cow<'_, [u8]>) {
+    // Stall the FIRST delivery ~2s to model a slow application handler. The
+    // observation channel is unbounded, so the event is buffered (never
+    // dropped) and this delivery still completes — just later. `swap` so only
+    // the first call sleeps; subsequent re-gossips of the same payload record
+    // promptly.
+    if !self.slept.swap(true, Ordering::SeqCst) {
+      compio::time::sleep(Duration::from_secs(2)).await;
+    }
+    // Ignoring poisoning is not silent failure: a poisoned lock means a prior
+    // test-thread panic already failed the test, so unwrap surfaces that.
+    self
+      .user_msgs
+      .lock()
+      .unwrap()
+      .push(Bytes::copy_from_slice(msg.as_ref()));
+  }
+}
+
+impl EventDelegate for SlowUserMsgDelegate {
+  type Id = SmolStr;
+  type Address = SocketAddr;
+}
+
+impl PingDelegate for SlowUserMsgDelegate {
+  type Id = SmolStr;
+  type Address = SocketAddr;
+}
+
+impl ConflictDelegate for SlowUserMsgDelegate {
+  type Id = SmolStr;
+  type Address = SocketAddr;
+}
+
+impl Delegate for SlowUserMsgDelegate {
+  type Id = SmolStr;
+  type Address = SocketAddr;
+}
+
+/// The observation `Delegate` must observe received application data even when
+/// its handler is slow — the driver buffers events for it across a brief stall.
+///
+/// `notify_user_msg` (from `Event::UserPacket`) and `merge_remote_state` (from
+/// `Event::RemoteStateReceived`) carry application payloads that are NOT part of
+/// the `MemberlistSnapshot`, so a dropped delegate event is unrecoverable from
+/// `members()`. The driver only ever `try_send`s to the observation task (it
+/// never awaits the hand-off), so a slow handler cannot stall SWIM. The
+/// observation channel is bounded (`Channel::Bounded`, the default), but one
+/// in-flight broadcast plus the trickle of membership events over a brief stall
+/// stays far under the cap — so the slow first handler only DELAYS delivery, it
+/// does not lose the payload. Here node B's first `notify_user_msg` sleeps ~2s;
+/// A queues a user broadcast that periodic gossip carries to B. Despite the
+/// slow first delivery, B's delegate EVENTUALLY records the payload within a
+/// generous window. Stream-backend parity for the QUIC test of the same name.
+///
+/// Honest scope: this guards eventual delivery under handler latency for a
+/// payload that fits the buffer — not the bounded channel's drop accounting
+/// under sustained saturation, which the dedicated bounded-observation-channel
+/// tests cover directly.
+#[compio::test]
+async fn slow_user_msg_delegate_still_observes_broadcast() {
+  let a_addr = loopback_addr(7530);
+  let b_addr = loopback_addr(7531);
+
+  // Node A is a normal VoidDelegate node; it queues the broadcast.
+  let a = make_tcp("slowuser-a", a_addr).await;
+
+  // Node B carries the slow-user-msg observation delegate; built inline like
+  // `make_tcp` but with `SlowUserMsgDelegate` in place of `VoidDelegate`.
+  let slept = Arc::new(AtomicBool::new(false));
+  let user_msgs: Arc<Mutex<Vec<Bytes>>> = Arc::new(Mutex::new(Vec::new()));
+  let b: Memberlist<TcpTransport<SmolStr, SocketAddr>, SlowUserMsgDelegate> = {
+    let opts = Options::new(
+      TcpTransportOptions::<SmolStr, SocketAddr>::new()
+        .with_local_id(SmolStr::new("slowuser-b"))
+        .with_advertise_addr(MaybeResolved::Resolved(b_addr))
+        .with_tcp_options(TcpOptions::new(None)),
+    );
+    Memberlist::<TcpTransport<SmolStr, SocketAddr>, SlowUserMsgDelegate>::new(
+      opts,
+      SlowUserMsgDelegate {
+        slept: slept.clone(),
+        user_msgs: user_msgs.clone(),
+      },
+      &SocketAddrResolver,
+      &FirstAddrResolver,
+    )
+    .await
+    .expect("construct slow-user-msg node B")
+  };
+
+  // Converge: A joins B; both observe two alive members.
+  a.join(&SocketAddrResolver, &[MaybeResolved::Resolved(b_addr)])
+    .await
+    .expect("join");
+  let converged = tokio_like_wait(
+    || a.alive_count() == 2 && b.alive_count() == 2,
+    Duration::from_secs(5),
+  )
+  .await;
+  assert!(
+    converged,
+    "cluster did not converge: a={}, b={}",
+    a.alive_count(),
+    b.alive_count()
+  );
+
+  // A queues a user broadcast; periodic gossip carries it to B.
+  a.queue_user_broadcast(Bytes::from_static(b"slow-payload"))
+    .await
+    .expect("queue user broadcast acks Ok");
+
+  // B's delegate must EVENTUALLY record the payload despite its first
+  // notify_user_msg sleeping ~2s. The unbounded observation channel buffers
+  // the event for the slow handler — it is never dropped. A generous 6s window
+  // absorbs the gossip-interval stagger plus the 2s handler stall.
+  let saw = tokio_like_wait(
+    || {
+      user_msgs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|b| b.as_ref() == b"slow-payload")
+    },
+    Duration::from_secs(6),
+  )
+  .await;
+  assert!(
+    saw,
+    "slow notify_user_msg never recorded the gossiped broadcast (event lost?); recorded: {:?}",
+    user_msgs.lock().unwrap()
+  );
+
+  // Ignoring Err: best-effort teardown. B's first notify_user_msg may still be
+  // mid-sleep, so both are timeout-wrapped.
+  let _ = compio::time::timeout(Duration::from_secs(5), a.shutdown()).await;
+  let _ = compio::time::timeout(Duration::from_secs(5), b.shutdown()).await;
+}
+
+/// After `leave()` completes, a data-plane mutation must be REJECTED rather
+/// than falsely acked. `leave()` stops the periodic gossip scheduler that
+/// drains `user_broadcasts`, so a broadcast enqueued afterward could never be
+/// disseminated. The driver gates `queue_user_broadcast` on a running node and
+/// replies `MemberlistError::NotRunning` instead of `Ok(())`.
+///
+/// `leave().await` returns only once the machine's `Event::LeftCluster` has
+/// fired, so by the time it returns `is_running()` is false and the subsequent
+/// command is gated. Strongly discriminating: without the gate the call returns
+/// `Ok(())`.
+#[compio::test]
+async fn queue_user_broadcast_after_leave_is_rejected() {
+  let a_addr = loopback_addr(7700);
+  let b_addr = loopback_addr(7701);
+
+  let a = make_tcp("ub-after-leave-a", a_addr).await;
+  let b = make_tcp("ub-after-leave-b", b_addr).await;
+
+  // Converge so A is a real running cluster member (the leave then has a live
+  // peer to flush its `Dead`-self notice to).
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+  let converged = tokio_like_wait(
+    || a.alive_count() == 2 && b.alive_count() == 2,
+    Duration::from_secs(5),
+  )
+  .await;
+  assert!(
+    converged,
+    "cluster did not converge: a={}, b={}",
+    a.alive_count(),
+    b.alive_count()
+  );
+
+  // Leave; `.await` blocks until the flush completes (`LeftCluster`).
+  a.leave().await.expect("leave");
+
+  // The post-leave broadcast must be rejected, NOT falsely acked.
+  let res = a
+    .queue_user_broadcast(Bytes::from_static(b"after-leave"))
+    .await;
+  assert!(
+    matches!(res, Err(memberlist_compio::MemberlistError::NotRunning)),
+    "expected NotRunning after leave, got {res:?}",
+  );
+
+  // Ignoring Err: best-effort teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), a.shutdown()).await;
+  let _ = compio::time::timeout(Duration::from_secs(5), b.shutdown()).await;
+}
+
+/// Mirror of `queue_user_broadcast_after_leave_is_rejected` for a second gated
+/// command: after `leave()` the metadata-update mutation is rejected with
+/// `MemberlistError::NotRunning` (the alive-broadcast path that would gossip the
+/// new metadata is no longer scheduled). Strongly discriminating: without the
+/// gate the call returns `Ok(())`.
+#[compio::test]
+async fn update_node_metadata_after_leave_is_rejected() {
+  let a_addr = loopback_addr(7702);
+  let b_addr = loopback_addr(7703);
+
+  let a = make_tcp("meta-after-leave-a", a_addr).await;
+  let b = make_tcp("meta-after-leave-b", b_addr).await;
+
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+  let converged = tokio_like_wait(
+    || a.alive_count() == 2 && b.alive_count() == 2,
+    Duration::from_secs(5),
+  )
+  .await;
+  assert!(
+    converged,
+    "cluster did not converge: a={}, b={}",
+    a.alive_count(),
+    b.alive_count()
+  );
+
+  a.leave().await.expect("leave");
+
+  let res = a.update_node_metadata(b"after-leave".to_vec()).await;
+  assert!(
+    matches!(res, Err(memberlist_compio::MemberlistError::NotRunning)),
+    "expected NotRunning after leave, got {res:?}",
+  );
+
+  // Ignoring Err: best-effort teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), a.shutdown()).await;
+  let _ = compio::time::timeout(Duration::from_secs(5), b.shutdown()).await;
+}
+
+/// Mirror of `update_node_metadata_after_leave_is_rejected` for the two policy-
+/// mutation commands: after `leave()` the node emits no protocol traffic, so a
+/// new compression or encryption policy could never take effect on the wire.
+/// Both `set_compression_options` and `set_encryption_options` must reject with
+/// `MemberlistError::NotRunning` rather than falsely ack a change that will
+/// never be observed. Strongly discriminating: without the gate each call
+/// returns `Ok(())`.
+#[compio::test]
+async fn set_policy_options_after_leave_is_rejected() {
+  let a_addr = loopback_addr(7708);
+  let b_addr = loopback_addr(7709);
+
+  let a = make_tcp("policy-after-leave-a", a_addr).await;
+  let b = make_tcp("policy-after-leave-b", b_addr).await;
+
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+  let converged = tokio_like_wait(
+    || a.alive_count() == 2 && b.alive_count() == 2,
+    Duration::from_secs(5),
+  )
+  .await;
+  assert!(
+    converged,
+    "cluster did not converge: a={}, b={}",
+    a.alive_count(),
+    b.alive_count()
+  );
+
+  a.leave().await.expect("leave");
+
+  let res_compr = a
+    .set_compression_options(memberlist_wire::CompressionOptions::new())
+    .await;
+  assert!(
+    matches!(
+      res_compr,
+      Err(memberlist_compio::MemberlistError::NotRunning)
+    ),
+    "expected NotRunning from set_compression_options after leave, got {res_compr:?}",
+  );
+
+  let res_enc = a
+    .set_encryption_options(memberlist_wire::EncryptionOptions::new())
+    .await;
+  assert!(
+    matches!(res_enc, Err(memberlist_compio::MemberlistError::NotRunning)),
+    "expected NotRunning from set_encryption_options after leave, got {res_enc:?}",
+  );
+
+  // Ignoring Err: best-effort teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), a.shutdown()).await;
+  let _ = compio::time::timeout(Duration::from_secs(5), b.shutdown()).await;
+}
+
+/// An ack payload too large to frame into a single gossip datagram must be
+/// REJECTED with `MemberlistError::PayloadTooLarge`, NOT falsely acked.
+/// An ack rides one UDP datagram on the gossip socket, so an over-budget
+/// payload makes every probe reply silently fail to send (the lossy-gossip
+/// policy drops `send_to` errors) — peers would receive no ack and falsely
+/// suspect this node. The driver validates at the machine setter and the
+/// payload is never stored. Strongly discriminating: without the validation
+/// the call returns `Ok(())`. 1 MiB is far over the default 1400-byte
+/// gossip budget.
+#[compio::test]
+async fn set_ack_payload_oversized_is_rejected() {
+  let a_addr = loopback_addr(7760);
+  let a = make_tcp("ack-oversized-a", a_addr).await;
+
+  let res = a
+    .set_ack_payload(Bytes::from(vec![0xab_u8; 1024 * 1024]))
+    .await;
+  assert!(
+    matches!(
+      res,
+      Err(memberlist_compio::MemberlistError::PayloadTooLarge(_))
+    ),
+    "expected PayloadTooLarge for a 1 MiB ack payload, got {res:?}",
+  );
+
+  // A reasonable payload on the SAME running node is still accepted: the
+  // rejection is a size cap, not a blanket failure.
+  let ok = a.set_ack_payload(Bytes::from_static(b"small")).await;
+  assert!(
+    ok.is_ok(),
+    "a small ack payload must still be accepted, got {ok:?}"
+  );
+
+  // Ignoring Err: best-effort teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), a.shutdown()).await;
+}
+
+/// After `leave()` completes, a `join` must be REJECTED with
+/// `MemberlistError::NotRunning` rather than falsely reporting success.
+/// `leave()` is terminal — it stops the periodic probe / gossip / push-pull
+/// schedulers and there is no rejoin / re-arm path — so a join enqueued
+/// afterward would resolve `Ok(contacted)` from the push/pull's
+/// `ExchangeCompleted` yet leave the node Left and non-participating,
+/// misleading orchestration into treating a dead node as rejoined. The driver
+/// gates `Command::Join` on a running node BEFORE enqueuing any push/pull and
+/// replies `NotRunning`. Both public entry points funnel through
+/// `Command::Join`, so both `join` (WaitForCompletion) and `dispatch_join`
+/// (Dispatch) are covered. Strongly discriminating: without the gate `join`
+/// returns `Ok(usize)`.
+#[compio::test]
+async fn join_after_leave_is_rejected() {
+  let a_addr = loopback_addr(7704);
+  let b_addr = loopback_addr(7705);
+
+  let a = make_tcp("join-after-leave-a", a_addr).await;
+  let b = make_tcp("join-after-leave-b", b_addr).await;
+
+  // Converge so A is a real running member with a live peer to flush its
+  // `Dead`-self notice to on leave.
+  b.join(&SocketAddrResolver, &[MaybeResolved::Resolved(a_addr)])
+    .await
+    .expect("join");
+  let converged = tokio_like_wait(
+    || a.alive_count() == 2 && b.alive_count() == 2,
+    Duration::from_secs(5),
+  )
+  .await;
+  assert!(
+    converged,
+    "cluster did not converge: a={}, b={}",
+    a.alive_count(),
+    b.alive_count()
+  );
+
+  // Leave; `.await` blocks until the flush completes (`LeftCluster`), so by the
+  // time it returns A's machine lifecycle is Left and `is_running()` is false.
+  a.leave().await.expect("leave");
+
+  // The synchronous `join` (WaitForCompletion arm) must be rejected.
+  let res = a
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(b_addr)])
+    .await;
+  assert!(
+    matches!(res, Err(memberlist_compio::MemberlistError::NotRunning)),
+    "expected NotRunning from join after leave, got {res:?}",
+  );
+
+  // The fire-and-forget `dispatch_join` (Dispatch arm) shares the same
+  // `Command::Join` gate and must also be rejected.
+  let res_dispatch = a
+    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(b_addr)])
+    .await;
+  assert!(
+    matches!(
+      res_dispatch,
+      Err(memberlist_compio::MemberlistError::NotRunning)
+    ),
+    "expected NotRunning from dispatch_join after leave, got {res_dispatch:?}",
+  );
+
+  // Ignoring Err: best-effort teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), a.shutdown()).await;
+  let _ = compio::time::timeout(Duration::from_secs(5), b.shutdown()).await;
+}
+
+/// A zero `bridge_recv_buf_len` must be REJECTED at construction with
+/// `MemberlistError::InvalidOption` rather than accepted. The per-bridge
+/// byte-mover reads into a `vec![0u8; bridge_recv_buf_len]`; a zero-length read
+/// returns `Ok(0)`, which the bridge treats as peer EOF, so every TCP/TLS
+/// join / push-pull stream exchange would deterministically break while
+/// construction returned `Ok`. The stream `Transport::new` validates the knob
+/// fail-fast. Strongly discriminating: without the validation `new` returns
+/// `Ok` over a silently-broken node. A nonzero value still constructs `Ok`.
+#[compio::test]
+async fn zero_bridge_recv_buf_len_is_rejected() {
+  let addr = loopback_addr(7706);
+
+  let bad = Options::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new("zero-recv-buf"))
+      .with_advertise_addr(MaybeResolved::Resolved(addr))
+      .with_tcp_options(TcpOptions::new(None))
+      .with_stream(StreamTransportOptions::new().with_bridge_recv_buf_len(0)),
+  );
+  let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
+    bad,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await;
+  // `Memberlist` is not `Debug`, so match instead of formatting `res` — on the
+  // (wrong) Ok path tear the node down so its socket releases the port.
+  match res {
+    Err(memberlist_compio::MemberlistError::InvalidOption(e)) => {
+      assert_eq!(
+        e.option(),
+        "bridge_recv_buf_len",
+        "InvalidOption must name the rejected knob"
+      );
+    }
+    Err(other) => panic!("expected InvalidOption(bridge_recv_buf_len), got {other:?}"),
+    Ok(m) => {
+      let _ = compio::time::timeout(Duration::from_secs(5), m.shutdown()).await;
+      panic!("a zero bridge_recv_buf_len must be rejected, but construction succeeded");
+    }
+  }
+
+  // A nonzero value on the SAME address still constructs Ok: the rejection is
+  // specific to the degenerate zero, not a blanket failure.
+  let good = Options::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new("nonzero-recv-buf"))
+      .with_advertise_addr(MaybeResolved::Resolved(addr))
+      .with_tcp_options(TcpOptions::new(None))
+      .with_stream(StreamTransportOptions::new().with_bridge_recv_buf_len(4096)),
+  );
+  let ok = TcpMemberlist::<SmolStr, SocketAddr>::new(
+    good,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("nonzero bridge_recv_buf_len must construct Ok");
+  let _ = compio::time::timeout(Duration::from_secs(5), ok.shutdown()).await;
+}
+
+/// A zero `idle_wake_interval` must be REJECTED at construction with
+/// `MemberlistError::InvalidOption` rather than accepted. It is the driver
+/// loop's fallback sleep when the coordinator has no nearer pending deadline,
+/// so a zero value makes a quiescent endpoint busy-spin the loop and peg a CPU
+/// core, silently. `Memberlist::new` validates the generic-free driver knob
+/// fail-fast for every backend. Strongly discriminating: without the
+/// validation `new` returns `Ok` over a CPU-pegging node. A nonzero value
+/// still constructs `Ok`.
+#[compio::test]
+async fn zero_idle_wake_interval_is_rejected() {
+  let addr = loopback_addr(7707);
+
+  let bad = Options::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new("zero-idle-wake"))
+      .with_advertise_addr(MaybeResolved::Resolved(addr))
+      .with_tcp_options(TcpOptions::new(None)),
+  )
+  .with_driver(DriverOptions::new().with_idle_wake_interval(Duration::ZERO));
+  let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
+    bad,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await;
+  // `Memberlist` is not `Debug`, so match instead of formatting `res` — on the
+  // (wrong) Ok path tear the node down so its socket releases the port.
+  match res {
+    Err(memberlist_compio::MemberlistError::InvalidOption(e)) => {
+      assert_eq!(
+        e.option(),
+        "idle_wake_interval",
+        "InvalidOption must name the rejected knob"
+      );
+    }
+    Err(other) => panic!("expected InvalidOption(idle_wake_interval), got {other:?}"),
+    Ok(m) => {
+      let _ = compio::time::timeout(Duration::from_secs(5), m.shutdown()).await;
+      panic!("a zero idle_wake_interval must be rejected, but construction succeeded");
+    }
+  }
+
+  // A nonzero value on the SAME address still constructs Ok.
+  let good = Options::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new("nonzero-idle-wake"))
+      .with_advertise_addr(MaybeResolved::Resolved(addr))
+      .with_tcp_options(TcpOptions::new(None)),
+  )
+  .with_driver(DriverOptions::new().with_idle_wake_interval(Duration::from_secs(30)));
+  let ok = TcpMemberlist::<SmolStr, SocketAddr>::new(
+    good,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("nonzero idle_wake_interval must construct Ok");
+  let _ = compio::time::timeout(Duration::from_secs(5), ok.shutdown()).await;
 }

@@ -40,11 +40,12 @@ use memberlist_wire::{
 };
 
 use crate::{
-  StreamDriverOptions,
   command::{
     Command, JoinCmd, JoinKind, LeaveCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
     ShutdownCmd, UpdateNodeMetadataCmd,
   },
+  delegate::Delegate,
+  driver_options::{DriverOptions, StreamTransportOptions},
   error::{JoinAllFailed, MemberlistError, Result},
   snapshot::MemberlistSnapshot,
 };
@@ -95,6 +96,55 @@ struct PendingJoin {
   deadline: Instant,
   /// One-shot reply channel back to the caller.
   reply: flume::Sender<Result<usize>>,
+}
+
+/// Driver-side state for the single in-flight graceful-leave operation.
+///
+/// A [`Command::Leave`] that finds the endpoint Running initiates the
+/// machine's `leave()`, which queues the direct `Dead`-self notices to
+/// every live peer and withholds [`Event::LeftCluster`] until they have
+/// drained through `poll_transmit`. The driver parks this here and
+/// replies only once that `LeftCluster` arrives (success) or
+/// `deadline` elapses ([`MemberlistError::LeaveTimeout`]) — so a
+/// returned `Ok(())` means the leave actually reached the wire, never
+/// merely that it was queued. Mirrors the [`PendingJoin`] /
+/// `shutdown_reply` parking pattern.
+///
+/// Leave is a SHARED operation: a second `Command::Leave` racing an
+/// in-flight one (cloned `Memberlist` handles can both call `leave()`)
+/// does NOT re-invoke `endpoint.leave()` (a repeated leave once already
+/// `Leaving`/`Left` is a terminal no-op that emits no completion event,
+/// so a fresh parked waiter would hang waiting on a `LeftCluster` that
+/// never re-fires). Instead it joins this in-flight operation by pushing
+/// its reply onto `repliers`. Every terminal path — `LeftCluster`
+/// success, `leave_timeout` reap, shutdown — drains EVERY replier.
+struct PendingLeave {
+  /// Reply channels of every `leave()` caller that joined this in-flight
+  /// leave — the initiator plus any racing clones. Drained together on
+  /// the single terminal outcome (`Ok` on `LeftCluster`, `LeaveTimeout`
+  /// on deadline, `Shutdown` on teardown).
+  repliers: Vec<flume::Sender<Result<()>>>,
+  /// Wall-clock instant past which the driver replies
+  /// [`MemberlistError::LeaveTimeout`] to every replier even if
+  /// `LeftCluster` has not yet fired.
+  deadline: Instant,
+}
+
+impl PendingLeave {
+  /// Reply to every joined `leave()` caller with a fresh `Result<()>`
+  /// from `make_result`. The single terminal outcome fans out to the
+  /// initiator and any racing clones. A constructor closure (rather than
+  /// a single cloned value) sidesteps `MemberlistError` not being
+  /// `Clone` — every terminal outcome here (`Ok(())`,
+  /// [`MemberlistError::LeaveTimeout`], [`MemberlistError::Shutdown`])
+  /// is a trivially reconstructible unit/variant value.
+  async fn resolve_all(self, mut make_result: impl FnMut() -> Result<()>) {
+    for replier in self.repliers {
+      // Ignoring Err: a `leave()` caller dropped its reply receiver
+      // (its user-facing future was cancelled); nothing to surface.
+      let _ = replier.send_async(make_result()).await;
+    }
+  }
 }
 
 /// Payload for [`BridgeInbound::Bytes`]: a slice of plaintext bytes the
@@ -319,7 +369,7 @@ where
 // The tuning knobs the driver loop reads (fallback idle sleep, dial
 // timeout, bridge-inbound cap, iter-top drain cap, cmd fairness
 // budget, past-due peek budget) all live on [`DriverOptions`] —
-// constructed once per `Memberlist` and threaded into `driver_loop`
+// constructed once per `Memberlist` and threaded into `stream_driver_loop`
 // below. The historical const values are preserved as the
 // `DEFAULT_*` constants in [`crate::driver_options`].
 
@@ -377,25 +427,28 @@ where
 ///
 /// `#[allow(clippy::too_many_arguments)]`: the parameter list is a
 /// composition of the coordinator + every channel the per-transport
-/// adapter owns. Packing into a struct would just shuffle the names
+/// `run()` body owns. Packing into a struct would just shuffle the names
 /// across the call site without reducing the actual coupling — the
-/// per-transport adapter (`TcpMemberlist::new` / `TlsMemberlist::new`)
-/// is the only caller and reads cleaner with positional args.
+/// per-transport `Transport::run` body (TCP / TLS) is the only caller and
+/// reads cleaner with positional args.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn driver_loop<I, A, R>(
+pub(crate) async fn stream_driver_loop<I, A, R, D>(
   mut endpoint: StreamEndpoint<I, A, R>,
   gossip_socket: UdpSocket,
   listener: TcpListener,
   commands: Receiver<Command>,
   events_tx: Sender<Event<I, A>>,
   events_dropped: Arc<std::sync::atomic::AtomicU64>,
+  observation_dropped: Arc<std::sync::atomic::AtomicU64>,
   snapshot: Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
   bridge_ready_rx: Receiver<BridgeReady>,
   bridge_ready_tx: Sender<BridgeReady>,
   shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
-  driver_opts: StreamDriverOptions,
-  socket_to_peer: Arc<dyn Fn(SocketAddr) -> A + Send + Sync>,
+  driver_opts: DriverOptions,
+  stream_opts: StreamTransportOptions,
+  delegate: D,
 ) where
+  D: Delegate<Id = I, Address = A>,
   I: memberlist_wire::Id
     + memberlist_wire::Data
     + memberlist_wire::CheapClone
@@ -410,6 +463,7 @@ pub(crate) async fn driver_loop<I, A, R>(
     + core::hash::Hash
     + core::fmt::Debug
     + core::fmt::Display
+    + From<SocketAddr>
     + Send
     + Sync
     + 'static,
@@ -417,18 +471,76 @@ pub(crate) async fn driver_loop<I, A, R>(
 {
   let mut bridges: HashMap<ExchangeId, BridgeHandle> = HashMap::new();
   let (bridge_inbound_tx, bridge_inbound_rx) =
-    flume::bounded::<BridgeInbound>(driver_opts.transport_options().bridge_inbound_cap());
+    flume::bounded::<BridgeInbound>(stream_opts.bridge_inbound_cap());
+
+  // Spawn the per-driver observation task. It owns the user `Delegate`
+  // and the `EventStream` sender and runs OFF this driver task: the
+  // driver `try_send`s every surfaced event onto `obs_tx`, the task
+  // dispatches the matching observation hook then forwards to
+  // subscribers. Decoupling observation from the driver loop keeps a
+  // slow `notify_*` / `merge_remote_state` from stalling protocol
+  // advancement — and therefore from delaying a parked join/leave reply
+  // that depends on a follow-up input the driver's arms must still
+  // service. The `obs_tx` queue is sized per
+  // [`DriverOptions::observation_channel`] (default [`Channel::Bounded`]).
+  // The `Delegate` carries the two application-data hooks (`notify_user_msg`
+  // from `UserPacket`, `merge_remote_state` from `RemoteStateReceived`) whose
+  // payloads are absent from `MemberlistSnapshot` and thus unrecoverable from
+  // `members()`. `Unbounded` never drops — the delegate observes EVERY event
+  // in order — but a persistently stuck handler grows memory (the handler's
+  // contract is to keep up). `Bounded(n)` caps that growth: a full channel
+  // drops the newest event (blocking would stall SWIM) and counts it in
+  // `observation_dropped` so the drop is observable, not silent. Either way the
+  // hand-off (`try_send`) is non-blocking, so a slow hook never stalls SWIM.
+  // The EventStream (`events_tx`) stays bounded best-effort.
+  let (obs_tx, obs_rx) = match driver_opts.observation_channel() {
+    crate::Channel::Unbounded => flume::unbounded::<Event<I, A>>(),
+    crate::Channel::Bounded(n) => flume::bounded::<Event<I, A>>(n),
+  };
+  // The two drop counters are kept distinct so a consumer can tell recoverable
+  // from potentially-unrecoverable loss: the observation task increments
+  // `events_dropped` on a bounded EventStream-forward drop (membership/control,
+  // recoverable from the snapshot), and the driver loop increments
+  // `observation_dropped` on a `Bounded` obs-channel drop (the delegate fell
+  // behind; may have lost app-data — see `drain_events`). Clone `events_dropped`
+  // for the task; thread `observation_dropped` into `drain_events`.
+  //
+  // `obs_payload_bytes` tracks the bytes of payload-bearing events
+  // (`UserPacket` / `RemoteStateReceived`) currently queued in `obs_tx`: the
+  // driver adds on enqueue, the observation task subtracts on dequeue. The byte
+  // backstop in `drain_events` uses it to bound the memory large reliable
+  // payloads occupy while a delegate falls behind — a count cap alone cannot,
+  // since one event can own a `max_stream_frame_size` payload.
+  let obs_payload_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+  compio::runtime::spawn(observation_task::<I, A, D>(
+    obs_rx,
+    delegate,
+    events_tx,
+    events_dropped.clone(),
+    obs_payload_bytes.clone(),
+  ))
+  .detach();
+
   // Stash for the [`Command::Shutdown`] reply sender — see
   // [`dispatch_command`]. Ack lands AFTER the post-loop cleanup drops
   // the listener and the gossip socket so the bound ports are free
   // when the caller resumes from `shutdown.await`.
   let mut shutdown_reply: Option<flume::Sender<Result<()>>> = None;
   // Outstanding synchronous-join waiters. Populated by
-  // [`dispatch_command`] on [`JoinKind::WaitForCompletion`]; updated
-  // by [`drain_events`] on every `NodeJoined`; reaped (replied + removed)
-  // by [`reap_pending_joins`] after each drain block or whenever a
-  // deadline elapses.
+  // [`dispatch_command`] on [`JoinKind::WaitForCompletion`]; reduced
+  // by [`drain_events`] on every push/pull `ExchangeCompleted`
+  // (replied + removed there the moment a waiter's `pending` set
+  // empties); the deadline path is reaped by [`reap_pending_joins`]
+  // after each drain block.
   let mut pending_joins: Vec<PendingJoin> = Vec::new();
+  // Outstanding graceful-leave waiter. Parked by [`dispatch_command`]
+  // when a [`Command::Leave`] initiates the machine's `leave()` (the
+  // endpoint was Running); resolved [`Ok`] in [`drain_events`]
+  // on `Event::LeftCluster`; reaped [`MemberlistError::LeaveTimeout`]
+  // by [`reap_pending_leave`] once its deadline elapses. At most one
+  // is outstanding at a time (a second initiating Leave is replied
+  // immediately rather than dropping a reply).
+  let mut pending_leave: Option<PendingLeave> = None;
 
   // Per-driver UDP recv buffer size, derived from the coordinator's
   // configured `gossip_mtu` + encrypted wrapper overhead. Computed
@@ -437,7 +549,27 @@ pub(crate) async fn driver_loop<I, A, R>(
   // value.
   let recv_buf_len = gossip_recv_buf_len::<I, A, R>(&endpoint);
 
+  // Observation-channel payload byte backstop. The `Bounded(n)` count cap
+  // bounds the NUMBER of queued events, but one `UserPacket` /
+  // `RemoteStateReceived` can own up to `max_stream_frame_size` bytes, so `n`
+  // large reliable payloads could still OOM. Cap the bytes of queued
+  // payload-bearing events at four frames' worth: a small burst of large
+  // payloads is absorbed, but a stuck delegate cannot accumulate without bound.
+  // `Unbounded` opts out of dropping entirely, so it opts out of the byte
+  // backstop too (budget `None`).
+  let obs_payload_budget: Option<u64> = match driver_opts.observation_channel() {
+    crate::Channel::Bounded(_) => Some((endpoint.max_stream_frame_size() as u64).saturating_mul(4)),
+    crate::Channel::Unbounded => None,
+  };
+
   refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
+
+  // Arm the periodic probe / gossip / push-pull schedulers. Without this
+  // the machine's `next_probe` / `next_gossip` / `next_pushpull` stay
+  // `None`, so failure detection, broadcast dissemination, and anti-entropy
+  // never run — the loop would only service explicit join push-pull and
+  // passive inbound traffic.
+  endpoint.start_scheduling(Instant::now());
 
   loop {
     let mut dirty = false;
@@ -466,12 +598,13 @@ pub(crate) async fn driver_loop<I, A, R>(
             &mut endpoint,
             &mut bridges,
             &bridge_ready_tx,
-            driver_opts,
+            stream_opts,
             &mut shutdown_reply,
             &mut pending_joins,
+            &mut pending_leave,
+            driver_opts.leave_timeout(),
             c,
             now,
-            &socket_to_peer,
           )
           .await;
           cmd_drained += 1;
@@ -528,7 +661,7 @@ pub(crate) async fn driver_loop<I, A, R>(
             &mut bridges,
             &bridge_inbound_tx,
             ready,
-            driver_opts.transport_options().bridge_recv_buf_len(),
+            stream_opts.bridge_recv_buf_len(),
           );
           drained += 1;
           dirty = true;
@@ -544,23 +677,37 @@ pub(crate) async fn driver_loop<I, A, R>(
     // arm fires. Run the drain phase + snapshot so the post-shutdown
     // state is flushed, then break.
     if exit {
+      // Exit-path snapshot gate (mirror-symmetric with the QUIC
+      // driver): publish a fresh snapshot iff the teardown drain
+      // itself produced observable progress, NOT on the iteration
+      // `dirty` flag. The drain-progress signal is the precise
+      // "did teardown change published state" question; gating on it
+      // (in both drivers) avoids a redundant publish when nothing
+      // drained and keeps the two exit paths identical in shape.
+      let mut drained_any = false;
       loop {
         let did_actions =
-          drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, driver_opts);
+          drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, stream_opts);
         let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
         let did_transmits = drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket).await;
-        let did_events = drain_events::<I, A, R>(
+        let did_events = drain_events(
           &mut endpoint,
-          &events_tx,
-          &events_dropped,
+          &obs_tx,
+          &observation_dropped,
+          &obs_payload_bytes,
+          obs_payload_budget,
           &mut pending_joins,
-        );
+          &mut pending_leave,
+        )
+        .await;
         if !(did_actions || did_transports || did_transmits || did_events) {
           break;
         }
+        drained_any = true;
       }
       reap_pending_joins(&mut pending_joins, Instant::now()).await;
-      if dirty {
+      reap_pending_leave(&mut pending_leave, Instant::now()).await;
+      if drained_any {
         refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
       }
       break;
@@ -568,20 +715,25 @@ pub(crate) async fn driver_loop<I, A, R>(
 
     // Re-poll the deadline AFTER applying the drained inputs — the
     // applied bytes / completions may have advanced or cleared the
-    // pending deadline. Fold in the earliest pending-join deadline
-    // so the timer arm fires by the first expiring synchronous join
-    // even when the coordinator itself has no nearer deadline; the
-    // past-due path's subsequent `handle_timeout` re-gate (after the
-    // peek) guards against calling the coordinator with no real
-    // endpoint-side work.
+    // pending deadline. Fold in the earliest pending-join AND
+    // pending-leave deadline so the timer arm fires by the first
+    // expiring synchronous join / graceful-leave even when the
+    // coordinator itself has no nearer deadline; the past-due path's
+    // subsequent `handle_timeout` re-gate (after the peek) guards
+    // against calling the coordinator with no real endpoint-side work.
     let setup_now = Instant::now();
     let endpoint_deadline = endpoint
       .poll_timeout()
       .unwrap_or(setup_now + driver_opts.idle_wake_interval());
-    let timeout_deadline = match min_pending_join_deadline(&pending_joins) {
-      Some(pj_d) if pj_d < endpoint_deadline => pj_d,
-      _ => endpoint_deadline,
-    };
+    let timeout_deadline = [
+      Some(endpoint_deadline),
+      min_pending_join_deadline(&pending_joins),
+      min_pending_leave_deadline(&pending_leave),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(endpoint_deadline);
 
     // BOUNDED past-due preemption. Under a continuous UDP-recv flood
     // the main `select_biased!`'s `recv` arm always wins over `timer`
@@ -630,7 +782,7 @@ pub(crate) async fn driver_loop<I, A, R>(
           let BufResult(res, buf) = gossip;
           if let Ok((n, src)) = res {
             let now = Instant::now();
-            dispatch_gossip::<I, A, R>(&mut endpoint, src, &buf[..n], now, &socket_to_peer);
+            dispatch_gossip::<I, A, R>(&mut endpoint, src, &buf[..n], now);
             dirty = true;
           }
         }
@@ -650,26 +802,32 @@ pub(crate) async fn driver_loop<I, A, R>(
         &bridge_inbound_rx,
         &bridge_ready_rx,
         driver_opts,
+        stream_opts,
       ) {
         dirty = true;
       }
 
       loop {
         let did_actions =
-          drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, driver_opts);
+          drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, stream_opts);
         let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
         let did_transmits = drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket).await;
-        let did_events = drain_events::<I, A, R>(
+        let did_events = drain_events(
           &mut endpoint,
-          &events_tx,
-          &events_dropped,
+          &obs_tx,
+          &observation_dropped,
+          &obs_payload_bytes,
+          obs_payload_budget,
           &mut pending_joins,
-        );
+          &mut pending_leave,
+        )
+        .await;
         if !(did_actions || did_transports || did_transmits || did_events) {
           break;
         }
       }
       reap_pending_joins(&mut pending_joins, Instant::now()).await;
+      reap_pending_leave(&mut pending_leave, Instant::now()).await;
       if dirty {
         refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
       }
@@ -687,20 +845,25 @@ pub(crate) async fn driver_loop<I, A, R>(
     if dirty {
       loop {
         let did_actions =
-          drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, driver_opts);
+          drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, stream_opts);
         let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
         let did_transmits = drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket).await;
-        let did_events = drain_events::<I, A, R>(
+        let did_events = drain_events(
           &mut endpoint,
-          &events_tx,
-          &events_dropped,
+          &obs_tx,
+          &observation_dropped,
+          &obs_payload_bytes,
+          obs_payload_budget,
           &mut pending_joins,
-        );
+          &mut pending_leave,
+        )
+        .await;
         if !(did_actions || did_transports || did_transmits || did_events) {
           break;
         }
       }
       reap_pending_joins(&mut pending_joins, Instant::now()).await;
+      reap_pending_leave(&mut pending_leave, Instant::now()).await;
       refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
       dirty = false;
     }
@@ -764,7 +927,7 @@ pub(crate) async fn driver_loop<I, A, R>(
         match res {
           Ok((n, src)) => {
             let now = Instant::now();
-            dispatch_gossip::<I, A, R>(&mut endpoint, src, &buf[..n], now, &socket_to_peer);
+            dispatch_gossip::<I, A, R>(&mut endpoint, src, &buf[..n], now);
             dirty = true;
           }
           Err(_) => {
@@ -792,6 +955,7 @@ pub(crate) async fn driver_loop<I, A, R>(
           &bridge_inbound_rx,
           &bridge_ready_rx,
           driver_opts,
+          stream_opts,
         ) {
           dirty = true;
         }
@@ -806,8 +970,7 @@ pub(crate) async fn driver_loop<I, A, R>(
             // bytes for the TLS path; the bridge itself sees only raw
             // socket bytes.
             let now = Instant::now();
-            let from: A = socket_to_peer(peer);
-            let eid = endpoint.accept_connection(from, now);
+            let eid = endpoint.accept_connection(peer.into(), now);
             let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
             bridges.insert(eid, BridgeHandle { out_tx });
             spawn_bridge(
@@ -815,7 +978,7 @@ pub(crate) async fn driver_loop<I, A, R>(
               eid,
               out_rx,
               &bridge_inbound_tx,
-              driver_opts.transport_options().bridge_recv_buf_len(),
+              stream_opts.bridge_recv_buf_len(),
             );
             dirty = true;
           }
@@ -841,12 +1004,13 @@ pub(crate) async fn driver_loop<I, A, R>(
               &mut endpoint,
               &mut bridges,
               &bridge_ready_tx,
-              driver_opts,
+              stream_opts,
               &mut shutdown_reply,
               &mut pending_joins,
+              &mut pending_leave,
+              driver_opts.leave_timeout(),
               c,
               now,
-              &socket_to_peer,
             ).await;
             dirty = true;
           }
@@ -864,7 +1028,7 @@ pub(crate) async fn driver_loop<I, A, R>(
             &mut bridges,
             &bridge_inbound_tx,
             ready,
-            driver_opts.transport_options().bridge_recv_buf_len(),
+            stream_opts.bridge_recv_buf_len(),
           );
           dirty = true;
         }
@@ -915,20 +1079,25 @@ pub(crate) async fn driver_loop<I, A, R>(
     // the per-bridge channel.
     loop {
       let did_actions =
-        drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, driver_opts);
+        drain_actions::<I, A, R>(&mut endpoint, &mut bridges, &bridge_ready_tx, stream_opts);
       let did_transports = drain_transport_transmits::<I, A, R>(&mut endpoint, &bridges);
       let did_transmits = drain_transmits::<I, A, R>(&mut endpoint, &gossip_socket).await;
-      let did_events = drain_events::<I, A, R>(
+      let did_events = drain_events(
         &mut endpoint,
-        &events_tx,
-        &events_dropped,
+        &obs_tx,
+        &observation_dropped,
+        &obs_payload_bytes,
+        obs_payload_budget,
         &mut pending_joins,
-      );
+        &mut pending_leave,
+      )
+      .await;
       if !(did_actions || did_transports || did_transmits || did_events) {
         break;
       }
     }
     reap_pending_joins(&mut pending_joins, Instant::now()).await;
+    reap_pending_leave(&mut pending_leave, Instant::now()).await;
 
     if dirty {
       refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
@@ -970,6 +1139,9 @@ pub(crate) async fn driver_loop<I, A, R>(
       Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { reply, .. }) => reply,
       Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => reply,
       Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => reply,
+      Command::QueueUserBroadcast(cmd) => cmd.reply().clone(),
+      Command::SetLocalState(cmd) => cmd.reply().clone(),
+      Command::SetAckPayload(cmd) => cmd.reply().clone(),
       Command::Join(JoinCmd { reply, .. }) => {
         // Join's reply type is `Result<usize>`; surface the same
         // Shutdown error through a separate match arm so the type
@@ -994,6 +1166,13 @@ pub(crate) async fn driver_loop<I, A, R>(
   for pj in pending_joins.drain(..) {
     // Ignoring Err: caller dropped the reply receiver.
     let _ = pj.reply.send_async(Err(MemberlistError::Shutdown)).await;
+  }
+  // Reply Err(Shutdown) to every joined graceful-leave replier whose
+  // `LeftCluster` never arrived before the loop exited (e.g. a shutdown
+  // raced the leave flush). Without this their receivers would hang
+  // forever — the loop body's reap path is gone and the task is exiting.
+  if let Some(pl) = pending_leave.take() {
+    pl.resolve_all(|| Err(MemberlistError::Shutdown)).await;
   }
   for (_eid, handle) in bridges.drain() {
     // Ignoring Err: the bridge may have exited already; the close
@@ -1038,12 +1217,13 @@ async fn dispatch_command<I, A, R>(
   endpoint: &mut StreamEndpoint<I, A, R>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
-  driver_opts: StreamDriverOptions,
+  stream_opts: StreamTransportOptions,
   shutdown_reply: &mut Option<flume::Sender<Result<()>>>,
   pending_joins: &mut Vec<PendingJoin>,
+  pending_leave: &mut Option<PendingLeave>,
+  leave_timeout: core::time::Duration,
   cmd: Command,
   now: Instant,
-  socket_to_peer: &Arc<dyn Fn(SocketAddr) -> A + Send + Sync>,
 ) where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -1059,6 +1239,7 @@ async fn dispatch_command<I, A, R>(
     + core::hash::Hash
     + core::fmt::Debug
     + core::fmt::Display
+    + From<SocketAddr>
     + Send
     + Sync
     + 'static,
@@ -1066,6 +1247,19 @@ async fn dispatch_command<I, A, R>(
 {
   match cmd {
     Command::Join(JoinCmd { addrs, kind, reply }) => {
+      // Gate on a running node FIRST: `leave()` is terminal — it stops
+      // the periodic schedulers (probe / gossip / push-pull) and there
+      // is no rejoin / re-arm path. A join enqueued after leave would
+      // resolve `Ok(contacted)` from `ExchangeCompleted` yet leave the
+      // node Left and non-participating, so orchestration would treat a
+      // dead node as rejoined. Reject with `NotRunning` BEFORE any
+      // `start_push_pull` so no push/pull is enqueued. The single-task
+      // driver makes the check + dispatch atomic (no lifecycle race).
+      if !endpoint.is_running() {
+        // Ignoring Err: the caller may have dropped the reply receiver.
+        let _ = reply.send_async(Err(MemberlistError::NotRunning)).await;
+        return;
+      }
       // Both `JoinKind::Dispatch` and `JoinKind::WaitForCompletion`
       // share the same `start_push_pull` fan-out: each seed becomes
       // one queued Connect action that the inline drain below pops
@@ -1082,19 +1276,18 @@ async fn dispatch_command<I, A, R>(
         JoinKind::Dispatch => {
           let mut count: usize = 0;
           for addr in addrs {
-            let peer: A = socket_to_peer(addr);
             // Ignoring StreamId return: the driver does not track
             // the per-exchange handle here — completion / failure
             // surfaces through `poll_event` (the `NodeJoined` /
             // `DialFailed` events that the events_tx forwards to
             // subscribers).
-            let _ = endpoint.start_push_pull(peer, PushPullKind::Join, now);
+            let _ = endpoint.start_push_pull(addr.into(), PushPullKind::Join, now);
             // Drain queued actions so the Connect that `start_push_pull`
             // queued is routed to its bridge BEFORE the next
             // `start_push_pull` enqueues another. No capture: the
             // Dispatch arm tracks no per-exchange waiter state.
             while let Some(action) = endpoint.poll_action() {
-              process_one_action(action, bridges, bridge_ready_tx, driver_opts, None);
+              process_one_action(action, bridges, bridge_ready_tx, stream_opts, None);
             }
             count += 1;
           }
@@ -1106,10 +1299,9 @@ async fn dispatch_command<I, A, R>(
         JoinKind::WaitForCompletion(crate::command::WaitForCompletionArgs { deadline }) => {
           let mut pending: HashSet<ExchangeId> = HashSet::with_capacity(addrs.len());
           for addr in addrs {
-            let peer: A = socket_to_peer(addr);
             // Ignoring StreamId return: per the Dispatch arm's
             // rationale above.
-            let _ = endpoint.start_push_pull(peer, PushPullKind::Join, now);
+            let _ = endpoint.start_push_pull(addr.into(), PushPullKind::Join, now);
             // Drain actions queued by THIS `start_push_pull`. The
             // capture binds the Connect's ExchangeId to the
             // dispatching waiter only — duplicate seeds produce
@@ -1120,7 +1312,7 @@ async fn dispatch_command<I, A, R>(
                 action,
                 bridges,
                 bridge_ready_tx,
-                driver_opts,
+                stream_opts,
                 Some((addr, &mut pending)),
               );
             }
@@ -1142,31 +1334,161 @@ async fn dispatch_command<I, A, R>(
       }
     }
     Command::Leave(LeaveCmd { reply }) => {
-      let res: Result<()> = endpoint
-        .leave(now)
-        .map_err(|e| MemberlistError::Io(io::Error::other(e.to_string())));
-      // Ignoring Err: caller dropped the reply receiver.
-      let _ = reply.send_async(res).await;
+      // Leave is a SHARED in-flight operation (cloned `Memberlist`
+      // handles can race two `leave()` calls). The decision:
+      //   * in-flight (`pending_leave` is `Some`) → JOIN it: push this
+      //     reply onto the shared `repliers` and return. Do NOT
+      //     re-invoke `endpoint.leave()` — a repeated leave once already
+      //     `Leaving`/`Left` is a terminal no-op that emits no second
+      //     `LeftCluster`, so a freshly-parked waiter would hang. Do NOT
+      //     reply now; the single terminal outcome resolves every joined
+      //     replier together.
+      //   * not in-flight (`None`) → INITIATE: snapshot Running before
+      //     the call (it decides whether a `LeftCluster` will fire),
+      //     call `endpoint.leave()`, then either PARK (was Running — the
+      //     machine queued the direct `Dead`-self notices and WILL emit
+      //     `LeftCluster` once they drain) or reply IMMEDIATELY (a
+      //     genuine no-op / error: nothing in flight, no completion
+      //     event coming, so parking would hang).
+      if let Some(pl) = pending_leave.as_mut() {
+        pl.repliers.push(reply);
+      } else {
+        let was_running = endpoint.is_running();
+        let res: Result<()> = endpoint
+          .leave(now)
+          .map_err(|e| MemberlistError::Io(io::Error::other(e.to_string())));
+        match res {
+          Ok(()) if was_running => {
+            // Initiated → park. A returned `Ok(())` then means the leave
+            // actually reached the wire (`LeftCluster`), never merely
+            // that it was queued.
+            *pending_leave = Some(PendingLeave {
+              repliers: vec![reply],
+              deadline: now + leave_timeout,
+            });
+          }
+          // Idempotent no-op (not Running) ⇒ no `LeftCluster` will fire,
+          // OR the call errored. Reply immediately; parking would hang.
+          other => {
+            // Ignoring Err: caller dropped the reply receiver.
+            let _ = reply.send_async(other).await;
+          }
+        }
+      }
     }
     Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { meta, reply }) => {
-      let res: Result<()> = match memberlist_wire::typed::Meta::try_from(meta) {
-        Ok(m) => endpoint
-          .update_meta(m)
-          .map_err(|e| MemberlistError::Io(io::Error::other(e.to_string()))),
-        Err(e) => Err(MemberlistError::Io(io::Error::other(e.to_string()))),
+      // Gate on a running node: after `leave()` the endpoint clears its
+      // periodic schedulers, so a metadata mutation could never be
+      // gossiped. Reject with `NotRunning` rather than ack a change that
+      // will never leave the local node. The single-task driver makes the
+      // check + apply atomic (no lifecycle race).
+      let res: Result<()> = if endpoint.is_running() {
+        match memberlist_wire::typed::Meta::try_from(meta) {
+          Ok(m) => endpoint
+            .update_meta(m)
+            .map_err(|e| MemberlistError::Io(io::Error::other(e.to_string()))),
+          Err(e) => Err(MemberlistError::Io(io::Error::other(e.to_string()))),
+        }
+      } else {
+        Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
       let _ = reply.send_async(res).await;
     }
     Command::SetCompressionOptions(SetCompressionOptionsCmd { opts, reply }) => {
-      endpoint.set_compression_options(opts);
+      // Gate on a running node: after `leave()` the endpoint emits no
+      // protocol traffic, so a new compression policy could never take
+      // effect on the wire. Reject with `NotRunning` rather than ack a
+      // change that will never be observed, and leave the endpoint
+      // untouched. The single-task driver makes the check + apply atomic.
+      let res: Result<()> = if endpoint.is_running() {
+        endpoint.set_compression_options(opts);
+        Ok(())
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = reply.send_async(Ok(())).await;
+      let _ = reply.send_async(res).await;
     }
     Command::SetEncryptionOptions(SetEncryptionOptionsCmd { opts, reply }) => {
-      endpoint.set_encryption_options(opts);
+      // Gate on a running node FIRST: after `leave()` the endpoint emits no
+      // protocol traffic, so a new encryption policy could never take effect
+      // on the wire. Reject with `NotRunning` without validating — there is
+      // no point trial-encrypting a policy that can never apply. When
+      // running, validate the policy BEFORE applying it: a keyring naming an
+      // AEAD whose backend feature is not compiled into this build is
+      // constructible, but every later `encrypt_gossip` would drop the
+      // datagram and every reliable-stream encode would fail — the cluster
+      // would silently break after a false `Ok`. Probe usability via a trial
+      // encrypt through the existing wire API; only swap the live policy when
+      // it is usable. The single-task driver makes the check + apply atomic.
+      let res: Result<()> = if endpoint.is_running() {
+        match crate::options::validate_encryption_options(&opts) {
+          Ok(()) => {
+            endpoint.set_encryption_options(opts);
+            Ok(())
+          }
+          Err(e) => Err(MemberlistError::Encryption(e)),
+        }
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = reply.send_async(Ok(())).await;
+      let _ = reply.send_async(res).await;
+    }
+    Command::QueueUserBroadcast(cmd) => {
+      // Gate on a running node FIRST: after `leave()` the gossip scheduler
+      // is stopped, so `user_broadcasts` would never drain. Then validate
+      // the framed lone `UserData` packet against the gossip budget: an
+      // over-budget payload is deterministically untransmittable, so the
+      // machine setter rejects it without storing it — surface that as
+      // `PayloadTooLarge` rather than a false `Ok`. The single-task driver
+      // makes the check + apply atomic.
+      let res: Result<()> = if endpoint.is_running() {
+        endpoint
+          .queue_user_broadcast(cmd.data().clone())
+          .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
+      // Ignoring Err: caller dropped the reply receiver.
+      let _ = cmd.reply().send_async(res).await;
+    }
+    Command::SetLocalState(cmd) => {
+      // Gate on a running node FIRST: after `leave()` no push/pull
+      // exchange will carry the snapshot, so reject with `NotRunning`. Then
+      // validate the framed-PushPull size against the reliable-stream frame
+      // budget: a snapshot whose framed PushPull exceeds it would be rejected
+      // by every receiver's frame-length gate, so the application state would
+      // never reach a peer. The machine setter rejects such a snapshot without
+      // storing it; surface that as `PayloadTooLarge` rather than a false `Ok`.
+      let res: Result<()> = if endpoint.is_running() {
+        endpoint
+          .set_local_state_snapshot(cmd.state().clone())
+          .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
+      // Ignoring Err: caller dropped the reply receiver.
+      let _ = cmd.reply().send_async(res).await;
+    }
+    Command::SetAckPayload(cmd) => {
+      // Gate on a running node FIRST: after `leave()` no probe ack will
+      // carry the payload, so reject with `NotRunning`. Then validate the
+      // framed-ack size against the gossip packet budget: an over-budget ack
+      // is emitted as a single UDP datagram that always fails to send, so a
+      // probing peer would receive no ack and falsely suspect this node. The
+      // machine setter rejects such a payload without storing it; surface
+      // that as `PayloadTooLarge` rather than a false `Ok`.
+      let res: Result<()> = if endpoint.is_running() {
+        endpoint
+          .set_ack_payload(cmd.payload().clone())
+          .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
+      // Ignoring Err: caller dropped the reply receiver.
+      let _ = cmd.reply().send_async(res).await;
     }
     Command::Shutdown(ShutdownCmd { reply }) => {
       // Drain every live bridge so the per-bridge byte movers observe
@@ -1272,7 +1594,6 @@ fn dispatch_gossip<I, A, R>(
   src: SocketAddr,
   datagram: &[u8],
   now: Instant,
-  socket_to_peer: &Arc<dyn Fn(SocketAddr) -> A + Send + Sync>,
 ) where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -1288,13 +1609,13 @@ fn dispatch_gossip<I, A, R>(
     + core::hash::Hash
     + core::fmt::Debug
     + core::fmt::Display
+    + From<SocketAddr>
     + Send
     + Sync
     + 'static,
   R: StreamTransport,
 {
-  let from: A = socket_to_peer(src);
-  endpoint.handle_gossip(from, datagram, now);
+  endpoint.handle_gossip(src.into(), datagram, now);
 
   // Drain the raw-buffer queue and decode each datagram. Each iteration
   // pops exactly the datagram we just fed (FIFO), but draining the loop
@@ -1382,7 +1703,7 @@ fn process_one_action(
   action: StreamAction,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
-  driver_opts: StreamDriverOptions,
+  stream_opts: StreamTransportOptions,
   capture: Option<(SocketAddr, &mut HashSet<ExchangeId>)>,
 ) {
   match action {
@@ -1397,7 +1718,7 @@ fn process_one_action(
       let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
       bridges.insert(eid, BridgeHandle { out_tx });
       let ready_tx = bridge_ready_tx.clone();
-      let dial_timeout = driver_opts.transport_options().dial_timeout();
+      let dial_timeout = stream_opts.dial_timeout();
       compio::runtime::spawn(async move {
         // Bound the dial with the configured dial timeout (default
         // 5s) so a connect to an unreachable peer reports failure to
@@ -1479,7 +1800,7 @@ fn drain_actions<I, A, R>(
   endpoint: &mut StreamEndpoint<I, A, R>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
-  driver_opts: StreamDriverOptions,
+  stream_opts: StreamTransportOptions,
 ) -> bool
 where
   I: memberlist_wire::Id
@@ -1504,7 +1825,7 @@ where
   let mut progress = false;
   while let Some(action) = endpoint.poll_action() {
     progress = true;
-    process_one_action(action, bridges, bridge_ready_tx, driver_opts, None);
+    process_one_action(action, bridges, bridge_ready_tx, stream_opts, None);
   }
   progress
 }
@@ -1655,17 +1976,109 @@ where
   }
 }
 
-/// Drain every queued [`Event`] into the subscriber channel.
+/// Fire the matching [`Delegate`] hook for one drained [`Event`].
 ///
-/// Events forward directly with no per-event allocation — the
-/// `Memberlist<I, A, R>` handle propagates `<I, A>` end-to-end so
-/// `EventStream<I, A>` carries the same shape the membership FSM
-/// emitted. Returns `true` iff any event was processed.
-fn drain_events<I, A, R>(
+/// The event-shaped hooks (`notify_join` / `notify_leave` / `notify_update`
+/// / `notify_ping_complete`) run on the driver thread BEFORE the event is
+/// forwarded to subscribers, so a delegate observes the transition before
+/// any [`EventStream`](crate::EventStream) consumer does. The membership
+/// FSM already carries the resolved `Arc<NodeState>` inside each variant,
+/// so the hook borrows it (cheap `Arc` bump) with no re-projection.
+///
+/// Admission (`notify_alive` / `notify_merge`) is NOT fired here — those
+/// are the machine's `AliveDelegate` / `MergeDelegate` predicates, supplied
+/// via [`Options`](crate::Options) and run inline inside the FSM ahead of
+/// the alive/merge transition. The observation [`Delegate`] is a distinct
+/// concern: its hooks observe transitions the FSM has already applied.
+pub(crate) async fn dispatch_event_delegate<I, A, D>(delegate: &D, ev: &Event<I, A>)
+where
+  D: Delegate<Id = I, Address = A>,
+{
+  match ev {
+    Event::NodeJoined(node) => delegate.notify_join(node.clone()).await,
+    Event::NodeLeft(node) => delegate.notify_leave(node.clone()).await,
+    Event::NodeUpdated(node) => delegate.notify_update(node.clone()).await,
+    Event::PingCompleted(payload) => {
+      let node = payload.node_ref();
+      delegate
+        .notify_ping_complete(
+          node.id_ref(),
+          node.address_ref(),
+          payload.rtt(),
+          payload.payload_ref().clone(),
+        )
+        .await;
+    }
+    Event::NodeConflict(c) => {
+      delegate
+        .notify_conflict(c.existing_ref().clone(), c.other_ref().clone())
+        .await;
+    }
+    Event::UserPacket(pkt) => {
+      delegate
+        .notify_user_msg(std::borrow::Cow::Borrowed(pkt.data_ref().as_ref()))
+        .await;
+    }
+    Event::RemoteStateReceived(rs) => {
+      delegate
+        .merge_remote_state(rs.user_data_ref().as_ref(), rs.join())
+        .await;
+    }
+    _ => {}
+  }
+}
+
+/// Yield to the runtime exactly once.
+///
+/// The event drain below is synchronous — no `.await` fires for membership
+/// events — so on a single-threaded runtime the observation task is not
+/// scheduled mid-drain. A bounded `obs_tx` would therefore overflow on a
+/// single large-but-valid burst (e.g. a join push/pull carrying many members)
+/// before the task drains a single event. Yielding hands the scheduler to the
+/// already-woken observation task so it can drain `obs_rx` before the drain
+/// continues. Runtime-agnostic (no dependency on a specific `yield_now`):
+/// re-arms the waker and returns `Pending` once, so the executor runs other
+/// ready tasks before re-polling this one.
+pub(crate) async fn yield_once() {
+  let mut yielded = false;
+  core::future::poll_fn(move |cx| {
+    if yielded {
+      core::task::Poll::Ready(())
+    } else {
+      yielded = true;
+      cx.waker().wake_by_ref();
+      core::task::Poll::Pending
+    }
+  })
+  .await
+}
+
+/// Drain every queued [`Event`]: synchronous protocol accounting, then
+/// hand off to the observation task. NO `.await` on user delegate code.
+///
+/// Drains `poll_event` to empty doing only the sync protocol accounting
+/// (join contact reduction + completed-join reply, leave-completion
+/// resolution), then hands each event to the per-driver observation task
+/// (delegate dispatch + EventStream forward) via `obs_tx`. The hand-off is
+/// non-blocking; on a bounded `obs_tx` (the default) a burst that outpaces the
+/// observation task [`yield_once`]s to let it drain, then drops + counts the
+/// overflow only if the task still cannot keep up (a slow/stuck delegate) — so
+/// a fast delegate never loses a valid burst while memory stays bounded.
+/// Returns `true` iff any event was drained.
+///
+/// Observation dispatch is deliberately OFF this path: a slow `notify_*`
+/// hook must not run on the driver task, because a join's
+/// `ExchangeCompleted` can arrive on a follow-up input the driver must
+/// still service — a hook blocking the loop would delay the parked
+/// join/leave reply that depends on it. See [`observation_task`].
+async fn drain_events<I, A, R>(
   endpoint: &mut StreamEndpoint<I, A, R>,
-  events_tx: &Sender<Event<I, A>>,
-  events_dropped: &std::sync::atomic::AtomicU64,
-  pending_joins: &mut [PendingJoin],
+  obs_tx: &Sender<Event<I, A>>,
+  observation_dropped: &std::sync::atomic::AtomicU64,
+  obs_payload_bytes: &std::sync::atomic::AtomicU64,
+  obs_payload_budget: Option<u64>,
+  pending_joins: &mut Vec<PendingJoin>,
+  pending_leave: &mut Option<PendingLeave>,
 ) -> bool
 where
   I: memberlist_wire::Id
@@ -1687,9 +2100,11 @@ where
     + 'static,
   R: StreamTransport,
 {
-  let mut progress = false;
+  let mut drained = false;
+
+  // Synchronous accounting only — no `.await` on user code.
   while let Some(ev) = endpoint.poll_event() {
-    progress = true;
+    drained = true;
     // Per-exchange contact accounting. The machine's
     // `ExchangeCompleted` event carries the terminal outcome of every
     // outbound bridge — push/pull, reliable ping, and reliable
@@ -1697,31 +2112,220 @@ where
     // completions: a reliable-ping bridge resolving has no bearing on
     // a `join_with` waiter's contact count, and a user-message bridge
     // is one-way fire-and-forget. Filter on the payload's `kind()`
-    // before reducing `pending_joins`. For every synchronous-join
-    // waiter that dispatched this exact `ExchangeId`, remove the eid
-    // from its `pending` set (always, regardless of outcome — the
-    // exchange has terminated) and increment `contacted` iff the
-    // outcome is `Succeeded`. Tracking by `ExchangeId` (not by
-    // `SocketAddr`) gives correct duplicate-seed semantics: passing
-    // the same address twice produces two exchanges and each is
-    // counted independently.
+    // before reducing `pending_joins`. For the synchronous-join waiter
+    // that dispatched this exact `ExchangeId`, remove the eid from its
+    // `pending` set (always, regardless of outcome — the exchange has
+    // terminated) and increment `contacted` iff the outcome is
+    // `Succeeded`. Tracking by `ExchangeId` (not by `SocketAddr`) gives
+    // correct duplicate-seed semantics: passing the same address twice
+    // produces two exchanges and each is counted independently. An eid
+    // belongs to at most one waiter, so the search stops on the first
+    // match.
+    //
+    // The COMPLETION reply (the waiter's `pending` is now empty) fires
+    // RIGHT HERE on the driver task — the observation hooks
+    // (`notify_join` / `merge_remote_state`) for the co-surfaced
+    // `NodeJoined` / `RemoteStateReceived` run off-loop on the
+    // observation task — so a slow hook cannot delay `join_with`'s
+    // `Ok(contacted)`, mirroring the `LeftCluster` leave resolution
+    // below. The DEADLINE path (a waiter whose `pending` is still
+    // non-empty when its `deadline` elapses) stays in
+    // `reap_pending_joins` with its partial `contacted`; a waiter
+    // replied + removed here is gone from `pending_joins`, so it can
+    // never be double-replied by the reaper.
     if let Event::ExchangeCompleted(ref payload) = ev
       && payload.kind() == ExchangeKind::PushPull
     {
       let eid = payload.eid();
       let succeeded = matches!(payload.outcome(), ExchangeOutcome::Succeeded);
-      for pj in pending_joins.iter_mut() {
-        if pj.pending.remove(&eid) && succeeded {
+      if let Some(idx) = pending_joins
+        .iter()
+        .position(|pj| pj.pending.contains(&eid))
+      {
+        let pj = &mut pending_joins[idx];
+        pj.pending.remove(&eid);
+        if succeeded {
           pj.contacted += 1;
+        }
+        if pj.pending.is_empty() {
+          // Fully resolved — reply now and drop the waiter. `contacted`
+          // is final (the FSM emits one `ExchangeCompleted` per
+          // dispatched exchange, so an empty `pending` set means every
+          // outbound exchange this call dispatched has terminated). A
+          // zero-contact resolution is the same `JoinAllFailed` the
+          // reaper would have produced.
+          let pj = pending_joins.swap_remove(idx);
+          let result = if pj.contacted == 0 {
+            Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
+              pj.requested,
+              0,
+            )))
+          } else {
+            Ok(pj.contacted)
+          };
+          // Ignoring Err: caller dropped the reply receiver (e.g. the
+          // user-facing join_with future was cancelled).
+          let _ = pj.reply.send_async(result).await;
         }
       }
     }
-    // The events channel is bounded; under sustained slow-subscriber
-    // load `try_send` returns `Full` and the event is dropped, with
-    // the drop counted into `events_dropped` for subscribers to detect
-    // a gap. A `Disconnected` return means every `EventStream`
-    // receiver has been dropped (no one is subscribing) — silently
-    // dropping is correct there.
+    // Leave-completion resolution. `LeftCluster` fires once the direct
+    // `Dead`-self notices queued by `leave()` have drained to the wire;
+    // resolving the parked waiter here — on this driver task, ahead of
+    // the observation task's `notify_leave` — is what makes `leave()`
+    // return promptly once the flush is done rather than waiting on
+    // delegate latency.
+    if matches!(ev, Event::LeftCluster)
+      && let Some(pl) = pending_leave.take()
+    {
+      // Resolve EVERY joined replier (the initiator plus any racing
+      // clones) with `Ok(())`.
+      pl.resolve_all(|| Ok(())).await;
+    }
+    // Payload-bearing events (`UserPacket` / `RemoteStateReceived`) can each
+    // own up to `max_stream_frame_size` bytes; size this one for the byte
+    // backstop (`None` for small membership / control events).
+    let payload_bytes = observation_payload_bytes(&ev);
+
+    // Byte backstop (bounded channels only): the count cap does not bound
+    // memory when events carry large reliable payloads. If enqueueing this
+    // payload event would push the queued payload bytes over budget, yield once
+    // so the observation task can drain (it subtracts as it dequeues), re-check,
+    // and drop + count if still over. Draining PAST the dropped event (via
+    // `continue`) preserves the obs decoupling — the `ExchangeCompleted` that
+    // fires a parked join/leave reply is never delayed by a backed-up delegate.
+    if let (Some(budget), Some(bytes)) = (obs_payload_budget, payload_bytes) {
+      if obs_payload_bytes
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(bytes)
+        > budget
+      {
+        yield_once().await;
+      }
+      if obs_payload_bytes
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(bytes)
+        > budget
+      {
+        observation_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        continue;
+      }
+    }
+
+    // Hand off to the observation task (delegate dispatch + EventStream
+    // forward, off this driver task), non-blocking. `Disconnected` means the
+    // task exited at teardown — the event is undeliverable, drop it. `Full`
+    // means the bounded channel is at its count capacity; yield once so the
+    // observation task can drain (a fast delegate empties it in that quantum,
+    // delivering a whole burst), then retry. Drop + count ONLY if still full —
+    // a genuinely slow/stuck delegate — bounding memory without an indefinite
+    // SWIM stall and without dropping a burst a fast delegate could absorb. On
+    // a successful enqueue, add the payload bytes to the backstop counter.
+    match obs_tx.try_send(ev) {
+      Ok(()) => add_obs_payload(obs_payload_bytes, payload_bytes),
+      Err(flume::TrySendError::Disconnected(_)) => {}
+      Err(flume::TrySendError::Full(ev)) => {
+        yield_once().await;
+        match obs_tx.try_send(ev) {
+          Ok(()) => add_obs_payload(obs_payload_bytes, payload_bytes),
+          Err(_) => {
+            observation_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+          }
+        }
+      }
+    }
+  }
+
+  drained
+}
+
+/// The observation-channel byte-backstop weight of an event: `Some(len)` for
+/// the payload-bearing variants (`UserPacket` / `RemoteStateReceived`, whose
+/// `Bytes` ride up to `max_stream_frame_size`), `None` for the small membership
+/// / control events the count cap already bounds.
+pub(crate) fn observation_payload_bytes<I, A>(ev: &Event<I, A>) -> Option<u64> {
+  match ev {
+    Event::UserPacket(p) => Some(p.data_ref().len() as u64),
+    Event::RemoteStateReceived(r) => Some(r.user_data_ref().len() as u64),
+    _ => None,
+  }
+}
+
+/// Add a just-enqueued event's payload weight (if any) to the byte-backstop
+/// counter. Paired with the subtract in [`observation_task`] on dequeue.
+pub(crate) fn add_obs_payload(counter: &std::sync::atomic::AtomicU64, bytes: Option<u64>) {
+  if let Some(b) = bytes {
+    counter.fetch_add(b, std::sync::atomic::Ordering::Relaxed);
+  }
+}
+
+/// Per-driver observation task: dispatch each event's [`Delegate`] hook, then
+/// fan membership / control events out to the `EventStream`, OFF the driver
+/// loop.
+///
+/// Receives each event the driver hands off (in machine-emission order) on
+/// `obs_rx` and fires the matching `notify_*` / `merge_remote_state` hook (so a
+/// delegate observes the transition ahead of any EventStream consumer). The
+/// obs-task recv side is lossless — it delivers every event that reached the
+/// channel; a bounded `obs_tx` only drops at the driver-side hand-off when the
+/// delegate cannot keep up (counted in `observation_dropped`).
+///
+/// Only membership / control events are then forwarded to `EventStream`
+/// subscribers. App-data events (`UserPacket` / `RemoteStateReceived`) reach
+/// the delegate hook above but are NOT fanned out: the EventStream is a
+/// best-effort channel whose documented recovery is reconciling from the
+/// membership snapshot, which cannot reconstruct app-data, and forwarding the
+/// large reliable payloads would let a slow subscriber pile them up in the
+/// bounded `events_tx` (the byte backstop only bounds the `obs_rx` delegate
+/// path). The forward is best-effort: a full queue (slow subscriber) drops the
+/// event via `try_send` and counts it into `events_dropped` (gap signal), never
+/// blocking. The task exits when `obs_rx` closes (the driver dropped its
+/// `obs_tx` at teardown). Mirrors the QUIC driver's `observation_task`.
+async fn observation_task<I, A, D>(
+  obs_rx: Receiver<Event<I, A>>,
+  delegate: D,
+  events_tx: Sender<Event<I, A>>,
+  events_dropped: Arc<std::sync::atomic::AtomicU64>,
+  obs_payload_bytes: Arc<std::sync::atomic::AtomicU64>,
+) where
+  D: Delegate<Id = I, Address = A>,
+  I: memberlist_wire::Id
+    + memberlist_wire::Data
+    + memberlist_wire::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  A: memberlist_wire::Data
+    + memberlist_wire::CheapClone
+    + Eq
+    + core::hash::Hash
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+{
+  while let Ok(ev) = obs_rx.recv_async().await {
+    // App-data events (`UserPacket` / `RemoteStateReceived`) carry the only
+    // large payloads. Measure this event for the byte backstop and free the
+    // budget it occupied as soon as it leaves the channel — before the
+    // (possibly slow) delegate hook — so the driver's enqueue side sees the
+    // reclaimed budget promptly. Membership / control events have no weight.
+    let payload = observation_payload_bytes(&ev);
+    if let Some(b) = payload {
+      obs_payload_bytes.fetch_sub(b, std::sync::atomic::Ordering::Relaxed);
+    }
+    dispatch_event_delegate(&delegate, &ev).await;
+    // Fan out membership / control events only. App-data was delivered to the
+    // delegate above; the EventStream cannot reconstruct it from the snapshot,
+    // and forwarding the large reliable payloads would let a slow subscriber
+    // retain them in the bounded `events_tx`, reintroducing the OOM the obs_rx
+    // byte backstop closes.
+    if payload.is_some() {
+      continue;
+    }
     if events_tx
       .try_send(ev)
       .is_err_and(|e| matches!(e, flume::TrySendError::Full(_)))
@@ -1729,18 +2333,24 @@ where
       events_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
   }
-  progress
 }
 
-/// Reap fully-resolved or deadline-expired entries from `pending_joins`.
+/// Reap deadline-expired entries from `pending_joins`.
 ///
-/// Called after every drain block. Replies + removes every entry whose
-/// `pending` set is now empty OR whose `deadline` has elapsed.
+/// Called after every drain block. The normal COMPLETION path (a
+/// waiter whose `pending` set drained to empty) now resolves inline in
+/// [`drain_events`] — ahead of the observation-delegate dispatch
+/// — so a fully-resolved waiter is replied + removed there and is gone
+/// from `pending_joins` before this reaper runs (it can never be
+/// double-replied here). This reaper therefore handles two remaining
+/// cases. First, DEADLINE expiry: a waiter whose `pending` is still
+/// non-empty when its `deadline` elapses replies with its partial
+/// `contacted`. Second, the degenerate insert-time-empty case: a
+/// `WaitForCompletion` that dispatched zero outbound exchanges (its
+/// `pending` set was empty on insert) never sees an `ExchangeCompleted`,
+/// so the empty-`pending` branch resolves it here on the next sweep.
 /// `swap_remove` is sound because `pending_joins` has no ordering
-/// semantics. Contact accounting itself is handled upstream by
-/// `dispatch_bridge_inbound`'s `Bytes` arm, which mirrors each seed's
-/// own bridge through the per-call `pending_eids` map (see
-/// [`PendingJoin`] for the per-bridge-only accounting rationale).
+/// semantics.
 async fn reap_pending_joins(pending_joins: &mut Vec<PendingJoin>, now: Instant) {
   let mut i = 0;
   while i < pending_joins.len() {
@@ -1771,6 +2381,33 @@ async fn reap_pending_joins(pending_joins: &mut Vec<PendingJoin>, now: Instant) 
 /// itself has no nearer deadline.
 fn min_pending_join_deadline(pending_joins: &[PendingJoin]) -> Option<Instant> {
   pending_joins.iter().map(|pj| pj.deadline).min()
+}
+
+/// Reap a deadline-expired graceful-leave waiter.
+///
+/// Called alongside [`reap_pending_joins`] after every drain block. If
+/// `pending_leave`'s `deadline` has elapsed without the machine's
+/// `Event::LeftCluster` having resolved it (in [`drain_events`]),
+/// reply [`MemberlistError::LeaveTimeout`] and clear the slot. A
+/// successful `LeftCluster` resolution already cleared it, so this only
+/// fires on the timeout path.
+async fn reap_pending_leave(pending_leave: &mut Option<PendingLeave>, now: Instant) {
+  if let Some(pl) = pending_leave.as_ref()
+    && now >= pl.deadline
+  {
+    let pl = pending_leave.take().expect("checked Some above");
+    // Resolve EVERY joined replier (the initiator plus any racing
+    // clones) with `LeaveTimeout`.
+    pl.resolve_all(|| Err(MemberlistError::LeaveTimeout)).await;
+  }
+}
+
+/// Earliest pending-leave deadline, if any. Folded into the driver's
+/// per-iteration `timeout_deadline` (alongside the pending-join
+/// deadline) so the timeout fires even under a continuous network flood
+/// that would otherwise keep the recv arm winning the select.
+fn min_pending_leave_deadline(pending_leave: &Option<PendingLeave>) -> Option<Instant> {
+  pending_leave.as_ref().map(|pl| pl.deadline)
 }
 
 /// Apply the deadline-firing protocol: drain every already-queued
@@ -1815,13 +2452,15 @@ fn min_pending_join_deadline(pending_joins: &[PendingJoin]) -> Option<Instant> {
 ///
 /// Returns `true` iff any work was applied (a queued completion was
 /// dispatched OR `handle_timeout` fired).
+#[allow(clippy::too_many_arguments)]
 fn fire_timeout_with_drain<I, A, R>(
   endpoint: &mut StreamEndpoint<I, A, R>,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_inbound_tx: &Sender<BridgeInbound>,
   bridge_inbound_rx: &Receiver<BridgeInbound>,
   bridge_ready_rx: &Receiver<BridgeReady>,
-  driver_opts: StreamDriverOptions,
+  driver_opts: DriverOptions,
+  stream_opts: StreamTransportOptions,
 ) -> bool
 where
   I: memberlist_wire::Id
@@ -1854,7 +2493,7 @@ where
       bridges,
       bridge_inbound_tx,
       ready,
-      driver_opts.transport_options().bridge_recv_buf_len(),
+      stream_opts.bridge_recv_buf_len(),
     );
     dirty = true;
   }

@@ -7,8 +7,10 @@ mod support;
 
 use std::{net::SocketAddr, time::Duration};
 
-use memberlist_compio::QuicMemberlist;
-use memberlist_machine::config::EndpointConfig;
+use memberlist_compio::{
+  FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options, QuicConfig,
+  QuicMemberlist, QuicTransportOptions, SocketAddrResolver, VoidDelegate,
+};
 use rustls::RootCertStore;
 use smol_str::SmolStr;
 
@@ -16,15 +18,31 @@ fn loopback_addr(port: u16) -> SocketAddr {
   format!("127.0.0.1:{port}").parse().expect("loopback")
 }
 
-fn make_config(id: &str, port: u16) -> EndpointConfig<SmolStr, SocketAddr> {
-  EndpointConfig::new(SmolStr::new(id), loopback_addr(port))
+/// Build a `QuicMemberlist` advertising `127.0.0.1:port` with the supplied
+/// `QuicConfig`. The membership-input address type is `SocketAddr`, so the
+/// construction resolver is the identity `SocketAddrResolver` (never invoked
+/// for a resolved advertise).
+async fn make_quic(id: &str, port: u16, qcfg: QuicConfig) -> QuicMemberlist<SmolStr, SocketAddr> {
+  let opts = Options::new(
+    QuicTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new(id))
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(port)))
+      .with_quic_config(qcfg),
+  );
+  QuicMemberlist::<SmolStr, SocketAddr>::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("bind quic memberlist")
 }
 
 #[compio::test]
 async fn quic_memberlist_binds_and_shuts_down_cleanly() {
-  let cfg = make_config("node-a", 0); // OS-pick — avoids parallel-test collisions.
-  let qcfg = support::self_trusted_quic_config();
-  let ml = QuicMemberlist::new(cfg, qcfg).await.expect("bind");
+  // OS-pick port 0 — avoids parallel-test collisions.
+  let ml = make_quic("node-a", 0, support::self_trusted_quic_config()).await;
   assert_eq!(ml.alive_count(), 1);
   assert_eq!(ml.member_count(), 1);
   let timed = compio::time::timeout(Duration::from_secs(5), ml.shutdown())
@@ -57,20 +75,19 @@ async fn quic_memberlist_two_node_dispatch_join_exchanges_gossip() {
 
   let a_port: u16 = 7401;
   let b_port: u16 = 7402;
-  let a = QuicMemberlist::new(make_config("a-7401", a_port), qcfg_a)
-    .await
-    .expect("bind a");
-  let b = QuicMemberlist::new(make_config("b-7402", b_port), qcfg_b)
-    .await
-    .expect("bind b");
+  let a = make_quic("a-7401", a_port, qcfg_a).await;
+  let b = make_quic("b-7402", b_port, qcfg_b).await;
 
   // Dispatch-style join — fire-and-forget, no synchronous wait. The
   // returned count is the number of seeds the driver accepted, not
   // the number that contacted; per-seed contact accounting is the
-  // job of the synchronous `join_with` path via
+  // job of the synchronous `join` path via
   // `Event::ExchangeCompleted`.
   let n = a
-    .dispatch_join(&[memberlist_compio::Address::from(loopback_addr(b_port))])
+    .dispatch_join(
+      &SocketAddrResolver,
+      &[MaybeResolved::Resolved(loopback_addr(b_port))],
+    )
     .await
     .expect("dispatch_join");
   assert_eq!(n, 1, "one seed dispatched");
@@ -114,9 +131,7 @@ async fn quic_memberlist_two_node_dispatch_join_exchanges_gossip() {
 /// push/pull deadlines.
 #[compio::test]
 async fn quic_memberlist_idle_timer_does_not_deadlock() {
-  let cfg = make_config("idle", 0);
-  let qcfg = support::self_trusted_quic_config();
-  let ml = QuicMemberlist::new(cfg, qcfg).await.expect("bind");
+  let ml = make_quic("idle", 0, support::self_trusted_quic_config()).await;
   assert_eq!(ml.alive_count(), 1);
 
   // Give the driver loop ample time to fire its wake timer at least
@@ -130,6 +145,51 @@ async fn quic_memberlist_idle_timer_does_not_deadlock() {
   assert_eq!(ml.alive_count(), 1);
   assert_eq!(ml.member_count(), 1);
 
+  let timed = compio::time::timeout(Duration::from_secs(5), ml.shutdown())
+    .await
+    .expect("shutdown within 5s");
+  timed.expect("shutdown Ok");
+}
+
+/// The identity-aware gossip_mtu floor lives in the shared `Memberlist::new`
+/// path, so it applies to the QUIC backend identically: a node whose unbounded
+/// local id is large enough that its own mandatory single-datagram control
+/// packets no longer fit the gossip budget is rejected, while a normal-sized id
+/// at the SAME gossip_mtu binds. Confirms both drivers stay symmetric.
+#[compio::test]
+async fn quic_gossip_mtu_rejected_for_oversized_local_id() {
+  // The worst-case Ping for a 2000-byte id frames to ~4 KiB, far above this
+  // 2000-byte gossip_mtu; the same budget easily holds a small id's worst case.
+  let huge_id = SmolStr::new("a".repeat(2000));
+  let opts = Options::new(
+    QuicTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(huge_id)
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
+      .with_quic_config(support::self_trusted_quic_config()),
+  )
+  .with_memberlist(MemberlistOptions::new().with_gossip_mtu(2000));
+  let res = QuicMemberlist::<SmolStr, SocketAddr>::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await;
+  match res {
+    Err(MemberlistError::GossipMtuTooSmall(e)) => {
+      assert_eq!(e.configured(), 2000, "carries the effective gossip_mtu");
+      assert!(
+        e.minimum() > 2000,
+        "the id-driven required minimum must exceed the configured gossip_mtu, got {}",
+        e.minimum()
+      );
+    }
+    Err(other) => panic!("expected GossipMtuTooSmall, got {other:?}"),
+    Ok(_) => panic!("an oversized local id must be rejected, but construction succeeded"),
+  }
+
+  // A normal small id at the SAME gossip_mtu binds successfully.
+  let ml = make_quic("small-id", 0, support::self_trusted_quic_config()).await;
   let timed = compio::time::timeout(Duration::from_secs(5), ml.shutdown())
     .await
     .expect("shutdown within 5s");

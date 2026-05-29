@@ -26,7 +26,7 @@ use crate::{
   config::EndpointConfig,
   event::{
     CompoundTransmit, DialRequested, Event, NodeConflict, PacketTransmit, PingCompleted,
-    Reliability, SendPushPullResponse, Transmit, UserPacket,
+    Reliability, RemoteStateReceived, SendPushPullResponse, Transmit, UserPacket,
   },
   members::{LocalNodeState, Member, Members},
   probe::{AwaitingIndirect, Probe, ProbeKind, ProbePhase},
@@ -51,6 +51,56 @@ pub enum Lifecycle {
 
 /// Maximum size of node-meta payload that can be carried in an `Alive` message.
 pub const META_MAX_SIZE: usize = 512;
+
+/// Headroom reserved below [`EndpointConfig::max_stream_frame_size`] for the
+/// membership-state list that rides the SAME PushPull frame as the local-state
+/// snapshot. [`set_local_state_snapshot`](Endpoint::set_local_state_snapshot)
+/// (and the construction-time `initial_local_state` check) bound the snapshot's
+/// minimal framed PushPull to `max_stream_frame_size - LOCAL_STATE_FRAME_BUDGET`
+/// so a snapshot sized right at the cap cannot crowd out the membership states
+/// it must travel with. 1 MiB comfortably holds the framing for thousands of
+/// `PushNodeState` entries; an operator running BOTH a near-cap snapshot AND a
+/// cluster whose membership framing exceeds this reserve should raise
+/// `max_stream_frame_size` accordingly.
+pub const LOCAL_STATE_FRAME_BUDGET: usize = 1024 * 1024;
+
+/// Validate a candidate local-state snapshot against the reliable-stream frame
+/// cap. Returns [`Error::LocalStateExceedsFrame`](crate::error::Error::LocalStateExceedsFrame)
+/// when the snapshot's minimal framed PushPull (the snapshot carried as
+/// `user_data`, with an empty membership-state list) would exceed
+/// `max_stream_frame_size - LOCAL_STATE_FRAME_BUDGET`.
+///
+/// Shared by the runtime setter
+/// ([`Endpoint::set_local_state_snapshot`]) and the construction-time
+/// `initial_local_state` check so both reject identically. Charges the EXACT
+/// framed size of a PushPull carrying only this snapshot — the same
+/// real-`encode_message` idiom [`Endpoint::set_ack_payload`] uses (no estimated
+/// upper bound); the `LOCAL_STATE_FRAME_BUDGET` reserve then leaves room for the
+/// membership states the real PushPull also carries.
+pub fn validate_local_state_snapshot<I, A>(
+  snapshot: &Bytes,
+  max_stream_frame_size: usize,
+) -> Result<(), crate::error::Error>
+where
+  I: Data,
+  A: Data,
+{
+  // Minimal framed PushPull for just this snapshot: empty membership states,
+  // snapshot as `user_data`. `join` does not change the framed length.
+  let candidate: PushPull<I, A> =
+    PushPull::new(true, core::iter::empty()).with_user_data(snapshot.cheap_clone());
+  let encoded_len = crate::wire::encode_message::<I, A>(&Message::PushPull(candidate))
+    .expect("locally-built PushPull always bridges to wire form")
+    .len();
+  let budget = max_stream_frame_size.saturating_sub(LOCAL_STATE_FRAME_BUDGET);
+  if encoded_len > budget {
+    return Err(crate::error::Error::LocalStateExceedsFrame(
+      encoded_len,
+      budget,
+    ));
+  }
+  Ok(())
+}
 
 /// A pending outbound stream dial that has not yet connected.
 #[derive(Debug)]
@@ -2019,8 +2069,37 @@ where
 
   /// Set the bytes to attach to outgoing Acks. Replaces the legacy
   /// `PingDelegate::ack_payload` callback.
-  pub fn set_ack_payload(&mut self, payload: Bytes) {
+  ///
+  /// An Ack is emitted as ONE UDP datagram on the gossip socket
+  /// ([`handle_ping`](Self::handle_ping)), so its framed size must fit the
+  /// node's gossip packet budget ([`gossip_mtu`](EndpointConfig::gossip_mtu)).
+  /// A payload whose framed Ack would exceed that budget is rejected with
+  /// [`Error::AckPayloadExceedsMtu`](crate::error::Error::AckPayloadExceedsMtu)
+  /// and NOT stored: an over-budget Ack is deterministically unsendable
+  /// (`send_to` errors are dropped under the lossy-gossip policy), so every
+  /// probe reply would silently fail and peers would falsely suspect this
+  /// node. Mirrors the fail-fast `update_meta` cap rather than storing a
+  /// payload that can never leave the node.
+  pub fn set_ack_payload(&mut self, payload: Bytes) -> Result<(), crate::error::Error> {
+    // Charge the exact framed size of the Ack that would carry this payload.
+    // `handle_ping` builds `Ack::new(seq).with_payload(...)`; the sequence
+    // number's protobuf varint is 1–5 bytes wide, so validate against the
+    // widest seq (`u32::MAX`) — the framed Ack for any real seq is then
+    // guaranteed `<= budget`. Same real-`encode_message` idiom the probe
+    // compound uses for its MTU fit check (no estimated upper bound).
+    let candidate = Ack::new(u32::MAX).with_payload(payload.cheap_clone());
+    let encoded_len = crate::wire::encode_message::<I, A>(&Message::Ack(candidate))
+      .expect("locally-built Ack always bridges to wire form")
+      .len();
+    let budget = self.gossip_mtu();
+    if encoded_len > budget {
+      return Err(crate::error::Error::AckPayloadExceedsMtu(
+        encoded_len,
+        budget,
+      ));
+    }
     self.ack_payload = payload;
+    Ok(())
   }
 
   /// Read the current ack payload as a byte slice.
@@ -2062,11 +2141,25 @@ where
   /// The bytes are returned to the peer when the gossip layer constructs a
   /// push/pull response.
   ///
+  /// The snapshot rides every push/pull exchange as the PushPull `user_data`,
+  /// and receivers reject any reliable-stream frame whose declared length
+  /// exceeds [`max_stream_frame_size`](EndpointConfig::max_stream_frame_size).
+  /// A snapshot whose minimal framed PushPull would exceed that cap (after
+  /// reserving headroom for the co-resident membership-state list) is rejected
+  /// with [`Error::LocalStateExceedsFrame`](crate::error::Error::LocalStateExceedsFrame)
+  /// and NOT stored: such a snapshot is deterministically untransmittable —
+  /// every push/pull carrying it would be rejected and the application state
+  /// would never reach any peer. Mirrors the fail-fast
+  /// [`set_ack_payload`](Self::set_ack_payload) cap rather than storing a
+  /// snapshot that can never leave the node.
+  ///
   /// **Limitation:** legacy `local_state(join: bool)` could return different
   /// bytes for initial-join vs anti-entropy. This setter takes a single
   /// snapshot used for both contexts.
-  pub fn set_local_state_snapshot(&mut self, bytes: Bytes) {
+  pub fn set_local_state_snapshot(&mut self, bytes: Bytes) -> Result<(), crate::error::Error> {
+    validate_local_state_snapshot::<I, A>(&bytes, self.max_stream_frame_size())?;
     self.local_state_snapshot = bytes;
+    Ok(())
   }
 
   /// Read the current local-state snapshot as a byte slice.
@@ -2090,11 +2183,36 @@ where
   /// callback (which was pulled by the gossip scheduler each round), our
   /// API is push-based — the application enqueues bytes ahead of time.
   ///
+  /// A payload whose lone framed `UserData` packet would exceed the gossip
+  /// packet budget ([`gossip_mtu`](EndpointConfig::gossip_mtu)) is rejected
+  /// with [`Error::UserBroadcastExceedsMtu`](crate::error::Error::UserBroadcastExceedsMtu)
+  /// and NOT stored: such a payload is deterministically untransmittable (it
+  /// cannot be gossiped even alone), so storing it would falsely report
+  /// success and leave bytes queued until a gossip tick discards them.
+  /// Mirrors the fail-fast [`set_ack_payload`](Self::set_ack_payload) cap.
+  ///
   /// **No automatic dedup:** the application is responsible for tracking
   /// which broadcasts are still relevant. To bound queue growth, check
   /// `user_broadcast_queue_len()` and avoid pushing if too many are pending.
-  pub fn queue_user_broadcast(&mut self, data: Bytes) {
+  pub fn queue_user_broadcast(&mut self, data: Bytes) -> Result<(), crate::error::Error> {
+    // Charge the exact framed size of the lone `UserData` packet that would
+    // carry this payload — the same `encode_message` idiom the gossip
+    // scheduler uses for its lone-payload fit check. A payload whose lone
+    // frame already exceeds the gossip budget can never be gossiped even
+    // alone, so reject it here rather than store bytes the scheduler would
+    // only discard at the next tick.
+    let encoded_len = crate::wire::encode_message::<I, A>(&Message::UserData(data.cheap_clone()))
+      .map(|b| b.len())
+      .unwrap_or(usize::MAX);
+    let budget = self.gossip_mtu();
+    if encoded_len > budget {
+      return Err(crate::error::Error::UserBroadcastExceedsMtu(
+        encoded_len,
+        budget,
+      ));
+    }
     self.user_broadcasts.push_back(data);
+    Ok(())
   }
 
   /// Number of user-data payloads currently queued for piggyback gossip.
@@ -2720,19 +2838,20 @@ where
   /// Route an [`EndpointEvent`](EndpointEvent) produced by a
   /// [`Stream`] back into the Endpoint.
   ///
-  /// - `PushPullReplyReceived`: buffers a [`BufferedMerge`] and emits
-  ///   [`Event::PendingMerge`] so the application can call [`decide_merge`].
-  ///   Returns `None` — no response needed (we sent ours before they replied).
-  /// - `PushPullRequestReceived`: same merge buffering, but also returns
-  ///   `Some(StreamCommand::SendPushPullResponse)` so the driver can encode
-  ///   and load the inbound stream's response payload.
+  /// - `PushPullReplyReceived`: applies the inbound merge inline (synchronous
+  ///   `MergeDelegate` filter, join-only). A rejected join merge returns
+  ///   `Some(StreamCommand::Close)` to fail the exchange; otherwise returns
+  ///   `None` (we sent our state before the peer replied).
+  /// - `PushPullRequestReceived`: applies the same inline merge filter. A
+  ///   rejected join merge returns `Some(StreamCommand::Close)`; otherwise
+  ///   returns `Some(StreamCommand::SendPushPullResponse)` so the driver can
+  ///   encode and load the inbound stream's response payload.
   /// - `ReliablePingAcked` / `ReliablePingFailed`: drives the probe FSM via
   ///   [`handle_reliable_ping_response`].
   /// - `UserDataReceived`: emits [`Event::UserPacket`] with `Reliable` reliability.
   /// - `StreamClosed` / `StreamErrored`: silently ignored at this layer (the
   ///   driver manages stream lifetime).
   ///
-  /// [`decide_merge`]: Endpoint::decide_merge
   /// [`handle_reliable_ping_response`]: Endpoint::handle_reliable_ping_response
   pub fn handle_stream_event(
     &mut self,
@@ -2741,14 +2860,28 @@ where
   ) -> Option<StreamCommand<I, A>> {
     match ev {
       EndpointEvent::PushPullReplyReceived(p) => {
-        // Outbound: we initiated; peer replied. Apply the merge inline
-        // (synchronous MergeDelegate filter, join-only). No StreamCommand:
-        // we already sent our state before they replied. `peer` and
-        // `user_data` are unused on the outbound path; the merge only
-        // needs `states` and `kind`.
-        let (_peer, states, _user_data, kind) = p.into_parts();
-        if self.merge_admitted(&states, kind) {
-          self.merge_state(&states, now);
+        // Outbound: we initiated; peer replied. Consult the MergeDelegate
+        // inline (synchronous filter, join-only). A rejected join merge
+        // terminalizes this exchange via `StreamCommand::Close`: the bridge
+        // fails with `AdmissionClosed`, so the synchronous join counts the
+        // seed as NOT contacted — a rejected `NotifyMerge` fails the push/pull,
+        // matching both the inbound arm and Go memberlist's `mergeRemoteState`
+        // error propagation. The membership merge needs only `states` and
+        // `kind`; `peer` and `user_data` are forwarded to the application via
+        // `Event::RemoteStateReceived` once the merge is admitted.
+        let (peer, states, user_data, kind) = p.into_parts();
+        if !self.merge_admitted(&states, kind) {
+          return Some(StreamCommand::Close);
+        }
+        self.merge_state(&states, now);
+        // Forward the peer's application-state snapshot only after the merge
+        // is admitted — a rejected filter must not leak the peer's state.
+        if !user_data.is_empty() {
+          self.emit_event(Event::RemoteStateReceived(RemoteStateReceived::new(
+            peer,
+            user_data,
+            kind.is_join(),
+          )));
         }
         None
       }
@@ -2756,13 +2889,22 @@ where
         // Inbound: peer initiated. Consult the MergeDelegate inline (join
         // only). A rejected join merge closes the stream — a rejected
         // `NotifyMerge` aborts the push/pull connection. Otherwise apply
-        // the merge and reply with our state. `peer` and the inbound
-        // `user_data` are not consulted at the FSM layer.
-        let (_peer, states, _user_data, kind) = p.into_parts();
+        // the merge and reply with our state. The membership merge does not
+        // consult `peer` or `user_data` at the FSM layer; once the merge is
+        // admitted, a non-empty `user_data` is forwarded to the application
+        // via `Event::RemoteStateReceived`.
+        let (peer, states, user_data, kind) = p.into_parts();
         if !self.merge_admitted(&states, kind) {
           return Some(StreamCommand::Close);
         }
         self.merge_state(&states, now);
+        if !user_data.is_empty() {
+          self.emit_event(Event::RemoteStateReceived(RemoteStateReceived::new(
+            peer,
+            user_data,
+            kind.is_join(),
+          )));
+        }
         let local_states: Vec<PushNodeState<I, A>> = self
           .members
           .iter()

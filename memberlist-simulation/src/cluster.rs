@@ -200,9 +200,17 @@ impl Cluster {
   /// `Event::PingCompleted` will carry this payload.
   ///
   /// Does nothing if `host` is not a known endpoint.
+  ///
+  /// # Panics
+  ///
+  /// Panics if the framed ack carrying `payload` would exceed the host's
+  /// gossip packet budget (`Endpoint::set_ack_payload` rejects an
+  /// unsendable ack). Sim scenarios pass small payloads, so a rejection
+  /// here is a test-authoring error, not a runtime condition.
   pub fn set_ack_payload(&mut self, host: SocketAddr, payload: bytes::Bytes) {
     if let Some(ep) = self.net.endpoints.get_mut(&host) {
-      ep.set_ack_payload(payload);
+      ep.set_ack_payload(payload)
+        .expect("sim ack payload must fit the gossip budget");
     }
   }
 

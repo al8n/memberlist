@@ -28,6 +28,13 @@ pub const DEFAULT_GOSSIP_MTU: usize = 1400;
 /// [`EndpointConfig::with_meta_max_size`] up to that wire ceiling.
 pub const DEFAULT_META_MAX_SIZE: usize = 512;
 
+/// Default value for [`EndpointConfig::max_stream_frame_size`]: 64 MiB.
+/// The hard cap on a single inbound reliable-stream frame
+/// (`[tag][varint len][body]`); a declared frame larger than this is
+/// rejected the moment the length varint is decoded. Generous enough for a
+/// very large push/pull snapshot; tune up for huge clusters.
+pub const DEFAULT_MAX_STREAM_FRAME_SIZE: usize = 64 * 1024 * 1024;
+
 /// Default value for [`EndpointConfig::accept_handshake_deadline`]:
 /// 10 seconds. Bounds the time a server-side bridge spends in
 /// `Handshaking` (label or TLS handshake step) before the
@@ -129,7 +136,7 @@ impl<I, A> EndpointConfig<I, A> {
       indirect_checks: 3,
       probe_timeout: Duration::from_millis(500),
       stream_timeout: Duration::from_secs(10),
-      max_stream_frame_size: 64 * 1024 * 1024,
+      max_stream_frame_size: DEFAULT_MAX_STREAM_FRAME_SIZE,
       gossip_mtu: DEFAULT_GOSSIP_MTU,
       gossip_interval: Duration::from_millis(200),
       gossip_nodes: 3,

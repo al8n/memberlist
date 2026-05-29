@@ -27,6 +27,44 @@ pub enum Error {
   /// cap. Payload: `(supplied_len, cap)`.
   #[error("meta size {0} exceeds per-endpoint cap {1}")]
   MetaExceedsCap(usize, usize),
+
+  /// A caller-supplied ack payload, once framed, would not fit a single
+  /// gossip datagram. Acks are emitted as one UDP datagram on the gossip
+  /// socket, so an over-budget ack is deterministically unsendable: every
+  /// probe reply would silently fail (`send_to` errors are dropped under
+  /// the lossy-gossip policy), peers would receive no ack and falsely
+  /// suspect this node. Rejected at the setter so the payload is never
+  /// stored. Payload: `(encoded_ack_len, gossip_mtu)`.
+  #[error("encoded ack ({0} bytes) exceeds the gossip packet budget ({1} bytes)")]
+  AckPayloadExceedsMtu(usize, usize),
+
+  /// A caller-supplied local-state snapshot, once framed into a PushPull,
+  /// would not fit the reliable-stream frame cap. The snapshot rides every
+  /// push/pull exchange as the PushPull `user_data`, and receivers reject any
+  /// stream frame whose declared length exceeds
+  /// [`EndpointConfig::max_stream_frame_size`](crate::config::EndpointConfig::max_stream_frame_size)
+  /// the moment the length varint is decoded. A snapshot whose minimal framed
+  /// PushPull already exceeds that cap (after reserving a framing budget for
+  /// the co-resident membership-state list) is deterministically untransmittable:
+  /// every push/pull carrying it is rejected and the application state never
+  /// reaches any peer. Rejected at the setter so the snapshot is never stored.
+  /// Payload: `(minimal_framed_pushpull_len, frame_budget)`, where the budget
+  /// is `max_stream_frame_size` minus the reserved membership-state headroom.
+  #[error(
+    "framed local-state snapshot ({0} bytes) exceeds the reliable-stream frame budget ({1} bytes)"
+  )]
+  LocalStateExceedsFrame(usize, usize),
+
+  /// A caller-supplied user-broadcast payload, once framed as a lone
+  /// `UserData` packet, would not fit a single gossip datagram. User
+  /// broadcasts ride outgoing gossip; a lone payload is emitted as one UDP
+  /// datagram, so a payload whose minimal lone frame already exceeds the
+  /// gossip packet budget is deterministically untransmittable — it can never
+  /// be gossiped and would otherwise sit queued until a gossip tick discards
+  /// it. Rejected at the setter so the payload is never stored. Payload:
+  /// `(encoded_userdata_len, gossip_mtu)`.
+  #[error("framed user broadcast ({0} bytes) exceeds the gossip packet budget ({1} bytes)")]
+  UserBroadcastExceedsMtu(usize, usize),
 }
 
 /// Error from a per-stream reliable-exchange state machine.

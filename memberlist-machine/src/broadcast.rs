@@ -665,7 +665,7 @@ mod tests {
 
     assert_eq!(q.q.len(), 1);
     let surviving_id = q.q.iter().next().unwrap().id;
-    // Pre-fix: surviving id == 2 while id_gen == 0 → invariant violated.
+    // A broken reset would leave surviving id == 2 while id_gen == 0 → invariant violated.
     assert!(
       surviving_id <= q.id_gen,
       "queued id {} must stay consistent with id_gen {} (id allocated after reset)",

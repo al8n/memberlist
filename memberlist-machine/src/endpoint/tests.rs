@@ -723,6 +723,52 @@ fn merge_delegate_vetoes_join_push_pull() {
   );
 }
 
+/// Symmetric to [`merge_delegate_vetoes_join_push_pull`] on the OUTBOUND
+/// reply arm: when WE initiated the join and the peer replied, a rejecting
+/// `MergeDelegate` must close the stream so the exchange terminalizes as
+/// failed (the synchronous join then counts the seed as NOT contacted). The
+/// remote state must not be applied.
+#[test]
+fn merge_delegate_vetoes_outbound_push_pull_reply() {
+  use EndpointEvent;
+  use PushPullKind;
+  use StreamCommand;
+  use bytes::Bytes;
+  use std::sync::{Arc, Mutex};
+
+  use crate::event::PushPullReplyReceived;
+
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  while e.poll_event().is_some() {}
+  let d = Arc::new(RejectAllMerge {
+    seen: Mutex::new(Vec::new()),
+  });
+  e.set_merge_delegate(ArcMerge(d.clone()));
+
+  let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  let ev = EndpointEvent::PushPullReplyReceived(PushPullReplyReceived::new(
+    peer,
+    vec![pns("carol", 7003, 1, State::Alive)],
+    Bytes::new(),
+    PushPullKind::Join,
+  ));
+  let cmd = e.handle_stream_event(ev, Instant::now());
+
+  assert!(
+    matches!(cmd, Some(StreamCommand::Close)),
+    "vetoed outbound join merge must close the stream (fail the exchange), got {cmd:?}"
+  );
+  assert!(
+    e.member(&SmolStr::new("carol")).is_none(),
+    "vetoed outbound join merge must not apply remote state"
+  );
+  assert_eq!(
+    *d.seen.lock().unwrap(),
+    vec![SmolStr::new("carol")],
+    "MergeDelegate must be handed the remote peer view on the reply arm"
+  );
+}
+
 /// The `MergeDelegate` is join-only: a periodic Refresh push/pull is never
 /// gated, so it merges even with a reject-all delegate installed.
 #[test]
@@ -778,8 +824,41 @@ impl crate::delegate::MergeDelegate<SmolStr, SocketAddr> for ArcMerge {
 fn set_ack_payload_round_trips() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   assert!(e.ack_payload().is_empty());
-  e.set_ack_payload(Bytes::from_static(b"hello"));
+  e.set_ack_payload(Bytes::from_static(b"hello"))
+    .expect("5-byte ack payload fits the gossip budget");
   assert_eq!(e.ack_payload(), b"hello");
+}
+
+/// An ack payload whose framed Ack exceeds the gossip packet budget is
+/// rejected (and NOT stored): such an Ack is emitted as a single UDP
+/// datagram that always fails to send, so every probe reply would silently
+/// drop and peers would falsely suspect this node. Mirrors the fail-fast
+/// `update_meta` cap. `gossip_mtu` defaults to 1400; a 4096-byte payload
+/// frames to > 1400 with certainty.
+#[test]
+fn set_ack_payload_oversized_is_rejected() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let budget = cfg().gossip_mtu();
+  let res = e.set_ack_payload(Bytes::from(vec![0xab_u8; 4096]));
+  match res {
+    Err(crate::error::Error::AckPayloadExceedsMtu(encoded, reported_budget)) => {
+      assert!(
+        encoded > reported_budget,
+        "rejected ack frame ({encoded}) must exceed the reported budget ({reported_budget})"
+      );
+      assert_eq!(
+        reported_budget, budget,
+        "budget must be the configured gossip_mtu"
+      );
+    }
+    other => panic!("expected AckPayloadExceedsMtu, got {other:?}"),
+  }
+  // The rejected payload must NOT be stored — a later probe must still ack
+  // with the prior (empty) payload, not the unsendable one.
+  assert!(
+    e.ack_payload().is_empty(),
+    "a rejected oversized payload must not be stored"
+  );
 }
 
 #[test]
@@ -889,27 +968,60 @@ fn process_alive_stamps_state_change_with_supplied_now() {
 fn set_local_state_snapshot_round_trips() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   assert!(e.local_state_snapshot().is_empty());
-  e.set_local_state_snapshot(Bytes::from_static(b"snapshot-v1"));
+  e.set_local_state_snapshot(Bytes::from_static(b"snapshot-v1"))
+    .expect("a tiny snapshot fits the frame budget");
   assert_eq!(e.local_state_snapshot(), b"snapshot-v1");
-  e.set_local_state_snapshot(Bytes::from_static(b"snapshot-v2"));
+  e.set_local_state_snapshot(Bytes::from_static(b"snapshot-v2"))
+    .expect("a tiny snapshot fits the frame budget");
   assert_eq!(e.local_state_snapshot(), b"snapshot-v2");
+}
+
+#[test]
+fn set_local_state_snapshot_rejects_oversized() {
+  // A snapshot whose framed PushPull exceeds `max_stream_frame_size` minus the
+  // membership-state reserve is deterministically untransmittable: every
+  // push/pull carrying it would be rejected at the receiver's frame-length
+  // gate, so the application state would never reach a peer. The setter must
+  // reject it (NOT store it) and leave the prior snapshot in place.
+  let small_cap = crate::endpoint::LOCAL_STATE_FRAME_BUDGET + 4096;
+  let mut e: Endpoint<SmolStr, SocketAddr> =
+    Endpoint::new(cfg().with_max_stream_frame_size(small_cap));
+  // Budget after the reserve is ~4096; an 8 KiB snapshot's framed PushPull is
+  // well over it.
+  let oversized = Bytes::from(vec![0u8; 8192]);
+  let res = e.set_local_state_snapshot(oversized);
+  assert!(
+    matches!(res, Err(crate::error::Error::LocalStateExceedsFrame(_, _))),
+    "oversized snapshot must be rejected with LocalStateExceedsFrame, got {res:?}"
+  );
+  // Rejected, not stored: the snapshot is still empty.
+  assert!(
+    e.local_state_snapshot().is_empty(),
+    "a rejected snapshot must not be stored"
+  );
+  // A snapshot that fits the post-reserve budget is accepted.
+  e.set_local_state_snapshot(Bytes::from_static(b"fits"))
+    .expect("a tiny snapshot fits even the reduced budget");
+  assert_eq!(e.local_state_snapshot(), b"fits");
 }
 
 #[test]
 fn queue_user_broadcast_appends_fifo() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   assert_eq!(e.user_broadcast_queue_len(), 0);
-  e.queue_user_broadcast(Bytes::from_static(b"hello"));
-  e.queue_user_broadcast(Bytes::from_static(b"world"));
+  e.queue_user_broadcast(Bytes::from_static(b"hello"))
+    .unwrap();
+  e.queue_user_broadcast(Bytes::from_static(b"world"))
+    .unwrap();
   assert_eq!(e.user_broadcast_queue_len(), 2);
 }
 
 #[test]
 fn drain_user_broadcasts_respects_limit() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
-  e.queue_user_broadcast(Bytes::from_static(b"aaaa"));
-  e.queue_user_broadcast(Bytes::from_static(b"bbbb"));
-  e.queue_user_broadcast(Bytes::from_static(b"cccc"));
+  e.queue_user_broadcast(Bytes::from_static(b"aaaa")).unwrap();
+  e.queue_user_broadcast(Bytes::from_static(b"bbbb")).unwrap();
+  e.queue_user_broadcast(Bytes::from_static(b"cccc")).unwrap();
   // Each 4 B payload is charged its assembled compound-part size:
   // 4 + USER_PART_OVERHEAD (= COMPOUND_MAX_PART_PREFIX_LEN 5 + UserData tag
   // 1 + plain-frame body-len varint 5 = 11) = 15 B. Limit 30 => pulls the
@@ -924,7 +1036,7 @@ fn drain_user_broadcasts_respects_limit() {
 #[test]
 fn drain_user_broadcasts_zero_limit_returns_empty() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
-  e.queue_user_broadcast(Bytes::from_static(b"data"));
+  e.queue_user_broadcast(Bytes::from_static(b"data")).unwrap();
   let drained = e.drain_user_broadcasts(0);
   assert!(drained.is_empty());
   assert_eq!(e.user_broadcast_queue_len(), 1);
@@ -990,7 +1102,8 @@ fn handle_ping_for_other_node_is_dropped() {
 #[test]
 fn handle_ping_uses_current_ack_payload() {
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
-  e.set_ack_payload(Bytes::from_static(b"app-data"));
+  e.set_ack_payload(Bytes::from_static(b"app-data"))
+    .expect("8-byte ack payload fits the gossip budget");
   let from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9999);
   let p = ping_to("local", 7000, "alice", 8001, 1);
   e.handle_ping(from, p, Instant::now());
@@ -4750,7 +4863,8 @@ fn gossip_scheduler_emits_transmits_to_peers() {
 
   // Queue a user broadcast — fire_gossip_scheduler drains this as
   // Message::UserData and includes it in the gossip payload.
-  e.queue_user_broadcast(bytes::Bytes::from_static(b"hello gossip"));
+  e.queue_user_broadcast(bytes::Bytes::from_static(b"hello gossip"))
+    .unwrap();
 
   // Arm gossip scheduler and fire it at t0.
   e.next_gossip = Some(t0);
@@ -5759,7 +5873,7 @@ fn gossip_membership_plus_user_compound_within_mtu() {
   // what sharing one compound_budget prevents.
   for i in 0..6usize {
     let payload = vec![0xa5_u8; 400 + i * 100]; // ~400..900 B each
-    e.queue_user_broadcast(bytes::Bytes::from(payload));
+    e.queue_user_broadcast(bytes::Bytes::from(payload)).unwrap();
   }
   e.next_gossip = Some(t0);
   e.handle_timeout(t0);
@@ -5807,7 +5921,8 @@ fn gossip_membership_plus_user_compound_within_mtu() {
 #[test]
 fn gossip_lone_near_mtu_user_broadcast_emits_packet() {
   let (mut e, t0) = gossip_harness_one_target();
-  e.queue_user_broadcast(bytes::Bytes::from(vec![0xab_u8; 1384]));
+  e.queue_user_broadcast(bytes::Bytes::from(vec![0xab_u8; 1384]))
+    .unwrap();
   e.next_gossip = Some(t0);
   e.handle_timeout(t0);
 
@@ -5836,31 +5951,38 @@ fn gossip_lone_near_mtu_user_broadcast_emits_packet() {
   );
 }
 
-/// An un-gossipable user payload (larger than ANY single UDP datagram)
-/// must NOT head-of-line-block every later user broadcast forever. It is
-/// dropped (best-effort gossip; the pure machine does not log) and the
-/// next, sendable payload still goes out.
+/// An un-gossipable user payload (larger than ANY single UDP datagram) is
+/// rejected at `queue_user_broadcast` rather than stored: it could never be
+/// gossiped even alone, so accepting it would falsely report success and
+/// leave it queued until a gossip tick discarded it. A valid payload queued
+/// after the rejected one is unaffected and still goes out.
 #[test]
-fn gossip_oversized_user_broadcast_does_not_wedge_fifo() {
+fn gossip_oversized_user_broadcast_rejected_at_enqueue() {
   let (mut e, t0) = gossip_harness_one_target();
-  e.queue_user_broadcast(bytes::Bytes::from(vec![0x5a_u8; 2000])); // > MTU, un-gossipable
-  e.queue_user_broadcast(bytes::Bytes::from(vec![0xc3_u8; 64])); // small, valid
+  // Its lone framed `UserData` packet exceeds `gossip_mtu`, so it is
+  // deterministically untransmittable and rejected without being stored.
+  assert!(matches!(
+    e.queue_user_broadcast(bytes::Bytes::from(vec![0x5a_u8; 2000])),
+    Err(crate::error::Error::UserBroadcastExceedsMtu(_, _))
+  ));
+  assert_eq!(
+    e.user_broadcast_queue_len(),
+    0,
+    "a rejected oversized payload must not be stored"
+  );
+  // A small, valid payload is accepted and gossiped normally.
+  e.queue_user_broadcast(bytes::Bytes::from(vec![0xc3_u8; 64]))
+    .unwrap();
   e.next_gossip = Some(t0);
   e.handle_timeout(t0);
 
   let txs = collect_transmits(&mut e);
-  assert_eq!(
-    txs.len(),
-    1,
-    "the small payload behind the un-gossipable one must still be sent"
-  );
+  assert_eq!(txs.len(), 1, "the valid payload must still be sent");
   match &txs[0] {
     Transmit::Packet(p) => match p.message_ref() {
-      Message::UserData(b) => assert_eq!(
-        b.len(),
-        64,
-        "the un-gossipable head must be dropped and the small payload emitted"
-      ),
+      Message::UserData(b) => {
+        assert_eq!(b.len(), 64, "the valid small payload must be emitted")
+      }
       other => panic!("expected Packet(UserData(64)), got Packet({other:?})"),
     },
     other => panic!("expected Packet(UserData(64)), got {other:?}"),
@@ -5868,7 +5990,7 @@ fn gossip_oversized_user_broadcast_does_not_wedge_fifo() {
   assert_eq!(
     e.user_broadcast_queue_len(),
     0,
-    "both the dropped giant and the emitted small payload must leave the FIFO"
+    "the emitted payload must leave the FIFO"
   );
 }
 
@@ -5996,7 +6118,8 @@ fn gossip_near_mtu_membership_outranks_user_broadcast() {
   // A small user broadcast that DOES fit the user budget — without the
   // SWIM-priority gate this made all_broadcasts non-empty and skipped
   // the membership rescue.
-  e.queue_user_broadcast(bytes::Bytes::from(vec![0x11_u8; 32]));
+  e.queue_user_broadcast(bytes::Bytes::from(vec![0x11_u8; 32]))
+    .unwrap();
   e.next_gossip = Some(t0);
   e.handle_timeout(t0);
 
