@@ -91,7 +91,7 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   /// Maximum packet size in bytes. Used as an upper bound when computing
   /// the effective `max_packet_size` for the transport.
   ///
-  /// Default is `u32::MAX`.
+  /// Default is `usize::MAX`.
   #[viewit(
     getter(const, attrs(doc = "Get the maximum packet size in bytes.")),
     setter(attrs(doc = "Set the maximum packet size in bytes. (Builder pattern)"))
