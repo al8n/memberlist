@@ -173,6 +173,17 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
     serde(default, skip_serializing_if = "Option::is_none")
   )]
   metric_labels: Option<Arc<memberlist_core::proto::MetricLabels>>,
+
+  /// The capacity of the packet receiving channel, i.e., the maximum number of
+  /// packets that can be buffered before backpressure is applied.
+  /// This is NOT a byte size.
+  ///
+  /// Default is `1000`.
+  #[viewit(
+    getter(const, attrs(doc = "Get the packet buffer capacity (number of packets, not bytes). Default is `1000`."),),
+    setter(attrs(doc = "Set the packet buffer capacity (number of packets, not bytes). Default is `1000`. (Builder pattern)"),)
+  )]
+  packet_buffer_size: usize,
 }
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer> Clone
@@ -197,6 +208,7 @@ where
       cidrs_policy: self.cidrs_policy.clone(),
       #[cfg(feature = "metrics")]
       metric_labels: self.metric_labels.clone(),
+      packet_buffer_size: self.packet_buffer_size,
     }
   }
 }
@@ -264,6 +276,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
       max_packet_size: usize::MAX,
       #[cfg(feature = "metrics")]
       metric_labels: None,
+      packet_buffer_size: 1000,
     }
   }
 
@@ -304,6 +317,7 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
         max_packet_size: opts.max_packet_size,
         #[cfg(feature = "metrics")]
         metric_labels: opts.metric_labels,
+        packet_buffer_size: opts.packet_buffer_size,
       },
     )
   }
@@ -321,4 +335,5 @@ pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   max_packet_size: usize,
   #[cfg(feature = "metrics")]
   metric_labels: Option<Arc<memberlist_core::proto::MetricLabels>>,
+  packet_buffer_size: usize,
 }

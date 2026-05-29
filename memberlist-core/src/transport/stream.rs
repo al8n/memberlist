@@ -105,11 +105,11 @@ pub struct PacketSubscriber<A, T> {
 }
 
 /// Returns producer and subscriber for packet.
-pub fn packet_stream<T: Transport>() -> (
+pub fn packet_stream<T: Transport>(capacity: usize) -> (
   PacketProducer<T::ResolvedAddress, <T::Runtime as RuntimeLite>::Instant>,
   PacketSubscriber<T::ResolvedAddress, <T::Runtime as RuntimeLite>::Instant>,
 ) {
-  let (sender, receiver) = async_channel::bounded(1000);
+  let (sender, receiver) = async_channel::bounded(capacity);
   (PacketProducer { sender }, PacketSubscriber { receiver })
 }
 

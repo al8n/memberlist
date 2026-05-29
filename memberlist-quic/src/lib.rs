@@ -118,7 +118,7 @@ where
     }
 
     let (stream_tx, stream_rx) = promised_stream::<Self>();
-    let (packet_tx, packet_rx) = packet_stream::<Self>();
+    let (packet_tx, packet_rx) = packet_stream::<Self>(opts.packet_buffer_size);
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
 
     let mut v4_connectors = SmallVec::with_capacity(opts.bind_addresses.len());
