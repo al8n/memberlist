@@ -146,9 +146,9 @@ pub use delegate::{AliveDelegate, MergeDelegate};
 pub use endpoint::{Endpoint, Lifecycle, META_MAX_SIZE};
 pub use error::{Error, StreamError};
 pub use event::{
-  CompoundTransmit, DecodeError, DialRequested, EndpointEvent, Event, NodeConflict,
-  PacketTransmit, PingCompleted, PushPullKind, PushPullReplyReceived, PushPullRequestReceived,
-  Reliability, ReliablePingAcked, ReliablePingFailed, SendPushPullResponse, StreamClosed,
+  CompoundTransmit, DecodeError, DialRequested, EndpointEvent, Event, NodeConflict, PacketTransmit,
+  PingCompleted, PushPullKind, PushPullReplyReceived, PushPullRequestReceived, Reliability,
+  ReliablePingAcked, ReliablePingFailed, RemoteStateReceived, SendPushPullResponse, StreamClosed,
   StreamCommand, StreamErrored, StreamEvent, StreamId, Transmit, UserDataReceived, UserPacket,
 };
 pub use members::{LocalNodeState, Member, Members};

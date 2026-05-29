@@ -3,28 +3,27 @@
 //!
 //! The handle exposes a CQRS API:
 //! - **Reads** (`snapshot`, `local_node`, `alive_count`, `member_count`) are
-//!   served lock-free from an `ArcSwap<MemberlistSnapshot<I, A>>` the driver
-//!   republishes after every state-affecting tick.
+//!   served lock-free from an `ArcSwap<MemberlistSnapshot<T::Id, SocketAddr>>`
+//!   the driver republishes after every state-affecting tick.
 //! - **Writes** (`join`, `leave`, `update_node_metadata`,
+//!   `queue_user_broadcast`, `set_local_state`, `set_ack_payload`,
 //!   `set_compression_options`, `set_encryption_options`, `shutdown`)
 //!   round-trip through the command channel: the handle sends a
 //!   [`Command`] carrying a one-shot reply sender; the driver dispatches
-//!   the command on the owned [`StreamEndpoint`] and replies.
+//!   the command on the owned machine endpoint and replies.
 //! - **Events** are observed via [`Memberlist::events`], which returns a
 //!   fresh [`EventStream`] for every call (flume MPMC — see
 //!   [`crate::events`] for the round-robin caveat).
 //!
-//! `Memberlist<I, A, R>` is honestly generic: the snapshot
-//! ([`MemberlistSnapshot<I, A>`]) and events channel
-//! ([`EventStream<I, A>`]) propagate `I`/`A` straight through. The
-//! transport-discriminator parameter `R` is a phantom on the handle —
-//! the trait bound lives in the per-transport spawn adapter
-//! ([`TcpMemberlist`](crate::TcpMemberlist) /
+//! `Memberlist<T, D>` is generic over the [`Transport`] backend and the
+//! [`Delegate`] hook bundle. The wire id type is `T::Id` and the driver-layer
+//! address is always `SocketAddr`, so the snapshot
+//! ([`MemberlistSnapshot<T::Id, SocketAddr>`]) and events channel
+//! ([`EventStream<T::Id, SocketAddr>`]) propagate those through. The pinned
+//! aliases [`TcpMemberlist`](crate::TcpMemberlist) /
 //! [`TlsMemberlist`](crate::TlsMemberlist) /
-//! [`QuicMemberlist`](crate::QuicMemberlist)), each of which fixes
-//! `I = SmolStr, A = SocketAddr` at the alias level. Power users that
-//! wire a custom [`StreamEndpoint`] / [`QuicEndpoint`] keep the full
-//! `<I, A>` shape end-to-end without any driver-side projection.
+//! [`QuicMemberlist`](crate::QuicMemberlist) fix the backend and a default
+//! [`VoidDelegate`](crate::delegate::VoidDelegate).
 
 use std::{
   marker::PhantomData,
@@ -37,50 +36,58 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
+use bytes::Bytes;
 use compio::runtime::JoinHandle;
 use flume::{Receiver, Sender};
 use memberlist_machine::event::Event;
 use memberlist_wire::{CheapClone, CompressionOptions, EncryptionOptions, Node};
 
 use crate::{
-  Address, EventStream, JoinAllFailed, MemberlistError, MemberlistSnapshot, Result,
+  EventStream, JoinAllFailed, MemberlistError, MemberlistSnapshot, Options, Result,
   command::{
-    Command, JoinCmd, JoinKind, LeaveCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
-    ShutdownCmd, UpdateNodeMetadataCmd, WaitForCompletionArgs,
+    Command, JoinCmd, JoinKind, LeaveCmd, QueueUserBroadcastCmd, SetAckPayloadCmd,
+    SetCompressionOptionsCmd, SetEncryptionOptionsCmd, SetLocalStateCmd, ShutdownCmd,
+    UpdateNodeMetadataCmd, WaitForCompletionArgs,
   },
-  resolver::{OsResolver, Resolver},
+  delegate::Delegate,
+  maybe_resolved::MaybeResolved,
+  resolver::{AdvertiseAddrResolver, Resolver},
+  transport::{Transport, TransportRuntime},
 };
 
 /// Cheaply clonable handle to a running memberlist driver.
 ///
 /// Every clone shares the same command channel, snapshot, events receiver,
 /// and driver-task handle. The driver task is spawned once at construction
-/// (see [`TcpMemberlist::new`](crate::TcpMemberlist) /
-/// [`TlsMemberlist::new`](crate::TlsMemberlist)) and lives until either
-/// [`Memberlist::shutdown`] resolves or every clone is dropped (the latter
-/// closes the command channel, which the driver observes as a shutdown
-/// request and exits its loop; the [`JoinHandle`] held inside the last
-/// `Arc` cancels the task on drop, which is a no-op if the loop already
-/// exited cleanly).
+/// (see [`Memberlist::new`]) and lives until either [`Memberlist::shutdown`]
+/// resolves or every clone is dropped (the latter closes the command
+/// channel, which the driver observes as a shutdown request and exits its
+/// loop; the [`JoinHandle`] held inside the last `Arc` cancels the task on
+/// drop, which is a no-op if the loop already exited cleanly).
 ///
-/// `Memberlist<I, A, R>` is honestly generic over the wire id /
-/// address types — the snapshot and events channel both propagate
-/// `<I, A>` through to their public types
-/// ([`MemberlistSnapshot<I, A>`] and [`EventStream<I, A>`]). Most users
-/// want [`TcpMemberlist`](crate::TcpMemberlist) /
+/// `Memberlist<T, D>` is generic over the [`Transport`] backend and the
+/// [`Delegate`] hook bundle — the snapshot and events channel both propagate
+/// `<T::Id, SocketAddr>` through to their public types
+/// ([`MemberlistSnapshot<T::Id, SocketAddr>`] and
+/// [`EventStream<T::Id, SocketAddr>`]). Most users want
+/// [`TcpMemberlist`](crate::TcpMemberlist) /
 /// [`TlsMemberlist`](crate::TlsMemberlist) /
-/// [`QuicMemberlist`](crate::QuicMemberlist), the pinned aliases that
-/// fix `I = SmolStr, A = SocketAddr`.
-pub struct Memberlist<I, A, R> {
+/// [`QuicMemberlist`](crate::QuicMemberlist), the pinned aliases that fix
+/// the backend and a default [`VoidDelegate`](crate::delegate::VoidDelegate).
+pub struct Memberlist<T, D>
+where
+  T: Transport,
+  D: Delegate<Id = T::Id, Address = SocketAddr>,
+{
   /// Command channel into the driver task — every write API sends one
   /// command and awaits the one-shot reply.
   commands: Sender<Command>,
   /// Lock-free observable state, republished by the driver after every
   /// state-affecting tick.
-  snapshot: Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
+  snapshot: Arc<ArcSwap<MemberlistSnapshot<T::Id, SocketAddr>>>,
   /// Shared events receiver — `events()` clones this into a fresh
   /// [`EventStream`].
-  events_rx: Receiver<Event<I, A>>,
+  events_rx: Receiver<Event<T::Id, SocketAddr>>,
   /// Driver-task handle. Wrapped in `Arc` so clones share ownership;
   /// dropping the last `Arc` drops the inner [`JoinHandle`], which
   /// cancels the task. After [`Memberlist::shutdown`] the task has
@@ -94,27 +101,36 @@ pub struct Memberlist<I, A, R> {
   /// reply-receiver hanging on a command buffered in a channel that
   /// already has its Receiver gone.
   shutdown_flag: Arc<AtomicBool>,
-  /// Monotonic count of events the driver dropped via `try_send` when
-  /// the bounded events channel was full (slow-subscriber backpressure).
-  /// `Disconnected` returns from `try_send` are NOT counted — those
-  /// only fire when every `EventStream` has been dropped, which is the
-  /// "no one is subscribing" terminal state and is not a gap. See
-  /// [`Self::events_dropped`].
+  /// Monotonic count of events dropped at the `EventStream` (`events()`)
+  /// fan-out: a slow subscriber let the bounded events queue fill, so the driver
+  /// dropped the newest event rather than block. App-data is routed to the
+  /// delegate only, so these are membership/control events — RECOVERABLE by
+  /// reconciling from the snapshot. `Disconnected` returns from the `try_send`
+  /// are NOT counted (every `EventStream` dropped — "no one is subscribing" — is
+  /// not a gap). See [`Self::events_dropped`].
   events_dropped: Arc<AtomicU64>,
-  /// Cached join deadline — the only `DriverOptions` field
-  /// [`Self::join_with`] reads on the handle hot-path. Caching one
-  /// scalar instead of the full options struct keeps `Memberlist<I, A,
-  /// R>` free of a transport-options generic.
+  /// Monotonic count of events dropped at the observation (delegate) channel:
+  /// when it is configured `Channel::Bounded` (the default) and the delegate
+  /// cannot keep up, the driver drops by count or by the payload byte backstop.
+  /// A drop here means BOTH the delegate hook and the EventStream missed the
+  /// event; for app-data (`UserPacket` / `RemoteStateReceived`) it is
+  /// UNRECOVERABLE (absent from the snapshot). See [`Self::observation_dropped`].
+  observation_dropped: Arc<AtomicU64>,
+  /// Cached join deadline — the only `DriverOptions` field [`Self::join`]
+  /// reads on the handle hot-path. Caching one scalar instead of the full
+  /// options struct keeps the handle free of a transport-options generic.
   cached_join_deadline: Duration,
-  /// Phantom over the wire id type.
-  _i: PhantomData<fn(I)>,
-  /// Phantom over the wire address type.
-  _a: PhantomData<fn(A)>,
-  /// Phantom over the stream record layer.
-  _r: PhantomData<fn(R)>,
+  /// Phantom over the transport backend.
+  _t: PhantomData<fn(T)>,
+  /// Phantom over the delegate bundle.
+  _d: PhantomData<fn(D)>,
 }
 
-impl<I, A, R> Clone for Memberlist<I, A, R> {
+impl<T, D> Clone for Memberlist<T, D>
+where
+  T: Transport,
+  D: Delegate<Id = T::Id, Address = SocketAddr>,
+{
   fn clone(&self) -> Self {
     Self {
       commands: self.commands.clone(),
@@ -123,68 +139,225 @@ impl<I, A, R> Clone for Memberlist<I, A, R> {
       driver_handle: self.driver_handle.clone(),
       shutdown_flag: self.shutdown_flag.clone(),
       events_dropped: self.events_dropped.clone(),
+      observation_dropped: self.observation_dropped.clone(),
       cached_join_deadline: self.cached_join_deadline,
-      _i: PhantomData,
-      _a: PhantomData,
-      _r: PhantomData,
+      _t: PhantomData,
+      _d: PhantomData,
     }
   }
 }
 
-impl<I, A, R> Memberlist<I, A, R> {
-  /// Internal constructor used by the per-transport adapters
-  /// (`TcpMemberlist::new`, `TlsMemberlist::new`, future `QuicMemberlist::new`).
-  /// Not exposed publicly: the abstract `Memberlist<I, A, R>` has no way to
-  /// spawn a driver task of its own — the spawn site lives in the transport
-  /// adapter that knows the concrete `R` type and how to wire the
-  /// transport-specific machinery (record layer, dial closure, or QUIC
-  /// endpoint).
-  #[allow(dead_code)]
-  pub(crate) fn from_parts(
-    commands: Sender<Command>,
-    snapshot: Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
-    events_rx: Receiver<Event<I, A>>,
-    events_dropped: Arc<AtomicU64>,
-    driver_handle: JoinHandle<()>,
-    shutdown_flag: Arc<AtomicBool>,
-    cached_join_deadline: Duration,
-  ) -> Self {
-    Self {
-      commands,
+impl<T, D> Memberlist<T, D>
+where
+  T: Transport,
+  T::Id: CheapClone + memberlist_wire::Data,
+  D: Delegate<Id = T::Id, Address = SocketAddr>,
+{
+  /// Construct a memberlist, bind the transport's sockets, build the
+  /// initial snapshot, and spawn the driver task on the current compio
+  /// runtime.
+  ///
+  /// `options` bundles the per-backend transport options, the SWIM-level
+  /// [`MemberlistOptions`](crate::MemberlistOptions), and the per-driver
+  /// [`DriverOptions`](crate::driver_options::DriverOptions). `delegate` is
+  /// the membership hook bundle (default
+  /// [`VoidDelegate`](crate::delegate::VoidDelegate) is a no-op). `resolver`
+  /// resolves the (possibly-unresolved) advertise address;
+  /// `advertise_resolver` picks one `SocketAddr` from the resolved
+  /// candidates.
+  ///
+  /// On return the driver task is already running. Reads (`snapshot`,
+  /// `local_node`, `alive_count`, `member_count`) are served lock-free from
+  /// the initial snapshot until the driver publishes its first refresh on
+  /// entry into the loop.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`MemberlistError::Io`] if the transport fails to construct
+  /// (binding the UDP gossip socket / TCP reliable listener / quinn
+  /// endpoint, most commonly `EADDRINUSE` on a port collision; or a
+  /// required option such as `local_id` / `advertise_addr` was not set).
+  pub async fn new<RES, AR>(
+    options: Options<T>,
+    delegate: D,
+    resolver: &RES,
+    advertise_resolver: &AR,
+  ) -> Result<Self>
+  where
+    RES: Resolver<Address = T::Address>,
+    AR: AdvertiseAddrResolver,
+  {
+    let (transport_opts, memberlist_opts, driver_opts, alive_delegate, merge_delegate) =
+      options.into_parts();
+    // Fail fast on an impossible `gossip_mtu` BEFORE binding any socket: a
+    // gossip packet is one UDP datagram, so a `gossip_mtu` whose wire datagram
+    // cannot fit a UDP packet would make near-MTU gossip silently unsendable.
+    // Enforced here so every backend (TCP/TLS/QUIC) shares one check.
+    crate::options::validate_gossip_mtu(&memberlist_opts)?;
+    // Fail fast on a generic-free driver knob whose value would
+    // deterministically break the driver loop (currently only a zero
+    // `idle_wake_interval`, which would busy-spin a quiescent loop). Shared by
+    // every backend through this single `Memberlist::new` path, like the
+    // gossip-MTU check above.
+    crate::options::validate_driver_options(&driver_opts)?;
+    // Fail fast on a zero `max_stream_frame_size`: the reliable-stream frame
+    // ceiling gates every push/pull and large user message, so a zero ceiling
+    // would reject every reliable frame and the node could never join or
+    // receive reliable user data. Checked before `initial_local_state`, which
+    // is validated against this same ceiling.
+    crate::options::validate_max_stream_frame_size(&memberlist_opts)?;
+    // Fail fast on an `initial_meta` larger than the effective meta cap
+    // (`min(meta_max_size, Meta::MAX_SIZE)`). The machine only debug-asserts this
+    // invariant, so without a release check a node could start with a meta the
+    // reliable-frame floor (sized for `meta_max_size`) under-counts, then fail
+    // every push/pull at the receiver's frame-length gate.
+    crate::options::validate_initial_meta(&memberlist_opts)?;
+    // Fail fast on an `initial_local_state` snapshot whose framed PushPull
+    // exceeds the reliable-stream frame budget: the snapshot rides every
+    // push/pull exchange, so an over-budget snapshot would be rejected by
+    // every receiver's frame-length gate and the application state would never
+    // reach a peer. Validated here (before any socket is bound) against the
+    // EFFECTIVE `max_stream_frame_size` (the configured override, or the
+    // machine default when unset) that `apply_memberlist_options` installs into
+    // every `T::run`.
+    crate::options::validate_initial_local_state::<T::Id, SocketAddr>(&memberlist_opts)?;
+    let transport = T::new(transport_opts, resolver, advertise_resolver)
+      .await
+      .map_err(|e| {
+        // Preserve a typed `MemberlistError` raised by the backend's `T::new`
+        // (e.g. a stream backend rejecting a zero `bridge_recv_buf_len` — a
+        // `T::Options`-local knob not reachable at the generic-option checks
+        // above) instead of flattening every backend error into `Io`. A custom
+        // transport whose `Error` is some other type still surfaces as `Io`.
+        let boxed: Box<dyn core::error::Error + Send + Sync> = Box::new(e);
+        match boxed.downcast::<MemberlistError>() {
+          Ok(typed) => *typed,
+          Err(other) => MemberlistError::Io(std::io::Error::other(other.to_string())),
+        }
+      })?;
+
+    // Fail fast on a node whose own mandatory single-datagram control packets
+    // (probe Ping / self-Alive / Ack) — built from the ACTUAL local id and the
+    // ACTUAL resolved advertise address — are unsendable, BEFORE any driver task
+    // is spawned. Two ways they can be unsendable, both surfaced here:
+    //   * the advertise address is not wire-encodable (e.g. a scoped IPv6 the
+    //     compact `SocketAddrV6` encoder rejects) ⇒ every local-node-bearing
+    //     packet would fail to encode at runtime — the node could not emit
+    //     membership traffic — so construction is rejected with
+    //     `AdvertiseAddrNotEncodable`;
+    //   * the unbounded local id pushes a packet's plaintext frame over the
+    //     gossip budget ⇒ silently unsendable / never gossiped and peers falsely
+    //     suspect it — rejected with `GossipMtuTooSmall`.
+    // The resolved id AND advertise address are first available through the
+    // generic `Transport` trait here; the just-built transport is dropped on
+    // `Err` (its socket closes) before any driver task is spawned.
+    crate::options::validate_gossip_mtu_for_identity::<T::Id>(
+      transport.local_id(),
+      transport.advertise_address(),
+      &memberlist_opts,
+    )?;
+
+    // Fail fast if `max_stream_frame_size` is too small to carry even the local
+    // node's own minimal reliable push/pull frame. Every join / anti-entropy
+    // exchange carries at least the local node, so a cap below that minimum
+    // would have every receiver's frame-length gate reject the exchange while
+    // the node still constructs Ok. Identity-aware (uses the ACTUAL id /
+    // advertise address, sized for the `meta_max_size` ceiling so any future
+    // `update_node_metadata` is guaranteed to fit): it accepts a small cap that
+    // genuinely fits the node and rejects only caps too small for its own frame.
+    crate::options::validate_stream_frame_for_identity::<T::Id>(
+      transport.local_id(),
+      transport.advertise_address(),
+      &memberlist_opts,
+    )?;
+
+    // Fail fast on a resolved advertise address that is not a usable unicast
+    // CONTACT — an unspecified IP (`0.0.0.0`/`::`, the wildcard-bind a node gets
+    // when it binds `0.0.0.0:0` and forgets to set a concrete advertise), a
+    // multicast / IPv4-broadcast IP, or a zero port. Such an address encodes
+    // fine (so the encodability check above passes) but is undialable: the node
+    // would join a cluster as a member no peer can route probes/dials to, then
+    // be falsely suspected and reaped. Rejected with `InvalidAdvertiseAddr`
+    // before any driver task is spawned (the transport is dropped on `Err`,
+    // closing its socket). Same single site / all-backend coverage as the
+    // identity check above; loopback / private / global unicast stay valid.
+    crate::options::validate_advertise_addr(transport.advertise_address())?;
+
+    // Build the initial snapshot from the transport's resolved local
+    // identity — independent of the machine endpoint, which `T::run`
+    // builds from the transport's stored config.
+    let local = Node::new(
+      transport.local_id().cheap_clone(),
+      *transport.advertise_address(),
+    );
+    let snapshot = Arc::new(ArcSwap::from_pointee(MemberlistSnapshot::new(
+      vec![local.cheap_clone()],
+      local,
+      1,
+      1,
+    )));
+
+    let (commands_tx, commands_rx) = flume::unbounded();
+    let (events_tx, events_rx) = flume::bounded(driver_opts.event_queue_cap());
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let events_dropped = Arc::new(AtomicU64::new(0));
+    let observation_dropped = Arc::new(AtomicU64::new(0));
+    let cached_join_deadline = driver_opts.join_deadline();
+
+    let runtime = TransportRuntime::new(
+      delegate,
+      commands_rx,
+      events_tx,
+      events_dropped.clone(),
+      observation_dropped.clone(),
+      snapshot.clone(),
+      shutdown_flag.clone(),
+      driver_opts,
+      memberlist_opts,
+      alive_delegate,
+      merge_delegate,
+    );
+
+    let driver_handle = compio::runtime::spawn(transport.run(runtime));
+
+    Ok(Self {
+      commands: commands_tx,
       snapshot,
       events_rx,
       driver_handle: Arc::new(driver_handle),
       shutdown_flag,
       events_dropped,
+      observation_dropped,
       cached_join_deadline,
-      _i: PhantomData,
-      _a: PhantomData,
-      _r: PhantomData,
-    }
+      _t: PhantomData,
+      _d: PhantomData,
+    })
   }
 
+  /// The local node, taken from the latest published snapshot.
+  ///
+  /// Cheap clone via [`CheapClone`] on both `T::Id` and `SocketAddr` — for
+  /// the pinned aliases (`SmolStr` + `SocketAddr`) this is `Arc`-bump and
+  /// scalar copy respectively.
+  #[inline]
+  pub fn local_node(&self) -> Node<T::Id, SocketAddr> {
+    self.snapshot.load().local_ref().cheap_clone()
+  }
+}
+
+impl<T, D> Memberlist<T, D>
+where
+  T: Transport,
+  D: Delegate<Id = T::Id, Address = SocketAddr>,
+{
   /// Lock-free snapshot of the cluster's current observable state.
   ///
   /// Returns a strong [`Arc`] pointing at the immutable snapshot the
   /// driver last published. Subsequent driver mutations do not affect the
   /// returned `Arc` — call again to observe a fresh snapshot.
   #[inline]
-  pub fn snapshot(&self) -> Arc<MemberlistSnapshot<I, A>> {
+  pub fn snapshot(&self) -> Arc<MemberlistSnapshot<T::Id, SocketAddr>> {
     self.snapshot.load_full()
-  }
-
-  /// The local node, taken from the latest published snapshot.
-  ///
-  /// Cheap clone via [`CheapClone`] on both `I` and `A` — for the
-  /// pinned aliases (`SmolStr` + `SocketAddr`) this is `Arc`-bump and
-  /// scalar copy respectively.
-  #[inline]
-  pub fn local_node(&self) -> Node<I, A>
-  where
-    I: CheapClone,
-    A: CheapClone,
-  {
-    self.snapshot.load().local_ref().cheap_clone()
   }
 
   /// Number of alive members in the latest published snapshot.
@@ -200,23 +373,15 @@ impl<I, A, R> Memberlist<I, A, R> {
     self.snapshot.load().member_count()
   }
 
-  /// Synchronous join: dispatch a push/pull against each seed address
-  /// and wait for actual contact.
+  /// Synchronous join: dispatch a push/pull against each seed and wait for
+  /// actual contact.
   ///
-  /// Convenience over [`Self::join_with`] for callers that do not
-  /// need a custom DNS path. See that method's docstring for the
-  /// per-seed completion semantics, the `JOIN_DEADLINE` bound, and
-  /// the `JoinAllFailed` zero-contact error.
-  pub async fn join(&self, seeds: &[Address]) -> Result<usize> {
-    self.join_with(&OsResolver, seeds).await
-  }
-
-  /// Synchronous join with an explicit resolver.
-  ///
-  /// Each resolved address becomes one outbound push/pull exchange.
-  /// The call resolves either when every dispatched exchange has
-  /// terminated OR when the per-call deadline (`JOIN_DEADLINE`,
-  /// currently 10s) elapses, whichever comes first.
+  /// Each seed is a [`MaybeResolved`] — either an already-resolved
+  /// `SocketAddr` (used directly) or an unresolved `T::Address` (resolved
+  /// via the supplied `resolver`). Each resolved address becomes one
+  /// outbound push/pull exchange. The call resolves either when every
+  /// dispatched exchange has terminated OR when the per-call deadline
+  /// (`JOIN_DEADLINE`, currently 10s) elapses, whichever comes first.
   ///
   /// The returned count is the number of dispatched exchanges that
   /// terminated with
@@ -225,66 +390,60 @@ impl<I, A, R> Memberlist<I, A, R> {
   /// frame + payload all accepted, and the peer's state was merged
   /// into membership. Each exchange counts independently, so passing
   /// the same address twice yields two contacts on a healthy peer.
-  /// An exchange whose dial failed, whose handshake / decode
-  /// rejected, whose peer hung up before completing the push/pull,
-  /// or which crossed the FSM's per-exchange deadline before
-  /// validating, does NOT count.
+  /// An exchange whose dial failed, whose handshake / decode rejected,
+  /// whose peer hung up before completing the push/pull, or which crossed
+  /// the FSM's per-exchange deadline before validating, does NOT count.
   ///
   /// On a non-empty input that resolved to ≥1 address, the return is:
   /// - `Ok(n)` with `n ≥ 1` — at least one exchange terminated
   ///   `Succeeded`.
   /// - `Err(MemberlistError::JoinAllFailed { requested, contacted: 0 })`
-  ///   — every dispatched exchange terminated `Failed` or the
-  ///   deadline elapsed before any could `Succeed` (the typical
-  ///   "all seeds unreachable" cluster-bootstrap failure).
+  ///   — every dispatched exchange terminated `Failed` or the deadline
+  ///   elapsed before any could `Succeed` (the typical "all seeds
+  ///   unreachable" cluster-bootstrap failure).
   ///
   /// An empty `seeds` slice returns `Ok(0)` without dispatching a
-  /// command. A non-empty slice whose resolver returns zero
-  /// addresses for every entry surfaces
+  /// command. A non-empty slice whose resolver returns zero addresses for
+  /// every entry surfaces
   /// `Err(MemberlistError::JoinAllFailed { requested: seeds.len(), contacted: 0 })`.
   ///
   /// # Cancellation
   ///
   /// The returned future is cancel-safe at the suspension point:
-  /// dropping it BEFORE the resolver finishes or the command is
-  /// sent simply abandons the call. Dropping AFTER the command is
-  /// sent and BEFORE the reply arrives drops the reply-receiver;
-  /// the driver still runs the push/pull exchanges and updates
-  /// membership, but the reply is silently discarded (the driver's
-  /// `send_async` ignores the `SendError::Disconnected`). The
-  /// caller should `select!` against an external cancel signal if a
-  /// tighter bound than `JOIN_DEADLINE` is required.
+  /// dropping it BEFORE the resolver finishes or the command is sent
+  /// simply abandons the call. Dropping AFTER the command is sent and
+  /// BEFORE the reply arrives drops the reply-receiver; the driver still
+  /// runs the push/pull exchanges and updates membership, but the reply
+  /// is silently discarded. The caller should `select!` against an
+  /// external cancel signal if a tighter bound than `JOIN_DEADLINE` is
+  /// required.
   ///
   /// # Fire-and-forget alternative
   ///
-  /// Callers that want to enqueue a join without waiting for
-  /// completion (long-lived background re-discovery loops, etc.)
-  /// should use [`Self::dispatch_join_with`].
-  pub async fn join_with<Res>(&self, resolver: &Res, seeds: &[Res::Address]) -> Result<usize>
+  /// Callers that want to enqueue a join without waiting for completion
+  /// (long-lived background re-discovery loops, etc.) should use
+  /// [`Self::dispatch_join`].
+  pub async fn join<RES>(
+    &self,
+    resolver: &RES,
+    seeds: &[MaybeResolved<T::Address, SocketAddr>],
+  ) -> Result<usize>
   where
-    Res: Resolver,
-    Res::Error: Into<std::io::Error>,
+    RES: Resolver<Address = T::Address>,
   {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
     }
     // Empty input is a trivial caller-side request — return `Ok(0)`
-    // without sending a command. Non-empty input that RESOLVES to
-    // zero socket addresses (a service-discovery resolver that finds
-    // no endpoints) must NOT collapse to a silent success: surface
-    // it as `JoinAllFailed` so a bootstrap / discovery outage is
-    // never reported as a healthy zero-contact join.
+    // without sending a command. Non-empty input that RESOLVES to zero
+    // socket addresses (a service-discovery resolver that finds no
+    // endpoints) must NOT collapse to a silent success: surface it as
+    // `JoinAllFailed` so a bootstrap / discovery outage is never reported
+    // as a healthy zero-contact join.
     if seeds.is_empty() {
       return Ok(0);
     }
-    let mut addrs: Vec<SocketAddr> = Vec::new();
-    for seed in seeds {
-      let resolved = resolver
-        .resolve(seed)
-        .await
-        .map_err(|e| MemberlistError::Resolve(e.into()))?;
-      addrs.extend(resolved);
-    }
+    let addrs = resolve_seeds(resolver, seeds).await?;
     if addrs.is_empty() {
       return Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
         seeds.len(),
@@ -307,52 +466,35 @@ impl<I, A, R> Memberlist<I, A, R> {
       .map_err(|_| MemberlistError::ReplyClosed)?
   }
 
-  /// Fire-and-forget join: dispatch a push/pull against each seed
-  /// address and return immediately.
+  /// Fire-and-forget join: dispatch a push/pull against each seed and
+  /// return immediately.
   ///
-  /// Convenience over [`Self::dispatch_join_with`] for callers that
-  /// do not need a custom DNS path. See [`Self::join`] for the
-  /// synchronous variant that waits for actual contact.
-  pub async fn dispatch_join(&self, seeds: &[Address]) -> Result<usize> {
-    self.dispatch_join_with(&OsResolver, seeds).await
-  }
-
-  /// Fire-and-forget join with an explicit resolver.
-  ///
-  /// Returns the number of resolved seed addresses handed to the
-  /// driver — i.e. the number of push/pull exchanges queued, NOT
-  /// the number of seeds that successfully responded. The driver
-  /// emits a [`NodeJoined`](memberlist_machine::event::Event) for
-  /// every newly-Alive peer; per-seed dial failure surfaces through
-  /// the membership FSM's normal suspicion / dead-node path.
+  /// Returns the number of resolved seed addresses handed to the driver —
+  /// i.e. the number of push/pull exchanges queued, NOT the number of
+  /// seeds that successfully responded. The driver emits a
+  /// [`NodeJoined`](memberlist_machine::event::Event) for every newly-Alive
+  /// peer; per-seed dial failure surfaces through the membership FSM's
+  /// normal suspicion / dead-node path.
   ///
   /// Applications that want to wait for actual contact should use
-  /// [`Self::join_with`] instead, which handles the completion
-  /// accounting and surfaces zero-contact failures as
-  /// [`MemberlistError::JoinAllFailed`]. This method exists for
-  /// callers that need to enqueue work without blocking on
-  /// completion — typically long-lived background re-discovery
-  /// loops where the caller observes [`Self::events`] separately.
-  pub async fn dispatch_join_with<Res>(
+  /// [`Self::join`] instead, which handles the completion accounting and
+  /// surfaces zero-contact failures as [`MemberlistError::JoinAllFailed`].
+  /// This method exists for callers that need to enqueue work without
+  /// blocking on completion — typically long-lived background
+  /// re-discovery loops where the caller observes [`Self::events`]
+  /// separately.
+  pub async fn dispatch_join<RES>(
     &self,
-    resolver: &Res,
-    seeds: &[Res::Address],
+    resolver: &RES,
+    seeds: &[MaybeResolved<T::Address, SocketAddr>],
   ) -> Result<usize>
   where
-    Res: Resolver,
-    Res::Error: Into<std::io::Error>,
+    RES: Resolver<Address = T::Address>,
   {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
     }
-    let mut addrs: Vec<SocketAddr> = Vec::new();
-    for seed in seeds {
-      let resolved = resolver
-        .resolve(seed)
-        .await
-        .map_err(|e| MemberlistError::Resolve(e.into()))?;
-      addrs.extend(resolved);
-    }
+    let addrs = resolve_seeds(resolver, seeds).await?;
     let (tx, rx) = flume::bounded(1);
     self
       .commands
@@ -368,9 +510,20 @@ impl<I, A, R> Memberlist<I, A, R> {
       .map_err(|_| MemberlistError::ReplyClosed)?
   }
 
-  /// Leave the cluster gracefully. Returns when the local "leave"
-  /// broadcast has been queued; subscribers observe an `Event::LeftCluster`
-  /// once the broadcast completes.
+  /// Leave the cluster gracefully.
+  ///
+  /// Returns `Ok(())` once the leave broadcast has been flushed to
+  /// peers — i.e. once the direct `Dead`-self notices queued for every
+  /// live peer have been handed to the wire (the membership machine's
+  /// `Event::LeftCluster` completion signal). Until then the call is
+  /// in flight; subscribers observe `Event::NodeLeft(self)` on peers as
+  /// the notices land.
+  ///
+  /// The wait races the driver's `leave_timeout` (see
+  /// [`DriverOptions::with_leave_timeout`](crate::DriverOptions::with_leave_timeout)):
+  /// if the flush does not complete within that budget the call returns
+  /// [`MemberlistError::LeaveTimeout`] — the local node has still left,
+  /// but the driver could not confirm peers were notified.
   pub async fn leave(&self) -> Result<()> {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
@@ -388,6 +541,10 @@ impl<I, A, R> Memberlist<I, A, R> {
 
   /// Replace the local node's metadata. The new bytes are gossiped
   /// through the standard alive-broadcast path.
+  ///
+  /// Returns [`MemberlistError::NotRunning`] if the local node has left
+  /// the cluster (after [`leave`](Self::leave)): the gossip schedulers
+  /// are stopped, so the update could never be disseminated.
   pub async fn update_node_metadata(&self, meta: Vec<u8>) -> Result<()> {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
@@ -399,6 +556,80 @@ impl<I, A, R> Memberlist<I, A, R> {
         meta,
         reply: tx,
       }))
+      .await
+      .map_err(|_| MemberlistError::CommandSend)?;
+    rx.recv_async()
+      .await
+      .map_err(|_| MemberlistError::ReplyClosed)?
+  }
+
+  /// Queue an application user-broadcast for cluster-wide gossip
+  /// dissemination. The bytes ride the standard gossip path and surface on
+  /// peers through [`NodeDelegate::notify_user_msg`](crate::NodeDelegate::notify_user_msg).
+  ///
+  /// Returns [`MemberlistError::NotRunning`] if the local node has left
+  /// the cluster (after [`leave`](Self::leave)): the gossip scheduler is
+  /// stopped, so the broadcast could never be disseminated.
+  pub async fn queue_user_broadcast(&self, data: Bytes) -> Result<()> {
+    if self.shutdown_flag.load(Ordering::Acquire) {
+      return Err(MemberlistError::Shutdown);
+    }
+    let (tx, rx) = flume::bounded(1);
+    self
+      .commands
+      .send_async(Command::QueueUserBroadcast(QueueUserBroadcastCmd::new(
+        data, tx,
+      )))
+      .await
+      .map_err(|_| MemberlistError::CommandSend)?;
+    rx.recv_async()
+      .await
+      .map_err(|_| MemberlistError::ReplyClosed)?
+  }
+
+  /// Set the application push/pull local-state snapshot. The snapshot is
+  /// carried in subsequent push/pull exchanges and surfaces on peers through
+  /// [`NodeDelegate::merge_remote_state`](crate::NodeDelegate::merge_remote_state).
+  ///
+  /// Returns [`MemberlistError::NotRunning`] if the local node has left
+  /// the cluster (after [`leave`](Self::leave)): no further push/pull
+  /// exchange will carry the snapshot.
+  pub async fn set_local_state(&self, state: Bytes) -> Result<()> {
+    if self.shutdown_flag.load(Ordering::Acquire) {
+      return Err(MemberlistError::Shutdown);
+    }
+    let (tx, rx) = flume::bounded(1);
+    self
+      .commands
+      .send_async(Command::SetLocalState(SetLocalStateCmd::new(state, tx)))
+      .await
+      .map_err(|_| MemberlistError::CommandSend)?;
+    rx.recv_async()
+      .await
+      .map_err(|_| MemberlistError::ReplyClosed)?
+  }
+
+  /// Set the application payload attached to outbound probe acks. The payload
+  /// surfaces on the probing peer through
+  /// [`PingDelegate::notify_ping_complete`](crate::PingDelegate::notify_ping_complete).
+  ///
+  /// Returns [`MemberlistError::NotRunning`] if the local node has left
+  /// the cluster (after [`leave`](Self::leave)): no further probe ack will
+  /// carry the payload.
+  ///
+  /// Returns [`MemberlistError::PayloadTooLarge`] if the framed ack carrying
+  /// `payload` would exceed the node's gossip packet budget. An ack is sent
+  /// as a single UDP datagram, so an over-budget payload is rejected (and
+  /// not stored): every probe reply would otherwise silently fail to send
+  /// and peers would falsely suspect this node.
+  pub async fn set_ack_payload(&self, payload: Bytes) -> Result<()> {
+    if self.shutdown_flag.load(Ordering::Acquire) {
+      return Err(MemberlistError::Shutdown);
+    }
+    let (tx, rx) = flume::bounded(1);
+    self
+      .commands
+      .send_async(Command::SetAckPayload(SetAckPayloadCmd::new(payload, tx)))
       .await
       .map_err(|_| MemberlistError::CommandSend)?;
     rx.recv_async()
@@ -432,35 +663,32 @@ impl<I, A, R> Memberlist<I, A, R> {
   /// # Not a trust-boundary cutoff
   ///
   /// This API is a key-ROTATION mechanism, not a key-REVOCATION
-  /// mechanism. The coordinator's machine-side state — the
-  /// keyring, the gossip ingress buffer, and every live bridge's
-  /// outbound buffer — is updated to the new policy on the spot
-  /// (see [`memberlist_machine::streams::StreamEndpoint::set_encryption_options`]
-  /// for the full purge-and-reap protocol). But any reliable-stream
-  /// bytes that were already encoded under the prior policy and
-  /// queued in a per-bridge byte-mover's FIFO channel WILL be
-  /// written to the wire under the prior policy before the bridge
-  /// observes its `Close` and exits. The window is bounded by the
-  /// FIFO drain through the socket's write half, and the bytes were
-  /// legitimately authenticated under the prior policy at encode
-  /// time — SWIM's eventual-consistency absorbs the brief
-  /// inconsistency.
+  /// mechanism. The coordinator's machine-side state — the keyring, the
+  /// gossip ingress buffer, and every live bridge's outbound buffer — is
+  /// updated to the new policy on the spot (see
+  /// [`memberlist_machine::streams::StreamEndpoint::set_encryption_options`]
+  /// for the full purge-and-reap protocol). But any reliable-stream bytes
+  /// that were already encoded under the prior policy and queued in a
+  /// per-bridge byte-mover's FIFO channel WILL be written to the wire
+  /// under the prior policy before the bridge observes its `Close` and
+  /// exits. The window is bounded by the FIFO drain through the socket's
+  /// write half, and the bytes were legitimately authenticated under the
+  /// prior policy at encode time — SWIM's eventual-consistency absorbs the
+  /// brief inconsistency.
   ///
-  /// **No public API in this crate provides a hard in-flight
-  /// cutoff for reliable-stream bytes already queued in a bridge.**
-  /// This includes [`Self::shutdown`] — the shutdown sequence
-  /// sends a `Close` through each bridge's FIFO out-channel, so
-  /// any queued `Bytes` ahead of that `Close` are written under
-  /// the prior policy before the bridge exits, identical to the
-  /// rotation case above. For applications that need a strict
-  /// trust-boundary cutoff (e.g. on observed key compromise) the
-  /// approved approach is OUT-OF-BAND key revocation at the peer
-  /// — every peer rejects the compromised key on its keyring
-  /// removal, and the leaked-window bytes become undecryptable
-  /// the moment they land. A future `StreamAction::Cancel`
-  /// machine-side extension is the documented path to in-driver
-  /// hard cancellation; until then, treat this as a rotation API
-  /// only.
+  /// **No public API in this crate provides a hard in-flight cutoff for
+  /// reliable-stream bytes already queued in a bridge.** This includes
+  /// [`Self::shutdown`] — the shutdown sequence sends a `Close` through
+  /// each bridge's FIFO out-channel, so any queued `Bytes` ahead of that
+  /// `Close` are written under the prior policy before the bridge exits,
+  /// identical to the rotation case above. For applications that need a
+  /// strict trust-boundary cutoff (e.g. on observed key compromise) the
+  /// approved approach is OUT-OF-BAND key revocation at the peer — every
+  /// peer rejects the compromised key on its keyring removal, and the
+  /// leaked-window bytes become undecryptable the moment they land. A
+  /// future `StreamAction::Cancel` machine-side extension is the
+  /// documented path to in-driver hard cancellation; until then, treat
+  /// this as a rotation API only.
   pub async fn set_encryption_options(&self, opts: EncryptionOptions) -> Result<()> {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);
@@ -488,33 +716,75 @@ impl<I, A, R> Memberlist<I, A, R> {
   /// multi-consumer broadcast, wrap with a dedicated broadcast layer
   /// above this stream.
   ///
+  /// # Membership / control events only
+  ///
+  /// The stream carries node-lifecycle and control events (joins, leaves,
+  /// updates, conflicts, ...). It does NOT carry application payloads —
+  /// [`Event::UserPacket`] and [`Event::RemoteStateReceived`] are delivered
+  /// only through the [`Delegate`](crate::delegate::Delegate) hooks
+  /// (`notify_user_msg` / `merge_remote_state`), which is their reliable path.
+  /// A best-effort stream cannot reconstruct a dropped payload from the
+  /// snapshot (which holds only membership), and buffering large reliable
+  /// payloads here for a slow subscriber would be an unbounded-memory hazard;
+  /// so app-data is the delegate's responsibility. Use the delegate to consume
+  /// it.
+  ///
   /// # Lossy under backpressure
   ///
   /// The events channel is bounded (1024). When the queue is full the
-  /// driver drops the newest event rather than block — a slow
-  /// subscriber that stops draining must not deadlock the membership
-  /// FSM. Subscribers that need to detect a gap can poll
-  /// [`Self::events_dropped`] before and after a window; a monotonic
-  /// increase means the driver dropped at least that many events
-  /// during the window and the subscriber should reconcile state from
-  /// the lock-free snapshot ([`Self::snapshot`] /
-  /// [`Self::alive_count`] / [`Self::member_count`]).
+  /// driver drops the newest event rather than block — a slow subscriber
+  /// that stops draining must not deadlock the membership FSM. A subscriber
+  /// can miss an event two ways, counted separately: the EventStream queue
+  /// overflowed ([`Self::events_dropped`]), or the upstream observation channel
+  /// dropped it BEFORE fan-out ([`Self::observation_dropped`]). To detect ALL
+  /// gaps, poll BOTH before and after a window; any increase means events were
+  /// missed and the subscriber should reconcile state from the lock-free
+  /// snapshot ([`Self::snapshot`] / [`Self::alive_count`] / [`Self::member_count`]).
   #[inline]
-  pub fn events(&self) -> EventStream<I, A> {
+  pub fn events(&self) -> EventStream<T::Id, SocketAddr> {
     EventStream::new(self.events_rx.clone())
   }
 
-  /// Monotonic count of events the driver has dropped because the
-  /// bounded events channel was full when the driver tried to publish
-  /// them. Slow subscribers that need to detect that they missed
-  /// events can sample this value before and after a window — a
-  /// monotonic increase across the window indicates dropped events
-  /// (the lock-free [`Self::snapshot`] / [`Self::alive_count`] /
-  /// [`Self::member_count`] read path is unaffected and remains the
-  /// authoritative source of current cluster state).
+  /// Monotonic count of events dropped at the [`EventStream`] ([`Self::events`])
+  /// fan-out: when a slow subscriber lets the bounded events queue fill, the
+  /// driver drops the newest event rather than block. App-data is delivered to
+  /// the [`Delegate`](crate::delegate::Delegate) only, so a gap here is in
+  /// membership/control events and is RECOVERABLE — reconcile from the lock-free
+  /// snapshot ([`Self::snapshot`] / [`Self::alive_count`] /
+  /// [`Self::member_count`]).
+  ///
+  /// This counter does NOT cover every gap an EventStream subscriber sees: an
+  /// upstream observation-channel drop suppresses an event BEFORE fan-out (so
+  /// the subscriber misses it) yet increments [`Self::observation_dropped`], not
+  /// this. A consumer detecting EventStream gaps must therefore watch BOTH
+  /// counters; their sum is the subscriber's total loss over a window.
   #[inline]
   pub fn events_dropped(&self) -> u64 {
     self.events_dropped.load(Ordering::Relaxed)
+  }
+
+  /// Monotonic count of events dropped at the observation (delegate) channel:
+  /// when it is configured [`Channel::Bounded`](crate::Channel::Bounded) (the
+  /// default) and the [`Delegate`](crate::delegate::Delegate) cannot keep up,
+  /// the driver drops the event — by count (the channel is at capacity) or by
+  /// the payload byte backstop (a large reliable payload would push queued
+  /// payload bytes over budget). A
+  /// [`Channel::Unbounded`](crate::Channel::Unbounded) observation channel never
+  /// drops here.
+  ///
+  /// Unlike [`Self::events_dropped`] (only a slow EventStream subscriber missed
+  /// the event), a drop here means the event reached NEITHER consumer: the
+  /// DELEGATE missed it AND it never reached EventStream fan-out, so EventStream
+  /// subscribers miss it too (watch both counters for stream gaps). For app-data
+  /// ([`Event::UserPacket`] / [`Event::RemoteStateReceived`]) it is
+  /// UNRECOVERABLE, since those payloads are absent from the snapshot. A rising
+  /// value means the delegate is not keeping up and application data may have
+  /// been lost; the remedy is a faster delegate or a
+  /// [`Channel::Unbounded`](crate::Channel::Unbounded) observation channel (at
+  /// the cost of unbounded queue growth under a stuck handler).
+  #[inline]
+  pub fn observation_dropped(&self) -> u64 {
+    self.observation_dropped.load(Ordering::Relaxed)
   }
 
   /// Cleanly shut down the driver task.
@@ -529,12 +799,11 @@ impl<I, A, R> Memberlist<I, A, R> {
   /// shutdown).
   pub async fn shutdown(self) -> Result<()> {
     // First-caller-wins: the racing clone that flips the flag to true
-    // owns the shutdown sequence; every other clone observing a
-    // already-true flag returns immediately with Shutdown. The
-    // command is still SENT (so the driver loop tears down) only if
-    // we are the first caller; otherwise the driver has already
-    // observed (or will observe) a prior Shutdown command and is
-    // tearing down on its own.
+    // owns the shutdown sequence; every other clone observing an
+    // already-true flag returns immediately with Shutdown. The command
+    // is still SENT (so the driver loop tears down) only if we are the
+    // first caller; otherwise the driver has already observed (or will
+    // observe) a prior Shutdown command and is tearing down on its own.
     if self.shutdown_flag.swap(true, Ordering::AcqRel) {
       return Err(MemberlistError::Shutdown);
     }
@@ -547,5 +816,96 @@ impl<I, A, R> Memberlist<I, A, R> {
     rx.recv_async()
       .await
       .map_err(|_| MemberlistError::ReplyClosed)?
+  }
+}
+
+/// Resolve a slice of [`MaybeResolved`] seeds into a flat `Vec<SocketAddr>`.
+///
+/// `Resolved` entries are used directly; `Unresolved` entries are run
+/// through `resolver` and their results appended. A resolver failure
+/// surfaces as [`MemberlistError::Resolve`].
+async fn resolve_seeds<RES>(
+  resolver: &RES,
+  seeds: &[MaybeResolved<RES::Address, SocketAddr>],
+) -> Result<Vec<SocketAddr>>
+where
+  RES: Resolver,
+{
+  let mut addrs: Vec<SocketAddr> = Vec::new();
+  for seed in seeds {
+    match seed {
+      MaybeResolved::Resolved(s) => addrs.push(*s),
+      MaybeResolved::Unresolved(a) => {
+        let resolved = resolver
+          .resolve(a)
+          .await
+          .map_err(|e| MemberlistError::Resolve(std::io::Error::other(e.to_string())))?;
+        addrs.extend(resolved);
+      }
+    }
+  }
+  Ok(addrs)
+}
+
+#[cfg(all(test, feature = "tcp"))]
+mod transport_api_tests {
+  use std::net::SocketAddr;
+
+  use smol_str::SmolStr;
+
+  use super::*;
+  use crate::{
+    FirstAddrResolver, OsResolver, TcpTransport, TcpTransportOptions, delegate::VoidDelegate,
+  };
+
+  /// Build a TCP memberlist bound to an ephemeral loopback port.
+  async fn spawn_node(id: &str) -> Memberlist<TcpTransport, VoidDelegate<SmolStr, SocketAddr>> {
+    let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse loopback");
+    Memberlist::new(
+      Options::new(
+        TcpTransportOptions::new()
+          .with_local_id(SmolStr::new(id))
+          .with_advertise_addr(MaybeResolved::Resolved(bind)),
+      ),
+      VoidDelegate::default(),
+      &OsResolver,
+      &FirstAddrResolver,
+    )
+    .await
+    .expect("construct memberlist")
+  }
+
+  /// Single-node construct + shutdown round trip through `Memberlist::new`.
+  #[compio::test]
+  async fn tcp_single_node_construct_and_shutdown() {
+    let n1 = spawn_node("solo").await;
+    assert_eq!(n1.local_node().id_ref().as_str(), "solo");
+    assert_eq!(n1.alive_count(), 1);
+    assert_eq!(n1.member_count(), 1);
+    n1.shutdown().await.expect("shutdown");
+  }
+
+  /// The gate: two `Memberlist<TcpTransport, VoidDelegate>` nodes join
+  /// end-to-end over real TCP, with `n2.join` contacting `n1`.
+  #[compio::test]
+  async fn tcp_two_node_join_via_new() {
+    let n1 = spawn_node("n1").await;
+    // The ephemeral port the OS assigned is recorded in the published
+    // snapshot's local node — bind was `127.0.0.1:0`.
+    let n1_addr = *n1.local_node().addr_ref();
+    assert_ne!(n1_addr.port(), 0, "OS-assigned port should be concrete");
+
+    let n2 = spawn_node("n2").await;
+    let contacted = n2
+      .join(&OsResolver, &[MaybeResolved::Resolved(n1_addr)])
+      .await
+      .expect("join n1");
+    assert!(
+      contacted >= 1,
+      "expected at least one contact, got {contacted}"
+    );
+
+    n1.shutdown().await.ok();
+    n2.shutdown().await.ok();
   }
 }

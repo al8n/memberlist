@@ -1,11 +1,16 @@
 //! Address resolution for memberlist-compio.
 
+mod advertise;
 mod os;
 mod socket_addr;
 
 #[cfg(feature = "dns")]
 mod dns;
 
+pub use advertise::{
+  AdvertiseAddrResolver, AdvertiseResolutionError, FirstAddrResolver, Ipv4PreferringResolver,
+  Ipv6PreferringResolver,
+};
 #[cfg(feature = "dns")]
 pub use dns::{DEFAULT_DNS_TIMEOUT, DnsResolver};
 pub use os::OsResolver;

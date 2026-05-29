@@ -11,8 +11,11 @@ use std::{
   time::{Duration, Instant},
 };
 
-use memberlist_compio::{MemberlistError, Resolver, SocketAddrResolver, TcpMemberlist};
-use memberlist_machine::{TcpOptions, config::EndpointConfig};
+use memberlist_compio::{
+  FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options, Resolver,
+  SocketAddrResolver, TcpMemberlist, TcpTransportOptions, VoidDelegate,
+};
+use memberlist_machine::TcpOptions;
 use memberlist_wire::typed::Meta;
 use smol_str::SmolStr;
 
@@ -34,6 +37,38 @@ fn loopback_addr(port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
 }
 
+/// Build a labelled `TcpMemberlist` advertising `addr`. The driver-layer
+/// membership address is `SocketAddr`, so every seed handed to `join`
+/// arrives as a `MaybeResolved::Resolved`.
+async fn make_tcp(id: &str, addr: SocketAddr, label: &[u8]) -> TcpMemberlist<SmolStr, SocketAddr> {
+  make_tcp_with(id, addr, label, MemberlistOptions::new()).await
+}
+
+/// Like [`make_tcp`] but with explicit SWIM-level [`MemberlistOptions`]
+/// (gossip MTU, meta cap, initial meta).
+async fn make_tcp_with(
+  id: &str,
+  addr: SocketAddr,
+  label: &[u8],
+  mopts: MemberlistOptions,
+) -> TcpMemberlist<SmolStr, SocketAddr> {
+  let opts = Options::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new(id))
+      .with_advertise_addr(MaybeResolved::Resolved(addr))
+      .with_tcp_options(TcpOptions::new(Some(label.to_vec()))),
+  )
+  .with_memberlist(mopts);
+  TcpMemberlist::<SmolStr, SocketAddr>::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("construct tcp memberlist")
+}
+
 /// Spin-wait up to `deadline` for `predicate` to return true. Returns
 /// false on timeout. Used because compio has no async assertion harness
 /// — polling the lock-free snapshot is the documented observability path.
@@ -53,28 +88,17 @@ async fn two_node_join_converges_member_counts() {
   let seed_addr = loopback_addr(7200);
   let joiner_addr = loopback_addr(7201);
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("seed"), seed_addr),
-    TcpOptions::new(Some(b"cluster-join".to_vec())),
-  )
-  .await
-  .expect("seed construct");
-
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("joiner"), joiner_addr),
-    TcpOptions::new(Some(b"cluster-join".to_vec())),
-  )
-  .await
-  .expect("joiner construct");
+  let seed = make_tcp("seed", seed_addr, b"cluster-join").await;
+  let joiner = make_tcp("joiner", joiner_addr, b"cluster-join").await;
 
   // Drive the join. The resolver is the identity pass-through since
-  // the seed list already carries concrete SocketAddrs. `join_with`
+  // the seed list already carries concrete SocketAddrs. `dispatch_join`
   // returns the dispatched count immediately; convergence is
   // observed via the snapshot below.
   let count = joiner
-    .dispatch_join_with(&SocketAddrResolver, &[seed_addr])
+    .dispatch_join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
-    .expect("join_with");
+    .expect("dispatch_join");
   assert_eq!(count, 1, "one seed address dispatched");
 
   // Wait for both sides to observe the cluster size grow to 2. The
@@ -111,27 +135,16 @@ async fn join_with_waits_for_actual_contact() {
   let seed_addr = loopback_addr(7210);
   let joiner_addr = loopback_addr(7211);
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("seed"), seed_addr),
-    TcpOptions::new(Some(b"cluster-join-sync".to_vec())),
-  )
-  .await
-  .expect("seed construct");
-
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("joiner"), joiner_addr),
-    TcpOptions::new(Some(b"cluster-join-sync".to_vec())),
-  )
-  .await
-  .expect("joiner construct");
+  let seed = make_tcp("seed", seed_addr, b"cluster-join-sync").await;
+  let joiner = make_tcp("joiner", joiner_addr, b"cluster-join-sync").await;
 
   let count = joiner
-    .join_with(&SocketAddrResolver, &[seed_addr])
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
-    .expect("join_with should succeed against a reachable seed");
+    .expect("join should succeed against a reachable seed");
   assert_eq!(count, 1, "one seed contacted");
 
-  // join_with returns when the seed is contacted; on return both sides
+  // join returns when the seed is contacted; on return both sides
   // must already observe the cluster size of 2 (no further wait).
   assert_eq!(joiner.member_count(), 2);
   // Seed-side may lag by one driver tick — its NodeJoined for the
@@ -162,17 +175,12 @@ async fn join_with_blackhole_surfaces_join_all_failed() {
   // bridge enters its EOF/Error path and no NodeJoined ever fires.
   let blackhole = loopback_addr(7213);
 
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("joiner"), joiner_addr),
-    TcpOptions::new(Some(b"cluster-join-fail".to_vec())),
-  )
-  .await
-  .expect("joiner construct");
+  let joiner = make_tcp("joiner", joiner_addr, b"cluster-join-fail").await;
 
   let err = joiner
-    .join_with(&SocketAddrResolver, &[blackhole])
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(blackhole)])
     .await
-    .expect_err("join_with against blackhole must fail");
+    .expect_err("join against blackhole must fail");
 
   match err {
     MemberlistError::JoinAllFailed(payload) => {
@@ -192,16 +200,28 @@ async fn join_with_blackhole_surfaces_join_all_failed() {
 #[compio::test]
 async fn join_with_empty_resolution_surfaces_join_all_failed() {
   let joiner_addr = loopback_addr(7214);
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("joiner"), joiner_addr),
-    TcpOptions::new(Some(b"cluster-empty-resolve".to_vec())),
+  // This joiner resolves `String` service keys via `EmptyResolver`, so its
+  // membership-input address type is `String` (not the default `HostAddr`).
+  let joiner: TcpMemberlist<SmolStr, String> = TcpMemberlist::<SmolStr, String>::new(
+    Options::new(
+      TcpTransportOptions::<SmolStr, String>::new()
+        .with_local_id(SmolStr::new("joiner"))
+        .with_advertise_addr(MaybeResolved::Resolved(joiner_addr))
+        .with_tcp_options(TcpOptions::new(Some(b"cluster-empty-resolve".to_vec()))),
+    ),
+    VoidDelegate::default(),
+    &EmptyResolver,
+    &FirstAddrResolver,
   )
   .await
   .expect("joiner construct");
 
-  let seeds: Vec<String> = vec!["svc-a".into(), "svc-b".into()];
+  let seeds: Vec<MaybeResolved<String, SocketAddr>> = vec![
+    MaybeResolved::Unresolved("svc-a".into()),
+    MaybeResolved::Unresolved("svc-b".into()),
+  ];
   let err = joiner
-    .join_with(&EmptyResolver, &seeds)
+    .join(&EmptyResolver, &seeds)
     .await
     .expect_err("non-empty seeds resolving to empty address list must fail");
 
@@ -219,9 +239,9 @@ async fn join_with_empty_resolution_surfaces_join_all_failed() {
 
   // Truly-empty input still short-circuits to Ok(0): no command sent,
   // no JoinAllFailed.
-  let empty: Vec<String> = Vec::new();
+  let empty: Vec<MaybeResolved<String, SocketAddr>> = Vec::new();
   let count = joiner
-    .join_with(&EmptyResolver, &empty)
+    .join(&EmptyResolver, &empty)
     .await
     .expect("empty seeds returns Ok");
   assert_eq!(count, 0);
@@ -243,29 +263,31 @@ async fn join_with_above_16kib_gossip_mtu_receives_large_alive_broadcasts() {
   // and below the 32 KiB gossip_mtu configured below.
   let big_meta = Meta::try_from(vec![0x5au8; 20 * 1024]).expect("20 KiB within wire ceiling");
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("seed"), seed_addr)
+  let seed = make_tcp_with(
+    "seed",
+    seed_addr,
+    b"large-mtu",
+    MemberlistOptions::new()
       .with_gossip_mtu(32 * 1024)
       .with_meta_max_size(32 * 1024)
       .with_initial_meta(big_meta.clone()),
-    TcpOptions::new(Some(b"large-mtu".to_vec())),
   )
-  .await
-  .expect("seed construct");
+  .await;
 
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("joiner"), joiner_addr)
+  let joiner = make_tcp_with(
+    "joiner",
+    joiner_addr,
+    b"large-mtu",
+    MemberlistOptions::new()
       .with_gossip_mtu(32 * 1024)
       .with_meta_max_size(32 * 1024),
-    TcpOptions::new(Some(b"large-mtu".to_vec())),
   )
-  .await
-  .expect("joiner construct");
+  .await;
 
   let count = joiner
-    .join_with(&SocketAddrResolver, &[seed_addr])
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
-    .expect("join_with against 20 KiB-meta seed");
+    .expect("join against 20 KiB-meta seed");
   assert_eq!(count, 1);
 
   // Both sides converge; large UDP alive broadcasts flow at the
@@ -304,29 +326,31 @@ async fn join_with_accepts_seed_with_larger_meta_cap() {
   // 4 KiB meta — well past the joiner's default 512-byte cap.
   let big_meta = Meta::try_from(vec![0x42u8; 4096]).expect("4 KiB within wire ceiling");
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("seed"), seed_addr)
+  let seed = make_tcp_with(
+    "seed",
+    seed_addr,
+    b"meta-cap-mismatch",
+    MemberlistOptions::new()
       .with_gossip_mtu(32 * 1024)
       .with_meta_max_size(8 * 1024)
       .with_initial_meta(big_meta.clone()),
-    TcpOptions::new(Some(b"meta-cap-mismatch".to_vec())),
   )
-  .await
-  .expect("seed construct");
+  .await;
 
   // Joiner keeps the default meta_max_size (512). It must still
   // accept the seed's 4 KiB meta and add the seed to membership.
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("joiner"), joiner_addr).with_gossip_mtu(32 * 1024),
-    TcpOptions::new(Some(b"meta-cap-mismatch".to_vec())),
+  let joiner = make_tcp_with(
+    "joiner",
+    joiner_addr,
+    b"meta-cap-mismatch",
+    MemberlistOptions::new().with_gossip_mtu(32 * 1024),
   )
-  .await
-  .expect("joiner construct");
+  .await;
 
   let count = joiner
-    .join_with(&SocketAddrResolver, &[seed_addr])
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(seed_addr)])
     .await
-    .expect("join_with against larger-meta seed");
+    .expect("join against larger-meta seed");
   assert_eq!(count, 1);
   // Convergence check: both nodes must observe the cluster, proving
   // the seed's Alive landed in joiner's membership despite the
@@ -358,24 +382,19 @@ async fn join_with_counts_each_outbound_exchange_for_duplicate_seeds() {
   let seed_addr = loopback_addr(7280);
   let joiner_addr = loopback_addr(7281);
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("seed"), seed_addr),
-    TcpOptions::new(Some(b"join-duplicate".to_vec())),
-  )
-  .await
-  .expect("seed construct");
-
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("joiner"), joiner_addr),
-    TcpOptions::new(Some(b"join-duplicate".to_vec())),
-  )
-  .await
-  .expect("joiner construct");
+  let seed = make_tcp("seed", seed_addr, b"join-duplicate").await;
+  let joiner = make_tcp("joiner", joiner_addr, b"join-duplicate").await;
 
   let count = joiner
-    .join_with(&SocketAddrResolver, &[seed_addr, seed_addr])
+    .join(
+      &SocketAddrResolver,
+      &[
+        MaybeResolved::Resolved(seed_addr),
+        MaybeResolved::Resolved(seed_addr),
+      ],
+    )
     .await
-    .expect("join_with with duplicate seeds should succeed");
+    .expect("join with duplicate seeds should succeed");
   assert_eq!(
     count, 2,
     "duplicate seed counts each outbound exchange independently"
@@ -403,23 +422,12 @@ async fn join_with_does_not_count_transitively_discovered_seeds() {
   let c_addr = loopback_addr(7241);
   let joiner_addr = loopback_addr(7242);
 
-  let c = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("c"), c_addr),
-    TcpOptions::new(Some(b"transitive-discover".to_vec())),
-  )
-  .await
-  .expect("c construct");
-
-  let a = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("a"), a_addr),
-    TcpOptions::new(Some(b"transitive-discover".to_vec())),
-  )
-  .await
-  .expect("a construct");
+  let c = make_tcp("c", c_addr, b"transitive-discover").await;
+  let a = make_tcp("a", a_addr, b"transitive-discover").await;
 
   // A joins C directly so A's membership records C as Alive.
   let n = a
-    .join_with(&SocketAddrResolver, &[c_addr])
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(c_addr)])
     .await
     .expect("a joins c");
   assert_eq!(n, 1, "A directly contacted C");
@@ -433,20 +441,21 @@ async fn join_with_does_not_count_transitively_discovered_seeds() {
   drop(c);
   compio::time::sleep(Duration::from_millis(50)).await;
 
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("joiner"), joiner_addr),
-    TcpOptions::new(Some(b"transitive-discover".to_vec())),
-  )
-  .await
-  .expect("joiner construct");
+  let joiner = make_tcp("joiner", joiner_addr, b"transitive-discover").await;
 
   let contacted = joiner
-    .join_with(&SocketAddrResolver, &[a_addr, c_addr])
+    .join(
+      &SocketAddrResolver,
+      &[
+        MaybeResolved::Resolved(a_addr),
+        MaybeResolved::Resolved(c_addr),
+      ],
+    )
     .await
     .expect("joiner contacts A even if C is unreachable");
   assert_eq!(
     contacted, 1,
-    "join_with counted a transitively-discovered seed as contacted"
+    "join counted a transitively-discovered seed as contacted"
   );
 
   a.shutdown().await.expect("a shutdown");
@@ -466,36 +475,19 @@ async fn concurrent_join_with_same_seed_uses_call_scoped_eid_ownership() {
   let j1_addr = loopback_addr(7251);
   let j2_addr = loopback_addr(7252);
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("seed"), seed_addr),
-    TcpOptions::new(Some(b"concurrent-join".to_vec())),
-  )
-  .await
-  .expect("seed construct");
+  let seed = make_tcp("seed", seed_addr, b"concurrent-join").await;
+  let j1 = make_tcp("j1", j1_addr, b"concurrent-join").await;
+  let j2 = make_tcp("j2", j2_addr, b"concurrent-join").await;
 
-  let j1 = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("j1"), j1_addr),
-    TcpOptions::new(Some(b"concurrent-join".to_vec())),
-  )
-  .await
-  .expect("j1 construct");
-
-  let j2 = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("j2"), j2_addr),
-    TcpOptions::new(Some(b"concurrent-join".to_vec())),
-  )
-  .await
-  .expect("j2 construct");
-
-  // Two concurrent join_with calls to the same seed. Each must
-  // resolve to Ok(1) — its own bridge's bytes — independently. With
+  // Two concurrent join calls to the same seed. Each must resolve to
+  // Ok(1) — its own bridge's bytes — independently. With
   // address-scoped (broken) ownership, the FIRST bytes arriving on
   // either bridge would advance BOTH waiters and could let one
   // return Ok(N>1) or hide a failed sibling exchange behind its own
   // sibling's success.
-  let seeds = [seed_addr];
-  let fut1 = j1.join_with(&SocketAddrResolver, &seeds);
-  let fut2 = j2.join_with(&SocketAddrResolver, &seeds);
+  let seeds = [MaybeResolved::Resolved(seed_addr)];
+  let fut1 = j1.join(&SocketAddrResolver, &seeds);
+  let fut2 = j2.join(&SocketAddrResolver, &seeds);
   let (n1, n2) = futures_util::future::join(fut1, fut2).await;
   let n1 = n1.expect("j1 contacts seed");
   let n2 = n2.expect("j2 contacts seed");
@@ -522,21 +514,10 @@ async fn join_with_under_bridge_backlog_does_not_timeout_arrived_completions() {
   let seed_addr = loopback_addr(7290);
   let joiner_addr = loopback_addr(7291);
 
-  let seed = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("seed"), seed_addr),
-    TcpOptions::new(Some(b"backlog-cap".to_vec())),
-  )
-  .await
-  .expect("seed construct");
+  let seed = make_tcp("seed", seed_addr, b"backlog-cap").await;
+  let joiner = make_tcp("joiner", joiner_addr, b"backlog-cap").await;
 
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("joiner"), joiner_addr),
-    TcpOptions::new(Some(b"backlog-cap".to_vec())),
-  )
-  .await
-  .expect("joiner construct");
-
-  // Issue many concurrent join_with calls in parallel. Each succeeds
+  // Issue many concurrent join calls in parallel. Each succeeds
   // independently; with 64 of them the bridge byte-mover tasks
   // collectively produce hundreds of BridgeInbound messages — enough
   // to test the cap-then-deadline interaction. Every call must
@@ -545,12 +526,12 @@ async fn join_with_under_bridge_backlog_does_not_timeout_arrived_completions() {
   let mut futures = Vec::with_capacity(N);
   for _ in 0..N {
     let joiner = joiner.clone();
-    let seeds = [seed_addr];
+    let seeds = [MaybeResolved::Resolved(seed_addr)];
     futures.push(async move {
       joiner
-        .join_with(&SocketAddrResolver, &seeds)
+        .join(&SocketAddrResolver, &seeds)
         .await
-        .expect("each parallel join_with must succeed")
+        .expect("each parallel join must succeed")
     });
   }
   let counts: Vec<usize> = futures_util::future::join_all(futures).await;
@@ -558,7 +539,7 @@ async fn join_with_under_bridge_backlog_does_not_timeout_arrived_completions() {
   assert_eq!(
     unique_counts,
     HashSet::from([1usize]),
-    "every parallel join_with must report Ok(1); got {counts:?}"
+    "every parallel join must report Ok(1); got {counts:?}"
   );
 
   seed.shutdown().await.expect("seed shutdown");
@@ -595,17 +576,12 @@ async fn join_with_against_banner_tcp_service_surfaces_join_all_failed() {
   })
   .detach();
 
-  let joiner = TcpMemberlist::new(
-    EndpointConfig::new(SmolStr::new("joiner"), joiner_addr),
-    TcpOptions::new(Some(b"banner-trust".to_vec())),
-  )
-  .await
-  .expect("joiner construct");
+  let joiner = make_tcp("joiner", joiner_addr, b"banner-trust").await;
 
   let err = joiner
-    .join_with(&SocketAddrResolver, &[banner_addr])
+    .join(&SocketAddrResolver, &[MaybeResolved::Resolved(banner_addr)])
     .await
-    .expect_err("join_with against banner service must not report contact");
+    .expect_err("join against banner service must not report contact");
   match err {
     MemberlistError::JoinAllFailed(payload) => {
       assert_eq!(payload.requested(), 1);

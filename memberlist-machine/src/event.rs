@@ -399,6 +399,56 @@ impl<A> UserPacket<A> {
   }
 }
 
+/// Payload for [`Event::RemoteStateReceived`]: a peer's application-level
+/// push-pull state snapshot arrived during anti-entropy / join sync.
+/// Surfaces the `user_data` the FSM layer does not itself consult, so the
+/// driver can hand it to the application (the Sans-I/O analog of Go
+/// memberlist's `MergeRemoteState`).
+#[derive(Debug)]
+pub struct RemoteStateReceived<A> {
+  peer: A,
+  user_data: Bytes,
+  join: bool,
+}
+
+impl<A> RemoteStateReceived<A> {
+  /// Construct a new payload. Crate-internal: only the `Endpoint` emits this
+  /// event; consumers read it through the accessors.
+  #[inline(always)]
+  pub(crate) const fn new(peer: A, user_data: Bytes, join: bool) -> Self {
+    Self {
+      peer,
+      user_data,
+      join,
+    }
+  }
+
+  /// The peer that supplied the state.
+  #[inline(always)]
+  pub const fn peer_ref(&self) -> &A {
+    &self.peer
+  }
+
+  /// The application state bytes the peer sent.
+  #[inline(always)]
+  pub const fn user_data_ref(&self) -> &Bytes {
+    &self.user_data
+  }
+
+  /// `true` if this push-pull was part of an initial join (vs periodic
+  /// anti-entropy).
+  #[inline(always)]
+  pub const fn join(&self) -> bool {
+    self.join
+  }
+
+  /// Consume the payload into its (peer, user_data, join) parts.
+  #[inline(always)]
+  pub fn into_parts(self) -> (A, Bytes, bool) {
+    (self.peer, self.user_data, self.join)
+  }
+}
+
 /// Payload for [`Event::PingCompleted`]: a probe ping completed with RTT.
 #[derive(Debug)]
 pub struct PingCompleted<I, A> {
@@ -518,6 +568,9 @@ pub enum Event<I, A> {
   NodeConflict(NodeConflict<I, A>),
   /// An application-level user-data packet arrived.
   UserPacket(UserPacket<A>),
+  /// A peer's push-pull application state arrived (non-empty). The Sans-I/O
+  /// analog of Go memberlist's `Delegate::MergeRemoteState`.
+  RemoteStateReceived(RemoteStateReceived<A>),
   /// The local node has finished its own leave broadcast.
   LeftCluster,
   /// A ping (issued by the local probe FSM) completed with a

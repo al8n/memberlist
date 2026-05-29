@@ -49,6 +49,202 @@ impl core::fmt::Display for JoinAllFailed {
   }
 }
 
+/// Payload for [`MemberlistError::InvalidGossipMtu`]: the configured
+/// `gossip_mtu` exceeds the largest plaintext gossip payload that can still
+/// fit a single UDP datagram once the encryption wrapper is added. Carries
+/// the configured value and the effective ceiling.
+#[derive(Debug)]
+pub struct InvalidGossipMtu {
+  configured: usize,
+  ceiling: usize,
+}
+
+impl InvalidGossipMtu {
+  /// Build a new payload from the configured `gossip_mtu` and the ceiling.
+  #[inline]
+  pub(crate) fn new(configured: usize, ceiling: usize) -> Self {
+    Self {
+      configured,
+      ceiling,
+    }
+  }
+
+  /// The configured `gossip_mtu` that was rejected.
+  #[inline]
+  pub fn configured(&self) -> usize {
+    self.configured
+  }
+
+  /// The effective ceiling — the largest plaintext `gossip_mtu` whose wire
+  /// datagram (after the encryption wrapper) still fits a single UDP packet.
+  #[inline]
+  pub fn ceiling(&self) -> usize {
+    self.ceiling
+  }
+}
+
+impl core::fmt::Display for InvalidGossipMtu {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(
+      f,
+      "gossip_mtu {} exceeds the maximum sendable plaintext gossip payload of {} bytes \
+       (a gossip packet is one UDP datagram, capped at {} bytes on the wire after the \
+       {}-byte encryption wrapper); a larger gossip_mtu would make near-MTU gossip \
+       packets deterministically unsendable",
+      self.configured,
+      self.ceiling,
+      self.ceiling + memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD,
+      memberlist_wire::ENCRYPTED_WRAPPER_OVERHEAD,
+    )
+  }
+}
+
+/// Payload for [`MemberlistError::GossipMtuTooSmall`]: the configured
+/// `gossip_mtu` is below the floor needed to carry the mandatory
+/// single-datagram control packets (probe Ping / Ack / minimal self-Alive)
+/// the SWIM protocol always emits. Carries the configured value and the
+/// required minimum.
+#[derive(Debug)]
+pub struct GossipMtuTooSmall {
+  configured: usize,
+  minimum: usize,
+}
+
+impl GossipMtuTooSmall {
+  /// Build a new payload from the configured `gossip_mtu` and the minimum.
+  #[inline]
+  pub(crate) fn new(configured: usize, minimum: usize) -> Self {
+    Self {
+      configured,
+      minimum,
+    }
+  }
+
+  /// The configured `gossip_mtu` that was rejected.
+  #[inline]
+  pub fn configured(&self) -> usize {
+    self.configured
+  }
+
+  /// The required minimum `gossip_mtu` — the floor that fits the mandatory
+  /// single-datagram control packets the protocol always emits.
+  #[inline]
+  pub fn minimum(&self) -> usize {
+    self.minimum
+  }
+}
+
+impl core::fmt::Display for GossipMtuTooSmall {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(
+      f,
+      "gossip_mtu {} is below the minimum of {} bytes required to carry the mandatory \
+       single-datagram control packets (probe Ping / Ack / a minimal self-Alive); a \
+       smaller gossip_mtu would make normal probes exceed the plaintext gossip ceiling, \
+       so peers would reject them and falsely suspect this node",
+      self.configured, self.minimum,
+    )
+  }
+}
+
+/// Payload for [`MemberlistError::InvalidAdvertiseAddr`]: the resolved
+/// advertise address cannot serve as the local node's reachable contact
+/// identity, so peers that learn it would be unable to route membership
+/// traffic to this node. Two independent classes are rejected, both carried
+/// here with a typed `reason`:
+///
+/// - NOT A USABLE UNICAST CONTACT — an unspecified IP (`0.0.0.0` / `::`, the
+///   wildcard-bind a node gets when it binds `0.0.0.0:0` and forgets to set a
+///   concrete advertise), a multicast IP, an IPv4 broadcast IP
+///   (`255.255.255.255`), or a zero port. Such an address encodes fine but is
+///   undialable: every UDP probe and reliable dial a peer aims at it would go
+///   nowhere.
+/// - NOT REPRESENTABLE ON THE WIRE — a scoped/flow-labelled IPv6 `SocketAddr`
+///   (`SocketAddrV6` with a nonzero `scope_id` or `flowinfo`, e.g. a link-local
+///   `fe80::/10` address): the compact wire layout is `[16B IP][2B port]` and
+///   carries neither field, so every local-node-bearing control packet
+///   (self-`Alive`, push/pull state, `Ping`) would fail to encode at runtime.
+///
+/// Carries the offending address and a human-readable reason describing which
+/// class it fell into.
+#[derive(Debug)]
+pub struct InvalidAdvertiseAddr {
+  addr: std::net::SocketAddr,
+  reason: String,
+}
+
+impl InvalidAdvertiseAddr {
+  /// Build a new payload from the rejected advertise address and the reason
+  /// it cannot serve as the local node's contact identity.
+  #[inline]
+  pub(crate) fn new(addr: std::net::SocketAddr, reason: String) -> Self {
+    Self { addr, reason }
+  }
+
+  /// The advertise address that was rejected.
+  #[inline]
+  pub fn addr(&self) -> std::net::SocketAddr {
+    self.addr
+  }
+
+  /// The reason the address cannot serve as the local node's contact
+  /// identity (undialable unicast contact, or not wire-encodable).
+  #[inline]
+  pub fn reason(&self) -> &str {
+    &self.reason
+  }
+}
+
+impl core::fmt::Display for InvalidAdvertiseAddr {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(
+      f,
+      "advertise address {} cannot serve as this node's reachable contact \
+       identity, so peers that learn it could not route membership traffic \
+       to this node: {}",
+      self.addr, self.reason,
+    )
+  }
+}
+
+/// Payload for [`MemberlistError::InvalidOption`]: an operator-set tuning knob
+/// ([`DriverOptions`](crate::DriverOptions) /
+/// [`StreamTransportOptions`](crate::StreamTransportOptions)) was given a value
+/// that would DETERMINISTICALLY break the node — an accept-then-silently-fail
+/// configuration the constructor rejects rather than honoring. Carries the
+/// knob name and a human-readable reason describing why the value is invalid.
+#[derive(Debug)]
+pub struct InvalidOption {
+  option: &'static str,
+  reason: String,
+}
+
+impl InvalidOption {
+  /// Build a new payload from the rejected knob name and the reason.
+  #[inline]
+  pub(crate) fn new(option: &'static str, reason: String) -> Self {
+    Self { option, reason }
+  }
+
+  /// The name of the tuning knob whose value was rejected.
+  #[inline]
+  pub fn option(&self) -> &'static str {
+    self.option
+  }
+
+  /// The reason the value would deterministically break the node.
+  #[inline]
+  pub fn reason(&self) -> &str {
+    &self.reason
+  }
+}
+
+impl core::fmt::Display for InvalidOption {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(f, "invalid {} option: {}", self.option, self.reason)
+  }
+}
+
 /// Errors returned by [`Memberlist`](crate::Memberlist) operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -78,9 +274,112 @@ pub enum MemberlistError {
   #[error("{0}")]
   JoinAllFailed(JoinAllFailed),
 
+  /// A graceful [`leave`](crate::Memberlist::leave) did not complete
+  /// within the driver's `leave_timeout`: the machine's
+  /// `Event::LeftCluster` completion signal — which fires only after the
+  /// direct `Dead`-self notices queued for live peers have been flushed
+  /// to the wire — was not observed before the deadline elapsed. The
+  /// leave was initiated but the driver cannot confirm peers were
+  /// notified; the local node still transitioned out of the cluster.
+  #[error("leave did not complete within the configured leave_timeout")]
+  LeaveTimeout,
+
   /// The driver task has shut down and is no longer accepting commands.
   #[error("driver shut down")]
   Shutdown,
+
+  /// The local node has left the cluster, so the operation cannot be
+  /// applied. Data-plane and metadata mutations
+  /// ([`queue_user_broadcast`](crate::Memberlist::queue_user_broadcast),
+  /// [`set_local_state`](crate::Memberlist::set_local_state),
+  /// [`set_ack_payload`](crate::Memberlist::set_ack_payload),
+  /// [`update_node_metadata`](crate::Memberlist::update_node_metadata))
+  /// require an actively-participating node: once the node has left, the
+  /// periodic gossip/probe/push-pull schedulers are stopped, so the
+  /// mutation could never be disseminated. Returned instead of a false
+  /// success.
+  #[error("the local node has left the cluster; the operation requires a running node")]
+  NotRunning,
+
+  /// A data-plane payload, once framed, would not fit a single gossip
+  /// datagram and is therefore deterministically unsendable. Currently
+  /// returned by [`set_ack_payload`](crate::Memberlist::set_ack_payload):
+  /// an Ack is emitted as one UDP datagram on the gossip socket, so an
+  /// over-budget ack payload would make every probe reply silently fail
+  /// (`send_to` errors are dropped under the lossy-gossip policy) and peers
+  /// would falsely suspect this node. Rejected instead of a false success;
+  /// the payload is not stored. The message carries the framed size and the
+  /// gossip packet budget.
+  #[error("payload too large to send: {0}")]
+  PayloadTooLarge(String),
+
+  /// The configured `gossip_mtu`
+  /// ([`MemberlistOptions::with_gossip_mtu`](crate::MemberlistOptions::with_gossip_mtu))
+  /// is larger than the largest plaintext gossip payload that can still fit a
+  /// single UDP datagram once the encryption wrapper is added. A gossip packet
+  /// (probe ack, gossip-disseminated Alive/user broadcast, …) is sent as ONE
+  /// UDP datagram, hard-capped at 65507 bytes on the wire; both drivers drop
+  /// `send_to` errors under the lossy-gossip policy, so a near-`gossip_mtu`
+  /// packet built above this ceiling would be silently unsendable and peers
+  /// would falsely suspect this node. Returned by `Memberlist::new` (fail-fast,
+  /// before any socket is bound) so the misconfiguration is surfaced rather
+  /// than producing deterministically dropped gossip.
+  #[error("{0}")]
+  InvalidGossipMtu(InvalidGossipMtu),
+
+  /// The configured `gossip_mtu`
+  /// ([`MemberlistOptions::with_gossip_mtu`](crate::MemberlistOptions::with_gossip_mtu))
+  /// is below the floor needed to carry the mandatory single-datagram control
+  /// packets (probe Ping / Ack / a minimal self-Alive) the SWIM protocol always
+  /// emits. A `gossip_mtu` smaller than the largest such packet would make
+  /// normal probes exceed the plaintext gossip ceiling on the receive side, so
+  /// peers would reject them and falsely suspect this node. Returned by
+  /// `Memberlist::new` (fail-fast, before any socket is bound) so the
+  /// misconfiguration is surfaced rather than producing silently-rejected
+  /// probes.
+  #[error("{0}")]
+  GossipMtuTooSmall(GossipMtuTooSmall),
+
+  /// The resolved advertise address cannot serve as the local node's
+  /// reachable contact identity, so a node constructed with it would publish
+  /// an address peers cannot route membership traffic to. Rejected (rather
+  /// than constructing `Ok` then silently failing every probe/dial) for any of:
+  /// an unspecified IP (`0.0.0.0` / `::` — the wildcard-bind a node gets when
+  /// it binds `0.0.0.0:0` and forgets to set a concrete advertise), a
+  /// multicast IP, an IPv4 broadcast IP, a zero port (all undialable contacts),
+  /// or a scoped/flow-labelled IPv6 `SocketAddr` (nonzero `scope_id`/`flowinfo`,
+  /// e.g. a link-local `fe80::/10` address) the compact `[16B IP][2B port]`
+  /// wire layout cannot carry — which would make every local-node-bearing
+  /// control packet (self-`Alive`, push/pull state, `Ping`) fail to encode.
+  /// Loopback, private, and global unicast addresses are accepted. Returned by
+  /// `Memberlist::new` after the transport resolves its advertise address but
+  /// before any driver task is spawned (the just-built transport is dropped on
+  /// `Err`, closing its socket), so the misconfiguration is surfaced rather
+  /// than producing a node that joins a cluster as an unreachable member.
+  #[error("{0}")]
+  InvalidAdvertiseAddr(InvalidAdvertiseAddr),
+
+  /// An operator-set driver / stream-transport tuning knob
+  /// ([`DriverOptions`](crate::DriverOptions) /
+  /// [`StreamTransportOptions`](crate::StreamTransportOptions)) was given a
+  /// value that would DETERMINISTICALLY break the node rather than merely
+  /// degrade it — an accept-then-silently-fail configuration. Two such knobs
+  /// are rejected:
+  /// - `bridge_recv_buf_len == 0` — the per-bridge reliable-stream read buffer
+  ///   would be zero-length, so every read returns `Ok(0)` (false EOF) and all
+  ///   TCP/TLS join / push-pull stream exchanges break with no error surfaced;
+  /// - `idle_wake_interval == 0` — the driver-loop fallback sleep would be
+  ///   zero, so a quiescent endpoint (one with no nearer scheduled deadline)
+  ///   busy-spins the loop, pegging a CPU core with no error surfaced.
+  ///
+  /// Rejected fail-fast at construction (the stream knob in `Transport::new`,
+  /// the driver knob in `Memberlist::new`) so the misconfiguration is surfaced
+  /// rather than producing a silently-broken or CPU-pegged node. Values that
+  /// merely degrade-but-function (e.g. `iter_drain_cap == 0`,
+  /// `cmd_fairness_budget == 0`) or are loud (`join_deadline == 0`) are NOT
+  /// rejected.
+  #[error("{0}")]
+  InvalidOption(InvalidOption),
 
   /// Sending a command to the driver failed because the channel is closed.
   #[error("send to driver failed (channel closed)")]

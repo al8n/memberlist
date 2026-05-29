@@ -418,6 +418,24 @@ where
     &mut self.ep
   }
 
+  /// Arm the periodic probe / gossip / push-pull schedulers. Forwards to
+  /// [`Endpoint::start_scheduling`].
+  #[inline]
+  pub fn start_scheduling(&mut self, now: Instant) {
+    self.ep.start_scheduling(now);
+  }
+
+  /// Returns `true` if the endpoint is in normal operation (not leaving
+  /// or left). Forwards to [`Endpoint::is_running`]. A driver consults
+  /// this before calling [`Self::leave`] to distinguish a leave that
+  /// actually initiates the dead-self flush (and will emit
+  /// [`Event::LeftCluster`](crate::event::Event::LeftCluster)) from an
+  /// idempotent post-leave no-op (which will not).
+  #[inline]
+  pub fn is_running(&self) -> bool {
+    self.ep.is_running()
+  }
+
   /// Update the local node's metadata. The new value is gossiped
   /// through the standard alive-broadcast path.
   ///
@@ -437,6 +455,49 @@ where
     meta: memberlist_wire::typed::Meta,
   ) -> Result<(), crate::error::Error> {
     self.ep.update_meta(meta)
+  }
+
+  /// Queue an application user-broadcast for gossip dissemination. Forwards
+  /// to the inner membership [`Endpoint`].
+  #[inline]
+  pub fn queue_user_broadcast(&mut self, data: Bytes) -> Result<(), crate::error::Error> {
+    self.ep.queue_user_broadcast(data)
+  }
+
+  /// The reliable-stream frame ceiling
+  /// ([`max_stream_frame_size`](crate::config::EndpointConfig::max_stream_frame_size)).
+  /// The driver derives its observation-channel payload byte budget from this.
+  #[inline]
+  pub fn max_stream_frame_size(&self) -> usize {
+    self.ep.max_stream_frame_size()
+  }
+
+  /// Set the application push-pull local-state snapshot. Forwards to the
+  /// inner [`Endpoint`].
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::Error::LocalStateExceedsFrame`] if the snapshot's
+  /// framed PushPull would exceed the reliable-stream frame budget — such a
+  /// snapshot is deterministically untransmittable, so it is rejected rather
+  /// than stored.
+  #[inline]
+  pub fn set_local_state_snapshot(&mut self, bytes: Bytes) -> Result<(), crate::error::Error> {
+    self.ep.set_local_state_snapshot(bytes)
+  }
+
+  /// Set the application ack payload attached to probe acks. Forwards to the
+  /// inner [`Endpoint`].
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::Error::AckPayloadExceedsMtu`] if the framed Ack
+  /// carrying `payload` would not fit the node's gossip packet budget — an
+  /// over-budget Ack is deterministically unsendable on the gossip socket,
+  /// so the payload is rejected rather than stored.
+  #[inline]
+  pub fn set_ack_payload(&mut self, payload: Bytes) -> Result<(), crate::error::Error> {
+    self.ep.set_ack_payload(payload)
   }
 
   /// Next outbound UDP datagram (quinn or encoded memberlist), if any.

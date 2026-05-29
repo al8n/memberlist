@@ -1,171 +1,321 @@
 //! TCP-backed memberlist driver — the first end-to-end usable surface.
 //!
-//! [`TcpMemberlist::new`] pins the generic [`crate::Memberlist`] handle to
-//! the concrete `I = SmolStr`, `A = SocketAddr`, `R = RawRecords`
-//! instantiation, binds the UDP gossip socket, constructs the composed
-//! [`StreamEndpoint`] super-state-machine, creates the command / event
-//! channels, publishes an initial snapshot, and spawns the driver task on
-//! the compio runtime. The returned handle is cheaply clonable and shares
-//! the same driver task with every clone.
+//! [`TcpTransport`] owns the bound UDP gossip socket and TCP reliable
+//! listener; [`Memberlist::new`](crate::Memberlist::new) constructs the
+//! transport, builds the initial snapshot, and spawns the driver task on
+//! the compio runtime. [`TcpMemberlist`] is the pinned-alias convenience
+//! shape (`I = SmolStr`, `A = SocketAddr`, default [`VoidDelegate`]); the
+//! machine endpoint is built inside [`TcpTransport::run`] from the stored
+//! [`TcpOptions`]. The returned handle is cheaply clonable and shares the
+//! same driver task with every clone.
 
 #![cfg(feature = "tcp")]
 
-use std::{
-  net::SocketAddr,
-  sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64},
-  },
-};
+use std::net::SocketAddr;
 
-use arc_swap::ArcSwap;
 use compio::net::{TcpListener, UdpSocket};
+use hostaddr::HostAddr;
 use memberlist_machine::{
   RawRecords, TcpOptions, config::EndpointConfig, endpoint::Endpoint, streams::StreamEndpoint,
 };
-use memberlist_wire::Node;
 use smol_str::SmolStr;
 
 use crate::{
-  Memberlist, MemberlistError, MemberlistSnapshot, Result, StreamDriverOptions, driver::driver_loop,
+  AdvertiseAddrResolver, Delegate, Memberlist, MemberlistError, Resolver, Result,
+  StreamTransportOptions, Transport, TransportRuntime,
+  delegate::{BoxedAlive, BoxedMerge, VoidDelegate},
+  maybe_resolved::MaybeResolved,
 };
 
-/// TCP-backed [`Memberlist`] alias — pins `I = SmolStr`, `A = SocketAddr`,
-/// `R = RawRecords`.
-pub type TcpMemberlist = Memberlist<SmolStr, SocketAddr, RawRecords>;
+/// TCP-backed [`Memberlist`] alias. Defaults: `I = SmolStr`,
+/// `A = HostAddr<SmolStr>`, `D = VoidDelegate<I, SocketAddr>`. Custom-typed
+/// callers parametrise `Memberlist<TcpTransport<MyId, MyAddr>, MyDelegate>`
+/// directly.
+pub type TcpMemberlist<I = SmolStr, A = HostAddr<SmolStr>, D = VoidDelegate<I, SocketAddr>> =
+  Memberlist<TcpTransport<I, A>, D>;
 
-impl TcpMemberlist {
-  /// Construct a TCP memberlist, bind the UDP gossip socket, and spawn the
-  /// driver task on the current compio runtime.
-  ///
-  /// `config` carries the membership-level settings (local id, advertise
-  /// address, SWIM timing, gossip MTU, etc.); `tcp_opts` carries the
-  /// plain-TCP record-layer options (cluster label + inbound-label-check
-  /// policy). The UDP gossip socket and the TCP reliable listener both
-  /// bind to `config.advertise_addr_ref()`; outbound TCP exchanges are
-  /// dialed on demand from the driver loop's `StreamAction::Connect` arm.
-  ///
-  /// On return the driver and listener tasks are already running. Reads
-  /// (`snapshot`, `local_node`, `alive_count`, `member_count`) are served
-  /// lock-free from the initial snapshot until the driver publishes its
-  /// first refresh on entry into the loop.
-  ///
-  /// # Errors
-  ///
-  /// Returns [`MemberlistError::Io`] if binding the UDP gossip socket or
-  /// the TCP reliable listener fails (most commonly `EADDRINUSE` on a port
-  /// collision).
-  pub async fn new(
-    config: EndpointConfig<SmolStr, SocketAddr>,
-    tcp_opts: TcpOptions,
-  ) -> Result<Self> {
-    Self::new_with_options(config, tcp_opts, StreamDriverOptions::default()).await
+/// Per-backend TCP-specific transport options.
+///
+/// Embedded into `Options<TcpTransport<I, A>>::transport()`. Bundles the
+/// local identifier, the (possibly-unresolved) advertise address, the
+/// stream-transport tuning knobs, and the plain-TCP record-layer
+/// `TcpOptions` (cluster label + inbound-label-check policy).
+pub struct TcpTransportOptions<I = SmolStr, A = HostAddr<SmolStr>> {
+  local_id: Option<I>,
+  advertise_addr: Option<MaybeResolved<A, SocketAddr>>,
+  stream: StreamTransportOptions,
+  tcp_options: TcpOptions,
+}
+
+impl<I, A> TcpTransportOptions<I, A> {
+  /// Construct with defaults. Caller MUST chain `with_local_id` and
+  /// `with_advertise_addr` before passing to `TcpTransport::new`. The
+  /// default `tcp_options` is the unlabeled plain-TCP record layer
+  /// (`TcpOptions::new(None)`); supply [`Self::with_tcp_options`] to set
+  /// a cluster label.
+  #[inline]
+  pub fn new() -> Self {
+    Self {
+      local_id: None,
+      advertise_addr: None,
+      stream: StreamTransportOptions::new(),
+      tcp_options: TcpOptions::new(None),
+    }
   }
 
-  /// Construct a TCP-backed memberlist with explicit per-driver tuning
-  /// knobs. Most callers want [`Self::new`] (defaults); reach for this
-  /// when a specific knob — `join_deadline`, `iter_drain_cap`,
-  /// `event_queue_cap`, etc. — must deviate from
-  /// [`StreamDriverOptions::default()`].
-  ///
-  /// See [`Self::new`] for the full error surface.
-  pub async fn new_with_options(
-    config: EndpointConfig<SmolStr, SocketAddr>,
-    tcp_opts: TcpOptions,
-    driver_opts: StreamDriverOptions,
-  ) -> Result<Self> {
-    // 1. Bind UDP gossip socket + TCP reliable listener on the configured
-    //    advertise address. Both share the same socket-address tuple — UDP
-    //    and TCP are independent layer-4 protocols and may coexist on the
-    //    same port.
-    let local_addr: SocketAddr = *config.advertise_addr_ref();
-    let local_id: SmolStr = config.local_id_ref().clone();
-    let gossip_socket = UdpSocket::bind(local_addr)
+  /// Builder: local node identifier.
+  #[must_use]
+  #[inline]
+  pub fn with_local_id(mut self, id: I) -> Self {
+    self.local_id = Some(id);
+    self
+  }
+
+  /// Builder: advertise address (resolved or unresolved).
+  #[must_use]
+  #[inline]
+  pub fn with_advertise_addr(mut self, addr: MaybeResolved<A, SocketAddr>) -> Self {
+    self.advertise_addr = Some(addr);
+    self
+  }
+
+  /// Builder: stream-transport tuning knobs.
+  #[must_use]
+  #[inline]
+  pub fn with_stream(mut self, opts: StreamTransportOptions) -> Self {
+    self.stream = opts;
+    self
+  }
+
+  /// Builder: plain-TCP record-layer options (cluster label +
+  /// inbound-label-check policy). Defaults to the unlabeled layer.
+  #[must_use]
+  #[inline]
+  pub fn with_tcp_options(mut self, opts: TcpOptions) -> Self {
+    self.tcp_options = opts;
+    self
+  }
+
+  /// Local node identifier — must be set before `TcpTransport::new`.
+  #[inline]
+  pub const fn local_id(&self) -> Option<&I> {
+    self.local_id.as_ref()
+  }
+
+  /// Advertise address — must be set before `TcpTransport::new`.
+  #[inline]
+  pub const fn advertise_addr(&self) -> Option<&MaybeResolved<A, SocketAddr>> {
+    self.advertise_addr.as_ref()
+  }
+
+  /// Stream-transport tuning knobs.
+  #[inline]
+  pub const fn stream(&self) -> &StreamTransportOptions {
+    &self.stream
+  }
+
+  /// Plain-TCP record-layer options.
+  #[inline]
+  pub const fn tcp_options(&self) -> &TcpOptions {
+    &self.tcp_options
+  }
+}
+
+impl<I, A> Default for TcpTransportOptions<I, A> {
+  #[inline]
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+/// TCP-backed memberlist transport.
+///
+/// Owns the bound `UdpSocket` (gossip) and `TcpListener` (reliable). The
+/// machine-layer `StreamEndpoint<I, SocketAddr, RawRecords>` is built inside
+/// [`TcpTransport::run`] from the stored config (`tcp_options`).
+pub struct TcpTransport<I = SmolStr, A = HostAddr<SmolStr>> {
+  local_id: I,
+  local_address: MaybeResolved<A, SocketAddr>,
+  advertise_socket: SocketAddr,
+  gossip_socket: UdpSocket,
+  tcp_listener: TcpListener,
+  stream_options: StreamTransportOptions,
+  tcp_options: TcpOptions,
+}
+
+impl<I, A> Transport for TcpTransport<I, A>
+where
+  I: memberlist_wire::Id
+    + memberlist_wire::Data
+    + memberlist_wire::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+  A: Clone + Send + 'static,
+{
+  type Error = MemberlistError;
+  type Id = I;
+  type Address = A;
+  type Options = TcpTransportOptions<I, A>;
+
+  async fn new<RES, AR>(
+    options: Self::Options,
+    resolver: &RES,
+    advertise_resolver: &AR,
+  ) -> Result<Self, Self::Error>
+  where
+    RES: Resolver<Address = Self::Address>,
+    AR: AdvertiseAddrResolver,
+  {
+    // Fail fast on a stream knob that would deterministically break the
+    // backend (a zero `bridge_recv_buf_len` makes every bridge read return a
+    // false EOF) BEFORE binding any socket. `bridge_recv_buf_len` lives in
+    // `T::Options`, so it is not reachable at the generic `Memberlist::new`
+    // gossip-MTU/advertise checks — validate it here at the earliest
+    // stream-backend construction boundary.
+    options.stream.validate()?;
+    let local_id = options.local_id.ok_or_else(|| {
+      MemberlistError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "local_id required",
+      ))
+    })?;
+    let advertise_input = options.advertise_addr.ok_or_else(|| {
+      MemberlistError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "advertise_addr required",
+      ))
+    })?;
+
+    let advertise_socket = match &advertise_input {
+      MaybeResolved::Resolved(s) => *s,
+      MaybeResolved::Unresolved(a) => {
+        let candidates = resolver
+          .resolve(a)
+          .await
+          .map_err(|e| MemberlistError::Resolve(std::io::Error::other(e.to_string())))?;
+        advertise_resolver.pick(candidates).map_err(|e| {
+          MemberlistError::Resolve(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            e.to_string(),
+          ))
+        })?
+      }
+    };
+
+    let gossip_socket = UdpSocket::bind(advertise_socket)
       .await
       .map_err(MemberlistError::Io)?;
-    let listener = TcpListener::bind(local_addr)
+    // Read back the actually-bound address: an ephemeral `:0` advertise
+    // request resolves to a concrete OS-assigned port here, and the TCP
+    // reliable listener MUST bind the same port the node gossips. Bind
+    // the listener to the gossip socket's resolved address so UDP gossip
+    // and TCP reliable share one port even when `:0` was requested.
+    let advertise_socket = gossip_socket.local_addr().map_err(MemberlistError::Io)?;
+    let tcp_listener = TcpListener::bind(advertise_socket)
       .await
       .map_err(MemberlistError::Io)?;
 
-    // 2. Build the composed super-state-machine. The membership
-    //    `Endpoint::new` runs `config.clone()`-equivalent work
-    //    (`local_id_ref().cheap_clone()`) and inserts the local node as
-    //    Alive at incarnation 1; the `StreamEndpoint` wraps that with the
-    //    `RawRecords` record layer plug and the supplied `TcpOptions`.
-    let endpoint: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
-      Endpoint::new(config),
-      tcp_opts,
-      Box::new(|_addr: &SocketAddr| None),
-      Box::new(|addr: &SocketAddr| *addr),
+    Ok(Self {
+      local_id,
+      local_address: advertise_input,
+      advertise_socket,
+      gossip_socket,
+      tcp_listener,
+      stream_options: options.stream,
+      tcp_options: options.tcp_options,
+    })
+  }
+
+  #[inline]
+  fn local_id(&self) -> &Self::Id {
+    &self.local_id
+  }
+
+  #[inline]
+  fn local_address(&self) -> &MaybeResolved<Self::Address, SocketAddr> {
+    &self.local_address
+  }
+
+  #[inline]
+  fn advertise_address(&self) -> &SocketAddr {
+    &self.advertise_socket
+  }
+
+  async fn run<D>(self, runtime: TransportRuntime<Self, D>)
+  where
+    D: Delegate<Id = Self::Id, Address = SocketAddr>,
+  {
+    // `Memberlist::new` is generic over `T` and cannot build the
+    // record-layer-specific endpoint; build it here from `self`'s
+    // stored config. Plain TCP has no SNI (`|_| None`) and a membership
+    // address that IS the transport socket (`|addr| *addr`).
+    let cfg = crate::options::apply_memberlist_options(
+      EndpointConfig::new(self.local_id, self.advertise_socket),
+      &runtime.memberlist_options,
+    );
+    // Install the optional machine admission predicates before the driver
+    // loop starts; each `None` leaves the `Endpoint` at its admit-all
+    // default. `BoxedAlive`/`BoxedMerge` forward the boxed dyn so it
+    // satisfies the setters' `impl AliveDelegate`/`impl MergeDelegate` bound.
+    let mut ep = Endpoint::new(cfg);
+    if let Some(ad) = runtime.alive_delegate {
+      ep.set_alive_delegate(BoxedAlive(ad));
+    }
+    if let Some(md) = runtime.merge_delegate {
+      ep.set_merge_delegate(BoxedMerge(md));
+    }
+    let endpoint = StreamEndpoint::new(
+      ep,
+      self.tcp_options,
+      Box::new(|_| None),
+      Box::new(|addr| *addr),
     );
 
-    // 3. Channels:
-    //    - commands  (handle → driver): unbounded; a slow driver still
-    //      acks every command via its one-shot reply, so a bounded
-    //      channel could back-pressure user calls under load.
-    //    - bridge_ready (listener/dial → driver): unbounded; producers
-    //      are driver-internal and cannot run hot enough to OOM.
-    //    - events    (driver → subscribers): BOUNDED at
-    //      `EVENT_QUEUE_CAP` so a slow / dropped subscriber cannot
-    //      accumulate events without limit. `try_send` on a full
-    //      channel drops the newest event; subscribers observe a
-    //      gap, which is the standard contract for bounded
-    //      broadcast-style streams.
-    //    The events channel is MPMC (flume) so multiple `EventStream`s
-    //    round-robin per the documented `events()` contract.
-    let (commands_tx, commands_rx) = flume::unbounded();
-    let (events_tx, events_rx) = flume::bounded(driver_opts.event_queue_cap());
     let (bridge_ready_tx, bridge_ready_rx) = flume::unbounded();
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let events_dropped = Arc::new(AtomicU64::new(0));
-
-    // 4. Initial snapshot (just the local node, no peers yet). The driver
-    //    publishes a fresh snapshot immediately on entry to its loop (the
-    //    `refresh_snapshot` call before the `select_biased`), so the
-    //    initial values are only observable in the narrow window between
-    //    `new` returning and the spawned task being polled.
-    let local = Node::new(local_id, local_addr);
-    let snapshot = Arc::new(ArcSwap::from_pointee(MemberlistSnapshot::new(
-      vec![local.clone()],
-      local,
-      1, // alive_count: the local node is Alive at incarnation 1.
-      1, // member_count: only the local node is known.
-    )));
-
-    // 5. Spawn the driver task. The driver owns BOTH the gossip socket
-    //    and the TCP listener directly so they both drop the instant the
-    //    driver loop exits — the listener's port is released before
-    //    `Memberlist::shutdown` returns and an immediate rebind on the
-    //    same address succeeds. The driver keeps its own
-    //    `bridge_ready_tx` clone so it can spawn outbound dial tasks
-    //    that report back. `socket_to_peer` is the identity for this
-    //    transport (membership address IS the `SocketAddr`).
-    let socket_to_peer: Arc<dyn Fn(SocketAddr) -> SocketAddr + Send + Sync> =
-      Arc::new(|addr: SocketAddr| addr);
-    let driver_handle = compio::runtime::spawn(driver_loop::<SmolStr, SocketAddr, RawRecords>(
+    crate::driver::stream_driver_loop::<Self::Id, SocketAddr, RawRecords, D>(
       endpoint,
-      gossip_socket,
-      listener,
-      commands_rx,
-      events_tx,
-      events_dropped.clone(),
-      snapshot.clone(),
+      self.gossip_socket,
+      self.tcp_listener,
+      runtime.commands_rx,
+      runtime.events_tx,
+      runtime.events_dropped,
+      runtime.observation_dropped,
+      runtime.snapshot,
       bridge_ready_rx,
       bridge_ready_tx,
-      shutdown_flag.clone(),
-      driver_opts,
-      socket_to_peer,
-    ));
+      runtime.shutdown_flag,
+      runtime.driver_options,
+      self.stream_options,
+      runtime.delegate,
+    )
+    .await;
+  }
+}
 
-    // 6. Build the handle from the wired parts.
-    Ok(Self::from_parts(
-      commands_tx,
-      snapshot,
-      events_rx,
-      events_dropped,
-      driver_handle,
-      shutdown_flag,
-      driver_opts.join_deadline(),
-    ))
+#[cfg(test)]
+mod transport_tests {
+  use super::*;
+  use crate::{FirstAddrResolver, MaybeResolved, OsResolver};
+  use std::net::SocketAddr;
+
+  fn test_tcp_opts() -> TcpTransportOptions {
+    let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    TcpTransportOptions::new()
+      .with_local_id(smol_str::SmolStr::new("test-node"))
+      .with_advertise_addr(MaybeResolved::Resolved(bind))
+  }
+
+  #[compio::test]
+  async fn new_with_resolved_advertise_skips_resolver() {
+    let opts = test_tcp_opts();
+    let t: TcpTransport = TcpTransport::new(opts, &OsResolver, &FirstAddrResolver)
+      .await
+      .expect("construct TcpTransport");
+    assert_eq!(t.local_id().as_str(), "test-node");
+    assert!(t.local_address().is_resolved());
+    let _: &SocketAddr = t.advertise_address();
   }
 }

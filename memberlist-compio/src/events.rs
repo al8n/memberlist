@@ -25,10 +25,13 @@ use std::{
 /// **Lossy under backpressure:** the events channel is bounded (1024
 /// at construction). When the queue is full the driver drops the
 /// newest event rather than block — a slow subscriber must not stall
-/// the membership FSM. Subscribers that need to detect dropped events
-/// can poll [`Memberlist::events_dropped`](crate::Memberlist::events_dropped):
-/// a monotonic increase across a window means the driver dropped at
-/// least that many events during the window. The lock-free
+/// the membership FSM. A subscriber can miss an event two ways, counted
+/// separately: the EventStream queue overflowed
+/// ([`Memberlist::events_dropped`](crate::Memberlist::events_dropped)), or the
+/// upstream observation channel dropped the event before it reached fan-out
+/// ([`Memberlist::observation_dropped`](crate::Memberlist::observation_dropped)).
+/// To detect ALL gaps, poll BOTH counters across a window — any increase means
+/// events were missed during it. The lock-free
 /// [`Memberlist::snapshot`](crate::Memberlist::snapshot) /
 /// [`Memberlist::alive_count`](crate::Memberlist::alive_count) /
 /// [`Memberlist::member_count`](crate::Memberlist::member_count) read

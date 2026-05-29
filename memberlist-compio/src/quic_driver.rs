@@ -44,11 +44,13 @@ use memberlist_machine::{
 use memberlist_wire::{CheapClone, Node};
 
 use crate::{
-  QuicDriverOptions,
   command::{
     Command, JoinCmd, JoinKind, LeaveCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
     ShutdownCmd, UpdateNodeMetadataCmd,
   },
+  delegate::Delegate,
+  driver::dispatch_event_delegate,
+  driver_options::DriverOptions,
   error::{JoinAllFailed, MemberlistError, Result},
   snapshot::MemberlistSnapshot,
 };
@@ -89,6 +91,54 @@ struct PendingJoin {
   reply: flume::Sender<Result<usize>>,
 }
 
+/// Driver-side state for the single in-flight graceful-leave operation.
+///
+/// Mirrors the stream driver's `PendingLeave`
+/// (`memberlist-compio/src/driver.rs`). A [`Command::Leave`] that finds
+/// the endpoint Running initiates the machine's `leave()`, which queues
+/// the direct `Dead`-self notices to every live peer and withholds
+/// [`Event::LeftCluster`] until they drain through `poll_transmit`. The
+/// driver parks this here and replies only once that `LeftCluster`
+/// arrives (success) or `deadline` elapses
+/// ([`MemberlistError::LeaveTimeout`]) — so a returned `Ok(())` means
+/// the leave actually reached the wire, never merely that it was queued.
+///
+/// Leave is a SHARED operation: a second `Command::Leave` racing an
+/// in-flight one (cloned `Memberlist` handles can both call `leave()`)
+/// does NOT re-invoke `endpoint.leave()` (a repeated leave once already
+/// `Leaving`/`Left` is a terminal no-op that emits no completion event,
+/// so a fresh parked waiter would hang waiting on a `LeftCluster` that
+/// never re-fires); it joins this in-flight operation by pushing its
+/// reply onto `repliers`. Every terminal path drains EVERY replier.
+struct PendingLeave {
+  /// Reply channels of every `leave()` caller that joined this in-flight
+  /// leave — the initiator plus any racing clones. Drained together on
+  /// the single terminal outcome (`Ok` on `LeftCluster`, `LeaveTimeout`
+  /// on deadline, `Shutdown` on teardown).
+  repliers: Vec<flume::Sender<Result<()>>>,
+  /// Wall-clock instant past which the driver replies
+  /// [`MemberlistError::LeaveTimeout`] to every replier even if
+  /// `LeftCluster` has not yet fired.
+  deadline: Instant,
+}
+
+impl PendingLeave {
+  /// Reply to every joined `leave()` caller with a fresh `Result<()>`
+  /// from `make_result`. The single terminal outcome fans out to the
+  /// initiator and any racing clones. A constructor closure (rather than
+  /// a single cloned value) sidesteps `MemberlistError` not being
+  /// `Clone` — every terminal outcome here (`Ok(())`,
+  /// [`MemberlistError::LeaveTimeout`], [`MemberlistError::Shutdown`])
+  /// is a trivially reconstructible unit/variant value.
+  async fn resolve_all(self, mut make_result: impl FnMut() -> Result<()>) {
+    for replier in self.repliers {
+      // Ignoring Err: a `leave()` caller dropped its reply receiver
+      // (its user-facing future was cancelled); nothing to surface.
+      let _ = replier.send_async(make_result()).await;
+    }
+  }
+}
+
 /// All driver-owned state, packed so the loop body can borrow
 /// individual fields without fighting Rust's borrow checker
 /// against a sprawling let-binding cluster.
@@ -96,11 +146,32 @@ struct QuicDriverState<I> {
   endpoint: QuicEndpoint<I>,
   udp_socket: UdpSocket,
   commands: Receiver<Command>,
-  events_tx: Sender<Event<I, SocketAddr>>,
-  events_dropped: Arc<AtomicU64>,
+  /// Hand-off channel to the per-driver observation task (delegate
+  /// dispatch + EventStream forward), sized per
+  /// [`DriverOptions::observation_channel`]. The driver `try_send`s every
+  /// surfaced event here, never blocking on user observation code. An
+  /// `Unbounded` channel never drops; a `Bounded(n)` channel drops the
+  /// newest event when full and counts it in `observation_dropped`.
+  obs_tx: Sender<Event<I, SocketAddr>>,
+  /// Observation-channel drop counter: the driver loop increments it on a
+  /// `Bounded` obs-channel drop (the surfacing `try_send` below) when the
+  /// delegate falls behind — by count or the payload byte backstop. A drop here
+  /// means the delegate (and EventStream) missed the event; for app-data it is
+  /// unrecoverable. (The observation task's separate EventStream-forward drops
+  /// increment `events_dropped`.)
+  observation_dropped: Arc<AtomicU64>,
+  /// Bytes of payload-bearing events (`UserPacket` / `RemoteStateReceived`)
+  /// currently queued in `obs_tx`: the driver adds on enqueue, the observation
+  /// task subtracts on dequeue. Bounds the memory large reliable payloads
+  /// occupy under a backed-up delegate (the count cap alone cannot).
+  obs_payload_bytes: Arc<AtomicU64>,
+  /// Byte backstop budget for queued payload-bearing events: `Some(4 *
+  /// max_stream_frame_size)` on a `Bounded` channel, `None` on `Unbounded`
+  /// (which opts out of dropping).
+  obs_payload_budget: Option<u64>,
   snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
   shutdown_flag: Arc<AtomicBool>,
-  driver_opts: QuicDriverOptions,
+  driver_opts: DriverOptions,
   /// Outstanding synchronous-join waiters. Populated when a
   /// `Command::Join` with `JoinKind::WaitForCompletion` lands;
   /// reduced on `Event::ExchangeCompleted` filtered to
@@ -116,6 +187,13 @@ struct QuicDriverState<I> {
   /// the post-loop cleanup so the ack lands AFTER the UDP socket
   /// drops and the bound port is free.
   shutdown_reply: Option<flume::Sender<Result<()>>>,
+  /// Outstanding graceful-leave waiter. Parked by `dispatch_command`
+  /// when a `Command::Leave` initiates the machine's `leave()` (the
+  /// endpoint was Running); resolved `Ok` in `drain_actions`' events
+  /// step on `Event::LeftCluster`; reaped `MemberlistError::LeaveTimeout`
+  /// by `reap_pending_leave` once its deadline elapses. At most one is
+  /// outstanding at a time.
+  pending_leave: Option<PendingLeave>,
 }
 
 /// Compute the per-recv UDP buffer size from the coordinator's
@@ -150,16 +228,19 @@ where
 /// All mutations on the endpoint happen here; reads happen lock-free
 /// via the published [`MemberlistSnapshot`].
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn driver_loop<I>(
+pub(crate) async fn quic_driver_loop<I, D>(
   endpoint: QuicEndpoint<I>,
   udp_socket: UdpSocket,
   commands: Receiver<Command>,
   events_tx: Sender<Event<I, SocketAddr>>,
   events_dropped: Arc<AtomicU64>,
+  observation_dropped: Arc<AtomicU64>,
   snapshot: Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
   shutdown_flag: Arc<AtomicBool>,
-  driver_opts: QuicDriverOptions,
+  driver_opts: DriverOptions,
+  delegate: D,
 ) where
+  D: Delegate<Id = I, Address = SocketAddr>,
   I: memberlist_wire::Id
     + memberlist_wire::Data
     + memberlist_wire::CheapClone
@@ -169,18 +250,72 @@ pub(crate) async fn driver_loop<I>(
     + Sync
     + 'static,
 {
+  // Spawn the per-driver observation task. It owns the user `Delegate`
+  // and the `EventStream` sender and runs OFF this driver task: the
+  // driver `try_send`s every surfaced event onto `obs_tx`, the task
+  // dispatches the matching observation hook then forwards to
+  // subscribers. Decoupling observation from the driver loop is what
+  // keeps a slow `notify_*` / `merge_remote_state` from stalling
+  // protocol advancement — and therefore from delaying a parked
+  // join/leave reply that depends on a follow-up inbound datagram the
+  // driver's recv arm must still service. The `obs_tx` queue is sized per
+  // [`DriverOptions::observation_channel`] (default [`Channel::Bounded`]).
+  // The `Delegate` carries the two application-data hooks (`notify_user_msg`
+  // from `UserPacket`, `merge_remote_state` from `RemoteStateReceived`) whose
+  // payloads are absent from `MemberlistSnapshot` and thus unrecoverable from
+  // `members()`. `Unbounded` never drops — the delegate observes EVERY event
+  // in order — but a persistently stuck handler grows memory (the handler's
+  // contract is to keep up). `Bounded(n)` caps that growth: a full channel
+  // drops the newest event (blocking would stall SWIM) and counts it in
+  // `observation_dropped` so the drop is observable, not silent. Either way the
+  // hand-off (`try_send`) is non-blocking, so a slow hook never stalls SWIM.
+  // The EventStream (`events_tx`) stays bounded best-effort.
+  let (obs_tx, obs_rx) = match driver_opts.observation_channel() {
+    crate::Channel::Unbounded => flume::unbounded::<Event<I, SocketAddr>>(),
+    crate::Channel::Bounded(n) => flume::bounded::<Event<I, SocketAddr>>(n),
+  };
+  // The two drop counters are kept distinct: the observation task increments
+  // `events_dropped` on a bounded EventStream-forward drop (membership/control,
+  // recoverable from the snapshot), and the driver loop increments
+  // `observation_dropped` on a `Bounded` obs-channel drop (the delegate fell
+  // behind; may have lost app-data). Clone `events_dropped` for the task; the
+  // driver keeps `observation_dropped` in `QuicDriverState` for the surfacing
+  // `try_send`.
+  //
+  // `obs_payload_bytes` tracks the bytes of payload-bearing events queued in
+  // `obs_tx` (driver adds on enqueue, observation task subtracts on dequeue),
+  // backing the byte backstop on the surfacing path; the byte budget caps
+  // queued payload bytes at four frames' worth on a `Bounded` channel, while
+  // `Unbounded` opts out of dropping (budget `None`).
+  let obs_payload_bytes = Arc::new(AtomicU64::new(0));
+  let obs_payload_budget: Option<u64> = match driver_opts.observation_channel() {
+    crate::Channel::Bounded(_) => Some((endpoint.max_stream_frame_size() as u64).saturating_mul(4)),
+    crate::Channel::Unbounded => None,
+  };
+  compio::runtime::spawn(observation_task::<I, D>(
+    obs_rx,
+    delegate,
+    events_tx,
+    events_dropped.clone(),
+    obs_payload_bytes.clone(),
+  ))
+  .detach();
+
   let mut state = QuicDriverState {
     endpoint,
     udp_socket,
     commands,
-    events_tx,
-    events_dropped,
+    obs_tx,
+    observation_dropped,
+    obs_payload_bytes,
+    obs_payload_budget,
     snapshot,
     shutdown_flag,
     driver_opts,
     pending_joins: HashMap::new(),
     next_pending_join_id: 0,
     shutdown_reply: None,
+    pending_leave: None,
   };
 
   // Per-driver UDP recv buffer size derived once from the coordinator's
@@ -189,6 +324,18 @@ pub(crate) async fn driver_loop<I>(
   // construction time and never reconfigured at runtime, so a single
   // value computed up-front is correct.
   let recv_buf_len = gossip_recv_buf_len::<I>(&state.endpoint);
+
+  // Arm the periodic probe / gossip / push-pull schedulers. Without this
+  // the machine's `next_probe` / `next_gossip` / `next_pushpull` stay
+  // `None`, so failure detection, broadcast dissemination, and anti-entropy
+  // never run — the loop would only service explicit join push-pull and
+  // passive inbound traffic.
+  state.endpoint.start_scheduling(Instant::now());
+
+  // Publish the initial snapshot at loop entry so the first observable
+  // state is available before any input arrives (mirror-symmetric with
+  // the stream driver's loop-entry `refresh_snapshot`).
+  refresh_snapshot::<I>(&state.endpoint, &state.snapshot);
 
   let mut exit = false;
   // Tracks whether the previous iteration's inputs (cmd-fairness
@@ -213,11 +360,14 @@ pub(crate) async fn driver_loop<I>(
         Ok(c) => {
           let now = Instant::now();
           let is_shutdown = matches!(c, Command::Shutdown(_));
+          let leave_timeout = state.driver_opts.leave_timeout();
           dispatch_command::<I>(
             &mut state.endpoint,
             &mut state.shutdown_reply,
             &mut state.pending_joins,
             &mut state.next_pending_join_id,
+            &mut state.pending_leave,
+            leave_timeout,
             c,
             now,
           )
@@ -228,7 +378,7 @@ pub(crate) async fn driver_loop<I>(
             // Shutdown is terminal — stop draining further commands
             // on this iteration. Any commands queued behind shutdown
             // observe the driver loop already exited (the `commands`
-            // receiver drops when `driver_loop` returns, so a racing
+            // receiver drops when `quic_driver_loop` returns, so a racing
             // `send_async` returns `Err(Disconnected)` and the caller
             // surfaces `MemberlistError::CommandSend`).
             exit = true;
@@ -239,6 +389,18 @@ pub(crate) async fn driver_loop<I>(
       }
     }
     if exit {
+      // Flush every queued surface before tearing down. A preceding
+      // `leave()` directly enqueues `Dead`-self transmits to live peers (it
+      // does not rely on the gossip queue), and those must reach the wire
+      // before the post-loop cleanup drops the UDP socket — otherwise peers
+      // observe a probe-timeout failure instead of an intentional leave.
+      // `drain_actions` iterates to fixed point internally. Mirrors the
+      // stream driver's exit drain (`memberlist-compio/src/driver.rs`).
+      if drain_actions::<I>(&mut state).await {
+        refresh_snapshot::<I>(&state.endpoint, &state.snapshot);
+      }
+      reap_pending_joins(&mut state.pending_joins, Instant::now()).await;
+      reap_pending_leave(&mut state.pending_leave, Instant::now()).await;
       break;
     }
 
@@ -258,9 +420,12 @@ pub(crate) async fn driver_loop<I>(
       }
       // Reap any pending-join waiter whose `pending` set was emptied
       // by the drain (a push/pull ExchangeCompleted reduction) or
-      // whose deadline elapsed during the drain. Mirrors the stream
-      // driver's post-drain `reap_pending_joins` call.
+      // whose deadline elapsed during the drain, and any graceful-leave
+      // waiter past its deadline (the `LeftCluster` success path is
+      // resolved inside the drain's events step). Mirrors the stream
+      // driver's post-drain reap calls.
       reap_pending_joins(&mut state.pending_joins, Instant::now()).await;
+      reap_pending_leave(&mut state.pending_leave, Instant::now()).await;
       dirty = false;
     }
 
@@ -283,17 +448,18 @@ pub(crate) async fn driver_loop<I>(
     // fires. Mirrors the stream driver's iter-top past-due branch
     // (`memberlist-compio/src/driver.rs:602`).
     //
-    // The past-due check folds in the earliest pending-join
-    // deadline: under a continuous recv flood `recv` would always win
-    // the main select over `timer`, so an expired synchronous-join
-    // waiter would never have its deadline reap fire either. Folding
-    // the min pending-join deadline into the past-due trigger lets
-    // the iter-top branch run `reap_pending_joins` even when the
+    // The past-due check folds in the earliest pending-join AND
+    // pending-leave deadline: under a continuous recv flood `recv`
+    // would always win the main select over `timer`, so an expired
+    // synchronous-join waiter or graceful-leave waiter would never have
+    // its deadline reap fire either. Folding both into the past-due
+    // trigger lets the iter-top branch run the reaps even when the
     // coordinator itself has no near-term work.
     let past_due_t = {
       let coord = state.endpoint.poll_timeout();
       let pj_min = min_pending_join_deadline(&state.pending_joins);
-      [coord, pj_min].into_iter().flatten().min()
+      let pl_min = min_pending_leave_deadline(&state.pending_leave);
+      [coord, pj_min, pl_min].into_iter().flatten().min()
     };
     if let Some(t) = past_due_t
       && setup_now >= t
@@ -302,6 +468,7 @@ pub(crate) async fn driver_loop<I>(
         refresh_snapshot::<I>(&state.endpoint, &state.snapshot);
       }
       reap_pending_joins(&mut state.pending_joins, Instant::now()).await;
+      reap_pending_leave(&mut state.pending_leave, Instant::now()).await;
       dirty = false;
       continue;
     }
@@ -309,10 +476,11 @@ pub(crate) async fn driver_loop<I>(
     let timeout_deadline = {
       let coord = state.endpoint.poll_timeout();
       let pj_min = min_pending_join_deadline(&state.pending_joins);
+      let pl_min = min_pending_leave_deadline(&state.pending_leave);
       let idle = setup_now + state.driver_opts.idle_wake_interval();
-      // `coord`/`pj_min` may be `None`; `idle` is always populated.
-      // The earliest of the three drives the timer arm.
-      [coord, pj_min, Some(idle)]
+      // `coord`/`pj_min`/`pl_min` may be `None`; `idle` is always
+      // populated. The earliest of the four drives the timer arm.
+      [coord, pj_min, pl_min, Some(idle)]
         .into_iter()
         .flatten()
         .min()
@@ -413,11 +581,14 @@ pub(crate) async fn driver_loop<I>(
             // `select!`.
             let now = Instant::now();
             let is_shutdown = matches!(c, Command::Shutdown(_));
+            let leave_timeout = state.driver_opts.leave_timeout();
             dispatch_command::<I>(
               &mut state.endpoint,
               &mut state.shutdown_reply,
               &mut state.pending_joins,
               &mut state.next_pending_join_id,
+              &mut state.pending_leave,
+              leave_timeout,
               c,
               now,
             )
@@ -476,6 +647,9 @@ pub(crate) async fn driver_loop<I>(
       Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { reply, .. }) => reply,
       Command::SetCompressionOptions(SetCompressionOptionsCmd { reply, .. }) => reply,
       Command::SetEncryptionOptions(SetEncryptionOptionsCmd { reply, .. }) => reply,
+      Command::QueueUserBroadcast(cmd) => cmd.reply().clone(),
+      Command::SetLocalState(cmd) => cmd.reply().clone(),
+      Command::SetAckPayload(cmd) => cmd.reply().clone(),
       Command::Join(JoinCmd { reply, .. }) => {
         // `Join`'s reply type is `Result<usize>`; surface the same
         // `Shutdown` error through a separate arm so the type
@@ -503,6 +677,14 @@ pub(crate) async fn driver_loop<I>(
     let _ = pj.reply.send_async(Err(MemberlistError::Shutdown)).await;
   }
 
+  // Reply `Err(Shutdown)` to every joined graceful-leave replier whose
+  // `LeftCluster` never arrived before the loop exited (e.g. a shutdown
+  // raced the leave flush). Without this their receivers would hang
+  // forever — the driver task is about to exit.
+  if let Some(pl) = state.pending_leave.take() {
+    pl.resolve_all(|| Err(MemberlistError::Shutdown)).await;
+  }
+
   // Drop the bound UDP socket BEFORE acking the observed shutdown
   // caller so an immediate rebind on the same port after
   // `shutdown.await` succeeds. The `Memberlist::shutdown` caller is
@@ -517,26 +699,85 @@ pub(crate) async fn driver_loop<I>(
     // to surface.
     let _ = reply.send_async(Ok(())).await;
   }
+  // `state` (and with it `obs_tx`) drops here, closing the observation
+  // channel; the observation task drains any buffered events and exits.
+}
+
+/// Per-driver observation task: dispatch each event's [`Delegate`] hook, then
+/// fan membership / control events out to the `EventStream`, OFF the driver
+/// loop.
+///
+/// Receives each event the driver hands off (in machine-emission order) on
+/// `obs_rx` and fires the matching `notify_*` / `merge_remote_state` hook (so a
+/// delegate observes the transition ahead of any EventStream consumer). The
+/// obs-task recv side is lossless — it delivers every event that reached the
+/// channel; a bounded `obs_tx` only drops at the driver-side hand-off when the
+/// delegate cannot keep up (counted in `observation_dropped`).
+///
+/// Only membership / control events are then forwarded to `EventStream`
+/// subscribers. App-data events (`UserPacket` / `RemoteStateReceived`) reach
+/// the delegate hook above but are NOT fanned out — the EventStream cannot
+/// reconstruct app-data from the membership snapshot, and forwarding the large
+/// reliable payloads would let a slow subscriber pile them up in the bounded
+/// `events_tx`. The forward is best-effort: a full queue (slow subscriber)
+/// drops the event via `try_send` and counts it into `events_dropped` (gap
+/// signal), never blocking. The task exits when `obs_rx` closes (the driver
+/// dropped its `obs_tx` at teardown). Mirrors the stream driver's
+/// `observation_task`.
+async fn observation_task<I, D>(
+  obs_rx: Receiver<Event<I, SocketAddr>>,
+  delegate: D,
+  events_tx: Sender<Event<I, SocketAddr>>,
+  events_dropped: Arc<AtomicU64>,
+  obs_payload_bytes: Arc<AtomicU64>,
+) where
+  D: Delegate<Id = I, Address = SocketAddr>,
+  I: memberlist_wire::Id
+    + memberlist_wire::Data
+    + memberlist_wire::CheapClone
+    + core::fmt::Debug
+    + core::fmt::Display
+    + Send
+    + Sync
+    + 'static,
+{
+  while let Ok(ev) = obs_rx.recv_async().await {
+    // App-data events carry the only large payloads. Measure this event for the
+    // byte backstop and free the budget it occupied before the (possibly slow)
+    // delegate hook, so the driver's enqueue side sees the reclaimed budget
+    // promptly. Membership / control events have no weight.
+    let payload = crate::driver::observation_payload_bytes(&ev);
+    if let Some(b) = payload {
+      obs_payload_bytes.fetch_sub(b, Ordering::Relaxed);
+    }
+    dispatch_event_delegate(&delegate, &ev).await;
+    // Fan out membership / control events only — app-data went to the delegate
+    // (above), never the bounded best-effort `events_tx`, so a slow subscriber
+    // cannot retain large payloads there. See the stream driver's
+    // `observation_task` for the full rationale.
+    if payload.is_some() {
+      continue;
+    }
+    if events_tx
+      .try_send(ev)
+      .is_err_and(|e| matches!(e, flume::TrySendError::Full(_)))
+    {
+      events_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+  }
 }
 
 /// Dispatch one driver command.
 ///
 /// Mirrors the stream driver's `dispatch_command` for the QUIC
 /// endpoint surface. The `Join` arm fans out one
-/// [`QuicEndpoint::start_push_pull`] per resolved seed; `Leave` /
-/// `SetEncryptionOptions` route to their machine setters; `Shutdown`
-/// stashes the reply for the post-loop ack so the bound UDP port is
-/// released before the caller's `shutdown().await` resumes.
-///
-/// `UpdateNodeMetadata` and `SetCompressionOptions` currently surface
-/// `MemberlistError::Io` with a "not implemented" message. The
-/// [`QuicEndpoint`] does not yet expose a public `update_meta` or
-/// `set_compression_options`; both have machine-side equivalents on
-/// [`memberlist_machine::streams::StreamEndpoint`] but are not on the
-/// QUIC endpoint's public surface (the `endpoint_mut` accessor is
-/// `#[cfg(test)]`-only). Wiring these requires an additive machine
-/// extension; the driver replies clearly rather than silently
-/// reporting success.
+/// [`QuicEndpoint::start_push_pull`] per resolved seed; `Leave`,
+/// `UpdateNodeMetadata`, `SetCompressionOptions`, `SetEncryptionOptions`,
+/// and the application-data commands (`QueueUserBroadcast`,
+/// `SetLocalState`, `SetAckPayload`) route to their `QuicEndpoint`
+/// setters; `Shutdown` stashes the reply for the post-loop ack so the
+/// bound UDP port is released before the caller's `shutdown().await`
+/// resumes.
 ///
 /// `JoinKind::WaitForCompletion` fans out one
 /// [`QuicEndpoint::start_push_pull`] per seed and parks a
@@ -550,6 +791,8 @@ async fn dispatch_command<I>(
   shutdown_reply: &mut Option<flume::Sender<Result<()>>>,
   pending_joins: &mut HashMap<u64, PendingJoin>,
   next_pending_join_id: &mut u64,
+  pending_leave: &mut Option<PendingLeave>,
+  leave_timeout: core::time::Duration,
   cmd: Command,
   now: Instant,
 ) where
@@ -564,6 +807,19 @@ async fn dispatch_command<I>(
 {
   match cmd {
     Command::Join(JoinCmd { addrs, kind, reply }) => {
+      // Gate on a running node FIRST: `leave()` is terminal — it stops
+      // the periodic schedulers (probe / gossip / push-pull) and there
+      // is no rejoin / re-arm path. A join enqueued after leave would
+      // resolve `Ok(contacted)` from `ExchangeCompleted` yet leave the
+      // node Left and non-participating, so orchestration would treat a
+      // dead node as rejoined. Reject with `NotRunning` BEFORE any
+      // `start_push_pull` so no push/pull is enqueued. The single-task
+      // driver makes the check + dispatch atomic (no lifecycle race).
+      if !endpoint.is_running() {
+        // Ignoring Err: the caller may have dropped the reply receiver.
+        let _ = reply.send_async(Err(MemberlistError::NotRunning)).await;
+        return;
+      }
       match kind {
         JoinKind::Dispatch => {
           let mut count: usize = 0;
@@ -623,31 +879,161 @@ async fn dispatch_command<I>(
       }
     }
     Command::Leave(LeaveCmd { reply }) => {
-      let res: Result<()> = endpoint
-        .leave(now)
-        .map_err(|e| MemberlistError::Io(io::Error::other(e.to_string())));
-      // Ignoring Err: caller dropped the reply receiver.
-      let _ = reply.send_async(res).await;
+      // Leave is a SHARED in-flight operation (cloned `Memberlist`
+      // handles can race two `leave()` calls). The decision:
+      //   * in-flight (`pending_leave` is `Some`) → JOIN it: push this
+      //     reply onto the shared `repliers` and return. Do NOT
+      //     re-invoke `endpoint.leave()` — a repeated leave once already
+      //     `Leaving`/`Left` is a terminal no-op that emits no second
+      //     `LeftCluster`, so a freshly-parked waiter would hang. Do NOT
+      //     reply now; the single terminal outcome resolves every joined
+      //     replier together.
+      //   * not in-flight (`None`) → INITIATE: snapshot Running before
+      //     the call (it decides whether a `LeftCluster` will fire),
+      //     call `endpoint.leave()`, then either PARK (was Running — the
+      //     machine queued the direct `Dead`-self notices and WILL emit
+      //     `LeftCluster` once they drain) or reply IMMEDIATELY (a
+      //     genuine no-op / error: nothing in flight, no completion
+      //     event coming, so parking would hang).
+      if let Some(pl) = pending_leave.as_mut() {
+        pl.repliers.push(reply);
+      } else {
+        let was_running = endpoint.is_running();
+        let res: Result<()> = endpoint
+          .leave(now)
+          .map_err(|e| MemberlistError::Io(io::Error::other(e.to_string())));
+        match res {
+          Ok(()) if was_running => {
+            // Initiated → park. A returned `Ok(())` then means the leave
+            // actually reached the wire (`LeftCluster`), never merely
+            // that it was queued.
+            *pending_leave = Some(PendingLeave {
+              repliers: vec![reply],
+              deadline: now + leave_timeout,
+            });
+          }
+          // Idempotent no-op (not Running) ⇒ no `LeftCluster` will fire,
+          // OR the call errored. Reply immediately; parking would hang.
+          other => {
+            // Ignoring Err: caller dropped the reply receiver.
+            let _ = reply.send_async(other).await;
+          }
+        }
+      }
     }
     Command::UpdateNodeMetadata(UpdateNodeMetadataCmd { meta, reply }) => {
-      let res: Result<()> = match memberlist_wire::typed::Meta::try_from(meta) {
-        Ok(m) => endpoint
-          .update_meta(m)
-          .map_err(|e| MemberlistError::Io(io::Error::other(e.to_string()))),
-        Err(e) => Err(MemberlistError::Io(io::Error::other(e.to_string()))),
+      // Gate on a running node: after `leave()` the endpoint clears its
+      // periodic schedulers, so a metadata mutation could never be
+      // gossiped. Reject with `NotRunning` rather than ack a change that
+      // will never leave the local node. The single-task driver makes the
+      // check + apply atomic (no lifecycle race).
+      let res: Result<()> = if endpoint.is_running() {
+        match memberlist_wire::typed::Meta::try_from(meta) {
+          Ok(m) => endpoint
+            .update_meta(m)
+            .map_err(|e| MemberlistError::Io(io::Error::other(e.to_string()))),
+          Err(e) => Err(MemberlistError::Io(io::Error::other(e.to_string()))),
+        }
+      } else {
+        Err(MemberlistError::NotRunning)
       };
       // Ignoring Err: caller dropped the reply receiver.
       let _ = reply.send_async(res).await;
     }
     Command::SetCompressionOptions(SetCompressionOptionsCmd { opts, reply }) => {
-      endpoint.set_compression_options(opts);
+      // Gate on a running node: after `leave()` the endpoint emits no
+      // protocol traffic, so a new compression policy could never take
+      // effect on the wire. Reject with `NotRunning` rather than ack a
+      // change that will never be observed, and leave the endpoint
+      // untouched. The single-task driver makes the check + apply atomic.
+      let res: Result<()> = if endpoint.is_running() {
+        endpoint.set_compression_options(opts);
+        Ok(())
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = reply.send_async(Ok(())).await;
+      let _ = reply.send_async(res).await;
     }
     Command::SetEncryptionOptions(SetEncryptionOptionsCmd { opts, reply }) => {
-      endpoint.set_encryption_options(opts);
+      // Gate on a running node FIRST: after `leave()` the endpoint emits no
+      // protocol traffic, so a new encryption policy could never take effect
+      // on the wire. Reject with `NotRunning` without validating — there is
+      // no point trial-encrypting a policy that can never apply. When
+      // running, validate the policy BEFORE applying it: a keyring naming an
+      // AEAD whose backend feature is not compiled into this build is
+      // constructible, but every later `encrypt_gossip` would drop the
+      // datagram and every reliable-stream encode would fail — the cluster
+      // would silently break after a false `Ok`. Probe usability via a trial
+      // encrypt through the existing wire API; only swap the live policy when
+      // it is usable. The single-task driver makes the check + apply atomic.
+      let res: Result<()> = if endpoint.is_running() {
+        match crate::options::validate_encryption_options(&opts) {
+          Ok(()) => {
+            endpoint.set_encryption_options(opts);
+            Ok(())
+          }
+          Err(e) => Err(MemberlistError::Encryption(e)),
+        }
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
       // Ignoring Err: caller dropped the reply receiver.
-      let _ = reply.send_async(Ok(())).await;
+      let _ = reply.send_async(res).await;
+    }
+    Command::QueueUserBroadcast(cmd) => {
+      // Gate on a running node FIRST: after `leave()` the gossip scheduler
+      // is stopped, so `user_broadcasts` would never drain. Then validate
+      // the framed lone `UserData` packet against the gossip budget: an
+      // over-budget payload is deterministically untransmittable, so the
+      // machine setter rejects it without storing it — surface that as
+      // `PayloadTooLarge` rather than a false `Ok`. The single-task driver
+      // makes the check + apply atomic.
+      let res: Result<()> = if endpoint.is_running() {
+        endpoint
+          .queue_user_broadcast(cmd.data().clone())
+          .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
+      // Ignoring Err: caller dropped the reply receiver.
+      let _ = cmd.reply().send_async(res).await;
+    }
+    Command::SetLocalState(cmd) => {
+      // Gate on a running node FIRST: after `leave()` no push/pull
+      // exchange will carry the snapshot, so reject with `NotRunning`. Then
+      // validate the framed-PushPull size against the reliable-stream frame
+      // budget: a snapshot whose framed PushPull exceeds it would be rejected
+      // by every receiver's frame-length gate, so the application state would
+      // never reach a peer. The machine setter rejects such a snapshot without
+      // storing it; surface that as `PayloadTooLarge` rather than a false `Ok`.
+      let res: Result<()> = if endpoint.is_running() {
+        endpoint
+          .set_local_state_snapshot(cmd.state().clone())
+          .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
+      // Ignoring Err: caller dropped the reply receiver.
+      let _ = cmd.reply().send_async(res).await;
+    }
+    Command::SetAckPayload(cmd) => {
+      // Gate on a running node FIRST: after `leave()` no probe ack will
+      // carry the payload, so reject with `NotRunning`. Then validate the
+      // framed-ack size against the gossip packet budget: an over-budget ack
+      // is emitted as a single UDP datagram that always fails to send, so a
+      // probing peer would receive no ack and falsely suspect this node. The
+      // machine setter rejects such a payload without storing it; surface
+      // that as `PayloadTooLarge` rather than a false `Ok`.
+      let res: Result<()> = if endpoint.is_running() {
+        endpoint
+          .set_ack_payload(cmd.payload().clone())
+          .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
+      // Ignoring Err: caller dropped the reply receiver.
+      let _ = cmd.reply().send_async(res).await;
     }
     Command::Shutdown(ShutdownCmd { reply }) => {
       // Stash the reply for the post-loop cleanup. Acking AFTER the
@@ -824,55 +1210,7 @@ where
   loop {
     let mut iter_progress = false;
 
-    // 1. Events — reduce `pending_joins` on push/pull
-    //    `ExchangeCompleted`, then forward to subscribers. `Full` ⇒
-    //    count the drop into `events_dropped`; `Disconnected` ⇒ no
-    //    subscribers, silently absorb (not a gap).
-    //
-    // Per-exchange contact accounting. The machine's
-    // `ExchangeCompleted` event carries the terminal outcome of every
-    // outbound bridge — push/pull, reliable ping, and reliable
-    // user-message. Sync-join consumes only `ExchangeKind::PushPull`
-    // completions: a reliable-ping bridge resolving has no bearing on
-    // a `join_with` waiter's contact count, and a user-message bridge
-    // is one-way fire-and-forget. Filter on the payload's `kind()`
-    // before reducing `pending_joins`. For every synchronous-join
-    // waiter that dispatched this exact `ExchangeId`, remove the eid
-    // from its `pending` set (always, regardless of outcome — the
-    // exchange has terminated) and increment `contacted` iff the
-    // outcome is `Succeeded`. Tracking by `ExchangeId` (not by
-    // `SocketAddr`) gives correct duplicate-seed semantics. An eid
-    // belongs to at most one waiter (the `WaitForCompletion` arm
-    // captures each dispatched eid into the waiter that allocated
-    // it), so the inner loop breaks on the first match.
-    while let Some(ev) = state.endpoint.poll_event() {
-      iter_progress = true;
-      if let Event::ExchangeCompleted(ref payload) = ev
-        && payload.kind() == ExchangeKind::PushPull
-      {
-        let eid = payload.eid();
-        let succeeded = matches!(payload.outcome(), ExchangeOutcome::Succeeded);
-        for pj in state.pending_joins.values_mut() {
-          if pj.pending.remove(&eid) {
-            if succeeded {
-              pj.contacted += 1;
-            }
-            break;
-          }
-        }
-      }
-      match state.events_tx.try_send(ev) {
-        Ok(()) => {}
-        Err(flume::TrySendError::Full(_)) => {
-          state.events_dropped.fetch_add(1, Ordering::Relaxed);
-        }
-        Err(flume::TrySendError::Disconnected(_)) => {
-          // No subscribers — silently absorb (not a gap).
-        }
-      }
-    }
-
-    // 2. Inbound memberlist datagrams — decrypt, strip optional
+    // 1. Inbound memberlist datagrams — decrypt, strip optional
     //    label, decode the inner frame(s) (plain or compound), and
     //    feed each message back via `handle_packet`. Any decode failure
     //    (truncated, bad label, bad tag, trailing bytes,
@@ -900,7 +1238,7 @@ where
       }
     }
 
-    // 3. Outbound memberlist transmits — encode (plain or compound),
+    // 2. Outbound memberlist transmits — encode (plain or compound),
     //    then compress + encrypt + send on the shared UDP socket.
     //    `encode_outgoing*` only fails on a typed↔buffa bridge error
     //    that round-trips a locally-built message; matches the
@@ -942,7 +1280,7 @@ where
       let _ = res;
     }
 
-    // 4. Raw QUIC datagrams (handshake, acks, application stream
+    // 3. Raw QUIC datagrams (handshake, acks, application stream
     //    data) — already framed by quinn-proto, no codec wrap.
     while let Some((dest, bytes)) = state.endpoint.poll_transmit() {
       iter_progress = true;
@@ -953,18 +1291,192 @@ where
       let _ = res;
     }
 
+    // 4. Events — synchronous protocol accounting + hand-off to the
+    //    observation task. Drains `poll_event` to empty doing ONLY the
+    //    sync protocol accounting (join contact reduction + completion
+    //    reply, leave-completion resolution), then hands each event to
+    //    the per-driver observation task via the non-blocking `obs_tx`.
+    //
+    // The observation task (spawned in `quic_driver_loop`) owns the
+    // user `Delegate` and the `EventStream` sender; it dispatches the
+    // matching `notify_*` / `merge_remote_state` hook then forwards to
+    // subscribers, OFF this driver task. The driver therefore never
+    // `.await`s user observation code, so a slow hook cannot stall
+    // protocol advancement. This is what decouples join completion from
+    // observation latency on QUIC, where a join's `ExchangeCompleted`
+    // arrives on a SEPARATE inbound datagram AFTER the one that surfaced
+    // its `NodeJoined` — a driver that blocked on that `NodeJoined`'s
+    // `notify_join` could not recv the completion datagram (the recv
+    // arm is on this same task) and the parked join reply would wait
+    // out the full hook. The `obs_tx` hand-off is a non-blocking `try_send`;
+    // on a bounded channel (the default) a burst that outpaces the observation
+    // task yields once to let it drain, then drops + counts the overflow only
+    // if the task still cannot keep up — so a fast delegate never loses a
+    // valid burst (including the application-data `UserPacket` /
+    // `RemoteStateReceived` payloads that `members()` cannot reconstruct)
+    // while memory stays bounded under a slow/stuck handler.
+
+    // Synchronous accounting only — no `.await` on user code.
+    while let Some(ev) = state.endpoint.poll_event() {
+      iter_progress = true;
+      // Per-exchange contact accounting. The machine's
+      // `ExchangeCompleted` event carries the terminal outcome of every
+      // outbound bridge — push/pull, reliable ping, and reliable
+      // user-message. Sync-join consumes only `ExchangeKind::PushPull`
+      // completions: a reliable-ping bridge resolving has no bearing on
+      // a `join_with` waiter's contact count, and a user-message bridge
+      // is one-way fire-and-forget. Filter on the payload's `kind()`
+      // before reducing `pending_joins`. For the synchronous-join waiter
+      // that dispatched this exact `ExchangeId`, remove the eid from its
+      // `pending` set (always, regardless of outcome — the exchange has
+      // terminated) and increment `contacted` iff the outcome is
+      // `Succeeded`. Tracking by `ExchangeId` (not by `SocketAddr`)
+      // gives correct duplicate-seed semantics. An eid belongs to at
+      // most one waiter (the `WaitForCompletion` arm captures each
+      // dispatched eid into the waiter that allocated it), so the search
+      // stops on the first match.
+      //
+      // The COMPLETION reply (the waiter's `pending` is now empty) fires
+      // RIGHT HERE on the driver task — the observation hooks
+      // (`notify_join` / `merge_remote_state`) for the co-surfaced
+      // `NodeJoined` / `RemoteStateReceived` run off-loop on the
+      // observation task — so a slow hook cannot delay `join_with`'s
+      // `Ok(contacted)`, mirroring the `LeftCluster` leave resolution
+      // below. The DEADLINE path (a waiter still non-empty when its
+      // `deadline` elapses) stays in `reap_pending_joins`; a waiter
+      // replied + removed here is gone from `pending_joins`, so it can
+      // never be double-replied by the reaper.
+      if let Event::ExchangeCompleted(ref payload) = ev
+        && payload.kind() == ExchangeKind::PushPull
+      {
+        let eid = payload.eid();
+        let succeeded = matches!(payload.outcome(), ExchangeOutcome::Succeeded);
+        let completed_key = state
+          .pending_joins
+          .iter_mut()
+          .find_map(|(key, pj)| {
+            if pj.pending.remove(&eid) {
+              if succeeded {
+                pj.contacted += 1;
+              }
+              Some((*key, pj.pending.is_empty()))
+            } else {
+              None
+            }
+          })
+          .and_then(|(key, empty)| empty.then_some(key));
+        if let Some(key) = completed_key
+          && let Some(pj) = state.pending_joins.remove(&key)
+        {
+          // Fully resolved — reply now and drop the waiter. `contacted`
+          // is final (the FSM emits one `ExchangeCompleted` per
+          // dispatched exchange, so an empty `pending` set means every
+          // outbound exchange this call dispatched has terminated). A
+          // zero-contact resolution is the same `JoinAllFailed` the
+          // reaper would have produced.
+          let reply_value = if pj.contacted == 0 {
+            Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
+              pj.requested,
+              0,
+            )))
+          } else {
+            Ok(pj.contacted)
+          };
+          // Ignoring Err: caller dropped the reply receiver (e.g. the
+          // user-facing join_with future was cancelled).
+          let _ = pj.reply.send_async(reply_value).await;
+        }
+      }
+      // Leave-completion resolution. `LeftCluster` fires once the
+      // direct `Dead`-self notices queued by `leave()` have drained to
+      // the wire; resolving the parked waiter here — on this driver
+      // task, ahead of the observation task's `notify_leave` — is what
+      // makes `leave()` return promptly once the flush is done rather
+      // than waiting on delegate latency.
+      if matches!(ev, Event::LeftCluster)
+        && let Some(pl) = state.pending_leave.take()
+      {
+        // Resolve EVERY joined replier (the initiator plus any racing
+        // clones) with `Ok(())`.
+        pl.resolve_all(|| Ok(())).await;
+      }
+      // Payload-bearing events (`UserPacket` / `RemoteStateReceived`) can each
+      // own up to `max_stream_frame_size` bytes; size this one for the byte
+      // backstop (`None` for small membership / control events).
+      let payload_bytes = crate::driver::observation_payload_bytes(&ev);
+
+      // Byte backstop (bounded channels only): the count cap does not bound
+      // memory when events carry large reliable payloads. If enqueueing this
+      // payload event would push the queued payload bytes over budget, yield
+      // once so the observation task can drain (it subtracts as it dequeues),
+      // re-check, and drop + count if still over. Draining PAST the dropped
+      // event (via `continue`) preserves the obs decoupling — the
+      // `ExchangeCompleted` that fires a parked join/leave reply is never
+      // delayed by a backed-up delegate.
+      if let (Some(budget), Some(bytes)) = (state.obs_payload_budget, payload_bytes) {
+        if state
+          .obs_payload_bytes
+          .load(Ordering::Relaxed)
+          .saturating_add(bytes)
+          > budget
+        {
+          crate::driver::yield_once().await;
+        }
+        if state
+          .obs_payload_bytes
+          .load(Ordering::Relaxed)
+          .saturating_add(bytes)
+          > budget
+        {
+          state.observation_dropped.fetch_add(1, Ordering::Relaxed);
+          continue;
+        }
+      }
+
+      // Hand off to the observation task (delegate dispatch + EventStream
+      // forward, off this driver task), non-blocking. `Disconnected` means the
+      // task exited at teardown — drop the undeliverable event. `Full` means
+      // the bounded channel is at its count capacity; yield once so the
+      // observation task can drain (a fast delegate empties it in that
+      // quantum), then retry; drop + count ONLY if still full (a slow/stuck
+      // delegate) — bounding memory without an indefinite SWIM stall. On a
+      // successful enqueue, add the payload bytes to the backstop counter.
+      match state.obs_tx.try_send(ev) {
+        Ok(()) => crate::driver::add_obs_payload(&state.obs_payload_bytes, payload_bytes),
+        Err(flume::TrySendError::Disconnected(_)) => {}
+        Err(flume::TrySendError::Full(ev)) => {
+          crate::driver::yield_once().await;
+          match state.obs_tx.try_send(ev) {
+            Ok(()) => crate::driver::add_obs_payload(&state.obs_payload_bytes, payload_bytes),
+            Err(_) => {
+              state.observation_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+          }
+        }
+      }
+    }
+
     if !iter_progress {
       break;
     }
     any_progress = true;
   }
+
   any_progress
 }
 
-/// Reap fully-resolved or deadline-expired entries from
-/// `pending_joins`. Called after every drain block. Replies + removes
-/// every entry whose `pending` set is now empty OR whose `deadline`
-/// has elapsed. Mirrors the stream driver's `reap_pending_joins`
+/// Reap deadline-expired entries from `pending_joins`. Called after
+/// every drain block. The normal COMPLETION path (a waiter whose
+/// `pending` set drained to empty) now resolves inline in the
+/// `drain_actions` events step — on the driver task, with observation
+/// dispatch off-loop — so a fully-resolved waiter is replied + removed
+/// there and is gone from `pending_joins` before this reaper runs (it
+/// can never be double-replied here). This reaper handles DEADLINE
+/// expiry (a still-non-empty waiter past its `deadline` replies with its
+/// partial `contacted`) and the degenerate insert-time-empty case (a
+/// `WaitForCompletion` that dispatched zero outbound exchanges never
+/// sees an `ExchangeCompleted`, so the empty-`pending` branch resolves
+/// it here). Mirrors the stream driver's `reap_pending_joins`
 /// (`memberlist-compio/src/driver.rs`).
 async fn reap_pending_joins(pending_joins: &mut HashMap<u64, PendingJoin>, now: Instant) {
   // Two-phase: collect ids to reap into a small vec, then drain. The
@@ -1001,6 +1513,36 @@ async fn reap_pending_joins(pending_joins: &mut HashMap<u64, PendingJoin>, now: 
 /// driver's `min_pending_join_deadline`.
 fn min_pending_join_deadline(pending_joins: &HashMap<u64, PendingJoin>) -> Option<Instant> {
   pending_joins.values().map(|pj| pj.deadline).min()
+}
+
+/// Reap a deadline-expired graceful-leave waiter.
+///
+/// Called alongside [`reap_pending_joins`] after every drain block. If
+/// `pending_leave`'s `deadline` has elapsed without the machine's
+/// `Event::LeftCluster` having resolved it (in `drain_actions`' events
+/// step), reply [`MemberlistError::LeaveTimeout`] and clear the slot. A
+/// successful `LeftCluster` resolution already cleared it, so this only
+/// fires on the timeout path. Mirrors the stream driver's
+/// `reap_pending_leave`.
+async fn reap_pending_leave(pending_leave: &mut Option<PendingLeave>, now: Instant) {
+  if let Some(pl) = pending_leave.as_ref()
+    && now >= pl.deadline
+  {
+    let pl = pending_leave.take().expect("checked Some above");
+    // Resolve EVERY joined replier (the initiator plus any racing
+    // clones) with `LeaveTimeout`.
+    pl.resolve_all(|| Err(MemberlistError::LeaveTimeout)).await;
+  }
+}
+
+/// Earliest pending-leave deadline, if any. Folded into the driver's
+/// per-iteration `timeout_deadline` and past-due trigger (alongside the
+/// pending-join deadline) so the leave timeout fires even under a
+/// continuous network flood that would otherwise keep the recv arm
+/// winning the select. Mirrors the stream driver's
+/// `min_pending_leave_deadline`.
+fn min_pending_leave_deadline(pending_leave: &Option<PendingLeave>) -> Option<Instant> {
+  pending_leave.as_ref().map(|pl| pl.deadline)
 }
 
 /// Publish a fresh snapshot of the coordinator's observable state to
