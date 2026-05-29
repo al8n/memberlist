@@ -425,19 +425,19 @@ impl ProtoDecoder {
     }
 
     // The header is varint-encoded: 1 byte tag + 1-5 bytes varint.
-    // Loop with peek() until we have enough bytes to decode the varint.
+    // Repeated peek() calls copy from the start of the unread stream,
+    // so we peek into the full buffer each time and track `available`
+    // as the total bytes returned rather than accumulating as a delta.
     let mut header = [0u8; super::MAX_PLAIN_MESSAGE_HEADER_SIZE];
-    let mut peeked = 0;
     let (length_delimited_size, total_len) = loop {
-      let n = reader.peek(&mut header[peeked..]).await?;
-      if n == 0 {
+      let available = reader.peek(&mut header).await?;
+      if available == 0 {
         return Err(Error::new(ErrorKind::UnexpectedEof, "stream closed during header peek"));
       }
-      peeked += n;
-      match varing::decode_u32_varint(&header[1..peeked]) {
+      match varing::decode_u32_varint(&header[1..available]) {
         Ok((len_bytes, total_len)) => {
           let total_header = 1 + len_bytes.get();
-          if total_header as usize <= peeked {
+          if total_header as usize <= available {
             break (len_bytes, total_len);
           }
         }
