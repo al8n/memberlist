@@ -1,8 +1,9 @@
-use std::{cmp, io, marker::PhantomData, net::SocketAddr, sync::Arc, time::Duration};
+use std::{io, marker::PhantomData, net::SocketAddr, ops::Deref, sync::Arc, time::Duration};
 
 use agnostic::Runtime;
 use futures::AsyncWriteExt;
-use memberlist_core::proto::MediumVec;
+use futures::io::AsyncReadExt;
+use peekable::future::AsyncPeekable;
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, VarInt};
 use smol_str::SmolStr;
 
@@ -10,6 +11,32 @@ mod options;
 pub use options::*;
 
 use super::{QuicAcceptor, QuicConnection, QuicConnector, QuicStream, StreamLayer};
+
+/// Shared endpoint wrapper that closes the underlying `Endpoint` only
+/// when the last holder drops it, preventing an acceptor from killing
+/// a connector (or vice versa) when they share a single `Endpoint`.
+struct SharedEndpoint(Arc<Endpoint>);
+
+impl Clone for SharedEndpoint {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl Deref for SharedEndpoint {
+    type Target = Endpoint;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for SharedEndpoint {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.0) == 1 {
+            Endpoint::close(&self.0, VarInt::from(0u32), b"endpoint shutdown");
+        }
+    }
+}
 
 /// [`Quinn`] is an implementation of [`StreamLayer`] based on [`quinn`].
 pub struct Quinn<R> {
@@ -48,19 +75,18 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
     addr: SocketAddr,
   ) -> io::Result<(SocketAddr, Self::Acceptor, Self::Connector)> {
     let server_name = self.opts.server_name.clone();
-
     let client_config = self.opts.client_config.clone();
     let sock = std::net::UdpSocket::bind(addr)?;
     let auto_port = addr.port() == 0;
 
-    let endpoint = Arc::new(Endpoint::new(
+    let shared_ep = SharedEndpoint(Arc::new(Endpoint::new(
       self.opts.endpoint_config.clone(),
       Some(self.opts.server_config.clone()),
       sock,
       Arc::new(R::quinn()),
-    )?);
+    )?));
 
-    let local_addr = endpoint.local_addr()?;
+    let local_addr = shared_ep.local_addr()?;
     if auto_port {
       tracing::info!(
         "memberlist_quic.endpoint: binding to dynamic addr {}",
@@ -69,17 +95,19 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
     }
 
     let acceptor = Self::Acceptor {
-      endpoint: endpoint.clone(),
+      endpoint: shared_ep.clone(),
       local_addr,
+      max_packet_size: self.opts.max_packet_size,
     };
 
     let connector = Self::Connector {
       server_name,
-      endpoint,
+      endpoint: shared_ep,
       local_addr,
       client_config,
       connect_timeout: self.opts.connect_timeout,
       _marker: PhantomData,
+      max_packet_size: self.opts.max_packet_size,
     };
     Ok((local_addr, acceptor, connector))
   }
@@ -87,8 +115,9 @@ impl<R: Runtime> StreamLayer for Quinn<R> {
 
 /// [`QuinnAcceptor`] is an implementation of [`QuicAcceptor`] based on [`quinn`].
 pub struct QuinnAcceptor {
-  endpoint: Arc<Endpoint>,
+  endpoint: SharedEndpoint,
   local_addr: SocketAddr,
+  max_packet_size: usize,
 }
 
 impl Clone for QuinnAcceptor {
@@ -96,6 +125,7 @@ impl Clone for QuinnAcceptor {
     Self {
       endpoint: self.endpoint.clone(),
       local_addr: self.local_addr,
+      max_packet_size: self.max_packet_size,
     }
   }
 }
@@ -113,13 +143,13 @@ impl QuicAcceptor for QuinnAcceptor {
     let remote_addr = conn.remote_address();
 
     Ok((
-      QuinnConnection::new(conn, self.local_addr, remote_addr),
+      QuinnConnection::new(conn, self.local_addr, remote_addr, self.max_packet_size),
       remote_addr,
     ))
   }
 
   async fn close(&mut self) -> io::Result<()> {
-    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close acceptor");
+    self.endpoint.close(VarInt::from(0u32), b"close acceptor");
     Ok(())
   }
 
@@ -128,20 +158,15 @@ impl QuicAcceptor for QuinnAcceptor {
   }
 }
 
-impl Drop for QuinnAcceptor {
-  fn drop(&mut self) {
-    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close acceptor");
-  }
-}
-
 /// [`QuinnConnector`] is an implementation of [`QuicConnector`] based on [`quinn`].
 pub struct QuinnConnector<R> {
   server_name: SmolStr,
-  endpoint: Arc<Endpoint>,
+  endpoint: SharedEndpoint,
   client_config: ClientConfig,
   connect_timeout: Duration,
   local_addr: SocketAddr,
   _marker: PhantomData<R>,
+  max_packet_size: usize,
 }
 
 impl<R> QuicConnector for QuinnConnector<R>
@@ -158,11 +183,11 @@ where
     let conn = R::timeout(self.connect_timeout, connecting)
       .await
       .map_err(io::Error::from)??;
-    Ok(QuinnConnection::new(conn, self.local_addr, addr))
+    Ok(QuinnConnection::new(conn, self.local_addr, addr, self.max_packet_size))
   }
 
   async fn close(&self) -> io::Result<()> {
-    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close connector");
+    self.endpoint.close(VarInt::from(0u32), b"close connector");
     Ok(())
   }
 
@@ -176,172 +201,28 @@ where
   }
 }
 
-impl<R> Drop for QuinnConnector<R> {
-  fn drop(&mut self) {
-    Endpoint::close(&self.endpoint, VarInt::from(0u32), b"close connector");
-  }
-}
-
-/// A [`ProtoReader`](memberlist_core::proto::ProtoReader) implementation for Quinn stream layer
-pub struct QuinnProtoReader {
-  stream: RecvStream,
-  peek_buf: MediumVec<u8>,
-}
-
-impl From<RecvStream> for QuinnProtoReader {
-  fn from(stream: RecvStream) -> Self {
-    Self {
-      stream,
-      peek_buf: MediumVec::new(),
-    }
-  }
-}
-
-impl memberlist_core::proto::ProtoReader for QuinnProtoReader {
-  async fn peek(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-    let dst_len = buf.len();
-    let peek_len = self.peek_buf.len();
-
-    match dst_len.cmp(&peek_len) {
-      cmp::Ordering::Less => {
-        buf.copy_from_slice(&self.peek_buf[..dst_len]);
-        Ok(dst_len)
-      }
-      cmp::Ordering::Equal => {
-        buf.copy_from_slice(&self.peek_buf);
-        Ok(peek_len)
-      }
-      cmp::Ordering::Greater => {
-        let want = dst_len - peek_len;
-        self.peek_buf.resize(dst_len, 0);
-        match self
-          .stream
-          .read(&mut self.peek_buf[peek_len..peek_len + want])
-          .await
-        {
-          Ok(Some(n)) => {
-            let has = peek_len + n;
-            if n < want {
-              self.peek_buf.truncate(has);
-            }
-            buf[..has].copy_from_slice(&self.peek_buf);
-            Ok(peek_len + n)
-          }
-          Ok(None) | Err(_) => {
-            self.peek_buf.truncate(peek_len);
-            buf[..peek_len].copy_from_slice(&self.peek_buf);
-            Ok(peek_len)
-          }
-        }
-      }
-    }
-  }
-
-  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
-    let dst_len = buf.len();
-    let peek_len = self.peek_buf.len();
-
-    match dst_len.cmp(&peek_len) {
-      cmp::Ordering::Less => {
-        buf.copy_from_slice(&self.peek_buf[..dst_len]);
-        Ok(())
-      }
-      cmp::Ordering::Equal => {
-        buf.copy_from_slice(&self.peek_buf);
-        Ok(())
-      }
-      cmp::Ordering::Greater => {
-        self.peek_buf.resize(dst_len, 0);
-        let mut total = peek_len;
-        while total < dst_len {
-          let n = self
-            .stream
-            .read(&mut self.peek_buf[total..])
-            .await?
-            .unwrap_or(0);
-          if n == 0 {
-            return Err(std::io::Error::new(
-              std::io::ErrorKind::UnexpectedEof,
-              "unexpected eof",
-            ));
-          }
-          total += n;
-        }
-        buf.copy_from_slice(&self.peek_buf);
-        Ok(())
-      }
-    }
-  }
-
-  async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-    let dst_len = buf.len();
-    let peek_len = self.peek_buf.len();
-
-    if dst_len <= peek_len {
-      buf.copy_from_slice(&self.peek_buf[..dst_len]);
-      self.peek_buf.drain(..dst_len);
-      Ok(dst_len)
-    } else {
-      buf[..peek_len].copy_from_slice(&self.peek_buf);
-      self.peek_buf.clear();
-      let mut total = peek_len;
-      while total < dst_len {
-        let n = self.stream.read(&mut buf[total..]).await?.unwrap_or(0);
-        if n == 0 {
-          break;
-        }
-        total += n;
-      }
-      Ok(total)
-    }
-  }
-
-  async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
-    let dst_len = buf.len();
-    let peek_len = self.peek_buf.len();
-
-    if dst_len <= peek_len {
-      buf.copy_from_slice(&self.peek_buf[..dst_len]);
-      self.peek_buf.drain(..dst_len);
-      Ok(())
-    } else {
-      buf[..peek_len].copy_from_slice(&self.peek_buf);
-      self.peek_buf.clear();
-      let mut total = peek_len;
-      while total < dst_len {
-        let n = self.stream.read(&mut buf[total..]).await?.unwrap_or(0);
-        if n == 0 {
-          return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "unexpected eof",
-          ));
-        }
-        total += n;
-      }
-      Ok(())
-    }
-  }
-}
-
 /// [`QuinnStream`] is an implementation of [`QuicStream`] based on [`quinn`].
+/// Uses `AsyncPeekable` from the `peekable` crate for peek/read operations
+/// instead of a hand-rolled `QuinnProtoReader`.
 pub struct QuinnStream {
   send: SendStream,
-  recv: QuinnProtoReader,
+  recv: AsyncPeekable<RecvStream>,
+  max_packet_size: usize,
 }
 
 impl QuinnStream {
   #[inline]
-  fn new(send: SendStream, recv: RecvStream) -> Self {
+  fn new(send: SendStream, recv: RecvStream, max_packet_size: usize) -> Self {
     Self {
       send,
-      recv: recv.into(),
+      recv: AsyncPeekable::from(recv),
+      max_packet_size,
     }
   }
 }
 
 impl memberlist_core::transport::Connection for QuinnStream {
-  type Reader = QuinnProtoReader;
-
+  type Reader = AsyncPeekable<RecvStream>;
   type Writer = SendStream;
 
   fn split(self) -> (Self::Reader, Self::Writer) {
@@ -375,38 +256,32 @@ impl memberlist_core::transport::Connection for QuinnStream {
   async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
     memberlist_core::proto::ProtoReader::peek_exact(&mut self.recv, buf).await
   }
-
-  fn consume_peek(&mut self) {
-    self.recv.peek_buf.clear();
-  }
 }
 
 impl QuicStream for QuinnStream {
   type SendStream = SendStream;
 
   async fn read_packet(&mut self) -> std::io::Result<bytes::Bytes> {
-    // TODO(al8n): make size limit configurable?
-    self
-      .recv
-      .stream
-      .read_to_end(u32::MAX as usize)
-      .await
-      .map(|data| {
-        if !self.recv.peek_buf.is_empty() {
-          let mut buf = bytes::BytesMut::with_capacity(self.recv.peek_buf.len() + data.len());
-          buf.extend_from_slice(&self.recv.peek_buf);
-          buf.extend_from_slice(&data);
-          buf.freeze()
-        } else {
-          data.into()
-        }
-      })
-      .map_err(|e| match e {
-        quinn::ReadToEndError::Read(e) => std::io::Error::from(e),
-        quinn::ReadToEndError::TooLong => {
-          std::io::Error::new(std::io::ErrorKind::InvalidData, "packet too large")
-        }
-      })
+    // AsyncPeekable implements AsyncRead. Read in a loop until EOF,
+    // enforcing the max_packet_size limit.
+    let mut buf = bytes::BytesMut::with_capacity(4096);
+    loop {
+      let len = buf.len();
+      buf.resize(len + 4096, 0);
+      let n = self.recv.read(&mut buf[len..]).await?;
+      if n == 0 {
+        buf.truncate(len);
+        break;
+      }
+      buf.truncate(len + n);
+      if buf.len() > self.max_packet_size {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::InvalidData,
+          "packet too large",
+        ));
+      }
+    }
+    Ok(buf.freeze())
   }
 }
 
@@ -415,15 +290,28 @@ pub struct QuinnConnection {
   conn: Connection,
   local_addr: SocketAddr,
   remote_addr: SocketAddr,
+  max_packet_size: usize,
+}
+
+impl Clone for QuinnConnection {
+  fn clone(&self) -> Self {
+    Self {
+      conn: self.conn.clone(),
+      local_addr: self.local_addr,
+      remote_addr: self.remote_addr,
+      max_packet_size: self.max_packet_size,
+    }
+  }
 }
 
 impl QuinnConnection {
   #[inline]
-  fn new(conn: Connection, local_addr: SocketAddr, remote_addr: SocketAddr) -> Self {
+  fn new(conn: Connection, local_addr: SocketAddr, remote_addr: SocketAddr, max_packet_size: usize) -> Self {
     Self {
       conn,
       local_addr,
       remote_addr,
+      max_packet_size,
     }
   }
 }
@@ -433,12 +321,12 @@ impl QuicConnection for QuinnConnection {
 
   async fn accept_bi(&self) -> io::Result<(Self::Stream, SocketAddr)> {
     let (send, recv) = self.conn.accept_bi().await?;
-    Ok((QuinnStream::new(send, recv), self.remote_addr))
+    Ok((QuinnStream::new(send, recv, self.max_packet_size), self.remote_addr))
   }
 
   async fn open_bi(&self) -> io::Result<(Self::Stream, SocketAddr)> {
     let (send, recv) = self.conn.open_bi().await?;
-    Ok((QuinnStream::new(send, recv), self.remote_addr))
+    Ok((QuinnStream::new(send, recv, self.max_packet_size), self.remote_addr))
   }
 
   async fn close(&self) -> io::Result<()> {

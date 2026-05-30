@@ -498,10 +498,23 @@ where
       .transport_send_packets(to, msgs.map(Message::UserData).collect::<OneOrMore<_>>())
       .await;
     futures::pin_mut!(stream);
-    match stream.next().await {
-      None => Ok(()),
-      Some(Ok(_)) => Ok(()),
-      Some(Err(e)) => Err(e),
+
+    let errs = stream
+      .filter_map(|res| async move {
+        match res {
+          Ok(()) => None,
+          Err(e) => Some(e),
+        }
+      })
+      .collect::<OneOrMore<_>>()
+      .await;
+
+    match errs.len() {
+      0 => Ok(()),
+      _ => match errs.into_either() {
+        either::Either::Left([e]) => Err(e),
+        either::Either::Right(e) => Err(Error::Multiple(e.into_vec().into())),
+      },
     }
   }
 

@@ -88,6 +88,16 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   timeout: Option<Duration>,
 
+  /// Maximum packet size in bytes. Used as an upper bound when computing
+  /// the effective `max_packet_size` for the transport.
+  ///
+  /// Default is `usize::MAX`.
+  #[viewit(
+    getter(const, attrs(doc = "Get the maximum packet size in bytes.")),
+    setter(attrs(doc = "Set the maximum packet size in bytes. (Builder pattern)"))
+  )]
+  max_packet_size: usize,
+
   /// The period of time to cleanup the connection pool.
   #[cfg_attr(
     feature = "serde",
@@ -102,7 +112,7 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
   )]
   connection_pool_cleanup_period: Duration,
 
-  /// The time to live for each connection in the connection pool. Default is `None`.
+  /// The time to live for each connection in the connection pool. Default is 30 seconds.
   #[viewit(
     getter(
       const,
@@ -163,6 +173,17 @@ pub struct QuicTransportOptions<I, A: AddressResolver<ResolvedAddress = SocketAd
     serde(default, skip_serializing_if = "Option::is_none")
   )]
   metric_labels: Option<Arc<memberlist_core::proto::MetricLabels>>,
+
+  /// The capacity of the packet receiving channel, i.e., the maximum number of
+  /// packets that can be buffered before backpressure is applied.
+  /// This is NOT a byte size.
+  ///
+  /// Default is `1000`.
+  #[viewit(
+    getter(const, attrs(doc = "Get the packet buffer capacity (number of packets, not bytes). Default is `1000`."),),
+    setter(attrs(doc = "Set the packet buffer capacity (number of packets, not bytes). Default is `1000`. (Builder pattern)"),)
+  )]
+  packet_buffer_size: usize,
 }
 
 impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer> Clone
@@ -183,9 +204,11 @@ where
       stream_layer: self.stream_layer.clone(),
       timeout: self.timeout,
       connection_pool_cleanup_period: self.connection_pool_cleanup_period,
+      max_packet_size: self.max_packet_size,
       cidrs_policy: self.cidrs_policy.clone(),
       #[cfg(feature = "metrics")]
       metric_labels: self.metric_labels.clone(),
+      packet_buffer_size: self.packet_buffer_size,
     }
   }
 }
@@ -245,13 +268,15 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
       timeout: None,
       bind_addresses: IndexSet::new(),
       advertise_address: None,
-      connection_ttl: None,
+      connection_ttl: Some(Duration::from_secs(30)),
       resolver: resolver_options,
       stream_layer: stream_layer_opts,
       cidrs_policy: CIDRsPolicy::allow_all(),
       connection_pool_cleanup_period: default_connection_pool_cleanup_period(),
+      max_packet_size: usize::MAX,
       #[cfg(feature = "metrics")]
       metric_labels: None,
+      packet_buffer_size: 1000,
     }
   }
 
@@ -289,8 +314,10 @@ impl<I, A: AddressResolver<ResolvedAddress = SocketAddr>, S: StreamLayer>
         timeout: opts.timeout,
         connection_pool_cleanup_period: opts.connection_pool_cleanup_period,
         cidrs_policy: opts.cidrs_policy,
+        max_packet_size: opts.max_packet_size,
         #[cfg(feature = "metrics")]
         metric_labels: opts.metric_labels,
+        packet_buffer_size: opts.packet_buffer_size,
       },
     )
   }
@@ -305,6 +332,8 @@ pub(crate) struct Options<I, A: AddressResolver<ResolvedAddress = SocketAddr>> {
   connection_pool_cleanup_period: Duration,
   connection_ttl: Option<Duration>,
   cidrs_policy: CIDRsPolicy,
+  max_packet_size: usize,
   #[cfg(feature = "metrics")]
   metric_labels: Option<Arc<memberlist_core::proto::MetricLabels>>,
+  packet_buffer_size: usize,
 }

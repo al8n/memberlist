@@ -370,11 +370,11 @@ impl<R: Runtime> memberlist_core::transport::Connection for TlsStream<R> {
     }
   }
 
-  fn consume_peek(&mut self) {
-    let _ = match &mut self.stream {
-      TlsStreamKind::Client { stream } => stream.consume(),
-      TlsStreamKind::Server { stream } => stream.consume(),
-    };
+  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+    match &mut self.stream {
+      TlsStreamKind::Client { stream } => stream.peek_exact(buf).await,
+      TlsStreamKind::Server { stream } => stream.peek_exact(buf).await,
+    }
   }
 
   async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
@@ -383,13 +383,6 @@ impl<R: Runtime> memberlist_core::transport::Connection for TlsStream<R> {
 
   async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
     AsyncReadExt::read(self, buf).await
-  }
-
-  async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
-    match &mut self.stream {
-      TlsStreamKind::Client { stream } => stream.peek_exact(buf).await,
-      TlsStreamKind::Server { stream } => stream.peek_exact(buf).await,
-    }
   }
 }
 

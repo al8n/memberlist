@@ -142,14 +142,14 @@ where
     match kind {
       Kind::V4(idx) => {
         if let Ok(sockets) = self.v4_sockets.try_borrow() {
-          Some(sockets[idx].clone())
+          sockets.get(idx).cloned()
         } else {
           None
         }
       }
       Kind::V6(idx) => {
         if let Ok(sockets) = self.v6_sockets.try_borrow() {
-          Some(sockets[idx].clone())
+          sockets.get(idx).cloned()
         } else {
           None
         }
@@ -197,7 +197,7 @@ where
     }
 
     let (stream_tx, stream_rx) = promised_stream::<Self>();
-    let (packet_tx, packet_rx) = packet_stream::<Self>();
+    let (packet_tx, packet_rx) = packet_stream::<Self>(opts.packet_buffer_size);
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
 
     let mut v4_promised_listeners = Vec::with_capacity(opts.bind_addresses.len());

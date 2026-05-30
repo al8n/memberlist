@@ -95,10 +95,6 @@ impl Connection for UnimplementedConnection {
     unimplemented!()
   }
 
-  fn consume_peek(&mut self) {
-    unimplemented!()
-  }
-
   async fn write_all(&mut self, _: &[u8]) -> std::io::Result<()> {
     unimplemented!()
   }
