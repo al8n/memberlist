@@ -253,14 +253,17 @@ pub enum EncryptionError {
 /// This is the always-on precheck called at the top of `encrypt` and
 /// `decrypt` before the feature-gated `match algo` dispatch.
 const fn key_matches_algorithm(algo: EncryptAlgorithm, key: &SecretKey) -> bool {
-  match (algo, key) {
+  matches!(
+    (algo, key),
     (EncryptAlgorithm::AesGcm, SecretKey::Aes128(_))
-    | (EncryptAlgorithm::AesGcm, SecretKey::Aes192(_))
-    | (EncryptAlgorithm::AesGcm, SecretKey::Aes256(_)) => true,
-    (EncryptAlgorithm::ChaCha20Poly1305, SecretKey::ChaCha20Poly1305(_)) => true,
-    (EncryptAlgorithm::Unknown(_), _) => true,
-    _ => false,
-  }
+      | (EncryptAlgorithm::AesGcm, SecretKey::Aes192(_))
+      | (EncryptAlgorithm::AesGcm, SecretKey::Aes256(_))
+      | (
+        EncryptAlgorithm::ChaCha20Poly1305,
+        SecretKey::ChaCha20Poly1305(_)
+      )
+      | (EncryptAlgorithm::Unknown(_), _)
+  )
 }
 
 /// Encrypt `plaintext` with `algo` and `key` using `nonce` and `aad`. A pure
@@ -328,33 +331,32 @@ fn aes_gcm_encrypt(
   use aead::{AeadInPlace, KeyInit};
   use aes_gcm::{
     Aes128Gcm, Aes256Gcm, AesGcm,
-    aes::{
-      Aes192,
-      cipher::{consts::U12, generic_array::GenericArray},
-    },
+    aes::{Aes192, cipher::consts::U12},
   };
 
   type Aes192Gcm = AesGcm<Aes192, U12>;
 
-  let nonce_ga = GenericArray::from_slice(nonce);
+  // The owned key/nonce byte arrays convert into the cipher's `GenericArray`-backed
+  // `Key`/`Nonce` types through `From<[u8; N]>`, keeping us off the deprecated
+  // `GenericArray::from_slice` constructor (`generic-array` 0.14 nudges toward 1.x).
   let mut buf = plaintext.to_vec();
   match key {
     SecretKey::Aes128(k) => {
-      let cipher = Aes128Gcm::new(GenericArray::from_slice(k));
+      let cipher = Aes128Gcm::new(&(*k).into());
       cipher
-        .encrypt_in_place(nonce_ga, aad, &mut buf)
+        .encrypt_in_place(&(*nonce).into(), aad, &mut buf)
         .map_err(|_| EncryptionError::AuthFailed)?;
     }
     SecretKey::Aes192(k) => {
-      let cipher = Aes192Gcm::new(GenericArray::from_slice(k));
+      let cipher = Aes192Gcm::new(&(*k).into());
       cipher
-        .encrypt_in_place(nonce_ga, aad, &mut buf)
+        .encrypt_in_place(&(*nonce).into(), aad, &mut buf)
         .map_err(|_| EncryptionError::AuthFailed)?;
     }
     SecretKey::Aes256(k) => {
-      let cipher = Aes256Gcm::new(GenericArray::from_slice(k));
+      let cipher = Aes256Gcm::new(&(*k).into());
       cipher
-        .encrypt_in_place(nonce_ga, aad, &mut buf)
+        .encrypt_in_place(&(*nonce).into(), aad, &mut buf)
         .map_err(|_| EncryptionError::AuthFailed)?;
     }
     SecretKey::ChaCha20Poly1305(_) => {
@@ -375,33 +377,31 @@ fn aes_gcm_decrypt(
   use aead::{AeadInPlace, KeyInit};
   use aes_gcm::{
     Aes128Gcm, Aes256Gcm, AesGcm,
-    aes::{
-      Aes192,
-      cipher::{consts::U12, generic_array::GenericArray},
-    },
+    aes::{Aes192, cipher::consts::U12},
   };
 
   type Aes192Gcm = AesGcm<Aes192, U12>;
 
-  let nonce_ga = GenericArray::from_slice(nonce);
+  // See `aes_gcm_encrypt`: `From<[u8; N]>` builds the cipher key/nonce, avoiding
+  // the deprecated `GenericArray::from_slice`.
   let mut buf = ciphertext.to_vec();
   match key {
     SecretKey::Aes128(k) => {
-      let cipher = Aes128Gcm::new(GenericArray::from_slice(k));
+      let cipher = Aes128Gcm::new(&(*k).into());
       cipher
-        .decrypt_in_place(nonce_ga, aad, &mut buf)
+        .decrypt_in_place(&(*nonce).into(), aad, &mut buf)
         .map_err(|_| EncryptionError::AuthFailed)?;
     }
     SecretKey::Aes192(k) => {
-      let cipher = Aes192Gcm::new(GenericArray::from_slice(k));
+      let cipher = Aes192Gcm::new(&(*k).into());
       cipher
-        .decrypt_in_place(nonce_ga, aad, &mut buf)
+        .decrypt_in_place(&(*nonce).into(), aad, &mut buf)
         .map_err(|_| EncryptionError::AuthFailed)?;
     }
     SecretKey::Aes256(k) => {
-      let cipher = Aes256Gcm::new(GenericArray::from_slice(k));
+      let cipher = Aes256Gcm::new(&(*k).into());
       cipher
-        .decrypt_in_place(nonce_ga, aad, &mut buf)
+        .decrypt_in_place(&(*nonce).into(), aad, &mut buf)
         .map_err(|_| EncryptionError::AuthFailed)?;
     }
     SecretKey::ChaCha20Poly1305(_) => {
@@ -420,17 +420,19 @@ fn chacha20poly1305_encrypt(
   aad: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
   use aead::{AeadInPlace, KeyInit};
-  use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+  use chacha20poly1305::ChaCha20Poly1305;
 
   let k = match key {
     SecretKey::ChaCha20Poly1305(k) => k,
     // Precheck in encrypt() guarantees this arm is never reached.
     _ => unreachable!("variant mismatch should be caught by precheck in encrypt()/decrypt()"),
   };
-  let cipher = ChaCha20Poly1305::new(Key::from_slice(k));
+  // `From<[u8; N]>` builds the key/nonce, avoiding the deprecated
+  // `GenericArray::from_slice` (see `aes_gcm_encrypt`).
+  let cipher = ChaCha20Poly1305::new(&(*k).into());
   let mut buf = plaintext.to_vec();
   cipher
-    .encrypt_in_place(Nonce::from_slice(nonce), aad, &mut buf)
+    .encrypt_in_place(&(*nonce).into(), aad, &mut buf)
     .map_err(|_| EncryptionError::AuthFailed)?;
   Ok(buf)
 }
@@ -443,17 +445,19 @@ fn chacha20poly1305_decrypt(
   aad: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
   use aead::{AeadInPlace, KeyInit};
-  use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+  use chacha20poly1305::ChaCha20Poly1305;
 
   let k = match key {
     SecretKey::ChaCha20Poly1305(k) => k,
     // Precheck in decrypt() guarantees this arm is never reached.
     _ => unreachable!("variant mismatch should be caught by precheck in encrypt()/decrypt()"),
   };
-  let cipher = ChaCha20Poly1305::new(Key::from_slice(k));
+  // See `chacha20poly1305_encrypt`: `From<[u8; N]>` avoids the deprecated
+  // `GenericArray::from_slice`.
+  let cipher = ChaCha20Poly1305::new(&(*k).into());
   let mut buf = ciphertext.to_vec();
   cipher
-    .decrypt_in_place(Nonce::from_slice(nonce), aad, &mut buf)
+    .decrypt_in_place(&(*nonce).into(), aad, &mut buf)
     .map_err(|_| EncryptionError::AuthFailed)?;
   Ok(buf)
 }
@@ -535,7 +539,7 @@ impl Keyring {
     if self.primary == key {
       return;
     }
-    if self.secondaries.iter().any(|s| *s == key) {
+    if self.secondaries.contains(&key) {
       return;
     }
     self.secondaries.push(key);

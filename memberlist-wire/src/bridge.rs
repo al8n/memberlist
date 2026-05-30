@@ -36,8 +36,15 @@ pub enum BridgeError {
 // ─── I / A ↔ Bytes helpers ───────────────────────────────────────────────────
 
 /// Encode a `Data` value to raw bytes (no length prefix).
+///
+/// Built from the always-available `encoded_len`/`encode` primitives: the
+/// `encode_to_vec` convenience method is gated behind the data module's
+/// `std`/`alloc` features, so a generic `T: Data` cannot depend on it across
+/// every feature combination.
 fn data_to_bytes<T: Data>(val: &T) -> Result<Bytes, BridgeError> {
-  Ok(Bytes::from(val.encode_to_vec()?))
+  let mut buf = vec![0u8; val.encoded_len()];
+  val.encode(&mut buf)?;
+  Ok(Bytes::from(buf))
 }
 
 /// Decode a `Data` value from raw bytes (no length prefix; the whole slice
