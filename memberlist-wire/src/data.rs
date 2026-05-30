@@ -48,6 +48,9 @@ pub(crate) fn debug_assert_read_eq<T: ?Sized>(actual: usize, expected: usize) {
   );
 }
 
+// Only the `std`/`alloc`-gated data submodules (`bytes`, `string`) call this, so
+// it carries the same gate to stay live-code under every feature combination.
+#[cfg(any(feature = "std", feature = "alloc"))]
 #[inline]
 pub(crate) fn check_encoded_message_size(required: usize) -> Result<(), EncodeError> {
   if required > u32::MAX as usize {
