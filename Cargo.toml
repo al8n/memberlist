@@ -2,6 +2,7 @@
 members = [
   "memberlist",
   "memberlist-compio",
+  "memberlist-reactor",
   "memberlist-core",
   "memberlist-machine",
   "memberlist-proto",

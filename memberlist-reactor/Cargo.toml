@@ -1,0 +1,58 @@
+[package]
+name = "memberlist-reactor"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "reactor-I/O async driver for the Sans-I/O memberlist machine (tokio / smol via agnostic)"
+
+[features]
+default = ["tcp"]
+tcp = ["memberlist-machine/tcp"]
+tls-rustls-ring = ["memberlist-machine/tls-rustls-ring"]
+tls-rustls-aws-lc-rs = ["memberlist-machine/tls-rustls-aws-lc-rs"]
+quic = ["memberlist-machine/quic"]
+quic-rustls-ring = ["quic", "memberlist-machine/quic-rustls-ring"]
+quic-rustls-aws-lc-rs = ["quic", "memberlist-machine/quic-rustls-aws-lc-rs"]
+compression-lz4 = ["memberlist-machine/compression-lz4"]
+compression-snappy = ["memberlist-machine/compression-snappy"]
+compression-zstd = ["memberlist-machine/compression-zstd"]
+compression-brotli = ["memberlist-machine/compression-brotli"]
+encryption-aes-gcm = ["memberlist-machine/encryption-aes-gcm"]
+encryption-chacha20-poly1305 = ["memberlist-machine/encryption-chacha20-poly1305"]
+# Runtime conveniences: pull in the concrete agnostic runtime impls.
+tokio = ["agnostic/tokio"]
+smol = ["agnostic/smol"]
+dns = ["dep:hickory-proto", "dep:resolv-conf"]
+
+[dependencies]
+memberlist = { workspace = true }
+memberlist-machine = { workspace = true }
+memberlist-wire = { workspace = true }
+agnostic = { workspace = true, features = ["net"] }
+agnostic-lite = { workspace = true }
+hostaddr = { workspace = true }
+smol_str = { workspace = true }
+arc-swap = { workspace = true }
+bytes = { workspace = true, features = ["std"] }
+flume = { workspace = true, default-features = false, features = ["async"] }
+futures-util = { workspace = true, default-features = false, features = ["std", "async-await-macro"] }
+thiserror = { workspace = true }
+hickory-proto = { workspace = true, optional = true, default-features = false, features = ["std"] }
+resolv-conf = { workspace = true, optional = true }
+
+[dev-dependencies]
+agnostic = { workspace = true, features = ["net", "tokio", "smol"] }
+smol_str = { workspace = true }
+futures-util = { workspace = true, default-features = false, features = ["std", "async-await-macro"] }
+# QUIC smoke-test fixtures (self-signed cert + quinn_proto configs). Dev-only:
+# production callers supply their own QuicConfig.
+rcgen = "0.14"
+ring = "0.17"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pki-types = "1"
+quinn-proto = { version = "0.11", features = ["rustls-ring"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[[test]]
+name = "quic_smoke"
+required-features = ["quic-rustls-ring"]
