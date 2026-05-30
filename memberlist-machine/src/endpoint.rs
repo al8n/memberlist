@@ -2157,7 +2157,7 @@ where
   /// bytes for initial-join vs anti-entropy. This setter takes a single
   /// snapshot used for both contexts.
   pub fn set_local_state_snapshot(&mut self, bytes: Bytes) -> Result<(), crate::error::Error> {
-    validate_local_state_snapshot::<I, A>(&bytes, self.max_stream_frame_size())?;
+    validate_local_state_snapshot::<I, A>(&bytes, self.cfg.max_stream_frame_size())?;
     self.local_state_snapshot = bytes;
     Ok(())
   }
