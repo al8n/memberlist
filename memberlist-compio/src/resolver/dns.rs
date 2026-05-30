@@ -243,10 +243,10 @@ impl Resolver for DnsResolver {
       // query DNS, and we have a fallback below.", memberlist.go:404).
       // We unconditionally fall through to the OS resolver on any error
       // or empty answer.
-      if let Ok(addrs) = self.tcp_query(host_str, port).await {
-        if !addrs.is_empty() {
-          return Ok(addrs);
-        }
+      if let Ok(addrs) = self.tcp_query(host_str, port).await
+        && !addrs.is_empty()
+      {
+        return Ok(addrs);
       }
     }
 
