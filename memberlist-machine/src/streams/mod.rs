@@ -69,11 +69,10 @@ pub use conn::ExchangeId;
 // drives it only through the bridge.
 pub use transport::{Intake, StreamTransport};
 
-use std::{
-  collections::HashMap,
-  net::SocketAddr,
-  time::{Duration, Instant},
-};
+use crate::{FxHashMap, Instant};
+use core::{net::SocketAddr, time::Duration};
+#[cfg(not(feature = "std"))]
+use std::{boxed::Box, string::String, vec::Vec};
 
 use bytes::Bytes;
 
@@ -236,7 +235,7 @@ pub struct StreamEndpoint<I, A, R: StreamTransport> {
   /// [`PendingMint::Outbound`] here, so the mint-on-label-settled step maps an
   /// exchange to its `dial_succeeded` `StreamId` by iterating these directly —
   /// no separate `StreamId -> ExchangeId` reverse index is needed.
-  exchanges: HashMap<ExchangeId, ExchangeMeta<A>>,
+  exchanges: FxHashMap<ExchangeId, ExchangeMeta<A>>,
   /// Outbound per-exchange bytes produced this tick (the one-time label
   /// prefix, then application bytes), tagged with the exchange handle + peer
   /// so the driver writes them on the right transport connection. Drained via
@@ -286,7 +285,7 @@ pub struct StreamEndpoint<I, A, R: StreamTransport> {
   /// allocation inside `service_dials`. Strictly outbound-only —
   /// inbound (server-side) exchanges are not assigned a kind by the
   /// initiator and never appear in this table.
-  pending_outbound_kinds: HashMap<StreamId, crate::event::ExchangeKind>,
+  pending_outbound_kinds: FxHashMap<StreamId, crate::event::ExchangeKind>,
   /// Most recent `now: Instant` injected by any `handle_*` / `start_*` wrapper.
   /// Used by [`Self::poll_timeout`] as the known-past anchor for the
   /// immediate-due wake of an unattempted `dial_pending` entry: the only way
@@ -621,13 +620,13 @@ where
       compression: memberlist_wire::CompressionOptions::new(),
       encryption: memberlist_wire::EncryptionOptions::new(),
       conns: StreamConns::new(),
-      exchanges: HashMap::new(),
+      exchanges: FxHashMap::default(),
       out_transmit: std::collections::VecDeque::new(),
       pending_connects: std::collections::VecDeque::new(),
       pending_teardowns: std::collections::VecDeque::new(),
       mem_ingress: std::collections::VecDeque::new(),
       dial_pending: std::collections::VecDeque::new(),
-      pending_outbound_kinds: HashMap::new(),
+      pending_outbound_kinds: FxHashMap::default(),
       last_now: None,
       policy_reap_pending: false,
     }
@@ -1855,7 +1854,7 @@ where
     // private deque, then drain that deque as the sole input. Non-DialRequested
     // events stay in the inner endpoint's queue for the public `poll_event`.
     self.sieve_dial_events();
-    let pending = std::mem::take(&mut self.dial_pending);
+    let pending = core::mem::take(&mut self.dial_pending);
     for entry in pending {
       let PendingDial {
         id,

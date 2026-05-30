@@ -49,7 +49,7 @@
 //! across iterations with a stashed buffer requires an unnameable-future
 //! slot that adds complexity without affecting correctness.
 
-use std::time::Instant;
+use memberlist_machine::Instant;
 
 use compio::{
   buf::BufResult,

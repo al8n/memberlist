@@ -18,7 +18,6 @@ use std::{
   io,
   net::SocketAddr,
   sync::Arc,
-  time::Instant,
 };
 
 use arc_swap::ArcSwap;
@@ -29,6 +28,7 @@ use compio::{
 use flume::{Receiver, Sender};
 use futures_util::{FutureExt, pin_mut, select_biased};
 use memberlist_machine::{
+  Instant,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
   streams::{StreamAction, StreamEndpoint, StreamTransport},
 };
@@ -880,7 +880,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
     let bridge_in_fut = bridge_inbound_rx.recv_async().fuse();
     let ready_fut = bridge_ready_rx.recv_async().fuse();
     let accept_fut = listener.accept().fuse();
-    let timer_fut = compio::time::sleep_until(timeout_deadline).fuse();
+    let timer_fut = compio::time::sleep_until(timeout_deadline.into_std()).fuse();
     pin_mut!(
       recv_fut,
       cmd_fut,

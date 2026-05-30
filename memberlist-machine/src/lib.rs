@@ -97,11 +97,30 @@
 //! * A `Stream` is *minted by* the `Endpoint` but driven *independently*;
 //!   it carries the exchange deadline and is the authority on it.
 
+#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
-#![deny(warnings, missing_docs)]
+#![deny(missing_docs)]
 #![allow(clippy::type_complexity, unexpected_cfgs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
+
+// Alias `alloc` to the name `std` so genuine-heap `std::` paths compile unchanged
+// under no_std+alloc (and `#[macro_use]` brings `vec!`/`format!` crate-wide).
+// Core-resident items are imported from `core::` directly, never via this alias.
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+#[macro_use]
+extern crate alloc as std;
+
+#[cfg(feature = "std")]
+extern crate std;
+
+// The protocol state is intrinsically heap-backed (Vec/Box/String/maps), so a
+// build with neither capability tier is unsupported. Fail with a clear message
+// instead of a cascade of "cannot find type `Vec`" errors.
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+compile_error!(
+  "memberlist-machine requires the `std` or `alloc` feature (the protocol state needs a heap allocator)"
+);
 
 #[cfg(any(feature = "quic", feature = "tls", feature = "tcp"))]
 mod bridge_phase;
@@ -132,10 +151,12 @@ pub mod delegate;
 pub mod endpoint;
 pub mod error;
 pub mod event;
+mod mathf;
 pub mod members;
 pub(crate) mod probe;
 pub mod stream;
 pub mod suspicion;
+pub mod time;
 pub(crate) mod wire;
 
 pub use ack::{AckEntry, AckKind, AckRegistry, AckResolution, ForwardAck};
@@ -144,7 +165,7 @@ pub use broadcast::{Broadcast, BroadcastQueue, MemberlistBroadcast};
 pub use config::{DEFAULT_GOSSIP_MTU, EndpointConfig};
 pub use delegate::{AliveDelegate, MergeDelegate};
 pub use endpoint::{Endpoint, Lifecycle, META_MAX_SIZE};
-pub use error::{Error, StreamError};
+pub use error::{EndpointInitError, Error, StreamError};
 pub use event::{
   CompoundTransmit, DecodeError, DialRequested, EndpointEvent, Event, NodeConflict, PacketTransmit,
   PingCompleted, PushPullKind, PushPullReplyReceived, PushPullRequestReceived, Reliability,
@@ -154,3 +175,9 @@ pub use event::{
 pub use members::{LocalNodeState, Member, Members};
 pub use stream::{PushPullSnapshot, Stream};
 pub use suspicion::{Confirmation, Suspicion};
+pub use time::Instant;
+
+/// `FxHashMap`/`FxHashSet` backed by hashbrown (no_std-capable) with rustc-hash's
+/// Fx hasher — rustc-hash's own `Fx*` map aliases are std-only.
+pub(crate) type FxHashMap<K, V> = hashbrown::HashMap<K, V, rustc_hash::FxBuildHasher>;
+pub(crate) type FxHashSet<T> = hashbrown::HashSet<T, rustc_hash::FxBuildHasher>;

@@ -7,11 +7,11 @@
 use std::{
   collections::{HashMap, VecDeque},
   net::SocketAddr,
-  time::{Duration, Instant},
+  time::Duration,
 };
 
 use memberlist_machine::{
-  Endpoint, EndpointConfig, Event, Stream, StreamCommand, StreamError, Transmit,
+  Endpoint, EndpointConfig, Event, Instant, Stream, StreamCommand, StreamError, Transmit,
 };
 use smol_str::SmolStr;
 
@@ -79,7 +79,7 @@ impl Network {
     now: Instant,
   ) -> SocketAddr {
     let addr = *cfg.advertise_addr_ref();
-    let mut ep = Endpoint::new(cfg);
+    let mut ep = Endpoint::new_at(cfg, now);
     ep.start_scheduling(now);
     self.endpoints.insert(addr, ep);
     addr

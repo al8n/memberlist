@@ -38,11 +38,11 @@
 use std::{
   collections::{HashMap, HashSet, VecDeque},
   net::SocketAddr,
-  time::{Duration, Instant},
+  time::Duration,
 };
 
 use memberlist_machine::{
-  Endpoint, EndpointConfig, Event, PushPullKind, RawRecords, TcpOptions, Transmit,
+  Endpoint, EndpointConfig, Event, Instant, PushPullKind, RawRecords, TcpOptions, Transmit,
   streams::{ExchangeId, StreamAction, StreamEndpoint},
 };
 use memberlist_wire::{
@@ -202,8 +202,9 @@ impl TcpCluster {
       .with_suspicion_mult(4)
       .with_retransmit_mult(4)
       .with_rng_seed(addr.port() as u64);
-    let mut ep = Endpoint::new(cfg);
-    ep.start_scheduling(self.clock.now());
+    let now = self.clock.now();
+    let mut ep = Endpoint::new_at(cfg, now);
+    ep.start_scheduling(now);
     let configured_label = if self.unlabeled_hosts.contains(&addr) {
       None
     } else {

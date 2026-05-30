@@ -17,7 +17,7 @@
 //! receive window is momentarily full; the next pump retries from the
 //! remainder.
 
-use std::time::Instant;
+use crate::Instant;
 
 use quinn_proto::{ConnectionHandle, StreamId as QuicSid, VarInt};
 
@@ -1206,7 +1206,7 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+  use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
   use bytes::Bytes;
   use memberlist_wire::typed::Message;

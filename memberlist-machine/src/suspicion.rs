@@ -1,7 +1,7 @@
 //! Lifeguard suspicion-timer state.
 
+use crate::{FxHashSet, Instant};
 use core::time::Duration;
-use std::{collections::HashSet, time::Instant};
 
 use memberlist_wire::CheapClone;
 
@@ -18,9 +18,9 @@ pub(crate) fn remaining_suspicion_time(
   min: Duration,
   max: Duration,
 ) -> Duration {
-  let frac = (n as f64 + 1.0).ln() / (k as f64 + 1.0).ln();
+  let frac = crate::mathf::ln(n as f64 + 1.0) / crate::mathf::ln(k as f64 + 1.0);
   let raw = max.as_secs_f64() - frac * (max.as_secs_f64() - min.as_secs_f64());
-  let timeout_ms = (raw * 1000.0).floor();
+  let timeout_ms = crate::mathf::floor(raw * 1000.0);
   if timeout_ms < min.as_millis() as f64 {
     min.saturating_sub(elapsed)
   } else {
@@ -46,7 +46,7 @@ pub struct Suspicion<I> {
   deadline: Instant,
   /// Set of peer ids that have already confirmed (excluding the original
   /// suspector). Used to deduplicate `confirm()` calls.
-  confirmations: HashSet<I>,
+  confirmations: FxHashSet<I>,
   /// Cached count of confirmations beyond the original suspector. Always
   /// equals `confirmations.len() - 1` (we seed with the original suspector).
   n: u32,
@@ -63,7 +63,7 @@ pub enum Confirmation {
   Ignored,
 }
 
-impl<I: Eq + std::hash::Hash + CheapClone> Suspicion<I> {
+impl<I: Eq + core::hash::Hash + CheapClone> Suspicion<I> {
   /// Construct a new suspicion state. `from` is the original suspector and
   /// is excluded from confirmations (so a peer's own suspicion can't count
   /// as a confirmation if it bounces back via gossip). `now` is the current
@@ -73,7 +73,7 @@ impl<I: Eq + std::hash::Hash + CheapClone> Suspicion<I> {
   /// Otherwise, the timer starts at `max` and accelerates toward `min` as
   /// confirmations arrive.
   pub fn new(from: I, k: u32, min: Duration, max: Duration, now: Instant) -> Self {
-    let mut confirmations = HashSet::new();
+    let mut confirmations = FxHashSet::default();
     confirmations.insert(from);
     let initial_timeout = if k < 1 { min } else { max };
     Self {

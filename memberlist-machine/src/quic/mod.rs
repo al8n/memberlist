@@ -15,7 +15,9 @@ mod demux;
 
 pub use crypto::QuicConfig;
 
-use std::{collections::HashMap, net::SocketAddr, time::Instant};
+use crate::Instant;
+use core::net::SocketAddr;
+use std::collections::HashMap;
 
 use bytes::{Bytes, BytesMut};
 use quinn_proto::{DatagramEvent, Dir, Endpoint as QuinnEndpoint};
@@ -601,8 +603,11 @@ where
     };
     let opened = e.conn_mut().streams().open(Dir::Uni).is_some();
     if opened {
-      e.conn_mut()
-        .close(now, quinn_proto::VarInt::from_u32(0), bytes::Bytes::new());
+      e.conn_mut().close(
+        now.into_std(),
+        quinn_proto::VarInt::from_u32(0),
+        bytes::Bytes::new(),
+      );
     }
     opened
   }
@@ -852,7 +857,7 @@ where
     let mut has_pending_conn_events = false;
     for ch in self.conns.iter_handles() {
       if let Some(e) = self.conns.get_mut(ch) {
-        if let Some(t) = e.conn_mut().poll_timeout() {
+        if let Some(t) = e.conn_mut().poll_timeout().map(crate::Instant::from_std) {
           best = Some(best.map_or(t, |b| b.min(t)));
         }
         if e.has_pending_events() {
@@ -947,10 +952,12 @@ where
       }
       DatagramEvent::NewConnection(incoming) => {
         let mut buf = Vec::new();
-        match self
-          .quinn
-          .accept(incoming, now, &mut buf, Some(self.cfg.server_arc()))
-        {
+        match self.quinn.accept(
+          incoming,
+          now.into_std(),
+          &mut buf,
+          Some(self.cfg.server_arc()),
+        ) {
           Ok((ch, conn)) => self.conns.insert_accepted(ch, conn, from),
           Err(e) => {
             // quinn-proto attaches an `Option<Transmit>` to its `AcceptError`
@@ -1229,7 +1236,7 @@ where
         continue;
       };
       let mut buf = Vec::new();
-      while let Some(tr) = e.conn_mut().poll_transmit(now, 1, &mut buf) {
+      while let Some(tr) = e.conn_mut().poll_transmit(now.into_std(), 1, &mut buf) {
         // Use the transmit's own destination (not the cached peer) so a
         // datagram is sent to the address quinn selected — correct under
         // path migration and consistent with the stateless `Response` arm.
@@ -1278,7 +1285,10 @@ where
       Class::Quic => {
         let mut scratch = Vec::new();
         let data = BytesMut::from(datagram);
-        if let Some(ev) = self.quinn.handle(now, from, None, None, data, &mut scratch) {
+        if let Some(ev) = self
+          .quinn
+          .handle(now.into_std(), from, None, None, data, &mut scratch)
+        {
           self.route_datagram_event(ev, from, now, &scratch);
         }
         self.run_tick(now);
@@ -1519,7 +1529,7 @@ where
       for conn_ev in pending {
         e.conn_mut().handle_event(conn_ev);
       }
-      e.conn_mut().handle_timeout(now);
+      e.conn_mut().handle_timeout(now.into_std());
       let mut lost = false;
       while let Some(ev) = e.conn_mut().poll() {
         match ev {
@@ -1725,7 +1735,7 @@ where
     // Non-`DialRequested` events stay in the inner endpoint's queue for the
     // public `poll_event()` to observe.
     self.sieve_dial_events();
-    let pending = std::mem::take(&mut self.dial_pending);
+    let pending = core::mem::take(&mut self.dial_pending);
     for entry in pending {
       // Decompose AND mark attempted BEFORE the open attempt: if this
       // attempt requeues (handshake-blocked or credit-exhausted), the
@@ -1933,10 +1943,8 @@ where
 
 #[cfg(test)]
 mod tests {
-  use std::{
-    net::SocketAddr,
-    time::{Duration, Instant},
-  };
+  use crate::Instant;
+  use core::{net::SocketAddr, time::Duration};
 
   use bytes::Bytes;
   use smol_str::SmolStr;
@@ -2292,7 +2300,7 @@ mod tests {
       .get_mut(ch_a)
       .expect("connection still in slab pre-close")
       .conn_mut()
-      .close(now, 0u32.into(), Bytes::new());
+      .close(now.into_std(), 0u32.into(), Bytes::new());
     for _ in 0..5000 {
       if a
         .conns
@@ -2713,7 +2721,7 @@ mod tests {
       .get_mut(ch_a)
       .expect("A's pooled connection is present")
       .conn_mut()
-      .close(now, 0u32.into(), bytes::Bytes::new());
+      .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
 
     let close_due = a
       .conns
@@ -2722,7 +2730,7 @@ mod tests {
       .conn_mut()
       .poll_timeout()
       .expect("Connection::close arms the Close timer; poll_timeout MUST be Some");
-    a.handle_timeout(close_due);
+    a.handle_timeout(crate::Instant::from_std(close_due));
 
     // Observable: the inline `drain_then_reap` ran for every bridge on
     // the lost connection in THIS single tick. The counter is incremented

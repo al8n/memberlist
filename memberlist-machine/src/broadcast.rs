@@ -1,15 +1,16 @@
 //! Broadcast trait and `BroadcastQueue` — the gossip retransmit queue.
 
-use std::{
-  collections::{BTreeSet, HashMap},
-  sync::Arc,
-};
+#[cfg(not(feature = "std"))]
+use std::vec::Vec;
+use std::{collections::BTreeSet, sync::Arc};
+
+use crate::FxHashMap;
 
 /// Computes the per-message retransmit ceiling using the formula
 /// `retransmit_mult * ceil(log10(num_nodes + 1))`.
 #[inline]
 pub fn retransmit_limit(retransmit_mult: u32, num_nodes: u32) -> u32 {
-  let log_n = ((num_nodes as f64) + 1.0).log10().ceil() as u32;
+  let log_n = crate::mathf::ceil(crate::mathf::log10((num_nodes as f64) + 1.0)) as u32;
   retransmit_mult * log_n
 }
 
@@ -81,13 +82,13 @@ impl<B> PartialEq for LimitedBroadcast<B> {
 impl<B> Eq for LimitedBroadcast<B> {}
 
 impl<B> PartialOrd for LimitedBroadcast<B> {
-  fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+  fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
     Some(self.cmp(other))
   }
 }
 
 impl<B> Ord for LimitedBroadcast<B> {
-  fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+  fn cmp(&self, other: &Self) -> core::cmp::Ordering {
     self
       .transmits
       .cmp(&other.transmits)
@@ -110,7 +111,7 @@ impl<B> PartialEq<&LimitedBroadcast<B>> for Cmp {
 }
 
 impl<B> PartialOrd<&LimitedBroadcast<B>> for Cmp {
-  fn partial_cmp(&self, other: &&LimitedBroadcast<B>) -> Option<std::cmp::Ordering> {
+  fn partial_cmp(&self, other: &&LimitedBroadcast<B>) -> Option<core::cmp::Ordering> {
     Some(
       self
         .transmits
@@ -131,7 +132,7 @@ impl<B> PartialOrd<&LimitedBroadcast<B>> for Cmp {
 pub struct BroadcastQueue<Id, B> {
   retransmit_mult: u32,
   q: BTreeSet<LimitedBroadcast<B>>,
-  m: HashMap<Id, LimitedBroadcast<B>>,
+  m: FxHashMap<Id, LimitedBroadcast<B>>,
   id_gen: u64,
 }
 
@@ -141,7 +142,7 @@ impl<Id, B> BroadcastQueue<Id, B> {
     Self {
       retransmit_mult,
       q: BTreeSet::new(),
-      m: HashMap::new(),
+      m: FxHashMap::default(),
       id_gen: 0,
     }
   }
@@ -426,7 +427,7 @@ where
 
   /// Drain all queued broadcasts (calling `finished()` on each).
   pub fn reset(&mut self) {
-    let q = std::mem::take(&mut self.q);
+    let q = core::mem::take(&mut self.q);
     self.m.clear();
     self.id_gen = 0;
     for item in q {
@@ -817,11 +818,11 @@ mod tests {
   #[test]
   fn memberlist_broadcast_invalidates_by_node_id() {
     use memberlist_wire::typed::{Ack, Message};
-    let m1: MemberlistBroadcast<smol_str::SmolStr, std::net::SocketAddr> =
+    let m1: MemberlistBroadcast<smol_str::SmolStr, core::net::SocketAddr> =
       MemberlistBroadcast::new(smol_str::SmolStr::new("alice"), Message::Ack(Ack::new(7)));
-    let m2: MemberlistBroadcast<smol_str::SmolStr, std::net::SocketAddr> =
+    let m2: MemberlistBroadcast<smol_str::SmolStr, core::net::SocketAddr> =
       MemberlistBroadcast::new(smol_str::SmolStr::new("alice"), Message::Ack(Ack::new(8)));
-    let m3: MemberlistBroadcast<smol_str::SmolStr, std::net::SocketAddr> =
+    let m3: MemberlistBroadcast<smol_str::SmolStr, core::net::SocketAddr> =
       MemberlistBroadcast::new(smol_str::SmolStr::new("bob"), Message::Ack(Ack::new(9)));
     assert!(m1.invalidates(&m2));
     assert!(!m1.invalidates(&m3));

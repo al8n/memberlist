@@ -13,11 +13,9 @@ use crate::{
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::{
-    net::SocketAddr,
-    sync::Arc,
-    time::{Duration, Instant},
-  };
+  use crate::Instant;
+  use core::{net::SocketAddr, time::Duration};
+  use std::sync::Arc;
 
   use bytes::Bytes;
   use rustls::pki_types::ServerName;

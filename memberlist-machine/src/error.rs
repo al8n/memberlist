@@ -67,6 +67,23 @@ pub enum Error {
   UserBroadcastExceedsMtu(usize, usize),
 }
 
+/// Error constructing an [`Endpoint`](crate::endpoint::Endpoint) via the
+/// fallible [`try_new`](crate::endpoint::Endpoint::try_new) /
+/// [`try_new_at`](crate::endpoint::Endpoint::try_new_at) constructors.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum EndpointInitError {
+  /// The config carried no RNG seed and the platform entropy source failed
+  /// while seeding the gossip RNG. Recoverable: the driver can retry, or
+  /// supply a seed via
+  /// [`EndpointConfig::with_rng_seed`](crate::config::EndpointConfig::with_rng_seed)
+  /// (e.g. from a hardware RNG) to avoid platform entropy entirely. On no_std
+  /// targets this reflects an integrator-provided getrandom backend that
+  /// errored or was not yet ready.
+  #[error("entropy source failed while seeding the gossip RNG")]
+  Entropy,
+}
+
 /// Error from a per-stream reliable-exchange state machine.
 ///
 /// `Clone` so a fatal error can be both stored in the terminal

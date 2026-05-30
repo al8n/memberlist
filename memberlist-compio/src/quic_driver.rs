@@ -24,7 +24,6 @@ use std::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
   },
-  time::Instant,
 };
 
 use arc_swap::ArcSwap;
@@ -37,7 +36,7 @@ use memberlist::codec::{
   parse_messages,
 };
 use memberlist_machine::{
-  QuicEndpoint,
+  Instant, QuicEndpoint,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
   streams::ExchangeId,
 };
@@ -504,7 +503,7 @@ pub(crate) async fn quic_driver_loop<I, D>(
     // packed state) so the compiler can see the disjoint splits.
     let recv_buf = vec![0u8; recv_buf_len];
     let recv_fut = state.udp_socket.recv_from(recv_buf).fuse();
-    let timer_fut = compio::time::sleep_until(timeout_deadline).fuse();
+    let timer_fut = compio::time::sleep_until(timeout_deadline.into_std()).fuse();
     let cmd_fut = state.commands.recv_async().fuse();
     pin_mut!(recv_fut, timer_fut, cmd_fut);
 

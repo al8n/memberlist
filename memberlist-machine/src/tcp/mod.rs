@@ -18,7 +18,9 @@ mod conn;
 mod options;
 mod records;
 
-use std::time::Instant;
+use crate::Instant;
+#[cfg(not(feature = "std"))]
+use std::vec::Vec;
 
 use crate::streams::transport::{Intake, StreamTransport};
 
@@ -101,10 +103,8 @@ impl StreamTransport for RawRecords {
 
 #[cfg(test)]
 mod tests {
-  use std::{
-    net::SocketAddr,
-    time::{Duration, Instant},
-  };
+  use crate::Instant;
+  use core::{net::SocketAddr, time::Duration};
 
   use bytes::Bytes;
   use smol_str::SmolStr;

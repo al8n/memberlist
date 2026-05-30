@@ -112,8 +112,8 @@ impl UnitLenExceedsMaxInfo {
   }
 }
 
-impl std::fmt::Display for UnitLenExceedsMaxInfo {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for UnitLenExceedsMaxInfo {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(
       f,
       "on-wire unit length {} exceeds the maximum {}",
@@ -439,6 +439,12 @@ impl CompressionOptions {
     }
   }
 }
+
+#[cfg(not(feature = "std"))]
+use std::vec::Vec;
+// `ToString` only feeds the backend error paths; lz4 is the only no_std backend.
+#[cfg(all(not(feature = "std"), feature = "lz4"))]
+use std::string::ToString;
 
 use crate::framing::{
   FrameError, MessageTag, decode_varint_u32, encode_varint_u32, unwrap_transforms,

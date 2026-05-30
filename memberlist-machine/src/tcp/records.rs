@@ -56,7 +56,9 @@
 //! request bytes), and the dialer's inbound label validation runs in-line on
 //! the established bridge's response read.
 
-use std::time::Instant;
+use crate::Instant;
+#[cfg(not(feature = "std"))]
+use std::vec::Vec;
 
 /// Outer label tag byte. Byte-compatible with the frozen `memberlist-proto`
 /// label frame and `memberlist::codec` (`LABELED_TAG = 12`).
@@ -505,7 +507,7 @@ fn encode_label_prefix(label: &[u8], out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::time::Instant;
+  use crate::Instant;
 
   fn label(s: &str) -> Option<Vec<u8>> {
     Some(s.as_bytes().to_vec())

@@ -1,6 +1,8 @@
 //! Application-facing event and transmit types emitted by [`Endpoint`].
 
 use std::sync::Arc;
+#[cfg(not(feature = "std"))]
+use std::{string::String, vec::Vec};
 
 use bytes::Bytes;
 use memberlist_wire::typed::{Message, NodeState, PushNodeState};
@@ -518,13 +520,13 @@ impl<A> DecodeError<A> {
 pub struct DialRequested<A> {
   id: StreamId,
   peer: A,
-  deadline: std::time::Instant,
+  deadline: crate::Instant,
 }
 
 impl<A> DialRequested<A> {
   /// Construct a new payload.
   #[inline(always)]
-  pub const fn new(id: StreamId, peer: A, deadline: std::time::Instant) -> Self {
+  pub const fn new(id: StreamId, peer: A, deadline: crate::Instant) -> Self {
     Self { id, peer, deadline }
   }
 
@@ -542,13 +544,13 @@ impl<A> DialRequested<A> {
 
   /// Deadline by which the dial (and full exchange) must complete.
   #[inline(always)]
-  pub const fn deadline(&self) -> std::time::Instant {
+  pub const fn deadline(&self) -> crate::Instant {
     self.deadline
   }
 
   /// Consume the payload into its (id, peer, deadline) parts.
   #[inline(always)]
-  pub fn into_parts(self) -> (StreamId, A, std::time::Instant) {
+  pub fn into_parts(self) -> (StreamId, A, crate::Instant) {
     (self.id, self.peer, self.deadline)
   }
 }
@@ -718,13 +720,13 @@ impl<I, A> PushPullReplyReceived<I, A> {
 #[derive(Debug)]
 pub struct ReliablePingAcked {
   seq: u32,
-  at: std::time::Instant,
+  at: crate::Instant,
 }
 
 impl ReliablePingAcked {
   /// Construct a new payload.
   #[inline(always)]
-  pub const fn new(seq: u32, at: std::time::Instant) -> Self {
+  pub const fn new(seq: u32, at: crate::Instant) -> Self {
     Self { seq, at }
   }
 
@@ -736,7 +738,7 @@ impl ReliablePingAcked {
 
   /// When the ack was observed.
   #[inline(always)]
-  pub const fn at(&self) -> std::time::Instant {
+  pub const fn at(&self) -> crate::Instant {
     self.at
   }
 }

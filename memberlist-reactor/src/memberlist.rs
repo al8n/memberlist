@@ -4,7 +4,6 @@
 use std::{
   net::SocketAddr,
   sync::{Arc, atomic::AtomicU64},
-  time::Instant,
 };
 
 use agnostic::{
@@ -13,7 +12,9 @@ use agnostic::{
 };
 #[cfg(any(feature = "tcp", feature = "tls"))]
 use memberlist_machine::streams::{StreamEndpoint, StreamTransport};
-use memberlist_machine::{AliveDelegate, Endpoint, EndpointConfig, MergeDelegate, event::Event};
+use memberlist_machine::{
+  AliveDelegate, Endpoint, EndpointConfig, Instant, MergeDelegate, event::Event,
+};
 #[cfg(feature = "quic")]
 use memberlist_machine::{QuicConfig, QuicEndpoint};
 #[cfg(feature = "tcp")]

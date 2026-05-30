@@ -1,8 +1,8 @@
 use core::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+  num::NonZeroUsize,
   time::Duration,
 };
-use std::num::NonZeroUsize;
 
 use varing::{Varint, decode_duration, encode_duration_to, encoded_duration_len};
 

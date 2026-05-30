@@ -255,8 +255,8 @@ impl InsufficientBufferCapacity {
   }
 }
 
-impl std::fmt::Display for InsufficientBufferCapacity {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for InsufficientBufferCapacity {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(
       f,
       "required: {}, remaining: {}",
@@ -369,8 +369,8 @@ impl MissingFieldInfo {
   }
 }
 
-impl std::fmt::Display for MissingFieldInfo {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for MissingFieldInfo {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "missing {} in {}", self.field, self.ty)
   }
 }
@@ -409,8 +409,8 @@ impl DuplicateFieldInfo {
   }
 }
 
-impl std::fmt::Display for DuplicateFieldInfo {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for DuplicateFieldInfo {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(
       f,
       "duplicate field {} with tag {} in {}",
@@ -453,8 +453,8 @@ impl UnknownWireTypeInfo {
   }
 }
 
-impl std::fmt::Display for UnknownWireTypeInfo {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for UnknownWireTypeInfo {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(
       f,
       "unknown wire type value {} with tag {} when decoding {}",
@@ -490,8 +490,8 @@ impl UnknownTagInfo {
   }
 }
 
-impl std::fmt::Display for UnknownTagInfo {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for UnknownTagInfo {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "unknown tag {} when decoding {}", self.tag, self.ty)
   }
 }

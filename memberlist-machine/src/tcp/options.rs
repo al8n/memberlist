@@ -26,6 +26,9 @@
 
 #![cfg(feature = "tcp")]
 
+#[cfg(not(feature = "std"))]
+use std::vec::Vec;
+
 /// Errors returned by [`TcpOptions::try_new`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

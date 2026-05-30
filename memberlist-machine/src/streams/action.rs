@@ -3,7 +3,7 @@
 //!
 //! Consumed by the unified stream-transport coordinator.
 
-use std::net::SocketAddr;
+use core::net::SocketAddr;
 
 use crate::streams::conn::ExchangeId;
 

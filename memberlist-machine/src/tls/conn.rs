@@ -4,13 +4,10 @@
 
 #[cfg(test)]
 mod tests {
-  use crate::{streams::conn::StreamConns, tls::options::tests::test_server};
+  use crate::{Instant, streams::conn::StreamConns, tls::options::tests::test_server};
+  use core::{net::SocketAddr, time::Duration};
   use smol_str::SmolStr;
-  use std::{
-    net::SocketAddr,
-    sync::Arc,
-    time::{Duration, Instant},
-  };
+  use std::sync::Arc;
 
   use crate::{
     streams::{bridge::StreamBridge, test_support::TEST_RELIABLE_MAX},
