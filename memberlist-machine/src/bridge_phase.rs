@@ -11,6 +11,9 @@
 //! composes them (the QUIC build already does).
 #![allow(dead_code)]
 
+#[cfg(not(feature = "std"))]
+use std::string::String;
+
 /// Transport lifecycle of one composed `(memberlist Stream, transport bidi)`
 /// exchange. Phases are monotonic — once `BothClosed` or `Failed` the
 /// bridge is terminal and `pump_bridges` reaps via `drain_then_reap` on

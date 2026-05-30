@@ -1,6 +1,6 @@
 //! Boundary helpers between buffa-generated wire fields (raw [`Bytes`])
 //! and the typical application types `SmolStr` (for node ids) and
-//! [`std::net::SocketAddr`] (for resolved addresses).
+//! [`core::net::SocketAddr`] (for resolved addresses).
 //!
 //! `memberlist-machine` stays generic over `I, A`, but practically every
 //! consumer uses `I = SmolStr` and `A = SocketAddr`. These helpers do
@@ -29,8 +29,13 @@
 //! [`ConvertError`] carries enough context for diagnostics without
 //! leaking raw byte slices into the error type.
 
-use core::str;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+#[cfg(not(feature = "std"))]
+use std::vec::Vec;
+
+use core::{
+  net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+  str,
+};
 
 use bytes::Bytes;
 use smol_str::SmolStr;
@@ -73,8 +78,8 @@ impl AddrLengthMismatchInfo {
   }
 }
 
-impl std::fmt::Display for AddrLengthMismatchInfo {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for AddrLengthMismatchInfo {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(
       f,
       "expected {} bytes for version {}, got {}",
@@ -291,7 +296,7 @@ mod tests {
     // compact wire layout cannot carry scope_id) instead of silently
     // flattening it to scope 0 — same contract as the `Data` encoder.
     // Unscoped IPv6 still round-trips.
-    use std::net::{Ipv6Addr, SocketAddrV6};
+    use core::net::{Ipv6Addr, SocketAddrV6};
 
     let scoped = SocketAddr::V6(SocketAddrV6::new(
       Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),

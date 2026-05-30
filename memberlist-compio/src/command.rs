@@ -3,8 +3,9 @@
 
 use crate::error::Result;
 use bytes::Bytes;
+use memberlist_machine::Instant;
 use memberlist_wire::{CompressionOptions, EncryptionOptions};
-use std::{net::SocketAddr, time::Instant};
+use std::net::SocketAddr;
 
 /// Payload for [`JoinKind::WaitForCompletion`].
 pub(crate) struct WaitForCompletionArgs {

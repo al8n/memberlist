@@ -4,10 +4,8 @@
 //! via `use crate::streams::test_support::*`. Gated `#[cfg(test)]` so
 //! the module has zero non-test-build footprint.
 
-use std::{
-  net::{IpAddr, Ipv4Addr, SocketAddr},
-  time::Instant,
-};
+use crate::Instant;
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use smol_str::SmolStr;
 

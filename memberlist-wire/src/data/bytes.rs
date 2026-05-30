@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use std::{boxed::Box, vec::Vec};
+
 use super::{Data, DataRef, check_encoded_message_size};
 
 macro_rules! impl_bytes {

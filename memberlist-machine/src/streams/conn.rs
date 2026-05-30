@@ -21,14 +21,16 @@
 //!
 //! Consumed by the unified stream-transport coordinator.
 
-use std::collections::HashMap;
+use crate::FxHashMap;
+#[cfg(not(feature = "std"))]
+use std::vec::Vec;
 
 pub use crate::event::ExchangeId;
 use crate::streams::{bridge::StreamBridge, transport::StreamTransport};
 
 /// The in-flight bridge map. Accessor-only.
 pub(crate) struct StreamConns<I, A, R> {
-  bridges: HashMap<ExchangeId, StreamBridge<I, A, R>>,
+  bridges: FxHashMap<ExchangeId, StreamBridge<I, A, R>>,
   next: u64,
 }
 
@@ -55,7 +57,7 @@ where
 {
   pub(crate) fn new() -> Self {
     Self {
-      bridges: HashMap::new(),
+      bridges: FxHashMap::default(),
       next: 0,
     }
   }

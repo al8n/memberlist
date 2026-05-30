@@ -6,6 +6,9 @@
 //! boundary where `I`/`A` are (de)serialised via the `Data` trait. The
 //! machine wire path calls `message_to_any` / `message_from_any`.
 
+#[cfg(not(feature = "std"))]
+use std::{string::ToString, vec::Vec};
+
 use buffa::MessageField as BuffaMessageField;
 use bytes::Bytes;
 
@@ -525,7 +528,7 @@ pub fn message_from_any<I: Data, A: Data>(
 
 #[cfg(test)]
 mod tests {
-  use std::net::SocketAddr;
+  use core::net::SocketAddr;
 
   use bytes::Bytes;
   use smol_str::SmolStr;
@@ -917,7 +920,7 @@ mod tests {
     // on encode rather than silently flattened to scope 0 (which would
     // gossip an undialable peer). Tested through the real node address
     // path.
-    use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+    use core::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 
     let scoped = SocketAddr::V6(SocketAddrV6::new(
       Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),

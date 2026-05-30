@@ -1,6 +1,6 @@
 use super::*;
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use smol_str::SmolStr;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 fn cfg() -> EndpointConfig<SmolStr, SocketAddr> {
   EndpointConfig::new(
@@ -64,6 +64,48 @@ fn new_endpoint_is_not_leaving_or_left() {
 fn new_endpoint_health_score_is_zero() {
   let e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   assert_eq!(e.health_score(), 0);
+}
+
+#[test]
+fn new_at_stamps_local_member_at_driver_clock() {
+  // A std driver with a virtual clock whose instants sit far below
+  // `Instant::now()`. The local member must be stamped at the driver's clock,
+  // not the wall clock — otherwise the machine reads a clock the driver does
+  // not own and carries a local `state_change` in the driver's own future,
+  // where later `duration_since` could saturate or panic.
+  let t0 = Instant::from_origin(core::time::Duration::from_secs(1));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(cfg(), t0);
+  assert_eq!(
+    e.node_state_change(&SmolStr::new("local")),
+    Some(t0),
+    "local member must be stamped at the driver clock, not Instant::now()"
+  );
+
+  // Driving entirely with driver instants at/after `t0` (all far below the
+  // wall clock) must not panic.
+  e.handle_timeout(t0 + core::time::Duration::from_millis(500));
+}
+
+#[test]
+fn try_new_at_with_seed_is_infallible() {
+  // A seeded config never touches platform entropy, so the fallible
+  // constructor always succeeds — the fully Sans-I/O / deterministic path.
+  let t0 = Instant::from_origin(core::time::Duration::from_secs(1));
+  let e = Endpoint::<SmolStr, SocketAddr>::try_new_at(cfg(), t0)
+    .expect("seeded construction never fails");
+  assert_eq!(e.num_members(), 1);
+}
+
+#[test]
+fn scheduler_deadlines_saturate_at_extreme_now() {
+  // A pathological near-maximum clock must not panic when the scheduler builds
+  // probe/gossip/push-pull deadlines as `now + interval`; the forward
+  // arithmetic saturates instead.
+  let near_max =
+    Instant::from_origin(core::time::Duration::MAX - core::time::Duration::from_secs(1));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(cfg(), near_max);
+  e.start_scheduling(near_max);
+  e.handle_timeout(near_max);
 }
 
 use Alive;
@@ -245,6 +287,34 @@ fn dead_alive_node_marks_dead_and_emits_left() {
     Event::NodeLeft(node) => assert_eq!(node.id_ref(), &SmolStr::new("bob")),
     other => panic!("expected NodeLeft, got {other:?}"),
   }
+}
+
+#[test]
+fn reset_nodes_with_now_before_state_change_does_not_panic() {
+  // A Dead member stamped at a late instant, then reclaim runs with an
+  // earlier `now` (a stale timer tick, a virtual-clock domain, or a direct
+  // `reset_nodes` call). The elapsed-since-state_change must saturate to zero
+  // rather than panic, and the member must not be reclaimed yet.
+  let t_late = Instant::from_origin(core::time::Duration::from_secs(100));
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(cfg(), t_late);
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, t_late);
+  while e.poll_event().is_some() {}
+  e.process_dead(dead("bob", "carol", 1), t_late);
+  assert_eq!(
+    e.members
+      .get(&SmolStr::new("bob"))
+      .unwrap()
+      .state_ref()
+      .state(),
+    State::Dead
+  );
+
+  let t_early = Instant::from_origin(core::time::Duration::from_secs(1));
+  e.reset_nodes(t_early); // must not panic
+  assert!(
+    e.members.get(&SmolStr::new("bob")).is_some(),
+    "a Dead member must not be reclaimed when now precedes its state_change"
+  );
 }
 
 #[test]
@@ -432,7 +502,7 @@ fn leave_with_no_live_peers_emits_left_cluster_immediately() {
   while e.poll_event().is_some() {}
   e.leave(Instant::now()).expect("ok");
   assert!(e.is_left());
-  let events: Vec<_> = std::iter::from_fn(|| e.poll_event()).collect();
+  let events: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
   assert!(events.iter().any(|ev| matches!(ev, Event::NodeLeft(_))));
   assert!(events.iter().any(|ev| matches!(ev, Event::LeftCluster)));
 }
@@ -456,7 +526,7 @@ fn leave_defers_left_cluster_until_dead_self_drained() {
   assert!(e.is_left());
   // ...but the leave is NOT complete: LeftCluster must be withheld while
   // the dead-self notice is still only queued.
-  let pre: Vec<_> = std::iter::from_fn(|| e.poll_event()).collect();
+  let pre: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
   assert!(
     pre.iter().any(|ev| matches!(ev, Event::NodeLeft(_))),
     "NodeLeft is the immediate state-change notification"
@@ -481,7 +551,7 @@ fn leave_defers_left_cluster_until_dead_self_drained() {
   assert!(saw_dead_self, "dead-self must be queued to the live peer");
 
   // Now that poll_transmit drained it, LeftCluster fires.
-  let post: Vec<_> = std::iter::from_fn(|| e.poll_event()).collect();
+  let post: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
   assert!(
     post.iter().any(|ev| matches!(ev, Event::LeftCluster)),
     "LeftCluster must fire once the dead-self has been handed to the I/O layer"
@@ -508,7 +578,7 @@ fn leave_no_live_peers_not_delayed_by_stale_transmit() {
   assert!(e.is_left());
   // LeftCluster must be emitted immediately (no live peers ⇒ legacy
   // `if any_alive` is false), NOT held behind the stale Ack.
-  let events: Vec<_> = std::iter::from_fn(|| e.poll_event()).collect();
+  let events: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
   assert!(
     events.iter().any(|ev| matches!(ev, Event::LeftCluster)),
     "zero-live-peer leave must complete immediately despite stale transmit"
@@ -540,7 +610,7 @@ fn leave_left_cluster_boundary_is_the_dead_self_not_other_traffic() {
 
   e.leave(t0).expect("ok"); // queues dead-self ⇒ [stale Ack, dead-self]
   assert!(e.is_left());
-  let pre: Vec<_> = std::iter::from_fn(|| e.poll_event()).collect();
+  let pre: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
   assert!(pre.iter().any(|ev| matches!(ev, Event::NodeLeft(_))));
   assert!(
     !pre.iter().any(|ev| matches!(ev, Event::LeftCluster)),
@@ -556,7 +626,7 @@ fn leave_left_cluster_boundary_is_the_dead_self_not_other_traffic() {
     );
   }
   assert!(
-    !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
     "stale prefix packet must not trigger LeftCluster"
   );
 
@@ -572,7 +642,7 @@ fn leave_left_cluster_boundary_is_the_dead_self_not_other_traffic() {
     );
   }
   assert!(
-    std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
+    core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
     "LeftCluster fires exactly when the dead-self is handed off"
   );
 
@@ -585,7 +655,7 @@ fn leave_left_cluster_boundary_is_the_dead_self_not_other_traffic() {
     );
   }
   assert!(
-    !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::LeftCluster)),
     "trailing post-leave traffic must not re-trigger LeftCluster"
   );
 }
@@ -1271,11 +1341,11 @@ fn direct_ack_after_direct_timeout_within_cumulative_succeeds() {
     "a direct Ack within the cumulative window must NOT suspect the target"
   );
   assert!(
-    !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
     "an Ack proves liveness — no reliable-fallback escalation"
   );
   assert!(
-    !std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
+    !core::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
       &tx,
       Transmit::Packet(p) if matches!(p.message_ref(), Message::IndirectPing(_))
     )),
@@ -1357,7 +1427,7 @@ fn app_ping_ack_after_probe_timeout_does_not_complete() {
   e.handle_ack(bob_addr, Ack::new(seq), t0 + pt + Duration::from_millis(10));
   assert!(!e.probes.contains_key(&seq), "ping probe must be gone");
   assert!(
-    !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::PingCompleted(..))),
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::PingCompleted(..))),
     "an app ping Ack after probe_timeout must NOT emit a late PingCompleted"
   );
 
@@ -1691,7 +1761,7 @@ fn forged_indirect_ping_source_is_rejected() {
   // forward's deadline would have elapsed.
   e.handle_timeout(t0 + Duration::from_millis(60));
   assert!(
-    !std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
+    !core::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
       &tx,
       Transmit::Packet(p) if matches!(p.message_ref(), Message::Nack(_))
     )),
@@ -1703,7 +1773,7 @@ fn forged_indirect_ping_source_is_rejected() {
   let honest_from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
   e.handle_indirect_ping(honest_from, ind_ping("bob", 7001, "carol", 7002, 43), t0);
   assert!(
-    std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
+    core::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
       &tx,
       Transmit::Packet(p) if matches!(p.message_ref(), Message::Ping(_))
     )),
@@ -1819,7 +1889,7 @@ fn probe_arms_reliable_fallback_concurrently_with_indirect() {
   }
   // A DialRequested for that reliable-ping stream was emitted in the same step.
   assert!(
-    std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
+    core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
     "concurrent reliable ping must emit DialRequested at fan-out time"
   );
 }
@@ -1871,11 +1941,11 @@ fn late_handle_timeout_does_not_extend_probe_window() {
   );
   // No reliable-fallback DialRequested and no IndirectPing were emitted.
   assert!(
-    !std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
+    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
     "an already-expired probe must NOT open the reliable fallback"
   );
   assert!(
-    !std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
+    !core::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
       &tx,
       Transmit::Packet(p) if matches!(p.message_ref(), Message::IndirectPing(_))
     )),
@@ -2094,7 +2164,7 @@ fn forward_ack_after_deadline_is_not_relayed_and_nack_still_fires() {
   let deadline = t0 + Duration::from_millis(50);
   e.handle_ack(bob, Ack::new(our_seq), deadline);
   assert!(
-    !std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
+    !core::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
       &tx,
       Transmit::Packet(p) if matches!(p.message_ref(), Message::Ack(_))
     )),
@@ -2142,7 +2212,7 @@ fn forward_ack_before_deadline_still_relays() {
 
   // 1ms before the 50ms forward deadline.
   e.handle_ack(bob, Ack::new(our_seq), t0 + Duration::from_millis(49));
-  let relayed = std::iter::from_fn(|| e.poll_transmit())
+  let relayed = core::iter::from_fn(|| e.poll_transmit())
     .find(|tx| matches!(tx, Transmit::Packet(p) if matches!(p.message_ref(), Message::Ack(_))))
     .expect("a within-deadline Forward Ack must still relay");
   match relayed {
@@ -2280,12 +2350,12 @@ fn app_ping_timeout_does_not_escalate_to_indirect_or_fallback() {
     "an app ping must terminate on direct timeout, not enter AwaitingIndirect"
   );
   assert!(
-    !std::iter::from_fn(|| e.poll_event())
+    !core::iter::from_fn(|| e.poll_event())
       .any(|ev| matches!(ev, Event::DialRequested(..) | Event::PingCompleted(..))),
     "no reliable-fallback DialRequested and no late PingCompleted"
   );
   assert!(
-    !std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
+    !core::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
       &tx,
       Transmit::Packet(p) if matches!(p.message_ref(), Message::IndirectPing(_))
     )),
@@ -2341,7 +2411,7 @@ fn probe_failure_with_no_indirect_peers_bumps_awareness_by_one() {
   // concurrently and races the single cumulative deadline.
   e.handle_timeout(t0 + Duration::from_millis(60));
   assert!(
-    std::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
+    core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::DialRequested(..))),
     "a 2-node probe must still attempt the reliable fallback"
   );
   assert_eq!(
@@ -2418,7 +2488,7 @@ fn reliable_fallback_bounded_by_probe_deadline_and_cleaned_on_failure() {
   // NOT now+stream_timeout, NOT 2*probe_timeout, NOT (late-callback)+x.
   e.handle_timeout(t0 + Duration::from_millis(60));
   let cumulative = t0 + e.cfg.probe_interval();
-  let (rid, dl) = std::iter::from_fn(|| e.poll_event())
+  let (rid, dl) = core::iter::from_fn(|| e.poll_event())
     .find_map(|ev| match ev {
       Event::DialRequested(p) => Some((p.id(), p.deadline())),
       _ => None,
@@ -2540,10 +2610,8 @@ fn stream_scaffolding_construction_smoke() {
     stream::{OutboundKind, Stream, StreamPhase},
   };
   use bytes::BytesMut;
-  use std::{
-    collections::VecDeque,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-  };
+  use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+  use std::collections::VecDeque;
 
   let id = StreamId::from_raw(1);
   let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
@@ -2669,7 +2737,7 @@ fn outbound_push_pull_decode_and_merge() {
   // Simulate peer's PushPull reply — contains "carol" as a member.
   let carol_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7003);
   let carol_state = PushNodeState::new(1, SmolStr::new("carol"), carol_addr, State::Alive);
-  let reply_pp = PushPull::new(false, std::iter::once(carol_state)).with_user_data(Bytes::new());
+  let reply_pp = PushPull::new(false, core::iter::once(carol_state)).with_user_data(Bytes::new());
   let reply_msg = Message::<SmolStr, SocketAddr>::PushPull(reply_pp);
   let reply_bytes = crate::wire::encode_message::<SmolStr, SocketAddr>(&reply_msg).expect("encode");
 
@@ -2727,7 +2795,7 @@ fn inbound_push_pull_decode_and_response_bytes() {
   // Peer's inbound PushPull: join=true, one peer "dave".
   let dave_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7004);
   let dave_state = PushNodeState::new(1, SmolStr::new("dave"), dave_addr, State::Alive);
-  let inbound_pp = PushPull::new(true, std::iter::once(dave_state)).with_user_data(Bytes::new());
+  let inbound_pp = PushPull::new(true, core::iter::once(dave_state)).with_user_data(Bytes::new());
   let inbound_msg = Message::<SmolStr, SocketAddr>::PushPull(inbound_pp);
   let inbound_bytes =
     crate::wire::encode_message::<SmolStr, SocketAddr>(&inbound_msg).expect("encode");
@@ -2989,7 +3057,7 @@ fn poll_transmit_advances_outbound_and_inbound_phases() {
   let mut s_in = e.accept_stream(peer, t0);
   let pp = PushPull::new(
     true,
-    std::iter::once(PushNodeState::new(
+    core::iter::once(PushNodeState::new(
       1,
       SmolStr::new("peer"),
       peer,
@@ -3215,7 +3283,7 @@ fn handle_data_bounds_input_buf_before_append() {
   let t0 = Instant::now();
   let mut s = e.accept_stream(peer, t0);
   let mut frame = vec![8u8, 0x80, 0x20]; // varint LE base-128 for 4096
-  frame.extend(std::iter::repeat_n(0u8, 4096));
+  frame.extend(core::iter::repeat_n(0u8, 4096));
   assert!(
     s.handle_data(&frame, t0).is_err(),
     "single-call oversize frame must be rejected"
@@ -3243,7 +3311,7 @@ fn handle_data_bounds_input_buf_before_append() {
     crate::wire::encode_message::<SmolStr, SocketAddr>(&Message::<SmolStr, SocketAddr>::Ping(ping))
       .expect("encode");
   assert!(delivery.len() < cap, "precondition: ping frame under cap");
-  delivery.extend(std::iter::repeat_n(0u8, cap)); // huge trailing
+  delivery.extend(core::iter::repeat_n(0u8, cap)); // huge trailing
   assert!(
     s2.handle_data(&delivery, t0).is_err(),
     "valid frame + oversize trailing in one call must be rejected pre-append"
@@ -3296,7 +3364,7 @@ fn handle_data_after_stream_deadline_fails_without_decoding() {
     crate::wire::encode_message::<SmolStr, SocketAddr>(&Message::<SmolStr, SocketAddr>::PushPull(
       PushPull::new(
         true,
-        std::iter::once(PushNodeState::new(1, SmolStr::new("p"), peer, State::Alive)),
+        core::iter::once(PushNodeState::new(1, SmolStr::new("p"), peer, State::Alive)),
       )
       .with_user_data(Bytes::new()),
     ))
@@ -3610,7 +3678,7 @@ fn timed_out_stream_never_transmits_queued_bytes() {
 
   // The failure is observable so the driver reaps it.
   assert!(
-    std::iter::from_fn(|| stream.poll_event()).any(|ev| matches!(ev, StreamEvent::Failed(_))),
+    core::iter::from_fn(|| stream.poll_event()).any(|ev| matches!(ev, StreamEvent::Failed(_))),
     "a Failed event must be emitted"
   );
 }
@@ -3650,7 +3718,7 @@ fn fatal_frame_error_terminalizes_stream_fsm() {
     "a terminal stream must not keep pulling a deadline"
   );
   assert!(
-    std::iter::from_fn(|| s.poll_event()).any(|ev| matches!(ev, StreamEvent::Failed(_))),
+    core::iter::from_fn(|| s.poll_event()).any(|ev| matches!(ev, StreamEvent::Failed(_))),
     "a Failed event must be emitted so the driver reaps the stream"
   );
   // Idempotent: data after terminalization is a silent no-op (no second
@@ -3855,7 +3923,7 @@ fn forged_forward_ack_does_not_relay() {
   let evil = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9999);
   e.handle_ack(evil, Ack::new(our_seq), t0 + Duration::from_millis(5));
   assert!(
-    !std::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
+    !core::iter::from_fn(|| e.poll_transmit()).any(|tx| matches!(
       &tx,
       Transmit::Packet(p) if matches!(p.message_ref(), Message::Ack(_))
     )),
@@ -3864,7 +3932,7 @@ fn forged_forward_ack_does_not_relay() {
 
   // The genuine target Ack relays an Ack back to the original requester.
   e.handle_ack(target, Ack::new(our_seq), t0 + Duration::from_millis(10));
-  let relayed = std::iter::from_fn(|| e.poll_transmit())
+  let relayed = core::iter::from_fn(|| e.poll_transmit())
     .find(|tx| matches!(tx, Transmit::Packet(p) if matches!(p.message_ref(), Message::Ack(_))))
     .expect("the genuine target Ack is relayed");
   match relayed {
@@ -3984,7 +4052,7 @@ fn eof_before_response_fails_peer_closed() {
     "a terminal stream pulls no deadline"
   );
   assert!(
-    std::iter::from_fn(|| s.poll_event()).any(|ev| matches!(ev, StreamEvent::Failed(_))),
+    core::iter::from_fn(|| s.poll_event()).any(|ev| matches!(ev, StreamEvent::Failed(_))),
     "a Failed event must be emitted so the driver reaps it"
   );
   // Idempotent: another EOF is a silent no-op.
@@ -4154,7 +4222,7 @@ fn build_push_pull_request_bytes() -> Vec<u8> {
   let dave_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7004);
   let dave_state =
     PushNodeState::<SmolStr, SocketAddr>::new(1, SmolStr::new("dave"), dave_addr, State::Alive);
-  let inbound_pp = PushPull::<SmolStr, SocketAddr>::new(true, std::iter::once(dave_state))
+  let inbound_pp = PushPull::<SmolStr, SocketAddr>::new(true, core::iter::once(dave_state))
     .with_user_data(bytes::Bytes::new());
   let inbound_msg = Message::<SmolStr, SocketAddr>::PushPull(inbound_pp);
   crate::wire::encode_message::<SmolStr, SocketAddr>(&inbound_msg).expect("encode")
@@ -4218,7 +4286,7 @@ fn trailing_bytes_after_outbound_done_fails_decode() {
   let carol_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7003);
   let carol_state =
     PushNodeState::<SmolStr, SocketAddr>::new(1, SmolStr::new("carol"), carol_addr, State::Alive);
-  let reply_pp = PushPull::<SmolStr, SocketAddr>::new(false, std::iter::once(carol_state))
+  let reply_pp = PushPull::<SmolStr, SocketAddr>::new(false, core::iter::once(carol_state))
     .with_user_data(Bytes::new());
   let reply_msg = Message::<SmolStr, SocketAddr>::PushPull(reply_pp);
   let mut bytes_with_trailing =
@@ -4272,7 +4340,7 @@ fn late_failure_emits_only_failed_lifecycle_not_closed() {
 
   // Public observable: poll_event only yields Failed; no spurious
   // Closed from the dispatched-but-rejected frame.
-  let events: Vec<StreamEvent> = std::iter::from_fn(|| s.poll_event()).collect();
+  let events: Vec<StreamEvent> = core::iter::from_fn(|| s.poll_event()).collect();
   assert!(
     !events.iter().any(|ev| matches!(ev, StreamEvent::Closed)),
     "no `Closed` lifecycle event must survive a late-failure dispatch \
@@ -4315,7 +4383,7 @@ fn split_delivery_done_then_trailing_bytes_fails_decode() {
   let carol_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7003);
   let carol_state =
     PushNodeState::<SmolStr, SocketAddr>::new(1, SmolStr::new("carol"), carol_addr, State::Alive);
-  let reply_pp = PushPull::<SmolStr, SocketAddr>::new(false, std::iter::once(carol_state))
+  let reply_pp = PushPull::<SmolStr, SocketAddr>::new(false, core::iter::once(carol_state))
     .with_user_data(Bytes::new());
   let reply_msg = Message::<SmolStr, SocketAddr>::PushPull(reply_pp);
   let reply = crate::wire::encode_message::<SmolStr, SocketAddr>(&reply_msg).expect("encode");
@@ -4337,7 +4405,7 @@ fn split_delivery_done_then_trailing_bytes_fails_decode() {
 
   // Combined trailing-bytes + lifecycle-clear invariant: only Failed
   // surfaces, no Closed.
-  let events: Vec<_> = std::iter::from_fn(|| s.poll_event()).collect();
+  let events: Vec<_> = core::iter::from_fn(|| s.poll_event()).collect();
   assert!(
     !events
       .iter()
@@ -5159,7 +5227,7 @@ fn handle_packet_ignores_push_pull() {
 
   let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
   let from: SocketAddr = "127.0.0.1:7001".parse().unwrap();
-  let pp = PushPull::new(false, std::iter::empty());
+  let pp = PushPull::new(false, core::iter::empty());
   e.handle_packet(from, Message::PushPull(pp), Instant::now());
   assert!(e.poll_transmit().is_none());
 }

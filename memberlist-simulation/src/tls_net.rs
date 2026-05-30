@@ -36,11 +36,11 @@ use std::{
   collections::{HashMap, HashSet, VecDeque},
   net::SocketAddr,
   sync::Arc,
-  time::{Duration, Instant},
+  time::Duration,
 };
 
 use memberlist_machine::{
-  Endpoint, EndpointConfig, Event, PushPullKind, TlsOptions, TlsRecords, Transmit,
+  Endpoint, EndpointConfig, Event, Instant, PushPullKind, TlsOptions, TlsRecords, Transmit,
   streams::{ExchangeId, StreamAction, StreamEndpoint},
 };
 use memberlist_wire::{
@@ -310,8 +310,9 @@ impl TlsCluster {
       .with_suspicion_mult(4)
       .with_retransmit_mult(4)
       .with_rng_seed(addr.port() as u64);
-    let mut ep = Endpoint::new(cfg);
-    ep.start_scheduling(self.clock.now());
+    let now = self.clock.now();
+    let mut ep = Endpoint::new_at(cfg, now);
+    ep.start_scheduling(now);
     let tls = if self.mtls_responder == Some(addr) {
       sim_tls_config_mtls_required()
     } else {

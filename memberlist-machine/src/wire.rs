@@ -12,6 +12,12 @@
 //! keep the codebase's `.expect("… cannot fail for well-formed data")`
 //! convention for messages the machine itself constructed.
 
+#[cfg(not(feature = "std"))]
+use std::{
+  string::{String, ToString},
+  vec::Vec,
+};
+
 use memberlist_wire::{Data, framing, message_from_any, message_to_any, typed::Message};
 
 /// Re-exported compound-frame overhead constants (defined in

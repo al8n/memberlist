@@ -13,7 +13,10 @@ pub use crate::{CheapClone, Node};
 
 // ─── Meta ────────────────────────────────────────────────────────────────────
 
-use std::str::FromStr;
+#[cfg(not(feature = "std"))]
+use std::{string::String, vec::Vec};
+
+use core::str::FromStr;
 
 use bytes::{Bytes, BytesMut};
 
@@ -1087,7 +1090,7 @@ impl core::fmt::Display for ErrorResponse {
   }
 }
 
-impl std::error::Error for ErrorResponse {}
+impl core::error::Error for ErrorResponse {}
 
 impl From<ErrorResponse> for SmolStr {
   fn from(err: ErrorResponse) -> Self {

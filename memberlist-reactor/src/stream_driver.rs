@@ -14,7 +14,7 @@ use std::{
     atomic::{AtomicU64, Ordering},
   },
   task::{Context, Poll},
-  time::{Duration, Instant},
+  time::Duration,
 };
 
 use agnostic::{
@@ -29,6 +29,7 @@ use memberlist::codec::{
   parse_messages,
 };
 use memberlist_machine::{
+  Instant,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
   streams::{ExchangeId, StreamAction, StreamEndpoint, StreamTransport},
 };

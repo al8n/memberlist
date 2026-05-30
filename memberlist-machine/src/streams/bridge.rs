@@ -57,7 +57,9 @@
 //!
 //! `StreamBridge` is consumed by the unified stream-transport coordinator.
 
-use std::time::Instant;
+use crate::Instant;
+#[cfg(not(feature = "std"))]
+use std::{string::ToString, vec::Vec};
 
 use crate::{
   bridge_phase::{BridgeFailure, BridgePhase},
@@ -369,7 +371,7 @@ where
     if self.pending_inbound.is_empty() {
       self.pump_in_established(data, eof, now)
     } else {
-      let mut combined = std::mem::take(&mut self.pending_inbound);
+      let mut combined = core::mem::take(&mut self.pending_inbound);
       combined.extend_from_slice(data);
       self.pump_in_established(&combined, eof, now)
     }
@@ -621,11 +623,11 @@ where
     if self.is_terminal() {
       return Ok(());
     }
-    // Feed the retained tail (if any) FIRST, then drain. `std::mem::take`
+    // Feed the retained tail (if any) FIRST, then drain. `core::mem::take`
     // clears `pending_inbound` (always empty for a raw-passthrough record
     // layer); an empty tail still drains the buffered surfaced plaintext and
     // honors the close anchor.
-    let combined = std::mem::take(&mut self.pending_inbound);
+    let combined = core::mem::take(&mut self.pending_inbound);
     self.pump_in_established(&combined, self.pending_eof, now)
   }
 

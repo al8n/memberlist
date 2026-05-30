@@ -15,7 +15,7 @@ mod conn;
 mod options;
 mod records;
 
-use std::time::Instant;
+use crate::Instant;
 
 use rustls::pki_types::ServerName;
 
@@ -147,7 +147,7 @@ mod tests {
         crate::endpoint::Endpoint<I, A>,
         super::TlsOptions,
         Box<dyn Fn(&A) -> Option<String> + Send + Sync>,
-        Box<dyn Fn(&A) -> std::net::SocketAddr + Send + Sync>,
+        Box<dyn Fn(&A) -> core::net::SocketAddr + Send + Sync>,
       ) -> crate::streams::StreamEndpoint<I, A, crate::tls::records::TlsRecords> =
         crate::streams::StreamEndpoint::<I, A, crate::tls::records::TlsRecords>::new;
     }
@@ -161,7 +161,7 @@ mod tests {
   #[cfg(feature = "encryption-aes-gcm")]
   #[test]
   fn tls_endpoint_gossip_encryption_roundtrip() {
-    use std::net::SocketAddr;
+    use core::net::SocketAddr;
 
     use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
     use smol_str::SmolStr;
@@ -202,7 +202,7 @@ mod tests {
   /// in `tcp/mod.rs::stream_endpoint_gossip_encryption_disabled_is_byte_identical`.
   #[test]
   fn tls_endpoint_gossip_encryption_disabled_is_byte_identical() {
-    use std::net::SocketAddr;
+    use core::net::SocketAddr;
 
     use smol_str::SmolStr;
 
@@ -236,7 +236,7 @@ mod tests {
   ))]
   #[test]
   fn tls_endpoint_encrypt_gossip_returns_err_on_unsupported_backend() {
-    use std::net::SocketAddr;
+    use core::net::SocketAddr;
 
     use memberlist_wire::{EncryptionError, EncryptionOptions, Keyring, SecretKey};
     use smol_str::SmolStr;
@@ -276,7 +276,7 @@ mod tests {
   #[cfg(feature = "encryption-aes-gcm")]
   #[test]
   fn tls_endpoint_decrypt_gossip_rejects_plaintext_when_encryption_enabled() {
-    use std::net::SocketAddr;
+    use core::net::SocketAddr;
 
     use memberlist_wire::{
       EncryptionOptions, FrameError, Keyring, MessageTag, SecretKey, encode_plain_frame,
@@ -315,7 +315,7 @@ mod tests {
   #[cfg(feature = "encryption-aes-gcm")]
   #[test]
   fn tls_endpoint_encrypted_gossip_wire_bytes_within_configured_mtu_plus_overhead() {
-    use std::net::SocketAddr;
+    use core::net::SocketAddr;
 
     use memberlist_wire::{ENCRYPTED_WRAPPER_OVERHEAD, EncryptionOptions, Keyring, SecretKey};
     use smol_str::SmolStr;
@@ -367,7 +367,7 @@ mod tests {
   /// — pure config plumbing.
   #[test]
   fn tls_endpoint_gossip_mtu_is_propagated_from_config() {
-    use std::net::SocketAddr;
+    use core::net::SocketAddr;
 
     use smol_str::SmolStr;
 
@@ -403,7 +403,8 @@ mod tests {
   #[cfg(feature = "encryption-aes-gcm")]
   #[test]
   fn tls_endpoint_set_encryption_options_purges_buffered_gossip_on_policy_change() {
-    use std::{net::SocketAddr, time::Instant};
+    use crate::Instant;
+    use core::net::SocketAddr;
 
     use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
     use smol_str::SmolStr;
@@ -455,7 +456,8 @@ mod tests {
   #[cfg(feature = "encryption-aes-gcm")]
   #[test]
   fn tls_endpoint_set_encryption_options_is_noop_when_reapplying_same_policy() {
-    use std::{net::SocketAddr, time::Instant};
+    use crate::Instant;
+    use core::net::SocketAddr;
 
     use memberlist_wire::{EncryptionOptions, Keyring, SecretKey};
     use smol_str::SmolStr;
@@ -511,7 +513,8 @@ mod tests {
   /// entries in `pending_outbound_kinds` unbounded.
   #[test]
   fn dial_context_failure_does_not_leak_pending_outbound_kinds() {
-    use std::{net::SocketAddr, time::Instant};
+    use crate::Instant;
+    use core::net::SocketAddr;
 
     use smol_str::SmolStr;
 

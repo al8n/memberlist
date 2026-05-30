@@ -1,10 +1,10 @@
 //! AckRegistry — bookkeeping for outstanding ack/nack handlers keyed by
 //! sequence number. Pure data structure; the `Endpoint` wires it into the probe FSM.
 
-use std::time::Instant;
+use crate::Instant;
 
+use crate::FxHashMap;
 use bytes::Bytes;
-use rustc_hash::FxHashMap;
 
 /// What category of probe / ping originated this ack-awaiting entry. Used by
 /// `Endpoint` to dispatch the eventual ack/nack/timeout to the right
@@ -268,7 +268,7 @@ impl<A> AckRegistry<A> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::{
+  use core::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
   };

@@ -13,10 +13,8 @@ use crate::{
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::{
-    net::SocketAddr,
-    time::{Duration, Instant},
-  };
+  use crate::Instant;
+  use core::{net::SocketAddr, time::Duration};
 
   use bytes::Bytes;
   use smol_str::SmolStr;

@@ -21,6 +21,9 @@
 //! yields no gain). The framing tag-driven unwrap loop strips `Encrypted`
 //! first, then `Compressed` (if present), then decodes the inner frame.
 
+#[cfg(not(feature = "std"))]
+use std::vec::Vec;
+
 /// Identifies the AEAD backend an encrypted frame was produced with. Each
 /// backend is opt-in behind its own feature; a node that decodes a tag it was
 /// not built with yields [`EncryptAlgorithm::Unknown`] and fails the decode
@@ -137,38 +140,54 @@ impl SecretKey {
   }
 
   /// Generate a random AES-128-GCM key.
+  ///
+  /// # Panics
+  /// Panics if the platform entropy source is unavailable. Where entropy can
+  /// fail at runtime (e.g. an embedded getrandom backend), build the key from
+  /// explicit bytes via [`SecretKey::Aes128`] instead.
   #[cfg(feature = "aes-gcm")]
   pub fn random_aes128() -> Self {
-    use rand::RngExt;
     let mut k = [0u8; 16];
-    rand::rng().fill(&mut k);
+    getrandom::fill(&mut k).expect("system entropy source unavailable");
     Self::Aes128(k)
   }
 
   /// Generate a random AES-192-GCM key.
+  ///
+  /// # Panics
+  /// Panics if the platform entropy source is unavailable. Where entropy can
+  /// fail at runtime (e.g. an embedded getrandom backend), build the key from
+  /// explicit bytes via [`SecretKey::Aes192`] instead.
   #[cfg(feature = "aes-gcm")]
   pub fn random_aes192() -> Self {
-    use rand::RngExt;
     let mut k = [0u8; 24];
-    rand::rng().fill(&mut k);
+    getrandom::fill(&mut k).expect("system entropy source unavailable");
     Self::Aes192(k)
   }
 
   /// Generate a random AES-256-GCM key.
+  ///
+  /// # Panics
+  /// Panics if the platform entropy source is unavailable. Where entropy can
+  /// fail at runtime (e.g. an embedded getrandom backend), build the key from
+  /// explicit bytes via [`SecretKey::Aes256`] instead.
   #[cfg(feature = "aes-gcm")]
   pub fn random_aes256() -> Self {
-    use rand::RngExt;
     let mut k = [0u8; 32];
-    rand::rng().fill(&mut k);
+    getrandom::fill(&mut k).expect("system entropy source unavailable");
     Self::Aes256(k)
   }
 
   /// Generate a random ChaCha20-Poly1305 key.
+  ///
+  /// # Panics
+  /// Panics if the platform entropy source is unavailable. Where entropy can
+  /// fail at runtime (e.g. an embedded getrandom backend), build the key from
+  /// explicit bytes via [`SecretKey::ChaCha20Poly1305`] instead.
   #[cfg(feature = "chacha20-poly1305")]
   pub fn random_chacha20poly1305() -> Self {
-    use rand::RngExt;
     let mut k = [0u8; 32];
-    rand::rng().fill(&mut k);
+    getrandom::fill(&mut k).expect("system entropy source unavailable");
     Self::ChaCha20Poly1305(k)
   }
 }
@@ -244,6 +263,12 @@ pub enum EncryptionError {
   /// an unauthenticated datagram cannot inject SWIM membership traffic.
   #[error("encryption is enabled but the inbound frame is not wrapped in Encrypted")]
   EncryptionRequired,
+  /// The platform entropy source failed while drawing the per-frame AEAD
+  /// nonce. Recoverable: the frame is simply not produced. On no_std targets
+  /// this reflects an integrator-provided getrandom backend that errored or
+  /// was not yet ready.
+  #[error("entropy source failed while generating an encryption nonce")]
+  Entropy,
 }
 
 /// Returns `true` when `key`'s cipher variant matches `algo`. `Unknown`
@@ -715,9 +740,10 @@ pub fn encode_encrypted_frame(
 ) -> Result<Vec<u8>, EncryptionError> {
   #[cfg(any(feature = "aes-gcm", feature = "chacha20-poly1305"))]
   let nonce: [u8; NONCE_LEN] = {
-    use rand::RngExt;
     let mut n = [0u8; NONCE_LEN];
-    rand::rng().fill(&mut n);
+    // Recoverable on this fallible path: a failing entropy source surfaces an
+    // encryption error rather than aborting the process.
+    getrandom::fill(&mut n).map_err(|_| EncryptionError::Entropy)?;
     n
   };
   #[cfg(not(any(feature = "aes-gcm", feature = "chacha20-poly1305")))]

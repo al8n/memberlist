@@ -32,14 +32,14 @@ use std::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
   },
-  time::{Duration, Instant},
+  time::Duration,
 };
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use compio::runtime::JoinHandle;
 use flume::{Receiver, Sender};
-use memberlist_machine::event::Event;
+use memberlist_machine::{Instant, event::Event};
 use memberlist_wire::{CheapClone, CompressionOptions, EncryptionOptions, Node};
 
 use crate::{

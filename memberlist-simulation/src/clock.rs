@@ -1,12 +1,21 @@
-//! Virtual clock anchored on a single real [`std::time::Instant`].
+//! Deterministic virtual clock in [`memberlist_machine::Instant`] time.
 //!
-//! `Clock::new()` captures `Instant::now()` once. All time advancement
-//! is done by accumulating a `Duration` offset from that anchor.
-//! `Endpoint` only ever does `now + Duration` arithmetic internally,
-//! so feeding computed `base + elapsed` is semantically identical to
-//! feeding a real clock — but tests never sleep.
+//! `Clock::new()` anchors at a fixed, large offset past the machine-time
+//! origin (not a wall-clock sample, so the harness is fully deterministic).
+//! All time advancement accumulates a `Duration` from that anchor.
+//! `Endpoint` only ever does `now + Duration` arithmetic internally, so
+//! feeding computed `base + elapsed` is semantically identical to feeding a
+//! real clock — but tests never sleep. The large anchor offset also gives
+//! backward aging ([`Cluster::age_node`](crate::Cluster::age_node)) ample
+//! headroom: `Instant - Duration` saturates at the origin.
 
-use std::time::{Duration, Instant};
+use memberlist_machine::Instant;
+use std::time::Duration;
+
+/// Fixed offset of the simulation origin past the machine-time origin. Large
+/// enough that any backward state-change aging a scenario performs stays well
+/// above the origin (where `Instant - Duration` would otherwise saturate).
+const ANCHOR_OFFSET: Duration = Duration::from_secs(86_400);
 
 /// A deterministic virtual clock.
 ///
@@ -29,10 +38,11 @@ pub struct Clock {
 }
 
 impl Clock {
-  /// Capture the current wall-clock instant as the simulation origin.
+  /// Anchor the simulation origin at a fixed offset past the machine-time
+  /// origin (deterministic — no wall-clock sample).
   pub fn new() -> Self {
     Self {
-      base: Instant::now(),
+      base: Instant::from_origin(ANCHOR_OFFSET),
       elapsed: Duration::ZERO,
     }
   }

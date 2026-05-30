@@ -40,10 +40,30 @@
 //! and as a reference implementation that the framing port cross-decodes
 //! against to guarantee bit-identical wire output.
 
+#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
-#![deny(missing_docs, warnings)]
+#![deny(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
+
+// Alias `alloc` to the name `std` so genuine-heap `std::` paths (`std::vec`,
+// `std::collections::BTreeMap`, `std::sync::Arc`, …) compile unchanged under
+// no_std+alloc. Core-resident items are imported from `core::` directly, never
+// routed through this alias.
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+#[macro_use]
+extern crate alloc as std;
+
+#[cfg(feature = "std")]
+extern crate std;
+
+// The typed messages, framing, and codecs are intrinsically heap-backed
+// (Vec/String/maps), so a build with neither capability tier is unsupported.
+// Fail with a clear message instead of a cascade of unresolved-`std` errors.
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+compile_error!(
+  "memberlist-wire requires the `std` or `alloc` feature (the codec needs a heap allocator)"
+);
 
 pub mod bridge;
 pub mod compression;

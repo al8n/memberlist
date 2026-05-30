@@ -1,12 +1,12 @@
 //! [`Endpoint`] — the Sans-I/O SWIM state machine.
 
-use std::{
-  collections::VecDeque,
-  marker::PhantomData,
-  sync::Arc,
-  time::{Duration, Instant},
-};
+use crate::Instant;
+use core::{marker::PhantomData, time::Duration};
+#[cfg(not(feature = "std"))]
+use std::{boxed::Box, vec::Vec};
+use std::{collections::VecDeque, sync::Arc};
 
+use crate::{FxHashMap, FxHashSet};
 use bytes::Bytes;
 use memberlist_wire::{
   CheapClone, Data, Id, Node,
@@ -16,7 +16,6 @@ use memberlist_wire::{
   },
 };
 use rand::{RngExt, SeedableRng, rngs::SmallRng, seq::IteratorRandom};
-use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
   AckEntry, AckKind, EndpointEvent, ForwardAck, PushPullKind, StreamCommand, StreamId,
@@ -24,6 +23,7 @@ use crate::{
   awareness::Awareness,
   broadcast::{BroadcastQueue, MemberlistBroadcast},
   config::EndpointConfig,
+  error::EndpointInitError,
   event::{
     CompoundTransmit, DialRequested, Event, NodeConflict, PacketTransmit, PingCompleted,
     Reliability, RemoteStateReceived, SendPushPullResponse, Transmit, UserPacket,
@@ -356,9 +356,22 @@ where
     + Sync
     + 'static,
 {
-  /// Construct a new endpoint. Inserts the local node as Alive at incarnation 1
-  /// and enqueues the initial Alive broadcast.
-  pub fn new(cfg: EndpointConfig<I, A>) -> Self {
+  /// Fallibly construct a new endpoint at the driver-supplied `now`. Inserts
+  /// the local node as Alive at incarnation 1, stamping its initial state at
+  /// `now`, and enqueues the initial Alive broadcast. The machine never reads a
+  /// clock itself, so a virtual- or embedded-clock driver stays internally
+  /// consistent.
+  ///
+  /// This is the entropy-fallible primary constructor. When the config carries
+  /// an explicit RNG seed (via
+  /// [`EndpointConfig::with_rng_seed`](crate::config::EndpointConfig::with_rng_seed))
+  /// it never touches platform entropy and never fails — the natural choice for
+  /// a fully Sans-I/O or deterministic driver. Without a seed it draws the
+  /// gossip RNG seed from the platform entropy source and returns
+  /// [`EndpointInitError::Entropy`] if that source fails (e.g. an
+  /// integrator-provided getrandom backend that is not ready on a no_std
+  /// target). See [`Endpoint::new_at`] for the panicking convenience.
+  pub fn try_new_at(cfg: EndpointConfig<I, A>, now: Instant) -> Result<Self, EndpointInitError> {
     // Operator-time misconfiguration guard: `initial_meta` was set
     // via the builder, but its size exceeds the per-endpoint cap
     // set via `with_meta_max_size`. The configs disagree — the
@@ -371,7 +384,17 @@ where
     );
     let rng = match cfg.rng_seed() {
       Some(seed) => SmallRng::seed_from_u64(seed),
-      None => rand::make_rng(),
+      None => {
+        // No explicit seed: pull 8 bytes from the platform entropy source.
+        // On std that is the OS RNG; on no_std targets the integrator
+        // registers a getrandom backend (e.g. an embassy/embedded hardware
+        // RNG). This is gossip jitter/selection entropy, not key material.
+        // Surface a failure as a recoverable init error rather than aborting:
+        // an embedded entropy backend can be transiently not-ready.
+        let mut seed = [0u8; 8];
+        getrandom::fill(&mut seed).map_err(|_| EndpointInitError::Entropy)?;
+        SmallRng::seed_from_u64(u64::from_le_bytes(seed))
+      }
     };
     let local_node = Node::new(
       cfg.local_id_ref().cheap_clone(),
@@ -390,7 +413,7 @@ where
     .with_meta(cfg.initial_meta_ref().cheap_clone())
     .with_protocol_version(cfg.protocol_version())
     .with_delegate_version(cfg.delegate_version());
-    let now = Instant::now();
+    // The local node's initial state is stamped at the driver-supplied `now`.
     let mut local_state = LocalNodeState::new(local_node_state, now);
     local_state.set_incarnation(1);
     // Ignoring Err: a fresh `Members` is empty, so the insert returns
@@ -431,7 +454,44 @@ where
 
     // Enqueue the initial Alive broadcast so peers learn about us.
     endpoint.broadcast_alive(&local_state);
-    endpoint
+    Ok(endpoint)
+  }
+
+  /// Construct a new endpoint at the driver-supplied `now`, panicking if the
+  /// seedless entropy draw fails. Convenience over [`Endpoint::try_new_at`] for
+  /// drivers on a platform whose entropy source does not fail (every std
+  /// target; a no_std target with an always-ready RNG backend) or that supply
+  /// an explicit seed.
+  ///
+  /// # Panics
+  /// When the config carries no RNG seed and the platform entropy source
+  /// fails. Use [`Endpoint::try_new_at`], or supply a seed via
+  /// [`EndpointConfig::with_rng_seed`](crate::config::EndpointConfig::with_rng_seed),
+  /// to handle that case without panicking.
+  pub fn new_at(cfg: EndpointConfig<I, A>, now: Instant) -> Self {
+    Self::try_new_at(cfg, now).expect("endpoint construction: system entropy source unavailable")
+  }
+
+  /// Fallibly construct a new endpoint, stamping the local node at the current
+  /// std monotonic clock. Std convenience over [`Endpoint::try_new_at`];
+  /// virtual- or embedded-clock drivers use `try_new_at` with their own `now`
+  /// so the machine never reads a clock the driver does not own.
+  #[cfg(feature = "std")]
+  pub fn try_new(cfg: EndpointConfig<I, A>) -> Result<Self, EndpointInitError> {
+    Self::try_new_at(cfg, Instant::now())
+  }
+
+  /// Construct a new endpoint, stamping the local node at the current std
+  /// monotonic clock. Convenience for std drivers on the real clock; virtual-
+  /// or embedded-clock drivers use [`Endpoint::new_at`] with their own `now`
+  /// so the machine never reads a clock the driver does not own.
+  ///
+  /// # Panics
+  /// Panics on a seedless config when the platform entropy source is
+  /// unavailable — see [`Endpoint::try_new`].
+  #[cfg(feature = "std")]
+  pub fn new(cfg: EndpointConfig<I, A>) -> Self {
+    Self::new_at(cfg, Instant::now())
   }
 
   /// Install the synchronous [`AliveDelegate`](crate::delegate::AliveDelegate)
@@ -781,7 +841,7 @@ where
   /// Compute the (min, max) suspicion timeouts for the current cluster size.
   fn suspicion_timeouts(&self) -> (Duration, Duration) {
     let n = self.num_members().max(1) as f64;
-    let node_scale = n.log10().max(1.0);
+    let node_scale = crate::mathf::log10(n).max(1.0);
     let interval = self.cfg.probe_interval();
     let min_ms =
       (interval.as_millis() as f64 * self.cfg.suspicion_mult() as f64 * node_scale) as u64;
@@ -2023,7 +2083,7 @@ where
   /// Used by simulation tests to age a peer's state without sleeping, so
   /// that suspicion-timeout logic fires immediately on the next tick.
   /// No-op if `peer` is not a known member.
-  pub fn age_member(&mut self, peer: &I, delta: std::time::Duration) {
+  pub fn age_member(&mut self, peer: &I, delta: core::time::Duration) {
     if let Some(m) = self.members.get_mut(peer) {
       let old = m.state_ref().state_change();
       // Saturating subtraction: Instant cannot go below its origin.
@@ -2056,7 +2116,12 @@ where
         if state != State::Dead && state != State::Left {
           return false;
         }
-        now.duration_since(m.state_ref().state_change()) > window
+        // Saturating: an out-of-order `now` (earlier than the member's
+        // state_change — a stale timer tick, a virtual-clock domain, or a
+        // direct `reset_nodes` call) yields zero elapsed and simply does not
+        // reclaim yet. The machine is correct under any input ordering and
+        // must not panic here.
+        now.saturating_duration_since(m.state_ref().state_change()) > window
       })
       .map(|m| m.state_ref().id_ref().cheap_clone())
       .collect();
@@ -3187,7 +3252,9 @@ pub(crate) fn push_pull_scale(interval: Duration, n: usize) -> Duration {
   if n <= THRESHOLD {
     return interval;
   }
-  let multiplier = (f64::log2(n as f64) - f64::log2(THRESHOLD as f64)).ceil() as u32 + 1;
+  let multiplier =
+    crate::mathf::ceil(crate::mathf::log2(n as f64) - crate::mathf::log2(THRESHOLD as f64)) as u32
+      + 1;
   interval * multiplier
 }
 

@@ -13,6 +13,9 @@
 //! while `memberlist-proto` uses a custom high-3-bits-wire-type scheme.
 //! Mixed-version clusters are not supported — this is a clean cut-over.
 
+#[cfg(not(feature = "std"))]
+use std::vec::Vec;
+
 use std::borrow::Cow;
 
 use buffa::Message as _;
@@ -179,8 +182,8 @@ impl IncompleteFrame {
   }
 }
 
-impl std::fmt::Display for IncompleteFrame {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for IncompleteFrame {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(
       f,
       "{} bytes available, {} required",

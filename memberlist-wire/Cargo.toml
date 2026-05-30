@@ -12,45 +12,77 @@ categories.workspace = true
 description = "Buffa-generated wire types + hand-rolled outer framing for the memberlist gossip protocol."
 
 [dependencies]
-buffa = { version = "0.5", default-features = false, features = ["std"] }
-bytes = { workspace = true, features = ["std"] }
-cheap-clone = { workspace = true, features = ["std", "smol_str_0_3", "bytes_1", "triomphe_0_1"] }
+buffa = { version = "0.5", default-features = false }
+bytes = { workspace = true }
+cheap-clone = { workspace = true, features = ["smol_str_0_3", "bytes_1", "triomphe_0_1"] }
 derive_more = { workspace = true, features = ["display", "from", "is_variant", "unwrap", "try_unwrap"] }
 paste = { workspace = true }
-smol_str = { workspace = true, features = ["std"] }
+smol_str = { workspace = true }
 thiserror = { workspace = true }
-triomphe = { workspace = true, features = ["std"] }
-varing = { workspace = true, features = ["std"] }
+triomphe = { workspace = true }
+varing = { workspace = true }
 
 # Compression backends — opt-in; the default build pulls none of them.
-brotli = { version = "8", optional = true }
+# lz4 + brotli are no_std+alloc; snappy + zstd are std-only (std I/O / C binding).
+brotli = { version = "8", optional = true, default-features = false }
 snap = { version = "1", optional = true }
-lz4_flex = { version = "0.13", optional = true }
+lz4_flex = { version = "0.13", optional = true, default-features = false }
 zstd = { version = "0.13", optional = true }
 
-# AEAD backends — opt-in; the default build pulls neither.
-aead = { version = "0.5", features = ["std"], optional = true }
-aes-gcm = { version = "0.10", optional = true }
-chacha20poly1305 = { version = "0.10", optional = true }
-rand = { workspace = true, optional = true }
+# AEAD backends — opt-in; the default build pulls neither. no_std+alloc-capable.
+# `getrandom` supplies per-frame nonces and random key-gen via platform entropy
+# (embedded targets register a getrandom backend).
+aead = { version = "0.5", optional = true, default-features = false }
+aes-gcm = { version = "0.10", optional = true, default-features = false }
+chacha20poly1305 = { version = "0.10", optional = true, default-features = false }
+getrandom = { workspace = true, optional = true }
 
 [build-dependencies]
 buffa-build = "0.5"
 
 [features]
 default = ["std"]
-# memberlist-wire is std-only; `alloc` is provided as an alias for `std` so
-# the copied data-module cfg-gates compile without modification.
-alloc = ["std"]
-std = ["buffa/std"]
 
-# Compression backends — opt-in; the default build pulls none of them.
-lz4 = ["dep:lz4_flex"]
-snappy = ["dep:snap"]
-zstd = ["dep:zstd"]
-brotli = ["dep:brotli"]
+# `std` and `alloc` are INDEPENDENT capability tiers — `std` does NOT pull the
+# `alloc` feature (the std library already provides the heap). `alloc` is the
+# minimal heap tier for `no_std` targets; the data module gates heap items on
+# `any(feature = "std", feature = "alloc")`.
+std = [
+  "buffa/std",
+  "bytes/std",
+  "cheap-clone/std",
+  "smol_str/std",
+  "triomphe/std",
+  "varing/std",
+  "derive_more/std",
+  "thiserror/std",
+  "aead?/std",
+  "aes-gcm?/std",
+  "chacha20poly1305?/std",
+  "lz4_flex?/std",
+  "brotli?/std",
+]
+alloc = ["cheap-clone/alloc", "varing/alloc"]
 
-# AEAD encryption backends — opt-in; the default build pulls neither.
-# The `aead` trait surface and `rand` (random nonces) are pulled in by either.
-aes-gcm = ["dep:aead", "dep:aes-gcm", "dep:rand"]
-chacha20-poly1305 = ["dep:aead", "dep:chacha20poly1305", "dep:rand"]
+# Compression backends — opt-in; the default build pulls none of them. lz4 is
+# no_std+alloc; brotli/snappy/zstd are std-only (their wire integration uses
+# std::io / a C binding). Each backend selects the capability tier it needs so
+# a direct dependent's feature set is self-contained.
+lz4 = ["alloc", "dep:lz4_flex"]
+brotli = ["std", "dep:brotli", "brotli/std"]
+snappy = ["std", "dep:snap"]
+zstd = ["std", "dep:zstd"]
+
+# AEAD encryption backends — opt-in; no_std+alloc (each selects `alloc`).
+# `encrypt`/`decrypt` take a caller-supplied nonce (no RNG); `getrandom`
+# supplies the per-frame nonce in `encode_encrypted_frame` and the
+# `SecretKey::random_*` key-gen helpers.
+aes-gcm = ["alloc", "dep:aead", "aead/alloc", "dep:aes-gcm", "aes-gcm/aes", "aes-gcm/alloc", "dep:getrandom"]
+chacha20-poly1305 = [
+  "alloc",
+  "dep:aead",
+  "aead/alloc",
+  "dep:chacha20poly1305",
+  "chacha20poly1305/alloc",
+  "dep:getrandom",
+]

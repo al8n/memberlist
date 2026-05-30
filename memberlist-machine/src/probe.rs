@@ -30,10 +30,9 @@
 //! the failure envelope from one probe_timeout to
 //! direct+indirect+stream_timeout.
 
-use std::{
-  sync::Arc,
-  time::{Duration, Instant},
-};
+use crate::Instant;
+use core::time::Duration;
+use std::sync::Arc;
 
 use memberlist_wire::typed::NodeState;
 

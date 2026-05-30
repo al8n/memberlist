@@ -4,12 +4,9 @@
 
 #[cfg(test)]
 mod tests {
-  use crate::streams::conn::StreamConns;
+  use crate::{Instant, streams::conn::StreamConns};
+  use core::{net::SocketAddr, time::Duration};
   use smol_str::SmolStr;
-  use std::{
-    net::SocketAddr,
-    time::{Duration, Instant},
-  };
 
   use crate::{
     config::EndpointConfig,

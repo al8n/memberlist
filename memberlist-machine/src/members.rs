@@ -1,6 +1,7 @@
 //! Cluster membership state.
 
-use std::{sync::Arc, time::Instant};
+use crate::Instant;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use memberlist_wire::{
@@ -268,7 +269,7 @@ where
   pub fn insert(&mut self, m: Member<I, A>) -> Option<Member<I, A>> {
     let id = m.state_ref().id_ref().cheap_clone();
     if let Some(&existing_idx) = self.node_map.get(&id) {
-      let old = std::mem::replace(&mut self.nodes[existing_idx], m);
+      let old = core::mem::replace(&mut self.nodes[existing_idx], m);
       return Some(old);
     }
     let idx = self.nodes.len();
@@ -355,10 +356,10 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+  use core::net::{IpAddr, Ipv4Addr, SocketAddr};
   use memberlist_wire::typed::{Meta, NodeState, State};
   use rand::{SeedableRng, rngs::SmallRng};
   use smol_str::SmolStr;
-  use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
   fn make_node(id: &str, port: u16, st: State) -> NodeState<SmolStr, SocketAddr> {
     NodeState::new(
@@ -386,7 +387,7 @@ mod tests {
     let now = Instant::now();
     let mut s = LocalNodeState::new(make_node("a", 7000, State::Alive), now);
     assert_eq!(s.state(), State::Alive);
-    let later = now + std::time::Duration::from_secs(1);
+    let later = now + core::time::Duration::from_secs(1);
     s.set_state(State::Suspect, later);
     assert_eq!(s.state(), State::Suspect);
     assert_eq!(s.state_change(), later);

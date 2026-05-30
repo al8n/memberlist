@@ -53,7 +53,8 @@
 //! ring backend. Behavioral determinism comes from the injected virtual
 //! clock, not from any test-only crypto hook.
 
-use std::{net::SocketAddr, sync::Arc};
+use core::net::SocketAddr;
+use std::sync::Arc;
 
 /// Per-peer SNI lookup. The coordinator calls this once per outbound dial,
 /// passing the dialed `SocketAddr`; the returned string is forwarded to

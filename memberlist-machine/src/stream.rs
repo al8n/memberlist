@@ -21,7 +21,10 @@
 //! `MessageRef::decode`, `handle_data` peeks the varint length prefix to
 //! confirm the full frame is buffered. See `try_decode_frame`.
 
-use std::{collections::VecDeque, time::Instant};
+use crate::Instant;
+use std::collections::VecDeque;
+#[cfg(not(feature = "std"))]
+use std::{string::ToString, vec::Vec};
 
 use bytes::{Bytes, BytesMut};
 use memberlist_wire::{Data, typed::PushNodeState};
@@ -286,7 +289,7 @@ where
     self.output_buf.clear();
     // The output buffer is fully drained (poll_transmit always empties it):
     // advance the write phase.
-    match std::mem::replace(&mut self.phase, StreamPhase::Done) {
+    match core::mem::replace(&mut self.phase, StreamPhase::Done) {
       // A reliable user message is one-way (`send_user_msg`: write then
       // done — no reply is read). It must terminate on send, NOT wait
       // for a response that never comes.

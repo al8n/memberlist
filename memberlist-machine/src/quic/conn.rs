@@ -2,11 +2,9 @@
 //! per peer (idle-evicted by quinn-proto's own `max_idle_timeout`); reaped
 //! only when `Connection::is_drained()` (the same protocol quinn uses).
 
-use std::{
-  collections::{HashMap, VecDeque},
-  net::SocketAddr,
-  time::Instant,
-};
+use crate::Instant;
+use core::net::SocketAddr;
+use std::collections::{HashMap, VecDeque};
 
 use quinn_proto::{Connection, ConnectionEvent, ConnectionHandle, Endpoint as QuinnEndpoint};
 use slab::Slab;
@@ -206,7 +204,7 @@ impl ConnTable {
     // `config.crypto.start_session(version, server_name, ...)`; the
     // rustls-backed `start_session` parses it via `ServerName::try_from`
     // and feeds the result to the configured `ServerCertVerifier`.
-    let (ch, conn) = quinn.connect(now, client, peer, server_name)?;
+    let (ch, conn) = quinn.connect(now.into_std(), client, peer, server_name)?;
     let slot = self.conns.insert(ConnEntry {
       conn,
       peer,
@@ -399,7 +397,7 @@ mod tests {
     t.get_mut(ch)
       .unwrap()
       .conn_mut()
-      .close(now, 0u32.into(), bytes::Bytes::new());
+      .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
 
     for _ in 0..5000 {
       if t.get_mut(ch).unwrap().conn_ref().is_drained() {
@@ -456,7 +454,7 @@ mod tests {
     t.get_mut(ch1)
       .unwrap()
       .conn_mut()
-      .close(now, 0u32.into(), bytes::Bytes::new());
+      .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
     assert!(t.get(ch1).unwrap().conn.is_closed());
     assert!(!t.get(ch1).unwrap().conn.is_drained());
     assert!(!t.get(ch1).unwrap().conn.is_handshaking());
@@ -539,7 +537,7 @@ mod tests {
     t.get_mut(ch1)
       .unwrap()
       .conn_mut()
-      .close(now, 0u32.into(), bytes::Bytes::new());
+      .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
     assert!(t.get(ch1).unwrap().conn.is_closed());
 
     // Second dial: MUST return the cached `ch1` so the caller's
@@ -587,7 +585,7 @@ mod tests {
     t.get_mut(ch)
       .unwrap()
       .conn_mut()
-      .close(now, 0u32.into(), bytes::Bytes::new());
+      .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
     // Closed state — `conn_mut` must NOT clear the sticky flag. The
     // returned `&mut Connection` is exercised for its side effect; the
     // binding itself is discarded.
@@ -645,7 +643,7 @@ mod tests {
     t.get_mut(ch1)
       .unwrap()
       .conn_mut()
-      .close(now, 0u32.into(), bytes::Bytes::new());
+      .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
     assert!(t.get(ch1).unwrap().conn.is_closed());
     assert!(!t.get(ch1).unwrap().conn.is_drained());
     // (3) Mint a fresh `(ConnectionHandle, Connection)` from the same
@@ -659,7 +657,7 @@ mod tests {
     // slab and updates `peers` per the usability predicate.
     let alt: SocketAddr = "127.0.0.1:4500".parse().unwrap();
     let (new_ch, new_conn) = client
-      .connect(now, cfg.client().clone(), alt, "localhost")
+      .connect(now.into_std(), cfg.client().clone(), alt, "localhost")
       .expect("fresh connection minted on the same client endpoint");
     t.insert_accepted(new_ch, new_conn, peer);
     // (4) The accepted connection IS live (`!is_closed()`), and the
@@ -732,7 +730,7 @@ mod tests {
     t.get_mut(ch)
       .unwrap()
       .conn_mut()
-      .close(now, 0u32.into(), bytes::Bytes::new());
+      .close(now.into_std(), 0u32.into(), bytes::Bytes::new());
     for _ in 0..5000 {
       if t.get(ch).unwrap().conn_ref().is_drained() {
         break;

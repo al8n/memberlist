@@ -2043,10 +2043,12 @@ mod per_peer_server_name {
   use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
   };
 
-  use memberlist_machine::{Endpoint, EndpointConfig, PushPullKind, QuicConfig, QuicEndpoint};
+  use memberlist_machine::{
+    Endpoint, EndpointConfig, Instant, PushPullKind, QuicConfig, QuicEndpoint,
+  };
   use memberlist_wire::typed::State;
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
   use smol_str::SmolStr;
@@ -2183,7 +2185,7 @@ mod per_peer_server_name {
       .with_suspicion_mult(4)
       .with_retransmit_mult(4)
       .with_rng_seed(addr.port() as u64);
-    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(ep_cfg);
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(ep_cfg, now);
     ep.start_scheduling(now);
     let mut seed = [0u8; 32];
     seed[..2].copy_from_slice(&addr.port().to_le_bytes());
@@ -2399,13 +2401,11 @@ mod per_peer_server_name {
 ///    a node whose cert isn't signed by the cluster CA cannot drive any
 ///    state changes.
 mod mtls_cluster_auth {
-  use std::{
-    net::SocketAddr,
-    sync::Arc,
-    time::{Duration, Instant},
-  };
+  use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-  use memberlist_machine::{Endpoint, EndpointConfig, PushPullKind, QuicConfig, QuicEndpoint};
+  use memberlist_machine::{
+    Endpoint, EndpointConfig, Instant, PushPullKind, QuicConfig, QuicEndpoint,
+  };
   use memberlist_wire::typed::State;
   use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
   use smol_str::SmolStr;
@@ -2576,7 +2576,7 @@ mod mtls_cluster_auth {
       .with_probe_timeout(Duration::from_millis(500))
       .with_suspicion_mult(4)
       .with_rng_seed(addr.port() as u64);
-    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new(ep_cfg);
+    let mut ep: Endpoint<SmolStr, SocketAddr> = Endpoint::new_at(ep_cfg, now);
     ep.start_scheduling(now);
     let mut seed = [0u8; 32];
     seed[..2].copy_from_slice(&addr.port().to_le_bytes());

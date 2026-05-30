@@ -1,13 +1,8 @@
 //! [`Cluster`]: top-level simulation harness.
 
-use std::{
-  collections::HashMap,
-  net::SocketAddr,
-  sync::Arc,
-  time::{Duration, Instant},
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use memberlist_machine::{AliveDelegate, EndpointConfig, Event, MergeDelegate};
+use memberlist_machine::{AliveDelegate, EndpointConfig, Event, Instant, MergeDelegate};
 use memberlist_wire::typed::{
   Alive, Dead, Message, Node, NodeState, PushNodeState, State, Suspect,
 };

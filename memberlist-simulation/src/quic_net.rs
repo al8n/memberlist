@@ -30,11 +30,11 @@ use std::{
   collections::{HashMap, VecDeque},
   net::SocketAddr,
   sync::Arc,
-  time::{Duration, Instant},
+  time::Duration,
 };
 
 use memberlist_machine::{
-  Endpoint, EndpointConfig, Event, PushPullKind, QuicConfig, QuicEndpoint, Transmit,
+  Endpoint, EndpointConfig, Event, Instant, PushPullKind, QuicConfig, QuicEndpoint, Transmit,
 };
 use memberlist_wire::{
   framing, message_from_any, message_to_any,
@@ -357,8 +357,9 @@ impl QuicCluster {
     if let Some(t) = self.stream_timeout {
       cfg = cfg.with_stream_timeout(t);
     }
-    let mut ep = Endpoint::new(cfg);
-    ep.start_scheduling(self.clock.now());
+    let now = self.clock.now();
+    let mut ep = Endpoint::new_at(cfg, now);
+    ep.start_scheduling(now);
     let qc = sim_quic_config(self.shrink_window);
     // Deterministic conformance harness: seed quinn's connection-ID /
     // path-challenge RNG from the node's port (distinct per node, fixed

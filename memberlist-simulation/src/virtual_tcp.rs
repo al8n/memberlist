@@ -11,10 +11,8 @@
 //! by the reader's `(addr, exchange)`. Fault hooks attach to a pipe and are
 //! consumed at delivery time so a one-shot can fire exactly once per pipe.
 
-use std::{
-  collections::VecDeque,
-  time::{Duration, Instant},
-};
+use memberlist_machine::Instant;
+use std::{collections::VecDeque, time::Duration};
 
 /// One side's view of a virtual TCP connection: an ordered byte queue the PEER
 /// writes into and this side reads from, plus a half-close marker. No

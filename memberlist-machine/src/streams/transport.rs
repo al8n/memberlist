@@ -11,7 +11,9 @@
 //! construction (`DialContext`), and the construction error
 //! (`ConstructError`).
 
-use std::time::Instant;
+use crate::Instant;
+#[cfg(not(feature = "std"))]
+use std::vec::Vec;
 
 /// Outcome of a single [`StreamTransport::handle_transport_data`] call.
 ///
