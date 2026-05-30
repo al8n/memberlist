@@ -13,25 +13,25 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 
-#[cfg(any(feature = "quic", feature = "tcp"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 mod command;
-#[cfg(any(feature = "quic", feature = "tcp"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 mod delegate;
 mod error;
-#[cfg(any(feature = "quic", feature = "tcp"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 mod events;
-#[cfg(any(feature = "quic", feature = "tcp"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 mod memberlist;
-#[cfg(any(feature = "quic", feature = "tcp"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 mod observation;
 mod options;
 #[cfg(feature = "quic")]
 mod quic_driver;
 mod resolver;
-#[cfg(any(feature = "quic", feature = "tcp"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 mod shared;
 mod snapshot;
-#[cfg(feature = "tcp")]
+#[cfg(any(feature = "tcp", feature = "tls"))]
 mod stream_driver;
 
 pub use error::Error;
@@ -39,17 +39,19 @@ pub use options::{Channel, DriverOptions, MemberlistOptions, Options};
 pub use resolver::{AddressResolver, MaybeResolved, SocketAddrResolver};
 pub use snapshot::MemberlistSnapshot;
 
-#[cfg(any(feature = "quic", feature = "tcp"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use delegate::{Delegate, VoidDelegate};
-#[cfg(any(feature = "quic", feature = "tcp"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use events::EventStream;
-#[cfg(any(feature = "quic", feature = "tcp"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use memberlist::Memberlist;
 #[cfg(feature = "quic")]
 pub use memberlist_machine::QuicConfig;
-#[cfg(any(feature = "quic", feature = "tcp"))]
+#[cfg(feature = "tls")]
+pub use memberlist_machine::TlsOptions;
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use memberlist_machine::event::Event;
-#[cfg(any(feature = "quic", feature = "tcp"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use memberlist_wire::typed::NodeState;
 
 /// The node-identity bound shared across the driver and handle — everything the

@@ -5,7 +5,7 @@
 //! are accepted by a dedicated task (the listener's `accept` is async-only).
 
 use std::{
-  collections::{BTreeMap, HashMap, HashSet, VecDeque},
+  collections::{HashMap, HashSet, VecDeque},
   future::Future,
   net::{Shutdown, SocketAddr},
   pin::Pin,
@@ -29,9 +29,8 @@ use memberlist::codec::{
   parse_messages,
 };
 use memberlist_machine::{
-  RawRecords,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
-  streams::{ExchangeId, StreamAction, StreamEndpoint},
+  streams::{ExchangeId, StreamAction, StreamEndpoint, StreamTransport},
 };
 
 use crate::{
@@ -132,14 +131,13 @@ struct DialConnected<R: Runtime> {
 ///
 /// `start_push_pull` returns a `StreamId` that is not the exchange's
 /// `ExchangeId`, and there is no public reverse index, so a join cannot key on
-/// the id it started. Instead it captures the `ExchangeId` at Connect time (the
-/// first Connect for a seed this join is still awaiting) and tracks completion by
-/// that id — unambiguous even for concurrent or duplicate-seed joins, which
-/// peer-only accounting could misattribute.
+/// the id it started. Instead `dispatch` drains the action(s) each
+/// `start_push_pull` queues and captures the resulting `Connect`'s `ExchangeId`
+/// here — synchronously, so the capture is unambiguous across concurrent or
+/// duplicate-seed joins, and a dial that fails before any `Connect` (e.g. a TLS
+/// peer with no SNI) simply contributes no id rather than wedging the join.
 struct PendingJoin {
-  /// Seeds still awaiting their Connect action, by outstanding count.
-  awaiting_connect: HashMap<SocketAddr, usize>,
-  /// Exchanges assigned to this join, awaiting their `ExchangeCompleted`.
+  /// Exchanges this join is awaiting, captured from their `Connect` at dispatch.
   pending_eids: HashSet<ExchangeId>,
   contacted: usize,
   requested: usize,
@@ -154,8 +152,8 @@ struct PendingLeave {
 
 /// The single-owner TCP driver future. Runs until shutdown (the last handle
 /// dropped, or a `Shutdown` command).
-pub(crate) struct StreamDriver<I: NodeId, R: Runtime> {
-  endpoint: StreamEndpoint<I, SocketAddr, RawRecords>,
+pub(crate) struct StreamDriver<I: NodeId, R: Runtime, T: StreamTransport> {
+  endpoint: StreamEndpoint<I, SocketAddr, T>,
   /// Unreliable gossip datagrams (the reliable exchanges run over TCP bridges).
   socket: <R::Net as Net>::UdpSocket,
   shared: Arc<Shared<I>>,
@@ -169,11 +167,10 @@ pub(crate) struct StreamDriver<I: NodeId, R: Runtime> {
   /// Application-data events retained after a full obs channel, retried on a
   /// later poll rather than dropped.
   obs_overflow: VecDeque<Event<I, SocketAddr>>,
-  /// Outstanding synchronous joins, keyed by a monotonic id. A `BTreeMap` so
-  /// iteration is in dispatch order: `assign_connect_to_join` binds each Connect
-  /// (queued in dispatch order) to the earliest-dispatched join awaiting that
-  /// peer, keeping concurrent same-seed joins call-scoped.
-  pending_joins: BTreeMap<u64, PendingJoin>,
+  /// Outstanding synchronous joins, keyed by a monotonic id. `dispatch` captures
+  /// each join's exchange ids synchronously and completions are matched by that
+  /// unique id, so map iteration order does not matter.
+  pending_joins: HashMap<u64, PendingJoin>,
   /// Monotonic key source for `pending_joins`.
   next_pending_join_id: u64,
   /// The in-flight graceful leave, resolved on `LeftCluster`.
@@ -203,10 +200,10 @@ pub(crate) struct StreamDriver<I: NodeId, R: Runtime> {
   idle_wake: Duration,
 }
 
-impl<I: NodeId, R: Runtime> StreamDriver<I, R> {
+impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
   #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
-    endpoint: StreamEndpoint<I, SocketAddr, RawRecords>,
+    endpoint: StreamEndpoint<I, SocketAddr, T>,
     socket: <R::Net as Net>::UdpSocket,
     shared: Arc<Shared<I>>,
     recv_batch: usize,
@@ -231,7 +228,7 @@ impl<I: NodeId, R: Runtime> StreamDriver<I, R> {
       obs_payload_bytes,
       obs_payload_budget,
       obs_overflow: VecDeque::new(),
-      pending_joins: BTreeMap::new(),
+      pending_joins: HashMap::new(),
       next_pending_join_id: 0,
       pending_leave: None,
       bridges: HashMap::new(),
@@ -310,29 +307,43 @@ impl<I: NodeId, R: Runtime> StreamDriver<I, R> {
           let _ = reply.try_send(Ok(count));
           return;
         }
-        // WaitForCompletion: tally an awaited Connect per seed; account_event
-        // captures each exchange's ExchangeId at Connect and replies the
-        // contacted count once every exchange completes.
-        //
-        // First drain any already-queued stream actions, so a same-peer Connect
-        // from an earlier call (join_detached, a gossip ping) binds to its own
-        // exchange rather than to this join's awaiting-Connect tally.
+        // WaitForCompletion: account_event replies the contacted count once every
+        // exchange this join started completes. An empty seed list is a no-op
+        // success, not a failure.
+        if addrs.is_empty() {
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.try_send(Ok(0));
+          return;
+        }
+        // Drain already-queued actions first, so a same-peer Connect from an
+        // earlier call (join_detached, a gossip ping) is handled and not captured
+        // by this join.
         while let Some(action) = self.endpoint.poll_action() {
           self.handle_stream_action(action);
         }
-        let mut awaiting_connect: HashMap<SocketAddr, usize> = HashMap::with_capacity(addrs.len());
-        let mut requested = 0usize;
+        // Start each seed's exchange and capture the Connect it produces
+        // synchronously. A dial that fails before any Connect (e.g. a TLS peer
+        // with no SNI) yields none, so it cannot leave the join awaiting forever.
+        let mut pending_eids = HashSet::with_capacity(addrs.len());
         for addr in &addrs {
-          // Ignoring StreamId: the exchange's ExchangeId is captured at Connect.
+          // Ignoring StreamId: the exchange's ExchangeId is captured from Connect.
           self
             .endpoint
             .start_push_pull(*addr, PushPullKind::Join, now);
-          *awaiting_connect.entry(*addr).or_insert(0) += 1;
-          requested += 1;
+          while let Some(action) = self.endpoint.poll_action() {
+            if let StreamAction::Connect(info) = &action
+              && info.peer() == *addr
+            {
+              pending_eids.insert(info.id());
+            }
+            self.handle_stream_action(action);
+          }
         }
-        if requested == 0 {
+        if pending_eids.is_empty() {
+          // Every seed's dial failed before producing an exchange: a bounded
+          // failure rather than an indefinite wait.
           // Ignoring Err: the caller dropped its reply receiver.
-          let _ = reply.try_send(Ok(0));
+          let _ = reply.try_send(Err(Error::JoinFailed(addrs.len())));
           return;
         }
         let id = self.next_pending_join_id;
@@ -340,10 +351,9 @@ impl<I: NodeId, R: Runtime> StreamDriver<I, R> {
         self.pending_joins.insert(
           id,
           PendingJoin {
-            awaiting_connect,
-            pending_eids: HashSet::new(),
+            pending_eids,
             contacted: 0,
-            requested,
+            requested: addrs.len(),
             reply,
           },
         );
@@ -399,7 +409,7 @@ impl<I: NodeId, R: Runtime> StreamDriver<I, R> {
             if succeeded {
               pj.contacted += 1;
             }
-            if pj.awaiting_connect.is_empty() && pj.pending_eids.is_empty() {
+            if pj.pending_eids.is_empty() {
               completed = Some(*key);
             }
             break;
@@ -429,31 +439,14 @@ impl<I: NodeId, R: Runtime> StreamDriver<I, R> {
     }
   }
 
-  /// Binds a freshly surfaced exchange `eid` to the first wait-join still
-  /// awaiting a Connect for `peer`. A Connect for a peer no join awaits
-  /// (gossip-driven push/pull) is ignored.
-  fn assign_connect_to_join(&mut self, peer: SocketAddr, eid: ExchangeId) {
-    for pj in self.pending_joins.values_mut() {
-      if let Some(count) = pj.awaiting_connect.get_mut(&peer) {
-        *count -= 1;
-        let drained = *count == 0;
-        if drained {
-          pj.awaiting_connect.remove(&peer);
-        }
-        pj.pending_eids.insert(eid);
-        return;
-      }
-    }
-  }
-
-  /// Applies one stream action: open a dial (binding the exchange to any wait-join
-  /// awaiting this peer), half-close a bridge's write, or tear a bridge down.
+  /// Applies one stream action: open a dial, half-close a bridge's write, or tear
+  /// a bridge down. A `dispatch` wait join captures its own exchanges' `Connect`
+  /// ids synchronously, so this only sets up the bridge.
   fn handle_stream_action(&mut self, action: StreamAction) {
     match action {
       StreamAction::Connect(info) => {
         let eid = info.id();
         let peer = info.peer();
-        self.assign_connect_to_join(peer, eid);
         let (out_tx, out_rx) = flume::unbounded();
         let (cancel_tx, cancel_rx) = flume::bounded(1);
         self.bridges.insert(
@@ -677,7 +670,11 @@ impl<I: NodeId, R: Runtime> StreamDriver<I, R> {
   }
 }
 
-impl<I: NodeId, R: Runtime> Future for StreamDriver<I, R> {
+impl<I: NodeId, R: Runtime, T: StreamTransport> Future for StreamDriver<I, R, T>
+where
+  T: Unpin,
+  T::Options: Unpin,
+{
   type Output = ();
 
   fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
@@ -715,7 +712,7 @@ impl<I: NodeId, R: Runtime> Future for StreamDriver<I, R> {
           }
         }
       }
-      for (_, pj) in core::mem::take(&mut this.pending_joins) {
+      for (_, pj) in this.pending_joins.drain() {
         // Ignoring Err: the join caller dropped its reply receiver.
         let _ = pj.reply.try_send(Err(Error::Shutdown));
       }

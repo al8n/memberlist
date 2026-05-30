@@ -8,8 +8,11 @@ description = "reactor-I/O async driver for the Sans-I/O memberlist machine (tok
 [features]
 default = ["tcp"]
 tcp = ["memberlist-machine/tcp"]
-tls-rustls-ring = ["memberlist-machine/tls-rustls-ring"]
-tls-rustls-aws-lc-rs = ["memberlist-machine/tls-rustls-aws-lc-rs"]
+# The shared TLS backend: enables the machine's rustls record layer (caller
+# supplies the configs). A crypto-backend feature (tls-rustls-*) adds a provider.
+tls = ["memberlist-machine/tls"]
+tls-rustls-ring = ["tls", "memberlist-machine/tls-rustls-ring"]
+tls-rustls-aws-lc-rs = ["tls", "memberlist-machine/tls-rustls-aws-lc-rs"]
 quic = ["memberlist-machine/quic"]
 quic-rustls-ring = ["quic", "memberlist-machine/quic-rustls-ring"]
 quic-rustls-aws-lc-rs = ["quic", "memberlist-machine/quic-rustls-aws-lc-rs"]
@@ -56,3 +59,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 [[test]]
 name = "quic_smoke"
 required-features = ["quic-rustls-ring"]
+
+[[test]]
+name = "tls_smoke"
+required-features = ["tls-rustls-ring"]
