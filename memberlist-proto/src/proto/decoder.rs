@@ -424,10 +424,27 @@ impl ProtoDecoder {
       return Ok(buf.freeze());
     }
 
+    // The header is varint-encoded: 1 byte tag + 1-5 bytes varint.
+    // Repeated peek() calls copy from the start of the unread stream,
+    // so we peek into the full buffer each time and track `available`
+    // as the total bytes returned rather than accumulating as a delta.
     let mut header = [0u8; super::MAX_PLAIN_MESSAGE_HEADER_SIZE];
-    reader.peek(&mut header).await?;
-    let (length_delimited_size, total_len) =
-      varing::decode_u32_varint(&header[1..]).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+    let (length_delimited_size, total_len) = loop {
+      let available = reader.peek(&mut header).await?;
+      if available == 0 {
+        return Err(Error::new(ErrorKind::UnexpectedEof, "stream closed during header peek"));
+      }
+      match varing::decode_u32_varint(&header[1..available]) {
+        Ok((len_bytes, total_len)) => {
+          let total_header = 1 + len_bytes.get();
+          if total_header as usize <= available {
+            break (len_bytes, total_len);
+          }
+        }
+        Err(varing::ConstDecodeError::InsufficientData(_)) => {} // need more bytes
+        Err(e) => return Err(Error::new(ErrorKind::InvalidData, e)),
+      }
+    };
     let mut buf = BytesMut::zeroed(1 + length_delimited_size.get() + total_len as usize);
     reader.read_exact(&mut buf).await?;
     let _ = auth_data;

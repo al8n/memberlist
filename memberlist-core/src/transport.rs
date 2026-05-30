@@ -24,24 +24,30 @@ pub trait Connection: Send + Sync {
   /// Splits the connection into a reader and a writer
   fn split(self) -> (Self::Reader, Self::Writer);
 
-  /// Read the payload from the proto reader to the buffer
+  /// Read up to `buf.len()` bytes from the connection's reader.
   ///
-  /// Returns the number of bytes read
+  /// Best-effort: returns the actual number of bytes read, which may be less
+  /// than `buf.len()`. Callers that need exactly `buf.len()` bytes should use
+  /// `read_exact()`.
   fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = std::io::Result<usize>> + Send;
 
-  /// Read exactly the payload from the proto reader to the buffer
+  /// Read exactly `buf.len()` bytes from the connection's reader.
+  ///
+  /// Returns `UnexpectedEof` if the stream closes before the buffer is full.
   fn read_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = std::io::Result<()>> + Send;
 
-  /// Peek the payload from the proto reader to the buffer
+  /// Peek up to `buf.len()` bytes from the connection's reader without
+  /// consuming them.
   ///
-  /// Returns the number of bytes peeked
+  /// Best-effort: returns the actual number of bytes peeked. Callers that
+  /// need exactly `buf.len()` bytes should use `peek_exact()`.
   fn peek(&mut self, buf: &mut [u8]) -> impl Future<Output = std::io::Result<usize>> + Send;
 
-  /// Peek exactly the payload from the proto reader to the buffer
+  /// Peek exactly `buf.len()` bytes from the connection's reader without
+  /// consuming them.
+  ///
+  /// Returns `UnexpectedEof` if the stream closes before the buffer is full.
   fn peek_exact(&mut self, buf: &mut [u8]) -> impl Future<Output = std::io::Result<()>> + Send;
-
-  /// Consume the content in peek buffer
-  fn consume_peek(&mut self);
 
   /// Write the payload to the proto writer
   fn write_all(&mut self, payload: &[u8]) -> impl Future<Output = std::io::Result<()>> + Send;

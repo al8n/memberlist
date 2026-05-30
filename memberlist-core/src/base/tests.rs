@@ -893,6 +893,54 @@ pub async fn memberlist_send<T, R>(
   .await;
 }
 
+/// Unit test for sending multiple packet batches.
+pub async fn memberlist_send_many<T, R>(
+  t1: T::Options,
+  t1_opts: Options,
+  t2: T::Options,
+  t2_opts: Options,
+) where
+  T: Transport<Runtime = R>,
+  R: RuntimeLite,
+{
+  let m1 = Memberlist::<T, _>::with_delegate(
+    CompositeDelegate::new().with_node_delegate(MockDelegate::<T::Id, T::ResolvedAddress>::new()),
+    t1,
+    t1_opts,
+  )
+  .await
+  .unwrap();
+
+  let m2 = Memberlist::<T, _>::new(t2, t2_opts).await.unwrap();
+
+  m2.join(MaybeResolvedAddress::resolved(
+    m1.advertise_address().clone(),
+  ))
+  .await
+  .unwrap();
+
+  wait_until_size::<_, _, R>(&m1, 2).await;
+  wait_until_size::<_, _, R>(&m2, 2).await;
+
+  let mut expected = (0..8u8)
+    .map(|idx| Bytes::from(vec![idx; 384]))
+    .collect::<Vec<_>>();
+
+  m2.send_many(m1.advertise_address(), expected.clone().into_iter())
+    .await
+    .expect("m2 send_many failed");
+
+  R::sleep(Duration::from_secs(2)).await;
+
+  let mut actual = m1.delegate().unwrap().node_delegate().get_messages().await;
+  actual.sort();
+  expected.sort();
+  assert_eq!(actual, expected);
+
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
+}
+
 /// Unit tests for leave
 pub async fn memberlist_leave<T, R>(
   t1: T::Options,

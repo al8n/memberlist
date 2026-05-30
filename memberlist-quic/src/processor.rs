@@ -80,6 +80,9 @@ where
       let fut2 = async {
         match acceptor.accept().await {
           Ok((connection, remote_addr)) => {
+            // Reset backoff delay on successful accept
+            loop_delay = Duration::ZERO;
+
             let shutdown_rx = shutdown_rx.clone();
             let packet_tx = packet_tx.clone();
             let stream_tx = stream_tx.clone();
@@ -147,65 +150,100 @@ where
     shutdown_rx: async_channel::Receiver<()>,
     #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::proto::MetricLabels>,
   ) {
+    // Listen for shutdown signal in a select with accept_bi() so that
+    // accept_bi() does not block shutdown indefinitely.
+    let shutdown_for_select = shutdown_rx.clone();
     loop {
-      let fut1 = shutdown_rx.recv();
-      let fut2 = async {
-        match conn.accept_bi().await {
-          Ok((mut stream, remote_addr)) => {
-            let mut stream_kind_buf = [0; 1];
-            if let Err(e) = stream.peek_exact(&mut stream_kind_buf).await {
-              tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist.transport.quic: failed to read stream kind");
-              return ControlFlow::Continue(());
-            }
-            let stream_kind = stream_kind_buf[0];
-            match StreamType::try_from(stream_kind) {
-              Ok(StreamType::Stream) => {
-                if let Err(e) = stream_tx.send(remote_addr, stream).await {
-                  tracing::error!(local_addr=%local_addr, err = %e, "memberlist.transport.quic: failed to send stream connection");
-                }
-                ControlFlow::Continue(())
-              }
-              Ok(StreamType::Packet) => {
-                stream.consume_peek();
-
-                Self::handle_packet(
-                  &mut stream,
-                  local_addr,
-                  remote_addr,
-                  &packet_tx,
-                  timeout,
-                  #[cfg(feature = "metrics")]
-                  &metric_labels,
-                )
-                .await;
-                ControlFlow::Continue(())
-              }
-              Err(val) => {
-                tracing::error!(local=%local_addr, from=%remote_addr, tag=%val, "memberlist.transport.quic: unknown stream");
-                ControlFlow::Break(())
-              }
-            }
-          }
-          Err(e) => {
-            tracing::debug!(local=%local_addr, from=%remote_addr, err = %e, "memberlist.transport.quic: failed to accept stream, shutting down the connection handler");
-            ControlFlow::Break(())
-          }
-        }
-      };
+      let fut1 = shutdown_for_select.recv();
+      let fut2 = conn.accept_bi();
 
       futures::pin_mut!(fut1, fut2);
 
       match futures::future::select(fut1, fut2).await {
         futures::future::Either::Left((_, _)) => break,
-        futures::future::Either::Right((flow, _)) => match flow {
-          ControlFlow::Continue(_) => continue,
-          ControlFlow::Break(_) => break,
-        },
+        futures::future::Either::Right((accept_result, _)) => {
+          let (stream, stream_remote_addr) = match accept_result {
+            Ok(pair) => pair,
+            Err(e) => {
+              tracing::debug!(local=%local_addr, from=%remote_addr, err = %e, "memberlist.transport.quic: failed to accept stream, shutting down the connection handler");
+              break;
+            }
+          };
+
+          // Spawn a detached task to handle this single stream so that
+          // one slow/blocked stream does not prevent processing others.
+          let packet_tx = packet_tx.clone();
+          let stream_tx = stream_tx.clone();
+          #[cfg(feature = "metrics")]
+          let metric_labels = metric_labels.clone();
+
+          <T::Runtime as RuntimeLite>::spawn_detach(Self::handle_stream(
+            stream,
+            local_addr,
+            stream_remote_addr,
+            stream_tx,
+            packet_tx,
+            timeout,
+            #[cfg(feature = "metrics")]
+            metric_labels,
+          ));
+        }
       }
     }
 
     tracing::debug!(local=%local_addr, remote=%remote_addr, "memberlist.transport.quic: connection handler exits");
     let _ = conn.close().await;
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  async fn handle_stream(
+    mut stream: S::Stream,
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    stream_tx: StreamProducer<T::ResolvedAddress, T::Connection>,
+    packet_tx: PacketProducer<T::ResolvedAddress, <T::Runtime as RuntimeLite>::Instant>,
+    timeout: Option<Duration>,
+    #[cfg(feature = "metrics")] metric_labels: Arc<memberlist_core::proto::MetricLabels>,
+  ) {
+    let mut stream_kind_buf = [0; 1];
+    if let Err(e) = stream.peek_exact(&mut stream_kind_buf).await {
+      tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist.transport.quic: failed to read stream kind");
+      return;
+    }
+    let stream_kind = stream_kind_buf[0];
+    match StreamType::try_from(stream_kind) {
+      Ok(StreamType::Stream) => {
+        if let Err(e) = stream_tx.send(remote_addr, stream).await {
+          tracing::error!(local_addr=%local_addr, err = %e, "memberlist.transport.quic: failed to send stream connection");
+        }
+      }
+      Ok(StreamType::Packet) => {
+        // Drain the stream type tag byte that was peeked in handle_stream().
+        // The processor peeked exactly 1 byte to determine whether this is a
+        // Stream or Packet stream, so we must consume it here before read_packet()
+        // reads the proto message payload from the stream.
+        let mut _tag = [0u8; 1];
+        if let Err(e) = stream.read_exact(&mut _tag).await {
+          tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist.transport.quic: failed to consume stream tag");
+          return;
+        }
+
+        Self::handle_packet(
+          &mut stream,
+          local_addr,
+          remote_addr,
+          &packet_tx,
+          timeout,
+          #[cfg(feature = "metrics")]
+          &metric_labels,
+        )
+        .await;
+      }
+      Err(val) => {
+        tracing::error!(local=%local_addr, from=%remote_addr, tag=%val, "memberlist.transport.quic: unknown stream");
+        // Don't kill the connection, just drop this stream.
+      }
+    }
   }
 
   #[allow(clippy::too_many_arguments)]

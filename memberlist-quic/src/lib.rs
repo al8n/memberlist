@@ -41,8 +41,6 @@ pub use options::*;
 pub mod stream_layer;
 use stream_layer::*;
 
-const MAX_MESSAGE_SIZE: usize = u32::MAX as usize;
-
 const PACKET_TAG: u8 = 254;
 const STREAM_TAG: u8 = 255;
 
@@ -120,7 +118,7 @@ where
     }
 
     let (stream_tx, stream_rx) = promised_stream::<Self>();
-    let (packet_tx, packet_rx) = packet_stream::<Self>();
+    let (packet_tx, packet_rx) = packet_stream::<Self>(opts.packet_buffer_size);
     let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
 
     let mut v4_connectors = SmallVec::with_capacity(opts.bind_addresses.len());
@@ -231,7 +229,7 @@ where
       advertise_addr: final_advertise_addr,
       connection_pool,
       local_addr: self_addr,
-      max_packet_size: MAX_MESSAGE_SIZE.min(stream_layer.max_stream_data()),
+      max_packet_size: opts.max_packet_size.min(stream_layer.max_stream_data()),
       opts,
       packet_rx,
       stream_rx,
@@ -448,6 +446,10 @@ where
     from: &Self::ResolvedAddress,
     conn: &mut <Self::Connection as Connection>::Reader,
   ) -> Result<usize, Self::Error> {
+    // Consume the stream type tag byte that was peeked by the processor
+    // in handle_stream(). The processor peeked exactly 1 byte to determine
+    // whether this is a Stream or Packet stream, so we must consume it here
+    // before the decoder reads the proto message payload.
     let mut buf = [0; 1];
     conn.read_exact(&mut buf).await?;
     match StreamType::try_from(buf[0]) {
