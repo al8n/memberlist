@@ -1,4 +1,5 @@
-//! The uniform [`Memberlist`] handle and the QUIC backend constructor.
+//! The uniform [`Memberlist`] handle and the QUIC, TCP, and TLS backend
+//! constructors.
 
 use std::{
   net::SocketAddr,
@@ -10,16 +11,20 @@ use agnostic::{
   Runtime,
   net::{Net, UdpSocket},
 };
+#[cfg(any(feature = "tcp", feature = "tls"))]
+use memberlist_machine::streams::{StreamEndpoint, StreamTransport};
 use memberlist_machine::{AliveDelegate, Endpoint, EndpointConfig, MergeDelegate, event::Event};
 #[cfg(feature = "quic")]
 use memberlist_machine::{QuicConfig, QuicEndpoint};
 #[cfg(feature = "tcp")]
-use memberlist_machine::{RawRecords, TcpOptions, streams::StreamEndpoint};
+use memberlist_machine::{RawRecords, TcpOptions};
+#[cfg(feature = "tls")]
+use memberlist_machine::{TlsOptions, TlsRecords};
 use memberlist_wire::{Node, typed::NodeState};
 
 #[cfg(feature = "quic")]
 use crate::quic_driver::QuicDriver;
-#[cfg(feature = "tcp")]
+#[cfg(any(feature = "tcp", feature = "tls"))]
 use crate::stream_driver::{ACCEPT_CAP, StreamDriver, accept_task};
 use crate::{
   NodeId,
@@ -33,7 +38,7 @@ use crate::{
   shared::Shared,
   snapshot::{MemberlistSnapshot, snapshot_of},
 };
-#[cfg(feature = "tcp")]
+#[cfg(any(feature = "tcp", feature = "tls"))]
 use agnostic::net::TcpListener;
 
 /// Wraps a boxed `AliveDelegate` so it satisfies the `impl AliveDelegate` bound
@@ -204,6 +209,85 @@ impl<I: NodeId> Memberlist<I> {
     Res: AddressResolver,
     D: Delegate<Id = I, Address = SocketAddr>,
   {
+    Self::build_stream_backend::<R, Res, D, RawRecords>(
+      resolver,
+      local_id,
+      advertise,
+      options,
+      delegate,
+      |ep| {
+        let tcp_opts = TcpOptions::try_new(None).expect("an absent TCP label is always valid");
+        StreamEndpoint::new(
+          ep,
+          tcp_opts,
+          Box::new(|_: &SocketAddr| -> Option<String> { None }),
+          Box::new(|addr: &SocketAddr| *addr),
+        )
+      },
+    )
+    .await
+  }
+
+  /// Builds a TLS-backed node and spawns its driver on the runtime `R`.
+  ///
+  /// Like [`tcp`](Self::tcp), but the reliable exchanges run over TLS. The caller
+  /// supplies the rustls server/client configs via `tls_options`, and
+  /// `sni_provider` maps each peer to the server name its certificate is verified
+  /// against — a TLS dial requires one, and returning `None` skips that peer.
+  #[cfg(feature = "tls")]
+  pub async fn tls<R, Res, D, F>(
+    resolver: &Res,
+    local_id: I,
+    advertise: MaybeResolved<Res::Address>,
+    options: Options<I>,
+    delegate: D,
+    tls_options: TlsOptions,
+    sni_provider: F,
+  ) -> Result<Self, Error>
+  where
+    R: Runtime,
+    Res: AddressResolver,
+    D: Delegate<Id = I, Address = SocketAddr>,
+    F: Fn(&SocketAddr) -> Option<String> + Send + Sync + 'static,
+  {
+    Self::build_stream_backend::<R, Res, D, TlsRecords>(
+      resolver,
+      local_id,
+      advertise,
+      options,
+      delegate,
+      move |ep| {
+        StreamEndpoint::new(
+          ep,
+          tls_options,
+          Box::new(sni_provider),
+          Box::new(|addr: &SocketAddr| *addr),
+        )
+      },
+    )
+    .await
+  }
+
+  /// Shared bootstrap for the stream backends (TCP, TLS): resolves and binds the
+  /// UDP gossip socket and the TCP listener, builds the membership `Endpoint`,
+  /// hands it to `make_endpoint` to wrap in the record-layer-specific
+  /// `StreamEndpoint`, then spawns the observation and accept tasks and the driver.
+  #[cfg(any(feature = "tcp", feature = "tls"))]
+  async fn build_stream_backend<R, Res, D, T>(
+    resolver: &Res,
+    local_id: I,
+    advertise: MaybeResolved<Res::Address>,
+    options: Options<I>,
+    delegate: D,
+    make_endpoint: impl FnOnce(Endpoint<I, SocketAddr>) -> StreamEndpoint<I, SocketAddr, T>,
+  ) -> Result<Self, Error>
+  where
+    R: Runtime,
+    Res: AddressResolver,
+    D: Delegate<Id = I, Address = SocketAddr>,
+    T: StreamTransport + Send + Unpin + 'static,
+    T::Options: Send + Unpin,
+  {
     let advertise_socket = resolve_one(resolver, advertise).await?;
     let socket = <R::Net as Net>::UdpSocket::bind(advertise_socket)
       .await
@@ -224,13 +308,7 @@ impl<I: NodeId> Memberlist<I> {
       ep.set_merge_delegate(BoxedMerge(md));
     }
 
-    let tcp_opts = TcpOptions::try_new(None).expect("an absent TCP label is always valid");
-    let mut endpoint = StreamEndpoint::<I, SocketAddr, RawRecords>::new(
-      ep,
-      tcp_opts,
-      Box::new(|_: &SocketAddr| -> Option<String> { None }),
-      Box::new(|addr: &SocketAddr| *addr),
-    );
+    let mut endpoint = make_endpoint(ep);
     endpoint.start_scheduling(Instant::now());
 
     let shared = Arc::new(Shared::new(snapshot_of(endpoint.endpoint_ref())));
@@ -268,7 +346,7 @@ impl<I: NodeId> Memberlist<I> {
       shared.clone(),
     ));
 
-    let driver = StreamDriver::<I, R>::new(
+    let driver = StreamDriver::<I, R, T>::new(
       endpoint,
       socket,
       shared.clone(),

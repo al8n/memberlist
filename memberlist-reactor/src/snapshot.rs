@@ -66,7 +66,7 @@ impl<I, A> MemberlistSnapshot<I, A> {
 
 /// Builds a membership snapshot from the machine's current view (shared by a
 /// backend constructor's initial publish and a driver's per-change republish).
-#[cfg(any(feature = "quic", feature = "tcp"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub(crate) fn snapshot_of<I: crate::NodeId>(
   ep: &memberlist_machine::Endpoint<I, SocketAddr>,
 ) -> MemberlistSnapshot<I, SocketAddr> {
