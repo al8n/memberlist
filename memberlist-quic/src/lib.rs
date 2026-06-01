@@ -298,6 +298,7 @@ where
   async fn fetch_connection(
     &self,
     addr: SocketAddr,
+    deadline: Option<R::Instant>,
   ) -> Result<S::Connection, QuicTransportError<A>> {
     if let Some(ent) = self.connection_pool.get(&addr) {
       let (_, connection) = ent.value();
@@ -307,7 +308,13 @@ where
     }
 
     let connector = self.next_connector(&addr);
-    let connection = connector.connect(addr).await?;
+    let connect_fut = connector.connect(addr);
+    let connection = match deadline {
+      Some(deadline) => R::timeout_at(deadline, connect_fut)
+        .await
+        .map_err(|e| QuicTransportError::Io(e.into()))??,
+      None => connect_fut.await?,
+    };
     self
       .connection_pool
       .insert(addr, (Instant::now(), connection.clone()));
@@ -319,7 +326,7 @@ where
     addr: SocketAddr,
     deadline: R::Instant,
   ) -> Result<S::Stream, QuicTransportError<A>> {
-    let conn = self.fetch_connection(addr).await?;
+    let conn = self.fetch_connection(addr, Some(deadline)).await?;
     R::timeout_at(deadline, conn.open_bi())
       .await
       .map_err(|e| QuicTransportError::Io(e.into()))?
@@ -461,7 +468,8 @@ where
     src: Payload,
   ) -> Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error> {
     let start = <Self::Runtime as RuntimeLite>::now();
-    let conn = self.fetch_connection(*addr).await?;
+    let deadline = self.opts.timeout.map(|ttl| start + ttl);
+    let conn = self.fetch_connection(*addr, deadline).await?;
 
     // Datagrams don't need a stream type tag — they're already a separate
     // channel from streams.
