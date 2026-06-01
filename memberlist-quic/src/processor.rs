@@ -157,15 +157,16 @@ where
           match datagram_conn.recv_datagram().await {
             Ok(bytes) => {
               let start = <T::Runtime as RuntimeLite>::now();
+              let len = bytes.len();
               if let Err(e) = datagram_packet_tx
-                .send(Packet::new(remote_addr, start, bytes.clone()))
+                .send(Packet::new(remote_addr, start, bytes))
                 .await
               {
                 tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist_quic.packet: failed to send packet from datagram");
               }
               #[cfg(feature = "metrics")]
               metrics::counter!("memberlist.packet.received", datagram_metric_labels.iter())
-                .increment(bytes.len() as u64);
+                .increment(len as u64);
             }
             Err(e) => {
               tracing::debug!(local=%local_addr, from=%remote_addr, err = %e, "memberlist_quic.packet: datagram stream closed");
