@@ -231,10 +231,10 @@ impl From<Options> for QuinnOptions {
     let mut transport = quinn::TransportConfig::default();
     transport.max_concurrent_uni_streams(max_concurrent_stream_limit.into());
     transport.max_concurrent_bidi_streams(max_concurrent_stream_limit.into());
-    // Enable datagrams for packet transport. 65536 bytes is the maximum
-    // allowed by the QUIC datagram protocol (RFC 9221, 16-bit length field),
-    // so hardcoding this value is correct.
-    transport.datagram_receive_buffer_size(Some(65536));
+    // Enable datagram reception for packet transport.
+    // This sets the size (in bytes) of quinn's internal queue for received
+    // datagrams; it does not impose a protocol-level maximum datagram size.
+    transport.datagram_receive_buffer_size(Some(65_536));
     transport.keep_alive_interval(Some(keep_alive_interval));
     transport.max_idle_timeout(Some(VarInt::from_u32(max_idle_timeout).into()));
     transport.allow_spin(false);
