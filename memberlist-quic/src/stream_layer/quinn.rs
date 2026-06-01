@@ -346,12 +346,11 @@ impl QuicConnection for QuinnConnection {
   }
 
   async fn send_datagram(&self, data: bytes::Bytes) -> io::Result<()> {
-    self.conn.send_datagram_wait(data).await.map_err(|e| {
-      io::Error::new(
-        io::ErrorKind::Other,
-        format!("failed to send datagram: {e}"),
-      )
-    })
+    self
+      .conn
+      .send_datagram_wait(data)
+      .await
+      .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
   }
 
   async fn recv_datagram(&self) -> io::Result<bytes::Bytes> {
@@ -359,7 +358,7 @@ impl QuicConnection for QuinnConnection {
       .conn
       .read_datagram()
       .await
-      .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("datagram read error: {e}")))
+      .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
   }
 
   async fn close(&self) -> io::Result<()> {
