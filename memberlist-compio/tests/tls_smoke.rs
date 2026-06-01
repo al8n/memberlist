@@ -12,11 +12,15 @@
 
 use std::{
   net::{IpAddr, Ipv4Addr, SocketAddr},
-  sync::Arc,
+  sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+  },
 };
 
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use memberlist_compio::{
   FirstAddrResolver, MaybeResolved, MemberlistError, Options, SocketAddrResolver,
   StreamTransportOptions, TlsMemberlist, TlsTransportOptions, VoidDelegate,
@@ -288,5 +292,146 @@ async fn two_node_join_converges_member_counts_tls() {
   assert_eq!(seed.alive_count(), 2);
 
   seed.shutdown().await.expect("seed shutdown");
+  joiner.shutdown().await.expect("joiner shutdown");
+}
+
+/// `send_many_reliable` where one payload connects and a LATER payload fails
+/// BEFORE `StreamAction::Connect` must reply `Err(SendFailed)` — not a false
+/// `Ok` once the connected exchange succeeds.
+///
+/// The pre-`Connect` failure is provoked deterministically with a stateful
+/// `sni_provider` that returns `Some("localhost")` on its FIRST call and `None`
+/// thereafter: a `None` SNI makes the TLS `dial_context` fail before any
+/// `Connect`, so the second payload's dial is retired pre-`Connect` and never
+/// surfaces an `ExchangeCompleted`. With two payloads (N = 2) and one captured
+/// exchange (M = 1), the driver seeds `failed = N - M = 1`; even though the
+/// first payload's exchange succeeds against the live seed, the final reply is
+/// `Err(SendFailed)`.
+///
+/// Without the seeding fix the driver would park with `failed = 0`, observe the
+/// single connected exchange succeed, and falsely report `Ok(())` though the
+/// second payload was never sent.
+#[compio::test]
+async fn tls_send_many_reliable_partial_pre_connect_failure_reports_err() {
+  let seed_addr = loopback_addr(7310);
+  let sender_addr = loopback_addr(7311);
+
+  // Live TLS seed the first payload connects to.
+  let seed = make_tls("tls-pcf-seed", seed_addr)
+    .await
+    .expect("seed construct");
+
+  // Sender's SNI provider: Some on the first dial, None on every later dial.
+  let sni_calls = Arc::new(AtomicUsize::new(0));
+  let sni_calls_for_closure = sni_calls.clone();
+  let sender_opts = Options::new(
+    TlsTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new("tls-pcf-sender"))
+      .with_advertise_addr(MaybeResolved::Resolved(sender_addr))
+      .with_tls_options(smoke_tls_options())
+      .with_sni_provider(Box::new(move |_addr: &SocketAddr| {
+        // First dial → Some (connects); subsequent dials → None (the TLS
+        // dial_context fails before Connect).
+        if sni_calls_for_closure.fetch_add(1, Ordering::SeqCst) == 0 {
+          Some("localhost".to_string())
+        } else {
+          None
+        }
+      })),
+  );
+  let sender = TlsMemberlist::<SmolStr, SocketAddr>::new(
+    sender_opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("sender construct");
+
+  // Two payloads to the SAME live seed: payload 0 dials with SNI Some →
+  // Connect → bridge → succeeds; payload 1 dials with SNI None → pre-Connect
+  // failure (no exchange). The seeded `failed` must force an Err result.
+  let result = compio::time::timeout(
+    Duration::from_secs(20),
+    sender.send_many_reliable(
+      seed_addr,
+      [
+        Bytes::from_static(b"tls-pcf-first"),
+        Bytes::from_static(b"tls-pcf-second"),
+      ],
+    ),
+  )
+  .await
+  .expect("send_many_reliable must resolve, not hang");
+  assert!(
+    matches!(result, Err(MemberlistError::SendFailed)),
+    "a partial pre-Connect failure must reply Err(SendFailed), got {result:?}"
+  );
+  // Sanity: the SNI provider was consulted at least twice (one Some, one None).
+  assert!(
+    sni_calls.load(Ordering::SeqCst) >= 2,
+    "both payload dials must consult the SNI provider; calls={}",
+    sni_calls.load(Ordering::SeqCst)
+  );
+
+  sender.shutdown().await.expect("sender shutdown");
+  seed.shutdown().await.expect("seed shutdown");
+}
+
+/// A synchronous `join` whose every seed fails BEFORE a `Connect` (the TLS
+/// `sni_provider` returns `None`, so `dial_context` fails at dial setup and no
+/// exchange is ever created) must resolve `JoinAllFailed` carrying the full
+/// resolved seed count, and must resolve PROMPTLY rather than idle until the
+/// join deadline.
+///
+/// The seed count is the denominator the caller sees. Deriving it from the
+/// captured-exchange count would report `requested == 0` here (every seed
+/// retired pre-`Connect`, so nothing is captured); with two seeds the payload
+/// must report `requested == 2`.
+#[compio::test]
+async fn tls_join_all_pre_connect_failure_reports_full_seed_count() {
+  let joiner_addr = loopback_addr(7312);
+  // SNI provider always `None` → every TLS dial fails at `dial_context`, before
+  // any `Connect`, so no exchange is created and `exchange_ids` stays empty.
+  let opts = Options::new(
+    TlsTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new("tls-nosni-joiner"))
+      .with_advertise_addr(MaybeResolved::Resolved(joiner_addr))
+      .with_tls_options(smoke_tls_options())
+      .with_sni_provider(Box::new(|_addr: &SocketAddr| None)),
+  );
+  let joiner = TlsMemberlist::<SmolStr, SocketAddr>::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("joiner construct");
+
+  // Two seeds; both dials fail pre-`Connect`. The addresses need not be
+  // reachable — `dial_context` fails before any connection is attempted.
+  let seeds = [
+    MaybeResolved::Resolved(loopback_addr(65534)),
+    MaybeResolved::Resolved(loopback_addr(65535)),
+  ];
+  let result = compio::time::timeout(
+    Duration::from_secs(10),
+    joiner.join(&SocketAddrResolver, &seeds),
+  )
+  .await
+  .expect("join must resolve promptly, not idle until the deadline");
+  match result {
+    Err(MemberlistError::JoinAllFailed(payload)) => {
+      assert_eq!(
+        payload.requested(),
+        2,
+        "requested must reflect the full resolved seed count, not the captured-exchange count",
+      );
+      assert_eq!(payload.contacted(), 0, "no seed was contacted");
+    }
+    other => panic!("expected JoinAllFailed with requested == 2, got {other:?}"),
+  }
+
   joiner.shutdown().await.expect("joiner shutdown");
 }

@@ -52,7 +52,7 @@ pub use memberlist_proto::TlsOptions;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
 pub use memberlist_proto::event::Event;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "tls"))]
-pub use memberlist_proto::typed::NodeState;
+pub use memberlist_proto::{Node, typed::NodeState};
 
 /// The node-identity bound shared across the driver and handle — everything the
 /// machine's `Endpoint<I, _>` requires of the identity type `I`. A blanket impl

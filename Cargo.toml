@@ -35,15 +35,13 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [workspace.dependencies]
-among = "0.1"
+among = "0.2"
 arc-swap = "1"
 auto_impl = "1"
 atomic_refcell = "0.1"
 agnostic-lite = { version = "0.6", features = ["time"] }
 agnostic-io = { version = "0.2", default-features = false }
 agnostic = "0.9"
-# agnostic-lite = { version = "0.4", features = ["time"], path = "../agnostic/agnostic-lite" }
-# agnostic = { version = "0.6", path = "../agnostic/agnostic" }
 async-lock = "3"
 async-channel = "2"
 bytes = { version = "1", default-features = false }
@@ -60,17 +58,12 @@ derive_more = { version = "2", default-features = false }
 either = { version = "1", default-features = false }
 futures = "0.3"
 indexmap = "2"
-getifs = "0.5"
+getifs = "0.6"
 getrandom = "0.4"
 metrics = "0.24"
 nodecraft = { version = "0.9", default-features = false }
-# nodecraft = { version = "0.8", path = "../nodecraft", features = [
-#   "async",
-#   "resolver",
-#   "agnostic",
-# ] }
 paste = "1"
-peekable = "0.5"
+peekable = "0.6"
 pin-project = "1"
 scopeguard = "1"
 serde = { version = "1", features = ["derive", "rc"] }

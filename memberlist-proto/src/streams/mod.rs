@@ -935,6 +935,34 @@ where
     self.ep.queue_user_broadcast(data)
   }
 
+  /// Initiate an application ping to `node`. Forwards to
+  /// [`Endpoint::ping`]; sets `last_now`. Returns the [`crate::event::PingId`]
+  /// correlation token; the terminal event (`PingCompleted` / `PingFailed`)
+  /// carries it so the driver can correlate the outcome.
+  #[inline]
+  pub fn ping(&mut self, node: crate::Node<I, A>, now: Instant) -> crate::event::PingId {
+    self.last_now = Some(now);
+    self.ep.ping(node, now)
+  }
+
+  /// Enqueue a directed unreliable user-data packet. Forwards to
+  /// [`Endpoint::send_user_packet`].
+  #[inline]
+  pub fn send_user_packet(&mut self, to: A, data: Bytes) -> Result<(), crate::error::Error> {
+    self.ep.send_user_packet(to, data)
+  }
+
+  /// Enqueue directed unreliable user-data packets (compound if ≥2).
+  /// Forwards to [`Endpoint::send_user_packets`].
+  #[inline]
+  pub fn send_user_packets(
+    &mut self,
+    to: A,
+    payloads: &[Bytes],
+  ) -> Result<(), crate::error::Error> {
+    self.ep.send_user_packets(to, payloads)
+  }
+
   /// The reliable-stream frame ceiling
   /// ([`max_stream_frame_size`](crate::config::EndpointConfig::max_stream_frame_size)).
   /// The driver derives its observation-channel payload byte budget from this.
@@ -1700,6 +1728,31 @@ where
     self.run_tick(now);
   }
 
+  /// The driver's outbound dial task for exchange `id` failed to connect
+  /// (connection refused, dial timeout, host unreachable) BEFORE any bytes
+  /// flowed. Fails the owning bridge so the next coordinator tick reaps it
+  /// with [`ExchangeOutcome::Failed`] and emits the terminal
+  /// [`Event::ExchangeCompleted`].
+  ///
+  /// This is distinct from [`Self::handle_transport_data`] with `eof = true`:
+  /// a clean transport `read == 0` (peer half-closed after the wire was
+  /// established) is benign for a one-way `UserMessage` (the FSM maps it to a
+  /// successful completion — see `Stream::handle_data`'s
+  /// `OutboundSendingRequest(UserMessage)` EOF arm). A dial that never
+  /// connected has NO established wire: feeding it as a benign EOF would
+  /// FALSELY complete a `UserMessage` `send_reliable` as success. Routing the
+  /// connect failure through `fail_dial_retired` instead terminalizes the
+  /// exchange as a genuine failure regardless of kind, so the driver's parked
+  /// reliable-send waiter resolves with an error. A no-op if the exchange's
+  /// bridge was already reaped (a same-tick `Close`/`Abort` from the machine).
+  pub fn handle_dial_failed(&mut self, id: ExchangeId, now: Instant) {
+    self.last_now = Some(now);
+    if let Some(bridge) = self.conns.get_mut(id) {
+      bridge.fail_dial_retired();
+    }
+    self.run_tick(now);
+  }
+
   /// The driver accepted an inbound transport connection from `from`.
   /// Allocates an [`ExchangeId`], builds a server-side `Handshaking` bridge
   /// bounded by [`ACCEPT_HANDSHAKE_DEADLINE`], and returns the handle the
@@ -1978,7 +2031,12 @@ where
           kind: exchange_kind,
         },
       );
-      let action = StreamAction::Connect(ConnectInfo::new(exchange, peer_socket));
+      // `id` is the machine `StreamId` of the originating `start_*` dial,
+      // threaded into the Connect so a driver can correlate a surfaced Connect
+      // back to the exact `start_*` it issued — `service_dials` drains the
+      // SHARED `dial_pending` deque, so one command's drain can also flush an
+      // unrelated same-peer dial; the peer address alone does not call-scope it.
+      let action = StreamAction::Connect(ConnectInfo::new(exchange, peer_socket, id));
       debug_assert!(
         matches!(action, StreamAction::Connect(_)),
         "pending_connects holds only Connect actions",

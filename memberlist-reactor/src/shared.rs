@@ -19,8 +19,8 @@ use crate::{command::Command, snapshot::MemberlistSnapshot};
 
 /// The lock-guarded part of [`Shared`]: the command queue handles push onto, and
 /// the driver's parked waker.
-struct Inner {
-  commands: VecDeque<Command>,
+struct Inner<I> {
+  commands: VecDeque<Command<I>>,
   driver_waker: Option<Waker>,
   /// Set once the driver has exited; no further commands are accepted, so a
   /// handle never waits on a reply that can never come.
@@ -30,7 +30,7 @@ struct Inner {
 /// State shared between the `Memberlist` handle (and its clones) and the backend
 /// driver task.
 pub(crate) struct Shared<I> {
-  inner: Mutex<Inner>,
+  inner: Mutex<Inner<I>>,
   snapshot: ArcSwap<MemberlistSnapshot<I, SocketAddr>>,
   /// Recoverable EventStream-forward drops (membership / control gaps).
   events_dropped: AtomicU64,
@@ -48,7 +48,7 @@ impl<I> Shared<I> {
   /// handle.
   pub(crate) fn new(initial: MemberlistSnapshot<I, SocketAddr>) -> Self {
     Self {
-      inner: Mutex::new(Inner {
+      inner: Mutex::new(Inner::<I> {
         commands: VecDeque::new(),
         driver_waker: None,
         closed: false,
@@ -64,7 +64,7 @@ impl<I> Shared<I> {
   /// Pushes a command and wakes the driver. Returns `false` (dropping `cmd`) if
   /// the driver has already exited, so the caller can fail fast instead of
   /// awaiting a reply that will never arrive.
-  pub(crate) fn push_command(&self, cmd: Command) -> bool {
+  pub(crate) fn push_command(&self, cmd: Command<I>) -> bool {
     let mut inner = self.inner.lock().unwrap();
     if inner.closed {
       return false;
@@ -78,7 +78,7 @@ impl<I> Shared<I> {
 
   /// Driver side: parks `waker` for the next push and returns all queued
   /// commands.
-  pub(crate) fn drain_commands(&self, waker: &Waker) -> VecDeque<Command> {
+  pub(crate) fn drain_commands(&self, waker: &Waker) -> VecDeque<Command<I>> {
     let mut inner = self.inner.lock().unwrap();
     match &inner.driver_waker {
       Some(w) if w.will_wake(waker) => {}
@@ -89,7 +89,7 @@ impl<I> Shared<I> {
 
   /// Driver side, on exit: closes the queue (rejecting further pushes) and
   /// returns any still-queued commands so the driver can fail their repliers.
-  pub(crate) fn close_and_drain(&self) -> VecDeque<Command> {
+  pub(crate) fn close_and_drain(&self) -> VecDeque<Command<I>> {
     let mut inner = self.inner.lock().unwrap();
     inner.closed = true;
     core::mem::take(&mut inner.commands)

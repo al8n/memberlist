@@ -240,7 +240,7 @@ fn probe_node_awareness_missed_nack_score_worsens() {
   // We monitor the score after every step; as soon as it rises above 0 (the
   // first missed-nack `record_failure`) we capture it and stop. m4 will also
   // become Suspect at that point.
-  let mut peak_score = 0u32;
+  let mut peak_score = 0usize;
   for _ in 0..2000 {
     c.step();
     let s = c.health_score(a1).unwrap_or(0);

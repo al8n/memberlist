@@ -48,6 +48,9 @@ pub use interface::{
   Medium, Route,
 };
 pub use memberlist::Memberlist;
+// Re-export types that appear in public `Memberlist` method signatures so
+// callers do not need to depend on `memberlist-proto` directly.
+pub use memberlist_proto::{Node, PingId, StreamId, typed::NodeState};
 pub use transform::{
   CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, SecretKey, TcpOptions,
   TransformOptions,
