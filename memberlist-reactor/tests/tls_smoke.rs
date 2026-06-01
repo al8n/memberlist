@@ -10,7 +10,8 @@ use std::{net::SocketAddr, time::Duration};
 
 use agnostic::tokio::TokioRuntime;
 use memberlist_reactor::{
-  MaybeResolved, Memberlist, Options, SocketAddrResolver, TlsOptions, VoidDelegate,
+  DriverOptions, Error, MaybeResolved, Memberlist, Options, SocketAddrResolver, TlsOptions,
+  VoidDelegate,
 };
 use rustls::RootCertStore;
 use smol_str::SmolStr;
@@ -106,6 +107,43 @@ async fn leave_completes_within_budget() {
 
   let _ = a.shutdown().await;
   let _ = b.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_close_timeout_is_rejected() {
+  // The TLS backend funnels through the same stream constructor as TCP, so a
+  // zero close_timeout (which RSTs a graceful close's queued push/pull bytes
+  // instead of draining them) must be rejected fail-fast here too.
+  let res = Memberlist::<SmolStr>::tls::<TokioRuntime, _, _, _>(
+    &SocketAddrResolver,
+    SmolStr::new("tls-zero-close"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new().with_driver(DriverOptions::new().with_close_timeout(Duration::ZERO)),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+    support::self_trusted_tls_options(),
+    |_: &SocketAddr| Some("localhost".to_string()),
+  )
+  .await;
+  assert!(
+    matches!(res, Err(Error::ZeroCloseTimeout)),
+    "a zero close_timeout must be rejected with ZeroCloseTimeout over TLS"
+  );
+
+  // A nonzero close_timeout constructs over TLS.
+  let ok = Memberlist::<SmolStr>::tls::<TokioRuntime, _, _, _>(
+    &SocketAddrResolver,
+    SmolStr::new("tls-nonzero-close"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new().with_driver(DriverOptions::new().with_close_timeout(Duration::from_secs(10))),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+    support::self_trusted_tls_options(),
+    |_: &SocketAddr| Some("localhost".to_string()),
+  )
+  .await
+  .expect("a nonzero close_timeout must construct over TLS");
+  // Ignoring Err: best-effort teardown; the positive-control assertion already
+  // passed, and the test does not depend on the shutdown reply.
+  let _ = ok.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

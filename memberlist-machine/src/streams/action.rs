@@ -38,8 +38,9 @@ impl ConnectInfo {
   }
 }
 
-/// Payload of [`StreamAction::Shutdown`] / [`StreamAction::Close`]: names one
-/// exchange's transport connection. Accessor-only.
+/// Payload of [`StreamAction::Shutdown`] / [`StreamAction::Close`] /
+/// [`StreamAction::Abort`]: names one exchange's transport connection.
+/// Accessor-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExchangeRef {
   id: ExchangeId,
@@ -71,8 +72,18 @@ pub enum StreamAction {
   /// buffered bytes.
   Shutdown(ExchangeRef),
   /// Tear down the transport connection and forget the exchange — the bridge
-  /// reached a terminal phase and has been reaped.
+  /// reached a GRACEFUL terminal phase (`BothClosed`) and has been reaped. Any
+  /// outbound bytes still queued for this exchange MUST be DELIVERED before the
+  /// FIN: they are legitimate response/label bytes a clean close owes the peer.
+  /// The failed-terminal counterpart is [`StreamAction::Abort`].
   Close(ExchangeRef),
+  /// Tear down the transport connection and DISCARD any buffered outbound bytes
+  /// — the bridge reached a FAILED terminal phase (dial failure, label/encryption
+  /// rejection, or an elapsed exchange deadline). Unlike [`StreamAction::Close`],
+  /// the driver MUST NOT flush bytes still queued for this exchange: they are
+  /// stale, belonging to an exchange the coordinator has given up on. Abort the
+  /// connection (RST) and reclaim it immediately.
+  Abort(ExchangeRef),
 }
 
 impl StreamAction {
@@ -99,6 +110,15 @@ impl StreamAction {
   pub const fn as_close(&self) -> Option<&ExchangeRef> {
     match self {
       StreamAction::Close(r) => Some(r),
+      _ => None,
+    }
+  }
+
+  /// Borrow the [`ExchangeRef`] iff this is a [`StreamAction::Abort`].
+  #[inline(always)]
+  pub const fn as_abort(&self) -> Option<&ExchangeRef> {
+    match self {
+      StreamAction::Abort(r) => Some(r),
       _ => None,
     }
   }

@@ -870,17 +870,18 @@ mod tests {
       stale,
     );
 
-    // (6) Load-bearing assertion: `Close` for the failed exchange did
+    // (6) Load-bearing assertion: `Abort` for the failed exchange did
     // surface — the gate must release the teardown once the purge empties
-    // the exchange's queue, else the bridge would leak (no `Close` ever
-    // fires).
-    let close_for_exchange = actions_observed
+    // the exchange's queue, else the bridge would leak (no teardown ever
+    // fires). A timed-out exchange is FAILED, so the reap emits `Abort` (the
+    // driver discards its stale buffered bytes) rather than `Close`.
+    let abort_for_exchange = actions_observed
       .iter()
-      .filter_map(|a| a.as_close())
+      .filter_map(|a| a.as_abort())
       .any(|r| r.id() == exchange);
     assert!(
-      close_for_exchange,
-      "Close for the timed-out exchange {:?} must surface from the natural \
+      abort_for_exchange,
+      "Abort for the timed-out exchange {:?} must surface from the natural \
        drain loop after the purge releases the gate; got {:?}",
       exchange,
       actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
@@ -970,16 +971,17 @@ mod tests {
       stale,
     );
 
-    // (5) Load-bearing assertion: `Close` for the failed exchange did
-    // surface — the bridge is retired, but the coordinator MUST signal
-    // the driver to close the socket.
-    let close_for_exchange = actions_observed
+    // (5) Load-bearing assertion: `Abort` for the failed exchange did
+    // surface — the bridge is retired (its inbound label was rejected), so
+    // the coordinator MUST signal the driver to RST the socket and discard
+    // its stale outbound bytes.
+    let abort_for_exchange = actions_observed
       .iter()
-      .filter_map(|a| a.as_close())
+      .filter_map(|a| a.as_abort())
       .any(|r| r.id() == exchange);
     assert!(
-      close_for_exchange,
-      "Close for the rejected acceptor {:?} must surface; got {:?}",
+      abort_for_exchange,
+      "Abort for the rejected acceptor {:?} must surface; got {:?}",
       exchange,
       actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
     );
@@ -1057,15 +1059,16 @@ mod tests {
       stale,
     );
 
-    // (5) Load-bearing assertion: `Close` for the failed exchange did
-    // surface.
-    let close_for_exchange = actions_observed
+    // (5) Load-bearing assertion: `Abort` for the failed exchange did
+    // surface — the slow-loris acceptor timed out (FAILED), so the reap
+    // emits `Abort` to RST the socket and discard its stale bytes.
+    let abort_for_exchange = actions_observed
       .iter()
-      .filter_map(|a| a.as_close())
+      .filter_map(|a| a.as_abort())
       .any(|r| r.id() == exchange);
     assert!(
-      close_for_exchange,
-      "Close for the slow-loris acceptor {:?} must surface; got {:?}",
+      abort_for_exchange,
+      "Abort for the slow-loris acceptor {:?} must surface; got {:?}",
       exchange,
       actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
     );
@@ -1545,19 +1548,19 @@ mod tests {
       actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
     );
 
-    // (8) `Close` for the failed exchange surfaces — the contract per the
-    // fix is to emit `Close` so a driver that had already drained
-    // `Connect` from a prior tick can clean up the open socket. In this
-    // test the Connect was purged so a driver's `Close` is a no-op for
-    // an unopened socket, but the action presence is the documented
-    // behaviour.
-    let close_for_exchange = actions_observed
+    // (8) `Abort` for the failed exchange surfaces — the contract is to
+    // emit `Abort` (the dial FAILED) so a driver that had already drained
+    // `Connect` from a prior tick can RST the open socket and discard any
+    // bytes it queued for the exchange. In this test the Connect was purged
+    // so a driver's `Abort` is a no-op for an unopened socket, but the action
+    // presence is the documented behaviour.
+    let abort_for_exchange = actions_observed
       .iter()
-      .filter_map(|a| a.as_close())
+      .filter_map(|a| a.as_abort())
       .any(|r| r.id() == exchange);
     assert!(
-      close_for_exchange,
-      "Close for the failed exchange must surface; got {:?}",
+      abort_for_exchange,
+      "Abort for the failed exchange must surface; got {:?}",
       actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
     );
 
@@ -2176,9 +2179,9 @@ mod tests {
     coord.set_encryption_options(opts);
 
     // (3) Drain `poll_action` and assert: NO `Connect` is observed (the
-    // purge worked), and a `Close` IS observed (the synchronous enqueue
+    // purge worked), and an `Abort` IS observed (the synchronous enqueue
     // worked, so the driver can tear down any state it accrued for the
-    // exchange).
+    // exchange and discard its stale bytes — the bridge FAILED).
     let mut actions_observed: Vec<StreamAction> = Vec::new();
     while let Some(action) = coord.poll_action() {
       actions_observed.push(action);
@@ -2194,15 +2197,15 @@ mod tests {
        got {:?}",
       actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
     );
-    let close_observed = actions_observed
+    let abort_observed = actions_observed
       .iter()
-      .any(|a| matches!(a, StreamAction::Close(_)));
+      .any(|a| matches!(a, StreamAction::Abort(_)));
     assert!(
-      close_observed,
-      "the failed bridge MUST surface a `Close` so the driver can clean up \
-       any state it accrued for the exchange (a driver that had already \
-       drained `Connect` from a prior tick would otherwise leak the open \
-       socket); got {:?}",
+      abort_observed,
+      "the failed bridge MUST surface an `Abort` so the driver can clean up \
+       any state it accrued for the exchange and discard its stale buffered \
+       bytes (a driver that had already drained `Connect` from a prior tick \
+       would otherwise leak the open socket / flush stale bytes); got {:?}",
       actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
     );
   }
@@ -2888,6 +2891,7 @@ mod tests {
       StreamAction::Connect(_) => "Connect",
       StreamAction::Shutdown(_) => "Shutdown",
       StreamAction::Close(_) => "Close",
+      StreamAction::Abort(_) => "Abort",
     }
   }
 }

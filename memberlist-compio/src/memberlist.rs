@@ -667,28 +667,25 @@ where
   /// gossip ingress buffer, and every live bridge's outbound buffer — is
   /// updated to the new policy on the spot (see
   /// [`memberlist_machine::streams::StreamEndpoint::set_encryption_options`]
-  /// for the full purge-and-reap protocol). But any reliable-stream bytes
-  /// that were already encoded under the prior policy and queued in a
-  /// per-bridge byte-mover's FIFO channel WILL be written to the wire
-  /// under the prior policy before the bridge observes its `Close` and
-  /// exits. The window is bounded by the FIFO drain through the socket's
-  /// write half, and the bytes were legitimately authenticated under the
-  /// prior policy at encode time — SWIM's eventual-consistency absorbs the
-  /// brief inconsistency.
+  /// for the full purge-and-reap protocol).
   ///
-  /// **No public API in this crate provides a hard in-flight cutoff for
-  /// reliable-stream bytes already queued in a bridge.** This includes
-  /// [`Self::shutdown`] — the shutdown sequence sends a `Close` through
-  /// each bridge's FIFO out-channel, so any queued `Bytes` ahead of that
-  /// `Close` are written under the prior policy before the bridge exits,
-  /// identical to the rotation case above. For applications that need a
-  /// strict trust-boundary cutoff (e.g. on observed key compromise) the
-  /// approved approach is OUT-OF-BAND key revocation at the peer — every
-  /// peer rejects the compromised key on its keyring removal, and the
-  /// leaked-window bytes become undecryptable the moment they land. A
-  /// future `StreamAction::Cancel` machine-side extension is the
-  /// documented path to in-driver hard cancellation; until then, treat
-  /// this as a rotation API only.
+  /// On an INSECURE reliable transport (plain TCP) a policy change FAILS
+  /// every live bridge, and the machine emits a [`StreamAction::Abort`] for
+  /// each: the driver hard-cancels the bridge through its out-of-band
+  /// cancel signal, so any reliable-stream bytes encoded under the prior
+  /// policy and still queued in the bridge's FIFO channel are DISCARDED,
+  /// not written. The affected exchanges are retried under fresh bridges
+  /// built on the new policy. The remaining rotation window is the GOSSIP
+  /// (UDP) path: a datagram already handed to the OS cannot be recalled.
+  ///
+  /// [`Self::shutdown`] is GRACEFUL, not a cutoff: the shutdown sequence
+  /// sends a `Close` through each bridge's FIFO out-channel, so any queued
+  /// `Bytes` ahead of that `Close` are written before the bridge exits (a
+  /// clean teardown flushes in-flight responses). For applications that
+  /// need a strict trust-boundary cutoff (e.g. on observed key compromise)
+  /// the approved approach remains OUT-OF-BAND key revocation at the peer —
+  /// every peer rejects the compromised key on its keyring removal, and any
+  /// leaked-window gossip bytes become undecryptable the moment they land.
   pub async fn set_encryption_options(&self, opts: EncryptionOptions) -> Result<()> {
     if self.shutdown_flag.load(Ordering::Acquire) {
       return Err(MemberlistError::Shutdown);

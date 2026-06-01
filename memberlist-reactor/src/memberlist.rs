@@ -300,6 +300,13 @@ impl<I: NodeId> Memberlist<I> {
       .map_err(Error::Io)?;
 
     let (ml_opts, drv_opts, alive, merge) = options.into_parts();
+    // Reject a zero graceful-close drain timeout before any bridge spawns. The
+    // stream driver bounds each post-Close drain write with `close_timeout`, so
+    // zero fires immediately and a graceful close RSTs its queued push/pull
+    // response bytes instead of draining them (matches the smoltcp driver).
+    if drv_opts.close_timeout().is_zero() {
+      return Err(Error::ZeroCloseTimeout);
+    }
     let cfg = apply_memberlist_options(EndpointConfig::new(local_id, bound), &ml_opts);
     let mut ep: Endpoint<I, SocketAddr> = Endpoint::new(cfg);
     if let Some(ad) = alive {
@@ -358,6 +365,7 @@ impl<I: NodeId> Memberlist<I> {
       obs_payload_budget,
       accepted_rx,
       accept_shutdown_tx,
+      drv_opts.close_timeout(),
     );
     R::spawn_detach(driver);
 

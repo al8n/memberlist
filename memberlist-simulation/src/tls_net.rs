@@ -913,7 +913,9 @@ impl TlsCluster {
       while let Some(action) = node.poll_action() {
         match &action {
           StreamAction::Connect(_) => connects.push((*src, action)),
-          StreamAction::Shutdown(_) | StreamAction::Close(_) => teardowns.push((*src, action)),
+          StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_) => {
+            teardowns.push((*src, action))
+          }
         }
       }
     }
@@ -948,7 +950,9 @@ impl TlsCluster {
       while let Some(action) = node.poll_action() {
         match &action {
           StreamAction::Connect(_) => late_connects.push((*src, action)),
-          StreamAction::Shutdown(_) | StreamAction::Close(_) => teardowns.push((*src, action)),
+          StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_) => {
+            teardowns.push((*src, action))
+          }
         }
       }
     }
@@ -1120,6 +1124,37 @@ impl TlsCluster {
         if let Some((peer, peer_exch)) = self.peer_of.remove(&key) {
           self.peer_of.remove(&(peer, peer_exch));
           if let Some(pipe) = self.pipes.get_mut(&(peer, peer_exch)) {
+            pipe.arm_fin(now, stride);
+          }
+        }
+        true
+      }
+      StreamAction::Abort(r) => {
+        // RST the connection: the exchange FAILED (dial failure, label /
+        // encryption rejection, or an elapsed exchange deadline). Unlike `Close`,
+        // which arms the FIN so already-queued inbound ciphertext still drains, an
+        // abort DISCARDS any queued-but-unsent inbound ciphertext in BOTH
+        // directions — it is stale, and a reader holding only a partial record
+        // stream rejects it rather than applying it. `inbound.clear()` is the
+        // discard; `arm_fin` then surfaces a terminal read==0 so the reader's
+        // exchange ends (it cannot hang awaiting records that will never come),
+        // and the mapping is forgotten so no later write routes into either side.
+        //
+        // The discard is the only behavioral difference from `Close`; the read==0
+        // terminator is shared because the transport surface has no signal
+        // distinct from EOF for a reset — the receiver sees the read stream end
+        // either way, and the truncated ciphertext buffer is what makes a reset
+        // observably different from a clean drain.
+        let stride = self.tcp_stride();
+        let key = (src, r.id());
+        if let Some(pipe) = self.pipes.get_mut(&key) {
+          pipe.inbound.clear();
+          pipe.arm_fin(now, stride);
+        }
+        if let Some((peer, peer_exch)) = self.peer_of.remove(&key) {
+          self.peer_of.remove(&(peer, peer_exch));
+          if let Some(pipe) = self.pipes.get_mut(&(peer, peer_exch)) {
+            pipe.inbound.clear();
             pipe.arm_fin(now, stride);
           }
         }

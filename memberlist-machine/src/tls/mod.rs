@@ -551,4 +551,196 @@ mod tests {
       "no bridge is allocated when dial_context rejects the per-peer SNI",
     );
   }
+
+  /// An ESTABLISHED TLS exchange whose deadline elapses while it still owes no
+  /// FIN (`fin_owed == false`) must surface NO outbound bytes — in particular
+  /// not the `close_notify` the failure path queues — before its
+  /// `StreamAction::Abort`. A failed exchange RSTs; it never puts a graceful
+  /// alert on the wire.
+  ///
+  /// The leak this guards is TLS-specific. On the failure transition
+  /// `StreamBridge::fail_with_retire` runs `retire_halves`, whose
+  /// `R::send_close_notify()` queues a `close_notify` alert into rustls's write
+  /// buffer (the send half was never closed, so the latch lets it through), then
+  /// `fail` calls `R::clear_outbound()`. For plain TCP `clear_outbound` empties
+  /// the record layer's outbound buffer, so a failed reap has nothing to
+  /// collect; but for TLS `clear_outbound` is a documented no-op (rustls exposes
+  /// no API to discard pending ciphertext), so the `close_notify` survives in
+  /// rustls's `write_tls` queue. If `StreamEndpoint::reap_bridge` drained that
+  /// buffer into `out_transmit` for a failed reap, the per-exchange teardown
+  /// gate in [`StreamEndpoint::poll_action`] would withhold the `Abort` behind
+  /// the queued alert, and a driver doing the natural "drain actions, drain
+  /// transmits, repeat" loop would write the `close_notify` on the wire BEFORE
+  /// the RST. The fix collects the bridge's final bytes ONLY for a clean
+  /// (`BothClosed`) reap; a failed reap purges the exchange's queue and collects
+  /// nothing.
+  ///
+  /// Setup: a bare client `TlsRecords` drives the acceptor coordinator's TLS
+  /// handshake to completion with NO application data, so the acceptor's bridge
+  /// reaches `Established(Active)` having sent nothing (`fin_owed == false`).
+  /// One `handle_timeout` past the bridge's exchange deadline reaps it as
+  /// `Failed(Timeout)` via `pump_out`'s `Done`-gate / flush-deadline path, which
+  /// runs `retire_halves` and queues the `close_notify`.
+  ///
+  /// Mutation gate: making `reap_bridge` call `collect_bridge_transmits`
+  /// unconditionally (instead of only on the clean-reap `else`) fails BOTH
+  /// assertions below — the 24-byte `close_notify` ciphertext surfaces for the
+  /// exchange and the `Abort` is withheld behind it.
+  #[test]
+  fn failed_established_tls_exchange_no_close_notify_before_abort() {
+    use crate::Instant;
+    use core::{net::SocketAddr, time::Duration};
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use rustls::pki_types::ServerName;
+    use smol_str::SmolStr;
+
+    use super::{TlsOptions, TlsRecords};
+    use crate::{
+      streams::{
+        ExchangeId, StreamAction, StreamEndpoint,
+        test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
+      },
+      tls::options::tests::{test_client, test_server},
+    };
+
+    fn action_kind(a: &StreamAction) -> &'static str {
+      match a {
+        StreamAction::Connect(_) => "Connect",
+        StreamAction::Shutdown(_) => "Shutdown",
+        StreamAction::Close(_) => "Close",
+        StreamAction::Abort(_) => "Abort",
+      }
+    }
+
+    let now = Instant::now();
+    let acceptor_ep = endpoint(8001);
+    let cfg = TlsOptions::new(test_server(), test_client());
+    let mut acceptor: StreamEndpoint<SmolStr, SocketAddr, TlsRecords> =
+      StreamEndpoint::new(acceptor_ep, cfg, test_sni_provider(), test_peer_to_socket());
+    let dialer_addr = addr(8000);
+
+    // (1) The driver accepts an inbound TLS connection. The acceptor builds a
+    // server-side `Handshaking` bridge bounded by `ACCEPT_HANDSHAKE_DEADLINE`.
+    let exchange = acceptor.accept_connection(dialer_addr, now);
+
+    // (2) A bare client record layer (the dialer's TLS half) handshakes with the
+    // acceptor coordinator carrying NO application request — the realistic case
+    // of a peer that connects and completes TLS but then stalls. Shuttle the
+    // ciphertext both ways until the handshake settles; deliver NOTHING else.
+    let mut client = TlsRecords::client(
+      Arc::new(test_client()),
+      ServerName::try_from("localhost").unwrap(),
+    )
+    .expect("client TlsRecords");
+    for _ in 0..64 {
+      let mut c_out = Vec::new();
+      client.poll_transport_transmit(&mut c_out);
+      if !c_out.is_empty() {
+        acceptor.handle_transport_data(exchange, &c_out, false, now);
+      }
+      let mut s_out = Vec::new();
+      while let Some((id, _peer, bytes)) = acceptor.poll_transport_transmit() {
+        assert_eq!(id, exchange, "the only live exchange is the acceptor's");
+        s_out.extend_from_slice(&bytes);
+      }
+      if !s_out.is_empty() {
+        client
+          .handle_transport_data(&s_out)
+          .expect("the client consumes the server flight");
+      }
+      // Drain the acceptor's pre-failure teardown queue (there is none yet) so
+      // a stray action cannot mask the post-failure assertion below.
+      while acceptor.poll_action().is_some() {}
+      if c_out.is_empty() && s_out.is_empty() {
+        break;
+      }
+    }
+
+    // Pre-failure invariant: the acceptor's bridge is Established and has sent
+    // nothing, so the deadline failure's `retire_halves` WILL queue a
+    // `close_notify` (the send half is not yet retired). If this regressed to a
+    // half-closed or already-failed bridge the test would no longer exercise the
+    // `close_notify`-leak path.
+    assert_eq!(
+      acceptor.bridge_is_established_pre_fin(exchange),
+      Some(true),
+      "the acceptor reached Established(Active) with no FIN owed — the state \
+       whose deadline failure queues a close_notify",
+    );
+    assert!(
+      !acceptor.exchange_has_pending_bytes(exchange),
+      "the established acceptor has drained its handshake ciphertext; no bytes \
+       are queued for the exchange before it fails",
+    );
+
+    // (3) The exchange deadline elapses. The default `stream_timeout` is 10s and
+    // the bridge's exchange deadline (snapshotted at promotion) is `now + 10s`,
+    // so `now + 11s` is strictly past it. `pump_bridges` fails the bridge to
+    // `Failed(Timeout)` (running `retire_halves` -> `send_close_notify`, which
+    // queues the `close_notify` into rustls's write buffer) and `reap_bridge`
+    // emits its teardown.
+    let deadline_elapsed = now + Duration::from_secs(11);
+    acceptor.handle_timeout(deadline_elapsed);
+
+    // (4) Load-bearing assertion A: BEFORE draining any transmits, the `Abort`
+    // is available immediately — it is NOT withheld behind a queued
+    // `close_notify`. Were the alert collected into `out_transmit`, the gate
+    // would see it and `poll_action` would return `None` here (the bytes must be
+    // drained first).
+    assert!(
+      !acceptor.exchange_has_pending_bytes(exchange),
+      "a failed reap must surface NO bytes for the exchange — the close_notify \
+       the failure path queued must NOT be collected into out_transmit",
+    );
+    let first = acceptor.poll_action();
+    let aborted = first
+      .as_ref()
+      .and_then(StreamAction::as_abort)
+      .is_some_and(|r| r.id() == exchange);
+    assert!(
+      aborted,
+      "the failed exchange's Abort must surface immediately (not withheld \
+       behind a collected close_notify); first post-failure action was {:?}",
+      first.as_ref().map(action_kind),
+    );
+
+    // (5) Load-bearing assertion B: a full natural drain loop surfaces NO bytes
+    // tagged with the failed exchange (the close_notify never reaches the wire).
+    let mut bytes_observed: Vec<(ExchangeId, Bytes)> = Vec::new();
+    let mut actions_observed: Vec<StreamAction> = Vec::new();
+    loop {
+      let mut made_progress = false;
+      while let Some(action) = acceptor.poll_action() {
+        actions_observed.push(action);
+        made_progress = true;
+      }
+      while let Some((id, _peer, bytes)) = acceptor.poll_transport_transmit() {
+        bytes_observed.push((id, bytes));
+        made_progress = true;
+      }
+      if !made_progress {
+        break;
+      }
+    }
+    let stale: Vec<&Bytes> = bytes_observed
+      .iter()
+      .filter_map(|(id, b)| (*id == exchange).then_some(b))
+      .collect();
+    assert!(
+      stale.is_empty(),
+      "NO outbound bytes (notably the TLS close_notify) may surface for the \
+       failed exchange {exchange:?}; got {stale:?}",
+    );
+    // No teardown OTHER than the already-consumed Abort exists for the exchange:
+    // a clean `Close` must never be emitted for a failed reap.
+    assert!(
+      actions_observed
+        .iter()
+        .all(|a| a.as_close().is_none_or(|r| r.id() != exchange)),
+      "a failed reap emits Abort, never Close, for the exchange; got {:?}",
+      actions_observed.iter().map(action_kind).collect::<Vec<_>>(),
+    );
+  }
 }

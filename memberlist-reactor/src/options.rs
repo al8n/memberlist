@@ -135,6 +135,7 @@ pub struct DriverOptions {
   recv_batch: usize,
   transmit_batch: usize,
   join_deadline: Duration,
+  close_timeout: Duration,
 }
 
 impl Default for DriverOptions {
@@ -145,6 +146,14 @@ impl Default for DriverOptions {
       recv_batch: 64,
       transmit_batch: 64,
       join_deadline: Duration::from_secs(10),
+      // Bound a per-bridge graceful-drain write. After a graceful
+      // `StreamAction::Close` the bridge has no remaining cancel path, so a
+      // peer that stopped reading would otherwise wedge the drain `write_all`
+      // forever — leaking the detached bridge task and its socket. A write
+      // that makes progress never trips this; only a write stalled for the
+      // full duration is abandoned and the bridge torn down (RST). 10s mirrors
+      // the smoltcp driver's `Config::close_timeout`.
+      close_timeout: Duration::from_secs(10),
     }
   }
 }
@@ -191,6 +200,20 @@ impl DriverOptions {
     self
   }
 
+  /// Sets the bound on a per-bridge graceful-drain write.
+  ///
+  /// After a graceful `StreamAction::Close` the reliable bridge has no
+  /// remaining cancel path, so a peer that stopped reading would otherwise
+  /// wedge the drain `write_all` forever. This caps each such write: a write
+  /// that makes progress never trips it; a write stalled for the full duration
+  /// is abandoned and the bridge torn down (RST). Mirrors the smoltcp driver's
+  /// `Config::close_timeout` (default 10s).
+  #[must_use]
+  pub fn with_close_timeout(mut self, timeout: Duration) -> Self {
+    self.close_timeout = timeout;
+    self
+  }
+
   /// The observation-channel capacity policy.
   #[must_use]
   pub const fn observation_channel(&self) -> Channel {
@@ -219,6 +242,12 @@ impl DriverOptions {
   #[must_use]
   pub const fn join_deadline(&self) -> Duration {
     self.join_deadline
+  }
+
+  /// The bound on a per-bridge graceful-drain write.
+  #[must_use]
+  pub const fn close_timeout(&self) -> Duration {
+    self.close_timeout
   }
 }
 
