@@ -785,7 +785,7 @@ impl Cluster {
   /// `awareness_max_multiplier - 1` (default 8 - 1 = 7).
   ///
   /// Returns `None` if `host` is not a known endpoint.
-  pub fn health_score(&self, host: SocketAddr) -> Option<u32> {
+  pub fn health_score(&self, host: SocketAddr) -> Option<usize> {
     self.net.endpoints.get(&host).map(|ep| ep.health_score())
   }
 

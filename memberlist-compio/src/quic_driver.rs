@@ -36,9 +36,10 @@ use memberlist::codec::{
   parse_messages,
 };
 use memberlist_proto::{
-  CheapClone, Instant, Node, QuicEndpoint,
+  Instant, Node, QuicEndpoint,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
   streams::ExchangeId,
+  typed::{NodeState, State},
 };
 
 use crate::{
@@ -137,13 +138,50 @@ impl PendingLeave {
   }
 }
 
+/// Driver-side state for one outstanding application-ping call.
+///
+/// Parked by the `Command::Ping` dispatch arm when the endpoint is running.
+/// Resolved on `Event::PingCompleted` (reply `Ok(rtt)`) or
+/// `Event::PingFailed` (reply `Err(PingTimeout)`) — both carry the matching
+/// `PingId` correlation token. On driver exit, drained with
+/// `Err(MemberlistError::Shutdown)`.
+struct PendingPing {
+  /// Correlation token minted by `endpoint.ping(…)`.
+  ping_id: memberlist_proto::PingId,
+  /// One-shot reply channel back to the `ping()` caller.
+  reply: flume::Sender<Result<core::time::Duration>>,
+}
+
+/// Driver-side state for one outstanding reliable directed-send call.
+///
+/// A single `Command::SendReliable` may dispatch multiple
+/// `start_user_message` calls (one per payload). Each call returns a
+/// `StreamId`; the driver parks one `PendingUserSend` whose `pending` set
+/// tracks the `ExchangeId`s of the in-flight QUIC streams. Resolved on
+/// `Event::ExchangeCompleted` where `kind() == ExchangeKind::UserMessage`:
+/// each completed `ExchangeId` is removed from `pending`; when `pending`
+/// empties the reply fires. On driver exit, drained with
+/// `Err(MemberlistError::Shutdown)`.
+struct PendingUserSend {
+  /// Set of `ExchangeId`s this call dispatched and has not yet seen a
+  /// terminal `ExchangeCompleted` for. An entry is removed on any terminal
+  /// outcome (success or failure). When this set empties the call resolves.
+  pending: HashSet<ExchangeId>,
+  /// Running count of exchange failures for this call (outcome `Failed`).
+  failed: usize,
+  /// One-shot reply channel back to the `send_reliable` / `send_many_reliable`
+  /// caller. `Ok(())` if every exchange succeeded; `Err(SendFailed)` if any
+  /// failed.
+  reply: flume::Sender<Result<()>>,
+}
+
 /// All driver-owned state, packed so the loop body can borrow
 /// individual fields without fighting Rust's borrow checker
 /// against a sprawling let-binding cluster.
 struct QuicDriverState<I> {
   endpoint: QuicEndpoint<I>,
   udp_socket: UdpSocket,
-  commands: Receiver<Command>,
+  commands: Receiver<Command<I>>,
   /// Hand-off channel to the per-driver observation task (delegate
   /// dispatch + EventStream forward), sized per
   /// [`DriverOptions::observation_channel`]. The driver `try_send`s every
@@ -192,6 +230,16 @@ struct QuicDriverState<I> {
   /// by `reap_pending_leave` once its deadline elapses. At most one is
   /// outstanding at a time.
   pending_leave: Option<PendingLeave>,
+  /// Outstanding application-ping waiters. Parked by `dispatch_command`
+  /// on `Command::Ping` when the endpoint is running; resolved in
+  /// `drain_actions`' event step on `Event::PingCompleted` /
+  /// `Event::PingFailed`; drained `Err(Shutdown)` on driver exit.
+  pending_pings: Vec<PendingPing>,
+  /// Outstanding reliable directed-send waiters. Parked by `dispatch_command`
+  /// on `Command::SendReliable` when the endpoint is running; resolved in
+  /// `drain_actions`' event step on `Event::ExchangeCompleted` filtered to
+  /// `ExchangeKind::UserMessage`; drained `Err(Shutdown)` on driver exit.
+  pending_user_sends: Vec<PendingUserSend>,
 }
 
 /// Compute the per-recv UDP buffer size from the coordinator's
@@ -229,7 +277,7 @@ where
 pub(crate) async fn quic_driver_loop<I, D>(
   endpoint: QuicEndpoint<I>,
   udp_socket: UdpSocket,
-  commands: Receiver<Command>,
+  commands: Receiver<Command<I>>,
   events_tx: Sender<Event<I, SocketAddr>>,
   events_dropped: Arc<AtomicU64>,
   observation_dropped: Arc<AtomicU64>,
@@ -314,6 +362,8 @@ pub(crate) async fn quic_driver_loop<I, D>(
     next_pending_join_id: 0,
     shutdown_reply: None,
     pending_leave: None,
+    pending_pings: Vec::new(),
+    pending_user_sends: Vec::new(),
   };
 
   // Per-driver UDP recv buffer size derived once from the coordinator's
@@ -365,6 +415,8 @@ pub(crate) async fn quic_driver_loop<I, D>(
             &mut state.pending_joins,
             &mut state.next_pending_join_id,
             &mut state.pending_leave,
+            &mut state.pending_pings,
+            &mut state.pending_user_sends,
             leave_timeout,
             c,
             now,
@@ -586,6 +638,8 @@ pub(crate) async fn quic_driver_loop<I, D>(
               &mut state.pending_joins,
               &mut state.next_pending_join_id,
               &mut state.pending_leave,
+              &mut state.pending_pings,
+              &mut state.pending_user_sends,
               leave_timeout,
               c,
               now,
@@ -648,12 +702,21 @@ pub(crate) async fn quic_driver_loop<I, D>(
       Command::QueueUserBroadcast(cmd) => cmd.reply().clone(),
       Command::SetLocalState(cmd) => cmd.reply().clone(),
       Command::SetAckPayload(cmd) => cmd.reply().clone(),
+      Command::SendUser(cmd) => cmd.reply().clone(),
+      Command::SendReliable(cmd) => cmd.reply().clone(),
       Command::Join(JoinCmd { reply, .. }) => {
         // `Join`'s reply type is `Result<usize>`; surface the same
         // `Shutdown` error through a separate arm so the type
         // checker sees the right `Sender<Result<usize>>`.
         // Ignoring Err: caller dropped the reply receiver.
         let _ = reply.send_async(Err(MemberlistError::Shutdown)).await;
+        continue;
+      }
+      Command::Ping(cmd) => {
+        // `Ping`'s reply type is `Result<Duration>`; surface Shutdown
+        // through a separate arm so the type checker sees the right sender.
+        // Ignoring Err: caller dropped the reply receiver.
+        let _ = cmd.reply().send_async(Err(MemberlistError::Shutdown)).await;
         continue;
       }
     };
@@ -673,6 +736,19 @@ pub(crate) async fn quic_driver_loop<I, D>(
     // Ignoring Err: caller's reply receiver may have been dropped;
     // nothing to surface.
     let _ = pj.reply.send_async(Err(MemberlistError::Shutdown)).await;
+  }
+
+  // Reply `Err(Shutdown)` to every parked application-ping waiter whose
+  // `PingCompleted`/`PingFailed` will never arrive (driver is exiting).
+  for pp in state.pending_pings.drain(..) {
+    // Ignoring Err: caller dropped the reply receiver.
+    let _ = pp.reply.send_async(Err(MemberlistError::Shutdown)).await;
+  }
+  // Reply `Err(Shutdown)` to every parked reliable directed-send waiter
+  // whose `ExchangeCompleted(UserMessage)` will never arrive (driver is exiting).
+  for ps in state.pending_user_sends.drain(..) {
+    // Ignoring Err: caller dropped the reply receiver.
+    let _ = ps.reply.send_async(Err(MemberlistError::Shutdown)).await;
   }
 
   // Reply `Err(Shutdown)` to every joined graceful-leave replier whose
@@ -790,8 +866,10 @@ async fn dispatch_command<I>(
   pending_joins: &mut HashMap<u64, PendingJoin>,
   next_pending_join_id: &mut u64,
   pending_leave: &mut Option<PendingLeave>,
+  pending_pings: &mut Vec<PendingPing>,
+  pending_user_sends: &mut Vec<PendingUserSend>,
   leave_timeout: core::time::Duration,
-  cmd: Command,
+  cmd: Command<I>,
   now: Instant,
 ) where
   I: memberlist_proto::Id
@@ -1039,6 +1117,77 @@ async fn dispatch_command<I>(
       // caller resumes from `shutdown.await`, so an immediate rebind
       // on the same port succeeds.
       *shutdown_reply = Some(reply);
+    }
+    Command::Ping(cmd) => {
+      // Gate on a running node: after `leave()` the probe scheduler is
+      // stopped, so a new application ping's completion event would never
+      // arrive and the caller would hang. Reject with `NotRunning` rather
+      // than park an unresolving waiter.
+      if endpoint.is_running() {
+        let (id, addr) = cmd.node().clone().into_parts();
+        let node = Node::new(id, addr);
+        let ping_id = endpoint.ping(node, now);
+        pending_pings.push(PendingPing {
+          ping_id,
+          reply: cmd.reply().clone(),
+        });
+      } else {
+        // Ignoring Err: caller dropped the reply receiver.
+        let _ = cmd
+          .reply()
+          .send_async(Err(MemberlistError::NotRunning))
+          .await;
+      }
+    }
+    Command::SendUser(cmd) => {
+      // Gate on a running node: after `leave()` the gossip scheduler is
+      // stopped; reject immediately.
+      let res: Result<()> = if endpoint.is_running() {
+        endpoint
+          .send_user_packets(*cmd.to(), cmd.payloads())
+          .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
+      // Ignoring Err: caller dropped the reply receiver.
+      let _ = cmd.reply().send_async(res).await;
+    }
+    Command::SendReliable(cmd) => {
+      // Gate on a running node: after `leave()` the QUIC stream coordinator
+      // is stopping; a new `start_user_message` would never produce a bridge
+      // and the caller would hang. Reject with `NotRunning`.
+      if !endpoint.is_running() {
+        // Ignoring Err: caller dropped the reply receiver.
+        let _ = cmd
+          .reply()
+          .send_async(Err(MemberlistError::NotRunning))
+          .await;
+        return;
+      }
+      let mut pending: HashSet<ExchangeId> = HashSet::with_capacity(cmd.payloads().len());
+      for payload in cmd.payloads() {
+        // `QuicEndpoint::start_user_message` calls `service_dials` +
+        // `flush_outbound` in-band (no separate `poll_action` loop needed),
+        // unlike the stream driver. The returned `StreamId` coerces to the
+        // `ExchangeId` that the bridge-reap path stamps on
+        // `Event::ExchangeCompleted(UserMessage)`.
+        // Ignoring StreamId: the ExchangeId::from coercion below is the only
+        // consumer; the raw StreamId is not needed after parking.
+        let stream_id = endpoint.start_user_message(*cmd.to(), payload.clone(), now);
+        pending.insert(ExchangeId::from(stream_id));
+      }
+      if pending.is_empty() {
+        // No exchanges dispatched (empty payloads). Reply Ok immediately;
+        // parking would hang with no terminal event incoming.
+        // Ignoring Err: caller dropped the reply receiver.
+        let _ = cmd.reply().send_async(Ok(())).await;
+      } else {
+        pending_user_sends.push(PendingUserSend {
+          pending,
+          failed: 0,
+          reply: cmd.reply().clone(),
+        });
+      }
     }
   }
 }
@@ -1385,6 +1534,61 @@ where
           let _ = pj.reply.send_async(reply_value).await;
         }
       }
+      // Ping completion: resolve the matching `PendingPing` waiter with the
+      // observed RTT. The event still flows to the observation task below
+      // (correlation is additive — `PingCompleted` also fires the delegate's
+      // `notify_ping_complete`). An id not found in `pending_pings` is an
+      // unsolicited or already-reaped event; safe to ignore.
+      if let Event::PingCompleted(ref p) = ev {
+        let pid = p.ping_id();
+        if let Some(idx) = state.pending_pings.iter().position(|pp| pp.ping_id == pid) {
+          let pp = state.pending_pings.swap_remove(idx);
+          // Ignoring Err: caller dropped the reply receiver (ping future was cancelled).
+          let _ = pp.reply.send_async(Ok(p.rtt())).await;
+        }
+      }
+      // Ping failure: resolve the matching `PendingPing` waiter with `PingTimeout`.
+      // Same additive semantics as `PingCompleted` — event continues to obs task.
+      if let Event::PingFailed(ref p) = ev {
+        let pid = p.ping_id();
+        if let Some(idx) = state.pending_pings.iter().position(|pp| pp.ping_id == pid) {
+          let pp = state.pending_pings.swap_remove(idx);
+          // Ignoring Err: caller dropped the reply receiver (ping future was cancelled).
+          let _ = pp.reply.send_async(Err(MemberlistError::PingTimeout)).await;
+        }
+      }
+      // Reliable user-send completion: each `ExchangeCompleted` with kind
+      // `UserMessage` may reduce a `PendingUserSend`'s pending set. When the
+      // set empties the call resolves. `Ok(())` if all exchanges succeeded;
+      // `Err(SendFailed)` if any failed. The event continues to the observation
+      // task below (additive — `ExchangeCompleted` feeds future monitoring).
+      if let Event::ExchangeCompleted(ref payload) = ev
+        && payload.kind() == ExchangeKind::UserMessage
+      {
+        let eid = payload.eid();
+        let failed = matches!(payload.outcome(), ExchangeOutcome::Failed);
+        if let Some(idx) = state
+          .pending_user_sends
+          .iter()
+          .position(|ps| ps.pending.contains(&eid))
+        {
+          let ps = &mut state.pending_user_sends[idx];
+          ps.pending.remove(&eid);
+          if failed {
+            ps.failed += 1;
+          }
+          if ps.pending.is_empty() {
+            let ps = state.pending_user_sends.swap_remove(idx);
+            let result = if ps.failed > 0 {
+              Err(MemberlistError::SendFailed)
+            } else {
+              Ok(())
+            };
+            // Ignoring Err: caller dropped the reply receiver.
+            let _ = ps.reply.send_async(result).await;
+          }
+        }
+      }
       // Leave-completion resolution. `LeftCluster` fires once the
       // direct `Dead`-self notices queued by `leave()` have drained to
       // the wire; resolving the parked waiter here — on this driver
@@ -1547,9 +1751,15 @@ fn min_pending_leave_deadline(pending_leave: &Option<PendingLeave>) -> Option<In
 /// `arc-swap`. Readers see the new snapshot on their next
 /// `MemberlistSnapshot::load` with no lock contention. Mirrors the
 /// stream driver's `refresh_snapshot`
-/// (`memberlist-compio/src/driver.rs`); the only structural
-/// difference is that the QUIC version goes through `endpoint_ref()`
-/// to reach the inner membership `Endpoint<I, SocketAddr>`.
+/// (`memberlist-compio/src/driver.rs`); reaches the inner membership
+/// `Endpoint<I, SocketAddr>` via `QuicEndpoint::endpoint_ref()`.
+///
+/// Each `Arc<NodeState>` in `members_vec` is a freshly-allocated clone of
+/// the membership FSM's wire-state entry with `member_liveness` stamped onto
+/// the `state` field — cheap because `NodeState::clone` is O(1) (`meta` is
+/// `Bytes`, which shares the underlying buffer). The local node entry is
+/// taken directly from the membership map so it carries the real meta,
+/// incarnation, and protocol versions.
 fn refresh_snapshot<I>(
   endpoint: &QuicEndpoint<I>,
   snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, SocketAddr>>>,
@@ -1564,22 +1774,31 @@ fn refresh_snapshot<I>(
     + 'static,
 {
   let ep = endpoint.endpoint_ref();
-  let mut members_vec: Vec<Node<I, SocketAddr>> = Vec::new();
+  // Build a snapshot-local NodeState for each member with the FSM-tracked
+  // liveness state (`member_liveness`) rather than the wire-protocol state
+  // (`ns.state()`, which is fixed at the last Alive broadcast and does not
+  // reflect subsequent Suspect/Dead transitions).
   let mut alive_count: usize = 0;
-  for ns in ep.members() {
-    members_vec.push(Node::new(
-      ns.id_ref().cheap_clone(),
-      ns.address_ref().cheap_clone(),
-    ));
-    if let Some(memberlist_proto::typed::State::Alive) = ep.member_liveness(ns.id_ref()) {
-      alive_count += 1;
-    }
-  }
-  let local = Node::new(
-    ep.local_id_ref().cheap_clone(),
-    ep.advertise_ref().cheap_clone(),
-  );
+  let members_vec: Vec<Arc<NodeState<I, SocketAddr>>> = ep
+    .members()
+    .map(|ns| {
+      let fsm = ep.member_liveness(ns.id_ref()).unwrap_or(State::Unknown(0));
+      if matches!(fsm, State::Alive) {
+        alive_count += 1;
+      }
+      Arc::new((*ns).clone().with_state(fsm))
+    })
+    .collect();
+  let local = ep
+    .member(ep.local_id_ref())
+    .expect("local node is always in the membership map");
   let member_count = ep.num_members();
-  let snap = MemberlistSnapshot::new(members_vec, local, alive_count, member_count);
+  let snap = MemberlistSnapshot::new(
+    members_vec,
+    local,
+    alive_count,
+    member_count,
+    ep.health_score(),
+  );
   snapshot.store(Arc::new(snap));
 }

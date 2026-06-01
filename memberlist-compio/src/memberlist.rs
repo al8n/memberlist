@@ -40,15 +40,17 @@ use bytes::Bytes;
 use compio::runtime::JoinHandle;
 use flume::{Receiver, Sender};
 use memberlist_proto::{
-  CheapClone, CompressionOptions, EncryptionOptions, Instant, Node, event::Event,
+  CheapClone, CompressionOptions, EncryptionOptions, Instant, Node,
+  event::Event,
+  typed::{NodeState, State},
 };
 
 use crate::{
   EventStream, JoinAllFailed, MemberlistError, MemberlistSnapshot, Options, Result,
   command::{
-    Command, JoinCmd, JoinKind, LeaveCmd, QueueUserBroadcastCmd, SetAckPayloadCmd,
-    SetCompressionOptionsCmd, SetEncryptionOptionsCmd, SetLocalStateCmd, ShutdownCmd,
-    UpdateNodeMetadataCmd, WaitForCompletionArgs,
+    Command, JoinCmd, JoinKind, LeaveCmd, PingCmd, QueueUserBroadcastCmd, SendReliableCmd,
+    SendUserCmd, SetAckPayloadCmd, SetCompressionOptionsCmd, SetEncryptionOptionsCmd,
+    SetLocalStateCmd, ShutdownCmd, UpdateNodeMetadataCmd, WaitForCompletionArgs,
   },
   delegate::Delegate,
   maybe_resolved::MaybeResolved,
@@ -81,8 +83,10 @@ where
   D: Delegate<Id = T::Id, Address = SocketAddr>,
 {
   /// Command channel into the driver task — every write API sends one
-  /// command and awaits the one-shot reply.
-  commands: Sender<Command>,
+  /// command and awaits the one-shot reply. The `T::Id` type parameter
+  /// propagates from `Command<I>` — only `Command::Ping` carries a full
+  /// `Node<I, SocketAddr>`.
+  commands: Sender<Command<T::Id>>,
   /// Lock-free observable state, republished by the driver after every
   /// state-affecting tick.
   snapshot: Arc<ArcSwap<MemberlistSnapshot<T::Id, SocketAddr>>>,
@@ -286,16 +290,34 @@ where
 
     // Build the initial snapshot from the transport's resolved local
     // identity — independent of the machine endpoint, which `T::run`
-    // builds from the transport's stored config.
-    let local = Node::new(
-      transport.local_id().cheap_clone(),
-      *transport.advertise_address(),
+    // builds from the transport's stored config. The local node starts
+    // alive at incarnation 0 (the machine sets incarnation 1 on first
+    // alive broadcast after construction).
+    //
+    // Carry the configured `initial_meta` (empty when unset) so a
+    // `local_node()` / `by_id(local)` read taken IMMEDIATELY after `new()`
+    // — before the driver task republishes its first endpoint-derived
+    // snapshot — already reflects the applied local metadata, matching the
+    // machine endpoint's local member (`Endpoint::new` stamps the same
+    // `initial_meta` onto its local `NodeState`). Protocol / delegate
+    // versions default to `V1` in both `NodeState::new` and
+    // `EndpointConfig`, and the compio options expose no override, so the
+    // defaults already agree with the endpoint's local member.
+    let initial_meta = memberlist_opts.initial_meta().cloned().unwrap_or_default();
+    let local_ns = Arc::new(
+      NodeState::new(
+        transport.local_id().cheap_clone(),
+        *transport.advertise_address(),
+        State::Alive,
+      )
+      .with_meta(initial_meta),
     );
     let snapshot = Arc::new(ArcSwap::from_pointee(MemberlistSnapshot::new(
-      vec![local.cheap_clone()],
-      local,
+      vec![local_ns.clone()],
+      local_ns,
       1,
       1,
+      0,
     )));
 
     let (commands_tx, commands_rx) = flume::unbounded();
@@ -342,7 +364,15 @@ where
   /// scalar copy respectively.
   #[inline]
   pub fn local_node(&self) -> Node<T::Id, SocketAddr> {
-    self.snapshot.load().local_ref().cheap_clone()
+    let snap = self.snapshot.load();
+    let ns = snap.local_ref();
+    Node::new(ns.id_ref().cheap_clone(), ns.address_ref().cheap_clone())
+  }
+
+  /// The local node's id.
+  #[inline]
+  pub fn local_id(&self) -> T::Id {
+    self.snapshot.load().local_ref().id_ref().cheap_clone()
   }
 }
 
@@ -372,6 +402,91 @@ where
   #[inline]
   pub fn member_count(&self) -> usize {
     self.snapshot.load().member_count()
+  }
+
+  /// The local node's advertised address.
+  #[inline]
+  pub fn advertise_address(&self) -> SocketAddr {
+    *self.snapshot.load().local_ref().address_ref()
+  }
+
+  /// The local node's full state from the latest published snapshot.
+  #[inline]
+  pub fn local_state(&self) -> Arc<memberlist_proto::typed::NodeState<T::Id, SocketAddr>> {
+    self.snapshot.load().local_ref().clone()
+  }
+
+  /// Look up a member by id in the latest published snapshot.
+  /// Returns `None` if the id is not known.
+  #[inline]
+  pub fn by_id(
+    &self,
+    id: &T::Id,
+  ) -> Option<Arc<memberlist_proto::typed::NodeState<T::Id, SocketAddr>>>
+  where
+    T::Id: PartialEq,
+  {
+    self.snapshot.load().by_id(id).cloned()
+  }
+
+  /// All members currently in the alive state, from the latest published
+  /// snapshot.
+  #[inline]
+  pub fn online_members(&self) -> Vec<Arc<memberlist_proto::typed::NodeState<T::Id, SocketAddr>>> {
+    self.snapshot.load().online_members().cloned().collect()
+  }
+
+  /// Number of alive members. Equivalent to [`Self::alive_count`].
+  #[inline]
+  pub fn num_online_members(&self) -> usize {
+    self.snapshot.load().alive_count()
+  }
+
+  /// All known members (alive + suspect + dead/left) from the latest
+  /// published snapshot. Mirrors the legacy `Memberlist::members` name.
+  #[inline]
+  pub fn members(&self) -> Vec<Arc<memberlist_proto::typed::NodeState<T::Id, SocketAddr>>> {
+    self.snapshot.load().members().to_vec()
+  }
+
+  /// Total member count. Equivalent to [`Self::member_count`]; mirrors the
+  /// legacy `Memberlist::num_members` name.
+  #[inline]
+  pub fn num_members(&self) -> usize {
+    self.snapshot.load().member_count()
+  }
+
+  /// Members matching `pred`, from the latest published snapshot.
+  #[inline]
+  pub fn members_by(
+    &self,
+    pred: impl FnMut(&memberlist_proto::typed::NodeState<T::Id, SocketAddr>) -> bool,
+  ) -> Vec<Arc<memberlist_proto::typed::NodeState<T::Id, SocketAddr>>> {
+    self.snapshot.load().members_by(pred).cloned().collect()
+  }
+
+  /// Count of members matching `pred`.
+  #[inline]
+  pub fn num_members_by(
+    &self,
+    pred: impl FnMut(&memberlist_proto::typed::NodeState<T::Id, SocketAddr>) -> bool,
+  ) -> usize {
+    self.snapshot.load().num_members_by(pred)
+  }
+
+  /// Map-filter members, collecting all `Some` results into a `Vec`.
+  #[inline]
+  pub fn members_map_by<O>(
+    &self,
+    f: impl FnMut(&memberlist_proto::typed::NodeState<T::Id, SocketAddr>) -> Option<O>,
+  ) -> Vec<O> {
+    self.snapshot.load().members_map_by(f)
+  }
+
+  /// The local node's Lifeguard health score (`0` = healthy; higher = worse).
+  #[inline]
+  pub fn health_score(&self) -> usize {
+    self.snapshot.load().health_score()
   }
 
   /// Synchronous join: dispatch a push/pull against each seed and wait for
@@ -783,6 +898,96 @@ where
   #[inline]
   pub fn observation_dropped(&self) -> u64 {
     self.observation_dropped.load(Ordering::Relaxed)
+  }
+
+  /// Ping `node` and return the measured round-trip time. Mirrors
+  /// `memberlist-core`'s `Ping`. The call completes once the endpoint
+  /// receives an Ack (reply `Ok(rtt)`) or the probe_timeout elapses
+  /// without a response (reply `Err(PingTimeout)`).
+  ///
+  /// Requires the node to be running. Returns `Err(NotRunning)` after
+  /// `leave()` and `Err(Shutdown)` after `shutdown()`.
+  pub async fn ping(&self, node: Node<T::Id, SocketAddr>) -> Result<Duration> {
+    if self.shutdown_flag.load(Ordering::Acquire) {
+      return Err(MemberlistError::Shutdown);
+    }
+    let (tx, rx) = flume::bounded(1);
+    self
+      .commands
+      .send_async(Command::Ping(PingCmd::new(node, tx)))
+      .await
+      .map_err(|_| MemberlistError::CommandSend)?;
+    rx.recv_async()
+      .await
+      .map_err(|_| MemberlistError::ReplyClosed)?
+  }
+
+  /// Send an unreliable directed user message to `to`. Best-effort
+  /// delivery; no completion event. Mirrors `memberlist-core`'s `send`.
+  ///
+  /// Returns `Err(PayloadTooLarge)` if the framed `UserData` packet
+  /// exceeds the gossip MTU, `Err(NotRunning)` after `leave()`, and
+  /// `Err(Shutdown)` after `shutdown()`.
+  pub async fn send(&self, to: SocketAddr, msg: Bytes) -> Result<()> {
+    self.send_many(to, core::iter::once(msg)).await
+  }
+
+  /// Send several unreliable directed user messages to `to`. Mirrors
+  /// `memberlist-core`'s `send_many`. Two-or-more messages are
+  /// compound-packed into one datagram (fewer syscalls); a single message
+  /// degrades to `send`.
+  pub async fn send_many(
+    &self,
+    to: SocketAddr,
+    msgs: impl IntoIterator<Item = Bytes>,
+  ) -> Result<()> {
+    if self.shutdown_flag.load(Ordering::Acquire) {
+      return Err(MemberlistError::Shutdown);
+    }
+    let payloads: Vec<Bytes> = msgs.into_iter().collect();
+    let (tx, rx) = flume::bounded(1);
+    self
+      .commands
+      .send_async(Command::SendUser(SendUserCmd::new(to, payloads, tx)))
+      .await
+      .map_err(|_| MemberlistError::CommandSend)?;
+    rx.recv_async()
+      .await
+      .map_err(|_| MemberlistError::ReplyClosed)?
+  }
+
+  /// Send a reliable directed user message to `to` over a dedicated reliable
+  /// exchange. The future resolves once the stream exchange completes
+  /// (success) or fails (e.g. dial failure, stream timeout). Mirrors
+  /// `memberlist-core`'s `send_reliable`.
+  pub async fn send_reliable(&self, to: SocketAddr, msg: Bytes) -> Result<()> {
+    self.send_many_reliable(to, core::iter::once(msg)).await
+  }
+
+  /// Send several reliable directed user messages to `to`, each on its own
+  /// reliable exchange. The future resolves once ALL streams have
+  /// completed. `Ok(())` if every exchange succeeded; `Err(SendFailed)` if
+  /// any failed. Mirrors `memberlist-core`'s `send_many_reliable`.
+  pub async fn send_many_reliable(
+    &self,
+    to: SocketAddr,
+    msgs: impl IntoIterator<Item = Bytes>,
+  ) -> Result<()> {
+    if self.shutdown_flag.load(Ordering::Acquire) {
+      return Err(MemberlistError::Shutdown);
+    }
+    let payloads: Vec<Bytes> = msgs.into_iter().collect();
+    let (tx, rx) = flume::bounded(1);
+    self
+      .commands
+      .send_async(Command::SendReliable(SendReliableCmd::new(
+        to, payloads, tx,
+      )))
+      .await
+      .map_err(|_| MemberlistError::CommandSend)?;
+    rx.recv_async()
+      .await
+      .map_err(|_| MemberlistError::ReplyClosed)?
   }
 
   /// Cleanly shut down the driver task.

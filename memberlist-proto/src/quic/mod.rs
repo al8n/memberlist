@@ -1033,6 +1033,59 @@ where
       )));
   }
 
+  /// Retire dial intent `id` after the in-band dial failed BEFORE any
+  /// bridge was created (deadline elapsed, cached connection closed,
+  /// `get_or_dial` error, or a frozen-API `dial_succeeded == None`).
+  ///
+  /// Discards the staged kind + peer (the bridge that would have been
+  /// keyed by `id` never existed, so the `emit_exchange_completed`
+  /// reap path will never observe `id`), then routes the failure
+  /// through the inner FSM's `dial_failed`.
+  ///
+  /// For an `ExchangeKind::UserMessage` OR `ExchangeKind::PushPull` dial
+  /// it ALSO emits a terminal [`Event::ExchangeCompleted`] with
+  /// `outcome = Failed`, keyed by the SAME `ExchangeId::from(id)` the
+  /// QUIC driver parked its waiter under (the reliable-send waiter for
+  /// `UserMessage`, the `WaitForCompletion` join waiter for `PushPull`).
+  /// Without this the driver's parked waiter would hang forever: the only
+  /// other `ExchangeCompleted` producer is the bridge-reap path, which
+  /// never fires for a bridge that was never created. A QUIC join parks
+  /// every `start_push_pull` exchange keyed by `ExchangeId::from(StreamId)`
+  /// and resolves only when each parked id surfaces a terminal
+  /// `ExchangeCompleted(PushPull)`; an unreachable seed whose dial fails
+  /// before a bridge exists would otherwise never drain its waiter set.
+  ///
+  /// No double-completion: a pre-bridge failure means NO bridge keyed by
+  /// `id` was ever inserted into `self.bridges` (the bridge is created
+  /// only on the `dial_succeeded` success path, which does not call this),
+  /// and this method drains both staged maps up front, so the bridge-reap
+  /// `emit_exchange_completed` — which requires both a live bridge for `id`
+  /// AND a `pending_outbound_kinds` entry — can never also fire for this
+  /// `id`. This single `Failed` is the lone terminal event for the
+  /// StreamId, independent of kind.
+  ///
+  /// `ReliablePing` is NOT widened here: its failure is already driven
+  /// into the probe FSM by `dial_failed` itself, which terminalizes the
+  /// fallback-probe path; a second `ExchangeCompleted` is neither parked
+  /// on nor expected by any driver for the reliable-ping fallback.
+  fn retire_failed_dial(&mut self, id: StreamId, err: crate::error::StreamError, now: Instant) {
+    let kind = self.pending_outbound_kinds.remove(&id);
+    let peer = self.pending_outbound_peers.remove(&id);
+    if let (Some(kind @ (ExchangeKind::UserMessage | ExchangeKind::PushPull)), Some(peer)) =
+      (kind, peer)
+    {
+      self
+        .ep
+        .emit_event(Event::ExchangeCompleted(ExchangeCompleted::new(
+          ExchangeId::from(id),
+          peer,
+          ExchangeOutcome::Failed,
+          kind,
+        )));
+    }
+    self.ep.dial_failed(id, err, now);
+  }
+
   /// Determine the [`ExchangeOutcome`] of a bridge at the moment it is
   /// being reaped. Mirrors [`super::streams::StreamEndpoint::reap_bridge`]'s
   /// rule: any failure phase (`BridgeFailure::Timeout`, `Transport`,
@@ -1380,6 +1433,35 @@ where
     self.service_dials(now);
     self.flush_outbound(now);
     id
+  }
+
+  /// Initiate a direct application-level ping to `node`. Returns a
+  /// [`crate::PingId`] correlation token; the driver parks a waiter and
+  /// resolves it on [`crate::event::Event::PingCompleted`] /
+  /// [`crate::event::Event::PingFailed`]. Forwards to the inner membership
+  /// [`Endpoint`].
+  ///
+  /// `ping` only queues a UDP gossip datagram (via `pending_transmits`) — it
+  /// does not touch QUIC bridge state — so it is safe to call without a
+  /// preceding `service_dials` / `flush_outbound`.
+  // No last_now update: ping only enqueues a packet transmit; it touches no dial/bridge state that poll_timeout must immediately re-examine.
+  #[inline]
+  pub fn ping(&mut self, node: crate::Node<I, SocketAddr>, now: Instant) -> crate::PingId {
+    self.ep.ping(node, now)
+  }
+
+  /// Enqueue one or more directed unreliable user messages to `to`. Forwards
+  /// to the inner membership [`Endpoint`]. Like `ping`, only touches the
+  /// gossip `pending_transmits` queue, drained by `poll_memberlist_transmit`.
+  ///
+  /// Returns `Err` if any payload exceeds the configured `gossip_mtu` ceiling.
+  #[inline]
+  pub fn send_user_packets(
+    &mut self,
+    to: SocketAddr,
+    payloads: &[Bytes],
+  ) -> Result<(), crate::error::Error> {
+    self.ep.send_user_packets(to, payloads)
   }
 
   /// The fixed per-tick step order (load-bearing — see module docs).
@@ -1754,14 +1836,14 @@ where
       // intent through the FSM's `dial_failed` path BEFORE either half
       // is created, so no orphan state can exist.
       if now >= deadline {
-        // Discard the staged kind and peer: the bridge was never
+        // Discard the staged kind and peer (the bridge was never
         // created, so the ExchangeCompleted reap path will never
-        // observe this id. Leaving entries stranded would leak memory
-        // across every pre-deadline-expired dial. Matches the
+        // observe this id) and surface a `Failed` completion for a
+        // UserMessage or PushPull dial so the parked reliable-send /
+        // join waiter resolves. Leaving entries stranded would leak
+        // memory across every pre-deadline-expired dial. Matches the
         // pre-bridge-creation failure paths below.
-        self.pending_outbound_kinds.remove(&id);
-        self.pending_outbound_peers.remove(&id);
-        self.ep.dial_failed(
+        self.retire_failed_dial(
           id,
           crate::error::StreamError::DialFailed("quic dial deadline elapsed".into()),
           now,
@@ -1816,8 +1898,22 @@ where
                   // already gone; `RecvStream::stop` discards unread data
                   // and queues STOP_SENDING with the same `Err(ClosedStream)`
                   // guard.
-                  self.pending_outbound_kinds.remove(&id);
-                  self.pending_outbound_peers.remove(&id);
+                  //
+                  // `retire_failed_dial` discards the staged kind/peer,
+                  // surfaces a `Failed` completion for a UserMessage /
+                  // PushPull dial (so a parked reliable-send / join
+                  // waiter resolves on this defense-in-depth path too),
+                  // and calls `dial_failed` — a no-op here because the
+                  // frozen `dial_succeeded` already consumed the intent,
+                  // but kept for uniformity with the other pre-bridge
+                  // failure sites.
+                  self.retire_failed_dial(
+                    id,
+                    crate::error::StreamError::DialFailed(
+                      "quic dial intent invalidated before bridge creation".into(),
+                    ),
+                    now,
+                  );
                   if let Some(e) = self.conns.get_mut(ch) {
                     let conn = e.conn_mut();
                     // Ignoring Err: idempotent retirement —
@@ -1886,9 +1982,7 @@ where
                   .map(|c| c.conn_ref().is_closed())
                   .unwrap_or(true);
                 if is_closed_now {
-                  self.pending_outbound_kinds.remove(&id);
-                  self.pending_outbound_peers.remove(&id);
-                  self.ep.dial_failed(
+                  self.retire_failed_dial(
                     id,
                     crate::error::StreamError::DialFailed(
                       "quic stream open: cached connection closed".into(),
@@ -1903,9 +1997,7 @@ where
                     attempted: true,
                   });
                 } else {
-                  self.pending_outbound_kinds.remove(&id);
-                  self.pending_outbound_peers.remove(&id);
-                  self.ep.dial_failed(
+                  self.retire_failed_dial(
                     id,
                     crate::error::StreamError::DialFailed(
                       "quic stream open deadline elapsed".into(),
@@ -1918,9 +2010,7 @@ where
           }
         }
         Err(e) => {
-          self.pending_outbound_kinds.remove(&id);
-          self.pending_outbound_peers.remove(&id);
-          self.ep.dial_failed(
+          self.retire_failed_dial(
             id,
             crate::error::StreamError::DialFailed(e.to_string().into()),
             now,
@@ -2910,6 +3000,199 @@ mod tests {
        stays orphaned in `StreamsState::recv` (and `send_streams` \
        would be > before, since the new stream is in `streams::send` \
        and only retires after the peer ACKs the RESET_STREAM)."
+    );
+  }
+
+  /// A reliable `UserMessage` dial that fails BEFORE any bridge is
+  /// created MUST surface a terminal `Event::ExchangeCompleted` with
+  /// `outcome = Failed` and `kind = UserMessage`, keyed by the SAME
+  /// `ExchangeId::from(StreamId)` the QUIC driver parks its
+  /// reliable-send waiter under. Without this the driver's parked waiter
+  /// hangs forever (the bridge-reap path — the only other
+  /// `ExchangeCompleted(UserMessage)` producer — never fires for a
+  /// bridge that was never created).
+  ///
+  /// The test registers a `UserMessage` intent (which dials the
+  /// unreachable peer in-band and requeues onto `dial_pending` while the
+  /// connection handshakes), overrides the requeued entry's deadline to
+  /// BEFORE `now`, and runs `service_dials(now)`. The expired-dial
+  /// pre-check retires the intent through `retire_failed_dial`, which
+  /// emits the `Failed` completion. `poll_event` then surfaces it.
+  ///
+  /// Negative control: revert `retire_failed_dial` to the bare
+  /// `pending_outbound_kinds.remove` + `dial_failed` it replaced and
+  /// `poll_event` yields no `ExchangeCompleted` — the assertion fails.
+  #[test]
+  fn expired_user_message_dial_emits_failed_exchange_completed() {
+    use crate::event::{Event, ExchangeId, ExchangeKind, ExchangeOutcome};
+
+    let a_addr: SocketAddr = "127.0.0.1:7971".parse().unwrap();
+    // No B endpoint is bound: the dial targets a port nothing listens on,
+    // so the connection never leaves `is_handshaking`.
+    let unreachable: SocketAddr = "127.0.0.1:7972".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+
+    // `start_user_message` registers the intent, dials in-band, and (the
+    // connection is still handshaking) requeues the intent onto
+    // `dial_pending` with deadline `now + stream_timeout`. The returned
+    // `StreamId` is the correlation handle the QUIC driver coerces to its
+    // parked `ExchangeId`.
+    let id = a.start_user_message(unreachable, Bytes::from_static(b"hello"), now);
+    let expected_eid = ExchangeId::from(id);
+
+    assert_eq!(
+      a.dial_pending.len(),
+      1,
+      "test precondition: the in-band dial must requeue the still-handshaking \
+       UserMessage intent onto `dial_pending`"
+    );
+    let entry = a
+      .dial_pending
+      .front_mut()
+      .expect("dial_pending non-empty per the preceding assertion");
+    assert_eq!(
+      entry.id, id,
+      "the requeued entry MUST carry the registered intent's id"
+    );
+    // Force the expired-dial pre-check to fire on the next service tick.
+    entry.deadline = now - Duration::from_millis(1);
+
+    a.service_dials(now);
+
+    // Drain events and find the terminal completion for this exchange.
+    let mut found = None;
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(payload) = ev
+        && payload.eid() == expected_eid
+      {
+        found = Some(payload);
+        break;
+      }
+    }
+    let payload = found.expect(
+      "a UserMessage dial that fails before any bridge is created MUST emit \
+       Event::ExchangeCompleted keyed by ExchangeId::from(StreamId) — the \
+       QUIC driver's parked reliable-send waiter resolves on exactly this \
+       event; without it the send hangs forever",
+    );
+    assert_eq!(
+      payload.kind(),
+      ExchangeKind::UserMessage,
+      "the surfaced completion MUST carry kind = UserMessage"
+    );
+    assert_eq!(
+      payload.outcome(),
+      ExchangeOutcome::Failed,
+      "a pre-bridge dial failure MUST carry outcome = Failed"
+    );
+    assert_eq!(
+      payload.peer(),
+      &unreachable,
+      "the completion MUST carry the dialed peer address"
+    );
+    // The intent's staged kind/peer must be drained (no leak).
+    assert!(
+      !a.pending_outbound_kinds.contains_key(&id),
+      "the staged outbound kind MUST be drained on dial failure"
+    );
+    assert!(
+      !a.pending_outbound_peers.contains_key(&id),
+      "the staged outbound peer MUST be drained on dial failure"
+    );
+  }
+
+  /// A `PushPull` dial that fails BEFORE any bridge is created MUST
+  /// surface a terminal `Event::ExchangeCompleted` with `outcome = Failed`
+  /// and `kind = PushPull`, keyed by the SAME `ExchangeId::from(StreamId)`
+  /// a QUIC `WaitForCompletion` join parks its waiter under. Without this
+  /// the driver's parked join waiter — which resolves only when every
+  /// dispatched push/pull exchange completes — never drains its set for an
+  /// unreachable seed and the join hangs (the reactor QUIC join has no
+  /// deadline; it relies on the machine emitting a completion).
+  ///
+  /// No double-completion: a pre-bridge failure created no bridge, so the
+  /// bridge-reap path (the only other `ExchangeCompleted` producer) never
+  /// fires for this StreamId — the `retire_failed_dial` `Failed` is the
+  /// single terminal event.
+  ///
+  /// Negative control: narrow `retire_failed_dial` back to the
+  /// `UserMessage`-only gate and this assertion (a `Failed` PushPull
+  /// completion is surfaced) fails — the join hang regresses.
+  #[test]
+  fn expired_push_pull_dial_emits_failed_exchange_completed() {
+    use crate::event::{Event, ExchangeId, ExchangeKind, ExchangeOutcome};
+
+    let a_addr: SocketAddr = "127.0.0.1:7973".parse().unwrap();
+    let unreachable: SocketAddr = "127.0.0.1:7974".parse().unwrap();
+    let now = Instant::now();
+    let mut a = make_endpoint("a", a_addr, now);
+
+    // `start_push_pull` on the coordinator registers the intent, dials
+    // in-band, and (the connection is still handshaking) requeues the
+    // intent onto `dial_pending`. The returned `StreamId` is the
+    // correlation handle the QUIC driver coerces to its parked
+    // `ExchangeId`.
+    let id = a.start_push_pull(unreachable, crate::event::PushPullKind::Refresh, now);
+    let expected_eid = ExchangeId::from(id);
+    assert_eq!(
+      a.dial_pending.len(),
+      1,
+      "test precondition: the in-band dial must requeue the still-handshaking \
+       PushPull intent onto `dial_pending`"
+    );
+    let entry = a
+      .dial_pending
+      .front_mut()
+      .expect("dial_pending non-empty per the preceding assertion");
+    assert_eq!(
+      entry.id, id,
+      "the requeued entry MUST carry the registered intent's id"
+    );
+    // Force the expired-dial pre-check to fire on the next service tick.
+    entry.deadline = now - Duration::from_millis(1);
+
+    a.service_dials(now);
+
+    // Drain events and find the terminal completion for this exchange.
+    let mut found = None;
+    while let Some(ev) = a.poll_event() {
+      if let Event::ExchangeCompleted(payload) = ev
+        && payload.eid() == expected_eid
+      {
+        found = Some(payload);
+        break;
+      }
+    }
+    let payload = found.expect(
+      "a PushPull dial that fails before any bridge is created MUST emit \
+       Event::ExchangeCompleted keyed by ExchangeId::from(StreamId) — the \
+       QUIC driver's parked join waiter resolves on exactly this event; \
+       without it an unreachable-seed join hangs forever",
+    );
+    assert_eq!(
+      payload.kind(),
+      ExchangeKind::PushPull,
+      "the surfaced completion MUST carry kind = PushPull"
+    );
+    assert_eq!(
+      payload.outcome(),
+      ExchangeOutcome::Failed,
+      "a pre-bridge dial failure MUST carry outcome = Failed"
+    );
+    assert_eq!(
+      payload.peer(),
+      &unreachable,
+      "the completion MUST carry the dialed peer address"
+    );
+    // The intent's staged kind/peer must be drained (no leak).
+    assert!(
+      !a.pending_outbound_kinds.contains_key(&id),
+      "the staged outbound kind MUST be drained on dial failure"
+    );
+    assert!(
+      !a.pending_outbound_peers.contains_key(&id),
+      "the staged outbound peer MUST be drained on dial failure"
     );
   }
 

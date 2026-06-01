@@ -388,6 +388,19 @@ pub enum MemberlistError {
   /// The driver's reply channel was dropped before a reply arrived.
   #[error("driver reply channel closed")]
   ReplyClosed,
+
+  /// An application ping (`Memberlist::ping`) did not receive an Ack within
+  /// the endpoint's configured `probe_timeout`. The probe was initiated but
+  /// the peer did not respond before the deadline elapsed.
+  #[error("ping timed out: no Ack received within probe_timeout")]
+  PingTimeout,
+
+  /// A reliable directed send (`send_reliable` / `send_many_reliable`) failed
+  /// because one or more outbound reliable exchanges did not complete
+  /// successfully. The peer may have been unreachable, rejected the connection,
+  /// or the stream-level exchange timed out.
+  #[error("reliable send failed: one or more outbound exchanges failed")]
+  SendFailed,
 }
 
 /// Convenience [`Result`] for [`MemberlistError`].

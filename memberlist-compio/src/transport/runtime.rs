@@ -31,6 +31,11 @@ use crate::{
   transport::Transport,
 };
 
+// Helper type alias used in the `commands_rx` field: the command channel is
+// parameterised over the transport id type so `Command::Ping` can carry a
+// `Node<I, SocketAddr>` without an extra generic on `TransportRuntime`.
+type CommandReceiver<T> = Receiver<Command<<T as Transport>::Id>>;
+
 /// Bundle handed to `Transport::run(self, runtime)`. Carries the delegate,
 /// command receiver, events sender, snapshot, and driver / SWIM tuning
 /// knobs. The machine endpoint is built inside `T::run` (it needs the
@@ -42,7 +47,7 @@ where
   D: Delegate<Id = T::Id, Address = SocketAddr>,
 {
   pub(crate) delegate: D,
-  pub(crate) commands_rx: Receiver<Command>,
+  pub(crate) commands_rx: CommandReceiver<T>,
   pub(crate) events_tx: Sender<Event<T::Id, SocketAddr>>,
   /// Drops at the `EventStream` fan-out (slow subscriber) — recoverable
   /// membership/control gaps.
@@ -72,7 +77,7 @@ where
   #[inline]
   pub(crate) fn new(
     delegate: D,
-    commands_rx: Receiver<Command>,
+    commands_rx: CommandReceiver<T>,
     events_tx: Sender<Event<T::Id, SocketAddr>>,
     events_dropped: Arc<AtomicU64>,
     observation_dropped: Arc<AtomicU64>,

@@ -65,6 +65,14 @@ pub enum Error {
   /// `(encoded_userdata_len, gossip_mtu)`.
   #[error("framed user broadcast ({0} bytes) exceeds the gossip packet budget ({1} bytes)")]
   UserBroadcastExceedsMtu(usize, usize),
+
+  /// A caller-supplied directed user packet (or multi-packet compound),
+  /// once framed including compound framing overhead, would not fit a single
+  /// gossip datagram. Directed user packets are emitted as one UDP datagram
+  /// and a compound whose assembled framed size exceeds the gossip MTU is
+  /// deterministically unsendable. Payload: `(framed_len, gossip_mtu)`.
+  #[error("framed user packet ({0} bytes) exceeds the packet MTU ({1} bytes)")]
+  UserPacketExceedsMtu(usize, usize),
 }
 
 /// Error constructing an [`Endpoint`](crate::endpoint::Endpoint) via the

@@ -25,7 +25,8 @@ use crate::{
   error::EndpointInitError,
   event::{
     CompoundTransmit, DialRequested, Event, NodeConflict, PacketTransmit, PingCompleted,
-    Reliability, RemoteStateReceived, SendPushPullResponse, Transmit, UserPacket,
+    PingFailed, PingId, Reliability, RemoteStateReceived, SendPushPullResponse, Transmit,
+    UserPacket,
   },
   members::{LocalNodeState, Member, Members},
   probe::{AwaitingIndirect, Probe, ProbeKind, ProbePhase},
@@ -268,9 +269,11 @@ where
     + Sync
     + 'static,
 {
-  /// Current Lifeguard health score (0 = healthy).
-  pub const fn health_score(&self) -> u32 {
-    self.awareness.health_score()
+  /// The local node's Lifeguard health score (`0` = fully healthy; higher is
+  /// worse). Mirrors `memberlist-core`'s `health_score`.
+  #[inline]
+  pub const fn health_score(&self) -> usize {
+    self.awareness.health_score() as usize
   }
 
   /// Record a health failure of the given `severity`, raising the health score
@@ -1315,6 +1318,7 @@ where
       }
       ProbeKind::Ping => {
         self.emit_event(Event::PingCompleted(PingCompleted::new(
+          PingId::new(seq),
           probe.target,
           rtt,
           payload,
@@ -1371,7 +1375,8 @@ where
   /// enabled for the target (both race the single cumulative deadline).
   /// `AwaitingIndirect` probes whose deadline elapsed terminate as failure
   /// (no extra per-stream timeout is added). Detection → process_suspect
-  /// for the target; Ping → silent drop.
+  /// for the target; Ping → emits `Event::PingFailed` carrying the ping's
+  /// correlation token (no escalation, no awareness penalty).
   fn advance_probe_fsm(&mut self, now: Instant) {
     let pt = self.cfg.probe_timeout();
     let mut to_fan_out: Vec<u32> = Vec::new();
@@ -1381,10 +1386,10 @@ where
         ProbePhase::AwaitingDirectAck(_) => {
           // `failure_deadline` is the authoritative end of the probe in
           // EVERY phase. If it has elapsed there is no budget left to
-          // escalate into — terminate now (suspect / silent for Ping),
-          // do NOT spend a full direct sub-window first. When
-          // `scale_timeout(probe_interval) < probe_timeout` the
-          // authoritative deadline precedes the direct deadline; an
+          // escalate into — terminate now (Detection → suspect; Ping →
+          // Event::PingFailed), do NOT spend a full direct sub-window
+          // first. When `scale_timeout(probe_interval) < probe_timeout`
+          // the authoritative deadline precedes the direct deadline; an
           // unconditional `sleep(probe_timeout)` here would ignore that
           // and let the probe outlive its own deadline.
           if probe.failure_deadline() <= now {
@@ -1395,9 +1400,9 @@ where
             // fallback. An application `ping` (ProbeKind::Ping) is
             // direct-only — it must NOT leak indirect traffic or emit a
             // late `PingCompleted` after the caller already saw the
-            // timeout. `probe_terminate_failure` is silent for
-            // `ProbeKind::Ping` (Detection-only suspect) and drops the
-            // ack entry.
+            // timeout. For `ProbeKind::Ping`, `probe_terminate_failure`
+            // emits `Event::PingFailed` (no escalation, no awareness
+            // penalty) and drops the ack entry.
             match probe.kind {
               ProbeKind::Detection => to_fan_out.push(*seq),
               ProbeKind::Ping => to_terminate_failure.push(*seq),
@@ -1547,8 +1552,8 @@ where
   /// AwaitingIndirect deadline (or AwaitingDirect with no indirect peers
   /// available): terminate the probe as failure. For Detection, mark the
   /// target as Suspect and apply Awareness delta per Lifeguard rules.
-  /// For Ping, silently drop (the application detects timeout via its
-  /// own deadline tracking).
+  /// For Ping, emit `Event::PingFailed` carrying the ping's correlation
+  /// token (no escalation, no awareness penalty).
   fn probe_terminate_failure(&mut self, seq: u32, now: Instant) {
     let Some(probe) = self.probes.remove(&seq) else {
       return;
@@ -1581,28 +1586,37 @@ where
       }
       _ => None,
     };
-    if matches!(probe.kind, ProbeKind::Detection) {
-      let severity = match nack_stats {
-        Some((expected, seen)) if expected > 0 => {
-          // Missing nacks = our health is suspect. Saturate to 0 in the
-          // (defensive) case where seen > expected, which can't happen
-          // under the FSM but the arithmetic should still be safe.
-          expected.saturating_sub(seen) as u32
-        }
-        _ => 1, // No indirect peers available; penalize ourselves.
-      };
-      self.awareness.record_failure(severity);
+    match probe.kind {
+      ProbeKind::Detection => {
+        let severity = match nack_stats {
+          Some((expected, seen)) if expected > 0 => {
+            // Missing nacks = our health is suspect. Saturate to 0 in the
+            // (defensive) case where seen > expected, which can't happen
+            // under the FSM but the arithmetic should still be safe.
+            expected.saturating_sub(seen) as u32
+          }
+          _ => 1, // No indirect peers available; penalize ourselves.
+        };
+        self.awareness.record_failure(severity);
 
-      // Mark the target as suspect.
-      let target_id = probe.target.id_ref().cheap_clone();
-      let local_id = self.cfg.local_id_ref().cheap_clone();
-      let target_inc = self
-        .members
-        .get(&target_id)
-        .map(|m| m.state_ref().incarnation())
-        .unwrap_or(0);
-      let suspect = Suspect::new(target_inc, target_id, local_id);
-      self.process_suspect(suspect, now);
+        // Mark the target as suspect.
+        let target_id = probe.target.id_ref().cheap_clone();
+        let local_id = self.cfg.local_id_ref().cheap_clone();
+        let target_inc = self
+          .members
+          .get(&target_id)
+          .map(|m| m.state_ref().incarnation())
+          .unwrap_or(0);
+        let suspect = Suspect::new(target_inc, target_id, local_id);
+        self.process_suspect(suspect, now);
+      }
+      ProbeKind::Ping => {
+        // Notify the application that its directed ping timed out.
+        self.emit_event(Event::PingFailed(PingFailed::new(
+          PingId::new(seq),
+          probe.target,
+        )));
+      }
     }
   }
 
@@ -2283,6 +2297,67 @@ where
     self.user_broadcasts.len()
   }
 
+  /// Enqueue a directed unreliable user message to `to` (no gossip, no
+  /// delivery guarantee). Mirrors `memberlist-core`'s `send`. Validates the
+  /// framed `UserData` size against the gossip MTU and emits one
+  /// `Transmit::Packet`; the driver encodes it with the live policy.
+  pub fn send_user_packet(&mut self, to: A, data: Bytes) -> Result<(), crate::error::Error> {
+    let encoded_len = crate::wire::encode_message::<I, A>(&Message::UserData(data.cheap_clone()))
+      .map(|b| b.len())
+      .unwrap_or(usize::MAX);
+    let budget = self.gossip_mtu();
+    if encoded_len > budget {
+      return Err(crate::error::Error::UserPacketExceedsMtu(
+        encoded_len,
+        budget,
+      ));
+    }
+    self
+      .pending_transmits
+      .push_back(Transmit::Packet(PacketTransmit::new(
+        to,
+        Message::UserData(data),
+      )));
+    Ok(())
+  }
+
+  /// Enqueue several directed unreliable user messages to `to`. Mirrors
+  /// `send_many`. Two-or-more messages are compound-packed into one datagram
+  /// (the driver splits at the MTU); a single message degrades to
+  /// `send_user_packet`.
+  pub fn send_user_packets(
+    &mut self,
+    to: A,
+    payloads: &[Bytes],
+  ) -> Result<(), crate::error::Error> {
+    match payloads {
+      [] => Ok(()),
+      [one] => self.send_user_packet(to, one.cheap_clone()),
+      many => {
+        let mut assembled =
+          crate::wire::COMPOUND_TAG_LEN + crate::wire::COMPOUND_MAX_COUNT_PREFIX_LEN;
+        let mut msgs = Vec::with_capacity(many.len());
+        for p in many {
+          let m = Message::UserData(p.cheap_clone());
+          let part_len = crate::wire::encode_message::<I, A>(&m)
+            .map(|b| b.len())
+            .unwrap_or(usize::MAX);
+          assembled = assembled
+            .saturating_add(crate::wire::COMPOUND_MAX_PART_PREFIX_LEN.saturating_add(part_len));
+          msgs.push(m);
+        }
+        let budget = self.gossip_mtu();
+        if assembled > budget {
+          return Err(crate::error::Error::UserPacketExceedsMtu(assembled, budget));
+        }
+        self
+          .pending_transmits
+          .push_back(Transmit::Compound(CompoundTransmit::new(to, msgs)));
+        Ok(())
+      }
+    }
+  }
+
   /// Conservative upper bound on the bytes a single drained user payload of
   /// length `L` adds to the assembled gossip compound. The true per-part
   /// framing is deeper than this constant: a `Message::UserData` bridges to
@@ -2616,16 +2691,18 @@ where
       )));
   }
 
-  /// Initiate an application-level ping to the given peer. The result is
-  /// delivered as `Event::PingCompleted { node, rtt, payload }` on success
-  /// (the peer's Ack arrives within `cfg.probe_timeout`); on failure the
-  /// timeout is silent and the application detects it via its own deadline
-  /// tracking.
+  /// Initiate a direct application-level ping to `node`. Returns a [`PingId`]
+  /// correlation token that identifies this exchange in the terminal event.
   ///
-  /// Replaces the legacy `Memberlist::ping` async API. The synchronous
-  /// design here means the caller doesn't await — the result flows back
-  /// through `poll_event`.
-  pub fn ping(&mut self, node: Node<I, A>, now: Instant) {
+  /// On success (peer Ack arrives within `cfg.probe_timeout`) the caller
+  /// receives `Event::PingCompleted` carrying the same `PingId`. On timeout,
+  /// `Event::PingFailed` is emitted, also carrying the `PingId`. Both events
+  /// flow through `poll_event`; the caller does not block or await.
+  ///
+  /// Unlike a SWIM failure-detection probe, an application ping is
+  /// direct-only: it does not fan out to indirect peers, request a reliable
+  /// fallback, or mark the target as suspect on timeout.
+  pub fn ping(&mut self, node: Node<I, A>, now: Instant) -> PingId {
     let target_id = node.id_ref().cheap_clone();
     let target_addr = node.addr_ref().cheap_clone();
     let target_arc = match self.members.get(&target_id) {
@@ -2666,6 +2743,7 @@ where
         target_addr,
         Message::Ping(ping),
       )));
+    PingId::new(seq)
   }
 
   /// Initiate an outbound push/pull state exchange with `peer`.

@@ -841,7 +841,7 @@ mod tests {
 
   /// A never-resolving cancel future: models a graceful Close, whose handle-drop
   /// disconnect is mapped to `pending()` — only an explicit abort resolves it.
-  fn never_cancels() -> impl Future<Output = ()> + FusedFuture + Unpin {
+  fn never_cancels() -> impl FusedFuture<Output = ()> + Unpin {
     Box::pin(futures_util::future::pending::<()>().fuse())
   }
 

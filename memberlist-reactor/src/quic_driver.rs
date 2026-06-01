@@ -26,14 +26,14 @@ use memberlist::codec::{
   parse_messages,
 };
 use memberlist_proto::{
-  Instant, QuicEndpoint,
+  Instant, PingId, QuicEndpoint,
   event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
   streams::ExchangeId,
 };
 
 use crate::{
   NodeId,
-  command::{Command, JoinCmd, LeaveCmd, ShutdownCmd},
+  command::{Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, ShutdownCmd},
   error::Error,
   observation::observation_payload_bytes,
   shared::Shared,
@@ -63,6 +63,26 @@ struct PendingLeave {
   repliers: Vec<Sender<Result<(), Error>>>,
 }
 
+/// An outstanding application-ping call; resolved on `PingCompleted` (reply
+/// `Ok(rtt)`) or `PingFailed` (reply `Err(PingTimeout)`) via the matching
+/// `PingId`. On driver exit, drained with `Err(Shutdown)`.
+struct PendingPing {
+  ping_id: PingId,
+  reply: Sender<Result<Duration, Error>>,
+}
+
+/// An outstanding reliable directed-send call; resolved on
+/// `ExchangeCompleted(UserMessage)` as each tracked `ExchangeId` surfaces.
+/// For QUIC, `QuicEndpoint::start_user_message` returns a `StreamId` that
+/// coerces directly to the `ExchangeId` stamped on the completion event —
+/// no `poll_action` drain is needed. On driver exit, drained with
+/// `Err(Shutdown)`.
+struct PendingUserSend {
+  pending: HashSet<ExchangeId>,
+  failed: usize,
+  reply: Sender<Result<(), Error>>,
+}
+
 /// The single-owner QUIC driver future. Runs until shutdown (the last handle
 /// dropped, or a `Shutdown` command).
 pub(crate) struct QuicDriver<I: NodeId, R: Runtime> {
@@ -77,6 +97,11 @@ pub(crate) struct QuicDriver<I: NodeId, R: Runtime> {
   next_pending_join_id: u64,
   /// The in-flight graceful leave, resolved on `LeftCluster`.
   pending_leave: Option<PendingLeave>,
+  /// Outstanding application-ping calls; resolved via `PingId` correlation.
+  pending_pings: Vec<PendingPing>,
+  /// Outstanding reliable-send calls; resolved when all tracked exchange ids
+  /// surface a terminal `ExchangeCompleted(UserMessage)`.
+  pending_user_sends: Vec<PendingUserSend>,
   /// Bytes of payload-bearing events queued in `obs_tx` (added on enqueue,
   /// subtracted by the obs task on dequeue) — the byte backstop's counter.
   obs_payload_bytes: Arc<AtomicU64>,
@@ -121,6 +146,8 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
       pending_joins: HashMap::new(),
       next_pending_join_id: 0,
       pending_leave: None,
+      pending_pings: Vec::new(),
+      pending_user_sends: Vec::new(),
       obs_payload_bytes,
       obs_payload_budget,
       obs_overflow: VecDeque::new(),
@@ -134,7 +161,7 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
   }
 
   /// Applies one command to the machine and replies on its oneshot.
-  fn dispatch(&mut self, cmd: Command, now: Instant) {
+  fn dispatch(&mut self, cmd: Command<I>, now: Instant) {
     match cmd {
       Command::Join(JoinCmd { addrs, wait, reply }) => {
         if !self.endpoint.is_running() {
@@ -217,6 +244,72 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
         // Ignoring Err: the caller dropped its reply receiver.
         let _ = reply.try_send(Ok(()));
       }
+      Command::Ping(PingCmd { node, reply }) => {
+        // Gate on a running node: after `leave()` the probe scheduler is
+        // stopped, so a new application ping's completion event would never
+        // arrive and the caller would hang forever. Reject with `NotRunning`.
+        if !self.endpoint.is_running() {
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.try_send(Err(Error::NotRunning));
+          return;
+        }
+        let ping_id = self.endpoint.ping(node, now);
+        self.pending_pings.push(PendingPing { ping_id, reply });
+      }
+      Command::SendUser(SendUserCmd {
+        to,
+        payloads,
+        reply,
+      }) => {
+        // Gate on a running node: after `leave()` the gossip scheduler is
+        // stopped; reject immediately.
+        if !self.endpoint.is_running() {
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.try_send(Err(Error::NotRunning));
+          return;
+        }
+        let res = self
+          .endpoint
+          .send_user_packets(to, &payloads)
+          .map_err(|e| Error::PayloadTooLarge(e.to_string()));
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.try_send(res);
+      }
+      Command::SendReliable(SendReliableCmd {
+        to,
+        payloads,
+        reply,
+      }) => {
+        // Gate on a running node: after `leave()` the QUIC stream coordinator
+        // is stopping; a new `start_user_message` would never produce a bridge
+        // and the caller would hang. Reject with `NotRunning`.
+        if !self.endpoint.is_running() {
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.try_send(Err(Error::NotRunning));
+          return;
+        }
+        if payloads.is_empty() {
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.try_send(Ok(()));
+          return;
+        }
+        let mut pending = HashSet::with_capacity(payloads.len());
+        for payload in payloads {
+          // `QuicEndpoint::start_user_message` calls `service_dials` +
+          // `flush_outbound` in-band (no separate `poll_action` loop needed,
+          // unlike the stream driver). The returned `StreamId` coerces to the
+          // `ExchangeId` that the bridge-reap path stamps on
+          // `Event::ExchangeCompleted(UserMessage)`.
+          // Ignoring StreamId: only ExchangeId::from is needed for correlation.
+          let stream_id = self.endpoint.start_user_message(to, payload, now);
+          pending.insert(ExchangeId::from(stream_id));
+        }
+        self.pending_user_sends.push(PendingUserSend {
+          pending,
+          failed: 0,
+          reply,
+        });
+      }
     }
   }
 
@@ -257,6 +350,53 @@ impl<I: NodeId, R: Runtime> QuicDriver<I, R> {
           for replier in pl.repliers {
             // Ignoring Err: a leave caller dropped its reply receiver.
             let _ = replier.try_send(Ok(()));
+          }
+        }
+      }
+      // Ping completion: resolve the matching waiter with the observed RTT.
+      // The event still flows to the observation task (additive correlation —
+      // `PingCompleted` also fires the delegate's `notify_ping_complete`).
+      Event::PingCompleted(p) => {
+        let pid = p.ping_id();
+        if let Some(idx) = self.pending_pings.iter().position(|pp| pp.ping_id == pid) {
+          let pp = self.pending_pings.swap_remove(idx);
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = pp.reply.try_send(Ok(p.rtt()));
+        }
+      }
+      // Ping failure: resolve the matching waiter with `PingTimeout`. Same
+      // additive semantics as `PingCompleted`.
+      Event::PingFailed(p) => {
+        let pid = p.ping_id();
+        if let Some(idx) = self.pending_pings.iter().position(|pp| pp.ping_id == pid) {
+          let pp = self.pending_pings.swap_remove(idx);
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = pp.reply.try_send(Err(Error::PingTimeout));
+        }
+      }
+      // Reliable user-send completion: reduce the pending set; reply when empty.
+      Event::ExchangeCompleted(p) if p.kind() == ExchangeKind::UserMessage => {
+        let eid = p.eid();
+        let failed = matches!(p.outcome(), ExchangeOutcome::Failed);
+        if let Some(idx) = self
+          .pending_user_sends
+          .iter()
+          .position(|ps| ps.pending.contains(&eid))
+        {
+          let ps = &mut self.pending_user_sends[idx];
+          ps.pending.remove(&eid);
+          if failed {
+            ps.failed += 1;
+          }
+          if ps.pending.is_empty() {
+            let ps = self.pending_user_sends.swap_remove(idx);
+            let res = if ps.failed > 0 {
+              Err(Error::SendFailed)
+            } else {
+              Ok(())
+            };
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = ps.reply.try_send(res);
           }
         }
       }
@@ -480,6 +620,16 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
           Command::Shutdown(ShutdownCmd { reply }) => {
             let _ = reply.try_send(Ok(()));
           }
+          // Ignoring Err: the caller dropped its reply receiver.
+          Command::Ping(PingCmd { reply, .. }) => {
+            let _ = reply.try_send(Err(Error::Shutdown));
+          }
+          Command::SendUser(SendUserCmd { reply, .. }) => {
+            let _ = reply.try_send(Err(Error::Shutdown));
+          }
+          Command::SendReliable(SendReliableCmd { reply, .. }) => {
+            let _ = reply.try_send(Err(Error::Shutdown));
+          }
         }
       }
       for (_, pj) in this.pending_joins.drain() {
@@ -491,6 +641,14 @@ impl<I: NodeId, R: Runtime> Future for QuicDriver<I, R> {
           // Ignoring Err: the leave caller dropped its reply receiver.
           let _ = replier.try_send(Err(Error::Shutdown));
         }
+      }
+      for pp in this.pending_pings.drain(..) {
+        // Ignoring Err: the ping caller dropped its reply receiver.
+        let _ = pp.reply.try_send(Err(Error::Shutdown));
+      }
+      for ps in this.pending_user_sends.drain(..) {
+        // Ignoring Err: the send_reliable caller dropped its reply receiver.
+        let _ = ps.reply.try_send(Err(Error::Shutdown));
       }
       return Poll::Ready(());
     }

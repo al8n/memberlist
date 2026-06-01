@@ -193,6 +193,42 @@ async fn quic_join_with_blackhole_surfaces_join_all_failed() {
   let _ = compio::time::timeout(Duration::from_secs(5), a.shutdown()).await;
 }
 
+/// `join` to an UNREACHABLE QUIC seed resolves to `Err` and does NOT hang,
+/// timeout-wrapped so a regression fails fast. The compio QUIC `PendingJoin`
+/// carries a deadline, so it cannot hang indefinitely, but the PushPull
+/// pre-bridge fix lets the join resolve on the machine's
+/// `ExchangeCompleted(PushPull, Failed)` emission (draining the waiter set)
+/// rather than waiting out the full join deadline. The wrapper guards against
+/// any regression that strands the waiter past the timeout.
+#[compio::test]
+async fn quic_join_to_unreachable_seed_returns_err_not_hang() {
+  let qcfg = support::self_trusted_quic_config();
+  let node = make_quic("qj-unreach", 0, qcfg).await;
+  // Port 1 on loopback has no QUIC listener — the dial handshake cannot
+  // complete, so the exchange is retired at its deadline.
+  let unreachable = loopback_addr(1);
+
+  let result = compio::time::timeout(
+    Duration::from_secs(30),
+    node.join(&SocketAddrResolver, &[MaybeResolved::Resolved(unreachable)]),
+  )
+  .await;
+  match result {
+    Ok(join_res) => assert!(
+      join_res.is_err(),
+      "QUIC join to an unreachable seed MUST return Err (zero contact), got {join_res:?}"
+    ),
+    Err(_elapsed) => panic!(
+      "QUIC join to an unreachable seed HUNG (timed out) — the PendingJoin \
+       waiter never resolved; the PushPull dial failure was not surfaced as \
+       Event::ExchangeCompleted(Failed)"
+    ),
+  }
+
+  // Ignoring Err: shutdown best-effort during test teardown.
+  let _ = compio::time::timeout(Duration::from_secs(5), node.shutdown()).await;
+}
+
 /// A non-empty `seeds` slice whose resolver returns an empty address
 /// vector must surface as `JoinAllFailed`, NOT a silent `Ok(0)`. A
 /// service-discovery resolver that finds no endpoints for a configured

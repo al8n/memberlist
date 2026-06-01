@@ -672,10 +672,7 @@ impl ProtoDecoder {
     }
 
     let mut payload_with_checksum = buf.split_to(payload_len + checksum_size);
-    let cks = match algo.checksum(&payload_with_checksum[..payload_len]) {
-      Ok(cks) => cks.to_be_bytes(),
-      Err(e) => return Err(e.into()),
-    };
+    let cks = algo.checksum(&payload_with_checksum[..payload_len])?.to_be_bytes();
 
     if payload_with_checksum[payload_len..].ne(&cks[..checksum_size]) {
       return Err(ChecksumError::Mismatch.into());

@@ -29,7 +29,7 @@ use crate::quic_driver::QuicDriver;
 use crate::stream_driver::{ACCEPT_CAP, StreamDriver, accept_task};
 use crate::{
   NodeId,
-  command::{Command, JoinCmd, LeaveCmd, ShutdownCmd},
+  command::{Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, ShutdownCmd},
   delegate::Delegate,
   error::Error,
   events::EventStream,
@@ -381,7 +381,7 @@ impl<I: NodeId> Memberlist<I> {
   /// This node's own identity and advertised address.
   #[must_use]
   pub fn local(&self) -> Node<I, SocketAddr> {
-    self.shared.load_snapshot().local().clone()
+    self.shared.load_snapshot().local()
   }
 
   /// The number of known members.
@@ -409,6 +409,107 @@ impl<I: NodeId> Memberlist<I> {
   #[must_use]
   pub fn observation_dropped(&self) -> u64 {
     self.shared.observation_dropped()
+  }
+
+  /// The local node's id.
+  #[must_use]
+  #[inline]
+  pub fn local_id(&self) -> I {
+    self
+      .shared
+      .load_snapshot()
+      .local_ref()
+      .id_ref()
+      .cheap_clone()
+  }
+
+  /// The local node's advertised address.
+  #[must_use]
+  #[inline]
+  pub fn advertise_address(&self) -> SocketAddr {
+    *self.shared.load_snapshot().local_ref().address_ref()
+  }
+
+  /// The local node's full state from the latest published snapshot.
+  #[must_use]
+  #[inline]
+  pub fn local_state(&self) -> Arc<NodeState<I, SocketAddr>> {
+    self.shared.load_snapshot().local_ref().clone()
+  }
+
+  /// Look up a member by id in the latest published snapshot.
+  #[must_use]
+  #[inline]
+  pub fn by_id(&self, id: &I) -> Option<Arc<NodeState<I, SocketAddr>>>
+  where
+    I: PartialEq,
+  {
+    self.shared.load_snapshot().by_id(id).cloned()
+  }
+
+  /// All members currently in the alive state, from the latest published
+  /// snapshot.
+  #[must_use]
+  #[inline]
+  pub fn online_members(&self) -> Vec<Arc<NodeState<I, SocketAddr>>> {
+    self
+      .shared
+      .load_snapshot()
+      .online_members()
+      .cloned()
+      .collect()
+  }
+
+  /// Number of alive members. Equivalent to
+  /// [`MemberlistSnapshot::alive_count`] on the snapshot.
+  #[must_use]
+  #[inline]
+  pub fn num_online_members(&self) -> usize {
+    self.shared.load_snapshot().alive_count()
+  }
+
+  /// All known members (alive + suspect + dead/left) from the latest
+  /// published snapshot. Mirrors the legacy `Memberlist::members` name.
+  #[must_use]
+  #[inline]
+  pub fn members(&self) -> Vec<Arc<NodeState<I, SocketAddr>>> {
+    self.shared.load_snapshot().members().to_vec()
+  }
+
+  /// Members matching `pred`, from the latest published snapshot.
+  #[must_use]
+  #[inline]
+  pub fn members_by(
+    &self,
+    pred: impl FnMut(&NodeState<I, SocketAddr>) -> bool,
+  ) -> Vec<Arc<NodeState<I, SocketAddr>>> {
+    self
+      .shared
+      .load_snapshot()
+      .members_by(pred)
+      .cloned()
+      .collect()
+  }
+
+  /// Count of members matching `pred`.
+  #[must_use]
+  #[inline]
+  pub fn num_members_by(&self, pred: impl FnMut(&NodeState<I, SocketAddr>) -> bool) -> usize {
+    self.shared.load_snapshot().num_members_by(pred)
+  }
+
+  /// Map-filter members, collecting all `Some` results into a `Vec`.
+  #[must_use]
+  #[inline]
+  pub fn members_map_by<O>(&self, f: impl FnMut(&NodeState<I, SocketAddr>) -> Option<O>) -> Vec<O> {
+    self.shared.load_snapshot().members_map_by(f)
+  }
+
+  /// The local node's Lifeguard health score (`0` = healthy; higher = worse).
+  #[must_use]
+  #[inline]
+  pub fn health_score(&self) -> usize {
+    self.shared.load_snapshot().health_score()
   }
 
   /// Joins the cluster by contacting `seeds` (resolved via `resolver`), waiting
@@ -502,6 +603,82 @@ impl<I: NodeId> Memberlist<I> {
     {
       // The driver already exited; shutdown is idempotent.
       return Ok(());
+    }
+    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Probes `node` and returns the measured round-trip time.
+  ///
+  /// Returns `Err(NotRunning)` if the node is not running, `Err(PingTimeout)`
+  /// if no ack arrived within the probe deadline, or `Err(Shutdown)` if the
+  /// driver shut down while waiting.
+  pub async fn ping(&self, node: Node<I, SocketAddr>) -> Result<std::time::Duration, Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let (tx, rx) = flume::bounded(1);
+    if !self
+      .shared
+      .push_command(Command::Ping(PingCmd { node, reply: tx }))
+    {
+      return Err(Error::Shutdown);
+    }
+    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Sends a single unreliable directed user message to `to` via gossip.
+  pub async fn send(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), Error> {
+    self.send_many(to, core::iter::once(payload)).await
+  }
+
+  /// Sends multiple unreliable directed user messages to `to` via gossip.
+  pub async fn send_many(
+    &self,
+    to: SocketAddr,
+    payloads: impl IntoIterator<Item = bytes::Bytes>,
+  ) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let payloads: Vec<bytes::Bytes> = payloads.into_iter().collect();
+    let (tx, rx) = flume::bounded(1);
+    if !self.shared.push_command(Command::SendUser(SendUserCmd {
+      to,
+      payloads,
+      reply: tx,
+    })) {
+      return Err(Error::Shutdown);
+    }
+    rx.recv_async().await.map_err(|_| Error::Shutdown)?
+  }
+
+  /// Sends a single reliable directed user message to `to` via the stream
+  /// plane (TCP or QUIC), waiting for the exchange to complete.
+  pub async fn send_reliable(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), Error> {
+    self.send_many_reliable(to, core::iter::once(payload)).await
+  }
+
+  /// Sends multiple reliable directed user messages to `to` via the stream
+  /// plane, waiting for all exchanges to complete.
+  pub async fn send_many_reliable(
+    &self,
+    to: SocketAddr,
+    payloads: impl IntoIterator<Item = bytes::Bytes>,
+  ) -> Result<(), Error> {
+    if self.shared.is_shutdown() {
+      return Err(Error::Shutdown);
+    }
+    let payloads: Vec<bytes::Bytes> = payloads.into_iter().collect();
+    let (tx, rx) = flume::bounded(1);
+    if !self
+      .shared
+      .push_command(Command::SendReliable(SendReliableCmd {
+        to,
+        payloads,
+        reply: tx,
+      }))
+    {
+      return Err(Error::Shutdown);
     }
     rx.recv_async().await.map_err(|_| Error::Shutdown)?
   }

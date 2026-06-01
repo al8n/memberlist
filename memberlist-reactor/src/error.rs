@@ -42,6 +42,19 @@ pub enum Error {
   )]
   ZeroCloseTimeout,
 
+  /// A directed ping timed out (no ack received within the probe deadline).
+  #[error("ping timed out")]
+  PingTimeout,
+
+  /// A reliable directed send failed: one or more stream exchanges did not
+  /// complete successfully.
+  #[error("reliable send failed")]
+  SendFailed,
+
+  /// A directed user-message payload exceeds the per-packet wire limit.
+  #[error("payload too large: {0}")]
+  PayloadTooLarge(String),
+
   /// An I/O error.
   #[error(transparent)]
   Io(#[from] std::io::Error),

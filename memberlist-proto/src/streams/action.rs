@@ -5,7 +5,7 @@
 
 use core::net::SocketAddr;
 
-use crate::streams::conn::ExchangeId;
+use crate::{event::StreamId, streams::conn::ExchangeId};
 
 /// Payload of [`StreamAction::Connect`]: dial a transport connection for an exchange.
 /// Accessor-only.
@@ -13,14 +13,19 @@ use crate::streams::conn::ExchangeId;
 pub struct ConnectInfo {
   id: ExchangeId,
   peer: SocketAddr,
+  stream_id: StreamId,
 }
 
 impl ConnectInfo {
   /// The exchange handle the coordinator keys this connection on. Every
   /// subsequent `handle_transport_data` / `poll_transport_transmit` for the
   /// connection carries this same handle.
-  pub(crate) const fn new(id: ExchangeId, peer: SocketAddr) -> Self {
-    Self { id, peer }
+  pub(crate) const fn new(id: ExchangeId, peer: SocketAddr, stream_id: StreamId) -> Self {
+    Self {
+      id,
+      peer,
+      stream_id,
+    }
   }
 
   /// The exchange handle the coordinator keys this connection on. Every
@@ -35,6 +40,18 @@ impl ConnectInfo {
   #[inline(always)]
   pub const fn peer(&self) -> SocketAddr {
     self.peer
+  }
+
+  /// The machine [`StreamId`] of the originating outbound dial — the `StreamId`
+  /// the matching `start_user_message` / `start_push_pull` / `start_reliable_ping`
+  /// call returned. A driver that started a batch of dials uses this to match a
+  /// surfaced `Connect` back to the exact `start_*` it issued, rather than the
+  /// ambiguous peer address: one `start_*` call's drain can also flush an
+  /// unrelated same-peer dial enqueued by another subsystem, so peer alone does
+  /// not call-scope the correlation.
+  #[inline(always)]
+  pub const fn stream_id(&self) -> StreamId {
+    self.stream_id
   }
 }
 

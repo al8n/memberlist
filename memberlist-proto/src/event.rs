@@ -219,6 +219,26 @@ impl<A> ExchangeCompleted<A> {
   }
 }
 
+/// Correlation token for an application ping (`Endpoint::ping`), echoed on the
+/// terminal `Event::PingCompleted` / `Event::PingFailed`. Mirrors how
+/// `StreamId` correlates reliable exchanges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PingId(u32);
+
+impl PingId {
+  /// Construct from the machine-allocated sequence number.
+  #[inline(always)]
+  pub(crate) const fn new(seq: u32) -> Self {
+    Self(seq)
+  }
+
+  /// The underlying sequence number.
+  #[inline(always)]
+  pub const fn get(&self) -> u32 {
+    self.0
+  }
+}
+
 /// Opaque handle for a stream-oriented exchange (push/pull, reliable ping,
 /// reliable user-message).
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
@@ -454,6 +474,7 @@ impl<A> RemoteStateReceived<A> {
 /// Payload for [`Event::PingCompleted`]: a probe ping completed with RTT.
 #[derive(Debug)]
 pub struct PingCompleted<I, A> {
+  ping_id: PingId,
   node: Arc<NodeState<I, A>>,
   rtt: core::time::Duration,
   payload: Bytes,
@@ -462,8 +483,24 @@ pub struct PingCompleted<I, A> {
 impl<I, A> PingCompleted<I, A> {
   /// Construct a new payload.
   #[inline(always)]
-  pub const fn new(node: Arc<NodeState<I, A>>, rtt: core::time::Duration, payload: Bytes) -> Self {
-    Self { node, rtt, payload }
+  pub const fn new(
+    ping_id: PingId,
+    node: Arc<NodeState<I, A>>,
+    rtt: core::time::Duration,
+    payload: Bytes,
+  ) -> Self {
+    Self {
+      ping_id,
+      node,
+      rtt,
+      payload,
+    }
+  }
+
+  /// The correlation token from `Endpoint::ping`.
+  #[inline(always)]
+  pub const fn ping_id(&self) -> PingId {
+    self.ping_id
   }
 
   /// The peer that responded.
@@ -482,6 +519,34 @@ impl<I, A> PingCompleted<I, A> {
   #[inline(always)]
   pub const fn payload_ref(&self) -> &Bytes {
     &self.payload
+  }
+}
+
+/// Payload for [`Event::PingFailed`]: an application ping timed out (no Ack
+/// within `probe_timeout`).
+#[derive(Debug)]
+pub struct PingFailed<I, A> {
+  ping_id: PingId,
+  node: Arc<NodeState<I, A>>,
+}
+
+impl<I, A> PingFailed<I, A> {
+  /// Construct a new payload.
+  #[inline(always)]
+  pub const fn new(ping_id: PingId, node: Arc<NodeState<I, A>>) -> Self {
+    Self { ping_id, node }
+  }
+
+  /// The correlation token from `Endpoint::ping`.
+  #[inline(always)]
+  pub const fn ping_id(&self) -> PingId {
+    self.ping_id
+  }
+
+  /// The peer that did not respond.
+  #[inline(always)]
+  pub fn node_ref(&self) -> &Arc<NodeState<I, A>> {
+    &self.node
   }
 }
 
@@ -579,6 +644,10 @@ pub enum Event<I, A> {
   /// measured round-trip-time and the peer's optional ack payload.
   /// Replaces legacy `PingDelegate::notify_ping_complete`.
   PingCompleted(PingCompleted<I, A>),
+  /// An application ping (issued via `Endpoint::ping`) timed out: no Ack
+  /// arrived within `probe_timeout`. Carries the same [`PingId`] token
+  /// returned by `Endpoint::ping`.
+  PingFailed(PingFailed<I, A>),
   /// A decode error was reported by an upstream component.
   DecodeError(DecodeError<A>),
   /// The Endpoint requests that the driver dial `peer` on a fresh stream.

@@ -28,12 +28,12 @@ use compio::{
 use flume::{Receiver, Sender};
 use futures_util::{FutureExt, pin_mut, select_biased};
 use memberlist_proto::{
-  Instant, Node,
-  event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
+  Instant,
+  event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId, Transmit},
   framing::{MessageTag, decode_compound, decode_message, encode_message},
   message_from_any, message_to_any,
   streams::{StreamAction, StreamEndpoint, StreamTransport},
-  typed::Message,
+  typed::{Message, NodeState, State},
 };
 
 use crate::{
@@ -142,6 +142,64 @@ impl PendingLeave {
       let _ = replier.send_async(make_result()).await;
     }
   }
+}
+
+/// Driver-side state for one outstanding application-ping call.
+///
+/// Parked by the `Command::Ping` dispatch arm when the endpoint is running.
+/// Resolved on `Event::PingCompleted` (reply `Ok(rtt)`) or
+/// `Event::PingFailed` (reply `Err(PingTimeout)`) — both carry the matching
+/// `PingId` correlation token. On driver exit, drained with
+/// `Err(MemberlistError::Shutdown)`.
+struct PendingPing {
+  /// Correlation token minted by `endpoint.ping(…)`.
+  ping_id: memberlist_proto::PingId,
+  /// One-shot reply channel back to the `ping()` caller.
+  reply: flume::Sender<Result<core::time::Duration>>,
+}
+
+/// Driver-side state for one outstanding reliable directed-send call.
+///
+/// A single `Command::SendReliable` may dispatch multiple
+/// `start_user_message` calls (one per payload). Each call returns a
+/// `StreamId`; the driver parks one `PendingUserSend` whose `pending` set
+/// tracks the `ExchangeId`s of the in-flight streams. Resolved on
+/// `Event::ExchangeCompleted` where `kind() == ExchangeKind::UserMessage`:
+/// each completed `ExchangeId` is removed from `pending`; when `pending`
+/// empties the reply fires. On driver exit, drained with
+/// `Err(MemberlistError::Shutdown)`.
+struct PendingUserSend {
+  /// Set of `ExchangeId`s this call dispatched and has not yet seen a
+  /// terminal `ExchangeCompleted` for. An entry is removed on any terminal
+  /// outcome (success or failure). When this set empties the call resolves.
+  pending: HashSet<ExchangeId>,
+  /// Running count of payload failures for this call. SEEDED at park time
+  /// to the count of payloads that never produced a `StreamAction::Connect`
+  /// (a pre-`Connect` retirement will never surface an `ExchangeCompleted`,
+  /// so it cannot be observed via `pending`); incremented further for each
+  /// tracked exchange whose terminal outcome is `Failed`.
+  failed: usize,
+  /// One-shot reply channel back to the `send_reliable` / `send_many_reliable`
+  /// caller. `Ok(())` only if every payload was dispatched AND every exchange
+  /// succeeded; `Err(SendFailed)` if any payload failed before `Connect` or
+  /// any exchange failed.
+  reply: flume::Sender<Result<()>>,
+}
+
+/// Driver-loop-local state tracking outstanding commands awaiting completion.
+///
+/// Passed by `&mut` to [`drain_events`] and [`dispatch_command`] so those
+/// functions do not each carry four separate mutable parameters for the same
+/// cohesive bookkeeping object.
+struct PendingCommands {
+  /// Outstanding synchronous-join waiters. See [`PendingJoin`].
+  joins: Vec<PendingJoin>,
+  /// Outstanding graceful-leave waiter (at most one at a time). See [`PendingLeave`].
+  leave: Option<PendingLeave>,
+  /// Outstanding application-ping waiters. See [`PendingPing`].
+  pings: Vec<PendingPing>,
+  /// Outstanding reliable directed-send waiters. See [`PendingUserSend`].
+  user_sends: Vec<PendingUserSend>,
 }
 
 /// Payload for [`BridgeInbound::Bytes`]: a slice of plaintext bytes the
@@ -441,7 +499,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   mut endpoint: StreamEndpoint<I, A, R>,
   gossip_socket: UdpSocket,
   listener: TcpListener,
-  commands: Receiver<Command>,
+  commands: Receiver<Command<I>>,
   events_tx: Sender<Event<I, A>>,
   events_dropped: Arc<std::sync::atomic::AtomicU64>,
   observation_dropped: Arc<std::sync::atomic::AtomicU64>,
@@ -531,21 +589,15 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   // the listener and the gossip socket so the bound ports are free
   // when the caller resumes from `shutdown.await`.
   let mut shutdown_reply: Option<flume::Sender<Result<()>>> = None;
-  // Outstanding synchronous-join waiters. Populated by
-  // [`dispatch_command`] on [`JoinKind::WaitForCompletion`]; reduced
-  // by [`drain_events`] on every push/pull `ExchangeCompleted`
-  // (replied + removed there the moment a waiter's `pending` set
-  // empties); the deadline path is reaped by [`reap_pending_joins`]
-  // after each drain block.
-  let mut pending_joins: Vec<PendingJoin> = Vec::new();
-  // Outstanding graceful-leave waiter. Parked by [`dispatch_command`]
-  // when a [`Command::Leave`] initiates the machine's `leave()` (the
-  // endpoint was Running); resolved [`Ok`] in [`drain_events`]
-  // on `Event::LeftCluster`; reaped [`MemberlistError::LeaveTimeout`]
-  // by [`reap_pending_leave`] once its deadline elapses. At most one
-  // is outstanding at a time (a second initiating Leave is replied
-  // immediately rather than dropping a reply).
-  let mut pending_leave: Option<PendingLeave> = None;
+  // Outstanding commands awaiting completion. Bundled into one struct
+  // and passed by `&mut` to [`dispatch_command`] and [`drain_events`].
+  // See [`PendingCommands`] for per-field documentation.
+  let mut pending = PendingCommands {
+    joins: Vec::new(),
+    leave: None,
+    pings: Vec::new(),
+    user_sends: Vec::new(),
+  };
 
   // Per-driver UDP recv buffer size, derived from the coordinator's
   // configured `gossip_mtu` + encrypted wrapper overhead. Computed
@@ -605,8 +657,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
             &bridge_ready_tx,
             stream_opts,
             &mut shutdown_reply,
-            &mut pending_joins,
-            &mut pending_leave,
+            &mut pending,
             driver_opts.leave_timeout(),
             c,
             now,
@@ -702,8 +753,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
           &observation_dropped,
           &obs_payload_bytes,
           obs_payload_budget,
-          &mut pending_joins,
-          &mut pending_leave,
+          &mut pending,
         )
         .await;
         if !(did_actions || did_transports || did_transmits || did_events) {
@@ -711,8 +761,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
         }
         drained_any = true;
       }
-      reap_pending_joins(&mut pending_joins, Instant::now()).await;
-      reap_pending_leave(&mut pending_leave, Instant::now()).await;
+      reap_pending_joins(&mut pending.joins, Instant::now()).await;
+      reap_pending_leave(&mut pending.leave, Instant::now()).await;
       if drained_any {
         refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
       }
@@ -733,8 +783,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       .unwrap_or(setup_now + driver_opts.idle_wake_interval());
     let timeout_deadline = [
       Some(endpoint_deadline),
-      min_pending_join_deadline(&pending_joins),
-      min_pending_leave_deadline(&pending_leave),
+      min_pending_join_deadline(&pending.joins),
+      min_pending_leave_deadline(&pending.leave),
     ]
     .into_iter()
     .flatten()
@@ -824,16 +874,15 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
           &observation_dropped,
           &obs_payload_bytes,
           obs_payload_budget,
-          &mut pending_joins,
-          &mut pending_leave,
+          &mut pending,
         )
         .await;
         if !(did_actions || did_transports || did_transmits || did_events) {
           break;
         }
       }
-      reap_pending_joins(&mut pending_joins, Instant::now()).await;
-      reap_pending_leave(&mut pending_leave, Instant::now()).await;
+      reap_pending_joins(&mut pending.joins, Instant::now()).await;
+      reap_pending_leave(&mut pending.leave, Instant::now()).await;
       if dirty {
         refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
       }
@@ -860,16 +909,15 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
           &observation_dropped,
           &obs_payload_bytes,
           obs_payload_budget,
-          &mut pending_joins,
-          &mut pending_leave,
+          &mut pending,
         )
         .await;
         if !(did_actions || did_transports || did_transmits || did_events) {
           break;
         }
       }
-      reap_pending_joins(&mut pending_joins, Instant::now()).await;
-      reap_pending_leave(&mut pending_leave, Instant::now()).await;
+      reap_pending_joins(&mut pending.joins, Instant::now()).await;
+      reap_pending_leave(&mut pending.leave, Instant::now()).await;
       refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
       dirty = false;
     }
@@ -1015,8 +1063,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
               &bridge_ready_tx,
               stream_opts,
               &mut shutdown_reply,
-              &mut pending_joins,
-              &mut pending_leave,
+              &mut pending,
               driver_opts.leave_timeout(),
               c,
               now,
@@ -1098,16 +1145,15 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
         &observation_dropped,
         &obs_payload_bytes,
         obs_payload_budget,
-        &mut pending_joins,
-        &mut pending_leave,
+        &mut pending,
       )
       .await;
       if !(did_actions || did_transports || did_transmits || did_events) {
         break;
       }
     }
-    reap_pending_joins(&mut pending_joins, Instant::now()).await;
-    reap_pending_leave(&mut pending_leave, Instant::now()).await;
+    reap_pending_joins(&mut pending.joins, Instant::now()).await;
+    reap_pending_leave(&mut pending.leave, Instant::now()).await;
 
     if dirty {
       refresh_snapshot::<I, A, R>(&endpoint, &snapshot);
@@ -1152,12 +1198,21 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
       Command::QueueUserBroadcast(cmd) => cmd.reply().clone(),
       Command::SetLocalState(cmd) => cmd.reply().clone(),
       Command::SetAckPayload(cmd) => cmd.reply().clone(),
+      Command::SendUser(cmd) => cmd.reply().clone(),
+      Command::SendReliable(cmd) => cmd.reply().clone(),
       Command::Join(JoinCmd { reply, .. }) => {
         // Join's reply type is `Result<usize>`; surface the same
         // Shutdown error through a separate match arm so the type
         // checker sees the right `Sender<Result<usize>>`.
         // Ignoring Err: caller dropped the reply receiver.
         let _ = reply.send_async(Err(MemberlistError::Shutdown)).await;
+        continue;
+      }
+      Command::Ping(cmd) => {
+        // Ping's reply type is `Result<Duration>`; surface Shutdown
+        // through a separate arm so the type checker sees the right sender.
+        // Ignoring Err: caller dropped the reply receiver.
+        let _ = cmd.reply().send_async(Err(MemberlistError::Shutdown)).await;
         continue;
       }
     };
@@ -1169,11 +1224,11 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   // returns `Err(SendError::Disconnected)` for every clone.
   drop(commands);
   // Reply Err(Shutdown) to every outstanding synchronous-join waiter.
-  // Their reply Senders live in `pending_joins`; without this drain
+  // Their reply Senders live in `pending.joins`; without this drain
   // the corresponding receivers on the caller side would hang
   // forever (the loop body's reap path is gone, and the driver task
   // is about to exit).
-  for pj in pending_joins.drain(..) {
+  for pj in pending.joins.drain(..) {
     // Ignoring Err: caller dropped the reply receiver.
     let _ = pj.reply.send_async(Err(MemberlistError::Shutdown)).await;
   }
@@ -1181,8 +1236,20 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
   // `LeftCluster` never arrived before the loop exited (e.g. a shutdown
   // raced the leave flush). Without this their receivers would hang
   // forever — the loop body's reap path is gone and the task is exiting.
-  if let Some(pl) = pending_leave.take() {
+  if let Some(pl) = pending.leave.take() {
     pl.resolve_all(|| Err(MemberlistError::Shutdown)).await;
+  }
+  // Reply Err(Shutdown) to every parked application-ping waiter whose
+  // `PingCompleted`/`PingFailed` will never arrive (driver is exiting).
+  for pp in pending.pings.drain(..) {
+    // Ignoring Err: caller dropped the reply receiver.
+    let _ = pp.reply.send_async(Err(MemberlistError::Shutdown)).await;
+  }
+  // Reply Err(Shutdown) to every parked reliable-send waiter whose
+  // `ExchangeCompleted(UserMessage)` will never arrive (driver is exiting).
+  for ps in pending.user_sends.drain(..) {
+    // Ignoring Err: caller dropped the reply receiver.
+    let _ = ps.reply.send_async(Err(MemberlistError::Shutdown)).await;
   }
   for (_eid, handle) in bridges.drain() {
     // Ignoring Err: the bridge may have exited already; the close
@@ -1218,10 +1285,9 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
 /// before the bound TCP port releases, allowing an immediate-rebind
 /// race window between `shutdown.await` returning and the listener
 /// actually dropping.
-// Eight arguments is past clippy's heuristic but each is a distinct
-// piece of mutable state the function reads or threads through; a
-// container struct would just be a parameter pack with no internal
-// invariant, costing readability for no gain.
+// Nine arguments is past clippy's heuristic but each is a distinct
+// piece of mutable state the function reads or threads through; the
+// pending command bookkeeping is already bundled into `PendingCommands`.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_command<I, A, R>(
   endpoint: &mut StreamEndpoint<I, A, R>,
@@ -1229,10 +1295,9 @@ async fn dispatch_command<I, A, R>(
   bridge_ready_tx: &Sender<BridgeReady>,
   stream_opts: StreamTransportOptions,
   shutdown_reply: &mut Option<flume::Sender<Result<()>>>,
-  pending_joins: &mut Vec<PendingJoin>,
-  pending_leave: &mut Option<PendingLeave>,
+  pending: &mut PendingCommands,
   leave_timeout: core::time::Duration,
-  cmd: Command,
+  cmd: Command<I>,
   now: Instant,
 ) where
   I: memberlist_proto::Id
@@ -1273,15 +1338,14 @@ async fn dispatch_command<I, A, R>(
       // Both `JoinKind::Dispatch` and `JoinKind::WaitForCompletion`
       // share the same `start_push_pull` fan-out: each seed becomes
       // one queued Connect action that the inline drain below pops
-      // and routes through `process_one_action`. Inline draining
-      // each seed's Connect immediately after `start_push_pull`
-      // gives the Connect's ExchangeId CALL-SCOPED ownership: the
-      // resulting eid is bound only to the synchronous-join waiter
-      // (if any) that dispatched it, never to a sibling waiter
-      // also targeting the same address. The driver's single-task
-      // discipline guarantees no other source can interleave a
-      // Connect action between this `start_push_pull` and the
-      // immediately-following `poll_action`.
+      // and routes through `process_one_action`. The wait variant
+      // captures each Connect's ExchangeId keyed on the `StreamId`
+      // that THIS join's `start_push_pull` returned, so the captured
+      // set is bound only to this join — never to a sibling waiter
+      // also targeting the same address, and never to an unrelated
+      // same-peer dial that the shared `service_dials` drain may flush
+      // for another subsystem (a scheduled push/pull, a probe
+      // reliable-ping, a gossip dial).
       match kind {
         JoinKind::Dispatch => {
           let mut count: usize = 0;
@@ -1307,39 +1371,59 @@ async fn dispatch_command<I, A, R>(
           let _ = reply.send_async(Ok(count)).await;
         }
         JoinKind::WaitForCompletion(crate::command::WaitForCompletionArgs { deadline }) => {
-          let mut pending: HashSet<ExchangeId> = HashSet::with_capacity(addrs.len());
+          // The resolved seed count (one per address, duplicates included).
+          // Capture it BEFORE the loop consumes `addrs`: this is the
+          // denominator the caller sees in `JoinAllFailed`. A seed that
+          // retires before producing a `Connect` (TLS `sni_provider`
+          // returns `None`, dialer construction error, or an elapsed dial
+          // deadline) never enters `exchange_ids`, so deriving `requested`
+          // from the captured-exchange count would undercount the seeds
+          // actually requested.
+          let requested = addrs.len();
+          let mut exchange_ids: HashSet<ExchangeId> = HashSet::with_capacity(requested);
+          // The `StreamId`s this join's `start_push_pull` calls returned;
+          // the Connect capture is keyed on this set (not the peer) so a
+          // same-peer dial flushed by the shared `service_dials` for another
+          // subsystem is never misattributed to this join.
+          let mut started: HashSet<StreamId> = HashSet::with_capacity(requested);
           for addr in addrs {
-            // Ignoring StreamId return: per the Dispatch arm's
-            // rationale above.
-            let _ = endpoint.start_push_pull(addr.into(), PushPullKind::Join, now);
-            // Drain actions queued by THIS `start_push_pull`. The
-            // capture binds the Connect's ExchangeId to the
-            // dispatching waiter only — duplicate seeds produce
-            // duplicate exchanges and each is tracked independently
-            // through its own ExchangeId.
+            let sid = endpoint.start_push_pull(addr.into(), PushPullKind::Join, now);
+            started.insert(sid);
+            // Drain actions queued by THIS `start_push_pull`. The capture
+            // binds the Connect's ExchangeId to this join only — duplicate
+            // seeds produce duplicate exchanges, each with its own StreamId
+            // and tracked independently through its own ExchangeId.
             while let Some(action) = endpoint.poll_action() {
               process_one_action(
                 action,
                 bridges,
                 bridge_ready_tx,
                 stream_opts,
-                Some((addr, &mut pending)),
+                Some((&started, &mut exchange_ids)),
               );
             }
           }
-          // `requested` is the number of outbound exchanges this call
-          // actually dispatched (one per address, including duplicates).
-          // For the call-into-empty case it would be 0, but the public
-          // `join_with` already defends against that — by the time we
-          // see a `WaitForCompletion` here `addrs` is non-empty.
-          let requested = pending.len();
-          pending_joins.push(PendingJoin {
-            pending,
-            contacted: 0,
-            requested,
-            deadline,
-            reply,
-          });
+          if exchange_ids.is_empty() {
+            // Every seed retired before a `Connect`, so no exchange will
+            // ever surface a terminal `ExchangeCompleted`. Parking would
+            // idle the waiter until `deadline`; resolve now with the
+            // all-failed outcome carrying the full resolved seed count
+            // (the same payload the deadline reaper would produce).
+            // Ignoring Err: the caller dropped the reply receiver.
+            let _ = reply
+              .send_async(Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
+                requested, 0,
+              ))))
+              .await;
+          } else {
+            pending.joins.push(PendingJoin {
+              pending: exchange_ids,
+              contacted: 0,
+              requested,
+              deadline,
+              reply,
+            });
+          }
         }
       }
     }
@@ -1360,7 +1444,7 @@ async fn dispatch_command<I, A, R>(
       //     `LeftCluster` once they drain) or reply IMMEDIATELY (a
       //     genuine no-op / error: nothing in flight, no completion
       //     event coming, so parking would hang).
-      if let Some(pl) = pending_leave.as_mut() {
+      if let Some(pl) = pending.leave.as_mut() {
         pl.repliers.push(reply);
       } else {
         let was_running = endpoint.is_running();
@@ -1372,7 +1456,7 @@ async fn dispatch_command<I, A, R>(
             // Initiated → park. A returned `Ok(())` then means the leave
             // actually reached the wire (`LeftCluster`), never merely
             // that it was queued.
-            *pending_leave = Some(PendingLeave {
+            pending.leave = Some(PendingLeave {
               repliers: vec![reply],
               deadline: now + leave_timeout,
             });
@@ -1512,6 +1596,143 @@ async fn dispatch_command<I, A, R>(
         let _ = handle.out_tx.try_send(BridgeOut::Close);
       }
       *shutdown_reply = Some(reply);
+    }
+    Command::Ping(cmd) => {
+      // Gate on a running node: after `leave()` the probe scheduler is
+      // stopped, so a new application ping's completion event would never
+      // arrive and the caller would hang forever on its reply channel.
+      // Reject with `NotRunning` rather than park an unresolving waiter.
+      if endpoint.is_running() {
+        // `PingCmd` carries `Node<I, SocketAddr>`; the machine's
+        // `StreamEndpoint::ping` expects `Node<I, A>`. Convert via
+        // `A::from(SocketAddr)` (the `From<SocketAddr>` bound on `A` ensures
+        // this is always defined).
+        let (id, addr) = cmd.node().clone().into_parts();
+        let node_a = memberlist_proto::Node::new(id, A::from(addr));
+        let ping_id = endpoint.ping(node_a, now);
+        pending.pings.push(PendingPing {
+          ping_id,
+          reply: cmd.reply().clone(),
+        });
+      } else {
+        // Ignoring Err: caller dropped the reply receiver.
+        let _ = cmd
+          .reply()
+          .send_async(Err(MemberlistError::NotRunning))
+          .await;
+      }
+    }
+    Command::SendUser(cmd) => {
+      // Gate on a running node: after `leave()` the gossip socket is
+      // effectively closed to protocol traffic; reject immediately.
+      let res: Result<()> = if endpoint.is_running() {
+        // Convert `SocketAddr` to `A` via the `A: From<SocketAddr>` bound.
+        endpoint
+          .send_user_packets(A::from(*cmd.to()), cmd.payloads())
+          .map_err(|e| MemberlistError::PayloadTooLarge(e.to_string()))
+      } else {
+        Err(MemberlistError::NotRunning)
+      };
+      // Ignoring Err: caller dropped the reply receiver.
+      let _ = cmd.reply().send_async(res).await;
+    }
+    Command::SendReliable(cmd) => {
+      // Gate on a running node: after `leave()` the stream coordinator is
+      // stopping, so a new `start_user_message` would never produce a
+      // `DialRequested` action and the caller would hang.
+      if !endpoint.is_running() {
+        // Ignoring Err: caller dropped the reply receiver.
+        let _ = cmd
+          .reply()
+          .send_async(Err(MemberlistError::NotRunning))
+          .await;
+        return;
+      }
+      // Convert `SocketAddr` to `A` once; reused for each payload's dial.
+      let peer_a = A::from(*cmd.to());
+      let mut exchange_ids: HashSet<ExchangeId> = HashSet::with_capacity(cmd.payloads().len());
+      // The `StreamId`s this command's `start_user_message` calls returned.
+      // The Connect capture is bound to THIS set, not the peer: `service_dials`
+      // drains a shared dial deque, so a same-peer dial flushed for another
+      // subsystem (a scheduled push/pull, a probe reliable-ping) is never
+      // misattributed to this send.
+      let mut started: HashSet<StreamId> = HashSet::with_capacity(cmd.payloads().len());
+      for payload in cmd.payloads() {
+        // `start_user_message` emits a `DialRequested` event which
+        // `service_dials` immediately converts into a `StreamAction::Connect`
+        // carrying the per-bridge `ExchangeId` (allocated by `StreamConns::allocate`,
+        // distinct from the machine-level `StreamId`) tagged with the originating
+        // `StreamId`. The capture in `process_one_action` grabs that `ExchangeId`
+        // for the Connect whose `stream_id()` is in `started`, so we can correlate
+        // the terminal `Event::ExchangeCompleted(UserMessage)` with this waiter.
+        let sid = endpoint.start_user_message(peer_a.cheap_clone(), payload.clone(), now);
+        started.insert(sid);
+        while let Some(action) = endpoint.poll_action() {
+          process_one_action(
+            action,
+            bridges,
+            bridge_ready_tx,
+            stream_opts,
+            Some((&started, &mut exchange_ids)),
+          );
+        }
+      }
+      // `n` = payloads dispatched; `m` = exchanges captured for this command.
+      // Each `start_user_message` produces one `StreamId` in `started` and at
+      // most one captured `Connect` (success) or zero (a pre-`Connect`
+      // retirement: TLS SNI parse failure, record-layer fault, or an
+      // already-elapsed exchange deadline — the API permits a `sni_provider`
+      // that returns `Some` then `None`, so a partial failure mid-batch is
+      // reachable). Because capture is keyed on `started`, an unrelated
+      // same-peer dial cannot inflate `m`, so `m <= n` always holds and
+      // `n - m` is the count of payloads that never produced an exchange and
+      // will never surface a terminal `ExchangeCompleted`.
+      let n = cmd.payloads().len();
+      let m = exchange_ids.len();
+      if m == 0 {
+        // No exchange was created. Two distinct cases:
+        // - empty payloads slice (`n == 0`): nothing to send, success is
+        //   vacuous. Reply `Ok(())`; parking would hang with no terminal
+        //   event.
+        // - non-empty payloads (`n > 0`) but every dial was retired before a
+        //   `Connect`: the send genuinely FAILED. Reply `Err(SendFailed)`.
+        let res = if n == 0 {
+          Ok(())
+        } else {
+          Err(MemberlistError::SendFailed)
+        };
+        // Ignoring Err: caller dropped the reply receiver.
+        let _ = cmd.reply().send_async(res).await;
+      } else {
+        // Park with `failed` SEEDED to the `n - m` payloads that never
+        // produced an exchange. The waiter resolves `Ok(())` only when
+        // every dispatched exchange succeeds AND no payload was dropped
+        // pre-`Connect`; any seeded or observed failure makes the final
+        // reply `Err(SendFailed)`. Without the seed, a batch where some
+        // payloads connect and a LATER one fails pre-`Connect` would
+        // falsely report `Ok` once the connected exchanges succeed.
+        //
+        // Capture-by-`StreamId` makes `m <= n` structural, so `n - m` cannot
+        // underflow. `checked_sub` is the fail-closed backstop: were a future
+        // regression to make `m > n`, reply `Err(SendFailed)` rather than
+        // panic on the underflow.
+        match n.checked_sub(m) {
+          Some(failed) => {
+            pending.user_sends.push(PendingUserSend {
+              pending: exchange_ids,
+              failed,
+              reply: cmd.reply().clone(),
+            });
+          }
+          None => {
+            // Ignoring Err: caller dropped the reply receiver.
+            let _ = cmd
+              .reply()
+              .send_async(Err(MemberlistError::SendFailed))
+              .await;
+          }
+        }
+      }
     }
   }
 }
@@ -1705,23 +1926,32 @@ where
 ///
 /// `capture` is `Some` only when this action is being processed inline
 /// from `dispatch_command` (so the Connect's ExchangeId can be bound
-/// to the specific synchronous-join waiter that just dispatched it).
-/// In the normal `drain_actions` path it is `None` — actions emitted by
-/// non-`dispatch_command` sources (probe-driven push/pull fallback,
-/// teardown sweeps) have no synchronous-join ownership.
+/// to the specific synchronous command that just dispatched it). The
+/// first element is the set of `StreamId`s that command's `start_*`
+/// calls returned; a Connect's `ExchangeId` is captured into the second
+/// set ONLY when its originating `stream_id()` is in that set. Matching
+/// the StreamId — not the peer — is what call-scopes the capture:
+/// `StreamEndpoint::service_dials` drains a SHARED dial deque, so one
+/// command's drain can also surface an unrelated same-peer dial enqueued
+/// by another subsystem (a scheduled push/pull, a probe reliable-ping, a
+/// gossip dial). Each `StreamId` yields at most one Connect, so the
+/// captured set never exceeds the count of dials this command started.
+/// In the normal `drain_actions` path `capture` is `None` — actions
+/// emitted by non-`dispatch_command` sources (probe-driven push/pull
+/// fallback, teardown sweeps) have no synchronous-command ownership.
 fn process_one_action(
   action: StreamAction,
   bridges: &mut HashMap<ExchangeId, BridgeHandle>,
   bridge_ready_tx: &Sender<BridgeReady>,
   stream_opts: StreamTransportOptions,
-  capture: Option<(SocketAddr, &mut HashSet<ExchangeId>)>,
+  capture: Option<(&HashSet<StreamId>, &mut HashSet<ExchangeId>)>,
 ) {
   match action {
     StreamAction::Connect(info) => {
       let eid = info.id();
       let peer = info.peer();
-      if let Some((target_addr, pending_exchanges)) = capture
-        && peer == target_addr
+      if let Some((started, pending_exchanges)) = capture
+        && started.contains(&info.stream_id())
       {
         pending_exchanges.insert(eid);
       }
@@ -2105,8 +2335,7 @@ async fn drain_events<I, A, R>(
   observation_dropped: &std::sync::atomic::AtomicU64,
   obs_payload_bytes: &std::sync::atomic::AtomicU64,
   obs_payload_budget: Option<u64>,
-  pending_joins: &mut Vec<PendingJoin>,
-  pending_leave: &mut Option<PendingLeave>,
+  pending: &mut PendingCommands,
 ) -> bool
 where
   I: memberlist_proto::Id
@@ -2166,11 +2395,12 @@ where
     {
       let eid = payload.eid();
       let succeeded = matches!(payload.outcome(), ExchangeOutcome::Succeeded);
-      if let Some(idx) = pending_joins
+      if let Some(idx) = pending
+        .joins
         .iter()
         .position(|pj| pj.pending.contains(&eid))
       {
-        let pj = &mut pending_joins[idx];
+        let pj = &mut pending.joins[idx];
         pj.pending.remove(&eid);
         if succeeded {
           pj.contacted += 1;
@@ -2182,7 +2412,7 @@ where
           // outbound exchange this call dispatched has terminated). A
           // zero-contact resolution is the same `JoinAllFailed` the
           // reaper would have produced.
-          let pj = pending_joins.swap_remove(idx);
+          let pj = pending.joins.swap_remove(idx);
           let result = if pj.contacted == 0 {
             Err(MemberlistError::JoinAllFailed(JoinAllFailed::new(
               pj.requested,
@@ -2204,11 +2434,66 @@ where
     // return promptly once the flush is done rather than waiting on
     // delegate latency.
     if matches!(ev, Event::LeftCluster)
-      && let Some(pl) = pending_leave.take()
+      && let Some(pl) = pending.leave.take()
     {
       // Resolve EVERY joined replier (the initiator plus any racing
       // clones) with `Ok(())`.
       pl.resolve_all(|| Ok(())).await;
+    }
+    // Ping completion: resolve the matching `PendingPing` waiter with the
+    // observed RTT. The event still flows to the observation task below
+    // (correlation is additive — `PingCompleted` also fires the delegate's
+    // `notify_ping_complete`). An eid not found in `pending_pings` is an
+    // unsolicited or already-reaped event; safe to ignore.
+    if let Event::PingCompleted(ref p) = ev {
+      let pid = p.ping_id();
+      if let Some(idx) = pending.pings.iter().position(|pp| pp.ping_id == pid) {
+        let pp = pending.pings.swap_remove(idx);
+        // Ignoring Err: caller dropped the reply receiver (ping future was cancelled).
+        let _ = pp.reply.send_async(Ok(p.rtt())).await;
+      }
+    }
+    // Ping failure: resolve the matching `PendingPing` waiter with `PingTimeout`.
+    // Same additive semantics as `PingCompleted` — event continues to obs task.
+    if let Event::PingFailed(ref p) = ev {
+      let pid = p.ping_id();
+      if let Some(idx) = pending.pings.iter().position(|pp| pp.ping_id == pid) {
+        let pp = pending.pings.swap_remove(idx);
+        // Ignoring Err: caller dropped the reply receiver (ping future was cancelled).
+        let _ = pp.reply.send_async(Err(MemberlistError::PingTimeout)).await;
+      }
+    }
+    // Reliable user-send completion: each `ExchangeCompleted` with kind
+    // `UserMessage` may reduce a `PendingUserSend`'s pending set. When the
+    // set empties the call resolves. `Ok(())` if all exchanges succeeded;
+    // `Err(SendFailed)` if any failed. The event continues to the observation
+    // task below (additive — `ExchangeCompleted` can feed future monitoring).
+    if let Event::ExchangeCompleted(ref payload) = ev
+      && payload.kind() == ExchangeKind::UserMessage
+    {
+      let eid = payload.eid();
+      let failed = matches!(payload.outcome(), ExchangeOutcome::Failed);
+      if let Some(idx) = pending
+        .user_sends
+        .iter()
+        .position(|ps| ps.pending.contains(&eid))
+      {
+        let ps = &mut pending.user_sends[idx];
+        ps.pending.remove(&eid);
+        if failed {
+          ps.failed += 1;
+        }
+        if ps.pending.is_empty() {
+          let ps = pending.user_sends.swap_remove(idx);
+          let result = if ps.failed > 0 {
+            Err(MemberlistError::SendFailed)
+          } else {
+            Ok(())
+          };
+          // Ignoring Err: caller dropped the reply receiver.
+          let _ = ps.reply.send_async(result).await;
+        }
+      }
     }
     // Payload-bearing events (`UserPacket` / `RemoteStateReceived`) can each
     // own up to `max_stream_frame_size` bytes; size this one for the byte
@@ -2541,10 +2826,12 @@ where
 /// `arc-swap`. Readers see the new snapshot on their next
 /// `MemberlistSnapshot::load` with no lock contention.
 ///
-/// The snapshot's `<I, A>` parameters propagate straight through from
-/// the [`StreamEndpoint`] — every `Node` is built by `cheap_clone`ing
-/// the membership FSM's own id / address (an `Arc` bump for `SmolStr`,
-/// scalar copy for `SocketAddr`).
+/// Each `Arc<NodeState>` in `members_vec` is a freshly-allocated clone of
+/// the membership FSM's wire-state entry with `member_liveness` stamped onto
+/// the `state` field — cheap because `NodeState::clone` is O(1) (`meta` is
+/// `Bytes`, which shares the underlying buffer). The local node entry is
+/// taken directly from the membership map so it carries the real meta,
+/// incarnation, and protocol versions.
 fn refresh_snapshot<I, A, R>(
   endpoint: &StreamEndpoint<I, A, R>,
   snapshot: &Arc<ArcSwap<MemberlistSnapshot<I, A>>>,
@@ -2569,23 +2856,32 @@ fn refresh_snapshot<I, A, R>(
   R: StreamTransport,
 {
   let ep = endpoint.endpoint_ref();
-  let mut members_vec: Vec<Node<I, A>> = Vec::new();
+  // Build a snapshot-local NodeState for each member with the FSM-tracked
+  // liveness state (`member_liveness`) rather than the wire-protocol state
+  // (`ns.state()`, which is fixed at the last Alive broadcast and does not
+  // reflect subsequent Suspect/Dead transitions).
   let mut alive_count: usize = 0;
-  for ns in ep.members() {
-    members_vec.push(Node::new(
-      ns.id_ref().cheap_clone(),
-      ns.address_ref().cheap_clone(),
-    ));
-    if let Some(memberlist_proto::typed::State::Alive) = ep.member_liveness(ns.id_ref()) {
-      alive_count += 1;
-    }
-  }
-  let local = Node::new(
-    ep.local_id_ref().cheap_clone(),
-    ep.advertise_ref().cheap_clone(),
-  );
+  let members_vec: Vec<Arc<NodeState<I, A>>> = ep
+    .members()
+    .map(|ns| {
+      let fsm = ep.member_liveness(ns.id_ref()).unwrap_or(State::Unknown(0));
+      if matches!(fsm, State::Alive) {
+        alive_count += 1;
+      }
+      Arc::new((*ns).clone().with_state(fsm))
+    })
+    .collect();
+  let local = ep
+    .member(ep.local_id_ref())
+    .expect("local node is always in the membership map");
   let member_count = ep.num_members();
-  let snap = MemberlistSnapshot::new(members_vec, local, alive_count, member_count);
+  let snap = MemberlistSnapshot::new(
+    members_vec,
+    local,
+    alive_count,
+    member_count,
+    ep.health_score(),
+  );
   snapshot.store(Arc::new(snap));
 }
 
@@ -2663,13 +2959,20 @@ fn handle_bridge_ready<I, A, R>(
       // taken it; `HashMap::remove` is a no-op for an absent key) so
       // the `out_tx` drops and any further bytes the machine surfaces
       // for the exchange route to a missing-bridge branch (silently
-      // dropped). Then feed EOF (timestamped with the dial-task's
-      // observation of the failure, NOT the driver's later
-      // `Instant::now()`) so a pre-deadline dial failure terminalizes
-      // the FSM cleanly rather than crossing the stream FSM's
-      // deadline gate.
+      // dropped). Then drive the exchange to a DIAL FAILURE (timestamped
+      // with the dial-task's observation of the failure, NOT the
+      // driver's later `Instant::now()`).
+      //
+      // NOT a benign EOF feed: a connect that never established has no
+      // wire, and a one-way `UserMessage` maps a clean EOF to a
+      // SUCCESSFUL completion (`Stream::handle_data`'s
+      // `OutboundSendingRequest(UserMessage)` EOF arm) — which would
+      // falsely report `send_reliable` success on an unreachable peer.
+      // `handle_dial_failed` terminalizes the exchange as `Failed`
+      // regardless of kind, so the parked reliable-send waiter resolves
+      // with `Err(SendFailed)`.
       bridges.remove(&eid);
-      endpoint.handle_transport_data(eid, &[], true, received_at);
+      endpoint.handle_dial_failed(eid, received_at);
     }
   }
 }
@@ -2699,4 +3002,123 @@ fn spawn_bridge(
     close_timeout,
   ))
   .detach();
+}
+
+#[cfg(test)]
+mod tests {
+  use std::{
+    collections::{HashMap, HashSet},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+  };
+
+  use memberlist_proto::{
+    Instant, RawRecords, TcpOptions,
+    config::EndpointConfig,
+    endpoint::Endpoint,
+    event::{PushPullKind, StreamId},
+    streams::{ExchangeId, StreamAction, StreamEndpoint},
+  };
+  use smol_str::SmolStr;
+
+  use super::{BridgeHandle, BridgeReady, StreamTransportOptions, process_one_action};
+
+  fn addr(port: u16) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
+  }
+
+  fn test_endpoint() -> StreamEndpoint<SmolStr, SocketAddr, RawRecords> {
+    let ep = Endpoint::new(EndpointConfig::new(
+      SmolStr::new("capture-test"),
+      "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+    ));
+    StreamEndpoint::new(
+      ep,
+      TcpOptions::new(Some(b"capture-test".to_vec())),
+      Box::new(|_| None),
+      Box::new(|a: &SocketAddr| *a),
+    )
+  }
+
+  /// `process_one_action` captures a `Connect`'s `ExchangeId` ONLY when its
+  /// originating `stream_id()` is in the `started` set — never by peer address.
+  /// This is the regression guard for the cross-subsystem misattribution: a
+  /// same-peer dial flushed by the shared `service_dials` for another subsystem
+  /// (here a `start_push_pull`) is left pending while a `send_reliable`-style
+  /// `start_user_message` runs; the user-message command must capture ONLY its
+  /// own exchange, so the parked waiter never sees a foreign `ExchangeId` (which
+  /// would make `m > n` or park on a PushPull completion the resolver ignores).
+  #[compio::test]
+  async fn capture_binds_to_started_stream_id_not_peer() {
+    let mut endpoint = test_endpoint();
+    let now = Instant::now();
+    let peer = addr(7000);
+
+    // An UNRELATED dial to `peer` enqueued by another subsystem. Its in-band
+    // `service_dials` already queued the `Connect`; we deliberately do NOT drain
+    // it, so it is still pending when the user-message command runs — exactly the
+    // shared-deque hazard `send_many_reliable` faces.
+    let foreign_sid = endpoint.start_push_pull(peer, PushPullKind::Join, now);
+
+    // The user-message command's own dial to the SAME peer.
+    let mut started: HashSet<StreamId> = HashSet::new();
+    let user_sid = endpoint.start_user_message(peer, bytes::Bytes::from_static(b"hi"), now);
+    started.insert(user_sid);
+    assert_ne!(
+      foreign_sid, user_sid,
+      "distinct dials get distinct StreamIds"
+    );
+
+    // Drain every queued action through the real capture path. Both Connects
+    // (foreign push/pull + this user-message) surface here; only the one whose
+    // StreamId is in `started` may be captured.
+    let mut bridges: HashMap<ExchangeId, BridgeHandle> = HashMap::new();
+    let (ready_tx, _ready_rx) = flume::unbounded::<BridgeReady>();
+    let mut captured: HashSet<ExchangeId> = HashSet::new();
+    let mut connect_count = 0usize;
+    while let Some(action) = endpoint.poll_action() {
+      if matches!(action, StreamAction::Connect(_)) {
+        connect_count += 1;
+      }
+      process_one_action(
+        action,
+        &mut bridges,
+        &ready_tx,
+        StreamTransportOptions::default(),
+        Some((&started, &mut captured)),
+      );
+    }
+
+    assert_eq!(
+      connect_count, 2,
+      "both same-peer dials surfaced a Connect in this drain",
+    );
+    assert_eq!(
+      captured.len(),
+      1,
+      "exactly this command's one exchange was captured (m <= n holds)",
+    );
+    // The captured exchange is the user-message's, not the foreign push/pull's.
+    // Both bridges were installed (every Connect routes to its bridge), so the
+    // distinguishing fact is solely WHICH ExchangeId entered `captured`.
+    assert_eq!(bridges.len(), 2, "every Connect installs its bridge handle");
+    // A Connect whose StreamId is NOT in `started` contributes nothing.
+    let empty_started: HashSet<StreamId> = HashSet::new();
+    let mut endpoint2 = test_endpoint();
+    let _ = endpoint2.start_push_pull(peer, PushPullKind::Join, now);
+    let mut bridges2: HashMap<ExchangeId, BridgeHandle> = HashMap::new();
+    let mut captured2: HashSet<ExchangeId> = HashSet::new();
+    while let Some(action) = endpoint2.poll_action() {
+      process_one_action(
+        action,
+        &mut bridges2,
+        &ready_tx,
+        StreamTransportOptions::default(),
+        Some((&empty_started, &mut captured2)),
+      );
+    }
+    assert!(
+      captured2.is_empty(),
+      "a Connect whose StreamId is not in `started` is never captured",
+    );
+  }
 }

@@ -3,8 +3,8 @@
 
 use crate::error::Result;
 use bytes::Bytes;
-use memberlist_proto::{CompressionOptions, EncryptionOptions, Instant};
-use std::net::SocketAddr;
+use memberlist_proto::{CompressionOptions, EncryptionOptions, Instant, Node};
+use std::{net::SocketAddr, time::Duration};
 
 /// Payload for [`JoinKind::WaitForCompletion`].
 pub(crate) struct WaitForCompletionArgs {
@@ -156,8 +156,121 @@ impl SetAckPayloadCmd {
   }
 }
 
+/// Payload for [`Command::Ping`].
+pub(crate) struct PingCmd<I> {
+  /// The node to ping (id + wire address).
+  node: Node<I, SocketAddr>,
+  /// One-shot reply channel for the round-trip time.
+  reply: flume::Sender<Result<Duration>>,
+}
+
+impl<I> PingCmd<I> {
+  /// Construct from a target node and a reply channel.
+  pub(crate) const fn new(
+    node: Node<I, SocketAddr>,
+    reply: flume::Sender<Result<Duration>>,
+  ) -> Self {
+    Self { node, reply }
+  }
+
+  /// The node to ping.
+  pub(crate) const fn node(&self) -> &Node<I, SocketAddr> {
+    &self.node
+  }
+
+  /// The reply channel for the round-trip time.
+  pub(crate) const fn reply(&self) -> &flume::Sender<Result<Duration>> {
+    &self.reply
+  }
+}
+
+/// Payload for [`Command::SendUser`].
+pub(crate) struct SendUserCmd {
+  /// Destination wire address.
+  to: SocketAddr,
+  /// One or more unreliable user-message payloads to direct to `to`.
+  payloads: Vec<Bytes>,
+  /// One-shot reply channel for the send result.
+  reply: flume::Sender<Result<()>>,
+}
+
+impl SendUserCmd {
+  /// Construct from a destination, payloads, and a reply channel.
+  pub(crate) fn new(
+    to: SocketAddr,
+    payloads: Vec<Bytes>,
+    reply: flume::Sender<Result<()>>,
+  ) -> Self {
+    Self {
+      to,
+      payloads,
+      reply,
+    }
+  }
+
+  /// The destination address.
+  pub(crate) const fn to(&self) -> &SocketAddr {
+    &self.to
+  }
+
+  /// The payloads to send.
+  pub(crate) fn payloads(&self) -> &[Bytes] {
+    &self.payloads
+  }
+
+  /// The reply channel.
+  pub(crate) const fn reply(&self) -> &flume::Sender<Result<()>> {
+    &self.reply
+  }
+}
+
+/// Payload for [`Command::SendReliable`].
+pub(crate) struct SendReliableCmd {
+  /// Destination wire address.
+  to: SocketAddr,
+  /// One or more reliable user-message payloads to deliver to `to`.
+  payloads: Vec<Bytes>,
+  /// One-shot reply channel for the send result.
+  reply: flume::Sender<Result<()>>,
+}
+
+impl SendReliableCmd {
+  /// Construct from a destination, payloads, and a reply channel.
+  pub(crate) fn new(
+    to: SocketAddr,
+    payloads: Vec<Bytes>,
+    reply: flume::Sender<Result<()>>,
+  ) -> Self {
+    Self {
+      to,
+      payloads,
+      reply,
+    }
+  }
+
+  /// The destination address.
+  pub(crate) const fn to(&self) -> &SocketAddr {
+    &self.to
+  }
+
+  /// The payloads to deliver reliably.
+  pub(crate) fn payloads(&self) -> &[Bytes] {
+    &self.payloads
+  }
+
+  /// The reply channel.
+  pub(crate) const fn reply(&self) -> &flume::Sender<Result<()>> {
+    &self.reply
+  }
+}
+
 /// Commands sent from the public Memberlist handle to the driver task.
-pub(crate) enum Command {
+///
+/// `I` is the node-id type. All existing variants carry only `SocketAddr` or
+/// `Bytes` data and are therefore unaffected by the type parameter; `Ping` is
+/// the first variant that carries a full `Node<I, SocketAddr>` and drives the
+/// parameterisation.
+pub(crate) enum Command<I> {
   /// Join a set of peers (addresses already resolved).
   Join(JoinCmd),
   /// Leave the cluster gracefully.
@@ -176,4 +289,10 @@ pub(crate) enum Command {
   SetAckPayload(SetAckPayloadCmd),
   /// Cleanly shut down the driver task.
   Shutdown(ShutdownCmd),
+  /// Ping a specific node and return the round-trip time.
+  Ping(PingCmd<I>),
+  /// Send one or more unreliable directed user messages.
+  SendUser(SendUserCmd),
+  /// Send one or more reliable directed user messages.
+  SendReliable(SendReliableCmd),
 }

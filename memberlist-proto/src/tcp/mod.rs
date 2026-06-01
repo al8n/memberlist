@@ -113,7 +113,7 @@ mod tests {
   use crate::{
     config::EndpointConfig,
     endpoint::Endpoint,
-    event::{Event, PushPullKind},
+    event::{Event, PushPullKind, StreamId},
     streams::{
       ConnectInfo, ExchangeId, ExchangeRef, StreamAction, StreamEndpoint,
       test_support::{addr, endpoint, test_peer_to_socket, test_sni_provider},
@@ -138,7 +138,7 @@ mod tests {
   #[test]
   fn tcp_action_accessors_match_only_their_variant() {
     let id = ExchangeId::new(0);
-    let connect = StreamAction::Connect(ConnectInfo::new(id, addr(7000)));
+    let connect = StreamAction::Connect(ConnectInfo::new(id, addr(7000), StreamId::from_raw(0)));
     assert!(connect.as_connect().is_some());
     assert!(connect.as_shutdown().is_none());
     assert!(connect.as_close().is_none());
@@ -200,6 +200,108 @@ mod tests {
       "label prefix begins with LABELED_TAG=12",
     );
     assert!(coord.live_bridge_count() >= 1);
+  }
+
+  /// The `Connect` action a `start_*` dial produces carries the originating
+  /// `StreamId` — the very `StreamId` that `start_*` returned. This is the
+  /// call-scoped correlation token drivers key their reliable-send / join
+  /// capture on: `service_dials` drains a SHARED dial deque, so the peer address
+  /// alone cannot tell one command's Connect apart from an unrelated same-peer
+  /// dial flushed for another subsystem.
+  #[test]
+  fn connect_action_carries_originating_stream_id() {
+    let now = Instant::now();
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+
+    // start_user_message: the returned StreamId equals the Connect's stream_id().
+    {
+      let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+        endpoint(7100),
+        cfg.clone(),
+        test_sni_provider(),
+        test_peer_to_socket(),
+      );
+      let payload = Bytes::from_static(b"hello-tcp");
+      let sid = coord.start_user_message(addr(7000), payload, now);
+      let connect = coord
+        .poll_action()
+        .expect("Connect surfaced for the outbound user-message dial");
+      match connect {
+        StreamAction::Connect(info) => {
+          assert_eq!(
+            info.stream_id(),
+            sid,
+            "Connect.stream_id() must equal the StreamId start_user_message returned",
+          );
+          assert_eq!(info.peer(), addr(7000));
+        }
+        other => panic!("expected Connect, got {:?}", action_kind(&other)),
+      }
+    }
+
+    // start_push_pull: same threading.
+    {
+      let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+        endpoint(7101),
+        cfg,
+        test_sni_provider(),
+        test_peer_to_socket(),
+      );
+      let sid = coord.start_push_pull(addr(7000), PushPullKind::Refresh, now);
+      let connect = coord
+        .poll_action()
+        .expect("Connect surfaced for the outbound push/pull dial");
+      match connect {
+        StreamAction::Connect(info) => {
+          assert_eq!(
+            info.stream_id(),
+            sid,
+            "Connect.stream_id() must equal the StreamId start_push_pull returned",
+          );
+        }
+        other => panic!("expected Connect, got {:?}", action_kind(&other)),
+      }
+    }
+  }
+
+  /// Two back-to-back `start_user_message` dials to the SAME peer each tag their
+  /// Connect with a DISTINCT originating `StreamId` (the very ids `start_*`
+  /// returned), so a driver that drains BOTH Connects in one pass can still
+  /// attribute each to the exact `start_*` it issued — the peer address, shared
+  /// by both, cannot. This is the precise property the drivers' StreamId-keyed
+  /// capture relies on.
+  #[test]
+  fn same_peer_dials_carry_distinct_stream_ids() {
+    let now = Instant::now();
+    let cfg = TcpOptions::new(Some(b"cluster-x".to_vec()));
+    let mut coord: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      endpoint(7100),
+      cfg,
+      test_sni_provider(),
+      test_peer_to_socket(),
+    );
+
+    let sid_a = coord.start_user_message(addr(7000), Bytes::from_static(b"a"), now);
+    let sid_b = coord.start_user_message(addr(7000), Bytes::from_static(b"b"), now);
+    assert_ne!(sid_a, sid_b, "each dial gets a fresh StreamId");
+
+    let mut seen: std::collections::HashMap<StreamId, SocketAddr> =
+      std::collections::HashMap::new();
+    while let Some(action) = coord.poll_action() {
+      if let StreamAction::Connect(info) = action {
+        assert!(
+          seen.insert(info.stream_id(), info.peer()).is_none(),
+          "each StreamId tags at most one Connect",
+        );
+      }
+    }
+    assert_eq!(seen.get(&sid_a), Some(&addr(7000)));
+    assert_eq!(seen.get(&sid_b), Some(&addr(7000)));
+    assert_eq!(
+      seen.len(),
+      2,
+      "both same-peer dials surfaced distinct Connects"
+    );
   }
 
   /// FIN-emit gating: `fin_owed()` flips a single [`StreamAction::Shutdown`] for

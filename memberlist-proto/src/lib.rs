@@ -180,9 +180,10 @@ pub use endpoint::{Endpoint, Lifecycle, META_MAX_SIZE};
 pub use error::{EndpointInitError, Error, StreamError};
 pub use event::{
   CompoundTransmit, DecodeError, DialRequested, EndpointEvent, Event, NodeConflict, PacketTransmit,
-  PingCompleted, PushPullKind, PushPullReplyReceived, PushPullRequestReceived, Reliability,
-  ReliablePingAcked, ReliablePingFailed, RemoteStateReceived, SendPushPullResponse, StreamClosed,
-  StreamCommand, StreamErrored, StreamEvent, StreamId, Transmit, UserDataReceived, UserPacket,
+  PingCompleted, PingFailed, PingId, PushPullKind, PushPullReplyReceived, PushPullRequestReceived,
+  Reliability, ReliablePingAcked, ReliablePingFailed, RemoteStateReceived, SendPushPullResponse,
+  StreamClosed, StreamCommand, StreamErrored, StreamEvent, StreamId, Transmit, UserDataReceived,
+  UserPacket,
 };
 pub use members::{LocalNodeState, Member, Members};
 pub use stream::{PushPullSnapshot, Stream};

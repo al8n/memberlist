@@ -67,6 +67,16 @@ fn new_endpoint_health_score_is_zero() {
 }
 
 #[test]
+fn health_score_reflects_awareness() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  assert_eq!(e.health_score(), 0usize);
+  e.degrade_health(3);
+  assert_eq!(e.health_score(), 3usize);
+  e.improve_health();
+  assert_eq!(e.health_score(), 2usize);
+}
+
+#[test]
 fn new_at_stamps_local_member_at_driver_clock() {
   // A std driver with a virtual clock whose instants sit far below
   // `Instant::now()`. The local member must be stamped at the driver's clock,
@@ -1423,12 +1433,23 @@ fn app_ping_ack_after_probe_timeout_does_not_complete() {
 
   // Ack lands at t0 + pt + 10ms — past the app-ping (direct) deadline,
   // and BEFORE any handle_timeout. For a Ping the cutoff is sent_at+pt,
-  // so this is too late: terminate silently, NO PingCompleted.
+  // so this is too late: probe_terminate_failure is called, emitting
+  // PingFailed. No PingCompleted must be emitted.
+  let ping_id = PingId::new(seq);
   e.handle_ack(bob_addr, Ack::new(seq), t0 + pt + Duration::from_millis(10));
   assert!(!e.probes.contains_key(&seq), "ping probe must be gone");
+  let events: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
   assert!(
-    !core::iter::from_fn(|| e.poll_event()).any(|ev| matches!(ev, Event::PingCompleted(..))),
+    !events
+      .iter()
+      .any(|ev| matches!(ev, Event::PingCompleted(..))),
     "an app ping Ack after probe_timeout must NOT emit a late PingCompleted"
+  );
+  assert!(
+    events
+      .iter()
+      .any(|ev| matches!(ev, Event::PingFailed(f) if f.ping_id() == ping_id)),
+    "a late-Ack past the cutoff must emit PingFailed (probe_terminate_failure)"
   );
 
   // Contrast: a Detection probe direct Ack at the same relative offset is
@@ -2303,11 +2324,9 @@ fn ping_completes_on_ack_with_pingcompleted_event() {
   }
 }
 
-/// An application `ping` is direct-only: on timeout the caller sees
-/// `Error::Lost`, with no indirect/TCP fallback. A `ProbeKind::Ping` that
-/// times out must terminate silently — NO indirect fan-out, NO
-/// reliable-fallback DialRequested, and NO late `PingCompleted` after the
-/// caller already treated it as lost.
+/// An application `ping` is direct-only: on timeout it emits `Event::PingFailed`
+/// with no indirect fan-out, no reliable-fallback DialRequested, and no
+/// `PingCompleted`. The target is not suspected.
 #[test]
 fn app_ping_timeout_does_not_escalate_to_indirect_or_fallback() {
   let mut e: Endpoint<SmolStr, SocketAddr> =
@@ -2325,7 +2344,7 @@ fn app_ping_timeout_does_not_escalate_to_indirect_or_fallback() {
     SmolStr::new("bob"),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001),
   );
-  e.ping(bob_node, t0);
+  let ping_id = e.ping(bob_node, t0);
   // Drain the single direct Ping.
   let seq = match e.poll_transmit().expect("direct Ping") {
     Transmit::Packet(p) => {
@@ -2344,13 +2363,21 @@ fn app_ping_timeout_does_not_escalate_to_indirect_or_fallback() {
   // Direct deadline elapses with no Ack.
   e.handle_timeout(t0 + Duration::from_millis(60));
 
-  // The app ping is gone — terminated silently, NOT escalated.
+  // The probe is gone — probe_terminate_failure emits PingFailed, NOT escalated.
   assert!(
     !e.probes.contains_key(&seq),
     "an app ping must terminate on direct timeout, not enter AwaitingIndirect"
   );
+  let events: Vec<_> = core::iter::from_fn(|| e.poll_event()).collect();
   assert!(
-    !core::iter::from_fn(|| e.poll_event())
+    events
+      .iter()
+      .any(|ev| matches!(ev, Event::PingFailed(f) if f.ping_id() == ping_id)),
+    "handle_timeout on app ping must emit PingFailed with the original PingId"
+  );
+  assert!(
+    !events
+      .iter()
       .any(|ev| matches!(ev, Event::DialRequested(..) | Event::PingCompleted(..))),
     "no reliable-fallback DialRequested and no late PingCompleted"
   );
@@ -6250,6 +6277,156 @@ fn endpoint_config_gossip_mtu_defaults_to_1400() {
   assert_eq!(
     DEFAULT_GOSSIP_MTU, 1400,
     "DEFAULT_GOSSIP_MTU must remain 1400 — operators tune from this anchor",
+  );
+}
+
+// ─────────────── Application ping: PingId token + PingFailed event ──────────────────
+
+#[test]
+fn app_ping_returns_token_carried_on_completion() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let bob_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  let t0 = Instant::now();
+  let ping_id = e.ping(Node::new(SmolStr::new("bob"), bob_addr), t0);
+  // Drain the Ping transmit and extract the sequence number.
+  let seq = match e.poll_transmit().expect("Ping transmit") {
+    Transmit::Packet(p) => {
+      let (_, message) = p.into_parts();
+      if let Message::Ping(ping) = message {
+        ping.sequence_number()
+      } else {
+        panic!("expected Ping message")
+      }
+    }
+    other => panic!("expected Packet transmit, got {other:?}"),
+  };
+  while e.poll_transmit().is_some() {}
+
+  // Feed back an Ack for the same sequence number.
+  e.handle_ack(bob_addr, Ack::new(seq), t0 + Duration::from_millis(10));
+
+  // The resulting PingCompleted must carry the same PingId.
+  let completed = core::iter::from_fn(|| e.poll_event())
+    .find_map(|ev| {
+      if let Event::PingCompleted(c) = ev {
+        Some(c)
+      } else {
+        None
+      }
+    })
+    .expect("PingCompleted event");
+  assert_eq!(completed.ping_id(), ping_id);
+}
+
+#[test]
+fn app_ping_timeout_emits_ping_failed_with_token() {
+  let pt = Duration::from_millis(50);
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg().with_probe_timeout(pt));
+  let bob_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
+  process_alive_auto(&mut e, alive("bob", 7001, 1), false, Instant::now());
+  while e.poll_event().is_some() {}
+  while e.poll_transmit().is_some() {}
+
+  let t0 = Instant::now();
+  let ping_id = e.ping(Node::new(SmolStr::new("bob"), bob_addr), t0);
+  while e.poll_transmit().is_some() {}
+  while e.poll_event().is_some() {}
+
+  // Advance past probe_timeout without delivering an Ack.
+  e.handle_timeout(t0 + pt + Duration::from_millis(1));
+
+  let failed = core::iter::from_fn(|| e.poll_event())
+    .find_map(|ev| {
+      if let Event::PingFailed(f) = ev {
+        Some(f)
+      } else {
+        None
+      }
+    })
+    .expect("PingFailed event");
+  assert_eq!(failed.ping_id(), ping_id);
+}
+
+// ─────────────── Directed unreliable user messages ───────────
+
+#[test]
+fn send_user_packet_enqueues_one_transmit() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
+  e.send_user_packet(dest, bytes::Bytes::from_static(b"hi"))
+    .unwrap();
+  match e.poll_transmit() {
+    Some(Transmit::Packet(p)) => {
+      assert_eq!(p.to_ref(), &dest);
+      assert!(matches!(p.message_ref(), Message::UserData(_)));
+    }
+    other => panic!("expected one Packet transmit, got {other:?}"),
+  }
+  assert!(e.poll_transmit().is_none());
+}
+
+#[test]
+fn send_user_packet_rejects_oversize() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
+  // A payload larger than gossip_mtu is always oversize after framing.
+  let huge = bytes::Bytes::from(vec![0u8; e.gossip_mtu() + 1]);
+  assert!(e.send_user_packet(dest, huge).is_err());
+  assert!(e.poll_transmit().is_none());
+}
+
+#[test]
+fn send_user_packets_compounds_when_multiple() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7002);
+  e.send_user_packets(
+    dest,
+    &[
+      bytes::Bytes::from_static(b"a"),
+      bytes::Bytes::from_static(b"b"),
+    ],
+  )
+  .unwrap();
+  match e.poll_transmit() {
+    Some(Transmit::Compound(c)) => {
+      assert_eq!(c.to_ref(), &dest);
+      assert_eq!(c.messages_slice().len(), 2);
+      assert!(
+        c.messages_slice()
+          .iter()
+          .all(|m| matches!(m, Message::UserData(_)))
+      );
+    }
+    other => panic!("expected a Compound transmit, got {other:?}"),
+  }
+  assert!(e.poll_transmit().is_none());
+}
+
+/// Two messages each larger than `gossip_mtu / 2` cannot be compounded into
+/// one datagram once compound framing overhead is included.  `send_user_packets`
+/// must reject the call and leave the transmit queue empty.
+#[test]
+fn send_user_packets_rejects_compound_oversize() {
+  let mut e: Endpoint<SmolStr, SocketAddr> = Endpoint::new(cfg());
+  let mtu = e.gossip_mtu();
+  // Each individual payload just over half the MTU — two of them will
+  // overflow after compound tag + count-prefix + two part-prefixes are added.
+  let half_plus = bytes::Bytes::from(vec![0u8; mtu / 2 + 1]);
+  let result = e.send_user_packets(
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7003),
+    &[half_plus.clone(), half_plus],
+  );
+  assert!(
+    result.is_err(),
+    "expected UserPacketExceedsMtu error for compound oversized pair"
+  );
+  assert!(
+    e.poll_transmit().is_none(),
+    "transmit queue must remain empty after rejected send_user_packets"
   );
 }
 

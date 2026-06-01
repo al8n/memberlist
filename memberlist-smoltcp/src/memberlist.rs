@@ -11,8 +11,8 @@ use std::collections::VecDeque;
 use std::{boxed::Box, collections::VecDeque};
 
 use memberlist_proto::{
-  AliveDelegate, Endpoint, EndpointConfig, Instant, Node, PushPullKind, RawRecords,
-  event::Transmit,
+  AliveDelegate, Endpoint, EndpointConfig, Instant, Node, PushPullKind, RawRecords, StreamId,
+  event::{PingId, Transmit},
   streams::{ExchangeId, StreamAction, StreamEndpoint},
   typed::{Alive, NodeState, State},
 };
@@ -820,6 +820,255 @@ where
       .map(|s| s == State::Dead)
       .unwrap_or(false)
   }
+
+  // ── Query accessors ────────────────────────────────────────────────────────
+  //
+  // These are thin `&self` reads over the live `Endpoint` inside the
+  // `StreamEndpoint`. Unlike the async drivers (compio, reactor) there is no
+  // `ArcSwap` snapshot: reads go directly to the machine state, so they always
+  // reflect the result of the last `poll` tick with no snapshot lag.
+  //
+  // FSM liveness: the `NodeState.state()` wire field is frozen at the last
+  // `Alive` broadcast. The real, gossip-tracked liveness is
+  // `endpoint.member_liveness(id)`. Every method that returns a `NodeState`
+  // stamps it with the FSM liveness via `ns.as_ref().clone().with_state(fsm)` so
+  // that `online_members()` and `is_alive()` agree on the same ground truth.
+
+  /// Return the `NodeState` for `id`, stamped with the current FSM liveness.
+  ///
+  /// Returns `None` when `id` is unknown to this node. The `NodeState.state()`
+  /// field reflects the live gossip-FSM state (`Alive` / `Suspect` / `Dead` /
+  /// `Unknown`), not the frozen wire-format value.
+  #[inline]
+  pub fn by_id(&self, id: &I) -> Option<std::sync::Arc<NodeState<I, SocketAddr>>> {
+    let ep = self.endpoint.endpoint_ref();
+    let ns = ep.member(id)?;
+    let fsm = ep.member_liveness(id).unwrap_or(State::Unknown(0));
+    Some(std::sync::Arc::new(ns.as_ref().clone().with_state(fsm)))
+  }
+
+  /// All members currently in the `Alive` FSM state.
+  ///
+  /// Each returned `NodeState` is stamped with the FSM liveness, so
+  /// `online_members()[i].state() == State::Alive` always holds. Consistent
+  /// with `is_alive`: if `is_alive(id)` is `true`, `id` appears here.
+  #[inline]
+  pub fn online_members(&self) -> std::vec::Vec<std::sync::Arc<NodeState<I, SocketAddr>>> {
+    let ep = self.endpoint.endpoint_ref();
+    ep.members()
+      .filter_map(|ns| {
+        let fsm = ep.member_liveness(ns.id_ref()).unwrap_or(State::Unknown(0));
+        if fsm == State::Alive {
+          Some(std::sync::Arc::new(ns.as_ref().clone().with_state(fsm)))
+        } else {
+          None
+        }
+      })
+      .collect()
+  }
+
+  /// Count of members currently in the `Alive` FSM state.
+  ///
+  /// Equivalent to `online_members().len()` but avoids allocating a `Vec`.
+  #[inline]
+  pub fn num_online_members(&self) -> usize {
+    let ep = self.endpoint.endpoint_ref();
+    ep.members()
+      .filter(|ns| {
+        ep.member_liveness(ns.id_ref())
+          .map(|s| s == State::Alive)
+          .unwrap_or(false)
+      })
+      .count()
+  }
+
+  /// All known members (Alive + Suspect + Dead/Left), each stamped with the
+  /// current FSM liveness.
+  ///
+  /// Mirrors the legacy `Memberlist::members` name.
+  #[inline]
+  pub fn members(&self) -> std::vec::Vec<std::sync::Arc<NodeState<I, SocketAddr>>> {
+    let ep = self.endpoint.endpoint_ref();
+    ep.members()
+      .map(|ns| {
+        let fsm = ep.member_liveness(ns.id_ref()).unwrap_or(State::Unknown(0));
+        std::sync::Arc::new(ns.as_ref().clone().with_state(fsm))
+      })
+      .collect()
+  }
+
+  /// Members matching `pred`, each stamped with the current FSM liveness.
+  #[inline]
+  pub fn members_by(
+    &self,
+    mut pred: impl FnMut(&NodeState<I, SocketAddr>) -> bool,
+  ) -> std::vec::Vec<std::sync::Arc<NodeState<I, SocketAddr>>> {
+    let ep = self.endpoint.endpoint_ref();
+    ep.members()
+      .filter_map(|ns| {
+        let fsm = ep.member_liveness(ns.id_ref()).unwrap_or(State::Unknown(0));
+        let stamped = ns.as_ref().clone().with_state(fsm);
+        if pred(&stamped) {
+          Some(std::sync::Arc::new(stamped))
+        } else {
+          None
+        }
+      })
+      .collect()
+  }
+
+  /// Count of members matching `pred`.
+  #[inline]
+  pub fn num_members_by(&self, mut pred: impl FnMut(&NodeState<I, SocketAddr>) -> bool) -> usize {
+    let ep = self.endpoint.endpoint_ref();
+    ep.members()
+      .filter(|ns| {
+        let fsm = ep.member_liveness(ns.id_ref()).unwrap_or(State::Unknown(0));
+        let stamped = ns.as_ref().clone().with_state(fsm);
+        pred(&stamped)
+      })
+      .count()
+  }
+
+  /// Map-filter members, collecting all `Some` results into a `Vec`.
+  ///
+  /// Each `NodeState` passed to `f` is stamped with the current FSM liveness.
+  #[inline]
+  pub fn members_map_by<O>(
+    &self,
+    mut f: impl FnMut(&NodeState<I, SocketAddr>) -> Option<O>,
+  ) -> std::vec::Vec<O> {
+    let ep = self.endpoint.endpoint_ref();
+    ep.members()
+      .filter_map(|ns| {
+        let fsm = ep.member_liveness(ns.id_ref()).unwrap_or(State::Unknown(0));
+        let stamped = ns.as_ref().clone().with_state(fsm);
+        f(&stamped)
+      })
+      .collect()
+  }
+
+  /// The local node's Lifeguard health score (`0` = fully healthy; higher = worse).
+  ///
+  /// Read directly from the live machine endpoint — no snapshot lag.
+  #[inline]
+  pub fn health_score(&self) -> usize {
+    self.endpoint.endpoint_ref().health_score()
+  }
+
+  /// The local node's id, cheap-cloned from the machine endpoint.
+  #[inline]
+  pub fn local_id(&self) -> I {
+    self.endpoint.endpoint_ref().local_id_ref().cheap_clone()
+  }
+
+  /// The local node's advertised `SocketAddr`.
+  #[inline]
+  pub fn advertise_address(&self) -> SocketAddr {
+    *self.endpoint.endpoint_ref().advertise_ref()
+  }
+
+  /// The local node's `NodeState`, stamped with the current FSM liveness.
+  #[inline]
+  pub fn local_state(&self) -> std::sync::Arc<NodeState<I, SocketAddr>> {
+    let ep = self.endpoint.endpoint_ref();
+    let local_id = ep.local_id_ref();
+    let ns = ep
+      .member(local_id)
+      .expect("local node is always in the membership map");
+    // Alive is the correct fallback for the LOCAL node specifically: from its own
+    // perspective the node is always alive, and before start() is called
+    // member_liveness may return None.  Unknown(0) would be wrong here because
+    // it implies the node's health is uncertain, which it never is locally.
+    let fsm = ep.member_liveness(local_id).unwrap_or(State::Alive);
+    std::sync::Arc::new(ns.as_ref().clone().with_state(fsm))
+  }
+
+  // ── Directed I/O ──────────────────────────────────────────────────────────
+  //
+  // These are `&mut self` thin forwarders. The poll loop drives all actual
+  // I/O; the caller correlates completion by draining `poll_event()` after
+  // subsequent `poll` ticks.
+
+  /// Send a direct UDP ping to `node`.
+  ///
+  /// Returns a [`PingId`] token. The caller should drain `poll_event()` after
+  /// subsequent `poll` ticks to observe the terminal event:
+  ///
+  /// - `Event::PingCompleted { ping_id, .. }` — the peer replied within
+  ///   `probe_timeout`.
+  /// - `Event::PingFailed { ping_id, .. }` — no reply within `probe_timeout`.
+  ///
+  /// Unlike a SWIM failure-detection probe, an application ping is direct-only:
+  /// it does not fan out to indirect peers, request a reliable fallback, or
+  /// mark the target as suspect on timeout.
+  #[inline]
+  pub fn ping(&mut self, node: Node<I, SocketAddr>, now: Instant) -> PingId {
+    self.endpoint.ping(node, now)
+  }
+
+  /// Enqueue a directed unreliable UDP user-data packet to `to`.
+  ///
+  /// The payload is encoded as a `UserData` gossip message and emitted on the
+  /// next gossip drain in `poll`. The peer observes it as `Event::UserPacket`
+  /// via `poll_event()`. Delivery is best-effort (UDP); callers that need
+  /// guaranteed delivery should use [`Self::send_reliable`].
+  ///
+  /// Returns `Err` when the framed payload exceeds the configured gossip MTU.
+  #[inline]
+  pub fn send(
+    &mut self,
+    to: SocketAddr,
+    payload: bytes::Bytes,
+  ) -> Result<(), memberlist_proto::Error> {
+    self.endpoint.send_user_packet(to, payload)
+  }
+
+  /// Enqueue multiple directed unreliable UDP user-data packets to `to`.
+  ///
+  /// When `payloads` contains two or more entries they are compounded into a
+  /// single gossip datagram if they fit together within the configured gossip
+  /// MTU. The peer observes each payload separately as `Event::UserPacket` via
+  /// `poll_event()`.
+  ///
+  /// Returns `Err` when the compound frame exceeds the gossip MTU.
+  #[inline]
+  pub fn send_many(
+    &mut self,
+    to: SocketAddr,
+    payloads: &[bytes::Bytes],
+  ) -> Result<(), memberlist_proto::Error> {
+    self.endpoint.send_user_packets(to, payloads)
+  }
+
+  /// Initiate a reliable TCP user-message delivery to `to`.
+  ///
+  /// The payload is encoded and sent over a dedicated TCP stream. Returns a
+  /// [`StreamId`] token. Completion surfaces as
+  /// `Event::ExchangeCompleted { kind: ExchangeKind::UserMessage, .. }` via
+  /// `poll_event()` after subsequent `poll` ticks.
+  ///
+  /// The smoltcp poll loop services the resulting `DialRequested` generically —
+  /// the same `Connect` path used for join push/pull — so no additional driver
+  /// changes are needed to carry user messages over TCP.
+  ///
+  /// Callers that want non-blocking fire-and-forget should retain the
+  /// `StreamId` for debugging only; the poll loop and machine handle the full
+  /// dial → handshake → send → FIN → teardown lifecycle.
+  ///
+  /// **Reliable exchanges share a single listener, so a peer accepts inbound
+  /// reliable streams one at a time.** To send multiple reliable messages to
+  /// the same peer, issue them sequentially: call `send_reliable`, drive `poll`
+  /// until the matching `Event::ExchangeCompleted { kind: UserMessage }` arrives
+  /// via `poll_event`, then send the next. Concurrent reliable streams to one
+  /// peer would collide at the listener (the second SYN is RST'd during the
+  /// first's handshake).
+  #[inline]
+  pub fn send_reliable(&mut self, to: SocketAddr, payload: bytes::Bytes, now: Instant) -> StreamId {
+    self.endpoint.start_user_message(to, payload, now)
+  }
+
+  // ── Join ──────────────────────────────────────────────────────────────────
 
   /// Record intent to join the cluster via these seed addresses.
   ///

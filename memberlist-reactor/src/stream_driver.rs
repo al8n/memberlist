@@ -33,14 +33,14 @@ use memberlist::codec::{
   parse_messages,
 };
 use memberlist_proto::{
-  Instant,
-  event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, Transmit},
+  Instant, PingId,
+  event::{Event, ExchangeKind, ExchangeOutcome, PushPullKind, StreamId, Transmit},
   streams::{ExchangeId, StreamAction, StreamEndpoint, StreamTransport},
 };
 
 use crate::{
   NodeId,
-  command::{Command, JoinCmd, LeaveCmd, ShutdownCmd},
+  command::{Command, JoinCmd, LeaveCmd, PingCmd, SendReliableCmd, SendUserCmd, ShutdownCmd},
   error::Error,
   observation::observation_payload_bytes,
   shared::Shared,
@@ -136,13 +136,14 @@ struct DialConnected<R: Runtime> {
 /// machine emits one `ExchangeCompleted` per dispatched exchange (success or
 /// `stream_timeout` failure), so the set always drains — no deadline needed.
 ///
-/// `start_push_pull` returns a `StreamId` that is not the exchange's
-/// `ExchangeId`, and there is no public reverse index, so a join cannot key on
-/// the id it started. Instead `dispatch` drains the action(s) each
+/// `start_push_pull` returns a `StreamId`, not the exchange's `ExchangeId`, and
+/// there is no public reverse index, so `dispatch` drains the action(s) each
 /// `start_push_pull` queues and captures the resulting `Connect`'s `ExchangeId`
-/// here — synchronously, so the capture is unambiguous across concurrent or
-/// duplicate-seed joins, and a dial that fails before any `Connect` (e.g. a TLS
-/// peer with no SNI) simply contributes no id rather than wedging the join.
+/// here, keyed on the originating `StreamId`. Matching the StreamId — not the
+/// peer — is what call-scopes the capture: `service_dials` drains a shared dial
+/// deque, so one join's drain can also surface an unrelated same-peer dial
+/// enqueued by another subsystem. A dial that fails before any `Connect` (e.g. a
+/// TLS peer with no SNI) simply contributes no id rather than wedging the join.
 struct PendingJoin {
   /// Exchanges this join is awaiting, captured from their `Connect` at dispatch.
   pending_eids: HashSet<ExchangeId>,
@@ -155,6 +156,34 @@ struct PendingJoin {
 /// when `LeftCluster` fires.
 struct PendingLeave {
   repliers: Vec<Sender<Result<(), Error>>>,
+}
+
+/// An outstanding application-ping call; resolved on `PingCompleted` (reply
+/// `Ok(rtt)`) or `PingFailed` (reply `Err(PingTimeout)`) via the matching
+/// `PingId`. On driver exit, drained with `Err(Shutdown)`.
+struct PendingPing {
+  ping_id: PingId,
+  reply: Sender<Result<Duration, Error>>,
+}
+
+/// An outstanding reliable directed-send call; a single `Command::SendReliable`
+/// may dispatch multiple `start_user_message` calls (one per payload). Each
+/// call returns a `StreamId`; the driver captures the resulting `Connect`'s
+/// `ExchangeId` in `dispatch` keyed on that `StreamId` (mirror of the join
+/// capture) and parks one `PendingUserSend` whose `pending` set tracks the
+/// in-flight `ExchangeId`s. Resolved on `ExchangeCompleted(UserMessage)` as each
+/// id empties from `pending`. On driver exit, drained with `Err(Shutdown)`.
+struct PendingUserSend {
+  /// `ExchangeId`s this call dispatched and has not yet seen a terminal
+  /// `ExchangeCompleted` for; an entry is removed on any terminal outcome.
+  pending: HashSet<ExchangeId>,
+  /// Running count of payload failures. SEEDED at park time to the count of
+  /// payloads that never produced a `Connect` (a pre-`Connect` retirement
+  /// will never surface an `ExchangeCompleted`); incremented further for each
+  /// tracked exchange whose terminal outcome is `Failed`. A non-zero value
+  /// makes the final reply `Err(SendFailed)`.
+  failed: usize,
+  reply: Sender<Result<(), Error>>,
 }
 
 /// The single-owner TCP driver future. Runs until shutdown (the last handle
@@ -182,6 +211,11 @@ pub(crate) struct StreamDriver<I: NodeId, R: Runtime, T: StreamTransport> {
   next_pending_join_id: u64,
   /// The in-flight graceful leave, resolved on `LeftCluster`.
   pending_leave: Option<PendingLeave>,
+  /// Outstanding application-ping calls; resolved via `PingId` correlation.
+  pending_pings: Vec<PendingPing>,
+  /// Outstanding reliable-send calls; resolved when all tracked exchange ids
+  /// surface a terminal `ExchangeCompleted(UserMessage)`.
+  pending_user_sends: Vec<PendingUserSend>,
   /// Each live exchange's bridge: its write channel and teardown handle.
   bridges: HashMap<ExchangeId, BridgeHandle>,
   /// Held only to be dropped on driver exit; closing the accept task's shutdown
@@ -246,6 +280,8 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
       pending_joins: HashMap::new(),
       next_pending_join_id: 0,
       pending_leave: None,
+      pending_pings: Vec::new(),
+      pending_user_sends: Vec::new(),
       bridges: HashMap::new(),
       _accept_shutdown_tx: accept_shutdown_tx,
       accepted_rx,
@@ -302,7 +338,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
   }
 
   /// Applies one handle command to the machine.
-  fn dispatch(&mut self, cmd: Command, now: Instant) {
+  fn dispatch(&mut self, cmd: Command<I>, now: Instant) {
     match cmd {
       Command::Join(JoinCmd { addrs, wait, reply }) => {
         if !self.endpoint.is_running() {
@@ -339,17 +375,22 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
           self.handle_stream_action(action);
         }
         // Start each seed's exchange and capture the Connect it produces
-        // synchronously. A dial that fails before any Connect (e.g. a TLS peer
-        // with no SNI) yields none, so it cannot leave the join awaiting forever.
+        // synchronously, keyed on the `StreamId` each `start_push_pull` returned
+        // (not the peer): `service_dials` drains a shared dial deque, so a
+        // same-peer dial flushed for another subsystem (a scheduled push/pull, a
+        // probe reliable-ping, a gossip dial) must not be misattributed to this
+        // join. A dial that fails before any Connect (e.g. a TLS peer with no
+        // SNI) yields none, so it cannot leave the join awaiting forever.
         let mut pending_eids = HashSet::with_capacity(addrs.len());
+        let mut started: HashSet<StreamId> = HashSet::with_capacity(addrs.len());
         for addr in &addrs {
-          // Ignoring StreamId: the exchange's ExchangeId is captured from Connect.
-          self
+          let sid = self
             .endpoint
             .start_push_pull(*addr, PushPullKind::Join, now);
+          started.insert(sid);
           while let Some(action) = self.endpoint.poll_action() {
             if let StreamAction::Connect(info) = &action
-              && info.peer() == *addr
+              && started.contains(&info.stream_id())
             {
               pending_eids.insert(info.id());
             }
@@ -409,12 +450,136 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         // Ignoring Err: the caller dropped its reply receiver.
         let _ = reply.try_send(Ok(()));
       }
+      Command::Ping(PingCmd { node, reply }) => {
+        // Gate on a running node: after `leave()` the probe scheduler is
+        // stopped, so a new application ping's completion event would never
+        // arrive and the caller would hang forever. Reject with `NotRunning`.
+        if !self.endpoint.is_running() {
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.try_send(Err(Error::NotRunning));
+          return;
+        }
+        let ping_id = self.endpoint.ping(node, now);
+        self.pending_pings.push(PendingPing { ping_id, reply });
+      }
+      Command::SendUser(SendUserCmd {
+        to,
+        payloads,
+        reply,
+      }) => {
+        // Gate on a running node: after `leave()` the gossip socket is
+        // effectively closed to protocol traffic; reject immediately.
+        if !self.endpoint.is_running() {
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.try_send(Err(Error::NotRunning));
+          return;
+        }
+        let res = self
+          .endpoint
+          .send_user_packets(to, &payloads)
+          .map_err(|e| Error::PayloadTooLarge(e.to_string()));
+        // Ignoring Err: the caller dropped its reply receiver.
+        let _ = reply.try_send(res);
+      }
+      Command::SendReliable(SendReliableCmd {
+        to,
+        payloads,
+        reply,
+      }) => {
+        // Gate on a running node: after `leave()` the stream coordinator is
+        // stopping; a new `start_user_message` would never produce a `Connect`
+        // and the caller would hang. Reject with `NotRunning`.
+        if !self.endpoint.is_running() {
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.try_send(Err(Error::NotRunning));
+          return;
+        }
+        if payloads.is_empty() {
+          // No payloads: nothing to track; reply Ok immediately.
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.try_send(Ok(()));
+          return;
+        }
+        // Drain any already-queued actions before starting new user messages
+        // so a pre-existing Connect from an earlier call is not captured here.
+        while let Some(action) = self.endpoint.poll_action() {
+          self.handle_stream_action(action);
+        }
+        // Start each payload's stream and capture the resulting Connect's
+        // ExchangeId synchronously, keyed on the `StreamId` each
+        // `start_user_message` returned (mirror of the join capture logic).
+        // `n` = payloads dispatched; `m` = exchanges captured for this command.
+        // Each `start_user_message` produces one `StreamId` in `started` and at
+        // most one captured `Connect` (success) or zero (a pre-`Connect`
+        // retirement: TLS SNI parse failure, record-layer fault, or an
+        // already-elapsed exchange deadline — the API permits a `sni_provider`
+        // that returns `Some` then `None`, so a partial failure mid-batch is
+        // reachable). Keying on `started` (not the peer) is what prevents a
+        // same-peer dial flushed by the shared `service_dials` for another
+        // subsystem from being misattributed to this send, so `m <= n` always
+        // holds.
+        let n = payloads.len();
+        let mut pending = HashSet::with_capacity(n);
+        let mut started: HashSet<StreamId> = HashSet::with_capacity(n);
+        for payload in payloads {
+          let sid = self.endpoint.start_user_message(to, payload, now);
+          started.insert(sid);
+          while let Some(action) = self.endpoint.poll_action() {
+            if let StreamAction::Connect(ref info) = action
+              && started.contains(&info.stream_id())
+            {
+              pending.insert(info.id());
+            }
+            self.handle_stream_action(action);
+          }
+        }
+        let m = pending.len();
+        if m == 0 {
+          // The empty-payloads case already returned `Ok(())` above, so
+          // reaching here means there WERE payloads to send but every dial
+          // was retired BEFORE a `StreamAction::Connect`. No exchange was
+          // created and no terminal `ExchangeCompleted` will arrive, so the
+          // send genuinely FAILED. Reply `Err(SendFailed)` rather than
+          // falsely reporting success.
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = reply.try_send(Err(Error::SendFailed));
+          return;
+        }
+        // Park with `failed` SEEDED to the `n - m` payloads that never
+        // produced an exchange (a partial pre-`Connect` failure). The
+        // waiter resolves `Ok(())` only when every dispatched exchange
+        // succeeds AND no payload was dropped pre-`Connect`; any seeded or
+        // observed failure makes the final reply `Err(SendFailed)`. Without
+        // the seed, a batch where some payloads connect and a LATER one
+        // fails pre-`Connect` would falsely report `Ok` once the connected
+        // exchanges succeed.
+        //
+        // Capture-by-`StreamId` makes `m <= n` structural, so `n - m` cannot
+        // underflow. `checked_sub` is the fail-closed backstop: were a future
+        // regression to make `m > n`, reply `Err(SendFailed)` rather than
+        // panic on the underflow.
+        match n.checked_sub(m) {
+          Some(failed) => {
+            self.pending_user_sends.push(PendingUserSend {
+              pending,
+              failed,
+              reply,
+            });
+          }
+          None => {
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = reply.try_send(Err(Error::SendFailed));
+          }
+        }
+      }
     }
   }
 
   /// Synchronous-command accounting for a surfaced event: reduces the matching
-  /// `WaitForCompletion` join on a push/pull `ExchangeCompleted` (replying when
-  /// its set empties), and resolves a parked leave on `LeftCluster`.
+  /// `WaitForCompletion` join on a push/pull `ExchangeCompleted`, resolves a
+  /// parked leave on `LeftCluster`, resolves ping waiters on
+  /// `PingCompleted`/`PingFailed`, and resolves reliable-send waiters on
+  /// `ExchangeCompleted(UserMessage)`.
   fn account_event(&mut self, ev: &Event<I, SocketAddr>) {
     match ev {
       Event::ExchangeCompleted(p) if p.kind() == ExchangeKind::PushPull => {
@@ -449,6 +614,54 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
           for replier in pl.repliers {
             // Ignoring Err: a leave caller dropped its reply receiver.
             let _ = replier.try_send(Ok(()));
+          }
+        }
+      }
+      // Ping completion: resolve the matching waiter with the observed RTT.
+      // The event still flows to the observation task (additive correlation —
+      // `PingCompleted` also fires the delegate's `notify_ping_complete`).
+      Event::PingCompleted(p) => {
+        let pid = p.ping_id();
+        if let Some(idx) = self.pending_pings.iter().position(|pp| pp.ping_id == pid) {
+          let pp = self.pending_pings.swap_remove(idx);
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = pp.reply.try_send(Ok(p.rtt()));
+        }
+      }
+      // Ping failure: resolve the matching waiter with `PingTimeout`. Same
+      // additive semantics as `PingCompleted`.
+      Event::PingFailed(p) => {
+        let pid = p.ping_id();
+        if let Some(idx) = self.pending_pings.iter().position(|pp| pp.ping_id == pid) {
+          let pp = self.pending_pings.swap_remove(idx);
+          // Ignoring Err: the caller dropped its reply receiver.
+          let _ = pp.reply.try_send(Err(Error::PingTimeout));
+        }
+      }
+      // Reliable user-send completion: reduce the pending set; reply when empty.
+      // The event continues to the observation task below (additive).
+      Event::ExchangeCompleted(p) if p.kind() == ExchangeKind::UserMessage => {
+        let eid = p.eid();
+        let failed = matches!(p.outcome(), ExchangeOutcome::Failed);
+        if let Some(idx) = self
+          .pending_user_sends
+          .iter()
+          .position(|ps| ps.pending.contains(&eid))
+        {
+          let ps = &mut self.pending_user_sends[idx];
+          ps.pending.remove(&eid);
+          if failed {
+            ps.failed += 1;
+          }
+          if ps.pending.is_empty() {
+            let ps = self.pending_user_sends.swap_remove(idx);
+            let res = if ps.failed > 0 {
+              Err(Error::SendFailed)
+            } else {
+              Ok(())
+            };
+            // Ignoring Err: the caller dropped its reply receiver.
+            let _ = ps.reply.try_send(res);
           }
         }
       }
@@ -739,6 +952,16 @@ where
           Command::Shutdown(ShutdownCmd { reply }) => {
             let _ = reply.try_send(Ok(()));
           }
+          // Ignoring Err: the caller dropped its reply receiver.
+          Command::Ping(PingCmd { reply, .. }) => {
+            let _ = reply.try_send(Err(Error::Shutdown));
+          }
+          Command::SendUser(SendUserCmd { reply, .. }) => {
+            let _ = reply.try_send(Err(Error::Shutdown));
+          }
+          Command::SendReliable(SendReliableCmd { reply, .. }) => {
+            let _ = reply.try_send(Err(Error::Shutdown));
+          }
         }
       }
       for (_, pj) in this.pending_joins.drain() {
@@ -750,6 +973,14 @@ where
           // Ignoring Err: the leave caller dropped its reply receiver.
           let _ = replier.try_send(Err(Error::Shutdown));
         }
+      }
+      for pp in this.pending_pings.drain(..) {
+        // Ignoring Err: the ping caller dropped its reply receiver.
+        let _ = pp.reply.try_send(Err(Error::Shutdown));
+      }
+      for ps in this.pending_user_sends.drain(..) {
+        // Ignoring Err: the send_reliable caller dropped its reply receiver.
+        let _ = ps.reply.try_send(Err(Error::Shutdown));
       }
       return Poll::Ready(());
     }
@@ -802,8 +1033,16 @@ where
           }
         }
         DialOutcome::Failed(eid) => {
+          // Drive the exchange to a DIAL FAILURE — NOT a benign EOF feed.
+          // A connect that never established has no wire, and a one-way
+          // `UserMessage` maps a clean EOF to a SUCCESSFUL completion
+          // (`Stream::handle_data`'s `OutboundSendingRequest(UserMessage)`
+          // EOF arm), which would falsely report `send_reliable` success on
+          // an unreachable peer. `handle_dial_failed` terminalizes the
+          // exchange as `Failed` regardless of kind, so the parked
+          // reliable-send waiter resolves with `Err(SendFailed)`.
           this.bridges.remove(&eid);
-          this.endpoint.handle_transport_data(eid, &[], true, now);
+          this.endpoint.handle_dial_failed(eid, now);
         }
       }
       progress = true;
@@ -1189,6 +1428,90 @@ mod tests {
       "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
     ));
     Arc::new(Shared::new(snapshot_of(&ep)))
+  }
+
+  fn capture_test_endpoint() -> StreamEndpoint<SmolStr, SocketAddr, RawRecords> {
+    let ep = Endpoint::new(EndpointConfig::new(
+      SmolStr::new("capture-test"),
+      "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+    ));
+    StreamEndpoint::new(
+      ep,
+      TcpOptions::new(Some(b"capture-test".to_vec())),
+      Box::new(|_| None),
+      Box::new(|a: &SocketAddr| *a),
+    )
+  }
+
+  /// The reliable-send / join capture keys on the originating `StreamId`, NOT
+  /// the peer. Regression guard for the cross-subsystem misattribution: a
+  /// same-peer dial flushed by the shared `service_dials` for another subsystem
+  /// (here a `start_push_pull`) is left pending while a `send_reliable`-style
+  /// `start_user_message` runs; the command must capture ONLY its own exchange.
+  /// If capture matched by peer (the bug), the foreign push/pull's `ExchangeId`
+  /// would be captured too — `m > n` (`checked_sub` underflow) or a waiter parked
+  /// on a PushPull completion the `UserMessage` resolver ignores (leaked waiter).
+  #[test]
+  fn capture_binds_to_started_stream_id_not_peer() {
+    let mut endpoint = capture_test_endpoint();
+    let now = Instant::now();
+    let peer = "127.0.0.1:7000".parse::<SocketAddr>().unwrap();
+
+    // An UNRELATED same-peer dial enqueued by another subsystem; its Connect is
+    // already queued by the in-band `service_dials` and deliberately left
+    // undrained — the exact shared-deque hazard `send_many_reliable` faces.
+    let foreign_sid = endpoint.start_push_pull(peer, PushPullKind::Join, now);
+
+    // This command's own dial to the SAME peer; capture is keyed on `started`.
+    let mut started: HashSet<StreamId> = HashSet::new();
+    let user_sid = endpoint.start_user_message(peer, Bytes::from_static(b"hi"), now);
+    started.insert(user_sid);
+    assert_ne!(
+      foreign_sid, user_sid,
+      "distinct dials get distinct StreamIds"
+    );
+
+    // Drain every queued action, replicating the dispatch loop's inline capture
+    // predicate exactly. Both Connects surface; only the one in `started` is
+    // captured.
+    let mut captured: HashSet<ExchangeId> = HashSet::new();
+    let mut connect_count = 0usize;
+    let mut foreign_eid = None;
+    let mut user_eid = None;
+    while let Some(action) = endpoint.poll_action() {
+      if let StreamAction::Connect(ref info) = action {
+        connect_count += 1;
+        if info.stream_id() == foreign_sid {
+          foreign_eid = Some(info.id());
+        }
+        if info.stream_id() == user_sid {
+          user_eid = Some(info.id());
+        }
+        if started.contains(&info.stream_id()) {
+          captured.insert(info.id());
+        }
+      }
+    }
+
+    assert_eq!(
+      connect_count, 2,
+      "both same-peer dials surfaced a Connect in this drain",
+    );
+    let foreign_eid = foreign_eid.expect("foreign push/pull surfaced a Connect");
+    let user_eid = user_eid.expect("user-message surfaced a Connect");
+    assert_eq!(
+      captured.len(),
+      1,
+      "exactly this command's one exchange was captured (m <= n holds)",
+    );
+    assert!(
+      captured.contains(&user_eid),
+      "the user-message exchange was captured",
+    );
+    assert!(
+      !captured.contains(&foreign_eid),
+      "the foreign same-peer push/pull exchange was NOT captured",
+    );
   }
 
   /// A graceful close (handle drop) must flush every byte already queued in

@@ -212,6 +212,43 @@ async fn repeated_shutdown_is_idempotent() {
   );
 }
 
+/// `join` to an UNREACHABLE QUIC seed resolves to `Err` and does NOT hang.
+/// The reactor QUIC driver parks every dispatched push/pull exchange in a
+/// `PendingJoin` with NO deadline, resolving only when each parked
+/// `ExchangeId` surfaces a terminal `ExchangeCompleted(PushPull)`. The dial to
+/// an unbound port never completes its handshake, so the `QuicEndpoint` retires
+/// the dial intent at its exchange deadline and (with the PushPull pre-bridge
+/// fix) emits `ExchangeCompleted(PushPull, Failed)`, which drains the waiter
+/// set and resolves the join with `JoinAllFailed`.
+///
+/// Wrapped in a `tokio::time::timeout` so a regression that drops the PushPull
+/// `Failed` emission (leaving the deadline-less waiter parked) fails fast here
+/// rather than hanging the suite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn join_to_unreachable_quic_seed_returns_err_not_hang() {
+  let node = make("quic-join-unreach", support::self_trusted_quic_config()).await;
+  // Port 1 on loopback has no QUIC listener — the dial handshake cannot
+  // complete, so the exchange is retired at its deadline.
+  let unreachable = "127.0.0.1:1".parse::<SocketAddr>().unwrap();
+
+  let result = tokio::time::timeout(
+    Duration::from_secs(30),
+    node.join(&SocketAddrResolver, &[MaybeResolved::Resolved(unreachable)]),
+  )
+  .await
+  .expect(
+    "QUIC join to an unreachable seed HUNG (timed out) — the deadline-less \
+     PendingJoin waiter never drained; the PushPull dial failure was not \
+     surfaced as Event::ExchangeCompleted(Failed)",
+  );
+  assert!(
+    result.is_err(),
+    "QUIC join to an unreachable seed MUST return Err (zero contact), got {result:?}"
+  );
+
+  let _ = node.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wildcard_advertise_is_rejected() {
   // Binding the wildcard 0.0.0.0:0 would advertise an unspecified contact peers
