@@ -16,8 +16,8 @@ use std::{
 use agnostic::tokio::TokioRuntime;
 use futures_util::StreamExt;
 use memberlist_reactor::{
-  Delegate, Error, Event, MaybeResolved, Memberlist, NodeState, Options, SocketAddrResolver,
-  VoidDelegate,
+  Delegate, DriverOptions, Error, Event, MaybeResolved, Memberlist, NodeState, Options,
+  SocketAddrResolver, VoidDelegate,
 };
 use smol_str::SmolStr;
 
@@ -200,6 +200,39 @@ async fn wildcard_advertise_is_rejected() {
   .await;
   let rejected = matches!(res, Err(Error::InvalidAdvertise(_)));
   assert!(rejected, "wildcard advertise must be rejected");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_close_timeout_is_rejected() {
+  // A zero close_timeout makes each post-Close graceful-drain write fire its
+  // backstop immediately, so a graceful close RSTs its queued push/pull response
+  // bytes instead of draining them; construction must reject it fail-fast.
+  let res = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+    &SocketAddrResolver,
+    SmolStr::new("zero-close"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new().with_driver(DriverOptions::new().with_close_timeout(Duration::ZERO)),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await;
+  assert!(
+    matches!(res, Err(Error::ZeroCloseTimeout)),
+    "a zero close_timeout must be rejected with ZeroCloseTimeout"
+  );
+
+  // A nonzero close_timeout constructs.
+  let ok = Memberlist::<SmolStr>::tcp::<TokioRuntime, _, _>(
+    &SocketAddrResolver,
+    SmolStr::new("nonzero-close"),
+    MaybeResolved::Resolved("127.0.0.1:0".parse::<SocketAddr>().unwrap()),
+    Options::new().with_driver(DriverOptions::new().with_close_timeout(Duration::from_secs(10))),
+    VoidDelegate::<SmolStr, SocketAddr>::new(),
+  )
+  .await
+  .expect("a nonzero close_timeout must construct");
+  // Ignoring Err: best-effort teardown; the positive-control assertion already
+  // passed, and the test does not depend on the shutdown reply.
+  let _ = ok.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

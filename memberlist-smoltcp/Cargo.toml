@@ -1,0 +1,55 @@
+[package]
+name = "memberlist-smoltcp"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Executor-free no_std memberlist driver over the smoltcp TCP/IP stack."
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["std"]
+std = ["memberlist-machine/std", "memberlist-wire/std", "smoltcp/std"]
+alloc = ["memberlist-machine/alloc", "memberlist-wire/alloc", "smoltcp/alloc"]
+
+# Gossip/reliable-plane compression backends. Each pass-through enables the
+# matching machine backend so the driver's `TransformOptions` can carry a
+# `CompressionOptions` for that algorithm; without one the algorithm's
+# `compress_gossip` falls back to plaintext and the reliable-plane bridge
+# cannot pack. lz4 is no_std+alloc; snappy/zstd/brotli are std-only (mirroring
+# the machine, so the tier is never silently under-selected on a no_std build).
+compression-lz4 = ["memberlist-machine/compression-lz4"]
+compression-snappy = ["memberlist-machine/compression-snappy"]
+compression-zstd = ["memberlist-machine/compression-zstd"]
+compression-brotli = ["memberlist-machine/compression-brotli"]
+
+# Gossip/reliable-plane AEAD encryption backends. Each pass-through enables the
+# matching machine backend so a `TransformOptions` carrying a `Keyring` for that
+# cipher can actually encrypt; without the backend `encrypt_gossip` returns
+# `EncryptionError::UnsupportedAlgorithm` (surfaced at construction by the
+# encryption-config probe, so it is never a silent runtime gossip drop). Both
+# AEAD backends are no_std+alloc.
+encryption-aes-gcm = ["memberlist-machine/encryption-aes-gcm"]
+encryption-chacha20-poly1305 = ["memberlist-machine/encryption-chacha20-poly1305"]
+
+[dependencies]
+memberlist-machine = { workspace = true, default-features = false, features = ["tcp"] }
+memberlist-wire = { workspace = true, default-features = false }
+smoltcp = { version = "0.13", default-features = false, features = ["alloc", "medium-ip", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-udp", "socket-tcp"] }
+getrandom = { workspace = true }
+bytes = { workspace = true }
+hashbrown = { version = "0.17", default-features = false, features = ["default-hasher"] }
+
+[dev-dependencies]
+smol_str = { workspace = true }
+# Enable the lz4 + AES-GCM backends for the transform round-trip tests
+# (`tests/transform.rs`). Declared on the dev build only so the library's own
+# build stays backend-free and the no_std/bare-metal compile checks exercise the
+# disabled-transform identity paths.
+memberlist-machine = { workspace = true, default-features = false, features = ["tcp", "compression-lz4", "encryption-aes-gcm"] }

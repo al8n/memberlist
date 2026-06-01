@@ -17,7 +17,8 @@ use std::{
 use bytes::Bytes;
 use memberlist_compio::{
   Address, FirstAddrResolver, MaybeResolved, MemberlistError, MemberlistOptions, Options,
-  OsResolver, SocketAddrResolver, TcpMemberlist, TcpTransportOptions, VoidDelegate,
+  OsResolver, SocketAddrResolver, StreamTransportOptions, TcpMemberlist, TcpTransportOptions,
+  VoidDelegate,
 };
 use memberlist_machine::TcpOptions;
 use smol_str::SmolStr;
@@ -413,6 +414,62 @@ async fn transport_new_rejects_oversized_initial_local_state() {
   )
   .await
   .expect("a small initial_local_state must construct");
+  m.shutdown().await.expect("shutdown");
+}
+
+/// A zero `close_timeout` makes the post-`StreamAction::Close` graceful drain
+/// fire its per-write timeout immediately, so a graceful close abandons (RSTs)
+/// its queued push/pull response bytes instead of draining them — truncating
+/// reliable exchanges. `Transport::new` (via `StreamTransportOptions::validate`)
+/// must reject it fail-fast with `InvalidOption("close_timeout", _)`, while the
+/// default (and any nonzero) `close_timeout` constructs successfully. The check
+/// lives in the shared stream-options `validate()`, so it covers both the TCP
+/// and TLS backends; this exercises it on TCP.
+#[compio::test]
+async fn transport_new_rejects_zero_close_timeout() {
+  let opts = Options::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new("zero-close"))
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
+      .with_tcp_options(TcpOptions::new(None))
+      .with_stream(StreamTransportOptions::new().with_close_timeout(Duration::ZERO)),
+  );
+  let res = TcpMemberlist::<SmolStr, SocketAddr>::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await;
+  match res {
+    Err(MemberlistError::InvalidOption(e)) => {
+      assert_eq!(
+        e.option(),
+        "close_timeout",
+        "carries the rejected knob name"
+      );
+      assert!(!e.reason().is_empty(), "carries a reason");
+    }
+    Err(other) => panic!("expected InvalidOption(close_timeout), got {other:?}"),
+    Ok(_) => panic!("a zero close_timeout must be rejected, but construction succeeded"),
+  }
+
+  // A nonzero close_timeout (here the explicit default) must construct.
+  let ok_opts = Options::new(
+    TcpTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new("nonzero-close"))
+      .with_advertise_addr(MaybeResolved::Resolved("127.0.0.1:0".parse().unwrap()))
+      .with_tcp_options(TcpOptions::new(None))
+      .with_stream(StreamTransportOptions::new().with_close_timeout(Duration::from_secs(10))),
+  );
+  let m = TcpMemberlist::<SmolStr, SocketAddr>::new(
+    ok_opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("a nonzero close_timeout must construct");
   m.shutdown().await.expect("shutdown");
 }
 

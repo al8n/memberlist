@@ -1,0 +1,62 @@
+//! Executor-free `no_std` memberlist driver over [smoltcp](https://docs.rs/smoltcp).
+//!
+//! Composes smoltcp's poll-based TCP/IP stack with the memberlist SWIM machine
+//! in one synchronous super-loop the caller drives. See
+//! `docs/superpowers/specs/2026-05-30-memberlist-smoltcp-driver-design.md`.
+//!
+//! # Building for bare metal
+//!
+//! Turn the default `std` feature off and the `alloc` feature on, against a
+//! bare-metal target. The gossip RNG seed is drawn from
+//! [`getrandom`](https://docs.rs/getrandom) when no explicit seed is configured,
+//! so a bare-metal target must register a `getrandom` backend (e.g. a hardware
+//! RNG); supply one, or build with the custom-backend cfg and provide the
+//! symbol in the final binary:
+//!
+//! ```sh
+//! RUSTFLAGS='--cfg getrandom_backend="custom"' \
+//!   cargo build -p memberlist-smoltcp --no-default-features --features alloc \
+//!   --target thumbv7em-none-eabihf
+//! ```
+//!
+//! Configuring an explicit RNG seed via `EndpointConfig` avoids the entropy
+//! draw entirely.
+#![cfg_attr(not(feature = "std"), no_std)]
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+#![allow(clippy::type_complexity, unexpected_cfgs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(docsrs, allow(unused_attributes))]
+
+// Alias `alloc` to the name `std` so genuine-heap `std::` paths compile unchanged
+// under no_std+alloc (and `#[macro_use]` brings `vec!`/`format!` crate-wide).
+// Core-resident items are imported from `core::` directly, never via this alias.
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+#[macro_use]
+extern crate alloc as std;
+
+#[cfg(feature = "std")]
+extern crate std;
+
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+compile_error!("memberlist-smoltcp requires the `std` or `alloc` feature");
+
+pub use config::Config;
+pub use error::{GossipMtuTooLarge, InitError, MediumMismatch};
+pub use interface::{
+  EthernetAddress, HardwareAddress, InterfaceConfig, IpAddress, IpCidr, Ipv4Address, Ipv6Address,
+  Medium, Route,
+};
+pub use memberlist::Memberlist;
+pub use transform::{
+  CompressAlgorithm, CompressionOptions, EncryptionOptions, Keyring, SecretKey, TcpOptions,
+  TransformOptions,
+};
+
+mod addr;
+mod config;
+mod error;
+mod interface;
+mod memberlist;
+mod reliable;
+mod transform;

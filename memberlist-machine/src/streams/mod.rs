@@ -43,10 +43,11 @@
 //!
 //! - [`StreamEndpoint::poll_action`] returns [`StreamAction::Connect`] first.
 //! - Once all `Connect`s are drained, [`StreamAction::Shutdown`] /
-//!   [`StreamAction::Close`] for an exchange is withheld while
-//!   [`StreamEndpoint::poll_transport_transmit`] still holds bytes tagged with
-//!   that exchange — a teardown applied before its exchange's last bytes are
-//!   written would orphan them (a transport `shutdown(write)` closes the send
+//!   [`StreamAction::Close`] / [`StreamAction::Abort`] for an exchange is
+//!   withheld while [`StreamEndpoint::poll_transport_transmit`] still holds
+//!   bytes tagged with that exchange — a teardown applied before its exchange's
+//!   last bytes are written would orphan them (a transport `shutdown(write)`
+//!   closes the send
 //!   half, so any later write fails).
 //! - Once the matching bytes drain, the teardown surfaces.
 //!
@@ -174,11 +175,11 @@ struct ExchangeMeta<A> {
 }
 
 /// The [`ExchangeId`] a teardown directive ([`StreamAction::Shutdown`] /
-/// [`StreamAction::Close`]) refers to. Panics on a `Connect` — the caller must
-/// hand only teardown actions in.
+/// [`StreamAction::Close`] / [`StreamAction::Abort`]) refers to. Panics on a
+/// `Connect` — the caller must hand only teardown actions in.
 fn teardown_exchange(action: &StreamAction) -> ExchangeId {
   match action {
-    StreamAction::Shutdown(r) | StreamAction::Close(r) => r.id(),
+    StreamAction::Shutdown(r) | StreamAction::Close(r) | StreamAction::Abort(r) => r.id(),
     StreamAction::Connect(_) => unreachable!("teardown_exchange called on a Connect action"),
   }
 }
@@ -246,12 +247,13 @@ pub struct StreamEndpoint<I, A, R: StreamTransport> {
   /// before any same-tick `Shutdown` / `Close` targets an existing bridge's
   /// connection.
   pending_connects: std::collections::VecDeque<StreamAction>,
-  /// Outbound [`StreamAction::Shutdown`] / [`StreamAction::Close`] directives,
-  /// in producer order. Drained by [`Self::poll_action`] only after
-  /// [`Self::pending_connects`] is exhausted AND the targeted exchange's
-  /// bytes have left [`Self::out_transmit`] — withholding a teardown behind
-  /// its own transmit prevents a transport `shutdown(write)` from orphaning
-  /// bytes the exchange still owes. Teardowns retain their producer order.
+  /// Outbound [`StreamAction::Shutdown`] / [`StreamAction::Close`] /
+  /// [`StreamAction::Abort`] directives, in producer order. Drained by
+  /// [`Self::poll_action`] only after [`Self::pending_connects`] is exhausted
+  /// AND the targeted exchange's bytes have left [`Self::out_transmit`] —
+  /// withholding a teardown behind its own transmit prevents a transport
+  /// `shutdown(write)` from orphaning bytes the exchange still owes. Teardowns
+  /// retain their producer order.
   pending_teardowns: std::collections::VecDeque<StreamAction>,
   /// Raw inbound gossip datagrams. `memberlist-machine` has no umbrella
   /// `codec` dependency, so the coordinator cannot decode them in-crate and
@@ -473,16 +475,19 @@ where
   /// "drain actions, drain transmits, repeat until idle" loop is correct:
   ///
   /// - Every queued [`StreamAction::Connect`] surfaces before any queued
-  ///   [`StreamAction::Shutdown`] / [`StreamAction::Close`], so a fresh dial's
-  ///   connection opens before a same-tick `Shutdown` / `Close` targets an
-  ///   existing bridge's connection.
-  /// - A `Shutdown` / `Close` for an exchange is withheld while
+  ///   [`StreamAction::Shutdown`] / [`StreamAction::Close`] /
+  ///   [`StreamAction::Abort`], so a fresh dial's connection opens before a
+  ///   same-tick teardown targets an existing bridge's connection.
+  /// - A `Shutdown` / `Close` / `Abort` for an exchange is withheld while
   ///   [`Self::poll_transport_transmit`] still holds bytes tagged with that
   ///   exchange's [`ExchangeId`]. Applying the teardown before its last bytes
   ///   are written would orphan them — a transport `shutdown(write)` closes the
   ///   send half and subsequent writes fail — so the driver MUST drain the
   ///   transmit queue first. The gate makes the natural drain loop correct
-  ///   without burdening the driver with an explicit phase contract.
+  ///   without burdening the driver with an explicit phase contract. (A failed
+  ///   reap purges the exchange's queued bytes before enqueuing its `Abort`, so
+  ///   the gate releases the `Abort` immediately — the bytes the driver must
+  ///   discard are the ones it already buffered locally on earlier ticks.)
   pub fn poll_action(&mut self) -> Option<StreamAction> {
     if let Some(connect) = self.pending_connects.pop_front() {
       return Some(connect);
@@ -712,14 +717,15 @@ where
   ///     driver open a transport socket for a bridge the coordinator has
   ///     already failed.
   ///
-  /// (3) Synchronously enqueue a [`StreamAction::Close`] for each
+  /// (3) Synchronously enqueue a [`StreamAction::Abort`] for each
   ///     newly-failed bridge so the driver's next [`Self::poll_action`]
   ///     returns the teardown directly. A terminal bridge returns no
   ///     per-bridge timeout and an idle endpoint may have no scheduler
-  ///     timeout at all, so a `Close` that only fires from the natural
+  ///     timeout at all, so a teardown that only fires from the natural
   ///     `pump_bridges` reap on the next [`Self::handle_timeout`] is not
   ///     reachable from the documented driver interface without an
-  ///     external scheduler kick.
+  ///     external scheduler kick. `Abort` (not `Close`) because the bridge
+  ///     FAILED: its queued bytes are stale and the driver must discard them.
   ///
   /// (4) Drop the entire [`Self::out_transmit`] queue. The per-exchange
   ///     purge in (1) only reaches chunks belonging to bridges still in
@@ -737,12 +743,12 @@ where
   /// which drains the bridge's stream events into the inner endpoint
   /// (the `StreamErrored` lifecycle notice the SWIM FSM consumes to
   /// retry the affected exchange under a fresh bridge constructed
-  /// under the new policy) and emits its OWN `Close`. The driver may
-  /// therefore observe two `Close` actions for the same exchange
-  /// across the policy-change and the subsequent reap — the second
-  /// is a no-op for the documented driver contract (the socket was
-  /// torn down on the first `Close` and the driver-side mapping no
-  /// longer recognises the exchange).
+  /// under the new policy) and emits its OWN `Abort` (the reap is
+  /// failed). The driver may therefore observe two `Abort` actions for
+  /// the same exchange across the policy-change and the subsequent reap
+  /// — the second is a no-op for the documented driver contract (the
+  /// socket was torn down on the first `Abort` and the driver-side
+  /// mapping no longer recognises the exchange).
   ///
   /// For a SECURE transport (`R::is_secure() == true`, e.g. TLS) the
   /// per-bridge setter's `is_secure()` branch force-disables the bridge's
@@ -810,10 +816,17 @@ where
     for id in newly_failed {
       self.purge_transmit_for(id);
       self.purge_pending_connect_for(id);
-      let action = StreamAction::Close(ExchangeRef::new(id));
+      // The bridge is in a FAILED terminal phase (the policy change rejected
+      // it): its queued bytes are stale plaintext encoded under the prior
+      // policy. Abort so the driver discards them rather than flushing them on
+      // the wire after the new policy publishes.
+      let action = StreamAction::Abort(ExchangeRef::new(id));
       debug_assert!(
-        matches!(action, StreamAction::Shutdown(_) | StreamAction::Close(_)),
-        "pending_teardowns holds only Shutdown / Close actions",
+        matches!(
+          action,
+          StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_)
+        ),
+        "pending_teardowns holds only Shutdown / Close / Abort actions",
       );
       self.pending_teardowns.push_back(action);
     }
@@ -1192,15 +1205,38 @@ where
     self.conns.get_mut(id).map(|b| b.is_failed())
   }
 
-  /// Append one [`StreamAction::Shutdown`] / [`StreamAction::Close`] to the
-  /// teardown queue, for tests that exercise [`Self::poll_action`]'s
-  /// Connect-before-teardown ordering by injecting a teardown at the same
-  /// producer site `maybe_emit_shutdown` / `reap_bridge` use.
+  /// Whether the given exchange's live bridge is in
+  /// [`bridge_phase::BridgePhase::Active`] and has NOT yet retired its send half
+  /// ([`StreamBridge::fin_owed`] is `false`). Used by the TLS failed-reap
+  /// regression to assert the pre-failure invariant — an Established bridge that
+  /// has sent nothing — so the subsequent deadline failure runs
+  /// `retire_halves`'s `send_close_notify` (queuing a `close_notify` into
+  /// rustls's write buffer) rather than finding the send half already closed.
+  ///
+  /// [`bridge_phase::BridgePhase::Active`]: crate::bridge_phase::BridgePhase::Active
+  /// [`StreamBridge::fin_owed`]: crate::streams::bridge::StreamBridge::fin_owed
+  #[cfg(all(test, feature = "tls"))]
+  pub(crate) fn bridge_is_established_pre_fin(&mut self, id: ExchangeId) -> Option<bool> {
+    self.conns.get_mut(id).map(|b| {
+      matches!(
+        b.phase_ref(),
+        crate::streams::phase::StreamPhase::Established(crate::bridge_phase::BridgePhase::Active)
+      ) && !b.fin_owed()
+    })
+  }
+
+  /// Append one [`StreamAction::Shutdown`] / [`StreamAction::Close`] /
+  /// [`StreamAction::Abort`] to the teardown queue, for tests that exercise
+  /// [`Self::poll_action`]'s Connect-before-teardown ordering by injecting a
+  /// teardown at the same producer site `maybe_emit_shutdown` / `reap_bridge` use.
   #[cfg(all(test, feature = "tcp"))]
   pub(crate) fn push_teardown(&mut self, action: StreamAction) {
     debug_assert!(
-      matches!(action, StreamAction::Shutdown(_) | StreamAction::Close(_)),
-      "pending_teardowns holds only Shutdown / Close actions",
+      matches!(
+        action,
+        StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_)
+      ),
+      "pending_teardowns holds only Shutdown / Close / Abort actions",
     );
     self.pending_teardowns.push_back(action);
   }
@@ -1270,46 +1306,52 @@ where
     }
   }
 
-  /// Drain a terminal bridge's final outbound bytes (anything `drain_then_reap`
-  /// just encoded into its reply) into the outbound queue, emit the
-  /// [`StreamAction::Close`] teardown, and forget the exchange. Called after
-  /// `drain_then_reap`, before the bridge is dropped — otherwise any trailing
-  /// bytes a failure-path `retire_halves` produced would be lost when the
-  /// bridge drops.
+  /// Reap a terminal bridge: forget the exchange and emit its teardown action.
+  ///
+  /// A clean (`BothClosed`) reap drains the bridge's final reply bytes (anything
+  /// `drain_then_reap` just encoded) into the outbound queue and emits
+  /// [`StreamAction::Close`], so the driver delivers them before its FIN. A
+  /// failed reap discards the bridge's outbound bytes — both already-queued
+  /// chunks and its current record-layer buffer — and emits
+  /// [`StreamAction::Abort`], so the driver RSTs without putting stale bytes
+  /// (including a TLS `close_notify`) on the wire.
   fn reap_bridge(&mut self, id: ExchangeId, br: &mut StreamBridge<I, A, R>, now: Instant) {
-    // Drop any pre-reap outbound chunks still tagged with this exchange
-    // BEFORE collecting the bridge's final bytes and queueing its `Close` —
-    // but ONLY for a failed reap.
+    // Discipline the bridge's outbound bytes by terminal outcome BEFORE emitting
+    // the teardown action below.
     //
-    // On a Failed reap, `out_transmit` can hold the bridge's pre-failure
-    // label / request bytes from earlier ticks (a dialer that was waiting
-    // for the response when its exchange deadline elapsed never drained the
-    // queued bytes); without this purge the [`Self::poll_action`] teardown
-    // gate would withhold the `Close` behind those stale bytes, and a driver
-    // doing the natural "drain actions, drain transmits, repeat" loop would
-    // emit them on the wire after the local exchange has already failed —
-    // leaking membership state from a failed push/pull, or sending a probe
-    // to a peer the local node has given up on. The dropped bytes are safe
-    // to discard because the bridge is being torn down: the failed phase
-    // forbids further send progress, and the bridge's remaining outbound
-    // buffer is dropped with the bridge itself.
+    // FAILED reap — discard everything; a failed exchange RSTs and must surface
+    // no bytes:
+    // (a) Purge already-queued `out_transmit` chunks tagged with this exchange —
+    //     pre-failure label / request bytes from earlier ticks (a dialer that was
+    //     waiting for the response when its exchange deadline elapsed never
+    //     drained them). Without the purge the [`Self::poll_action`] gate would
+    //     withhold the `Abort` behind those stale bytes and a driver doing the
+    //     natural "drain actions, drain transmits, repeat" loop would emit them
+    //     after the exchange already failed — leaking membership state.
+    // (b) Do NOT collect the bridge's current record-layer buffer. For plain TCP
+    //     `clear_outbound` already emptied it on the failure transition, so there
+    //     is nothing to collect; but for TLS `clear_outbound` is a no-op and the
+    //     failure path queued a `close_notify` into rustls's write buffer.
+    //     Collecting would drain that alert (and any pending rustls ciphertext)
+    //     into `out_transmit`, and the gate would then withhold the `Abort`
+    //     behind it until the driver put the alert on the wire. Both are safe to
+    //     drop: the failed phase forbids further send progress and the bridge is
+    //     about to be dropped.
     //
-    // On a clean (`BothClosed`) reap, `out_transmit` may already hold
-    // legitimate response chunks queued by an EARLIER pump. The acceptor's
-    // lazy outbound label prefix fires the instant its inbound label
-    // validates; if the dialer's `[label]` and `[request][FIN]` arrive in
-    // two separate transport reads, the next `pump_bridges` drains the
-    // acceptor's label prefix into `out_transmit` BEFORE the request bytes
-    // arrive — and the response chunk added by `collect_bridge_transmits`
-    // below joins the queued label as the second tagged chunk for the
-    // exchange. Purging would drop the label prefix and leave the peer with
-    // a response that the dialer's inbound-label check then rejects as
-    // unlabeled. Skip the purge for clean reaps so the bytes split across
-    // multiple `out_transmit` entries reach the wire intact.
+    // CLEAN (`BothClosed`) reap — keep and collect. `out_transmit` may already
+    // hold legitimate response chunks from an EARLIER pump. The acceptor's lazy
+    // outbound label prefix fires the instant its inbound label validates; if the
+    // dialer's `[label]` and `[request][FIN]` arrive in two separate transport
+    // reads, the next `pump_bridges` drains the label prefix into `out_transmit`
+    // BEFORE the request bytes arrive, and `collect_bridge_transmits` adds the
+    // final response chunk as the second tagged chunk. Purging would drop the
+    // label prefix and leave the peer rejecting an unlabeled response — so a
+    // clean reap never purges and always collects, delivering both before its FIN.
     if br.is_failed() {
       self.purge_transmit_for(id);
+    } else {
+      self.collect_bridge_transmits(id, br);
     }
-    self.collect_bridge_transmits(id, br);
     // Snapshot the terminal outcome BEFORE the exchange-meta is removed
     // — drivers correlate the outcome with their own ExchangeId-keyed
     // waiters via the public ExchangeCompleted event below. Emission
@@ -1351,10 +1393,22 @@ where
         now,
       );
     }
-    let action = StreamAction::Close(ExchangeRef::new(id));
+    // Route on the SAME terminal outcome computed above: a failed reap (dial
+    // failure, label/encryption rejection, or an elapsed exchange deadline)
+    // emits `Abort` so the driver discards the bridge's stale buffered bytes
+    // rather than flushing them; a clean (`BothClosed`) reap emits `Close` so
+    // the driver delivers the legitimate response/label bytes before its FIN.
+    let action = if br.is_failed() {
+      StreamAction::Abort(ExchangeRef::new(id))
+    } else {
+      StreamAction::Close(ExchangeRef::new(id))
+    };
     debug_assert!(
-      matches!(action, StreamAction::Shutdown(_) | StreamAction::Close(_)),
-      "pending_teardowns holds only Shutdown / Close actions",
+      matches!(
+        action,
+        StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_)
+      ),
+      "pending_teardowns holds only Shutdown / Close / Abort actions",
     );
     self.pending_teardowns.push_back(action);
   }
@@ -1379,8 +1433,11 @@ where
         meta.fin_emitted = true;
         let action = StreamAction::Shutdown(ExchangeRef::new(id));
         debug_assert!(
-          matches!(action, StreamAction::Shutdown(_) | StreamAction::Close(_)),
-          "pending_teardowns holds only Shutdown / Close actions",
+          matches!(
+            action,
+            StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_)
+          ),
+          "pending_teardowns holds only Shutdown / Close / Abort actions",
         );
         self.pending_teardowns.push_back(action);
       }
@@ -1481,15 +1538,19 @@ where
               drop(br);
             }
             self.exchanges.remove(&id);
-            // (5) Emit `Close` so a driver that had already drained
+            // (5) Emit `Abort` so a driver that had already drained
             //     `Connect` from an earlier tick can tear the open socket
-            //     down. If `Connect` was still in `pending_connects`,
-            //     step (3) dropped it and `Close` is a no-op for that
-            //     exchange.
-            let action = StreamAction::Close(ExchangeRef::new(id));
+            //     down and DISCARD any bytes it queued before the dial was
+            //     retired — the exchange FAILED, so those bytes are stale. If
+            //     `Connect` was still in `pending_connects`, step (3) dropped
+            //     it and `Abort` is a no-op for that exchange.
+            let action = StreamAction::Abort(ExchangeRef::new(id));
             debug_assert!(
-              matches!(action, StreamAction::Shutdown(_) | StreamAction::Close(_)),
-              "pending_teardowns holds only Shutdown / Close actions",
+              matches!(
+                action,
+                StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_)
+              ),
+              "pending_teardowns holds only Shutdown / Close / Abort actions",
             );
             self.pending_teardowns.push_back(action);
           }

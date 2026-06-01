@@ -208,6 +208,11 @@ pub(crate) struct OutboundOkReady {
   /// driver pushed pre-handshake bytes into the matching `out_tx` while
   /// the dial was in flight.
   pub(crate) out_rx: Receiver<BridgeOut>,
+  /// The receive half of the bridge's pre-allocated cancel channel — a
+  /// `StreamAction::Abort` for this exchange while the dial was in flight
+  /// signals the matching `cancel_tx`, so the bridge breaks without
+  /// draining `out_rx`.
+  pub(crate) cancel_rx: Receiver<()>,
 }
 
 /// Payload for [`BridgeReady::OutboundFail`]: an outbound dial task hit a
@@ -297,29 +302,32 @@ pub(crate) enum BridgeOut {
 
 /// Per-bridge handle the driver owns to communicate with the byte-mover.
 ///
-/// Single-channel design — see [`BridgeOut`] for the flush-then-close
-/// ordering guarantee. The bridge task is detached at spawn time so
-/// every `Close` action drives a graceful teardown: the bridge
-/// processes its queued `Bytes` in FIFO order, pulls the trailing
-/// `Close`, and exits. Hard cancellation from the driver side is
-/// deliberately out of scope — the SWIM machine emits a single
-/// `Close` action for both normal exchange completion and policy-
-/// change-forced reap, and a hard cancel here would abort the last
-/// bytes of every normal push/pull exchange.
+/// Two channels: the FIFO `out_tx` for bytes + graceful control (see
+/// [`BridgeOut`] for the flush-then-close ordering guarantee), and an
+/// out-of-band `cancel_tx` priority signal for a hard abort. The bridge
+/// task is detached at spawn time.
 ///
-/// Trade-off under a policy change (`set_encryption_options`
-/// mid-flight): any `Bytes` already queued in the bridge's
-/// `out_tx` channel WILL be written under the prior policy before
-/// the bridge observes the `Close` and exits. The window is bounded
-/// by the FIFO drain through the socket's write half; the bytes
-/// were legitimately authenticated under the prior policy at encode
-/// time; SWIM's eventual-consistency absorbs the brief inconsistency.
-/// A `StreamAction::Cancel` variant on the machine side would let the
-/// driver distinguish hard vs graceful close and enable a strict
-/// trust-boundary cutoff for revocation scenarios.
+/// A graceful [`StreamAction::Close`] drives a flush-then-exit teardown:
+/// the bridge processes its queued `Bytes` in FIFO order, pulls the
+/// trailing `BridgeOut::Close`, and exits, so the last bytes of a normal
+/// push/pull exchange reach the wire.
+///
+/// A failed [`StreamAction::Abort`] drives a hard cancel via `cancel_tx`:
+/// the bridge's `select!` resolves the cancel arm with PRIORITY over both
+/// reads and the `out_tx` FIFO, so it breaks IMMEDIATELY without draining
+/// any `Bytes` still queued in `out_tx` and drops its write half. This is
+/// the trust-boundary cutoff for a failed exchange (an elapsed deadline,
+/// or a `set_encryption_options` mid-flight policy change that rejected the
+/// bridge): stale bytes — including any encoded under a prior encryption
+/// policy — are discarded rather than written, so a policy change cannot
+/// leak post-enablement plaintext.
 struct BridgeHandle {
-  /// Bytes-or-close stream into the bridge task.
+  /// Bytes-or-graceful-control FIFO into the bridge task.
   out_tx: Sender<BridgeOut>,
+  /// Out-of-band hard-abort signal. Sent by the `StreamAction::Abort` arm;
+  /// the bridge selects on it with priority and breaks without draining
+  /// `out_tx`. Bounded(1): a single send is enough to cancel.
+  cancel_tx: Sender<()>,
 }
 
 /// Hard ceiling on the per-recv UDP buffer. UDP's wire payload is
@@ -662,6 +670,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
             &bridge_inbound_tx,
             ready,
             stream_opts.bridge_recv_buf_len(),
+            stream_opts.close_timeout(),
           );
           drained += 1;
           dirty = true;
@@ -972,13 +981,16 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
             let now = Instant::now();
             let eid = endpoint.accept_connection(peer.into(), now);
             let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-            bridges.insert(eid, BridgeHandle { out_tx });
+            let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+            bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
             spawn_bridge(
               stream,
               eid,
               out_rx,
+              cancel_rx,
               &bridge_inbound_tx,
               stream_opts.bridge_recv_buf_len(),
+              stream_opts.close_timeout(),
             );
             dirty = true;
           }
@@ -1029,6 +1041,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D>(
             &bridge_inbound_tx,
             ready,
             stream_opts.bridge_recv_buf_len(),
+            stream_opts.close_timeout(),
           );
           dirty = true;
         }
@@ -1716,7 +1729,8 @@ fn process_one_action(
         pending_exchanges.insert(eid);
       }
       let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
-      bridges.insert(eid, BridgeHandle { out_tx });
+      let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+      bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
       let ready_tx = bridge_ready_tx.clone();
       let dial_timeout = stream_opts.dial_timeout();
       compio::runtime::spawn(async move {
@@ -1736,10 +1750,11 @@ fn process_one_action(
               eid,
               stream,
               out_rx,
+              cancel_rx,
             }),
-            // Dropping `out_rx` here disconnects the channel; any
-            // bytes the driver pushed into `out_tx` during the
-            // dial are dropped, which is correct — the exchange
+            // Dropping `out_rx` (and `cancel_rx`) here disconnects the
+            // channels; any bytes the driver pushed into `out_tx` during
+            // the dial are dropped, which is correct — the exchange
             // never produced a wire to write them on.
             Err(err) => BridgeReady::OutboundFail(OutboundFailReady {
               eid,
@@ -1781,9 +1796,9 @@ fn process_one_action(
       }
     }
     StreamAction::Close(eref) => {
-      // Full teardown. The bridge writes any queued `Bytes` (already
-      // ordered before this `Close` in the channel FIFO), then sends
-      // a single EOF marker to the driver and exits. Removing the
+      // Graceful full teardown. The bridge writes any queued `Bytes`
+      // (already ordered before this `Close` in the channel FIFO), then
+      // sends a single EOF marker to the driver and exits. Removing the
       // `BridgeHandle` here is symmetric with the bridge's exit —
       // any later `Bytes` the machine surfaces for this exchange
       // miss the lookup in `drain_transport_transmits` and are
@@ -1791,6 +1806,22 @@ fn process_one_action(
       if let Some(handle) = bridges.remove(&eref.id()) {
         // Ignoring Err: see Shutdown arm.
         let _ = handle.out_tx.try_send(BridgeOut::Close);
+      }
+    }
+    StreamAction::Abort(eref) => {
+      // Hard teardown of a FAILED exchange. Signal the out-of-band
+      // `cancel_tx`: the bridge's `select!` resolves the cancel arm
+      // with priority over its `out_rx` FIFO, so it breaks IMMEDIATELY
+      // and drops its write half WITHOUT writing any `Bytes` still
+      // queued for this exchange — those bytes are stale (belonging to
+      // an exchange the coordinator gave up on) and must be discarded,
+      // not flushed. Removing the `BridgeHandle` drops `out_tx`, so any
+      // later bytes the machine surfaces also miss the lookup and are
+      // dropped.
+      if let Some(handle) = bridges.remove(&eref.id()) {
+        // Ignoring Err: the bridge may have already exited (its
+        // cancel receiver gone); the abort signal is best-effort.
+        let _ = handle.cancel_tx.try_send(());
       }
     }
   }
@@ -2494,6 +2525,7 @@ where
       bridge_inbound_tx,
       ready,
       stream_opts.bridge_recv_buf_len(),
+      stream_opts.close_timeout(),
     );
     dirty = true;
   }
@@ -2569,6 +2601,7 @@ fn handle_bridge_ready<I, A, R>(
   bridge_inbound_tx: &Sender<BridgeInbound>,
   ready: BridgeReady,
   recv_buf_len: usize,
+  close_timeout: core::time::Duration,
 ) where
   I: memberlist_wire::Id
     + memberlist_wire::Data
@@ -2594,25 +2627,35 @@ fn handle_bridge_ready<I, A, R>(
       eid,
       stream,
       out_rx,
+      cancel_rx,
     }) => {
       // The `BridgeHandle` was pre-inserted at Connect time. If it is
       // still in the table the dial completed before any teardown for
       // this exchange — spawn the byte-mover with the pre-allocated
       // `out_rx` so it sees every byte the driver queued during the
       // dial. If the handle is GONE the coordinator already retired
-      // the exchange (timeout, Close from the machine) while the dial
-      // was in flight; dropping `stream` here closes the socket so the
-      // peer is never asked to honor an exchange we no longer track.
+      // the exchange (timeout, Close/Abort from the machine) while the
+      // dial was in flight; dropping `stream` here closes the socket so
+      // the peer is never asked to honor an exchange we no longer track.
       if !bridges.contains_key(&eid) {
-        // The exchange was retired (timeout, Close from the machine)
-        // while the dial was in flight. Drop the stream + out_rx so
-        // the peer is never asked to honor an exchange we no longer
-        // track.
+        // The exchange was retired (timeout, Close/Abort from the
+        // machine) while the dial was in flight. Drop the stream +
+        // out_rx + cancel_rx so the peer is never asked to honor an
+        // exchange we no longer track.
         drop(stream);
         drop(out_rx);
+        drop(cancel_rx);
         return;
       }
-      spawn_bridge(stream, eid, out_rx, bridge_inbound_tx, recv_buf_len);
+      spawn_bridge(
+        stream,
+        eid,
+        out_rx,
+        cancel_rx,
+        bridge_inbound_tx,
+        recv_buf_len,
+        close_timeout,
+      );
     }
     BridgeReady::OutboundFail(OutboundFailReady {
       eid,
@@ -2643,16 +2686,20 @@ fn spawn_bridge(
   stream: TcpStream,
   eid: ExchangeId,
   out_rx: Receiver<BridgeOut>,
+  cancel_rx: Receiver<()>,
   bridge_inbound_tx: &Sender<BridgeInbound>,
   recv_buf_len: usize,
+  close_timeout: core::time::Duration,
 ) {
   let inbound_tx = bridge_inbound_tx.clone();
   compio::runtime::spawn(crate::bridge::bridge_task(
     stream,
     eid,
     out_rx,
+    cancel_rx,
     inbound_tx,
     recv_buf_len,
+    close_timeout,
   ))
   .detach();
 }

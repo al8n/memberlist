@@ -52,6 +52,20 @@ pub const DEFAULT_BRIDGE_INBOUND_CAP: usize = 1024;
 /// Default per-bridge TCP read buffer size for the stream-transport driver.
 pub const DEFAULT_BRIDGE_RECV_BUF_LEN: usize = 16 * 1024;
 
+/// Default bound on a per-bridge graceful-drain write for the stream-transport
+/// driver: 10 seconds.
+///
+/// After a graceful `StreamAction::Close` the bridge drains the queued response
+/// `Bytes` via `write_all`, but the handle is already gone so there is no
+/// remaining cancel path. A peer that sent a valid request+FIN and then STOPPED
+/// reading collapses its receive window to zero, and that `write_all` would
+/// block forever — leaking the detached bridge task and its socket. This bounds
+/// each post-Close drain write: a write making progress (the peer is reading)
+/// never trips it; only a write stalled for the full timeout (the peer is not
+/// reading) is abandoned and the bridge torn down (RST). Mirrors the smoltcp
+/// driver's `Config::close_timeout` default.
+pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
 // ---------- observation channel ----------
 
 /// How the per-driver delegate **observation channel** is bounded.
@@ -268,6 +282,7 @@ impl Default for DriverOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StreamTransportOptions {
   dial_timeout: Duration,
+  close_timeout: Duration,
   bridge_inbound_cap: usize,
   bridge_recv_buf_len: usize,
 }
@@ -278,6 +293,7 @@ impl StreamTransportOptions {
   pub const fn new() -> Self {
     Self {
       dial_timeout: DEFAULT_DIAL_TIMEOUT,
+      close_timeout: DEFAULT_CLOSE_TIMEOUT,
       bridge_inbound_cap: DEFAULT_BRIDGE_INBOUND_CAP,
       bridge_recv_buf_len: DEFAULT_BRIDGE_RECV_BUF_LEN,
     }
@@ -288,6 +304,20 @@ impl StreamTransportOptions {
   #[inline]
   pub const fn with_dial_timeout(mut self, d: Duration) -> Self {
     self.dial_timeout = d;
+    self
+  }
+
+  /// Builder: bound on a per-bridge graceful-drain write.
+  ///
+  /// After a graceful `StreamAction::Close` the bridge has no remaining cancel
+  /// path, so a peer that stopped reading would otherwise wedge the drain
+  /// `write_all` forever. This caps each such write: a write that makes
+  /// progress never trips it; a write stalled for the full duration is
+  /// abandoned and the bridge torn down (RST). See [`DEFAULT_CLOSE_TIMEOUT`].
+  #[must_use]
+  #[inline]
+  pub const fn with_close_timeout(mut self, d: Duration) -> Self {
+    self.close_timeout = d;
     self
   }
 
@@ -313,6 +343,12 @@ impl StreamTransportOptions {
     self.dial_timeout
   }
 
+  /// Bound on a per-bridge graceful-drain write.
+  #[inline]
+  pub const fn close_timeout(&self) -> Duration {
+    self.close_timeout
+  }
+
   /// Bridge-inbound channel capacity.
   #[inline]
   pub const fn bridge_inbound_cap(&self) -> usize {
@@ -328,12 +364,19 @@ impl StreamTransportOptions {
   /// Validate the stream-transport knobs that would DETERMINISTICALLY break
   /// (not merely degrade) a stream backend.
   ///
-  /// Only `bridge_recv_buf_len == 0` is rejected: the per-bridge byte-mover
-  /// reads into a `vec![0u8; bridge_recv_buf_len]`, and a zero-length read
-  /// returns `Ok(0)` — which the bridge treats as peer EOF. So every TCP/TLS
-  /// bridge would report EOF instead of reading reliable frames and all
-  /// join / push-pull stream traffic would deterministically break, with no
-  /// error surfaced. Rejected fail-fast at `Transport::new` (mirroring the
+  /// Two knobs are rejected:
+  /// - `bridge_recv_buf_len == 0`: the per-bridge byte-mover reads into a
+  ///   `vec![0u8; bridge_recv_buf_len]`, and a zero-length read returns `Ok(0)`
+  ///   — which the bridge treats as peer EOF. So every TCP/TLS bridge would
+  ///   report EOF instead of reading reliable frames and all join / push-pull
+  ///   stream traffic would deterministically break, with no error surfaced.
+  /// - `close_timeout == 0`: the post-`StreamAction::Close` graceful drain
+  ///   bounds each queued-response `write` with this timeout, and a zero timeout
+  ///   fires immediately — so every graceful close abandons (RSTs) its queued
+  ///   push/pull response bytes instead of draining them, truncating reliable
+  ///   exchanges. Mirrors the smoltcp driver's `ZeroCloseTimeout` rejection.
+  ///
+  /// Both are rejected fail-fast at `Transport::new` (mirroring the
   /// reject-not-clamp `gossip_mtu` doctrine) rather than constructing `Ok` over
   /// a silently-broken cluster. `bridge_inbound_cap == 0` (a valid flume
   /// rendezvous channel — synchronous handoff, degraded throughput) and
@@ -351,6 +394,17 @@ impl StreamTransportOptions {
           "the per-bridge reliable-stream read buffer must be nonzero: a zero-length read \
            returns Ok(0), which the bridge treats as peer EOF, so every TCP/TLS join / \
            push-pull stream exchange would break"
+            .to_string(),
+        ),
+      ));
+    }
+    if self.close_timeout.is_zero() {
+      return Err(crate::error::MemberlistError::InvalidOption(
+        crate::error::InvalidOption::new(
+          "close_timeout",
+          "the reliable graceful-close drain timeout must be nonzero: a zero timeout fires \
+           immediately, so a graceful close abandons (RSTs) queued push/pull response bytes \
+           instead of draining them, truncating reliable exchanges"
             .to_string(),
         ),
       ));

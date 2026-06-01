@@ -18,8 +18,8 @@ use std::{
 use std::time::{Duration, Instant};
 
 use memberlist_compio::{
-  FirstAddrResolver, MaybeResolved, MemberlistError, Options, SocketAddrResolver, TlsMemberlist,
-  TlsTransportOptions, VoidDelegate,
+  FirstAddrResolver, MaybeResolved, MemberlistError, Options, SocketAddrResolver,
+  StreamTransportOptions, TlsMemberlist, TlsTransportOptions, VoidDelegate,
 };
 use memberlist_machine::TlsOptions;
 use smol_str::SmolStr;
@@ -181,6 +181,60 @@ async fn double_bind_returns_io_error() {
   );
 
   m1.shutdown().await.expect("shutdown");
+}
+
+/// A zero `close_timeout` makes the post-`StreamAction::Close` graceful drain
+/// abandon (RST) its queued push/pull response bytes instead of draining them.
+/// The TLS backend funnels through the same `StreamTransportOptions::validate`
+/// choke point as TCP, so construction must reject it with
+/// `InvalidOption("close_timeout", _)`; a nonzero `close_timeout` constructs.
+#[compio::test]
+async fn tls_construct_rejects_zero_close_timeout() {
+  let opts = Options::new(
+    TlsTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new("tls-zero-close"))
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
+      .with_tls_options(smoke_tls_options())
+      .with_stream(StreamTransportOptions::new().with_close_timeout(Duration::ZERO)),
+  );
+  let res = TlsMemberlist::<SmolStr, SocketAddr>::new(
+    opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await;
+  match res {
+    Err(MemberlistError::InvalidOption(e)) => {
+      assert_eq!(
+        e.option(),
+        "close_timeout",
+        "carries the rejected knob name"
+      );
+      assert!(!e.reason().is_empty(), "carries a reason");
+    }
+    Err(other) => panic!("expected InvalidOption(close_timeout), got {other:?}"),
+    Ok(_) => panic!("a zero close_timeout must be rejected, but TLS construction succeeded"),
+  }
+
+  // A nonzero close_timeout constructs (the gossip socket binds an ephemeral
+  // loopback port).
+  let ok_opts = Options::new(
+    TlsTransportOptions::<SmolStr, SocketAddr>::new()
+      .with_local_id(SmolStr::new("tls-nonzero-close"))
+      .with_advertise_addr(MaybeResolved::Resolved(loopback_addr(0)))
+      .with_tls_options(smoke_tls_options())
+      .with_stream(StreamTransportOptions::new().with_close_timeout(Duration::from_secs(10))),
+  );
+  let m = TlsMemberlist::<SmolStr, SocketAddr>::new(
+    ok_opts,
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("a nonzero close_timeout must construct over TLS");
+  m.shutdown().await.expect("shutdown");
 }
 
 /// Spin-wait up to `deadline` for `predicate` to return true.

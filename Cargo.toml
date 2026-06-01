@@ -3,6 +3,7 @@ members = [
   "memberlist",
   "memberlist-compio",
   "memberlist-reactor",
+  "memberlist-smoltcp",
   "memberlist-core",
   "memberlist-machine",
   "memberlist-proto",

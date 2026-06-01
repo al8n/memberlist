@@ -23,7 +23,11 @@ use agnostic::{
 };
 use bytes::Bytes;
 use flume::{Receiver, Sender};
-use futures_util::{AsyncReadExt, AsyncWriteExt, FutureExt, select};
+use futures_util::{
+  AsyncReadExt, AsyncWriteExt, FutureExt,
+  future::{FusedFuture, pending},
+  pin_mut, select, select_biased,
+};
 use memberlist::codec::{
   DecodeOptions, EncodeOptions, decode_incoming, encode_outgoing, encode_outgoing_compound,
   parse_messages,
@@ -76,13 +80,15 @@ enum BridgeOut {
   ShutdownWrite,
 }
 
-/// The pump's end of a live bridge: the write channel plus a cancel channel held
-/// only to be dropped. Dropping the handle (on the machine's Close action or
-/// driver shutdown) disconnects both, so the bridge exits from any state — even a
-/// write blocked on a peer that stopped reading.
+/// The pump's end of a live bridge: the write channel plus an explicit-abort
+/// channel. A graceful `StreamAction::Close` (or driver shutdown) drops the whole
+/// handle: `out_tx` disconnects, and the bridge tears down after draining the
+/// `BridgeOut::Data` it already queued. A failed `StreamAction::Abort` instead
+/// sends `()` on `cancel_tx` first, which preempts the bridge — even a write
+/// stalled on a peer that stopped reading — and discards the queued bytes.
 struct BridgeHandle {
   out_tx: Sender<BridgeOut>,
-  _cancel_tx: Sender<()>,
+  cancel_tx: Sender<()>,
 }
 
 /// Inbound transport bytes (or EOF) from a bridge's TCP read side to the pump.
@@ -199,6 +205,13 @@ pub(crate) struct StreamDriver<I: NodeId, R: Runtime, T: StreamTransport> {
   timer: Option<Pin<Box<R::Sleep>>>,
   timer_deadline: Option<Instant>,
   idle_wake: Duration,
+  /// No-progress (idle) bound on a bridge's post-Close graceful drain. A
+  /// graceful Close has no remaining cancel path, so a non-reading peer would
+  /// otherwise wedge the drain forever; if a single partial write makes NO
+  /// progress for this long the drain is abandoned and the bridge torn down
+  /// (RST). A peer that keeps reading — even slowly — resets the deadline on
+  /// every chunk and never trips it. Threaded into each spawned `bridge_task`.
+  close_timeout: Duration,
 }
 
 impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
@@ -214,6 +227,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
     obs_payload_budget: Option<u64>,
     accepted_rx: Receiver<(<R::Net as Net>::TcpStream, SocketAddr)>,
     accept_shutdown_tx: Sender<()>,
+    close_timeout: Duration,
   ) -> Self {
     let buf_len = endpoint
       .gossip_mtu()
@@ -245,6 +259,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
       timer: None,
       timer_deadline: None,
       idle_wake: Duration::from_secs(1),
+      close_timeout,
     }
   }
 
@@ -257,13 +272,14 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
     out_rx: Receiver<BridgeOut>,
     cancel_rx: Receiver<()>,
   ) {
-    R::spawn_detach(bridge_task::<I, <R::Net as Net>::TcpStream>(
+    R::spawn_detach(bridge_task::<I, R, <R::Net as Net>::TcpStream>(
       stream,
       eid,
       out_rx,
       cancel_rx,
       self.inbound_tx.clone(),
       self.shared.clone(),
+      self.close_timeout,
     ));
   }
 
@@ -450,13 +466,7 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         let peer = info.peer();
         let (out_tx, out_rx) = flume::unbounded();
         let (cancel_tx, cancel_rx) = flume::bounded(1);
-        self.bridges.insert(
-          eid,
-          BridgeHandle {
-            out_tx,
-            _cancel_tx: cancel_tx,
-          },
-        );
+        self.bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
         self.spawn_dial(eid, peer, out_rx, cancel_rx);
       }
       StreamAction::Shutdown(eref) => {
@@ -466,8 +476,26 @@ impl<I: NodeId, R: Runtime, T: StreamTransport> StreamDriver<I, R, T> {
         }
       }
       StreamAction::Close(eref) => {
-        // Dropping the handle disconnects the bridge's write and cancel channels,
-        // tearing it down even if a write is stalled mid-send.
+        // Graceful close. Dropping the handle disconnects `out_tx` and
+        // `cancel_tx`: the bridge first drains the `BridgeOut::Data` it already
+        // queued (writing the exchange's final response), then exits on the
+        // `out_rx` disconnect. The `cancel_tx` disconnect is mapped to a
+        // never-resolving future in the bridge, so it does NOT preempt that
+        // drain — unlike Abort below, Close delivers the queued bytes.
+        self.bridges.remove(&eref.id());
+      }
+      StreamAction::Abort(eref) => {
+        // A FAILED exchange. Send the explicit cancel BEFORE dropping the handle:
+        // it resolves the bridge's cancel future with `Ok(())`, preempting the
+        // bridge — even a write stalled on an unresponsive peer — and discarding
+        // any queued bytes (possibly encoded under a superseded policy). Abort and
+        // Close no longer coincide: Abort preempts and discards, Close drains.
+        if let Some(handle) = self.bridges.get(&eref.id()) {
+          // Ignoring Err: the bridge already exited, or the bounded(1) channel is
+          // full from a prior signal — the handle drop below still disconnects it;
+          // the explicit signal is only the abort fast-path.
+          let _ = handle.cancel_tx.try_send(());
+        }
         self.bridges.remove(&eref.id());
       }
     }
@@ -753,13 +781,7 @@ where
       let eid = this.endpoint.accept_connection(peer, now);
       let (out_tx, out_rx) = flume::unbounded();
       let (cancel_tx, cancel_rx) = flume::bounded(1);
-      this.bridges.insert(
-        eid,
-        BridgeHandle {
-          out_tx,
-          _cancel_tx: cancel_tx,
-        },
-      );
+      this.bridges.insert(eid, BridgeHandle { out_tx, cancel_tx });
       this.spawn_bridge(eid, stream, out_rx, cancel_rx);
       progress = true;
     }
@@ -910,20 +932,56 @@ async fn dial_task<I: NodeId, R: Runtime>(
 
 /// Moves bytes between one exchange's TCP stream and the pump, waking it after
 /// each inbound enqueue. Reads forward to `inbound_tx`; `out_rx` drives writes
-/// and the write half-close. The bridge tears down when the pump drops its handle
-/// (disconnecting `out_rx` and `cancel_rx`), which preempts even a stalled write.
-async fn bridge_task<I: NodeId, S: TcpStream>(
+/// and the write half-close.
+///
+/// Teardown distinguishes a graceful close from an explicit abort:
+/// - A graceful `StreamAction::Close` drops the handle, disconnecting `out_rx`
+///   and `cancel_rx`. The bridge first drains the `BridgeOut::Data` already
+///   queued in `out_rx` (flushing the exchange's final response), then exits on
+///   the `out_rx` disconnect. The `cancel_rx` disconnect does NOT preempt that
+///   drain — it is mapped to a never-resolving future below.
+/// - An explicit `StreamAction::Abort` sends `()` on `cancel_rx` before dropping
+///   the handle. That resolves `cancel_fut`, which preempts the bridge — even a
+///   write stalled on an unresponsive peer — and discards the queued bytes.
+///
+/// A graceful Close has NO remaining cancel path (the handle is gone), so a peer
+/// that sent its request+FIN and then STOPPED reading would wedge the post-Close
+/// drain forever — leaking this detached task and its socket. The drain is
+/// therefore a chunked write loop, and EACH partial write is bounded by a fresh
+/// `close_timeout`. Because progress resets the deadline, this is a NO-PROGRESS
+/// (idle) timeout, not a cap on total drain duration: a peer that keeps reading
+/// — even slowly, so a large frame outlasts `close_timeout` overall — advances
+/// on every chunk and never trips it. It fires only when a single partial write
+/// makes NO progress for the full `close_timeout`; the bridge is then torn down,
+/// dropping the write half so the OS RSTs the stuck stream.
+async fn bridge_task<I: NodeId, R: Runtime, S: TcpStream>(
   stream: S,
   eid: ExchangeId,
   out_rx: Receiver<BridgeOut>,
   cancel_rx: Receiver<()>,
   inbound_tx: Sender<BridgeInbound>,
   shared: Arc<Shared<I>>,
+  close_timeout: Duration,
 ) {
   let (mut read_half, mut write_half) = stream.into_split();
   let mut buf = vec![0u8; BRIDGE_READ_BUF];
   let mut read_eof = false;
   let mut write_closed = false;
+  // Hoist a single cancel future that resolves ONLY on an explicit abort. A
+  // graceful Close drops `cancel_tx` (Err(Disconnected)); that is NOT an abort,
+  // so map it to a future that never resolves — queued writes then complete and
+  // the bridge tears down via the `out_rx` disconnect after draining. Because the
+  // disconnect maps to `pending()`, `cancel_fut` never wins the write race on a
+  // graceful close, so a write is never dropped mid-flight (no partial-write /
+  // duplication hazard); an explicit abort still resolves and preempts.
+  let cancel_fut = async {
+    match cancel_rx.recv_async().await {
+      Ok(()) => (),
+      Err(_) => pending::<()>().await,
+    }
+  }
+  .fuse();
+  pin_mut!(cancel_fut);
   loop {
     // A push/pull peer half-closes (FINs) after sending its half, then reads the
     // reply. So a read EOF retires only the read side; the bridge stays alive to
@@ -932,7 +990,14 @@ async fn bridge_task<I: NodeId, S: TcpStream>(
     if read_eof {
       match out_rx.recv_async().await {
         Ok(BridgeOut::Data(bytes)) => {
-          if !write_closed && write_cancellable(&mut write_half, &bytes, &cancel_rx).await {
+          // Tear down on either teardown signal: an explicit abort, OR a drain
+          // that makes NO progress for `close_timeout` on a non-reading peer (a
+          // graceful Close has no cancel path, so the idle timeout is its only
+          // backstop). A slow-but-reading peer resets the deadline each chunk.
+          if !write_closed
+            && write_cancellable::<_, R, _>(&mut write_half, &bytes, &mut cancel_fut, close_timeout)
+              .await
+          {
             break;
           }
         }
@@ -971,7 +1036,19 @@ async fn bridge_task<I: NodeId, S: TcpStream>(
       },
       out = out_rx.recv_async().fuse() => match out {
         Ok(BridgeOut::Data(bytes)) => {
-          if !write_closed && write_cancellable(&mut write_half, &bytes, &cancel_rx).await {
+          // Tear down on an explicit abort OR a drain that makes NO progress for
+          // `close_timeout` on a non-reading peer (the graceful-Close backstop).
+          // A slow-but-reading peer resets the deadline each chunk and is not
+          // timed out.
+          if !write_closed
+            && write_cancellable::<_, R, _>(
+              &mut write_half,
+              &bytes,
+              &mut cancel_fut,
+              close_timeout,
+            )
+            .await
+          {
             break;
           }
         }
@@ -989,20 +1066,451 @@ async fn bridge_task<I: NodeId, S: TcpStream>(
   let _ = S::reunite(read_half, write_half).map(|s| s.shutdown(Shutdown::Both));
 }
 
-/// Writes `bytes` fully, racing the write against the bridge's cancel channel so
-/// a teardown (handle drop) preempts a write stalled on an unresponsive peer.
-/// Returns true if cancelled — the bridge should then tear down.
-async fn write_cancellable<W: futures_util::io::AsyncWrite + Unpin>(
+/// Writes `bytes` fully via a chunked loop, racing EACH partial write against
+/// TWO backstops.
+///
+/// 1. The bridge's hoisted `cancel_fut` — resolves ONLY on an explicit
+///    `StreamAction::Abort` (a graceful Close maps its handle-drop disconnect to
+///    a never-resolving future). Listed FIRST in every iteration so it preempts
+///    immediately, even a write stalled mid-frame on an unresponsive peer; on a
+///    graceful close the write always wins this arm and the queued bytes flush.
+/// 2. An `R::sleep(close_timeout)` re-armed FRESH on every iteration — the
+///    backstop for a post-Close drain that has NO remaining cancel path. After a
+///    graceful Close the pump removed the handle, so a non-reading peer could
+///    otherwise wedge the drain forever. Because the deadline resets on each
+///    partial write, it is a NO-PROGRESS (idle) timeout, not a cap on total write
+///    duration: a peer that keeps reading — even slowly, so the whole frame takes
+///    longer than `close_timeout` to drain — advances on every chunk and never
+///    trips it. It fires only when a single partial write makes NO progress for
+///    the full `close_timeout` (a genuinely stalled peer).
+///
+/// Returns true if the bridge should tear down (drop the write half → RST):
+/// aborted, the drain made no progress for `close_timeout`, or a write error /
+/// write-zero. Returns false only on a fully-written frame.
+async fn write_cancellable<W, R, C>(
   write_half: &mut W,
   bytes: &[u8],
-  cancel_rx: &Receiver<()>,
-) -> bool {
-  select! {
-    res = write_half.write_all(bytes).fuse() => {
-      // Ignoring Err: a write failure ends the exchange via its stream timeout.
-      let _ = res;
-      false
+  mut cancel_fut: &mut C,
+  close_timeout: Duration,
+) -> bool
+where
+  W: futures_util::io::AsyncWrite + Unpin,
+  R: Runtime,
+  C: Future<Output = ()> + FusedFuture + Unpin,
+{
+  let mut written = 0;
+  while written < bytes.len() {
+    // Re-arm the deadline FRESH each iteration: progress (a non-empty partial
+    // write) resets the clock, so this is an idle timeout, not a total-duration
+    // cap. A slow-but-reading peer advances every chunk and never trips it.
+    let timeout_fut = R::sleep(close_timeout).fuse();
+    pin_mut!(timeout_fut);
+    let res = select_biased! {
+      // Explicit abort only (a disconnect was mapped to `pending()`). Listed
+      // first so it can preempt even a write blocked mid-frame on an
+      // unresponsive peer, ahead of the timeout backstop.
+      _ = cancel_fut => return true,
+      // Backstop: no progress on this partial write for the full `close_timeout`
+      // (a non-reading peer) → tear down (RST on teardown).
+      _ = timeout_fut => return true,
+      // Write the unwritten tail; a partial write returns its byte count.
+      res = write_half.write(&bytes[written..]).fuse() => res,
+    };
+    match res {
+      // Progress: advance and loop with a fresh deadline.
+      Ok(n) if n > 0 => written += n,
+      // A zero-byte write makes no progress, and a write error ends the
+      // exchange: tear down rather than spin or write further.
+      // Ignoring Err: the inbound side observes the same broken socket on its
+      // next read; surfacing it here would race the pump's teardown.
+      _ => return true,
     }
-    _ = cancel_rx.recv_async().fuse() => true,
+  }
+  false
+}
+
+#[cfg(test)]
+mod tests {
+  use agnostic::{
+    Runtime,
+    net::{Net, TcpListener, TcpStream},
+    tokio::TokioRuntime,
+  };
+  use memberlist_machine::{
+    Instant, RawRecords, TcpOptions, config::EndpointConfig, endpoint::Endpoint,
+    streams::StreamEndpoint,
+  };
+  use smol_str::SmolStr;
+
+  use super::*;
+
+  type TokioNet = <TokioRuntime as Runtime>::Net;
+  type TokioTcpStream = <TokioNet as Net>::TcpStream;
+
+  /// Mints a real [`ExchangeId`] via a minimal in-memory `StreamEndpoint`.
+  ///
+  /// `accept_connection` allocates only in-memory bridge state (no I/O), and the
+  /// `ExchangeId` it returns is opaque to the bridge — it merely stamps it onto
+  /// `BridgeInbound` events. These tests assert on the bytes the bridge writes to
+  /// the wire, not on the stamped id, so any valid id suffices.
+  fn fresh_eid() -> ExchangeId {
+    let cfg = EndpointConfig::new(
+      SmolStr::new("bridge-test"),
+      "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+    );
+    let ep = Endpoint::new(cfg);
+    let mut endpoint: StreamEndpoint<SmolStr, SocketAddr, RawRecords> = StreamEndpoint::new(
+      ep,
+      TcpOptions::new(None),
+      Box::new(|_| None),
+      Box::new(|addr| *addr),
+    );
+    endpoint.accept_connection("127.0.0.1:1".parse().unwrap(), Instant::now())
+  }
+
+  /// Connects a loopback TCP pair, returning `(server, client)`. The bridge owns
+  /// `server`; the test plays the peer through `client`, reading what the bridge
+  /// writes.
+  async fn loopback_pair() -> (TokioTcpStream, TokioTcpStream) {
+    let listener = <TokioNet as Net>::TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind loopback listener");
+    let addr = listener.local_addr().expect("listener local_addr");
+    let client = TokioTcpStream::connect(addr).await.expect("connect client");
+    let (server, _peer_addr) = listener.accept().await.expect("accept server");
+    (server, client)
+  }
+
+  /// A `Shared` whose only role here is to absorb the bridge's `wake_driver`
+  /// calls — these tests assert on the wire, not on driver wakeups.
+  fn test_shared() -> Arc<Shared<SmolStr>> {
+    let ep = Endpoint::new(EndpointConfig::new(
+      SmolStr::new("bridge-test"),
+      "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+    ));
+    Arc::new(Shared::new(snapshot_of(&ep)))
+  }
+
+  /// A graceful close (handle drop) must flush every byte already queued in
+  /// `out_rx` before the bridge exits.
+  ///
+  /// Reproduces the push/pull final-response shape: the peer half-closes its
+  /// write side (request EOF), so the bridge enters its read-EOF mode and stays
+  /// alive to write the reply. The reply is then queued and the whole handle
+  /// dropped — `out_tx` AND `cancel_tx` disconnect together. The peer must
+  /// receive the full reply, then EOF. If the cancel disconnect were treated as
+  /// an abort (the bug), `write_cancellable` would preempt the reply and the peer
+  /// would read `UnexpectedEof` / a truncated body.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn graceful_close_drains_queued_bytes_before_exit() {
+    let (server, mut client) = loopback_pair().await;
+    let eid = fresh_eid();
+    let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+    let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+    let (inbound_tx, inbound_rx) = flume::unbounded::<BridgeInbound>();
+    let shared = test_shared();
+
+    let response = b"the-final-response-bytes".to_vec();
+
+    // A long `close_timeout` so this graceful-drain test exercises the FIFO
+    // drain, never the timeout backstop (the peer reads promptly here).
+    let bridge = tokio::spawn(bridge_task::<SmolStr, TokioRuntime, TokioTcpStream>(
+      server,
+      eid,
+      out_rx,
+      cancel_rx,
+      inbound_tx,
+      shared,
+      Duration::from_secs(60),
+    ));
+
+    // The peer sends its request, then half-closes its write side. The bridge
+    // reads the request, forwards it, then observes the FIN and enters read-EOF
+    // mode (the half-open state where it writes the reply).
+    client.write_all(b"request").await.expect("write request");
+    client
+      .shutdown(Shutdown::Write)
+      .expect("half-close client write side");
+
+    // Wait until the bridge has reported the request EOF: this proves it reached
+    // read-EOF mode, the exact clean state the graceful close must drain from.
+    loop {
+      match inbound_rx
+        .recv_async()
+        .await
+        .expect("bridge reports inbound")
+      {
+        BridgeInbound::Eof(_) => break,
+        BridgeInbound::Data(_) => continue,
+      }
+    }
+
+    // Queue the reply, then drop the whole handle: the graceful-Close shape —
+    // `out_tx` and `cancel_tx` both disconnect with the reply already queued.
+    out_tx
+      .send(BridgeOut::Data(Bytes::from(response.clone())))
+      .expect("queue response bytes");
+    drop((out_tx, cancel_tx));
+
+    // The peer must read the full reply before EOF.
+    let mut got = vec![0u8; response.len()];
+    client
+      .read_exact(&mut got)
+      .await
+      .expect("peer reads the full response before EOF");
+    assert_eq!(
+      got, response,
+      "graceful close must flush the queued response; a cancel disconnect must \
+       not truncate the drain"
+    );
+
+    // After the reply the bridge exits and shuts the socket: the peer sees EOF.
+    let tail = client
+      .read_to_end(&mut Vec::new())
+      .await
+      .expect("read tail after response");
+    assert_eq!(tail, 0, "no bytes after the response, only EOF");
+
+    bridge.await.expect("bridge task exits cleanly");
+  }
+
+  /// An explicit abort (`cancel_tx.send(())`, a FAILED exchange's
+  /// `StreamAction::Abort`) must preempt and DISCARD the bytes still queued in
+  /// `out_rx` — stale bytes (possibly encoded under a superseded policy) never
+  /// reach the wire. Keeping `out_tx` alive proves the ONLY teardown signal is
+  /// the explicit abort, not a disconnect.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn explicit_abort_preempts_and_discards() {
+    let (server, mut client) = loopback_pair().await;
+    let eid = fresh_eid();
+    let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+    let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+    let (inbound_tx, _inbound_rx) = flume::unbounded::<BridgeInbound>();
+    let shared = test_shared();
+
+    let stale = b"stale-bytes-that-must-not-reach-the-wire".to_vec();
+
+    // Queue stale bytes and pre-arm the explicit abort BEFORE the task runs, so
+    // the bridge's first write race sees a ready cancel and breaks without
+    // writing. Keep `out_tx` alive: the abort send is the sole teardown signal.
+    out_tx
+      .send(BridgeOut::Data(Bytes::from(stale)))
+      .expect("queue stale bytes");
+    cancel_tx.try_send(()).expect("signal explicit abort");
+    let _out_tx_kept = out_tx;
+
+    // A long `close_timeout`: the abort, not the backstop, must drive teardown.
+    let bridge = tokio::spawn(bridge_task::<SmolStr, TokioRuntime, TokioTcpStream>(
+      server,
+      eid,
+      out_rx,
+      cancel_rx,
+      inbound_tx,
+      shared,
+      Duration::from_secs(60),
+    ));
+
+    // The peer must see EOF with NO bytes — the abort dropped the write side
+    // without flushing the stale queue.
+    let n = client
+      .read_to_end(&mut Vec::new())
+      .await
+      .expect("read peer side to EOF");
+    assert_eq!(n, 0, "explicit abort must discard queued bytes, got {n}");
+
+    bridge.await.expect("bridge task exits cleanly");
+  }
+
+  /// A post-Close graceful drain whose peer STOPPED reading must be reclaimed by
+  /// `close_timeout` — it has NO remaining cancel path, so without the timeout
+  /// backstop the bridge's drain blocks FOREVER, leaking the detached task and
+  /// its socket. A fully stalled peer makes NO progress, so the idle
+  /// `close_timeout` fires and reclaims it.
+  ///
+  /// Shape: the peer sends its request then half-closes (the bridge enters
+  /// read-EOF mode), an oversized reply is queued, and the whole handle is
+  /// dropped — the exact `StreamAction::Close` ordering. The peer is then held
+  /// but NEVER read, so its receive window collapses to zero and the drain
+  /// stalls once the kernel buffers fill. With no cancel path the ONLY teardown
+  /// is the `close_timeout` backstop.
+  ///
+  /// The outer `close_timeout * 5` bound fails fast: without the backstop the
+  /// drain would block forever and trip it; with it the bridge reclaims within
+  /// ~`close_timeout`. A SHORT `close_timeout` keeps the test fast.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn graceful_close_drain_bounded_by_close_timeout_when_peer_stalls() {
+    let (server, mut client) = loopback_pair().await;
+    let eid = fresh_eid();
+    let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+    let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+    let (inbound_tx, inbound_rx) = flume::unbounded::<BridgeInbound>();
+    let shared = test_shared();
+
+    let close_timeout = Duration::from_millis(300);
+
+    // A reply far larger than any kernel socket buffer: with the peer never
+    // reading, its window collapses to zero and the drain blocks once the
+    // send/recv buffers fill — it cannot complete unless the peer reads.
+    let response = vec![0xCDu8; 16 * 1024 * 1024];
+
+    let bridge = tokio::spawn(bridge_task::<SmolStr, TokioRuntime, TokioTcpStream>(
+      server,
+      eid,
+      out_rx,
+      cancel_rx,
+      inbound_tx,
+      shared,
+      close_timeout,
+    ));
+
+    // The peer sends its request then half-closes its write side, driving the
+    // bridge into read-EOF mode (the half-open state from which a graceful Close
+    // drains the queued reply).
+    client.write_all(b"request").await.expect("write request");
+    client
+      .shutdown(Shutdown::Write)
+      .expect("half-close client write side");
+
+    // Wait until the bridge reports the request EOF: it is now in read-EOF mode,
+    // the exact clean state from which a graceful Close drains.
+    loop {
+      match inbound_rx
+        .recv_async()
+        .await
+        .expect("bridge reports inbound")
+      {
+        BridgeInbound::Eof(_) => break,
+        BridgeInbound::Data(_) => continue,
+      }
+    }
+
+    // Queue the oversized reply and drop the whole handle: the graceful-Close
+    // shape (`out_tx` and `cancel_tx` both disconnect, the reply queued). No
+    // cancel can ever be sent now — only `close_timeout` can reclaim the bridge.
+    out_tx
+      .send(BridgeOut::Data(Bytes::from(response)))
+      .expect("queue oversized response");
+    drop((out_tx, cancel_tx));
+
+    // The peer is NEVER read: the drain stalls on a zero window. The bridge must
+    // reclaim within ~`close_timeout`; the generous `close_timeout * 5` outer
+    // bound fails fast — without the backstop the drain blocks forever and trips it.
+    tokio::time::timeout(close_timeout * 5, bridge)
+      .await
+      .expect("bridge reclaims within ~close_timeout, not blocking forever on a stalled drain")
+      .expect("bridge task exits cleanly");
+  }
+
+  /// A peer that reads SLOWLY but CONTINUOUSLY must receive the WHOLE reply, even
+  /// when the total drain outlasts `close_timeout`.
+  ///
+  /// `close_timeout` is a NO-PROGRESS (idle) bound, not a cap on total write
+  /// duration. The peer here reads the oversized reply in chunks with a small
+  /// delay between each, so the writer is gated by the reader: the total drain
+  /// greatly EXCEEDS `close_timeout`, yet each chunk is read well within it, so no
+  /// single partial write ever goes idle for the full `close_timeout`.
+  ///
+  /// A total-duration cap would instead race the ENTIRE write against a single
+  /// `R::sleep(close_timeout)`; a drain that takes longer than `close_timeout`
+  /// overall (this slow reader) would lose that race mid-transfer, the bridge
+  /// would tear down, and the socket would be RST — the peer's `read_exact` then
+  /// failing with `UnexpectedEof` on the truncated body. The idle bound instead
+  /// re-arms on each partial write, so progress keeps resetting it and the full
+  /// reply is delivered.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn slow_but_progressing_reader_is_not_timed_out() {
+    let (server, mut client) = loopback_pair().await;
+    let eid = fresh_eid();
+    let (out_tx, out_rx) = flume::unbounded::<BridgeOut>();
+    let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
+    let (inbound_tx, inbound_rx) = flume::unbounded::<BridgeInbound>();
+    let shared = test_shared();
+
+    // SHORT idle bound: the slow reader's TOTAL drain (below) runs several times
+    // longer, while no single partial write ever goes idle this long.
+    let close_timeout = Duration::from_millis(250);
+
+    // A reply far larger than the kernel socket buffers, so the writer cannot
+    // dump it all and finish instantly — it stays gated by the slow reader, so
+    // the TOTAL drain wall-clock greatly outlasts `close_timeout`.
+    let len = 16 * 1024 * 1024;
+    let response: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+
+    let bridge = tokio::spawn(bridge_task::<SmolStr, TokioRuntime, TokioTcpStream>(
+      server,
+      eid,
+      out_rx,
+      cancel_rx,
+      inbound_tx,
+      shared,
+      close_timeout,
+    ));
+
+    // The peer sends its request then half-closes its write side, driving the
+    // bridge into read-EOF mode (the half-open state from which a graceful Close
+    // drains the queued reply).
+    client.write_all(b"request").await.expect("write request");
+    client
+      .shutdown(Shutdown::Write)
+      .expect("half-close client write side");
+
+    // Wait until the bridge reports the request EOF: it is now in read-EOF mode,
+    // the exact clean state from which a graceful Close drains.
+    loop {
+      match inbound_rx
+        .recv_async()
+        .await
+        .expect("bridge reports inbound")
+      {
+        BridgeInbound::Eof(_) => break,
+        BridgeInbound::Data(_) => continue,
+      }
+    }
+
+    // Queue the reply and drop the whole handle: the graceful-Close shape
+    // (`out_tx` and `cancel_tx` both disconnect, the reply queued). No cancel can
+    // ever be sent now — only the idle `close_timeout` could reclaim the bridge,
+    // and it must NOT while the peer keeps reading.
+    out_tx
+      .send(BridgeOut::Data(Bytes::from(response.clone())))
+      .expect("queue response bytes");
+    drop((out_tx, cancel_tx));
+
+    // Read the whole reply SLOWLY but CONTINUOUSLY: 2 MiB chunks with a 60ms gap
+    // between reads. The chunk is large enough (~ the kernel buffer) that the
+    // writer never gets more than one sleep ahead, so no single partial write
+    // goes idle for `close_timeout`; yet with eight chunks the TOTAL drain runs
+    // ~0.5s, several times the 250ms idle bound. A total-duration cap would lose
+    // its race against the ~0.5s drain mid-transfer and RST, so this `read_exact`
+    // would see `UnexpectedEof` on a truncated body; the idle bound re-arms on
+    // each chunk, so the full body arrives.
+    let chunk = 2 * 1024 * 1024;
+    let mut got = vec![0u8; len];
+    let mut off = 0;
+    while off < len {
+      let end = (off + chunk).min(len);
+      client
+        .read_exact(&mut got[off..end])
+        .await
+        .expect("slow reader receives the full reply, never a truncated body");
+      off = end;
+      tokio::time::sleep(Duration::from_millis(60)).await;
+    }
+
+    assert_eq!(
+      got, response,
+      "a slow-but-progressing reader must receive the exact reply, not a \
+       truncated or corrupted body"
+    );
+
+    // After the full reply the bridge exits and shuts the socket: the peer sees
+    // EOF.
+    let tail = client
+      .read_to_end(&mut Vec::new())
+      .await
+      .expect("read tail after reply");
+    assert_eq!(tail, 0, "no bytes after the reply, only EOF");
+
+    bridge.await.expect("bridge task exits cleanly");
   }
 }

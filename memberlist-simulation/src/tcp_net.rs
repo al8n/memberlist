@@ -842,7 +842,9 @@ impl TcpCluster {
       while let Some(action) = node.poll_action() {
         match &action {
           StreamAction::Connect(_) => connects.push((*src, action)),
-          StreamAction::Shutdown(_) | StreamAction::Close(_) => teardowns.push((*src, action)),
+          StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_) => {
+            teardowns.push((*src, action))
+          }
         }
       }
     }
@@ -877,7 +879,9 @@ impl TcpCluster {
       while let Some(action) = node.poll_action() {
         match &action {
           StreamAction::Connect(_) => late_connects.push((*src, action)),
-          StreamAction::Shutdown(_) | StreamAction::Close(_) => teardowns.push((*src, action)),
+          StreamAction::Shutdown(_) | StreamAction::Close(_) | StreamAction::Abort(_) => {
+            teardowns.push((*src, action))
+          }
         }
       }
     }
@@ -1049,6 +1053,39 @@ impl TcpCluster {
         if let Some((peer, peer_exch)) = self.peer_of.remove(&key) {
           self.peer_of.remove(&(peer, peer_exch));
           if let Some(pipe) = self.pipes.get_mut(&(peer, peer_exch)) {
+            pipe.arm_fin(now, stride);
+          }
+        }
+        true
+      }
+      StreamAction::Abort(r) => {
+        // RST the connection: the exchange FAILED (dial failure, label /
+        // encryption rejection, or an elapsed exchange deadline). Unlike `Close`,
+        // which arms the FIN so already-queued inbound bytes still drain (a clean
+        // TCP close delivers bytes sent before it), an abort DISCARDS any
+        // queued-but-unsent inbound bytes in BOTH directions — they are stale,
+        // and a reader that has only a partial push/pull frame rejects it rather
+        // than applying it. `inbound.clear()` is the byte-discard; `arm_fin` then
+        // surfaces a terminal read==0 so the reader's exchange ends (it cannot
+        // hang awaiting bytes that will never come), and the mapping is forgotten
+        // so no later write routes into either side.
+        //
+        // The discard is the only behavioral difference from `Close`; the read==0
+        // terminator is shared because the plain-TCP transport surface
+        // (`handle_transport_data(.., eof=true)`) has no signal distinct from EOF
+        // for a reset — the receiver sees the read stream end either way, and the
+        // truncated buffer is what makes a reset observably different from a clean
+        // drain.
+        let stride = self.tcp_stride();
+        let key = (src, r.id());
+        if let Some(pipe) = self.pipes.get_mut(&key) {
+          pipe.inbound.clear();
+          pipe.arm_fin(now, stride);
+        }
+        if let Some((peer, peer_exch)) = self.peer_of.remove(&key) {
+          self.peer_of.remove(&(peer, peer_exch));
+          if let Some(pipe) = self.pipes.get_mut(&(peer, peer_exch)) {
+            pipe.inbound.clear();
             pipe.arm_fin(now, stride);
           }
         }

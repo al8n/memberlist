@@ -11,6 +11,9 @@
 //!   wire messages (Alive, Suspect, Dead, Ping, IndirectPing, Ack, Nack,
 //!   PushPull, UserData, ErrorResponse) plus supporting structures
 //!   (Server, PushNodeState, Meta, State enum, version enums).
+//! - [`codec`] — datagram (UDP/gossip) encode/decode: label wrap/strip,
+//!   single-message and compound frame encode/parse. Shared by all drivers
+//!   (std and no_std). Re-exported at the crate root for convenience.
 //! - [`compression`] — the tagged, feature-gated compression transform
 //!   (`CompressAlgorithm`, `CompressionOptions`, the compressed-frame
 //!   codec). Wraps the [`framing`] codec; opt-in per backend.
@@ -66,6 +69,7 @@ compile_error!(
 );
 
 pub mod bridge;
+pub mod codec;
 pub mod compression;
 pub mod convert;
 pub mod data;
@@ -79,6 +83,10 @@ pub mod wire_type;
 
 pub use bridge::{BridgeError, message_from_any, message_to_any};
 pub use cheap_clone::CheapClone;
+pub use codec::{
+  CodecError, DecodeOptions, EncodeOptions, MAX_LABEL_LEN, decode_incoming, encode_outgoing,
+  encode_outgoing_compound, parse_message, parse_messages,
+};
 pub use compression::{
   CompressAlgorithm, CompressionError, CompressionOptions, CompressionOutcome, OversizeOriginal,
   UnitLenExceedsMaxInfo, compress, decode_compressed_frame, decompress, encode_compressed_frame,

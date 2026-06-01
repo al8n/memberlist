@@ -31,6 +31,17 @@ pub enum Error {
   #[error("invalid advertise address {0}: must be a concrete unicast address")]
   InvalidAdvertise(SocketAddr),
 
+  /// The configured `close_timeout` is zero. The stream driver bounds each
+  /// per-bridge graceful-close drain `write` with this timeout; a zero timeout
+  /// fires immediately, so a graceful close abandons (RSTs) its queued push/pull
+  /// response bytes instead of draining them, truncating reliable exchanges.
+  /// Rejected at construction (stream backends only; QUIC has no bridges),
+  /// mirroring the smoltcp driver's `ZeroCloseTimeout` rejection.
+  #[error(
+    "close_timeout must be nonzero: a zero timeout immediately RSTs a graceful reliable close, truncating queued push/pull bytes"
+  )]
+  ZeroCloseTimeout,
+
   /// An I/O error.
   #[error(transparent)]
   Io(#[from] std::io::Error),

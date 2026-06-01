@@ -55,6 +55,7 @@ const MAX_LABEL_LEN: usize = u8::MAX as usize - 2;
 /// Carries the cluster label and the inbound label-check policy. All fields
 /// are private; use the accessor methods. Construct via [`TcpOptions::try_new`]
 /// (checked) or [`TcpOptions::new`] (panics on an invalid label).
+#[derive(Debug, Clone)]
 pub struct TcpOptions {
   label: Option<Vec<u8>>,
   skip_inbound_label_check: bool,
